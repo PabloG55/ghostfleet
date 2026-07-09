@@ -37,6 +37,8 @@ fi
 
 while true; do
   choice="$(node "$GRID" "$SOCK" "$CONF" </dev/tty)" || true
+  # keep the running server's options/bindings in sync with the repo config
+  tmux -L "$SOCK" has-session 2>/dev/null && TM source-file "$CONF" 2>/dev/null || true
   case "$choice" in
     "")
       break
