@@ -66,3 +66,7 @@ fi
 
 echo
 echo "Done. Start (or restart) a Claude Code session, then run:  claude-fleet"
+if command -v zellij >/dev/null 2>&1; then
+  echo "Tip: to auto-resume hand-started claude panes on zellij re-attach, run:"
+  echo "    $REPO/scripts/enable-zellij-resume.sh"
+fi

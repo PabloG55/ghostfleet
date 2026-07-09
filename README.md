@@ -103,14 +103,27 @@ Restart your Claude Code sessions so the new hooks load, then run `claude-fleet`
 3. Work as usual. When you're done for the day, `zellij kill-session acmev2`.
 4. Come back and run the same launch command — every tab resumes its conversation.
 
-Optional, for ad-hoc panes you didn't launch from the layout: enable zellij's own
-serialization and rewrite the resurrected command:
+### Auto-resume hand-started panes (optional)
+
+The layout covers tabs you launch from it. For panes you open by hand (new tab,
+type `claude`), enable zellij's own serialization + a command-rewrite so those
+resurrect as `claude --continue` too:
+
+```bash
+./scripts/enable-zellij-resume.sh
+```
+
+It's idempotent, backs up `~/.config/zellij/config.kdl`, validates with
+`zellij setup --check`, and appends:
 
 ```kdl
 // ~/.config/zellij/config.kdl
 session_serialization true
-post_command_discovery_hook "echo \"$RESURRECT_COMMAND\" | sed 's/^claude$/claude --continue/'"
+post_command_discovery_hook "echo $RESURRECT_COMMAND | sed 's/^claude$/claude --continue/'"
 ```
+
+Only a bare `claude` is rewritten — `nvim`, shells, `claude --resume …`, and the
+`claude-here` wrapper are left untouched. Restart zellij for it to take effect.
 
 ---
 
