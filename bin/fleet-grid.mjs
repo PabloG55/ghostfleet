@@ -59,17 +59,25 @@ function tmuxList() {
 }
 
 function fleetBySlot() {
+  // Index by slot, scoped to this zellij session, keeping the newest entry per
+  // slot (avoids a stale/duplicate file shadowing the live one, and stops a
+  // same-named checkout in another project from leaking in).
   const map = new Map();
   let files = [];
   try { files = fs.readdirSync(FLEET_DIR).filter(f => f.endsWith('.json')); } catch { return map; }
   for (const f of files) {
     try {
       const o = JSON.parse(fs.readFileSync(path.join(FLEET_DIR, f), 'utf8'));
-      if (o.slot) map.set(o.slot, o);
+      if (!o.slot) continue;
+      if (o.zellij && o.zellij !== Z) continue;
+      const prev = map.get(o.slot);
+      if (!prev || (o.ts || 0) > (prev.ts || 0)) map.set(o.slot, o);
     } catch {}
   }
   return map;
 }
+
+function mtimeSec(p) { try { return Math.floor(fs.statSync(p).mtimeMs / 1000); } catch { return 0; } }
 
 function tailText(p, maxBytes = 65536) {
   try {
@@ -122,16 +130,42 @@ function newestTranscript(cwd) {
 function gather() {
   const sessions = tmuxList();
   const fleet = fleetBySlot();
+  const nowS = Math.floor(Date.now() / 1000);
   return sessions.map(s => {
     const st = fleet.get(s.name);
     const folder = st?.folder || (s.cwd ? path.basename(s.cwd) : s.name);
     const branch = st?.branch || (s.cwd ? gitBranch(s.cwd) : '');
-    const status = st?.status || 'starting';
-    const ts = st?.ts || 0;
     const transcript = st?.transcript || newestTranscript(s.cwd || '');
-    const age = ts ? Math.max(0, Math.floor(Date.now() / 1000) - ts) : null;
+    const tmt = transcript ? mtimeSec(transcript) : 0;    // last transcript write = live activity
+    const hook = st?.status || '';
+    // Live signal beats stale hook events: a transcript written in the last ~10s
+    // means the session is actively streaming right now.
+    let status;
+    if (tmt && nowS - tmt < 10) status = 'working';        // streaming now
+    else if (hook === 'working') status = 'working';       // mid-turn per hooks
+    else if (hook === 'need-you') status = 'need-you';     // blocked, waiting on you
+    else if (transcript) status = 'ready';                 // has history, awaiting you
+    else status = 'idle';                                  // brand new, nothing yet
+    const ageBase = tmt || st?.ts || 0;
+    const age = ageBase ? Math.max(0, nowS - ageBase) : null;
     return { name: s.name, folder, branch, status, age, msg: lastAssistant(transcript), attached: s.attached };
   });
+}
+
+function killSession(name) {
+  try {
+    execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'kill-session', '-t', name], { stdio: 'ignore' });
+  } catch {}
+  // drop its status file(s) so the card disappears (the conversation history in
+  // ~/.claude/projects is untouched — you can re-open it later from `new`).
+  let files = [];
+  try { files = fs.readdirSync(FLEET_DIR).filter(f => f.endsWith('.json')); } catch {}
+  for (const f of files) {
+    try {
+      const o = JSON.parse(fs.readFileSync(path.join(FLEET_DIR, f), 'utf8'));
+      if (o.slot === name && (!o.zellij || o.zellij === Z)) fs.unlinkSync(path.join(FLEET_DIR, f));
+    } catch {}
+  }
 }
 
 // ── text helpers ────────────────────────────────────────────────────────
@@ -231,6 +265,7 @@ let cards = [];
 let items = [];              // grid items: cards + {new:true}
 let checkouts = [];
 let pickSel = 0;
+let confirmKill = null;      // session name awaiting kill confirmation
 
 function buildItems() {
   cards = gather();
@@ -248,7 +283,11 @@ function renderGrid() {
   let buf = '\x1b[H';
   const header = ` ${C.bold}claude-fleet${C.reset} ${C.dim}[${Z}]${C.reset}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}`;
-  buf += header + '\x1b[K\n\x1b[K\n';
+  buf += header + '\x1b[K\n';
+  if (confirmKill)
+    buf += `${C.red}${C.bold} kill session '${confirmKill}'?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
+  else
+    buf += '\x1b[K\n';
   const nc = cols();
   for (let i = 0; i < items.length; i += nc) {
     const rowItems = items.slice(i, i + nc);
@@ -261,7 +300,7 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter session · n new · q quit${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · x kill · q quit${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -308,12 +347,18 @@ function moveGrid(d) {
 
 function onKey(key) {
   if (mode === 'grid') {
+    if (confirmKill) {
+      if (key === 'y' || key === 'Y') { killSession(confirmKill); confirmKill = null; buildItems(); }
+      else confirmKill = null;
+      render(); return;
+    }
     if (key === '\x03' || key === 'q') return finish('');
     if (key === '\x1b[A' || key === 'k') moveGrid('up');
     else if (key === '\x1b[B' || key === 'j') moveGrid('down');
     else if (key === '\x1b[C' || key === 'l') moveGrid('right');
     else if (key === '\x1b[D' || key === 'h') moveGrid('left');
     else if (key === 'n') { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
+    else if (key === 'x' || key === 'X') { const it = items[sel]; if (it?.card) confirmKill = it.card.name; }
     else if (key === '\r' || key === '\n') {
       const it = items[sel];
       if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
