@@ -178,20 +178,44 @@ function newCardLines(selected) {
 }
 
 // ── checkout discovery (for new session) ────────────────────────────────
-function discoverCheckouts() {
-  const roots = [path.join(HOME, Z)];
+const CFG_FILE = path.join(HOME, '.config', 'claude-fleet', 'checkouts');
+const isRepo = p => { try { return fs.existsSync(path.join(p, '.git')); } catch { return false; } };
+// e.g. "acmev2" -> "acme", "widgetco" -> "widgetco", "acme-2" -> "acme"
+const Zbase = Z.replace(/[-_ ]?v?\d+$/i, '') || Z;
+
+const nameRoots = [...new Set([path.join(HOME, Z), path.join(HOME, Zbase)])];
+const cwdRoots = [...new Set([process.cwd(), path.dirname(process.cwd())])];
+function discoverRoots() { return [...new Set([...nameRoots, ...cwdRoots])]; }
+
+function collectRepos(roots) {
   const out = [];
   for (const root of roots) {
+    if (isRepo(root)) out.push(root);
     let entries = [];
     try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { continue; }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
       const p = path.join(root, e.name);
-      if (fs.existsSync(path.join(p, '.git'))) out.push(p);
+      if (isRepo(p)) out.push(p);
     }
-    if (fs.existsSync(path.join(root, '.git'))) out.push(root);
   }
   return [...new Set(out)].sort();
+}
+
+function discoverCheckouts() {
+  // 1) explicit config wins: ~/.config/claude-fleet/checkouts, one path per line
+  try {
+    const paths = fs.readFileSync(CFG_FILE, 'utf8').split('\n')
+      .map(s => s.trim()).filter(s => s && !s.startsWith('#'))
+      .map(p => p.startsWith('~') ? path.join(HOME, p.slice(1)) : p)
+      .filter(p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } });
+    if (paths.length) return [...new Set(paths)].sort();
+  } catch {}
+  // 2) prefer project-name roots (~/<session>, ~/<session sans version suffix>)
+  const named = collectRepos(nameRoots);
+  if (named.length) return named;
+  // 3) fall back to the pane's cwd + its parent
+  return collectRepos(cwdRoots);
 }
 
 // ── terminal / screen ─────────────────────────────────────────────────────
@@ -246,8 +270,9 @@ function renderPicker() {
   let buf = '\x1b[H';
   buf += ` ${C.bold}new session${C.reset} ${C.dim}— pick a checkout under ~/${Z}${C.reset}\x1b[K\n\x1b[K\n`;
   if (checkouts.length === 0) {
-    buf += `${C.yellow}  no git checkouts found under ~/${Z}${C.reset}\x1b[K\n`;
-    buf += `${C.dim}  create ~/.config/claude-fleet or add checkouts there, then retry${C.reset}\x1b[K\n`;
+    buf += `${C.yellow}  no git checkouts found automatically${C.reset}\x1b[K\n`;
+    buf += `${C.dim}  looked in: ${discoverRoots().map(r => r.replace(HOME, '~')).join(', ')}${C.reset}\x1b[K\n`;
+    buf += `${C.dim}  fix: put one path per line in ~/.config/claude-fleet/checkouts${C.reset}\x1b[K\n`;
   } else {
     checkouts.forEach((c, i) => {
       const mark = i === pickSel ? `${C.bold}${C.green}▸ ` : '  ';
@@ -302,6 +327,15 @@ function onKey(key) {
     else if ((key === '\r' || key === '\n') && checkouts.length) return finish(`new${US}${checkouts[pickSel]}`);
     render();
   }
+}
+
+// ── debug: print discovered checkouts and exit ────────────────────────────
+if (process.argv.includes('--checkouts')) {
+  console.log(`scope Z=${Z} (base=${Zbase})`);
+  console.log('roots:', discoverRoots().map(r => r.replace(HOME, '~')).join(', '));
+  const cks = discoverCheckouts();
+  console.log('checkouts:\n' + (cks.length ? cks.map(c => '  ' + c).join('\n') : '  (none)'));
+  process.exit(0);
 }
 
 // ── plain (non-interactive) mode ──────────────────────────────────────────
