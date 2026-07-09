@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# claude-fleet — one-screen overview of every live Claude Code session.
+#
+# Reads the status files that hooks/fleet-event.sh writes to ~/.claude/fleet and
+# the JSONL transcripts Claude Code keeps in ~/.claude/projects, then prints a
+# table sorted by urgency (needs-you first). `--watch` redraws every 2s.
+#
+# Env:
+#   FLEET_PRUNE_SECS  drop status files older than this (default 43200 = 12h)
+#   CLAUDE_FLEET_DIR  status dir (default ~/.claude/fleet)
+
+set -o pipefail
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-$HOME/.claude/fleet}"
+PROJECTS="$HOME/.claude/projects"
+PRUNE_SECS="${FLEET_PRUNE_SECS:-43200}"
+
+RED=$'\033[1;31m'; GRN=$'\033[0;32m'; CYN=$'\033[0;36m'; DIM=$'\033[2m'
+BLD=$'\033[1m'; RST=$'\033[0m'
+
+command -v jq >/dev/null 2>&1 || { echo "claude-fleet: jq is required" >&2; exit 1; }
+
+human() { # seconds -> compact duration
+  local s=$1
+  if   [ "$s" -lt 60 ];   then echo "${s}s"
+  elif [ "$s" -lt 3600 ]; then echo "$((s/60))m"
+  else echo "$((s/3600))h$(((s%3600)/60))m"; fi
+}
+
+last_msg() { # $1 = transcript path -> last assistant text, one line
+  [ -f "$1" ] || return
+  tail -n 120 "$1" 2>/dev/null | jq -r '
+    select(.type=="assistant")
+    | (.message.content // [])
+    | map(select(.type=="text") | .text) | join(" ")' 2>/dev/null \
+    | tr '\n' ' ' | grep -v '^[[:space:]]*$' | tail -n 1
+}
+
+render() {
+  local now; now=$(date +%s)
+  local need=0 work=0 ready=0 idle=0
+  local rows=()
+  shopt -s nullglob
+  for f in "$FLEET_DIR"/*.json; do
+    local ts status folder branch slot tr
+    IFS=$'\t' read -r ts status folder branch slot tr < <(
+      jq -r '[(.ts//0), (.status//"idle"), (.folder//""), (.branch//""),
+              (.slot//""), (.transcript//"")] | @tsv' "$f" 2>/dev/null)
+    [ -n "$ts" ] || continue
+    local age=$(( now - ts ))
+    if [ "$age" -gt "$PRUNE_SECS" ]; then rm -f "$f" 2>/dev/null; continue; fi
+
+    local badge color idlestr sk
+    case "$status" in
+      need-you) badge="NEEDS YOU"; color="$RED"; sk=0; need=$((need+1));  idlestr="$(human $age) ago" ;;
+      working)  badge="working";   color="$CYN"; sk=1; work=$((work+1));  idlestr="busy $(human $age)" ;;
+      ready)    badge="ready";     color="$GRN"; sk=2; ready=$((ready+1));idlestr="$(human $age) ago" ;;
+      *)        badge="idle";      color="$DIM"; sk=3; idle=$((idle+1));  idlestr="$(human $age) ago" ;;
+    esac
+
+    local msg; msg="$(last_msg "$tr")"; msg="${msg:0:44}"
+    local tab="${slot:-—}"
+    local line
+    line="$(printf ' %-9.9s %-13.13s %-24.24s %-10.10s %-44.44s %s' \
+      "$tab" "$folder" "$branch" "$badge" "$msg" "$idlestr")"
+    rows+=("${sk}|${color}${line}${RST}")
+  done
+
+  printf '%s %d need you · %d working · %d ready · %d idle%s\n' \
+    "$BLD" "$need" "$work" "$ready" "$idle" "$RST"
+  printf '%s %-9s %-13s %-24s %-10s %-44s %s%s\n' \
+    "$DIM" "TAB" "CHECKOUT" "BRANCH" "STATUS" "LAST MSG" "IDLE" "$RST"
+  if [ ${#rows[@]} -eq 0 ]; then
+    echo "  (no active sessions — start Claude Code in a project and it'll appear here)"
+    return
+  fi
+  printf '%s\n' "${rows[@]}" | sort -t'|' -k1,1n | cut -d'|' -f2-
+}
+
+if [ "${1:-}" = "--watch" ] || [ "${1:-}" = "-w" ]; then
+  trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
+  tput civis 2>/dev/null
+  while true; do clear; render; sleep 2; done
+else
+  render
+fi

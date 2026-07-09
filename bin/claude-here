@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# claude-here — launch Claude Code *resuming* the conversation that belongs to
+# this zellij slot / checkout, instead of a blank `claude`.
+#
+# Used as the pane command in a zellij layout (see layouts/acme.kdl) so that
+# re-attaching a zellij session — or rebuilding it after a full exit — brings
+# every conversation back where it was, in the right checkout.
+#
+# Usage:  claude-here [slot] [-- extra claude args...]
+#   slot  a stable per-tab label (e.g. "claude 2") recorded by the hook so the
+#         exact session can be matched back. Optional; falls back to cwd.
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-$HOME/.claude/fleet}"
+PROJECTS="$HOME/.claude/projects"
+
+slot=""
+if [ $# -gt 0 ] && [ "$1" != "--" ]; then
+  slot="$1"; shift
+fi
+[ "${1:-}" = "--" ] && shift
+[ -n "$slot" ] && export CLAUDE_FLEET_SLOT="$slot"
+
+resume_id=""
+
+# 1) exact match: the most recent session for this (zellij session + slot)
+if [ -n "$slot" ] && [ -n "${ZELLIJ_SESSION_NAME:-}" ] && command -v jq >/dev/null 2>&1; then
+  shopt -s nullglob
+  best_ts=0
+  for f in "$FLEET_DIR"/*.json; do
+    IFS=$'\t' read -r z s id ts < <(
+      jq -r '[.zellij, .slot, .session_id, (.ts//0)] | @tsv' "$f" 2>/dev/null)
+    [ "$z" = "$ZELLIJ_SESSION_NAME" ] && [ "$s" = "$slot" ] || continue
+    if [ "${ts:-0}" -gt "$best_ts" ]; then best_ts="$ts"; resume_id="$id"; fi
+  done
+fi
+
+if [ -n "$resume_id" ]; then
+  echo "claude-here: resuming session $resume_id  (slot='$slot')" >&2
+  exec claude --resume "$resume_id" "$@"
+fi
+
+# 2) fallback: continue the most recent conversation in this cwd, if any
+enc="$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
+if ls "$PROJECTS/$enc"/*.jsonl >/dev/null 2>&1; then
+  echo "claude-here: continuing most recent conversation in $PWD" >&2
+  exec claude --continue "$@"
+fi
+
+# 3) nothing here yet: fresh session
+echo "claude-here: no prior session in $PWD — starting fresh" >&2
+exec claude "$@"
