@@ -19,7 +19,9 @@ echo "  bin dir:  $BIN_DIR"
 echo "  settings: $SETTINGS"
 echo
 
-command -v jq >/dev/null 2>&1 || { echo "error: jq is required (brew install jq)"; exit 1; }
+command -v jq   >/dev/null 2>&1 || { echo "error: jq is required (brew install jq)"; exit 1; }
+command -v node >/dev/null 2>&1 || { echo "error: node is required (the v2 grid is a Node TUI)"; exit 1; }
+command -v tmux >/dev/null 2>&1 || echo "! tmux not found — the grid needs it. Install: brew install tmux"
 
 mkdir -p "$CLAUDE_DIR/fleet" "$BIN_DIR"
 chmod +x "$REPO"/hooks/*.sh "$REPO"/bin/*
@@ -56,17 +58,12 @@ esac
 if [ -d "$HOME/.config/zellij" ]; then
   ZL="$HOME/.config/zellij/layouts"
   mkdir -p "$ZL"
-  if [ ! -e "$ZL/acme.kdl" ]; then
-    ln -sf "$REPO/layouts/acme.kdl" "$ZL/acme.kdl"
-    echo "✓ linked example layout -> $ZL/acme.kdl (edit its cwd paths)"
-  else
-    echo "· $ZL/acme.kdl already exists — left it alone"
-  fi
+  ln -sf "$REPO/layouts/fleet.kdl" "$ZL/fleet.kdl"
+  echo "✓ linked v2 layout -> $ZL/fleet.kdl  (launch: zellij --layout fleet attach -c <project>)"
+  [ -e "$ZL/acme.kdl" ] || ln -sf "$REPO/layouts/acme.kdl" "$ZL/acme.kdl"
 fi
 
 echo
-echo "Done. Start (or restart) a Claude Code session, then run:  claude-fleet"
-if command -v zellij >/dev/null 2>&1; then
-  echo "Tip: to auto-resume hand-started claude panes on zellij re-attach, run:"
-  echo "    $REPO/scripts/enable-zellij-resume.sh"
-fi
+echo "Done. Launch a project's fleet with one pane:"
+echo "    zellij --layout fleet attach -c acme     # then press 'n' to add a session"
+echo "Or just run  claude-fleet  inside any zellij pane."
