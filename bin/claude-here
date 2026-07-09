@@ -20,6 +20,15 @@ fi
 [ "${1:-}" = "--" ] && shift
 [ -n "$slot" ] && export CLAUDE_FLEET_SLOT="$slot"
 
+# Start sessions in bypass ("yolo") mode by default so they don't stop for
+# permission prompts — matches how the fleet is meant to run. Opt out with
+# CLAUDE_FLEET_YOLO=0.
+YOLO=()
+case "${CLAUDE_FLEET_YOLO:-1}" in
+  0|false|no|off) ;;
+  *) YOLO=(--dangerously-skip-permissions) ;;
+esac
+
 resume_id=""
 
 # 1) exact match: the most recent session for this (zellij session + slot)
@@ -36,16 +45,16 @@ fi
 
 if [ -n "$resume_id" ]; then
   echo "claude-here: resuming session $resume_id  (slot='$slot')" >&2
-  exec claude --resume "$resume_id" "$@"
+  exec claude "${YOLO[@]}" --resume "$resume_id" "$@"
 fi
 
 # 2) fallback: continue the most recent conversation in this cwd, if any
 enc="$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
 if ls "$PROJECTS/$enc"/*.jsonl >/dev/null 2>&1; then
   echo "claude-here: continuing most recent conversation in $PWD" >&2
-  exec claude --continue "$@"
+  exec claude "${YOLO[@]}" --continue "$@"
 fi
 
 # 3) nothing here yet: fresh session
 echo "claude-here: no prior session in $PWD — starting fresh" >&2
-exec claude "$@"
+exec claude "${YOLO[@]}" "$@"
