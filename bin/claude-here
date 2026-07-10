@@ -29,6 +29,13 @@ case "${CLAUDE_FLEET_YOLO:-1}" in
   *) YOLO=(--dangerously-skip-permissions) ;;
 esac
 
+enc="$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
+dir="$PROJECTS/$enc"
+
+# a transcript is only resumable if it has a real turn — an empty/aborted
+# session makes `claude --resume/--continue` error out ("No conversation found").
+has_turns() { grep -qE '"type":[[:space:]]*"(user|assistant)"' "$1" 2>/dev/null; }
+
 resume_id=""
 
 # 1) exact match: the most recent session for this (zellij session + slot)
@@ -42,19 +49,23 @@ if [ -n "$slot" ] && [ -n "${ZELLIJ_SESSION_NAME:-}" ] && command -v jq >/dev/nu
     if [ "${ts:-0}" -gt "$best_ts" ]; then best_ts="$ts"; resume_id="$id"; fi
   done
 fi
+# drop the slot match if its transcript is gone or empty (so we don't error out)
+if [ -n "$resume_id" ] && ! { [ -f "$dir/$resume_id.jsonl" ] && has_turns "$dir/$resume_id.jsonl"; }; then
+  resume_id=""
+fi
 
+# 2) else the newest REAL conversation in this cwd
+if [ -z "$resume_id" ] && [ -d "$dir" ]; then
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if has_turns "$f"; then resume_id="$(basename "$f" .jsonl)"; break; fi
+  done < <(ls -t "$dir"/*.jsonl 2>/dev/null)
+fi
+
+# 3) resume if we found a real one; otherwise start FRESH in this dir
 if [ -n "$resume_id" ]; then
-  echo "claude-here: resuming session $resume_id  (slot='$slot')" >&2
+  echo "claude-here: resuming $resume_id in $PWD" >&2
   exec claude "${YOLO[@]}" --resume "$resume_id" "$@"
 fi
-
-# 2) fallback: continue the most recent conversation in this cwd, if any
-enc="$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
-if ls "$PROJECTS/$enc"/*.jsonl >/dev/null 2>&1; then
-  echo "claude-here: continuing most recent conversation in $PWD" >&2
-  exec claude "${YOLO[@]}" --continue "$@"
-fi
-
-# 3) nothing here yet: fresh session
-echo "claude-here: no prior session in $PWD — starting fresh" >&2
+echo "claude-here: no resumable conversation in $PWD — starting fresh" >&2
 exec claude "${YOLO[@]}" "$@"
