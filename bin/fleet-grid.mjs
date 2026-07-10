@@ -201,14 +201,31 @@ function clockLabel(epoch) {
   const ap = h >= 12 ? 'p' : 'a'; h = h % 12 || 12;
   return `${h}:${String(m).padStart(2, '0')}${ap}`;
 }
+function schedMarker(session) { return path.join(FLEET_DIR, session + '.sched'); }
+function readSched(session) {
+  try { return JSON.parse(fs.readFileSync(schedMarker(session), 'utf8')); } catch { return null; }
+}
+function cancelSchedule(session) {
+  // kill the waiter (it's a detached process-group leader, so -pid kills its
+  // sleep + caffeinate too) and drop the marker.
+  const m = readSched(session);
+  if (m && m.pid) {
+    try { process.kill(-m.pid, 'SIGTERM'); } catch {}
+    try { process.kill(m.pid, 'SIGTERM'); } catch {}
+  }
+  try { fs.unlinkSync(schedMarker(session)); } catch {}
+}
 function schedule(session, whenStr, msg) {
   const at = parseWhen(whenStr);
   if (!at) return false;
-  try { fs.writeFileSync(path.join(FLEET_DIR, session + '.sched'), JSON.stringify({ at, msg })); } catch {}
+  cancelSchedule(session);            // replace, never stack
+  let pid = 0;
   try {
     const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-schedule');
-    spawn(bin, [SOCK, session, String(at), msg], { detached: true, stdio: 'ignore' }).unref();
+    const child = spawn(bin, [SOCK, session, String(at), msg], { detached: true, stdio: 'ignore' });
+    pid = child.pid; child.unref();
   } catch { return false; }
+  try { fs.writeFileSync(schedMarker(session), JSON.stringify({ at, msg, pid })); } catch {}
   return true;
 }
 
@@ -372,7 +389,12 @@ function renderPicker() {
 
 function renderSchedule() {
   let buf = '\x1b[H';
-  buf += ` ${C.bold}schedule a message${C.reset} ${C.dim}→ ${schedFor}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` ${C.bold}schedule a message${C.reset} ${C.dim}→ ${schedFor}${C.reset}\x1b[K\n`;
+  const existing = readSched(schedFor);
+  if (existing && existing.at > Math.floor(Date.now() / 1000))
+    buf += ` ${C.yellow}currently: @${clockLabel(existing.at)} "${existing.msg}"${C.reset} ${C.dim}— a new time replaces it; empty + ⏎ cancels${C.reset}\x1b[K\n`;
+  else
+    buf += '\x1b[K\n';
   const parts = schedInput.split('|');
   const at = parseWhen((parts[0] || '').trim());
   const msg = (parts[1] || 'continue').trim() || 'continue';
@@ -382,7 +404,7 @@ function renderSchedule() {
     : ` ${C.dim}→ enter a time${C.reset}\x1b[K\n`;
   buf += ` ${C.dim}message:${C.reset} ${msg}\x1b[K\n\x1b[K\n`;
   buf += `${C.dim} examples: 3:50am · 15:30 · +2h   ·   customize text with  <time> | <message>${C.reset}\x1b[K\n\x1b[K\n`;
-  buf += `${C.dim} ⏎ schedule · esc cancel${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ⏎ schedule · empty + ⏎ clears a pending one · esc back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function render() {
@@ -442,9 +464,14 @@ function onKey(key) {
     if (key === '\x1b' || key === '\x03') { mode = 'grid'; schedFor = null; render(); return; }
     else if (key === '\r' || key === '\n') {
       const parts = schedInput.split('|');
-      const msg = (parts[1] || 'continue').trim() || 'continue';
-      if (schedule(schedFor, (parts[0] || '').trim(), msg)) { mode = 'grid'; schedFor = null; buildItems(); }
-      // invalid time -> stay in schedule mode so they can fix it
+      const whenStr = (parts[0] || '').trim();
+      if (whenStr === '') {                 // empty time -> cancel any pending schedule
+        cancelSchedule(schedFor); mode = 'grid'; schedFor = null; buildItems();
+      } else {
+        const msg = (parts[1] || 'continue').trim() || 'continue';
+        if (schedule(schedFor, whenStr, msg)) { mode = 'grid'; schedFor = null; buildItems(); }
+        // invalid time -> stay in schedule mode so they can fix it
+      }
     } else if (key === '\x7f' || key === '\b') {
       schedInput = schedInput.slice(0, -1);
     } else if (key.length === 1 && key >= ' ') {
