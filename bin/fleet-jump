@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# fleet-jump <zellij-session> [tmux-slot] [tmux-socket]
+#
+# Run when a fleet notification is clicked. Focuses the terminal window running
+# <zellij-session> (via AeroSpace, matched on the window title), then — if a
+# fleet slot + socket are given and a tmux client is attached there — flips that
+# pane to the target session so you land right on it.
+#
+# If the title heuristic misses, add an explicit line to
+#   ~/.config/claude-fleet/windows   ->   "<zellij-session> <aerospace-window-id>"
+set -uo pipefail
+
+ZS="${1:-}"; SLOT="${2:-}"; SOCK="${3:-}"
+[ -n "$ZS" ] || exit 0
+
+# 1) focus the terminal window for this zellij session
+if command -v aerospace >/dev/null 2>&1; then
+  wid=""
+  # explicit override wins
+  if [ -f "$HOME/.config/claude-fleet/windows" ]; then
+    wid="$(awk -v s="$ZS" '$1==s{print $2; exit}' "$HOME/.config/claude-fleet/windows" 2>/dev/null)"
+  fi
+  # else match the window whose title mentions the session name
+  [ -n "$wid" ] || wid="$(aerospace list-windows --all --format '%{window-id}|%{window-title}' 2>/dev/null \
+        | awk -F'|' -v s="$ZS" 'index($2,s){print $1; exit}')"
+  [ -n "$wid" ] && aerospace focus --window-id "$wid" 2>/dev/null || true
+fi
+
+# 2) land on the exact session inside the fleet
+if [ -n "$SLOT" ] && [ -n "$SOCK" ] && command -v tmux >/dev/null 2>&1; then
+  cl="$(tmux -L "$SOCK" list-clients -F '#{client_name}' 2>/dev/null | head -1)"
+  if [ -n "$cl" ]; then
+    # a session is attached in the pane — flip it straight to the target
+    tmux -L "$SOCK" switch-client -c "$cl" -t "$SLOT" 2>/dev/null || true
+  else
+    # the pane is at the grid (no client) — leave a request the grid auto-attaches
+    mkdir -p "$HOME/.claude/fleet-jumps" 2>/dev/null
+    printf '%s\t%s' "$SLOT" "$(date +%s)" > "$HOME/.claude/fleet-jumps/$SOCK" 2>/dev/null || true
+  fi
+fi
+exit 0

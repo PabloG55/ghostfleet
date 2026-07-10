@@ -68,6 +68,14 @@ self-contained (siblings don't share your context); only sessions in the *same* 
 Status per card: `● NEEDS YOU` (permission/question) · `◆ working` · `✓ ready` · `· idle`.
 When a session needs you or finishes, you also get a named macOS notification (checkout · branch).
 
+**Click-to-jump.** With `terminal-notifier` + [AeroSpace](https://github.com/nikitabobko/AeroSpace) installed,
+clicking a notification runs `fleet-jump`, which focuses the terminal window running that session's
+zellij session (matched by window title) and lands the fleet pane on the exact session — via
+`tmux switch-client` if a session is attached, or a jump-request the grid auto-attaches if it's at the
+grid. If the title heuristic ever misses a window, pin it in `~/.config/claude-fleet/windows`
+(`<zellij-session> <aerospace-window-id>` per line). Without terminal-notifier it falls back to a plain
+(non-clickable) `osascript` notification.
+
 ## Keys
 
 **In the grid:** `↑↓←→` / `hjkl` move · `⏎` enter the selected session · `n` new session ·

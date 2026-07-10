@@ -67,18 +67,21 @@ fi
 
 # --- notify (Stop / Notification only), detached so the hook returns fast -----
 if [ "$EVENT" = "Stop" ] || [ "$EVENT" = "Notification" ]; then
-  label="${folder:-claude}"
-  [ -n "$branch" ] && label="$label · $branch"
-  [ -n "$SLOT" ] && label="$SLOT — $label"
-  if [ "$EVENT" = "Stop" ]; then
-    title="✅ Claude — done"; sound="Glass"
+  if [ "$EVENT" = "Stop" ]; then title="✅ Claude — done"; sound="Glass"; else title="🔔 Claude — needs you"; sound="Ping"; fi
+  sub="${folder:-claude}"; [ -n "$branch" ] && sub="$sub · $branch"
+  tn="$(command -v terminal-notifier 2>/dev/null || true)"
+  HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+  JUMP="$HOOK_DIR/../bin/fleet-jump"
+  if [ -n "$tn" ] && [ -x "$JUMP" ]; then
+    # clickable: clicking runs fleet-jump to focus the window + land on the session
+    zs="${ZELL//\'/}"; sl="${SLOT//\'/}"
+    "$tn" -title "$title" -subtitle "$sub" -message "${SLOT:+$SLOT · }click to jump" \
+      -sound "$sound" -group "cf-$SESSION" \
+      -execute "$JUMP '$zs' '$sl' '${CLAUDE_FLEET_SOCK:-}'" >/dev/null 2>&1 &
   else
-    title="🔔 Claude — needs you"; sound="Ping"
+    msg="${SLOT:+$SLOT — }$sub"; msg="${msg//\"/}"; ttl="${title//\"/}"
+    ( osascript -e "display notification \"$msg\" with title \"$ttl\" sound name \"$sound\"" >/dev/null 2>&1 & )
   fi
-  # strip characters that would break the AppleScript string literal
-  msg="${label//\"/}"; msg="${msg//\\/}"
-  ttl="${title//\"/}"
-  ( osascript -e "display notification \"$msg\" with title \"$ttl\" sound name \"$sound\"" >/dev/null 2>&1 & )
 fi
 
 exit 0

@@ -533,6 +533,23 @@ process.stdin.on('data', onKey);
 process.on('SIGTERM', () => finish(''));
 process.on('SIGINT', () => finish(''));
 
+// A clicked notification with no attached client drops a jump request here; the
+// grid picks it up and auto-attaches that session (fleet-jump writes it).
+function checkJump() {
+  if (mode !== 'grid') return false;
+  const f = path.join(HOME, '.claude', 'fleet-jumps', SOCK);
+  let raw;
+  try { raw = fs.readFileSync(f, 'utf8'); fs.unlinkSync(f); } catch { return false; }
+  const [slot, ts] = raw.split('\t');
+  if (slot && (Date.now() / 1000 - Number(ts || 0)) < 30 && cards.some(c => c.name === slot)) {
+    finish(`attach${US}${slot}`);
+    return true;
+  }
+  return false;
+}
+
 buildItems();
-render();
-const timer = setInterval(() => { if (mode === 'grid') { buildItems(); render(); } }, 1200);
+if (!checkJump()) render();
+const timer = setInterval(() => {
+  if (mode === 'grid') { buildItems(); if (checkJump()) return; render(); }
+}, 1200);
