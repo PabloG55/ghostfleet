@@ -73,11 +73,12 @@ if [ "$EVENT" = "Stop" ] || [ "$EVENT" = "Notification" ]; then
   HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
   JUMP="$HOOK_DIR/../bin/fleet-jump"
   if [ -n "$tn" ] && [ -x "$JUMP" ]; then
-    # clickable: clicking runs fleet-jump to focus the window + land on the session
-    zs="${ZELL//\'/}"; sl="${SLOT//\'/}"
-    "$tn" -title "$title" -subtitle "$sub" -message "${SLOT:+$SLOT · }click to jump" \
+    # clickable: clicking focuses the window + lands you on MASTER (you coordinate
+    # everything through the lead — you only ever talk to master)
+    zs="${ZELL//\'/}"
+    "$tn" -title "$title" -subtitle "$sub" -message "${SLOT:+$SLOT · }click → master" \
       -sound "$sound" -group "cf-$SESSION" \
-      -execute "$JUMP '$zs' '$sl' '${CLAUDE_FLEET_SOCK:-}'" >/dev/null 2>&1 &
+      -execute "$JUMP '$zs' 'master' '${CLAUDE_FLEET_SOCK:-}'" >/dev/null 2>&1 &
   else
     msg="${SLOT:+$SLOT — }$sub"; msg="${msg//\"/}"; ttl="${title//\"/}"
     ( osascript -e "display notification \"$msg\" with title \"$ttl\" sound name \"$sound\"" >/dev/null 2>&1 & )

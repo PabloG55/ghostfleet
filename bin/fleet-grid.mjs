@@ -533,7 +533,7 @@ function checkJump() {
   let raw;
   try { raw = fs.readFileSync(f, 'utf8'); fs.unlinkSync(f); } catch { return false; }
   const [slot, ts] = raw.split('\t');
-  if (slot && (Date.now() / 1000 - Number(ts || 0)) < 30 && cards.some(c => c.name === slot)) {
+  if (slot && (Date.now() / 1000 - Number(ts || 0)) < 30 && (slot === 'master' || cards.some(c => c.name === slot))) {
     finish(`attach${US}${slot}`);
     return true;
   }
@@ -560,11 +560,36 @@ function readProjects() {
       .filter(x => x.name && x.path);
   } catch { return []; }
 }
-function sessCount(name) {
+function profileDir(p) { return (!p || p === 'work' || p === 'default') ? path.join(HOME, '.claude') : path.join(HOME, '.claude-' + p); }
+// live sessions for a project (incl master) + how many need you / are working
+function projectStatus(proj) {
+  let names = [];
   try {
-    const o = execFileSync('tmux', ['-L', 'cf-' + name, 'list-sessions', '-F', 'x'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    return o.split('\n').filter(Boolean).length;
-  } catch { return 0; }
+    const o = execFileSync('tmux', ['-L', 'cf-' + proj.name, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    names = o.split('\n').filter(Boolean);
+  } catch { return { need: 0, working: 0, total: 0 }; }
+  const dir = path.join(profileDir(proj.profile), 'fleet');
+  const bySlot = new Map();
+  try {
+    for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.json'))) {
+      try {
+        const o = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+        if (!o.slot || (o.zellij && o.zellij !== proj.name)) continue;
+        const prev = bySlot.get(o.slot);
+        if (!prev || (o.ts || 0) > (prev.ts || 0)) bySlot.set(o.slot, o);
+      } catch {}
+    }
+  } catch {}
+  const nowS = Math.floor(Date.now() / 1000);
+  let need = 0, working = 0;
+  for (const name of names) {
+    const o = bySlot.get(name);
+    if (!o) continue;
+    const tmt = o.transcript ? mtimeSec(o.transcript) : 0;
+    if (o.status === 'need-you') need++;
+    else if ((tmt && nowS - tmt < 10) || o.status === 'working') working++;
+  }
+  return { need, working, total: names.length };
 }
 
 // projects picker
@@ -579,8 +604,13 @@ function pRender() {
     const lines = row.map((it, j) => {
       const sel = i + j === pSel;
       if (it.add) return boxCard('+ add project', ['choose a root', 'folder…', ''], C.yellow, sel);
-      const n = sessCount(it.project.name);
-      return boxCard(it.project.name, [it.project.profile, it.project.path.replace(HOME, '~'), n ? `${n} session${n > 1 ? 's' : ''}` : 'no sessions yet'], n ? C.green : C.grey, sel);
+      const st = projectStatus(it.project);
+      let line, color;
+      if (st.need > 0) { line = `● ${st.need} need you`; color = C.red; }
+      else if (st.working > 0) { line = `◆ ${st.working} working`; color = C.cyan; }
+      else if (st.total > 0) { line = `${st.total} session${st.total > 1 ? 's' : ''} · ready`; color = C.green; }
+      else { line = 'no sessions yet'; color = C.grey; }
+      return boxCard(it.project.name, [it.project.profile, it.project.path.replace(HOME, '~'), line], color, sel);
     });
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
     buf += '\x1b[K\n';
