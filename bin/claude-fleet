@@ -128,8 +128,8 @@ while true; do
   # LEVEL 1 — project home: Master Claude | All sessions
   home="$(node "$GRID" "$SOCK" --screen home </dev/tty)" || true; _clear
   case "$home" in
-    master) enter_master ;;
-    grid)   grid_loop ;;
-    *)      PROJECT="" ;;      # back -> project picker
+    master) enter_master; PROJECT="" ;;   # leaving master -> straight back to Projects
+    grid)   grid_loop ;;                  # leaving the grid -> back to this project's home
+    *)      PROJECT="" ;;                  # back -> project picker
   esac
 done

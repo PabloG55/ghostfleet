@@ -85,6 +85,8 @@ back out of the grid / home / projects, mirroring the in-session detach. `q` doe
 Node screens.
 
 **Project home:** `m` → Master Claude · `s` → sessions grid · arrows/`⏎` select · `q`/`` ` `` back.
+From **master**, `` ` `` jumps straight back to **Projects** (master is the per-project hub — leaving
+it means you're done with that project for now). Leaving the grid or a worker goes back one level.
 
 **In the grid:** `↑↓←→` / `hjkl` move · `⏎` enter the selected session · `n` new session ·
 `N` new *parallel* session (fresh conversation) · `s` schedule a message · `x` kill session ·
