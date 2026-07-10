@@ -52,9 +52,9 @@ self-contained (siblings don't share your context); only sessions in the *same* 
 
 ## How it works
 
-- **One tmux server per zellij session** (`tmux -L cf-<zellij-session>`) is the hidden
-  substrate. It keeps each Claude session alive in the background and handles attach / detach /
-  resize — the battle-tested part. You never interact with tmux directly.
+- **One tmux server per project** (`tmux -L cf-<project>`) is the hidden substrate. It keeps each
+  Claude session alive in the background and handles attach / detach / resize — the battle-tested
+  part. You never interact with tmux directly.
 - **`claude-fleet`** is a tiny loop: it runs the grid, and when you pick a card it hands off to
   `tmux attach`. Detach (see keys below) and the loop redraws the grid. Node never owns PTYs.
 - **`fleet-grid.mjs`** is a flicker-free Node TUI (zero npm deps). Each card joins three sources:
@@ -76,7 +76,8 @@ grid. If the title heuristic ever misses a window, pin it in `~/.config/claude-f
 ## Keys
 
 **In the grid:** `↑↓←→` / `hjkl` move · `⏎` enter the selected session · `n` new session ·
-`s` schedule a message · `x` kill session · `q` quit to the shell.
+`N` new *parallel* session (fresh conversation) · `s` schedule a message · `x` kill session ·
+`q` step back up a level.
 
 **Schedule a message** (`s` on a card): type a time and it sends a message into that session then —
 great for resuming when your usage limit resets. Examples: `3:50am`, `15:30`, `+2h`. Message defaults
@@ -100,9 +101,11 @@ cd claude-fleet
 ./install.sh
 ```
 
-The installer symlinks `claude-fleet` / `claude-here` into `~/.local/bin`, wires the status +
-notification hooks into `~/.claude/settings.json` (backing up the old file), and links the
-zellij layout.
+The installer symlinks the commands (`claude-fleet`, `claude-here`, `fleet-send` / `-list` / `-read`
+/ `-spawn` / `-schedule` / `-jump`) into `~/.local/bin`; wires the status + notification hooks and the
+fleet MCP server into every Claude config dir it finds (`~/.claude`, `~/.claude-*`, backing each up);
+installs the `claude-fleet-orchestrate` skill; and links the zellij layout. Optional but recommended
+for clickable notifications: `brew install terminal-notifier` (+ AeroSpace).
 
 ## Use it
 
@@ -140,15 +143,19 @@ finds (`~/.claude` and `~/.claude-*`), so both accounts report status.
 
 ## Config
 
-| Env var               | Default                     | Meaning                                          |
-| --------------------- | --------------------------- | ------------------------------------------------ |
-| `CLAUDE_CONFIG_DIR`   | `~/.claude`                 | The profile/account dir (set by the profile arg).|
-| `CLAUDE_FLEET_PROFILE`| `work`                      | Profile name shown in the header.                |
-| `CLAUDE_FLEET_DIR`    | `$CLAUDE_CONFIG_DIR/fleet`  | Where per-session status files live.             |
-| `CLAUDE_FLEET_SCOPE`  | `$ZELLIJ_SESSION_NAME`      | Fleet scope / tmux socket + checkout root.        |
-| `CLAUDE_FLEET_YOLO`   | `1`                         | `0` to require permission prompts in sessions.    |
+`claude-fleet` sets these per project; each spawned session inherits them (used by the grid, hooks,
+and `fleet-*` tools):
 
-`claude-fleet --plain` prints a one-shot, non-interactive table (handy for scripts).
+| Env var               | Meaning                                                          |
+| --------------------- | --------------------------------------------------------------- |
+| `CLAUDE_FLEET_SCOPE`  | The project name (shown in the header; scopes checkout discovery).|
+| `CLAUDE_FLEET_ROOT`   | The project's root folder (where its checkouts/worktrees live).  |
+| `CLAUDE_FLEET_SOCK`   | The project's tmux socket, `cf-<project>`.                       |
+| `CLAUDE_CONFIG_DIR`   | The account/config dir for the project's `profile`.              |
+| `CLAUDE_FLEET_DIR`    | Per-session status files (`$CLAUDE_CONFIG_DIR/fleet`).           |
+| `CLAUDE_FLEET_YOLO`   | `0` to require permission prompts in sessions (default: bypass). |
+
+`claude-fleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).
 
 ## Extras
 
@@ -157,8 +164,10 @@ finds (`~/.claude` and `~/.claude-*`), so both accounts report status.
 
 ## Uninstall
 
-Remove the hook blocks from `~/.claude/settings.json` (or restore a `settings.json.bak.*`),
-delete the symlinks in `~/.local/bin`, and `tmux -L cf-<name> kill-server` for any live fleets.
+In each config dir (`~/.claude`, `~/.claude-*`): remove the fleet `hooks` blocks and the
+`claude-fleet` entry under `mcpServers` from `settings.json` (or restore a `settings.json.bak.*`),
+and delete `skills/claude-fleet-orchestrate`. Then delete the symlinks in `~/.local/bin`, and
+`tmux -L cf-<project> kill-server` for any live fleets.
 
 ## License
 
