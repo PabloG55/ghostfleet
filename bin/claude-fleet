@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # claude-fleet — the single control plane for parallel Claude Code sessions.
-# Run it as the one pane in your zellij session. Three levels:
+# Run it as the one pane in your zellij session:
 #
-#   Projects  →  Project home (Master Claude | All sessions)  →  the session grid
+#   Projects  →  ⏎  →  Master Claude  →  C-a s  →  the session grid
 #
 # Each project has its own hidden tmux server (cf-<project>) holding its sessions.
-# Node draws the screens; tmux does the PTY work. Detach (` or prefix C-a g) to
-# step back up a level.
+# Node draws the screens; tmux does the PTY work. From master, ` (or C-a g) steps
+# back to Projects; from the grid it steps back to master.
 #
 #   claude-fleet                 project picker
-#   claude-fleet <project>       jump straight into a project's home
+#   claude-fleet <project>       jump straight into a project's Master Claude
 #   claude-fleet <project> --plain   one-shot non-interactive list (for scripts)
 set -uo pipefail
 
@@ -61,36 +61,43 @@ set_project() {
   mkdir -p "$CFG_DIR/fleet" 2>/dev/null
 }
 
-# the "master" lead session runs in the project's main checkout
+# the "master" lead session runs in the project's main checkout. From inside it,
+# `C-a s` writes a "<socket>.goto" marker (see tmux/cf.tmux.conf) then detaches;
+# we read that marker here to decide where to go next: the grid, or (on a plain
+# `/C-a g detach) back to Projects. Sets MASTER_GOTO for the caller.
 enter_master() {
   local main="$PROJECT_ROOT/$PROJECT"
   [ -d "$main/.git" ] || main="$(find "$PROJECT_ROOT" -maxdepth 1 -type d -exec test -e '{}/.git' ';' -print 2>/dev/null | head -1)"
   [ -n "$main" ] && [ -d "$main" ] || main="$PROJECT_ROOT"
   TM has-session -t master 2>/dev/null || \
     TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here master"
+  TM source-file "$CONF" 2>/dev/null || true           # refresh bindings/status on the live server
+  local marker; marker="$(TM display-message -t master -p '#{socket_path}' 2>/dev/null).goto"
+  rm -f "$marker" 2>/dev/null                          # clear any stale signal
   TM attach -t master 2>/dev/null || true; _clear
+  MASTER_GOTO="$(cat "$marker" 2>/dev/null)"; rm -f "$marker" 2>/dev/null
 }
 
 # the session grid ⇄ attach loop for the current project; returns on back/quit
 grid_loop() {
-  local choice name cwd base i
+  local choice name cwd base i last=""   # last = the session we just left, so the grid re-selects it
   while true; do
     _clear
-    choice="$(node "$GRID" "$SOCK" "$CONF" </dev/tty)" || true
+    choice="$(node "$GRID" "$SOCK" "$CONF" --select "$last" </dev/tty)" || true
     tmux -L "$SOCK" has-session 2>/dev/null && TM source-file "$CONF" 2>/dev/null || true
     case "$choice" in
       ""|back) return ;;
-      attach${US}*) name="${choice#attach${US}}"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
+      attach${US}*) name="${choice#attach${US}}"; last="$name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
       new${US}*)
         cwd="${choice#new${US}}"; base="$(basename "$cwd")"; name="$base"; i=2
         while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
         TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here \"$name\""
-        TM attach -t "$name" 2>/dev/null || true; _clear ;;
+        last="$name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
       newfresh${US}*)
         cwd="${choice#newfresh${US}}"; base="$(basename "$cwd")"; name="$base~2"; i=2
         while TM has-session -t "$name" 2>/dev/null; do i=$((i + 1)); name="$base~$i"; done
         TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" "exec claude-here \"$name\""
-        TM attach -t "$name" 2>/dev/null || true; _clear ;;
+        last="$name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
     esac
   done
 }
@@ -105,10 +112,11 @@ if [ -n "${1:-}" ] && [ "${1#--}" = "$1" ] && [ -n "$(proj_field "$1" 2)" ]; the
 fi
 
 _clear
+LAST_PROJECT=""    # the project we last stepped out of — Projects re-selects it
 while true; do
   # LEVEL 0 — pick a project
   if [ -z "$PROJECT" ]; then
-    sel="$(node "$GRID" - --screen projects </dev/tty)" || true; _clear
+    sel="$(node "$GRID" - --screen projects --select "$LAST_PROJECT" </dev/tty)" || true; _clear
     case "$sel" in
       "") break ;;                                   # quit
       addproject)
@@ -125,11 +133,15 @@ while true; do
     [ -z "$PROJECT" ] && continue
   fi
 
-  # LEVEL 1 — project home: Master Claude | All sessions
-  home="$(node "$GRID" "$SOCK" --screen home </dev/tty)" || true; _clear
-  case "$home" in
-    master) enter_master; PROJECT="" ;;   # leaving master -> straight back to Projects
-    grid)   grid_loop ;;                  # leaving the grid -> back to this project's home
-    *)      PROJECT="" ;;                  # back -> project picker
-  esac
+  # LEVEL 1 — Master Claude (⏎ on a project lands straight here). From master:
+  #   C-a s      -> the sessions grid; leaving the grid returns here to master
+  #   ` / C-a g  -> back to the Projects picker
+  MASTER_GOTO=""
+  enter_master
+  if [ "$MASTER_GOTO" = "grid" ]; then
+    grid_loop
+  else
+    LAST_PROJECT="$PROJECT"   # remember it so the Projects picker re-selects it
+    PROJECT=""
+  fi
 done

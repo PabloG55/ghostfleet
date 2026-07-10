@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# fleet-pause [-s SOCKET] <session>
+#
+# Reliably stop a fleet worker and PARK it (mark it intentionally off, for cost
+# control). Two things make "just turn it off" unreliable, both handled here:
+#   1. Escape via `send-keys` is swallowed mid tool/shell exec, so one Escape
+#      often doesn't catch. We send Escape repeatedly until the turn actually
+#      stops.
+#   2. The keyword "is it working" check false-positives on old scrollback. The
+#      reliable signal is snapshotting the pane twice and diffing: a live turn
+#      keeps redrawing its spinner (glyph + timer tick), so a working pane always
+#      differs across ~0.6s; an idle pane is byte-identical.
+#
+# Un-park by giving it work again (fleet-send) — the UserPromptSubmit hook clears
+# the park marker — or with `fleet-resume`.
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
+SESSION="${1:-}"
+
+[ -n "$SOCK" ]    || { echo "fleet-pause: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+[ -n "$SESSION" ] || { echo "fleet-pause: usage: fleet-pause [-s socket] <session>" >&2; exit 1; }
+tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
+  || { echo "fleet-pause: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+
+snap()    { tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null; }
+is_idle() { local a b; a="$(snap)"; sleep 0.6; b="$(snap)"; [ "$a" = "$b" ]; }
+
+if is_idle; then
+  echo "fleet-pause: '$SESSION' was already idle" >&2
+else
+  stopped=no
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    tmux -L "$SOCK" send-keys -t "$SESSION" Escape
+    sleep 0.3
+    if is_idle; then stopped=yes; break; fi
+  done
+  if [ "$stopped" != yes ]; then
+    echo "fleet-pause: could not interrupt '$SESSION' after 10 tries (still redrawing). Try again in a moment." >&2
+    exit 1
+  fi
+fi
+
+# mark parked — the grid reads this to show it OFF and skip it in the live counts.
+mkdir -p "$FLEET_DIR" 2>/dev/null
+printf '%s\n' "$(date +%s)" > "$FLEET_DIR/$SESSION.parked"
+echo "fleet-pause: parked '$SESSION' — idle, zero consumption. Resume: fleet-send $SESSION \"<task>\"  (or fleet-resume $SESSION)"

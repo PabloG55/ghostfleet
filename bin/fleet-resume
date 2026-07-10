@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# fleet-resume [-s SOCKET] <session> [prompt...]
+#
+# Un-park a session paused with fleet-pause: clears the park marker. If a prompt
+# is given, also dispatches it (via fleet-send) to wake the worker right away.
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
+SESSION="${1:-}"; shift || true
+MSG="$*"
+
+[ -n "$SESSION" ] || { echo "fleet-resume: usage: fleet-resume [-s socket] <session> [prompt]" >&2; exit 1; }
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+rm -f "$FLEET_DIR/$SESSION.parked" 2>/dev/null
+
+if [ -n "$MSG" ]; then
+  [ -n "$SOCK" ] || { echo "fleet-resume: no socket for dispatch (pass -s <socket>)" >&2; exit 1; }
+  # resolve sibling fleet-send (works via the ~/.local/bin symlink or a direct path)
+  src="${BASH_SOURCE[0]}"
+  while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
+  BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+  "$BIN_DIR/fleet-send" -s "$SOCK" "$SESSION" "$MSG"
+else
+  echo "fleet-resume: un-parked '$SESSION' (send it work to wake it)"
+fi

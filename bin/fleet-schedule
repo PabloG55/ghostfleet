@@ -13,6 +13,11 @@ set -uo pipefail
 
 SOCK="${1:?socket}"; SESSION="${2:?session}"; TARGET="${3:?target-epoch}"; shift 3
 MSG="${*:-continue}"
+
+# resolve sibling helpers (works via the ~/.local/bin symlink or a direct path)
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 MARK="$FLEET_DIR/$SESSION.sched"
 

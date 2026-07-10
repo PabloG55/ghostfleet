@@ -2,22 +2,23 @@
 
 A zellij-native master CLI for running many **Claude Code** sessions in parallel.
 
-One zellij session, one pane — `claude-fleet` is the whole control plane, in three levels:
+One zellij session, one pane — `claude-fleet` is the whole control plane:
 
 ```
-Projects            →   Project home                →   the session grid
- ▸ web                   ▸ Master Claude (the lead)      api  api-1  api-2 …
- ▸ api                   ▸ All sessions           ─────▸  ⏎ enter · n new · N parallel
- ▸ + add project                                          s sched · x kill · q back
+Projects          ⏎→    Master Claude      C-a s→    the session grid
+ ▸ web                   the lead — spawns           api  api-1  api-2 …
+ ▸ api                   & coordinates workers  ───▸  ⏎ enter · n new · N parallel
+ ▸ + add project        ←`  (back to Projects)       ←`  (back to master)
 ```
 
-- **Projects** — pick a project (or `+ add project` → browse to a root folder). Each project
-  has its own hidden tmux server (`cf-<project>`) holding its sessions.
-- **Project home** — enter the project's **Master Claude** (a lead session that spawns worktrees
-  and coordinates workers) or **All sessions** (the grid).
+- **Projects** — pick a project and `⏎` drops you straight into its **Master Claude**. `x` removes
+  a project from the list; `+ add project` browses to a root folder. Each project has its own
+  hidden tmux server (`cf-<project>`) holding its sessions.
+- **Master Claude** — the lead session that spawns worktrees and coordinates workers. `C-a s`
+  jumps to the session grid; `` ` `` (or `C-a g`) steps back to Projects.
 - **The grid** — a card per Claude session (status · branch · last message). Arrow to one, `⏎` to
   drop *inside* it full-screen; `` ` `` back to the grid. Every session keeps running in the
-  background, so agents work in parallel while you jump between them. `q` steps back up a level.
+  background, so agents work in parallel while you jump between them. `` ` `` steps back to master.
 
 Nothing else is zellij-native like this — every other terminal fleet tool (nicknisi/fleet,
 tmux-claude-session-manager, Recon) is tmux-bound; the rest take over your multiplexer
@@ -81,17 +82,21 @@ If a window is ever mis-matched, pin it in `~/.config/claude-fleet/windows`
 ## Keys
 
 `` ` `` (backtick) is the universal **back** everywhere — it detaches you from a session and steps
-back out of the grid / home / projects, mirroring the in-session detach. `q` does the same on the
+back out of the grid / master / projects, mirroring the in-session detach. `q` does the same on the
 Node screens.
 
-**Project home:** `m` → Master Claude · `s` → sessions grid · arrows/`⏎` select · `q`/`` ` `` back.
-From **master**, `` ` `` jumps straight back to **Projects** (master is the per-project hub — leaving
-it means you're done with that project for now). Leaving the grid or a worker goes back one level.
+**Projects:** `↑↓←→` / `hjkl` move · `⏎` open (straight into that project's **Master Claude**) ·
+`x` remove a project from the list (its sessions + history are left untouched — re-add it any time) ·
+`q` / `` ` `` quit.
+
+**In master:** `C-a s` jumps to the **session grid**; `` ` `` (or `C-a g`) jumps back to **Projects**
+(master is the per-project hub — leaving it means you're done with that project for now). Leaving
+the grid or a worker returns to master.
 
 **In the grid:** `↑↓←→` / `hjkl` move · `⏎` enter the selected session · `n` new session ·
 `N` new *parallel* session (fresh conversation) · `s` schedule a message · `x` kill session ·
-`q` / `` ` `` step back up a level. (The `master` session is managed from the home screen, so it
-doesn't show here.)
+`q` / `` ` `` step back to master. (The `master` session is its own hub — reach it with `C-a s`, so
+it doesn't show here.)
 
 **Schedule a message** (`s` on a card): type a time and it sends a message into that session then —
 great for resuming when your usage limit resets. Examples: `3:50am`, `15:30`, `+2h`. Message defaults
@@ -100,8 +105,9 @@ detached waiter runs `tmux send-keys` at that time, keeping the Mac awake with `
 *Caveat:* fires only if the machine is awake then — for a closed-lid guarantee also run
 `sudo pmset schedule wake "MM/dd/yy HH:mm:ss"`.
 
-**Inside a session:** everything goes to Claude as normal. To pop back to the grid, detach:
-`Ctrl-a` then `g` (mnemonic: **g**rid) — or `Ctrl-a d`. The session keeps running.
+**Inside a session:** everything goes to Claude as normal. To pop back a level, detach:
+`Ctrl-a` then `g` (mnemonic: **g**rid) — or `Ctrl-a d`. From **master**, `Ctrl-a s` opens the
+session grid instead. The session keeps running.
 (`Ctrl-a` is the tmux prefix; press it twice to send a literal `Ctrl-a` to Claude.)
 
 ## Install
@@ -129,9 +135,9 @@ for clickable notifications: `brew install terminal-notifier` (+ AeroSpace).
 zellij --layout fleet attach -c fleet    # or just run `claude-fleet` in any pane
 ```
 
-You land on the **Projects** picker. Pick a project → **Master Claude** or **All sessions**.
-In the grid, `n` starts a session in a checkout, `N` a fresh parallel one, `⏎` enters it,
-`` ` `` comes back, `q` steps up a level.
+You land on the **Projects** picker. `⏎` on a project drops you into its **Master Claude**; from
+there `Ctrl-a s` opens the session grid. In the grid, `n` starts a session in a checkout, `N` a
+fresh parallel one, `⏎` enters it, `` ` `` comes back, `q` steps up a level.
 
 **Projects** live in `~/.config/claude-fleet/projects` (`name<TAB>path<TAB>profile`). Add your first
 from the picker (`+ add project` → browse to a root folder that holds your checkouts/worktrees), or

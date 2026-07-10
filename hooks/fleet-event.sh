@@ -18,12 +18,15 @@ mkdir -p "$FLEET_DIR" 2>/dev/null || exit 0
 
 # --- read the hook payload (single jq pass) ----------------------------------
 input="$(cat)"
-IFS=$'\t' read -r EVENT SESSION CWD TRANSCRIPT < <(
+# Join with the unit separator (non-whitespace), not @tsv: a whitespace IFS makes
+# `read` collapse empty fields (e.g. a missing transcript_path) and shift the rest.
+IFS=$'\x1f' read -r EVENT SESSION CWD TRANSCRIPT NOTE < <(
   printf '%s' "$input" | jq -r '
-    [ .hook_event_name // "",
-      .session_id // "",
+    [ (.hook_event_name // ""),
+      (.session_id // ""),
       (.cwd // .workspace.current_dir // ""),
-      (.transcript_path // "") ] | @tsv' 2>/dev/null
+      (.transcript_path // ""),
+      (.message // "" | gsub("[\n\r\t]"; " ")) ] | join("\u001f")' 2>/dev/null
 )
 
 [ -n "$SESSION" ] || exit 0
@@ -42,8 +45,18 @@ SLOT="${CLAUDE_FLEET_SLOT:-}"
 now="$(date +%s)"
 
 case "$EVENT" in
-  UserPromptSubmit) status="working"  ;;
-  Notification)     status="need-you" ;;
+  UserPromptSubmit) status="working"; [ -n "$SLOT" ] && rm -f "$FLEET_DIR/$SLOT.parked" 2>/dev/null ;;  # any new prompt un-parks
+  Notification)
+    # Claude fires Notification for real attention (permission / a question) AND for
+    # benign idle ("Claude is waiting for your input"), which a long-running lead or
+    # watcher trips constantly. Only real attention is a need-you; idle-waiting means
+    # the turn is over and it's sitting at the prompt → 'ready'.
+    low="$(printf '%s' "$NOTE" | tr '[:upper:]' '[:lower:]')"
+    case "$low" in
+      *"waiting for your input"*|*"waiting for your response"*|*"is waiting"*) status="ready" ;;
+      *) status="need-you" ;;
+    esac
+    ;;
   Stop)             status="ready"    ;;
   SubagentStop)     status="working"  ;;
   SessionStart)     status="idle"     ;;
@@ -65,8 +78,10 @@ else
   rm -f "$tmp" 2>/dev/null
 fi
 
-# --- notify (Stop / Notification only), detached so the hook returns fast -----
-if [ "$EVENT" = "Stop" ] || [ "$EVENT" = "Notification" ]; then
+# --- notify, detached so the hook returns fast -------------------------------
+# Only a real attention-need (need-you) or a completed turn — never the benign idle
+# "waiting for your input" Notification, which is the false "needs you" a watcher trips.
+if [ "$EVENT" = "Stop" ] || { [ "$EVENT" = "Notification" ] && [ "$status" = "need-you" ]; }; then
   if [ "$EVENT" = "Stop" ]; then title="✅ Claude — done"; sound="Glass"; else title="🔔 Claude — needs you"; sound="Ping"; fi
   sub="${folder:-claude}"; [ -n "$branch" ] && sub="$sub · $branch"
   tn="$(command -v terminal-notifier 2>/dev/null || true)"

@@ -45,6 +45,7 @@ const STATUS = {
   'need-you': { label: '● NEEDS YOU', color: C.red },
   working:    { label: '◆ working',   color: C.cyan },
   ready:      { label: '✓ ready',     color: C.green },
+  parked:     { label: '⏸ parked',    color: C.grey },
   idle:       { label: '· idle',      color: C.grey },
   starting:   { label: '… starting',  color: C.yellow },
 };
@@ -113,6 +114,50 @@ function lastAssistant(p) {
   return '';
 }
 
+// Is the session actively working right now? We read the SAME signal you do on
+// screen: Claude's in-progress affordance ("esc to interrupt", shown throughout
+// any generation or tool run) in the live pane. This is immune to the hook/
+// transcript lag that made mtime-based guessing wrong in both directions (a long
+// generation looks idle to mtime; a background-task write looks busy). A missing
+// pane / capture error simply reads as not-busy.
+// Claude's live spinner is always "<gerund>… (<elapsed> · ↓ <n> tokens)". Anchor the
+// elapsed timer to the ellipsis so a bare "(30s)" / "(4h 11m)" in content or the status
+// bar never counts; also accept the "↓ N tokens" counter and an explicit interrupt hint.
+const BUSY_RE = /(?:…|\.\.\.)\s*\(\d+[ms]|↓\s*[\d.,]+\s*[km]?\s*tokens|esc to interrupt/i;
+function paneBusy(sock, name) {
+  try {
+    const txt = execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', name],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    // Claude's live spinner: "✽ Working… (9m 31s · ↓ 34.4k tokens)" / "Baking… (27s · …)".
+    // Match the elapsed timer "(<n>m|s ·", the "↓ N tokens" counter, or an interrupt
+    // hint. The "(" is anchored to a digit (not the idle "(shift+tab to cycle)" or the
+    // "(4h 28m)" reset clock), and the token counter to "↓" (not the idle "…save 788k
+    // tokens" hint) — so an idle prompt never reads as busy.
+    //
+    // Test PER LINE, never the whole blob: \s in the regex matches newlines, so a
+    // whole-pane test matches across line boundaries and false-positives on idle panes.
+    return txt.split('\n').some(line => BUSY_RE.test(line));
+  } catch { return false; }
+}
+
+// Single source of truth for a session's live status, shared by the grid and the
+// projects screen so they never disagree.
+//   • pane shows the interrupt affordance → working (generating / running a tool)
+//   • hook says 'need-you'                → blocked, waiting on you
+//   • otherwise has history               → ready (idle at the prompt); new → idle
+function deriveStatus(hook, transcript, busy) {
+  if (busy) return 'working';
+  if (hook === 'need-you') return 'need-you';
+  if (transcript) return 'ready';
+  return 'idle';
+}
+
+// A session parked with fleet-pause has a <name>.parked marker (cleared on the
+// next UserPromptSubmit). Parked = intentionally off, distinct from idle/ready.
+function isParked(name) {
+  try { return fs.existsSync(path.join(FLEET_DIR, name + '.parked')); } catch { return false; }
+}
+
 function gitBranch(cwd) {
   try {
     return execFileSync('git', ['-C', cwd, '--no-optional-locks', 'rev-parse', '--abbrev-ref', 'HEAD'],
@@ -140,16 +185,10 @@ function gather() {
     const folder = st?.folder || (s.cwd ? path.basename(s.cwd) : s.name);
     const branch = st?.branch || (s.cwd ? gitBranch(s.cwd) : '');
     const transcript = st?.transcript || newestTranscript(s.cwd || '');
-    const tmt = transcript ? mtimeSec(transcript) : 0;    // last transcript write = live activity
-    const hook = st?.status || '';
-    // Live signal beats stale hook events: a transcript written in the last ~10s
-    // means the session is actively streaming right now.
-    let status;
-    if (tmt && nowS - tmt < 10) status = 'working';        // streaming now
-    else if (hook === 'working') status = 'working';       // mid-turn per hooks
-    else if (hook === 'need-you') status = 'need-you';     // blocked, waiting on you
-    else if (transcript) status = 'ready';                 // has history, awaiting you
-    else status = 'idle';                                  // brand new, nothing yet
+    const tmt = transcript ? mtimeSec(transcript) : 0;    // last transcript write = age display only
+    const busy = paneBusy(SOCK, s.name);
+    let status = deriveStatus(st?.status || '', transcript, busy);
+    if (!busy && isParked(s.name)) status = 'parked';     // intentionally off (fleet-pause)
     const ageBase = tmt || st?.ts || 0;
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
     let sched = null;
@@ -165,6 +204,7 @@ function killSession(name) {
   try {
     execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'kill-session', '-t', name], { stdio: 'ignore' });
   } catch {}
+  try { fs.unlinkSync(path.join(FLEET_DIR, name + '.parked')); } catch {}   // clear any park marker
   // drop its status file(s) so the card disappears (the conversation history in
   // ~/.claude/projects is untouched — you can re-open it later from `new`).
   let files = [];
@@ -175,6 +215,19 @@ function killSession(name) {
       if (o.slot === name && (!o.zellij || o.zellij === Z)) fs.unlinkSync(path.join(FLEET_DIR, f));
     } catch {}
   }
+}
+
+// ── pause / resume (cost control) ───────────────────────────────────────────
+// fleet-pause interrupts the worker (Escape-retry, pane-diff verified) then writes
+// the .parked marker; run it detached so the TUI never blocks on the retry loop.
+function pauseSession(name) {
+  try {
+    const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-pause');
+    spawn(bin, ['-s', SOCK, name], { detached: true, stdio: 'ignore' }).unref();
+  } catch {}
+}
+function resumeSession(name) {
+  try { fs.unlinkSync(path.join(FLEET_DIR, name + '.parked')); } catch {}
 }
 
 // ── scheduling (send a message to a session at a time) ──────────────────────
@@ -332,10 +385,15 @@ let confirmKill = null;      // session name awaiting kill confirmation
 let schedFor = null;         // session name being scheduled
 let schedInput = '';         // typed "<time> | <message>" buffer
 let timer;                   // refresh interval (session grid / projects)
+let selInit = false;         // apply --select preselect exactly once (first build)
 
 function buildItems() {
   cards = gather();
   items = [...cards.map(c => ({ card: c })), { newCard: true }];
+  if (!selInit) {            // first build: land on the session we just came back from
+    selInit = true;
+    if (SELECT) { const i = items.findIndex(it => it.card && it.card.name === SELECT); if (i >= 0) sel = i; }
+  }
   if (sel >= items.length) sel = items.length - 1;
   if (sel < 0) sel = 0;
 }
@@ -346,9 +404,11 @@ function renderGrid() {
   const need = cards.filter(c => c.status === 'need-you').length;
   const work = cards.filter(c => c.status === 'working').length;
   const ready = cards.filter(c => c.status === 'ready').length;
+  const parked = cards.filter(c => c.status === 'parked').length;
   let buf = '\x1b[H';
   const header = ` ${C.bold}claude-fleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
-    `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}`;
+    `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
+    (parked ? ` · ${C.grey}${parked} parked${C.reset}` : '');
   buf += header + '\x1b[K\n';
   if (confirmKill)
     buf += `${C.red}${C.bold} kill session '${confirmKill}'?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
@@ -366,7 +426,7 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · N parallel · s sched · x kill · q/\` back${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · s sched · p pause · P resume · x kill · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -453,6 +513,8 @@ function onKey(key) {
     else if (key === 'N') { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = true; mode = 'picker'; }
     else if (key === 'x' || key === 'X') { const it = items[sel]; if (it?.card) confirmKill = it.card.name; }
     else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
+    else if (key === 'p') { const it = items[sel]; if (it?.card) pauseSession(it.card.name); }
+    else if (key === 'P') { const it = items[sel]; if (it?.card) resumeSession(it.card.name); }
     else if (key === '\r' || key === '\n') {
       const it = items[sel];
       if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
@@ -542,6 +604,9 @@ function checkJump() {
 
 // ── project-level screens (projects picker · home · folder browser) ─────────
 const SCREEN = (() => { const i = process.argv.indexOf('--screen'); return i >= 0 ? (process.argv[i + 1] || '') : ''; })();
+// Project to preselect on the projects screen (the one we just stepped out of),
+// so leaving a project returns the cursor to it instead of jumping to the top.
+const SELECT = (() => { const i = process.argv.indexOf('--select'); return i >= 0 ? (process.argv[i + 1] || '') : ''; })();
 const PROJECTS_CFG = path.join(HOME, '.config', 'claude-fleet', 'projects');
 
 function boxCard(title, rows, color, sel) {
@@ -561,7 +626,8 @@ function readProjects() {
   } catch { return []; }
 }
 function profileDir(p) { return (!p || p === 'work' || p === 'default') ? path.join(HOME, '.claude') : path.join(HOME, '.claude-' + p); }
-// live sessions for a project (incl master) + how many need you / are working
+// live sessions for a project (incl master, the lead you land on with ⏎) +
+// how many need you / are working
 function projectStatus(proj) {
   let names = [];
   try {
@@ -580,24 +646,49 @@ function projectStatus(proj) {
       } catch {}
     }
   } catch {}
-  const nowS = Math.floor(Date.now() / 1000);
-  let need = 0, working = 0;
+  let need = 0, working = 0, parked = 0, total = 0;
   for (const name of names) {
+    total++;                            // master included — it's the project's lead session (⏎ lands there)
     const o = bySlot.get(name);
-    if (!o) continue;
-    const tmt = o.transcript ? mtimeSec(o.transcript) : 0;
-    if (o.status === 'need-you') need++;
-    else if ((tmt && nowS - tmt < 10) || o.status === 'working') working++;
+    const busy = paneBusy('cf-' + proj.name, name);
+    if (!busy && fs.existsSync(path.join(dir, name + '.parked'))) { parked++; continue; }  // intentionally off
+    const s = deriveStatus(o ? o.status : '', o ? o.transcript : '', busy);
+    if (s === 'need-you') need++;
+    else if (s === 'working') working++;
   }
-  return { need, working, total: names.length };
+  return { need, working, parked, total };
 }
 
 // projects picker
 let pItems = [], pSel = 0;
-function pBuild() { pItems = [...readProjects().map(p => ({ project: p })), { add: true }]; pSel = Math.max(0, Math.min(pSel, pItems.length - 1)); }
+let pSelInit = false;        // apply --select preselect exactly once (first build)
+let pConfirmRemove = null;   // project name awaiting remove confirmation
+function pBuild() {
+  pItems = [...readProjects().map(p => ({ project: p })), { add: true }];
+  if (!pSelInit) {           // first build: land on the just-exited project, if any
+    pSelInit = true;
+    if (SELECT) { const i = pItems.findIndex(it => it.project && it.project.name === SELECT); if (i >= 0) pSel = i; }
+  }
+  pSel = Math.max(0, Math.min(pSel, pItems.length - 1));
+}
+// remove a project from the list (~/.config/claude-fleet/projects) — only the
+// list entry; its tmux sessions and conversation history are left untouched.
+function removeProject(name) {
+  let lines;
+  try { lines = fs.readFileSync(PROJECTS_CFG, 'utf8').split('\n'); } catch { return; }
+  const kept = lines.filter(l => {
+    const t = l.replace(/\r$/, '');
+    if (!t.trim() || t.startsWith('#')) return true;   // keep comments + blanks
+    return t.split('\t')[0] !== name;                  // drop only the matching project
+  });
+  try { fs.writeFileSync(PROJECTS_CFG, kept.join('\n')); } catch {}
+}
 function pRender() {
   let buf = '\x1b[H';
-  buf += ` ${C.bold}claude-fleet${C.reset} ${C.dim}— projects${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` ${C.bold}claude-fleet${C.reset} ${C.dim}— projects${C.reset}\x1b[K\n`;
+  buf += pConfirmRemove
+    ? `${C.red}${C.bold} remove '${pConfirmRemove}' from projects?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`
+    : '\x1b[K\n';
   const nc = cols();
   for (let i = 0; i < pItems.length; i += nc) {
     const row = pItems.slice(i, i + nc);
@@ -608,6 +699,7 @@ function pRender() {
       let line, color;
       if (st.need > 0) { line = `● ${st.need} need you`; color = C.red; }
       else if (st.working > 0) { line = `◆ ${st.working} working`; color = C.cyan; }
+      else if (st.parked > 0 && st.parked === st.total) { line = `⏸ ${st.parked} parked`; color = C.grey; }
       else if (st.total > 0) { line = `${st.total} session${st.total > 1 ? 's' : ''} · ready`; color = C.green; }
       else { line = 'no sessions yet'; color = C.grey; }
       return boxCard(it.project.name, [it.project.profile, it.project.path.replace(HOME, '~'), line], color, sel);
@@ -615,46 +707,28 @@ function pRender() {
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ open · q/\` quit${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ open · x remove · q/\` quit${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function pMove(d) { const nc = cols(); let n = pSel; if (d === 'left') n--; else if (d === 'right') n++; else if (d === 'up') n -= nc; else if (d === 'down') n += nc; if (n >= 0 && n < pItems.length) pSel = n; }
 function onKeyProjects(key) {
+  if (pConfirmRemove) {
+    if (key === 'y' || key === 'Y') { removeProject(pConfirmRemove); pConfirmRemove = null; pBuild(); }
+    else pConfirmRemove = null;
+    pRender(); return;
+  }
   if (key === '\x03' || key === 'q' || key === '\x60') return finish('');
   if (key === '\x1b[A' || key === 'k') pMove('up');
   else if (key === '\x1b[B' || key === 'j') pMove('down');
   else if (key === '\x1b[C' || key === 'l') pMove('right');
   else if (key === '\x1b[D' || key === 'h') pMove('left');
+  else if (key === 'x' || key === 'X') { const it = pItems[pSel]; if (it?.project) pConfirmRemove = it.project.name; }
   else if (key === '\r' || key === '\n') {
     const it = pItems[pSel];
     if (it?.add) return finish('addproject');
     if (it?.project) return finish(`project${US}${it.project.name}`);
   }
   pRender();
-}
-
-// project home
-let hSel = 0;
-const HOME_ITEMS = ['master', 'grid'];
-function hRender() {
-  let buf = '\x1b[H';
-  buf += ` ${C.bold}${Z}${C.reset} ${C.dim}— project home${C.reset}\x1b[K\n\x1b[K\n`;
-  const cards2 = [
-    boxCard('Master Claude', ['the lead — spawns &', 'coordinates workers', ''], C.cyan, hSel === 0),
-    boxCard('All sessions', ['see & enter the', 'fleet grid', ''], C.green, hSel === 1),
-  ];
-  for (let li = 0; li < 5; li++) buf += ' ' + cards2.map(c => c[li]).join(' ') + '\x1b[K\n';
-  buf += `\x1b[K\n${C.dim} ←→/hl move · ⏎ enter · m master · s sessions · q/\` back${C.reset}\x1b[K\n\x1b[J`;
-  out(buf);
-}
-function onKeyHome(key) {
-  if (key === '\x03' || key === 'q' || key === '\x1b' || key === '\x60') return finish('back');
-  if (key === 'm' || key === 'M') return finish('master');   // straight to Master Claude
-  if (key === 's' || key === 'S') return finish('grid');      // straight to the sessions grid
-  if (key === '\x1b[D' || key === 'h' || key === '\x1b[A' || key === 'k') hSel = 0;
-  else if (key === '\x1b[C' || key === 'l' || key === '\x1b[B' || key === 'j') hSel = 1;
-  else if (key === '\r' || key === '\n') return finish(HOME_ITEMS[hSel]);
-  hRender();
 }
 
 // add-project folder browser
@@ -704,8 +778,6 @@ process.on('SIGINT', () => finish(''));
 if (SCREEN === 'projects') {
   pBuild(); pRender(); process.stdin.on('data', onKeyProjects);
   timer = setInterval(() => { pBuild(); pRender(); }, 2500);
-} else if (SCREEN === 'home') {
-  hRender(); process.stdin.on('data', onKeyHome);
 } else if (SCREEN === 'addproject') {
   dBuild(); dRender(); process.stdin.on('data', onKeyAdd);
 } else {

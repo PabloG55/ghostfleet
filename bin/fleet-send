@@ -20,18 +20,41 @@ MSG="$*"
 tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
 
-# heads-up if the target is mid-turn (Claude will queue it after the current turn)
-FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
-if command -v jq >/dev/null 2>&1; then
-  st="$(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$SESSION" 'select(.slot==$s)|.status' "$f" 2>/dev/null; done | tail -1)"
-  [ "$st" = "working" ] && echo "fleet-send: note — '$SESSION' is working; it'll queue after the current turn." >&2
-fi
+# Is the target mid-turn right now? Read the LIVE pane (Claude's working spinner),
+# not the status file — the file can be stale, and a wrong guess here is harmless
+# but a wrong "queued" note is confusing.
+busy() { tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null \
+  | grep -qE '(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt'; }
+pre_busy=no; busy && pre_busy=yes
+[ "$pre_busy" = yes ] && echo "fleet-send: note — '$SESSION' is working; your prompt will queue after this turn." >&2
 
-# bracketed paste keeps multi-line prompts as a single message, then submit.
-# The delay matters: send Enter too soon and it lands *inside* the bracketed
-# paste (becomes a newline in the chip) instead of submitting the turn.
+# Bracketed paste keeps a multi-line prompt as ONE message; then submit. The race
+# (why a naive send sometimes silently fails): an Enter sent before the bracketed
+# paste has finished rendering is swallowed as a newline instead of submitting. So
+# wait for the paste to land, submit, then VERIFY the turn actually started (the
+# pane flips to the spinner) and re-Enter if it didn't.
 tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
 tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
-sleep "${CLAUDE_FLEET_SUBMIT_DELAY:-0.5}"
-tmux -L "$SOCK" send-keys -t "$SESSION" Enter
-echo "fleet-send: → $SESSION"
+
+# wait for the paste to appear in the pane before pressing Enter (fall back ~2s)
+probe="$(printf '%s' "$MSG" | tr '\n\r\t' '   ' | sed 's/  */ /g')"; probe="${probe: -24}"
+for _ in $(seq 1 20); do
+  tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null | grep -qF -- "$probe" && break
+  sleep 0.1
+done
+
+if [ "$pre_busy" = yes ]; then
+  # already mid-turn: the prompt just queues into the box; one submit is enough
+  sleep "${CLAUDE_FLEET_SUBMIT_DELAY:-0.4}"
+  tmux -L "$SOCK" send-keys -t "$SESSION" Enter
+  echo "fleet-send: → $SESSION (queued)"
+else
+  ok=no
+  for _ in 1 2 3 4; do
+    tmux -L "$SOCK" send-keys -t "$SESSION" Enter
+    for _ in 1 2 3; do busy && { ok=yes; break; }; sleep 0.2; done
+    [ "$ok" = yes ] && break
+  done
+  [ "$ok" = yes ] && echo "fleet-send: → $SESSION" \
+                  || echo "fleet-send: → $SESSION (warning: no turn started — verify it landed)" >&2
+fi

@@ -42,7 +42,20 @@ if [ -e "$WT" ]; then
 elif git -C "$GITROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
   git -C "$GITROOT" worktree add "$WT" "$BRANCH" >&2 || exit 1
 else
-  git -C "$GITROOT" worktree add "$WT" -b "$BRANCH" ${FROM:+"$FROM"} >&2 || exit 1
+  # Base the new branch on a FRESH ref. If --from names a branch with a remote
+  # counterpart, fetch it and branch off the remote tip — so a new worktree never
+  # starts behind a stale local main (the footgun where workers begin N PRs behind).
+  BASE="$FROM"
+  if [ -n "$FROM" ]; then
+    remote="$(git -C "$GITROOT" config --get "branch.$FROM.remote" 2>/dev/null || echo origin)"
+    if git -C "$GITROOT" fetch --quiet "$remote" "$FROM" 2>/dev/null \
+       && git -C "$GITROOT" rev-parse --verify --quiet "refs/remotes/$remote/$FROM" >/dev/null; then
+      behind="$(git -C "$GITROOT" rev-list --count "$FROM..$remote/$FROM" 2>/dev/null || echo 0)"
+      [ "${behind:-0}" -gt 0 ] && echo "fleet-spawn: local $FROM was $behind commit(s) behind $remote/$FROM — basing $BRANCH on the fresh remote tip" >&2
+      BASE="$remote/$FROM"
+    fi
+  fi
+  git -C "$GITROOT" worktree add "$WT" -b "$BRANCH" ${BASE:+"$BASE"} >&2 || exit 1
 fi
 
 # unique session name on this fleet's socket
