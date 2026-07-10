@@ -1,12 +1,10 @@
-// claude-fleet v2 layout — the recommended setup.
+// claude-fleet layout — ONE zellij session, one pane, the whole control plane.
 //
-// One tab, one pane, running the claude-fleet grid. All your Claude sessions
-// for this zellij session live *inside* that pane (held by a hidden tmux
-// server), and you select a card to drop into one.
+// claude-fleet opens the Projects picker; pick a project → Master Claude or the
+// session grid → your sessions. Each project has its own hidden tmux server.
+// No more per-project zellij sessions — just this one.
 //
-// Launch, one per project (the session name scopes the fleet + tmux socket):
-//     zellij --layout fleet attach -c acme
-//     zellij --layout fleet attach -c widgetco
+//     zellij --layout fleet attach -c fleet
 //
 // If zellij can't find `claude-fleet`, use the absolute path
 // (e.g. command="/Users/you/.local/bin/claude-fleet").

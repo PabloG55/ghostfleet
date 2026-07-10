@@ -279,7 +279,7 @@ const isRepo = p => { try { return fs.existsSync(path.join(p, '.git')); } catch 
 // e.g. "acmev2" -> "acme", "widgetco" -> "widgetco", "acme-2" -> "acme"
 const Zbase = Z.replace(/[-_ ]?v?\d+$/i, '') || Z;
 
-const nameRoots = [...new Set([path.join(HOME, Z), path.join(HOME, Zbase)])];
+const nameRoots = [...new Set([process.env.CLAUDE_FLEET_ROOT || '', path.join(HOME, Z), path.join(HOME, Zbase)].filter(Boolean))];
 const cwdRoots = [...new Set([process.cwd(), path.dirname(process.cwd())])];
 function discoverRoots() { return [...new Set([...nameRoots, ...cwdRoots])]; }
 
@@ -331,6 +331,7 @@ let pickFresh = false;       // picker opened via N (fresh parallel) vs n (resum
 let confirmKill = null;      // session name awaiting kill confirmation
 let schedFor = null;         // session name being scheduled
 let schedInput = '';         // typed "<time> | <message>" buffer
+let timer;                   // refresh interval (session grid / projects)
 
 function buildItems() {
   cards = gather();
@@ -443,7 +444,7 @@ function onKey(key) {
       else confirmKill = null;
       render(); return;
     }
-    if (key === '\x03' || key === 'q') return finish('');
+    if (key === '\x03' || key === 'q') return finish('back');
     if (key === '\x1b[A' || key === 'k') moveGrid('up');
     else if (key === '\x1b[B' || key === 'j') moveGrid('down');
     else if (key === '\x1b[C' || key === 'l') moveGrid('right');
@@ -524,15 +525,6 @@ if (PLAIN) {
   process.exit(0);
 }
 
-// ── interactive loop ──────────────────────────────────────────────────────
-out('\x1b[?1049h\x1b[?25l'); // alt-screen + hide cursor
-process.stdin.setRawMode?.(true);
-process.stdin.resume();
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', onKey);
-process.on('SIGTERM', () => finish(''));
-process.on('SIGINT', () => finish(''));
-
 // A clicked notification with no attached client drops a jump request here; the
 // grid picks it up and auto-attaches that session (fleet-jump writes it).
 function checkJump() {
@@ -548,8 +540,145 @@ function checkJump() {
   return false;
 }
 
-buildItems();
-if (!checkJump()) render();
-const timer = setInterval(() => {
-  if (mode === 'grid') { buildItems(); if (checkJump()) return; render(); }
-}, 1200);
+// ── project-level screens (projects picker · home · folder browser) ─────────
+const SCREEN = (() => { const i = process.argv.indexOf('--screen'); return i >= 0 ? (process.argv[i + 1] || '') : ''; })();
+const PROJECTS_CFG = path.join(HOME, '.config', 'claude-fleet', 'projects');
+
+function boxCard(title, rows, color, sel) {
+  const t = clip(`─ ${title} `, CW);
+  const top = `╭${t}${'─'.repeat(Math.max(0, CW - vis(t)))}╮`;
+  const body = [0, 1, 2].map(i => `│ ${padEndV(rows[i] || '', CW - 2)} │`);
+  const bot = `╰${'─'.repeat(CW)}╯`;
+  const wrap = (s, isTop) => sel ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}` : `${color}${s}${C.reset}`;
+  return [wrap(top, true), wrap(body[0]), wrap(body[1]), wrap(body[2]), wrap(bot)];
+}
+function readProjects() {
+  try {
+    return fs.readFileSync(PROJECTS_CFG, 'utf8').split('\n')
+      .map(l => l.replace(/\r$/, '')).filter(l => l.trim() && !l.startsWith('#'))
+      .map(l => { const [name, p, profile] = l.split('\t'); return { name, path: (p || '').replace(/^~/, HOME), profile: profile || 'work' }; })
+      .filter(x => x.name && x.path);
+  } catch { return []; }
+}
+function sessCount(name) {
+  try {
+    const o = execFileSync('tmux', ['-L', 'cf-' + name, 'list-sessions', '-F', 'x'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return o.split('\n').filter(Boolean).length;
+  } catch { return 0; }
+}
+
+// projects picker
+let pItems = [], pSel = 0;
+function pBuild() { pItems = [...readProjects().map(p => ({ project: p })), { add: true }]; pSel = Math.max(0, Math.min(pSel, pItems.length - 1)); }
+function pRender() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}claude-fleet${C.reset} ${C.dim}— projects${C.reset}\x1b[K\n\x1b[K\n`;
+  const nc = cols();
+  for (let i = 0; i < pItems.length; i += nc) {
+    const row = pItems.slice(i, i + nc);
+    const lines = row.map((it, j) => {
+      const sel = i + j === pSel;
+      if (it.add) return boxCard('+ add project', ['choose a root', 'folder…', ''], C.yellow, sel);
+      const n = sessCount(it.project.name);
+      return boxCard(it.project.name, [it.project.profile, it.project.path.replace(HOME, '~'), n ? `${n} session${n > 1 ? 's' : ''}` : 'no sessions yet'], n ? C.green : C.grey, sel);
+    });
+    for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
+    buf += '\x1b[K\n';
+  }
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ open · q quit${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+function pMove(d) { const nc = cols(); let n = pSel; if (d === 'left') n--; else if (d === 'right') n++; else if (d === 'up') n -= nc; else if (d === 'down') n += nc; if (n >= 0 && n < pItems.length) pSel = n; }
+function onKeyProjects(key) {
+  if (key === '\x03' || key === 'q') return finish('');
+  if (key === '\x1b[A' || key === 'k') pMove('up');
+  else if (key === '\x1b[B' || key === 'j') pMove('down');
+  else if (key === '\x1b[C' || key === 'l') pMove('right');
+  else if (key === '\x1b[D' || key === 'h') pMove('left');
+  else if (key === '\r' || key === '\n') {
+    const it = pItems[pSel];
+    if (it?.add) return finish('addproject');
+    if (it?.project) return finish(`project${US}${it.project.name}`);
+  }
+  pRender();
+}
+
+// project home
+let hSel = 0;
+const HOME_ITEMS = ['master', 'grid'];
+function hRender() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}${Z}${C.reset} ${C.dim}— project home${C.reset}\x1b[K\n\x1b[K\n`;
+  const cards2 = [
+    boxCard('Master Claude', ['the lead — spawns &', 'coordinates workers', ''], C.cyan, hSel === 0),
+    boxCard('All sessions', ['see & enter the', 'fleet grid', ''], C.green, hSel === 1),
+  ];
+  for (let li = 0; li < 5; li++) buf += ' ' + cards2.map(c => c[li]).join(' ') + '\x1b[K\n';
+  buf += `\x1b[K\n${C.dim} ←→/hl move · ⏎ enter · q back${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+function onKeyHome(key) {
+  if (key === '\x03' || key === 'q' || key === '\x1b') return finish('back');
+  if (key === '\x1b[D' || key === 'h' || key === '\x1b[A' || key === 'k') hSel = 0;
+  else if (key === '\x1b[C' || key === 'l' || key === '\x1b[B' || key === 'j') hSel = 1;
+  else if (key === '\r' || key === '\n') return finish(HOME_ITEMS[hSel]);
+  hRender();
+}
+
+// add-project folder browser
+let curDir = HOME, dirEntries = [], dSel = 0;
+function dBuild() {
+  let subs = [];
+  try { subs = fs.readdirSync(curDir, { withFileTypes: true }).filter(e => e.isDirectory() && !e.name.startsWith('.')).map(e => e.name).sort(); } catch {}
+  dirEntries = ['..', ...subs];
+  dSel = Math.max(0, Math.min(dSel, dirEntries.length - 1));
+}
+function dRender() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}add project${C.reset} ${C.dim}— pick a root folder (holds your checkouts/worktrees)${C.reset}\x1b[K\n`;
+  buf += ` ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  const maxShow = Math.max(6, (process.stderr.rows || 24) - 9);
+  let start = Math.max(0, dSel - Math.floor(maxShow / 2));
+  const end = Math.min(dirEntries.length, start + maxShow);
+  start = Math.max(0, end - maxShow);
+  for (let i = start; i < end; i++) {
+    const e = dirEntries[i], sel = i === dSel;
+    buf += `${sel ? `${C.bold}${C.green}▸ ` : '  '}${e === '..' ? '../' : e + '/'}${sel ? C.reset : ''}\x1b[K\n`;
+  }
+  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · s select THIS folder · esc cancel${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+function onKeyAdd(key) {
+  if (key === '\x1b' || key === '\x03') return finish('');
+  if (key === '\x1b[A' || key === 'k') dSel = Math.max(0, dSel - 1);
+  else if (key === '\x1b[B' || key === 'j') dSel = Math.min(dirEntries.length - 1, dSel + 1);
+  else if (key === '\x1b[D' || key === 'h') { curDir = path.dirname(curDir); dSel = 0; dBuild(); }
+  else if (key === '\x1b[C' || key === 'l' || key === '\r' || key === '\n') {
+    const e = dirEntries[dSel];
+    curDir = e === '..' ? path.dirname(curDir) : path.join(curDir, e);
+    dSel = 0; dBuild();
+  } else if (key === 's' || key === 'S') return finish(`newproject${US}${curDir}`);
+  dRender();
+}
+
+// ── dispatch ────────────────────────────────────────────────────────────────
+out('\x1b[?1049h\x1b[?25l'); // alt-screen + hide cursor
+process.stdin.setRawMode?.(true);
+process.stdin.resume();
+process.stdin.setEncoding('utf8');
+process.on('SIGTERM', () => finish(''));
+process.on('SIGINT', () => finish(''));
+
+if (SCREEN === 'projects') {
+  pBuild(); pRender(); process.stdin.on('data', onKeyProjects);
+  timer = setInterval(() => { pBuild(); pRender(); }, 2500);
+} else if (SCREEN === 'home') {
+  hRender(); process.stdin.on('data', onKeyHome);
+} else if (SCREEN === 'addproject') {
+  dBuild(); dRender(); process.stdin.on('data', onKeyAdd);
+} else {
+  process.stdin.on('data', onKey);
+  buildItems();
+  if (!checkJump()) render();
+  timer = setInterval(() => { if (mode === 'grid') { buildItems(); if (checkJump()) return; render(); } }, 1200);
+}

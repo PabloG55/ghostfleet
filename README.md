@@ -2,25 +2,22 @@
 
 A zellij-native master CLI for running many **Claude Code** sessions in parallel.
 
-One zellij session per project → **one tab, one pane** → that pane is a **card grid of
-every Claude session in that project**. Arrow to a card, hit Enter, and you're *inside* that
-session full-screen; detach and you're back at the grid. Every session keeps running in the
-background the whole time, so your agents work in parallel while you jump between them.
+One zellij session, one pane — `claude-fleet` is the whole control plane, in three levels:
 
 ```
-zellij session "acme"  →  one pane:
-╭─ claude-fleet [acme] ──────  2 need you · 1 working ─╮
-│ ╭ acme ─────────────╮ ╭ acme-1 ───────────────╮ │
-│ │ ● NEEDS YOU    1m ago  │ │ ● NEEDS YOU        7m ago  │ │
-│ │ fix/proposal-template  │ │ chore/api-vercel-migrate   │ │
-│ │ "Want me to drill…"    │ │ "Save as → Quote then…"    │ │
-│ ╰────────────────────────╯ ╰────────────────────────────╯ │
-│ ╭ acme-2 ───────────╮ ╭ + new session ─────────────╮ │
-│ │ ◆ working     busy 4m  │ │ start a Claude session     │ │
-│ │ feat/email-signature   │ │ in a checkout…             │ │
-│ ╰────────────────────────╯ ╰────────────────────────────╯ │
-╰ ↑↓←→/hjkl move · ⏎ enter session · n new · q quit ────────╯
+Projects            →   Project home                →   the session grid
+ ▸ acme              ▸ Master Claude (the lead)      acme  acme-1 …
+ ▸ widgetco              ▸ All sessions           ─────▸  ⏎ enter · n new · N parallel
+ ▸ + add project                                          s sched · x kill · q back
 ```
+
+- **Projects** — pick a project (or `+ add project` → browse to a root folder). Each project
+  has its own hidden tmux server (`cf-<project>`) holding its sessions.
+- **Project home** — enter the project's **Master Claude** (a lead session that spawns worktrees
+  and coordinates workers) or **All sessions** (the grid).
+- **The grid** — a card per Claude session (status · branch · last message). Arrow to one, `⏎` to
+  drop *inside* it full-screen; `` ` `` back to the grid. Every session keeps running in the
+  background, so agents work in parallel while you jump between them. `q` steps back up a level.
 
 Nothing else is zellij-native like this — every other terminal fleet tool (nicknisi/fleet,
 tmux-claude-session-manager, Recon) is tmux-bound; the rest take over your multiplexer
@@ -109,42 +106,37 @@ zellij layout.
 
 ## Use it
 
-One zellij session per project — the session name scopes the fleet and its tmux server:
+**One** zellij session runs everything:
 
 ```bash
-zellij --layout fleet attach -c acme     # one pane, running the grid
-zellij --layout fleet attach -c widgetco     # a separate fleet, separate tmux server
+zellij --layout fleet attach -c fleet    # or just run `claude-fleet` in any pane
 ```
 
-Then press `n` to start a session in a checkout (auto-discovered under `~/<session-name>/*`),
-work in it, detach back to the grid, start another. The two projects never see each other's
-sessions.
+You land on the **Projects** picker. Pick a project → **Master Claude** or **All sessions**.
+In the grid, `n` starts a session in a checkout, `N` a fresh parallel one, `⏎` enters it,
+`` ` `` comes back, `q` steps up a level.
 
-Prefer no layout? Just run `claude-fleet` in any zellij pane.
+**Projects** live in `~/.config/claude-fleet/projects` (`name<TAB>path<TAB>profile`), seeded with
+`acme` and `widgetco`. Add one from the picker (`+ add project` → browse to a root folder that
+holds your checkouts/worktrees), or edit the file. Jump straight in with `claude-fleet <project>`.
 
 ## Profiles (work vs personal accounts)
 
 Claude Code keeps each account in its own config dir (`CLAUDE_CONFIG_DIR`) — that dir holds
-the login, `settings.json`, `projects/` (transcripts) and the fleet's `fleet/` status. A fleet
-is pinned to one profile, so work and personal never mix:
+the login, `settings.json`, `projects/` (transcripts) and the fleet's `fleet/` status. A project's
+`profile` (3rd column in the projects file; default `work` = `~/.claude`, `personal` =
+`~/.claude-personal`) picks its account, so work and personal never mix:
 
-```bash
-claude-fleet            # work profile   -> ~/.claude
-claude-fleet personal   # personal       -> ~/.claude-personal
-claude-fleet <name>     # any profile    -> ~/.claude-<name>
+```
+# ~/.config/claude-fleet/projects   (name <TAB> path <TAB> profile)
+acme	~/acme	work
+widgetco	~/widgetco	work
+sideproj	~/Documents/me/sideproj	personal
 ```
 
-Each profile gets its own tmux socket (`cf-<profile>-<session>`), its own grid, reads its own
-`projects/`, and launches sessions with that `CLAUDE_CONFIG_DIR`. The header shows which one
-you're in: `claude-fleet [personal:widgetco]`. `install.sh` wires the status/notification hooks
-into every config dir it finds (`~/.claude` and `~/.claude-*`), so both accounts report status.
-
-Tip — mirror your shell aliases:
-
-```bash
-alias fleet='claude-fleet'            # work
-alias fleet-personal='claude-fleet personal'
-```
+Each project's sessions live on their own socket (`cf-<project>`) under that account's config dir,
+so accounts never mix. `install.sh` wires the status/notification hooks into every config dir it
+finds (`~/.claude` and `~/.claude-*`), so both accounts report status.
 
 ## Config
 
