@@ -26,6 +26,29 @@ Nothing else is zellij-native like this — every other terminal fleet tool (nic
 tmux-claude-session-manager, Recon) is tmux-bound; the rest take over your multiplexer
 (Claude Squad, ccmanager) or are web/cloud dashboards (Omnara).
 
+## Orchestrate: a lead session driving workers
+
+Because every session lives on the same tmux socket, a "lead" session can dispatch work to
+siblings and read their output — turning a fleet into lead-and-workers (e.g. `widgetco` handing
+briefs to `widgetco-1` / `widgetco-2` worktrees). Three commands, callable from a session's Bash:
+
+- **`fleet-list`** — sibling sessions + status (`(you)` marks the caller).
+- **`fleet-send <session> "<prompt>"`** — type a prompt into that session's Claude and submit it
+  (multi-line safe via bracketed paste; warns if the target is mid-turn).
+- **`fleet-read <session> [n]`** — print the sibling's last `n` assistant messages.
+
+```bash
+fleet-list
+fleet-send widgetco-1 "Implement the policy PDF engine in lib/policy/generation/*. Done when tests pass."
+fleet-send widgetco-2 "Build the app shell + UI primitives. Done when the shell renders."
+fleet-read widgetco-1 3     # check progress
+```
+
+The installed **`claude-fleet-orchestrate` skill** tells a lead session these exist, so you can just
+say "dispatch these briefs to the other worktrees." Each session knows its fleet via
+`CLAUDE_FLEET_SOCK`. Prompts must be self-contained (siblings don't share your context), and only
+sessions in the *same* fleet are reachable. (A future MCP wrapper could expose these as native tools.)
+
 ## How it works
 
 - **One tmux server per zellij session** (`tmux -L cf-<zellij-session>`) is the hidden

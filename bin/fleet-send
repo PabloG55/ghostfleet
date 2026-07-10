@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# fleet-send [-s SOCKET] <session> <prompt...>
+#
+# Type <prompt> into another fleet session's Claude input and submit it. Meant
+# to be called by a "lead" Claude session (via its Bash tool) to dispatch work
+# to sibling sessions in the same fleet.
+#
+# Socket defaults to $CLAUDE_FLEET_SOCK (exported into every fleet session).
+# Uses a bracketed paste so multi-line prompts go in as ONE message, then Enter.
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
+SESSION="${1:-}"; shift || true
+MSG="$*"
+
+[ -n "$SOCK" ]    || { echo "fleet-send: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+[ -n "$SESSION" ] || { echo "fleet-send: usage: fleet-send [-s socket] <session> <prompt>" >&2; exit 1; }
+[ -n "$MSG" ]     || { echo "fleet-send: empty prompt" >&2; exit 1; }
+tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
+  || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
+
+# heads-up if the target is mid-turn (Claude will queue it after the current turn)
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+if command -v jq >/dev/null 2>&1; then
+  st="$(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$SESSION" 'select(.slot==$s)|.status' "$f" 2>/dev/null; done | tail -1)"
+  [ "$st" = "working" ] && echo "fleet-send: note — '$SESSION' is working; it'll queue after the current turn." >&2
+fi
+
+# bracketed paste keeps multi-line prompts as a single message, then submit
+tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
+tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
+tmux -L "$SOCK" send-keys -t "$SESSION" Enter
+echo "fleet-send: → $SESSION"

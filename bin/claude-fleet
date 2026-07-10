@@ -49,6 +49,7 @@ Z="${ZELLIJ_SESSION_NAME:-${CLAUDE_FLEET_SCOPE:-default}}"
 export CLAUDE_FLEET_SCOPE="$Z"
 # work keeps the plain socket (no churn to existing fleets); others are namespaced.
 if [ "$PROFILE" = "work" ]; then SOCK="cf-$Z"; else SOCK="cf-$PROFILE-$Z"; fi
+export CLAUDE_FLEET_SOCK="$SOCK"   # so sessions know their fleet (fleet-send/list/read)
 US=$'\x1f'
 TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
 
@@ -73,7 +74,7 @@ while true; do
       base="$(basename "$cwd")"
       name="$base"; i=2
       while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
-      TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" "exec claude-here \"$name\""
+      TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here \"$name\""
       TM attach -t "$name" || true
       ;;
   esac

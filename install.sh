@@ -23,17 +23,19 @@ command -v tmux >/dev/null 2>&1 || echo "! tmux not found — the grid needs it.
 mkdir -p "$BIN_DIR"
 chmod +x "$REPO"/hooks/*.sh "$REPO"/bin/*
 
-ln -sf "$REPO/bin/claude-fleet"   "$BIN_DIR/claude-fleet"
-ln -sf "$REPO/bin/claude-here"    "$BIN_DIR/claude-here"
-ln -sf "$REPO/bin/fleet-schedule" "$BIN_DIR/fleet-schedule"
-echo "✓ linked claude-fleet, claude-here, fleet-schedule -> $BIN_DIR"
+for b in claude-fleet claude-here fleet-schedule fleet-send fleet-list fleet-read; do
+  ln -sf "$REPO/bin/$b" "$BIN_DIR/$b"
+done
+echo "✓ linked claude-fleet + helpers (here, schedule, send, list, read) -> $BIN_DIR"
 
 # --- wire hooks into every Claude config dir (profile) ----------------------
 # Each profile (work=~/.claude, personal=~/.claude-personal, …) has its OWN
 # settings.json, so the status/notification hooks must be wired into each.
 wire_hooks() {
   local dir="$1" settings="$1/settings.json" tmp
-  mkdir -p "$dir/fleet"
+  mkdir -p "$dir/fleet" "$dir/skills"
+  # orchestration skill so a lead session knows it can drive siblings
+  ln -sf "$REPO/skill/claude-fleet-orchestrate" "$dir/skills/claude-fleet-orchestrate"
   [ -f "$settings" ] || echo '{}' > "$settings"
   cp "$settings" "$settings.bak.$(date +%Y%m%d%H%M%S)"
   tmp="$(mktemp)"
