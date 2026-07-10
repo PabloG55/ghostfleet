@@ -1,14 +1,14 @@
 ---
 name: claude-fleet-orchestrate
-description: Coordinate AND spawn sibling Claude Code sessions in the same claude-fleet (parallel git worktrees). Use when you are a "lead" session dividing work across siblings — create a NEW worker on its own git worktree/branch, dispatch a prompt to a session, list the fleet, or read a sibling's latest output. Triggers include "spin up a worker for X", "create a new session/worktree on branch Y", "parallelize this into workers", "kick off the workers", "send this to <session>", "have widgetco-1 do X", "check what <session> said", "dispatch these briefs to the other worktrees". Runs the fleet-spawn / fleet-send / fleet-list / fleet-read commands (or the fleet_* MCP tools).
+description: Coordinate AND spawn sibling Claude Code sessions in the same claude-fleet (parallel git worktrees). Use when you are a "lead" session dividing work across siblings — create a NEW worker on its own git worktree/branch, dispatch a prompt to a session, list the fleet, or read a sibling's latest output. Triggers include "spin up a worker for X", "create a new session/worktree on branch Y", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "dispatch these briefs to the other worktrees". Runs the fleet-spawn / fleet-send / fleet-list / fleet-read commands (or the fleet_* MCP tools).
 ---
 
 # Orchestrating sibling fleet sessions
 
 You are running inside a **claude-fleet** session. The env var `CLAUDE_FLEET_SOCK`
 identifies your fleet (all sessions share one hidden tmux server). Sibling
-sessions are other worktrees/tasks in the same fleet — e.g. a `widgetco` lead
-alongside `widgetco-1` and `widgetco-2` workers. You can drive them from your
+sessions are other worktrees/tasks in the same fleet — e.g. an `api` lead
+alongside `api-1` and `api-2` workers. You can drive them from your
 Bash tool:
 
 - **`fleet-list`** — list sibling sessions and their status (`working` / `ready` /
@@ -50,10 +50,10 @@ available; otherwise call the shell commands via Bash.
 ```bash
 fleet-list
 # dispatch to existing workers:
-fleet-send widgetco-1 "Implement the policy PDF engine in lib/policy/generation/*. Brief: … Done when: `pnpm test` passes for the generation module."
-fleet-send widgetco-2 "Build the app shell + UI primitives in apps/web + packages/ui. Brief: … Done when: the shell renders and Clerk auth wraps it."
+fleet-send api-1 "Implement the payments module in src/payments/*. Brief: … Done when: the test suite for that module passes."
+fleet-send api-2 "Build the app shell + shared UI. Brief: … Done when: the shell renders and auth wraps it."
 # or spin up a brand-new worker on its own worktree/branch, briefed in one shot:
-fleet-spawn a4 --branch feat/notifications --prompt "Build the email notification jobs. Brief: … Done when: …"
+fleet-spawn worker4 --branch feat/notifications --prompt "Build the notification jobs. Brief: … Done when: …"
 # … later …
-fleet-read widgetco-1 3
+fleet-read api-1 3
 ```

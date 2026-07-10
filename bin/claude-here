@@ -2,9 +2,9 @@
 # claude-here — launch Claude Code *resuming* the conversation that belongs to
 # this zellij slot / checkout, instead of a blank `claude`.
 #
-# Used as the pane command in a zellij layout (see layouts/acme.kdl) so that
-# re-attaching a zellij session — or rebuilding it after a full exit — brings
-# every conversation back where it was, in the right checkout.
+# Run by claude-fleet as the command for each session, so re-opening a session
+# (or rebuilding after a full exit) brings its conversation back in the right
+# checkout instead of a blank prompt.
 #
 # Usage:  claude-here [slot] [-- extra claude args...]
 #   slot  a stable per-tab label (e.g. "claude 2") recorded by the hook so the

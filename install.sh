@@ -67,8 +67,7 @@ if [ -d "$HOME/.config/zellij" ]; then
   ZL="$HOME/.config/zellij/layouts"
   mkdir -p "$ZL"
   ln -sf "$REPO/layouts/fleet.kdl" "$ZL/fleet.kdl"
-  echo "✓ linked v2 layout -> $ZL/fleet.kdl  (launch: zellij --layout fleet attach -c <project>)"
-  [ -e "$ZL/acme.kdl" ] || ln -sf "$REPO/layouts/acme.kdl" "$ZL/acme.kdl"
+  echo "✓ linked layout -> $ZL/fleet.kdl  (launch: zellij --layout fleet attach -c fleet)"
 fi
 
 echo

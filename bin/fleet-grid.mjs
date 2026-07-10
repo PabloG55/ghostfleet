@@ -276,7 +276,7 @@ function newCardLines(selected) {
 // ── checkout discovery (for new session) ────────────────────────────────
 const CFG_FILE = path.join(HOME, '.config', 'claude-fleet', 'checkouts');
 const isRepo = p => { try { return fs.existsSync(path.join(p, '.git')); } catch { return false; } };
-// e.g. "acmev2" -> "acme", "widgetco" -> "widgetco", "acme-2" -> "acme"
+// e.g. "myapp-v2" -> "myapp", "api" -> "api", "api-2" -> "api"
 const Zbase = Z.replace(/[-_ ]?v?\d+$/i, '') || Z;
 
 const nameRoots = [...new Set([process.env.CLAUDE_FLEET_ROOT || '', path.join(HOME, Z), path.join(HOME, Zbase)].filter(Boolean))];

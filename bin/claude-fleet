@@ -40,10 +40,12 @@ proj_field() { awk -F'\t' -v n="$1" -v f="$2" '$1==n{print $f; exit}' "$PROJECTS
 ensure_projects() {
   [ -f "$PROJECTS_CFG" ] && return 0
   mkdir -p "$(dirname "$PROJECTS_CFG")" 2>/dev/null
-  {
-    [ -d "$HOME/acme" ] && printf 'acme\t%s/acme\twork\n' "$HOME"
-    [ -d "$HOME/widgetco" ] && printf 'widgetco\t%s/widgetco\twork\n' "$HOME"
-  } > "$PROJECTS_CFG"
+  cat > "$PROJECTS_CFG" <<'EOF'
+# claude-fleet projects — one per line:  name<TAB>path<TAB>profile
+# profile: work (~/.claude) or personal (~/.claude-personal).
+# Add from the picker ("+ add project"), or edit here, e.g.:
+#   myapp<TAB>~/code/myapp<TAB>work
+EOF
 }
 
 # select a project: export everything the grid/hooks/sessions key off
