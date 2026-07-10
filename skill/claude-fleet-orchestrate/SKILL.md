@@ -1,6 +1,6 @@
 ---
 name: claude-fleet-orchestrate
-description: Coordinate sibling Claude Code sessions in the same claude-fleet (parallel git worktrees). Use when you are a "lead" session dividing work across siblings — dispatch a prompt to another session, list the fleet, or read a sibling's latest output. Triggers include "send this to <session>", "have widgetco-1 do X", "kick off the workers", "check what <session> said", "dispatch these briefs to the other worktrees". Runs the fleet-list / fleet-send / fleet-read commands.
+description: Coordinate AND spawn sibling Claude Code sessions in the same claude-fleet (parallel git worktrees). Use when you are a "lead" session dividing work across siblings — create a NEW worker on its own git worktree/branch, dispatch a prompt to a session, list the fleet, or read a sibling's latest output. Triggers include "spin up a worker for X", "create a new session/worktree on branch Y", "parallelize this into workers", "kick off the workers", "send this to <session>", "have widgetco-1 do X", "check what <session> said", "dispatch these briefs to the other worktrees". Runs the fleet-spawn / fleet-send / fleet-list / fleet-read commands (or the fleet_* MCP tools).
 ---
 
 # Orchestrating sibling fleet sessions
