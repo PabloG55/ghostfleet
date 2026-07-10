@@ -327,6 +327,7 @@ let cards = [];
 let items = [];              // grid items: cards + {new:true}
 let checkouts = [];
 let pickSel = 0;
+let pickFresh = false;       // picker opened via N (fresh parallel) vs n (resume)
 let confirmKill = null;      // session name awaiting kill confirmation
 let schedFor = null;         // session name being scheduled
 let schedInput = '';         // typed "<time> | <message>" buffer
@@ -364,14 +365,16 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · s sched · x kill · q quit${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · N parallel · s sched · x kill · q quit${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
 
 function renderPicker() {
   let buf = '\x1b[H';
-  buf += ` ${C.bold}new session${C.reset} ${C.dim}— pick a checkout under ~/${Z}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += pickFresh
+    ? ` ${C.bold}new PARALLEL session${C.reset} ${C.dim}— fresh conversation in a checkout under ~/${Z}${C.reset}\x1b[K\n\x1b[K\n`
+    : ` ${C.bold}new session${C.reset} ${C.dim}— pick a checkout under ~/${Z}${C.reset}\x1b[K\n\x1b[K\n`;
   if (checkouts.length === 0) {
     buf += `${C.yellow}  no git checkouts found automatically${C.reset}\x1b[K\n`;
     buf += `${C.dim}  looked in: ${discoverRoots().map(r => r.replace(HOME, '~')).join(', ')}${C.reset}\x1b[K\n`;
@@ -445,7 +448,8 @@ function onKey(key) {
     else if (key === '\x1b[B' || key === 'j') moveGrid('down');
     else if (key === '\x1b[C' || key === 'l') moveGrid('right');
     else if (key === '\x1b[D' || key === 'h') moveGrid('left');
-    else if (key === 'n') { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
+    else if (key === 'n') { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = false; mode = 'picker'; }
+    else if (key === 'N') { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = true; mode = 'picker'; }
     else if (key === 'x' || key === 'X') { const it = items[sel]; if (it?.card) confirmKill = it.card.name; }
     else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
     else if (key === '\r' || key === '\n') {
@@ -458,7 +462,7 @@ function onKey(key) {
     if (key === '\x1b' || key === '\x03' || key === 'q') { mode = 'grid'; render(); return; }
     if (key === '\x1b[A' || key === 'k') pickSel = Math.max(0, pickSel - 1);
     else if (key === '\x1b[B' || key === 'j') pickSel = Math.min(checkouts.length - 1, pickSel + 1);
-    else if ((key === '\r' || key === '\n') && checkouts.length) return finish(`new${US}${checkouts[pickSel]}`);
+    else if ((key === '\r' || key === '\n') && checkouts.length) return finish(`${pickFresh ? 'newfresh' : 'new'}${US}${checkouts[pickSel]}`);
     render();
   } else if (mode === 'schedule') {
     if (key === '\x1b' || key === '\x03') { mode = 'grid'; schedFor = null; render(); return; }

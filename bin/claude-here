@@ -29,6 +29,12 @@ case "${CLAUDE_FLEET_YOLO:-1}" in
   *) YOLO=(--dangerously-skip-permissions) ;;
 esac
 
+# A parallel session (grid `N`) is a deliberately NEW conversation in this dir —
+# never resume, even if the checkout already has one.
+case "${CLAUDE_FLEET_FRESH:-0}" in
+  1|true|yes|on) echo "claude-here: fresh parallel session in $PWD" >&2; exec claude "${YOLO[@]}" "$@" ;;
+esac
+
 enc="$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
 dir="$PROJECTS/$enc"
 

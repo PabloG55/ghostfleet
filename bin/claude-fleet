@@ -77,5 +77,13 @@ while true; do
       TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here \"$name\""
       TM attach -t "$name" || true
       ;;
+    newfresh${US}*)
+      cwd="${choice#newfresh${US}}"
+      base="$(basename "$cwd")"
+      name="$base~2"; i=2
+      while TM has-session -t "$name" 2>/dev/null; do i=$((i + 1)); name="$base~$i"; done
+      TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" "exec claude-here \"$name\""
+      TM attach -t "$name" || true
+      ;;
   esac
 done
