@@ -52,11 +52,15 @@ if [ "$PROFILE" = "work" ]; then SOCK="cf-$Z"; else SOCK="cf-$PROFILE-$Z"; fi
 export CLAUDE_FLEET_SOCK="$SOCK"   # so sessions know their fleet (fleet-send/list/read)
 US=$'\x1f'
 TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
+# wipe the main screen + scrollback so tmux's "[detached …]" lines and any stray
+# frame don't pile up / flicker between the grid and attached sessions
+_clear() { printf '\033[2J\033[3J\033[H' >/dev/tty 2>/dev/null || true; }
 
 if [ "${1:-}" = "--plain" ]; then
   exec node "$GRID" "$SOCK" "$CONF" --plain
 fi
 
+_clear
 while true; do
   choice="$(node "$GRID" "$SOCK" "$CONF" </dev/tty)" || true
   # keep the running server's options/bindings in sync with the repo config
@@ -67,7 +71,7 @@ while true; do
       ;;
     attach${US}*)
       name="${choice#attach${US}}"
-      TM attach -t "$name" || true
+      TM attach -t "$name" 2>/dev/null || true; _clear
       ;;
     new${US}*)
       cwd="${choice#new${US}}"
@@ -75,7 +79,7 @@ while true; do
       name="$base"; i=2
       while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
       TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here \"$name\""
-      TM attach -t "$name" || true
+      TM attach -t "$name" 2>/dev/null || true; _clear
       ;;
     newfresh${US}*)
       cwd="${choice#newfresh${US}}"
@@ -83,7 +87,7 @@ while true; do
       name="$base~2"; i=2
       while TM has-session -t "$name" 2>/dev/null; do i=$((i + 1)); name="$base~$i"; done
       TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" "exec claude-here \"$name\""
-      TM attach -t "$name" || true
+      TM attach -t "$name" 2>/dev/null || true; _clear
       ;;
   esac
 done
