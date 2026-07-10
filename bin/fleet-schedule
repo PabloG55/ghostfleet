@@ -19,8 +19,11 @@ MARK="$FLEET_DIR/$SESSION.sched"
 now="$(date +%s)"
 delay=$(( TARGET - now )); [ "$delay" -lt 0 ] && delay=0
 
-# keep awake (idle-sleep only) for the lifetime of this waiter
-command -v caffeinate >/dev/null 2>&1 && caffeinate -i -w "$$" &
+# keep awake (idle-sleep only) for the lifetime of this waiter.
+# NB: `if …; then caffeinate & fi` backgrounds ONLY caffeinate — writing it as
+# `cmd && caffeinate &` would background the whole `&&` list in an extra bash
+# subshell (a confusing second "bash fleet-schedule" in ps).
+if command -v caffeinate >/dev/null 2>&1; then caffeinate -i -w "$$" & fi
 
 sleep "$delay"
 
