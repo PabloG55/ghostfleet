@@ -75,9 +75,16 @@ grid. If the title heuristic ever misses a window, pin it in `~/.config/claude-f
 
 ## Keys
 
+`` ` `` (backtick) is the universal **back** everywhere — it detaches you from a session and steps
+back out of the grid / home / projects, mirroring the in-session detach. `q` does the same on the
+Node screens.
+
+**Project home:** `m` → Master Claude · `s` → sessions grid · arrows/`⏎` select · `q`/`` ` `` back.
+
 **In the grid:** `↑↓←→` / `hjkl` move · `⏎` enter the selected session · `n` new session ·
 `N` new *parallel* session (fresh conversation) · `s` schedule a message · `x` kill session ·
-`q` step back up a level.
+`q` / `` ` `` step back up a level. (The `master` session is managed from the home screen, so it
+doesn't show here.)
 
 **Schedule a message** (`s` on a card): type a time and it sends a message into that session then —
 great for resuming when your usage limit resets. Examples: `3:50am`, `15:30`, `+2h`. Message defaults

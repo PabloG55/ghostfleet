@@ -132,7 +132,7 @@ function newestTranscript(cwd) {
 }
 
 function gather() {
-  const sessions = tmuxList();
+  const sessions = tmuxList().filter(s => s.name !== 'master');   // master lives on the home screen, not the grid
   const fleet = fleetBySlot();
   const nowS = Math.floor(Date.now() / 1000);
   return sessions.map(s => {
@@ -366,7 +366,7 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · N parallel · s sched · x kill · q quit${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · N parallel · s sched · x kill · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -387,7 +387,7 @@ function renderPicker() {
       buf += `${mark}${c.replace(HOME, '~')}${end}\x1b[K\n`;
     });
   }
-  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎ create · esc back${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎ create · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 
@@ -408,7 +408,7 @@ function renderSchedule() {
     : ` ${C.dim}→ enter a time${C.reset}\x1b[K\n`;
   buf += ` ${C.dim}message:${C.reset} ${msg}\x1b[K\n\x1b[K\n`;
   buf += `${C.dim} examples: 3:50am · 15:30 · +2h   ·   customize text with  <time> | <message>${C.reset}\x1b[K\n\x1b[K\n`;
-  buf += `${C.dim} ⏎ schedule · empty + ⏎ clears a pending one · esc back${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ⏎ schedule · empty + ⏎ clears a pending one · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function render() {
@@ -444,7 +444,7 @@ function onKey(key) {
       else confirmKill = null;
       render(); return;
     }
-    if (key === '\x03' || key === 'q') return finish('back');
+    if (key === '\x03' || key === 'q' || key === '\x60') return finish('back');
     if (key === '\x1b[A' || key === 'k') moveGrid('up');
     else if (key === '\x1b[B' || key === 'j') moveGrid('down');
     else if (key === '\x1b[C' || key === 'l') moveGrid('right');
@@ -460,13 +460,13 @@ function onKey(key) {
     }
     render();
   } else if (mode === 'picker') {
-    if (key === '\x1b' || key === '\x03' || key === 'q') { mode = 'grid'; render(); return; }
+    if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') { mode = 'grid'; render(); return; }
     if (key === '\x1b[A' || key === 'k') pickSel = Math.max(0, pickSel - 1);
     else if (key === '\x1b[B' || key === 'j') pickSel = Math.min(checkouts.length - 1, pickSel + 1);
     else if ((key === '\r' || key === '\n') && checkouts.length) return finish(`${pickFresh ? 'newfresh' : 'new'}${US}${checkouts[pickSel]}`);
     render();
   } else if (mode === 'schedule') {
-    if (key === '\x1b' || key === '\x03') { mode = 'grid'; schedFor = null; render(); return; }
+    if (key === '\x1b' || key === '\x03' || key === '\x60') { mode = 'grid'; schedFor = null; render(); return; }
     else if (key === '\r' || key === '\n') {
       const parts = schedInput.split('|');
       const whenStr = (parts[0] || '').trim();
@@ -585,12 +585,12 @@ function pRender() {
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ open · q quit${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ open · q/\` quit${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function pMove(d) { const nc = cols(); let n = pSel; if (d === 'left') n--; else if (d === 'right') n++; else if (d === 'up') n -= nc; else if (d === 'down') n += nc; if (n >= 0 && n < pItems.length) pSel = n; }
 function onKeyProjects(key) {
-  if (key === '\x03' || key === 'q') return finish('');
+  if (key === '\x03' || key === 'q' || key === '\x60') return finish('');
   if (key === '\x1b[A' || key === 'k') pMove('up');
   else if (key === '\x1b[B' || key === 'j') pMove('down');
   else if (key === '\x1b[C' || key === 'l') pMove('right');
@@ -614,11 +614,13 @@ function hRender() {
     boxCard('All sessions', ['see & enter the', 'fleet grid', ''], C.green, hSel === 1),
   ];
   for (let li = 0; li < 5; li++) buf += ' ' + cards2.map(c => c[li]).join(' ') + '\x1b[K\n';
-  buf += `\x1b[K\n${C.dim} ←→/hl move · ⏎ enter · q back${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ←→/hl move · ⏎ enter · m master · s sessions · q/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function onKeyHome(key) {
-  if (key === '\x03' || key === 'q' || key === '\x1b') return finish('back');
+  if (key === '\x03' || key === 'q' || key === '\x1b' || key === '\x60') return finish('back');
+  if (key === 'm' || key === 'M') return finish('master');   // straight to Master Claude
+  if (key === 's' || key === 'S') return finish('grid');      // straight to the sessions grid
   if (key === '\x1b[D' || key === 'h' || key === '\x1b[A' || key === 'k') hSel = 0;
   else if (key === '\x1b[C' || key === 'l' || key === '\x1b[B' || key === 'j') hSel = 1;
   else if (key === '\r' || key === '\n') return finish(HOME_ITEMS[hSel]);
@@ -645,11 +647,11 @@ function dRender() {
     const e = dirEntries[i], sel = i === dSel;
     buf += `${sel ? `${C.bold}${C.green}▸ ` : '  '}${e === '..' ? '../' : e + '/'}${sel ? C.reset : ''}\x1b[K\n`;
   }
-  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · s select THIS folder · esc cancel${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · s select THIS folder · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function onKeyAdd(key) {
-  if (key === '\x1b' || key === '\x03') return finish('');
+  if (key === '\x1b' || key === '\x03' || key === '\x60') return finish('');
   if (key === '\x1b[A' || key === 'k') dSel = Math.max(0, dSel - 1);
   else if (key === '\x1b[B' || key === 'j') dSel = Math.min(dirEntries.length - 1, dSel + 1);
   else if (key === '\x1b[D' || key === 'h') { curDir = path.dirname(curDir); dSel = 0; dBuild(); }
