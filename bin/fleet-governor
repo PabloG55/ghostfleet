@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# fleet-governor [-s SOCKET] [options]
+#
+# Budget backpressure for a SINGLE-ACCOUNT fleet. Every worker + the lead drink
+# from one usage pool, so wide fan-out drains it N x faster and all workers freeze
+# at the ceiling together. This governor is a DUMB, non-Claude loop (zero Claude
+# budget) ON PURPOSE: the lead runs on the same account and stalls too, so metering
+# can't depend on it.
+#
+# Each tick it reads the 5h usage % off the workers' status bars and, as it climbs,
+# shrinks the number of active workers by parking the newest ones (fleet-pause) so
+# the survivors finish and bank their PRs instead of all stalling mid-task. When the
+# window resets (% drops below --resume), it auto-resumes the workers IT parked
+# (tagged so it never touches a worker you paused by hand).
+#
+#   -s SOCKET      fleet socket (default: $CLAUDE_FLEET_SOCK)
+#   --interval N   seconds between ticks (default 60)
+#   --shed P       start shedding at this 5h usage % (default 80; keep < 85)
+#   --resume P     resume governor-parked workers below this % (default 75)
+#   --once         run one tick and exit (for testing / cron)
+#   --dry-run      log decisions, don't actually pause/resume
+#
+# Active-worker cap by usage %:  >=92 -> 1,  >=85 -> 2,  >=--shed -> 3,  else all.
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+INTERVAL=60; SHED=80; RESUME=75; ONCE=0; DRY=0
+T2=85; T1=92                       # fixed caps above --shed: 85% -> 2 active, 92% -> 1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s)         SOCK="${2:?}"; shift 2 ;;
+    --interval) INTERVAL="${2:?}"; shift 2 ;;
+    --shed)     SHED="${2:?}"; shift 2 ;;
+    --resume)   RESUME="${2:?}"; shift 2 ;;
+    --once)     ONCE=1; shift ;;
+    --dry-run)  DRY=1; shift ;;
+    *) echo "fleet-governor: unknown arg $1" >&2; exit 1 ;;
+  esac
+done
+[ -n "$SOCK" ] || { echo "fleet-governor: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"      # sibling fleet-pause / fleet-resume
+log() { echo "[fleet-governor $(date +%H:%M:%S)] $*"; }
+
+# The 5h usage % from a pane's status bar: the "NN%(" field. Excludes ctx:NN%
+# (no paren after) and 7d:NN%( (colon-prefixed) by requiring a non-colon, non-digit
+# char right before the number.
+pct_of() {
+  tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null \
+    | grep -oE '[^:0-9][0-9]+%\(' | grep -oE '[0-9]+' | tail -1
+}
+# one shared account -> take the highest reading across all live panes
+budget() {
+  local max=0 p s
+  for s in $(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
+    p="$(pct_of "$s")"; [ -n "$p" ] && [ "$p" -gt "$max" ] && max="$p"
+  done
+  echo "$max"
+}
+# workers (never the lead), newest first
+workers_newest_first() {
+  tmux -L "$SOCK" list-sessions -F '#{session_created} #{session_name}' 2>/dev/null \
+    | grep -vE ' master$' | sort -rn | awk '{print $2}'
+}
+is_parked()  { [ -f "$FLEET_DIR/$1.parked" ]; }
+gov_parked() { is_parked "$1" && grep -q '^governor' "$FLEET_DIR/$1.parked" 2>/dev/null; }
+cap_for() {
+  local p="$1"
+  if   [ "$p" -ge "$T1" ];   then echo 1
+  elif [ "$p" -ge "$T2" ];   then echo 2
+  elif [ "$p" -ge "$SHED" ]; then echo 3
+  else echo 999; fi
+}
+
+tick() {
+  local pct cap n to_shed w resumed active
+  pct="$(budget)"
+  if [ -z "$pct" ] || [ "$pct" -eq 0 ]; then log "no budget reading this tick"; return; fi
+
+  # recovered / window reset -> resume what WE parked (leave hand-paused workers alone)
+  if [ "$pct" -lt "$RESUME" ]; then
+    resumed=0
+    for w in $(workers_newest_first); do
+      if gov_parked "$w"; then
+        log "budget ${pct}% < ${RESUME}% -> resume $w"
+        [ "$DRY" = 1 ] || "$BIN_DIR/fleet-resume" -s "$SOCK" "$w" >/dev/null 2>&1
+        resumed=1
+      fi
+    done
+    [ "$resumed" = 0 ] && log "budget ${pct}% (healthy)"
+    return
+  fi
+
+  # under pressure -> shed newest active workers down to the cap
+  cap="$(cap_for "$pct")"
+  active=()
+  for w in $(workers_newest_first); do is_parked "$w" || active+=("$w"); done
+  n=${#active[@]}
+  if [ "$n" -gt "$cap" ]; then
+    to_shed=$(( n - cap ))
+    log "budget ${pct}% -> cap ${cap}; ${n} active -> parking ${to_shed} newest"
+    for w in "${active[@]}"; do
+      [ "$to_shed" -gt 0 ] || break
+      log "  park $w"
+      if [ "$DRY" != 1 ]; then
+        "$BIN_DIR/fleet-pause" -s "$SOCK" "$w" >/dev/null 2>&1 \
+          && printf 'governor %s\n' "$(date +%s)" > "$FLEET_DIR/$w.parked"
+      fi
+      to_shed=$(( to_shed - 1 ))
+    done
+  else
+    log "budget ${pct}% -> cap ${cap}; ${n} active (ok)"
+  fi
+}
+
+modelabel="ACTIVE (will pause workers)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"
+log "started on $SOCK — $modelabel — shed>=${SHED}%, resume<${RESUME}%, caps ${T2}%->2 ${T1}%->1, interval ${INTERVAL}s"
+if [ "$ONCE" = 1 ]; then
+  tick
+else
+  while true; do
+    tmux -L "$SOCK" list-sessions >/dev/null 2>&1 || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
+    tick
+    sleep "$INTERVAL"
+  done
+fi

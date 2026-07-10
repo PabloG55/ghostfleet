@@ -8,8 +8,10 @@
 # Node draws the screens; tmux does the PTY work. From master, ` (or C-a g) steps
 # back to Projects; from the grid it steps back to master.
 #
-#   claude-fleet                 project picker
-#   claude-fleet <project>       jump straight into a project's Master Claude
+#   claude-fleet                 project picker (work profile)
+#   claude-fleet <profile>       a separate profile — its own projects list
+#                                (projects.<profile>) + config dir (~/.claude-<profile>)
+#   claude-fleet <project>       jump straight into a known work project's Master Claude
 #   claude-fleet <project> --plain   one-shot non-interactive list (for scripts)
 set -uo pipefail
 
@@ -52,13 +54,31 @@ EOF
 set_project() {
   PROJECT="$1"
   PROJECT_ROOT="$(proj_field "$PROJECT" 2)"; PROJECT_ROOT="${PROJECT_ROOT/#\~/$HOME}"
-  local prof; prof="$(proj_field "$PROJECT" 3)"; [ -n "$prof" ] || prof="work"
+  local prof; prof="$(proj_field "$PROJECT" 3)"; [ -n "$prof" ] || prof="${PROFILE:-work}"
   CFG_DIR="$(profile_dir "$prof")"
-  SOCK="cf-$PROJECT"
+  # work keeps the bare cf-<project> socket (back-compat); other profiles are
+  # namespaced so a same-named project in another profile can't collide.
+  case "$prof" in work|default) SOCK="cf-$PROJECT" ;; *) SOCK="cf-$prof-$PROJECT" ;; esac
   export CLAUDE_CONFIG_DIR="$CFG_DIR" CLAUDE_FLEET_DIR="$CFG_DIR/fleet" \
          CLAUDE_FLEET_PROFILE="$prof" CLAUDE_FLEET_SCOPE="$PROJECT" \
          CLAUDE_FLEET_ROOT="$PROJECT_ROOT" CLAUDE_FLEET_SOCK="$SOCK"
   mkdir -p "$CFG_DIR/fleet" 2>/dev/null
+}
+
+# Keep a budget governor alive for this project's fleet — a DUMB non-Claude loop
+# that parks workers as the shared account nears its usage ceiling (see
+# bin/fleet-governor). It must NOT be the master: the lead is on the same account
+# and stalls at the same time, so metering has to run outside Claude. Singleton per
+# project; opt out with CLAUDE_FLEET_GOVERNOR=off, watch-only with =dry.
+ensure_governor() {
+  local mode="${CLAUDE_FLEET_GOVERNOR:-on}"
+  case "$mode" in 0|off|no|false) return 0 ;; esac
+  local pidf="$CFG_DIR/fleet/$PROJECT.governor.pid" logf="$CFG_DIR/fleet/$PROJECT.governor.log"
+  # already running for this project?
+  if [ -f "$pidf" ] && kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then return 0; fi
+  local dry=""; [ "$mode" = "dry" ] && dry="--dry-run"
+  CLAUDE_FLEET_DIR="$CFG_DIR/fleet" nohup "$BIN_DIR/fleet-governor" -s "$SOCK" $dry >>"$logf" 2>&1 &
+  echo $! > "$pidf"
 }
 
 # the "master" lead session runs in the project's main checkout. From inside it,
@@ -72,6 +92,7 @@ enter_master() {
   TM has-session -t master 2>/dev/null || \
     TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here master"
   TM source-file "$CONF" 2>/dev/null || true           # refresh bindings/status on the live server
+  ensure_governor                                       # budget backpressure for this fleet (non-Claude, singleton)
   local marker; marker="$(TM display-message -t master -p '#{socket_path}' 2>/dev/null).goto"
   rm -f "$marker" 2>/dev/null                          # clear any stale signal
   TM attach -t master 2>/dev/null || true; _clear
@@ -102,12 +123,32 @@ grid_loop() {
   done
 }
 
+# --- profile scope --------------------------------------------------------------
+# `claude-fleet [profile]` gives each profile its own projects list
+# (~/.config/claude-fleet/projects.<profile>) AND its own Claude config dir
+# (~/.claude-<profile>). A bare arg that names a known WORK project still jumps
+# straight into it (back-compat).
+WORK_CFG="$HOME/.config/claude-fleet/projects"
+PROFILE="work"; JUMP=""
+if [ -n "${1:-}" ] && [ "${1#--}" = "$1" ]; then
+  if awk -F'\t' -v n="$1" '$1==n{f=1} END{exit !f}' "$WORK_CFG" 2>/dev/null; then
+    JUMP="$1"                          # known work project -> jump into it
+  else
+    PROFILE="$1"                       # otherwise the arg selects a profile
+  fi
+fi
+case "$PROFILE" in
+  work|default) PROJECTS_CFG="$WORK_CFG" ;;
+  *)            PROJECTS_CFG="$HOME/.config/claude-fleet/projects.$PROFILE" ;;
+esac
+export CLAUDE_FLEET_PROJECTS="$PROJECTS_CFG" CLAUDE_FLEET_PROFILE="$PROFILE"
+
 ensure_projects
 
-# claude-fleet <project> [--plain]  -> jump straight to a project (skip picker)
+# jump straight into a project (claude-fleet <project> [--plain])
 PROJECT=""
-if [ -n "${1:-}" ] && [ "${1#--}" = "$1" ] && [ -n "$(proj_field "$1" 2)" ]; then
-  set_project "$1"
+if [ -n "$JUMP" ]; then
+  set_project "$JUMP"
   [ "${2:-}" = "--plain" ] && exec node "$GRID" "$SOCK" "$CONF" --plain
 fi
 
@@ -125,7 +166,7 @@ while true; do
         if [ -n "$p" ] && [ "$p" != "newproject" ] && [ -d "$p" ]; then
           nm="$(basename "$p")"
           awk -F'\t' -v n="$nm" '$1==n{f=1} END{exit !f}' "$PROJECTS_CFG" 2>/dev/null \
-            || printf '%s\t%s\twork\n' "$nm" "$p" >> "$PROJECTS_CFG"
+            || printf '%s\t%s\t%s\n' "$nm" "$p" "$PROFILE" >> "$PROJECTS_CFG"
           set_project "$nm"
         fi ;;
       project${US}*) set_project "${sel#project${US}}" ;;

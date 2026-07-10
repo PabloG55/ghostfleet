@@ -607,7 +607,7 @@ const SCREEN = (() => { const i = process.argv.indexOf('--screen'); return i >= 
 // Project to preselect on the projects screen (the one we just stepped out of),
 // so leaving a project returns the cursor to it instead of jumping to the top.
 const SELECT = (() => { const i = process.argv.indexOf('--select'); return i >= 0 ? (process.argv[i + 1] || '') : ''; })();
-const PROJECTS_CFG = path.join(HOME, '.config', 'claude-fleet', 'projects');
+const PROJECTS_CFG = process.env.CLAUDE_FLEET_PROJECTS || path.join(HOME, '.config', 'claude-fleet', 'projects');
 
 function boxCard(title, rows, color, sel) {
   const t = clip(`─ ${title} `, CW);
@@ -626,12 +626,16 @@ function readProjects() {
   } catch { return []; }
 }
 function profileDir(p) { return (!p || p === 'work' || p === 'default') ? path.join(HOME, '.claude') : path.join(HOME, '.claude-' + p); }
+// tmux socket for a project — work stays bare cf-<name>; other profiles are
+// namespaced so same-named projects don't collide (matches bin/claude-fleet).
+function sockOf(proj) { const p = proj.profile; return (!p || p === 'work' || p === 'default') ? 'cf-' + proj.name : 'cf-' + p + '-' + proj.name; }
 // live sessions for a project (incl master, the lead you land on with ⏎) +
 // how many need you / are working
 function projectStatus(proj) {
+  const sock = sockOf(proj);
   let names = [];
   try {
-    const o = execFileSync('tmux', ['-L', 'cf-' + proj.name, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const o = execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     names = o.split('\n').filter(Boolean);
   } catch { return { need: 0, working: 0, total: 0 }; }
   const dir = path.join(profileDir(proj.profile), 'fleet');
@@ -650,7 +654,7 @@ function projectStatus(proj) {
   for (const name of names) {
     total++;                            // master included — it's the project's lead session (⏎ lands there)
     const o = bySlot.get(name);
-    const busy = paneBusy('cf-' + proj.name, name);
+    const busy = paneBusy(sock, name);
     if (!busy && fs.existsSync(path.join(dir, name + '.parked'))) { parked++; continue; }  // intentionally off
     const s = deriveStatus(o ? o.status : '', o ? o.transcript : '', busy);
     if (s === 'need-you') need++;
@@ -685,7 +689,8 @@ function removeProject(name) {
 }
 function pRender() {
   let buf = '\x1b[H';
-  buf += ` ${C.bold}claude-fleet${C.reset} ${C.dim}— projects${C.reset}\x1b[K\n`;
+  const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
+  buf += ` ${C.bold}claude-fleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
   buf += pConfirmRemove
     ? `${C.red}${C.bold} remove '${pConfirmRemove}' from projects?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`
     : '\x1b[K\n';
