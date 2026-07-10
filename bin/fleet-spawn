@@ -9,14 +9,16 @@
 #   --branch  branch to use (default: <name>); created if it doesn't exist
 #   --from    base ref for a new branch (default: current HEAD)
 #   --prompt  initial task to send once the session boots (~7s later)
+#   --model   model for the new session (e.g. opus); default = account default
 set -uo pipefail
 
-NAME=""; BRANCH=""; FROM=""; PROMPT=""
+NAME=""; BRANCH=""; FROM=""; PROMPT=""; MODEL=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --branch) BRANCH="${2:?}"; shift 2 ;;
     --from)   FROM="${2:?}";   shift 2 ;;
     --prompt) PROMPT="${2:?}"; shift 2 ;;
+    --model)  MODEL="${2:?}";  shift 2 ;;
     -*) echo "fleet-spawn: unknown option $1" >&2; exit 1 ;;
     *)  [ -z "$NAME" ] && { NAME="$1"; shift; } || { echo "fleet-spawn: unexpected arg $1" >&2; exit 1; } ;;
   esac
@@ -50,6 +52,7 @@ while tmux -L "$SOCK" has-session -t "$name" 2>/dev/null; do name="$NAME~$i"; i=
 # fresh session in the worktree, background (lead keeps working)
 tmux -L "$SOCK" new-session -d -s "$name" -c "$WT" \
   -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
+  -e "CLAUDE_FLEET_MODEL=$MODEL" \
   "exec claude-here \"$name\""
 echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)"
 

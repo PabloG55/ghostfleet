@@ -27,8 +27,11 @@ if command -v jq >/dev/null 2>&1; then
   [ "$st" = "working" ] && echo "fleet-send: note — '$SESSION' is working; it'll queue after the current turn." >&2
 fi
 
-# bracketed paste keeps multi-line prompts as a single message, then submit
+# bracketed paste keeps multi-line prompts as a single message, then submit.
+# The delay matters: send Enter too soon and it lands *inside* the bracketed
+# paste (becomes a newline in the chip) instead of submitting the turn.
 tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
 tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
+sleep "${CLAUDE_FLEET_SUBMIT_DELAY:-0.5}"
 tmux -L "$SOCK" send-keys -t "$SESSION" Enter
 echo "fleet-send: → $SESSION"

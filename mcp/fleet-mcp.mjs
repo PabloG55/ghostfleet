@@ -28,7 +28,7 @@ const TOOLS = [
   { name: 'fleet_read', description: 'Read the last N assistant messages from a sibling session, to check its progress/output.',
     inputSchema: { type: 'object', properties: { session: { type: 'string' }, n: { type: 'number', description: 'how many recent assistant messages (default 1)' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_spawn', description: 'Create a new git worktree off the current repo and start a fresh parallel session in it (in the background), optionally with an initial task prompt. Use to spin up a new worker on its own branch.',
-    inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, prompt: { type: 'string', description: 'initial task to send once it boots' } }, required: ['name'], additionalProperties: false } },
+    inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, prompt: { type: 'string', description: 'initial task to send once it boots' }, model: { type: 'string', description: 'model for the worker (e.g. opus); default = account default' } }, required: ['name'], additionalProperties: false } },
 ];
 
 function callTool(name, a = {}) {
@@ -39,6 +39,7 @@ function callTool(name, a = {}) {
     case 'fleet_spawn': {
       const args = [String(a.name)];
       if (a.branch) args.push('--branch', String(a.branch));
+      if (a.model) args.push('--model', String(a.model));
       if (a.prompt) args.push('--prompt', String(a.prompt));
       return run('fleet-spawn', args);
     }

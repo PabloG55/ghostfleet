@@ -29,10 +29,15 @@ case "${CLAUDE_FLEET_YOLO:-1}" in
   *) YOLO=(--dangerously-skip-permissions) ;;
 esac
 
+# Model override (fleet-spawn --model, or a fleet default) so spawned workers
+# don't fall back to the account's default model.
+MODEL=()
+[ -n "${CLAUDE_FLEET_MODEL:-}" ] && MODEL=(--model "$CLAUDE_FLEET_MODEL")
+
 # A parallel session (grid `N`) is a deliberately NEW conversation in this dir —
 # never resume, even if the checkout already has one.
 case "${CLAUDE_FLEET_FRESH:-0}" in
-  1|true|yes|on) echo "claude-here: fresh parallel session in $PWD" >&2; exec claude "${YOLO[@]}" "$@" ;;
+  1|true|yes|on) echo "claude-here: fresh parallel session in $PWD" >&2; exec claude "${YOLO[@]}" "${MODEL[@]}" "$@" ;;
 esac
 
 enc="$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
@@ -71,7 +76,7 @@ fi
 # 3) resume if we found a real one; otherwise start FRESH in this dir
 if [ -n "$resume_id" ]; then
   echo "claude-here: resuming $resume_id in $PWD" >&2
-  exec claude "${YOLO[@]}" --resume "$resume_id" "$@"
+  exec claude "${YOLO[@]}" "${MODEL[@]}" --resume "$resume_id" "$@"
 fi
 echo "claude-here: no resumable conversation in $PWD — starting fresh" >&2
-exec claude "${YOLO[@]}" "$@"
+exec claude "${YOLO[@]}" "${MODEL[@]}" "$@"

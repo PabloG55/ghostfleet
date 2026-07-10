@@ -29,7 +29,11 @@ sleep "$delay"
 
 # only send if the session is still around
 if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
-  tmux -L "$SOCK" send-keys -t "$SESSION" -l "$MSG"
+  # bracketed paste (multi-line safe) + a beat before Enter, else the Enter lands
+  # inside the paste instead of submitting the turn
+  tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
+  tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
+  sleep "${CLAUDE_FLEET_SUBMIT_DELAY:-0.5}"
   tmux -L "$SOCK" send-keys -t "$SESSION" Enter
 fi
 rm -f "$MARK" 2>/dev/null

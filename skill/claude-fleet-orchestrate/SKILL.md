@@ -18,10 +18,11 @@ Bash tool:
   a worker a task/brief.
 - **`fleet-read <session> [n]`** — print the last `n` (default 1) assistant
   messages from that session, so you can see how a worker is doing.
-- **`fleet-spawn <name> [--branch <b>] [--from <ref>] [--prompt "<task>"]`** —
+- **`fleet-spawn <name> [--branch <b>] [--from <ref>] [--model <m>] [--prompt "<task>"]`** —
   create a git worktree off the current repo and start a fresh worker session in
   it (in the background), optionally handing it an initial task. Use to spin up a
-  new parallel worker on its own branch.
+  new parallel worker on its own branch. Pass `--model opus` for heavier tracks
+  (workers otherwise use the account's default model).
 
 These are also exposed as MCP tools (`fleet_list`, `fleet_send`, `fleet_read`,
 `fleet_spawn`) if the claude-fleet MCP server is registered — prefer those when
