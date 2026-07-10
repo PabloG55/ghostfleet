@@ -72,15 +72,18 @@ if [ "$EVENT" = "Stop" ] || [ "$EVENT" = "Notification" ]; then
   tn="$(command -v terminal-notifier 2>/dev/null || true)"
   HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
   JUMP="$HOOK_DIR/../bin/fleet-jump"
-  if [ -n "$tn" ] && [ -x "$JUMP" ]; then
-    # clickable: clicking focuses the window + lands you on MASTER (you coordinate
-    # everything through the lead — you only ever talk to master)
+  # Default to osascript — it posts via a system app that's already authorized, so
+  # it reliably shows on modern macOS. terminal-notifier is opt-in
+  # (CLAUDE_FLEET_NOTIFIER=terminal-notifier) because it can be *clicked* to jump to
+  # master — but macOS must authorize it first (System Settings → Notifications),
+  # which old versions often never register for.
+  if [ "${CLAUDE_FLEET_NOTIFIER:-osascript}" = "terminal-notifier" ] && [ -n "$tn" ] && [ -x "$JUMP" ]; then
     zs="${ZELL//\'/}"
     "$tn" -title "$title" -subtitle "$sub" -message "${SLOT:+$SLOT · }click → master" \
       -sound "$sound" -group "cf-$SESSION" \
       -execute "$JUMP '$zs' 'master' '${CLAUDE_FLEET_SOCK:-}'" >/dev/null 2>&1 &
   else
-    msg="${SLOT:+$SLOT — }$sub"; msg="${msg//\"/}"; ttl="${title//\"/}"
+    msg="${SLOT:+$SLOT — }$sub"; msg="${msg//\"/}"; msg="${msg//\\/}"; ttl="${title//\"/}"
     ( osascript -e "display notification \"$msg\" with title \"$ttl\" sound name \"$sound\"" >/dev/null 2>&1 & )
   fi
 fi
