@@ -44,7 +44,14 @@ When a session needs you or finishes, you also get a named macOS notification (c
 ## Keys
 
 **In the grid:** `↑↓←→` / `hjkl` move · `⏎` enter the selected session · `n` new session ·
-`q` quit to the shell.
+`s` schedule a message · `x` kill session · `q` quit to the shell.
+
+**Schedule a message** (`s` on a card): type a time and it sends a message into that session then —
+great for resuming when your usage limit resets. Examples: `3:50am`, `15:30`, `+2h`. Message defaults
+to `continue`; customize with `<time> | <message>`. A scheduled card shows `@3:50a`. Under the hood a
+detached waiter runs `tmux send-keys` at that time, keeping the Mac awake with `caffeinate`.
+*Caveat:* fires only if the machine is awake then — for a closed-lid guarantee also run
+`sudo pmset schedule wake "MM/dd/yy HH:mm:ss"`.
 
 **Inside a session:** everything goes to Claude as normal. To pop back to the grid, detach:
 `Ctrl-a` then `g` (mnemonic: **g**rid) — or `Ctrl-a d`. The session keeps running.

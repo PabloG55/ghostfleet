@@ -23,9 +23,10 @@ command -v tmux >/dev/null 2>&1 || echo "! tmux not found — the grid needs it.
 mkdir -p "$BIN_DIR"
 chmod +x "$REPO"/hooks/*.sh "$REPO"/bin/*
 
-ln -sf "$REPO/bin/claude-fleet" "$BIN_DIR/claude-fleet"
-ln -sf "$REPO/bin/claude-here"  "$BIN_DIR/claude-here"
-echo "✓ linked claude-fleet, claude-here -> $BIN_DIR"
+ln -sf "$REPO/bin/claude-fleet"   "$BIN_DIR/claude-fleet"
+ln -sf "$REPO/bin/claude-here"    "$BIN_DIR/claude-here"
+ln -sf "$REPO/bin/fleet-schedule" "$BIN_DIR/fleet-schedule"
+echo "✓ linked claude-fleet, claude-here, fleet-schedule -> $BIN_DIR"
 
 # --- wire hooks into every Claude config dir (profile) ----------------------
 # Each profile (work=~/.claude, personal=~/.claude-personal, …) has its OWN

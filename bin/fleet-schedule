@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# fleet-schedule <socket> <session> <target-epoch> <message...>
+#
+# Waits until <target-epoch>, then types <message> (default "continue") + Enter
+# into the tmux <session> on <socket>. Meant to be spawned detached by the grid
+# (press `s` on a card), but usable standalone too.
+#
+# Keeps the Mac awake while waiting (caffeinate) so the send actually fires.
+# CAVEAT: reliable only if the machine is awake at the target time. caffeinate
+# prevents *idle* sleep; a closed lid can still sleep. For a hard guarantee also:
+#   sudo pmset schedule wake "MM/dd/yy HH:mm:ss"
+set -uo pipefail
+
+SOCK="${1:?socket}"; SESSION="${2:?session}"; TARGET="${3:?target-epoch}"; shift 3
+MSG="${*:-continue}"
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+MARK="$FLEET_DIR/$SESSION.sched"
+
+now="$(date +%s)"
+delay=$(( TARGET - now )); [ "$delay" -lt 0 ] && delay=0
+
+# keep awake (idle-sleep only) for the lifetime of this waiter
+command -v caffeinate >/dev/null 2>&1 && caffeinate -i -w "$$" &
+
+sleep "$delay"
+
+# only send if the session is still around
+if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
+  tmux -L "$SOCK" send-keys -t "$SESSION" -l "$MSG"
+  tmux -L "$SOCK" send-keys -t "$SESSION" Enter
+fi
+rm -f "$MARK" 2>/dev/null

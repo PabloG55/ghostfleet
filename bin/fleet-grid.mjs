@@ -19,7 +19,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const HOME = os.homedir();
 // Everything is scoped to one Claude config dir (= one account/profile).
@@ -151,7 +152,12 @@ function gather() {
     else status = 'idle';                                  // brand new, nothing yet
     const ageBase = tmt || st?.ts || 0;
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
-    return { name: s.name, folder, branch, status, age, msg: lastAssistant(transcript), attached: s.attached };
+    let sched = null;
+    try {
+      const mk = JSON.parse(fs.readFileSync(path.join(FLEET_DIR, s.name + '.sched'), 'utf8'));
+      if (mk && mk.at > nowS) sched = mk;
+    } catch {}
+    return { name: s.name, folder, branch, status, age, msg: lastAssistant(transcript), attached: s.attached, sched };
   });
 }
 
@@ -169,6 +175,41 @@ function killSession(name) {
       if (o.slot === name && (!o.zellij || o.zellij === Z)) fs.unlinkSync(path.join(FLEET_DIR, f));
     } catch {}
   }
+}
+
+// ── scheduling (send a message to a session at a time) ──────────────────────
+function parseWhen(str) {
+  const s = String(str || '').trim().toLowerCase();
+  let m;
+  if ((m = s.match(/^\+(\d+)\s*([hm])$/)))            // +2h, +30m
+    return Math.floor(Date.now() / 1000) + (+m[1]) * (m[2] === 'h' ? 3600 : 60);
+  if ((m = s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/))) {   // 3:50am, 15:30, 9
+    let h = +m[1]; const min = m[2] ? +m[2] : 0; const ap = m[3];
+    if (ap === 'pm' && h < 12) h += 12;
+    if (ap === 'am' && h === 12) h = 0;
+    if (h > 23 || min > 59) return null;
+    const d = new Date(); d.setHours(h, min, 0, 0);
+    let t = Math.floor(d.getTime() / 1000);
+    if (t <= Math.floor(Date.now() / 1000)) t += 86400;        // already passed -> tomorrow
+    return t;
+  }
+  return null;
+}
+function clockLabel(epoch) {
+  const d = new Date(epoch * 1000);
+  let h = d.getHours(); const m = d.getMinutes();
+  const ap = h >= 12 ? 'p' : 'a'; h = h % 12 || 12;
+  return `${h}:${String(m).padStart(2, '0')}${ap}`;
+}
+function schedule(session, whenStr, msg) {
+  const at = parseWhen(whenStr);
+  if (!at) return false;
+  try { fs.writeFileSync(path.join(FLEET_DIR, session + '.sched'), JSON.stringify({ at, msg })); } catch {}
+  try {
+    const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-schedule');
+    spawn(bin, [SOCK, session, String(at), msg], { detached: true, stdio: 'ignore' }).unref();
+  } catch { return false; }
+  return true;
 }
 
 // ── text helpers ────────────────────────────────────────────────────────
@@ -195,7 +236,8 @@ function cardLines(card, selected) {
   const title = clip(`─ ${card.name} `, CW);
   const top = `╭${title}${'─'.repeat(Math.max(0, CW - vis(title)))}╮`;
   const idle = card.age == null ? '' : (card.status === 'working' ? `busy ${humanAge(card.age)}` : `${humanAge(card.age)} ago`);
-  const l1 = `│ ${padEndV(twoCol(meta.label, idle, CW - 2), CW - 2)} │`;
+  const right = card.sched ? `@${clockLabel(card.sched.at)}` : idle;   // @ = scheduled send
+  const l1 = `│ ${padEndV(twoCol(meta.label, right, CW - 2), CW - 2)} │`;
   const l2 = `│ ${padEndV(card.branch || card.folder, CW - 2)} │`;
   const l3 = `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
   const bot = `╰${'─'.repeat(CW)}╯`;
@@ -269,6 +311,8 @@ let items = [];              // grid items: cards + {new:true}
 let checkouts = [];
 let pickSel = 0;
 let confirmKill = null;      // session name awaiting kill confirmation
+let schedFor = null;         // session name being scheduled
+let schedInput = '';         // typed "<time> | <message>" buffer
 
 function buildItems() {
   cards = gather();
@@ -303,7 +347,7 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · x kill · q quit${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · s sched · x kill · q quit${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -326,7 +370,26 @@ function renderPicker() {
   out(buf);
 }
 
-function render() { mode === 'grid' ? renderGrid() : renderPicker(); }
+function renderSchedule() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}schedule a message${C.reset} ${C.dim}→ ${schedFor}${C.reset}\x1b[K\n\x1b[K\n`;
+  const parts = schedInput.split('|');
+  const at = parseWhen((parts[0] || '').trim());
+  const msg = (parts[1] || 'continue').trim() || 'continue';
+  buf += ` send at:  ${C.bold}${schedInput}${C.reset}▏\x1b[K\n`;
+  buf += at
+    ? ` ${C.green}→ ${clockLabel(at)}  (${new Date(at * 1000).toLocaleString()})${C.reset}\x1b[K\n`
+    : ` ${C.dim}→ enter a time${C.reset}\x1b[K\n`;
+  buf += ` ${C.dim}message:${C.reset} ${msg}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} examples: 3:50am · 15:30 · +2h   ·   customize text with  <time> | <message>${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ schedule · esc cancel${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+function render() {
+  if (mode === 'grid') renderGrid();
+  else if (mode === 'picker') renderPicker();
+  else renderSchedule();
+}
 
 // ── input ───────────────────────────────────────────────────────────────
 function cleanup() {
@@ -362,18 +425,42 @@ function onKey(key) {
     else if (key === '\x1b[D' || key === 'h') moveGrid('left');
     else if (key === 'n') { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
     else if (key === 'x' || key === 'X') { const it = items[sel]; if (it?.card) confirmKill = it.card.name; }
+    else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
     else if (key === '\r' || key === '\n') {
       const it = items[sel];
       if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
       else if (it?.card) return finish(`attach${US}${it.card.name}`);
     }
     render();
-  } else { // picker
+  } else if (mode === 'picker') {
     if (key === '\x1b' || key === '\x03' || key === 'q') { mode = 'grid'; render(); return; }
     if (key === '\x1b[A' || key === 'k') pickSel = Math.max(0, pickSel - 1);
     else if (key === '\x1b[B' || key === 'j') pickSel = Math.min(checkouts.length - 1, pickSel + 1);
     else if ((key === '\r' || key === '\n') && checkouts.length) return finish(`new${US}${checkouts[pickSel]}`);
     render();
+  } else if (mode === 'schedule') {
+    if (key === '\x1b' || key === '\x03') { mode = 'grid'; schedFor = null; render(); return; }
+    else if (key === '\r' || key === '\n') {
+      const parts = schedInput.split('|');
+      const msg = (parts[1] || 'continue').trim() || 'continue';
+      if (schedule(schedFor, (parts[0] || '').trim(), msg)) { mode = 'grid'; schedFor = null; buildItems(); }
+      // invalid time -> stay in schedule mode so they can fix it
+    } else if (key === '\x7f' || key === '\b') {
+      schedInput = schedInput.slice(0, -1);
+    } else if (key.length === 1 && key >= ' ') {
+      schedInput += key;
+    }
+    render();
+  }
+}
+
+// ── debug: parse a time string and exit ───────────────────────────────────
+{
+  const wi = process.argv.indexOf('--when');
+  if (wi !== -1) {
+    const at = parseWhen(process.argv[wi + 1]);
+    console.log(at ? `${at}  -> ${clockLabel(at)}  (${new Date(at * 1000).toLocaleString()})` : 'null (unparseable)');
+    process.exit(0);
   }
 }
 
