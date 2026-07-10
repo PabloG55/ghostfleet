@@ -18,6 +18,14 @@ Bash tool:
   a worker a task/brief.
 - **`fleet-read <session> [n]`** — print the last `n` (default 1) assistant
   messages from that session, so you can see how a worker is doing.
+- **`fleet-spawn <name> [--branch <b>] [--from <ref>] [--prompt "<task>"]`** —
+  create a git worktree off the current repo and start a fresh worker session in
+  it (in the background), optionally handing it an initial task. Use to spin up a
+  new parallel worker on its own branch.
+
+These are also exposed as MCP tools (`fleet_list`, `fleet_send`, `fleet_read`,
+`fleet_spawn`) if the claude-fleet MCP server is registered — prefer those when
+available; otherwise call the shell commands via Bash.
 
 ## How to use it
 
@@ -41,8 +49,11 @@ Bash tool:
 
 ```bash
 fleet-list
+# dispatch to existing workers:
 fleet-send widgetco-1 "Implement the policy PDF engine in lib/policy/generation/*. Brief: … Done when: `pnpm test` passes for the generation module."
 fleet-send widgetco-2 "Build the app shell + UI primitives in apps/web + packages/ui. Brief: … Done when: the shell renders and Clerk auth wraps it."
+# or spin up a brand-new worker on its own worktree/branch, briefed in one shot:
+fleet-spawn a4 --branch feat/notifications --prompt "Build the email notification jobs. Brief: … Done when: …"
 # … later …
 fleet-read widgetco-1 3
 ```

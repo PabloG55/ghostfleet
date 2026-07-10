@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# fleet-spawn <name> [--branch <branch>] [--from <base-ref>] [--prompt "<task>"]
+#
+# Create a git worktree off the current repo and start a FRESH parallel fleet
+# session in it, in the background (no attach). Optionally hand it an initial
+# prompt. Lets a "lead" session spin up workers on new branches/worktrees.
+#
+#   name    session + worktree dir name (worktree = <repo-parent>/<name>)
+#   --branch  branch to use (default: <name>); created if it doesn't exist
+#   --from    base ref for a new branch (default: current HEAD)
+#   --prompt  initial task to send once the session boots (~7s later)
+set -uo pipefail
+
+NAME=""; BRANCH=""; FROM=""; PROMPT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --branch) BRANCH="${2:?}"; shift 2 ;;
+    --from)   FROM="${2:?}";   shift 2 ;;
+    --prompt) PROMPT="${2:?}"; shift 2 ;;
+    -*) echo "fleet-spawn: unknown option $1" >&2; exit 1 ;;
+    *)  [ -z "$NAME" ] && { NAME="$1"; shift; } || { echo "fleet-spawn: unexpected arg $1" >&2; exit 1; } ;;
+  esac
+done
+[ -n "$NAME" ] || { echo "fleet-spawn: usage: fleet-spawn <name> [--branch b] [--from ref] [--prompt \"...\"]" >&2; exit 1; }
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+[ -n "$SOCK" ] || { echo "fleet-spawn: no fleet socket (run inside a fleet session, or export CLAUDE_FLEET_SOCK)" >&2; exit 1; }
+command -v git  >/dev/null 2>&1 || { echo "fleet-spawn: git required"  >&2; exit 1; }
+command -v tmux >/dev/null 2>&1 || { echo "fleet-spawn: tmux required" >&2; exit 1; }
+
+GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
+  || { echo "fleet-spawn: not inside a git repo" >&2; exit 1; }
+WT="$(dirname "$GITROOT")/$NAME"       # sibling worktree, matches the <proj>/<name> layout
+[ -n "$BRANCH" ] || BRANCH="$NAME"
+CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+# create the worktree (reuse if it already exists; new branch unless it exists)
+if [ -e "$WT" ]; then
+  echo "fleet-spawn: $WT already exists — reusing it" >&2
+elif git -C "$GITROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  git -C "$GITROOT" worktree add "$WT" "$BRANCH" >&2 || exit 1
+else
+  git -C "$GITROOT" worktree add "$WT" -b "$BRANCH" ${FROM:+"$FROM"} >&2 || exit 1
+fi
+
+# unique session name on this fleet's socket
+name="$NAME"; i=2
+while tmux -L "$SOCK" has-session -t "$name" 2>/dev/null; do name="$NAME~$i"; i=$((i + 1)); done
+
+# fresh session in the worktree, background (lead keeps working)
+tmux -L "$SOCK" new-session -d -s "$name" -c "$WT" \
+  -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
+  "exec claude-here \"$name\""
+echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)"
+
+# optional initial prompt — send once Claude has booted (~7s), via the scheduler
+if [ -n "$PROMPT" ]; then
+  nohup fleet-schedule "$SOCK" "$name" "$(( $(date +%s) + 7 ))" "$PROMPT" >/dev/null 2>&1 &
+  echo "fleet-spawn: will send the initial prompt in ~7s"
+fi

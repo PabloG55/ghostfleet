@@ -36,18 +36,22 @@ briefs to `widgetco-1` / `widgetco-2` worktrees). Three commands, callable from 
 - **`fleet-send <session> "<prompt>"`** — type a prompt into that session's Claude and submit it
   (multi-line safe via bracketed paste; warns if the target is mid-turn).
 - **`fleet-read <session> [n]`** — print the sibling's last `n` assistant messages.
+- **`fleet-spawn <name> [--branch b] [--prompt "…"]`** — create a git **worktree** off the current
+  repo and start a fresh worker session in it (background), optionally briefed in one shot.
 
 ```bash
 fleet-list
 fleet-send widgetco-1 "Implement the policy PDF engine in lib/policy/generation/*. Done when tests pass."
-fleet-send widgetco-2 "Build the app shell + UI primitives. Done when the shell renders."
+fleet-spawn a4 --branch feat/notifications --prompt "Build the email notification jobs. Done when …"
 fleet-read widgetco-1 3     # check progress
 ```
 
-The installed **`claude-fleet-orchestrate` skill** tells a lead session these exist, so you can just
-say "dispatch these briefs to the other worktrees." Each session knows its fleet via
-`CLAUDE_FLEET_SOCK`. Prompts must be self-contained (siblings don't share your context), and only
-sessions in the *same* fleet are reachable. (A future MCP wrapper could expose these as native tools.)
+These are also exposed as **MCP tools** (`fleet_list` / `fleet_send` / `fleet_read` / `fleet_spawn`)
+via a dependency-free stdio server (`mcp/fleet-mcp.mjs`) that `install.sh` registers in each config
+dir — so a lead session can call them as structured tool-calls, not just Bash. The installed
+**`claude-fleet-orchestrate` skill** tells a lead these exist, so you can just say "spin up a worker
+for X and brief it." Each session knows its fleet via `CLAUDE_FLEET_SOCK`; prompts must be
+self-contained (siblings don't share your context); only sessions in the *same* fleet are reachable.
 
 ## How it works
 
