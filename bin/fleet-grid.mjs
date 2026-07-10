@@ -22,14 +22,17 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 
 const HOME = os.homedir();
-const FLEET_DIR = process.env.CLAUDE_FLEET_DIR || path.join(HOME, '.claude', 'fleet');
-const PROJECTS = path.join(HOME, '.claude', 'projects');
+// Everything is scoped to one Claude config dir (= one account/profile).
+const CFG = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
+const FLEET_DIR = process.env.CLAUDE_FLEET_DIR || path.join(CFG, 'fleet');
+const PROJECTS = path.join(CFG, 'projects');
+const PROFILE = process.env.CLAUDE_FLEET_PROFILE || 'work';
 const US = '\x1f'; // unit separator — non-whitespace field delimiter
 
 const SOCK = process.argv[2] || 'cf-default';
 const CONF = process.argv[3] && !process.argv[3].startsWith('--') ? process.argv[3] : null;
 const PLAIN = process.argv.includes('--plain');
-const Z = SOCK.replace(/^cf-/, '');
+const Z = process.env.CLAUDE_FLEET_SCOPE || SOCK.replace(/^cf-/, '');
 
 // ── colors ────────────────────────────────────────────────────────────────
 const C = {
@@ -281,7 +284,7 @@ function renderGrid() {
   const work = cards.filter(c => c.status === 'working').length;
   const ready = cards.filter(c => c.status === 'ready').length;
   let buf = '\x1b[H';
-  const header = ` ${C.bold}claude-fleet${C.reset} ${C.dim}[${Z}]${C.reset}   ` +
+  const header = ` ${C.bold}claude-fleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}`;
   buf += header + '\x1b[K\n';
   if (confirmKill)

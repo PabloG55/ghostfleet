@@ -8,7 +8,9 @@
 #
 # Must stay fast and never fail the session: it always exits 0.
 
-FLEET_DIR="${CLAUDE_FLEET_DIR:-$HOME/.claude/fleet}"
+# Status lives under the ACTIVE config dir, so work and personal profiles
+# (CLAUDE_CONFIG_DIR=~/.claude vs ~/.claude-personal) stay separate.
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 
 # jq is required to parse the payload; if it's missing, do nothing quietly.
 command -v jq >/dev/null 2>&1 || exit 0

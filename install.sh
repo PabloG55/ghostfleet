@@ -8,44 +8,48 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLAUDE_DIR="$HOME/.claude"
-SETTINGS="$CLAUDE_DIR/settings.json"
 BIN_DIR="${CLAUDE_FLEET_BIN:-$HOME/.local/bin}"
 HOOK="$REPO/hooks/fleet-event.sh"
 
 echo "claude-fleet installer"
 echo "  repo:     $REPO"
 echo "  bin dir:  $BIN_DIR"
-echo "  settings: $SETTINGS"
 echo
 
 command -v jq   >/dev/null 2>&1 || { echo "error: jq is required (brew install jq)"; exit 1; }
 command -v node >/dev/null 2>&1 || { echo "error: node is required (the v2 grid is a Node TUI)"; exit 1; }
 command -v tmux >/dev/null 2>&1 || echo "! tmux not found — the grid needs it. Install: brew install tmux"
 
-mkdir -p "$CLAUDE_DIR/fleet" "$BIN_DIR"
+mkdir -p "$BIN_DIR"
 chmod +x "$REPO"/hooks/*.sh "$REPO"/bin/*
 
 ln -sf "$REPO/bin/claude-fleet" "$BIN_DIR/claude-fleet"
 ln -sf "$REPO/bin/claude-here"  "$BIN_DIR/claude-here"
 echo "✓ linked claude-fleet, claude-here -> $BIN_DIR"
 
-# --- wire hooks into settings.json ------------------------------------------
-[ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
-cp "$SETTINGS" "$SETTINGS.bak.$(date +%Y%m%d%H%M%S)"
-tmp="$(mktemp)"
-jq --arg hook "$HOOK" '
-  def entry: [ { matcher: "", hooks: [ { type: "command", command: $hook } ] } ];
-  .hooks = ((.hooks // {}) + {
-    Notification:     entry,
-    Stop:             entry,
-    UserPromptSubmit: entry,
-    SessionStart:     entry,
-    SessionEnd:       entry
-  })
-' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
-echo "✓ wired hooks (Notification, Stop, UserPromptSubmit, SessionStart, SessionEnd)"
-echo "  (previous settings backed up to $SETTINGS.bak.*)"
+# --- wire hooks into every Claude config dir (profile) ----------------------
+# Each profile (work=~/.claude, personal=~/.claude-personal, …) has its OWN
+# settings.json, so the status/notification hooks must be wired into each.
+wire_hooks() {
+  local dir="$1" settings="$1/settings.json" tmp
+  mkdir -p "$dir/fleet"
+  [ -f "$settings" ] || echo '{}' > "$settings"
+  cp "$settings" "$settings.bak.$(date +%Y%m%d%H%M%S)"
+  tmp="$(mktemp)"
+  jq --arg hook "$HOOK" '
+    def entry: [ { matcher: "", hooks: [ { type: "command", command: $hook } ] } ];
+    .hooks = ((.hooks // {}) + {
+      Notification: entry, Stop: entry, UserPromptSubmit: entry,
+      SessionStart: entry, SessionEnd: entry })
+  ' "$settings" > "$tmp" && mv "$tmp" "$settings"
+  echo "✓ wired hooks into $settings (backup saved)"
+}
+is_config_dir() { [ -f "$1/settings.json" ] || [ -d "$1/projects" ] || [ -f "$1/.claude.json" ]; }
+
+wire_hooks "$HOME/.claude"                       # work (default)
+for d in "$HOME"/.claude-*; do                   # personal + any other profiles
+  [ -d "$d" ] && is_config_dir "$d" && wire_hooks "$d"
+done
 
 # --- PATH hint ---------------------------------------------------------------
 case ":$PATH:" in
@@ -64,6 +68,7 @@ if [ -d "$HOME/.config/zellij" ]; then
 fi
 
 echo
-echo "Done. Launch a project's fleet with one pane:"
-echo "    zellij --layout fleet attach -c acme     # then press 'n' to add a session"
-echo "Or just run  claude-fleet  inside any zellij pane."
+echo "Done. In a zellij pane:"
+echo "    claude-fleet            # work profile   (~/.claude)"
+echo "    claude-fleet personal   # personal       (~/.claude-personal)"
+echo "Then press 'n' to add a session. (Layout: zellij --layout fleet attach -c <project>.)"

@@ -80,12 +80,39 @@ sessions.
 
 Prefer no layout? Just run `claude-fleet` in any zellij pane.
 
+## Profiles (work vs personal accounts)
+
+Claude Code keeps each account in its own config dir (`CLAUDE_CONFIG_DIR`) — that dir holds
+the login, `settings.json`, `projects/` (transcripts) and the fleet's `fleet/` status. A fleet
+is pinned to one profile, so work and personal never mix:
+
+```bash
+claude-fleet            # work profile   -> ~/.claude
+claude-fleet personal   # personal       -> ~/.claude-personal
+claude-fleet <name>     # any profile    -> ~/.claude-<name>
+```
+
+Each profile gets its own tmux socket (`cf-<profile>-<session>`), its own grid, reads its own
+`projects/`, and launches sessions with that `CLAUDE_CONFIG_DIR`. The header shows which one
+you're in: `claude-fleet [personal:widgetco]`. `install.sh` wires the status/notification hooks
+into every config dir it finds (`~/.claude` and `~/.claude-*`), so both accounts report status.
+
+Tip — mirror your shell aliases:
+
+```bash
+alias fleet='claude-fleet'            # work
+alias fleet-personal='claude-fleet personal'
+```
+
 ## Config
 
-| Env var             | Default            | Meaning                                            |
-| ------------------- | ------------------ | -------------------------------------------------- |
-| `CLAUDE_FLEET_DIR`  | `~/.claude/fleet`  | Where per-session status files live.               |
-| `CLAUDE_FLEET_SCOPE`| `$ZELLIJ_SESSION_NAME` | Override the fleet scope / tmux socket name.   |
+| Env var               | Default                     | Meaning                                          |
+| --------------------- | --------------------------- | ------------------------------------------------ |
+| `CLAUDE_CONFIG_DIR`   | `~/.claude`                 | The profile/account dir (set by the profile arg).|
+| `CLAUDE_FLEET_PROFILE`| `work`                      | Profile name shown in the header.                |
+| `CLAUDE_FLEET_DIR`    | `$CLAUDE_CONFIG_DIR/fleet`  | Where per-session status files live.             |
+| `CLAUDE_FLEET_SCOPE`  | `$ZELLIJ_SESSION_NAME`      | Fleet scope / tmux socket + checkout root.        |
+| `CLAUDE_FLEET_YOLO`   | `1`                         | `0` to require permission prompts in sessions.    |
 
 `claude-fleet --plain` prints a one-shot, non-interactive table (handy for scripts).
 

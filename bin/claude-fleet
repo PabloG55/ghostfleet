@@ -26,8 +26,29 @@ CONF="$REPO/tmux/cf.tmux.conf"
 command -v node  >/dev/null 2>&1 || { echo "claude-fleet: node is required"; exit 1; }
 command -v tmux  >/dev/null 2>&1 || { echo "claude-fleet: tmux is required (brew install tmux)"; exit 1; }
 
+# --- profile: which Claude config dir / account this fleet drives ------------
+#   claude-fleet            -> work     (~/.claude)
+#   claude-fleet personal   -> personal (~/.claude-personal)
+#   claude-fleet <name>     -> ~/.claude-<name>
+PROFILE="work"
+case "${1:-}" in
+  ""|--*) ;;                 # no profile given (or the arg is a flag like --plain)
+  *) PROFILE="$1"; shift ;;
+esac
+case "$PROFILE" in
+  work|default) PROFILE="work"; CFG_DIR="$HOME/.claude" ;;
+  *)            CFG_DIR="$HOME/.claude-$PROFILE" ;;
+esac
+# Everything downstream (grid, hooks, spawned sessions) keys off this config dir.
+export CLAUDE_CONFIG_DIR="$CFG_DIR"
+export CLAUDE_FLEET_DIR="$CFG_DIR/fleet"
+export CLAUDE_FLEET_PROFILE="$PROFILE"
+mkdir -p "$CFG_DIR/fleet" 2>/dev/null
+
 Z="${ZELLIJ_SESSION_NAME:-${CLAUDE_FLEET_SCOPE:-default}}"
-SOCK="cf-$Z"
+export CLAUDE_FLEET_SCOPE="$Z"
+# work keeps the plain socket (no churn to existing fleets); others are namespaced.
+if [ "$PROFILE" = "work" ]; then SOCK="cf-$Z"; else SOCK="cf-$PROFILE-$Z"; fi
 US=$'\x1f'
 TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
 
@@ -52,7 +73,7 @@ while true; do
       base="$(basename "$cwd")"
       name="$base"; i=2
       while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
-      TM new-session -d -s "$name" -c "$cwd" "exec claude-here \"$name\""
+      TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" "exec claude-here \"$name\""
       TM attach -t "$name" || true
       ;;
   esac

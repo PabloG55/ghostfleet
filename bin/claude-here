@@ -10,8 +10,8 @@
 #   slot  a stable per-tab label (e.g. "claude 2") recorded by the hook so the
 #         exact session can be matched back. Optional; falls back to cwd.
 
-FLEET_DIR="${CLAUDE_FLEET_DIR:-$HOME/.claude/fleet}"
-PROJECTS="$HOME/.claude/projects"
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+PROJECTS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
 
 slot=""
 if [ $# -gt 0 ] && [ "$1" != "--" ]; then
