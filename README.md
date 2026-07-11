@@ -110,8 +110,9 @@ back out of the grid / master / projects, mirroring the in-session detach. `q` d
 Node screens.
 
 **Projects:** `↑↓←→` / `hjkl` move · `⏎` open (straight into that project's **Master Claude**) ·
-`x` remove a project from the list (its sessions + history are left untouched — re-add it any time) ·
-`q` / `` ` `` quit.
+`s` schedule a message to that project's **master** (great for "continue at 3am when the limit
+resets" — the card then shows `@3:50a`) · `x` remove a project from the list (its sessions + history
+are left untouched — re-add it any time) · `q` / `` ` `` quit.
 
 **In master:** `C-a s` jumps to the **session grid**; `` ` `` (or `C-a g`) jumps back to **Projects**
 (master is the per-project hub — leaving it means you're done with that project for now). Leaving
@@ -122,8 +123,9 @@ the grid or a worker returns to master.
 `q` / `` ` `` step back to master. (The `master` session is its own hub — reach it with `C-a s`, so
 it doesn't show here.)
 
-**Schedule a message** (`s` on a card): type a time and it sends a message into that session then —
-great for resuming when your usage limit resets. Examples: `3:50am`, `15:30`, `+2h`. Message defaults
+**Schedule a message** (`s` on a grid card — or on a **project** card, which targets that project's
+`master`): type a time and it sends a message into that session then — great for resuming when your
+usage limit resets. Examples: `3:50am`, `15:30`, `+2h`. Message defaults
 to `continue`; customize with `<time> | <message>`. A scheduled card shows `@3:50a`. Under the hood a
 detached waiter runs `tmux send-keys` at that time, keeping the Mac awake with `caffeinate`.
 *Caveat:* fires only if the machine is awake then — for a closed-lid guarantee also run

@@ -198,11 +198,8 @@ function gather() {
     if (!busy && isParked(s.name)) status = 'parked';     // intentionally off (fleet-pause)
     const ageBase = tmt || st?.ts || 0;
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
-    let sched = null;
-    try {
-      const mk = JSON.parse(fs.readFileSync(path.join(FLEET_DIR, s.name + '.sched'), 'utf8'));
-      if (mk && mk.at > nowS) sched = mk;
-    } catch {}
+    const mk = readSched(s.name);                 // socket-namespaced marker
+    const sched = (mk && mk.at > nowS) ? mk : null;
     return { name: s.name, folder, branch, status, age, msg: lastAssistant(transcript), attached: s.attached, sched };
   });
 }
@@ -261,31 +258,38 @@ function clockLabel(epoch) {
   const ap = h >= 12 ? 'p' : 'a'; h = h % 12 || 12;
   return `${h}:${String(m).padStart(2, '0')}${ap}`;
 }
-function schedMarker(session) { return path.join(FLEET_DIR, session + '.sched'); }
-function readSched(session) {
-  try { return JSON.parse(fs.readFileSync(schedMarker(session), 'utf8')); } catch { return null; }
+// Markers are namespaced by socket (<sock>.<session>.sched) so the same-named
+// session — above all 'master', which EVERY project has — can't collide across
+// projects that share one profile's fleet dir. dir/sock default to this grid's
+// own project; the projects screen passes another project's fleet dir + socket so
+// it can schedule a message to that project's master.
+function schedMarker(session, dir = FLEET_DIR, sock = SOCK) { return path.join(dir, `${sock}.${session}.sched`); }
+function readSched(session, dir = FLEET_DIR, sock = SOCK) {
+  try { return JSON.parse(fs.readFileSync(schedMarker(session, dir, sock), 'utf8')); } catch { return null; }
 }
-function cancelSchedule(session) {
+function cancelSchedule(session, dir = FLEET_DIR, sock = SOCK) {
   // kill the waiter (it's a detached process-group leader, so -pid kills its
   // sleep + caffeinate too) and drop the marker.
-  const m = readSched(session);
+  const m = readSched(session, dir, sock);
   if (m && m.pid) {
     try { process.kill(-m.pid, 'SIGTERM'); } catch {}
     try { process.kill(m.pid, 'SIGTERM'); } catch {}
   }
-  try { fs.unlinkSync(schedMarker(session)); } catch {}
+  try { fs.unlinkSync(schedMarker(session, dir, sock)); } catch {}
 }
-function schedule(session, whenStr, msg) {
+function schedule(session, whenStr, msg, sock = SOCK, dir = FLEET_DIR, env = null) {
   const at = parseWhen(whenStr);
   if (!at) return false;
-  cancelSchedule(session);            // replace, never stack
+  cancelSchedule(session, dir, sock);       // replace, never stack
   let pid = 0;
   try {
     const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-schedule');
-    const child = spawn(bin, [SOCK, session, String(at), msg], { detached: true, stdio: 'ignore' });
+    const opts = { detached: true, stdio: 'ignore' };
+    if (env) opts.env = { ...process.env, ...env };   // target profile's config/fleet dir
+    const child = spawn(bin, [sock, session, String(at), msg], opts);
     pid = child.pid; child.unref();
   } catch { return false; }
-  try { fs.writeFileSync(schedMarker(session), JSON.stringify({ at, msg, pid })); } catch {}
+  try { fs.writeFileSync(schedMarker(session, dir, sock), JSON.stringify({ at, msg, pid })); } catch {}
   return true;
 }
 
@@ -703,6 +707,8 @@ function projectStatus(proj) {
 let pItems = [], pSel = 0;
 let pSelInit = false;        // apply --select preselect exactly once (first build)
 let pConfirmRemove = null;   // project name awaiting remove confirmation
+let pSchedFor = null;        // { proj, sock, dir } — master being scheduled from the projects screen
+let pSchedInput = '';        // typed "<time> | <message>" buffer for the above
 function pBuild() {
   pItems = [...readProjects().map(p => ({ project: p })), { add: true }];
   if (!pSelInit) {           // first build: land on the just-exited project, if any
@@ -724,6 +730,7 @@ function removeProject(name) {
   try { fs.writeFileSync(PROJECTS_CFG, kept.join('\n')); } catch {}
 }
 function pRender() {
+  if (pSchedFor) return pRenderSchedule();
   let buf = '\x1b[H';
   const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
   buf += ` ${C.bold}claude-fleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
@@ -743,19 +750,44 @@ function pRender() {
       else if (st.parked > 0 && st.parked === st.total) { line = `⏸ ${st.parked} parked`; color = C.grey; }
       else if (st.total > 0) { line = `${st.total} session${st.total > 1 ? 's' : ''} · ready`; color = C.green; }
       else { line = 'no sessions yet'; color = C.grey; }
+      // a message scheduled to this project's master shows as @<time> on the card
+      const sm = readSched('master', path.join(profileDir(it.project.profile), 'fleet'), sockOf(it.project));
+      if (sm && sm.at > Math.floor(Date.now() / 1000)) line += `  @${clockLabel(sm.at)}`;
       return boxCard(it.project.name, [it.project.profile, it.project.path.replace(HOME, '~'), line], color, sel);
     });
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ open · x remove · q/\` quit${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ open · s schedule · x remove · q/\` quit${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+// schedule a message to a project's master (mirrors the grid's renderSchedule)
+function pRenderSchedule() {
+  const { proj, dir, sock } = pSchedFor;
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}schedule a message${C.reset} ${C.dim}→ ${proj.name} · master${C.reset}\x1b[K\n`;
+  const existing = readSched('master', dir, sock);
+  if (existing && existing.at > Math.floor(Date.now() / 1000))
+    buf += ` ${C.yellow}currently: @${clockLabel(existing.at)} "${existing.msg}"${C.reset} ${C.dim}— a new time replaces it; empty + ⏎ cancels${C.reset}\x1b[K\n`;
+  else
+    buf += '\x1b[K\n';
+  const parts = pSchedInput.split('|');
+  const at = parseWhen((parts[0] || '').trim());
+  const msg = (parts[1] || 'continue').trim() || 'continue';
+  buf += ` send at:  ${C.bold}${pSchedInput}${C.reset}▏\x1b[K\n`;
+  buf += at
+    ? ` ${C.green}→ ${clockLabel(at)}  (${new Date(at * 1000).toLocaleString()})${C.reset}\x1b[K\n`
+    : ` ${C.dim}→ enter a time${C.reset}\x1b[K\n`;
+  buf += ` ${C.dim}message:${C.reset} ${msg}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} examples: 3:50am · 15:30 · +2h   ·   customize text with  <time> | <message>${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ schedule · empty + ⏎ clears a pending one · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function pMove(d) { const nc = cols(); let n = pSel; if (d === 'left') n--; else if (d === 'right') n++; else if (d === 'up') n -= nc; else if (d === 'down') n += nc; if (n >= 0 && n < pItems.length) pSel = n; }
 function onKeyProjects(key) {
   const mev = parseMouse(key);
   if (mev) {
-    if (mev.press && mev.button === 0 && !pConfirmRemove) {
+    if (mev.press && mev.button === 0 && !pConfirmRemove && !pSchedFor) {
       const idx = cardAt(mev.x, mev.y, cols());
       if (idx >= 0 && idx < pItems.length) {
         pSel = idx;
@@ -765,6 +797,23 @@ function onKeyProjects(key) {
       }
     }
     return;
+  }
+  if (pSchedFor) {                                   // typing a scheduled message to a master
+    if (key === '\x1b' || key === '\x03' || key === '\x60') { pSchedFor = null; pSchedInput = ''; }
+    else if (key === '\r' || key === '\n') {
+      const { proj, sock, dir } = pSchedFor;
+      const parts = pSchedInput.split('|');
+      const whenStr = (parts[0] || '').trim();
+      if (whenStr === '') { cancelSchedule('master', dir, sock); pSchedFor = null; pSchedInput = ''; }   // clear pending
+      else {
+        const msg = (parts[1] || 'continue').trim() || 'continue';
+        const env = { CLAUDE_CONFIG_DIR: profileDir(proj.profile), CLAUDE_FLEET_DIR: dir };
+        if (schedule('master', whenStr, msg, sock, dir, env)) { pSchedFor = null; pSchedInput = ''; }
+        // invalid time -> stay in schedule mode so they can fix it
+      }
+    } else if (key === '\x7f' || key === '\b') { pSchedInput = pSchedInput.slice(0, -1); }
+    else if (key.length === 1 && key >= ' ') { pSchedInput += key; }
+    pRender(); return;
   }
   if (pConfirmRemove) {
     if (key === 'y' || key === 'Y') { removeProject(pConfirmRemove); pConfirmRemove = null; pBuild(); }
@@ -777,6 +826,10 @@ function onKeyProjects(key) {
   else if (key === '\x1b[C' || key === 'l') pMove('right');
   else if (key === '\x1b[D' || key === 'h') pMove('left');
   else if (key === 'x' || key === 'X') { const it = pItems[pSel]; if (it?.project) pConfirmRemove = it.project.name; }
+  else if (key === 's' || key === 'S') {
+    const it = pItems[pSel];
+    if (it?.project) { pSchedFor = { proj: it.project, sock: sockOf(it.project), dir: path.join(profileDir(it.project.profile), 'fleet') }; pSchedInput = ''; }
+  }
   else if (key === '\r' || key === '\n') {
     const it = pItems[pSel];
     if (it?.add) return finish('addproject');
