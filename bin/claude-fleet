@@ -93,6 +93,10 @@ enter_master() {
     TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here master"
   TM source-file "$CONF" 2>/dev/null || true           # refresh bindings/status on the live server
   ensure_governor                                       # budget backpressure for this fleet (non-Claude, singleton)
+  # master's status-left names the project it leads + its live worker count
+  # (project/socket baked in as literals; #() runs the helper on the status interval)
+  TM set-option -t master status-left \
+    "#[bg=colour148,fg=colour16,bold] ● master · #($BIN_DIR/fleet-statusbar '$PROJECT' '$SOCK') #[bg=colour236,fg=colour148,nobold]▏" 2>/dev/null || true
   local marker; marker="$(TM display-message -t master -p '#{socket_path}' 2>/dev/null).goto"
   rm -f "$marker" 2>/dev/null                          # clear any stale signal
   TM attach -t master 2>/dev/null || true; _clear

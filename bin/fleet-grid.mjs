@@ -480,7 +480,7 @@ function render() {
 // ── input ───────────────────────────────────────────────────────────────
 function cleanup() {
   try { process.stdin.setRawMode(false); } catch {}
-  out('\x1b[?25h\x1b[?1049l');
+  out('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l');   // disable mouse, show cursor, leave alt-screen
 }
 function finish(result) {
   cleanup();
@@ -497,7 +497,36 @@ function moveGrid(d) {
   if (n >= 0 && n < items.length) sel = n;
 }
 
+// ── mouse (SGR) ─────────────────────────────────────────────────────────────
+// ESC [ < btn ; x ; y (M=press | m=release). Left click = btn 0.
+function parseMouse(key) {
+  const m = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(key);
+  return m ? { button: +m[1], x: +m[2], y: +m[3], press: m[4] === 'M' } : null;
+}
+// index of the card under terminal cell (x,y) on a header+card-grid screen, or -1.
+// layout (grid + projects): rows 1-2 = header; cards from row 3, each block 5 lines
+// + 1 blank (6 rows); cards CW+2 wide with a 1-col gap and 1 leading column.
+function cardAt(x, y, nc) {
+  const gy = y - 3; if (gy < 0 || gy % 6 >= 5) return -1;
+  const gx = x - 2; if (gx < 0 || gx % (CW + 3) >= CW + 2) return -1;
+  const col = Math.floor(gx / (CW + 3)); if (col >= nc) return -1;
+  return Math.floor(gy / 6) * nc + col;
+}
+
 function onKey(key) {
+  const mev = parseMouse(key);
+  if (mev) {
+    if (mode === 'grid' && mev.press && mev.button === 0 && !confirmKill) {
+      const idx = cardAt(mev.x, mev.y, cols());
+      if (idx >= 0 && idx < items.length) {
+        sel = idx;
+        const it = items[sel];
+        if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = false; mode = 'picker'; render(); }
+        else if (it?.card) return finish(`attach${US}${it.card.name}`);
+      }
+    }
+    return;   // swallow other mouse events (release, scroll, non-grid modes, misses)
+  }
   if (mode === 'grid') {
     if (confirmKill) {
       if (key === 'y' || key === 'Y') { killSession(confirmKill); confirmKill = null; buildItems(); }
@@ -717,6 +746,19 @@ function pRender() {
 }
 function pMove(d) { const nc = cols(); let n = pSel; if (d === 'left') n--; else if (d === 'right') n++; else if (d === 'up') n -= nc; else if (d === 'down') n += nc; if (n >= 0 && n < pItems.length) pSel = n; }
 function onKeyProjects(key) {
+  const mev = parseMouse(key);
+  if (mev) {
+    if (mev.press && mev.button === 0 && !pConfirmRemove) {
+      const idx = cardAt(mev.x, mev.y, cols());
+      if (idx >= 0 && idx < pItems.length) {
+        pSel = idx;
+        const it = pItems[pSel];
+        if (it?.add) return finish('addproject');
+        if (it?.project) return finish(`project${US}${it.project.name}`);
+      }
+    }
+    return;
+  }
   if (pConfirmRemove) {
     if (key === 'y' || key === 'Y') { removeProject(pConfirmRemove); pConfirmRemove = null; pBuild(); }
     else pConfirmRemove = null;
@@ -773,7 +815,7 @@ function onKeyAdd(key) {
 }
 
 // ── dispatch ────────────────────────────────────────────────────────────────
-out('\x1b[?1049h\x1b[?25l'); // alt-screen + hide cursor
+out('\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h'); // alt-screen + hide cursor + SGR mouse tracking
 process.stdin.setRawMode?.(true);
 process.stdin.resume();
 process.stdin.setEncoding('utf8');

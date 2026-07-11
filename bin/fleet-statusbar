@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# fleet-statusbar <project> <socket>
+#
+# Prints the master status-bar detail: "<project> · <n> running" where n is the
+# number of worker sessions (master excluded) live on <socket>. The master's
+# status-left runs this via tmux #(...) (set in bin/claude-fleet enter_master),
+# with project + socket baked in as literals so nothing has to be interpolated.
+proj="${1:-}"; sock="${2:-}"
+[ -n "$proj" ] || exit 0
+n=0
+[ -n "$sock" ] && n="$(tmux -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null | grep -vc '^master$')"
+if [ "${n:-0}" -gt 0 ]; then printf '%s · %s running' "$proj" "$n"; else printf '%s' "$proj"; fi
