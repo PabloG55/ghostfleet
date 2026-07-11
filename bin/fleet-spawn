@@ -1,24 +1,34 @@
 #!/usr/bin/env bash
-# fleet-spawn <name> [--branch <branch>] [--from <base-ref>] [--prompt "<task>"]
+# fleet-spawn <name> [--branch <b>] [--from <ref>] [--prompt "<task>"] [--reuse <wt>|--new]
 #
 # Create a git worktree off the current repo and start a FRESH parallel fleet
 # session in it, in the background (no attach). Optionally hand it an initial
 # prompt. Lets a "lead" session spin up workers on new branches/worktrees.
+#
+# REUSE BEFORE PROLIFERATE: if free worktrees already exist (idle, no session,
+# clean), creating yet another one is almost never what you want. So spawn will
+# STOP and list them rather than silently make a new one — reuse one with
+# --reuse, or say --new if you really want a fresh worktree. (See fleet-worktrees.)
 #
 #   name    session + worktree dir name (worktree = <repo-parent>/<name>)
 #   --branch  branch to use (default: <name>); created if it doesn't exist
 #   --from    base ref for a new branch (default: current HEAD)
 #   --prompt  initial task to send once the session boots (~7s later)
 #   --model   model for the new session (e.g. opus); default = account default
+#   --reuse   start the session in an EXISTING free worktree (name or path); no
+#             new worktree/branch — the branch comes from that worktree
+#   --new     force-create a new worktree even if free ones exist
 set -uo pipefail
 
-NAME=""; BRANCH=""; FROM=""; PROMPT=""; MODEL=""
+NAME=""; BRANCH=""; FROM=""; PROMPT=""; MODEL=""; REUSE=""; NEW=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --branch) BRANCH="${2:?}"; shift 2 ;;
     --from)   FROM="${2:?}";   shift 2 ;;
     --prompt) PROMPT="${2:?}"; shift 2 ;;
     --model)  MODEL="${2:?}";  shift 2 ;;
+    --reuse)  REUSE="${2:?}";  shift 2 ;;
+    --new)    NEW=1;           shift ;;
     -*) echo "fleet-spawn: unknown option $1" >&2; exit 1 ;;
     *)  [ -z "$NAME" ] && { NAME="$1"; shift; } || { echo "fleet-spawn: unexpected arg $1" >&2; exit 1; } ;;
   esac
@@ -33,29 +43,81 @@ command -v tmux >/dev/null 2>&1 || { echo "fleet-spawn: tmux required" >&2; exit
 GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
   || { echo "fleet-spawn: not inside a git repo" >&2; exit 1; }
 WT="$(dirname "$GITROOT")/$NAME"       # sibling worktree, matches the <proj>/<name> layout
+PARENT="$(dirname "$GITROOT")"
 [ -n "$BRANCH" ] || BRANCH="$NAME"
 CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
-# create the worktree (reuse if it already exists; new branch unless it exists)
-if [ -e "$WT" ]; then
+# who's live where — so we can tell free worktrees from occupied ones (same test
+# as fleet-worktrees: a worktree is FREE = no live session on it + clean tree).
+panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
+sess_for() {
+  local wt="$1" p s
+  while IFS=$'\t' read -r p s; do
+    [ -n "$p" ] || continue
+    case "$p" in "$wt"|"$wt"/*) echo "$s"; return ;; esac
+  done <<EOF
+$panes
+EOF
+}
+free_worktrees() {                     # "<basename> (<branch>, clean)" per free worktree
+  local first=1
+  git -C "$GITROOT" worktree list --porcelain 2>/dev/null | awk '
+    /^worktree /{ if(wt!=""&&!skip)print wt"\t"br; wt=substr($0,10); br="(detached)"; skip=0 }
+    /^branch / { b=$2; sub("refs/heads/","",b); br=b }
+    /^bare$/   { skip=1 }
+    /^$/       { if(wt!=""&&!skip){print wt"\t"br; wt=""} }
+    END        { if(wt!=""&&!skip)print wt"\t"br }
+  ' | while IFS=$'\t' read -r wt br; do
+        [ -n "$wt" ] || continue
+        [ "$first" = 1 ] && { first=0; continue; }                          # skip main checkout
+        [ -z "$(sess_for "$wt")" ] || continue                              # occupied
+        [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || continue # dirty -> not free
+        printf '%s (%s, clean)\n' "${wt##*/}" "$br"
+      done
+}
+
+# --- resolve the worktree: reuse an existing free one, or create a new one -----
+if [ -n "$REUSE" ]; then
+  case "$REUSE" in /*) WT="$REUSE" ;; *) WT="$PARENT/$REUSE" ;; esac
+  git -C "$GITROOT" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $WT" \
+    || { echo "fleet-spawn: '$REUSE' is not a worktree of this repo — see: fleet-worktrees" >&2; exit 1; }
+  s="$(sess_for "$WT")"
+  [ -z "$s" ] || { echo "fleet-spawn: worktree '$REUSE' is busy (session '$s'); pick a FREE one (fleet-worktrees)" >&2; exit 1; }
+  BRANCH="$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  echo "fleet-spawn: reusing worktree $WT (branch $BRANCH)" >&2
+elif [ -e "$WT" ]; then
   echo "fleet-spawn: $WT already exists — reusing it" >&2
-elif git -C "$GITROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
-  git -C "$GITROOT" worktree add "$WT" "$BRANCH" >&2 || exit 1
+  BRANCH="$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "$BRANCH")"
 else
-  # Base the new branch on a FRESH ref. If --from names a branch with a remote
-  # counterpart, fetch it and branch off the remote tip — so a new worktree never
-  # starts behind a stale local main (the footgun where workers begin N PRs behind).
-  BASE="$FROM"
-  if [ -n "$FROM" ]; then
-    remote="$(git -C "$GITROOT" config --get "branch.$FROM.remote" 2>/dev/null || echo origin)"
-    if git -C "$GITROOT" fetch --quiet "$remote" "$FROM" 2>/dev/null \
-       && git -C "$GITROOT" rev-parse --verify --quiet "refs/remotes/$remote/$FROM" >/dev/null; then
-      behind="$(git -C "$GITROOT" rev-list --count "$FROM..$remote/$FROM" 2>/dev/null || echo 0)"
-      [ "${behind:-0}" -gt 0 ] && echo "fleet-spawn: local $FROM was $behind commit(s) behind $remote/$FROM — basing $BRANCH on the fresh remote tip" >&2
-      BASE="$remote/$FROM"
+  # about to CREATE a new worktree — reuse a free one first if any exist (unless --new)
+  if [ "$NEW" != 1 ]; then
+    fw="$(free_worktrees)"
+    if [ -n "$fw" ]; then
+      { echo "fleet-spawn: free worktree(s) available — reuse one instead of making another:"
+        printf '%s\n' "$fw" | sed 's/^/  /'
+        echo "  Reuse:     fleet-spawn $NAME --reuse <worktree>"
+        echo "  Force new: fleet-spawn $NAME --new"; } >&2
+      exit 1
     fi
   fi
-  git -C "$GITROOT" worktree add "$WT" -b "$BRANCH" ${BASE:+"$BASE"} >&2 || exit 1
+  if git -C "$GITROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    git -C "$GITROOT" worktree add "$WT" "$BRANCH" >&2 || exit 1
+  else
+    # Base the new branch on a FRESH ref. If --from names a branch with a remote
+    # counterpart, fetch it and branch off the remote tip — so a new worktree never
+    # starts behind a stale local main (the footgun where workers begin N PRs behind).
+    BASE="$FROM"
+    if [ -n "$FROM" ]; then
+      remote="$(git -C "$GITROOT" config --get "branch.$FROM.remote" 2>/dev/null || echo origin)"
+      if git -C "$GITROOT" fetch --quiet "$remote" "$FROM" 2>/dev/null \
+         && git -C "$GITROOT" rev-parse --verify --quiet "refs/remotes/$remote/$FROM" >/dev/null; then
+        behind="$(git -C "$GITROOT" rev-list --count "$FROM..$remote/$FROM" 2>/dev/null || echo 0)"
+        [ "${behind:-0}" -gt 0 ] && echo "fleet-spawn: local $FROM was $behind commit(s) behind $remote/$FROM — basing $BRANCH on the fresh remote tip" >&2
+        BASE="$remote/$FROM"
+      fi
+    fi
+    git -C "$GITROOT" worktree add "$WT" -b "$BRANCH" ${BASE:+"$BASE"} >&2 || exit 1
+  fi
 fi
 
 # unique session name on this fleet's socket
@@ -68,6 +130,16 @@ tmux -L "$SOCK" new-session -d -s "$name" -c "$WT" \
   -e "CLAUDE_FLEET_MODEL=$MODEL" \
   "exec claude-here \"$name\""
 echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)"
+
+# record what this worktree is for, so fleet-worktrees (and a lead that restarted
+# and lost its memory) can see intent without guessing. Keyed by worktree path.
+MANIFEST="${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}/$SOCK.manifest.tsv"
+mkdir -p "$(dirname "$MANIFEST")" 2>/dev/null
+task="${PROMPT:--}"; task="$(printf '%s' "$task" | tr '\n\r\t' '   ' | cut -c1-200)"
+mtmp="$MANIFEST.$$.tmp"
+{ [ -f "$MANIFEST" ] && awk -F'\t' -v w="$WT" '$1!=w' "$MANIFEST"
+  printf '%s\t%s\t%s\t%s\n' "$WT" "$name" "$BRANCH" "$task"; } >"$mtmp" 2>/dev/null \
+  && mv -f "$mtmp" "$MANIFEST" 2>/dev/null || rm -f "$mtmp" 2>/dev/null
 
 # optional initial prompt — send once Claude has booted (~7s), via the scheduler
 if [ -n "$PROMPT" ]; then

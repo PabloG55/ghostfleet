@@ -42,6 +42,9 @@ done
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"      # sibling fleet-pause / fleet-resume
 log() { echo "[fleet-governor $(date +%H:%M:%S)] $*"; }
+# also drop park/resume events into the lead's attention feed (see fleet-inbox)
+INBOX="$FLEET_DIR/$SOCK.inbox"
+inbox() { printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" >> "$INBOX" 2>/dev/null || true; }
 
 # The 5h usage % from a pane's status bar: the "NN%(" field. Excludes ctx:NN%
 # (no paren after) and 7d:NN%( (colon-prefixed) by requiring a non-colon, non-digit
@@ -84,7 +87,10 @@ tick() {
     for w in $(workers_newest_first); do
       if gov_parked "$w"; then
         log "budget ${pct}% < ${RESUME}% -> resume $w"
-        [ "$DRY" = 1 ] || "$BIN_DIR/fleet-resume" -s "$SOCK" "$w" >/dev/null 2>&1
+        if [ "$DRY" != 1 ]; then
+          "$BIN_DIR/fleet-resume" -s "$SOCK" "$w" >/dev/null 2>&1
+          inbox "$w" resumed "governor: budget ${pct}% — window recovered"
+        fi
         resumed=1
       fi
     done
@@ -104,8 +110,10 @@ tick() {
       [ "$to_shed" -gt 0 ] || break
       log "  park $w"
       if [ "$DRY" != 1 ]; then
-        "$BIN_DIR/fleet-pause" -s "$SOCK" "$w" >/dev/null 2>&1 \
-          && printf 'governor %s\n' "$(date +%s)" > "$FLEET_DIR/$w.parked"
+        if "$BIN_DIR/fleet-pause" -s "$SOCK" "$w" >/dev/null 2>&1; then
+          printf 'governor %s\n' "$(date +%s)" > "$FLEET_DIR/$w.parked"
+          inbox "$w" parked "governor: budget ${pct}% — shed to cap ${cap}"
+        fi
       fi
       to_shed=$(( to_shed - 1 ))
     done

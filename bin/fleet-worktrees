@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# fleet-worktrees [-s SOCKET]
+#
+# Inventory every git worktree of the current repo and tell a lead session which
+# ones are FREE to reuse — so it stops spinning up a brand-new worktree when idle
+# ones already exist. This is the "look before you spawn" view: fleet-spawn refers
+# to the same free/occupied logic before it will create a new worktree.
+#
+# For each worktree it shows: branch · live fleet session (if any) · state ·
+# git (clean/dirty + ahead/behind) · the task it was spun up for (from the
+# manifest). A worktree is FREE = it exists, has NO live session on this fleet,
+# and its working tree is clean (a dirty, sessionless worktree has unfinished
+# work, so it's left alone, not offered for reuse).
+#
+# Socket defaults to $CLAUDE_FLEET_SOCK.
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
+[ -n "$SOCK" ] || { echo "fleet-worktrees: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+command -v git  >/dev/null 2>&1 || { echo "fleet-worktrees: git required"  >&2; exit 1; }
+command -v tmux >/dev/null 2>&1 || { echo "fleet-worktrees: tmux required" >&2; exit 1; }
+git -C "$PWD" rev-parse --show-toplevel >/dev/null 2>&1 \
+  || { echo "fleet-worktrees: not inside a git repo" >&2; exit 1; }
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
+
+# pane cwd -> session, once. `exec claude-here` keeps the pane cwd at the session
+# checkout, so a worktree is "occupied" when some session's pane sits in it.
+panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
+
+sess_for() {                       # first session whose pane cwd is at/under $1
+  local wt="$1" p s
+  while IFS=$'\t' read -r p s; do
+    [ -n "$p" ] || continue
+    case "$p" in "$wt"|"$wt"/*) echo "$s"; return ;; esac
+  done <<EOF
+$panes
+EOF
+}
+busy() { tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null \
+  | grep -qE '(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt'; }
+is_parked() { [ -f "$FLEET_DIR/$1.parked" ]; }
+task_for()  { awk -F'\t' -v w="$1" '$1==w{print $4; exit}' "$MANIFEST" 2>/dev/null; }
+git_state() {                      # "clean|dirty" (+ahead / -behind vs upstream)
+  local wt="$1" d ab behind ahead extra=""
+  [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ] && d=dirty || d=clean
+  if ab="$(git -C "$wt" rev-list --count --left-right '@{u}...HEAD' 2>/dev/null)"; then
+    behind="${ab%%	*}"; ahead="${ab##*	}"
+    [ "${ahead:-0}" -gt 0 ] 2>/dev/null && extra="$extra +$ahead"
+    [ "${behind:-0}" -gt 0 ] 2>/dev/null && extra="$extra -$behind"
+  fi
+  printf '%s%s' "$d" "$extra"
+}
+
+# enumerate worktrees (path<TAB>branch); the FIRST is the main checkout = the lead's
+wts="$(git -C "$PWD" worktree list --porcelain 2>/dev/null | awk '
+  /^worktree /{ if (wt!="") print wt "\t" br; wt=substr($0,10); br="(detached)"; skip=0 }
+  /^branch /  { b=$2; sub("refs/heads/","",b); br=b }
+  /^detached$/{ br="(detached)" }
+  /^bare$/    { skip=1 }
+  /^$/        { if (wt!="" && !skip) { print wt "\t" br; wt=""; skip=0 } }
+  END         { if (wt!="" && !skip) print wt "\t" br }
+')"
+
+printf '%-16s %-22s %-14s %-7s %-14s %s\n' WORKTREE BRANCH SESSION STATE GIT TASK
+free=""; first=1
+while IFS=$'\t' read -r wt br; do
+  [ -n "$wt" ] || continue
+  base="${wt##*/}"
+  sess="$(sess_for "$wt")"
+  state=""; git=""; task="$(task_for "$wt")"; [ -n "$task" ] || task="-"
+  git="$(git_state "$wt")"
+  if [ "$first" = 1 ]; then                       # main checkout — the lead's home
+    if [ "$sess" = master ]; then state=LEAD; elif [ -n "$sess" ]; then state="$sess"; else state=main; sess="-"; fi
+    first=0
+  elif [ -n "$sess" ]; then
+    if is_parked "$sess"; then state=parked
+    elif busy "$sess"; then state=busy
+    else state=idle; fi
+  else
+    sess="-"
+    case "$git" in clean*) state=FREE; free="$free $base" ;; *) state=stale ;; esac
+  fi
+  printf '%-16s %-22s %-14s %-7s %-14s %s\n' \
+    "$base" "${br:0:22}" "${sess:0:14}" "$state" "$git" "${task:0:60}"
+done <<EOF
+$wts
+EOF
+
+echo
+if [ -n "$free" ]; then
+  echo "Free to reuse:$free   →  fleet-spawn <name> --reuse <worktree>"
+else
+  echo "No free worktrees (all in use, or dirty). Create one: fleet-spawn <name> --new"
+fi

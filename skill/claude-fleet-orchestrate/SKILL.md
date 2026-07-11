@@ -1,60 +1,127 @@
 ---
 name: claude-fleet-orchestrate
-description: Coordinate AND spawn sibling Claude Code sessions in the same claude-fleet (parallel git worktrees). Use when you are a "lead" session dividing work across siblings — create a NEW worker on its own git worktree/branch, dispatch a prompt to a session, list the fleet, or read a sibling's latest output. Triggers include "spin up a worker for X", "create a new session/worktree on branch Y", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "dispatch these briefs to the other worktrees". Runs the fleet-spawn / fleet-send / fleet-list / fleet-read commands (or the fleet_* MCP tools).
+description: Coordinate, spawn, observe, unblock, and budget sibling Claude Code sessions in the same claude-fleet (parallel git worktrees). Use when you are a "lead"/master session dividing work across siblings — see which worktrees are free and REUSE one before creating another, dispatch a prompt to a worker, list the fleet, read a worker's output, check who needs you, unblock a worker stuck on a prompt, or park/resume workers to control cost. Triggers include "spin up a worker for X", "work on a worktree to fix Y", "which worktrees are free / reuse a worktree", "create a new session/worktree on branch Z", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "who needs me / check the inbox", "unblock/answer <session>", "pause/park <session>", "resume <session>". Runs the fleet-* commands (or the fleet_* MCP tools).
 ---
 
 # Orchestrating sibling fleet sessions
 
-You are running inside a **claude-fleet** session. The env var `CLAUDE_FLEET_SOCK`
-identifies your fleet (all sessions share one hidden tmux server). Sibling
-sessions are other worktrees/tasks in the same fleet — e.g. an `api` lead
-alongside `api-1` and `api-2` workers. You can drive them from your
-Bash tool:
+You are running inside a **claude-fleet** session (usually the **master**/lead). The
+env var `CLAUDE_FLEET_SOCK` identifies your fleet — every session shares one hidden
+tmux server. Sibling sessions are other worktrees/tasks in the same fleet (e.g. an
+`api` lead alongside `api-1`, `api-2` workers). You drive them from your Bash tool
+(or the `fleet_*` MCP tools — **prefer the MCP tools when available**).
 
-- **`fleet-list`** — list sibling sessions and their status (`working` / `ready` /
-  `need-you` / `idle`). `(you)` marks the current session.
-- **`fleet-send <session> "<prompt>"`** — type a prompt into that session's Claude
-  and submit it. Multi-line prompts are sent as one message. This is how you hand
-  a worker a task/brief.
-- **`fleet-read <session> [n]`** — print the last `n` (default 1) assistant
-  messages from that session, so you can see how a worker is doing.
-- **`fleet-spawn <name> [--branch <b>] [--from <ref>] [--model <m>] [--prompt "<task>"]`** —
-  create a git worktree off the current repo and start a fresh worker session in
-  it (in the background), optionally handing it an initial task. Use to spin up a
-  new parallel worker on its own branch. Pass `--model opus` for heavier tracks
-  (workers otherwise use the account's default model).
+## Read the state BEFORE you act
 
-These are also exposed as MCP tools (`fleet_list`, `fleet_send`, `fleet_read`,
-`fleet_spawn`) if the claude-fleet MCP server is registered — prefer those when
-available; otherwise call the shell commands via Bash.
+You cannot see the fleet; you have to *look*. Your context drifts and a restarted
+lead starts blank, so **do not act from memory — read the real state first:**
 
-## How to use it
+- **`fleet-worktrees`** — every git worktree of this repo: its branch, whether a
+  session is live on it, git state (clean/dirty, ahead/behind), the task it was
+  spun up for, and a **"Free to reuse"** line. This is your map.
+- **`fleet-inbox`** — what has needed you since you last looked (see below).
+- **`fleet-list`** — the live sessions and their status.
 
-1. `fleet-list` first — see who exists and who's free.
-2. `fleet-send <worker> "<self-contained brief>"` to dispatch. Give the worker a
-   complete brief (it doesn't share your context): the task, the files/paths, the
-   done-criteria.
-3. Later, `fleet-read <worker> 3` to check progress before sending the next step.
+## Reuse a worktree before you spawn a new one
+
+Worktrees are a **reusable resource, not disposable.** Creating a fresh one when
+idle ones already exist wastes disk, branches, and your attention — and it's the
+classic way a lead "gets lost." So:
+
+1. Run **`fleet-worktrees`**. If it lists a **FREE** worktree that fits, reuse it.
+2. Reuse with **`fleet-spawn <name> --reuse <worktree>`** — this starts a worker in
+   that existing worktree (on its current branch), without creating anything new.
+3. Only create a new worktree when none are free — and `fleet-spawn` enforces this:
+   **if free worktrees exist it will refuse and list them** rather than silently
+   make another. Add **`--new`** only when you genuinely want a fresh worktree.
+
+## Attention: pull the inbox, don't poll every worker
+
+A worker can't interrupt you, and polling each one with `fleet-read` burns the
+**shared account budget** (see below). Instead, attention-needing events are
+collected passively — a worker's `need-you` (permission / usage-limit / a real
+question) and the governor's park/resume — into an inbox you drain in one call:
+
+- **`fleet-inbox`** — shows what's new since you last looked, then marks it seen.
+  Check it at the top of an orchestration turn. Use `fleet-read <worker> 3` only on
+  the workers it flags, not on everyone.
+
+## Unblock a worker stuck on a prompt
+
+`fleet-send` types a *task* into a worker and submits a turn — it can't answer a
+**dialog**. When a worker is parked on a permission prompt, a "reached usage limit —
+retry?", or a trust prompt, use:
+
+- **`fleet-answer <session> "<keys>"`** — sends literal keystrokes (e.g. `"2"`),
+  Enter by default. `--no-enter` to skip Enter; `--key <Name>` (repeatable) for
+  special keys (Enter, Escape, Up, Down…). It prints the pane afterward so you see
+  the effect.
+
+## Budget: one shared account
+
+Every worker AND you drink from **one usage pool**, so wide fan-out drains it N×
+faster and everyone stalls at the ceiling together. A **governor** runs alongside
+the fleet (a dumb non-Claude loop) and auto-parks the newest workers as usage
+climbs, resuming them when the window resets — you'll see those in `fleet-inbox`.
+Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
+
+- **`fleet-pause <session>`** — reliably interrupt a worker and mark it OFF (zero
+  consumption).
+- **`fleet-resume <session> ["<task>"]`** — un-park it; with a task it wakes right
+  away. (Sending any new prompt also un-parks a worker.)
+
+## The core commands
+
+| do | command |
+|----|---------|
+| see all worktrees + which are free | `fleet-worktrees` |
+| see live sessions + status | `fleet-list` |
+| check who needs you | `fleet-inbox` |
+| dispatch a task | `fleet-send <session> "<self-contained brief>"` |
+| read a worker's output | `fleet-read <session> [n]` |
+| reuse a free worktree | `fleet-spawn <name> --reuse <worktree> [--prompt "…"]` |
+| new worker (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] [--new] [--prompt "…"]` |
+| unblock a stuck worker | `fleet-answer <session> "<keys>"` |
+| park / resume (cost) | `fleet-pause <session>` / `fleet-resume <session>` |
+
+`fleet-spawn` accepts `--model opus` for heavier tracks (workers otherwise use the
+account default). It records each worker's task in a manifest, so `fleet-worktrees`
+shows *what each worktree is for* — that's how you rebuild your map after a restart
+instead of guessing.
 
 ## Rules
 
-- **Don't spam a busy worker.** If `fleet-list` shows a session `working`, a new
-  `fleet-send` will queue after its current turn — fine for the *next* task, but
-  don't fire multiple prompts at a working session.
-- **Prompts must be self-contained.** A sibling has its own conversation/context;
-  paste the full brief, not a reference to "the thing we discussed".
-- **You can't see a worker's screen** — use `fleet-read` to observe, not assume.
+- **Look before you spawn.** `fleet-worktrees` first; reuse a FREE worktree; only
+  `--new` when none fit.
+- **Don't spam a busy worker.** If it's `working`, one `fleet-send` queues after the
+  current turn — fine for the *next* task; don't fire several at a working session.
+- **Prompts must be self-contained.** A sibling has its own context — paste the full
+  brief (task, files/paths, done-criteria), not "the thing we discussed".
+- **You can't see a worker's screen.** Use `fleet-read` / `fleet-inbox` to observe,
+  never assume.
 - Only sessions in *your* fleet (same `CLAUDE_FLEET_SOCK`) are reachable.
 
 ## Example
 
 ```bash
-fleet-list
-# dispatch to existing workers:
-fleet-send api-1 "Implement the payments module in src/payments/*. Brief: … Done when: the test suite for that module passes."
-fleet-send api-2 "Build the app shell + shared UI. Brief: … Done when: the shell renders and auth wraps it."
-# or spin up a brand-new worker on its own worktree/branch, briefed in one shot:
-fleet-spawn worker4 --branch feat/notifications --prompt "Build the notification jobs. Brief: … Done when: …"
+fleet-worktrees          # → "Free to reuse: api-3"
+fleet-inbox              # → api-1 NEEDS YOU: permission to run tests
+
+# unblock the one that needs me
+fleet-answer api-1 "2"
+
+# reuse the free worktree instead of making a new one
+fleet-spawn fix-auth --reuse api-3 \
+  --prompt "Fix the token refresh bug in src/auth/*. Brief: … Done when: auth tests pass."
+
+# a genuinely new track (no free worktree fit) — off the fresh remote main
+fleet-spawn notifications --from main --new \
+  --prompt "Build the notification jobs. Brief: … Done when: …"
+
+# shed an idle worker to protect the shared budget
+fleet-pause api-2
+
 # … later …
-fleet-read api-1 3
+fleet-inbox              # who needs me now
+fleet-read fix-auth 3    # check the one I care about
 ```

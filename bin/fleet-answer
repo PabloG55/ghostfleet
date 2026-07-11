@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# fleet-answer [-s SOCKET] <session> <text> [--no-enter]
+# fleet-answer [-s SOCKET] <session> --key <Name> [--key <Name> ...]
+#
+# Send raw keystrokes to a worker that's BLOCKED on a prompt — a permission
+# dialog ("1 / 2 / 3"), a "reached usage limit — retry?", a trust prompt, etc.
+# These are the cases fleet-send can't handle: fleet-send types a message into
+# Claude's input box and submits a turn, but a worker sitting on a dialog needs a
+# literal key, not a prompt. fleet-answer just presses keys.
+#
+#   <text>       a literal string (e.g. "2" or "yes"); sent then Enter
+#   --no-enter   don't press Enter after the text
+#   --key <Name> a tmux key name (Enter, Escape, Up, Down, Left, Right, Space,
+#                Tab, BSpace, …); repeat to send a sequence. Overrides <text>.
+#
+# After sending it prints the tail of the pane so you can see what happened.
+# Socket defaults to $CLAUDE_FLEET_SOCK.
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+SESSION=""; TEXT=""; NOENTER=0; KEYS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s)         SOCK="${2:-}"; shift 2 ;;
+    --key)      KEYS+=("${2:?}"); shift 2 ;;
+    --no-enter) NOENTER=1; shift ;;
+    --)         shift; break ;;
+    -*) echo "fleet-answer: unknown option $1" >&2; exit 1 ;;
+    *)  if [ -z "$SESSION" ]; then SESSION="$1"; else TEXT="${TEXT:+$TEXT }$1"; fi; shift ;;
+  esac
+done
+while [ $# -gt 0 ]; do TEXT="${TEXT:+$TEXT }$1"; shift; done
+
+[ -n "$SOCK" ]    || { echo "fleet-answer: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+[ -n "$SESSION" ] || { echo "fleet-answer: usage: fleet-answer [-s socket] <session> <text|--key Name>" >&2; exit 1; }
+tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
+  || { echo "fleet-answer: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
+
+if [ "${#KEYS[@]}" -gt 0 ]; then
+  for k in "${KEYS[@]}"; do tmux -L "$SOCK" send-keys -t "$SESSION" "$k"; done
+  desc="keys: ${KEYS[*]}"
+else
+  [ -n "$TEXT" ] || { echo "fleet-answer: nothing to send — give <text> or --key <Name>" >&2; exit 1; }
+  tmux -L "$SOCK" send-keys -t "$SESSION" -l -- "$TEXT"
+  desc="'$TEXT'"
+  if [ "$NOENTER" != 1 ]; then tmux -L "$SOCK" send-keys -t "$SESSION" Enter; else desc="$desc (no enter)"; fi
+fi
+
+sleep 0.5
+echo "fleet-answer: sent $desc → $SESSION. Pane now:" >&2
+tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 15

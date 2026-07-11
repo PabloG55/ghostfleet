@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // claude-fleet MCP server — exposes the fleet orchestration commands as native
 // tools so a lead Claude session can call them as structured tool-calls instead
-// of shelling out. Thin wrapper over bin/fleet-{list,send,read,spawn}; those
+// of shelling out. Thin wrapper over bin/fleet-{list,send,read,spawn,worktrees,
+// inbox,answer,pause,resume}; those
 // read the session's env (CLAUDE_FLEET_SOCK, CLAUDE_CONFIG_DIR) which this
 // server inherits from the Claude session that launched it.
 //
@@ -27,8 +28,18 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { session: { type: 'string', description: 'target session name (see fleet_list)' }, prompt: { type: 'string', description: 'the full, self-contained prompt to run there' } }, required: ['session', 'prompt'], additionalProperties: false } },
   { name: 'fleet_read', description: 'Read the last N assistant messages from a sibling session, to check its progress/output.',
     inputSchema: { type: 'object', properties: { session: { type: 'string' }, n: { type: 'number', description: 'how many recent assistant messages (default 1)' } }, required: ['session'], additionalProperties: false } },
-  { name: 'fleet_spawn', description: 'Create a new git worktree off the current repo and start a fresh parallel session in it (in the background), optionally with an initial task prompt. Use to spin up a new worker on its own branch.',
-    inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, prompt: { type: 'string', description: 'initial task to send once it boots' }, model: { type: 'string', description: 'model for the worker (e.g. opus); default = account default' } }, required: ['name'], additionalProperties: false } },
+  { name: 'fleet_spawn', description: 'Create a new git worktree off the current repo and start a fresh parallel session in it (in the background), optionally with an initial task prompt. Call fleet_worktrees FIRST: if free worktrees exist, spawn refuses unless you reuse one (reuse) or force a new one (force_new).',
+    inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, prompt: { type: 'string', description: 'initial task to send once it boots' }, model: { type: 'string', description: 'model for the worker (e.g. opus); default = account default' }, reuse: { type: 'string', description: 'start in this EXISTING free worktree (name or path) instead of creating one' }, force_new: { type: 'boolean', description: 'create a new worktree even if free ones exist' } }, required: ['name'], additionalProperties: false } },
+  { name: 'fleet_worktrees', description: 'Inventory every git worktree of this repo — branch, whether a session is live on it, git state, and which are FREE to reuse. Call this BEFORE fleet_spawn so you reuse an idle worktree instead of proliferating new ones.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'fleet_inbox', description: "Drain the lead's attention feed: worker 'need-you' events (permission / usage-limit / real questions) plus governor park/resume, collected passively. One call replaces polling every sibling — shows only what is new since last call.",
+    inputSchema: { type: 'object', properties: { all: { type: 'boolean', description: 'show the whole inbox instead of only new entries' } }, additionalProperties: false } },
+  { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a permission dialog, a "reached usage limit — retry?", a trust prompt (e.g. text "2"). Use this to unblock a worker; use fleet_send for normal task prompts.',
+    inputSchema: { type: 'object', properties: { session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
+  { name: 'fleet_pause', description: 'Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work.',
+    inputSchema: { type: 'object', properties: { session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_resume', description: 'Un-park a worker paused with fleet_pause; optionally dispatch a prompt to wake it immediately.',
+    inputSchema: { type: 'object', properties: { session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session'], additionalProperties: false } },
 ];
 
 function callTool(name, a = {}) {
@@ -40,8 +51,23 @@ function callTool(name, a = {}) {
       const args = [String(a.name)];
       if (a.branch) args.push('--branch', String(a.branch));
       if (a.model) args.push('--model', String(a.model));
+      if (a.reuse) args.push('--reuse', String(a.reuse));
+      if (a.force_new) args.push('--new');
       if (a.prompt) args.push('--prompt', String(a.prompt));
       return run('fleet-spawn', args);
+    }
+    case 'fleet_worktrees': return run('fleet-worktrees', []);
+    case 'fleet_inbox': return run('fleet-inbox', a.all ? ['--all'] : []);
+    case 'fleet_answer': {
+      const args = [String(a.session), String(a.text)];
+      if (a.no_enter) args.push('--no-enter');
+      return run('fleet-answer', args);
+    }
+    case 'fleet_pause': return run('fleet-pause', [String(a.session)]);
+    case 'fleet_resume': {
+      const args = [String(a.session)];
+      if (a.prompt) args.push(String(a.prompt));
+      return run('fleet-resume', args);
     }
     default: return `unknown tool: ${name}`;
   }

@@ -78,6 +78,16 @@ else
   rm -f "$tmp" 2>/dev/null
 fi
 
+# --- push real attention-needs into the lead's inbox (see fleet-inbox) --------
+# Event-driven, zero polling: when a WORKER actually needs a human (permission /
+# limit / a real question), drop one line the lead can drain with `fleet-inbox`
+# instead of polling every sibling. Only need-you, only workers (never the lead
+# itself), only when we know the fleet socket. Best-effort; never fail the hook.
+if [ "$status" = "need-you" ] && [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; then
+  printf '%s\t%s\t%s\t%s\n' "$now" "$SLOT" "need-you" "${NOTE:0:120}" \
+    >> "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.inbox" 2>/dev/null || true
+fi
+
 # --- notify, detached so the hook returns fast -------------------------------
 # Only a real attention-need (need-you) or a completed turn — never the benign idle
 # "waiting for your input" Notification, which is the false "needs you" a watcher trips.

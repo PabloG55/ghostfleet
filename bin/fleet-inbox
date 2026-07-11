@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# fleet-inbox [-s SOCKET] [--all] [--clear]
+#
+# The lead's ATTENTION feed. Workers can't push into a busy lead, and having the
+# lead poll every sibling (fleet-read × N) burns the shared budget. So instead,
+# events that actually need the lead are collected passively — the event hook
+# appends a worker's "need-you" (permission / limit / a real question) and the
+# budget governor appends "parked"/"resumed" — into <sock>.inbox. ONE call here
+# drains what's new since you last looked, so you learn who needs you without
+# polling anyone.
+#
+#   (default)  show entries you haven't seen yet, then mark them seen
+#   --all      show the whole inbox (doesn't change what's "seen")
+#   --clear    empty the inbox
+#
+# Socket defaults to $CLAUDE_FLEET_SOCK.
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+MODE=new
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s)      SOCK="${2:-}"; shift 2 ;;
+    --all)   MODE=all;   shift ;;
+    --clear) MODE=clear; shift ;;
+    *) echo "fleet-inbox: unknown arg $1" >&2; exit 1 ;;
+  esac
+done
+[ -n "$SOCK" ] || { echo "fleet-inbox: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+INBOX="$FLEET_DIR/$SOCK.inbox"
+SEEN="$FLEET_DIR/$SOCK.inbox.seen"
+
+# TSV in ("<ts>\t<session>\t<event>\t<detail>") -> human-readable out
+fmt() {
+  while IFS=$'\t' read -r ts sess ev detail; do
+    [ -n "$ts" ] || continue
+    hhmm="$(date -r "$ts" +%H:%M 2>/dev/null || echo '--:--')"
+    up="$(printf '%s' "$ev" | tr '[:lower:]' '[:upper:]')"
+    printf '%s  %-14s %-9s %s\n' "$hhmm" "${sess:0:14}" "$up" "$detail"
+  done
+}
+
+if [ "$MODE" = clear ]; then
+  : > "$INBOX" 2>/dev/null || true
+  printf '0\n' > "$SEEN" 2>/dev/null || true
+  echo "inbox: cleared"
+  exit 0
+fi
+
+[ -f "$INBOX" ] && [ -s "$INBOX" ] || { echo "inbox: (empty)"; exit 0; }
+
+if [ "$MODE" = all ]; then
+  n="$(wc -l < "$INBOX" | tr -d ' ')"
+  echo "inbox — all ($n):"
+  fmt < "$INBOX"
+  exit 0
+fi
+
+# default: only what's new since the stored line-offset, then advance it
+total="$(wc -l < "$INBOX" | tr -d ' ')"
+seen="$(cat "$SEEN" 2>/dev/null || echo 0)"; case "$seen" in ''|*[!0-9]*) seen=0 ;; esac
+if [ "$total" -le "$seen" ]; then
+  [ "$seen" -gt "$total" ] && printf '%s\n' "$total" > "$SEEN" 2>/dev/null   # inbox was cleared/rotated
+  echo "inbox: nothing new"
+  exit 0
+fi
+echo "inbox — $((total - seen)) new:"
+tail -n +"$((seen + 1))" "$INBOX" | fmt
+printf '%s\n' "$total" > "$SEEN" 2>/dev/null || true
