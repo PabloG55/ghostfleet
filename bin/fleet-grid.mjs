@@ -152,10 +152,17 @@ function deriveStatus(hook, transcript, busy) {
   return 'idle';
 }
 
-// A session parked with fleet-pause has a <name>.parked marker (cleared on the
-// next UserPromptSubmit). Parked = intentionally off, distinct from idle/ready.
+// A session parked with fleet-pause has a <sock>.<name>.parked marker (cleared on
+// the next UserPromptSubmit). Parked = intentionally off, distinct from idle/ready.
+// The marker is namespaced by socket so same-named workers in different fleets
+// can't collide; clearParked also drops the legacy bare marker during upgrade.
+function parkedFile(name) { return path.join(FLEET_DIR, SOCK + '.' + name + '.parked'); }
+function clearParked(name) {
+  try { fs.unlinkSync(parkedFile(name)); } catch {}
+  try { fs.unlinkSync(path.join(FLEET_DIR, name + '.parked')); } catch {}   // legacy bare
+}
 function isParked(name) {
-  try { return fs.existsSync(path.join(FLEET_DIR, name + '.parked')); } catch { return false; }
+  try { return fs.existsSync(parkedFile(name)); } catch { return false; }
 }
 
 function gitBranch(cwd) {
@@ -204,7 +211,7 @@ function killSession(name) {
   try {
     execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'kill-session', '-t', name], { stdio: 'ignore' });
   } catch {}
-  try { fs.unlinkSync(path.join(FLEET_DIR, name + '.parked')); } catch {}   // clear any park marker
+  clearParked(name);   // clear any park marker (namespaced + legacy)
   // drop its status file(s) so the card disappears (the conversation history in
   // ~/.claude/projects is untouched — you can re-open it later from `new`).
   let files = [];
@@ -227,7 +234,7 @@ function pauseSession(name) {
   } catch {}
 }
 function resumeSession(name) {
-  try { fs.unlinkSync(path.join(FLEET_DIR, name + '.parked')); } catch {}
+  clearParked(name);
 }
 
 // ── scheduling (send a message to a session at a time) ──────────────────────
@@ -684,7 +691,7 @@ function projectStatus(proj) {
     total++;                            // master included — it's the project's lead session (⏎ lands there)
     const o = bySlot.get(name);
     const busy = paneBusy(sock, name);
-    if (!busy && fs.existsSync(path.join(dir, name + '.parked'))) { parked++; continue; }  // intentionally off
+    if (!busy && fs.existsSync(path.join(dir, sock + '.' + name + '.parked'))) { parked++; continue; }  // intentionally off (namespaced)
     const s = deriveStatus(o ? o.status : '', o ? o.transcript : '', busy);
     if (s === 'need-you') need++;
     else if (s === 'working') working++;

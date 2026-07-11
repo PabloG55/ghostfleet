@@ -43,18 +43,56 @@ for _ in $(seq 1 20); do
   sleep 0.1
 done
 
+# Confirm the turn actually started. The RELIABLE signal is our pasted probe
+# LEAVING Claude's input box: that catches a turn that finishes before any spinner
+# renders (a fast reply) AND a turn that thinks a while before one appears (Opus
+# extended thinking); a live spinner counts too. Watching only the spinner over a
+# short window is what produced false "no turn started" warnings and a flurry of
+# stray Enters fired into an already-running turn.
+#
+# in_input: 0 = probe still sitting in the input box; 1 = box present, probe gone
+# (submitted); 2 = no box found (unknown → fall back to the spinner).
+in_input() {
+  local pane; pane="$(tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null)"
+  printf '%s\n' "$pane" | awk -v p="$probe" '
+    { l[NR]=$0 } /╰/ { c=NR }
+    END { if(!c) exit 2; for(i=c-1;i>=1;i--) if(l[i]~/╭/){o=i;break}
+          for(i=o;i<=c;i++) if(index(l[i],p)) exit 0; exit 1 }'
+}
+submitted() { busy && return 0; in_input; [ "$?" = 1 ]; }
+
 if [ "$pre_busy" = yes ]; then
   # already mid-turn: the prompt just queues into the box; one submit is enough
   sleep "${CLAUDE_FLEET_SUBMIT_DELAY:-0.4}"
   tmux -L "$SOCK" send-keys -t "$SESSION" Enter
   echo "fleet-send: → $SESSION (queued)"
 else
-  ok=no
-  for _ in 1 2 3 4; do
-    tmux -L "$SOCK" send-keys -t "$SESSION" Enter
-    for _ in 1 2 3; do busy && { ok=yes; break; }; sleep 0.2; done
-    [ "$ok" = yes ] && break
+  tmux -L "$SOCK" send-keys -t "$SESSION" Enter
+  ok=no; renudged=no
+  for i in $(seq 1 40); do                      # up to ~8s, but breaks as soon as confirmed
+    submitted && { ok=yes; break; }
+    # a swallowed Enter (the paste/Enter race) leaves the probe in the box — nudge
+    # exactly ONCE more after ~1.6s; never spam Enter into a live turn
+    if [ "$i" = 8 ] && [ "$renudged" = no ]; then
+      in_input; [ "$?" = 0 ] && { tmux -L "$SOCK" send-keys -t "$SESSION" Enter; renudged=yes; }
+    fi
+    sleep 0.2
   done
   [ "$ok" = yes ] && echo "fleet-send: → $SESSION" \
-                  || echo "fleet-send: → $SESSION (warning: no turn started — verify it landed)" >&2
+                  || echo "fleet-send: → $SESSION (warning: could not confirm submit — verify it landed)" >&2
+fi
+
+# CF-6: record the dispatched task in the manifest so fleet-worktrees' TASK column
+# reflects fleet-send work too (not just fleet-spawn --prompt). Keyed by the target's
+# worktree path, matching fleet-spawn. Best-effort; never affects the send result.
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
+cwd="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+if [ -n "$cwd" ]; then
+  subject="$(printf '%s' "$MSG" | tr '\n\r\t' '   ' | sed 's/^ *//' | cut -c1-200)"
+  br="$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')"
+  mtmp="$MANIFEST.$$.tmp"; mkdir -p "$FLEET_DIR" 2>/dev/null
+  { [ -f "$MANIFEST" ] && awk -F'\t' -v w="$cwd" '$1!=w' "$MANIFEST"
+    printf '%s\t%s\t%s\t%s\n' "$cwd" "$SESSION" "$br" "$subject"; } >"$mtmp" 2>/dev/null \
+    && mv -f "$mtmp" "$MANIFEST" 2>/dev/null || rm -f "$mtmp" 2>/dev/null
 fi

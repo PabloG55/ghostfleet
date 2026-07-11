@@ -73,12 +73,20 @@ set_project() {
 ensure_governor() {
   local mode="${CLAUDE_FLEET_GOVERNOR:-on}"
   case "$mode" in 0|off|no|false) return 0 ;; esac
-  local pidf="$CFG_DIR/fleet/$PROJECT.governor.pid" logf="$CFG_DIR/fleet/$PROJECT.governor.log"
-  # already running for this project?
-  if [ -f "$pidf" ] && kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then return 0; fi
+  local fdir="$CFG_DIR/fleet"
+  local pidf="$fdir/$PROJECT.governor.pid" verf="$fdir/$PROJECT.governor.ver" logf="$fdir/$PROJECT.governor.log"
+  local ver; ver="$(stat -f %m "$BIN_DIR/fleet-governor" 2>/dev/null || echo 0)"
+  # already running for this project WITH the current governor code? keep it.
+  if [ -f "$pidf" ] && kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then
+    [ "$(cat "$verf" 2>/dev/null)" = "$ver" ] && return 0
+    # a governor is a long-lived daemon, so a running one keeps OLD behavior after an
+    # upgrade (e.g. it wouldn't emit the new inbox park/resume events). Restart it.
+    kill "$(cat "$pidf" 2>/dev/null)" 2>/dev/null
+  fi
   local dry=""; [ "$mode" = "dry" ] && dry="--dry-run"
-  CLAUDE_FLEET_DIR="$CFG_DIR/fleet" nohup "$BIN_DIR/fleet-governor" -s "$SOCK" $dry >>"$logf" 2>&1 &
+  CLAUDE_FLEET_DIR="$fdir" nohup "$BIN_DIR/fleet-governor" -s "$SOCK" $dry >>"$logf" 2>&1 &
   echo $! > "$pidf"
+  printf '%s\n' "$ver" > "$verf"
 }
 
 # the "master" lead session runs in the project's main checkout. From inside it,

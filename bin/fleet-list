@@ -23,6 +23,9 @@ while IFS= read -r name; do
   if command -v jq >/dev/null 2>&1; then
     st="$(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$name" 'select(.slot==$s)|[(.ts//0),.status]|@tsv' "$f" 2>/dev/null; done | sort -rn | head -1 | cut -f2)"
   fi
+  # a parked worker's hook status is stale (Escape doesn't fire Stop) — the marker
+  # is the truth, so report 'parked' to agree with fleet-worktrees (namespaced).
+  [ -f "$FLEET_DIR/$SOCK.$name.parked" ] && st="parked"
   mark=""; [ "$name" = "$SELF" ] && mark="(you)"
   printf '%-22s %-10s %s\n' "$name" "${st:-?}" "$mark"
 done <<EOF

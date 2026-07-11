@@ -66,8 +66,8 @@ workers_newest_first() {
   tmux -L "$SOCK" list-sessions -F '#{session_created} #{session_name}' 2>/dev/null \
     | grep -vE ' master$' | sort -rn | awk '{print $2}'
 }
-is_parked()  { [ -f "$FLEET_DIR/$1.parked" ]; }
-gov_parked() { is_parked "$1" && grep -q '^governor' "$FLEET_DIR/$1.parked" 2>/dev/null; }
+is_parked()  { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
+gov_parked() { is_parked "$1" && grep -q '^governor' "$FLEET_DIR/$SOCK.$1.parked" 2>/dev/null; }
 cap_for() {
   local p="$1"
   if   [ "$p" -ge "$T1" ];   then echo 1
@@ -111,7 +111,7 @@ tick() {
       log "  park $w"
       if [ "$DRY" != 1 ]; then
         if "$BIN_DIR/fleet-pause" -s "$SOCK" "$w" >/dev/null 2>&1; then
-          printf 'governor %s\n' "$(date +%s)" > "$FLEET_DIR/$w.parked"
+          printf 'governor %s\n' "$(date +%s)" > "$FLEET_DIR/$SOCK.$w.parked"
           inbox "$w" parked "governor: budget ${pct}% — shed to cap ${cap}"
         fi
       fi

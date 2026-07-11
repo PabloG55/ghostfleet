@@ -124,6 +124,11 @@ fi
 name="$NAME"; i=2
 while tmux -L "$SOCK" has-session -t "$name" 2>/dev/null; do name="$NAME~$i"; i=$((i + 1)); done
 
+# CF-3: clear any STALE park marker for this name (namespaced + legacy bare) so the
+# fresh session doesn't boot "parked" off a marker left by a killed same-named one.
+rm -f "${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}/$SOCK.$name.parked" \
+      "${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}/$name.parked" 2>/dev/null
+
 # fresh session in the worktree, background (lead keeps working)
 tmux -L "$SOCK" new-session -d -s "$name" -c "$WT" \
   -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \

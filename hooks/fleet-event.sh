@@ -45,7 +45,11 @@ SLOT="${CLAUDE_FLEET_SLOT:-}"
 now="$(date +%s)"
 
 case "$EVENT" in
-  UserPromptSubmit) status="working"; [ -n "$SLOT" ] && rm -f "$FLEET_DIR/$SLOT.parked" 2>/dev/null ;;  # any new prompt un-parks
+  UserPromptSubmit) status="working"                       # any new prompt un-parks the session
+    if [ -n "$SLOT" ]; then
+      [ -n "${CLAUDE_FLEET_SOCK:-}" ] && rm -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.$SLOT.parked" 2>/dev/null
+      rm -f "$FLEET_DIR/$SLOT.parked" 2>/dev/null                                    # legacy bare marker
+    fi ;;
   Notification)
     # Claude fires Notification for real attention (permission / a question) AND for
     # benign idle ("Claude is waiting for your input"), which a long-running lead or

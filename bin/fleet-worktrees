@@ -41,7 +41,7 @@ EOF
 }
 busy() { tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null \
   | grep -qE '(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt'; }
-is_parked() { [ -f "$FLEET_DIR/$1.parked" ]; }
+is_parked() { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
 task_for()  { awk -F'\t' -v w="$1" '$1==w{print $4; exit}' "$MANIFEST" 2>/dev/null; }
 git_state() {                      # "clean|dirty" (+ahead / -behind vs upstream)
   local wt="$1" d ab behind ahead extra=""

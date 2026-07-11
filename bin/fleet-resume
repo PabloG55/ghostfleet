@@ -12,6 +12,8 @@ MSG="$*"
 
 [ -n "$SESSION" ] || { echo "fleet-resume: usage: fleet-resume [-s socket] <session> [prompt]" >&2; exit 1; }
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+# clear the park marker: the socket-namespaced one (current) + a legacy bare one
+[ -n "$SOCK" ] && rm -f "$FLEET_DIR/$SOCK.$SESSION.parked" 2>/dev/null
 rm -f "$FLEET_DIR/$SESSION.parked" 2>/dev/null
 
 if [ -n "$MSG" ]; then

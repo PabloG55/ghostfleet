@@ -93,6 +93,13 @@ instead of guessing.
 
 - **Look before you spawn.** `fleet-worktrees` first; reuse a FREE worktree; only
   `--new` when none fit.
+- **Stuck ≠ busy — reach for `fleet-answer`, not another `fleet-send`.** A worker
+  that ignores a `fleet-send`, or shows `working` with no progress, is usually
+  **blocked on a dialog** (a permission prompt, a "reached usage limit — retry?",
+  a trust prompt). A prompt can't dismiss a dialog — send the keystroke:
+  `fleet-answer <session> "2"`. (`fleet-inbox` flags these as `need-you`.) This is
+  the single most common mis-step; when in doubt, `fleet-read`/`fleet-answer` to
+  see and clear the dialog before sending more work.
 - **Don't spam a busy worker.** If it's `working`, one `fleet-send` queues after the
   current turn — fine for the *next* task; don't fire several at a working session.
 - **Prompts must be self-contained.** A sibling has its own context — paste the full

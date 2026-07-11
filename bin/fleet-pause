@@ -45,6 +45,8 @@ else
 fi
 
 # mark parked — the grid reads this to show it OFF and skip it in the live counts.
+# Namespaced by socket (<sock>.<session>.parked) so a same-named worker in another
+# fleet can't collide, and cross-fleet cleanup can't clobber the wrong marker.
 mkdir -p "$FLEET_DIR" 2>/dev/null
-printf '%s\n' "$(date +%s)" > "$FLEET_DIR/$SESSION.parked"
+printf '%s\n' "$(date +%s)" > "$FLEET_DIR/$SOCK.$SESSION.parked"
 echo "fleet-pause: parked '$SESSION' — idle, zero consumption. Resume: fleet-send $SESSION \"<task>\"  (or fleet-resume $SESSION)"
