@@ -26,30 +26,54 @@ tmux-claude-session-manager, Recon) is tmux-bound; the rest take over your multi
 
 ## Orchestrate: a lead session driving workers
 
-Because every session lives on the same tmux socket, a "lead" session can dispatch work to
-siblings and read their output — turning a fleet into lead-and-workers (e.g. an `api` lead handing
-briefs to `api-1` / `api-2` worktrees). Three commands, callable from a session's Bash:
+Because every session lives on the same tmux socket, a "lead"/**master** session can dispatch
+work to siblings, watch them, unblock them, and manage cost — turning a fleet into
+lead-and-workers (e.g. an `api` lead handing briefs to `api-1` / `api-2` worktrees). All of it
+is callable from a session's Bash (or the `fleet_*` MCP tools).
 
-- **`fleet-list`** — sibling sessions + status (`(you)` marks the caller).
-- **`fleet-send <session> "<prompt>"`** — type a prompt into that session's Claude and submit it
-  (multi-line safe via bracketed paste; warns if the target is mid-turn).
-- **`fleet-read <session> [n]`** — print the sibling's last `n` assistant messages.
-- **`fleet-spawn <name> [--branch b] [--prompt "…"]`** — create a git **worktree** off the current
-  repo and start a fresh worker session in it (background), optionally briefed in one shot.
+**The lead's loop — look before you act.** Fleet state lives on disk (worktrees + a manifest of
+what each was spun up for), not in the lead's head, so it *reads* the state instead of guessing —
+which is what keeps a long-running or restarted lead from getting lost:
+
+1. **`fleet-worktrees`** + **`fleet-inbox`** — what exists / what's free, and who needs you.
+2. **Reuse a free worktree** before creating one — `fleet-spawn` refuses to proliferate (it lists
+   the free ones) unless you `--reuse <wt>` or `--new`.
+3. **`fleet-answer`** to unblock a stuck worker; **`fleet-pause`** to shed cost.
+
+| goal | command |
+|------|---------|
+| every worktree + which are **FREE** | `fleet-worktrees` |
+| live sessions + status | `fleet-list` |
+| who needs you (drains since last look) | `fleet-inbox` |
+| dispatch a self-contained brief | `fleet-send <session> "…"` |
+| read a worker's last N messages | `fleet-read <session> [n]` |
+| **reuse** a free worktree for a worker | `fleet-spawn <name> --reuse <wt> --prompt "…"` |
+| new worktree (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] --new --prompt "…"` |
+| unblock a worker stuck on a dialog | `fleet-answer <session> "2"` |
+| park / resume a worker (cost) | `fleet-pause <session>` · `fleet-resume <session>` |
 
 ```bash
-fleet-list
-fleet-send api-1 "Implement the payments module in src/payments/*. Done when the tests pass."
-fleet-spawn worker4 --branch feat/notifications --prompt "Build the notification jobs. Done when …"
-fleet-read api-1 3     # check progress
+fleet-worktrees                 # → "Free to reuse: api-3"
+fleet-inbox                     # → api-1 NEEDS YOU: permission to run tests
+fleet-answer api-1 "2"          # unblock it
+fleet-spawn fix-auth --reuse api-3 \
+  --prompt "Fix token refresh in src/auth/*. Done when auth tests pass."
+fleet-read fix-auth 3           # check progress
 ```
 
-These are also exposed as **MCP tools** (`fleet_list` / `fleet_send` / `fleet_read` / `fleet_spawn`)
-via a dependency-free stdio server (`mcp/fleet-mcp.mjs`) that `install.sh` registers in each config
-dir — so a lead session can call them as structured tool-calls, not just Bash. The installed
-**`claude-fleet-orchestrate` skill** tells a lead these exist, so you can just say "spin up a worker
-for X and brief it." Each session knows its fleet via `CLAUDE_FLEET_SOCK`; prompts must be
-self-contained (siblings don't share your context); only sessions in the *same* fleet are reachable.
+These are also exposed as **MCP tools** (`fleet_list` / `_send` / `_read` / `_spawn` /
+`_worktrees` / `_inbox` / `_answer` / `_pause` / `_resume`) via a dependency-free stdio server
+(`mcp/fleet-mcp.mjs`) that `install.sh` registers in each config dir. The installed
+**`claude-fleet-orchestrate` skill** teaches a lead the loop above — reuse before spawn, pull the
+inbox instead of polling every sibling, unblock with `fleet-answer`, mind the shared budget — so
+you can just say *"work on a worktree to fix X"* and it reuses a free one. Each session knows its
+fleet via `CLAUDE_FLEET_SOCK`; prompts must be self-contained (siblings don't share your context);
+only sessions in the *same* fleet are reachable.
+
+**Budget.** One account funds the whole fleet, so wide fan-out drains it N× faster and everyone
+stalls at the ceiling together. A **governor** (a dumb non-Claude loop, auto-started per fleet)
+parks the newest workers as usage nears the ceiling and resumes them when the window resets; those
+events show up in `fleet-inbox`. Opt out with `CLAUDE_FLEET_GOVERNOR=off`, watch-only with `=dry`.
 
 ## How it works
 
@@ -121,11 +145,12 @@ cd claude-fleet
 ./install.sh
 ```
 
-The installer symlinks the commands (`claude-fleet`, `claude-here`, `fleet-send` / `-list` / `-read`
-/ `-spawn` / `-schedule` / `-jump`) into `~/.local/bin`; wires the status + notification hooks and the
-fleet MCP server into every Claude config dir it finds (`~/.claude`, `~/.claude-*`, backing each up);
-installs the `claude-fleet-orchestrate` skill; and links the zellij layout. Optional but recommended
-for clickable notifications: `brew install terminal-notifier` (+ AeroSpace).
+The installer symlinks the commands (`claude-fleet`, `claude-here`, and the `fleet-*` helpers —
+`list` / `send` / `read` / `spawn` / `worktrees` / `inbox` / `answer` / `pause` / `resume` /
+`schedule` / `jump` / `governor` / `statusbar`) into `~/.local/bin`; wires the status + notification
+hooks and the fleet MCP server into every Claude config dir it finds (`~/.claude`, `~/.claude-*`,
+backing each up); installs the `claude-fleet-orchestrate` skill; and links the zellij layout.
+Optional but recommended for clickable notifications: `brew install terminal-notifier` (+ AeroSpace).
 
 ## Use it
 
