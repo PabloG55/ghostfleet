@@ -148,9 +148,11 @@ cd claude-fleet
 The installer symlinks the commands (`claude-fleet`, `claude-here`, and the `fleet-*` helpers —
 `list` / `send` / `read` / `spawn` / `worktrees` / `inbox` / `answer` / `pause` / `resume` /
 `schedule` / `jump` / `governor` / `statusbar`) into `~/.local/bin`; wires the status + notification
-hooks and the fleet MCP server into every Claude config dir it finds (`~/.claude`, `~/.claude-*`,
-backing each up); installs the `claude-fleet-orchestrate` skill; and links the zellij layout.
-Optional but recommended for clickable notifications: `brew install terminal-notifier` (+ AeroSpace).
+hooks into every Claude config dir it finds (`~/.claude`, `~/.claude-*`, backing each up);
+**registers the fleet MCP server** into each config dir's `.claude.json` via `claude mcp add -s user`
+(Claude Code reads MCP from `.claude.json`/`.mcp.json`, *not* `settings.json`); installs the
+`claude-fleet-orchestrate` skill; and links the zellij layout. Optional but recommended for
+clickable notifications: `brew install terminal-notifier` (+ AeroSpace).
 
 ## Use it
 
