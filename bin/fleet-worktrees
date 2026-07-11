@@ -80,7 +80,7 @@ while IFS=$'\t' read -r wt br; do
     elif busy "$sess"; then state=busy
     else state=idle; fi
   else
-    sess="-"
+    sess="-"; task="-"    # no live session -> the manifest task refers to a gone session; don't show it stale
     case "$git" in clean*) state=FREE; free="$free $base" ;; *) state=stale ;; esac
   fi
   printf '%-16s %-22s %-14s %-7s %-14s %s\n' \
