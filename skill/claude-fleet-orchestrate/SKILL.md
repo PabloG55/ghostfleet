@@ -29,22 +29,33 @@ idle ones already exist wastes disk, branches, and your attention — and it's t
 classic way a lead "gets lost." So:
 
 1. Run **`fleet-worktrees`**. If it lists a **FREE** worktree that fits, reuse it.
-2. Reuse with **`fleet-spawn <name> --reuse <worktree>`** — this starts a worker in
-   that existing worktree (on its current branch), without creating anything new.
+2. Reuse with **`fleet-spawn <name> --reuse <worktree>`** — starts a worker in that
+   existing worktree on its current branch. To **recycle** it onto a fresh branch in
+   one step, add `--branch <new> --from <base>`: e.g.
+   `fleet-spawn fix --reuse api-3 --branch feat/x --from main` cleans it
+   (`reset --hard`) and checks out the new branch off the base.
 3. Only create a new worktree when none are free — and `fleet-spawn` enforces this:
    **if free worktrees exist it will refuse and list them** rather than silently
    make another. Add **`--new`** only when you genuinely want a fresh worktree.
 
-## Attention: pull the inbox, don't poll every worker
+## Attention & completion: pull the inbox, don't poll
 
 A worker can't interrupt you, and polling each one with `fleet-read` burns the
-**shared account budget** (see below). Instead, attention-needing events are
-collected passively — a worker's `need-you` (permission / usage-limit / a real
-question) and the governor's park/resume — into an inbox you drain in one call:
+**shared account budget** (see below). Instead the events you act on are collected
+passively into an inbox you drain in one call:
+
+- a worker **`done`** — its turn finished (idle). This is your **completion
+  signal**: when a dispatched brief is ready to review/merge, or the worker is free
+  for the next task. (A worker's autonomous turn ends once, so one `done` per brief.)
+- a worker **`need-you`** — permission / usage-limit / a real question.
+- governor **`parked`/`resumed`** — budget shedding.
 
 - **`fleet-inbox`** — shows what's new since you last looked, then marks it seen.
-  Check it at the top of an orchestration turn. Use `fleet-read <worker> 3` only on
-  the workers it flags, not on everyone.
+  Check it at the top of an orchestration turn; `fleet-read <worker> 3` only on the
+  ones it flags. A `done` → dispatch the next step or merge; a `need-you` →
+  `fleet-answer`. (You still won't be *woken* while idle — check the inbox when you
+  next act; a truly hands-off push into the lead is intentionally not done, since it
+  would interrupt the lead and spend budget.)
 
 ## Unblock a worker stuck on a prompt
 
@@ -76,10 +87,11 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 |----|---------|
 | see all worktrees + which are free | `fleet-worktrees` |
 | see live sessions + status | `fleet-list` |
-| check who needs you | `fleet-inbox` |
+| check who needs you / what finished | `fleet-inbox` |
 | dispatch a task | `fleet-send <session> "<self-contained brief>"` |
 | read a worker's output | `fleet-read <session> [n]` |
 | reuse a free worktree | `fleet-spawn <name> --reuse <worktree> [--prompt "…"]` |
+| recycle a worktree onto a new branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from <base>` |
 | new worker (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] [--new] [--prompt "…"]` |
 | unblock a stuck worker | `fleet-answer <session> "<keys>"` |
 | park / resume (cost) | `fleet-pause <session>` / `fleet-resume <session>` |
@@ -87,7 +99,11 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 `fleet-spawn` accepts `--model opus` for heavier tracks (workers otherwise use the
 account default). It records each worker's task in a manifest, so `fleet-worktrees`
 shows *what each worktree is for* — that's how you rebuild your map after a restart
-instead of guessing.
+instead of guessing. `--from` bases the branch on your **local** ref (use
+`--from HEAD` for the current one) and only falls back to the remote tip if local
+is *behind* — so a worker never misses your just-committed, unpushed work. A fresh
+worktree also gets the main checkout's `node_modules` symlinked in, so workers can
+actually run lint/typecheck/tests.
 
 ## Rules
 

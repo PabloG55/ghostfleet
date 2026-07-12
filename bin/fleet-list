@@ -26,7 +26,10 @@ while IFS= read -r name; do
   # a parked worker's hook status is stale (Escape doesn't fire Stop) — the marker
   # is the truth, so report 'parked' to agree with fleet-worktrees (namespaced).
   [ -f "$FLEET_DIR/$SOCK.$name.parked" ] && st="parked"
-  mark=""; [ "$name" = "$SELF" ] && mark="(you)"
+  mark=""
+  # the caller is, by definition, alive and mid-turn (it's running this) — so its
+  # own row showing a stale 'need-you' is just confusing. Label it plainly.
+  if [ "$name" = "$SELF" ]; then mark="(you)"; [ "$st" = "need-you" ] && st="working"; fi
   printf '%-22s %-10s %s\n' "$name" "${st:-?}" "$mark"
 done <<EOF
 $names

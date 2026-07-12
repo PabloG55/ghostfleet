@@ -82,13 +82,19 @@ else
   rm -f "$tmp" 2>/dev/null
 fi
 
-# --- push real attention-needs into the lead's inbox (see fleet-inbox) --------
-# Event-driven, zero polling: when a WORKER actually needs a human (permission /
-# limit / a real question), drop one line the lead can drain with `fleet-inbox`
-# instead of polling every sibling. Only need-you, only workers (never the lead
-# itself), only when we know the fleet socket. Best-effort; never fail the hook.
-if [ "$status" = "need-you" ] && [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; then
-  printf '%s\t%s\t%s\t%s\n' "$now" "$SLOT" "need-you" "${NOTE:0:120}" \
+# --- push worker events into the lead's inbox (see fleet-inbox) ---------------
+# Event-driven, zero polling: the lead can't be interrupted, so it drains this
+# feed with `fleet-inbox` instead of polling every sibling. Emit the two events a
+# lead acts on: a worker NEEDING a human (permission / limit / a real question),
+# and a worker DONE (its turn ended → idle, the completion signal — a worker's
+# autonomous turn Stops once when its whole tool-loop finishes). Workers only,
+# never the lead's own turns; best-effort, never fail the hook.
+if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; then
+  ev=""; detail=""
+  if   [ "$status" = "need-you" ]; then ev="need-you"; detail="${NOTE:0:120}"
+  elif [ "$EVENT" = "Stop" ];      then ev="done";      detail="${folder}${branch:+ · $branch}"
+  fi
+  [ -n "$ev" ] && printf '%s\t%s\t%s\t%s\n' "$now" "$SLOT" "$ev" "$detail" \
     >> "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.inbox" 2>/dev/null || true
 fi
 

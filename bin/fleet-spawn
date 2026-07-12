@@ -12,18 +12,24 @@
 #
 #   name    session + worktree dir name (worktree = <repo-parent>/<name>)
 #   --branch  branch to use (default: <name>); created if it doesn't exist
-#   --from    base ref for a new branch (default: current HEAD)
+#   --from    base ref for a new branch. Respects LOCAL commits: bases off your
+#             local ref (use HEAD for the current one) and only falls back to the
+#             remote tip when local is strictly BEHIND its upstream (warns if ahead).
 #   --prompt  initial task to send once the session boots (~7s later)
 #   --model   model for the new session (e.g. opus); default = account default
-#   --reuse   start the session in an EXISTING free worktree (name or path); no
-#             new worktree/branch — the branch comes from that worktree
+#   --reuse   start the session in an EXISTING free worktree (name or path). Alone,
+#             it keeps the worktree's current branch; add --branch/--from to CLEAN
+#             it (reset --hard) and rebranch in one step — how leads recycle.
 #   --new     force-create a new worktree even if free ones exist
+#
+# A fresh worktree gets the main checkout's node_modules symlinked in (so workers
+# can run lint/typecheck/tests); opt out with CLAUDE_FLEET_LINK_NM=0.
 set -uo pipefail
 
-NAME=""; BRANCH=""; FROM=""; PROMPT=""; MODEL=""; REUSE=""; NEW=0
+NAME=""; BRANCH=""; BRANCH_SET=0; FROM=""; PROMPT=""; MODEL=""; REUSE=""; NEW=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --branch) BRANCH="${2:?}"; shift 2 ;;
+    --branch) BRANCH="${2:?}"; BRANCH_SET=1; shift 2 ;;
     --from)   FROM="${2:?}";   shift 2 ;;
     --prompt) PROMPT="${2:?}"; shift 2 ;;
     --model)  MODEL="${2:?}";  shift 2 ;;
@@ -44,7 +50,6 @@ GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
   || { echo "fleet-spawn: not inside a git repo" >&2; exit 1; }
 WT="$(dirname "$GITROOT")/$NAME"       # sibling worktree, matches the <proj>/<name> layout
 PARENT="$(dirname "$GITROOT")"
-[ -n "$BRANCH" ] || BRANCH="$NAME"
 CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 # who's live where — so we can tell free worktrees from occupied ones (same test
@@ -76,6 +81,46 @@ free_worktrees() {                     # "<basename> (<branch>, clean)" per free
       done
 }
 
+# Resolve --from to a concrete base ref, RESPECTING LOCAL commits. Echoes the ref
+# on stdout (warnings on stderr); empty --from -> "" (git uses current HEAD).
+#   local behind & not ahead -> the remote tip (don't start stale), warn
+#   local ahead (unpushed)   -> your LOCAL ref (has commits the remote lacks), warn
+#   HEAD / sha / tag / no upstream / in sync / diverged -> the ref as given, local
+resolve_base() {
+  local from="$1" ref up lr ahead behind
+  [ -n "$from" ] || return 0
+  if [ "$from" != HEAD ] && ! git -C "$GITROOT" show-ref --verify --quiet "refs/heads/$from"; then
+    echo "$from"; return 0                               # sha / tag / remote ref -> as-is
+  fi
+  ref="$from"; [ "$from" = HEAD ] && ref="$(git -C "$GITROOT" symbolic-ref --quiet --short HEAD 2>/dev/null)"
+  [ -n "$ref" ] || { echo "$from"; return 0; }           # detached HEAD -> as-is
+  up="$(git -C "$GITROOT" rev-parse --abbrev-ref --symbolic-full-name "$ref@{u}" 2>/dev/null)"
+  [ -n "$up" ] || { echo "$ref"; return 0; }             # no upstream -> local
+  git -C "$GITROOT" fetch --quiet "${up%%/*}" "${up#*/}" 2>/dev/null || true
+  lr="$(git -C "$GITROOT" rev-list --count --left-right "$ref...$up" 2>/dev/null)"
+  ahead="${lr%%	*}"; behind="${lr##*	}"; ahead="${ahead:-0}"; behind="${behind:-0}"
+  if [ "$behind" -gt 0 ] && [ "$ahead" -eq 0 ]; then
+    echo "fleet-spawn: local $ref is $behind behind $up — basing on the remote tip ($up); 'git pull' to catch local up" >&2
+    echo "$up"
+  elif [ "$ahead" -gt 0 ]; then
+    echo "fleet-spawn: local $ref is $ahead ahead of $up (unpushed) — basing on your LOCAL $ref, not the remote" >&2
+    echo "$ref"
+  else
+    echo "$ref"
+  fi
+}
+
+# Symlink the source checkout's node_modules into a fresh worktree so workers can
+# run lint/typecheck/tests (a new worktree has none). Opt out: CLAUDE_FLEET_LINK_NM=0.
+link_node_modules() {
+  local wt="$1"
+  case "${CLAUDE_FLEET_LINK_NM:-1}" in 0|off|no|false) return 0 ;; esac
+  [ -e "$wt/node_modules" ] && return 0                  # worktree already has its own
+  [ -d "$GITROOT/node_modules" ] || return 0             # nothing to link
+  ln -s "$GITROOT/node_modules" "$wt/node_modules" 2>/dev/null \
+    && echo "fleet-spawn: linked node_modules from the main checkout so tests/lint run (opt out: CLAUDE_FLEET_LINK_NM=0)" >&2
+}
+
 # --- resolve the worktree: reuse an existing free one, or create a new one -----
 if [ -n "$REUSE" ]; then
   case "$REUSE" in /*) WT="$REUSE" ;; *) WT="$PARENT/$REUSE" ;; esac
@@ -83,42 +128,47 @@ if [ -n "$REUSE" ]; then
     || { echo "fleet-spawn: '$REUSE' is not a worktree of this repo — see: fleet-worktrees" >&2; exit 1; }
   s="$(sess_for "$WT")"
   [ -z "$s" ] || { echo "fleet-spawn: worktree '$REUSE' is busy (session '$s'); pick a FREE one (fleet-worktrees)" >&2; exit 1; }
-  BRANCH="$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-  echo "fleet-spawn: reusing worktree $WT (branch $BRANCH)" >&2
+  if [ "$BRANCH_SET" = 1 ] || [ -n "$FROM" ]; then       # recycle: clean + rebranch in one step
+    [ -n "$BRANCH" ] || BRANCH="$NAME"
+    base="$(resolve_base "$FROM")"
+    git -C "$WT" reset --hard >/dev/null 2>&1
+    git -C "$WT" clean -fd   >/dev/null 2>&1
+    if git -C "$GITROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      git -C "$WT" checkout "$BRANCH" >&2 || exit 1
+    else
+      git -C "$WT" checkout -b "$BRANCH" ${base:+"$base"} >&2 || exit 1
+    fi
+    echo "fleet-spawn: recycled $WT onto '$BRANCH'${base:+ (from $base)}" >&2
+  else
+    BRANCH="$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    echo "fleet-spawn: reusing worktree $WT (branch $BRANCH)" >&2
+  fi
 elif [ -e "$WT" ]; then
   echo "fleet-spawn: $WT already exists — reusing it" >&2
-  BRANCH="$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "$BRANCH")"
+  BRANCH="$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "${BRANCH:-$NAME}")"
 else
+  [ -n "$BRANCH" ] || BRANCH="$NAME"
   # about to CREATE a new worktree — reuse a free one first if any exist (unless --new)
   if [ "$NEW" != 1 ]; then
     fw="$(free_worktrees)"
     if [ -n "$fw" ]; then
       { echo "fleet-spawn: free worktree(s) available — reuse one instead of making another:"
         printf '%s\n' "$fw" | sed 's/^/  /'
-        echo "  Reuse:     fleet-spawn $NAME --reuse <worktree>"
-        echo "  Force new: fleet-spawn $NAME --new"; } >&2
+        echo "  Reuse:    fleet-spawn $NAME --reuse <worktree>"
+        echo "  Recycle:  fleet-spawn $NAME --reuse <worktree> --branch <new> --from origin/main"
+        echo "  New:      fleet-spawn $NAME --new"; } >&2
       exit 1
     fi
   fi
   if git -C "$GITROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
     git -C "$GITROOT" worktree add "$WT" "$BRANCH" >&2 || exit 1
   else
-    # Base the new branch on a FRESH ref. If --from names a branch with a remote
-    # counterpart, fetch it and branch off the remote tip — so a new worktree never
-    # starts behind a stale local main (the footgun where workers begin N PRs behind).
-    BASE="$FROM"
-    if [ -n "$FROM" ]; then
-      remote="$(git -C "$GITROOT" config --get "branch.$FROM.remote" 2>/dev/null || echo origin)"
-      if git -C "$GITROOT" fetch --quiet "$remote" "$FROM" 2>/dev/null \
-         && git -C "$GITROOT" rev-parse --verify --quiet "refs/remotes/$remote/$FROM" >/dev/null; then
-        behind="$(git -C "$GITROOT" rev-list --count "$FROM..$remote/$FROM" 2>/dev/null || echo 0)"
-        [ "${behind:-0}" -gt 0 ] && echo "fleet-spawn: local $FROM was $behind commit(s) behind $remote/$FROM — basing $BRANCH on the fresh remote tip" >&2
-        BASE="$remote/$FROM"
-      fi
-    fi
-    git -C "$GITROOT" worktree add "$WT" -b "$BRANCH" ${BASE:+"$BASE"} >&2 || exit 1
+    base="$(resolve_base "$FROM")"
+    git -C "$GITROOT" worktree add "$WT" -b "$BRANCH" ${base:+"$base"} >&2 || exit 1
   fi
 fi
+
+link_node_modules "$WT"
 
 # unique session name on this fleet's socket
 name="$NAME"; i=2

@@ -44,22 +44,30 @@ which is what keeps a long-running or restarted lead from getting lost:
 |------|---------|
 | every worktree + which are **FREE** | `fleet-worktrees` |
 | live sessions + status | `fleet-list` |
-| who needs you (drains since last look) | `fleet-inbox` |
+| who needs you / what **finished** (drains since last look) | `fleet-inbox` |
 | dispatch a self-contained brief | `fleet-send <session> "…"` |
 | read a worker's last N messages | `fleet-read <session> [n]` |
 | **reuse** a free worktree for a worker | `fleet-spawn <name> --reuse <wt> --prompt "…"` |
+| **recycle** a worktree onto a fresh branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from main` |
 | new worktree (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] --new --prompt "…"` |
 | unblock a worker stuck on a dialog | `fleet-answer <session> "2"` |
 | park / resume a worker (cost) | `fleet-pause <session>` · `fleet-resume <session>` |
 
 ```bash
 fleet-worktrees                 # → "Free to reuse: api-3"
-fleet-inbox                     # → api-1 NEEDS YOU: permission to run tests
-fleet-answer api-1 "2"          # unblock it
-fleet-spawn fix-auth --reuse api-3 \
+fleet-inbox                     # → api-1 DONE (feat/x) · api-2 NEEDS YOU: run tests?
+fleet-answer api-2 "2"          # unblock the one waiting on a dialog
+fleet-spawn fix-auth --reuse api-3 --branch feat/auth --from main \
   --prompt "Fix token refresh in src/auth/*. Done when auth tests pass."
 fleet-read fix-auth 3           # check progress
 ```
+
+The **inbox carries completion too**: a worker's turn ending shows as `DONE`, so
+you learn when a brief is ready to review/merge without polling. A fresh worktree
+gets the main checkout's `node_modules` symlinked in (workers can run
+lint/typecheck/tests; opt out with `CLAUDE_FLEET_LINK_NM=0`), and `--from` bases a
+branch on your **local** ref — falling back to the remote tip only when local is
+*behind* — so a worker never misses just-committed, unpushed work.
 
 These are also exposed as **MCP tools** (`fleet_list` / `_send` / `_read` / `_spawn` /
 `_worktrees` / `_inbox` / `_answer` / `_pause` / `_resume`) via a dependency-free stdio server
