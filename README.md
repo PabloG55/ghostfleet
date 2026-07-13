@@ -94,7 +94,13 @@ events show up in `fleet-inbox`. Opt out with `CLAUDE_FLEET_GOVERNOR=off`, watch
 - **`fleet-grid.mjs`** is a flicker-free Node TUI (zero npm deps). Each card joins three sources:
   the tmux session list, the per-session status file that the Claude hooks write to
   `~/.claude/fleet/`, and the last assistant line from the transcript in `~/.claude/projects/`.
-- **`claude-here`** is what each session runs, so sessions resume by checkout.
+- **`claude-here`** is what each session runs, so sessions resume by checkout. If a
+  conversation was registered as a Claude Code **background agent** (e.g. it was
+  backgrounded, or created by a bg workflow), a plain `--resume` is refused with
+  "currently running as a background agent" — so `claude-here` detects that (via
+  `claude agents --json`) and resumes with `--fork-session`, branching an
+  interactive copy with full history. The fork becomes the newest conversation, so
+  the next open resumes it cleanly.
 
 Status per card: `● NEEDS YOU` (permission/question) · `◆ working` · `✓ ready` · `· idle`.
 When a session needs you or finishes, you also get a named macOS notification (checkout · branch).

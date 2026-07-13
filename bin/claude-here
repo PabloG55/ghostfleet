@@ -73,10 +73,27 @@ if [ -z "$resume_id" ] && [ -d "$dir" ]; then
   done < <(ls -t "$dir"/*.jsonl 2>/dev/null)
 fi
 
+# A conversation that's registered as a background agent can't be plain --resume'd:
+# Claude refuses with "currently running as a background agent (bg)" and drops to a
+# shell — which strands a fleet session (claude-here always resumes). If the target
+# is held as a bg agent, branch a copy with --fork-session instead. The fork becomes
+# the newest conversation in this dir, so the next open resumes it cleanly (no fork,
+# since a fork isn't a bg agent) — self-healing after one fork. If the check isn't
+# available it falls through to a plain resume (no worse than before).
+is_bg_agent() {
+  command -v claude >/dev/null 2>&1 || return 1
+  claude agents --json 2>/dev/null | grep -q "$1"
+}
+
 # 3) resume if we found a real one; otherwise start FRESH in this dir
 if [ -n "$resume_id" ]; then
+  FORK=()
+  if is_bg_agent "$resume_id"; then
+    echo "claude-here: $resume_id is held as a background agent — forking a copy (--fork-session)" >&2
+    FORK=(--fork-session)
+  fi
   echo "claude-here: resuming $resume_id in $PWD" >&2
-  exec claude "${YOLO[@]}" "${MODEL[@]}" --resume "$resume_id" "$@"
+  exec claude "${YOLO[@]}" "${MODEL[@]}" --resume "$resume_id" "${FORK[@]}" "$@"
 fi
 echo "claude-here: no resumable conversation in $PWD — starting fresh" >&2
 exec claude "${YOLO[@]}" "${MODEL[@]}" "$@"
