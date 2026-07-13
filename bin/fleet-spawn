@@ -196,8 +196,21 @@ mtmp="$MANIFEST.$$.tmp"
   printf '%s\t%s\t%s\t%s\n' "$WT" "$name" "$BRANCH" "$task"; } >"$mtmp" 2>/dev/null \
   && mv -f "$mtmp" "$MANIFEST" 2>/dev/null || rm -f "$mtmp" 2>/dev/null
 
-# optional initial prompt — send once Claude has booted (~7s), via the scheduler
+# optional initial prompt — dispatch once the worker's Claude is actually READY for
+# input, NOT after a fixed delay: v2.1 boot can take a minute+, and a prompt sent
+# before the input box exists is silently dropped (the worker then just sits idle).
+# Poll the pane for the input prompt / status bar, then fleet-send. Background so the
+# lead isn't blocked; falls back to sending after ~3min if no marker ever appears.
 if [ -n "$PROMPT" ]; then
-  nohup fleet-schedule "$SOCK" "$name" "$(( $(date +%s) + 7 ))" "$PROMPT" >/dev/null 2>&1 &
-  echo "fleet-spawn: will send the initial prompt in ~7s"
+  nohup bash -c '
+    sock="$1"; name="$2"; msg="$3"
+    for _ in $(seq 1 90); do
+      tmux -L "$sock" capture-pane -p -t "$name" 2>/dev/null \
+        | grep -qE "❯|bypass permissions|for shortcuts" && break
+      sleep 2
+    done
+    sleep 1
+    fleet-send -s "$sock" "$name" "$msg"
+  ' _ "$SOCK" "$name" "$PROMPT" >/dev/null 2>&1 &
+  echo "fleet-spawn: will dispatch the initial prompt once '$name' is ready for input"
 fi
