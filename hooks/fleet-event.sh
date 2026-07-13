@@ -114,9 +114,18 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
       last="$(cat "$stamp" 2>/dev/null || echo 0)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
       win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"; case "$win" in ''|*[!0-9]*) win=30 ;; esac
       if [ "$(( now - last ))" -ge "$win" ]; then
-        printf '%s\n' "$now" > "$stamp" 2>/dev/null
-        _sock="$CLAUDE_FLEET_SOCK"
-        ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+        # Don't clobber a half-typed message: the wake pastes + Enter into the
+        # master's input, so only fire when that input is EMPTY. If you're mid-typing
+        # (anything after the ❯ prompt), skip — the event stays in the inbox and the
+        # NEXT wake (once your box is clear) delivers it. Don't stamp on skip, so the
+        # next event re-checks right away instead of waiting out the cooldown.
+        inl="$(tmux -L "$CLAUDE_FLEET_SOCK" capture-pane -p -t master 2>/dev/null | grep '❯' | tail -1)"
+        inl="$(printf '%s' "${inl#*❯}" | tr -d '[:space:]│╭╮╰╯─|')"
+        if [ -z "$inl" ]; then
+          printf '%s\n' "$now" > "$stamp" 2>/dev/null
+          _sock="$CLAUDE_FLEET_SOCK"
+          ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+        fi
       fi
     fi
   fi
