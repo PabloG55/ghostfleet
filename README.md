@@ -64,7 +64,9 @@ fleet-read fix-auth 3           # check progress
 ```
 
 The **inbox carries completion too**: a worker's turn ending shows as `DONE`, so
-you learn when a brief is ready to review/merge without polling. A fresh worktree
+you learn when a brief is ready to review/merge without polling — and with
+`CLAUDE_FLEET_NOTIFY_LEAD=1` the lead is **woken** on `done`/`need-you` (debounced)
+so it acts hands-off instead of polling at all (see Config). A fresh worktree
 gets the main checkout's `node_modules` symlinked in (workers can run
 lint/typecheck/tests; opt out with `CLAUDE_FLEET_LINK_NM=0`), and `--from` bases a
 branch on your **local** ref — falling back to the remote tip only when local is
@@ -218,6 +220,7 @@ and `fleet-*` tools):
 | `CLAUDE_CONFIG_DIR`   | The account/config dir for the project's `profile`.              |
 | `CLAUDE_FLEET_DIR`    | Per-session status files (`$CLAUDE_CONFIG_DIR/fleet`).           |
 | `CLAUDE_FLEET_YOLO`   | `0` to require permission prompts in sessions (default: bypass). |
+| `CLAUDE_FLEET_NOTIFY_LEAD` | `1` to **push** worker `done`/`need-you` events to the lead — the hook wakes the master to drain the inbox, instead of the master polling. Debounced (a burst wakes it once); off by default (each wake costs a master turn). Also enable per-fleet, live, with `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead`; tune the coalesce window with `CLAUDE_FLEET_NOTIFY_DEBOUNCE` (seconds, default 30). |
 
 `claude-fleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).
 

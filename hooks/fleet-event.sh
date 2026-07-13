@@ -94,8 +94,30 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
   if   [ "$status" = "need-you" ]; then ev="need-you"; detail="${NOTE:0:120}"
   elif [ "$EVENT" = "Stop" ];      then ev="done";      detail="${folder}${branch:+ · $branch}"
   fi
-  [ -n "$ev" ] && printf '%s\t%s\t%s\t%s\n' "$now" "$SLOT" "$ev" "$detail" \
-    >> "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.inbox" 2>/dev/null || true
+  if [ -n "$ev" ]; then
+    printf '%s\t%s\t%s\t%s\n' "$now" "$SLOT" "$ev" "$detail" \
+      >> "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.inbox" 2>/dev/null || true
+
+    # Opt-in PUSH: instead of the lead polling, WAKE it so it drains the inbox and
+    # acts. Enable per fleet by `touch $FLEET_DIR/<sock>.notify-lead` (live, no
+    # restart) or export CLAUDE_FLEET_NOTIFY_LEAD=1 before launching the fleet.
+    # Debounced (leading-edge cooldown): the first event wakes the master, then
+    # events within CLAUDE_FLEET_NOTIFY_DEBOUNCE seconds (default 30) are suppressed,
+    # so a burst of finishes wakes it ONCE. OFF by default — each wake spends a
+    # master turn on the shared account. Never fires for the lead's own turns (this
+    # block is workers-only); fleet-send just queues if the master is mid-turn.
+    if { [ "${CLAUDE_FLEET_NOTIFY_LEAD:-0}" = 1 ] || [ -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify-lead" ]; } \
+       && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t master 2>/dev/null; then
+      stamp="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify.stamp"
+      last="$(cat "$stamp" 2>/dev/null || echo 0)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
+      win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"; case "$win" in ''|*[!0-9]*) win=30 ;; esac
+      if [ "$(( now - last ))" -ge "$win" ]; then
+        printf '%s\n' "$now" > "$stamp" 2>/dev/null
+        _sock="$CLAUDE_FLEET_SOCK"
+        ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+      fi
+    fi
+  fi
 fi
 
 # --- notify, detached so the hook returns fast -------------------------------

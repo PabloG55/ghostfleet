@@ -53,9 +53,11 @@ passively into an inbox you drain in one call:
 - **`fleet-inbox`** — shows what's new since you last looked, then marks it seen.
   Check it at the top of an orchestration turn; `fleet-read <worker> 3` only on the
   ones it flags. A `done` → dispatch the next step or merge; a `need-you` →
-  `fleet-answer`. (You still won't be *woken* while idle — check the inbox when you
-  next act; a truly hands-off push into the lead is intentionally not done, since it
-  would interrupt the lead and spend budget.)
+  `fleet-answer`. If the **push** is enabled for this fleet, you'll instead be
+  *woken* by a nudge — *"[fleet] a worker finished or needs you…"*. When you get it,
+  just drain `fleet-inbox` and act; it's an automated note, don't reply to it. (The
+  push is debounced — a burst of finishes wakes you once. If it's off, you're not
+  woken while idle, so drain the inbox whenever you next act.)
 
 ## Unblock a worker stuck on a prompt
 
