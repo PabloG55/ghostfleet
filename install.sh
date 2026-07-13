@@ -25,10 +25,10 @@ command -v tmux >/dev/null 2>&1 || echo "! tmux not found — the grid needs it.
 mkdir -p "$BIN_DIR"
 chmod +x "$REPO"/hooks/*.sh "$REPO"/bin/*
 
-for b in claude-fleet claude-here fleet-schedule fleet-send fleet-list fleet-read fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar fleet-worktrees fleet-answer fleet-inbox; do
+for b in claude-fleet claude-here fleet-schedule fleet-send fleet-list fleet-read fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar fleet-worktrees fleet-answer fleet-inbox fleet-stop; do
   ln -sf "$REPO/bin/$b" "$BIN_DIR/$b"
 done
-echo "✓ linked claude-fleet + helpers (here, schedule, send, list, read, spawn, jump, pause, resume, governor, statusbar, worktrees, answer, inbox) -> $BIN_DIR"
+echo "✓ linked claude-fleet + helpers (here, schedule, send, list, read, spawn, jump, pause, resume, governor, statusbar, worktrees, answer, inbox, stop) -> $BIN_DIR"
 
 # --- wire hooks into every Claude config dir (profile) ----------------------
 # Each profile (work=~/.claude, personal=~/.claude-personal, …) has its OWN

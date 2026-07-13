@@ -80,6 +80,11 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
   consumption).
 - **`fleet-resume <session> ["<task>"]`** — un-park it; with a task it wakes right
   away. (Sending any new prompt also un-parks a worker.)
+- **`fleet-stop <session>`** — done *for good*: kills the session and clears its
+  state. Pause is temporary; **stop is gone.** Use it when a worker is finished, or
+  when you removed its git worktree and the session now lingers as `dead` in
+  `fleet-list` (the fleet's only clean "stop"). It doesn't touch git — run
+  `git worktree prune` if the dir is stale.
 
 ## The core commands
 
@@ -95,6 +100,7 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | new worker (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] [--new] [--prompt "…"]` |
 | unblock a stuck worker | `fleet-answer <session> "<keys>"` |
 | park / resume (cost) | `fleet-pause <session>` / `fleet-resume <session>` |
+| stop a worker for good (or a dead orphan) | `fleet-stop <session>` |
 
 `fleet-spawn` accepts `--model opus` for heavier tracks (workers otherwise use the
 account default). It records each worker's task in a manifest, so `fleet-worktrees`

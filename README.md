@@ -52,6 +52,7 @@ which is what keeps a long-running or restarted lead from getting lost:
 | new worktree (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] --new --prompt "…"` |
 | unblock a worker stuck on a dialog | `fleet-answer <session> "2"` |
 | park / resume a worker (cost) | `fleet-pause <session>` · `fleet-resume <session>` |
+| **stop** a worker for good (or a dead orphan) | `fleet-stop <session>` |
 
 ```bash
 fleet-worktrees                 # → "Free to reuse: api-3"

@@ -40,6 +40,8 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_resume', description: 'Un-park a worker paused with fleet_pause; optionally dispatch a prompt to wake it immediately.',
     inputSchema: { type: 'object', properties: { session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_stop', description: "Cleanly STOP a worker for good: kill its session and clear its fleet state (status file, park/schedule markers + the schedule waiter, manifest entry). Use for a finished worker, or an ORPHAN whose git worktree was removed (its session lingers in fleet_list otherwise). Unlike fleet_pause (which only parks), this removes it. Does not touch git — run 'git worktree prune' if the dir is stale.",
+    inputSchema: { type: 'object', properties: { session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
 ];
 
 function callTool(name, a = {}) {
@@ -70,6 +72,7 @@ function callTool(name, a = {}) {
       if (a.prompt) args.push(String(a.prompt));
       return run('fleet-resume', args);
     }
+    case 'fleet_stop': return run('fleet-stop', [String(a.session)]);
     default: return `unknown tool: ${name}`;
   }
 }

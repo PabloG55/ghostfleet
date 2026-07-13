@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# fleet-stop [-s SOCKET] <session>
+#
+# Cleanly STOP a fleet worker: kill its tmux session and clear ALL of its fleet
+# state — the status file, the park + schedule markers (and the detached schedule
+# waiter, which outlives the session), and its manifest entry.
+#
+# Use it when a worker is done for good, or when it's an ORPHAN: `git worktree
+# remove <dir>` deletes the checkout but the worker's tmux session keeps running
+# (its cwd just vanishes), so it lingers in `fleet-list` forever. fleet-pause only
+# PARKS (keeps the session); this is the actual "stop".
+#
+# It does NOT touch git. If the worktree dir is now stale, tidy git's admin with
+# `git worktree prune` (or `git worktree remove --force <dir>`) in the repo.
+#
+# Socket defaults to $CLAUDE_FLEET_SOCK.
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
+SESSION="${1:-}"
+
+[ -n "$SOCK" ]    || { echo "fleet-stop: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+[ -n "$SESSION" ] || { echo "fleet-stop: usage: fleet-stop [-s socket] <session>" >&2; exit 1; }
+[ "$SESSION" = master ] && { echo "fleet-stop: refusing to stop 'master' (the lead)" >&2; exit 1; }
+[ -n "${CLAUDE_FLEET_SLOT:-}" ] && [ "$SESSION" = "$CLAUDE_FLEET_SLOT" ] \
+  && { echo "fleet-stop: refusing to stop the calling session ('$SESSION')" >&2; exit 1; }
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+
+# 1) kill the schedule waiter first — it's a detached process group that outlives
+#    the tmux session, so killing the session alone would leave it to fire later.
+sched="$FLEET_DIR/$SOCK.$SESSION.sched"
+if [ -f "$sched" ] && command -v jq >/dev/null 2>&1; then
+  pid="$(jq -r '.pid // empty' "$sched" 2>/dev/null)"
+  [ -n "$pid" ] && { kill -- "-$pid" 2>/dev/null; kill "$pid" 2>/dev/null; }
+fi
+
+# 2) kill the tmux session (this is what removes it from fleet-list / the grid)
+if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
+  tmux -L "$SOCK" kill-session -t "$SESSION" 2>/dev/null \
+    && echo "fleet-stop: killed session '$SESSION'"
+else
+  echo "fleet-stop: no live session '$SESSION' on $SOCK — clearing any leftover state" >&2
+fi
+
+# 3) clear its fleet state so nothing stale lingers
+rm -f "$FLEET_DIR/$SOCK.$SESSION.parked" "$FLEET_DIR/$SESSION.parked" \
+      "$FLEET_DIR/$SOCK.$SESSION.sched"  "$FLEET_DIR/$SESSION.sched"  2>/dev/null
+
+# manifest is keyed by worktree path with the session in field 2 — drop its line
+MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
+if [ -f "$MANIFEST" ]; then
+  mtmp="$MANIFEST.$$.tmp"
+  awk -F'\t' -v s="$SESSION" '$2!=s' "$MANIFEST" >"$mtmp" 2>/dev/null \
+    && mv -f "$mtmp" "$MANIFEST" 2>/dev/null || rm -f "$mtmp" 2>/dev/null
+fi
+
+# per-session status file(s) (keyed by session_id; .slot is the session name) so
+# it disappears from fleet-list / the grid immediately
+if command -v jq >/dev/null 2>&1; then
+  for f in "$FLEET_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    [ "$(jq -r '.slot // empty' "$f" 2>/dev/null)" = "$SESSION" ] && rm -f "$f" 2>/dev/null
+  done
+fi
+
+echo "fleet-stop: cleared '$SESSION' state. If its git worktree dir is stale, run: git worktree prune"

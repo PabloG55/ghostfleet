@@ -69,6 +69,12 @@ free=""; first=1
 while IFS=$'\t' read -r wt br; do
   [ -n "$wt" ] || continue
   base="${wt##*/}"
+  # a worktree dir that git still lists but no longer exists on disk (removed with
+  # rm -rf instead of `git worktree remove`) — flag it; `git worktree prune` tidies it.
+  if [ ! -d "$wt" ]; then
+    printf '%-16s %-22s %-14s %-7s %-14s %s\n' "$base" "${br:0:22}" "-" "gone" "-" "git worktree prune"
+    first=0; continue
+  fi
   sess="$(sess_for "$wt")"
   state=""; git=""; task="$(task_for "$wt")"; [ -n "$task" ] || task="-"
   git="$(git_state "$wt")"
