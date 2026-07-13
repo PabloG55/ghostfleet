@@ -220,7 +220,7 @@ and `fleet-*` tools):
 | `CLAUDE_CONFIG_DIR`   | The account/config dir for the project's `profile`.              |
 | `CLAUDE_FLEET_DIR`    | Per-session status files (`$CLAUDE_CONFIG_DIR/fleet`).           |
 | `CLAUDE_FLEET_YOLO`   | `0` to require permission prompts in sessions (default: bypass). |
-| `CLAUDE_FLEET_NOTIFY_LEAD` | `1` to **push** worker `done`/`need-you` events to the lead — the hook wakes the master to drain the inbox, instead of the master polling. Debounced (a burst wakes it once); off by default (each wake costs a master turn). Also enable per-fleet, live, with `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead`; tune the coalesce window with `CLAUDE_FLEET_NOTIFY_DEBOUNCE` (seconds, default 30). |
+| `CLAUDE_FLEET_NOTIFY_LEAD` | `1` to **push** worker `done`/`need-you` events to the lead — the hook wakes the master to drain the inbox, instead of the master polling. Debounced (a burst wakes it once); off by default (each wake costs a master turn). Enable live without restart via a marker: **all fleets** → `touch ~/.config/claude-fleet/notify-lead`; one fleet → `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead`. Tune the coalesce window with `CLAUDE_FLEET_NOTIFY_DEBOUNCE` (seconds, default 30). |
 
 `claude-fleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).
 

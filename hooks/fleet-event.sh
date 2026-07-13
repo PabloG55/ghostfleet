@@ -106,7 +106,9 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     # so a burst of finishes wakes it ONCE. OFF by default — each wake spends a
     # master turn on the shared account. Never fires for the lead's own turns (this
     # block is workers-only); fleet-send just queues if the master is mid-turn.
-    if { [ "${CLAUDE_FLEET_NOTIFY_LEAD:-0}" = 1 ] || [ -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify-lead" ]; } \
+    if { [ "${CLAUDE_FLEET_NOTIFY_LEAD:-0}" = 1 ] \
+         || [ -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify-lead" ] \
+         || [ -f "$HOME/.config/claude-fleet/notify-lead" ]; } \
        && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t master 2>/dev/null; then
       stamp="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify.stamp"
       last="$(cat "$stamp" 2>/dev/null || echo 0)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
