@@ -126,7 +126,8 @@ If a window is ever mis-matched, pin it in `~/.config/claude-fleet/windows`
 back out of the grid / master / projects, mirroring the in-session detach. `q` does the same on the
 Node screens.
 
-**Projects:** `↑↓←→` / `hjkl` move · `⏎` open (straight into that project's **Master Claude**) ·
+**Projects:** `↑↓←→` / `hjkl` move · `⇧`+`hjkl` **reorder** (move the selected project in the list;
+persisted to the config) · `⏎` open (straight into that project's **Master Claude**) ·
 `s` schedule a message to that project's **master** (great for "continue at 3am when the limit
 resets" — the card then shows `@3:50a`) · `x` remove a project from the list (its sessions + history
 are left untouched — re-add it any time) · `q` / `` ` `` quit.

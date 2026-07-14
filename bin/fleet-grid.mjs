@@ -729,6 +729,24 @@ function removeProject(name) {
   });
   try { fs.writeFileSync(PROJECTS_CFG, kept.join('\n')); } catch {}
 }
+// reorder: move a project `delta` positions in the list, persisted to the config
+// (~/.config/claude-fleet/projects). Comment lines are kept (floated to the top);
+// blank separators are dropped. Returns the project's new index, or -1.
+function reorderProject(name, delta) {
+  let lines;
+  try { lines = fs.readFileSync(PROJECTS_CFG, 'utf8').split('\n'); } catch { return -1; }
+  const isProj = l => { const t = l.replace(/\r$/, ''); return t.trim() && !t.startsWith('#'); };
+  const projs = lines.filter(isProj);
+  const comments = lines.filter(l => l.replace(/\r$/, '').trim().startsWith('#'));
+  const idx = projs.findIndex(l => l.replace(/\r$/, '').split('\t')[0] === name);
+  if (idx < 0) return -1;
+  const ni = Math.max(0, Math.min(projs.length - 1, idx + delta));
+  if (ni === idx) return idx;                     // already at the edge — nothing to do
+  const [moved] = projs.splice(idx, 1);
+  projs.splice(ni, 0, moved);
+  try { fs.writeFileSync(PROJECTS_CFG, [...comments, ...projs].join('\n') + '\n'); } catch {}
+  return ni;
+}
 function pRender() {
   if (pSchedFor) return pRenderSchedule();
   let buf = '\x1b[H';
@@ -758,7 +776,7 @@ function pRender() {
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ open · s schedule · x remove · q/\` quit${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎ open · s schedule · x remove · q/\` quit${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // schedule a message to a project's master (mirrors the grid's renderSchedule)
@@ -825,7 +843,17 @@ function onKeyProjects(key) {
   else if (key === '\x1b[B' || key === 'j') pMove('down');
   else if (key === '\x1b[C' || key === 'l') pMove('right');
   else if (key === '\x1b[D' || key === 'h') pMove('left');
-  else if (key === 'x' || key === 'X') { const it = pItems[pSel]; if (it?.project) pConfirmRemove = it.project.name; }
+  // ⇧+hjkl: reorder — move the selected project in the list (persisted).
+  else if (key === 'H' || key === 'L' || key === 'K' || key === 'J') {
+    const it = pItems[pSel];
+    if (it?.project) {
+      const nc = cols();
+      const delta = key === 'H' ? -1 : key === 'L' ? 1 : key === 'K' ? -nc : nc;
+      const ni = reorderProject(it.project.name, delta);
+      pBuild(); if (ni >= 0) pSel = ni;
+    }
+  }
+  else if (key === 'x') { const it = pItems[pSel]; if (it?.project) pConfirmRemove = it.project.name; }
   else if (key === 's' || key === 'S') {
     const it = pItems[pSel];
     if (it?.project) { pSchedFor = { proj: it.project, sock: sockOf(it.project), dir: path.join(profileDir(it.project.profile), 'fleet') }; pSchedInput = ''; }
