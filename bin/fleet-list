@@ -7,6 +7,10 @@
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
+# Prefer $TMUX (the live server this session runs in) over the env var — it's
+# drift-proof; a long-running --resume/--fork Claude can hold a stale
+# CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
 if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
 [ -n "$SOCK" ] || { echo "fleet-list: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 

@@ -42,6 +42,11 @@ done
 [ -n "$NAME" ] || { echo "fleet-spawn: usage: fleet-spawn <name> [--branch b] [--from ref] [--prompt \"...\"]" >&2; exit 1; }
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
+# Prefer $TMUX (the live tmux server this session actually runs in) over the env
+# var: it's drift-proof, whereas a long-running --resume/--fork Claude can hold a
+# STALE CLAUDE_FLEET_SOCK from an earlier context. Only trust it when it names a
+# cf-* (fleet) server. (route_to_owner below still refines this by repo owner.)
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
 [ -n "$SOCK" ] || { echo "fleet-spawn: no fleet socket (run inside a fleet session, or export CLAUDE_FLEET_SOCK)" >&2; exit 1; }
 command -v git  >/dev/null 2>&1 || { echo "fleet-spawn: git required"  >&2; exit 1; }
 command -v tmux >/dev/null 2>&1 || { echo "fleet-spawn: tmux required" >&2; exit 1; }
