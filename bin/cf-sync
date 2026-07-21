@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# cf-sync — copy the claude-fleet RUNTIME out of the git repo into a non-TCC
+# location so ClaudeCode.app (and any terminal) can actually execute it.
+#
+# WHY THIS EXISTS: the git repo lives under ~/Documents, which macOS guards with
+# TCC. An app that hasn't been granted "Documents folder" / Full Disk Access gets
+# EPERM ("Operation not permitted") trying to EXEC anything there — so the fleet
+# CLI, the event hook, and the MCP server all fail. ~/.local is NOT TCC-protected,
+# so we run the executables from a copy there and keep the repo purely for dev.
+#
+# install.sh copies the runtime here and records the source repo in <dest>/.source.
+# After you EDIT the repo, run `cf-sync` to push those edits into the live runtime.
+#
+#   cf-sync                 # sync recorded source repo -> live runtime
+#   cf-sync <repo-path>     # sync from an explicit repo (also re-records it)
+#
+# Live runtime dir: $CLAUDE_FLEET_HOME or ~/.local/libexec/claude-fleet
+set -uo pipefail
+
+# resolve our own install dir (follow symlinks) = the live runtime root's bin/
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
+DEST="${CLAUDE_FLEET_HOME:-$(cd "$(dirname "$src")/.." && pwd)}"
+
+# figure out the SOURCE repo: arg > recorded .source > give up with guidance
+REPO="${1:-}"
+[ -n "$REPO" ] || REPO="$(cat "$DEST/.source" 2>/dev/null || true)"
+if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
+  echo "cf-sync: don't know the source repo. Pass it once: cf-sync /path/to/claude-fleet" >&2
+  exit 1
+fi
+REPO="$(cd "$REPO" && pwd)"
+
+if [ "$REPO" = "$DEST" ]; then
+  echo "cf-sync: source and runtime are the same dir ($DEST) — nothing to do (repo isn't under TCC?)." >&2
+  exit 0
+fi
+
+# copy only the runtime dirs (not .git / README / tests); preserve perms so the
+# exec bits survive. Mirror each dir so deletions in the repo propagate.
+mkdir -p "$DEST"
+for d in bin tmux hooks mcp skill layouts; do
+  [ -d "$REPO/$d" ] || continue
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete "$REPO/$d/" "$DEST/$d/"
+  else
+    rm -rf "$DEST/$d"; mkdir -p "$DEST/$d"; cp -Rp "$REPO/$d/." "$DEST/$d/"
+  fi
+done
+printf '%s\n' "$REPO" > "$DEST/.source"
+
+echo "cf-sync: synced runtime  $REPO  ->  $DEST"
+echo "  (the ~/.local/bin symlinks + settings hook + MCP already point here; no relink needed)"
