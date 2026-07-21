@@ -10,6 +10,15 @@
 // (e.g. command="/Users/you/.local/bin/claude-fleet").
 
 layout {
+    // Free Ctrl-s inside the fleet session so the keystroke reaches the nested
+    // tmux, which binds it to "jump to the sessions grid" (see tmux/cf.tmux.conf).
+    // Zellij's default Ctrl-s (enter scroll mode) is scoped away here only — still
+    // reachable with the mouse / PageUp, and unchanged in your other sessions.
+    keybinds {
+        normal {
+            unbind "Ctrl s"
+        }
+    }
     tab name="fleet" {
         pane command="claude-fleet"
     }

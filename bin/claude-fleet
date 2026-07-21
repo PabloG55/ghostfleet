@@ -2,7 +2,7 @@
 # claude-fleet — the single control plane for parallel Claude Code sessions.
 # Run it as the one pane in your zellij session:
 #
-#   Projects  →  ⏎  →  Master Claude  →  C-a s  →  the session grid
+#   Projects  →  ⏎  →  Master Claude  →  C-s  →  the session grid
 #
 # Each project has its own hidden tmux server (cf-<project>) holding its sessions.
 # Node draws the screens; tmux does the PTY work. From master, ` (or C-a g) steps
@@ -90,7 +90,7 @@ ensure_governor() {
 }
 
 # the "master" lead session runs in the project's main checkout. From inside it,
-# `C-a s` writes a "<socket>.goto" marker (see tmux/cf.tmux.conf) then detaches;
+# `C-s` (or C-a s) writes a "<socket>.goto" marker (see tmux/cf.tmux.conf) then detaches;
 # we read that marker here to decide where to go next: the grid, or (on a plain
 # `/C-a g detach) back to Projects. Sets MASTER_GOTO for the caller.
 enter_master() {
@@ -187,7 +187,7 @@ while true; do
   fi
 
   # LEVEL 1 — Master Claude (⏎ on a project lands straight here). From master:
-  #   C-a s      -> the sessions grid; leaving the grid returns here to master
+  #   C-s        -> the sessions grid; leaving the grid returns here to master
   #   ` / C-a g  -> back to the Projects picker
   MASTER_GOTO=""
   enter_master
