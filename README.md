@@ -5,7 +5,7 @@ A zellij-native master CLI for running many **Claude Code** sessions in parallel
 One zellij session, one pane — `claude-fleet` is the whole control plane:
 
 ```
-Projects          ⏎→    Master Claude      C-a s→    the session grid
+Projects          ⏎→    Master Claude      C-s →    the session grid
  ▸ web                   the lead — spawns           api  api-1  api-2 …
  ▸ api                   & coordinates workers  ───▸  ⏎ enter · n new · N parallel
  ▸ + add project        ←`  (back to Projects)       ←`  (back to master)
@@ -14,8 +14,10 @@ Projects          ⏎→    Master Claude      C-a s→    the session grid
 - **Projects** — pick a project and `⏎` drops you straight into its **Master Claude**. `x` removes
   a project from the list; `+ add project` browses to a root folder. Each project has its own
   hidden tmux server (`cf-<project>`) holding its sessions.
-- **Master Claude** — the lead session that spawns worktrees and coordinates workers. `C-a s`
-  jumps to the session grid; `` ` `` (or `C-a g`) steps back to Projects.
+- **Master Claude** — the lead session that spawns worktrees and coordinates workers. `Ctrl-s`
+  (one chord, no prefix; `C-a s` still works as a fallback) jumps to the session grid; `` ` ``
+  (or `C-a g`) steps back to Projects. The fleet zellij layout frees `Ctrl-s` from zellij's
+  scroll mode so it reaches tmux — scroll is still on the mouse / `PageUp`.
 - **The grid** — a card per Claude session (status · branch · last message). Arrow to one, `⏎` to
   drop *inside* it full-screen; `` ` `` back to the grid. Every session keeps running in the
   background, so agents work in parallel while you jump between them. `` ` `` steps back to master.
@@ -122,23 +124,34 @@ If a window is ever mis-matched, pin it in `~/.config/claude-fleet/windows`
 
 ## Keys
 
-`` ` `` (backtick) is the universal **back** everywhere — it detaches you from a session and steps
-back out of the grid / master / projects, mirroring the in-session detach. `q` does the same on the
-Node screens.
+`` ` `` (backtick) is the universal **back** — it detaches you from a session and steps back out of
+the grid / master, mirroring the in-session detach. `q` does the same on the Node grid. **Projects**
+is the root, so there's nothing behind it: fully exiting to the shell takes **`Ctrl-C` twice** (a
+single stray key can't drop the whole control plane); the first press shows *"press ⌃C again to quit"*.
 
 **Projects:** `↑↓←→` / `hjkl` move · `⇧`+`hjkl` **reorder** (move the selected project in the list;
 persisted to the config) · `⏎` open (straight into that project's **Master Claude**) ·
 `s` schedule a message to that project's **master** (great for "continue at 3am when the limit
-resets" — the card then shows `@3:50a`) · `x` remove a project from the list (its sessions + history
-are left untouched — re-add it any time) · `q` / `` ` `` quit.
+resets" — the card then shows `@3:50a`) · `,` **settings** (per-project toggles, below) ·
+`x` remove a project from the list (its sessions + history
+are left untouched — re-add it any time) · **`Ctrl-C` twice** to quit to the shell (first press arms
+it: *"press ⌃C again to quit"*).
 
-**In master:** `C-a s` jumps to the **session grid**; `` ` `` (or `C-a g`) jumps back to **Projects**
+**Settings** (`,` on Projects): a per-project page to toggle the **worker → master auto-nudge**. When
+on, a worker that finishes or needs help pings its master to drain `fleet-inbox` (the *"[fleet] A
+worker finished or needs you…"* message). `↑↓`/`jk` move · `space`/`⏎` toggle the selected project ·
+`esc`/`` ` `` back. Each project shows `● on` / `○ off` and its source (`this project` vs `global
+default`). Toggling writes an explicit per-project choice that **overrides** the global default
+(`CLAUDE_FLEET_NOTIFY_LEAD` / `~/.config/claude-fleet/notify-lead`) — so you can leave the nudge on
+globally but silence it for one noisy project (or vice-versa). Takes effect immediately, no restart.
+
+**In master:** `Ctrl-s` jumps to the **session grid**; `` ` `` (or `C-a g`) jumps back to **Projects**
 (master is the per-project hub — leaving it means you're done with that project for now). Leaving
 the grid or a worker returns to master.
 
 **In the grid:** `↑↓←→` / `hjkl` move · `⏎` enter the selected session · `n` new session ·
 `N` new *parallel* session (fresh conversation) · `s` schedule a message · `x` kill session ·
-`q` / `` ` `` step back to master. (The `master` session is its own hub — reach it with `C-a s`, so
+`q` / `` ` `` step back to master. (The `master` session is its own hub — reach it with `Ctrl-s`, so
 it doesn't show here.)
 
 **Schedule a message** (`s` on a grid card — or on a **project** card, which targets that project's
@@ -150,8 +163,8 @@ detached waiter runs `tmux send-keys` at that time, keeping the Mac awake with `
 `sudo pmset schedule wake "MM/dd/yy HH:mm:ss"`.
 
 **Inside a session:** everything goes to Claude as normal. To pop back a level, detach:
-`Ctrl-a` then `g` (mnemonic: **g**rid) — or `Ctrl-a d`. From **master**, `Ctrl-a s` opens the
-session grid instead. The session keeps running.
+`Ctrl-a` then `g` (mnemonic: **g**rid) — or `Ctrl-a d`. From **master**, `Ctrl-s` (or `Ctrl-a s`)
+opens the session grid instead. The session keeps running.
 (`Ctrl-a` is the tmux prefix; press it twice to send a literal `Ctrl-a` to Claude.)
 
 ## Install
@@ -165,14 +178,31 @@ cd claude-fleet
 ./install.sh
 ```
 
-The installer symlinks the commands (`claude-fleet`, `claude-here`, and the `fleet-*` helpers —
-`list` / `send` / `read` / `spawn` / `worktrees` / `inbox` / `answer` / `pause` / `resume` /
-`schedule` / `jump` / `governor` / `statusbar`) into `~/.local/bin`; wires the status + notification
-hooks into every Claude config dir it finds (`~/.claude`, `~/.claude-*`, backing each up);
-**registers the fleet MCP server** into each config dir's `.claude.json` via `claude mcp add -s user`
-(Claude Code reads MCP from `.claude.json`/`.mcp.json`, *not* `settings.json`); installs the
-`claude-fleet-orchestrate` skill; and links the zellij layout. Optional but recommended for
-clickable notifications: `brew install terminal-notifier` (+ AeroSpace).
+The installer first **stages the runtime** — it copies `bin/`, `hooks/`, `mcp/`, `skill/`, and
+`layouts/` out of the repo into `~/.local/libexec/claude-fleet` (override with `CLAUDE_FLEET_HOME`)
+— then symlinks the commands (`claude-fleet`, `claude-here`, `cf-sync`, and the `fleet-*` helpers —
+`list` / `send` / `read` / `spawn` / `worktrees` / `inbox` / `answer` / `pause` / `resume` / `stop` /
+`schedule` / `jump` / `governor` / `statusbar`) into `~/.local/bin` **pointing at the staged copy**;
+wires the status + notification hooks into every Claude config dir it finds (`~/.claude`,
+`~/.claude-*`, backing each up); **registers the fleet MCP server** into each config dir's
+`.claude.json` via `claude mcp add -s user` (Claude Code reads MCP from `.claude.json`/`.mcp.json`,
+*not* `settings.json`); installs the `claude-fleet-orchestrate` skill; and links the zellij layout.
+Optional but recommended for clickable notifications: `brew install terminal-notifier` (+ AeroSpace).
+
+### Why the runtime is staged out of the repo (macOS TCC)
+
+macOS guards `~/Documents`, `~/Desktop`, and `~/Downloads` with **TCC**. An app that hasn't been
+granted *Documents folder* / *Full Disk Access* — notably **ClaudeCode.app** — gets
+`Operation not permitted` when it tries to **execute** anything stored there. So if you cloned this
+repo under `~/Documents`, running the fleet CLI, the event hook, or the MCP server *directly from
+the repo* breaks the instant such an app hosts your session (symlinks don't help — exec follows them
+back into the protected folder). `~/.local` is **not** TCC-protected, so the installer runs
+everything from the staged copy there and the repo stays purely for development.
+
+**After you edit the repo, run `cf-sync`** to push those edits into the live runtime (it copies the
+runtime dirs from the recorded source repo into `~/.local/libexec/claude-fleet`; the PATH symlinks,
+hook, and MCP already point there, so no re-link is needed). The alternative — granting ClaudeCode.app
+Full Disk Access — also works but can reset on app/OS updates; staging survives updates.
 
 ## Use it
 
@@ -183,7 +213,7 @@ zellij --layout fleet attach -c fleet    # or just run `claude-fleet` in any pan
 ```
 
 You land on the **Projects** picker. `⏎` on a project drops you into its **Master Claude**; from
-there `Ctrl-a s` opens the session grid. In the grid, `n` starts a session in a checkout, `N` a
+there `Ctrl-s` opens the session grid. In the grid, `n` starts a session in a checkout, `N` a
 fresh parallel one, `⏎` enters it, `` ` `` comes back, `q` steps up a level.
 
 **Projects** live in `~/.config/claude-fleet/projects` (`name<TAB>path<TAB>profile`). Add your first
@@ -221,7 +251,7 @@ and `fleet-*` tools):
 | `CLAUDE_CONFIG_DIR`   | The account/config dir for the project's `profile`.              |
 | `CLAUDE_FLEET_DIR`    | Per-session status files (`$CLAUDE_CONFIG_DIR/fleet`).           |
 | `CLAUDE_FLEET_YOLO`   | `0` to require permission prompts in sessions (default: bypass). |
-| `CLAUDE_FLEET_NOTIFY_LEAD` | `1` to **push** worker `done`/`need-you` events to the lead — the hook wakes the master to drain the inbox, instead of the master polling. Debounced (a burst wakes it once); off by default (each wake costs a master turn). Enable live without restart via a marker: **all fleets** → `touch ~/.config/claude-fleet/notify-lead`; one fleet → `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead`. Tune the coalesce window with `CLAUDE_FLEET_NOTIFY_DEBOUNCE` (seconds, default 30). It never clobbers your input: if you're mid-typing at the master (its input line isn't empty), the wake is skipped and the event is delivered on the next one. |
+| `CLAUDE_FLEET_NOTIFY_LEAD` | `1` to **push** worker `done`/`need-you` events to the lead — the hook wakes the master to drain the inbox, instead of the master polling. Debounced (a burst wakes it once); off by default (each wake costs a master turn). Enable live without restart via a marker: **all fleets** → `touch ~/.config/claude-fleet/notify-lead`; one fleet → `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead`. **Disable one fleet even when the global default is on** → `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead-off` (authoritative kill switch; beats the env var + both on-markers). The **Projects → `,` settings page** toggles these per-project markers for you. Tune the coalesce window with `CLAUDE_FLEET_NOTIFY_DEBOUNCE` (seconds, default 30). It never clobbers your input: if you're mid-typing at the master (its input line isn't empty), the wake is skipped and the event is delivered on the next one. |
 
 `claude-fleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).
 

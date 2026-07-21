@@ -12,6 +12,13 @@
 # (CLAUDE_CONFIG_DIR=~/.claude vs ~/.claude-personal) stay separate.
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 
+# Route by the LIVE tmux server ($TMUX), not a possibly-stale CLAUDE_FLEET_SOCK: a
+# long-running --resume/--fork Claude can hold an env var from an earlier context,
+# which would send this worker's inbox events / wake-nudge to the WRONG fleet's
+# master. $TMUX reflects the server this session actually runs in and can't drift.
+# Only when it names a cf-* (fleet) server; otherwise keep whatever env provided.
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) CLAUDE_FLEET_SOCK="${_t%%,*}"; CLAUDE_FLEET_SOCK="${CLAUDE_FLEET_SOCK##*/}" ;; esac
+
 # jq is required to parse the payload; if it's missing, do nothing quietly.
 command -v jq >/dev/null 2>&1 || exit 0
 mkdir -p "$FLEET_DIR" 2>/dev/null || exit 0
@@ -106,7 +113,15 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     # so a burst of finishes wakes it ONCE. OFF by default — each wake spends a
     # master turn on the shared account. Never fires for the lead's own turns (this
     # block is workers-only); fleet-send just queues if the master is mid-turn.
-    if { [ "${CLAUDE_FLEET_NOTIFY_LEAD:-0}" = 1 ] \
+    #
+    # Precedence (matches the TUI settings page, projects screen → ,):
+    #   <sock>.notify-lead-off  is an authoritative KILL SWITCH — if present this
+    #   fleet NEVER pushes, overriding the env var, the per-fleet on-marker, AND the
+    #   global default. That's how "disable worker→master nudges for THIS project"
+    #   works even when the global default is on. Otherwise push is on when any of
+    #   env=1 / per-fleet on-marker / global marker is set.
+    if [ ! -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify-lead-off" ] \
+       && { [ "${CLAUDE_FLEET_NOTIFY_LEAD:-0}" = 1 ] \
          || [ -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify-lead" ] \
          || [ -f "$HOME/.config/claude-fleet/notify-lead" ]; } \
        && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t master 2>/dev/null; then

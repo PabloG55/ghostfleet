@@ -709,6 +709,43 @@ let pSelInit = false;        // apply --select preselect exactly once (first bui
 let pConfirmRemove = null;   // project name awaiting remove confirmation
 let pSchedFor = null;        // { proj, sock, dir } — master being scheduled from the projects screen
 let pSchedInput = '';        // typed "<time> | <message>" buffer for the above
+let pQuitArmed = 0;          // ts of the first ⌃C; a second ⌃C within QUIT_WINDOW fully exits
+const QUIT_WINDOW = 2000;    // ms — how long the "press ⌃C again" arming lasts
+let pSettings = false;       // settings page open (per-project worker→master nudge)
+let pSetSel = 0;             // selected row on the settings page
+
+// ── worker → master auto-nudge (notify-lead) per-project settings ───────────
+// The hook (hooks/fleet-event.sh) pings a project's master when a worker finishes
+// or needs help, so it drains fleet-inbox. It's gated by markers this page toggles:
+//   <sock>.notify-lead-off  — authoritative OFF (wins over everything)
+//   <sock>.notify-lead      — per-project ON
+//   ~/.config/claude-fleet/notify-lead  — global default ON
+// (An env var CLAUDE_FLEET_NOTIFY_LEAD=1 can also turn it on at launch; the OFF
+// marker overrides that too. This page can't see the env, so it reports by marker.)
+const GLOBAL_NOTIFY = () => path.join(HOME, '.config', 'claude-fleet', 'notify-lead');
+function pushState(proj) {
+  const dir = path.join(profileDir(proj.profile), 'fleet');
+  const sock = sockOf(proj);
+  const off = fs.existsSync(path.join(dir, sock + '.notify-lead-off'));
+  const on  = fs.existsSync(path.join(dir, sock + '.notify-lead'));
+  const glob = fs.existsSync(GLOBAL_NOTIFY());
+  if (off)  return { on: false, source: 'off · this project' };
+  if (on)   return { on: true,  source: 'on · this project' };
+  if (glob) return { on: true,  source: 'on · global default' };
+  return { on: false, source: 'off · default' };
+}
+// Toggle the effective state, always writing an EXPLICIT per-project marker so the
+// project's choice is independent of (and survives changes to) the global default.
+function togglePush(proj) {
+  const dir = path.join(profileDir(proj.profile), 'fleet');
+  const sock = sockOf(proj);
+  const offP = path.join(dir, sock + '.notify-lead-off');
+  const onP  = path.join(dir, sock + '.notify-lead');
+  const nowOn = pushState(proj).on;
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  if (nowOn) { try { fs.writeFileSync(offP, ''); } catch {} try { fs.unlinkSync(onP); } catch {} }
+  else       { try { fs.writeFileSync(onP, '');  } catch {} try { fs.unlinkSync(offP); } catch {} }
+}
 function pBuild() {
   pItems = [...readProjects().map(p => ({ project: p })), { add: true }];
   if (!pSelInit) {           // first build: land on the just-exited project, if any
@@ -748,6 +785,7 @@ function reorderProject(name, delta) {
   return ni;
 }
 function pRender() {
+  if (pSettings) return pRenderSettings();
   if (pSchedFor) return pRenderSchedule();
   let buf = '\x1b[H';
   const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
@@ -776,7 +814,32 @@ function pRender() {
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎ open · s schedule · x remove · q/\` quit${C.reset}\x1b[K\n\x1b[J`;
+  const armed = pQuitArmed && Date.now() - pQuitArmed < QUIT_WINDOW;
+  const quit = armed
+    ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}`
+    : '⌃C ⌃C quit';
+  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎ open · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+// settings page: per-project toggle for the worker→master auto-nudge (notify-lead)
+function pRenderSettings() {
+  const projs = readProjects();
+  pSetSel = Math.max(0, Math.min(pSetSel, Math.max(0, projs.length - 1)));
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}settings${C.reset} ${C.dim}— worker → master auto-nudge, per project${C.reset}\x1b[K\n`;
+  const glob = fs.existsSync(GLOBAL_NOTIFY());
+  buf += ` ${C.dim}when on, a worker that finishes or needs help pings its master to drain ${C.reset}${C.bold}fleet-inbox${C.reset}${C.dim}.  global default: ${C.reset}${glob ? `${C.green}on` : `${C.grey}off`}${C.reset}\x1b[K\n\x1b[K\n`;
+  if (!projs.length) buf += ` ${C.dim}(no projects yet)${C.reset}\x1b[K\n`;
+  projs.forEach((p, i) => {
+    const st = pushState(p);
+    const sel = i === pSetSel;
+    const badge = st.on ? `${C.green}● on ${C.reset}` : `${C.grey}○ off${C.reset}`;
+    const cur = sel ? `${C.bold}${C.white}▸ ` : '   ';
+    const name = (sel ? C.bold + C.white : C.reset) + padEndV(p.name, 22) + C.reset;
+    const prof = padEndV(p.profile, 10);
+    buf += `${cur}${badge}  ${name} ${C.dim}${prof} ${st.source}${C.reset}\x1b[K\n`;
+  });
+  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space/⏎ toggle · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // schedule a message to a project's master (mirrors the grid's renderSchedule)
@@ -805,7 +868,7 @@ function pMove(d) { const nc = cols(); let n = pSel; if (d === 'left') n--; else
 function onKeyProjects(key) {
   const mev = parseMouse(key);
   if (mev) {
-    if (mev.press && mev.button === 0 && !pConfirmRemove && !pSchedFor) {
+    if (mev.press && mev.button === 0 && !pConfirmRemove && !pSchedFor && !pSettings) {
       const idx = cardAt(mev.x, mev.y, cols());
       if (idx >= 0 && idx < pItems.length) {
         pSel = idx;
@@ -815,6 +878,14 @@ function onKeyProjects(key) {
       }
     }
     return;
+  }
+  if (pSettings) {                                   // per-project auto-nudge toggles
+    const projs = readProjects();
+    if (key === '\x1b' || key === '\x03' || key === '\x60') { pSettings = false; }
+    else if (key === '\x1b[A' || key === 'k') pSetSel = Math.max(0, pSetSel - 1);
+    else if (key === '\x1b[B' || key === 'j') pSetSel = Math.min(Math.max(0, projs.length - 1), pSetSel + 1);
+    else if (key === ' ' || key === '\r' || key === '\n') { const p = projs[pSetSel]; if (p) togglePush(p); }
+    pRender(); return;
   }
   if (pSchedFor) {                                   // typing a scheduled message to a master
     if (key === '\x1b' || key === '\x03' || key === '\x60') { pSchedFor = null; pSchedInput = ''; }
@@ -838,7 +909,14 @@ function onKeyProjects(key) {
     else pConfirmRemove = null;
     pRender(); return;
   }
-  if (key === '\x03' || key === 'q' || key === '\x60') return finish('');
+  // Fully exiting to the shell (this is the ONLY screen whose quit does that)
+  // now takes ⌃C twice, so a single stray key can't drop the whole fleet UI.
+  // First ⌃C arms + shows a hint; a second within QUIT_WINDOW quits.
+  if (key === '\x03') {
+    if (pQuitArmed && Date.now() - pQuitArmed < QUIT_WINDOW) return finish('');
+    pQuitArmed = Date.now(); pRender(); return;
+  }
+  if (pQuitArmed) pQuitArmed = 0;                    // any other key disarms a pending quit
   if (key === '\x1b[A' || key === 'k') pMove('up');
   else if (key === '\x1b[B' || key === 'j') pMove('down');
   else if (key === '\x1b[C' || key === 'l') pMove('right');
@@ -858,6 +936,7 @@ function onKeyProjects(key) {
     const it = pItems[pSel];
     if (it?.project) { pSchedFor = { proj: it.project, sock: sockOf(it.project), dir: path.join(profileDir(it.project.profile), 'fleet') }; pSchedInput = ''; }
   }
+  else if (key === ',') { pSettings = true; pSetSel = 0; }   // open the settings page
   else if (key === '\r' || key === '\n') {
     const it = pItems[pSel];
     if (it?.add) return finish('addproject');
