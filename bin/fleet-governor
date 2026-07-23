@@ -7,31 +7,28 @@
 # budget) ON PURPOSE: the lead runs on the same account and stalls too, so metering
 # can't depend on it.
 #
-# Each tick it reads the 5h usage % off the workers' status bars and, as it climbs,
-# shrinks the number of active workers by parking the newest ones (fleet-pause) so
-# the survivors finish and bank their PRs instead of all stalling mid-task. When the
-# window resets (% drops below --resume), it auto-resumes the workers IT parked
-# (tagged so it never touches a worker you paused by hand).
+# Policy: let every worker run FULL TILT — no early throttling. Only step in at the
+# ceiling: at/above --pause-at (default 98%) it NOTIFIES you and parks ALL workers
+# at once; when the window recovers below --resume (default 90%) it resumes the ones
+# IT parked (never a worker you paused by hand).
 #
 #   -s SOCKET      fleet socket (default: $CLAUDE_FLEET_SOCK)
+#   --pause-at P   notify + park ALL workers at/above this 5h usage % (default 98)
+#   --resume P     resume governor-parked workers below this % (default 90)
 #   --interval N   seconds between ticks (default 60)
-#   --shed P       start shedding at this 5h usage % (default 80; keep < 85)
-#   --resume P     resume governor-parked workers below this % (default 75)
 #   --once         run one tick and exit (for testing / cron)
-#   --dry-run      log decisions, don't actually pause/resume
-#
-# Active-worker cap by usage %:  >=92 -> 1,  >=85 -> 2,  >=--shed -> 3,  else all.
+#   --dry-run      log decisions, don't actually pause/resume/notify
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
-INTERVAL=60; SHED=80; RESUME=75; ONCE=0; DRY=0
-T2=85; T1=92                       # fixed caps above --shed: 85% -> 2 active, 92% -> 1
+INTERVAL=60; PAUSE_AT=98; RESUME=90; ONCE=0; DRY=0
+COOLDOWN=900                          # min seconds between macOS "budget" alerts (anti-spam)
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)         SOCK="${2:?}"; shift 2 ;;
-    --interval) INTERVAL="${2:?}"; shift 2 ;;
-    --shed)     SHED="${2:?}"; shift 2 ;;
+    --pause-at) PAUSE_AT="${2:?}"; shift 2 ;;
     --resume)   RESUME="${2:?}"; shift 2 ;;
+    --interval) INTERVAL="${2:?}"; shift 2 ;;
     --once)     ONCE=1; shift ;;
     --dry-run)  DRY=1; shift ;;
     *) echo "fleet-governor: unknown arg $1" >&2; exit 1 ;;
@@ -41,14 +38,26 @@ done
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"      # sibling fleet-pause / fleet-resume
+PROJ="${SOCK#cf-}"
 log() { echo "[fleet-governor $(date +%H:%M:%S)] $*"; }
-# also drop park/resume events into the lead's attention feed (see fleet-inbox)
 INBOX="$FLEET_DIR/$SOCK.inbox"
 inbox() { printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$1" "$2" "$3" >> "$INBOX" 2>/dev/null || true; }
 
-# The 5h usage % from a pane's status bar: the "NN%(" field. Excludes ctx:NN%
-# (no paren after) and 7d:NN%( (colon-prefixed) by requiring a non-colon, non-digit
-# char right before the number.
+LAST_NOTIFY=0
+# "let me know" — a debounced macOS notification + the lead's inbox feed
+notify() {
+  local now msg="$1"; now="$(date +%s)"
+  inbox "fleet" budget "$msg"
+  [ "$DRY" = 1 ] && return 0
+  if [ $(( now - LAST_NOTIFY )) -ge "$COOLDOWN" ] && command -v osascript >/dev/null 2>&1; then
+    LAST_NOTIFY="$now"
+    ( osascript -e "display notification \"$msg\" with title \"🔔 claude-fleet — $PROJ\" sound name \"Ping\"" >/dev/null 2>&1 & )
+  fi
+}
+
+# The 5h usage % from a pane's status bar: the "NN%(" field. Excludes ctx:NN% (no
+# paren after) and 7d:NN%( (colon-prefixed) by requiring a non-colon, non-digit char
+# right before the number.
 pct_of() {
   tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null \
     | grep -oE '[^:0-9][0-9]+%\(' | grep -oE '[0-9]+' | tail -1
@@ -68,20 +77,34 @@ workers_newest_first() {
 }
 is_parked()  { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
 gov_parked() { is_parked "$1" && grep -q '^governor' "$FLEET_DIR/$SOCK.$1.parked" 2>/dev/null; }
-cap_for() {
-  local p="$1"
-  if   [ "$p" -ge "$T1" ];   then echo 1
-  elif [ "$p" -ge "$T2" ];   then echo 2
-  elif [ "$p" -ge "$SHED" ]; then echo 3
-  else echo 999; fi
-}
 
 tick() {
-  local pct cap n to_shed w resumed active
+  local pct w active resumed n
   pct="$(budget)"
   if [ -z "$pct" ] || [ "$pct" -eq 0 ]; then log "no budget reading this tick"; return; fi
 
-  # recovered / window reset -> resume what WE parked (leave hand-paused workers alone)
+  # AT/ABOVE the ceiling -> notify + park ALL workers at once (once per episode)
+  if [ "$pct" -ge "$PAUSE_AT" ]; then
+    active=()
+    for w in $(workers_newest_first); do is_parked "$w" || active+=("$w"); done
+    n=${#active[@]}
+    if [ "$n" -gt 0 ]; then
+      log "budget ${pct}% >= ${PAUSE_AT}% -> parking ALL ${n} worker(s)"
+      notify "budget ${pct}% — parked ${n} worker(s); auto-resume under ${RESUME}%"
+      for w in "${active[@]}"; do
+        log "  park $w"
+        if [ "$DRY" != 1 ] && "$BIN_DIR/fleet-pause" -s "$SOCK" "$w" >/dev/null 2>&1; then
+          printf 'governor %s\n' "$(date +%s)" > "$FLEET_DIR/$SOCK.$w.parked"
+          inbox "$w" parked "governor: budget ${pct}% — ceiling, parked all"
+        fi
+      done
+    else
+      log "budget ${pct}% — all workers parked, holding for recovery"
+    fi
+    return
+  fi
+
+  # RECOVERED -> resume what WE parked (leave hand-paused workers alone)
   if [ "$pct" -lt "$RESUME" ]; then
     resumed=0
     for w in $(workers_newest_first); do
@@ -98,32 +121,12 @@ tick() {
     return
   fi
 
-  # under pressure -> shed newest active workers down to the cap
-  cap="$(cap_for "$pct")"
-  active=()
-  for w in $(workers_newest_first); do is_parked "$w" || active+=("$w"); done
-  n=${#active[@]}
-  if [ "$n" -gt "$cap" ]; then
-    to_shed=$(( n - cap ))
-    log "budget ${pct}% -> cap ${cap}; ${n} active -> parking ${to_shed} newest"
-    for w in "${active[@]}"; do
-      [ "$to_shed" -gt 0 ] || break
-      log "  park $w"
-      if [ "$DRY" != 1 ]; then
-        if "$BIN_DIR/fleet-pause" -s "$SOCK" "$w" >/dev/null 2>&1; then
-          printf 'governor %s\n' "$(date +%s)" > "$FLEET_DIR/$SOCK.$w.parked"
-          inbox "$w" parked "governor: budget ${pct}% — shed to cap ${cap}"
-        fi
-      fi
-      to_shed=$(( to_shed - 1 ))
-    done
-  else
-    log "budget ${pct}% -> cap ${cap}; ${n} active (ok)"
-  fi
+  # between RESUME and PAUSE_AT -> full throttle, do nothing
+  log "budget ${pct}% (running full-throttle; ceiling ${PAUSE_AT}%)"
 }
 
-modelabel="ACTIVE (will pause workers)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"
-log "started on $SOCK — $modelabel — shed>=${SHED}%, resume<${RESUME}%, caps ${T2}%->2 ${T1}%->1, interval ${INTERVAL}s"
+modelabel="ACTIVE (parks all at ceiling)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"
+log "started on $SOCK — $modelabel — pause-all>=${PAUSE_AT}%, resume<${RESUME}%, interval ${INTERVAL}s"
 if [ "$ONCE" = 1 ]; then
   tick
 else
