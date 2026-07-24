@@ -51,6 +51,9 @@ fi
 # 3) clear its fleet state so nothing stale lingers
 rm -f "$FLEET_DIR/$SOCK.$SESSION.parked" "$FLEET_DIR/$SESSION.parked" \
       "$FLEET_DIR/$SOCK.$SESSION.sched"  "$FLEET_DIR/$SESSION.sched"  2>/dev/null
+# per-session auto-nudge overrides (grid settings page) — drop them too, so a future
+# session that reuses this name doesn't silently inherit a stale explicit on/off.
+rm -f "$FLEET_DIR/$SOCK.$SESSION.notify-lead" "$FLEET_DIR/$SOCK.$SESSION.notify-lead-off" 2>/dev/null
 
 # manifest is keyed by worktree path with the session in field 2 — drop its line
 MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"

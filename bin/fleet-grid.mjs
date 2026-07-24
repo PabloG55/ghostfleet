@@ -234,6 +234,35 @@ function resumeSession(name) {
   clearParked(name);
 }
 
+// ── worker → master auto-nudge, PER SESSION ─────────────────────────────────
+// Same markers as the per-project page (projects screen → ,) but namespaced with
+// the session: <sock>.<session>.notify-lead[-off]. Most specific wins, so one noisy
+// worker can be silenced without touching the project — and one worker can push
+// while the rest of the project stays quiet. (hooks/fleet-event.sh reads these.)
+function projPushOn() {                       // what "inherit" resolves to here
+  if (fs.existsSync(path.join(FLEET_DIR, SOCK + '.notify-lead-off'))) return false;
+  if (fs.existsSync(path.join(FLEET_DIR, SOCK + '.notify-lead'))) return true;
+  return fs.existsSync(path.join(HOME, '.config', 'claude-fleet', 'notify-lead'));
+}
+function sessPushFiles(name) {
+  return { on: path.join(FLEET_DIR, `${SOCK}.${name}.notify-lead`),
+           off: path.join(FLEET_DIR, `${SOCK}.${name}.notify-lead-off`) };
+}
+function sessPush(name) {                     // 'on' | 'off' | 'inherit'
+  const f = sessPushFiles(name);
+  try { if (fs.existsSync(f.off)) return 'off'; if (fs.existsSync(f.on)) return 'on'; } catch {}
+  return 'inherit';
+}
+function cycleSessPush(name) {                // inherit → on → off → inherit
+  const f = sessPushFiles(name), cur = sessPush(name);
+  try { fs.mkdirSync(FLEET_DIR, { recursive: true }); } catch {}
+  try { fs.unlinkSync(f.on); } catch {}
+  try { fs.unlinkSync(f.off); } catch {}
+  if (cur === 'inherit') { try { fs.writeFileSync(f.on, ''); } catch {} }
+  else if (cur === 'on') { try { fs.writeFileSync(f.off, ''); } catch {} }
+  // 'off' → inherit: both markers already removed
+}
+
 // ── scheduling (send a message to a session at a time) ──────────────────────
 function parseWhen(str) {
   const s = String(str || '').trim().toLowerCase();
@@ -397,6 +426,8 @@ let schedFor = null;         // session name being scheduled
 let schedInput = '';         // typed "<time> | <message>" buffer
 let timer;                   // refresh interval (session grid / projects)
 let selInit = false;         // apply --select preselect exactly once (first build)
+let gSettings = false;       // per-session settings page open (auto-nudge)
+let gSetSel = 0;             // selected row on the per-session settings page
 
 function buildItems() {
   cards = gather();
@@ -437,7 +468,7 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · s sched · p pause · P resume · x kill · q/\` back${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · s sched · p pause · P resume · x kill · , settings · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -482,8 +513,30 @@ function renderSchedule() {
   buf += `${C.dim} ⏎ schedule · empty + ⏎ clears a pending one · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
+// settings page: per-SESSION toggle for the worker→master auto-nudge
+function renderSettings() {
+  const names = cards.map(c => c.name);
+  gSetSel = Math.max(0, Math.min(gSetSel, Math.max(0, names.length - 1)));
+  const pOn = projPushOn();
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}settings${C.reset} ${C.dim}— worker → master auto-nudge, per session${C.reset}\x1b[K\n`;
+  buf += ` ${C.dim}a session's own setting wins over the project's.  project ${C.reset}${C.bold}${Z}${C.reset}${C.dim}: ${C.reset}` +
+         `${pOn ? `${C.green}on` : `${C.grey}off`}${C.reset} ${C.dim}(change on the projects screen → ,)${C.reset}\x1b[K\n\x1b[K\n`;
+  if (!names.length) buf += ` ${C.dim}(no sessions yet)${C.reset}\x1b[K\n`;
+  names.forEach((n, i) => {
+    const st = sessPush(n), selRow = i === gSetSel;
+    const badge = st === 'on'  ? `${C.green}● on     ${C.reset}`
+                : st === 'off' ? `${C.red}○ off    ${C.reset}`
+                :                `${C.grey}· inherit${C.reset}`;
+    const detail = st === 'inherit' ? `follows project · ${pOn ? 'on' : 'off'}` : 'this session';
+    buf += `${selRow ? `${C.bold}${C.white}▸ ` : '   '}${badge}  ` +
+           `${(selRow ? C.bold + C.white : C.reset) + padEndV(n, 22) + C.reset} ${C.dim}${detail}${C.reset}\x1b[K\n`;
+  });
+  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space/⏎ cycle inherit → on → off · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
 function render() {
-  if (mode === 'grid') renderGrid();
+  if (mode === 'grid') { if (gSettings) renderSettings(); else renderGrid(); }
   else if (mode === 'picker') renderPicker();
   else renderSchedule();
 }
@@ -539,6 +592,14 @@ function onKey(key) {
     return;   // swallow other mouse events (release, scroll, non-grid modes, misses)
   }
   if (mode === 'grid') {
+    if (gSettings) {                                 // per-session auto-nudge toggles
+      const names = cards.map(c => c.name);
+      if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') gSettings = false;
+      else if (key === '\x1b[A' || key === 'k') gSetSel = Math.max(0, gSetSel - 1);
+      else if (key === '\x1b[B' || key === 'j') gSetSel = Math.min(Math.max(0, names.length - 1), gSetSel + 1);
+      else if (key === ' ' || key === '\r' || key === '\n') { const n = names[gSetSel]; if (n) cycleSessPush(n); }
+      render(); return;
+    }
     if (confirmKill) {
       if (key === 'y' || key === 'Y') { killSession(confirmKill); confirmKill = null; buildItems(); }
       else confirmKill = null;
@@ -555,6 +616,11 @@ function onKey(key) {
     else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
     else if (key === 'p') { const it = items[sel]; if (it?.card) pauseSession(it.card.name); }
     else if (key === 'P') { const it = items[sel]; if (it?.card) resumeSession(it.card.name); }
+    else if (key === ',') {                          // per-session auto-nudge settings
+      gSettings = true;
+      const it = items[sel]; const i = it?.card ? cards.findIndex(c => c.name === it.card.name) : 0;
+      gSetSel = i >= 0 ? i : 0;                      // land on the session you had selected
+    }
     else if (key === '\r' || key === '\n') {
       const it = items[sel];
       if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }

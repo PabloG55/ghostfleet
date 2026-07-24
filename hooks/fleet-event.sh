@@ -120,10 +120,21 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     #   global default. That's how "disable worker→master nudges for THIS project"
     #   works even when the global default is on. Otherwise push is on when any of
     #   env=1 / per-fleet on-marker / global marker is set.
-    if [ ! -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify-lead-off" ] \
-       && { [ "${CLAUDE_FLEET_NOTIFY_LEAD:-0}" = 1 ] \
-         || [ -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify-lead" ] \
-         || [ -f "$HOME/.config/claude-fleet/notify-lead" ]; } \
+    # MOST SPECIFIC WINS: a per-SESSION marker (<sock>.<session>.notify-lead[-off],
+    # set from the grid's settings page) overrides the project's, which overrides the
+    # env var / global default. So one noisy worker can be silenced without touching
+    # the project, and one worker can push while the rest of the project stays quiet.
+    _sm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}"
+    _pm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}"
+    _push=0
+    if   [ -n "$SLOT" ] && [ -f "$_sm.notify-lead-off" ]; then _push=0
+    elif [ -n "$SLOT" ] && [ -f "$_sm.notify-lead" ];     then _push=1
+    elif [ -f "$_pm.notify-lead-off" ];                   then _push=0
+    elif [ "${CLAUDE_FLEET_NOTIFY_LEAD:-0}" = 1 ] \
+      || [ -f "$_pm.notify-lead" ] \
+      || [ -f "$HOME/.config/claude-fleet/notify-lead" ]; then _push=1
+    fi
+    if [ "$_push" = 1 ] \
        && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t master 2>/dev/null; then
       stamp="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify.stamp"
       last="$(cat "$stamp" 2>/dev/null || echo 0)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
