@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# fleet-companion [-s SOCKET] [session|path]
+#
+# Start a SECOND Claude session in the SAME worktree — a companion to ask questions
+# in while the first one keeps working. Same files, same branch, separate
+# conversation (fresh, never resumed). Nothing is branched or copied.
+#
+#   no arg      companion for the worktree you're standing in (cwd)
+#   <session>   companion for that session's worktree (its pane cwd)
+#   <path>      companion for that directory
+#
+# Named "<base>~q", "<base>~q2", … so it's obvious which card is the companion.
+# It shares the repo with the worker: two Claudes editing the same files can
+# conflict, so keep the companion to questions/reading unless you mean otherwise.
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
+TARGET="${1:-}"
+
+[ -n "$SOCK" ] || { echo "fleet-companion: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+command -v tmux >/dev/null 2>&1 || { echo "fleet-companion: tmux required" >&2; exit 1; }
+
+# resolve the worktree dir
+if [ -z "$TARGET" ]; then
+  DIR="$PWD"
+elif [ -d "$TARGET" ]; then
+  DIR="$TARGET"
+elif tmux -L "$SOCK" has-session -t "$TARGET" 2>/dev/null; then
+  DIR="$(tmux -L "$SOCK" display-message -t "$TARGET" -p '#{pane_current_path}' 2>/dev/null)"
+  [ -n "$DIR" ] || { echo "fleet-companion: could not read '$TARGET' cwd" >&2; exit 1; }
+else
+  echo "fleet-companion: '$TARGET' is neither a directory nor a session on $SOCK (see: fleet-list)" >&2; exit 1
+fi
+DIR="$(cd "$DIR" 2>/dev/null && pwd)" || { echo "fleet-companion: bad directory" >&2; exit 1; }
+
+CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+base="${DIR##*/}"
+name="$base~q"; i=2
+while tmux -L "$SOCK" has-session -t "$name" 2>/dev/null; do name="$base~q$i"; i=$((i + 1)); done
+
+# CLAUDE_FLEET_FRESH=1 -> a deliberately NEW conversation in a dir that already has
+# one (claude-here would otherwise resume the worker's transcript).
+tmux -L "$SOCK" new-session -d -s "$name" -c "$DIR" \
+  -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
+  "exec claude-here \"$name\"" || { echo "fleet-companion: failed to start session" >&2; exit 1; }
+
+echo "fleet-companion: started '$name' in $DIR (same worktree, fresh conversation)"
+echo "fleet-companion: jump in from the grid, or ask it: fleet-send $name \"<question>\""

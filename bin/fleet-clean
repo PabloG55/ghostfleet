@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# fleet-clean [-s SOCKET] [--go]
+#
+# Tear down FINISHED work in the current fleet. DRY RUN by default — prints exactly
+# what it would do; re-run with --go to actually apply it.
+#
+# Removes:
+#   • worktrees safe to drop — clean (no uncommitted changes), NO live session, and
+#     no local-only commits (fully pushed, OR nothing beyond main, OR a scratch/*
+#     throwaway). Then `git worktree remove` + prune.
+#   • their branch, when it's clearly done — merged into main, upstream "gone"
+#     (remote branch deleted after a squash-merge), or scratch/*.
+#   • stale fleet state — dead *.governor.pid, orphan *.parked / *.sched markers.
+#
+# NEVER touches: the main checkout (master's home), a worktree with a live session,
+# one with uncommitted or unpushed work, or Claude's own .claude/worktrees/agent-*
+# trees (--agents opts in) — those are listed as "keep — <why>".
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+GO=0; AGENTS=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s)       SOCK="${2:?}"; shift 2 ;;
+    --go)     GO=1; shift ;;
+    --agents) AGENTS=1; shift ;;      # also sweep Claude's own .claude/worktrees/agent-* trees
+    *) echo "fleet-clean: unknown arg $1" >&2; exit 1 ;;
+  esac
+done
+[ -n "$SOCK" ] || { echo "fleet-clean: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+command -v git >/dev/null 2>&1 || { echo "fleet-clean: git required" >&2; exit 1; }
+GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
+  || { echo "fleet-clean: not inside a git repo" >&2; exit 1; }
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+
+MAIN="$(git -C "$GITROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"; MAIN="${MAIN#origin/}"
+[ -n "$MAIN" ] || MAIN=main
+
+run() { if [ "$GO" = 1 ]; then eval "$1"; else echo "      would: $1"; fi; }
+
+echo "fleet-clean · $SOCK · repo $GITROOT · main=$MAIN · $([ "$GO" = 1 ] && echo 'EXECUTING' || echo 'DRY RUN (add --go to apply)')"
+git -C "$GITROOT" fetch --prune --quiet origin 2>/dev/null || true   # refresh 'gone' upstream tracking
+
+panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null || true)"
+sess_for() { local wt="$1" p s; while IFS=$'\t' read -r p s; do [ -n "$p" ] || continue
+  case "$p" in "$wt"|"$wt"/*) echo "$s"; return ;; esac; done <<EOF
+$panes
+EOF
+}
+
+echo "worktrees:"
+first=1; removed=0; kept=0
+while IFS=$'\t' read -r wt br; do
+  [ -n "$wt" ] || continue
+  if [ "$first" = 1 ]; then first=0; continue; fi            # main checkout — never touch
+  base="${wt##*/}"
+  # Claude Code's OWN subagent worktrees (Agent tool, isolation:worktree). A live
+  # subagent runs inside a Claude process, NOT a tmux session, so the no-live-session
+  # test can't see it — removing one could yank the rug from a running agent. Claude
+  # cleans these up itself. Skip unless explicitly asked.
+  case "$wt" in
+    */.claude/worktrees/*)
+      if [ "$AGENTS" != 1 ]; then
+        echo "  keep $base — Claude agent worktree (use --agents to include)"; kept=$((kept+1)); continue
+      fi ;;
+  esac
+  if [ ! -d "$wt" ]; then echo "  prune $base (dir gone)"; run "git -C '$GITROOT' worktree prune"; continue; fi
+  s="$(sess_for "$wt")"
+  [ -z "$s" ] || { echo "  keep $base — live session '$s'"; kept=$((kept+1)); continue; }
+  [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || { echo "  keep $base — uncommitted changes"; kept=$((kept+1)); continue; }
+
+  safe=0; why=""
+  case "$br" in scratch/*) safe=1; why="scratch throwaway" ;; esac
+  if [ "$safe" = 0 ]; then
+    up="$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+    if [ -n "$up" ] && [ "$(git -C "$wt" rev-list --count "$up..HEAD" 2>/dev/null || echo 1)" = 0 ]; then
+      safe=1; why="fully pushed"
+    elif [ "$(git -C "$GITROOT" rev-list --count "$MAIN..$br" 2>/dev/null || echo 1)" = 0 ]; then
+      safe=1; why="no commits beyond $MAIN"
+    fi
+  fi
+  [ "$safe" = 1 ] || { echo "  keep $base — unpushed local commits on '$br'"; kept=$((kept+1)); continue; }
+
+  echo "  remove $base ($br) — $why"
+  run "git -C '$GITROOT' worktree remove '$wt'"
+  del=0; dwhy=""
+  case "$br" in scratch/*) del=1; dwhy="scratch" ;; esac
+  if [ "$del" = 0 ] && [ -n "$br" ] && [ "$br" != "$MAIN" ] && [ "$br" != "(detached)" ]; then
+    if git -C "$GITROOT" branch --merged "$MAIN" 2>/dev/null | sed 's/^[* ] *//' | grep -qxF "$br"; then del=1; dwhy="merged into $MAIN"
+    elif git -C "$GITROOT" for-each-ref --format='%(upstream:track)' "refs/heads/$br" 2>/dev/null | grep -q gone; then del=1; dwhy="remote branch gone (squash-merged)"; fi
+  fi
+  [ "$del" = 1 ] && { echo "      delete branch $br — $dwhy"; run "git -C '$GITROOT' branch -D '$br'"; }
+  removed=$((removed+1))
+done <<EOF
+$(git -C "$GITROOT" worktree list --porcelain 2>/dev/null | awk '
+  /^worktree /{ if(wt!=""&&!skip)print wt"\t"br; wt=substr($0,10); br="(detached)"; skip=0 }
+  /^branch / { b=$2; sub("refs/heads/","",b); br=b }
+  /^bare$/   { skip=1 }
+  /^$/       { if(wt!=""&&!skip){print wt"\t"br; wt=""} }
+  END        { if(wt!=""&&!skip)print wt"\t"br }
+')
+EOF
+run "git -C '$GITROOT' worktree prune"
+
+echo "stale fleet state:"
+for pidf in "$FLEET_DIR"/*.governor.pid; do
+  [ -f "$pidf" ] || continue
+  pid="$(cat "$pidf" 2>/dev/null)"
+  # stale = the pid is gone OR has been recycled by something that isn't a governor
+  case "$(ps -o command= -p "${pid:-0}" 2>/dev/null)" in
+    *fleet-governor*) ;;
+    "") echo "  dead $(basename "$pidf") (pid ${pid:-?} gone)"; run "rm -f '$pidf'" ;;
+    *)  echo "  stale $(basename "$pidf") (pid ${pid:-?} is not a governor)"; run "rm -f '$pidf'" ;;
+  esac
+done
+live="$(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null || true)"
+for mk in "$FLEET_DIR/$SOCK".*.parked "$FLEET_DIR/$SOCK".*.sched; do
+  [ -f "$mk" ] || continue
+  b="$(basename "$mk")"; sn="${b#"$SOCK".}"; sn="${sn%.parked}"; sn="${sn%.sched}"
+  printf '%s\n' "$live" | grep -qxF "$sn" || { echo "  orphan $b (no live '$sn')"; run "rm -f '$mk'"; }
+done
+
+echo
+[ "$GO" = 1 ] && echo "fleet-clean: done — removed $removed worktree(s), kept $kept." \
+             || echo "fleet-clean: dry run — nothing changed. Re-run with --go to apply."
