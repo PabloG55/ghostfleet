@@ -63,10 +63,21 @@ function tmuxList() {
   } catch { return []; }
 }
 
+// Does a status file belong to the fleet on `sock`? Scope by the SOCKET the session
+// runs on — the only field that identifies the fleet. (`zellij` is the zellij session
+// name, e.g. "work", NOT the project: when empty it used to match EVERY project, so
+// one fleet's master going need-you painted "1 need you" on all of them — every
+// project has a session named `master`. When it was set to "work" it matched none.)
+// Legacy files predate `sock`: fail CLOSED — an ambiguous entry matches nothing, and
+// status falls back to the live pane, rather than leaking across fleets. Each session
+// rewrites its file on the next event, so this self-heals within a turn.
+function ownedBy(o, sock, zScope) {
+  if (o.sock) return o.sock === sock;
+  return !!o.zellij && o.zellij === zScope;
+}
 function fleetBySlot() {
-  // Index by slot, scoped to this zellij session, keeping the newest entry per
-  // slot (avoids a stale/duplicate file shadowing the live one, and stops a
-  // same-named checkout in another project from leaking in).
+  // Index by slot, scoped to THIS fleet, keeping the newest entry per slot (avoids a
+  // stale/duplicate file shadowing the live one).
   const map = new Map();
   let files = [];
   try { files = fs.readdirSync(FLEET_DIR).filter(f => f.endsWith('.json')); } catch { return map; }
@@ -74,7 +85,7 @@ function fleetBySlot() {
     try {
       const o = JSON.parse(fs.readFileSync(path.join(FLEET_DIR, f), 'utf8'));
       if (!o.slot) continue;
-      if (o.zellij && o.zellij !== Z) continue;
+      if (!ownedBy(o, SOCK, Z)) continue;
       const prev = map.get(o.slot);
       if (!prev || (o.ts || 0) > (prev.ts || 0)) map.set(o.slot, o);
     } catch {}
@@ -216,7 +227,9 @@ function killSession(name) {
   for (const f of files) {
     try {
       const o = JSON.parse(fs.readFileSync(path.join(FLEET_DIR, f), 'utf8'));
-      if (o.slot === name && (!o.zellij || o.zellij === Z)) fs.unlinkSync(path.join(FLEET_DIR, f));
+      // scope by socket: a bare slot match would delete ANOTHER fleet's same-named
+      // (e.g. `master`) status file
+      if (o.slot === name && ownedBy(o, SOCK, Z)) fs.unlinkSync(path.join(FLEET_DIR, f));
     } catch {}
   }
 }
@@ -750,7 +763,7 @@ function projectStatus(proj) {
     for (const f of fs.readdirSync(dir).filter(f => f.endsWith('.json'))) {
       try {
         const o = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
-        if (!o.slot || (o.zellij && o.zellij !== proj.name)) continue;
+        if (!o.slot || !ownedBy(o, sock, proj.name)) continue;   // scope by socket, not zellij
         const prev = bySlot.get(o.slot);
         if (!prev || (o.ts || 0) > (prev.ts || 0)) bySlot.set(o.slot, o);
       } catch {}

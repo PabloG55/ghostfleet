@@ -78,9 +78,10 @@ esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"
 if jq -n \
   --arg id "$SESSION" --arg z "$ZELL" --arg slot "$SLOT" \
+  --arg sock "${CLAUDE_FLEET_SOCK:-}" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
   --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" \
-  '{session_id:$id, zellij:$z, slot:$slot, cwd:$cwd, folder:$folder,
+  '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, cwd:$cwd, folder:$folder,
     branch:$branch, status:$status, transcript:$tr, ts:$ts}' \
   >"$tmp" 2>/dev/null
 then
