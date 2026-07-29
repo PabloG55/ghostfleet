@@ -78,8 +78,39 @@ workers_newest_first() {
 is_parked()  { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
 gov_parked() { is_parked "$1" && grep -q '^governor' "$FLEET_DIR/$SOCK.$1.parked" 2>/dev/null; }
 
+# Resume every worker THIS governor parked (never a hand-paused one). Reports the
+# count in $RELEASED — NOT on stdout, because this function also logs there and a
+# command substitution would capture the log lines as the "count".
+RELEASED=0
+release_gov_parked() {
+  local w
+  RELEASED=0
+  for w in $(workers_newest_first); do
+    if gov_parked "$w"; then
+      log "  resume $w"
+      if [ "$DRY" != 1 ]; then
+        "$BIN_DIR/fleet-resume" -s "$SOCK" "$w" >/dev/null 2>&1
+        inbox "$w" resumed "governor: $1"
+      fi
+      RELEASED=$((RELEASED + 1))
+    fi
+  done
+}
+
 tick() {
   local pct w active resumed n
+  # PER-PROJECT "ignore limit" override (grid settings page → , , or `touch
+  # $FLEET_DIR/$SOCK.governor-off`). Read LIVE every tick, so flipping it takes effect
+  # without restarting this loop — and it RELEASES whatever the governor parked, which
+  # is the whole point: "I have extra usage, un-park my workers". Hand-paused workers
+  # stay paused. Nothing else here can un-stick a park while the budget reads high.
+  if [ -f "$FLEET_DIR/$SOCK.governor-off" ]; then
+    release_gov_parked "budget ceiling ignored for this project"
+    [ "$RELEASED" -gt 0 ] && log "ignore-limit ON -> released ${RELEASED} governor-parked worker(s)" \
+                          || log "ignore-limit ON — not enforcing the budget ceiling"
+    return
+  fi
+
   pct="$(budget)"
   if [ -z "$pct" ] || [ "$pct" -eq 0 ]; then log "no budget reading this tick"; return; fi
 

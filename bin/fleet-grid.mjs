@@ -790,8 +790,9 @@ let pSchedFor = null;        // { proj, sock, dir } — master being scheduled f
 let pSchedInput = '';        // typed "<time> | <message>" buffer for the above
 let pQuitArmed = 0;          // ts of the first ⌃C; a second ⌃C within QUIT_WINDOW fully exits
 const QUIT_WINDOW = 2000;    // ms — how long the "press ⌃C again" arming lasts
-let pSettings = false;       // settings page open (per-project worker→master nudge)
-let pSetSel = 0;             // selected row on the settings page
+let pSettings = false;       // settings page open (per-project toggles)
+let pSetSel = 0;             // selected row (project) on the settings page
+let pSetCol = 0;             // selected column (which setting) on the settings page
 
 // ── worker → master auto-nudge (notify-lead) per-project settings ───────────
 // The hook (hooks/fleet-event.sh) pings a project's master when a worker finishes
@@ -825,6 +826,31 @@ function togglePush(proj) {
   if (nowOn) { try { fs.writeFileSync(offP, ''); } catch {} try { fs.unlinkSync(onP); } catch {} }
   else       { try { fs.writeFileSync(onP, '');  } catch {} try { fs.unlinkSync(offP); } catch {} }
 }
+
+// ── per-project: ignore the budget ceiling ──────────────────────────────────
+// fleet-governor parks every worker at >=--pause-at% of the 5h usage window and
+// resumes under --resume%. This marker tells THAT project's governor to stop
+// enforcing it — read live each tick (no restart), and flipping it on RELEASES the
+// workers the governor parked. Use it when you have extra usage and want the fleet
+// to keep going; hand-paused workers stay paused either way.
+function limitFile(proj) { return path.join(profileDir(proj.profile), 'fleet', sockOf(proj) + '.governor-off'); }
+function ignoreLimit(proj) { try { return fs.existsSync(limitFile(proj)); } catch { return false; } }
+function toggleIgnoreLimit(proj) {
+  const f = limitFile(proj);
+  if (ignoreLimit(proj)) { try { fs.unlinkSync(f); } catch {} }
+  else { try { fs.mkdirSync(path.dirname(f), { recursive: true }); } catch {}
+         try { fs.writeFileSync(f, ''); } catch {} }
+}
+
+// the settings page's columns (rows are projects)
+const SETCOLS = [
+  { title: 'AUTO-NUDGE', onColor: C.green, toggle: togglePush,
+    blurb: `${C.dim}auto-nudge: a worker that finishes or needs help pings its master to drain ${C.reset}${C.bold}fleet-inbox${C.reset}`,
+    state: p => { const st = pushState(p); return { on: st.on, label: st.on ? 'on' : 'off' }; } },
+  { title: 'BUDGET LIMIT', onColor: C.yellow, toggle: toggleIgnoreLimit,
+    blurb: `${C.dim}budget limit: ${C.reset}${C.bold}enforced${C.reset}${C.dim} = governor parks all workers near the 5h usage ceiling · ${C.reset}${C.bold}ignored${C.reset}${C.dim} = keep running (releases its parks)${C.reset}`,
+    state: p => { const ig = ignoreLimit(p); return { on: ig, label: ig ? 'ignored' : 'enforced' }; } },
+];
 function pBuild() {
   pItems = [...readProjects().map(p => ({ project: p })), { add: true }];
   if (!pSelInit) {           // first build: land on the just-exited project, if any
@@ -905,20 +931,26 @@ function pRenderSettings() {
   const projs = readProjects();
   pSetSel = Math.max(0, Math.min(pSetSel, Math.max(0, projs.length - 1)));
   let buf = '\x1b[H';
-  buf += ` ${C.bold}settings${C.reset} ${C.dim}— worker → master auto-nudge, per project${C.reset}\x1b[K\n`;
+  buf += ` ${C.bold}settings${C.reset} ${C.dim}— per project${C.reset}\x1b[K\n`;
   const glob = fs.existsSync(GLOBAL_NOTIFY());
-  buf += ` ${C.dim}when on, a worker that finishes or needs help pings its master to drain ${C.reset}${C.bold}fleet-inbox${C.reset}${C.dim}.  global default: ${C.reset}${glob ? `${C.green}on` : `${C.grey}off`}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` ${C.dim}${C.reset}${SETCOLS[pSetCol].blurb}\x1b[K\n`;
+  buf += ` ${C.dim}nudge global default: ${C.reset}${glob ? `${C.green}on` : `${C.grey}off`}${C.reset}\x1b[K\n\x1b[K\n`;
+  const head = `   ${padEndV('', 6)}  ${padEndV('PROJECT', 22)} ${padEndV('PROFILE', 10)}`;
+  buf += `${C.dim}${head}${SETCOLS.map((c, ci) => (ci === pSetCol ? C.bold + C.white : C.dim) + padEndV(c.title, 16) + C.reset).join(' ')}${C.reset}\x1b[K\n`;
   if (!projs.length) buf += ` ${C.dim}(no projects yet)${C.reset}\x1b[K\n`;
   projs.forEach((p, i) => {
-    const st = pushState(p);
     const sel = i === pSetSel;
-    const badge = st.on ? `${C.green}● on ${C.reset}` : `${C.grey}○ off${C.reset}`;
     const cur = sel ? `${C.bold}${C.white}▸ ` : '   ';
     const name = (sel ? C.bold + C.white : C.reset) + padEndV(p.name, 22) + C.reset;
-    const prof = padEndV(p.profile, 10);
-    buf += `${cur}${badge}  ${name} ${C.dim}${prof} ${st.source}${C.reset}\x1b[K\n`;
+    const cells = SETCOLS.map((c, ci) => {
+      const st = c.state(p);
+      const lit = sel && ci === pSetCol;                       // the cell space/⏎ acts on
+      const txt = padEndV((st.on ? '● ' : '○ ') + st.label, 16);
+      return (lit ? C.rev : '') + (st.on ? c.onColor : C.grey) + txt + C.reset;
+    });
+    buf += `${cur}${padEndV('', 6)}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}\x1b[K\n`;
   });
-  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space/⏎ toggle · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ toggle · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // schedule a message to a project's master (mirrors the grid's renderSchedule)
@@ -958,12 +990,14 @@ function onKeyProjects(key) {
     }
     return;
   }
-  if (pSettings) {                                   // per-project auto-nudge toggles
+  if (pSettings) {                                   // per-project toggles (rows × columns)
     const projs = readProjects();
     if (key === '\x1b' || key === '\x03' || key === '\x60') { pSettings = false; }
     else if (key === '\x1b[A' || key === 'k') pSetSel = Math.max(0, pSetSel - 1);
     else if (key === '\x1b[B' || key === 'j') pSetSel = Math.min(Math.max(0, projs.length - 1), pSetSel + 1);
-    else if (key === ' ' || key === '\r' || key === '\n') { const p = projs[pSetSel]; if (p) togglePush(p); }
+    else if (key === '\x1b[D' || key === 'h') pSetCol = Math.max(0, pSetCol - 1);
+    else if (key === '\x1b[C' || key === 'l') pSetCol = Math.min(SETCOLS.length - 1, pSetCol + 1);
+    else if (key === ' ' || key === '\r' || key === '\n') { const p = projs[pSetSel]; if (p) SETCOLS[pSetCol].toggle(p); }
     pRender(); return;
   }
   if (pSchedFor) {                                   // typing a scheduled message to a master
