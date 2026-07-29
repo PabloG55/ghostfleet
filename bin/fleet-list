@@ -11,11 +11,15 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+AMBIENT="$SOCK"                      # the caller's OWN fleet, before -s retargets us
 if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
 [ -n "$SOCK" ] || { echo "fleet-list: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+# "(you)" only makes sense when listing your OWN fleet — when -s points at another
+# one, a same-named session (every fleet has a `master`) is NOT you.
 SELF="${CLAUDE_FLEET_SLOT:-}"
+[ "$SOCK" = "$AMBIENT" ] || SELF=""
 
 names="$(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null)"
 [ -n "$names" ] || { echo "(no sessions on $SOCK)"; exit 0; }
@@ -25,7 +29,13 @@ while IFS= read -r name; do
   [ -n "$name" ] || continue
   st="?"
   if command -v jq >/dev/null 2>&1; then
-    st="$(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$name" 'select(.slot==$s)|[(.ts//0),.status]|@tsv' "$f" 2>/dev/null; done | sort -rn | head -1 | cut -f2)"
+    # scope by sock: matching slot alone collides across fleets (every one has a
+    # `master`), so it would report another project's status here. Legacy entries
+    # (no sock) are a last resort, never for the ambiguous `master`.
+    st="$(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$name" --arg k "$SOCK" 'select(.slot==$s and ((.sock // "") == $k))|[(.ts//0),.status]|@tsv' "$f" 2>/dev/null; done | sort -rn | head -1 | cut -f2)"
+    if [ -z "$st" ] && [ "$name" != master ]; then
+      st="$(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$name" 'select(.slot==$s and ((.sock // "") == ""))|[(.ts//0),.status]|@tsv' "$f" 2>/dev/null; done | sort -rn | head -1 | cut -f2)"
+    fi
   fi
   # a parked worker's hook status is stale (Escape doesn't fire Stop) — the marker
   # is the truth, so report 'parked' to agree with fleet-worktrees (namespaced).

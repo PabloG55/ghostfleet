@@ -18,12 +18,46 @@ command -v jq >/dev/null 2>&1 || { echo "fleet-read: jq required" >&2; exit 1; }
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 FLEET_DIR="${CLAUDE_FLEET_DIR:-$CFG/fleet}"
 
-# locate the session's transcript via its status file (newest for that slot)
-tr="$(for f in "$FLEET_DIR"/*.json; do
-  jq -r --arg s "$SESSION" 'select(.slot==$s)|[(.ts//0),(.transcript//"")]|@tsv' "$f" 2>/dev/null
-done | sort -rn | head -1 | cut -f2)"
+# Locate the session's transcript via its status file — newest entry for that slot ON
+# THIS FLEET. Scoping by sock is essential: every fleet has a session named `master`,
+# so matching by slot alone returns whichever project's master wrote most recently
+# (i.e. some other repo's conversation). Entries predating the sock field are only
+# trusted when nothing better exists, and never for the ambiguous `master` name.
+row="$(for f in "$FLEET_DIR"/*.json; do
+  jq -r --arg s "$SESSION" --arg k "$SOCK" \
+    'select(.slot==$s and ((.sock // "") == $k))|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' "$f" 2>/dev/null
+done | sort -rn | head -1)"
+if [ -z "$row" ] && [ "$SESSION" != master ]; then          # legacy files (no sock)
+  row="$(for f in "$FLEET_DIR"/*.json; do
+    jq -r --arg s "$SESSION" 'select(.slot==$s and ((.sock // "") == ""))|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' "$f" 2>/dev/null
+  done | sort -rn | head -1)"
+fi
+tr="$(printf '%s' "$row" | cut -f2)"
+sid="$(printf '%s' "$row" | cut -f3)"
 
-[ -n "$tr" ] && [ -f "$tr" ] || { echo "fleet-read: no transcript for '$SESSION'" >&2; exit 1; }
+# The status file records the path Claude *will* write, but the file only appears once
+# the session has taken a turn. If it's missing, rebuild the path from the recorded
+# session_id + the session's live pane cwd. Deliberately NOT "newest .jsonl in that
+# dir": several sessions can share a checkout (master + a companion + a reopened
+# conversation), so newest-wins would print a DIFFERENT session's output — worse than
+# saying nothing.
+if { [ -z "$tr" ] || [ ! -f "$tr" ]; } && [ -n "$sid" ]; then
+  cwd="$(tmux -L "$SOCK" display-message -t "$SESSION" -p '#{pane_current_path}' 2>/dev/null)"
+  if [ -n "$cwd" ]; then
+    enc="$(printf '%s' "$cwd" | sed 's#[/.]#-#g')"
+    cand="$CFG/projects/$enc/$sid.jsonl"
+    [ -f "$cand" ] && tr="$cand"
+  fi
+fi
+
+if [ -z "$tr" ] || [ ! -f "$tr" ]; then
+  if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
+    echo "fleet-read: '$SESSION' is live but has no transcript yet — it hasn't taken a turn. Send it work: fleet-send${SOCK:+ -s $SOCK} $SESSION \"<prompt>\"" >&2
+  else
+    echo "fleet-read: no transcript for '$SESSION' (no such session on ${SOCK:-<no socket>} — try fleet-list)" >&2
+  fi
+  exit 1
+fi
 
 tail -n 600 "$tr" \
   | jq -r 'select(.type=="assistant") | (.message.content // []) | map(select(.type=="text")|.text) | join(" ")' 2>/dev/null \
