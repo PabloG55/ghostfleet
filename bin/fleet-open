@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# fleet-open <session-id> [--as <name>] [--into <session>] [--list]
+#
+# Open a SPECIFIC past Claude conversation as a fleet session — the thing
+# `claude --resume <id>` does in a bare terminal, but landed on the right project's
+# fleet so it shows up as a card you can jump into.
+#
+#   <session-id>     full id or a unique prefix (e.g. cc7b36af)
+#   --as <name>      session/card name (default: resume-<prefix>)
+#   --into <session> OVERWRITE an existing session: kill it and reopen that card on
+#                    this conversation instead (the old conversation stays on disk —
+#                    nothing is deleted, reopen it later with its own id)
+#   --list           just print what the id resolves to (transcript, cwd, fleet)
+#
+# It finds the transcript across every profile (~/.claude, ~/.claude-<profile>),
+# reads the conversation's own cwd, routes to the fleet of the project that owns
+# that repo, and starts the session there with claude-here (which resumes exactly
+# this id — never silently the newest one — and forks it if it's held as a
+# background agent).
+set -uo pipefail
+
+ID=""; AS=""; INTO=""; LIST=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --as)   AS="${2:?}";   shift 2 ;;
+    --into) INTO="${2:?}"; shift 2 ;;
+    --list) LIST=1; shift ;;
+    -*) echo "fleet-open: unknown option $1" >&2; exit 1 ;;
+    *)  [ -z "$ID" ] && { ID="$1"; shift; } || { echo "fleet-open: unexpected arg $1" >&2; exit 1; } ;;
+  esac
+done
+[ -n "$ID" ] || { echo "fleet-open: usage: fleet-open <session-id> [--as name] [--into session] [--list]" >&2; exit 1; }
+command -v tmux >/dev/null 2>&1 || { echo "fleet-open: tmux required" >&2; exit 1; }
+command -v jq   >/dev/null 2>&1 || { echo "fleet-open: jq required" >&2; exit 1; }
+
+# --- find the transcript (any profile), by full id or unique prefix -------------
+hits=""
+for cfg in "$HOME/.claude" "$HOME"/.claude-*; do
+  [ -d "$cfg/projects" ] || continue
+  while IFS= read -r f; do
+    [ -n "$f" ] && hits="$hits$cfg	$f
+"
+  done < <(find "$cfg/projects" -maxdepth 2 -name "$ID*.jsonl" -type f 2>/dev/null)
+done
+hits="$(printf '%s' "$hits" | grep -v '^$' || true)"
+n="$(printf '%s\n' "$hits" | grep -c . || true)"
+[ "${n:-0}" -ge 1 ] || { echo "fleet-open: no transcript matching '$ID' in any profile" >&2; exit 1; }
+if [ "$n" -gt 1 ]; then
+  echo "fleet-open: '$ID' is ambiguous — $n matches:" >&2
+  printf '%s\n' "$hits" | while IFS=$'\t' read -r c f; do echo "  $(basename "$f" .jsonl)   ${f/#$HOME/~}" >&2; done
+  echo "  pass a longer prefix." >&2; exit 1
+fi
+CFG_DIR="$(printf '%s' "$hits" | cut -f1)"
+TR="$(printf '%s' "$hits" | cut -f2)"
+FULL_ID="$(basename "$TR" .jsonl)"
+
+# the conversation's own cwd (authoritative — the encoded dir name is lossy: both
+# '/' and '.' become '-', so it can't be decoded back to a path reliably)
+CWD="$(jq -r 'select(.cwd != null) | .cwd' "$TR" 2>/dev/null | head -1)"
+[ -n "$CWD" ] && [ -d "$CWD" ] || { echo "fleet-open: can't determine a live cwd for $FULL_ID (recorded: ${CWD:-<none>})" >&2; exit 1; }
+
+# --- route to the fleet of the project that owns this repo ---------------------
+GITROOT="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || echo "$CWD")"
+ROOT="$(dirname "$GITROOT")"
+SOCK=""; PROJ=""
+for cfgf in "$HOME/.config/claude-fleet/projects" "$HOME"/.config/claude-fleet/projects.*; do
+  [ -f "$cfgf" ] || continue
+  got="$(awk -F'\t' -v r="$ROOT" -v g="$GITROOT" -v home="$HOME" '
+    /^[[:space:]]*#/ || NF<2 { next }
+    { p=$2; sub(/^~/, home, p); if (p==r || p==g) { print $1 "\t" ($3==""?"work":$3); exit } }' "$cfgf")"
+  [ -n "$got" ] && break
+done
+if [ -n "${got:-}" ]; then
+  PROJ="${got%%	*}"; prof="${got##*	}"
+  case "$prof" in work|default) SOCK="cf-$PROJ" ;; *) SOCK="cf-$prof-$PROJ" ;; esac
+else                                   # unknown repo -> fall back to the ambient fleet
+  _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+  [ -n "$SOCK" ] || SOCK="${CLAUDE_FLEET_SOCK:-}"
+  PROJ="${SOCK#cf-}"
+fi
+[ -n "$SOCK" ] || { echo "fleet-open: no fleet owns $ROOT and no ambient fleet — run inside a fleet session" >&2; exit 1; }
+FLEET_DIR="$CFG_DIR/fleet"
+
+if [ "$LIST" = 1 ]; then
+  echo "id:         $FULL_ID"
+  echo "transcript: ${TR/#$HOME/~}"
+  echo "cwd:        $CWD"
+  echo "profile:    ${CFG_DIR/#$HOME/~}"
+  echo "fleet:      $SOCK${PROJ:+  (project $PROJ)}"
+  exit 0
+fi
+
+# --- pick the session name ------------------------------------------------------
+if [ -n "$INTO" ]; then
+  tmux -L "$SOCK" has-session -t "$INTO" 2>/dev/null \
+    || { echo "fleet-open: no session '$INTO' on $SOCK (see: fleet-list)" >&2; exit 1; }
+  [ "$INTO" = master ] && { echo "fleet-open: refusing to overwrite 'master' (the lead) — use --as instead" >&2; exit 1; }
+  old_cwd="$(tmux -L "$SOCK" display-message -t "$INTO" -p '#{pane_current_path}' 2>/dev/null)"
+  [ "$old_cwd" = "$CWD" ] || echo "fleet-open: note — '$INTO' sits in $old_cwd but this conversation belongs to $CWD; opening it in $CWD" >&2
+  name="$INTO"
+  tmux -L "$SOCK" kill-session -t "$INTO" 2>/dev/null
+  echo "fleet-open: replacing '$INTO' (its previous conversation is still on disk)"
+else
+  base="${AS:-resume-${FULL_ID%%-*}}"
+  name="$base"; i=2
+  while tmux -L "$SOCK" has-session -t "$name" 2>/dev/null; do name="$base~$i"; i=$((i + 1)); done
+fi
+
+# a stale park marker would boot the fresh session "parked" (same guard as fleet-spawn)
+rm -f "$FLEET_DIR/$SOCK.$name.parked" "$FLEET_DIR/$name.parked" 2>/dev/null
+
+tmux -L "$SOCK" new-session -d -s "$name" -c "$CWD" \
+  -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" \
+  -e "CLAUDE_FLEET_RESUME=$FULL_ID" \
+  "exec claude-here \"$name\"" \
+  || { echo "fleet-open: failed to start the session" >&2; exit 1; }
+
+echo "fleet-open: opened $FULL_ID as '$name' on $SOCK (cwd $CWD)"
+echo "fleet-open: jump in from the grid, or: fleet-send $name \"<message>\""

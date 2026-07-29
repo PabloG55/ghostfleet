@@ -48,9 +48,19 @@ dir="$PROJECTS/$enc"
 has_turns() { grep -qE '"type":[[:space:]]*"(user|assistant)"' "$1" 2>/dev/null; }
 
 resume_id=""
+explicit=0
+
+# 0) EXPLICIT conversation (fleet-open <session-id>): resume exactly this one and
+# skip discovery. Deliberately never falls back to "newest in this cwd" — silently
+# opening a different conversation than the one asked for is worse than erroring.
+if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
+  resume_id="$CLAUDE_FLEET_RESUME"; explicit=1
+  [ -f "$dir/$resume_id.jsonl" ] \
+    || echo "claude-here: warning — no transcript $dir/$resume_id.jsonl for this cwd; asking claude anyway" >&2
+fi
 
 # 1) exact match: the most recent session for this (zellij session + slot)
-if [ -n "$slot" ] && [ -n "${ZELLIJ_SESSION_NAME:-}" ] && command -v jq >/dev/null 2>&1; then
+if [ "$explicit" != 1 ] && [ -n "$slot" ] && [ -n "${ZELLIJ_SESSION_NAME:-}" ] && command -v jq >/dev/null 2>&1; then
   shopt -s nullglob
   best_ts=0
   for f in "$FLEET_DIR"/*.json; do
@@ -60,13 +70,14 @@ if [ -n "$slot" ] && [ -n "${ZELLIJ_SESSION_NAME:-}" ] && command -v jq >/dev/nu
     if [ "${ts:-0}" -gt "$best_ts" ]; then best_ts="$ts"; resume_id="$id"; fi
   done
 fi
-# drop the slot match if its transcript is gone or empty (so we don't error out)
-if [ -n "$resume_id" ] && ! { [ -f "$dir/$resume_id.jsonl" ] && has_turns "$dir/$resume_id.jsonl"; }; then
+# drop the slot match if its transcript is gone or empty (so we don't error out).
+# An EXPLICIT id is exempt: we resume what was asked for, or fail loudly.
+if [ "$explicit" != 1 ] && [ -n "$resume_id" ] && ! { [ -f "$dir/$resume_id.jsonl" ] && has_turns "$dir/$resume_id.jsonl"; }; then
   resume_id=""
 fi
 
 # 2) else the newest REAL conversation in this cwd
-if [ -z "$resume_id" ] && [ -d "$dir" ]; then
+if [ "$explicit" != 1 ] && [ -z "$resume_id" ] && [ -d "$dir" ]; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     if has_turns "$f"; then resume_id="$(basename "$f" .jsonl)"; break; fi
