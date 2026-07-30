@@ -470,7 +470,7 @@ function renderGrid() {
   if (confirmKill)
     buf += `${C.red}${C.bold} kill session '${confirmKill}'?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
   else
-    buf += '\x1b[K\n';
+    buf += (jumpStage ? jumpHint() : '') + '\x1b[K\n';
   const nc = cols();
   for (let i = 0; i < items.length; i += nc) {
     const rowItems = items.slice(i, i + nc);
@@ -483,7 +483,7 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎/1-9 enter · n new · s sched · p pause · P resume · x kill · , settings · ^P/Q projects · q/\` back${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎/1-9 enter · n new · s sched · p pause · P resume · x kill · , settings · ^F jump · ^P/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -568,6 +568,54 @@ function finish(result) {
   process.exit(0);
 }
 
+// ── ^F jump chord ───────────────────────────────────────────────────────────
+// The chord tmux implements as key tables (see tmux/cf.tmux.conf) is only reachable
+// from INSIDE a session, so these Node screens implement the same grammar and emit
+// the same action strings — one grammar, two entry points, both resolved by
+// claude-fleet's take_jump:
+//   ^F <p> <s>  -> jumps:<p>:<s>     ^F <p> ⏎ / m  -> jumpm:<p>   (that project's master)
+//   ^F <p> s    -> jump:<p>          ^F s <p>      -> jump:<p>    (its session grid)
+//   ^F p        -> projects          esc / ^C      -> cancel
+// jumpKey returns the action to emit, 'handled' when it consumed the key mid-chord,
+// or null when no chord is active — so plain digits, s, p and ^C behave as before.
+let jumpStage = null;        // null | 'first' | 'proj' | 'grid'
+let jumpProj = '';           // project digit collected at the 'first' stage
+function jumpHint() {
+  const k = s => `${C.reset}${C.bold}${s}${C.dim}`;
+  const body = jumpStage === 'first'
+    ? `project? ${k('1-9')} · ${k('s')} + digit = that project's grid · ${k('p')} = projects · ${k('esc')}`
+    : jumpStage === 'grid'
+      ? `session grid of project? ${k('1-9')} · ${k('esc')}`
+      : `project ${k(jumpProj)}, session? ${k('1-9')} · ${k('⏎/m')} = master · ${k('s')} = grid · ${k('esc')}`;
+  return ` ${C.yellow}${C.bold}jump →${C.reset} ${C.dim}${body}${C.reset}`;
+}
+function jumpKey(key) {
+  const digit = key.length === 1 && key >= '1' && key <= '9';
+  if (!jumpStage) {                                   // only ^F opens a chord
+    if (key !== '\x06') return null;
+    jumpStage = 'first'; jumpProj = ''; return 'handled';
+  }
+  if (key === '\x1b' || key === '\x03' || key === '\x06') {   // esc / ^C / ^F cancels
+    jumpStage = null; jumpProj = ''; return 'handled';
+  }
+  if (jumpStage === 'first') {
+    if (digit) { jumpProj = key; jumpStage = 'proj'; return 'handled'; }
+    if (key === 's' || key === 'S') { jumpStage = 'grid'; return 'handled'; }
+    if (key === 'p' || key === 'P') { jumpStage = null; return 'projects'; }
+    jumpStage = null; return 'handled';               // anything else aborts the chord
+  }
+  if (jumpStage === 'grid') {                         // ^F s <p>
+    jumpStage = null;
+    return digit ? `jump:${key}` : 'handled';
+  }
+  const p = jumpProj;                                 // 'proj': what to open in project p
+  jumpStage = null; jumpProj = '';
+  if (digit) return `jumps:${p}:${key}`;
+  if (key === 'm' || key === 'M' || key === '\r' || key === '\n') return `jumpm:${p}`;
+  if (key === 's' || key === 'S') return `jump:${p}`;
+  return 'handled';
+}
+
 function moveGrid(d) {
   const nc = cols();
   let n = sel;
@@ -619,6 +667,10 @@ function onKey(key) {
       if (key === 'y' || key === 'Y') { killSession(confirmKill); confirmKill = null; buildItems(); }
       else confirmKill = null;
       render(); return;
+    }
+    {                                                // ^F jump chord (see jumpKey)
+      const j = jumpKey(key);
+      if (j) { if (j !== 'handled') return finish(j); render(); return; }
     }
     if (key === '\x03' || key === 'q' || key === '\x60') return finish('back');
     if (key === '\x1b[A' || key === 'k') moveGrid('up');
