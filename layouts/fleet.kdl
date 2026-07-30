@@ -20,6 +20,7 @@ layout {
         normal {
             unbind "Ctrl s"
             unbind "Ctrl p"
+            unbind "Ctrl f"
         }
     }
     tab name="fleet" {

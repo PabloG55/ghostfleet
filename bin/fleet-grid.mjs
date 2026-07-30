@@ -353,10 +353,12 @@ function humanAge(a) {
 
 // ── card rendering ────────────────────────────────────────────────────────
 const CW = 30; // inner content width
-function cardLines(card, selected) {
+function cardLines(card, selected, idx) {
   const meta = STATUS[card.status] || STATUS.starting;
   const color = meta.color;
-  const title = clip(`─ ${card.name} `, CW);
+  // 1-9 prefix = the digit that jumps straight to this card (see onKey)
+  const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
+  const title = clip(`─ ${num}${card.name} `, CW);
   const top = `╭${title}${'─'.repeat(Math.max(0, CW - vis(title)))}╮`;
   const idle = card.age == null ? '' : (card.status === 'working' ? `busy ${humanAge(card.age)}` : `${humanAge(card.age)} ago`);
   const right = card.sched ? `@${clockLabel(card.sched.at)}` : idle;   // @ = scheduled send
@@ -474,14 +476,14 @@ function renderGrid() {
     const rowItems = items.slice(i, i + nc);
     const linesPerCard = rowItems.map((it, j) => {
       const idx = i + j;
-      return it.newCard ? newCardLines(idx === sel) : cardLines(it.card, idx === sel);
+      return it.newCard ? newCardLines(idx === sel) : cardLines(it.card, idx === sel, idx);
     });
     for (let li = 0; li < 5; li++) {
       buf += ' ' + linesPerCard.map(lc => lc[li]).join(' ') + '\x1b[K\n';
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · s sched · p pause · P resume · x kill · , settings · ^P/Q projects · q/\` back${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎/1-9 enter · n new · s sched · p pause · P resume · x kill · , settings · ^P/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -629,6 +631,10 @@ function onKey(key) {
     else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
     else if (key === 'p') { const it = items[sel]; if (it?.card) pauseSession(it.card.name); }
     else if (key === 'P') { const it = items[sel]; if (it?.card) resumeSession(it.card.name); }
+    else if (key >= '1' && key <= '9') {              // insta-jump: digit -> that card
+      const it = items[Number(key) - 1];
+      if (it?.card) { sel = Number(key) - 1; return finish(`attach${US}${it.card.name}`); }
+    }
     else if (key === '\x10' || key === 'Q') return finish('projects');  // ^P (or Q) -> Projects
                                                      // Q works even before zellij's Ctrl-p unbind applies
     else if (key === ',') {                          // per-session auto-nudge settings
@@ -916,7 +922,7 @@ function pRender() {
       // a message scheduled to this project's master shows as @<time> on the card
       const sm = readSched('master', path.join(profileDir(it.project.profile), 'fleet'), sockOf(it.project));
       if (sm && sm.at > Math.floor(Date.now() / 1000)) line += `  @${clockLabel(sm.at)}`;
-      return boxCard(it.project.name, [it.project.profile, it.project.path.replace(HOME, '~'), line], color, sel);
+      return boxCard(`${i + j < 9 ? `${i + j + 1} ` : ''}${it.project.name}`, [it.project.profile, it.project.path.replace(HOME, '~'), line], color, sel);
     });
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
     buf += '\x1b[K\n';
@@ -925,7 +931,7 @@ function pRender() {
   const quit = armed
     ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}`
     : '⌃C ⌃C quit';
-  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎ open · ^S sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 open · ^S sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // settings page: per-project toggle for the worker→master auto-nudge (notify-lead)
@@ -1050,6 +1056,10 @@ function onKeyProjects(key) {
   else if (key === 's' || key === 'S') {
     const it = pItems[pSel];
     if (it?.project) { pSchedFor = { proj: it.project, sock: sockOf(it.project), dir: path.join(profileDir(it.project.profile), 'fleet') }; pSchedInput = ''; }
+  }
+  else if (key >= '1' && key <= '9') {                       // insta-jump: digit -> that project
+    const it = pItems[Number(key) - 1];
+    if (it?.project) { pSel = Number(key) - 1; return finish(`project${US}${it.project.name}`); }
   }
   else if (key === '\x13') {                                 // ^S -> straight to the sessions grid
     const it = pItems[pSel];

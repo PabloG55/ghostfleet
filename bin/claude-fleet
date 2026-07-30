@@ -53,6 +53,9 @@ _clear() { printf '\033[2J\033[3J\033[H' >/dev/tty 2>/dev/null || true; }
 TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
 
 profile_dir() { case "$1" in work|default|"") echo "$HOME/.claude" ;; *) echo "$HOME/.claude-$1" ;; esac; }
+# Nth project (1-based) in the list, matching the numbers the cards show. Used by the
+# insta-jump chord: C-f <digit> from master/a chat (see tmux/cf.tmux.conf).
+proj_nth() { awk -F'\t' -v n="$1" '/^[[:space:]]*#/ || NF<2 { next } { i++; if (i==n) { print $1; exit } }' "$PROJECTS_CFG" 2>/dev/null; }
 proj_field() { awk -F'\t' -v n="$1" -v f="$2" '$1==n{print $f; exit}' "$PROJECTS_CFG" 2>/dev/null; }
 
 ensure_projects() {
@@ -127,12 +130,24 @@ enter_master() {
   MASTER_GOTO="$(cat "$marker" 2>/dev/null)"; rm -f "$marker" 2>/dev/null
 }
 
+# A "jump:<n>" goto marker (C-f <digit>) means: switch to the Nth project and open its
+# session grid. Returns 0 when it retargeted us, so callers can bail out of their loop.
+take_jump() {
+  case "$1" in
+    jump:[1-9])
+      local nth name; nth="${1#jump:}"; name="$(proj_nth "$nth")"
+      if [ -n "$name" ]; then set_project "$name"; GOTO=grid; return 0; fi
+      ;;
+  esac
+  return 1
+}
+
 # the session grid ⇄ attach loop for the current project; returns on back/quit
 grid_loop() {
   # GRID_EXIT=projects means the grid asked to go straight to the Projects screen
   # (^P) instead of back to this project's master.
   GRID_EXIT=""
-  local choice name cwd base i last="" gmark=""   # last = the session we just left, so the grid re-selects it
+  local choice name cwd base i last="" gmark="" gv=""   # last = the session we just left, so the grid re-selects it
   while true; do
     _clear
     choice="$(node "$GRID" "$SOCK" "$CONF" --select "$last" </dev/tty)" || true
@@ -146,8 +161,9 @@ grid_loop() {
         # tmux/cf.tmux.conf), so leaving a chat can jump straight up to Projects.
         gmark="$(TM display-message -p '#{socket_path}' 2>/dev/null).goto"; rm -f "$gmark" 2>/dev/null
         TM attach -t "$name" 2>/dev/null || true; _clear
-        if [ "$(cat "$gmark" 2>/dev/null)" = projects ]; then rm -f "$gmark" 2>/dev/null; GRID_EXIT=projects; return; fi
-        rm -f "$gmark" 2>/dev/null ;;
+        gv="$(cat "$gmark" 2>/dev/null)"; rm -f "$gmark" 2>/dev/null
+        if [ "$gv" = projects ]; then GRID_EXIT=projects; return; fi
+        if take_jump "$gv"; then GRID_EXIT=jump; return; fi ;;
       new${US}*)
         cwd="${choice#new${US}}"; base="$(basename "$cwd")"; name="$base"; i=2
         while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
@@ -227,16 +243,19 @@ while true; do
     GOTO=""
     ensure_governor              # normally done by enter_master, which we skipped
     grid_loop
+    [ "$GRID_EXIT" = "jump" ] && continue     # jumped to another project's grid
     LAST_PROJECT="$PROJECT"; PROJECT=""
     continue
   fi
 
   MASTER_GOTO=""
   enter_master
-  if [ "$MASTER_GOTO" = "grid" ]; then
+  if take_jump "$MASTER_GOTO"; then continue          # C-f <digit> from master
+  elif [ "$MASTER_GOTO" = "grid" ]; then
     grid_loop
     # ^P in the grid -> up to Projects instead of back into master
     if [ "$GRID_EXIT" = "projects" ]; then LAST_PROJECT="$PROJECT"; PROJECT=""; fi
+    [ "$GRID_EXIT" = "jump" ] && continue             # C-f <digit> from a chat
   else
     LAST_PROJECT="$PROJECT"   # remember it so the Projects picker re-selects it
     PROJECT=""
