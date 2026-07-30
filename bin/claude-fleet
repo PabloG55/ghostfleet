@@ -9,8 +9,9 @@
 #                     grid returns to Projects, since master was never asked for
 #   grid,     ^P  ->  straight back to Projects (instead of into master)
 #   any screen, 1-9  ->  jump to that numbered card (project, or session in the grid)
-#   chat/master, C-f <n>    ->  project n's MASTER
-#   chat/master, C-f s <n>  ->  project n's session GRID
+#   chat/master, C-f <p> <s>    ->  project p, session s      (e.g. C-f 1 1)
+#   chat/master, C-f <p> Enter  ->  project p's MASTER        (m also works)
+#   chat/master, C-f <p> s      ->  project p's session GRID  (or C-f s <p>)
 #
 # Each project has its own hidden tmux server (cf-<project>) holding its sessions.
 # Node draws the screens; tmux does the PTY work. From master, ` (or C-a g) steps
@@ -138,12 +139,15 @@ enter_master() {
 #   jump:<n>   C-f s <digit>  -> its session GRID
 # Returns 0 when it retargeted us, so callers can bail out of their own loop.
 take_jump() {
-  local nth name
+  local nth name rest
   case "$1" in
     jumpm:[1-9]) nth="${1#jumpm:}"; name="$(proj_nth "$nth")"
-      if [ -n "$name" ]; then set_project "$name"; GOTO=""; return 0; fi ;;
+      if [ -n "$name" ]; then set_project "$name"; GOTO=""; JUMP_SESS=""; return 0; fi ;;
     jump:[1-9])  nth="${1#jump:}";  name="$(proj_nth "$nth")"
-      if [ -n "$name" ]; then set_project "$name"; GOTO=grid; return 0; fi ;;
+      if [ -n "$name" ]; then set_project "$name"; GOTO=grid; JUMP_SESS=""; return 0; fi ;;
+    jumps:[1-9]:[1-9])                       # project + session, e.g. C-f 1 1
+      rest="${1#jumps:}"; nth="${rest%%:*}"; name="$(proj_nth "$nth")"
+      if [ -n "$name" ]; then set_project "$name"; GOTO=grid; JUMP_SESS="${rest#*:}"; return 0; fi ;;
   esac
   return 1
 }
@@ -153,10 +157,18 @@ grid_loop() {
   # GRID_EXIT=projects means the grid asked to go straight to the Projects screen
   # (^P) instead of back to this project's master.
   GRID_EXIT=""
-  local choice name cwd base i last="" gmark="" gv=""   # last = the session we just left, so the grid re-selects it
+  local choice name cwd base i last="" gmark="" gv="" pending=""
+  # C-f <p> <s>: attach the Nth session (grid order, master excluded) without drawing
+  # the grid first. Feeding it through `pending` reuses the normal attach path below.
+  if [ -n "$JUMP_SESS" ]; then
+    name="$(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -v '^master$' | sed -n "${JUMP_SESS}p")"
+    [ -n "$name" ] && pending="attach${US}${name}"
+    JUMP_SESS=""
+  fi
   while true; do
     _clear
-    choice="$(node "$GRID" "$SOCK" "$CONF" --select "$last" </dev/tty)" || true
+    if [ -n "$pending" ]; then choice="$pending"; pending=""
+    else choice="$(node "$GRID" "$SOCK" "$CONF" --select "$last" </dev/tty)" || true; fi
     tmux -L "$SOCK" has-session 2>/dev/null && TM source-file "$CONF" 2>/dev/null || true
     case "$choice" in
       ""|back) return ;;
@@ -217,6 +229,7 @@ _clear
 LAST_PROJECT=""    # the project we last stepped out of — Projects re-selects it
 GOTO=""            # "grid" -> skip master, open the sessions grid (^S from Projects)
 GRID_EXIT=""       # "projects" -> the grid asked to go up to Projects (^P)
+JUMP_SESS=""       # session index pending from a C-f <p> <s> jump
 while true; do
   # LEVEL 0 — pick a project
   if [ -z "$PROJECT" ]; then
