@@ -64,7 +64,14 @@ case "$EVENT" in
     # the turn is over and it's sitting at the prompt → 'ready'.
     low="$(printf '%s' "$NOTE" | tr '[:upper:]' '[:lower:]')"
     case "$low" in
+      # benign idle — the turn is over, it's sitting at the prompt
       *"waiting for your input"*|*"waiting for your response"*|*"is waiting"*) status="ready" ;;
+      # a HARD block genuinely needs you (fleet-answer unblocks these)
+      *"limit reached"*|*"rate limit"*|*"approaching your"*) status="need-you" ;;
+      # usage ADVISORIES ("You've used 77% of your weekly limit · resets 7pm") are
+      # informational: nothing is waiting on you, so they must not paint "need you"
+      # on the card. Checked after the hard-block patterns above.
+      *"you've used"*|*"youve used"*|*"% of your"*) status="ready" ;;
       *) status="need-you" ;;
     esac
     ;;

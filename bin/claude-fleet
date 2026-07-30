@@ -4,6 +4,11 @@
 #
 #   Projects  →  ⏎  →  Master Claude  →  C-s  →  the session grid
 #
+# Shortcuts that skip a level:
+#   Projects, ^S  ->  that project's session grid directly (no master); leaving the
+#                     grid returns to Projects, since master was never asked for
+#   grid,     ^P  ->  straight back to Projects (instead of into master)
+#
 # Each project has its own hidden tmux server (cf-<project>) holding its sessions.
 # Node draws the screens; tmux does the PTY work. From master, ` (or C-a g) steps
 # back to Projects; from the grid it steps back to master.
@@ -113,6 +118,9 @@ enter_master() {
 
 # the session grid ⇄ attach loop for the current project; returns on back/quit
 grid_loop() {
+  # GRID_EXIT=projects means the grid asked to go straight to the Projects screen
+  # (^P) instead of back to this project's master.
+  GRID_EXIT=""
   local choice name cwd base i last=""   # last = the session we just left, so the grid re-selects it
   while true; do
     _clear
@@ -120,6 +128,7 @@ grid_loop() {
     tmux -L "$SOCK" has-session 2>/dev/null && TM source-file "$CONF" 2>/dev/null || true
     case "$choice" in
       ""|back) return ;;
+      projects) GRID_EXIT=projects; return ;;      # ^P in the grid
       attach${US}*) name="${choice#attach${US}}"; last="$name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
       new${US}*)
         cwd="${choice#new${US}}"; base="$(basename "$cwd")"; name="$base"; i=2
@@ -166,6 +175,8 @@ fi
 
 _clear
 LAST_PROJECT=""    # the project we last stepped out of — Projects re-selects it
+GOTO=""            # "grid" -> skip master, open the sessions grid (^S from Projects)
+GRID_EXIT=""       # "projects" -> the grid asked to go up to Projects (^P)
 while true; do
   # LEVEL 0 — pick a project
   if [ -z "$PROJECT" ]; then
@@ -182,6 +193,8 @@ while true; do
           set_project "$nm"
         fi ;;
       project${US}*) set_project "${sel#project${US}}" ;;
+      sessions${US}*) set_project "${sel#sessions${US}}"; GOTO=grid ;;   # ^S: straight to the grid
+
     esac
     [ -z "$PROJECT" ] && continue
   fi
@@ -189,10 +202,22 @@ while true; do
   # LEVEL 1 — Master Claude (⏎ on a project lands straight here). From master:
   #   C-s        -> the sessions grid; leaving the grid returns here to master
   #   ` / C-a g  -> back to the Projects picker
+  # ^S from Projects: open the sessions grid WITHOUT starting/attaching master.
+  # Leaving the grid then returns to Projects — master was never asked for.
+  if [ "$GOTO" = "grid" ]; then
+    GOTO=""
+    ensure_governor              # normally done by enter_master, which we skipped
+    grid_loop
+    LAST_PROJECT="$PROJECT"; PROJECT=""
+    continue
+  fi
+
   MASTER_GOTO=""
   enter_master
   if [ "$MASTER_GOTO" = "grid" ]; then
     grid_loop
+    # ^P in the grid -> up to Projects instead of back into master
+    if [ "$GRID_EXIT" = "projects" ]; then LAST_PROJECT="$PROJECT"; PROJECT=""; fi
   else
     LAST_PROJECT="$PROJECT"   # remember it so the Projects picker re-selects it
     PROJECT=""

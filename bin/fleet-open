@@ -10,6 +10,9 @@
 #   --into <session> OVERWRITE an existing session: kill it and reopen that card on
 #                    this conversation instead (the old conversation stays on disk —
 #                    nothing is deleted, reopen it later with its own id)
+#   --force          allow --into master, i.e. make this conversation the fleet's LEAD
+#                    (it then owns the inbox + dispatch). Refused from inside that
+#                    master — run it from another pane.
 #   --list           just print what the id resolves to (transcript, cwd, fleet)
 #
 # It finds the transcript across every profile (~/.claude, ~/.claude-<profile>),
@@ -19,12 +22,13 @@
 # background agent).
 set -uo pipefail
 
-ID=""; AS=""; INTO=""; LIST=0
+ID=""; AS=""; INTO=""; LIST=0; FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --as)   AS="${2:?}";   shift 2 ;;
     --into) INTO="${2:?}"; shift 2 ;;
     --list) LIST=1; shift ;;
+    --force) FORCE=1; shift ;;
     -*) echo "fleet-open: unknown option $1" >&2; exit 1 ;;
     *)  [ -z "$ID" ] && { ID="$1"; shift; } || { echo "fleet-open: unexpected arg $1" >&2; exit 1; } ;;
   esac
@@ -94,7 +98,22 @@ fi
 if [ -n "$INTO" ]; then
   tmux -L "$SOCK" has-session -t "$INTO" 2>/dev/null \
     || { echo "fleet-open: no session '$INTO' on $SOCK (see: fleet-list)" >&2; exit 1; }
-  [ "$INTO" = master ] && { echo "fleet-open: refusing to overwrite 'master' (the lead) — use --as instead" >&2; exit 1; }
+  # Replacing the LEAD is allowed, but only on purpose: master is what drains the
+  # inbox, gets the workers' nudges and dispatches them, so whatever conversation
+  # lands here inherits those duties. Never run this from inside the master you are
+  # replacing — killing it kills the command mid-flight and leaves the fleet leaderless.
+  if [ "$INTO" = master ] && [ "$FORCE" != 1 ]; then
+    echo "fleet-open: '--into master' replaces the fleet's LEAD — pass --force if that's what you want (or --as <name> to open it as its own card)" >&2
+    exit 1
+  fi
+  if [ "$INTO" = master ]; then
+    _me="${TMUX:-}"; case "${_me##*/}" in cf-*) _me="${_me%%,*}"; _me="${_me##*/}" ;; *) _me="" ;; esac
+    if [ -n "$_me" ] && [ "$_me" = "$SOCK" ] && [ "${CLAUDE_FLEET_SLOT:-}" = master ]; then
+      echo "fleet-open: refusing — you ARE $SOCK's master; this would kill the session running this command. Run it from another pane." >&2
+      exit 1
+    fi
+    echo "fleet-open: replacing $SOCK's LEAD with this conversation — it inherits the inbox/dispatch role" >&2
+  fi
   old_cwd="$(tmux -L "$SOCK" display-message -t "$INTO" -p '#{pane_current_path}' 2>/dev/null)"
   [ "$old_cwd" = "$CWD" ] || echo "fleet-open: note — '$INTO' sits in $old_cwd but this conversation belongs to $CWD; opening it in $CWD" >&2
   name="$INTO"

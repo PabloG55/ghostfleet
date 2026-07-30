@@ -481,7 +481,7 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · s sched · p pause · P resume · x kill · , settings · q/\` back${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · s sched · p pause · P resume · x kill · , settings · ^P projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -629,6 +629,7 @@ function onKey(key) {
     else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
     else if (key === 'p') { const it = items[sel]; if (it?.card) pauseSession(it.card.name); }
     else if (key === 'P') { const it = items[sel]; if (it?.card) resumeSession(it.card.name); }
+    else if (key === '\x10') return finish('projects');   // ^P -> the Projects screen
     else if (key === ',') {                          // per-session auto-nudge settings
       gSettings = true;
       const it = items[sel]; const i = it?.card ? cards.findIndex(c => c.name === it.card.name) : 0;
@@ -923,7 +924,7 @@ function pRender() {
   const quit = armed
     ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}`
     : '⌃C ⌃C quit';
-  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎ open · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎ open · ^S sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // settings page: per-project toggle for the worker→master auto-nudge (notify-lead)
@@ -1048,6 +1049,10 @@ function onKeyProjects(key) {
   else if (key === 's' || key === 'S') {
     const it = pItems[pSel];
     if (it?.project) { pSchedFor = { proj: it.project, sock: sockOf(it.project), dir: path.join(profileDir(it.project.profile), 'fleet') }; pSchedInput = ''; }
+  }
+  else if (key === '\x13') {                                 // ^S -> straight to the sessions grid
+    const it = pItems[pSel];
+    if (it?.project) return finish(`sessions${US}${it.project.name}`);
   }
   else if (key === ',') { pSettings = true; pSetSel = 0; }   // open the settings page
   else if (key === '\r' || key === '\n') {
