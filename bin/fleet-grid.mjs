@@ -905,7 +905,7 @@ function pRender() {
   buf += ` ${C.bold}claude-fleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
   buf += pConfirmRemove
     ? `${C.red}${C.bold} remove '${pConfirmRemove}' from projects?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`
-    : '\x1b[K\n';
+    : (jumpStage ? jumpHint() : '') + '\x1b[K\n';
   const nc = cols();
   for (let i = 0; i < pItems.length; i += nc) {
     const row = pItems.slice(i, i + nc);
@@ -931,7 +931,7 @@ function pRender() {
   const quit = armed
     ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}`
     : '⌃C ⌃C quit';
-  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 open · ^S sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 open · ^F jump · ^S sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // settings page: per-project toggle for the worker→master auto-nudge (notify-lead)
@@ -1033,6 +1033,10 @@ function onKeyProjects(key) {
   // Fully exiting to the shell (this is the ONLY screen whose quit does that)
   // now takes ⌃C twice, so a single stray key can't drop the whole fleet UI.
   // First ⌃C arms + shows a hint; a second within QUIT_WINDOW quits.
+  {                                                  // C-f jump chord (see jumpKey)
+    const j = jumpKey(key);
+    if (j) { if (j !== 'handled') return finish(j); pRender(); return; }
+  }
   if (key === '\x03') {
     if (pQuitArmed && Date.now() - pQuitArmed < QUIT_WINDOW) return finish('');
     pQuitArmed = Date.now(); pRender(); return;

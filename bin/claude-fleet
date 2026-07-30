@@ -173,6 +173,7 @@ grid_loop() {
     case "$choice" in
       ""|back) return ;;
       projects) GRID_EXIT=projects; return ;;      # ^P in the grid
+      jump*) if take_jump "$choice"; then GRID_EXIT=jump; return; fi ;;   # ^F chord in the grid
       attach${US}*)
         name="${choice#attach${US}}"; last="$name"
         # C-p inside a session drops a "projects" marker then detaches (see
@@ -248,6 +249,7 @@ while true; do
         fi ;;
       project${US}*) set_project "${sel#project${US}}" ;;
       sessions${US}*) set_project "${sel#sessions${US}}"; GOTO=grid ;;   # ^S: straight to the grid
+      jump*) take_jump "$sel" || true ;;               # ^F chord from the Projects screen
 
     esac
     [ -z "$PROJECT" ] && continue
