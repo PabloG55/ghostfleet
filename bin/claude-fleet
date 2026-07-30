@@ -8,6 +8,9 @@
 #   Projects, ^S  ->  that project's session grid directly (no master); leaving the
 #                     grid returns to Projects, since master was never asked for
 #   grid,     ^P  ->  straight back to Projects (instead of into master)
+#   any screen, 1-9  ->  jump to that numbered card (project, or session in the grid)
+#   chat/master, C-f <n>    ->  project n's MASTER
+#   chat/master, C-f s <n>  ->  project n's session GRID
 #
 # Each project has its own hidden tmux server (cf-<project>) holding its sessions.
 # Node draws the screens; tmux does the PTY work. From master, ` (or C-a g) steps
@@ -130,14 +133,17 @@ enter_master() {
   MASTER_GOTO="$(cat "$marker" 2>/dev/null)"; rm -f "$marker" 2>/dev/null
 }
 
-# A "jump:<n>" goto marker (C-f <digit>) means: switch to the Nth project and open its
-# session grid. Returns 0 when it retargeted us, so callers can bail out of their loop.
+# An insta-jump goto marker (see tmux/cf.tmux.conf) retargets us at the Nth project:
+#   jumpm:<n>  C-f <digit>    -> its MASTER   (GOTO empty: the loop enters master)
+#   jump:<n>   C-f s <digit>  -> its session GRID
+# Returns 0 when it retargeted us, so callers can bail out of their own loop.
 take_jump() {
+  local nth name
   case "$1" in
-    jump:[1-9])
-      local nth name; nth="${1#jump:}"; name="$(proj_nth "$nth")"
-      if [ -n "$name" ]; then set_project "$name"; GOTO=grid; return 0; fi
-      ;;
+    jumpm:[1-9]) nth="${1#jumpm:}"; name="$(proj_nth "$nth")"
+      if [ -n "$name" ]; then set_project "$name"; GOTO=""; return 0; fi ;;
+    jump:[1-9])  nth="${1#jump:}";  name="$(proj_nth "$nth")"
+      if [ -n "$name" ]; then set_project "$name"; GOTO=grid; return 0; fi ;;
   esac
   return 1
 }
