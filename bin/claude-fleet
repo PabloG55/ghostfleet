@@ -36,6 +36,17 @@ command -v tmux  >/dev/null 2>&1 || { echo "claude-fleet: tmux is required (brew
 
 US=$'\x1f'
 PROJECTS_CFG="$HOME/.config/claude-fleet/projects"
+# The control plane is a long-lived bash loop, so a `cf-sync` upgrade would otherwise
+# not take effect until you quit and relaunch — and a NEW screen (node) talking to an
+# OLD loop silently drops any new action it prints. Remember our own mtime and re-exec
+# when it changes, but only at the Projects screen (nothing is attached there).
+SELF_MTIME="$(stat -f %m "$src" 2>/dev/null || echo 0)"
+maybe_reexec() {
+  local now; now="$(stat -f %m "$src" 2>/dev/null || echo 0)"
+  [ "$now" = "$SELF_MTIME" ] && return 0
+  _clear; echo "claude-fleet: upgraded — reloading…" >&2
+  exec "$src" ${PROFILE:+"$PROFILE"}
+}
 # wipe the main screen + scrollback so tmux's "[detached …]" lines / stray frames
 # don't pile up between screens
 _clear() { printf '\033[2J\033[3J\033[H' >/dev/tty 2>/dev/null || true; }
@@ -121,7 +132,7 @@ grid_loop() {
   # GRID_EXIT=projects means the grid asked to go straight to the Projects screen
   # (^P) instead of back to this project's master.
   GRID_EXIT=""
-  local choice name cwd base i last=""   # last = the session we just left, so the grid re-selects it
+  local choice name cwd base i last="" gmark=""   # last = the session we just left, so the grid re-selects it
   while true; do
     _clear
     choice="$(node "$GRID" "$SOCK" "$CONF" --select "$last" </dev/tty)" || true
@@ -129,7 +140,14 @@ grid_loop() {
     case "$choice" in
       ""|back) return ;;
       projects) GRID_EXIT=projects; return ;;      # ^P in the grid
-      attach${US}*) name="${choice#attach${US}}"; last="$name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
+      attach${US}*)
+        name="${choice#attach${US}}"; last="$name"
+        # C-p inside a session drops a "projects" marker then detaches (see
+        # tmux/cf.tmux.conf), so leaving a chat can jump straight up to Projects.
+        gmark="$(TM display-message -p '#{socket_path}' 2>/dev/null).goto"; rm -f "$gmark" 2>/dev/null
+        TM attach -t "$name" 2>/dev/null || true; _clear
+        if [ "$(cat "$gmark" 2>/dev/null)" = projects ]; then rm -f "$gmark" 2>/dev/null; GRID_EXIT=projects; return; fi
+        rm -f "$gmark" 2>/dev/null ;;
       new${US}*)
         cwd="${choice#new${US}}"; base="$(basename "$cwd")"; name="$base"; i=2
         while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
@@ -180,6 +198,7 @@ GRID_EXIT=""       # "projects" -> the grid asked to go up to Projects (^P)
 while true; do
   # LEVEL 0 — pick a project
   if [ -z "$PROJECT" ]; then
+    maybe_reexec                 # pick up a cf-sync upgrade before drawing Projects
     sel="$(node "$GRID" - --screen projects --select "$LAST_PROJECT" </dev/tty)" || true; _clear
     case "$sel" in
       "") break ;;                                   # quit

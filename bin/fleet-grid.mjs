@@ -481,7 +481,7 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · s sched · p pause · P resume · x kill · , settings · ^P projects · q/\` back${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎ enter · n new · s sched · p pause · P resume · x kill · , settings · ^P/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -629,7 +629,8 @@ function onKey(key) {
     else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
     else if (key === 'p') { const it = items[sel]; if (it?.card) pauseSession(it.card.name); }
     else if (key === 'P') { const it = items[sel]; if (it?.card) resumeSession(it.card.name); }
-    else if (key === '\x10') return finish('projects');   // ^P -> the Projects screen
+    else if (key === '\x10' || key === 'Q') return finish('projects');  // ^P (or Q) -> Projects
+                                                     // Q works even before zellij's Ctrl-p unbind applies
     else if (key === ',') {                          // per-session auto-nudge settings
       gSettings = true;
       const it = items[sel]; const i = it?.card ? cards.findIndex(c => c.name === it.card.name) : 0;
