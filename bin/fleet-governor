@@ -73,7 +73,7 @@ pct_of() {
 }
 # one shared account -> take the highest reading across all live panes
 budget() {
-  local max=0 p s
+  local max=0 p="" s=""
   for s in $(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
     p="$(pct_of "$s")"; [ -n "$p" ] && [ "$p" -gt "$max" ] && max="$p"
   done
@@ -107,7 +107,7 @@ release_gov_parked() {
 }
 
 tick() {
-  local pct w active resumed n
+  local pct="" w="" active=() resumed=0 n=0
   # PER-PROJECT "ignore limit" override (grid settings page → , , or `touch
   # $FLEET_DIR/$SOCK.governor-off`). Read LIVE every tick, so flipping it takes effect
   # without restarting this loop — and it RELEASES whatever the governor parked, which

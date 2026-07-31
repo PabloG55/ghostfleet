@@ -35,7 +35,7 @@ MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
 panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
 
 sess_for() {                       # first session whose pane cwd is at/under $1
-  local wt="$1" p s
+  local wt="$1" p="" s=""
   while IFS=$'\t' read -r p s; do
     [ -n "$p" ] || continue
     case "$p" in "$wt"|"$wt"/*) echo "$s"; return ;; esac
@@ -48,7 +48,7 @@ busy() { tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null \
 is_parked() { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
 task_for()  { awk -F'\t' -v w="$1" '$1==w{print $4; exit}' "$MANIFEST" 2>/dev/null; }
 git_state() {                      # "clean|dirty" (+ahead / -behind vs upstream)
-  local wt="$1" d ab behind ahead extra=""
+  local wt="$1" d="" ab="" behind="" ahead="" extra=""
   [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ] && d=dirty || d=clean
   if ab="$(git -C "$wt" rev-list --count --left-right '@{u}...HEAD' 2>/dev/null)"; then
     behind="${ab%%	*}"; ahead="${ab##*	}"

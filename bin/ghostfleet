@@ -49,7 +49,7 @@ _mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0;
 SELF_MTIME="$(_mtime "$src")"
 shopt -s execfail 2>/dev/null || true      # a failed exec must NOT kill the control plane
 maybe_reexec() {
-  local now target
+  local now="" target=""
   # Can't stat ourselves? The script was moved/renamed/deleted under us (a rename, an
   # uninstall). Do NOT treat that as "upgraded" — the old code in memory still works,
   # whereas exec'ing a path that no longer exists would kill the whole control plane.
@@ -162,7 +162,7 @@ enter_master() {
 #   jump:<n>   C-f s <digit>  -> its session GRID
 # Returns 0 when it retargeted us, so callers can bail out of their own loop.
 take_jump() {
-  local nth name rest
+  local nth="" name="" rest=""
   case "$1" in
     jumpm:[1-9]) nth="${1#jumpm:}"; name="$(proj_nth "$nth")"
       if [ -n "$name" ]; then set_project "$name"; GOTO=""; JUMP_SESS=""; return 0; fi ;;

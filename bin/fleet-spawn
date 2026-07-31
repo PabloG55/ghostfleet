@@ -65,7 +65,7 @@ CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 # parent of its repo (siblings live under it); match that against the projects
 # configs and switch to the owner's socket + config dir. No match → keep ambient.
 route_to_owner() {
-  local root="$1" cfg got name prof osock ocfg
+  local root="$1" cfg="" got="" name="" prof="" osock="" ocfg=""
   [ -n "$root" ] || return 0
   for cfg in "$HOME/.config/ghostfleet/projects" "$HOME"/.config/ghostfleet/projects.*; do
     [ -f "$cfg" ] || continue
@@ -90,7 +90,7 @@ route_to_owner "$(dirname "$GITROOT")"
 # as fleet-worktrees: a worktree is FREE = no live session on it + clean tree).
 panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
 sess_for() {
-  local wt="$1" p s
+  local wt="$1" p="" s=""
   while IFS=$'\t' read -r p s; do
     [ -n "$p" ] || continue
     case "$p" in "$wt"|"$wt"/*) echo "$s"; return ;; esac
@@ -121,7 +121,7 @@ free_worktrees() {                     # "<basename> (<branch>, clean)" per free
 #   local ahead (unpushed)   -> your LOCAL ref (has commits the remote lacks), warn
 #   HEAD / sha / tag / no upstream / in sync / diverged -> the ref as given, local
 resolve_base() {
-  local from="$1" ref up lr ahead behind
+  local from="$1" ref="" up="" lr="" ahead="" behind=""
   [ -n "$from" ] || return 0
   if [ "$from" != HEAD ] && ! git -C "$GITROOT" show-ref --verify --quiet "refs/heads/$from"; then
     echo "$from"; return 0                               # sha / tag / remote ref -> as-is
