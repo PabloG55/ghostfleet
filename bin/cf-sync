@@ -21,6 +21,14 @@ set -uo pipefail
 src="${BASH_SOURCE[0]}"
 while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
 DEST="${CLAUDE_FLEET_HOME:-$(cd "$(dirname "$src")/.." && pwd)}"
+# If we were invoked as the REPO's own copy (the repo's bin/ ahead of ~/.local/bin on
+# PATH), DEST would be the repo itself and the sync would no-op with "same dir" —
+# looking like a deploy that happened when nothing moved. Fall back to the canonical
+# runtime whenever this copy is the source and a real runtime exists next door.
+if [ -z "${CLAUDE_FLEET_HOME:-}" ] && [ -d "$DEST/.git" ]; then
+  _rt="$HOME/.local/libexec/ghostfleet"
+  [ -d "$_rt" ] && [ "$_rt" != "$DEST" ] && DEST="$_rt"
+fi
 
 # figure out the SOURCE repo: arg > recorded .source > give up with guidance
 REPO="${1:-}"
@@ -32,7 +40,8 @@ fi
 REPO="$(cd "$REPO" && pwd)"
 
 if [ "$REPO" = "$DEST" ]; then
-  echo "cf-sync: source and runtime are the same dir ($DEST) — nothing to do (repo isn't under TCC?)." >&2
+  echo "cf-sync: source and runtime are the same dir ($DEST) — nothing to sync." >&2
+  echo "cf-sync: if you meant to deploy, name the runtime: CLAUDE_FLEET_HOME=~/.local/libexec/ghostfleet cf-sync $REPO" >&2
   exit 0
 fi
 
