@@ -156,9 +156,19 @@ function paneBusy(sock, name) {
 //   • pane shows the interrupt affordance → working (generating / running a tool)
 //   • hook says 'need-you'                → blocked, waiting on you
 //   • otherwise has history               → ready (idle at the prompt); new → idle
-function deriveStatus(hook, transcript, busy) {
+function deriveStatus(hook, transcript, busy, hookTs, tmt) {
   if (busy) return 'working';
-  if (hook === 'need-you') return 'need-you';
+  // need-you is LATCHED: the hook writes it once and nothing clears it until a later
+  // event overwrites the file — so if the hook stops firing for a session (a broken
+  // hook path, a sandbox denial), the card stays red forever while the pane sits idle.
+  // A flag is stale when the session kept working AFTER it was raised: while something
+  // genuinely waits on you the transcript can't advance, so tmt > hookTs means it was
+  // already dealt with. (Claude writes the assistant turn before the Notification, so
+  // a real question still has hookTs >= tmt.)
+  if (hook === 'need-you') {
+    const stale = tmt && hookTs && tmt > hookTs + 5;
+    if (!stale) return 'need-you';
+  }
   if (transcript) return 'ready';
   return 'idle';
 }
@@ -205,7 +215,7 @@ function gather() {
     const transcript = st?.transcript || newestTranscript(s.cwd || '');
     const tmt = transcript ? mtimeSec(transcript) : 0;    // last transcript write = age display only
     const busy = paneBusy(SOCK, s.name);
-    let status = deriveStatus(st?.status || '', transcript, busy);
+    let status = deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
     if (!busy && isParked(s.name)) status = 'parked';     // intentionally off (fleet-pause)
     const ageBase = tmt || st?.ts || 0;
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
@@ -835,7 +845,8 @@ function projectStatus(proj) {
     const o = bySlot.get(name);
     const busy = paneBusy(sock, name);
     if (!busy && fs.existsSync(path.join(dir, sock + '.' + name + '.parked'))) { parked++; continue; }  // intentionally off (namespaced)
-    const s = deriveStatus(o ? o.status : '', o ? o.transcript : '', busy);
+    const tmt = o && o.transcript ? mtimeSec(o.transcript) : 0;
+    const s = deriveStatus(o ? o.status : '', o ? o.transcript : '', busy, o ? (o.ts || 0) : 0, tmt);
     if (s === 'need-you') need++;
     else if (s === 'working') working++;
   }
