@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# fleet-adopt <path> [--profile P] [--days N] [--per-dir N] [--start] [--go]
+#
+# BACKFILL an existing setup into a fleet. If you already run Claude by hand — one
+# session per terminal tab or zellij pane, scattered across a repo and its worktrees —
+# this finds those conversations, registers the project, and reopens each one as a card
+# on that project's fleet, under a single master that can see and drive them all.
+#
+# DRY RUN by default: it prints exactly what it would adopt. Add --go to do it.
+#
+#   <path>       the project root: the repo, or a folder holding its checkouts
+#   --profile P  which Claude profile to search + register under (default: work)
+#   --days N     only conversations touched in the last N days (default 30)
+#   --per-dir N  how many conversations per checkout (default 1 = the newest)
+#   --start      also start the project's master
+#   --go         actually adopt (otherwise just show the plan)
+#
+# WHY IT ONLY REOPENS: a conversation is a file on disk; adopting means starting a fleet
+# session that resumes it. It does NOT move a running process — so if a conversation is
+# still open in another tab/pane, close it first, or you'll have two live copies of the
+# same thread (Claude forks one that's held as a background agent).
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+
+ROOT_IN=""; PROFILE="work"; DAYS=30; PER=1; START=0; GO=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile) PROFILE="${2:?}"; shift 2 ;;
+    --days)    DAYS="${2:?}";    shift 2 ;;
+    --per-dir) PER="${2:?}";     shift 2 ;;
+    --start)   START=1; shift ;;
+    --go)      GO=1;    shift ;;
+    -*) echo "fleet-adopt: unknown option $1" >&2; exit 1 ;;
+    *)  [ -z "$ROOT_IN" ] && { ROOT_IN="$1"; shift; } || { echo "fleet-adopt: unexpected arg $1" >&2; exit 1; } ;;
+  esac
+done
+[ -n "$ROOT_IN" ] || { echo "fleet-adopt: usage: fleet-adopt <path> [--profile P] [--days N] [--per-dir N] [--start] [--go]" >&2; exit 1; }
+command -v jq >/dev/null 2>&1 || { echo "fleet-adopt: jq required" >&2; exit 1; }
+
+ROOT="$(cd "${ROOT_IN/#\~/$HOME}" 2>/dev/null && pwd)" || { echo "fleet-adopt: no such directory: $ROOT_IN" >&2; exit 1; }
+NAME="${ROOT##*/}"
+case "$PROFILE" in work|default) CFG_DIR="$HOME/.claude"; SOCK="cf-$NAME" ;; *) CFG_DIR="$HOME/.claude-$PROFILE"; SOCK="cf-$PROFILE-$NAME" ;; esac
+PROJDIR="$CFG_DIR/projects"
+[ -d "$PROJDIR" ] || { echo "fleet-adopt: no conversations for profile '$PROFILE' ($PROJDIR)" >&2; exit 1; }
+
+enc() { printf '%s' "$1" | sed 's#[/.]#-#g'; }
+ENC_ROOT="$(enc "$ROOT")"
+has_turns() { grep -qE '"type":[[:space:]]*"(user|assistant)"' "$1" 2>/dev/null; }
+CUTOFF=$(( $(date +%s) - DAYS*86400 ))
+
+echo "fleet-adopt · $ROOT · profile $PROFILE · fleet $SOCK · $([ "$GO" = 1 ] && echo 'ADOPTING' || echo 'DRY RUN (add --go)')"
+echo
+
+# every checkout under this root that has Claude history (dir names are the cwd with
+# / and . turned into -, so the root's encoding is a prefix of its checkouts')
+plan=""; n=0
+for d in "$PROJDIR/$ENC_ROOT" "$PROJDIR/$ENC_ROOT"-*; do
+  [ -d "$d" ] || continue
+  taken=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ "$taken" -ge "$PER" ] && break
+    [ "$(stat -f %m "$f" 2>/dev/null || echo 0)" -ge "$CUTOFF" ] || continue
+    has_turns "$f" || continue
+    id="$(basename "$f" .jsonl)"
+    cwd="$(jq -r 'select(.cwd != null) | .cwd' "$f" 2>/dev/null | head -1)"
+    [ -n "$cwd" ] && [ -d "$cwd" ] || continue
+    case "$cwd" in "$ROOT"|"$ROOT"/*) ;; *) continue ;; esac      # guard the lossy encoding
+    last="$(jq -r 'select(.type=="assistant") | (.message.content // []) | map(select(.type=="text")|.text) | join(" ")' "$f" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1 | tr '\n' ' ' | cut -c1-58)"
+    plan="$plan$id	$cwd	$last
+"
+    n=$((n+1)); taken=$((taken+1))
+  done < <(ls -t "$d"/*.jsonl 2>/dev/null)
+done
+
+if [ "$n" = 0 ]; then
+  echo "  no conversations under $ROOT in the last $DAYS days (profile $PROFILE)"
+  echo "  try: --days 90, or --profile personal"
+  exit 0
+fi
+
+printf '%s' "$plan" | while IFS=$'\t' read -r id cwd last; do
+  [ -n "$id" ] || continue
+  printf '  %-14s %-42s %s\n' "${id%%-*}" "${cwd/#$HOME/~}" "${last:-…}"
+done
+echo
+echo "  $n conversation(s) -> cards on $SOCK, one master over them"
+
+if [ "$GO" != 1 ]; then
+  echo
+  echo "  Dry run — nothing changed. Re-run with --go."
+  echo "  NOTE: adopting REOPENS a conversation; it can't move a running process. Close any"
+  echo "        tab/pane still holding these threads first, or you'll have two live copies."
+  exit 0
+fi
+
+echo
+"$BIN_DIR/fleet-project" add "$ROOT" --name "$NAME" --profile "$PROFILE" 2>&1 | sed 's/^/  /'
+printf '%s' "$plan" | while IFS=$'\t' read -r id cwd last; do
+  [ -n "$id" ] || continue
+  base="${cwd##*/}"
+  CLAUDE_FLEET_DIR="$CFG_DIR/fleet" "$BIN_DIR/fleet-open" "$id" --as "$base" 2>&1 | grep -vE '^fleet-open: jump in' | sed 's/^/  /'
+done
+[ "$START" = 1 ] && "$BIN_DIR/fleet-project" add "$ROOT" --name "$NAME" --profile "$PROFILE" --start 2>&1 | grep -E 'master|dispatch' | sed 's/^/  /'
+echo
+echo "  done — open it with:  ghostfleet$([ "$PROFILE" = work ] || echo " $PROFILE")   (then pick $NAME)"

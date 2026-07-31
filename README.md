@@ -1,12 +1,17 @@
 # ghostfleet
 
-A zellij-native master CLI for running many **Claude Code** sessions in parallel.
+A terminal control plane for running many **Claude Code** sessions in parallel.
+
+Runs in **any terminal** — Terminal.app, iTerm, Ghostty, Kitty, a plain SSH shell. It needs
+only `node` and `tmux`. zellij is **optional**: if you use it, a layout is included that frees
+`Ctrl-s`/`Ctrl-p`/`Ctrl-f` so the one-key shortcuts reach the app; without it everything still
+works through the `C-a` prefix (`C-a s`, `C-a p`, `C-a f`).
 
 > A *ghost fleet* is a fleet of autonomous, unmanned vessels under one command — which is
 > exactly what this is: agents working with nobody in the seat, and one control plane
 > steering them. The CLI is still `ghostfleet` and the commands are still `fleet-*`.
 
-One zellij session, one pane — `ghostfleet` is the whole control plane:
+One terminal window (or one zellij pane) — `ghostfleet` is the whole control plane:
 
 ```
 Projects          ⏎→    Master Claude      C-s →    the session grid
@@ -20,15 +25,16 @@ Projects          ⏎→    Master Claude      C-s →    the session grid
   hidden tmux server (`cf-<project>`) holding its sessions.
 - **Master Claude** — the lead session that spawns worktrees and coordinates workers. `Ctrl-s`
   (one chord, no prefix; `C-a s` still works as a fallback) jumps to the session grid; `` ` ``
-  (or `C-a g`) steps back to Projects. The fleet zellij layout frees `Ctrl-s` from zellij's
-  scroll mode so it reaches tmux — scroll is still on the mouse / `PageUp`.
+  (or `C-a g`) steps back to Projects. In a bare terminal `Ctrl-s` reaches tmux directly; under
+  zellij the included layout frees it from zellij's scroll mode (scroll is still mouse / `PageUp`).
 - **The grid** — a card per Claude session (status · branch · last message). Arrow to one, `⏎` to
   drop *inside* it full-screen; `` ` `` back to the grid. Every session keeps running in the
   background, so agents work in parallel while you jump between them. `` ` `` steps back to master.
 
-Nothing else is zellij-native like this — every other terminal fleet tool (nicknisi/fleet,
-tmux-claude-session-manager, Recon) is tmux-bound; the rest take over your multiplexer
-(Claude Squad, ccmanager) or are web/cloud dashboards (Omnara).
+What makes it different: it runs *beside* your setup instead of taking it over. Sessions live on
+per-project tmux servers ghostfleet manages for you, so you never lose a session by closing a
+window — and if you use zellij, it stays a single pane instead of commandeering your multiplexer
+(Claude Squad, ccmanager) or pushing you to a web dashboard (Omnara).
 
 ## Orchestrate: a lead session driving workers
 
@@ -223,6 +229,41 @@ fresh parallel one, `⏎` enters it, `` ` `` comes back, `q` steps up a level.
 **Projects** live in `~/.config/ghostfleet/projects` (`name<TAB>path<TAB>profile`). Add your first
 from the picker (`+ add project` → browse to a root folder that holds your checkouts/worktrees), or
 edit the file directly. Jump straight in with `ghostfleet <project>`.
+
+## Already running Claude by hand? Adopt it
+
+If you already work the scattered way — a Claude session per terminal tab or zellij
+pane, spread across a repo and its worktrees — you don't have to start over.
+`fleet-adopt` finds those conversations, registers the project, and reopens each one as
+a card on that project's fleet, with a single master over them.
+
+```bash
+fleet-adopt ~/acme                 # DRY RUN: shows what it would adopt
+fleet-adopt ~/acme --go --start    # adopt them + start the master
+```
+
+```
+fleet-adopt · /Users/you/acme · profile work · fleet cf-acme · DRY RUN
+  175944ef   ~/acme/platform             Want me to pull that request row + audit…
+  0621074a   ~/acme/acme-1           I killed the stale processes and relaunc…
+  6fff3551   ~/acme/acme-2           Confirmed — that commit belongs to a sep…
+  8 conversation(s) -> cards on cf-acme, one master over them
+```
+
+Options: `--days N` how far back to look (default 30), `--per-dir N` conversations per
+checkout (default 1 = the newest), `--profile P`, `--start`, `--go`.
+
+It **reopens** conversations — it can't move a running process. Close any tab or pane
+still holding those threads first, or you'll end up with two live copies of the same
+conversation.
+
+To register a project without adopting anything (the CLI form of "+ add project", and
+what a lead session uses via the `fleet_project_add` tool):
+
+```bash
+fleet-project add ~/code/newapp --start   # register it and boot its master
+fleet-project list
+```
 
 ## Profiles (work vs personal accounts)
 
