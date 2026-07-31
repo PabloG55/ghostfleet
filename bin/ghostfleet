@@ -45,11 +45,23 @@ PROJECTS_CFG="$HOME/.config/ghostfleet/projects"
 # OLD loop silently drops any new action it prints. Remember our own mtime and re-exec
 # when it changes, but only at the Projects screen (nothing is attached there).
 SELF_MTIME="$(stat -f %m "$src" 2>/dev/null || echo 0)"
+shopt -s execfail 2>/dev/null || true      # a failed exec must NOT kill the control plane
 maybe_reexec() {
-  local now; now="$(stat -f %m "$src" 2>/dev/null || echo 0)"
+  local now target
+  # Can't stat ourselves? The script was moved/renamed/deleted under us (a rename, an
+  # uninstall). Do NOT treat that as "upgraded" — the old code in memory still works,
+  # whereas exec'ing a path that no longer exists would kill the whole control plane.
+  now="$(stat -f %m "$src" 2>/dev/null)" || return 0
+  [ -n "$now" ] || return 0
   [ "$now" = "$SELF_MTIME" ] && return 0
+  # Prefer our own path; fall back to whatever is on PATH now (survives a rename).
+  target="$src"
+  [ -x "$target" ] || target="$(command -v ghostfleet 2>/dev/null)"
+  if [ -z "$target" ] || [ ! -x "$target" ]; then SELF_MTIME="$now"; return 0; fi
   _clear; echo "ghostfleet: upgraded — reloading…" >&2
-  exec "$src" ${PROFILE:+"$PROFILE"}
+  exec "$target" ${PROFILE:+"$PROFILE"}
+  SELF_MTIME="$now"                        # exec failed (execfail) — carry on with what we have
+  echo "ghostfleet: reload failed, continuing on the running copy" >&2
 }
 # wipe the main screen + scrollback so tmux's "[detached …]" lines / stray frames
 # don't pile up between screens

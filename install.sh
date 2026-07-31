@@ -45,11 +45,11 @@ chmod +x "$FLEET_HOME"/hooks/*.sh "$FLEET_HOME"/bin/* 2>/dev/null || true
 HOOK="$FLEET_HOME/hooks/fleet-event.sh"
 
 mkdir -p "$BIN_DIR"
-for b in ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar fleet-worktrees fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-clean fleet-open; do
+for b in ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar fleet-worktrees fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-clean fleet-open fleet-project; do
   ln -sf "$FLEET_HOME/bin/$b" "$BIN_DIR/$b"
 done
 ln -sf "$FLEET_HOME/bin/ghostfleet" "$BIN_DIR/claude-fleet"   # back-compat: the old entry point
-echo "✓ linked ghostfleet + helpers (here, cf-sync, schedule, send, list, read, spawn, jump, pause, resume, governor, statusbar, worktrees, answer, inbox, stop, scratch, companion, clean, open) -> $BIN_DIR"
+echo "✓ linked ghostfleet + helpers (here, cf-sync, schedule, send, list, read, spawn, jump, pause, resume, governor, statusbar, worktrees, answer, inbox, stop, scratch, companion, clean, open, project) -> $BIN_DIR"
 
 # --- wire hooks into every Claude config dir (profile) ----------------------
 # Each profile (work=~/.claude, personal=~/.claude-personal, …) has its OWN

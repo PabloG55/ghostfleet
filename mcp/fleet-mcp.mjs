@@ -87,6 +87,8 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_stop', description: "Cleanly STOP a worker for good: kill its session and clear its fleet state (status file, park/schedule markers + the schedule waiter, manifest entry). Use for a finished worker, or an ORPHAN whose git worktree was removed (its session lingers in fleet_list otherwise). Unlike fleet_pause (which only parks), this removes it. Does not touch git — run 'git worktree prune' if the dir is stale.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_project_add', description: "Register a NEW project (its own fleet) from a path — the CLI form of the Projects screen's '+ add project'. Use this when work belongs to a repo that is NOT part of any existing fleet: registering it and starting its master is correct, whereas spawning a worker inside your own fleet would put it on the wrong socket and under the wrong project. start:true boots its master immediately so you can fleet_send to it.",
+    inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'project root: the repo, or a folder holding its checkouts' }, name: { type: 'string', description: 'project name (default: the folder name)' }, profile: { type: 'string', description: 'work (default) or another profile' }, start: { type: 'boolean', description: 'also start its master session' } }, required: ['path'], additionalProperties: false } },
   { name: 'fleet_projects', description: "List every ghostfleet project: name, profile, path, fleet socket and how many sessions are live. These names are what the `project` argument accepts, so a lead in one repo can list/send/read/answer/pause/stop a session in ANOTHER project's fleet.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
 ];
@@ -95,6 +97,13 @@ function callTool(name, a = {}) {
   let t;
   try { t = target(a.project); } catch (e) { return `error: ${e.message}`; }
   switch (name) {
+    case 'fleet_project_add': {
+      const args = ['add', String(a.path)];
+      if (a.name) args.push('--name', String(a.name));
+      if (a.profile) args.push('--profile', String(a.profile));
+      if (a.start) args.push('--start');
+      return run('fleet-project', args);
+    }
     case 'fleet_projects': {
       const rows = projects().map(p => {
         let n = '0';

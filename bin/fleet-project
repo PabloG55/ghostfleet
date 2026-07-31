@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# fleet-project add <path> [--name N] [--profile P] [--start]
+# fleet-project list
+# fleet-project rm <name>
+#
+# Register a PROJECT (a new fleet) from the command line — the thing the Projects
+# screen's "+ add project" does. Without this a lead had no way to create one, so
+# work on a brand-new repo got spawned as a worker inside whatever fleet the lead
+# happened to be in, on the wrong socket and under the wrong project.
+#
+#   add     append <path> to this profile's projects list (idempotent). --start also
+#           boots its master right away, so the new fleet is usable immediately
+#           without opening the TUI.
+#   list    name · profile · fleet socket · path
+#   rm      drop the list entry only — sessions, worktrees and history are untouched
+#
+# <path> is the project ROOT: the repo itself, or a folder holding its checkouts /
+# worktrees (same rule the TUI uses).
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+CONF="$BIN_DIR/../tmux/cf.tmux.conf"
+
+CFG_HOME="$HOME/.config/ghostfleet"
+profile_dir() { case "$1" in work|default|"") echo "$HOME/.claude" ;; *) echo "$HOME/.claude-$1" ;; esac; }
+cfg_for()     { case "$1" in work|default|"") echo "$CFG_HOME/projects" ;; *) echo "$CFG_HOME/projects.$1" ;; esac; }
+sock_for()    { case "$2" in work|default|"") echo "cf-$1" ;; *) echo "cf-$2-$1" ;; esac; }
+
+cmd="${1:-}"; shift 2>/dev/null || true
+
+case "$cmd" in
+  list)
+    printf '%-18s %-10s %-26s %s\n' PROJECT PROFILE FLEET PATH
+    for f in "$CFG_HOME"/projects "$CFG_HOME"/projects.*; do
+      [ -f "$f" ] || continue
+      while IFS=$'\t' read -r n p prof; do
+        case "$n" in ''|\#*) continue ;; esac
+        [ -n "$p" ] || continue
+        prof="${prof:-work}"
+        printf '%-18s %-10s %-26s %s\n' "$n" "$prof" "$(sock_for "$n" "$prof")" "${p/#\~/$HOME}"
+      done < "$f"
+    done
+    ;;
+
+  add)
+    PATH_IN=""; NAME=""; PROFILE="work"; START=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --name)    NAME="${2:?}";    shift 2 ;;
+        --profile) PROFILE="${2:?}"; shift 2 ;;
+        --start)   START=1;          shift ;;
+        -*) echo "fleet-project: unknown option $1" >&2; exit 1 ;;
+        *)  [ -z "$PATH_IN" ] && { PATH_IN="$1"; shift; } || { echo "fleet-project: unexpected arg $1" >&2; exit 1; } ;;
+      esac
+    done
+    [ -n "$PATH_IN" ] || { echo "fleet-project: usage: fleet-project add <path> [--name N] [--profile P] [--start]" >&2; exit 1; }
+    ROOT="$(cd "${PATH_IN/#\~/$HOME}" 2>/dev/null && pwd)" \
+      || { echo "fleet-project: no such directory: $PATH_IN" >&2; exit 1; }
+    [ -n "$NAME" ] || NAME="${ROOT##*/}"
+    case "$NAME" in *[!A-Za-z0-9._-]*) echo "fleet-project: bad name '$NAME' (use A-Za-z0-9._-)" >&2; exit 1 ;; esac
+
+    CFG="$(cfg_for "$PROFILE")"; mkdir -p "$CFG_HOME" 2>/dev/null
+    if [ -f "$CFG" ] && awk -F'\t' -v n="$NAME" '$1==n{f=1} END{exit !f}' "$CFG"; then
+      echo "fleet-project: '$NAME' is already a project in profile '$PROFILE'"
+    else
+      printf '%s\t%s\t%s\n' "$NAME" "$ROOT" "$PROFILE" >> "$CFG"
+      echo "fleet-project: added '$NAME' ($PROFILE) -> $ROOT"
+    fi
+
+    SOCK="$(sock_for "$NAME" "$PROFILE")"; CDIR="$(profile_dir "$PROFILE")"
+    echo "fleet-project: fleet $SOCK · open it with:  ghostfleet   (then pick $NAME)"
+
+    if [ "$START" = 1 ]; then
+      # same main-checkout rule as the TUI: <root>/<name>, else a git dir at depth 1,
+      # else the root itself
+      main="$ROOT/$NAME"
+      [ -d "$main/.git" ] || main="$(find "$ROOT" -maxdepth 1 -type d -exec test -e '{}/.git' ';' -print 2>/dev/null | head -1)"
+      [ -n "$main" ] && [ -d "$main" ] || main="$ROOT"
+      mkdir -p "$CDIR/fleet" 2>/dev/null
+      if tmux -L "$SOCK" has-session -t master 2>/dev/null; then
+        echo "fleet-project: master already running on $SOCK"
+      else
+        tmux -L "$SOCK" -f "$CONF" new-session -d -s master -c "$main" \
+          -e "CLAUDE_CONFIG_DIR=$CDIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here master" \
+          && echo "fleet-project: started master in $main" \
+          || { echo "fleet-project: could not start master" >&2; exit 1; }
+      fi
+      echo "fleet-project: dispatch to it with:  fleet-send -s $SOCK master \"<brief>\""
+    fi
+    ;;
+
+  rm|remove)
+    NAME="${1:-}"; [ -n "$NAME" ] || { echo "fleet-project: usage: fleet-project rm <name>" >&2; exit 1; }
+    found=0
+    for f in "$CFG_HOME"/projects "$CFG_HOME"/projects.*; do
+      [ -f "$f" ] || continue
+      if awk -F'\t' -v n="$NAME" '$1==n{f=1} END{exit !f}' "$f"; then
+        tmp="$f.$$.tmp"
+        awk -F'\t' -v n="$NAME" '$1!=n' "$f" > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" && found=1
+      fi
+    done
+    [ "$found" = 1 ] && echo "fleet-project: removed '$NAME' from the list (its sessions + history are untouched)" \
+                     || { echo "fleet-project: no project '$NAME'" >&2; exit 1; }
+    ;;
+
+  *)
+    echo "fleet-project: usage:" >&2
+    echo "  fleet-project add <path> [--name N] [--profile P] [--start]" >&2
+    echo "  fleet-project list" >&2
+    echo "  fleet-project rm <name>" >&2
+    exit 1 ;;
+esac
