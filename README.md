@@ -253,9 +253,18 @@ fleet-adopt · /Users/you/acme · profile work · fleet cf-acme · DRY RUN
 Options: `--days N` how far back to look (default 30), `--per-dir N` conversations per
 checkout (default 1 = the newest), `--profile P`, `--start`, `--go`.
 
-It **reopens** conversations — it can't move a running process. Close any tab or pane
-still holding those threads first, or you'll end up with two live copies of the same
-conversation.
+It **reopens** conversations — a running process can't be moved between terminals. You
+don't have to go closing panes yourself, though: adopt detects which conversations are
+open right now (a live Claude carries its conversation id in its own argv) and handles
+them rather than silently duplicating:
+
+- **default** — those rows are skipped, naming the pid holding each one
+- `--takeover` — quits that Claude for you (the same as typing `/exit`), then adopts it
+- `--force` — adopt anyway, accepting two live copies (rarely what you want)
+
+```bash
+fleet-adopt ~/acme --go --takeover --start   # adopt everything, closing panes for me
+```
 
 To register a project without adopting anything (the CLI form of "+ add project", and
 what a lead session uses via the `fleet_project_add` tool):

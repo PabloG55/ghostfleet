@@ -14,25 +14,32 @@
 #   --per-dir N  how many conversations per checkout (default 1 = the newest)
 #   --start      also start the project's master
 #   --go         actually adopt (otherwise just show the plan)
+#   --takeover   a conversation still open elsewhere: quit that Claude first, then adopt
+#   --force      adopt even what's open elsewhere (accepts two live copies — rarely right)
 #
 # WHY IT ONLY REOPENS: a conversation is a file on disk; adopting means starting a fleet
-# session that resumes it. It does NOT move a running process — so if a conversation is
-# still open in another tab/pane, close it first, or you'll have two live copies of the
-# same thread (Claude forks one that's held as a background agent).
+# session that resumes it — a running process can't be moved between terminals. Two live
+# copies of one conversation both append to it and diverge, so adopt REFUSES to do that:
+# it detects which conversations are open right now (their pid carries the id, via
+# --session-id/--resume) and skips them, naming the pid to close. --takeover quits them
+# for you (SIGTERM, the same as typing /exit) and then adopts — so you don't have to go
+# hunting through panes.
 set -uo pipefail
 
 src="${BASH_SOURCE[0]}"
 while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
 BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
 
-ROOT_IN=""; PROFILE="work"; DAYS=30; PER=1; START=0; GO=0
+ROOT_IN=""; PROFILE="work"; DAYS=30; PER=1; START=0; GO=0; TAKEOVER=0; FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --profile) PROFILE="${2:?}"; shift 2 ;;
     --days)    DAYS="${2:?}";    shift 2 ;;
     --per-dir) PER="${2:?}";     shift 2 ;;
     --start)   START=1; shift ;;
-    --go)      GO=1;    shift ;;
+    --go)       GO=1;       shift ;;
+    --takeover) TAKEOVER=1; shift ;;
+    --force)    FORCE=1;    shift ;;
     -*) echo "fleet-adopt: unknown option $1" >&2; exit 1 ;;
     *)  [ -z "$ROOT_IN" ] && { ROOT_IN="$1"; shift; } || { echo "fleet-adopt: unexpected arg $1" >&2; exit 1; } ;;
   esac
@@ -46,17 +53,30 @@ case "$PROFILE" in work|default) CFG_DIR="$HOME/.claude"; SOCK="cf-$NAME" ;; *) 
 PROJDIR="$CFG_DIR/projects"
 [ -d "$PROJDIR" ] || { echo "fleet-adopt: no conversations for profile '$PROFILE' ($PROJDIR)" >&2; exit 1; }
 
+# Which conversations are open RIGHT NOW, and in what process? A live Claude carries
+# its conversation id in its own argv (--session-id for a fresh one, --resume for a
+# resumed one), so this is exact — no guessing from directories or file mtimes.
+LIVE_MAP="$(ps -eo pid=,args= 2>/dev/null | awk '
+  { for (i = 2; i <= NF; i++)
+      if (($i == "--session-id" || $i == "--resume" || $i == "--fork-session") && (i+1) <= NF &&
+          $(i+1) ~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+        print $(i+1) "\t" $1 }' | sort -u)"
+live_pid() { printf '%s' "$LIVE_MAP" | awk -F'\t' -v i="$1" '$1==i{print $2; exit}'; }
+
 enc() { printf '%s' "$1" | sed 's#[/.]#-#g'; }
 ENC_ROOT="$(enc "$ROOT")"
 has_turns() { grep -qE '"type":[[:space:]]*"(user|assistant)"' "$1" 2>/dev/null; }
 CUTOFF=$(( $(date +%s) - DAYS*86400 ))
+MARK_OPEN=""; MARK_OFF=""
+[ -t 1 ] && { MARK_OPEN=$'\033[38;5;221m'; MARK_OFF=$'\033[0m'; }
 
 echo "fleet-adopt · $ROOT · profile $PROFILE · fleet $SOCK · $([ "$GO" = 1 ] && echo 'ADOPTING' || echo 'DRY RUN (add --go)')"
 echo
 
 # every checkout under this root that has Claude history (dir names are the cwd with
 # / and . turned into -, so the root's encoding is a prefix of its checkouts')
-plan=""; n=0
+plan=""; n=0; live_n=0
+US=$'\x1f'                 # field separator: NOT whitespace, so empty fields survive
 for d in "$PROJDIR/$ENC_ROOT" "$PROJDIR/$ENC_ROOT"-*; do
   [ -d "$d" ] || continue
   taken=0
@@ -70,7 +90,8 @@ for d in "$PROJDIR/$ENC_ROOT" "$PROJDIR/$ENC_ROOT"-*; do
     [ -n "$cwd" ] && [ -d "$cwd" ] || continue
     case "$cwd" in "$ROOT"|"$ROOT"/*) ;; *) continue ;; esac      # guard the lossy encoding
     last="$(jq -r 'select(.type=="assistant") | (.message.content // []) | map(select(.type=="text")|.text) | join(" ")' "$f" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1 | tr '\n' ' ' | cut -c1-58)"
-    plan="$plan$id	$cwd	$last
+    pid="$(live_pid "$id")"; [ -n "$pid" ] && live_n=$((live_n+1))
+    plan="$plan${id}${US}${cwd}${US}${pid}${US}${last}
 "
     n=$((n+1)); taken=$((taken+1))
   done < <(ls -t "$d"/*.jsonl 2>/dev/null)
@@ -82,12 +103,19 @@ if [ "$n" = 0 ]; then
   exit 0
 fi
 
-printf '%s' "$plan" | while IFS=$'\t' read -r id cwd last; do
+printf '%s' "$plan" | while IFS="$US" read -r id cwd pid last; do
   [ -n "$id" ] || continue
-  printf '  %-14s %-42s %s\n' "${id%%-*}" "${cwd/#$HOME/~}" "${last:-…}"
+  mark=""; [ -n "$pid" ] && mark="  ${MARK_OPEN}open now (pid $pid)${MARK_OFF}"
+  printf '  %-14s %-40s %s%s\n' "${id%%-*}" "${cwd/#$HOME/~}" "${last:-…}" "$mark"
 done
 echo
 echo "  $n conversation(s) -> cards on $SOCK, one master over them"
+if [ "${live_n:-0}" -gt 0 ]; then
+  echo "  ${live_n} of them are OPEN somewhere right now — adopting those would leave two live"
+  echo "  copies appending to one conversation, so they are skipped unless you pass:"
+  echo "     --takeover   quit that Claude first (same as /exit), then adopt it"
+  echo "     --force      adopt anyway and accept the fork"
+fi
 
 if [ "$GO" != 1 ]; then
   echo
@@ -99,9 +127,23 @@ fi
 
 echo
 "$BIN_DIR/fleet-project" add "$ROOT" --name "$NAME" --profile "$PROFILE" 2>&1 | sed 's/^/  /'
-printf '%s' "$plan" | while IFS=$'\t' read -r id cwd last; do
+printf '%s' "$plan" | while IFS="$US" read -r id cwd pid last; do
   [ -n "$id" ] || continue
   base="${cwd##*/}"
+  if [ -n "$pid" ] && [ "$FORCE" != 1 ]; then
+    if [ "$TAKEOVER" = 1 ]; then
+      echo "  ${base}: quitting the Claude holding it (pid $pid)…"
+      kill "$pid" 2>/dev/null
+      for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "  ${base}: pid $pid did not exit — skipping (close it by hand, then re-run)" >&2
+        continue
+      fi
+    else
+      echo "  ${base}: SKIPPED — still open in pid $pid (close it, or use --takeover)" >&2
+      continue
+    fi
+  fi
   CLAUDE_FLEET_DIR="$CFG_DIR/fleet" "$BIN_DIR/fleet-open" "$id" --as "$base" 2>&1 | grep -vE '^fleet-open: jump in' | sed 's/^/  /'
 done
 [ "$START" = 1 ] && "$BIN_DIR/fleet-project" add "$ROOT" --name "$NAME" --profile "$PROFILE" --start 2>&1 | grep -E 'master|dispatch' | sed 's/^/  /'
