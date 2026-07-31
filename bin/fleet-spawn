@@ -69,6 +69,8 @@ route_to_owner() {
   [ -n "$root" ] || return 0
   for cfg in "$HOME/.config/ghostfleet/projects" "$HOME"/.config/ghostfleet/projects.*; do
     [ -f "$cfg" ] || continue
+# only real profile lists: a suffix like ".bak.1785" is a backup, not a profile
+    case "${cfg##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac
     got="$(awk -F'\t' -v r="$root" -v home="$HOME" '
       /^[[:space:]]*#/ || NF<2 { next }
       { p=$2; sub(/^~/, home, p); if (p==r) { print $1 "\t" ($3==""?"work":$3); exit } }' "$cfg")"

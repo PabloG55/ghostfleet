@@ -65,7 +65,15 @@ maybe_reexec() {
 }
 # wipe the main screen + scrollback so tmux's "[detached …]" lines / stray frames
 # don't pile up between screens
-_clear() { printf '\033[2J\033[3J\033[H' >/dev/tty 2>/dev/null || true; }
+# Clear the screen AND turn focus reporting off (\033[?1004l). tmux/Claude enable it
+# per-app; during a transition nothing is in a state to consume a focus report, so the
+# terminal's "focus gained" arrives as literal ^[[I in the corner of a blank screen.
+# Whatever we hand over to re-enables it for itself.
+_clear() { printf '\033[?1004l\033[2J\033[3J\033[H' >/dev/tty 2>/dev/null || true; }
+# Attaching a session or booting a screen isn't instant — Claude has to redraw, which
+# can take a beat on a big conversation. Say what's happening instead of showing a
+# blank screen (the thing that made a stray escape look like a glitch).
+_loading() { _clear; printf '\033[38;5;245m  %s…\033[0m\r' "$1" >/dev/tty 2>/dev/null || true; }
 TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
 
 profile_dir() { case "$1" in work|default|"") echo "$HOME/.claude" ;; *) echo "$HOME/.claude-$1" ;; esac; }
@@ -142,6 +150,7 @@ enter_master() {
     "#[bg=colour148,fg=colour16,bold] ● master · #($BIN_DIR/fleet-statusbar '$PROJECT' '$SOCK') #[bg=colour236,fg=colour148,nobold]▏" 2>/dev/null || true
   local marker; marker="$(TM display-message -t master -p '#{socket_path}' 2>/dev/null).goto"
   rm -f "$marker" 2>/dev/null                          # clear any stale signal
+  _loading "opening $PROJECT · master"
   TM attach -t master 2>/dev/null || true; _clear
   MASTER_GOTO="$(cat "$marker" 2>/dev/null)"; rm -f "$marker" 2>/dev/null
 }
@@ -187,7 +196,7 @@ grid_loop() {
       projects) GRID_EXIT=projects; return ;;      # ^P in the grid
       jump*) if take_jump "$choice"; then GRID_EXIT=jump; return; fi ;;   # ^F chord in the grid
       attach${US}*)
-        name="${choice#attach${US}}"; last="$name"
+        name="${choice#attach${US}}"; last="$name"; _loading "opening $name"
         # C-p inside a session drops a "projects" marker then detaches (see
         # tmux/cf.tmux.conf), so leaving a chat can jump straight up to Projects.
         gmark="$(TM display-message -p '#{socket_path}' 2>/dev/null).goto"; rm -f "$gmark" 2>/dev/null
@@ -199,12 +208,12 @@ grid_loop() {
         cwd="${choice#new${US}}"; base="$(basename "$cwd")"; name="$base"; i=2
         while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
         TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here \"$name\""
-        last="$name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
+        last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
       newfresh${US}*)
         cwd="${choice#newfresh${US}}"; base="$(basename "$cwd")"; name="$base~2"; i=2
         while TM has-session -t "$name" 2>/dev/null; do i=$((i + 1)); name="$base~$i"; done
         TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" "exec claude-here \"$name\""
-        last="$name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
+        last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
     esac
   done
 }

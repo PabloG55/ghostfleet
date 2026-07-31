@@ -69,6 +69,8 @@ ROOT="$(dirname "$GITROOT")"
 SOCK=""; PROJ=""
 for cfgf in "$HOME/.config/ghostfleet/projects" "$HOME"/.config/ghostfleet/projects.*; do
   [ -f "$cfgf" ] || continue
+# only real profile lists: a suffix like ".bak.1785" is a backup, not a profile
+  case "${cfgf##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac
   got="$(awk -F'\t' -v r="$ROOT" -v g="$GITROOT" -v home="$HOME" '
     /^[[:space:]]*#/ || NF<2 { next }
     { p=$2; sub(/^~/, home, p); if (p==r || p==g) { print $1 "\t" ($3==""?"work":$3); exit } }' "$cfgf")"

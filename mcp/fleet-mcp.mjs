@@ -25,7 +25,8 @@ const HOME = os.homedir();
 function projects() {
   const dir = path.join(HOME, '.config', 'ghostfleet');
   const files = [path.join(dir, 'projects')];
-  try { for (const f of fs.readdirSync(dir)) if (f.startsWith('projects.')) files.push(path.join(dir, f)); } catch {}
+  // only real profile lists: 'projects.bak.1785…' is a backup, not a profile
+  try { for (const f of fs.readdirSync(dir)) if (/^projects\.[A-Za-z0-9_-]+$/.test(f)) files.push(path.join(dir, f)); } catch {}
   const out = [];
   for (const f of files) {
     let txt; try { txt = fs.readFileSync(f, 'utf8'); } catch { continue; }
