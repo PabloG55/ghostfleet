@@ -69,8 +69,14 @@ route_to_owner() {
   [ -n "$root" ] || return 0
   for cfg in "$HOME/.config/ghostfleet/projects" "$HOME"/.config/ghostfleet/projects.*; do
     [ -f "$cfg" ] || continue
-# only real profile lists: a suffix like ".bak.1785" is a backup, not a profile
-    case "${cfg##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac
+    # only real profile lists: a suffix like ".bak.1785" is a backup, not a profile.
+    # The bare default file has NO ".profile" suffix to check — stripping "*/projects."
+    # from it is a no-op, so it's left with its full path (slashes and all), which then
+    # (wrongly) fails this same charset check and got skipped every time, meaning a repo
+    # registered under the default 'work' profile could never be matched here at all.
+    if [ "$cfg" != "$HOME/.config/ghostfleet/projects" ]; then
+      case "${cfg##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac
+    fi
     got="$(awk -F'\t' -v r="$root" -v home="$HOME" '
       /^[[:space:]]*#/ || NF<2 { next }
       { p=$2; sub(/^~/, home, p); if (p==r) { print $1 "\t" ($3==""?"work":$3); exit } }' "$cfg")"
