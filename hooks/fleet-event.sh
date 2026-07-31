@@ -192,6 +192,9 @@ if [ "$EVENT" = "Stop" ] || { [ "$EVENT" = "Notification" ] && [ "$status" = "ne
       ( osascript -e "display notification \"$msg\" with title \"$ttl\" sound name \"$sound\"" >/dev/null 2>&1 & )
     elif command -v notify-send >/dev/null 2>&1; then
       ( notify-send "$ttl" "$msg" >/dev/null 2>&1 & )
+    elif grep -qi microsoft /proc/version 2>/dev/null && command -v powershell.exe >/dev/null 2>&1; then
+      # WSL: notify-send usually has no DBus/X, so raise a Windows toast instead
+      ( powershell.exe -NoProfile -Command "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); \$n = New-Object System.Windows.Forms.NotifyIcon; \$n.Icon = [System.Drawing.SystemIcons]::Information; \$n.Visible = \$true; \$n.ShowBalloonTip(5000, '$ttl', '$msg', 'Info')" >/dev/null 2>&1 & )
     fi
   fi
 fi

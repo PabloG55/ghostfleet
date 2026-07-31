@@ -11,7 +11,11 @@ git clone https://github.com/PabloG55/ghostfleet && cd ghostfleet && ./install.s
 ghostfleet
 ```
 
-Needs only `node` + `tmux`. macOS and Linux. zellij optional.
+Needs only `node` + `tmux`. **macOS · Linux · Windows via WSL2.** zellij optional.
+
+*(Native Windows isn't supported and won't be: sessions are tmux servers, and tmux is
+POSIX-only. Under WSL2 it's just Linux and works the same — that path is untested by
+me, so file an issue if something bites.)*
 
 > A *ghost fleet* is a fleet of autonomous, unmanned vessels under one command — agents
 > working with nobody in the seat, and one control plane steering them.

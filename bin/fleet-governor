@@ -57,6 +57,9 @@ notify() {
       ( osascript -e "display notification \"$msg\" with title \"🔔 ghostfleet — $PROJ\" sound name \"Ping\"" >/dev/null 2>&1 & )
     elif command -v notify-send >/dev/null 2>&1; then
       ( notify-send "ghostfleet — $PROJ" "$msg" >/dev/null 2>&1 & )
+    elif grep -qi microsoft /proc/version 2>/dev/null && command -v powershell.exe >/dev/null 2>&1; then
+      # WSL: notify-send usually has no DBus/X, so raise a Windows toast instead
+      ( powershell.exe -NoProfile -Command "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms'); \$n = New-Object System.Windows.Forms.NotifyIcon; \$n.Icon = [System.Drawing.SystemIcons]::Information; \$n.Visible = \$true; \$n.ShowBalloonTip(5000, 'ghostfleet', '$msg', 'Info')" >/dev/null 2>&1 & )
     fi
   fi
 }
