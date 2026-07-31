@@ -40,7 +40,8 @@ SEEN="$FLEET_DIR/$SOCK.inbox.seen"
 fmt() {
   while IFS=$'\t' read -r ts sess ev detail; do
     [ -n "$ts" ] || continue
-    hhmm="$(date -r "$ts" +%H:%M 2>/dev/null || echo '--:--')"
+    # BSD/macOS takes an epoch with -r; GNU/Linux needs -d @epoch
+    hhmm="$(date -r "$ts" +%H:%M 2>/dev/null || date -d "@$ts" +%H:%M 2>/dev/null || echo '--:--')"
     up="$(printf '%s' "$ev" | tr '[:lower:]' '[:upper:]')"
     printf '%s  %-14s %-9s %s\n' "$hhmm" "${sess:0:14}" "$up" "$detail"
   done

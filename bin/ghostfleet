@@ -44,14 +44,16 @@ PROJECTS_CFG="$HOME/.config/ghostfleet/projects"
 # not take effect until you quit and relaunch — and a NEW screen (node) talking to an
 # OLD loop silently drops any new action it prints. Remember our own mtime and re-exec
 # when it changes, but only at the Projects screen (nothing is attached there).
-SELF_MTIME="$(stat -f %m "$src" 2>/dev/null || echo 0)"
+# portable file mtime: BSD/macOS `stat -f`, GNU/Linux `stat -c`
+_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
+SELF_MTIME="$(_mtime "$src")"
 shopt -s execfail 2>/dev/null || true      # a failed exec must NOT kill the control plane
 maybe_reexec() {
   local now target
   # Can't stat ourselves? The script was moved/renamed/deleted under us (a rename, an
   # uninstall). Do NOT treat that as "upgraded" — the old code in memory still works,
   # whereas exec'ing a path that no longer exists would kill the whole control plane.
-  now="$(stat -f %m "$src" 2>/dev/null)" || return 0
+  now="$(_mtime "$src")"; [ "$now" = 0 ] && return 0
   [ -n "$now" ] || return 0
   [ "$now" = "$SELF_MTIME" ] && return 0
   # Prefer our own path; fall back to whatever is on PATH now (survives a rename).
@@ -118,7 +120,7 @@ ensure_governor() {
   case "$mode" in 0|off|no|false) return 0 ;; esac
   local fdir="$CFG_DIR/fleet"
   local pidf="$fdir/$PROJECT.governor.pid" verf="$fdir/$PROJECT.governor.ver" logf="$fdir/$PROJECT.governor.log"
-  local ver; ver="$(stat -f %m "$BIN_DIR/fleet-governor" 2>/dev/null || echo 0)"
+  local ver; ver="$(_mtime "$BIN_DIR/fleet-governor")"
   # already running for this project WITH the current governor code? keep it.
   if [ -f "$pidf" ] && kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null; then
     [ "$(cat "$verf" 2>/dev/null)" = "$ver" ] && return 0

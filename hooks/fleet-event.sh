@@ -186,7 +186,13 @@ if [ "$EVENT" = "Stop" ] || { [ "$EVENT" = "Notification" ] && [ "$status" = "ne
       -execute "$JUMP '$zs' 'master' '${CLAUDE_FLEET_SOCK:-}'" >/dev/null 2>&1 &
   else
     msg="${SLOT:+$SLOT — }$sub"; msg="${msg//\"/}"; msg="${msg//\\/}"; ttl="${title//\"/}"
-    ( osascript -e "display notification \"$msg\" with title \"$ttl\" sound name \"$sound\"" >/dev/null 2>&1 & )
+    # macOS: osascript. Linux: notify-send. Neither: stay silent — the status file and
+    # the lead's inbox already carry the event, so nothing depends on the popup.
+    if command -v osascript >/dev/null 2>&1; then
+      ( osascript -e "display notification \"$msg\" with title \"$ttl\" sound name \"$sound\"" >/dev/null 2>&1 & )
+    elif command -v notify-send >/dev/null 2>&1; then
+      ( notify-send "$ttl" "$msg" >/dev/null 2>&1 & )
+    fi
   fi
 fi
 

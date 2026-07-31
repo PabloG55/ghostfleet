@@ -1,15 +1,34 @@
 # ghostfleet
 
-A terminal control plane for running many **Claude Code** sessions in parallel.
+**Run a fleet of Claude Code agents in parallel, from one terminal.** Each agent gets its
+own git worktree; you get one screen that shows what every one of them is doing.
 
-Runs in **any terminal** — Terminal.app, iTerm, Ghostty, Kitty, a plain SSH shell. It needs
-only `node` and `tmux`. zellij is **optional**: if you use it, a layout is included that frees
-`Ctrl-s`/`Ctrl-p`/`Ctrl-f` so the one-key shortcuts reach the app; without it everything still
-works through the `C-a` prefix (`C-a s`, `C-a p`, `C-a f`).
+<!-- Record with: brew install vhs && vhs demo.tape -->
+![ghostfleet](docs/demo.gif)
 
-> A *ghost fleet* is a fleet of autonomous, unmanned vessels under one command — which is
-> exactly what this is: agents working with nobody in the seat, and one control plane
-> steering them. The CLI is still `ghostfleet` and the commands are still `fleet-*`.
+```bash
+git clone https://github.com/PabloG55/ghostfleet && cd ghostfleet && ./install.sh
+ghostfleet
+```
+
+Needs only `node` + `tmux`. macOS and Linux. zellij optional.
+
+> A *ghost fleet* is a fleet of autonomous, unmanned vessels under one command — agents
+> working with nobody in the seat, and one control plane steering them.
+
+## Why another one of these
+
+Orchestrating agents is easy to demo and hard to trust. The parts that took real
+debugging — and that most wrappers get wrong:
+
+| problem | what ghostfleet does |
+| --- | --- |
+| "is it working?" — the transcript's mtime says idle mid-generation, and busy when a background write lands | reads the live pane, the same signal you read |
+| a worker needs you, you handle it, the card stays red forever | a `need-you` older than the session's own activity is treated as spent |
+| every project has a session called `master`, so their statuses collide | status is scoped by the fleet's socket, not by name |
+| a dispatched prompt silently lands in the input box without submitting | dispatch waits for the paste, submits, then verifies a turn actually started |
+| one account: 5 agents drain the budget 5× faster and all stall together | a non-Claude governor meters usage and parks workers at the ceiling, resuming on reset (it can't be the lead — the lead stalls too) |
+| you already run agents by hand in a dozen panes | `fleet-adopt` finds those conversations and rebuilds them as one fleet |
 
 One terminal window (or one zellij pane) — `ghostfleet` is the whole control plane:
 

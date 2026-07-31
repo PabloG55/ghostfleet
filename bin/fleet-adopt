@@ -63,6 +63,8 @@ LIVE_MAP="$(ps -eo pid=,args= 2>/dev/null | awk '
         print $(i+1) "\t" $1 }' | sort -u)"
 live_pid() { printf '%s' "$LIVE_MAP" | awk -F'\t' -v i="$1" '$1==i{print $2; exit}'; }
 
+# portable file mtime: BSD/macOS `stat -f`, GNU/Linux `stat -c`
+_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0; }
 enc() { printf '%s' "$1" | sed 's#[/.]#-#g'; }
 ENC_ROOT="$(enc "$ROOT")"
 has_turns() { grep -qE '"type":[[:space:]]*"(user|assistant)"' "$1" 2>/dev/null; }
@@ -83,7 +85,7 @@ for d in "$PROJDIR/$ENC_ROOT" "$PROJDIR/$ENC_ROOT"-*; do
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ "$taken" -ge "$PER" ] && break
-    [ "$(stat -f %m "$f" 2>/dev/null || echo 0)" -ge "$CUTOFF" ] || continue
+    [ "$(_mtime "$f")" -ge "$CUTOFF" ] || continue
     has_turns "$f" || continue
     id="$(basename "$f" .jsonl)"
     cwd="$(jq -r 'select(.cwd != null) | .cwd' "$f" 2>/dev/null | head -1)"
