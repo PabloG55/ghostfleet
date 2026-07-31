@@ -463,7 +463,7 @@ function renderGrid() {
   const ready = cards.filter(c => c.status === 'ready').length;
   const parked = cards.filter(c => c.status === 'parked').length;
   let buf = '\x1b[H';
-  const header = ` ${C.bold}claude-fleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
+  const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
     (parked ? ` · ${C.grey}${parked} parked${C.reset}` : '');
   buf += header + '\x1b[K\n';
@@ -954,7 +954,7 @@ function pRender() {
   if (pSchedFor) return pRenderSchedule();
   let buf = '\x1b[H';
   const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
-  buf += ` ${C.bold}claude-fleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
+  buf += ` ${C.bold}ghostfleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
   buf += pConfirmRemove
     ? `${C.red}${C.bold} remove '${pConfirmRemove}' from projects?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`
     : (jumpStage ? jumpHint() : '') + '\x1b[K\n';

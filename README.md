@@ -1,6 +1,10 @@
-# claude-fleet
+# ghostfleet
 
 A zellij-native master CLI for running many **Claude Code** sessions in parallel.
+
+> A *ghost fleet* is a fleet of autonomous, unmanned vessels under one command — which is
+> exactly what this is: agents working with nobody in the seat, and one control plane
+> steering them. The CLI is still `claude-fleet` and the commands are still `fleet-*`.
 
 One zellij session, one pane — `claude-fleet` is the whole control plane:
 
