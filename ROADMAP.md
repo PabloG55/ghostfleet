@@ -79,3 +79,30 @@ and everything stalled together on the shared account.
   (`7d:79%`) is invisible to it and hit us anyway.
 - **Multi-account** — the real ceiling-raiser for parallelism, explicitly out of
   scope for now (single account by choice).
+
+## Native Windows (deliberately not planned)
+
+WSL2 works today — under it this is just Linux. **Native** Windows (cmd/PowerShell, no
+WSL) is out of scope by construction, and it's worth writing down why so the answer
+doesn't have to be re-derived every time it's asked.
+
+Every capability here comes from tmux: sessions that outlive the window, `capture-pane`
+(which is the entire status system — see the pane-vs-mtime problem), `send-keys` for
+dispatch, attach/detach, per-project servers, and the key tables behind ^S/^P/^F. tmux is
+POSIX-only, so native support isn't a port — it's reimplementing tmux:
+
+- a background **session-host daemon** owning ConPTY handles, since nothing else keeps a
+  detached process alive
+- a headless terminal emulator (xterm.js) per session, purely so there IS a rendered
+  screen to read the way `capture-pane` reads one
+- ConPTY writes for dispatch, and the paste-then-submit race re-solved on that path
+- attach = render that buffer into the console and forward keys
+- ~20 bash scripts rewritten in PowerShell (Git Bash defeats the point — that's POSIX)
+
+Feasible with node-pty + xterm.js (the TUI is already Node), but weeks of work, and it
+permanently doubles the platform surface: every feature written twice, every bug twice.
+
+**If demand appears, the cheap move is not a rewrite.** Abstract the session backend
+behind five operations — `spawn / list / read-screen / send-keys / attach` — with tmux as
+backend #1. A ConPTY backend then becomes additive instead of a fork. Do that refactor
+when someone asks, not on spec.
