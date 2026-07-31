@@ -3,7 +3,7 @@
 #
 # Prints the master status-bar detail: "<project> · <n> running" where n is the
 # number of worker sessions (master excluded) live on <socket>. The master's
-# status-left runs this via tmux #(...) (set in bin/claude-fleet enter_master),
+# status-left runs this via tmux #(...) (set in bin/ghostfleet enter_master),
 # with project + socket baked in as literals so nothing has to be interpolated.
 proj="${1:-}"; sock="${2:-}"
 [ -n "$proj" ] || exit 0

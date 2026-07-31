@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Enable zellij auto-resume for ad-hoc `claude` panes.
 #
-# The claude-fleet layout already resumes each tab (it runs `claude-here`). This
+# The ghostfleet layout already resumes each tab (it runs `claude-here`). This
 # covers the OTHER case: panes you start by hand (open a tab, type `claude`).
 # It turns on zellij session serialization and installs a post_command_discovery_hook
 # that rewrites a resurrected bare `claude` into `claude --continue`, so on
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 CFG="${ZELLIJ_CONFIG:-$HOME/.config/zellij/config.kdl}"
-MARK="// claude-fleet:auto-resume"
+MARK="// ghostfleet:auto-resume"
 
 [ -f "$CFG" ] || { echo "error: no zellij config at $CFG"; exit 1; }
 

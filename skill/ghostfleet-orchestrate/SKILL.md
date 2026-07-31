@@ -1,11 +1,11 @@
 ---
-name: claude-fleet-orchestrate
-description: Coordinate, spawn, observe, unblock, and budget sibling Claude Code sessions in the same claude-fleet (parallel git worktrees). Use when you are a "lead"/master session dividing work across siblings — see which worktrees are free and REUSE one before creating another, dispatch a prompt to a worker, list the fleet, read a worker's output, check who needs you, unblock a worker stuck on a prompt, or park/resume workers to control cost. Triggers include "spin up a worker for X", "work on a worktree to fix Y", "which worktrees are free / reuse a worktree", "create a new session/worktree on branch Z", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "who needs me / check the inbox", "unblock/answer <session>", "pause/park <session>", "resume <session>". Runs the fleet-* commands (or the fleet_* MCP tools).
+name: ghostfleet-orchestrate
+description: Coordinate, spawn, observe, unblock, and budget sibling Claude Code sessions in the same ghostfleet (parallel git worktrees). Use when you are a "lead"/master session dividing work across siblings — see which worktrees are free and REUSE one before creating another, dispatch a prompt to a worker, list the fleet, read a worker's output, check who needs you, unblock a worker stuck on a prompt, or park/resume workers to control cost. Triggers include "spin up a worker for X", "work on a worktree to fix Y", "which worktrees are free / reuse a worktree", "create a new session/worktree on branch Z", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "who needs me / check the inbox", "unblock/answer <session>", "pause/park <session>", "resume <session>". Runs the fleet-* commands (or the fleet_* MCP tools).
 ---
 
 # Orchestrating sibling fleet sessions
 
-You are running inside a **claude-fleet** session (usually the **master**/lead). The
+You are running inside a **ghostfleet** session (usually the **master**/lead). The
 env var `CLAUDE_FLEET_SOCK` identifies your fleet — every session shares one hidden
 tmux server. Sibling sessions are other worktrees/tasks in the same fleet (e.g. an
 `api` lead alongside `api-1`, `api-2` workers). You drive them from your Bash tool

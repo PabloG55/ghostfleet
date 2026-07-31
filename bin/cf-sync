@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cf-sync — copy the claude-fleet RUNTIME out of the git repo into a non-TCC
+# cf-sync — copy the ghostfleet RUNTIME out of the git repo into a non-TCC
 # location so ClaudeCode.app (and any terminal) can actually execute it.
 #
 # WHY THIS EXISTS: the git repo lives under ~/Documents, which macOS guards with
@@ -14,7 +14,7 @@
 #   cf-sync                 # sync recorded source repo -> live runtime
 #   cf-sync <repo-path>     # sync from an explicit repo (also re-records it)
 #
-# Live runtime dir: $CLAUDE_FLEET_HOME or ~/.local/libexec/claude-fleet
+# Live runtime dir: $CLAUDE_FLEET_HOME or ~/.local/libexec/ghostfleet
 set -uo pipefail
 
 # resolve our own install dir (follow symlinks) = the live runtime root's bin/
@@ -26,7 +26,7 @@ DEST="${CLAUDE_FLEET_HOME:-$(cd "$(dirname "$src")/.." && pwd)}"
 REPO="${1:-}"
 [ -n "$REPO" ] || REPO="$(cat "$DEST/.source" 2>/dev/null || true)"
 if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
-  echo "cf-sync: don't know the source repo. Pass it once: cf-sync /path/to/claude-fleet" >&2
+  echo "cf-sync: don't know the source repo. Pass it once: cf-sync /path/to/ghostfleet" >&2
   exit 1
 fi
 REPO="$(cd "$REPO" && pwd)"

@@ -2,7 +2,7 @@
 # claude-here — launch Claude Code *resuming* the conversation that belongs to
 # this zellij slot / checkout, instead of a blank `claude`.
 #
-# Run by claude-fleet as the command for each session, so re-opening a session
+# Run by ghostfleet as the command for each session, so re-opening a session
 # (or rebuilding after a full exit) brings its conversation back in the right
 # checkout instead of a blank prompt.
 #

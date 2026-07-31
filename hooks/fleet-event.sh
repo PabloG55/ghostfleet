@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-fleet event hook.
+# ghostfleet event hook.
 #
 # Wired into Claude Code's hook system (see install.sh). Fires on every hooked
 # event, writes a tiny per-session status file to ~/.claude/fleet/<id>.json, and
@@ -140,7 +140,7 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     elif [ -f "$_pm.notify-lead-off" ];                   then _push=0
     elif [ "${CLAUDE_FLEET_NOTIFY_LEAD:-0}" = 1 ] \
       || [ -f "$_pm.notify-lead" ] \
-      || [ -f "$HOME/.config/claude-fleet/notify-lead" ]; then _push=1
+      || [ -f "$HOME/.config/ghostfleet/notify-lead" ]; then _push=1
     fi
     if [ "$_push" = 1 ] \
        && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t master 2>/dev/null; then

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// fleet-grid.mjs — the claude-fleet card grid.
+// fleet-grid.mjs — the ghostfleet card grid.
 //
-// Invoked by bin/claude-fleet inside a zellij pane as:
+// Invoked by bin/ghostfleet inside a zellij pane as:
 //     node fleet-grid.mjs <tmux-socket> <tmux-conf> [--plain]
 // stdin is the tty (for keys); the TUI is drawn to /dev/tty; the CHOSEN action
 // is printed to stdout (captured by the loop). Choices:
@@ -255,7 +255,7 @@ function resumeSession(name) {
 function projPushOn() {                       // what "inherit" resolves to here
   if (fs.existsSync(path.join(FLEET_DIR, SOCK + '.notify-lead-off'))) return false;
   if (fs.existsSync(path.join(FLEET_DIR, SOCK + '.notify-lead'))) return true;
-  return fs.existsSync(path.join(HOME, '.config', 'claude-fleet', 'notify-lead'));
+  return fs.existsSync(path.join(HOME, '.config', 'ghostfleet', 'notify-lead'));
 }
 function sessPushFiles(name) {
   return { on: path.join(FLEET_DIR, `${SOCK}.${name}.notify-lead`),
@@ -382,7 +382,7 @@ function newCardLines(selected) {
 }
 
 // ── checkout discovery (for new session) ────────────────────────────────
-const CFG_FILE = path.join(HOME, '.config', 'claude-fleet', 'checkouts');
+const CFG_FILE = path.join(HOME, '.config', 'ghostfleet', 'checkouts');
 const isRepo = p => { try { return fs.existsSync(path.join(p, '.git')); } catch { return false; } };
 // e.g. "myapp-v2" -> "myapp", "api" -> "api", "api-2" -> "api"
 const Zbase = Z.replace(/[-_ ]?v?\d+$/i, '') || Z;
@@ -407,7 +407,7 @@ function collectRepos(roots) {
 }
 
 function discoverCheckouts() {
-  // 1) explicit config wins: ~/.config/claude-fleet/checkouts, one path per line
+  // 1) explicit config wins: ~/.config/ghostfleet/checkouts, one path per line
   try {
     const paths = fs.readFileSync(CFG_FILE, 'utf8').split('\n')
       .map(s => s.trim()).filter(s => s && !s.startsWith('#'))
@@ -496,7 +496,7 @@ function renderPicker() {
   if (checkouts.length === 0) {
     buf += `${C.yellow}  no git checkouts found automatically${C.reset}\x1b[K\n`;
     buf += `${C.dim}  looked in: ${discoverRoots().map(r => r.replace(HOME, '~')).join(', ')}${C.reset}\x1b[K\n`;
-    buf += `${C.dim}  fix: put one path per line in ~/.config/claude-fleet/checkouts${C.reset}\x1b[K\n`;
+    buf += `${C.dim}  fix: put one path per line in ~/.config/ghostfleet/checkouts${C.reset}\x1b[K\n`;
   } else {
     checkouts.forEach((c, i) => {
       const mark = i === pickSel ? `${C.bold}${C.green}▸ ` : '  ';
@@ -572,7 +572,7 @@ function finish(result) {
 // The chord tmux implements as key tables (see tmux/cf.tmux.conf) is only reachable
 // from INSIDE a session, so these Node screens implement the same grammar and emit
 // the same action strings — one grammar, two entry points, both resolved by
-// claude-fleet's take_jump:
+// ghostfleet's take_jump:
 //   ^F <p> <s>  -> jumps:<p>:<s>     ^F <p> ⏎ / m  -> jumpm:<p>   (that project's master)
 //   ^F <p> s    -> jump:<p>          ^F s <p>      -> jump:<p>    (its session grid)
 //   ^F p        -> projects          esc / ^C      -> cancel
@@ -786,7 +786,7 @@ const SCREEN = (() => { const i = process.argv.indexOf('--screen'); return i >= 
 // Project to preselect on the projects screen (the one we just stepped out of),
 // so leaving a project returns the cursor to it instead of jumping to the top.
 const SELECT = (() => { const i = process.argv.indexOf('--select'); return i >= 0 ? (process.argv[i + 1] || '') : ''; })();
-const PROJECTS_CFG = process.env.CLAUDE_FLEET_PROJECTS || path.join(HOME, '.config', 'claude-fleet', 'projects');
+const PROJECTS_CFG = process.env.CLAUDE_FLEET_PROJECTS || path.join(HOME, '.config', 'ghostfleet', 'projects');
 
 function boxCard(title, rows, color, sel) {
   const t = clip(`─ ${title} `, CW);
@@ -806,7 +806,7 @@ function readProjects() {
 }
 function profileDir(p) { return (!p || p === 'work' || p === 'default') ? path.join(HOME, '.claude') : path.join(HOME, '.claude-' + p); }
 // tmux socket for a project — work stays bare cf-<name>; other profiles are
-// namespaced so same-named projects don't collide (matches bin/claude-fleet).
+// namespaced so same-named projects don't collide (matches bin/ghostfleet).
 function sockOf(proj) { const p = proj.profile; return (!p || p === 'work' || p === 'default') ? 'cf-' + proj.name : 'cf-' + p + '-' + proj.name; }
 // live sessions for a project (incl master, the lead you land on with ⏎) +
 // how many need you / are working
@@ -859,10 +859,10 @@ let pSetCol = 0;             // selected column (which setting) on the settings 
 // or needs help, so it drains fleet-inbox. It's gated by markers this page toggles:
 //   <sock>.notify-lead-off  — authoritative OFF (wins over everything)
 //   <sock>.notify-lead      — per-project ON
-//   ~/.config/claude-fleet/notify-lead  — global default ON
+//   ~/.config/ghostfleet/notify-lead  — global default ON
 // (An env var CLAUDE_FLEET_NOTIFY_LEAD=1 can also turn it on at launch; the OFF
 // marker overrides that too. This page can't see the env, so it reports by marker.)
-const GLOBAL_NOTIFY = () => path.join(HOME, '.config', 'claude-fleet', 'notify-lead');
+const GLOBAL_NOTIFY = () => path.join(HOME, '.config', 'ghostfleet', 'notify-lead');
 function pushState(proj) {
   const dir = path.join(profileDir(proj.profile), 'fleet');
   const sock = sockOf(proj);
@@ -919,7 +919,7 @@ function pBuild() {
   }
   pSel = Math.max(0, Math.min(pSel, pItems.length - 1));
 }
-// remove a project from the list (~/.config/claude-fleet/projects) — only the
+// remove a project from the list (~/.config/ghostfleet/projects) — only the
 // list entry; its tmux sessions and conversation history are left untouched.
 function removeProject(name) {
   let lines;
@@ -932,7 +932,7 @@ function removeProject(name) {
   try { fs.writeFileSync(PROJECTS_CFG, kept.join('\n')); } catch {}
 }
 // reorder: move a project `delta` positions in the list, persisted to the config
-// (~/.config/claude-fleet/projects). Comment lines are kept (floated to the top);
+// (~/.config/ghostfleet/projects). Comment lines are kept (floated to the top);
 // blank separators are dropped. Returns the project's new index, or -1.
 function reorderProject(name, delta) {
   let lines;

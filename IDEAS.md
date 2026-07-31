@@ -3,10 +3,10 @@
 > **Chosen: `ghostfleet`.** A ghost fleet is a fleet of autonomous, unmanned vessels
 > under one command — agents with nobody in the seat, one control plane steering them.
 > Applied to the visible surfaces (TUI headers, README). The CLI entry point, the
-> `fleet-*` commands, `~/.config/claude-fleet/`, `~/.local/libexec/claude-fleet/` and the
+> `fleet-*` commands, `~/.config/ghostfleet/`, `~/.local/libexec/ghostfleet/` and the
 > `cf-<project>` sockets are deliberately unchanged — see "Renaming cost" below.
 
-One-word name candidates for the tool currently called **claude-fleet**.
+One-word name candidates for the tool currently called **ghostfleet**.
 
 What the name has to carry: *one control plane commanding many parallel Claude
 sessions* — projects → a lead → workers on their own git worktrees. So the strong
@@ -89,7 +89,7 @@ nothing in devtools owns the word.
 **Helm** is the best *word* for a control plane, and the worst *choice* — Kubernetes
 Helm will bury it in every search.
 
-Keeping **claude-fleet** is also defensible: it says exactly what it is, and the
+Keeping **ghostfleet** is also defensible: it says exactly what it is, and the
 `fleet-*` command prefix (`fleet-spawn`, `fleet-open`, `fleet-governor`) is already
 consistent and typo-friendly. A rename means renaming ~20 commands and the config
 paths, so the new name should be clearly better, not just newer.
@@ -100,8 +100,8 @@ The product name and the command names don't have to match, and here the split i
 deliberate: a full rename touches live state, not just strings.
 
 - ~20 commands on `PATH` (`fleet-spawn`, `fleet-open`, `fleet-governor`, …)
-- `~/.config/claude-fleet/projects[.<profile>]`
-- `~/.local/libexec/claude-fleet/` (the staged runtime `cf-sync` writes to)
+- `~/.config/ghostfleet/projects[.<profile>]`
+- `~/.local/libexec/ghostfleet/` (the staged runtime `cf-sync` writes to)
 - `~/.claude*/fleet/` — status files, park/sched markers, inboxes, governor pidfiles
 - `cf-<project>` tmux sockets, which name every RUNNING session
 - the hook path wired into every profile's `settings.json`, and the MCP registration

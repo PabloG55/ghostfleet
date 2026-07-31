@@ -67,7 +67,7 @@ CWD="$(jq -r 'select(.cwd != null) | .cwd' "$TR" 2>/dev/null | head -1)"
 GITROOT="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null || echo "$CWD")"
 ROOT="$(dirname "$GITROOT")"
 SOCK=""; PROJ=""
-for cfgf in "$HOME/.config/claude-fleet/projects" "$HOME"/.config/claude-fleet/projects.*; do
+for cfgf in "$HOME/.config/ghostfleet/projects" "$HOME"/.config/ghostfleet/projects.*; do
   [ -f "$cfgf" ] || continue
   got="$(awk -F'\t' -v r="$ROOT" -v g="$GITROOT" -v home="$HOME" '
     /^[[:space:]]*#/ || NF<2 { next }

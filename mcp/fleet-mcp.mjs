@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// claude-fleet MCP server — exposes the fleet orchestration commands as native
+// ghostfleet MCP server — exposes the fleet orchestration commands as native
 // tools so a lead Claude session can call them as structured tool-calls instead
 // of shelling out. Thin wrapper over bin/fleet-{list,send,read,spawn,worktrees,
 // inbox,answer,pause,resume}; those
@@ -21,9 +21,9 @@ const HOME = os.homedir();
 // name another fleet, a lead could only ever see its own, so work spanning repos
 // (e.g. replying to a session fleet-open put on another project's fleet) was
 // impossible from a tool call. Resolve a project name -> its socket + config dir,
-// from the same ~/.config/claude-fleet/projects[.<profile>] files claude-fleet reads.
+// from the same ~/.config/ghostfleet/projects[.<profile>] files ghostfleet reads.
 function projects() {
-  const dir = path.join(HOME, '.config', 'claude-fleet');
+  const dir = path.join(HOME, '.config', 'ghostfleet');
   const files = [path.join(dir, 'projects')];
   try { for (const f of fs.readdirSync(dir)) if (f.startsWith('projects.')) files.push(path.join(dir, f)); } catch {}
   const out = [];
@@ -87,7 +87,7 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_stop', description: "Cleanly STOP a worker for good: kill its session and clear its fleet state (status file, park/schedule markers + the schedule waiter, manifest entry). Use for a finished worker, or an ORPHAN whose git worktree was removed (its session lingers in fleet_list otherwise). Unlike fleet_pause (which only parks), this removes it. Does not touch git — run 'git worktree prune' if the dir is stale.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
-  { name: 'fleet_projects', description: "List every claude-fleet project: name, profile, path, fleet socket and how many sessions are live. These names are what the `project` argument accepts, so a lead in one repo can list/send/read/answer/pause/stop a session in ANOTHER project's fleet.",
+  { name: 'fleet_projects', description: "List every ghostfleet project: name, profile, path, fleet socket and how many sessions are live. These names are what the `project` argument accepts, so a lead in one repo can list/send/read/answer/pause/stop a session in ANOTHER project's fleet.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
 ];
 
@@ -147,7 +147,7 @@ function handle(line) {
     return send({ jsonrpc: '2.0', id, result: {
       protocolVersion: params?.protocolVersion || '2024-11-05',
       capabilities: { tools: {} },
-      serverInfo: { name: 'claude-fleet', version: '1.0.0' },
+      serverInfo: { name: 'ghostfleet', version: '1.0.0' },
     }});
   }
   if (method === 'tools/list') return send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });

@@ -51,7 +51,7 @@ notify() {
   [ "$DRY" = 1 ] && return 0
   if [ $(( now - LAST_NOTIFY )) -ge "$COOLDOWN" ] && command -v osascript >/dev/null 2>&1; then
     LAST_NOTIFY="$now"
-    ( osascript -e "display notification \"$msg\" with title \"🔔 claude-fleet — $PROJ\" sound name \"Ping\"" >/dev/null 2>&1 & )
+    ( osascript -e "display notification \"$msg\" with title \"🔔 ghostfleet — $PROJ\" sound name \"Ping\"" >/dev/null 2>&1 & )
   fi
 }
 

@@ -7,7 +7,7 @@
 # pane to the target session so you land right on it.
 #
 # If the title heuristic misses, add an explicit line to
-#   ~/.config/claude-fleet/windows   ->   "<zellij-session> <aerospace-window-id>"
+#   ~/.config/ghostfleet/windows   ->   "<zellij-session> <aerospace-window-id>"
 set -uo pipefail
 
 ZS="${1:-}"; SLOT="${2:-}"; SOCK="${3:-}"
@@ -17,8 +17,8 @@ ZS="${1:-}"; SLOT="${2:-}"; SOCK="${3:-}"
 if command -v aerospace >/dev/null 2>&1; then
   wid=""
   # explicit override wins
-  if [ -f "$HOME/.config/claude-fleet/windows" ]; then
-    wid="$(awk -v s="$ZS" '$1==s{print $2; exit}' "$HOME/.config/claude-fleet/windows" 2>/dev/null)"
+  if [ -f "$HOME/.config/ghostfleet/windows" ]; then
+    wid="$(awk -v s="$ZS" '$1==s{print $2; exit}' "$HOME/.config/ghostfleet/windows" 2>/dev/null)"
   fi
   # else match the window whose title mentions the session name
   [ -n "$wid" ] || wid="$(aerospace list-windows --all --format '%{window-id}|%{window-title}' 2>/dev/null \

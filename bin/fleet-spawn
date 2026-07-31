@@ -60,14 +60,14 @@ CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 # ROUTE BY OWNING PROJECT — the worker MUST land on the fleet of the project this
 # repo belongs to, NOT whatever socket we happened to be called with. Otherwise
 # orchestrating several projects from one session (or a stale CLAUDE_FLEET_SOCK in
-# the env) spawns e.g. acme/widgetco workers onto the claude-fleet fleet, so
+# the env) spawns e.g. acme/widgetco workers onto the ghostfleet fleet, so
 # their status/nudges report to the wrong project. A worktree's project ROOT is the
 # parent of its repo (siblings live under it); match that against the projects
 # configs and switch to the owner's socket + config dir. No match → keep ambient.
 route_to_owner() {
   local root="$1" cfg got name prof osock ocfg
   [ -n "$root" ] || return 0
-  for cfg in "$HOME/.config/claude-fleet/projects" "$HOME"/.config/claude-fleet/projects.*; do
+  for cfg in "$HOME/.config/ghostfleet/projects" "$HOME"/.config/ghostfleet/projects.*; do
     [ -f "$cfg" ] || continue
     got="$(awk -F'\t' -v r="$root" -v home="$HOME" '
       /^[[:space:]]*#/ || NF<2 { next }

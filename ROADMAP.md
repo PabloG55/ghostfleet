@@ -1,6 +1,6 @@
 # Ideas
 
-One-word ideas for claude-fleet. Each is grounded in something that actually bit us
+One-word ideas for ghostfleet. Each is grounded in something that actually bit us
 while running the fleet — the evidence line is why it's here, not a guess.
 
 ## Top 3 (by time lost / known-bad behavior)

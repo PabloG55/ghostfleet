@@ -4,9 +4,9 @@ A zellij-native master CLI for running many **Claude Code** sessions in parallel
 
 > A *ghost fleet* is a fleet of autonomous, unmanned vessels under one command — which is
 > exactly what this is: agents working with nobody in the seat, and one control plane
-> steering them. The CLI is still `claude-fleet` and the commands are still `fleet-*`.
+> steering them. The CLI is still `ghostfleet` and the commands are still `fleet-*`.
 
-One zellij session, one pane — `claude-fleet` is the whole control plane:
+One zellij session, one pane — `ghostfleet` is the whole control plane:
 
 ```
 Projects          ⏎→    Master Claude      C-s →    the session grid
@@ -81,7 +81,7 @@ branch on your **local** ref — falling back to the remote tip only when local 
 These are also exposed as **MCP tools** (`fleet_list` / `_send` / `_read` / `_spawn` /
 `_worktrees` / `_inbox` / `_answer` / `_pause` / `_resume`) via a dependency-free stdio server
 (`mcp/fleet-mcp.mjs`) that `install.sh` registers in each config dir. The installed
-**`claude-fleet-orchestrate` skill** teaches a lead the loop above — reuse before spawn, pull the
+**`ghostfleet-orchestrate` skill** teaches a lead the loop above — reuse before spawn, pull the
 inbox instead of polling every sibling, unblock with `fleet-answer`, mind the shared budget — so
 you can just say *"work on a worktree to fix X"* and it reuses a free one. Each session knows its
 fleet via `CLAUDE_FLEET_SOCK`; prompts must be self-contained (siblings don't share your context);
@@ -97,7 +97,7 @@ events show up in `fleet-inbox`. Opt out with `CLAUDE_FLEET_GOVERNOR=off`, watch
 - **One tmux server per project** (`tmux -L cf-<project>`) is the hidden substrate. It keeps each
   Claude session alive in the background and handles attach / detach / resize — the battle-tested
   part. You never interact with tmux directly.
-- **`claude-fleet`** is a tiny loop: it runs the grid, and when you pick a card it hands off to
+- **`ghostfleet`** is a tiny loop: it runs the grid, and when you pick a card it hands off to
   `tmux attach`. Detach (see keys below) and the loop redraws the grid. Node never owns PTYs.
 - **`fleet-grid.mjs`** is a flicker-free Node TUI (zero npm deps). Each card joins three sources:
   the tmux session list, the per-session status file that the Claude hooks write to
@@ -123,7 +123,7 @@ matched by window title) and lands you on **master**, so you coordinate through 
 macOS must *authorize* terminal-notifier (System Settings → Notifications), and its Homebrew build
 often ships with a broken signature — re-sign it once:
 `codesign --force --deep -s - "$(brew --prefix)"/Cellar/terminal-notifier/*/terminal-notifier.app`.
-If a window is ever mis-matched, pin it in `~/.config/claude-fleet/windows`
+If a window is ever mis-matched, pin it in `~/.config/ghostfleet/windows`
 (`<zellij-session> <aerospace-window-id>` per line).
 
 ## Keys
@@ -146,7 +146,7 @@ on, a worker that finishes or needs help pings its master to drain `fleet-inbox`
 worker finished or needs you…"* message). `↑↓`/`jk` move · `space`/`⏎` toggle the selected project ·
 `esc`/`` ` `` back. Each project shows `● on` / `○ off` and its source (`this project` vs `global
 default`). Toggling writes an explicit per-project choice that **overrides** the global default
-(`CLAUDE_FLEET_NOTIFY_LEAD` / `~/.config/claude-fleet/notify-lead`) — so you can leave the nudge on
+(`CLAUDE_FLEET_NOTIFY_LEAD` / `~/.config/ghostfleet/notify-lead`) — so you can leave the nudge on
 globally but silence it for one noisy project (or vice-versa). Takes effect immediately, no restart.
 
 **In master:** `Ctrl-s` jumps to the **session grid**; `` ` `` (or `C-a g`) jumps back to **Projects**
@@ -177,20 +177,20 @@ Requires `node` (v18+), `jq`, `tmux`, and macOS (notifications use `osascript`).
 
 ```bash
 brew install tmux jq
-git clone https://github.com/PabloG55/claude-fleet.git
-cd claude-fleet
+git clone https://github.com/PabloG55/ghostfleet.git
+cd ghostfleet
 ./install.sh
 ```
 
 The installer first **stages the runtime** — it copies `bin/`, `hooks/`, `mcp/`, `skill/`, and
-`layouts/` out of the repo into `~/.local/libexec/claude-fleet` (override with `CLAUDE_FLEET_HOME`)
-— then symlinks the commands (`claude-fleet`, `claude-here`, `cf-sync`, and the `fleet-*` helpers —
+`layouts/` out of the repo into `~/.local/libexec/ghostfleet` (override with `CLAUDE_FLEET_HOME`)
+— then symlinks the commands (`ghostfleet`, `claude-here`, `cf-sync`, and the `fleet-*` helpers —
 `list` / `send` / `read` / `spawn` / `worktrees` / `inbox` / `answer` / `pause` / `resume` / `stop` /
 `schedule` / `jump` / `governor` / `statusbar`) into `~/.local/bin` **pointing at the staged copy**;
 wires the status + notification hooks into every Claude config dir it finds (`~/.claude`,
 `~/.claude-*`, backing each up); **registers the fleet MCP server** into each config dir's
 `.claude.json` via `claude mcp add -s user` (Claude Code reads MCP from `.claude.json`/`.mcp.json`,
-*not* `settings.json`); installs the `claude-fleet-orchestrate` skill; and links the zellij layout.
+*not* `settings.json`); installs the `ghostfleet-orchestrate` skill; and links the zellij layout.
 Optional but recommended for clickable notifications: `brew install terminal-notifier` (+ AeroSpace).
 
 ### Why the runtime is staged out of the repo (macOS TCC)
@@ -204,7 +204,7 @@ back into the protected folder). `~/.local` is **not** TCC-protected, so the ins
 everything from the staged copy there and the repo stays purely for development.
 
 **After you edit the repo, run `cf-sync`** to push those edits into the live runtime (it copies the
-runtime dirs from the recorded source repo into `~/.local/libexec/claude-fleet`; the PATH symlinks,
+runtime dirs from the recorded source repo into `~/.local/libexec/ghostfleet`; the PATH symlinks,
 hook, and MCP already point there, so no re-link is needed). The alternative — granting ClaudeCode.app
 Full Disk Access — also works but can reset on app/OS updates; staging survives updates.
 
@@ -213,16 +213,16 @@ Full Disk Access — also works but can reset on app/OS updates; staging survive
 **One** zellij session runs everything:
 
 ```bash
-zellij --layout fleet attach -c fleet    # or just run `claude-fleet` in any pane
+zellij --layout fleet attach -c fleet    # or just run `ghostfleet` in any pane
 ```
 
 You land on the **Projects** picker. `⏎` on a project drops you into its **Master Claude**; from
 there `Ctrl-s` opens the session grid. In the grid, `n` starts a session in a checkout, `N` a
 fresh parallel one, `⏎` enters it, `` ` `` comes back, `q` steps up a level.
 
-**Projects** live in `~/.config/claude-fleet/projects` (`name<TAB>path<TAB>profile`). Add your first
+**Projects** live in `~/.config/ghostfleet/projects` (`name<TAB>path<TAB>profile`). Add your first
 from the picker (`+ add project` → browse to a root folder that holds your checkouts/worktrees), or
-edit the file directly. Jump straight in with `claude-fleet <project>`.
+edit the file directly. Jump straight in with `ghostfleet <project>`.
 
 ## Profiles (work vs personal accounts)
 
@@ -232,7 +232,7 @@ the login, `settings.json`, `projects/` (transcripts) and the fleet's `fleet/` s
 `~/.claude-personal`) picks its account, so work and personal never mix:
 
 ```
-# ~/.config/claude-fleet/projects   (name <TAB> path <TAB> profile)
+# ~/.config/ghostfleet/projects   (name <TAB> path <TAB> profile)
 web	~/code/web	work
 api	~/code/api	work
 sideproj	~/projects/sideproj	personal
@@ -244,7 +244,7 @@ finds (`~/.claude` and `~/.claude-*`), so both accounts report status.
 
 ## Config
 
-`claude-fleet` sets these per project; each spawned session inherits them (used by the grid, hooks,
+`ghostfleet` sets these per project; each spawned session inherits them (used by the grid, hooks,
 and `fleet-*` tools):
 
 | Env var               | Meaning                                                          |
@@ -255,9 +255,9 @@ and `fleet-*` tools):
 | `CLAUDE_CONFIG_DIR`   | The account/config dir for the project's `profile`.              |
 | `CLAUDE_FLEET_DIR`    | Per-session status files (`$CLAUDE_CONFIG_DIR/fleet`).           |
 | `CLAUDE_FLEET_YOLO`   | `0` to require permission prompts in sessions (default: bypass). |
-| `CLAUDE_FLEET_NOTIFY_LEAD` | `1` to **push** worker `done`/`need-you` events to the lead — the hook wakes the master to drain the inbox, instead of the master polling. Debounced (a burst wakes it once); off by default (each wake costs a master turn). Enable live without restart via a marker: **all fleets** → `touch ~/.config/claude-fleet/notify-lead`; one fleet → `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead`. **Disable one fleet even when the global default is on** → `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead-off` (authoritative kill switch; beats the env var + both on-markers). The **Projects → `,` settings page** toggles these per-project markers for you. Tune the coalesce window with `CLAUDE_FLEET_NOTIFY_DEBOUNCE` (seconds, default 30). It never clobbers your input: if you're mid-typing at the master (its input line isn't empty), the wake is skipped and the event is delivered on the next one. |
+| `CLAUDE_FLEET_NOTIFY_LEAD` | `1` to **push** worker `done`/`need-you` events to the lead — the hook wakes the master to drain the inbox, instead of the master polling. Debounced (a burst wakes it once); off by default (each wake costs a master turn). Enable live without restart via a marker: **all fleets** → `touch ~/.config/ghostfleet/notify-lead`; one fleet → `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead`. **Disable one fleet even when the global default is on** → `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead-off` (authoritative kill switch; beats the env var + both on-markers). The **Projects → `,` settings page** toggles these per-project markers for you. Tune the coalesce window with `CLAUDE_FLEET_NOTIFY_DEBOUNCE` (seconds, default 30). It never clobbers your input: if you're mid-typing at the master (its input line isn't empty), the wake is skipped and the event is delivered on the next one. |
 
-`claude-fleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).
+`ghostfleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).
 
 ## Extras
 
@@ -267,8 +267,8 @@ and `fleet-*` tools):
 ## Uninstall
 
 In each config dir (`~/.claude`, `~/.claude-*`): remove the fleet `hooks` blocks and the
-`claude-fleet` entry under `mcpServers` from `settings.json` (or restore a `settings.json.bak.*`),
-and delete `skills/claude-fleet-orchestrate`. Then delete the symlinks in `~/.local/bin`, and
+`ghostfleet` entry under `mcpServers` from `settings.json` (or restore a `settings.json.bak.*`),
+and delete `skills/ghostfleet-orchestrate`. Then delete the symlinks in `~/.local/bin`, and
 `tmux -L cf-<project> kill-server` for any live fleets.
 
 ## License

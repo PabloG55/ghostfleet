@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# claude-fleet — the single control plane for parallel Claude Code sessions.
+# ghostfleet — the single control plane for parallel Claude Code sessions.
 # Run it as the one pane in your zellij session:
 #
 #   Projects  →  ⏎  →  Master Claude  →  C-s  →  the session grid
@@ -17,11 +17,11 @@
 # Node draws the screens; tmux does the PTY work. From master, ` (or C-a g) steps
 # back to Projects; from the grid it steps back to master.
 #
-#   claude-fleet                 project picker (work profile)
-#   claude-fleet <profile>       a separate profile — its own projects list
+#   ghostfleet                 project picker (work profile)
+#   ghostfleet <profile>       a separate profile — its own projects list
 #                                (projects.<profile>) + config dir (~/.claude-<profile>)
-#   claude-fleet <project>       jump straight into a known work project's Master Claude
-#   claude-fleet <project> --plain   one-shot non-interactive list (for scripts)
+#   ghostfleet <project>       jump straight into a known work project's Master Claude
+#   ghostfleet <project> --plain   one-shot non-interactive list (for scripts)
 set -uo pipefail
 
 # Resolve this script through the ~/.local/bin symlink to find the repo root.
@@ -35,11 +35,11 @@ REPO="$(cd "$BIN_DIR/.." && pwd)"
 GRID="$BIN_DIR/fleet-grid.mjs"
 CONF="$REPO/tmux/cf.tmux.conf"
 
-command -v node  >/dev/null 2>&1 || { echo "claude-fleet: node is required"; exit 1; }
-command -v tmux  >/dev/null 2>&1 || { echo "claude-fleet: tmux is required (brew install tmux)"; exit 1; }
+command -v node  >/dev/null 2>&1 || { echo "ghostfleet: node is required"; exit 1; }
+command -v tmux  >/dev/null 2>&1 || { echo "ghostfleet: tmux is required (brew install tmux)"; exit 1; }
 
 US=$'\x1f'
-PROJECTS_CFG="$HOME/.config/claude-fleet/projects"
+PROJECTS_CFG="$HOME/.config/ghostfleet/projects"
 # The control plane is a long-lived bash loop, so a `cf-sync` upgrade would otherwise
 # not take effect until you quit and relaunch — and a NEW screen (node) talking to an
 # OLD loop silently drops any new action it prints. Remember our own mtime and re-exec
@@ -48,7 +48,7 @@ SELF_MTIME="$(stat -f %m "$src" 2>/dev/null || echo 0)"
 maybe_reexec() {
   local now; now="$(stat -f %m "$src" 2>/dev/null || echo 0)"
   [ "$now" = "$SELF_MTIME" ] && return 0
-  _clear; echo "claude-fleet: upgraded — reloading…" >&2
+  _clear; echo "ghostfleet: upgraded — reloading…" >&2
   exec "$src" ${PROFILE:+"$PROFILE"}
 }
 # wipe the main screen + scrollback so tmux's "[detached …]" lines / stray frames
@@ -66,7 +66,7 @@ ensure_projects() {
   [ -f "$PROJECTS_CFG" ] && return 0
   mkdir -p "$(dirname "$PROJECTS_CFG")" 2>/dev/null
   cat > "$PROJECTS_CFG" <<'EOF'
-# claude-fleet projects — one per line:  name<TAB>path<TAB>profile
+# ghostfleet projects — one per line:  name<TAB>path<TAB>profile
 # profile: work (~/.claude) or personal (~/.claude-personal).
 # Add from the picker ("+ add project"), or edit here, e.g.:
 #   myapp<TAB>~/code/myapp<TAB>work
@@ -198,11 +198,11 @@ grid_loop() {
 }
 
 # --- profile scope --------------------------------------------------------------
-# `claude-fleet [profile]` gives each profile its own projects list
-# (~/.config/claude-fleet/projects.<profile>) AND its own Claude config dir
+# `ghostfleet [profile]` gives each profile its own projects list
+# (~/.config/ghostfleet/projects.<profile>) AND its own Claude config dir
 # (~/.claude-<profile>). A bare arg that names a known WORK project still jumps
 # straight into it (back-compat).
-WORK_CFG="$HOME/.config/claude-fleet/projects"
+WORK_CFG="$HOME/.config/ghostfleet/projects"
 PROFILE="work"; JUMP=""
 if [ -n "${1:-}" ] && [ "${1#--}" = "$1" ]; then
   if awk -F'\t' -v n="$1" '$1==n{f=1} END{exit !f}' "$WORK_CFG" 2>/dev/null; then
@@ -213,13 +213,13 @@ if [ -n "${1:-}" ] && [ "${1#--}" = "$1" ]; then
 fi
 case "$PROFILE" in
   work|default) PROJECTS_CFG="$WORK_CFG" ;;
-  *)            PROJECTS_CFG="$HOME/.config/claude-fleet/projects.$PROFILE" ;;
+  *)            PROJECTS_CFG="$HOME/.config/ghostfleet/projects.$PROFILE" ;;
 esac
 export CLAUDE_FLEET_PROJECTS="$PROJECTS_CFG" CLAUDE_FLEET_PROFILE="$PROFILE"
 
 ensure_projects
 
-# jump straight into a project (claude-fleet <project> [--plain])
+# jump straight into a project (ghostfleet <project> [--plain])
 PROJECT=""
 if [ -n "$JUMP" ]; then
   set_project "$JUMP"

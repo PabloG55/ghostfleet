@@ -1,13 +1,13 @@
-// claude-fleet layout — ONE zellij session, one pane, the whole control plane.
+// ghostfleet layout — ONE zellij session, one pane, the whole control plane.
 //
-// claude-fleet opens the Projects picker; pick a project → Master Claude or the
+// ghostfleet opens the Projects picker; pick a project → Master Claude or the
 // session grid → your sessions. Each project has its own hidden tmux server.
 // No more per-project zellij sessions — just this one.
 //
 //     zellij --layout fleet attach -c fleet
 //
-// If zellij can't find `claude-fleet`, use the absolute path
-// (e.g. command="/Users/you/.local/bin/claude-fleet").
+// If zellij can't find `ghostfleet`, use the absolute path
+// (e.g. command="/Users/you/.local/bin/ghostfleet").
 
 layout {
     // Free Ctrl-s and Ctrl-p inside the fleet session so those keystrokes reach the
@@ -24,6 +24,6 @@ layout {
         }
     }
     tab name="fleet" {
-        pane command="claude-fleet"
+        pane command="ghostfleet"
     }
 }
