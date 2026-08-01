@@ -30,7 +30,7 @@ git -C "$PWD" rev-parse --show-toplevel >/dev/null 2>&1 \
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
 
-# pane cwd -> session, once. `exec claude-here` keeps the pane cwd at the session
+# pane cwd -> session, once. `exec agent-here` keeps the pane cwd at the session
 # checkout, so a worktree is "occupied" when some session's pane sits in it.
 panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
 

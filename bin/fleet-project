@@ -91,7 +91,7 @@ case "$cmd" in
         echo "fleet-project: master already running on $SOCK"
       else
         tmux -L "$SOCK" -f "$CONF" new-session -d -s master -c "$main" \
-          -e "CLAUDE_CONFIG_DIR=$CDIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here master" \
+          -e "CLAUDE_CONFIG_DIR=$CDIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec agent-here master" \
           && echo "fleet-project: started master in $main" \
           || { echo "fleet-project: could not start master" >&2; exit 1; }
       fi

@@ -41,10 +41,14 @@ name="$base~q"; i=2
 while tmux -L "$SOCK" has-session -t "$name" 2>/dev/null; do name="$base~q$i"; i=$((i + 1)); done
 
 # CLAUDE_FLEET_FRESH=1 -> a deliberately NEW conversation in a dir that already has
-# one (claude-here would otherwise resume the worker's transcript).
+# one (the launcher would otherwise resume the worker's transcript).
+# Launch through agent-here like every other session. This companion has its own new
+# name and therefore no agent marker, so it still resolves to claude exactly as before
+# — but going through the dispatcher means an explicit CLAUDE_FLEET_AGENT is honoured
+# instead of silently ignored, which is the whole point of having one entry point.
 tmux -L "$SOCK" new-session -d -s "$name" -c "$DIR" \
   -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
-  "exec claude-here \"$name\"" || { echo "fleet-companion: failed to start session" >&2; exit 1; }
+  "exec agent-here \"$name\"" || { echo "fleet-companion: failed to start session" >&2; exit 1; }
 
 echo "fleet-companion: started '$name' in $DIR (same worktree, fresh conversation)"
 echo "fleet-companion: jump in from the grid, or ask it: fleet-send $name \"<question>\""
