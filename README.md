@@ -385,18 +385,28 @@ Re-run `./install.sh` any time you add a profile; it's idempotent and backs up e
 ### The one sharp edge
 
 `ghostfleet <name>` checks the **work** list first and jumps into that project if the name matches.
-Anything else is read as a *profile* — and an unknown profile silently creates an empty list rather
-than erroring:
+Anything else is read as a *profile* — so the `ghostfleet <project>` shortcut (and `--plain`) only
+ever reaches **work** projects. A personal project's name is not a jump target:
 
-```bash
-ghostfleet acme    # a work project  -> jumps straight into its master
-ghostfleet sideproj    # a PERSONAL project -> NOT a jump; reads as profile "sideproj"
-                       #   -> creates an empty ~/.config/ghostfleet/projects.sideproj
+```console
+$ ghostfleet sideproj
+ghostfleet: no profile "sideproj"
+  (looked for /Users/you/.config/ghostfleet/projects.sideproj)
+
+  "sideproj" is a PROJECT in the "personal" profile, not a profile.
+  Open it from that profile's screen:  ghostfleet personal
+
+  known profiles:  work personal
+  new profile:     ghostfleet sideproj --new
 ```
 
-So the `ghostfleet <project>` shortcut (and `--plain`) only reaches **work** projects. For anything
-else, open the profile and pick from the screen: `ghostfleet personal`. A typo lands the same way —
-if you get an unexpectedly empty picker, look for a stray `projects.<typo>` and delete it.
+An unknown profile is **refused, not created** — a typo and a personal project name used to both
+land you at an identical blank picker with a phantom `projects.<typo>` left behind, which told you
+nothing about which mistake you'd made. Creating a profile is now the explicit `--new`:
+
+```bash
+ghostfleet sideproj --new   # writes ~/.config/ghostfleet/projects.sideproj, then opens it
+```
 
 ## Config
 

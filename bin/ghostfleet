@@ -20,6 +20,8 @@
 #   ghostfleet                 project picker (work profile)
 #   ghostfleet <profile>       a separate profile — its own projects list
 #                                (projects.<profile>) + config dir (~/.claude-<profile>)
+#                                an UNKNOWN profile is refused, not created
+#   ghostfleet <profile> --new create that profile's (empty) projects list
 #   ghostfleet <project>       jump straight into a known work project's Master Claude
 #   ghostfleet <project> --plain   one-shot non-interactive list (for scripts)
 set -uo pipefail
@@ -86,7 +88,9 @@ maybe_reexec() {
   [ -x "$target" ] || target="$(command -v ghostfleet 2>/dev/null)"
   if [ -z "$target" ] || [ ! -x "$target" ]; then SELF_MTIME="$now"; return 0; fi
   _clear; echo "ghostfleet: upgraded — reloading…" >&2
-  exec "$target" ${PROFILE:+"$PROFILE"}
+  # REEXEC tells the new copy this profile was already validated, so a list that
+  # vanished under a running control plane can't make the reload refuse and exit.
+  CLAUDE_FLEET_REEXEC=1 exec "$target" ${PROFILE:+"$PROFILE"}
   SELF_MTIME="$now"                        # exec failed (execfail) — carry on with what we have
   echo "ghostfleet: reload failed, continuing on the running copy" >&2
 }
@@ -278,7 +282,38 @@ grid_loop() {
 # (~/.claude-<profile>). A bare arg that names a known WORK project still jumps
 # straight into it (back-compat).
 WORK_CFG="$HOME/.config/ghostfleet/projects"
-PROFILE="work"; JUMP=""
+CFG_HOME="$(dirname "$WORK_CFG")"
+PROFILE="work"; JUMP=""; NEW_PROFILE=0
+for _a in "$@"; do [ "$_a" = "--new" ] && NEW_PROFILE=1; done
+
+# Every profile that actually HAS a list, work first. A ".bak.1785" suffix is a
+# backup, not a profile — the charset test rejects it because a backup name still
+# contains a dot.
+known_profiles() {
+  local f n
+  [ -f "$WORK_CFG" ] && printf 'work\n'
+  for f in "$CFG_HOME"/projects.*; do
+    [ -f "$f" ] || continue
+    n="${f##*/projects.}"
+    case "$n" in *[!A-Za-z0-9_-]*) continue ;; esac
+    printf '%s\n' "$n"
+  done
+}
+# Which profile's list holds a project by this name (first match wins). Used only
+# to explain a miss — "sideproj" isn't a profile, it's a project over in personal.
+profile_holding() {
+  local f n
+  for f in "$WORK_CFG" "$CFG_HOME"/projects.*; do
+    [ -f "$f" ] || continue
+    case "${f##*/}" in
+      projects) n=work ;;
+      *) n="${f##*/projects.}"; case "$n" in *[!A-Za-z0-9_-]*) continue ;; esac ;;
+    esac
+    awk -F'\t' -v p="$1" '$1==p{f=1} END{exit !f}' "$f" 2>/dev/null && { printf '%s\n' "$n"; return 0; }
+  done
+  return 1
+}
+
 if [ -n "${1:-}" ] && [ "${1#--}" = "$1" ]; then
   if awk -F'\t' -v n="$1" '$1==n{f=1} END{exit !f}' "$WORK_CFG" 2>/dev/null; then
     JUMP="$1"                          # known work project -> jump into it
@@ -288,8 +323,37 @@ if [ -n "${1:-}" ] && [ "${1#--}" = "$1" ]; then
 fi
 case "$PROFILE" in
   work|default) PROJECTS_CFG="$WORK_CFG" ;;
-  *)            PROJECTS_CFG="$HOME/.config/ghostfleet/projects.$PROFILE" ;;
+  *)            PROJECTS_CFG="$CFG_HOME/projects.$PROFILE" ;;
 esac
+
+# An unknown profile used to be indistinguishable from a new one: ensure_projects
+# would conjure an empty list and drop you at a blank picker. A typo and a PERSONAL
+# project's name both land here (the jump test above only searches the WORK list),
+# so the one thing the blank screen never told you was which mistake you'd made.
+# Refuse, and say where the name actually lives. --new is the deliberate opt-in.
+#   The re-exec path is exempt: maybe_reexec re-runs us with the profile we already
+#   validated, and a control plane that killed itself mid-upgrade because someone
+#   moved a config file is a far worse failure than a stale list.
+if [ "$NEW_PROFILE" = 0 ] && [ "${CLAUDE_FLEET_REEXEC:-0}" != 1 ] \
+   && [ "$PROFILE" != work ] && [ "$PROFILE" != default ] && [ ! -f "$PROJECTS_CFG" ]; then
+  {
+    echo "ghostfleet: no profile \"$PROFILE\""
+    echo "  (looked for $PROJECTS_CFG)"
+    if owner="$(profile_holding "$PROFILE")"; then
+      echo
+      echo "  \"$PROFILE\" is a PROJECT in the \"$owner\" profile, not a profile."
+      echo "  Open it from that profile's screen:  ghostfleet $owner"
+    fi
+    echo
+    _known="$(known_profiles | paste -sd' ' -)"
+    # On a brand-new machine there isn't even a work list yet, and a bare
+    # "known profiles:" with nothing after it reads like the lookup broke.
+    echo "  known profiles:  ${_known:-(none yet — plain \`ghostfleet\` starts the work profile)}"
+    echo "  new profile:     ghostfleet $PROFILE --new"
+  } >&2
+  exit 1
+fi
+
 export CLAUDE_FLEET_PROJECTS="$PROJECTS_CFG" CLAUDE_FLEET_PROFILE="$PROFILE"
 
 ensure_projects
