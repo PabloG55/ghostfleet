@@ -2,8 +2,6 @@
   <img src="docs/logo-banner.svg" alt="ghostfleet" width="440">
 </p>
 
-# ghostfleet
-
 **Run a fleet of Claude Code agents in parallel, from one terminal.** Each agent gets its
 own git worktree; you get one screen that shows what every one of them is doing.
 
