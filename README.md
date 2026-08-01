@@ -27,7 +27,7 @@ debugging — and that most wrappers get wrong:
 | requirement | why |
 | --- | --- |
 | `node` (v18+) | the grid is a zero-npm-dependency Node TUI |
-| `tmux` | the hidden substrate that keeps sessions alive in the background |
+| `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below) |
 | `jq` | the status/notification hook parses its JSON payload with it |
 | macOS, Linux, or **Windows via WSL2** | sessions are tmux servers, and tmux is POSIX-only — see the native-Windows note below |
 | `zellij` (optional) | not required, but the included layout gives you one pane that frees `Ctrl-s`/arrows from its own bindings |
@@ -40,7 +40,7 @@ me, so file an issue if something bites.)*
 ## Install
 
 ```bash
-brew install tmux jq        # macOS — apt/dnf/pacman on Linux
+brew install jq             # macOS — apt/dnf/pacman on Linux (tmux missing? installer offers to get it)
 npx ghostfleet              # installs, no clone needed
 ghostfleet
 ```
@@ -57,6 +57,11 @@ Both run the exact same `install.sh` — `npx ghostfleet` just fetches the packa
 runs it for you, so there's nothing left checked out afterward (if you later want to
 edit ghostfleet itself, switch to the clone: `cf-sync` needs a real repo to sync
 from, and npx's cache isn't one).
+
+Missing `tmux`? The installer detects it, works out the right package manager for your
+OS (Homebrew, apt, dnf, yum, pacman, zypper, or apk), and asks before running anything
+— it never installs (or `sudo`s) without you confirming. No package manager recognized,
+or you say no? It just tells you the command to run yourself.
 
 The installer **stages the runtime** — it copies `bin/`, `hooks/`, `mcp/`, `skill/`, and
 `layouts/` out of the repo into `~/.local/libexec/ghostfleet` (override with `CLAUDE_FLEET_HOME`)

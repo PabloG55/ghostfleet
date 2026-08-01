@@ -31,7 +31,67 @@ echo
 
 command -v jq   >/dev/null 2>&1 || { echo "error: jq is required (brew install jq)"; exit 1; }
 command -v node >/dev/null 2>&1 || { echo "error: node is required (the v2 grid is a Node TUI)"; exit 1; }
-command -v tmux >/dev/null 2>&1 || echo "! tmux not found — the grid needs it. Install: brew install tmux"
+
+# tmux is the one dependency worth offering to install for you: it's the most
+# likely to be missing (jq/node are common already, if you're running this at
+# all), and every supported OS has exactly one obvious package for it. Never
+# runs a privileged command without asking first, and reads the prompt from
+# /dev/tty directly — piping this script through `curl | bash` leaves stdin
+# attached to the script itself, not the terminal, so a plain `read` would
+# silently read garbage (or block on it) instead of showing the user anything.
+ensure_tmux() {
+  command -v tmux >/dev/null 2>&1 && return 0
+  local sudo_prefix=() cmd=()
+  [ "$(id -u)" = 0 ] || sudo_prefix=(sudo)
+  case "$(uname -s)" in
+    Darwin) command -v brew >/dev/null 2>&1 && cmd=(brew install tmux) ;;
+    Linux)
+      if   command -v apt-get >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" apt-get install -y tmux)
+      elif command -v dnf     >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" dnf install -y tmux)
+      elif command -v yum     >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" yum install -y tmux)
+      elif command -v pacman  >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" pacman -S --noconfirm tmux)
+      elif command -v zypper  >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" zypper install -y tmux)
+      elif command -v apk     >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" apk add tmux)
+      fi
+      ;;
+  esac
+
+  if [ "${#cmd[@]}" -eq 0 ]; then
+    echo "! tmux not found — the grid needs it, and I don't recognize a package manager to install it with."
+    echo "  Install it yourself, e.g.: brew install tmux (macOS) / apt-get, dnf, yum, pacman, zypper, or apk install tmux (Linux)"
+    return 0
+  fi
+
+  echo "! tmux not found — the grid needs it."
+  # Probe /dev/tty in a subshell first rather than pre-checking with `[ -r ]`:
+  # that only tests permission bits and passes even with no controlling terminal
+  # at all (this happens in sandboxed/headless environments) — the actual open()
+  # is what fails there. A failed `exec` on THIS shell prints its own diagnostic
+  # that a plain `2>/dev/null` doesn't catch; wrapping the probe in `( … )` keeps
+  # that noise inside the subshell instead of leaking to the real stderr.
+  local ans=""
+  if ( exec 3<>/dev/tty ) 2>/dev/null; then
+    exec 9<>/dev/tty
+    printf "  Install it now with: %s ? [Y/n] " "${cmd[*]}" >&9
+    read -r ans <&9 || ans=""
+    exec 9>&- 9<&-
+  else
+    echo "  Non-interactive (no controlling terminal) — not auto-installing. Run: ${cmd[*]}"
+    return 0
+  fi
+  case "$ans" in
+    ""|y|Y|yes|YES|Yes)
+      echo "  Running: ${cmd[*]}"
+      if "${cmd[@]}"; then
+        echo "✓ tmux installed"
+      else
+        echo "! tmux install failed — install it yourself: ${cmd[*]}"
+      fi
+      ;;
+    *) echo "  Skipped. Install it yourself: ${cmd[*]}" ;;
+  esac
+}
+ensure_tmux
 
 chmod +x "$REPO"/hooks/*.sh "$REPO"/bin/*
 
