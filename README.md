@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" alt="ghostfleet logo" width="160">
+  <img src="docs/logo-banner.svg" alt="ghostfleet" width="440">
 </p>
 
 # ghostfleet
@@ -83,12 +83,13 @@ Full Disk Access — also works but can reset on app/OS updates; staging survive
 
 One terminal window (or one zellij pane) — `ghostfleet` is the whole control plane:
 
+```mermaid
+flowchart LR
+    Projects["Projects\npick a project · + add project"] -- "⏎ enter" --> Master["Master Claude\nthe lead — spawns &\ncoordinates workers"]
+    Master -- "Ctrl-s" --> Grid["The grid\napi · api-1 · api-2 …"]
 ```
-Projects          ⏎→    Master Claude      C-s →    the session grid
- ▸ web                   the lead — spawns           api  api-1  api-2 …
- ▸ api                   & coordinates workers  ───▸  ⏎ enter · n new · N parallel
- ▸ + add project        ←`  (back to Projects)       ←`  (back to master)
-```
+
+`` ` `` (backtick) always steps back one level, from anywhere — grid → master → Projects.
 
 - **Projects** — pick a project and `⏎` drops you straight into its **Master Claude**. Each
   project has its own hidden tmux server (`cf-<project>`) holding its sessions.
