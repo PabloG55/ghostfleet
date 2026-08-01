@@ -65,12 +65,73 @@ assumed; Codex degrades to nothing, because it could not be run at all.)*
 
 ## Selecting an agent
 
-Proposed, smallest surface that fits what exists:
-
-- `CLAUDE_FLEET_AGENT=codex` — env, honoured by the session launcher
-- `fleet-spawn <name> --agent codex` — per worker
-- grid `n` picks the agent when more than one is installed; the card shows it
+- `fleet-spawn <name> --agent opencode` — per worker
+- `CLAUDE_FLEET_AGENT=opencode` — env, honoured by the session launcher
+- the card shows the agent whenever it isn't claude
 - default stays `claude`, so nothing changes for anyone who ignores this
+
+`fleet-spawn` refuses an unknown agent, and refuses a known one whose binary isn't on
+PATH, *before* it creates a worktree — a half-built worker whose pane dropped to a
+shell is worse than a clear error. It also prints a warning when the chosen adapter is
+unverified or can't resume.
+
+## What shipped
+
+| Piece | Where |
+|---|---|
+| the adapter table + per-session agent marker | `bin/fleet-agent` |
+| launcher dispatch (default path unchanged) | `bin/agent-here` |
+| OpenCode launch/resume | `bin/opencode-here` |
+| Codex launch — **untested** | `bin/codex-here` |
+| OpenCode → fleet events | `hooks/opencode-fleet-event.js` |
+
+A session's agent is recorded in `<sock>.<session>.agent`, alongside the existing
+`.parked` / `.sched` / `.notify-lead` markers and socket-namespaced for the same
+reason: every project has a `master`. **Absent means claude**, so every session that
+already exists, and every code path that has never heard of agents, stays on the
+default with no migration.
+
+The four coupling sites now ask the adapter: `bin/claude-here` (via `agent-here`),
+busy detection in `fleet-grid.mjs` / `fleet-send` / `fleet-worktrees` / `fleet-spawn`,
+the event bridge, and `fleet-governor`'s metering.
+
+### Keeping the default honest
+
+Claude's three busy regexes are transcribed **verbatim** from the pre-adapter code and
+were diffed byte-for-byte against `git show HEAD` to prove it. `fleet-grid.mjs --plain`
+on three live Claude fleets produces output identical to the old grid once the new
+AGENT column is removed. Claude never goes through an adapter lookup at all — its
+pattern is inlined and `agent-here` execs `claude-here` directly.
+
+### Traps found while wiring it, worth not re-introducing
+
+- **An empty busy regex must never reach `grep -E`.** `grep -qE ""` matches every
+  line, so an agent with no detector would report as permanently *busy*. Every call
+  site guards for it and reports *unknown* instead.
+- **`-s <socket>` is mandatory when one fleet touches another.** `fleet-agent` prefers
+  the live `$TMUX` server like the rest of the fleet, but `fleet-spawn` routes workers
+  to their *owning* project's socket, which is often not the lead's. Resolving from
+  `$TMUX` there filed the marker under the caller's fleet and the worker came back as
+  plain claude. `-s` is accepted anywhere after the subcommand, because accepting it in
+  only one position is the same silent-wrong-answer trap.
+- **The grid resolves `fleet-agent` as its own sibling, not through PATH.** A PATH miss
+  made every non-claude agent lose its detector and silently fall back to the last
+  hook status — wrong, with no error anywhere.
+- **OpenCode republishes a user message after `session.idle`.** Treating each copy as a
+  new turn rewrote `ready` back to `working` a second after finishing, so a done worker
+  looked permanently busy. The plugin de-dupes by message id.
+
+### Known rough edges
+
+- `fleet-send`'s submit confirmation parses Claude's `╭ … ╰` input box. OpenCode's
+  input box is drawn differently, so confirmation falls back to the busy check. In
+  practice the turn starts and busy goes true, which confirms it; only a turn that
+  finishes faster than the poll can emit a spurious "could not confirm submit"
+  warning. The prompt still lands.
+- `fleet-agent installed` reports codex whenever `codex` is on PATH — which it is here,
+  even though the wrapper is broken. "On PATH" is not "works".
+- The OpenCode bridge is installed globally into `~/.config/opencode/plugin/`. It is
+  inert without `CLAUDE_FLEET_SOCK`, so ordinary `opencode` use is unaffected.
 
 ## Open questions — answered
 

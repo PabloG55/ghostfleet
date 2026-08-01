@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# fleet-agent — the AGENT ADAPTER: the one place that knows how each coding CLI
+# launches, what its pane looks like while it works, and which fleet signals it
+# can actually supply.
+#
+# An "agent" is a per-session axis orthogonal to the PROFILE axis: profile answers
+# *whose account*, agent answers *which CLI*. Default is claude, and every claude
+# value below is transcribed VERBATIM from the pre-adapter code so the default path
+# is byte-identical — see the regex note above the table.
+#
+#   fleet-agent list                       every known agent
+#   fleet-agent installed                  ...whose binary is actually on PATH
+#   fleet-agent field <agent> <field>      one field (see FIELDS)
+#   fleet-agent of <session> [-s sock]     the agent a live session is running
+#   fleet-agent set <session> <agent>      record it (fleet-spawn does this)
+#   fleet-agent forget <session>           drop the marker (session killed)
+#   fleet-agent busy <session> [-s sock]   0 = working, 1 = not, 2 = can't tell
+#   fleet-agent blocked <session>          0 = waiting on a human
+#
+# FIELDS
+#   bin         executable that must exist on PATH for this agent to be usable
+#   launcher    the <agent>-here script that starts/resumes it in a fleet pane
+#   busy_re     POSIX ERE (grep -E) matching "generating" in a captured pane.
+#               EMPTY means "no validated detector" — callers must report UNKNOWN,
+#               never idle, and never feed an empty pattern to grep (it matches
+#               every line, which would read as permanently busy).
+#   busy_re_js  the same signal as a JavaScript regex source, for fleet-grid.mjs.
+#               Two spellings exist because grep ERE and JS regex are different
+#               dialects and the pre-adapter code already had both; they must always
+#               express the SAME signal.
+#   blocked_re  ERE matching "stopped, waiting on a human" in the pane. Empty = none.
+#   ready_re    ERE matching "the input box exists, a prompt will land" — fleet-spawn
+#               waits for this before dispatching an initial prompt.
+#   hooks       yes = pushes need-you/done into the fleet event file by itself
+#   budget      yes = its pane carries the shared-account usage % the governor meters
+#   resume      yes = re-opening a session continues that cwd's conversation
+#   verified    yes = the values above were checked against a running binary
+#
+# See docs/multi-agent-sessions.md for the captures these were derived from.
+set -uo pipefail
+
+DEFAULT_AGENT=claude
+
+# ── the table ────────────────────────────────────────────────────────────────
+# claude: verbatim from bin/claude-here, bin/fleet-{send,worktrees,spawn} and
+# fleet-grid.mjs BUSY_RE as they stood before the adapter existed.
+#
+# opencode: measured 2026-08-01 against OpenCode 1.18.11. Its busy token is
+# "esc interrupt" — NOT claude's "esc to interrupt" — so claude's regex matches an
+# opencode pane never, which is the silent always-idle failure this table exists to
+# prevent. Verified in both directions: present while generating, absent when idle
+# AND absent while blocked on a permission prompt (so blocked isn't masked as busy).
+# Do NOT add an elapsed-time alternative: opencode prints "· 22.1s" AFTER a turn
+# ends, the opposite of claude, where the timer means live.
+#
+# codex: NOT VERIFIED. Its vendored native binary is missing on the dev machine, so
+# nothing here was observed. busy_re/blocked_re/ready_re are deliberately EMPTY
+# rather than guessed — an invented regex that never fires is indistinguishable from
+# a working one, and this repo has been bitten by exactly that. Fill them in from a
+# real capture before trusting a codex card.
+agent_field() {
+  local a="$1" f="$2"
+  case "$a" in
+    claude)
+      case "$f" in
+        bin)        printf 'claude' ;;
+        launcher)   printf 'claude-here' ;;
+        busy_re)    printf '%s' '(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt' ;;
+        busy_re_js) printf '%s' '(?:…|\.\.\.)\s*\(\d+[ms]|↓\s*[\d.,]+\s*[km]?\s*tokens|esc to interrupt' ;;
+        blocked_re) printf '' ;;   # need-you arrives via hooks, not the pane
+        ready_re)   printf '%s' '❯|bypass permissions|for shortcuts' ;;
+        hooks)      printf 'yes' ;;
+        budget)     printf 'yes' ;;
+        resume)     printf 'yes' ;;
+        verified)   printf 'yes' ;;
+        *) return 1 ;;
+      esac ;;
+    opencode)
+      case "$f" in
+        bin)        printf 'opencode' ;;
+        launcher)   printf 'opencode-here' ;;
+        busy_re)    printf '%s' 'esc interrupt' ;;
+        busy_re_js) printf '%s' 'esc interrupt' ;;
+        blocked_re) printf '%s' 'Permission required|Allow once' ;;
+        ready_re)   printf '%s' 'ctrl\+p commands|OpenCode [0-9]' ;;
+        hooks)      printf 'yes' ;;   # permission.asked -> need-you, session.idle -> done
+        budget)     printf 'no'  ;;   # "13.8K (7%)" is CONTEXT, not the 5h account window
+        resume)     printf 'yes' ;;   # --continue is cwd-scoped (verified both ways)
+        verified)   printf 'yes' ;;
+        *) return 1 ;;
+      esac ;;
+    codex)
+      case "$f" in
+        bin)        printf 'codex' ;;
+        launcher)   printf 'codex-here' ;;
+        busy_re)    printf '' ;;
+        busy_re_js) printf '' ;;
+        blocked_re) printf '' ;;
+        ready_re)   printf '' ;;
+        hooks)      printf 'no'  ;;
+        budget)     printf 'no'  ;;
+        resume)     printf 'no'  ;;
+        verified)   printf 'no'  ;;
+        *) return 1 ;;
+      esac ;;
+    *) return 1 ;;
+  esac
+}
+KNOWN_AGENTS="claude opencode codex"
+
+is_agent() { case " $KNOWN_AGENTS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# ── per-session agent marker ─────────────────────────────────────────────────
+# <sock>.<session>.agent, matching the existing .parked/.sched/.notify-lead markers.
+# Socket-namespaced for the same reason they are: EVERY project has a session called
+# 'master', so a bare name would collide across fleets sharing one profile's dir.
+# ABSENT = claude. That's what keeps every pre-existing session, and every session
+# created by a path that doesn't know about agents, on the default.
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+# Prefer the LIVE tmux server over the env var, same drift-proofing the rest of the
+# fleet uses: a long-running --resume/--fork session can hold a stale
+# CLAUDE_FLEET_SOCK from an earlier context.
+#
+# But `-s` (parsed below, last) must still win, and callers MUST use it when they
+# know the target fleet. fleet-spawn routes a worker to its owning project's socket,
+# which is frequently NOT the socket the lead is sitting in — resolving from $TMUX
+# there would file the marker under the caller's fleet and the worker would come back
+# as plain claude. Same failure the repo already documents for status files: a
+# session's state has to be scoped by ITS fleet socket, not the observer's.
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+
+marker() { printf '%s/%s.%s.agent' "$FLEET_DIR" "$SOCK" "$1"; }
+
+agent_of() {                       # session -> agent name (default claude)
+  local a=""
+  a="$(cat "$(marker "$1")" 2>/dev/null | tr -d '[:space:]')"
+  if [ -n "$a" ] && is_agent "$a"; then printf '%s' "$a"; else printf '%s' "$DEFAULT_AGENT"; fi
+}
+
+pane() { tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null; }
+
+# 0 = busy, 1 = idle, 2 = UNKNOWN (agent has no validated detector).
+# The empty-pattern guard is the whole point: `grep -qE ""` matches every line, so an
+# agent with no regex would read as permanently busy instead of honestly unknown.
+agent_busy() {
+  local s="$1" re=""
+  re="$(agent_field "$(agent_of "$s")" busy_re)" || return 2
+  [ -n "$re" ] || return 2
+  pane "$s" | grep -qE "$re" && return 0 || return 1
+}
+agent_blocked() {
+  local s="$1" re=""
+  re="$(agent_field "$(agent_of "$s")" blocked_re)" || return 2
+  [ -n "$re" ] || return 2
+  pane "$s" | grep -qE "$re" && return 0 || return 1
+}
+
+cmd="${1:-}"; shift 2>/dev/null || true
+# -s <sock> is accepted ANYWHERE after the subcommand, not just immediately after it.
+# Only accepting it in one position is a silent-failure trap: `fleet-agent of <sess>
+# -s <sock>` reads naturally, would parse as a positional, and the socket would fall
+# back to $TMUX — giving a confidently wrong answer instead of an error.
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s) SOCK="${2:-}"; shift 2 ;;
+    *)  ARGS+=("$1"); shift ;;
+  esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+
+case "$cmd" in
+  list)      printf '%s\n' $KNOWN_AGENTS ;;
+  installed)
+    for a in $KNOWN_AGENTS; do
+      command -v "$(agent_field "$a" bin)" >/dev/null 2>&1 && printf '%s\n' "$a"
+    done ;;
+  field)
+    a="${1:?fleet-agent: usage: fleet-agent field <agent> <field>}"
+    f="${2:?fleet-agent: usage: fleet-agent field <agent> <field>}"
+    agent_field "$a" "$f" || { echo "fleet-agent: unknown agent/field: $a/$f" >&2; exit 1; } ;;
+  of)        agent_of "${1:?fleet-agent: usage: fleet-agent of <session>}" ;;
+  set)
+    s="${1:?fleet-agent: usage: fleet-agent set <session> <agent>}"
+    a="${2:?fleet-agent: usage: fleet-agent set <session> <agent>}"
+    is_agent "$a" || { echo "fleet-agent: unknown agent '$a' (known: $KNOWN_AGENTS)" >&2; exit 1; }
+    [ -n "$SOCK" ] || { echo "fleet-agent: no socket — cannot namespace the marker" >&2; exit 1; }
+    mkdir -p "$FLEET_DIR" 2>/dev/null
+    # claude is the default and the absence of a marker already means claude; writing
+    # one anyway keeps `fleet-agent of` honest if the default ever changes.
+    printf '%s\n' "$a" > "$(marker "$s")" 2>/dev/null ;;
+  forget)    rm -f "$(marker "${1:?fleet-agent: usage: fleet-agent forget <session>}")" 2>/dev/null ;;
+  busy)      agent_busy "${1:?fleet-agent: usage: fleet-agent busy <session>}"; exit $? ;;
+  blocked)   agent_blocked "${1:?fleet-agent: usage: fleet-agent blocked <session>}"; exit $? ;;
+  ""|-h|--help|help)
+    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) echo "fleet-agent: unknown command '$cmd' (try: fleet-agent --help)" >&2; exit 1 ;;
+esac

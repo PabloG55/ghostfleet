@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# opencode-here — launch OpenCode *resuming* the conversation that belongs to this
+# checkout, the OpenCode counterpart of claude-here.
+#
+# Usage:  opencode-here [slot] [-- extra opencode args...]
+#
+# Resume works differently here, and better than claude-here has to: OpenCode stores
+# a stable ses_* id against a `directory` in its own SQLite store, and `--continue`
+# resolves the newest session FOR THIS DIRECTORY. Verified in both directions — with
+# a newer session sitting in a sibling worktree, --continue in this one still returns
+# this one's conversation. So there is no transcript-scanning to do; the CLI already
+# scopes by cwd, which is the entire job claude-here does by hand.
+#
+# `--continue` with no prior session in this directory starts a fresh one rather than
+# erroring (verified), so it is safe unconditionally — no "does a session exist" probe.
+set -uo pipefail
+
+slot=""
+if [ $# -gt 0 ] && [ "$1" != "--" ]; then
+  slot="$1"; shift
+fi
+[ "${1:-}" = "--" ] && shift
+[ -n "$slot" ] && export CLAUDE_FLEET_SLOT="$slot"
+
+# Bypass ("yolo") mode by default so workers don't stop at every permission prompt,
+# matching how the fleet runs Claude. OpenCode spells it --auto. Opt out with
+# CLAUDE_FLEET_YOLO=0 — the same switch claude-here uses, so one env var covers both.
+YOLO=()
+case "${CLAUDE_FLEET_YOLO:-1}" in
+  0|false|no|off) ;;
+  *) YOLO=(--auto) ;;
+esac
+
+MODEL=()
+[ -n "${CLAUDE_FLEET_MODEL:-}" ] && MODEL=(--model "$CLAUDE_FLEET_MODEL")
+
+# A parallel session (grid `N`) is a deliberately NEW conversation in this dir.
+case "${CLAUDE_FLEET_FRESH:-0}" in
+  1|true|yes|on)
+    echo "opencode-here: fresh parallel session in $PWD" >&2
+    exec opencode "${YOLO[@]}" "${MODEL[@]}" "$@" ;;
+esac
+
+# EXPLICIT conversation (fleet-open <session-id>): pin exactly this one. Like
+# claude-here, never fall back to "newest in this cwd" — opening a different
+# conversation than the one asked for is worse than failing.
+if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
+  echo "opencode-here: resuming ${CLAUDE_FLEET_RESUME} in $PWD" >&2
+  exec opencode "${YOLO[@]}" "${MODEL[@]}" --session "$CLAUDE_FLEET_RESUME" "$@"
+fi
+
+echo "opencode-here: continuing this checkout's conversation in $PWD" >&2
+exec opencode "${YOLO[@]}" "${MODEL[@]}" --continue "$@"

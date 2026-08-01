@@ -48,6 +48,10 @@ const STATUS = {
   parked:     { label: '⏸ parked',    color: C.grey },
   idle:       { label: '· idle',      color: C.grey },
   starting:   { label: '… starting',  color: C.yellow },
+  // An agent whose adapter has no validated busy regex. NOT idle: we genuinely
+  // cannot tell what that pane is doing, and rendering a confident "idle"/"ready"
+  // it hasn't earned is the exact failure this whole layer exists to avoid.
+  unknown:    { label: '? unknown',   color: C.yellow },
 };
 
 // ── data ────────────────────────────────────────────────────────────────
@@ -135,7 +139,52 @@ function lastAssistant(p) {
 // elapsed timer to the ellipsis so a bare "(30s)" / "(4h 11m)" in content or the status
 // bar never counts; also accept the "↓ N tokens" counter and an explicit interrupt hint.
 const BUSY_RE = /(?:…|\.\.\.)\s*\(\d+[ms]|↓\s*[\d.,]+\s*[km]?\s*tokens|esc to interrupt/i;
+
+// ── which agent is a session running? ────────────────────────────────────────
+// A session records its agent in <sock>.<name>.agent (bin/fleet-agent writes it),
+// namespaced by socket for the same reason .parked is: every project has a `master`.
+// ABSENT = claude, which is what keeps every pre-existing session — and every session
+// started by a path that predates agents — on exactly the old code path.
+function agentOf(name) {
+  try {
+    const a = fs.readFileSync(path.join(FLEET_DIR, `${SOCK}.${name}.agent`), 'utf8').trim();
+    return /^[a-z0-9_-]+$/.test(a) ? a : 'claude';
+  } catch { return 'claude'; }
+}
+
+// The busy pattern for an agent, from the adapter. Claude's is inlined above and
+// never looked up, so the default path does not depend on fleet-agent existing at
+// all. Everything else shells out ONCE per agent and is cached for the life of the
+// process (a running grid already holds stale code until you back out and re-enter,
+// per CLAUDE.md, so this cache doesn't introduce a new staleness class).
+//
+// A cached `null` means "this agent has no validated detector" → report unknown.
+const busyReCache = new Map([['claude', BUSY_RE]]);
+// Resolve fleet-agent as OUR OWN SIBLING, not through PATH. If PATH happens not to
+// include the fleet's bin dir, a PATH lookup fails, every non-claude agent loses its
+// detector, and the grid quietly falls back to whatever the last hook said — a wrong
+// answer with no error anywhere. The adapter ships in the same directory as this
+// file, so ask for it there and only fall back to PATH.
+const SIBLING_AGENT_BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-agent');
+function busyReFor(agent) {
+  if (busyReCache.has(agent)) return busyReCache.get(agent);
+  let re = null;
+  for (const bin of [SIBLING_AGENT_BIN, 'fleet-agent']) {
+    try {
+      const src = execFileSync(bin, ['field', agent, 'busy_re_js'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      if (src && src.trim()) { re = new RegExp(src, 'i'); }
+      break;                      // it ran: an empty answer is a real "no detector"
+    } catch { /* not there — try the next */ }
+  }
+  busyReCache.set(agent, re);
+  return re;
+}
+
+// true = working, false = not working, null = CAN'T TELL (no detector for this agent)
 function paneBusy(sock, name) {
+  const re = busyReFor(agentOf(name));
+  if (!re) return null;
   try {
     const txt = execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', name],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
@@ -147,7 +196,7 @@ function paneBusy(sock, name) {
     //
     // Test PER LINE, never the whole blob: \s in the regex matches newlines, so a
     // whole-pane test matches across line boundaries and false-positives on idle panes.
-    return txt.split('\n').some(line => BUSY_RE.test(line));
+    return txt.split('\n').some(line => re.test(line));
   } catch { return false; }
 }
 
@@ -156,6 +205,8 @@ function paneBusy(sock, name) {
 //   • pane shows the interrupt affordance → working (generating / running a tool)
 //   • hook says 'need-you'                → blocked, waiting on you
 //   • otherwise has history               → ready (idle at the prompt); new → idle
+//   • busy === null (no detector for this agent) → trust a pushed hook status, else
+//     report 'unknown' — never 'ready'/'idle', which would be a claim we can't back
 function deriveStatus(hook, transcript, busy, hookTs, tmt) {
   if (busy) return 'working';
   // need-you is LATCHED: the hook writes it once and nothing clears it until a later
@@ -169,6 +220,10 @@ function deriveStatus(hook, transcript, busy, hookTs, tmt) {
     const stale = tmt && hookTs && tmt > hookTs + 5;
     if (!stale) return 'need-you';
   }
+  // No pane detector for this agent. A pushed hook status is still real evidence, so
+  // use it when there is one; with nothing at all, say so. Falling through to the
+  // transcript test below would print '✓ ready' for a pane we never actually read.
+  if (busy === null) return (hook === 'working' || hook === 'ready' || hook === 'idle') ? hook : 'unknown';
   if (transcript) return 'ready';
   return 'idle';
 }
@@ -221,7 +276,8 @@ function gather() {
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
-    return { name: s.name, folder, branch, status, age, msg: lastAssistant(transcript), attached: s.attached, sched };
+    return { name: s.name, folder, branch, status, age, msg: lastAssistant(transcript), attached: s.attached, sched,
+             agent: agentOf(s.name) };
   });
 }
 
@@ -230,6 +286,9 @@ function killSession(name) {
     execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'kill-session', '-t', name], { stdio: 'ignore' });
   } catch {}
   clearParked(name);   // clear any park marker (namespaced + legacy)
+  // Drop the agent marker too, or a later session that reuses this name inherits a
+  // dead one's agent and launches the wrong CLI.
+  try { fs.unlinkSync(path.join(FLEET_DIR, `${SOCK}.${name}.agent`)); } catch {}
   // drop its status file(s) so the card disappears (the conversation history in
   // ~/.claude/projects is untouched — you can re-open it later from `new`).
   let files = [];
@@ -373,7 +432,12 @@ function cardLines(card, selected, idx) {
   const idle = card.age == null ? '' : (card.status === 'working' ? `busy ${humanAge(card.age)}` : `${humanAge(card.age)} ago`);
   const right = card.sched ? `@${clockLabel(card.sched.at)}` : idle;   // @ = scheduled send
   const l1 = `│ ${padEndV(twoCol(meta.label, right, CW - 2), CW - 2)} │`;
-  const l2 = `│ ${padEndV(card.branch || card.folder, CW - 2)} │`;
+  // Name the agent on the card whenever it isn't the default. Without this an
+  // "unknown" or a differently-behaving status is unreadable — you can't tell whether
+  // the fleet is confused or the session simply isn't Claude. Claude cards are left
+  // exactly as they were (no marker, no width change).
+  const l2 = `│ ${padEndV(twoCol(card.branch || card.folder,
+                                 card.agent && card.agent !== 'claude' ? card.agent : '', CW - 2), CW - 2)} │`;
   const l3 = `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
   const bot = `╰${'─'.repeat(CW)}╯`;
   const wrap = (s, isTop) => selected
@@ -965,12 +1029,17 @@ if (PLAIN) {
   const work = rows.filter(c => c.status === 'working').length;
   const ready = rows.filter(c => c.status === 'ready').length;
   console.log(`${need} need you · ${work} working · ${ready} ready`);
-  console.log(['TAB', 'CHECKOUT', 'BRANCH', 'STATUS', 'LAST MSG', 'IDLE']
-    .map((h, i) => h.padEnd([12, 14, 26, 11, 46, 8][i])).join(''));
+  // AGENT is in the plain table because this is the path used to verify the fleet
+  // without drawing the TUI — a status you can't attribute to an agent is not
+  // checkable, and "is this session even using the detector I think it is" is the
+  // first question when a signal looks wrong.
+  console.log(['TAB', 'CHECKOUT', 'BRANCH', 'AGENT', 'STATUS', 'LAST MSG', 'IDLE']
+    .map((h, i) => h.padEnd([12, 14, 26, 9, 11, 46, 8][i])).join(''));
   for (const c of rows) {
     const idle = c.age == null ? '' : (c.status === 'working' ? `busy ${humanAge(c.age)}` : `${humanAge(c.age)} ago`);
     console.log([
       clip(c.name, 12).padEnd(12), clip(c.folder, 14).padEnd(14), clip(c.branch, 26).padEnd(26),
+      clip(c.agent, 9).padEnd(9),
       clip(c.status, 11).padEnd(11), clip(c.msg, 44).padEnd(46), idle,
     ].join(''));
   }

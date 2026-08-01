@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# codex-here — launch Codex in a fleet pane.
+#
+# ⚠ UNTESTED. Structurally complete, never executed. The dev machine's Codex install
+# is broken (the @openai/codex npm wrapper spawns a vendored native binary that is
+# absent, so even `codex --version` dies with ENOENT), so NOTHING in this file has
+# been observed working. It is checked in so the adapter layer is genuinely
+# agent-generic rather than opencode-shaped, not because it is known good.
+#
+# What is actually known, from disk rather than from running it:
+#   - sessions persist to ~/.codex/sessions/YYYY/MM/DD/rollout-<ISO>-<uuid>.jsonl,
+#     so a per-conversation UUID exists
+#   - ~/.codex/config.toml already carries per-directory state, so a `notify` hook
+#     has somewhere to live
+# What is NOT known: whether `codex resume <id>` pins to a cwd, what its pane says
+# mid-generation, or whether its notify hook can be turned into a need-you.
+#
+# Consequences, deliberate:
+#   - the adapter reports resume=no for codex, so this starts FRESH and SAYS SO
+#     instead of pretending to restore a conversation
+#   - the adapter's codex busy_re is EMPTY, so the grid shows such a session as
+#     "unknown", never as idle
+#
+# Before anyone relies on this: get a working codex, capture a real pane
+# mid-generation and at rest, and fill in busy_re/ready_re in bin/fleet-agent.
+set -uo pipefail
+
+slot=""
+if [ $# -gt 0 ] && [ "$1" != "--" ]; then
+  slot="$1"; shift
+fi
+[ "${1:-}" = "--" ] && shift
+[ -n "$slot" ] && export CLAUDE_FLEET_SLOT="$slot"
+
+# Codex's bypass flag. Unverified like everything else here; CLAUDE_FLEET_YOLO=0
+# opts out, same switch as the other agents.
+YOLO=()
+case "${CLAUDE_FLEET_YOLO:-1}" in
+  0|false|no|off) ;;
+  *) YOLO=(--dangerously-bypass-approvals-and-sandbox) ;;
+esac
+
+MODEL=()
+[ -n "${CLAUDE_FLEET_MODEL:-}" ] && MODEL=(--model "$CLAUDE_FLEET_MODEL")
+
+echo "codex-here: WARNING — the codex adapter is untested; resume is not wired, this session starts FRESH" >&2
+
+# An explicit id is passed through to `codex resume` on the caller's authority. It is
+# NOT advertised as working (the adapter says resume=no) — this exists so that whoever
+# validates codex has the obvious thing to test first.
+if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
+  echo "codex-here: attempting 'codex resume ${CLAUDE_FLEET_RESUME}' — UNVERIFIED, may not work" >&2
+  exec codex resume "$CLAUDE_FLEET_RESUME" "${YOLO[@]}" "${MODEL[@]}" "$@"
+fi
+
+exec codex "${YOLO[@]}" "${MODEL[@]}" "$@"

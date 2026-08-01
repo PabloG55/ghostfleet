@@ -64,6 +64,23 @@ notify() {
   fi
 }
 
+# Can this session's agent report the shared-account usage figure at all? Only Claude
+# panes carry it. A session running another CLI is UNMETERABLE, and that has to be
+# explicit in both directions:
+#   - its pane must never be READ for a budget number. The "NN%(" pattern is generic
+#     enough to hit some unrelated "(" in another agent's UI, and a stray match would
+#     drive the whole fleet's park decision off a number that means nothing.
+#   - it must never be PARKED for a Claude reading. It isn't spending that account, so
+#     freezing it buys no budget back — it just silently stops work.
+# Absent adapter -> treated as claude, which is the pre-adapter behaviour.
+meterable() {
+  local a=""
+  command -v fleet-agent >/dev/null 2>&1 || return 0
+  a="$(fleet-agent of "$1" -s "$SOCK" 2>/dev/null)"
+  [ -n "$a" ] || return 0
+  [ "$(fleet-agent field "$a" budget 2>/dev/null)" = yes ]
+}
+
 # The 5h usage % from a pane's status bar: the "NN%(" field. Excludes ctx:NN% (no
 # paren after) and 7d:NN%( (colon-prefixed) by requiring a non-colon, non-digit char
 # right before the number.
@@ -71,18 +88,23 @@ pct_of() {
   tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null \
     | grep -oE '[^:0-9][0-9]+%\(' | grep -oE '[0-9]+' | tail -1
 }
-# one shared account -> take the highest reading across all live panes
+# one shared account -> take the highest reading across all live panes that actually
+# report one
 budget() {
   local max=0 p="" s=""
   for s in $(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
+    meterable "$s" || continue
     p="$(pct_of "$s")"; [ -n "$p" ] && [ "$p" -gt "$max" ] && max="$p"
   done
   echo "$max"
 }
-# workers (never the lead), newest first
+# workers (never the lead), newest first — and only ones that drink from the metered
+# account, so the ceiling never parks a worker it isn't measuring
 workers_newest_first() {
+  local s=""
   tmux -L "$SOCK" list-sessions -F '#{session_created} #{session_name}' 2>/dev/null \
-    | grep -vE ' master$' | sort -rn | awk '{print $2}'
+    | grep -vE ' master$' | sort -rn | awk '{print $2}' \
+    | while IFS= read -r s; do meterable "$s" && printf '%s\n' "$s"; done
 }
 is_parked()  { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
 gov_parked() { is_parked "$1" && grep -q '^governor' "$FLEET_DIR/$SOCK.$1.parked" 2>/dev/null; }

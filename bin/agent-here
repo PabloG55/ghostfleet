@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# agent-here — start THIS session's agent in this pane.
+#
+# The single entry point every fleet session launches through. It picks the agent
+# for the session and hands off to that agent's <agent>-here launcher, which owns
+# the resume semantics for its CLI.
+#
+# Usage:  agent-here [slot] [-- extra args for the agent...]
+#   (same contract as claude-here, which this replaced as the launch target)
+#
+# Agent selection, most specific first:
+#   CLAUDE_FLEET_AGENT=<name>   set per session by fleet-spawn --agent / the grid
+#   the recorded marker         <sock>.<slot>.agent, so a REBUILT session keeps its
+#                               agent instead of silently reverting to claude
+#   claude                      the default
+#
+# THE DEFAULT PATH IS UNTOUCHED ON PURPOSE. With no agent selected this execs
+# claude-here with the argv it was given, in the same process — so claude sessions
+# invoke exactly the command they always did, and nothing here can regress them.
+set -uo pipefail
+
+AGENT="${CLAUDE_FLEET_AGENT:-}"
+
+# Recover the agent from the marker when the env doesn't carry it. This is what
+# makes re-opening a session (grid rebuild, fleet-open) keep running the agent it
+# was created with rather than quietly switching to claude.
+if [ -z "$AGENT" ] && [ $# -gt 0 ] && [ "$1" != "--" ]; then
+  if command -v fleet-agent >/dev/null 2>&1; then
+    AGENT="$(fleet-agent of "$1" 2>/dev/null)"
+  fi
+fi
+
+case "${AGENT:-claude}" in
+  claude|"")
+    exec claude-here "$@" ;;
+esac
+
+if ! command -v fleet-agent >/dev/null 2>&1; then
+  echo "agent-here: fleet-agent is not installed — cannot resolve agent '$AGENT'; falling back to claude" >&2
+  exec claude-here "$@"
+fi
+
+launcher="$(fleet-agent field "$AGENT" launcher 2>/dev/null)"
+if [ -z "$launcher" ] || ! command -v "$launcher" >/dev/null 2>&1; then
+  echo "agent-here: no launcher for agent '$AGENT' — falling back to claude" >&2
+  exec claude-here "$@"
+fi
+
+bin="$(fleet-agent field "$AGENT" bin 2>/dev/null)"
+if [ -n "$bin" ] && ! command -v "$bin" >/dev/null 2>&1; then
+  # Don't silently start a different agent than the one asked for — that would make
+  # a card claim an agent the pane isn't running. Say so and stop.
+  echo "agent-here: '$AGENT' selected but '$bin' is not on PATH." >&2
+  echo "agent-here: install it, or start this session with --agent claude." >&2
+  echo "agent-here: dropping to a shell so the pane isn't lost." >&2
+  exec "${SHELL:-/bin/bash}" -l
+fi
+
+export CLAUDE_FLEET_AGENT="$AGENT"
+exec "$launcher" "$@"

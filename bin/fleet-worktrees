@@ -43,8 +43,20 @@ sess_for() {                       # first session whose pane cwd is at/under $1
 $panes
 EOF
 }
-busy() { tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null \
-  | grep -qE '(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt'; }
+# Busy is per-AGENT: claude's spinner says "esc to interrupt", opencode's says "esc
+# interrupt". Unlike the other call sites this one takes a session name per call, so
+# the agent is resolved per session. Falls back to claude's literal pattern (verbatim
+# from before the adapter) when fleet-agent isn't available, and treats an EMPTY
+# pattern as "can't tell" rather than feeding grep a match-everything regex.
+busy() {
+  local re='(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt' a=""
+  if command -v fleet-agent >/dev/null 2>&1; then
+    a="$(fleet-agent of "$1" -s "$SOCK" 2>/dev/null)"
+    [ -n "$a" ] && [ "$a" != claude ] && re="$(fleet-agent field "$a" busy_re 2>/dev/null)"
+  fi
+  [ -n "$re" ] || return 1
+  tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null | grep -qE "$re"
+}
 is_parked() { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
 task_for()  { awk -F'\t' -v w="$1" '$1==w{print $4; exit}' "$MANIFEST" 2>/dev/null; }
 git_state() {                      # "clean|dirty" (+ahead / -behind vs upstream)

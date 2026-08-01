@@ -24,11 +24,29 @@ MSG="$*"
 tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
 
-# Is the target mid-turn right now? Read the LIVE pane (Claude's working spinner),
+# Is the target mid-turn right now? Read the LIVE pane (the agent's working spinner),
 # not the status file — the file can be stale, and a wrong guess here is harmless
 # but a wrong "queued" note is confusing.
-busy() { tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null \
-  | grep -qE '(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt'; }
+#
+# The pattern comes from the target's AGENT: claude says "esc to interrupt", opencode
+# says "esc interrupt", and one regex cannot serve both. Resolved once here rather
+# than per call, because submitted() polls this in a loop. Falls back to claude's
+# literal pattern — byte-identical to what this script used before the adapter — so a
+# missing/renamed fleet-agent degrades to today's behaviour instead of breaking send.
+BUSY_RE='(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt'
+if command -v fleet-agent >/dev/null 2>&1; then
+  _a="$(fleet-agent of "$SESSION" -s "$SOCK" 2>/dev/null)"
+  if [ -n "$_a" ] && [ "$_a" != claude ]; then
+    BUSY_RE="$(fleet-agent field "$_a" busy_re 2>/dev/null)"
+  fi
+fi
+# An EMPTY pattern means the agent has no validated detector. It must never reach
+# grep: `grep -qE ""` matches every line, which would report the session as
+# permanently busy and make fleet-send queue every prompt behind a phantom turn.
+busy() {
+  [ -n "$BUSY_RE" ] || return 1
+  tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null | grep -qE "$BUSY_RE"
+}
 pre_busy=no; busy && pre_busy=yes
 [ "$pre_busy" = yes ] && echo "fleet-send: note — '$SESSION' is working; your prompt will queue after this turn." >&2
 

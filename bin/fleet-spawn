@@ -17,6 +17,11 @@
 #             remote tip when local is strictly BEHIND its upstream (warns if ahead).
 #   --prompt  initial task to send once the session boots (~7s later)
 #   --model   model for the new session (e.g. opus); default = account default
+#   --agent   which coding CLI runs the session (claude | opencode | codex).
+#             Default claude. See bin/fleet-agent for what each one can actually
+#             report back — a non-claude worker is not metered by the governor, and
+#             an unverified agent's card shows "unknown" rather than a status it
+#             hasn't earned.
 #   --reuse   start the session in an EXISTING free worktree (name or path). Alone,
 #             it keeps the worktree's current branch; add --branch/--from to CLEAN
 #             it (reset --hard) and rebranch in one step — how leads recycle.
@@ -27,12 +32,14 @@
 set -uo pipefail
 
 NAME=""; BRANCH=""; BRANCH_SET=0; FROM=""; PROMPT=""; MODEL=""; REUSE=""; NEW=0
+AGENT="${CLAUDE_FLEET_AGENT:-claude}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --branch) BRANCH="${2:?}"; BRANCH_SET=1; shift 2 ;;
     --from)   FROM="${2:?}";   shift 2 ;;
     --prompt) PROMPT="${2:?}"; shift 2 ;;
     --model)  MODEL="${2:?}";  shift 2 ;;
+    --agent)  AGENT="${2:?}";  shift 2 ;;
     --reuse)  REUSE="${2:?}";  shift 2 ;;
     --new)    NEW=1;           shift ;;
     -*) echo "fleet-spawn: unknown option $1" >&2; exit 1 ;;
@@ -50,6 +57,25 @@ _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;
 [ -n "$SOCK" ] || { echo "fleet-spawn: no fleet socket (run inside a fleet session, or export CLAUDE_FLEET_SOCK)" >&2; exit 1; }
 command -v git  >/dev/null 2>&1 || { echo "fleet-spawn: git required"  >&2; exit 1; }
 command -v tmux >/dev/null 2>&1 || { echo "fleet-spawn: tmux required" >&2; exit 1; }
+
+# Validate the agent HERE, before a worktree gets created: refusing early beats
+# leaving a half-built worker whose pane dropped to a shell because its CLI is
+# missing. An unknown name is a hard error rather than a silent fall back to claude —
+# spawning a different agent than the one asked for is exactly the kind of quiet
+# substitution that makes a card lie about what it's running.
+if [ "$AGENT" != claude ]; then
+  command -v fleet-agent >/dev/null 2>&1 \
+    || { echo "fleet-spawn: --agent needs fleet-agent on PATH (run ./install.sh)" >&2; exit 1; }
+  fleet-agent field "$AGENT" bin >/dev/null 2>&1 \
+    || { echo "fleet-spawn: unknown agent '$AGENT' (known: $(fleet-agent list | tr '\n' ' '))" >&2; exit 1; }
+  abin="$(fleet-agent field "$AGENT" bin)"
+  command -v "$abin" >/dev/null 2>&1 \
+    || { echo "fleet-spawn: agent '$AGENT' needs '$abin' on PATH — not found" >&2; exit 1; }
+  [ "$(fleet-agent field "$AGENT" verified)" = yes ] \
+    || echo "fleet-spawn: note — the '$AGENT' adapter is UNVERIFIED; its pane signals are unknown, so the grid will show this worker's state as 'unknown' rather than guessing" >&2
+  [ "$(fleet-agent field "$AGENT" resume)" = yes ] \
+    || echo "fleet-spawn: note — '$AGENT' cannot resume a conversation for a cwd; re-opening this session starts fresh" >&2
+fi
 
 GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
   || { echo "fleet-spawn: not inside a git repo" >&2; exit 1; }
@@ -219,12 +245,28 @@ while tmux -L "$SOCK" has-session -t "$name" 2>/dev/null; do name="$NAME~$i"; i=
 rm -f "${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}/$SOCK.$name.parked" \
       "${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}/$name.parked" 2>/dev/null
 
+# Record the agent BEFORE the session starts, for the same reason the park marker is
+# cleared here: a killed same-named worker can leave a stale marker behind, and
+# agent-here reads this to recover the agent when a session is rebuilt without the
+# env var. Writing it first also means the pane never races a missing marker.
+# Claude clears rather than writes — absent means claude, so the default leaves no
+# state behind and pre-existing sessions keep behaving exactly as before.
+if [ "$AGENT" = claude ]; then
+  rm -f "${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}/$SOCK.$name.agent" 2>/dev/null
+else
+  # -s is mandatory here, not decoration: route_to_owner may have moved this worker to
+  # ANOTHER project's fleet, and fleet-agent would otherwise resolve the socket from
+  # the lead's own $TMUX and file the marker under the wrong fleet.
+  CLAUDE_FLEET_DIR="${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}" \
+    fleet-agent set -s "$SOCK" "$name" "$AGENT" 2>/dev/null
+fi
+
 # fresh session in the worktree, background (lead keeps working)
 tmux -L "$SOCK" new-session -d -s "$name" -c "$WT" \
   -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
-  -e "CLAUDE_FLEET_MODEL=$MODEL" \
-  "exec claude-here \"$name\""
-echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)"
+  -e "CLAUDE_FLEET_MODEL=$MODEL" -e "CLAUDE_FLEET_AGENT=$AGENT" \
+  "exec agent-here \"$name\""
+echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)${AGENT:+ [agent: $AGENT]}"
 
 # record what this worktree is for, so fleet-worktrees (and a lead that restarted
 # and lost its memory) can see intent without guessing. Keyed by worktree path.
@@ -241,16 +283,29 @@ mtmp="$MANIFEST.$$.tmp"
 # before the input box exists is silently dropped (the worker then just sits idle).
 # Poll the pane for the input prompt / status bar, then fleet-send. Background so the
 # lead isn't blocked; falls back to sending after ~3min if no marker ever appears.
+#
+# The "ready" marker is per-agent: claude's input box looks nothing like opencode's,
+# so a hardcoded claude pattern would never match a non-claude pane and every worker
+# would wait the full fallback before its prompt landed. An agent with NO known ready
+# marker (an unverified adapter) skips straight to the timed fallback rather than
+# polling for a pattern that can't appear.
 if [ -n "$PROMPT" ]; then
+  READY_RE='❯|bypass permissions|for shortcuts'
+  if [ "$AGENT" != claude ] && command -v fleet-agent >/dev/null 2>&1; then
+    READY_RE="$(fleet-agent field "$AGENT" ready_re 2>/dev/null)"
+  fi
   nohup bash -c '
-    sock="$1"; name="$2"; msg="$3"
-    for _ in $(seq 1 90); do
-      tmux -L "$sock" capture-pane -p -t "$name" 2>/dev/null \
-        | grep -qE "❯|bypass permissions|for shortcuts" && break
-      sleep 2
-    done
+    sock="$1"; name="$2"; msg="$3"; re="$4"
+    if [ -n "$re" ]; then
+      for _ in $(seq 1 90); do
+        tmux -L "$sock" capture-pane -p -t "$name" 2>/dev/null | grep -qE "$re" && break
+        sleep 2
+      done
+    else
+      sleep 15                      # no ready marker for this agent — best effort
+    fi
     sleep 1
     fleet-send -s "$sock" "$name" "$msg"
-  ' _ "$SOCK" "$name" "$PROMPT" >/dev/null 2>&1 &
+  ' _ "$SOCK" "$name" "$PROMPT" "$READY_RE" >/dev/null 2>&1 &
   echo "fleet-spawn: will dispatch the initial prompt once '$name' is ready for input"
 fi

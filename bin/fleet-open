@@ -139,7 +139,7 @@ rm -f "$FLEET_DIR/$SOCK.$name.parked" "$FLEET_DIR/$name.parked" 2>/dev/null
 tmux -L "$SOCK" new-session -d -s "$name" -c "$CWD" \
   -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" \
   -e "CLAUDE_FLEET_RESUME=$FULL_ID" \
-  "exec claude-here \"$name\"" \
+  "exec agent-here \"$name\"" \
   || { echo "fleet-open: failed to start the session" >&2; exit 1; }
 
 echo "fleet-open: opened $FULL_ID as '$name' on $SOCK (cwd $CWD)"

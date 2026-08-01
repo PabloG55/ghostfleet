@@ -45,11 +45,29 @@ chmod +x "$FLEET_HOME"/hooks/*.sh "$FLEET_HOME"/bin/* 2>/dev/null || true
 HOOK="$FLEET_HOME/hooks/fleet-event.sh"
 
 mkdir -p "$BIN_DIR"
-for b in ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar fleet-worktrees fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-clean fleet-open fleet-project fleet-adopt fleet-awake fleet-cycle; do
+for b in ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar fleet-worktrees fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-clean fleet-open fleet-project fleet-adopt fleet-awake fleet-cycle fleet-agent agent-here opencode-here codex-here; do
   ln -sf "$FLEET_HOME/bin/$b" "$BIN_DIR/$b"
 done
 ln -sf "$FLEET_HOME/bin/ghostfleet" "$BIN_DIR/claude-fleet"   # back-compat: the old entry point
-echo "✓ linked ghostfleet + helpers (here, cf-sync, schedule, send, list, read, spawn, jump, pause, resume, governor, statusbar, worktrees, answer, inbox, stop, scratch, companion, clean, open, project, adopt, awake, cycle) -> $BIN_DIR"
+echo "✓ linked ghostfleet + helpers (here, cf-sync, schedule, send, list, read, spawn, jump, pause, resume, governor, statusbar, worktrees, answer, inbox, stop, scratch, companion, clean, open, project, adopt, awake, cycle, agent) -> $BIN_DIR"
+
+# --- OpenCode event bridge (optional, only if opencode is installed) --------
+# The counterpart of wire_hooks below: Claude Code learns about the fleet through
+# settings.json hooks, OpenCode through a plugin. Installed GLOBALLY (OpenCode
+# auto-discovers ~/.config/opencode/plugin/*.js) rather than into each checkout, so
+# no file is ever written into the user's repo. The plugin is inert without
+# CLAUDE_FLEET_SOCK in the environment, so it does nothing to ordinary opencode use.
+if command -v opencode >/dev/null 2>&1; then
+  OC_PLUGIN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugin"
+  if mkdir -p "$OC_PLUGIN_DIR" 2>/dev/null; then
+    ln -sf "$FLEET_HOME/hooks/opencode-fleet-event.js" "$OC_PLUGIN_DIR/ghostfleet-event.js"
+    echo "✓ installed the OpenCode event bridge -> $OC_PLUGIN_DIR/ghostfleet-event.js"
+  else
+    echo "! could not create $OC_PLUGIN_DIR — OpenCode workers will fall back to pane-only detection"
+  fi
+else
+  echo "· opencode not installed — skipping its event bridge (fleet-spawn --agent opencode will refuse until it is)"
+fi
 
 # --- wire hooks into every Claude config dir (profile) ----------------------
 # Each profile (work=~/.claude, personal=~/.claude-personal, …) has its OWN

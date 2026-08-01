@@ -182,7 +182,7 @@ enter_master() {
   [ -d "$main/.git" ] || main="$(find "$PROJECT_ROOT" -maxdepth 1 -type d -exec test -e '{}/.git' ';' -print 2>/dev/null | head -1)"
   [ -n "$main" ] && [ -d "$main" ] || main="$PROJECT_ROOT"
   TM has-session -t master 2>/dev/null || \
-    TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here master"
+    TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec agent-here master"
   tm_wire                                               # refresh bindings/status on the live server
   ensure_governor                                       # budget backpressure for this fleet (non-Claude, singleton)
   # master's status-left names the project it leads + its live worker count
@@ -279,7 +279,7 @@ grid_loop() {
         [ -n "$name" ] || name="$(basename "$cwd")"
         base="$name"; i=2
         while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
-        TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here \"$name\""
+        TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec agent-here \"$name\""
         tm_wire     # this may be the call that CREATED the server — @cf_bin isn't set yet
         last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
       newfresh${US}*)
@@ -295,7 +295,7 @@ grid_loop() {
         # produced "<name>~3" as the very first parallel session, and nothing was ever
         # called ~2.
         while TM has-session -t "$name" 2>/dev/null; do name="$base~$i"; i=$((i + 1)); done
-        TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" "exec claude-here \"$name\""
+        TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" "exec agent-here \"$name\""
         tm_wire     # ditto — a fresh server has no @cf_bin until we hand it one
         last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
     esac
