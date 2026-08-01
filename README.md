@@ -43,11 +43,22 @@ me, so file an issue if something bites.)*
 
 ```bash
 brew install tmux jq        # macOS — apt/dnf/pacman on Linux
+npx ghostfleet              # installs, no clone needed
+ghostfleet
+```
+
+Prefer to clone the repo (e.g. to develop against it)?
+
+```bash
 git clone https://github.com/PabloG55/ghostfleet.git
 cd ghostfleet
 ./install.sh
-ghostfleet
 ```
+
+Both run the exact same `install.sh` — `npx ghostfleet` just fetches the package and
+runs it for you, so there's nothing left checked out afterward (if you later want to
+edit ghostfleet itself, switch to the clone: `cf-sync` needs a real repo to sync
+from, and npx's cache isn't one).
 
 The installer **stages the runtime** — it copies `bin/`, `hooks/`, `mcp/`, `skill/`, and
 `layouts/` out of the repo into `~/.local/libexec/ghostfleet` (override with `CLAUDE_FLEET_HOME`)
