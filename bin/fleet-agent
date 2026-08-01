@@ -107,10 +107,16 @@ agent_field() {
         # approval prompts were not observed, because the fleet runs with approvals
         # bypassed. Do not read a non-match as "definitely not blocked".
         blocked_re) printf '%s' 'Do you trust the contents of this directory' ;;
-        # The composer footer ("gpt-5.5 medium · /path"). Deliberately NOT the "›"
-        # input marker: that also renders on the trust dialog's menu, and a false
+        # The composer footer ("gpt-5.5 medium · ~/work/repo"). Deliberately NOT the
+        # "›" input marker: that also renders on the trust dialog's menu, and a false
         # ready would make fleet-spawn fire its prompt into that dialog and lose it.
-        ready_re)   printf '%s' '· /' ;;
+        #
+        # `[~/]` because codex abbreviates $HOME to "~", so a worktree under $HOME
+        # prints "· ~/..." and one outside prints "· /...". This was first written as
+        # "· /" and passed its test only because the test worktree sat in /private/tmp;
+        # every REAL worktree lives under $HOME, so it never matched in practice and
+        # fleet-spawn silently fell back to its timed send.
+        ready_re)   printf '%s' '· [~/]' ;;
         hooks)      printf 'no'  ;;
         budget)     printf 'no'  ;;
         resume)     printf 'no'  ;;
