@@ -55,6 +55,23 @@ prefer proof over assertion:
 
 - **`IFS=$'\t'` collapses empty fields** (tab is IFS-whitespace), shifting every later
   field left. Use `$'\x1f'` for any record with optional fields.
+- **The leftover lands on the last variable, and it looks like data.** `read -r n p prof`
+  against a four-column line puts the 4th field *inside* `prof` — and anything derived
+  from it (the fleet socket) is wrong too. Its expansion cousin: `${x#*$SEP}` on a string
+  with **no** separator returns the string *unchanged*, so a short record sets the field
+  to the whole cwd — non-empty, so every `[ -n "$x" ]` fallback sails past it. Name every
+  column the format has, and test for the *separator*, not for emptiness.
+- **A test can pass because of where it ran.** A codex ready-pattern of `· /` matched its
+  capture only because that worktree sat in `/private/tmp`; codex abbreviates `$HOME`, so
+  it matched nowhere real. Same day, a config key written from `$PWD` instead of `pwd -P`
+  was never found, because `/tmp` is a symlink to `/private/tmp`. If a fixture came from a
+  temp dir, ask what it would look like under `$HOME`.
+- **Re-sourcing a tmux config adds bindings but never removes deleted ones.** A running
+  fleet keeps a binding you deleted from the file until its server dies, so a removed
+  no-prefix binding goes on swallowing that key. Leave an explicit `unbind -n`.
+- **`node --check` proves syntax, not that it runs.** A missing `let` is a ReferenceError
+  that only fires on the keystroke that reaches it — and it kills the whole grid pane.
+  Drive the real TUI in a scratch tmux pane and send it keys.
 - **A session's status must be scoped by its fleet socket.** Every project has a session
   called `master`, so matching on name alone reports another project's state.
 - **The pane is the truth for "is it working".** Transcript mtime says idle mid-generation
