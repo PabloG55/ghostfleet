@@ -35,8 +35,14 @@ case "$cmd" in
     printf '%-18s %-10s %-26s %s\n' PROJECT PROFILE FLEET PATH
     for f in "$CFG_HOME"/projects "$CFG_HOME"/projects.*; do
       [ -f "$f" ] || continue
-# only real profile lists: a suffix like ".bak.1785" is a backup, not a profile
-      case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac
+# only real profile lists: a suffix like ".bak.1785" is a backup, not a profile — but
+# guard ONLY the suffixed ones. On the primary `projects` there is nothing to strip, so
+# ## leaves the whole path, whose own '/' and '.' trip the guard: the main list was
+# skipped, so `list` showed the personal profiles and hid every work project.
+      case "${f##*/}" in
+        projects) ;;
+        *) case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac ;;
+      esac
       while IFS=$'\t' read -r n p prof; do
         case "$n" in ''|\#*) continue ;; esac
         [ -n "$p" ] || continue
@@ -98,8 +104,12 @@ case "$cmd" in
     found=0
     for f in "$CFG_HOME"/projects "$CFG_HOME"/projects.*; do
       [ -f "$f" ] || continue
-# only real profile lists: a suffix like ".bak.1785" is a backup, not a profile
-      case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac
+# same guard as `list`: the primary `projects` has no suffix to strip, and skipping it
+# here made `rm` silently find nothing for any work project (found=0, exit 1).
+      case "${f##*/}" in
+        projects) ;;
+        *) case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac ;;
+      esac
       if awk -F'\t' -v n="$NAME" '$1==n{f=1} END{exit !f}' "$f"; then
         tmp="$f.$$.tmp"
         awk -F'\t' -v n="$NAME" '$1!=n' "$f" > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" && found=1
