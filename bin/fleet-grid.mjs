@@ -583,7 +583,7 @@ function W() { return process.stderr.columns || 80; }
 function H() { return process.stderr.rows || 24; }
 function out(s) { tty.write(s); }
 
-let mode = 'grid';           // 'grid' | 'picker' | 'nameprompt' | 'rename' | 'schedule'
+let mode = 'grid';           // 'grid' | 'picker' | 'nameprompt' | 'agentpick' | 'rename' | 'schedule'
 let sel = 0;                 // selection index in grid
 let cards = [];
 let items = [];              // grid items: cards + {new:true}
@@ -592,6 +592,7 @@ let pickSel = 0;
 let pickFresh = false;       // picker opened via N (fresh parallel) vs n (resume)
 let nameCwd = '';            // checkout chosen in the picker, awaiting a session name
 let nameInput = '';          // editable, pre-filled with the checkout's basename
+let agentSel = 0;            // selection on the agent screen (only shown if >1 installed)
 // Resuming an already-known worktree needs no naming step — that's only for the
 // explicit "+ new session" flow. Attach straight in with the worktree's own name.
 function freeWtChoice(w) { return `new${US}${w.path}${US}${path.basename(w.path)}`; }
@@ -713,8 +714,64 @@ function renderNamePrompt() {
   buf += ` ${C.bold}session name${C.reset} ${C.dim}— ${nameCwd.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
   buf += ` name:  ${C.bold}${nameInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
   buf += `${C.dim} a live session with the same name gets -2/-3 appended automatically${C.reset}\x1b[K\n\x1b[K\n`;
-  buf += `${C.dim} ⏎ create · esc/\` back to the checkout list${C.reset}\x1b[K\n\x1b[J`;
+  const next = installedAgents().length > 1 ? 'pick an agent' : 'create';
+  buf += `${C.dim} ⏎ ${next} · esc/\` back to the checkout list${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
+}
+
+// Which coding CLIs are actually usable, from the adapter. Cached for the process:
+// this only gates a UI step, and re-shelling per keystroke would be silly.
+// Resolved as our own sibling first, for the same reason busyReFor does it — a PATH
+// miss would silently collapse the choice to claude-only and nobody would know why.
+let _agents = null;
+function installedAgents() {
+  if (_agents) return _agents;
+  _agents = ['claude'];
+  for (const bin of [SIBLING_AGENT_BIN, 'fleet-agent']) {
+    try {
+      const out = execFileSync(bin, ['installed'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const list = out.split('\n').map(s => s.trim()).filter(s => /^[a-z0-9_-]+$/.test(s));
+      if (list.length) _agents = list;
+      break;                       // it ran; its answer stands even if short
+    } catch { /* not there — try the next */ }
+  }
+  return _agents;
+}
+
+// Only reached when more than one agent is installed, so a claude-only machine
+// never sees this screen and its new-session flow is unchanged.
+function renderAgentPick() {
+  const agents = installedAgents();
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}agent${C.reset} ${C.dim}— ${nameInput} in ${nameCwd.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  agents.forEach((a, i) => {
+    const on = i === agentSel;
+    const mark = on ? `${C.bold}${C.white} ▸ ` : '   ';
+    // Say what you're giving up BEFORE the choice, not after it goes wrong.
+    const caps = [];
+    if (a !== 'claude') {
+      if (agentField(a, 'hooks') !== 'yes')  caps.push('no done/need-you nudges');
+      if (agentField(a, 'resume') !== 'yes') caps.push('no resume');
+      if (agentField(a, 'budget') !== 'yes') caps.push('not budget-metered');
+    }
+    const note = caps.length ? `  ${C.dim}(${caps.join(' · ')})${C.reset}` : '';
+    buf += `${mark}${on ? C.bold + C.white : C.reset}${padEndV(a, 12)}${C.reset}${note}\x1b[K\n`;
+  });
+  buf += `\x1b[K\n${C.dim} ↑↓/jk move · ⏎ create · esc/\` back to the name${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+// one adapter field, cached per (agent,field) — used only to annotate the picker
+const _fieldCache = new Map();
+function agentField(agent, field) {
+  const k = `${agent} ${field}`;
+  if (_fieldCache.has(k)) return _fieldCache.get(k);
+  let v = '';
+  for (const bin of [SIBLING_AGENT_BIN, 'fleet-agent']) {
+    try { v = execFileSync(bin, ['field', agent, field], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); break; }
+    catch { /* try the next */ }
+  }
+  _fieldCache.set(k, v);
+  return v;
 }
 
 function renderSchedule() {
@@ -772,6 +829,7 @@ function render() {
   if (mode === 'grid') { if (gSettings) renderSettings(); else renderGrid(); }
   else if (mode === 'picker') renderPicker();
   else if (mode === 'nameprompt') renderNamePrompt();
+  else if (mode === 'agentpick') renderAgentPick();
   else if (mode === 'rename') renderRename();
   else renderSchedule();
 }
@@ -938,11 +996,24 @@ function onKey(key) {
   } else if (mode === 'nameprompt') {
     if (key === '\x1b' || key === '\x03' || key === '\x60') { mode = 'picker'; render(); return; }
     if (key === '\r' || key === '\n') {
+      // Only detour through the agent screen when there is actually a choice.
+      if (installedAgents().length > 1) { agentSel = 0; mode = 'agentpick'; render(); return; }
       const name = nameInput.trim() || path.basename(nameCwd);
       return finish(`${pickFresh ? 'newfresh' : 'new'}${US}${nameCwd}${US}${name}`);
     }
     else if (key === '\x7f' || key === '\b') nameInput = nameInput.slice(0, -1);
     else if (key.length === 1 && key >= ' ' && key !== '.' && key !== ':') nameInput += key;
+    render();
+  } else if (mode === 'agentpick') {
+    const agents = installedAgents();
+    if (key === '\x1b' || key === '\x03' || key === '\x60') { mode = 'nameprompt'; render(); return; }
+    if (key === '\x1b[A' || key === 'k') agentSel = Math.max(0, agentSel - 1);
+    else if (key === '\x1b[B' || key === 'j') agentSel = Math.min(agents.length - 1, agentSel + 1);
+    else if (key === '\r' || key === '\n') {
+      const name = nameInput.trim() || path.basename(nameCwd);
+      const agent = agents[agentSel] || 'claude';
+      return finish(`${pickFresh ? 'newfresh' : 'new'}${US}${nameCwd}${US}${name}${US}${agent}`);
+    }
     render();
   } else if (mode === 'rename') {
     if (key === '\x1b' || key === '\x03' || key === '\x60') {

@@ -173,6 +173,38 @@ ensure_governor() {
   printf '%s\n' "$ver" > "$verf"
 }
 
+# Split the grid's "<cwd><US><name><US><agent>" choice. Every field after the cwd is
+# OPTIONAL, because a grid that predates it sends fewer — grid_loop re-runs node each
+# pass, but the screen you are LOOKING at keeps its old code until you leave and
+# re-enter, so a cf-sync mid-grid hands an old choice to this new parser. Testing for
+# the separator rather than for emptiness is the whole trick: `${x#*$US}` on a string
+# WITHOUT one returns it unchanged, so a two-field choice would otherwise set name to
+# the entire cwd — non-empty, sailing past any `[ -n "$name" ]` fallback, and you get a
+# session called "/Users/...". That exact bug shipped once already.
+# Sets: cwd, name, agent.
+split_choice() {
+  local rest="$1" tail=""
+  agent=""
+  case "$rest" in
+    *"$US"*) cwd="${rest%%${US}*}"; tail="${rest#*${US}}" ;;
+    *)       cwd="$rest"; tail="" ;;
+  esac
+  case "$tail" in
+    *"$US"*) name="${tail%%${US}*}"; agent="${tail#*${US}}" ;;
+    *)       name="$tail" ;;
+  esac
+  [ -n "$name" ] || name="$(basename "$cwd")"
+  case "$agent" in *[!a-z0-9_-]*) agent="" ;; esac     # never interpolate junk
+}
+
+# Record the agent for a session the grid just created, so re-opening it keeps that
+# agent instead of quietly reverting to claude. Must run AFTER the -2/-3 collision
+# suffix is settled, or the marker lands under a name nothing will look up.
+remember_agent() {
+  [ -n "${2:-}" ] && [ "$2" != claude ] || return 0
+  CLAUDE_FLEET_DIR="$CFG_DIR/fleet" "$BIN_DIR/fleet-agent" set -s "$SOCK" "$1" "$2" 2>/dev/null || true
+}
+
 # the "master" lead session runs in the project's main checkout. From inside it,
 # `C-s` (or C-a s) writes a "<socket>.goto" marker (see tmux/cf.tmux.conf) then detaches;
 # we read that marker here to decide where to go next: the grid, or (on a plain
@@ -229,7 +261,7 @@ grid_loop() {
   # GRID_EXIT=projects means the grid asked to go straight to the Projects screen
   # (^P) instead of back to this project's master.
   GRID_EXIT=""
-  local choice name cwd base rest="" i last="" gsp="" gmark="" gcur="" gv="" gc="" pending=""
+  local choice name cwd agent="" base rest="" i last="" gsp="" gmark="" gcur="" gv="" gc="" pending=""
   # C-f <p> <s>: attach the Nth session (grid order, master excluded) without drawing
   # the grid first. Feeding it through `pending` reuses the normal attach path below.
   if [ -n "$JUMP_SESS" ]; then
@@ -271,31 +303,23 @@ grid_loop() {
         # hypothetical: grid_loop re-runs node each pass, but the grid you're LOOKING at
         # keeps its old code until you leave and re-enter it, so a cf-sync mid-grid has
         # an old screen handing its choice to this new parser.
-        rest="${choice#new${US}}"
-        case "$rest" in
-          *"$US"*) cwd="${rest%%${US}*}"; name="${rest#*${US}}" ;;
-          *)       cwd="$rest"; name="" ;;
-        esac
-        [ -n "$name" ] || name="$(basename "$cwd")"
+        split_choice "${choice#new${US}}"
         base="$name"; i=2
         while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
-        TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec agent-here \"$name\""
+        remember_agent "$name" "$agent"
+        TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_AGENT=$agent" "exec agent-here \"$name\""
         tm_wire     # this may be the call that CREATED the server — @cf_bin isn't set yet
         last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
       newfresh${US}*)
-        rest="${choice#newfresh${US}}"
-        case "$rest" in
-          *"$US"*) cwd="${rest%%${US}*}"; name="${rest#*${US}}" ;;
-          *)       cwd="$rest"; name="" ;;
-        esac
-        [ -n "$name" ] || name="$(basename "$cwd")"
+        split_choice "${choice#newfresh${US}}"
         base="$name"; i=2
         # Bump AFTER using $i, like the `new` branch above. Incrementing first skipped
         # ~2 entirely: the usual case (a live session already holding the typed name)
         # produced "<name>~3" as the very first parallel session, and nothing was ever
         # called ~2.
         while TM has-session -t "$name" 2>/dev/null; do name="$base~$i"; i=$((i + 1)); done
-        TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" "exec agent-here \"$name\""
+        remember_agent "$name" "$agent"
+        TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" -e "CLAUDE_FLEET_AGENT=$agent" "exec agent-here \"$name\""
         tm_wire     # ditto — a fresh server has no @cf_bin until we hand it one
         last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
     esac
