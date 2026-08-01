@@ -1,0 +1,33 @@
+{
+  "name": "ghostfleet",
+  "version": "1.0.0",
+  "description": "Run a fleet of Claude Code agents in parallel, from one terminal.",
+  "license": "MIT",
+  "homepage": "https://github.com/PabloG55/ghostfleet",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PabloG55/ghostfleet.git"
+  },
+  "bin": {
+    "ghostfleet": "./bin/npx-install.mjs"
+  },
+  "files": [
+    "bin/",
+    "tmux/",
+    "hooks/",
+    "mcp/",
+    "skill/",
+    "layouts/",
+    "scripts/",
+    "install.sh",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "private": false
+}
