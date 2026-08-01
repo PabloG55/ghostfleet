@@ -45,11 +45,11 @@ chmod +x "$FLEET_HOME"/hooks/*.sh "$FLEET_HOME"/bin/* 2>/dev/null || true
 HOOK="$FLEET_HOME/hooks/fleet-event.sh"
 
 mkdir -p "$BIN_DIR"
-for b in ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar fleet-worktrees fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-clean fleet-open fleet-project fleet-adopt fleet-awake fleet-cycle fleet-agent agent-here opencode-here codex-here; do
+for b in ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar fleet-worktrees fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-clean fleet-open fleet-project fleet-adopt fleet-awake fleet-cycle fleet-rename fleet-agent agent-here opencode-here codex-here; do
   ln -sf "$FLEET_HOME/bin/$b" "$BIN_DIR/$b"
 done
 ln -sf "$FLEET_HOME/bin/ghostfleet" "$BIN_DIR/claude-fleet"   # back-compat: the old entry point
-echo "✓ linked ghostfleet + helpers (here, cf-sync, schedule, send, list, read, spawn, jump, pause, resume, governor, statusbar, worktrees, answer, inbox, stop, scratch, companion, clean, open, project, adopt, awake, cycle, agent) -> $BIN_DIR"
+echo "✓ linked ghostfleet + helpers (here, cf-sync, schedule, send, list, read, spawn, jump, pause, resume, governor, statusbar, worktrees, answer, inbox, stop, scratch, companion, clean, open, project, adopt, awake, cycle, rename, agent) -> $BIN_DIR"
 
 # --- OpenCode event bridge (optional, only if opencode is installed) --------
 # The counterpart of wire_hooks below: Claude Code learns about the fleet through

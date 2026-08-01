@@ -608,59 +608,33 @@ let renameMsg = '';          // error from the last attempt, shown until you ret
 
 // Rename BOTH the tmux session and its worktree folder (git worktree move), so the
 // two never drift apart — a session named "x" always sitting in a folder named "x"
-// is the invariant the rest of the grid (and fleet-spawn) relies on. Self-contained:
-// no bash round-trip, this runs entirely here since it doesn't attach anything.
+// is the invariant the rest of the grid (and fleet-spawn) relies on. Shells out to
+// bin/fleet-rename (same pattern as pauseSession -> bin/fleet-pause below) rather
+// than duplicating the git/tmux/marker-migration logic here.
 function doRename(oldName, newName) {
   newName = newName.trim();
   if (!newName || newName === oldName) return { ok: false, msg: 'unchanged' };
-  if (/[\s.:]/.test(newName)) return { ok: false, msg: 'no spaces, "." or ":" (tmux/path safe names only)' };
-  if (tmuxList().some(s => s.name === newName)) return { ok: false, msg: `'${newName}' is already a live session` };
-  const s = tmuxList().find(x => x.name === oldName);
-  if (!s || !s.cwd) return { ok: false, msg: `can't find ${oldName}'s checkout` };
-  const oldPath = s.cwd;
-  const newPath = path.join(path.dirname(oldPath), newName);
-  if (fs.existsSync(newPath)) return { ok: false, msg: `${newPath} already exists` };
-  const repo = mainRepo() || oldPath;
+  const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-rename');
   try {
-    execFileSync('git', ['-C', repo, 'worktree', 'move', oldPath, newPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+    execFileSync(bin, ['-s', SOCK, oldName, newName], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
-    const msg = (e.stderr || e.message || '').toString().trim().split('\n').pop();
-    return { ok: false, msg: `git worktree move failed: ${msg.slice(0, 90)}` };
+    const msg = (e.stderr || e.stdout || e.message || '').toString().trim().split('\n').pop();
+    return { ok: false, msg: (msg || 'rename failed').replace(/^fleet-rename: /, '').slice(0, 100) };
   }
-  try {
-    execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'rename-session', '-t', oldName, newName], { stdio: 'ignore' });
-  } catch {
-    return { ok: false, msg: `worktree moved to ${newPath}, but the tmux rename failed — session is still '${oldName}'` };
-  }
-  migrateSessionState(oldName, newName, oldPath, newPath);
+  patchStatusFile(oldName, newName);
   return { ok: true };
 }
-// Move every marker/record keyed by the OLD name so pause/notify-lead/schedule state
-// (and fleet-worktrees' manifest) survive the rename instead of silently resetting.
-function migrateSessionState(oldName, newName, oldPath, newPath) {
-  const mv = (a, b) => { try { fs.renameSync(a, b); } catch {} };
-  mv(parkedFile(oldName), parkedFile(newName));
-  const op = sessPushFiles(oldName), np = sessPushFiles(newName);
-  mv(op.on, np.on); mv(op.off, np.off);
-  mv(schedMarker(oldName), schedMarker(newName));
-  try {
-    const mf = path.join(FLEET_DIR, `${SOCK}.manifest.tsv`);
-    const lines = fs.readFileSync(mf, 'utf8').split('\n').map(l => {
-      const parts = l.split('\t');
-      if (parts[0] !== oldPath) return l;
-      parts[0] = newPath; parts[1] = newName; return parts.join('\t');
-    });
-    fs.writeFileSync(mf, lines.join('\n'));
-  } catch {}
-  // status file(s): patch slot/cwd/folder now instead of waiting for the next hook
-  // event to overwrite them (Stop/UserPromptSubmit would anyway, but not right away)
+// status file(s): patch slot/cwd/folder now instead of waiting for the next hook
+// event to overwrite them (Stop/UserPromptSubmit would anyway, but not right away)
+function patchStatusFile(oldName, newName) {
   try {
     for (const f of fs.readdirSync(FLEET_DIR)) {
       if (!f.endsWith('.json')) continue;
       const p = path.join(FLEET_DIR, f);
       let o; try { o = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { continue; }
       if (o.slot === oldName && ownedBy(o, SOCK, Z)) {
-        o.slot = newName; o.cwd = newPath; o.folder = path.basename(newPath);
+        const newPath = path.join(path.dirname(o.cwd || ''), newName);
+        o.slot = newName; o.cwd = newPath; o.folder = newName;
         try { fs.writeFileSync(p, JSON.stringify(o)); } catch {}
       }
     }

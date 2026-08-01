@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# fleet-rename [-s SOCKET] <session> <new-name>
+#
+# Rename a worker's tmux session AND move its worktree folder (git worktree move),
+# so the two identities never drift apart — a session named "x" living in a folder
+# named anything else breaks the assumption fleet-spawn/fleet-worktrees both rely on
+# (worktree basename == session name). CLI counterpart of the grid's per-session
+# settings page (`,` then `r`), which shells out to this exact script.
+#
+# Migrates everything keyed by the OLD name so state isn't silently dropped:
+#   - the pause marker (fleet-pause)
+#   - the notify-lead / notify-lead-off per-session override
+#   - a pending scheduled send (fleet-schedule)
+#   - the fleet-spawn manifest row (what fleet-worktrees shows as the task)
+#
+# Refuses on a live-session collision, an existing path collision, or a dirty/locked
+# worktree `git worktree move` won't touch (deliberately no --force here).
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+# Prefer $TMUX (the live server this session runs in) over the env var — it's
+# drift-proof; a long-running --resume/--fork Claude can hold a stale
+# CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
+OLD="${1:-}"; NEW="${2:-}"
+
+[ -n "$SOCK" ] || { echo "fleet-rename: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+[ -n "$OLD" ] && [ -n "$NEW" ] || { echo "fleet-rename: usage: fleet-rename [-s socket] <session> <new-name>" >&2; exit 1; }
+[ "$OLD" = master ] && { echo "fleet-rename: refusing to rename 'master' (the lead) — every project needs one" >&2; exit 1; }
+[ "$OLD" = "$NEW" ] && { echo "fleet-rename: '$OLD' is already named that" >&2; exit 1; }
+case "$NEW" in *[[:space:].:]*) echo "fleet-rename: name can't contain spaces, '.' or ':' (tmux/path safe names only)" >&2; exit 1 ;; esac
+
+tmux -L "$SOCK" has-session -t "$OLD" 2>/dev/null \
+  || { echo "fleet-rename: no session '$OLD' on $SOCK (try: fleet-list)" >&2; exit 1; }
+tmux -L "$SOCK" has-session -t "$NEW" 2>/dev/null \
+  && { echo "fleet-rename: '$NEW' is already a live session on $SOCK" >&2; exit 1; }
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+OLD_PATH="$(tmux -L "$SOCK" display-message -p -t "$OLD" '#{pane_current_path}' 2>/dev/null)"
+[ -n "$OLD_PATH" ] || { echo "fleet-rename: could not resolve '$OLD's checkout path" >&2; exit 1; }
+NEW_PATH="$(dirname "$OLD_PATH")/$NEW"
+[ -e "$NEW_PATH" ] && { echo "fleet-rename: $NEW_PATH already exists" >&2; exit 1; }
+
+GITROOT="$(git -C "$OLD_PATH" rev-parse --show-toplevel 2>/dev/null)"
+[ -n "$GITROOT" ] || { echo "fleet-rename: '$OLD_PATH' isn't a git checkout" >&2; exit 1; }
+
+git -C "$GITROOT" worktree move "$OLD_PATH" "$NEW_PATH" 2>&1 \
+  || { echo "fleet-rename: 'git worktree move' failed (dirty/locked worktree?) — nothing renamed" >&2; exit 1; }
+
+tmux -L "$SOCK" rename-session -t "$OLD" "$NEW" \
+  || { echo "fleet-rename: worktree moved to $NEW_PATH, but the tmux rename failed — session is still '$OLD'" >&2; exit 1; }
+
+# migrate every marker keyed by the old name (best-effort — a marker that never
+# existed for this session isn't an error, e.g. it was never paused)
+mv -f "$FLEET_DIR/$SOCK.$OLD.parked"          "$FLEET_DIR/$SOCK.$NEW.parked"          2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.notify-lead"     "$FLEET_DIR/$SOCK.$NEW.notify-lead"     2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.notify-lead-off" "$FLEET_DIR/$SOCK.$NEW.notify-lead-off" 2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.sched"           "$FLEET_DIR/$SOCK.$NEW.sched"           2>/dev/null || true
+
+MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
+if [ -f "$MANIFEST" ]; then
+  tmp="$MANIFEST.$$.tmp"
+  awk -F'\t' -v OFS='\t' -v op="$OLD_PATH" -v np="$NEW_PATH" -v nn="$NEW" \
+    '$1==op { $1=np; $2=nn } { print }' "$MANIFEST" >"$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$MANIFEST" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+fi
+
+echo "fleet-rename: '$OLD' -> '$NEW' ($NEW_PATH)"

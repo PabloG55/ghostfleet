@@ -146,8 +146,9 @@ its own name — no naming prompt, that's only for the "+ new session" flow (see
 (wins over it, per the precedence in `hooks/fleet-event.sh`). `Esc`/`q`/`` ` `` closes.
 
 **`r` — rename** [not upstream yet — added locally, see the fork's PR]: opens a rename
-screen for the selected session, pre-filled with its current name, fully editable.
-Confirming with `⏎`:
+screen for the selected session, pre-filled with its current name, fully editable
+(same operation as running `fleet-rename <session> <new-name>` from a shell — the
+grid shells out to that exact script). Confirming with `⏎`:
 1. Moves the worktree folder on disk (`git worktree move`) — branch untouched.
 2. Renames the tmux session — the card updates immediately.
 3. Migrates anything keyed by the old name: the pause marker, the notify-lead
@@ -205,6 +206,7 @@ the checkout's basename.
 | `fleet-answer <s> "2"` | unblock a dialog — don't use `fleet-send` for this |
 | `fleet-pause <s>` / `fleet-resume <s>` | CLI equivalents of `p`/`P` on the grid |
 | `fleet-stop <s>` | shut down for good + clear its state |
+| `fleet-rename <s> <new-name>` | CLI equivalent of the grid's `r` — renames the session AND moves its worktree folder, migrating pause/notify-lead/schedule/manifest state | [Not upstream yet — added locally, see the fork's PR.] |
 | `fleet-cycle next\|prev <socket-path> [session]` | what `S-Right`/`S-Left` call — steps the attached client along the ring | [UPSTREAM] |
 | `fleet-awake [-d\|--display] [pid]` / `fleet-awake --status` | idle-sleep inhibitor the control plane arms automatically (see §1) | [UPSTREAM] |
 | `ghostfleet <profile> --new` | create an empty projects list for a new profile — an unknown profile is otherwise **refused**, not silently created | [UPSTREAM] |
