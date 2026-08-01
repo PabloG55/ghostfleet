@@ -120,6 +120,12 @@ pattern is inlined and `agent-here` execs `claude-here` directly.
 - **OpenCode republishes a user message after `session.idle`.** Treating each copy as a
   new turn rewrote `ready` back to `working` a second after finishing, so a done worker
   looked permanently busy. The plugin de-dupes by message id.
+- **`set -u` + an empty bash array kills the pane on macOS.** bash 3.2 treats
+  `"${empty[@]}"` as unbound and aborts, so `CLAUDE_FLEET_YOLO=0` (or simply no model)
+  made the launcher exit instead of starting the agent. The new launchers expand
+  through `${a[@]+"${a[@]}"}`; `claude-here` only gets away with the bare form because
+  it never sets `-u`. Found by testing the yolo switch in *both* positions — the
+  default path was fine, which is exactly why the opt-out needed exercising too.
 
 ### Known rough edges
 

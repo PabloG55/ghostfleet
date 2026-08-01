@@ -43,6 +43,10 @@ esac
 MODEL=()
 [ -n "${CLAUDE_FLEET_MODEL:-}" ] && MODEL=(--model "$CLAUDE_FLEET_MODEL")
 
+# ${a[@]+"${a[@]}"}, never "${a[@]}" — see opencode-here: bash 3.2 + set -u aborts
+# on an empty array, which would kill the pane whenever yolo/model are unset.
+OPTS=( ${YOLO[@]+"${YOLO[@]}"} ${MODEL[@]+"${MODEL[@]}"} )
+
 echo "codex-here: WARNING — the codex adapter is untested; resume is not wired, this session starts FRESH" >&2
 
 # An explicit id is passed through to `codex resume` on the caller's authority. It is
@@ -50,7 +54,7 @@ echo "codex-here: WARNING — the codex adapter is untested; resume is not wired
 # validates codex has the obvious thing to test first.
 if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
   echo "codex-here: attempting 'codex resume ${CLAUDE_FLEET_RESUME}' — UNVERIFIED, may not work" >&2
-  exec codex resume "$CLAUDE_FLEET_RESUME" "${YOLO[@]}" "${MODEL[@]}" "$@"
+  exec codex resume "$CLAUDE_FLEET_RESUME" ${OPTS[@]+"${OPTS[@]}"} "$@"
 fi
 
-exec codex "${YOLO[@]}" "${MODEL[@]}" "$@"
+exec codex ${OPTS[@]+"${OPTS[@]}"} "$@"

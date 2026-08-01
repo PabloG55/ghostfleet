@@ -34,11 +34,18 @@ esac
 MODEL=()
 [ -n "${CLAUDE_FLEET_MODEL:-}" ] && MODEL=(--model "$CLAUDE_FLEET_MODEL")
 
+# Both arrays are expanded below as ${a[@]+"${a[@]}"}, never as "${a[@]}". macOS ships
+# bash 3.2, where `set -u` treats an EMPTY array's "${a[@]}" as an unbound variable and
+# aborts — so opting out with CLAUDE_FLEET_YOLO=0, or just not setting a model, killed
+# the pane at launch. (claude-here gets away with the bare form only because it never
+# sets -u.)
+OPTS=( ${YOLO[@]+"${YOLO[@]}"} ${MODEL[@]+"${MODEL[@]}"} )
+
 # A parallel session (grid `N`) is a deliberately NEW conversation in this dir.
 case "${CLAUDE_FLEET_FRESH:-0}" in
   1|true|yes|on)
     echo "opencode-here: fresh parallel session in $PWD" >&2
-    exec opencode "${YOLO[@]}" "${MODEL[@]}" "$@" ;;
+    exec opencode ${OPTS[@]+"${OPTS[@]}"} "$@" ;;
 esac
 
 # EXPLICIT conversation (fleet-open <session-id>): pin exactly this one. Like
@@ -46,8 +53,8 @@ esac
 # conversation than the one asked for is worse than failing.
 if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
   echo "opencode-here: resuming ${CLAUDE_FLEET_RESUME} in $PWD" >&2
-  exec opencode "${YOLO[@]}" "${MODEL[@]}" --session "$CLAUDE_FLEET_RESUME" "$@"
+  exec opencode ${OPTS[@]+"${OPTS[@]}"} --session "$CLAUDE_FLEET_RESUME" "$@"
 fi
 
 echo "opencode-here: continuing this checkout's conversation in $PWD" >&2
-exec opencode "${YOLO[@]}" "${MODEL[@]}" --continue "$@"
+exec opencode ${OPTS[@]+"${OPTS[@]}"} --continue "$@"
