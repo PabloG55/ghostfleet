@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# fleet-cycle next|prev <socket-path> [current-session]
+#
+# Step the attached client one session along this fleet's ring, in the SAME order
+# the grid numbers its cards — master first, then the workers:
+#
+#     master -> worker 1 -> worker 2 -> ... -> wraps back to master
+#
+# Bound to S-Right / S-Left in tmux/cf.tmux.conf. This is a pure tmux
+# switch-client: the ghostfleet control plane is never involved, so stepping
+# between sessions is instant and no screen is redrawn. Contrast the C-f jump
+# chords, which have to detach and go back through the control plane because they
+# cross PROJECTS — a different tmux server, which a client cannot switch to.
+#
+# It does leave a "<socket>.cur" breadcrumb, because the control plane attached you
+# to ONE session and otherwise has no idea you walked off it. Without that, backing
+# out of a worker you cycled into FROM master would read as "done with master" and
+# throw you all the way up to Projects (see enter_master in bin/ghostfleet).
+set -uo pipefail
+
+DIR="${1:-next}"; SOCK="${2:-}"; CUR="${3:-}"
+[ -n "$SOCK" ] || exit 0
+T() { tmux -S "$SOCK" "$@"; }
+[ -n "$CUR" ] || CUR="$(T display-message -p '#{session_name}' 2>/dev/null)"
+
+# master first, then the rest in list order. This has to match the grid's numbering
+# (JUMP_SESS in bin/ghostfleet lists the same way) or "session 2" would mean two
+# different things depending on how you got there.
+# `-t =master` is an EXACT match: a bare -t is a prefix match, so a worker called
+# "master-notes" would otherwise answer for master.
+ring="$( { T has-session -t '=master' 2>/dev/null && printf 'master\n'
+           T list-sessions -F '#{session_name}' 2>/dev/null | grep -v '^master$'
+         } 2>/dev/null )"
+
+target="$(printf '%s\n' "$ring" | awk -v cur="$CUR" -v dir="$DIR" '
+  NF { n++; a[n] = $0; if ($0 == cur) i = n }
+  END {
+    if (n < 2) exit                       # a ring of one: nowhere to step
+    if (!i) i = 1                         # current not in the ring? start at the top
+    j = (dir == "prev") ? i - 1 : i + 1
+    if (j < 1) j = n                      # wrap at both ends
+    if (j > n) j = 1
+    print a[j]
+  }')"
+
+[ -n "$target" ] || exit 0
+printf '%s' "$target" > "$SOCK.cur" 2>/dev/null
+T switch-client -t "=$target" 2>/dev/null

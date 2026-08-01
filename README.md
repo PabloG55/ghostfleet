@@ -182,6 +182,24 @@ globally but silence it for one noisy project (or vice-versa). Takes effect imme
 (master is the per-project hub — leaving it means you're done with that project for now). Leaving
 the grid or a worker returns to master.
 
+**Cycle sessions:** `Shift-→` / `Shift-←` step along the project's ring — **master first, then the
+workers in the same order the grid numbers them**, wrapping at both ends:
+
+```
+master  ⇄  worker 1  ⇄  worker 2  ⇄  …  ⇄  back to master
+```
+
+It's instant: both sessions live on the same tmux server, so the client just switches and nothing
+redraws — no detach, no grid, the control plane never wakes up. (`Ctrl-f` still has to go the long
+way round, because it crosses *projects*, and those are separate tmux servers a client can't switch
+between.) Backing out with `` ` `` respects where you actually **ended up**, not where you started:
+cycle master → worker and `` ` `` drops you at the grid, not at Projects.
+
+**Shift** rather than Ctrl on purpose: every no-prefix binding is stolen from the app, so the only
+question is what you can afford to lose. `Ctrl-←/→` is word-jump in Claude's input and you'd miss
+it; `Shift-←/→` does nothing in a Claude session, tmux only spends it in the prefix table, and
+zellij's arrow bindings are all `Alt-`. `C-a ←` / `C-a →` work too, prefixed.
+
 **In the grid:** `↑↓←→` / `hjkl` move · `⏎` enter the selected session · `n` new session ·
 `N` new *parallel* session (fresh conversation) · `s` schedule a message · `x` kill session ·
 `q` / `` ` `` step back to master. (The `master` session is its own hub — reach it with `Ctrl-s`, so

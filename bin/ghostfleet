@@ -102,6 +102,16 @@ _clear() { printf '\033[?1004l\033[2J\033[3J\033[H' >/dev/tty 2>/dev/null || tru
 # blank screen (the thing that made a stray escape look like a glitch).
 _loading() { _clear; printf '\033[38;5;245m  %s…\033[0m\r' "$1" >/dev/tty 2>/dev/null || true; }
 TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
+# Re-source the bindings on a LIVE server (a cf-sync only reaches a running fleet
+# this way) and hand it our absolute bin dir. The ⇧←/⇧→ bindings shell out to
+# fleet-cycle, and a tmux server inherits whatever PATH it was born with — which,
+# for a server started by an app rather than a login shell, need not include
+# ~/.local/bin. Baking the path in is the difference between the keys working and
+# failing silently inside run-shell.
+tm_wire() {
+  TM source-file "$CONF" 2>/dev/null || true
+  TM set-option -g @cf_bin "$BIN_DIR" 2>/dev/null || true
+}
 
 profile_dir() { case "$1" in work|default|"") echo "$HOME/.claude" ;; *) echo "$HOME/.claude-$1" ;; esac; }
 # Nth project (1-based) in the list, matching the numbers the cards show. Used by the
@@ -169,17 +179,27 @@ enter_master() {
   [ -n "$main" ] && [ -d "$main" ] || main="$PROJECT_ROOT"
   TM has-session -t master 2>/dev/null || \
     TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here master"
-  TM source-file "$CONF" 2>/dev/null || true           # refresh bindings/status on the live server
+  tm_wire                                               # refresh bindings/status on the live server
   ensure_governor                                       # budget backpressure for this fleet (non-Claude, singleton)
   # master's status-left names the project it leads + its live worker count
   # (project/socket baked in as literals; #() runs the helper on the status interval)
   TM set-option -t master status-left \
     "#[bg=colour148,fg=colour16,bold] ● master · #($BIN_DIR/fleet-statusbar '$PROJECT' '$SOCK') #[bg=colour236,fg=colour148,nobold]▏" 2>/dev/null || true
-  local marker; marker="$(TM display-message -t master -p '#{socket_path}' 2>/dev/null).goto"
-  rm -f "$marker" 2>/dev/null                          # clear any stale signal
+  local sp marker curf cur
+  sp="$(TM display-message -t master -p '#{socket_path}' 2>/dev/null)"
+  marker="$sp.goto"; curf="$sp.cur"
+  rm -f "$marker" "$curf" 2>/dev/null                  # clear any stale signal
   _loading "opening $PROJECT · master"
   TM attach -t master 2>/dev/null || true; _clear
   MASTER_GOTO="$(cat "$marker" 2>/dev/null)"; rm -f "$marker" 2>/dev/null
+  # ⇧←/⇧→ walks the CLIENT to another session (bin/fleet-cycle) without ever
+  # waking this loop, so "we attached master" stops meaning "you're on master".
+  # If you stepped off onto a worker, back = the grid: an empty marker would
+  # otherwise read as "done with this project" and eject you all the way to
+  # Projects, throwing away the project you're plainly still inside.
+  cur="$(cat "$curf" 2>/dev/null)"; rm -f "$curf" 2>/dev/null
+  [ -z "$MASTER_GOTO" ] && [ -n "$cur" ] && [ "$cur" != master ] && MASTER_GOTO=grid
+  return 0
 }
 
 # An insta-jump goto marker (see tmux/cf.tmux.conf) retargets us at the Nth project:
@@ -205,7 +225,7 @@ grid_loop() {
   # GRID_EXIT=projects means the grid asked to go straight to the Projects screen
   # (^P) instead of back to this project's master.
   GRID_EXIT=""
-  local choice name cwd base i last="" gmark="" gv="" pending=""
+  local choice name cwd base i last="" gsp="" gmark="" gcur="" gv="" gc="" pending=""
   # C-f <p> <s>: attach the Nth session (grid order, master excluded) without drawing
   # the grid first. Feeding it through `pending` reuses the normal attach path below.
   if [ -n "$JUMP_SESS" ]; then
@@ -217,7 +237,7 @@ grid_loop() {
     _clear
     if [ -n "$pending" ]; then choice="$pending"; pending=""
     else choice="$(node "$GRID" "$SOCK" "$CONF" --select "$last" </dev/tty)" || true; fi
-    tmux -L "$SOCK" has-session 2>/dev/null && TM source-file "$CONF" 2>/dev/null || true
+    tmux -L "$SOCK" has-session 2>/dev/null && tm_wire
     case "$choice" in
       ""|back) return ;;
       projects) GRID_EXIT=projects; return ;;      # ^P in the grid
@@ -226,20 +246,27 @@ grid_loop() {
         name="${choice#attach${US}}"; last="$name"; _loading "opening $name"
         # C-p inside a session drops a "projects" marker then detaches (see
         # tmux/cf.tmux.conf), so leaving a chat can jump straight up to Projects.
-        gmark="$(TM display-message -p '#{socket_path}' 2>/dev/null).goto"; rm -f "$gmark" 2>/dev/null
+        gsp="$(TM display-message -p '#{socket_path}' 2>/dev/null)"
+        gmark="$gsp.goto"; gcur="$gsp.cur"; rm -f "$gmark" "$gcur" 2>/dev/null
         TM attach -t "$name" 2>/dev/null || true; _clear
         gv="$(cat "$gmark" 2>/dev/null)"; rm -f "$gmark" 2>/dev/null
+        # ⇧←/⇧→ may have moved the client on; put the grid's cursor where you
+        # ACTUALLY ended up, not on the card we happened to attach three sessions ago.
+        gc="$(cat "$gcur" 2>/dev/null)"; rm -f "$gcur" 2>/dev/null
+        [ -n "$gc" ] && [ "$gc" != master ] && last="$gc"
         if [ "$gv" = projects ]; then GRID_EXIT=projects; return; fi
         if take_jump "$gv"; then GRID_EXIT=jump; return; fi ;;
       new${US}*)
         cwd="${choice#new${US}}"; base="$(basename "$cwd")"; name="$base"; i=2
         while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
         TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here \"$name\""
+        tm_wire     # this may be the call that CREATED the server — @cf_bin isn't set yet
         last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
       newfresh${US}*)
         cwd="${choice#newfresh${US}}"; base="$(basename "$cwd")"; name="$base~2"; i=2
         while TM has-session -t "$name" 2>/dev/null; do i=$((i + 1)); name="$base~$i"; done
         TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" "exec claude-here \"$name\""
+        tm_wire     # ditto — a fresh server has no @cf_bin until we hand it one
         last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
     esac
   done
