@@ -86,7 +86,7 @@ CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 # ROUTE BY OWNING PROJECT — the worker MUST land on the fleet of the project this
 # repo belongs to, NOT whatever socket we happened to be called with. Otherwise
 # orchestrating several projects from one session (or a stale CLAUDE_FLEET_SOCK in
-# the env) spawns e.g. acme/widgetco workers onto the ghostfleet fleet, so
+# the env) spawns e.g. another project's workers onto the ghostfleet fleet, so
 # their status/nudges report to the wrong project. A worktree's project ROOT is the
 # parent of its repo (siblings live under it); match that against the projects
 # configs and switch to the owner's socket + config dir. No match → keep ambient.

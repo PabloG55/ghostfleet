@@ -304,7 +304,7 @@ fleet-adopt ~/acme --go --start    # adopt them + start the master
 
 ```
 fleet-adopt · /Users/you/acme · profile work · fleet cf-acme · DRY RUN
-  175944ef   ~/acme/platform             Want me to pull that request row + audit…
+  175944ef   ~/acme/api              Want me to pull that request row + audit…
   0621074a   ~/acme/acme-1           I killed the stale processes and relaunc…
   6fff3551   ~/acme/acme-2           Confirmed — that commit belongs to a sep…
   8 conversation(s) -> cards on cf-acme, one master over them
@@ -400,12 +400,14 @@ ghostfleet: no profile "sideproj"
   new profile:     ghostfleet sideproj --new
 ```
 
+(`--new` is how you'd deliberately create a *third* profile — see below.)
+
 An unknown profile is **refused, not created** — a typo and a personal project name used to both
 land you at an identical blank picker with a phantom `projects.<typo>` left behind, which told you
 nothing about which mistake you'd made. Creating a profile is now the explicit `--new`:
 
 ```bash
-ghostfleet sideproj --new   # writes ~/.config/ghostfleet/projects.sideproj, then opens it
+ghostfleet client --new   # writes ~/.config/ghostfleet/projects.client, then opens it
 ```
 
 ## Config
