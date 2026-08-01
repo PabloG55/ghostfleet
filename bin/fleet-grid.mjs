@@ -528,9 +528,7 @@ let pickSel = 0;
 let pickFresh = false;       // picker opened via N (fresh parallel) vs n (resume)
 let nameCwd = '';            // checkout chosen in the picker, awaiting a session name
 let nameInput = '';          // editable, pre-filled with the checkout's basename
-// a free-worktree card already identifies its checkout, so jump straight to naming a
-// session there — same destination `n`'s picker reaches, just without that extra step
-// resuming an already-known worktree needs no naming step — that's only for the
+// Resuming an already-known worktree needs no naming step — that's only for the
 // explicit "+ new session" flow. Attach straight in with the worktree's own name.
 function freeWtChoice(w) { return `new${US}${w.path}${US}${path.basename(w.path)}`; }
 let confirmKill = null;      // session name awaiting kill confirmation

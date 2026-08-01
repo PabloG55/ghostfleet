@@ -264,18 +264,37 @@ grid_loop() {
         # the picker sends "<cwd><US><name>" — the name is whatever the user typed on
         # the naming screen (pre-filled with the checkout's basename, but editable), so
         # a second/third session on the same checkout no longer has to be "<repo>-2".
-        rest="${choice#new${US}}"; cwd="${rest%%${US}*}"; name="${rest#*${US}}"
-        [ -n "$name" ] || name="$(basename "$cwd")"     # defensive: an older grid build sent none
+        # Split only when the name field is ACTUALLY there. `${rest#*$US}` on a string
+        # with no US returns the string unchanged, so an old two-field choice would set
+        # name to the whole cwd — non-empty, so the fallback below never fired and you
+        # got a session named "/Users/…". That's a live upgrade window, not a
+        # hypothetical: grid_loop re-runs node each pass, but the grid you're LOOKING at
+        # keeps its old code until you leave and re-enter it, so a cf-sync mid-grid has
+        # an old screen handing its choice to this new parser.
+        rest="${choice#new${US}}"
+        case "$rest" in
+          *"$US"*) cwd="${rest%%${US}*}"; name="${rest#*${US}}" ;;
+          *)       cwd="$rest"; name="" ;;
+        esac
+        [ -n "$name" ] || name="$(basename "$cwd")"
         base="$name"; i=2
         while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
         TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here \"$name\""
         tm_wire     # this may be the call that CREATED the server — @cf_bin isn't set yet
         last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
       newfresh${US}*)
-        rest="${choice#newfresh${US}}"; cwd="${rest%%${US}*}"; name="${rest#*${US}}"
+        rest="${choice#newfresh${US}}"
+        case "$rest" in
+          *"$US"*) cwd="${rest%%${US}*}"; name="${rest#*${US}}" ;;
+          *)       cwd="$rest"; name="" ;;
+        esac
         [ -n "$name" ] || name="$(basename "$cwd")"
         base="$name"; i=2
-        while TM has-session -t "$name" 2>/dev/null; do i=$((i + 1)); name="$base~$i"; done
+        # Bump AFTER using $i, like the `new` branch above. Incrementing first skipped
+        # ~2 entirely: the usual case (a live session already holding the typed name)
+        # produced "<name>~3" as the very first parallel session, and nothing was ever
+        # called ~2.
+        while TM has-session -t "$name" 2>/dev/null; do name="$base~$i"; i=$((i + 1)); done
         TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" "exec claude-here \"$name\""
         tm_wire     # ditto — a fresh server has no @cf_bin until we hand it one
         last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
