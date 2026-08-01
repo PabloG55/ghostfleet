@@ -390,6 +390,22 @@ function newCardLines(selected) {
   const wrap = (s, isTop) => selected ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}` : `${C.dim}${color}${s}${C.reset}`;
   return lines.map((s, i) => wrap(s, i === 0));
 }
+// a worktree that exists but has no live session — ⏎ jumps straight to naming one,
+// skipping the checkout picker entirely (the worktree is already identified)
+function freeCardLines(w, selected, idx) {
+  const color = C.grey;
+  const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
+  const title = clip(`─ ${num}${path.basename(w.path)} `, CW);
+  const top = `╭${title}${'─'.repeat(Math.max(0, CW - vis(title)))}╮`;
+  const l1 = `│ ${padEndV('· FREE', CW - 2)} │`;
+  const l2 = `│ ${padEndV(w.branch, CW - 2)} │`;
+  const l3 = `│ ${padEndV(w.task ? `"${w.task}"` : '(no session yet)', CW - 2)} │`;
+  const bot = `╰${'─'.repeat(CW)}╯`;
+  const wrap = (s, isTop) => selected
+    ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}`
+    : `${color}${s}${C.reset}`;
+  return [wrap(top, true), wrap(l1), wrap(l2), wrap(l3), wrap(bot)];
+}
 
 // ── checkout discovery (for new session) ────────────────────────────────
 const CFG_FILE = path.join(HOME, '.config', 'ghostfleet', 'checkouts');
@@ -416,6 +432,64 @@ function collectRepos(roots) {
   return [...new Set(out)].sort();
 }
 
+// A project registered with `fleet-project add <repo>` (path = the repo itself, not
+// a container folder) has CLAUDE_FLEET_ROOT pointing AT the repo, one level DEEPER
+// than where fleet-spawn actually creates worktree siblings (the repo's own parent).
+// collectRepos() then only ever finds the main repo itself, never its worktrees. Ask
+// git directly for the truth instead of guessing a directory to scan — this is exact
+// regardless of which registration convention was used, and it's the same source
+// fleet-worktrees/fleet-spawn already trust.
+function worktreesOf(repoPath) {
+  try {
+    const out = execFileSync('git', ['-C', repoPath, 'worktree', 'list', '--porcelain'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return out.split('\n\n').filter(Boolean).map(block => {
+      const wt = /^worktree (.+)$/m.exec(block)?.[1];
+      const br = /^branch refs\/heads\/(.+)$/m.exec(block)?.[1];
+      return wt ? { path: wt, branch: br || '(detached)' } : null;
+    }).filter(Boolean);
+  } catch { return []; }
+}
+// The project's own main checkout — mirrors enter_master's convention in bin/ghostfleet
+// (PROJECT_ROOT/PROJECT, else the first child repo, else PROJECT_ROOT itself) so this
+// agrees with whichever checkout the master session actually opened.
+function mainRepo() {
+  const root = process.env.CLAUDE_FLEET_ROOT || '';
+  if (!root) return '';
+  if (isRepo(root)) return root;
+  const named = path.join(root, Z);
+  if (isRepo(named)) return named;
+  try {
+    for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+      if (e.isDirectory() && isRepo(path.join(root, e.name))) return path.join(root, e.name);
+    }
+  } catch {}
+  return root;
+}
+// what a worktree was spun up for, from the manifest fleet-spawn writes (keyed by path)
+function manifestTask(wtPath) {
+  try {
+    for (const line of fs.readFileSync(path.join(FLEET_DIR, `${SOCK}.manifest.tsv`), 'utf8').split('\n')) {
+      const [w, , , task] = line.split('\t');
+      if (w === wtPath) return (task && task !== '-') ? task : '';
+    }
+  } catch {}
+  return '';
+}
+// Worktrees of THIS project with no live session on them — shown as their own cards
+// (see buildItems) so reusing one doesn't require going through `n`'s checkout picker
+// first. Excludes the main checkout itself: that's master's slot, never a free card
+// (same convention as fleet-spawn's free_worktrees, which also skips the first entry).
+function freeWorktrees() {
+  const repo = mainRepo();
+  if (!repo) return [];
+  const all = worktreesOf(repo);
+  if (all.length < 2) return [];
+  const liveCwds = tmuxList().map(s => s.cwd).filter(Boolean);
+  return all
+    .filter(w => w.path !== repo && !liveCwds.some(c => c === w.path || c.startsWith(w.path + '/')))
+    .map(w => ({ path: w.path, branch: w.branch, task: manifestTask(w.path) }));
+}
+
 function discoverCheckouts() {
   // 1) explicit config wins: ~/.config/ghostfleet/checkouts, one path per line
   try {
@@ -427,7 +501,13 @@ function discoverCheckouts() {
   } catch {}
   // 2) prefer project-name roots (~/<session>, ~/<session sans version suffix>)
   const named = collectRepos(nameRoots);
-  if (named.length) return named;
+  if (named.length) {
+    // pull in each found repo's OWN worktrees too (fleet-spawn siblings live in its
+    // parent, which a single-repo-style project registration never scans into)
+    const withWorktrees = new Set(named);
+    for (const repo of named) for (const wt of worktreesOf(repo)) withWorktrees.add(wt.path);
+    return [...withWorktrees].sort();
+  }
   // 3) fall back to the pane's cwd + its parent
   return collectRepos(cwdRoots);
 }
@@ -439,13 +519,20 @@ function W() { return process.stderr.columns || 80; }
 function H() { return process.stderr.rows || 24; }
 function out(s) { tty.write(s); }
 
-let mode = 'grid';           // 'grid' | 'picker'
+let mode = 'grid';           // 'grid' | 'picker' | 'nameprompt' | 'rename' | 'schedule'
 let sel = 0;                 // selection index in grid
 let cards = [];
 let items = [];              // grid items: cards + {new:true}
 let checkouts = [];
 let pickSel = 0;
 let pickFresh = false;       // picker opened via N (fresh parallel) vs n (resume)
+let nameCwd = '';            // checkout chosen in the picker, awaiting a session name
+let nameInput = '';          // editable, pre-filled with the checkout's basename
+// a free-worktree card already identifies its checkout, so jump straight to naming a
+// session there — same destination `n`'s picker reaches, just without that extra step
+// resuming an already-known worktree needs no naming step — that's only for the
+// explicit "+ new session" flow. Attach straight in with the worktree's own name.
+function freeWtChoice(w) { return `new${US}${w.path}${US}${path.basename(w.path)}`; }
 let confirmKill = null;      // session name awaiting kill confirmation
 let schedFor = null;         // session name being scheduled
 let schedInput = '';         // typed "<time> | <message>" buffer
@@ -453,10 +540,75 @@ let timer;                   // refresh interval (session grid / projects)
 let selInit = false;         // apply --select preselect exactly once (first build)
 let gSettings = false;       // per-session settings page open (auto-nudge)
 let gSetSel = 0;             // selected row on the per-session settings page
+let renameOld = null;        // session being renamed (from the settings page's 'r')
+let renameInput = '';        // editable, pre-filled with the current name
+let renameMsg = '';          // error from the last attempt, shown until you retype
+
+// Rename BOTH the tmux session and its worktree folder (git worktree move), so the
+// two never drift apart — a session named "x" always sitting in a folder named "x"
+// is the invariant the rest of the grid (and fleet-spawn) relies on. Self-contained:
+// no bash round-trip, this runs entirely here since it doesn't attach anything.
+function doRename(oldName, newName) {
+  newName = newName.trim();
+  if (!newName || newName === oldName) return { ok: false, msg: 'unchanged' };
+  if (/[\s.:]/.test(newName)) return { ok: false, msg: 'no spaces, "." or ":" (tmux/path safe names only)' };
+  if (tmuxList().some(s => s.name === newName)) return { ok: false, msg: `'${newName}' is already a live session` };
+  const s = tmuxList().find(x => x.name === oldName);
+  if (!s || !s.cwd) return { ok: false, msg: `can't find ${oldName}'s checkout` };
+  const oldPath = s.cwd;
+  const newPath = path.join(path.dirname(oldPath), newName);
+  if (fs.existsSync(newPath)) return { ok: false, msg: `${newPath} already exists` };
+  const repo = mainRepo() || oldPath;
+  try {
+    execFileSync('git', ['-C', repo, 'worktree', 'move', oldPath, newPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    const msg = (e.stderr || e.message || '').toString().trim().split('\n').pop();
+    return { ok: false, msg: `git worktree move failed: ${msg.slice(0, 90)}` };
+  }
+  try {
+    execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'rename-session', '-t', oldName, newName], { stdio: 'ignore' });
+  } catch {
+    return { ok: false, msg: `worktree moved to ${newPath}, but the tmux rename failed — session is still '${oldName}'` };
+  }
+  migrateSessionState(oldName, newName, oldPath, newPath);
+  return { ok: true };
+}
+// Move every marker/record keyed by the OLD name so pause/notify-lead/schedule state
+// (and fleet-worktrees' manifest) survive the rename instead of silently resetting.
+function migrateSessionState(oldName, newName, oldPath, newPath) {
+  const mv = (a, b) => { try { fs.renameSync(a, b); } catch {} };
+  mv(parkedFile(oldName), parkedFile(newName));
+  const op = sessPushFiles(oldName), np = sessPushFiles(newName);
+  mv(op.on, np.on); mv(op.off, np.off);
+  mv(schedMarker(oldName), schedMarker(newName));
+  try {
+    const mf = path.join(FLEET_DIR, `${SOCK}.manifest.tsv`);
+    const lines = fs.readFileSync(mf, 'utf8').split('\n').map(l => {
+      const parts = l.split('\t');
+      if (parts[0] !== oldPath) return l;
+      parts[0] = newPath; parts[1] = newName; return parts.join('\t');
+    });
+    fs.writeFileSync(mf, lines.join('\n'));
+  } catch {}
+  // status file(s): patch slot/cwd/folder now instead of waiting for the next hook
+  // event to overwrite them (Stop/UserPromptSubmit would anyway, but not right away)
+  try {
+    for (const f of fs.readdirSync(FLEET_DIR)) {
+      if (!f.endsWith('.json')) continue;
+      const p = path.join(FLEET_DIR, f);
+      let o; try { o = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { continue; }
+      if (o.slot === oldName && ownedBy(o, SOCK, Z)) {
+        o.slot = newName; o.cwd = newPath; o.folder = path.basename(newPath);
+        try { fs.writeFileSync(p, JSON.stringify(o)); } catch {}
+      }
+    }
+  } catch {}
+}
 
 function buildItems() {
   cards = gather();
-  items = [...cards.map(c => ({ card: c })), { newCard: true }];
+  const free = freeWorktrees();
+  items = [...cards.map(c => ({ card: c })), ...free.map(w => ({ freeWt: w })), { newCard: true }];
   if (!selInit) {            // first build: land on the session we just came back from
     selInit = true;
     if (SELECT) { const i = items.findIndex(it => it.card && it.card.name === SELECT); if (i >= 0) sel = i; }
@@ -486,7 +638,9 @@ function renderGrid() {
     const rowItems = items.slice(i, i + nc);
     const linesPerCard = rowItems.map((it, j) => {
       const idx = i + j;
-      return it.newCard ? newCardLines(idx === sel) : cardLines(it.card, idx === sel, idx);
+      return it.newCard ? newCardLines(idx === sel)
+           : it.freeWt  ? freeCardLines(it.freeWt, idx === sel, idx)
+           : cardLines(it.card, idx === sel, idx);
     });
     for (let li = 0; li < 5; li++) {
       buf += ' ' + linesPerCard.map(lc => lc[li]).join(' ') + '\x1b[K\n';
@@ -514,7 +668,16 @@ function renderPicker() {
       buf += `${mark}${c.replace(HOME, '~')}${end}\x1b[K\n`;
     });
   }
-  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎ create · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎ name it · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+
+function renderNamePrompt() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}session name${C.reset} ${C.dim}— ${nameCwd.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` name:  ${C.bold}${nameInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} a live session with the same name gets -2/-3 appended automatically${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ create · esc/\` back to the checkout list${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 
@@ -557,12 +720,23 @@ function renderSettings() {
     buf += `${selRow ? `${C.bold}${C.white}▸ ` : '   '}${badge}  ` +
            `${(selRow ? C.bold + C.white : C.reset) + padEndV(n, 22) + C.reset} ${C.dim}${detail}${C.reset}\x1b[K\n`;
   });
-  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space/⏎ cycle inherit → on → off · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space/⏎ cycle inherit → on → off · r rename · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+function renderRename() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}rename${C.reset} ${C.dim}— ${renameOld}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` new name:  ${C.bold}${renameInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += (renameMsg ? `${C.red}${renameMsg}${C.reset}` : '') + '\x1b[K\n\x1b[K\n';
+  buf += `${C.dim} renames the tmux session AND moves its worktree folder (git worktree move)${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ⏎ rename · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function render() {
   if (mode === 'grid') { if (gSettings) renderSettings(); else renderGrid(); }
   else if (mode === 'picker') renderPicker();
+  else if (mode === 'nameprompt') renderNamePrompt();
+  else if (mode === 'rename') renderRename();
   else renderSchedule();
 }
 
@@ -660,6 +834,7 @@ function onKey(key) {
         const it = items[sel];
         if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = false; mode = 'picker'; render(); }
         else if (it?.card) return finish(`attach${US}${it.card.name}`);
+        else if (it?.freeWt) return finish(freeWtChoice(it.freeWt));
       }
     }
     return;   // swallow other mouse events (release, scroll, non-grid modes, misses)
@@ -671,6 +846,10 @@ function onKey(key) {
       else if (key === '\x1b[A' || key === 'k') gSetSel = Math.max(0, gSetSel - 1);
       else if (key === '\x1b[B' || key === 'j') gSetSel = Math.min(Math.max(0, names.length - 1), gSetSel + 1);
       else if (key === ' ' || key === '\r' || key === '\n') { const n = names[gSetSel]; if (n) cycleSessPush(n); }
+      else if (key === 'r' || key === 'R') {
+        const n = names[gSetSel];
+        if (n) { renameOld = n; renameInput = n; renameMsg = ''; mode = 'rename'; gSettings = false; }
+      }
       render(); return;
     }
     if (confirmKill) {
@@ -696,6 +875,7 @@ function onKey(key) {
     else if (key >= '1' && key <= '9') {              // insta-jump: digit -> that card
       const it = items[Number(key) - 1];
       if (it?.card) { sel = Number(key) - 1; return finish(`attach${US}${it.card.name}`); }
+      else if (it?.freeWt) { sel = Number(key) - 1; return finish(freeWtChoice(it.freeWt)); }
     }
     else if (key === '\x10' || key === 'Q') return finish('projects');  // ^P (or Q) -> Projects
                                                      // Q works even before zellij's Ctrl-p unbind applies
@@ -708,13 +888,37 @@ function onKey(key) {
       const it = items[sel];
       if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
       else if (it?.card) return finish(`attach${US}${it.card.name}`);
+      else if (it?.freeWt) return finish(freeWtChoice(it.freeWt));
     }
     render();
   } else if (mode === 'picker') {
     if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') { mode = 'grid'; render(); return; }
     if (key === '\x1b[A' || key === 'k') pickSel = Math.max(0, pickSel - 1);
     else if (key === '\x1b[B' || key === 'j') pickSel = Math.min(checkouts.length - 1, pickSel + 1);
-    else if ((key === '\r' || key === '\n') && checkouts.length) return finish(`${pickFresh ? 'newfresh' : 'new'}${US}${checkouts[pickSel]}`);
+    else if ((key === '\r' || key === '\n') && checkouts.length) {
+      nameCwd = checkouts[pickSel]; nameInput = path.basename(nameCwd); mode = 'nameprompt';
+    }
+    render();
+  } else if (mode === 'nameprompt') {
+    if (key === '\x1b' || key === '\x03' || key === '\x60') { mode = 'picker'; render(); return; }
+    if (key === '\r' || key === '\n') {
+      const name = nameInput.trim() || path.basename(nameCwd);
+      return finish(`${pickFresh ? 'newfresh' : 'new'}${US}${nameCwd}${US}${name}`);
+    }
+    else if (key === '\x7f' || key === '\b') nameInput = nameInput.slice(0, -1);
+    else if (key.length === 1 && key >= ' ' && key !== '.' && key !== ':') nameInput += key;
+    render();
+  } else if (mode === 'rename') {
+    if (key === '\x1b' || key === '\x03' || key === '\x60') {
+      mode = 'grid'; gSettings = true; renameOld = null; renameMsg = ''; render(); return;
+    }
+    if (key === '\r' || key === '\n') {
+      const res = doRename(renameOld, renameInput);
+      if (res.ok) { renameOld = null; renameInput = ''; renameMsg = ''; mode = 'grid'; gSettings = true; buildItems(); }
+      else renameMsg = res.msg;
+    }
+    else if (key === '\x7f' || key === '\b') renameInput = renameInput.slice(0, -1);
+    else if (key.length === 1 && key >= ' ' && key !== '.' && key !== ':') renameInput += key;
     render();
   } else if (mode === 'schedule') {
     if (key === '\x1b' || key === '\x03' || key === '\x60') { mode = 'grid'; schedFor = null; render(); return; }

@@ -229,7 +229,7 @@ grid_loop() {
   # GRID_EXIT=projects means the grid asked to go straight to the Projects screen
   # (^P) instead of back to this project's master.
   GRID_EXIT=""
-  local choice name cwd base i last="" gsp="" gmark="" gcur="" gv="" gc="" pending=""
+  local choice name cwd base rest="" i last="" gsp="" gmark="" gcur="" gv="" gc="" pending=""
   # C-f <p> <s>: attach the Nth session (grid order, master excluded) without drawing
   # the grid first. Feeding it through `pending` reuses the normal attach path below.
   if [ -n "$JUMP_SESS" ]; then
@@ -261,13 +261,20 @@ grid_loop() {
         if [ "$gv" = projects ]; then GRID_EXIT=projects; return; fi
         if take_jump "$gv"; then GRID_EXIT=jump; return; fi ;;
       new${US}*)
-        cwd="${choice#new${US}}"; base="$(basename "$cwd")"; name="$base"; i=2
+        # the picker sends "<cwd><US><name>" — the name is whatever the user typed on
+        # the naming screen (pre-filled with the checkout's basename, but editable), so
+        # a second/third session on the same checkout no longer has to be "<repo>-2".
+        rest="${choice#new${US}}"; cwd="${rest%%${US}*}"; name="${rest#*${US}}"
+        [ -n "$name" ] || name="$(basename "$cwd")"     # defensive: an older grid build sent none
+        base="$name"; i=2
         while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
         TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec claude-here \"$name\""
         tm_wire     # this may be the call that CREATED the server — @cf_bin isn't set yet
         last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
       newfresh${US}*)
-        cwd="${choice#newfresh${US}}"; base="$(basename "$cwd")"; name="$base~2"; i=2
+        rest="${choice#newfresh${US}}"; cwd="${rest%%${US}*}"; name="${rest#*${US}}"
+        [ -n "$name" ] || name="$(basename "$cwd")"
+        base="$name"; i=2
         while TM has-session -t "$name" 2>/dev/null; do i=$((i + 1)); name="$base~$i"; done
         TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" "exec claude-here \"$name\""
         tm_wire     # ditto — a fresh server has no @cf_bin until we hand it one
