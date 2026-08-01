@@ -90,17 +90,33 @@ agent_field() {
         *) return 1 ;;
       esac ;;
     codex)
+      # Measured against codex-cli 0.146.0 (the notarized cask build) on 2026-08-01,
+      # authenticated, in a real fleet pane. Previously all-empty because the binary
+      # could not be run at all — XProtect had quarantined the npm build's vendored
+      # binary, which is unnotarized; the cask's is signed by OpenAI and is not.
       case "$f" in
         bin)        printf 'codex' ;;
         launcher)   printf 'codex-here' ;;
-        busy_re)    printf '' ;;
-        busy_re_js) printf '' ;;
-        blocked_re) printf '' ;;
-        ready_re)   printf '' ;;
+        # "• Working (1s • esc to interrupt)" — the counter ticks, so anchor on the
+        # "Working (<n>s" shape rather than the bare interrupt hint, which could also
+        # appear in output text. Confirmed absent from the idle pane (0 matches).
+        busy_re)    printf '%s' 'Working \([0-9]+[ms][^)]*esc to interrupt' ;;
+        busy_re_js) printf '%s' 'Working \(\d+[ms][^)]*esc to interrupt' ;;
+        # The directory-trust dialog. This is a PARTIAL detector: it's the blocker a
+        # fleet worker actually hits (every fresh worktree), but codex's command
+        # approval prompts were not observed, because the fleet runs with approvals
+        # bypassed. Do not read a non-match as "definitely not blocked".
+        blocked_re) printf '%s' 'Do you trust the contents of this directory' ;;
+        # The composer footer ("gpt-5.5 medium · /path"). Deliberately NOT the "›"
+        # input marker: that also renders on the trust dialog's menu, and a false
+        # ready would make fleet-spawn fire its prompt into that dialog and lose it.
+        ready_re)   printf '%s' '· /' ;;
         hooks)      printf 'no'  ;;
         budget)     printf 'no'  ;;
         resume)     printf 'no'  ;;
-        verified)   printf 'no'  ;;
+        # The PANE SIGNALS above are verified; resume still isn't wired (see `resume`),
+        # and fleet-spawn warns about that separately.
+        verified)   printf 'yes' ;;
         *) return 1 ;;
       esac ;;
     *) return 1 ;;

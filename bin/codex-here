@@ -32,12 +32,35 @@ fi
 [ "${1:-}" = "--" ] && shift
 [ -n "$slot" ] && export CLAUDE_FLEET_SLOT="$slot"
 
-# Codex's bypass flag. Unverified like everything else here; CLAUDE_FLEET_YOLO=0
-# opts out, same switch as the other agents.
+# Pre-trust this worktree so the pane doesn't dead-end on codex's directory-trust
+# dialog. That dialog is NOT covered by --dangerously-bypass-approvals-and-sandbox
+# (which is about command approval), so a codex worker in a FRESH worktree — i.e.
+# every worker fleet-spawn makes — comes up blocked, and fleet-spawn's initial
+# prompt gets typed into the dialog and lost. Answering it by hand writes exactly
+# this stanza, so we're pre-recording the answer, not inventing a mechanism.
+#
+# Only under yolo: bypassing approvals but still hand-confirming trust would be
+# incoherent. Opt out with CLAUDE_FLEET_YOLO=0 (then answer the prompt yourself).
+# Append-only and idempotent — never rewrites config a human put there.
+trust_this_dir() {
+  case "${CLAUDE_FLEET_CODEX_TRUST:-1}" in 0|false|no|off) return 0 ;; esac
+  # `pwd -P`, not $PWD: codex keys this table by the PHYSICAL path, and on macOS a
+  # worktree reached through a symlinked parent (/tmp -> /private/tmp is the one that
+  # caught this) has a different logical path. Writing the logical spelling produces a
+  # stanza codex never matches — a silent no-op that looks exactly like success.
+  local dir cfg key
+  dir="$(pwd -P 2>/dev/null)" || dir="$PWD"
+  cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"; key="[projects.\"$dir\"]"
+  mkdir -p "$(dirname "$cfg")" 2>/dev/null || return 0
+  grep -qF -- "$key" "$cfg" 2>/dev/null && return 0
+  printf '\n%s\ntrust_level = "trusted"\n' "$key" >> "$cfg" 2>/dev/null || true
+}
+
+# Codex's bypass flag. CLAUDE_FLEET_YOLO=0 opts out, same switch as the other agents.
 YOLO=()
 case "${CLAUDE_FLEET_YOLO:-1}" in
   0|false|no|off) ;;
-  *) YOLO=(--dangerously-bypass-approvals-and-sandbox) ;;
+  *) YOLO=(--dangerously-bypass-approvals-and-sandbox); trust_this_dir ;;
 esac
 
 MODEL=()
