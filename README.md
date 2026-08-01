@@ -348,9 +348,55 @@ api	~/code/api	work
 sideproj	~/projects/sideproj	personal
 ```
 
-Each project's sessions live on their own socket (`cf-<project>`) under that account's config dir,
-so accounts never mix. `install.sh` wires the status/notification hooks into every config dir it
-finds (`~/.claude` and `~/.claude-*`), so both accounts report status.
+Each project's sessions live on their own socket under that account's config dir, so accounts never
+mix. Work keeps the bare `cf-<project>`; every other profile is namespaced `cf-<profile>-<project>`,
+so the same project name in two profiles can't collide.
+
+### Two ways to split, and which you want
+
+The table above is the *mixed* list: one Projects screen showing work and personal side by side.
+The other way gives each profile its **own** projects list, so the screen only ever shows one side:
+
+```bash
+ghostfleet            # work      -> ~/.config/ghostfleet/projects           + ~/.claude
+ghostfleet personal   # personal  -> ~/.config/ghostfleet/projects.personal  + ~/.claude-personal
+ghostfleet <anything> # any name works: projects.<name> + ~/.claude-<name>
+```
+
+Use the **mixed list** if you want everything on one screen and only the account to differ. Use
+**`ghostfleet <profile>`** if you want work and personal genuinely separate — different project
+lists, different account, different sockets. The two can coexist; a row's 3rd column always wins,
+so a row marked `work` inside `projects.personal` really does run on `~/.claude`.
+
+### Setting up the second account
+
+The config dir holds the login, so a new profile starts logged out. **Log in before installing**,
+because `install.sh` only wires hooks and MCP into `~/.claude-*` dirs that already look like config
+dirs — an empty one is skipped, and you'd get a profile whose sessions never report status:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-personal claude    # then /login with the other account
+./install.sh                                   # NOW it sees the dir and wires it up
+ghostfleet personal                            # empty picker -> "+ add project"
+```
+
+Re-run `./install.sh` any time you add a profile; it's idempotent and backs up each `settings.json`.
+
+### The one sharp edge
+
+`ghostfleet <name>` checks the **work** list first and jumps into that project if the name matches.
+Anything else is read as a *profile* — and an unknown profile silently creates an empty list rather
+than erroring:
+
+```bash
+ghostfleet acme    # a work project  -> jumps straight into its master
+ghostfleet sideproj    # a PERSONAL project -> NOT a jump; reads as profile "sideproj"
+                       #   -> creates an empty ~/.config/ghostfleet/projects.sideproj
+```
+
+So the `ghostfleet <project>` shortcut (and `--plain`) only reaches **work** projects. For anything
+else, open the profile and pick from the screen: `ghostfleet personal`. A typo lands the same way —
+if you get an unexpectedly empty picker, look for a stray `projects.<typo>` and delete it.
 
 ## Config
 
