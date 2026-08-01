@@ -7,9 +7,6 @@
 **Run a fleet of Claude Code agents in parallel, from one terminal.** Each agent gets its
 own git worktree; you get one screen that shows what every one of them is doing.
 
-<!-- Record with: brew install vhs && vhs demo.tape -->
-![ghostfleet](docs/demo.gif)
-
 > A *ghost fleet* is a fleet of autonomous, unmanned vessels under one command — agents
 > working with nobody in the seat, and one control plane steering them.
 
