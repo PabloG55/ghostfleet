@@ -1,28 +1,31 @@
 #!/usr/bin/env bash
-# codex-here — launch Codex in a fleet pane.
+# codex-here — launch Codex in a fleet pane, resuming this checkout's conversation.
 #
-# ⚠ UNTESTED. Structurally complete, never executed. The dev machine's Codex install
-# is broken (the @openai/codex npm wrapper spawns a vendored native binary that is
-# absent, so even `codex --version` dies with ENOENT), so NOTHING in this file has
-# been observed working. It is checked in so the adapter layer is genuinely
-# agent-generic rather than opencode-shaped, not because it is known good.
+# Verified against codex-cli 0.146.0 (the notarized cask build). An earlier cut of
+# this file declared resume unsupported — but only because the binary could not be
+# executed at all then, not because anything had been tried. It can, and it does.
 #
-# What is actually known, from disk rather than from running it:
-#   - sessions persist to ~/.codex/sessions/YYYY/MM/DD/rollout-<ISO>-<uuid>.jsonl,
-#     so a per-conversation UUID exists
-#   - ~/.codex/config.toml already carries per-directory state, so a `notify` hook
-#     has somewhere to live
-# What is NOT known: whether `codex resume <id>` pins to a cwd, what its pane says
-# mid-generation, or whether its notify hook can be turned into a need-you.
+# `codex resume --last` is CWD-SCOPED, which is the property a fleet needs: a global
+# "most recent session" would hand worker B the conversation belonging to worker A.
+# Verified in both directions plus the empty case, via `codex exec` — two repos with a
+# codeword planted in each, B's session created LAST:
 #
-# Consequences, deliberate:
-#   - the adapter reports resume=no for codex, so this starts FRESH and SAYS SO
-#     instead of pretending to restore a conversation
-#   - the adapter's codex busy_re is EMPTY, so the grid shows such a session as
-#     "unknown", never as idle
+#   in A: resume --last -> "ALPHA"     (not BRAVO — did NOT take the global newest)
+#   in B: resume --last -> "BRAVO"
+#   in C: resume --last -> "unknown"   (no prior session: starts fresh, steals nothing)
 #
-# Before anyone relies on this: get a working codex, capture a real pane
-# mid-generation and at rest, and fill in busy_re/ready_re in bin/fleet-agent.
+# So resume is used below, and needs no "does a session exist here?" probe.
+#
+# BUT the adapter still reports resume=no, deliberately. The TUI only persists its
+# rollout on a CLEAN exit: kill the pane and nothing reaches ~/.codex/sessions, so
+# there is nothing to resume. Killing panes is how the fleet recycles sessions, which
+# makes the case resume exists for the one it doesn't survive — verified by planting a
+# codeword, killing the pane, re-opening: "unknown", and no rollout file holds it.
+# Resuming here is therefore best-effort: it restores a cleanly-exited conversation
+# and silently starts fresh otherwise, which is strictly better than never trying.
+#
+# Also still true: codex pushes no need-you/done events (hooks=no), and its blocked_re
+# covers only the trust dialog.
 set -uo pipefail
 
 slot=""
@@ -70,14 +73,22 @@ MODEL=()
 # on an empty array, which would kill the pane whenever yolo/model are unset.
 OPTS=( ${YOLO[@]+"${YOLO[@]}"} ${MODEL[@]+"${MODEL[@]}"} )
 
-echo "codex-here: WARNING — the codex adapter is untested; resume is not wired, this session starts FRESH" >&2
+# A parallel session (grid `N`, fleet-spawn) is a deliberately NEW conversation in a
+# dir that already has one — must never resume, same contract as claude-here.
+case "${CLAUDE_FLEET_FRESH:-0}" in
+  1|true|yes|on)
+    echo "codex-here: fresh session in $PWD" >&2
+    exec codex ${OPTS[@]+"${OPTS[@]}"} "$@" ;;
+esac
 
-# An explicit id is passed through to `codex resume` on the caller's authority. It is
-# NOT advertised as working (the adapter says resume=no) — this exists so that whoever
-# validates codex has the obvious thing to test first.
+# fleet-open <id>: resume exactly that conversation, by id.
 if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
-  echo "codex-here: attempting 'codex resume ${CLAUDE_FLEET_RESUME}' — UNVERIFIED, may not work" >&2
+  echo "codex-here: resuming session ${CLAUDE_FLEET_RESUME} in $PWD" >&2
   exec codex resume "$CLAUDE_FLEET_RESUME" ${OPTS[@]+"${OPTS[@]}"} "$@"
 fi
 
-exec codex ${OPTS[@]+"${OPTS[@]}"} "$@"
+# Otherwise continue whatever this checkout was last doing. Safe unconditionally:
+# with no session for this cwd, codex starts a fresh one instead of erroring or
+# picking up a different directory's (verified — see the header).
+echo "codex-here: resuming this checkout's last session in $PWD" >&2
+exec codex resume --last ${OPTS[@]+"${OPTS[@]}"} "$@"

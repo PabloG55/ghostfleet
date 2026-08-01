@@ -53,11 +53,12 @@ DEFAULT_AGENT=claude
 # Do NOT add an elapsed-time alternative: opencode prints "· 22.1s" AFTER a turn
 # ends, the opposite of claude, where the timer means live.
 #
-# codex: NOT VERIFIED. Its vendored native binary is missing on the dev machine, so
-# nothing here was observed. busy_re/blocked_re/ready_re are deliberately EMPTY
-# rather than guessed — an invented regex that never fires is indistinguishable from
-# a working one, and this repo has been bitten by exactly that. Fill them in from a
-# real capture before trusting a codex card.
+# codex: measured 2026-08-01 against codex-cli 0.146.0, authenticated, in a real
+# fleet pane. It was briefly unmeasurable — XProtect quarantined the npm build's
+# unnotarized vendored binary — and the fields sat EMPTY rather than guessed for
+# exactly as long as that lasted. The one field still short of the others is
+# blocked_re, which covers the trust dialog but not command approval; the fleet
+# bypasses approvals, so that prompt has never been observed to capture.
 agent_field() {
   local a="$1" f="$2"
   case "$a" in
@@ -119,9 +120,15 @@ agent_field() {
         ready_re)   printf '%s' '· [~/]' ;;
         hooks)      printf 'no'  ;;
         budget)     printf 'no'  ;;
+        # NO, and the reason is subtle enough to write down. `codex resume --last` IS
+        # cwd-scoped and works — verified both directions plus the empty case, using
+        # `codex exec`. But the TUI only persists its rollout on a clean exit: kill the
+        # pane (SIGHUP) and nothing reaches ~/.codex/sessions, so there is nothing left
+        # to resume. Killing panes is precisely how the fleet recycles a session, so the
+        # case resume exists for is the case it doesn't survive. Verified: a codeword
+        # planted in a TUI pane, pane killed, session re-opened -> "unknown", and the
+        # word appears in no rollout file. Flip this the day the TUI flushes on SIGHUP.
         resume)     printf 'no'  ;;
-        # The PANE SIGNALS above are verified; resume still isn't wired (see `resume`),
-        # and fleet-spawn warns about that separately.
         verified)   printf 'yes' ;;
         *) return 1 ;;
       esac ;;
