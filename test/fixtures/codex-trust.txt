@@ -1,0 +1,4 @@
+> You are in /private/tmp/agenttest/repo2
+  Do you trust the contents of this directory? Working with untrusted contents
+› 1. Yes, continue
+  2. No, quit

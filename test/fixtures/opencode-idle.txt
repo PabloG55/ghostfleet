@@ -1,0 +1,4 @@
+  ┃  Ask anything... "What is the tech stack of this project?"
+  ┃  Build auto · Big Pickle OpenCode Zen
+   tab agents  ctrl+p commands
+   ~/work/repo:main                                   1.18.11

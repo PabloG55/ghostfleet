@@ -33,8 +33,16 @@ takes effect on the next Projects screen. Long-lived processes do NOT:
 
 ## Testing
 
-There's no test suite; verify against the live fleet instead, and prefer proof over
-assertion:
+Run `./test/run.sh` before pushing — no deps, a couple of seconds. It covers the
+things that have actually broken (wire-format parsing, the projects-file columns,
+session naming, and every agent's pane detectors against real captured panes), and
+its assertions run in BOTH directions on purpose: a busy regex is only proven by
+matching a real busy pane AND staying silent on a real idle one. A test that can
+only pass proves nothing — when you add one, break the code deliberately and watch
+it go red before you trust it.
+
+It can't cover the interactive parts, so also verify against the live fleet, and
+prefer proof over assertion:
 
 - `fleet-grid.mjs --plain` exercises the real status path without drawing the TUI
 - **never** launch the interactive grid headlessly — it blocks on the tty and hangs

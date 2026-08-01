@@ -32,7 +32,7 @@ cmd="${1:-}"; shift 2>/dev/null || true
 
 case "$cmd" in
   list)
-    printf '%-18s %-10s %-26s %s\n' PROJECT PROFILE FLEET PATH
+    printf '%-18s %-10s %-10s %-26s %s\n' PROJECT PROFILE AGENT FLEET PATH
     for f in "$CFG_HOME"/projects "$CFG_HOME"/projects.*; do
       [ -f "$f" ] || continue
 # only real profile lists: a suffix like ".bak.1785" is a backup, not a profile — but
@@ -43,11 +43,16 @@ case "$cmd" in
         projects) ;;
         *) case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac ;;
       esac
-      while IFS=$'\t' read -r n p prof; do
+      # Name the AGENT column too, even though it's optional. `read` hands the LAST
+      # variable everything remaining, so reading three fields from a four-field line
+      # glued the agent onto the profile ("work<TAB>opencode") — and the fleet socket,
+      # which is derived from the profile, came out wrong with it. Same family as the
+      # IFS trap already documented in CLAUDE.md: name every column the format has.
+      while IFS=$'\t' read -r n p prof agent; do
         case "$n" in ''|\#*) continue ;; esac
         [ -n "$p" ] || continue
         prof="${prof:-work}"
-        printf '%-18s %-10s %-26s %s\n' "$n" "$prof" "$(sock_for "$n" "$prof")" "${p/#\~/$HOME}"
+        printf '%-18s %-10s %-10s %-26s %s\n' "$n" "$prof" "${agent:-claude}" "$(sock_for "$n" "$prof")" "${p/#\~/$HOME}"
       done < "$f"
     done
     ;;

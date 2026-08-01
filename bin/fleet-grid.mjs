@@ -997,7 +997,15 @@ function onKey(key) {
     if (key === '\x1b' || key === '\x03' || key === '\x60') { mode = 'picker'; render(); return; }
     if (key === '\r' || key === '\n') {
       // Only detour through the agent screen when there is actually a choice.
-      if (installedAgents().length > 1) { agentSel = 0; mode = 'agentpick'; render(); return; }
+      if (installedAgents().length > 1) {
+        // Start on the project's default (CLAUDE_FLEET_AGENT, from the projects file's
+        // 4th column) rather than always on claude, so a project set up for opencode
+        // doesn't make you re-pick it every single time.
+        const def = process.env.CLAUDE_FLEET_AGENT || 'claude';
+        const i = installedAgents().indexOf(def);
+        agentSel = i >= 0 ? i : 0;
+        mode = 'agentpick'; render(); return;
+      }
       const name = nameInput.trim() || path.basename(nameCwd);
       return finish(`${pickFresh ? 'newfresh' : 'new'}${US}${nameCwd}${US}${name}`);
     }

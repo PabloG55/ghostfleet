@@ -127,8 +127,10 @@ ensure_projects() {
   [ -f "$PROJECTS_CFG" ] && return 0
   mkdir -p "$(dirname "$PROJECTS_CFG")" 2>/dev/null
   cat > "$PROJECTS_CFG" <<'EOF'
-# ghostfleet projects — one per line:  name<TAB>path<TAB>profile
+# ghostfleet projects — one per line:  name<TAB>path<TAB>profile<TAB>agent
 # profile: work (~/.claude) or personal (~/.claude-personal).
+# agent:   optional default coding CLI for this project (claude | opencode | codex).
+#          Omit for claude. `fleet-agent list` shows what's available.
 # Add from the picker ("+ add project"), or edit here, e.g.:
 #   myapp<TAB>~/code/myapp<TAB>work
 EOF
@@ -139,13 +141,19 @@ set_project() {
   PROJECT="$1"
   PROJECT_ROOT="$(proj_field "$PROJECT" 2)"; PROJECT_ROOT="${PROJECT_ROOT/#\~/$HOME}"
   local prof; prof="$(proj_field "$PROJECT" 3)"; [ -n "$prof" ] || prof="${PROFILE:-work}"
+  # 4th column: the project's DEFAULT agent, inherited by its master and by any
+  # session created in it that doesn't name one. Absent = claude, which is what keeps
+  # every existing three-column projects file behaving exactly as it did.
+  PROJECT_AGENT="$(proj_field "$PROJECT" 4)"
+  case "$PROJECT_AGENT" in *[!a-z0-9_-]*) PROJECT_AGENT="" ;; esac
   CFG_DIR="$(profile_dir "$prof")"
   # work keeps the bare cf-<project> socket (back-compat); other profiles are
   # namespaced so a same-named project in another profile can't collide.
   case "$prof" in work|default) SOCK="cf-$PROJECT" ;; *) SOCK="cf-$prof-$PROJECT" ;; esac
   export CLAUDE_CONFIG_DIR="$CFG_DIR" CLAUDE_FLEET_DIR="$CFG_DIR/fleet" \
          CLAUDE_FLEET_PROFILE="$prof" CLAUDE_FLEET_SCOPE="$PROJECT" \
-         CLAUDE_FLEET_ROOT="$PROJECT_ROOT" CLAUDE_FLEET_SOCK="$SOCK"
+         CLAUDE_FLEET_ROOT="$PROJECT_ROOT" CLAUDE_FLEET_SOCK="$SOCK" \
+         CLAUDE_FLEET_AGENT="$PROJECT_AGENT"
   mkdir -p "$CFG_DIR/fleet" 2>/dev/null
 }
 
@@ -195,6 +203,9 @@ split_choice() {
   esac
   [ -n "$name" ] || name="$(basename "$cwd")"
   case "$agent" in *[!a-z0-9_-]*) agent="" ;; esac     # never interpolate junk
+  # No agent in the choice (an older grid, or a project with a default): inherit the
+  # project's. An EXPLICIT pick — including "claude" — is non-empty, so it still wins.
+  [ -n "$agent" ] || agent="${PROJECT_AGENT:-}"
 }
 
 # Record the agent for a session the grid just created, so re-opening it keeps that
@@ -214,7 +225,8 @@ enter_master() {
   [ -d "$main/.git" ] || main="$(find "$PROJECT_ROOT" -maxdepth 1 -type d -exec test -e '{}/.git' ';' -print 2>/dev/null | head -1)"
   [ -n "$main" ] && [ -d "$main" ] || main="$PROJECT_ROOT"
   TM has-session -t master 2>/dev/null || \
-    TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec agent-here master"
+    remember_agent master "${PROJECT_AGENT:-}"
+    TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_AGENT=${PROJECT_AGENT:-}" "exec agent-here master"
   tm_wire                                               # refresh bindings/status on the live server
   ensure_governor                                       # budget backpressure for this fleet (non-Claude, singleton)
   # master's status-left names the project it leads + its live worker count
@@ -409,7 +421,7 @@ export CLAUDE_FLEET_PROJECTS="$PROJECTS_CFG" CLAUDE_FLEET_PROFILE="$PROFILE"
 ensure_projects
 
 # jump straight into a project (ghostfleet <project> [--plain])
-PROJECT=""
+PROJECT=""; PROJECT_AGENT=""
 if [ -n "$JUMP" ]; then
   set_project "$JUMP"
   [ "${2:-}" = "--plain" ] && exec node "$GRID" "$SOCK" "$CONF" --plain
