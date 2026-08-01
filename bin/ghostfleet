@@ -38,6 +38,31 @@ CONF="$REPO/tmux/cf.tmux.conf"
 command -v node  >/dev/null 2>&1 || { echo "ghostfleet: node is required"; exit 1; }
 command -v tmux  >/dev/null 2>&1 || { echo "ghostfleet: tmux is required (brew install tmux)"; exit 1; }
 
+# Keep the machine awake for as long as the control plane is up (see bin/fleet-awake).
+# Workers only earn their keep unattended, and an idle-sleeping box freezes every one
+# of them mid-turn and swallows scheduled sends, leaving no trace of why.
+#   CLAUDE_FLEET_AWAKE=on       idle sleep off, screen still darkens (default)
+#                     =display  also pin the screen on — a dark screen is
+#                               indistinguishable from a slept machine, so this is
+#                               what to reach for when you need to SEE it's alive
+#                     =off      don't inhibit anything
+# `fleet-awake --status` answers "is it actually holding?" without the guesswork.
+#   The marker is EXPORTED so it survives maybe_reexec: exec keeps both our pid and
+#   our environment, so without it every cf-sync upgrade would stack another
+#   inhibitor on the same process. It carries the MODE too, so flipping =display
+#   and reloading actually re-arms instead of matching the stale marker.
+_awake_mode="${CLAUDE_FLEET_AWAKE:-on}"
+case "$_awake_mode" in
+  0|off|no|false) : ;;
+  *) if [ "${CLAUDE_FLEET_AWAKE_PID:-}" != "$$:$_awake_mode" ]; then
+       case "$_awake_mode" in
+         display|screen) "$BIN_DIR/fleet-awake" --display "$$" 2>/dev/null ;;
+         *)              "$BIN_DIR/fleet-awake" "$$" 2>/dev/null ;;
+       esac
+       export CLAUDE_FLEET_AWAKE_PID="$$:$_awake_mode"
+     fi ;;
+esac
+
 US=$'\x1f'
 PROJECTS_CFG="$HOME/.config/ghostfleet/projects"
 # The control plane is a long-lived bash loop, so a `cf-sync` upgrade would otherwise

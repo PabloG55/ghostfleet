@@ -191,9 +191,28 @@ it doesn't show here.)
 `master`): type a time and it sends a message into that session then — great for resuming when your
 usage limit resets. Examples: `3:50am`, `15:30`, `+2h`. Message defaults
 to `continue`; customize with `<time> | <message>`. A scheduled card shows `@3:50a`. Under the hood a
-detached waiter runs `tmux send-keys` at that time, keeping the Mac awake with `caffeinate`.
+detached waiter runs `tmux send-keys` at that time, holding the machine awake for the wait.
 *Caveat:* fires only if the machine is awake then — for a closed-lid guarantee also run
 `sudo pmset schedule wake "MM/dd/yy HH:mm:ss"`.
+
+**Staying awake.** Running `ghostfleet` holds an *idle sleep off* assertion for as long as the
+control plane is up (`caffeinate -i -s` on macOS, `systemd-inhibit` on Linux — see `bin/fleet-awake`).
+A sleeping box freezes every worker mid-turn and eats scheduled sends, and leaves nothing behind to
+say why.
+
+By default the **screen still goes dark** on its own timer (macOS `displaysleep`, 5 min on battery)
+while the machine stays fully awake. That is indistinguishable from a slept machine at a glance, so
+a working fleet can read as a broken one — check it, don't guess:
+
+```bash
+fleet-awake --status
+# holding sleep for pid 27809 (bash) — inhibitor pid 27817
+# kernel: PreventUserIdleSystemSleep=1 PreventUserIdleDisplaySleep=0
+```
+
+Set `CLAUDE_FLEET_AWAKE=display` to pin the screen on too, at the cost of the backlight. A **closed
+lid still sleeps** either way — the `pmset schedule wake` line above is the only hard guarantee
+across one. `CLAUDE_FLEET_AWAKE=off` inhibits nothing.
 
 **Inside a session:** everything goes to Claude as normal. To pop back a level, detach:
 `Ctrl-a` then `g` (mnemonic: **g**rid) — or `Ctrl-a d`. From **master**, `Ctrl-s` (or `Ctrl-a s`)
@@ -215,7 +234,7 @@ The installer first **stages the runtime** — it copies `bin/`, `hooks/`, `mcp/
 `layouts/` out of the repo into `~/.local/libexec/ghostfleet` (override with `CLAUDE_FLEET_HOME`)
 — then symlinks the commands (`ghostfleet`, `claude-here`, `cf-sync`, and the `fleet-*` helpers —
 `list` / `send` / `read` / `spawn` / `worktrees` / `inbox` / `answer` / `pause` / `resume` / `stop` /
-`schedule` / `jump` / `governor` / `statusbar`) into `~/.local/bin` **pointing at the staged copy**;
+`schedule` / `jump` / `governor` / `statusbar` / `awake`) into `~/.local/bin` **pointing at the staged copy**;
 wires the status + notification hooks into every Claude config dir it finds (`~/.claude`,
 `~/.claude-*`, backing each up); **registers the fleet MCP server** into each config dir's
 `.claude.json` via `claude mcp add -s user` (Claude Code reads MCP from `.claude.json`/`.mcp.json`,
@@ -328,6 +347,7 @@ and `fleet-*` tools):
 | `CLAUDE_CONFIG_DIR`   | The account/config dir for the project's `profile`.              |
 | `CLAUDE_FLEET_DIR`    | Per-session status files (`$CLAUDE_CONFIG_DIR/fleet`).           |
 | `CLAUDE_FLEET_YOLO`   | `0` to require permission prompts in sessions (default: bypass). |
+| `CLAUDE_FLEET_AWAKE`  | `display` to keep the screen on as well as the machine; `off` to inhibit nothing (control plane *and* scheduled sends). Default `on` = awake, screen free to darken. Check with `fleet-awake --status`. |
 | `CLAUDE_FLEET_NOTIFY_LEAD` | `1` to **push** worker `done`/`need-you` events to the lead — the hook wakes the master to drain the inbox, instead of the master polling. Debounced (a burst wakes it once); off by default (each wake costs a master turn). Enable live without restart via a marker: **all fleets** → `touch ~/.config/ghostfleet/notify-lead`; one fleet → `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead`. **Disable one fleet even when the global default is on** → `touch $CLAUDE_FLEET_DIR/<sock>.notify-lead-off` (authoritative kill switch; beats the env var + both on-markers). The **Projects → `,` settings page** toggles these per-project markers for you. Tune the coalesce window with `CLAUDE_FLEET_NOTIFY_DEBOUNCE` (seconds, default 30). It never clobbers your input: if you're mid-typing at the master (its input line isn't empty), the wake is skipped and the event is delivered on the next one. |
 
 `ghostfleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).

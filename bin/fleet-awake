@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# fleet-awake [-d|--display] [pid]
+# fleet-awake --status
+#
+# Hold a "don't sleep" assertion for as long as <pid> (default: our parent) is
+# alive, then let it go. Spawns the inhibitor detached and returns immediately, so
+# a caller just fires it and carries on:
+#
+#     fleet-awake "$$"             # stay awake for the lifetime of this script
+#     fleet-awake -d "$$"          # ...and keep the SCREEN on too
+#     fleet-awake --status         # is anything holding one right now?
+#
+# WHY: a fleet is only worth anything unattended. When the machine idle-sleeps,
+# every worker's turn stops mid-generation and a scheduled send (fleet-schedule)
+# fires late or not at all — and nothing anywhere says why, because from the
+# fleet's point of view time simply skipped.
+#
+# WHY --display EXISTS: without it the screen still goes dark on its own timer
+# (macOS `displaysleep`, 5 min on battery by default) while the machine stays fully
+# awake. From across the room that is INDISTINGUISHABLE from the box having slept,
+# so a working fleet reads as a broken one. --display buys that reassurance for the
+# price of the backlight; --status settles it for free.
+#
+# CAVEAT: this is *idle* sleep. A closed lid still sleeps on macOS. For a hard
+# guarantee across a lid close, stay on AC in clamshell, or pre-schedule the wake:
+#   sudo pmset schedule wake "MM/dd/yy HH:mm:ss"
+#
+# Silent on purpose when arming (the control plane calls it mid-screen), and a
+# no-op on any platform without an inhibitor — never a reason to fail the caller.
+set -uo pipefail
+
+# --- status -----------------------------------------------------------------
+if [ "${1:-}" = "--status" ]; then
+  found=0
+  while read -r ipid iargs; do
+    [ -n "${ipid:-}" ] || continue
+    found=1
+    wpid="${iargs##*-w }"; wpid="${wpid%% *}"
+    case "$iargs" in *" -d "*) what="sleep + display" ;; *) what="sleep" ;; esac
+    if kill -0 "$wpid" 2>/dev/null; then
+      printf 'holding %s for pid %s (%s) — inhibitor pid %s\n' \
+        "$what" "$wpid" "$(ps -o comm= -p "$wpid" 2>/dev/null | sed 's:.*/::')" "$ipid"
+    else
+      printf 'stale inhibitor pid %s (watching dead pid %s)\n' "$ipid" "$wpid"
+    fi
+  done < <(pgrep -f "caffeinate .*-w " 2>/dev/null | while read -r p; do
+             printf '%s %s\n' "$p" "$(ps -o args= -p "$p" 2>/dev/null)"; done)
+  # Linux side
+  while read -r p; do
+    [ -n "$p" ] && { found=1; printf 'holding sleep — systemd-inhibit pid %s\n' "$p"; }
+  done < <(pgrep -f "systemd-inhibit .*awake-" 2>/dev/null)
+  [ "$found" = 1 ] || echo "nothing held — the machine can idle-sleep"
+  # The OS is the authority, not our process list; show what it actually thinks.
+  if command -v pmset >/dev/null 2>&1; then
+    printf 'kernel: PreventUserIdleSystemSleep=%s PreventUserIdleDisplaySleep=%s\n' \
+      "$(pmset -g assertions 2>/dev/null | awk '/PreventUserIdleSystemSleep /{print $2; exit}')" \
+      "$(pmset -g assertions 2>/dev/null | awk '/PreventUserIdleDisplaySleep /{print $2; exit}')"
+  fi
+  exit 0
+fi
+
+# --- arm --------------------------------------------------------------------
+SCREEN=0
+case "${1:-}" in -d|--display) SCREEN=1; shift ;; esac
+
+PID="${1:-$PPID}"
+case "$PID" in ''|*[!0-9]*) exit 0 ;; esac
+kill -0 "$PID" 2>/dev/null || exit 0        # nothing left to keep awake for
+
+# Already holding one for this exact pid? ghostfleet re-execs itself on upgrade,
+# which KEEPS its pid — without this check every cf-sync would stack another
+# inhibitor on the same process, and they'd only be reaped when it finally exits.
+# Matching on the FULL flag set is deliberate: switching modes must not look like
+# an existing hold, or `=display` would silently keep giving you the dark screen.
+held() { pgrep -f "$1" >/dev/null 2>&1; }
+
+if command -v caffeinate >/dev/null 2>&1; then
+  # -i idle sleep, -s system sleep (AC only — a no-op on battery, which is what you
+  # want: don't fight the power budget while unplugged). -d additionally pins the
+  # display on, off by default because it costs real battery for zero fleet benefit.
+  args="-i -s"; [ "$SCREEN" = 1 ] && args="-d -i -s"
+  held "caffeinate $args -w $PID" && exit 0
+  # shellcheck disable=SC2086  # $args must word-split into separate flags
+  nohup caffeinate $args -w "$PID" >/dev/null 2>&1 &
+elif command -v systemd-inhibit >/dev/null 2>&1; then
+  # Linux equivalent. systemd-inhibit has no "watch a pid" flag, so it wraps a
+  # process that exits when ours does; --why carries the pid as our dedupe marker.
+  # `idle` is what logind blanks the screen on, so it covers the -d case too.
+  what="idle:sleep"; [ "$SCREEN" = 1 ] && what="idle:sleep:handle-lid-switch"
+  held "systemd-inhibit .*awake-$PID " && exit 0
+  nohup systemd-inhibit --what="$what" --who=ghostfleet --why="awake-$PID " --mode=block \
+    tail --pid="$PID" -f /dev/null >/dev/null 2>&1 &
+fi
+# WSL and everything else: the host OS owns sleep, nothing to assert here.
+exit 0

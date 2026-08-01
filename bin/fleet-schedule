@@ -5,9 +5,9 @@
 # into the tmux <session> on <socket>. Meant to be spawned detached by the grid
 # (press `s` on a card), but usable standalone too.
 #
-# Keeps the Mac awake while waiting (caffeinate) so the send actually fires.
-# CAVEAT: reliable only if the machine is awake at the target time. caffeinate
-# prevents *idle* sleep; a closed lid can still sleep. For a hard guarantee also:
+# Keeps the box awake while waiting (fleet-awake) so the send actually fires.
+# CAVEAT: reliable only if the machine is awake at the target time — that's *idle*
+# sleep only; a closed lid can still sleep. For a hard guarantee also:
 #   sudo pmset schedule wake "MM/dd/yy HH:mm:ss"
 set -uo pipefail
 
@@ -24,11 +24,14 @@ MARK="$FLEET_DIR/$SESSION.sched"
 now="$(date +%s)"
 delay=$(( TARGET - now )); [ "$delay" -lt 0 ] && delay=0
 
-# keep awake (idle-sleep only) for the lifetime of this waiter.
-# NB: `if …; then caffeinate & fi` backgrounds ONLY caffeinate — writing it as
-# `cmd && caffeinate &` would background the whole `&&` list in an extra bash
-# subshell (a confusing second "bash fleet-schedule" in ps).
-if command -v caffeinate >/dev/null 2>&1; then caffeinate -i -w "$$" & fi
+# Keep awake (idle-sleep only) for the lifetime of this waiter — a send that's hours
+# out is exactly the one a sleeping machine eats. Platform guard, dedupe and the lid
+# caveat all live in fleet-awake; same CLAUDE_FLEET_AWAKE=off switch as the control
+# plane, since "don't keep my laptop awake" can't mean two different things.
+case "${CLAUDE_FLEET_AWAKE:-on}" in
+  0|off|no|false) : ;;
+  *) "$BIN_DIR/fleet-awake" "$$" 2>/dev/null ;;
+esac
 
 sleep "$delay"
 
