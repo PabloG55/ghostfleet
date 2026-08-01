@@ -98,6 +98,32 @@ is "primary list is not skipped"          "1" "$(grep -c '^four ' <<<"$out2" || 
 is "a .bak file is not read as a profile" "0" "$(grep -c '1785'   <<<"$out2" || true)"
 rm -rf "$T"
 
+group "fleet-project add --agent"
+T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/p1" "$T/p2" "$T/p3"
+PATH="$ROOT/bin:$PATH" HOME="$T" "$ROOT/bin/fleet-project" add "$T/p1" --name a4 --agent opencode >/dev/null 2>&1
+PATH="$ROOT/bin:$PATH" HOME="$T" "$ROOT/bin/fleet-project" add "$T/p2" --name a3 >/dev/null 2>&1
+PATH="$ROOT/bin:$PATH" HOME="$T" "$ROOT/bin/fleet-project" add "$T/p3" --name bad --agent notreal >/dev/null 2>&1
+cf="$T/.config/ghostfleet/projects"
+is "--agent writes 4 columns"      "4" "$(awk -F'\t' '$1=="a4"{print NF}' "$cf")"
+is "no --agent stays 3 columns"    "3" "$(awk -F'\t' '$1=="a3"{print NF}' "$cf")"
+# A default that never applies is worse than an error: nothing would ever report it.
+is "unknown agent is not written"  "0" "$(grep -c 'notreal' "$cf" || true)"
+is "unknown agent aborts the add"  "0" "$(awk -F'\t' '$1=="bad"' "$cf" | wc -l | tr -d ' ')"
+rm -rf "$T"
+
+group "projects screen reads the agent column"
+T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a" "$T/b"
+printf 'oc\t%s/a\twork\topencode\npl\t%s/b\twork\n' "$T" "$T" > "$T/.config/ghostfleet/projects"
+scr="$(HOME="$T" CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" node "$ROOT/bin/fleet-grid.mjs" - --screen projects --plain 2>/dev/null; true)"
+# --plain doesn't draw cards, so assert on the parser the screen uses instead
+got="$(HOME="$T" node -e '
+  const fs=require("fs");
+  const l=fs.readFileSync(process.argv[1],"utf8").split("\n").filter(x=>x.trim()&&!x.startsWith("#"));
+  console.log(l.map(x=>{const c=x.split("\t");return (c[0]+":"+(c[3]||"claude"))}).join(" "));
+' "$T/.config/ghostfleet/projects")"
+is "4th column parsed per project" "oc:opencode pl:claude" "$got"
+rm -rf "$T"
+
 # ── 4. session naming ────────────────────────────────────────────────────────
 group "session naming"
 namer() {                      # $1=typed $2=live list $3=separator

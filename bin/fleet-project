@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-project add <path> [--name N] [--profile P] [--start]
+# fleet-project add <path> [--name N] [--profile P] [--agent A] [--start]
 # fleet-project list
 # fleet-project rm <name>
 #
@@ -58,17 +58,29 @@ case "$cmd" in
     ;;
 
   add)
-    PATH_IN=""; NAME=""; PROFILE="work"; START=0
+    PATH_IN=""; NAME=""; PROFILE="work"; AGENT=""; START=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --name)    NAME="${2:?}";    shift 2 ;;
         --profile) PROFILE="${2:?}"; shift 2 ;;
+        --agent)   AGENT="${2:?}";   shift 2 ;;
         --start)   START=1;          shift ;;
         -*) echo "fleet-project: unknown option $1" >&2; exit 1 ;;
         *)  [ -z "$PATH_IN" ] && { PATH_IN="$1"; shift; } || { echo "fleet-project: unexpected arg $1" >&2; exit 1; } ;;
       esac
     done
-    [ -n "$PATH_IN" ] || { echo "fleet-project: usage: fleet-project add <path> [--name N] [--profile P] [--start]" >&2; exit 1; }
+    [ -n "$PATH_IN" ] || { echo "fleet-project: usage: fleet-project add <path> [--name N] [--profile P] [--agent A] [--start]" >&2; exit 1; }
+    # Reject an unknown agent HERE rather than writing it and letting every session in
+    # the project quietly fall back to claude. A default that never applies is worse
+    # than an error, because nothing ever reports that it didn't.
+    if [ -n "$AGENT" ]; then
+      if command -v fleet-agent >/dev/null 2>&1; then
+        fleet-agent list 2>/dev/null | grep -qx -- "$AGENT" \
+          || { echo "fleet-project: unknown agent '$AGENT' (known: $(fleet-agent list | tr '\n' ' '))" >&2; exit 1; }
+      else
+        case "$AGENT" in *[!a-z0-9_-]*) echo "fleet-project: bad agent '$AGENT'" >&2; exit 1 ;; esac
+      fi
+    fi
     ROOT="$(cd "${PATH_IN/#\~/$HOME}" 2>/dev/null && pwd)" \
       || { echo "fleet-project: no such directory: $PATH_IN" >&2; exit 1; }
     [ -n "$NAME" ] || NAME="${ROOT##*/}"
@@ -78,8 +90,14 @@ case "$cmd" in
     if [ -f "$CFG" ] && awk -F'\t' -v n="$NAME" '$1==n{f=1} END{exit !f}' "$CFG"; then
       echo "fleet-project: '$NAME' is already a project in profile '$PROFILE'"
     else
-      printf '%s\t%s\t%s\n' "$NAME" "$ROOT" "$PROFILE" >> "$CFG"
-      echo "fleet-project: added '$NAME' ($PROFILE) -> $ROOT"
+      # Only write the 4th column when there IS one. A plain add keeps producing the
+      # three-column line every existing reader already handles.
+      if [ -n "$AGENT" ]; then
+        printf '%s\t%s\t%s\t%s\n' "$NAME" "$ROOT" "$PROFILE" "$AGENT" >> "$CFG"
+      else
+        printf '%s\t%s\t%s\n' "$NAME" "$ROOT" "$PROFILE" >> "$CFG"
+      fi
+      echo "fleet-project: added '$NAME' ($PROFILE${AGENT:+, agent $AGENT}) -> $ROOT"
     fi
 
     SOCK="$(sock_for "$NAME" "$PROFILE")"; CDIR="$(profile_dir "$PROFILE")"
@@ -126,7 +144,7 @@ case "$cmd" in
 
   *)
     echo "fleet-project: usage:" >&2
-    echo "  fleet-project add <path> [--name N] [--profile P] [--start]" >&2
+    echo "  fleet-project add <path> [--name N] [--profile P] [--agent A] [--start]" >&2
     echo "  fleet-project list" >&2
     echo "  fleet-project rm <name>" >&2
     exit 1 ;;

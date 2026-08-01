@@ -1134,7 +1134,13 @@ function readProjects() {
   try {
     return fs.readFileSync(PROJECTS_CFG, 'utf8').split('\n')
       .map(l => l.replace(/\r$/, '')).filter(l => l.trim() && !l.startsWith('#'))
-      .map(l => { const [name, p, profile] = l.split('\t'); return { name, path: (p || '').replace(/^~/, HOME), profile: profile || 'work' }; })
+      // Destructure the AGENT column too. Naming one fewer variable than the format
+      // has is harmless here (JS drops the extra, unlike shell `read`, which glues it
+      // onto the last variable — that exact difference bit fleet-project), but the
+      // column has to be READ for the projects screen to be able to show it.
+      .map(l => { const [name, p, profile, agent] = l.split('\t');
+                  return { name, path: (p || '').replace(/^~/, HOME), profile: profile || 'work',
+                           agent: /^[a-z0-9_-]+$/.test(agent || '') ? agent : '' }; })
       .filter(x => x.name && x.path);
   } catch { return []; }
 }
@@ -1309,7 +1315,11 @@ function pRender() {
       // a message scheduled to this project's master shows as @<time> on the card
       const sm = readSched('master', path.join(profileDir(it.project.profile), 'fleet'), sockOf(it.project));
       if (sm && sm.at > Math.floor(Date.now() / 1000)) line += `  @${clockLabel(sm.at)}`;
-      return boxCard(`${i + j < 9 ? `${i + j + 1} ` : ''}${it.project.name}`, [it.project.profile, it.project.path.replace(HOME, '~'), line], color, sel);
+      // Show the project's default agent beside its profile, but only when it HAS one
+      // — the overwhelming case is claude, and printing it on every card would be noise
+      // that hides the single project which actually differs.
+      const who = it.project.agent ? `${it.project.profile} · ${it.project.agent}` : it.project.profile;
+      return boxCard(`${i + j < 9 ? `${i + j + 1} ` : ''}${it.project.name}`, [who, it.project.path.replace(HOME, '~'), line], color, sel);
     });
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
     buf += '\x1b[K\n';

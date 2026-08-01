@@ -378,11 +378,16 @@ the login, `settings.json`, `projects/` (transcripts) and the fleet's `fleet/` s
 `~/.claude-personal`) picks its account, so work and personal never mix:
 
 ```
-# ~/.config/ghostfleet/projects   (name <TAB> path <TAB> profile)
+# ~/.config/ghostfleet/projects   (name <TAB> path <TAB> profile <TAB> agent)
 web	~/code/web	work
-api	~/code/api	work
+api	~/code/api	work	opencode
 sideproj	~/projects/sideproj	personal
 ```
+
+The 4th column is the project's **default agent** (`claude` · `opencode` · `codex`) —
+inherited by its master and by every session created in it, and pre-selected on the
+grid's agent screen so you don't re-pick it each time. Omit it for `claude`. Set it
+without hand-editing: `fleet-project add <path> --agent opencode`.
 
 Each project's sessions live on their own socket under that account's config dir, so accounts never
 mix. Work keeps the bare `cf-<project>`; every other profile is namespaced `cf-<profile>-<project>`,
