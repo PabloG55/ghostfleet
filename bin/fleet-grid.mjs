@@ -981,7 +981,7 @@ function onKey(key) {
     // t = the sTack screen. s/S are schedule and n/N are new, so this is the free key
     // nearest the rest of the grid's verbs. It leaves this project's grid entirely —
     // the stack lists every project's sessions, which is the point of it.
-    else if (key === 't' || key === 'T') return finish('stack');
+    else if (key === 't' || key === 'T' || key === '\x14') return finish('stack');
     else if (key >= '1' && key <= '9') {              // insta-jump: digit -> that card
       const it = items[Number(key) - 1];
       if (it?.card) { sel = Number(key) - 1; return finish(`attach${US}${it.card.name}`); }
@@ -1529,6 +1529,13 @@ function onKeyProjects(key) {
   else if (key === '\x13') {                                 // ^S -> straight to the sessions grid
     const it = pItems[pSel];
     if (it?.project) return finish(`sessions${US}${it.project.name}`);
+  }
+  // ^T -> the stack, from here too. The stack lists every project's sessions, so it
+  // doesn't matter which card is selected — but it still has to be opened through a
+  // project, because stack.tsv lives in that project's PROFILE dir.
+  else if (key === '\x14') {
+    const it = pItems[pSel] || pItems.find(x => x.project);
+    if (it?.project) return finish(`stackfor${US}${it.project.name}`);
   }
   else if (key === ',') { pSettings = true; pSetSel = 0; }   // open the settings page
   else if (key === '\r' || key === '\n') {

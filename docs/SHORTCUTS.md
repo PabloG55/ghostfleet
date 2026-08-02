@@ -74,6 +74,7 @@ holding an assertion. [UPSTREAM]
 | `←→` / `h l` | move selection (column) | README |
 | `⇧h` `⇧j` `⇧k` `⇧l` (`H J K L`) | **reorders** the selected project in the list (persisted to the file) | README |
 | `⏎` | enters that project's **Master Claude** | README |
+| `Ctrl-t` | the **stack** screen, from anywhere — Projects, master, the grid, or inside a session |
 | `Ctrl-s` | **straight to that project's grid**, skipping master | README |
 | `s` / `S` | schedule a message to that project's master | README |
 | `,` | opens the **settings** screen (see below — it has 2 columns, not 1) | README (incomplete) |

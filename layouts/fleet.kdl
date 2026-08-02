@@ -21,6 +21,7 @@ layout {
             unbind "Ctrl s"
             unbind "Ctrl p"
             unbind "Ctrl f"
+            unbind "Ctrl t"
         }
     }
     tab name="fleet" {
