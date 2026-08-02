@@ -84,19 +84,43 @@ meterable() {
 # The 5h usage % from a pane's status bar: the "NN%(" field. Excludes ctx:NN% (no
 # paren after) and 7d:NN%( (colon-prefixed) by requiring a non-colon, non-digit char
 # right before the number.
+#
+# NARROW PANES HAVE NO FIGURE TO SCRAPE. Claude TRUNCATES its status line to the pane
+# width, it does not wrap: measured on one session resized through the range, the field
+# is present at 100 columns and gone at 90, replaced by an ellipsis
+#   100:  ... | Opus 5 (1M context) | ctx:5% | 17%(4h 12…
+#    90:  ... | Opus 5 (1M context) | ctx:5% |…
+#    50:  pablo@example.com | Example Account | w1 | …
+# The stack screen makes ~50-column panes routine (a nested client resizes its target),
+# so this is now an ordinary state rather than a curiosity — and a session that has NO
+# reading is indistinguishable, from here, from an account at 0%.
 pct_of() {
   tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null \
     | grep -oE '[^:0-9][0-9]+%\(' | grep -oE '[0-9]+' | tail -1
 }
 # one shared account -> take the highest reading across all live panes that actually
-# report one
+# report one.
+#
+# Sets BUDGET_PCT and BUDGET_BLIND rather than echoing, and so must NOT be called in a
+# command substitution: that is a subshell, and the assignment would be thrown away
+# (the same trap release_gov_parked already documents). BUDGET_BLIND names the metered
+# sessions whose pane was too narrow to carry the figure, so "no reading" can say WHY
+# instead of looking exactly like a healthy idle fleet.
+BUDGET_PCT=0
+BUDGET_BLIND=""
 budget() {
-  local max=0 p="" s=""
+  local p="" s="" w=""
+  BUDGET_PCT=0; BUDGET_BLIND=""
   for s in $(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
     meterable "$s" || continue
-    p="$(pct_of "$s")"; [ -n "$p" ] && [ "$p" -gt "$max" ] && max="$p"
+    p="$(pct_of "$s")"
+    if [ -n "$p" ]; then
+      [ "$p" -gt "$BUDGET_PCT" ] && BUDGET_PCT="$p"
+    else
+      w="$(tmux -L "$SOCK" display-message -p -t "$s" '#{window_width}' 2>/dev/null)"
+      BUDGET_BLIND="$BUDGET_BLIND $s(${w:-?}c)"
+    fi
   done
-  echo "$max"
 }
 # workers (never the lead), newest first — and only ones that drink from the metered
 # account, so the ceiling never parks a worker it isn't measuring
@@ -142,8 +166,14 @@ tick() {
     return
   fi
 
-  pct="$(budget)"
-  if [ -z "$pct" ] || [ "$pct" -eq 0 ]; then log "no budget reading this tick"; return; fi
+  budget; pct="$BUDGET_PCT"
+  if [ -z "$pct" ] || [ "$pct" -eq 0 ]; then
+    # Say WHICH panes couldn't be read and how wide they were. Without this, a fleet
+    # whose sessions are all in a stack looks identical to a fleet at 0% usage, and the
+    # ceiling silently stops being enforced.
+    log "no budget reading this tick${BUDGET_BLIND:+ — no pane carries the 5h figure (too narrow):$BUDGET_BLIND}"
+    return
+  fi
 
   # AT/ABOVE the ceiling -> notify + park ALL workers at once (once per episode)
   if [ "$pct" -ge "$PAUSE_AT" ]; then

@@ -125,6 +125,7 @@ explaining it's a keyboard-navigable mini file browser.
 | **digit `1`-`9`** | insta-jump: opens the card at that position directly | [CODE] not in the README |
 | **left click** (mouse) | selects and opens the card under the cursor | [CODE] |
 | `Ctrl-p` or `Q` (uppercase) | **jumps straight to Projects**, without going back through master first | [CODE] not in the README — `Q` is a fallback for when zellij still owns `Ctrl-p` |
+| **`t`** / **`T`** | opens the **stack** screen — several sessions on screen at once, across projects (see §3b) | [not upstream yet — `feat/stack-view`] |
 | **`p`** (lowercase) | **pauses** the selected session (`fleet-pause`) — directly from the grid, no Bash needed | **[CODE] — not in the README at all** |
 | **`P`** (uppercase) | **resumes** the selected session (`fleet-resume`) — directly from the grid | **[CODE] — not in the README at all** |
 | `,` | opens **per-session** settings (individual auto-nudge toggle — see below, and now also rename) | [CODE] — the README only describes the Projects `,`, not that the grid has its own per-session one too |
@@ -181,6 +182,48 @@ A name that collides with a live session still gets `-2`/`-3` appended automatic
 same safety net as before, just starting from whatever you typed instead of forcing
 the checkout's basename.
 
+## 3b. The **stack** screen (`t` on the grid) — sessions side by side
+
+Lists every live session in **every project of this profile**, not just the one whose
+grid you came from — watching one project's worker next to another's is the point.
+
+| key | what it does |
+|---|---|
+| `↑↓` / `k j` | move between sessions (project headers are skipped) |
+| `space` | add/remove the selected session from the stack (`[✓]` marks members) |
+| `⏎` | open the stack — one pane per member, even horizontal split |
+| `c` | clear the stack |
+| `Esc` / `q` / `` ` `` | back to the grid |
+
+Membership persists in `$CLAUDE_FLEET_DIR/stack.tsv` as `sock<TAB>session`, so it
+survives leaving the screen. Socket-scoped, for the reason every marker in this repo is:
+every project has a session called `master`.
+
+### Inside the stack — a THIRD level of multiplexer
+
+zellij → the stack's tmux → each project's fleet tmux → the agent. The **outer** tmux
+answers a key first, so the stack's config (`tmux/cf-stack.tmux.conf`) deliberately binds
+almost nothing and does **not** load `tmux/cf.tmux.conf`. Verified live:
+
+| key | who answers it, inside a stack pane |
+|---|---|
+| `` ` `` | **the stack** — leaves the whole stack in one press. (The fleet already takes `` ` `` with `-n`, so nothing new is stolen from the agent, and "one level back" from a stack means "leave the stack".) |
+| `Ctrl-a` … | **the fleet**, as everywhere else — `C-a g`/`d`/`s`/`p` and the `C-a C-a` literal escape all still work. The stack has `prefix None` precisely so this keeps working. |
+| `S-Left` / `S-Right` | **the fleet** — cycles *that pane's* nested client to another session in *that* project. Confirmed: a pane showing `master` stepped to `worker-b`. |
+| `Ctrl-s` / `Ctrl-p` / `Ctrl-f` | **the fleet** — they do what they always do (write a `.goto` marker, detach), which here closes that one pane. The marker is harmless: every path that reads one clears it first. |
+| everything else | **the agent**. Note `Ctrl-b` is *not* used by the stack — Claude Code uses it to move the cursor back one character, which is why the stack has no prefix of its own. |
+| mouse | **the fleet** — the stack keeps `mouse off` so events pass through. |
+
+Each pane keeps its own session's status bar; the **pane border** carries
+`project · session`, because a nested bar reading `● master` can't say whose master it is.
+
+Leaving **detaches** the nested clients and never kills a session (asserted in
+`test/run.sh`, and the assertion goes red if the teardown is changed to kill).
+
+Two measured caveats live in `docs/stack-view.md`: the busy detector had to be fixed to
+work at stack width, and the governor's 5h usage scrape cannot read a pane narrower than
+~100 columns.
+
 ### "Schedule a message" screen (`s` on the grid or Projects)
 
 | key | what it does |
@@ -207,6 +250,8 @@ the checkout's basename.
 | `fleet-pause <s>` / `fleet-resume <s>` | CLI equivalents of `p`/`P` on the grid |
 | `fleet-stop <s>` | shut down for good + clear its state |
 | `fleet-rename <s> <new-name>` | CLI equivalent of the grid's `r` — renames the session AND moves its worktree folder, migrating pause/notify-lead/schedule/manifest state | [Not upstream yet — added locally, see the fork's PR.] |
+| `fleet-stack members\|add\|remove\|toggle\|clear` | the stack screen's membership, from a shell (`sock<TAB>session` in `$CLAUDE_FLEET_DIR/stack.tsv`) | [not upstream yet — `feat/stack-view`] |
+| `fleet-stack open [--dry-run]` | build the stack window and attach. `--dry-run` prints the panes it would create and the nested attach for each, and needs no tty | [not upstream yet] |
 | `fleet-cycle next\|prev <socket-path> [session]` | what `S-Right`/`S-Left` call — steps the attached client along the ring | [UPSTREAM] |
 | `fleet-awake [-d\|--display] [pid]` / `fleet-awake --status` | idle-sleep inhibitor the control plane arms automatically (see §1) | [UPSTREAM] |
 | `ghostfleet <profile> --new` | create an empty projects list for a new profile — an unknown profile is otherwise **refused**, not silently created | [UPSTREAM] |
