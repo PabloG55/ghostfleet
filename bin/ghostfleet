@@ -333,6 +333,7 @@ grid_loop() {
         # ACTUALLY ended up, not on the card we happened to attach three sessions ago.
         gc="$(cat "$gcur" 2>/dev/null)"; rm -f "$gcur" 2>/dev/null
         [ -n "$gc" ] && [ "$gc" != master ] && last="$gc"
+        if [ "$gv" = stack ]; then GRID_EXIT=stack; return; fi   # C-t inside a chat
         if [ "$gv" = projects ]; then GRID_EXIT=projects; return; fi
         if take_jump "$gv"; then GRID_EXIT=jump; return; fi ;;
       new${US}*)
@@ -481,6 +482,7 @@ while true; do
         fi ;;
       project${US}*) set_project "${sel#project${US}}" ;;
       sessions${US}*) set_project "${sel#sessions${US}}"; GOTO=grid ;;   # ^S: straight to the grid
+      stackfor${US}*) set_project "${sel#stackfor${US}}"; GOTO=stack ;;  # ^T from Projects
       jump*) take_jump "$sel" || true ;;               # ^F chord from the Projects screen
 
     esac
@@ -492,10 +494,19 @@ while true; do
   #   ` / C-a g  -> back to the Projects picker
   # ^S from Projects: open the sessions grid WITHOUT starting/attaching master.
   # Leaving the grid then returns to Projects — master was never asked for.
+  # ^T from Projects: open the stack for that project's profile without going
+  # through master or the grid. Leaving it returns to Projects, since neither
+  # was asked for — same contract as ^S.
+  if [ "$GOTO" = "stack" ]; then
+    GOTO=""; stack_loop
+    LAST_PROJECT="$PROJECT"; PROJECT=""
+    continue
+  fi
   if [ "$GOTO" = "grid" ]; then
     GOTO=""
     ensure_governor              # normally done by enter_master, which we skipped
     grid_loop
+    [ "$GRID_EXIT" = "stack" ] && { stack_loop; continue; }   # C-t from a chat
     [ "$GRID_EXIT" = "jump" ] && continue     # jumped to another project's grid
     LAST_PROJECT="$PROJECT"; PROJECT=""
     continue
@@ -504,10 +515,15 @@ while true; do
   MASTER_GOTO=""
   enter_master
   if take_jump "$MASTER_GOTO"; then continue          # C-f <digit> from master
+  elif [ "$MASTER_GOTO" = "stack" ]; then
+    # C-t at the master session. Returning from the stack lands back on master,
+    # exactly as returning from the grid does.
+    stack_loop
   elif [ "$MASTER_GOTO" = "grid" ]; then
     grid_loop
     # ^P in the grid -> up to Projects instead of back into master
     if [ "$GRID_EXIT" = "projects" ]; then LAST_PROJECT="$PROJECT"; PROJECT=""; fi
+    [ "$GRID_EXIT" = "stack" ] && { stack_loop; continue; }   # C-t from a chat
     [ "$GRID_EXIT" = "jump" ] && continue             # C-f <digit> from a chat
   else
     LAST_PROJECT="$PROJECT"   # remember it so the Projects picker re-selects it
