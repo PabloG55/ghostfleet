@@ -1130,6 +1130,38 @@ function boxCard(title, rows, color, sel) {
   const wrap = (s, isTop) => sel ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}` : `${color}${s}${C.reset}`;
   return [wrap(top, true), wrap(body[0]), wrap(body[1]), wrap(body[2]), wrap(bot)];
 }
+// ── the Projects banner ──────────────────────────────────────────────────────
+// The logo as a sprite: a ghost for a sail (two eye holes, tattered hem), a pennant
+// on the mast, a hull under it. Drawn with half-blocks so each terminal row carries
+// two pixel rows — at this size that vertical doubling is the whole difference
+// between a recognisable ship and a smudge.
+const SHIP = [
+  '    █▀▀▀█    ',
+  '  ▄████████▄ ',
+  '  ██ ████ ██ ',
+  '  █▀██▀██▀██ ',
+  ' ▄▄▄▄▄▄▄▄▄▄▄▄▄',
+  '  ▀█████████▀',
+];
+// Costs six rows, which is a real bite out of a short window — and the cards are the
+// point of this screen, not the logo. Below either threshold, fall back to the plain
+// one-line header rather than pushing projects off the bottom.
+function banner(profTag) {
+  const wide = W() >= 60, tall = H() >= 22;
+  if (!wide || !tall) return ` ${C.bold}ghostfleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
+  const right = [
+    '', '',
+    `${C.bold}ghostfleet${C.reset}${profTag}`,
+    `${C.dim}— projects${C.reset}`,
+    '', '',
+  ];
+  let s = '';
+  for (let i = 0; i < SHIP.length; i++) {
+    s += ` ${C.white}${SHIP[i]}${C.reset}   ${right[i] || ''}\x1b[K\n`;
+  }
+  return s;
+}
+
 function readProjects() {
   try {
     return fs.readFileSync(PROJECTS_CFG, 'utf8').split('\n')
@@ -1295,7 +1327,7 @@ function pRender() {
   if (pSchedFor) return pRenderSchedule();
   let buf = '\x1b[H';
   const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
-  buf += ` ${C.bold}ghostfleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
+  buf += banner(profTag);
   buf += pConfirmRemove
     ? `${C.red}${C.bold} remove '${pConfirmRemove}' from projects?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`
     : (jumpStage ? jumpHint() : '') + '\x1b[K\n';
