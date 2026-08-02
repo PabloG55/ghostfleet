@@ -665,7 +665,13 @@ function renderGrid() {
   const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
     (parked ? ` · ${C.grey}${parked} parked${C.reset}` : '');
-  buf += header + '\x1b[K\n';
+  // Same banner as the Projects screen, with the live counts beside the ship. Falls
+  // back to the one-line header on a window too small to spend the rows on.
+  buf += banner([
+    `${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}`,
+    `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
+      (parked ? ` · ${C.grey}${parked} parked${C.reset}` : ''),
+  ]) ?? (header + '\x1b[K\n');
   if (confirmKill)
     buf += `${C.red}${C.bold} kill session '${confirmKill}'?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
   else
@@ -1136,30 +1142,34 @@ function boxCard(title, rows, color, sel) {
 // two pixel rows — at this size that vertical doubling is the whole difference
 // between a recognisable ship and a smudge.
 const SHIP = [
-  '    █▀▀▀█    ',
-  '  ▄████████▄ ',
-  '  ██ ████ ██ ',
-  '  █▀██▀██▀██ ',
-  ' ▄▄▄▄▄▄▄▄▄▄▄▄▄',
-  '  ▀█████████▀',
+  '         ▄▄▄▄▄▄█                ',
+  '         ▀▀▀▀▀ █                ',
+  '          ▄▄███████▄▄▄          ',
+  '       ▄██████ ███ ████▄      ▄▀',
+  '     ▄██████████████████    ▄▀  ',
+  '   ▄██▀▀████▀▀████▀▀███   ▄▀    ',
+  '▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▀      ',
+  '  ▀▀▀█████████████████▀▀        ',
 ];
-// Costs six rows, which is a real bite out of a short window — and the cards are the
+// Costs eight rows, a real bite out of a short window — and the cards are the
 // point of this screen, not the logo. Below either threshold, fall back to the plain
 // one-line header rather than pushing projects off the bottom.
-function banner(profTag) {
-  const wide = W() >= 60, tall = H() >= 22;
-  if (!wide || !tall) return ` ${C.bold}ghostfleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
-  const right = [
-    '', '',
-    `${C.bold}ghostfleet${C.reset}${profTag}`,
-    `${C.dim}— projects${C.reset}`,
-    '', '',
-  ];
-  let s = '';
+function banner(right) {
+  // Eight rows is a real bite out of a short window, and the CARDS are the point of
+  // both screens. Below either threshold, fall back to the caller's one-liner.
+  const shipW = Math.max(...SHIP.map(l => l.length));
+  if (W() < shipW + 44 || H() < 26) return null;
+  // Ship on the RIGHT, hard against the edge; the text reads from the left margin
+  // like every other line on the screen, so the eye isn't asked to start mid-row.
+  const col = Math.max(1, W() - shipW - 2);
+  const pad = Math.max(0, Math.floor((SHIP.length - right.length) / 2));
+  const beside = [...Array(pad).fill(''), ...right];
+  let out = '';
   for (let i = 0; i < SHIP.length; i++) {
-    s += ` ${C.white}${SHIP[i]}${C.reset}   ${right[i] || ''}\x1b[K\n`;
+    const text = beside[i] || '';
+    out += ` ${text}\x1b[${col}G${C.white}${SHIP[i]}${C.reset}\x1b[K\n`;
   }
-  return s;
+  return out;
 }
 
 function readProjects() {
@@ -1327,7 +1337,8 @@ function pRender() {
   if (pSchedFor) return pRenderSchedule();
   let buf = '\x1b[H';
   const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
-  buf += banner(profTag);
+  buf += banner([`${C.bold}ghostfleet${C.reset}${profTag}`, `${C.dim}— projects${C.reset}`])
+      ?? ` ${C.bold}ghostfleet${C.reset}${profTag} ${C.dim}— projects${C.reset}\x1b[K\n`;
   buf += pConfirmRemove
     ? `${C.red}${C.bold} remove '${pConfirmRemove}' from projects?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`
     : (jumpStage ? jumpHint() : '') + '\x1b[K\n';
