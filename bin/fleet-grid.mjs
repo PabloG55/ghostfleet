@@ -144,7 +144,7 @@ function lastAssistant(p) {
 // before the ellipsis rules out a TRUNCATED line ("| w1 | …", "/…/path"), which is
 // everywhere at narrow width — belt and braces, not a tested behaviour; see the note in
 // bin/fleet-agent, which is where all of this was measured.
-const BUSY_RE = /[A-Za-z](?:…|\.\.\.)\s*\(|↓\s*[\d.,]+\s*[km]?\s*tokens|esc to interrupt/i;
+const BUSY_RE = /^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:…|\.\.\.)\s?\(/i;
 
 // ── which agent is a session running? ────────────────────────────────────────
 // A session records its agent in <sock>.<name>.agent (bin/fleet-agent writes it),
