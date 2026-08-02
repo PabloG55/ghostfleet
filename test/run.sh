@@ -124,6 +124,31 @@ got="$(HOME="$T" node -e '
 is "4th column parsed per project" "oc:opencode pl:claude" "$got"
 rm -rf "$T"
 
+group "projects banner"
+# The sprite costs six rows. On a short or narrow window the cards matter more than
+# the logo, so it must collapse to the one-line header instead of pushing projects
+# off the bottom. Driven through a real pane, because this is a rendering decision.
+T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a"
+printf 'demo\t%s/a\twork\n' "$T" > "$T/.config/ghostfleet/projects"
+bnr() {   # cols rows -> 1 if the ship rendered
+  tmux -L cfbtest kill-server 2>/dev/null
+  tmux -L cfbtest new-session -d -x "$1" -y "$2" -e HOME="$T" \
+    -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
+    "node '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 8" 2>/dev/null
+  sleep 2
+  local n; n="$(tmux -L cfbtest capture-pane -p 2>/dev/null | grep -c '█' || true)"
+  tmux -L cfbtest kill-server 2>/dev/null
+  [ "${n:-0}" -gt 0 ] && echo 1 || echo 0
+}
+if command -v tmux >/dev/null 2>&1; then
+  is "roomy window draws the ship"      "1" "$(bnr 100 30)"
+  is "short window falls back to 1 line" "0" "$(bnr 100 20)"
+  is "narrow window falls back to 1 line" "0" "$(bnr 50 30)"
+else
+  skip "banner rendering" "tmux not available"
+fi
+rm -rf "$T"
+
 # ── 4. session naming ────────────────────────────────────────────────────────
 group "session naming"
 namer() {                      # $1=typed $2=live list $3=separator
