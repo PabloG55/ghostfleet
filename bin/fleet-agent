@@ -87,8 +87,24 @@ agent_field() {
         # gerund, so dropping the letter changes no verdict in the corpus and no fixture
         # can prove it. Kept because the asymmetry is worth it — a false busy strands a
         # worker the lead then won't dispatch to — not because a test covers it.
-        busy_re)    printf '%s' '[A-Za-z](…|\.\.\.) ?\(|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt' ;;
-        busy_re_js) printf '%s' '[A-Za-z](?:…|\.\.\.)\s*\(|↓\s*[\d.,]+\s*[km]?\s*tokens|esc to interrupt' ;;
+        #
+        # ANCHORED TO THE LINE START, and the ↓-tokens / esc-to-interrupt alternatives
+        # are gone. Unanchored, the pattern also matched an agent WRITING ABOUT a
+        # spinner — a report, a doc, a pasted capture — and those strings are
+        # byte-identical to the real thing, so nothing about the text can separate
+        # them. A worker that had just documented this detector sat on the grid as
+        # "working" for 17 minutes after it finished. Position is the only signal
+        # left: a live spinner OWNS its line, starting at the glyph; prose about one
+        # always has something in front ("56  ✳ Flowing… (…)", "+ columns `✻ …`").
+        # Scoping to the last N lines was tried first and is wrong — queued messages
+        # sit BELOW the spinner and are unbounded, so it re-blinds the narrow pane
+        # this regex was widened to fix.
+        # The dropped alternatives were redundant: both live inside the parens of the
+        # gerund line at wide widths, and both real busy fixtures still fire without
+        # them. Verified on every live pane across six fleets: fires on the one
+        # genuinely working session, silent on the other eleven.
+        busy_re)    printf '%s' '^[[:space:]]*[^[:alnum:][:space:]]?[[:space:]]*[A-Za-z]+(…|\.\.\.) ?\(' ;;
+        busy_re_js) printf '%s' '^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:…|\.\.\.)\s?\(' ;;
         blocked_re) printf '' ;;   # need-you arrives via hooks, not the pane
         ready_re)   printf '%s' '❯|bypass permissions|for shortcuts' ;;
         hooks)      printf 'yes' ;;

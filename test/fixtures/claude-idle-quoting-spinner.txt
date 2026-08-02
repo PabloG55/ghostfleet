@@ -1,0 +1,19 @@
+  I measured the detector across pane widths. The findings:
+
+     81 +  columns `✻ Flowing… (almost done thinking with xhigh effort)` carries no `(NNs`,
+     82 +  `↓ N tokens` and no `esc to interrupt` — the old regex read a thinking agent as idle
+
+  At 56 columns, with the agent thinking continuously, fleet-agent busy reported idle.
+
+    240  ✶ Forming… (31s · thinking more with xhigh effort)    busy 3/3
+     70  · Forming… (21s · still thinking with xhigh effort)   busy 3/3
+     56  ✳ Flowing… (almost done thinking with xhigh effort)   busy 0/3
+     30  ✽ Gusting… (thinking)                                 busy 0/3
+
+  Pushed to the branch.
+
+────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────
+  user@example.com | Example Account | w1 | main | Opus 5 | ctx:34%
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 3 agents
