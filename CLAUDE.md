@@ -76,5 +76,17 @@ prefer proof over assertion:
   called `master`, so matching on name alone reports another project's state.
 - **The pane is the truth for "is it working".** Transcript mtime says idle mid-generation
   and busy when a background write lands.
+- **A detector measured at full width can go blind in a narrow one.** Claude *composes*
+  its spinner line to fit the pane and drops the elapsed-time counter first, so at 56
+  columns `✻ Flowing… (almost done thinking with xhigh effort)` carries no `(NNs`, no
+  `↓ N tokens` and no `esc to interrupt` — the old regex read a thinking agent as idle
+  for a full minute. And there is no threshold to code around: the phase text grows
+  through a turn, so the same pane at the same width stops matching partway in. Measure
+  a new pattern across widths, not just at yours.
+- **`tmux attach </dev/tty` refuses to attach.** `ttyname()` of that fd is the literal
+  string `/dev/tty`, not the device, and tmux errors `can't use /dev/tty`. Everything
+  before the attach still works, so a screen builds all its panes and then silently
+  fails to show them. The node screens all take `</dev/tty`; anything that *attaches*
+  must not (see `TM attach` in grid_loop, and `fix_stdin_tty` in fleet-stack).
 - **macOS-only calls need a guard**: `stat -f`, `date -r`, `osascript`, `caffeinate`. Linux
   and WSL are supported.
