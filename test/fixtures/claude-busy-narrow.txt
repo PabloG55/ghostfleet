@@ -1,0 +1,29 @@
+  carefully as you possibly can, then answer. Compute
+  98765432123456789 times 12345678987654321 entirely by
+  hand, showing every partial product and every carry,
+  and verify the result three separate ways.
+
+❯ No tools whatsoever. Think for as long as you
+  possibly can, in exhaustive detail, then answer:
+  enumerate and verify by hand the first 60 prime
+  numbers, and for each one prove primality by trial
+  division showing every division.
+
+✻ Flowing… (almost done thinking with xhigh effort)
+
+  ❯ No tools. Think as long and hard as you possibly
+    can, then answer: prove the irrationality of the
+    square root of 2 in five genuinely different
+    ways, working every step out fully.
+  ❯ No tools at all. Think for as long as you
+    possibly can before answering — really exhaust
+    it: independently derive, from first principles
+    and with every step written out, the closed form
+    for the sum of the first n fourth powers, then
+    verify it for n=1..12 by hand.
+
+────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────
+  pablo@example.com | Example Account  | w1 |   HEA…
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 3 …

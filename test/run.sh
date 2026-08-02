@@ -64,6 +64,82 @@ for a in claude opencode codex; do
   is "$a: silent on a real IDLE pane" "0" "$(matches "$re" "$idle")"
 done
 
+# The SAME detector, against a pane that is only 56 columns wide — the width the stack
+# screen makes ordinary, because a nested client resizes its target. Claude COMPOSES
+# its spinner to fit and drops the elapsed-time counter first, so at 56 columns the
+# live line is "✻ Flowing… (almost done thinking with xhigh effort)": no "(NNs", no
+# "↓ N tokens", no "esc to interrupt". Every alternative the old regex had was
+# width-dependent, and `fleet-agent busy` read IDLE for 120 consecutive samples over a
+# full minute of real thinking. Both fixtures are verbatim 56-column captures (only the
+# account/email sanitised); the idle one is here because the narrow pane is FULL of
+# truncation ellipses ("| w1 |   HEA…"), which is exactly what a looser fix would trip
+# over.
+group "pane detectors at stack width"
+cre="$("$ROOT/bin/fleet-agent" field claude busy_re)"
+is "claude: matches a 56-col BUSY pane with no timer" "1" "$(matches "$cre" "$FIX/claude-busy-narrow.txt")"
+is "claude: silent on a 56-col IDLE pane"             "0" "$(matches "$cre" "$FIX/claude-idle-narrow.txt")"
+is "claude: silent on a 130-col IDLE pane"            "0" "$(matches "$cre" "$FIX/claude-idle-wide.txt")"
+# grep ERE and JS are different dialects and the two spellings are maintained
+# separately, so run the JS one over the same fixtures rather than trusting they agree.
+jsre="$("$ROOT/bin/fleet-agent" field claude busy_re_js)"
+jsm() { node -e '
+  const fs=require("fs"), re=new RegExp(process.argv[1],"i");
+  console.log(fs.readFileSync(process.argv[2],"utf8").split("\n").filter(l=>re.test(l)).length ? 1 : 0);
+' "$1" "$2"; }
+is "claude(js): matches the 56-col BUSY pane" "1" "$(jsm "$jsre" "$FIX/claude-busy-narrow.txt")"
+is "claude(js): silent on the 56-col IDLE pane" "0" "$(jsm "$jsre" "$FIX/claude-idle-narrow.txt")"
+
+# The governor scrapes the 5h usage % out of the same pane, and Claude TRUNCATES its
+# status line rather than wrapping it — so below ~100 columns the figure is simply not
+# there. This is a LIMITATION, asserted so it stays a known one: if a stacked session
+# is the only client, the governor gets no reading from it, and `budget()` falls back
+# to whatever a wider pane reports. Asserted in both directions so a "fix" that
+# loosened the pattern into matching ctx:NN% or the 7d figure would go red.
+group "governor usage scrape vs pane width"
+# The governor's OWN pct_of, lifted out of bin/fleet-governor (the same trick this file
+# uses for split_choice) with `tmux` stubbed out to cat a fixture instead of capturing a
+# pane. So this exercises the shipped pattern: change it and these go red.
+eval "$(sed -n '/^pct_of() {/,/^}/p' "$ROOT/bin/fleet-governor")"
+PANE=""
+SOCK=stub                 # pct_of interpolates it; under `set -u` an unset one aborts
+                          # the function, and an aborted pct_of returns "" — which is
+                          # what two of these tests EXPECT. Don't let them pass on that.
+tmux() { cat "$PANE"; }
+PANE="$FIX/claude-idle-wide.txt"
+is "reads the 5h figure at 130 columns"     "18" "$(pct_of x)"
+# The figure is TRUNCATED away, not wrapped, so there is nothing on the pane to find.
+PANE="$FIX/claude-busy-narrow.txt"
+is "no figure to read at 56 columns"        ""   "$(pct_of x)"
+PANE="$FIX/claude-idle-narrow.txt"
+is "no figure to read at 56 columns (idle)" ""   "$(pct_of x)"
+# The wide fixture also carries ctx:5% and 7d:33%(115h 24m). Reading either as the 5h
+# figure would drive the whole fleet's park decision off the wrong number, so the answer
+# above being exactly 18 is half the test — this is the other half.
+is "not ctx:NN%, not the 7d figure"         "18" "$(PANE="$FIX/claude-idle-wide.txt"; pct_of x)"
+unset -f tmux; PANE=""
+# ...and the whole tick, through a real pane, because budget() now sets globals instead
+# of echoing: called in a command substitution it would be a SUBSHELL and every
+# assignment would vanish, leaving the governor permanently at 0%. That is the trap
+# release_gov_parked already carries a comment about, one function further down.
+if command -v tmux >/dev/null 2>&1; then
+  gov() {                        # $1 = fixture to show, $2 = pane width -> the log line
+    local T; T="$(mktemp -d)"
+    tmux -L cfgovtest kill-server 2>/dev/null
+    tmux -L cfgovtest new-session -d -s master -x "$2" -y 30 "cat '$1'; sleep 30" 2>/dev/null
+    sleep 1
+    CLAUDE_FLEET_DIR="$T" "$ROOT/bin/fleet-governor" -s cfgovtest --once --dry-run 2>&1 | tail -1
+    tmux -L cfgovtest kill-server 2>/dev/null; rm -rf "$T"
+  }
+  is "a tick reads 18% off a 130-col pane" "1" \
+     "$(gov "$FIX/claude-idle-wide.txt" 130 | grep -c 'budget 18%' || true)"
+  # A blind tick must SAY it is blind — otherwise it is indistinguishable from an
+  # account sitting at 0%, and the ceiling silently stops being enforced.
+  is "a blind tick names the narrow pane" "1" \
+     "$(gov "$FIX/claude-busy-narrow.txt" 56 | grep -c 'too narrow.*master(56c)' || true)"
+else
+  skip "governor tick" "tmux not available"
+fi
+
 group "ready detectors (ready_re)"
 cre="$("$ROOT/bin/fleet-agent" field codex ready_re)"
 # "· /" passed its original test only because that worktree sat in /private/tmp.
@@ -162,6 +238,188 @@ is "new: -2 taken -> -3"          "foo-3"  "$(namer foo "foo foo-2"   -)"
 # Incrementing before use skipped ~2 entirely: the ordinary case produced ~3 first.
 is "parallel: first is ~2, not ~3" "foo~2" "$(namer foo "foo"         '~')"
 is "parallel: then ~3"             "foo~3" "$(namer foo "foo foo~2"   '~')"
+
+# ── 4b. the stack ────────────────────────────────────────────────────────────
+# stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
+# repo is: EVERY project has a session called `master`, so a bare name stacks whichever
+# one tmux answers for first.
+group "stack membership (stack.tsv)"
+T="$(mktemp -d)"; export CLAUDE_FLEET_DIR="$T"
+FS() { CLAUDE_FLEET_DIR="$T" "$ROOT/bin/fleet-stack" "$@"; }
+FS add cf-a master; FS add cf-b master; FS add cf-a worker
+is "3 members recorded"                 "3"          "$(FS all | wc -l | tr -d ' ')"
+# The whole reason for the socket column: these are two DIFFERENT sessions.
+is "same name on two sockets is 2 rows" "2"          "$(FS all | grep -c 'master$' || true)"
+is "removing one leaves the other"      "cf-b	master" "$(FS remove cf-a master; FS all | grep 'master$')"
+is "adding twice is a no-op"            "2"          "$(FS add cf-b master; FS all | wc -l | tr -d ' ')"
+is "toggle removes a member"            "removed"    "$(FS toggle cf-b master)"
+is "toggle adds it back"                "added"      "$(FS toggle cf-b master)"
+is "clear empties the file"             "0"          "$(FS clear; FS all | grep -c . || true)"
+# A field that could close a quote would reach the shell command a pane runs.
+FS add 'cf-x;touch /tmp/pwned' s >/dev/null 2>&1
+is "a shell-metachar member is refused" "0" "$(FS all | grep -c . || true)"
+# The two traps CLAUDE.md keeps a list of, applied to this format:
+#   - a stray 3rd column: with fewer read variables than fields the leftover lands
+#     INSIDE the last one, so "master" silently becomes "master<TAB>JUNK" — verified by
+#     removing the guards, which reproduces exactly that row
+#   - `IFS=$'\t'` collapses empty fields, so "<TAB>master" would set sock=master and
+#     leave the session empty — non-obvious, because sock is then non-empty
+# TWO guards in read_all catch the first one (the sink `extra` variable names the column,
+# and the charset test rejects the embedded tab if anyone ever drops the sink), so this
+# asserts the CONTRACT rather than either guard: removing just one still passes.
+printf 'cf-a\tmaster\tJUNK\n\tmaster\ncf-b\tworker\n' > "$T/stack.tsv"
+is "3-column row is dropped, not glued" "cf-b	worker" "$(FS all)"
+is "...and exactly one row survives"    "1"           "$(FS all | wc -l | tr -d ' ')"
+# An empty stack must refuse rather than build a window with nothing in it.
+FS clear; FS open --dry-run >/dev/null 2>&1
+is "open on an empty stack exits 2"     "2"           "$?"
+rm -rf "$T"; unset CLAUDE_FLEET_DIR
+
+# The stack is a THIRD multiplexer level (zellij -> stack tmux -> fleet tmux -> agent)
+# and the OUTER tmux answers a key first. cf.tmux.conf binds `, ^S, ^P, ⇧←/→ and ^F
+# with -n; if the stack's config bound any of them, the fleet would never see them
+# again. Proven by asking a REAL server what it owns, not by grepping the file.
+group "stack config steals only the backtick"
+if command -v tmux >/dev/null 2>&1; then
+  tmux -L cfstktest kill-server 2>/dev/null
+  tmux -L cfstktest -f "$ROOT/tmux/cf-stack.tmux.conf" new-session -d -s t "sleep 30" 2>/dev/null
+  # tmux's own root table always carries ~24 Mouse*/Wheel*/*Click* bindings. They are
+  # built-ins, and inert here because `mouse off` — the KEYBOARD entries are what
+  # decide whether a keystroke stops at the stack or reaches the fleet inside it.
+  root="$(tmux -L cfstktest list-keys -T root 2>/dev/null | grep -vE 'Mouse|Wheel|Click')"
+  is "root table binds exactly 1 key"  "1" "$(printf '%s\n' "$root" | grep -c . || true)"
+  is "...and it is the backtick"       "1" "$(printf '%s\n' "$root" | grep -c -- '-T root `' || true)"
+  for k in C-s C-p C-f S-Left S-Right; do
+    is "no-prefix $k passes through"   "0" "$(printf '%s\n' "$root" | grep -cE "root +$k " || true)"
+  done
+  # C-a must stay the FLEET's prefix, or C-a g/d/s/p and the C-a C-a escape all die.
+  is "prefix is None (C-a reaches the fleet)" "None" "$(tmux -L cfstktest show-options -gv prefix 2>/dev/null)"
+  # An outer tmux that claimed the mouse would eat every event before the fleet.
+  is "mouse stays off"                 "off"  "$(tmux -L cfstktest show-options -gv mouse 2>/dev/null)"
+  tmux -L cfstktest kill-server 2>/dev/null
+else
+  skip "stack config" "tmux not available"
+fi
+
+# `node --check` proves the screen PARSES, not that it runs — a missing `let` is a
+# ReferenceError that only fires on the keystroke that reaches it, and it kills the
+# whole grid pane. So drive the real TUI in a scratch tmux pane and send it keys. The
+# screen prints its choice on stdout, which is what the control plane switches on: a
+# screen that renders beautifully and prints the wrong word does nothing at all.
+group "stack screen (real TUI, keys sent)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/fleet" "$T/repo"
+  tmux -L cfstkui kill-server 2>/dev/null
+  tmux -L cfstkses kill-server 2>/dev/null
+  # one real project with two live sessions, so the screen has rows to toggle
+  printf 'demo\t%s/repo\twork\n' "$T" > "$T/.config/ghostfleet/projects"
+  tmux -L cf-demo kill-server 2>/dev/null
+  tmux -L cf-demo new-session -d -s master "sleep 90" 2>/dev/null
+  tmux -L cf-demo new-session -d -s worker "sleep 90" 2>/dev/null
+  ui() {          # keys… -> whatever the screen printed on stdout
+    tmux -L cfstkui kill-server 2>/dev/null
+    tmux -L cfstkui new-session -d -x 100 -y 30 \
+      -e HOME="$T" -e CLAUDE_FLEET_DIR="$T/fleet" \
+      -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' - --screen stack > '$T/out' 2>'$T/err'" 2>/dev/null
+    sleep 2.5
+    local k
+    for k in "$@"; do tmux -L cfstkui send-keys "$k"; sleep 0.6; done
+    sleep 1
+    cat "$T/out" 2>/dev/null
+    tmux -L cfstkui kill-server 2>/dev/null
+  }
+  # It has to LIST the fleet's sessions, or there is nothing to pick.
+  tmux -L cfstkui kill-server 2>/dev/null
+  tmux -L cfstkui new-session -d -x 100 -y 30 -e HOME="$T" -e CLAUDE_FLEET_DIR="$T/fleet" \
+    -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
+    "node '$ROOT/bin/fleet-grid.mjs' - --screen stack; sleep 8" 2>/dev/null
+  sleep 2.5
+  screen="$(tmux -L cfstkui capture-pane -p 2>/dev/null)"
+  is "lists the project's sessions"  "1" "$(printf '%s\n' "$screen" | grep -c 'worker' || true)"
+  is "no crash on the way in"        "0" "$(printf '%s\n' "$screen" | grep -cE 'ReferenceError|TypeError|is not defined' || true)"
+  tmux -L cfstkui kill-server 2>/dev/null
+  # ⏎ on an EMPTY stack must not hand the control plane an open it can't satisfy —
+  # it stays on the screen, so the following Escape is what ends the run ("back").
+  rm -f "$T/fleet/stack.tsv"
+  is "⏎ with nothing stacked doesn't open" "back" "$(ui Enter Escape)"
+  # space adds the selected session, socket-scoped, and ⏎ then asks for the window
+  rm -f "$T/fleet/stack.tsv"
+  is "space + ⏎ asks to open"       "stackopen" "$(ui Space Enter)"
+  is "...and space wrote one member" "1"        "$(grep -c . "$T/fleet/stack.tsv" 2>/dev/null || true)"
+  is "...scoped to its socket"       "1"        "$(grep -c '^cf-demo	' "$T/fleet/stack.tsv" 2>/dev/null || true)"
+  # Same key, both directions — and from a KNOWN-empty file, or "twice" would just be
+  # toggling the member the previous case left behind and end up back at one.
+  rm -f "$T/fleet/stack.tsv"
+  is "space twice leaves it empty"   "0"        "$(ui Space Space Escape >/dev/null; grep -c . "$T/fleet/stack.tsv" 2>/dev/null || true)"
+  is "esc/q backs out"               "back"     "$(ui q)"
+  # And the way in: `t` on the grid must emit exactly the word grid_loop switches on.
+  tmux -L cfstkses kill-server 2>/dev/null
+  tmux -L cfstkses new-session -d -x 100 -y 30 -e HOME="$T" -e CLAUDE_FLEET_DIR="$T/fleet" \
+    "node '$ROOT/bin/fleet-grid.mjs' cf-demo - > '$T/gout' 2>/dev/null" 2>/dev/null
+  sleep 2.5; tmux -L cfstkses send-keys t; sleep 1.5
+  is "t on the grid asks for the stack" "stack" "$(cat "$T/gout" 2>/dev/null)"
+  tmux -L cfstkses kill-server 2>/dev/null
+  tmux -L cf-demo kill-server 2>/dev/null
+  rm -rf "$T"
+else
+  skip "stack screen" "tmux or node not available"
+fi
+
+# Panes cannot cross tmux servers, so the stack is nested attaches. The contract that
+# matters most: LEAVING must detach those clients and never kill a session. Driven
+# through real servers because "attach in a pane that dies leaves the session running"
+# is exactly the kind of thing that is true until it isn't.
+group "stack window (live tmux)"
+if command -v tmux >/dev/null 2>&1; then
+  T="$(mktemp -d)"
+  for s in cfstka cfstkb cfstkdrv cf-stack; do tmux -L "$s" kill-server 2>/dev/null; done
+  # two members on two DIFFERENT servers — the case join-pane cannot do at all
+  tmux -L cfstka new-session -d -s master "sleep 120" 2>/dev/null
+  tmux -L cfstkb new-session -d -s master "sleep 120" 2>/dev/null
+  CLAUDE_FLEET_DIR="$T" "$ROOT/bin/fleet-stack" add cfstka master
+  CLAUDE_FLEET_DIR="$T" "$ROOT/bin/fleet-stack" add cfstkb master
+  # a driver pane, because `fleet-stack open` attaches and needs a real tty
+  tmux -L cfstkdrv -f /dev/null new-session -d -s drv -x 160 -y 40 \
+    -e CLAUDE_FLEET_DIR="$T" "bash --norc" 2>/dev/null
+  sleep 1
+  tmux -L cfstkdrv send-keys -t drv "'$ROOT/bin/fleet-stack' open" Enter
+  sleep 4
+  is "one pane per member"        "2" "$(tmux -L cf-stack list-panes -t stack 2>/dev/null | grep -c . || true)"
+  # Every project has a `master`; the pane border is the only thing that can say whose.
+  is "panes are labelled by socket" "2" "$(tmux -L cf-stack list-panes -t stack -F '#{pane_title}' 2>/dev/null | grep -cE '^cfstk[ab] · master$' || true)"
+  is "both members have a client" "1 1" "$( { tmux -L cfstka list-sessions -F '#{session_attached}' 2>/dev/null; tmux -L cfstkb list-sessions -F '#{session_attached}' 2>/dev/null; } | tr '\n' ' ' | sed 's/ $//')"
+  # Without this, opening a stack silently crops whatever you view full-screen next.
+  is "window-size largest on member A" "largest" "$(tmux -L cfstka show-options -gv window-size 2>/dev/null)"
+  is "window-size largest on member B" "largest" "$(tmux -L cfstkb show-options -gv window-size 2>/dev/null)"
+  # ` leaves the whole stack (the one key the stack's config binds)
+  tmux -L cfstkdrv send-keys -t drv '`'
+  sleep 3
+  is "leaving tears the stack down"    "0" "$(tmux -L cf-stack list-sessions 2>/dev/null | grep -c . || true)"
+  is "member A SURVIVES, detached"     "master 0" "$(tmux -L cfstka list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null)"
+  is "member B SURVIVES, detached"     "master 0" "$(tmux -L cfstkb list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null)"
+
+  # `fleet-stack open </dev/tty` — the way every other screen in this repo is invoked,
+  # and the way the control plane called it at first. tmux REFUSES a client whose stdin
+  # is the /dev/tty alias (`tty </dev/tty` reports the literal "/dev/tty"), so the whole
+  # window gets built and then the attach fails. The visible symptom was a one-frame
+  # flicker with no error, because the panes really were there. Assert the ATTACH, not
+  # just the panes — panes alone were true while it was broken.
+  tmux -L cf-stack kill-server 2>/dev/null
+  tmux -L cfstkdrv kill-server 2>/dev/null
+  tmux -L cfstkdrv -f /dev/null new-session -d -s drv -x 160 -y 40 \
+    -e CLAUDE_FLEET_DIR="$T" "bash --norc" 2>/dev/null
+  sleep 1
+  tmux -L cfstkdrv send-keys -t drv "'$ROOT/bin/fleet-stack' open </dev/tty" Enter
+  sleep 4
+  is "opens with stdin on /dev/tty too" "stack" "$(tmux -L cf-stack list-clients -F '#{client_session}' 2>/dev/null)"
+  tmux -L cfstkdrv send-keys -t drv '`'; sleep 2
+
+  for s in cfstka cfstkb cfstkdrv cf-stack; do tmux -L "$s" kill-server 2>/dev/null; done
+  rm -rf "$T"
+else
+  skip "stack window" "tmux not available"
+fi
 
 # ── 5. sleep inhibitor guards ────────────────────────────────────────────────
 group "fleet-awake guards"

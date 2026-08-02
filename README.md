@@ -90,7 +90,7 @@ Full Disk Access — also works but can reset on app/OS updates; staging survive
 
 </details>
 
-## The three screens
+## The screens
 
 One terminal window (or one zellij pane) — `ghostfleet` is the whole control plane:
 
@@ -108,6 +108,8 @@ flowchart LR
 - **The grid** — a card per Claude session (status · branch · last message), plus a card for
   every worktree that has **no** live session yet. Every session keeps running in the
   background, so agents work in parallel while you jump between them.
+- **The stack** (`t` from the grid) — several of those sessions on screen *at the same time*, in
+  split panes, including sessions from different projects.
 
 ```bash
 zellij --layout fleet attach -c fleet    # one zellij session runs everything
@@ -149,12 +151,41 @@ detach. `q` does the same on the grid. **Projects** is the root: fully exiting t
 | a **`· FREE`** card (grey) | a worktree with no live session — `⏎` attaches directly, no prompt |
 | `n` | new session on a checkout — lands on a **naming screen** (edit or accept the suggested name), then resumes if that checkout already has a conversation |
 | `N` | same, but the conversation is **forced blank** |
+| `t` | the **stack** — several sessions on screen at once, across projects (below) |
 | `x` | kill the session (asks `y`/`Y` to confirm) |
 | `q` / `` ` `` | back to master |
 | digit `1`-`9` | jump straight to the card at that position |
 
 For an **isolated worker on its own branch** (rather than just another session on an existing
 checkout), use `fleet-spawn` — see [Orchestrate](#orchestrate-a-lead-session-driving-workers) below.
+
+### The stack — watching two workers at once
+
+`t` on the grid opens a screen listing every live session in **every** project. `space` marks the
+ones you want, `⏎` puts them side by side in split panes — one project's worker on the left,
+another's on the right, both live and typable.
+
+```
+── superkey · master ─────────────────┬── ghostfleet · stack-view ───────────
+  ✻ Flowing… (18s · thinking)         │  ⏺ ran the suite: 131 passed
+  ● master ▏3 workers                 │  ● stack-view ▏
+```
+
+Panes cannot cross tmux servers and every project *is* a server, so each pane runs a nested
+`tmux attach` into that project's fleet. Three practical consequences:
+
+- **Leaving detaches, it never kills.** `` ` `` closes the whole stack; every session keeps
+  running exactly where it was.
+- **Your keys still work.** The stack's tmux has no prefix of its own, so `Ctrl-a …`, `Ctrl-s`,
+  `Ctrl-p`, `⇧←/→` and the mouse all reach the fleet inside the pane as usual. The only key it
+  takes is `` ` ``, which the fleet already took.
+- **Panes are narrow, and Claude reflows to fit.** That is fine for reading and typing, but the
+  governor cannot scrape the 5h usage figure out of a pane under ~100 columns — Claude truncates
+  its status line rather than wrapping it. Details, and the busy-detector fix that came out of
+  measuring this, are in **[docs/stack-view.md](docs/stack-view.md)**.
+
+Membership persists in `$CLAUDE_FLEET_DIR/stack.tsv`, so the stack survives leaving the screen.
+`fleet-stack open --dry-run` prints what it would build without touching anything.
 
 ### Inside a session
 

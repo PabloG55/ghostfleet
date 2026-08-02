@@ -1,6 +1,10 @@
 # Stack: several sessions on screen at once
 
-**Status:** design + measured constraints. Branch `feat/stack-view`.
+**Status:** built. Branch `feat/stack-view`. The two open questions below were answered
+against a real narrow pane before any UI was written, and **question 1 came back
+"broken"** — the busy detector could not see a working agent at stack width. That is
+fixed in the detector, not worked around in the stack. See *What the measurements
+said*, below.
 
 A third screen alongside Projects and the grid: pick sessions, see them side by side in
 split panes, work in any of them. The point is watching two workers at once — one
@@ -83,16 +87,94 @@ invisible until you notice Claude is wrapping at 50 columns.
    `attach` in a pane that dies leaves the session running — verify, don't assume.
 4. **The status bar** renders per session; three nested bars stacked up will be noisy.
 
-## Open questions
+## What the measurements said
 
-1. Does `fleet-agent busy` still read a stacked session's pane correctly? Detection
-   captures `-t <session>`, which is server-side and shouldn't care about clients — but
-   the pane is now narrower, and every busy regex was measured at full width. **Check
-   the detectors against a narrow pane before trusting a stacked card's status.**
-2. Does the governor's usage scrape survive the reflow? Same question: it greps a status
-   line that may wrap at 50 columns.
-3. What happens when a stacked session is killed, paused by the governor, or renamed
-   underneath the stack?
+Method: a real Claude session on its own fleet server, nested into a pane on a second
+server, the nesting pane resized through 30–240 columns while the session was given real
+work. `fleet-agent busy` and the governor's `pct_of` were then read at each width, in
+both directions (working and idle).
 
-Answer 1 and 2 before the UI work. A stack that quietly breaks status detection would
-undo the thing the fleet is for.
+### 1. `fleet-agent busy` was BROKEN at stack width — and is now fixed
+
+Not a small miss. At 56 columns, with the agent thinking the whole time, `fleet-agent
+busy` reported **idle for 120 consecutive samples over a full minute**.
+
+The cause is not the capture — `capture-pane` is server-side and works fine. It is that
+**Claude composes its spinner line to the pane width, and the elapsed-time counter is
+the first field it drops.** Same session, same turn, different widths:
+
+```
+240  ✶ Forming… (31s · thinking more with xhigh effort)     busy 3/3
+ 70  · Forming… (21s · still thinking with xhigh effort)    busy 3/3
+ 62  ✳ Forming… (almost done thinking with xhigh effort)    busy 0/3   <- no timer
+ 56  ✳ Flowing… (almost done thinking with xhigh effort)    busy 0/3   <- no timer
+ 50  ✶ Forming… (still thinking with xhigh effort)          busy 0/3   <- no timer
+ 46  ✳ Forming… (thinking with xhigh effort)                busy 0/3   <- no timer
+ 30  ✽ Gusting… (thinking)                                  busy 0/3   <- no timer
+```
+
+Every alternative the old regex had was width-dependent: `esc to interrupt` and
+`↓ N tokens` are dropped even earlier than the timer, and the timer was the only thing
+`(…|\.\.\.) ?\([0-9]+[ms]` could anchor on. And there is no fixed threshold to code
+around — the phase text *grows* through a turn (`thinking` → `still thinking` →
+`almost done thinking`), so a stack pane that reads correctly early in a turn stops
+reading correctly later in the same turn, at the same width.
+
+What survives every width is the **shape**: gerund, ellipsis, open paren. A finished
+turn is `✻ Cooked for 6s` — no ellipsis — so the two never collide. The regex now
+anchors on that; both spellings (`busy_re`, `busy_re_js`) and the grid's inlined copy
+were changed together, and `test/run.sh` asserts it against verbatim 56-column captures
+in both directions. Two side notes worth keeping:
+
+- **Don't anchor on the spinner glyph.** It renders as a plain `·` often enough to
+  matter (`· Forming… (21s …)` above).
+- **Plain-text streaming shows no busy indicator at any width** — verified identically at
+  50 and 220 columns, so this is pre-existing and *not* a stack regression. During a
+  long prose answer the pane carries only the text. The grid still reads such a session
+  correctly because it also has the hook and transcript signals; a bare `fleet-agent
+  busy` does not.
+
+### 2. The governor's usage scrape does NOT survive a narrow pane
+
+Claude **truncates** its status line to the pane width — it does not wrap — so the 5h
+field is not pushed onto a second line, it is gone:
+
+```
+130  … | Opus 5 (1M context) | ctx:5% | 18%(4h 4m) | 7d:33%(115h 24m)   -> 18
+100  … | Opus 5 (1M context) | ctx:5% | 17%(4h 12…                      -> 17
+ 90  … | Opus 5 (1M context) | ctx:5% |…                                -> none
+ 56    pablo@example.com | Example Account | w1 |   HEA…                 -> none
+```
+
+There is no fix that keeps the stack useful. Pinning member windows wide
+(`window-size manual`) would restore the figure and reduce each stack pane to a sliver
+of a cropped session, which is worse than the problem. So this is a **stated
+limitation**, with three things done about it:
+
+- `window-size largest` means the figure comes *back* the moment any wider client
+  attaches — verified: the same session read `none` with only a 160-column stack pane,
+  and `18` with a 200-column client also attached.
+- `budget()` takes the max across all of a fleet's sessions, so one unstacked session
+  (usually `master`) keeps the ceiling enforced for the whole project.
+- when there is genuinely no reading, the governor now **says which panes were too
+  narrow and how wide they were**, instead of logging a bare "no budget reading" that is
+  indistinguishable from an account at 0%.
+
+Worth knowing: a member window **stays narrow after you leave the stack** (tmux keeps
+the last client's size), until something wider attaches. So the blind spot outlives the
+screen.
+
+### 3. Leaving never kills a session — verified, not assumed
+
+Killing the outer stack window SIGHUPs each pane's `tmux attach`, which detaches that
+nested client. Measured on two members on two different servers: after leaving, both
+sessions are alive at `clients=0`, and the stack server is gone. `test/run.sh` asserts
+it, and the assertion goes red if the teardown is changed to kill.
+
+## Still open
+
+- What happens when a stacked session is **killed, paused by the governor, or renamed**
+  underneath the stack. Today the pane simply dies (`remain-on-exit off`) and the layout
+  reflows; membership keeps the stale row until you toggle it off, and `fleet-stack
+  members` prunes dead rows on the next open.
+- Vertical / grid layouts. `even-horizontal` only, on purpose.

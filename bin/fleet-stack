@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+# fleet-stack — several fleet sessions on screen at once, in split panes, including
+# sessions from DIFFERENT projects.
+#
+#   fleet-stack members            the stack, "sock<TAB>session" per line (live only)
+#   fleet-stack all                the same, without pruning dead members
+#   fleet-stack add    <sock> <session>
+#   fleet-stack remove <sock> <session>
+#   fleet-stack toggle <sock> <session>     prints "added" or "removed"
+#   fleet-stack clear
+#   fleet-stack open [--dry-run]   build the stack window and attach to it
+#   fleet-stack close              tear the window down (detaches; never kills a session)
+#
+# WHY A NESTED ATTACH, AND NOT join-pane
+# Every project is its own tmux server (cf-<project>) and PANES CANNOT CROSS SERVERS —
+# `join-pane -s` on a session that lives on another socket fails with "can't find
+# pane". So the one thing that puts two projects' sessions side by side is a pane that
+# runs `tmux -L <their-sock> attach -t <session>`. join-pane is wrong even within one
+# project: it MOVES the pane out of its session, and a fleet session is one window of
+# one pane, so moving it empties the session and tmux destroys it. Nesting leaves every
+# session exactly where it was. See docs/stack-view.md for the measurements.
+#
+# WHY window-size largest
+# A nested client RESIZES its target — tmux sizes a window to fit its clients, so
+# attaching a session into a 50-column stack pane shrinks the session to 50 columns.
+# Under the default (window-size latest) the LAST client to attach decides, so a
+# full-screen view opened afterwards is cropped to the stack pane's size and Claude
+# wraps at 50 columns with nothing on screen to explain why. `largest` makes the
+# biggest attached client win instead. It is set on every server the stack attaches
+# into, LIVE, because a running fleet server keeps the options it was born with.
+#
+# WHAT LEAVING DOES
+# Tearing the stack down kills the OUTER window, which SIGHUPs the `tmux attach` in
+# each pane. That detaches the nested client and leaves the member session running —
+# verified in test/run.sh, in both directions (the session survives, and its client
+# count drops back to 0).
+set -uo pipefail
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+TSV="$FLEET_DIR/stack.tsv"
+STACK_SOCK="${CLAUDE_FLEET_STACK_SOCK:-cf-stack}"
+STACK_SESS=stack
+
+# Our own repo's stack config, resolved through the ~/.local/bin symlink like
+# bin/ghostfleet does. It is deliberately NOT tmux/cf.tmux.conf — see that file.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  target="$(readlink "$src")"
+  case "$target" in /*) src="$target" ;; *) src="$(dirname "$src")/$target" ;; esac
+done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+CONF="$(cd "$BIN_DIR/.." && pwd)/tmux/cf-stack.tmux.conf"
+
+# A pane narrower than this is not a view of a session, it's a column of hyphens.
+# Claude's own layout gives up well before here; 30 is the narrowest width at which
+# its spinner and prompt were still legible when measured.
+MIN_COLS=30
+
+# ── membership ───────────────────────────────────────────────────────────────
+# stack.tsv is "sock<TAB>session": two MANDATORY fields, which is the only reason a
+# TAB is safe here at all. `IFS=$'\t'` COLLAPSES empty fields (tab is IFS whitespace),
+# so a line missing its first column ("<TAB>master") would put "master" in $sock and
+# leave $sess empty — hence the emptiness test on BOTH fields, not just one.
+# `extra` is a sink, not decoration: with fewer variables than fields, read glues the
+# leftover onto the LAST variable, so a stray third column would land INSIDE $sess and
+# look like a session name. Name every column the format has, then reject the rest.
+# The charset test is not cosmetic: both fields are interpolated into the shell command
+# a pane runs (`tmux -L '<sock>' attach -t '<sess>'`), so anything that could close a
+# quote has to be refused here rather than quoted around later.
+valid_line() {                      # $1=sock $2=sess $3=extra -> 0 if usable
+  [ -n "$1" ] && [ -n "$2" ] && [ -z "$3" ] || return 1
+  case "$1$2" in *[!A-Za-z0-9._~-]*) return 1 ;; esac
+  return 0
+}
+read_all() {                        # every well-formed row, in file order, deduped
+  local sock sess extra seen=""
+  [ -f "$TSV" ] || return 0
+  while IFS=$'\t' read -r sock sess extra || [ -n "${sock:-}" ]; do
+    case "$sock" in ''|'#'*) continue ;; esac
+    valid_line "$sock" "$sess" "${extra:-}" || continue
+    case "$seen" in *"|$sock/$sess|"*) continue ;; esac
+    seen="$seen|$sock/$sess|"
+    printf '%s\t%s\n' "$sock" "$sess"
+  done < "$TSV"
+}
+is_live() { tmux -L "$1" has-session -t "=$2" 2>/dev/null; }
+read_live() {                       # ...restricted to sessions that still exist
+  local sock sess
+  while IFS=$'\t' read -r sock sess; do
+    [ -n "$sock" ] || continue
+    is_live "$sock" "$sess" && printf '%s\t%s\n' "$sock" "$sess"
+  done < <(read_all)
+}
+write_all() {                       # $1 = the full new body (may be empty)
+  mkdir -p "$FLEET_DIR" 2>/dev/null
+  # Write through a temp file in the SAME directory: the grid screen re-reads this on
+  # every redraw (1.2s), and a half-written file would parse as a shorter stack.
+  local tmp="$TSV.$$"
+  printf '%s' "$1" > "$tmp" 2>/dev/null || return 1
+  mv -f "$tmp" "$TSV" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+}
+add_member() {
+  local sock="$1" sess="$2" body=""
+  valid_line "$sock" "$sess" "" || { echo "fleet-stack: bad member '$sock/$sess'" >&2; return 1; }
+  in_stack "$sock" "$sess" && return 0
+  body="$(read_all)"
+  write_all "${body:+$body$'\n'}${sock}"$'\t'"${sess}"$'\n'
+}
+remove_member() {
+  local sock="$1" sess="$2" body=""
+  body="$(read_all | grep -vxF "$sock	$sess" || true)"
+  write_all "${body:+$body$'\n'}"
+}
+in_stack() { read_all | grep -qxF "$1	$2"; }
+
+# ── the window ───────────────────────────────────────────────────────────────
+# The label a pane border carries. Every project has a session called `master`, and a
+# nested session's own status bar says only "● master" — so in a cross-project stack
+# the border is the ONLY thing that says which project a pane belongs to.
+label_of() { printf '%s · %s' "${1#cf-}" "$2"; }
+
+# Cols/rows of the terminal we'll attach into. A brand-new detached session is 80x24,
+# and splitting THAT four ways fails with "no space for new pane" long before the panes
+# are genuinely too narrow to use — so the window has to be born the right size.
+# The brace group swallows bash's own "/dev/tty: Device not configured" when there is
+# no controlling terminal (a script, a test); redirecting only stty's stderr does not.
+tty_size() {
+  local sz=""
+  sz="$( { stty size < /dev/tty; } 2>/dev/null )"
+  case "$sz" in
+    *[0-9]*' '*[0-9]*) printf '%s %s' "${sz#* }" "${sz%% *}" ;;   # stty prints rows cols
+    *) printf '200 50' ;;
+  esac
+}
+
+# tmux REFUSES a client whose stdin is the /dev/tty *alias*, and the failure is a nasty
+# one because everything up to the attach works:
+#
+#   $ tty </dev/tty                     -> /dev/tty          (not the device path)
+#   $ tmux -L x attach -t s </dev/tty   -> open terminal failed: can't use /dev/tty
+#
+# So a caller that hands us the terminal the obvious way — `fleet-stack open </dev/tty`,
+# which is how every OTHER screen in this repo is invoked — builds the whole stack window
+# and then cannot attach to it. On screen that is a flicker and nothing else: the panes
+# existed (60x33 and 59x33, verified), the member sessions were resized, and the control
+# plane looped straight back to the picker with no error anywhere. Found by driving the
+# real control plane, not by reading. Re-point stdin at the actual device so this works
+# whoever calls it and however they opened the terminal.
+fix_stdin_tty() {
+  [ "$(tty 2>/dev/null)" = /dev/tty ] || return 0
+  local d=""
+  d="$(ps -o tty= -p $$ 2>/dev/null | tr -d '[:space:]')"        # ttys018 / pts/3
+  [ -n "$d" ] && [ "$d" != "?" ] && [ -c "/dev/$d" ] || return 0
+  exec < "/dev/$d"
+}
+
+close_stack() {
+  # Killing the outer session SIGHUPs each pane's `tmux attach`, which DETACHES that
+  # nested client. The member session keeps running — that is the whole contract of
+  # this screen, and test/run.sh asserts it rather than assuming it.
+  tmux -L "$STACK_SOCK" kill-session -t "=$STACK_SESS" 2>/dev/null || true
+  # Don't leave an empty tmux server behind for a screen you've left.
+  tmux -L "$STACK_SOCK" list-sessions >/dev/null 2>&1 || \
+    tmux -L "$STACK_SOCK" kill-server 2>/dev/null || true
+}
+
+open_stack() {
+  local dry="${1:-0}" sock sess n=0 w h per fits members dropped=""
+  [ "$dry" = 1 ] || fix_stdin_tty         # see the note on fix_stdin_tty
+  members="$(read_live)"
+  [ -n "$members" ] || { echo "fleet-stack: the stack is empty — add sessions on the stack screen (space)" >&2; return 2; }
+  n="$(printf '%s\n' "$members" | grep -c .)"
+
+  read -r w h < <(tty_size)
+  # even-horizontal gives each pane (w - (n-1)) / n columns; the -1s are the borders.
+  fits=$(( (w + 1) / (MIN_COLS + 1) ))
+  [ "$fits" -lt 1 ] && fits=1
+  if [ "$n" -gt "$fits" ]; then
+    # NEVER silently truncate: a stack that quietly showed 3 of your 5 sessions would
+    # read as "those two aren't running".
+    dropped="$(printf '%s\n' "$members" | tail -n +$((fits + 1)) | while IFS=$'\t' read -r sock sess; do printf '%s, ' "$(label_of "$sock" "$sess")"; done)"
+    echo "fleet-stack: ${w} columns fits ${fits} pane(s) of ${MIN_COLS}+; showing the first ${fits}, leaving out: ${dropped%, }" >&2
+    members="$(printf '%s\n' "$members" | head -n "$fits")"
+    n="$fits"
+  fi
+  per=$(( (w - n + 1) / n ))
+
+  if [ "$dry" = 1 ]; then
+    printf 'stack socket: %s (conf %s)\n' "$STACK_SOCK" "$CONF"
+    printf 'terminal: %sx%s -> %s pane(s) of ~%s columns\n' "$w" "$h" "$n" "$per"
+    while IFS=$'\t' read -r sock sess; do
+      printf '  %-28s  tmux -L %s attach -t %s\n' "$(label_of "$sock" "$sess")" "$sock" "$sess"
+    done <<EOF
+$members
+EOF
+    return 0
+  fi
+
+  # See the header: without this, opening a stack silently crops every full-screen
+  # view of a stacked session afterwards. Set per member server, live.
+  while IFS=$'\t' read -r sock sess; do
+    tmux -L "$sock" set-option -g window-size largest 2>/dev/null || true
+  done <<EOF
+$members
+EOF
+
+  close_stack                        # a stale stack from a crashed run
+  local first=1 idx=0
+  while IFS=$'\t' read -r sock sess; do
+    idx=$((idx + 1))
+    if [ "$first" = 1 ]; then
+      first=0
+      # -x/-y from the real terminal: with no client attached yet a new session is
+      # 80x24, and splitting that four ways fails with "no space for new pane" long
+      # before the panes are actually too narrow to use.
+      tmux -L "$STACK_SOCK" -f "$CONF" new-session -d -s "$STACK_SESS" -x "$w" -y "$h" \
+        "exec tmux -L '$sock' attach -t '$sess'" 2>/dev/null || {
+          echo "fleet-stack: could not create the stack window on $STACK_SOCK" >&2; return 1; }
+    else
+      tmux -L "$STACK_SOCK" split-window -h -t "$STACK_SESS" \
+        "exec tmux -L '$sock' attach -t '$sess'" 2>/dev/null || {
+          echo "fleet-stack: no room for $(label_of "$sock" "$sess")" >&2; continue; }
+    fi
+    tmux -L "$STACK_SOCK" select-pane -t "$STACK_SESS.$((idx - 1))" -T "$(label_of "$sock" "$sess")" 2>/dev/null || true
+    tmux -L "$STACK_SOCK" select-layout -t "$STACK_SESS" even-horizontal 2>/dev/null || true
+  done <<EOF
+$members
+EOF
+
+  tmux -L "$STACK_SOCK" select-pane -t "$STACK_SESS.0" 2>/dev/null || true
+  # tmux's own stderr is NOT swallowed here on purpose. Every pane is already built at
+  # this point, so a silent attach failure looks exactly like a stack that opened and
+  # closed instantly — which is how the /dev/tty problem above stayed invisible.
+  if ! tmux -L "$STACK_SOCK" -f "$CONF" attach -t "$STACK_SESS"; then
+    echo "fleet-stack: built the stack window but could not attach to $STACK_SOCK" >&2
+    close_stack
+    return 1
+  fi
+  close_stack
+}
+
+cmd="${1:-}"; shift 2>/dev/null || true
+case "$cmd" in
+  members)  read_live ;;
+  all)      read_all ;;
+  add)      add_member "${1:?fleet-stack: usage: fleet-stack add <sock> <session>}" \
+                       "${2:?fleet-stack: usage: fleet-stack add <sock> <session>}" ;;
+  remove)   remove_member "${1:?fleet-stack: usage: fleet-stack remove <sock> <session>}" \
+                          "${2:?fleet-stack: usage: fleet-stack remove <sock> <session>}" ;;
+  toggle)
+    s="${1:?fleet-stack: usage: fleet-stack toggle <sock> <session>}"
+    n="${2:?fleet-stack: usage: fleet-stack toggle <sock> <session>}"
+    if in_stack "$s" "$n"; then remove_member "$s" "$n" && echo removed
+    else add_member "$s" "$n" && echo added; fi ;;
+  clear)    write_all "" ;;
+  open)     case "${1:-}" in --dry-run) open_stack 1 ;; *) open_stack 0 ;; esac; exit $? ;;
+  close)    close_stack ;;
+  ""|-h|--help|help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) echo "fleet-stack: unknown command '$cmd' (try: fleet-stack --help)" >&2; exit 1 ;;
+esac
