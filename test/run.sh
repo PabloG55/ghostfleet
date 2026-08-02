@@ -82,9 +82,14 @@ is "claude: silent on a 130-col IDLE pane"            "0" "$(matches "$cre" "$FI
 # grep ERE and JS are different dialects and the two spellings are maintained
 # separately, so run the JS one over the same fixtures rather than trusting they agree.
 jsre="$("$ROOT/bin/fleet-agent" field claude busy_re_js)"
+# String(), not a bare number. console.log() runs a NON-string argument through
+# util.inspect, which colourises when colour is on — and every fleet session has
+# FORCE_COLOR=3 in its environment, so this returned "\033[33m1\033[39m" and the
+# comparison failed. It passed wherever colour happened to be off: the same
+# "a test can pass because of where it ran" trap CLAUDE.md already warns about.
 jsm() { node -e '
   const fs=require("fs"), re=new RegExp(process.argv[1],"i");
-  console.log(fs.readFileSync(process.argv[2],"utf8").split("\n").filter(l=>re.test(l)).length ? 1 : 0);
+  console.log(String(fs.readFileSync(process.argv[2],"utf8").split("\n").filter(l=>re.test(l)).length ? 1 : 0));
 ' "$1" "$2"; }
 is "claude(js): matches the 56-col BUSY pane" "1" "$(jsm "$jsre" "$FIX/claude-busy-narrow.txt")"
 is "claude(js): silent on the 56-col IDLE pane" "0" "$(jsm "$jsre" "$FIX/claude-idle-narrow.txt")"
