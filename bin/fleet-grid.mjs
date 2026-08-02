@@ -1154,20 +1154,20 @@ const SHIP = [
 // Costs eight rows, a real bite out of a short window — and the cards are the
 // point of this screen, not the logo. Below either threshold, fall back to the plain
 // one-line header rather than pushing projects off the bottom.
-function banner(right) {
-  // Eight rows is a real bite out of a short window, and the CARDS are the point of
-  // both screens. Below either threshold, fall back to the caller's one-liner.
+function banner(beside) {
+  // Costs eight rows, a real bite out of a short window — and the cards are the point
+  // of both screens. Below either threshold, fall back to the caller's one-liner.
   const shipW = Math.max(...SHIP.map(l => l.length));
   if (W() < shipW + 44 || H() < 26) return null;
-  // Ship on the RIGHT, hard against the edge; the text reads from the left margin
-  // like every other line on the screen, so the eye isn't asked to start mid-row.
-  const col = Math.max(1, W() - shipW - 2);
-  const pad = Math.max(0, Math.floor((SHIP.length - right.length) / 2));
-  const beside = [...Array(pad).fill(''), ...right];
+  // Ship first, text immediately to its right. Pinning the ship to the far edge was
+  // tried and reads as marooned on a wide terminal: the cards start at the left
+  // margin, so a header that starts there too is the only one that looks attached
+  // to them.
+  const pad = Math.max(0, Math.floor((SHIP.length - beside.length) / 2));
+  const text = [...Array(pad).fill(''), ...beside];
   let out = '';
   for (let i = 0; i < SHIP.length; i++) {
-    const text = beside[i] || '';
-    out += ` ${text}\x1b[${col}G${C.white}${SHIP[i]}${C.reset}\x1b[K\n`;
+    out += ` ${C.white}${SHIP[i]}${C.reset}   ${text[i] || ''}\x1b[K\n`;
   }
   return out;
 }
