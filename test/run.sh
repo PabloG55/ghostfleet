@@ -145,6 +145,24 @@ else
   skip "governor tick" "tmux not available"
 fi
 
+# An agent that WRITES ABOUT a spinner puts byte-identical text on screen while idle
+# — a report, a doc, a pasted capture. Nothing in the text separates them, so the
+# pattern is anchored to the line start: a live spinner OWNS its line, prose about
+# one always has something in front. A worker sat on the grid as "working" for 17
+# minutes after finishing, purely from its own report text, before this.
+group "busy: prose about a spinner is not a spinner"
+q="$FIX/claude-idle-quoting-spinner.txt"
+re="$("$ROOT/bin/fleet-agent" field claude busy_re)"
+jre="$("$ROOT/bin/fleet-agent" field claude busy_re_js)"
+is "idle pane quoting spinners: silent"      "0" "$(matches "$re" "$q")"
+is "...and silent for the JS spelling too"   "0" "$(jsm "$jre" "$q")"
+# The same file must still contain text an UNANCHORED pattern would have matched,
+# or this test would pass against a regex that simply stopped working.
+is "the fixture really is a trap"            "1" "$([ "$(grep -cE '[A-Za-z](…|\.\.\.) ?\(' "$q" || true)" -gt 0 ] && echo 1 || echo 0)"
+# Dropping the ↓-tokens / esc-to-interrupt alternatives must not un-detect anything.
+is "wide busy still fires without them"      "1" "$(matches "$re" "$FIX/claude-busy.txt")"
+is "narrow busy still fires without them"    "1" "$(matches "$re" "$FIX/claude-busy-narrow.txt")"
+
 group "ready detectors (ready_re)"
 cre="$("$ROOT/bin/fleet-agent" field codex ready_re)"
 # "· /" passed its original test only because that worktree sat in /private/tmp.
