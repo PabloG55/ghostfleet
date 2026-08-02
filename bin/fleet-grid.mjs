@@ -135,10 +135,16 @@ function lastAssistant(p) {
 // transcript lag that made mtime-based guessing wrong in both directions (a long
 // generation looks idle to mtime; a background-task write looks busy). A missing
 // pane / capture error simply reads as not-busy.
-// Claude's live spinner is always "<gerund>… (<elapsed> · ↓ <n> tokens)". Anchor the
-// elapsed timer to the ellipsis so a bare "(30s)" / "(4h 11m)" in content or the status
-// bar never counts; also accept the "↓ N tokens" counter and an explicit interrupt hint.
-const BUSY_RE = /(?:…|\.\.\.)\s*\(\d+[ms]|↓\s*[\d.,]+\s*[km]?\s*tokens|esc to interrupt/i;
+// Claude's live spinner is "<gerund>… (<elapsed> · ↓ <n> tokens · esc to interrupt)",
+// but it is COMPOSED TO FIT the pane and the elapsed counter is the first field dropped.
+// In a narrow pane — the stack screen makes ~50-column panes routine — all three of
+// those fields are gone and only "Flowing… (almost done thinking…)" is left, which is
+// why the shape (letter, ellipsis, open paren) is what's matched rather than the timer.
+// A finished turn reads "✻ Cooked for 6s": no ellipsis, so it can't collide. The letter
+// before the ellipsis rules out a TRUNCATED line ("| w1 | …", "/…/path"), which is
+// everywhere at narrow width — belt and braces, not a tested behaviour; see the note in
+// bin/fleet-agent, which is where all of this was measured.
+const BUSY_RE = /[A-Za-z](?:…|\.\.\.)\s*\(|↓\s*[\d.,]+\s*[km]?\s*tokens|esc to interrupt/i;
 
 // ── which agent is a session running? ────────────────────────────────────────
 // A session records its agent in <sock>.<name>.agent (bin/fleet-agent writes it),
@@ -690,7 +696,7 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎/1-9 enter · n new · s sched · p pause · P resume · x kill · , settings · ^F jump · ^P/Q projects · q/\` back${C.reset}\x1b[K\n`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⏎/1-9 enter · n new · t stack · s sched · p pause · P resume · x kill · , settings · ^F jump · ^P/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -972,6 +978,10 @@ function onKey(key) {
     else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
     else if (key === 'p') { const it = items[sel]; if (it?.card) pauseSession(it.card.name); }
     else if (key === 'P') { const it = items[sel]; if (it?.card) resumeSession(it.card.name); }
+    // t = the sTack screen. s/S are schedule and n/N are new, so this is the free key
+    // nearest the rest of the grid's verbs. It leaves this project's grid entirely —
+    // the stack lists every project's sessions, which is the point of it.
+    else if (key === 't' || key === 'T') return finish('stack');
     else if (key >= '1' && key <= '9') {              // insta-jump: digit -> that card
       const it = items[Number(key) - 1];
       if (it?.card) { sel = Number(key) - 1; return finish(`attach${US}${it.card.name}`); }
@@ -1190,15 +1200,18 @@ function profileDir(p) { return (!p || p === 'work' || p === 'default') ? path.j
 // tmux socket for a project — work stays bare cf-<name>; other profiles are
 // namespaced so same-named projects don't collide (matches bin/ghostfleet).
 function sockOf(proj) { const p = proj.profile; return (!p || p === 'work' || p === 'default') ? 'cf-' + proj.name : 'cf-' + p + '-' + proj.name; }
-// live sessions for a project (incl master, the lead you land on with ⏎) +
-// how many need you / are working
-function projectStatus(proj) {
+// Per-session status for a project — the ONE implementation shared by the Projects
+// screen (which aggregates it into a count per card) and the stack screen (which lists
+// the sessions themselves). Two copies of this would drift, and the two screens
+// disagreeing about whether a worker is busy is precisely the bug class this repo keeps
+// paying for. Includes master: it's the project's lead session, and stackable.
+function sessionStatuses(proj) {
   const sock = sockOf(proj);
   let names = [];
   try {
     const o = execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     names = o.split('\n').filter(Boolean);
-  } catch { return { need: 0, working: 0, total: 0 }; }
+  } catch { return []; }
   const dir = path.join(profileDir(proj.profile), 'fleet');
   const bySlot = new Map();
   try {
@@ -1211,18 +1224,26 @@ function projectStatus(proj) {
       } catch {}
     }
   } catch {}
-  let need = 0, working = 0, parked = 0, total = 0;
-  for (const name of names) {
-    total++;                            // master included — it's the project's lead session (⏎ lands there)
+  return names.map(name => {
     const o = bySlot.get(name);
     const busy = paneBusy(sock, name);
-    if (!busy && fs.existsSync(path.join(dir, sock + '.' + name + '.parked'))) { parked++; continue; }  // intentionally off (namespaced)
+    // intentionally off (marker is namespaced by socket — every project has a `master`)
+    if (!busy && fs.existsSync(path.join(dir, sock + '.' + name + '.parked'))) return { sock, name, status: 'parked' };
     const tmt = o && o.transcript ? mtimeSec(o.transcript) : 0;
-    const s = deriveStatus(o ? o.status : '', o ? o.transcript : '', busy, o ? (o.ts || 0) : 0, tmt);
-    if (s === 'need-you') need++;
-    else if (s === 'working') working++;
+    return { sock, name, status: deriveStatus(o ? o.status : '', o ? o.transcript : '', busy, o ? (o.ts || 0) : 0, tmt) };
+  });
+}
+// live sessions for a project (incl master, the lead you land on with ⏎) +
+// how many need you / are working
+function projectStatus(proj) {
+  const ss = sessionStatuses(proj);
+  let need = 0, working = 0, parked = 0;
+  for (const s of ss) {
+    if (s.status === 'parked') parked++;
+    else if (s.status === 'need-you') need++;
+    else if (s.status === 'working') working++;
   }
-  return { need, working, parked, total };
+  return { need, working, parked, total: ss.length };
 }
 
 // projects picker
@@ -1554,6 +1575,97 @@ function onKeyAdd(key) {
   dRender();
 }
 
+// ── the stack screen ────────────────────────────────────────────────────────
+// Pick sessions from ANY project in this profile and see them side by side. Every
+// session in the fleet is listed, whichever project owns it, because watching one
+// project's worker next to another's is the whole point of the screen.
+//
+// Membership lives in $CLAUDE_FLEET_DIR/stack.tsv and is owned by bin/fleet-stack —
+// this screen shells out to it rather than parsing the file itself, so there is one
+// parser for a format whose fields are socket-scoped on purpose (every project has a
+// session called `master`, so a bare name would stack the wrong one).
+const STACK_BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-stack');
+const STACK_MIN_COLS = 30;   // must match MIN_COLS in bin/fleet-stack
+function stackRun(args) {
+  try {
+    return execFileSync(STACK_BIN, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch { return ''; }
+}
+function stackMembers() {              // Set of "sock\tsession", live members only
+  return new Set(stackRun(['members']).split('\n').filter(Boolean));
+}
+let sItems = [], sSel = 0, sMembers = new Set(), sMsg = '';
+function sBuild() {
+  sMembers = stackMembers();
+  sItems = [];
+  for (const p of readProjects()) {
+    const ss = sessionStatuses(p);
+    if (!ss.length) continue;
+    sItems.push({ header: p.name, profile: p.profile });
+    for (const s of ss) sItems.push({ proj: p.name, sock: s.sock, name: s.name, status: s.status });
+  }
+  // Land on a session, never on a project header — space/⏎ would have nothing to act on.
+  if (sSel >= sItems.length) sSel = sItems.length - 1;
+  if (sSel < 0) sSel = 0;
+  if (sItems[sSel]?.header) sMoveStack(1) || sMoveStack(-1);
+}
+function sMoveStack(d) {               // step to the next selectable row; false if none
+  for (let i = sSel + d; i >= 0 && i < sItems.length; i += d) {
+    if (!sItems[i].header) { sSel = i; return true; }
+  }
+  return false;
+}
+function sRender() {
+  const memberRows = sItems.filter(it => !it.header && sMembers.has(`${it.sock}\t${it.name}`));
+  const n = memberRows.length;
+  // The same arithmetic bin/fleet-stack applies before it builds anything, shown here
+  // so the limit is visible BEFORE you press ⏎ rather than as a message after.
+  const fits = Math.max(1, Math.floor((W() + 1) / (STACK_MIN_COLS + 1)));
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}stack${C.reset} ${C.dim}— several sessions on screen at once, across projects${C.reset}\x1b[K\n`;
+  buf += n === 0
+    ? ` ${C.dim}nothing stacked yet — ${C.reset}space${C.dim} adds the selected session${C.reset}\x1b[K\n`
+    : ` ${C.green}${n} stacked${C.reset}${C.dim} · ~${Math.floor((W() - n + 1) / n)} columns each${C.reset}` +
+      (n > fits ? `  ${C.red}${C.bold}this window fits ${fits} — the rest will be left out${C.reset}` : '') + '\x1b[K\n';
+  buf += sMsg ? ` ${C.yellow}${sMsg}${C.reset}\x1b[K\n` : '\x1b[K\n';
+  const STC = { working: C.cyan, 'need-you': C.red, parked: C.grey, ready: C.green, idle: C.grey, unknown: C.grey };
+  const maxShow = Math.max(6, H() - 7);
+  let start = Math.max(0, sSel - Math.floor(maxShow / 2));
+  const end = Math.min(sItems.length, start + maxShow);
+  start = Math.max(0, end - maxShow);
+  if (!sItems.length) buf += ` ${C.dim}(no live sessions in any project)${C.reset}\x1b[K\n`;
+  for (let i = start; i < end; i++) {
+    const it = sItems[i];
+    if (it.header) {
+      buf += `\x1b[K\n ${C.bold}${C.white}${it.header}${C.reset}${it.profile && it.profile !== 'work' ? ` ${C.yellow}${it.profile}${C.reset}` : ''}\x1b[K\n`;
+      continue;
+    }
+    const inStack = sMembers.has(`${it.sock}\t${it.name}`);
+    const sel = i === sSel;
+    const box = inStack ? `${C.green}${C.bold}[✓]${C.reset}` : `${C.dim}[ ]${C.reset}`;
+    const col = STC[it.status] || C.grey;
+    const nm = (sel ? C.bold + C.white : C.reset) + padEndV(it.name, 24) + C.reset;
+    buf += `${sel ? `${C.bold}${C.white}▸ ` : '  '}${box} ${nm} ${col}${padEndV(it.status, 10)}${C.reset}\x1b[K\n`;
+  }
+  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space add/remove · ⏎ open the stack · c clear · esc/q/\` back${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+function onKeyStack(key) {
+  if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') return finish('back');
+  sMsg = '';
+  if (key === '\x1b[A' || key === 'k') sMoveStack(-1);
+  else if (key === '\x1b[B' || key === 'j') sMoveStack(1);
+  else if (key === ' ') {
+    const it = sItems[sSel];
+    if (it && !it.header) { stackRun(['toggle', it.sock, it.name]); sMembers = stackMembers(); }
+  } else if (key === 'c' || key === 'C') { stackRun(['clear']); sMembers = stackMembers(); }
+  else if (key === '\r' || key === '\n') {
+    if (sMembers.size === 0) sMsg = 'the stack is empty — press space on a session first';
+    else return finish('stackopen');
+  }
+  sRender();
+}
+
 // ── dispatch ────────────────────────────────────────────────────────────────
 out('\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h'); // alt-screen + hide cursor + SGR mouse tracking
 process.stdin.setRawMode?.(true);
@@ -1567,6 +1679,9 @@ if (SCREEN === 'projects') {
   timer = setInterval(() => { pBuild(); pRender(); }, 2500);
 } else if (SCREEN === 'addproject') {
   dBuild(); dRender(); process.stdin.on('data', onKeyAdd);
+} else if (SCREEN === 'stack') {
+  sBuild(); sRender(); process.stdin.on('data', onKeyStack);
+  timer = setInterval(() => { sBuild(); sRender(); }, 2500);
 } else {
   process.stdin.on('data', onKey);
   buildItems();

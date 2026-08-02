@@ -268,6 +268,36 @@ take_jump() {
   return 1
 }
 
+# the STACK screen ⇄ stack-window loop (grid `t`). The screen lists every project's
+# live sessions and toggles membership in stack.tsv; ⏎ hands off to bin/fleet-stack,
+# which builds one window of nested attaches and blocks until you leave it.
+#
+# The stack is CROSS-PROJECT, so it is deliberately not scoped to $SOCK — but it does
+# run inside the current project's environment, which is what points $CLAUDE_FLEET_DIR
+# (and so stack.tsv) at the right profile.
+stack_loop() {
+  local choice
+  while true; do
+    _clear
+    choice="$(node "$GRID" "$SOCK" "$CONF" --screen stack </dev/tty)" || true
+    case "$choice" in
+      ""|back) return ;;
+      stackopen)
+        _loading "opening the stack"
+        # NOT captured and NOT given `</dev/tty`, unlike the node screens above. tmux
+        # refuses a client whose stdin is the /dev/tty alias ("open terminal failed:
+        # can't use /dev/tty"), so the redirect that every screen here wants is exactly
+        # the thing that stops the stack attaching — same reason `TM attach` in grid_loop
+        # doesn't have one. fleet-stack repairs it defensively too; belt and braces,
+        # because this failed silently (a one-frame flicker, no error) when it was wrong.
+        # A real failure (empty stack, no room) prints its reason and we fall back to the
+        # screen, which is where you'd fix it anyway.
+        "$BIN_DIR/fleet-stack" open || sleep 1.5
+        _clear ;;
+    esac
+  done
+}
+
 # the session grid ⇄ attach loop for the current project; returns on back/quit
 grid_loop() {
   # GRID_EXIT=projects means the grid asked to go straight to the Projects screen
@@ -289,6 +319,7 @@ grid_loop() {
     case "$choice" in
       ""|back) return ;;
       projects) GRID_EXIT=projects; return ;;      # ^P in the grid
+      stack) stack_loop ;;                         # `t` in the grid
       jump*) if take_jump "$choice"; then GRID_EXIT=jump; return; fi ;;   # ^F chord in the grid
       attach${US}*)
         name="${choice#attach${US}}"; last="$name"; _loading "opening $name"

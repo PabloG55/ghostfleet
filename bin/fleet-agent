@@ -66,8 +66,29 @@ agent_field() {
       case "$f" in
         bin)        printf 'claude' ;;
         launcher)   printf 'claude-here' ;;
-        busy_re)    printf '%s' '(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt' ;;
-        busy_re_js) printf '%s' '(?:…|\.\.\.)\s*\(\d+[ms]|↓\s*[\d.,]+\s*[km]?\s*tokens|esc to interrupt' ;;
+        # The spinner line is COMPOSED TO FIT the pane, and the elapsed-time counter
+        # is the first thing dropped. Measured at 56 columns (a stack pane) against a
+        # real thinking session: 120 consecutive samples over 60s all read
+        #   "✳ Flowing… (almost done thinking with xhigh effort)"
+        # — no "(NNs", no "↓ N tokens", no "esc to interrupt". All three of the old
+        # alternatives were width-dependent, so a narrow pane read IDLE for a full
+        # minute while the agent was thinking. Also seen: "… (still thinking with
+        # xhigh effort)" at 50 cols and a bare "… (thinking)" at 30.
+        #
+        # What survives every width is the SHAPE: a gerund, an ellipsis, an open
+        # paren — "Cooking… (", "Gusting… (", "Flowing… (". A finished turn is
+        # "✻ Cooked for 6s", with no ellipsis, so the two stay distinguishable.
+        # Don't anchor on the spinner glyph: it renders as "·" often enough to matter.
+        #
+        # The leading [A-Za-z] is DEFENCE IN DEPTH, and deliberately not claimed as a
+        # tested behaviour. Narrow panes are full of truncation ellipses, so requiring a
+        # letter in front rules out "| w1 | …" and "/…/path". But across 174 real frames
+        # at widths 30–240 the ONLY thing an ellipsis was ever followed by "(" in was a
+        # gerund, so dropping the letter changes no verdict in the corpus and no fixture
+        # can prove it. Kept because the asymmetry is worth it — a false busy strands a
+        # worker the lead then won't dispatch to — not because a test covers it.
+        busy_re)    printf '%s' '[A-Za-z](…|\.\.\.) ?\(|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt' ;;
+        busy_re_js) printf '%s' '[A-Za-z](?:…|\.\.\.)\s*\(|↓\s*[\d.,]+\s*[km]?\s*tokens|esc to interrupt' ;;
         blocked_re) printf '' ;;   # need-you arrives via hooks, not the pane
         ready_re)   printf '%s' '❯|bypass permissions|for shortcuts' ;;
         hooks)      printf 'yes' ;;
