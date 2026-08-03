@@ -445,6 +445,25 @@ else
 fi
 
 # ── 5. sleep inhibitor guards ────────────────────────────────────────────────
+# The mode has to survive a relaunch. An env var only applies to the process you
+# launched with it, so a persisted marker is the difference between "set it once" and
+# "the screen locks again the next time you forget" — reported three times before this.
+group "awake mode is persisted, not just an env var"
+awmode() {   # $1 = env value ("" = unset), $2 = marker contents ("" = no marker)
+  local T; T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet"
+  [ -n "$2" ] && printf '%s\n' "$2" > "$T/.config/ghostfleet/awake"
+  HOME="$T" CLAUDE_FLEET_AWAKE="$1" bash -c "$(sed -n '/^_awake_file=/,/^case "\$_awake_mode" in on|off/p' "$ROOT/bin/ghostfleet"); printf %s \"\$_awake_mode\""
+  rm -rf "$T"
+}
+is "marker alone selects display"      "display" "$(awmode "" display)"
+is "marker alone selects off"          "off"     "$(awmode "" off)"
+is "no marker, no env -> on"           "on"      "$(awmode "" "")"
+# A one-off override must still work without editing the marker.
+is "env beats the marker"              "off"     "$(awmode off display)"
+is "env beats the marker, other way"   "display" "$(awmode display off)"
+# A typo in the file must not silently disable the inhibitor.
+is "garbage marker falls back to on"   "on"      "$(awmode "" 'garbage!')"
+
 group "fleet-awake guards"
 "$ROOT/bin/fleet-awake" 999999 >/dev/null 2>&1; is "dead pid: exits 0, no inhibitor" "0" "$?"
 "$ROOT/bin/fleet-awake" abc    >/dev/null 2>&1; is "junk arg: exits 0"               "0" "$?"

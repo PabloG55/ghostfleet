@@ -395,7 +395,18 @@ fleet-awake --status
 # kernel: PreventUserIdleSystemSleep=1 PreventUserIdleDisplaySleep=0
 ```
 
-Set `CLAUDE_FLEET_AWAKE=display` to pin the screen on too, at the cost of the backlight. A
+Keeping the **screen** on is a separate switch, because idle-sleep and display-sleep are
+different assertions — and on battery the display dies at 5 minutes, which is what locks
+you out. Persist it once:
+
+```bash
+echo display > ~/.config/ghostfleet/awake     # display | on | off
+```
+
+The file is read at every launch, so it survives relaunches and terminals that never
+sourced your shell rc — `CLAUDE_FLEET_AWAKE=display` works too, but only for the process
+you set it on, which is one forgotten relaunch away from locking again. The env var still
+wins when set, so `CLAUDE_FLEET_AWAKE=off ghostfleet` is a clean one-off. A
 **closed lid still sleeps** either way — the `pmset schedule wake` line above is the only hard
 guarantee across one. `CLAUDE_FLEET_AWAKE=off` inhibits nothing.
 
