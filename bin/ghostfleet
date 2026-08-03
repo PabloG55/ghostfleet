@@ -53,7 +53,21 @@ command -v tmux  >/dev/null 2>&1 || { echo "ghostfleet: tmux is required (brew i
 #   our environment, so without it every cf-sync upgrade would stack another
 #   inhibitor on the same process. It carries the MODE too, so flipping =display
 #   and reloading actually re-arms instead of matching the stale marker.
-_awake_mode="${CLAUDE_FLEET_AWAKE:-on}"
+# The mode is PERSISTED, not just an env var. An env var only applies to the process
+# you happened to launch with it, so "export CLAUDE_FLEET_AWAKE=display" is one
+# forgotten relaunch away from the screen locking again — which is exactly how this
+# was reported three times. The marker file survives relaunches, re-execs, and being
+# started from a GUI terminal that never sourced your shell rc.
+#   ~/.config/ghostfleet/awake   contains: display | on | off
+# The env var still wins when set, so a one-off `CLAUDE_FLEET_AWAKE=off ghostfleet`
+# works without editing anything.
+_awake_file="$HOME/.config/ghostfleet/awake"
+_awake_mode="${CLAUDE_FLEET_AWAKE:-}"
+if [ -z "$_awake_mode" ] && [ -f "$_awake_file" ]; then
+  _awake_mode="$(tr -d '[:space:]' < "$_awake_file" 2>/dev/null)"
+fi
+case "$_awake_mode" in ''|*[!a-z]*) _awake_mode="${_awake_mode:-on}" ;; esac
+case "$_awake_mode" in on|off|no|false|display|screen|0) : ;; *) _awake_mode=on ;; esac
 case "$_awake_mode" in
   0|off|no|false) : ;;
   *) if [ "${CLAUDE_FLEET_AWAKE_PID:-}" != "$$:$_awake_mode" ]; then
