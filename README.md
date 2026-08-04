@@ -176,8 +176,11 @@ Panes cannot cross tmux servers and every project *is* a server, so each pane ru
 
 - **Leaving detaches, it never kills.** `` ` `` closes the whole stack; every session keeps
   running exactly where it was.
-- **Your keys still work.** The stack's tmux has no prefix of its own, so `Ctrl-a …`, `Ctrl-s`,
-  `Ctrl-p`, `⇧←/→` and the mouse all reach the fleet inside the pane as usual. The only key it
+- **`⇧←/→` moves focus between the panes**, wrapping at both ends. That is the one key the stack
+  had to take from the fleet, and it costs nothing: `Ctrl-a ←/→` still cycles which session a
+  pane shows, because the stack has no prefix of its own.
+- **Everything else still reaches the agent.** `Ctrl-a …`, `Ctrl-s`, `Ctrl-p`, `Ctrl-f` and the
+  mouse all pass through to the fleet inside the pane as usual; the only other key the stack
   takes is `` ` ``, which the fleet already took.
 - **Panes are narrow, and Claude reflows to fit.** That is fine for reading and typing, but the
   governor cannot scrape the 5h usage figure out of a pane under ~100 columns — Claude truncates
@@ -215,6 +218,7 @@ which is what keeps a long-running or restarted lead from getting lost:
 | live sessions + status | `fleet-list` |
 | who needs you / what **finished** (drains since last look) | `fleet-inbox` |
 | dispatch a self-contained brief | `fleet-send <session> "…"` |
+| **ask** one and get the answer back | `fleet-send --reply-to me <session> "…"` |
 | read a worker's last N messages | `fleet-read <session> [n]` |
 | **reuse** a free worktree for a worker | `fleet-spawn <name> --reuse <wt> --prompt "…"` |
 | **recycle** a worktree onto a fresh branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from main` |
@@ -242,6 +246,24 @@ lint/typecheck/tests; opt out with `CLAUDE_FLEET_LINK_NM=0`), and `--from` bases
 branch on your **local** ref — falling back to the remote tip only when local is
 *behind* — so a worker never misses just-committed, unpushed work.
 
+**Asking, not just dispatching.** A plain send is one-way: the target works, its turn ends, and
+that `done` goes to **its own** fleet's master — so a question sent to another project looked
+ignored no matter how long you waited. `--reply-to me` (MCP: `reply_to: true`) records the return
+address next to that session, and when its turn ends the hook relays the answer into **your**
+inbox and wakes you:
+
+```bash
+fleet-send -s cf-getmycoi --reply-to me master "Does your /cois endpoint dedupe by externalId?"
+# …later, without polling:
+fleet-inbox        # → 14:05  getmycoi/master  ANSWERED  yes — same externalId returns deduped:true…
+fleet-read -s cf-getmycoi master 3      # the full reply
+```
+
+The target is told it's answering an agent, so ending its turn *is* the reply — it needn't run
+anything. Only the turn your prompt actually starts answers (a prompt that queued behind a running
+turn doesn't answer with that turn's work), a mid-request permission block reaches you too as
+`ASKS`, and one request gets exactly one answer.
+
 These are also exposed as **MCP tools** (`fleet_list` / `_send` / `_read` / `_spawn` /
 `_worktrees` / `_inbox` / `_answer` / `_pause` / `_resume` / `_rename` / `_stop`) via a
 dependency-free stdio server (`mcp/fleet-mcp.mjs`) that `install.sh` registers in each config dir.
@@ -249,7 +271,8 @@ The installed **`ghostfleet-orchestrate` skill** teaches a lead the loop above �
 spawn, pull the inbox instead of polling every sibling, unblock with `fleet-answer`, mind the
 shared budget — so you can just say *"work on a worktree to fix X"* and it reuses a free one. Each
 session knows its fleet via `CLAUDE_FLEET_SOCK`; prompts must be self-contained (siblings don't
-share your context); only sessions in the *same* fleet are reachable.
+share your context). Another **project's** fleet is reachable too — `-s <socket>` from a shell, or
+`project: "<name>"` on any of the MCP tools (`fleet_projects` lists the names).
 
 **Budget.** One account funds the whole fleet, so wide fan-out drains it N× faster and everyone
 stalls at the ceiling together. A **governor** (a dumb non-Claude loop, auto-started per fleet)

@@ -97,6 +97,18 @@ else
   rm -f "$tmp" 2>/dev/null
 fi
 
+# A wake PASTES into a session's input box and presses Enter, so it must only fire when
+# that box is EMPTY — otherwise it submits whatever a human was half-way through typing
+# with the nudge glued onto the end. Anything left after the ❯ prompt (once the box
+# drawing is stripped) counts as half-typed. Skipping is safe: the event stays in the
+# inbox and the next wake, with a clear box, delivers it. Shared by both wakes below.
+_input_empty() {                      # $1=socket $2=session -> 0 when safe to paste
+  local inl
+  inl="$(tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null | grep '❯' | tail -1)"
+  inl="$(printf '%s' "${inl#*❯}" | tr -d '[:space:]│╭╮╰╯─|')"
+  [ -z "$inl" ]
+}
+
 # --- push worker events into the lead's inbox (see fleet-inbox) ---------------
 # Event-driven, zero polling: the lead can't be interrupted, so it drains this
 # feed with `fleet-inbox` instead of polling every sibling. Emit the two events a
@@ -148,14 +160,9 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
       last="$(cat "$stamp" 2>/dev/null || echo 0)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
       win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"; case "$win" in ''|*[!0-9]*) win=30 ;; esac
       if [ "$(( now - last ))" -ge "$win" ]; then
-        # Don't clobber a half-typed message: the wake pastes + Enter into the
-        # master's input, so only fire when that input is EMPTY. If you're mid-typing
-        # (anything after the ❯ prompt), skip — the event stays in the inbox and the
-        # NEXT wake (once your box is clear) delivers it. Don't stamp on skip, so the
-        # next event re-checks right away instead of waiting out the cooldown.
-        inl="$(tmux -L "$CLAUDE_FLEET_SOCK" capture-pane -p -t master 2>/dev/null | grep '❯' | tail -1)"
-        inl="$(printf '%s' "${inl#*❯}" | tr -d '[:space:]│╭╮╰╯─|')"
-        if [ -z "$inl" ]; then
+        # Don't clobber a half-typed message (see _input_empty). Don't stamp on skip,
+        # so the next event re-checks right away instead of waiting out the cooldown.
+        if _input_empty "$CLAUDE_FLEET_SOCK" master; then
           printf '%s\n' "$now" > "$stamp" 2>/dev/null
           _sock="$CLAUDE_FLEET_SOCK"
           ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
@@ -165,10 +172,102 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
   fi
 fi
 
+# --- relay the answer back to whoever ASKED (fleet-send --reply-to) -----------
+# The block above is one-way: a worker's Stop reaches ITS OWN fleet's master and nobody
+# else. So a question sent from another project — or sent to a project's MASTER, which
+# that block skips entirely — got worked on and answered into thin air; from the asking
+# side that is indistinguishable from being ignored. fleet-send --reply-to leaves an
+# address next to the target session; this is the delivery.
+#
+# Deliberately NOT gated on the notify-lead markers: those exist to keep background
+# worker chatter off a master. An explicit --reply-to is someone waiting for an answer,
+# and dropping it silently is the exact failure this path exists to fix. Equally
+# deliberately outside the workers-only block above, because the target of a
+# cross-project question is usually that project's master.
+#
+# WHY ARMING, AND NOT JUST "RELAY ON THE NEXT STOP": fleet-send pastes into a target
+# that may be MID-TURN, in which case the prompt queues and the turn already running
+# Stops first. Relaying that Stop would answer with the wrong turn's work and consume
+# the address, so the real answer — the one we asked for — would never be sent. So the
+# address is ARMED by the UserPromptSubmit that actually starts a turn, and only an
+# armed address relays. Note what this does NOT protect: if a human types into that
+# session later, that turn is armed too. fleet-send removes its own marker when it
+# can't confirm the submit, which closes the common way that happens.
+if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
+  rt="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.reply-to"
+  if [ -f "$rt" ] && [ "$EVENT" = "UserPromptSubmit" ]; then
+    : > "$rt.armed" 2>/dev/null
+  elif [ -f "$rt" ] && [ -f "$rt.armed" ] \
+       && { [ "$EVENT" = "Stop" ] || [ "$status" = "need-you" ]; }; then
+    # \x1f, and a sink for the leftover: with fewer variables than fields `read` glues
+    # the rest onto the LAST one — which here is the DIRECTORY this writes into, so a
+    # stray field would aim the whole delivery somewhere else. Validate every column.
+    IFS=$'\x1f' read -r r_sock r_sess r_dir r_extra < "$rt" 2>/dev/null
+    r_ok=1
+    [ -n "${r_sock:-}" ] && [ -n "${r_sess:-}" ] && [ -z "${r_extra:-}" ] || r_ok=0
+    case "${r_sock:-}${r_sess:-}" in *[!A-Za-z0-9._~-]*) r_ok=0 ;; esac
+    case "${r_dir:-}" in /*) [ -d "$r_dir" ] || r_ok=0 ;; *) r_ok=0 ;; esac
+    # An address pointing back at this very session would relay its own Stop into its
+    # own input — and that reply is a prompt, which Stops, and relays again.
+    [ "${r_sock:-}" = "$CLAUDE_FLEET_SOCK" ] && [ "${r_sess:-}" = "$SLOT" ] && r_ok=0
+
+    if [ "$r_ok" = 1 ]; then
+      if [ "$EVENT" = "Stop" ]; then
+        r_ev="answered"
+        # The answer itself: last non-empty assistant message, flattened to one line.
+        # Same extraction as fleet-read, so the excerpt and the "full reply" command
+        # can't disagree. Tabs MUST go — the inbox is a TSV and a tab in the detail
+        # would shift the columns of a row nothing else validates.
+        r_txt="$(tail -n 400 "$TRANSCRIPT" 2>/dev/null \
+          | jq -r 'select(.type=="assistant") | (.message.content // [])
+                   | map(select(.type=="text")|.text) | join(" ")' 2>/dev/null \
+          | grep -v '^[[:space:]]*$' | tail -1 | tr '\n\r\t' '   ')"
+      else
+        r_ev="asks"; r_txt="$NOTE"
+      fi
+      # Bash substring, not `cut -c`: this text is UTF-8 (em dashes, box glyphs) and
+      # cut counts bytes in the C locale, which would slice a character in half.
+      r_txt="${r_txt:0:220}"
+      [ -n "$r_txt" ] || r_txt="(no text — read it with fleet-read)"
+
+      printf '%s\t%s\t%s\t%s\n' "$now" "${CLAUDE_FLEET_SOCK#cf-}/$SLOT" "$r_ev" "$r_txt" \
+        >> "$r_dir/$r_sock.inbox" 2>/dev/null || true
+
+      # Debounced per ASKER, not per fleet like the master nudge above: a shared stamp
+      # would let either wake swallow the other's, and this one must not be droppable.
+      r_stamp="$r_dir/$r_sock.$r_sess.relay.stamp"
+      r_last="$(cat "$r_stamp" 2>/dev/null || echo 0)"; case "$r_last" in ''|*[!0-9]*) r_last=0 ;; esac
+      r_win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"; case "$r_win" in ''|*[!0-9]*) r_win=30 ;; esac
+      if tmux -L "$r_sock" has-session -t "=$r_sess" 2>/dev/null \
+         && [ "$(( now - r_last ))" -ge "$r_win" ] && _input_empty "$r_sock" "$r_sess"; then
+        printf '%s\n' "$now" > "$r_stamp" 2>/dev/null
+        # No --reply-to on this one: an answer that asked for an answer is a loop.
+        ( fleet-send -s "$r_sock" "$r_sess" "[fleet] ${CLAUDE_FLEET_SOCK#cf-}/$SLOT $r_ev your request: $r_txt
+Full reply: fleet-read -s $CLAUDE_FLEET_SOCK $SLOT 3 — to ask it something else, fleet-send -s $CLAUDE_FLEET_SOCK --reply-to me $SLOT \"…\". Relayed automatically; no need to reply to this line." >/dev/null 2>&1 & )
+      fi
+      # One request, one answer: consume the address on Stop so a later, unrelated turn
+      # can't answer again. need-you keeps it — that turn hasn't produced the answer yet.
+      [ "$EVENT" = "Stop" ] && rm -f "$rt" "$rt.armed" 2>/dev/null
+    else
+      # A malformed address can never become valid, and leaving it would re-run this
+      # every turn. Name it in the inbox of the fleet that CAN see it: our own.
+      printf '%s\t%s\t%s\t%s\n' "$now" "$SLOT" "need-you" "unroutable reply-to marker dropped (see ${rt##*/})" \
+        >> "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.inbox" 2>/dev/null || true
+      rm -f "$rt" "$rt.armed" 2>/dev/null
+    fi
+  fi
+fi
+
 # --- notify, detached so the hook returns fast -------------------------------
 # Only a real attention-need (need-you) or a completed turn — never the benign idle
 # "waiting for your input" Notification, which is the false "needs you" a watcher trips.
-if [ "$EVENT" = "Stop" ] || { [ "$EVENT" = "Notification" ] && [ "$status" = "need-you" ]; }; then
+# CLAUDE_FLEET_NOTIFIER=off silences the popup and nothing else — the status file and the
+# inboxes still record everything, which is what the rest of the fleet reads. For a
+# headless/CI run (and test/run.sh, which fires this hook for real) a desktop
+# notification per event is noise from a machine nobody is watching.
+case "${CLAUDE_FLEET_NOTIFIER:-}" in off|none|false) EVENT_QUIET=1 ;; *) EVENT_QUIET=0 ;; esac
+if [ "$EVENT_QUIET" = 0 ] \
+   && { [ "$EVENT" = "Stop" ] || { [ "$EVENT" = "Notification" ] && [ "$status" = "need-you" ]; }; }; then
   if [ "$EVENT" = "Stop" ]; then title="✅ Claude — done"; sound="Glass"; else title="🔔 Claude — needs you"; sound="Ping"; fi
   sub="${folder:-claude}"; [ -n "$branch" ] && sub="$sub · $branch"
   tn="$(command -v terminal-notifier 2>/dev/null || true)"

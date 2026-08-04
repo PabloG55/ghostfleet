@@ -2,6 +2,8 @@
 
 ## Commits
 
+- **Never push to `main` directly — every change lands through a PR.** Branch, commit
+  there, open the PR; let review happen even when the change looks obvious.
 - **Never add a `Co-Authored-By:` trailer**, and don't add any other AI attribution
   (no "generated with", no tool footer). Commits are authored by the repo owner, full
   stop.
@@ -88,5 +90,18 @@ prefer proof over assertion:
   before the attach still works, so a screen builds all its panes and then silently
   fails to show them. The node screens all take `</dev/tty`; anything that *attaches*
   must not (see `TM attach` in grid_loop, and `fix_stdin_tty` in fleet-stack).
+- **Every push channel is scoped to ONE fleet socket, and silence is the symptom.** A
+  worker's Stop reaches `master` on *its own* socket and nobody else, and it skips masters
+  entirely — so a question sent to another project got worked on and answered into thin
+  air. From the asking side that is indistinguishable from being ignored: no error, no
+  row, nothing to grep. When you add a cross-fleet path, carry the asker's socket AND its
+  fleet dir (another profile is another directory), and assert the delivery lands in the
+  *asker's* dir, not yours.
+- **A prompt sent to a busy session Stops the WRONG turn first.** `fleet-send` pastes into
+  the input box; if a turn is already running the prompt queues behind it, so the next
+  `Stop` belongs to work you never asked for. Anything that waits for "the answer to my
+  prompt" has to be armed by the `UserPromptSubmit` that actually starts a turn — the
+  version that just took the next Stop answered with a stranger's work and consumed the
+  request, which then looked like the relay had never fired at all.
 - **macOS-only calls need a guard**: `stat -f`, `date -r`, `osascript`, `caffeinate`. Linux
   and WSL are supported.
