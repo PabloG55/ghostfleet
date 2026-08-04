@@ -308,9 +308,10 @@ group "stack config steals only what it must"
 if command -v tmux >/dev/null 2>&1; then
   tmux -L cfstktest kill-server 2>/dev/null
   tmux -L cfstktest -f "$ROOT/tmux/cf-stack.tmux.conf" new-session -d -s t "sleep 30" 2>/dev/null
-  # tmux's own root table always carries ~24 Mouse*/Wheel*/*Click* bindings. They are
-  # built-ins, and inert here because `mouse off` — the KEYBOARD entries are what
-  # decide whether a keystroke stops at the stack or reaches the fleet inside it.
+  # tmux's own root table always carries ~24 Mouse*/Wheel*/*Click* bindings. Those are
+  # built-ins nothing here manages (and with `mouse on` they are what makes a click
+  # focus a pane — asserted separately below); the KEYBOARD entries are what decide
+  # whether a keystroke stops at the stack or reaches the fleet inside it.
   root="$(tmux -L cfstktest list-keys -T root 2>/dev/null | grep -vE 'Mouse|Wheel|Click')"
   is "root table binds exactly 3 keys" "3" "$(printf '%s\n' "$root" | grep -c . || true)"
   is "backtick leaves the stack"       "1" "$(printf '%s\n' "$root" | grep -c -- '-T root ` *detach-client' || true)"
@@ -324,18 +325,22 @@ if command -v tmux >/dev/null 2>&1; then
   is "S-Left selects the previous one" "1" "$(printf '%s\n' "$root" | grep -cE "root +S-Left +select-pane -t '?:\.-" || true)"
   # C-a must stay the FLEET's prefix, or C-a g/d/s/p and the C-a C-a escape all die.
   is "prefix is None (C-a reaches the fleet)" "None" "$(tmux -L cfstktest show-options -gv prefix 2>/dev/null)"
-  # An outer tmux that claimed the mouse would eat every event before the fleet.
-  is "mouse stays off"                 "off"  "$(tmux -L cfstktest show-options -gv mouse 2>/dev/null)"
+  # `on` so a CLICK focuses the pane you clicked. It was `off` on the theory that an
+  # outer tmux claiming the mouse would swallow events before the fleet; measured, it
+  # forwards them (default MouseDown1Pane is `select-pane -t = ; send-keys -M`), and
+  # `off` never stopped delivery in the first place — it only suppressed the focusing.
+  is "mouse is on (click focuses)"     "on"   "$(tmux -L cfstktest show-options -gv mouse 2>/dev/null)"
   tmux -L cfstktest kill-server 2>/dev/null
 else
   skip "stack config" "tmux not available"
 fi
 
-# A binding in the file is not focus that MOVES. With `prefix None` and `mouse off` there
-# was NO way to reach pane 2..N — the stack was watch-only for every pane but the first —
-# and "the config says select-pane" would pass just as happily for a key the client never
-# resolves. So attach a REAL client and send it keys: both directions, the wrap at both
-# ends, and the negative (a key the fleet owns must leave focus alone).
+# A binding in the file is not focus that MOVES. With `prefix None` (tmux ships pane
+# navigation only in the prefix table) and `mouse off` (which made the click bindings
+# inert) there was NO way to reach pane 2..N — the stack was watch-only for every pane but
+# the first — and "the config says select-pane" would pass just as happily for a key the
+# client never resolves. So attach a REAL client and drive it: keys in both directions, the
+# wrap at both ends, the negative (a key the fleet owns must leave focus alone), and a click.
 group "stack pane focus (real client, keys sent)"
 if command -v tmux >/dev/null 2>&1; then
   SCONF="$ROOT/tmux/cf-stack.tmux.conf"
@@ -361,6 +366,20 @@ if command -v tmux >/dev/null 2>&1; then
   # C-s belongs to the fleet inside (it writes a .goto marker and detaches). If the stack
   # ever answered it, this would move focus instead of passing through.
   key C-s;     is "C-s leaves focus put" "1" "$(act)"
+
+  # And by CLICK. A mouse event can't be sent with send-keys, so feed the client the raw
+  # SGR sequence it would get from the terminal (press then release, 1-based coords).
+  # With `mouse off` this moved nothing — the bindings were suppressed — while the click
+  # still reached the agent in the pane clicked, which is the state this replaces.
+  geom="$(tmux -L cfstkpane list-panes -t stack -F '#{pane_index}:#{pane_left}-#{pane_right}' 2>/dev/null | tr '\n' ' ')"
+  is "3 panes across 200 columns"      "0:0-65 1:67-132 2:134-199 " "$geom"
+  click() {   # $1=column $2=row
+    tmux -L cfstkout send-keys -l "$(printf '\033[<0;%s;%sM' "$1" "$2")" 2>/dev/null; sleep 0.3
+    tmux -L cfstkout send-keys -l "$(printf '\033[<0;%s;%sm' "$1" "$2")" 2>/dev/null; sleep 0.4
+  }
+  click 150 10; is "a click focuses pane 2"  "2" "$(act)"
+  click  20 10; is "...and back to pane 0"   "0" "$(act)"
+  click 100 10; is "...and the middle one"   "1" "$(act)"
   tmux -L cfstkout kill-server 2>/dev/null; tmux -L cfstkpane kill-server 2>/dev/null
 else
   skip "stack pane focus" "tmux not available"
