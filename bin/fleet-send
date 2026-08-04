@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# fleet-send [-s SOCKET] <session> <prompt...>
+# fleet-send [-s SOCKET] [--reply-to me|<session>|<socket>/<session>] [--reply-dir DIR]
+#            <session> <prompt...>
 #
 # Type <prompt> into another fleet session's Claude input and submit it. Meant
 # to be called by a "lead" Claude session (via its Bash tool) to dispatch work
@@ -7,22 +8,133 @@
 #
 # Socket defaults to $CLAUDE_FLEET_SOCK (exported into every fleet session).
 # Uses a bracketed paste so multi-line prompts go in as ONE message, then Enter.
+#
+# --reply-to makes it a CONVERSATION instead of a one-way dispatch: it records who
+# asked, so when the target's turn ends the event hook relays the answer back into
+# the asker's inbox and wakes it. Without it, a send is fire-and-forget — the target's
+# Stop only ever reaches ITS OWN fleet's master (hooks/fleet-event.sh), which is why a
+# question sent across projects looked like it was ignored. See that hook for the
+# routing; --reply-dir is for callers whose env doesn't name the asker's fleet dir.
 set -uo pipefail
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
 # Prefer $TMUX (the live server this session runs in) over the env var — it's
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
+
+# WHO IS ASKING — resolved from $TMUX only, and BEFORE -s can move SOCK.
+# `--reply-to me` must NOT be answered out of CLAUDE_FLEET_SOCK: the MCP server calls
+# this with TMUX cleared and CLAUDE_FLEET_SOCK repointed at the TARGET's fleet (see
+# run() in mcp/fleet-mcp.mjs), so a guess from env would address the reply to our
+# session NAME on the target's SOCKET — a marker that validates perfectly and relays
+# to whichever session answers that name over there. So `me` resolves from the live
+# server or fails loudly, and callers with no $TMUX pass the address explicitly.
+SELF_SOCK=""; SELF_SESS=""
+case "${_t##*/}" in cf-*)
+  SELF_SOCK="${_t%%,*}"; SELF_SOCK="${SELF_SOCK##*/}"
+  # $TMUX is "<socket-path>,<server-pid>,<session-id>" and that last field is the
+  # session ID ($7), not its name — look the name up rather than trusting
+  # CLAUDE_FLEET_SLOT, which a --resume'd/--fork'd session can hold stale.
+  _sid="${_t##*,}"; case "$_sid" in ''|*[!0-9]*) _sid="" ;; esac
+  [ -n "$_sid" ] && SELF_SESS="$(tmux -L "$SELF_SOCK" list-sessions \
+      -F '#{session_id} #{session_name}' 2>/dev/null | awk -v i="\$$_sid" '$1==i{print $2; exit}')"
+  [ -n "$SELF_SESS" ] || SELF_SESS="${CLAUDE_FLEET_SLOT:-}"
+;; esac
+
+REPLY_TO=""; REPLY_DIR=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s)          SOCK="${2:-}";      shift 2 ;;
+    --reply-to)  REPLY_TO="${2:-}";  shift 2 ;;
+    --reply-dir) REPLY_DIR="${2:-}"; shift 2 ;;
+    *) break ;;
+  esac
+done
 SESSION="${1:-}"; shift || true
 MSG="$*"
 
 [ -n "$SOCK" ]    || { echo "fleet-send: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
-[ -n "$SESSION" ] || { echo "fleet-send: usage: fleet-send [-s socket] <session> <prompt>" >&2; exit 1; }
+[ -n "$SESSION" ] || { echo "fleet-send: usage: fleet-send [-s socket] [--reply-to me|<session>|<socket>/<session>] <session> <prompt>" >&2; exit 1; }
 [ -n "$MSG" ]     || { echo "fleet-send: empty prompt" >&2; exit 1; }
 tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
+
+# --- the reply address ---------------------------------------------------------
+# WHY A MARKER RATHER THAN JUST TELLING THE TARGET TO ANSWER: you CAN put a return
+# address in the prompt — "reply with fleet-send -s cf-x master …" — and it works, but
+# only while the target remembers to, and it pastes into the asker's input box whether
+# or not a human is mid-sentence in it. The marker moves the reply into the machinery
+# that already solved both problems: the Stop hook relays it (so simply ENDING the turn
+# answers), and it reuses that hook's empty-input guard and debounce.
+#
+# The marker belongs to the TARGET (its hook reads its own $FLEET_DIR on Stop), so the
+# asker's fleet dir has to travel INSIDE it: under a different profile the asker's inbox
+# is a different directory entirely, and the target's hook has no way to know which.
+RSOCK=""; RSESS=""
+if [ -n "$REPLY_TO" ]; then
+  case "$REPLY_TO" in
+    me)  RSOCK="$SELF_SOCK"; RSESS="$SELF_SESS"
+         [ -n "$RSOCK" ] && [ -n "$RSESS" ] || {
+           echo "fleet-send: --reply-to me needs a live fleet session (\$TMUX names none) — pass --reply-to <socket>/<session>" >&2; exit 1; } ;;
+    */*) RSOCK="${REPLY_TO%%/*}"; RSESS="${REPLY_TO#*/}" ;;
+    *)   RSOCK="$SELF_SOCK"; RSESS="$REPLY_TO"
+         [ -n "$RSOCK" ] || {
+           echo "fleet-send: --reply-to '$REPLY_TO' has no socket and \$TMUX names none — pass --reply-to <socket>/<session>" >&2; exit 1; } ;;
+  esac
+  # Both fields come back out of a file and get interpolated into a tmux command line,
+  # so refuse anything that could close a quote HERE instead of quoting around it later
+  # (same rule, and the same charset, as fleet-stack's valid_line). This also catches a
+  # three-part "a/b/c", whose leftover lands inside RSESS as "b/c".
+  case "$RSOCK$RSESS" in *[!A-Za-z0-9._~-]*)
+    echo "fleet-send: bad --reply-to '$REPLY_TO' (expected me, <session>, or <socket>/<session>)" >&2; exit 1 ;;
+  esac
+  # A session pointed at ITSELF would relay its own Stop into its own input, and that
+  # reply is a prompt — one that Stops, and relays again. Refuse the cycle.
+  if [ "$RSOCK" = "$SOCK" ] && [ "$RSESS" = "$SESSION" ]; then
+    echo "fleet-send: --reply-to names the target itself ($RSOCK/$RSESS) — its answer would loop back into its own input" >&2; exit 1
+  fi
+
+  rdir="$REPLY_DIR"
+  if [ -z "$rdir" ]; then                       # ask the asker's own session env
+    rdir="$(tmux -L "$RSOCK" show-environment -t "$RSESS" CLAUDE_FLEET_DIR 2>/dev/null)"
+    rdir="${rdir#CLAUDE_FLEET_DIR=}"; case "$rdir" in /*) ;; *) rdir="" ;; esac
+  fi
+  if [ -z "$rdir" ]; then                       # ...then its profile, the usual case
+    _c="$(tmux -L "$RSOCK" show-environment -t "$RSESS" CLAUDE_CONFIG_DIR 2>/dev/null)"
+    _c="${_c#CLAUDE_CONFIG_DIR=}"; case "$_c" in /*) rdir="$_c/fleet" ;; esac
+  fi
+  [ -n "$rdir" ] || rdir="$FLEET_DIR"           # ...then same-profile, which it usually is
+  mkdir -p "$FLEET_DIR" 2>/dev/null
+  # Three MANDATORY fields on one line. \x1f, not a tab: a tab is IFS-whitespace, so a
+  # `read` over it collapses an empty field and shifts every later one left — and the
+  # last field here is a PATH, which is exactly the field you least want to receive
+  # something else's value. The hook re-validates all three anyway.
+  printf '%s\x1f%s\x1f%s\n' "$RSOCK" "$RSESS" "$rdir" \
+    > "$FLEET_DIR/$SOCK.$SESSION.reply-to" 2>/dev/null
+  # Clear any arming left by an earlier request, or this brand-new address would look
+  # armed to the turn that is running RIGHT NOW and answer it with that turn's work.
+  rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
+
+  # Tell the target what it's in, PREPENDED. Not appended: the paste-landed probe below
+  # is the last 24 chars of the message, and a fixed boilerplate tail would be the same
+  # 24 chars on every relayed send — the probe would match a PREVIOUS one still on the
+  # pane. Keeping the caller's own words last keeps the probe unique per send.
+  MSG="[fleet] This request comes from another agent ($RSOCK/$RSESS), not a human. When
+your turn ends, its last message is relayed back automatically — so finish with the
+ANSWER, self-contained (it doesn't share your context). No need to fleet-send a reply.
+
+$MSG"
+fi
+# NOTE what a plain send deliberately does NOT do: clear an existing address. "The newest
+# send wins" reads tidy and is a trap — the address is keyed by the TARGET, so every
+# automated plain send would cancel a question someone else had asked that session. The
+# master nudge in hooks/fleet-event.sh is exactly that (a plain fleet-send at `master`),
+# so any worker finishing would silently drop a pending question to its project's master.
+# Staleness is bounded from the other end instead: the hook only relays an ARMED address,
+# and an unconfirmed submit below takes its own marker back.
 
 # Is the target mid-turn right now? Read the LIVE pane (the agent's working spinner),
 # not the status file — the file can be stale, and a wrong guess here is harmless
@@ -49,6 +161,13 @@ busy() {
 }
 pre_busy=no; busy && pre_busy=yes
 [ "$pre_busy" = yes ] && echo "fleet-send: note — '$SESSION' is working; your prompt will queue after this turn." >&2
+
+# The relay lives in the CLAUDE event hook (hooks/fleet-event.sh), so a target running a
+# different agent will never answer. Say that HERE: the whole point of --reply-to is not
+# waiting on an answer that isn't coming, and a silent no-reply is the bug it fixes.
+if [ -n "$RSESS" ] && [ -n "${_a:-}" ] && [ "$_a" != claude ]; then
+  echo "fleet-send: note — '$SESSION' runs $_a, and the reply relay is wired into the Claude hook only; its answer won't come back on its own (read it with fleet-read${SOCK:+ -s $SOCK} $SESSION)." >&2
+fi
 
 # Bracketed paste keeps a multi-line prompt as ONE message; then submit. The race
 # (why a naive send sometimes silently fails): an Enter sent before the bracketed
@@ -100,14 +219,29 @@ else
     fi
     sleep 0.2
   done
-  [ "$ok" = yes ] && echo "fleet-send: → $SESSION" \
-                  || echo "fleet-send: → $SESSION (warning: could not confirm submit — verify it landed)" >&2
+  if [ "$ok" = yes ]; then
+    echo "fleet-send: → $SESSION"
+  else
+    echo "fleet-send: → $SESSION (warning: could not confirm submit — verify it landed)" >&2
+    # Take the reply address back. Unconfirmed means no turn is known to have started,
+    # and a marker left behind would attach our question to whatever that session does
+    # NEXT — answering a stranger's turn to a session that stopped waiting. The hook
+    # only relays an ARMED address, so this only matters when nothing ever armed it.
+    [ -n "$RSESS" ] && [ ! -f "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" ] \
+      && rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to" 2>/dev/null
+  fi
+fi
+
+# A plain `[ -n … ] && echo` here would leave a FALSE exit status behind when there is no
+# reply address, and callers read fleet-send's status as "did the send work" (the MCP
+# server turns any nonzero into an error string).
+if [ -n "$RSESS" ]; then
+  echo "fleet-send: its answer will be relayed to $RSOCK/$RSESS when its turn ends"
 fi
 
 # CF-6: record the dispatched task in the manifest so fleet-worktrees' TASK column
 # reflects fleet-send work too (not just fleet-spawn --prompt). Keyed by the target's
 # worktree path, matching fleet-spawn. Best-effort; never affects the send result.
-FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
 cwd="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
 if [ -n "$cwd" ]; then

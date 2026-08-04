@@ -52,6 +52,35 @@ function target(proj) {
   return hit;
 }
 
+// WHO WE ARE — needed for fleet_send's reply_to, and resolved HERE rather than in
+// fleet-send, because run() below deliberately clears TMUX and repoints
+// CLAUDE_FLEET_SOCK at the TARGET's fleet. `--reply-to me` in that child would resolve
+// OUR session name against the TARGET's socket: an address that validates perfectly and
+// relays the answer to whichever session answers that name over there. Never cached —
+// fleet_rename can change our own name while this server lives.
+function self() {
+  const t = process.env.TMUX || '';                     // <socket-path>,<pid>,<session-id>
+  const [sp, , sid] = t.split(',');
+  const sock = (sp || '').split('/').pop() || '';
+  if (!/^cf-/.test(sock)) return null;                  // not inside a fleet session
+  let sess = '';
+  if (/^\d+$/.test(sid || '')) {                        // that field is the ID, not the name
+    try {
+      const rows = execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_id} #{session_name}'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      for (const line of rows.split('\n')) {
+        const [id, name] = line.split(' ');
+        if (id === `$${sid}`) { sess = name || ''; break; }
+      }
+    } catch {}
+  }
+  if (!sess) sess = process.env.CLAUDE_FLEET_SLOT || ''; // a --resume'd session can hold this stale
+  if (!sess) return null;
+  const dir = process.env.CLAUDE_FLEET_DIR
+    || path.join(process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude'), 'fleet');
+  return { sock, sess, dir };
+}
+
 function run(cmd, args, t) {
   // When targeting another fleet, pass -s AND point the env at that profile, so
   // status/markers land in the right fleet dir. TMUX is cleared because the commands
@@ -70,16 +99,16 @@ function run(cmd, args, t) {
 const TOOLS = [
   { name: 'fleet_list', description: "List the Claude sessions in a fleet (parallel worktrees) with their status. Call this first to see which siblings exist and whether they are free. Pass `project` to list ANOTHER project's fleet.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" } }, additionalProperties: false } },
-  { name: 'fleet_send', description: 'Send a prompt to a sibling fleet session and submit it (it runs there). The prompt must be self-contained — the sibling does not share your context.',
-    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'target session name (see fleet_list)' }, prompt: { type: 'string', description: 'the full, self-contained prompt to run there' } }, required: ['session', 'prompt'], additionalProperties: false } },
+  { name: 'fleet_send', description: 'Send a prompt to a sibling fleet session and submit it (it runs there). The prompt must be self-contained — the sibling does not share your context. Set reply_to:true when you are ASKING something rather than dispatching work: without it a send is one-way and the answer never comes back to you.',
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'target session name (see fleet_list)' }, prompt: { type: 'string', description: 'the full, self-contained prompt to run there' }, reply_to: { type: 'boolean', description: "ask for an answer back: when that session's turn ends, its reply lands in YOUR inbox (fleet_inbox) and wakes you" } }, required: ['session', 'prompt'], additionalProperties: false } },
   { name: 'fleet_read', description: 'Read the last N assistant messages from a sibling session, to check its progress/output.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, n: { type: 'number', description: 'how many recent assistant messages (default 1)' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_spawn', description: 'Create a new git worktree off the current repo and start a fresh parallel session in it (in the background), optionally with an initial task prompt. Call fleet_worktrees FIRST: if free worktrees exist, spawn refuses unless you reuse one (reuse) or force a new one (force_new).',
     inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, from: { type: 'string', description: 'base ref for a new branch; bases on your LOCAL ref (use "HEAD" for current), falls back to the remote tip only if local is behind' }, prompt: { type: 'string', description: 'initial task to send once it boots' }, model: { type: 'string', description: 'model for the worker (e.g. opus); default = account default' }, reuse: { type: 'string', description: 'start in this EXISTING free worktree (name or path); combine with branch+from to clean & rebranch it in one step' }, force_new: { type: 'boolean', description: 'create a new worktree even if free ones exist' } }, required: ['name'], additionalProperties: false } },
   { name: 'fleet_worktrees', description: 'Inventory every git worktree of this repo — branch, whether a session is live on it, git state, and which are FREE to reuse. Call this BEFORE fleet_spawn so you reuse an idle worktree instead of proliferating new ones.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
-  { name: 'fleet_inbox', description: "Drain the lead's attention feed: worker 'need-you' events (permission / usage-limit / real questions) plus governor park/resume, collected passively. One call replaces polling every sibling — shows only what is new since last call.",
-    inputSchema: { type: 'object', properties: { all: { type: 'boolean', description: 'show the whole inbox instead of only new entries' } }, additionalProperties: false } },
+  { name: 'fleet_inbox', description: "Drain the lead's attention feed: worker 'need-you' events (permission / usage-limit / real questions), governor park/resume, and answers relayed back from sessions you asked with fleet_send reply_to. One call replaces polling every sibling — shows only what is new since last call. Pass `project` to drain ANOTHER project's feed instead of your own.",
+    inputSchema: { type: 'object', properties: { all: { type: 'boolean', description: 'show the whole inbox instead of only new entries' }, project: { type: 'string', description: "another project's fleet to read (name from fleet_projects); omit for your own — your relayed answers arrive in YOUR OWN inbox, so omit it for those" } }, additionalProperties: false } },
   { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a permission dialog, a "reached usage limit — retry?", a trust prompt (e.g. text "2"). Use this to unblock a worker; use fleet_send for normal task prompts.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
   { name: 'fleet_pause', description: 'Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work.',
@@ -119,7 +148,18 @@ function callTool(name, a = {}) {
         : '(no projects configured)';
     }
     case 'fleet_list': return run('fleet-list', [], t);
-    case 'fleet_send': return run('fleet-send', [String(a.session), String(a.prompt)], t);
+    case 'fleet_send': {
+      const args = [];
+      if (a.reply_to) {
+        const me = self();
+        // Refuse rather than send it one-way: a caller that asked for an answer and
+        // silently didn't get a return address would wait for a reply that can't come.
+        if (!me) return 'error: reply_to needs this session to be inside a fleet ($TMUX names none). Send without reply_to, or from Bash: fleet-send --reply-to <socket>/<session> …';
+        args.push('--reply-to', `${me.sock}/${me.sess}`, '--reply-dir', me.dir);
+      }
+      args.push(String(a.session), String(a.prompt));
+      return run('fleet-send', args, t);
+    }
     case 'fleet_read': return run('fleet-read', [String(a.session), String(a.n || 1)], t);
     case 'fleet_spawn': {
       const args = [String(a.name)];

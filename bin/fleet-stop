@@ -54,6 +54,9 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.parked" "$FLEET_DIR/$SESSION.parked" \
 # per-session auto-nudge overrides (grid settings page) — drop them too, so a future
 # session that reuses this name doesn't silently inherit a stale explicit on/off.
 rm -f "$FLEET_DIR/$SOCK.$SESSION.notify-lead" "$FLEET_DIR/$SOCK.$SESSION.notify-lead-off" 2>/dev/null
+# a pending reply address (fleet-send --reply-to): the session that would have answered
+# is gone, and a name-reuser must not inherit a stranger's question to answer.
+rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to" "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
 
 # manifest is keyed by worktree path with the session in field 2 — drop its line
 MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"

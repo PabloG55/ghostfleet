@@ -43,7 +43,11 @@ fmt() {
     # BSD/macOS takes an epoch with -r; GNU/Linux needs -d @epoch
     hhmm="$(date -r "$ts" +%H:%M 2>/dev/null || date -d "@$ts" +%H:%M 2>/dev/null || echo '--:--')"
     up="$(printf '%s' "$ev" | tr '[:lower:]' '[:upper:]')"
-    printf '%s  %-14s %-9s %s\n' "$hhmm" "${sess:0:14}" "$up" "$detail"
+    # 22, not 14: a relayed answer (fleet-send --reply-to) names its sender as
+    # "<project>/<session>", because the session answering you is in another fleet and
+    # a bare name there is ambiguous — every project has one called `master`. At 14 the
+    # project ate the column and every row read as the same responder.
+    printf '%s  %-22s %-9s %s\n' "$hhmm" "${sess:0:22}" "$up" "$detail"
   done
 }
 
