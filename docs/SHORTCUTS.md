@@ -210,11 +210,12 @@ almost nothing and does **not** load `tmux/cf.tmux.conf`. Verified live:
 |---|---|
 | `` ` `` | **the stack** — leaves the whole stack in one press. (The fleet already takes `` ` `` with `-n`, so nothing new is stolen from the agent, and "one level back" from a stack means "leave the stack".) |
 | `Ctrl-a` … | **the fleet**, as everywhere else — `C-a g`/`d`/`s`/`p` and the `C-a C-a` literal escape all still work. The stack has `prefix None` precisely so this keeps working. |
-| `S-Left` / `S-Right` | **the stack** — MOVES FOCUS between panes, wrapping at both ends. Until this existed the stack was watch-only past the first pane: `prefix None` puts tmux's own pane navigation (prefix-table only) out of reach, and `mouse off` means a click goes to whichever pane already has focus, so focus never left pane 0. |
+| `S-Left` / `S-Right` | **the stack** — MOVES FOCUS between panes, wrapping at both ends. Until this existed the stack was watch-only past the first pane: `prefix None` puts tmux's own pane navigation (prefix-table only) out of reach, and `mouse off` made the click bindings inert, so focus never left pane 0. |
 | `Ctrl-a ←` / `Ctrl-a →` | **the fleet** — cycles *that pane's* nested client to another session in *that* project (what `⇧←→` did before it moved to pane focus; `tmux/cf.tmux.conf` binds both forms, and only the `-n` one was taken). Confirmed: a pane showing `master` stepped to `worker-b`. |
 | `Ctrl-s` / `Ctrl-p` / `Ctrl-f` | **the fleet** — they do what they always do (write a `.goto` marker, detach), which here closes that one pane. The marker is harmless: every path that reads one clears it first. |
 | everything else | **the agent**. Note `Ctrl-b` is *not* used by the stack — Claude Code uses it to move the cursor back one character, which is why the stack has no prefix of its own. |
-| mouse | **the fleet** — the stack keeps `mouse off` so events pass through. |
+| **click** | **both** — the stack focuses the pane you clicked, then forwards the click to the agent in it (tmux's default `MouseDown1Pane` is `select-pane -t = ; send-keys -M`). So clicking a pane is the same as `⇧←→`-ing to it, and Claude still sees the click. |
+| wheel / drag | **the agent** — forwarded, because a nested tmux always sets `mouse_any_flag`. Verified the wheel does *not* drop the outer tmux into copy-mode, which is the classic nested-tmux scroll trap. |
 
 Each pane keeps its own session's status bar; the **pane border** carries
 `project · session`, because a nested bar reading `● master` can't say whose master it is.

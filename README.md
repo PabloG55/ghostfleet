@@ -176,12 +176,13 @@ Panes cannot cross tmux servers and every project *is* a server, so each pane ru
 
 - **Leaving detaches, it never kills.** `` ` `` closes the whole stack; every session keeps
   running exactly where it was.
-- **`⇧←/→` moves focus between the panes**, wrapping at both ends. That is the one key the stack
-  had to take from the fleet, and it costs nothing: `Ctrl-a ←/→` still cycles which session a
-  pane shows, because the stack has no prefix of its own.
-- **Everything else still reaches the agent.** `Ctrl-a …`, `Ctrl-s`, `Ctrl-p`, `Ctrl-f` and the
-  mouse all pass through to the fleet inside the pane as usual; the only other key the stack
-  takes is `` ` ``, which the fleet already took.
+- **`⇧←/→` moves focus between the panes** (wrapping at both ends), and so does **clicking one**.
+  `⇧←→` is the one key the stack had to take from the fleet, and it costs nothing: `Ctrl-a ←/→`
+  still cycles which session a pane shows, because the stack has no prefix of its own.
+- **Everything else still reaches the agent.** `Ctrl-a …`, `Ctrl-s`, `Ctrl-p`, `Ctrl-f`, the
+  wheel and drags all pass through to the fleet inside the pane as usual — a click both focuses
+  the pane *and* reaches Claude. The only other key the stack takes is `` ` ``, which the fleet
+  already took.
 - **Panes are narrow, and Claude reflows to fit.** That is fine for reading and typing, but the
   governor cannot scrape the 5h usage figure out of a pane under ~100 columns — Claude truncates
   its status line rather than wrapping it. Details, and the busy-detector fix that came out of
