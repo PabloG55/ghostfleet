@@ -173,14 +173,20 @@ every way of **moving focus**:
 
 - tmux ships pane navigation *only* in the prefix table (`prefix o`, `prefix ←→`), and
   `prefix None` makes that table unreachable. The root table has nothing but the built-in
-  `Mouse*`/`Wheel*` entries.
-- `mouse off` means the outer tmux never claims the mouse, so a click in another pane is
-  delivered to whichever pane **already** has focus — the inner tmux there enables mouse
-  reporting, so the sequence arrives, just at the wrong session.
+  `Mouse*`/`Wheel*` entries — and `mouse off` made those inert.
 - `fleet-stack` selects pane 0 before attaching, and nothing afterwards can move it.
 
 So a two-pane stack could *watch* both sessions and only ever type into the left one, which
 reads as an unresponsive pane rather than a missing keybinding.
+
+**What `mouse off` was actually doing** — worth writing down, because the first version of
+this section got it wrong. It did *not* stop the event reaching the agent. tmux routes a
+mouse sequence to the pane **under the cursor** and translates the coordinates for it, and
+it propagates a pane's own mouse request outward, so the whole three-level chain carried
+clicks with `mouse off` set here. Measured: a click at column 150, in a pane at offset 134,
+arrived at that pane's agent reporting **column 16**. What `off` suppressed was only tmux's
+`Mouse*` *bindings* — the `select-pane`. So a click in an unfocused stack pane already went
+to that pane's Claude while the keyboard stayed behind: the worst of both.
 
 Fixed by binding `⇧←/→` on the stack server to `select-pane -t :.+` / `:.-`. Three notes:
 
@@ -195,6 +201,25 @@ Fixed by binding `⇧←/→` on the stack server to `select-pane -t :.+` / `:.-
 - **Alt+arrows were the other candidate** and were rejected: they depend on the terminal
   sending Option as Meta. `⇧←→` needs no such assumption — the fleet's existing binding
   already proves those keys arrive.
+
+And `mouse on`, so a **click** focuses the pane you clicked. Measured on tmux 3.7b in the
+real nest, with synthetic SGR events fed to a live client, both directions:
+
+| | `mouse off` | `mouse on` |
+|---|---|---|
+| click focuses that pane | no | **yes** |
+| click still reaches the agent | yes, col 150 → `16` | yes, **byte-identical** |
+| wheel reaches the agent | yes | yes |
+| wheel traps the outer tmux in copy-mode | no | **no** |
+
+So `on` costs nothing. The default `MouseDown1Pane` is `select-pane -t = ; send-keys -M` —
+it forwards *after* focusing — and `MouseDrag1Pane`/`WheelUpPane` forward whenever the pane's
+app requested mouse tracking (`mouse_any_flag`), which a nested tmux always has. That last
+row is the classic nested-tmux scroll trap and it is worth re-checking if these defaults ever
+change: an outer tmux that entered copy-mode on a wheel event would freeze the pane's view
+and swallow the scroll. Nothing new is asked of zellij at level 1 either — with `off` the
+event already had to pass through it to reach the agent, so this only changes what the stack
+does with an event it was already receiving.
 
 ### 4. Leaving never kills a session — verified, not assumed
 
