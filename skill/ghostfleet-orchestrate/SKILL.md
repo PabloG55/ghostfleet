@@ -59,6 +59,23 @@ passively into an inbox you drain in one call:
   push is debounced — a burst of finishes wakes you once. If it's off, you're not
   woken while idle, so drain the inbox whenever you next act.)
 
+## Asking a session a question (not dispatching work)
+
+A plain `fleet-send` is **one-way**. The target works and its turn ends, but that `done`
+event goes to *its own* fleet's master — never to you — so a question sent to another
+project's session looks ignored no matter how long you wait. When you want an answer:
+
+- **`fleet-send --reply-to me <session> "<question>"`** (MCP: `fleet_send` with
+  `reply_to: true`) — records your address, and when that session's turn ends the hook
+  relays its answer into **your** `fleet-inbox` and wakes you. Add `-s <socket>` (MCP:
+  `project`) to ask another project's session; that is the case it exists for.
+- The answer arrives as an `ANSWERED` row naming `<project>/<session>`, with the reply's
+  first ~200 characters. Pull the rest with `fleet-read -s <socket> <session> 3`.
+- The target is told it is answering an agent, so **ending its turn is the reply** — it
+  doesn't run anything. If it hits a permission prompt mid-request you get an `ASKS` row
+  instead, and can unblock it with `fleet-answer`; the address survives until it answers.
+- One request, one answer. Ask again to ask again.
+
 ## Unblock a worker stuck on a prompt
 
 `fleet-send` types a *task* into a worker and submits a turn — it can't answer a
@@ -96,6 +113,7 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | see live sessions + status | `fleet-list` |
 | check who needs you / what finished | `fleet-inbox` |
 | dispatch a task | `fleet-send <session> "<self-contained brief>"` |
+| **ask** a session something (answer comes back) | `fleet-send --reply-to me <session> "<question>"` |
 | read a worker's output | `fleet-read <session> [n]` |
 | reuse a free worktree | `fleet-spawn <name> --reuse <worktree> [--prompt "…"]` |
 | recycle a worktree onto a new branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from <base>` |

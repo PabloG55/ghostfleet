@@ -210,13 +210,17 @@ almost nothing and does **not** load `tmux/cf.tmux.conf`. Verified live:
 |---|---|
 | `` ` `` | **the stack** — leaves the whole stack in one press. (The fleet already takes `` ` `` with `-n`, so nothing new is stolen from the agent, and "one level back" from a stack means "leave the stack".) |
 | `Ctrl-a` … | **the fleet**, as everywhere else — `C-a g`/`d`/`s`/`p` and the `C-a C-a` literal escape all still work. The stack has `prefix None` precisely so this keeps working. |
-| `S-Left` / `S-Right` | **the fleet** — cycles *that pane's* nested client to another session in *that* project. Confirmed: a pane showing `master` stepped to `worker-b`. |
+| `S-Left` / `S-Right` | **the stack** — MOVES FOCUS between panes, wrapping at both ends. Until this existed the stack was watch-only past the first pane: `prefix None` puts tmux's own pane navigation (prefix-table only) out of reach, and `mouse off` means a click goes to whichever pane already has focus, so focus never left pane 0. |
+| `Ctrl-a ←` / `Ctrl-a →` | **the fleet** — cycles *that pane's* nested client to another session in *that* project (what `⇧←→` did before it moved to pane focus; `tmux/cf.tmux.conf` binds both forms, and only the `-n` one was taken). Confirmed: a pane showing `master` stepped to `worker-b`. |
 | `Ctrl-s` / `Ctrl-p` / `Ctrl-f` | **the fleet** — they do what they always do (write a `.goto` marker, detach), which here closes that one pane. The marker is harmless: every path that reads one clears it first. |
 | everything else | **the agent**. Note `Ctrl-b` is *not* used by the stack — Claude Code uses it to move the cursor back one character, which is why the stack has no prefix of its own. |
 | mouse | **the fleet** — the stack keeps `mouse off` so events pass through. |
 
 Each pane keeps its own session's status bar; the **pane border** carries
 `project · session`, because a nested bar reading `● master` can't say whose master it is.
+Note that a stacked pane's own status bar still advertises `⇧←→ cycle`: it belongs to the
+fleet *inside* the pane, which has no way to know it is being viewed through a stack. Inside
+one, that hint means `Ctrl-a ←/→`.
 
 Leaving **detaches** the nested clients and never kills a session (asserted in
 `test/run.sh`, and the assertion goes red if the teardown is changed to kill).
@@ -246,6 +250,7 @@ work at stack width, and the governor's 5h usage scrape cannot read a pane narro
 | `fleet-spawn <n> --new --prompt "..."` | isolated worker (new worktree) |
 | `fleet-spawn <n> --reuse <wt>` | reuse a free worktree |
 | `fleet-send <s> "..."` | new task (only if the session is free) |
+| `fleet-send --reply-to me <s> "..."` | **ask** instead of dispatch: records a return address, and when that session's turn ends the hook relays its answer into YOUR inbox and wakes you. Works across projects (`-s <sock>`), which is the case it exists for — a plain send's `done` only ever reaches the target's OWN master. [not upstream yet] |
 | `fleet-read <s> [n]` | a worker's last N messages |
 | `fleet-answer <s> "2"` | unblock a dialog — don't use `fleet-send` for this |
 | `fleet-pause <s>` / `fleet-resume <s>` | CLI equivalents of `p`/`P` on the grid |

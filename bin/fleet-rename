@@ -11,6 +11,8 @@
 #   - the pause marker (fleet-pause)
 #   - the notify-lead / notify-lead-off per-session override
 #   - a pending scheduled send (fleet-schedule)
+#   - a pending reply address (fleet-send --reply-to), so a question already asked of
+#     this session still gets its answer relayed after the rename
 #   - the fleet-spawn manifest row (what fleet-worktrees shows as the task)
 #
 # Refuses on a live-session collision, an existing path collision, or a dirty/locked
@@ -57,6 +59,8 @@ mv -f "$FLEET_DIR/$SOCK.$OLD.parked"          "$FLEET_DIR/$SOCK.$NEW.parked"    
 mv -f "$FLEET_DIR/$SOCK.$OLD.notify-lead"     "$FLEET_DIR/$SOCK.$NEW.notify-lead"     2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.notify-lead-off" "$FLEET_DIR/$SOCK.$NEW.notify-lead-off" 2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.sched"           "$FLEET_DIR/$SOCK.$NEW.sched"           2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.reply-to"        "$FLEET_DIR/$SOCK.$NEW.reply-to"        2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.reply-to.armed"  "$FLEET_DIR/$SOCK.$NEW.reply-to.armed"  2>/dev/null || true
 
 MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
 if [ -f "$MANIFEST" ]; then

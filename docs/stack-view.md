@@ -164,7 +164,39 @@ Worth knowing: a member window **stays narrow after you leave the stack** (tmux 
 the last client's size), until something wider attaches. So the blind spot outlives the
 screen.
 
-### 3. Leaving never kills a session — verified, not assumed
+### 3. `prefix None` + `mouse off` left NO way to reach pane 2..N
+
+Hazard 1 above ("check what still reaches Claude") was answered by taking almost nothing:
+`prefix None` so `C-a` stays the fleet's, `mouse off` so events pass through, one binding
+(`` ` ``). What that combination also does — measured on a live stack, not read — is remove
+every way of **moving focus**:
+
+- tmux ships pane navigation *only* in the prefix table (`prefix o`, `prefix ←→`), and
+  `prefix None` makes that table unreachable. The root table has nothing but the built-in
+  `Mouse*`/`Wheel*` entries.
+- `mouse off` means the outer tmux never claims the mouse, so a click in another pane is
+  delivered to whichever pane **already** has focus — the inner tmux there enables mouse
+  reporting, so the sequence arrives, just at the wrong session.
+- `fleet-stack` selects pane 0 before attaching, and nothing afterwards can move it.
+
+So a two-pane stack could *watch* both sessions and only ever type into the left one, which
+reads as an unresponsive pane rather than a missing keybinding.
+
+Fixed by binding `⇧←/→` on the stack server to `select-pane -t :.+` / `:.-`. Three notes:
+
+- **It is affordable only because of the prefix table.** `⇧←→` is the one `-n` pair the
+  fleet also binds (its session ring), but `tmux/cf.tmux.conf` binds the same commands to
+  `C-a ←/→` as well, and `prefix None` passes those straight through. Nothing is lost;
+  inside a stack the ring just moves to the prefixed form.
+- **`:.+`/`:.-`, not `-L`/`-R`.** The layout is always `even-horizontal`, so pane index
+  order *is* left-to-right order — and the index form wraps at both ends, matching the
+  fleet's own wrapping ring instead of dead-ending on the edge pane. Verified by driving an
+  attached client through all three panes and off both ends (`test/run.sh`).
+- **Alt+arrows were the other candidate** and were rejected: they depend on the terminal
+  sending Option as Meta. `⇧←→` needs no such assumption — the fleet's existing binding
+  already proves those keys arrive.
+
+### 4. Leaving never kills a session — verified, not assumed
 
 Killing the outer stack window SIGHUPs each pane's `tmux attach`, which detaches that
 nested client. Measured on two members on two different servers: after leaving, both

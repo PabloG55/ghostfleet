@@ -300,9 +300,11 @@ rm -rf "$T"; unset CLAUDE_FLEET_DIR
 
 # The stack is a THIRD multiplexer level (zellij -> stack tmux -> fleet tmux -> agent)
 # and the OUTER tmux answers a key first. cf.tmux.conf binds `, ^S, ^P, ⇧←/→ and ^F
-# with -n; if the stack's config bound any of them, the fleet would never see them
-# again. Proven by asking a REAL server what it owns, not by grepping the file.
-group "stack config steals only the backtick"
+# with -n; every one the stack also binds is one the fleet never sees again. It takes
+# exactly three — ` to leave, ⇧←/→ to move focus between panes — and ⇧←→ is affordable
+# ONLY because the fleet binds the same session cycle to C-a ←/→ in its prefix table,
+# which still passes through. Proven by asking a REAL server what it owns.
+group "stack config steals only what it must"
 if command -v tmux >/dev/null 2>&1; then
   tmux -L cfstktest kill-server 2>/dev/null
   tmux -L cfstktest -f "$ROOT/tmux/cf-stack.tmux.conf" new-session -d -s t "sleep 30" 2>/dev/null
@@ -310,11 +312,16 @@ if command -v tmux >/dev/null 2>&1; then
   # built-ins, and inert here because `mouse off` — the KEYBOARD entries are what
   # decide whether a keystroke stops at the stack or reaches the fleet inside it.
   root="$(tmux -L cfstktest list-keys -T root 2>/dev/null | grep -vE 'Mouse|Wheel|Click')"
-  is "root table binds exactly 1 key"  "1" "$(printf '%s\n' "$root" | grep -c . || true)"
-  is "...and it is the backtick"       "1" "$(printf '%s\n' "$root" | grep -c -- '-T root `' || true)"
-  for k in C-s C-p C-f S-Left S-Right; do
+  is "root table binds exactly 3 keys" "3" "$(printf '%s\n' "$root" | grep -c . || true)"
+  is "backtick leaves the stack"       "1" "$(printf '%s\n' "$root" | grep -c -- '-T root ` *detach-client' || true)"
+  # These three still have to reach the fleet: they write a .goto marker and detach.
+  for k in C-s C-p C-f; do
     is "no-prefix $k passes through"   "0" "$(printf '%s\n' "$root" | grep -cE "root +$k " || true)"
   done
+  # ⇧←→ must select a PANE (:.+/:.- wrap; -L/-R dead-end on the edge pane) and must not
+  # be anything that detaches — a stack you leave by moving right is not navigation.
+  is "S-Right selects the next pane"   "1" "$(printf '%s\n' "$root" | grep -cE "root +S-Right +select-pane -t '?:\.\+" || true)"
+  is "S-Left selects the previous one" "1" "$(printf '%s\n' "$root" | grep -cE "root +S-Left +select-pane -t '?:\.-" || true)"
   # C-a must stay the FLEET's prefix, or C-a g/d/s/p and the C-a C-a escape all die.
   is "prefix is None (C-a reaches the fleet)" "None" "$(tmux -L cfstktest show-options -gv prefix 2>/dev/null)"
   # An outer tmux that claimed the mouse would eat every event before the fleet.
@@ -322,6 +329,164 @@ if command -v tmux >/dev/null 2>&1; then
   tmux -L cfstktest kill-server 2>/dev/null
 else
   skip "stack config" "tmux not available"
+fi
+
+# A binding in the file is not focus that MOVES. With `prefix None` and `mouse off` there
+# was NO way to reach pane 2..N — the stack was watch-only for every pane but the first —
+# and "the config says select-pane" would pass just as happily for a key the client never
+# resolves. So attach a REAL client and send it keys: both directions, the wrap at both
+# ends, and the negative (a key the fleet owns must leave focus alone).
+group "stack pane focus (real client, keys sent)"
+if command -v tmux >/dev/null 2>&1; then
+  SCONF="$ROOT/tmux/cf-stack.tmux.conf"
+  tmux -L cfstkpane kill-server 2>/dev/null; tmux -L cfstkout kill-server 2>/dev/null
+  tmux -L cfstkpane -f "$SCONF" new-session -d -s stack -x 200 -y 50 "sleep 60" 2>/dev/null
+  tmux -L cfstkpane split-window -h -t stack "sleep 60" 2>/dev/null
+  tmux -L cfstkpane split-window -h -t stack "sleep 60" 2>/dev/null
+  tmux -L cfstkpane select-layout -t stack even-horizontal 2>/dev/null
+  tmux -L cfstkpane select-pane -t stack.0 2>/dev/null
+  # An ATTACHED client is the only thing that resolves a key table — send-keys straight
+  # to the pane would bypass the bindings entirely and prove nothing about them.
+  tmux -L cfstkout new-session -d -x 200 -y 50 \
+    "tmux -L cfstkpane -f '$SCONF' attach -t stack" 2>/dev/null
+  sleep 1.5
+  act() { tmux -L cfstkpane list-panes -t stack -F '#{?pane_active,#{pane_index},}' 2>/dev/null | tr -d ' \n'; }
+  key() { tmux -L cfstkout send-keys "$1" 2>/dev/null; sleep 0.5; }
+  is "focus starts on the first pane"  "0" "$(act)"
+  key S-Right; is "⇧→ moves one right"  "1" "$(act)"
+  key S-Right; is "...and again"        "2" "$(act)"
+  key S-Right; is "...and WRAPS to 0"   "0" "$(act)"
+  key S-Left;  is "⇧← wraps back to 2"  "2" "$(act)"
+  key S-Left;  is "...and moves left"   "1" "$(act)"
+  # C-s belongs to the fleet inside (it writes a .goto marker and detaches). If the stack
+  # ever answered it, this would move focus instead of passing through.
+  key C-s;     is "C-s leaves focus put" "1" "$(act)"
+  tmux -L cfstkout kill-server 2>/dev/null; tmux -L cfstkpane kill-server 2>/dev/null
+else
+  skip "stack pane focus" "tmux not available"
+fi
+
+# ── 4c. the reply relay (fleet-send --reply-to → the hook) ────────────────────
+# A question sent to another fleet used to be answered into thin air: the inbox block in
+# hooks/fleet-event.sh routes a Stop to ITS OWN fleet's master and nobody else, and it
+# skips masters entirely — so the usual cross-project target reported to no one. From the
+# asking side that is indistinguishable from being ignored, which is what makes it worth
+# testing in every direction: a relay that never fires looks exactly like today's bug.
+group "reply relay (hook routing)"
+if command -v jq >/dev/null 2>&1; then
+  T="$(mktemp -d)"; RF="$T/resp/fleet"; AF="$T/ask/fleet"; mkdir -p "$RF" "$AF"
+  US=$'\x1f'; TRF="$T/t.jsonl"; asked="$AF/cf-ask.inbox"
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"the write-back is suppressed by the sync"}]}}' > "$TRF"
+  mark()  { printf '%s\n' "$1" > "$RF/cf-resp.w1.reply-to"; }
+  arm()   { : > "$RF/cf-resp.w1.reply-to.armed"; }
+  held()  { [ -f "$RF/cf-resp.w1.reply-to" ] && echo 1 || echo 0; }
+  armed() { [ -f "$RF/cf-resp.w1.reply-to.armed" ] && echo 1 || echo 0; }
+  rows()  { grep -c . "$1" 2>/dev/null || true; }
+  fire()  {                     # $1 = event, $2 = notification message
+    printf '{"hook_event_name":"%s","session_id":"sid1","cwd":"%s","transcript_path":"%s","message":"%s"}' \
+      "$1" "$T" "$TRF" "${2:-}" \
+    | env -u TMUX CLAUDE_FLEET_DIR="$RF" CLAUDE_FLEET_SOCK=cf-resp CLAUDE_FLEET_SLOT=w1 \
+          CLAUDE_FLEET_NOTIFIER=off "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  # The delivery itself. The row lands in the ASKER's dir, which is the whole point: under
+  # another profile that is a different directory, so the address has to carry it.
+  mark "cf-ask${US}master${US}$AF"; arm; fire Stop
+  is "the answer reaches the asker"     "resp/w1|answered" "$(awk -F'\t' 'NR==1{print $2"|"$3}' "$asked" 2>/dev/null)"
+  is "...carrying the answer's text"    "1" "$(matches 'write-back is suppressed' "$asked")"
+  is "...and the address is consumed"   "0" "$(ls "$RF" 2>/dev/null | grep -c 'reply-to' || true)"
+  # Both paths must stay independent: no address means no relay, and the responder's own
+  # fleet still logs its 'done' exactly as before.
+  : > "$asked"; : > "$RF/cf-resp.inbox"; fire Stop
+  is "no address, no relay"             "0" "$(rows "$asked")"
+  is "...its own fleet still logs done" "1" "$(matches 'done' "$RF/cf-resp.inbox")"
+  # ARMING — the ordering guard. fleet-send can paste into a session that is MID-TURN,
+  # and that turn Stops first. Relaying it would answer with the wrong turn's work AND
+  # consume the address, so the answer actually asked for would never be sent.
+  : > "$asked"; mark "cf-ask${US}master${US}$AF"; fire Stop
+  is "an unarmed address doesn't relay" "0" "$(rows "$asked")"
+  is "...and is kept, not burned"       "1" "$(held)"
+  fire UserPromptSubmit
+  is "UserPromptSubmit arms it"         "1" "$(armed)"
+  fire Stop
+  is "...and THAT turn's Stop relays"   "1" "$(matches 'write-back is suppressed' "$asked")"
+  # A block mid-request goes back to the asker too (it's the one that can unblock it),
+  # but must NOT consume the address — that turn hasn't produced the answer yet.
+  : > "$asked"; mark "cf-ask${US}master${US}$AF"; arm; fire Notification "needs permission to run rm"
+  is "a mid-request block relays"       "asks" "$(awk -F'\t' 'NR==1{print $3}' "$asked" 2>/dev/null)"
+  is "...and keeps the address"         "1" "$(held)"
+  # Malformed addresses. The 4-field case is the trap CLAUDE.md keeps a list of: with
+  # fewer read variables than fields the leftover glues onto the LAST one — here the
+  # DIRECTORY every row gets written into. Two guards catch it (the sink, and the -d
+  # test), so this asserts the contract rather than either guard.
+  bads=("cf-ask${US}master${US}$AF${US}JUNK"      \
+        "cf-ask${US}mas ter${US}$AF"              \
+        "cf-ask${US}master${US}not/absolute"      \
+        "cf-ask${US}master"                       \
+        "cf-resp${US}w1${US}$AF")
+  : > "$RF/cf-resp.inbox"
+  for bad in "${bads[@]}"; do
+    : > "$asked"; mark "$bad"; arm; fire Stop
+    is "unroutable address is refused"  "0" "$(rows "$asked")"
+    is "...dropped, not retried a turn" "0" "$(ls "$RF" 2>/dev/null | grep -c 'reply-to' || true)"
+  done
+  # Silence is the failure mode here: dropping the address without a word would leave the
+  # asker waiting and the responder with nothing to explain it. One row per dropped one.
+  is "...and it says so where you look" "${#bads[@]}" "$(matches 'unroutable reply-to marker' "$RF/cf-resp.inbox")"
+  rm -rf "$T"
+else
+  skip "reply relay" "jq not available"
+fi
+
+# The sending half: the address fleet-send writes, and every address it must refuse.
+group "reply relay (fleet-send --reply-to)"
+if command -v tmux >/dev/null 2>&1; then
+  T="$(mktemp -d)"; RF="$T/fleet"; AF="$T/ask/fleet"; mkdir -p "$RF" "$AF"
+  US=$'\x1f'
+  tmux -L cffsend kill-server 2>/dev/null
+  # The pane prints the busy marker on purpose: fleet-send then takes its "already
+  # mid-turn, the prompt queues" path, which skips the 8s submit-confirm loop. The
+  # queued path must KEEP the address (arming decides which turn answers, not this).
+  tmux -L cffsend new-session -d -x 200 -y 40 -s tgt "printf 'esc to interrupt\n'; sleep 30" 2>/dev/null
+  sleep 0.4
+  FSEND() { env -u TMUX CLAUDE_FLEET_DIR="$RF" "$ROOT/bin/fleet-send" -s cffsend "$@" 2>&1; }
+  FSEND --reply-to "cf-ask/master" --reply-dir "$AF" tgt "what is the schema" >/dev/null 2>&1
+  is "the address is a 3-field record" "cf-ask|master|$AF" \
+     "$(tr '\037' '|' < "$RF/cffsend.tgt.reply-to" 2>/dev/null | tr -d '\n')"
+  is "a queued send keeps it"          "1" "$([ -f "$RF/cffsend.tgt.reply-to" ] && echo 1 || echo 0)"
+  is "...and nothing is pre-armed"     "0" "$([ -f "$RF/cffsend.tgt.reply-to.armed" ] && echo 1 || echo 0)"
+  # The target has to be TOLD, or it answers as if a human were watching. Read it off the
+  # PANE (the tty echoes the paste): fleet-send pastes with -d, which deletes the buffer,
+  # so the buffer is gone by now — and the pane is what the agent actually received.
+  # The notice is PREPENDED: the paste-landed probe is the last 24 chars of the message,
+  # and a fixed boilerplate tail would be identical on every relayed send, so the probe
+  # would match a PREVIOUS send still on screen instead of this one.
+  buf="$(tmux -L cffsend capture-pane -p -t tgt 2>/dev/null | grep -v '^[[:space:]]*$')"
+  is "the target is told who asked"    "1" "$(printf '%s\n' "$buf" | grep -c 'from another agent (cf-ask/master)' || true)"
+  is "...and the caller's words last"  "what is the schema" "$(printf '%s\n' "$buf" | tail -1)"
+  # Every field lands in a file that a hook reads back and interpolates into a tmux
+  # command line, so refuse it here — the same rule as fleet-stack's valid_line.
+  is "a path-ish address is refused"   "1" "$(FSEND --reply-to 'cf-a/../../etc' tgt hi | grep -c 'bad --reply-to' || true)"
+  is "a quote-closing one is refused"  "1" "$(FSEND --reply-to "cf-a/x';id'" tgt hi | grep -c 'bad --reply-to' || true)"
+  is "the target as its own asker too" "1" "$(FSEND --reply-to cffsend/tgt tgt hi | grep -c 'would loop back' || true)"
+  # `me` must NOT be answered from CLAUDE_FLEET_SOCK: under the MCP server that env names
+  # the TARGET's fleet, so it would address our session NAME on their SOCKET — an address
+  # that validates and relays to whatever answers that name over there.
+  is "--reply-to me with no \$TMUX refuses" "1" \
+     "$(env -u TMUX CLAUDE_FLEET_DIR="$RF" CLAUDE_FLEET_SOCK=cf-somewhere-else \
+          "$ROOT/bin/fleet-send" -s cffsend --reply-to me tgt hi 2>&1 \
+        | grep -c 'needs a live fleet session' || true)"
+  rm -f "$RF/cffsend.tgt.reply-to"
+  FSEND tgt "plain dispatch" >/dev/null 2>&1
+  is "a plain send writes no address"  "0" "$(ls "$RF" 2>/dev/null | grep -c 'reply-to' || true)"
+  # ...and must not CANCEL one. "Newest send wins" reads tidy and is a trap: the address is
+  # keyed by the TARGET, so the master nudge in fleet-event.sh — a plain fleet-send at
+  # `master` — would drop a pending question to that master every time a worker finished.
+  FSEND --reply-to "cf-ask/master" --reply-dir "$AF" tgt "q2" >/dev/null 2>&1
+  FSEND tgt "unrelated dispatch" >/dev/null 2>&1
+  is "...and doesn't cancel a pending" "1" "$([ -f "$RF/cffsend.tgt.reply-to" ] && echo 1 || echo 0)"
+  tmux -L cffsend kill-server 2>/dev/null; rm -rf "$T"
+else
+  skip "reply relay (fleet-send)" "tmux not available"
 fi
 
 # `node --check` proves the screen PARSES, not that it runs — a missing `let` is a
