@@ -462,6 +462,56 @@ else
   skip "grid clicks" "tmux missing"
 fi
 
+# ── 4a6. a need-you that was answered must stop being red ────────────────────
+# need-you is LATCHED — the hook writes it and only a later hook event overwrites it —
+# so the only other way out is noticing the session moved on. That test was purely a
+# clock: "the transcript advanced more than 5s after the flag". The 5s is slop for
+# Claude writing its turn either side of firing the hook, and it swallowed real
+# answers: a /login answered 3 seconds after the prompt landed INSIDE the grace, and a
+# slash command is not a model turn, so no Stop hook ever came either. The card stayed
+# red for the life of the session while the pane sat at an idle prompt.
+#
+# The fix asks who spoke last instead, so the cases below run in BOTH directions: an
+# answered flag must clear, and a genuinely pending one must NOT — a rule that just
+# cleared everything would fix the complaint and silently blind the fleet to every
+# real question, which is the one thing this status exists to surface.
+group "an answered need-you stops being red"
+if command -v tmux >/dev/null 2>&1; then
+  NY="$(mktemp -d)"
+  tmux -L cfneedtest kill-server 2>/dev/null
+  for s in n1 n2 n3; do tmux -L cfneedtest new-session -d -s "$s" "sleep 120" 2>/dev/null; done
+  node -e '
+    const fs=require("fs"),path=require("path");
+    const dir=process.argv[1], now=Math.floor(Date.now()/1000);
+    const A=JSON.stringify({type:"assistant",message:{role:"assistant",content:[{type:"text",text:"working on it"}]}});
+    const U=JSON.stringify({type:"user",message:{role:"user",content:"ok"}});
+    // slot -> [transcript tail, seconds the transcript lands AFTER the hook]
+    const cases={ n1:[[A,U],3], n2:[[U,A],3], n3:[[U,A],600] };
+    for(const [slot,[lines,delta]] of Object.entries(cases)){
+      const t=path.join(dir,slot+".jsonl");
+      fs.writeFileSync(t,lines.join("\n")+"\n");
+      const hookTs=now-3600;                       // raised an hour ago either way
+      fs.utimesSync(t,hookTs+delta,hookTs+delta);
+      fs.writeFileSync(path.join(dir,slot+".json"),JSON.stringify(
+        {sock:"cfneedtest",slot,cwd:"/tmp/"+slot,folder:slot,branch:"main",
+         status:"need-you",transcript:t,ts:hookTs}));
+    }' "$NY"
+  nystat() { CLAUDE_FLEET_DIR="$NY" node "$ROOT/bin/fleet-grid.mjs" cfneedtest --plain 2>/dev/null \
+             | tail -n +3 | while IFS= read -r l; do
+                 [ "$(printf '%s' "$l" | cut -c1-12 | sed 's/ *$//')" = "$1" ] \
+                   && printf '%s' "$l" | cut -c62-72 | sed 's/ *$//'; done; }
+  # answered 3s later — inside the old grace, so it used to stay red forever
+  is "answered (user spoke last)      -> cleared" "ready"    "$(nystat n1)"
+  # Claude spoke last and nothing came back: a real question, must survive
+  is "pending (Claude spoke last)     -> still red" "need-you" "$(nystat n2)"
+  # and the original clock rule still has to work on its own
+  is "moved on long after             -> cleared" "ready"    "$(nystat n3)"
+  tmux -L cfneedtest kill-server 2>/dev/null
+  rm -rf "$NY"
+else
+  skip "answered need-you" "tmux missing"
+fi
+
 # ── 4b. the stack ────────────────────────────────────────────────────────────
 # stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
 # repo is: EVERY project has a session called `master`, so a bare name stacks whichever

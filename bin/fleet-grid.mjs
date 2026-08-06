@@ -201,6 +201,21 @@ const BUSY_RE = /^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:…|\.\.\.)\s?\(/i;
 // namespaced by socket for the same reason .parked is: every project has a `master`.
 // ABSENT = claude, which is what keeps every pre-existing session — and every session
 // started by a path that predates agents — on exactly the old code path.
+// The role of the NEWEST entry in a transcript: 'assistant' when Claude spoke last,
+// 'user' when something came back to it — a tool result, a typed reply, or the output
+// of a slash command. Used to tell an answered need-you from a live one.
+function lastEntryRole(p) {
+  if (!p) return '';
+  const lines = tailText(p).split('\n').filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const t = JSON.parse(lines[i]).type;
+      if (t === 'assistant' || t === 'user') return t;
+    } catch {}
+  }
+  return '';
+}
+
 function agentOf(name) {
   try {
     const a = fs.readFileSync(path.join(FLEET_DIR, `${SOCK}.${name}.agent`), 'utf8').trim();
@@ -272,9 +287,20 @@ function deriveStatus(hook, transcript, busy, hookTs, tmt) {
   // genuinely waits on you the transcript can't advance, so tmt > hookTs means it was
   // already dealt with. (Claude writes the assistant turn before the Notification, so
   // a real question still has hookTs >= tmt.)
+  // Two ways to be stale, because the CLOCK ALONE IS NOT ENOUGH. That +5s is slop for
+  // Claude writing the assistant turn either side of firing the hook — and it swallowed
+  // real answers: a /login answered 3 seconds after the prompt landed INSIDE the grace,
+  // and since a slash command is not a model turn, no Stop hook ever came to overwrite
+  // the status either. The card stayed red for as long as the session lived, on a
+  // session sitting at an idle prompt.
+  //   So also ask WHO SPOKE LAST. A pending question always leaves Claude speaking
+  // last; a tool result, a typed reply, or a slash command's output is a `user` entry
+  // and only ever lands once the thing was dealt with. That has no ordering slop to
+  // tune, which is the whole reason the window was wrong.
   if (hook === 'need-you') {
-    const stale = tmt && hookTs && tmt > hookTs + 5;
-    if (!stale) return 'need-you';
+    const movedOn  = tmt && hookTs && tmt > hookTs + 5;
+    const answered = tmt && hookTs && tmt >= hookTs && lastEntryRole(transcript) === 'user';
+    if (!movedOn && !answered) return 'need-you';
   }
   // No pane detector for this agent. A pushed hook status is still real evidence, so
   // use it when there is one; with nothing at all, say so. Falling through to the
