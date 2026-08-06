@@ -4,14 +4,15 @@
 #
 #   Projects  →  ⏎  →  Master Claude  →  C-s  →  the session grid
 #
-# Shortcuts that skip a level:
-#   Projects, ^S  ->  that project's session grid directly (no master); leaving the
-#                     grid returns to Projects, since master was never asked for
-#   grid,     ^P  ->  straight back to Projects (instead of into master)
+# One `back` steps up exactly ONE level from wherever you are, however you got there:
+#   session  ->  the grid   ->  master  ->  Projects
+# Shortcuts that skip a level on the way DOWN:
+#   Projects, ^S  ->  that project's session grid directly (no master)
+#   grid,     ^P  ->  straight back to Projects (the express lane up, past master)
 #   any screen, 1-9  ->  jump to that numbered card (project, or session in the grid)
-#   chat/master, C-f <p> <s>    ->  project p, session s      (e.g. C-f 1 1)
-#   chat/master, C-f <p> Enter  ->  project p's MASTER        (m also works)
-#   chat/master, C-f <p> s      ->  project p's session GRID  (or C-f s <p>)
+#   chat/master, Ctrl-f <p> <s>    ->  project p, session s      (e.g. Ctrl-f 1 1)
+#   chat/master, Ctrl-f <p> Enter  ->  project p's MASTER        (m also works)
+#   chat/master, Ctrl-f <p> s      ->  project p's session GRID  (or Ctrl-f s <p>)
 #
 # Each project has its own hidden tmux server (cf-<project>) holding its sessions.
 # Node draws the screens; tmux does the PTY work. From master, ` (or C-a g) steps
@@ -129,7 +130,19 @@ TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
 tm_wire() {
   TM source-file "$CONF" 2>/dev/null || true
   TM set-option -g @cf_bin "$BIN_DIR" 2>/dev/null || true
+  # Hand the server the grid's CARD ORDER (⇧hjkl in the grid persists one). ⇧←→ runs
+  # fleet-cycle inside run-shell, which inherits the server's environment and not this
+  # fleet's — so it can't find the order file, but it can always read an option off the
+  # socket it's already talking to. ':' separates: tmux allows neither ':' nor '.' in a
+  # session name, so no name can smuggle a separator through.
+  TM set-option -g @cf_order "$(grid_sessions | paste -sd: -)" 2>/dev/null || true
 }
+
+# This fleet's session names in the GRID's order, master excluded — the numbering the
+# cards show. Asks the grid itself rather than re-deriving it: the order is persisted
+# and reorderable, and a second implementation here is how "session 2" ends up meaning
+# one thing to a card and another to the Ctrl-f chord that counts them.
+grid_sessions() { node "$GRID" "$SOCK" "$CONF" --order 2>/dev/null; }
 
 profile_dir() { case "$1" in work|default|"") echo "$HOME/.claude" ;; *) echo "$HOME/.claude-$1" ;; esac; }
 # Nth project (1-based) in the list, matching the numbers the cards show. Used by the
@@ -318,10 +331,13 @@ grid_loop() {
   # (^P) instead of back to this project's master.
   GRID_EXIT=""
   local choice name cwd agent="" base rest="" i last="" gsp="" gmark="" gcur="" gv="" gc="" pending=""
-  # C-f <p> <s>: attach the Nth session (grid order, master excluded) without drawing
-  # the grid first. Feeding it through `pending` reuses the normal attach path below.
+  # Ctrl-f <p> <s>: attach the Nth session (grid order, master excluded) without
+  # drawing the grid first. Feeding it through `pending` reuses the normal attach path
+  # below. The Nth is grid_sessions' Nth — the cards can be reordered, and counting
+  # tmux's own listing here would silently open a different session than the digit on
+  # the card you were reading.
   if [ -n "$JUMP_SESS" ]; then
-    name="$(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -v '^master$' | sed -n "${JUMP_SESS}p")"
+    name="$(grid_sessions | sed -n "${JUMP_SESS}p")"
     [ -n "$name" ] && pending="attach${US}${name}"
     JUMP_SESS=""
   fi
@@ -506,24 +522,29 @@ while true; do
   # LEVEL 1 — Master Claude (⏎ on a project lands straight here). From master:
   #   C-s        -> the sessions grid; leaving the grid returns here to master
   #   ` / C-a g  -> back to the Projects picker
-  # ^S from Projects: open the sessions grid WITHOUT starting/attaching master.
-  # Leaving the grid then returns to Projects — master was never asked for.
   # ^T from Projects: open the stack for that project's profile without going
-  # through master or the grid. Leaving it returns to Projects, since neither
-  # was asked for — same contract as ^S.
+  # through master or the grid. The stack is CROSS-project, not a level of this one,
+  # so leaving it returns to where it was opened from — Projects.
   if [ "$GOTO" = "stack" ]; then
     GOTO=""; stack_loop
     LAST_PROJECT="$PROJECT"; PROJECT=""
     continue
   fi
+  # ^S from Projects (and the Ctrl-f grid/session jumps) opens the grid WITHOUT
+  # starting master first. Backing out of it still lands on MASTER, not Projects:
+  # the levels are Projects → master → grid → session, and one `back` steps up
+  # exactly one of them wherever you are. It used to depend on how you got in —
+  # jump straight to a session and backing out ejected you two levels, past the
+  # master of the project you were plainly still inside, which read as the fleet
+  # losing your place. ^P is the express lane up for when you did mean to leave.
   if [ "$GOTO" = "grid" ]; then
     GOTO=""
     ensure_governor              # normally done by enter_master, which we skipped
     grid_loop
     [ "$GRID_EXIT" = "stack" ] && { stack_loop; continue; }   # C-t from a chat
     [ "$GRID_EXIT" = "jump" ] && continue     # jumped to another project's grid
-    LAST_PROJECT="$PROJECT"; PROJECT=""
-    continue
+    [ "$GRID_EXIT" = "projects" ] && { LAST_PROJECT="$PROJECT"; PROJECT=""; }
+    continue                                  # PROJECT still set -> master, next pass
   fi
 
   MASTER_GOTO=""

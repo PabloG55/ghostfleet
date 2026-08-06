@@ -100,7 +100,8 @@ flowchart LR
     Master -- "Ctrl-s" --> Grid["The grid\napi · api-1 · api-2 …"]
 ```
 
-`` ` `` (backtick) always steps back one level, from anywhere — grid → master → Projects.
+`` ` `` (backtick) always steps back exactly one level, from anywhere — session → grid → master
+→ Projects — no matter which shortcut you took *down*.
 
 - **Projects** — pick a project and `⏎` drops you straight into its **Master Claude**. Each
   project has its own hidden tmux server (`cf-<project>`) holding its sessions.
@@ -128,8 +129,17 @@ worktree, creating a new one. Everything else (scheduling, cycling, per-session 
 nice-to-have documented in **[docs/SHORTCUTS.md](docs/SHORTCUTS.md)**.
 
 `` ` `` (backtick) is the universal **back** everywhere below — it steps out one level, mirroring
-detach. `q` does the same on the grid. **Projects** is the root: fully exiting to the shell takes
-**`Ctrl-C` twice** (a single stray key can't drop the whole control plane).
+detach. `q` does the same on the grid. The levels are
+
+```
+Projects  →  master  →  the grid  →  a session
+```
+
+and one **back** always steps up exactly one of them, *however you got in* — jump straight into a
+session with `Ctrl-f 1 1` and backing out still walks you through that project's grid and master.
+`Ctrl-p` is the express lane when you did mean to leave the project entirely. **Projects** is the
+root: fully exiting to the shell takes **`Ctrl-C` twice** (a single stray key can't drop the whole
+control plane).
 
 ### Projects — pick what to work on
 
@@ -142,22 +152,34 @@ detach. `q` does the same on the grid. **Projects** is the root: fully exiting t
 | `x` | remove a project from the list (sessions + history untouched) |
 | digit `1`-`9` | jump straight to the project at that position |
 
-### The grid — switching between worktrees, creating a new one
+### The grid — switching between worktrees, creating and deleting them
 
 | key | does |
 | --- | --- |
 | `↑↓←→` / `hjkl` | move |
+| `⇧h` `⇧j` `⇧k` `⇧l` | **reorder** the selected card (persisted — see below) |
 | `⏎` | enter the selected card full-screen |
 | a **`· FREE`** card (grey) | a worktree with no live session — `⏎` attaches directly, no prompt |
 | `n` | new session on a checkout — lands on a **naming screen** (edit or accept the suggested name), then resumes if that checkout already has a conversation |
 | `N` | same, but the conversation is **forced blank** |
+| `w` | **new worktree** — a fresh sibling checkout on its own branch, with a session started in it |
 | `t` | the **stack** — several sessions on screen at once, across projects (below) |
-| `x` | kill the session (asks `y`/`Y` to confirm) |
+| `x` | kill the session — or, on a `· FREE` card, **remove that worktree** (asks `y` to confirm) |
 | `q` / `` ` `` | back to master |
 | digit `1`-`9` | jump straight to the card at that position |
 
-For an **isolated worker on its own branch** (rather than just another session on an existing
-checkout), use `fleet-spawn` — see [Orchestrate](#orchestrate-a-lead-session-driving-workers) below.
+**Reordering matters more than it looks.** The card order *is* the fleet's numbering: the digit
+printed on a card, `1`-`9`, `Ctrl-f <project> <session>` and `⇧←→` cycling all count the same
+list. Move a card and every one of them follows it, so the worker you keep coming back to can
+live at `1`. The order is saved per fleet and survives leaving the grid.
+
+`w` asks for a name, a branch (defaults to the name) and a base ref, then hands the job to
+`fleet-spawn` — so the new branch is cut from the *right* place (it prefers the remote tip when
+your local ref is behind, and your local one when it's ahead), `node_modules` is symlinked in so
+lint and tests run, and you land in the session. `x` on a `· FREE` card removes a worktree's
+checkout; the **branch is left alone**, and a dirty tree is refused until you confirm again with
+`f`. From a lead session the same jobs are `fleet-spawn` and `git worktree remove` — see
+[Orchestrate](#orchestrate-a-lead-session-driving-workers) below.
 
 ### The stack — watching two workers at once
 
@@ -290,7 +312,10 @@ events show up in `fleet-inbox`. Opt out with `CLAUDE_FLEET_GOVERNOR=off`, watch
 - **`fleet-grid.mjs`** is a flicker-free Node TUI (zero npm deps). Each card joins three sources:
   the tmux session list, the per-session status file that the Claude hooks write to
   `~/.claude/fleet/`, and the last assistant line from the transcript in `~/.claude/projects/`.
-  Worktrees with no live session are read straight from `git worktree list`.
+  Worktrees with no live session are read straight from `git worktree list`. Card order is its
+  own fourth source (`<sock>.order`, rewritten by `⇧hjkl`) — and the single one, since
+  `ghostfleet` counts `Ctrl-f <p> <s>` through `fleet-grid.mjs --order` rather than re-deriving
+  it, and `fleet-cycle` reads the copy mirrored onto the tmux server as `@cf_order`.
 - **`claude-here`** is what each session runs, so sessions resume by checkout. If a
   conversation was registered as a Claude Code **background agent** (e.g. it was
   backgrounded, or created by a bg workflow), a plain `--resume` is refused with
@@ -380,6 +405,8 @@ same order the grid numbers them**, wrapping at both ends:
 ```
 master  ⇄  worker 1  ⇄  worker 2  ⇄  …  ⇄  back to master
 ```
+
+That's the *card* order, so reordering with `⇧hjkl` in the grid moves the ring with it.
 
 It's instant: both sessions live on the same tmux server, so the client just switches and nothing
 redraws — no detach, no grid, the control plane never wakes up. (`Ctrl-f`'s jump chord still has

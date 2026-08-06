@@ -50,8 +50,9 @@ at any step:
    - **`s`** → asks for one more digit → `jump:<project>` (that project's grid — short form, skips the per-project sub-menu)
    - **`Escape`** → cancels
 
-So: `C-f 1 1` = project 1, session 1. `C-f 1 ⏎` (or `C-f 1 m`) = project 1's master.
-`C-f 1 s` = project 1's grid. `C-f s 1` = the same, short form. `C-f p` = Projects.
+So: `Ctrl-f 1 1` = project 1, session 1. `Ctrl-f 1 ⏎` (or `Ctrl-f 1 m`) = project 1's
+master. `Ctrl-f 1 s` = project 1's grid. `Ctrl-f s 1` = the same, short form.
+`Ctrl-f p` = Projects.
 [CODE] — the README only summarizes this in one comment line in `bin/ghostfleet`,
 without detailing the sub-steps or that `Escape` cancels at any level.
 
@@ -117,12 +118,14 @@ explaining it's a keyboard-navigable mini file browser.
 | key | what it does | source |
 |---|---|---|
 | `↑↓←→` / `hjkl` | move selection | README |
+| `⇧h` `⇧j` `⇧k` `⇧l` (`H J K L`) | **reorders** the selected session's card (persisted per fleet — see below) | README |
 | `⏎` | enters the selected session in full | README |
 | `n` | new session on a checkout — **resumes** if a conversation already exists there | README + [CONFIRMED] nuance |
 | `N` | new session, conversation **forced blank** | README + [CONFIRMED] nuance |
-| `x` / `X` | asks for confirmation (`y`/`Y`) to kill the session | README |
+| `w` / `W` | **new worktree** — a form (name · branch · from · agent), then `fleet-spawn --new` creates it and you land in the session (see below) | README |
+| `x` / `X` | asks for confirmation (`y`/`Y`) to kill the session — or, on a `· FREE` card, to **remove that worktree** | README |
 | `s` / `S` | schedule a message to that session | README |
-| `q` / `` ` `` / `Ctrl-C` | back to master (**one press**, no arming like on Projects) | README |
+| `q` / `` ` `` / `Ctrl-C` | back to master (**one press**, no arming like on Projects) — and it is master *however you reached the grid*, including `Ctrl-s` from Projects and the `Ctrl-f` jumps, which skip master on the way in. It used to depend on that: entering the grid without master meant backing out ejected you two levels, past the master of the project you were plainly still inside. `Ctrl-p` remains the express lane up. | README |
 | **digit `1`-`9`** | insta-jump: opens the card at that position directly | [CODE] not in the README |
 | **left click** (mouse) | selects and opens the card under the cursor | [CODE] |
 | `Ctrl-p` or `Q` (uppercase) | **jumps straight to Projects**, without going back through master first | [CODE] not in the README — `Q` is a fallback for when zellij still owns `Ctrl-p` |
@@ -131,6 +134,40 @@ explaining it's a keyboard-navigable mini file browser.
 | **`P`** (uppercase) | **resumes** the selected session (`fleet-resume`) — directly from the grid | **[CODE] — not in the README at all** |
 | `,` | opens **per-session** settings (individual auto-nudge toggle — see below, and now also rename) | [CODE] — the README only describes the Projects `,`, not that the grid has its own per-session one too |
 | `Ctrl-f …` | jump chord (same as in tmux) | README (summarized) |
+
+### Card order is the fleet's numbering (`⇧hjkl`)
+
+`⇧hjkl` moves the selected session's card the way it does on the Projects screen, but
+the stakes are higher here: **four** things count this same list — the digit printed on
+each card, the `1`-`9` insta-jump, `Ctrl-f <project> <session>`, and `⇧←→` cycling. They
+have to keep agreeing, so the order is written to `$CLAUDE_FLEET_DIR/<sock>.order` *and*
+mirrored onto the tmux server as the `@cf_order` option (colon-separated — tmux allows
+neither `:` nor `.` in a session name, so no name can smuggle a separator through).
+
+The two copies exist because `⇧←→` runs `fleet-cycle` inside a tmux `run-shell`, which
+inherits the *server's* environment rather than the fleet's and so cannot find the file
+at all. `bin/ghostfleet` resolves `Ctrl-f <p> <s>` by asking the grid itself
+(`fleet-grid.mjs --order`), so there is exactly one implementation of the ordering and
+one consumer of the mirror. Sessions the file has never seen sort last, in tmux's own
+order; names in the file with no live session are skipped rather than counted.
+
+### `w` — a brand-new worktree
+
+A four-field form (the `agent` row only appears when more than one agent is installed):
+`name` (the session and the folder), `branch` (blank = same as the name), `from` (base
+ref, pre-filled with the repo's current branch), `agent`. `⏎` hands the whole job to
+`bin/fleet-spawn <name> --new`, run with its cwd set to the project's **main checkout** —
+spawn finds the repo from `$PWD`, and the control plane's own cwd is somewhere else
+entirely. That reuse is the point: base-ref resolution against the upstream, the
+`node_modules` symlink, the manifest entry and the agent marker all come for free and
+can't drift from what a lead session gets. The grid then attaches the session **spawn
+says it started**, not the name that was typed — spawn settles collisions itself
+(`name~2`), and attaching the wrong one would be silent.
+
+`x` on a `· FREE` card runs `git worktree remove`. The **branch is deliberately left
+alone**. A dirty tree makes git refuse; the refusal is shown and forcing past it takes
+`f`, not a second `y` — a second `y` on a prompt that just failed is a reflex, and this
+one discards real work.
 
 ### Live sessions vs. free worktrees — cards look different
 
