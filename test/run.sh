@@ -664,6 +664,56 @@ else
   skip "MCP cross-project" "git/tmux missing"
 fi
 
+# ── 4a8. dev-stack slots ─────────────────────────────────────────────────────
+# One integer per checkout that nothing else in the fleet holds, so a repo can derive
+# its local stack (ports, database, bucket) instead of a human picking free numbers per
+# worktree with nothing checking they agree.
+#
+# The race is the whole feature. Leads spawn concurrently — that is what a fleet IS —
+# and a read-modify-write over a shared free list has nothing serialising it, so two
+# spawns both read "lowest free is N" and both take it: the original collision back
+# again, rarer and harder to see. There is no lock to reach for either (flock(1) is not
+# on macOS), so the claim itself is the atom. Measured against the obvious
+# read-then-write version, which hands the SAME slot to all 20 racers and leaves 19
+# checkouts with none at all.
+group "dev-stack slots"
+if command -v git >/dev/null 2>&1; then
+  SL="$(mktemp -d)"
+  mkdir -p "$SL/home/.config/ghostfleet" "$SL/root/proj" "$SL/root/proj-1" "$SL/root/wt-a"
+  git init -q "$SL/root/proj" 2>/dev/null
+  printf 'proj\t%s\twork\n' "$SL/root" > "$SL/home/.config/ghostfleet/projects"
+  SLOT() { HOME="$SL/home" CLAUDE_FLEET_SLOTS="$SL/slots" "$ROOT/bin/fleet-slot" "$@"; }
+  # 0 is the project's REGISTERED primary — the checkout master runs in — and is never
+  # allocated, so the checkout you already work in keeps the ports it always had.
+  is "the registered primary is 0"      "0" "$(SLOT claim "$SL/root/proj")"
+  # ...and "primary" must NOT mean "first entry of git worktree list": a sibling CLONE
+  # is its own repo's first entry, so that test would hand 0 to every checkout in the
+  # project and collide them all onto the primary's ports — the exact failure this
+  # feature removes.
+  is "a sibling clone is NOT 0"         "1" "$(SLOT claim "$SL/root/proj-1")"
+  is "another checkout gets the next"   "2" "$(SLOT claim "$SL/root/wt-a")"
+  # idempotent, so `reuse` keeps its slot (and its warm database) with no special case,
+  # and a boot script can call it every time instead of caching the answer
+  is "claiming twice is stable"         "1" "$(SLOT claim "$SL/root/proj-1")"
+  is "of: reads without allocating"     "2" "$(SLOT of "$SL/root/wt-a")"
+  SLOT release "$SL/root/proj-1" >/dev/null
+  is "a released slot is handed out again" "1" "$(mkdir -p "$SL/root/wt-b"; SLOT claim "$SL/root/wt-b")"
+  # a slot whose checkout is gone must not stay held, or the pool fills with nothing
+  rm -rf "$SL/root/wt-a"
+  SLOT reclaim >/dev/null
+  is "reclaim frees a vanished checkout" "" "$(SLOT of "$SL/root/wt-a" 2>/dev/null)"
+  # THE RACE
+  rm -rf "$SL/slots"; for i in $(seq 1 20); do mkdir -p "$SL/race/w$i"; done
+  for i in $(seq 1 20); do SLOT claim "$SL/race/w$i" & done > "$SL/race.out" 2>&1
+  wait
+  is "20 concurrent claims -> 20 slots"  "20" "$(sort -n "$SL/race.out" | uniq | grep -c . || true)"
+  is "...none of them duplicated"        "0"  "$(sort -n "$SL/race.out" | uniq -d | grep -c . || true)"
+  is "...and 20 checkouts are recorded"  "20" "$(SLOT list | cut -f2 | sort -u | grep -c . || true)"
+  rm -rf "$SL"
+else
+  skip "dev-stack slots" "git missing"
+fi
+
 # ── 4b. the stack ────────────────────────────────────────────────────────────
 # stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
 # repo is: EVERY project has a session called `master`, so a bare name stacks whichever

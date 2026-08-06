@@ -250,6 +250,44 @@ which is what keeps a long-running or restarted lead from getting lost:
 | park / resume a worker (cost) | `fleet-pause <session>` · `fleet-resume <session>` |
 | **rename** a worker + move its worktree | `fleet-rename <session> <new-name>` |
 | **stop** a worker for good (or a dead orphan) | `fleet-stop <session>` |
+| the checkout's **dev-stack slot** | `fleet-slot of <path>` · `fleet-slot list` |
+
+### Dev-stack slots — one integer per checkout
+
+Several checkouts of one repo each need their own local stack: an API port, a web port,
+a database, a bucket. Picking those by hand per worktree is how two of them end up sharing
+a database for a fortnight with nothing to notice.
+
+`fleet-spawn` now hands every checkout one integer that **nothing else in the fleet
+holds** — across every project *and* every profile — and puts it in the session's
+environment as `CLAUDE_FLEET_SLOT`. Your repo derives the rest:
+
+```bash
+N=$(fleet-slot of "$PWD")       # 0 for the project's primary checkout
+API_PORT=$((4000 + N))          # …and whatever else your stack needs
+```
+
+**ghostfleet allocates the number and nothing else.** It doesn't know what a port is,
+which database you run, or what your stack is called — those formulas belong to the repo
+that owns those names. That's what lets one allocator serve repos sharing no conventions.
+
+**Slot 0 is the project's primary checkout** and is never allocated, so the checkout you
+already work in keeps the ports it always had — adopting this changes nothing about a
+machine that's already set up. "Primary" means the checkout the project is *registered*
+at (the one `master` runs in), not "the first entry of `git worktree list`" — sibling
+clones are each their own repo's first entry, and that test would hand `0` to all of them.
+
+Claims are **idempotent by path**, so `--reuse` keeps its slot and therefore its
+already-migrated database — which is what makes reuse cheaper than a fresh worktree
+rather than merely tidier. `fleet-stop` releases; `fleet-clean` reclaims slots whose
+checkout is gone by any route. `fleet-worktrees` shows the column.
+
+The allocation is a directory of marker files (`~/.config/ghostfleet/slots/`) rather than
+a table, because leads spawn concurrently and a read-modify-write over a shared free list
+has nothing serialising it — two spawns would both take the lowest free number, which is
+the collision this removes. There's no lock to reach for either (`flock(1)` isn't on
+macOS), so creating the marker under `set -C` *is* the atom: it succeeds for exactly one
+racer, and the directory listing is the free list.
 
 ```bash
 fleet-worktrees                 # → "Free to reuse: api-3"

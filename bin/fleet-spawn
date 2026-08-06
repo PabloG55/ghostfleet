@@ -236,6 +236,17 @@ fi
 
 link_node_modules "$WT"
 
+# ONE INTEGER PER CHECKOUT that nothing else in the fleet holds, so the repo can derive
+# a local dev stack from it — ports, database name, bucket — instead of a human picking
+# free numbers per worktree and nothing checking they agree. ghostfleet allocates the
+# NUMBER and deliberately knows nothing about what it becomes: those formulas belong to
+# the repo that owns those names. Idempotent, so reusing a worktree keeps its stack (and
+# its already-seeded database) rather than paying for a fresh one. Best-effort: a fleet
+# whose repo doesn't use slots must still spawn exactly as before.
+SLOT="$("$(dirname "$0")/fleet-slot" claim "$WT" 2>/dev/null)" || SLOT=""
+case "$SLOT" in ''|*[!0-9]*) SLOT="" ;; esac
+[ -n "$SLOT" ] && echo "fleet-spawn: dev-stack slot $SLOT (read it with: fleet-slot of \"$WT\")" >&2
+
 # unique session name on this fleet's socket
 name="$NAME"; i=2
 while tmux -L "$SOCK" has-session -t "$name" 2>/dev/null; do name="$NAME~$i"; i=$((i + 1)); done
@@ -264,7 +275,7 @@ fi
 # fresh session in the worktree, background (lead keeps working)
 tmux -L "$SOCK" new-session -d -s "$name" -c "$WT" \
   -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
-  -e "CLAUDE_FLEET_MODEL=$MODEL" -e "CLAUDE_FLEET_AGENT=$AGENT" \
+  -e "CLAUDE_FLEET_MODEL=$MODEL" -e "CLAUDE_FLEET_AGENT=$AGENT" -e "CLAUDE_FLEET_SLOT=$SLOT" \
   "exec agent-here \"$name\""
 echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)${AGENT:+ [agent: $AGENT]}"
 
