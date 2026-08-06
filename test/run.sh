@@ -714,6 +714,74 @@ else
   skip "dev-stack slots" "git missing"
 fi
 
+# ── 4a9. pinning the primary, and the repo's own setup hook ──────────────────
+# Deriving the primary checkout is a guess about someone's disk layout, and it is wrong
+# exactly where it costs most: a project registered at a plain CONTAINER directory
+# holding several clones AND unrelated products. superkey's root is one of those — four
+# superkey clones plus `platform` and `gmc-crosswalk` — so the child-scan would hand
+# slot 0 to a different product entirely. An explicit pin skips the guess.
+group "dev-stack slots: pinned primary"
+if command -v git >/dev/null 2>&1; then
+  PN="$(mktemp -d)"
+  mkdir -p "$PN/home/.config/ghostfleet" "$PN/root/aardvark" "$PN/root/theproj"
+  git init -q "$PN/root/aardvark" 2>/dev/null; git init -q "$PN/root/theproj" 2>/dev/null
+  # the registered NAME matches no child dir, so <root>/<name> misses and the scan runs
+  printf 'mismatch\t%s\twork\n' "$PN/root" > "$PN/home/.config/ghostfleet/projects"
+  PIN() { HOME="$PN/home" CLAUDE_FLEET_SLOTS="$PN/slots" "$ROOT/bin/fleet-slot" "$@"; }
+  rm -rf "$PN/slots"
+  # unpinned: alphabetical order hands 0 to the FOREIGN repo — the hazard, demonstrated
+  is "unpinned: the scan takes the first repo" "0" "$(PIN claim "$PN/root/aardvark")"
+  rm -rf "$PN/slots"
+  printf 'mismatch\t%s\n' "$PN/root/theproj" > "$PN/home/.config/ghostfleet/primaries"
+  is "pinned: the named checkout is 0"         "0" "$(PIN claim "$PN/root/theproj")"
+  is "pinned: the foreign repo is allocated"   "1" "$(PIN claim "$PN/root/aardvark")"
+  rm -rf "$PN"
+else
+  skip "pinned primary" "git missing"
+fi
+
+# A repo that ships .ghostfleet/post-create sets its own worktree up, so the
+# node_modules symlink must not ALSO happen. Not merely redundant: in a pnpm workspace
+# the root node_modules links workspace packages by RELATIVE path, so a symlinked tree
+# resolves every workspace import from the symlink's real location — the MAIN checkout's
+# source. Silent cross-tree contamination, and `pnpm install` afterwards would install
+# straight through the symlink into that checkout.
+group "dev-stack slots: post-create hook"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  HK="$(mktemp -d)"; mkdir -p "$HK/home/.config/ghostfleet" "$HK/stub" "$HK/fleet"
+  printf '#!/usr/bin/env bash\nsleep 60\n' > "$HK/stub/agent-here"; chmod +x "$HK/stub/agent-here"
+  # $1 = "hook" | "nohook" -> spawns a worktree and reports what it got
+  spawnwt() {
+    rm -rf "$HK/root" "$HK/slots"; mkdir -p "$HK/root/proj/.ghostfleet"
+    git init -q -b main "$HK/root/proj" 2>/dev/null
+    git -C "$HK/root/proj" config user.email t@t; git -C "$HK/root/proj" config user.name t
+    mkdir -p "$HK/root/proj/node_modules/pretend"     # so the symlink WOULD fire
+    printf 'node_modules/\n.ran\n' > "$HK/root/proj/.gitignore"
+    if [ "$1" = hook ]; then
+      printf '#!/usr/bin/env bash\nprintf "slot=%%s" "${CLAUDE_FLEET_SLOT:-none}" > .ran\n' \
+        > "$HK/root/proj/.ghostfleet/post-create"
+      chmod +x "$HK/root/proj/.ghostfleet/post-create"
+    fi
+    git -C "$HK/root/proj" add -A; git -C "$HK/root/proj" commit -qm init 2>/dev/null
+    printf 'proj\t%s\twork\n' "$HK/root" > "$HK/home/.config/ghostfleet/projects"
+    tmux -L cfhooktest kill-server 2>/dev/null
+    ( cd "$HK/root/proj" && HOME="$HK/home" CLAUDE_FLEET_SLOTS="$HK/slots" \
+      CLAUDE_FLEET_DIR="$HK/fleet" CLAUDE_FLEET_SOCK=cfhooktest \
+      PATH="$HK/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" w1 --new ) >/dev/null 2>&1
+    tmux -L cfhooktest kill-server 2>/dev/null
+  }
+  spawnwt hook
+  is "hook: it ran, and saw its slot"     "slot=1" "$(cat "$HK/root/w1/.ran" 2>/dev/null)"
+  is "hook: no node_modules symlink"      "0"      "$([ -L "$HK/root/w1/node_modules" ] && echo 1 || echo 0)"
+  # the other direction, or "no symlink" would pass for a spawn that simply stopped
+  # linking at all
+  spawnwt nohook
+  is "no hook: the symlink still happens" "1"      "$([ -L "$HK/root/w1/node_modules" ] && echo 1 || echo 0)"
+  rm -rf "$HK"
+else
+  skip "post-create hook" "git/tmux missing"
+fi
+
 # ── 4b. the stack ────────────────────────────────────────────────────────────
 # stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
 # repo is: EVERY project has a session called `master`, so a bare name stacks whichever

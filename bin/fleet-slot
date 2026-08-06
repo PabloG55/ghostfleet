@@ -13,7 +13,13 @@
 #   claim <path>    the slot for this checkout, allocating one if it has none.
 #                   IDEMPOTENT — the same path always answers the same number, so a
 #                   boot script can call it every time instead of caching it.
-#   of <path>       print its slot, or exit 1 if it has none (never allocates)
+#   of <path>       print its slot, or exit 1 if it has none (never allocates).
+#                   AN EMPTY ANSWER IS NOT ZERO. `N=$(fleet-slot of "$PWD")` followed by
+#                   $((4000 + N)) yields 4000 for an unclaimed checkout — the primary's
+#                   port — which is the silent collision this whole thing exists to
+#                   remove, reintroduced at the commonest ad-hoc entry point (a plain
+#                   `git worktree add`). A boot script should call `claim`, which is
+#                   idempotent and answers 0 only for a registered primary.
 #   release <path>  free it — for a checkout that is being removed
 #   list            every slot: "<n><TAB><path>", lowest first
 #   reclaim         drop slots whose checkout no longer exists on disk
@@ -56,6 +62,22 @@ abspath() {
   if [ -d "$d" ]; then printf '%s/%s\n' "$(cd "$d" && pwd -P)" "$b"; else printf '%s\n' "$p"; fi
 }
 
+# An EXPLICIT pin wins over any derivation: "<project><TAB><abs path>" per line in
+# ~/.config/ghostfleet/primaries. Deriving the primary is a guess about someone's disk
+# layout, and it is wrong exactly where it is most expensive — a project registered at a
+# plain container directory holding several clones AND unrelated products. superkey's
+# root is such a directory (four superkey clones plus `platform` and `gmc-crosswalk`);
+# <root>/<name> happens to resolve there, but the child-scan fallback one line below it
+# would pick `platform` — a different product — and hand it slot 0. Pin it and the guess
+# never runs.
+pinned() {
+  local f="$CFG_HOME/primaries" name="$1" p=""
+  [ -f "$f" ] || return 1
+  p="$(awk -F'\t' -v n="$name" '/^[[:space:]]*#/ || NF<2 { next } $1==n { print $2; exit }' "$f" 2>/dev/null)"
+  [ -n "$p" ] || return 1
+  abspath "${p/#\~/$HOME}"
+}
+
 # Every registered project's PRIMARY checkout, one per line. Mirrors enter_master's
 # convention in bin/ghostfleet: <root>/<name>, else the first child repo, else the root
 # itself — because a project is registered either as a container of checkouts or as one
@@ -72,6 +94,7 @@ primaries() {
     while IFS=$'\x1f' read -r name root; do
       [ -n "$name" ] && [ -n "$root" ] || continue
       root="${root/#\~/$HOME}"
+      if p="$(pinned "$name")"; then printf '%s\n' "$p"; continue; fi
       if [ -d "$root/.git" ]; then p="$root"
       elif [ -d "$root/$name/.git" ]; then p="$root/$name"
       else

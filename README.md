@@ -282,6 +282,39 @@ already-migrated database — which is what makes reuse cheaper than a fresh wor
 rather than merely tidier. `fleet-stop` releases; `fleet-clean` reclaims slots whose
 checkout is gone by any route. `fleet-worktrees` shows the column.
 
+**An empty answer is not zero.** `N=$(fleet-slot of "$PWD")` then `$((4000 + N))` yields
+`4000` for a checkout nothing ever claimed — the primary's port, i.e. the exact silent
+collision this removes, reintroduced at the commonest ad-hoc entry point (a plain `git
+worktree add`). Boot scripts should call **`claim`**: it's idempotent, and it answers `0`
+only for a registered primary.
+
+**Pin the primary when the guess would be wrong.** `<root>/<name>`, else the first child
+repo, else the root — fine for a project registered at its repo or at a container named
+after it. It is wrong for a container holding several clones *and* unrelated products,
+where the child-scan can hand slot 0 to a different product. Name it explicitly, one
+`<project><TAB><path>` per line:
+
+```
+~/.config/ghostfleet/primaries
+myrepo	/Users/me/work/myrepo
+```
+
+### `.ghostfleet/post-create` — the repo sets its own worktree up
+
+A fresh worktree inherits no dependencies. ghostfleet symlinks the main checkout's
+`node_modules` in, which is right for a single-package repo and **wrong for a pnpm
+workspace**: the root `node_modules` links workspace packages by *relative* path, so a
+symlinked tree resolves every workspace import from the symlink's real location — the
+main checkout's source. Silent cross-tree contamination, and an install afterwards writes
+straight through the symlink into that checkout.
+
+So if a repo ships an executable `.ghostfleet/post-create`, `fleet-spawn` runs it in the
+new worktree **instead of** symlinking (force it back with `CLAUDE_FLEET_LINK_NM=1`). It
+runs after the slot is claimed, with `CLAUDE_FLEET_SLOT` and `CLAUDE_FLEET_WORKTREE` set,
+so a hook can provision per-slot state as well as install. It is synchronous — the lead
+waits — because the alternative is a worker whose first test run fails for a reason that
+has nothing to do with its task. A failure is loud, not fatal.
+
 The allocation is a directory of marker files (`~/.config/ghostfleet/slots/`) rather than
 a table, because leads spawn concurrently and a read-modify-write over a shared free list
 has nothing serialising it — two spawns would both take the lowest free number, which is

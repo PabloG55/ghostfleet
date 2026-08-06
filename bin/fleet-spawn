@@ -234,7 +234,20 @@ else
   fi
 fi
 
-link_node_modules "$WT"
+# A repo that ships .ghostfleet/post-create is telling us it sets its own worktree up,
+# so the node_modules symlink must NOT also happen — and not merely because it is
+# redundant. In a pnpm WORKSPACE the root node_modules links workspace packages by
+# RELATIVE path (node_modules/@scope/db -> ../../packages/db), so a symlinked tree
+# resolves every workspace import from the symlink's real location: the MAIN checkout's
+# source. Silent cross-tree contamination, far worse than the missing-binary symptom it
+# is meant to prevent. Worse still, running `pnpm install` afterwards would install
+# THROUGH the symlink into the main checkout. Set CLAUDE_FLEET_LINK_NM=1 to force it.
+POST_CREATE="$WT/.ghostfleet/post-create"
+if [ -x "$POST_CREATE" ] && [ "${CLAUDE_FLEET_LINK_NM:-}" != 1 ]; then
+  echo "fleet-spawn: .ghostfleet/post-create present — skipping the node_modules symlink, the repo sets itself up" >&2
+else
+  link_node_modules "$WT"
+fi
 
 # ONE INTEGER PER CHECKOUT that nothing else in the fleet holds, so the repo can derive
 # a local dev stack from it — ports, database name, bucket — instead of a human picking
@@ -246,6 +259,22 @@ link_node_modules "$WT"
 SLOT="$("$(dirname "$0")/fleet-slot" claim "$WT" 2>/dev/null)" || SLOT=""
 case "$SLOT" in ''|*[!0-9]*) SLOT="" ;; esac
 [ -n "$SLOT" ] && echo "fleet-spawn: dev-stack slot $SLOT (read it with: fleet-slot of \"$WT\")" >&2
+
+# Run it BEFORE the session starts, so the agent lands in a worktree that already works
+# rather than discovering halfway through a task that its toolchain is missing — and
+# AFTER the slot is claimed, so a hook that provisions per-slot state (a database, a
+# bucket) can read CLAUDE_FLEET_SLOT instead of having to ask for it again. Synchronous
+# on purpose: the lead waits, but the alternative is a worker whose first test run fails
+# for a reason that has nothing to do with its task. A failure is loud and not fatal — a
+# worktree with no dependencies is still worth opening.
+if [ -x "$POST_CREATE" ]; then
+  echo "fleet-spawn: running .ghostfleet/post-create in $WT${SLOT:+ (slot $SLOT)} …" >&2
+  if ( cd "$WT" && CLAUDE_FLEET_SLOT="$SLOT" CLAUDE_FLEET_WORKTREE="$WT" "$POST_CREATE" ) >&2; then
+    echo "fleet-spawn: post-create finished" >&2
+  else
+    echo "fleet-spawn: WARNING — .ghostfleet/post-create failed; starting '$NAME' anyway" >&2
+  fi
+fi
 
 # unique session name on this fleet's socket
 name="$NAME"; i=2
