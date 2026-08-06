@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# fleet-slot claim|of|release|list|reclaim [path]
+#
+# Hand each checkout ONE small integer that nothing else in the fleet holds, so a repo
+# can derive a local dev stack from it — ports, database name, bucket — without a human
+# picking free numbers and without two worktrees silently landing on the same ones.
+#
+# ghostfleet allocates the INTEGER and nothing else. It does not know what a port is,
+# which database you run, or what your stack is called: those formulas belong to the
+# repo that owns those names, which reads the slot and derives the rest. Keeping that
+# line is what lets one allocator serve repos that share no conventions.
+#
+#   claim <path>    the slot for this checkout, allocating one if it has none.
+#                   IDEMPOTENT — the same path always answers the same number, so a
+#                   boot script can call it every time instead of caching it.
+#   of <path>       print its slot, or exit 1 if it has none (never allocates).
+#                   AN EMPTY ANSWER IS NOT ZERO. `N=$(fleet-slot of "$PWD")` followed by
+#                   $((4000 + N)) yields 4000 for an unclaimed checkout — the primary's
+#                   port — which is the silent collision this whole thing exists to
+#                   remove, reintroduced at the commonest ad-hoc entry point (a plain
+#                   `git worktree add`). A boot script should call `claim`, which is
+#                   idempotent and answers 0 only for a registered primary.
+#   release <path>  free it — for a checkout that is being removed
+#   list            every slot: "<n><TAB><path>", lowest first
+#   reclaim         drop slots whose checkout no longer exists on disk
+#
+# SLOT 0 IS THE PROJECT'S PRIMARY CHECKOUT and is never allocated. That keeps the
+# checkout you have always worked in on exactly the ports it has always used, so
+# adopting this changes nothing about the machine you already have set up. It is per
+# project on purpose: two products' primaries both being 0 only collide if both repos
+# derive the same ports from it, which is a decision inside those repos.
+#   "Primary" means the checkout the project is REGISTERED at — the one `master` runs
+# in — not "the first entry of git worktree list". Sibling clones (superkey-1,
+# superkey-2 …) are each their own repo's first entry, so that test would hand slot 0
+# to every one of them and collide them all onto the primary's ports, which is the
+# exact failure this exists to remove.
+#
+# WHY A DIRECTORY OF MARKER FILES, NOT A TABLE. Leads spawn concurrently — that is what
+# a fleet is — and a read-modify-write over a shared free list has nothing serialising
+# it, so two spawns both read "lowest free is 2" and both take it. That is the original
+# collision, back again but rarer and harder to see. There is no lock to reach for
+# either: flock(1) does not ship on macOS. So the claim IS the atom: creating
+# slots/<n> under `set -C` succeeds for exactly one racer and fails for the rest, and
+# the directory listing is the free list. No lock, no parse, no race.
+set -uo pipefail
+
+SLOTS_DIR="${CLAUDE_FLEET_SLOTS:-$HOME/.config/ghostfleet/slots}"
+MAX_SLOT="${CLAUDE_FLEET_MAX_SLOT:-40}"
+CFG_HOME="$HOME/.config/ghostfleet"
+
+usage() { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+# Physical path. `pwd -P` and not the string we were handed: /tmp is a symlink to
+# /private/tmp on macOS, so the same checkout reached two ways would otherwise claim
+# two slots. (Same trap a config key written from $PWD hit in this repo before.)
+abspath() {
+  local p="${1:-}"
+  [ -n "$p" ] || return 1
+  if [ -d "$p" ]; then (cd "$p" 2>/dev/null && pwd -P) && return 0; fi
+  # gone from disk (a release/reclaim for a removed checkout) — normalise what we can
+  local d b; d="$(dirname "$p")"; b="$(basename "$p")"
+  if [ -d "$d" ]; then printf '%s/%s\n' "$(cd "$d" && pwd -P)" "$b"; else printf '%s\n' "$p"; fi
+}
+
+# An EXPLICIT pin wins over any derivation: "<project><TAB><abs path>" per line in
+# ~/.config/ghostfleet/primaries. Deriving the primary is a guess about someone's disk
+# layout, and it is wrong exactly where it is most expensive — a project registered at a
+# plain container directory holding several clones AND unrelated products. superkey's
+# root is such a directory (four superkey clones plus `platform` and `gmc-crosswalk`);
+# <root>/<name> happens to resolve there, but the child-scan fallback one line below it
+# would pick `platform` — a different product — and hand it slot 0. Pin it and the guess
+# never runs.
+pinned() {
+  local f="$CFG_HOME/primaries" name="$1" p=""
+  [ -f "$f" ] || return 1
+  p="$(awk -F'\t' -v n="$name" '/^[[:space:]]*#/ || NF<2 { next } $1==n { print $2; exit }' "$f" 2>/dev/null)"
+  [ -n "$p" ] || return 1
+  abspath "${p/#\~/$HOME}"
+}
+
+# Every registered project's PRIMARY checkout, one per line. Mirrors enter_master's
+# convention in bin/ghostfleet: <root>/<name>, else the first child repo, else the root
+# itself — because a project is registered either as a container of checkouts or as one
+# repo. Reads every profile's list, since slots span profiles (each profile has its own
+# config dir, so nothing else here is shared).
+primaries() {
+  local cfg name root p
+  for cfg in "$CFG_HOME/projects" "$CFG_HOME"/projects.*; do
+    [ -f "$cfg" ] || continue
+    case "${cfg##*/}" in
+      projects) : ;;
+      *) case "${cfg##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac ;;
+    esac
+    while IFS=$'\x1f' read -r name root; do
+      [ -n "$name" ] && [ -n "$root" ] || continue
+      root="${root/#\~/$HOME}"
+      if p="$(pinned "$name")"; then printf '%s\n' "$p"; continue; fi
+      if [ -d "$root/.git" ]; then p="$root"
+      elif [ -d "$root/$name/.git" ]; then p="$root/$name"
+      else
+        p=""
+        for d in "$root"/*/; do [ -d "$d/.git" ] && { p="${d%/}"; break; }; done
+        [ -n "$p" ] || p="$root"
+      fi
+      abspath "$p"
+    done < <(awk -F'\t' '/^[[:space:]]*#/ || NF<2 { next } { printf "%s\x1f%s\n", $1, $2 }' "$cfg" 2>/dev/null)
+  done
+}
+
+is_primary() {
+  local me="$1" p
+  while IFS= read -r p; do [ "$p" = "$me" ] && return 0; done < <(primaries)
+  return 1
+}
+
+slot_of() {                      # path -> slot, or 1 if unheld
+  local me="$1" f n
+  for f in "$SLOTS_DIR"/*; do
+    [ -f "$f" ] || continue
+    n="${f##*/}"
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    [ "$(cat "$f" 2>/dev/null)" = "$me" ] && { printf '%s\n' "$n"; return 0; }
+  done
+  return 1
+}
+
+cmd="${1:-}"; shift 2>/dev/null || true
+case "$cmd" in
+  claim)
+    me="$(abspath "${1:-}")" || usage
+    # the primary is 0 by definition and never occupies a slot in the pool
+    is_primary "$me" && { echo 0; exit 0; }
+    mkdir -p "$SLOTS_DIR" 2>/dev/null
+    if n="$(slot_of "$me")"; then printf '%s\n' "$n"; exit 0; fi
+    n=1
+    while [ "$n" -le "$MAX_SLOT" ]; do
+      # THE ATOM: noclobber makes this succeed for exactly one racer.
+      if ( set -C; printf '%s\n' "$me" > "$SLOTS_DIR/$n" ) 2>/dev/null; then
+        # Two claims for the SAME path can still both allocate (each missed the
+        # other's write). Converge on the lowest and hand the spare back, or a
+        # checkout would sit on two slots and quietly shrink the pool.
+        low="$(slot_of "$me")"
+        if [ -n "$low" ] && [ "$low" != "$n" ] && [ "$low" -lt "$n" ]; then
+          rm -f "$SLOTS_DIR/$n" 2>/dev/null; n="$low"
+        fi
+        printf '%s\n' "$n"; exit 0
+      fi
+      n=$((n + 1))
+    done
+    echo "fleet-slot: no free slot (1-$MAX_SLOT all held) — run 'fleet-slot reclaim', or raise CLAUDE_FLEET_MAX_SLOT" >&2
+    exit 1 ;;
+  of)
+    me="$(abspath "${1:-}")" || usage
+    is_primary "$me" && { echo 0; exit 0; }
+    slot_of "$me" || exit 1 ;;
+  release)
+    me="$(abspath "${1:-}")" || usage
+    if n="$(slot_of "$me")"; then rm -f "$SLOTS_DIR/$n" 2>/dev/null; printf 'fleet-slot: released %s (was %s)\n' "$me" "$n"; fi ;;
+  list)
+    for f in "$SLOTS_DIR"/*; do
+      [ -f "$f" ] || continue
+      n="${f##*/}"; case "$n" in ''|*[!0-9]*) continue ;; esac
+      printf '%s\t%s\n' "$n" "$(cat "$f" 2>/dev/null)"
+    done | sort -n ;;
+  reclaim)
+    # A slot whose checkout is gone must not stay held, or the pool fills up with
+    # nothing and the next spawn is refused for a shortage that isn't real.
+    for f in "$SLOTS_DIR"/*; do
+      [ -f "$f" ] || continue
+      n="${f##*/}"; case "$n" in ''|*[!0-9]*) continue ;; esac
+      p="$(cat "$f" 2>/dev/null)"
+      if [ -z "$p" ] || [ ! -d "$p" ]; then
+        rm -f "$f" 2>/dev/null; printf 'fleet-slot: reclaimed %s (checkout gone: %s)\n' "$n" "${p:-?}"
+      fi
+    done ;;
+  *) usage ;;
+esac

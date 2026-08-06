@@ -80,7 +80,11 @@ wts="$(git -C "$PWD" worktree list --porcelain 2>/dev/null | awk '
   END         { if (wt!="" && !skip) print wt "\t" br }
 ')"
 
-printf '%-16s %-22s %-14s %-7s %-14s %s\n' WORKTREE BRANCH SESSION STATE GIT TASK
+# SLOT is the dev-stack number (bin/fleet-slot): the repo derives its ports/database
+# from it, so seeing it here is what makes "which stack is this?" answerable without
+# digging. Blank when this checkout has none; 0 is the project's primary.
+slot_for() { "$(dirname "$0")/fleet-slot" of "$1" 2>/dev/null || printf '-'; }
+printf '%-16s %-22s %-14s %-7s %-5s %-14s %s\n' WORKTREE BRANCH SESSION STATE SLOT GIT TASK
 free=""; first=1
 while IFS=$'\t' read -r wt br; do
   [ -n "$wt" ] || continue
@@ -88,7 +92,7 @@ while IFS=$'\t' read -r wt br; do
   # a worktree dir that git still lists but no longer exists on disk (removed with
   # rm -rf instead of `git worktree remove`) — flag it; `git worktree prune` tidies it.
   if [ ! -d "$wt" ]; then
-    printf '%-16s %-22s %-14s %-7s %-14s %s\n' "$base" "${br:0:22}" "-" "gone" "-" "git worktree prune"
+    printf '%-16s %-22s %-14s %-7s %-5s %-14s %s\n' "$base" "${br:0:22}" "-" "gone" "-" "-" "git worktree prune"
     first=0; continue
   fi
   sess="$(sess_for "$wt")"
@@ -105,8 +109,8 @@ while IFS=$'\t' read -r wt br; do
     sess="-"; task="-"    # no live session -> the manifest task refers to a gone session; don't show it stale
     case "$git" in clean*) state=FREE; free="$free $base" ;; *) state=stale ;; esac
   fi
-  printf '%-16s %-22s %-14s %-7s %-14s %s\n' \
-    "$base" "${br:0:22}" "${sess:0:14}" "$state" "$git" "${task:0:60}"
+  printf '%-16s %-22s %-14s %-7s %-5s %-14s %s\n' \
+    "$base" "${br:0:22}" "${sess:0:14}" "$state" "$(slot_for "$wt")" "$git" "${task:0:60}"
 done <<EOF
 $wts
 EOF

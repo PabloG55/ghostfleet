@@ -664,6 +664,124 @@ else
   skip "MCP cross-project" "git/tmux missing"
 fi
 
+# ── 4a8. dev-stack slots ─────────────────────────────────────────────────────
+# One integer per checkout that nothing else in the fleet holds, so a repo can derive
+# its local stack (ports, database, bucket) instead of a human picking free numbers per
+# worktree with nothing checking they agree.
+#
+# The race is the whole feature. Leads spawn concurrently — that is what a fleet IS —
+# and a read-modify-write over a shared free list has nothing serialising it, so two
+# spawns both read "lowest free is N" and both take it: the original collision back
+# again, rarer and harder to see. There is no lock to reach for either (flock(1) is not
+# on macOS), so the claim itself is the atom. Measured against the obvious
+# read-then-write version, which hands the SAME slot to all 20 racers and leaves 19
+# checkouts with none at all.
+group "dev-stack slots"
+if command -v git >/dev/null 2>&1; then
+  SL="$(mktemp -d)"
+  mkdir -p "$SL/home/.config/ghostfleet" "$SL/root/proj" "$SL/root/proj-1" "$SL/root/wt-a"
+  git init -q "$SL/root/proj" 2>/dev/null
+  printf 'proj\t%s\twork\n' "$SL/root" > "$SL/home/.config/ghostfleet/projects"
+  SLOT() { HOME="$SL/home" CLAUDE_FLEET_SLOTS="$SL/slots" "$ROOT/bin/fleet-slot" "$@"; }
+  # 0 is the project's REGISTERED primary — the checkout master runs in — and is never
+  # allocated, so the checkout you already work in keeps the ports it always had.
+  is "the registered primary is 0"      "0" "$(SLOT claim "$SL/root/proj")"
+  # ...and "primary" must NOT mean "first entry of git worktree list": a sibling CLONE
+  # is its own repo's first entry, so that test would hand 0 to every checkout in the
+  # project and collide them all onto the primary's ports — the exact failure this
+  # feature removes.
+  is "a sibling clone is NOT 0"         "1" "$(SLOT claim "$SL/root/proj-1")"
+  is "another checkout gets the next"   "2" "$(SLOT claim "$SL/root/wt-a")"
+  # idempotent, so `reuse` keeps its slot (and its warm database) with no special case,
+  # and a boot script can call it every time instead of caching the answer
+  is "claiming twice is stable"         "1" "$(SLOT claim "$SL/root/proj-1")"
+  is "of: reads without allocating"     "2" "$(SLOT of "$SL/root/wt-a")"
+  SLOT release "$SL/root/proj-1" >/dev/null
+  is "a released slot is handed out again" "1" "$(mkdir -p "$SL/root/wt-b"; SLOT claim "$SL/root/wt-b")"
+  # a slot whose checkout is gone must not stay held, or the pool fills with nothing
+  rm -rf "$SL/root/wt-a"
+  SLOT reclaim >/dev/null
+  is "reclaim frees a vanished checkout" "" "$(SLOT of "$SL/root/wt-a" 2>/dev/null)"
+  # THE RACE
+  rm -rf "$SL/slots"; for i in $(seq 1 20); do mkdir -p "$SL/race/w$i"; done
+  for i in $(seq 1 20); do SLOT claim "$SL/race/w$i" & done > "$SL/race.out" 2>&1
+  wait
+  is "20 concurrent claims -> 20 slots"  "20" "$(sort -n "$SL/race.out" | uniq | grep -c . || true)"
+  is "...none of them duplicated"        "0"  "$(sort -n "$SL/race.out" | uniq -d | grep -c . || true)"
+  is "...and 20 checkouts are recorded"  "20" "$(SLOT list | cut -f2 | sort -u | grep -c . || true)"
+  rm -rf "$SL"
+else
+  skip "dev-stack slots" "git missing"
+fi
+
+# ── 4a9. pinning the primary, and the repo's own setup hook ──────────────────
+# Deriving the primary checkout is a guess about someone's disk layout, and it is wrong
+# exactly where it costs most: a project registered at a plain CONTAINER directory
+# holding several clones AND unrelated products. superkey's root is one of those — four
+# superkey clones plus `platform` and `gmc-crosswalk` — so the child-scan would hand
+# slot 0 to a different product entirely. An explicit pin skips the guess.
+group "dev-stack slots: pinned primary"
+if command -v git >/dev/null 2>&1; then
+  PN="$(mktemp -d)"
+  mkdir -p "$PN/home/.config/ghostfleet" "$PN/root/aardvark" "$PN/root/theproj"
+  git init -q "$PN/root/aardvark" 2>/dev/null; git init -q "$PN/root/theproj" 2>/dev/null
+  # the registered NAME matches no child dir, so <root>/<name> misses and the scan runs
+  printf 'mismatch\t%s\twork\n' "$PN/root" > "$PN/home/.config/ghostfleet/projects"
+  PIN() { HOME="$PN/home" CLAUDE_FLEET_SLOTS="$PN/slots" "$ROOT/bin/fleet-slot" "$@"; }
+  rm -rf "$PN/slots"
+  # unpinned: alphabetical order hands 0 to the FOREIGN repo — the hazard, demonstrated
+  is "unpinned: the scan takes the first repo" "0" "$(PIN claim "$PN/root/aardvark")"
+  rm -rf "$PN/slots"
+  printf 'mismatch\t%s\n' "$PN/root/theproj" > "$PN/home/.config/ghostfleet/primaries"
+  is "pinned: the named checkout is 0"         "0" "$(PIN claim "$PN/root/theproj")"
+  is "pinned: the foreign repo is allocated"   "1" "$(PIN claim "$PN/root/aardvark")"
+  rm -rf "$PN"
+else
+  skip "pinned primary" "git missing"
+fi
+
+# A repo that ships .ghostfleet/post-create sets its own worktree up, so the
+# node_modules symlink must not ALSO happen. Not merely redundant: in a pnpm workspace
+# the root node_modules links workspace packages by RELATIVE path, so a symlinked tree
+# resolves every workspace import from the symlink's real location — the MAIN checkout's
+# source. Silent cross-tree contamination, and `pnpm install` afterwards would install
+# straight through the symlink into that checkout.
+group "dev-stack slots: post-create hook"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  HK="$(mktemp -d)"; mkdir -p "$HK/home/.config/ghostfleet" "$HK/stub" "$HK/fleet"
+  printf '#!/usr/bin/env bash\nsleep 60\n' > "$HK/stub/agent-here"; chmod +x "$HK/stub/agent-here"
+  # $1 = "hook" | "nohook" -> spawns a worktree and reports what it got
+  spawnwt() {
+    rm -rf "$HK/root" "$HK/slots"; mkdir -p "$HK/root/proj/.ghostfleet"
+    git init -q -b main "$HK/root/proj" 2>/dev/null
+    git -C "$HK/root/proj" config user.email t@t; git -C "$HK/root/proj" config user.name t
+    mkdir -p "$HK/root/proj/node_modules/pretend"     # so the symlink WOULD fire
+    printf 'node_modules/\n.ran\n' > "$HK/root/proj/.gitignore"
+    if [ "$1" = hook ]; then
+      printf '#!/usr/bin/env bash\nprintf "slot=%%s" "${CLAUDE_FLEET_SLOT:-none}" > .ran\n' \
+        > "$HK/root/proj/.ghostfleet/post-create"
+      chmod +x "$HK/root/proj/.ghostfleet/post-create"
+    fi
+    git -C "$HK/root/proj" add -A; git -C "$HK/root/proj" commit -qm init 2>/dev/null
+    printf 'proj\t%s\twork\n' "$HK/root" > "$HK/home/.config/ghostfleet/projects"
+    tmux -L cfhooktest kill-server 2>/dev/null
+    ( cd "$HK/root/proj" && HOME="$HK/home" CLAUDE_FLEET_SLOTS="$HK/slots" \
+      CLAUDE_FLEET_DIR="$HK/fleet" CLAUDE_FLEET_SOCK=cfhooktest \
+      PATH="$HK/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" w1 --new ) >/dev/null 2>&1
+    tmux -L cfhooktest kill-server 2>/dev/null
+  }
+  spawnwt hook
+  is "hook: it ran, and saw its slot"     "slot=1" "$(cat "$HK/root/w1/.ran" 2>/dev/null)"
+  is "hook: no node_modules symlink"      "0"      "$([ -L "$HK/root/w1/node_modules" ] && echo 1 || echo 0)"
+  # the other direction, or "no symlink" would pass for a spawn that simply stopped
+  # linking at all
+  spawnwt nohook
+  is "no hook: the symlink still happens" "1"      "$([ -L "$HK/root/w1/node_modules" ] && echo 1 || echo 0)"
+  rm -rf "$HK"
+else
+  skip "post-create hook" "git/tmux missing"
+fi
+
 # ── 4b. the stack ────────────────────────────────────────────────────────────
 # stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
 # repo is: EVERY project has a session called `master`, so a bare name stacks whichever
