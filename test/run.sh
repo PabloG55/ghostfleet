@@ -145,6 +145,69 @@ else
   skip "governor tick" "tmux not available"
 fi
 
+# ── the governor reads a LIVE figure, not a fossil ───────────────────────────
+# Two ways the status bar's number lies, both of which parked a real fleet:
+#
+#  1. Parking freezes the pane the figure is read from. An idle Claude does not repaint
+#     its status bar, so a worker parked at 98% still SAYS 98% long after the window
+#     recovered — and since budget() takes the MAX across panes, that fossil becomes the
+#     fleet's answer. The trap then closes on itself: everything parked, so nothing
+#     refreshes, so the reading never falls, so nothing is ever resumed. A real log sat
+#     at "98% — all workers parked, holding for recovery" until ignore-limit was flipped
+#     by hand.
+#  2. The figure is stale for a while after an account/team switch — every pane keeps
+#     reporting the OLD window until Claude next repaints it. Acting on the first
+#     reading parks the fleet over a number that has already stopped being true.
+group "governor: a frozen pane must not pin the fleet"
+if command -v tmux >/dev/null 2>&1; then
+  GV="$(mktemp -d)"
+  printf 'x | Acct | master | main | Opus 5 (1M context) | ctx:5%% | 17%%(4h 34m) | 7d:20%%(3h)\n' > "$GV/lo"
+  printf 'x | Acct | w1 | main | Opus 5 (1M context) | ctx:5%% | 98%%(2h 40m) | 7d:86%%(4h)\n'     > "$GV/hi"
+  govtick() {                    # $@ = extra governor args -> its decision line
+    tmux -L cfgovfrz kill-server 2>/dev/null
+    tmux -L cfgovfrz new-session -d -s master -x 200 -y 30 "cat '$GV/lo'; sleep 60" 2>/dev/null
+    tmux -L cfgovfrz new-session -d -s w1     -x 200 -y 30 "cat '$GV/hi'; sleep 60" 2>/dev/null
+    sleep 1
+    CLAUDE_FLEET_DIR="$GV" "$ROOT/bin/fleet-governor" -s cfgovfrz --once --dry-run "$@" 2>&1
+    tmux -L cfgovfrz kill-server 2>/dev/null
+  }
+  rm -f "$GV/cfgovfrz.w1.parked"
+  # w1 LIVE: its 98% is a real reading and must still drive the ceiling
+  is "a live 98% pane still parks"      "1" "$(govtick --confirm 0 | grep -c 'parking ALL 1' || true)"
+  # w1 PARKED: the same 98% is now a stopped clock, and master's live 17% must win
+  printf 'governor 1\n' > "$GV/cfgovfrz.w1.parked"
+  is "a PARKED 98% pane is ignored"     "1" "$(govtick --confirm 0 | grep -c 'budget 17%' || true)"
+  is "...so the fleet can recover"      "1" "$(govtick --confirm 0 | grep -c 'resume w1' || true)"
+  rm -rf "$GV"
+else
+  skip "governor frozen pane" "tmux missing"
+fi
+
+group "governor: look twice before parking"
+if command -v tmux >/dev/null 2>&1; then
+  GC="$(mktemp -d)"
+  printf 'x | Acct | master | main | Opus 5 (1M context) | ctx:5%% | 98%%(2h 40m) | 7d:86%%(4h)\n' > "$GC/hi"
+  printf 'x | Acct | master | main | Opus 5 (1M context) | ctx:5%% | 17%%(4h 34m) | 7d:20%%(3h)\n' > "$GC/lo"
+  # $1 = the pane script (what the figure does over time) -> the decision line
+  confirmtick() {
+    tmux -L cfgovcfm kill-server 2>/dev/null
+    tmux -L cfgovcfm new-session -d -s master -x 200 -y 30 "$1" 2>/dev/null
+    tmux -L cfgovcfm new-session -d -s w1     -x 200 -y 30 "sleep 60" 2>/dev/null
+    sleep 1
+    CLAUDE_FLEET_DIR="$GC" "$ROOT/bin/fleet-governor" -s cfgovcfm --once --dry-run --confirm 4 2>&1
+    tmux -L cfgovcfm kill-server 2>/dev/null
+  }
+  # the figure catches up during the wait: the 98% was the OLD account's, don't park
+  is "a figure that catches up -> no park" "1" \
+     "$(confirmtick "cat '$GC/hi'; sleep 2; clear; cat '$GC/lo'; sleep 60" | grep -c 'not parking' || true)"
+  # it holds: a real ceiling, so the wait must not have turned parking off
+  is "a figure that HOLDS -> parks"        "1" \
+     "$(confirmtick "cat '$GC/hi'; sleep 60" | grep -c 'parking ALL' || true)"
+  rm -rf "$GC"
+else
+  skip "governor confirm" "tmux missing"
+fi
+
 # An agent that WRITES ABOUT a spinner puts byte-identical text on screen while idle
 # — a report, a doc, a pasted capture. Nothing in the text separates them, so the
 # pattern is anchored to the line start: a live spinner OWNS its line, prose about
@@ -201,6 +264,53 @@ line "the idle agent-count hint"    "⏵⏵ bypass permissions on (shift+tab to 
 # first, and that pane still has to read as busy.
 line "one word, clock dropped"      "✽ Flowing… (almost done thinking with xhigh effort)"                 1
 rm -rf "$ST"
+
+# THE GRID IS THE THING THAT DRAWS THE CARD, so assert on ITS answer, through a real
+# pane. The group above asserts on what `fleet-agent field` returns — and that is
+# exactly how a fix shipped that changed nothing a user could see: fleet-grid.mjs kept
+# its own inline copy of claude's pattern AND pre-seeded the cache with it, so it never
+# asked the adapter at all. The adapter learned to see a running subagent, the suite
+# went green, and the grid went on printing "✓ ready" over a busy session.
+group "the GRID's own verdict on a real pane"
+if command -v tmux >/dev/null 2>&1; then
+  GB="$(mktemp -d)"
+  gridsees() {                   # $1 = what the pane shows -> the STATUS the grid prints
+    printf '%s\n' "$1" > "$GB/pane.txt"
+    tmux -L cfgridbusy kill-server 2>/dev/null
+    # -c "$GB": an empty temp dir ON PURPOSE. Inherit the suite's cwd and
+    # newestTranscript() finds a REAL conversation for it, so the idle case comes back
+    # "ready" and the assertion below passes or fails on where the suite was run from.
+    tmux -L cfgridbusy new-session -d -s w1 -c "$GB" -x 200 -y 30 "cat '$GB/pane.txt'; sleep 30" 2>/dev/null
+    sleep 1
+    CLAUDE_FLEET_DIR="$GB" CLAUDE_FLEET_ROOT= node "$ROOT/bin/fleet-grid.mjs" cfgridbusy --plain 2>/dev/null \
+      | tail -n +3 | grep '^w1' | cut -c62-72 | sed 's/ *$//'
+    tmux -L cfgridbusy kill-server 2>/dev/null
+  }
+  is "a subagent line reads as working"  "working" "$(gridsees "+ Adding the operator-key auth provider… (10m 15s · ↓ 32.8k tokens)")"
+  # "Razzle-dazzling" is one WORD but carries a hyphen, so [A-Za-z]+ stopped at "Razzle"
+  # — a live, reported miss that had nothing to do with subagents.
+  is "a hyphenated spinner too"          "working" "$(gridsees "✳ Razzle-dazzling… (3m 5s · ↓ 11.5k tokens)")"
+  is "the plain one-word spinner"        "working" "$(gridsees "✻ Flowing… (18s)")"
+  # and the other direction, or all of the above would pass on a detector matching
+  # everything
+  is "an idle prompt is not working"     "idle"    "$(gridsees "❯ ")"
+  rm -rf "$GB"
+else
+  skip "grid verdict" "tmux missing"
+fi
+
+# Two spellings of one pattern in two languages is already a drift risk the suite
+# checks for; a THIRD copy inlined in the grid is how the drift actually happened. The
+# grid keeps it only as a fallback for when fleet-agent can't be reached, so it has to
+# stay byte-identical to what the adapter serves.
+group "the grid's inline fallback matches the adapter"
+is "BUSY_RE == claude's busy_re_js" "true" "$(node -e '
+  const fs=require("fs"),{execFileSync}=require("child_process");
+  const adapter=execFileSync(process.argv[1]+"/bin/fleet-agent",["field","claude","busy_re_js"],{encoding:"utf8"});
+  const m=fs.readFileSync(process.argv[1]+"/bin/fleet-grid.mjs","utf8").match(/^const BUSY_RE = \/(.*)\/i;$/m);
+  if(!m){console.log("NO-BUSY_RE-FOUND");process.exit(0)}
+  console.log(String(new RegExp(adapter,"i").source===new RegExp(m[1],"i").source));
+' "$ROOT")"
 
 group "ready detectors (ready_re)"
 cre="$("$ROOT/bin/fleet-agent" field codex ready_re)"

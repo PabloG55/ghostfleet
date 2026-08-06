@@ -194,7 +194,16 @@ function lastAssistant(p) {
 // before the ellipsis rules out a TRUNCATED line ("| w1 | …", "/…/path"), which is
 // everywhere at narrow width — belt and braces, not a tested behaviour; see the note in
 // bin/fleet-agent, which is where all of this was measured.
-const BUSY_RE = /^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:…|\.\.\.)\s?\(/i;
+// Second branch: while a SUBAGENT runs, Claude swaps the one-word spinner for the
+// agent's own description ("+ Adding the operator-key auth provider… (10m 15s · …)"),
+// which is a phrase. It has to demand the elapsed clock, because a phrase before an
+// ellipsis is also what prose looks like. Kept identical to bin/fleet-agent's
+// busy_re_js — this is a FALLBACK for when that isn't reachable, not a second opinion,
+// and the suite pins the two together.
+// The `/` is deliberately NOT escaped: it is legal unescaped inside a character class,
+// and escaping it makes this literal's .source differ from the adapter's by a backslash
+// — which is enough to defeat a test that pins the two together.
+const BUSY_RE = /^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:(?:…|\.\.\.)\s?\(|[A-Za-z0-9 /-]*(?:…|\.\.\.) \(\d+[ms])/i;
 
 // ── which agent is a session running? ────────────────────────────────────────
 // A session records its agent in <sock>.<name>.agent (bin/fleet-agent writes it),
@@ -230,7 +239,15 @@ function agentOf(name) {
 // per CLAUDE.md, so this cache doesn't introduce a new staleness class).
 //
 // A cached `null` means "this agent has no validated detector" → report unknown.
-const busyReCache = new Map([['claude', BUSY_RE]]);
+//
+// Claude is NO LONGER pre-seeded. Seeding the cache meant the grid never asked the
+// adapter for it, so the inline copy was a THIRD spelling of the same pattern that
+// nothing kept in step — and it drifted: the adapter learned to see a running subagent
+// and the grid, the one thing that actually draws the card, went on missing it. Worse,
+// a suite that asserted on `fleet-agent field claude busy_re_js` stayed green through
+// all of it. The adapter is the source now; BUSY_RE is what we fall back to when it
+// can't be reached, which is the property the inline copy was there for.
+const busyReCache = new Map();
 // Resolve fleet-agent as OUR OWN SIBLING, not through PATH. If PATH happens not to
 // include the fleet's bin dir, a PATH lookup fails, every non-claude agent loses its
 // detector, and the grid quietly falls back to whatever the last hook said — a wrong
@@ -248,6 +265,10 @@ function busyReFor(agent) {
       break;                      // it ran: an empty answer is a real "no detector"
     } catch { /* not there — try the next */ }
   }
+  // Claude keeps a working detector even with no adapter on disk at all — that is what
+  // the inline copy is for. Every other agent's "no answer" stays null, i.e. `unknown`,
+  // because inventing a pattern for one is exactly the guess this layer refuses to make.
+  if (!re && agent === 'claude') re = BUSY_RE;
   busyReCache.set(agent, re);
   return re;
 }
@@ -832,7 +853,10 @@ function renderGrid() {
   else if (confirmWt)
     // Clip to what actually fits beside the key hint: a line that wraps pushes the
     // whole card grid down a row and reflows it under you as you read it.
-    buf += confirmWt.force
+    buf += confirmWt.busy
+      ? `${C.yellow}${C.bold} removing worktree '${path.basename(confirmWt.path)}'…${C.reset}` +
+        `${C.yellow} deleting the checkout — this can take a minute on a big one${C.reset}\x1b[K\n`
+      : confirmWt.force
       ? `${C.red}${C.bold} ${clip(confirmWt.msg, Math.max(20, W() - 40))}${C.reset}` +
         `${C.red} — f = remove anyway · any key = cancel${C.reset}\x1b[K\n`
       : `${C.red}${C.bold} remove worktree '${path.basename(confirmWt.path)}' (${confirmWt.branch})?${C.reset}` +
@@ -1186,9 +1210,18 @@ function onKey(key) {
       // just refused is a reflex, and this particular one throws away real work.
       const said = confirmWt.force ? (key === 'f' || key === 'F') : (key === 'y' || key === 'Y');
       if (said) {
+        // `git worktree remove` deletes the whole checkout, and on a big repo — one
+        // with a real node_modules rather than the symlink fleet-spawn makes — that is
+        // tens of thousands of files and takes the better part of a minute. It runs
+        // SYNCHRONOUSLY, so the grid cannot redraw or take a key until it returns:
+        // reported as "the app froze for a minute and then it deleted it". Say what is
+        // happening first, the way the new-worktree form does, so the wait reads as
+        // work rather than as a hang.
+        confirmWt = { ...confirmWt, busy: true };
+        render();
         const res = removeWorktree(confirmWt.path, confirmWt.force);
         if (res.ok) { confirmWt = null; buildItems(); }
-        else confirmWt = { ...confirmWt, msg: res.msg, force: true };
+        else confirmWt = { ...confirmWt, busy: false, msg: res.msg, force: true };
       } else confirmWt = null;
       render(); return;
     }
