@@ -58,8 +58,16 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.notify-lead" "$FLEET_DIR/$SOCK.$SESSION.notify-
 # is gone, and a name-reuser must not inherit a stranger's question to answer.
 rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to" "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
 
-# manifest is keyed by worktree path with the session in field 2 — drop its line
+# The dev-stack slot is keyed by WORKTREE PATH, so release it before the manifest row
+# (the only thing that still knows which path this session held) is dropped. A slot left
+# held by a session that is gone fills the pool up with nothing, and the next spawn is
+# refused for a shortage that isn't real.
 MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
+if [ -f "$MANIFEST" ]; then
+  wt="$(awk -F'\t' -v s="$SESSION" '$2==s{print $1; exit}' "$MANIFEST" 2>/dev/null)"
+  [ -n "$wt" ] && "$(dirname "$0")/fleet-slot" release "$wt" >/dev/null 2>&1
+fi
+
 if [ -f "$MANIFEST" ]; then
   mtmp="$MANIFEST.$$.tmp"
   awk -F'\t' -v s="$SESSION" '$2!=s' "$MANIFEST" >"$mtmp" 2>/dev/null \

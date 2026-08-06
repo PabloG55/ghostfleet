@@ -121,6 +121,15 @@ for mk in "$FLEET_DIR/$SOCK".*.parked "$FLEET_DIR/$SOCK".*.sched; do
   printf '%s\n' "$live" | grep -qxF "$sn" || { echo "  orphan $b (no live '$sn')"; run "rm -f '$mk'"; }
 done
 
+# Slots outlive the checkouts they name if a worktree is removed by any path that
+# isn't fleet-stop — `git worktree remove` by hand, the grid's x, this very command.
+# Sweeping here is what stops the pool silently filling with holes.
+if [ "$GO" = 1 ]; then
+  "$(dirname "$0")/fleet-slot" reclaim 2>/dev/null | sed 's/^/  /'
+else
+  echo "  (dry run) would release dev-stack slots whose checkout is gone"
+fi
+
 echo
 [ "$GO" = 1 ] && echo "fleet-clean: done — removed $removed worktree(s), kept $kept." \
              || echo "fleet-clean: dry run — nothing changed. Re-run with --go to apply."
