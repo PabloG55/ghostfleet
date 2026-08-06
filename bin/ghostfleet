@@ -142,7 +142,22 @@ tm_wire() {
 # cards show. Asks the grid itself rather than re-deriving it: the order is persisted
 # and reorderable, and a second implementation here is how "session 2" ends up meaning
 # one thing to a card and another to the Ctrl-f chord that counts them.
-grid_sessions() { node "$GRID" "$SOCK" "$CONF" --order 2>/dev/null; }
+#
+# The support test is not decoration. A grid that PREDATES --order sees no flag it
+# knows and falls through to drawing the TUI — inside this command substitution, where
+# nothing reads its output and nothing ever exits, so the control plane freezes behind
+# a grid nobody can act on, with no error anywhere. Measured, including with stdin on
+# /dev/null: the old screen's own refresh timer keeps it alive regardless. cf-sync
+# copies the tree file by file, so a new loop calling an old grid is a real (if brief)
+# window. Falling back to tmux's own order is exactly what that grid would have
+# produced anyway — it has no reordering for the order to disagree with.
+grid_sessions() {
+  if grep -qa "includes('--order')" "$GRID" 2>/dev/null; then
+    node "$GRID" "$SOCK" "$CONF" --order </dev/null 2>/dev/null
+  else
+    tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -v '^master$'
+  fi
+}
 
 profile_dir() { case "$1" in work|default|"") echo "$HOME/.claude" ;; *) echo "$HOME/.claude-$1" ;; esac; }
 # Nth project (1-based) in the list, matching the numbers the cards show. Used by the
