@@ -16,12 +16,16 @@
 #   --pause-at P   notify + park ALL workers at/above this 5h usage % (default 98)
 #   --resume P     resume governor-parked workers below this % (default 90)
 #   --interval N   seconds between ticks (default 60)
+#   --confirm N    at the ceiling, re-read after N seconds and only park if it HOLDS
+#                  (default 20; 0 parks on the first reading). The status bar's figure
+#                  is not live — after an account/team switch every pane keeps
+#                  reporting the OLD window until Claude next repaints it.
 #   --once         run one tick and exit (for testing / cron)
 #   --dry-run      log decisions, don't actually pause/resume/notify
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
-INTERVAL=60; PAUSE_AT=98; RESUME=90; ONCE=0; DRY=0
+INTERVAL=60; PAUSE_AT=98; RESUME=90; ONCE=0; DRY=0; CONFIRM=20
 COOLDOWN=900                          # min seconds between macOS "budget" alerts (anti-spam)
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -29,6 +33,7 @@ while [ $# -gt 0 ]; do
     --pause-at) PAUSE_AT="${2:?}"; shift 2 ;;
     --resume)   RESUME="${2:?}"; shift 2 ;;
     --interval) INTERVAL="${2:?}"; shift 2 ;;
+    --confirm)  CONFIRM="${2:?}";  shift 2 ;;
     --once)     ONCE=1; shift ;;
     --dry-run)  DRY=1; shift ;;
     *) echo "fleet-governor: unknown arg $1" >&2; exit 1 ;;
@@ -106,13 +111,25 @@ pct_of() {
 # (the same trap release_gov_parked already documents). BUDGET_BLIND names the metered
 # sessions whose pane was too narrow to carry the figure, so "no reading" can say WHY
 # instead of looking exactly like a healthy idle fleet.
+#
+# A PARKED PANE IS A STOPPED CLOCK, so it is skipped. Parking freezes the very pane the
+# figure is read from: an idle Claude does not repaint its status bar, so a worker
+# parked at 98% still SAYS 98% however long the real window has since recovered. Taking
+# the max then makes that fossil the fleet's answer, and the trap closes on itself —
+# everything is parked, so nothing can refresh, so the reading never falls, so nothing
+# is ever resumed. Measured in a real log: three workers held at "98% — all workers
+# parked, holding for recovery" for minutes after the account had actually moved to
+# ~17%, and the only way out was flipping ignore-limit by hand. master is never parked,
+# so a live reading is always available.
 BUDGET_PCT=0
 BUDGET_BLIND=""
+BUDGET_FROZEN=""
 budget() {
   local p="" s="" w=""
-  BUDGET_PCT=0; BUDGET_BLIND=""
+  BUDGET_PCT=0; BUDGET_BLIND=""; BUDGET_FROZEN=""
   for s in $(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
     meterable "$s" || continue
+    if is_parked "$s"; then BUDGET_FROZEN="$BUDGET_FROZEN $s"; continue; fi
     p="$(pct_of "$s")"
     if [ -n "$p" ]; then
       [ "$p" -gt "$BUDGET_PCT" ] && BUDGET_PCT="$p"
@@ -171,7 +188,9 @@ tick() {
     # Say WHICH panes couldn't be read and how wide they were. Without this, a fleet
     # whose sessions are all in a stack looks identical to a fleet at 0% usage, and the
     # ceiling silently stops being enforced.
-    log "no budget reading this tick${BUDGET_BLIND:+ — no pane carries the 5h figure (too narrow):$BUDGET_BLIND}"
+    # Frozen panes are named for the same reason: "every live pane was skipped as a
+    # stopped clock" and "the account really is at 0%" must not read the same.
+    log "no budget reading this tick${BUDGET_BLIND:+ — no pane carries the 5h figure (too narrow):$BUDGET_BLIND}${BUDGET_FROZEN:+ — skipped as parked (frozen figure):$BUDGET_FROZEN}"
     return
   fi
 
@@ -180,6 +199,33 @@ tick() {
     active=()
     for w in $(workers_newest_first); do is_parked "$w" || active+=("$w"); done
     n=${#active[@]}
+    # LOOK TWICE BEFORE PARKING. The status bar's figure is not live — it is whatever
+    # Claude last painted, and it keeps saying the OLD number until the session next
+    # updates it. Switch the account/team and every pane goes on reporting the previous
+    # window's usage for a while; act on that and the fleet is parked over a number that
+    # has already stopped being true, and a worker un-parked by hand is re-parked within
+    # the minute by the same fossil. So re-read after a short wait and only park if it
+    # still holds. Costs a few seconds of running past the ceiling, which is the cheap
+    # side of this trade: the ceiling exists so work doesn't stall, and parking three
+    # workers over a stale figure stalls it exactly as hard.
+    if [ "$n" -gt 0 ] && [ "$CONFIRM" -gt 0 ]; then
+      log "budget ${pct}% >= ${PAUSE_AT}% — re-reading in ${CONFIRM}s before parking ${n} worker(s)"
+      sleep "$CONFIRM"
+      budget
+      if [ "$BUDGET_PCT" -eq 0 ]; then
+        log "  re-read got no figure — not parking on the first reading alone"
+        return
+      fi
+      if [ "$BUDGET_PCT" -lt "$PAUSE_AT" ]; then
+        log "  re-read ${BUDGET_PCT}% — the ${pct}% had not caught up yet; not parking"
+        return
+      fi
+      pct="$BUDGET_PCT"
+      # the wait is long enough for the fleet to have changed under us
+      active=()
+      for w in $(workers_newest_first); do is_parked "$w" || active+=("$w"); done
+      n=${#active[@]}
+    fi
     if [ "$n" -gt 0 ]; then
       log "budget ${pct}% >= ${PAUSE_AT}% -> parking ALL ${n} worker(s)"
       notify "budget ${pct}% — parked ${n} worker(s); auto-resume under ${RESUME}%"
