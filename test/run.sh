@@ -314,6 +314,72 @@ both "unknown session lands last"       "c a b d" "$(printf 'c\na\n')"      "$(p
 both "a duplicate in the file is not"   "c a b"   "$(printf 'c\nc\na\n')"   "$LIVE"
 rm -rf "$ORD_T"
 
+# ── 4a3. a rename must not lose the session's slot ───────────────────────────
+# Every other per-session marker is migrated by RENAMING its file. The card order is
+# the one that can't be: it stores names INSIDE the file, one per line. Renaming with
+# only the file moves left the session unlisted, so it sorted to the END of the grid —
+# and every card after its old slot shifted up one, which quietly re-points the digits
+# and `Ctrl-f <p> <s>` at the next session along. Shipped broken; found by driving it.
+group "rename keeps its slot in the card order"
+if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  RN="$(mktemp -d)"; RNF="$RN/fleet"; mkdir -p "$RNF" "$RN/repo"
+  tmux -L cfrntest kill-server 2>/dev/null
+  git init -q -b main "$RN/repo" 2>/dev/null
+  git -C "$RN/repo" config user.email t@t; git -C "$RN/repo" config user.name t
+  : > "$RN/repo/f"; git -C "$RN/repo" add -A; git -C "$RN/repo" commit -qm init 2>/dev/null
+  for w in wa wb wc; do
+    git -C "$RN/repo" worktree add -q "$RN/$w" -b "$w" 2>/dev/null
+    tmux -L cfrntest new-session -d -s "$w" -c "$RN/$w" "sleep 120" 2>/dev/null
+  done
+  ordr() { CLAUDE_FLEET_DIR="$RNF" node "$ROOT/bin/fleet-grid.mjs" cfrntest --order 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
+  printf 'wc\nwa\nwb\n' > "$RNF/cfrntest.order"
+  is "fixture: wa sits in slot 2"        "wc wa wb" "$(ordr)"
+  CLAUDE_FLEET_DIR="$RNF" "$ROOT/bin/fleet-rename" -s cfrntest wa wz >/dev/null 2>&1
+  is "renamed session KEEPS slot 2"      "wc wz wb" "$(ordr)"
+  is "the file itself was rewritten"     "wc wz wb" "$(tr '\n' ' ' < "$RNF/cfrntest.order" | sed 's/ $//')"
+  # ⇧←→ reads the server's mirror, not the file, so that has to move too or the
+  # renamed session drops to the end of the RING while the grid shows it in place.
+  is "@cf_order mirror moved with it"    "wc:wz:wb" "$(tmux -L cfrntest show-options -gqv @cf_order 2>/dev/null)"
+  # An order file that never mentioned this session must come out untouched, not
+  # rewritten into something that happens to look plausible.
+  printf 'wb\nwc\n' > "$RNF/cfrntest.order"
+  CLAUDE_FLEET_DIR="$RNF" "$ROOT/bin/fleet-rename" -s cfrntest wz wq >/dev/null 2>&1
+  is "an unlisted session leaves it be"  "wb wc" "$(tr '\n' ' ' < "$RNF/cfrntest.order" | sed 's/ $//')"
+  tmux -L cfrntest kill-server 2>/dev/null
+  rm -rf "$RN"
+else
+  skip "rename keeps its slot" "tmux/git missing"
+fi
+
+# ── 4a4. never hand --order to a grid that predates it ───────────────────────
+# It doesn't error: an unknown flag is no flag, so the old grid falls through to
+# DRAWING THE TUI inside the control plane's command substitution — nothing reads it,
+# nothing exits, and the fleet freezes behind a screen you can't act on, with no
+# message anywhere. Measured; stdin on /dev/null doesn't help, its own refresh timer
+# keeps it alive. So grid_sessions asks the file whether it knows the flag first.
+#
+# The stub is a grid that PRINTS instead of hanging, so a removed guard fails this
+# suite loudly rather than wedging it.
+group "--order is only offered to a grid that has it"
+if command -v tmux >/dev/null 2>&1; then
+  GT="$(mktemp -d)"
+  echo 'console.log("STUB RAN")' > "$GT/old-grid.mjs"
+  tmux -L cfordguard kill-server 2>/dev/null
+  for s in ga gb; do tmux -L cfordguard new-session -d -s "$s" "sleep 120" 2>/dev/null; done
+  tmux -L cfordguard new-session -d -s master "sleep 120" 2>/dev/null
+  eval "$(sed -n '/^grid_sessions() {/,/^}/p' "$ROOT/bin/ghostfleet")"
+  SOCK=cfordguard; CONF=""
+  GRID="$GT/old-grid.mjs"
+  is "old grid: not run, tmux order used" "ga gb" "$(grid_sessions | tr '\n' ' ' | sed 's/ $//')"
+  GRID="$ROOT/bin/fleet-grid.mjs"
+  printf 'gb\nga\n' > "$GT/cfordguard.order"
+  is "current grid: it IS asked"          "gb ga" "$(CLAUDE_FLEET_DIR="$GT" grid_sessions | tr '\n' ' ' | sed 's/ $//')"
+  tmux -L cfordguard kill-server 2>/dev/null
+  rm -rf "$GT"
+else
+  skip "--order guard" "tmux missing"
+fi
+
 # ── 4b. the stack ────────────────────────────────────────────────────────────
 # stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
 # repo is: EVERY project has a session called `master`, so a bare name stacks whichever
