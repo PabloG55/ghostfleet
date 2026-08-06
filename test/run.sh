@@ -163,6 +163,45 @@ is "the fixture really is a trap"            "1" "$([ "$(grep -cE '[A-Za-z](…|
 is "wide busy still fires without them"      "1" "$(matches "$re" "$FIX/claude-busy.txt")"
 is "narrow busy still fires without them"    "1" "$(matches "$re" "$FIX/claude-busy-narrow.txt")"
 
+# While a SUBAGENT runs, Claude replaces its one-word spinner with the agent's own
+# description — "+ Adding the operator-key auth provider… (10m 15s · ↓ 32.8k tokens)".
+# That's a PHRASE, which the one-word pattern could not see, so a session with a
+# ten-minute agent under it sat on the grid as "✓ ready" — not merely wrong, but the
+# one status that means "finished, come look".
+#
+# PROVENANCE, because it matters here: these lines are TRANSCRIBED from a reported
+# pane (a screenshot of a live session), not taken with capture-pane. The line is
+# drawn in place and never reaches the scrollback, and a 5-minute poll of every live
+# pane across six fleets didn't catch one. So rather than pin one exact transcription
+# — which could be wrong in a way that passes here and still misses in the wild —
+# these vary everything a transcription could get wrong (the leading glyph, the
+# spacing, hyphens and digits in the description) and assert only the structure the
+# fix actually rests on: line start · phrase · ellipsis · elapsed clock.
+group "a running subagent reads as working, not ready"
+sre="$("$ROOT/bin/fleet-agent" field claude busy_re)"
+sjs="$("$ROOT/bin/fleet-agent" field claude busy_re_js)"
+ST="$(mktemp -d)"
+line() {   # $1=label $2=the pane line $3=1 fires / 0 silent
+  printf '%s\n' "$2" > "$ST/l"
+  is "$1 (ere)" "$3" "$(matches "$sre" "$ST/l")"
+  is "$1 (js)"  "$3" "$(jsm  "$sjs" "$ST/l")"
+}
+line "the reported subagent line"   "+ Adding the operator-key auth provider… (10m 15s · ↓ 32.8k tokens)" 1
+line "another glyph, short clock"   "✢ Running the full regression suite… (2m 4s · ↓ 1.2k tokens)"        1
+line "no glyph, indented"           "  Checking the migration plan… (42s)"                                1
+line "digits and a slash in it"     "· Updating apps/api v2 routes… (11m 40s · ↓ 42.2k tokens)"           1
+# The phrase branch buys its spaces by REQUIRING the clock. Without that, ordinary
+# prose with an ellipsis is indistinguishable from a spinner — the exact false
+# positive that anchoring was introduced to close, which cost 17 minutes of a worker
+# showing "working" after it had finished.
+line "a phrase with no clock"       "- Adding the operator-key auth provider… (the one that hung)"        0
+line "prose with a line number"     "56  ✳ Adding the thing… (10m 15s)"                                   0
+line "the idle agent-count hint"    "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent"           0
+# and the one-word branch must keep its LOOSE paren: a narrow pane drops the clock
+# first, and that pane still has to read as busy.
+line "one word, clock dropped"      "✽ Flowing… (almost done thinking with xhigh effort)"                 1
+rm -rf "$ST"
+
 group "ready detectors (ready_re)"
 cre="$("$ROOT/bin/fleet-agent" field codex ready_re)"
 # "· /" passed its original test only because that worktree sat in /private/tmp.
@@ -378,6 +417,49 @@ if command -v tmux >/dev/null 2>&1; then
   rm -rf "$GT"
 else
   skip "--order guard" "tmux missing"
+fi
+
+# ── 4a5. a click has to land on the card you clicked ─────────────────────────
+# The hit-test hardcoded "cards start at row 3", which stopped being true the day the
+# ship banner went up — it was added AFTER clickable cards and nothing told cardAt. On
+# any window big enough to fly the ship (8 rows instead of 1) every click resolved a
+# whole card-row too low: onto nothing at all on a small grid, so the click looked
+# simply dead, and onto the WRONG session on a fuller one.
+#
+# So this is measured at BOTH layouts. A test at one size proves nothing here — that is
+# exactly how it broke, and a hit-test pinned only to the short layout would look
+# perfectly correct while every real (big) window stayed broken.
+group "grid clicks land on the card you clicked"
+if command -v tmux >/dev/null 2>&1; then
+  CK="$(mktemp -d)"
+  tmux -L cfclktest kill-server 2>/dev/null; tmux -L cfclkdrv kill-server 2>/dev/null
+  for s in master ca cb; do tmux -L cfclktest new-session -d -s "$s" "sleep 120" 2>/dev/null; done
+  # $1=width $2=height $3=col $4=row -> the choice the grid printed, if any.
+  # stderr is deliberately NOT redirected: the grid reads the terminal size off it, so
+  # sending it to a file makes every window look like 80x24 and the ship never flies —
+  # which silently turns the wide case into a second copy of the short one.
+  clickcard() {
+    tmux -L cfclkdrv kill-session -t d 2>/dev/null; : > "$CK/choice"
+    tmux -L cfclkdrv -f /dev/null new-session -d -s d -x "$1" -y "$2" \
+      "CLAUDE_FLEET_DIR='$CK' CLAUDE_FLEET_SCOPE=clktest CLAUDE_FLEET_ROOT= node '$ROOT/bin/fleet-grid.mjs' cfclktest > '$CK/choice'" 2>/dev/null
+    sleep 2
+    tmux -L cfclkdrv send-keys -t d -l "$(printf '\033[<0;%s;%sM' "$3" "$4")" 2>/dev/null; sleep 0.3
+    tmux -L cfclkdrv send-keys -t d -l "$(printf '\033[<0;%s;%sm' "$3" "$4")" 2>/dev/null; sleep 0.7
+    cat "$CK/choice"
+  }
+  US=$'\x1f'
+  # 140x40: the ship fits, so cards start at row 10
+  is "wide: card 1 opens card 1"   "attach${US}ca" "$(clickcard 140 40 10 11)"
+  is "wide: card 2 opens card 2"   "attach${US}cb" "$(clickcard 140 40 43 11)"
+  is "wide: the banner is not a card" ""           "$(clickcard 140 40 10 4)"
+  is "wide: the gap is not a card"    ""           "$(clickcard 140 40 10 15)"
+  # 140x24: too short for the ship, so cards start at row 3 — the original layout
+  is "short: card 1 opens card 1"  "attach${US}ca" "$(clickcard 140 24 10 4)"
+  is "short: header is not a card"    ""           "$(clickcard 140 24 10 1)"
+  tmux -L cfclkdrv kill-server 2>/dev/null; tmux -L cfclktest kill-server 2>/dev/null
+  rm -rf "$CK"
+else
+  skip "grid clicks" "tmux missing"
 fi
 
 # ── 4b. the stack ────────────────────────────────────────────────────────────

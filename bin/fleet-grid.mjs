@@ -1102,11 +1102,21 @@ function parseMouse(key) {
   const m = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/.exec(key);
   return m ? { button: +m[1], x: +m[2], y: +m[3], press: m[4] === 'M' } : null;
 }
+// 1-based row of the first card line, on BOTH screens: the header (the ship when it
+// fits, otherwise one line) plus the confirm/jump row under it.
+//
+// This was hardcoded to 3, which stopped being true the day the ship went up — the
+// banner landed after clickable cards did and nothing told the hit-test. On any window
+// wide enough to fly it, every click resolved a whole card-row too low: usually onto
+// nothing at all (so the click looked simply dead), and on a fuller grid onto the wrong
+// session. Derive it from the same predicate the renderer uses, so the two cannot
+// disagree again.
+function firstCardRow() { return (bannerFits() ? SHIP.length : 1) + 2; }
 // index of the card under terminal cell (x,y) on a header+card-grid screen, or -1.
-// layout (grid + projects): rows 1-2 = header; cards from row 3, each block 5 lines
-// + 1 blank (6 rows); cards CW+2 wide with a 1-col gap and 1 leading column.
+// Each card block is 5 lines + 1 blank (6 rows); cards CW+2 wide with a 1-col gap and
+// 1 leading column.
 function cardAt(x, y, nc) {
-  const gy = y - 3; if (gy < 0 || gy % 6 >= 5) return -1;
+  const gy = y - firstCardRow(); if (gy < 0 || gy % 6 >= 5) return -1;
   const gx = x - 2; if (gx < 0 || gx % (CW + 3) >= CW + 2) return -1;
   const col = Math.floor(gx / (CW + 3)); if (col >= nc) return -1;
   return Math.floor(gy / 6) * nc + col;
@@ -1427,11 +1437,16 @@ const SHIP = [
 // Costs eight rows, a real bite out of a short window — and the cards are the
 // point of this screen, not the logo. Below either threshold, fall back to the plain
 // one-line header rather than pushing projects off the bottom.
-function banner(beside) {
-  // Costs eight rows, a real bite out of a short window — and the cards are the point
-  // of both screens. Below either threshold, fall back to the caller's one-liner.
+// Costs eight rows, a real bite out of a short window — and the cards are the point
+// of both screens. Below either threshold, fall back to the caller's one-liner.
+// Separate from banner() because the CLICK hit-test needs the same answer: this is
+// what decides whether the cards start at row 3 or row 10.
+function bannerFits() {
   const shipW = Math.max(...SHIP.map(l => l.length));
-  if (W() < shipW + 44 || H() < 26) return null;
+  return W() >= shipW + 44 && H() >= 26;
+}
+function banner(beside) {
+  if (!bannerFits()) return null;
   // Ship first, text immediately to its right. Pinning the ship to the far edge was
   // tried and reads as marooned on a wide terminal: the cards start at the left
   // margin, so a header that starts there too is the only one that looks attached

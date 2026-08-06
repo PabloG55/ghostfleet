@@ -103,8 +103,20 @@ agent_field() {
         # gerund line at wide widths, and both real busy fixtures still fire without
         # them. Verified on every live pane across six fleets: fires on the one
         # genuinely working session, silent on the other eleven.
-        busy_re)    printf '%s' '^[[:space:]]*[^[:alnum:][:space:]]?[[:space:]]*[A-Za-z]+(…|\.\.\.) ?\(' ;;
-        busy_re_js) printf '%s' '^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:…|\.\.\.)\s?\(' ;;
+        # SECOND BRANCH — a running SUBAGENT replaces the one-word spinner with the
+        # agent's own description: "+ Adding the operator-key auth provider… (10m 15s ·
+        # ↓ 32.8k tokens)". A PHRASE, so `[A-Za-z]+…` could not see it and a session
+        # with a 10-minute agent under it sat on the grid as "✓ ready" — the worst
+        # possible lie, since ready means "done, come look".
+        #   It is a separate branch, not a widening of the first, because a phrase is
+        # exactly what prose looks like: allowing spaces before the ellipsis in the
+        # ORIGINAL branch re-opens the false positive that anchoring was added to close.
+        # So this branch pays for its spaces by demanding the elapsed clock right after
+        # ("… (10m" / "… (42s"), which prose only carries if it quotes a whole live
+        # line verbatim AND starts it at the margin. The first branch keeps its loose
+        # "(", because a narrow pane drops the clock and that must still fire.
+        busy_re)    printf '%s' '^[[:space:]]*[^[:alnum:][:space:]]?[[:space:]]*[A-Za-z]+((…|\.\.\.) ?\(|[A-Za-z0-9 /-]*(…|\.\.\.) \([0-9]+[ms])' ;;
+        busy_re_js) printf '%s' '^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:(?:…|\.\.\.)\s?\(|[A-Za-z0-9 /-]*(?:…|\.\.\.) \(\d+[ms])' ;;
         blocked_re) printf '' ;;   # need-you arrives via hooks, not the pane
         ready_re)   printf '%s' '❯|bypass permissions|for shortcuts' ;;
         hooks)      printf 'yes' ;;
