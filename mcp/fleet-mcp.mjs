@@ -33,11 +33,14 @@ function projects() {
     for (const line of txt.split('\n')) {
       const t = line.replace(/\r$/, '');
       if (!t.trim() || t.startsWith('#')) continue;
-      const [name, p, prof0] = t.split('\t');
+      const [name, p, prof0, agent0] = t.split('\t');
       if (!name || !p) continue;
       const prof = prof0 || 'work';
       const isWork = prof === 'work' || prof === 'default';
-      out.push({ name, path: p.replace(/^~/, HOME), profile: prof,
+      // 4th column = that project's default agent. Carried so a cross-fleet spawn uses
+      // the TARGET's default rather than inheriting whatever the caller happens to run.
+      const agent = /^[a-z0-9_-]+$/.test((agent0 || '').trim()) ? agent0.trim() : '';
+      out.push({ name, path: p.replace(/^~/, HOME), profile: prof, agent,
                  sock: isWork ? `cf-${name}` : `cf-${prof}-${name}`,
                  cfg: isWork ? path.join(HOME, '.claude') : path.join(HOME, '.claude-' + prof) });
     }
@@ -81,16 +84,36 @@ function self() {
   return { sock, sess, dir };
 }
 
-function run(cmd, args, t) {
+// fleet-spawn and fleet-worktrees find the repo from $PWD, not from -s — they are the
+// only two commands here that do. So targeting another project means RUNNING THERE, and
+// this resolves where "there" is: the same convention enter_master uses in
+// bin/ghostfleet — <root>/<name>, else the first child repo, else the root itself,
+// because a project is registered either as a container of checkouts or as one repo.
+function checkoutOf(t) {
+  const isRepo = p => { try { return fs.existsSync(path.join(p, '.git')); } catch { return false; } };
+  if (isRepo(t.path)) return t.path;
+  const named = path.join(t.path, t.name);
+  if (isRepo(named)) return named;
+  try {
+    for (const e of fs.readdirSync(t.path, { withFileTypes: true }))
+      if (e.isDirectory() && isRepo(path.join(t.path, e.name))) return path.join(t.path, e.name);
+  } catch {}
+  return t.path;
+}
+
+function run(cmd, args, t, opts = {}) {
   // When targeting another fleet, pass -s AND point the env at that profile, so
   // status/markers land in the right fleet dir. TMUX is cleared because the commands
   // prefer the live server it names (drift-proof for normal use, wrong here).
-  const argv = t ? ['-s', t.sock, ...args] : args;
+  // opts.noSock: fleet-spawn takes no -s at all (it derives the fleet from the repo it
+  // is run in, via route_to_owner) and rejects unknown options outright.
+  const argv = (t && !opts.noSock) ? ['-s', t.sock, ...args] : args;
   const env = t ? { ...process.env, TMUX: '', CLAUDE_FLEET_SOCK: t.sock,
-                    CLAUDE_CONFIG_DIR: t.cfg, CLAUDE_FLEET_DIR: path.join(t.cfg, 'fleet') }
+                    CLAUDE_CONFIG_DIR: t.cfg, CLAUDE_FLEET_DIR: path.join(t.cfg, 'fleet'),
+                    CLAUDE_FLEET_AGENT: t.agent || 'claude' }
                 : process.env;
   try {
-    return execFileSync(path.join(BIN, cmd), argv, { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }) || '(no output)';
+    return execFileSync(path.join(BIN, cmd), argv, { encoding: 'utf8', env, cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'] }) || '(no output)';
   } catch (e) {
     return `${e.stdout || ''}${e.stderr || ''}`.trim() || `error: ${e.message}`;
   }
@@ -103,10 +126,10 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'target session name (see fleet_list)' }, prompt: { type: 'string', description: 'the full, self-contained prompt to run there' }, reply_to: { type: 'boolean', description: "ask for an answer back: when that session's turn ends, its reply lands in YOUR inbox (fleet_inbox) and wakes you" } }, required: ['session', 'prompt'], additionalProperties: false } },
   { name: 'fleet_read', description: 'Read the last N assistant messages from a sibling session, to check its progress/output.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, n: { type: 'number', description: 'how many recent assistant messages (default 1)' } }, required: ['session'], additionalProperties: false } },
-  { name: 'fleet_spawn', description: 'Create a new git worktree off the current repo and start a fresh parallel session in it (in the background), optionally with an initial task prompt. Call fleet_worktrees FIRST: if free worktrees exist, spawn refuses unless you reuse one (reuse) or force a new one (force_new).',
-    inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, from: { type: 'string', description: 'base ref for a new branch; bases on your LOCAL ref (use "HEAD" for current), falls back to the remote tip only if local is behind' }, prompt: { type: 'string', description: 'initial task to send once it boots' }, model: { type: 'string', description: 'model for the worker (e.g. opus); default = account default' }, reuse: { type: 'string', description: 'start in this EXISTING free worktree (name or path); combine with branch+from to clean & rebranch it in one step' }, force_new: { type: 'boolean', description: 'create a new worktree even if free ones exist' } }, required: ['name'], additionalProperties: false } },
-  { name: 'fleet_worktrees', description: 'Inventory every git worktree of this repo — branch, whether a session is live on it, git state, and which are FREE to reuse. Call this BEFORE fleet_spawn so you reuse an idle worktree instead of proliferating new ones.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'fleet_spawn', description: "Create a new git worktree and start a fresh parallel session in it (in the background), optionally with an initial task prompt. Defaults to YOUR OWN repo; pass `project` to spawn a worker into ANOTHER project's fleet (name from fleet_projects) — it runs in that project's checkout and the worker lands on that fleet, with that project's default agent. Call fleet_worktrees FIRST (same `project`): if free worktrees exist, spawn refuses unless you reuse one (reuse) or force a new one (force_new).",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, from: { type: 'string', description: 'base ref for a new branch; bases on your LOCAL ref (use "HEAD" for current), falls back to the remote tip only if local is behind' }, prompt: { type: 'string', description: 'initial task to send once it boots' }, model: { type: 'string', description: 'model for the worker (e.g. opus); default = account default' }, reuse: { type: 'string', description: 'start in this EXISTING free worktree (name or path); combine with branch+from to clean & rebranch it in one step' }, force_new: { type: 'boolean', description: 'create a new worktree even if free ones exist' } }, required: ['name'], additionalProperties: false } },
+  { name: 'fleet_worktrees', description: "Inventory every git worktree of a repo — branch, whether a session is live on it, git state, and which are FREE to reuse. Call this BEFORE fleet_spawn so you reuse an idle worktree instead of proliferating new ones. Defaults to your own repo; pass `project` to inventory ANOTHER project's.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" } }, additionalProperties: false } },
   { name: 'fleet_inbox', description: "Drain the lead's attention feed: worker 'need-you' events (permission / usage-limit / real questions), governor park/resume, and answers relayed back from sessions you asked with fleet_send reply_to. One call replaces polling every sibling — shows only what is new since last call. Pass `project` to drain ANOTHER project's feed instead of your own.",
     inputSchema: { type: 'object', properties: { all: { type: 'boolean', description: 'show the whole inbox instead of only new entries' }, project: { type: 'string', description: "another project's fleet to read (name from fleet_projects); omit for your own — your relayed answers arrive in YOUR OWN inbox, so omit it for those" } }, additionalProperties: false } },
   { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a permission dialog, a "reached usage limit — retry?", a trust prompt (e.g. text "2"). Use this to unblock a worker; use fleet_send for normal task prompts.',
@@ -169,9 +192,11 @@ function callTool(name, a = {}) {
       if (a.reuse) args.push('--reuse', String(a.reuse));
       if (a.force_new) args.push('--new');
       if (a.prompt) args.push('--prompt', String(a.prompt));
-      return run('fleet-spawn', args);
+      // noSock + cwd: spawn has no -s, and finds the repo (and so the owning fleet)
+      // from where it runs. Everything else here is addressed by socket.
+      return run('fleet-spawn', args, t, { noSock: true, cwd: t ? checkoutOf(t) : undefined });
     }
-    case 'fleet_worktrees': return run('fleet-worktrees', []);
+    case 'fleet_worktrees': return run('fleet-worktrees', [], t, { cwd: t ? checkoutOf(t) : undefined });
     case 'fleet_inbox': return run('fleet-inbox', a.all ? ['--all'] : [], t);
     case 'fleet_answer': {
       const args = [String(a.session), String(a.text)];

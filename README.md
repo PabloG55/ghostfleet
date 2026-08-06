@@ -295,7 +295,11 @@ spawn, pull the inbox instead of polling every sibling, unblock with `fleet-answ
 shared budget — so you can just say *"work on a worktree to fix X"* and it reuses a free one. Each
 session knows its fleet via `CLAUDE_FLEET_SOCK`; prompts must be self-contained (siblings don't
 share your context). Another **project's** fleet is reachable too — `-s <socket>` from a shell, or
-`project: "<name>"` on any of the MCP tools (`fleet_projects` lists the names).
+`project: "<name>"` on any of the MCP tools (`fleet_projects` lists the names). That includes
+**starting a worker in another project**: `fleet_spawn` and `fleet_worktrees` are the two that
+find the repo from the directory they run in rather than from a socket, so `project` puts them in
+that project's checkout — the new worker lands on its fleet, on its branch, with its default
+agent, without the lead needing to know where any of that lives.
 
 **Budget.** One account funds the whole fleet, so wide fan-out drains it N× faster and everyone
 stalls at the ceiling together. A **governor** (a dumb non-Claude loop, auto-started per fleet)

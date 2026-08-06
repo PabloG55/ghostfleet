@@ -622,6 +622,48 @@ else
   skip "answered need-you" "tmux missing"
 fi
 
+# ── 4a7. the MCP can reach ANOTHER project's repo ────────────────────────────
+# fleet_spawn and fleet_worktrees find the repo from $PWD rather than from -s — the
+# only two here that do — which is why they were also the only two with no `project`
+# parameter. An agent asked to start a worker in another project had to drop to the CLI
+# and know that fleet-spawn re-routes by repo owner. They now RUN IN the target's
+# checkout instead.
+#
+# Both directions, because a tool that ignored the parameter entirely would sail through
+# a one-sided test by inventorying whatever directory it already sat in: with `project`
+# it must see the TARGET's worktree and NOT the caller's, and without it, the reverse.
+group "MCP: fleet_worktrees reaches another project"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  MP="$(mktemp -d)"
+  mkdir -p "$MP/home/.config/ghostfleet" "$MP/root"
+  for r in "$MP/root/theproj" "$MP/caller"; do
+    mkdir -p "$r"; git init -q -b main "$r" 2>/dev/null
+    git -C "$r" config user.email t@t; git -C "$r" config user.name t
+    : > "$r/f"; git -C "$r" add -A; git -C "$r" commit -qm init 2>/dev/null
+  done
+  git -C "$MP/root/theproj" worktree add -q "$MP/root/only-over-there" -b only-over-there 2>/dev/null
+  printf 'theproj\t%s\twork\n' "$MP/root" > "$MP/home/.config/ghostfleet/projects"
+  mcpwt() {            # $1 = the tool's JSON arguments -> its text output
+    { printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
+      printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fleet_worktrees","arguments":%s}}\n' "$1"
+      sleep 3
+    } | ( cd "$MP/caller" && HOME="$MP/home" CLAUDE_FLEET_SOCK=cfmcptest TMUX= \
+          node "$ROOT/mcp/fleet-mcp.mjs" 2>/dev/null ) \
+      | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{d.split("\n").filter(Boolean).forEach(l=>{try{const o=JSON.parse(l);if(o.id===2)process.stdout.write(o.result?.content?.[0]?.text||"")}catch{}})})'
+  }
+  # anchored to the WORKTREE column: the name also appears in the "Free to reuse:"
+  # footer, so an unanchored count is 2 and the assertion would be pinned to a
+  # formatting detail rather than to the row being there.
+  is "with project: the TARGET's worktree"   "1" "$(mcpwt '{"project":"theproj"}' | grep -c '^only-over-there ' || true)"
+  is "with project: NOT the caller's repo"   "0" "$(mcpwt '{"project":"theproj"}' | grep -c '^caller ' || true)"
+  is "without project: the caller's repo"    "1" "$(mcpwt '{}'                    | grep -c '^caller ' || true)"
+  is "without project: not the target's"     "0" "$(mcpwt '{}'                    | grep -c '^only-over-there ' || true)"
+  is "an unknown project is refused"         "1" "$(mcpwt '{"project":"nope"}'    | grep -c 'unknown project' || true)"
+  rm -rf "$MP"
+else
+  skip "MCP cross-project" "git/tmux missing"
+fi
+
 # ── 4b. the stack ────────────────────────────────────────────────────────────
 # stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
 # repo is: EVERY project has a session called `master`, so a bare name stacks whichever
