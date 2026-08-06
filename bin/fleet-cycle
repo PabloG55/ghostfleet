@@ -23,13 +23,26 @@ DIR="${1:-next}"; SOCK="${2:-}"; CUR="${3:-}"
 T() { tmux -S "$SOCK" "$@"; }
 [ -n "$CUR" ] || CUR="$(T display-message -p '#{session_name}' 2>/dev/null)"
 
-# master first, then the rest in list order. This has to match the grid's numbering
-# (JUMP_SESS in bin/ghostfleet lists the same way) or "session 2" would mean two
-# different things depending on how you got there.
+# master first, then the workers in CARD order. This has to match the grid's numbering
+# (JUMP_SESS in bin/ghostfleet counts the same list) or "session 2" would mean two
+# different things depending on how you got there — and the grid's order is not tmux's:
+# ⇧hjkl reorders the cards. @cf_order is that order, mirrored onto this server by
+# tm_wire/the grid, because run-shell can't see the fleet's env and so can't reach the
+# file it's persisted in. Unset (a server that predates it) -> tmux's own list order,
+# which is exactly what the grid falls back to as well.
 # `-t =master` is an EXACT match: a bare -t is a prefix match, so a worker called
 # "master-notes" would otherwise answer for master.
+ord="$(T show-options -gqv @cf_order 2>/dev/null)"
 ring="$( { T has-session -t '=master' 2>/dev/null && printf 'master\n'
-           T list-sessions -F '#{session_name}' 2>/dev/null | grep -v '^master$'
+           T list-sessions -F '#{session_name}' 2>/dev/null | grep -v '^master$' \
+             | awk -v ord="$ord" '
+                 BEGIN { m = split(ord, want, ":") }
+                 { live[$0] = 1; rest[++r] = $0 }
+                 END {
+                   for (i = 1; i <= m; i++)
+                     if (want[i] != "" && (want[i] in live) && !(want[i] in shown)) { print want[i]; shown[want[i]] = 1 }
+                   for (i = 1; i <= r; i++) if (!(rest[i] in shown)) print rest[i]
+                 }'
          } 2>/dev/null )"
 
 target="$(printf '%s\n' "$ring" | awk -v cur="$CUR" -v dir="$DIR" '

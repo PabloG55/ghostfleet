@@ -262,6 +262,58 @@ is "new: -2 taken -> -3"          "foo-3"  "$(namer foo "foo foo-2"   -)"
 is "parallel: first is ~2, not ~3" "foo~2" "$(namer foo "foo"         '~')"
 is "parallel: then ~3"             "foo~3" "$(namer foo "foo foo~2"   '~')"
 
+# ── 4a2. the card order ──────────────────────────────────────────────────────
+# ⇧hjkl reorders the cards, and that order IS the fleet's numbering — the digit on a
+# card, `1`-`9`, `Ctrl-f <p> <s>` and ⇧←→ all count the same list. THREE separate
+# implementations read it: fleet-grid.mjs (the screen, and `--order`, which is what
+# bin/ghostfleet counts through), and the awk ring in fleet-cycle (which can't reach
+# the order FILE from inside run-shell, so it reads the @cf_order option instead).
+# Two orderings that disagree don't fail — they quietly open a different session than
+# the card you were reading, which is indistinguishable from a mis-press.
+#
+# Both directions matter here too: an implementation that ignored the saved order
+# entirely would still pass every "unset -> tmux order" case on its own.
+group "card order (grid vs fleet-cycle)"
+ORD_T="$(mktemp -d)"
+# Both implementations are lifted out of the shipped files rather than restated here —
+# a copy in the test proves the copy, not the code. That makes the EXTRACTION load-
+# bearing, so assert it found something: a renamed function otherwise turns every case
+# below into a silent empty answer, which is the failure this whole file exists to
+# refuse. (It has already happened once: `orderFile()` grew parameters.)
+ORD_JS="$(awk '/^function orderFile\(/,/^function writeOrder\(/' "$ROOT/bin/fleet-grid.mjs" | sed '$d')"
+ORD_AWK="$(sed -n "/BEGIN { m = split(ord, want/,/^ *}'\$/p" "$ROOT/bin/fleet-cycle" | sed "s/'\$//")"
+is "grid's applyOrder was found"  "1" "$(printf '%s' "$ORD_JS"  | grep -c 'function applyOrder')"
+is "fleet-cycle's ring was found" "1" "$(printf '%s' "$ORD_AWK" | grep -c 'split(ord, want')"
+js_order() {                   # $1=order-file contents  $2=live names (newline sep)
+  printf '%s' "$1" > "$ORD_T/cf-t.order"
+  printf '%s' "$2" | node --input-type=module -e "
+    import fs from 'node:fs'; import path from 'node:path';
+    const FLEET_DIR = '$ORD_T', SOCK = 'cf-t';
+    $ORD_JS
+    const live = fs.readFileSync(0, 'utf8').split('\n').filter(Boolean).map(name => ({ name }));
+    console.log(applyOrder(live).map(r => r.name).join(' '));
+  "
+}
+awk_order() {                  # $1=@cf_order value (colon sep)  $2=live names
+  printf '%s\n' "$2" | awk -v ord="$1" "$ORD_AWK" | paste -sd' ' -
+}
+both() {                       # assert the two agree AND match the expectation
+  local label="$1" want="$2" file="$3" live="$4"
+  is "$label (grid)"        "$want" "$(js_order  "$file" "$live")"
+  is "$label (fleet-cycle)" "$want" "$(awk_order "$(printf '%s' "$file" | paste -sd: -)" "$live")"
+}
+LIVE="$(printf 'a\nb\nc')"
+both "no saved order -> tmux's own"     "a b c"   ""                        "$LIVE"
+both "saved order wins"                 "c a b"   "$(printf 'c\na\nb\n')"   "$LIVE"
+both "partial order, rest keeps tmux's" "c a b"   "$(printf 'c\n')"         "$LIVE"
+# A killed session still named in the file must be SKIPPED, not counted — otherwise
+# every card after it shifts up one and the digits point one session too far.
+both "dead name in the file is skipped" "c a"     "$(printf 'c\nb\na\n')"   "$(printf 'a\nc')"
+# and a session created since the last reorder must still appear, at the end
+both "unknown session lands last"       "c a b d" "$(printf 'c\na\n')"      "$(printf 'a\nb\nc\nd')"
+both "a duplicate in the file is not"   "c a b"   "$(printf 'c\nc\na\n')"   "$LIVE"
+rm -rf "$ORD_T"
+
 # ── 4b. the stack ────────────────────────────────────────────────────────────
 # stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
 # repo is: EVERY project has a session called `master`, so a bare name stacks whichever

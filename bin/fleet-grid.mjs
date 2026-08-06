@@ -97,6 +97,56 @@ function fleetBySlot() {
   return map;
 }
 
+// ── card order ────────────────────────────────────────────────────────────
+// The grid's order IS the fleet's numbering: the digit on each card, the 1-9
+// insta-jump, `Ctrl-f <p> <s>` and ⇧←→ cycling all count cards in this order. ⇧hjkl
+// rewrites it, so it has to survive in two places — a file (for this process and the
+// next one) and a tmux server option (fleet-cycle runs inside `run-shell`, which
+// cannot see this fleet's environment and so cannot find the file at all).
+// dir/sock are parameters because the STACK screen reads other projects' fleets, and
+// each one keeps its own order — defaulting to this fleet covers every other caller.
+function orderFile(dir = FLEET_DIR, sock = SOCK) { return path.join(dir, `${sock}.order`); }
+function readOrder(dir, sock) {
+  try { return fs.readFileSync(orderFile(dir, sock), 'utf8').split('\n').map(s => s.trim()).filter(Boolean); }
+  catch { return []; }
+}
+// Saved order first, skipping names whose session is gone; then everything the file
+// has never heard of, in tmux's own order. A session created since the last reorder
+// lands at the END rather than vanishing off a grid that only shows what's listed.
+function applyOrder(rows, dir, sock) {
+  const order = readOrder(dir, sock);
+  if (!order.length) return rows;
+  const left = new Map(rows.map(r => [r.name, r]));
+  const out = [];
+  for (const n of order) { const r = left.get(n); if (r) { out.push(r); left.delete(n); } }
+  for (const r of rows) if (left.has(r.name)) out.push(r);
+  return out;
+}
+function writeOrder(names) {
+  try {
+    fs.mkdirSync(FLEET_DIR, { recursive: true });
+    fs.writeFileSync(orderFile(), names.join('\n') + '\n');
+  } catch {}
+  // Mirror onto the tmux server for fleet-cycle. ':' is the separator because tmux
+  // rejects both ':' and '.' in a session name — no name can smuggle one past.
+  try {
+    execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'set-option', '-g', '@cf_order', names.join(':')],
+      { stdio: 'ignore' });
+  } catch {}
+}
+// Move `name` `delta` places in the order and persist it. Returns its new index.
+function reorderSession(name, delta) {
+  const names = cards.map(c => c.name);
+  const idx = names.indexOf(name);
+  if (idx < 0) return -1;
+  const ni = Math.max(0, Math.min(names.length - 1, idx + delta));
+  if (ni === idx) return idx;                          // already at the edge
+  const [moved] = names.splice(idx, 1);
+  names.splice(ni, 0, moved);
+  writeOrder(names);
+  return ni;
+}
+
 function mtimeSec(p) { try { return Math.floor(fs.statSync(p).mtimeMs / 1000); } catch { return 0; } }
 
 function tailText(p, maxBytes = 65536) {
@@ -266,7 +316,8 @@ function newestTranscript(cwd) {
 }
 
 function gather() {
-  const sessions = tmuxList().filter(s => s.name !== 'master');   // master lives on the home screen, not the grid
+  // master lives on the home screen, not the grid; the rest come back in CARD order
+  const sessions = applyOrder(tmuxList().filter(s => s.name !== 'master'));
   const fleet = fleetBySlot();
   const nowS = Math.floor(Date.now() / 1000);
   return sessions.map(s => {
@@ -560,6 +611,73 @@ function freeWorktrees() {
     .map(w => ({ path: w.path, branch: w.branch, task: manifestTask(w.path) }));
 }
 
+// ── worktrees: create · remove ────────────────────────────────────────────
+// The repo's current branch — the default base a new worktree's branch is cut from,
+// shown on the form so "from" is never a mystery you have to go and look up.
+function currentBranch(repo) {
+  try {
+    return execFileSync('git', ['-C', repo, 'symbolic-ref', '--quiet', '--short', 'HEAD'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || 'HEAD';
+  } catch { return 'HEAD'; }
+}
+// Create a worktree AND start a session in it, by handing the whole job to
+// bin/fleet-spawn (same pattern as doRename -> fleet-rename). Not laziness: spawn
+// already resolves the base ref against its upstream so a new branch doesn't start
+// stale, symlinks node_modules in, records the manifest and the agent marker, and
+// routes the session onto the OWNING project's socket. A second copy of all that
+// here would be a second thing to keep right, and the two would drift.
+//   fleet-spawn finds the repo from $PWD, so it has to RUN in the main checkout: the
+// control plane's cwd is wherever ghostfleet was launched from, usually elsewhere.
+function createWorktree({ name, branch, from, agent }) {
+  const repo = mainRepo();
+  if (!repo) return { ok: false, msg: 'no git checkout found for this project' };
+  const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-spawn');
+  const args = [name, '--new'];
+  if (branch) args.push('--branch', branch);
+  if (from) args.push('--from', from);
+  if (agent) args.push('--agent', agent);
+  let stdout = '';
+  try {
+    stdout = execFileSync(bin, args, {
+      cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      // fleet-agent has to be findable for a non-claude agent, and a tmux server born
+      // outside a login shell need not carry ~/.local/bin on PATH.
+      env: { ...process.env, CLAUDE_FLEET_SOCK: SOCK, PATH: `${path.dirname(bin)}:${process.env.PATH || ''}` },
+    });
+  } catch (e) {
+    const msg = `${e.stderr || ''}\n${e.stdout || ''}`.trim().split('\n').filter(Boolean).pop();
+    return { ok: false, msg: (msg || 'fleet-spawn failed').replace(/^fleet-spawn: /, '').slice(0, 160) };
+  }
+  // spawn settles name collisions itself (name~2, …), so attach the session it says
+  // it STARTED, not the one we asked for — attaching the wrong one would be silent.
+  const started = /started '([^']+)'/.exec(stdout)?.[1] || name;
+  return { ok: true, session: started };
+}
+// Remove a free worktree's checkout. The BRANCH is left alone on purpose: a worktree
+// is a working copy, and deleting someone's branch because they tidied up a folder
+// is not a thing you can undo. git refuses on a dirty tree — that refusal is the
+// message the caller shows, and forcing past it is a different, deliberate keystroke.
+function removeWorktree(wtPath, force) {
+  const repo = mainRepo();
+  if (!repo) return { ok: false, msg: 'no git checkout found for this project' };
+  try {
+    execFileSync('git', ['-C', repo, 'worktree', 'remove', ...(force ? ['--force'] : []), wtPath],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return { ok: true };
+  } catch (e) {
+    const raw = `${e.stderr || ''}`.trim().split('\n').filter(Boolean).pop() || 'git worktree remove failed';
+    // git names the worktree by its FULL path, which on a real checkout is long enough
+    // to push the actual reason off the end of the line — the first cut of this showed
+    // half a path and nothing else. The card already says which worktree this is; what
+    // you need here is why git said no, and that `f` is the answer to "use --force".
+    return { ok: false, msg: raw
+      .replace(/^fatal:\s*/, '')
+      .replaceAll(wtPath, path.basename(wtPath))
+      .replaceAll(HOME, '~')
+      .replace(/,?\s*use --force to delete it\.?$/, '') };
+  }
+}
+
 function discoverCheckouts() {
   // 1) explicit config wins: ~/.config/ghostfleet/checkouts, one path per line
   try {
@@ -589,7 +707,7 @@ function W() { return process.stderr.columns || 80; }
 function H() { return process.stderr.rows || 24; }
 function out(s) { tty.write(s); }
 
-let mode = 'grid';           // 'grid' | 'picker' | 'nameprompt' | 'agentpick' | 'rename' | 'schedule'
+let mode = 'grid';           // 'grid' | 'picker' | 'nameprompt' | 'agentpick' | 'rename' | 'schedule' | 'newwt'
 let sel = 0;                 // selection index in grid
 let cards = [];
 let items = [];              // grid items: cards + {new:true}
@@ -612,6 +730,11 @@ let gSetSel = 0;             // selected row on the per-session settings page
 let renameOld = null;        // session being renamed (from the settings page's 'r')
 let renameInput = '';        // editable, pre-filled with the current name
 let renameMsg = '';          // error from the last attempt, shown until you retype
+let wtFields = null;         // { name, branch, from, agent } while the new-worktree form is open
+let wtSel = 0;               // selected field on that form
+let wtMsg = '';              // what fleet-spawn complained about last time
+let wtBusy = false;          // mid-create — a fetch + a session boot is not instant
+let confirmWt = null;        // { path, branch, msg, force } — free worktree awaiting removal
 
 // Rename BOTH the tmux session and its worktree folder (git worktree move), so the
 // two never drift apart — a session named "x" always sitting in a folder named "x"
@@ -680,6 +803,14 @@ function renderGrid() {
   ]) ?? (header + '\x1b[K\n');
   if (confirmKill)
     buf += `${C.red}${C.bold} kill session '${confirmKill}'?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
+  else if (confirmWt)
+    // Clip to what actually fits beside the key hint: a line that wraps pushes the
+    // whole card grid down a row and reflows it under you as you read it.
+    buf += confirmWt.force
+      ? `${C.red}${C.bold} ${clip(confirmWt.msg, Math.max(20, W() - 40))}${C.reset}` +
+        `${C.red} — f = remove anyway · any key = cancel${C.reset}\x1b[K\n`
+      : `${C.red}${C.bold} remove worktree '${path.basename(confirmWt.path)}' (${confirmWt.branch})?${C.reset}` +
+        `${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
   else
     buf += (jumpStage ? jumpHint() : '') + '\x1b[K\n';
   const nc = cols();
@@ -696,7 +827,11 @@ function renderGrid() {
     }
     buf += '\x1b[K\n';
   }
-  buf += `${C.dim} ↑↓←→/hjkl move · ⏎/1-9 enter · n new · t stack · s sched · p pause · P resume · x kill · , settings · ^F jump · ^P/Q projects · q/\` back${C.reset}\x1b[K\n`;
+  // `x` means two different things depending on what's selected, so the footer says
+  // which one it means RIGHT NOW rather than making you find out by pressing it.
+  const xVerb = items[sel]?.freeWt ? 'x remove wt' : 'x kill';
+  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 enter · n new · w worktree · t stack · s sched · ` +
+         `p pause · P resume · ${xVerb} · , settings · Ctrl-f jump · Ctrl-p/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -837,12 +972,59 @@ function renderRename() {
   buf += `${C.dim} ⏎ rename · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
+// The insertable text in a stdin chunk. A PASTE (and a fast enough typist) arrives
+// as one multi-character read, which a `key.length === 1` test drops on the floor
+// without a sound — and a base ref is exactly the kind of thing you paste rather
+// than type. Anything starting with ESC is an escape sequence (arrows, shift-tab),
+// never text. '.' and ':' go for the same reason the naming screen bars them: tmux
+// rejects both in a session name, and this name becomes one.
+function typedText(key) {
+  if (!key || key.startsWith('\x1b')) return '';
+  return [...key].filter(ch => ch >= ' ' && ch !== '\x7f' && ch !== '.' && ch !== ':').join('');
+}
+// The fields the new-worktree form shows. `agent` only appears when there is
+// actually a choice to make — the same rule the naming screen uses before it
+// detours through the agent picker, so a claude-only machine sees three rows.
+function wtRows() {
+  const rows = [
+    { key: 'name',   label: 'name',   hint: 'the session + the folder' },
+    { key: 'branch', label: 'branch', hint: 'blank = same as the name' },
+    { key: 'from',   label: 'from',   hint: 'base ref for a new branch' },
+  ];
+  if (installedAgents().length > 1) rows.push({ key: 'agent', label: 'agent', hint: '←/→ to change' });
+  return rows;
+}
+function renderNewWorktree() {
+  const repo = mainRepo();
+  const rows = wtRows();
+  const target = repo ? path.join(path.dirname(repo), wtFields.name || '…') : '(nowhere — no git checkout)';
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}new worktree${C.reset} ${C.dim}— a sibling checkout of ${path.basename(repo || Z)}, on its own branch${C.reset}\x1b[K\n`;
+  buf += ` ${C.cyan}${target.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  rows.forEach((r, i) => {
+    const on = i === wtSel;
+    // branch shows what it will ACTUALLY use when left blank, rather than nothing —
+    // the default is the name, and a blank line reads like "no branch".
+    const val = wtFields[r.key] || '';
+    const shown = (r.key === 'branch' && !val) ? `${wtFields.name || ''}${C.dim} (from the name)${C.reset}` : val;
+    const cursor = (on && r.key !== 'agent') ? '▌' : '';
+    buf += `${on ? ` ${C.bold}${C.white}▸ ` : '   '}${padEndV(r.label, 8)}${C.reset}` +
+           `${on ? C.white : C.dim}${shown}${cursor}${C.reset}` +
+           `${C.dim}${on ? `   ${r.hint}` : ''}${C.reset}\x1b[K\n`;
+  });
+  buf += '\x1b[K\n';
+  buf += (wtBusy ? ` ${C.yellow}creating the worktree and starting the session…${C.reset}`
+        : wtMsg  ? ` ${C.red}${wtMsg}${C.reset}` : '') + '\x1b[K\n\x1b[K\n';
+  buf += `${C.dim} ↑↓/tab field · ⏎ create + open · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
 function render() {
   if (mode === 'grid') { if (gSettings) renderSettings(); else renderGrid(); }
   else if (mode === 'picker') renderPicker();
   else if (mode === 'nameprompt') renderNamePrompt();
   else if (mode === 'agentpick') renderAgentPick();
   else if (mode === 'rename') renderRename();
+  else if (mode === 'newwt') renderNewWorktree();
   else renderSchedule();
 }
 
@@ -933,7 +1115,7 @@ function cardAt(x, y, nc) {
 function onKey(key) {
   const mev = parseMouse(key);
   if (mev) {
-    if (mode === 'grid' && mev.press && mev.button === 0 && !confirmKill) {
+    if (mode === 'grid' && mev.press && mev.button === 0 && !confirmKill && !confirmWt) {
       const idx = cardAt(mev.x, mev.y, cols());
       if (idx >= 0 && idx < items.length) {
         sel = idx;
@@ -963,6 +1145,17 @@ function onKey(key) {
       else confirmKill = null;
       render(); return;
     }
+    if (confirmWt) {
+      // Forcing takes a DIFFERENT key, not a second 'y'. A second y on a prompt that
+      // just refused is a reflex, and this particular one throws away real work.
+      const said = confirmWt.force ? (key === 'f' || key === 'F') : (key === 'y' || key === 'Y');
+      if (said) {
+        const res = removeWorktree(confirmWt.path, confirmWt.force);
+        if (res.ok) { confirmWt = null; buildItems(); }
+        else confirmWt = { ...confirmWt, msg: res.msg, force: true };
+      } else confirmWt = null;
+      render(); return;
+    }
     {                                                // ^F jump chord (see jumpKey)
       const j = jumpKey(key);
       if (j) { if (j !== 'handled') return finish(j); render(); return; }
@@ -972,9 +1165,36 @@ function onKey(key) {
     else if (key === '\x1b[B' || key === 'j') moveGrid('down');
     else if (key === '\x1b[C' || key === 'l') moveGrid('right');
     else if (key === '\x1b[D' || key === 'h') moveGrid('left');
+    // ⇧+hjkl: reorder — move the selected session's card. Persisted, because this
+    // order IS the fleet's numbering: the digits, 1-9, `Ctrl-f <p> <s>` and ⇧←→ all
+    // count these cards, and they have to keep meaning the same session.
+    else if (key === 'H' || key === 'L' || key === 'K' || key === 'J') {
+      const it = items[sel];
+      if (it?.card) {
+        const nc = cols();
+        const delta = key === 'H' ? -1 : key === 'L' ? 1 : key === 'K' ? -nc : nc;
+        const ni = reorderSession(it.card.name, delta);
+        buildItems(); if (ni >= 0) sel = ni;      // cards lead `items`, so index == index
+      }
+    }
     else if (key === 'n') { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = false; mode = 'picker'; }
     else if (key === 'N') { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = true; mode = 'picker'; }
-    else if (key === 'x' || key === 'X') { const it = items[sel]; if (it?.card) confirmKill = it.card.name; }
+    // w = a brand-new WORKTREE (n/N start a session in one that already exists).
+    else if (key === 'w' || key === 'W') {
+      const repo = mainRepo();
+      const agents = installedAgents();
+      const def = process.env.CLAUDE_FLEET_AGENT || 'claude';
+      wtFields = { name: '', branch: '', from: repo ? currentBranch(repo) : '',
+                   agent: agents.includes(def) ? def : (agents[0] || 'claude') };
+      wtSel = 0; wtBusy = false;
+      wtMsg = repo ? '' : 'this project has no git checkout — nothing to branch from';
+      mode = 'newwt';
+    }
+    else if (key === 'x' || key === 'X') {
+      const it = items[sel];
+      if (it?.card) confirmKill = it.card.name;
+      else if (it?.freeWt) confirmWt = { path: it.freeWt.path, branch: it.freeWt.branch, msg: '', force: false };
+    }
     else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
     else if (key === 'p') { const it = items[sel]; if (it?.card) pauseSession(it.card.name); }
     else if (key === 'P') { const it = items[sel]; if (it?.card) resumeSession(it.card.name); }
@@ -1039,6 +1259,37 @@ function onKey(key) {
       return finish(`${pickFresh ? 'newfresh' : 'new'}${US}${nameCwd}${US}${name}${US}${agent}`);
     }
     render();
+  } else if (mode === 'newwt') {
+    const rows = wtRows();
+    const f = rows[wtSel]?.key || 'name';
+    if (key === '\x1b' || key === '\x03' || key === '\x60') { mode = 'grid'; wtFields = null; wtMsg = ''; render(); return; }
+    if (key === '\x1b[A' || key === '\x1b[Z') wtSel = (wtSel + rows.length - 1) % rows.length;
+    else if (key === '\x1b[B' || key === '\t') wtSel = (wtSel + 1) % rows.length;
+    else if (f === 'agent' && (key === '\x1b[C' || key === '\x1b[D' || key === ' ')) {
+      const agents = installedAgents();
+      const i = Math.max(0, agents.indexOf(wtFields.agent));
+      wtFields.agent = agents[(i + (key === '\x1b[D' ? agents.length - 1 : 1)) % agents.length];
+    }
+    else if (key === '\r' || key === '\n') {
+      const name = (wtFields.name || '').trim();
+      if (!name) { wtMsg = 'a name is required'; render(); return; }
+      // `git worktree add` fetches when the base has an upstream, and the session
+      // then has to boot — both block this process, so SAY so before starting rather
+      // than freezing on a form that looks like it ignored the keystroke.
+      wtMsg = ''; wtBusy = true; render();
+      const res = createWorktree({
+        name,
+        branch: (wtFields.branch || '').trim() || name,
+        from: (wtFields.from || '').trim(),
+        agent: wtFields.agent || '',
+      });
+      wtBusy = false;
+      if (res.ok) return finish(`attach${US}${res.session}`);
+      wtMsg = res.msg;
+    }
+    else if (key === '\x7f' || key === '\b') wtFields[f] = (wtFields[f] || '').slice(0, -1);
+    else if (f !== 'agent') { const t = typedText(key); if (t) wtFields[f] += t; }
+    render();
   } else if (mode === 'rename') {
     if (key === '\x1b' || key === '\x03' || key === '\x60') {
       mode = 'grid'; gSettings = true; renameOld = null; renameMsg = ''; render(); return;
@@ -1088,6 +1339,18 @@ if (process.argv.includes('--checkouts')) {
   console.log('roots:', discoverRoots().map(r => r.replace(HOME, '~')).join(', '));
   const cks = discoverCheckouts();
   console.log('checkouts:\n' + (cks.length ? cks.map(c => '  ' + c).join('\n') : '  (none)'));
+  process.exit(0);
+}
+
+// ── the fleet's CARD ORDER, one session per line (master excluded) ────────
+// The single source of that order. bin/ghostfleet resolves `Ctrl-f <p> <s>` through
+// this and mirrors it onto the tmux server for fleet-cycle, so every consumer counts
+// the same cards the screen shows — "session 2" cannot mean two different sessions
+// depending on how you got there. Deliberately does NOT call gather(): it needs
+// names, not a capture-pane round trip per session.
+if (process.argv.includes('--order')) {
+  const names = applyOrder(tmuxList().filter(s => s.name !== 'master')).map(s => s.name);
+  if (names.length) console.log(names.join('\n'));
   process.exit(0);
 }
 
@@ -1224,7 +1487,13 @@ function sessionStatuses(proj) {
       } catch {}
     }
   } catch {}
-  return names.map(name => {
+  // Ring order — master first, then that project's own card order — so the stack lists
+  // each project the way its grid and its ⇧←→ ring do, not the way tmux happens to sort.
+  const ordered = [
+    ...names.filter(n => n === 'master'),
+    ...applyOrder(names.filter(n => n !== 'master').map(name => ({ name })), dir, sock).map(r => r.name),
+  ];
+  return ordered.map(name => {
     const o = bySlot.get(name);
     const busy = paneBusy(sock, name);
     // intentionally off (marker is namespaced by socket — every project has a `master`)
@@ -1392,7 +1661,7 @@ function pRender() {
   const quit = armed
     ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}`
     : '⌃C ⌃C quit';
-  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 open · ^F jump · ^S sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
+  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 open · Ctrl-f jump · Ctrl-s sessions · s schedule · , settings · x remove · ${quit}${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // settings page: per-project toggle for the worker→master auto-nudge (notify-lead)
