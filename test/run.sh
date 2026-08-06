@@ -1186,6 +1186,24 @@ for a in $("$ROOT/bin/fleet-agent" list); do
      "$([ -n "$e" ] && echo y || echo n)" "$([ -n "$j" ] && echo y || echo n)"
 done
 
+# ── 6b. every command is actually installed ──────────────────────────────────
+# A new command that never reaches the install list is invisible until someone hits
+# "command not found" — and worse, the SUMMARY line was hand-maintained separately from
+# the loop that does the linking, so it had already drifted twice (it was still missing
+# fleet-stack, then fleet-slot) and told you it had not linked a command it just had.
+# The summary is derived now; this keeps the LIST honest.
+group "install list covers every command"
+# deliberately not linked: invoked by their parent, not by a user on PATH
+NOT_LINKED="fleet-grid.mjs npx-install.mjs"
+for f in "$ROOT"/bin/*; do
+  b="$(basename "$f")"
+  case " $NOT_LINKED " in *" $b "*) continue ;; esac
+  # "does it appear at all", not "exactly once": ghostfleet and fleet-spawn are named
+  # in prose elsewhere in the installer, and pinning a COUNT would fail on that.
+  is "$b is in install.sh's list" "yes" \
+     "$(grep -qE "(^|[( ])$b([ )]|\$)" "$ROOT/install.sh" 2>/dev/null && echo yes || echo no)"
+done
+
 # ── 7. every command parses ──────────────────────────────────────────────────
 group "syntax"
 for f in "$ROOT"/bin/*; do
