@@ -253,6 +253,12 @@ line "the reported subagent line"   "+ Adding the operator-key auth provider… 
 line "another glyph, short clock"   "✢ Running the full regression suite… (2m 4s · ↓ 1.2k tokens)"        1
 line "no glyph, indented"           "  Checking the migration plan… (42s)"                                1
 line "digits and a slash in it"     "· Updating apps/api v2 routes… (11m 40s · ↓ 42.2k tokens)"           1
+# These two are why the class is an EXCLUDE list. An allow-list of letters/digits was
+# widened twice in one day — first for the hyphen, then for the apostrophe — because
+# these strings are model-written prose and will contain any punctuation at all. Both
+# were live misses: a card sat on "✓ ready" over a session seven minutes into a turn.
+line "an apostrophe in the phrase"     "✳ Extracting DV's review surface into shared components… (7m 32s · ↓ 21.1k)" 1
+line "a comma and a full stop"         "✻ Reading src/a.ts, then src/b.ts… (2m 4s)"                          1
 # The phrase branch buys its spaces by REQUIRING the clock. Without that, ordinary
 # prose with an ellipsis is indistinguishable from a spinner — the exact false
 # positive that anchoring was introduced to close, which cost 17 minutes of a worker
@@ -260,6 +266,11 @@ line "digits and a slash in it"     "· Updating apps/api v2 routes… (11m 40s 
 line "a phrase with no clock"       "- Adding the operator-key auth provider… (the one that hung)"        0
 line "prose with a line number"     "56  ✳ Adding the thing… (10m 15s)"                                   0
 line "the idle agent-count hint"    "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent"           0
+# ...and why it still excludes ( ` and ". Those three are structural: "(" would let the
+# phrase swallow the very clock this branch demands, and a backtick or quote is how
+# PROSE quotes a spinner — the false positive anchoring was added to close. Allowing
+# them (a bare [^(]* was the obvious simplification) makes this fire.
+line "prose quoting a spinner"        "> quoting \`✻ Baking… (2m 1s)\` here"                                  0
 # and the one-word branch must keep its LOOSE paren: a narrow pane drops the clock
 # first, and that pane still has to read as busy.
 line "one word, clock dropped"      "✽ Flowing… (almost done thinking with xhigh effort)"                 1
