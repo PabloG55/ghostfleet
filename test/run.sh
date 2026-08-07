@@ -857,7 +857,15 @@ if command -v tmux >/dev/null 2>&1; then
   LB="$(mktemp -d)"; mkdir -p "$LB/fleet"
   tmux -L cflbltest kill-server 2>/dev/null; tmux -L cflbldrv kill-server 2>/dev/null
   tmux -L cflbltest new-session -d -s master "sleep 120" 2>/dev/null
-  tmux -L cflbltest new-session -d -s w1 -c "$LB" "sleep 120" 2>/dev/null
+  # a real worktree whose FOLDER and BRANCH deliberately differ — the case the card used
+  # to hide, because it read `branch || folder` and the branch always won
+  git init -q -b main "$LB/repo" 2>/dev/null
+  git -C "$LB/repo" config user.email t@t; git -C "$LB/repo" config user.name t
+  : > "$LB/repo/f"; git -C "$LB/repo" add -A; git -C "$LB/repo" commit -qm init 2>/dev/null
+  git -C "$LB/repo" worktree add -q "$LB/wt-folder" -b feature-x 2>/dev/null
+  git -C "$LB/repo" worktree add -q "$LB/samename" -b samename 2>/dev/null
+  tmux -L cflbltest new-session -d -s w1 -c "$LB/wt-folder" "sleep 120" 2>/dev/null
+  tmux -L cflbltest new-session -d -s w2 -c "$LB/samename" "sleep 120" 2>/dev/null
   cardtitle() {                 # the top line of card 1, as drawn
     tmux -L cflbldrv kill-session -t d 2>/dev/null
     tmux -L cflbldrv -f /dev/null new-session -d -s d -x 120 -y 32 \
@@ -876,12 +884,20 @@ if command -v tmux >/dev/null 2>&1; then
     tmux -L cflbldrv capture-pane -p -t d 2>/dev/null | grep -E '^ │' | sed -n '2p' | sed 's/^ │ //; s/ *│.*$//'
     tmux -L cflbldrv kill-session -t d 2>/dev/null
   }
+  # cardline2 reads card 1; w1 sorts first
   rm -f "$LB/fleet/cflbltest.w1.label"
   is "no label: the card is the session name" "w1" "$(cardtitle)"
+  # THE WORKTREE LEADS. It was invisible before: a session in "wt-folder" on branch
+  # "feature-x" showed only the branch, so the card never said which checkout it was.
+  is "worktree first, branch appended"        "wt-folder · feature-x" "$(cardline2)"
   printf 'PR 964 doc verify\n' > "$LB/fleet/cflbltest.w1.label"
   is "labelled: the card is the label"        "PR 964 doc verify" "$(cardtitle)"
   # the session name must stay ON the card — it is what fleet-send takes
   is "...and the session name is still shown" "1" "$(cardline2 | grep -c '^w1 · ' || true)"
+  # and the branch is NOT repeated when it says the same thing as the folder
+  rm -f "$LB/fleet/cflbltest.w1.label"
+  tmux -L cflbltest kill-session -t w1 2>/dev/null
+  is "same name: the branch is not repeated"  "samename" "$(cardline2)"
   # a marker keyed by name has to move with a rename, like every other one here
   printf 'keepme\n' > "$LB/fleet/cflbltest.w1.label"
   mv "$LB/fleet/cflbltest.w1.label" "$LB/fleet/cflbltest.w2.label"   # what fleet-rename does
