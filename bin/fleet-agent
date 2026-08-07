@@ -111,6 +111,22 @@ agent_field() {
         #   It is a separate branch, not a widening of the first, because a phrase is
         # exactly what prose looks like: allowing spaces before the ellipsis in the
         # ORIGINAL branch re-opens the false positive that anchoring was added to close.
+        #   IT ALSO REQUIRES THE LEADING GLYPH, which branch one leaves optional. Every
+        # real spinner and subagent line ever captured here carries one (✻ ✽ ✳ ✢ · +);
+        # prose starts with a letter. That single character is what separates "Extracting
+        # DV's review surface… (7m 32s · …)" from "Some prose that mentions Flowing… (18s)",
+        # and no character class can.
+        #   AND ITS PARENTHETICAL MUST CLOSE AT END OF LINE. A live spinner's "(12s · ↓ 3k
+        # tokens)" is the last thing on its line; prose quoting one keeps talking after the
+        # ")". This is the branch's real defence, and it had to become so because the
+        # obvious one does not survive a terminal: backticks and quotes are RENDERED as
+        # styling and never reach capture-pane, so "`- The spinner reads Flowing… (18s)` —
+        # does fire" arrives with its backticks stripped and looked exactly like a spinner.
+        # Measured on a live pane: that line matched, the session read "working" for the
+        # rest of its life, and it was a message ABOUT this detector — the same way the
+        # anchor had to be added in the first place. The class below still excludes ` and "
+        # because they cost nothing when they DO survive (a fenced block), but nothing may
+        # depend on them.
         #   The class is "anything but ( ` and "" rather than a list of allowed letters.
         # An allow-list was tried and had to be widened twice in a day — first for the
         # hyphen in "Razzle-dazzling", then for the apostrophe in "Extracting DV's review
@@ -124,8 +140,8 @@ agent_field() {
         # ("… (10m" / "… (42s"), which prose only carries if it quotes a whole live
         # line verbatim AND starts it at the margin. The first branch keeps its loose
         # "(", because a narrow pane drops the clock and that must still fire.
-        busy_re)    printf '%s' '^[[:space:]]*[^[:alnum:][:space:]]?[[:space:]]*[A-Za-z]+((…|\.\.\.) ?\(|[^(`"]*(…|\.\.\.) \([0-9]+[ms])' ;;
-        busy_re_js) printf '%s' '^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:(?:…|\.\.\.)\s?\(|[^(`"]*(?:…|\.\.\.) \(\d+[ms])' ;;
+        busy_re)    printf '%s' '^[[:space:]]*[^[:alnum:][:space:]]?[[:space:]]*[A-Za-z]+(…|\.\.\.) ?\(|^[[:space:]]*[^[:alnum:][:space:]][[:space:]]*[A-Za-z]+[^(`"]*(…|\.\.\.) \([0-9]+[ms][^)]*\)[[:space:]]*$' ;;
+        busy_re_js) printf '%s' '^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:…|\.\.\.)\s?\(|^\s*[^A-Za-z0-9\s]\s*[A-Za-z]+[^(`"]*(?:…|\.\.\.) \(\d+[ms][^)]*\)\s*$' ;;
         blocked_re) printf '' ;;   # need-you arrives via hooks, not the pane
         ready_re)   printf '%s' '❯|bypass permissions|for shortcuts' ;;
         hooks)      printf 'yes' ;;
