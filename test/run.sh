@@ -811,6 +811,40 @@ else
   skip "post-create hook" "git/tmux missing"
 fi
 
+# ── 4a10. a worker must not spawn workers ────────────────────────────────────
+# A session finishes a PR, is told "branch off fresh main", and reaches for the
+# orchestrate skill — which spawns. But it is ALREADY in a worktree, so it gets a second
+# one beside the first instead of re-branching where it stands. The fleet's shape is
+# master in the main checkout and workers as leaves; nesting is never what was meant.
+#
+# Both directions, because a guard that refused everywhere would "fix" this by breaking
+# the only path that is supposed to work.
+group "spawning from inside a worktree is refused"
+if command -v git >/dev/null 2>&1; then
+  WK="$(mktemp -d)"; mkdir -p "$WK/repo"
+  git init -q -b main "$WK/repo" 2>/dev/null
+  git -C "$WK/repo" config user.email t@t; git -C "$WK/repo" config user.name t
+  : > "$WK/repo/f"; git -C "$WK/repo" add -A; git -C "$WK/repo" commit -qm init 2>/dev/null
+  git -C "$WK/repo" worktree add -q "$WK/wt-a" -b wt-a 2>/dev/null
+  spawn_in() { ( cd "$1" && CLAUDE_FLEET_SOCK=cfnest "$ROOT/bin/fleet-spawn" newone 2>&1 ); }
+  out="$(spawn_in "$WK/wt-a")"
+  is "refused from a linked worktree"    "1" "$(printf '%s' "$out" | grep -c 'ALREADY in a worktree' || true)"
+  is "...and says how to re-branch here" "1" "$(printf '%s' "$out" | grep -c 'checkout -B' || true)"
+  is "...and creates nothing"            "0" "$([ -e "$WK/newone" ] && echo 1 || echo 0)"
+  # The main checkout is the path that MUST still work — it is where master lives and
+  # where every legitimate spawn comes from. It gets as far as the free-worktree refusal
+  # (wt-a is clean and sessionless), which is proof it passed the nesting guard.
+  out2="$(spawn_in "$WK/repo")"
+  is "allowed from the main checkout"    "0" "$(printf '%s' "$out2" | grep -c 'ALREADY in a worktree' || true)"
+  is "...reaching spawn's own free-list" "1" "$(printf '%s' "$out2" | grep -c 'free worktree' || true)"
+  # and the override is a real escape hatch, not decoration
+  out3="$( cd "$WK/wt-a" && CLAUDE_FLEET_ALLOW_NESTED=1 CLAUDE_FLEET_SOCK=cfnest "$ROOT/bin/fleet-spawn" newone 2>&1 )"
+  is "override gets past the guard"      "0" "$(printf '%s' "$out3" | grep -c 'ALREADY in a worktree' || true)"
+  rm -rf "$WK"
+else
+  skip "worker nesting guard" "git missing"
+fi
+
 # ── 4b. the stack ────────────────────────────────────────────────────────────
 # stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
 # repo is: EVERY project has a session called `master`, so a bare name stacks whichever
