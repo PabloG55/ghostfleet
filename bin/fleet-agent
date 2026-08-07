@@ -111,12 +111,21 @@ agent_field() {
         #   It is a separate branch, not a widening of the first, because a phrase is
         # exactly what prose looks like: allowing spaces before the ellipsis in the
         # ORIGINAL branch re-opens the false positive that anchoring was added to close.
+        #   The class is "anything but ( ` and "" rather than a list of allowed letters.
+        # An allow-list was tried and had to be widened twice in a day — first for the
+        # hyphen in "Razzle-dazzling", then for the apostrophe in "Extracting DV's review
+        # surface" — because these strings are model-written prose and will contain any
+        # punctuation at all. The three exclusions are structural, not cosmetic: "(" would
+        # let the phrase swallow the very clock this branch requires, and a backtick or
+        # quote is how PROSE quotes a spinner, which is the false positive anchoring was
+        # added to close (measured: allowing them makes "> quoting `✻ Baking… (2m 1s)`"
+        # fire).
         # So this branch pays for its spaces by demanding the elapsed clock right after
         # ("… (10m" / "… (42s"), which prose only carries if it quotes a whole live
         # line verbatim AND starts it at the margin. The first branch keeps its loose
         # "(", because a narrow pane drops the clock and that must still fire.
-        busy_re)    printf '%s' '^[[:space:]]*[^[:alnum:][:space:]]?[[:space:]]*[A-Za-z]+((…|\.\.\.) ?\(|[A-Za-z0-9 /-]*(…|\.\.\.) \([0-9]+[ms])' ;;
-        busy_re_js) printf '%s' '^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:(?:…|\.\.\.)\s?\(|[A-Za-z0-9 /-]*(?:…|\.\.\.) \(\d+[ms])' ;;
+        busy_re)    printf '%s' '^[[:space:]]*[^[:alnum:][:space:]]?[[:space:]]*[A-Za-z]+((…|\.\.\.) ?\(|[^(`"]*(…|\.\.\.) \([0-9]+[ms])' ;;
+        busy_re_js) printf '%s' '^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:(?:…|\.\.\.)\s?\(|[^(`"]*(?:…|\.\.\.) \(\d+[ms])' ;;
         blocked_re) printf '' ;;   # need-you arrives via hooks, not the pane
         ready_re)   printf '%s' '❯|bypass permissions|for shortcuts' ;;
         hooks)      printf 'yes' ;;

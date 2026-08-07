@@ -200,10 +200,10 @@ function lastAssistant(p) {
 // ellipsis is also what prose looks like. Kept identical to bin/fleet-agent's
 // busy_re_js — this is a FALLBACK for when that isn't reachable, not a second opinion,
 // and the suite pins the two together.
-// The `/` is deliberately NOT escaped: it is legal unescaped inside a character class,
-// and escaping it makes this literal's .source differ from the adapter's by a backslash
-// — which is enough to defeat a test that pins the two together.
-const BUSY_RE = /^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:(?:…|\.\.\.)\s?\(|[A-Za-z0-9 /-]*(?:…|\.\.\.) \(\d+[ms])/i;
+// Nothing in the class is escaped: `(`, a backtick and a quote are all legal bare
+// inside a character class, and escaping any of them makes this literal's .source differ
+// from the adapter's by a backslash — enough to defeat the test that pins the two.
+const BUSY_RE = /^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:(?:…|\.\.\.)\s?\(|[^(`"]*(?:…|\.\.\.) \(\d+[ms])/i;
 
 // ── which agent is a session running? ────────────────────────────────────────
 // A session records its agent in <sock>.<name>.agent (bin/fleet-agent writes it),
