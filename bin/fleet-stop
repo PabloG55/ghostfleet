@@ -57,6 +57,8 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.notify-lead" "$FLEET_DIR/$SOCK.$SESSION.notify-
 # a pending reply address (fleet-send --reply-to): the session that would have answered
 # is gone, and a name-reuser must not inherit a stranger's question to answer.
 rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to" "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
+# the display label too, or a session that reuses this name inherits a stranger's title
+rm -f "$FLEET_DIR/$SOCK.$SESSION.label" 2>/dev/null
 
 # The dev-stack slot is keyed by WORKTREE PATH, so release it before the manifest row
 # (the only thing that still knows which path this session held) is dropped. A slot left

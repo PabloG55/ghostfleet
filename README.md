@@ -165,8 +165,16 @@ control plane).
 | `w` | **new worktree** — a fresh sibling checkout on its own branch, with a session started in it |
 | `t` | the **stack** — several sessions on screen at once, across projects (below) |
 | `x` | kill the session — or, on a `· FREE` card, **remove that worktree** (asks `y` to confirm) |
+| `,` then `l` | **label** the session — the card is titled whatever you type, the session keeps its name |
 | `q` / `` ` `` | back to master |
 | digit `1`-`9` | jump straight to the card at that position |
+
+**A label is display only.** `,` then `l` titles a card whatever you like — *"PR 964 doc
+verify"* — while the tmux session keeps its name. That separation is deliberate: the
+session name is what `fleet-send` addresses, what the `Ctrl-f` chord counts, and what
+`fleet-rename` keeps equal to the worktree's folder for the rest of the fleet. So a
+labelled card shows **`<session> · <worktree>`** underneath, because a card titled
+*"PR 964 doc verify"* otherwise tells you nothing about what to type. Empty clears it.
 
 **Reordering matters more than it looks.** The card order *is* the fleet's numbering: the digit
 printed on a card, `1`-`9`, `Ctrl-f <project> <session>` and `⇧←→` cycling all count the same

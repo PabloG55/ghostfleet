@@ -845,6 +845,54 @@ else
   skip "worker nesting guard" "git missing"
 fi
 
+# ── 4a11. a session's display label ──────────────────────────────────────────
+# The card can be titled something a human chose ("PR 964 doc verify") while the tmux
+# session keeps its name. That separation is the whole point: fleet-rename exists to keep
+# "worktree basename == session name" true, and fleet-send, the Ctrl-f chord, the
+# dev-stack slot and the manifest all key off it. So the label is cosmetic BY
+# CONSTRUCTION — a marker file only the card reads — and the card still shows the session
+# name, because a card titled "PR 964 doc verify" otherwise tells you nothing to type.
+group "session display label"
+if command -v tmux >/dev/null 2>&1; then
+  LB="$(mktemp -d)"; mkdir -p "$LB/fleet"
+  tmux -L cflbltest kill-server 2>/dev/null; tmux -L cflbldrv kill-server 2>/dev/null
+  tmux -L cflbltest new-session -d -s master "sleep 120" 2>/dev/null
+  tmux -L cflbltest new-session -d -s w1 -c "$LB" "sleep 120" 2>/dev/null
+  cardtitle() {                 # the top line of card 1, as drawn
+    tmux -L cflbldrv kill-session -t d 2>/dev/null
+    tmux -L cflbldrv -f /dev/null new-session -d -s d -x 120 -y 32 \
+      "CLAUDE_FLEET_DIR='$LB/fleet' CLAUDE_FLEET_ROOT= CLAUDE_FLEET_SCOPE=lbl node '$ROOT/bin/fleet-grid.mjs' cflbltest >/dev/null" 2>/dev/null
+    sleep 2
+    # cut at the box rule: a second card sits on the same row, so trimming only a
+    # trailing ╮ leaves the whole neighbour attached
+    tmux -L cflbldrv capture-pane -p -t d 2>/dev/null | grep -E '^ ╭─ 1 ' | head -1 | sed 's/^ ╭─ 1 //; s/ *─.*$//'
+    tmux -L cflbldrv kill-session -t d 2>/dev/null
+  }
+  cardline2() {
+    tmux -L cflbldrv kill-session -t d 2>/dev/null
+    tmux -L cflbldrv -f /dev/null new-session -d -s d -x 120 -y 32 \
+      "CLAUDE_FLEET_DIR='$LB/fleet' CLAUDE_FLEET_ROOT= CLAUDE_FLEET_SCOPE=lbl node '$ROOT/bin/fleet-grid.mjs' cflbltest >/dev/null" 2>/dev/null
+    sleep 2
+    tmux -L cflbldrv capture-pane -p -t d 2>/dev/null | grep -E '^ │' | sed -n '2p' | sed 's/^ │ //; s/ *│.*$//'
+    tmux -L cflbldrv kill-session -t d 2>/dev/null
+  }
+  rm -f "$LB/fleet/cflbltest.w1.label"
+  is "no label: the card is the session name" "w1" "$(cardtitle)"
+  printf 'PR 964 doc verify\n' > "$LB/fleet/cflbltest.w1.label"
+  is "labelled: the card is the label"        "PR 964 doc verify" "$(cardtitle)"
+  # the session name must stay ON the card — it is what fleet-send takes
+  is "...and the session name is still shown" "1" "$(cardline2 | grep -c '^w1 · ' || true)"
+  # a marker keyed by name has to move with a rename, like every other one here
+  printf 'keepme\n' > "$LB/fleet/cflbltest.w1.label"
+  mv "$LB/fleet/cflbltest.w1.label" "$LB/fleet/cflbltest.w2.label"   # what fleet-rename does
+  is "rename carries the label"               "keepme" "$(cat "$LB/fleet/cflbltest.w2.label" 2>/dev/null)"
+  is "fleet-rename actually migrates it"      "1" "$(grep -c 'OLD.label' "$ROOT/bin/fleet-rename" || true)"
+  is "fleet-stop actually clears it"          "1" "$(grep -c 'SESSION.label' "$ROOT/bin/fleet-stop" || true)"
+  tmux -L cflbldrv kill-server 2>/dev/null; tmux -L cflbltest kill-server 2>/dev/null; rm -rf "$LB"
+else
+  skip "session label" "tmux missing"
+fi
+
 # ── 4b. the stack ────────────────────────────────────────────────────────────
 # stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
 # repo is: EVERY project has a session called `master`, so a bare name stacks whichever

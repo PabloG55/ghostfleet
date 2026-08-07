@@ -225,6 +225,27 @@ function lastEntryRole(p) {
   return '';
 }
 
+// A DISPLAY LABEL for a session: what the card calls it, and nothing else. The tmux
+// session name stays the identity — fleet-send addresses it, the Ctrl-f chord counts it,
+// the dev-stack slot and the manifest key off its worktree — because fleet-rename exists
+// to keep "worktree basename == session name" true and the rest of the fleet relies on
+// that. So this is cosmetic by construction: a marker file the card reads and no other
+// code path consults, which is why renaming a worker still cannot drift from its folder.
+function labelOf(name) {
+  try {
+    const t = fs.readFileSync(path.join(FLEET_DIR, `${SOCK}.${name}.label`), 'utf8').trim();
+    return t.slice(0, 40);
+  } catch { return ''; }
+}
+function setLabel(name, text) {
+  const f = path.join(FLEET_DIR, `${SOCK}.${name}.label`);
+  const t = (text || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  try {
+    fs.mkdirSync(FLEET_DIR, { recursive: true });
+    if (t) fs.writeFileSync(f, t + '\n'); else fs.unlinkSync(f);   // empty clears it
+  } catch {}
+}
+
 function agentOf(name) {
   try {
     const a = fs.readFileSync(path.join(FLEET_DIR, `${SOCK}.${name}.agent`), 'utf8').trim();
@@ -381,7 +402,7 @@ function gather() {
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
     return { name: s.name, folder, branch, status, age, msg: lastAssistant(transcript), attached: s.attached, sched,
-             agent: agentOf(s.name) };
+             agent: agentOf(s.name), label: labelOf(s.name) };
   });
 }
 
@@ -531,7 +552,8 @@ function cardLines(card, selected, idx) {
   const color = meta.color;
   // 1-9 prefix = the digit that jumps straight to this card (see onKey)
   const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
-  const title = clip(`─ ${num}${card.name} `, CW);
+  // A labelled card is titled by the label; an unlabelled one is unchanged.
+  const title = clip(`─ ${num}${card.label || card.name} `, CW);
   const top = `╭${title}${'─'.repeat(Math.max(0, CW - vis(title)))}╮`;
   const idle = card.age == null ? '' : (card.status === 'working' ? `busy ${humanAge(card.age)}` : `${humanAge(card.age)} ago`);
   const right = card.sched ? `@${clockLabel(card.sched.at)}` : idle;   // @ = scheduled send
@@ -540,7 +562,12 @@ function cardLines(card, selected, idx) {
   // "unknown" or a differently-behaving status is unreadable — you can't tell whether
   // the fleet is confused or the session simply isn't Claude. Claude cards are left
   // exactly as they were (no marker, no width change).
-  const l2 = `│ ${padEndV(twoCol(card.branch || card.folder,
+  // With a label on top, this line carries "<session> · <worktree>" — the session name
+  // has to stay visible because it is what you address with fleet-send/fleet-read, and a
+  // card titled "PR 964 doc verify" otherwise tells you nothing about what to type.
+  // Without a label nothing moves: the branch keeps this line, as before.
+  const l2text = card.label ? `${card.name} · ${card.folder}` : (card.branch || card.folder);
+  const l2 = `│ ${padEndV(twoCol(l2text,
                                  card.agent && card.agent !== 'claude' ? card.agent : '', CW - 2), CW - 2)} │`;
   const l3 = `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
   const bot = `╰${'─'.repeat(CW)}╯`;
@@ -782,6 +809,8 @@ let wtSel = 0;               // selected field on that form
 let wtMsg = '';              // what fleet-spawn complained about last time
 let wtBusy = false;          // mid-create — a fetch + a session boot is not instant
 let confirmWt = null;        // { path, branch, msg, force } — free worktree awaiting removal
+let labelFor = null;         // session being labelled (from the settings page's 'l')
+let labelInput = '';         // editable, pre-filled with the current label
 
 // Rename BOTH the tmux session and its worktree folder (git worktree move), so the
 // two never drift apart — a session named "x" always sitting in a folder named "x"
@@ -1010,7 +1039,7 @@ function renderSettings() {
     buf += `${selRow ? `${C.bold}${C.white}▸ ` : '   '}${badge}  ` +
            `${(selRow ? C.bold + C.white : C.reset) + padEndV(n, 22) + C.reset} ${C.dim}${detail}${C.reset}\x1b[K\n`;
   });
-  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space/⏎ cycle inherit → on → off · r rename · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space/⏎ cycle inherit → on → off · r rename · l label · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function renderRename() {
@@ -1068,8 +1097,19 @@ function renderNewWorktree() {
   buf += `${C.dim} ↑↓/tab field · ⏎ create + open · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
+function renderLabel() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}label${C.reset} ${C.dim}— what the card calls ${labelFor}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` label:  ${C.bold}${labelInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} Display only. The session is still '${labelFor}' — that is what fleet-send${C.reset}\x1b[K\n`;
+  buf += `${C.dim} addresses and what the Ctrl-f chord counts, and the card keeps showing it.${C.reset}\x1b[K\n`;
+  buf += `${C.dim} Empty clears the label.${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ save · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
 function render() {
   if (mode === 'grid') { if (gSettings) renderSettings(); else renderGrid(); }
+  else if (mode === 'label') renderLabel();
   else if (mode === 'picker') renderPicker();
   else if (mode === 'nameprompt') renderNamePrompt();
   else if (mode === 'agentpick') renderAgentPick();
@@ -1197,6 +1237,10 @@ function onKey(key) {
       else if (key === 'r' || key === 'R') {
         const n = names[gSetSel];
         if (n) { renameOld = n; renameInput = n; renameMsg = ''; mode = 'rename'; gSettings = false; }
+      }
+      else if (key === 'l' || key === 'L') {
+        const n = names[gSetSel];
+        if (n) { labelFor = n; labelInput = labelOf(n); mode = 'label'; gSettings = false; }
       }
       render(); return;
     }
@@ -1358,6 +1402,15 @@ function onKey(key) {
     }
     else if (key === '\x7f' || key === '\b') wtFields[f] = (wtFields[f] || '').slice(0, -1);
     else if (f !== 'agent') { const t = typedText(key); if (t) wtFields[f] += t; }
+    render();
+  } else if (mode === 'label') {
+    if (key === '\x1b' || key === '\x03' || key === '\x60') { mode = 'grid'; gSettings = true; labelFor = null; render(); return; }
+    if (key === '\r' || key === '\n') {
+      setLabel(labelFor, labelInput);
+      labelFor = null; labelInput = ''; mode = 'grid'; gSettings = true; buildItems();
+    }
+    else if (key === '\x7f' || key === '\b') labelInput = labelInput.slice(0, -1);
+    else { const t = typedText(key); if (t) labelInput += t; }
     render();
   } else if (mode === 'rename') {
     if (key === '\x1b' || key === '\x03' || key === '\x60') {

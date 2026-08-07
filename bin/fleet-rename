@@ -15,6 +15,7 @@
 #     this session still gets its answer relayed after the rename
 #   - the fleet-spawn manifest row (what fleet-worktrees shows as the task)
 #   - its slot in the grid's card order (⇧hjkl), which is stored by NAME
+#   - its display label (the grid's `,` then `l`)
 #
 # Refuses on a live-session collision, an existing path collision, or a dirty/locked
 # worktree `git worktree move` won't touch (deliberately no --force here).
@@ -62,6 +63,7 @@ mv -f "$FLEET_DIR/$SOCK.$OLD.notify-lead-off" "$FLEET_DIR/$SOCK.$NEW.notify-lead
 mv -f "$FLEET_DIR/$SOCK.$OLD.sched"           "$FLEET_DIR/$SOCK.$NEW.sched"           2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.reply-to"        "$FLEET_DIR/$SOCK.$NEW.reply-to"        2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.reply-to.armed"  "$FLEET_DIR/$SOCK.$NEW.reply-to.armed"  2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.label"           "$FLEET_DIR/$SOCK.$NEW.label"           2>/dev/null || true
 
 # The card order stores session names INSIDE the file, one per line, so unlike every
 # marker above it can't be migrated by renaming the file — the line has to be rewritten.
