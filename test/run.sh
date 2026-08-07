@@ -251,7 +251,11 @@ line() {   # $1=label $2=the pane line $3=1 fires / 0 silent
 }
 line "the reported subagent line"   "+ Adding the operator-key auth provider… (10m 15s · ↓ 32.8k tokens)" 1
 line "another glyph, short clock"   "✢ Running the full regression suite… (2m 4s · ↓ 1.2k tokens)"        1
-line "no glyph, indented"           "  Checking the migration plan… (42s)"                                1
+# NOT a case: a phrase with no leading glyph. That was invented rather than captured,
+# and every real spinner and subagent line taken off a pane carries one (✻ ✽ ✳ ✢ · +).
+# Keeping it forced the phrase branch to accept lines starting with a bare word, which
+# is exactly what prose does — see the two prose cases below, which it cannot separate
+# without the glyph.
 line "digits and a slash in it"     "· Updating apps/api v2 routes… (11m 40s · ↓ 42.2k tokens)"           1
 # These two are why the class is an EXCLUDE list. An allow-list of letters/digits was
 # widened twice in one day — first for the hyphen, then for the apostrophe — because
@@ -271,6 +275,20 @@ line "the idle agent-count hint"    "⏵⏵ bypass permissions on (shift+tab to 
 # PROSE quotes a spinner — the false positive anchoring was added to close. Allowing
 # them (a bare [^(]* was the obvious simplification) makes this fire.
 line "prose quoting a spinner"        "> quoting \`✻ Baking… (2m 1s)\` here"                                  0
+# THE ONE THAT ACTUALLY BIT. A terminal RENDERS markdown delimiters as styling, so the
+# backticks never reach capture-pane: this is a real captured line from a session whose
+# own message was about this detector, and it read "working" for the rest of its life.
+# Nothing may depend on a quote surviving; what separates it is that a live spinner's
+# parenthetical CLOSES its line, and prose keeps talking after the ")".
+line "prose, backticks stripped by the terminal" \
+     "  One thing I found: a bullet quoting a spinner at the margin — - The spinner reads Flowing… (18s) — does fire, and did before." 0
+# A markdown bullet starts with "-", which IS a glyph — so the glyph rule cannot save
+# this one and the end-of-line rule has to. A live spinner's parenthetical is the last
+# thing on its line; prose keeps talking after the ")".
+line "a bulleted quote that keeps talking" \
+     "  - The spinner reads Flowing… (18s) — does fire, and did before this change."      0
+line "prose whose clock DOES end the line" \
+     "  Some prose that happens to mention Flowing… (18s)"                                 0
 # and the one-word branch must keep its LOOSE paren: a narrow pane drops the clock
 # first, and that pane still has to read as busy.
 line "one word, clock dropped"      "✽ Flowing… (almost done thinking with xhigh effort)"                 1

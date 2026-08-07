@@ -203,7 +203,7 @@ function lastAssistant(p) {
 // Nothing in the class is escaped: `(`, a backtick and a quote are all legal bare
 // inside a character class, and escaping any of them makes this literal's .source differ
 // from the adapter's by a backslash — enough to defeat the test that pins the two.
-const BUSY_RE = /^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:(?:…|\.\.\.)\s?\(|[^(`"]*(?:…|\.\.\.) \(\d+[ms])/i;
+const BUSY_RE = /^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:…|\.\.\.)\s?\(|^\s*[^A-Za-z0-9\s]\s*[A-Za-z]+[^(`"]*(?:…|\.\.\.) \(\d+[ms][^)]*\)\s*$/i;
 
 // ── which agent is a session running? ────────────────────────────────────────
 // A session records its agent in <sock>.<name>.agent (bin/fleet-agent writes it),
