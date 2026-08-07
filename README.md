@@ -654,6 +654,16 @@ In each config dir (`~/.claude`, `~/.claude-*`): remove the fleet `hooks` blocks
 and delete `skills/ghostfleet-orchestrate`. Then delete the symlinks in `~/.local/bin`, and
 `tmux -L cf-<project> kill-server` for any live fleets.
 
+Each popup leads with the **`Ctrl-f` chord that lands on that exact session** — e.g.
+`Ctrl-f 2 1 · superkey-1 — …`, or `Ctrl-f 2 ⏎` for a master. It's first in the string
+because notifications truncate from the right, and that's the part you act on. Neither
+digit is guessable: the project's is its position in *its profile's* list, and the
+session's is its position in the grid's **card order**, which `⇧hjkl` can rewrite — so
+the chord is read from the same source `Ctrl-f` itself counts through. When it can't be
+worked out (an unregistered project, or a position past 9, which the chord can't
+express) it's simply absent — a chord that sends you to the wrong session is worse than
+none.
+
 ## License
 
 MIT © 2026 Pablo Garces
