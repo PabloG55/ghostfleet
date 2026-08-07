@@ -562,11 +562,19 @@ function cardLines(card, selected, idx) {
   // "unknown" or a differently-behaving status is unreadable — you can't tell whether
   // the fleet is confused or the session simply isn't Claude. Claude cards are left
   // exactly as they were (no marker, no width change).
-  // With a label on top, this line carries "<session> · <worktree>" — the session name
-  // has to stay visible because it is what you address with fleet-send/fleet-read, and a
-  // card titled "PR 964 doc verify" otherwise tells you nothing about what to type.
-  // Without a label nothing moves: the branch keeps this line, as before.
-  const l2text = card.label ? `${card.name} · ${card.folder}` : (card.branch || card.folder);
+  // This line leads with the WORKTREE, because that is the thing the session is sitting
+  // in and it was previously invisible: it read `branch || folder`, so the branch always
+  // won and the folder only showed when there wasn't one. On a fleet where the two
+  // differ — a session in `doc-verify-stepper` on branch `acord-document-verification` —
+  // the card named the branch and never said which checkout it was.
+  // The branch is appended only when it ADDS something; on most worktrees it is the same
+  // string twice, and the line is 28 columns.
+  //   With a label on top, the session name takes the second slot instead: it is what
+  // fleet-send/fleet-read address, and a card titled "PR 964 doc verify" that doesn't
+  // show it tells you nothing about what to type.
+  const l2text = card.label
+    ? `${card.name} · ${card.folder}`
+    : (card.branch && card.branch !== card.folder ? `${card.folder} · ${card.branch}` : (card.folder || card.branch));
   const l2 = `│ ${padEndV(twoCol(l2text,
                                  card.agent && card.agent !== 'claude' ? card.agent : '', CW - 2), CW - 2)} │`;
   const l3 = `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;

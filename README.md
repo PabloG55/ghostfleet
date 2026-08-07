@@ -169,6 +169,11 @@ control plane).
 | `q` / `` ` `` | back to master |
 | digit `1`-`9` | jump straight to the card at that position |
 
+**The second line names the worktree**, with the branch appended only when it says
+something different — `doc-verify-stepper · acord-document-verification`, or just
+`billing-retry` when the two match. It used to read *branch or folder*, so the branch
+always won and the checkout a session was actually sitting in never appeared.
+
 **A label is display only.** `,` then `l` titles a card whatever you like — *"PR 964 doc
 verify"* — while the tmux session keeps its name. That separation is deliberate: the
 session name is what `fleet-send` addresses, what the `Ctrl-f` chord counts, and what
