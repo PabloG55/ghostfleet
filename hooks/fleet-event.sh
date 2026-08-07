@@ -270,8 +270,53 @@ if [ "$EVENT_QUIET" = 0 ] \
    && { [ "$EVENT" = "Stop" ] || { [ "$EVENT" = "Notification" ] && [ "$status" = "need-you" ]; }; }; then
   if [ "$EVENT" = "Stop" ]; then title="✅ Claude — done"; sound="Glass"; else title="🔔 Claude — needs you"; sound="Ping"; fi
   sub="${folder:-claude}"; [ -n "$branch" ] && sub="$sub · $branch"
-  tn="$(command -v terminal-notifier 2>/dev/null || true)"
   HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+
+  # The Ctrl-f chord that lands on THIS session, so the popup says where to go instead
+  # of only who spoke: "Ctrl-f 2 1". Two digits, and neither is guessable from here —
+  # the project's is its position in ITS PROFILE's list, the session's is its position
+  # in the grid's card order, which ⇧hjkl can rewrite.
+  #
+  # The session digit comes from `fleet-grid.mjs --order`, the same call bin/ghostfleet
+  # counts the chord through. Deriving it here instead would be a second opinion about
+  # an order the user can change, and the first time they disagreed the popup would
+  # send you to the wrong session — worse than saying nothing.
+  jump_chord() {
+    local sock="$1" sess="$2" pn="" sn=""
+    # Match on the SOCKET each row computes, not on the socket's name: a work project
+    # called "personal-foo" and a personal project called "foo" both spell cf-personal-foo,
+    # so splitting the string cannot tell them apart. Rebuilding it can.
+    # Collect the lists that EXIST rather than globbing straight into awk: with no
+    # profile files the pattern doesn't expand, and awk is handed a literal
+    # ".../projects.*" it can't open — which killed the whole lookup. It only worked
+    # here because this machine happens to have a projects.personal.
+    local files=() f=""
+    [ -f "$HOME/.config/ghostfleet/projects" ] && files+=("$HOME/.config/ghostfleet/projects")
+    for f in "$HOME"/.config/ghostfleet/projects.*; do [ -f "$f" ] && files+=("$f"); done
+    [ "${#files[@]}" -gt 0 ] || return 1
+    pn="$(awk -F'\t' -v want="$sock" '
+        FNR==1 { i=0; skip=0; prof="work"; f=FILENAME
+                 if (sub(/.*\/projects\./, "", f)) { prof=f
+                   if (prof !~ /^[A-Za-z0-9_-]+$/) skip=1 } }   # projects.bak.1785 is a backup
+        skip || /^[[:space:]]*#/ || NF<2 { next }
+        { i++
+          p = ($3 != "" ? $3 : prof)
+          s = (p == "work" || p == "default") ? "cf-" $1 : "cf-" p "-" $1
+          if (s == want) { print i; exit } }
+      ' "${files[@]}" 2>/dev/null)"
+    case "$pn" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$pn" -ge 1 ] && [ "$pn" -le 9 ] || return 1      # the chord only takes one digit
+    if [ "$sess" = master ]; then
+      printf 'Ctrl-f %s ⏎' "$pn"; return 0             # master is Enter, not a digit
+    fi
+    sn="$(node "$HOOK_DIR/../bin/fleet-grid.mjs" "$sock" --order 2>/dev/null \
+          | grep -nxF -- "$sess" 2>/dev/null | head -1 | cut -d: -f1)"
+    case "$sn" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$sn" -ge 1 ] && [ "$sn" -le 9 ] || return 1
+    printf 'Ctrl-f %s %s' "$pn" "$sn"
+  }
+  chord="$(jump_chord "${CLAUDE_FLEET_SOCK:-}" "$SLOT" 2>/dev/null)" || chord=""
+  tn="$(command -v terminal-notifier 2>/dev/null || true)"
   JUMP="$HOOK_DIR/../bin/fleet-jump"
   # Default to osascript — it posts via a system app that's already authorized, so
   # it reliably shows on modern macOS. terminal-notifier is opt-in
@@ -280,11 +325,14 @@ if [ "$EVENT_QUIET" = 0 ] \
   # which old versions often never register for.
   if [ "${CLAUDE_FLEET_NOTIFIER:-osascript}" = "terminal-notifier" ] && [ -n "$tn" ] && [ -x "$JUMP" ]; then
     zs="${ZELL//\'/}"
-    "$tn" -title "$title" -subtitle "$sub" -message "${SLOT:+$SLOT · }click → master" \
+    "$tn" -title "$title" -subtitle "${chord:+$chord · }$sub" -message "${SLOT:+$SLOT · }click → master" \
       -sound "$sound" -group "cf-$SESSION" \
       -execute "$JUMP '$zs' 'master' '${CLAUDE_FLEET_SOCK:-}'" >/dev/null 2>&1 &
   else
-    msg="${SLOT:+$SLOT — }$sub"; msg="${msg//\"/}"; msg="${msg//\\/}"; ttl="${title//\"/}"
+    # Chord FIRST: a notification is truncated from the right, and the one part you act
+    # on must survive that. Absent when it can't be worked out (unknown project, or a
+    # position past 9, which the chord can't express) — a wrong chord is worse than none.
+    msg="${chord:+$chord · }${SLOT:+$SLOT — }$sub"; msg="${msg//\"/}"; msg="${msg//\\/}"; ttl="${title//\"/}"
     # macOS: osascript. Linux: notify-send. Neither: stay silent — the status file and
     # the lead's inbox already carry the event, so nothing depends on the popup.
     if command -v osascript >/dev/null 2>&1; then
