@@ -79,6 +79,30 @@ fi
 
 GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
   || { echo "fleet-spawn: not inside a git repo" >&2; exit 1; }
+# A WORKER MUST NOT SPAWN WORKERS. Run from inside a linked worktree, this would add
+# another worktree beside the one you are already sitting in — which is what happens
+# when a session finishes a PR, is told "branch off fresh main", and reaches for the
+# orchestrate skill instead of just re-branching where it stands. The fleet's shape is
+# master in the main checkout and workers as leaves; nesting is never what was meant.
+#   A linked worktree has its own git-dir under the shared common dir; the main
+# checkout's two are the same path. That is exact, unlike guessing from the folder name.
+if [ "${CLAUDE_FLEET_ALLOW_NESTED:-0}" != 1 ] \
+   && [ "$(git -C "$PWD" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)" ]; then
+  _main="$(git -C "$PWD" worktree list 2>/dev/null | head -1 | awk '{print $1}')"
+  _br="$(git -C "$PWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  { echo "fleet-spawn: this session is ALREADY in a worktree ($GITROOT, branch $_br)."
+    echo "  Spawning here would add another one beside it, which is almost never what was meant."
+    echo
+    echo "  Starting fresh work in THIS worktree — no new worktree, no new session:"
+    echo "      git fetch origin && git checkout -B <new-branch> origin/main"
+    echo
+    echo "  Really want another worker? Run it from the main checkout:"
+    echo "      (cd ${_main:-<main checkout>} && fleet-spawn $NAME …)"
+    echo "  or from a lead, fleet_spawn with project: \"<name>\" — it runs there for you."
+    echo "  Override deliberately with CLAUDE_FLEET_ALLOW_NESTED=1."; } >&2
+  exit 1
+fi
+
 WT="$(dirname "$GITROOT")/$NAME"       # sibling worktree, matches the <proj>/<name> layout
 PARENT="$(dirname "$GITROOT")"
 CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"

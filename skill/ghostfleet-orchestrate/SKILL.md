@@ -22,6 +22,24 @@ lead starts blank, so **do not act from memory — read the real state first:**
 - **`fleet-inbox`** — what has needed you since you last looked (see below).
 - **`fleet-list`** — the live sessions and their status.
 
+## First: are you the lead, or are you already a worker?
+
+**If this session is already in a git worktree, do not spawn anything.** You are a
+worker, and workers are leaves — spawning here adds a second worktree beside the one you
+are sitting in. When you finish a PR and are asked to start fresh work, re-branch where
+you stand:
+
+```bash
+git fetch origin && git checkout -B <new-branch> origin/main
+```
+
+That is the whole operation: same worktree, same session, same dev-stack slot, and the
+dependencies you already installed. `fleet-spawn` refuses from a linked worktree and
+says this, so if you see that refusal it is not an obstacle to work around — it means
+the request was "start new work", not "start a new worker".
+
+Everything below is for a **lead** in the project's main checkout.
+
 ## Reuse a worktree before you spawn a new one
 
 Worktrees are a **reusable resource, not disposable.** Creating a fresh one when
