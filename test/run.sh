@@ -1186,6 +1186,54 @@ for a in $("$ROOT/bin/fleet-agent" list); do
      "$([ -n "$e" ] && echo y || echo n)" "$([ -n "$j" ] && echo y || echo n)"
 done
 
+# ── 6a2. the notification names the chord that reaches the session ───────────
+# A popup that says only WHO spoke leaves you to find them. It now leads with the
+# Ctrl-f chord that lands on that exact session — and neither digit is guessable from
+# inside the hook: the project's is its position in ITS PROFILE's list, and the
+# session's is its position in the grid's CARD order, which ⇧hjkl can rewrite. So the
+# reorder case is the one that matters; a chord derived from tmux's own ordering would
+# look right until the day someone moved a card, then send you to the wrong session.
+group "notification carries the jump chord"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  NT="$(mktemp -d)"; mkdir -p "$NT/home/.config/ghostfleet" "$NT/fleet" "$NT/stub"
+  printf 'alpha\t/tmp/alpha\twork\nbravo\t/tmp/bravo\twork\n' > "$NT/home/.config/ghostfleet/projects"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$OSA_OUT"\n' > "$NT/stub/osascript"
+  chmod +x "$NT/stub/osascript"
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n' > "$NT/t.jsonl"
+  tmux -L cf-bravo kill-server 2>/dev/null
+  for s in master wa wb wc; do tmux -L cf-bravo new-session -d -s "$s" "sleep 120" 2>/dev/null; done
+  chordfor() {           # $1 = session, $2 = socket -> just the chord the popup shows
+    rm -f "$NT/osa.txt"
+    printf '{"hook_event_name":"Stop","session_id":"s1","cwd":"%s","transcript_path":"%s","message":""}' \
+      "$NT" "$NT/t.jsonl" \
+    | env -u TMUX HOME="$NT/home" PATH="$NT/stub:$PATH" OSA_OUT="$NT/osa.txt" \
+          CLAUDE_FLEET_DIR="$NT/fleet" CLAUDE_FLEET_SOCK="${2:-cf-bravo}" CLAUDE_FLEET_SLOT="$1" \
+          "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$NT/osa.txt" ] && break; sleep 0.2; done
+    sed -n 's/.*display notification "\([^"]*\)".*/\1/p' "$NT/osa.txt" 2>/dev/null | sed 's/ · .*//'
+  }
+  rm -f "$NT/fleet/cf-bravo.order"
+  is "worker: project digit + card digit" "Ctrl-f 2 1" "$(chordfor wa)"
+  is "master is Enter, not a digit"       "Ctrl-f 2 ⏎" "$(chordfor master)"
+  # THE ONE THAT MATTERS: move the cards and the chord has to move with them
+  printf 'wc\nwb\nwa\n' > "$NT/fleet/cf-bravo.order"
+  is "reordered: wc is now card 1"        "Ctrl-f 2 1" "$(chordfor wc)"
+  is "reordered: wa is now card 3"        "Ctrl-f 2 3" "$(chordfor wa)"
+  # A chord it cannot work out must be ABSENT, not wrong — a popup that sends you to
+  # someone else's session is worse than one that just names the worker. The unlisted
+  # fleet is given LIVE SESSIONS on purpose: point it at an empty socket and the chord
+  # goes missing because the SESSION digit can't be found, so the assertion would pass
+  # without the project lookup ever being exercised. (First cut did exactly that, and
+  # forcing the project digit to 1 sailed straight through it.)
+  tmux -L cf-unlisted kill-server 2>/dev/null
+  for s in master wa wb; do tmux -L cf-unlisted new-session -d -s "$s" "sleep 120" 2>/dev/null; done
+  is "unlisted project: no chord at all"  "wa — $(basename "$NT")" "$(chordfor wa cf-unlisted)"
+  tmux -L cf-unlisted kill-server 2>/dev/null
+  tmux -L cf-bravo kill-server 2>/dev/null; rm -rf "$NT"
+else
+  skip "notification chord" "tmux/jq missing"
+fi
+
 # ── 6b. every command is actually installed ──────────────────────────────────
 # A new command that never reaches the install list is invisible until someone hits
 # "command not found" — and worse, the SUMMARY line was hand-maintained separately from
