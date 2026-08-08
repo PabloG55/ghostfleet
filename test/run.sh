@@ -651,6 +651,101 @@ else
   skip "answered need-you" "tmux missing"
 fi
 
+# ── 4a6b. a codex worker has history, and the grid has to find it ────────────
+# codex has no hooks, so no status file is ever pushed for it, and its history is in
+# its own layout ($CODEX_HOME/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl) that the
+# claude-shaped lookup cannot reach. Both sources came back empty and deriveStatus fell
+# to its last line: every codex worker read "· idle" — which on this grid means BRAND
+# NEW — with no age and no last line, however long the conversation had been.
+#
+# Both directions, and the wrong answers here are the plausible ones: a resolver that
+# returned the newest rollout REGARDLESS of cwd, or borrowed the claude transcript
+# sitting in a recycled worktree, would light the card up with a real message and a real
+# timestamp belonging to somebody else — which reads as working perfectly.
+#
+# $CX is `pwd -P`: mktemp hands back /var/... which is a symlink to /private/var, tmux
+# reports the physical path, and a rollout keyed to the logical one would match nothing.
+# That exact mismatch is why the codex trust stanza was written to a path codex never read.
+group "codex history (rollout -> ready)"
+if command -v tmux >/dev/null 2>&1; then
+  CX="$(cd "$(mktemp -d)" && pwd -P)"
+  tmux -L cfcodextest kill-server 2>/dev/null
+  node -e '
+    const fs=require("fs"),path=require("path");
+    const CX=process.argv[1];
+    const wt=s=>path.join(CX,"wt",s);
+    const enc=c=>c.replace(/[/.]/g,"-");
+    const day=path.join(CX,"codex","sessions","2026","08","08");
+    fs.mkdirSync(day,{recursive:true});
+    fs.mkdirSync(path.join(CX,"fleet"),{recursive:true});
+    // A rollout: the header (which is the ONLY place the cwd appears) plus, optionally,
+    // a completed turn. The header padding stands in for the base instructions the real
+    // file carries — kilobytes of prose AFTER the cwd, which is what forces the reader
+    // to look at a bounded window rather than parse the line.
+    const roll=(stamp,cwd,msg)=>{
+      const lines=[JSON.stringify({timestamp:"2026-08-08T04:25:21.829Z",ordinal:0,type:"session_meta",
+        payload:{session_id:stamp,cwd,originator:"codex-tui",cli_version:"0.147.0",
+                 base_instructions:{text:"You are Codex. ".repeat(500)}}})];
+      if(msg) lines.push(JSON.stringify({timestamp:"2026-08-08T04:25:23.711Z",ordinal:13,type:"event_msg",
+        payload:{type:"task_complete",turn_id:"t1",last_agent_message:msg,completed_at:1786163123}}));
+      fs.writeFileSync(path.join(day,`rollout-2026-08-08T${stamp}-0000.jsonl`),lines.join("\n")+"\n");
+    };
+    for(const s of ["c1","c2","c3","c4","c5","c6"]) fs.mkdirSync(wt(s),{recursive:true});
+    // c1 talked to codex; c2 has only started it; c3 has no rollout of its own at all
+    roll("00-10-00",wt("c1"),"binder slots line up now");
+    roll("00-11-00",wt("c2"),"");
+    // c6 is a RECYCLED worktree: an older finished conversation and a newer one, same cwd
+    roll("00-12-00",wt("c6"),"the previous tenant");
+    roll("00-13-00",wt("c6"),"who lives here now");
+    // an unrelated rollout, newest of all — nothing may fall back to it
+    roll("00-14-00",path.join(CX,"wt","somewhere-else"),"a stranger");
+    // c4 is a worktree that USED to run claude: the old transcript must not be borrowed
+    const pd=path.join(CX,"cfg","projects",enc(wt("c4")));
+    fs.mkdirSync(pd,{recursive:true});
+    fs.writeFileSync(path.join(pd,"old.jsonl"),JSON.stringify(
+      {type:"assistant",message:{role:"assistant",content:[{type:"text",text:"claude was here"}]}})+"\n");
+    // c5 is the control: still claude, and must go on reading exactly that transcript
+    const pd5=path.join(CX,"cfg","projects",enc(wt("c5")));
+    fs.mkdirSync(pd5,{recursive:true});
+    fs.writeFileSync(path.join(pd5,"live.jsonl"),JSON.stringify(
+      {type:"assistant",message:{role:"assistant",content:[{type:"text",text:"claude still works"}]}})+"\n");
+    for(const s of ["c1","c2","c3","c4","c6"])
+      fs.writeFileSync(path.join(CX,"fleet",`cfcodextest.${s}.agent`),"codex\n");
+  ' "$CX"
+  for s in c1 c2 c3 c4 c5 c6; do
+    tmux -L cfcodextest new-session -d -s "$s" -c "$CX/wt/$s" "sleep 120" 2>/dev/null
+  done
+  # column widths come from the --plain header: name 12, checkout 14, branch 26,
+  # agent 9, status 11, msg 46
+  cxcol() { CLAUDE_CONFIG_DIR="$CX/cfg" CLAUDE_FLEET_DIR="$CX/fleet" CODEX_HOME="$CX/codex" \
+            node "$ROOT/bin/fleet-grid.mjs" cfcodextest --plain 2>/dev/null \
+            | tail -n +3 | while IFS= read -r l; do
+                [ "$(printf '%s' "$l" | cut -c1-12 | sed 's/ *$//')" = "$1" ] \
+                  && printf '%s' "$l" | cut -c"$2" | sed 's/ *$//'; done; }
+  cxstat() { cxcol "$1" 62-72; }
+  cxmsg()  { cxcol "$1" 73-118; }
+  is "finished a turn          -> ready"      "ready" "$(cxstat c1)"
+  is "and its last line is shown"            "binder slots line up now" "$(cxmsg c1)"
+  # codex writes the header at STARTUP, so a file exists before you have said anything —
+  # handing that back would call a brand-new pane "ready", which means "has history".
+  is "started, never spoken to -> idle"      "idle"  "$(cxstat c2)"
+  is "and shows no last line"                ""      "$(cxmsg c2)"
+  # the stranger's rollout is the newest on disk: matching by cwd is the only thing
+  # standing between c3 and somebody else's conversation
+  is "no rollout of its own     -> idle"     "idle"  "$(cxstat c3)"
+  is "and never borrows another's line"      ""      "$(cxmsg c3)"
+  is "recycled worktree: newest rollout wins" "who lives here now" "$(cxmsg c6)"
+  # dispatch is on the AGENT, not "try codex, fall back to claude"
+  is "codex never reads a claude transcript" ""      "$(cxmsg c4)"
+  is "and stays idle for it"                 "idle"  "$(cxstat c4)"
+  is "claude sessions are untouched"         "claude still works" "$(cxmsg c5)"
+  is "and still read ready"                  "ready" "$(cxstat c5)"
+  tmux -L cfcodextest kill-server 2>/dev/null
+  rm -rf "$CX"
+else
+  skip "codex history" "tmux missing"
+fi
+
 # ── 4a7. the MCP can reach ANOTHER project's repo ────────────────────────────
 # fleet_spawn and fleet_worktrees find the repo from $PWD rather than from -s — the
 # only two here that do — which is why they were also the only two with no `project`
