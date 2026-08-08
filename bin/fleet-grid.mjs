@@ -27,6 +27,9 @@ const HOME = os.homedir();
 const CFG = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
 const FLEET_DIR = process.env.CLAUDE_FLEET_DIR || path.join(CFG, 'fleet');
 const PROJECTS = path.join(CFG, 'projects');
+// codex keeps its own history, in its own place, under its own env var (same name and
+// default the binary uses). Nothing about it is reachable from PROJECTS above.
+const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
 const PROFILE = process.env.CLAUDE_FLEET_PROFILE || 'work';
 const US = '\x1f'; // unit separator — non-whitespace field delimiter
 
@@ -161,6 +164,18 @@ function tailText(p, maxBytes = 65536) {
   } catch { return ''; }
 }
 
+// tailText's mirror: the FIRST maxBytes of a file. Used to read a rollout's header
+// without paying for the megabytes of turns behind it.
+function headText(p, maxBytes = 4096) {
+  try {
+    const fd = fs.openSync(p, 'r');
+    const buf = Buffer.alloc(Math.min(maxBytes, fs.fstatSync(fd).size));
+    fs.readSync(fd, buf, 0, buf.length, 0);
+    fs.closeSync(fd);
+    return buf.toString('utf8');
+  } catch { return ''; }
+}
+
 function lastAssistant(p) {
   if (!p) return '';
   const lines = tailText(p).split('\n').filter(Boolean);
@@ -171,6 +186,25 @@ function lastAssistant(p) {
         const c = o.message?.content;
         if (Array.isArray(c)) {
           const t = c.filter(x => x.type === 'text').map(x => x.text).join(' ').trim();
+          if (t) return t.replace(/\s+/g, ' ');
+        }
+      }
+      // codex rollout records. Disjoint from Claude's by `type`, so one reader handles
+      // both formats without having to be told which file it was handed.
+      // task_complete first because we walk BACKWARDS: it is written once, at the end of
+      // a turn, and already carries the finished text — so it cannot catch a mid-turn
+      // draft the way the message record it summarises can.
+      if (o.type === 'event_msg' && o.payload?.type === 'task_complete') {
+        const t = (o.payload.last_agent_message || '').trim();
+        if (t) return t.replace(/\s+/g, ' ');
+      }
+      if (o.type === 'response_item' && o.payload?.role === 'assistant') {
+        const c = o.payload.content;
+        if (Array.isArray(c)) {
+          // codex spells its assistant text `output_text` ('text' is what the INPUT side
+          // uses); accept both rather than depend on which side wrote the record.
+          const t = c.filter(x => x.type === 'output_text' || x.type === 'text')
+                     .map(x => x.text).join(' ').trim();
           if (t) return t.replace(/\s+/g, ' ');
         }
       }
@@ -383,6 +417,77 @@ function newestTranscript(cwd) {
   } catch { return ''; }
 }
 
+// ── codex history ────────────────────────────────────────────────────────────
+// codex is the one agent with NO hooks (bin/fleet-agent: hooks=no), so nothing ever
+// pushes it a status file — and its history lives in a layout newestTranscript() cannot
+// reach: $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl, keyed by date and
+// uuid rather than by cwd. Both halves of `st?.transcript || newestTranscript(cwd)` came
+// back empty, deriveStatus fell through to its last line, and every codex worker sat on
+// the grid as "· idle" — which here means BRAND NEW — however long you'd been talking to
+// it, with no age and no last line. The cwd it was started in is in the rollout's own
+// header, so the mapping the filename doesn't carry is recoverable from the content.
+//
+// Day directories, newest first. The names are zero-padded, so lexicographic order IS
+// chronological and no stat() is needed to sort them.
+function codexDayDirs() {
+  const root = path.join(CODEX_HOME, 'sessions');
+  const rd = d => { try { return fs.readdirSync(d).sort().reverse(); } catch { return []; } };
+  const out = [];
+  for (const y of rd(root)) for (const m of rd(path.join(root, y)))
+    for (const d of rd(path.join(root, y, m))) out.push(path.join(root, y, m, d));
+  return out;
+}
+
+// cwd -> the newest rollout STARTED in it. Scanning reads the head of candidate files,
+// so it is cached: gather() runs on a 1.2s redraw and this must not walk the whole tree
+// each time. The stamp is the newest day dir and its mtime — a new rollout either lands
+// in that dir (bumping its mtime) or creates a newer one, so both ways invalidate. The
+// file's own growth deliberately does NOT: appending a turn cannot change WHICH file
+// this is, and everything read out of it downstream is read fresh.
+const rolloutCache = new Map();
+function codexRolloutPath(cwd) {
+  if (!cwd) return '';
+  const dirs = codexDayDirs();
+  const stamp = dirs.length ? `${dirs[0]}\x1f${mtimeSec(dirs[0])}` : '';
+  const hit = rolloutCache.get(cwd);
+  if (hit && hit.stamp === stamp) return hit.file;
+  let file = '';
+  outer:
+  for (const dir of dirs) {
+    let names = [];
+    try { names = fs.readdirSync(dir).filter(f => f.startsWith('rollout-') && f.endsWith('.jsonl')).sort().reverse(); } catch {}
+    for (const n of names) {
+      // The header line carries the cwd, but it also carries the model's full base
+      // instructions — kilobytes of prose — so read a bounded chunk and match rather
+      // than parse. cwd sits in the first ~200 bytes, well ahead of that text, and this
+      // is the FIRST "cwd" in the file: turn_context repeats it later, which is why the
+      // window is capped instead of scanning the whole line.
+      const head = headText(path.join(dir, n), 4096);
+      const m = /"cwd":"((?:[^"\\]|\\.)*)"/.exec(head);
+      if (!m) continue;
+      let seen = '';
+      try { seen = JSON.parse(`"${m[1]}"`); } catch { continue; }
+      if (seen !== cwd) continue;
+      file = path.join(dir, n);
+      break outer;                                   // newest-first: the first hit wins
+    }
+  }
+  rolloutCache.set(cwd, { file, stamp });
+  return file;
+}
+
+// The rollout only counts as HISTORY once a turn has actually completed in it. codex
+// writes its header at startup, so a pane you have not said anything to yet ALREADY has
+// a file on disk — handing that back would flip a brand-new worker straight to "✓ ready"
+// (which on this grid means "has history, idle at the prompt"), the same unearned claim
+// the 'unknown' status exists to avoid. And it must be THIS session's rollout that
+// decides: falling back to an older one for the same cwd would print the last words of a
+// conversation that pane no longer has, which is how a recycled worktree lies.
+function codexTranscript(cwd) {
+  const f = codexRolloutPath(cwd);
+  return f && lastAssistant(f) ? f : '';
+}
+
 function gather() {
   // master lives on the home screen, not the grid; the rest come back in CARD order
   const sessions = applyOrder(tmuxList().filter(s => s.name !== 'master'));
@@ -390,9 +495,15 @@ function gather() {
   const nowS = Math.floor(Date.now() / 1000);
   return sessions.map(s => {
     const st = fleet.get(s.name);
+    const agent = agentOf(s.name);
     const folder = st?.folder || (s.cwd ? path.basename(s.cwd) : s.name);
     const branch = st?.branch || (s.cwd ? gitBranch(s.cwd) : '');
-    const transcript = st?.transcript || newestTranscript(s.cwd || '');
+    // Dispatched on the agent, not tried in turn: newestTranscript() keys purely off the
+    // cwd, so on a worktree that USED to run claude it happily returns that old transcript
+    // for the codex session standing there now — a wrong answer that looks like a right
+    // one, since the card would show a real message with a real timestamp.
+    const transcript = st?.transcript ||
+      (agent === 'codex' ? codexTranscript(s.cwd || '') : newestTranscript(s.cwd || ''));
     const tmt = transcript ? mtimeSec(transcript) : 0;    // last transcript write = age display only
     const busy = paneBusy(SOCK, s.name);
     let status = deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
@@ -402,7 +513,7 @@ function gather() {
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
     return { name: s.name, folder, branch, status, age, msg: lastAssistant(transcript), attached: s.attached, sched,
-             agent: agentOf(s.name), label: labelOf(s.name) };
+             agent, label: labelOf(s.name) };
   });
 }
 
