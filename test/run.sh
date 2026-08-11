@@ -1596,6 +1596,19 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   # back: a tab returns to the session it came from, not up to the grid
   is "the tab records its origin"  "api-2" \
      "$(tmux -L cftabh show-options -qv -t _term-api-2 @cf_tab_from 2>/dev/null)"
+  # A TAB OUTLIVES THE CODE THAT MADE IT. tmux sessions keep the options they were born
+  # with, so tabs already open when the back key landed had no @cf_tab_from — ` fell
+  # through to detach and threw you up to Projects, from inside the very feature meant
+  # to step back one level. It read as "the binding never shipped", and re-installing
+  # could not fix it. So the stamp is re-applied on every call, repairing in place.
+  tmux -L cftabh set-option -u -t _term-api-2 @cf_tab_from 2>/dev/null
+  is "...a stale tab starts unstamped" "" \
+     "$(tmux -L cftabh show-options -qv -t _term-api-2 @cf_tab_from 2>/dev/null)"
+  "$ROOT/bin/fleet-tab" term cftabh "$TH/api-2" api-2 >/dev/null 2>&1
+  is "...and one C-t repairs it"   "api-2" \
+     "$(tmux -L cftabh show-options -qv -t _term-api-2 @cf_tab_from 2>/dev/null)"
+  is "...without dealing a second" "1" \
+     "$(tmux -L cftabh list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^_term-api-2$' || true)"
   is "...and its bar names it"     "1" \
      "$(tmux -L cftabh display-message -p -t _term-api-2 '#{status-left}' 2>/dev/null | grep -c 'api-2' || true)"
   # the OTHER direction: with the origin gone, back must fall through to a detach
