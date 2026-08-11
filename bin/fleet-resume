@@ -17,8 +17,26 @@ MSG="$*"
 [ -n "$SESSION" ] || { echo "fleet-resume: usage: fleet-resume [-s socket] <session> [prompt]" >&2; exit 1; }
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 # clear the park marker: the socket-namespaced one (current) + a legacy bare one
-[ -n "$SOCK" ] && rm -f "$FLEET_DIR/$SOCK.$SESSION.parked" 2>/dev/null
-rm -f "$FLEET_DIR/$SESSION.parked" 2>/dev/null
+#
+# SAY WHAT WAS ACTUALLY CLEARED. This used to `rm -f` and then announce "un-parked"
+# whatever happened, so pointing it at the wrong fleet dir reported success and did
+# nothing — and there is no shortage of ways to point it wrong: CLAUDE_FLEET_DIR
+# outranks CLAUDE_CONFIG_DIR, so a shell inherited from a WORK session silently
+# overrides a --personal profile, and an unexpanded ~ in either variable yields a
+# directory that cannot exist. Both were hit in one sitting, and from the outside the
+# result is identical to a resume that does not work: you run it, it says it worked,
+# the worker stays parked. `rm -f` cannot fail loudly, so check first.
+CLEARED=0
+for m in ${SOCK:+"$FLEET_DIR/$SOCK.$SESSION.parked"} "$FLEET_DIR/$SESSION.parked"; do
+  [ -f "$m" ] || continue
+  rm -f "$m" 2>/dev/null && CLEARED=$((CLEARED + 1))
+done
+if [ "$CLEARED" = 0 ]; then
+  # Not an error — resuming an already-running worker is a no-op worth stating. Naming
+  # the directory is the point: it is the one thing that tells you a wrong-profile call
+  # from a genuinely un-parked session.
+  echo "fleet-resume: '$SESSION' was not parked — no marker in $FLEET_DIR" >&2
+fi
 
 if [ -n "$MSG" ]; then
   [ -n "$SOCK" ] || { echo "fleet-resume: no socket for dispatch (pass -s <socket>)" >&2; exit 1; }
@@ -27,6 +45,6 @@ if [ -n "$MSG" ]; then
   while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
   BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
   "$BIN_DIR/fleet-send" -s "$SOCK" "$SESSION" "$MSG"
-else
+elif [ "$CLEARED" -gt 0 ]; then
   echo "fleet-resume: un-parked '$SESSION' (send it work to wake it)"
 fi

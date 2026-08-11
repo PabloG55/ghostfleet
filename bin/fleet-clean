@@ -129,9 +129,13 @@ for pidf in "$FLEET_DIR"/*.governor.pid; do
   esac
 done
 live="$(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null || true)"
-for mk in "$FLEET_DIR/$SOCK".*.parked "$FLEET_DIR/$SOCK".*.sched; do
+# .stale is the governor's "this pane has not repainted since we parked it" fingerprint.
+# It self-clears the moment the pane moves, so the only ones that linger belong to
+# sessions that died while parked — and a leftover would make a NEW session of the same
+# name start out ignored by the budget reader.
+for mk in "$FLEET_DIR/$SOCK".*.parked "$FLEET_DIR/$SOCK".*.sched "$FLEET_DIR/$SOCK".*.stale; do
   [ -f "$mk" ] || continue
-  b="$(basename "$mk")"; sn="${b#"$SOCK".}"; sn="${sn%.parked}"; sn="${sn%.sched}"
+  b="$(basename "$mk")"; sn="${b#"$SOCK".}"; sn="${sn%.parked}"; sn="${sn%.sched}"; sn="${sn%.stale}"
   printf '%s\n' "$live" | grep -qxF "$sn" || { echo "  orphan $b (no live '$sn')"; run "rm -f '$mk'"; }
 done
 
