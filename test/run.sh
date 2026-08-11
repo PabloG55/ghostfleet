@@ -1698,6 +1698,71 @@ else
   skip "tab name single-sourced" "tmux not available"
 fi
 
+# ── 4e. the governor parks on a fossil its own park created ──────────────────
+# A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
+# still shows the figure it was painting when it was parked. Skipping PARKED panes was
+# not enough: everything parked -> the only live pane is master at 46% -> resume all ->
+# the just-resumed panes still say 104% -> park all -> round again. Measured in a real
+# log: 1,024 park/resume events, one cycle every ~90s, each park cutting a turn off
+# mid-flight, so three-wide ran slower than one-wide.
+#
+# Four directions, because a detector that called EVERYTHING a fossil would "fix" the
+# loop by disabling the ceiling entirely — the failure this whole layer exists to avoid.
+group "governor: a resumed pane is a stopped clock too"
+if command -v tmux >/dev/null 2>&1; then
+  GV="$(mktemp -d)"; tmux -L cfgovt kill-server 2>/dev/null
+  tmux -L cfgovt new-session -d -s w1 \
+    "printf 'acct | Opus 5 | ctx:5%% | 104%%(4h 1m)\n'; sleep 90" 2>/dev/null
+  sleep 1
+  # one-liner, so grep it; the rest are real blocks
+  eval "$(grep -a '^stale_f() {' "$ROOT/bin/fleet-governor")"
+  eval "$(sed -n '/^pct_of() {/,/^}/p' "$ROOT/bin/fleet-governor")"
+  eval "$(sed -n '/^pct_fingerprint() {/,/^}/p' "$ROOT/bin/fleet-governor")"
+  eval "$(sed -n '/^is_fossil() {/,/^}/p' "$ROOT/bin/fleet-governor")"
+  SOCK=cfgovt; FLEET_DIR="$GV"
+  is "the pane's figure is read"     "104" "$(pct_of w1)"
+  is "unparked: not a fossil"        "no"  "$(is_fossil w1 && echo yes || echo no)"
+  printf '%s' "$(pct_fingerprint w1)" > "$(stale_f w1)"
+  is "parked on it: fossil"          "yes" "$(is_fossil w1 && echo yes || echo no)"
+  is "...and still, a tick later"    "yes" "$(is_fossil w1 && echo yes || echo no)"
+  # the pane MOVES — the whole point is that this releases it, with no timer to tune
+  tmux -L cfgovt respawn-pane -k -t w1 \
+    "printf 'acct | Opus 5 | ctx:5%% | 41%%(4h 9m)\n'; sleep 90" 2>/dev/null
+  sleep 1
+  is "repainted: not a fossil"       "no"  "$(is_fossil w1 && echo yes || echo no)"
+  is "...marker self-cleared"        "yes" "$([ -f "$(stale_f w1)" ] && echo no || echo yes)"
+  is "...and the NEW figure is used" "41"  "$(pct_of w1)"
+  tmux -L cfgovt kill-server 2>/dev/null; rm -rf "$GV"
+else
+  skip "governor fossil detector" "tmux not available"
+fi
+
+# Recovery releases ONE worker per tick. Letting all of them back on the same reading
+# re-creates the condition that tripped the ceiling — five resumed together were over it
+# again inside a minute — which is the other half of what sustained the loop.
+group "governor: recovery ramps, it does not slam"
+is "resume breaks after the first" "1" \
+   "$(sed -n '/RECOVERED -> resume what WE parked/,/healthy/p' "$ROOT/bin/fleet-governor" | grep -c '^ *break$' || true)"
+# ...but an explicit "ignore the budget" still releases everything: that is a human
+# saying "I have extra usage, un-park my workers", not a reading to be ramped into.
+is "ignore-limit passes no cap"    "1" \
+   "$(grep -c 'release_gov_parked "budget ceiling ignored for this project"$' "$ROOT/bin/fleet-governor" || true)"
+
+# fleet-resume used to print "un-parked" whatever happened — it never checked a marker
+# existed. Pointing it at the wrong fleet dir (CLAUDE_FLEET_DIR outranks
+# CLAUDE_CONFIG_DIR; an unexpanded ~ is a directory that cannot exist) reported success
+# and did nothing, which is indistinguishable from a resume that is simply broken.
+group "fleet-resume says what it actually cleared"
+FR="$(mktemp -d)"; mkdir -p "$FR/fleet"
+rout() { env -u TMUX CLAUDE_FLEET_DIR="$1" "$ROOT/bin/fleet-resume" -s cf-x plan 2>&1 | head -1; }
+is "nothing parked -> says so"  "1" "$(rout "$FR/fleet" | grep -c 'was not parked' || true)"
+is "...and names the dir it looked in" "1" "$(rout "$FR/fleet" | grep -cF "$FR/fleet" || true)"
+printf '%s\n' 123 > "$FR/fleet/cf-x.plan.parked"
+is "really parked -> un-parks"  "1" "$(rout "$FR/fleet" | grep -c 'un-parked' || true)"
+is "...and the marker is gone"  "0" "$([ -f "$FR/fleet/cf-x.plan.parked" ] && echo 1 || echo 0)"
+is "wrong dir -> refuses to claim success" "1" "$(rout "$FR/nope" | grep -c 'was not parked' || true)"
+rm -rf "$FR"
+
 # ── 5. sleep inhibitor guards ────────────────────────────────────────────────
 # The mode has to survive a relaunch. An env var only applies to the process you
 # launched with it, so a persisted marker is the difference between "set it once" and
