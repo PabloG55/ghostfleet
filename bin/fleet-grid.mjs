@@ -66,9 +66,21 @@ function tmuxList() {
     return out.split('\n').filter(Boolean).map(l => {
       const [name, cwd, attached] = l.split(US);
       return { name, cwd: cwd || '', attached: attached === '1' };
-    });
+    }).filter(s => !isTab(s.name));
   } catch { return []; }
 }
+
+// A TAB IS NOT A SESSION CARD. fleet-tab's terminals/editors are real tmux sessions on
+// this socket (that is what keeps the fleet from reading them as agent panes), but they
+// are not work and they must not be cards: a card claims a NUMBER, so a terminal
+// silently renumbered every session behind it — and the digits, ⇧←→ and `Ctrl-f <p> <s>`
+// all count these cards, so 2 stopped meaning what it meant a moment ago.
+//   Worse, a tab shares its origin's cwd, so the transcript lookup (which is keyed by
+// cwd) handed it the ORIGIN'S last message: a terminal card showing "✓ ready" and a
+// summary of work it had no part in.
+//   You do not lose the tab by hiding it — C-t from the session reuses the one you
+// have, and ` inside it comes back here.
+function isTab(name) { return /^_(?:term|edit)-/.test(name || ''); }
 
 // Does a status file belong to the fleet on `sock`? Scope by the SOCKET the session
 // runs on — the only field that identifies the fleet. (`zellij` is the zellij session
@@ -512,9 +524,34 @@ function gather() {
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
-    return { name: s.name, folder, branch, status, age, msg: lastAssistant(transcript), attached: s.attached, sched,
-             agent, label: labelOf(s.name) };
+    return { name: s.name, cwd: s.cwd || '', folder, branch, status, age, msg: lastAssistant(transcript),
+             attached: s.attached, sched, agent, label: labelOf(s.name) };
   });
+}
+
+// ^T / ^N on the grid: a terminal or the editor on the SELECTED card's folder, falling
+// back to the project root (master's cwd) when the selection isn't a session — pressing
+// it on "+ new session" should still give you a terminal, not nothing.
+//
+// fleet-tab creates or reuses the session; we then hand back an ordinary `attach`
+// choice, so the control-plane loop opens it through the path it already has for every
+// other session. No new verb in bin/ghostfleet, and the tab is attached, not merely
+// created in the background where you'd have no way to reach it (it has no card).
+//
+// The name has to be predicted to build that choice, so it uses the SAME sanitising
+// fleet-tab does. If they ever drift, this attaches to a session that isn't there —
+// which is why the test asserts the predicted name against the one really created.
+function tabName(kind, from) { return `_${kind}-${String(from).replace(/[.:]/g, '_')}`; }
+function tabChoice(kind) {
+  const card = items[sel]?.card;
+  const home = tmuxList().find(s => s.name === 'master');
+  const cwd  = card?.cwd || home?.cwd || process.cwd();
+  const from = card?.name || 'master';
+  const bin  = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-tab');
+  try {
+    execFileSync(bin, [kind, SOCK, cwd, from], { stdio: 'ignore' });
+  } catch { return ''; }               // no editor installed, no tmux — stay on the grid
+  return `attach${US}${tabName(kind, from)}`;
 }
 
 function killSession(name) {
@@ -1029,7 +1066,8 @@ function renderGrid() {
   // which one it means RIGHT NOW rather than making you find out by pressing it.
   const xVerb = items[sel]?.freeWt ? 'x remove wt' : 'x kill';
   buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 enter · n new · w worktree · t stack · s sched · ` +
-         `p pause · P resume · ${xVerb} · , settings · Ctrl-f jump · Ctrl-p/Q projects · q/\` back${C.reset}\x1b[K\n`;
+         `p pause · P resume · ${xVerb} · , settings · Ctrl-t term · Ctrl-n edit · Ctrl-f jump · ` +
+         `Ctrl-p/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
 }
@@ -1433,7 +1471,14 @@ function onKey(key) {
     // t = the sTack screen. s/S are schedule and n/N are new, so this is the free key
     // nearest the rest of the grid's verbs. It leaves this project's grid entirely —
     // the stack lists every project's sessions, which is the point of it.
-    else if (key === 't' || key === 'T' || key === '\x14') return finish('stack');
+    else if (key === 't' || key === 'T' || key === '\x18') return finish('stack');
+    // ^T / ^N — the SAME keys as inside a session, so the chord doesn't change meaning
+    // depending on which screen you're looking at. ^X likewise now carries the stack
+    // here, matching tmux; plain `t` keeps it too, since no tab wants that letter.
+    // An empty choice means the tab could not be opened (no editor, no tmux). Staying
+    // on the grid is the honest outcome; finishing with '' would quit the screen.
+    else if (key === '\x14') { const c = tabChoice('term'); if (c) return finish(c); render(); return; }
+    else if (key === '\x0e') { const c = tabChoice('edit'); if (c) return finish(c); render(); return; }
     else if (key >= '1' && key <= '9') {              // insta-jump: digit -> that card
       const it = items[Number(key) - 1];
       if (it?.card) { sel = Number(key) - 1; return finish(`attach${US}${it.card.name}`); }
