@@ -10,18 +10,24 @@
 // (e.g. command="/Users/you/.local/bin/ghostfleet").
 
 layout {
-    // Free Ctrl-s and Ctrl-p inside the fleet session so those keystrokes reach the
-    // app instead of zellij: the nested tmux binds them to "jump to the sessions grid"
-    // and "jump up to Projects" (see tmux/cf.tmux.conf), and the Node screens read the
-    // same two keys (^S sessions / ^P projects). Zellij's defaults for these — scroll
-    // mode and pane mode — are scoped away HERE only: still reachable with the mouse /
-    // PageUp / Ctrl-t, and unchanged in your other zellij sessions.
+    // Free these inside the fleet session so the keystrokes reach the app instead of
+    // zellij: the nested tmux binds them (see tmux/cf.tmux.conf) and the Node screens
+    // read the same ones (^S sessions / ^P projects). Zellij's defaults here — scroll,
+    // pane, tab, resize mode — are scoped away IN THIS LAYOUT ONLY: still reachable
+    // with the mouse / PageUp, and untouched in your other zellij sessions.
+    //   Ctrl-t and Ctrl-n are the TABS pair (a terminal / the editor on the current
+    // session's folder). Ctrl-x, which the stack screen moved to, needs no unbind —
+    // zellij's normal mode does not bind it, which is half of why it was picked.
+    //   NOTE: zellij only reads keybinds when a session is CREATED. Adding one here
+    // does nothing to a fleet you already have open — you need a new zellij session
+    // before Ctrl-n stops opening resize mode.
     keybinds {
         normal {
             unbind "Ctrl s"
             unbind "Ctrl p"
             unbind "Ctrl f"
             unbind "Ctrl t"
+            unbind "Ctrl n"
         }
     }
     tab name="fleet" {
