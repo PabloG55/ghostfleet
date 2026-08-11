@@ -112,6 +112,33 @@ pct_of() {
   tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null \
     | grep -oE '[^:0-9][0-9]+%\(' | grep -oE '[0-9]+' | tail -1
 }
+
+# A PARK CREATES THE FOSSIL THAT JUSTIFIES THE NEXT PARK. Skipping parked panes is not
+# enough: a worker RESUMED a moment ago still shows the figure it was painting when it
+# was parked, because a Claude pane only repaints when it does something. So the loop
+# closes on itself — everything parked, the only live pane is master reading 46%, resume
+# all, the just-resumed panes still say 104%, park all, and round again. Measured in a
+# real log: 1,024 park/resume events, one cycle every ~90 seconds, each park cutting a
+# turn off mid-flight, so three-wide ran slower than one-wide.
+#   The fix is to remember what the pane looked like when we parked it and refuse to
+# believe it again until it has actually moved. The whole status LINE is the fingerprint,
+# not the number: any repaint at all changes it (the elapsed counter alone is enough),
+# while a frozen pane stays byte-identical.
+stale_f() { printf '%s/%s.%s.stale' "$FLEET_DIR" "$SOCK" "$1"; }
+pct_fingerprint() {
+  tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null \
+    | grep -E '[^:0-9][0-9]+%\(' | tail -1 | cksum
+}
+# 0 = this session's figure is the one we parked it on and it has not repainted since.
+# Self-clearing: the moment the pane moves, the marker goes and the reading counts again.
+is_fossil() {
+  local f cur; f="$(stale_f "$1")"
+  [ -f "$f" ] || return 1
+  cur="$(pct_fingerprint "$1")"
+  [ "$cur" = "$(cat "$f" 2>/dev/null)" ] && return 0
+  rm -f "$f" 2>/dev/null
+  return 1
+}
 # one shared account -> take the highest reading across all live panes that actually
 # report one.
 #
@@ -139,6 +166,9 @@ budget() {
   for s in $(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
     meterable "$s" || continue
     if is_parked "$s"; then BUDGET_FROZEN="$BUDGET_FROZEN $s"; continue; fi
+    # ...and a session we resumed that has not repainted yet is the same stopped clock,
+    # still showing the number we parked it on. Believing it re-parks it immediately.
+    if is_fossil "$s"; then BUDGET_FROZEN="$BUDGET_FROZEN $s(unchanged)"; continue; fi
     p="$(pct_of "$s")"
     if [ -n "$p" ]; then
       [ "$p" -gt "$BUDGET_PCT" ] && BUDGET_PCT="$p"
@@ -163,10 +193,17 @@ gov_parked() { is_parked "$1" && grep -q '^governor' "$FLEET_DIR/$SOCK.$1.parked
 # count in $RELEASED — NOT on stdout, because this function also logs there and a
 # command substitution would capture the log lines as the "count".
 RELEASED=0
+#   $2 caps how many to release this pass (empty = all). RECOVERY RELEASES ONE AT A
+# TIME. Letting every worker back at once re-creates the exact condition that tripped
+# the ceiling — five sessions resumed together were back over it inside a minute, which
+# is half of why the park/resume loop sustained itself. One per tick ramps the load and
+# lets the next reading actually mean something. The ignore-limit path passes no cap: a
+# human flipping "ignore the budget" is asking for all of them back, now.
 release_gov_parked() {
-  local w
+  local w cap="${2:-}"
   RELEASED=0
   for w in $(workers_newest_first); do
+    [ -n "$cap" ] && [ "$RELEASED" -ge "$cap" ] && break
     if gov_parked "$w"; then
       log "  resume $w"
       if [ "$DRY" != 1 ]; then
@@ -240,8 +277,13 @@ tick() {
       notify "budget ${pct}% — parked ${n} worker(s); auto-resume under ${RESUME}%"
       for w in "${active[@]}"; do
         log "  park $w"
+        # Fingerprint BEFORE pausing: we want the pane exactly as it read when it earned
+        # the park. Taken after, it could catch a repaint from the pause itself and we
+        # would be remembering the wrong frame.
+        fp="$(pct_fingerprint "$w")"
         if [ "$DRY" != 1 ] && "$BIN_DIR/fleet-pause" -s "$SOCK" "$w" >/dev/null 2>&1; then
           printf 'governor %s\n' "$(date +%s)" > "$FLEET_DIR/$SOCK.$w.parked"
+          printf '%s' "$fp" > "$(stale_f "$w")" 2>/dev/null
           inbox "$w" parked "governor: budget ${pct}% — ceiling, parked all"
         fi
       done
@@ -253,6 +295,11 @@ tick() {
 
   # RECOVERED -> resume what WE parked (leave hand-paused workers alone)
   if [ "$pct" -lt "$RESUME" ]; then
+    # ONE PER TICK, newest first. Releasing every parked worker on the same reading puts
+    # the fleet straight back into the state that tripped the ceiling — measured: five
+    # resumed together were over it again inside a minute, then parked together, for
+    # 1,024 events. Ramping means the next reading is taken with one more worker running,
+    # which is the question actually being asked.
     resumed=0
     for w in $(workers_newest_first); do
       if gov_parked "$w"; then
@@ -262,6 +309,7 @@ tick() {
           inbox "$w" resumed "governor: budget ${pct}% — window recovered"
         fi
         resumed=1
+        break
       fi
     done
     [ "$resumed" = 0 ] && log "budget ${pct}% (healthy)"
