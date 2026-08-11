@@ -1563,6 +1563,83 @@ else
   skip "tab bindings" "tmux not available"
 fi
 
+# A TAB IS NOT A CARD. It is a real session (that is what keeps the fleet from reading
+# it as an agent pane), so every list built from `list-sessions` picked it up: it took
+# card 1 and renumbered every session behind it, and because it shares its origin's cwd
+# the transcript lookup handed it the ORIGIN'S last message — a terminal card reading
+# "✓ ready" over work it had no part in. The grid, the ring and the shell fallback all
+# have to agree, or a digit means one session on the grid and another to ⇧→.
+group "tabs are not sessions"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  TH="$(mktemp -d)"; mkdir -p "$TH/main" "$TH/api-2"
+  tmux -L cftabh kill-server 2>/dev/null
+  tmux -L cftabh new-session -d -s master -c "$TH/main" 'sleep 60' 2>/dev/null
+  tmux -L cftabh new-session -d -s api-2  -c "$TH/api-2" 'sleep 60' 2>/dev/null
+  "$ROOT/bin/fleet-tab" term cftabh "$TH/api-2" api-2 >/dev/null 2>&1
+  HSOCK="$(tmux -L cftabh display-message -p '#{socket_path}' 2>/dev/null)"
+  is "tmux really has the tab"     "1" \
+     "$(tmux -L cftabh list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^_term-api-2$' || true)"
+  # ...and every list the fleet builds leaves it out
+  ord="$(node "$ROOT/bin/fleet-grid.mjs" cftabh --order </dev/null 2>/dev/null | tr '\n' ' ')"
+  is "the grid's order omits it"   "api-2 " "$ord"
+  is "...and no card renders it"   "0" \
+     "$(node "$ROOT/bin/fleet-grid.mjs" cftabh --plain </dev/null 2>/dev/null | grep -c '_term-' || true)"
+  ring="$(sed -n '/^ring="\$(/,/^)"/p' "$ROOT/bin/fleet-cycle" | grep -c '_term-' || true)"
+  is "the cycle ring excludes it"  "1" "$ring"
+  # the exact-match anchor, because '^master' would also swallow a worker called
+  # master-notes — the prefix-vs-exact trap this repo has already been bitten by
+  is "...and still matches master EXACTLY" "1" \
+     "$(grep -c "grep -vE '\^master\\\$|\^_term-|\^_edit-'" "$ROOT/bin/fleet-cycle" || true)"
+  is "the shell fallback agrees"   "1" \
+     "$(grep -c "grep -vE '\^master\\\$|\^_term-|\^_edit-'" "$ROOT/bin/ghostfleet" || true)"
+
+  # back: a tab returns to the session it came from, not up to the grid
+  is "the tab records its origin"  "api-2" \
+     "$(tmux -L cftabh show-options -qv -t _term-api-2 @cf_tab_from 2>/dev/null)"
+  is "...and its bar names it"     "1" \
+     "$(tmux -L cftabh display-message -p -t _term-api-2 '#{status-left}' 2>/dev/null | grep -c 'api-2' || true)"
+  # the OTHER direction: with the origin gone, back must fall through to a detach
+  # rather than switch-client at a dead name and look like a broken key
+  tmux -L cftabh kill-session -t api-2 2>/dev/null
+  "$ROOT/bin/fleet-tab" back "$HSOCK" _term-api-2 "" >/dev/null 2>&1
+  is "a dead origin doesn't strand it" "1" \
+     "$(tmux -L cftabh has-session -t '=_term-api-2' 2>/dev/null && echo 1 || echo 0)"
+  tmux -L cftabh kill-server 2>/dev/null; rm -rf "$TH"
+else
+  skip "tabs are not sessions" "tmux or node missing"
+fi
+
+# The grid's own keys. ^T/^N/^X must mean the same thing here as they do inside a
+# session — a chord that changes meaning per screen is worse than no chord. Driven
+# through a REAL tty, because the grid reads stdin directly.
+group "grid tab keys (real TUI)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  GK="$(mktemp -d)"; mkdir -p "$GK/main" "$GK/api-2"
+  tmux -L cfgkin kill-server 2>/dev/null; tmux -L cfgkout kill-server 2>/dev/null
+  tmux -L cfgkin new-session -d -s master -c "$GK/main" 'sleep 90' 2>/dev/null
+  tmux -L cfgkin new-session -d -s api-2  -c "$GK/api-2" 'sleep 90' 2>/dev/null
+  gkey() {                      # $1 = key -> the choice the grid printed
+    rm -f "$GK/choice"; tmux -L cfgkout kill-server 2>/dev/null
+    tmux -L cfgkout new-session -d -x 200 -y 50 \
+      "node '$ROOT/bin/fleet-grid.mjs' cfgkin > '$GK/choice' 2>/dev/null" 2>/dev/null
+    sleep 2
+    tmux -L cfgkout send-keys "$1" 2>/dev/null; sleep 2
+    tmux -L cfgkout kill-server 2>/dev/null
+    tr '\037' '|' < "$GK/choice" 2>/dev/null
+  }
+  is "^T asks to attach a term tab" "attach|_term-api-2" "$(gkey C-t)"
+  # the name is PREDICTED to build that choice — if it ever drifts from what fleet-tab
+  # really creates, the grid attaches to a session that does not exist
+  is "...and that session exists"   "1" \
+     "$(tmux -L cfgkin has-session -t '=_term-api-2' 2>/dev/null && echo 1 || echo 0)"
+  is "^N asks to attach an editor"  "attach|_edit-api-2" "$(gkey C-n)"
+  is "^X is the stack"              "stack" "$(gkey C-x)"
+  is "...and plain t still is too"  "stack" "$(gkey t)"
+  tmux -L cfgkout kill-server 2>/dev/null; tmux -L cfgkin kill-server 2>/dev/null; rm -rf "$GK"
+else
+  skip "grid tab keys" "tmux or node missing"
+fi
+
 # ── 5. sleep inhibitor guards ────────────────────────────────────────────────
 # The mode has to survive a relaunch. An env var only applies to the process you
 # launched with it, so a persisted marker is the difference between "set it once" and

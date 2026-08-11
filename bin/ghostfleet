@@ -155,7 +155,9 @@ grid_sessions() {
   if grep -qa "includes('--order')" "$GRID" 2>/dev/null; then
     node "$GRID" "$SOCK" "$CONF" --order </dev/null 2>/dev/null
   else
-    tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -v '^master$'
+    # Tabs are excluded here too, or this fallback would disagree with the grid it is
+    # standing in for — and this list IS the card numbering (JUMP_SESS counts it).
+    tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | grep -vE '^master$|^_term-|^_edit-'
   fi
 }
 
