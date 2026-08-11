@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# fleet-tab term|edit <socket-path> <cwd> [from-session]
+# fleet-tab term|edit <socket> <cwd> [from-session] [-f <tmux-conf>]
+# fleet-tab back    <socket> <session> [client-tty]     ` from inside a tab
+# fleet-tab name    term|edit <from-session>            what that tab will be called
 #
 # Open a plain TAB — a terminal, or the editor — on a session's own folder. Bound to
 # C-t / C-n inside a session (tmux/cf.tmux.conf). You are attached to a worker, you
@@ -32,12 +34,39 @@
 set -uo pipefail
 
 KIND="${1:-}"; SOCK="${2:-}"; CWD="${3:-}"; FROM="${4:-}"
-case "$KIND" in term|edit|back) ;; *) echo "fleet-tab: usage: fleet-tab term|edit <socket-path> <cwd> [from]  |  fleet-tab back <socket-path> <session> <client-tty>" >&2; exit 1 ;; esac
+case "$KIND" in term|edit|back|name) ;; *) echo "fleet-tab: usage: fleet-tab term|edit <socket> <cwd> [from] [-f conf]  |  fleet-tab back <socket> <session> <tty>  |  fleet-tab name term|edit <from>" >&2; exit 1 ;; esac
+
+# The tab's session name, single-sourced. Callers that have to ATTACH a tab need to know
+# what it will be called before it exists (bin/ghostfleet opens one straight from the
+# Projects screen), and a second hand-rolled copy of this rule is a name that silently
+# drifts — you attach to a session that was never created and the screen just sits there.
+#   tmux forbids . and : in a session name, so the origin is sanitised rather than
+# trusted; a worker called `api.2` would otherwise fail to create with a parse error.
+tab_name() { printf '_%s-%s' "$1" "$(printf '%s' "${2:-tab}" | tr '.:' '__')"; }
+if [ "$KIND" = name ]; then
+  case "${2:-}" in term|edit) ;; *) echo "fleet-tab: name needs term|edit" >&2; exit 1 ;; esac
+  tab_name "$2" "${3:-}"; exit 0
+fi
+
 [ -n "$SOCK" ] || { echo "fleet-tab: no socket" >&2; exit 1; }
+# -f <conf>: the tmux config to start the server WITH. Only matters when this call is
+# the one that creates it — opening a tab on a project you have never entered otherwise
+# brings up a bare tmux with none of the fleet's bindings, so ` would not come back.
+CONF=""
+shift 4 2>/dev/null || shift $#
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -f) CONF="${2:-}"; shift 2 ;;
+    *)  shift ;;
+  esac
+done
 # A PATH or a NAME. tmux keybindings hand over #{socket_path} (absolute), while the grid
 # and anyone on the command line have only the `cf-<project>` name that -L takes. Telling
 # them apart by the slash beats making callers care which flag this wants.
-case "$SOCK" in /*) T() { tmux -S "$SOCK" "$@"; } ;; *) T() { tmux -L "$SOCK" "$@"; } ;; esac
+case "$SOCK" in
+  /*) T() { tmux -S "$SOCK" ${CONF:+-f "$CONF"} "$@"; } ;;
+  *)  T() { tmux -L "$SOCK" ${CONF:+-f "$CONF"} "$@"; } ;;
+esac
 
 # `back` — the other half of a tab. Bound to ` (and C-a g) via if-shell, which only
 # routes here when @cf_tab_from is set, i.e. only from inside a tab.
@@ -69,10 +98,7 @@ fi
 # the terminal you already have, not deal you a second one — the same "reuse before
 # proliferate" rule the worktrees follow, for the same reason: a pile of near-identical
 # tabs is indistinguishable from a mess.
-#   tmux forbids . and : in a session name, so the origin is sanitised rather than
-# trusted; a worker called `api.2` would otherwise fail to create with a parse error.
-safe="$(printf '%s' "${FROM:-tab}" | tr '.:' '__')"
-[ "$KIND" = term ] && NAME="_term-$safe" || NAME="_edit-$safe"
+NAME="$(tab_name "$KIND" "$FROM")"
 
 if ! T has-session -t "=$NAME" 2>/dev/null; then
   if [ "$KIND" = edit ]; then

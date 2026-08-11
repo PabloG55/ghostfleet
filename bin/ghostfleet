@@ -529,7 +529,14 @@ while true; do
         fi ;;
       project${US}*) set_project "${sel#project${US}}" ;;
       sessions${US}*) set_project "${sel#sessions${US}}"; GOTO=grid ;;   # ^S: straight to the grid
-      stackfor${US}*) set_project "${sel#stackfor${US}}"; GOTO=stack ;;  # ^T from Projects
+      stackfor${US}*) set_project "${sel#stackfor${US}}"; GOTO=stack ;;  # ^X from Projects
+      tabfor${US}*)                                     # ^T / ^N from Projects
+        _tf="${sel#tabfor${US}}"; _tk="${_tf#*${US}}"; _tf="${_tf%%${US}*}"
+        # A short record (no kind) would leave _tk holding the whole project name —
+        # `${x#*$US}` on a string WITHOUT the separator returns it unchanged. Check for
+        # the KIND, not for emptiness.
+        case "$_tk" in term|edit) ;; *) _tk=term ;; esac
+        set_project "$_tf"; GOTO="tab:$_tk" ;;
       jump*) take_jump "$sel" || true ;;               # ^F chord from the Projects screen
 
     esac
@@ -539,7 +546,7 @@ while true; do
   # LEVEL 1 — Master Claude (⏎ on a project lands straight here). From master:
   #   C-s        -> the sessions grid; leaving the grid returns here to master
   #   ` / C-a g  -> back to the Projects picker
-  # ^T from Projects: open the stack for that project's profile without going
+  # ^X from Projects: open the stack for that project's profile without going
   # through master or the grid. The stack is CROSS-project, not a level of this one,
   # so leaving it returns to where it was opened from — Projects.
   if [ "$GOTO" = "stack" ]; then
@@ -547,6 +554,25 @@ while true; do
     LAST_PROJECT="$PROJECT"; PROJECT=""
     continue
   fi
+  # ^T / ^N from Projects: a terminal (or the editor) at that project's ROOT, without
+  # booting its master — you often want a shell in a repo, not a Claude session in it.
+  #   -f "$CONF" matters on a project you have never entered: this call is then the one
+  # that CREATES the tmux server, and a server born without the fleet's config has none
+  # of the bindings, so ` would not bring you back out of the tab.
+  #   The name comes from fleet-tab itself rather than being rebuilt here: we have to
+  # attach to a session that does not exist yet, and a second copy of the naming rule is
+  # a name that drifts — you would attach to nothing and the screen would just sit there.
+  case "$GOTO" in tab:*)
+    _tk="${GOTO#tab:}"; GOTO=""
+    _tn="$("$BIN_DIR/fleet-tab" name "$_tk" "$PROJECT" 2>/dev/null)"
+    "$BIN_DIR/fleet-tab" "$_tk" "$SOCK" "$PROJECT_ROOT" "$PROJECT" -f "$CONF" >/dev/null 2>&1
+    tm_wire
+    if [ -n "$_tn" ] && TM has-session -t "=$_tn" 2>/dev/null; then
+      _loading "opening $_tn"; TM attach -t "$_tn" 2>/dev/null || true; _clear
+    fi
+    LAST_PROJECT="$PROJECT"; PROJECT=""
+    continue ;;
+  esac
   # ^S from Projects (and the Ctrl-f grid/session jumps) opens the grid WITHOUT
   # starting master first. Backing out of it still lands on MASTER, not Projects:
   # the levels are Projects → master → grid → session, and one `back` steps up

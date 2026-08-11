@@ -2090,12 +2090,23 @@ function onKeyProjects(key) {
     const it = pItems[pSel];
     if (it?.project) return finish(`sessions${US}${it.project.name}`);
   }
-  // ^T -> the stack, from here too. The stack lists every project's sessions, so it
+  // ^X -> the stack, from here too. The stack lists every project's sessions, so it
   // doesn't matter which card is selected — but it still has to be opened through a
   // project, because stack.tsv lives in that project's PROFILE dir.
-  else if (key === '\x14') {
+  //   It was ^T until tabs took that key. This screen had its OWN copy of the binding,
+  // which is how ^T went on opening the stack here long after the session grid and tmux
+  // had both moved on — the same chord meaning two different things one screen apart.
+  else if (key === '\x18') {
     const it = pItems[pSel] || pItems.find(x => x.project);
     if (it?.project) return finish(`stackfor${US}${it.project.name}`);
+  }
+  // ^T / ^N -> a terminal or the editor at the SELECTED PROJECT'S ROOT, without booting
+  // its master first. Opened by the loop rather than here: this screen has no socket for
+  // that project yet (it may never have been entered), and the server has to come up
+  // with the fleet's tmux config or the tab would have none of the bindings.
+  else if (key === '\x14' || key === '\x0e') {
+    const it = pItems[pSel] || pItems.find(x => x.project);
+    if (it?.project) return finish(`tabfor${US}${it.project.name}${US}${key === '\x14' ? 'term' : 'edit'}`);
   }
   else if (key === ',') { pSettings = true; pSetSel = 0; }   // open the settings page
   else if (key === '\r' || key === '\n') {
