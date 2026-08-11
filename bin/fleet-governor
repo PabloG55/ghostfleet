@@ -78,8 +78,17 @@ notify() {
 #   - it must never be PARKED for a Claude reading. It isn't spending that account, so
 #     freezing it buys no budget back — it just silently stops work.
 # Absent adapter -> treated as claude, which is the pre-adapter behaviour.
+# A TAB IS NOT A WORKER. fleet-tab opens terminals and editors as sessions on this very
+# socket (_term-* / _edit-*) — deliberately, so they can be addressed by name — but they
+# run a shell, not an agent. The default below is PERMISSIVE (unknown agent -> assume
+# metered), so without this they would be swept in: the governor would scrape a shell
+# prompt for a usage %, find none, and report the fleet as blind — then park your
+# terminal to reclaim tokens it never spent.
+is_tab() { case "$1" in _term-*|_edit-*) return 0 ;; *) return 1 ;; esac; }
+
 meterable() {
   local a=""
+  is_tab "$1" && return 1
   command -v fleet-agent >/dev/null 2>&1 || return 0
   a="$(fleet-agent of "$1" -s "$SOCK" 2>/dev/null)"
   [ -n "$a" ] || return 0

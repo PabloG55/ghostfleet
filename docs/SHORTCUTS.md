@@ -29,6 +29,32 @@ Two separate key-handling systems, and it matters which one you're in:
 | `Ctrl-a s` | same as `Ctrl-s`, prefixed (fallback) | README |
 | `Ctrl-p` (no prefix) | drops a `.goto=projects` marker and detaches → **straight to Projects**, from any session (master or worker) | [CODE] not in the README |
 | `Ctrl-a p` | same as `Ctrl-p`, prefixed | [CODE] |
+| `Ctrl-t` (no prefix) or `Ctrl-a t` | **terminal tab** on this session's own folder — a login shell in `#{pane_current_path}`, so it follows you if you've cd'd inside the repo | [CODE] `bin/fleet-tab` |
+| `Ctrl-n` (no prefix) or `Ctrl-a n` | **editor tab** on the same folder — `$EDITOR` (default `nvim .`); override with `CLAUDE_FLEET_EDITOR` | [CODE] `bin/fleet-tab` |
+| `Ctrl-x` (no prefix) or `Ctrl-a x` | the **stack** screen. It lived on `Ctrl-t` until tabs took that key | [CODE] |
+
+### Tabs (`Ctrl-t` / `Ctrl-n`)
+
+A tab is **another session on the same fleet socket**, named `_term-<session>` /
+`_edit-<session>` — not a tmux window. That is load-bearing twice over:
+
+- **Why not a window.** Every status reader here captures with `capture-pane -t
+  "$SESSION"`, which resolves to the session's *current* window. A shell window would
+  make the grid read the shell instead of the agent, the governor park a working
+  session, and `fleet-send` paste your prompt into the shell — silently.
+- **Why the `_`.** It marks them as not-workers (`is_tab` in `fleet-governor`,
+  and the refusal in `fleet-send`). It is an underscore and not a `+` because a leading
+  `+` is tmux target syntax for "next session" — see CLAUDE.md.
+
+Unlike every other chord in this table, tabs **do not detach**: they're on the same
+server, so you land there instantly and `⇧←`/`⇧→` (or `Ctrl-s`) brings you back. One tab
+per kind per session, reused — pressing `Ctrl-t` twice returns you to the terminal you
+already have. They show up on the grid and in the cycle ring, which is how you get back
+out of one.
+
+`Ctrl-n` needs zellij's own `Ctrl-n` (resize mode) unbound, which `layouts/fleet.kdl`
+now does — but **zellij only reads keybinds when a session is created**, so an already
+open fleet keeps swallowing it until you start a new zellij session.
 | `S-Right` / `S-Left` (no prefix) | **step to the next/previous session** in this fleet's ring (master first, then workers, wraps both ends) — a pure `switch-client`, the control plane is never involved, so it's instant with no redraw | [UPSTREAM] `bin/fleet-cycle` |
 | `Ctrl-a Right` / `Ctrl-a Left` | same as `S-Right`/`S-Left`, prefixed (fallback) | [UPSTREAM] |
 | `Ctrl-f` (no prefix) or `Ctrl-a f` | opens the **jump table** (`cfjump`) — see below | README (summarized), [CODE] (full detail) |

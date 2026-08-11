@@ -103,5 +103,12 @@ prefer proof over assertion:
   prompt" has to be armed by the `UserPromptSubmit` that actually starts a turn — the
   version that just took the next Stop answered with a stranger's work and consumed the
   request, which then looked like the relay had never fired at all.
+- **A session NAME can be tmux target syntax.** Tabs were `+term-<session>` until it turned
+  out a leading `+` means "the next session". The half that works is what hides it:
+  `has-session -t '=+term-api-2'` says yes and `switch-client` goes there, so the feature
+  demos fine — while `display-message -t '+term-api-2'` answers for a *different* session
+  and `capture-pane` reads that other pane. Every status reader here targets a bare
+  `-t "$name"`, so the fleet reads the wrong pane and says nothing. Prefix with `_`, and
+  when you invent a name, check it against a target-resolving command, not `has-session`.
 - **macOS-only calls need a guard**: `stat -f`, `date -r`, `osascript`, `caffeinate`. Linux
   and WSL are supported.

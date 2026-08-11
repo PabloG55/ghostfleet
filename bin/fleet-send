@@ -61,6 +61,14 @@ MSG="$*"
 [ -n "$MSG" ]     || { echo "fleet-send: empty prompt" >&2; exit 1; }
 tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
+# A TAB IS NOT AN AGENT. fleet-tab's _term-*/_edit-* sessions live on this same socket
+# and run a shell, so a send would type the prompt at a shell prompt and press Enter —
+# the fleet would execute it, and the "answer" would never come because nothing here
+# is waiting for a Stop. Refuse by name; there is no pane signal that could tell a
+# shell from an agent reliably enough to catch this later.
+case "$SESSION" in
+  _term-*|_edit-*) echo "fleet-send: '$SESSION' is a tab (a shell), not an agent — it cannot be prompted" >&2; exit 1 ;;
+esac
 
 # --- the reply address ---------------------------------------------------------
 # WHY A MARKER RATHER THAN JUST TELLING THE TARGET TO ANSWER: you CAN put a return

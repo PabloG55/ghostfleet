@@ -378,7 +378,7 @@ grid_loop() {
         # ACTUALLY ended up, not on the card we happened to attach three sessions ago.
         gc="$(cat "$gcur" 2>/dev/null)"; rm -f "$gcur" 2>/dev/null
         [ -n "$gc" ] && [ "$gc" != master ] && last="$gc"
-        if [ "$gv" = stack ]; then GRID_EXIT=stack; return; fi   # C-t inside a chat
+        if [ "$gv" = stack ]; then GRID_EXIT=stack; return; fi   # C-x inside a chat
         if [ "$gv" = projects ]; then GRID_EXIT=projects; return; fi
         if take_jump "$gv"; then GRID_EXIT=jump; return; fi ;;
       new${US}*)
@@ -556,7 +556,7 @@ while true; do
     GOTO=""
     ensure_governor              # normally done by enter_master, which we skipped
     grid_loop
-    [ "$GRID_EXIT" = "stack" ] && { stack_loop; continue; }   # C-t from a chat
+    [ "$GRID_EXIT" = "stack" ] && { stack_loop; continue; }   # C-x from a chat
     [ "$GRID_EXIT" = "jump" ] && continue     # jumped to another project's grid
     [ "$GRID_EXIT" = "projects" ] && { LAST_PROJECT="$PROJECT"; PROJECT=""; }
     continue                                  # PROJECT still set -> master, next pass
@@ -566,14 +566,14 @@ while true; do
   enter_master
   if take_jump "$MASTER_GOTO"; then continue          # C-f <digit> from master
   elif [ "$MASTER_GOTO" = "stack" ]; then
-    # C-t at the master session. Returning from the stack lands back on master,
+    # C-x at the master session. Returning from the stack lands back on master,
     # exactly as returning from the grid does.
     stack_loop
   elif [ "$MASTER_GOTO" = "grid" ]; then
     grid_loop
     # ^P in the grid -> up to Projects instead of back into master
     if [ "$GRID_EXIT" = "projects" ]; then LAST_PROJECT="$PROJECT"; PROJECT=""; fi
-    [ "$GRID_EXIT" = "stack" ] && { stack_loop; continue; }   # C-t from a chat
+    [ "$GRID_EXIT" = "stack" ] && { stack_loop; continue; }   # C-x from a chat
     [ "$GRID_EXIT" = "jump" ] && continue             # C-f <digit> from a chat
   else
     LAST_PROJECT="$PROJECT"   # remember it so the Projects picker re-selects it

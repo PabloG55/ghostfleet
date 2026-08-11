@@ -1486,6 +1486,83 @@ else
   skip "stack window" "tmux not available"
 fi
 
+# ── 4d. tabs: a terminal / editor on the session's own folder ────────────────
+# C-t and C-n open a tab; C-x is where the stack screen moved to make room.
+#
+# A tab is a SESSION, never a window, and that is not a style choice: every status
+# reader here captures with `capture-pane -t "$SESSION"`, which resolves to the
+# session's CURRENT window. A shell window would make the grid read the shell instead
+# of the agent — and `fleet-send` would paste your prompt into it.
+group "tabs (fleet-tab)"
+if command -v tmux >/dev/null 2>&1; then
+  TB="$(mktemp -d)"; mkdir -p "$TB/api-2" "$TB/api-3"
+  tmux -L cftabt kill-server 2>/dev/null
+  tmux -L cftabt new-session -d -s api-2 -c "$TB/api-2" 'sleep 60' 2>/dev/null
+  TSOCK="$(tmux -L cftabt display-message -p '#{socket_path}' 2>/dev/null)"
+  ft() { "$ROOT/bin/fleet-tab" "$@" >/dev/null 2>&1; }
+  nsess() { tmux -L cftabt list-sessions -F '#{session_name}' 2>/dev/null | grep -c "$1" || true; }
+
+  ft term "$TSOCK" "$TB/api-2" api-2
+  is "a term tab appears"             "1" "$(nsess '^_term-api-2$')"
+  # pwd -P on BOTH sides: mktemp hands back /var/folders/…, tmux reports the resolved
+  # /private/var/folders/… — the same /tmp-is-a-symlink trap that already cost this repo
+  # a config key nothing could find.
+  is "...on the folder it was asked for" "$(cd "$TB/api-2" && pwd -P)" \
+     "$(tmux -L cftabt display-message -p -t _term-api-2 '#{pane_current_path}' 2>/dev/null)"
+  # THE NAME MUST BE TARGET-RESOLVABLE. It was `+term-…` first, and a leading + means
+  # "next session" to tmux: has-session and switch-client both still worked, so it
+  # demoed fine, while display-message/capture-pane silently answered for ANOTHER
+  # session. Assert the name resolves to ITSELF — has-session cannot catch this.
+  is "...and the name resolves to itself" "_term-api-2" \
+     "$(tmux -L cftabt display-message -p -t _term-api-2 '#{session_name}' 2>/dev/null)"
+  # the bug, still reproducible, so the assertion above is known to have teeth
+  tmux -L cftabt new-session -d -s '+term-api-2' -c "$TB/api-3" 'sleep 60' 2>/dev/null
+  is "...unlike a + name, which resolves elsewhere" "0" \
+     "$(tmux -L cftabt display-message -p -t '+term-api-2' '#{session_name}' 2>/dev/null \
+        | grep -c '^+term-api-2$' || true)"
+
+  ft term "$TSOCK" "$TB/api-2" api-2
+  is "pressing it twice REUSES the tab" "1" "$(nsess '^_term-api-2$')"
+  ft term "$TSOCK" "$TB/api-3" api-3
+  is "another session gets its own"     "1" "$(nsess '^_term-api-3$')"
+  ft term "$TSOCK" "$TB/api-2" "api.2"
+  is "a dot in the name can't break it" "1" "$(nsess '^_term-api_2$')"
+
+  # is_tab decides what the agent machinery leaves alone. Both directions, and the
+  # negative case is a REAL worktree name that contains "term" — a substring match
+  # would sweep it in and the governor would stop metering a live worker.
+  eval "$(sed -n '/^is_tab() {/p' "$ROOT/bin/fleet-governor")"
+  tab_says() { is_tab "$1" && echo tab || echo worker; }
+  is "_term-x is a tab"          "tab"    "$(tab_says _term-x)"
+  is "_edit-x is a tab"          "tab"    "$(tab_says _edit-x)"
+  is "a worker is not"           "worker" "$(tab_says api-2)"
+  is "nor is 'terminal-fix'"     "worker" "$(tab_says terminal-fix)"
+
+  # fleet-send into a shell would type the prompt at a prompt and press Enter.
+  st() { env -u TMUX "$ROOT/bin/fleet-send" -s cftabt "$1" hi 2>&1 | head -1; }
+  is "send to a tab is refused"  "1" "$(st _term-api-2 | grep -c 'is a tab' || true)"
+  is "...but a worker still takes one" "0" "$(st api-2 | grep -c 'is a tab' || true)"
+  tmux -L cftabt kill-server 2>/dev/null; rm -rf "$TB"
+else
+  skip "tabs" "tmux not available"
+fi
+
+# The bindings themselves: C-t/C-n must reach fleet-tab, and the stack must have MOVED
+# off C-t rather than merely gained C-x — a config that binds both is the bug.
+group "tab bindings (real tmux server)"
+if command -v tmux >/dev/null 2>&1; then
+  tmux -L cftabk kill-server 2>/dev/null
+  tmux -L cftabk -f "$ROOT/tmux/cf.tmux.conf" new-session -d -s api-2 'sleep 60' 2>/dev/null
+  rk() { tmux -L cftabk list-keys -T root 2>/dev/null | grep -E "^bind-key +-T root +$1 " || true; }
+  is "C-t opens a term tab"      "1" "$(rk C-t | grep -c 'fleet-tab term' || true)"
+  is "...and no longer the stack" "0" "$(rk C-t | grep -c 'goto' || true)"
+  is "C-n opens an edit tab"     "1" "$(rk C-n | grep -c 'fleet-tab edit' || true)"
+  is "C-x opens the stack"       "1" "$(rk C-x | grep -c 'printf stack' || true)"
+  tmux -L cftabk kill-server 2>/dev/null
+else
+  skip "tab bindings" "tmux not available"
+fi
+
 # ── 5. sleep inhibitor guards ────────────────────────────────────────────────
 # The mode has to survive a relaunch. An env var only applies to the process you
 # launched with it, so a persisted marker is the difference between "set it once" and

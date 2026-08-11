@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# fleet-tab term|edit <socket-path> <cwd> [from-session]
+#
+# Open a plain TAB — a terminal, or the editor — on a session's own folder. Bound to
+# C-t / C-n inside a session (tmux/cf.tmux.conf). You are attached to a worker, you
+# want a shell in ITS worktree — not master's, not wherever the last terminal happened
+# to be — and you want it one keystroke away.
+#
+# Takes the socket PATH and drives `tmux -S`, like fleet-cycle: run-shell cannot see
+# the fleet's env, so anything that trusts $CLAUDE_FLEET_SOCK here would be reading a
+# variable the tmux server never had.
+#
+# WHY A SESSION AND NOT A WINDOW. A tmux window is the obvious "tab", and it is the
+# wrong answer here: every status reader in this repo captures with
+# `capture-pane -t "$SESSION"`, which resolves to the session's CURRENT window. Open a
+# shell window and the whole fleet starts reading it instead of the agent — the grid
+# calls a working session idle, the governor parks it, and `fleet-send` PASTES YOUR
+# PROMPT INTO THE SHELL. Nothing errors; the prompt is simply gone. A separate session
+# is addressed by name, so none of that can happen — and it costs nothing, because the
+# tabs then land in the cycle ring and on the grid, which is how you get back out.
+#
+# THE _ PREFIX IS LOAD-BEARING. It is what tells the agent machinery these are not
+# workers (is_tab, in fleet-governor and fleet-send). Worker names track worktree
+# basenames — fleet-rename exists to keep "worktree basename == session name" true —
+# so a real worker cannot collide with one.
+#   It was `+` first, and `+` is a TMUX TARGET METACHARACTER: a leading + means "the
+# next session". `has-session -t '=+term-api-2'` still said yes, and switch-client still
+# went there, so it looked correct — but `display-message -t '+term-api-2'` answered for
+# a completely DIFFERENT session, and capture-pane with it read that other session's
+# pane. Every status reader in this repo targets a bare `-t "$name"`, so the fleet would
+# have been quietly reading the wrong pane. Measured both ways; `_` resolves to itself.
+set -uo pipefail
+
+KIND="${1:-}"; SOCK="${2:-}"; CWD="${3:-}"; FROM="${4:-}"
+case "$KIND" in term|edit) ;; *) echo "fleet-tab: usage: fleet-tab term|edit <socket-path> <cwd> [from]" >&2; exit 1 ;; esac
+[ -n "$SOCK" ] || { echo "fleet-tab: no socket path" >&2; exit 1; }
+T() { tmux -S "$SOCK" "$@"; }
+
+# Fall back to the caller's own cwd rather than refusing: a tab on the wrong-but-real
+# folder is still useful, a silent no-op from a keybinding is not.
+[ -d "${CWD:-}" ] || CWD="$PWD"
+[ -n "$FROM" ] || FROM="$(T display-message -p '#{session_name}' 2>/dev/null)"
+
+# One tab per kind per origin session, REUSED. Pressing C-t twice should put you back in
+# the terminal you already have, not deal you a second one — the same "reuse before
+# proliferate" rule the worktrees follow, for the same reason: a pile of near-identical
+# tabs is indistinguishable from a mess.
+#   tmux forbids . and : in a session name, so the origin is sanitised rather than
+# trusted; a worker called `api.2` would otherwise fail to create with a parse error.
+safe="$(printf '%s' "${FROM:-tab}" | tr '.:' '__')"
+[ "$KIND" = term ] && NAME="_term-$safe" || NAME="_edit-$safe"
+
+if ! T has-session -t "=$NAME" 2>/dev/null; then
+  if [ "$KIND" = edit ]; then
+    ED="${CLAUDE_FLEET_EDITOR:-${EDITOR:-nvim}}"
+    command -v "${ED%% *}" >/dev/null 2>&1 || {
+      T display-message "fleet-tab: '${ED%% *}' not found — set CLAUDE_FLEET_EDITOR" 2>/dev/null
+      exit 1; }
+    # `.` so it opens ON the folder (a file browser), not an empty buffer that gives no
+    # clue which worktree you landed in.
+    CMD="$ED ."
+  else
+    # A login shell, so it is the prompt you actually configured, not a bare sh.
+    CMD="${SHELL:-/bin/sh} -l"
+  fi
+  # No `exec agent-here`, and no CLAUDE_* env: a tab is NOT an agent. The event hook
+  # never fires for it, so it never registers as something that can be sent to, nudged,
+  # waited on, or counted as busy.
+  T new-session -d -s "$NAME" -c "$CWD" "$CMD" 2>/dev/null || {
+    T display-message "fleet-tab: could not open $NAME" 2>/dev/null; exit 1; }
+fi
+
+# Same server, so this is a direct switch — instant, no detach, control plane never
+# involved, exactly how fleet-cycle moves between sessions. With no client attached
+# (called from a script rather than a keybinding) there is nothing to move, so say what
+# was made instead of failing.
+T switch-client -t "=$NAME" 2>/dev/null || echo "$NAME"
