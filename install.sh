@@ -103,6 +103,7 @@ chmod +x "$FLEET_HOME"/hooks/*.sh "$FLEET_HOME"/bin/* 2>/dev/null || true
 
 # Everything below points at the STAGED runtime, never the repo.
 HOOK="$FLEET_HOME/hooks/fleet-event.sh"
+GUARD="$FLEET_HOME/hooks/fleet-guard.sh"
 
 mkdir -p "$BIN_DIR"
 CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read
@@ -181,11 +182,20 @@ wire_hooks() {
   tmp="$(mktemp)"
   # Hooks belong in settings.json; MCP does NOT (see register_mcp). Wire the hooks
   # and strip any stale ghostfleet MCP entry an older installer wrote here.
-  jq --arg hook "$HOOK" '
+  jq --arg hook "$HOOK" --arg guard "$GUARD" '
     def entry: [ { matcher: "", hooks: [ { type: "command", command: $hook } ] } ];
     .hooks = ((.hooks // {}) + {
       Notification: entry, Stop: entry, UserPromptSubmit: entry,
       SessionStart: entry, SessionEnd: entry })
+    # PreToolUse is SHARED GROUND — unlike the five above, other tools legitimately
+    # live here, so ours is APPENDED, never assigned over the top. Stanzas pointing at
+    # our guard are dropped first so re-installing (or changing the matcher) replaces
+    # rather than stacks up copies.
+    | .hooks.PreToolUse = (
+        [ (.hooks.PreToolUse // [])[]
+          | select([.hooks[]?.command] | index($guard) | not) ]
+        + [ { matcher: "EnterWorktree",
+              hooks: [ { type: "command", command: $guard } ] } ] )
     | (if .mcpServers then .mcpServers |= del(.["ghostfleet"]) else . end)
     | (if (.mcpServers // {}) == {} then del(.mcpServers) else . end)
   ' "$settings" > "$tmp" && mv "$tmp" "$settings"

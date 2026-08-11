@@ -67,7 +67,9 @@ The installer **stages the runtime** — it copies `bin/`, `hooks/`, `mcp/`, `sk
 `layouts/` out of the repo into `~/.local/libexec/ghostfleet` (override with `CLAUDE_FLEET_HOME`)
 — then symlinks the commands (`ghostfleet`, `claude-here`, `cf-sync`, and the `fleet-*` helpers)
 into `~/.local/bin` **pointing at the staged copy**; wires the status + notification hooks into
-every Claude config dir it finds (`~/.claude`, `~/.claude-*`, backing each up); **registers the
+every Claude config dir it finds (`~/.claude`, `~/.claude-*`, backing each up), plus a `PreToolUse`
+guard that stops Claude Code's built-in `EnterWorktree` from walking a fleet session off its own
+checkout (it is *appended* to `PreToolUse`, so hooks you already have there survive); **registers the
 fleet MCP server** into each config dir's `.claude.json` via `claude mcp add -s user` (Claude Code
 reads MCP from `.claude.json`/`.mcp.json`, *not* `settings.json`); installs the
 `ghostfleet-orchestrate` skill; and links the zellij layout. Re-run any time; it's idempotent.

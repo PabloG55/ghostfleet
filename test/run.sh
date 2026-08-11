@@ -940,6 +940,122 @@ else
   skip "worker nesting guard" "git missing"
 fi
 
+# ── 4a10b. the built-in EnterWorktree must not move a fleet session ──────────
+# Claude Code's own worktree tool CREATES the tree and RELOCATES THE CALLING SESSION
+# into it. Told "start a worktree and open a PR", a master reached for it: the worktree
+# appeared, master walked off its own checkout, and the thread the user was talking to
+# was suddenly somewhere else. It looks half-right, so it went unnoticed twice.
+# fleet-spawn's nesting guard can't catch it — fleet-spawn was never called.
+#
+# Both directions, and then some: a guard that blocked everything would "fix" this by
+# breaking plain Claude Code outside a fleet, by trapping an already-moved session with
+# no way back (ExitWorktree), and by refusing every other tool in the session.
+group "EnterWorktree is refused in a fleet"
+if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  GW="$(mktemp -d)"
+  git init -q -b main "$GW/repo" 2>/dev/null
+  git -C "$GW/repo" config user.email t@t; git -C "$GW/repo" config user.name t
+  : > "$GW/repo/f"; git -C "$GW/repo" add -A; git -C "$GW/repo" commit -qm init 2>/dev/null
+  git -C "$GW/repo" worktree add -q "$GW/wt-a" -b wt-a 2>/dev/null
+  # Start from a CLEAN env every time, then set only what the case is about. The suite
+  # itself usually runs inside a fleet, so an inherited $TMUX / $CLAUDE_FLEET_SOCK would
+  # make "allowed outside a fleet" pass or fail on where it ran, not on the code.
+  guard() { local json="$1"; shift
+    GOUT="$(printf '%s' "$json" | env -u TMUX -u CLAUDE_FLEET_SOCK \
+      -u CLAUDE_FLEET_ALLOW_BUILTIN_WORKTREE "$@" bash "$ROOT/hooks/fleet-guard.sh" 2>&1)"; GRC=$?; }
+  j() { printf '{"hook_event_name":"%s","tool_name":"%s","cwd":"%s"}' "$1" "$2" "$3"; }
+  has() { printf '%s' "$GOUT" | grep -c -- "$1" || true; }
+
+  guard "$(j PreToolUse EnterWorktree "$GW/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "blocked in a fleet (exit 2 = block)"  "2" "$GRC"
+  is "...and hands over fleet-spawn"        "1" "$(has 'fleet-spawn <name>')"
+  is "...and says it would MOVE this one"   "1" "$(has 'MOVE THIS SESSION')"
+
+  # A worker is a leaf: the answer there is re-branch in place, not spawn a worker.
+  guard "$(j PreToolUse EnterWorktree "$GW/wt-a")" CLAUDE_FLEET_SOCK=cf-x
+  is "blocked inside a linked worktree too" "2" "$GRC"
+  is "...and says re-branch where you are"  "1" "$(has 'checkout -B')"
+  is "...and does NOT offer fleet-spawn"    "0" "$(has 'fleet-spawn <name>')"
+
+  # ── the directions that prove the guard isn't just "deny everything" ──
+  guard "$(j PreToolUse EnterWorktree "$GW/repo")"
+  is "allowed outside a fleet"              "0" "$GRC"
+  is "...and stays silent there"            ""  "$GOUT"
+
+  guard "$(j PreToolUse ExitWorktree "$GW/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "ExitWorktree is never blocked"        "0" "$GRC"
+
+  guard "$(j PreToolUse Bash "$GW/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "other tools pass through"             "0" "$GRC"
+
+  guard "$(j Stop EnterWorktree "$GW/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "only PreToolUse is inspected"         "0" "$GRC"
+
+  guard "$(j PreToolUse EnterWorktree "$GW/repo")" CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_ALLOW_BUILTIN_WORKTREE=1
+  is "the override is a real escape hatch"  "0" "$GRC"
+
+  # The installer shares PreToolUse with whatever the user already had there.
+  WIRED="$(printf '%s' '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/mine"}]}]}}' \
+    | jq -c --arg guard /G '.hooks.PreToolUse = ([ (.hooks.PreToolUse // [])[]
+          | select([.hooks[]?.command] | index($guard) | not) ]
+        + [ { matcher: "EnterWorktree", hooks: [ { type: "command", command: $guard } ] } ])')"
+  is "wiring keeps a foreign PreToolUse hook" "1" "$(printf '%s' "$WIRED" | grep -c '/mine' || true)"
+  RE="$(printf '%s' "$WIRED" | jq -c --arg guard /G '.hooks.PreToolUse = ([ (.hooks.PreToolUse // [])[]
+          | select([.hooks[]?.command] | index($guard) | not) ]
+        + [ { matcher: "EnterWorktree", hooks: [ { type: "command", command: $guard } ] } ])')"
+  is "...and re-installing does not stack up" "1" "$(printf '%s' "$RE" | grep -o '/G' | grep -c . || true)"
+  rm -rf "$GW"
+else
+  skip "EnterWorktree guard" "git or jq missing"
+fi
+
+# ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
+# They are git worktrees like any other, so a stale one lands in the free-list looking
+# clean and sessionless. fleet-spawn then shadows itself: it offers a tree you cannot
+# sensibly reuse AND refuses to make a new one until you pass --new. Both directions —
+# skipping every worktree would be the same bug wearing the opposite sign.
+group "free worktrees exclude Claude's own"
+if command -v git >/dev/null 2>&1; then
+  FW="$(mktemp -d)"
+  git init -q -b main "$FW/repo" 2>/dev/null
+  git -C "$FW/repo" config user.email t@t; git -C "$FW/repo" config user.name t
+  : > "$FW/repo/f"; git -C "$FW/repo" add -A; git -C "$FW/repo" commit -qm init 2>/dev/null
+  git -C "$FW/repo" worktree add -q "$FW/repo/.claude/worktrees/aw" -b aw 2>/dev/null
+  eval "$(sed -n '/^free_worktrees() {/,/^}/p' "$ROOT/bin/fleet-spawn")"
+  GITROOT="$FW/repo"; sess_for() { :; }          # nothing occupied anywhere
+  is "a .claude/worktrees tree is not free" "0" "$(free_worktrees | grep -c aw || true)"
+  git -C "$FW/repo" worktree add -q "$FW/sib" -b sib 2>/dev/null
+  is "a real sibling worktree still is"     "1" "$(free_worktrees | grep -c '^sib ' || true)"
+  rm -rf "$FW"
+else
+  skip "free-worktree exclusion" "git missing"
+fi
+
+# ── 4a10d. fleet-clean can actually reclaim what it offers to ────────────────
+# Claude LOCKS its worktrees, and the lock outlives the session that set it: plain
+# `worktree remove` AND `remove --force` both refuse a locked tree, and `worktree prune`
+# skips it. So --agents promised a sweep it could not perform, and the leftover sat
+# there forever. Both directions: the default must still keep its hands off.
+group "fleet-clean and Claude's locked worktrees"
+if command -v git >/dev/null 2>&1; then
+  FC="$(mktemp -d)"
+  git init -q -b main "$FC/repo" 2>/dev/null
+  git -C "$FC/repo" config user.email t@t; git -C "$FC/repo" config user.name t
+  : > "$FC/repo/f"; git -C "$FC/repo" add -A; git -C "$FC/repo" commit -qm init 2>/dev/null
+  git -C "$FC/repo" worktree add -q "$FC/repo/.claude/worktrees/aw" -b aw 2>/dev/null
+  git -C "$FC/repo" worktree lock "$FC/repo/.claude/worktrees/aw" --reason "claude session (pid 99999)" 2>/dev/null
+  clean_out() { ( cd "$FC/repo" && env -u TMUX CLAUDE_FLEET_SOCK=cf-t "$ROOT/bin/fleet-clean" "$@" 2>&1 ); }
+  d="$(clean_out)"; a="$(clean_out --agents)"
+  is "default keeps Claude's worktree"   "1" "$(printf '%s' "$d" | grep -c "keep aw" || true)"
+  is "...and plans no removal"           "0" "$(printf '%s' "$d" | grep -c "worktree remove" || true)"
+  is "--agents plans to remove it"       "1" "$(printf '%s' "$a" | grep -c "remove aw" || true)"
+  is "...with the -f -f a lock requires" "1" "$(printf '%s' "$a" | grep -c "remove --force --force" || true)"
+  is "...and is still a DRY RUN"         "1" "$([ -d "$FC/repo/.claude/worktrees/aw" ] && echo 1 || echo 0)"
+  rm -rf "$FC"
+else
+  skip "fleet-clean locked worktrees" "git missing"
+fi
+
 # ── 4a11. a session's display label ──────────────────────────────────────────
 # The card can be titled something a human chose ("PR 964 doc verify") while the tmux
 # session keeps its name. That separation is the whole point: fleet-rename exists to keep
@@ -1480,6 +1596,9 @@ for f in "$ROOT"/bin/*; do
   case "$f" in *.mjs) node --check "$f" >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error" ;;
                    *) bash -n "$f"      >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error" ;;
   esac
+done
+for f in "$ROOT"/hooks/*.sh; do
+  bash -n "$f" >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error"
 done
 node --check "$ROOT/mcp/fleet-mcp.mjs" >/dev/null 2>&1 && ok "fleet-mcp.mjs parses" || bad "fleet-mcp.mjs parses" "ok" "syntax error"
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
