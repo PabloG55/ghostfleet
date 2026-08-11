@@ -150,6 +150,8 @@ control plane).
 | `↑↓←→` / `hjkl` | move |
 | `⏎` | open that project's **Master Claude** |
 | `Ctrl-s` | skip master, go **straight to that project's grid** |
+| `Ctrl-t` / `Ctrl-n` | a **terminal / editor** at that project's root, without booting its master first |
+| `Ctrl-x` | that project's **stack** screen |
 | `+ add project` → `⏎` | browse to a root folder that holds your checkouts/worktrees |
 | `x` | remove a project from the list (sessions + history untouched) |
 | digit `1`-`9` | jump straight to the project at that position |
@@ -165,7 +167,8 @@ control plane).
 | `n` | new session on a checkout — lands on a **naming screen** (edit or accept the suggested name), then resumes if that checkout already has a conversation |
 | `N` | same, but the conversation is **forced blank** |
 | `w` | **new worktree** — a fresh sibling checkout on its own branch, with a session started in it |
-| `t` | the **stack** — several sessions on screen at once, across projects (below) |
+| `t` / `Ctrl-x` | the **stack** — several sessions on screen at once, across projects (below) |
+| `Ctrl-t` / `Ctrl-n` | a **terminal / editor tab** on the selected card's folder (below) |
 | `x` | kill the session — or, on a `· FREE` card, **remove that worktree** (asks `y` to confirm) |
 | `,` then `l` | **label** the session — the card is titled whatever you type, the session keeps its name |
 | `q` / `` ` `` | back to master |
@@ -233,6 +236,33 @@ Membership persists in `$CLAUDE_FLEET_DIR/stack.tsv`, so the stack survives leav
 `Ctrl-a` then `g` (mnemonic **g**rid) detaches back a level — or `Ctrl-a d`. From **master**,
 `Ctrl-s` (or `Ctrl-a s`) opens the session grid instead. The session keeps running.
 (`Ctrl-a` is the tmux prefix; press it twice to send a literal `Ctrl-a` to Claude.)
+
+### Tabs — a terminal or an editor on the session's own folder
+
+| key | does |
+| --- | --- |
+| `Ctrl-t` | a **terminal** on this session's folder — a login shell in the pane's current path |
+| `Ctrl-n` | an **editor** on the same folder — `$EDITOR` (default `nvim .`), override with `CLAUDE_FLEET_EDITOR` |
+| `` ` `` | back to the session you opened the tab from |
+
+Attached to a worker, wanting a shell in *its* worktree used to mean detaching, finding the
+directory and `cd`-ing there. These work from the grid and the Projects screen too, where they
+act on the selected card's folder / the project's root — the same chord means the same thing on
+every screen.
+
+Unlike every other key here, a tab **does not detach**: it's another session on the same tmux
+server, so you land there instantly, and `` ` `` brings you back to where you opened it from
+rather than up to the grid. One tab per kind per session, reused — pressing `Ctrl-t` twice
+returns you to the terminal you already have.
+
+**A tab is a session, not a window, and it is not a card.** The session part is load-bearing:
+every status reader here captures with `capture-pane -t "$SESSION"`, which resolves to a
+session's *current window*, so a shell window would make the grid read the shell instead of the
+agent, the governor park a working session, and `fleet-send` paste your prompt into the shell.
+The not-a-card part is too — a card claims a *number*, so a terminal renumbered every session
+behind it and broke what `1`-`9`, `⇧←→` and `Ctrl-f <p> <s>` point at. So tabs are hidden from
+the grid, the ring and the numbering, and named `_term-…` / `_edit-…` so the agent machinery
+leaves them alone.
 
 ## Orchestrate: a lead session driving workers
 

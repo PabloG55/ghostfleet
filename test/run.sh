@@ -1640,6 +1640,51 @@ else
   skip "grid tab keys" "tmux or node missing"
 fi
 
+# THE PROJECTS SCREEN KEEPS ITS OWN COPY OF THESE KEYS. That is exactly how ^T went on
+# opening the stack there long after the session grid AND tmux had both moved to ^X —
+# one chord meaning two different things one screen apart, and nothing to notice it.
+# CLAUDE_FLEET_PROJECTS keeps this off the real registry: without it the screen reads
+# the developer's own projects and the test passes or fails on whose machine it is.
+group "Projects screen tab keys (real TUI)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  PK="$(mktemp -d)"; mkdir -p "$PK/repo"
+  printf 'demo\t%s\twork\n' "$PK/repo" > "$PK/projects"
+  pkey() {
+    rm -f "$PK/choice"; tmux -L cfpkout kill-server 2>/dev/null
+    tmux -L cfpkout new-session -d -x 200 -y 50 \
+      "CLAUDE_FLEET_PROJECTS='$PK/projects' node '$ROOT/bin/fleet-grid.mjs' - --screen projects > '$PK/choice' 2>/dev/null" 2>/dev/null
+    sleep 2
+    tmux -L cfpkout send-keys "$1" 2>/dev/null; sleep 2
+    tmux -L cfpkout kill-server 2>/dev/null
+    tr '\037' '|' < "$PK/choice" 2>/dev/null
+  }
+  is "^T asks for a term tab"  "tabfor|demo|term" "$(pkey C-t)"
+  is "^N asks for an editor"   "tabfor|demo|edit" "$(pkey C-n)"
+  is "^X is the stack here too" "stackfor|demo"   "$(pkey C-x)"
+  tmux -L cfpkout kill-server 2>/dev/null; rm -rf "$PK"
+else
+  skip "Projects screen tab keys" "tmux or node missing"
+fi
+
+# The name the control plane attaches to must be the name fleet-tab really creates. The
+# loop has to know it BEFORE the session exists, so it asks fleet-tab rather than
+# rebuilding the rule — a second copy drifts, and the failure is an attach to nothing.
+group "tab name is single-sourced"
+if command -v tmux >/dev/null 2>&1; then
+  NM="$(mktemp -d)"; tmux -L cfnm kill-server 2>/dev/null
+  is "name term master" "_term-master"  "$("$ROOT/bin/fleet-tab" name term master)"
+  is "name edit api.2"  "_edit-api_2"   "$("$ROOT/bin/fleet-tab" name edit 'api.2')"
+  # and it agrees with what actually gets created
+  "$ROOT/bin/fleet-tab" term cfnm "$NM" 'api.2' >/dev/null 2>&1
+  is "...and that is the session made" "1" \
+     "$(tmux -L cfnm has-session -t "=$("$ROOT/bin/fleet-tab" name term 'api.2')" 2>/dev/null && echo 1 || echo 0)"
+  is "ghostfleet asks for the name"    "1" \
+     "$(grep -c 'fleet-tab\" name' "$ROOT/bin/ghostfleet" || true)"
+  tmux -L cfnm kill-server 2>/dev/null; rm -rf "$NM"
+else
+  skip "tab name single-sourced" "tmux not available"
+fi
+
 # ── 5. sleep inhibitor guards ────────────────────────────────────────────────
 # The mode has to survive a relaunch. An env var only applies to the process you
 # launched with it, so a persisted marker is the difference between "set it once" and
