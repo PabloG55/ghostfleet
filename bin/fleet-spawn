@@ -165,6 +165,12 @@ free_worktrees() {                     # "<basename> (<branch>, clean)" per free
   ' | while IFS=$'\t' read -r wt br; do
         [ -n "$wt" ] || continue
         [ "$first" = 1 ] && { first=0; continue; }                          # skip main checkout
+        # NOT OURS TO REUSE: Claude Code's own trees (the Agent tool's isolation:worktree,
+        # and EnterWorktree's <repo>/.claude/worktrees/<name>) are git worktrees like any
+        # other, so they land here looking clean and sessionless — i.e. "free". A stale one
+        # then shadows spawn completely: it offers a tree you cannot sensibly reuse AND
+        # refuses to create a new one until you pass --new. Claude owns these; skip them.
+        case "$wt" in */.claude/worktrees/*) continue ;; esac
         [ -z "$(sess_for "$wt")" ] || continue                              # occupied
         [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || continue # dirty -> not free
         printf '%s (%s, clean)\n' "${wt##*/}" "$br"
