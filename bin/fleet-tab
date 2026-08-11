@@ -32,9 +32,33 @@
 set -uo pipefail
 
 KIND="${1:-}"; SOCK="${2:-}"; CWD="${3:-}"; FROM="${4:-}"
-case "$KIND" in term|edit) ;; *) echo "fleet-tab: usage: fleet-tab term|edit <socket-path> <cwd> [from]" >&2; exit 1 ;; esac
-[ -n "$SOCK" ] || { echo "fleet-tab: no socket path" >&2; exit 1; }
-T() { tmux -S "$SOCK" "$@"; }
+case "$KIND" in term|edit|back) ;; *) echo "fleet-tab: usage: fleet-tab term|edit <socket-path> <cwd> [from]  |  fleet-tab back <socket-path> <session> <client-tty>" >&2; exit 1 ;; esac
+[ -n "$SOCK" ] || { echo "fleet-tab: no socket" >&2; exit 1; }
+# A PATH or a NAME. tmux keybindings hand over #{socket_path} (absolute), while the grid
+# and anyone on the command line have only the `cf-<project>` name that -L takes. Telling
+# them apart by the slash beats making callers care which flag this wants.
+case "$SOCK" in /*) T() { tmux -S "$SOCK" "$@"; } ;; *) T() { tmux -L "$SOCK" "$@"; } ;; esac
+
+# `back` — the other half of a tab. Bound to ` (and C-a g) via if-shell, which only
+# routes here when @cf_tab_from is set, i.e. only from inside a tab.
+#   Falls back to detaching whenever the origin cannot be reached: closing the session
+# you opened the tab from is ordinary (finish the work, kill the worker, terminal still
+# open), and a switch-client at a dead name would leave the key doing nothing at all —
+# looking exactly like the binding is broken.
+if [ "$KIND" = back ]; then
+  SESS="${3:-}"; TTY="${4:-}"
+  from="$(T show-options -qv -t "$SESS" @cf_tab_from 2>/dev/null)"
+  if [ -n "$from" ] && T has-session -t "=$from" 2>/dev/null; then
+    # Same breadcrumb fleet-cycle leaves, for the same reason: the control plane
+    # attached you to ONE session and cannot see that you walked off it. Without this,
+    # backing out later restores the grid's cursor to the tab you attached through —
+    # which has no card — instead of the session you actually ended up in.
+    case "$SOCK" in /*) printf '%s' "$from" > "$SOCK.cur" 2>/dev/null ;; esac
+    T switch-client ${TTY:+-c "$TTY"} -t "=$from" 2>/dev/null && exit 0
+  fi
+  T detach-client ${TTY:+-t "$TTY"} 2>/dev/null
+  exit 0
+fi
 
 # Fall back to the caller's own cwd rather than refusing: a tab on the wrong-but-real
 # folder is still useful, a silent no-op from a keybinding is not.
@@ -68,6 +92,27 @@ if ! T has-session -t "=$NAME" 2>/dev/null; then
   # waited on, or counted as busy.
   T new-session -d -s "$NAME" -c "$CWD" "$CMD" 2>/dev/null || {
     T display-message "fleet-tab: could not open $NAME" 2>/dev/null; exit 1; }
+
+  # WHERE THIS TAB CAME FROM, recorded on the session itself. Two things read it:
+  # the status bar below, and the back key (tmux/cf.tmux.conf) — a tab goes back to the
+  # session it was opened from, not up to the grid.
+  #   Stored rather than derived from the name, because the name was SANITISED: a tab
+  # off `api.2` is `_term-api_2`, and stripping the prefix would send you back to a
+  # session called `api_2` that does not exist.
+  T set-option -t "$NAME" @cf_tab_from "$FROM" 2>/dev/null
+  T set-option -t "$NAME" @cf_tab_kind "$KIND" 2>/dev/null
+
+  # KEEP THE CONTEXT. Left to the global status-left a tab renders as a bare
+  # `● _term-master`, which is the one thing you already know and none of what you
+  # need — you cannot tell which project's fleet you are in, and there are several.
+  # Name the origin and the project instead, the way master's own bar does (see
+  # enter_master in bin/ghostfleet).
+  PROJ="${SOCK##*/}"; PROJ="${PROJ#cf-}"
+  [ "$KIND" = term ] && GLYPH="⌨" || GLYPH="✎"
+  T set-option -t "$NAME" status-left \
+    "#[bg=colour148,fg=colour16,bold] ● $GLYPH ${FROM:-tab} · $PROJ #[bg=colour236,fg=colour148,nobold]▏" 2>/dev/null
+  T set-option -t "$NAME" status-right \
+    "#[fg=colour252]#[bold]\`#[fg=colour246]#[nobold] back to #[fg=colour148]#[bold]${FROM:-the session}#[fg=colour246]#[nobold]  ·  #[fg=colour252]#[bold]⇧←→#[fg=colour246]#[nobold] cycle  ·  #[fg=colour252]#[bold]Ctrl-s#[fg=colour246]#[nobold] sessions " 2>/dev/null
 fi
 
 # Same server, so this is a direct switch — instant, no detach, control plane never

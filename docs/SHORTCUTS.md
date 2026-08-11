@@ -47,10 +47,24 @@ A tab is **another session on the same fleet socket**, named `_term-<session>` /
   `+` is tmux target syntax for "next session" — see CLAUDE.md.
 
 Unlike every other chord in this table, tabs **do not detach**: they're on the same
-server, so you land there instantly and `⇧←`/`⇧→` (or `Ctrl-s`) brings you back. One tab
-per kind per session, reused — pressing `Ctrl-t` twice returns you to the terminal you
-already have. They show up on the grid and in the cycle ring, which is how you get back
-out of one.
+server, so you land there instantly. One tab per kind per session, reused — pressing
+`Ctrl-t` twice returns you to the terminal you already have.
+
+**Back from a tab goes to the session you came from**, not up to the grid — a tab is
+opened *out of* a chat, so detaching would be one level further than you asked for.
+`fleet-tab` records the origin on the tab session (`@cf_tab_from`) and the back key
+branches on it, so every other session keeps the plain detach it always had. If the
+origin has since been closed, back falls through to a detach rather than leaving the key
+doing nothing.
+
+**A tab is not a card.** It's a real session — that's what stops the fleet reading it as
+an agent pane — but it's hidden from the grid, the cycle ring and the card numbering.
+It has to be: a card claims a *number*, so a terminal renumbered every session behind it,
+and because a tab shares its origin's cwd the transcript lookup handed it the origin's
+last message — a terminal card reading "✓ ready" over work it had no part in.
+
+Its status bar names the origin and the project (`● ⌨ master · ghostfleet`) rather than
+the bare session name, which is the one thing you already know.
 
 `Ctrl-n` needs zellij's own `Ctrl-n` (resize mode) unbound, which `layouts/fleet.kdl`
 now does — but **zellij only reads keybinds when a session is created**, so an already
@@ -155,7 +169,9 @@ explaining it's a keyboard-navigable mini file browser.
 | **digit `1`-`9`** | insta-jump: opens the card at that position directly | [CODE] not in the README |
 | **left click** (mouse) | selects and opens the card under the cursor | [CODE] |
 | `Ctrl-p` or `Q` (uppercase) | **jumps straight to Projects**, without going back through master first | [CODE] not in the README — `Q` is a fallback for when zellij still owns `Ctrl-p` |
-| **`t`** / **`T`** | opens the **stack** screen — several sessions on screen at once, across projects (see §3b) | [not upstream yet — `feat/stack-view`] |
+| **`t`** / **`T`** / `Ctrl-x` | opens the **stack** screen — several sessions on screen at once, across projects (see §3b) | [not upstream yet — `feat/stack-view`] |
+| `Ctrl-t` | **terminal tab** on the selected card's folder (the project root when the selection isn't a session). Creates or reuses it, then attaches — same key, same meaning, as inside a session | [CODE] `tabChoice` |
+| `Ctrl-n` | **editor tab** on the same folder | [CODE] `tabChoice` |
 | **`p`** (lowercase) | **pauses** the selected session (`fleet-pause`) — directly from the grid, no Bash needed | **[CODE] — not in the README at all** |
 | **`P`** (uppercase) | **resumes** the selected session (`fleet-resume`) — directly from the grid | **[CODE] — not in the README at all** |
 | `,` | opens **per-session** settings (individual auto-nudge toggle — see below, and now also rename) | [CODE] — the README only describes the Projects `,`, not that the grid has its own per-session one too |

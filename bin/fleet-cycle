@@ -33,8 +33,13 @@ T() { tmux -S "$SOCK" "$@"; }
 # `-t =master` is an EXACT match: a bare -t is a prefix match, so a worker called
 # "master-notes" would otherwise answer for master.
 ord="$(T show-options -gqv @cf_order 2>/dev/null)"
+# Tabs (fleet-tab's _term-*/_edit-*) are NOT in the ring, because they are not on the
+# grid. The ring's whole contract is that it walks the cards in card order; a session
+# with no card would make ⇧→ stop somewhere the numbering cannot name, and the ordered
+# list below appends anything @cf_order does not mention, so leaving them in would put
+# them there silently.
 ring="$( { T has-session -t '=master' 2>/dev/null && printf 'master\n'
-           T list-sessions -F '#{session_name}' 2>/dev/null | grep -v '^master$' \
+           T list-sessions -F '#{session_name}' 2>/dev/null | grep -vE '^master$|^_term-|^_edit-' \
              | awk -v ord="$ord" '
                  BEGIN { m = split(ord, want, ":") }
                  { live[$0] = 1; rest[++r] = $0 }
