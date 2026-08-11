@@ -74,6 +74,9 @@ esac
 # you opened the tab from is ordinary (finish the work, kill the worker, terminal still
 # open), and a switch-client at a dead name would leave the key doing nothing at all —
 # looking exactly like the binding is broken.
+#   That fallback is also what makes a tab opened from the PROJECTS screen behave: its
+# origin is the project NAME, which is never a session, so back detaches — landing you
+# on Projects, which is precisely where that tab was opened from.
 if [ "$KIND" = back ]; then
   SESS="${3:-}"; TTY="${4:-}"
   from="$(T show-options -qv -t "$SESS" @cf_tab_from 2>/dev/null)"
@@ -118,28 +121,34 @@ if ! T has-session -t "=$NAME" 2>/dev/null; then
   # waited on, or counted as busy.
   T new-session -d -s "$NAME" -c "$CWD" "$CMD" 2>/dev/null || {
     T display-message "fleet-tab: could not open $NAME" 2>/dev/null; exit 1; }
-
-  # WHERE THIS TAB CAME FROM, recorded on the session itself. Two things read it:
-  # the status bar below, and the back key (tmux/cf.tmux.conf) — a tab goes back to the
-  # session it was opened from, not up to the grid.
-  #   Stored rather than derived from the name, because the name was SANITISED: a tab
-  # off `api.2` is `_term-api_2`, and stripping the prefix would send you back to a
-  # session called `api_2` that does not exist.
-  T set-option -t "$NAME" @cf_tab_from "$FROM" 2>/dev/null
-  T set-option -t "$NAME" @cf_tab_kind "$KIND" 2>/dev/null
-
-  # KEEP THE CONTEXT. Left to the global status-left a tab renders as a bare
-  # `● _term-master`, which is the one thing you already know and none of what you
-  # need — you cannot tell which project's fleet you are in, and there are several.
-  # Name the origin and the project instead, the way master's own bar does (see
-  # enter_master in bin/ghostfleet).
-  PROJ="${SOCK##*/}"; PROJ="${PROJ#cf-}"
-  [ "$KIND" = term ] && GLYPH="⌨" || GLYPH="✎"
-  T set-option -t "$NAME" status-left \
-    "#[bg=colour148,fg=colour16,bold] ● $GLYPH ${FROM:-tab} · $PROJ #[bg=colour236,fg=colour148,nobold]▏" 2>/dev/null
-  T set-option -t "$NAME" status-right \
-    "#[fg=colour252]#[bold]\`#[fg=colour246]#[nobold] back to #[fg=colour148]#[bold]${FROM:-the session}#[fg=colour246]#[nobold]  ·  #[fg=colour252]#[bold]⇧←→#[fg=colour246]#[nobold] cycle  ·  #[fg=colour252]#[bold]Ctrl-s#[fg=colour246]#[nobold] sessions " 2>/dev/null
 fi
+
+# STAMPED ON EVERY CALL, NOT JUST ON CREATION. A tmux session keeps the options it was
+# born with, and a tab outlives the code that made it: the ones already open when this
+# grew a back key had no @cf_tab_from, so ` fell through to detach-client and threw you
+# up to Projects — from inside a feature whose whole point was to go back one step. It
+# looked like the binding had never landed, and no amount of re-installing fixed it,
+# because the option is written at creation and those tabs were already created.
+#   Doing it here instead makes the next C-t repair the tab in place. Idempotent, and it
+# costs four tmux calls on a keypress that was already spawning a process.
+#
+# WHERE THIS TAB CAME FROM. Two things read it: the status bar, and the back key in
+# tmux/cf.tmux.conf. Stored rather than derived from the name, because the name was
+# SANITISED — a tab off `api.2` is `_term-api_2`, and stripping the prefix would send you
+# back to a session called `api_2` that does not exist.
+T set-option -t "$NAME" @cf_tab_from "$FROM" 2>/dev/null
+T set-option -t "$NAME" @cf_tab_kind "$KIND" 2>/dev/null
+
+# KEEP THE CONTEXT. Left to the global status-left a tab renders as a bare
+# `● _term-master`, which is the one thing you already know and none of what you need —
+# you cannot tell which project's fleet you are in, and there are several. Name the
+# origin and the project instead, the way master's own bar does (see enter_master).
+PROJ="${SOCK##*/}"; PROJ="${PROJ#cf-}"
+[ "$KIND" = term ] && GLYPH="⌨" || GLYPH="✎"
+T set-option -t "$NAME" status-left \
+  "#[bg=colour148,fg=colour16,bold] ● $GLYPH ${FROM:-tab} · $PROJ #[bg=colour236,fg=colour148,nobold]▏" 2>/dev/null
+T set-option -t "$NAME" status-right \
+  "#[fg=colour252]#[bold]\`#[fg=colour246]#[nobold] back to #[fg=colour148]#[bold]${FROM:-the session}#[fg=colour246]#[nobold]  ·  #[fg=colour252]#[bold]⇧←→#[fg=colour246]#[nobold] cycle  ·  #[fg=colour252]#[bold]Ctrl-s#[fg=colour246]#[nobold] sessions " 2>/dev/null
 
 # Same server, so this is a direct switch — instant, no detach, control plane never
 # involved, exactly how fleet-cycle moves between sessions. With no client attached
