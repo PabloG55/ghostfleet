@@ -13,8 +13,8 @@
 #   • stale fleet state — dead *.governor.pid, orphan *.parked / *.sched markers.
 #
 # NEVER touches: the main checkout (master's home), a worktree with a live session,
-# one with uncommitted or unpushed work, or Claude's own .claude/worktrees/agent-*
-# trees (--agents opts in) — those are listed as "keep — <why>".
+# one with uncommitted or unpushed work, or anything under Claude's own
+# .claude/worktrees/ (--agents opts in) — those are listed as "keep — <why>".
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
@@ -24,7 +24,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -s)       SOCK="${2:?}"; shift 2 ;;
     --go)     GO=1; shift ;;
-    --agents) AGENTS=1; shift ;;      # also sweep Claude's own .claude/worktrees/agent-* trees
+    --agents) AGENTS=1; shift ;;      # also sweep Claude's own .claude/worktrees/ trees
     *) echo "fleet-clean: unknown arg $1" >&2; exit 1 ;;
   esac
 done
@@ -49,21 +49,35 @@ $panes
 EOF
 }
 
+# "yes" when git holds a lock on this worktree. Read from porcelain rather than by
+# guessing the .git/worktrees/<id>/locked path: <id> is not always the basename.
+locked_wt() { git -C "$GITROOT" worktree list --porcelain 2>/dev/null | awk -v w="$1" '
+  /^worktree /{ cur=substr($0,10) } /^locked/{ if(cur==w){print "yes"; exit} }'; }
+
 echo "worktrees:"
 first=1; removed=0; kept=0
 while IFS=$'\t' read -r wt br; do
   [ -n "$wt" ] || continue
   if [ "$first" = 1 ]; then first=0; continue; fi            # main checkout — never touch
   base="${wt##*/}"
-  # Claude Code's OWN subagent worktrees (Agent tool, isolation:worktree). A live
-  # subagent runs inside a Claude process, NOT a tmux session, so the no-live-session
-  # test can't see it — removing one could yank the rug from a running agent. Claude
-  # cleans these up itself. Skip unless explicitly asked.
+  # Claude Code's OWN worktrees — the Agent tool's isolation:worktree trees AND the ones
+  # EnterWorktree makes. A live subagent runs inside a Claude process, NOT a tmux session,
+  # so the no-live-session test can't see it; removing one could yank the rug from a
+  # running agent. Claude cleans up after itself. Skip the WHOLE directory, not just
+  # agent-*, unless explicitly asked.
+  #   Under --agents they still need one extra thing. Claude LOCKS these while a session
+  # holds them, and a lock outlives the session that set it: plain `worktree remove` and
+  # even `remove --force` refuse a locked tree, and `worktree prune` skips it. Only
+  # `remove -f -f` reclaims one. So --agents would have promised a sweep it could not
+  # perform. Safe to escalate here only because every gate below has already passed —
+  # no live session, clean tree, nothing unpushed, branch merged or gone.
+  rmflags=""
   case "$wt" in
     */.claude/worktrees/*)
       if [ "$AGENTS" != 1 ]; then
-        echo "  keep $base — Claude agent worktree (use --agents to include)"; kept=$((kept+1)); continue
-      fi ;;
+        echo "  keep $base — Claude's own worktree (use --agents to include)"; kept=$((kept+1)); continue
+      fi
+      [ -z "$(locked_wt "$wt")" ] || rmflags=" --force --force" ;;
   esac
   if [ ! -d "$wt" ]; then echo "  prune $base (dir gone)"; run "git -C '$GITROOT' worktree prune"; continue; fi
   s="$(sess_for "$wt")"
@@ -83,7 +97,7 @@ while IFS=$'\t' read -r wt br; do
   [ "$safe" = 1 ] || { echo "  keep $base — unpushed local commits on '$br'"; kept=$((kept+1)); continue; }
 
   echo "  remove $base ($br) — $why"
-  run "git -C '$GITROOT' worktree remove '$wt'"
+  run "git -C '$GITROOT' worktree remove$rmflags '$wt'"
   del=0; dwhy=""
   case "$br" in scratch/*) del=1; dwhy="scratch" ;; esac
   if [ "$del" = 0 ] && [ -n "$br" ] && [ "$br" != "$MAIN" ] && [ "$br" != "(detached)" ]; then

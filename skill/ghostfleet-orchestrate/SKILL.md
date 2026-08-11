@@ -1,6 +1,6 @@
 ---
 name: ghostfleet-orchestrate
-description: Coordinate, spawn, observe, unblock, and budget sibling Claude Code sessions in the same ghostfleet (parallel git worktrees). Use when you are a "lead"/master session dividing work across siblings — see which worktrees are free and REUSE one before creating another, dispatch a prompt to a worker, list the fleet, read a worker's output, check who needs you, unblock a worker stuck on a prompt, or park/resume workers to control cost. Triggers include "spin up a worker for X", "work on a worktree to fix Y", "which worktrees are free / reuse a worktree", "create a new session/worktree on branch Z", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "who needs me / check the inbox", "unblock/answer <session>", "pause/park <session>", "resume <session>". Runs the fleet-* commands (or the fleet_* MCP tools).
+description: Coordinate, spawn, observe, unblock, and budget sibling Claude Code sessions in the same ghostfleet (parallel git worktrees). Use when you are a "lead"/master session dividing work across siblings — see which worktrees are free and REUSE one before creating another, dispatch a prompt to a worker, list the fleet, read a worker's output, check who needs you, unblock a worker stuck on a prompt, or park/resume workers to control cost. USE THIS FOR ANY MENTION OF A WORKTREE IN A FLEET SESSION — "start a worktree", "make/create a worktree", "spin up a worktree", "worktree this", "start a wrotree" and every other typo of it. In a ghostfleet session that ALWAYS means a ghostfleet worktree (a sibling of the repo, run by a NEW session), never Claude Code's built-in EnterWorktree tool, which would move THIS session into <repo>/.claude/worktrees/ and abandon the thread the user is talking to. Other triggers: "spin up a worker for X", "work on a worktree to fix Y", "which worktrees are free / reuse a worktree", "create a new session/worktree on branch Z", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "who needs me / check the inbox", "unblock/answer <session>", "pause/park <session>", "resume <session>". Runs the fleet-* commands (or the fleet_* MCP tools).
 ---
 
 # Orchestrating sibling fleet sessions
@@ -21,6 +21,27 @@ lead starts blank, so **do not act from memory — read the real state first:**
   spun up for, and a **"Free to reuse"** line. This is your map.
 - **`fleet-inbox`** — what has needed you since you last looked (see below).
 - **`fleet-list`** — the live sessions and their status.
+
+## "Start a worktree" means fleet-spawn — never EnterWorktree
+
+Claude Code ships its own worktree tool, **`EnterWorktree`**, and in here it is always
+the wrong one. It creates the tree at `<repo>/.claude/worktrees/<name>` and then
+**relocates the calling session into it**. So a lead told *"start a worktree and open a
+PR"* that reaches for it gets a worktree — and silently walks off its own checkout. No
+new session, no new pane, and the thread the user was talking to is now somewhere else.
+It looks half-right, which is exactly why it slipped through twice before anyone noticed.
+
+| | ghostfleet | built-in `EnterWorktree` |
+|---|---|---|
+| where | sibling of the repo | `<repo>/.claude/worktrees/<name>` |
+| who works it | a **new** session; you keep yours | **this** session, moved |
+| gets | node_modules, dev-stack slot, manifest entry | none of it |
+
+A `PreToolUse` hook refuses `EnterWorktree` in a fleet session and points back here, so
+if you see that refusal it is not an obstacle to route around — reach for `fleet-spawn`
+(or just `git checkout -b` and do the work yourself, which needs no worktree at all).
+
+`ExitWorktree` is never blocked: a session that already got moved needs its way back.
 
 ## First: are you the lead, or are you already a worker?
 
