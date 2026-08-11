@@ -115,7 +115,8 @@ holding an assertion. [UPSTREAM]
 | `←→` / `h l` | move selection (column) | README |
 | `⇧h` `⇧j` `⇧k` `⇧l` (`H J K L`) | **reorders** the selected project in the list (persisted to the file) | README |
 | `⏎` | enters that project's **Master Claude** | README |
-| `Ctrl-t` | the **stack** screen, from anywhere — Projects, master, the grid, or inside a session |
+| `Ctrl-x` | the **stack** screen, from anywhere — Projects, master, the grid, or inside a session. (It was `Ctrl-t` everywhere until tabs took that key; the Projects screen kept its own copy of the binding, which is why it lagged behind the others for a while) |
+| `Ctrl-t` / `Ctrl-n` | a **terminal / editor tab at the selected project's root**, without booting its master first — you often want a shell in a repo, not a Claude session in it. Opens the project's tmux server if it has never been entered |
 | `Ctrl-s` | **straight to that project's grid**, skipping master | README |
 | `s` / `S` | schedule a message to that project's master | README |
 | `,` | opens the **settings** screen (see below — it has 2 columns, not 1) | README (incomplete) |
