@@ -244,6 +244,14 @@ Membership persists in `$CLAUDE_FLEET_DIR/stack.tsv`, so the stack survives leav
 | `Ctrl-t` | a **terminal** on this session's folder — a login shell in the pane's current path |
 | `Ctrl-n` | an **editor** on the same folder — `$EDITOR` (default `nvim .`), override with `CLAUDE_FLEET_EDITOR` |
 | `` ` `` | back to the session you opened the tab from |
+| **drag** | select **and copy to the clipboard** — no prefix, no modifier. Double-click a word, triple-click a line |
+
+Drag-to-copy needs code because `mouse on` means tmux captures the drag: the terminal's
+own selection never happens, and what you highlight lands in tmux's *private* buffer —
+looking selected while not being on your clipboard. `bin/fleet-copy` picks the clipboard
+tool at run time (`pbcopy` / `wl-copy` / `xclip` / `xsel` / `clip.exe`), and
+`set-clipboard on` also emits OSC 52 so a selection makes it back to your machine when
+the fleet is over SSH.
 
 Attached to a worker, wanting a shell in *its* worktree used to mean detaching, finding the
 directory and `cd`-ing there. These work from the grid and the Projects screen too, where they
