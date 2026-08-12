@@ -32,6 +32,11 @@
 #   ready_re    ERE matching "the input box exists, a prompt will land" — fleet-spawn
 #               waits for this before dispatching an initial prompt.
 #   hooks       yes = pushes need-you/done into the fleet event file by itself
+#   limit_re    ERE matching "this account is spent until the window rolls over".
+#               Empty/absent = this agent has no such signal. NEVER sufficient on its
+#               own — the caller must also see the session's own usage figure at 100%+,
+#               because a pane that merely QUOTES the notice looks identical otherwise.
+#   limit_re_js the same signal as a JavaScript regex source, for fleet-grid.mjs.
 #   budget      yes = its pane carries the shared-account usage % the governor meters
 #   resume      yes = re-opening a session continues that cwd's conversation
 #   verified    yes = the values above were checked against a running binary
@@ -144,6 +149,19 @@ agent_field() {
         busy_re_js) printf '%s' '^\s*[^A-Za-z0-9\s]?\s*[A-Za-z]+(?:…|\.\.\.)\s?\(|^\s*[^A-Za-z0-9\s]\s*[A-Za-z]+[^(`"]*(?:…|\.\.\.) \(\d+[ms][^)]*\)\s*$' ;;
         blocked_re) printf '' ;;   # need-you arrives via hooks, not the pane
         ready_re)   printf '%s' '❯|bypass permissions|for shortcuts' ;;
+        # THE ACCOUNT IS SPENT. Claude prints this and then does nothing until the window
+        # rolls over, but the pane still shows an input box — so every ready_re matches
+        # and the card says "✓ ready" over a session that cannot take a single prompt.
+        # Five of them read as a healthy fleet.
+        #   THE TEXT ALONE IS NOT THE SIGNAL. Measured on two real panes: a limited
+        # worker carries this line, and so does a session that merely QUOTED it — and the
+        # quote arrives with the same "⎿ " tool-result marker, because reading a limited
+        # pane with capture-pane renders its output as a tool result. Anchoring on the
+        # glyph would have called the reader limited too. The caller pairs this with the
+        # session's OWN 5h figure (>=100%), which is machine-painted per session and is
+        # the part prose cannot forge: really-limited read 102%, the quoter 15%.
+        limit_re)    printf '%s' "You've hit your (session|usage) limit" ;;
+        limit_re_js) printf '%s' "You've hit your (?:session|usage) limit" ;;
         hooks)      printf 'yes' ;;
         budget)     printf 'yes' ;;
         resume)     printf 'yes' ;;

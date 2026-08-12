@@ -1698,6 +1698,43 @@ else
   skip "tab name single-sourced" "tmux not available"
 fi
 
+# ── 4d2. "at limit" must not read as "ready" ─────────────────────────────────
+# Claude prints "You've hit your session limit · resets 10:20pm" and then takes no
+# prompt until the window rolls over — but it leaves the input box up, so every ready
+# signal still matches. Five limited workers rendered as "5 ready", which is the summary
+# line lying at exactly the moment you would act on it.
+#
+# THE TEXT ALONE CANNOT BE THE SIGNAL, and these two fixtures are why. Both are real
+# captures taken the same minute; both carry the notice; both carry it behind the same
+# "⎿ " tool-result marker — because reading a limited pane with capture-pane renders its
+# output as a tool result in the reader's own pane. Anchoring on the glyph, or on the
+# sentence, calls the READER limited too. The only thing that separates them is the
+# session's own 5h figure: 102% vs 15%.
+group "session limit is not ready"
+LIM_RE="$("$ROOT/bin/fleet-agent" field claude limit_re 2>/dev/null)"
+is "claude has a limit pattern"      "1"   "$([ -n "$LIM_RE" ] && echo 1 || echo 0)"
+is "...and other agents do not"      ""    "$("$ROOT/bin/fleet-agent" field opencode limit_re 2>/dev/null)"
+# the notice fires on BOTH — that is the point, it is not the discriminator
+is "notice matches the real one"     "1"   "$(matches "$LIM_RE" "$FIX/claude-limit-hit.txt")"
+is "notice matches the quote too"    "1"   "$(matches "$LIM_RE" "$FIX/claude-idle-quoting-limit.txt")"
+# ...and the usage figure is what tells them apart
+pct_in() { grep -oE '[^:0-9][0-9]+%\(' "$1" 2>/dev/null | grep -oE '[0-9]+' | tail -1; }
+is "the limited pane reads 102%"     "102" "$(pct_in "$FIX/claude-limit-hit.txt")"
+is "the quoting pane reads 15%"      "15"  "$(pct_in "$FIX/claude-idle-quoting-limit.txt")"
+# the conjunction the grid applies, spelled out in both directions
+lim() { [ "$(matches "$LIM_RE" "$1")" != 0 ] && [ "$(pct_in "$1")" -ge 100 ] 2>/dev/null && echo limit || echo ready; }
+is "really limited -> limit"         "limit" "$(lim "$FIX/claude-limit-hit.txt")"
+is "merely quoting  -> ready"        "ready" "$(lim "$FIX/claude-idle-quoting-limit.txt")"
+# and an ordinary idle pane, which mentions no limit at all, is untouched
+is "a plain idle pane -> ready"      "ready" "$(lim "$FIX/claude-idle.txt")"
+# the status must exist, be counted apart from ready, and never be folded into it
+is "the grid has a 'limit' status"   "1" "$(grep -ac '^  limit: ' "$ROOT/bin/fleet-grid.mjs" || true)"
+is "...counted apart from ready"     "1" "$(grep -ac "c.status === 'limit'" "$ROOT/bin/fleet-grid.mjs" || true)"
+# The stack picker reaches other projects' fleets through sessionStatuses, NOT tmuxList,
+# so hiding tabs from the grid did nothing for it — every terminal in every project
+# showed up there as an "idle" session you could stack.
+is "the stack picker drops tabs"     "1" "$(sed -n '/^function sessionStatuses/,/^}/p' "$ROOT/bin/fleet-grid.mjs" | grep -c 'isTab' || true)"
+
 # ── 4e. the governor parks on a fossil its own park created ──────────────────
 # A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
 # still shows the figure it was painting when it was parked. Skipping PARKED panes was
