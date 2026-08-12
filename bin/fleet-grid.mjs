@@ -56,7 +56,17 @@ const STATUS = {
   // it hasn't earned is the exact failure this whole layer exists to avoid.
   // The account is spent. NOT ready: the input box is still there and every ready
   // signal matches, so five limited workers rendered as a healthy fleet of five.
-  limit:      { label: '⏳ limit',     color: C.yellow },
+  //
+  // EVERY GLYPH HERE MUST BE ONE COLUMN WIDE. vis() counts CODE POINTS, not columns, so
+  // a 2-column character makes the line render wider than the arithmetic thinks and
+  // shoves every card to its right out of alignment. This label was ⏳ (U+23F3) for
+  // exactly one release: measured against a real terminal it is 2 columns, while ⧗ ⏸ ●
+  // ◆ ✓ ↻ are all 1. The suite pins this, because the failure is silent and cosmetic
+  // until you notice the whole grid has shifted.
+  limit:      { label: '⧗ limit',     color: C.yellow },
+  // Turn cut short, waiting on a human — a park does this, so a governor episode makes
+  // them in bulk. Also NOT ready, and for the same reason: the input box looks normal.
+  interrupted:{ label: '⚠ interrupted', color: C.red },
   unknown:    { label: '? unknown',   color: C.yellow },
 };
 
@@ -381,6 +391,21 @@ function paneBusy(sock, name) {
 // Fails CLOSED. A pane under ~100 columns drops the figure entirely (Claude truncates
 // its status line rather than wrapping), so the conjunction cannot be met and the
 // session keeps whatever status it had — a missed limit, never a fabricated one.
+// "The turn was cut short and it is waiting on you." Same shape as paneLimit: the
+// pattern is anchored to the indent Claude renders its own marker at, because a session
+// that merely QUOTES the sentence carries it nested deeper inside a command's output.
+// Verified against the session that wrote this code, which greps for the string.
+function paneInterrupted(sock, name) {
+  const src = agentField(agentOf(name), 'interrupt_re_js');
+  if (!src) return false;
+  let re; try { re = new RegExp(src); } catch { return false; }
+  try {
+    const txt = execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', name],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return txt.split('\n').some(line => re.test(line));
+  } catch { return false; }
+}
+
 function paneLimit(sock, name) {
   const src = agentField(agentOf(name), 'limit_re_js');
   if (!src) return null;                     // this agent has no such signal
@@ -565,6 +590,9 @@ function gather() {
     if (!busy && status !== 'parked') {
       limitAt = paneLimit(SOCK, s.name);
       if (limitAt) status = 'limit';
+      // Limit wins if both are showing: it says WHY the session is stuck and when it
+      // comes back, where "interrupted" only says it stopped.
+      else if (paneInterrupted(SOCK, s.name)) status = 'interrupted';
     }
     const ageBase = tmt || st?.ts || 0;
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
@@ -1076,9 +1104,11 @@ function renderGrid() {
   // all five are waiting on a usage window is the summary line lying at a glance, which
   // is the one place it must not.
   const limited = cards.filter(c => c.status === 'limit').length;
+  const cut = cards.filter(c => c.status === 'interrupted').length;
   let buf = '\x1b[H';
   const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
+    (cut ? ` · ${C.red}${cut} interrupted${C.reset}` : '') +
     (limited ? ` · ${C.yellow}${limited} at limit${C.reset}` : '') +
     (parked ? ` · ${C.grey}${parked} parked${C.reset}` : '');
   // Same banner as the Projects screen, with the live counts beside the ship. Falls
