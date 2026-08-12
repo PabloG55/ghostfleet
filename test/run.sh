@@ -1797,6 +1797,40 @@ rm -f "$QT"
 is "the grid has an 'interrupted' status" "1" \
    "$(grep -ac '^  interrupted:' "$ROOT/bin/fleet-grid.mjs" || true)"
 
+# ── 4d5. fleet-send must be able to SEE the input box ────────────────────────
+# in_input answers "is my pasted prompt still sitting in the composer?" and it located
+# the box by its rounded corners (╭ … ╰). Claude now draws the composer as two plain
+# horizontal rules, so on every current pane the detector returned 2 = "no box found".
+#
+# The visible half was cosmetic: every send ended in "could not confirm submit". The
+# damaging half was silent — the re-nudge that recovers a SWALLOWED ENTER only fires
+# when in_input says 0 ("probe still in the box"), which a blind detector can never say.
+# So the paste/Enter race stopped being recoverable and the prompt sat unsent forever,
+# which from the outside is a worker ignoring you. Found live: a lead's "continue where
+# you left off" still in the box while the same session answered a fresh probe fine.
+#
+# Both directions AND both box styles, because a detector that says 2 everywhere and one
+# that says 0 everywhere are equally useless, and fixing the new style by breaking the
+# old one just moves the blindness.
+group "fleet-send can see the composer"
+if command -v awk >/dev/null 2>&1; then
+  # the real function, lifted out of the script so the test exercises the shipped code
+  eval "$(sed -n '/^in_input() {/,/^}/p' "$ROOT/bin/fleet-send" | sed 's/tmux -L "\$SOCK" capture-pane -p -t "\$SESSION" 2>\/dev\/null/cat "$PANE"/')"
+  probe="browser walkthrough on 8120"
+  ii() { PANE="$1" in_input; echo $?; }
+  PANE="$FIX/claude-input-pending.txt";   in_input; is "plain rules: probe still in the box" "0" "$?"
+  PANE="$FIX/claude-input-submitted.txt"; in_input; is "plain rules: probe gone = submitted" "1" "$?"
+  # the older rounded composer must keep working — same pane, corners drawn on
+  RB="$(mktemp)"; sed 's/^─\(─*\)$/╭\1╮/' "$FIX/claude-input-pending.txt" > "$RB"
+  PANE="$RB"; in_input; is "rounded box is still seen"          "0" "$?"
+  # a pane with no composer at all is UNKNOWN (2), never a confident answer
+  printf 'just some text\nand more\n' > "$RB"
+  PANE="$RB"; in_input; is "no box at all -> unknown, not a guess" "2" "$?"
+  rm -f "$RB"
+else
+  skip "fleet-send composer detector" "awk missing"
+fi
+
 # ── 4e. the governor parks on a fossil its own park created ──────────────────
 # A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
 # still shows the figure it was painting when it was parked. Skipping PARKED panes was

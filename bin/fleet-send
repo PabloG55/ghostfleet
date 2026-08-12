@@ -201,12 +201,30 @@ done
 #
 # in_input: 0 = probe still sitting in the input box; 1 = box present, probe gone
 # (submitted); 2 = no box found (unknown → fall back to the spinner).
+#
+# BOTH COMPOSER STYLES, and the second one is why this exists. Claude used to draw the
+# input box with rounded corners (╭ … ╰) and now draws it as two plain horizontal rules.
+# Looking only for ╰ made this blind on every current pane: it returned 2 (unknown)
+# forever, so `submitted` never confirmed and EVERY send ended in "could not confirm
+# submit — verify it landed".
+#   That warning was the harmless half. The re-nudge that recovers a swallowed Enter
+# only fires when in_input says 0 — probe STILL in the box — which a blind detector can
+# never say. So the one case it exists for, the paste/Enter race, stopped being
+# recoverable: the prompt sat in the composer unsent, indefinitely, and from the outside
+# the worker looked like it was ignoring you. Found on a live fleet where a lead's
+# "continue where you left off" was still sitting in the box, unsent, while the session
+# answered a fresh probe perfectly.
+#   A boundary is a line made of nothing but box-drawing rule characters and spaces —
+# true of ╭──╮/╰──╯ and of a bare ───── alike. The composer is between the LAST TWO,
+# because below it there is only the status bar, which carries text.
 in_input() {
   local pane; pane="$(tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null)"
   printf '%s\n' "$pane" | awk -v p="$probe" '
-    { l[NR]=$0 } /╰/ { c=NR }
-    END { if(!c) exit 2; for(i=c-1;i>=1;i--) if(l[i]~/╭/){o=i;break}
-          for(i=o;i<=c;i++) if(index(l[i],p)) exit 0; exit 1 }'
+    { l[NR]=$0; if ($0 ~ /^[[:space:]]*[─╭╰╮╯][─╭╰╮╯[:space:]]*$/) b[++n]=NR }
+    END { if (n < 2) exit 2
+          o = b[n-1]; c = b[n]
+          for (i = o; i <= c; i++) if (index(l[i], p)) exit 0
+          exit 1 }'
 }
 submitted() { busy && return 0; in_input; [ "$?" = 1 ]; }
 
