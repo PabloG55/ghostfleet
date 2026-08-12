@@ -1831,6 +1831,65 @@ else
   skip "fleet-send composer detector" "awk missing"
 fi
 
+# ── 4d6. selecting with the mouse must reach the system clipboard ────────────
+# `mouse on` is what creates this problem: tmux captures the drag, so the terminal's own
+# selection never happens and what you highlight lands in tmux's private buffer —
+# visibly selected, and not on the clipboard. Getting a URL out of a pane meant holding
+# a per-terminal modifier to bypass tmux, which nobody discovers.
+#
+# Driven as a REAL DRAG through an attached client, because that is the only thing that
+# resolves a mouse binding: send-keys to the pane would bypass the binding entirely and
+# prove nothing. fleet-copy is stubbed so the test can read what the drag produced
+# without touching the machine's actual clipboard.
+group "drag to copy"
+if command -v tmux >/dev/null 2>&1; then
+  DC="$(mktemp -d)"; mkdir -p "$DC/bin"
+  printf '#!/bin/sh\ncat > "%s/got.txt"\n' "$DC" > "$DC/bin/fleet-copy"; chmod +x "$DC/bin/fleet-copy"
+  tmux -L cfdrin kill-server 2>/dev/null; tmux -L cfdrout kill-server 2>/dev/null
+  tmux -L cfdrin -f "$ROOT/tmux/cf.tmux.conf" new-session -d -x 80 -y 12 \
+    "printf 'COPY-ME-9182\n'; sleep 90" 2>/dev/null
+  tmux -L cfdrin set -g @cf_bin "$DC/bin" 2>/dev/null
+  tmux -L cfdrout new-session -d -x 80 -y 12 \
+    "tmux -L cfdrin -f '$ROOT/tmux/cf.tmux.conf' attach -t 0" 2>/dev/null
+  sleep 1.5
+  m() { tmux -L cfdrout send-keys -l "$(printf "$1")" 2>/dev/null; sleep 0.3; }
+  m '\033[<0;1;1M'; m '\033[<32;13;1M'; m '\033[<0;13;1m'   # press, move, release
+  sleep 0.6
+  is "a drag reaches the clipboard" "COPY-ME-9182" \
+     "$(tr -d '\n' < "$DC/got.txt" 2>/dev/null)"
+  # ...and the binding exists in BOTH copy-mode tables. mode-keys follows $EDITOR, so
+  # binding only copy-mode-vi works on a vi user's machine and nowhere else.
+  is "bound for copy-mode-vi" "1" "$(grep -c '^bind -T copy-mode-vi MouseDragEnd1Pane' "$ROOT/tmux/cf.tmux.conf" || true)"
+  is "bound for copy-mode"    "1" "$(grep -c '^bind -T copy-mode    MouseDragEnd1Pane' "$ROOT/tmux/cf.tmux.conf" || true)"
+  is "the stack copies too"   "2" "$(grep -c 'MouseDragEnd1Pane' "$ROOT/tmux/cf-stack.tmux.conf" || true)"
+  # the stack must NOT take clicks into copy-mode: in there a click FOCUSES a pane, and
+  # that behaviour is pinned by its own group above
+  is "...without stealing its clicks" "0" "$(grep -c 'Click1Pane' "$ROOT/tmux/cf-stack.tmux.conf" || true)"
+  tmux -L cfdrout kill-server 2>/dev/null; tmux -L cfdrin kill-server 2>/dev/null; rm -rf "$DC"
+else
+  skip "drag to copy" "tmux not available"
+fi
+
+# fleet-copy picks a clipboard tool at run time — pbcopy is macOS-only and this repo
+# supports Linux and WSL. Both directions: it must find one when present, and say what
+# is missing rather than exiting mutely when none is (it runs from a keybinding, where
+# silence is indistinguishable from a broken binding).
+group "fleet-copy finds a clipboard"
+CP="$(mktemp -d)"; mkdir -p "$CP/bin"
+printf '#!/bin/sh\ncat > "%s/out.txt"\n' "$CP" > "$CP/bin/pbcopy"; chmod +x "$CP/bin/pbcopy"
+printf 'hello-clip' | PATH="$CP/bin:$PATH" "$ROOT/bin/fleet-copy" >/dev/null 2>&1
+is "it uses the tool it finds"  "hello-clip" "$(cat "$CP/out.txt" 2>/dev/null)"
+# A PATH holding `cat` and NOTHING else. Emptying it entirely proves nothing: the
+# shebang's `env bash` fails to exec, and even run as `/bin/bash script` the `cat` that
+# reads stdin is gone too, so it exits at the empty-input guard having never reached the
+# clipboard search — a green light for a code path that was never entered.
+mkdir -p "$CP/nobin"; ln -sf "$(command -v cat)" "$CP/nobin/cat"
+out="$(printf 'x' | PATH="$CP/nobin" /bin/bash "$ROOT/bin/fleet-copy" 2>&1; echo "rc=$?")"
+is "no tool -> says so"         "1" "$(printf '%s' "$out" | grep -c 'no clipboard tool' || true)"
+is "...and exits non-zero"      "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
+is "empty selection is a no-op" "rc=0" "$(printf '' | PATH="$CP/nobin" /bin/bash "$ROOT/bin/fleet-copy" 2>&1; echo "rc=$?")"
+rm -rf "$CP"
+
 # ── 4e. the governor parks on a fossil its own park created ──────────────────
 # A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
 # still shows the figure it was painting when it was parked. Skipping PARKED panes was

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# fleet-copy — put stdin on the system clipboard, whatever this OS calls that.
+#
+# Bound to mouse selection in tmux/cf.tmux.conf (and the stack's config), so dragging
+# across a pane copies the way it does in zellij — no prefix, no copy-mode keys, no
+# holding a modifier to escape tmux's mouse capture.
+#
+# WHY A SCRIPT AND NOT pbcopy IN THE BINDING. pbcopy is macOS-only and this repo
+# supports Linux and WSL, so the choice has to be made at run time; doing it here keeps
+# the tmux config to one line per binding and puts the OS logic somewhere testable.
+#
+# Order matters: Wayland before X11, because a Wayland session usually still has xclip
+# installed and pointed at an XWayland clipboard that nothing reads. WSL last, since it
+# is the only one that can be present ALONGSIDE a real X display.
+set -uo pipefail
+
+data="$(cat)"
+[ -n "$data" ] || exit 0                      # empty selection: nothing to do, not an error
+put() { printf '%s' "$data" | "$@" >/dev/null 2>&1; }
+
+if   command -v pbcopy   >/dev/null 2>&1; then put pbcopy
+elif [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1; then put wl-copy
+elif command -v xclip    >/dev/null 2>&1; then put xclip -selection clipboard
+elif command -v xsel     >/dev/null 2>&1; then put xsel --clipboard --input
+elif command -v clip.exe >/dev/null 2>&1; then put clip.exe
+else
+  # No clipboard tool. The selection is still in tmux's own buffer (copy-pipe fills it
+  # either way), so say what is missing rather than failing mutely — this runs from a
+  # keybinding, where a silent exit is indistinguishable from a broken binding.
+  echo "fleet-copy: no clipboard tool found (pbcopy / wl-copy / xclip / xsel / clip.exe)" >&2
+  exit 1
+fi

@@ -32,6 +32,21 @@ Two separate key-handling systems, and it matters which one you're in:
 | `Ctrl-t` (no prefix) or `Ctrl-a t` | **terminal tab** on this session's own folder — a login shell in `#{pane_current_path}`, so it follows you if you've cd'd inside the repo | [CODE] `bin/fleet-tab` |
 | `Ctrl-n` (no prefix) or `Ctrl-a n` | **editor tab** on the same folder — `$EDITOR` (default `nvim .`); override with `CLAUDE_FLEET_EDITOR` | [CODE] `bin/fleet-tab` |
 | `Ctrl-x` (no prefix) or `Ctrl-a x` | the **stack** screen. It lived on `Ctrl-t` until tabs took that key | [CODE] |
+| **drag with the mouse** | **selects and copies to the system clipboard**, no prefix and no modifier — the way zellij does it. Double-click copies a word, triple-click a line | [CODE] `bin/fleet-copy` |
+
+### Why drag-to-copy needed code at all
+
+`mouse on` is what creates the problem: tmux captures the drag, so the terminal's own
+selection never happens and what you highlight goes into tmux's *private* buffer. It
+looks selected and it is not on your clipboard — the only way out was holding a
+per-terminal modifier (⌥ on macOS Terminal/iTerm) to bypass tmux, which nobody
+discovers. `bin/fleet-copy` picks the right clipboard tool at run time (`pbcopy` /
+`wl-copy` / `xclip` / `xsel` / `clip.exe`), because `pbcopy` is macOS-only and this repo
+supports Linux and WSL. `set-clipboard on` additionally sends an OSC 52 copy, which is
+what carries a selection back to **your** machine when the fleet is over SSH.
+
+The stack gets the drag binding too, but **not** the double/triple-click ones: in there
+a click focuses a pane, and that is pinned by a test.
 
 ### Tabs (`Ctrl-t` / `Ctrl-n`)
 
