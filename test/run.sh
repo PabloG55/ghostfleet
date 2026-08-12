@@ -1735,6 +1735,68 @@ is "...counted apart from ready"     "1" "$(grep -ac "c.status === 'limit'" "$RO
 # showed up there as an "idle" session you could stack.
 is "the stack picker drops tabs"     "1" "$(sed -n '/^function sessionStatuses/,/^}/p' "$ROOT/bin/fleet-grid.mjs" | grep -c 'isTab' || true)"
 
+# ── 4d3. a status glyph wider than one column shifts every card ──────────────
+# vis() counts CODE POINTS, not display columns, so the whole card grid is built on
+# "one character = one cell". A 2-column glyph renders wider than the arithmetic
+# believes and shoves every card to its right out of alignment — silent, cosmetic, and
+# instantly visible to the person using it. Shipped once: the limit status was ⏳
+# (U+23F3), which measures 2.
+#
+# MEASURED, not tabulated: each glyph is printed into a real tmux pane and the cursor
+# column is read back, so a new status with an emoji in it fails here rather than in
+# your terminal. (⏳ is measured too, as the control — a test that only ever sees
+# 1-column glyphs would pass just as happily with a broken ruler.)
+group "status glyphs are one column"
+if command -v tmux >/dev/null 2>&1; then
+  tmux -L cfglyph kill-server 2>/dev/null
+  tmux -L cfglyph new-session -d -x 80 -y 10 'sleep 600' 2>/dev/null
+  sleep 0.5
+  gwidth() {                     # $1 = glyph -> the column the cursor lands on
+    tmux -L cfglyph respawn-pane -k -t 0 "printf '%s' '$1'; sleep 600" 2>/dev/null
+    sleep 0.35
+    tmux -L cfglyph display-message -p -t 0 '#{cursor_x}' 2>/dev/null
+  }
+  is "the ruler works: ⏳ is 2 wide" "2" "$(gwidth '⏳')"
+  # every leading glyph the STATUS table actually uses
+  # ONLY the STATUS table — `label:` is an ordinary key elsewhere in this file, and
+  # scooping those up tested the width of the word "branch".
+  #   LC_ALL=C on the sort, or it dedupes almost everything: under this machine's
+  # collation ● ◆ ✓ ⏸ · … ⧗ ⚠ all compare EQUAL, so `sort -u` returned two of the nine
+  # and the loop quietly tested a third of what it claimed to.
+  GLYPHS="$(sed -n '/^const STATUS = {/,/^};/p' "$ROOT/bin/fleet-grid.mjs" \
+            | grep -aoE "label: '[^ ']+" | sed "s/label: '//" | LC_ALL=C sort -u)"
+  is "...and the table is non-empty"  "1" "$([ -n "$GLYPHS" ] && echo 1 || echo 0)"
+  for g in $GLYPHS; do
+    is "status glyph $g is 1 column" "1" "$(gwidth "$g")"
+  done
+  tmux -L cfglyph kill-server 2>/dev/null
+else
+  skip "status glyph widths" "tmux not available"
+fi
+
+# ── 4d4. an interrupted turn must not read as ready ──────────────────────────
+# A cut-short turn leaves "Interrupted · What should Claude do instead?" above an
+# ordinary empty input box, so every ready signal matches and the card says "✓ ready"
+# over a session doing nothing. A park interrupts a turn, so a governor episode makes
+# these in bulk.
+#
+# ANCHORED TO THE INDENT, which is the entire discriminator: Claude renders its own
+# result marker at exactly two columns, while the same sentence quoted inside a
+# command's output lands deeper. Caught against the session that wrote the detector,
+# which greps for the string and would otherwise have marked itself interrupted.
+group "interrupted is not ready"
+INT_RE="$("$ROOT/bin/fleet-agent" field claude interrupt_re 2>/dev/null)"
+is "claude has an interrupt pattern" "1" "$([ -n "$INT_RE" ] && echo 1 || echo 0)"
+is "...and other agents do not"      ""  "$("$ROOT/bin/fleet-agent" field opencode interrupt_re 2>/dev/null)"
+is "it fires on a real one"          "1" "$(matches "$INT_RE" "$FIX/claude-interrupted.txt")"
+is "...and not on a plain idle pane" "0" "$(matches "$INT_RE" "$FIX/claude-idle.txt")"
+# the anchor earns its keep: the SAME sentence one indent deeper must not fire
+QT="$(mktemp)"; sed 's/^  ⎿/     ⎿/' "$FIX/claude-interrupted.txt" > "$QT"
+is "...nor on the sentence quoted deeper" "0" "$(matches "$INT_RE" "$QT")"
+rm -f "$QT"
+is "the grid has an 'interrupted' status" "1" \
+   "$(grep -ac '^  interrupted:' "$ROOT/bin/fleet-grid.mjs" || true)"
+
 # ── 4e. the governor parks on a fossil its own park created ──────────────────
 # A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
 # still shows the figure it was painting when it was parked. Skipping PARKED panes was
