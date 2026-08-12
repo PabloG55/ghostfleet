@@ -162,6 +162,19 @@ agent_field() {
         # the part prose cannot forge: really-limited read 102%, the quoter 15%.
         limit_re)    printf '%s' "You've hit your (session|usage) limit" ;;
         limit_re_js) printf '%s' "You've hit your (?:session|usage) limit" ;;
+        # A turn cut short — "Interrupted · What should Claude do instead?" — leaves the
+        # session waiting on a human with an ordinary empty input box, so it read as
+        # "✓ ready" while doing nothing. A park interrupts a turn, so a governor episode
+        # produces these in bulk.
+        #   ANCHORED TO THE INDENT, and that is the whole discriminator. Claude renders
+        # its own result marker at exactly two columns; the same sentence QUOTED inside a
+        # command's output lands deeper (measured: 4-5). Without the anchor, a session
+        # that so much as greps for this string marks itself interrupted — verified
+        # against the session that was writing this code, which does exactly that.
+        #   `.*` spans the gap after ⎿ because it is a NO-BREAK space (U+00A0), not the
+        # ordinary one it looks like; a literal " " here matches nothing at all.
+        interrupt_re)    printf '%s' '^  ⎿.*Interrupted' ;;
+        interrupt_re_js) printf '%s' '^  ⎿.*Interrupted' ;;
         hooks)      printf 'yes' ;;
         budget)     printf 'yes' ;;
         resume)     printf 'yes' ;;
