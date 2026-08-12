@@ -54,6 +54,9 @@ const STATUS = {
   // An agent whose adapter has no validated busy regex. NOT idle: we genuinely
   // cannot tell what that pane is doing, and rendering a confident "idle"/"ready"
   // it hasn't earned is the exact failure this whole layer exists to avoid.
+  // The account is spent. NOT ready: the input box is still there and every ready
+  // signal matches, so five limited workers rendered as a healthy fleet of five.
+  limit:      { label: '⏳ limit',     color: C.yellow },
   unknown:    { label: '? unknown',   color: C.yellow },
 };
 
@@ -359,6 +362,41 @@ function paneBusy(sock, name) {
   } catch { return false; }
 }
 
+// "This account is spent" — returns the reset time (e.g. "10:20pm") or null.
+//
+// TWO SIGNALS, AND IT NEEDS BOTH. Claude prints "You've hit your session limit ·
+// resets 10:20pm" and then takes no prompt until the window rolls over — but it leaves
+// the input box up, so every ready signal still matches and the card reads "✓ ready".
+// Five limited workers looked like a healthy fleet of five.
+//
+// The text alone would be a false-positive machine. Measured on two real panes taken
+// the same minute: the limited worker carries the line — and so does a session that
+// merely QUOTED it, arriving with the identical "⎿ " tool-result marker, because
+// reading a limited pane with capture-pane renders its output as a tool result. So the
+// glyph cannot separate them either.
+//   What does: the session's OWN 5h figure, painted into its status bar by Claude and
+// not forgeable by anything it happens to be discussing. Really limited: 102%. Quoting
+// it while healthy: 15%.
+//
+// Fails CLOSED. A pane under ~100 columns drops the figure entirely (Claude truncates
+// its status line rather than wrapping), so the conjunction cannot be met and the
+// session keeps whatever status it had — a missed limit, never a fabricated one.
+function paneLimit(sock, name) {
+  const src = agentField(agentOf(name), 'limit_re_js');
+  if (!src) return null;                     // this agent has no such signal
+  let re; try { re = new RegExp(src); } catch { return null; }
+  try {
+    const txt = execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', name],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    if (!txt.split('\n').some(line => re.test(line))) return null;
+    // the 5h account figure, same field the governor meters (see pct_of in fleet-governor)
+    const pcts = [...txt.matchAll(/[^:0-9](\d+)%\(/g)].map(m => Number(m[1]));
+    if (!pcts.length || pcts[pcts.length - 1] < 100) return null;
+    const at = /resets\s+(\d{1,2}:\d{2}\s*[ap]m)/i.exec(txt);
+    return at ? at[1].replace(/\s+/g, '') : 'soon';
+  } catch { return null; }
+}
+
 // Single source of truth for a session's live status, shared by the grid and the
 // projects screen so they never disagree.
 //   • pane shows the interrupt affordance → working (generating / running a tool)
@@ -520,12 +558,20 @@ function gather() {
     const busy = paneBusy(SOCK, s.name);
     let status = deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
     if (!busy && isParked(s.name)) status = 'parked';     // intentionally off (fleet-pause)
+    // Checked last and only on a session that is neither generating nor deliberately
+    // off: those two already describe it better. A limited session looks exactly like a
+    // ready one — same input box, same prompt — so nothing but the pane can tell.
+    let limitAt = null;
+    if (!busy && status !== 'parked') {
+      limitAt = paneLimit(SOCK, s.name);
+      if (limitAt) status = 'limit';
+    }
     const ageBase = tmt || st?.ts || 0;
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
     return { name: s.name, cwd: s.cwd || '', folder, branch, status, age, msg: lastAssistant(transcript),
-             attached: s.attached, sched, agent, label: labelOf(s.name) };
+             attached: s.attached, sched, agent, label: labelOf(s.name), limitAt };
   });
 }
 
@@ -704,7 +750,11 @@ function cardLines(card, selected, idx) {
   const title = clip(`─ ${num}${card.label || card.name} `, CW);
   const top = `╭${title}${'─'.repeat(Math.max(0, CW - vis(title)))}╮`;
   const idle = card.age == null ? '' : (card.status === 'working' ? `busy ${humanAge(card.age)}` : `${humanAge(card.age)} ago`);
-  const right = card.sched ? `@${clockLabel(card.sched.at)}` : idle;   // @ = scheduled send
+  // For a limited session the reset time is the only number that matters — "55m ago"
+  // says when it last spoke, which is not the question you are asking of that card.
+  const right = card.sched ? `@${clockLabel(card.sched.at)}`
+              : card.status === 'limit' && card.limitAt ? `↻ ${card.limitAt}`
+              : idle;   // @ = scheduled send
   const l1 = `│ ${padEndV(twoCol(meta.label, right, CW - 2), CW - 2)} │`;
   // Name the agent on the card whenever it isn't the default. Without this an
   // "unknown" or a differently-behaving status is unreadable — you can't tell whether
@@ -1022,9 +1072,14 @@ function renderGrid() {
   const work = cards.filter(c => c.status === 'working').length;
   const ready = cards.filter(c => c.status === 'ready').length;
   const parked = cards.filter(c => c.status === 'parked').length;
+  // Counted separately and NEVER folded into "ready": a fleet reading "5 ready" when
+  // all five are waiting on a usage window is the summary line lying at a glance, which
+  // is the one place it must not.
+  const limited = cards.filter(c => c.status === 'limit').length;
   let buf = '\x1b[H';
   const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
+    (limited ? ` · ${C.yellow}${limited} at limit${C.reset}` : '') +
     (parked ? ` · ${C.grey}${parked} parked${C.reset}` : '');
   // Same banner as the Projects screen, with the live counts beside the ship. Falls
   // back to the one-line header on a window too small to spend the rows on.
@@ -1764,7 +1819,11 @@ function sessionStatuses(proj) {
   let names = [];
   try {
     const o = execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    names = o.split('\n').filter(Boolean);
+    // Tabs are filtered HERE as well as in tmuxList: the stack screen reaches other
+    // projects' fleets through this path, not that one, so the grid hiding them was no
+    // help — every terminal in every project turned up in the stack picker as an "idle"
+    // session you could stack. Stacking a shell is never what that screen is for.
+    names = o.split('\n').filter(Boolean).filter(n => !isTab(n));
   } catch { return []; }
   const dir = path.join(profileDir(proj.profile), 'fleet');
   const bySlot = new Map();

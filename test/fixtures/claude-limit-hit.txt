@@ -1,0 +1,11 @@
+  Made 1 scratchpad edit +41, searched for 1 pattern, ran 5 shell commands
+  ⎿  You've hit your session limit · resets 10:20pm (America/New_York)
+     /upgrade to increase your usage limit.
+
+✻ Sautéed for 11m 4s · 1 shell still running
+                                                                                                                                                                                                                                      new task? /clear to save 287.6k tokens
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  pasebarona@gmail.com | Pablo Garces | check |   feat/outfit-check-chat | Opus 5 (1M context) | ctx:29% | 102%(4h 9m) | 7d:42%(69h 49m)                                                                                                                                /rc
+  ⏵⏵ bypass permissions on · 1 shell
