@@ -38,6 +38,11 @@ sess_for() {                       # first session whose pane cwd is at/under $1
   local wt="$1" p="" s=""
   while IFS=$'\t' read -r p s; do
     [ -n "$p" ] || continue
+    # A TAB IS NOT AN OCCUPANT. fleet-tab's terminals/editors sit in the checkout they
+    # were opened from, so a worktree with a terminal open on it read as "occupied by
+    # _term-master" and dropped out of the free list — a shell holding a whole worktree
+    # hostage. It is not work; it does not own the checkout.
+    case "$s" in _term-*|_edit-*) continue ;; esac
     case "$p" in "$wt"|"$wt"/*) echo "$s"; return ;; esac
   done <<EOF
 $panes
@@ -70,37 +75,108 @@ git_state() {                      # "clean|dirty" (+ahead / -behind vs upstream
   printf '%s%s' "$d" "$extra"
 }
 
-# enumerate worktrees (path<TAB>branch); the FIRST is the main checkout = the lead's
-wts="$(git -C "$PWD" worktree list --porcelain 2>/dev/null | awk '
-  /^worktree /{ if (wt!="") print wt "\t" br; wt=substr($0,10); br="(detached)"; skip=0 }
-  /^branch /  { b=$2; sub("refs/heads/","",b); br=b }
-  /^detached$/{ br="(detached)" }
-  /^bare$/    { skip=1 }
-  /^$/        { if (wt!="" && !skip) { print wt "\t" br; wt=""; skip=0 } }
-  END         { if (wt!="" && !skip) print wt "\t" br }
-')"
+wts_of() {                         # path<TAB>branch for one repo; first line = its own root
+  git -C "$1" worktree list --porcelain 2>/dev/null | awk '
+    /^worktree /{ if (wt!="") print wt "\t" br; wt=substr($0,10); br="(detached)"; skip=0 }
+    /^branch /  { b=$2; sub("refs/heads/","",b); br=b }
+    /^detached$/{ br="(detached)" }
+    /^bare$/    { skip=1 }
+    /^$/        { if (wt!="" && !skip) { print wt "\t" br; wt=""; skip=0 } }
+    END         { if (wt!="" && !skip) print wt "\t" br }'
+}
+
+# ONE PROJECT CAN BE SEVERAL CLONES, and a worktree belongs to exactly one of them.
+#
+# A project root is not always a repo. superkey registers ~/superkey, which holds four
+# INDEPENDENT clones (superkey, superkey-1, superkey-3, superkey-xd), each with its own
+# .git and therefore its own private set of worktrees. A lead standing in one of them saw
+# 2 and was blind to the other 17 — so "reuse before you spawn", which is built on this
+# list, could never fire, and every task made another one. Nineteen worktrees, fifteen
+# of them idle.
+#
+# So the inventory spans every clone under the project root: the repo we're in, plus each
+# immediate sibling that is a clone in its own right (git-dir == git-common-dir; that test
+# is exact, and it is what keeps a WORKTREE of one clone from being walked a second time
+# as if it were a clone itself). Single-repo projects find exactly one and are unchanged.
+# --here restricts it to the current repo, which is the old behaviour.
+HERE=0; FREE_ONLY=0
+# --free: just the reusable ones, "<abs path><TAB><branch>", for fleet-spawn's
+# reuse-before-proliferate check. A machine mode rather than parsing the table below,
+# so the two can never disagree about what "free" means — that agreement is the whole
+# point of this file existing.
+for a in "$@"; do
+  case "$a" in --here) HERE=1 ;; --free) FREE_ONLY=1 ;; esac
+done
+GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"
+PROOT="$(dirname "$GITROOT")"
+is_clone() { [ "$(git -C "$1" rev-parse --git-dir 2>/dev/null)" = "$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)" ]; }
+
+repos="$GITROOT"
+if [ "$HERE" != 1 ]; then
+  # The project root is the parent — the same assumption fleet-spawn makes when it
+  # places a sibling worktree.
+  for d in "$PROOT"/*/; do
+    d="${d%/}"
+    [ -d "$d" ] || continue
+    [ "$d" = "$GITROOT" ] && continue
+    git -C "$d" rev-parse --show-toplevel >/dev/null 2>&1 || continue
+    [ "$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)" = "$d" ] || continue
+    is_clone "$d" || continue                 # a worktree, not a clone: its owner lists it
+    repos="$repos
+$d"
+  done
+fi
+
+wts=""
+while IFS= read -r r; do
+  [ -n "$r" ] || continue
+  o="$(wts_of "$r")"
+  [ -n "$o" ] || continue
+  wts="${wts:+$wts
+}$o"
+done <<EOF
+$repos
+EOF
 
 # SLOT is the dev-stack number (bin/fleet-slot): the repo derives its ports/database
 # from it, so seeing it here is what makes "which stack is this?" answerable without
 # digging. Blank when this checkout has none; 0 is the project's primary.
 slot_for() { "$(dirname "$0")/fleet-slot" of "$1" 2>/dev/null || printf '-'; }
-printf '%-16s %-22s %-14s %-7s %-5s %-14s %s\n' WORKTREE BRANCH SESSION STATE SLOT GIT TASK
-free=""; first=1
+[ "$FREE_ONLY" = 1 ] || printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' WORKTREE BRANCH SESSION STATE SLOT GIT TASK
+# A LABEL YOU CAN PASTE BACK. Basenames repeat across clones once several of them keep a
+# .worktrees/ each, so the old bare basename was ambiguous AND wrong to hand to --reuse.
+# Relative to the project root it is unique, readable, and exactly what --reuse resolves.
+rel_of() { case "$1" in "$PROOT"/*) printf '%s' "${1#"$PROOT"/}" ;; *) printf '%s' "$1" ;; esac; }
+# Each clone's own root is a main checkout, not something to offer for reuse. With several
+# clones there is more than one, so it cannot be "the first line" any more.
+is_root() { case "$ROOTS" in *"|$1|"*) return 0 ;; esac; return 1; }
+ROOTS="|"
+while IFS= read -r r; do [ -n "$r" ] && ROOTS="$ROOTS$r|"; done <<EOF
+$repos
+EOF
+
+free=""
 while IFS=$'\t' read -r wt br; do
   [ -n "$wt" ] || continue
-  base="${wt##*/}"
+  # NOT OURS TO HAND OUT. Claude Code's own trees — the Agent tool's isolation:worktree,
+  # and the ones EnterWorktree makes — are git worktrees like any other, so they arrive
+  # here looking clean and sessionless, i.e. "free". Offering one for reuse points a
+  # worker at a checkout Claude is managing. fleet-spawn already skipped these; now that
+  # this file is the enumerator, the skip has to live here or the exclusion silently
+  # stops applying.
+  case "$wt" in */.claude/worktrees/*) continue ;; esac
+  base="$(rel_of "$wt")"
   # a worktree dir that git still lists but no longer exists on disk (removed with
   # rm -rf instead of `git worktree remove`) — flag it; `git worktree prune` tidies it.
   if [ ! -d "$wt" ]; then
-    printf '%-16s %-22s %-14s %-7s %-5s %-14s %s\n' "$base" "${br:0:22}" "-" "gone" "-" "-" "git worktree prune"
-    first=0; continue
+    [ "$FREE_ONLY" = 1 ] || printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' "${base:0:38}" "${br:0:22}" "-" "gone" "-" "-" "git worktree prune"
+    continue
   fi
   sess="$(sess_for "$wt")"
   state=""; git=""; task="$(task_for "$wt")"; [ -n "$task" ] || task="-"
   git="$(git_state "$wt")"
-  if [ "$first" = 1 ]; then                       # main checkout — the lead's home
-    if [ "$sess" = master ]; then state=LEAD; elif [ -n "$sess" ]; then state="$sess"; else state=main; sess="-"; fi
-    first=0
+  if is_root "$wt"; then                          # a clone's own checkout — a lead's home
+    if [ "$sess" = master ]; then state=LEAD; elif [ -n "$sess" ]; then state="${sess:0:7}"; else state=main; sess="-"; fi
   elif [ -n "$sess" ]; then
     if is_parked "$sess"; then state=parked
     elif busy "$sess"; then state=busy
@@ -109,15 +185,28 @@ while IFS=$'\t' read -r wt br; do
     sess="-"; task="-"    # no live session -> the manifest task refers to a gone session; don't show it stale
     case "$git" in clean*) state=FREE; free="$free $base" ;; *) state=stale ;; esac
   fi
-  printf '%-16s %-22s %-14s %-7s %-5s %-14s %s\n' \
-    "$base" "${br:0:22}" "${sess:0:14}" "$state" "$(slot_for "$wt")" "$git" "${task:0:60}"
+  if [ "$FREE_ONLY" = 1 ]; then
+    [ "$state" = FREE ] && printf '%s\t%s\n' "$wt" "$br"
+  else
+    printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' \
+      "${base:0:38}" "${br:0:22}" "${sess:0:14}" "$state" "$(slot_for "$wt")" "$git" "${task:0:60}"
+  fi
 done <<EOF
 $wts
 EOF
 
+[ "$FREE_ONLY" = 1 ] && exit 0
 echo
 if [ -n "$free" ]; then
-  echo "Free to reuse:$free   →  fleet-spawn <name> --reuse <worktree>"
+  # Sixteen of these on one line is a wall, not a list — and this is the line a lead is
+  # meant to read BEFORE deciding to create another worktree.
+  n="$(printf '%s' "$free" | wc -w | tr -d ' ')"
+  if [ "${n:-0}" -gt 4 ]; then
+    echo "Free to reuse ($n)   →  fleet-spawn <name> --reuse <worktree>"
+    for f in $free; do echo "  $f"; done
+  else
+    echo "Free to reuse:$free   →  fleet-spawn <name> --reuse <worktree>"
+  fi
 else
   echo "No free worktrees (all in use, or dirty). Create one: fleet-spawn <name> --new"
 fi

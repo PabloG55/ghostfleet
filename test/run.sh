@@ -1021,7 +1021,10 @@ if command -v git >/dev/null 2>&1; then
   git -C "$FW/repo" config user.email t@t; git -C "$FW/repo" config user.name t
   : > "$FW/repo/f"; git -C "$FW/repo" add -A; git -C "$FW/repo" commit -qm init 2>/dev/null
   git -C "$FW/repo" worktree add -q "$FW/repo/.claude/worktrees/aw" -b aw 2>/dev/null
-  eval "$(sed -n '/^free_worktrees() {/,/^}/p' "$ROOT/bin/fleet-spawn")"
+  # the LOCAL fallback: fleet-spawn's own single-repo logic, used when fleet-worktrees
+  # isn't reachable. The cross-clone path is covered in its own group below.
+  eval "$(sed -n '/^free_worktrees_local() {/,/^}/p' "$ROOT/bin/fleet-spawn")"
+  free_worktrees() { free_worktrees_local; }
   GITROOT="$FW/repo"; sess_for() { :; }          # nothing occupied anywhere
   is "a .claude/worktrees tree is not free" "0" "$(free_worktrees | grep -c aw || true)"
   git -C "$FW/repo" worktree add -q "$FW/sib" -b sib 2>/dev/null
@@ -1911,6 +1914,87 @@ is "opt back in with the flag" "DISABLE_AUTOUPDATER=[unset]" "$(ah CLAUDE_FLEET_
 # it is set in the ONE place every launch path goes through, not per call site
 is "set in agent-here"         "1" "$(grep -c 'export DISABLE_AUTOUPDATER=1' "$ROOT/bin/agent-here" || true)"
 rm -rf "$AH"
+
+# ── 4d8. a worktree goes where the REPO says worktrees go ────────────────────
+# A sibling was the only layout and is still the default. But superkey's PreToolUse guard
+# denies any edit whose PATH lacks `.worktrees/` — it never asks git whether the path IS a
+# worktree — so our sibling (a real, isolated worktree on its own branch) was refused as
+# "the shared main checkout", the agent obeyed the refusal, and created a SECOND worktree
+# nested inside the first, plus a full dependency install. Nineteen worktrees across four
+# clones, fifteen idle, came out of that.
+#
+# The default case is the one to protect: a repo with no convention must place worktrees
+# exactly where it always did, or this "fix" silently relocates every other project.
+group "worktree location follows the repo"
+if command -v git >/dev/null 2>&1; then
+  eval "$(sed -n '/^worktree_parent() {/,/^}/p' "$ROOT/bin/fleet-spawn")"
+  WD="$(mktemp -d)"
+  mkrepo() { git init -q -b main "$WD/$1" 2>/dev/null; git -C "$WD/$1" config user.email t@t
+             git -C "$WD/$1" config user.name t; : > "$WD/$1/f"
+             git -C "$WD/$1" add -A; git -C "$WD/$1" commit -qm i 2>/dev/null; }
+  mkrepo plain
+  mkrepo declares; printf '.worktrees/\n' > "$WD/declares/.gitignore"
+  git -C "$WD/declares" add -A; git -C "$WD/declares" commit -qm ignore 2>/dev/null
+  mkrepo hasdir; mkdir -p "$WD/hasdir/.worktrees"
+  wp() { GITROOT="$WD/$1" PARENT="$WD" CLAUDE_FLEET_WORKTREE_DIR="${2-}" worktree_parent; }
+  is "no convention -> sibling (unchanged)" "$WD"                       "$(wp plain)"
+  is "the dir exists -> use it"             "$WD/hasdir/.worktrees"     "$(wp hasdir)"
+  # the case that matters most: the FIRST worktree in a fresh clone, where the directory
+  # does not exist yet and only the repo's declaration says where they belong
+  is "declared in .gitignore -> use it"     "$WD/declares/.worktrees"   "$(wp declares)"
+  is "explicit 'sibling' overrides back"    "$WD"                       "$(wp declares sibling)"
+  is "explicit relative dir"                "$WD/declares/.wt"          "$(wp declares .wt)"
+  is "explicit absolute dir"                "/tmp/elsewhere"            "$(wp declares /tmp/elsewhere)"
+  # `.worktrees/` is a DIRECTORY-ONLY pattern: check-ignore will not match it against a
+  # bare name with nothing on disk, which is exactly the fresh-clone case. Probing a child
+  # is what makes the declaration detectable before the first worktree exists.
+  is "the probe asks about a child path"    "1" \
+     "$(grep -c 'check-ignore -q .worktrees/.probe' "$ROOT/bin/fleet-spawn" || true)"
+  rm -rf "$WD"
+else
+  skip "worktree location" "git missing"
+fi
+
+# ── 4d9. one project can be several clones ───────────────────────────────────
+# superkey registers ~/superkey, which is NOT a repo — it holds four independent clones,
+# each with its own .git and therefore its own private worktrees. fleet-worktrees walked
+# only the clone it stood in: 2 visible, 17 invisible. So reuse-before-proliferate could
+# never fire and every task made another worktree.
+#
+# Both directions: it must find the siblings, and it must NOT walk a linked worktree a
+# second time as though it were a clone of its own (which would list its owner's trees
+# again, and offer the main checkout for reuse).
+group "worktrees span sibling clones"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  # pwd -P: git and fleet-worktrees report the RESOLVED path, and mktemp hands back the
+  # /var/folders symlink — the same /tmp-is-a-symlink trap that has bitten this repo twice.
+  CW="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$CW/proj"
+  mk2() { git init -q -b main "$CW/proj/$1" 2>/dev/null; git -C "$CW/proj/$1" config user.email t@t
+          git -C "$CW/proj/$1" config user.name t; : > "$CW/proj/$1/f"
+          git -C "$CW/proj/$1" add -A; git -C "$CW/proj/$1" commit -qm i 2>/dev/null; }
+  mk2 a; mk2 b                                     # two independent clones
+  git -C "$CW/proj/a" worktree add -q "$CW/proj/a/.worktrees/aw" -b aw 2>/dev/null
+  git -C "$CW/proj/b" worktree add -q "$CW/proj/b/.worktrees/bw" -b bw 2>/dev/null
+  tmux -L cfclone kill-server 2>/dev/null; tmux -L cfclone new-session -d -s master 'sleep 60' 2>/dev/null
+  fwt() { ( cd "$CW/proj/a" && env -u TMUX CLAUDE_FLEET_SOCK=cfclone "$ROOT/bin/fleet-worktrees" "$@" 2>/dev/null ); }
+  free="$(fwt --free | awk -F'\t' '{print $1}' | sed "s|$CW/proj/||" | sort | tr '\n' ' ')"
+  is "sees BOTH clones' worktrees" "a/.worktrees/aw b/.worktrees/bw " "$free"
+  # --here is the old behaviour, and has to stay available
+  hfree="$(fwt --here --free | awk -F'\t' '{print $1}' | sed "s|$CW/proj/||" | sort | tr '\n' ' ')"
+  is "--here restricts to this repo"  "a/.worktrees/aw " "$hfree"
+  # a clone's own checkout is a main checkout, never offered for reuse — and with several
+  # clones there is more than one, so it can't be "the first line" any more
+  is "no clone root is offered"       "0" "$(fwt --free | grep -cE "proj/(a|b)\$" || true)"
+  # Claude Code's own worktrees must stay out of the free list here too. fleet-spawn
+  # skipped them; the moment this file became the enumerator, that skip had to move with
+  # it or the exclusion silently stopped applying — which is exactly what the suite caught.
+  git -C "$CW/proj/a" worktree add -q "$CW/proj/a/.claude/worktrees/agent-x" -b agentx 2>/dev/null
+  is "Claude's own trees stay excluded" "0" "$(fwt --free | grep -c '.claude/worktrees' || true)"
+  is "...and the real ones still show"  "2" "$(fwt --free | grep -c '.worktrees/' || true)"
+  tmux -L cfclone kill-server 2>/dev/null; rm -rf "$CW"
+else
+  skip "cross-clone worktrees" "git or tmux missing"
+fi
 
 # ── 4e. the governor parks on a fossil its own park created ──────────────────
 # A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
