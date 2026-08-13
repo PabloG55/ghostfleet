@@ -272,6 +272,32 @@ behind it and broke what `1`-`9`, `⇧←→` and `Ctrl-f <p> <s>` point at. So 
 the grid, the ring and the numbering, and named `_term-…` / `_edit-…` so the agent machinery
 leaves them alone.
 
+### Updating Claude Code under a fleet
+
+Fleet sessions run with `DISABLE_AUTOUPDATER=1`. Claude Code's background-service
+supervisor watches its own executable's mtime and self-restarts when it moves — but the
+updater is still writing that ~300MB file, so the exec lands on a path that exists, has
+a fresh mtime, and isn't executable yet:
+
+```
+[supervisor] binary at …/claude.exe changed (mtime changed) — self-restarting for upgrade
+[supervisor] upgrade self-respawn failed to spawn: EACCES: permission denied … bg workers may be orphaned
+```
+
+The session then drops into the **agents view** carrying `Couldn't restart the
+background service`. It self-heals in ~2s, which is why it persists as an annoyance
+rather than getting fixed. A fleet makes it routine instead of rare: one update swaps
+the binary under *every* live session at once, so they all lose the race together.
+
+So update deliberately, with the fleet idle:
+
+```bash
+npm i -g @anthropic-ai/claude-code     # or however you installed it
+```
+
+The cost is real: **a long-lived fleet drifts behind the released version until you do.**
+`CLAUDE_FLEET_AUTOUPDATE=1` opts back in.
+
 ## Orchestrate: a lead session driving workers
 
 Because every session lives on the same tmux socket, a "lead"/**master** session can dispatch

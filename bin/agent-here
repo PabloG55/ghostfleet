@@ -19,6 +19,31 @@
 # invoke exactly the command they always did, and nothing here can regress them.
 set -uo pipefail
 
+# THE BINARY MUST NOT CHANGE UNDER A RUNNING FLEET. Claude Code's background-service
+# supervisor watches its own executable's mtime and self-restarts when it moves — but
+# the updater is still WRITING that file at that moment, and it is ~300MB, so the exec
+# lands on a file that exists, already has a new mtime, and is not executable yet:
+#
+#   [supervisor] binary at …/claude.exe changed (mtime changed) — self-restarting
+#   [supervisor] upgrade self-respawn failed to spawn: EACCES: permission denied,
+#                posix_spawn '…/claude.exe' — bg workers may be orphaned
+#
+# The session then drops into the agents view carrying that error. Measured on one
+# machine: 32 of these between Aug 6 and Aug 13. It self-heals in about two seconds,
+# which is why it survives as a recurring annoyance rather than getting fixed.
+#   A FLEET TURNS A RARE RACE INTO A ROUTINE ONE. One update swaps the binary under
+# every live session at once, so they all lose it together — the reason it shows up in
+# several panes in the same instant rather than once in a while.
+#
+# So fleet sessions do not auto-update; you update deliberately, with the fleet idle:
+#     npm i -g @anthropic-ai/claude-code      (or however you installed it)
+# The cost is real and worth naming: a long-lived fleet WILL drift behind the released
+# version until you do. Opt back in with CLAUDE_FLEET_AUTOUPDATE=1.
+#   Set here rather than in each `new-session -e` because this is the one entry point
+# every launch path already goes through — the grid, fleet-spawn, fleet-open and
+# claude-here all exec it — so there is no route that can quietly miss it.
+[ "${CLAUDE_FLEET_AUTOUPDATE:-0}" = 1 ] || export DISABLE_AUTOUPDATER=1
+
 AGENT="${CLAUDE_FLEET_AGENT:-}"
 
 # Recover the agent from the marker when the env doesn't carry it. This is what

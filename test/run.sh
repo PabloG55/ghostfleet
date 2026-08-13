@@ -1890,6 +1890,28 @@ is "...and exits non-zero"      "1" "$(printf '%s' "$out" | grep -c 'rc=1' || tr
 is "empty selection is a no-op" "rc=0" "$(printf '' | PATH="$CP/nobin" /bin/bash "$ROOT/bin/fleet-copy" 2>&1; echo "rc=$?")"
 rm -rf "$CP"
 
+# ── 4d7. a fleet must not have its binary swapped mid-flight ─────────────────
+# Claude Code's background-service supervisor watches its own executable's mtime and
+# self-restarts when it moves — while the updater is still writing that ~300MB file, so
+# the exec hits a path that exists, has a fresh mtime, and is not executable yet:
+# EACCES. The session then drops into the agents view carrying the error. A fleet turns
+# that from a rare race into a routine one, because one update swaps the binary under
+# every live session at once.
+#
+# Both directions: the opt-out has to actually work, or the only way back to
+# auto-updates would be editing the launcher.
+group "fleet sessions don't auto-update"
+AH="$(mktemp -d)"; mkdir -p "$AH/bin"
+# stand in for the real launcher and report what it was handed
+printf '#!/bin/sh\necho "DISABLE_AUTOUPDATER=[${DISABLE_AUTOUPDATER:-unset}]"\n' > "$AH/bin/claude-here"
+chmod +x "$AH/bin/claude-here"
+ah() { env -u DISABLE_AUTOUPDATER "$@" PATH="$AH/bin:$PATH" /bin/bash "$ROOT/bin/agent-here" 2>/dev/null; }
+is "off by default"            "DISABLE_AUTOUPDATER=[1]"     "$(ah)"
+is "opt back in with the flag" "DISABLE_AUTOUPDATER=[unset]" "$(ah CLAUDE_FLEET_AUTOUPDATE=1)"
+# it is set in the ONE place every launch path goes through, not per call site
+is "set in agent-here"         "1" "$(grep -c 'export DISABLE_AUTOUPDATER=1' "$ROOT/bin/agent-here" || true)"
+rm -rf "$AH"
+
 # ── 4e. the governor parks on a fossil its own park created ──────────────────
 # A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
 # still shows the figure it was painting when it was parked. Skipping PARKED panes was
