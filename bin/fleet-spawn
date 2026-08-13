@@ -103,8 +103,53 @@ if [ "${CLAUDE_FLEET_ALLOW_NESTED:-0}" != 1 ] \
   exit 1
 fi
 
-WT="$(dirname "$GITROOT")/$NAME"       # sibling worktree, matches the <proj>/<name> layout
 PARENT="$(dirname "$GITROOT")"
+
+# WHERE A WORKTREE GOES IS THE REPO'S CALL, NOT OURS.
+#
+# A sibling was the only layout for a long time and is still the default. But a repo
+# that runs its own worktree doctrine puts them somewhere specific, and ours fought it:
+# superkey has a PreToolUse guard that denies any edit whose PATH does not contain
+# `.worktrees/` — it never asks git whether the path IS a worktree. So a sibling (a real,
+# isolated worktree on its own branch) was refused as "the shared main checkout", the
+# agent dutifully obeyed the instructions in the refusal, and created a SECOND worktree
+# nested inside the first:
+#
+#     ~/proj/broker-unassign                            <- ours, where the session sits
+#     ~/proj/broker-unassign/.worktrees/broker-unassign <- the guard's, where edits land
+#
+# Two worktrees and a full dependency install per task, with the session attached to the
+# one that wasn't being edited. Nineteen worktrees across four clones, fifteen of them
+# idle, came out of that.
+#
+# Resolution, most explicit first:
+#   CLAUDE_FLEET_WORKTREE_DIR  a directory — relative goes under the repo, absolute is
+#                              taken as-is; `sibling` forces the classic layout
+#   $GITROOT/.worktrees exists the convention is demonstrably already in use here
+#   git ignores .worktrees/    the repo DECLARES the convention before the first one
+#                              exists. Asked of git rather than grepped out of
+#                              .gitignore, so nested files, info/exclude and the global
+#                              ignore all count — and a repo that merely has a stray
+#                              directory isn't mistaken for one that opted in.
+#   otherwise                  sibling, byte-for-byte the previous behaviour
+worktree_parent() {
+  local v="${CLAUDE_FLEET_WORKTREE_DIR:-}"
+  case "$v" in
+    sibling|-) printf '%s' "$PARENT"; return ;;
+    /*)        printf '%s' "$v"; return ;;
+    ?*)        printf '%s/%s' "$GITROOT" "${v#./}"; return ;;
+  esac
+  [ -d "$GITROOT/.worktrees" ] && { printf '%s/.worktrees' "$GITROOT"; return; }
+  # A path INSIDE it, not the bare name: `.worktrees/` is a directory-only pattern, and
+  # check-ignore will not match one against a name that has no trailing slash and no
+  # directory on disk — which is precisely the first-worktree-in-a-fresh-clone case this
+  # branch exists to serve. Probing a child matches whether or not anything exists yet.
+  git -C "$GITROOT" check-ignore -q .worktrees/.probe 2>/dev/null \
+    && { printf '%s/.worktrees' "$GITROOT"; return; }
+  printf '%s' "$PARENT"
+}
+WT_PARENT="$(worktree_parent)"
+WT="$WT_PARENT/$NAME"
 CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 # ROUTE BY OWNING PROJECT — the worker MUST land on the fleet of the project this
@@ -154,7 +199,27 @@ sess_for() {
 $panes
 EOF
 }
-free_worktrees() {                     # "<basename> (<branch>, clean)" per free worktree
+free_worktrees() {                     # "<label> (<branch>, clean)" per free worktree
+  # ASK fleet-worktrees, which looks across every clone under the project root. That is
+  # the whole reason this guard was toothless here: a project can be several independent
+  # clones (superkey is four), each owning its own worktrees, and this function only ever
+  # walked the one clone it was standing in — 2 visible, 17 invisible. So it found nothing
+  # free and dutifully created another, nineteen times over.
+  #   Sharing the enumerator also keeps "free" meaning one thing: two definitions of it
+  # drift, and the one that drifts is the one nobody reads.
+  local fw
+  fw="$(dirname "$0")/fleet-worktrees"
+  if [ -x "$fw" ]; then
+    "$fw" -s "$SOCK" --free 2>/dev/null | while IFS=$'\t' read -r p b; do
+      [ -n "$p" ] || continue
+      case "$p" in "$PARENT"/*) printf '%s (%s, clean)\n' "${p#"$PARENT"/}" "$b" ;;
+                   *)           printf '%s (%s, clean)\n' "${p##*/}" "$b" ;; esac
+    done
+    return
+  fi
+  free_worktrees_local
+}
+free_worktrees_local() {               # fallback: this repo only, the pre-cross-clone logic
   local first=1
   git -C "$GITROOT" worktree list --porcelain 2>/dev/null | awk '
     /^worktree /{ if(wt!=""&&!skip)print wt"\t"br; wt=substr($0,10); br="(detached)"; skip=0 }
@@ -219,9 +284,33 @@ link_node_modules() {
 
 # --- resolve the worktree: reuse an existing free one, or create a new one -----
 if [ -n "$REUSE" ]; then
-  case "$REUSE" in /*) WT="$REUSE" ;; *) WT="$PARENT/$REUSE" ;; esac
-  git -C "$GITROOT" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $WT" \
-    || { echo "fleet-spawn: '$REUSE' is not a worktree of this repo — see: fleet-worktrees" >&2; exit 1; }
+  # ACCEPT WHAT fleet-worktrees PRINTS. That list now spans every clone under the project
+  # root, and its labels are project-root-relative (`superkey-1/.worktrees/foo`), so the
+  # old "$PARENT/$REUSE" + "is it a worktree of THIS repo" pair rejected most of what a
+  # lead had just been told it could reuse. Resolve the label, then ask GIT — in the
+  # target — whether it really is a linked worktree; that is exact and does not care which
+  # clone owns it.
+  case "$REUSE" in
+    /*) WT="$REUSE" ;;
+    */*) WT="$PARENT/$REUSE" ;;                       # project-root-relative, as printed
+    *)  WT="$PARENT/$REUSE"
+        # a bare name: accept it when exactly one worktree anywhere under the project
+        # root ends in it, so the short form keeps working now that names nest.
+        if [ ! -d "$WT" ]; then
+          _hits="$(find "$PARENT" -maxdepth 3 -type d -name "$REUSE" 2>/dev/null)"
+          _n="$(printf '%s\n' "$_hits" | grep -c . || true)"
+          case "$_n" in
+            1) WT="$_hits" ;;
+            0) ;;
+            *) { echo "fleet-spawn: '$REUSE' is ambiguous — several worktrees have that name:"
+                 printf '%s\n' "$_hits" | sed "s|^$PARENT/|  |"
+                 echo "  pass the path as fleet-worktrees prints it"; } >&2; exit 1 ;;
+          esac
+        fi ;;
+  esac
+  [ -d "$WT" ] && [ "$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null)" = "$WT" ] \
+    && [ "$(git -C "$WT" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null)" ] \
+    || { echo "fleet-spawn: '$REUSE' is not a git worktree — see: fleet-worktrees" >&2; exit 1; }
   s="$(sess_for "$WT")"
   [ -z "$s" ] || { echo "fleet-spawn: worktree '$REUSE' is busy (session '$s'); pick a FREE one (fleet-worktrees)" >&2; exit 1; }
   if [ "$BRANCH_SET" = 1 ] || [ -n "$FROM" ]; then       # recycle: clean + rebranch in one step
@@ -256,6 +345,10 @@ else
       exit 1
     fi
   fi
+  # `git worktree add` creates the leaf, not the path above it: with a .worktrees/
+  # convention this is the call that has to bring that directory into being, and the
+  # FIRST worktree in a fresh clone is exactly when it doesn't exist yet.
+  mkdir -p "$WT_PARENT" 2>/dev/null || true
   if git -C "$GITROOT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
     git -C "$GITROOT" worktree add "$WT" "$BRANCH" >&2 || exit 1
   else

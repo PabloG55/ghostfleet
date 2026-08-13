@@ -166,7 +166,7 @@ control plane).
 | a **`· FREE`** card (grey) | a worktree with no live session — `⏎` attaches directly, no prompt |
 | `n` | new session on a checkout — lands on a **naming screen** (edit or accept the suggested name), then resumes if that checkout already has a conversation |
 | `N` | same, but the conversation is **forced blank** |
-| `w` | **new worktree** — a fresh sibling checkout on its own branch, with a session started in it |
+| `w` | **new worktree** — a fresh checkout on its own branch, with a session started in it (below) |
 | `t` / `Ctrl-x` | the **stack** — several sessions on screen at once, across projects (below) |
 | `Ctrl-t` / `Ctrl-n` | a **terminal / editor tab** on the selected card's folder (below) |
 | `x` | kill the session — or, on a `· FREE` card, **remove that worktree** (asks `y` to confirm) |
@@ -271,6 +271,26 @@ The not-a-card part is too — a card claims a *number*, so a terminal renumbere
 behind it and broke what `1`-`9`, `⇧←→` and `Ctrl-f <p> <s>` point at. So tabs are hidden from
 the grid, the ring and the numbering, and named `_term-…` / `_edit-…` so the agent machinery
 leaves them alone.
+
+### Where a worktree goes, and which ones you can reuse
+
+`w` puts a worktree beside the repo — unless the repo says otherwise. A repo that runs
+its own worktree doctrine (a `.worktrees/` directory, or one declared in `.gitignore`)
+gets its worktrees there instead. `CLAUDE_FLEET_WORKTREE_DIR` overrides either way;
+`sibling` forces the classic layout.
+
+This matters when the repo *enforces* its convention. superkey has a `PreToolUse` guard
+that denies any edit whose path lacks `.worktrees/` — it never asks git whether the path
+*is* a worktree — so a sibling worktree was refused as "the shared main checkout", the
+agent obeyed the refusal, and created a **second worktree nested inside the first**, plus
+a full dependency install. Two worktrees per task, with the session attached to the one
+that wasn't being edited.
+
+**A project can also be several clones.** `fleet-worktrees` spans every clone under the
+project root, not just the one you're standing in. superkey registers `~/superkey`, which
+isn't a repo at all — it holds four independent clones, each owning its own worktrees. A
+lead saw 2 and was blind to the other 17, so *reuse before proliferate* could never fire
+and every task made another one. `--here` restricts it to the current repo.
 
 ### Updating Claude Code under a fleet
 
