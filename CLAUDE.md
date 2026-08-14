@@ -30,6 +30,11 @@ takes effect on the next Projects screen. Long-lived processes do NOT:
 - a **running grid/Projects screen** keeps the old Node code until you back out and
   re-enter it
 - a **governor** is a daemon; `ensure_governor` restarts one whose code changed
+- an **MCP server** is spawned once per Claude session and lives as long as it, so a
+  session started before a `cf-sync` keeps calling the old `fleet-mcp.mjs`. Seen live: a
+  worker passed `fleet_stop(reclaim: true)` to a five-day-old server, which accepted the
+  argument and silently ignored it. The file on disk was current; the process was not.
+  Only a NEW session picks it up
 - **tmux bindings** load when the fleet's server is re-sourced (re-entering the project)
 - **zellij keybinds** only apply to a NEW zellij session
 
