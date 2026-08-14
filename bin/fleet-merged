@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# fleet-merged [repo-dir]
+#
+# Print the branch names whose PR has been MERGED, one per line. The answer to
+# "is this worktree finished?" — and the reason a fleet fills up with worktrees whose
+# work shipped weeks ago.
+#
+# WHY NOT ASK GIT. Every git-side test for "did this land" compares commits, and a
+# SQUASH-MERGE does not put the branch's commits in main — it puts one new commit there
+# with a different hash and a different patch-id. So `rev-list HEAD --not --remotes`,
+# `git cherry`, and `branch --merged` all report a squash-merged branch as unlanded.
+# Measured on one repo: 17 worktrees flagged as holding "129 unpushed commits", of which
+# 16 had merged PRs and the 17th had every one of its 12 added files already in main.
+# fleet-clean refused all of them on that evidence, which is why nothing could ever be
+# reclaimed automatically.
+#
+# The failure direction matters: this list makes cleanup MORE willing, so it must never
+# guess. No gh, no network, no PR -> print nothing, and every caller falls back to its
+# own conservative git checks. Silence here means "I don't know", never "nothing merged".
+#
+# Cached, because a lead calls this from fleet-inbox on every look and the answer moves
+# at the speed of merges, not keystrokes.
+set -uo pipefail
+
+REPO_DIR="${1:-$PWD}"
+TTL="${CLAUDE_FLEET_MERGED_TTL:-600}"          # seconds; 0 forces a refresh
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+
+command -v gh  >/dev/null 2>&1 || exit 0
+command -v git >/dev/null 2>&1 || exit 0
+slug="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null \
+        | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
+[ -n "$slug" ] || exit 0
+
+mkdir -p "$FLEET_DIR" 2>/dev/null
+cache="$FLEET_DIR/merged.$(printf '%s' "$slug" | tr '/' '_')"
+
+# Serve the cache while it is fresh. `find -newermt` would be cleaner but is not portable
+# to the BSD find on macOS, and `stat -f` is macOS-only — so compare mtimes the long way.
+if [ -f "$cache" ] && [ "$TTL" -gt 0 ]; then
+  now="$(date +%s)"
+  mt="$(date -r "$cache" +%s 2>/dev/null || stat -c %Y "$cache" 2>/dev/null || echo 0)"
+  [ $((now - mt)) -lt "$TTL" ] && { cat "$cache"; exit 0; }
+fi
+
+# --limit is deliberately generous: a short page would silently under-report, and an
+# under-report here reads as "not merged", which is the safe direction but makes the
+# whole feature look broken on a busy repo.
+out="$(gh pr list --repo "$slug" --state merged --limit 300 \
+        --json headRefName --jq '.[].headRefName' 2>/dev/null)" || exit 0
+[ -n "$out" ] || exit 0
+printf '%s\n' "$out" > "$cache" 2>/dev/null
+printf '%s\n' "$out"

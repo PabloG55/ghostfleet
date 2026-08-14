@@ -54,6 +54,11 @@ EOF
 locked_wt() { git -C "$GITROOT" worktree list --porcelain 2>/dev/null | awk -v w="$1" '
   /^worktree /{ cur=substr($0,10) } /^locked/{ if(cur==w){print "yes"; exit} }'; }
 
+# Branches whose PR is merged — asked once, cached by fleet-merged. Empty means "could
+# not tell", never "nothing is merged": every caller must fall back, not assume.
+MERGED="$("$(dirname "$0")/fleet-merged" "$GITROOT" 2>/dev/null || true)"
+is_merged() { [ -n "$MERGED" ] && printf '%s\n' "$MERGED" | grep -qxF -- "$1"; }
+
 echo "worktrees:"
 first=1; removed=0; kept=0
 while IFS=$'\t' read -r wt br; do
@@ -86,6 +91,15 @@ while IFS=$'\t' read -r wt br; do
 
   safe=0; why=""
   case "$br" in scratch/*) safe=1; why="scratch throwaway" ;; esac
+  # A MERGED PR IS THE DECISIVE ANSWER, and the git tests below cannot give it. They
+  # compare commits, and a squash-merge lands one NEW commit with a different hash and a
+  # different patch-id — so a branch whose work shipped weeks ago still looks unlanded.
+  # Measured on one repo: 16 of 17 worktrees were refused as holding "unpushed local
+  # commits" while every one of their PRs was already merged. That is why nothing here
+  # could ever reclaim the only kind of finished work the fleet actually produces.
+  #   fleet-merged prints nothing when it cannot know (no gh, no network, no PR), so the
+  # conservative git checks below still decide in that case.
+  if [ "$safe" = 0 ] && is_merged "$br"; then safe=1; why="PR merged"; fi
   if [ "$safe" = 0 ]; then
     up="$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
     if [ -n "$up" ] && [ "$(git -C "$wt" rev-list --count "$up..HEAD" 2>/dev/null || echo 1)" = 0 ]; then
