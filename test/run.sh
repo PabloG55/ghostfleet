@@ -2056,6 +2056,63 @@ else
   skip "finished worktrees" "git or tmux missing"
 fi
 
+# ── 4d11. "this worker is done" in one command ───────────────────────────────
+# Stopping a worker left its worktree behind, and fleet-stop's own header apologised for
+# it — "run `git worktree prune` in the repo". So finishing a worker was a stop here and
+# a raw git command somewhere else, and nothing an agent could reach at all: there is no
+# clean tool in MCP. A worker cannot do it for itself either; its cwd IS the worktree.
+#
+# The safety decision is NOT duplicated here — it is delegated to fleet-clean --only, so
+# there is exactly one set of gates. Both directions, because a --reclaim that removes
+# whatever it is pointed at is a data-loss bug wearing a convenience feature's clothes.
+group "fleet-stop --reclaim"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  RC="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$RC/fleet"
+  git init -q -b main "$RC/repo" 2>/dev/null
+  git -C "$RC/repo" config user.email t@t; git -C "$RC/repo" config user.name t
+  : > "$RC/repo/f"; git -C "$RC/repo" add -A; git -C "$RC/repo" commit -qm i 2>/dev/null
+  git -C "$RC/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null
+  git -C "$RC/repo" worktree add -q "$RC/repo/.worktrees/shipped" -b feat/shipped 2>/dev/null
+  git -C "$RC/repo" worktree add -q "$RC/repo/.worktrees/wip"     -b feat/wip 2>/dev/null
+  echo scratch > "$RC/repo/.worktrees/wip/dirty.txt"
+  printf 'feat/shipped\n' > "$RC/fleet/merged.acme_widget"     # seed, so no gh call
+  tmux -L cfrecl kill-server 2>/dev/null
+  tmux -L cfrecl new-session -d -s master  -c "$RC/repo" 'sleep 90' 2>/dev/null
+  tmux -L cfrecl new-session -d -s shipped -c "$RC/repo/.worktrees/shipped" 'sleep 90' 2>/dev/null
+  tmux -L cfrecl new-session -d -s wip     -c "$RC/repo/.worktrees/wip" 'sleep 90' 2>/dev/null
+  sleep 0.6
+  stop() { env -u TMUX CLAUDE_FLEET_DIR="$RC/fleet" "$ROOT/bin/fleet-stop" -s cfrecl "$@" 2>&1; }
+
+  out="$(stop --reclaim shipped)"
+  is "a finished worker: session gone"  "0" "$(tmux -L cfrecl has-session -t '=shipped' 2>/dev/null && echo 1 || echo 0)"
+  is "...and its worktree removed"      "0" "$([ -d "$RC/repo/.worktrees/shipped" ] && echo 1 || echo 0)"
+  is "...for the stated reason"         "1" "$(printf '%s' "$out" | grep -c 'PR merged' || true)"
+
+  out="$(stop --reclaim wip)"
+  is "an unfinished worker: still stops" "0" "$(tmux -L cfrecl has-session -t '=wip' 2>/dev/null && echo 1 || echo 0)"
+  is "...but the worktree is KEPT"       "1" "$([ -d "$RC/repo/.worktrees/wip" ] && echo 1 || echo 0)"
+  is "...saying why"                     "1" "$(printf '%s' "$out" | grep -c 'uncommitted changes' || true)"
+
+  # without the flag it must behave exactly as it always did — stop only, git untouched
+  tmux -L cfrecl new-session -d -s wip2 -c "$RC/repo/.worktrees/wip" 'sleep 90' 2>/dev/null; sleep 0.4
+  stop wip2 >/dev/null
+  is "no --reclaim -> worktree untouched" "1" "$([ -d "$RC/repo/.worktrees/wip" ] && echo 1 || echo 0)"
+
+  # a main checkout is never removed, whatever the session sitting in it is called
+  tmux -L cfrecl new-session -d -s home -c "$RC/repo" 'sleep 90' 2>/dev/null; sleep 0.4
+  out="$(stop --reclaim home)"
+  is "a MAIN checkout is refused"        "1" "$(printf '%s' "$out" | grep -c 'is a main checkout' || true)"
+  is "...and still exists"               "1" "$([ -d "$RC/repo/.git" ] && echo 1 || echo 0)"
+  tmux -L cfrecl kill-server 2>/dev/null; rm -rf "$RC"
+else
+  skip "fleet-stop --reclaim" "git or tmux missing"
+fi
+# ...and an agent can actually reach it, which was half the gap: there is no clean tool
+# in MCP at all, so a lead had to shell out to a command that was all-or-nothing.
+group "reclaim is reachable from MCP"
+is "fleet_stop takes reclaim" "1" "$(grep -c "a.reclaim ? \['--reclaim'" "$ROOT/mcp/fleet-mcp.mjs" || true)"
+is "...and it is in the schema" "1" "$(grep -c "reclaim: { type: 'boolean'" "$ROOT/mcp/fleet-mcp.mjs" || true)"
+
 # ── 4e. the governor parks on a fossil its own park created ──────────────────
 # A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
 # still shows the figure it was painting when it was parked. Skipping PARKED panes was
