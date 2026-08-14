@@ -278,6 +278,25 @@ link_node_modules() {
   case "${CLAUDE_FLEET_LINK_NM:-1}" in 0|off|no|false) return 0 ;; esac
   [ -e "$wt/node_modules" ] && return 0                  # worktree already has its own
   [ -d "$GITROOT/node_modules" ] || return 0             # nothing to link
+  # NEVER INTO A WORKSPACE. The convenience is real for a plain repo and actively
+  # destructive here, twice over:
+  #   - the root node_modules links workspace packages by RELATIVE path
+  #     (node_modules/@scope/db -> ../packages/db), and through a symlinked
+  #     node_modules that resolves from the symlink's REAL location — the main
+  #     checkout. The worktree silently typechecks and tests the source it is not
+  #     editing.
+  #   - a `pnpm install` in the worktree writes THROUGH the symlink into the main
+  #     checkout, rewriting its .pnpm store underneath it. Reported live: "Root
+  #     node_modules/vitest is a dangling symlink — the new worktree's install
+  #     disturbed the main checkout's links."
+  # Opting out was previously the repo's job (a .ghostfleet/post-create, whose mere
+  # existence skips this) — but a repo should not have to know that to avoid its shared
+  # checkout being corrupted. Detect it here instead.
+  if [ -f "$GITROOT/pnpm-workspace.yaml" ] \
+     || grep -q '"workspaces"' "$GITROOT/package.json" 2>/dev/null; then
+    echo "fleet-spawn: $NAME is a workspace — NOT symlinking node_modules (an install there would rewrite the main checkout's). Run your installer in the worktree." >&2
+    return 0
+  fi
   ln -s "$GITROOT/node_modules" "$wt/node_modules" 2>/dev/null \
     && echo "fleet-spawn: linked node_modules from the main checkout so tests/lint run (opt out: CLAUDE_FLEET_LINK_NM=0)" >&2
 }

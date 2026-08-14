@@ -2107,6 +2107,46 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
 else
   skip "fleet-stop --reclaim" "git or tmux missing"
 fi
+# FLAGS ON EITHER SIDE OF THE SESSION. The first cut broke out of the arg loop at the
+# first non-flag, so `fleet-stop <session> --reclaim` parsed the session and then
+# SILENTLY DROPPED the flag: session stopped, worktree left, nothing said why. An agent
+# hit it within a day — having copied that order from this repo's own skill table. An
+# ignored option is worse than a rejected one, so an unknown flag is now an error too.
+group "fleet-stop flag order"
+fs() { env -u TMUX CLAUDE_FLEET_SOCK=cf-nosuch "$ROOT/bin/fleet-stop" "$@" 2>&1 | head -1; }
+is "flag BEFORE the session"  "1" "$(fs --reclaim ghost | grep -c "no live session 'ghost'" || true)"
+is "flag AFTER the session"   "1" "$(fs ghost --reclaim | grep -c "no live session 'ghost'" || true)"
+is "an unknown flag errors"   "1" "$(fs --bogus ghost | grep -c 'unknown option' || true)"
+is "a second session errors"  "1" "$(fs a b | grep -c 'unexpected arg' || true)"
+# and the skill must teach the form that works, since that is where the agent copied from
+is "the skill shows a working form" "0" \
+   "$(grep -c 'fleet-stop <session> --reclaim' "$ROOT/skill/ghostfleet-orchestrate/SKILL.md" || true)"
+
+# A WORKSPACE MUST NOT GET THE node_modules SYMLINK. Convenient for a plain repo,
+# destructive here: the root node_modules links workspace packages by RELATIVE path, so
+# through a symlink they resolve from the MAIN checkout — and an install in the worktree
+# writes THROUGH the symlink into it. Reported live as "Root node_modules/vitest is a
+# dangling symlink — the new worktree's install disturbed the main checkout's links."
+group "no node_modules symlink into a workspace"
+if command -v git >/dev/null 2>&1; then
+  WS="$(cd "$(mktemp -d)" && pwd -P)"
+  eval "$(sed -n '/^link_node_modules() {/,/^}/p' "$ROOT/bin/fleet-spawn")"
+  mk() { mkdir -p "$WS/$1/node_modules"; printf '{}' > "$WS/$1/package.json"; mkdir -p "$WS/$1-wt"; }
+  mk plain
+  mk pnpmws; printf 'packages:\n  - packages/*\n' > "$WS/pnpmws/pnpm-workspace.yaml"
+  mk npmws;  printf '{"workspaces":["packages/*"]}' > "$WS/npmws/package.json"
+  linked() { GITROOT="$WS/$1" NAME="$1" link_node_modules "$WS/$1-wt" 2>/dev/null
+             [ -L "$WS/$1-wt/node_modules" ] && echo yes || echo no; }
+  is "a plain repo still gets the link" "yes" "$(linked plain)"
+  is "a pnpm workspace does NOT"        "no"  "$(linked pnpmws)"
+  is "an npm/yarn workspace does NOT"   "no"  "$(linked npmws)"
+  is "...and it says why"               "1" \
+     "$(GITROOT="$WS/pnpmws" NAME=pnpmws link_node_modules "$WS/pnpmws-wt" 2>&1 | grep -c 'rewrite the main checkout' || true)"
+  rm -rf "$WS"
+else
+  skip "workspace symlink guard" "git missing"
+fi
+
 # ...and an agent can actually reach it, which was half the gap: there is no clean tool
 # in MCP at all, so a lead had to shell out to a command that was all-or-nothing.
 group "reclaim is reachable from MCP"

@@ -151,7 +151,7 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | see all worktrees + which are free | `fleet-worktrees` |
 | see live sessions + status | `fleet-list` |
 | check who needs you / what finished | `fleet-inbox` — its footer also names worktrees whose PR merged and are safe to reclaim |
-| a worker is done for good | `fleet-stop <session> --reclaim` — stops it AND removes its worktree when safe, or keeps it and says why |
+| a worker is done for good | `fleet-stop --reclaim <session>` — stops it AND removes its worktree when safe, or keeps it and says why. One call, not stop-then-remove: the worktree path is read from the live session, and a two-step teardown leaves a window for the session to come back |
 | dispatch a task | `fleet-send <session> "<self-contained brief>"` |
 | **ask** a session something (answer comes back) | `fleet-send --reply-to me <session> "<question>"` |
 | read a worker's output | `fleet-read <session> [n]` |
