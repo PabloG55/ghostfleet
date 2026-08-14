@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-clean [-s SOCKET] [--go]
+# fleet-clean [-s SOCKET] [--go] [--agents] [--only <worktree-path>]
 #
 # Tear down FINISHED work in the current fleet. DRY RUN by default — prints exactly
 # what it would do; re-run with --go to actually apply it.
@@ -19,12 +19,16 @@ set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-GO=0; AGENTS=0
+GO=0; AGENTS=0; ONLY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)       SOCK="${2:?}"; shift 2 ;;
     --go)     GO=1; shift ;;
     --agents) AGENTS=1; shift ;;      # also sweep Claude's own .claude/worktrees/ trees
+    # Restrict the sweep to ONE worktree. Exists so `fleet-stop --reclaim` can finish a
+    # single worker without inheriting a second copy of the "is this safe to remove"
+    # rules — the gates below are the only ones, and they stay the only ones.
+    --only)   ONLY="${2:?}"; shift 2 ;;
     *) echo "fleet-clean: unknown arg $1" >&2; exit 1 ;;
   esac
 done
@@ -65,6 +69,7 @@ while IFS=$'\t' read -r wt br; do
   [ -n "$wt" ] || continue
   if [ "$first" = 1 ]; then first=0; continue; fi            # main checkout — never touch
   base="${wt##*/}"
+  if [ -n "$ONLY" ]; then case "$wt" in "$ONLY"|"$ONLY"/) ;; *) continue ;; esac; fi
   # Claude Code's OWN worktrees — the Agent tool's isolation:worktree trees AND the ones
   # EnterWorktree makes. A live subagent runs inside a Claude process, NOT a tmux session,
   # so the no-live-session test can't see it; removing one could yank the rug from a
