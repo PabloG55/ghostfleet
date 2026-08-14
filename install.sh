@@ -108,7 +108,7 @@ GUARD="$FLEET_HOME/hooks/fleet-guard.sh"
 mkdir -p "$BIN_DIR"
 CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read
          fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar
-         fleet-worktrees fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy
+         fleet-worktrees fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy fleet-merged
          fleet-clean fleet-open fleet-project fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot
          agent-here opencode-here codex-here)

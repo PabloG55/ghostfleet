@@ -63,6 +63,13 @@ busy() {
   tmux -L "$SOCK" capture-pane -p -t "$1" 2>/dev/null | grep -qE "$re"
 }
 is_parked() { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
+# FINISHED means "its PR merged", which no git test can answer in a squash-merge repo:
+# the squash lands one NEW commit, so the branch's own commits are never in main and
+# every reachability check calls shipped work unlanded. fleet-merged asks GitHub and
+# caches; it prints nothing when it cannot tell, so silence degrades to FREE, never to
+# a confident DONE.
+MERGED="$("$(dirname "$0")/fleet-merged" "$PWD" 2>/dev/null || true)"
+is_merged() { [ -n "$MERGED" ] && printf '%s\n' "$MERGED" | grep -qxF -- "$1"; }
 task_for()  { awk -F'\t' -v w="$1" '$1==w{print $4; exit}' "$MANIFEST" 2>/dev/null; }
 git_state() {                      # "clean|dirty" (+ahead / -behind vs upstream)
   local wt="$1" d="" ab="" behind="" ahead="" extra=""
@@ -99,13 +106,13 @@ wts_of() {                         # path<TAB>branch for one repo; first line = 
 # is exact, and it is what keeps a WORKTREE of one clone from being walked a second time
 # as if it were a clone itself). Single-repo projects find exactly one and are unchanged.
 # --here restricts it to the current repo, which is the old behaviour.
-HERE=0; FREE_ONLY=0
+HERE=0; FREE_ONLY=0; DONE_ONLY=0
 # --free: just the reusable ones, "<abs path><TAB><branch>", for fleet-spawn's
 # reuse-before-proliferate check. A machine mode rather than parsing the table below,
 # so the two can never disagree about what "free" means — that agreement is the whole
 # point of this file existing.
 for a in "$@"; do
-  case "$a" in --here) HERE=1 ;; --free) FREE_ONLY=1 ;; esac
+  case "$a" in --here) HERE=1 ;; --free) FREE_ONLY=1 ;; --done) DONE_ONLY=1 ;; esac
 done
 GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)"
 PROOT="$(dirname "$GITROOT")"
@@ -142,7 +149,7 @@ EOF
 # from it, so seeing it here is what makes "which stack is this?" answerable without
 # digging. Blank when this checkout has none; 0 is the project's primary.
 slot_for() { "$(dirname "$0")/fleet-slot" of "$1" 2>/dev/null || printf '-'; }
-[ "$FREE_ONLY" = 1 ] || printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' WORKTREE BRANCH SESSION STATE SLOT GIT TASK
+{ [ "$FREE_ONLY" = 1 ] || [ "$DONE_ONLY" = 1 ]; } || printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' WORKTREE BRANCH SESSION STATE SLOT GIT TASK
 # A LABEL YOU CAN PASTE BACK. Basenames repeat across clones once several of them keep a
 # .worktrees/ each, so the old bare basename was ambiguous AND wrong to hand to --reuse.
 # Relative to the project root it is unique, readable, and exactly what --reuse resolves.
@@ -155,7 +162,7 @@ while IFS= read -r r; do [ -n "$r" ] && ROOTS="$ROOTS$r|"; done <<EOF
 $repos
 EOF
 
-free=""
+free=""; done_list=""
 while IFS=$'\t' read -r wt br; do
   [ -n "$wt" ] || continue
   # NOT OURS TO HAND OUT. Claude Code's own trees — the Agent tool's isolation:worktree,
@@ -169,7 +176,7 @@ while IFS=$'\t' read -r wt br; do
   # a worktree dir that git still lists but no longer exists on disk (removed with
   # rm -rf instead of `git worktree remove`) — flag it; `git worktree prune` tidies it.
   if [ ! -d "$wt" ]; then
-    [ "$FREE_ONLY" = 1 ] || printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' "${base:0:38}" "${br:0:22}" "-" "gone" "-" "-" "git worktree prune"
+    { [ "$FREE_ONLY" = 1 ] || [ "$DONE_ONLY" = 1 ]; } || printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' "${base:0:38}" "${br:0:22}" "-" "gone" "-" "-" "git worktree prune"
     continue
   fi
   sess="$(sess_for "$wt")"
@@ -183,10 +190,17 @@ while IFS=$'\t' read -r wt br; do
     else state=idle; fi
   else
     sess="-"; task="-"    # no live session -> the manifest task refers to a gone session; don't show it stale
-    case "$git" in clean*) state=FREE; free="$free $base" ;; *) state=stale ;; esac
+    case "$git" in
+      clean*) if is_merged "$br"; then state=DONE; done_list="$done_list $base"
+              else state=FREE; fi
+              free="$free $base" ;;      # DONE is reusable too — clean and sessionless
+      *)      state=stale ;;
+    esac
   fi
-  if [ "$FREE_ONLY" = 1 ]; then
-    [ "$state" = FREE ] && printf '%s\t%s\n' "$wt" "$br"
+  if [ "$DONE_ONLY" = 1 ]; then
+    [ "$state" = DONE ] && printf '%s\t%s\n' "$wt" "$br"
+  elif [ "$FREE_ONLY" = 1 ]; then
+    { [ "$state" = FREE ] || [ "$state" = DONE ]; } && printf '%s\t%s\n' "$wt" "$br"
   else
     printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' \
       "${base:0:38}" "${br:0:22}" "${sess:0:14}" "$state" "$(slot_for "$wt")" "$git" "${task:0:60}"
@@ -195,8 +209,15 @@ done <<EOF
 $wts
 EOF
 
-[ "$FREE_ONLY" = 1 ] && exit 0
+{ [ "$FREE_ONLY" = 1 ] || [ "$DONE_ONLY" = 1 ]; } && exit 0
 echo
+if [ -n "$done_list" ]; then
+  n="$(printf '%s' "$done_list" | wc -w | tr -d ' ')"
+  echo "Finished ($n) — PR merged, nothing to lose:"
+  for f in $done_list; do echo "  $f"; done
+  echo "  reclaim: fleet-clean --go"
+  echo
+fi
 if [ -n "$free" ]; then
   # Sixteen of these on one line is a wall, not a list — and this is the line a lead is
   # meant to read BEFORE deciding to create another worktree.
