@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-stop [-s SOCKET] [--reclaim] <session>
+# fleet-stop [-s SOCKET] [--reclaim] <session>      (flags may go on either side)
 #
 # Cleanly STOP a fleet worker: kill its tmux session and clear ALL of its fleet
 # state — the status file, the park + schedule markers (and the detached schedule
@@ -28,15 +28,21 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-RECLAIM=0
+# FLAGS ARE ACCEPTED IN ANY POSITION. The first cut broke out of this loop at the first
+# non-flag, so `fleet-stop <session> --reclaim` parsed the session and then SILENTLY
+# DROPPED the flag — the session stopped, the worktree stayed, and nothing said why. A
+# real agent hit that within a day, having copied the order from this repo's own skill
+# table. An option that is ignored without complaint is worse than one that errors.
+RECLAIM=0; SESSION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)        SOCK="${2:-}"; shift 2 ;;
     --reclaim) RECLAIM=1; shift ;;
-    *)         break ;;
+    -*)        echo "fleet-stop: unknown option $1" >&2; exit 1 ;;
+    *)         [ -z "$SESSION" ] && SESSION="$1" || { echo "fleet-stop: unexpected arg $1" >&2; exit 1; }
+               shift ;;
   esac
 done
-SESSION="${1:-}"
 
 [ -n "$SOCK" ]    || { echo "fleet-stop: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 [ -n "$SESSION" ] || { echo "fleet-stop: usage: fleet-stop [-s socket] <session>" >&2; exit 1; }
