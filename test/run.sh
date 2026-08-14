@@ -1996,6 +1996,66 @@ else
   skip "cross-clone worktrees" "git or tmux missing"
 fi
 
+# ── 4d10. finished work has to announce itself ───────────────────────────────
+# A worker that merges its PR and goes idle leaves a worktree behind, and nothing ever
+# said so — one fleet reached 19, fifteen of them idle, before anyone counted.
+#
+# "Finished" cannot be asked of git. A SQUASH-MERGE lands one NEW commit, so the
+# branch's own commits are never in main and every reachability test (rev-list --not
+# --remotes, git cherry, branch --merged) calls shipped work unlanded. Measured: 16 of
+# 17 worktrees were refused as holding "unpushed local commits" while every one of their
+# PRs was merged. fleet-merged asks GitHub instead, and the cache it keeps is what makes
+# it cheap enough for fleet-inbox to call on every look.
+group "finished worktrees surface to the lead"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  FD="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$FD/fleet"
+  mkr() { git init -q -b main "$FD/repo" 2>/dev/null; git -C "$FD/repo" config user.email t@t
+          git -C "$FD/repo" config user.name t; : > "$FD/repo/f"
+          git -C "$FD/repo" add -A; git -C "$FD/repo" commit -qm i 2>/dev/null
+          git -C "$FD/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null; }
+  mkr
+  git -C "$FD/repo" worktree add -q "$FD/repo/.worktrees/shipped"  -b feat/shipped  2>/dev/null
+  git -C "$FD/repo" worktree add -q "$FD/repo/.worktrees/ongoing"  -b feat/ongoing  2>/dev/null
+  git -C "$FD/repo" worktree add -q "$FD/repo/.worktrees/messy"    -b feat/messy    2>/dev/null
+  echo scratch > "$FD/repo/.worktrees/messy/dirty.txt"
+  # Seed fleet-merged's cache instead of reaching the network: same code path, same
+  # file, no gh call. Only feat/shipped has a merged PR.
+  printf 'feat/shipped\n' > "$FD/fleet/merged.acme_widget"
+  tmux -L cffin kill-server 2>/dev/null; tmux -L cffin new-session -d -s master 'sleep 60' 2>/dev/null
+  wt() { ( cd "$FD/repo" && env -u TMUX CLAUDE_FLEET_DIR="$FD/fleet" CLAUDE_FLEET_SOCK=cffin \
+           "$ROOT/bin/fleet-worktrees" "$@" 2>/dev/null ); }
+  is "the merged one is DONE"        "1" "$(wt --done | grep -c 'worktrees/shipped' || true)"
+  is "an unmerged one is not"        "0" "$(wt --done | grep -c 'worktrees/ongoing' || true)"
+  is "a dirty one is not"            "0" "$(wt --done | grep -c 'worktrees/messy'   || true)"
+  # DONE is still reusable — clean and sessionless is the whole definition of free
+  is "...but DONE is still offered as free" "1" "$(wt --free | grep -c 'worktrees/shipped' || true)"
+  # a live session outranks everything: it is neither free nor finished
+  tmux -L cffin new-session -d -s w1 -c "$FD/repo/.worktrees/shipped" 'sleep 60' 2>/dev/null
+  sleep 0.5
+  is "a live session makes it neither"  "0" "$(wt --done | grep -c 'worktrees/shipped' || true)"
+  tmux -L cffin kill-session -t '=w1' 2>/dev/null; sleep 0.5
+
+  # fleet-clean must now agree, or --go still refuses the only finished work there is
+  cl="$( cd "$FD/repo" && env -u TMUX CLAUDE_FLEET_DIR="$FD/fleet" CLAUDE_FLEET_SOCK=cffin \
+         "$ROOT/bin/fleet-clean" 2>/dev/null )"
+  is "fleet-clean calls it merged"   "1" "$(printf '%s' "$cl" | grep -c 'remove shipped .*PR merged' || true)"
+  is "...and still keeps the dirty"  "1" "$(printf '%s' "$cl" | grep -c 'keep messy' || true)"
+
+  # the footer is the whole point: it must appear on the QUIET path, which is the one a
+  # lead sees most and the one it would otherwise never be read under
+  ib() { ( cd "$FD/repo" && env -u TMUX CLAUDE_FLEET_DIR="$FD/fleet" CLAUDE_FLEET_SOCK=cffin \
+           "$ROOT/bin/fleet-inbox" 2>/dev/null ); }
+  is "inbox is quiet here"           "1" "$(ib | grep -c 'inbox: (empty)' || true)"
+  is "...and still surfaces it"      "1" "$(ib | grep -c 'finished & reclaimable (1)' || true)"
+  is "...naming the worktree"        "1" "$(ib | grep -c 'shipped  (feat/shipped)' || true)"
+  # and says nothing when there is nothing — a footer that always fires is noise
+  rm -f "$FD/fleet/merged.acme_widget"
+  is "silent when nothing is finished" "0" "$(ib | grep -c 'finished & reclaimable' || true)"
+  tmux -L cffin kill-server 2>/dev/null; rm -rf "$FD"
+else
+  skip "finished worktrees" "git or tmux missing"
+fi
+
 # ── 4e. the governor parks on a fossil its own park created ──────────────────
 # A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
 # still shows the figure it was painting when it was parked. Skipping PARKED panes was

@@ -111,6 +111,24 @@ master. `Ctrl-f 1 s` = project 1's grid. `Ctrl-f s 1` = the same, short form.
 [CODE] — the README only summarizes this in one comment line in `bin/ghostfleet`,
 without detailing the sub-steps or that `Escape` cancels at any level.
 
+
+### Knowing when a worktree is finished
+
+`fleet-worktrees` marks a worktree **DONE** when its PR is merged, it has no session and
+its tree is clean — and `fleet-inbox` repeats that as a footer, including on the
+`inbox: nothing new` path, because that is the answer a lead sees most often. Nothing is
+deleted automatically; the lead runs `fleet-clean --go`.
+
+**"Finished" cannot be asked of git.** A squash-merge lands one *new* commit, so the
+branch's own commits are never in `main` and every reachability test — `rev-list --not
+--remotes`, `git cherry`, `branch --merged` — reports shipped work as unlanded. Measured
+on one fleet: 16 of 17 worktrees were refused as holding "unpushed local commits" while
+every one of their PRs was merged. `bin/fleet-merged` asks GitHub instead and caches the
+answer (10 min, `CLAUDE_FLEET_MERGED_TTL`). When it cannot tell — no `gh`, no network, no
+PR — it prints nothing, and every caller falls back to the conservative git checks. That
+direction matters: this list makes cleanup *more* willing, so silence must never read as
+"nothing merged".
+
 ### `fleet-awake` — keeping the machine alive for the whole session
 
 Not a keybinding, but worth knowing: `bin/ghostfleet` arms `fleet-awake` (an idle-sleep

@@ -58,12 +58,36 @@ if [ "$MODE" = clear ]; then
   exit 0
 fi
 
-[ -f "$INBOX" ] && [ -s "$INBOX" ] || { echo "inbox: (empty)"; exit 0; }
+
+# FINISHED WORK DOES NOT ANNOUNCE ITSELF. A worker that merges its PR and goes idle
+# leaves a worktree behind, and nothing ever said so — one fleet reached 19 of them, 15
+# idle, before anyone counted. The nudge already sends a lead here when a worker
+# finishes, so this is the one place the fact reliably gets read.
+#   Surfaced, never acted on: the lead decides. And it is a footer on EVERY exit path,
+# because "inbox: nothing new" is the most common answer and the one you would otherwise
+# never see it under.
+reclaimable() {
+  local wt out n
+  wt="$(dirname "$0")/fleet-worktrees"
+  [ -x "$wt" ] || return 0
+  out="$("$wt" -s "$SOCK" --done 2>/dev/null)" || return 0
+  n="$(printf '%s' "$out" | grep -c . || true)"
+  [ "${n:-0}" -gt 0 ] || return 0
+  echo
+  echo "finished & reclaimable ($n) — PR merged, no session, clean:"
+  printf '%s\n' "$out" | while IFS=$'\t' read -r p b; do
+    [ -n "$p" ] || continue; echo "  ${p##*/}  ($b)"
+  done
+  echo "  reclaim: fleet-clean --go"
+}
+
+[ -f "$INBOX" ] && [ -s "$INBOX" ] || { echo "inbox: (empty)"; reclaimable; exit 0; }
 
 if [ "$MODE" = all ]; then
   n="$(wc -l < "$INBOX" | tr -d ' ')"
   echo "inbox — all ($n):"
   fmt < "$INBOX"
+  reclaimable
   exit 0
 fi
 
@@ -73,8 +97,10 @@ seen="$(cat "$SEEN" 2>/dev/null || echo 0)"; case "$seen" in ''|*[!0-9]*) seen=0
 if [ "$total" -le "$seen" ]; then
   [ "$seen" -gt "$total" ] && printf '%s\n' "$total" > "$SEEN" 2>/dev/null   # inbox was cleared/rotated
   echo "inbox: nothing new"
+  reclaimable
   exit 0
 fi
 echo "inbox — $((total - seen)) new:"
 tail -n +"$((seen + 1))" "$INBOX" | fmt
 printf '%s\n' "$total" > "$SEEN" 2>/dev/null || true
+reclaimable
