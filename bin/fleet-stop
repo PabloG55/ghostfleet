@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-stop [-s SOCKET] <session>
+# fleet-stop [-s SOCKET] [--reclaim] <session>
 #
 # Cleanly STOP a fleet worker: kill its tmux session and clear ALL of its fleet
 # state — the status file, the park + schedule markers (and the detached schedule
@@ -10,8 +10,15 @@
 # (its cwd just vanishes), so it lingers in `fleet-list` forever. fleet-pause only
 # PARKS (keeps the session); this is the actual "stop".
 #
-# It does NOT touch git. If the worktree dir is now stale, tidy git's admin with
-# `git worktree prune` (or `git worktree remove --force <dir>`) in the repo.
+# On its own it does NOT touch git — the checkout stays. `--reclaim` finishes the job:
+# stop the worker AND remove its worktree, so "this one is done" is one command instead
+# of a stop here and a `git worktree remove` somewhere else. A worker cannot do this for
+# itself: its cwd IS the worktree, and pulling it out from under a live session is what
+# produces "working directory no longer exists".
+#   The decision of whether removal is safe is NOT made here. It is delegated to
+# `fleet-clean --only <path> --go`, which owns the gates (clean tree, no other session,
+# PR merged or fully pushed) — a second copy of those rules is a second thing to be
+# wrong, and being wrong here deletes work.
 #
 # Socket defaults to $CLAUDE_FLEET_SOCK.
 set -uo pipefail
@@ -21,7 +28,14 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
+RECLAIM=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s)        SOCK="${2:-}"; shift 2 ;;
+    --reclaim) RECLAIM=1; shift ;;
+    *)         break ;;
+  esac
+done
 SESSION="${1:-}"
 
 [ -n "$SOCK" ]    || { echo "fleet-stop: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
@@ -31,6 +45,16 @@ SESSION="${1:-}"
   && { echo "fleet-stop: refusing to stop the calling session ('$SESSION')" >&2; exit 1; }
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+
+# WHERE THIS WORKER LIVES, asked while it is still alive. Once the session is killed
+# tmux cannot answer, and the manifest can be stale for a session that was renamed or
+# rebuilt — so read the pane's cwd first and keep it.
+WT=""
+if [ "$RECLAIM" = 1 ]; then
+  WT="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+  # the pane may be deeper in the tree than the checkout root; resolve to the worktree
+  [ -n "$WT" ] && WT="$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)"
+fi
 
 # 1) kill the schedule waiter first — it's a detached process group that outlives
 #    the tmux session, so killing the session alone would leave it to fire later.
@@ -85,4 +109,26 @@ if command -v jq >/dev/null 2>&1; then
   done
 fi
 
-echo "fleet-stop: cleared '$SESSION' state. If its git worktree dir is stale, run: git worktree prune"
+if [ "$RECLAIM" != 1 ]; then
+  echo "fleet-stop: cleared '$SESSION' state. If its git worktree dir is stale, run: git worktree prune"
+  exit 0
+fi
+
+echo "fleet-stop: cleared '$SESSION' state."
+if [ -z "$WT" ]; then
+  echo "fleet-stop: could not tell which worktree '$SESSION' was in — nothing removed." >&2
+  exit 0
+fi
+# Never the main checkout, whatever the session was called: git-dir == git-common-dir
+# only in a repo's own root, and that is somebody's home rather than a task's leftovers.
+if [ "$(git -C "$WT" rev-parse --git-dir 2>/dev/null)" = "$(git -C "$WT" rev-parse --git-common-dir 2>/dev/null)" ]; then
+  echo "fleet-stop: '$WT' is a main checkout, not a worktree — left alone." >&2
+  exit 0
+fi
+MAIN_CO="$(git -C "$WT" worktree list 2>/dev/null | head -1 | awk '{print $1}')"
+CLEAN="$(dirname "$0")/fleet-clean"
+[ -x "$CLEAN" ] || { echo "fleet-stop: fleet-clean not found — worktree left at $WT" >&2; exit 0; }
+# Runs FROM the main checkout: fleet-clean resolves its repo from $PWD, and the
+# directory it is about to remove is a poor place to be standing.
+( cd "$MAIN_CO" 2>/dev/null && "$CLEAN" -s "$SOCK" --only "$WT" --go ) | sed 's/^/  /'
+[ -d "$WT" ] && echo "fleet-stop: kept $WT (see the reason above)" || echo "fleet-stop: reclaimed $WT"

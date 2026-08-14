@@ -119,6 +119,12 @@ its tree is clean — and `fleet-inbox` repeats that as a footer, including on t
 `inbox: nothing new` path, because that is the answer a lead sees most often. Nothing is
 deleted automatically; the lead runs `fleet-clean --go`.
 
+`fleet-stop <session> --reclaim` is the one-command version for a single worker: it
+stops the session and removes its worktree, delegating the "is that safe" decision to
+`fleet-clean --only` so there is exactly one set of gates. If it is not safe the session
+still stops and the worktree is kept with the reason printed. Agents reach it as
+`fleet_stop(reclaim: true)`.
+
 **"Finished" cannot be asked of git.** A squash-merge lands one *new* commit, so the
 branch's own commits are never in `main` and every reachability test — `rev-list --not
 --remotes`, `git cherry`, `branch --merged` — reports shipped work as unlanded. Measured
