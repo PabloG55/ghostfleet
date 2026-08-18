@@ -9,9 +9,11 @@
 # Socket defaults to $CLAUDE_FLEET_SOCK (exported into every fleet session).
 # Uses a bracketed paste so multi-line prompts go in as ONE message, then Enter.
 #
-# --reply-to makes it a CONVERSATION instead of a one-way dispatch: it records who
-# asked, so when the target's turn ends the event hook relays the answer back into
-# the asker's inbox and wakes it. Without it, a send is fire-and-forget — the target's
+# --reply-to makes it a CONVERSATION instead of a one-way dispatch. It asks the target to
+# answer the asker DIRECTLY, by name, with Claude Code's cross-session messaging
+# (SendMessage) — which lands even when the asker is mid-turn — and it records who asked,
+# so a turn that never gets there still has its last message relayed into the asker's
+# inbox by the event hook. Without it, a send is fire-and-forget — the target's
 # Stop only ever reaches ITS OWN fleet's master (hooks/fleet-event.sh), which is why a
 # question sent across projects looked like it was ignored. See that hook for the
 # routing; --reply-dir is for callers whose env doesn't name the asker's fleet dir.
@@ -70,6 +72,16 @@ case "$SESSION" in
   _term-*|_edit-*) echo "fleet-send: '$SESSION' is a tab (a shell), not an agent — it cannot be prompted" >&2; exit 1 ;;
 esac
 
+# WHICH AGENT runs the target, resolved BEFORE the reply preamble is built and reused by
+# the busy detector further down. It decides what the target can be TOLD to do: SendMessage
+# is a Claude Code tool, and telling codex/opencode to call it would replace a hint they
+# can act on with one they can't. Unknown (no fleet-agent installed) counts as claude —
+# the same default the rest of this script has always taken.
+_a=""
+if command -v fleet-agent >/dev/null 2>&1; then
+  _a="$(fleet-agent of "$SESSION" -s "$SOCK" 2>/dev/null)"
+fi
+
 # --- the reply address ---------------------------------------------------------
 # WHY A MARKER RATHER THAN JUST TELLING THE TARGET TO ANSWER: you CAN put a return
 # address in the prompt — "reply with fleet-send -s cf-x master …" — and it works, but
@@ -126,15 +138,50 @@ if [ -n "$REPLY_TO" ]; then
   # armed to the turn that is running RIGHT NOW and answer it with that turn's work.
   rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
 
+  # THE ASKER'S PEER NAME — what Claude Code's cross-session messaging can address, and
+  # the reason bin/claude-here now passes --name: it is the SAME string the hook prints in
+  # an inbox row, so `${RSOCK#cf-}/$RSESS` is one derivation used on both sides rather than
+  # two that have to be kept in step.
+  RPEER="${RSOCK#cf-}/$RSESS"
+
   # Tell the target what it's in, PREPENDED. Not appended: the paste-landed probe below
   # is the last 24 chars of the message, and a fixed boilerplate tail would be the same
   # 24 chars on every relayed send — the probe would match a PREVIOUS one still on the
   # pane. Keeping the caller's own words last keeps the probe unique per send.
-  MSG="[fleet] This request comes from another agent ($RSOCK/$RSESS), not a human. When
+  #
+  # ASK FOR A SendMessage FIRST, and keep the turn-ending relay as the second half of the
+  # same instruction. The relay is a nine-link chain and every link drops the answer in
+  # silence: the turn has to END (a usage limit, an interrupt or a killed session means no
+  # answer ever), the row has to be drained, and the wake that tells the asker to drain it
+  # is skipped outright when the asker is BUSY — the exact moment a lead is most likely to
+  # be waiting on one. A SendMessage has none of those: it is delivered to the asker's
+  # session and shows up there mid-turn.
+  #   Belt AND braces on purpose. The direct path needs the asker to be an addressable
+  # peer, which a session started before this change (or renamed since) is not, and a turn
+  # that dies takes the tool call with it — so the answer has to be in the last message too,
+  # or the fallback relays "(no text)". The hook suppresses its row when it can PROVE the
+  # SendMessage landed, so saying it twice does not answer twice.
+  if [ -z "$_a" ] || [ "$_a" = claude ]; then
+    MSG="[fleet] This request comes from another agent ($RPEER), not a human, and it is
+waiting on the answer. Answer it BOTH ways, in this order:
+  1. call SendMessage with to: \"$RPEER\" and the full answer as the message — that
+     reaches them directly, even while they are working (it may need ToolSearch
+     \"select:SendMessage\" first; ListAgents shows whether that name is live);
+  2. then end your turn with that same answer as your final message — if the name isn't
+     reachable, ending the turn is what gets relayed back instead.
+Self-contained either way: they don't share your context.
+
+$MSG"
+  else
+    # Not a Claude session: SendMessage doesn't exist there, and neither does the Stop hook
+    # that relays (fleet-send warns the caller about that a few lines below). Today's
+    # wording, so a codex/opencode target is told the one thing it can act on.
+    MSG="[fleet] This request comes from another agent ($RSOCK/$RSESS), not a human. When
 your turn ends, its last message is relayed back automatically — so finish with the
 ANSWER, self-contained (it doesn't share your context). No need to fleet-send a reply.
 
 $MSG"
+  fi
 fi
 # NOTE what a plain send deliberately does NOT do: clear an existing address. "The newest
 # send wins" reads tidy and is a trap — the address is keyed by the TARGET, so every
@@ -154,11 +201,8 @@ fi
 # literal pattern — byte-identical to what this script used before the adapter — so a
 # missing/renamed fleet-agent degrades to today's behaviour instead of breaking send.
 BUSY_RE='(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt'
-if command -v fleet-agent >/dev/null 2>&1; then
-  _a="$(fleet-agent of "$SESSION" -s "$SOCK" 2>/dev/null)"
-  if [ -n "$_a" ] && [ "$_a" != claude ]; then
-    BUSY_RE="$(fleet-agent field "$_a" busy_re 2>/dev/null)"
-  fi
+if [ -n "$_a" ] && [ "$_a" != claude ]; then
+  BUSY_RE="$(fleet-agent field "$_a" busy_re 2>/dev/null)"
 fi
 # An EMPTY pattern means the agent has no validated detector. It must never reach
 # grep: `grep -qE ""` matches every line, which would report the session as
@@ -262,7 +306,13 @@ fi
 # reply address, and callers read fleet-send's status as "did the send work" (the MCP
 # server turns any nonzero into an error string).
 if [ -n "$RSESS" ]; then
-  echo "fleet-send: its answer will be relayed to $RSOCK/$RSESS when its turn ends"
+  if [ -z "$_a" ] || [ "$_a" = claude ]; then
+    # Name BOTH paths: the caller is about to wait, and "watch your inbox" alone would be
+    # wrong now — the usual delivery is a message that arrives in this session directly.
+    echo "fleet-send: it was asked to answer ${RPEER:-$RSOCK/$RSESS} directly (SendMessage), and its turn-end message is relayed to $RSOCK/$RSESS as the fallback"
+  else
+    echo "fleet-send: its answer will be relayed to $RSOCK/$RSESS when its turn ends"
+  fi
 fi
 
 # CF-6: record the dispatched task in the manifest so fleet-worktrees' TASK column
