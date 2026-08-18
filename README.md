@@ -219,6 +219,12 @@ Panes cannot cross tmux servers and every project *is* a server, so each pane ru
 - **`⇧←/→` moves focus between the panes** (wrapping at both ends), and so does **clicking one**.
   `⇧←→` is the one key the stack had to take from the fleet, and it costs nothing: `Ctrl-a ←/→`
   still cycles which session a pane shows, because the stack has no prefix of its own.
+- **`Ctrl-a <` / `Ctrl-a >` moves the PANE** you are in one slot along the row, wrapping the same
+  way — so you can arrange the projects in the order you want to read them. The new order is
+  written back to `stack.tsv`, so it is still there the next time you open the stack. (`Ctrl-a {`
+  and `Ctrl-a }` do the same, since those are tmux's own move-a-pane keys. `⌃⇧←/→` does it in one
+  chord if your terminal sends it — Apple Terminal does not, see
+  **[docs/stack-view.md](docs/stack-view.md)**.)
 - **Everything else still reaches the agent.** `Ctrl-a …`, `Ctrl-s`, `Ctrl-p`, `Ctrl-f`, the
   wheel and drags all pass through to the fleet inside the pane as usual — a click both focuses
   the pane *and* reaches Claude. The only other key the stack takes is `` ` ``, which the fleet

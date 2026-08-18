@@ -1162,9 +1162,11 @@ rm -rf "$T"; unset CLAUDE_FLEET_DIR
 # The stack is a THIRD multiplexer level (zellij -> stack tmux -> fleet tmux -> agent)
 # and the OUTER tmux answers a key first. cf.tmux.conf binds `, ^S, ^P, ⇧←/→ and ^F
 # with -n; every one the stack also binds is one the fleet never sees again. It takes
-# exactly three — ` to leave, ⇧←/→ to move focus between panes — and ⇧←→ is affordable
-# ONLY because the fleet binds the same session cycle to C-a ←/→ in its prefix table,
-# which still passes through. Proven by asking a REAL server what it owns.
+# exactly five — ` to leave, ⇧←/→ to move focus between panes, ⌃⇧←/→ to move the PANE —
+# and ⇧←→ is affordable ONLY because the fleet binds the same session cycle to C-a ←/→ in
+# its prefix table, which still passes through. Proven by asking a REAL server what it
+# owns. The count is asserted on purpose: it is what makes the next author justify a new
+# no-prefix key instead of quietly taking one out of Claude's keyboard.
 group "stack config steals only what it must"
 if command -v tmux >/dev/null 2>&1; then
   tmux -L cfstktest kill-server 2>/dev/null
@@ -1174,7 +1176,7 @@ if command -v tmux >/dev/null 2>&1; then
   # focus a pane — asserted separately below); the KEYBOARD entries are what decide
   # whether a keystroke stops at the stack or reaches the fleet inside it.
   root="$(tmux -L cfstktest list-keys -T root 2>/dev/null | grep -vE 'Mouse|Wheel|Click')"
-  is "root table binds exactly 3 keys" "3" "$(printf '%s\n' "$root" | grep -c . || true)"
+  is "root table binds exactly 5 keys" "5" "$(printf '%s\n' "$root" | grep -c . || true)"
   is "backtick leaves the stack"       "1" "$(printf '%s\n' "$root" | grep -c -- '-T root ` *detach-client' || true)"
   # These three still have to reach the fleet: they write a .goto marker and detach.
   for k in C-s C-p C-f; do
@@ -1184,6 +1186,17 @@ if command -v tmux >/dev/null 2>&1; then
   # be anything that detaches — a stack you leave by moving right is not navigation.
   is "S-Right selects the next pane"   "1" "$(printf '%s\n' "$root" | grep -cE "root +S-Right +select-pane -t '?:\.\+" || true)"
   is "S-Left selects the previous one" "1" "$(printf '%s\n' "$root" | grep -cE "root +S-Left +select-pane -t '?:\.-" || true)"
+  # ⌃⇧←→ MOVES the pane. Two keys apart from the pair above and no printable character —
+  # ⇧HJKL, which is what the grid uses for the same job, cannot be bound here at all:
+  # Shift+H is not a keycode, it is capital H, and this server would then eat every
+  # capital H, J, K and L typed into any Claude pane in the stack.
+  is "C-S-Right moves the pane right"  "1" "$(printf '%s\n' "$root" | grep -cE "root +C-S-Right +run-shell .*fleet-stack move right" || true)"
+  is "C-S-Left moves it left"          "1" "$(printf '%s\n' "$root" | grep -cE "root +C-S-Left +run-shell .*fleet-stack move left" || true)"
+  is "no capital letter is bound"      "0" "$(printf '%s\n' "$root" | grep -cE "root +[A-Z] " || true)"
+  # It has to name the pane by TTY. A member name would move the wrong pane as soon as two
+  # sessions of one project are stacked side by side, or the lead cycles a pane (C-a ←/→)
+  # to a session other than the one it was opened on.
+  is "...naming the pane by its tty"   "2" "$(printf '%s\n' "$root" | grep -c 'pane_tty' || true)"
   # C-a must stay the FLEET's prefix, or C-a g/d/s/p and the C-a C-a escape all die.
   is "prefix is None (C-a reaches the fleet)" "None" "$(tmux -L cfstktest show-options -gv prefix 2>/dev/null)"
   # `on` so a CLICK focuses the pane you clicked. It was `off` on the theory that an
@@ -1244,6 +1257,137 @@ if command -v tmux >/dev/null 2>&1; then
   tmux -L cfstkout kill-server 2>/dev/null; tmux -L cfstkpane kill-server 2>/dev/null
 else
   skip "stack pane focus" "tmux not available"
+fi
+
+# ── 4b2. reordering the stack ────────────────────────────────────────────────
+# The panes are built in stack.tsv's row order (read_live hands open_stack its members in
+# file order), so a reorder that only moved panes would EVAPORATE on the next open: the
+# window reflows and the file puts everything straight back where it was. Both writes
+# therefore apply ONE decision — swap_plan turns "move the pane at position P one slot"
+# into adjacent swaps, reorder_rows applies that same list to the file's rows — and this
+# group drives that pair directly, the way the wire-format group drives split_choice. No
+# tmux, because the arithmetic is where a wrap goes wrong.
+group "stack reorder (the file's rows)"
+T="$(mktemp -d)"; TSV="$T/stack.tsv"
+eval "$(sed -n '/^valid_line() {/,/^}/p;/^read_all() {/,/^}/p;/^swap_plan() {/,/^}/p;/^reorder_rows() {/,/^}/p' "$ROOT/bin/fleet-stack")"
+PANES() { printf 'cf-a\tone\ncf-b\ttwo\ncf-c\tthree\n'; }     # what is on screen, left to right
+RO() { PANES | reorder_rows "$1" "$2" | tr '\t' ':' | tr '\n' ' '; }
+PLAN() { swap_plan "$1" "$2" "$3" | tr '\n' '/' | sed 's|/$||'; }
+PANES > "$TSV"
+is "an inside move is one swap"        "1 2"     "$(PLAN right 1 3)"
+is "off the end is a walk across"      "2 1/1 0" "$(PLAN right 2 3)"
+is "a stack of one has no plan"        "1"       "$(swap_plan right 0 1 >/dev/null 2>&1; echo $?)"
+is "moving the middle pane right"      "cf-a:one cf-c:three cf-b:two "  "$(RO right 1)"
+is "moving the middle pane left"       "cf-b:two cf-a:one cf-c:three "  "$(RO left 1)"
+# Wrapping matches the ⇧←→ focus ring: the moved pane comes out the other side and the
+# REST SLIDE ONE PLACE. Asserted as the whole row, because swapping the two END panes
+# would also "wrap" — and would fling a pane the lead never touched across the screen.
+is "off the left end the rest slide"   "cf-b:two cf-c:three cf-a:one "  "$(RO left 0)"
+is "off the right end, likewise"       "cf-c:three cf-a:one cf-b:two "  "$(RO right 2)"
+# Why the move is computed over PANES and not over file order. A row whose session has
+# died keeps its place in the file — nothing prunes it, read_live just skips it — so file
+# order and pane order are different lists. Walking file order would spend the keypress
+# swapping a pane with a row that is not on screen: the file would change, the window
+# would not, and one keystroke would mean two different things.
+printf 'cf-x\tdead\ncf-a\tone\ncf-b\ttwo\ncf-c\tthree\n' > "$TSV"
+is "a paneless row keeps its slot"     "cf-x:dead cf-b:two cf-a:one cf-c:three "  "$(RO right 0)"
+printf 'cf-a\tone\ncf-x\tdead\ncf-b\ttwo\ncf-c\tthree\n' > "$TSV"
+is "...even sitting between two panes" "cf-b:two cf-x:dead cf-a:one cf-c:three "  "$(RO right 0)"
+# A pane whose row has gone (`fleet-stack remove` from a shell, with the stack open) must
+# refuse: rewriting the file from the panes alone would drop that member from the stack.
+printf 'cf-a\tone\ncf-c\tthree\n' > "$TSV"
+is "a pane with no row refuses"        "1"  "$(PANES | reorder_rows right 0 >/dev/null 2>&1; echo $?)"
+is "...and writes nothing"             ""   "$(PANES | reorder_rows right 0 2>/dev/null)"
+rm -rf "$T"; unset TSV
+
+# A right file with a wrong window is the same bug as the reverse, so this drives the real
+# `fleet-stack move` against real panes and asserts BOTH after every press — plus the two
+# things a bare swap-pane gets wrong: which pane keeps the focus, and whether the border
+# labels travel with the pane or stay with the slot they were set on.
+group "stack reorder (real panes and the file together)"
+if command -v tmux >/dev/null 2>&1; then
+  T="$(mktemp -d)"; MS=cfmvpane      # never cf-stack: that socket is the lead's live screen
+  tmux -L $MS kill-server 2>/dev/null
+  tmux -L $MS -f "$ROOT/tmux/cf-stack.tmux.conf" new-session -d -s stack -x 200 -y 50 "sleep 120" 2>/dev/null
+  tmux -L $MS split-window -h -t stack "sleep 120" 2>/dev/null
+  tmux -L $MS split-window -h -t stack "sleep 120" 2>/dev/null
+  tmux -L $MS select-layout -t stack even-horizontal 2>/dev/null
+  # exactly what open_stack stamps: which member each pane is, and which profile's
+  # stack.tsv the stack was opened from
+  mi=0
+  for m in one two three; do
+    tmux -L $MS set-option -p -t "stack.$mi" @cf_sock "cf-$m" 2>/dev/null
+    tmux -L $MS set-option -p -t "stack.$mi" @cf_sess master 2>/dev/null
+    tmux -L $MS select-pane -t "stack.$mi" -T "$m · master" 2>/dev/null
+    mi=$((mi + 1))
+  done
+  tmux -L $MS set-option -g @cf_fleet_dir "$T" 2>/dev/null
+  tmux -L $MS select-pane -t stack.0 2>/dev/null
+  printf 'cf-one\tmaster\ncf-two\tmaster\ncf-three\tmaster\n' > "$T/stack.tsv"
+  MSOCK="$(tmux -L $MS display-message -p '#{socket_path}' 2>/dev/null)"
+  pn() { tmux -L $MS list-panes -t "=stack" -F '#{@cf_sock}' 2>/dev/null | tr '\n' ' '; }
+  fl() { tr '\n' ' ' < "$T/stack.tsv" | sed 's/	master//g'; }
+  ac() { tmux -L $MS list-panes -t "=stack" -F '#{?pane_active,#{@cf_sock},}' 2>/dev/null | tr -d ' \n'; }
+  ti() { tmux -L $MS list-panes -t "=stack" -F '#{pane_title}' 2>/dev/null | tr '\n' ' '; }
+  # the tty of the pane with the focus is what a binding hands over, from either side of
+  # the nest (`#{pane_tty}` from the stack, `#{client_tty}` from the session inside it)
+  MV() { "$ROOT/bin/fleet-stack" move "$1" \
+           "$(tmux -L $MS list-panes -t '=stack' -F '#{?pane_active,#{pane_tty},}' 2>/dev/null | tr -d ' \n')" \
+           "$MSOCK" 2>&1; }
+  is "the panes start in file order"    "cf-one cf-two cf-three " "$(pn)"
+  MV right >/dev/null 2>&1
+  is "moving right moves the pane"      "cf-two cf-one cf-three " "$(pn)"
+  is "...and the file says the same"    "cf-two cf-one cf-three " "$(fl)"
+  is "...and the focus goes WITH it"    "cf-one"                  "$(ac)"
+  is "...and the labels travel too"     "two · master one · master three · master " "$(ti)"
+  MV right >/dev/null 2>&1
+  is "again, to the last slot"          "cf-two cf-three cf-one " "$(pn)"
+  MV right >/dev/null 2>&1
+  is "off the end it wraps on screen"   "cf-one cf-two cf-three " "$(pn)"
+  is "...and in the file"               "cf-one cf-two cf-three " "$(fl)"
+  is "...still holding the focus"       "cf-one"                  "$(ac)"
+  MV left >/dev/null 2>&1
+  is "and the other way round"          "cf-two cf-three cf-one " "$(pn)"
+  is "...file agreeing"                 "cf-two cf-three cf-one " "$(fl)"
+  # A tty that is no pane of this stack is the chord pressed OUTSIDE the stack. It must say
+  # so: reordering a stack the lead isn't looking at is worse than doing nothing, and doing
+  # nothing silently is indistinguishable from a broken binding.
+  is "an unknown tty refuses"           "1" "$("$ROOT/bin/fleet-stack" move right /dev/null "$MSOCK" >/dev/null 2>&1; echo $?)"
+  is "...saying which pane it wanted"   "1" "$("$ROOT/bin/fleet-stack" move right /dev/null "$MSOCK" 2>&1 | grep -c 'not a pane' || true)"
+  is "...and leaves the file alone"     "cf-two cf-three cf-one " "$(fl)"
+  # A stack opened by an older ghostfleet has no stamps at all. Reordering it would have to
+  # guess which row a pane is, so it refuses instead — and says how to fix it.
+  tmux -L $MS set-option -pu -t stack.0 @cf_sock 2>/dev/null
+  is "an unstamped pane refuses"        "1" "$(MV right >/dev/null 2>&1; echo $?)"
+  is "...and the file is untouched"     "cf-two cf-three cf-one " "$(fl)"
+  tmux -L $MS kill-server 2>/dev/null; rm -rf "$T"
+else
+  skip "stack reorder (real panes)" "tmux not available"
+fi
+
+# The prefixed form, which is the one that works in every terminal: Apple Terminal sends
+# nothing for ⌃⇧← (it emits a bare ESC [ D, the same bytes as an unmodified ←), so the
+# stack's own binding is dead weight there. C-a reaches the fleet from inside a stack
+# because the stack runs `prefix None`. Two directions matter here: the chord must be in
+# the PREFIX table, and `<`/`>`/`{`/`}` must NOT be in the root table — they are printable
+# characters, and a fleet that answered them would swallow every one typed into Claude.
+group "stack reorder chord (fleet prefix table)"
+if command -v tmux >/dev/null 2>&1; then
+  tmux -L cfmvchord kill-server 2>/dev/null
+  tmux -L cfmvchord -f "$ROOT/tmux/cf.tmux.conf" new-session -d -s master 'sleep 60' 2>/dev/null
+  pk() { tmux -L cfmvchord list-keys -T prefix 2>/dev/null | grep -E "^bind-key +-T prefix +\\\\?$1 " || true; }
+  is "C-a > moves the pane right"   "1" "$(pk '>' | grep -c 'fleet-stack move right' || true)"
+  is "C-a < moves it left"          "1" "$(pk '<' | grep -c 'fleet-stack move left'  || true)"
+  is "C-a } does too (tmux's own)"  "1" "$(pk '}' | grep -c 'fleet-stack move right' || true)"
+  is "C-a { likewise"               "1" "$(pk '{' | grep -c 'fleet-stack move left'  || true)"
+  is "...named by the client's tty" "4" "$(tmux -L cfmvchord list-keys -T prefix 2>/dev/null | grep -c 'fleet-stack move .*client_tty' || true)"
+  root="$(tmux -L cfmvchord list-keys -T root 2>/dev/null)"
+  for c in '<' '>' '{' '}'; do
+    is "a bare $c still reaches the agent" "0" "$(printf '%s\n' "$root" | grep -cF -- "-T root $c " || true)"
+  done
+  tmux -L cfmvchord kill-server 2>/dev/null
+else
+  skip "stack reorder chord" "tmux not available"
 fi
 
 # ── 4c. the reply relay (fleet-send --reply-to → the hook) ────────────────────
@@ -1441,21 +1585,25 @@ fi
 group "stack window (live tmux)"
 if command -v tmux >/dev/null 2>&1; then
   T="$(mktemp -d)"
-  for s in cfstka cfstkb cfstkdrv cf-stack; do tmux -L "$s" kill-server 2>/dev/null; done
+  for s in cfstka cfstkb cfstkdrv cfstkwin; do tmux -L "$s" kill-server 2>/dev/null; done
   # two members on two DIFFERENT servers — the case join-pane cannot do at all
   tmux -L cfstka new-session -d -s master "sleep 120" 2>/dev/null
   tmux -L cfstkb new-session -d -s master "sleep 120" 2>/dev/null
   CLAUDE_FLEET_DIR="$T" "$ROOT/bin/fleet-stack" add cfstka master
   CLAUDE_FLEET_DIR="$T" "$ROOT/bin/fleet-stack" add cfstkb master
-  # a driver pane, because `fleet-stack open` attaches and needs a real tty
+  # a driver pane, because `fleet-stack open` attaches and needs a real tty. The stack
+  # socket is overridden for the same reason the fleet dir is: the default is `cf-stack`,
+  # which is the socket the LEAD's own stack screen runs on — a suite that built its
+  # fixture there would tear down a stack somebody is working in, and the failure would
+  # land on them and not on the test.
   tmux -L cfstkdrv -f /dev/null new-session -d -s drv -x 160 -y 40 \
-    -e CLAUDE_FLEET_DIR="$T" "bash --norc" 2>/dev/null
+    -e CLAUDE_FLEET_DIR="$T" -e CLAUDE_FLEET_STACK_SOCK=cfstkwin "bash --norc" 2>/dev/null
   sleep 1
   tmux -L cfstkdrv send-keys -t drv "'$ROOT/bin/fleet-stack' open" Enter
   sleep 4
-  is "one pane per member"        "2" "$(tmux -L cf-stack list-panes -t stack 2>/dev/null | grep -c . || true)"
+  is "one pane per member"        "2" "$(tmux -L cfstkwin list-panes -t stack 2>/dev/null | grep -c . || true)"
   # Every project has a `master`; the pane border is the only thing that can say whose.
-  is "panes are labelled by socket" "2" "$(tmux -L cf-stack list-panes -t stack -F '#{pane_title}' 2>/dev/null | grep -cE '^cfstk[ab] · master$' || true)"
+  is "panes are labelled by socket" "2" "$(tmux -L cfstkwin list-panes -t stack -F '#{pane_title}' 2>/dev/null | grep -cE '^cfstk[ab] · master$' || true)"
   is "both members have a client" "1 1" "$( { tmux -L cfstka list-sessions -F '#{session_attached}' 2>/dev/null; tmux -L cfstkb list-sessions -F '#{session_attached}' 2>/dev/null; } | tr '\n' ' ' | sed 's/ $//')"
   # Without this, opening a stack silently crops whatever you view full-screen next.
   is "window-size largest on member A" "largest" "$(tmux -L cfstka show-options -gv window-size 2>/dev/null)"
@@ -1463,7 +1611,7 @@ if command -v tmux >/dev/null 2>&1; then
   # ` leaves the whole stack (the one key the stack's config binds)
   tmux -L cfstkdrv send-keys -t drv '`'
   sleep 3
-  is "leaving tears the stack down"    "0" "$(tmux -L cf-stack list-sessions 2>/dev/null | grep -c . || true)"
+  is "leaving tears the stack down"    "0" "$(tmux -L cfstkwin list-sessions 2>/dev/null | grep -c . || true)"
   is "member A SURVIVES, detached"     "master 0" "$(tmux -L cfstka list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null)"
   is "member B SURVIVES, detached"     "master 0" "$(tmux -L cfstkb list-sessions -F '#{session_name} #{session_attached}' 2>/dev/null)"
 
@@ -1473,20 +1621,79 @@ if command -v tmux >/dev/null 2>&1; then
   # window gets built and then the attach fails. The visible symptom was a one-frame
   # flicker with no error, because the panes really were there. Assert the ATTACH, not
   # just the panes — panes alone were true while it was broken.
-  tmux -L cf-stack kill-server 2>/dev/null
+  tmux -L cfstkwin kill-server 2>/dev/null
   tmux -L cfstkdrv kill-server 2>/dev/null
   tmux -L cfstkdrv -f /dev/null new-session -d -s drv -x 160 -y 40 \
-    -e CLAUDE_FLEET_DIR="$T" "bash --norc" 2>/dev/null
+    -e CLAUDE_FLEET_DIR="$T" -e CLAUDE_FLEET_STACK_SOCK=cfstkwin "bash --norc" 2>/dev/null
   sleep 1
   tmux -L cfstkdrv send-keys -t drv "'$ROOT/bin/fleet-stack' open </dev/tty" Enter
   sleep 4
-  is "opens with stdin on /dev/tty too" "stack" "$(tmux -L cf-stack list-clients -F '#{client_session}' 2>/dev/null)"
+  is "opens with stdin on /dev/tty too" "stack" "$(tmux -L cfstkwin list-clients -F '#{client_session}' 2>/dev/null)"
   tmux -L cfstkdrv send-keys -t drv '`'; sleep 2
 
-  for s in cfstka cfstkb cfstkdrv cf-stack; do tmux -L "$s" kill-server 2>/dev/null; done
+  for s in cfstka cfstkb cfstkdrv cfstkwin; do tmux -L "$s" kill-server 2>/dev/null; done
   rm -rf "$T"
 else
   skip "stack window" "tmux not available"
+fi
+
+# And through the whole nest, with real keys — the only thing that can prove the chord
+# ARRIVES. Terminal → stack tmux → fleet tmux → the pane: C-a has to pass through the
+# stack (`prefix None`) to reach the fleet, whose prefix table runs fleet-stack against
+# the stack it is nested in. A binding that never fires is indistinguishable from one
+# that works, and this one crosses two servers to do its job.
+group "stack reorder through the nest (real keys)"
+if command -v tmux >/dev/null 2>&1; then
+  T="$(mktemp -d)"; NF=cfmvfleet; NK=cfmvnest; ND=cfmvdrv
+  for s in $NF $NK $ND; do tmux -L "$s" kill-server 2>/dev/null; done
+  # A fleet server with the REAL config, so C-a is its prefix. @cf_bin points the binding
+  # at THIS checkout instead of the installed runtime. CLAUDE_FLEET_STACK_SOCK is exported
+  # into the server's own environment on purpose: a binding's run-shell inherits the
+  # server's env and not the env of whoever attached, which is exactly why production
+  # never reads it from there — it takes the default socket, and takes the fleet DIR from
+  # an option on the stack server instead.
+  for s in master worker-1 worker-2; do
+    CLAUDE_FLEET_STACK_SOCK=$NK tmux -L $NF -f "$ROOT/tmux/cf.tmux.conf" \
+      new-session -d -s "$s" -x 200 -y 50 "sleep 200" 2>/dev/null
+  done
+  tmux -L $NF set-option -g @cf_bin "$ROOT/bin" 2>/dev/null
+  printf '%s\tmaster\n%s\tworker-1\n%s\tworker-2\n' $NF $NF $NF > "$T/stack.tsv"
+  tmux -L $ND -f /dev/null new-session -d -s drv -x 200 -y 50 \
+    -e CLAUDE_FLEET_DIR="$T" -e CLAUDE_FLEET_STACK_SOCK=$NK "bash --norc" 2>/dev/null
+  sleep 1
+  tmux -L $ND send-keys -t drv "'$ROOT/bin/fleet-stack' open" Enter
+  sleep 4
+  np() { tmux -L $NK list-panes -t "=stack" -F '#{@cf_sess}' 2>/dev/null | tr '\n' ' '; }
+  nf() { tr '\n' ' ' < "$T/stack.tsv" | sed "s/$NF	//g"; }
+  na() { tmux -L $NK list-panes -t "=stack" -F '#{?pane_active,#{@cf_sess},}' 2>/dev/null | tr -d ' \n'; }
+  nk() { for a in "$@"; do tmux -L $ND send-keys "$a" 2>/dev/null; sleep 1; done; }
+  is "the nested stack opens in file order" "master worker-1 worker-2 " "$(np)"
+  nk C-a '>'
+  is "C-a > reaches the fleet and moves it" "worker-1 master worker-2 " "$(np)"
+  is "...and rewrites the file"             "worker-1 master worker-2 " "$(nf)"
+  is "...leaving the lead in the same pane" "master"                    "$(na)"
+  nk C-a '>'
+  is "...again, to the far end"             "worker-1 worker-2 master " "$(np)"
+  # A bare > is a printable character and MUST reach the agent: if either server answered
+  # it, nobody in the stack could type one.
+  nk '>'
+  is "a bare > moves nothing"               "worker-1 worker-2 master " "$(np)"
+  # ⌃⇧← as the bytes a terminal that has it would send. Apple Terminal does NOT (it emits
+  # a bare ESC [ D — see tmux/cf-stack.tmux.conf), which is why the chord above exists.
+  tmux -L $ND send-keys -l "$(printf '\033[1;6D')" 2>/dev/null; sleep 1
+  is "the raw C-S-Left sequence fires too"  "worker-1 master worker-2 " "$(np)"
+  is "...and the file follows"              "worker-1 master worker-2 " "$(nf)"
+  # The whole point of writing the file: leaving must not lose the arrangement.
+  tmux -L $ND send-keys '`'; sleep 3
+  is "leaving still tears the stack down"   "0" "$(tmux -L $NK list-sessions 2>/dev/null | grep -c . || true)"
+  tmux -L $ND send-keys -t drv "'$ROOT/bin/fleet-stack' open" Enter
+  sleep 4
+  is "and it reopens in the ORDER SET"      "worker-1 master worker-2 " "$(np)"
+  tmux -L $ND send-keys '`'; sleep 2
+  for s in $NF $NK $ND; do tmux -L "$s" kill-server 2>/dev/null; done
+  rm -rf "$T"
+else
+  skip "stack reorder through the nest" "tmux not available"
 fi
 
 # ── 4d. tabs: a terminal / editor on the session's own folder ────────────────
