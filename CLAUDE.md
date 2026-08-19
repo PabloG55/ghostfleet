@@ -48,6 +48,12 @@ matching a real busy pane AND staying silent on a real idle one. A test that can
 only pass proves nothing — when you add one, break the code deliberately and watch
 it go red before you trust it.
 
+Run it whenever you like, including while a sibling worktree is running it: each run
+puts its tmux servers under its own `$TMUX_TMPDIR`, so they are reachable from that
+run and nowhere else — not from another run, and not from the live fleet. A new test
+that needs a server just uses `tmux -L <name>` as the rest do; an absolute `-S` path
+would step outside the namespace, and so would unsetting `TMUX_TMPDIR`.
+
 It can't cover the interactive parts, so also verify against the live fleet, and
 prefer proof over assertion:
 
@@ -115,5 +121,18 @@ prefer proof over assertion:
   and `capture-pane` reads that other pane. Every status reader here targets a bare
   `-t "$name"`, so the fleet reads the wrong pane and says nothing. Prefix with `_`, and
   when you invent a name, check it against a target-resolving command, not `has-session`.
+  Don't try to reproduce it by asking WHICH session it answers: that is version-dependent
+  (tmux 3.7b answers whatever session is *current*, which is the one just created often
+  enough to look correct). The part that holds everywhere is that the answer MOVES when
+  some other session becomes current, without the session of that name being touched — a
+  `+` name is an expression, not a name, and it is right only by luck.
+- **A suite with fixed socket names cannot be run twice at once, and the second run
+  lies.** `test/run.sh` used forty-odd fixed names, and nearly every group opens with
+  `kill-server`, so two worktrees testing together tore each other's fixtures down
+  mid-assertion: 46 phantom failures in one measured case, and a red run that went green
+  on a quiet retry with no code change. That is worse than no suite — the rule here is to
+  trust a test only after watching it go red, and a phantom red looks exactly like a real
+  one. Per-run `$TMUX_TMPDIR` now, plus a startup sweep for the servers a killed run
+  leaves behind, since a unique name has nobody to kill it next time.
 - **macOS-only calls need a guard**: `stat -f`, `date -r`, `osascript`, `caffeinate`. Linux
   and WSL are supported.
