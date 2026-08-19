@@ -121,6 +121,11 @@ prefer proof over assertion:
   and `capture-pane` reads that other pane. Every status reader here targets a bare
   `-t "$name"`, so the fleet reads the wrong pane and says nothing. Prefix with `_`, and
   when you invent a name, check it against a target-resolving command, not `has-session`.
+  Don't try to reproduce it by asking WHICH session it answers: that is version-dependent
+  (tmux 3.7b answers whatever session is *current*, which is the one just created often
+  enough to look correct). The part that holds everywhere is that the answer MOVES when
+  some other session becomes current, without the session of that name being touched — a
+  `+` name is an expression, not a name, and it is right only by luck.
 - **A suite with fixed socket names cannot be run twice at once, and the second run
   lies.** `test/run.sh` used forty-odd fixed names, and nearly every group opens with
   `kill-server`, so two worktrees testing together tore each other's fixtures down

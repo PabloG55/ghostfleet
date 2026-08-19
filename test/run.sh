@@ -2027,11 +2027,35 @@ if command -v tmux >/dev/null 2>&1; then
   # session. Assert the name resolves to ITSELF — has-session cannot catch this.
   is "...and the name resolves to itself" "_term-api-2" \
      "$(tmux -L cftabt display-message -p -t _term-api-2 '#{session_name}' 2>/dev/null)"
-  # the bug, still reproducible, so the assertion above is known to have teeth
+  # AND THE ASSERTION ABOVE HAS TEETH, because a + name does NOT resolve to itself.
+  #
+  # DO NOT RESTORE the assertion that used to stand here — "a + name resolves
+  # ELSEWHERE", expecting 0. It went red on untouched main, and not because anything
+  # regressed: what a + target answers is version-dependent. `+` is not part of a name,
+  # it is a target expression, and it is answered relative to whatever session tmux
+  # considers CURRENT. tmux 3.7b answers the current session itself, and the session
+  # created last is current — so `-t '+term-api-2'`, measured right after creating
+  # `+term-api-2`, answered `+term-api-2` and the old expectation inverted. Older tmux
+  # answers the session AFTER the current one, which lands back on `+term-api-2` just as
+  # easily given the wrong ordering. Neither spelling is something to assert. The `_`
+  # prefix in bin/fleet-tab stays regardless: the hazard is live on the tmux other people
+  # are running, and this repo has it written down as one.
+  #
+  # What IS the same on every tmux, and IS the hazard, is that the answer MOVES when some
+  # other session becomes current — while the session of that name is not touched at all.
+  # A name does not do that. So make another session current and measure both names
+  # across it: the + one drifts, the _ one does not. The second assertion is the control;
+  # without it a tmux that answered the current session for EVERY target would satisfy
+  # the first one and the `_` fix would be worth nothing.
   tmux -L cftabt new-session -d -s '+term-api-2' -c "$TB/api-3" 'sleep 60' 2>/dev/null
-  is "...unlike a + name, which resolves elsewhere" "0" \
-     "$(tmux -L cftabt display-message -p -t '+term-api-2' '#{session_name}' 2>/dev/null \
-        | grep -c '^+term-api-2$' || true)"
+  resolves() { tmux -L cftabt display-message -p -t "$1" '#{session_name}' 2>/dev/null; }
+  was_plus="$(resolves '+term-api-2')"; was_under="$(resolves _term-api-2)"
+  tmux -L cftabt new-session -d -s zz-elsewhere -c "$TB/api-3" 'sleep 60' 2>/dev/null
+  is "...unlike a + name, which answers whoever is current" "moved" \
+     "$([ "$was_plus" = "$(resolves '+term-api-2')" ] && echo same || echo moved)"
+  is "...while the _ name keeps answering itself"           "same" \
+     "$([ "$was_under" = "$(resolves _term-api-2)" ] && echo same || echo moved)"
+  tmux -L cftabt kill-session -t '=zz-elsewhere' 2>/dev/null
 
   ft term "$TSOCK" "$TB/api-2" api-2
   is "pressing it twice REUSES the tab" "1" "$(nsess '^_term-api-2$')"
