@@ -8,6 +8,10 @@
 #   fleet-stack remove <sock> <session>
 #   fleet-stack toggle <sock> <session>     prints "added" or "removed"
 #   fleet-stack clear
+#   fleet-stack move left|right <tty> [<stack-socket>]
+#                                  push the stack pane that owns <tty> one slot along —
+#                                  on screen AND in stack.tsv (see WHY A MOVE IS TWO
+#                                  WRITES). Bound to C-a < / C-a > inside a session.
 #   fleet-stack open [--dry-run]   build the stack window and attach to it
 #   fleet-stack close              tear the window down (detaches; never kills a session)
 #
@@ -34,6 +38,15 @@
 # each pane. That detaches the nested client and leaves the member session running —
 # verified in test/run.sh, in both directions (the session survives, and its client
 # count drops back to 0).
+#
+# WHY A MOVE IS TWO WRITES
+# The layout is always even-horizontal, so PANE INDEX ORDER IS VISUAL ORDER — and that
+# order comes out of stack.tsv, because read_live() hands open_stack its members in file
+# order. So moving a pane is two writes that have to agree: swap-pane on the live window,
+# and a rewrite of the file. A version that only did the first would look like the
+# feature not working at all: the panes move, and the next `fleet-stack open` puts them
+# straight back where the file still says they go. See the reordering section below for
+# how one decision drives both.
 set -uo pipefail
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
@@ -207,7 +220,6 @@ EOF
   close_stack                        # a stale stack from a crashed run
   local first=1 idx=0
   while IFS=$'\t' read -r sock sess; do
-    idx=$((idx + 1))
     if [ "$first" = 1 ]; then
       first=0
       # -x/-y from the real terminal: with no client attached yet a new session is
@@ -216,12 +228,34 @@ EOF
       tmux -L "$STACK_SOCK" -f "$CONF" new-session -d -s "$STACK_SESS" -x "$w" -y "$h" \
         "exec tmux -L '$sock' attach -t '$sess'" 2>/dev/null || {
           echo "fleet-stack: could not create the stack window on $STACK_SOCK" >&2; return 1; }
+      # The two things a run-shell on this server cannot look up for itself: where this
+      # binary lives, and which profile's stack.tsv the stack was opened from. Mirrored as
+      # options for the same reason bin/ghostfleet mirrors @cf_bin/@cf_order onto a fleet
+      # server — a binding's run-shell does not inherit the environment of the shell that
+      # opened the screen. Unlike a fleet server this one is created per open and killed on
+      # the way out, so what is set here is exactly as fresh as the stack itself.
+      # @cf_bin also fixes the copy binding this config has always had: nothing set it, so
+      # fleet-copy resolved through whatever PATH the terminal happened to carry.
+      tmux -L "$STACK_SOCK" set-option -g @cf_bin "$BIN_DIR" 2>/dev/null || true
+      tmux -L "$STACK_SOCK" set-option -g @cf_fleet_dir "$FLEET_DIR" 2>/dev/null || true
     else
       tmux -L "$STACK_SOCK" split-window -h -t "$STACK_SESS" \
         "exec tmux -L '$sock' attach -t '$sess'" 2>/dev/null || {
           echo "fleet-stack: no room for $(label_of "$sock" "$sess")" >&2; continue; }
     fi
+    # Count PANES, not members. A member whose split-window failed ("no room") leaves the
+    # loop above early, and counting it here would put every later label — and now every
+    # later member stamp — one pane along. Cosmetic while it was only a border; with the
+    # stamp it is a reorder that moves the wrong pane.
+    idx=$((idx + 1))
     tmux -L "$STACK_SOCK" select-pane -t "$STACK_SESS.$((idx - 1))" -T "$(label_of "$sock" "$sess")" 2>/dev/null || true
+    # WHAT this pane is, stamped on the pane itself, so `fleet-stack move` can map a pane
+    # back to its row in stack.tsv. The border title is not a substitute: label_of strips
+    # the `cf-` prefix, so `cf-foo` and a socket actually called `foo` label identically.
+    # A pane option travels WITH the pane through swap-pane (measured), so the map keeps
+    # working after any number of moves.
+    tmux -L "$STACK_SOCK" set-option -p -t "$STACK_SESS.$((idx - 1))" @cf_sock "$sock" 2>/dev/null || true
+    tmux -L "$STACK_SOCK" set-option -p -t "$STACK_SESS.$((idx - 1))" @cf_sess "$sess" 2>/dev/null || true
     tmux -L "$STACK_SOCK" select-layout -t "$STACK_SESS" even-horizontal 2>/dev/null || true
   done <<EOF
 $members
@@ -239,6 +273,166 @@ EOF
   close_stack
 }
 
+# ── reordering ───────────────────────────────────────────────────────────────
+# ONE decision, applied twice. `swap_plan` turns "move the pane at position P one slot
+# <dir>" into a list of ADJACENT swaps; reorder_rows applies that list to the file's rows
+# and move_pane applies the same list to the window's panes. Neither side gets to decide
+# anything on its own, which is the only way the file and the screen cannot end up
+# disagreeing about what one keypress meant.
+#
+# WRAPPING is a rotation, not a swap with the far pane. The stack's ⇧←/⇧→ focus ring
+# wraps (`:.+`/`:.-`), so the pane ring wraps too: pushed off the left end, a pane
+# reappears on the right and everything else slides one place left. Swapping the two END
+# panes instead would fling a pane the lead never touched all the way across the screen.
+# Expressed as adjacent swaps, the wrap is not a special case at all — it is the moved
+# pane walking across, one slot at a time. (`rotate-window -U`/`-D` does exactly this in
+# one call, measured; it is not used because it would be a SECOND expression of the same
+# decision, and the file has no rotate-window.)
+swap_plan() {                       # $1=left|right $2=position $3=count -> "i j" per line
+  local dir="$1" pos="$2" n="$3" i
+  [ "$n" -gt 1 ] || return 1        # a stack of one: nowhere to move it
+  if [ "$dir" = right ]; then
+    if [ "$pos" -lt $((n - 1)) ]; then printf '%s %s\n' "$pos" "$((pos + 1))"; return 0; fi
+    i=$((n - 1)); while [ "$i" -gt 0 ]; do printf '%s %s\n' "$i" "$((i - 1))"; i=$((i - 1)); done
+  else
+    if [ "$pos" -gt 0 ]; then printf '%s %s\n' "$pos" "$((pos - 1))"; return 0; fi
+    i=0; while [ "$i" -lt $((n - 1)) ]; do printf '%s %s\n' "$i" "$((i + 1))"; i=$((i + 1)); done
+  fi
+}
+
+# The new file body. stdin is the rows that HAVE a pane, in pane order; $2 is the position
+# of the one being moved.
+#
+# WHY THE MOVE IS COMPUTED OVER PANES AND NOT OVER FILE ORDER. A stack.tsv routinely
+# carries rows for sessions that have since died — nothing prunes them, read_live() just
+# skips them — so file order and pane order are not the same list. Stepping through file
+# order would make the key a no-op every time a dead row sat next to the pane being
+# moved: the file would change, the screen would not, and the two would then disagree
+# about what "one slot left" means. So the rows WITH panes are permuted through the slots
+# they already hold in the file, and every other row keeps its absolute slot.
+#
+# The `|`-delimited `seen` string is the same set trick read_all uses, and it is safe for
+# the same reason: valid_line refuses every character that isn't [A-Za-z0-9._~-], so no
+# row can contain the delimiter.
+reorder_rows() {                    # $1=left|right $2=position; stdin=visible rows
+  local dir="$1" pos="$2" line i j k n tmp plan seen="" out=""
+  local vis=() orig=() all=() repl=()
+  while IFS= read -r line; do [ -n "$line" ] && vis+=("$line"); done
+  n=${#vis[@]}
+  plan="$(swap_plan "$dir" "$pos" "$n")" || return 1
+  orig=("${vis[@]}")
+  while read -r i j; do
+    [ -n "${i:-}" ] || continue
+    tmp="${vis[$i]}"; vis[$i]="${vis[$j]}"; vis[$j]="$tmp"
+  done <<EOF
+$plan
+EOF
+  for ((i = 0; i < n; i++)); do seen="$seen|${orig[$i]}|"; done
+  while IFS= read -r line; do all+=("$line"); done < <(read_all)
+  k=0
+  for ((i = 0; i < ${#all[@]}; i++)); do
+    case "$seen" in *"|${all[$i]}|"*) repl[$i]="${vis[$k]}"; k=$((k + 1)) ;; esac
+  done
+  # Every pane has to have had a row, or this rewrite would drop a member that is on
+  # screen. `fleet-stack remove` from a shell, while the stack is open, is how that
+  # happens — refuse the move rather than write a file the window contradicts.
+  [ "$k" = "$n" ] || return 1
+  for ((i = 0; i < ${#all[@]}; i++)); do out="$out${repl[$i]:-${all[$i]}}"$'\n'; done
+  printf '%s' "$out"
+}
+
+# The stack server: addressed by the socket NAME we default to, or by the socket PATH the
+# stack's own binding hands us (`#{socket_path}`). The path is exact — and it is how the
+# tests drive a stack that must not be the lead's real one.
+ST_FLAG=-L; ST_ADDR="$STACK_SOCK"
+ST() { tmux "$ST_FLAG" "$ST_ADDR" "$@"; }
+
+# WHICH PANE MOVES: the one that owns <tty>. Not "the active pane", and not a member
+# name.
+#
+# A stack pane's pty IS the tty of the nested client running in it — measured in the real
+# nest, in both directions (`list-panes -F '#{pane_tty}'` on the stack and
+# `list-clients -F '#{client_tty}'` on the fleet print the same device). So the two
+# callers hand us the same string from opposite ends of the nest: the stack's own binding
+# passes `#{pane_tty}`, and a session INSIDE the stack passes `#{client_tty}`, which tmux
+# resolves to the client that pressed the key. That is exact in the two cases a member
+# name gets wrong — two sessions of the SAME project stacked side by side, and a pane the
+# lead has since cycled (C-a ←/→) to a different session than the one it was opened on.
+#
+# It is also what makes the chord safe to bind on every fleet session, stacked or not:
+# pressed outside the stack, <tty> matches no pane and this says so, instead of silently
+# reordering a stack the lead is not even looking at.
+move_pane() {                       # $1=left|right $2=tty
+  local dir="$1" tty="$2" panes fdir body plan moved tmp
+  local pid ptty psock psess extra pos=-1 n=0 i j
+  local ids=() rows=()
+  local US=$'\x1f'
+  case "$dir" in left|right) ;; *) echo "fleet-stack: move takes left or right" >&2; return 1 ;; esac
+  [ -n "$tty" ] || { echo "fleet-stack: move needs the tty of the pane to move" >&2; return 1; }
+
+  # \x1f, not a tab: @cf_sock/@cf_sess are EMPTY on a pane that predates them, and
+  # `IFS=$'\t'` collapses empty fields (tab is IFS whitespace), which would shift the
+  # stamps into the tty and read as a pane that just isn't the one we want.
+  panes="$(ST list-panes -t "=$STACK_SESS" \
+             -F "#{pane_id}${US}#{pane_tty}${US}#{@cf_sock}${US}#{@cf_sess}" 2>/dev/null)"
+  [ -n "$panes" ] || { echo "fleet-stack: no stack window on $ST_ADDR — nothing to reorder" >&2; return 1; }
+  while IFS="$US" read -r pid ptty psock psess extra; do
+    [ -n "$pid" ] || continue
+    if [ -z "$psock" ] || [ -z "$psess" ]; then
+      echo "fleet-stack: this stack's panes don't say which member they are — leave it with \` and open it again" >&2
+      return 1
+    fi
+    ids+=("$pid"); rows+=("$psock"$'\t'"$psess")
+    [ "$ptty" = "$tty" ] && pos="$n"
+    n=$((n + 1))
+  done <<EOF
+$panes
+EOF
+  [ "$pos" -ge 0 ] || { echo "fleet-stack: $tty is not a pane of the stack on $ST_ADDR — reordering only works from inside the stack" >&2; return 1; }
+  plan="$(swap_plan "$dir" "$pos" "$n")" || { echo "fleet-stack: only one pane in the stack — nothing to move it past" >&2; return 1; }
+
+  # WHICH stack.tsv. Not the one this process's environment points at: the fleet route
+  # runs from a run-shell on a long-lived fleet server, whose environment is a snapshot of
+  # whenever that server happened to be created — the same reason @cf_bin and @cf_order
+  # are mirrored onto a server rather than read from the env. The stack server is created
+  # per open and killed on the way out, so an option ON IT is exactly as fresh as the
+  # stack, and it is the profile the stack was actually opened from.
+  fdir="$(ST show-options -gqv @cf_fleet_dir 2>/dev/null)"
+  [ -n "$fdir" ] || { echo "fleet-stack: this stack doesn't say which fleet dir it came from — leave it with \` and open it again" >&2; return 1; }
+  FLEET_DIR="$fdir"; TSV="$fdir/stack.tsv"
+
+  # THE FILE FIRST. If this fails nothing has moved and the window still matches the file;
+  # the other order can lose the arrangement the lead just made and leave no trace of why.
+  body="$(printf '%s\n' "${rows[@]}" | reorder_rows "$dir" "$pos")" || {
+    echo "fleet-stack: a pane on screen is no longer a member in $TSV — reopen the stack" >&2; return 1; }
+  write_all "${body:+$body$'\n'}" || { echo "fleet-stack: could not write $TSV" >&2; return 1; }
+
+  moved="${ids[$pos]}"
+  while read -r i j; do
+    [ -n "${i:-}" ] || continue
+    # -d keeps the SELECTION on the pane object instead of the slot it left. Without it
+    # tmux selects the pane swapped INTO that slot (measured), so the lead would be typing
+    # into the neighbour after every move. Panes are addressed by %id, and ids[] is swapped
+    # in lockstep below, because the indices move under us as the plan is applied.
+    #   `break`, not `|| true`: carrying on would apply the rest of the plan through a map
+    # that no longer describes the window. The only way here is a pane that died under the
+    # keypress — the file already holds the order that was asked for, and the next open
+    # lays the window out from it.
+    ST swap-pane -d -s "${ids[$i]}" -t "${ids[$j]}" 2>/dev/null || break
+    tmp="${ids[$i]}"; ids[$i]="${ids[$j]}"; ids[$j]="$tmp"
+  done <<EOF
+$plan
+EOF
+  # Focus follows the pane that moved, not the slot it vacated — stated once, here,
+  # rather than left to swap-pane's flags. The border titles need no such help: a pane
+  # option and a pane title both travel WITH the pane (measured), so the labels and the
+  # member stamps arrive in the new slot already correct.
+  ST select-pane -t "$moved" 2>/dev/null || true
+  # The layout every part of this rests on. Cheap, and it is what open_stack does after
+  # each split, so a rounding difference can't accumulate into an uneven row.
+  ST select-layout -t "=$STACK_SESS" even-horizontal 2>/dev/null || true
+}
+
 cmd="${1:-}"; shift 2>/dev/null || true
 case "$cmd" in
   members)  read_live ;;
@@ -253,8 +447,16 @@ case "$cmd" in
     if in_stack "$s" "$n"; then remove_member "$s" "$n" && echo removed
     else add_member "$s" "$n" && echo added; fi ;;
   clear)    write_all "" ;;
+  move)
+    d="${1:?fleet-stack: usage: fleet-stack move left|right <tty> [<stack-socket>]}"
+    t="${2:?fleet-stack: usage: fleet-stack move left|right <tty> [<stack-socket>]}"
+    if [ -n "${3:-}" ]; then ST_FLAG=-S; ST_ADDR="$3"; fi
+    move_pane "$d" "$t" ;;
   open)     case "${1:-}" in --dry-run) open_stack 1 ;; *) open_stack 0 ;; esac; exit $? ;;
   close)    close_stack ;;
-  ""|-h|--help|help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//' ;;
+  # The header IS the help. Printed by walking the comment block instead of a line range:
+  # a range silently truncates the moment the header grows a paragraph, which is exactly
+  # what happened to the old '2,35p' when this file gained one.
+  ""|-h|--help|help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0" ;;
   *) echo "fleet-stack: unknown command '$cmd' (try: fleet-stack --help)" >&2; exit 1 ;;
 esac

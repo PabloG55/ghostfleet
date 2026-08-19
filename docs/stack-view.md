@@ -1,10 +1,10 @@
 # Stack: several sessions on screen at once
 
-**Status:** built. Branch `feat/stack-view`. The two open questions below were answered
-against a real narrow pane before any UI was written, and **question 1 came back
-"broken"** — the busy detector could not see a working agent at stack width. That is
-fixed in the detector, not worked around in the stack. See *What the measurements
-said*, below.
+**Status:** built. Branch `feat/stack-view`, plus `feat/stack-pane-reorder` for §5. The two
+open questions below were answered against a real narrow pane before any UI was written,
+and **question 1 came back "broken"** — the busy detector could not see a working agent at
+stack width. That is fixed in the detector, not worked around in the stack. See *What the
+measurements said*, below.
 
 A third screen alongside Projects and the grid: pick sessions, see them side by side in
 split panes, work in any of them. The point is watching two workers at once — one
@@ -228,10 +228,101 @@ nested client. Measured on two members on two different servers: after leaving, 
 sessions are alive at `clients=0`, and the stack server is gone. `test/run.sh` asserts
 it, and the assertion goes red if the teardown is changed to kill.
 
+### 5. Reordering the panes: ⇧HJKL is impossible, ⌃⇧←→ is not sent, so the chord
+
+The panes are laid out in `stack.tsv`'s row order — `read_live()` hands `open_stack` its
+members in file order — so "move this pane" is **two writes that have to agree**: a
+`swap-pane` on the live window and a rewrite of the file. Doing only the first looks
+exactly like the feature not working: the panes move, and the next `fleet-stack open` puts
+them straight back where the file still says they go.
+
+Both writes therefore apply **one** decision. `swap_plan` turns *move the pane at position
+P one slot* into a list of ADJACENT swaps; `reorder_rows` applies that list to the file's
+rows and `move_pane` applies the same list to the window's panes. Wrapping falls out of it
+rather than being a second rule: pushed off the left end, the pane walks across one slot at
+a time and the rest slide one place left — the ring rotates, matching the `⇧←→` focus ring.
+(`rotate-window -U`/`-D` does that in one call, measured; it isn't used because it would be
+a second expression of the same decision, and the file has no `rotate-window`.)
+
+The move is computed over the **panes**, not over file order, because those are not the
+same list: a `stack.tsv` routinely carries rows for sessions that have since died (nothing
+prunes them, `read_live` just skips them). Stepping through file order would spend the
+keypress swapping a pane with a row that is not on screen — the file would change and the
+window would not. Rows without a pane keep their absolute slot instead.
+
+#### The keys, which is where the measuring was
+
+**⇧HJKL was the request, and cannot be bound here at all.** Shift+H is not a distinct
+keycode — it is capital `H`. The stack binds with `-n`, and every `-n` key is one the
+nested fleet, and Claude, never receive. `bind -n S-h` *is* `bind -n H`, so it would
+swallow every capital H, J, K and L typed into any pane in the stack. (The same keys
+reorder cards on the grid because that screen is a Node TUI reading raw keys: nothing is
+nested inside it.)
+
+**⌃⇧←→ is the right shape and this terminal doesn't send it.** tmux resolves it correctly
+— fed the raw bytes, `C-S-Left` fires and `S-Left` does not — but the emitter is the
+terminal, and Apple Terminal drops the modifiers. Measured by driving real keystrokes into
+a Terminal window (System Events) and reading the bytes off the pty:
+
+```
+key        bytes Apple Terminal actually sends
+⇧←         ^[[1;2D      ✓ distinct   <- which is why the fleet's ⇧←→ ring works
+⇧→         ^[[1;2C      ✓ distinct
+⌃⇧←        ^[[D         ✗ a bare Left
+⌃⇧→        ^[[C         ✗ a bare Right
+⌥⇧←        ^[[D         ✗ a bare Left
+⇧↑ / ⇧↓    ^[[A / ^[[B  ✗ bare Up/Down
+⌃⇧↑        ^[[A         ✗ bare Up
+⌃PgUp      (nothing)
+⌥← / ⌥→    ^[b / ^[f    — Claude's word-jump; not ours to take
+```
+
+So `⇧←/⇧→` is the *only* modified arrow pair this terminal has, and the fleet already
+spends it. There is no second no-prefix key to spend either: every one is taken from
+Claude, which is the standing rule in `tmux/cf.tmux.conf`.
+
+**The prefix table is free, and reachable.** After `C-a` the agent sees nothing, and `C-a`
+reaches the fleet from inside a stack precisely because the stack runs `prefix None`.
+Measured in the real nest (terminal → stack tmux → fleet tmux → pane): `C-a >` fired the
+fleet's binding and reported the pressing client's tty; a bare `>` fired nothing and went
+through to the pane. So the move is bound to `C-a <` / `C-a >`, plus `C-a {` / `C-a }`,
+which are tmux's own move-a-pane keys and do nothing at all on a one-pane fleet session.
+
+**`C-a ⇧←/⇧→` would have been the prettiest form and does not work.** The stack binds
+`⇧←→` with `-n`, and the OUTER server answers a key first — so after `C-a` passed through
+to the fleet, the `⇧→` was eaten by the stack, moved focus, and left the fleet sitting on
+an armed prefix. Measured, not assumed. A chord through the stack can only use a second
+key the stack leaves alone.
+
+`⌃⇧←→` is bound on the stack anyway: it costs nothing (a terminal that doesn't send the
+sequence cannot have it swallowed), and the terminals that do send it — iTerm2, Ghostty,
+WezTerm, kitty, foot — get the one-chord version.
+
+#### Which pane moves: the tty, not the name
+
+A stack pane's pty **is** the tty of the nested client running in it — measured in both
+directions (`list-panes -F '#{pane_tty}'` on the stack and `list-clients -F '#{client_tty}'`
+on the fleet print the same device). So both bindings name the same pane from opposite ends
+of the nest: the stack passes `#{pane_tty}`, a session inside it passes `#{client_tty}`.
+A member name would have been wrong in two ordinary cases — two sessions of the same
+project stacked side by side, and a pane the lead has since cycled (`C-a ←/→`) onto a
+different session than it was opened on — and it is the tty that makes the chord safe to
+bind on *every* fleet session: pressed outside the stack it matches no pane, and says so
+rather than reordering a stack nobody is looking at.
+
+Focus stays on the pane that moved, which `swap-pane` does not do on its own: without `-d`
+tmux selects the pane swapped INTO the slot, so the lead ends up typing into the neighbour.
+Border titles and the member stamps need no such help — a pane title and a pane option both
+travel with the pane.
+
 ## Still open
 
 - What happens when a stacked session is **killed, paused by the governor, or renamed**
   underneath the stack. Today the pane simply dies (`remain-on-exit off`) and the layout
   reflows; membership keeps the stale row until you toggle it off, and `fleet-stack
   members` prunes dead rows on the next open.
-- Vertical / grid layouts. `even-horizontal` only, on purpose.
+- Vertical / grid layouts. `even-horizontal` only, on purpose — and note the reorder rests
+  on that: pane index order is only visual order while the layout is one row.
+- Reordering from the stack SCREEN, where the members are listed by project and their
+  left-to-right order is not shown at all. `⇧hjkl` would be free there (it is a Node TUI,
+  like the grid), but the screen would have to show the order first.
