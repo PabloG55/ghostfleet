@@ -4,6 +4,10 @@
 #     ./test/run.sh            everything
 #     ./test/run.sh agent      only groups whose name matches "agent"
 #
+# Safe to run while a sibling worktree is running it: every tmux server a run
+# starts lives under that run's own $TMUX_TMPDIR (§0), so two runs cannot meet
+# and neither can reach the live fleet.
+#
 # WHAT BELONGS HERE. Every case below is a bug that actually shipped, and every one
 # of them was SILENT — the code kept running and produced a plausible wrong answer:
 #
@@ -34,6 +38,108 @@ is()    { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
           if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "$2" "$3"; fi; }
 # grep -c, but never let a non-match kill the run under pipefail
 matches() { grep -cE -- "$1" "$2" 2>/dev/null || true; }
+
+# ── 0. one tmux socket namespace per RUN ─────────────────────────────────────
+# Every server this file starts used to have a FIXED name — cftabh, cfstka,
+# cfrecl, forty-odd of them. That is fine for one run and corrupting for two, and
+# two is the ordinary case in a repo whose whole subject is running sessions in
+# parallel: a sibling worktree running the suite drove the SAME servers, and
+# since nearly every group opens with `kill-server`, each run tore the other's
+# fixture down mid-assertion, counted sessions the other had created, and read
+# panes the other had written. Measured twice in one afternoon: 46 phantom
+# failures in a run that overlapped a sibling's, and a red run that went green on
+# a quiet retry with no code change in between. That is worse than having no
+# suite, because the rule here is to trust a test only after watching it go red —
+# and a phantom red is indistinguishable from a real one.
+#
+# THE FIX IS THE DIRECTORY, NOT THE NAMES. `tmux -L <name>` is a name *inside*
+# $TMUX_TMPDIR, so one exported variable namespaces every socket a run opens —
+# including the ones this file never spells, which is the half renaming cannot
+# reach: fleet-stack falls back to `cf-stack` when CLAUDE_FLEET_STACK_SOCK is
+# unset, and cf-stack is the lead's live stack screen. ab8fff5 caught exactly
+# that by hand, after the suite had spent who knows how long tearing down real
+# stacks; under a private TMUX_TMPDIR the same slip cannot reach out of the run
+# at all. Nothing started here can touch cf-superkey or cf-ghostfleet now even if
+# it asks for them by name.
+#
+# It also leaves the names alone, and the names are load-bearing. `${SOCK#cf-}`
+# is how a fleet turns a socket into a project, so `cfstka` (no hyphen) and
+# `cf-demo` (hyphen) exercise two different paths on purpose — the stack's pane
+# label is asserted as `cfstka · master`, which only reads that way because the
+# strip finds nothing to strip. A renaming scheme that blurred the two would have
+# changed what several assertions measure while every one of them stayed green.
+#
+# /tmp rather than $TMPDIR: macOS hands out a /var/folders/… TMPDIR long enough
+# to push a socket path past sun_path's 104 bytes. `pwd -P` because /tmp here is
+# a symlink to /private/tmp and tmux reports the resolved path back — two
+# spellings of one directory is the trap that already cost this repo a config key
+# nothing could find.
+TEST_RUNS=/tmp/ghostfleet-test                    # one <prefix>.<pid>.XXXXXX per run
+TMUX_TMPDIR="$(cd "$(mktemp -d "$TEST_RUNS.$$.XXXXXX")" && pwd -P)"; export TMUX_TMPDIR
+
+# A fixed name is self-limiting: the next run kills the server. A unique one is
+# not, so a run that dies half way leaks its servers for good. Two guards — our
+# own teardown, on the failing path as much as the passing one (this suite exits
+# non-zero by design, and gets ⌃C'd), and a sweep for the runs that never reached
+# theirs. The sweep is keyed on the pid in the directory name and only ever looks
+# at directories this file created and this user owns, so it can reach neither a
+# live sibling's servers nor anybody's real fleet. Two depths of glob because the
+# namespace check below builds fake run directories one level down, and a socket
+# the teardown cannot see is a server nothing ever kills.
+kill_servers_in() {                # $1 = a run directory
+  local s
+  for s in "$1"/tmux-*/* "$1"/*/tmux-*/*; do
+    [ -S "$s" ] && tmux -S "$s" kill-server 2>/dev/null
+  done
+  return 0
+}
+sweep_dead_runs() {                # $1 = the <prefix> of <prefix>.<pid>.XXXXXX
+  local d pid
+  for d in "$1".*; do
+    [ -d "$d" ] && [ -O "$d" ] || continue
+    pid="${d#"$1".}"; pid="${pid%%.*}"
+    case "$pid" in ''|*[!0-9]*) continue ;; esac   # not a run directory of ours
+    [ "$pid" = "$$" ] && continue                  # us
+    kill -0 "$pid" 2>/dev/null && continue         # a run still going: hands off
+    kill_servers_in "$d"; rm -rf "$d"
+  done
+  return 0
+}
+trap 'rc=$?; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
+trap 'exit 130' INT
+sweep_dead_runs "$TEST_RUNS"
+
+# Proven, not asserted: every other group now rests on this, so it goes first and
+# goes red on its own rather than being taken on trust. Both directions on the
+# sweep especially — it deletes directories and kills servers, and the direction
+# that matters is the one where it must NOT.
+group "socket namespace (this run's own)"
+if command -v tmux >/dev/null 2>&1; then
+  tmux -L nsprobe kill-server 2>/dev/null
+  tmux -L nsprobe new-session -d -s p 'sleep 20' 2>/dev/null
+  nsp="$(tmux -L nsprobe display-message -p '#{socket_path}' 2>/dev/null)"
+  is "a server lands in THIS run's dir" "$TMUX_TMPDIR" "$(dirname "$(dirname "$nsp")")"
+  tmux -L nsprobe kill-server 2>/dev/null
+  # On a scratch prefix of its own: pointed at $TEST_RUNS the sweep would be
+  # making its point by reaching into a sibling's live run. Named under $TEST_RUNS
+  # all the same, so a run killed mid-group leaves something a later sweep owns.
+  SW="$(cd "$(mktemp -d "$TEST_RUNS.$$.swpXXXXXX")" && pwd -P)"; SWP="$SW/run"
+  sleep 30 & LIVE=$!
+  sleep 0  & DEAD=$!; wait "$DEAD" 2>/dev/null
+  LD="$SWP.$LIVE.aaaaaa"; DD="$SWP.$DEAD.bbbbbb"; mkdir -p "$LD" "$DD"
+  TMUX_TMPDIR="$DD" tmux -L leaked new-session -d -s s 'sleep 60' 2>/dev/null
+  spid="$(TMUX_TMPDIR="$DD" tmux -L leaked display-message -p '#{pid}' 2>/dev/null)"
+  alive() { kill -0 "${1:-0}" 2>/dev/null && echo 1 || echo 0; }
+  is "a leaked server is running to begin with" "1" "$(alive "$spid")"
+  sweep_dead_runs "$SWP"; sleep 0.5
+  is "the sweep kills a dead run's server"      "0" "$(alive "$spid")"
+  is "...and takes its directory with it"       "0" "$([ -d "$DD" ] && echo 1 || echo 0)"
+  is "...but leaves a LIVE run's alone"         "1" "$([ -d "$LD" ] && echo 1 || echo 0)"
+  kill "$LIVE" 2>/dev/null; wait "$LIVE" 2>/dev/null
+  kill_servers_in "$SW"; rm -rf "$SW"
+else
+  skip "socket namespace" "tmux not available"
+fi
 
 # ── 1. the grid → control-plane wire format ──────────────────────────────────
 # Fields after the cwd are optional: a grid still holding older code sends fewer.
