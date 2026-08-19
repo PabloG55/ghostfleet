@@ -441,21 +441,30 @@ branch on your **local** ref — falling back to the remote tip only when local 
 
 **Asking, not just dispatching.** A plain send is one-way: the target works, its turn ends, and
 that `done` goes to **its own** fleet's master — so a question sent to another project looked
-ignored no matter how long you waited. `--reply-to me` (MCP: `reply_to: true`) records the return
-address next to that session, and when its turn ends the hook relays the answer into **your**
-inbox and wakes you:
+ignored no matter how long you waited. `--reply-to me` (MCP: `reply_to: true`) makes it a
+conversation, and the answer comes back two ways:
 
 ```bash
 fleet-send -s cf-getmycoi --reply-to me master "Does your /cois endpoint dedupe by externalId?"
-# …later, without polling:
+# → arrives in your session as a message from getmycoi/master, even mid-turn
+# …or, if it couldn't reach you, without polling:
 fleet-inbox        # → 14:05  getmycoi/master  ANSWERED  yes — same externalId returns deduped:true…
 fleet-read -s cf-getmycoi master 3      # the full reply
 ```
 
-The target is told it's answering an agent, so ending its turn *is* the reply — it needn't run
-anything. Only the turn your prompt actually starts answers (a prompt that queued behind a running
-turn doesn't answer with that turn's work), a mid-request permission block reaches you too as
-`ASKS`, and one request gets exactly one answer.
+Every fleet session is **named `<project>/<session>`** for Claude Code's cross-session messaging
+(`claude-here` passes `--name`; the derived default was `broker-agencies-61`, which nothing could
+address), so the target is asked to answer you *directly* with `SendMessage`. That lands in your
+session whatever you are doing — the case the relay below is worst at.
+
+The **turn-end relay is the fallback**, and it's the reason `--reply-to` still leaves an address
+next to the target: it covers an asker that isn't an addressable peer (a session started before
+this, or renamed since), a **codex/opencode** target that has no such tool, and a turn that dies
+before it gets there. The target is told to do both, so ending its turn is still an answer. Only
+the turn your prompt actually starts answers (a prompt that queued behind a running turn doesn't
+answer with that turn's work), a mid-request permission block reaches you too as `ASKS`, and one
+request gets exactly one answer — a delivery the fleet can *prove* landed suppresses the row, so
+you never read the same answer twice.
 
 These are also exposed as **MCP tools** (`fleet_list` / `_send` / `_read` / `_spawn` /
 `_worktrees` / `_inbox` / `_answer` / `_pause` / `_resume` / `_rename` / `_stop`) via a

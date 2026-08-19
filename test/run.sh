@@ -1287,6 +1287,12 @@ if command -v jq >/dev/null 2>&1; then
   is "...and is kept, not burned"       "1" "$(held)"
   fire UserPromptSubmit
   is "UserPromptSubmit arms it"         "1" "$(armed)"
+  # The answer is written AFTER arming, because that is the only order a real turn can
+  # have: the prompt starts the turn, the turn produces the message. It matters now that
+  # arming records where the transcript had got to and the relay reads only what came
+  # after — a fixture whose answer predates the arming is a turn that answered before it
+  # was asked, and gets the "(no text)" it deserves.
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"the write-back is suppressed by the sync"}]}}' >> "$TRF"
   fire Stop
   is "...and THAT turn's Stop relays"   "1" "$(matches 'write-back is suppressed' "$asked")"
   # A block mid-request goes back to the asker too (it's the one that can unblock it),
@@ -1317,6 +1323,116 @@ else
   skip "reply relay" "jq not available"
 fi
 
+# ── 4c2. two paths, one answer ────────────────────────────────────────────────
+# The relay above is a nine-link chain and every link drops the answer in SILENCE: the
+# turn must end (a usage limit, an interrupt or a killed session means it never does), the
+# row must be drained, and the wake that says "drain it" is skipped outright while the
+# asker is BUSY — the moment a lead is most likely to be waiting on one. So fleet-send now
+# asks the target to answer the asker BY NAME with SendMessage, which lands in its session
+# regardless. Both paths live at once, which is a new way to be wrong: a target that obeys
+# would answer twice, the second time by pasting into the asker's input box.
+#
+# Suppression must therefore be exact, and it is asserted in BOTH directions — a rule that
+# fires too eagerly recreates the silence it was written to fix. The transcript fixtures
+# are verbatim lines from real sessions: one delivery that succeeded, and one addressed to
+# a name that does not exist (which is what a session with no peer name looks like).
+group "reply relay (a direct answer replaces the row)"
+if command -v jq >/dev/null 2>&1; then
+  # the shipped detector, lifted out of the hook — change it there and these go red
+  eval "$(sed -n '/^_peer_answered() {/,/^}/p' "$ROOT/hooks/fleet-event.sh")"
+  OK="$FIX/reply-sendmessage-ok.jsonl"              # → cftest/receiver, {"success":true}
+  NO="$FIX/reply-sendmessage-failed.jsonl"          # → a name nothing answers, success:false
+  NO_TU="$(sed -n 1p "$NO")"; NO_TR="$(sed -n 2p "$NO")"
+  pa() { _peer_answered "$1" "$2" "$3" && echo 1 || echo 0; }
+  is "a delivered answer counts"        "1" "$(pa "$OK" 0 'cftest/receiver')"
+  # the whole point of matching the recipient: a target that messaged somebody else has
+  # not answered US, and treating that as an answer is a dropped one
+  is "...only for OUR address"          "0" "$(pa "$OK" 0 'ask/master')"
+  # A CALL IS NOT A DELIVERY. This is the case the fallback exists for — the asker isn't
+  # an addressable peer (started before it had a name, or renamed since), the tool says
+  # so, and suppressing here would strand the answer.
+  is "an unreachable name doesn't"      "0" "$(pa "$NO" 0 'zzz-no-such-peer-9f3a/nobody')"
+  # Scoped to THIS turn. The address survives across turns until it's answered, so an
+  # unscoped search finds the SendMessage that answered the PREVIOUS question and eats
+  # this one. Arming records where the transcript had got to; a turn starting after those
+  # lines must not see them.
+  is "...and only within this turn"     "0" "$(pa "$OK" "$(grep -c . "$OK")" 'cftest/receiver')"
+  # Everything unknown falls toward DELIVERING: a duplicate is annoying, a drop is the bug.
+  is "no transcript -> relay"           "0" "$(pa "$FIX/nope.jsonl" 0 'cftest/receiver')"
+  is "no arming offset -> relay"        "0" "$(pa "$OK" "" 'cftest/receiver')"
+  is "no address -> relay"              "0" "$(pa "$OK" 0 '')"
+
+  # ...and the same thing end to end, through the real hook: the row that does NOT get
+  # written, and the one that still does.
+  T="$(mktemp -d)"; RF="$T/resp/fleet"; AF="$T/ask/fleet"; mkdir -p "$RF" "$AF"
+  US=$'\x1f'; TRF="$T/t.jsonl"; asked="$AF/cf-cftest.inbox"
+  fire()  {
+    printf '{"hook_event_name":"%s","session_id":"sid1","cwd":"%s","transcript_path":"%s","message":""}' \
+      "$1" "$T" "$TRF" \
+    | env -u TMUX CLAUDE_FLEET_DIR="$RF" CLAUDE_FLEET_SOCK=cf-resp CLAUDE_FLEET_SLOT=w1 \
+          CLAUDE_FLEET_NOTIFIER=off "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  rows()  { grep -c . "$1" 2>/dev/null || true; }
+  # The asker is cf-cftest/receiver, so its peer name is exactly the one the fixture was
+  # captured answering. The transcript is that delivery plus a closing message, which is
+  # what the fallback would have relayed.
+  turn()  { cat "$1" > "$TRF"
+            printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"yes — deduped by externalId"}]}}' >> "$TRF"
+            printf '%s\n' "cf-cftest${US}receiver${US}$AF" > "$RF/cf-resp.w1.reply-to"
+            printf '%s\n' "${2:-0}" > "$RF/cf-resp.w1.reply-to.armed"; : > "$asked"; }
+  turn "$OK"; fire Stop
+  is "a delivered answer: no row"       "0" "$(rows "$asked")"
+  is "...and the address is consumed"   "0" "$(ls "$RF" 2>/dev/null | grep -c 'reply-to' || true)"
+  # SAME transcript, turn armed AFTER the delivery: that SendMessage belongs to an earlier
+  # question, so this turn is unanswered and the row must land.
+  turn "$OK" "$(grep -c . "$OK")"; fire Stop
+  is "a previous turn's delivery: row"  "1" "$(rows "$asked")"
+  # SAME shape, delivery REFUSED: the fallback is the only path left.
+  turn "$NO"; fire Stop
+  is "an undelivered answer: row"       "1" "$(rows "$asked")"
+  is "...carrying the answer's text"    "1" "$(matches 'deduped by externalId' "$asked")"
+  # AND IT MUST BE THIS TURN'S ANSWER. "The last assistant text in the file" is not the same
+  # thing, and the difference is not theoretical: seen on a live fleet, the final message
+  # landed in the transcript in the same second the Stop hook ran and lost the race, so a
+  # question about 7+5 was answered `4` — the PREVIOUS turn's answer, relayed with complete
+  # confidence and nothing in the row to reveal it.
+  prev='{"type":"assistant","message":{"content":[{"type":"text","text":"4"}]}}'
+  here='{"type":"assistant","message":{"content":[{"type":"text","text":"12"}]}}'
+  mkturn() {                    # $@ = the lines this turn added, after a one-line history
+    printf '%s\n' "$prev" > "$TRF"
+    for l in "$@"; do printf '%s\n' "$l" >> "$TRF"; done
+    printf '%s\n' "cf-cftest${US}receiver${US}$AF" > "$RF/cf-resp.w1.reply-to"
+    printf '1\n' > "$RF/cf-resp.w1.reply-to.armed"; : > "$asked"
+  }
+  mkturn "$NO_TU" "$NO_TR" "$here"; fire Stop
+  # trailing space: the extraction flattens the message's own newline into one (existing
+  # behaviour of every relayed row), so compare the trimmed detail
+  is "the row carries THIS turn's text" "12" \
+     "$(awk -F'\t' 'NR==1{print $4}' "$asked" 2>/dev/null | sed 's/[[:space:]]*$//')"
+  # A turn that ended on a tool call has no answer to relay. Saying so points the asker at
+  # fleet-read; reaching back for an older message answers it with something that was never
+  # the answer to this question.
+  mkturn "$NO_TU" "$NO_TR"; fire Stop
+  is "no text this turn -> says so"     "1" "$(matches 'no text' "$asked")"
+  is "...never an older answer"         "0" "$(awk -F'\t' 'NR==1{print $4}' "$asked" 2>/dev/null | grep -c '^4$' || true)"
+  # An offset the transcript cannot contain has outlived the file it was counted against —
+  # a session killed mid-question and brought back on another one. Unknown, not "said
+  # nothing": scoping to it would relay "(no text)" for a turn that answered perfectly.
+  mkturn "$NO_TU" "$NO_TR" "$here"; printf '9999\n' > "$RF/cf-resp.w1.reply-to.armed"
+  fire Stop
+  is "a stale offset falls back"        "12" \
+     "$(awk -F'\t' 'NR==1{print $4}' "$asked" 2>/dev/null | sed 's/[[:space:]]*$//')"
+  # Arming is what records the offset, and it must be the transcript's CURRENT length —
+  # an empty marker (what older code wrote) means "unknown", which relays.
+  printf 'a\nb\nc\n' > "$TRF"
+  printf '%s\n' "cf-cftest${US}receiver${US}$AF" > "$RF/cf-resp.w1.reply-to"
+  rm -f "$RF/cf-resp.w1.reply-to.armed"; fire UserPromptSubmit
+  is "arming records the turn's start"  "3" "$(cat "$RF/cf-resp.w1.reply-to.armed" 2>/dev/null)"
+  rm -rf "$T"
+else
+  skip "direct answer suppression" "jq not available"
+fi
+
 # The sending half: the address fleet-send writes, and every address it must refuse.
 group "reply relay (fleet-send --reply-to)"
 if command -v tmux >/dev/null 2>&1; then
@@ -1341,8 +1457,36 @@ if command -v tmux >/dev/null 2>&1; then
   # and a fixed boilerplate tail would be identical on every relayed send, so the probe
   # would match a PREVIOUS send still on screen instead of this one.
   buf="$(tmux -L cffsend capture-pane -p -t tgt 2>/dev/null | grep -v '^[[:space:]]*$')"
-  is "the target is told who asked"    "1" "$(printf '%s\n' "$buf" | grep -c 'from another agent (cf-ask/master)' || true)"
+  # Named by its PEER name (cf- stripped), not by its socket: that is the string Claude
+  # Code's SendMessage can address, the same one claude-here passes as --name and the hook
+  # prints in an inbox row. Telling the target "cf-ask/master" would name nothing.
+  is "the target is told who asked"    "1" "$(printf '%s\n' "$buf" | grep -c 'from another agent (ask/master)' || true)"
+  # ...and told to USE it. The turn-ending relay drops the answer in silence whenever the
+  # turn doesn't end, isn't drained, or the asker is busy when the wake would fire; a
+  # direct message has none of those links. Both halves are asked for on purpose — the
+  # relay is the fallback for an asker that isn't an addressable peer.
+  is "...and to SendMessage the answer" "1" "$(printf '%s\n' "$buf" | grep -c 'SendMessage with to: "ask/master"' || true)"
+  is "...and to end with it too"        "1" "$(printf '%s\n' "$buf" | grep -c 'end your turn with that same answer' || true)"
   is "...and the caller's words last"  "what is the schema" "$(printf '%s\n' "$buf" | tail -1)"
+  # A NON-CLAUDE target has no SendMessage, so the instruction it can act on is the old
+  # one. Asserted because the wrong half of this branch is invisible: codex would simply
+  # ignore a tool it doesn't have, and look like it ignored the question.
+  #   Its OWN session, and its own pane: capture-pane reads whatever is still on screen, so
+  # asserting "SendMessage is absent" in the pane that was just sent the claude wording
+  # passes for the wrong reason — it found the previous send. (It did, first time round.)
+  # The busy line is codex's, not claude's, or fleet-send waits out its submit-confirm loop
+  # against a pane no agent is reading.
+  tmux -L cffsend new-session -d -x 200 -y 40 -s cdx \
+    "printf 'Working (12s · esc to interrupt\n'; sleep 30" 2>/dev/null
+  sleep 0.4
+  printf 'codex\n' > "$RF/cffsend.cdx.agent"
+  PATH="$ROOT/bin:$PATH" FSEND --reply-to "cf-ask/master" --reply-dir "$AF" cdx "codex question" >/dev/null 2>&1
+  cbuf="$(tmux -L cffsend capture-pane -p -t cdx 2>/dev/null | grep -v '^[[:space:]]*$')"
+  is "a codex target isn't told to"     "0" "$(printf '%s\n' "$cbuf" | grep -c 'call SendMessage' || true)"
+  is "...it gets the relay wording"     "1" "$(printf '%s\n' "$cbuf" | grep -c 'relayed back automatically' || true)"
+  # and the claude wording really was on the other pane — the assertion above has teeth
+  is "...while a claude target is"      "1" "$(printf '%s\n' "$buf" | grep -c 'call SendMessage' || true)"
+  rm -f "$RF/cffsend.cdx.agent" "$RF/cffsend.cdx.reply-to"
   # Every field lands in a file that a hook reads back and interpolates into a tmux
   # command line, so refuse it here — the same rule as fleet-stack's valid_line.
   is "a path-ish address is refused"   "1" "$(FSEND --reply-to 'cf-a/../../etc' tgt hi | grep -c 'bad --reply-to' || true)"
@@ -1368,6 +1512,58 @@ if command -v tmux >/dev/null 2>&1; then
 else
   skip "reply relay (fleet-send)" "tmux not available"
 fi
+
+# ── 4c3. a fleet session is addressable by name ───────────────────────────────
+# Claude Code names every session for its cross-session messaging, and left alone it
+# DERIVES that name from the directory: broker-agencies-61, getmycoi-06, platform-4b.
+# Nothing in the fleet knows those, so "reply to master" named nothing and the direct
+# reply path could not be used at all. claude-here now passes the address the fleet
+# already uses, <project>/<session> — the same string fleet-send computes for --reply-to
+# and the hook prints in an inbox row.
+#
+# Both directions, because a HALF name is worse than none: "/master" or "superkey/" is
+# unaddressable and would still displace the derived one, so a session missing either half
+# must go unnamed rather than named wrongly.
+group "peer name (claude-here --name)"
+CH="$(mktemp -d)"; mkdir -p "$CH/bin" "$CH/cfg" "$CH/work" "$CH/fleet"
+# stand in for claude and report the argv it was handed
+printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done\n' > "$CH/bin/claude"
+chmod +x "$CH/bin/claude"
+ARGV() {                        # $1 = CLAUDE_FLEET_SOCK ("" = unset), rest = claude-here argv
+  local sock="$1"; shift
+  ( cd "$CH/work" && env -u ZELLIJ_SESSION_NAME -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_MODEL \
+      -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH \
+      PATH="$CH/bin:$PATH" CLAUDE_CONFIG_DIR="$CH/cfg" CLAUDE_FLEET_DIR="$CH/fleet" \
+      CLAUDE_FLEET_SOCK="$sock" \
+      /bin/bash "$ROOT/bin/claude-here" "$@" 2>/dev/null ) | tr '\n' ' '
+}
+NAMED() { ARGV "$@" | sed -n 's/.*--name \([^ ]*\).*/\1/p'; }
+is "named <project>/<session>"        "superkey/master" "$(NAMED cf-superkey master)"
+# The SAME expansion fleet-send uses (${sock#cf-}), so a socket without the prefix spells
+# one name on both sides instead of two that never meet.
+is "...however the socket is spelled" "weird/master"    "$(NAMED weird master)"
+is "no socket -> no name"             ""                "$(NAMED '' master)"
+is "no session -> no name"           ""                 "$(NAMED cf-superkey)"
+# A name has to be spellable back at us: fleet-send refuses these characters in a reply
+# address, and Claude Code renames a session whose name it won't take.
+is "an unspellable name is dropped"   ""                "$(NAMED cf-superkey 'mas ter')"
+# The caller's own --name wins, and a second one would be an argument error.
+is "an explicit --name is left alone" "boss"            "$(NAMED cf-superkey master -- --name boss)"
+is "...and never doubled"             "1" \
+   "$(ARGV cf-superkey master -- --name boss | tr ' ' '\n' | grep -c -- '--name' || true)"
+is "...nor in the --name=x spelling"  "1" \
+   "$(ARGV cf-superkey master -- --name=boss | tr ' ' '\n' | grep -c -- '--name' || true)"
+# THE PATH A FLEET SESSION ACTUALLY TAKES is the resume one — a session is created once
+# and re-opened for the rest of its life, so a name that only lands on a fresh start would
+# be missing from every session anyone talks to.
+enc="$(printf '%s' "$CH/work" | sed 's#[/.]#-#g')"; mkdir -p "$CH/cfg/projects/$enc"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' \
+  > "$CH/cfg/projects/$enc/abc123.jsonl"
+res="$(ARGV cf-superkey master)"
+is "a resumed session is named too"   "1" "$(printf '%s' "$res" | grep -c -- '--resume abc123' || true)"
+is "...with the same name"            "superkey/master" "$(NAMED cf-superkey master)"
+rm -rf "$CH"
+
 
 # `node --check` proves the screen PARSES, not that it runs — a missing `let` is a
 # ReferenceError that only fires on the keystroke that reaches it, and it kills the

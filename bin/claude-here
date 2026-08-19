@@ -34,10 +34,45 @@ esac
 MODEL=()
 [ -n "${CLAUDE_FLEET_MODEL:-}" ] && MODEL=(--model "$CLAUDE_FLEET_MODEL")
 
+# --- this session's PEER NAME ------------------------------------------------
+# Claude Code registers every session under a name that other sessions can address
+# directly (SendMessage / ListAgents, ~/.claude/sessions/<pid>.json). Left alone it
+# DERIVES that name from the directory — broker-agencies-61, getmycoi-06 — which no
+# fleet command knows and no agent can be told to reply to, so the one reliable way
+# an answer could come back was unusable.
+#
+# Name it what the fleet ALREADY calls this session: <project>/<session>, byte-for-byte
+# the address hooks/fleet-event.sh prints in an inbox row and fleet-send computes for
+# --reply-to. That makes "answer superkey/master" an address that resolves instead of a
+# label. It also dodges a collision the derived scheme doesn't have to think about:
+# every project has a session called `master`, and a bare `master` would make Claude
+# Code rename ours out from under the address.
+#
+# `#cf-` rather than a `cf-*` guard on purpose: fleet-send derives the same name with
+# the same expansion, so a socket WITHOUT the prefix yields the same (unstripped) name
+# on both sides — one spelling, whatever the socket looks like.
+NAME=()
+_peer_proj="${CLAUDE_FLEET_SOCK:-}"; _peer_proj="${_peer_proj#cf-}"
+_peer_sess="${CLAUDE_FLEET_SLOT:-}"
+# An explicit --name is the caller's business, and a second one is an argument error, so
+# don't add ours. Both spellings, since only one of them looks like a flag.
+for _arg in "$@"; do case "$_arg" in --name|--name=*) _peer_proj="" ;; esac; done
+# HALF A NAME IS WORSE THAN NO NAME: "/master" or "superkey/" is a name nothing can
+# address, and passing it would still displace the derived one — so a session with only
+# half its identity in the environment goes unnamed and keeps today's behaviour. Same
+# for a name that isn't spellable back at us (fleet-send refuses those characters in a
+# reply address, and Claude Code renames what it won't accept).
+if [ -n "$_peer_proj" ] && [ -n "$_peer_sess" ]; then
+  case "$_peer_proj$_peer_sess" in
+    *[!A-Za-z0-9._~-]*) ;;
+    *) NAME=(--name "$_peer_proj/$_peer_sess") ;;
+  esac
+fi
+
 # A parallel session (grid `N`) is a deliberately NEW conversation in this dir —
 # never resume, even if the checkout already has one.
 case "${CLAUDE_FLEET_FRESH:-0}" in
-  1|true|yes|on) echo "claude-here: fresh parallel session in $PWD" >&2; exec claude "${YOLO[@]}" "${MODEL[@]}" "$@" ;;
+  1|true|yes|on) echo "claude-here: fresh parallel session in $PWD" >&2; exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "$@" ;;
 esac
 
 enc="$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
@@ -104,7 +139,7 @@ if [ -n "$resume_id" ]; then
     FORK=(--fork-session)
   fi
   echo "claude-here: resuming $resume_id in $PWD" >&2
-  exec claude "${YOLO[@]}" "${MODEL[@]}" --resume "$resume_id" "${FORK[@]}" "$@"
+  exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" --resume "$resume_id" "${FORK[@]}" "$@"
 fi
 echo "claude-here: no resumable conversation in $PWD — starting fresh" >&2
-exec claude "${YOLO[@]}" "${MODEL[@]}" "$@"
+exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "$@"
