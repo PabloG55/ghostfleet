@@ -109,6 +109,51 @@ _input_empty() {                      # $1=socket $2=session -> 0 when safe to p
   [ -z "$inl" ]
 }
 
+# Did this turn already hand the answer to the asker DIRECTLY? fleet-send --reply-to now
+# asks the target to call SendMessage (Claude Code's cross-session messaging), which lands
+# in the asker's session even while it is mid-turn — the exact case where the relay below
+# skips its wake and the row sits unread. Both paths are live at once, so a target that
+# does as it is told would answer TWICE: once into the asker's session, and again as an
+# inbox row plus a paste into the asker's input box, which can Stop a turn it never asked
+# about.
+#
+# PROOF, NOT INTENTION. What counts is a SendMessage whose recipient is THIS asker and
+# whose tool_result came back {"success":true} — the recipient's own confirmation that it
+# was delivered. A tool call alone doesn't count: an unreachable name (a session started
+# before it had a peer name, or renamed since) answers {"success":false}, and suppressing
+# on that would recreate the silence this whole path exists to end.
+#
+# SCOPED TO THIS TURN, from the line the transcript had reached when the address was armed.
+# The address survives across turns until it's answered, so an unscoped search would find
+# the SendMessage that answered the PREVIOUS question to the same asker and swallow this
+# one.
+#
+# Fails toward DELIVERING: no transcript, no offset, unparsable JSON, no jq — every one of
+# them returns non-zero and the relay runs. A duplicate answer is annoying; a dropped one
+# is the bug.
+_peer_answered() {              # $1=transcript $2=line this turn starts at $3=asker peer name
+  local tr="$1" from="$2" to="$3" n=""
+  [ -n "$tr" ] && [ -f "$tr" ] && [ -n "$to" ] || return 1
+  case "$from" in ''|*[!0-9]*) return 1 ;; esac
+  # `.content` of a tool_result is an ARRAY of blocks, and `tostring` on it JSON-escapes
+  # the payload's own quotes ("success" becomes \"success\") — which is exactly how the
+  # first version of this matched nothing at all. Join the text blocks instead.
+  n="$(tail -n "+$(( from + 1 ))" "$tr" 2>/dev/null | jq -s --arg to "$to" '
+        ([ .[] | select(.type=="assistant") | (.message.content // [])
+           | if type=="array" then .[] else empty end
+           | select(.type=="tool_use" and .name=="SendMessage" and ((.input.to // "") == $to))
+           | .id ]) as $ids
+        | [ .[] | select(.type=="user") | (.message.content // [])
+            | if type=="array" then .[] else empty end
+            | select(.type=="tool_result" and (.is_error != true))
+            | .tool_use_id as $tid | select(($ids | index($tid)) != null)
+            | (.content | if type=="array" then map(select(.type=="text") | .text) | join(" ")
+                          else tostring end)
+            | select(test("\"success\" *: *true")) ] | length' 2>/dev/null)"
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$n" -gt 0 ]
+}
+
 # --- push worker events into the lead's inbox (see fleet-inbox) ---------------
 # Event-driven, zero polling: the lead can't be interrupted, so it drains this
 # feed with `fleet-inbox` instead of polling every sibling. Emit the two events a
@@ -196,7 +241,16 @@ fi
 if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
   rt="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.reply-to"
   if [ -f "$rt" ] && [ "$EVENT" = "UserPromptSubmit" ]; then
-    : > "$rt.armed" 2>/dev/null
+    # The arming marker also carries WHERE THIS TURN STARTS in the transcript — the line
+    # count now — so the Stop below can ask "did this turn SendMessage the answer" without
+    # finding the one that answered the previous question to the same asker. An empty or
+    # unparsable marker (one written by older code) means "don't know", and _peer_answered
+    # then declines to suppress: a duplicate, never a silence.
+    _tl=0
+    [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] \
+      && _tl="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
+    case "$_tl" in ''|*[!0-9]*) _tl=0 ;; esac
+    printf '%s\n' "$_tl" > "$rt.armed" 2>/dev/null
   elif [ -f "$rt" ] && [ -f "$rt.armed" ] \
        && { [ "$EVENT" = "Stop" ] || [ "$status" = "need-you" ]; }; then
     # \x1f, and a sink for the leftover: with fewer variables than fields `read` glues
@@ -212,38 +266,79 @@ if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
     [ "${r_sock:-}" = "$CLAUDE_FLEET_SOCK" ] && [ "${r_sess:-}" = "$SLOT" ] && r_ok=0
 
     if [ "$r_ok" = 1 ]; then
-      if [ "$EVENT" = "Stop" ]; then
-        r_ev="answered"
-        # The answer itself: last non-empty assistant message, flattened to one line.
-        # Same extraction as fleet-read, so the excerpt and the "full reply" command
-        # can't disagree. Tabs MUST go — the inbox is a TSV and a tab in the detail
-        # would shift the columns of a row nothing else validates.
-        r_txt="$(tail -n 400 "$TRANSCRIPT" 2>/dev/null \
-          | jq -r 'select(.type=="assistant") | (.message.content // [])
-                   | map(select(.type=="text")|.text) | join(" ")' 2>/dev/null \
-          | grep -v '^[[:space:]]*$' | tail -1 | tr '\n\r\t' '   ')"
-      else
-        r_ev="asks"; r_txt="$NOTE"
+      # Who we would be answering, and where this turn began (see _peer_answered).
+      r_peer="${r_sock#cf-}/$r_sess"
+      r_start="$(head -n 1 "$rt.armed" 2>/dev/null | tr -d '[:space:]')"
+      case "$r_start" in ''|*[!0-9]*) r_start="" ;; esac
+      # An offset the transcript cannot contain has outlived the file it was counted against
+      # (the session was killed and came back on another one). Scoping to it would read past
+      # the end and report "no text" for a turn that answered perfectly, so treat it as
+      # UNKNOWN — which falls back to the unscoped window, exactly as before this existed.
+      if [ -n "$r_start" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+        _tn="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
+        case "$_tn" in ''|*[!0-9]*) _tn=0 ;; esac
+        [ "$r_start" -gt "$_tn" ] && r_start=""
       fi
-      # Bash substring, not `cut -c`: this text is UTF-8 (em dashes, box glyphs) and
-      # cut counts bytes in the C locale, which would slice a character in half.
-      r_txt="${r_txt:0:220}"
-      [ -n "$r_txt" ] || r_txt="(no text — read it with fleet-read)"
 
-      printf '%s\t%s\t%s\t%s\n' "$now" "${CLAUDE_FLEET_SOCK#cf-}/$SLOT" "$r_ev" "$r_txt" \
-        >> "$r_dir/$r_sock.inbox" 2>/dev/null || true
+      # THE RELAY IS NOW THE SECOND HALF OF A PAIR. fleet-send --reply-to asks the target to
+      # answer the asker BY NAME with SendMessage, which lands in its session even mid-turn —
+      # the case this relay is worst at, since its wake is skipped outright while the asker is
+      # busy. Both paths live at once, so a target that does as it is told would answer TWICE,
+      # the second time as a row that reads like a separate answer plus a paste into the
+      # asker's input box. So the relay stands down for a delivery it can PROVE happened, and
+      # runs in every other case: an unreachable asker, a target that ignored the instruction,
+      # a non-Claude agent, a turn killed before it got there.
+      r_direct=0
+      [ "$EVENT" = "Stop" ] && _peer_answered "$TRANSCRIPT" "$r_start" "$r_peer" && r_direct=1
 
-      # Debounced per ASKER, not per fleet like the master nudge above: a shared stamp
-      # would let either wake swallow the other's, and this one must not be droppable.
-      r_stamp="$r_dir/$r_sock.$r_sess.relay.stamp"
-      r_last="$(cat "$r_stamp" 2>/dev/null || echo 0)"; case "$r_last" in ''|*[!0-9]*) r_last=0 ;; esac
-      r_win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"; case "$r_win" in ''|*[!0-9]*) r_win=30 ;; esac
-      if tmux -L "$r_sock" has-session -t "=$r_sess" 2>/dev/null \
-         && [ "$(( now - r_last ))" -ge "$r_win" ] && _input_empty "$r_sock" "$r_sess"; then
-        printf '%s\n' "$now" > "$r_stamp" 2>/dev/null
-        # No --reply-to on this one: an answer that asked for an answer is a loop.
-        ( fleet-send -s "$r_sock" "$r_sess" "[fleet] ${CLAUDE_FLEET_SOCK#cf-}/$SLOT $r_ev your request: $r_txt
+      if [ "$r_direct" = 0 ]; then
+        if [ "$EVENT" = "Stop" ]; then
+          r_ev="answered"
+          # The answer itself: last non-empty assistant message, flattened to one line.
+          # Same extraction as fleet-read, so the excerpt and the "full reply" command
+          # can't disagree. Tabs MUST go — the inbox is a TSV and a tab in the detail
+          # would shift the columns of a row nothing else validates.
+          #
+          # SCOPED TO THIS TURN, and RETRIED, because "the last assistant text in the file"
+          # is not the same thing as "the answer". Caught on a live fleet: the final message
+          # lands in the transcript in the same SECOND the Stop hook runs, and lost the race —
+          # so the relay answered a question about 7+5 with `4`, the previous turn's answer,
+          # confidently and with nothing in the row to reveal it. Scoping makes that
+          # impossible (nothing from an earlier turn is in range); the retry is what turns the
+          # racy case from "(no text)" back into the real answer. Bounded, and never reached
+          # unless somebody is owed an answer this relay still has to carry.
+          for _try in 1 2 3 4 5; do
+            if [ -n "$r_start" ]; then _from="+$(( r_start + 1 ))"; else _from="-400"; fi
+            r_txt="$(tail -n "$_from" "$TRANSCRIPT" 2>/dev/null \
+              | jq -r 'select(.type=="assistant") | (.message.content // [])
+                       | map(select(.type=="text")|.text) | join(" ")' 2>/dev/null \
+              | grep -v '^[[:space:]]*$' | tail -1 | tr '\n\r\t' '   ')"
+            [ -n "$r_txt" ] && break
+            sleep 0.2
+          done
+        else
+          r_ev="asks"; r_txt="$NOTE"
+        fi
+        # Bash substring, not `cut -c`: this text is UTF-8 (em dashes, box glyphs) and
+        # cut counts bytes in the C locale, which would slice a character in half.
+        r_txt="${r_txt:0:220}"
+        [ -n "$r_txt" ] || r_txt="(no text — read it with fleet-read)"
+
+        printf '%s\t%s\t%s\t%s\n' "$now" "${CLAUDE_FLEET_SOCK#cf-}/$SLOT" "$r_ev" "$r_txt" \
+          >> "$r_dir/$r_sock.inbox" 2>/dev/null || true
+
+        # Debounced per ASKER, not per fleet like the master nudge above: a shared stamp
+        # would let either wake swallow the other's, and this one must not be droppable.
+        r_stamp="$r_dir/$r_sock.$r_sess.relay.stamp"
+        r_last="$(cat "$r_stamp" 2>/dev/null || echo 0)"; case "$r_last" in ''|*[!0-9]*) r_last=0 ;; esac
+        r_win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"; case "$r_win" in ''|*[!0-9]*) r_win=30 ;; esac
+        if tmux -L "$r_sock" has-session -t "=$r_sess" 2>/dev/null \
+           && [ "$(( now - r_last ))" -ge "$r_win" ] && _input_empty "$r_sock" "$r_sess"; then
+          printf '%s\n' "$now" > "$r_stamp" 2>/dev/null
+          # No --reply-to on this one: an answer that asked for an answer is a loop.
+          ( fleet-send -s "$r_sock" "$r_sess" "[fleet] ${CLAUDE_FLEET_SOCK#cf-}/$SLOT $r_ev your request: $r_txt
 Full reply: fleet-read -s $CLAUDE_FLEET_SOCK $SLOT 3 — to ask it something else, fleet-send -s $CLAUDE_FLEET_SOCK --reply-to me $SLOT \"…\". Relayed automatically; no need to reply to this line." >/dev/null 2>&1 & )
+        fi
       fi
       # One request, one answer: consume the address on Stop so a later, unrelated turn
       # can't answer again. need-you keeps it — that turn hasn't produced the answer yet.

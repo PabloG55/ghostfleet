@@ -105,15 +105,21 @@ event goes to *its own* fleet's master — never to you — so a question sent t
 project's session looks ignored no matter how long you wait. When you want an answer:
 
 - **`fleet-send --reply-to me <session> "<question>"`** (MCP: `fleet_send` with
-  `reply_to: true`) — records your address, and when that session's turn ends the hook
-  relays its answer into **your** `fleet-inbox` and wakes you. Add `-s <socket>` (MCP:
-  `project`) to ask another project's session; that is the case it exists for.
-- The answer arrives as an `ANSWERED` row naming `<project>/<session>`, with the reply's
-  first ~200 characters. Pull the rest with `fleet-read -s <socket> <session> 3`.
-- The target is told it is answering an agent, so **ending its turn is the reply** — it
-  doesn't run anything. If it hits a permission prompt mid-request you get an `ASKS` row
-  instead, and can unblock it with `fleet-answer`; the address survives until it answers.
-- One request, one answer. Ask again to ask again.
+  `reply_to: true`) — the target is told to answer **you, by name** (every fleet session is
+  named `<project>/<session>` for cross-session messaging), so its reply usually arrives
+  **in this conversation** as a message from `<project>/<session>` — even while you are
+  mid-turn. Nothing to poll, nothing to drain. Add `-s <socket>` (MCP: `project`) to ask
+  another project's session; that is the case it exists for.
+- If it **couldn't** message you — you aren't an addressable peer, it runs codex/opencode,
+  or its turn died first — the answer falls back to an `ANSWERED` row in `fleet-inbox`
+  naming `<project>/<session>`, with the reply's first ~200 characters; pull the rest with
+  `fleet-read -s <socket> <session> 3`. So a missing row is not a missing answer: check
+  what arrived in the conversation first.
+- The target is told it is answering an agent, so **ending its turn is also the reply** —
+  it needn't run anything else. If it hits a permission prompt mid-request you get an
+  `ASKS` row instead, and can unblock it with `fleet-answer`; the address survives until
+  it answers.
+- One request, one answer — you won't get both copies.
 
 ## Unblock a worker stuck on a prompt
 

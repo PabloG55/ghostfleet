@@ -370,7 +370,7 @@ work at stack width, and the governor's 5h usage scrape cannot read a pane narro
 | `fleet-spawn <n> --new --prompt "..."` | isolated worker (new worktree) |
 | `fleet-spawn <n> --reuse <wt>` | reuse a free worktree |
 | `fleet-send <s> "..."` | new task (only if the session is free) |
-| `fleet-send --reply-to me <s> "..."` | **ask** instead of dispatch: records a return address, and when that session's turn ends the hook relays its answer into YOUR inbox and wakes you. Works across projects (`-s <sock>`), which is the case it exists for — a plain send's `done` only ever reaches the target's OWN master. [not upstream yet] |
+| `fleet-send --reply-to me <s> "..."` | **ask** instead of dispatch: the target is told to answer you by name with `SendMessage`, so the reply lands in your session even mid-turn; if it can't reach you, the hook relays its turn-end message into YOUR inbox instead. Works across projects (`-s <sock>`), which is the case it exists for — a plain send's `done` only ever reaches the target's OWN master. [not upstream yet] |
 | `fleet-read <s> [n]` | a worker's last N messages |
 | `fleet-answer <s> "2"` | unblock a dialog — don't use `fleet-send` for this |
 | `fleet-pause <s>` / `fleet-resume <s>` | CLI equivalents of `p`/`P` on the grid |
