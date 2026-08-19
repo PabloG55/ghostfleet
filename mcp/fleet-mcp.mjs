@@ -148,9 +148,54 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
 ];
 
+// REFUSING A CALL, so the caller can see it was refused. MCP's error channel for a tool
+// call is a result flagged isError — a client renders that as a failed call, where the
+// same words in an ordinary result render as the tool's output. The bug this exists for
+// returned the normal success line, so text alone would only be half a fix: the lead's
+// transcript would still show a green call.
+const fail = (msg) => ({ isError: true, text: `error: ${msg}` });
+
+// `required` in an inputSchema is a declaration to the CLIENT; the server never enforced
+// it. So a client that dropped a key handed the tool `undefined`, and `String(undefined)`
+// is the seven-character word "undefined" — pasted into a worker's input box and
+// submitted as its prompt, while the call answered `fleet-send: → <session>` as usual.
+// Four dispatches from one lead were lost that way, with nothing on either side to see.
+// Validate here instead, and name the tool and the argument so the next one reads
+// "fleet_send: missing required argument 'prompt'".
+//
+// Driven off the schema's own `required` rather than a check per tool: 13 tools and 12
+// required arguments today, and a hand-written list drifts from the schema the first
+// time one is added.
+//
+// EMPTY STRING is refused too — everywhere but one place. "" is not an addressable
+// session, worktree name or path, and an empty prompt pastes nothing and submits it,
+// which loses the caller's instruction exactly as the missing key did. fleet_answer's
+// `text` is the exception: it is raw keystrokes whose own description promises a trailing
+// Enter, so "" reads as a deliberate bare Enter, and whether that is honoured belongs to
+// fleet-answer — which today refuses it by name ("nothing to send — give <text> or --key
+// Name"). Nothing silent gets through either way; a *missing* text still cannot, because
+// that is what would type u-n-d-e-f-i-n-e-d into a permission dialog.
+const EMPTY_OK = new Set(['fleet_answer.text']);
+
+function argError(name, a) {
+  const req = TOOLS.find(x => x.name === name)?.inputSchema?.required || [];
+  for (const k of req) {
+    const v = a[k];
+    if (v === undefined || v === null) return `${name}: missing required argument '${k}'`;
+    // Wrong TYPE is the same defect wearing another hat: String([]) is "", String({}) is
+    // "[object Object]", and both reach a shell command as quietly as "undefined" did.
+    if (typeof v !== 'string')
+      return `${name}: required argument '${k}' must be a string, got ${Array.isArray(v) ? 'array' : typeof v}`;
+    if (v === '' && !EMPTY_OK.has(`${name}.${k}`)) return `${name}: required argument '${k}' is empty`;
+  }
+  return null;
+}
+
 function callTool(name, a = {}) {
+  const bad = argError(name, a);
+  if (bad) return fail(bad);                    // before anything runs, or resolves
   let t;
-  try { t = target(a.project); } catch (e) { return `error: ${e.message}`; }
+  try { t = target(a.project); } catch (e) { return fail(e.message); }
   switch (name) {
     case 'fleet_project_add': {
       const args = ['add', String(a.path)];
@@ -177,7 +222,7 @@ function callTool(name, a = {}) {
         const me = self();
         // Refuse rather than send it one-way: a caller that asked for an answer and
         // silently didn't get a return address would wait for a reply that can't come.
-        if (!me) return 'error: reply_to needs this session to be inside a fleet ($TMUX names none). Send without reply_to, or from Bash: fleet-send --reply-to <socket>/<session> …';
+        if (!me) return fail('reply_to needs this session to be inside a fleet ($TMUX names none). Send without reply_to, or from Bash: fleet-send --reply-to <socket>/<session> …');
         args.push('--reply-to', `${me.sock}/${me.sess}`, '--reply-dir', me.dir);
       }
       args.push(String(a.session), String(a.prompt));
@@ -211,7 +256,7 @@ function callTool(name, a = {}) {
     }
     case 'fleet_stop': return run('fleet-stop', a.reclaim ? ['--reclaim', String(a.session)] : [String(a.session)], t);
     case 'fleet_rename': return run('fleet-rename', [String(a.session), String(a.new_name)], t);
-    default: return `unknown tool: ${name}`;
+    default: return fail(`unknown tool: ${name}`);
   }
 }
 
@@ -230,8 +275,16 @@ function handle(line) {
   }
   if (method === 'tools/list') return send({ jsonrpc: '2.0', id, result: { tools: TOOLS } });
   if (method === 'tools/call') {
-    const text = callTool(params?.name, params?.arguments || {});
-    return send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: String(text).slice(0, 8000) }] } });
+    // callTool returns text for a call that RAN, or fail()'s {isError, text} for one we
+    // refused to run. Only the second sets isError; a command that ran and printed a
+    // failure is its own output, and flagging that would misreport the several commands
+    // here which write to stderr on success (fleet-answer echoes the pane).
+    const r = callTool(params?.name, params?.arguments || {});
+    const out = typeof r === 'string' ? { text: r } : r;
+    return send({ jsonrpc: '2.0', id, result: {
+      content: [{ type: 'text', text: String(out.text).slice(0, 8000) }],
+      ...(out.isError ? { isError: true } : {}),
+    }});
   }
   if (method === 'ping') return send({ jsonrpc: '2.0', id, result: {} });
   if (method && method.startsWith('notifications/')) return;   // no response for notifications
