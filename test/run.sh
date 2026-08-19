@@ -894,6 +894,106 @@ else
   skip "MCP cross-project" "git/tmux missing"
 fi
 
+# ── 4a7b. a missing required argument must not become the word "undefined" ────
+# Shipped, and silent on both sides: a lead sent four prompts with fleet_send and every
+# one of them arrived in the worker's pane as `❯ undefined`, while the tool answered
+# `fleet-send: → <session>` — the ordinary success line. Two workers then sat idle
+# waiting on instructions their lead was certain it had sent, one of them a scope answer
+# sent three times. `required: ['session','prompt']` had been in the inputSchema all
+# along; that array is a promise the CLIENT keeps, and this client (Claude Code 2.1.226)
+# dropped the key. `String(undefined)` is the seven-character word "undefined", and the
+# wrapper pasted it in and pressed Enter.
+#
+# So: every required argument of every tool, refused BY NAME before anything runs. Run
+# against stub bin/ commands that log their argv, because the two halves are only
+# separable if execution is observable — "refused" and "ran with garbage" both return
+# text otherwise. Both directions, so a guard that refused everything (which would also
+# make the no-`undefined` assertion green) cannot pass: the valid calls must still reach
+# their command with their arguments intact.
+group "MCP refuses a missing required argument"
+AG="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$AG/mcp" "$AG/bin" "$AG/home"
+cp "$ROOT/mcp/fleet-mcp.mjs" "$AG/mcp/"     # BIN is <this file>/../bin, so the copy's
+: > "$AG/ran"                               # stubs are what a passing call reaches
+for c in fleet-project fleet-list fleet-send fleet-read fleet-spawn fleet-worktrees \
+         fleet-inbox fleet-answer fleet-pause fleet-resume fleet-stop fleet-rename; do
+  cat > "$AG/bin/$c" <<STUB
+#!/bin/sh
+printf '%s' "\$(basename "\$0")" >> "$AG/ran"
+for a in "\$@"; do printf ' [%s]' "\$a" >> "$AG/ran"; done
+printf '\n' >> "$AG/ran"
+echo "STUB ran"
+STUB
+  chmod +x "$AG/bin/$c"
+done
+# HOME/TMUX cleared: nothing here may read the real projects file or reach a live fleet.
+HOME="$AG/home" TMUX= CLAUDE_FLEET_SOCK=cfargtest \
+  node "$ROOT/test/helpers/mcp-argcheck.mjs" "$AG/mcp/fleet-mcp.mjs" > "$AG/out" 2>/dev/null
+US=$'\x1f'
+agf() { grep -m1 "^$1$US" "$AG/out" | cut -d "$US" -f2; }   # 1 = returned as an error
+agt() { grep -m1 "^$1$US" "$AG/out" | cut -d "$US" -f3; }   # the text the caller sees
+
+# the reported call, and the message the next lead gets instead of silence
+is "missing prompt: flagged isError"       "1" "$(agf send.no-prompt)"
+is "missing prompt: names tool and arg"    "1" "$(agt send.no-prompt | grep -cF "fleet_send: missing required argument 'prompt'" || true)"
+is "missing session is named too"          "1" "$(agt send.no-session | grep -cF "fleet_send: missing required argument 'session'" || true)"
+# null and a non-string are the same defect in another coat: String() turns them into
+# "null" and "[object Object]" just as quietly
+is "an explicit null is refused"           "1" "$(agt pause.null | grep -cF "fleet_pause: missing required argument 'session'" || true)"
+is "a non-string is refused, with its type" "1" "$(agt send.obj-prompt | grep -cF "must be a string, got object" || true)"
+# an empty prompt pastes nothing and submits it — the same lost instruction
+is "an empty prompt is refused"            "1" "$(agt send.empty | grep -cF "fleet_send: required argument 'prompt' is empty" || true)"
+is "a missing answer text is refused"      "1" "$(agt answer.no-text | grep -cF "fleet_answer: missing required argument 'text'" || true)"
+# ...but empty is NOT blanket-refused: fleet_answer's text is raw keystrokes, and "" with
+# the trailing Enter its description promises is a legible call. It goes through.
+is "an empty answer text still runs"       "0" "$(agf answer.empty)"
+
+# THE OTHER DIRECTION. Refusing must not cost the valid calls anything: each of these
+# reached its command, and with its arguments unchanged.
+is "a full send reaches fleet-send"        "1" "$(grep -cF 'fleet-send [w1] [the real work]' "$AG/ran" || true)"
+is "optional n still defaults"             "1" "$(grep -cF 'fleet-read [w1] [1]' "$AG/ran" || true)"
+is "optional reclaim stays optional"       "1" "$(grep -cF 'fleet-stop [w1]' "$AG/ran" || true)"
+is "optional all stays optional"           "1" "$(grep -cF 'fleet-inbox [--all]' "$AG/ran" || true)"
+is "optional prompt stays optional"        "1" "$(grep -cF 'fleet-resume [w1] [go]' "$AG/ran" || true)"
+is "a tool with no required args runs"     "1" "$(grep -cF 'fleet-list' "$AG/ran" || true)"
+is "empty text reaches fleet-answer"       "1" "$(grep -cF 'fleet-answer [w1] []' "$AG/ran" || true)"
+# and NOTHING else did — a refusal that still shelled out would show up here
+is "exactly the 7 valid calls ran"         "7" "$(grep -c . "$AG/ran" || true)"
+is "no command was handed 'undefined'"     "0" "$(grep -c undefined "$AG/ran" || true)"
+
+# DRIFT: the same check for every required argument the server declares, omitted in turn,
+# generated from its own tools/list — so a tool added later is covered without editing
+# this file. The count guards the loop itself: a driver that generated no cases would
+# leave the refusal tally at zero and read as a pass.
+nreq=0; badreq=0
+while IFS="$US" read -r c e txt; do
+  case "$c" in req:*) ;; *) continue ;; esac
+  nreq=$((nreq+1)); k="${c##*.}"; tool="${c#req:}"; tool="${tool%%.*}"
+  if [ "$e" = 1 ] && printf '%s' "$txt" | grep -qF "$tool: missing required argument '$k'"; then :
+  else badreq=$((badreq+1)); fi
+done < "$AG/out"
+is "every declared required arg is refused by name" "0" "$badreq"
+is "...and the loop covered the 12 known today"     "yes" "$([ "${nreq:-0}" -ge 12 ] && echo yes || echo no)"
+is "...and nothing new ran while doing it"          "7" "$(grep -c . "$AG/ran" || true)"
+rm -rf "$AG"
+
+# The empty-text exception above rests on fleet-answer refusing "" itself, by name. If
+# that ever became a silent no-op the exception would be hiding a lost keystroke, so it
+# is asserted here rather than assumed.
+group "fleet-answer refuses an empty text itself"
+if command -v tmux >/dev/null 2>&1; then
+  tmux -L cfansempty kill-server 2>/dev/null
+  tmux -L cfansempty new-session -d -s w1 "sleep 30" 2>/dev/null
+  out="$(TMUX= "$ROOT/bin/fleet-answer" -s cfansempty w1 "" 2>&1; echo "rc=$?")"
+  is "it refuses"        "1" "$(printf '%s' "$out" | grep -c 'nothing to send' || true)"
+  is "and exits nonzero" "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
+  # the other direction: a real key does get through, so the refusal is about emptiness
+  is "a real text is sent" "1" "$(TMUX= "$ROOT/bin/fleet-answer" -s cfansempty w1 "2" 2>&1 | grep -c "sent '2'" || true)"
+  tmux -L cfansempty kill-server 2>/dev/null
+else
+  skip "fleet-answer empty text" "tmux missing"
+fi
+
 # ── 4a8. dev-stack slots ─────────────────────────────────────────────────────
 # One integer per checkout that nothing else in the fleet holds, so a repo can derive
 # its local stack (ports, database, bucket) instead of a human picking free numbers per
@@ -2866,6 +2966,7 @@ for f in "$ROOT"/hooks/*.sh; do
   bash -n "$f" >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error"
 done
 node --check "$ROOT/mcp/fleet-mcp.mjs" >/dev/null 2>&1 && ok "fleet-mcp.mjs parses" || bad "fleet-mcp.mjs parses" "ok" "syntax error"
+node --check "$ROOT/test/helpers/mcp-argcheck.mjs" >/dev/null 2>&1 && ok "mcp-argcheck helper parses" || bad "mcp-argcheck helper parses" "ok" "syntax error"
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
 
 printf '\n%s passed  %s%s failed%s  %s skipped\n' "$PASS" "$([ "$FAIL" -gt 0 ] && printf '%s' "$R")" "$FAIL" "$N" "$SKIP"
