@@ -1,0 +1,12 @@
+{
+  "global_nudge": true,
+  "sessions": {
+    "policy-beside": "on",
+    "docs-sweep": "inherit",
+    "doc-verify": "inherit",
+    "rate-limit": "off",
+    "list-pages": "inherit",
+    "cache-keys": "inherit",
+    "csv-export": "inherit"
+  }
+}

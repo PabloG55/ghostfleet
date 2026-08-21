@@ -1,0 +1,10 @@
+{
+  "roots": ["/Users/pgarces/Documents/acme-api", "/Users/pgarces/Documents"],
+  "checkouts": [
+    "/Users/pgarces/Documents/acme-api",
+    "/Users/pgarces/Documents/acme-api-1",
+    "/Users/pgarces/Documents/acme-api-2",
+    "/Users/pgarces/Documents/policy-beside",
+    "/Users/pgarces/Documents/docs-sweep"
+  ]
+}

@@ -47,8 +47,13 @@ fi
 
 # copy only the runtime dirs (not .git / README / tests); preserve perms so the
 # exec bits survive. Mirror each dir so deletions in the repo propagate.
+#
+# `web` is in this list because the phone client is a RUNTIME asset: fleet-serve serves
+# those static files from $DEST, not from the repo, so a client left out of the sync 404s
+# in the browser while every file on disk looks perfectly correct — the same shape of
+# confusion as a stale MCP process, and just as invisible from the repo side.
 mkdir -p "$DEST"
-for d in bin tmux hooks mcp skill layouts; do
+for d in bin tmux hooks mcp skill layouts web; do
   [ -d "$REPO/$d" ] || continue
   if command -v rsync >/dev/null 2>&1; then
     rsync -a --delete "$REPO/$d/" "$DEST/$d/"

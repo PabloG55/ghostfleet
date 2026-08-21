@@ -1,0 +1,99 @@
+{
+  "project": "acme-api",
+  "profile": "work",
+  "counts": { "need_you": 0, "working": 2, "ready": 4, "parked": 0, "limit": 0, "interrupted": 0 },
+  "cards": [
+    {
+      "name": "policy-beside",
+      "label": null,
+      "status": "working",
+      "folder": "policy-beside",
+      "branch": "feat/policy-policy-beside-form",
+      "agent": "claude",
+      "msg": "All three states present. Running the full suite before I touch the migration.",
+      "age": 41,
+      "attached": false,
+      "sched": null,
+      "limit_at": null
+    },
+    {
+      "name": "docs-sweep",
+      "label": null,
+      "status": "ready",
+      "folder": "docs-sweep",
+      "branch": "investigate/vendor-account-dupes",
+      "agent": "claude",
+      "msg": "Done. Draft PR #1165 — the dupes come from two account rows sharing an tax ids.",
+      "age": 3000,
+      "attached": false,
+      "sched": null,
+      "limit_at": null
+    },
+    {
+      "name": "doc-verify",
+      "label": "PR 964 doc verify",
+      "status": "ready",
+      "folder": "list-pages",
+      "branch": "docs-pass",
+      "agent": "claude",
+      "msg": "Rebased on main and pushed. Waiting on review.",
+      "age": 7380,
+      "attached": false,
+      "sched": { "at": 1787356800 },
+      "limit_at": null
+    },
+    {
+      "name": "rate-limit",
+      "label": null,
+      "status": "working",
+      "folder": "rate-limit",
+      "branch": "rate-limit",
+      "agent": "codex",
+      "msg": "Seeding the canned extraction so the builder has data without scratch.",
+      "age": 12,
+      "attached": true,
+      "sched": null,
+      "limit_at": null
+    },
+    {
+      "name": "list-pages",
+      "label": null,
+      "status": "ready",
+      "folder": "list-pages",
+      "branch": "feat/batch-item-slots",
+      "agent": "claude",
+      "msg": "Both slots land extracted. 622 passed / 0 failed.",
+      "age": 480,
+      "attached": false,
+      "sched": null,
+      "limit_at": null
+    },
+    {
+      "name": "cache-keys",
+      "label": null,
+      "status": "starting",
+      "folder": "cache-keys",
+      "branch": "fix/cache-keys-org-scope",
+      "agent": "claude",
+      "msg": "",
+      "age": null,
+      "attached": false,
+      "sched": null,
+      "limit_at": null
+    },
+    {
+      "name": "csv-export",
+      "label": null,
+      "status": "ready",
+      "folder": "csv-export",
+      "branch": "csv-export",
+      "agent": "claude",
+      "msg": "Page breaks fixed for the 14-coverage case.",
+      "age": 86400,
+      "attached": false,
+      "sched": null,
+      "limit_at": null
+    }
+  ],
+  "free_worktrees": []
+}

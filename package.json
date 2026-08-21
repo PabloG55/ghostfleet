@@ -19,6 +19,7 @@
     "skill/",
     "layouts/",
     "scripts/",
+    "web/",
     "install.sh",
     "LICENSE"
   ],
