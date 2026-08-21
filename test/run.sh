@@ -105,7 +105,10 @@ sweep_dead_runs() {                # $1 = the <prefix> of <prefix>.<pid>.XXXXXX
   done
   return 0
 }
-trap 'rc=$?; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
+# fleet-serve is a background node child, not a tmux server, so the sweep above cannot
+# reach it — and a leaked daemon holding a TCP port is the same cross-run interference
+# this section exists to stop. $SERVE_PIDS is set by the fleet-serve group.
+trap 'rc=$?; kill ${SERVE_PIDS:-} 2>/dev/null; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
 trap 'exit 130' INT
 sweep_dead_runs "$TEST_RUNS"
 
@@ -913,7 +916,7 @@ fi
 group "MCP refuses a missing required argument"
 AG="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$AG/mcp" "$AG/bin" "$AG/home"
-cp "$ROOT/mcp/fleet-mcp.mjs" "$AG/mcp/"     # BIN is <this file>/../bin, so the copy's
+cp "$ROOT"/mcp/*.mjs "$AG/mcp/"             # BIN is <this file>/../bin, so the copy's
 : > "$AG/ran"                               # stubs are what a passing call reaches
 for c in fleet-project fleet-list fleet-send fleet-read fleet-spawn fleet-worktrees \
          fleet-inbox fleet-answer fleet-pause fleet-resume fleet-stop fleet-rename; do
@@ -3329,6 +3332,597 @@ else
   skip "notification chord" "tmux/jq missing"
 fi
 
+# ── 5z. fleet-serve: the phone's endpoint ────────────────────────────────────
+# docs/mobile.md §1 is the reason this group is long: the endpoint is remote code
+# execution BY DESIGN — fleet_spawn runs shell commands, fleet_send injects prompts into
+# agents running --dangerously-skip-permissions — so every control on it is load-bearing
+# and every one of them is asserted in BOTH directions. A guard that refuses everything
+# passes the "it refused" half and is useless; a guard that never fires is
+# indistinguishable from one that works. Every assertion here was watched going red with
+# its protection removed.
+#
+# Nothing here touches the live fleet: the server runs against a throwaway $HOME whose
+# projects file names TWO fake projects, and against a COPY of bin/ whose fleet-* commands
+# are stubs that log their argv. The copy is also what exercises the dispatch for real —
+# bin/fleet-serve.mjs imports ../mcp/fleet-dispatch.mjs, so the copy's fleet-serve reaches
+# the copy's stubs.
+
+group "fleet-serve refuses a bind that is not the tailnet"
+# Pure classification, no listener — which is the point: this half has to work on a
+# machine where Tailscale has never been installed, because that is exactly the machine
+# where somebody reaches for 0.0.0.0 to "just make it work". `--any` drops the
+# is-it-on-an-interface check so the tailnet cases are about the RANGE, not this host.
+verdict() { "$ROOT/bin/fleet-serve" check-bind "$1" --any 2>&1 | awk '/^bindable/{print $2}'; }
+reason()  { "$ROOT/bin/fleet-serve" check-bind "$1" --any 2>&1 | sed -n 's/^  - //p'; }
+for a in 0.0.0.0 :: '*' 0; do
+  is "wildcard '$a' is refused"            "no"  "$(verdict "$a")"
+  is "...and it says it is a wildcard"     "1"   "$(reason "$a" | grep -c wildcard || true)"
+done
+is "a public address is refused"           "no"  "$(verdict 8.8.8.8)"
+is "...naming remote code execution"       "1"   "$(reason 8.8.8.8 | grep -c 'remote code execution' || true)"
+is "a LAN address is refused"              "no"  "$(verdict 192.168.1.5)"
+is "...and so is 10/8"                     "no"  "$(verdict 10.1.2.3)"
+is "...and 172.16/12"                      "no"  "$(verdict 172.20.0.9)"
+is "link-local is refused"                 "no"  "$(verdict 169.254.7.7)"
+is "a v4-mapped wildcard is refused"       "no"  "$(verdict ::ffff:0.0.0.0)"
+is "a v4-mapped public addr is refused"    "no"  "$(verdict ::ffff:8.8.8.8)"
+is "an empty bind is refused"              "no"  "$(verdict '')"
+# THE OTHER DIRECTION — the two transports docs/mobile.md §5 sanctions must both work, or
+# the refusals above are just a broken program. Tailscale gives a 100.64/10 address;
+# Cloudflare Tunnel's cloudflared connects to loopback.
+is "loopback is allowed"                   "yes" "$(verdict 127.0.0.1)"
+is "...including ::1"                      "yes" "$(verdict ::1)"
+is "the tailnet CGNAT range is allowed"    "yes" "$(verdict 100.108.68.93)"
+is "...and the low end of 100.64/10"       "yes" "$(verdict 100.64.0.1)"
+is "...and the high end"                   "yes" "$(verdict 100.127.255.254)"
+is "...but 100.128.x is NOT in it"         "no"  "$(verdict 100.128.0.1)"
+is "Tailscale's IPv6 prefix is allowed"    "yes" "$(verdict fd7a:115c:a1e0::1)"
+is "...but another ULA is not"             "no"  "$(verdict fd00::1)"
+# an address in an allowed RANGE still has to exist on this machine
+is "a tailnet addr this host lacks fails"  "no"  \
+   "$("$ROOT/bin/fleet-serve" check-bind 100.64.99.99 2>&1 | awk '/^bindable/{print $2}')"
+is "...and says why"                       "1"   \
+   "$("$ROOT/bin/fleet-serve" check-bind 100.64.99.99 2>&1 | grep -c 'not on any interface' || true)"
+is "a name is judged by what it resolves to" "yes" "$(verdict localhost)"
+
+# ── the live daemon ──────────────────────────────────────────────────────────
+# A FIXED PORT WOULD BE THE TMUX-SOCKET BUG AGAIN (§0): two worktrees running the suite
+# together would fight over it and the second run would lie. Ask the OS for a free one.
+free_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(p))})' 2>/dev/null; }
+SERVE_PIDS=""
+serve_stop() {
+  [ -n "${SERVE_PIDS:-}" ] && kill $SERVE_PIDS 2>/dev/null
+  SERVE_PIDS=""
+  # Wait for the port to come back, or the next group's listen() races a kill that has not
+  # landed yet and dies with EADDRINUSE — which looks exactly like a broken server.
+  [ -n "${BASE:-}" ] || return 0
+  i=0; while [ "$i" -lt 40 ] && curl -s -m1 "$BASE/healthz" >/dev/null 2>&1; do i=$((i+1)); sleep 0.1; done
+  return 0
+}
+
+SV=""
+if ! command -v node >/dev/null 2>&1; then
+  group "fleet-serve (live)"; skip "fleet-serve HTTP" "node missing"
+else
+SV="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$SV/home/.config/ghostfleet" "$SV/home/.claude/fleet" "$SV/repo" "$SV/other"
+cp -R "$ROOT/bin" "$ROOT/mcp" "$SV/"
+: > "$SV/ran"
+for c in fleet-list fleet-send fleet-spawn fleet-worktrees fleet-inbox fleet-answer \
+         fleet-pause fleet-resume fleet-rename fleet-project; do
+  cat > "$SV/bin/$c" <<STUB
+#!/bin/sh
+printf '%s' "\$(basename "\$0")" >> "$SV/ran"
+for a in "\$@"; do printf ' [%s]' "\$a" >> "$SV/ran"; done
+printf ' {scope=%s root=%s sock=%s}\n' "\${CLAUDE_FLEET_SCOPE:-}" "\${CLAUDE_FLEET_ROOT:-}" "\${CLAUDE_FLEET_SOCK:-}" >> "$SV/ran"
+echo "STUB \$(basename "\$0") ok"
+STUB
+  chmod +x "$SV/bin/$c"
+done
+# fleet-stop and fleet-clean have to behave like the real ones at the point that matters:
+# a gated removal that DECLINES, printing the line the force step keys off, and a forced
+# one that goes through.
+cat > "$SV/bin/fleet-stop" <<STUB
+#!/bin/sh
+printf 'fleet-stop' >> "$SV/ran"
+for a in "\$@"; do printf ' [%s]' "\$a" >> "$SV/ran"; done
+printf '\n' >> "$SV/ran"
+rec=0; frc=0
+for a in "\$@"; do case "\$a" in --reclaim) rec=1 ;; --force) frc=1 ;; esac; done
+echo "fleet-stop: killed session"
+[ "\$rec" = 1 ] && [ "\$frc" = 0 ] && echo "fleet-stop: kept $SV/repo/wt (see the reason above)"
+[ "\$rec" = 1 ] && [ "\$frc" = 1 ] && echo "fleet-stop: force-removed $SV/repo/wt (past fleet-clean's gates, on request)"
+exit 0
+STUB
+cat > "$SV/bin/fleet-clean" <<STUB
+#!/bin/sh
+printf 'fleet-clean' >> "$SV/ran"
+for a in "\$@"; do printf ' [%s]' "\$a" >> "$SV/ran"; done
+printf '\n' >> "$SV/ran"
+frc=0; for a in "\$@"; do case "\$a" in --force) frc=1 ;; esac; done
+if [ "\$frc" = 1 ]; then echo "  remove api-6 (feat/q) — FORCED past the gates, on request"
+else echo "  keep api-6 — unpushed local commits on 'feat/q'"; fi
+exit 0
+STUB
+chmod +x "$SV/bin/fleet-stop" "$SV/bin/fleet-clean"
+# fleet-read, both modes. 50 messages, so the 20-then-load-more bound is measurable
+# rather than asserted, and the --json shape is the one /api/session serves.
+cat > "$SV/bin/fleet-read" <<'STUB'
+#!/usr/bin/env node
+import fs from 'node:fs';
+const argv = process.argv.slice(2);
+fs.appendFileSync(process.env.SV_RAN, 'fleet-read' + argv.map(a => ` [${a}]`).join('') + '\n');
+const flag = (n, d) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : d; };
+const all = Array.from({ length: 50 }, (_, i) => ({ ts: 1700000000 + i, role: i % 2 ? 'assistant' : 'user', text: `message ${i + 1}` }));
+if (argv.includes('--json')) {
+  const limit = Number(flag('--limit', 20)), before = flag('--before', null);
+  const end = before == null ? all.length : all.findIndex(m => String(m.ts) === String(before));
+  const e = end < 0 ? all.length : end, s = Math.max(0, e - limit);
+  process.stdout.write(JSON.stringify({ session: 'w1', total: all.length, window_truncated: false,
+    messages: all.slice(s, e), next_before: s > 0 ? String(all[s].ts) : null }) + '\n');
+} else {
+  const n = Number(argv[argv.length - 1]) || 1;
+  process.stdout.write(all.slice(-n).map(m => m.text).join('\n') + '\n');
+}
+STUB
+chmod +x "$SV/bin/fleet-read"
+printf 'demo\t%s\twork\nother\t%s\twork\n' "$SV/repo" "$SV/other" > "$SV/home/.config/ghostfleet/projects"
+
+PORT="$(free_port)"; PORT="${PORT:-18787}"
+BASE="http://localhost:$PORT"
+export GHOSTFLEET_SERVE_CONFIG="$SV/serve.json" GHOSTFLEET_SERVE_AUDIT="$SV/audit.jsonl" SV_RAN="$SV/ran" SV_ROOT="$SV"
+sv_cli() { HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" "$@"; }
+sv_code() { sv_cli enroll "$1" | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}'; }
+sv_start() {
+  HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.$1" 2>&1 &
+  SERVE_PIDS="$SERVE_PIDS $!"
+  i=0; while [ "$i" -lt 60 ]; do
+    curl -s -m1 "$BASE/healthz" >/dev/null 2>&1 && return 0
+    i=$((i+1)); sleep 0.1
+  done
+  return 1
+}
+sv_cli init --bind 127.0.0.1 --port "$PORT" >/dev/null 2>&1
+# Rate limiting has its own group below; here it must not fire. One probe phase makes
+# dozens of assertion and verb calls in a second, which no phone ever would, and a 429 in
+# the middle of the auth phase would read as an auth failure.
+sv_rate() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:+process.argv[2],write:+process.argv[3],auth:+process.argv[4]};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$SV/serve.json" "$1" "$2" "$3"; }
+sv_rate 4000 4000 4000
+US=$'\x1f'
+pf() { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f2; }   # http status
+pb() { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f3; }   # body
+
+# ── auth ─────────────────────────────────────────────────────────────────────
+group "fleet-serve: a token exists only because a passkey signed for it"
+if sv_start auth; then
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" auth "$(sv_code phone)" > "$SV/probe.auth" 2>"$SV/probe.auth.err"
+  is "a cold read is refused"                "401" "$(pf cold.read auth)"
+  is "a cold verb is refused"                "401" "$(pf cold.verb auth)"
+  is "a challenge is free to ask for"        "200" "$(pf cold.challenge auth)"
+  # §1: registration with no authorisation lets anyone who reaches the port enrol their
+  # own passkey. web/README.md's contract has no gate; this server requires the window
+  # AND the one-time code, and refuses each missing half by name.
+  is "register with no code is refused"      "403" "$(pf register.noCode auth)"
+  is "...naming the CLI that opens one"      "1"   "$(pb register.noCode auth | grep -c 'fleet-serve enroll' || true)"
+  is "register with a wrong code is refused" "403" "$(pf register.wrongCode auth)"
+  is "the right code enrols the passkey"     "200" "$(pf register.ok auth)"
+  is "...and returns a token with an expiry" "1"   "$(pb register.ok auth | grep -c '"expires_at":' || true)"
+  # THE §5 PROPERTY, both directions on one server: nothing but an assertion mints a
+  # token, so nothing else opens the API — including the credential id, which the client
+  # keeps in localStorage and is careful to call not-a-secret.
+  is "no token: refused"                     "401" "$(pf noToken.read auth)"
+  is "a forged token: refused"               "401" "$(pf forgedToken.read auth)"
+  is "the credential id as a token: refused" "401" "$(pf credAsToken.read auth)"
+  is "...and it says a passkey is needed"    "1"   "$(pb forgedToken.read auth | grep -c '"needs":"passkey"' || true)"
+  is "the real token: read allowed"          "200" "$(pf token.read auth)"
+  is "the real token: verb allowed"          "200" "$(pf token.verb auth)"
+  is "a real assertion mints another"        "200" "$(pf assert.ok auth)"
+  is "a challenge we never issued: refused"  "401" "$(pf assert.replay auth)"
+  is "an untouched authenticator: refused"   "401" "$(pf assert.noPresence auth)"
+  is "a forged signature: refused"           "401" "$(pf assert.badSig auth)"
+  is "an unenrolled key: refused"            "401" "$(pf assert.strangeKey auth)"
+  # single-use: the same signed challenge twice is a replay, and the second one loses
+  is "a challenge works once"                "200" "$(pf assert.firstUse auth)"
+  is "...and not twice"                      "401" "$(pf assert.secondUse auth)"
+  is "an unexpected Host is refused"         "403" "$(pf host.wrong auth)"
+  is "a foreign Origin is refused"           "403" "$(pf origin.wrong auth)"
+  is "no fleet command ran for any of it"    "0"   "$(grep -c 'fleet-spawn\|fleet-stop\|fleet-send' "$SV/ran" || true)"
+
+  # ── revocation: one action, landing on a RUNNING daemon ───────────────────
+  group "fleet-serve: revoking a client is one action"
+  tok="$(pb assert.ok auth | sed 's/.*"token":"\([^"]*\)".*/\1/')"
+  cred="$(pb token auth | sed 's/.*"cred":"\([^"]*\)".*/\1/')"
+  is "the token works before the revoke"     "200" \
+     "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $tok" "$BASE/api/projects")"
+  sv_cli revoke phone >/dev/null 2>&1
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" revoked "$tok" "$cred" > "$SV/probe.rev" 2>/dev/null
+  is "the same read is now refused"           "401" "$(pf revoked.read rev)"
+  is "the same verb is now refused"           "401" "$(pf revoked.verb rev)"
+  is "and its passkey cannot mint another"    "401" "$(pf revoked.assert rev)"
+  is "no restart was needed"                  "1"   "$(grep -c 'listening on' "$SV/log.auth" || true)"
+  is "the client is listed as revoked"        "1"   "$(sv_cli clients 2>/dev/null | grep -c 'phone .*revoked' || true)"
+  serve_stop
+else
+  skip "fleet-serve auth" "server did not come up"
+fi
+
+# ── verbs ────────────────────────────────────────────────────────────────────
+group "fleet-serve: destructive verbs need a fresh passkey, on the tool name"
+: > "$SV/ran"
+if sv_start verbs; then
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" verbs "$(sv_code v)" > "$SV/probe.verbs" 2>"$SV/probe.verbs.err"
+  is "a fleet tool with no project refused"  "400" "$(pf project.missing verbs)"
+  is "...saying there is no default fleet"   "1"   "$(pb project.missing verbs | grep -c 'no default one' || true)"
+  is "an unknown project is refused"         "400" "$(pf project.unknown verbs)"
+  is "a misspelt argument is refused"        "400" "$(pf arg.typo verbs)"
+  is "...and names the argument"             "1"   "$(pb arg.typo verbs | grep -c "unknown argument 'promt'" || true)"
+  is "an unknown tool is refused"            "400" "$(pf tool.unknown verbs)"
+  # the shared dispatch's own guard (#38) reaches the phone unchanged
+  is "a missing required arg is refused"     "400" "$(pf arg.missing verbs)"
+  is "...by the SAME message the MCP gives"  "1"   "$(pb arg.missing verbs | grep -c "fleet_send: missing required argument 'prompt'" || true)"
+  # the verbs the client asks for that have no MCP tool yet: refused BY NAME, with the
+  # reason, so the button behind them fails loudly instead of looking like a typo
+  is "a not-yet-a-tool verb says so"         "501" "$(pf tool.notYet verbs)"
+  is "...and explains what is missing"       "1"   "$(pb tool.notYet verbs | grep -c 'marker file' || true)"
+  is "send needs no passkey"                 "200" "$(pf send.ok verbs)"
+  is "...and reaches another project too"    "200" "$(pf send.other verbs)"
+  is "answer needs no passkey"               "200" "$(pf answer.ok verbs)"
+  is "spawn with no assertion is refused"    "401" "$(pf spawn.noAssertion verbs)"
+  is "...asking for one at the action"       "1"   "$(pb spawn.noAssertion verbs | grep -c 'X-Fleet-Assertion' || true)"
+  is "spawn with a forged assertion"         "401" "$(pf spawn.badAssertion verbs)"
+  is "spawn with a real one runs"            "200" "$(pf spawn.ok verbs)"
+  is "rename takes the same step"            "200" "$(pf rename.ok verbs)"
+  # stricter than web/api.js's DESTRUCTIVE set, deliberately: its own README says the
+  # passkey covers removing a worktree, and §12 calls that the load-bearing one
+  is "worktree removal needs one too"        "401" "$(pf wtRemove.noAssertion verbs)"
+  is "project_add needs one too"             "401" "$(pf projectAdd.noAssertion verbs)"
+  is "another client's assertion is refused" "401" "$(pf spawn.othersAssertion verbs)"
+  # `f = remove anyway` — its own step, after a refusal it is answering
+  is "force before any refusal"              "409" "$(pf force.beforeRefusal verbs)"
+  is "a gated removal reports it declined"   "200" "$(pf remove.declined verbs)"
+  is "...and says the worktree was kept"     "1"   "$(pb remove.declined verbs | grep -c 'keep api-6' || true)"
+  is "force after the refusal runs"          "200" "$(pf force.ok verbs)"
+  is "...reaching fleet-clean with --force"  "1"   "$(grep -c 'fleet-clean .*\[--go\] \[--force\]' "$SV/ran" || true)"
+  is "one refusal buys exactly one force"    "409" "$(pf force.twice verbs)"
+  is "a reclaim declines the same way"       "200" "$(pf reclaim.declined verbs)"
+  is "...and its force then goes through"    "200" "$(pf reclaimForce.ok verbs)"
+  is "...reaching fleet-stop with --force"   "1"   "$(grep -c 'fleet-stop .*\[--reclaim\] \[--force\]' "$SV/ran" || true)"
+  # THE OTHER DIRECTION on every refusal above: only the calls that were allowed ran.
+  is "spawn ran exactly once"                "1"   "$(grep -c '^fleet-spawn ' "$SV/ran" || true)"
+  is "the spawn that ran was the right one"  "1"   "$(grep -c 'fleet-spawn \[api-9\]' "$SV/ran" || true)"
+  is "api-X never ran"                       "0"   "$(grep -c 'api-X' "$SV/ran" || true)"
+  is "fleet-project never ran"               "0"   "$(grep -c '^fleet-project ' "$SV/ran" || true)"
+  is "no command was handed 'undefined'"     "0"   "$(grep -c undefined "$SV/ran" || true)"
+  # ...and the child's environment is the TARGET's, not the daemon's. The stubs echo what
+  # they were given, so this is what they actually ran with rather than what we intended.
+  is "a verb carries the target's scope+root" "1" \
+     "$(grep -c "fleet-send .*{scope=demo root=$SV/repo sock=cf-demo}" "$SV/ran" || true)"
+  is "...and another project's is its own"    "1" \
+     "$(grep -c "fleet-send .*{scope=other root=$SV/other sock=cf-other}" "$SV/ran" || true)"
+  is "...and never an empty one"              "0"   "$(grep -c '{scope= ' "$SV/ran" || true)"
+
+  # ── audit ─────────────────────────────────────────────────────────────────
+  group "fleet-serve: every mutation is audited into fleet-inbox"
+  INB="$SV/home/.claude/fleet/cf-demo.inbox"
+  is "the inbox row landed in the fleet dir" "1"   "$([ -f "$INB" ] && echo 1 || echo 0)"
+  is "a send is in it"                       "1"   "$(grep -c 'mobile.*send session=w1 prompt=' "$INB" || true)"
+  is "a spawn is in it"                      "1"   "$(grep -c 'mobile.*spawn name=api-9' "$INB" || true)"
+  is "a forced worktree removal is in it"    "1"   "$(grep -c 'mobile.*worktree_remove path=.*force=true' "$INB" || true)"
+  is "a forced reclaim is in it"             "1"   "$(grep -c 'mobile.*stop session=w1 reclaim=true force=true' "$INB" || true)"
+  is "a REFUSED call is recorded too"        "1"   "$(grep -c 'REFUSED' "$INB" || true)"
+  # fleet-inbox reads this with IFS=$'\t'; an EMPTY field there collapses and shifts every
+  # later column left (CLAUDE.md's oldest trap), so no row may have one.
+  is "every row has all four fields"         "0"   "$(awk -F'\t' 'NF!=4 || $1=="" || $2=="" || $3=="" || $4==""' "$INB" | grep -c . || true)"
+  rows="$(grep -c . "$INB" || true)"
+  is "fleet-inbox renders every row"         "$rows" \
+     "$(CLAUDE_FLEET_DIR="$SV/home/.claude/fleet" TMUX= "$ROOT/bin/fleet-inbox" -s cf-demo --all 2>/dev/null | grep -c 'MOBILE' || true)"
+  is "a read wrote no inbox row"             "0"   "$(grep -c 'mobile.*read ' "$INB" || true)"
+  # §7: the log says what the fingerprint was FOR, not merely that one happened
+  is "the audit names the purpose"           "1"   "$(sv_cli audit -n 50 2>/dev/null | grep -c 'spawn .*api-9 .*ran passkey:spawn' || true)"
+  is "the audit chain is intact"             "0"   "$(sv_cli audit --verify >/dev/null 2>&1; echo $?)"
+  # tamper with it and the chain must notice — a hash chain that never fires is a filename
+  cp "$SV/audit.jsonl" "$SV/audit.keep"
+  node -e 'const fs=require("fs");const p=process.argv[1];const l=fs.readFileSync(p,"utf8").split("\n").filter(Boolean);l.splice(1,1);fs.writeFileSync(p,l.join("\n")+"\n")' "$SV/audit.jsonl"
+  is "a deleted row breaks the chain"        "1"   "$(sv_cli audit --verify >/dev/null 2>&1; echo $?)"
+  is "...and it says which row"              "1"   "$(sv_cli audit --verify 2>&1 | grep -c 'BROKEN at row 2' || true)"
+  cp "$SV/audit.keep" "$SV/audit.jsonl"
+  is "restored, the chain is intact again"   "0"   "$(sv_cli audit --verify >/dev/null 2>&1; echo $?)"
+  # ...and it survives a CLI writer interleaving with the daemon's own appends, which is
+  # what broke it the first time: the daemon cached the tail and chained past `revoke`'s row
+  sv_cli enroll interleave >/dev/null 2>&1
+  is "a CLI writer does not break it"        "0"   "$(sv_cli audit --verify >/dev/null 2>&1; echo $?)"
+  serve_stop
+else
+  skip "fleet-serve verbs" "server did not come up"
+fi
+
+# ── reads ────────────────────────────────────────────────────────────────────
+group "fleet-serve: the grid is never launched without --json"
+: > "$SV/ran"; : > "$SV/gridran"
+# An unknown flag falls through to the interactive TUI, which blocks on the tty forever
+# (CLAUDE.md). So the flag is looked for in the FILE first, exactly as bin/ghostfleet does
+# for --order. This stub records being launched and then blocks, like the real thing.
+cat > "$SV/bin/fleet-grid.mjs" <<'STUB'
+#!/usr/bin/env node
+// import, not require: this is an .mjs, and a `require('fs')` here would throw before it
+// could record anything — so "the grid was never launched" could not fail, which is the
+// one thing a test must never be. Verified by removing the guard and watching it go red.
+import fs from 'node:fs';
+fs.appendFileSync(process.env.GRIDRAN, 'launched\n');
+console.error('INTERACTIVE MODE — this would have blocked on the tty');
+setInterval(() => {}, 1000);
+STUB
+chmod +x "$SV/bin/fleet-grid.mjs"
+if GRIDRAN="$SV/gridran" sv_start nojson; then
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" reads "$(sv_code r1)" > "$SV/probe.nojson" 2>/dev/null
+  is "a grid without --json gives 503"       "503" "$(pf grid nojson)"
+  is "...naming the flag"                    "1"   "$(pb grid nojson | grep -c 'no --json flag' || true)"
+  is "...and the grid was never launched"    "0"   "$(grep -c launched "$SV/gridran" || true)"
+  serve_stop
+else
+  skip "fleet-serve grid 503" "server did not come up"
+fi
+
+group "fleet-serve: reads proxy the grid, per project, and bound the tail"
+: > "$SV/ran"
+# The §4 payload, echoing back the four env vars the daemon is supposed to set per
+# project. That is the whole point of this stub: a daemon that let SCOPE and ROOT inherit
+# its own values answered every project with the FIRST one's name and worktrees.
+# The §4 payload. free_worktrees is computed the way the real grid computes it — the
+# ROOT's worktrees MINUS the sessions live on the SOCKET — because that pairing is the
+# whole bug: a daemon that lets SCOPE/ROOT inherit its own values hands this a root from
+# one project and a socket from another, the pairing cannot see the sessions, and
+# OCCUPIED worktrees come back as FREE. Measured on the deployed runtime: querying
+# cf-superkey with a ghostfleet environment advertised fleet-pwa, fleet-serve and
+# grid-json as free while live agents were mid-turn in all three.
+cat > "$SV/bin/fleet-grid.mjs" <<'STUB'
+#!/usr/bin/env node
+import fs from 'node:fs';
+import process from 'node:process';
+const scope = process.env.CLAUDE_FLEET_SCOPE || '', root = process.env.CLAUDE_FLEET_ROOT || '';
+const sock = process.env.CLAUDE_FLEET_SOCK || '';
+const read = (f) => { try { return fs.readFileSync(f, 'utf8').split('\n').filter(Boolean); } catch { return []; } };
+const worktrees = read(`${root}/worktrees`);          // what this ROOT contains
+const sessions = read(`${process.env.SV_ROOT}/sessions.${sock}`);   // who is live on this SOCKET
+const free = worktrees.filter(w => !sessions.includes(w));
+if (process.argv.includes('--json')) {
+  const out = JSON.stringify({ project: scope, profile: process.env.CLAUDE_FLEET_PROFILE || '', sock,
+    counts: { need_you: 1, working: 0, ready: 0, parked: 1, limit: 2, interrupted: 0 },
+    cards: [
+      { name: 'api-2', label: null, status: 'need-you', folder: 'api-2', branch: 'feat/a-very-long-branch-name-that-the-tui-would-elide', agent: 'claude', msg: 'Allow `pnpm test`?', age: 3600, attached: false, sched: null, limit_at: null },
+      { name: 'api-3', label: null, status: 'limit',    folder: 'api-3', branch: 'feat/y', agent: 'codex',    msg: 'hi', age: 12, attached: false, sched: null, limit_at: '10:20pm' },
+      { name: 'api-4', label: null, status: 'unknown',  folder: 'api-4', branch: 'feat/z', agent: 'opencode', msg: '',   age: null, attached: false, sched: null, limit_at: null },
+      { name: 'api-5', label: null, status: 'parked',   folder: 'api-5', branch: 'b', agent: 'claude',        msg: '',   age: 1, attached: false, sched: null, limit_at: null },
+      { name: 'api-6', label: null, status: 'a-tenth-status', folder: 'api-6', branch: 'c', agent: 'claude',  msg: '',   age: 1, attached: false, sched: null, limit_at: null }],
+    free_worktrees: free.map(w => ({ path: `${root}/${w}`, branch: `feat/${w}`, task: 'idle' })) });
+  // process.exit() DISCARDS a pending stdout write on a pipe — measured next door at
+  // 200,000 bytes written and 65,536 arriving, JSON stopping mid-string. Wait for it.
+  process.stdout.write(out + '\n', () => process.exit(0));
+} else if (process.argv.includes('--checkouts')) {
+  console.log(`scope Z=${scope}`);
+  console.log(`roots: ${root}, ${root}/x`);
+  console.log('checkouts:');
+  console.log(`  ${root}/one`);
+  console.log(`  ${root}/two`);
+} else { console.error('INTERACTIVE'); setInterval(() => {}, 1000); }
+STUB
+# demo holds two worktrees and a live session in one of them; other holds two of its own.
+# So `free` is only right if the root and the socket handed to the child belong together.
+printf 'busy-demo\nfree-demo\n' > "$SV/repo/worktrees"
+printf 'busy-other\nfree-other\n' > "$SV/other/worktrees"
+printf 'busy-demo\n'  > "$SV/sessions.cf-demo"
+printf 'busy-other\n' > "$SV/sessions.cf-other"
+chmod +x "$SV/bin/fleet-grid.mjs"
+if sv_start json; then
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" reads "$(sv_code r2)" > "$SV/probe.reads" 2>"$SV/probe.reads.err"
+  is "the grid's JSON is served"              "200" "$(pf grid reads)"
+  # THE BUG A LONG-LIVED DAEMON GETS WRONG. fleet-grid.mjs derives `project` from
+  # CLAUDE_FLEET_SCOPE and its free-worktree list from CLAUDE_FLEET_ROOT. A daemon that
+  # inherits its own answers every project with the first one's name and the first one's
+  # worktrees — and a "reuse this free worktree" tap would then name a checkout in the
+  # WRONG REPO with fleet_spawn behind it. Two projects from one process, or the test
+  # passes whether or not the bug exists.
+  is "project demo says it is demo"           "1"   "$(pb grid reads | grep -c '"project":"demo"' || true)"
+  is "project other says it is other"         "1"   "$(pb grid.other reads | grep -c '"project":"other"' || true)"
+  is "demo's free worktree is demo's"         "1"   "$(pb grid reads | grep -c "$SV/repo/free-demo" || true)"
+  is "other's free worktree is other's"       "1"   "$(pb grid.other reads | grep -c "$SV/other/free-other" || true)"
+  is "...and demo's is not in other's answer" "0"   "$(pb grid.other reads | grep -c "$SV/repo/free-demo" || true)"
+  is "each gets its own socket"               "1"   "$(pb grid.other reads | grep -c '"sock":"cf-other"' || true)"
+  # THE ASSERTION THAT PROTECTS A DESTRUCTIVE VERB. A worktree with a live session must
+  # never be advertised as free — `fleet_spawn --reuse` on one resets and rebranches a
+  # checkout somebody is working in. With a mismatched root/socket pair the busy one comes
+  # back as free and nothing about the response looks wrong.
+  is "an OCCUPIED worktree is never free"     "0"   "$(pb grid reads | grep -c 'busy-demo' || true)"
+  is "...in either project"                   "0"   "$(pb grid.other reads | grep -c 'busy-other' || true)"
+  is "...and no cross-project leak at all"    "0"   "$(pb grid.other reads | grep -c 'demo' || true)"
+  # §4's three rules: the nine statuses survive, unknown is not idle, limit is not ready.
+  is "'unknown' is passed through, not idle"  "1"   "$(pb grid reads | grep -c '"status":"unknown"' || true)"
+  is "'limit' is passed through, not ready"   "1"   "$(pb grid reads | grep -c '"status":"limit"' || true)"
+  is "limit is not folded into ready"         "1"   "$(pb grid reads | grep -c '"limit":2' || true)"
+  is "the long branch is NOT elided"          "1"   "$(pb grid reads | grep -c 'feat/a-very-long-branch-name-that-the-tui-would-elide' || true)"
+  is "free worktrees carry over"              "1"   "$(pb grid reads | grep -c '"free_worktrees"' || true)"
+  is "a tenth status is complained about"     "1"   "$(pb grid reads | grep -c 'schema_warnings' || true)"
+  is "...and still passed through verbatim"   "1"   "$(pb grid reads | grep -c '"a-tenth-status"' || true)"
+  is "an unknown project is refused"          "400" "$(pf grid.unknown reads)"
+  # §11.3: a bounded page with an explicit load-more. A PERFORMANCE bound — 46 MB down a
+  # WireGuard tunnel on cellular — never to be described as a security control.
+  is "the default page is 20 messages"        "20"  "$(pb session reads | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).messages.length))')"
+  is "...and it is the NEWEST 20"             "1"   "$(pb session reads | grep -c '"message 50"' || true)"
+  is "...starting at 31, not at 1"            "1"   "$(pb session reads | grep -c '"message 31"' || true)"
+  is "...and 30 is NOT in it"                 "0"   "$(pb session reads | grep -c '"message 30"' || true)"
+  is "...with a cursor for the next page"     "1"   "$(pb session reads | grep -c '"next_before":' || true)"
+  is "each message carries ts and role"       "1"   "$(pb session reads | grep -c '"role":"assistant"' || true)"
+  is "limit=5 returns 5"                      "5"   "$(pb session.limit reads | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).messages.length))')"
+  is "limit=0 is refused"                     "400" "$(pf session.zero reads)"
+  is "limit past the cap is refused"          "400" "$(pf session.huge reads)"
+  is "it went through fleet-read --json"      "1"   "$([ "$(grep -c 'fleet-read .*\[--json\]' "$SV/ran" || true)" -ge 1 ] && echo 1 || echo 0)"
+  is "...and never read the transcript here" "0"   "$(grep -c 'readFileSync(tr\|projects/.*jsonl' "$ROOT/bin/fleet-serve.mjs" || true)"
+  # the other contract reads
+  is "checkouts are served"                   "200" "$(pf checkouts reads)"
+  is "...from that project's own root"        "1"   "$(pb checkouts reads | grep -c "$SV/repo/one" || true)"
+  is "settings are served"                    "200" "$(pf settings reads)"
+  is "...as the tri-state the client wants"   "1"   "$(pb settings reads | grep -c '"global_nudge"' || true)"
+  is "projects carry \$HOME for ~ shortening" "1"   "$(pb projects reads | grep -c '"home":' || true)"
+  is "...and a rollup counted from cards"     "1"   "$(pb projects reads | grep -c '"need":1' || true)"
+  # counts has six keys and a card can hold nine statuses, so a total by SUM is wrong:
+  # five cards, and the six counts add to four.
+  is "...whose total is the card count"       "1"   "$(pb projects reads | grep -c '"total":5' || true)"
+  is "the inbox is readable"                  "200" "$(pf inbox reads)"
+  # reading the inbox from the phone must not consume the lead's "new since last look"
+  is "...never in the consuming form"         "0"   "$(grep -cE '^fleet-inbox \[-s\] \[cf-demo\]( \{|$)' "$SV/ran" || true)"
+  is "...and --all did run"                   "1"   "$([ "$(grep -c 'fleet-inbox \[-s\] \[cf-demo\] \[--all\]' "$SV/ran" || true)" -ge 1 ] && echo 1 || echo 0)"
+  is "the audit log is readable from here"    "200" "$(pf audit reads)"
+  is "health reports the grid flag"           "1"   "$(pb health reads | grep -c '"grid_json":true' || true)"
+  serve_stop
+else
+  skip "fleet-serve reads" "server did not come up"
+fi
+
+group "fleet-serve rate limits a token that leaked"
+sv_rate 3 2 200
+if sv_start rate; then
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" rate "$(sv_code rl)" > "$SV/probe.rate" 2>/dev/null
+  burst="$(pb burst rate)"
+  is "the burst starts by succeeding"        "1"   "$(printf '%s' "$burst" | grep -c '^\[200' || true)"
+  is "...and then gets 429s"                 "1"   "$(printf '%s' "$burst" | grep -c '429' || true)"
+  is "it does not 429 from the first call"   "0"   "$(printf '%s' "$burst" | grep -c '^\[429' || true)"
+  serve_stop
+else
+  skip "fleet-serve rate limit" "server did not come up"
+fi
+sv_rate 4000 4000 4000
+
+group "fleet-serve asserts Tailscale Funnel is off"
+# §11.1: Funnel is the one setting that would undo all of §5, "and it should be asserted,
+# not remembered". Three directions, because two of them look alike from outside: on
+# (refuse), off (start), and no CLI at all (say UNVERIFIED rather than pass).
+mkdir -p "$SV/shim" "$SV/noshim"
+cat > "$SV/shim/tailscale" <<'STUB'
+#!/bin/sh
+case "$*" in "serve status --json") echo '{"AllowFunnel":{"host.example.ts.net:443":true}}' ;; *) echo '{}' ;; esac
+STUB
+chmod +x "$SV/shim/tailscale"
+# Bounded, because the whole point is that this invocation must DIE. Run it straight and
+# it hangs the suite the moment the guard is missing — a red assertion wearing a hang, and
+# a hang is not a test result. Verified by removing the refusal: it went red here.
+( PATH="$SV/shim:$PATH" HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" >"$SV/funnel.out" 2>&1; echo "rc=$?" >>"$SV/funnel.out" ) &
+fpid=$!
+i=0; while [ "$i" -lt 60 ] && kill -0 $fpid 2>/dev/null; do i=$((i+1)); sleep 0.1; done
+kill $fpid 2>/dev/null; wait $fpid 2>/dev/null
+out="$(cat "$SV/funnel.out" 2>/dev/null)"
+is "funnel on: it refuses to start"    "1" "$(printf '%s' "$out" | grep -c 'Funnel is ON' || true)"
+is "funnel on: nonzero exit"           "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
+cat > "$SV/shim/tailscale" <<'STUB'
+#!/bin/sh
+echo '{}'
+STUB
+chmod +x "$SV/shim/tailscale"
+is "funnel off: check passes it"       "1" \
+   "$(PATH="$SV/shim:$PATH" HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" check 2>&1 | grep -c 'funnel     off (asserted)' || true)"
+is "no CLI: reported UNVERIFIED"       "1" \
+   "$(PATH="$SV/noshim" HOME="$SV/home" TMUX= "$(command -v node)" "$SV/bin/fleet-serve.mjs" check 2>&1 | grep -c 'funnel     unverified' || true)"
+is "...and never as a pass"            "0" \
+   "$(PATH="$SV/noshim" HOME="$SV/home" TMUX= "$(command -v node)" "$SV/bin/fleet-serve.mjs" check 2>&1 | grep -c 'funnel     off' || true)"
+
+group "fleet-serve holds a sleep inhibitor while it runs"
+# §8: this Mac is set to sleep after one minute idle ON AC, and the fleet survives only
+# because ttyskeepawake holds it up while tmux ttys are active. A daemon nobody is
+# attached to has no tty, so it holds its own — through bin/fleet-awake, which already
+# carries the macOS/Linux/other guard. Proven by asking the OS, and specifically for OUR
+# pid: this machine had an unrelated inhibitor running the whole time, and the first cut
+# of the check reported that one and read as a pass no matter what it did.
+if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/null 2>&1; then
+  HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=on node "$SV/bin/fleet-serve.mjs" > "$SV/log.awake" 2>&1 &
+  apid=$!
+  i=0; while [ "$i" -lt 60 ] && ! grep -q 'awake:' "$SV/log.awake" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
+  is "it reports holding one for its pid" "1" "$(grep -c "awake: holding .* for pid $apid " "$SV/log.awake" || true)"
+  is "the OS agrees an inhibitor exists" "1" \
+     "$( (pgrep -f "caffeinate .*-w $apid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$apid " >/dev/null 2>&1) && echo 1 || echo 0)"
+  kill $apid 2>/dev/null; sleep 1
+  is "and it is released when we stop"    "0" \
+     "$( (pgrep -f "caffeinate .*-w $apid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$apid " >/dev/null 2>&1) && echo 1 || echo 0)"
+  # off must mean off, or "on" proves nothing
+  HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.awakeoff" 2>&1 &
+  bpid=$!
+  i=0; while [ "$i" -lt 40 ] && ! grep -q 'awake:' "$SV/log.awakeoff" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
+  is "CLAUDE_FLEET_AWAKE=off holds none" "0" \
+     "$( (pgrep -f "caffeinate .*-w $bpid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$bpid " >/dev/null 2>&1) && echo 1 || echo 0)"
+  kill $bpid 2>/dev/null
+else
+  skip "fleet-serve inhibitor" "no caffeinate or systemd-inhibit on this platform"
+fi
+
+group "fleet-serve serves the client, and says when there is none"
+# The repo-vs-runtime trap: cf-sync mirrors a hardcoded dir list, and web/ was not on it,
+# so a staged runtime had no client at all while the repo looked perfect. Reported once at
+# boot rather than as a 404 per request, which reads as the client's bug.
+is "no web/ dir: named at startup"     "1" "$(grep -c 'client: NONE at' "$SV/log.json" || true)"
+mkdir -p "$SV/web"; printf '<p>hi</p>' > "$SV/web/index.html"; printf 'export const x=1;\n' > "$SV/web/app.js"
+if sv_start web; then
+  is "web/ present: named at startup"  "1" "$(grep -c "client: $SV/web" "$SV/log.web" || true)"
+  is "index.html is served"            "200" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")"
+  # An ES module served as text/plain is REFUSED by the browser, and the failure looks
+  # like a blank page rather than like a MIME error.
+  is ".js is text/javascript"          "1" "$(curl -s -D- -o /dev/null "$BASE/app.js" 2>/dev/null | grep -ci 'content-type: text/javascript' || true)"
+  is "...and never text/plain"         "0" "$(curl -s -D- -o /dev/null "$BASE/app.js" 2>/dev/null | grep -ci 'content-type: text/plain' || true)"
+  is "the shell needs no token"        "200" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/index.html")"
+  is "...but the API still does"       "401" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/projects")"
+  # 404, not 403: node's URL parser collapses ../ before serveStatic ever sees it, so the
+  # plain spelling never reaches the prefix check. That is exactly why the ENCODED one is
+  # the assertion that matters — %2e%2e%2f survives that parse, and without the decode it
+  # would resolve to a literal directory name, meaning the guard behind it could never
+  # fire and would be indistinguishable from a working one.
+  is "a ../ traversal gets nothing"    "404" "$(curl -s -o /dev/null -w '%{http_code}' --path-as-is "$BASE/../serve.json")"
+  is "an encoded traversal is refused" "403" "$(curl -s -o /dev/null -w '%{http_code}' --path-as-is "$BASE/%2e%2e%2fserve.json")"
+  is "...and the config never leaks"   "0"   "$(curl -s --path-as-is "$BASE/%2e%2e%2fserve.json" | grep -c 'rp_id' || true)"
+  serve_stop
+else
+  skip "fleet-serve static" "server did not come up"
+fi
+is "cf-sync copies web/ to the runtime" "1" "$(grep -c 'for d in bin tmux hooks mcp skill layouts web' "$ROOT/bin/cf-sync" || true)"
+
+group "fleet-serve does not fork the dispatch"
+# The whole point of mcp/fleet-dispatch.mjs: two callers of the fleet verbs, ONE copy of
+# the argument validation that keeps a dropped key from reaching a worker as the word
+# "undefined" (#38). A fleet-serve that shelled out to bin/fleet-* itself would pass every
+# HTTP test above and quietly lose that.
+is "fleet-serve imports the dispatch"   "1" \
+   "$(grep -c "from '../mcp/fleet-dispatch.mjs'" "$ROOT/bin/fleet-serve.mjs" || true)"
+is "the MCP server imports it too"      "1" \
+   "$(grep -c "from './fleet-dispatch.mjs'" "$ROOT/mcp/fleet-mcp.mjs" || true)"
+# The ONLY bin/ commands the daemon runs by hand are the one read producer (§3) and the
+# sleep inhibitor (§8). Every fleet VERB goes through the shared planner, so a future edit
+# that shells out to fleet-send directly turns this red rather than passing quietly.
+is "it runs only the grid + fleet-awake" "fleet-awake fleet-grid.mjs" \
+   "$(grep -oE "join\(BIN, '[^']+'" "$ROOT/bin/fleet-serve.mjs" | sed "s/.*'\(.*\)'/\1/" | sort -u | tr '\n' ' ' | sed 's/ $//')"
+is "and every verb goes through it"      "1" \
+   "$([ "$(grep -c 'callToolAsync(' "$ROOT/bin/fleet-serve.mjs" || true)" -ge 1 ] && echo 1 || echo 0)"
+is "the MCP server no longer execs"      "0" \
+   "$(grep -c 'execFileSync\|execFile(' "$ROOT/mcp/fleet-mcp.mjs" || true)"
+# All six env vars, per target, in the ONE place that builds a child's environment.
+for v in CLAUDE_FLEET_SOCK CLAUDE_CONFIG_DIR CLAUDE_FLEET_DIR CLAUDE_FLEET_PROFILE CLAUDE_FLEET_SCOPE CLAUDE_FLEET_ROOT; do
+  is "the dispatch sets $v per target" "1" "$(grep -c "$v: " "$ROOT/mcp/fleet-dispatch.mjs" || true)"
+done
+rm -rf "$SV"
+fi
+serve_stop
+
+group "fleet-stop and fleet-clean agree on 'remove anyway'"
+# The phone's `f = remove anyway` (§7) and the grid's are the same operation, so it lives
+# in fleet-clean — the file that owns worktree removal and the rule about which gates may
+# be skipped. fleet-stop delegates to it rather than running its own git.
+out="$(TMUX= CLAUDE_FLEET_SOCK=cfforcetest "$ROOT/bin/fleet-stop" --force w1 2>&1; echo "rc=$?")"
+is "fleet-stop --force needs --reclaim"  "1" "$(printf '%s' "$out" | grep -c 'only means something with --reclaim' || true)"
+is "...and it exits nonzero"             "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
+out="$(cd / && TMUX= CLAUDE_FLEET_SOCK=cfforcetest "$ROOT/bin/fleet-clean" --force --go 2>&1; echo "rc=$?")"
+is "fleet-clean --force needs --only"    "1" "$(printf '%s' "$out" | grep -c 'needs --only' || true)"
+is "...and it exits nonzero"             "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
+is "fleet-stop delegates, not git"       "0" \
+   "$(grep -c "git -C \"\$MAIN_CO\" worktree remove" "$ROOT/bin/fleet-stop" || true)"
+is "...it calls fleet-clean --force"     "1" \
+   "$(grep -c -- '--only "\$WT" --go --force' "$ROOT/bin/fleet-stop" || true)"
+
+
 # ── 6a. the phone client (web/) ───────────────────────────────────────────────
 # The PWA renders the SAME cards as the TUI, from the §4 JSON. Two helpers do the work
 # and both emit one `name <US> want <US> got` row per check, so the comparing and the
@@ -3399,7 +3993,7 @@ fi
 # The summary is derived now; this keeps the LIST honest.
 group "install list covers every command"
 # deliberately not linked: invoked by their parent, not by a user on PATH
-NOT_LINKED="fleet-grid.mjs npx-install.mjs"
+NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs"
 for f in "$ROOT"/bin/*; do
   b="$(basename "$f")"
   case " $NOT_LINKED " in *" $b "*) continue ;; esac
@@ -3419,8 +4013,9 @@ done
 for f in "$ROOT"/hooks/*.sh; do
   bash -n "$f" >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error"
 done
-node --check "$ROOT/mcp/fleet-mcp.mjs" >/dev/null 2>&1 && ok "fleet-mcp.mjs parses" || bad "fleet-mcp.mjs parses" "ok" "syntax error"
-node --check "$ROOT/test/helpers/mcp-argcheck.mjs" >/dev/null 2>&1 && ok "mcp-argcheck helper parses" || bad "mcp-argcheck helper parses" "ok" "syntax error"
+for f in "$ROOT"/mcp/*.mjs "$ROOT"/test/helpers/*.mjs; do
+  node --check "$f" >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error"
+done
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
 
 printf '\n%s passed  %s%s failed%s  %s skipped\n' "$PASS" "$([ "$FAIL" -gt 0 ] && printf '%s' "$R")" "$FAIL" "$N" "$SKIP"

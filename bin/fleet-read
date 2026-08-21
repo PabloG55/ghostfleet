@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 # fleet-read [-s SOCKET] <session> [n]
+# fleet-read [-s SOCKET] --json <session> [--limit N] [--before TS]
 #
 # Print the last n (default 1) assistant messages from a sibling session's
 # transcript — so a lead session can check a worker's progress/output.
+#
+# --json emits the same messages as DATA — {ts, role, text} per message, with a cursor —
+# for bin/fleet-serve's /api/session (docs/mobile.md §11.3). It is additive for the same
+# reason fleet-grid.mjs --json is: the phone needs a timestamp and a role per message,
+# and the alternative was a second reader of the transcript. There is already exactly one
+# piece of code that knows how to FIND a session's transcript on a given fleet (the block
+# below, and every line of it is a bug that was fixed once), so a second one would
+# eventually disagree with this one about which conversation a recycled worktree is
+# holding — which is the failure that block exists to prevent.
+#
+# The default output is unchanged, byte for byte: the MCP fleet_read tool and the grid
+# both parse it.
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
@@ -10,9 +23,25 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
-SESSION="${1:-}"; N="${2:-1}"
-[ -n "$SESSION" ] || { echo "fleet-read: usage: fleet-read [-s socket] <session> [n]" >&2; exit 1; }
+# Flags in any position, and named positionals. fleet-stop's header explains why: a flag
+# silently dropped because it came after the session name stops the worker and leaves the
+# worktree, with nothing to say so.
+JSON=0; LIMIT=20; BEFORE=""; SESSION=""; N=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s)       SOCK="${2:-}"; shift 2 ;;
+    --json)   JSON=1; shift ;;
+    --limit)  LIMIT="${2:-20}"; shift 2 ;;
+    --before) BEFORE="${2:-}"; shift 2 ;;
+    -*)       echo "fleet-read: unknown option $1" >&2; exit 1 ;;
+    *)        if [ -z "$SESSION" ]; then SESSION="$1"; elif [ -z "$N" ]; then N="$1"
+              else echo "fleet-read: unexpected arg $1" >&2; exit 1; fi; shift ;;
+  esac
+done
+N="${N:-1}"
+case "$LIMIT" in ''|*[!0-9]*) echo "fleet-read: --limit must be a number" >&2; exit 1 ;; esac
+[ "$LIMIT" -ge 1 ] 2>/dev/null || LIMIT=1
+[ -n "$SESSION" ] || { echo "fleet-read: usage: fleet-read [-s socket] [--json] <session> [n]" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "fleet-read: jq required" >&2; exit 1; }
 
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
@@ -51,12 +80,59 @@ if { [ -z "$tr" ] || [ ! -f "$tr" ]; } && [ -n "$sid" ]; then
 fi
 
 if [ -z "$tr" ] || [ ! -f "$tr" ]; then
+  msg=""
   if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
-    echo "fleet-read: '$SESSION' is live but has no transcript yet — it hasn't taken a turn. Send it work: fleet-send${SOCK:+ -s $SOCK} $SESSION \"<prompt>\"" >&2
+    msg="fleet-read: '$SESSION' is live but has no transcript yet — it hasn't taken a turn. Send it work: fleet-send${SOCK:+ -s $SOCK} $SESSION \"<prompt>\""
   else
-    echo "fleet-read: no transcript for '$SESSION' (no such session on ${SOCK:-<no socket>} — try fleet-list)" >&2
+    msg="fleet-read: no transcript for '$SESSION' (no such session on ${SOCK:-<no socket>} — try fleet-list)"
   fi
+  # A session that exists but has not spoken is a STATE, not a failure, and a JSON caller
+  # has to be able to render it as one. "no messages" and "no transcript yet" are
+  # different facts; an empty array for both would erase the difference.
+  if [ "$JSON" = 1 ]; then
+    jq -n --arg s "$SESSION" --arg note "$msg" \
+      '{session:$s, total:0, messages:[], next_before:null, note:$note}'
+    exit 0
+  fi
+  echo "$msg" >&2
   exit 1
+fi
+
+# The WINDOW. 600 lines is what the default path has always read, and --json keeps a
+# bound of its own kind for the same reason: the largest transcript measured here is
+# 46 MB, and a phone asking for twenty messages must not make anybody read all of it.
+# `total` is the count INSIDE this window, and `window_truncated` says when the window
+# was the limit — a count presented as "the whole conversation" when it is not would be
+# the one thing a message list must not get wrong.
+TAIL_LINES=2000
+if [ "$JSON" = 1 ]; then
+  lines="$(wc -l < "$tr" 2>/dev/null | tr -d ' ')"
+  trunc=false; [ "${lines:-0}" -gt "$TAIL_LINES" ] && trunc=true
+  # role + timestamp per message, both halves of the conversation, tool results excluded:
+  # a screen of tool_result blocks is not a conversation, and `content` is a plain string
+  # on some user turns and an array on the rest.
+  tail -n "$TAIL_LINES" "$tr" \
+    | jq -c 'select(.type=="assistant" or .type=="user")
+             | select((.isSidechain // false) | not)
+             | select((.isMeta // false) | not)
+             | { ts: ((.timestamp // "") | if . == "" then 0
+                      else (sub("\\.[0-9]+Z$";"Z") | fromdateiso8601? // 0) end),
+                 role: (.message.role // .type),
+                 text: ((.message.content // [])
+                        | if type == "string" then .
+                          else (map(select(.type == "text") | .text) | join("\n")) end) }
+             | select((.text | type) == "string" and (.text | test("[^[:space:]]")))' 2>/dev/null \
+    | jq -s --argjson limit "$LIMIT" --arg before "$BEFORE" --arg s "$SESSION" --argjson trunc "$trunc" '
+        . as $all
+        | ($all | length) as $total
+        | (if $before == "" then $total
+           else ([ $all | to_entries[] | select((.value.ts | tostring) == $before) | .key ] | first // $total)
+           end) as $end
+        | (if $end - $limit < 0 then 0 else $end - $limit end) as $start
+        | { session: $s, total: $total, window_truncated: $trunc,
+            messages: $all[$start:$end],
+            next_before: (if $start > 0 then ($all[$start].ts | tostring) else null end) }'
+  exit 0
 fi
 
 tail -n 600 "$tr" \

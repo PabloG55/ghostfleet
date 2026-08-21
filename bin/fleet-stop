@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-stop [-s SOCKET] [--reclaim] <session>      (flags may go on either side)
+# fleet-stop [-s SOCKET] [--reclaim [--force]] <session>   (flags may go on either side)
 #
 # Cleanly STOP a fleet worker: kill its tmux session and clear ALL of its fleet
 # state — the status file, the park + schedule markers (and the detached schedule
@@ -20,6 +20,17 @@
 # PR merged or fully pushed) — a second copy of those rules is a second thing to be
 # wrong, and being wrong here deletes work.
 #
+# `--force` (only with --reclaim) is the ESCALATION for when those gates decline: the
+# gated attempt still runs and still prints its reason, and only a worktree that survived
+# it is then removed — by `fleet-clean --only <path> --go --force`, which is where "remove
+# anyway" lives. NOT by a `git worktree remove` of our own: the first cut of this did
+# exactly that and immediately owned a second copy of which gates may be skipped and
+# which may not, in the file whose own header says a second copy is a second thing to be
+# wrong. That is the same two-step the grid offers on a free-worktree card — "remove
+# worktree 'api-3' (feat/x)?" and then, on git's refusal, "f = remove anyway" — and one
+# implementation is what lets the TUI and the phone (bin/fleet-serve) mean the same thing
+# by it. It DELETES UNCOMMITTED WORK by design.
+#
 # Socket defaults to $CLAUDE_FLEET_SOCK.
 set -uo pipefail
 
@@ -33,17 +44,23 @@ _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;
 # DROPPED the flag — the session stopped, the worktree stayed, and nothing said why. A
 # real agent hit that within a day, having copied the order from this repo's own skill
 # table. An option that is ignored without complaint is worse than one that errors.
-RECLAIM=0; SESSION=""
+RECLAIM=0; FORCE=0; SESSION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)        SOCK="${2:-}"; shift 2 ;;
     --reclaim) RECLAIM=1; shift ;;
+    --force)   FORCE=1;   shift ;;
     -*)        echo "fleet-stop: unknown option $1" >&2; exit 1 ;;
     *)         [ -z "$SESSION" ] && SESSION="$1" || { echo "fleet-stop: unexpected arg $1" >&2; exit 1; }
                shift ;;
   esac
 done
 
+# --force without --reclaim would read as a harder stop and do nothing at all: nothing
+# on the non-reclaim path touches git. Refuse it rather than accept it silently — the
+# same rule the flag-order comment above was written for.
+[ "$FORCE" = 1 ] && [ "$RECLAIM" != 1 ] \
+  && { echo "fleet-stop: --force only means something with --reclaim (without it nothing touches git)" >&2; exit 1; }
 [ -n "$SOCK" ]    || { echo "fleet-stop: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 [ -n "$SESSION" ] || { echo "fleet-stop: usage: fleet-stop [-s socket] <session>" >&2; exit 1; }
 [ "$SESSION" = master ] && { echo "fleet-stop: refusing to stop 'master' (the lead)" >&2; exit 1; }
@@ -137,4 +154,19 @@ CLEAN="$(dirname "$0")/fleet-clean"
 # Runs FROM the main checkout: fleet-clean resolves its repo from $PWD, and the
 # directory it is about to remove is a poor place to be standing.
 ( cd "$MAIN_CO" 2>/dev/null && "$CLEAN" -s "$SOCK" --only "$WT" --go ) | sed 's/^/  /'
-[ -d "$WT" ] && echo "fleet-stop: kept $WT (see the reason above)" || echo "fleet-stop: reclaimed $WT"
+if [ ! -d "$WT" ]; then echo "fleet-stop: reclaimed $WT"; exit 0; fi
+if [ "$FORCE" != 1 ]; then
+  echo "fleet-stop: kept $WT (see the reason above)"
+  echo "fleet-stop: remove it anyway with: fleet-stop -s $SOCK --reclaim --force $SESSION"
+  exit 0
+fi
+
+# --- remove anyway ----------------------------------------------------------
+# Same command, same --only, plus --force: fleet-clean skips the three gates that ask
+# whether the WORK is finished and keeps the ones that ask whether removal would break
+# something nobody asked about (a live session standing there, the main checkout, Claude's
+# own trees). Reported honestly either way, because a force that silently left the
+# directory behind is the worst of the three outcomes.
+( cd "$MAIN_CO" 2>/dev/null && "$CLEAN" -s "$SOCK" --only "$WT" --go --force ) | sed 's/^/  /'
+[ -d "$WT" ] && { echo "fleet-stop: could not remove $WT even with --force (see above)" >&2; exit 1; } \
+             || echo "fleet-stop: force-removed $WT (past fleet-clean's gates, on request)"
