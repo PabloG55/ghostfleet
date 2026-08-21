@@ -72,6 +72,16 @@ of being parked mid-task.
 **Evidence:** the governor only reacts at the threshold; the 5h window ran to 99–102%
 and everything stalled together on the shared account.
 
+### Mobile
+Read the fleet — and eventually steer it — from a phone. Designed, not built:
+**[docs/mobile.md](mobile.md)** has the schema, the transport and the security posture.
+
+**Evidence:** the fleet is invisible away from the desk, so a worker blocked on a
+permission at 9pm waits for someone to open a laptop. Two thirds of it already exists —
+`fleet-grid.mjs` computes every field a phone needs in 0.39s for the busiest fleet, and
+the MCP server is already the complete verb set — so what is missing is a machine-readable
+output, a transport, and a client, not a second implementation of the grid.
+
 ## Also raised, not yet scoped
 
 - **Cost** — per-project token accounting, so a project's spend is attributable.
