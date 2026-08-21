@@ -1,8 +1,9 @@
 # Mobile: the fleet from a phone
 
-**Status:** design only, nothing built. Three decisions are settled: the transport is
-Tailscale with Tailnet Lock (§5), the phone gets the **full verb set** rather than a
-read-only phase (§7), and content is served **unredacted** (§11.3).
+**Status:** design settled; `--json` (§4) shipped in #41, `fleet-serve` and the client in
+flight. Three decisions are settled: the transport is Tailscale with Tailnet Lock (§5),
+the phone gets the **full verb set** rather than a read-only phase (§7), and content is
+served **unredacted** (§11.3).
 Every number below was measured on this machine before the design was written, and **two
 of the measurements changed the design** — the sleep setting (§8) and the dependency
 posture (§6). See those sections before disagreeing with the conclusions.
@@ -87,8 +88,9 @@ with the scars.
 narrow widths columns collide (`people-dupespeople-dupes`). The *values* are already
 computed by `cardLines()` — they are truncated on the way out. `--json` emits them whole.
 
-The schema is deliberately **exactly what `cardLines()` consumes**, so the phone renders
-from the same inputs the TUI does and the two cannot disagree:
+The schema is deliberately **exactly what `cardLines()` consumes** — with one deliberate
+addition, noted under the block — so the phone renders from the same inputs the TUI does
+and the two cannot disagree:
 
 ```jsonc
 {
@@ -107,7 +109,7 @@ from the same inputs the TUI does and the two cannot disagree:
       "msg":       "All three states present. Running the full suite…",
       "age":       20,                    // seconds; null when unknown
       "attached":  false,
-      "sched":     null,                  // { "at": <epoch> } → card shows @HH:MM
+      "sched":     null,                  // { "at": <epoch>, "msg": "…" } → card shows @HH:MM
       "limit_at":  null                   // "10:20pm" → card shows ↻ 10:20pm
     }
   ],
@@ -116,6 +118,18 @@ from the same inputs the TUI does and the two cannot disagree:
   ]
 }
 ```
+
+`sched` carries the scheduled **prompt** as well as the time, and that is the one place
+this schema is not simply what the card draws. `@10:30pm` with no way to say *what* will
+be sent is half a fact: in the TUI you are one keystroke from the session and can go and
+look, and on a phone you are not, so the text is the difference between a card that
+informs and a card that raises a question it cannot answer. It is emitted **whole** —
+a user-authored prompt of arbitrary length, the only such field here — because clipping
+it in the emitter would be a display decision taken in the wrong layer, and §11.3 already
+settled that content is served unredacted and bounded only for transport cost. The client
+clips, exactly as it does for `msg`. The marker on disk also holds the `pid` of the
+process that will send it; that is deliberately **not** on the wire, because it names a
+process on one machine and means nothing to a client that is not on it.
 
 Three rules this schema has to keep, each of which the TUI already keeps and each of
 which is a way the summary could lie:

@@ -2786,6 +2786,398 @@ group "reclaim is reachable from MCP"
 is "fleet_stop takes reclaim" "1" "$(grep -c "a.reclaim ? \['--reclaim'" "$ROOT/mcp/fleet-mcp.mjs" || true)"
 is "...and it is in the schema" "1" "$(grep -c "reclaim: { type: 'boolean'" "$ROOT/mcp/fleet-mcp.mjs" || true)"
 
+# ── 4d12. --json: the contract the phone renders from ────────────────────────
+# `--plain` is formatted FOR A TERMINAL and cannot be parsed. In the fixture below the
+# branch elides to `feat/coi-policy-beside-fo…`, the message is clipped at 44 columns,
+# and STATUS runs straight into LAST MSG with no separator — `interruptedwas mid-turn`
+# — which on a real fleet reads `people-dupespeople-dupes`. The VALUES are whole:
+# cardLines() computes the full branch, the full message and the exact idle seconds and
+# only truncates on the way to the screen. `--json` emits them before that happens
+# (docs/mobile.md §4).
+#
+# This is a CONTRACT, not a convenience. fleet-serve and the PWA render from it, and §3
+# turns entirely on there being ONE producer of "what is this session doing" — a second
+# implementation would drift from the grid's, and the grid's is the one with the scars.
+# So the two surfaces are asserted to AGREE on the same fixture, and each of the doc's
+# three invariants is checked in BOTH directions, because each is a way the summary can
+# lie while every field is present and plausible:
+#
+#   1. all nine statuses survive, uncollapsed
+#   2. `unknown` is not `idle` — it means the agent's adapter has no validated busy
+#      detector and we genuinely cannot tell; a green dot it has not earned is the exact
+#      failure this whole layer exists to prevent
+#   3. `limit` is never folded into `ready` — five workers at a usage ceiling reported as
+#      "5 ready" is the summary lying at the one glance you would act on
+#
+# A one-direction version of any of these passes for an emitter that hardcodes the
+# answer, which is why every status below is driven through a REAL pane on a real
+# socket rather than asserted from the shape of the source.
+group "--json: the §4 schema"
+if command -v tmux >/dev/null 2>&1; then
+  JS="$(cd "$(mktemp -d)" && pwd -P)"
+  node -e '
+    const fs=require("fs"),path=require("path");
+    const JS=process.argv[1], SOCK=process.argv[2], FIX=process.argv[3];
+    const F=path.join(JS,"fleet"); fs.mkdirSync(F,{recursive:true});
+    fs.mkdirSync(path.join(JS,"panes"),{recursive:true});
+    // The panes are verbatim captures: limit and interrupted are both conjunctions over
+    // real text (a usage figure >= 100%, a marker at exactly two columns), so a
+    // hand-written pane would exercise neither.
+    for(const [as,f] of [["busy","claude-busy.txt"],["idle","claude-idle.txt"],
+                         ["limit","claude-limit-hit.txt"],["cut","claude-interrupted.txt"]])
+      fs.copyFileSync(path.join(FIX,f),path.join(JS,"panes",as+".txt"));
+    const now=Math.floor(Date.now()/1000);
+    const A=t=>JSON.stringify({type:"assistant",message:{role:"assistant",content:[{type:"text",text:t}]}});
+    const U=JSON.stringify({type:"user",message:{role:"user",content:"ok"}});
+    // Ages are pinned 2h back, which is what makes `age` assertable at all: --plain
+    // renders that as "2h0m ago" while --json must report the seconds, and a fixture
+    // whose age was "a few seconds" could not tell the two apart.
+    const mk=(slot,o,lines,ageS)=>{
+      let tr="";
+      if(lines){ tr=path.join(JS,slot+".jsonl"); fs.writeFileSync(tr,lines.join("\n")+"\n");
+                 const t=now-(ageS==null?7205:ageS); fs.utimesSync(tr,t,t); }
+      fs.writeFileSync(path.join(F,slot+".json"),JSON.stringify(
+        Object.assign({sock:SOCK,slot,cwd:path.join(JS,"wt",slot),folder:slot,
+                       branch:"main",transcript:tr,ts:now-7205},o)));
+    };
+    mk("w-working",   {status:"working"}, [A("busy right now")]);
+    mk("w-ready",     {status:"ready"},   [A("Done. Draft PR #1165 is up for review.")]);
+    mk("w-idle",      {status:"idle"},    null);          // no history at all = brand new
+    mk("w-limit",     {status:"ready"},   [A("ran out of room")]);
+    mk("w-interrupt", {status:"ready"},   [A("was mid-turn")]);
+    mk("w-parked",    {status:"ready"},   [A("parked on purpose")]);
+    // A need-you that must SURVIVE: Claude spoke last and the flag is newer than the
+    // transcript, so neither staleness rule clears it.
+    mk("w-needyou",   {status:"need-you",ts:now-60}, [U,A("Which branch should I cut from?")], 3600);
+    // A hook status the vocabulary does not know, and it has to be: with no busy
+    // detector, deriveStatus TRUSTS a pushed working/ready/idle, so a fixture whose hook
+    // said "ready" would come back ready and never exercise `unknown` at all.
+    mk("w-unknown",   {status:"?"},       [A("cannot tell")]);
+    // The long values are the whole reason --json exists: both are elided by --plain.
+    mk("w-long",      {status:"ready",branch:"feat/coi-policy-beside-form-and-a-very-long-tail"},
+                      [A("All three states present. Running the full suite before I push, then I will open the PR.")]);
+    fs.writeFileSync(path.join(F,SOCK+".w-parked.parked"),"");
+    // An agent with no adapter entry, so it has no validated busy detector -> unknown.
+    fs.writeFileSync(path.join(F,SOCK+".w-unknown.agent"),"gemini\n");
+    fs.writeFileSync(path.join(F,SOCK+".w-long.label"),"PR 964 doc verify\n");
+    // A real scheduled prompt, plus the pid the marker carries and the wire must not.
+    fs.writeFileSync(path.join(F,SOCK+".w-ready.sched"),JSON.stringify(
+      {at:now+3600,msg:"pick the review back up and push if the suite is green",pid:4242}));
+    // ...and one far longer than the 28 columns a card draws. The scheduled text is the
+    // only user-authored field of arbitrary length in the schema, so the emitter must not
+    // be what shortens it: clipping here would be a display decision taken in the wrong
+    // layer, and it would be invisible, because a truncated prompt still reads as one.
+    fs.writeFileSync(path.join(F,SOCK+".w-long.sched"),JSON.stringify(
+      {at:now+7200,msg:"rebase onto main, ".repeat(40)+"then open the PR",pid:4243}));
+    // w-fresh gets NO status file and no transcript, on purpose: it is the only way to
+    // reach `age: null`. Every other session here carries a hook timestamp, and
+    // ageBase falls back to it — so a fixture where they all do would never test the
+    // null the schema promises, and a client that assumed a number would break on the
+    // first genuinely new session it met.
+    fs.mkdirSync(path.join(JS,"wt","w-fresh"),{recursive:true});
+  ' "$JS" cfjsn "$FIX"
+  tmux -L cfjsn kill-server 2>/dev/null
+  for s in w-working w-ready w-idle w-limit w-interrupt w-parked w-needyou w-unknown w-long w-fresh; do
+    case "$s" in
+      w-working)   jp=busy  ;;
+      w-limit)     jp=limit ;;
+      w-interrupt) jp=cut   ;;
+      *)           jp=idle  ;;
+    esac
+    mkdir -p "$JS/wt/$s"
+    # 200 columns: Claude drops its own 5h usage figure from a pane under ~100, and the
+    # limit signal is a conjunction that needs it. A narrow fixture would fail CLOSED
+    # and this group would silently stop testing `limit` at all.
+    tmux -L cfjsn new-session -d -s "$s" -c "$JS/wt/$s" -x 200 -y 40 \
+      "cat '$JS/panes/$jp.txt'; sleep 300" 2>/dev/null
+  done
+  sleep 1
+  # CLAUDE_CONFIG_DIR at a path that does not exist, so newestTranscript() cannot reach
+  # a real conversation for the one session that deliberately has no history.
+  # CLAUDE_FLEET_ROOT empty so free_worktrees is [] here; it has its own group below.
+  # SCOPE AND PROFILE ARE SET EXPLICITLY, not inherited. Both are exported by every
+  # live fleet session, so a suite run from inside one would assert `project` against
+  # whatever project it happened to be launched from and pass for the wrong reason —
+  # the same "it passed because of where it ran" trap as the codex ready pattern.
+  jgrid() { env -u TMUX CLAUDE_FLEET_DIR="$JS/fleet" CLAUDE_FLEET_ROOT= CLAUDE_CONFIG_DIR="$JS/cfg" \
+            CLAUDE_FLEET_SCOPE=demoproj CLAUDE_FLEET_PROFILE=work \
+            node "$ROOT/bin/fleet-grid.mjs" cfjsn "$@" 2>/dev/null; }
+  jgrid --json > "$JS/out.json"; jrc=$?
+  jgrid --plain > "$JS/out.plain"
+  # An expression over the parsed object. Objects/arrays come back as JSON so a shape
+  # can be asserted whole; undefined comes back empty, which is how a MISSING key is
+  # told apart from a null one below.
+  J() { node -e '
+    const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    const v=new Function("o","return ("+process.argv[2]+")")(o);
+    console.log(v===undefined?"":(v!==null&&typeof v==="object")?JSON.stringify(v):String(v));
+  ' "$JS/out.json" "$1"; }
+  C() { J "o.cards.find(c=>c.name===\"$1\").$2"; }
+
+  # ── it is machine-readable at all ──────────────────────────────────────────
+  is "exits 0"                        "0" "$jrc"
+  # stdout is the channel bin/ghostfleet reads the chosen action off, so ONE line and
+  # nothing else: a stray console.log would leave a consumer with unparseable bytes.
+  is "one line of output"             "1" "$(wc -l < "$JS/out.json" | tr -d ' ')"
+  is "and it parses"                  "1" "$(node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(1)' "$JS/out.json" 2>/dev/null || echo 0)"
+
+  # ── the §4 shape, key for key ─────────────────────────────────────────────
+  # Two sibling workers (fleet-serve, fleet-pwa) are written against exactly these
+  # names, so a rename is a broken client, not a refactor.
+  is "top-level keys"    "project profile counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
+  is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
+  is "card keys"         "name label status folder branch agent msg age attached sched limit_at" \
+                         "$(J 'Object.keys(o.cards[0]).join(" ")')"
+  is "project is the fleet's project" "demoproj" "$(J 'o.project')"
+  is "profile is the profile"         "work"     "$(J 'o.profile')"
+  # ...and with no scope exported it comes off the socket, cf- stripped — the same
+  # derivation the rest of the fleet uses to turn a socket into a project name.
+  is "project falls back to the socket" "derived" \
+     "$(env -u CLAUDE_FLEET_SCOPE CLAUDE_FLEET_DIR="$JS/fleet" CLAUDE_FLEET_ROOT= \
+        CLAUDE_CONFIG_DIR="$JS/cfg" node "$ROOT/bin/fleet-grid.mjs" cf-derived --json 2>/dev/null \
+        | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).project))')"
+  is "every session is a card"        "10"         "$(J 'o.cards.length')"
+
+  # ── the values are UNTRUNCATED, which is the point ─────────────────────────
+  # Both directions: --plain must be shown to elide, or "json carries it whole" would
+  # pass just as happily against a fixture short enough that nothing was ever clipped.
+  is "plain elides the long branch"  "1" "$(grep -ac 'feat/coi-policy-beside-fo…' "$JS/out.plain" || true)"
+  is "json carries it whole"         "feat/coi-policy-beside-form-and-a-very-long-tail" "$(C w-long branch)"
+  is "plain clips the long message"  "1" "$(grep -ac 'Running the full …' "$JS/out.plain" || true)"
+  is "json carries it whole"         "All three states present. Running the full suite before I push, then I will open the PR." \
+                                     "$(C w-long msg)"
+  # --plain renders "2h0m ago" — an hour and a minute of resolution thrown away before
+  # it reaches the caller. The window is tied to the fixture's 2h pin, so a build that
+  # emitted 0, or the rendered string, or the mtime itself, all fail it.
+  is "age is seconds, not '2h0m ago'" "true"   "$(J 'o.cards.find(c=>c.name==="w-long").age>=7205&&o.cards.find(c=>c.name==="w-long").age<7260')"
+  is "...and a number"                "number" "$(J 'typeof o.cards.find(c=>c.name==="w-long").age')"
+  # null, not 0 and not absent: a brand-new session has no last-spoke time at all, and 0
+  # would render as "0s ago" — the freshest possible card, which is the opposite claim.
+  is "...and null when there is none" "null"   "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-fresh").age)')"
+  # branch is '' rather than null when git cannot answer, because that is what the card
+  # is handed; pinned so a client knows which falsy value to expect.
+  is "an unknown branch is empty"     '""'     "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-fresh").branch)')"
+
+  # ── invariant 1: all nine statuses, no collapsing ─────────────────────────
+  # The vocabulary comes from the STATUS table the TUI renders from, so dropping or
+  # renaming one goes red here rather than on the phone.
+  is "the vocabulary is nine values" "idle interrupted limit need-you parked ready starting unknown working" \
+     "$(sed -n '/^const STATUS = {/,/^};/p' "$ROOT/bin/fleet-grid.mjs" \
+        | grep -aoE "^  '?[a-z-]+'?:" | tr -d " ':" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+  # ...and eight of the nine are driven end to end, each from a real pane or marker.
+  # `starting` is the ninth and is deliberately absent: it is the render-time fallback
+  # for a status the table does not know (`STATUS[card.status] || STATUS.starting`), and
+  # nothing in gather() can produce it. A client must still handle it — the TUI does —
+  # but this fixture cannot manufacture one, and a test that pretended to would be
+  # asserting against a value the producer cannot emit.
+  is "working survives"     "working"     "$(C w-working status)"
+  is "ready survives"       "ready"       "$(C w-ready status)"
+  is "idle survives"        "idle"        "$(C w-idle status)"
+  is "need-you survives"    "need-you"    "$(C w-needyou status)"
+  is "parked survives"      "parked"      "$(C w-parked status)"
+  is "limit survives"       "limit"       "$(C w-limit status)"
+  is "interrupted survives" "interrupted" "$(C w-interrupt status)"
+  is "unknown survives"     "unknown"     "$(C w-unknown status)"
+  is "eight distinct statuses in one fleet" "8" "$(J 'new Set(o.cards.map(c=>c.status)).size')"
+  is "...and w-fresh is idle too"           "idle" "$(C w-fresh status)"
+  # ONE producer (§3): the same fixture read through both surfaces must agree session by
+  # session, or the phone and the grid can describe the same fleet differently.
+  is "json and plain agree on every status" "" \
+     "$(node -e '
+       const fs=require("fs");
+       const j=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+       const rows=fs.readFileSync(process.argv[2],"utf8").split("\n").slice(2).filter(Boolean);
+       const plain=new Map(rows.map(l=>[l.slice(0,12).trim(),l.slice(61,72).trim()]));
+       console.log(j.cards.filter(c=>plain.get(c.name)!==c.status)
+                          .map(c=>c.name+":"+c.status+"!="+plain.get(c.name)).join(" "));
+     ' "$JS/out.json" "$JS/out.plain")"
+
+  # ── invariant 2: `unknown` is not `idle` ──────────────────────────────────
+  # gemini has no adapter entry, so there is no validated busy regex and the pane was
+  # never actually read. Anything but `unknown` here is a claim the fleet cannot back.
+  is "no detector -> unknown"        "unknown" "$(C w-unknown status)"
+  is "...not idle"                   "false"   "$(J 'o.cards.find(c=>c.name==="w-unknown").status==="idle"')"
+  is "...and not ready either"       "false"   "$(J 'o.cards.find(c=>c.name==="w-unknown").status==="ready"')"
+  # THE OTHER DIRECTION. w-unknown and w-idle are showing the SAME idle pane; the only
+  # difference is the .agent marker. Without this, a build that answered `unknown` for
+  # every session on earth would pass every assertion above.
+  is "a claude session on that pane is idle" "idle"  "$(C w-idle status)"
+  is "...and one with history is ready"      "ready" "$(C w-ready status)"
+  # An unknown card is not silently counted as something we DO know. It has no bucket of
+  # its own (the six are the six the TUI header shows), so what must hold is that it
+  # lands in none of them: ready counts w-ready and w-long, and nothing else.
+  is "unknown is in no counts bucket" "0" \
+     "$(J 'Object.values(o.counts).reduce((a,b)=>a+b,0) - o.cards.filter(c=>["need-you","working","ready","parked","limit","interrupted"].includes(c.status)).length')"
+
+  # ── invariant 3: `limit` is never folded into `ready` ─────────────────────
+  # A limited session leaves the input box up and matches every ready signal, so this is
+  # the one that silently reads as a healthy fleet.
+  is "the limited pane is limit"      "limit"   "$(C w-limit status)"
+  is "...and carries its reset time"  "10:20pm" "$(C w-limit limit_at)"
+  is "...and is counted as limit"     "1"       "$(J 'o.counts.limit')"
+  is "...and NOT as ready"            "2"       "$(J 'o.counts.ready')"   # w-ready + w-long only
+  is "no card claims both"            "0"       "$(J 'o.cards.filter(c=>c.status==="ready"&&c.limit_at).length')"
+  # the other direction: a healthy idle pane must still reach `ready`, and must not
+  # borrow a reset time
+  is "a healthy session is ready"     "ready"   "$(C w-ready status)"
+  is "...with no reset time"          "null"    "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-ready").limit_at)')"
+  is "...and limit stays 1"           "1"       "$(J 'o.counts.limit')"
+  # interrupted is the same trap wearing a different sign, and is counted apart too
+  is "interrupted has its own bucket" "1"       "$(J 'o.counts.interrupted')"
+
+  # ── the nullable fields, present as null rather than absent ───────────────
+  # `label` is '' internally and null on the wire, so a client has one test for "is this
+  # card titled by a label" instead of two. A MISSING key would read as empty here too,
+  # which is why the assertions go through JSON.stringify.
+  is "label: null when unlabelled"   "null" "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-ready").label)')"
+  is "label: the string when set"    "PR 964 doc verify" "$(C w-long label)"
+  is "sched: null when none"         "null" "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-idle").sched)')"
+  # The time AND the prompt, and NOT the pid. `@10:30pm` with no way to say what will be
+  # sent is half a fact, and on a phone you cannot step into the session and look; the pid
+  # names a process on one machine and means nothing to a client that is not on it.
+  is "sched: the epoch and the text" "at msg" "$(J 'Object.keys(o.cards.find(c=>c.name==="w-ready").sched).join(" ")')"
+  is "sched: at is a number"         "number" "$(J 'typeof o.cards.find(c=>c.name==="w-ready").sched.at')"
+  is "sched: msg is the prompt"      "pick the review back up and push if the suite is green" \
+                                     "$(J 'o.cards.find(c=>c.name==="w-ready").sched.msg')"
+  # Emitted WHOLE. 736 characters against the 28 a card draws, so a clip anywhere in the
+  # emitter fails here; the length and the tail together mean a build that clipped at any
+  # width, front or back, goes red rather than one that clipped at exactly 28.
+  is "sched: a long prompt is whole" "736" "$(J 'o.cards.find(c=>c.name==="w-long").sched.msg.length')"
+  is "...far longer than a card"     "true" "$(J 'o.cards.find(c=>c.name==="w-long").sched.msg.length>28')"
+  is "...and ends where it should"   "then open the PR" \
+                                     "$(J 'o.cards.find(c=>c.name==="w-long").sched.msg.slice(-16)')"
+  # And the other surface genuinely cannot carry it: --plain has no column for the
+  # scheduled text at all, which is why the phone has to get it from here.
+  is "...and --plain carries none of it" "0" "$(grep -ac 'rebase onto main' "$JS/out.plain" || true)"
+  is "limit_at: null when healthy"   "null" "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-idle").limit_at)')"
+  is "attached is a boolean"         "boolean" "$(J 'typeof o.cards[0].attached')"
+  # Both directions, through a real client: a field that is always false looks identical
+  # to one that works, and "(attached)" is what the card draws when it has no message.
+  tmux -L cfjsndrv kill-server 2>/dev/null
+  tmux -L cfjsndrv new-session -d -x 200 -y 40 "tmux -L cfjsn attach -t w-ready" 2>/dev/null
+  sleep 1
+  jgrid --json > "$JS/att.json"
+  A_() { node -e '
+    const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    console.log(String(o.cards.find(c=>c.name===process.argv[2]).attached));
+  ' "$JS/att.json" "$1"; }
+  is "an attached session reads true"    "true"  "$(A_ w-ready)"
+  is "...and its neighbour stays false"  "false" "$(A_ w-idle)"
+  tmux -L cfjsndrv kill-server 2>/dev/null
+  is "agent is named on every card"  "10"   "$(J 'o.cards.filter(c=>typeof c.agent==="string"&&c.agent).length')"
+  is "...including the non-claude one" "gemini" "$(C w-unknown agent)"
+  # cwd is NOT on the wire: the card never draws it, and a field the TUI does not render
+  # is a field nothing keeps honest. Same for the schedule marker's pid, which lives on
+  # disk and must not reach a client that is not on this machine.
+  is "no field the card cannot show" "" "$(J 'o.cards.map(c=>Object.keys(c)).flat().filter(k=>k==="cwd"||k==="limitAt").join(" ")')"
+  is "no pid anywhere in the payload" "0" "$(grep -ac '\"pid\"' "$JS/out.json" || true)"
+  is "...and nothing but at+msg in sched" "" \
+     "$(J 'o.cards.filter(c=>c.sched).map(c=>Object.keys(c.sched)).flat().filter(k=>k!=="at"&&k!=="msg").join(" ")')"
+
+  tmux -L cfjsn kill-server 2>/dev/null
+  rm -rf "$JS"
+else
+  skip "--json schema" "tmux missing"
+fi
+
+# free_worktrees is the one field that comes from git rather than from a pane, and the
+# grey FREE cards are what the phone taps to reuse a checkout. Three ways it can be
+# wrong, all silent: the main checkout offered as reusable (it is master's slot), a
+# worktree with a live session offered as free (you would spawn a second session on
+# top of one that is working), and the manifest task lost so the card cannot say what
+# the tree was spun up for.
+group "--json: free_worktrees"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  JW="$(cd "$(mktemp -d)" && pwd -P)"
+  git init -q -b main "$JW/proj" 2>/dev/null
+  git -C "$JW/proj" config user.email t@t; git -C "$JW/proj" config user.name t
+  : > "$JW/proj/f"; git -C "$JW/proj" add -A; git -C "$JW/proj" commit -qm init 2>/dev/null
+  git -C "$JW/proj" worktree add -q "$JW/proj-2" -b feat/x 2>/dev/null
+  git -C "$JW/proj" worktree add -q "$JW/proj-3" -b feat/y 2>/dev/null
+  mkdir -p "$JW/fleet"
+  printf '%s\t-\t-\tteach the phone to read the grid\n' "$JW/proj-2" > "$JW/fleet/cfjsw.manifest.tsv"
+  tmux -L cfjsw kill-server 2>/dev/null
+  tmux -L cfjsw new-session -d -s master -c "$JW/proj"   'sleep 300' 2>/dev/null
+  tmux -L cfjsw new-session -d -s proj-3 -c "$JW/proj-3" 'sleep 300' 2>/dev/null
+  sleep 0.6
+  jw="$(CLAUDE_FLEET_DIR="$JW/fleet" CLAUDE_FLEET_ROOT="$JW" CLAUDE_FLEET_SCOPE=proj \
+        CLAUDE_CONFIG_DIR="$JW/cfg" node "$ROOT/bin/fleet-grid.mjs" cfjsw --json 2>/dev/null)"
+  JW_() { printf '%s' "$jw" | node -e '
+    let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+      const o=JSON.parse(s); const v=new Function("o","return ("+process.argv[1]+")")(o);
+      console.log(v===undefined?"":(v!==null&&typeof v==="object")?JSON.stringify(v):String(v));});
+  ' "$1"; }
+  is "the sessionless worktree is free" "1"      "$(JW_ 'o.free_worktrees.length')"
+  is "...by absolute path"              "proj-2" "$(JW_ 'require("path").basename(o.free_worktrees[0].path)')"
+  is "...with its branch"               "feat/x" "$(JW_ 'o.free_worktrees[0].branch')"
+  is "...and what it was spun up for"   "teach the phone to read the grid" "$(JW_ 'o.free_worktrees[0].task')"
+  is "free_worktrees keys"              "path branch task" "$(JW_ 'Object.keys(o.free_worktrees[0]).join(" ")')"
+  # both directions: the two trees that must NOT be offered
+  is "the main checkout is not free"    "0" "$(JW_ 'o.free_worktrees.filter(w=>w.path.endsWith("/proj")).length')"
+  is "an occupied worktree is not free" "0" "$(JW_ 'o.free_worktrees.filter(w=>w.path.endsWith("/proj-3")).length')"
+  is "...it is a card instead"          "1" "$(JW_ 'o.cards.filter(c=>c.name==="proj-3").length')"
+  # master is the home screen, never a card — same rule the grid draws by
+  is "master is not a card"             "0" "$(JW_ 'o.cards.filter(c=>c.name==="master").length')"
+  tmux -L cfjsw kill-server 2>/dev/null
+  rm -rf "$JW"
+else
+  skip "--json free_worktrees" "git or tmux missing"
+fi
+
+# A card's `msg` is a whole assistant turn, bounded only by the 64KB tail read the
+# transcript gets — and nothing bounds the SUM across cards. So a few verbose workers
+# push this payload past the 64KB pipe buffer, and process.exit() DISCARDS a pending
+# stdout write, which on macOS a pipe always is. Measured before the fix: 200 000 bytes
+# written, 65 536 arriving, the JSON stopping mid-string with no error on either side.
+# The reader cannot even tell it was cut — it sees a parse failure and blames the
+# producer. --plain is not exposed to it (its message column is clipped to 46 characters,
+# so a row is ~126 bytes and it would take 500 sessions to fill the buffer), which is why
+# this needs its own case instead of riding along on the group above.
+group "--json survives a payload bigger than a pipe buffer"
+if command -v tmux >/dev/null 2>&1; then
+  JB="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$JB/fleet"
+  # Three workers at 30KB of message each. Deliberately not one at 90KB: lastAssistant()
+  # only reads the last 64KB of a transcript, so a single oversized turn is unparseable
+  # there and comes back EMPTY — which would have made this group pass by producing no
+  # payload at all. The sum across cards is the part with no bound.
+  node -e '
+    const fs=require("fs"),path=require("path");
+    const JB=process.argv[1], n=Math.floor(Date.now()/1000);
+    const big="verbose ".repeat(3750).trim();     // 29 999 chars, no whitespace runs to collapse
+    for(const s of ["h1","h2","h3"]){
+      fs.mkdirSync(path.join(JB,"wt",s),{recursive:true});
+      const t=path.join(JB,s+".jsonl");
+      fs.writeFileSync(t,JSON.stringify({type:"assistant",message:{role:"assistant",
+        content:[{type:"text",text:big}]}})+"\n");
+      fs.writeFileSync(path.join(JB,"fleet",s+".json"),JSON.stringify(
+        {sock:"cfjsb",slot:s,cwd:path.join(JB,"wt",s),folder:s,branch:"main",
+         status:"ready",transcript:t,ts:n-60}));
+    }
+  ' "$JB"
+  tmux -L cfjsb kill-server 2>/dev/null
+  for s in h1 h2 h3; do
+    tmux -L cfjsb new-session -d -s "$s" -c "$JB/wt/$s" -x 200 -y 40 'sleep 300' 2>/dev/null
+  done
+  sleep 0.8
+  # $() is a real pipe, which is the whole point: to a FILE the same code is safe on every
+  # platform, so a test that redirected would pass against the truncating version.
+  jb="$(CLAUDE_FLEET_DIR="$JB/fleet" CLAUDE_FLEET_ROOT= CLAUDE_CONFIG_DIR="$JB/cfg" \
+        CLAUDE_FLEET_SCOPE=big node "$ROOT/bin/fleet-grid.mjs" cfjsb --json 2>/dev/null)"
+  jbq() { printf '%s' "$jb" | node -e '
+    let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+      try{ console.log(String(new Function("o","return ("+process.argv[1]+")")(JSON.parse(s)))) }
+      catch{ console.log("truncated") }});
+  ' "$1"; }
+  is "more than one pipe buffer of it" "1" "$([ "${#jb}" -gt 65536 ] && echo 1 || echo 0)"
+  is "...and it still parses"          "3" "$(jbq 'o.cards.length')"
+  is "...with every message whole"     "29999 29999 29999" \
+     "$(jbq 'o.cards.map(c=>c.msg.length).join(" ")')"
+  tmux -L cfjsb kill-server 2>/dev/null
+  rm -rf "$JB"
+else
+  skip "--json big payload" "tmux missing"
+fi
+
 # ── 4e. the governor parks on a fossil its own park created ──────────────────
 # A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
 # still shows the figure it was painting when it was parked. Skipping PARKED panes was
