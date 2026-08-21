@@ -17,6 +17,7 @@
 import * as G from './grid.js';
 import * as api from './api.js';
 import * as pk from './passkey.js';
+import * as ansi from './ansi.js';
 
 // ── state ─────────────────────────────────────────────────────────────────
 const S = {
@@ -26,6 +27,12 @@ const S = {
   projects: null,       // last /api/projects payload
   grid: null,           // last §4 payload
   sess: null,           // last /api/session payload  { messages, next_before, … }
+  view: 'pane',         // the session screen: 'pane' (the real thing) | 'msgs' (the list)
+  pane: null,           // last /api/pane payload   { pane, at, … }
+  paneGeom: null,       // { rows, cols } — measured from that payload, not claimed by it
+  paneErr: '',          // the last pane read's failure, shown once rather than per poll
+  pscroll: 0,           // scrollback rows asked for; 0 = exactly what an attach shows
+  pfs: 0,               // the pane's font size in px, 0 until restore() or PFS_DEFAULT
   sel: 0,               // the TUI's `sel` — which card the verbs act on
   locked: true,
   confirm: null,        // { kind, … } — the TUI's confirm bar, reproduced
@@ -35,6 +42,7 @@ const S = {
   hiddenAt: 0,
 };
 const LS_LAST = 'gf.last';   // last fetched state, for a cold offline open
+const LS_PFS = 'gf.pfs';    // the pane's font size, which is a per-eyesight preference
 
 // ── persistence: something to show before the network answers ─────────────
 // "Usable offline enough to show the last fetched state rather than a blank page."
@@ -82,11 +90,19 @@ async function refresh() {
     else if (S.screen === 'grid') S.grid = await api.getGrid(S.project);
     else if (S.screen === 'session') {
       S.grid = await api.getGrid(S.project);
+      // The pane has its OWN faster timer (panePoll below), so this loop only has to
+      // fetch it once, to fill the box on the way in rather than up to a poll later.
+      if (S.view === 'pane' && !S.pane) await readPane();
       // Re-read the tail while it is STILL the first page, so a worker that says
       // something new while you are looking at it shows up. Once "load more" has been
       // pressed, leave the loaded pages alone — refetching would throw away the older
       // messages you deliberately went and got.
-      if (!S.sess || S.sess.pages === 1) {
+      //
+      // Only while the list is what is on screen. A transcript read is the most
+      // expensive call this client makes — /api/session buffers 32 MB because one page
+      // is 20 whole assistant turns — and paying for it every five seconds to render
+      // nothing is the kind of waste that is invisible until it is a phone bill.
+      if (S.view !== 'pane' && (!S.sess || S.sess.pages === 1)) {
         const fresh = await api.getSession(S.project, S.session);
         S.sess = { ...fresh, pages: 1 };
       }
@@ -144,12 +160,19 @@ function toast(text, kind = '') {
 function render() {
   const app = document.getElementById('app');
   app.textContent = '';
-  if (S.locked) { app.append(lockScreen()); renderSheet(); return; }
+  // The pane's nodes are about to be thrown away; drop the references with them, so a
+  // poll that lands mid-render patches nothing rather than a detached <pre>.
+  paneBoxNode = paneNode = paneGeomNode = null;
+  if (S.locked) { app.append(lockScreen()); renderSheet(); syncPanePoll(); return; }
   if (S.screen === 'projects') app.append(...projectsScreen());
   else if (S.screen === 'grid') app.append(...gridScreen());
   else app.append(...sessionScreen());
   if (S.toast) app.append(el('div', { class: 'toast ' + S.toast.kind, text: S.toast.text }));
   renderSheet();
+  // Every state change that matters to the pane's timer — the screen, the view, a sheet,
+  // a confirmation, the lock — has already been applied by the time we get here, which is
+  // why this is the single place that starts and stops it.
+  syncPanePoll();
 }
 
 // The banner does not fit a phone — bannerFits() wants 76 columns and 26 rows — so the
@@ -311,9 +334,31 @@ async function reorder(name, delta) {
 }
 
 // ── the session screen ────────────────────────────────────────────────────
+// WHAT A TAP ON A CARD LANDS ON IS THE PANE, and that is the whole of this change.
+//
+// It used to land on a message list, and the first person to use the app said why that
+// was wrong: "it doesn't look like a normal chat and i can't see the commands that is
+// running." Both halves, one cause. /api/session goes through `fleet-read --json`, whose
+// payload is {ts, role, text} — assistant and user prose — so a tool call, the command
+// inside it and its result are not in the data at all. The list was not under-rendering
+// them; it never had them. Pressing ⏎ on a card at the desk ATTACHES to the tmux pane,
+// and what you get is the Claude Code TUI: ⏺ bullets, ⎿ tool results, the spinner, the
+// permission dialog. "Exactly as the computer version" is that pane, and CLAUDE.md
+// already says how to get it — THE PANE IS THE TRUTH, which is why every status detector
+// in this repo reads it instead of reconstructing it.
+//
+// The list stays, one tap away, and is not a consolation prize: it pages back over the
+// WHOLE transcript, which the pane cannot do (a pane is what fits on a screen plus
+// whatever scrollback tmux kept), and prose reads better in it. Two views of two
+// different things, not two attempts at one.
 function openSession(name) {
   if (!name) return;
   S.session = name; S.screen = 'session'; S.sess = null;
+  // Reset to the pane on every open rather than remembering the last choice. The card is
+  // tapped to answer "what is this worker doing right now", and the pane is the answer to
+  // that question; a sticky preference would sometimes answer a different one.
+  S.view = 'pane'; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
+  paneScroll = null;          // another session's offset means nothing in this one's pane
   render(); refresh();
 }
 function cardOf(name) { return ((S.grid && S.grid.cards) || []).find(c => c.name === name); }
@@ -349,8 +394,180 @@ function sessionScreen() {
     btn('stop + reclaim worktree', () => askReclaim(S.session), 'danger'),
     btn('q back', () => back()),
   ]));
-  out.push(messages());
+  out.push(viewSwitch());
+  out.push(S.view === 'pane' ? paneView() : messages());
   return out.filter(Boolean);
+}
+
+// Two views, each labelled with what it IS. Not "live"/"history" — the pane is the
+// session's screen and the list is its transcript, and naming them for their freshness
+// would suggest the list is a stale copy of the same thing when it is a different thing.
+function viewSwitch() {
+  const sw = el('div', { class: 'viewsw' });
+  const pick = (v, label) => btn(label, () => {
+    if (S.view === v) return;
+    S.view = v;
+    render();
+    refresh();              // fills whichever payload this view needs and has not got
+  }, S.view === v ? 'on' : '');
+  sw.append(pick('pane', 'pane'), pick('msgs', 'messages'));
+  return sw;
+}
+
+// ── the pane ──────────────────────────────────────────────────────────────
+// NEVER WRAPPED, NEVER REFLOWED. The pane was captured at the width the desktop layout
+// gave it — 269 columns on this machine's fleets, measured, against a phone's ~40 — and
+// it is a character grid, so wrapping it does not make it narrower, it makes it a
+// different picture. So it scrolls sideways inside .pane-box and the page body never
+// does (app.css).
+//
+// That leaves a real problem rather than solving it, and the zoom row is the honest
+// answer to it: no toggle makes 269 columns readable on a phone, so both readings are
+// offered. `fit` scales the whole pane in to see its SHAPE — is there a dialog, is a diff
+// on screen, where is the spinner — and ± takes it back to a size you can read and pan
+// across. Font-size, not a transform, so every step re-lays the glyphs out crisply.
+const PFS_DEFAULT = 11;         // px: small, and still readable on a phone held normally
+const PFS_MIN = 6, PFS_MAX = 28;
+const PANE_HISTORY = 200;       // rows of scrollback the `history` toggle asks for
+
+let paneBoxNode = null, paneNode = null, paneGeomNode = null;
+// WHERE THE READER HAD SCROLLED TO, kept OUTSIDE the nodes, because the nodes do not
+// survive. refresh()'s 5s grid poll ends in render(), which rebuilds the whole session
+// screen — so a freshly built .pane-box starts at scrollTop 0 and the "open at the end"
+// rule then threw the reader to the bottom of the pane every five seconds, and to column 0
+// with it. Measured in a real browser: scrolled to (40, 300), five seconds later (253, 0).
+// A toast, a verb and a view switch all do the same thing, so the fix is not "render less"
+// — it is that the position belongs to the SESSION, not to a div.
+//   `atEnd` rather than a raw offset for the tail case: a pane that has grown (history on,
+// or a taller capture) has a different bottom, and a reader who was at the end wants the
+// new end, not the old number.
+let paneScroll = null;         // { top, left, atEnd } | null = never scrolled yet
+
+function paneView() {
+  const wrap = el('div', { class: 'paneview' });
+  if (!S.pfs) S.pfs = restoredPfs();
+
+  const g = S.paneGeom;
+  // The pane's real geometry, measured from the capture on screen rather than asked of
+  // tmux separately — see the comment on /api/pane in bin/fleet-serve.mjs for why a
+  // second `-t <session>` resolution is a thing to avoid rather than a convenience.
+  // Kept as a node so the poll can update it without redrawing the screen under a reader.
+  paneGeomNode = el('span', { class: 'geom', text: g ? `${g.cols}×${g.rows}` : '' });
+  wrap.append(el('div', { class: 'pane-bar' }, [
+    btn('−', () => zoomPane(1 / 1.25)),
+    btn('+', () => zoomPane(1.25)),
+    btn('fit', () => fitPane()),
+    btn(S.pscroll ? `history ${S.pscroll}` : 'history', () => {
+      S.pscroll = S.pscroll ? 0 : PANE_HISTORY;
+      S.pane = null;                       // the old payload is the wrong length now
+      render(); refresh();
+    }, S.pscroll ? 'on' : ''),
+    paneGeomNode,
+  ]));
+
+  const box = el('div', { class: 'pane-box' });
+  const pre = el('pre', { class: 'pane' });
+  pre.style.setProperty('--pfs', S.pfs.toFixed(2) + 'px');
+  if (S.paneErr) {
+    // A dead pane read says so IN the box, where the pane would be. A toast every two
+    // seconds would bury the app in its own error messages.
+    box.append(el('div', { class: 'hint', text: S.paneErr }));
+  } else if (!S.pane) {
+    box.append(el('div', { class: 'hint', text: 'capturing the pane…' }));
+  } else if (S.pane.note) {
+    box.append(el('div', { class: 'hint', text: S.pane.note }));
+  } else {
+    const r = ansi.render(S.pane.pane || '');
+    S.paneGeom = { rows: r.rows, cols: r.cols };
+    pre.innerHTML = r.html;
+    box.append(pre);
+  }
+  paneBoxNode = box; paneNode = pre;
+  // Recorded as the reader scrolls, so the next render can put them back. Cheap, and the
+  // only place `atEnd` is decided from a real layout rather than inferred.
+  box.addEventListener('scroll', () => rememberPaneScroll(box));
+  wrap.append(box);
+  restorePaneScroll(box);
+  return wrap;
+}
+
+function rememberPaneScroll(box) {
+  const h = Number(box.scrollHeight) || 0, top = Number(box.scrollTop) || 0, ch = Number(box.clientHeight) || 0;
+  paneScroll = { top, left: Number(box.scrollLeft) || 0, atEnd: h - top - ch < 6 };
+}
+
+// The newest output — the spinner, the ❯ prompt, a permission dialog — is at the BOTTOM of
+// a pane, so a pane opened for the first time opens there. Every render after that restores
+// where the reader actually was.
+function restorePaneScroll(box) {
+  const go = () => {
+    sizePaneBox(box);
+    try {
+      if (!paneScroll || paneScroll.atEnd) box.scrollTop = box.scrollHeight;
+      else { box.scrollTop = paneScroll.top; box.scrollLeft = paneScroll.left; }
+    } catch {}
+  };
+  // Next frame, not this one: the node is not in the document yet when this runs, so
+  // scrollHeight is 0 and the assignment would be a no-op that looks like it worked.
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(go); else go();
+}
+
+// The box takes exactly the screen that is left below it — MEASURED, not a vh fraction.
+// app.css carries `max-height: 68vh` as the pre-JS fallback and 68vh is wrong on every
+// phone, because what sits above the box is not a fixed height: the verb bar wraps to
+// however many rows the buttons need, which differs with the width and with whether the
+// session is parked. Measured at 390x844 the constant put the box's last 30px past the
+// fold, which is precisely where a pane keeps the things worth seeing — the ❯ prompt, the
+// spinner, and the bottom edge of a permission dialog.
+function sizePaneBox(box) {
+  if (!box || typeof box.getBoundingClientRect !== 'function' || typeof getComputedStyle !== 'function') return;
+  const top = box.getBoundingClientRect().top;
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  // #app's bottom padding is the home-indicator safe area; the viewport includes it, so
+  // without it the box would end underneath the indicator on a notched phone.
+  const app = document.getElementById('app');
+  const pad = app ? (parseFloat(getComputedStyle(app).paddingBottom) || 0) : 0;
+  const h = vh - top - pad - 6;
+  if (Number.isFinite(h) && h > 140) box.style.maxHeight = Math.round(h) + 'px';
+}
+
+function restoredPfs() {
+  // Guarded like every other storage read here: a browser with site data blocked throws
+  // on the getter, and a pane that will not draw because of a font-size preference would
+  // be an absurd way to lose the screen.
+  let v = NaN;
+  try { v = Number(localStorage.getItem(LS_PFS)); } catch {}
+  return Number.isFinite(v) && v >= 1 && v <= PFS_MAX ? v : PFS_DEFAULT;
+}
+// No render() here, deliberately: the size is one CSS variable on the <pre>, and
+// rebuilding the screen to change it would reset the horizontal scroll to column 0 on
+// every tap of `+`. Zooming a terminal you are panning across must not move you.
+function setPfs(px) {
+  S.pfs = px;
+  try { localStorage.setItem(LS_PFS, String(px)); } catch {}
+  if (paneNode) paneNode.style.setProperty('--pfs', px.toFixed(2) + 'px');
+}
+function zoomPane(mul) {
+  setPfs(Math.max(PFS_MIN, Math.min(PFS_MAX, (S.pfs || PFS_DEFAULT) * mul)));
+}
+// The whole pane, in the viewport. Measured, not computed from an assumed advance width:
+// monospace faces differ, and fitCards() already learned that a guess 4% out is a clipped
+// border. Same probe, one glyph, at a known size.
+function fitPane() {
+  const cols = (S.paneGeom && S.paneGeom.cols) || 80;
+  const box = paneBoxNode;
+  const avail = (box && box.clientWidth ? box.clientWidth : document.documentElement.clientWidth) - 14;
+  const probe = document.createElement('pre');
+  probe.style.cssText = 'position:absolute;visibility:hidden;margin:0;font-size:100px;white-space:pre';
+  probe.textContent = '0'.repeat(10);
+  document.body.appendChild(probe);
+  const per100 = probe.getBoundingClientRect().width / 10;       // px per column at 100px
+  probe.remove();
+  if (!per100 || !avail || avail < 0) return;
+  // No PFS_MIN floor here, on purpose: `fit` is the one control whose job is to show the
+  // SHAPE of a 269-column pane, and clamping it to a readable size would silently refuse
+  // to do the thing it was tapped for.
+  setPfs(Math.max(1, Math.min(PFS_MAX, avail * 100 / (cols * per100))));
 }
 
 // Newest first. The TUI has no equivalent screen to mirror — a session's conversation
@@ -388,8 +605,94 @@ function messages() {
   return wrap;
 }
 
+// ── the pane's own poll ───────────────────────────────────────────────────
+// A terminal has to look live or it is a screenshot, so the pane is read faster than the
+// rest of the app and on its own timer.
+//
+// AND IT STOPS WHEN THE PAGE IS HIDDEN — cleared, not merely skipped. A phone polling a
+// terminal every two seconds from inside a pocket is a battery cost and a rate-limit cost
+// for a picture nobody is looking at, and `if (document.hidden) return` inside the
+// callback still wakes the radio and the JS thread on schedule to decide that. So
+// visibilitychange tears the timer down and rebuilds it, and syncPanePoll() is the one
+// place that decides whether it should exist at all.
+//
+// THE CADENCE, and the arithmetic behind it: serve.json's read limit is 240/min, counted
+// per client id AND per ip. On the session screen the app makes two kinds of read — this
+// pane poll and refresh()'s grid poll at 5s (12/min) — so 2s here totals 42/min, about a
+// sixth of the ceiling. `history` on multiplies the payload by four (200 rows of
+// scrollback against a 65-row pane), so it slows to 4s: the request is cheap for the
+// daemon either way, but the bytes cross a WireGuard tunnel on someone's cellular plan,
+// and that is the cost worth being careful with. Measured: a 269x65 pane captures to
+// 5.9 KB with its escapes, so 2s is ~3 KB/s and history at 4s is about the same.
+const PANE_POLL_MS = 2000, PANE_POLL_HISTORY_MS = 4000;
+let paneTimer = null, paneTimerMs = 0, paneBusy = false;
+
+const panePeriod = () => (S.pscroll ? PANE_POLL_HISTORY_MS : PANE_POLL_MS);
+// Paused for a sheet or a confirmation for the same reason refresh() is: those are forms
+// with half-typed text in them, and a repaint under one is how you lose it.
+const panePollWanted = () =>
+  !document.hidden && !S.locked && !S.sheet && !S.confirm &&
+  S.screen === 'session' && S.view === 'pane';
+
+function stopPanePoll() {
+  if (paneTimer) { clearInterval(paneTimer); paneTimer = null; paneTimerMs = 0; }
+}
+// Idempotent, and called from render() — so entering the screen, switching view, opening a
+// sheet and locking all reach it without any of them having to know about the timer.
+function syncPanePoll() {
+  if (!panePollWanted()) return stopPanePoll();
+  if (paneTimer && paneTimerMs === panePeriod()) return;
+  stopPanePoll();
+  paneTimerMs = panePeriod();
+  paneTimer = setInterval(() => {
+    if (!panePollWanted()) return stopPanePoll();
+    readPane().then(paintPane);
+  }, paneTimerMs);
+}
+
+async function readPane() {
+  // One request in flight at a time. A capture that takes longer than the period would
+  // otherwise stack up requests behind it, which is how a slow link turns into a burst
+  // that trips the rate limit — the opposite of what a poll interval is for.
+  if (paneBusy) return;
+  paneBusy = true;
+  const want = { project: S.project, session: S.session, scroll: S.pscroll };
+  try {
+    const j = await api.getPane(want.project, want.session, want.scroll);
+    // Discarded if the screen moved while this was in flight: painting it would put one
+    // session's pane under another session's card.
+    if (S.screen !== 'session' || S.session !== want.session || S.pscroll !== want.scroll) return;
+    S.pane = j;
+    if (S.paneErr) { S.paneErr = ''; render(); }
+  } catch (e) {
+    if (e instanceof api.AuthError) return lock();
+    const msg = e instanceof api.OfflineError
+      ? 'offline — this is the last pane captured' : String(e.message || e);
+    // Rendered only when it CHANGES. The poll is every two seconds; re-rendering the
+    // screen on each failure would make an unreachable daemon look like a flickering app.
+    if (S.paneErr !== msg) { S.paneErr = msg; render(); }
+  } finally { paneBusy = false; }
+}
+
+// The repaint, in place: one innerHTML assignment on the <pre>, never a render() of the
+// whole screen. render() would rebuild the box and throw away where the reader had
+// scrolled to — twice a second, mid-sentence, which is unusable.
+function paintPane() {
+  if (S.screen !== 'session' || S.view !== 'pane' || !S.pane || S.paneErr) return;
+  const box = paneBoxNode, pre = paneNode;
+  if (!box || !pre) { render(); return; }
+  const r = ansi.render(S.pane.pane || '');
+  S.paneGeom = { rows: r.rows, cols: r.cols };
+  // A terminal's tail behaviour: follow the end only for a reader who was already at it.
+  // Someone who has scrolled up to read a command stays where they put themselves.
+  rememberPaneScroll(box);
+  pre.innerHTML = r.html;
+  if (paneScroll.atEnd) { try { box.scrollTop = box.scrollHeight; } catch {} }
+  if (paneGeomNode) paneGeomNode.textContent = `${r.cols}×${r.rows}`;
+}
+
 function back() {
-  if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; }
+  if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
   else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; }
   render(); refresh();
 }
@@ -410,7 +713,12 @@ function cardEl(block, h, idx) {
   block.lines.forEach((line, i) => {
     const span = el('span', { class: 'l' + (i === 0 ? ' t' : '') });
     for (const tok of G.cells(line)) {
-      span.append(tok.cell ? el('i', { class: 'c', text: tok.text }) : document.createTextNode(tok.text));
+      // `wide` came in with the pane view: cells() now says when tmux gave a character
+      // TWO columns, and the card honours it for the same reason the pane does — one
+      // answer to "how many cells is this", not two that can disagree. No card glyph is
+      // wide today, so this changes nothing on screen and everything about which of the
+      // two files has to be right.
+      span.append(tok.cell ? el('i', { class: tok.wide ? 'c w' : 'c', text: tok.text }) : document.createTextNode(tok.text));
     }
     pre.append(span);
   });
@@ -1122,15 +1430,23 @@ function onKey(e) {
 // declaration exists. test/helpers/pwa-check.mjs asserts the ordering.
 restore();
 fitCards();
-addEventListener('resize', fitCards);
+addEventListener('resize', () => {
+  fitCards();
+  // An orientation change moves the fold, and the pane box was sized against the old one.
+  if (paneBoxNode) sizePaneBox(paneBoxNode);
+});
 addEventListener('keydown', onKey);
 // §5: a passkey at every open, and again after the app has been backgrounded for a few
 // minutes. The token expiring is the same event as far as this is concerned.
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { S.hiddenAt = Date.now(); return; }
+  // Hidden: the pane's timer is TORN DOWN, not left to skip its turns. That is the
+  // difference between an app that stops polling in a pocket and one that keeps waking
+  // the radio every two seconds to decide it should not have.
+  if (document.hidden) { S.hiddenAt = Date.now(); stopPanePoll(); return; }
   if (S.hiddenAt && Date.now() - S.hiddenAt > pk.RELOCK_AFTER_HIDDEN) lock();
   else if (!api.haveToken() && !pk.bypassAllowed()) lock();
   else refresh();
+  syncPanePoll();
 });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
 render();

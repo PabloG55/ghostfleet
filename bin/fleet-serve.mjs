@@ -785,6 +785,60 @@ async function sessionMessages(t, session, limit, before) {
   }
 }
 
+// ── the session's real pane ───────────────────────────────────────────────
+// The endpoint that made the phone show what the desktop shows. Its whole justification
+// is a subtraction: /api/session above cannot carry a command, because fleet-read --json
+// emits {ts, role, text} and a tool call is none of those three. Attaching to the pane
+// at the desk shows ⏺ bullets, ⎿ tool results, the spinner and the permission dialog;
+// capturing it is how that reaches a phone. CLAUDE.md's own rule for every status
+// detector in this repo applies unchanged here — THE PANE IS THE TRUTH, and a
+// reconstruction of it drifts.
+//
+// TWO THINGS THIS DELIBERATELY DOES NOT DO, both of which would damage the desk.
+//
+//   IT DOES NOT ATTACH. `capture-pane` reads; attaching would make this a tmux CLIENT,
+//   and a client sizes the window to fit itself. A phone attaching to a 269-column pane
+//   reflows the agent's window to ~40 columns — the desktop finds its session cropped,
+//   and CLAUDE.md records the neighbouring lesson about what narrow panes then do to the
+//   detectors that read them ("a detector measured at full width can go blind in a
+//   narrow one"). The phone is a spectator of the grid the desk laid out.
+//
+//   IT DOES NOT RESIZE. Same reason, said separately because the temptation is
+//   different: "just capture it at phone width" sounds like a rendering choice and is
+//   actually a write to the fleet.
+//
+// Scoped by the fleet's SOCKET, like every other reader here: every project has a
+// session called `master`, so `-t master` without `-L <sock>` reads whichever project's
+// master tmux answers first. And targeted as a BARE `-t "$name"`, which is what the rest
+// of the repo does, for the reason bin/fleet-tab documents at length: a session name can
+// be tmux target syntax, and a name resolving to a different session's pane is a reader
+// that lies without erroring.
+const PANE_SCROLLBACK_MAX = 2000;
+function paneCapture(t, session, scrollback) {
+  return new Promise((resolve) => {
+    const args = ['-L', t.sock, 'capture-pane', '-p', '-e'];
+    // -e is the entire point: it keeps the SGR escapes, and colour and attributes are how
+    // the TUI tells a tool header from prose. Without it the phone gets grey text that
+    // technically contains the commands and reads like a log file.
+    if (scrollback > 0) args.push('-S', String(-scrollback));
+    // NOT -J. Joining wrapped lines would un-wrap the grid tmux already laid out, which
+    // is the one thing the client cannot recover from — it is rendering a character grid,
+    // and a joined line is a row that is no longer a row.
+    args.push('-t', session);
+    execFile('tmux', args, { encoding: 'utf8', timeout: 15000, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+          return resolve({ error: 'that pane produced more output than this server will buffer — ask for less scrollback' });
+        // tmux says "can't find pane: x" on stderr and exits non-zero for a session that
+        // is gone. Passed through as its own words: the phone's next grid poll will drop
+        // the card anyway, and inventing a friendlier sentence here would hide which of
+        // the socket or the name was wrong.
+        if (err && !stdout) return resolve({ error: `tmux capture-pane failed: ${(stderr || err.message).trim().split('\n')[0]}` });
+        resolve({ pane: String(stdout) });
+      });
+  });
+}
+
 // The checkouts the `n` (new session) picker offers. The phone has no filesystem of its
 // own, so the daemon has to answer it — and the answer is the TUI's own
 // discoverCheckouts(), reached through the flag it already has. Its output is three
@@ -1131,6 +1185,32 @@ async function api(req, res, url, ip) {
       return send(res, 400, { ok: false, text: 'limit must be an integer 1-500' });
     const r = await sessionMessages(t, session, limit, url.searchParams.get('before'));
     return r.error ? send(res, 502, { ok: false, text: r.error }) : send(res, 200, r.json);
+  }
+
+  if (p === '/api/pane' && req.method === 'GET') {
+    const rp = resolveProject(url.searchParams.get('project') || '');
+    if (rp.error) return send(res, 400, { ok: false, text: rp.error });
+    const t = rp.t;
+    const session = url.searchParams.get('session') || '';
+    if (!session) return send(res, 400, { ok: false, text: 'session is required' });
+    const raw = url.searchParams.get('scrollback');
+    const scrollback = raw === null ? 0 : Number(raw);
+    if (!Number.isInteger(scrollback) || scrollback < 0 || scrollback > PANE_SCROLLBACK_MAX)
+      return send(res, 400, { ok: false, text: `scrollback must be an integer 0-${PANE_SCROLLBACK_MAX}` });
+    const r = await paneCapture(t, session, scrollback);
+    if (r.error) return send(res, 502, { ok: false, text: r.error });
+    // No `cols`/`rows` from tmux, on purpose, though `display-message -p '#{pane_width}'`
+    // would answer directly. That is a SECOND target resolution of the same name, and
+    // bin/fleet-tab's scar is that a name can resolve to a different session — so the
+    // geometry would be free to disagree with the payload beside it, and the client would
+    // size a view for a pane it is not showing. The client measures what it was sent
+    // (web/ansi.js's render() counts rows and the widest row in cells), which cannot.
+    // The pane is served UNREDACTED, which is §11.3 and is deliberate: under this
+    // transport there is no adversary a secret filter defends against — anyone who
+    // reaches this port already has full parity, which is RCE — and masking `sk_live_…`
+    // corrupts any session that is legitimately about key handling. Bounded for transport
+    // cost only, by `scrollback`.
+    return send(res, 200, { ok: true, project: t.name, session, scrollback, at: now(), pane: r.pane });
   }
 
   if (p === '/api/checkouts' && req.method === 'GET') {

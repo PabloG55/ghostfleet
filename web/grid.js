@@ -257,14 +257,75 @@ export function parseWhen(str, nowS = Math.floor(Date.now() / 1000)) {
 // single non-ASCII code points, which app.js renders in a 1ch box. Grouping consecutive
 // non-ASCII characters into one wider box would be fewer elements and wrong: it only
 // works while every glyph in the run measures 1, which is the assumption that broke.
+//
+// ...EXCEPT that "one cell" is not universal either, and the pane view is what made that
+// matter. A card is built from a glyph set the TUI curated — ⏳ was rejected from it for
+// measuring 2 — but a PANE is arbitrary terminal output, and tmux lays ✅ or 日 into TWO
+// grid columns. Pinning those to 1ch does not merely draw them small: every character
+// after them on that line slides one column left, which in a box-drawn permission dialog
+// is the border coming away from the box. So a token carries `wide`, and the renderer
+// gives it a 2ch box. Cards are unaffected in practice (no card glyph is wide) and that
+// is the point — one answer to "how many cells is this character", used by both.
+const WIDE = [
+  [0x1100, 0x115f],                                   // Hangul Jamo
+  [0x231a, 0x231b], [0x23e9, 0x23ec], [0x23f0, 0x23f0], [0x23f3, 0x23f3],
+  [0x25fd, 0x25fe], [0x2614, 0x2615], [0x2648, 0x2653], [0x267f, 0x267f],
+  [0x2693, 0x2693], [0x26a1, 0x26a1], [0x26aa, 0x26ab], [0x26bd, 0x26be],
+  [0x26c4, 0x26c5], [0x26ce, 0x26ce], [0x26d4, 0x26d4], [0x26ea, 0x26ea],
+  [0x26f2, 0x26f3], [0x26f5, 0x26f5], [0x26fa, 0x26fa], [0x26fd, 0x26fd],
+  [0x2705, 0x2705], [0x270a, 0x270b], [0x2728, 0x2728], [0x274c, 0x274c],
+  [0x274e, 0x274e], [0x2753, 0x2755], [0x2757, 0x2757], [0x2795, 0x2797],
+  [0x27b0, 0x27b0], [0x27bf, 0x27bf], [0x2b1b, 0x2b1c], [0x2b50, 0x2b50],
+  [0x2b55, 0x2b55],
+  [0x2e80, 0x303e], [0x3041, 0x33ff],                 // CJK radicals, kana, CJK compat
+  [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf], [0xa960, 0xa97f],
+  [0xac00, 0xd7a3],                                   // Hangul syllables
+  [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe6f],
+  [0xff00, 0xff60], [0xffe0, 0xffe6],                 // fullwidth forms
+  [0x1f300, 0x1f64f], [0x1f680, 0x1f6ff], [0x1f7e0, 0x1f7eb],
+  [0x1f900, 0x1f9ff], [0x1fa70, 0x1faff],             // the emoji planes
+  [0x20000, 0x3fffd],
+];
+export function isWide(cp) {
+  for (const [lo, hi] of WIDE) if (cp >= lo && cp <= hi) return true;
+  return false;
+}
+// Combining marks and variation selectors take no cell of their own — they belong to the
+// character before them, and are emitted in ITS box, because a zero-width box of their
+// own would leave them combining with nothing.
+export function isZeroWidth(cp) {
+  return (cp >= 0x0300 && cp <= 0x036f) || (cp >= 0x200b && cp <= 0x200f)
+      || (cp >= 0xfe00 && cp <= 0xfe0f) || cp === 0x20e3 || (cp >= 0x1ab0 && cp <= 0x1aff);
+}
 export function cells(line) {
   const out = [];
   let run = '';
   for (const ch of String(line)) {
-    if (ch.codePointAt(0) < 0x80) { run += ch; continue; }
+    const cp = ch.codePointAt(0);
+    if (cp < 0x80) { run += ch; continue; }
+    // A mark joins whatever it modifies rather than opening a box of its own: the box
+    // already emitted if the base character was non-ASCII, otherwise the ASCII run it
+    // sits inside. Either way it claims no cell — a 1ch box for a mark would widen the
+    // line by a column and leave the mark combining with nothing.
+    const prev = out[out.length - 1];
+    if (isZeroWidth(cp)) {
+      if (!run && prev && prev.cell) prev.text += ch; else run += ch;
+      continue;
+    }
     if (run) { out.push({ text: run }); run = ''; }
-    out.push({ text: ch, cell: true });
+    out.push(isWide(cp) ? { text: ch, cell: true, wide: true } : { text: ch, cell: true });
   }
   if (run) out.push({ text: run });
   return out;
+}
+// How many terminal columns a string occupies — the pane's own arithmetic, from the same
+// table, so "this pane is 269 columns" and the boxes drawn for it cannot disagree.
+export function cellWidth(s) {
+  let w = 0;
+  for (const ch of String(s)) {
+    const cp = ch.codePointAt(0);
+    if (isZeroWidth(cp)) continue;
+    w += isWide(cp) ? 2 : 1;
+  }
+  return w;
 }

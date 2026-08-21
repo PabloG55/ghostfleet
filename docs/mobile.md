@@ -3,7 +3,8 @@
 **Status:** design settled; `--json` (§4) shipped in #41, `fleet-serve` and the client in
 flight. Three decisions are settled: the transport is Tailscale with Tailnet Lock (§5),
 the phone gets the **full verb set** rather than a read-only phase (§7), and content is
-served **unredacted** (§11.3).
+served **unredacted** (§11.3). One thing in here was **wrong until it met a user**: §7's
+session screen was a message list, and it could not show a command (§7a).
 Every number below was measured on this machine before the design was written, and **two
 of the measurements changed the design** — the sleep setting (§8) and the dependency
 posture (§6). See those sections before disagreeing with the conclusions.
@@ -73,7 +74,9 @@ which is exactly the property you want before putting it behind a network.
         │  over Tailscale — never the public internet (§5)
         ▼
    fleet-serve            ── reads ──►  fleet-grid.mjs --json
-   (node, on the Mac)     ── acts ──►   MCP dispatch (same handlers, same guards)
+   (node, on the Mac)                    fleet-read --json
+                                         tmux capture-pane -p -e   (§7a)
+                          ── acts ──►   MCP dispatch (same handlers, same guards)
                           ── holds ──►  caffeinate (§8)
 ```
 
@@ -279,6 +282,10 @@ the same `y = yes` confirmation.
 **The stack has no phone equivalent** and does not need one. It exists to put four
 sessions side by side; a phone has no side, and at `nc = 1` that is just the card list.
 
+The one screen that is **not** a mirror of a TUI screen is the session screen, because the
+TUI has no such screen: `⏎` on a card *attaches to the pane*. §7a is what that means on a
+phone, and getting it wrong was the first thing a user noticed.
+
 ## 7. Full parity, and where the guardrails actually live
 
 **The phone gets the whole verb set, including `spawn` and `stop --reclaim`.** A
@@ -323,9 +330,143 @@ Physical constraints, not policy:
   deliberately out of scope; the fleet verbs cover what those tabs are usually reached
   for.
 
+  **§7a does not reopen this, and the difference is the whole reason it is safe.** The pane
+  view is a periodic `capture-pane` — a photograph of a grid tmux already laid out, one
+  direction, no pty, no session of its own, nothing the phone can type into except the
+  verbs that were already server-side and audited. A terminal tab is an interactive shell:
+  a pty, a live byte stream both ways, and arbitrary command execution outside the verb
+  vocabulary §7 enumerates. Reading a pane and owning a shell are not the same surface, and
+  "we already show a terminal" is not an argument for the second.
+
 Everything else maps: `n` new · `w` worktree · `s` schedule · `p`/`P` pause and resume ·
 `x` kill or remove · `,` settings · `⇧hjkl` reorder · `Ctrl-f` jump · `Ctrl-p`/`Q`
 projects · `q` back.
+
+## 7a. The session screen is the pane
+
+**This section exists because the first version was wrong, and a user said so in one
+sentence:** *"it doesn't look like a normal chat and i can't see the commands that is
+running — is it possible to make it look exactly as the computer version?"*
+
+Both halves were true and they had one cause. The session screen rendered `/api/session`,
+which goes through `fleet-read --json` and emits `{ts, role, text}` — assistant and user
+**prose**. A tool call, the command inside it and its result are not in that payload at
+all. So the screen was not under-rendering the commands; it never had them, and no amount
+of client work could have produced them.
+
+And "exactly as the computer version" has a precise answer, because at the desk `⏎` on a
+card **attaches to the tmux pane**: you get the Claude Code TUI — `⏺` bullets,
+`⎿ Bash(…)` tool headers, the spinner, the elapsed counter, the permission dialog. That is
+the thing being asked for, and this repo already has the rule for how to get it. CLAUDE.md,
+about every status detector here: **the pane is the truth.** Reconstructions drift; that is
+why nothing in this codebase infers what a session is doing from anything but its pane.
+
+So: **`GET /api/pane` returns `tmux -L <sock> capture-pane -p -e -t <session>`**, and the
+client renders the escapes. A real permission dialog, on a real 390pt viewport — the `⏺`
+bullet, the `Write(hello.txt)` tool header, the diff, the numbered choices, and `answer
+keys` sitting above it:
+
+<img src="img/pane-permission-dialog.png" width="360" alt="the session screen showing a
+Claude Code permission dialog captured from the pane">
+
+```
+GET /api/pane?project=<name>&session=<name>[&scrollback=0..2000]
+ -> { ok, project, session, scrollback, at, pane: "<text with SGR escapes>" }
+```
+
+`-e` is the whole point — it keeps the SGR escapes, and colour and attributes are how the
+TUI distinguishes a tool header from prose. Without it you get grey text that technically
+contains the commands and reads like a log file. Scoped by the fleet's **socket** and
+targeted as a bare `-t <name>`, exactly as every other reader in this repo is, and for the
+reasons both are already written down: every project has a session called `master`, and a
+session name can be tmux target syntax (`bin/fleet-tab`).
+
+No geometry from tmux in that payload, though `display-message -p '#{pane_width}'` would
+answer directly. That would be a **second** resolution of the same target, free to
+disagree with the capture beside it — so the client counts rows and columns from the bytes
+it was actually sent, which cannot.
+
+### It does not attach, and it does not resize
+
+`capture-pane` reads. **Attaching** is what would make the daemon a tmux *client*, and a
+client sizes the window to fit itself: a phone attaching to a 269-column pane reflows the
+agent's window to ~40 columns, and the desktop finds its session cropped. The neighbouring
+lesson is already in CLAUDE.md too — *a detector measured at full width can go blind in a
+narrow one* — so a phone-shaped pane would not merely look odd at the desk, it would take
+the fleet's own status reading with it.
+
+"Just capture it at phone width" is the same mistake wearing a rendering costume. It is a
+write to the fleet. The phone is a spectator of the grid the desk laid out.
+
+### Width is the honest problem
+
+The pane was captured at whatever the desktop layout gave it — **269 columns** on this
+machine's fleets, measured — and a phone is about 40. Nothing makes that readable at once,
+so the design does not pretend otherwise:
+
+- **Never wrapped, never reflowed.** A wrapped TUI is unreadable and is no longer the
+  computer version. It scrolls **sideways inside its own box**, and the page body never
+  does — a body that scrolls horizontally slides the whole app off the screen, header and
+  verbs with it.
+- **Both readings are offered.** `fit` scales the whole pane into the viewport to see its
+  *shape* — is there a dialog, is a diff on screen, where is the spinner — and `±` takes it
+  back to a size you can read and pan across. Font-size rather than a transform, so the
+  glyphs re-lay out crisply at every step. All 269 columns at once, which is unreadable and
+  is not meant to be read:
+
+  <img src="img/pane-fit.png" width="360" alt="the same screen with fit pressed: the whole
+  269-column pane scaled into the viewport">
+- **The box takes the screen that is left below it,** measured. A `vh` constant is wrong on
+  every phone, because the verb bar above it wraps to however many rows the buttons need —
+  and what falls below the fold is the *bottom* of the pane, which is where the prompt, the
+  spinner and a dialog's last line live.
+
+### The two rules the cards already paid for
+
+Both are in `web/app.css` for the cards and both matter **more** here, because a pane is
+hundreds of columns of exactly the characters that break:
+
+1. **Bold is never `font-weight`.** The bold face has no box-drawing glyphs, so `─ ╭ ╮ ╰ ╯`
+   fall back to a wider font while `│` and the letters do not — 366px against 517px on one
+   32-character line, measured in Chrome at 19px. SGR 1 is rendered as the **bright half of
+   the palette**, which is the other thing bold has always meant on a terminal and the half
+   that cannot move a glyph.
+2. **One cell per cell.** `⧗` measures 1.274 advances and `⏸` 1.046 in every monospace face
+   on this machine, so each non-ASCII code point goes in a box of exactly `1ch` — through
+   the same `cells()` the cards use, extended with a `2ch` case for the characters tmux
+   lays into two columns. In a card a stray quarter-column cost a right border; in a
+   box-drawn permission dialog it is the border walking out of the box.
+
+### Polling
+
+**2s while the pane is on screen, 4s with `history` on, and nothing at all while the page
+is hidden.** The timer is *cleared* on `visibilitychange` rather than left to skip its
+turns: `if (document.hidden) return` inside the callback still wakes the radio and the JS
+thread on schedule to decide it should not have, and a phone doing that every two seconds
+in a pocket has already paid the cost this is about.
+
+With the grid poll's 5s that is ~42 reads/min against `serve.json`'s 240/min, about a sixth
+of the ceiling. A 269x65 pane captures to 5.9 KB with its escapes, measured, so 2s is
+roughly 3 KB/s over the tunnel; `history` quadruples the payload, which is why it halves
+the rate rather than keeping it.
+
+### The message list stays
+
+It is reachable on the same screen with one tap, and it is not a consolation prize: it
+pages back over the **whole** transcript (§11.3's 20-with-load-more), which a pane cannot —
+a pane is what fits on a screen plus whatever scrollback tmux kept. Two views of two
+different things, not two attempts at one. What a tap on a *card* lands on is the pane,
+because the question a card is tapped to answer is "what is this worker doing right now".
+
+### What this unlocks, which is the actual point
+
+`answer keys` has been on this screen since the phone had one, and it was close to useless:
+§7 put it there for the motivating case in §1 — a worker blocked on "Allow `pnpm test`?"
+since 9pm — and you could not see what you were answering. With the pane visible the dialog
+is legible and the keystroke is obvious. That chain is what makes the app worth opening
+from a café, so it is tested as a chain: the pane carries a real permission dialog, the
+verb clears it, and the pane afterwards is different. Any one of those alone proves
+nothing, because a pane that never changes and a verb that does nothing look identical.
 
 ## 8. Availability: the measurement that nearly sinks it
 
@@ -376,7 +517,14 @@ building a chat client.
 - **No redesign of the grid.** The phone renders the existing cards, glyphs and status
   vocabulary. Two divergent layouts would have to be kept in step forever.
 - **No stack view** (§6).
-- **No chat client.** A session's conversation is Remote Control's job (§9).
+- **No chat client.** A session's conversation is Remote Control's job (§9). The pane view
+  (§7a) is not one either, and the distinction is load-bearing: it is a *capture of a
+  terminal*, not a rendering of a conversation. Nothing in it is composed here, which is
+  exactly why it cannot drift from what the desk sees.
+- **No terminal emulation.** `capture-pane` hands over a grid tmux has already laid out, so
+  the client renders SGR attributes and drops everything else — cursor movement, scroll
+  regions, wrapping. Re-deriving any of it would be a second answer to "what does this pane
+  look like", competing with the one that has the scars.
 - **No second status implementation.** Everything comes from `fleet-grid.mjs` (§3).
 
 ## 11. Decisions
@@ -407,6 +555,16 @@ building a chat client.
    matching `fleet-read` — with an explicit "load more". That is pagination, which every
    app has, and it should not be described as a security control.
 
+   **The pane (§7a) is served the same way, and the reasoning transfers exactly.** It is a
+   READ behind the same session token — no new auth path — and it is unredacted, because
+   the adversary a filter would defend against does not exist under this transport and
+   because masking `sk_live_…` in a *pane* would corrupt the display of the very session
+   that is working on key handling. Its `scrollback` parameter is a transport bound of the
+   same kind as the 20: `0` is exactly what an attach shows, and more rows cost more bytes.
+   If anything, the pane makes the §11.4 premise more visible rather than less — it is
+   literally somebody's screen — which is a reason to keep that premise stated, not a
+   reason to reopen this.
+
 4. **Multi-user?** Assumed single-user throughout, and §3's reasoning **depends on it**:
    "my phone, my sessions" is what makes unredacted content correct. A second person on
    the tailnet, an org-managed tailnet, or a shared node all reopen §3 and change the auth
@@ -431,3 +589,10 @@ building a chat client.
 - **The audit log is only useful if something reads it.** An unread log is a compliance
   gesture. It should surface in the grid — a `fleet-inbox` row when a mobile action fires
   is the natural place, and costs almost nothing.
+- **The pane's width is a standing invitation to break the desk.** 269 columns on a 40-column
+  phone will keep looking like a bug, and the two obvious fixes — attach, or capture at
+  phone width — are both writes to the fleet that crop the desktop's session and can blind
+  the status detectors that read it (§7a). The mitigation is that the endpoint has no verb
+  that could do either and the suite asserts all three of *no attach*, *no resize*, and *no
+  client ever attached*. If someone reaches for it anyway, they will have to delete a test
+  that says why.

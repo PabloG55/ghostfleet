@@ -88,14 +88,20 @@ dismiss.
 | `grid.js` | the cards, as strings. Mirrors `cardLines`/`newCardLines`/`freeCardLines`/`boxCard`/the counts header. No DOM, no fetch |
 | `app.js` | the three screens, the four gestures, the verbs and the confirmations |
 | `api.js` | **the only file that talks to the network**, the fixture backend, and the probe that decides between them |
+| `ansi.js` | the pane, as HTML: SGR escapes → coloured spans, cells → 1ch boxes. Pure, no DOM, no fetch |
 | `passkey.js` | the WebAuthn ceremonies (§5, §7) |
 | `sw.js` | offline: cache-first for the app, network-first with fallback for `/api/*` |
-| `fixtures/` | §4 payloads, and the projects/checkouts/settings/session reads |
+| `fixtures/` | §4 payloads, and the projects/checkouts/settings/session/pane reads |
 | `icons/make-icons.mjs` | rasterises the grid's own `SHIP` sprite into the home-screen icons |
 
 ## Screens and gestures
 
-Projects → grid → session, mirroring the desktop. §7's key-to-touch mapping:
+Projects → grid → session, mirroring the desktop. **A tap on a card lands on the session's
+real tmux pane** — `capture-pane -p -e`, rendered by `ansi.js`, which is what `⏎` on a card
+gets you at the desk (§7a). The paginated message list is one tap away on the same screen;
+it pages back over the *whole* transcript, which a pane cannot, so both are kept.
+
+§7's key-to-touch mapping:
 
 | terminal | phone |
 |---|---|
@@ -149,6 +155,8 @@ GET  /api/projects                          -> { home, projects: [ … ] }
 GET  /api/grid?project=<name>               -> docs/mobile.md §4, verbatim
 GET  /api/session?project=&session=&limit=20[&before=<ts>]
                                             -> { session, total, messages: [{ts,role,text}], next_before, note? }
+GET  /api/pane?project=&session=[&scrollback=0..2000]
+                                            -> { ok, project, session, scrollback, at, pane: "<SGR text>" }
 GET  /api/checkouts?project=<name>          -> { roots, checkouts }
 GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
 POST /api/verb   { tool, args }             -> { ok, text }         Bearer token required
@@ -212,12 +220,45 @@ Two notes for whoever wires the server up:
   it is what lets `node --check` and the test helpers read these `.js` files as ES
   modules. Don't remove it.
 
+## The pane
+
+`/api/pane` is `tmux -L <sock> capture-pane -p -e -t <session>`, scoped by the fleet's
+socket and targeted as a bare `-t <name>` like every other reader here. `-e` keeps the SGR
+escapes, which is the whole point: colour and attributes are how the TUI tells a tool
+header from prose.
+
+**It never attaches and never resizes.** Attaching would make the daemon a tmux *client*,
+and a client sizes the window to fit itself — a phone attaching to a 269-column pane
+reflows the agent's window to ~40 columns, and the desktop finds its session cropped.
+`capture-pane` only reads. Asserted three ways in the suite, including that no client is
+ever attached after the whole probe has run.
+
+**Width is the honest problem and it is not solved, it is offered twice.** The pane was
+captured at whatever the desktop layout gave it — 269 columns on this machine's fleets,
+measured — and a phone is ~40. It is never wrapped or reflowed: a wrapped TUI is
+unreadable and stops being the thing you came to look at. So it scrolls sideways inside its
+own box (never the page body), and the zoom row gives both readings — `fit` scales the whole
+pane in to see its *shape*, `±` takes it back to a size you can read and pan across.
+
+`ansi.js` keeps the two rules the cards learned the hard way. **Bold is never
+`font-weight`** — the bold face has no box-drawing glyphs, so a weight change moves
+`─ ╭ ╮ ╰ ╯` and not `│` (366px → 517px on one line, measured), so SGR 1 renders as the
+bright half of the palette instead. **One cell per cell** — through the same `cells()` the
+cards use, boxed at 1ch, or 2ch where tmux gave the character two columns.
+
+**Polling: 2s while the pane is on screen, 4s with `history` on, and nothing at all while
+the page is hidden** — the timer is cleared on `visibilitychange`, not left to skip its
+turns, because a phone that wakes its radio every two seconds in a pocket has already paid
+the cost. With `refresh()`'s 5s grid poll that is ~42 reads/min against `serve.json`'s
+240/min ceiling.
+
 ## Pagination
 
 20 messages, with an explicit "load more" (§11.3). That bound is about **not pulling
 46 MB down a tunnel on cellular** — it is a performance decision, not a security
 control, and content is served **unredacted**. Anything that describes it as a redaction
-has misread the design.
+has misread the design. `/api/pane`'s `scrollback` is the same kind of bound for the same
+reason: 0 is exactly what an attach shows, and more rows cost more bytes.
 
 ## Offline
 
@@ -234,6 +275,8 @@ the lie.
 ./test/run.sh                          # the suite, including the three helpers below
 node test/helpers/grid-parity.mjs      # phone card == TUI card, line for line
 node test/helpers/pwa-check.mjs        # self-containment, precache, icons, §4 fixtures, §7 prompts
+node test/helpers/pane-check.mjs      # the pane renderer, against real `capture-pane -e` bytes
+node test/helpers/pane-render.mjs     # < an /api/pane body: what a phone would SHOW, as text
 node test/helpers/pwa-origin.mjs <base>            # which backend it picks, against a LIVE fleet-serve
 node test/helpers/pwa-render.mjs <base>            # app.js actually RUNS, and paints what it decided
 node test/helpers/pwa-enrol.mjs <base> <code> <id> # the enrolment ceremony, end to end

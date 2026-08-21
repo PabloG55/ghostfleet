@@ -3936,6 +3936,159 @@ else
   skip "fleet-serve reads" "server did not come up: $SV_WHY"
 fi
 
+# ── /api/pane: the session's real pane, and the dialog it makes answerable ────
+# THE WHOLE POINT OF THE ENDPOINT, and it is a chain rather than a call. The phone used to
+# render a session as a message list, and the first person to use it said "i can't see the
+# commands that is running" — which was not a rendering shortfall: /api/session goes
+# through `fleet-read --json`, whose payload is {ts, role, text}, so a tool call and the
+# command inside it are absent from the DATA. `answer keys` had been on that screen since
+# #40 and was close to useless, because you could not see what you were answering.
+#
+# So the three assertions that matter are one story: the pane carries a real permission
+# dialog, the verb clears it, and the pane afterwards is different. Any one alone proves
+# nothing — a pane that never changes and a verb that does nothing look identical from
+# here, which is the shape CLAUDE.md keeps warning about.
+#
+# NOTHING IS STUBBED ON THIS PATH. The server runs against the REAL $ROOT/bin, so
+# fleet_answer reaches the real bin/fleet-answer and the real tmux; and the bytes in the
+# pane are the ones Claude Code actually emitted for a "Do you want to create hello.txt?"
+# prompt, captured live into test/fixtures/claude-permission-dialog-sgr.txt. They are
+# replayed into a pane that then blocks on a keystroke, which keeps Claude's own escapes
+# while leaving the key handling deterministic enough for a suite.
+group "fleet-serve: /api/pane is the pane, and answer keys clears what it shows"
+if [ -z "$SV" ]; then
+  skip "/api/pane" "node missing"
+else
+PN="$TMUX_TMPDIR/pane"; mkdir -p "$PN/home/.config/ghostfleet" "$PN/repo" "$PN/other"
+printf 'demo\t%s\twork\nother\t%s\twork\n' "$PN/repo" "$PN/other" > "$PN/home/.config/ghostfleet/projects"
+# The dialog, on a pane sized like the one it was captured from, so the geometry the
+# endpoint reports can be checked against a number we chose rather than one we read back.
+cat > "$PN/dialog.sh" <<SH
+#!/bin/sh
+clear
+cat "$ROOT/test/fixtures/claude-permission-dialog-sgr.txt"
+# Blocks until fleet-answer sends a key, then redraws — so "the pane changed" is a real
+# consequence of the verb and not of time passing.
+read -r answer
+clear
+printf 'ANSWERED [%s] - dialog cleared\n' "\$answer"
+sleep 600
+SH
+chmod +x "$PN/dialog.sh"
+tmux -L cf-demo new-session -d -s dlg -x 100 -y 30 "$PN/dialog.sh" 2>/dev/null
+# A SESSION OF THE SAME NAME ON ANOTHER FLEET. CLAUDE.md's most-repeated scar: "a session's
+# status must be scoped by its fleet socket — every project has a session called `master`,
+# so matching on name alone reports another project's state." A pane read is the worst place
+# for that, because the wrong answer is a perfectly plausible screenful of somebody else's
+# work. So `dlg` exists on cf-other too, saying something unmistakable, and the assertion
+# below is that it never appears.
+tmux -L cf-other new-session -d -s dlg -x 100 -y 30 "sh -c 'clear; echo WRONG-FLEET-PANE; sleep 600'" 2>/dev/null
+i=0; while [ "$i" -lt 40 ] && ! tmux -L cf-other capture-pane -p -t dlg 2>/dev/null | grep -q 'WRONG-FLEET-PANE'; do i=$((i+1)); sleep 0.1; done
+is "the decoy fleet has a 'dlg' too"        "1"   "$(tmux -L cf-other capture-pane -p -t dlg 2>/dev/null | grep -c 'WRONG-FLEET-PANE' || true)"
+# Wait for the dialog to be ON the pane before asserting anything about it: `cat` into a
+# fresh pane is fast but not instant, and a race here would read an empty pane and blame
+# the endpoint.
+i=0; while [ "$i" -lt 60 ] && ! tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null | grep -q 'Do you want to create'; do i=$((i+1)); sleep 0.1; done
+is "the fixture reached a real pane"        "1"   "$(tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null | grep -c 'Do you want to create' || true)"
+
+PNPORT="$(free_port)"; PNPORT="${PNPORT:-18799}"
+PNBASE="http://localhost:$PNPORT"
+pn_cli() { GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
+           HOME="$PN/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" "$@"; }
+pn_cli init --bind 127.0.0.1 --port "$PNPORT" >/dev/null 2>&1
+node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$PN/serve.json"
+GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
+  HOME="$PN/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$ROOT/bin/fleet-serve.mjs" > "$PN/log" 2>&1 &
+PN_PID=$!
+i=0; up=no; while [ "$i" -lt 60 ]; do curl -s -m1 "$PNBASE/healthz" >/dev/null 2>&1 && { up=yes; break; }; i=$((i+1)); sleep 0.1; done
+if [ "$up" != yes ]; then
+  skip "/api/pane" "server did not come up"
+else
+  pncode="$(pn_cli enroll phone | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')"
+  node "$ROOT/test/helpers/serve-probe.mjs" "$PNBASE" pane "$pncode" > "$PN/probe" 2>"$PN/probe.err"
+  pnf() { grep -m1 "^$1$US" "$PN/probe" | cut -d "$US" -f2; }
+  pnb() { grep -m1 "^$1$US" "$PN/probe" | cut -d "$US" -f3; }
+  is "the probe ran without complaining"     ""    "$(head -2 "$PN/probe.err" | tr '\n' ' ' | sed 's/ *$//')"
+
+  # ── 1. the pane, with its escapes ──────────────────────────────────────────
+  is "a pane is served"                      "200" "$(pnf pane.dialog)"
+  is "...and it carries the dialog"          "1"   "$(pnb pane.dialog | grep -c 'Do you want to create' || true)"
+  # THROUGH THE RENDERER, not by grepping the wire, and a real capture is why. Claude Code
+  # writes filenames as OSC 8 hyperlinks and puts a colour change between `1. ` and `Yes`,
+  # so the bytes contain neither `Write(hello.txt)` nor `1. Yes` while the pane on screen
+  # plainly reads both. Both of those started life here as greps on the body and went red
+  # against a live pane while web/ansi.js was right — so what is asserted is what a phone
+  # would SHOW (test/helpers/pane-render.mjs), which is also the only claim worth making.
+  pnshow="$(pnb pane.dialog | node "$ROOT/test/helpers/pane-render.mjs" 2>"$PN/render.err")"
+  pntext() { printf '%s\n' "$pnshow" | tail -n +2; }
+  is "the body renders without complaint"    ""    "$(head -2 "$PN/render.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and the numbered choices are legible" "1" "$(pntext | grep -cF '1. Yes' || true)"
+  is "...all three of them"                  "3"   "$(pntext | grep -cE '^ *(❯ )?[123]\. ' || true)"
+  is "...and the question above them"        "1"   "$(pntext | grep -cF 'Do you want to create hello.txt?' || true)"
+  # The command, which is the sentence that started this feature. Its filename is an OSC 8
+  # link, so this line is also the proof the label survives and the URL does not.
+  is "the tool header is legible"            "1"   "$(pntext | grep -cF 'Write(hello.txt)' || true)"
+  is "...and the URL behind it is not shown" "0"   "$(pntext | grep -c 'file:///' || true)"
+  # -e IS THE POINT: colour and attributes are how the TUI tells a tool header from prose.
+  # JSON spells an ESC as , so these two are what a plain `capture-pane` (no -e)
+  # would fail while still returning a perfectly readable pane — which is exactly the sort
+  # of half-working that looks fine until someone squints at a phone.
+  is "...with the SGR escapes intact"        "1"   "$(pnb pane.dialog | grep -c 'u001b\[38;5;' || true)"
+  is "...including the bold the dialog uses" "1"   "$(pnb pane.dialog | grep -c 'u001b\[1m' || true)"
+  # ...and the geometry it was captured at, which is the pane the DESK laid out. A phone
+  # that had attached would have reflowed this to its own width, so this pair is the
+  # no-attach promise measured rather than asserted: the client's own count of the served
+  # bytes, against what tmux says the pane is.
+  is "the served pane renders 100 columns"   "100" "$(printf '%s\n' "$pnshow" | head -1 | cut -d "$US" -f1)"
+  is "...and 30 rows"                        "30"  "$(printf '%s\n' "$pnshow" | head -1 | cut -d "$US" -f2)"
+  is "...which is what tmux says it is"      "100x30" "$(tmux -L cf-demo display-message -p -t dlg '#{pane_width}x#{pane_height}' 2>/dev/null)"
+  # SCOPED BY THE SOCKET, both directions. `demo` must not return the identically-named
+  # session on `other`'s fleet, and `other` must return its own — a reader that answered
+  # `demo` for both would pass the first half on its own.
+  is "...and not the other fleet's 'dlg'"    "0"   "$(pnb pane.dialog | grep -c 'WRONG-FLEET-PANE' || true)"
+  is "the other fleet's 'dlg' is its own"    "1"   "$(pnb pane.otherFleet | grep -c 'WRONG-FLEET-PANE' || true)"
+  is "...and not this fleet's dialog"        "0"   "$(pnb pane.otherFleet | grep -c 'Do you want to create' || true)"
+
+  # ── 2. answer keys ─────────────────────────────────────────────────────────
+  is "answer keys is accepted"               "200" "$(pnf pane.answer)"
+  # ── 3. ...and the pane it showed has changed ───────────────────────────────
+  is "the dialog is gone from the pane"      "0"   "$(pnb pane.after | grep -c 'Do you want to create' || true)"
+  is "...and the answer landed as sent"      "1"   "$(pnb pane.after | grep -c 'ANSWERED \[1\]' || true)"
+
+  # ── the endpoint's edges, each refused by name ─────────────────────────────
+  is "no session is refused"                 "400" "$(pnf pane.noSession)"
+  is "...saying which field"                 "1"   "$(pnb pane.noSession | grep -c 'session is required' || true)"
+  is "no project is refused"                 "400" "$(pnf pane.noProject)"
+  is "an unknown project is refused"         "400" "$(pnf pane.badProject)"
+  # A session that is gone gets tmux's own words, not a friendlier invention: which of the
+  # socket and the name was wrong is the useful half.
+  is "a vanished session is a 502"           "502" "$(pnf pane.gone)"
+  is "...quoting tmux"                       "1"   "$(pnb pane.gone | grep -c 'find pane' || true)"
+  is "scrollback past the cap is refused"    "400" "$(pnf pane.scrollbackBad)"
+  is "...naming the range"                   "1"   "$(pnb pane.scrollbackBad | grep -c '0-2000' || true)"
+  is "a negative scrollback is refused"      "400" "$(pnf pane.scrollbackNeg)"
+  is "a scrollback in range is served"       "200" "$(pnf pane.scrollbackOk)"
+  # THE SECURITY POSTURE, unchanged: this is a READ behind the same session-token gate as
+  # every other read, with no auth path of its own (§5, §11.3).
+  is "a cold pane read is refused"           "401" "$(pnf pane.noToken)"
+  is "...and it asks for a passkey"          "1"   "$(pnb pane.noToken | grep -c '"needs":"passkey"' || true)"
+
+  # IT MUST NOT ATTACH, AND MUST NOT RESIZE. Attaching makes this a tmux CLIENT and a
+  # client sizes the window to fit itself, so a phone would reflow the agent's 269-column
+  # pane to ~40 and the desk would find its session cropped. Asserted three ways: the code
+  # contains neither verb, and after every request above no client has ever attached.
+  is "no attach in fleet-serve.mjs"          "0"   "$(grep -cE 'attach-session|attach-client' "$ROOT/bin/fleet-serve.mjs" || true)"
+  is "no resize in fleet-serve.mjs"          "0"   "$(grep -cE 'resize-window|resize-pane' "$ROOT/bin/fleet-serve.mjs" || true)"
+  is "no client ever attached"               "0"   "$(tmux -L cf-demo list-clients -t dlg 2>/dev/null | wc -l | tr -d ' ')"
+  # ...and -J is absent too: joining wrapped lines would un-wrap the grid tmux laid out,
+  # which is the one thing the client cannot recover from.
+  is "capture-pane is not asked to join"     "0"   "$(grep -c "'-J'" "$ROOT/bin/fleet-serve.mjs" || true)"
+fi
+kill $PN_PID 2>/dev/null
+tmux -L cf-demo kill-server 2>/dev/null
+tmux -L cf-other kill-server 2>/dev/null
+fi
+
 group "fleet-serve: the REAL grid, two projects, one daemon process"
 # The strongest form of the scope/root test: no stub grid, no fake payload — the actual
 # bin/fleet-grid.mjs --json, driven through the daemon, against two real repos with a real
@@ -4293,6 +4446,23 @@ if [ -d "$ROOT/web" ]; then
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PW/struct"
+
+  # ── the pane renderer ──────────────────────────────────────────────────────
+  # The session screen's DEFAULT view goes through web/ansi.js, so what it gets wrong is
+  # what a phone shows instead of a terminal. Driven against real `capture-pane -p -e`
+  # bytes (test/fixtures/claude-*-sgr.txt): a live session mid-turn and a live permission
+  # dialog. Every one of these was watched going red with its rule removed — the
+  # font-weight pair, the cell boxing, the cross-row attribute state, the HTML escaping,
+  # the OSC handling and the wide-glyph box, seven deliberate breaks in all.
+  node "$ROOT/test/helpers/pane-check.mjs" > "$PW/pane" 2> "$PW/pane.err"
+  is "pane-check ran"                 "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PW/pane.err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A floor, for the reason pwa-check documents: a helper that dies half way emits a few
+  # rows and a bare "no mismatches" would call that green.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/pane")" -ge 60 ] && echo yes || echo "no: $(wc -l < "$PW/pane") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PW/pane"
   rm -rf "$PW"
 
   # cf-sync mirrors only a whitelist of directories into the runtime, and the client is
