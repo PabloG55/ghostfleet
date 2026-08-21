@@ -730,8 +730,16 @@ const NINE = new Set(['need-you', 'working', 'ready', 'parked', 'idle', 'startin
 function gridJson(t) {
   return new Promise((resolve) => {
     execFile(process.execPath, [GRID, t.sock, TMUX_CONF, '--json'],
-      { encoding: 'utf8', env: gridEnv(t), timeout: 20000, maxBuffer: 8 * 1024 * 1024 },
+      // 64 MB. TWO fields in §4 are emitted WHOLE and are user-authored: `msg`, the last
+      // assistant line, and since #41 `sched.msg`, the text a scheduled send will deliver.
+      // Neither has a bound, and the cards multiply them. Measured on the live fleets:
+      // superkey 17.5 KB across six sessions, getmycoi 13.3 KB — so this is three orders
+      // of magnitude of headroom rather than a guess, and the overflow path below reports
+      // itself instead of parsing a payload that was cut off mid-string.
+      { encoding: 'utf8', env: gridEnv(t), timeout: 20000, maxBuffer: 64 * 1024 * 1024 },
       (err, stdout, stderr) => {
+        if (err?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+          return resolve({ error: 'fleet-grid --json produced more output than this server will buffer — the payload was cut off, so it is refused rather than parsed short' });
         if (err && !stdout) return resolve({ error: `fleet-grid --json failed: ${(stderr || err.message).trim().split('\n')[0]}` });
         let j;
         try { j = JSON.parse(stdout); } catch { return resolve({ error: `fleet-grid --json did not print JSON: ${String(stdout).trim().slice(0, 200)}` }); }
@@ -761,7 +769,11 @@ function gridJson(t) {
 // checkout and newest-wins prints a DIFFERENT session's conversation. One reader.
 async function sessionMessages(t, session, limit, before) {
   const args = { project: t.name, session, json: true, limit, before };
-  const out = await callToolAsync('fleet_read', args, { timeout: 60000 });
+  // 32 MB, not the 1 MB default: a page is 20 messages and a message is a whole assistant
+  // turn, which is routinely tens of KB and occasionally far more. Overflow is not a
+  // truncated page here — the dispatch refuses it by name — but the cap has to sit above
+  // what a real conversation produces or an ordinary read starts failing.
+  const out = await callToolAsync('fleet_read', args, { timeout: 60000, maxBuffer: 32 * 1024 * 1024 });
   const text = typeof out === 'string' ? out : String(out.text);
   try { return { json: JSON.parse(text) }; }
   catch {
@@ -1321,8 +1333,15 @@ async function serve(argv) {
   const bind = flag('--bind') || c.bind;
   const port = Number(flag('--port') || c.port || 8787);
 
+  // fs.writeSync, not console.error. Every refusal here is MULTI-LINE — the bind refusal
+  // lists each address this machine has — and console.error to a pipe is asynchronous, so
+  // process.exit() on the next line discards whatever had not drained. The reason it
+  // refused is the entire value of refusing, and a truncated one is worse than none. This
+  // is also the one exit that has to work from inside a listen-error callback, where
+  // returning a code is not available.
   const die = (lines) => {
-    for (const l of [].concat(lines)) console.error(`fleet-serve: ${l}`);
+    try { fs.writeSync(2, [].concat(lines).map(l => `fleet-serve: ${l}\n`).join('')); }
+    catch { for (const l of [].concat(lines)) console.error(`fleet-serve: ${l}`); }
     process.exit(1);
   };
 
@@ -1402,7 +1421,22 @@ async function serve(argv) {
   if (!ch0.ok && ch0.n) log(`  WARNING: audit chain broken at row ${ch0.at} (${ch0.why})`);
   armAwake();
   setInterval(sweep, 30000).unref();
-  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { log(`${sig} — stopping`); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000); });
+  // SHUTTING DOWN IS THE SAME TRUNCATION BUG AS process.exit() AFTER A console.log, one
+  // layer out: a socket write is asynchronous, so tearing the process down while a
+  // response is still draining cuts it at the pipe buffer with no error on either side —
+  // and from the phone that is a malformed body, not a failed request. So: stop accepting,
+  // let the in-flight ones finish, drop the idle keep-alives that would otherwise hold
+  // close() open forever, and only cut things off after a grace long enough for a real
+  // response — saying so when it comes to that, rather than exiting silently.
+  let stopping = false;
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => {
+    if (stopping) { log(`${sig} again — exiting now`); process.exit(1); }
+    stopping = true;
+    log(`${sig} — draining, then stopping`);
+    server.close(() => { log('stopped'); process.exit(0); });
+    server.closeIdleConnections?.();
+    setTimeout(() => { log('grace expired with a request still open — cutting it off'); process.exit(0); }, 15000).unref();
+  });
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
@@ -1435,7 +1469,7 @@ async function main() {
     // config is a real state, and this is where you ask what would happen. Only a
     // MISSING argument is the usage error.
     const addr = argv[1];
-    if (addr === undefined) { console.error('fleet-serve: check-bind needs an address (use "" to ask about an unset one)'); process.exit(2); }
+    if (addr === undefined) { console.error('fleet-serve: check-bind needs an address (use "" to ask about an unset one)'); process.exitCode = 2; return; }
     const r = await assertBindable(addr, { requireLocal: !argv.includes('--any') });
     const c0 = classifyAddr(addr);
     console.log(`${addr}  ->  ${(r.addrs || [{ kind: c0.kind }]).map(a => `${a.address || addr} (${a.kind})`).join(', ')}`);
@@ -1475,13 +1509,13 @@ async function main() {
 
   if (cmd === 'init') {
     const bind = flag('--bind');
-    if (!bind) { console.error('fleet-serve: init needs --bind (there is deliberately no default)'); process.exit(2); }
+    if (!bind) { console.error('fleet-serve: init needs --bind (there is deliberately no default)'); process.exitCode = 2; return; }
     const r = await assertBindable(bind);
-    if (!r.ok) { for (const w of r.why) console.error(`fleet-serve: ${w}`); process.exit(1); }
+    if (!r.ok) { for (const w of r.why) console.error(`fleet-serve: ${w}`); process.exitCode = 1; return; }
     const port = Number(flag('--port') || 8787);
     const kind = r.addrs[0].kind;
     const rp = flag('--rp-id') || (kind === 'loopback' ? 'localhost' : null);
-    if (!rp) { console.error('fleet-serve: --rp-id is required for a non-loopback bind (the MagicDNS name the phone will open)'); process.exit(2); }
+    if (!rp) { console.error('fleet-serve: --rp-id is required for a non-loopback bind (the MagicDNS name the phone will open)'); process.exitCode = 2; return; }
     const scheme = kind === 'loopback' && !flag('--origin') ? 'http' : 'https';
     const origin = flag('--origin') || `${scheme}://${rp}${(scheme === 'https' && port === 443) || (scheme === 'http' && port === 80) ? '' : ':' + port}`;
     const c = loadConfig();
@@ -1494,16 +1528,16 @@ async function main() {
 
   if (cmd === 'enroll') {
     const id = argv[1];
-    if (!id || !/^[A-Za-z0-9._-]{1,32}$/.test(id)) { console.error('fleet-serve: enroll needs a client id (A-Za-z0-9._-)'); process.exit(2); }
+    if (!id || !/^[A-Za-z0-9._-]{1,32}$/.test(id)) { console.error('fleet-serve: enroll needs a client id (A-Za-z0-9._-)'); process.exitCode = 2; return; }
     const c = loadConfig();
     const existing = c.clients.find(x => x.id === id);
     if (existing && !argv.includes('--add')) {
       console.error(`fleet-serve: '${id}' is already enrolled (${(existing.creds || []).length} passkeys).`);
       console.error(`  add another passkey to it:  fleet-serve enroll ${id} --add`);
       console.error(`  or revoke it and start over: fleet-serve revoke ${id}`);
-      process.exit(1);
+      process.exitCode = 1; return;
     }
-    if (!existing && argv.includes('--add')) { console.error(`fleet-serve: no client '${id}' to add a passkey to`); process.exit(1); }
+    if (!existing && argv.includes('--add')) { console.error(`fleet-serve: no client '${id}' to add a passkey to`); process.exitCode = 1; return; }
     const code = enrolCode();
     c.enroll = { id, code_sha256: sha256(normCode(code)), exp: now() + (c.enroll_ttl || 900) };
     saveConfig(c);
@@ -1536,7 +1570,7 @@ async function main() {
     const id = argv[1];
     const c = loadConfig();
     const x = c.clients.find(y => y.id === id);
-    if (!x) { console.error(`fleet-serve: no client '${id}' (see: fleet-serve clients)`); process.exit(1); }
+    if (!x) { console.error(`fleet-serve: no client '${id}' (see: fleet-serve clients)`); process.exitCode = 1; return; }
     // Drop the CREDENTIALS: with one token, minted only by an assertion, the enrolled
     // passkey is the device identity, so removing it is what stops a lost phone getting
     // another token. The row stays, marked revoked — the record of which device this was
@@ -1567,11 +1601,11 @@ async function main() {
   if (cmd === 'serve') return serve(argv);
   console.error(`fleet-serve: unknown command '${cmd}'\n`);
   console.error(USAGE);
-  process.exit(2);
+  process.exitCode = 2;
 }
 
 // Importable for the test suite (classifyAddr / assertBindable / cborDecode) without
 // starting a server: only a direct run gets a main().
 let direct = false;
 try { direct = !!process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)); } catch {}
-if (direct) main().catch((e) => { console.error(`fleet-serve: ${e.stack || e.message}`); process.exit(1); });
+if (direct) main().catch((e) => { console.error(`fleet-serve: ${e.stack || e.message}`); process.exitCode = 1; });

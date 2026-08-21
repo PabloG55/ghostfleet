@@ -3408,6 +3408,19 @@ is "a tailnet addr this host lacks fails"  "no"  \
 is "...and says why"                       "1"   \
    "$("$ROOT/bin/fleet-serve" check-bind 100.64.99.99 2>&1 | grep -c 'not on any interface' || true)"
 is "a name is judged by what it resolves to" "yes" "$(verdict localhost)"
+# A REFUSAL THAT ARRIVES HALF-WRITTEN IS WORSE THAN NONE, and the whole value of this one
+# is the reason plus the candidate list. console.error to a PIPE is asynchronous, so the
+# process.exit() on the next line used to be able to drop it; the refusal writes with
+# fs.writeSync now. Read through `cat` on purpose, so it is a pipe and not a tty.
+bindrefuse="$(cd "$(mktemp -d)" && pwd -P)"
+GHOSTFLEET_SERVE_CONFIG="$bindrefuse/c.json" "$ROOT/bin/fleet-serve" init --bind 127.0.0.1 --port 19001 >/dev/null 2>&1
+node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.bind="0.0.0.0";fs.writeFileSync(p,JSON.stringify(c))' "$bindrefuse/c.json"
+refusal="$(GHOSTFLEET_SERVE_CONFIG="$bindrefuse/c.json" TMUX= "$ROOT/bin/fleet-serve" 2>&1 | cat)"
+is "a piped refusal keeps its reason"      "1" "$(printf '%s' "$refusal" | grep -c "is a wildcard" || true)"
+is "...and its closing candidate list"     "1" "$(printf '%s' "$refusal" | grep -c "addresses this machine has" || true)"
+is "...down to the last line of it"        "1" \
+   "$([ "$(printf '%s\n' "$refusal" | tail -1 | grep -c '^fleet-serve:   - ' || true)" = 1 ] && echo 1 || echo 0)"
+rm -rf "$bindrefuse"
 
 # ── the live daemon ──────────────────────────────────────────────────────────
 # A FIXED PORT WOULD BE THE TMUX-SOCKET BUG AGAIN (§0): two worktrees running the suite
@@ -3717,7 +3730,7 @@ if (process.argv.includes('--json')) {
     counts: { need_you: 1, working: 0, ready: 0, parked: 1, limit: 2, interrupted: 0 },
     cards: [
       { name: 'api-2', label: null, status: 'need-you', folder: 'api-2', branch: 'feat/a-very-long-branch-name-that-the-tui-would-elide', agent: 'claude', msg: 'Allow `pnpm test`?', age: 3600, attached: false, sched: null, limit_at: null },
-      { name: 'api-3', label: null, status: 'limit',    folder: 'api-3', branch: 'feat/y', agent: 'codex',    msg: 'hi', age: 12, attached: false, sched: null, limit_at: '10:20pm' },
+      { name: 'api-3', label: null, status: 'limit',    folder: 'api-3', branch: 'feat/y', agent: 'codex',    msg: 'hi', age: 12, attached: false, sched: { at: 1700000000, msg: 'S'.repeat(4000) }, limit_at: '10:20pm' },
       { name: 'api-4', label: null, status: 'unknown',  folder: 'api-4', branch: 'feat/z', agent: 'opencode', msg: '',   age: null, attached: false, sched: null, limit_at: null },
       { name: 'api-5', label: null, status: 'parked',   folder: 'api-5', branch: 'b', agent: 'claude',        msg: '',   age: 1, attached: false, sched: null, limit_at: null },
       { name: 'api-6', label: null, status: 'a-tenth-status', folder: 'api-6', branch: 'c', agent: 'claude',  msg: '',   age: 1, attached: false, sched: null, limit_at: null }],
@@ -3768,6 +3781,11 @@ if sv_start json; then
   is "limit is not folded into ready"         "1"   "$(pb grid reads | grep -c '"limit":2' || true)"
   is "the long branch is NOT elided"          "1"   "$(pb grid reads | grep -c 'feat/a-very-long-branch-name-that-the-tui-would-elide' || true)"
   is "free worktrees carry over"              "1"   "$(pb grid reads | grep -c '"free_worktrees"' || true)"
+  # sched became {at, msg} in #41, and `msg` is a user-authored prompt of arbitrary length
+  # emitted WHOLE — the client clips, not the server. 4000 characters through, unclipped.
+  is "sched carries its at AND its msg"       "1"   "$(pb grid reads | grep -c '"sched":{"at":1700000000' || true)"
+  is "...and the msg is not clipped"          "4000" \
+     "$(pb grid reads | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log((JSON.parse(s).cards.find(c=>c.sched)||{sched:{msg:""}}).sched.msg.length))')"
   is "a tenth status is complained about"     "1"   "$(pb grid reads | grep -c 'schema_warnings' || true)"
   is "...and still passed through verbatim"   "1"   "$(pb grid reads | grep -c '"a-tenth-status"' || true)"
   is "an unknown project is refused"          "400" "$(pf grid.unknown reads)"
@@ -3795,6 +3813,22 @@ if sv_start json; then
   # five cards, and the six counts add to four.
   is "...whose total is the card count"       "1"   "$(pb projects reads | grep -c '"total":5' || true)"
   is "the inbox is readable"                  "200" "$(pf inbox reads)"
+  # ...and an answer too big to buffer is REFUSED BY NAME rather than returned short.
+  # node hands back the bytes it did collect alongside the error, so the naive
+  # `stdout || stderr` returns a payload cut off mid-value — which for text does not fail
+  # at all, it just looks like a short answer. The one direction that matters here is the
+  # negative: the truncated text must not reach the caller as if it were the whole thing.
+  cp "$SV/bin/fleet-inbox" "$SV/bin/fleet-inbox.keep"
+  cat > "$SV/bin/fleet-inbox" <<'STUB'
+#!/usr/bin/env node
+// 4 MB, past the dispatch's 1 MB default for an ordinary verb
+process.stdout.write('x'.repeat(4 * 1024 * 1024) + '\nTAIL-MARKER\n');
+STUB
+  chmod +x "$SV/bin/fleet-inbox"
+  ovf="$(node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" reads "$(sv_code ovf)" 2>/dev/null | grep -m1 "^inbox$US" | cut -d "$US" -f3)"
+  is "an over-long answer says it was cut"   "1"   "$(printf '%s' "$ovf" | grep -c 'produced more than' || true)"
+  is "...and does not return it short"       "0"   "$(printf '%s' "$ovf" | grep -c 'xxxxxxxxxx' || true)"
+  mv "$SV/bin/fleet-inbox.keep" "$SV/bin/fleet-inbox"
   # reading the inbox from the phone must not consume the lead's "new since last look"
   is "...never in the consuming form"         "0"   "$(grep -cE '^fleet-inbox \[-s\] \[cf-demo\]( \{|$)' "$SV/ran" || true)"
   is "...and --all did run"                   "1"   "$([ "$(grep -c 'fleet-inbox \[-s\] \[cf-demo\] \[--all\]' "$SV/ran" || true)" -ge 1 ] && echo 1 || echo 0)"

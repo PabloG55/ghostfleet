@@ -155,17 +155,25 @@ function execPlan(p) {
     return execFileSync(file, argv, { encoding: 'utf8', env, cwd, stdio: ['ignore', 'pipe', 'pipe'] }) || '(no output)';
   } catch (e) { return combined(e); }
 }
-// maxBuffer matches execFileSync's default so the two cannot differ on a chatty
-// command; a timeout is the async half's own concern and is passed by the caller.
-function execPlanAsync(p, { timeout = 0 } = {}) {
+// maxBuffer defaults to execFileSync's own so the two cannot differ on a chatty command;
+// a caller that expects a big answer raises it. Timeout is the async half's own concern.
+//
+// EXCEEDING IT IS THE TRUNCATION BUG WEARING A THIRD HAT. node hands back the output it
+// DID collect alongside the error, so a naive `stdout || stderr` returns a payload cut off
+// mid-value — which for JSON fails loudly at the parse, and for text does not fail at all:
+// it looks like a short answer. So it is named rather than merged into the generic path.
+function execPlanAsync(p, { timeout = 0, maxBuffer = 1024 * 1024 } = {}) {
   const { file, argv, env, cwd } = invocation(p);
   return new Promise((resolve) => {
-    execFile(file, argv, { encoding: 'utf8', env, cwd, timeout, maxBuffer: 1024 * 1024 },
+    execFile(file, argv, { encoding: 'utf8', env, cwd, timeout, maxBuffer },
       (err, stdout, stderr) => {
         if (!err) return resolve(stdout || '(no output)');
         // A killed-by-timeout child has usually printed nothing, so say what happened
         // rather than handing back an empty string that reads like success.
-        if (err.killed && timeout) return resolve(`error: ${p.cmd} timed out after ${timeout}ms`);
+        if (err.killed && timeout && err.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+          return resolve(`error: ${p.cmd} timed out after ${timeout}ms`);
+        if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+          return resolve(`error: ${p.cmd} produced more than ${maxBuffer} bytes — the answer was cut off, so it is refused rather than returned short`);
         resolve(`${stdout || ''}${stderr || ''}`.trim() || `error: ${err.message}`);
       });
   });
