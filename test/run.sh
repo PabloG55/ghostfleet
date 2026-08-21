@@ -2860,7 +2860,15 @@ if command -v tmux >/dev/null 2>&1; then
     // An agent with no adapter entry, so it has no validated busy detector -> unknown.
     fs.writeFileSync(path.join(F,SOCK+".w-unknown.agent"),"gemini\n");
     fs.writeFileSync(path.join(F,SOCK+".w-long.label"),"PR 964 doc verify\n");
-    fs.writeFileSync(path.join(F,SOCK+".w-ready.sched"),JSON.stringify({at:now+3600,msg:"ping",pid:4242}));
+    // A real scheduled prompt, plus the pid the marker carries and the wire must not.
+    fs.writeFileSync(path.join(F,SOCK+".w-ready.sched"),JSON.stringify(
+      {at:now+3600,msg:"pick the review back up and push if the suite is green",pid:4242}));
+    // ...and one far longer than the 28 columns a card draws. The scheduled text is the
+    // only user-authored field of arbitrary length in the schema, so the emitter must not
+    // be what shortens it: clipping here would be a display decision taken in the wrong
+    // layer, and it would be invisible, because a truncated prompt still reads as one.
+    fs.writeFileSync(path.join(F,SOCK+".w-long.sched"),JSON.stringify(
+      {at:now+7200,msg:"rebase onto main, ".repeat(40)+"then open the PR",pid:4243}));
     // w-fresh gets NO status file and no transcript, on purpose: it is the only way to
     // reach `age: null`. Every other session here carries a hook timestamp, and
     // ageBase falls back to it — so a fixture where they all do would never test the
@@ -3023,11 +3031,24 @@ if command -v tmux >/dev/null 2>&1; then
   # which is why the assertions go through JSON.stringify.
   is "label: null when unlabelled"   "null" "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-ready").label)')"
   is "label: the string when set"    "PR 964 doc verify" "$(C w-long label)"
-  is "sched: null when none"         "null" "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-long").sched)')"
-  # Just the epoch. The marker on disk also holds the message and the pid of the process
-  # that will send it; the card draws neither, and a pid means nothing off this machine.
-  is "sched: the epoch only"         "at"   "$(J 'Object.keys(o.cards.find(c=>c.name==="w-ready").sched).join(" ")')"
-  is "sched: it is a number"         "number" "$(J 'typeof o.cards.find(c=>c.name==="w-ready").sched.at')"
+  is "sched: null when none"         "null" "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-idle").sched)')"
+  # The time AND the prompt, and NOT the pid. `@10:30pm` with no way to say what will be
+  # sent is half a fact, and on a phone you cannot step into the session and look; the pid
+  # names a process on one machine and means nothing to a client that is not on it.
+  is "sched: the epoch and the text" "at msg" "$(J 'Object.keys(o.cards.find(c=>c.name==="w-ready").sched).join(" ")')"
+  is "sched: at is a number"         "number" "$(J 'typeof o.cards.find(c=>c.name==="w-ready").sched.at')"
+  is "sched: msg is the prompt"      "pick the review back up and push if the suite is green" \
+                                     "$(J 'o.cards.find(c=>c.name==="w-ready").sched.msg')"
+  # Emitted WHOLE. 736 characters against the 28 a card draws, so a clip anywhere in the
+  # emitter fails here; the length and the tail together mean a build that clipped at any
+  # width, front or back, goes red rather than one that clipped at exactly 28.
+  is "sched: a long prompt is whole" "736" "$(J 'o.cards.find(c=>c.name==="w-long").sched.msg.length')"
+  is "...far longer than a card"     "true" "$(J 'o.cards.find(c=>c.name==="w-long").sched.msg.length>28')"
+  is "...and ends where it should"   "then open the PR" \
+                                     "$(J 'o.cards.find(c=>c.name==="w-long").sched.msg.slice(-16)')"
+  # And the other surface genuinely cannot carry it: --plain has no column for the
+  # scheduled text at all, which is why the phone has to get it from here.
+  is "...and --plain carries none of it" "0" "$(grep -ac 'rebase onto main' "$JS/out.plain" || true)"
   is "limit_at: null when healthy"   "null" "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-idle").limit_at)')"
   is "attached is a boolean"         "boolean" "$(J 'typeof o.cards[0].attached')"
   # Both directions, through a real client: a field that is always false looks identical
@@ -3046,8 +3067,12 @@ if command -v tmux >/dev/null 2>&1; then
   is "agent is named on every card"  "10"   "$(J 'o.cards.filter(c=>typeof c.agent==="string"&&c.agent).length')"
   is "...including the non-claude one" "gemini" "$(C w-unknown agent)"
   # cwd is NOT on the wire: the card never draws it, and a field the TUI does not render
-  # is a field nothing keeps honest.
+  # is a field nothing keeps honest. Same for the schedule marker's pid, which lives on
+  # disk and must not reach a client that is not on this machine.
   is "no field the card cannot show" "" "$(J 'o.cards.map(c=>Object.keys(c)).flat().filter(k=>k==="cwd"||k==="limitAt").join(" ")')"
+  is "no pid anywhere in the payload" "0" "$(grep -ac '\"pid\"' "$JS/out.json" || true)"
+  is "...and nothing but at+msg in sched" "" \
+     "$(J 'o.cards.filter(c=>c.sched).map(c=>Object.keys(c.sched)).flat().filter(k=>k!=="at"&&k!=="msg").join(" ")')"
 
   tmux -L cfjsn kill-server 2>/dev/null
   rm -rf "$JS"

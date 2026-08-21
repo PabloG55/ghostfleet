@@ -1809,10 +1809,21 @@ if (JSON_OUT) {
       msg:      c.msg,
       age:      c.age,            // seconds since the last transcript write; null = unknown
       attached: c.attached,
-      // Just the epoch. The marker on disk also carries the message and the pid of the
-      // process that will send it; neither is on the card, and the pid is meaningless
-      // off this machine.
-      sched:    c.sched ? { at: c.sched.at } : null,
+      // The epoch AND the prompt, but not the pid. `@10:30pm` with no way to say WHAT
+      // will be sent is half a fact: in the TUI you are one keystroke from the session
+      // and can go and look, and on a phone you are not, so the scheduled text is the
+      // difference between a card that informs and a card that raises a question it
+      // cannot answer. The pid stays out because it identifies a process on one machine
+      // and means nothing to a client that isn't on it.
+      //   `msg` is emitted WHOLE. It is a user-authored prompt of arbitrary length —
+      // the only field here that is — and the card renders one line of it, but clipping
+      // it here would be a display decision taken in the wrong layer: §11.3 settled
+      // that content is served unredacted and bounded only for transport cost, and the
+      // card's own `msg` already works this way. The client clips.
+      //   Both paths that write a marker default the text to "continue" and cannot
+      // write an empty one, so this is a non-empty string in practice; `?? null` is for
+      // a marker that predates the field rather than a case the fleet can produce.
+      sched:    c.sched ? { at: c.sched.at, msg: c.sched.msg ?? null } : null,
       limit_at: c.limitAt || null,   // "10:20pm" — when the usage window rolls over
     })),
     free_worktrees: freeWorktrees(),
