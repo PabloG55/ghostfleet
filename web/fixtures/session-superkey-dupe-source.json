@@ -1,0 +1,24 @@
+{
+  "project": "superkey",
+  "session": "dupe-source",
+  "agent": "claude",
+  "status": "limit",
+  "total": 3,
+  "messages": [
+    {
+      "ts": 1787339200,
+      "role": "assistant",
+      "text": "Two agency rows share an FEIN, so the broker join fans out. Confirmed against 4,213 rows: 11 pairs, all created by the same import."
+    },
+    {
+      "ts": 1787341800,
+      "role": "assistant",
+      "text": "The fix is a unique index on (fein, org_id) plus a merge for the existing pairs. Writing the merge as a migration so it is replayable."
+    },
+    {
+      "ts": 1787342700,
+      "role": "assistant",
+      "text": "Reached the 5h usage limit mid-run; the diff is stashed on the branch."
+    }
+  ]
+}
