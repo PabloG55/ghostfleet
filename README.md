@@ -650,6 +650,68 @@ wins when set, so `CLAUDE_FLEET_AWAKE=off ghostfleet` is a clean one-off. A
 **closed lid still sleeps** either way — the `pmset schedule wake` line above is the only hard
 guarantee across one. `CLAUDE_FLEET_AWAKE=off` inhibits nothing.
 
+### The fleet from a phone (`fleet-serve`)
+
+`fleet-serve` puts the fleet on a phone: an HTTP endpoint over **Tailscale**, serving the
+grid the TUI already computes and the same verbs a lead session drives. The design, the
+threat model and the measurements behind it are in [docs/mobile.md](docs/mobile.md); this
+is the setup.
+
+**Read §1 of that document before opening this port.** The endpoint is remote code
+execution *by design* — `spawn` runs shell commands, `send` injects prompts into agents
+running `--dangerously-skip-permissions` — so it is never publicly routable and every
+mutating call is authenticated, confirmed and recorded.
+
+```bash
+tailscale ip -4                                    # the address to bind to
+fleet-serve init --bind 100.x.y.z --rp-id <name>.ts.net
+fleet-serve check                                  # preflight: bind, funnel, config
+fleet-serve enroll phone                           # prints a one-time code
+fleet-serve                                        # run it
+```
+
+Open the printed origin on the phone, type the code, and approve the passkey. The code is
+single-use and expires; it returns a bearer token **once** (only its digest is stored).
+
+**The bind address is explicit and it fails closed.** There is no default, and only
+loopback and the tailnet (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) are accepted — a
+wildcard, a LAN address or a public one is refused before the socket opens, naming which
+it was. Both transports docs/mobile.md sanctions land inside that rule: Tailscale gives
+you a `100.64/10` address, and Cloudflare Tunnel's `cloudflared` connects to loopback.
+
+```bash
+fleet-serve check-bind 0.0.0.0        # bindable: no — it listens on every interface
+fleet-serve check-bind 192.168.1.5    # bindable: no — reachable by that whole network
+```
+
+**A passkey at every open, enforced server-side.** The assertion mints a session token
+that lives ~15 minutes, and the API rejects any request without a live one — a bearer
+token on its own gets a 401, because a lock that only gates the UI is decoration.
+`spawn`, `stop`, `rename` and `project_add` need a *second* assertion bound to that exact
+action, plus the grid's own `y` confirmation; a forced reclaim needs its own `f` step on
+top, and only after a plain reclaim has reported why it declined.
+
+```bash
+fleet-serve clients                   # who is enrolled
+fleet-serve revoke phone              # one action; a running daemon honours it at once
+fleet-serve audit -n 20               # every mutation, oldest prev-hash first
+fleet-serve audit --verify            # the chain, so a deleted row is visible
+```
+
+Every mutation also lands as a `MOBILE` row in that fleet's `fleet-inbox`, so it shows up
+where you already look rather than in a log nobody reads.
+
+**Two things to do yourself.** `fleet-serve` holds a `caffeinate`/`systemd-inhibit`
+handle while it runs (see *Staying awake*), but a Mac configured to sleep on AC will still
+sleep the moment the last tmux tty goes quiet — run `sudo pmset -c sleep 0` once. And
+WebAuthn needs a secure context on a non-loopback origin, so get a certificate for the
+MagicDNS name (`tailscale cert <name>.ts.net`) and point `tls` at it in
+`~/.config/ghostfleet/serve.json`.
+
+**Never turn on Tailscale Funnel.** That is the one setting that publishes this to the
+open internet; `fleet-serve` refuses to start while it is on, and says so when it cannot
+check.
+
 ### Notifications
 
 Notifications post via **`osascript`** by default — reliable on modern macOS since it goes through a

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# fleet-serve — the fleet's HTTP endpoint, so a phone can run it (docs/mobile.md).
+#
+#   fleet-serve init --bind 127.0.0.1        write the config (no default bind, ever)
+#   fleet-serve enroll phone                 open a one-time passkey enrolment
+#   fleet-serve                              run it
+#   fleet-serve check                        preflight without listening
+#
+# A launcher, exactly like bin/ghostfleet is for fleet-grid.mjs: the daemon is node, and
+# this is what puts `fleet-serve` on PATH with a readable error when node is missing.
+# `exec` on purpose — the pid is what bin/fleet-awake holds the machine awake for (§8),
+# so the process that ends up listening has to be this one.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"
+  case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+
+command -v node >/dev/null 2>&1 || { echo "fleet-serve: node is required (>=18)" >&2; exit 1; }
+exec node "$BIN_DIR/fleet-serve.mjs" "$@"
