@@ -87,6 +87,10 @@ body {
  * GEOMETRY stays exact. Not font-style: italic — <i> is just the shortest tag name for
  * something this repetitive. */
 .card .c { display: inline-block; width: 1ch; text-align: center; font-style: normal; }
+/* Two cells for a character tmux laid into two columns — cells() decides, and it decides
+ * for the pane and the card alike. No card glyph is wide today; the rule is here so that
+ * if one ever is, the card does not silently lose a column. */
+.card .c.w { width: 2ch; }
 .card.dim { opacity: .65; }
 /* NO font-weight ON A CARD, EVER — and this is the one rule in the file that is not
  * cosmetic. The TUI draws the selected card bold (C.bold on all five lines), and in a
@@ -161,7 +165,65 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .on { color: var(--green); } .off { color: var(--red); } .inherit { color: var(--dim); }
 .bud-on { color: var(--yellow); }
 
-/* ── the session screen ─────────────────────────────────────────────────── */
+/* ── the session screen: the pane ───────────────────────────────────────── */
+/* What the desktop shows when you press ⏎ on a card, which is a tmux pane, which is a
+ * CHARACTER GRID. Everything in this block exists to keep it one — a pane whose rows do
+ * not line up is not a terminal, it is a picture of one that has been dropped.
+ *
+ * NO font-weight IN HERE EITHER, and for the same measured reason as the cards above:
+ * the bold face has no box-drawing glyphs, so ─ ╭ ╮ ╰ ╯ come from a wider fallback while
+ * │ and the letters do not (366px → 517px on one 32-character line, in Chrome at 19px).
+ * A card that widens loses its right border; a 269-column pane full of dialog borders and
+ * ─── rules widens into a different picture. web/ansi.js therefore renders SGR 1 as the
+ * bright half of the palette, which is the other half of what bold has always meant on a
+ * terminal and the half that cannot move a glyph. pwa-check.mjs asserts no .pane rule
+ * sets font-weight, because — exactly as with the card — this is invisible until it is
+ * someone else's pane on someone else's phone. */
+.paneview { margin: .6em 0 0; }
+/* THE WIDTH PROBLEM, and it is the honest one. The pane was captured at whatever the
+ * desktop layout gave it: 269 columns on this machine's fleet, measured, against a
+ * phone's ~40. It is NOT reflowed and NOT wrapped — a wrapped TUI is unreadable and stops
+ * being "the computer version" — so it scrolls sideways inside this box and nowhere else.
+ * `overscroll-behavior: contain` is what keeps that promise: without it a horizontal
+ * fling at the end of a row chains to the page and the whole app slides off. */
+.pane-box {
+  overflow: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  /* A FALLBACK ONLY — sizePaneBox() replaces it with the measured space left below the
+   * box. What sits above it is not a fixed height (the verb bar wraps to however many
+   * rows the buttons need), so no vh constant is right on every phone; this one is here
+   * so the box is never unbounded in the frame before the measurement lands. */
+  max-height: 68vh; background: #07090b; border: 1px solid var(--hair);
+  padding: .35em .45em;
+}
+/* line-height 1 for the same reason the cards use it: a terminal's cell height IS its
+ * line height, and anything looser opens gaps that break ─ into a row of dashes and │
+ * into a dotted line. */
+.pane {
+  margin: 0; font: inherit; font-size: var(--pfs, 11px); line-height: 1;
+  white-space: pre; width: max-content; color: var(--fg);
+}
+/* One cell per cell — grid.js's cells(), same as a card, boxed here too. ⧗ measures 1.274
+ * advances and ⏸ 1.046 in every monospace face on this machine, and in a pane the glyph
+ * that is a quarter-column wide does not spoil a border, it slides the whole rest of the
+ * line. `.w` is the two-column case: tmux lays ✅ and 日 into two grid columns, so a 1ch
+ * box for them would pull everything after them one column left. */
+.pane .c { display: inline-block; width: 1ch; text-align: center; font-style: normal; }
+.pane .c.w { width: 2ch; }
+/* The zoom row. A phone cannot show 269 columns at a readable size and no toggle changes
+ * that arithmetic, so both readings are offered: `fit` scales the whole pane into the
+ * viewport to see its SHAPE (where the dialog is, whether a diff is on screen), and the
+ * ± steps take it back to a size you can read and pan. Font-size rather than a transform,
+ * so the glyphs re-lay out crisply at every step instead of being scaled bitmaps. */
+.pane-bar { display: flex; flex-wrap: wrap; gap: .4em; align-items: baseline; padding: .4em .2em; }
+.pane-bar .geom { color: var(--dim); margin-left: auto; }
+.pane-bar button { padding: .3em .55em; }
+.pane-bar button.on { color: var(--bg); background: var(--dim); border-color: var(--dim); }
+/* The view switch: the pane is what a tap on a card lands on, and the message list is
+ * still one tap away. Both are labelled with what they ARE, not with which is default. */
+.viewsw { display: flex; gap: .4em; padding: .5em .2em 0; }
+.viewsw button.on { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
+
+/* ── the session screen: the message list ──────────────────────────────── */
 .msgs { margin: .8em 0 0; }
 .msg { padding: .6em .1em; border-top: 1px solid var(--hair); }
 .msg .when { color: var(--dim); }

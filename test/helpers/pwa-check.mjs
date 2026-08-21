@@ -262,6 +262,64 @@ for (const st of NINE) {
   is(`the ${st} glyph occupies exactly one cell`, true, ascii || boxed);
 }
 
+// ── 5e. the pane view keeps the card's two rules, and its own promise ─────
+// The session screen's default is now the real tmux pane (web/ansi.js). It is a much
+// bigger character grid than a card — 269 columns on this machine's fleets, measured — so
+// the two geometry rules above matter MORE here, not less, and each is checked as a
+// negative because a rule that never fires looks exactly like one that works.
+const paneRules = [...cssNoComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+  .map(m => [m[1].trim(), m[2]])
+  .filter(([sel]) => /\.pane/.test(sel));
+is('there are .pane rules to check', true, paneRules.length > 0);
+// Rule one, and the reason ansi.js renders SGR 1 as the bright half of the palette: the
+// bold face has no box-drawing glyphs, so a weight change moves ─ ╭ ╮ ╰ ╯ and not │.
+is('no .pane rule sets font-weight', '',
+   paneRules.filter(([, body]) => /font-weight/.test(body)).map(([sel]) => sel).join(' | '));
+// COMMENTS STRIPPED FIRST, and this is the same trap as the .card rule above: ansi.js's
+// header explains at length why bold must not be a weight, so a bare grep for
+// "font-weight" matched its own reasoning and the assertion could never pass. Only what
+// the file EMITS counts.
+const ansiCode = read('ansi.js').replace(/^\s*\/\/.*$/gm, '');
+is('...and the renderer emits none either', '',
+   (ansiCode.match(/font-weight/g) || []).join(','));
+// Rule two: one cell per cell, boxed, through the SAME cells() the card uses.
+is('the pane renders through cells()', true, /import \{ cells[^}]*\} from '\.\/grid\.js'/.test(read('ansi.js')));
+is('...into a 1ch box', true, /\.pane \.c \{[^}]*width: 1ch/.test(CSS));
+is('...and a 2ch box for a two-column cell', true, /\.pane \.c\.w \{[^}]*width: 2ch/.test(CSS));
+// NEVER WRAPPED. `white-space: pre` is the whole difference between a terminal and a
+// paragraph, and `pre-wrap` here would reflow a 269-column grid into porridge.
+is('the pane never wraps', true, /\.pane \{[^}]*white-space: pre[;\s]/.test(cssNoComments));
+// ...and the sideways scroll it needs instead is INSIDE its own box. A body that scrolls
+// horizontally slides the whole app off the screen, header and verbs with it.
+is('the pane box scrolls on its own', true, /\.pane-box \{[^}]*overflow: auto/.test(cssNoComments));
+is('...without chaining to the page', true, /\.pane-box \{[^}]*overscroll-behavior: contain/.test(cssNoComments));
+// The poll STOPS when the page is hidden, cleared rather than skipped: a phone waking its
+// radio every two seconds in a pocket is the cost this is about, and `if (hidden) return`
+// inside the callback still pays it.
+is('hiding the page tears the pane timer down', true, /document\.hidden\)\s*\{[^}]*stopPanePoll\(\)/.test(APP));
+is('...and the timer is a real clearInterval', true, /clearInterval\(paneTimer\)/.test(APP));
+is('...and it never runs while hidden', true, /panePollWanted = \(\) =>\s*\n?\s*!document\.hidden/.test(APP));
+// WHERE THE READER SCROLLED TO SURVIVES A RE-RENDER, and this pair guards a bug that a
+// fake DOM cannot see and a real browser found immediately. refresh()'s 5s grid poll ends
+// in render(), which rebuilds the session screen — so the "open at the end" rule threw the
+// reader to the bottom of the pane every five seconds. Measured in headless Chrome at
+// 390x844: scrolled to (top 40, left 300), and five seconds later (253, 0), which is the
+// bottom of a 269-column pane at column zero, mid-sentence. Asserted here as the SHAPE of
+// the fix — the offset lives outside the nodes, and the jump-to-end is conditional — and
+// verified as behaviour in a browser, because an assertion against a stub DOM would only
+// prove the stub.
+is('the pane scroll offset outlives the nodes', true, /^let paneScroll = null;/m.test(APP));
+is('...and the jump-to-end is conditional', true, /if \(!paneScroll \|\| paneScroll\.atEnd\)/.test(APP));
+is('...fed by the box\'s own scroll events', true, /addEventListener\('scroll', \(\) => rememberPaneScroll/.test(APP));
+
+// A tap on a card lands on the PANE. The message list stays reachable — it pages back over
+// the whole transcript, which a pane cannot — so both halves are asserted.
+is('a session opens on the pane', true, /S\.view = 'pane';/.test(APP));
+is('...and the message list is still reachable', true, /pick\('msgs', 'messages'\)/.test(APP));
+// api.js is still the only file that talks to the network, pane included.
+is('the pane read goes through api.js', true, /export async function getPane/.test(read('api.js')));
+is('...and ansi.js fetches nothing', '', (read('ansi.js').match(/\bfetch\(/g) || []).join(','));
+
 // ── 6. no status is quietly folded into another ────────────────────────────
 is('nine statuses, nine distinct labels', 9, new Set(NINE.map(s => G.STATUS[s].label)).size);
 is('unknown is not idle', true, G.STATUS.unknown.label !== G.STATUS.idle.label && G.STATUS.unknown.color !== G.STATUS.idle.color);

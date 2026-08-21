@@ -126,6 +126,49 @@ if (phase === 'reads') {
   row('health', await a.api(base, 'GET', '/api/health'));
 }
 
+// THE PAYOFF PATH, in one phase because the whole value is the CHAIN. docs/mobile.md §7
+// put `answer keys` on the session screen from the start, and it was close to useless: a
+// worker blocked on "Allow pnpm test?" since 9pm is exactly the case the app exists for,
+// and you could not see what you were answering. So: the pane shows a real permission
+// dialog, the verb clears it, and the pane changes. Any one of the three alone proves
+// nothing — a pane that never changes and a verb that does nothing look the same.
+//
+// Real tmux on the far side (run.sh creates the session), and the REAL bin/fleet-answer,
+// not the stub the other phases use. What the pane contains is the genuine bytes Claude
+// Code emitted for a "Do you want to create hello.txt?" prompt, captured live and replayed
+// into a pane that then blocks on a keystroke — so the escapes are Claude's own while the
+// key handling stays deterministic enough for a suite.
+if (phase === 'pane') {
+  await a.enroll(base, arg);
+  row('pane.dialog', await a.api(base, 'GET', '/api/pane?project=demo&session=dlg'));
+  // The same session NAME on another fleet. run.sh puts an unmistakable decoy there,
+  // because a pane read that ignored the socket would return a plausible screenful of
+  // somebody else's work rather than an error — CLAUDE.md's most-repeated scar.
+  row('pane.otherFleet', await a.api(base, 'GET', '/api/pane?project=other&session=dlg'));
+  row('pane.answer', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'dlg', text: '1' }));
+  // The pane is read again only after the far side has had a moment to redraw. Polled, not
+  // slept: a fixed sleep tuned to this machine is a test that passes on this machine.
+  let after = null;
+  for (let i = 0; i < 60; i++) {
+    after = await a.api(base, 'GET', '/api/pane?project=demo&session=dlg');
+    if (!String(after.json?.pane || '').includes('Do you want to create')) break;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  row('pane.after', after);
+  // The argument checks and the geometry, on the same server: a missing session, a
+  // scrollback out of range, and a scrollback that is allowed.
+  row('pane.noSession', await a.api(base, 'GET', '/api/pane?project=demo'));
+  row('pane.noProject', await a.api(base, 'GET', '/api/pane?session=dlg'));
+  row('pane.badProject', await a.api(base, 'GET', '/api/pane?project=nope&session=dlg'));
+  row('pane.gone', await a.api(base, 'GET', '/api/pane?project=demo&session=no-such-session'));
+  row('pane.scrollbackBad', await a.api(base, 'GET', '/api/pane?project=demo&session=dlg&scrollback=99999'));
+  row('pane.scrollbackNeg', await a.api(base, 'GET', '/api/pane?project=demo&session=dlg&scrollback=-1'));
+  row('pane.scrollbackOk', await a.api(base, 'GET', '/api/pane?project=demo&session=dlg&scrollback=50'));
+  // ...and a cold read of it is refused like every other read (§5): the pane is a READ
+  // behind the same session-token gate, with no auth path of its own.
+  row('pane.noToken', await request(base, 'GET', '/api/pane?project=demo&session=dlg'));
+}
+
 if (phase === 'rate') {
   await a.enroll(base, arg);
   const seen = [];
