@@ -13,8 +13,15 @@
 //   GET  /api/checkouts?project=<name>          -> { roots, checkouts }
 //   GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
 //   POST /api/verb   { tool, args }             -> { ok, text }        (Bearer token required)
-//   GET  /api/auth/challenge                    -> { challenge, rp_id, user }
-//   POST /api/auth/register | /api/auth/assert  -> { token, expires_at }
+//   GET  /api/auth/challenge                    -> { challenge, rp_id, user, enrolling }
+//   POST /api/auth/register { code, … }         -> { token, expires_at }
+//   POST /api/auth/assert                       -> { token, expires_at }
+//
+// `code` on register is the one-time code `fleet-serve enroll <client-id>` printed, and it
+// is NOT optional: the server refuses a registration that no window and no code
+// authorised, because the endpoint is remote code execution and trust-on-first-use loses
+// to whoever wins the race to be first. The contract used to omit it and the client never
+// sent one, so every enrolment was a 403 and the phone could not get in at all.
 //
 // `tool` is the MCP tool name, unchanged — fleet_list, fleet_send, fleet_read,
 // fleet_spawn, fleet_worktrees, fleet_inbox, fleet_answer, fleet_pause, fleet_resume,
@@ -36,17 +43,152 @@
 import { setHome } from './grid.js';
 
 const LS = {
-  base: 'gf.base',          // fleet-serve origin; empty string = fixtures
+  base: 'gf.base',          // absent = ask this page's own origin; see pref()
   fixture: 'gf.fixture',    // which grid fixture the fixture backend serves
 };
 
 // Verbs that take a second passkey assertion at the moment of action (§7).
 export const DESTRUCTIVE = new Set(['fleet_spawn', 'fleet_stop', 'fleet_rename']);
 
+// ── which backend, and how we know ────────────────────────────────────────
+// `gf.base` was one string with two meanings — a URL, or '' for fixtures — and nothing
+// ever set it. So the client that fleet-serve ITSELF serves defaulted to fixtures: a
+// phone opening the daemon's own URL over the tailnet was shown four projects that do
+// not exist on this machine, offered a local-only passkey with no enrolment prompt, and
+// never made one request — which is why `fleet-serve clients` said "(no clients
+// enrolled)" and nothing anywhere said why. Both halves did what they were told; nobody
+// wired the default.
+//
+// Three states now, and the third is the one that was missing:
+//
+//   absent / ''    ask the origin this page came from whether a fleet is behind it
+//   'fixtures'     fixtures because someone chose them — the escape hatch for demoing
+//                  the client while the daemon is the thing serving it
+//   a URL          that origin, wherever the page itself came from
+//
+// "Unset" and "chosen" HAVE to be different values. While they were the same one, the
+// only safe reading of unset was the wrong one. A URL cannot collide with the sentinel:
+// every base has a scheme.
+const FORCED_FIXTURES = 'fixtures';
+
+// WHERE THE PROBE ASKS — a route the server really has, and that is the whole care in
+// this constant. Every path under /api/ answers 401 today because the token gate runs
+// before the routing table, so a probe at an invented path (/api/cards, say) looks like
+// it works — right until the gate moves and the invented path starts 404ing, which this
+// file reads as "no server" and answers with fixtures. That is this same bug, one
+// release later. test/helpers/pwa-check.mjs asserts the path against fleet-serve's own
+// routing table, and asserts it is NOT in that server's OPEN set, because a 401 is the
+// signal being relied on.
+export const PROBE_PATH = '/api/health';
+const PROBE_TIMEOUT = 4000;
+
 // ── configuration ─────────────────────────────────────────────────────────
-export function baseUrl() { try { return localStorage.getItem(LS.base) || ''; } catch { return ''; } }
-export function setBaseUrl(u) { try { localStorage.setItem(LS.base, (u || '').replace(/\/+$/, '')); } catch {} }
-export function mode() { return baseUrl() ? 'server' : 'fixtures'; }
+// pref() is what is STORED; resolution() is what we are actually talking to. They are
+// only the same thing once an explicit setting exists.
+export function pref() {
+  let v = '';
+  try { v = (localStorage.getItem(LS.base) || '').trim(); } catch {}
+  if (!v) return { kind: 'auto' };
+  if (v === FORCED_FIXTURES) return { kind: 'fixtures' };
+  return { kind: 'server', base: v.replace(/\/+$/, '') };
+}
+let resolved = null;      // { mode, base, source, detail } — decided once per load
+let resolving = null;     // the in-flight probe, so ten callers make one request
+function store(v) {
+  try { if (v) localStorage.setItem(LS.base, v); else localStorage.removeItem(LS.base); } catch {}
+  resolved = null; resolving = null;        // a different backend is a different answer
+}
+export function setBaseUrl(u) { store(String(u || '').trim().replace(/\/+$/, '')); }
+export function useFixtures() { store(FORCED_FIXTURES); }
+export function useAutoDetect() { store(''); }
+
+// The origin to ask. file:// gives 'null' for location.origin and has no API behind it,
+// so it is not asked at all rather than probed and reported as a failure.
+function pageOrigin() {
+  if (typeof location === 'undefined' || !location) return '';
+  if (!/^https?:$/.test(location.protocol || '')) return '';
+  return String(location.origin || '').replace(/\/+$/, '');
+}
+
+// THE SIGNAL. A 401 is proof of success, and a stronger one than a 200: it says the
+// endpoint exists AND that auth is enforced there (§5). A 200 is the weaker case — at
+// first run nothing is enrolled, so there is no authenticated call to make, and
+// demanding one would put the client back in fixtures on the very machine it is served
+// from. So: any structured answer from the API means the API is there.
+//
+// The other side of it is what must NOT count. A static server (`python3 -m
+// http.server`, how this client gets reviewed) 404s. One with an SPA fallback answers
+// 200 text/html, which is the trap — a body arrives, the status is fine, and only the
+// content type says it is a page and not an answer. And some *other* JSON service on
+// that port is not this one, so the body has to look like fleet-serve's envelope.
+export function probeVerdict(r) {
+  if (!r || !r.status) return 'fixtures';                                  // never answered
+  if (r.status === 404) return 'fixtures';                                 // a server, but not this one
+  if (!/^application\/json\b/i.test(r.contentType || '')) return 'fixtures';
+  const b = r.body;
+  if (!b || typeof b !== 'object') return 'fixtures';
+  return ('ok' in b || 'needs' in b || 'error' in b || 'version' in b) ? 'server' : 'fixtures';
+}
+
+async function probeFetch(url) {
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const t = setTimeout(() => { if (ctl) ctl.abort(); }, PROBE_TIMEOUT);
+  try {
+    const r = await fetch(url, { cache: 'no-store', headers: { accept: 'application/json' },
+                                 signal: ctl ? ctl.signal : undefined });
+    const contentType = r.headers.get('content-type') || '';
+    let body = null;
+    if (/json/i.test(contentType)) { try { body = await r.json(); } catch {} }
+    return { status: r.status, contentType, body };
+  } finally { clearTimeout(t); }
+}
+
+const fixturesBecause = (detail) => ({ mode: 'fixtures', base: '', source: 'probe', detail });
+async function detect(origin) {
+  if (!origin) return fixturesBecause('fixtures — this page has no http(s) origin to ask');
+  let r;
+  try { r = await probeFetch(origin + PROBE_PATH); }
+  catch (e) { return fixturesBecause(`fixtures — nothing answered ${origin}${PROBE_PATH} (${String((e && e.message) || e)})`); }
+  if (probeVerdict(r) === 'server')
+    return { mode: 'server', base: origin, source: 'probe',
+             detail: r.status === 401
+               ? `${origin} — served this app, and its API asked for a passkey (401), which is the server enforcing §5`
+               : `${origin} — served this app, and its API answered (${r.status})` };
+  return fixturesBecause(`fixtures — ${origin} serves this app but no fleet is behind it `
+    + `(${PROBE_PATH} → ${r.status} ${(r.contentType || 'no content-type').split(';')[0]})`);
+}
+
+// Synchronous, for the renderer: an explicit setting is known without asking anybody,
+// and only the auto case has to wait. 'probing' is a real third mode rather than an
+// optimistic 'fixtures' — guessing fixtures for a few hundred milliseconds is how the
+// screens end up drawing sample data on a real fleet, which is the bug.
+export function resolution() {
+  if (resolved) return resolved;
+  const p = pref();
+  if (p.kind === 'fixtures') return { mode: 'fixtures', base: '', source: 'setting', detail: 'fixtures — chosen in settings' };
+  if (p.kind === 'server') return { mode: 'server', base: p.base, source: 'setting', detail: `${p.base} — set in settings` };
+  const o = pageOrigin();
+  return { mode: 'probing', base: '', source: 'probe',
+           detail: o ? `looking for a fleet at ${o}…` : 'looking for a fleet…' };
+}
+export function mode() { return resolution().mode; }
+export function baseUrl() { return resolution().base; }
+// The short form for the header, so every screen can say which fleet it is showing.
+export function modeLabel() {
+  const r = resolution();
+  if (r.mode === 'server') return r.base.replace(/^https?:\/\//, '');
+  return r.mode === 'probing' ? 'looking for a fleet…' : 'fixtures';
+}
+// Awaited by every call below, so no request can be made before it is known where
+// requests go. Memoised: the probe happens once per load.
+export async function ready() {
+  if (resolved) return resolved;
+  if (pref().kind !== 'auto') { resolved = resolution(); return resolved; }
+  if (!resolving) resolving = detect(pageOrigin()).then(r => { resolved = r; resolving = null; return r; });
+  return resolving;
+}
+// For "the daemon started after I opened this page", and for the suite.
+export function reprobe() { resolved = null; resolving = null; return ready(); }
 
 // The fixture backend's whole routing table. `project` is the payload's own project
 // field, so tapping a project on the Projects screen lands on that project's fixture —
@@ -107,7 +249,7 @@ async function fixture(file) {
 
 // ── reads ─────────────────────────────────────────────────────────────────
 export async function getProjects() {
-  if (mode() === 'server') {
+  if ((await ready()).mode === 'server') {
     const j = await get('/api/projects');
     setHome(j.home || '');
     return j;
@@ -140,7 +282,7 @@ async function rollup(project) {
 // fixture mode so a pause you just asked for is visible on the card — on a server the
 // fleet itself is the one that changes and there is nothing to replay.
 export async function getGrid(project) {
-  if (mode() === 'server') return get(`/api/grid?project=${encodeURIComponent(project || '')}`);
+  if ((await ready()).mode === 'server') return get(`/api/grid?project=${encodeURIComponent(project || '')}`);
   const chosen = FIXTURES.find(f => f.file === fixtureName());
   // The fixture picked in settings wins when it belongs to the project you opened;
   // otherwise the first fixture for that project. A project with no fixture gets the
@@ -161,7 +303,7 @@ export async function getGrid(project) {
 // over CLAUDE_FLEET_ROOT / ~/.config/ghostfleet/checkouts, not something the client can
 // guess.
 export async function getCheckouts(project) {
-  if (mode() === 'server') return get(`/api/checkouts?project=${encodeURIComponent(project || '')}`);
+  if ((await ready()).mode === 'server') return get(`/api/checkouts?project=${encodeURIComponent(project || '')}`);
   return fixture('checkouts.json');
 }
 
@@ -169,7 +311,7 @@ export async function getCheckouts(project) {
 // "exactly what cardLines() consumes" and this is not one of those fields, so it gets
 // its own read rather than widening the one the whole design leans on.
 export async function getSettings(project) {
-  if (mode() === 'server') return get(`/api/settings?project=${encodeURIComponent(project || '')}`);
+  if ((await ready()).mode === 'server') return get(`/api/settings?project=${encodeURIComponent(project || '')}`);
   try { return await fixture(`settings-${project}.json`); }
   catch { return { global_nudge: false, sessions: {} }; }
 }
@@ -179,7 +321,7 @@ export async function getSettings(project) {
 // the content itself is served unredacted.
 export const PAGE = 20;
 export async function getSession(project, session, before = null) {
-  if (mode() === 'server') {
+  if ((await ready()).mode === 'server') {
     const q = `/api/session?project=${encodeURIComponent(project || '')}&session=${encodeURIComponent(session)}` +
               `&limit=${PAGE}` + (before ? `&before=${encodeURIComponent(before)}` : '');
     return get(q);
@@ -205,17 +347,30 @@ export async function getSession(project, session, before = null) {
 // Here rather than in passkey.js so that "only api.js talks to the network" is true
 // without an exception — an exception is how a second base URL gets introduced, and
 // then the app is half-pointed at the server and half at nothing.
+//
+// AND THE SERVER'S OWN WORDS WHEN IT REFUSES. `${kind} → HTTP 403` is what a phone was
+// given for twenty minutes: /api/auth/register refuses in two ways, both of them the only
+// thing that says what to do next — "no enrolment is open. On the Mac: fleet-serve enroll
+// <client-id>" and "wrong or missing enrolment code" — and this file was throwing the
+// sentence away and reporting the number. A button that does nothing is what that looks
+// like from the phone.
+async function authFetch(kind, path, init) {
+  let r;
+  try { r = await fetch(baseUrl() + path, init); }
+  catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((j && (j.text || j.error)) || `${kind} → HTTP ${r.status}`);
+  return j;
+}
 export async function authChallenge() {
-  const r = await fetch(baseUrl() + '/api/auth/challenge', { cache: 'no-store' });
-  if (!r.ok) throw new Error(`challenge → HTTP ${r.status}`);
-  return r.json();
+  await ready();
+  return authFetch('challenge', '/api/auth/challenge', { cache: 'no-store' });
 }
 export async function authPost(kind, body) {     // kind: 'register' | 'assert'
-  const r = await fetch(`${baseUrl()}/api/auth/${kind}`, {
+  await ready();
+  const j = await authFetch(kind, `/api/auth/${kind}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`${kind} → HTTP ${r.status}`);
-  const j = await r.json();
   setToken(j.token, j.expires_at);
   return j;
 }
@@ -224,7 +379,7 @@ export async function authPost(kind, body) {     // kind: 'register' | 'assert'
 // `assertion` is the fresh WebAuthn assertion for a destructive verb. It is passed
 // through to the server, which is what decides whether it counts.
 export async function verb(tool, args, assertion = null) {
-  if (mode() === 'server') {
+  if ((await ready()).mode === 'server') {
     if (!haveToken()) throw new AuthError('no live session token');
     let r;
     try {

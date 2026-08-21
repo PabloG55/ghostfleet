@@ -43,9 +43,42 @@ open http://localhost:8000
 mysteriously, and in fixture mode it offers a clearly-labelled way past — there is no
 server there to protect.
 
-With no server configured it runs entirely from `fixtures/`. Point it at `fleet-serve`
-in **settings → connection** (or `localStorage.setItem('gf.base', 'http://…')`) and
-nothing else changes.
+## Which fleet it talks to
+
+**Whoever served the page gets asked first.** On boot, with nothing configured, the
+client `GET`s `/api/health` on its own `location.origin`:
+
+| the origin answers | the client runs on |
+|---|---|
+| a JSON envelope — **including a 401** | that origin, over the tailnet |
+| a 404, an HTML page, or nothing at all | the bundled `fixtures/` |
+
+A **401 is the proof**, and a stronger one than a 200: it says the endpoint exists *and*
+that the passkey is being enforced there (§5). Requiring a successful authenticated call
+would be worse than useless — at first run nothing is enrolled, so there is nothing to
+authenticate with, and the client would fall back to fixtures on the very machine serving
+it. Which is exactly what it used to do: `gf.base` unset meant "fixtures", nothing ever
+set it, and a phone opening the daemon's own URL was shown four sample projects that do
+not exist on this machine while `fleet-serve clients` reported `(no clients enrolled)` —
+the client had never made a request.
+
+So `cd web && python3 -m http.server 8000` still lands in `fixtures/`, which is how this
+client gets reviewed, and **an explicit setting still wins in either direction**:
+
+| `gf.base` | means |
+|---|---|
+| absent (or `''`) | ask this page's origin — the default |
+| `'fixtures'` | fixtures, even when `fleet-serve` is what served the page (for a demo) |
+| `'http://mac.tailnet.ts.net:8787'` | that origin, whatever served the page |
+
+"Unset" and "fixtures" have to be **different values**; while they were both the empty
+string, the only safe reading of unset was the wrong one. Set it in **settings →
+connection**, which offers those same three choices, or from a console with
+`localStorage.setItem('gf.base', …)`.
+
+The resolved mode is in the **header on every screen** — `⚠ fixtures` in yellow, or the
+origin it is talking to — because the lock screen that explains it is the one thing you
+dismiss.
 
 ## Files
 
@@ -54,7 +87,7 @@ nothing else changes.
 | `index.html` | the shell — small on purpose, it is what a cold offline open paints |
 | `grid.js` | the cards, as strings. Mirrors `cardLines`/`newCardLines`/`freeCardLines`/`boxCard`/the counts header. No DOM, no fetch |
 | `app.js` | the three screens, the four gestures, the verbs and the confirmations |
-| `api.js` | **the only file that talks to the network**, and the fixture backend |
+| `api.js` | **the only file that talks to the network**, the fixture backend, and the probe that decides between them |
 | `passkey.js` | the WebAuthn ceremonies (§5, §7) |
 | `sw.js` | offline: cache-first for the app, network-first with fallback for `/api/*` |
 | `fixtures/` | §4 payloads, and the projects/checkouts/settings/session reads |
@@ -119,9 +152,36 @@ GET  /api/session?project=&session=&limit=20[&before=<ts>]
 GET  /api/checkouts?project=<name>          -> { roots, checkouts }
 GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
 POST /api/verb   { tool, args }             -> { ok, text }         Bearer token required
-GET  /api/auth/challenge                    -> { challenge, rp_id, user }
-POST /api/auth/register | /api/auth/assert  -> { token, expires_at }
+GET  /api/auth/challenge                    -> { challenge, rp_id, user, enrolling }
+POST /api/auth/register { code, id, … }     -> { token, expires_at }
+POST /api/auth/assert                       -> { token, expires_at }
+GET  /api/health                            -> { ok, version, … }    the probe's target
 ```
+
+### Enrolling the phone
+
+`code` on register is **not optional**. `fleet-serve` refuses a registration that no
+window and no one-time code authorised, and it is right to: the endpoint is remote code
+execution, and trust-on-first-use loses to whoever wins the race to be first. On the Mac:
+
+```bash
+fleet-serve enroll phone      # prints e.g.  GP7CX-ZRDR5  — 15 minutes, one use
+```
+
+The lock screen offers **enrol this phone** whenever the client is in server mode with no
+credential for that origin, and the sheet behind it takes the code. Case and the hyphen do
+not matter (the client normalises exactly as the server does), and the sheet asks
+`/api/auth/challenge` whether a window is even open *before* spending a Face ID prompt on
+a refusal. When the server does refuse, **its own sentence is what you see** — "no
+enrolment is open…" and "wrong or missing enrolment code…" are the only things that say
+what to do next, and `register → HTTP 403` is not.
+
+A credential is stored per backend (`gf.cred:<origin>`, or `gf.cred:fixtures`), so a
+passkey registered against the bundled fixtures is not offered as one for a server. It
+used to be: the phone had registered in fixture mode, so the lock screen offered "unlock
+with Face ID", the assertion 401'd, and the button looked broken. Nothing is stored at all
+until the server has accepted the attestation, for the same reason — a refused
+registration that left a credential behind put the app straight back into that state.
 
 `tool` is the **MCP tool name, unchanged** — `fleet_list`, `fleet_send`, `fleet_read`,
 `fleet_spawn`, `fleet_worktrees`, `fleet_inbox`, `fleet_answer`, `fleet_pause`,
@@ -171,12 +231,30 @@ the lie.
 ## Tests
 
 ```bash
-./test/run.sh                          # the suite, including the two helpers below
+./test/run.sh                          # the suite, including the three helpers below
 node test/helpers/grid-parity.mjs      # phone card == TUI card, line for line
 node test/helpers/pwa-check.mjs        # self-containment, precache, icons, §4 fixtures, §7 prompts
+node test/helpers/pwa-origin.mjs <base>            # which backend it picks, against a LIVE fleet-serve
+node test/helpers/pwa-render.mjs <base>            # app.js actually RUNS, and paints what it decided
+node test/helpers/pwa-enrol.mjs <base> <code> <id> # the enrolment ceremony, end to end
 ```
 
-Both emit `name <US> want <US> got` rows that `test/run.sh` feeds to its own `is`. Every
-assertion in them was watched going red before it was trusted — a two-column glyph, a
-folded `unknown`, a swapped counts clause, a reworded confirmation, a fixture left out
-of the precache, a CDN link in the HTML.
+All of them emit `name <US> want <US> got` rows that `test/run.sh` feeds to its own `is`.
+Every assertion in them was watched going red before it was trusted — a two-column glyph,
+a folded `unknown`, a swapped counts clause, a reworded confirmation, a fixture left out
+of the precache, a CDN link in the HTML, a same-origin default put back to fixtures, a
+registration that forgets the enrolment code, and a fixture passkey counted as a server's.
+
+`pwa-render.mjs` builds a ~60-line DOM and **imports `app.js` for real**, because
+`node --check` proves syntax and not that it runs — this file has already been blank once
+from a ReferenceError in a version that parsed perfectly (see the boot block's comment).
+It reads back the painted text: which origin the lock screen names, that server mode
+offers *enrol this phone* and hides the fixture bypass, and that the header says
+`⚠ fixtures` once you are past the lock.
+
+`pwa-origin.mjs` wants a real `fleet-serve` on loopback (`run.sh` starts one and passes
+its base), because the signal the client leans on is a **response nobody wrote down** —
+the 401 a cold, unenrolled daemon gives — and the whole point is that it is measured
+rather than assumed. It brings its own static servers for the other direction, including
+one with an SPA fallback, which answers `200 text/html` for `/api/health` and is the case
+a status-only check reads as success.

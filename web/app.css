@@ -50,6 +50,13 @@ body {
  * when something is wrong. Each segment is its own span, so a break lands between
  * clauses. */
 .hdr .counts { white-space: normal; }
+/* Which fleet this screen is showing, in the header, on every screen. Yellow for
+ * fixtures because sample data presented as a fleet is the failure this row exists for;
+ * dim for a real origin, since that is the ordinary state and nothing is wrong. A
+ * tailnet hostname is long, so it is allowed to break rather than push the counts off. */
+.hdr .mode { overflow-wrap: anywhere; }
+.hdr .mode.server, .hdr .mode.probing { color: var(--dim); }
+.hdr .mode.fixtures { color: var(--yellow); }
 .stale { color: var(--yellow); padding: .2em .4em .6em; }
 
 /* ── the confirm bar: same place the TUI puts it, under the header ──────── */
@@ -173,3 +180,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .lock { text-align: left; padding: 12vh .6em 0; }
 .lock .ship { color: var(--cyan); white-space: pre; font: inherit; font-size: var(--fs); line-height: 1.05; margin: 0 0 1em; }
 .lock h1 { font: inherit; font-weight: 700; color: var(--white); margin: 0 0 .4em; }
+/* The two sentences that have to be READ, not skimmed past: "fixtures, and here is why"
+ * and "the passkey is unavailable, and here is why". `.sheet .warn` existed; this one did
+ * not, so both were drawn in body grey next to everything else. */
+.lock .warn { color: var(--yellow); }
