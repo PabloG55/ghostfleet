@@ -29,11 +29,47 @@ FILTER="${1:-}"
 PASS=0; FAIL=0; SKIP=0; GROUP=""
 R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; D=$'\033[2m'; N=$'\033[0m'
 
+# ── the run's environment: NOTHING may force colour ──────────────────────────
+# Every value this suite compares is captured through a pipe, and node decides whether to
+# colourise by asking whether stdout is a tty — except when FORCE_COLOR overrides that.
+# `console.log(1)` on a bare NUMBER goes through util.inspect, which paints a number
+# yellow, so a helper that answered `1` actually answered $'\033[33m1\033[39m' and its red
+# line printed as
+#
+#     expected: 1
+#     got:      1
+#
+# two values that look identical and are not. This repo has now been bitten twice. §2's
+# busy_re probe was the first (fixed in place with String()); the second was free_port(),
+# where the cost was not one assertion but the whole serve half of the suite: a coloured
+# port makes $BASE a URL curl can never reach, `fleet-serve init --port` parses it as NaN
+# and writes null, so every daemon fell back to its built-in 8787, was abandoned there
+# still holding the port, and the next one died EADDRINUSE. 1350 green assertions became
+# 1051 passed / 4 failed / 8 skipped — six groups skipping with "server did not come up"
+# and three assertions in OTHER groups going red over logs those daemons never wrote. Not
+# one line of that output mentioned colour, and the suite is green again the moment the
+# variable is absent, which is why it looked like a phantom.
+#
+# UNSET HERE rather than hunting every console.log, for the same reason §0 below
+# namespaces the socket DIRECTORY instead of renaming forty sockets: this reaches the
+# helpers that have not been written yet. The String() guards stay as well — a suite that
+# is only correct because somebody scrubbed its environment is one `export` away from
+# lying again — and the group at the end of §0 proves both halves in both directions.
+# NO_COLOR is deliberately NOT set: that would change what the code UNDER TEST emits,
+# and this is about what the harness CAPTURES.
+unset FORCE_COLOR CLICOLOR_FORCE
+
 group() { GROUP="$1"; case "$GROUP" in *"$FILTER"*) printf '\n%s%s%s\n' "$D" "$GROUP" "$N" ;; esac; }
 skip()  { case "$GROUP" in *"$FILTER"*) SKIP=$((SKIP+1)); printf '  %s○%s %s %s(%s)%s\n' "$Y" "$N" "$1" "$D" "$2" "$N" ;; esac; }
 ok()    { PASS=$((PASS+1)); printf '  %s✔%s %s\n' "$G" "$N" "$1"; }
+# A red line has to be legible, and two values that differ only in bytes a terminal does
+# not draw print as the same value — which is how "expected: 1 / got: 1" happened above.
+# ESC, tab, CR and newline come back as \e \t \r \n, so a failure that reads as equal can
+# only mean `is` itself is broken, rather than being a puzzle about the value.
+vis()   { local v="$1"; v="${v//$'\e'/\\e}"; v="${v//$'\t'/\\t}"
+          v="${v//$'\r'/\\r}"; v="${v//$'\n'/\\n}"; printf '%s' "$v"; }
 bad()   { FAIL=$((FAIL+1)); printf '  %s✘%s %s\n     %sexpected:%s %s\n     %sgot:     %s %s\n' \
-            "$R" "$N" "$1" "$D" "$N" "$2" "$D" "$N" "$3"; }
+            "$R" "$N" "$1" "$D" "$N" "$(vis "$2")" "$D" "$N" "$(vis "$3")"; }
 is()    { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
           if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "$2" "$3"; fi; }
 # grep -c, but never let a non-match kill the run under pipefail
@@ -156,6 +192,28 @@ if command -v tmux >/dev/null 2>&1; then
   kill_servers_in "$SW"; rm -rf "$SW"
 else
   skip "socket namespace" "tmux not available"
+fi
+
+# The other precondition every group rests on, proven the same way and for the same
+# reason: a guard that is never exercised looks exactly like one that works. So put the
+# variable BACK and check the probe changes — without that direction this group would pass
+# just as happily on a node that colourises nothing, and the unset would be cargo.
+group "the harness captures plain bytes"
+if command -v node >/dev/null 2>&1; then
+  ESC="$(printf '\033')"
+  is "a bare number is captured bare"       "1" "$(node -e 'console.log(1)' 2>/dev/null)"
+  is "...with no escape in it"              "0" "$(node -e 'console.log(1)' 2>/dev/null | grep -c "$ESC" || true)"
+  # the direction that makes the one above mean something
+  is "FORCE_COLOR would have painted it"    "1" \
+     "$(FORCE_COLOR=3 node -e 'console.log(1)' 2>/dev/null | grep -c "$ESC" || true)"
+  is "...and then it is not the string 1"   "0" \
+     "$([ "$(FORCE_COLOR=3 node -e 'console.log(1)' 2>/dev/null)" = 1 ] && echo 1 || echo 0)"
+  # String() is the per-site half, and it has to hold with the variable back ON — that is
+  # what stops the next exported FORCE_COLOR from costing the serve section again.
+  is "String() survives forced colour"      "1" \
+     "$(FORCE_COLOR=3 node -e 'console.log(String(1))' 2>/dev/null)"
+else
+  skip "plain bytes" "node missing"
 fi
 
 # ── 1. the grid → control-plane wire format ──────────────────────────────────
@@ -2946,7 +3004,14 @@ if command -v tmux >/dev/null 2>&1; then
   # stdout is the channel bin/ghostfleet reads the chosen action off, so ONE line and
   # nothing else: a stray console.log would leave a consumer with unparseable bytes.
   is "one line of output"             "1" "$(wc -l < "$JS/out.json" | tr -d ' ')"
-  is "and it parses"                  "1" "$(node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log(1)' "$JS/out.json" 2>/dev/null || echo 0)"
+  # ONE thing, in bytes that cannot carry formatting. This asserted two things at once
+  # (the JSON parses AND node exited 0) and captured the answer as `console.log(1)` — a
+  # bare number, which util.inspect paints yellow under FORCE_COLOR. The JSON was fine;
+  # the probe's answer was $'\033[33m1\033[39m' and the red line read "expected: 1 / got: 1".
+  # The exit status is the whole answer, so let it be the answer and let the shell write
+  # the byte.
+  is "and it parses"                  "1" \
+     "$(node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$JS/out.json" 2>/dev/null && echo 1 || echo 0)"
 
   # ── the §4 shape, key for key ─────────────────────────────────────────────
   # Two sibling workers (fleet-serve, fleet-pwa) are written against exactly these
@@ -3425,7 +3490,26 @@ rm -rf "$bindrefuse"
 # ── the live daemon ──────────────────────────────────────────────────────────
 # A FIXED PORT WOULD BE THE TMUX-SOCKET BUG AGAIN (§0): two worktrees running the suite
 # together would fight over it and the second run would lie. Ask the OS for a free one.
-free_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(p))})' 2>/dev/null; }
+# String(p), NOT a bare number: console.log() runs a non-string through util.inspect,
+# which colourises under FORCE_COLOR, and a port with $'\033[33m' round it poisons
+# EVERYTHING downstream — $BASE becomes a URL curl cannot reach, `init --port` parses NaN
+# and writes null, the daemon silently falls back to its built-in 8787 and is abandoned
+# there holding the port, and the next group dies EADDRINUSE. Six groups skipped as
+# "server did not come up" while the daemon was up the whole time on a port nobody asked
+# for. See the unset at the top of this file for the general guard; this is the local one.
+free_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(String(p)))})' 2>/dev/null; }
+# Proven at the site, with the variable put BACK: everything below depends on this being a
+# number a URL can hold, and the unset at the top of the file is not allowed to be the
+# only reason it is. Both directions — digits with colour forced, and a port that actually
+# binds — because "" would satisfy a digits-only check by matching nothing.
+group "free_port answers in digits, colour or not"
+if command -v node >/dev/null 2>&1; then
+  fp="$(FORCE_COLOR=3 free_port)"
+  is "a forced-colour port is bare digits" "1" "$(printf '%s' "$fp" | grep -cE '^[0-9]+$' || true)"
+  is "...and it is a real port number"     "1" "$([ "${fp:-0}" -gt 0 ] 2>/dev/null && echo 1 || echo 0)"
+else
+  skip "free_port" "node missing"
+fi
 SERVE_PIDS=""
 serve_stop() {
   [ -n "${SERVE_PIDS:-}" ] && kill $SERVE_PIDS 2>/dev/null
@@ -3513,13 +3597,26 @@ BASE="http://localhost:$PORT"
 export GHOSTFLEET_SERVE_CONFIG="$SV/serve.json" GHOSTFLEET_SERVE_AUDIT="$SV/audit.jsonl" SV_RAN="$SV/ran" SV_ROOT="$SV"
 sv_cli() { HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" "$@"; }
 sv_code() { sv_cli enroll "$1" | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}'; }
+# WHY it did not come up, not just THAT it did not. Six groups used to skip with the bare
+# words "server did not come up" while the daemon's own first line said exactly what was
+# wrong — `port 8787 is already in use`, which would have named the coloured-port bug in
+# one read. And a skip exits 0: a suite that could not test the daemon AT ALL still looked
+# green apart from three misattributed reds in other groups. So it is a FAILURE. This
+# daemon is the suite's own fixture, not a platform capability that might be absent, and
+# CLAUDE.md's rule for the whole file applies — silence is the symptom.
+SV_WHY=""
 sv_start() {
   HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.$1" 2>&1 &
-  SERVE_PIDS="$SERVE_PIDS $!"
+  svp=$!
+  SERVE_PIDS="$SERVE_PIDS $svp"
   i=0; while [ "$i" -lt 60 ]; do
-    curl -s -m1 "$BASE/healthz" >/dev/null 2>&1 && return 0
+    curl -s -m1 "$BASE/healthz" >/dev/null 2>&1 && { SV_WHY=""; return 0; }
+    kill -0 "$svp" 2>/dev/null || break        # already exited: its log is the answer
     i=$((i+1)); sleep 0.1
   done
+  SV_WHY="$(tr '\n' ' ' < "$SV/log.$1" 2>/dev/null | cut -c1-180)"
+  [ -n "$SV_WHY" ] || SV_WHY="nothing at all in $SV/log.$1"
+  bad "the daemon comes up ($1)" "listening on $BASE" "$SV_WHY"
   return 1
 }
 sv_cli init --bind 127.0.0.1 --port "$PORT" >/dev/null 2>&1
@@ -3583,7 +3680,7 @@ if sv_start auth; then
   is "the client is listed as revoked"        "1"   "$(sv_cli clients 2>/dev/null | grep -c 'phone .*revoked' || true)"
   serve_stop
 else
-  skip "fleet-serve auth" "server did not come up"
+  skip "fleet-serve auth" "server did not come up: $SV_WHY"
 fi
 
 # ── verbs ────────────────────────────────────────────────────────────────────
@@ -3673,7 +3770,7 @@ if sv_start verbs; then
   is "a CLI writer does not break it"        "0"   "$(sv_cli audit --verify >/dev/null 2>&1; echo $?)"
   serve_stop
 else
-  skip "fleet-serve verbs" "server did not come up"
+  skip "fleet-serve verbs" "server did not come up: $SV_WHY"
 fi
 
 # ── reads ────────────────────────────────────────────────────────────────────
@@ -3700,7 +3797,7 @@ if GRIDRAN="$SV/gridran" sv_start nojson; then
   is "...and the grid was never launched"    "0"   "$(grep -c launched "$SV/gridran" || true)"
   serve_stop
 else
-  skip "fleet-serve grid 503" "server did not come up"
+  skip "fleet-serve grid 503" "server did not come up: $SV_WHY"
 fi
 
 group "fleet-serve: reads proxy the grid, per project, and bound the tail"
@@ -3785,19 +3882,19 @@ if sv_start json; then
   # emitted WHOLE — the client clips, not the server. 4000 characters through, unclipped.
   is "sched carries its at AND its msg"       "1"   "$(pb grid reads | grep -c '"sched":{"at":1700000000' || true)"
   is "...and the msg is not clipped"          "4000" \
-     "$(pb grid reads | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log((JSON.parse(s).cards.find(c=>c.sched)||{sched:{msg:""}}).sched.msg.length))')"
+     "$(pb grid reads | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(String((JSON.parse(s).cards.find(c=>c.sched)||{sched:{msg:""}}).sched.msg.length)))')"
   is "a tenth status is complained about"     "1"   "$(pb grid reads | grep -c 'schema_warnings' || true)"
   is "...and still passed through verbatim"   "1"   "$(pb grid reads | grep -c '"a-tenth-status"' || true)"
   is "an unknown project is refused"          "400" "$(pf grid.unknown reads)"
   # §11.3: a bounded page with an explicit load-more. A PERFORMANCE bound — 46 MB down a
   # WireGuard tunnel on cellular — never to be described as a security control.
-  is "the default page is 20 messages"        "20"  "$(pb session reads | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).messages.length))')"
+  is "the default page is 20 messages"        "20"  "$(pb session reads | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(String(JSON.parse(s).messages.length)))')"
   is "...and it is the NEWEST 20"             "1"   "$(pb session reads | grep -c '"message 50"' || true)"
   is "...starting at 31, not at 1"            "1"   "$(pb session reads | grep -c '"message 31"' || true)"
   is "...and 30 is NOT in it"                 "0"   "$(pb session reads | grep -c '"message 30"' || true)"
   is "...with a cursor for the next page"     "1"   "$(pb session reads | grep -c '"next_before":' || true)"
   is "each message carries ts and role"       "1"   "$(pb session reads | grep -c '"role":"assistant"' || true)"
-  is "limit=5 returns 5"                      "5"   "$(pb session.limit reads | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).messages.length))')"
+  is "limit=5 returns 5"                      "5"   "$(pb session.limit reads | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(String(JSON.parse(s).messages.length)))')"
   is "limit=0 is refused"                     "400" "$(pf session.zero reads)"
   is "limit past the cap is refused"          "400" "$(pf session.huge reads)"
   is "it went through fleet-read --json"      "1"   "$([ "$(grep -c 'fleet-read .*\[--json\]' "$SV/ran" || true)" -ge 1 ] && echo 1 || echo 0)"
@@ -3836,7 +3933,7 @@ STUB
   is "health reports the grid flag"           "1"   "$(pb health reads | grep -c '"grid_json":true' || true)"
   serve_stop
 else
-  skip "fleet-serve reads" "server did not come up"
+  skip "fleet-serve reads" "server did not come up: $SV_WHY"
 fi
 
 group "fleet-serve: the REAL grid, two projects, one daemon process"
@@ -3873,8 +3970,12 @@ rcode="$(GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/au
   HOME="$RG/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" enroll phone | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')"
 GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl" \
   HOME="$RG/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$ROOT/bin/fleet-serve.mjs" > "$RG/log" 2>&1 &
-SERVE_PIDS="$SERVE_PIDS $!"
-i=0; while [ "$i" -lt 60 ] && ! curl -s -m1 "$RBASE/healthz" >/dev/null 2>&1; do i=$((i+1)); sleep 0.1; done
+rgp=$!
+SERVE_PIDS="$SERVE_PIDS $rgp"
+i=0; while [ "$i" -lt 60 ] && ! curl -s -m1 "$RBASE/healthz" >/dev/null 2>&1; do
+  kill -0 "$rgp" 2>/dev/null || break          # already exited: its log is the answer
+  i=$((i+1)); sleep 0.1
+done
 if curl -s -m1 "$RBASE/healthz" >/dev/null 2>&1; then
   cat > "$RG/probe.mjs" <<'PROBE'
 // dynamic, because an import specifier cannot be an expression and the helper lives at
@@ -3909,10 +4010,11 @@ PROBE
   is "...and never mentions pa's"            "0"   "$(rb pb | freepaths | grep -c "$RG/pa" || true)"
   is "...nor does anything else in pb"       "0"   "$(rb pb | grep -c "$RG/pa" || true)"
   is "pa's counts have the six §4 keys"      "6"   \
-     "$(rb pa | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(Object.keys(JSON.parse(s).counts).length))')"
+     "$(rb pa | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(String(Object.keys(JSON.parse(s).counts).length)))')"
   is "the busy session is a card, not free"  "1"   "$(rb pa | grep -c '"name":"busy"' || true)"
 else
-  skip "real grid through the daemon" "server did not come up"
+  skip "real grid through the daemon" \
+    "server did not come up: $(tr '\n' ' ' < "$RG/log" 2>/dev/null | cut -c1-180)"
 fi
 serve_stop
 tmux -L cf-pa kill-server 2>/dev/null
@@ -3931,7 +4033,7 @@ if sv_start rate; then
   is "it does not 429 from the first call"   "0"   "$(printf '%s' "$burst" | grep -c '^\[429' || true)"
   serve_stop
 else
-  skip "fleet-serve rate limit" "server did not come up"
+  skip "fleet-serve rate limit" "server did not come up: $SV_WHY"
 fi
 sv_rate 4000 4000 4000
 
@@ -3977,13 +4079,26 @@ group "fleet-serve holds a sleep inhibitor while it runs"
 if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/null 2>&1; then
   HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=on node "$SV/bin/fleet-serve.mjs" > "$SV/log.awake" 2>&1 &
   apid=$!
-  i=0; while [ "$i" -lt 60 ] && ! grep -q 'awake:' "$SV/log.awake" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
-  is "it reports holding one for its pid" "1" "$(grep -c "awake: holding .* for pid $apid " "$SV/log.awake" || true)"
-  is "the OS agrees an inhibitor exists" "1" \
-     "$( (pgrep -f "caffeinate .*-w $apid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$apid " >/dev/null 2>&1) && echo 1 || echo 0)"
-  kill $apid 2>/dev/null; sleep 1
-  is "and it is released when we stop"    "0" \
-     "$( (pgrep -f "caffeinate .*-w $apid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$apid " >/dev/null 2>&1) && echo 1 || echo 0)"
+  i=0; while [ "$i" -lt 60 ] && kill -0 "$apid" 2>/dev/null \
+        && ! grep -q 'awake:' "$SV/log.awake" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
+  # A DAEMON THAT NEVER STARTED READS AS AN INHIBITOR THAT NEVER FIRED: both assertions
+  # below come back `expected 1, got 0` when the process died on its first line, and
+  # neither one mentions the process. That is how the coloured-port bug spent its life
+  # being reported as a broken sleep inhibitor. Ask the prior question first, and quote
+  # the daemon.
+  if ! grep -q 'awake:' "$SV/log.awake" 2>/dev/null; then
+   bad "the daemon under test starts" "an awake: line in its log" \
+       "$(tr '\n' ' ' < "$SV/log.awake" 2>/dev/null | cut -c1-180)"
+   skip "fleet-serve inhibitor" "the daemon never got as far as arming one"
+   kill $apid 2>/dev/null
+  else
+   is "it reports holding one for its pid" "1" "$(grep -c "awake: holding .* for pid $apid " "$SV/log.awake" || true)"
+   is "the OS agrees an inhibitor exists" "1" \
+      "$( (pgrep -f "caffeinate .*-w $apid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$apid " >/dev/null 2>&1) && echo 1 || echo 0)"
+   kill $apid 2>/dev/null; sleep 1
+   is "and it is released when we stop"    "0" \
+      "$( (pgrep -f "caffeinate .*-w $apid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$apid " >/dev/null 2>&1) && echo 1 || echo 0)"
+  fi
   # off must mean off, or "on" proves nothing
   HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.awakeoff" 2>&1 &
   bpid=$!
@@ -3999,7 +4114,16 @@ group "fleet-serve serves the client, and says when there is none"
 # The repo-vs-runtime trap: cf-sync mirrors a hardcoded dir list, and web/ was not on it,
 # so a staged runtime had no client at all while the repo looked perfect. Reported once at
 # boot rather than as a 404 per request, which reads as the client's bug.
-is "no web/ dir: named at startup"     "1" "$(grep -c 'client: NONE at' "$SV/log.json" || true)"
+# ITS OWN DAEMON, not a log some other group happened to leave behind. This read
+# $SV/log.json — written by the "reads proxy the grid" group four groups up — so when that
+# group's daemon could not start, the failure surfaced HERE, on an assertion about web/,
+# in a group whose own daemon was fine. A red line has to point at its own subject.
+if sv_start noweb; then
+  is "no web/ dir: named at startup"   "1" "$(grep -c 'client: NONE at' "$SV/log.noweb" || true)"
+  serve_stop
+else
+  skip "fleet-serve no-client notice" "server did not come up: $SV_WHY"
+fi
 mkdir -p "$SV/web"; printf '<p>hi</p>' > "$SV/web/index.html"; printf 'export const x=1;\n' > "$SV/web/app.js"
 if sv_start web; then
   is "web/ present: named at startup"  "1" "$(grep -c "client: $SV/web" "$SV/log.web" || true)"
@@ -4020,7 +4144,7 @@ if sv_start web; then
   is "...and the config never leaks"   "0"   "$(curl -s --path-as-is "$BASE/%2e%2e%2fserve.json" | grep -c 'rp_id' || true)"
   serve_stop
 else
-  skip "fleet-serve static" "server did not come up"
+  skip "fleet-serve static" "server did not come up: $SV_WHY"
 fi
 is "cf-sync copies web/ to the runtime" "1" "$(grep -c 'for d in bin tmux hooks mcp skill layouts web' "$ROOT/bin/cf-sync" || true)"
 
@@ -4090,7 +4214,7 @@ if sv_start origin; then
   rm -rf "$PWO"
   serve_stop
 else
-  skip "phone client origin" "server did not come up"
+  skip "phone client origin" "server did not come up: $SV_WHY"
 fi
 
 group "fleet-serve does not fork the dispatch"
