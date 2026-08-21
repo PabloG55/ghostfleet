@@ -1,7 +1,8 @@
 # Mobile: the fleet from a phone
 
-**Status:** design only, nothing built. Two decisions are settled: the transport is
-Tailscale (§5), and the phone gets the **full verb set**, not a read-only phase (§7).
+**Status:** design only, nothing built. Three decisions are settled: the transport is
+Tailscale with Tailnet Lock (§5), the phone gets the **full verb set** rather than a
+read-only phase (§7), and content is served **unredacted** (§11.3).
 Every number below was measured on this machine before the design was written, and **two
 of the measurements changed the design** — the sleep setting (§8) and the dependency
 posture (§6). See those sections before disagreeing with the conclusions.
@@ -152,20 +153,62 @@ here — publish to the open internet behind a random hostname. That is security
 obscurity, and scanners enumerate those hostnames. For an endpoint that spawns processes
 it is not a tradeoff, it is a breach with a delay.
 
+### Who can join the tailnet at all
+
+The ACL question and the enrolment question are different, and only the second one
+survives a compromised Tailscale account — an attacker with the account enrols their own
+node and never touches the PWA.
+
+**Tailnet Lock** closes that. With it on, a new node needs a cryptographic signature from
+one of *your* existing trusted nodes, and peers reject an unsigned key, so **neither a
+compromised account nor a compromised Tailscale coordination server can add a device**.
+Available on the Personal plan.
+
+It has a real failure mode that has to be handled at setup, not later: enabling it issues
+**ten disablement secrets, once**. Lose those *and* the signing nodes and the tailnet
+cannot be recovered — not by support, unless a secret was deposited with them in advance.
+So designate both the Mac and the phone as signing nodes (two is the minimum anyway) and
+store the secrets somewhere that survives losing both devices.
+
+**A tag-based ACL** then narrows what an enrolled device may reach. The default tailnet
+policy is `src: * → dst: *:*` — every device reaches every other — so a future work
+laptop silently gets the fleet unless this is written:
+
+```json
+{ "action": "accept",
+  "src": ["tag:fleet-client"],
+  "dst": ["tag:fleet-server:8787"] }
+```
+
+Tags, not node IDs: a node ID changes on reinstall, and an ACL pinned to a stale one
+either breaks confusingly or — if `*` gets pasted in while debugging — widens silently.
+
 ### Auth on top of the transport
 
 The VPN authenticates a **device**, not a person; an unlocked phone on the tailnet is
 inside. So the service also requires:
 
-- a **bearer token**, device-bound and individually revocable, stored in the PWA;
-- **bind to the tailnet interface only**, never `0.0.0.0`, so a bug in the VPN layer does
-  not immediately mean a bug in this one;
-- an **append-only audit log** of every request that changes anything, so "what happened"
-  is answerable;
-- **rate limiting**, because a token that leaks should be slow to exploit.
+- **A passkey at every open.** Face ID on cold start and after the app has been
+  backgrounded for a few minutes. Not a password: a password typed twenty times a day
+  converges on something short, autofills from a manager on the very unlocked phone that
+  is the threat, and is replayable. A passkey is bound to the secure enclave, cannot be
+  copied off the device, and does not degrade with use.
+- **Server-enforced, not client-enforced.** The passkey assertion mints a short-lived
+  session token (~15 min) and the API rejects any request without a live one. A lock
+  screen that only gates the UI is decoration — `curl` with the bearer token would walk
+  straight past it.
+- **A bearer token** identifying the enrolled client, device-bound and individually
+  revocable.
+- **A second passkey assertion on the destructive verbs** (§7).
+- **Bind to the tailnet interface only**, never `0.0.0.0`, so a bug in the VPN layer does
+  not immediately become a bug in this one.
+- **An append-only audit log** of every request that changes anything, surfaced as a
+  `fleet-inbox` row (§12).
+- **Rate limiting**, because a token that leaks should be slow to exploit.
 
-Passkeys/WebAuthn are the natural second factor for destructive actions in §7 v3, and
-Safari supports them, which is most of what a native Face ID gate would have bought.
+The layers answer different questions, which is why all of them are here: Tailnet Lock —
+*can this device join*; the ACL — *may it reach this port*; the passkey — *is this the
+owner*; the session token — *is that still true right now*.
 
 ## 6. Client: a PWA, and the reason is the repo
 
@@ -335,15 +378,25 @@ building a chat client.
 
 **Still open:**
 
-3. **Redaction scope**, and parity raises the stakes rather than lowering them: reading a
-   session is part of parity, so the scrollback now crosses the wire, where the earlier
-   read-only sketch would have served one sentence per card. Transcripts contain a hosted
-   `DATABASE_URL`, Clerk keys, and SuperKey's real policy data. Options: (a) a
-   secret-pattern filter on the way out, (b) serve a bounded tail rather than full
-   history, (c) both. Recommendation: **both** — (a) because the values are known shapes
-   and cheap to match, (b) because a bound limits the blast radius of whatever (a) misses.
-4. **Multi-user?** Assumed single-user throughout. Anything else changes the auth model
-   from "a token" to "identities and per-project authorization."
+3. **Content is served unredacted.** A secret-pattern filter was proposed and dropped.
+   Transcripts do hold live-shaped credentials — measured across the SuperKey transcripts:
+   16 `sk_live_`, 139 `sk_test_`, 194 JWTs, 2 AWS key IDs, 51 `CLERK_SECRET`, 4213
+   `DATABASE_URL`, in a corpus whose largest single file is 46 MB. But under this
+   transport there is no adversary it defends against. The public internet cannot route
+   here; a thief past Face ID has the password manager too; and anyone who compromises the
+   tailnet has **full parity, which is RCE** — beside that, transcript text is the least
+   valuable thing they take. The filter's cost is real and immediate by contrast: masking
+   `sk_live_…` corrupts any session that is legitimately *about* key handling.
+
+   **Pagination stays, for performance rather than secrecy.** Shipping 46 MB down a
+   WireGuard tunnel on cellular is slow and expensive. Serve a bounded tail — 20 messages,
+   matching `fleet-read` — with an explicit "load more". That is pagination, which every
+   app has, and it should not be described as a security control.
+
+4. **Multi-user?** Assumed single-user throughout, and §3's reasoning **depends on it**:
+   "my phone, my sessions" is what makes unredacted content correct. A second person on
+   the tailnet, an org-managed tailnet, or a shared node all reopen §3 and change the auth
+   model from "a token" to identities and per-project authorization.
 
 ## 12. Open risks
 
@@ -351,10 +404,16 @@ building a chat client.
   `fleet-clean`'s gates are about whether removal is *safe*, not whether it was
   *intended*. The passkey and the reproduced confirmation (§7) are what stand between a
   pocket and a deleted checkout, so they are load-bearing, not decoration.
-- **Redaction is a filter, and filters miss.** Every line of transcript crossing the wire
-  is potential exfiltration of production secrets — now more of it, per decision 3.
+- **Tailnet Lock can lock *you* out.** Ten disablement secrets, issued once. Lose them and
+  the signing nodes and the tailnet is unrecoverable. This is the only risk here that is
+  permanent, and it is created at setup — so the secrets go somewhere that survives losing
+  both devices, before the feature is switched on, not after.
+- **Decision 3 rests on decision 4.** Serving unredacted transcripts is correct *because*
+  the tailnet is one person's. That premise is stated (§11.4) precisely so that adding a
+  second person is recognised as reopening it rather than as an admin chore.
 - **A phone is lost more often than a laptop.** Revocation has to be one action and it has
-  to be testable; "the token is in the PWA" is only safe if killing it is trivial.
+  to be testable; "the token is in the PWA" is only safe if killing it is trivial. The
+  passkey (§5) is what stands between a lost-but-unlocked phone and the fleet.
 - **The audit log is only useful if something reads it.** An unread log is a compliance
   gesture. It should surface in the grid — a `fleet-inbox` row when a mobile action fires
   is the natural place, and costs almost nothing.
