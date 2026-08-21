@@ -2,12 +2,16 @@
 // fleet-grid.mjs — the ghostfleet card grid.
 //
 // Invoked by bin/ghostfleet inside a zellij pane as:
-//     node fleet-grid.mjs <tmux-socket> <tmux-conf> [--plain]
+//     node fleet-grid.mjs <tmux-socket> <tmux-conf> [--plain|--json]
 // stdin is the tty (for keys); the TUI is drawn to /dev/tty; the CHOSEN action
 // is printed to stdout (captured by the loop). Choices:
 //     attach\x1f<session>   → loop runs `tmux attach -t <session>`
 //     new\x1f<cwd>          → loop creates + attaches a new session in <cwd>
 //     (empty)               → quit to shell
+//
+// The two non-interactive modes read the same data and draw nothing: --plain prints a
+// table for a human at a terminal, --json the same values untruncated as the wire format
+// the phone renders from (docs/mobile.md §4). The socket is POSITIONAL in both.
 //
 // Data per card is joined from three sources:
 //   1. tmux list-sessions on <socket>  → the sessions that exist (name, cwd, attached)
@@ -36,6 +40,11 @@ const US = '\x1f'; // unit separator — non-whitespace field delimiter
 const SOCK = process.argv[2] || 'cf-default';
 const CONF = process.argv[3] && !process.argv[3].startsWith('--') ? process.argv[3] : null;
 const PLAIN = process.argv.includes('--plain');
+// Machine-readable sibling of --plain. --plain is formatted FOR A TERMINAL: branches
+// elide, the message is clipped to 44 columns, and at a narrow width adjacent columns
+// touch with no separator ("people-dupespeople-dupes") — so it cannot be parsed, only
+// read. The values behind it are whole; --json emits them before the formatting.
+const JSON_OUT = process.argv.includes('--json');
 const Z = process.env.CLAUDE_FLEET_SCOPE || SOCK.replace(/^cf-/, '');
 
 // ── colors ────────────────────────────────────────────────────────────────
@@ -603,6 +612,34 @@ function gather() {
   });
 }
 
+// The summary line, counted ONCE for all three consumers: the TUI header, --plain's
+// first line, and --json's `counts`. It was inline in renderGrid, and --plain kept its
+// own three-of-the-six copy; a third copy for --json is how the fleet ends up reporting
+// two different numbers for the same fleet in the same second, which is precisely the
+// drift the phone design forbids (docs/mobile.md §3: one producer of "what is this
+// session doing"). One function means a new status can only be added in one place.
+//
+// LIMIT AND INTERRUPTED ARE THEIR OWN BUCKETS AND ARE NEVER FOLDED INTO READY. Both
+// leave the input box up and match every ready signal, so five workers at a usage
+// ceiling counted as "5 ready" is the summary lying at exactly the glance you would act
+// on. The keys are the wire names (need_you, not need-you) because this object IS the
+// `counts` object --json emits.
+//
+// Six buckets, not nine, and deliberately: these are the six the header shows. `idle`,
+// `starting` and `unknown` are carried per card and counted by nobody — a consumer that
+// wants them reads cards[], and must not infer them by subtracting these six from
+// cards.length as though the remainder were one status.
+function statusCounts(cards) {
+  return {
+    need_you:    cards.filter(c => c.status === 'need-you').length,
+    working:     cards.filter(c => c.status === 'working').length,
+    ready:       cards.filter(c => c.status === 'ready').length,
+    parked:      cards.filter(c => c.status === 'parked').length,
+    limit:       cards.filter(c => c.status === 'limit').length,
+    interrupted: cards.filter(c => c.status === 'interrupted').length,
+  };
+}
+
 // ^T / ^N on the grid: a terminal or the editor on the SELECTED card's folder, falling
 // back to the project root (master's cwd) when the selection isn't a session — pressing
 // it on "+ new session" should still give you a terminal, not nothing.
@@ -1096,15 +1133,10 @@ function buildItems() {
 function cols() { return Math.max(1, Math.floor(W() / (CW + 3))); }
 
 function renderGrid() {
-  const need = cards.filter(c => c.status === 'need-you').length;
-  const work = cards.filter(c => c.status === 'working').length;
-  const ready = cards.filter(c => c.status === 'ready').length;
-  const parked = cards.filter(c => c.status === 'parked').length;
-  // Counted separately and NEVER folded into "ready": a fleet reading "5 ready" when
-  // all five are waiting on a usage window is the summary line lying at a glance, which
-  // is the one place it must not.
-  const limited = cards.filter(c => c.status === 'limit').length;
-  const cut = cards.filter(c => c.status === 'interrupted').length;
+  // Counted by statusCounts() so the header, --plain and --json cannot disagree; limit
+  // and interrupted are separate buckets there and never folded into ready.
+  const { need_you: need, working: work, ready, parked, limit: limited, interrupted: cut }
+    = statusCounts(cards);
   let buf = '\x1b[H';
   const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
@@ -1725,12 +1757,73 @@ if (process.argv.includes('--order')) {
   process.exit(0);
 }
 
+// ── json (machine-readable) mode ──────────────────────────────────────────
+// docs/mobile.md §4. The wire format the phone renders from, and the whole reason it is
+// THIS file: a second implementation of "what is this session doing" would drift from
+// the grid's, and the grid's is the one with the scars. Everything here comes from
+// gather() and statusCounts() — the same two calls the TUI draws from — so the phone and
+// the grid cannot disagree about a fleet.
+//
+// The fields are exactly what cardLines() consumes, and nothing else. No cwd (the card
+// never shows it), no pid out of the schedule marker: a field the TUI does not render is
+// a field nothing keeps honest.
+//
+// UNTRUNCATED, which is the point. --plain clips the branch to 26 columns and the
+// message to 44 and pads both, so a consumer of that text cannot tell an elided branch
+// from a real one — `feat/coi-policy-beside-fo…` is a plausible branch name. These are
+// the values as computed.
+//
+// Checked BEFORE --plain so `--json --plain` gives the parseable one: a caller that
+// passed both wants a machine to read the result, and a caller that wanted the table
+// would not have asked for json.
+// AND IT IS AWAITED RATHER THAN console.log'd. process.exit() DISCARDS a pending stdout
+// write, and on macOS a pipe is asynchronous — so `console.log(json); process.exit(0)`
+// truncates at the 64KB pipe buffer with no error on either side. Measured on this
+// machine: 200 000 bytes written, 65 536 received, the JSON stopping mid-string. It is
+// reachable because `msg` has no length bound (it is a whole assistant turn), and it
+// fails as unparseable garbage rather than as a missing field — the reader cannot even
+// tell it was truncated. --plain is not exposed to this: its message column is clipped
+// to 46, so a row is ~126 bytes and you would need 500 sessions to fill the buffer.
+//   The await is also what keeps the module body from falling through into the TUI,
+// which is what a bare write-with-callback would do.
+if (JSON_OUT) {
+  const rows = gather();
+  await new Promise(res => process.stdout.write(JSON.stringify({
+    project: Z,
+    profile: PROFILE,
+    counts: statusCounts(rows),
+    cards: rows.map(c => ({
+      name:     c.name,           // what fleet-send / fleet-read address
+      // '' means unlabelled internally; on the wire that is null, so "is this card
+      // titled by a label" is one test for the client rather than two.
+      label:    c.label || null,
+      // The nine-value vocabulary, verbatim and uncollapsed — need-you, working, ready,
+      // parked, idle, starting, unknown, limit, interrupted. `unknown` in particular is
+      // NOT idle: it means the agent's adapter has no validated busy detector and we
+      // genuinely cannot tell, and a client that renders it as a confident green dot
+      // undoes the one thing this status layer is for.
+      status:   c.status,
+      folder:   c.folder,
+      branch:   c.branch,
+      agent:    c.agent,          // the card only draws it when != claude
+      msg:      c.msg,
+      age:      c.age,            // seconds since the last transcript write; null = unknown
+      attached: c.attached,
+      // Just the epoch. The marker on disk also carries the message and the pid of the
+      // process that will send it; neither is on the card, and the pid is meaningless
+      // off this machine.
+      sched:    c.sched ? { at: c.sched.at } : null,
+      limit_at: c.limitAt || null,   // "10:20pm" — when the usage window rolls over
+    })),
+    free_worktrees: freeWorktrees(),
+  }) + '\n', res));
+  process.exit(0);
+}
+
 // ── plain (non-interactive) mode ──────────────────────────────────────────
 if (PLAIN) {
   const rows = gather();
-  const need = rows.filter(c => c.status === 'need-you').length;
-  const work = rows.filter(c => c.status === 'working').length;
-  const ready = rows.filter(c => c.status === 'ready').length;
+  const { need_you: need, working: work, ready } = statusCounts(rows);
   console.log(`${need} need you · ${work} working · ${ready} ready`);
   // AGENT is in the plain table because this is the path used to verify the fleet
   // without drawing the TUI — a status you can't attribute to an agent is not
