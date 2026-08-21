@@ -300,4 +300,27 @@ const stores = [...read('api.js').matchAll(/(?:localStorage|sessionStorage)\.set
 is('no storage write mentions the token', '', stores.filter(a => /token/i.test(a)).join('|'));
 is('the token lives in a module variable', true, /^let token = null, tokenExp = 0;$/m.test(read('api.js')));
 
+// ── 9. the probe asks a route the server really has ───────────────────────
+// api.js decides between the daemon and the bundled fixtures by asking ONE endpoint, and
+// reads a 401 there as proof of a fleet (§5: the API refusing an unauthenticated request
+// is the enforcement). Both halves of that are cross-file facts about fleet-serve, and
+// both break silently:
+//
+//   - an INVENTED path answers 401 today only because the token gate runs before the
+//     routing table. Move the gate and it 404s, api.js reads "no server", and every
+//     phone the daemon serves quietly falls back to sample data — the bug this whole
+//     section exists for, one release later.
+//   - a path in fleet-serve's OPEN set answers 200 with no token, so a probe there
+//     proves the endpoint exists but says nothing about auth being enforced.
+const SERVE = fs.readFileSync(path.join(ROOT, 'bin', 'fleet-serve.mjs'), 'utf8');
+is('the probe path is a route fleet-serve has', true,
+   new RegExp(`p === '${api.PROBE_PATH}'`).test(SERVE));
+is('...and it sits behind the token gate', false,
+   new RegExp(`OPEN = new Set\\(\\[[^\\]]*'${api.PROBE_PATH}'`).test(SERVE));
+// One file knows where the fleet lives — the same invariant as "one file fetches", and
+// broken the same way: a screen that reads the setting itself gets its own opinion about
+// which backend it is talking to.
+is('only api.js reads the backend setting', '',
+   ['app.js', 'passkey.js', 'grid.js'].filter(f => /gf\.base/.test(JS[f])).join(','));
+
 console.log(rows.join('\n'));

@@ -4024,6 +4024,75 @@ else
 fi
 is "cf-sync copies web/ to the runtime" "1" "$(grep -c 'for d in bin tmux hooks mcp skill layouts web' "$ROOT/bin/cf-sync" || true)"
 
+# ── the client picks the right backend when the DAEMON is what served it ─────
+# Found on a real phone: the client fleet-serve serves ran on fixtures, because `gf.base`
+# unset meant "fixtures" and nothing ever set it. The phone showed four projects that do
+# not exist on this machine, offered a local-only passkey, and never made one request —
+# so `fleet-serve clients` said "(no clients enrolled)" and there was nothing to grep.
+#
+# The helper needs a LIVE daemon, so it runs here rather than in the web/ group below:
+# the signal being relied on is a real 401 from a real fleet-serve with nothing enrolled,
+# and the whole point is that this is measured and not assumed. It brings its own static
+# servers for the other direction.
+group "phone client: served by the daemon means talking to the daemon"
+if sv_start origin; then
+  PWO="$(mktemp -d "$TEST_RUNS.$$.pwo.XXXXXX")"
+  node "$ROOT/test/helpers/pwa-origin.mjs" "$BASE" > "$PWO/out" 2> "$PWO/err"
+  is "pwa-origin ran"                 "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PWO/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A floor, for the same reason as the two helpers below: this one `await import`s the
+  # client and starts servers, and a helper that dies emits nothing — which in a
+  # 1200-assertion run is indistinguishable from a group that passed.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/out")" -ge 50 ] && echo yes || echo "no: $(wc -l < "$PWO/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PWO/out"
+
+  # ── and the client has to RUN, and paint what it decided ──────────────────
+  # `node --check` proves syntax, not that it runs (CLAUDE.md), and app.js has already met
+  # that once: its boot block sat above the `const SHIP` the lock screen draws, so every
+  # screen was blank from a ReferenceError in a file that parses perfectly. pwa-check's
+  # answer is structural — declarations before statements — and this is the other half: a
+  # 60-line DOM, app.js imported for real, and the painted text read back.
+  node "$ROOT/test/helpers/pwa-render.mjs" "$BASE" > "$PWO/render" 2> "$PWO/render.err"
+  is "pwa-render ran"                 "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PWO/render.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/render")" -ge 28 ] && echo yes || echo "no: $(wc -l < "$PWO/render") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PWO/render"
+
+  # ── and once it IS talking to the daemon, it has to be able to get in ──────
+  # The other half of the same seam, found on the same phone: fleet-serve will not enrol a
+  # passkey without a window opened from the terminal AND the one-time code it printed —
+  # correctly, since the endpoint is remote code execution — and the client had no field
+  # to type one into, so every registration was a guaranteed 403. Worse, api.js reported
+  # `register → HTTP 403` and threw away the server's sentence, which is the only thing
+  # that says what to do next.
+  #
+  # A NEW client id, not 'phone': the auth group above already enrolled that one, and
+  # `fleet-serve enroll` refuses an id that already has a passkey — so reusing it would
+  # hand the helper an empty code and fail for a reason that has nothing to do with the
+  # client. The caps are the raised ones (sv_rate above); this spends about a dozen from
+  # the `auth` bucket, since every ceremony starts with a challenge.
+  PWE_CODE="$(sv_code pwaenrol)"
+  is "an enrolment window opened"     "yes" "$([ -n "$PWE_CODE" ] && echo yes || echo no)"
+  node "$ROOT/test/helpers/pwa-enrol.mjs" "$BASE" "$PWE_CODE" pwaenrol > "$PWO/enrol" 2> "$PWO/enrol.err"
+  is "pwa-enrol ran"                  "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PWO/enrol.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/enrol")" -ge 40 ] && echo yes || echo "no: $(wc -l < "$PWO/enrol") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PWO/enrol"
+  # The client really is enrolled now, as far as the SERVER is concerned — asserted from
+  # the other side, because the helper's own view of it is the client's.
+  is "the daemon lists the phone as enrolled" "1" "$(sv_cli clients | grep -c '^pwaenrol *active *1' || true)"
+  rm -rf "$PWO"
+  serve_stop
+else
+  skip "phone client origin" "server did not come up"
+fi
+
 group "fleet-serve does not fork the dispatch"
 # The whole point of mcp/fleet-dispatch.mjs: two callers of the fleet verbs, ONE copy of
 # the argument validation that keeps a dropped key from reaching a worker as the word
