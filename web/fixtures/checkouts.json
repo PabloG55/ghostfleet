@@ -1,0 +1,10 @@
+{
+  "roots": ["/Users/pgarces/Documents/superkey", "/Users/pgarces/Documents"],
+  "checkouts": [
+    "/Users/pgarces/Documents/superkey",
+    "/Users/pgarces/Documents/superkey-1",
+    "/Users/pgarces/Documents/superkey-2",
+    "/Users/pgarces/Documents/coi-beside",
+    "/Users/pgarces/Documents/dupe-source"
+  ]
+}

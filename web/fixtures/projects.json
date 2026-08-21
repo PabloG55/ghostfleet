@@ -1,0 +1,60 @@
+{
+  "home": "/Users/pgarces",
+  "projects": [
+    {
+      "name": "superkey",
+      "profile": "work",
+      "path": "/Users/pgarces/Documents/superkey",
+      "agent": null,
+      "socket": "cf-superkey",
+      "sessions": { "need": 0, "working": 2, "parked": 0, "total": 7 },
+      "sched": null,
+      "nudge": true,
+      "budget": "enforced"
+    },
+    {
+      "name": "ghostfleet",
+      "profile": "work",
+      "path": "/Users/pgarces/Documents/me/ghostfleet",
+      "agent": null,
+      "socket": "cf-ghostfleet",
+      "sessions": { "need": 1, "working": 3, "parked": 0, "total": 5 },
+      "sched": { "at": 1787356800 },
+      "nudge": true,
+      "budget": "enforced"
+    },
+    {
+      "name": "koji",
+      "profile": "work",
+      "path": "/Users/pgarces/Documents/koji",
+      "agent": "codex",
+      "socket": "cf-koji",
+      "sessions": { "need": 0, "working": 0, "parked": 2, "total": 2 },
+      "sched": null,
+      "nudge": false,
+      "budget": "ignored"
+    },
+    {
+      "name": "acord-mapper",
+      "profile": "work",
+      "path": "/Users/pgarces/Documents/acord-mapper",
+      "agent": null,
+      "socket": "cf-acord-mapper",
+      "sessions": { "need": 0, "working": 0, "parked": 0, "total": 3 },
+      "sched": null,
+      "nudge": true,
+      "budget": "enforced"
+    },
+    {
+      "name": "dotfiles",
+      "profile": "personal",
+      "path": "/Users/pgarces/Documents/dotfiles",
+      "agent": null,
+      "socket": "cf-dotfiles",
+      "sessions": { "need": 0, "working": 0, "parked": 0, "total": 0 },
+      "sched": null,
+      "nudge": false,
+      "budget": "enforced"
+    }
+  ]
+}

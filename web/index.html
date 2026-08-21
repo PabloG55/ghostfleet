@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover + the safe-area insets in app.css: an installed PWA owns the
+     whole screen, notch and home indicator included. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ghostfleet</title>
+<meta name="theme-color" content="#0b0d10">
+<!-- iOS installs from these two, not from the manifest (16.4+ reads the manifest for
+     display/scope but still wants the apple-touch-icon). -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ghostfleet">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<link rel="icon" href="./icons/icon-192.png" sizes="192x192">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<!-- Everything below is built by app.js. The static shell is deliberately this small:
+     it is what the service worker serves on a cold offline open, before any state. -->
+<div id="app" aria-live="polite"></div>
+<div id="sheet"></div>
+<script type="module" src="./app.js"></script>
+<noscript>ghostfleet needs JavaScript: the grid is computed, not a page.</noscript>
+</body>
+</html>

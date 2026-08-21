@@ -1,0 +1,12 @@
+{
+  "global_nudge": true,
+  "sessions": {
+    "coi-beside": "on",
+    "dupe-source": "inherit",
+    "doc-verify": "inherit",
+    "quote-extract": "off",
+    "binder-slots": "inherit",
+    "rls-contacts": "inherit",
+    "proposal-pdf": "inherit"
+  }
+}

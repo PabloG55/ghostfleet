@@ -1,0 +1,38 @@
+{
+  "project": "ghostfleet",
+  "profile": "work",
+  "counts": { "need_you": 0, "working": 1, "ready": 1, "parked": 0, "limit": 0, "interrupted": 0 },
+  "cards": [
+    {
+      "name": "fleet-pwa",
+      "label": null,
+      "status": "working",
+      "folder": "fleet-pwa",
+      "branch": "feat/fleet-pwa",
+      "agent": "claude",
+      "msg": "Mirroring cardLines() into web/grid.js; the parity helper lifts the real one.",
+      "age": 95,
+      "attached": false,
+      "sched": null,
+      "limit_at": null
+    },
+    {
+      "name": "fleet-serve",
+      "label": null,
+      "status": "ready",
+      "folder": "fleet-serve",
+      "branch": "feat/fleet-serve",
+      "agent": "claude",
+      "msg": "Transport only — no second status implementation.",
+      "age": 900,
+      "attached": false,
+      "sched": null,
+      "limit_at": null
+    }
+  ],
+  "free_worktrees": [
+    { "path": "/Users/pgarces/Documents/me/api-3", "branch": "feat/x", "task": "rework the ACORD 25 mapper" },
+    { "path": "/Users/pgarces/Documents/me/grid-json", "branch": "feat/grid-json", "task": "" },
+    { "path": "/Users/pgarces/Documents/me/stack-view", "branch": "feat/stack-view", "task": "landed in #36, safe to reclaim" }
+  ]
+}

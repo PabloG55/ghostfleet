@@ -3329,6 +3329,68 @@ else
   skip "notification chord" "tmux/jq missing"
 fi
 
+# ── 6a. the phone client (web/) ───────────────────────────────────────────────
+# The PWA renders the SAME cards as the TUI, from the §4 JSON. Two helpers do the work
+# and both emit one `name <US> want <US> got` row per check, so the comparing and the
+# reporting stay here, in this file's own `is`.
+#
+# THE ROW COUNT IS ASSERTED FIRST, and that is not a formality. Both helpers `await
+# import(...)` and throw on a missing file or a renamed function; a helper that dies
+# emits nothing, the `while` loop runs zero times, and the group prints nothing at all
+# — which in a 600-assertion run looks exactly like a group that passed. A floor under
+# the count is what turns that silence back into a failure.
+#
+# \x1f, not a tab: tab is IFS-whitespace, so an empty field would collapse and shift
+# `got` into `want` — the trap at the top of CLAUDE.md, and one that would report a
+# mismatch as a pass here.
+group "phone client: the card the phone draws is the card the TUI draws"
+if [ -d "$ROOT/web" ]; then
+  PW="$(mktemp -d "$TEST_RUNS.$$.pwa.XXXXXX")"
+  node "$ROOT/test/helpers/grid-parity.mjs" > "$PW/parity" 2> "$PW/parity.err"
+  is "grid-parity ran"                "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PW/parity.err" | tr '\n' ' ' | sed 's/ *$//')"
+  # 4 cards on the smallest fixture set is ~40 rows; 90 leaves room to add fixtures and
+  # still fails loudly if the helper dies half way.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/parity")" -ge 90 ] && echo yes || echo "no: $(wc -l < "$PW/parity") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PW/parity"
+
+  node "$ROOT/test/helpers/pwa-check.mjs" > "$PW/struct" 2> "$PW/struct.err"
+  is "pwa-check ran"                  "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PW/struct.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/struct")" -ge 80 ] && echo yes || echo "no: $(wc -l < "$PW/struct") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PW/struct"
+  rm -rf "$PW"
+
+  # cf-sync mirrors only a whitelist of directories into the runtime, and the client is
+  # a RUNTIME asset — fleet-serve serves it from ~/.local/libexec/ghostfleet, not from
+  # the repo. Left out of that list, the PWA 404s in the browser while every file in the
+  # repo is perfectly correct: the same "the file on disk was current, the process was
+  # not" trap CLAUDE.md records for a stale MCP server, and just as invisible from here.
+  is "cf-sync syncs web/ into the runtime" "yes" \
+     "$(grep -qE '^for d in .*\bweb\b' "$ROOT/bin/cf-sync" && echo yes || echo no)"
+  is "...and npm ships it"                 "yes" \
+     "$(grep -q '"web/"' "$ROOT/package.json" && echo yes || echo no)"
+
+  # The client is served as static files, so it has to parse as what the browser will
+  # load it as: ES modules. `node --check` reads web/package.json's "type": "module" to
+  # decide, which is exactly why that file is there — without it these parse as CommonJS
+  # and every `import` is a syntax error.
+  for f in "$ROOT"/web/*.js; do
+    node --check "$f" >/dev/null 2>&1 && ok "web/$(basename "$f") parses as a module" \
+      || bad "web/$(basename "$f") parses as a module" "ok" "syntax error"
+  done
+  for f in "$ROOT"/web/fixtures/*.json "$ROOT"/web/manifest.webmanifest "$ROOT"/web/package.json; do
+    node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$f" 2>/dev/null \
+      && ok "$(basename "$f") is valid JSON" || bad "$(basename "$f") is valid JSON" "ok" "parse error"
+  done
+else
+  skip "phone client" "web/ not present"
+fi
+
 # ── 6b. every command is actually installed ──────────────────────────────────
 # A new command that never reaches the install list is invisible until someone hits
 # "command not found" — and worse, the SUMMARY line was hand-maintained separately from
