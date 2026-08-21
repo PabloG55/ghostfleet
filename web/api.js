@@ -10,6 +10,8 @@
 //   GET  /api/grid?project=<name>               -> docs/mobile.md §4, verbatim
 //   GET  /api/session?project=&session=&limit=20[&before=<ts>]
 //                                               -> { session, total, messages: [ {ts,role,text} ], note? }
+//   GET  /api/pane?project=&session=[&scrollback=N]
+//                                               -> { session, rows?, cols?, at, pane: "<SGR text>" }
 //   GET  /api/checkouts?project=<name>          -> { roots, checkouts }
 //   GET  /api/settings?project=<name>           -> { global_nudge, sessions: { name: on|off|inherit } }
 //   POST /api/verb   { tool, args }             -> { ok, text }        (Bearer token required)
@@ -341,6 +343,34 @@ export async function getSession(project, session, before = null) {
   const end = upTo < 0 ? msgs.length : upTo;
   const start = Math.max(0, end - PAGE);
   return { ...all, messages: msgs.slice(start, end), next_before: start > 0 ? String(msgs[start].ts) : null };
+}
+
+// The session's real pane — `capture-pane -p -e`, escapes and all.
+//
+// Why this exists next to getSession() rather than instead of it: getSession cannot show
+// a command. It goes through `fleet-read --json`, whose payload is {ts, role, text} —
+// assistant and user prose — so tool calls, the commands inside them and their results
+// are absent from the wire, not merely unrendered. The first person to use this app said
+// both halves of that out loud ("it doesn't look like a normal chat and I can't see the
+// commands that is running"), and the fix is the one CLAUDE.md already prescribes for
+// every other question about a session: read the pane, because THE PANE IS THE TRUTH.
+//
+// The list stays reachable. It reads better for scrolling back through prose, it is
+// paginated over the whole transcript rather than bounded by what is on screen, and the
+// pane cannot replace either of those.
+export async function getPane(project, session, scrollback = 0) {
+  if ((await ready()).mode === 'server') {
+    return get(`/api/pane?project=${encodeURIComponent(project || '')}&session=${encodeURIComponent(session)}`
+             + (scrollback ? `&scrollback=${scrollback}` : ''));
+  }
+  // Fixture mode carries a REAL capture — one of a working session mid-turn, one of a
+  // live permission dialog — because the thing being checked is a renderer, and a
+  // hand-written escape sequence would only prove it can parse what I thought to write.
+  try { return await fixture(`pane-${project}-${session}.json`); }
+  catch {
+    return { session, pane: '', rows: 0, cols: 0,
+             note: `no pane captured for '${session}' in fixture mode.` };
+  }
 }
 
 // ── auth (the passkey's three requests) ───────────────────────────────────
