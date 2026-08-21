@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-clean [-s SOCKET] [--go] [--agents] [--only <worktree-path>]
+# fleet-clean [-s SOCKET] [--go] [--agents] [--only <worktree-path> [--force]]
 #
 # Tear down FINISHED work in the current fleet. DRY RUN by default — prints exactly
 # what it would do; re-run with --go to actually apply it.
@@ -15,15 +15,26 @@
 # NEVER touches: the main checkout (master's home), a worktree with a live session,
 # one with uncommitted or unpushed work, or anything under Claude's own
 # .claude/worktrees/ (--agents opts in) — those are listed as "keep — <why>".
+#
+# --force (only with --only) IS "REMOVE ANYWAY". It is the grid's `f = remove anyway` and
+# the phone's second confirmation (docs/mobile.md §7), and it lives here rather than in
+# either caller because this file owns worktree removal and a second copy of that is a
+# second thing to be wrong. It skips exactly the three gates that ask whether the WORK is
+# finished — uncommitted changes, unpushed commits, unmerged branch — and DELETES THAT
+# WORK. It keeps the three that ask whether removal would break something nobody asked
+# about: the main checkout, a live session standing in the tree, and Claude's own
+# worktrees. Refused without --only, because "force" and "sweep the whole fleet" must
+# never be the same command.
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-GO=0; AGENTS=0; ONLY=""
+GO=0; AGENTS=0; ONLY=""; FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)       SOCK="${2:?}"; shift 2 ;;
     --go)     GO=1; shift ;;
+    --force)  FORCE=1; shift ;;       # see the header: remove anyway, one named worktree
     --agents) AGENTS=1; shift ;;      # also sweep Claude's own .claude/worktrees/ trees
     # Restrict the sweep to ONE worktree. Exists so `fleet-stop --reclaim` can finish a
     # single worker without inheriting a second copy of the "is this safe to remove"
@@ -33,6 +44,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$SOCK" ] || { echo "fleet-clean: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+[ "$FORCE" = 1 ] && [ -z "$ONLY" ] \
+  && { echo "fleet-clean: --force needs --only <worktree-path> — it removes ONE named worktree past the gates, never a fleet-wide sweep" >&2; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "fleet-clean: git required" >&2; exit 1; }
 GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
   || { echo "fleet-clean: not inside a git repo" >&2; exit 1; }
@@ -91,7 +104,16 @@ while IFS=$'\t' read -r wt br; do
   esac
   if [ ! -d "$wt" ]; then echo "  prune $base (dir gone)"; run "git -C '$GITROOT' worktree prune"; continue; fi
   s="$(sess_for "$wt")"
+  # Kept even under --force: this one is not about whether the work is finished. Another
+  # session standing here would have its cwd pulled out from under it and start reporting
+  # "working directory no longer exists" — a break in something nobody asked us to touch.
   [ -z "$s" ] || { echo "  keep $base — live session '$s'"; kept=$((kept+1)); continue; }
+  if [ "$FORCE" = 1 ]; then
+    echo "  remove $base ($br) — FORCED past the gates, on request (uncommitted or unpushed work is being deleted)"
+    run "git -C '$GITROOT' worktree remove --force$rmflags '$wt'"
+    removed=$((removed+1))
+    continue                     # and no branch deletion: the branch may be the only copy
+  fi
   [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || { echo "  keep $base — uncommitted changes"; kept=$((kept+1)); continue; }
 
   safe=0; why=""
