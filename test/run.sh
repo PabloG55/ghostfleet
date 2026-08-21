@@ -2786,8 +2786,18 @@ fi
 # ...and an agent can actually reach it, which was half the gap: there is no clean tool
 # in MCP at all, so a lead had to shell out to a command that was all-or-nothing.
 group "reclaim is reachable from MCP"
-is "fleet_stop takes reclaim" "1" "$(grep -c "a.reclaim ? \['--reclaim'" "$ROOT/mcp/fleet-mcp.mjs" || true)"
-is "...and it is in the schema" "1" "$(grep -c "reclaim: { type: 'boolean'" "$ROOT/mcp/fleet-mcp.mjs" || true)"
+# The tool list and the argv it builds moved to mcp/fleet-dispatch.mjs when bin/fleet-serve
+# needed the same verbs over HTTP — fleet-mcp.mjs is only the stdio transport now. Same
+# assertion, same reason: an option that exists in the schema but never reaches the command
+# is an option that is silently ignored.
+is "fleet_stop takes reclaim"  "1" "$(grep -c "if (a.reclaim) args.push('--reclaim')" "$ROOT/mcp/fleet-dispatch.mjs" || true)"
+is "...and it is in the schema" "1" "$(grep -c "reclaim: { type: 'boolean'" "$ROOT/mcp/fleet-dispatch.mjs" || true)"
+# and its escalation, which is the phone's `f = remove anyway` (docs/mobile.md §7). TWO
+# tools carry it — fleet_stop for a worktree that still has a session, fleet_worktree_
+# remove for a free one — and both hand it to fleet-clean, which owns the rule about which
+# gates a force may skip.
+is "...and force reaches both tools" "2" "$(grep -c "if (a.force) args.push('--force')" "$ROOT/mcp/fleet-dispatch.mjs" || true)"
+is "...refused without reclaim" "1" "$(grep -c 'force needs reclaim' "$ROOT/mcp/fleet-dispatch.mjs" || true)"
 
 # ── 4d12. --json: the contract the phone renders from ────────────────────────
 # `--plain` is formatted FOR A TERMINAL and cannot be parsed. In the fixture below the
@@ -3776,6 +3786,88 @@ if sv_start json; then
   serve_stop
 else
   skip "fleet-serve reads" "server did not come up"
+fi
+
+group "fleet-serve: the REAL grid, two projects, one daemon process"
+# The strongest form of the scope/root test: no stub grid, no fake payload — the actual
+# bin/fleet-grid.mjs --json, driven through the daemon, against two real repos with a real
+# tmux session sitting in one of their worktrees.
+#
+# mainRepo() reads CLAUDE_FLEET_ROOT and freeWorktrees() pairs that repo's worktrees
+# against tmuxList()'s cwds on CLAUDE_FLEET_SOCK, so a daemon that inherits its own values
+# hands those two functions a root from one project and a socket from another. The pairing
+# then cannot see the sessions, and a worktree with a live agent in it is advertised as
+# FREE. Measured on the deployed runtime against cf-superkey from a ghostfleet environment:
+# fleet-pwa, fleet-serve and grid-json all came back free, all three mid-turn.
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+RG="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$RG/home/.config/ghostfleet" "$RG/home/.claude/fleet"
+for pj in pa pb; do
+  mkdir -p "$RG/$pj"
+  git init -q "$RG/$pj/main" 2>/dev/null
+  ( cd "$RG/$pj/main" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init )
+  # two worktrees, because freeWorktrees() returns [] for a repo that has fewer than two
+  git -C "$RG/$pj/main" worktree add -q -b "wt1-$pj" "$RG/$pj/wt1-$pj" 2>/dev/null
+  git -C "$RG/$pj/main" worktree add -q -b "wt2-$pj" "$RG/$pj/wt2-$pj" 2>/dev/null
+done
+printf 'pa\t%s\twork\npb\t%s\twork\n' "$RG/pa" "$RG/pb" > "$RG/home/.config/ghostfleet/projects"
+# a live session standing in pa's FIRST worktree, on pa's OWN socket
+tmux -L cf-pa kill-server 2>/dev/null
+tmux -L cf-pa new-session -d -s busy -c "$RG/pa/wt1-pa" 'sleep 120' 2>/dev/null
+RPORT="$(free_port)"; RPORT="${RPORT:-18899}"
+RBASE="http://localhost:$RPORT"
+GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl" \
+  HOME="$RG/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" init --bind 127.0.0.1 --port "$RPORT" >/dev/null 2>&1
+rcode="$(GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl" \
+  HOME="$RG/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" enroll phone | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')"
+GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl" \
+  HOME="$RG/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$ROOT/bin/fleet-serve.mjs" > "$RG/log" 2>&1 &
+SERVE_PIDS="$SERVE_PIDS $!"
+i=0; while [ "$i" -lt 60 ] && ! curl -s -m1 "$RBASE/healthz" >/dev/null 2>&1; do i=$((i+1)); sleep 0.1; done
+if curl -s -m1 "$RBASE/healthz" >/dev/null 2>&1; then
+  cat > "$RG/probe.mjs" <<'PROBE'
+// dynamic, because an import specifier cannot be an expression and the helper lives at
+// an absolute path this temp dir has no relative route to
+const { Authenticator } = await import(process.env.HELPER);
+const base = process.argv[2];
+const a = new Authenticator({ rpId: 'localhost', origin: base });
+await a.enroll(base, process.argv[3]);
+for (const p of ['pa', 'pb']) {
+  const r = await a.api(base, 'GET', `/api/grid?project=${p}`);
+  console.log(`${p}\x1f${r.status}\x1f${JSON.stringify(r.json)}`);
+}
+PROBE
+  HELPER="file://$ROOT/test/helpers/serve-client.mjs" node "$RG/probe.mjs" "$RBASE" "$rcode" > "$RG/out" 2>"$RG/err"
+  rf() { grep -m1 "^$1$US" "$RG/out" | cut -d "$US" -f2; }
+  rb() { grep -m1 "^$1$US" "$RG/out" | cut -d "$US" -f3; }
+  is "the real grid answers for pa"          "200" "$(rf pa)"
+  is "the real grid answers for pb"          "200" "$(rf pb)"
+  is "pa says it is pa"                      "1"   "$(rb pa | grep -c '"project":"pa"' || true)"
+  is "pb says it is pb"                      "1"   "$(rb pb | grep -c '"project":"pb"' || true)"
+  # THE ONE THAT PROTECTS A DESTRUCTIVE VERB: wt1-pa has a live session in it.
+  #   Matched against free_worktrees SPECIFICALLY, not against the whole payload — the
+  # busy session's own card carries folder/branch "wt1-pa" too, so a grep over the body
+  # matches whether or not the worktree is offered as free. That is the same class of
+  # mistake as the test that cannot fail: it went red for the right reason but the wrong
+  # substring, on a grid that was behaving correctly.
+  freepaths() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log((JSON.parse(s).free_worktrees||[]).map(w=>w.path).join(" ")))'; }
+  is "pa's occupied worktree is NOT free"    "0"   "$(rb pa | freepaths | grep -c 'wt1-pa' || true)"
+  is "...but its idle one is"                "1"   "$(rb pa | freepaths | grep -c 'wt2-pa' || true)"
+  # ...and pb, queried from the SAME process, sees only its own tree
+  is "pb's free list is pb's"                "1"   "$(rb pb | freepaths | grep -c "$RG/pb" || true)"
+  is "...and never mentions pa's"            "0"   "$(rb pb | freepaths | grep -c "$RG/pa" || true)"
+  is "...nor does anything else in pb"       "0"   "$(rb pb | grep -c "$RG/pa" || true)"
+  is "pa's counts have the six §4 keys"      "6"   \
+     "$(rb pa | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(Object.keys(JSON.parse(s).counts).length))')"
+  is "the busy session is a card, not free"  "1"   "$(rb pa | grep -c '"name":"busy"' || true)"
+else
+  skip "real grid through the daemon" "server did not come up"
+fi
+serve_stop
+tmux -L cf-pa kill-server 2>/dev/null
+rm -rf "$RG"
+else
+  skip "real grid through the daemon" "git, tmux or node missing"
 fi
 
 group "fleet-serve rate limits a token that leaked"
