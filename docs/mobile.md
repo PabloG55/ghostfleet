@@ -1,14 +1,16 @@
 # Mobile: the fleet from a phone
 
-**Status:** design only, nothing built. Every number below was measured on the author's
-machine before the design was written, and **two of the measurements changed the
-design** — the sleep setting (§8) and the dependency posture (§6). See those sections
-before disagreeing with the conclusions.
+**Status:** design only, nothing built. Two decisions are settled: the transport is
+Tailscale (§5), and the phone gets the **full verb set**, not a read-only phase (§7).
+Every number below was measured on this machine before the design was written, and **two
+of the measurements changed the design** — the sleep setting (§8) and the dependency
+posture (§6). See those sections before disagreeing with the conclusions.
 
 The fleet is invisible away from the desk. A worker that needs a permission at 9pm waits
-until someone opens a terminal, and the only thing you actually want to know from a couch
-or a café — *is anything blocked on me* — costs a laptop. This is the design for reading
-the fleet, and eventually steering it, from a phone.
+until someone opens a terminal, and the thing you actually want to know from a couch or a
+café — *is anything blocked on me* — costs a laptop. This is the design for **running**
+the fleet from a phone: the same grid, the same cards, the same verbs, including creating
+and reclaiming worktrees.
 
 ## 1. The constraint everything else follows from
 
@@ -24,8 +26,13 @@ contain `DATABASE_URL` for hosted Neon, Clerk keys, and — for the SuperKey fle
 insurance policies belonging to real people.
 
 So the security posture is not "add a login page." It is: **the service is never publicly
-routable, and v1 cannot execute anything.** Everything in §5–§7 follows from this
-sentence, and a change that weakens it is a redesign, not a tweak.
+routable, and every mutating call is authenticated, confirmed and recorded.** Everything
+in §5–§7 follows from that sentence, and a change that weakens it is a redesign, not a
+tweak.
+
+Note what is deliberately *not* the mitigation: reducing what the phone can do. Parity is
+a requirement (§7), so the capability is fixed and the controls are identity,
+confirmation and accountability instead.
 
 ## 2. What already exists (and why this is smaller than it looks)
 
@@ -215,21 +222,53 @@ the same `y = yes` confirmation.
 **The stack has no phone equivalent** and does not need one. It exists to put four
 sessions side by side; a phone has no side, and at `nc = 1` that is just the card list.
 
-## 7. Phasing, and the read-only boundary
+## 7. Full parity, and where the guardrails actually live
 
-**v1 — read only.** Projects, grid, session transcript. No verb that changes anything.
-A compromised token leaks information instead of executing code, and this is most of the
-value: it answers *is anything blocked on me* from anywhere.
+**The phone gets the whole verb set, including `spawn` and `stop --reclaim`.** A
+read-only first phase was proposed and rejected: an app that reports a worker has been
+blocked on "Allow `pnpm test`?" since 9pm and cannot answer it has not solved the problem
+that motivated it, it has only described it more conveniently.
 
-**v2 — the safe verbs.** `answer` (unblock a dialog), `send`, `pause`/`resume`. These
-change agent state but create nothing and delete nothing.
+That decision does not lower the bar from §1, it moves where the bar is enforced. If
+capability is fixed at parity, security stops being about *restricting what can be done*
+and becomes about *proving who is doing it, and leaving a record*:
 
-**v3 — the destructive verbs.** `spawn`, `stop --reclaim`, `rename`, behind explicit
-confirmation and a passkey. `stop --reclaim` deletes a worktree; a fat-fingered tap on a
-phone must not be able to reach it casually.
+- **Passkey / WebAuthn re-auth on the destructive verbs** — `spawn`, `stop --reclaim`,
+  `rename`, `kill`. Not a block; a biometric prompt at the moment of action, so a phone in
+  someone else's hand is not the same as a phone plus its owner. **This makes the phone
+  stricter than the terminal**, which cannot ask for a fingerprint.
+- **The TUI's own confirmations, reproduced.** The grid already guards these, and
+  inheriting them *is* parity rather than an addition:
 
-The boundary is enforced **server-side by an allowlist of tool names per phase**, never by
-which buttons the client draws. A client-side restriction is a suggestion.
+  ```
+  kill session 'coi-beside'?          y = yes · any other key = cancel
+  remove worktree 'api-3' (feat/x)?   y = yes · any other key = cancel
+                                      f = remove anyway
+  ```
+
+  A phone confirmation is a second deliberate tap, and `--force` needs its own.
+- **Every mutating call writes an audit row**, and that row surfaces as a `fleet-inbox`
+  entry (§12). A log nobody reads is a compliance gesture; a log that appears in the grid
+  is a control.
+- **Rate limiting**, so a leaked token is slow to use.
+
+Enforcement is **server-side on the tool name**, never on which buttons the client draws.
+A client-side restriction is a suggestion.
+
+### The two things that cannot transfer
+
+Physical constraints, not policy:
+
+- **The stack** (§6) — it exists to put sessions side by side, and a phone has no side.
+- **`Ctrl-t` terminal and `Ctrl-n` editor tabs** — these open a shell and neovim in the
+  session's folder. There is no local shell on the phone to open them in. Streaming a
+  remote shell is a much larger surface than the rest of this document combined and is
+  deliberately out of scope; the fleet verbs cover what those tabs are usually reached
+  for.
+
+Everything else maps: `n` new · `w` worktree · `s` schedule · `p`/`P` pause and resume ·
+`x` kill or remove · `,` settings · `⇧hjkl` reorder · `Ctrl-f` jump · `Ctrl-p`/`Q`
+projects · `q` back.
 
 ## 8. Availability: the measurement that nearly sinks it
 
@@ -283,23 +322,37 @@ building a chat client.
 - **No chat client.** A session's conversation is Remote Control's job (§9).
 - **No second status implementation.** Everything comes from `fleet-grid.mjs` (§3).
 
-## 11. Decisions still needed
+## 11. Decisions
 
-1. **Tailscale or Cloudflare Access** (§5). Recommendation: Tailscale, because it fails
-   closed and this endpoint is RCE.
-2. **Is v1 strictly read-only** (§7)? Recommendation: yes.
-3. **Redaction scope.** Transcripts hold live secrets and customer PII. Options: (a) a
-   secret-pattern filter on the way out, (b) `msg` truncated to the card's ~60 chars and
-   full transcripts never served, (c) both. Recommendation: both, with (b) as the v1
-   boundary — the grid needs a sentence, not a scrollback.
+**Settled:**
+
+1. **Transport: Tailscale** (§5). It fails closed, and this endpoint is RCE. Funnel stays
+   off — that is the single setting that would undo §5, and it should be asserted, not
+   remembered.
+2. **Full parity, not a read-only phase** (§7). An app that can see a blocked worker but
+   not unblock it describes the problem instead of solving it. The guardrails move to
+   identity, confirmation and audit rather than reduced capability.
+
+**Still open:**
+
+3. **Redaction scope**, and parity raises the stakes rather than lowering them: reading a
+   session is part of parity, so the scrollback now crosses the wire, where the earlier
+   read-only sketch would have served one sentence per card. Transcripts contain a hosted
+   `DATABASE_URL`, Clerk keys, and SuperKey's real policy data. Options: (a) a
+   secret-pattern filter on the way out, (b) serve a bounded tail rather than full
+   history, (c) both. Recommendation: **both** — (a) because the values are known shapes
+   and cheap to match, (b) because a bound limits the blast radius of whatever (a) misses.
 4. **Multi-user?** Assumed single-user throughout. Anything else changes the auth model
    from "a token" to "identities and per-project authorization."
 
 ## 12. Open risks
 
-- **Redaction is a filter, and filters miss.** Any transcript text crossing the wire is
-  potential exfiltration of production secrets. This is the strongest argument for
-  decision 3(b) — serve the card's sentence, not the conversation.
+- **Parity means the phone can delete work.** `stop --reclaim` removes a worktree, and
+  `fleet-clean`'s gates are about whether removal is *safe*, not whether it was
+  *intended*. The passkey and the reproduced confirmation (§7) are what stand between a
+  pocket and a deleted checkout, so they are load-bearing, not decoration.
+- **Redaction is a filter, and filters miss.** Every line of transcript crossing the wire
+  is potential exfiltration of production secrets — now more of it, per decision 3.
 - **A phone is lost more often than a laptop.** Revocation has to be one action and it has
   to be testable; "the token is in the PWA" is only safe if killing it is trivial.
 - **The audit log is only useful if something reads it.** An unread log is a compliance
