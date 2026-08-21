@@ -93,6 +93,20 @@ kill_servers_in() {                # $1 = a run directory
   done
   return 0
 }
+# A LEAKED fleet-serve is the same hazard wearing a TCP port. The suite's own teardown
+# kills the ones it started, and ⌃C reaches it through the INT trap — but a run that is
+# SIGKILLed runs no trap at all, and a daemon left holding a port is exactly the
+# cross-run interference this section exists to stop. Measured once: a run killed mid-way
+# left one alive for half an hour. It is found by its own argv, which names the dead run's
+# directory, so this can only ever reach a daemon THIS file started under a directory that
+# is provably nobody's any more.
+kill_serves_in() {                 # $1 = a run directory
+  local p
+  for p in $(pgrep -f "$1/.*fleet-serve.mjs" 2>/dev/null); do
+    [ "$p" = "$$" ] || kill "$p" 2>/dev/null
+  done
+  return 0
+}
 sweep_dead_runs() {                # $1 = the <prefix> of <prefix>.<pid>.XXXXXX
   local d pid
   for d in "$1".*; do
@@ -101,14 +115,14 @@ sweep_dead_runs() {                # $1 = the <prefix> of <prefix>.<pid>.XXXXXX
     case "$pid" in ''|*[!0-9]*) continue ;; esac   # not a run directory of ours
     [ "$pid" = "$$" ] && continue                  # us
     kill -0 "$pid" 2>/dev/null && continue         # a run still going: hands off
-    kill_servers_in "$d"; rm -rf "$d"
+    kill_serves_in "$d"; kill_servers_in "$d"; rm -rf "$d"
   done
   return 0
 }
 # fleet-serve is a background node child, not a tmux server, so the sweep above cannot
 # reach it — and a leaked daemon holding a TCP port is the same cross-run interference
 # this section exists to stop. $SERVE_PIDS is set by the fleet-serve group.
-trap 'rc=$?; kill ${SERVE_PIDS:-} 2>/dev/null; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
+trap 'rc=$?; kill ${SERVE_PIDS:-} 2>/dev/null; kill_serves_in "$TMUX_TMPDIR"; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
 trap 'exit 130' INT
 sweep_dead_runs "$TEST_RUNS"
 
@@ -3414,7 +3428,10 @@ SV=""
 if ! command -v node >/dev/null 2>&1; then
   group "fleet-serve (live)"; skip "fleet-serve HTTP" "node missing"
 else
-SV="$(cd "$(mktemp -d)" && pwd -P)"
+# Inside the run's own namespace, not a mktemp of its own: the sweep above finds a leaked
+# daemon by the directory in its argv, and a path outside $TMUX_TMPDIR is a path no future
+# run can attribute to a dead one.
+SV="$TMUX_TMPDIR/serve"; mkdir -p "$SV"
 mkdir -p "$SV/home/.config/ghostfleet" "$SV/home/.claude/fleet" "$SV/repo" "$SV/other"
 cp -R "$ROOT/bin" "$ROOT/mcp" "$SV/"
 : > "$SV/ran"
@@ -3800,7 +3817,7 @@ group "fleet-serve: the REAL grid, two projects, one daemon process"
 # FREE. Measured on the deployed runtime against cf-superkey from a ghostfleet environment:
 # fleet-pwa, fleet-serve and grid-json all came back free, all three mid-turn.
 if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
-RG="$(cd "$(mktemp -d)" && pwd -P)"
+RG="$TMUX_TMPDIR/realgrid"; mkdir -p "$RG"
 mkdir -p "$RG/home/.config/ghostfleet" "$RG/home/.claude/fleet"
 for pj in pa pb; do
   mkdir -p "$RG/$pj"
