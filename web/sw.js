@@ -15,7 +15,14 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-const VERSION = 'ghostfleet-v1';
+// BUMPED WHEN THE CLIENT CHANGES, and this release is why. The shell is served
+// CACHE-FIRST, so a phone that already has v1 paints the old app.js on the first open
+// after a deploy and only revalidates behind it — which for the two fixes in this version
+// (same-origin detection, and the enrolment code) means the first look after deploying
+// still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
+// not working. A new name means install() refetches the shell and activate() drops the old
+// cache, so the next open runs the new code.
+const VERSION = 'ghostfleet-v2';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './manifest.webmanifest',

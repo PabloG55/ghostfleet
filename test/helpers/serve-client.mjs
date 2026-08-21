@@ -89,6 +89,23 @@ export class Authenticator {
     return crypto.createSign('sha256').update(Buffer.concat([authData, sha(clientData)])).sign(this.priv);
   }
 
+  // The raw ceremony outputs, for a FAKE navigator.credentials (test/helpers/pwa-enrol.mjs).
+  // The methods below post the bodies themselves; these two hand back what a platform
+  // authenticator hands a browser, so the real web/passkey.js can do the encoding and the
+  // posting — which is the half that was broken (it never sent the enrolment code) and so
+  // is the half that has to be exercised rather than reimplemented here.
+  createResult(challengeB64u) {
+    const cd = this.clientData('webauthn.create', challengeB64u);
+    const ad = this.authData({ attested: true });
+    return { rawId: this.credId, clientDataJSON: cd,
+             attestationObject: cbor(new Map([['fmt', 'none'], ['attStmt', new Map()], ['authData', ad]])) };
+  }
+  getResult(challengeB64u) {
+    const cd = this.clientData('webauthn.get', challengeB64u);
+    const ad = this.authData();
+    return { rawId: this.credId, clientDataJSON: cd, authenticatorData: ad, signature: this.sign(ad, cd) };
+  }
+
   // Register: the code opens the window, the passkey is what gets enrolled, and the
   // response carries the first token. Mirrors web/passkey.js register() exactly —
   // {id, attestation, client_data} — plus the `code` this server requires (see the

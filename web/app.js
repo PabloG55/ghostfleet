@@ -160,7 +160,7 @@ function header(counts) {
   const scope = S.screen === 'projects'
     ? el('span', { class: 'scope', text: '— projects' })
     : el('span', { class: 'scope', text: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]` });
-  const kids = [el('span', { class: 'name', text: 'ghostfleet' }), scope];
+  const kids = [el('span', { class: 'name', text: 'ghostfleet' }), scope, modeChip()];
   if (counts) {
     const c = el('span', { class: 'counts' });
     for (const seg of G.countsSegments(counts)) {
@@ -171,6 +171,20 @@ function header(counts) {
   const rows = [el('div', { class: 'hdr' }, kids)];
   if (S.stale) rows.push(el('div', { class: 'stale', text: `⚠ offline — last fetched ${G.clockLabel(S.stale)}` }));
   return rows;
+}
+
+// WHICH FLEET AM I LOOKING AT — on every screen, without opening settings. The lock
+// screen has always said it, and the lock screen is the one thing you dismiss: the phone
+// that was shown four fictional projects had gone past it, and the only clue left was
+// recognising the project names. So the answer lives in the header, which every screen
+// draws, and it names the ORIGIN rather than saying "server" — two fleets are two
+// origins, and "server" would not tell them apart.
+function modeChip() {
+  const r = api.resolution();
+  const text = r.mode === 'server' ? '\u25cf ' + api.modeLabel()
+             : r.mode === 'probing' ? '\u2026 looking for a fleet'
+             : '\u26a0 fixtures';
+  return el('span', { class: 'mode ' + r.mode, text, title: r.detail });
 }
 
 // ── the projects screen ───────────────────────────────────────────────────
@@ -596,31 +610,58 @@ function lockScreen() {
   const box = el('div', { class: 'lock' });
   box.append(el('pre', { class: 'ship', text: SHIP }));
   box.append(el('h1', { text: 'ghostfleet' }));
-  const server = api.mode() === 'server';
-  box.append(el('p', { text: server ? `${api.baseUrl()} — over the tailnet` : 'fixtures — no server configured' }));
-  if (!pk.available()) {
+  // Which backend, and WHY that one — api.js writes the sentence, because api.js is the
+  // half that knows whether it asked and what answered. "fixtures — no server
+  // configured" is the line that made this diagnosable from a photo of a phone, so the
+  // shape is kept and the server case is now equally specific: it names the origin it is
+  // talking to, so "which fleet is this" is answerable here too.
+  const r = api.resolution();
+  const server = r.mode === 'server';
+  box.append(el('p', { class: server ? null : 'warn', text: r.detail }));
+  if (r.mode !== 'probing' && !pk.available()) {
     box.append(el('p', { class: 'warn', text: `passkey unavailable: ${pk.unavailableReason()}` }));
   }
-  if (!server) {
+  if (r.mode === 'fixtures') {
     // Say plainly what the gate is worth here. §5's rule is that the assertion has to
     // mint a token the SERVER checks; with no server there is nothing to check it, and
     // claiming otherwise would be the "lock screen as decoration" the doc warns about.
     box.append(el('p', { text: 'in fixture mode the passkey gate is local only — the server is what enforces it (§5).' }));
   }
   const row = el('div', { class: 'row' });
-  if (pk.available() && !pk.registered()) {
-    row.append(btn('register a passkey', async () => {
-      try { await pk.register(); S.locked = false; render(); refresh(); }
-      catch (e) { toast(String(e.message || e), 'bad'); }
-    }, 'go'));
-  } else if (pk.available()) {
-    row.append(btn('unlock with Face ID', async () => {
-      try { await pk.open(); S.locked = false; render(); refresh(); }
-      catch (e) { toast(String(e.message || e), 'bad'); }
-    }, 'go'));
-  }
-  if (pk.bypassAllowed()) {
-    row.append(btn('continue without a passkey (fixtures)', () => { pk.bypass(); S.locked = false; render(); refresh(); }));
+  // NO ACTION BUTTONS UNTIL THE PROBE ANSWERS. "register a passkey" means one thing
+  // against a server and another against fixtures, and the fixture bypass must never be
+  // offered on a page that turns out to be served BY the daemon — which is precisely the
+  // window a probe is open for.
+  if (r.mode !== 'probing') {
+    if (pk.available() && !pk.registered()) {
+      // Against a server, registering is ENROLLING, and the server refuses a passkey that
+      // no window and no one-time code authorised. That refusal is not a bug to route
+      // around — the endpoint is remote code execution — so the phone gets a field to
+      // type the code into, which is the half that was missing.
+      if (server) row.append(btn('enrol this phone', () => sheetEnrol(), 'go'));
+      else row.append(btn('register a passkey', async () => {
+        try { await pk.register(); S.locked = false; render(); refresh(); }
+        catch (e) { toast(String(e.message || e), 'bad'); }
+      }, 'go'));
+    } else if (pk.available()) {
+      row.append(btn('unlock with Face ID', async () => {
+        try { await pk.open(); S.locked = false; render(); refresh(); }
+        catch (e) { toast(String(e.message || e), 'bad'); }
+      }, 'go'));
+    }
+    if (pk.bypassAllowed()) {
+      row.append(btn('continue without a passkey (fixtures)', () => { pk.bypass(); S.locked = false; render(); refresh(); }));
+    }
+    // Only when the probe is the reason. A daemon started after this page was opened is
+    // the ordinary way to be here, and it is one request to find out — not a reload,
+    // which on a home-screen app is a cold start.
+    if (r.mode === 'fixtures' && r.source === 'probe') {
+      row.append(btn('look again', async () => {
+        const next = await api.reprobe();
+        toast(next.detail, next.mode === 'server' ? 'good' : '');
+        render();
+      }));
+    }
   }
   row.append(btn('settings', () => sheetSettings()));
   box.append(row);
@@ -823,6 +864,47 @@ function sheetAddProject() {
   ]));
 }
 
+// The enrolment code. `fleet-serve enroll <client-id>` prints one and says "Open <origin>
+// on the phone and enter it" — and there was nowhere to enter it, so every registration
+// was a 403 and the lock screen's button did nothing at all.
+//
+// Errors land INSIDE the sheet rather than in a toast: #sheet is a fixed overlay above
+// #app, so a toast under it cannot be read, and the two sentences worth reading here are
+// long. They are the server's own, verbatim (api.js), because "no enrolment is open — run
+// fleet-serve enroll <id>" and "wrong or missing enrolment code" are the difference
+// between knowing what to do next and staring at a screen.
+function sheetEnrol() {
+  const code = input('', { placeholder: 'GP7CX-ZRDR5', autocapitalize: 'characters' });
+  const note = el('p', { text: `asking ${api.modeLabel()} whether an enrolment window is open…` });
+  const err = el('p', { class: 'err' });
+  const go = async () => {
+    err.textContent = '';
+    try {
+      await pk.register(code.value);
+      S.locked = false;
+      toast('enrolled — the server minted this session', 'good');
+      closeSheet();
+      refresh();
+    } catch (e) { err.textContent = String((e && e.message) || e); }
+  };
+  openSheet(sheet('enrol this phone', api.modeLabel(), [
+    el('p', { text: 'On the Mac: fleet-serve enroll <client-id> — it prints a one-time code, good for 15 minutes and one use. Case and the hyphen do not matter.' }),
+    note, field('enrolment code', code), err,
+    el('div', { class: 'row' }, [btn('enrol', go, 'go'), btn('esc back', closeSheet)]),
+  ]));
+  // Asked before anything is typed, and before Face ID: a closed window is knowable in
+  // advance, and finding out afterwards means biometrics spent on a refusal.
+  pk.enrolmentState().then(st => {
+    note.className = st.open ? 'ok' : 'warn';
+    note.textContent = st.open
+      ? `a window is open for '${st.client}' — enter the code it printed.`
+      : 'no enrolment is open. On the Mac: fleet-serve enroll <client-id>, then come back.';
+  }).catch(e => {
+    note.className = 'warn';
+    note.textContent = `could not ask the server: ${String((e && e.message) || e)}`;
+  });
+}
+
 // `,` — settings. The TUI has two of these pages and this sheet is both, plus the block
 // a phone needs and a terminal does not (where the fleet is, and the passkey).
 async function sheetSettings() {
@@ -864,26 +946,54 @@ async function sheetSettings() {
   }
 
   // where the fleet is
-  const base = input(api.baseUrl(), { placeholder: 'http://mac.tailnet.ts.net:8787  (blank = fixtures)' });
+  //
+  // THREE choices, not a URL box whose emptiness means two different things. It used to
+  // be one field where blank meant fixtures, so "I have not said" and "I want fixtures"
+  // were the same value — and since nothing ever filled it in, the client fleet-serve
+  // was serving chose fixtures and showed a fleet that does not exist. Both overrides
+  // have to survive that fix: forcing fixtures while the daemon serves the page (a demo)
+  // and forcing an origin while something else serves it.
+  const p = api.pref();
+  const how = el('select', {}, [
+    el('option', { value: 'auto', text: 'auto — this page\'s own origin, if a fleet answers there', selected: p.kind === 'auto' }),
+    el('option', { value: 'fixtures', text: 'fixtures — the bundled sample fleet, never a server', selected: p.kind === 'fixtures' }),
+    el('option', { value: 'url', text: 'a URL I type below', selected: p.kind === 'server' }),
+  ]);
+  const base = input(p.kind === 'server' ? p.base : '', { placeholder: 'http://mac.tailnet.ts.net:8787' });
   kids.push(el('h2', { text: 'connection' }));
+  kids.push(el('p', { text: `right now: ${api.resolution().detail}` }));
+  kids.push(field('where the fleet is', how));
   kids.push(field('fleet-serve URL', base));
-  kids.push(el('p', { text: 'blank runs the client against the bundled fixtures. Over the tailnet only — never a public hostname (§5).' }));
+  kids.push(el('p', { text: `auto asks ${api.PROBE_PATH} on the origin that served this page — a 401 there is proof of a fleet, since it means the endpoint exists and is enforcing the passkey. Over the tailnet only — never a public hostname (§5).` }));
   const fx = el('select', {}, api.FIXTURES.map(f => el('option', { value: f.file, text: f.title, selected: f.file === api.fixtureName() })));
   kids.push(field('fixture', fx));
   kids.push(el('div', { class: 'row' }, [
-    btn('save', () => {
-      api.setBaseUrl(base.value.trim());
+    btn('save', async () => {
+      if (how.value === 'fixtures') api.useFixtures();
+      else if (how.value === 'url') api.setBaseUrl(base.value.trim());
+      else api.useAutoDetect();
       api.setFixtureName(fx.value);
       api.resetOverlay();
       closeSheet();
-      lock();     // a different backend is a different session: assert again
+      lock();               // a different backend is a different session: assert again
+      await api.ready();    // and 'auto' has to ask before the lock screen can say what it is
+      render();
     }, 'go'),
   ]));
 
+  // A passkey is registered FOR A BACKEND, so this says which one — that is the whole
+  // reason the phone was stuck: a credential registered against fixtures counted as one
+  // for the server, so the app offered to unlock with a passkey the server had never
+  // seen.
   kids.push(el('h2', { text: 'passkey' }));
-  kids.push(el('p', { text: pk.available() ? (pk.registered() ? 'registered on this device.' : 'not registered yet.') : `unavailable: ${pk.unavailableReason()}` }));
+  kids.push(el('p', { text: pk.available()
+    ? (pk.registered() ? `registered on this device for ${api.modeLabel()}.` : `not registered for ${api.modeLabel()} yet.`)
+    : `unavailable: ${pk.unavailableReason()}` }));
   kids.push(el('div', { class: 'row' }, [
-    pk.available() && !pk.registered() ? btn('register', async () => { try { await pk.register(); toast('passkey registered', 'good'); } catch (e) { toast(String(e.message || e), 'bad'); } closeSheet(); }) : null,
+    pk.available() && !pk.registered() && api.mode() === 'server'
+      ? btn('enrol this phone', () => { closeSheet(); sheetEnrol(); }) : null,
+    pk.available() && !pk.registered() && api.mode() === 'fixtures'
+      ? btn('register', async () => { try { await pk.register(); toast('passkey registered', 'good'); } catch (e) { toast(String(e.message || e), 'bad'); } closeSheet(); }) : null,
     pk.registered() ? btn('forget this device\'s passkey', () => { pk.forget(); toast('forgotten — a lost phone is revoked server-side too', 'good'); closeSheet(); }, 'danger') : null,
   ].filter(Boolean)));
 
@@ -1024,6 +1134,11 @@ document.addEventListener('visibilitychange', () => {
 });
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
 render();
+// Paint first, ask second. The lock screen above is drawn against the 'probing' mode —
+// the ship, and one line saying which origin is being asked — so this only ever fills in
+// the answer. Waiting for the probe before the first paint would put a blank page in
+// front of a cold open, which is the thing the service worker exists to prevent.
+api.ready().then(() => render());
 
 // Polling, not a socket: `fleet-grid.mjs --plain` answers the busiest fleet in 0.39s
 // (§2), so a 5s poll is well inside what the daemon can serve and needs no new
