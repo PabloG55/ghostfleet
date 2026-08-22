@@ -26,25 +26,26 @@ that still renders is a card that still looks right.
 ╰──────────────────────────────╯
 ```
 
-| the grid, `nc = 1` | all nine statuses | projects |
+| the grid, `nc = 1`, scrolling | the session, which is a chat | its live pane |
 |---|---|---|
-| ![grid](../docs/mobile/grid.png) | ![statuses](../docs/mobile/statuses.png) | ![projects](../docs/mobile/projects.png) |
+| ![grid](../docs/mobile/grid.gif) | ![session](../docs/mobile/session.gif) | ![pane](../docs/mobile/pane.gif) |
+| the card list is the one region that scrolls — the page itself never does | at rest, scrolled back through older turns, a draft in the composer, and the `⋯` sheet | as attached, then `fit`, then zoomed, then scrollback |
 
-| a session, which is a chat | its live pane | the `⋯` actions |
+| all nine statuses | projects | the TUI's own confirmation, and its force step |
 |---|---|---|
-| ![session](../docs/mobile/session.png) | ![pane](../docs/mobile/pane.png) | ![actions](../docs/mobile/actions.png) |
+| ![statuses](../docs/mobile/statuses.png) | ![projects](../docs/mobile/projects.png) | ![confirm](../docs/mobile/confirm.png) |
 
-| the TUI's own confirmation, and its force step |
-|---|
-| ![confirm](../docs/mobile/confirm.png) |
+The three surfaces that *do* something are loops; the statuses stay a still because nine
+glyphs and their colours are a legend, not a behaviour — you read that one rather than
+wait for it to come round again.
 
-Every shot above is the app running on **fixtures**, which is why they can be regenerated
-without a fleet — and why they must be. Two of them went stale silently: `grid.png` was
-taken before the lead's card reached the phone (#47), so it opened on `coi-beside` and
-counted one session too few, and `session.png` was the pre-#48 screen — a card, ten footer
-buttons, and a newest-first table of `HH:MM · assistant` rows, none of which the app has
-any more. A screenshot cannot fail a test, so the only thing that catches this is
-re-taking them when the screen changes.
+Everything above is the app running on **fixtures**, which is why it can be regenerated
+without a fleet — and why it must be. Two of the stills these replaced had gone stale
+silently: the grid was shot before the lead's card reached the phone (#47), so it opened on
+`coi-beside` and counted one session too few, and the session was the pre-#48 screen — a
+card, ten footer buttons, and a newest-first table of `HH:MM · assistant` rows, none of
+which the app has any more. Neither one looked broken. An image cannot fail a test, so the
+only thing that catches this is re-taking it when the screen changes.
 
 ### Re-taking them
 
@@ -61,8 +62,10 @@ lock screen, and shoot each screen. Note that the cards are not `<button>`s and 
 not listen for `click`: the tap handler is `pointerup` on `.card` (`app.js:1083`), guarded
 by a movement slop and a long-press timer, so a driver that only dispatches `click` selects
 a card and never opens it. Downscale the 2x captures to the 390-wide convention, and build
-the GIF from the stills — the screens are static, so 5fps is enough and `stats_mode=diff`
-is what keeps a dark UI from banding:
+each GIF from its frames with the concat demuxer, a `duration` per frame — the screens are
+static between interactions, so 5fps is enough, and `stats_mode=diff` is what keeps a dark
+UI from banding. The grid's loop ping-pongs back to the top so it reads as a scroll rather
+than a jump cut:
 
 ```bash
 ffmpeg -f concat -safe 0 -i list.txt -filter_complex \
