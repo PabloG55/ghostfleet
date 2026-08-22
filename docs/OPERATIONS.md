@@ -196,7 +196,7 @@ If a window is ever mis-matched, pin it in `~/.config/ghostfleet/windows`
 (`<zellij-session> <aerospace-window-id>` per line).
 
 Each popup leads with the **`Ctrl-f` chord that lands on that exact session** — e.g.
-`Ctrl-f 2 1 · superkey-1 — …`, or `Ctrl-f 2 ⏎` for a master. It's first in the string
+`Ctrl-f 2 1 · acme-api-1 — …`, or `Ctrl-f 2 ⏎` for a master. It's first in the string
 because notifications truncate from the right, and that's the part you act on. Neither
 digit is guessable: the project's is its position in *its profile's* list, and the
 session's is its position in the grid's **card order**, which `⇧hjkl` can rewrite — so
@@ -302,7 +302,7 @@ its own worktree doctrine (a `.worktrees/` directory, or one declared in `.gitig
 gets its worktrees there instead. `CLAUDE_FLEET_WORKTREE_DIR` overrides either way;
 `sibling` forces the classic layout.
 
-This matters when the repo *enforces* its convention. superkey has a `PreToolUse` guard
+This matters when the repo *enforces* its convention. One repo here has a `PreToolUse` guard
 that denies any edit whose path lacks `.worktrees/` — it never asks git whether the path
 *is* a worktree — so a sibling worktree was refused as "the shared main checkout", the
 agent obeyed the refusal, and created a **second worktree nested inside the first**, plus
@@ -310,10 +310,10 @@ a full dependency install. Two worktrees per task, with the session attached to 
 that wasn't being edited.
 
 **A project can also be several clones.** `fleet-worktrees` spans every clone under the
-project root, not just the one you're standing in. superkey registers `~/superkey`, which
-isn't a repo at all — it holds four independent clones, each owning its own worktrees. A
-lead saw 2 and was blind to the other 17, so *reuse before proliferate* could never fire
-and every task made another one. `--here` restricts it to the current repo.
+project root, not just the one you're standing in. One project here registers a *container*
+directory that isn't a repo at all — it holds four independent clones, each owning its own
+worktrees. A lead saw 2 and was blind to the other 17, so *reuse before proliferate* could
+never fire and every task made another one. `--here` restricts it to the current repo.
 
 ## Updating Claude Code under a fleet
 
