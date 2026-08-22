@@ -194,12 +194,12 @@ export function reprobe() { resolved = null; resolving = null; return ready(); }
 
 // The fixture backend's whole routing table. `project` is the payload's own project
 // field, so tapping a project on the Projects screen lands on that project's fixture —
-// and the two superkey fixtures are two states of one fleet, chosen in settings.
+// and the two acme-api fixtures are two states of one fleet, chosen in settings.
 export const FIXTURES = [
-  { file: 'grid-superkey.json', project: 'superkey',   title: 'superkey — a busy fleet' },
-  { file: 'grid-degraded.json', project: 'superkey',   title: 'superkey — unknown · limit · interrupted · parked' },
-  { file: 'grid-free.json',     project: 'ghostfleet', title: 'ghostfleet — free worktrees' },
-  { file: 'grid-empty.json',    project: 'dotfiles',   title: 'dotfiles — nothing running' },
+  { file: 'grid-acme-api.json', project: 'acme-api', title: 'acme-api — a busy fleet' },
+  { file: 'grid-degraded.json', project: 'acme-api', title: 'acme-api — unknown · limit · interrupted · parked' },
+  { file: 'grid-free.json',     project: 'toolbox',  title: 'toolbox — free worktrees' },
+  { file: 'grid-empty.json',    project: 'scratch',  title: 'scratch — nothing running' },
 ];
 export function fixtureName() {
   try { return localStorage.getItem(LS.fixture) || FIXTURES[0].file; } catch { return FIXTURES[0].file; }

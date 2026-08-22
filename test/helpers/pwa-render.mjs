@@ -272,12 +272,12 @@ is('...on the projects screen', true, /ghostfleet/.test(app.textContent) && /pro
 // screen. This clicks through the real one.
 // The projects list is fetched, so it is not on screen the instant the lock lifts —
 // clicking `⏎ open` before it arrives opens nothing at all, silently.
-is('the projects list arrives', true, await until(() => /superkey/.test(app.textContent)));
+is('the projects list arrives', true, await until(() => /acme-api/.test(app.textContent)));
 // btn() splits "<key> <label>" into a <b> and a text node, and this DOM joins children
 // with a space — so a footer button reads "⏎  open", with two. Every match below is
 // whitespace-loose for that reason; a single-space regex silently matches nothing, and
 // click(null) is a no-op that looks like a screen that did not change.
-click(btnWith(/⏎\s+open/));                            // the first project — superkey
+click(btnWith(/⏎\s+open/));                            // the first project — acme-api
 await until(() => /master/.test(app.textContent), 4000);
 is('the grid draws the lead as a card', true, /master/.test(app.textContent));
 // The lead is card 1, so it is what the footer is aimed at on arrival — and that footer
@@ -309,7 +309,7 @@ is('...and it says it is the lead', true, /the fleet's lead/.test(app.textConten
 is('...opening on the chat', true, await until(() => /anything blocked on me/.test(app.textContent), 4000));
 is('...oldest first, newest last', true, (() => {
   const bubs = app.all(n => n.className.split(/\s+/).includes('bub')).map(n => n.textContent);
-  return bubs.length >= 4 && /which workers are free/.test(bubs[0]) && /Dispatched the binder work/.test(bubs[bubs.length - 1]);
+  return bubs.length >= 4 && /which workers are free/.test(bubs[0]) && /Dispatched the retry work/.test(bubs[bubs.length - 1]);
 })());
 // Two roles, drawn as two sides. A chat where both speakers look the same is the table
 // this replaced.
@@ -333,12 +333,12 @@ is('...and the chat is the scroller', true,
 // A real 269x65 capture — the widest pane on the fleet meeting the narrowest screen, which
 // is the exact case "never wrapped, never reflowed" exists for and the one case that had no
 // fixture. (One edit to it: the lead names its own checkout in its header and this capture
-// came off the ghostfleet fleet, so the path says superkey; byte length preserved.)
+// came off the ghostfleet fleet, so the path says acme-api; byte length preserved.)
 click(btnWith(/^pane$/));
 // Matched on text inside ONE span: ansi.js opens a span per attribute run, so
 // "Claude Code v2.1.235" is two of them and a regex spanning them never fires.
 is('the pane view still opens', true, await until(() => /Claude Code/.test(app.textContent), 4000));
-is('...naming its own checkout', true, /Documents\/superkey/.test(app.textContent));
+is('...naming its own checkout', true, /gf-demo\/acme-api/.test(app.textContent));
 is('...and not an error or a placeholder', false,
    /no pane captured|capturing the pane…/.test(app.textContent));
 click(btnWith(/^chat$/));
@@ -401,8 +401,8 @@ is('...and the stack is unwound', 0, histDepth);
 
 // ── THE OTHER DIRECTION: a worker keeps all of it ───────────────────────
 click(btnWith(/⏎\s+open/));
-is('a project opens again', true, await until(() => !!cardTitled(/coi-beside/), 4000));
-tap(cardTitled(/coi-beside/));
+is('a project opens again', true, await until(() => !!cardTitled(/api-fix/), 4000));
+tap(cardTitled(/api-fix/));
 await until(() => !!app.find(n => n.tag === 'textarea'), 4000);
 is('a worker says nothing about a lead', false, /the fleet's lead/.test(app.textContent));
 click(btnWith(/⋯/));

@@ -136,8 +136,8 @@ html.shell, html.shell body { height: 100%; overflow: hidden; }
  * terminal bold cannot change the geometry: a cell is a cell. In CSS it can, and here it
  * did. Measured in Chrome at font-size 19px, the same title line:
  *
- *     ╭─ 1 superkey ─────────────────╮   weight 400 → 366px
- *     ╭─ 1 superkey ─────────────────╮   weight 700 → 517px
+ *     ╭─ 1 acme-api ─────────────────╮   weight 400 → 366px
+ *     ╭─ 1 acme-api ─────────────────╮   weight 700 → 517px
  *
  * The bold face has no box-drawing glyphs, so ─ ╭ ╮ ╰ ╯ fall back to a font with a
  * different advance while │ and the letters stay put. The selected card — only ever the

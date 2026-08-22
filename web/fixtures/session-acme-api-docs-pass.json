@@ -1,0 +1,24 @@
+{
+  "project": "acme-api",
+  "session": "docs-pass",
+  "agent": "opencode",
+  "status": "limit",
+  "total": 3,
+  "messages": [
+    {
+      "ts": 1787339200,
+      "role": "assistant",
+      "text": "Two response schemas share one $ref, so the generated examples fan out. Confirmed across 4,213 paths: 11 pairs, all from the same import."
+    },
+    {
+      "ts": 1787341800,
+      "role": "assistant",
+      "text": "The fix is a unique key on (schema, version) plus a merge for the existing pairs. Writing the merge as a migration so it is replayable."
+    },
+    {
+      "ts": 1787342700,
+      "role": "assistant",
+      "text": "Reached the 5h usage limit mid-run; the diff is stashed on the branch."
+    }
+  ]
+}
