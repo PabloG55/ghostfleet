@@ -20,6 +20,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # Not a skip: the ^N assertion still runs and still proves what it is for.
+      # bin/fleet-tab defaults the editor to nvim and correctly REFUSES when it is
+      # absent, which is what neither runner image has — so the grid emits no choice
+      # and the test reads empty. CLAUDE_FLEET_EDITOR is the product's own documented
+      # override for exactly this, and vi is on both images. Checked in both
+      # directions on a Mac with tmux 3.7b: with the editor missing the assertion is
+      # red with an empty `got`, matching CI exactly; with this set it is green.
+      CLAUDE_FLEET_EDITOR: vi
+
     # Local wall clock is ~4m30s, nearly all of it waiting on tmux and daemon settles
     # rather than burning CPU. A hung tmux server would otherwise sit on the runner's
     # 6-hour default; this fails it in a readable amount of time instead.
