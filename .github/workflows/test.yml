@@ -1,0 +1,77 @@
+name: test
+
+# The suite is the only thing standing between this repo and the class of bug it
+# exists to catch — silent ones, where the code keeps running and answers wrong.
+# Until now it ran when somebody remembered. Now it runs on every push to main and
+# every pull request, on both supported platforms.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      # Not fail-fast: the two legs are the point. macOS is where this is developed
+      # and Linux is where the macOS-only guards (stat -f, date -r, osascript,
+      # caffeinate) are actually proven — cancelling one because the other went red
+      # would throw away exactly the half that was telling us something new.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Not a skip: the ^N assertion still runs and still proves what it is for.
+      # bin/fleet-tab defaults the editor to nvim and correctly REFUSES when it is
+      # absent, which is what neither runner image has — so the grid emits no choice
+      # and the test reads empty. CLAUDE_FLEET_EDITOR is the product's own documented
+      # override for exactly this, and vi is on both images. Checked in both
+      # directions on a Mac with tmux 3.7b: with the editor missing the assertion is
+      # red with an empty `got`, matching CI exactly; with this set it is green.
+      CLAUDE_FLEET_EDITOR: vi
+
+    # Local wall clock is ~4m30s, nearly all of it waiting on tmux and daemon settles
+    # rather than burning CPU. A hung tmux server would otherwise sit on the runner's
+    # 6-hour default; this fails it in a readable amount of time instead.
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # tmux is on neither runner image; jq is on both today, and that is not a
+      # promise. Both are installed rather than assumed. No npm step: the suite has
+      # no dependencies and the repo has no lockfile.
+      - name: Install tmux and jq (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux jq
+
+      - name: Install tmux and jq (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          for p in tmux jq; do
+            brew list --formula "$p" >/dev/null 2>&1 || brew install "$p"
+          done
+
+      # package.json says node >=18. The runner images ship one, but which one drifts,
+      # and a suite that fails because an image moved should not read as a code bug.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # A platform difference in the suite shows up as a red assertion that never
+      # mentions the platform. These four lines are what makes such a leg diagnosable.
+      - name: Versions
+        run: |
+          bash --version | head -1
+          node --version
+          tmux -V
+          jq --version
+
+      # No isolation needed beyond what the suite already does: it puts every tmux
+      # server it starts under its own per-run $TMUX_TMPDIR and sweeps the leftovers
+      # of runs that died before their teardown (test/run.sh §0), which is why two
+      # runs can share a machine. A CI runner is the easy case of that.
+      - name: ./test/run.sh
+        run: ./test/run.sh
