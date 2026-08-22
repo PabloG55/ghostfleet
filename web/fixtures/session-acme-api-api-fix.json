@@ -1,0 +1,129 @@
+{
+  "project": "acme-api",
+  "session": "api-fix",
+  "agent": "claude",
+  "status": "working",
+  "total": 34,
+  "messages": [
+    {
+      "ts": 1787337960,
+      "role": "assistant",
+      "text": "Read the retry panel spec and the existing backoff helper."
+    },
+    {
+      "ts": 1787338200,
+      "role": "assistant",
+      "text": "The helper only retries on 5xx; the spec wants 429 with Retry-After honoured too."
+    },
+    {
+      "ts": 1787338440,
+      "role": "assistant",
+      "text": "Added a case for 429. Retry-After can be seconds or an HTTP date, so both are parsed."
+    },
+    {
+      "ts": 1787338680,
+      "role": "assistant",
+      "text": "An HTTP date in the past has to clamp to zero rather than sleep negative."
+    },
+    {
+      "ts": 1787338920,
+      "role": "assistant",
+      "text": "Wrote the table test: 5xx, 429-seconds, 429-date, 429-date-in-the-past, 4xx-no-retry."
+    },
+    {
+      "ts": 1787339160,
+      "role": "assistant",
+      "text": "4xx must NOT retry, and that was the one the old helper got wrong."
+    },
+    {
+      "ts": 1787339400,
+      "role": "assistant",
+      "text": "Suite green: 618 passed."
+    },
+    {
+      "ts": 1787339640,
+      "role": "assistant",
+      "text": "Wrote the user-guide section for the new retry panel."
+    },
+    {
+      "ts": 1787339880,
+      "role": "assistant",
+      "text": "The OpenAPI examples mention the old backoff field — updated them to match what I built."
+    },
+    {
+      "ts": 1787340120,
+      "role": "assistant",
+      "text": "Draft PR #211 is up with both screenshots."
+    },
+    {
+      "ts": 1787340360,
+      "role": "assistant",
+      "text": "Review comment: use the shared RetryPolicy instead of a local one. Fair — doing that."
+    },
+    {
+      "ts": 1787340600,
+      "role": "assistant",
+      "text": "Swapped it. The shared policy already handles the jittered case, so the sleep moved into it."
+    },
+    {
+      "ts": 1787340840,
+      "role": "assistant",
+      "text": "That deleted 30 lines net."
+    },
+    {
+      "ts": 1787341080,
+      "role": "assistant",
+      "text": "Re-ran the suite after the swap. Still green."
+    },
+    {
+      "ts": 1787341320,
+      "role": "assistant",
+      "text": "One flake in the date test: it used the real clock. Pinned it to a fixed instant."
+    },
+    {
+      "ts": 1787341560,
+      "role": "assistant",
+      "text": "Pushed. PR is ready for a second look."
+    },
+    {
+      "ts": 1787341800,
+      "role": "assistant",
+      "text": "Second review: asked for the clamp to be its own named function. Done."
+    },
+    {
+      "ts": 1787342040,
+      "role": "assistant",
+      "text": "Rebased on main — one conflict in the helper, taken ours plus their new import."
+    },
+    {
+      "ts": 1787342280,
+      "role": "assistant",
+      "text": "622 passed / 0 failed after the rebase."
+    },
+    {
+      "ts": 1787342520,
+      "role": "assistant",
+      "text": "Squashed to three commits: the parse, the clamp, the docs."
+    },
+    {
+      "ts": 1787342760,
+      "role": "assistant",
+      "text": "Waiting on CI before I mark it ready."
+    },
+    {
+      "ts": 1787343000,
+      "role": "assistant",
+      "text": "CI green. Marked ready for review."
+    },
+    {
+      "ts": 1787343240,
+      "role": "assistant",
+      "text": "Starting the migration that drops the old backoff column."
+    },
+    {
+      "ts": 1787343480,
+      "role": "assistant",
+      "text": "All three cases covered. Running the full suite before I touch the migration."
+    }
+  ]
+}

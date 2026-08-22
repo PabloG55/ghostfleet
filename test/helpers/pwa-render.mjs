@@ -309,7 +309,7 @@ is('...and it says it is the lead', true, /the fleet's lead/.test(app.textConten
 is('...opening on the chat', true, await until(() => /anything blocked on me/.test(app.textContent), 4000));
 is('...oldest first, newest last', true, (() => {
   const bubs = app.all(n => n.className.split(/\s+/).includes('bub')).map(n => n.textContent);
-  return bubs.length >= 4 && /which workers are free/.test(bubs[0]) && /Dispatched the batch work/.test(bubs[bubs.length - 1]);
+  return bubs.length >= 4 && /which workers are free/.test(bubs[0]) && /Dispatched the retry work/.test(bubs[bubs.length - 1]);
 })());
 // Two roles, drawn as two sides. A chat where both speakers look the same is the table
 // this replaced.
@@ -338,7 +338,7 @@ click(btnWith(/^pane$/));
 // Matched on text inside ONE span: ansi.js opens a span per attribute run, so
 // "Claude Code v2.1.235" is two of them and a regex spanning them never fires.
 is('the pane view still opens', true, await until(() => /Claude Code/.test(app.textContent), 4000));
-is('...naming its own checkout', true, /Documents\/acme-api/.test(app.textContent));
+is('...naming its own checkout', true, /gf-demo\/acme-api/.test(app.textContent));
 is('...and not an error or a placeholder', false,
    /no pane captured|capturing the pane…/.test(app.textContent));
 click(btnWith(/^chat$/));
@@ -401,8 +401,8 @@ is('...and the stack is unwound', 0, histDepth);
 
 // ── THE OTHER DIRECTION: a worker keeps all of it ───────────────────────
 click(btnWith(/⏎\s+open/));
-is('a project opens again', true, await until(() => !!cardTitled(/policy-beside/), 4000));
-tap(cardTitled(/policy-beside/));
+is('a project opens again', true, await until(() => !!cardTitled(/api-fix/), 4000));
+tap(cardTitled(/api-fix/));
 await until(() => !!app.find(n => n.tag === 'textarea'), 4000);
 is('a worker says nothing about a lead', false, /the fleet's lead/.test(app.textContent));
 click(btnWith(/⋯/));

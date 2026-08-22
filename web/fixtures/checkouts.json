@@ -1,10 +1,13 @@
 {
-  "roots": ["/Users/pgarces/Documents/acme-api", "/Users/pgarces/Documents"],
+  "roots": [
+    "/Users/pgarces/gf-demo",
+    "/Users/pgarces"
+  ],
   "checkouts": [
-    "/Users/pgarces/Documents/acme-api",
-    "/Users/pgarces/Documents/acme-api-1",
-    "/Users/pgarces/Documents/acme-api-2",
-    "/Users/pgarces/Documents/policy-beside",
-    "/Users/pgarces/Documents/docs-sweep"
+    "/Users/pgarces/gf-demo/acme-api",
+    "/Users/pgarces/gf-demo/acme-api-1",
+    "/Users/pgarces/gf-demo/acme-api-2",
+    "/Users/pgarces/gf-demo/api-fix",
+    "/Users/pgarces/gf-demo/docs-pass"
   ]
 }
