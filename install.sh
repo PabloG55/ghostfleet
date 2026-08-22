@@ -16,20 +16,79 @@
 # and point PATH symlinks / the hook / MCP / skill / layout THERE. The repo stays
 # for development; after editing it, run `cf-sync` to push changes into the runtime.
 #
-# Re-run any time; it's idempotent.
+# Re-run any time; it's idempotent. `--yes` (or CLAUDE_FLEET_YES=1) lets it install
+# missing dependencies with no prompt, for installs with no terminal to ask at.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${CLAUDE_FLEET_BIN:-$HOME/.local/bin}"
 FLEET_HOME="${CLAUDE_FLEET_HOME:-$HOME/.local/libexec/ghostfleet}"
 
+usage() {
+  cat <<'EOF'
+ghostfleet installer
+
+    ./install.sh [-y|--yes]          from a clone
+    npx ghostfleet-cli [-y|--yes]    without cloning (args pass straight through)
+
+  -y, --yes    Install missing dependencies (tmux, jq) WITHOUT prompting, using the
+               OS package manager — with sudo on Linux where that needs it. For
+               unattended installs (CI, a Dockerfile, `curl | bash`) where there is
+               no terminal to ask at. Same as CLAUDE_FLEET_YES=1.
+  -h, --help   This.
+
+Without it nothing is installed and no privileged command is run unless you answer the
+prompt at the terminal — including when there IS no terminal, where the installer
+prints the command and installs nothing.
+EOF
+}
+
+# --- consent to install missing dependencies --------------------------------
+# The default is unchanged and deliberate: ensure_pkg below never installs, and never
+# sudo's, without a yes typed at /dev/tty. What this adds is the other end of that rule
+# — with no controlling terminal there is nobody to ask, so `npx ghostfleet-cli` inside
+# CI or a Dockerfile printed one line about tmux and exited 0. That install reads as
+# clean and cannot work: a fleet session IS a tmux server, so the grid has nothing to
+# start. --yes is how you consent IN ADVANCE, for the case where you cannot be asked.
+ASSUME_YES=0; YES_VIA=""
+# An explicit CLAUDE_FLEET_YES=0 means OFF. "Non-empty is consent" would read a
+# Dockerfile's `ENV CLAUDE_FLEET_YES=0` as permission to sudo, which is the one mistake
+# this flag must not make.
+case "${CLAUDE_FLEET_YES:-}" in
+  ""|0|n|N|no|No|NO|false|False|FALSE|off|Off|OFF) ;;
+  *) ASSUME_YES=1; YES_VIA="CLAUDE_FLEET_YES" ;;
+esac
+for a in "$@"; do
+  case "$a" in
+    -y|--yes)  ASSUME_YES=1; YES_VIA="--yes" ;;
+    -h|--help) usage; exit 0 ;;
+    # A MISTYPED flag must not be ignored: `--yse` in a Dockerfile would otherwise
+    # produce exactly the silent tmux-less install that --yes exists to prevent, and
+    # the build would pass. A stray POSITIONAL stays a warning, because args were
+    # ignored entirely before this and nothing that worked should start failing.
+    -*) echo "install.sh: unknown option: $a" >&2; usage >&2; exit 2 ;;
+    *)  echo "! ignoring unrecognized argument: $a" >&2 ;;
+  esac
+done
+
 echo "ghostfleet installer"
 echo "  repo:     $REPO   (development)"
 echo "  runtime:  $FLEET_HOME   (executed from here)"
 echo "  bin dir:  $BIN_DIR"
+[ "$ASSUME_YES" = 1 ] && echo "  deps:     $YES_VIA given — missing dependencies will be installed WITHOUT asking"
 echo
 
 command -v node >/dev/null 2>&1 || { echo "error: node is required (the v2 grid is a Node TUI)"; exit 1; }
+
+# Both consent paths — a yes typed at the tty, and --yes given in advance — install
+# through this one place, so they cannot drift into installing differently.
+pkg_run() {
+  local pkg="$1"; shift
+  echo "  Running: $*"
+  if "$@"; then echo "✓ $pkg installed"; return 0; fi
+  echo "! $pkg install failed — install it yourself: $*"
+  return 1
+}
 
 # Offer to install a missing dependency rather than just refusing. Both of ours are
 # one obvious package on every supported OS, and the package name happens to equal
@@ -71,6 +130,15 @@ ensure_pkg() {
   fi
 
   echo "! $pkg not found — $why."
+
+  # Consent given up front: install, no prompt. This is the only path that runs a
+  # package manager with nobody watching, which is exactly why it is opt-in.
+  if [ "$ASSUME_YES" = 1 ]; then
+    echo "  $YES_VIA given — installing without asking."
+    pkg_run "$pkg" "${cmd[@]}" || true    # the end-of-install check decides if it is fatal
+    return 0
+  fi
+
   # Probe /dev/tty in a subshell first rather than pre-checking with `[ -r ]`:
   # that only tests permission bits and passes even with no controlling terminal
   # at all (this happens in sandboxed/headless environments) — the actual open()
@@ -84,18 +152,28 @@ ensure_pkg() {
     read -r ans <&9 || ans=""
     exec 9>&- 9<&-
   else
+    # Don't stop at "not auto-installing". That line is true, actionable only by a
+    # human, and printed precisely where no human is — so name the flag that makes an
+    # unattended install actually work, which is what the reader of this line wants.
     echo "  Non-interactive (no controlling terminal) — not auto-installing. Run: ${cmd[*]}"
+    echo "  Or consent up front and let the installer run that for you:"
+    echo "      npx ghostfleet-cli --yes   |   ./install.sh --yes   |   CLAUDE_FLEET_YES=1"
+    # WHERE the flag goes decides whether we ever see it. `--yes`/`-y` is also npx's own
+    # flag, so BEFORE the package name npm consumes it and this script is invoked with no
+    # arguments at all — landing here, printing "pass --yes", at somebody who is certain
+    # they did. Measured on npm 11.18: after the package name it reaches us (and we never
+    # reach this branch); before it, argv is empty and npm leaves its own parse behind in
+    # npm_config_yes ("true"), which is the only way to tell the two apart. A plain
+    # `npx ghostfleet-cli` leaves that variable set but EMPTY, so it must not count.
+    case "${npm_config_yes:-}" in
+      ""|false|0) ;;
+      *) echo "  (npm swallowed a --yes of its own: it only reaches this installer AFTER the"
+         echo "   package name — 'npx ghostfleet-cli --yes', not 'npx --yes ghostfleet-cli'.)" ;;
+    esac
     return 0
   fi
   case "$ans" in
-    ""|y|Y|yes|YES|Yes)
-      echo "  Running: ${cmd[*]}"
-      if "${cmd[@]}"; then
-        echo "✓ $pkg installed"
-      else
-        echo "! $pkg install failed — install it yourself: ${cmd[*]}"
-      fi
-      ;;
+    ""|y|Y|yes|YES|Yes) pkg_run "$pkg" "${cmd[@]}" || true ;;
     *) echo "  Skipped. Install it yourself: ${cmd[*]}" ;;
   esac
 }
@@ -236,6 +314,27 @@ if [ -d "$HOME/.config/zellij" ]; then
   mkdir -p "$ZL"
   ln -sf "$FLEET_HOME/layouts/fleet.kdl" "$ZL/fleet.kdl"
   echo "✓ linked layout -> $ZL/fleet.kdl  (launch: zellij --layout fleet attach -c fleet)"
+fi
+
+# --- did tmux actually land? -------------------------------------------------
+# Last, because first is where it gets scrolled past: the tmux offer happens a few
+# hundred lines of output earlier, and every shape of "no" ends up here — declined at
+# the prompt, install failed, no package manager recognised, or no terminal to ask at.
+# `npx ghostfleet-cli` in CI hit that last one and exited 0 having installed a fleet
+# that cannot open a single session, because a session IS a tmux server. Say so where
+# it will still be on screen.
+if ! command -v tmux >/dev/null 2>&1; then
+  echo
+  echo "! tmux is STILL missing. Everything above is installed and wired, but the grid cannot"
+  echo "  start a session without it — a fleet session IS a tmux server. Install tmux and you"
+  echo "  are done; nothing here needs re-running."
+  if [ "$ASSUME_YES" = 1 ]; then
+    # $YES_VIA delegated the install to us and we did not manage it. Exit non-zero so an
+    # unattended install FAILS here, instead of a CI job going green around a fleet that
+    # cannot spawn anything.
+    echo "  $YES_VIA was given, so this is an error, not a warning."
+    exit 1
+  fi
 fi
 
 echo

@@ -88,7 +88,7 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | `git` | worktrees **are** the isolation model — a worker is a checkout on its own branch. `fleet-spawn` refuses to run without it |
 | `claude` ([Claude Code](https://github.com/anthropics/claude-code)) | what a session runs by default, and what the pane detectors are written against |
 | `node` (v18+) | the grid is a zero-npm-dependency Node TUI |
-| `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below). The one thing it cannot do is install it with no terminal attached, so a piped or CI install prints the command instead |
+| `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below). With no terminal attached it has nobody to ask, so a piped or CI install prints the command instead — pass `--yes` there and it installs without prompting |
 | `jq` | the installer wires the hooks and MCP entries with it, and the status hook parses its payload with it. **macOS 26 already ships it** (`/usr/bin/jq`); anywhere it is missing the installer offers to install it |
 | macOS, Linux, or **Windows via WSL2** | sessions are tmux servers, and tmux is POSIX-only — see the native-Windows note below |
 | `codex` / `opencode` (optional) | alternative agents, chosen per worktree on the `w` form. Their pane signals are detected separately — see [docs/multi-agent-sessions.md](docs/multi-agent-sessions.md) |
@@ -134,6 +134,32 @@ Missing `tmux`? The installer detects it, works out the right package manager fo
 OS (Homebrew, apt, dnf, yum, pacman, zypper, or apk), and asks before running anything
 — it never installs (or `sudo`s) without you confirming. No package manager recognized,
 or you say no? It just tells you the command to run yourself.
+
+**Installing with no terminal (CI, a Dockerfile, `curl | bash`)?** There is nobody to ask,
+so the default is to install nothing and print the command — and `tmux` is not optional
+here: a fleet session **is** a tmux server, so an install that skipped it leaves a grid
+that cannot start anything. Consent up front instead:
+
+```bash
+npx ghostfleet-cli --yes          # or: ./install.sh --yes, or CLAUDE_FLEET_YES=1
+```
+
+That installs the missing dependencies without prompting, using the same package manager
+it would have offered — `sudo` included on Linux, which is why it is opt-in and never the
+default. With `--yes`, an install that ends without `tmux` **exits non-zero** instead of
+looking successful. Without it, nothing is installed unless you say yes at the terminal.
+
+**With `npx`, the flag goes *after* the package name.** `--yes` (and `-y`) is npx's own
+flag too, so `npx --yes ghostfleet-cli` is consumed by npm and this installer is invoked
+with no arguments at all — it then refuses exactly as if you had never passed it
+(measured on npm 11.18; it notices and says where the flag belongs, but the install still
+skips `tmux`). In a Dockerfile or a CI config, the env var is the form nothing can
+misparse:
+
+```dockerfile
+ENV CLAUDE_FLEET_YES=1
+RUN npx ghostfleet-cli
+```
 
 The installer **stages the runtime** — it copies `bin/`, `hooks/`, `mcp/`, `skill/`, and
 `layouts/` out of the repo into `~/.local/libexec/ghostfleet` (override with `CLAUDE_FLEET_HOME`)
