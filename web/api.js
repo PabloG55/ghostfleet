@@ -261,7 +261,7 @@ export async function getProjects() {
   // In fixture mode the per-project rollup is DERIVED from the grid fixture that
   // project opens, not read from projects.json. Two reasons: the numbers cannot drift
   // out of step with the cards you land on, and switching to the degraded fixture in
-  // settings correctly turns superkey's card red — the projects screen's whole job is
+  // settings correctly turns acme-api's card red — the projects screen's whole job is
   // to say which project needs you, so a hardcoded 0 there would be the one lie this
   // screen must not tell. On a server the daemon computes it from sessionStatuses,
   // which is where the `sessions` field in the fixture comes from.

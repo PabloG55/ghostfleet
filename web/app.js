@@ -518,7 +518,7 @@ function sessionScreen() {
         meta ? el('span', { style: `color:${G.COLORS[meta.color]}`, text: meta.label }) : null,
         // The folder earns its place only when it says something the two names either side
         // of it do not. A lead sits in the main checkout, which is usually named after the
-        // project — printing both gave "superkey · superkey".
+        // project — printing both gave "acme-api · acme-api".
         el('span', { class: 'scope', text: ` ${S.project || ''}${c && c.folder && c.folder !== S.session && c.folder !== S.project ? ' · ' + c.folder : ''}` }),
       ]),
     ]),

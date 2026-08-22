@@ -73,16 +73,16 @@ control plane).
 | digit `1`-`9` | jump straight to the card at that position |
 
 **The second line names the worktree**, with the branch appended only when it says
-something different — `doc-verify-stepper · acord-document-verification`, or just
-`billing-retry` when the two match. It used to read *branch or folder*, so the branch
+something different — `docs-pass · docs/openapi-examples`, or just
+`csv-export` when the two match. It used to read *branch or folder*, so the branch
 always won and the checkout a session was actually sitting in never appeared.
 
-**A label is display only.** `,` then `l` titles a card whatever you like — *"PR 964 doc
-verify"* — while the tmux session keeps its name. That separation is deliberate: the
+**A label is display only.** `,` then `l` titles a card whatever you like — *"PR 198 strict
+types"* — while the tmux session keeps its name. That separation is deliberate: the
 session name is what `fleet-send` addresses, what the `Ctrl-f` chord counts, and what
 `fleet-rename` keeps equal to the worktree's folder for the rest of the fleet. So a
 labelled card shows **`<session> · <worktree>`** underneath, because a card titled
-*"PR 964 doc verify"* otherwise tells you nothing about what to type. Empty clears it.
+*"PR 198 strict types"* otherwise tells you nothing about what to type. Empty clears it.
 
 **Reordering matters more than it looks.** The card order *is* the fleet's numbering: the digit
 printed on a card, `1`-`9`, `Ctrl-f <project> <session>` and `⇧←→` cycling all count the same

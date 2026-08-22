@@ -140,7 +140,7 @@ fleet-read -s cf-getmycoi master 3      # the full reply
 ```
 
 Every fleet session is **named `<project>/<session>`** for Claude Code's cross-session messaging
-(`claude-here` passes `--name`; the derived default was `broker-agencies-61`, which nothing could
+(`claude-here` passes `--name`; the derived default was the bare directory name, which nothing could
 address), so the target is asked to answer you *directly* with `SendMessage`. That lands in your
 session whatever you are doing — the case the relay below is worst at.
 
