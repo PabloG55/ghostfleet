@@ -60,7 +60,11 @@ class Node_ {
   append(...ks) { for (const k of ks) if (k != null) this.kids.push(k); }
   appendChild(k) { this.kids.push(k); return k; }
   remove() {}
-  focus() { this.focused = true; }
+  // Records the focused node on the document too, not just a flag on itself: the poll
+  // guard asks `document.activeElement === composerNode`, which is the only way to
+  // tell "you are typing" that cannot go stale when a render drops the element.
+  focus() { this.focused = true; try { documentStub.activeElement = this; } catch {} }
+  blur()  { this.focused = false; try { if (documentStub.activeElement === this) documentStub.activeElement = null; } catch {} }
   get firstChild() { return this.kids[0] || null; }
   getBoundingClientRect() { return { width: 800, height: 20 }; }   // 8px per column, at 100px
   // A comma-separated tag list is the only selector app.js uses (renderSheet's first field).
@@ -167,8 +171,8 @@ is('a live fleet-serve base was given', true, !!BASE);
 // ── it boots at all ───────────────────────────────────────────────────────
 // The import IS the test: app.js's last block runs restore(), fitCards(), render() and
 // the probe. A ReferenceError anywhere in it lands here instead of on a phone.
-let bootError = '';
-try { await import(new URL('../../web/app.js', import.meta.url).href); }
+let bootError = '', appmod = {};
+try { appmod = await import(new URL('../../web/app.js', import.meta.url).href); }
 catch (e) { bootError = String((e && e.message) || e); }
 is('web/app.js boots without throwing', '', bootError);
 is('...and painted something', true, app.kids.length > 0);
@@ -322,6 +326,18 @@ is('...and the agent\'s are the other', true,
 is('...with a composer in place of the prompt sheet', true, !!app.find(n => n.tag === 'textarea'));
 is('...and a send button', true, !!btnWith(/^send$/));
 is('...and the prompt sheet is gone', false, !!btnWith(/send a prompt/));
+
+// THE POLL HAS TO STOP WHILE YOU ARE TYPING, and both directions matter: a guard that
+// never pauses lowers the keyboard every five seconds, and one that never resumes leaves
+// the grid frozen behind a box you touched once an hour ago. Reported live as "it hides
+// the keyboard every time, I cannot type for more than five seconds" — refresh() ends in
+// render(), render() empties #app, and the element the keyboard is attached to goes with it.
+const boxNode = app.find(n => n.tag === 'textarea');
+is('the poll runs when nothing is focused', false, appmod.pollPaused());
+boxNode.focus();
+is('...and pauses while the composer has focus', true, appmod.pollPaused());
+boxNode.blur();
+is('...and resumes when it loses focus', false, appmod.pollPaused());
 // ONE region scrolls. The page itself must not, or a repaint every five seconds drops the
 // reader wherever the browser lands — which is what "the screen moves around" was.
 is('...inside the shell, not the page', true,

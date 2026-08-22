@@ -209,6 +209,7 @@ function render() {
   // The pane's nodes are about to be thrown away; drop the references with them, so a
   // poll that lands mid-render patches nothing rather than a detached <pre>.
   paneBoxNode = paneNode = paneGeomNode = null;
+  composerNode = null;                      // re-set by composer() if this render draws one
   if (S.locked) { app.append(lockScreen()); renderSheet(); syncPanePoll(); return; }
   if (S.screen === 'projects') app.append(...projectsScreen());
   else if (S.screen === 'grid') app.append(...gridScreen());
@@ -618,9 +619,13 @@ function composer(card) {
   const box = el('textarea', { rows: '1', placeholder: 'message this session…',
                                autocapitalize: 'sentences', spellcheck: 'false' });
   box.value = S.draft || '';
+  composerNode = box;      // pollPaused() compares document.activeElement against this
   // The draft lives in state, not in the DOM: render() rebuilds this element every poll,
-  // and a half-typed message must survive that. (The poll is also paused while a sheet or
-  // a confirmation is open — this is the same rule for the box that replaced them.)
+  // and a half-typed message must survive that. That saves the TEXT and not the caret:
+  // the element the keyboard is attached to is gone, and a mobile browser lowers the
+  // keyboard when its focused node is destroyed — so the box that survives is one you
+  // have to tap again, every five seconds, which is not a box you can type in. The poll
+  // has to actually stop; see pollPaused().
   box.addEventListener('input', () => {
     S.draft = box.value;
     // Grow with the text, up to the CSS max — a one-line box for a paragraph is the
@@ -910,6 +915,25 @@ function restoreChatScroll(box) {
 // daemon either way, but the bytes cross a WireGuard tunnel on someone's cellular plan,
 // and that is the cost worth being careful with. Measured: a 269x65 pane captures to
 // 5.9 KB with its escapes, so 2s is ~3 KB/s and history at 4s is about the same.
+// Whether the 5s poll may run. Declared here, with the other declarations, because
+// pwa-check enforces that every top-level declaration precedes the first top-level
+// statement — that is what makes a temporal-dead-zone reference structurally impossible,
+// and putting this beside the setInterval that uses it broke the rule.
+export function pollPaused() {
+  if (document.hidden || S.locked || S.sheet || S.confirm) return true;
+  // Typing counts. refresh() ends in render(), render() empties #app and rebuilds it, so
+  // a poll that lands while the composer has focus destroys the element the keyboard is
+  // attached to. Reported as "it hides the keyboard every time, I cannot type for more
+  // than five seconds" — five being this interval, exactly.
+  try { if (composerNode && document.activeElement === composerNode) return true; } catch {}
+  return false;
+}
+
+// The live composer <textarea>, so the poll can tell whether you are typing in it.
+// A node, not a boolean: a flag set by focus/blur goes stale the moment a render
+// throws the element away without firing blur, and then the poll never resumes.
+let composerNode = null;
+
 const PANE_POLL_MS = 2000, PANE_POLL_HISTORY_MS = 4000;
 let paneTimer = null, paneTimerMs = 0, paneBusy = false;
 
@@ -1824,9 +1848,6 @@ api.ready().then(() => render());
 // (§2), so a 5s poll is well inside what the daemon can serve and needs no new
 // machinery. Paused while a form or a confirmation is open — a redraw under a
 // half-typed prompt is how you lose it.
-setInterval(() => {
-  if (document.hidden || S.locked || S.sheet || S.confirm) return;
-  refresh();
-}, 5000);
+setInterval(() => { if (!pollPaused()) refresh(); }, 5000);
 
 

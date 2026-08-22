@@ -15,7 +15,10 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v5 renames every fixture: the demo data used to be real
+// BUMPED WHEN THE CLIENT CHANGES — v6 stops the 5s poll while you are typing, and this is
+// the bump that matters most so far: without it a phone keeps a client whose keyboard
+// closes every five seconds, and the fix is invisible until the shell is refetched. v5
+// renames every fixture: the demo data used to be real
 // project and session names, which is fine in a private repo and not in a public one. v4
 // rebuilt the session screen as a chat (a composer, a shell that owns the viewport,
 // history-backed back, speech) and added two fixtures. v3 added the pane view, which was a
@@ -27,11 +30,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: b32a6cba3af7
+// CLIENT-HASH: fe2697fbf9f5
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v5';
+const VERSION = 'ghostfleet-v6';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js',
