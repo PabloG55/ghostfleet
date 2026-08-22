@@ -338,11 +338,15 @@ export async function getSession(project, session, before = null) {
     return { session, total: 0, messages: [], next_before: null,
              note: `no transcript for '${session}' yet — it hasn't taken a turn.` };
   }
-  const msgs = all.messages || [];
+  // Anything sent from this client during this session of the app, appended in order —
+  // the transcript is what the chat reconciles its optimistic bubble against, so a fixture
+  // that never echoes a send cannot exercise that at all.
+  const msgs = [...(all.messages || []), ...(overlay.sent.get(session) || [])];
   const upTo = before == null ? msgs.length : msgs.findIndex(m => String(m.ts) === String(before));
   const end = upTo < 0 ? msgs.length : upTo;
   const start = Math.max(0, end - PAGE);
-  return { ...all, messages: msgs.slice(start, end), next_before: start > 0 ? String(msgs[start].ts) : null };
+  return { ...all, total: msgs.length, messages: msgs.slice(start, end),
+           next_before: start > 0 ? String(msgs[start].ts) : null };
 }
 
 // The session's real pane — `capture-pane -p -e`, escapes and all.
@@ -439,7 +443,7 @@ export async function verb(tool, args, assertion = null) {
 // Kept as an OVERLAY rather than by editing the fixture in memory, so reloading always
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
-const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [] };
+const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map() };
 function applyOverlay(g) {
   let cards = (g.cards || [])
     .filter(c => !overlay.gone.has(c.name))
@@ -479,7 +483,18 @@ function fixtureVerb(tool, a) {
         return { ok: false, text: "fleet_pause: refusing to park 'master' — it is the fleet's lead, and a fleet whose lead is off dispatches nothing" };
       overlay.status.set(a.session, 'parked'); return ok(`parked '${a.session}'`);
     case 'fleet_resume': overlay.status.set(a.session, a.prompt ? 'working' : 'ready'); return ok(`resumed '${a.session}'`);
-    case 'fleet_send':   overlay.status.set(a.session, 'working'); return ok(`sent to '${a.session}'`);
+    case 'fleet_send': {
+      overlay.status.set(a.session, 'working');
+      // ...and it lands in the transcript, because the chat's optimistic bubble is
+      // reconciled against what the transcript says (app.js's reconcilePending). Without
+      // the echo, fixture mode shows a message that is "sending…" for three minutes and
+      // then silently disappears — which demos the exact failure the reconcile exists to
+      // avoid, and leaves the reconcile itself untested.
+      const list = overlay.sent.get(a.session) || [];
+      list.push({ ts: Math.floor(Date.now() / 1000), role: 'user', text: String(a.prompt || '') });
+      overlay.sent.set(a.session, list);
+      return ok(`sent to '${a.session}'`);
+    }
     case 'fleet_answer': overlay.status.set(a.session, 'working'); return ok(`answered '${a.session}'`);
     case 'fleet_stop':
       // The planner refuses the lead before it reaches a command (mcp/fleet-dispatch.mjs),
@@ -538,4 +553,5 @@ function fixtureVerb(tool, a) {
 export function resetOverlay() {
   overlay.status.clear(); overlay.gone.clear(); overlay.sched.clear();
   overlay.label.clear(); overlay.freeGone.clear(); overlay.added.length = 0; overlay.order.length = 0;
+  overlay.sent.clear();
 }

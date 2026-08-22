@@ -15,8 +15,9 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v3 adds the pane view, which is a new file (ansi.js)
-// and a new default for the session screen. The rule below is why the bump is not
+// BUMPED WHEN THE CLIENT CHANGES — v4 rebuilds the session screen as a chat (a composer, a
+// shell that owns the viewport, history-backed back, speech) and adds two fixtures. v3
+// added the pane view, which was a new file (ansi.js) and a new default for that screen. The rule below is why the bump is not
 // optional and why forgetting it is worse than shipping nothing. The shell is served
 // CACHE-FIRST, so a phone that already has v1 paints the old app.js on the first open
 // after a deploy and only revalidates behind it — which for the two fixes in this version
@@ -24,7 +25,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-const VERSION = 'ghostfleet-v3';
+// CLIENT-HASH: c4494ae70cb3
+// ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
+// any of them and the suite goes red with the hash to paste here — which is the moment to
+// bump VERSION, so the two can never drift apart again.
+const VERSION = 'ghostfleet-v4';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js',

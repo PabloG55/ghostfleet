@@ -100,6 +100,13 @@ const documentStub = {
     : []),
   addEventListener() {},
 };
+const winListeners = {};
+const fireWindow = (ev) => { for (const f of winListeners[ev] || []) f({ type: ev }); };
+// THE GESTURE, both halves. A swipe pops the entry and then fires popstate; firing alone
+// would model half of it and leave the depth assertions passing for the wrong reason.
+const swipeBack = () => { if (histDepth > 0) histDepth--; fireWindow('popstate'); };
+let histDepth = 0;
+const histPushedUrls = [];
 const stored = new Map();
 for (const [name, value] of [
   ['localStorage', {
@@ -108,11 +115,29 @@ for (const [name, value] of [
     removeItem: (k) => { stored.delete(k); },
   }],
   ['document', documentStub],
+  // A REAL REGISTRY, not a no-op. app.js's back gesture is wired to `popstate`, and a
+  // swallowed listener would make the whole feature untestable outside a browser — which
+  // is the same "it parses but does it run" gap this helper exists to close.
+  ['addEventListener', (ev, fn) => { (winListeners[ev] = winListeners[ev] || []).push(fn); }],
+  // ...and the platform half of it. The app never reads a URL — pushState is called with
+  // the current href and the entries carry a depth — so a counter IS the model: push
+  // deepens, back()/go() pop and fire popstate, and popping at the root does nothing,
+  // which is where the system gesture would leave the app.
+  ['history', {
+    get length() { return histDepth + 1; },
+    pushState: (_st, _t, url) => { histPushedUrls.push(String(url ?? '')); histDepth++; },
+    replaceState: () => {},
+    back: () => { if (histDepth > 0) { histDepth--; fireWindow('popstate'); } },
+    go: (n) => {
+      const steps = Math.min(histDepth, Math.max(0, -Number(n) || 0));
+      if (!steps) return;
+      histDepth -= steps; fireWindow('popstate');
+    },
+  }],
   // available() wants these two; the ceremony behind the buttons is pwa-enrol.mjs's job,
   // and this file stops at the sheet rather than touching navigator.credentials.
   ['window', { isSecureContext: true, PublicKeyCredential: function PublicKeyCredential() {} }],
   ['navigator', {}],
-  ['addEventListener', () => {}],
   // app.js polls every 5s; left real, the process would never exit.
   ['setInterval', () => 0],
 ]) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -133,8 +158,8 @@ globalThis.fetch = (url, opts) => {
 };
 
 const U = BASE ? new URL(BASE) : null;
-globalThis.location = U ? { origin: U.origin, protocol: U.protocol, host: U.host, hostname: U.hostname }
-                       : { origin: 'null', protocol: 'file:', host: '', hostname: '' };
+globalThis.location = U ? { href: U.href, origin: U.origin, protocol: U.protocol, host: U.host, hostname: U.hostname }
+                       : { href: 'file:///', origin: 'null', protocol: 'file:', host: '', hostname: '' };
 
 const api = await import(new URL('../../web/api.js', import.meta.url).href);
 is('a live fleet-serve base was given', true, !!BASE);
@@ -160,6 +185,12 @@ async function until(pred, ms = 4000) {
   return pred();
 }
 const btnWith = (re) => app.find(n => n.tag === 'button' && re.test(n.textContent));
+// The sheet's own "esc back", so a test closes it the way a finger does.
+const closeSheetFromTest = () => {
+  const host = sheetHost.firstChild;
+  const b = host && host.find(n => n.tag === 'button' && /esc\s+back/.test(n.textContent));
+  if (b) (b.listeners.click || []).forEach(f => f());
+};
 // Null-safe on purpose: a button that is not there has to come out as a red ROW from the
 // assertion above it, not as a dead helper that emits nothing at all.
 const click = (n) => (n && (n.listeners.click || []).map(f => f())[0]);
@@ -204,7 +235,7 @@ if (BASE) {
 // save button is the one thing that has to re-resolve and re-lock. Port 1 has nothing on
 // it, so 'auto' can only land in fixtures.
 stored.clear();
-globalThis.location = { origin: 'http://127.0.0.1:1', protocol: 'http:', host: '127.0.0.1:1', hostname: '127.0.0.1' };
+globalThis.location = { href: 'http://127.0.0.1:1/', origin: 'http://127.0.0.1:1', protocol: 'http:', host: '127.0.0.1:1', hostname: '127.0.0.1' };
 click(btnWith(/settings/));
 await tick(50);
 const set = sheetHost.firstChild;
@@ -269,52 +300,143 @@ const tap = (n) => (n && (n.listeners.pointerdown || []).length
   : null);
 tap(cardTitled(/master/));
 await until(() => /the fleet's lead/.test(app.textContent), 4000);
-is('tapping it opens its session screen', true, !!btnWith(/send a prompt/));
+is('tapping it opens its session screen', true, !!app.find(n => n.tag === 'textarea'));
 is('...and it says it is the lead', true, /the fleet's lead/.test(app.textContent));
-// THE PANE IS WHAT A TAP LANDS ON (§7a), and until this fixture existed nobody had ever
-// rendered a LEAD's. It is a real 269x65 capture — the widest pane on the fleet going to
-// the narrowest screen, which is the exact case "never wrapped, never reflowed" exists
-// for. (One edit to the capture: the lead names its own checkout in its header, and this
-// one came off the ghostfleet fleet, so the path says superkey. Byte-length preserved.)
-// Matched on text that lives INSIDE one span: ansi.js opens a new span per attribute run,
-// so "Claude Code v2.1.235" is two spans and a regex spanning them silently never fires.
-is('...the lead pane renders', true, await until(() => /Claude Code/.test(app.textContent), 4000));
-// ...and it is THIS lead's pane: the header names the checkout, which is the one thing in
-// the capture that identifies whose screen it is.
-is('...naming its own checkout', true, /Documents\/superkey/.test(app.textContent));
-is('...and not as an error or a placeholder', false,
-   /no pane captured|capturing the pane…/.test(app.textContent));
-// Both views work for a lead, which needed a transcript fixture too — without one the
-// messages tap 404s into "reading the transcript…" and the lead is half-openable.
-click(btnWith(/^messages$/));
-is('...its transcript opens too', true, await until(() => /anything blocked on me/.test(app.textContent), 4000));
+
+// ── the chat is what a tap lands on now ──────────────────────────────────
+// The default moved from the pane (#45) to the chat, at the request of the person using
+// it, and the pane's reason survives as the blocked banner rather than as the default.
+is('...opening on the chat', true, await until(() => /anything blocked on me/.test(app.textContent), 4000));
+is('...oldest first, newest last', true, (() => {
+  const bubs = app.all(n => n.className.split(/\s+/).includes('bub')).map(n => n.textContent);
+  return bubs.length >= 4 && /which workers are free/.test(bubs[0]) && /Dispatched the binder work/.test(bubs[bubs.length - 1]);
+})());
+// Two roles, drawn as two sides. A chat where both speakers look the same is the table
+// this replaced.
+is('...the user\'s turns are their own side', true,
+   app.all(n => n.className.split(/\s+/).includes('user')).length >= 2);
+is('...and the agent\'s are the other', true,
+   app.all(n => n.className.split(/\s+/).includes('agent')).length >= 2);
+// A composer, not a full-screen form: `send a prompt` used to be three taps and a screen
+// change for the verb this app exists to use most.
+is('...with a composer in place of the prompt sheet', true, !!app.find(n => n.tag === 'textarea'));
+is('...and a send button', true, !!btnWith(/^send$/));
+is('...and the prompt sheet is gone', false, !!btnWith(/send a prompt/));
+// ONE region scrolls. The page itself must not, or a repaint every five seconds drops the
+// reader wherever the browser lands — which is what "the screen moves around" was.
+is('...inside the shell, not the page', true,
+   (documentStub.documentElement.className || '').split(/\s+/).includes('shell'));
+is('...and the chat is the scroller', true,
+   !!app.find(n => n.className.split(/\s+/).includes('chat') && (n.listeners.scroll || []).length > 0));
+
+// ── the pane, still one tap away, and now with a fixture for a LEAD ──────
+// A real 269x65 capture — the widest pane on the fleet meeting the narrowest screen, which
+// is the exact case "never wrapped, never reflowed" exists for and the one case that had no
+// fixture. (One edit to it: the lead names its own checkout in its header and this capture
+// came off the ghostfleet fleet, so the path says superkey; byte length preserved.)
 click(btnWith(/^pane$/));
-// The geometry label LAGS by one paint on purpose — it is a node the poll updates without
-// redrawing the screen under a reader — so it is asserted after coming back to the pane
-// rather than on the first render, where it is legitimately empty.
-is('...and the pane reports its real size', true, await until(() => /269×65/.test(app.textContent), 4000));
-// The verbs that mean something for a lead are all still there.
-is('...keeps send a prompt', true, !!btnWith(/send a prompt/));
-is('...keeps answer keys', true, !!btnWith(/answer keys/));
-// ...and NOT pause. Parking the lead turns off the session that dispatches work and
-// drains fleet-inbox; the governor already excludes master from what it parks, plan()
-// refuses it, and on the grid it was one careless swipe on the FIRST card. Resume stays
-// reachable everywhere — the recovery direction is never guarded — it is simply not drawn
-// here while the lead is running.
-is('...has no pause button', false, !!btnWith(/\bp\s+pause/));
-// ...and the three the server refuses are NOT.
-is('...has no kill button', false, !!btnWith(/x\s+kill/));
-is('...no stop \u002b reclaim', false, !!btnWith(/reclaim worktree/));
-is('...and no rename', false, !!btnWith(/r\s+rename/));
-// THE OTHER DIRECTION, or a screen that drew no buttons at all would pass all three.
-click(btnWith(/q\s+back/));
-await until(() => !!btnWith(/n\s+new/), 4000);
+// Matched on text inside ONE span: ansi.js opens a span per attribute run, so
+// "Claude Code v2.1.235" is two of them and a regex spanning them never fires.
+is('the pane view still opens', true, await until(() => /Claude Code/.test(app.textContent), 4000));
+is('...naming its own checkout', true, /Documents\/superkey/.test(app.textContent));
+is('...and not an error or a placeholder', false,
+   /no pane captured|capturing the pane…/.test(app.textContent));
+click(btnWith(/^chat$/));
+is('...and the chat comes back', true, await until(() => /anything blocked on me/.test(app.textContent), 4000));
+
+// ── the composer actually sends, and the optimistic bubble is reconciled ──
+// A chat where your own message vanishes for five seconds reads as a send that failed, so
+// it is drawn immediately and dimmed. It is not TRUSTED, though: it is matched against
+// what the transcript comes back with, or a send that silently went nowhere would sit
+// there looking delivered forever.
+const ta = app.find(n => n.tag === 'textarea');
+ta.value = 'run the suite and report back';
+(ta.listeners.input || []).forEach(f => f());
+click(btnWith(/^send$/));
+is('a sent message shows at once', true, await until(() =>
+  !!app.find(n => n.className.split(/\s+/).includes('pending')), 4000));
+is('...and the box is cleared', '', app.find(n => n.tag === 'textarea').value);
+is('...then the transcript claims it', true, await until(() =>
+  !app.find(n => n.className.split(/\s+/).includes('pending')), 8000));
+is('...and it is still on screen, as a real turn', true,
+   app.all(n => n.className.split(/\s+/).includes('bub')).some(n => /run the suite and report back/.test(n.textContent)));
+
+// ── reading the last message aloud ──────────────────────────────────────
+// The harness has no speechSynthesis, which is the case a phone without it hits: the
+// button must be ABSENT rather than dead. Its presence is covered by the unit check on
+// speakable() and by pwa-check's availability guard.
+is('no speak button without synthesis', false, !!btnWith(/🔊/));
+
+// ── the ten buttons are one sheet now ───────────────────────────────────
+is('the verb wall is gone', false, !!btnWith(/answer keys/));
+click(btnWith(/⋯/));
+const acts = sheetHost.firstChild;
+is('⋯ opens the actions sheet', true, !!acts);
+is('...with answer keys, the unblock verb', true, !!acts && /answer keys/.test(acts.textContent));
+is('...and sched and label', true, !!acts && /sched/.test(acts.textContent) && /label/.test(acts.textContent));
+// The lead's three refusals are absent HERE too — the sheet is not a way around them.
+is('...and no kill for the lead', false, !!acts && /x  kill/.test(acts.textContent));
+is('...no reclaim either', false, !!acts && /reclaim worktree/.test(acts.textContent));
+is('...nor rename', false, !!acts && /r\s+rename/.test(acts.textContent));
+is('...nor pause', false, !!acts && /p  pause/.test(acts.textContent));
+is('...and it says why', true, !!acts && /cannot be stopped, reclaimed, renamed or paused/.test(acts.textContent));
+closeSheetFromTest();
+
+// ── the back gesture, which had nothing to pop before ───────────────────
+// Two forward moves were made to get here (project, then session), so there are two of our
+// entries on the stack and the system gesture has somewhere to go. No URL was ever set:
+// every push reuses the current href.
+is('navigating pushed history entries', 2, histDepth);
+is('...and none of them set a url', true, histPushedUrls.every(u => u === location.href));
+// The gesture itself. popstate is the ONLY path backwards, so this is exactly what a swipe
+// does — not a second code path that happens to agree.
+swipeBack();
+is('the gesture goes back to the grid', true, await until(() => !!btnWith(/n\s+new/), 4000));
+is('...and not out of the app', true, /master/.test(app.textContent));
+swipeBack();
+is('...then to projects', true, await until(() => /— projects/.test(app.textContent), 4000));
+// At the root there is nothing of ours left, so the platform gets it — which is what
+// closing the app should do, and what the old code did on the FIRST back from anywhere.
+is('...and the stack is unwound', 0, histDepth);
+
+// ── THE OTHER DIRECTION: a worker keeps all of it ───────────────────────
+click(btnWith(/⏎\s+open/));
+is('a project opens again', true, await until(() => !!cardTitled(/coi-beside/), 4000));
 tap(cardTitled(/coi-beside/));
-await until(() => !!btnWith(/x\s+kill/), 4000);
-is('a worker keeps its pause button', true, !!btnWith(/\bp\s+pause/));
-is('a worker keeps its kill button', true, !!btnWith(/x\s+kill/));
-is('...and its stop + reclaim', true, !!btnWith(/reclaim worktree/));
-is('...and its rename', true, !!btnWith(/r\s+rename/));
-is('...and says nothing about a lead', false, /the fleet's lead/.test(app.textContent));
+await until(() => !!app.find(n => n.tag === 'textarea'), 4000);
+is('a worker says nothing about a lead', false, /the fleet's lead/.test(app.textContent));
+click(btnWith(/⋯/));
+const wacts = sheetHost.firstChild;
+is('a worker keeps kill', true, !!wacts && /kill/.test(wacts.textContent));
+is('...and stop + reclaim', true, !!wacts && /reclaim worktree/.test(wacts.textContent));
+is('...and rename', true, !!wacts && /rename/.test(wacts.textContent));
+is('...and pause', true, !!wacts && /pause/.test(wacts.textContent));
+closeSheetFromTest();
+
+// ── the banner that pays for the new default ────────────────────────────
+// A ready session must NOT be shouted at, and a blocked one must be — the pair is the
+// test, because a banner that is always there says nothing and one that never fires is
+// indistinguishable from a missing feature. The degraded fixture is the fleet whose LEAD is
+// need-you, which is the case a phone exists to catch.
+is('a ready session has no banner', false, !!app.find(n => n.className.split(/\s+/).includes('blocked')));
+// The overlay records what THIS run did to the fleet, and this run sent master a message
+// a moment ago — which set it working. Reset it, or the status being asserted below is the
+// test's own footprint rather than the fixture's.
+api.resetOverlay();
+api.setFixtureName('grid-degraded.json');
+click(btnWith(/‹/));
+is('back to the grid', true, await until(() => !!btnWith(/n\s+new/), 4000));
+await until(() => {
+  const c = cardTitled(/master/);
+  return c && /NEEDS YOU/.test(c.textContent);
+}, 5000);
+tap(cardTitled(/master/));
+is('a blocked session says so', true, await until(() =>
+  !!app.find(n => n.className.split(/\s+/).includes('blocked')), 4000));
+is('...naming what a transcript cannot show', true, /a transcript cannot show one/.test(app.textContent));
+// ...and the button goes where the answer has to be typed. This is the whole seam between
+// the two views: the chat is the better place to read, the pane the only place to unblock.
+click(btnWith(/open the pane/));
+is('...and it opens the pane', true, await until(() => /Claude Code/.test(app.textContent), 4000));
 
 console.log(rows.join('\n'));

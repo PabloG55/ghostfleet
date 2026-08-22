@@ -27,7 +27,7 @@ const S = {
   projects: null,       // last /api/projects payload
   grid: null,           // last §4 payload
   sess: null,           // last /api/session payload  { messages, next_before, … }
-  view: 'pane',         // the session screen: 'pane' (the real thing) | 'msgs' (the list)
+  view: 'chat',         // the session screen: 'chat' (the conversation) | 'pane' (the terminal)
   pane: null,           // last /api/pane payload   { pane, at, … }
   paneGeom: null,       // { rows, cols } — measured from that payload, not claimed by it
   paneErr: '',          // the last pane read's failure, shown once rather than per poll
@@ -40,7 +40,18 @@ const S = {
   toast: null,
   stale: 0,             // epoch of the payload on screen, when it came from the cache
   hiddenAt: 0,
+  draft: '',            // the composer's text, kept across repaints (a poll must not eat it)
+  pending: null,        // { text, at } — sent, not yet back in the transcript
+  speaking: '',         // the text currently being read aloud, '' when silent
 };
+// WHICH VIEW A TAP ON A CARD LANDS ON, and it moved. #45 made it the pane, because a
+// message list could not show a command and the first person to use the app said so. It is
+// the chat now, because the second thing they said after living with it was "convert it to
+// a normal chat like the Claude app... the chat is very small" — and the pane's reason
+// survives inside the new default rather than being argued away: a blocked session draws a
+// red banner in the chat with one button to the pane, which is the only place an answer can
+// be typed. Both views are one tap apart, and the pane is still a verbatim capture.
+const DEFAULT_VIEW = 'chat';
 const LS_LAST = 'gf.last';   // last fetched state, for a cold offline open
 const LS_PFS = 'gf.pfs';    // the pane's font size, which is a per-eyesight preference
 
@@ -52,6 +63,11 @@ function save() {
   try {
     localStorage.setItem(LS_LAST, JSON.stringify({
       at: Math.floor(Date.now() / 1000), screen: S.screen, project: S.project,
+      // THE SESSION NAME TOO. `screen` was saved and this was not, so quitting from a
+      // session and reopening restored the session SCREEN with nothing on it: "'null' is
+      // not on this fleet's grid any more". It was always broken and was easy to miss
+      // while that screen was a card and a row of buttons; it is the whole viewport now.
+      session: S.session, view: S.view,
       projects: S.projects, grid: S.grid,
     }));
   } catch {}
@@ -61,8 +77,21 @@ function restore() {
   if (!j) return;
   S.projects = j.projects || null; S.grid = j.grid || null;
   S.project = j.project || null; S.screen = j.screen || 'projects';
+  S.session = j.session || null;
+  // 'msgs' was the old list view's name and is not a view any more; anything unrecognised
+  // falls to the default rather than rendering neither.
+  S.view = j.view === 'pane' ? 'pane' : DEFAULT_VIEW;
+  // A CLAMP, not a trust. Half-written state is how the screen above happened, and the
+  // rule is simple enough to state: you cannot be on a screen whose subject is missing.
+  if (S.screen === 'session' && !S.session) S.screen = S.project ? 'grid' : 'projects';
+  if (S.screen === 'grid' && !S.project) S.screen = 'projects';
   S.stale = j.at || 0;
+  // ...and give the back gesture the trail it would have had if you had walked here. A
+  // cold open is at the root of its own history, so without this the first swipe out of a
+  // restored session screen leaves the app — the exact complaint, one reopen later.
+  seedNav(S.screen === 'session' ? 2 : S.screen === 'grid' ? 1 : 0);
 }
+function seedNav(depth) { for (let i = 0; i < depth; i++) pushNav(); }
 
 // The card is 32 columns (CW + 2) and it should span the phone. Measured rather than
 // assumed: monospace faces differ in advance width, and a guess that is 4% out either
@@ -106,6 +135,9 @@ async function refresh() {
         const fresh = await api.getSession(S.project, S.session);
         S.sess = { ...fresh, pages: 1 };
       }
+      // Whatever the transcript now says decides whether the optimistic bubble is still
+      // telling the truth.
+      reconcilePending();
     }
     S.stale = 0;
     save();
@@ -157,8 +189,22 @@ function toast(text, kind = '') {
 }
 
 // ── render ────────────────────────────────────────────────────────────────
+// Which screens own the viewport rather than growing a page under it. The session screen
+// has a composer pinned to the bottom and a conversation that scrolls between two fixed
+// bars, and the grid has a card list under a header — both are columns of a known height,
+// which is what stops the layout moving on a poll.
+const SHELL_SCREENS = new Set(['session', 'grid', 'projects']);
 function render() {
   const app = document.getElementById('app');
+  // Toggled on <html> as well: the page must not scroll behind a screen that owns the
+  // viewport, or a drag near the edge slides the whole app and the scroller under the
+  // finger never moves. Guarded — the fake DOM the suite renders into has no classList on
+  // documentElement until it needs one.
+  const shell = !S.locked && SHELL_SCREENS.has(S.screen);
+  try {
+    app.classList.toggle('shell', shell);
+    document.documentElement.classList.toggle('shell', shell);
+  } catch {}
   app.textContent = '';
   // The pane's nodes are about to be thrown away; drop the references with them, so a
   // poll that lands mid-render patches nothing rather than a detached <pre>.
@@ -237,9 +283,25 @@ function projectsScreen() {
   out.push(el('div', { class: 'hint', text: 'tap a project · long-press to remove it from the list · drag its title to reorder' }));
   return out.filter(Boolean);
 }
+// `Q` / Ctrl-p jumps straight to Projects from anywhere, which is neither forward nor
+// back. Unwinding our own entries keeps the stack honest: pushing here would leave the
+// gesture retracing grid → session screens you have already left, and leaving the stack
+// alone would make the first back-gesture from Projects exit the app.
+function toProjects() {
+  const n = navDepth;
+  S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null;
+  S.pending = null; stopSpeaking();
+  navDepth = 0;
+  if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
+    try { history.go(-n); } catch {}    // popstate fires; popTo() sees screen==='projects'
+  }
+  render(); refresh();
+}
+
 function openProject(name) {
   if (!name) return;
   S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null;
+  pushNav();                          // so the back gesture returns to Projects, not out
   render(); refresh();
 }
 
@@ -315,7 +377,7 @@ function gridScreen() {
     btn(it.freeWt ? 'x remove wt' : it.card?.lead ? 'x — not the lead' : 'x kill',
         () => { if (it.card) askKill(it.card.name); else if (it.freeWt) askRemoveWorktree(it.freeWt); }, 'danger'),
     btn(', settings', () => sheetSettings()),
-    btn('Q projects', () => { S.screen = 'projects'; S.sel = 0; render(); refresh(); }),
+    btn('Q projects', () => toProjects()),
   ]));
   out.push(el('div', { class: 'hint', text: 'tap a card · swipe ← pause · swipe → resume · long-press = x · drag a card\'s title to reorder' }));
   return out.filter(Boolean);
@@ -342,6 +404,63 @@ async function reorder(name, delta) {
   await doVerb('fleet_order', { project: S.project, order: moved.filter(c => !c.lead).map(c => c.name) }, { quiet: true });
 }
 
+// ── reading a message aloud ─────────────────────────────────────────────────
+// "add smth to reproduce the last message like an audio". SpeechSynthesis, which is in
+// the browser already — no network call, no key, nothing for the CSP to refuse and no
+// second service to keep alive. It is also the only way this app produces output you can
+// take in without looking at it, which on a phone is the point.
+//
+// WHAT IS SPOKEN IS NOT WHAT IS WRITTEN. An assistant turn is markdown with code in it,
+// and a synthesiser reads `**` and backticks and a 40-line diff out loud, one character at
+// a time. So fenced blocks become the words "code block" (you cannot follow code by ear,
+// and pretending otherwise wastes a minute of listening), inline code keeps its text
+// without its backticks, links become "link", and the emphasis marks go. Capped, because
+// a whole turn can be thousands of characters and there is no way to skim a voice.
+const SPEAK_MAX = 1200;
+export function speakable(text) {
+  let t = String(text || '');
+  t = t.replace(/```[\s\S]*?```/g, ' … code block … ');   // fenced code: named, not read
+  t = t.replace(/`([^`]*)`/g, '$1');                      // inline code: the text, not the ticks
+  t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1 link'); // [label](url) -> "label link"
+  t = t.replace(/https?:\/\/\S+/g, ' link ');            // and a bare one
+  t = t.replace(/^\s{0,3}#{1,6}\s+/gm, '');               // heading marks
+  t = t.replace(/^\s{0,3}[-*+]\s+/gm, '');                // bullet marks
+  t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, '$1$2$3');
+  t = t.replace(/\s+/g, ' ').trim();
+  return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, '') + '… and it goes on.' : t;
+}
+const canSpeak = () => {
+  try { return typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance === 'function'; }
+  catch { return false; }
+};
+function stopSpeaking() {
+  if (!canSpeak()) { S.speaking = ''; return; }
+  try { speechSynthesis.cancel(); } catch {}
+  S.speaking = '';
+}
+// A TOGGLE, and it is the same button both ways: tapping the one that is speaking stops
+// it. Two voices at once is the failure mode of a play button that is really two buttons.
+function toggleSpeak(text) {
+  if (!canSpeak()) { toast('this browser has no speech synthesis', 'bad'); return; }
+  const say = speakable(text);
+  if (!say) { toast('nothing to read out in that message', 'bad'); return; }
+  const wasSpeaking = S.speaking;
+  stopSpeaking();
+  if (wasSpeaking === say) { render(); return; }        // tapped the one that was talking
+  S.speaking = say;
+  try {
+    const u = new SpeechSynthesisUtterance(say);
+    u.rate = 1.05;
+    // Cleared when it finishes on its own, or the button stays lit for a voice that
+    // stopped talking a minute ago. `onerror` too: iOS refuses to speak at all until a
+    // gesture has unlocked audio, and a stuck highlight is how that looks from outside.
+    u.onend = () => { if (S.speaking === say) { S.speaking = ''; render(); } };
+    u.onerror = () => { if (S.speaking === say) { S.speaking = ''; render(); } };
+    speechSynthesis.speak(u);
+  } catch { S.speaking = ''; toast('speech synthesis refused to start', 'bad'); }
+  render();
+}
+
 // ── the session screen ────────────────────────────────────────────────────
 // WHAT A TAP ON A CARD LANDS ON IS THE PANE, and that is the whole of this change.
 //
@@ -366,73 +485,221 @@ function openSession(name) {
   // Reset to the pane on every open rather than remembering the last choice. The card is
   // tapped to answer "what is this worker doing right now", and the pane is the answer to
   // that question; a sticky preference would sometimes answer a different one.
-  S.view = 'pane'; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
+  S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
+  S.draft = ''; S.pending = null; stopSpeaking();
   paneScroll = null;          // another session's offset means nothing in this one's pane
+  chatScroll = null;
+  pushNav();
   render(); refresh();
 }
 function cardOf(name) { return ((S.grid && S.grid.cards) || []).find(c => c.name === name); }
 
 function sessionScreen() {
   const c = cardOf(S.session);
-  const out = header(null);
-  out.push(confirmBar());
-  if (c) {
-    const list = el('div', { class: 'cards' });
-    // The same card, not a summary of it: this screen is reached BY the card, and
-    // redrawing it differently here would be the second layout §10 refuses.
-    list.append(cardEl(G.cardLines(c, false, ((S.grid.cards || []).indexOf(c))), {}, -1));
-    out.push(list);
-  } else {
-    out.push(el('div', { class: 'hint', text: `'${S.session}' is not on this fleet's grid any more.` }));
-  }
-  const parked = c && c.status === 'parked';
-  // THE LEAD KEEPS EVERY VERB THAT MEANS SOMETHING FOR IT AND NONE THAT CANNOT HAPPEN.
-  // Prompting, answering a dialog, pausing and scheduling are the reasons to open this
-  // screen from a couch at all, and they work on master exactly as they do on a worker.
-  // Stop, reclaim and rename are refused by the server for every caller, so drawing them
-  // here would be three buttons whose only outcome is an error — and the reclaim one asks
-  // for a fingerprint before it can even fail.
   const lead = !!(c && c.lead);
-  out.push(el('div', { class: 'verbs' }, [
-    btn('send a prompt', () => sheetSend(S.session), 'go'),
-    // The motivating case (§1): a worker blocked on "Allow pnpm test?" since 9pm. That
-    // is fleet_answer, keystrokes into a dialog — not a prompt, which would queue
-    // behind the block instead of clearing it.
-    btn('answer keys', () => sheetAnswer(S.session)),
-    lead && !parked ? null
-      : btn(parked ? 'P resume' : 'p pause', () => (parked ? resumeSession(S.session) : pauseSession(S.session))),
-    btn('s sched', () => sheetSchedule(S.session)),
-    lead ? null : btn('r rename', () => sheetRename(S.session), 'danger'),
-    btn('l label', () => sheetLabel(S.session)),
-    lead ? null : btn('x kill', () => askKill(S.session), 'danger'),
-    // §7 puts stop --reclaim on the phone on purpose, and §12 is why it takes two
-    // confirmations: fleet-clean's gates decide whether removal is SAFE, never whether
-    // it was intended.
-    lead ? null : btn('stop + reclaim worktree', () => askReclaim(S.session), 'danger'),
-    btn('q back', () => back()),
-  ].filter(Boolean)));
-  // ...and it SAYS so, rather than leaving three buttons quietly missing. A gap you can
-  // see is a decision; a gap you cannot is a half-built screen (the same rule §7's two
-  // absent features are spelled out under).
-  if (lead) out.push(el('div', { class: 'hint', text: 'the fleet\'s lead — it cannot be stopped, reclaimed or renamed; every project needs one, and its checkout is the repo itself' }));
-  out.push(viewSwitch());
-  out.push(S.view === 'pane' ? paneView() : messages());
+  const parked = c && c.status === 'parked';
+  const meta = (c && G.STATUS[c.status]) || null;
+
+  // ── the top bar ─────────────────────────────────────────────────────────
+  // What replaced ten footer buttons. It carries only what you need in order to READ the
+  // screen — where you are, what this session is doing, which view you are in — and one
+  // `⋯` for everything you might DO. The verbs did not go away; they moved somewhere that
+  // is not competing with the conversation for a phone's worth of pixels.
+  //
+  // The mode chip stays. It is on every screen for a reason with a scar on it: a phone was
+  // once shown four projects that did not exist and the only clue was recognising the
+  // names, so "which fleet is this" is never more than a glance away.
+  const out = [el('div', { class: 'sbar' }, [
+    btn('‹', () => back()),
+    el('div', { class: 'who' }, [
+      el('span', { class: 'nm', text: (c && c.label) || S.session }),
+      el('span', { class: 'st' }, [
+        meta ? el('span', { style: `color:${G.COLORS[meta.color]}`, text: meta.label }) : null,
+        // The folder earns its place only when it says something the two names either side
+        // of it do not. A lead sits in the main checkout, which is usually named after the
+        // project — printing both gave "superkey · superkey".
+        el('span', { class: 'scope', text: ` ${S.project || ''}${c && c.folder && c.folder !== S.session && c.folder !== S.project ? ' · ' + c.folder : ''}` }),
+      ]),
+    ]),
+    modeChip(),
+    el('div', { class: 'seg' }, [
+      btn('chat', () => setView('chat'), S.view === 'chat' ? 'on' : ''),
+      btn('pane', () => setView('pane'), S.view === 'pane' ? 'on' : ''),
+    ]),
+    btn('⋯', () => sheetActions()),
+  ])];
+  out.push(confirmBar());
+  if (!c) out.push(el('div', { class: 'hint', text: `'${S.session}' is not on this fleet's grid any more.` }));
+  // The lead still says what it is, in one line rather than by three missing buttons.
+  if (lead) out.push(el('div', { class: 'hint lead1', text: "the fleet's lead — no stop, reclaim, rename or pause" }));
+  out.push(S.view === 'pane' ? paneView() : chatView(c));
+  out.push(composer(c));
   return out.filter(Boolean);
 }
 
-// Two views, each labelled with what it IS. Not "live"/"history" — the pane is the
-// session's screen and the list is its transcript, and naming them for their freshness
-// would suggest the list is a stale copy of the same thing when it is a different thing.
-function viewSwitch() {
-  const sw = el('div', { class: 'viewsw' });
-  const pick = (v, label) => btn(label, () => {
-    if (S.view === v) return;
-    S.view = v;
-    render();
-    refresh();              // fills whichever payload this view needs and has not got
-  }, S.view === v ? 'on' : '');
-  sw.append(pick('pane', 'pane'), pick('msgs', 'messages'));
-  return sw;
+function setView(v) {
+  if (S.view === v) return;
+  S.view = v;
+  render();
+  refresh();                // fills whichever payload this view needs and has not got
+}
+
+// ── the chat ────────────────────────────────────────────────────────────────
+// "can we literally convert it to a normal chat like the Claude app... it has a bunch of
+// buttons and the chat is very small."
+//
+// It was a table: newest-first, every row stamped `HH:MM · role`, under a card and ten
+// buttons. Oldest-first with the newest at the bottom is not decoration — it is the only
+// order in which the thing you just said and the answer to it are next to each other, and
+// it is what every chat on the phone has trained the reader to expect.
+//
+// AND THE COST OF MAKING THIS THE DEFAULT IS PAID EXPLICITLY. #45 moved the default to the
+// pane because a message list could not show a command: /api/session serves {ts, role,
+// text}, so a tool call, the command inside it and a permission dialog are not in this
+// payload at all. That is still true. So a session that is BLOCKED says so here, in red,
+// with the one button that goes where the answer has to be typed — the pane. The chat is
+// the better place to read a conversation; the pane is the only place to unblock one, and
+// this is the seam between them rather than a thing to discover.
+function chatView(card) {
+  const wrap = el('div', { class: 'chat' });
+  const s = S.sess;
+  if (card && card.status === 'need-you') {
+    wrap.append(el('div', { class: 'blocked' }, [
+      el('div', { class: 't', text: 'this session is waiting on you — a permission prompt or a question is drawn in its pane, and a transcript cannot show one' }),
+      btn('open the pane', () => setView('pane')),
+    ]));
+  }
+  if (!s) { wrap.append(el('div', { class: 'hint', text: 'reading the transcript…' })); return wrap; }
+  if (s.note) { wrap.append(el('div', { class: 'hint', text: s.note })); return wrap; }
+  // Older messages load at the TOP, where they belong in this order — the button is the
+  // ceiling of the conversation, not a footer.
+  if (s.next_before) {
+    wrap.append(el('div', { class: 'row l' }, [
+      btn(`load ${api.PAGE} older`, async () => {
+        try {
+          const older = await api.getSession(S.project, S.session, s.next_before);
+          S.sess = { ...older, messages: [...(older.messages || []), ...(s.messages || [])],
+                     next_before: older.next_before, pages: (s.pages || 1) + 1 };
+        } catch (e) { toast(String(e.message || e), 'bad'); }
+        // Hold the reader's place: a page prepended above them would otherwise throw them
+        // to the top of a conversation they were reading the middle of.
+        chatScroll = { keepFromEnd: true };
+        render();
+      }),
+    ]));
+  } else if (s.total) {
+    wrap.append(el('div', { class: 'meta l', text: '— the beginning of the transcript —' }));
+  }
+  for (const m of (s.messages || [])) wrap.append(turn(m.role === 'user', m.text, G.clockLabel(m.ts)));
+  // Sent, not yet echoed by the transcript. Dimmed rather than absent: a chat where your
+  // own message disappears for five seconds reads as a send that failed, and this app's
+  // whole job is telling you what is actually happening.
+  if (S.pending) wrap.append(turn(true, S.pending.text, 'sending…', true));
+  wrap.addEventListener('scroll', () => rememberChatScroll(wrap));
+  restoreChatScroll(wrap);
+  return wrap;
+}
+function turn(mine, text, when, pending = false) {
+  return el('div', { class: 'turn ' + (mine ? 'me' : 'them') }, [
+    el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : ''), text: String(text || '') }),
+    el('div', { class: 'meta', text: when }),
+  ]);
+}
+
+// ── the composer ────────────────────────────────────────────────────────────
+// A text box and a send button, where a chat puts them. It replaces `send a prompt`, which
+// opened a full-screen form to type one line — three taps and a screen change for the verb
+// this app exists to use most.
+//
+// It is drawn in the PANE view too, on purpose: watching a worker work and then telling it
+// something is one motion, and making you switch views to find the box would be the same
+// mistake the sheet was.
+function composer(card) {
+  const box = el('textarea', { rows: '1', placeholder: 'message this session…',
+                               autocapitalize: 'sentences', spellcheck: 'false' });
+  box.value = S.draft || '';
+  // The draft lives in state, not in the DOM: render() rebuilds this element every poll,
+  // and a half-typed message must survive that. (The poll is also paused while a sheet or
+  // a confirmation is open — this is the same rule for the box that replaced them.)
+  box.addEventListener('input', () => {
+    S.draft = box.value;
+    // Grow with the text, up to the CSS max — a one-line box for a paragraph is the
+    // "chat is very small" complaint in miniature.
+    try { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight, 160) + 'px'; } catch {}
+  });
+  const kids = [box];
+  // Read the newest thing the agent said. ONE button, deliberately: a speaker on every
+  // bubble is the button wall again, and the newest message is the one you want read out —
+  // it is also the one nearest the thumb, at the bottom of the column.
+  const last = lastAgentText();
+  if (canSpeak() && last) {
+    const on = S.speaking === speakable(last);
+    kids.push(btn(on ? '■' : '🔊', () => toggleSpeak(last), 'speak' + (on ? ' on' : '')));
+  }
+  kids.push(btn('send', () => sendDraft(), 'go'));
+  return el('div', { class: 'composer' }, kids);
+}
+function lastAgentText() {
+  const ms = (S.sess && S.sess.messages) || [];
+  for (let i = ms.length - 1; i >= 0; i--) if (ms[i].role !== 'user' && String(ms[i].text || '').trim()) return ms[i].text;
+  return '';
+}
+async function sendDraft() {
+  const text = String(S.draft || '').trim();
+  if (!text) return;
+  // Optimistic, and reconciled against the transcript rather than trusted: reconcilePending
+  // clears this when the real message comes back, and gives up on it after a while so a
+  // failed send cannot sit there looking sent forever.
+  S.pending = { text, at: Math.floor(Date.now() / 1000) };
+  S.draft = '';
+  chatScroll = null;                 // a message you just sent belongs on screen
+  render();
+  const r = await doVerb('fleet_send', { project: S.project, session: S.session, prompt: text }, { quiet: true });
+  if (!r) { S.pending = null; render(); }        // doVerb already said why
+}
+// The pending bubble goes when the transcript has it — matched on the text, because the
+// only id a sent prompt has is what it said. PENDING_TTL is the give-up: a send that
+// errored has already cleared this, but one that vanished for any other reason must not
+// leave a permanent "sending…" on a screen whose whole purpose is being accurate.
+const PENDING_TTL = 180;
+function reconcilePending() {
+  if (!S.pending) return;
+  const want = S.pending.text.trim();
+  const ms = (S.sess && S.sess.messages) || [];
+  if (ms.some(m => m.role === 'user' && String(m.text || '').trim() === want)) { S.pending = null; return; }
+  if (Math.floor(Date.now() / 1000) - S.pending.at > PENDING_TTL) S.pending = null;
+}
+
+// ── everything you can DO to a session, in one sheet ────────────────────────
+// The ten buttons that used to sit between the card and the conversation. Nothing here is
+// new and nothing was dropped — the lead's three refusals are still absent for the reasons
+// leadGuard documents, and `stop + reclaim` still takes both of the TUI's confirmations.
+function sheetActions() {
+  const c = cardOf(S.session);
+  const lead = !!(c && c.lead);
+  const parked = c && c.status === 'parked';
+  const go = (fn) => () => { closeSheet(); fn(); };
+  const rows = [
+    // The motivating case (§1): a worker blocked on "Allow pnpm test?" since 9pm. That is
+    // fleet_answer — keystrokes into a dialog — not a prompt, which would queue behind the
+    // block instead of clearing it. It is the first row for that reason.
+    btn('answer keys', go(() => sheetAnswer(S.session))),
+    lead && !parked ? null
+      : btn(parked ? 'P resume' : 'p pause', go(() => (parked ? resumeSession(S.session) : pauseSession(S.session)))),
+    btn('s sched', go(() => sheetSchedule(S.session))),
+    btn('l label', go(() => sheetLabel(S.session))),
+    lead ? null : btn('r rename', go(() => sheetRename(S.session)), 'danger'),
+    lead ? null : btn('x kill', go(() => askKill(S.session)), 'danger'),
+    // §7 puts stop --reclaim on the phone on purpose, and §12 is why it takes two
+    // confirmations: fleet-clean's gates decide whether removal is SAFE, never whether
+    // it was intended.
+    lead ? null : btn('stop + reclaim worktree', go(() => askReclaim(S.session)), 'danger'),
+  ].filter(Boolean);
+  openSheet(sheet('actions', S.session, [
+    el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
+    lead ? el('p', { text: "the lead cannot be stopped, reclaimed, renamed or paused — every project needs one, and its checkout is the repo itself" }) : null,
+    el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+  ].filter(Boolean)), false);
 }
 
 // ── the pane ──────────────────────────────────────────────────────────────
@@ -548,6 +815,12 @@ function sizePaneBox(box) {
   // without it the box would end underneath the indicator on a notched phone.
   const app = document.getElementById('app');
   const pad = app ? (parseFloat(getComputedStyle(app).paddingBottom) || 0) : 0;
+  // UNDER THE SHELL THIS IS FLEX'S JOB. The measurement existed because what sat above
+  // the box was a button bar that rewrapped, so no constant was right on every phone — and
+  // the box moving whenever the buttons did was itself part of "the screen moves around".
+  // A flex child is given its height; measuring one and then setting a max-height fights
+  // the layout that already knows the answer.
+  try { if (document.getElementById('app').classList.contains('shell')) return; } catch {}
   const h = vh - top - pad - 6;
   if (Number.isFinite(h) && h > 140) box.style.maxHeight = Math.round(h) + 'px';
 }
@@ -591,39 +864,31 @@ function fitPane() {
   setPfs(Math.max(1, Math.min(PFS_MAX, avail * 100 / (cols * per100))));
 }
 
-// Newest first. The TUI has no equivalent screen to mirror — a session's conversation
-// is Remote Control's job (§9) and this is not a chat client — so the choice is made
-// for the question the phone is opened to answer: what did this worker just say. The
-// page is 20 with an explicit "load more" (§11.3): a bound on bytes over a tunnel, not
-// a redaction. What is shown is unredacted.
-function messages() {
-  const wrap = el('div', { class: 'msgs' });
-  const s = S.sess;
-  if (!s) { wrap.append(el('div', { class: 'hint', text: 'reading the transcript…' })); return wrap; }
-  if (s.note) { wrap.append(el('div', { class: 'hint', text: s.note })); return wrap; }
-  const msgs = (s.messages || []).slice().reverse();
-  wrap.append(el('div', { class: 'hint', text: `${msgs.length} of ${s.total} messages · newest first · served whole` }));
-  for (const m of msgs) {
-    wrap.append(el('div', { class: 'msg' }, [
-      el('div', { class: 'when', text: `${G.clockLabel(m.ts)} · ${m.role}` }),
-      el('div', { class: 'text', text: m.text }),
-    ]));
-  }
-  if (s.next_before) {
-    wrap.append(el('div', { class: 'more' }, [
-      btn(`load more (${api.PAGE} older)`, async () => {
-        try {
-          const older = await api.getSession(S.project, S.session, s.next_before);
-          S.sess = { ...older, messages: [...(older.messages || []), ...(s.messages || [])],
-                     next_before: older.next_before, pages: (s.pages || 1) + 1 };
-        } catch (e) { toast(String(e.message || e), 'bad'); }
-        render();
-      }),
-    ]));
-  } else if (s.total) {
-    wrap.append(el('div', { class: 'hint', text: '— the whole transcript —' }));
-  }
-  return wrap;
+// ── the chat's scroll, on the pane's proven idiom ───────────────────────────
+// The same problem and the same answer: render() rebuilds this list on every poll, so
+// something has to remember where the reader was or the conversation jumps under them —
+// which is half of "the screen moves around". A chat's default is not the pane's, though:
+// a terminal opens at the bottom because the newest output is there, and a chat opens at
+// the bottom because that is where the newest MESSAGE is, so both stick to the end unless
+// the reader has scrolled up. `keepFromEnd` is the one exception — prepending a page of
+// older messages must not throw you to the top of them.
+let chatScroll = null;
+function rememberChatScroll(box) {
+  const h = Number(box.scrollHeight) || 0, top = Number(box.scrollTop) || 0, ch = Number(box.clientHeight) || 0;
+  chatScroll = { top, atEnd: h - top - ch < 24, fromEnd: h - top };
+}
+function restoreChatScroll(box) {
+  const go = () => {
+    try {
+      if (!chatScroll || chatScroll.atEnd) box.scrollTop = box.scrollHeight;
+      else if (chatScroll.keepFromEnd) box.scrollTop = Math.max(0, box.scrollHeight - chatScroll.fromEnd);
+      else box.scrollTop = chatScroll.top;
+    } catch {}
+  };
+  go();
+  // Twice, like the pane's: the first pass runs before the browser has laid the bubbles
+  // out, so scrollHeight is still the old one.
+  try { requestAnimationFrame(go); } catch {}
 }
 
 // ── the pane's own poll ───────────────────────────────────────────────────
@@ -712,10 +977,43 @@ function paintPane() {
   if (paneGeomNode) paneGeomNode.textContent = `${r.cols}×${r.rows}`;
 }
 
-function back() {
-  if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
+// ── back, and why there are no URLs ─────────────────────────────────────────
+// "if I go back it takes me to the last page I was, not back." An installed PWA gets the
+// system back gesture, and this app had nothing on the history stack — so back left the
+// app entirely (or returned to whatever page the tab held before it), skipping every
+// screen you had actually walked through.
+//
+// The fix is history ENTRIES WITHOUT A URL. pushState is called with the CURRENT href, so
+// the stack gains a step the gesture can pop while the address never changes: no routes to
+// invent, nothing to parse on a cold open, no way for a stale link to name a session that
+// is gone. In standalone mode there is no address bar to show a URL anyway; what the user
+// asked for and what the platform wants are the same thing here.
+//
+// ONE DIRECTION OF TRUTH: going deeper pushes, and every backward move goes through
+// popstate. The app's own `‹`/`q` calls history.back() rather than changing the screen
+// itself, so the gesture and the button cannot disagree about where "back" is.
+let navDepth = 0;
+function pushNav() {
+  navDepth++;
+  try { history.pushState({ gf: navDepth }, '', location.href); } catch {}
+}
+// The actual screen change. Called ONLY by popstate (and by the pop-less fallbacks below,
+// for a browser that gave us no history object at all).
+function popTo() {
+  if (S.sheet) { closeSheet(); return; }
+  if (S.confirm) { cancel(); return; }
+  if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; stopSpeaking(); }
   else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; }
+  else return;                                  // at the root: let the platform have it
+  navDepth = Math.max(0, navDepth - 1);
   render(); refresh();
+}
+function back() {
+  // Ask the platform to pop, so a tap and a swipe take the identical path. With no entry
+  // of ours on the stack (or no history at all) there is nothing to pop, so move directly
+  // rather than doing nothing — a back button that silently fails is worse than no gesture.
+  if (navDepth > 0 && typeof history !== 'undefined' && typeof history.back === 'function') history.back();
+  else popTo();
 }
 
 // ── cards, and the four gestures ──────────────────────────────────────────
@@ -1414,7 +1712,7 @@ function onKey(e) {
   if (S.screen === 'session') {
     switch (k) {
       case 'q': case '`': back(); break;
-      case 'Q': S.screen = 'projects'; S.sel = 0; render(); refresh(); break;
+      case 'Q': toProjects(); break;
       case 'p': pauseSession(S.session); break;
       case 'P': resumeSession(S.session); break;
       case 's': sheetSchedule(S.session); break;
@@ -1461,7 +1759,7 @@ function onKey(e) {
       break;
     case ',': sheetSettings(); break;
     case 'q': case '`': back(); break;
-    case 'Q': S.screen = 'projects'; S.sel = 0; render(); refresh(); break;
+    case 'Q': toProjects(); break;
     default:
       if (k >= '1' && k <= '9') {
         const i = Number(k) - 1;
@@ -1472,11 +1770,11 @@ function onKey(e) {
         else if (t.card) openSession(t.card.name);
         else if (t.freeWt) sheetName({ cwd: t.freeWt.path, name: G.basename(t.freeWt.path), reuse: t.freeWt.path });
         else sheetPicker();
-      } else if (e.ctrlKey && (k === 'p' || k === 'P')) { S.screen = 'projects'; S.sel = 0; render(); refresh(); }
+      } else if (e.ctrlKey && (k === 'p' || k === 'P')) { toProjects(); }
       // Ctrl-f is a chord in the terminal because there is no other way to point at a
       // project from inside a session. Here the two screens ARE the chord: projects,
       // then a card.
-      else if (e.ctrlKey && (k === 'f' || k === 'F')) { S.screen = 'projects'; S.sel = 0; render(); refresh(); }
+      else if (e.ctrlKey && (k === 'f' || k === 'F')) { toProjects(); }
       return;
   }
   e.preventDefault();
@@ -1498,6 +1796,10 @@ addEventListener('resize', () => {
   if (paneBoxNode) sizePaneBox(paneBoxNode);
 });
 addEventListener('keydown', onKey);
+// The system back gesture. Every backward move in the app comes through here, so a swipe
+// and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
+// this is what answers). No URL is ever read: the entries carry a depth, not a route.
+addEventListener('popstate', () => popTo());
 // §5: a passkey at every open, and again after the app has been backgrounded for a few
 // minutes. The token expiring is the same event as far as this is concerned.
 document.addEventListener('visibilitychange', () => {
