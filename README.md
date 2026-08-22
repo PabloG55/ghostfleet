@@ -8,6 +8,19 @@ own git worktree; you get one screen that shows what every one of them is doing.
 > A *ghost fleet* is a fleet of autonomous, unmanned vessels under one command — agents
 > working with nobody in the seat, and one control plane steering them.
 
+<p align="center">
+  <img src="docs/worktree-demo.gif" width="900"
+       alt="The Projects screen, then one project's session grid, then the new-worktree
+            form: a name, a branch, and which agent runs it. The worktree is cut, the
+            agent boots into it, and Projects comes back counting one more session.">
+</p>
+
+<p align="center">
+  <sub>Recorded by <a href="worktree.tape"><code>worktree.tape</code></a> against a real
+  fleet — <code>w</code> on a project's grid cuts a worktree, branches it, and boots an
+  agent in it.</sub>
+</p>
+
 ## Why another one of these
 
 Orchestrating agents is easy to demo and hard to trust. The parts that took real

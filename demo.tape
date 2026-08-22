@@ -31,7 +31,7 @@ Type "2"
 Sleep 4s
 
 # from master, C-s drops into that project's session grid
-Ctrl+s
+Ctrl+S
 Sleep 3s
 
 # the grid: a card per agent — status, branch, last thing it said
@@ -46,7 +46,7 @@ Type "`"
 Sleep 2s
 
 # ^F jumps anywhere: project 1, session 1, from any screen
-Ctrl+f
+Ctrl+F
 Sleep 1s
 Type "1"
 Sleep 1s
@@ -56,5 +56,5 @@ Sleep 4s
 # back out to the grid, then up to Projects with ^P
 Type "`"
 Sleep 2s
-Ctrl+p
+Ctrl+P
 Sleep 3s
