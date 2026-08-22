@@ -294,8 +294,8 @@ function gridScreen() {
       list.append(cardEl(G.cardLines(c, sel, idx), {
         tap: () => openSession(c.name),
         longPress: () => askKill(c.name),
-        swipeLeft: () => doVerb('fleet_pause', { project: S.project, session: c.name }),
-        swipeRight: () => doVerb('fleet_resume', { project: S.project, session: c.name }),
+        swipeLeft: () => pauseSession(c.name),
+        swipeRight: () => resumeSession(c.name),
         reorder: d => reorder(c.name, d),
       }, idx));
     }
@@ -307,8 +307,8 @@ function gridScreen() {
     btn('n new', () => sheetPicker()),
     btn('w worktree', () => sheetWorktree()),
     btn('s sched', () => { if (it.card) sheetSchedule(it.card.name); }),
-    btn('p pause', () => { if (it.card) doVerb('fleet_pause', { project: S.project, session: it.card.name }); }),
-    btn('P resume', () => { if (it.card) doVerb('fleet_resume', { project: S.project, session: it.card.name }); }),
+    btn('p pause', () => { if (it.card) pauseSession(it.card.name); }),
+    btn('P resume', () => { if (it.card) resumeSession(it.card.name); }),
     // The footer says which `x` means right now, exactly as the TUI's does, because
     // finding out by pressing it costs a worktree — and on the lead it means nothing at
     // all, which is worth saying before the tap rather than in the toast after it.
@@ -399,7 +399,8 @@ function sessionScreen() {
     // is fleet_answer, keystrokes into a dialog — not a prompt, which would queue
     // behind the block instead of clearing it.
     btn('answer keys', () => sheetAnswer(S.session)),
-    btn(parked ? 'P resume' : 'p pause', () => doVerb(parked ? 'fleet_resume' : 'fleet_pause', { project: S.project, session: S.session })),
+    lead && !parked ? null
+      : btn(parked ? 'P resume' : 'p pause', () => (parked ? resumeSession(S.session) : pauseSession(S.session))),
     btn('s sched', () => sheetSchedule(S.session)),
     lead ? null : btn('r rename', () => sheetRename(S.session), 'danger'),
     btn('l label', () => sheetLabel(S.session)),
@@ -882,6 +883,18 @@ function leadGuard(name, what) {
   return true;
 }
 
+// Pause is a WORKER verb, and the fleet already keeps that rule where it matters:
+// bin/fleet-governor excludes master from the sessions it parks ("master is never
+// parked"), and plan() refuses it. A lead that is off dispatches nothing and drains no
+// inbox — and on the grid it is one careless swipe on the FIRST card, which the lead now
+// is. RESUME is deliberately NOT guarded: the recovery direction has to stay open.
+function pauseSession(name) {
+  if (name && !leadGuard(name, 'paused')) doVerb('fleet_pause', { project: S.project, session: name });
+}
+function resumeSession(name) {
+  if (name) doVerb('fleet_resume', { project: S.project, session: name });
+}
+
 function askKill(name) { if (name && !leadGuard(name, 'stopped')) { S.confirm = { kind: 'kill', name }; render(); } }
 async function confirmedKill(name) {
   S.confirm = null;
@@ -1268,7 +1281,11 @@ async function sheetSettings() {
     kids.push(el('p', { text: 'worker → master auto-nudge, per session. A session\'s own setting wins over the project\'s.' }));
     const rows = el('div', { class: 'rows' });
     kids.push(el('p', { text: `nudge global default: ${cfg.global_nudge ? 'on' : 'off'}` }));
-    for (const c of (S.grid && S.grid.cards) || []) {
+    // THE LEAD IS SKIPPED. These rows are the "worker → master auto-nudge" override, and
+    // the lead has no lead to nudge — a toggle for master pinging itself is nonsense the
+    // moment master became a card. The `r` shortcut in each row would only reach a refusal
+    // too. Filtered on the WIRE's flag, like every other lead test in this file.
+    for (const c of ((S.grid && S.grid.cards) || []).filter(c => !c.lead)) {
       const state = cfg.sessions[c.name] || 'inherit';
       const badge = el('span', { class: 'badge ' + (state === 'on' ? 'on' : state === 'off' ? 'off' : 'inherit'),
                                  text: state === 'on' ? '● on' : state === 'off' ? '○ off' : '· inherit' });
@@ -1398,8 +1415,8 @@ function onKey(e) {
     switch (k) {
       case 'q': case '`': back(); break;
       case 'Q': S.screen = 'projects'; S.sel = 0; render(); refresh(); break;
-      case 'p': doVerb('fleet_pause', { project: S.project, session: S.session }); break;
-      case 'P': doVerb('fleet_resume', { project: S.project, session: S.session }); break;
+      case 'p': pauseSession(S.session); break;
+      case 'P': resumeSession(S.session); break;
       case 's': sheetSchedule(S.session); break;
       case 'r': sheetRename(S.session); break;
       case 'l': sheetLabel(S.session); break;
@@ -1435,8 +1452,8 @@ function onKey(e) {
       if (S.screen === 'projects') { if (it.project) sheetSchedule('master', it.project.name); }
       else if (it.card) sheetSchedule(it.card.name);
       break;
-    case 'p': if (it.card) doVerb('fleet_pause', { project: S.project, session: it.card.name }); break;
-    case 'P': if (it.card) doVerb('fleet_resume', { project: S.project, session: it.card.name }); break;
+    case 'p': if (it.card) pauseSession(it.card.name); break;
+    case 'P': if (it.card) resumeSession(it.card.name); break;
     case 'x': case 'X':
       if (S.screen === 'projects') { if (it.project) { S.confirm = { kind: 'project', name: it.project.name }; render(); } }
       else if (it.card) askKill(it.card.name);

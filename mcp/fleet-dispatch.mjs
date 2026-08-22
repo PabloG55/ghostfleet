@@ -194,7 +194,7 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { all: { type: 'boolean', description: 'show the whole inbox instead of only new entries' }, project: { type: 'string', description: "another project's fleet to read (name from fleet_projects); omit for your own — your relayed answers arrive in YOUR OWN inbox, so omit it for those" } }, additionalProperties: false } },
   { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a permission dialog, a "reached usage limit — retry?", a trust prompt (e.g. text "2"). Use this to unblock a worker; use fleet_send for normal task prompts.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
-  { name: 'fleet_pause', description: 'Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work.',
+  { name: 'fleet_pause', description: "Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work. Can't park 'master': it is the fleet's lead, and a fleet whose lead is off dispatches nothing (the governor excludes it for the same reason).",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_resume', description: 'Un-park a worker paused with fleet_pause; optionally dispatch a prompt to wake it immediately.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session'], additionalProperties: false } },
@@ -352,7 +352,20 @@ export function plan(name, a = {}) {
       if (a.no_enter) args.push('--no-enter');
       return run('fleet-answer', args, t);
     }
-    case 'fleet_pause': return run('fleet-pause', [String(a.session)], t);
+    case 'fleet_pause': {
+      // Pause is a WORKER verb — its own description says "park a worker" — and the
+      // governor already keeps this rule for itself: bin/fleet-governor excludes master
+      // from the sessions it parks ("master is never parked"), because a fleet whose lead
+      // is off has nothing to drain fleet-inbox or dispatch the next task, and the way out
+      // was flipping a marker by hand. It only became reachable from a phone when the lead
+      // gained a card, and there it is one careless swipe on the FIRST one.
+      //   RESUME IS DELIBERATELY NOT GUARDED. The recovery direction has to stay open, or
+      // a lead parked by an older build — or by hand — could not be turned back on from
+      // the one surface that can see it.
+      const nl = notTheLead('fleet_pause', a.session, 'park');
+      if (nl) return nl;
+      return run('fleet-pause', [String(a.session)], t);
+    }
     case 'fleet_resume': {
       const args = [String(a.session)];
       if (a.prompt) args.push(String(a.prompt));

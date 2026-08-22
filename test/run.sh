@@ -2905,6 +2905,18 @@ if command -v node >/dev/null 2>&1; then
   # would refuse to stop it.
   is "a name containing it is a worker"   "1" \
      "$(mcpcall fleet_stop '{"session":"master-card"}' | grep -c "cleared 'master-card' state" || true)"
+  # PARK is refused and RESUME is not, which is the asymmetry: you can always turn the lead
+  # back on, never off. Both are checked, because an untested asymmetry is one that gets
+  # tidied into symmetry by the next reader.
+  is "parking the lead is an isError"     "1" \
+     "$(mcpcall fleet_pause '{"session":"master"}' | grep -c "^REFUSED .*the fleet's lead" || true)"
+  is "...but resuming it is not"          "0" \
+     "$(mcpcall fleet_resume '{"session":"master"}' | grep -c '^REFUSED' || true)"
+  # It reached exec rather than being turned back by plan(): `RAN` is what the executor
+  # returns, and fleet-resume's own "no session" line goes to stderr, so stdout is empty —
+  # which is why this asserts the disposition and not the text.
+  is "...and reaches the command"         "1" \
+     "$(mcpcall fleet_resume '{"session":"master"}' | grep -c '^RAN' || true)"
   rm -rf "$LD"
 else
   skip "the lead from MCP" "node missing"
@@ -3941,6 +3953,19 @@ if sv_start verbs; then
   # being unmatchable.
   is "fleet-stop never ran for the lead"     "0"   "$(grep -c 'fleet-stop .*\[master\]' "$SV/ran" || true)"
   is "...and fleet-rename never did"         "0"   "$(grep -c 'fleet-rename .*\[master\]' "$SV/ran" || true)"
+  # PARK, same rule — the governor already excludes master from what it parks, and this
+  # only became reachable when the lead got a card, where it is one swipe on the first one.
+  is "parking the lead is refused"           "400" "$(pf lead.pause verbs)"
+  is "...and says it is the lead"            "1"   "$(pb lead.pause verbs | grep -c "the fleet's lead" || true)"
+  is "...and fleet-pause never ran for it"   "0"   "$(grep -c 'fleet-pause .*\[master\]' "$SV/ran" || true)"
+  # BUT RESUME IS NOT REFUSED. The recovery direction stays open, and an untested
+  # asymmetry is one somebody tidies into a bug.
+  is "resuming the lead is allowed"          "200" "$(pf lead.resume verbs)"
+  is "...and reached the command"            "1"   "$(grep -c 'fleet-resume .*\[master\]' "$SV/ran" || true)"
+  # ...and a worker parks as it always did, or "refused" above would be indistinguishable
+  # from a verb that is simply broken.
+  is "a worker still parks"                  "200" "$(pf worker.pause verbs)"
+  is "...reaching fleet-pause"               "1"   "$(grep -c 'fleet-pause .*\[w1\]' "$SV/ran" || true)"
   # THE OTHER DIRECTION on every refusal above: only the calls that were allowed ran.
   is "spawn ran exactly once"                "1"   "$(grep -c '^fleet-spawn ' "$SV/ran" || true)"
   is "the spawn that ran was the right one"  "1"   "$(grep -c 'fleet-spawn \[api-9\]' "$SV/ran" || true)"
@@ -3970,6 +3995,9 @@ if sv_start verbs; then
   is "the lead's stop is audited refused"    "1"   "$(grep -c 'stop session=master — REFUSED' "$INB" || true)"
   is "...its reclaim too"                    "1"   "$(grep -c 'stop session=master reclaim=true — REFUSED' "$INB" || true)"
   is "...and its rename"                     "1"   "$(grep -c 'rename session=master new_name=lead — REFUSED' "$INB" || true)"
+  is "...and its park"                       "1"   "$(grep -c 'pause session=master — REFUSED' "$INB" || true)"
+  is "...while its resume is audited as ran" "0"   "$(grep -c 'resume session=master — REFUSED' "$INB" || true)"
+  is "...and IS in the log"                  "1"   "$(grep -c 'resume session=master' "$INB" || true)"
   # and the near-miss is recorded as having RUN, or "refused" would be indistinguishable
   # from "audited at all"
   is "the near-miss is audited as ran"       "0"   "$(grep -c 'stop session=master-card — REFUSED' "$INB" || true)"
@@ -4339,9 +4367,12 @@ for pj in pa pb; do
   git -C "$RG/$pj/main" worktree add -q -b "wt2-$pj" "$RG/$pj/wt2-$pj" 2>/dev/null
 done
 printf 'pa\t%s\twork\npb\t%s\twork\n' "$RG/pa" "$RG/pb" > "$RG/home/.config/ghostfleet/projects"
-# a live session standing in pa's FIRST worktree, on pa's OWN socket
+# a live session standing in pa's FIRST worktree, on pa's OWN socket — plus pa's LEAD,
+# sitting in the main checkout the way a real one does. pb gets neither, which is what
+# makes the Projects-screen assertions below a pair rather than a single reading.
 tmux -L cf-pa kill-server 2>/dev/null
 tmux -L cf-pa new-session -d -s busy -c "$RG/pa/wt1-pa" 'sleep 120' 2>/dev/null
+tmux -L cf-pa new-session -d -s master -c "$RG/pa/main" 'sleep 120' 2>/dev/null
 RPORT="$(free_port)"; RPORT="${RPORT:-18899}"
 RBASE="http://localhost:$RPORT"
 GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl" \
@@ -4368,6 +4399,12 @@ for (const p of ['pa', 'pb']) {
   const r = await a.api(base, 'GET', `/api/grid?project=${p}`);
   console.log(`${p}\x1f${r.status}\x1f${JSON.stringify(r.json)}`);
 }
+// THE SEAM. /api/projects rolls each project up from these same cards, and until now the
+// rollup was only ever tested against a STUB grid while the cards were only ever tested
+// through the real emitter — so nothing crossed the join, and the lead arriving in `cards`
+// changed a screen no assertion was watching.
+const pr = await a.api(base, 'GET', '/api/projects');
+console.log(`projects\x1f${pr.status}\x1f${JSON.stringify(pr.json)}`);
 PROBE
   HELPER="file://$ROOT/test/helpers/serve-client.mjs" node "$RG/probe.mjs" "$RBASE" "$rcode" > "$RG/out" 2>"$RG/err"
   rf() { grep -m1 "^$1$US" "$RG/out" | cut -d "$US" -f2; }
@@ -4392,6 +4429,37 @@ PROBE
   is "pa's counts have the six §4 keys"      "6"   \
      "$(rb pa | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(String(Object.keys(JSON.parse(s).counts).length)))')"
   is "the busy session is a card, not free"  "1"   "$(rb pa | grep -c '"name":"busy"' || true)"
+  # ── the Projects screen, from the same cards (the seam) ────────────────────
+  # It counts cards.length, so the lead counts there too — which is what the TUI's own
+  # Projects screen has ALWAYS done (projectStatus -> sessionStatuses, "Includes master:
+  # it's the project's lead session"). The phone was the one under-counting; these two
+  # surfaces now agree, and this is the assertion that says so out loud.
+  PJ() { node -e '
+    const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    const p=(o.projects||[]).find(x=>x.name===process.argv[2])||{};
+    const v=new Function("p","return ("+process.argv[3]+")")(p);
+    console.log(v===undefined?"":(v!==null&&typeof v==="object")?JSON.stringify(v):String(v));
+  ' /dev/stdin "$1" "$2" <<< "$(rb projects)"; }
+  is "the projects rollup answers"           "200"    "$(rf projects)"
+  is "pa counts its lead and its worker"     "2"      "$(PJ pa 'p.sessions.total')"
+  # THE SEAM ITSELF, stated as an identity rather than as two numbers I typed: the rollup's
+  # total must equal the card count /api/grid served for the same project, from the same
+  # daemon, in the same second. That is the join nothing crossed before — and it holds
+  # whatever the fleet happens to contain, so it cannot pass by coincidence of fixture.
+  is "...which is exactly its card count"    "same"   "$(node -e '
+    const fs=require("fs");
+    const grid=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    const proj=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+    const pa=(proj.projects||[]).find(x=>x.name==="pa")||{};
+    const n=(grid.cards||[]).length, t=pa.sessions&&pa.sessions.total;
+    console.log(n===t ? "same" : `grid=${n} rollup=${t}`);
+  ' <(rb pa) <(rb projects))"
+  # ...and the lead is genuinely one of the cards being counted, not a coincidence of two.
+  is "...and the lead is one of them"        "1"      "$(rb pa | grep -c '"name":"master"' || true)"
+  # ...and the other direction: a project with NO sessions still reads zero, so "counts the
+  # lead" cannot be a constant.
+  is "pb has no sessions at all"             "0"      "$(PJ pb 'p.sessions.total')"
+  is "...and is not silently null"           "object" "$(PJ pb 'typeof p.sessions')"
 else
   skip "real grid through the daemon" \
     "server did not come up: $(tr '\n' ' ' < "$RG/log" 2>/dev/null | cut -c1-180)"

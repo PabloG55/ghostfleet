@@ -471,7 +471,13 @@ function applyOverlay(g) {
 function fixtureVerb(tool, a) {
   const ok = text => ({ ok: true, text });
   switch (tool) {
-    case 'fleet_pause':  overlay.status.set(a.session, 'parked'); return ok(`parked '${a.session}'`);
+    case 'fleet_pause':
+      // The lead is not a worker and the planner refuses it (mcp/fleet-dispatch.mjs); the
+      // governor excludes it too. Resume is NOT refused — the recovery direction stays
+      // open on both backends.
+      if (a.session === 'master')
+        return { ok: false, text: "fleet_pause: refusing to park 'master' — it is the fleet's lead, and a fleet whose lead is off dispatches nothing" };
+      overlay.status.set(a.session, 'parked'); return ok(`parked '${a.session}'`);
     case 'fleet_resume': overlay.status.set(a.session, a.prompt ? 'working' : 'ready'); return ok(`resumed '${a.session}'`);
     case 'fleet_send':   overlay.status.set(a.session, 'working'); return ok(`sent to '${a.session}'`);
     case 'fleet_answer': overlay.status.set(a.session, 'working'); return ok(`answered '${a.session}'`);

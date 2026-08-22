@@ -192,6 +192,21 @@ is('...and says why the rest are gone', true, /cannot be stopped, reclaimed or r
 // otherwise the demo teaches the opposite of what the daemon does.
 is('fixture mode refuses to stop the lead', true, /refusing to stop 'master'/.test(JS['api.js']));
 is('...and to rename it', true, /refusing to rename 'master'/.test(JS['api.js']));
+is('...and to park it', true, /refusing to park 'master'/.test(JS['api.js']));
+// PARK is the third one, and the one that only became reachable because the lead got a
+// card: it is the swipe-left gesture on what is now the FIRST card on the grid. Every path
+// into it goes through one function, so a new call site cannot miss the guard.
+is('pause has one guarded entry point', true, /function pauseSession\(name\) \{\s*\n?\s*if \(name && !leadGuard\(name, 'paused'\)\)/.test(APP));
+is('...and nothing calls fleet_pause around it', 1, (APP.match(/doVerb\('fleet_pause'/g) || []).length);
+// RESUME is deliberately NOT guarded — the recovery direction stays open on every surface.
+is('resume is not guarded', true, /function resumeSession\(name\) \{\s*\n?\s*if \(name\) doVerb\('fleet_resume'/.test(APP));
+// The auto-nudge rows are per-WORKER: a toggle for master pinging itself is nonsense, and
+// each row also carries a rename shortcut that could only reach a refusal.
+// Anchored to the CARDS LIST it filters, not to the predicate: `.filter(c => !c.lead)`
+// alone also matches reorder()'s order list, so the loose version passed with the settings
+// rows left unfiltered. A regex that matches somewhere else is a test that cannot fail.
+is('the settings rows skip the lead', true,
+   /S\.grid\.cards\) \|\| \[\]\)\.filter\(c => !c\.lead\)/.test(APP));
 // The two things §7 says cannot transfer. A substitute for either is the mistake; the
 // app is required to SAY they are absent rather than leave a gap.
 is('the stack is not rebuilt', 0, (APP.match(/renderStack|stackScreen/g) || []).length);

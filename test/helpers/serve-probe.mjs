@@ -120,6 +120,16 @@ if (phase === 'verbs') {
   // ...and the other direction on the guard itself: a session whose name merely CONTAINS
   // it is an ordinary worker. A prefix match here would refuse real sessions.
   row('nearLead.stop', await a.verb(base, 'fleet_stop', { project: 'demo', session: 'master-card' }, await fresh('stop')));
+
+  // PARK is a worker verb too — bin/fleet-governor already excludes master from what it
+  // parks, because a fleet whose lead is off dispatches nothing. It needs no passkey, so
+  // these carry none: what is being shown is the planner's refusal, not the gate's.
+  row('lead.pause', await a.verb(base, 'fleet_pause', { project: 'demo', session: 'master' }));
+  // ...and RESUME is deliberately NOT refused. The recovery direction has to stay open, or
+  // a lead parked by an older build could never be turned back on from the phone — and an
+  // asymmetry nothing tests is an asymmetry that gets 'tidied up' into a bug.
+  row('lead.resume', await a.verb(base, 'fleet_resume', { project: 'demo', session: 'master' }));
+  row('worker.pause', await a.verb(base, 'fleet_pause', { project: 'demo', session: 'w1' }));
 }
 
 if (phase === 'reads') {

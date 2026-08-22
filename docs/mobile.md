@@ -177,8 +177,18 @@ byte-for-byte what they were.
 - **`+ new session` and the FREE worktree cards are untouched.** `free_worktrees` already
   excluded the main checkout ("that's master's slot, never a free card"), so the lead
   arriving as a card takes nothing away from that list and adds nothing to it.
+- **The Projects screen counts it, and that is a convergence rather than a change of
+  mind.** `/api/projects` rolls each project up from these same cards, so a project's
+  `total` gains one and a blocked lead turns its project card red — which is §1's whole
+  question. The desk has always worked this way: `projectStatus` reads `sessionStatuses`,
+  whose comment says *"Includes master: it's the project's lead session"*. So the phone was
+  the surface under-counting, and the two now agree. The seam is asserted as an identity
+  (the rollup's total *is* the card count `/api/grid` served for the same project, from the
+  same daemon), because until then the rollup was only ever tested against a stub grid
+  while the cards were only ever tested through the real emitter, and nothing crossed the
+  join.
 
-**And the lead cannot be stopped, reclaimed or renamed — enforced server-side.**
+**And the lead cannot be stopped, reclaimed, renamed or parked — enforced server-side.**
 `bin/fleet-stop` and `bin/fleet-rename` already refused by name, but they refuse in the
 *shell*, and a nonzero exit from a `bin/fleet-*` command is deliberately not treated as a
 refusal (several of them write to stderr on success). So `fleet_stop --reclaim master`
@@ -187,6 +197,17 @@ in the success toast, and the audit logged `result: 'ran'`. The refusal moved in
 `plan()` in `mcp/fleet-dispatch.mjs` — the one layer both callers go through — so the MCP
 server returns an `isError` and the daemon a 400 with `result: 'refused'`. The client not
 drawing the button is the affordance, never the control (§7).
+
+`fleet_pause` is refused for the same reason and on the same authority: `bin/fleet-governor`
+already excludes master from the sessions it parks — *"master is never parked"* — because a
+fleet whose lead is off drains no inbox and dispatches nothing, and the way out was
+flipping a marker by hand. It only became reachable at all when the lead gained a card, and
+there it is **swipe-left on the first card**.
+
+**`fleet_resume` is deliberately NOT refused.** The recovery direction has to stay open, or
+a lead parked by an older build could never be turned back on from the one surface that can
+see it. Both halves of that asymmetry are asserted, in both callers — an untested asymmetry
+is one the next reader tidies into symmetry.
 
 `sched` carries the scheduled **prompt** as well as the time, and that is the other place
 this schema is not simply what the card draws. `@10:30pm` with no way to say *what* will

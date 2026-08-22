@@ -35,7 +35,9 @@ const SHELL = [
   './fixtures/grid-free.json', './fixtures/grid-empty.json',
   './fixtures/settings-superkey.json',
   './fixtures/session-superkey-coi-beside.json', './fixtures/session-superkey-dupe-source.json',
+  './fixtures/session-superkey-master.json',
   './fixtures/pane-superkey-coi-beside.json', './fixtures/pane-superkey-dupe-source.json',
+  './fixtures/pane-superkey-master.json',
 ];
 
 self.addEventListener('install', e => {

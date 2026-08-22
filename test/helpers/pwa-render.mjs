@@ -271,10 +271,37 @@ tap(cardTitled(/master/));
 await until(() => /the fleet's lead/.test(app.textContent), 4000);
 is('tapping it opens its session screen', true, !!btnWith(/send a prompt/));
 is('...and it says it is the lead', true, /the fleet's lead/.test(app.textContent));
+// THE PANE IS WHAT A TAP LANDS ON (§7a), and until this fixture existed nobody had ever
+// rendered a LEAD's. It is a real 269x65 capture — the widest pane on the fleet going to
+// the narrowest screen, which is the exact case "never wrapped, never reflowed" exists
+// for. (One edit to the capture: the lead names its own checkout in its header, and this
+// one came off the ghostfleet fleet, so the path says superkey. Byte-length preserved.)
+// Matched on text that lives INSIDE one span: ansi.js opens a new span per attribute run,
+// so "Claude Code v2.1.235" is two spans and a regex spanning them silently never fires.
+is('...the lead pane renders', true, await until(() => /Claude Code/.test(app.textContent), 4000));
+// ...and it is THIS lead's pane: the header names the checkout, which is the one thing in
+// the capture that identifies whose screen it is.
+is('...naming its own checkout', true, /Documents\/superkey/.test(app.textContent));
+is('...and not as an error or a placeholder', false,
+   /no pane captured|capturing the pane…/.test(app.textContent));
+// Both views work for a lead, which needed a transcript fixture too — without one the
+// messages tap 404s into "reading the transcript…" and the lead is half-openable.
+click(btnWith(/^messages$/));
+is('...its transcript opens too', true, await until(() => /anything blocked on me/.test(app.textContent), 4000));
+click(btnWith(/^pane$/));
+// The geometry label LAGS by one paint on purpose — it is a node the poll updates without
+// redrawing the screen under a reader — so it is asserted after coming back to the pane
+// rather than on the first render, where it is legitimately empty.
+is('...and the pane reports its real size', true, await until(() => /269×65/.test(app.textContent), 4000));
 // The verbs that mean something for a lead are all still there.
 is('...keeps send a prompt', true, !!btnWith(/send a prompt/));
 is('...keeps answer keys', true, !!btnWith(/answer keys/));
-is('...keeps pause', true, !!btnWith(/\bp\s+pause|\bP\s+resume/));
+// ...and NOT pause. Parking the lead turns off the session that dispatches work and
+// drains fleet-inbox; the governor already excludes master from what it parks, plan()
+// refuses it, and on the grid it was one careless swipe on the FIRST card. Resume stays
+// reachable everywhere — the recovery direction is never guarded — it is simply not drawn
+// here while the lead is running.
+is('...has no pause button', false, !!btnWith(/\bp\s+pause/));
 // ...and the three the server refuses are NOT.
 is('...has no kill button', false, !!btnWith(/x\s+kill/));
 is('...no stop \u002b reclaim', false, !!btnWith(/reclaim worktree/));
@@ -284,6 +311,7 @@ click(btnWith(/q\s+back/));
 await until(() => !!btnWith(/n\s+new/), 4000);
 tap(cardTitled(/coi-beside/));
 await until(() => !!btnWith(/x\s+kill/), 4000);
+is('a worker keeps its pause button', true, !!btnWith(/\bp\s+pause/));
 is('a worker keeps its kill button', true, !!btnWith(/x\s+kill/));
 is('...and its stop + reclaim', true, !!btnWith(/reclaim worktree/));
 is('...and its rename', true, !!btnWith(/r\s+rename/));
