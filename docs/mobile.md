@@ -3,10 +3,14 @@
 **Status:** design settled; `--json` (§4) shipped in #41, `fleet-serve` and the client in
 flight. Three decisions are settled: the transport is Tailscale with Tailnet Lock (§5),
 the phone gets the **full verb set** rather than a read-only phase (§7), and content is
-served **unredacted** (§11.3). **Two** things in here were **wrong until they met a
-user**: §7's session screen was a message list and could not show a command (§7a), and §4
-left `master` out of the cards, so the phone could reach every worker and not the session
-you send work to ("it's not opening the main agent, just the sessions" — see §4's `lead`).
+served **unredacted** (§11.3). **Three** things in here were **wrong until they met
+a user**, and one of them twice: §7's session screen was a message list and could not show
+a command, then it was a pane behind ten buttons and is now a chat with the pane one tap
+away (§7a, which keeps both corrections and says why the second does not undo the first);
+§4 left `master` out of the cards, so the phone could reach every worker and not the
+session you send work to ("it's not opening the main agent, just the sessions" — §4's
+`lead`); and nothing was on the history stack, so the system back gesture left the app
+instead of walking back through it (§10).
 Every number below was measured on this machine before the design was written, and **two
 of the measurements changed the design** — the sleep setting (§8) and the dependency
 posture (§6). See those sections before disagreeing with the conclusions.
@@ -430,11 +434,67 @@ Everything else maps: `n` new · `w` worktree · `s` schedule · `p`/`P` pause a
 `x` kill or remove · `,` settings · `⇧hjkl` reorder · `Ctrl-f` jump · `Ctrl-p`/`Q`
 projects · `q` back.
 
-## 7a. The session screen is the pane
+## 7a. The session screen: a chat, with the pane one tap away
 
-**This section exists because the first version was wrong, and a user said so in one
-sentence:** *"it doesn't look like a normal chat and i can't see the commands that is
-running — is it possible to make it look exactly as the computer version?"*
+**This section has been wrong twice, both times for the same reason — it was written before
+anyone had lived with it — and the two corrections point in opposite directions. Read them
+in order, because the second does not undo the first.**
+
+### Correction 2 (current): it is a chat
+
+*"can we literally convert it to a normal chat like the Claude app... now it look weird it
+has a bunch of buttons and the chat is very small, also let's see if we can add smth to
+reproduce the last message like an audio... it's not that responsive either, the screen
+moves around."*
+
+Four complaints, four different causes, and only one of them was styling:
+
+- **"a bunch of buttons and the chat is very small."** The session screen was a header, a
+  card, **ten** footer buttons, a view switch and *then* the content. On a 390×844 phone
+  that is over half the screen spent before the first message. The verbs are one `⋯` sheet
+  now; nothing was dropped and the lead's refusals are still absent from it.
+- **"a normal chat."** The transcript was a table — newest-first, every row stamped
+  `HH:MM · role`. It is bubbles now, oldest at the top, opened at the bottom, with a
+  **composer** instead of `send a prompt` opening a full-screen form to type one line.
+  Two roles, two sides. This is the one part of the client that is deliberately *not* a
+  transcription of the TUI; the cards still are, and `grid-parity` still holds them to it.
+- **"the screen moves around."** Structural, not cosmetic. The whole app was a single
+  scrolling *document* that `render()` wipes and rebuilds every poll — 5s for the grid, 2s
+  for the pane — so nothing owned the scroll position and every repaint dropped the reader
+  wherever the browser landed. Worse, the pane's box was sized by *measuring* the space
+  left under a button bar that rewraps, so the layout moved when the buttons did. There is
+  now a shell: the page itself never scrolls, and the one region that does is a flex child
+  that owns its own `scrollTop` (the idiom the pane already had, applied to the chat).
+  `sizePaneBox`'s measurement is dead under it — flex is given the height, so measuring it
+  was standing in for a layout that could not answer the question.
+- **"reproduce the last message like an audio."** `SpeechSynthesis`, in the browser
+  already: no network call, nothing for the CSP to refuse, no service to keep alive. One
+  button, in the composer, reading the newest assistant turn — a speaker on every bubble is
+  the button wall again. **What is spoken is not what is written:** fenced code becomes the
+  words "code block" (you cannot follow code by ear, and pretending otherwise costs a
+  minute of listening), inline code loses its backticks, links become "link", and it is
+  capped at 1200 characters because there is no way to skim a voice. It is a stop toggle,
+  because two voices at once is the failure mode of a play button.
+
+**And the default view flipped, which is the part that had to be paid for rather than
+argued away.** Correction 1 below moved it to the pane for a reason that is still true: a
+permission dialog is drawn by the agent *into its pane* and is not in `/api/session`'s
+payload at all, so **a chat cannot show one**. So a blocked session says so *in the chat* —
+a red banner naming exactly that, with one button to the pane, where the answer is typed.
+The chat is the better place to read a conversation; the pane is the only place to unblock
+one; the banner is the seam, rather than something to find out.
+
+Two things came free with the layout, both pre-existing and both invisible while that
+screen was small: `save()` had never persisted `session`, so quitting from a session and
+reopening restored the session *screen* with nothing on it (`'null' is not on this fleet's
+grid any more`) — it now persists the session and **clamps**, because you cannot be on a
+screen whose subject is missing. And a restored screen **seeds the history trail**, or the
+first back-gesture out of it leaves the app.
+
+### Correction 1: the pane, and why it is still here
+
+*"it doesn't look like a normal chat and i can't see the commands that is running — is it
+possible to make it look exactly as the computer version?"*
 
 Both halves were true and they had one cause. The session screen rendered `/api/session`,
 which goes through `fleet-read --json` and emits `{ts, role, text}` — assistant and user
@@ -605,10 +665,18 @@ building a chat client.
 - **No redesign of the grid.** The phone renders the existing cards, glyphs and status
   vocabulary. Two divergent layouts would have to be kept in step forever.
 - **No stack view** (§6).
-- **No chat client.** A session's conversation is Remote Control's job (§9). The pane view
-  (§7a) is not one either, and the distinction is load-bearing: it is a *capture of a
-  terminal*, not a rendering of a conversation. Nothing in it is composed here, which is
-  exactly why it cannot drift from what the desk sees.
+- **~~No chat client.~~ Superseded by §7a's correction 2**, at the request of the person
+  using it. The transcript view is a chat now — bubbles, oldest-first, a composer — and it
+  is the default. What that bullet was *protecting* still holds, and holds exactly where it
+  did: **the pane is not a chat.** It is a *capture of a terminal*; nothing in it is
+  composed here, which is why it cannot drift from what the desk sees. A conversation you
+  can read is a rendering of `/api/session`; a conversation you can *unblock* is the pane,
+  and the two are one tap apart with a banner between them.
+- **No routing.** The back gesture works by pushing history entries that reuse the current
+  href — the stack carries a depth, never a route. So there is no URL to parse on a cold
+  open, no link that can name a session that has since been reclaimed, and nothing to keep
+  in step with the screens. (*"can we not have urls? if I go back it takes me to the last
+  page I was, not back."*)
 - **No terminal emulation.** `capture-pane` hands over a grid tmux has already laid out, so
   the client renders SGR attributes and drops everything else — cursor movement, scroll
   regions, wrapping. Re-deriving any of it would be a second answer to "what does this pane

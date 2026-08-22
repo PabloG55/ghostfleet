@@ -41,6 +41,45 @@ body {
   margin: 0 auto;
 }
 
+/* ── the shell: ONE screen, ONE scroller ─────────────────────────────────────
+ * "it's not that responsive either, the screen moves around" — and it did, for a
+ * structural reason rather than a styling one: the whole app was a single scrolling
+ * DOCUMENT that render() wipes and rebuilds every poll (5s for the grid, 2s for the
+ * pane). Nothing owned the scroll position, so each repaint dropped the page wherever
+ * the browser landed, and the pane's own box was sized by MEASURING the space left under
+ * a button bar that rewraps — so the layout moved when the buttons did.
+ *
+ * The shell fixes both: the page itself never scrolls, and the one region that does is a
+ * flex child that owns its own scrollTop. 100dvh, not 100vh, because iOS counts the URL
+ * bar in vh and the bottom of a 100vh column sits under it. */
+html.shell, html.shell body { height: 100%; overflow: hidden; }
+#app.shell {
+  height: 100vh; height: 100dvh;
+  display: flex; flex-direction: column; gap: 0;
+}
+/* The scrolling region. `min-height: 0` is the whole trick — a flex child's default
+ * min-height is its content, so without it the column grows past the viewport and the
+ * page scrolls again, which is exactly the bug. */
+#app.shell > .scroll,
+#app.shell > .paneview > .pane-box,
+#app.shell > .cards,
+#app.shell > .chat {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+}
+#app.shell > .paneview {
+  flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0;
+}
+/* Under the shell the box is a flex child, so its height is GIVEN to it. The measured
+ * max-height (sizePaneBox) and the 68vh fallback are both off — they were standing in for
+ * a layout that could not answer the question. */
+#app.shell > .paneview > .pane-box { max-height: none; }
+/* Everything that is not the scroller is a fixed band: the header and the confirm bar
+ * above, the verbs or the composer below. That is what makes the card list scroll under a
+ * header that stays put, instead of the whole page moving. */
+#app.shell > .sbar, #app.shell > .composer, #app.shell > .verbs,
+#app.shell > .hdr, #app.shell > .confirm, #app.shell > .hint, #app.shell > .stale { flex: 0 0 auto; }
+
 /* ── header ─────────────────────────────────────────────────────────────── */
 .hdr { display: flex; flex-wrap: wrap; gap: .3em .9em; align-items: baseline; padding: .2em .2em .6em; font-size: 13px; }
 .hdr .name { font-weight: 700; color: var(--white); }
@@ -223,12 +262,91 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .viewsw { display: flex; gap: .4em; padding: .5em .2em 0; }
 .viewsw button.on { color: var(--bg); background: var(--cyan); border-color: var(--cyan); }
 
-/* ── the session screen: the message list ──────────────────────────────── */
-.msgs { margin: .8em 0 0; }
-.msg { padding: .6em .1em; border-top: 1px solid var(--hair); }
-.msg .when { color: var(--dim); }
-.msg .text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.more { margin: .8em 0; }
+/* ── the session screen: the top bar ────────────────────────────────────────
+ * Ten footer buttons used to sit between the card and the content — "it has a bunch of
+ * buttons and the chat is very small". They are one `⋯` now, and the row that replaced
+ * them carries only what you need to READ the screen: where you are, what the session is
+ * doing, and which of the two views you are in. */
+.sbar {
+  display: flex; align-items: center; gap: .5em;
+  padding: .1em .1em .5em; border-bottom: 1px solid var(--hair); margin-bottom: .5em;
+}
+.sbar .who { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.sbar .who .nm { font-weight: 700; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sbar .who .st { font-size: 12px; }
+.sbar button { padding: .35em .6em; }
+/* The view switch, as a segmented control rather than two loose buttons. */
+.seg { display: flex; border: 1px solid var(--hair); }
+.seg button { border: 0; padding: .35em .7em; }
+.seg button.on { color: var(--bg); background: var(--cyan); }
+
+/* ── the chat ───────────────────────────────────────────────────────────────
+ * "can we literally convert it to a normal chat like the Claude app". So: oldest at the
+ * top, newest at the bottom, opened at the bottom, and bubbles rather than a table of
+ * timestamped rows. This is the ONE part of the client that is deliberately not a
+ * transcription of the TUI (docs/mobile.md §7a) — the cards still are, and grid-parity
+ * still holds them to it.
+ *
+ * Prose, not code: the chat is the one place a proportional face is right. Everything
+ * else in this file is monospace because it is a terminal; a paragraph is not. */
+.chat { padding: 0 .1em; display: flex; flex-direction: column; gap: .55em; }
+/* A SHORT conversation sits on the composer, not at the top of an empty column — which is
+ * where every chat on the phone puts it. `margin-top: auto` on the first child rather than
+ * `justify-content: flex-end`, because that one clips the top of a LONG conversation out of
+ * reach in a scroll container. */
+.chat > :first-child { margin-top: auto; }
+/* The mode chip is in the top bar now, and a tailnet hostname is long enough to squeeze
+ * the view switch off the end of it. */
+.sbar .mode { max-width: 7em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.hint.lead1 { padding: .15em .2em .3em; font-size: 12px; }
+.chat .bub {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 15px; line-height: 1.45;
+  padding: .55em .7em; border-radius: 14px; max-width: 88%;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.chat .bub.user { align-self: flex-end; background: #1d3a5c; color: #eaf2ff; border-bottom-right-radius: 4px; }
+.chat .bub.agent { align-self: flex-start; background: #14181d; border: 1px solid var(--hair); border-bottom-left-radius: 4px; }
+/* A message that has been sent but has not come back in the transcript yet. It is dimmed
+ * rather than absent, because a chat where your own message vanishes for five seconds
+ * reads as a send that failed. */
+.chat .bub.pending { opacity: .55; }
+.chat .meta { font-size: 11px; color: var(--dim); padding: 0 .3em; }
+.chat .meta.r { align-self: flex-end; }
+.chat .meta.l { align-self: flex-start; }
+.chat .row { display: flex; gap: .5em; align-items: center; }
+.chat .row.l { align-self: flex-start; }
+/* THE BLOCKED BANNER. Defaulting to the chat costs something real: a permission dialog is
+ * drawn by the agent INTO ITS PANE and is not in the transcript at all (§7a), so a chat
+ * cannot show one. The status can, and does — this is the affordance that keeps #45's
+ * lesson working under the new default. */
+.chat .blocked {
+  align-self: stretch; border: 1px solid var(--red); color: var(--red);
+  padding: .55em .7em; display: flex; gap: .6em; align-items: center; flex-wrap: wrap;
+}
+.chat .blocked .t { flex: 1 1 auto; }
+
+/* ── the composer ───────────────────────────────────────────────────────── */
+.composer { display: flex; gap: .45em; align-items: flex-end; padding: .5em .1em 0; border-top: 1px solid var(--hair); }
+.composer textarea {
+  flex: 1 1 auto; min-width: 0; resize: none; font: inherit; font-size: 15px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: #14181d; color: var(--fg); border: 1px solid var(--hair); border-radius: 12px;
+  padding: .5em .7em; max-height: 8em; line-height: 1.35;
+}
+.composer button { padding: .5em .7em; }
+.composer button.go { color: var(--bg); background: var(--green); border-color: var(--green); }
+/* Speaking is a toggle, and it says which state it is in — a play button that is really a
+ * stop button is how you end up with two voices at once. */
+.speak.on { color: var(--bg); background: var(--yellow); border-color: var(--yellow); }
+
+/* One message: the bubble and its timestamp, aligned as a pair. Grouped so the gap
+ * between TURNS is bigger than the gap inside one, which is what makes a column of
+ * bubbles read as a conversation rather than as a list. */
+.chat .turn { display: flex; flex-direction: column; gap: .15em; max-width: 88%; }
+.chat .turn.me { align-self: flex-end; align-items: flex-end; }
+.chat .turn.them { align-self: flex-start; align-items: flex-start; }
+.chat .turn .bub { max-width: 100%; }
 .toast {
   position: fixed; left: 8px; right: 8px; bottom: calc(env(safe-area-inset-bottom) + 8px);
   background: #14181d; border: 1px solid var(--hair); padding: .6em .7em; z-index: 20;

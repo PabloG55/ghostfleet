@@ -19,6 +19,7 @@
 //     pocket and a deleted checkout
 //   - a status vocabulary that quietly collapses two values into one label
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -109,6 +110,28 @@ const shipped = [
 is('every shipped file is precached', '', shipped.filter(f => !shell.includes(f)).join(','));
 is('the service worker never caches a verb', true, /req\.method !== 'GET'/.test(read('sw.js')));
 
+// A CACHE VERSION THAT DID NOT MOVE IS A DEPLOY THAT DID NOT LAND. sw.js says so itself —
+// "forgetting it is worse than shipping nothing" — because the shell is served CACHE-FIRST:
+// a phone that already has the old version paints the old app.js on the first open after a
+// deploy and revalidates behind it, which is indistinguishable from the fix not working.
+// It was a thing to REMEMBER, and this repo's rule is to make it impossible instead.
+//
+// So the version is pinned to the client's own bytes: change any precached file and this
+// goes red with the hash to paste, and the moment you paste it is the moment you bump
+// VERSION. Everything precached from web/ counts EXCEPT sw.js itself, which contains the
+// pin and cannot hash itself.
+const pinned = shell.filter(f => f !== 'sw.js' && exists(f)).sort();
+const clientHash = crypto.createHash('sha256')
+  .update(pinned.map(f => f + '\0' + fs.readFileSync(path.join(WEB, f))).join('\0'))
+  .digest('hex').slice(0, 12);
+const recorded = (/CLIENT-HASH:\s*([0-9a-f]{12})/.exec(read('sw.js')) || [])[1] || '(none recorded)';
+is('the cache version is pinned to the client', clientHash, recorded);
+// ...and a pin is only worth anything if a bump actually TAKES EFFECT, which is two
+// behaviours rather than a count of identifiers: install fills the new cache, and activate
+// drops every other one. (A count broke the moment sw.js read the cache one more time.)
+is('...install fills the new cache', true, /caches\.open\(VERSION\)/.test(read('sw.js')));
+is('...and activate drops the old ones', true, /if \(k !== VERSION\) await caches\.delete\(k\)/.test(read('sw.js')));
+
 // ── 3. the fixtures are §4, exactly ───────────────────────────────────────
 const NINE = ['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted'];
 const TOP = ['project', 'profile', 'counts', 'cards', 'free_worktrees'].sort().join(',');
@@ -187,7 +210,7 @@ is('...and kill goes through the guard', true, /function askKill\(name\) \{ if \
 is('...and reclaim too', true, /function askReclaim\(name\) \{ if \(name && !leadGuard\(/.test(APP));
 is('...and rename too', true, /function sheetRename\(name\) \{[\s\S]{0,400}?leadGuard\(name, 'renamed'\)/.test(APP));
 is('the lead keeps send/answer/pause', true, /const lead = !!\(c && c\.lead\);/.test(APP));
-is('...and says why the rest are gone', true, /cannot be stopped, reclaimed or renamed/.test(APP));
+is('...and says why the rest are gone', true, /cannot be stopped, reclaimed, renamed or paused/.test(APP));
 // Fixture mode stands in for the SERVER, so it has to refuse what the server refuses —
 // otherwise the demo teaches the opposite of what the daemon does.
 is('fixture mode refuses to stop the lead', true, /refusing to stop 'master'/.test(JS['api.js']));
@@ -356,10 +379,49 @@ is('the pane scroll offset outlives the nodes', true, /^let paneScroll = null;/m
 is('...and the jump-to-end is conditional', true, /if \(!paneScroll \|\| paneScroll\.atEnd\)/.test(APP));
 is('...fed by the box\'s own scroll events', true, /addEventListener\('scroll', \(\) => rememberPaneScroll/.test(APP));
 
-// A tap on a card lands on the PANE. The message list stays reachable — it pages back over
-// the whole transcript, which a pane cannot — so both halves are asserted.
-is('a session opens on the pane', true, /S\.view = 'pane';/.test(APP));
-is('...and the message list is still reachable', true, /pick\('msgs', 'messages'\)/.test(APP));
+// A tap on a card lands on the CHAT, and that is a change of mind with a reason: #45 made
+// it the pane because a message list could not show a command, and the person using the app
+// then lived with it and asked for "a normal chat like the Claude app". Both halves are
+// still asserted, plus the third that makes the new default safe.
+is('a session opens on the chat', true, /const DEFAULT_VIEW = 'chat';/.test(APP));
+is('...and the pane is one tap away', true, /btn\('pane', \(\) => setView\('pane'\)/.test(APP));
+// THE COST OF THE NEW DEFAULT, PAID IN THE CLIENT. A permission dialog is drawn into the
+// agent's pane and is not in /api/session's payload at all, so a chat cannot show one —
+// which is exactly why #45 moved the default. The banner is what keeps that lesson working:
+// a blocked session says so in the chat and offers the pane, where the answer is typed.
+is('a blocked session is called out in the chat', true, /card\.status === 'need-you'/.test(APP));
+is('...with a way to the pane from there', true, /btn\('open the pane', \(\) => setView\('pane'\)\)/.test(APP));
+// The chat's scroll is remembered the way the pane's is, or every poll throws the reader.
+is('the chat scroll offset outlives the nodes', true, /^let chatScroll = null;/m.test(APP));
+is('...fed by its own scroll events', true, /addEventListener\('scroll', \(\) => rememberChatScroll/.test(APP));
+// ONE region scrolls, and the page does not. This is the structural half of "the screen
+// moves around": a document that re-renders every poll cannot hold a scroll position.
+is('the shell owns the viewport', true, /document\.documentElement\.classList\.toggle\('shell', shell\)/.test(APP));
+is('...and the pane stops measuring under it', true, /classList\.contains\('shell'\)\) return;/.test(APP));
+
+// ── 5d. the back gesture, and no URLs ─────────────────────────────────────
+// "if I go back it takes me to the last page I was, not back." The app had nothing on the
+// history stack, so the system gesture left it. The entries carry a DEPTH and reuse the
+// current href — no routes to invent, nothing to parse on a cold open, and no URL ever
+// appears (there is no address bar in standalone mode anyway).
+is('navigation pushes history entries', true, /history\.pushState\(\{ gf: navDepth \}, '', location\.href\)/.test(APP));
+is('...and never a url of its own', 0,
+   (APP.match(/pushState\([^)]*,\s*'\/[^']*'\)/g) || []).length);
+is('...popstate is what moves back', true, /addEventListener\('popstate', \(\) => popTo\(\)\)/.test(APP));
+is('...and the back button asks the platform', true, /if \(navDepth > 0 &&[^\n]*history\.back/.test(APP));
+// A sheet and a confirmation are back-steps too: the gesture must close them rather than
+// leaving the screen under them.
+is('back closes a sheet first', true, /if \(S\.sheet\) \{ closeSheet\(\); return; \}/.test(APP));
+is('...then a confirmation', true, /if \(S\.confirm\) \{ cancel\(\); return; \}/.test(APP));
+
+// ── 5e. reading a message aloud ───────────────────────────────────────────
+// In-browser synthesis: no network call, so nothing for the CSP to refuse and no service to
+// keep alive. Guarded on availability, because a phone without it must not get a dead
+// button — and what is SPOKEN is not what is written, or a synthesiser reads a diff out one
+// character at a time.
+is('speech is available-checked', true, /typeof speechSynthesis !== 'undefined'/.test(APP));
+is('...and fenced code is not read aloud', true, /code block/.test(APP));
+is('...and it is a stop toggle, not a second voice', true, /speechSynthesis\.cancel\(\)/.test(APP));
 // api.js is still the only file that talks to the network, pane included.
 is('the pane read goes through api.js', true, /export async function getPane/.test(read('api.js')));
 is('...and ansi.js fetches nothing', '', (read('ansi.js').match(/\bfetch\(/g) || []).join(','));
