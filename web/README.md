@@ -3,6 +3,12 @@
 The fleet grid, as a Progressive Web App. Design: [`docs/mobile.md`](../docs/mobile.md)
 — §4 is the JSON, §6 is the client and layout, §7 is parity and the confirmations.
 
+<p align="center">
+  <img src="../docs/mobile/phone-demo.gif" width="320"
+       alt="Projects, then one project's grid, then a session: the chat, its composer, the
+            actions sheet, and the live pane with a permission prompt waiting on an answer.">
+</p>
+
 It is **not a second design**. `bin/fleet-grid.mjs` computes its column count from the
 window width (`const nc = cols()`), so a phone is `nc = 1`, and the card is the same
 five lines `cardLines()` draws — the same box-drawing characters, the same 32 columns,
@@ -20,13 +26,54 @@ that still renders is a card that still looks right.
 ╰──────────────────────────────╯
 ```
 
-| the grid, `nc = 1` | all nine statuses | projects |
+| the grid, `nc = 1`, scrolling | the session, which is a chat | its live pane |
 |---|---|---|
-| ![grid](../docs/mobile/grid.png) | ![statuses](../docs/mobile/statuses.png) | ![projects](../docs/mobile/projects.png) |
+| ![grid](../docs/mobile/grid.gif) | ![session](../docs/mobile/session.gif) | ![pane](../docs/mobile/pane.gif) |
+| the card list is the one region that scrolls — the page itself never does | at rest, scrolled back through older turns, a draft in the composer, and the `⋯` sheet | as attached, then `fit`, then zoomed, then scrollback |
 
-| a session | the TUI's own confirmation, and its force step |
-|---|---|
-| ![session](../docs/mobile/session.png) | ![confirm](../docs/mobile/confirm.png) |
+| all nine statuses | projects | the TUI's own confirmation, and its force step |
+|---|---|---|
+| ![statuses](../docs/mobile/statuses.png) | ![projects](../docs/mobile/projects.png) | ![confirm](../docs/mobile/confirm.png) |
+
+The three surfaces that *do* something are loops; the statuses stay a still because nine
+glyphs and their colours are a legend, not a behaviour — you read that one rather than
+wait for it to come round again.
+
+Everything above is the app running on **fixtures**, which is why it can be regenerated
+without a fleet — and why it must be. Two of the stills these replaced had gone stale
+silently: the grid was shot before the lead's card reached the phone (#47), so it opened on
+`coi-beside` and counted one session too few, and the session was the pre-#48 screen — a
+card, ten footer buttons, and a newest-first table of `HH:MM · assistant` rows, none of
+which the app has any more. Neither one looked broken. An image cannot fail a test, so the
+only thing that catches this is re-taking it when the screen changes.
+
+### Re-taking them
+
+The client picks fixtures whenever `/api/health` does not answer as a fleet
+(`api.js:128`), so a plain static server is a complete, deterministic app with no
+enrolment and no real fleet data in the frame:
+
+```bash
+(cd web && python3 -m http.server 8899 --bind 127.0.0.1)
+```
+
+Open it at a 390x844 viewport with `devicePixelRatio` 2, take the fixture bypass on the
+lock screen, and shoot each screen. Note that the cards are not `<button>`s and they do
+not listen for `click`: the tap handler is `pointerup` on `.card` (`app.js:1083`), guarded
+by a movement slop and a long-press timer, so a driver that only dispatches `click` selects
+a card and never opens it. Downscale the 2x captures to the 390-wide convention, and build
+each GIF from its frames with the concat demuxer, a `duration` per frame — the screens are
+static between interactions, so 5fps is enough, and `stats_mode=diff` is what keeps a dark
+UI from banding. The grid's loop ping-pongs back to the top so it reads as a scroll rather
+than a jump cut:
+
+```bash
+ffmpeg -f concat -safe 0 -i list.txt -filter_complex \
+  "fps=5,scale=390:-1:flags=lanczos,split[a][b];\
+   [a]palettegen=max_colors=128:stats_mode=diff[p];\
+   [b][p]paletteuse=dither=bayer:bayer_scale=3" \
+  -loop 0 docs/mobile/phone-demo.gif -y
+```
 
 ## Running it
 
