@@ -15,7 +15,10 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v6 stops the 5s poll while you are typing, and this is
+// BUMPED WHEN THE CLIENT CHANGES — v7 makes the client take a new one by itself: app.js
+// reloads on `controllerchange`, so one cold open picks up a deploy instead of two. This
+// is the last version anybody should have to install by hand. v6 stops the 5s poll while
+// you are typing, and that was
 // the bump that matters most so far: without it a phone keeps a client whose keyboard
 // closes every five seconds, and the fix is invisible until the shell is refetched. v5
 // renames every fixture: the demo data used to be real
@@ -30,11 +33,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: fe2697fbf9f5
+// CLIENT-HASH: 5bb4e56a801b
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v6';
+const VERSION = 'ghostfleet-v7';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js',
