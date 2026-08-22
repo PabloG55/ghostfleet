@@ -9,16 +9,45 @@ own git worktree; you get one screen that shows what every one of them is doing.
 > working with nobody in the seat, and one control plane steering them.
 
 <p align="center">
-  <img src="docs/worktree-demo.gif" width="900"
-       alt="The Projects screen, then one project's session grid, then the new-worktree
-            form: a name, a branch, and which agent runs it. The worktree is cut, the
-            agent boots into it, and Projects comes back counting one more session.">
+  <img src="docs/worktree-demo.gif" width="820"
+       alt="The Projects screen, then one project's session grid, then the new-worktree form:
+            a name, a branch, and which agent runs it. The worktree is cut, the agent boots
+            into it, and Projects comes back counting one more session.">
+</p>
+<p align="center">
+  <b>Start a worker.</b> <sub><code>w</code> cuts a worktree, branches it, picks which agent
+  runs it, and boots it — you land in the session.</sub>
 </p>
 
 <p align="center">
-  <sub>Recorded by <a href="worktree.tape"><code>worktree.tape</code></a> against a real
-  fleet — <code>w</code> on a project's grid cuts a worktree, branches it, and boots an
-  agent in it.</sub>
+  <img src="docs/stack-demo.gif" width="820"
+       alt="The stack screen listing three idle workers, each ticked, then the stack open:
+            claude, opencode and codex side by side in three panes, each with its own status
+            bar and a border naming its project and session.">
+</p>
+<p align="center">
+  <b>Watch three at once.</b> <sub><code>claude</code>, <code>opencode</code> and
+  <code>codex</code> side by side — every pane live and typable, across projects.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/mobile/phone-demo.gif" width="260"
+       alt="On a phone: the projects list, one project's grid of session cards, a session as a
+            chat with bubbles and a composer, the actions sheet, and the live pane showing a
+            permission prompt waiting on an answer.">
+</p>
+<p align="center">
+  <b>Unblock one from anywhere.</b> <sub>The same grid as an installable web app. A session is
+  a chat; its <code>pane</code> tab is the real terminal, so a worker stuck on a permission
+  prompt gets an answer from your pocket.</sub>
+</p>
+
+<p align="center">
+  <sub>All three recorded against a real fleet by <a href="worktree.tape"><code>worktree.tape</code></a>
+  and <a href="stack.tape"><code>stack.tape</code></a>. Details:
+  <a href="docs/SHORTCUTS.md">keys</a> ·
+  <a href="docs/stack-view.md">the stack</a> ·
+  <a href="web/README.md">the phone client</a>.</sub>
 </p>
 
 ## Why another one of these
