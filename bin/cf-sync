@@ -52,16 +52,46 @@ fi
 # those static files from $DEST, not from the repo, so a client left out of the sync 404s
 # in the browser while every file on disk looks perfectly correct — the same shape of
 # confusion as a stale MCP process, and just as invisible from the repo side.
-mkdir -p "$DEST"
+# EVERY COPY IS CHECKED, because the whole deploy model rests on the runtime matching
+# the repo and this is the only command that makes that true. It used to run rsync and
+# ignore its status — `set -uo pipefail` has no `-e` — and then print "synced runtime"
+# unconditionally. Seen live: TCC denied one directory and cf-sync reported success over
+# the top of rsync's own error.
+#
+#     rsync(87193): error: open /Users/pgarces/…/ghostfleet/web/: Operation not permitted
+#     cf-sync: synced runtime  /Users/pgarces/…/ghostfleet  ->  /Users/pgarces/.local/…
+#
+# That is worse than failing: a success line is what you check BEFORE concluding the
+# runtime is current, so the one safeguard against the repo-vs-runtime trap at the top of
+# CLAUDE.md was the thing asserting the trap had not happened.
+mkdir -p "$DEST" || { echo "cf-sync: cannot create $DEST" >&2; exit 1; }
+failed=""
 for d in bin tmux hooks mcp skill layouts web; do
   [ -d "$REPO/$d" ] || continue
   if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete "$REPO/$d/" "$DEST/$d/"
+    rsync -a --delete "$REPO/$d/" "$DEST/$d/"; rc=$?
   else
-    rm -rf "$DEST/$d"; mkdir -p "$DEST/$d"; cp -Rp "$REPO/$d/." "$DEST/$d/"
+    rm -rf "$DEST/$d" && mkdir -p "$DEST/$d" && cp -Rp "$REPO/$d/." "$DEST/$d/"; rc=$?
   fi
+  # Any non-zero is a failure, including rsync's "partial transfer" warnings. A partial
+  # copy of bin/ is exactly the state that runs half-new code, and there is no exit code
+  # here that means "the runtime matches the repo, but less so".
+  [ "$rc" -eq 0 ] || { failed="$failed $d"; echo "cf-sync: FAILED to sync $d/ (exit $rc)" >&2; }
 done
+
+# The pointer is recorded either way: it says where to sync FROM, not that a sync worked,
+# and dropping it would leave the retry — the very next thing you do — with no source.
 printf '%s\n' "$REPO" > "$DEST/.source"
+
+if [ -n "$failed" ]; then
+  echo "cf-sync: NOT SYNCED —$failed" >&2
+  echo "cf-sync: the runtime at $DEST is now a MIX of old and new code. Do not trust it." >&2
+  # Name the cause this script exists for. cf-sync is here BECAUSE ~/Documents is TCC
+  # guarded, so a permission denial on the source is the likeliest reading of a failure
+  # and the least likely to be guessed from an exit code.
+  case " $failed " in *' '*) echo "cf-sync: if this says 'Operation not permitted', macOS TCC is denying the source. Grant your terminal Full Disk Access (System Settings > Privacy & Security), then re-run." >&2 ;; esac
+  exit 1
+fi
 
 echo "cf-sync: synced runtime  $REPO  ->  $DEST"
 echo "  (the ~/.local/bin symlinks + settings hook + MCP already point here; no relink needed)"

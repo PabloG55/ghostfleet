@@ -4301,6 +4301,61 @@ else
 fi
 is "cf-sync copies web/ to the runtime" "1" "$(grep -c 'for d in bin tmux hooks mcp skill layouts web' "$ROOT/bin/cf-sync" || true)"
 
+# ── cf-sync reports the truth about whether it synced ────────────────────────
+# It used to run rsync and never look at the status — `set -uo pipefail` has no `-e` — so
+# a denied directory printed rsync's error and then "cf-sync: synced runtime" right after
+# it, exit 0. Seen live when TCC denied web/. That is the repo-vs-runtime trap with its
+# only safeguard inverted: the success line is what you check to conclude the runtime is
+# current, so it was asserting the trap had not happened while it had.
+#
+# Behavioural, not grep: every existing cf-sync assertion greps the source for a string,
+# which cannot tell whether the exit status is acted on. These run the real script.
+group "cf-sync tells the truth about a failed sync"
+CS="$(mktemp -d)"
+mkdir -p "$CS/repo/bin" "$CS/repo/web"
+printf '#!/bin/sh\necho hi\n' > "$CS/repo/bin/thing"; chmod +x "$CS/repo/bin/thing"
+printf 'x\n' > "$CS/repo/web/index.html"
+
+# the happy path first, so a later failure is known to be the change and not the setup
+out_ok="$(CLAUDE_FLEET_HOME="$CS/rt" "$ROOT/bin/cf-sync" "$CS/repo" 2>&1)"; rc_ok=$?
+is "a good sync exits 0"                 "0"   "$rc_ok"
+is "...and says it synced"               "1"   "$(printf '%s' "$out_ok" | grep -c 'synced runtime' || true)"
+is "...and the file is really there"      "hi"  "$(sh "$CS/rt/bin/thing" 2>/dev/null)"
+is "...and the exec bit survived"         "yes" "$([ -x "$CS/rt/bin/thing" ] && echo yes || echo no)"
+
+# Now deny ONE directory and leave the rest fine — the shape of the live failure, and the
+# one that matters: a partial sync is the state that runs half-new code.
+#
+# The denial is on the SOURCE, which is both the real case (TCC guards ~/Documents, which
+# is the entire reason this script exists) and the only one that works: denying the
+# DESTINATION does not fail, because `rsync -a` preserves the source's permissions and
+# resets the mode you set. Measured — chmod 500 on the dest syncs happily, exit 0, while
+# chmod 000 on the source gives rsync exit 23 and the same "Permission denied" line seen
+# live. A failure injection that does not inject is a test that proves nothing.
+chmod 000 "$CS/repo/web"
+# Whether the denial TOOK has to be decided WITHOUT asking cf-sync, or the guard becomes
+# the bug's alibi: gating on `rc_bad = 0` reads a broken cf-sync as "cannot deny here" and
+# SKIPS — and a skip exits 0, so the suite stays green with the defect present. Watched
+# that happen on the way in. `ls` answers the question independently.
+if ls "$CS/repo/web" >/dev/null 2>&1; then
+  chmod 700 "$CS/repo/web" 2>/dev/null || true
+  skip "cf-sync failure path" "this user can read a 000 dir (root?), cannot deny the source"
+else
+  out_bad="$(CLAUDE_FLEET_HOME="$CS/rt2" "$ROOT/bin/cf-sync" "$CS/repo" 2>&1)"; rc_bad=$?
+  chmod 700 "$CS/repo/web" 2>/dev/null || true
+  is "a failed sync exits non-zero"        "yes" "$([ "$rc_bad" -ne 0 ] && echo yes || echo no)"
+  # THE BUG. Before the fix this printed both rsync's error AND the success line.
+  is "...and NEVER claims it synced"       "0"   "$(printf '%s' "$out_bad" | grep -c 'synced runtime' || true)"
+  is "...and names the directory"          "1"   "$(printf '%s' "$out_bad" | grep -c 'FAILED to sync web/' || true)"
+  is "...and warns the runtime is a mix"   "1"   "$(printf '%s' "$out_bad" | grep -c 'MIX of old and new' || true)"
+  # the dirs it COULD do are still done, which is why "do not trust it" is the wording
+  is "...while the dirs it could do landed" "hi" "$(sh "$CS/rt2/bin/thing" 2>/dev/null)"
+  # the retry has to know where to sync from, so the pointer is written even on failure
+  is "...and .source is still recorded"    "$CS/repo" "$(cat "$CS/rt2/.source" 2>/dev/null)"
+fi
+chmod 700 "$CS/rt2/web" 2>/dev/null || true
+rm -rf "$CS"
+
 # ── the client picks the right backend when the DAEMON is what served it ─────
 # Found on a real phone: the client fleet-serve serves ran on fixtures, because `gf.base`
 # unset meant "fixtures" and nothing ever set it. The phone showed four projects that do
