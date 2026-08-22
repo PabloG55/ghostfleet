@@ -14,7 +14,8 @@
       "age": 95,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "fleet-serve",
@@ -27,7 +28,8 @@
       "age": 900,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     }
   ],
   "free_worktrees": [

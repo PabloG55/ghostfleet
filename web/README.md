@@ -143,10 +143,17 @@ What stands in front of them is identity and confirmation, not reduced capabilit
   delete work (§12).
 - **an audit row for every mutating call**, visible in settings.
 
+- **the lead is not a worker.** `master` is a card here (§4's `lead`) because a phone is
+  the only way to reach it, and its card looks exactly like a worker's — so `stop`,
+  `stop --reclaim` and `rename` are not drawn on it, and the screen says why rather than
+  leaving three buttons quietly missing. The gate reads §4's `lead` flag, never the name.
+
 None of that is the enforcement. §5: *server-enforced, not client-enforced* — the
 assertion's job is to make the server mint a short-lived token, and the server refuses
 anything without a live one. The lists in `api.js` decide which taps ask for a
-fingerprint; `curl` never runs them.
+fingerprint; `curl` never runs them. The lead is refused the same way: in `plan()`
+(`mcp/fleet-dispatch.mjs`), which is the layer both the MCP server and the daemon go
+through, so the button being absent is a courtesy and not the control.
 
 ## What `fleet-serve` has to answer
 

@@ -107,6 +107,29 @@ if (phase === 'verbs') {
   // the same two-step on a session's own worktree
   row('reclaim.declined', await a.verb(base, 'fleet_stop', { project: 'demo', session: 'w1', reclaim: true }, await fresh('stop')));
   row('reclaimForce.ok', await a.verb(base, 'fleet_stop', { project: 'demo', session: 'w1', reclaim: true, force: true }, await fresh('force')));
+
+  // THE LEAD IS NOT A WORKER. It only became nameable from here when it gained a card
+  // (docs/mobile.md §4), and `reclaim` on it would aim fleet-clean at the repo's own main
+  // checkout. Every one of these carries a REAL assertion, so what is being shown is the
+  // refusal itself and not a missing fingerprint — and they are LAST so the force chain
+  // above keeps the sequence it is asserting on. run.sh checks the other half: the stubs
+  // record every command that ran, and neither fleet-stop nor fleet-rename is among them.
+  row('lead.stop', await a.verb(base, 'fleet_stop', { project: 'demo', session: 'master' }, await fresh('stop')));
+  row('lead.reclaim', await a.verb(base, 'fleet_stop', { project: 'demo', session: 'master', reclaim: true }, await fresh('stop')));
+  row('lead.rename', await a.verb(base, 'fleet_rename', { project: 'demo', session: 'master', new_name: 'lead' }, await fresh('rename')));
+  // ...and the other direction on the guard itself: a session whose name merely CONTAINS
+  // it is an ordinary worker. A prefix match here would refuse real sessions.
+  row('nearLead.stop', await a.verb(base, 'fleet_stop', { project: 'demo', session: 'master-card' }, await fresh('stop')));
+
+  // PARK is a worker verb too — bin/fleet-governor already excludes master from what it
+  // parks, because a fleet whose lead is off dispatches nothing. It needs no passkey, so
+  // these carry none: what is being shown is the planner's refusal, not the gate's.
+  row('lead.pause', await a.verb(base, 'fleet_pause', { project: 'demo', session: 'master' }));
+  // ...and RESUME is deliberately NOT refused. The recovery direction has to stay open, or
+  // a lead parked by an older build could never be turned back on from the phone — and an
+  // asymmetry nothing tests is an asymmetry that gets 'tidied up' into a bug.
+  row('lead.resume', await a.verb(base, 'fleet_resume', { project: 'demo', session: 'master' }));
+  row('worker.pause', await a.verb(base, 'fleet_pause', { project: 'demo', session: 'w1' }));
 }
 
 if (phase === 'reads') {

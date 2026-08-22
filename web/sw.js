@@ -35,7 +35,9 @@ const SHELL = [
   './fixtures/grid-free.json', './fixtures/grid-empty.json',
   './fixtures/settings-acme-api.json',
   './fixtures/session-acme-api-policy-beside.json', './fixtures/session-acme-api-docs-sweep.json',
+  './fixtures/session-acme-api-master.json',
   './fixtures/pane-acme-api-policy-beside.json', './fixtures/pane-acme-api-docs-sweep.json',
+  './fixtures/pane-acme-api-master.json',
 ];
 
 self.addEventListener('install', e => {

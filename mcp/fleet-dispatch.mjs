@@ -194,11 +194,11 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { all: { type: 'boolean', description: 'show the whole inbox instead of only new entries' }, project: { type: 'string', description: "another project's fleet to read (name from fleet_projects); omit for your own — your relayed answers arrive in YOUR OWN inbox, so omit it for those" } }, additionalProperties: false } },
   { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a permission dialog, a "reached usage limit — retry?", a trust prompt (e.g. text "2"). Use this to unblock a worker; use fleet_send for normal task prompts.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
-  { name: 'fleet_pause', description: 'Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work.',
+  { name: 'fleet_pause', description: "Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work. Can't park 'master': it is the fleet's lead, and a fleet whose lead is off dispatches nothing (the governor excludes it for the same reason).",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_resume', description: 'Un-park a worker paused with fleet_pause; optionally dispatch a prompt to wake it immediately.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session'], additionalProperties: false } },
-  { name: 'fleet_stop', description: "Cleanly STOP a worker for good: kill its session and clear its fleet state (status file, park/schedule markers + the schedule waiter, manifest entry). Use for a finished worker, or an ORPHAN whose git worktree was removed (its session lingers in fleet_list otherwise). Unlike fleet_pause (which only parks), this removes it. reclaim:true ALSO removes its git worktree — the one-call \"this one is done\", instead of stopping here and running `git worktree remove` somewhere else. Whether removal is safe is decided by fleet-clean's own gates (clean tree, no other session, PR merged or fully pushed); if it isn't, the session still stops and the worktree is kept with the reason. force:true (with reclaim) is the escalation for exactly that case — `git worktree remove --force`, which DELETES uncommitted work; ask for it only after a plain reclaim reported why it declined. Without reclaim it does not touch git.",
+  { name: 'fleet_stop', description: "Cleanly STOP a worker for good: kill its session and clear its fleet state (status file, park/schedule markers + the schedule waiter, manifest entry). Use for a finished worker, or an ORPHAN whose git worktree was removed (its session lingers in fleet_list otherwise). Unlike fleet_pause (which only parks), this removes it. reclaim:true ALSO removes its git worktree — the one-call \"this one is done\", instead of stopping here and running `git worktree remove` somewhere else. Whether removal is safe is decided by fleet-clean's own gates (clean tree, no other session, PR merged or fully pushed); if it isn't, the session still stops and the worktree is kept with the reason. force:true (with reclaim) is the escalation for exactly that case — `git worktree remove --force`, which DELETES uncommitted work; ask for it only after a plain reclaim reported why it declined. Without reclaim it does not touch git. Can't stop 'master': it is the fleet's lead, and reclaim would aim at the repo's own main checkout.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, reclaim: { type: 'boolean', description: "also remove its git worktree when it is safe to (PR merged or fully pushed, clean, no other session)" }, force: { type: 'boolean', description: "with reclaim: remove the worktree ANYWAY, past those gates. Destroys uncommitted work — the deliberate second step after a reclaim was declined" } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_rename', description: "Rename a worker's session AND move its worktree folder (git worktree move) in one step, so the two never drift apart. Migrates its pause marker, notify-lead override, pending scheduled send, fleet_worktrees manifest row, and its slot in the grid's card order to the new name. Refuses on a live-session/path collision or a dirty worktree git won't move. Can't rename 'master'.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'current session name' }, new_name: { type: 'string', description: 'new name for both the session and its worktree folder' } }, required: ['session', 'new_name'], additionalProperties: false } },
@@ -218,6 +218,28 @@ export const TOOLS = [
 // returned the normal success line, so text alone would only be half a fix: the lead's
 // transcript would still show a green call.
 export const fail = (msg) => ({ isError: true, text: `error: ${msg}` });
+
+// THE LEAD IS NOT A WORKER, and this is where saying so has to happen.
+//
+// Three commands already refuse it: bin/fleet-stop won't stop 'master', bin/fleet-rename
+// won't rename it, and fleet-clean won't remove a main checkout. But they all refuse in
+// the SHELL, and a nonzero exit from one of these is not a refusal here — combined()
+// hands the child's output back as ordinary text on purpose (several of them write to
+// stderr on success). So `fleet_stop --reclaim master` came back as a plain string, which
+// runVerb reads as ok:true: the phone showed a SUCCESS toast carrying the words "refusing
+// to stop 'master'", and fleet-serve's audit logged it as `result: 'ran'`. The guard held
+// and the report lied about it.
+//
+// Refusing in plan() fixes both callers at once, because plan() is the only layer both
+// go through: the MCP server returns {isError:true} to the agent, and the daemon returns
+// a 400 with `result: 'refused'` in the audit. It is also the layer that CANNOT be
+// bypassed by a client that simply doesn't draw the button — docs/mobile.md §7's rule,
+// and the reason this landed with the lead's card: until now nothing could name master
+// as a target from a phone, and now everything can.
+const LEAD = 'master';
+const notTheLead = (tool, session, why) => (String(session) === LEAD
+  ? { kind: 'fail', ...fail(`${tool}: refusing to ${why} '${LEAD}' — it is the fleet's lead, not a worker (every project needs one, and its checkout is the repo itself)`) }
+  : null);
 
 // `required` in an inputSchema is a declaration to the CLIENT; the server never enforced
 // it. So a client that dropped a key handed the tool `undefined`, and `String(undefined)`
@@ -330,13 +352,30 @@ export function plan(name, a = {}) {
       if (a.no_enter) args.push('--no-enter');
       return run('fleet-answer', args, t);
     }
-    case 'fleet_pause': return run('fleet-pause', [String(a.session)], t);
+    case 'fleet_pause': {
+      // Pause is a WORKER verb — its own description says "park a worker" — and the
+      // governor already keeps this rule for itself: bin/fleet-governor excludes master
+      // from the sessions it parks ("master is never parked"), because a fleet whose lead
+      // is off has nothing to drain fleet-inbox or dispatch the next task, and the way out
+      // was flipping a marker by hand. It only became reachable from a phone when the lead
+      // gained a card, and there it is one careless swipe on the FIRST one.
+      //   RESUME IS DELIBERATELY NOT GUARDED. The recovery direction has to stay open, or
+      // a lead parked by an older build — or by hand — could not be turned back on from
+      // the one surface that can see it.
+      const nl = notTheLead('fleet_pause', a.session, 'park');
+      if (nl) return nl;
+      return run('fleet-pause', [String(a.session)], t);
+    }
     case 'fleet_resume': {
       const args = [String(a.session)];
       if (a.prompt) args.push(String(a.prompt));
       return run('fleet-resume', args, t);
     }
     case 'fleet_stop': {
+      // The lead, first: `reclaim` on master would aim fleet-clean at the repo's own main
+      // checkout, and this is the one verb on the phone that can delete work.
+      const nl = notTheLead('fleet_stop', a.session, 'stop');
+      if (nl) return nl;
       // --force is meaningless without --reclaim and fleet-stop says so itself; sending
       // it alone would look like a harder stop while doing nothing at all, so refuse
       // here where the caller can still see which argument was wrong.
@@ -347,7 +386,13 @@ export function plan(name, a = {}) {
       args.push(String(a.session));
       return run('fleet-stop', args, t);
     }
-    case 'fleet_rename': return run('fleet-rename', [String(a.session), String(a.new_name)], t);
+    case 'fleet_rename': {
+      // Same rule, same reason it has to be here: bin/fleet-rename's own refusal reached
+      // the phone as a success toast.
+      const nl = notTheLead('fleet_rename', a.session, 'rename');
+      if (nl) return nl;
+      return run('fleet-rename', [String(a.session), String(a.new_name)], t);
+    }
     case 'fleet_project_remove': return run('fleet-project', ['rm', String(a.name)]);
     case 'fleet_worktree_remove': {
       // fleet-clean owns worktree removal AND the rule about which gates --force may
