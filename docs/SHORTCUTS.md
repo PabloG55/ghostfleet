@@ -1,11 +1,16 @@
 # ghostfleet — shortcuts & behavior notes
 
-Living reference of every keybinding and non-obvious behavior in ghostfleet, kept up
-to date as new ones are found or added. Each entry is tagged with where it came from:
+The reference for every keybinding and non-obvious behavior in ghostfleet, kept up to date
+as new ones are found or added. **This file owns them** — the README keeps the pitch, the
+install and the screens, and points here for keys, so there is one place a keystroke is
+described and no second copy to drift against.
 
-- **[README]** — already documented there
-- **[CODE]** — missing (or incomplete) in the README; found by reading
-  `bin/fleet-grid.mjs` / `tmux/cf.tmux.conf` / `bin/ghostfleet` directly
+The provenance tags below are kept because they say how sure we are of each row, which is
+worth knowing. They date from when the README was the primary description of the keys:
+
+- **[README]** — was documented there before this file owned it
+- **[CODE]** — found by reading `bin/fleet-grid.mjs` / `tmux/cf.tmux.conf` /
+  `bin/ghostfleet` directly, rather than from any prose
 - **[CONFIRMED]** — verified live, not just read in the source
 - **[UPSTREAM]** — landed via an upstream commit after this doc was started
 
@@ -16,6 +21,85 @@ Two separate key-handling systems, and it matters which one you're in:
   the grid / the pickers* — no tmux involved there, it reads stdin directly.
 
 ---
+
+## 0. The handful that covers almost everything
+
+The handful of keys that cover almost everything you'll do — switching projects, entering a
+worktree, creating a new one. Everything else — scheduling, cycling, per-session settings, and every key either screen
+answers — is in the numbered sections below.
+
+`` ` `` (backtick) is the universal **back** everywhere below — it steps out one level, mirroring
+detach. `q` does the same on the grid. The levels are
+
+```
+Projects  →  master  →  the grid  →  a session
+```
+
+and one **back** always steps up exactly one of them, *however you got in* — jump straight into a
+session with `Ctrl-f 1 1` and backing out still walks you through that project's grid and master.
+`Ctrl-p` is the express lane when you did mean to leave the project entirely. **Projects** is the
+root: fully exiting to the shell takes **`Ctrl-C` twice** (a single stray key can't drop the whole
+control plane).
+
+### Projects — pick what to work on
+
+| key | does |
+| --- | --- |
+| `↑↓←→` / `hjkl` | move |
+| `⏎` | open that project's **Master Claude** |
+| `Ctrl-s` | skip master, go **straight to that project's grid** |
+| `Ctrl-t` / `Ctrl-n` | a **terminal / editor** at that project's root, without booting its master first |
+| `Ctrl-x` | that project's **stack** screen |
+| `+ add project` → `⏎` | browse to a root folder that holds your checkouts/worktrees |
+| `x` | remove a project from the list (sessions + history untouched) |
+| digit `1`-`9` | jump straight to the project at that position |
+
+### The grid — switching between worktrees, creating and deleting them
+
+| key | does |
+| --- | --- |
+| `↑↓←→` / `hjkl` | move |
+| `⇧h` `⇧j` `⇧k` `⇧l` | **reorder** the selected card (persisted — see below) |
+| `⏎` | enter the selected card full-screen |
+| a **`· FREE`** card (grey) | a worktree with no live session — `⏎` attaches directly, no prompt |
+| `n` | new session on a checkout — lands on a **naming screen** (edit or accept the suggested name), then resumes if that checkout already has a conversation |
+| `N` | same, but the conversation is **forced blank** |
+| `w` | **new worktree** — a fresh checkout on its own branch, with a session started in it (below) |
+| `t` / `Ctrl-x` | the **stack** — several sessions on screen at once, across projects (below) |
+| `Ctrl-t` / `Ctrl-n` | a **terminal / editor tab** on the selected card's folder (below) |
+| `x` | kill the session — or, on a `· FREE` card, **remove that worktree** (asks `y` to confirm) |
+| `,` then `l` | **label** the session — the card is titled whatever you type, the session keeps its name |
+| `q` / `` ` `` | back to master |
+| digit `1`-`9` | jump straight to the card at that position |
+
+**The second line names the worktree**, with the branch appended only when it says
+something different — `doc-verify-stepper · acord-document-verification`, or just
+`billing-retry` when the two match. It used to read *branch or folder*, so the branch
+always won and the checkout a session was actually sitting in never appeared.
+
+**A label is display only.** `,` then `l` titles a card whatever you like — *"PR 964 doc
+verify"* — while the tmux session keeps its name. That separation is deliberate: the
+session name is what `fleet-send` addresses, what the `Ctrl-f` chord counts, and what
+`fleet-rename` keeps equal to the worktree's folder for the rest of the fleet. So a
+labelled card shows **`<session> · <worktree>`** underneath, because a card titled
+*"PR 964 doc verify"* otherwise tells you nothing about what to type. Empty clears it.
+
+**Reordering matters more than it looks.** The card order *is* the fleet's numbering: the digit
+printed on a card, `1`-`9`, `Ctrl-f <project> <session>` and `⇧←→` cycling all count the same
+list. Move a card and every one of them follows it, so the worker you keep coming back to can
+live at `1`. The order is saved per fleet and survives leaving the grid.
+
+`w` asks for a name, a branch (defaults to the name) and a base ref, then hands the job to
+`fleet-spawn` — so the new branch is cut from the *right* place (it prefers the remote tip when
+your local ref is behind, and your local one when it's ahead), `node_modules` is symlinked in so
+lint and tests run, and you land in the session. `x` on a `· FREE` card removes a worktree's
+checkout; the **branch is left alone**, and a dirty tree is refused until you confirm again with
+`f`. From a lead session the same jobs are `fleet-spawn` and `git worktree remove` — see
+[ORCHESTRATION.md](ORCHESTRATION.md).
+
+The rest, in depth: the **stack** is §3b, everything *inside* a session — the
+prefix, tabs, drag-to-copy, the `Ctrl-f` jump table — is §1, and the screens the
+grid opens (settings, the checkout picker, scheduling) are §2 and §3.
 
 ## 1. Inside a session (tmux attached) — `tmux/cf.tmux.conf`
 
@@ -200,7 +284,7 @@ explaining it's a keyboard-navigable mini file browser.
 | `↑↓←→` / `hjkl` | move selection | README |
 | `⇧h` `⇧j` `⇧k` `⇧l` (`H J K L`) | **reorders** the selected session's card (persisted per fleet — see below) | README |
 | `⏎` | enters the selected session in full | README |
-| `n` | new session on a checkout — **resumes** if a conversation already exists there | README + [CONFIRMED] nuance |
+| `n` | new session on a checkout — lands on the **naming screen** below (edit or accept the suggested name), then **resumes** if a conversation already exists there | README + [CONFIRMED] nuance |
 | `N` | new session, conversation **forced blank** | README + [CONFIRMED] nuance |
 | `w` / `W` | **new worktree** — a form (name · branch · from · agent), then `fleet-spawn --new` creates it and you land in the session (see below) | README |
 | `x` / `X` | asks for confirmation (`y`/`Y`) to kill the session — or, on a `· FREE` card, to **remove that worktree** | README |
