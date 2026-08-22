@@ -26,12 +26,33 @@
 #             it keeps the worktree's current branch; add --branch/--from to CLEAN
 #             it (reset --hard) and rebranch in one step — how leads recycle.
 #   --new     force-create a new worktree even if free ones exist
+#   -s, --socket  the fleet to put the worker on, OVERRIDING $TMUX. See "WHICH
+#             FLEET" below — this is the only way to insist, and it also pins the
+#             socket against owner-routing.
 #
 # A fresh worktree gets the main checkout's node_modules symlinked in (so workers
 # can run lint/typecheck/tests); opt out with CLAUDE_FLEET_LINK_NM=0.
+#
+# WHICH FLEET THE WORKER LANDS ON — two directions, and both exist for a reason.
+#
+#   $TMUX beats $CLAUDE_FLEET_SOCK. The env var can go STALE: a long-running
+#   --resume/--fork Claude carries whatever socket its earlier context exported,
+#   while the tmux server it is actually sitting in cannot be out of date. So for
+#   the ordinary case — a lead session running this by hand — the live server wins.
+#
+#   -s/--socket (or $CLAUDE_FLEET_SOCK_FORCE) beats $TMUX. $TMUX is INHERITED by
+#   anything a fleet session launches, and a program launched that way is not "in"
+#   that fleet in any meaningful sense. Measured: vhs, started from a fleet session
+#   to record `ghostfleet demo`, handed the recorded shell the recorder's socket, so
+#   the grid on screen created a worktree and the worker went onto the RECORDER's
+#   fleet. Nothing errored — the grid drew the new worktree as "· FREE — no session
+#   yet", because the session was real and simply on a socket that grid never reads.
+#   An explicit socket also pins against route_to_owner below: a caller that names
+#   the fleet has said the last word, and a silent re-route is the same class of bug.
 set -uo pipefail
 
 NAME=""; BRANCH=""; BRANCH_SET=0; FROM=""; PROMPT=""; MODEL=""; REUSE=""; NEW=0
+SOCK_FORCE="${CLAUDE_FLEET_SOCK_FORCE:-}"
 AGENT="${CLAUDE_FLEET_AGENT:-claude}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,6 +63,7 @@ while [ $# -gt 0 ]; do
     --agent)  AGENT="${2:?}";  shift 2 ;;
     --reuse)  REUSE="${2:?}";  shift 2 ;;
     --new)    NEW=1;           shift ;;
+    -s|--socket) SOCK_FORCE="${2:?}"; shift 2 ;;
     -*) echo "fleet-spawn: unknown option $1" >&2; exit 1 ;;
     *)  [ -z "$NAME" ] && { NAME="$1"; shift; } || { echo "fleet-spawn: unexpected arg $1" >&2; exit 1; } ;;
   esac
@@ -54,7 +76,16 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # STALE CLAUDE_FLEET_SOCK from an earlier context. Only trust it when it names a
 # cf-* (fleet) server. (route_to_owner below still refines this by repo owner.)
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-[ -n "$SOCK" ] || { echo "fleet-spawn: no fleet socket (run inside a fleet session, or export CLAUDE_FLEET_SOCK)" >&2; exit 1; }
+# ...and an EXPLICIT socket beats both, because $TMUX is inherited by anything a
+# fleet session launches (see "WHICH FLEET" in the header). PINNED, so route_to_owner
+# leaves it alone as well: a caller that named the fleet gets the fleet it named.
+if [ -n "$SOCK_FORCE" ]; then
+  case "$SOCK_FORCE" in
+    *[!A-Za-z0-9._-]*) echo "fleet-spawn: -s '$SOCK_FORCE' is not a tmux socket name" >&2; exit 1 ;;
+  esac
+  SOCK="$SOCK_FORCE"
+fi
+[ -n "$SOCK" ] || { echo "fleet-spawn: no fleet socket (run inside a fleet session, or export CLAUDE_FLEET_SOCK, or pass -s <socket>)" >&2; exit 1; }
 command -v git  >/dev/null 2>&1 || { echo "fleet-spawn: git required"  >&2; exit 1; }
 command -v tmux >/dev/null 2>&1 || { echo "fleet-spawn: tmux required" >&2; exit 1; }
 
@@ -159,8 +190,8 @@ CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 # their status/nudges report to the wrong project. A worktree's project ROOT is the
 # parent of its repo (siblings live under it); match that against the projects
 # configs and switch to the owner's socket + config dir. No match → keep ambient.
-route_to_owner() {
-  local root="$1" cfg="" got="" name="" prof="" osock="" ocfg=""
+project_at() {                     # <path> -> "<name>\t<profile>" of the project registered there
+  local root="$1" cfg="" got=""
   [ -n "$root" ] || return 0
   for cfg in "$HOME/.config/ghostfleet/projects" "$HOME"/.config/ghostfleet/projects.*; do
     [ -f "$cfg" ] || continue
@@ -175,8 +206,29 @@ route_to_owner() {
     got="$(awk -F'\t' -v r="$root" -v home="$HOME" '
       /^[[:space:]]*#/ || NF<2 { next }
       { p=$2; sub(/^~/, home, p); if (p==r) { print $1 "\t" ($3==""?"work":$3); exit } }' "$cfg")"
-    [ -n "$got" ] && break
+    [ -n "$got" ] && { printf '%s\n' "$got"; return 0; }
   done
+  return 0
+}
+# TWO PATHS TRIED, PARENT FIRST, because a project is registered either way and the two
+# conventions used to contradict each other (docs/OPERATIONS.md, "Two ways to register a
+# project"):
+#   <repo>'s PARENT  the registered path is a CONTAINER of checkouts — the only
+#                    convention this understood
+#   <repo> itself    the registered path IS the repo, which fleet-grid.mjs mainRepo()
+#                    wants. That matched nothing here, so pointing the path at the repo
+#                    silently kept the ambient socket: one convention's fix was the
+#                    other's bug, and you could not satisfy both.
+# Parent first keeps every existing routing decision byte-for-byte — the repo-itself
+# probe only ever answers where there was NO answer before. A repo registered as its own
+# project INSIDE a registered container still routes to the container, which is the
+# pre-existing behaviour and not something to change under anyone by accident.
+route_to_owner() {
+  local got="" name="" prof="" osock="" ocfg=""
+  # -s said which fleet. Re-routing it would make "I mean it" advice.
+  [ -z "$SOCK_FORCE" ] || return 0
+  got="$(project_at "$(dirname "$GITROOT")")"                 # the container convention
+  [ -n "$got" ] || got="$(project_at "$GITROOT")"             # ...else the repo-itself one
   [ -n "$got" ] || return 0                                   # unknown repo → keep ambient (safe)
   name="${got%%	*}"; prof="${got##*	}"
   case "$prof" in work|default) osock="cf-$name"; ocfg="$HOME/.claude" ;; *) osock="cf-$prof-$name"; ocfg="$HOME/.claude-$prof" ;; esac
@@ -185,7 +237,7 @@ route_to_owner() {
     SOCK="$osock"; CFG_DIR="$ocfg"
   fi
 }
-route_to_owner "$(dirname "$GITROOT")"
+route_to_owner
 
 # who's live where — so we can tell free worktrees from occupied ones (same test
 # as fleet-worktrees: a worktree is FREE = no live session on it + clean tree).
@@ -240,6 +292,68 @@ free_worktrees_local() {               # fallback: this repo only, the pre-cross
         [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || continue # dirty -> not free
         printf '%s (%s, clean)\n' "${wt##*/}" "$br"
       done
+}
+
+# REFUSE A BRANCH NAME GIT ALREADY READS AS A REF, BEFORE ANYTHING IS CREATED.
+#
+# git resolves a bare name as $GIT_DIR/<name> BEFORE refs/heads/<name>, and the git dir
+# is a shared drawer that tools drop things in — opencode writes $GIT_DIR/opencode. So
+# once a worker called `opencode` has run, that name resolves as BOTH the stray file and
+# refs/heads/opencode, and `git worktree add <path> -b opencode` dies with
+#
+#     warning: refname 'opencode' is ambiguous.
+#     fatal: invalid reference: opencode
+#
+# AFTER creating the branch. Half-succeeded, every time, and the leftover branch is
+# invisible until someone goes looking: no worktree, no session, and a repo that needs
+# hand cleanup before the same name will work again. Slashed names do it too, via
+# $GIT_DIR/feat/x.
+#
+# Only content git can PARSE as a ref makes the name ambiguous, and that is what keeps
+# this off git's own files: `config` and `packed-refs` live in the same directory, and a
+# branch called `config` is perfectly fine because `[core]` is not a ref. Testing the
+# CONTENT rather than mere existence is the difference between a guard and a nuisance.
+#   Both git dirs, because a linked worktree has its own ($GIT_DIR/worktrees/<name>) and
+# an agent running IN the worktree writes there, not into the common dir.
+gitdir_ref_collision() {           # <repo-dir> <branch> -> prints the colliding path
+  local dir="$1" br="$2" gd="" p="" first=""
+  [ -n "$br" ] || return 1
+  for gd in "$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null)" \
+            "$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; do
+    [ -n "$gd" ] || continue
+    p="$gd/$br"
+    [ -f "$p" ] || continue
+    # `|| true`, NOT `|| first=""`: read returns non-zero on a file with no trailing
+    # newline and still assigns what it read, so clearing on failure would let exactly
+    # the sloppiest writers through — and a marker file written without a newline is a
+    # perfectly ordinary thing for a tool to leave behind.
+    IFS= read -r first < "$p" || true
+    first="${first%$'\r'}"
+    if [[ $first =~ ^ref:[[:space:]] ]] || [[ $first =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+      printf '%s\n' "$p"; return 0
+    fi
+  done
+  return 1
+}
+#   THE FIXES COME FIRST, the explanation after. fleet-grid.mjs shows the opening lines
+# of a refusal in a fixed-height block on the new-worktree form (spawnFailLines), so a
+# message that diagnoses for six lines and then advises is a message whose advice the
+# form throws away. That is the bug this whole change set is about; not repeating it here.
+assert_branch_nameable() {         # <repo-dir> <branch> — refuses, creating nothing
+  local dir="$1" br="$2" hit=""
+  hit="$(gitdir_ref_collision "$dir" "$br")" || return 0
+  { echo "fleet-spawn: '$br' already resolves as a ref — a file in the git dir has that exact name:"
+    echo "      ${hit/#$HOME/~}"
+    echo "  Use another branch name (the worktree can still be called '$NAME'):"
+    echo "      fleet-spawn $NAME --branch ${br}-wt"
+    echo "  Or move that file aside, if it is a tool's leftover and not something you need:"
+    echo "      mv ${hit/#$HOME/~} ${hit/#$HOME/~}.bak"
+    echo
+    echo "  git looks a bare name up in the git dir BEFORE refs/heads/, so 'worktree add"
+    echo "  … $br' dies on 'invalid reference: $br' AFTER creating the branch. Nothing"
+    echo "  was created here. (opencode writes \$GIT_DIR/opencode — which is how a worker"
+    echo "  named after its own agent poisons that name for good.)"; } >&2
+  exit 1
 }
 
 # Resolve --from to a concrete base ref, RESPECTING LOCAL commits. Echoes the ref
@@ -334,6 +448,9 @@ if [ -n "$REUSE" ]; then
   [ -z "$s" ] || { echo "fleet-spawn: worktree '$REUSE' is busy (session '$s'); pick a FREE one (fleet-worktrees)" >&2; exit 1; }
   if [ "$BRANCH_SET" = 1 ] || [ -n "$FROM" ]; then       # recycle: clean + rebranch in one step
     [ -n "$BRANCH" ] || BRANCH="$NAME"
+    # BEFORE the reset --hard: a recycle throws the tree away, and doing that only to
+    # fail on the checkout is the same half-done state the guard exists to prevent.
+    assert_branch_nameable "$WT" "$BRANCH"
     base="$(resolve_base "$FROM")"
     git -C "$WT" reset --hard >/dev/null 2>&1
     git -C "$WT" clean -fd   >/dev/null 2>&1
@@ -352,6 +469,10 @@ elif [ -e "$WT" ]; then
   BRANCH="$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "${BRANCH:-$NAME}")"
 else
   [ -n "$BRANCH" ] || BRANCH="$NAME"
+  # FIRST, before the free-worktree offer and before any mkdir: a name git already reads
+  # as a ref cannot be fixed by reusing or by --new, so hearing about it now saves a
+  # round trip through advice that cannot work.
+  assert_branch_nameable "$GITROOT" "$BRANCH"
   # about to CREATE a new worktree — reuse a free one first if any exist (unless --new)
   if [ "$NEW" != 1 ]; then
     fw="$(free_worktrees)"

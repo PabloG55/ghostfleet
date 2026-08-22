@@ -260,14 +260,43 @@ remember_agent() {
   CLAUDE_FLEET_DIR="$CFG_DIR/fleet" "$BIN_DIR/fleet-agent" set -s "$SOCK" "$1" "$2" 2>/dev/null || true
 }
 
+# WHERE MASTER OPENS: the project's main checkout, from a registered path that is EITHER
+# the repo or a container of checkouts. Three steps, and the third is a scan — the two
+# conventions and what each one costs are written up in docs/OPERATIONS.md, "Two ways to
+# register a project". Two other places walk these same steps (fleet-grid.mjs mainRepo(),
+# fleet-dispatch.mjs checkoutOf()) and the suite pins all three together, because
+# "which checkout is this project" cannot have three answers.
+#
+# A LINKED WORKTREE IS A REPO TOO, and must not win the scan. git gives a worktree a
+# .git FILE and a real checkout a .git DIRECTORY; the scan asked `test -e`, in readdir
+# order, so on a container root whose worktrees are siblings of its clones it could hand
+# back a worktree — and master opened in a worktree cannot spawn anything (fleet-spawn
+# refuses nesting), so every `w` from its grid fails for a reason nothing on screen
+# explains. Prefer a directory, sort so the answer is the same one twice, and fall back
+# to a worktree only when the project genuinely has nothing else.
+#   A SORTED GLOB, not `find`. The scan was `find … | head -1`, whose order is the
+# filesystem's: on APFS it does not even follow creation order, so which checkout a
+# container root resolved to was not a decision anybody had made. A glob is sorted by
+# the shell, which is also what node's readdir gives the other two copies (libuv
+# alphasorts), so the three now walk the same list in the same order.
+master_checkout() {                # <project-root> <project-name> -> the checkout to open
+  local root="$1" name="$2" k="" first="" main=""
+  [ -e "$root/.git" ]       && { printf '%s\n' "$root"; return 0; }
+  [ -e "$root/$name/.git" ] && { printf '%s\n' "$root/$name"; return 0; }
+  for k in "$root"/*; do
+    [ -d "$k" ] && [ -e "$k/.git" ] || continue
+    [ -n "$first" ] || first="$k"                  # a worktree will do, if that is all
+    [ -d "$k/.git" ] && { main="$k"; break; }      # ...but a real checkout wins
+  done
+  printf '%s\n' "${main:-${first:-$root}}"
+}
+
 # the "master" lead session runs in the project's main checkout. From inside it,
 # `C-s` (or C-a s) writes a "<socket>.goto" marker (see tmux/cf.tmux.conf) then detaches;
 # we read that marker here to decide where to go next: the grid, or (on a plain
 # `/C-a g detach) back to Projects. Sets MASTER_GOTO for the caller.
 enter_master() {
-  local main="$PROJECT_ROOT/$PROJECT"
-  [ -d "$main/.git" ] || main="$(find "$PROJECT_ROOT" -maxdepth 1 -type d -exec test -e '{}/.git' ';' -print 2>/dev/null | head -1)"
-  [ -n "$main" ] && [ -d "$main" ] || main="$PROJECT_ROOT"
+  local main; main="$(master_checkout "$PROJECT_ROOT" "$PROJECT")"
   TM has-session -t master 2>/dev/null || \
     remember_agent master "${PROJECT_AGENT:-}"
     TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_AGENT=${PROJECT_AGENT:-}" "exec agent-here master"

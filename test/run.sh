@@ -1221,6 +1221,297 @@ else
   skip "worker nesting guard" "git missing"
 fi
 
+# ── 4a10a1. an explicit socket has to be able to win ─────────────────────────
+# fleet-spawn prefers $TMUX over $CLAUDE_FLEET_SOCK on purpose (a long-running --resume
+# Claude holds a stale env var; the live server it sits in cannot go stale). But that
+# left NO way for a caller to say "this socket, I mean it", and $TMUX is inherited by
+# anything launched from inside a fleet session. Measured: vhs, started from a fleet
+# session to record `ghostfleet demo`, handed the recorded shell the RECORDER's socket,
+# so the grid on screen asked for a worker and fleet-spawn put it on the launching
+# session's fleet. Nothing errored — the grid drew the new worktree as "· FREE — no
+# session yet", because the session was real and simply on a socket that grid never reads.
+#
+# The manifest FILENAME is the witness: fleet-spawn writes "<sock>.manifest.tsv", so it
+# names the socket the run actually chose without racing a session boot.
+#
+# BOTH DIRECTIONS, and the first one matters most: $TMUX must STILL beat the plain env
+# var, or this is the silent precedence flip it was meant not to be.
+group "an explicit socket beats \$TMUX"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  XS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$XS/home/.config/ghostfleet" "$XS/stub"
+  printf '#!/usr/bin/env bash\nsleep 60\n' > "$XS/stub/agent-here"; chmod +x "$XS/stub/agent-here"
+  # a $TMUX that names a cf-* server, formatted the way tmux does: <socket>,<pid>,<n>
+  FAKE_TMUX="$TMUX_TMPDIR/cf-xsamb,1,0"
+  sockchosen() {                 # $1 = env assignment (or ""), rest = extra spawn args
+    local envs="$1"; shift
+    rm -rf "$XS/repo" "$XS/fleet" "$XS/wt"; mkdir -p "$XS/fleet"
+    git init -q -b main "$XS/repo" 2>/dev/null
+    git -C "$XS/repo" config user.email t@t; git -C "$XS/repo" config user.name t
+    : > "$XS/repo/f"; git -C "$XS/repo" add -A; git -C "$XS/repo" commit -qm init 2>/dev/null
+    ( cd "$XS/repo" && HOME="$XS/home" TMUX="$FAKE_TMUX" CLAUDE_FLEET_SOCK=cf-xsenv \
+      CLAUDE_FLEET_DIR="$XS/fleet" PATH="$XS/stub:$ROOT/bin:$PATH" \
+      env ${envs:+$envs} "$ROOT/bin/fleet-spawn" wt --new "$@" ) >/dev/null 2>&1
+    for s in cf-xsamb cf-xsenv cf-xsflag cf-xsforce cf-other; do
+      tmux -L "$s" kill-server 2>/dev/null
+    done
+    ( cd "$XS/fleet" && ls *.manifest.tsv 2>/dev/null | sed 's/\.manifest\.tsv$//' )
+  }
+  is "no override: \$TMUX still wins"   "cf-xsamb"   "$(sockchosen '')"
+  is "-s wins over \$TMUX"              "cf-xsflag"  "$(sockchosen '' -s cf-xsflag)"
+  is "--socket is the same flag"        "cf-xsflag"  "$(sockchosen '' --socket cf-xsflag)"
+  is "the env override wins too"        "cf-xsforce" "$(sockchosen CLAUDE_FLEET_SOCK_FORCE=cf-xsforce)"
+  is "-s beats the env override"        "cf-xsflag"  \
+     "$(sockchosen CLAUDE_FLEET_SOCK_FORCE=cf-xsforce -s cf-xsflag)"
+  # An explicit socket must survive route_to_owner too, or "I mean it" is a suggestion.
+  # Registering this repo's PARENT as another project is what would otherwise move it.
+  printf 'other\t%s\twork\n' "$XS" > "$XS/home/.config/ghostfleet/projects"
+  is "route_to_owner does not move it"  "cf-xsflag"  "$(sockchosen '' -s cf-xsflag)"
+  # ...and the other direction: with no explicit socket, owner routing still happens
+  is "...but it still routes otherwise" "cf-other"   "$(sockchosen '')"
+  rm -f "$XS/home/.config/ghostfleet/projects"
+  rm -rf "$XS"
+else
+  skip "explicit spawn socket" "git or tmux missing"
+fi
+
+# The grid is the caller that was actually bitten, and reproducing it needs no props: a
+# tmux server whose socket happens to start with "cf-" is all $TMUX has to say for
+# fleet-spawn to prefer it, and the grid runs in a pane. So run the real TUI on a pane of
+# cf-gpsn, point it at a fleet on cf-gpin, press `w` and create — the manifest filename
+# says which fleet the worker actually landed on.
+group "the grid's create lands on the grid's own fleet"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  GP="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$GP/fleet" "$GP/stub"
+  printf '#!/usr/bin/env bash\nsleep 60\n' > "$GP/stub/agent-here"; chmod +x "$GP/stub/agent-here"
+  git init -q -b main "$GP/repo" 2>/dev/null
+  git -C "$GP/repo" config user.email t@t; git -C "$GP/repo" config user.name t
+  : > "$GP/repo/f"; git -C "$GP/repo" add -A; git -C "$GP/repo" commit -qm init 2>/dev/null
+  tmux -L cf-gpin kill-server 2>/dev/null; tmux -L cf-gpsn kill-server 2>/dev/null
+  tmux -L cf-gpin new-session -d -s master -c "$GP/repo" 'sleep 90' 2>/dev/null
+  # a launcher script, not an inline command: PATH has to be EXPANDED at run time and a
+  # $PATH inside tmux's own quoting is the sort of thing that silently ends up literal,
+  # which reads back as "the grid never started" rather than as a quoting mistake
+  { echo '#!/usr/bin/env bash'
+    echo "export CLAUDE_FLEET_ROOT='$GP/repo' CLAUDE_FLEET_DIR='$GP/fleet'"
+    echo "export PATH=\"$GP/stub:$ROOT/bin:\$PATH\""
+    echo "exec node '$ROOT/bin/fleet-grid.mjs' cf-gpin >/dev/null 2>&1"; } > "$GP/launch"
+  chmod +x "$GP/launch"
+  tmux -L cf-gpsn new-session -d -x 120 -y 40 "$GP/launch" 2>/dev/null
+  sleep 2
+  tmux -L cf-gpsn send-keys w 2>/dev/null;      sleep 1
+  tmux -L cf-gpsn send-keys wkr 2>/dev/null;    sleep 1
+  tmux -L cf-gpsn send-keys Enter 2>/dev/null;  sleep 6
+  tmux -L cf-gpsn kill-server 2>/dev/null; tmux -L cf-gpin kill-server 2>/dev/null
+  is "the worktree really got made" "1" "$([ -d "$GP/wkr" ] && echo 1 || echo 0)"
+  is "the worker is on cf-gpin"     "cf-gpin" \
+     "$( cd "$GP/fleet" && ls *.manifest.tsv 2>/dev/null | sed 's/\.manifest\.tsv$//' )"
+  rm -rf "$GP"
+else
+  skip "grid create socket" "git, tmux or node missing"
+fi
+
+# ── 4a10a2. a branch name git already resolves as a root ref ─────────────────
+# git looks a bare name up as $GIT_DIR/<name> BEFORE refs/heads/<name>, and tools drop
+# files in the git dir: opencode writes $GIT_DIR/opencode. So once a worker called
+# `opencode` has run, that name resolves as BOTH the stray file and refs/heads/opencode,
+# and `git worktree add <path> -b opencode` dies with `fatal: invalid reference: opencode`
+# — AFTER creating the branch. Half-succeeded: a branch nobody asked for, no worktree,
+# and a repo needing hand cleanup. A slashed name (.git/feat/x) does it too.
+#
+# Only content git can PARSE as a ref does this, which is what keeps the guard off git's
+# own files: a branch called `config` is fine, because `[core]` is not a ref.
+group "a stray ref in the git dir is refused up front"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  RG="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$RG/home/.config/ghostfleet" "$RG/stub" "$RG/fleet"
+  printf '#!/usr/bin/env bash\nsleep 60\n' > "$RG/stub/agent-here"; chmod +x "$RG/stub/agent-here"
+  BOGUS=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+  mkrg() {                       # a fresh repo; the case then drops what it likes in .git
+    rm -rf "$RG/repo" "$RG"/wt* "$RG/opencode" "$RG/config"
+    git init -q -b main "$RG/repo" 2>/dev/null
+    git -C "$RG/repo" config user.email t@t; git -C "$RG/repo" config user.name t
+    : > "$RG/repo/f"; git -C "$RG/repo" add -A; git -C "$RG/repo" commit -qm init 2>/dev/null
+  }
+  spawnrg() {                    # $@ = fleet-spawn args -> what it said
+    ( cd "$RG/repo" && HOME="$RG/home" env -u TMUX CLAUDE_FLEET_SOCK=cfstrayref \
+      CLAUDE_FLEET_DIR="$RG/fleet" PATH="$RG/stub:$ROOT/bin:$PATH" \
+      "$ROOT/bin/fleet-spawn" "$@" --new 2>&1 )
+    tmux -L cfstrayref kill-server 2>/dev/null
+  }
+  # THE REASON THE GUARD EXISTS, proven rather than asserted: git really does create the
+  # branch and then refuse. If a future git stops doing this, that is worth a red line.
+  mkrg; printf '%s\n' "$BOGUS" > "$RG/repo/.git/opencode"
+  graw="$(git -C "$RG/repo" worktree add "$RG/wtraw" -b opencode 2>&1)"; grc=$?
+  is "git itself fails on it"           "1" "$([ "$grc" = 0 ] && echo 0 || echo 1)"
+  is "...saying invalid reference"      "1" "$(printf '%s' "$graw" | grep -c 'invalid reference' || true)"
+  is "...with the branch already made"  "1" "$(git -C "$RG/repo" branch --list opencode | grep -c opencode || true)"
+  is "...and no worktree"               "0" "$([ -e "$RG/wtraw" ] && echo 1 || echo 0)"
+
+  mkrg; printf '%s\n' "$BOGUS" > "$RG/repo/.git/opencode"
+  out="$(spawnrg opencode)"
+  is "spawn refuses the collision"      "1" "$(printf '%s' "$out" | grep -c 'already resolves as a ref' || true)"
+  # named at least once — the message points at it twice, once to say what is in the way
+  # and once in the `mv` that clears it
+  is "...naming the file"               "1" \
+     "$([ "$(printf '%s' "$out" | grep -c '\.git/opencode' || true)" -ge 1 ] && echo 1 || echo 0)"
+  is "...and naming a way out"          "1" "$(printf '%s' "$out" | grep -c -- '--branch' || true)"
+  is "...creating NO branch"            "0" "$(git -C "$RG/repo" branch --list opencode | grep -c opencode || true)"
+  is "...and NO worktree"               "0" "$([ -e "$RG/opencode" ] && echo 1 || echo 0)"
+  # a slashed branch name collides the same way, so the guard cannot only look at a leaf
+  mkrg; mkdir -p "$RG/repo/.git/feat"; printf '%s\n' "$BOGUS" > "$RG/repo/.git/feat/x"
+  out2="$(spawnrg wtb --branch feat/x)"
+  is "a slashed branch too"             "1" "$(printf '%s' "$out2" | grep -c 'already resolves as a ref' || true)"
+  # ── the directions that prove it is not "refuse anything in the git dir" ──
+  mkrg; printf 'not a ref at all\n' > "$RG/repo/.git/opencode"
+  out3="$(spawnrg opencode)"
+  is "unparseable content is no ref"    "0" "$(printf '%s' "$out3" | grep -c 'already resolves as a ref' || true)"
+  is "...so that worktree IS created"   "1" "$([ -d "$RG/opencode" ] && echo 1 || echo 0)"
+  # git's OWN files share the git dir, and a branch named after one of them is fine
+  mkrg; out4="$(spawnrg config)"
+  is "a branch called 'config' is fine" "0" "$(printf '%s' "$out4" | grep -c 'already resolves as a ref' || true)"
+  is "...and really gets a worktree"    "1" "$([ -d "$RG/config" ] && echo 1 || echo 0)"
+  rm -rf "$RG"
+else
+  skip "git-dir ref collision" "git or tmux missing"
+fi
+
+# ── 4a10a3. the form must show the ADVICE, not the escape hatch ──────────────
+# createWorktree kept `.split('\n').filter(Boolean).pop()` of fleet-spawn's stderr — the
+# LAST line. The nested-worktree refusal is nine lines and ends with "Override
+# deliberately with CLAUDE_FLEET_ALLOW_NESTED=1", so the form showed the one thing you
+# must not do and threw away "Really want another worker? Run it from the main checkout"
+# along with both commands that fix it.
+group "the new-worktree form keeps the advice"
+if command -v git >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  AD="$(cd "$(mktemp -d)" && pwd -P)"
+  git init -q -b main "$AD/repo" 2>/dev/null
+  git -C "$AD/repo" config user.email t@t; git -C "$AD/repo" config user.name t
+  : > "$AD/repo/f"; git -C "$AD/repo" add -A; git -C "$AD/repo" commit -qm init 2>/dev/null
+  git -C "$AD/repo" worktree add -q "$AD/wt-a" -b wt-a 2>/dev/null
+  # Lift the real function out of the grid and feed it the real refusal from the real
+  # command — a fixture of either one is a copy that drifts from what ships.
+  shape() { node -e '
+    const fs=require("fs");
+    const m=fs.readFileSync(process.argv[1],"utf8").match(/^function spawnFailLines\([\s\S]*?^}$/m);
+    if(!m){console.log("NO-spawnFailLines-FOUND");process.exit(0)}
+    const spawnFailLines=eval("("+m[0]+")");
+    let raw=""; process.stdin.on("data",d=>raw+=d)
+      .on("end",()=>console.log(spawnFailLines(raw).join("\n")));
+  ' "$ROOT/bin/fleet-grid.mjs"; }
+  raw="$( cd "$AD/wt-a" && env -u TMUX CLAUDE_FLEET_SOCK=cfadvice "$ROOT/bin/fleet-spawn" nope 2>&1 )"
+  sh="$(printf '%s' "$raw" | shape)"
+  is "keeps 'from the main checkout'"      "1" "$(printf '%s' "$sh" | grep -c 'from the main checkout' || true)"
+  is "keeps the re-branch command"        "1" "$(printf '%s' "$sh" | grep -c 'checkout -B' || true)"
+  is "keeps the spawn-from-there command" "1" "$(printf '%s' "$sh" | grep -c 'fleet-spawn nope' || true)"
+  is "DROPS the override line"            "0" "$(printf '%s' "$sh" | grep -c 'ALLOW_NESTED' || true)"
+  is "leads with what went wrong"         "1" "$(printf '%s' "$sh" | head -1 | grep -c 'ALREADY in a worktree' || true)"
+  is "...without the command's prefix"    "0" "$(printf '%s' "$sh" | head -1 | grep -c 'fleet-spawn:' || true)"
+  is "bounded, so the form cannot grow"   "1" \
+     "$([ "$(printf '%s\n' "$sh" | grep -c .)" -le 6 ] && echo 1 || echo 0)"
+  # the other direction: a ONE-line refusal must still arrive whole, not empty
+  one="$(printf "fleet-spawn: unknown agent 'zz' (known: claude )\n" | shape)"
+  is "a one-line refusal survives"        "1" "$(printf '%s' "$one" | grep -c "unknown agent 'zz'" || true)"
+  rm -rf "$AD"
+else
+  skip "worktree form advice" "git or node missing"
+fi
+
+# The layout half, in the real TUI: the footer must not move when the message does. The
+# pure function above cannot see this, and neither can `node --check`.
+group "the worktree form's footer stays put"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  FT="$(cd "$(mktemp -d)" && pwd -P)"
+  git init -q -b main "$FT/repo" 2>/dev/null
+  git -C "$FT/repo" config user.email t@t; git -C "$FT/repo" config user.name t
+  : > "$FT/repo/f"; git -C "$FT/repo" add -A; git -C "$FT/repo" commit -qm init 2>/dev/null
+  # CLAUDE_FLEET_ROOT at a LINKED WORKTREE is not contrived: that is exactly what
+  # mainRepo()'s child scan handed back on a container root, and it is how the nine-line
+  # refusal reached this form in the first place.
+  git -C "$FT/repo" worktree add -q "$FT/wt-a" -b wt-a 2>/dev/null
+  tmux -L cfftin kill-server 2>/dev/null
+  tmux -L cfftin new-session -d -s master -c "$FT/repo" 'sleep 90' 2>/dev/null
+  formpane() {                   # $1 = a name to type (or "") -> the pane as drawn
+    tmux -L cfftout kill-server 2>/dev/null
+    tmux -L cfftout new-session -d -x 120 -y 40 \
+      "CLAUDE_FLEET_ROOT='$FT/wt-a' CLAUDE_FLEET_DIR='$FT' \
+       node '$ROOT/bin/fleet-grid.mjs' cfftin >/dev/null 2>&1" 2>/dev/null
+    sleep 2
+    tmux -L cfftout send-keys w 2>/dev/null; sleep 1
+    if [ -n "$1" ]; then
+      tmux -L cfftout send-keys "$1" 2>/dev/null; sleep 1
+      tmux -L cfftout send-keys Enter 2>/dev/null; sleep 4
+    fi
+    tmux -L cfftout capture-pane -p 2>/dev/null
+    tmux -L cfftout kill-server 2>/dev/null
+  }
+  footrow() { printf '%s\n' "$1" | grep -n 'create + open' | head -1 | cut -d: -f1; }
+  clean="$(formpane '')"
+  erred="$(formpane nope)"
+  is "the empty form draws a footer"    "1" "$([ -n "$(footrow "$clean")" ] && echo 1 || echo 0)"
+  is "the refusal reached the form"     "1" "$(printf '%s' "$erred" | grep -c 'ALREADY in a worktree' || true)"
+  is "...showing the actionable advice" "1" "$(printf '%s' "$erred" | grep -c 'from the main checkout' || true)"
+  is "...and not the override"          "0" "$(printf '%s' "$erred" | grep -c 'ALLOW_NESTED' || true)"
+  is "the footer did not move"          "$(footrow "$clean")" "$(footrow "$erred")"
+  tmux -L cfftin kill-server 2>/dev/null; rm -rf "$FT"
+else
+  skip "worktree form layout" "git, tmux or node missing"
+fi
+
+# ── 4a10a4. a container root holds worktrees too, and one is not a checkout ──
+# mainRepo() falls back to "the first child directory that is a repo" when the registered
+# path is not itself a repo. `readdir` order is not a preference, and a LINKED WORKTREE
+# has a .git of its own — so on a container root it handed back a worktree, fleet-spawn's
+# nesting guard refused the create, and the form showed only "override this".
+#
+# Both directions: prefer the main checkout, AND still answer when a worktree is
+# genuinely all there is.
+group "a container root resolves to its main checkout"
+if command -v git >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  MR="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$MR/root" "$MR/only"
+  mkmr() { git init -q -b main "$1" 2>/dev/null; git -C "$1" config user.email t@t
+           git -C "$1" config user.name t; : > "$1/f"; git -C "$1" add -A
+           git -C "$1" commit -qm init 2>/dev/null; }
+  mkmr "$MR/src"
+  # THE ORDER IS THE FIXTURE. `awt` is a linked worktree and sorts FIRST; `zmain` is a
+  # real checkout and sorts last. All three implementations now walk a SORTED list
+  # (node's readdir alphasorts; the shell copy globs), so the worktree is what each of
+  # them reaches first and the preference below is the only thing standing between it
+  # and the wrong answer. Rename either directory and this fixture proves nothing.
+  git -C "$MR/src" worktree add -q "$MR/root/awt" -b awt 2>/dev/null
+  mkmr "$MR/root/zmain"
+  git -C "$MR/src" worktree add -q "$MR/only/wt" -b onlywt 2>/dev/null
+  mainrepo() { CLAUDE_FLEET_ROOT="$1" CLAUDE_FLEET_DIR="$MR" \
+    node "$ROOT/bin/fleet-grid.mjs" cf-mrx --checkouts 2>/dev/null \
+    | sed -n 's/^main repo: //p'; }
+  is "picks the checkout, not a worktree" "$MR/root/zmain" "$(mainrepo "$MR/root")"
+  is "a registered repo is itself"        "$MR/root/zmain" "$(mainrepo "$MR/root/zmain")"
+  # nothing but a worktree under it: still answer, rather than going silent
+  is "a lone worktree is still an answer" "$MR/only/wt"    "$(mainrepo "$MR/only")"
+  # THREE COPIES OF THESE STEPS, and "which checkout is this project" cannot have three
+  # answers: the grid draws it, a lead's fleet_spawn RUNS there, and master OPENS there.
+  # A disagreement is a worker sitting on a checkout nobody is looking at. So every case
+  # above is asked of all three, on the same fixture.
+  mcpof() { node -e '
+    import(process.argv[1]+"/mcp/fleet-dispatch.mjs").then(m =>
+      console.log(m.checkoutOf({ path: process.argv[2], name: process.argv[3] })));
+  ' "$ROOT" "$1" "${2:-nosuch}"; }
+  eval "$(sed -n '/^master_checkout() {/,/^}/p' "$ROOT/bin/ghostfleet")"
+  is "the MCP's copy agrees"              "$MR/root/zmain" "$(mcpof "$MR/root")"
+  is "and master opens the same one"      "$MR/root/zmain" "$(master_checkout "$MR/root" nosuch)"
+  is "...honouring <root>/<name> first"   "$MR/root/zmain" "$(master_checkout "$MR/root" zmain)"
+  is "...and still answering for one wt"  "$MR/only/wt"    "$(master_checkout "$MR/only" nosuch)"
+  # A REGISTERED PATH IS TAKEN AT ITS WORD, even when it names a worktree — the grid
+  # already does that (isRepo, not "is a checkout"), and master has to open where the
+  # grid thinks the project is or `w` and the cards describe different repos. The shell
+  # copy used to differ here: its scan emitted the start point first with `test -e`, so
+  # a container root that WAS a worktree resolved to a clone inside it instead.
+  is "a worktree root is honoured: grid"  "$MR/only/wt" "$(mainrepo "$MR/only/wt")"
+  is "...and master"                      "$MR/only/wt" "$(master_checkout "$MR/only/wt" nosuch)"
+  is "...and the MCP"                     "$MR/only/wt" "$(mcpof "$MR/only/wt")"
+  rm -rf "$MR"
+else
+  skip "container root resolution" "git or node missing"
+fi
+
 # ── 4a10b. the built-in EnterWorktree must not move a fleet session ──────────
 # Claude Code's own worktree tool CREATES the tree and RELOCATES THE CALLING SESSION
 # into it. Told "start a worktree and open a PR", a master reached for it: the worktree
