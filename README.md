@@ -39,10 +39,15 @@ debugging — and that most wrappers get wrong:
 
 | requirement | why |
 | --- | --- |
+| `git` | worktrees **are** the isolation model — a worker is a checkout on its own branch. `fleet-spawn` refuses to run without it |
+| `claude` ([Claude Code](https://github.com/anthropics/claude-code)) | what a session runs by default, and what the pane detectors are written against |
 | `node` (v18+) | the grid is a zero-npm-dependency Node TUI |
 | `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below) |
 | `jq` | the status/notification hook parses its JSON payload with it |
 | macOS, Linux, or **Windows via WSL2** | sessions are tmux servers, and tmux is POSIX-only — see the native-Windows note below |
+| `codex` / `opencode` (optional) | alternative agents, chosen per worktree on the `w` form. Their pane signals are detected separately — see [docs/multi-agent-sessions.md](docs/multi-agent-sessions.md) |
+| `$EDITOR` (optional, default `nvim .`) | what `Ctrl-n`'s editor tab opens. Any editor works — override with `CLAUDE_FLEET_EDITOR`. No particular Neovim distribution is involved; if `nvim` isn't installed, set the variable to what you use |
+| `tailscale` (optional) | **only** for the phone client, and only off-LAN: it is how `fleet-serve` is reachable without exposing a port — see [docs/mobile.md](docs/mobile.md) |
 | `zellij` (optional) | not required, but the included layout gives you one pane that frees `Ctrl-s`/arrows from its own bindings |
 | `terminal-notifier` + [AeroSpace](https://github.com/nikitabobko/AeroSpace) (optional, macOS) | for **clickable** notifications that jump straight to the fleet — see [Notifications](#notifications) |
 
@@ -54,22 +59,23 @@ me, so file an issue if something bites.)*
 
 ```bash
 brew install jq             # macOS — apt/dnf/pacman on Linux (tmux missing? installer offers to get it)
-npx ghostfleet              # installs, no clone needed
-ghostfleet
-```
-
-Prefer to clone the repo (e.g. to develop against it)?
-
-```bash
 git clone https://github.com/PabloG55/ghostfleet.git
 cd ghostfleet
 ./install.sh
+ghostfleet
 ```
 
-Both run the exact same `install.sh` — `npx ghostfleet` just fetches the package and
-runs it for you, so there's nothing left checked out afterward (if you later want to
-edit ghostfleet itself, switch to the clone: `cf-sync` needs a real repo to sync
-from, and npx's cache isn't one).
+**Do not run `npx ghostfleet`.** That name on npm belongs to an unrelated project —
+`ghostfleet@0.0.2`, published by someone else, and confusingly close in pitch ("fleets of
+disposable AI agents in your own cloud"). Running it installs a stranger's package, not
+this one. This repo's `package.json` still claims that name and so cannot be published
+under it; the shim it points at (`bin/npx-install.mjs`) is fine and just runs `install.sh`,
+so the only thing missing is a name that is actually free. `ghostfleet-cli`,
+`claude-ghostfleet`, `ghost-fleet` and `gfleet` were unclaimed at the time of writing, and
+a scoped `@you/ghostfleet` is always available.
+
+Cloning is also what you want if you intend to edit ghostfleet itself: `cf-sync` syncs the
+runtime **from a real repo**, and an npx cache is not one.
 
 Missing `tmux`? The installer detects it, works out the right package manager for your
 OS (Homebrew, apt, dnf, yum, pacman, zypper, or apk), and asks before running anything
