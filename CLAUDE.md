@@ -37,6 +37,17 @@ takes effect on the next Projects screen. Long-lived processes do NOT:
   Only a NEW session picks it up
 - **tmux bindings** load when the fleet's server is re-sourced (re-entering the project)
 - **zellij keybinds** only apply to a NEW zellij session
+- an **installed PWA** keeps running the old client, and this one lives on another
+  device. The shell is served cache-first (`web/sw.js`), so a phone that already has the
+  app paints the `app.js` it cached and only revalidates behind the paint. Bumping that
+  file's `VERSION` is necessary and NOT sufficient: the bump puts the new bytes in the
+  cache, but only a real navigation parses them, and reopening an installed iOS PWA from
+  the app switcher is a resume, not a navigation. Swipe it away and relaunch. Seen live:
+  the v4 shell was fetched and fully precached one second *after* the page loaded, so the
+  phone went on running the v3 client for the next two minutes with the new bytes already
+  sitting in its cache. Nothing on the phone distinguishes the two — read `fleet-serve`'s
+  request log, where the chat client polls `/api/session` and the pane-first one that
+  preceded it polls `/api/pane`
 
 ## Testing
 

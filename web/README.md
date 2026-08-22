@@ -287,6 +287,15 @@ it was and labels it `⚠ offline — last fetched 9:04p` instead of showing a b
 stale grid with a timestamp beats an error page; a stale grid presented as live would be
 the lie.
 
+Cache-first is also the deploy hazard, and it is the phone that pays it. After a
+`cf-sync` a phone that already has the app runs the `app.js` **it** cached, so the first
+look after a deploy can be the old client — indistinguishable from the fix not working.
+Bumping `sw.js`'s `VERSION` (and the `CLIENT-HASH` the suite pins to it) is what lands the
+new bytes; it does not re-parse a page that is already open, and reopening an installed
+iOS PWA from the app switcher is a resume, not a navigation. Swipe it away and relaunch.
+The tell is on the server, not the phone: the chat client polls `/api/session`, and the
+pane-first client that preceded it polls `/api/pane`.
+
 ## Tests
 
 ```bash
