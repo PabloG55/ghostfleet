@@ -315,6 +315,79 @@ isn't a repo at all — it holds four independent clones, each owning its own wo
 lead saw 2 and was blind to the other 17, so *reuse before proliferate* could never fire
 and every task made another one. `--here` restricts it to the current repo.
 
+**A branch name git already reads as a ref is refused up front.** git resolves a bare
+name as `$GIT_DIR/<name>` *before* `refs/heads/<name>`, and the git dir is a shared
+drawer — opencode writes `$GIT_DIR/opencode`. So after a worker called `opencode` has
+run once, that name is ambiguous, and `git worktree add … -b opencode` dies on
+`fatal: invalid reference: opencode` **after** creating the branch: half-succeeded, no
+worktree, and a stray branch to clean up by hand. `fleet-spawn` now checks before it
+creates anything, names the file, and offers `--branch <other>` or moving the file away.
+Only content git can *parse* as a ref counts, so a branch called `config` is still fine
+— `[core]` is not a ref. **Don't name a worker after its own agent.**
+
+## Two ways to register a project, and what each one costs
+
+A project's `path` (2nd column of the projects file) is read as **either** the repo
+itself **or** a container of checkouts, and three places have to work out which:
+
+| | reads it as | when the path is a repo | when it's a container |
+|---|---|---|---|
+| `enter_master` (`bin/ghostfleet`) | where master opens | the repo | `<root>/<name>`, else a child repo, else the root |
+| `mainRepo()` (`bin/fleet-grid.mjs`) | where `w` runs `fleet-spawn` | the repo | `<root>/<scope>`, else a child repo, else the root |
+| `route_to_owner` (`bin/fleet-spawn`) | which fleet a worker joins | matches the repo | matches the repo's **parent** |
+
+They used to *contradict* each other. `route_to_owner` only ever matched the parent, so
+pointing the path at the repo — which is what `mainRepo()` wants — meant owner-routing
+found nothing and the worker kept whatever socket was ambient. Satisfying one broke the
+other. It now tries the parent first (every previous routing decision is unchanged) and
+then the repo itself, so both conventions route.
+
+**Point it at the repo** when the project *is* one repo. Every step above is then exact,
+and nothing has to guess.
+
+**Point it at the container** when the project is genuinely several clones (superkey is
+four) — that's the only path that can name them all, and `fleet-worktrees` needs it to
+see every clone's worktrees. Two things to know when you do:
+
+- **Name the main checkout after the project.** `<root>/<name>` is step 2 for
+  `enter_master` and `checkoutOf()`; `mainRepo()` uses `CLAUDE_FLEET_SCOPE` for that
+  step, which every real caller sets to the project name — but its fallback is derived
+  from the *socket*, and a non-work profile's socket carries its profile
+  (`cf-personal-galapass` → `personal-galapass`), which is nobody's directory. So a
+  hand-run `fleet-grid.mjs cf-personal-galapass --plain` skips step 2.
+- **Step 3 is a scan, and a linked worktree is a repo too.** It used to return whatever
+  `readdir` yielded first, and on a container root that was a *worktree* — whereupon
+  `fleet-spawn`, run there, correctly refused to spawn a worker from inside a worktree,
+  and the create failed for a reason nothing on screen explained. The scan now sorts and
+  prefers a real checkout (a `.git` **directory**; a worktree's `.git` is a file). Check
+  what it picked with `fleet-grid.mjs <socket> --checkouts`, which prints `main repo:`.
+
+## Putting a worker on a specific fleet
+
+`fleet-spawn` picks the fleet in this order, and both directions exist on purpose:
+
+1. **`-s <socket>`** (or `CLAUDE_FLEET_SOCK_FORCE`) — an explicit socket wins, and is
+   also *pinned*: `route_to_owner` leaves it alone.
+2. **`$TMUX`**, when it names a `cf-*` server — the live tmux server the caller sits in.
+3. **`$CLAUDE_FLEET_SOCK`**.
+
+`$TMUX` beats the env var because the env var goes stale: a long-running
+`--resume`/`--fork` Claude carries whatever socket its earlier context exported, while
+the server it is actually sitting in cannot be out of date.
+
+The explicit override beats `$TMUX` because **`$TMUX` is inherited**, and a program a
+fleet session launched is not "in" that fleet in any useful sense. Measured: `vhs`,
+started from a fleet session to record `ghostfleet demo`, handed the recorded shell the
+*recorder's* socket — so the grid on screen created a worktree and the worker went onto
+the recorder's fleet. Nothing errored. The grid drew the new worktree as
+`· FREE — no session yet`, because the session was real and simply on a socket that grid
+never reads. The grid now passes `-s` for its own `w` creates; `env -u TMUX` still works
+and is still worth having in a recording script.
+
+Cross-project spawns from a lead (`fleet_spawn` with `project:`) deliberately *don't*
+pass `-s`: they run `fleet-spawn` inside the target's checkout and let `route_to_owner`
+find the fleet, which is the mechanism that makes targeting work at all.
+
 ## Updating Claude Code under a fleet
 
 Fleet sessions run with `DISABLE_AUTOUPDATER=1`. Claude Code's background-service

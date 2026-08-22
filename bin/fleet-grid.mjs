@@ -910,6 +910,10 @@ function freeCardLines(w, selected, idx) {
 // ── checkout discovery (for new session) ────────────────────────────────
 const CFG_FILE = path.join(HOME, '.config', 'ghostfleet', 'checkouts');
 const isRepo = p => { try { return fs.existsSync(path.join(p, '.git')); } catch { return false; } };
+// A MAIN checkout, as opposed to a linked worktree: git gives a worktree a .git FILE
+// (`gitdir: …`) and a real clone a .git DIRECTORY. No subprocess, and exact for the one
+// distinction mainRepo() needs — "is this the checkout master lives in, or a leaf".
+const isMainCheckout = p => { try { return fs.statSync(path.join(p, '.git')).isDirectory(); } catch { return false; } };
 // e.g. "myapp-v2" -> "myapp", "api" -> "api", "api-2" -> "api"
 const Zbase = Z.replace(/[-_ ]?v?\d+$/i, '') || Z;
 
@@ -949,9 +953,29 @@ function worktreesOf(repoPath) {
     }).filter(Boolean);
   } catch { return []; }
 }
-// The project's own main checkout — mirrors enter_master's convention in bin/ghostfleet
-// (PROJECT_ROOT/PROJECT, else the first child repo, else PROJECT_ROOT itself) so this
-// agrees with whichever checkout the master session actually opened.
+// The project's own main checkout — the same three steps enter_master walks in
+// bin/ghostfleet (<root>/<name>, else a child repo, else the root itself), so this
+// agrees with whichever checkout the master session actually opened. Both registration
+// conventions land here; docs/OPERATIONS.md, "Two ways to register a project", is the
+// write-up of what each one costs.
+//
+// TWO CAVEATS THE OLD COMMENT PAPERED OVER:
+//
+//   Step 2 is enter_master's `$PROJECT_ROOT/$PROJECT` only when CLAUDE_FLEET_SCOPE is
+//   set. Every real caller sets it (bin/ghostfleet, fleet-serve.mjs, fleet-dispatch.mjs),
+//   but the fallback is SOCKET-derived, and a non-work profile's socket carries its
+//   profile: `cf-personal-galapass` gives Z = `personal-galapass`, which is not a
+//   directory anybody has. So a hand-run `fleet-grid.mjs cf-personal-galapass --plain`
+//   — the documented way to exercise this path without the TUI — skips step 2 entirely
+//   and lands on step 3. That is exactly why step 3 has to be safe rather than lucky.
+//
+//   Step 3 was "whatever readdir yields first", and readdir order is not a preference.
+//   A LINKED WORKTREE has a .git of its own, so on a container root it came back as the
+//   project's main checkout — and then fleet-spawn, run there, correctly refused to
+//   spawn a worker from inside a worktree. Prefer a real checkout (a .git DIRECTORY; a
+//   worktree's is a .git file pointing elsewhere) and sort, so the answer is the same
+//   one twice. A worktree is still returned when it is genuinely all there is —
+//   answering nothing would break the projects that already work this way.
 function mainRepo() {
   const root = process.env.CLAUDE_FLEET_ROOT || '';
   if (!root) return '';
@@ -959,9 +983,10 @@ function mainRepo() {
   const named = path.join(root, Z);
   if (isRepo(named)) return named;
   try {
-    for (const e of fs.readdirSync(root, { withFileTypes: true })) {
-      if (e.isDirectory() && isRepo(path.join(root, e.name))) return path.join(root, e.name);
-    }
+    const kids = fs.readdirSync(root, { withFileTypes: true })
+      .filter(e => e.isDirectory()).map(e => path.join(root, e.name))
+      .filter(isRepo).sort();
+    return kids.find(isMainCheckout) || kids[0] || root;
   } catch {}
   return root;
 }
@@ -999,6 +1024,34 @@ function currentBranch(repo) {
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || 'HEAD';
   } catch { return 'HEAD'; }
 }
+// WHICH LINES OF A REFUSAL THE FORM SHOWS. This kept `.pop()` — the LAST line — and
+// fleet-spawn's refusals are paragraphs that build to their point. The nested-worktree
+// one is nine lines ending in "Override deliberately with CLAUDE_FLEET_ALLOW_NESTED=1",
+// so the form displayed the single thing you should not do and threw away both commands
+// that actually fix it, including "Really want another worker? Run it from the main
+// checkout". A form that only ever offers the escape hatch teaches the escape hatch.
+//
+// So: drop blanks and each line's leading indent, drop the escape-hatch lines outright
+// (an override is never a form's advice — it is what you reach for after reading the
+// advice and disagreeing), and keep the first few of what's left. Front-loaded rather
+// than tail-loaded because these messages lead with what went wrong and then say what
+// to do about it; the last lines are the footnotes.
+//
+// Pure on purpose — no width, no colour, no HOME — so the suite can lift it out and
+// feed it a real refusal. Clipping and padding belong to the renderer.
+function spawnFailLines(raw, max = 6) {
+  const lines = String(raw || '').split('\n')
+    .map(l => l.replace(/\s+$/, '').replace(/^\s+/, ''))
+    .filter(Boolean)
+    .map(l => l.replace(/^fleet-spawn:\s*/, ''))
+    .filter(l => !/^Override deliberately\b/i.test(l));
+  return lines.length ? lines.slice(0, max) : ['fleet-spawn failed'];
+}
+// The rows renderNewWorktree spends on that message, ALWAYS — see the block there.
+// Same number as the cap above, kept adjacent to it because the two only make sense
+// together: keeping lines the form has no room to draw would be a silent truncation,
+// and reserving rows nothing can fill would be dead space above the footer.
+const WT_MSG_ROWS = 6;
 // Create a worktree AND start a session in it, by handing the whole job to
 // bin/fleet-spawn (same pattern as doRename -> fleet-rename). Not laziness: spawn
 // already resolves the base ref against its upstream so a new branch doesn't start
@@ -1011,7 +1064,13 @@ function createWorktree({ name, branch, from, agent }) {
   const repo = mainRepo();
   if (!repo) return { ok: false, msg: 'no git checkout found for this project' };
   const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-spawn');
-  const args = [name, '--new'];
+  // -s, not just the env var: fleet-spawn prefers $TMUX over $CLAUDE_FLEET_SOCK (a
+  // --resume'd Claude can hold a stale one), and $TMUX is INHERITED — so a control plane
+  // launched from inside some other fleet session handed this repo's worker to THAT
+  // fleet. Seen live under vhs while recording the demo: the create succeeded, the
+  // session was real, and the grid drew the new worktree as "· FREE — no session yet"
+  // because it was sitting on a socket this grid never reads.
+  const args = [name, '--new', '-s', SOCK];
   if (branch) args.push('--branch', branch);
   if (from) args.push('--from', from);
   if (agent) args.push('--agent', agent);
@@ -1024,8 +1083,7 @@ function createWorktree({ name, branch, from, agent }) {
       env: { ...process.env, CLAUDE_FLEET_SOCK: SOCK, PATH: `${path.dirname(bin)}:${process.env.PATH || ''}` },
     });
   } catch (e) {
-    const msg = `${e.stderr || ''}\n${e.stdout || ''}`.trim().split('\n').filter(Boolean).pop();
-    return { ok: false, msg: (msg || 'fleet-spawn failed').replace(/^fleet-spawn: /, '').slice(0, 160) };
+    return { ok: false, msg: spawnFailLines(`${e.stderr || ''}\n${e.stdout || ''}`).join('\n') };
   }
   // spawn settles name collisions itself (name~2, …), so attach the session it says
   // it STARTED, not the one we asked for — attaching the wrong one would be silent.
@@ -1111,7 +1169,7 @@ let renameInput = '';        // editable, pre-filled with the current name
 let renameMsg = '';          // error from the last attempt, shown until you retype
 let wtFields = null;         // { name, branch, from, agent } while the new-worktree form is open
 let wtSel = 0;               // selected field on that form
-let wtMsg = '';              // what fleet-spawn complained about last time
+let wtMsg = '';              // what fleet-spawn complained about last time (may be several lines)
 let wtBusy = false;          // mid-create — a fetch + a session boot is not instant
 let confirmWt = null;        // { path, branch, msg, force } — free worktree awaiting removal
 let labelFor = null;         // session being labelled (from the settings page's 'l')
@@ -1400,8 +1458,21 @@ function renderNewWorktree() {
            `${C.dim}${on ? `   ${r.hint}` : ''}${C.reset}\x1b[K\n`;
   });
   buf += '\x1b[K\n';
-  buf += (wtBusy ? ` ${C.yellow}creating the worktree and starting the session…${C.reset}`
-        : wtMsg  ? ` ${C.red}${wtMsg}${C.reset}` : '') + '\x1b[K\n\x1b[K\n';
+  // A CONSTANT-HEIGHT MESSAGE BLOCK. fleet-spawn's refusals are paragraphs (see
+  // spawnFailLines), and a block that grew with them would walk the footer down the
+  // screen and, on the next render, leave the old footer drawn below the new one —
+  // this screen redraws from cursor-home and never clears. So always spend WT_MSG_ROWS
+  // rows, blank when there is nothing to say. Every line is clipped to the pane, since
+  // one wrapped line costs a row just the same.
+  const msgRows = Math.max(1, Math.min(WT_MSG_ROWS, H() - rows.length - 8));
+  const body = wtBusy ? ['creating the worktree and starting the session…']
+             : wtMsg  ? wtMsg.split('\n') : [];
+  for (let i = 0; i < msgRows; i++) {
+    const line = body[i];
+    buf += (line ? ` ${i === 0 ? (wtBusy ? C.yellow : C.red) : C.dim}${clip(line.replaceAll(HOME, '~'), W() - 2)}${C.reset}` : '')
+         + '\x1b[K\n';
+  }
+  buf += '\x1b[K\n';
   buf += `${C.dim} ↑↓/tab field · ⏎ create + open · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
@@ -1774,6 +1845,10 @@ function onKey(key) {
 if (process.argv.includes('--checkouts')) {
   console.log(`scope Z=${Z} (base=${Zbase})`);
   console.log('roots:', discoverRoots().map(r => r.replace(HOME, '~')).join(', '));
+  // UNABBREVIATED, and its own line: this is the checkout `w` runs fleet-spawn in, and
+  // the whole reason it is printed is that it used to answer a LINKED WORKTREE — which
+  // looks entirely reasonable in a list and makes every create fail the nesting guard.
+  console.log('main repo:', mainRepo());
   const cks = discoverCheckouts();
   console.log('checkouts:\n' + (cks.length ? cks.map(c => '  ' + c).join('\n') : '  (none)'));
   process.exit(0);
