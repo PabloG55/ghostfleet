@@ -3,6 +3,12 @@
 The fleet grid, as a Progressive Web App. Design: [`docs/mobile.md`](../docs/mobile.md)
 — §4 is the JSON, §6 is the client and layout, §7 is parity and the confirmations.
 
+<p align="center">
+  <img src="../docs/mobile/phone-demo.gif" width="320"
+       alt="Projects, then one project's grid, then a session: the chat, its composer, the
+            actions sheet, and the live pane with a permission prompt waiting on an answer.">
+</p>
+
 It is **not a second design**. `bin/fleet-grid.mjs` computes its column count from the
 window width (`const nc = cols()`), so a phone is `nc = 1`, and the card is the same
 five lines `cardLines()` draws — the same box-drawing characters, the same 32 columns,
@@ -24,9 +30,47 @@ that still renders is a card that still looks right.
 |---|---|---|
 | ![grid](../docs/mobile/grid.png) | ![statuses](../docs/mobile/statuses.png) | ![projects](../docs/mobile/projects.png) |
 
-| a session | the TUI's own confirmation, and its force step |
-|---|---|
-| ![session](../docs/mobile/session.png) | ![confirm](../docs/mobile/confirm.png) |
+| a session, which is a chat | its live pane | the `⋯` actions |
+|---|---|---|
+| ![session](../docs/mobile/session.png) | ![pane](../docs/mobile/pane.png) | ![actions](../docs/mobile/actions.png) |
+
+| the TUI's own confirmation, and its force step |
+|---|
+| ![confirm](../docs/mobile/confirm.png) |
+
+Every shot above is the app running on **fixtures**, which is why they can be regenerated
+without a fleet — and why they must be. Two of them went stale silently: `grid.png` was
+taken before the lead's card reached the phone (#47), so it opened on `coi-beside` and
+counted one session too few, and `session.png` was the pre-#48 screen — a card, ten footer
+buttons, and a newest-first table of `HH:MM · assistant` rows, none of which the app has
+any more. A screenshot cannot fail a test, so the only thing that catches this is
+re-taking them when the screen changes.
+
+### Re-taking them
+
+The client picks fixtures whenever `/api/health` does not answer as a fleet
+(`api.js:128`), so a plain static server is a complete, deterministic app with no
+enrolment and no real fleet data in the frame:
+
+```bash
+(cd web && python3 -m http.server 8899 --bind 127.0.0.1)
+```
+
+Open it at a 390x844 viewport with `devicePixelRatio` 2, take the fixture bypass on the
+lock screen, and shoot each screen. Note that the cards are not `<button>`s and they do
+not listen for `click`: the tap handler is `pointerup` on `.card` (`app.js:1083`), guarded
+by a movement slop and a long-press timer, so a driver that only dispatches `click` selects
+a card and never opens it. Downscale the 2x captures to the 390-wide convention, and build
+the GIF from the stills — the screens are static, so 5fps is enough and `stats_mode=diff`
+is what keeps a dark UI from banding:
+
+```bash
+ffmpeg -f concat -safe 0 -i list.txt -filter_complex \
+  "fps=5,scale=390:-1:flags=lanczos,split[a][b];\
+   [a]palettegen=max_colors=128:stats_mode=diff[p];\
+   [b][p]paletteuse=dither=bayer:bayer_scale=3" \
+  -loop 0 docs/mobile/phone-demo.gif -y
+```
 
 ## Running it
 
