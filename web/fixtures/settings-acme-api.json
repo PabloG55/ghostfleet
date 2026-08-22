@@ -1,0 +1,12 @@
+{
+  "global_nudge": true,
+  "sessions": {
+    "api-fix": "on",
+    "docs-pass": "inherit",
+    "types": "inherit",
+    "list-pages": "off",
+    "cache-keys": "inherit",
+    "rate-limit": "inherit",
+    "csv-export": "inherit"
+  }
+}

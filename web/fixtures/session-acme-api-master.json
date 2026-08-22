@@ -1,0 +1,34 @@
+{
+  "project": "acme-api",
+  "session": "master",
+  "agent": "claude",
+  "status": "ready",
+  "total": 5,
+  "messages": [
+    {
+      "ts": 1787352000,
+      "role": "user",
+      "text": "which workers are free? put the retry work on one of them"
+    },
+    {
+      "ts": 1787352040,
+      "role": "assistant",
+      "text": "Two free worktrees: acme-api-3 (feat/x, clean) and acme-api-5 (stale, 3 unpushed commits). Reusing acme-api-3 rather than making a sixth.\n\nSpawned api-fix on it with the retry-policy context."
+    },
+    {
+      "ts": 1787352900,
+      "role": "user",
+      "text": "anything blocked on me?"
+    },
+    {
+      "ts": 1787352915,
+      "role": "assistant",
+      "text": "One: list-pages has been sitting on \"Allow pnpm test?\" for 22 minutes. Everything else is running or done.\n\nI can answer it from here if you want — it is the ordinary test command, not a migration."
+    },
+    {
+      "ts": 1787354400,
+      "role": "assistant",
+      "text": "Dispatched the retry work to api-fix. Waiting on its PR."
+    }
+  ]
+}

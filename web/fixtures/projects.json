@@ -2,56 +2,83 @@
   "home": "/Users/pgarces",
   "projects": [
     {
-      "name": "superkey",
+      "name": "acme-api",
       "profile": "work",
-      "path": "/Users/pgarces/Documents/superkey",
+      "path": "/Users/pgarces/gf-demo/acme-api",
       "agent": null,
-      "socket": "cf-superkey",
-      "sessions": { "need": 0, "working": 2, "parked": 0, "total": 7 },
+      "socket": "cf-acme-api",
+      "sessions": {
+        "need": 0,
+        "working": 2,
+        "parked": 0,
+        "total": 7
+      },
       "sched": null,
       "nudge": true,
       "budget": "enforced"
     },
     {
-      "name": "ghostfleet",
+      "name": "acme-web",
       "profile": "work",
-      "path": "/Users/pgarces/Documents/me/ghostfleet",
+      "path": "/Users/pgarces/gf-demo/acme-web",
       "agent": null,
-      "socket": "cf-ghostfleet",
-      "sessions": { "need": 1, "working": 3, "parked": 0, "total": 5 },
-      "sched": { "at": 1787356800 },
+      "socket": "cf-acme-web",
+      "sessions": {
+        "need": 1,
+        "working": 3,
+        "parked": 0,
+        "total": 5
+      },
+      "sched": {
+        "at": 1787356800
+      },
       "nudge": true,
       "budget": "enforced"
     },
     {
-      "name": "koji",
+      "name": "toolbox",
       "profile": "work",
-      "path": "/Users/pgarces/Documents/koji",
+      "path": "/Users/pgarces/gf-demo/toolbox",
       "agent": "codex",
-      "socket": "cf-koji",
-      "sessions": { "need": 0, "working": 0, "parked": 2, "total": 2 },
+      "socket": "cf-toolbox",
+      "sessions": {
+        "need": 0,
+        "working": 0,
+        "parked": 2,
+        "total": 2
+      },
       "sched": null,
       "nudge": false,
       "budget": "ignored"
     },
     {
-      "name": "acord-mapper",
+      "name": "billing-svc",
       "profile": "work",
-      "path": "/Users/pgarces/Documents/acord-mapper",
+      "path": "/Users/pgarces/gf-demo/billing-svc",
       "agent": null,
-      "socket": "cf-acord-mapper",
-      "sessions": { "need": 0, "working": 0, "parked": 0, "total": 3 },
+      "socket": "cf-billing-svc",
+      "sessions": {
+        "need": 0,
+        "working": 0,
+        "parked": 0,
+        "total": 3
+      },
       "sched": null,
       "nudge": true,
       "budget": "enforced"
     },
     {
-      "name": "dotfiles",
+      "name": "scratch",
       "profile": "personal",
-      "path": "/Users/pgarces/Documents/dotfiles",
+      "path": "/Users/pgarces/gf-demo/scratch",
       "agent": null,
-      "socket": "cf-dotfiles",
-      "sessions": { "need": 0, "working": 0, "parked": 0, "total": 0 },
+      "socket": "cf-personal-scratch",
+      "sessions": {
+        "need": 0,
+        "working": 0,
+        "parked": 0,
+        "total": 0
+      },
       "sched": null,
       "nudge": false,
       "budget": "enforced"

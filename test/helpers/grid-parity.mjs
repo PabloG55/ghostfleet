@@ -152,7 +152,7 @@ const tuiHeader = new Function('need', 'work', 'ready', 'cut', 'limited', 'parke
 // strip the ` ghostfleet [profile:project]   ` prefix — the phone's header carries the
 // project name elsewhere; the COUNTS are what has to match.
 const tuiCounts = (n, w, r, cut, lim, park) =>
-  tuiHeader(n, w, r, cut, lim, park, 'work', 'superkey').replace(/^.*?\]\s{2,}/, '');
+  tuiHeader(n, w, r, cut, lim, park, 'work', 'acme-api').replace(/^.*?\]\s{2,}/, '');
 const CASES = [
   ['a quiet fleet', 0, 0, 0, 0, 0, 0],
   ['the doc\'s example', 0, 2, 4, 0, 0, 0],

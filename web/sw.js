@@ -15,9 +15,11 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v4 rebuilds the session screen as a chat (a composer, a
-// shell that owns the viewport, history-backed back, speech) and adds two fixtures. v3
-// added the pane view, which was a new file (ansi.js) and a new default for that screen. The rule below is why the bump is not
+// BUMPED WHEN THE CLIENT CHANGES — v5 renames every fixture: the demo data used to be real
+// project and session names, which is fine in a private repo and not in a public one. v4
+// rebuilt the session screen as a chat (a composer, a shell that owns the viewport,
+// history-backed back, speech) and added two fixtures. v3 added the pane view, which was a
+// new file (ansi.js) and a new default for that screen. The rule below is why the bump is not
 // optional and why forgetting it is worse than shipping nothing. The shell is served
 // CACHE-FIRST, so a phone that already has v1 paints the old app.js on the first open
 // after a deploy and only revalidates behind it — which for the two fixes in this version
@@ -25,24 +27,24 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: c4494ae70cb3
+// CLIENT-HASH: b32a6cba3af7
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v4';
+const VERSION = 'ghostfleet-v5';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js',
   './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',
-  './fixtures/grid-superkey.json', './fixtures/grid-degraded.json',
+  './fixtures/grid-acme-api.json', './fixtures/grid-degraded.json',
   './fixtures/grid-free.json', './fixtures/grid-empty.json',
-  './fixtures/settings-superkey.json',
-  './fixtures/session-superkey-coi-beside.json', './fixtures/session-superkey-dupe-source.json',
-  './fixtures/session-superkey-master.json',
-  './fixtures/pane-superkey-coi-beside.json', './fixtures/pane-superkey-dupe-source.json',
-  './fixtures/pane-superkey-master.json',
+  './fixtures/settings-acme-api.json',
+  './fixtures/session-acme-api-api-fix.json', './fixtures/session-acme-api-docs-pass.json',
+  './fixtures/session-acme-api-master.json',
+  './fixtures/pane-acme-api-api-fix.json', './fixtures/pane-acme-api-docs-pass.json',
+  './fixtures/pane-acme-api-master.json',
 ];
 
 self.addEventListener('install', e => {
