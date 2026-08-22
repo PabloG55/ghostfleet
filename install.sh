@@ -29,40 +29,48 @@ echo "  runtime:  $FLEET_HOME   (executed from here)"
 echo "  bin dir:  $BIN_DIR"
 echo
 
-command -v jq   >/dev/null 2>&1 || { echo "error: jq is required (brew install jq)"; exit 1; }
 command -v node >/dev/null 2>&1 || { echo "error: node is required (the v2 grid is a Node TUI)"; exit 1; }
 
-# tmux is the one dependency worth offering to install for you: it's the most
-# likely to be missing (jq/node are common already, if you're running this at
-# all), and every supported OS has exactly one obvious package for it. Never
-# runs a privileged command without asking first, and reads the prompt from
-# /dev/tty directly — piping this script through `curl | bash` leaves stdin
-# attached to the script itself, not the terminal, so a plain `read` would
-# silently read garbage (or block on it) instead of showing the user anything.
-ensure_tmux() {
-  command -v tmux >/dev/null 2>&1 && return 0
+# Offer to install a missing dependency rather than just refusing. Both of ours are
+# one obvious package on every supported OS, and the package name happens to equal
+# the command name for both. Never runs a privileged command without asking first,
+# and reads the prompt from /dev/tty directly — piping this script through
+# `curl | bash` leaves stdin attached to the script itself, not the terminal, so a
+# plain `read` would silently read garbage (or block on it) instead of showing the
+# user anything.
+#   This used to be tmux-only, on the reasoning that tmux was "the most likely to be
+# missing (jq/node are common already)". The conclusion was right and the handling was
+# not: jq was the one dependency that stopped a first install with a bare
+# `error: jq is required (brew install jq)` instead of an offer. Measured while changing
+# this: macOS 26 SHIPS jq at /usr/bin/jq, Apple-signed as com.apple.jq — so the
+# `brew install jq` the README used to open with was telling most readers to install
+# something they already had, while the people who genuinely lacked it (older macOS,
+# a minimal Linux image, a container) got an error and no help.
+ensure_pkg() {
+  local pkg="$1" why="$2"
+  command -v "$pkg" >/dev/null 2>&1 && return 0
   local sudo_prefix=() cmd=()
   [ "$(id -u)" = 0 ] || sudo_prefix=(sudo)
   case "$(uname -s)" in
-    Darwin) command -v brew >/dev/null 2>&1 && cmd=(brew install tmux) ;;
+    Darwin) command -v brew >/dev/null 2>&1 && cmd=(brew install "$pkg") ;;
     Linux)
-      if   command -v apt-get >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" apt-get install -y tmux)
-      elif command -v dnf     >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" dnf install -y tmux)
-      elif command -v yum     >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" yum install -y tmux)
-      elif command -v pacman  >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" pacman -S --noconfirm tmux)
-      elif command -v zypper  >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" zypper install -y tmux)
-      elif command -v apk     >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" apk add tmux)
+      if   command -v apt-get >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" apt-get install -y "$pkg")
+      elif command -v dnf     >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" dnf install -y "$pkg")
+      elif command -v yum     >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" yum install -y "$pkg")
+      elif command -v pacman  >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" pacman -S --noconfirm "$pkg")
+      elif command -v zypper  >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" zypper install -y "$pkg")
+      elif command -v apk     >/dev/null 2>&1; then cmd=("${sudo_prefix[@]}" apk add "$pkg")
       fi
       ;;
   esac
 
   if [ "${#cmd[@]}" -eq 0 ]; then
-    echo "! tmux not found — the grid needs it, and I don't recognize a package manager to install it with."
-    echo "  Install it yourself, e.g.: brew install tmux (macOS) / apt-get, dnf, yum, pacman, zypper, or apk install tmux (Linux)"
+    echo "! $pkg not found — $why, and I don't recognize a package manager to install it with."
+    echo "  Install it yourself, e.g.: brew install $pkg (macOS) / apt-get, dnf, yum, pacman, zypper, or apk install $pkg (Linux)"
     return 0
   fi
 
-  echo "! tmux not found — the grid needs it."
+  echo "! $pkg not found — $why."
   # Probe /dev/tty in a subshell first rather than pre-checking with `[ -r ]`:
   # that only tests permission bits and passes even with no controlling terminal
   # at all (this happens in sandboxed/headless environments) — the actual open()
@@ -83,15 +91,21 @@ ensure_tmux() {
     ""|y|Y|yes|YES|Yes)
       echo "  Running: ${cmd[*]}"
       if "${cmd[@]}"; then
-        echo "✓ tmux installed"
+        echo "✓ $pkg installed"
       else
-        echo "! tmux install failed — install it yourself: ${cmd[*]}"
+        echo "! $pkg install failed — install it yourself: ${cmd[*]}"
       fi
       ;;
     *) echo "  Skipped. Install it yourself: ${cmd[*]}" ;;
   esac
 }
-ensure_tmux
+ensure_pkg jq   "this installer edits settings.json and .claude.json with it, and the status hook parses its payload with it"
+ensure_pkg tmux "the grid needs it"
+
+# jq is the one that cannot be deferred: the wiring below is written WITH jq, so a
+# declined or failed install has to stop here rather than half-configure a config dir.
+# tmux can wait — nothing in this script needs it, only the fleet does, later.
+command -v jq >/dev/null 2>&1 || { echo "error: jq is required to wire the hooks and MCP server — install it and re-run"; exit 1; }
 
 chmod +x "$REPO"/hooks/*.sh "$REPO"/bin/*
 

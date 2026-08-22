@@ -88,8 +88,8 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | `git` | worktrees **are** the isolation model — a worker is a checkout on its own branch. `fleet-spawn` refuses to run without it |
 | `claude` ([Claude Code](https://github.com/anthropics/claude-code)) | what a session runs by default, and what the pane detectors are written against |
 | `node` (v18+) | the grid is a zero-npm-dependency Node TUI |
-| `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below) |
-| `jq` | the status/notification hook parses its JSON payload with it |
+| `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below). The one thing it cannot do is install it with no terminal attached, so a piped or CI install prints the command instead |
+| `jq` | the installer wires the hooks and MCP entries with it, and the status hook parses its payload with it. **macOS 26 already ships it** (`/usr/bin/jq`); anywhere it is missing the installer offers to install it |
 | macOS, Linux, or **Windows via WSL2** | sessions are tmux servers, and tmux is POSIX-only — see the native-Windows note below |
 | `codex` / `opencode` (optional) | alternative agents, chosen per worktree on the `w` form. Their pane signals are detected separately — see [docs/multi-agent-sessions.md](docs/multi-agent-sessions.md) |
 | `$EDITOR` (optional, default `nvim .`) | what `Ctrl-n`'s editor tab opens. Any editor works — override with `CLAUDE_FLEET_EDITOR`. No particular Neovim distribution is involved; if `nvim` isn't installed, set the variable to what you use |
@@ -104,7 +104,6 @@ me, so file an issue if something bites.)*
 ## Install
 
 ```bash
-brew install jq             # macOS — apt/dnf/pacman on Linux (tmux missing? installer offers to get it)
 npx ghostfleet-cli          # installs, no clone needed
 ghostfleet
 ```
