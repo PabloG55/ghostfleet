@@ -4813,6 +4813,27 @@ if [ -d "$ROOT/web" ]; then
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PW/pane"
+
+  # ── the docs' example data ─────────────────────────────────────────────────
+  # #59 renamed the fixtures and #60 re-shot the images; docs/mobile.md, which is the
+  # document those fixtures implement, was left naming sessions that no longer exist.
+  # Nothing failed, because a doc's examples have no compiler — so the spec and the
+  # client disagreed about what the app renders, silently, and the real project names
+  # #59 removed went on shipping in the one file people actually read. This asks the
+  # fixtures instead: every name docs/mobile.md and web/README.md put in a naming
+  # position has to be a project, session, worktree or branch that web/fixtures/ has.
+  # Each rule was watched going red with an old name pasted back into its own position —
+  # a payload value, a card title, a card's worktree line, a --plain row, a confirmation,
+  # a socket, a path, and a backticked name in prose.
+  node "$ROOT/test/helpers/doc-fixtures.mjs" > "$PW/docs" 2> "$PW/docs.err"
+  is "doc-fixtures ran"               "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PW/docs.err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A floor, for the reason pwa-check documents: a scanner that matches nothing emits no
+  # rows, and "no mismatches" over an empty file reads exactly like a clean document.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/docs")" -ge 20 ] && echo yes || echo "no: $(wc -l < "$PW/docs") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PW/docs"
   rm -rf "$PW"
 
   # cf-sync mirrors only a whitelist of directories into the runtime, and the client is

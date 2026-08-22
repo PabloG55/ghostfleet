@@ -15,8 +15,11 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v5 renames every fixture: the demo data used to be real
-// project and session names, which is fine in a private repo and not in a public one. v4
+// BUMPED WHEN THE CLIENT CHANGES — v6 is comments only (two of them still named a fixture
+// v5 had renamed), and it is bumped anyway: the pin is on the BYTES, and a version that
+// tracks "did this feel important" is a version somebody has to remember. v5 renames every
+// fixture: the demo data used to be real project and session names, which is fine in a
+// private repo and not in a public one. v4
 // rebuilt the session screen as a chat (a composer, a shell that owns the viewport,
 // history-backed back, speech) and added two fixtures. v3 added the pane view, which was a
 // new file (ansi.js) and a new default for that screen. The rule below is why the bump is not
@@ -27,11 +30,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: b32a6cba3af7
+// CLIENT-HASH: 76c38713ad7e
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v5';
+const VERSION = 'ghostfleet-v6';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js',

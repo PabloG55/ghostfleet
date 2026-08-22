@@ -19,10 +19,10 @@ the only thing keeping the two in step, because this kind of drift is silent: a 
 that still renders is a card that still looks right.
 
 ```
-╭─ 1 coi-beside ───────────────╮
-│ ◆ working            busy 41s│   status left · age right (or ↻ reset, or @scheduled)
-│ coi-beside · feat/coi-polic… │   worktree · branch  (+ agent when it isn't claude)
-│ "All three states present. R…│   last message, quoted
+╭─ 2 api-fix ──────────────────╮
+│ ◆ working           busy 41s │   status left · age right (or ↻ reset, or @scheduled)
+│ api-fix · feat/retry-backo…  │   worktree · branch  (+ agent when it isn't claude)
+│ "All three cases covered. R… │   last message, quoted
 ╰──────────────────────────────╯
 ```
 
@@ -42,7 +42,7 @@ wait for it to come round again.
 Everything above is the app running on **fixtures**, which is why it can be regenerated
 without a fleet — and why it must be. Two of the stills these replaced had gone stale
 silently: the grid was shot before the lead's card reached the phone (#47), so it opened on
-`coi-beside` and counted one session too few, and the session was the pre-#48 screen — a
+`api-fix` and counted one session too few, and the session was the pre-#48 screen — a
 card, ten footer buttons, and a newest-first table of `HH:MM · assistant` rows, none of
 which the app has any more. Neither one looked broken. An image cannot fail a test, so the
 only thing that catches this is re-taking it when the screen changes.
@@ -191,8 +191,8 @@ it has not solved the problem, it has described it more conveniently.
 
 What stands in front of them is identity and confirmation, not reduced capability:
 
-- **the TUI's own prompts, reproduced verbatim** — `kill session 'x'?`,
-  `remove worktree 'api-3' (feat/x)?`, `y = yes · any other key = cancel`, and
+- **the TUI's own prompts, reproduced verbatim** — `kill session 'api-fix'?`,
+  `remove worktree 'toolbox-3' (feat/x)?`, `y = yes · any other key = cancel`, and
   `f = remove anyway` as its **own** key. `pwa-check.mjs` reads those strings out of
   `fleet-grid.mjs` and asserts the phone carries the same ones.
 - **a passkey at the moment of action** for `spawn`, `stop`, `rename` and removing a
@@ -351,6 +351,7 @@ node test/helpers/grid-parity.mjs      # phone card == TUI card, line for line
 node test/helpers/pwa-check.mjs        # self-containment, precache, icons, §4 fixtures, §7 prompts
 node test/helpers/pane-check.mjs      # the pane renderer, against real `capture-pane -e` bytes
 node test/helpers/pane-render.mjs     # < an /api/pane body: what a phone would SHOW, as text
+node test/helpers/doc-fixtures.mjs    # every session/project these docs name still exists in fixtures/
 node test/helpers/pwa-origin.mjs <base>            # which backend it picks, against a LIVE fleet-serve
 node test/helpers/pwa-render.mjs <base>            # app.js actually RUNS, and paints what it decided
 node test/helpers/pwa-enrol.mjs <base> <code> <id> # the enrolment ceremony, end to end

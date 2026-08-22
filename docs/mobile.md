@@ -31,8 +31,8 @@ bug — that is its purpose:
 
 Anyone who reaches this service runs code as the user. And the data is not incidental
 either: the grid's own `LAST MSG` column renders conversation text, and fleet transcripts
-contain `DATABASE_URL` for hosted Neon, Clerk keys, and — for the SuperKey fleet — real
-insurance policies belonging to real people.
+contain `DATABASE_URL` for hosted Neon, Clerk keys, and — on a fleet working a production
+codebase — customer records belonging to real people.
 
 So the security posture is not "add a login page." It is: **the service is never publicly
 routable, and every mutating call is authenticated, confirmed and recorded.** Everything
@@ -50,17 +50,17 @@ Two thirds of this is built.
 **The data.** `fleet-grid.mjs --plain` already computes every field the phone needs:
 
 ```
-$ node bin/fleet-grid.mjs cf-superkey tmux/cf.tmux.conf --plain
+$ node bin/fleet-grid.mjs cf-acme-api tmux/cf.tmux.conf --plain
 0 need you · 2 working · 4 ready
-TAB         CHECKOUT     BRANCH                   AGENT   STATUS   LAST MSG                   IDLE
-coi-beside  coi-beside   feat/coi-policy-beside…  claude  working  All three states present…   busy 20s
-dupe-source dupe-source  investigate/broker-age…  claude  ready    Done. Draft PR **#1165**…   50m ago
+TAB         CHECKOUT      BRANCH                    AGENT    STATUS     LAST MSG                                      IDLE
+api-fix     api-fix       feat/retry-backoff        claude   working    All three cases covered. Running the full s…  busy 41s
+docs-pass   docs-pass     docs/openapi-examples     opencode ready      Done. Draft PR #212 — the drift was two sch…  50m ago
 ```
 
 And it is fast enough that polling is not a design problem:
 
 ```
-busiest fleet (superkey, 6 live sessions)   0.39s
+busiest fleet (6 live sessions)             0.39s
 all 14 projects                             0.17s   (most are empty and exit immediately)
 ```
 
@@ -93,17 +93,19 @@ with the scars.
 
 ## 4. `fleet-grid.mjs --json`
 
-`--plain` is formatted for a TTY: branches elide to `feat/coi-policy-beside-fo…` and at
-narrow widths columns collide (`people-dupespeople-dupes`). The *values* are already
+`--plain` is formatted for a TTY: the last message clips at 44 columns, and a value that
+fills its column touches the next one (`adapter-pro…adapter-probe`). The *values* are already
 computed by `cardLines()` — they are truncated on the way out. `--json` emits them whole.
 
 The schema is deliberately **exactly what `cardLines()` consumes** — with two deliberate
 additions, both noted under the block — so the phone renders from the same inputs the TUI
-does and the two cannot disagree:
+does and the two cannot disagree. The values below are `web/fixtures/grid-acme-api.json`:
+two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, since
+`acme-api` has no free worktree. `test/helpers/doc-fixtures.mjs` holds them to that.
 
 ```jsonc
 {
-  "project": "superkey",
+  "project": "acme-api",
   "profile": "work",
   "counts": { "need_you": 0, "working": 2, "ready": 5,   // the lead is counted, see below
               "parked": 0, "limit": 0, "interrupted": 0 },
@@ -112,10 +114,10 @@ does and the two cannot disagree:
       "name":      "master",              // THE LEAD, and always the first card
       "label":     null,
       "status":    "ready",
-      "folder":    "superkey",            // the main checkout — the repo itself
+      "folder":    "acme-api",            // the main checkout — the repo itself
       "branch":    "main",
       "agent":     "claude",
-      "msg":       "Dispatched the binder work to binder-slots.",
+      "msg":       "Dispatched the retry work to api-fix. Waiting on its PR.",
       "age":       95,
       "attached":  true,
       "sched":     null,
@@ -123,14 +125,14 @@ does and the two cannot disagree:
       "lead":      true                   // not a worker: no stop, no reclaim, no rename
     },
     {
-      "name":      "coi-beside",          // what fleet-send/fleet-read address
+      "name":      "api-fix",             // what fleet-send/fleet-read address
       "label":     null,                  // titles the card when set; name moves to line 2
       "status":    "working",             // the nine-value vocabulary, verbatim
-      "folder":    "coi-beside",          // the worktree it sits in
-      "branch":    "feat/coi-policy-beside-form",
+      "folder":    "api-fix",             // the worktree it sits in
+      "branch":    "feat/retry-backoff",
       "agent":     "claude",              // rendered only when != claude
-      "msg":       "All three states present. Running the full suite…",
-      "age":       20,                    // seconds; null when unknown
+      "msg":       "All three cases covered. Running the full suite before I touch the migration.",
+      "age":       41,                    // seconds; null when unknown
       "attached":  false,
       "sched":     null,                  // { "at": <epoch>, "msg": "…" } → card shows @HH:MM
       "limit_at":  null,                  // "10:20pm" → card shows ↻ 10:20pm
@@ -138,7 +140,7 @@ does and the two cannot disagree:
     }
   ],
   "free_worktrees": [
-    { "path": "/Users/…/api-3", "branch": "feat/x", "task": "…" }
+    { "path": "/Users/pgarces/gf-demo/toolbox-3", "branch": "feat/x", "task": "rework the CSV column mapper" }
   ]
 }
 ```
@@ -252,7 +254,7 @@ public.
 **Explicitly not Tailscale Funnel.** That is the feature that publishes to the internet.
 
 **Acceptable alternative: Cloudflare Tunnel + Cloudflare Access.** `cloudflared` is
-already installed on this machine (the SuperKey dev-stack skill uses it). Outbound-only,
+already installed on this machine (another project's dev-stack skill uses it). Outbound-only,
 no open ports, and Access adds SSO, policy and audit logs. Choose it if a real URL is
 wanted. The tradeoff is honest: the hostname *is* publicly routable and all the security
 lives in the Access policy being right, so it fails *open*.
@@ -359,11 +361,11 @@ cols()` — so **a phone is `nc = 1`**. The card is the same five lines `cardLin
 produces:
 
 ```
-╭─ 1 coi-beside ───────────────╮
-│ ◆ working            busy 41s │   status · age (or ↻ reset, or @scheduled)
-│ coi-beside · feat/coi-poli…   │   worktree · branch  (+ agent when != claude)
-│ "All three states present."   │   last message
-╰───────────────────────────────╯
+╭─ 2 api-fix ──────────────────╮
+│ ◆ working           busy 41s │   status · age (or ↻ reset, or @scheduled)
+│ api-fix · feat/retry-backo…  │   worktree · branch  (+ agent when != claude)
+│ "All three cases covered. R… │   last message
+╰──────────────────────────────╯
 ```
 
 The `+ new session` card and the grey `FREE` worktree cards carry over unchanged, because
@@ -397,9 +399,9 @@ and becomes about *proving who is doing it, and leaving a record*:
   inheriting them *is* parity rather than an addition:
 
   ```
-  kill session 'coi-beside'?          y = yes · any other key = cancel
-  remove worktree 'api-3' (feat/x)?   y = yes · any other key = cancel
-                                      f = remove anyway
+  kill session 'api-fix'?                y = yes · any other key = cancel
+  remove worktree 'toolbox-3' (feat/x)?  y = yes · any other key = cancel
+                                         f = remove anyway
   ```
 
   A phone confirmation is a second deliberate tap, and `--force` needs its own.
@@ -697,7 +699,7 @@ building a chat client.
 **Still open:**
 
 3. **Content is served unredacted.** A secret-pattern filter was proposed and dropped.
-   Transcripts do hold live-shaped credentials — measured across the SuperKey transcripts:
+   Transcripts do hold live-shaped credentials — measured across this machine's transcripts:
    16 `sk_live_`, 139 `sk_test_`, 194 JWTs, 2 AWS key IDs, 51 `CLERK_SECRET`, 4213
    `DATABASE_URL`, in a corpus whose largest single file is 46 MB. But under this
    transport there is no adversary it defends against. The public internet cannot route
