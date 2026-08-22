@@ -105,20 +105,28 @@ me, so file an issue if something bites.)*
 
 ```bash
 brew install jq             # macOS — apt/dnf/pacman on Linux (tmux missing? installer offers to get it)
-git clone https://github.com/PabloG55/ghostfleet.git
-cd ghostfleet
-./install.sh
+npx ghostfleet-cli          # installs, no clone needed
 ghostfleet
 ```
 
-**Do not run `npx ghostfleet`.** That name on npm belongs to an unrelated project —
-`ghostfleet@0.0.2`, published by someone else, and confusingly close in pitch ("fleets of
-disposable AI agents in your own cloud"). Running it installs a stranger's package, not
-this one. This repo's `package.json` still claims that name and so cannot be published
-under it; the shim it points at (`bin/npx-install.mjs`) is fine and just runs `install.sh`,
-so the only thing missing is a name that is actually free. `ghostfleet-cli`,
-`claude-ghostfleet`, `ghost-fleet` and `gfleet` were unclaimed at the time of writing, and
-a scoped `@you/ghostfleet` is always available.
+Prefer to clone the repo (e.g. to develop against it)?
+
+```bash
+git clone https://github.com/PabloG55/ghostfleet.git
+cd ghostfleet
+./install.sh
+```
+
+Both run the same `install.sh` — `npx ghostfleet-cli` just fetches the package and runs it
+for you, so nothing is left checked out afterwards. The command it installs is
+`ghostfleet`, not `ghostfleet-cli`: the npm package name and the binary name are separate,
+and only the package name had to change.
+
+**The package is `ghostfleet-cli`, and `ghostfleet` on npm is someone else's.**
+`ghostfleet@0.0.2` was published by an unrelated project ten days after this one took the
+name, pitched as "fleets of disposable AI agents in your own cloud" — close enough that
+`npx ghostfleet` looks right and installs a stranger's package. Nothing here can be done
+about that, so the suffix is load-bearing: type `-cli`.
 
 Cloning is also what you want if you intend to edit ghostfleet itself: `cf-sync` syncs the
 runtime **from a real repo**, and an npx cache is not one.

@@ -1,6 +1,6 @@
 {
-  "name": "ghostfleet",
-  "version": "1.0.0",
+  "name": "ghostfleet-cli",
+  "version": "0.1.0",
   "description": "Run a fleet of Claude Code agents in parallel, from one terminal.",
   "license": "MIT",
   "homepage": "https://github.com/PabloG55/ghostfleet",
@@ -23,6 +23,9 @@
     "install.sh",
     "LICENSE"
   ],
+  "scripts": {
+    "prepublishOnly": "./test/run.sh"
+  },
   "engines": {
     "node": ">=18"
   },
