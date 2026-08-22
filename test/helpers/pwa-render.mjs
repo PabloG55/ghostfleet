@@ -338,6 +338,16 @@ boxNode.focus();
 is('...and pauses while the composer has focus', true, appmod.pollPaused());
 boxNode.blur();
 is('...and resumes when it loses focus', false, appmod.pollPaused());
+
+// The 5s poll is not the only caller that rebuilds the screen: readPane()'s error
+// transitions call render() on a 2s timer, so an unreachable daemon would close the
+// keyboard mid-sentence even with the poll paused. Deferred, not dropped — the error still
+// has to arrive, a moment later, or an offline pane would look like a working one.
+boxNode.focus();
+is('a render defers while you type', false, appmod.renderUnlessTyping());
+is('...and is remembered, not dropped', true, appmod.renderWasDeferred());
+boxNode.blur();
+is('...and goes through once you stop', true, appmod.renderUnlessTyping());
 // ONE region scrolls. The page itself must not, or a repaint every five seconds drops the
 // reader wherever the browser lands — which is what "the screen moves around" was.
 is('...inside the shell, not the page', true,

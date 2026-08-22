@@ -165,6 +165,19 @@ const sessions = fs.readdirSync(fixDir).filter(f => /^session-/.test(f));
 is('there is a session fixture longer than one page', true,
    sessions.some(f => (JSON.parse(fs.readFileSync(path.join(fixDir, f), 'utf8')).messages || []).length > 20));
 
+// A CACHE-FIRST SHELL DOES NOT REACH A PHONE BY ITSELF. Bumping VERSION lands the new
+// bytes; it does not re-parse a page that is already open, and the first re-navigation
+// runs the OLD app.js while the new worker installs behind it — so a fix took TWO cold
+// opens to arrive, and in between a phone reported a bug that was already fixed. Both
+// halves have to be present for one open to be enough: the worker must CLAIM the page,
+// and the page must react when it does.
+is('the worker claims open pages', true, /clients\.claim\(\)/.test(JS['sw.js']));
+is('...and the client reacts to being claimed', true,
+   /addEventListener\('controllerchange'/.test(JS['app.js']));
+// ...but never mid-sentence: a reload throws away the draft, which lives in memory.
+is('...without reloading while you type', true,
+   /function takeNewClientIfIdle[\s\S]{0,300}pollPaused\(\)/.test(JS['app.js']));
+
 // ── 4. §7's guardrails, in §7's words ─────────────────────────────────────
 // Extracted from fleet-grid.mjs rather than typed here, so a reworded TUI prompt shows
 // up as a mismatch instead of as two apps that disagree in front of a deleted checkout.

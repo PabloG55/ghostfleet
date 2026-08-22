@@ -919,6 +919,29 @@ function restoreChatScroll(box) {
 // pwa-check enforces that every top-level declaration precedes the first top-level
 // statement — that is what makes a temporal-dead-zone reference structurally impossible,
 // and putting this beside the setInterval that uses it broke the rule.
+// Set when a newer service worker has taken control and this page is now the stale one.
+let swReloadPending = false;
+export function takeNewClientIfIdle() {
+  if (!swReloadPending) return false;
+  if (pollPaused()) return false;          // not while you are typing into it
+  try { location.reload(); } catch { return false; }
+  return true;
+}
+
+// A render that defers rather than destroying what you are typing into. render() empties
+// #app, so any caller that fires while the composer has focus closes the keyboard — the
+// 5s poll was the loud case and pollPaused() stops that one, but readPane()'s error
+// transitions call render() too, on a 2s timer, and would reopen the same wound the first
+// time a pane read failed mid-sentence. Deferred, not dropped: the flag is spent by the
+// next poll, so the error still reaches the screen a moment later.
+let renderDeferred = false;
+export function renderUnlessTyping() {
+  if (pollPaused()) { renderDeferred = true; return false; }
+  render();
+  return true;
+}
+export function renderWasDeferred() { return renderDeferred; }
+
 export function pollPaused() {
   if (document.hidden || S.locked || S.sheet || S.confirm) return true;
   // Typing counts. refresh() ends in render(), render() empties #app and rebuilds it, so
@@ -973,14 +996,14 @@ async function readPane() {
     // session's pane under another session's card.
     if (S.screen !== 'session' || S.session !== want.session || S.pscroll !== want.scroll) return;
     S.pane = j;
-    if (S.paneErr) { S.paneErr = ''; render(); }
+    if (S.paneErr) { S.paneErr = ''; renderUnlessTyping(); }
   } catch (e) {
     if (e instanceof api.AuthError) return lock();
     const msg = e instanceof api.OfflineError
       ? 'offline — this is the last pane captured' : String(e.message || e);
     // Rendered only when it CHANGES. The poll is every two seconds; re-rendering the
     // screen on each failure would make an unreachable daemon look like a flickering app.
-    if (S.paneErr !== msg) { S.paneErr = msg; render(); }
+    if (S.paneErr !== msg) { S.paneErr = msg; renderUnlessTyping(); }
   } finally { paneBusy = false; }
 }
 
@@ -1836,7 +1859,26 @@ document.addEventListener('visibilitychange', () => {
   else refresh();
   syncPanePoll();
 });
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+// THE SHELL IS CACHE-FIRST, so a deploy does not reach a phone that already has the app
+// until something re-navigates — and the first re-navigation runs the OLD app.js while the
+// new one installs behind it, so it takes TWO cold opens to pick up a fix. Measured: a
+// phone ran a client 42 minutes older than the deploy while making /api/ calls the whole
+// time, and the bug it was reporting had already been fixed. So when a new worker takes
+// control, reload — that is what turns one relaunch into the update.
+//   `controllerchange` fires when the new worker claims this page (sw.js calls
+// clients.claim()). Guarded on there having BEEN a controller: on a first install the
+// event also fires, and reloading then would be a pointless flash on the very first open.
+//   Never mid-sentence. A reload throws away S.draft, which lives in memory — so if you
+// are typing, it waits, and the poll spends it when you are not.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
+  let hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) { hadController = true; return; }
+    swReloadPending = true;
+    takeNewClientIfIdle();
+  });
+}
 render();
 // Paint first, ask second. The lock screen above is drawn against the 'probing' mode —
 // the ship, and one line saying which origin is being asked — so this only ever fills in
@@ -1848,6 +1890,11 @@ api.ready().then(() => render());
 // (§2), so a 5s poll is well inside what the daemon can serve and needs no new
 // machinery. Paused while a form or a confirmation is open — a redraw under a
 // half-typed prompt is how you lose it.
-setInterval(() => { if (!pollPaused()) refresh(); }, 5000);
+setInterval(() => {
+  if (pollPaused()) return;
+  if (takeNewClientIfIdle()) return;       // a newer client was waiting for you to stop typing
+  if (renderDeferred) { renderDeferred = false; render(); }
+  refresh();
+}, 5000);
 
 
