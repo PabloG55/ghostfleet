@@ -96,16 +96,27 @@ dismiss.
 
 ## Screens and gestures
 
-Projects → grid → session, mirroring the desktop. **A tap on a card lands on the session's
-real tmux pane** — `capture-pane -p -e`, rendered by `ansi.js`, which is what `⏎` on a card
-gets you at the desk (§7a). The paginated message list is one tap away on the same screen;
-it pages back over the *whole* transcript, which a pane cannot, so both are kept.
+Projects → grid → session, mirroring the desktop. **A tap on a card lands on a chat** —
+bubbles, oldest-first, with a composer — and **the session's real tmux pane is one tap
+away** (`capture-pane -p -e`, rendered by `ansi.js`, which is what `⏎` on a card gets you
+at the desk). Both are kept because they are different things: the chat is the readable
+one and pages back over the whole transcript, the pane is the only place a permission
+dialog exists at all. A **blocked** session says so in the chat, in red, with a button to
+the pane — that banner is what makes the chat safe as the default (§7a).
+
+The **back gesture** works: navigating pushes a history entry that reuses the current href,
+so a swipe walks session → grid → projects and **no URL ever appears**.
+
+The session screen's ten footer buttons are one **`⋯` actions sheet**. The composer replaced
+`send a prompt`, and a **`🔊`** beside it reads the newest assistant turn aloud
+(`SpeechSynthesis` — no network, and fenced code is announced rather than read out).
 
 §7's key-to-touch mapping:
 
 | terminal | phone |
 |---|---|
 | `1-9` / `⏎` | tap a card |
+| `q` / back | the system back gesture, or `‹` in the session bar |
 | `⇧hjkl` reorder | drag a card **by its title line** (the grip — the rest of the card still scrolls) |
 | `p` / `P` | swipe ← pause · swipe → resume |
 | `x` | long-press |
