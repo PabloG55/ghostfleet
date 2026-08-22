@@ -1,8 +1,22 @@
 {
   "project": "superkey",
   "profile": "work",
-  "counts": { "need_you": 1, "working": 0, "ready": 1, "parked": 2, "limit": 2, "interrupted": 1 },
+  "counts": { "need_you": 2, "working": 0, "ready": 1, "parked": 2, "limit": 2, "interrupted": 1 },
   "cards": [
+    {
+      "name": "master",
+      "label": null,
+      "status": "need-you",
+      "folder": "superkey",
+      "branch": "main",
+      "agent": "claude",
+      "msg": "Which of the two limit resets do you want me to wait for?",
+      "age": 260,
+      "attached": false,
+      "sched": null,
+      "limit_at": null,
+      "lead": true
+    },
     {
       "name": "coi-beside",
       "label": null,
@@ -14,7 +28,8 @@
       "age": 9000,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "dupe-source",
@@ -27,7 +42,8 @@
       "age": 3300,
       "attached": false,
       "sched": null,
-      "limit_at": "10:20pm"
+      "limit_at": "10:20pm",
+      "lead": false
     },
     {
       "name": "binder-slots",
@@ -40,7 +56,8 @@
       "age": 4100,
       "attached": false,
       "sched": null,
-      "limit_at": "10:20pm"
+      "limit_at": "10:20pm",
+      "lead": false
     },
     {
       "name": "proposal-pdf",
@@ -53,7 +70,8 @@
       "age": 1500,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "rls-contacts",
@@ -66,7 +84,8 @@
       "age": 2400,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "quote-extract",
@@ -79,7 +98,8 @@
       "age": 2405,
       "attached": false,
       "sched": { "at": 1787368200 },
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "opencode-probe",
@@ -92,7 +112,8 @@
       "age": 620,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "docs-sweep",
@@ -105,7 +126,8 @@
       "age": 172800,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "doc-verify",
@@ -118,7 +140,8 @@
       "age": 7380,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     }
   ],
   "free_worktrees": []

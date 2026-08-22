@@ -21,6 +21,7 @@
 //   - the lock screen says which backend it resolved to, on a real probe of a real daemon
 //   - server mode routes to ENROLMENT and hides the fixture bypass, which is the pair of
 //     buttons the stuck phone was on the wrong side of
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -89,6 +90,14 @@ const documentStub = {
   createElement: (t) => new Node_(t),
   createTextNode: (t) => { const n = new Node_('#text'); n.textContent = t; return n; },
   getElementById: (id) => (id === 'app' ? app : id === 'sheet' ? sheetHost : null),
+  // markSel() reaches for this on every pointerdown — it moves the selection without a
+  // re-render, because re-rendering mid-gesture replaces the node under the finger. It is
+  // implemented rather than stubbed to [] so a TAP goes all the way through: the lead's
+  // card is the one thing on the grid that cannot be reached any other way here (no
+  // keyboard — addEventListener is a no-op above).
+  querySelectorAll: (sel) => (sel === '#app .card'
+    ? app.all(n => n.className.split(/\s+/).includes('card'))
+    : []),
   addEventListener() {},
 };
 const stored = new Map();
@@ -107,6 +116,22 @@ for (const [name, value] of [
   // app.js polls every 5s; left real, the process would never exit.
   ['setInterval', () => 0],
 ]) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+// FIXTURE MODE HAS TO BE ABLE TO READ ITS FIXTURES. api.js fetches them as
+// `./fixtures/<file>` — a relative URL, which in a browser resolves against the page and
+// here resolves against nothing ("Failed to parse URL"). So the shipped files are served
+// off disk, and only those: anything else falls through to the real fetch, which is what
+// the origin probe and every server-mode request still use.
+const realFetch = globalThis.fetch;
+globalThis.fetch = (url, opts) => {
+  const m = /^\.\/fixtures\/([A-Za-z0-9._-]+)$/.exec(String(url));
+  if (!m) return realFetch(url, opts);
+  const file = new URL(`../../web/fixtures/${m[1]}`, import.meta.url);
+  let body;
+  try { body = fs.readFileSync(file, 'utf8'); }
+  catch { return Promise.resolve({ ok: false, status: 404, json: async () => ({}) }); }
+  return Promise.resolve({ ok: true, status: 200, json: async () => JSON.parse(body) });
+};
+
 const U = BASE ? new URL(BASE) : null;
 globalThis.location = U ? { origin: U.origin, protocol: U.protocol, host: U.host, hostname: U.hostname }
                        : { origin: 'null', protocol: 'file:', host: '', hostname: '' };
@@ -203,5 +228,65 @@ is('...and does not offer to enrol', false, !!btnWith(/enrol this phone/));
 click(btnWith(/continue without a passkey/));
 is('past the lock, the header names the backend', true, /⚠ fixtures/.test(app.textContent));
 is('...on the projects screen', true, /ghostfleet/.test(app.textContent) && /projects/.test(app.textContent));
+
+// ── the LEAD's card, and the three buttons that must not be on it ─────────
+// docs/mobile.md §4: `master` is a card here because a phone is the only way to reach it,
+// and the bug it fixes was reported as "it's not opening the main agent, just the
+// sessions". Its card is the same five lines a worker's is — same box, same status line —
+// so the only thing standing between the lead and `stop --reclaim` on this screen is that
+// the button is not drawn.
+//
+// Driven, not asserted from the source: pwa-check reads the guard OUT of app.js, and a
+// guard that is present in the file can still be bypassed by a second path into the same
+// screen. This clicks through the real one.
+// The projects list is fetched, so it is not on screen the instant the lock lifts —
+// clicking `⏎ open` before it arrives opens nothing at all, silently.
+is('the projects list arrives', true, await until(() => /superkey/.test(app.textContent)));
+// btn() splits "<key> <label>" into a <b> and a text node, and this DOM joins children
+// with a space — so a footer button reads "⏎  open", with two. Every match below is
+// whitespace-loose for that reason; a single-space regex silently matches nothing, and
+// click(null) is a no-op that looks like a screen that did not change.
+click(btnWith(/⏎\s+open/));                            // the first project — superkey
+await until(() => /master/.test(app.textContent), 4000);
+is('the grid draws the lead as a card', true, /master/.test(app.textContent));
+// The lead is card 1, so it is what the footer is aimed at on arrival — and that footer
+// names which `x` means right now, exactly as the TUI's does, because finding out by
+// pressing it costs a worktree. Over the lead it means nothing, and says so.
+is('...selected first, with x disclaimed', true, !!btnWith(/not the lead/));
+// Press it anyway: the confirmation must not open, and the refusal has to be VISIBLE.
+// A guard that silently does nothing is a button that looks broken.
+click(btnWith(/^x/));
+is('...pressing x opens no kill prompt', false, /kill session 'master'/.test(app.textContent));
+is('...and says why instead', true, /this fleet's lead/.test(app.textContent));
+// ...and the summary above it counts the lead, which on the degraded fixture is the whole
+// point: `counts` is a fold over the cards, and the lead is one of them.
+// Open the lead by tapping its card. The card is a <div>, not a button, so this goes
+// through the same tap handler a finger does.
+const cardTitled = (re) => app.find(n => n.className.split(/\s+/).includes('card') && re.test(n.textContent));
+const tap = (n) => (n && (n.listeners.pointerdown || []).length
+  ? ((n.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 })),
+     (n.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 })))
+  : null);
+tap(cardTitled(/master/));
+await until(() => /the fleet's lead/.test(app.textContent), 4000);
+is('tapping it opens its session screen', true, !!btnWith(/send a prompt/));
+is('...and it says it is the lead', true, /the fleet's lead/.test(app.textContent));
+// The verbs that mean something for a lead are all still there.
+is('...keeps send a prompt', true, !!btnWith(/send a prompt/));
+is('...keeps answer keys', true, !!btnWith(/answer keys/));
+is('...keeps pause', true, !!btnWith(/\bp\s+pause|\bP\s+resume/));
+// ...and the three the server refuses are NOT.
+is('...has no kill button', false, !!btnWith(/x\s+kill/));
+is('...no stop \u002b reclaim', false, !!btnWith(/reclaim worktree/));
+is('...and no rename', false, !!btnWith(/r\s+rename/));
+// THE OTHER DIRECTION, or a screen that drew no buttons at all would pass all three.
+click(btnWith(/q\s+back/));
+await until(() => !!btnWith(/n\s+new/), 4000);
+tap(cardTitled(/coi-beside/));
+await until(() => !!btnWith(/x\s+kill/), 4000);
+is('a worker keeps its kill button', true, !!btnWith(/x\s+kill/));
+is('...and its stop + reclaim', true, !!btnWith(/reclaim worktree/));
+is('...and its rename', true, !!btnWith(/r\s+rename/));
+is('...and says nothing about a lead', false, /the fleet's lead/.test(app.textContent));
 
 console.log(rows.join('\n'));

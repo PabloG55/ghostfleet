@@ -104,6 +104,22 @@ function tmuxList() {
 // have, and ` inside it comes back here.
 function isTab(name) { return /^_(?:term|edit)-/.test(name || ''); }
 
+// THE LEAD. Every project has exactly one session called `master` — it is the one the
+// grid is drawn FROM, and the one work is dispatched from. Every filter here used to
+// spell that as a bare `!== 'master'`; naming it once means "is this the lead" is a
+// question with one answer, and the answer is not a string comparison scattered across a
+// file — which is also why the WIRE carries `lead` per card (docs/mobile.md §4) instead
+// of asking each client to compare that string for itself.
+//   The distinction matters more than it looks, because the two consumers of gather()
+// disagree about the lead ON PURPOSE. The TUI runs INSIDE master: a card for yourself is
+// redundant, `q` already returns you there, and the header would count you among the
+// workers you are deciding about. A remote client (docs/mobile.md) is inside nothing —
+// it is a viewer of every session — so for the phone master is not "here", it is simply
+// unreachable, which is exactly the bug this landed for: "it's not opening the main
+// agent, just the sessions."
+const LEAD = 'master';
+function isLead(name) { return name === LEAD; }
+
 // Does a status file belong to the fleet on `sock`? Scope by the SOCKET the session
 // runs on — the only field that identifies the fleet. (`zellij` is the zellij session
 // name, e.g. "work", NOT the project: when empty it used to match EVERY project, so
@@ -572,9 +588,27 @@ function codexTranscript(cwd) {
   return f && lastAssistant(f) ? f : '';
 }
 
-function gather() {
-  // master lives on the home screen, not the grid; the rest come back in CARD order
-  const sessions = applyOrder(tmuxList().filter(s => s.name !== 'master'));
+// `lead: true` asks for the LEAD's card as well, first, and only --json passes it.
+//
+// The TUI and --plain keep the fleet exactly as it was — master lives on the home screen,
+// not the grid — and that is the correct answer for a reader who is sitting inside it.
+// A remote client is not, so leaving master out left the phone with no way to reach the
+// one session you send work to (docs/mobile.md §4).
+//
+// FIRST, not appended, and it is deliberately outside applyOrder(): the <sock>.order file
+// is written from the TUI's own cards, so it has never held master and never will —
+// merging the lead into applyOrder() would drop it at the END, behind every worker, on
+// every fleet that has ever been reordered. The stack picker made this same call for the
+// same reason (see sessionStatuses: `...names.filter(n => isLead(n))` first), and it
+// is also just true: the lead is the card you are looking for.
+//   The card ORDER the fleet numbers by is untouched — --order still excludes the lead,
+// so `Ctrl-f <p> <s>` and ⇧←→ at the desk count the same sessions they always did.
+function gather({ lead = false } = {}) {
+  const live = tmuxList();
+  const sessions = [
+    ...(lead ? live.filter(s => isLead(s.name)) : []),
+    ...applyOrder(live.filter(s => !isLead(s.name))),
+  ];
   const fleet = fleetBySlot();
   const nowS = Math.floor(Date.now() / 1000);
   return sessions.map(s => {
@@ -608,7 +642,7 @@ function gather() {
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
     return { name: s.name, cwd: s.cwd || '', folder, branch, status, age, msg: lastAssistant(transcript),
-             attached: s.attached, sched, agent, label: labelOf(s.name), limitAt };
+             attached: s.attached, sched, agent, label: labelOf(s.name), limitAt, lead: isLead(s.name) };
   });
 }
 
@@ -1752,7 +1786,7 @@ if (process.argv.includes('--checkouts')) {
 // depending on how you got there. Deliberately does NOT call gather(): it needs
 // names, not a capture-pane round trip per session.
 if (process.argv.includes('--order')) {
-  const names = applyOrder(tmuxList().filter(s => s.name !== 'master')).map(s => s.name);
+  const names = applyOrder(tmuxList().filter(s => !isLead(s.name))).map(s => s.name);
   if (names.length) console.log(names.join('\n'));
   process.exit(0);
 }
@@ -1786,11 +1820,26 @@ if (process.argv.includes('--order')) {
 // to 46, so a row is ~126 bytes and you would need 500 sessions to fill the buffer.
 //   The await is also what keeps the module body from falling through into the TUI,
 // which is what a bare write-with-callback would do.
+//
+// AND IT IS THE ONE CALLER THAT ASKS FOR THE LEAD. The TUI is drawn from inside master,
+// so its own card would be redundant there; a phone is inside nothing and master was
+// therefore unreachable from it — reported by the person using the app as "it's not
+// opening the main agent, just the sessions". gather({lead:true}) puts it first; the TUI
+// and --plain still call gather() and are byte-for-byte what they were.
 if (JSON_OUT) {
-  const rows = gather();
+  const rows = gather({ lead: true });
   await new Promise(res => process.stdout.write(JSON.stringify({
     project: Z,
     profile: PROFILE,
+    // COUNTED OVER THESE CARDS, lead included — `counts` is a fold over `cards` and
+    // nothing else, which is the only definition that cannot drift: web/grid.js's
+    // countsFrom() folds the same array in the client, and the suite asserts the two
+    // agree on every fixture. Excluding the lead from one fold and not the other is how
+    // the header starts lying. It also answers the question the phone exists to ask
+    // (§1: "is anything blocked on me") — a lead sitting on a permission prompt is the
+    // most important `need_you` on the fleet, and reporting "0 need you" over it would be
+    // the summary lying at exactly the glance you would act on. The TUI's header counts
+    // no lead because the TUI's cards contain none: one rule, two card lists.
     counts: statusCounts(rows),
     cards: rows.map(c => ({
       name:     c.name,           // what fleet-send / fleet-read address
@@ -1825,6 +1874,15 @@ if (JSON_OUT) {
       // a marker that predates the field rather than a case the fleet can produce.
       sched:    c.sched ? { at: c.sched.at, msg: c.sched.msg ?? null } : null,
       limit_at: c.limitAt || null,   // "10:20pm" — when the usage window rolls over
+      // THE ONE FIELD THE TUI'S CARD DOES NOT DRAW, and it is here because the TUI has no
+      // lead card to draw it on. Without it a client can only tell the lead apart by
+      // comparing the string "master" itself — in the card list, on the session screen,
+      // and in front of every destructive button — and a comparison in three places is a
+      // comparison that drifts. `fleet-worktrees` already calls this row LEAD.
+      //   A boolean on EVERY card, never omitted on the workers: "is this the lead" must
+      // be one test, and an absent key reads as false in exactly the same way a real
+      // false does, right up until the day it is absent for another reason.
+      lead:     c.lead,
     })),
     free_worktrees: freeWorktrees(),
   }) + '\n', res));
@@ -1974,8 +2032,8 @@ function sessionStatuses(proj) {
   // Ring order — master first, then that project's own card order — so the stack lists
   // each project the way its grid and its ⇧←→ ring do, not the way tmux happens to sort.
   const ordered = [
-    ...names.filter(n => n === 'master'),
-    ...applyOrder(names.filter(n => n !== 'master').map(name => ({ name })), dir, sock).map(r => r.name),
+    ...names.filter(n => isLead(n)),
+    ...applyOrder(names.filter(n => !isLead(n)).map(name => ({ name })), dir, sock).map(r => r.name),
   ];
   return ordered.map(name => {
     const o = bySlot.get(name);

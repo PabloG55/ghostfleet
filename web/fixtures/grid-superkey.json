@@ -1,8 +1,22 @@
 {
   "project": "superkey",
   "profile": "work",
-  "counts": { "need_you": 0, "working": 2, "ready": 4, "parked": 0, "limit": 0, "interrupted": 0 },
+  "counts": { "need_you": 0, "working": 2, "ready": 5, "parked": 0, "limit": 0, "interrupted": 0 },
   "cards": [
+    {
+      "name": "master",
+      "label": null,
+      "status": "ready",
+      "folder": "superkey",
+      "branch": "main",
+      "agent": "claude",
+      "msg": "Dispatched the binder work to binder-slots. Waiting on its PR.",
+      "age": 95,
+      "attached": true,
+      "sched": null,
+      "limit_at": null,
+      "lead": true
+    },
     {
       "name": "coi-beside",
       "label": null,
@@ -14,7 +28,8 @@
       "age": 41,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "dupe-source",
@@ -27,7 +42,8 @@
       "age": 3000,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "doc-verify",
@@ -40,7 +56,8 @@
       "age": 7380,
       "attached": false,
       "sched": { "at": 1787356800 },
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "quote-extract",
@@ -53,7 +70,8 @@
       "age": 12,
       "attached": true,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "binder-slots",
@@ -66,7 +84,8 @@
       "age": 480,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "rls-contacts",
@@ -79,7 +98,8 @@
       "age": null,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     },
     {
       "name": "proposal-pdf",
@@ -92,7 +112,8 @@
       "age": 86400,
       "attached": false,
       "sched": null,
-      "limit_at": null
+      "limit_at": null,
+      "lead": false
     }
   ],
   "free_worktrees": []

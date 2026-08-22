@@ -454,11 +454,16 @@ function applyOverlay(g) {
   // then anything it has not heard of — a new session appears at the end rather than
   // vanishing because it is not in the list.
   if (overlay.order.length) {
-    const left = new Map(cards.map(c => [c.name, c]));
+    // The LEAD is pinned first and is not in the order, exactly as gather({lead:true})
+    // has it: <sock>.order is written from the TUI's cards, which never include master.
+    // Ordering it like a worker here would let the fixture show a layout the real emitter
+    // cannot produce.
+    const lead = cards.filter(c => c.lead);
+    const left = new Map(cards.filter(c => !c.lead).map(c => [c.name, c]));
     const out = [];
     for (const n of overlay.order) { const c = left.get(n); if (c) { out.push(c); left.delete(n); } }
     for (const c of cards) if (left.has(c.name)) out.push(c);
-    cards = out;
+    cards = [...lead, ...out];
   }
   const free = (g.free_worktrees || []).filter(w => !overlay.freeGone.has(w.path));
   return { ...g, cards, free_worktrees: free };
@@ -471,24 +476,36 @@ function fixtureVerb(tool, a) {
     case 'fleet_send':   overlay.status.set(a.session, 'working'); return ok(`sent to '${a.session}'`);
     case 'fleet_answer': overlay.status.set(a.session, 'working'); return ok(`answered '${a.session}'`);
     case 'fleet_stop':
+      // The planner refuses the lead before it reaches a command (mcp/fleet-dispatch.mjs),
+      // so fixture mode has to refuse it too — this backend stands in for the SERVER, and
+      // a demo that cheerfully stops master teaches the opposite of what the daemon does.
+      // It compares the NAME because that is what the server compares; the `lead` flag on
+      // the card is for the client's own rendering, and nothing here renders.
+      if (a.session === 'master')
+        return { ok: false, text: "fleet_stop: refusing to stop 'master' — it is the fleet's lead, not a worker" };
       overlay.gone.add(a.session);
       // reclaim also removes the worktree — and fleet-clean's gates decide whether that
       // is SAFE, not whether it was intended. The fixture refuses the one worktree whose
       // branch is not merged, so the `f = remove anyway` step has something to refuse.
       return ok(a.reclaim ? `stopped '${a.session}' and removed its worktree` : `stopped '${a.session}'`);
     case 'fleet_rename': {
+      if (a.session === 'master')
+        return { ok: false, text: "fleet_rename: refusing to rename 'master' — it is the fleet's lead, not a worker" };
       const st = overlay.status.get(a.session);
       overlay.gone.add(a.session);
       overlay.added.push({ name: a.new_name, label: null, status: st || 'ready', folder: a.new_name,
                            branch: a.new_name, agent: 'claude', msg: '', age: 0, attached: false,
-                           sched: null, limit_at: null });
+                           sched: null, limit_at: null, lead: false });
       return ok(`renamed '${a.session}' → '${a.new_name}'`);
     }
     case 'fleet_spawn':
       if (a.reuse) overlay.freeGone.add(a.reuse);
+      // `lead: false` spelled out, not left off: §4 carries the flag on EVERY card, and a
+      // spawned one is the last place you want "is this the lead" to depend on a key that
+      // happens to be absent.
       overlay.added.push({ name: a.name, label: null, status: 'starting', folder: a.name,
                            branch: a.branch || a.name, agent: a.agent || 'claude', msg: '', age: null,
-                           attached: false, sched: null, limit_at: null });
+                           attached: false, sched: null, limit_at: null, lead: false });
       return ok(`spawned '${a.name}'`);
     case 'fleet_worktree_remove':
       // The refusal path, so the confirmation that follows it is real: only a merged or

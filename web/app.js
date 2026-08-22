@@ -310,8 +310,10 @@ function gridScreen() {
     btn('p pause', () => { if (it.card) doVerb('fleet_pause', { project: S.project, session: it.card.name }); }),
     btn('P resume', () => { if (it.card) doVerb('fleet_resume', { project: S.project, session: it.card.name }); }),
     // The footer says which `x` means right now, exactly as the TUI's does, because
-    // finding out by pressing it costs a worktree.
-    btn(it.freeWt ? 'x remove wt' : 'x kill', () => { if (it.card) askKill(it.card.name); else if (it.freeWt) askRemoveWorktree(it.freeWt); }, 'danger'),
+    // finding out by pressing it costs a worktree — and on the lead it means nothing at
+    // all, which is worth saying before the tap rather than in the toast after it.
+    btn(it.freeWt ? 'x remove wt' : it.card?.lead ? 'x — not the lead' : 'x kill',
+        () => { if (it.card) askKill(it.card.name); else if (it.freeWt) askRemoveWorktree(it.freeWt); }, 'danger'),
     btn(', settings', () => sheetSettings()),
     btn('Q projects', () => { S.screen = 'projects'; S.sel = 0; render(); refresh(); }),
   ]));
@@ -323,14 +325,21 @@ function gridScreen() {
 // four of its keys collapse to ±1 — H/L move one card, K/J move one row, and one row
 // IS one card here.
 async function reorder(name, delta) {
-  const names = ((S.grid && S.grid.cards) || []).map(c => c.name);
-  const i = names.indexOf(name);
+  const cards = (S.grid && S.grid.cards) || [];
+  const i = cards.findIndex(c => c.name === name);
   if (i < 0 || !delta) return;
-  const ni = Math.max(0, Math.min(names.length - 1, i + delta));
-  if (ni === i) return;
-  names.splice(ni, 0, ...names.splice(i, 1));
+  // THE LEAD DOES NOT MOVE AND IS NOT IN THE ORDER. <sock>.order is written from the
+  // TUI's own cards, which never include master, and the emitter puts the lead first
+  // regardless of what that file says — so dragging it would be a card that springs back
+  // on the next poll, and sending its name would put a line in the order file that
+  // nothing will ever match.
+  if (cards[i].lead) return;
+  const ni = Math.max(0, Math.min(cards.length - 1, i + delta));
+  if (ni === i || cards[ni]?.lead) return;
+  const moved = cards.slice();
+  moved.splice(ni, 0, ...moved.splice(i, 1));
   S.sel = ni;
-  await doVerb('fleet_order', { project: S.project, order: names }, { quiet: true });
+  await doVerb('fleet_order', { project: S.project, order: moved.filter(c => !c.lead).map(c => c.name) }, { quiet: true });
 }
 
 // ── the session screen ────────────────────────────────────────────────────
@@ -377,6 +386,13 @@ function sessionScreen() {
     out.push(el('div', { class: 'hint', text: `'${S.session}' is not on this fleet's grid any more.` }));
   }
   const parked = c && c.status === 'parked';
+  // THE LEAD KEEPS EVERY VERB THAT MEANS SOMETHING FOR IT AND NONE THAT CANNOT HAPPEN.
+  // Prompting, answering a dialog, pausing and scheduling are the reasons to open this
+  // screen from a couch at all, and they work on master exactly as they do on a worker.
+  // Stop, reclaim and rename are refused by the server for every caller, so drawing them
+  // here would be three buttons whose only outcome is an error — and the reclaim one asks
+  // for a fingerprint before it can even fail.
+  const lead = !!(c && c.lead);
   out.push(el('div', { class: 'verbs' }, [
     btn('send a prompt', () => sheetSend(S.session), 'go'),
     // The motivating case (§1): a worker blocked on "Allow pnpm test?" since 9pm. That
@@ -385,15 +401,19 @@ function sessionScreen() {
     btn('answer keys', () => sheetAnswer(S.session)),
     btn(parked ? 'P resume' : 'p pause', () => doVerb(parked ? 'fleet_resume' : 'fleet_pause', { project: S.project, session: S.session })),
     btn('s sched', () => sheetSchedule(S.session)),
-    btn('r rename', () => sheetRename(S.session), 'danger'),
+    lead ? null : btn('r rename', () => sheetRename(S.session), 'danger'),
     btn('l label', () => sheetLabel(S.session)),
-    btn('x kill', () => askKill(S.session), 'danger'),
+    lead ? null : btn('x kill', () => askKill(S.session), 'danger'),
     // §7 puts stop --reclaim on the phone on purpose, and §12 is why it takes two
     // confirmations: fleet-clean's gates decide whether removal is SAFE, never whether
     // it was intended.
-    btn('stop + reclaim worktree', () => askReclaim(S.session), 'danger'),
+    lead ? null : btn('stop + reclaim worktree', () => askReclaim(S.session), 'danger'),
     btn('q back', () => back()),
-  ]));
+  ].filter(Boolean)));
+  // ...and it SAYS so, rather than leaving three buttons quietly missing. A gap you can
+  // see is a decision; a gap you cannot is a half-built screen (the same rule §7's two
+  // absent features are spelled out under).
+  if (lead) out.push(el('div', { class: 'hint', text: 'the fleet\'s lead — it cannot be stopped, reclaimed or renamed; every project needs one, and its checkout is the repo itself' }));
   out.push(viewSwitch());
   out.push(S.view === 'pane' ? paneView() : messages());
   return out.filter(Boolean);
@@ -840,7 +860,29 @@ function bar(cls, q, keys, buttons) {
 }
 function cancel() { S.confirm = null; render(); }
 
-function askKill(name) { if (name) { S.confirm = { kind: 'kill', name }; render(); } }
+// THE LEAD IS NOT A WORKER, and the card no longer looks any different from one — which
+// is the whole hazard of putting master on the grid at all. So every path into the two
+// verbs that would end it goes through here first.
+//
+// It reads `card.lead` (§4), NEVER the name: the producer decided which session is the
+// lead exactly once, and a client that re-derived it by comparing "master" here, on the
+// session screen, and beside each button would be three comparisons to keep in step.
+//
+// This is the affordance half only. mcp/fleet-dispatch.mjs refuses the call whatever the
+// client draws (§7: `curl` does not run this file), and the toast says the same thing the
+// server would — so the two cannot end up disagreeing about whether it was allowed.
+function isLeadCard(name) { const c = cardOf(name); return !!(c && c.lead); }
+function leadGuard(name, what) {
+  if (!isLeadCard(name)) return false;
+  toast(`'${name}' is this fleet's lead — it cannot be ${what}. Every project needs one, and its checkout is the repo itself.`, 'bad');
+  // toast() only sets the state; doVerb's callers repaint on their way to refresh() and
+  // this path has nothing else to do — so without this the tap produced no toast, no
+  // prompt and no error, which is a button that looks broken rather than one that refused.
+  render();
+  return true;
+}
+
+function askKill(name) { if (name && !leadGuard(name, 'stopped')) { S.confirm = { kind: 'kill', name }; render(); } }
 async function confirmedKill(name) {
   S.confirm = null;
   await doVerb('fleet_stop', { project: S.project, session: name });
@@ -848,7 +890,7 @@ async function confirmedKill(name) {
 }
 // stop --reclaim removes the worktree too, so it takes BOTH of the TUI's prompts: the
 // kill, then the removal. Two deliberate steps for the one verb that can delete work.
-function askReclaim(name) { if (name) { S.confirm = { kind: 'reclaim-kill', name }; render(); } }
+function askReclaim(name) { if (name && !leadGuard(name, 'stopped or reclaimed')) { S.confirm = { kind: 'reclaim-kill', name }; render(); } }
 function askReclaimWorktree(name) {
   const c = cardOf(name) || {};
   S.confirm = { kind: 'reclaim-wt', name, folder: c.folder || name, branch: c.branch || '' };
@@ -1128,6 +1170,9 @@ function sheetAnswer(name) {
 }
 
 function sheetRename(name) {
+  // The button is already gone on the lead's screen; the KEY is a second door into the
+  // same sheet, and a form that can only end in a refusal is worse than no form.
+  if (leadGuard(name, 'renamed')) return;
   const nm = input(name);
   const go = async () => {
     const n = (nm.value || '').trim();

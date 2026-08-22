@@ -3,8 +3,10 @@
 **Status:** design settled; `--json` (§4) shipped in #41, `fleet-serve` and the client in
 flight. Three decisions are settled: the transport is Tailscale with Tailnet Lock (§5),
 the phone gets the **full verb set** rather than a read-only phase (§7), and content is
-served **unredacted** (§11.3). One thing in here was **wrong until it met a user**: §7's
-session screen was a message list, and it could not show a command (§7a).
+served **unredacted** (§11.3). **Two** things in here were **wrong until they met a
+user**: §7's session screen was a message list and could not show a command (§7a), and §4
+left `master` out of the cards, so the phone could reach every worker and not the session
+you send work to ("it's not opening the main agent, just the sessions" — see §4's `lead`).
 Every number below was measured on this machine before the design was written, and **two
 of the measurements changed the design** — the sleep setting (§8) and the dependency
 posture (§6). See those sections before disagreeing with the conclusions.
@@ -91,17 +93,31 @@ with the scars.
 narrow widths columns collide (`people-dupespeople-dupes`). The *values* are already
 computed by `cardLines()` — they are truncated on the way out. `--json` emits them whole.
 
-The schema is deliberately **exactly what `cardLines()` consumes** — with one deliberate
-addition, noted under the block — so the phone renders from the same inputs the TUI does
-and the two cannot disagree:
+The schema is deliberately **exactly what `cardLines()` consumes** — with two deliberate
+additions, both noted under the block — so the phone renders from the same inputs the TUI
+does and the two cannot disagree:
 
 ```jsonc
 {
   "project": "superkey",
   "profile": "work",
-  "counts": { "need_you": 0, "working": 2, "ready": 4,
+  "counts": { "need_you": 0, "working": 2, "ready": 5,   // the lead is counted, see below
               "parked": 0, "limit": 0, "interrupted": 0 },
   "cards": [
+    {
+      "name":      "master",              // THE LEAD, and always the first card
+      "label":     null,
+      "status":    "ready",
+      "folder":    "superkey",            // the main checkout — the repo itself
+      "branch":    "main",
+      "agent":     "claude",
+      "msg":       "Dispatched the binder work to binder-slots.",
+      "age":       95,
+      "attached":  true,
+      "sched":     null,
+      "limit_at":  null,
+      "lead":      true                   // not a worker: no stop, no reclaim, no rename
+    },
     {
       "name":      "coi-beside",          // what fleet-send/fleet-read address
       "label":     null,                  // titles the card when set; name moves to line 2
@@ -113,7 +129,8 @@ and the two cannot disagree:
       "age":       20,                    // seconds; null when unknown
       "attached":  false,
       "sched":     null,                  // { "at": <epoch>, "msg": "…" } → card shows @HH:MM
-      "limit_at":  null                   // "10:20pm" → card shows ↻ 10:20pm
+      "limit_at":  null,                  // "10:20pm" → card shows ↻ 10:20pm
+      "lead":      false                  // on every card, never omitted
     }
   ],
   "free_worktrees": [
@@ -122,7 +139,56 @@ and the two cannot disagree:
 }
 ```
 
-`sched` carries the scheduled **prompt** as well as the time, and that is the one place
+### `lead`: the card the TUI does not have
+
+**`master` is in `cards`, first, and marked.** It was not, and that is the bug this
+section was amended for — from the person using the app, after a week of real use: *"it's
+not opening the main agent, just the sessions."* `gather()` had always filtered master out
+of the grid, and `--json` inherited the filter.
+
+**That filter is right for the TUI and wrong for a remote client**, and the distinction is
+the whole of the fix. The grid is drawn from *inside* master: you are already in it, a card
+for yourself would be redundant, `q` returns you there, and the header would count you
+among the workers you are deciding about. A phone is inside nothing — it is a viewer of
+every session — so for it master is not "here", it is simply unreachable. Same producer,
+one argument (`gather({lead: true})`), two card lists; `--plain`, `--order` and the TUI are
+byte-for-byte what they were.
+
+- **First, not last.** The stack picker had already made this call for the same reason
+  (`sessionStatuses`: the lead, then that project's card order) — and it has to be
+  *outside* `applyOrder`, because `<sock>.order` is written from the TUI's own cards and so
+  has never held master. Merged in, the lead would land at the END on every fleet that has
+  ever been reordered. It is also just true that the lead is the card you opened the app to
+  find. **The fleet's numbering is untouched:** `--order` still excludes it, so
+  `Ctrl-f <p> <s>` and ⇧←→ at the desk count the same sessions they always did. The digit
+  on a phone card is that card's own position, which is what `grid.js` already documents.
+- **`lead` is a boolean on every card**, and the client must not re-derive it by comparing
+  the string `"master"`. The producer decides it once; a client that compared the name
+  would do it in the card list, on the session screen and beside each destructive button —
+  three copies to keep in step, in front of the one verb that deletes work. `fleet-worktrees`
+  already calls this row `LEAD`.
+- **It counts.** `counts` is a fold over `cards` and nothing else — the only definition
+  that cannot drift, since `web/grid.js`'s `countsFrom()` folds the same array in the
+  client and the suite asserts the two agree on every fixture. It is also the right answer
+  to the question §1 says this exists to ask: a lead sitting on a permission prompt is the
+  most important `need_you` on the fleet, and "0 need you" over it would be the summary
+  lying at exactly the glance you would act on. The TUI's header counts no lead because the
+  TUI's cards contain none — one rule, two card lists.
+- **`+ new session` and the FREE worktree cards are untouched.** `free_worktrees` already
+  excluded the main checkout ("that's master's slot, never a free card"), so the lead
+  arriving as a card takes nothing away from that list and adds nothing to it.
+
+**And the lead cannot be stopped, reclaimed or renamed — enforced server-side.**
+`bin/fleet-stop` and `bin/fleet-rename` already refused by name, but they refuse in the
+*shell*, and a nonzero exit from a `bin/fleet-*` command is deliberately not treated as a
+refusal (several of them write to stderr on success). So `fleet_stop --reclaim master`
+came back through `fleet-serve` as `ok: true` with the words *"refusing to stop 'master'"*
+in the success toast, and the audit logged `result: 'ran'`. The refusal moved into
+`plan()` in `mcp/fleet-dispatch.mjs` — the one layer both callers go through — so the MCP
+server returns an `isError` and the daemon a 400 with `result: 'refused'`. The client not
+drawing the button is the affordance, never the control (§7).
+
+`sched` carries the scheduled **prompt** as well as the time, and that is the other place
 this schema is not simply what the card draws. `@10:30pm` with no way to say *what* will
 be sent is half a fact: in the TUI you are one keystroke from the session and can go and
 look, and on a phone you are not, so the text is the difference between a card that
@@ -145,7 +211,8 @@ which is a way the summary could lie:
 3. **`limit` is never folded into `ready`.** Five workers at a usage ceiling rendered as
    "5 ready" is the summary line lying at a glance, which is the one place it must not.
 
-`--json` is additive. `--plain` and the TUI are untouched.
+`--json` is additive. `--plain`, `--order` and the TUI are untouched — including the card
+list: theirs has no lead in it, and `counts` follows whichever list it is folding.
 
 ## 5. Transport: reachable from anywhere, routable from nowhere
 
