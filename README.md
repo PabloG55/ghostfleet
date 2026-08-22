@@ -130,6 +130,24 @@ about that, so the suffix is load-bearing: type `-cli`.
 Cloning is also what you want if you intend to edit ghostfleet itself: `cf-sync` syncs the
 runtime **from a real repo**, and an npx cache is not one.
 
+**If you already have a clone, be careful running the npx installer over it.** `install.sh`
+records where to sync FROM in `<runtime>/.source`, and `cf-sync` with no argument reads it —
+so an installer run from an npx cache used to repoint that at the cache, after which every
+`cf-sync` in your clone copied the *cache* into the live runtime. Nothing errors and the sync
+still prints `synced runtime`; your edits just quietly stop arriving. The installer now
+**keeps a recorded clone** when it is running from a cache (it says so: `pointer stays on your
+clone: …`), so this only bites an older install. To fix one, do either:
+
+```bash
+cd /path/to/ghostfleet && ./install.sh    # re-install from the clone — it re-records it
+cf-sync /path/to/ghostfleet               # or just repoint it once; later `cf-sync` remembers
+```
+
+Check it any time with `cat ~/.local/libexec/ghostfleet/.source`. An install run *from* a
+clone always repoints — that includes a re-install from the same clone, a moved clone, and a
+second clone — because the guard only fires when the copy being installed from could not serve
+as a sync source at all.
+
 Missing `tmux`? The installer detects it, works out the right package manager for your
 OS (Homebrew, apt, dnf, yum, pacman, zypper, or apk), and asks before running anything
 — it never installs (or `sudo`s) without you confirming. No package manager recognized,

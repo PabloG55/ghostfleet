@@ -188,9 +188,36 @@ command -v jq >/dev/null 2>&1 || { echo "error: jq is required to wire the hooks
 chmod +x "$REPO"/hooks/*.sh "$REPO"/bin/*
 
 # --- stage the runtime out of the repo (into a non-TCC location) ------------
-# cf-sync copies bin/tmux/hooks/mcp/skill/layouts from the repo into FLEET_HOME
+# cf-sync copies bin/tmux/hooks/mcp/skill/layouts/web from the repo into FLEET_HOME
 # and records the repo in FLEET_HOME/.source (so `cf-sync` alone re-syncs later).
+#
+# THAT POINTER IS A FOOTGUN, and this is where it goes off. `.source` is the only thing
+# telling a later `cf-sync` where to sync FROM, and cf-sync records whatever it was
+# handed — correctly, it cannot know better. So running the npm/npx installer on a
+# machine that ALREADY has a clone repointed .source at the npx cache, and from then on
+# `cf-sync` in the clone copied the CACHE into the live runtime: your edits stop
+# arriving, nothing errors, and the sync still prints "synced runtime". That is the
+# repo-vs-runtime trap at the top of CLAUDE.md, reached from a direction no message
+# mentions and with the success line asserting it did not happen.
+#   So: when the copy we are RUNNING FROM is not a git repo (npx cache, unpacked
+# tarball) and the recorded source is one, stage from here — that is what the person
+# asked for by running npx — and then put the pointer back. An install run from a clone
+# always repoints, unchanged: that includes a re-install from the same clone, a moved
+# clone, and a second clone, because the guard only ever fires when THIS copy could not
+# serve as a sync source in the first place.
+is_repo() { [ -e "$1/.git" ]; }   # a directory in a clone, a FILE in a git worktree
+KEEP_SOURCE=""
+if ! is_repo "$REPO"; then
+  prev="$(cat "$FLEET_HOME/.source" 2>/dev/null || true)"
+  if [ -n "$prev" ] && [ "$prev" != "$REPO" ] && is_repo "$prev"; then KEEP_SOURCE="$prev"; fi
+fi
 CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" "$REPO"
+if [ -n "$KEEP_SOURCE" ]; then
+  printf '%s\n' "$KEEP_SOURCE" > "$FLEET_HOME/.source"
+  echo "· this install ran from $REPO, which is not a git repo,"
+  echo "  so cf-sync's source pointer stays on your clone: $KEEP_SOURCE"
+  echo "  (to repoint it deliberately: cf-sync /path/to/ghostfleet)"
+fi
 chmod +x "$FLEET_HOME"/hooks/*.sh "$FLEET_HOME"/bin/* 2>/dev/null || true
 
 # Everything below points at the STAGED runtime, never the repo.
