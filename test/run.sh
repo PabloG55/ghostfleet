@@ -2871,6 +2871,57 @@ is "...and it is in the schema" "1" "$(grep -c "reclaim: { type: 'boolean'" "$RO
 is "...and force reaches both tools" "2" "$(grep -c "if (a.force) args.push('--force')" "$ROOT/mcp/fleet-dispatch.mjs" || true)"
 is "...refused without reclaim" "1" "$(grep -c 'force needs reclaim' "$ROOT/mcp/fleet-dispatch.mjs" || true)"
 
+# ...and NOT on the lead, from the other caller. plan() is shared, so the daemon group
+# below already drives this over HTTP — but an agent reaches it through callTool(), and MCP's
+# error channel is a result flagged isError. A refusal that comes back as ordinary output
+# renders in the lead's own transcript as a green call, which is the failure fail() exists
+# for. Driven, not grepped: plan() refuses before exec, so none of these run a command.
+group "the lead cannot be stopped from MCP either"
+if command -v node >/dev/null 2>&1; then
+  LD="$(cd "$(mktemp -d)" && pwd -P)"
+  # A socket no server answers on and a throwaway fleet dir, so the one call that IS
+  # allowed through can reach bin/fleet-stop without anything real to stop.
+  mcpcall() { env -u TMUX -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_SOCK=cf-nosuch CLAUDE_FLEET_DIR="$LD" \
+    node -e 'import(process.argv[1]).then(d => {
+      const r = d.callTool(process.argv[2], JSON.parse(process.argv[3]));
+      process.stdout.write(typeof r === "string" ? "RAN " + r : "REFUSED " + r.text);
+    })' "$ROOT/mcp/fleet-dispatch.mjs" "$1" "$2" 2>&1; }
+  is "stopping the lead is an isError"  "1" \
+     "$(mcpcall fleet_stop '{"session":"master"}' | grep -c "^REFUSED .*the fleet's lead" || true)"
+  is "...and so is reclaiming it"       "1" \
+     "$(mcpcall fleet_stop '{"session":"master","reclaim":true}' | grep -c "^REFUSED .*the fleet's lead" || true)"
+  is "...and renaming it"               "1" \
+     "$(mcpcall fleet_rename '{"session":"master","new_name":"lead"}' | grep -c "^REFUSED .*the fleet's lead" || true)"
+  # THE OTHER DIRECTION: a guard that refused every stop would pass all three. This one
+  # reaches bin/fleet-stop, which finds nothing to stop on a socket no server answers on
+  # and says so — its "no live session" line goes to stderr, so what comes back is the
+  # state-clearing line it prints on the way out.
+  is "a worker still reaches the command" "1" \
+     "$(mcpcall fleet_stop '{"session":"w-one"}' | grep -c "cleared 'w-one' state" || true)"
+  is "...and was not refused here"        "0" \
+     "$(mcpcall fleet_stop '{"session":"w-one"}' | grep -c '^REFUSED' || true)"
+  # ...and a name that CONTAINS the lead's is an ordinary worker. Not hypothetical: the
+  # worktree this landed from is called `master-card`, and a prefix or substring match here
+  # would refuse to stop it.
+  is "a name containing it is a worker"   "1" \
+     "$(mcpcall fleet_stop '{"session":"master-card"}' | grep -c "cleared 'master-card' state" || true)"
+  # PARK is refused and RESUME is not, which is the asymmetry: you can always turn the lead
+  # back on, never off. Both are checked, because an untested asymmetry is one that gets
+  # tidied into symmetry by the next reader.
+  is "parking the lead is an isError"     "1" \
+     "$(mcpcall fleet_pause '{"session":"master"}' | grep -c "^REFUSED .*the fleet's lead" || true)"
+  is "...but resuming it is not"          "0" \
+     "$(mcpcall fleet_resume '{"session":"master"}' | grep -c '^REFUSED' || true)"
+  # It reached exec rather than being turned back by plan(): `RAN` is what the executor
+  # returns, and fleet-resume's own "no session" line goes to stderr, so stdout is empty —
+  # which is why this asserts the disposition and not the text.
+  is "...and reaches the command"         "1" \
+     "$(mcpcall fleet_resume '{"session":"master"}' | grep -c '^RAN' || true)"
+  rm -rf "$LD"
+else
+  skip "the lead from MCP" "node missing"
+fi
+
 # ── 4d12. --json: the contract the phone renders from ────────────────────────
 # `--plain` is formatted FOR A TERMINAL and cannot be parsed. In the fixture below the
 # branch elides to `feat/coi-policy-beside-fo…`, the message is clipped at 44 columns,
@@ -3018,7 +3069,7 @@ if command -v tmux >/dev/null 2>&1; then
   # names, so a rename is a broken client, not a refactor.
   is "top-level keys"    "project profile counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
   is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
-  is "card keys"         "name label status folder branch agent msg age attached sched limit_at" \
+  is "card keys"         "name label status folder branch agent msg age attached sched limit_at lead" \
                          "$(J 'Object.keys(o.cards[0]).join(" ")')"
   is "project is the fleet's project" "demoproj" "$(J 'o.project')"
   is "profile is the profile"         "work"     "$(J 'o.profile')"
@@ -3029,6 +3080,11 @@ if command -v tmux >/dev/null 2>&1; then
         CLAUDE_CONFIG_DIR="$JS/cfg" node "$ROOT/bin/fleet-grid.mjs" cf-derived --json 2>/dev/null \
         | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).project))')"
   is "every session is a card"        "10"         "$(J 'o.cards.length')"
+  # This fixture has no `master` at all, so `lead` must be present and FALSE on all ten:
+  # it is a boolean on every card, not a key that turns up only on the one that has it.
+  # The lead's own card has its own group below.
+  is "no lead on a fleet without one" "0"          "$(J 'o.cards.filter(c=>c.lead).length')"
+  is "...and every card says false"   "10"         "$(J 'o.cards.filter(c=>c.lead===false).length')"
 
   # ── the values are UNTRUNCATED, which is the point ─────────────────────────
   # Both directions: --plain must be shown to elide, or "json carries it whole" would
@@ -3172,6 +3228,150 @@ else
   skip "--json schema" "tmux missing"
 fi
 
+# ── 4d12b. --json: the LEAD's card ───────────────────────────────────────────
+# The bug this group exists for, reported after a week of real use: "it's not opening the
+# main agent, just the sessions." gather() filtered `master` out of the cards, and --json
+# inherited the filter — so the phone could reach every worker and not the one session you
+# send work to.
+#
+# THE FILTER IS RIGHT FOR THE TUI AND WRONG FOR A REMOTE CLIENT, so every assertion here
+# is a PAIR: the lead is in --json, and it is still absent from --plain, from --order and
+# from the interactive grid. One direction on its own would pass for a build that had
+# simply deleted the filter, which would put a redundant card for yourself on the screen
+# you are drawing it from — and one direction the other way passes for the bug.
+#
+# The interactive grid is driven for real, in a tmux pane, and its pane is CAPTURED: a
+# `lead` a client can see and the TUI cannot is not something --plain can prove, since
+# --plain is a different code path from renderGrid. (Never headlessly — it blocks on the
+# tty; CLAUDE.md.)
+group "--json: the lead's card"
+if command -v tmux >/dev/null 2>&1; then
+  JL="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$JL/fleet" "$JL/wt/main" "$JL/wt/w-one" "$JL/wt/w-two"
+  node -e '
+    const fs=require("fs"),path=require("path");
+    const JL=process.argv[1], SOCK=process.argv[2];
+    const F=path.join(JL,"fleet");
+    const now=Math.floor(Date.now()/1000);
+    const A=t=>JSON.stringify({type:"assistant",message:{role:"assistant",content:[{type:"text",text:t}]}});
+    const U=JSON.stringify({type:"user",message:{role:"user",content:"ok"}});
+    const mk=(slot,o,lines)=>{
+      const tr=path.join(JL,slot+".jsonl");
+      fs.writeFileSync(tr,lines.join("\n")+"\n");
+      fs.utimesSync(tr,now-3600,now-3600);
+      fs.writeFileSync(path.join(F,slot+".json"),JSON.stringify(
+        Object.assign({sock:SOCK,slot,cwd:path.join(JL,"wt",slot==="master"?"main":slot),
+                       folder:slot==="master"?"main":slot,branch:"main",transcript:tr,ts:now-3600},o)));
+    };
+    // The LEAD is the one blocked on a question, deliberately: it is the case the counts
+    // decision turns on, and the one a phone exists to see.
+    mk("master", {status:"need-you",ts:now-60}, [U,A("Which branch should I cut the release from?")]);
+    mk("w-one",  {status:"ready"},              [A("Done. PR is up.")]);
+    mk("w-two",  {status:"ready"},              [A("Rebased and pushed.")]);
+    // A card order the TUI would have written: workers only, and w-two before w-one. The
+    // lead is not in it and must still come first — merged into applyOrder() it would land
+    // at the END, which is the failure mode this pins.
+    fs.writeFileSync(path.join(F,SOCK+".order"),"w-two\nw-one\n");
+  ' "$JL" cfjld
+  tmux -L cfjld kill-server 2>/dev/null
+  for s in master w-one w-two; do
+    d="$JL/wt/$s"; [ "$s" = master ] && d="$JL/wt/main"
+    tmux -L cfjld new-session -d -s "$s" -c "$d" -x 120 -y 40 "cat '$FIX/claude-idle.txt'; sleep 300" 2>/dev/null
+  done
+  sleep 1
+  lgrid() { env -u TMUX CLAUDE_FLEET_DIR="$JL/fleet" CLAUDE_FLEET_ROOT= CLAUDE_CONFIG_DIR="$JL/cfg" \
+            CLAUDE_FLEET_SCOPE=leadproj CLAUDE_FLEET_PROFILE=work \
+            node "$ROOT/bin/fleet-grid.mjs" cfjld "$@" 2>/dev/null; }
+  lgrid --json  > "$JL/out.json"
+  lgrid --plain > "$JL/out.plain"
+  lgrid --order > "$JL/out.order"
+  L() { node -e '
+    const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    const v=new Function("o","return ("+process.argv[2]+")")(o);
+    console.log(v===undefined?"":(v!==null&&typeof v==="object")?JSON.stringify(v):String(v));
+  ' "$JL/out.json" "$1"; }
+
+  # ── it is there, and it is FIRST ───────────────────────────────────────────
+  is "the lead is a card"              "1"        "$(L 'o.cards.filter(c=>c.name==="master").length')"
+  is "...and the first one"            "master"   "$(L 'o.cards[0].name')"
+  # The order file names both workers in reverse, so this is not "first because tmux
+  # happened to list it first": the workers' own order is honoured behind the lead.
+  is "...ahead of the saved order"     "master,w-two,w-one" "$(L 'o.cards.map(c=>c.name).join(",")')"
+  is "every session is a card"         "3"        "$(L 'o.cards.length')"
+
+  # ── how it is MARKED, and the client must not need the name ────────────────
+  is "the lead is flagged"             "true"     "$(L 'o.cards[0].lead')"
+  is "...and it is a boolean"          "boolean"  "$(L 'typeof o.cards[0].lead')"
+  # The other direction: a flag that is true everywhere marks nothing.
+  is "the workers are not"             "false,false" "$(L 'o.cards.filter(c=>c.name!=="master").map(c=>c.lead).join(",")')"
+  is "exactly one lead"                "1"        "$(L 'o.cards.filter(c=>c.lead===true).length')"
+  is "lead is on every card"           "3"        "$(L 'o.cards.filter(c=>typeof c.lead==="boolean").length')"
+
+  # ── the lead's own fields are computed, not stubbed ────────────────────────
+  # It goes through the same gather() the workers do, so its status comes off the same
+  # pane+hook path. A lead pinned to some placeholder status would look identical here
+  # until the day you needed it to be right.
+  is "the lead's status is derived"    "need-you" "$(L 'o.cards[0].status')"
+  is "...its folder is the checkout"   "main"     "$(L 'o.cards[0].folder')"
+  is "...and it carries its message"   "Which branch should I cut the release from?" "$(L 'o.cards[0].msg')"
+
+  # ── it COUNTS, because counts is a fold over cards ─────────────────────────
+  # A lead blocked on a question is the most important need_you on the fleet; reporting
+  # "0 need you" over it would be the summary lying at the one glance you would act on.
+  is "the lead is counted"             "1" "$(L 'o.counts.need_you')"
+  is "...and the workers still are"    "2" "$(L 'o.counts.ready')"
+  # The same fold, done twice — statusCounts() here and web/grid.js's countsFrom() in the
+  # client. Excluding the lead from one and not the other is how the header starts lying.
+  is "counts == a fold over the cards" "" "$(node -e '
+    const fs=require("fs");
+    const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    const n=s=>o.cards.filter(c=>c.status===s).length;
+    const want={need_you:n("need-you"),working:n("working"),ready:n("ready"),
+                parked:n("parked"),limit:n("limit"),interrupted:n("interrupted")};
+    console.log(Object.keys(want).filter(k=>want[k]!==o.counts[k]).join(" "));
+  ' "$JL/out.json")"
+
+  # ── and the surfaces that must NOT have gained it ─────────────────────────
+  is "--plain has no lead row"         "0" "$(grep -ac '^master' "$JL/out.plain" || true)"
+  is "...but has both workers"         "2" "$(grep -acE '^w-(one|two) ' "$JL/out.plain" || true)"
+  # --order IS the fleet's numbering (the digits, 1-9, Ctrl-f <p> <s>, ⇧←→). A lead in it
+  # would renumber every worker at the desk.
+  is "--order has no lead"             "0" "$(grep -ac '^master$' "$JL/out.order" || true)"
+  is "...and still numbers the workers" "w-two
+w-one" "$(cat "$JL/out.order")"
+
+  # ── the interactive grid: the real TUI, its real pane ─────────────────────
+  # node --check proves it parses, not that it runs, and --plain is a different code path
+  # from renderGrid — so this is the only thing that shows what the screen draws.
+  tmux -L cfjldui kill-server 2>/dev/null
+  tmux -L cfjldui new-session -d -x 100 -y 40 \
+    -e CLAUDE_FLEET_DIR="$JL/fleet" -e CLAUDE_FLEET_ROOT= -e CLAUDE_CONFIG_DIR="$JL/cfg" \
+    -e CLAUDE_FLEET_SCOPE=leadproj -e CLAUDE_FLEET_PROFILE=work \
+    "node '$ROOT/bin/fleet-grid.mjs' cfjld - > '$JL/tui.out' 2>'$JL/tui.err'; sleep 20" 2>/dev/null
+  sleep 3
+  tui="$(tmux -L cfjldui capture-pane -p 2>/dev/null)"
+  # Counted off the card TITLES rather than any line mentioning a name, so the answer does
+  # not depend on how many cards this width puts on a row.
+  is "the TUI draws both workers"      "2" "$(printf '%s\n' "$tui" | grep -aoE '─ [0-9] w-(one|two) ' | grep -ac . || true)"
+  is "...and no card for itself"       "0" "$(printf '%s\n' "$tui" | grep -ac 'master' || true)"
+  # THE HEADER, WHICH IS THE PAIR TO `counts` ABOVE. --json says need_you 1 because its
+  # cards include the lead; the TUI says 0 because its cards do not. One rule — counts are
+  # a fold over whatever card list you are drawing — and the two surfaces differ only
+  # because their lists do.
+  is "...and its header counts no lead" "1" \
+     "$(printf '%s\n' "$tui" | grep -ac '0 need you · 0 working · 2 ready' || true)"
+  # + new session survives — a card list that lost it would be a different bug wearing
+  # this one's clothes.
+  is "...+ new session is still there" "1" "$(printf '%s\n' "$tui" | grep -ac '+ new session' || true)"
+  is "...and it did not crash"         "0" "$(printf '%s\n' "$tui" | grep -acE 'ReferenceError|TypeError|is not defined' || true)"
+  tmux -L cfjldui kill-server 2>/dev/null
+
+  tmux -L cfjld kill-server 2>/dev/null
+  rm -rf "$JL"
+else
+  skip "--json the lead" "tmux missing"
+fi
+
 # free_worktrees is the one field that comes from git rather than from a pane, and the
 # grey FREE cards are what the phone taps to reuse a checkout. Three ways it can be
 # wrong, all silent: the main checkout offered as reusable (it is master's slot), a
@@ -3208,8 +3408,15 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "the main checkout is not free"    "0" "$(JW_ 'o.free_worktrees.filter(w=>w.path.endsWith("/proj")).length')"
   is "an occupied worktree is not free" "0" "$(JW_ 'o.free_worktrees.filter(w=>w.path.endsWith("/proj-3")).length')"
   is "...it is a card instead"          "1" "$(JW_ 'o.cards.filter(c=>c.name==="proj-3").length')"
-  # master is the home screen, never a card — same rule the grid draws by
-  is "master is not a card"             "0" "$(JW_ 'o.cards.filter(c=>c.name==="master").length')"
+  # THE LEAD IS A CARD, and this assertion used to say the opposite — it encoded the bug.
+  # `proj` is master's home, so the two lists have to disagree about it on purpose: off
+  # free_worktrees because a session is standing in it, and ON cards because that session
+  # is the one the phone came for (docs/mobile.md §4). The TUI still draws neither.
+  is "the lead IS a card"               "1"      "$(JW_ 'o.cards.filter(c=>c.name==="master").length')"
+  is "...and it is first"               "master" "$(JW_ 'o.cards[0].name')"
+  is "...flagged as the lead"           "true"   "$(JW_ 'o.cards[0].lead')"
+  is "...while the worker is not"       "false"  "$(JW_ 'o.cards.find(c=>c.name==="proj-3").lead')"
+  is "...and its checkout is still not free" "0" "$(JW_ 'o.free_worktrees.filter(w=>w.path.endsWith("/proj")).length')"
   tmux -L cfjsw kill-server 2>/dev/null
   rm -rf "$JW"
 else
@@ -3724,6 +3931,41 @@ if sv_start verbs; then
   is "a reclaim declines the same way"       "200" "$(pf reclaim.declined verbs)"
   is "...and its force then goes through"    "200" "$(pf reclaimForce.ok verbs)"
   is "...reaching fleet-stop with --force"   "1"   "$(grep -c 'fleet-stop .*\[--reclaim\] \[--force\]' "$SV/ran" || true)"
+  # THE LEAD, which only became nameable from a phone once it gained a card (§4). Refused
+  # in plan() — the layer BOTH callers go through — and not by the client declining to draw
+  # the button, which curl does not run. bin/fleet-stop refused it already, but it refused
+  # in the shell, and a nonzero exit from a bin/fleet-* command is deliberately handed back
+  # as ordinary output here: the refusal arrived as ok:true with "refusing to stop 'master'"
+  # in the success toast, and the audit said `result: 'ran'`.
+  is "stopping the lead is refused"          "400" "$(pf lead.stop verbs)"
+  is "...and says it is the lead"            "1"   "$(pb lead.stop verbs | grep -c "the fleet's lead" || true)"
+  is "reclaiming the lead is refused"        "400" "$(pf lead.reclaim verbs)"
+  is "renaming the lead is refused"          "400" "$(pf lead.rename verbs)"
+  # THE OTHER DIRECTION, twice over. A guard that refused every stop would pass all three
+  # above: the force chain higher up stopped 'w1' for real, and a name that merely CONTAINS
+  # `master` is an ordinary worker — a prefix or substring match would refuse this repo's
+  # own worktrees.
+  is "a near-miss name still stops"          "200" "$(pf nearLead.stop verbs)"
+  is "...and reached the command"            "1"   "$(grep -c 'fleet-stop .*\[master-card\]' "$SV/ran" || true)"
+  # ...and the refused ones never reached a command at all. The stubs log every call, so
+  # this is what ran, not what we meant to allow — and it is the SAME pattern shape as the
+  # near-miss above, one place looser than `[master]`, so neither of the pair can pass by
+  # being unmatchable.
+  is "fleet-stop never ran for the lead"     "0"   "$(grep -c 'fleet-stop .*\[master\]' "$SV/ran" || true)"
+  is "...and fleet-rename never did"         "0"   "$(grep -c 'fleet-rename .*\[master\]' "$SV/ran" || true)"
+  # PARK, same rule — the governor already excludes master from what it parks, and this
+  # only became reachable when the lead got a card, where it is one swipe on the first one.
+  is "parking the lead is refused"           "400" "$(pf lead.pause verbs)"
+  is "...and says it is the lead"            "1"   "$(pb lead.pause verbs | grep -c "the fleet's lead" || true)"
+  is "...and fleet-pause never ran for it"   "0"   "$(grep -c 'fleet-pause .*\[master\]' "$SV/ran" || true)"
+  # BUT RESUME IS NOT REFUSED. The recovery direction stays open, and an untested
+  # asymmetry is one somebody tidies into a bug.
+  is "resuming the lead is allowed"          "200" "$(pf lead.resume verbs)"
+  is "...and reached the command"            "1"   "$(grep -c 'fleet-resume .*\[master\]' "$SV/ran" || true)"
+  # ...and a worker parks as it always did, or "refused" above would be indistinguishable
+  # from a verb that is simply broken.
+  is "a worker still parks"                  "200" "$(pf worker.pause verbs)"
+  is "...reaching fleet-pause"               "1"   "$(grep -c 'fleet-pause .*\[w1\]' "$SV/ran" || true)"
   # THE OTHER DIRECTION on every refusal above: only the calls that were allowed ran.
   is "spawn ran exactly once"                "1"   "$(grep -c '^fleet-spawn ' "$SV/ran" || true)"
   is "the spawn that ran was the right one"  "1"   "$(grep -c 'fleet-spawn \[api-9\]' "$SV/ran" || true)"
@@ -3746,7 +3988,20 @@ if sv_start verbs; then
   is "a spawn is in it"                      "1"   "$(grep -c 'mobile.*spawn name=api-9' "$INB" || true)"
   is "a forced worktree removal is in it"    "1"   "$(grep -c 'mobile.*worktree_remove path=.*force=true' "$INB" || true)"
   is "a forced reclaim is in it"             "1"   "$(grep -c 'mobile.*stop session=w1 reclaim=true force=true' "$INB" || true)"
-  is "a REFUSED call is recorded too"        "1"   "$(grep -c 'REFUSED' "$INB" || true)"
+  is "a REFUSED call is recorded too"        "1"   "$(grep -c 'send session=w1 — REFUSED' "$INB" || true)"
+  # ...including each of the lead's three, by name and with its arguments — §7 wants the
+  # log to say what was attempted, and a refusal that leaves no row is a refusal nobody
+  # can review afterwards.
+  is "the lead's stop is audited refused"    "1"   "$(grep -c 'stop session=master — REFUSED' "$INB" || true)"
+  is "...its reclaim too"                    "1"   "$(grep -c 'stop session=master reclaim=true — REFUSED' "$INB" || true)"
+  is "...and its rename"                     "1"   "$(grep -c 'rename session=master new_name=lead — REFUSED' "$INB" || true)"
+  is "...and its park"                       "1"   "$(grep -c 'pause session=master — REFUSED' "$INB" || true)"
+  is "...while its resume is audited as ran" "0"   "$(grep -c 'resume session=master — REFUSED' "$INB" || true)"
+  is "...and IS in the log"                  "1"   "$(grep -c 'resume session=master' "$INB" || true)"
+  # and the near-miss is recorded as having RUN, or "refused" would be indistinguishable
+  # from "audited at all"
+  is "the near-miss is audited as ran"       "0"   "$(grep -c 'stop session=master-card — REFUSED' "$INB" || true)"
+  is "...but it is in the log"               "1"   "$(grep -c 'stop session=master-card' "$INB" || true)"
   # fleet-inbox reads this with IFS=$'\t'; an EMPTY field there collapses and shifts every
   # later column left (CLAUDE.md's oldest trap), so no row may have one.
   is "every row has all four fields"         "0"   "$(awk -F'\t' 'NF!=4 || $1=="" || $2=="" || $3=="" || $4==""' "$INB" | grep -c . || true)"
@@ -4112,9 +4367,12 @@ for pj in pa pb; do
   git -C "$RG/$pj/main" worktree add -q -b "wt2-$pj" "$RG/$pj/wt2-$pj" 2>/dev/null
 done
 printf 'pa\t%s\twork\npb\t%s\twork\n' "$RG/pa" "$RG/pb" > "$RG/home/.config/ghostfleet/projects"
-# a live session standing in pa's FIRST worktree, on pa's OWN socket
+# a live session standing in pa's FIRST worktree, on pa's OWN socket — plus pa's LEAD,
+# sitting in the main checkout the way a real one does. pb gets neither, which is what
+# makes the Projects-screen assertions below a pair rather than a single reading.
 tmux -L cf-pa kill-server 2>/dev/null
 tmux -L cf-pa new-session -d -s busy -c "$RG/pa/wt1-pa" 'sleep 120' 2>/dev/null
+tmux -L cf-pa new-session -d -s master -c "$RG/pa/main" 'sleep 120' 2>/dev/null
 RPORT="$(free_port)"; RPORT="${RPORT:-18899}"
 RBASE="http://localhost:$RPORT"
 GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl" \
@@ -4141,6 +4399,12 @@ for (const p of ['pa', 'pb']) {
   const r = await a.api(base, 'GET', `/api/grid?project=${p}`);
   console.log(`${p}\x1f${r.status}\x1f${JSON.stringify(r.json)}`);
 }
+// THE SEAM. /api/projects rolls each project up from these same cards, and until now the
+// rollup was only ever tested against a STUB grid while the cards were only ever tested
+// through the real emitter — so nothing crossed the join, and the lead arriving in `cards`
+// changed a screen no assertion was watching.
+const pr = await a.api(base, 'GET', '/api/projects');
+console.log(`projects\x1f${pr.status}\x1f${JSON.stringify(pr.json)}`);
 PROBE
   HELPER="file://$ROOT/test/helpers/serve-client.mjs" node "$RG/probe.mjs" "$RBASE" "$rcode" > "$RG/out" 2>"$RG/err"
   rf() { grep -m1 "^$1$US" "$RG/out" | cut -d "$US" -f2; }
@@ -4165,6 +4429,37 @@ PROBE
   is "pa's counts have the six §4 keys"      "6"   \
      "$(rb pa | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(String(Object.keys(JSON.parse(s).counts).length)))')"
   is "the busy session is a card, not free"  "1"   "$(rb pa | grep -c '"name":"busy"' || true)"
+  # ── the Projects screen, from the same cards (the seam) ────────────────────
+  # It counts cards.length, so the lead counts there too — which is what the TUI's own
+  # Projects screen has ALWAYS done (projectStatus -> sessionStatuses, "Includes master:
+  # it's the project's lead session"). The phone was the one under-counting; these two
+  # surfaces now agree, and this is the assertion that says so out loud.
+  PJ() { node -e '
+    const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    const p=(o.projects||[]).find(x=>x.name===process.argv[2])||{};
+    const v=new Function("p","return ("+process.argv[3]+")")(p);
+    console.log(v===undefined?"":(v!==null&&typeof v==="object")?JSON.stringify(v):String(v));
+  ' /dev/stdin "$1" "$2" <<< "$(rb projects)"; }
+  is "the projects rollup answers"           "200"    "$(rf projects)"
+  is "pa counts its lead and its worker"     "2"      "$(PJ pa 'p.sessions.total')"
+  # THE SEAM ITSELF, stated as an identity rather than as two numbers I typed: the rollup's
+  # total must equal the card count /api/grid served for the same project, from the same
+  # daemon, in the same second. That is the join nothing crossed before — and it holds
+  # whatever the fleet happens to contain, so it cannot pass by coincidence of fixture.
+  is "...which is exactly its card count"    "same"   "$(node -e '
+    const fs=require("fs");
+    const grid=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    const proj=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+    const pa=(proj.projects||[]).find(x=>x.name==="pa")||{};
+    const n=(grid.cards||[]).length, t=pa.sessions&&pa.sessions.total;
+    console.log(n===t ? "same" : `grid=${n} rollup=${t}`);
+  ' <(rb pa) <(rb projects))"
+  # ...and the lead is genuinely one of the cards being counted, not a coincidence of two.
+  is "...and the lead is one of them"        "1"      "$(rb pa | grep -c '"name":"master"' || true)"
+  # ...and the other direction: a project with NO sessions still reads zero, so "counts the
+  # lead" cannot be a constant.
+  is "pb has no sessions at all"             "0"      "$(PJ pb 'p.sessions.total')"
+  is "...and is not silently null"           "object" "$(PJ pb 'typeof p.sessions')"
 else
   skip "real grid through the daemon" \
     "server did not come up: $(tr '\n' ' ' < "$RG/log" 2>/dev/null | cut -c1-180)"

@@ -112,7 +112,7 @@ is('the service worker never caches a verb', true, /req\.method !== 'GET'/.test(
 // ── 3. the fixtures are §4, exactly ───────────────────────────────────────
 const NINE = ['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted'];
 const TOP = ['project', 'profile', 'counts', 'cards', 'free_worktrees'].sort().join(',');
-const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'msg', 'age', 'attached', 'sched', 'limit_at'].sort().join(',');
+const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead'].sort().join(',');
 const COUNTS = ['need_you', 'working', 'ready', 'parked', 'limit', 'interrupted'].sort().join(',');
 const fixDir = path.join(WEB, 'fixtures');
 const grids = fs.readdirSync(fixDir).filter(f => /^grid-.*\.json$/.test(f)).sort();
@@ -123,7 +123,16 @@ for (const f of grids) {
   (g.cards || []).forEach((c, i) => {
     is(`${f}#${i}: card keys are §4's`, CARD, Object.keys(c).sort().join(','));
     is(`${f}#${i}: status is one of the nine`, true, NINE.includes(c.status));
+    // A BOOLEAN, never absent and never a string: the client gates three destructive
+    // buttons on it, and `undefined` is falsy in exactly the way a real `false` is.
+    is(`${f}#${i}: lead is a boolean`, 'boolean', typeof c.lead);
   });
+  // At most one lead per fleet, and where there is one it is FIRST — gather({lead:true})
+  // puts it there deliberately (it is the card you opened the app to find), so a fixture
+  // that showed it anywhere else would be teaching a layout the emitter cannot produce.
+  const leads = (g.cards || []).filter(c => c.lead);
+  is(`${f}: at most one lead`, true, leads.length <= 1);
+  if (leads.length) is(`${f}: the lead is the first card`, true, g.cards[0].lead === true);
   (g.free_worktrees || []).forEach((w, i) => {
     is(`${f} free#${i}: keys are §4's`, 'branch,path,task', Object.keys(w).sort().join(','));
   });
@@ -163,6 +172,41 @@ is('§7\'s destructive verbs take a passkey', 'fleet_rename,fleet_spawn,fleet_st
 is('...and so does removing a worktree', true, /removeWorktree[\s\S]{0,400}assertFor\(/.test(APP));
 is('stop --reclaim is reachable', true, /fleet_stop'[^\n]*reclaim: true/.test(APP));
 is('reclaim takes BOTH confirmations', true, /reclaim-kill/.test(APP) && /reclaim-wt/.test(APP));
+
+// ── 5a. ...and not on the lead ─────────────────────────────────────────────
+// The lead's card looks exactly like a worker's — same five lines, same box — so the one
+// thing standing between "master" and `stop --reclaim` on this screen is that the button
+// is not drawn. It is read off §4's `lead` flag, NEVER by comparing the name: the producer
+// decided which session is the lead once, and three copies of that comparison (the card
+// list, the session screen, each button) is three things to keep in step.
+//   None of this is the enforcement — mcp/fleet-dispatch.mjs refuses the call whoever asks
+// — which is why the run.sh group drives the refusal through the planner as well.
+is('the lead is read off the card, not the name', true,
+   /function isLeadCard\(name\) \{ const c = cardOf\(name\); return !!\(c && c\.lead\); \}/.test(APP));
+is('...and kill goes through the guard', true, /function askKill\(name\) \{ if \(name && !leadGuard\(/.test(APP));
+is('...and reclaim too', true, /function askReclaim\(name\) \{ if \(name && !leadGuard\(/.test(APP));
+is('...and rename too', true, /function sheetRename\(name\) \{[\s\S]{0,400}?leadGuard\(name, 'renamed'\)/.test(APP));
+is('the lead keeps send/answer/pause', true, /const lead = !!\(c && c\.lead\);/.test(APP));
+is('...and says why the rest are gone', true, /cannot be stopped, reclaimed or renamed/.test(APP));
+// Fixture mode stands in for the SERVER, so it has to refuse what the server refuses —
+// otherwise the demo teaches the opposite of what the daemon does.
+is('fixture mode refuses to stop the lead', true, /refusing to stop 'master'/.test(JS['api.js']));
+is('...and to rename it', true, /refusing to rename 'master'/.test(JS['api.js']));
+is('...and to park it', true, /refusing to park 'master'/.test(JS['api.js']));
+// PARK is the third one, and the one that only became reachable because the lead got a
+// card: it is the swipe-left gesture on what is now the FIRST card on the grid. Every path
+// into it goes through one function, so a new call site cannot miss the guard.
+is('pause has one guarded entry point', true, /function pauseSession\(name\) \{\s*\n?\s*if \(name && !leadGuard\(name, 'paused'\)\)/.test(APP));
+is('...and nothing calls fleet_pause around it', 1, (APP.match(/doVerb\('fleet_pause'/g) || []).length);
+// RESUME is deliberately NOT guarded — the recovery direction stays open on every surface.
+is('resume is not guarded', true, /function resumeSession\(name\) \{\s*\n?\s*if \(name\) doVerb\('fleet_resume'/.test(APP));
+// The auto-nudge rows are per-WORKER: a toggle for master pinging itself is nonsense, and
+// each row also carries a rename shortcut that could only reach a refusal.
+// Anchored to the CARDS LIST it filters, not to the predicate: `.filter(c => !c.lead)`
+// alone also matches reorder()'s order list, so the loose version passed with the settings
+// rows left unfiltered. A regex that matches somewhere else is a test that cannot fail.
+is('the settings rows skip the lead', true,
+   /S\.grid\.cards\) \|\| \[\]\)\.filter\(c => !c\.lead\)/.test(APP));
 // The two things §7 says cannot transfer. A substitute for either is the mistake; the
 // app is required to SAY they are absent rather than leave a gap.
 is('the stack is not rebuilt', 0, (APP.match(/renderStack|stackScreen/g) || []).length);
