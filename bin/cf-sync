@@ -14,6 +14,12 @@
 #   cf-sync                 # sync recorded source repo -> live runtime
 #   cf-sync <repo-path>     # sync from an explicit repo (also re-records it)
 #
+# The recorded pointer is <dest>/.source, and it is the only thing that knows where a
+# bare `cf-sync` syncs FROM. install.sh writes it too — except when it is running out of
+# an npx cache while .source already names a real clone, where it leaves the clone alone
+# (see the staging block there); otherwise `npx ghostfleet-cli` on a machine that has a
+# clone would silently redirect every later sync at the cache.
+#
 # Live runtime dir: $CLAUDE_FLEET_HOME or ~/.local/libexec/ghostfleet
 set -uo pipefail
 
@@ -44,6 +50,12 @@ if [ "$REPO" = "$DEST" ]; then
   echo "cf-sync: if you meant to deploy, name the runtime: CLAUDE_FLEET_HOME=~/.local/libexec/ghostfleet cf-sync $REPO" >&2
   exit 0
 fi
+
+# A source with no .git is worth one line. It is not an error — an unpacked npx cache
+# syncs perfectly well — but it is nobody's checkout, so edits made in a clone you create
+# LATER go nowhere while this still prints "synced runtime" over the top of them.
+# install.sh guards the other order (clone first, then npx); nothing can guess this one.
+[ -e "$REPO/.git" ] || echo "cf-sync: note — $REPO is not a git repo (an npx cache unpacks into a dir like that). If the code you edit lives in a CLONE, point this at it once: cf-sync /path/to/ghostfleet" >&2
 
 # copy only the runtime dirs (not .git / README / tests); preserve perms so the
 # exec bits survive. Mirror each dir so deletions in the repo propagate.
