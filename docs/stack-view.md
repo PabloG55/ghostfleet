@@ -11,6 +11,20 @@ split panes, work in any of them. The point is watching two workers at once — 
 project's session on the left, another's on the right — instead of cycling between
 full-screen views.
 
+<p align="center">
+  <img src="stack-demo.gif" width="900"
+       alt="The stack screen listing three idle workers, each ticked, then the stack open:
+            claude, opencode and codex side by side in three panes, each with its own
+            status bar and a border naming its project and session.">
+</p>
+
+<p align="center">
+  <sub>Recorded by <a href="../stack.tape"><code>stack.tape</code></a> — three workers on
+  one project, running <b>claude</b>, <b>opencode</b> and <b>codex</b>. Its header lists
+  what the demo fleet has to contain first, including the first-run dialog each agent
+  shows in a fresh profile.</sub>
+</p>
+
 ## The constraint everything else follows from
 
 **Every project is its own tmux server** (`cf-<project>`), and *panes cannot cross
