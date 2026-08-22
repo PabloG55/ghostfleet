@@ -97,16 +97,29 @@ export function self() {
 // fleet-spawn and fleet-worktrees find the repo from $PWD, not from -s — they are the
 // only two commands here that do. So targeting another project means RUNNING THERE, and
 // this resolves where "there" is: the same convention enter_master uses in
-// bin/ghostfleet — <root>/<name>, else the first child repo, else the root itself,
-// because a project is registered either as a container of checkouts or as one repo.
+// bin/ghostfleet — <root>/<name>, else a child repo, else the root itself, because a
+// project is registered either as a container of checkouts or as one repo
+// (docs/OPERATIONS.md, "Two ways to register a project").
+//
+// PREFER A MAIN CHECKOUT among the children, and sort. A linked worktree has a .git of
+// its own, so "the first child directory that is a repo" handed one back on a container
+// root — whereupon fleet-spawn, run there, correctly refused to spawn a worker from
+// inside a worktree, and a lead's fleet_spawn failed for a reason nothing in the request
+// explained. git gives a real clone a .git DIRECTORY and a worktree a .git file, which
+// is the whole distinction. fleet-grid.mjs mainRepo() is the third copy of these steps
+// and has the same preference; the suite pins the two together, because a lead that
+// targets a project and a grid that draws it must agree about which checkout it is.
 export function checkoutOf(t) {
   const isRepo = p => { try { return fs.existsSync(path.join(p, '.git')); } catch { return false; } };
+  const isMain = p => { try { return fs.statSync(path.join(p, '.git')).isDirectory(); } catch { return false; } };
   if (isRepo(t.path)) return t.path;
   const named = path.join(t.path, t.name);
   if (isRepo(named)) return named;
   try {
-    for (const e of fs.readdirSync(t.path, { withFileTypes: true }))
-      if (e.isDirectory() && isRepo(path.join(t.path, e.name))) return path.join(t.path, e.name);
+    const kids = fs.readdirSync(t.path, { withFileTypes: true })
+      .filter(e => e.isDirectory()).map(e => path.join(t.path, e.name))
+      .filter(isRepo).sort();
+    return kids.find(isMain) || kids[0] || t.path;
   } catch {}
   return t.path;
 }
@@ -122,8 +135,11 @@ function invocation(p) {
   // When targeting another fleet, pass -s AND point the env at that profile, so
   // status/markers land in the right fleet dir. TMUX is cleared because the commands
   // prefer the live server it names (drift-proof for normal use, wrong here).
-  // opts.noSock: fleet-spawn takes no -s at all (it derives the fleet from the repo it
-  // is run in, via route_to_owner) and rejects unknown options outright.
+  // opts.noSock: fleet-spawn is deliberately NOT given -s. It accepts one now, but an
+  // explicit socket PINS the fleet and skips route_to_owner — and route_to_owner is
+  // precisely the mechanism that gets a cross-project spawn onto the target's fleet,
+  // from the repo it is running in. Passing -s here would pin the worker to whatever
+  // socket we resolved and defeat the thing that makes targeting work.
   const t = p.t;
   const argv = (t && !p.opts.noSock) ? ['-s', t.sock, ...p.args] : p.args;
   // ALL SIX, EXPLICITLY — the same set bin/ghostfleet:197-200 exports when it enters a
@@ -341,8 +357,9 @@ export function plan(name, a = {}) {
       if (a.reuse) args.push('--reuse', String(a.reuse));
       if (a.force_new) args.push('--new');
       if (a.prompt) args.push('--prompt', String(a.prompt));
-      // noSock + cwd: spawn has no -s, and finds the repo (and so the owning fleet)
-      // from where it runs. Everything else here is addressed by socket.
+      // noSock + cwd: spawn finds the repo (and so the owning fleet) from where it runs,
+      // and an explicit -s would pin the socket past that. Everything else here is
+      // addressed by socket. See invocation()'s note.
       return run('fleet-spawn', args, t, { noSock: true, cwd: t ? checkoutOf(t) : undefined });
     }
     case 'fleet_worktrees': return run('fleet-worktrees', [], t, { cwd: t ? checkoutOf(t) : undefined });

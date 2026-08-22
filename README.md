@@ -74,7 +74,7 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | --- | --- |
 | **[docs/SHORTCUTS.md](docs/SHORTCUTS.md)** | **Every key, and what answers it.** Start at §0 — the handful that covers almost everything — then the exhaustive sections: inside a session, the Projects screen, the grid, the stack, the `fleet-*` commands, and the behaviors that are not guessable from the UI |
 | **[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md)** | **A lead session driving workers.** Dispatching briefs to siblings, watching them, unblocking them, reusing worktrees before making more, and metering cost with the governor |
-| **[docs/OPERATIONS.md](docs/OPERATIONS.md)** | **The special cases.** Adopting Claude sessions you started by hand, the phone client, notifications, work-vs-personal profiles, staying awake, where a worktree goes, and updating Claude Code under a live fleet |
+| **[docs/OPERATIONS.md](docs/OPERATIONS.md)** | **The special cases.** Adopting Claude sessions you started by hand, the phone client, notifications, work-vs-personal profiles, staying awake, where a worktree goes, the two ways to register a project, which fleet a worker lands on, and updating Claude Code under a live fleet |
 | **[docs/mobile.md](docs/mobile.md)** · **[web/README.md](web/README.md)** | The phone client — the design argument, and the client itself |
 | **[docs/stack-view.md](docs/stack-view.md)** | Why the stack is nested attaches and not `join-pane`, and what was measured to find out |
 | **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex` and `opencode` workers beside `claude`, and what degrades |
@@ -275,6 +275,7 @@ and `fleet-*` tools):
 | `CLAUDE_FLEET_SCOPE`  | The project name (shown in the header; scopes checkout discovery).|
 | `CLAUDE_FLEET_ROOT`   | The project's root folder (where its checkouts/worktrees live).  |
 | `CLAUDE_FLEET_SOCK`   | The project's tmux socket, `cf-<project>`.                       |
+| `CLAUDE_FLEET_SOCK_FORCE` | Pins `fleet-spawn` to that socket, **beating `$TMUX`** (which is inherited by anything a fleet session launches). Same as `fleet-spawn -s`. See [Putting a worker on a specific fleet](docs/OPERATIONS.md#putting-a-worker-on-a-specific-fleet). |
 | `CLAUDE_CONFIG_DIR`   | The account/config dir for the project's `profile`.              |
 | `CLAUDE_FLEET_DIR`    | Per-session status files (`$CLAUDE_CONFIG_DIR/fleet`).           |
 | `CLAUDE_FLEET_YOLO`   | `0` to require permission prompts in sessions (default: bypass). |

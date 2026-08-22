@@ -12,13 +12,17 @@
 #      [a]palettegen=max_colors=128:stats_mode=diff[p];\
 #      [b][p]paletteuse=dither=bayer:bayer_scale=3" -loop 0 docs/worktree-demo.gif -y
 #
-# `env -u TMUX` IS NOT OPTIONAL. fleet-spawn prefers $TMUX over CLAUDE_FLEET_SOCK
-# (bin/fleet-spawn:56, deliberately — a --resume'd Claude can hold a stale env var).
-# vhs inherits the environment of whatever launched it, so recording from inside a fleet
-# session hands the recorded shell YOUR socket, and the worker this tape creates is
-# spawned onto your fleet instead of the one on screen. It does not look like a routing
-# bug from the outside: the grid draws the new worktree as `· FREE — no session yet`,
-# because the session is real and is simply on a socket this grid never reads.
+# KEEP `env -u TMUX`. fleet-spawn prefers $TMUX over CLAUDE_FLEET_SOCK (deliberately —
+# a --resume'd Claude can hold a stale env var), and vhs inherits the environment of
+# whatever launched it, so recording from inside a fleet session hands the recorded shell
+# YOUR socket. That used to spawn this tape's worker onto your fleet instead of the one
+# on screen, and it did not look like a routing bug from the outside: the grid drew the
+# new worktree as `· FREE — no session yet`, because the session was real and was simply
+# on a socket that grid never reads.
+#   The grid now passes `-s <its own socket>` to fleet-spawn, which beats $TMUX and is
+# pinned past owner-routing, so the `w` flow this tape records is safe either way. The
+# line stays because everything ELSE the recorded shell runs still reads $TMUX, and a
+# recording is the one place where a wrong fleet is invisible until it is published.
 #
 # `Ctrl+S`, not `Ctrl+s` — vhs 0.11 rejects a lowercase char after a modifier, and the
 # whole tape fails to parse rather than that one line being skipped.
@@ -36,8 +40,10 @@
 #
 # Name the worker after something other than its agent. opencode writes a marker file at
 # $GIT_DIR/opencode, so a worker called `opencode` makes that name resolve as BOTH that
-# file and refs/heads/opencode, and the NEXT create of it dies on `fatal: invalid
-# reference: opencode` — with the branch already made, so it half-succeeded.
+# file and refs/heads/opencode, and the NEXT create of it died on `fatal: invalid
+# reference: opencode` — with the branch already made, so it half-succeeded. fleet-spawn
+# now refuses that name up front and names the file, which is a clear message on camera
+# rather than a wrecked repo, but it is still not the take you want to shoot.
 
 Output docs/worktree-demo.mp4
 
