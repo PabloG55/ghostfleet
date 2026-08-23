@@ -15,7 +15,10 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v7 makes the client take a new one by itself: app.js
+// BUMPED WHEN THE CLIENT CHANGES — v8 makes the running version VISIBLE on the device,
+// because three rounds of "is the fix live?" were spent inferring it from a server log.
+// If the settings sheet shows no `client` line at all, that IS the answer: the client is
+// older than v8. v7 makes the client take a new one by itself: app.js
 // reloads on `controllerchange`, so one cold open picks up a deploy instead of two. This
 // is the last version anybody should have to install by hand. v6 stops the 5s poll while
 // you are typing, and that was
@@ -33,11 +36,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: b8457df7449e
+// CLIENT-HASH: 824650f55b19
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v7';
+const VERSION = 'ghostfleet-v8';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js',
@@ -69,6 +72,17 @@ self.addEventListener('activate', e => {
     for (const k of await caches.keys()) if (k !== VERSION) await caches.delete(k);
     await self.clients.claim();
   })());
+});
+
+// WHICH CLIENT AM I RUNNING? Nothing in the app answered that, and a cache-first shell is
+// exactly the app where you need to know: a phone can serve /api/ calls for hours on a
+// client older than the deploy, and neither the person holding it nor the person reading
+// the server log can tell. The worker is the authority — it is the thing that decides
+// which bytes you got — so it answers, and the app prints what it says.
+self.addEventListener('message', e => {
+  if (e.data && e.data.type === 'version' && e.ports && e.ports[0]) {
+    e.ports[0].postMessage({ version: VERSION });
+  }
 });
 
 self.addEventListener('fetch', e => {
