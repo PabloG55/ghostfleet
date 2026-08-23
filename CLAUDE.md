@@ -79,6 +79,24 @@ prefer proof over assertion:
 
 - **`IFS=$'\t'` collapses empty fields** (tab is IFS-whitespace), shifting every later
   field left. Use `$'\x1f'` for any record with optional fields.
+- **…but `\x1f` must NEVER be the separator inside a tmux `-F` format.** tmux **≤ 3.5**
+  pushes every byte of command output through `vis(3)` — `utf8_strvis()` with
+  `VIS_OCTAL|VIS_CSTYLE|VIS_NOSLASH`, from `server_client_print()` — so a `\x1f` comes
+  back as the four literal characters `\037`, the record never splits, and the WHOLE row
+  lands in the first field. The entry above, arriving through tmux's formatter instead of
+  through `read`. tmux **3.6** stopped (`cmd-queue.c` passes `parse=1` unconditionally).
+  **Ubuntu 24.04's apt tmux is 3.4; Homebrew's is 3.7b**, so it reads as "broken on
+  Linux" and is nothing of the kind — tmux 3.4 on a Mac reproduced 122 of the Linux
+  leg's 125 failures, group for group. Of every byte below `0x20` plus `0x7f`, **a tab is
+  the only one all of 3.4/3.5/3.6/3.7b emit verbatim** (measured on four builds, for
+  `list-sessions -F` and `display-message -p` alike), and tmux will not let a tab into a
+  session name. So: **tab at the tmux boundary, `\x1f` on our own wires** — the grid's
+  choice line, the hooks' jq records, the reply-to file — and `tr '\t' '\037'` where a
+  shell has to `read` what tmux printed. Two constants, two comments, and a suite group
+  that runs the real code through `test/helpers/tmux-vis35.mjs`, because on 3.7b the two
+  separators behave identically and an assertion about this would otherwise pass either
+  way. Do NOT "just un-escape it": `VIS_NOSLASH` means a backslash is not doubled, so a
+  literal `\037` in the data is indistinguishable from an escaped `0x1f`.
 - **The leftover lands on the last variable, and it looks like data.** `read -r n p prof`
   against a four-column line puts the 4th field *inside* `prof` — and anything derived
   from it (the fleet socket) is wrong too. Its expansion cousin: `${x#*$SEP}` on a string

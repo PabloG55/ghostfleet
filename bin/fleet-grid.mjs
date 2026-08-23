@@ -35,7 +35,32 @@ const PROJECTS = path.join(CFG, 'projects');
 // default the binary uses). Nothing about it is reachable from PROJECTS above.
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
 const PROFILE = process.env.CLAUDE_FLEET_PROFILE || 'work';
-const US = '\x1f'; // unit separator — non-whitespace field delimiter
+// TWO WIRES, TWO SEPARATORS, and conflating them cost 122 red assertions.
+//
+// US is OUR OWN protocol: the chosen action this file prints on stdout for the bash
+// control plane to parse (`attach\x1f<session>`, see the header). It never passes
+// through tmux, and \x1f is right for it — bash's `read` collapses runs of IFS
+// WHITESPACE, so a tab would eat an empty field and shift every later one left, which
+// is the trap CLAUDE.md opens with.
+//
+// TF is the separator inside a tmux `-F` format, and it MUST be a tab, because tmux
+// <= 3.5 runs every byte of command output through vis(3) — utf8_strvis() with
+// VIS_OCTAL|VIS_CSTYLE|VIS_NOSLASH, called from server_client_print() — which turns
+// \x1f into the four literal characters `\037`. The split then finds nothing to split
+// on and the WHOLE record lands in the first field: the same "leftover lands on the
+// last variable, and it looks like data" failure, arriving through tmux's formatter
+// instead of through `read`. tmux 3.6 stopped escaping (cmd-queue.c passes parse=1
+// unconditionally) — and Ubuntu 24.04's apt tmux is 3.4 while Homebrew's is 3.7b, so
+// this read as "ghostfleet is broken on Linux" when it is nothing of the kind.
+//
+// A TAB IS THE ONLY CHOICE, not a preference. Measured on 3.4, 3.5, 3.6 and 3.7b built
+// from source, for `list-sessions -F` and `display-message -p` alike: of every byte
+// below 0x20 plus 0x7f, tab is the ONLY one that comes back verbatim on all four (vis
+// leaves it alone because VIS_TAB is not in that flag set). And a tab cannot appear
+// INSIDE these fields — tmux sanitizes a tab in a session name to the literal `\t` on
+// 3.4 and rejects the name outright on 3.7b. test/run.sh pins both halves.
+const US = '\x1f'; // our own wire, to bin/ghostfleet — never crosses tmux
+const TF = '\t';   // the separator inside a tmux -F format — see above
 
 const SOCK = process.argv[2] || 'cf-default';
 const CONF = process.argv[3] && !process.argv[3].startsWith('--') ? process.argv[3] : null;
@@ -80,15 +105,39 @@ const STATUS = {
 };
 
 // ── data ────────────────────────────────────────────────────────────────
+// SAY SO WHEN A RECORD DID NOT SPLIT, once. The reason a formatter change turned into
+// 122 red assertions rather than one is that nothing checked: an unsplit record is a
+// perfectly plausible session called "name<sep>/path<sep>0", so every consumer went on
+// working with a name that was really the whole row. Test for the SEPARATOR and for the
+// COLUMN COUNT the format asks for — not for emptiness, which an unsplit record passes.
+let warnedRecord = false;
+function tmuxRecord(line, cols) {
+  const f = line.split(TF);
+  if (f.length === cols) return f;
+  if (!warnedRecord) {
+    warnedRecord = true;
+    process.stderr.write(`fleet-grid: tmux returned a ${f.length}-field record where the ` +
+      `format asks for ${cols} — this tmux rewrote the separator. tmux -V: ` +
+      `${tmuxVersion() || '?'}\n`);
+  }
+  return null;
+}
+function tmuxVersion() {
+  try {
+    return execFileSync('tmux', ['-V'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch { return ''; }
+}
 function tmuxList() {
   try {
     const args = ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F',
-      `#{session_name}${US}#{session_path}${US}#{session_attached}`];
+      `#{session_name}${TF}#{session_path}${TF}#{session_attached}`];
     const out = execFileSync('tmux', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     return out.split('\n').filter(Boolean).map(l => {
-      const [name, cwd, attached] = l.split(US);
+      const f = tmuxRecord(l, 3);
+      if (!f) return null;
+      const [name, cwd, attached] = f;
       return { name, cwd: cwd || '', attached: attached === '1' };
-    }).filter(s => !isTab(s.name));
+    }).filter(Boolean).filter(s => !isTab(s.name));
   } catch { return []; }
 }
 
