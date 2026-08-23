@@ -110,6 +110,41 @@ you out. Persist it once:
 echo display > ~/.config/ghostfleet/awake     # display | on | off
 ```
 
+### The two platforms do not assert the same thing
+
+The same word in that file buys you different things on each OS, and until this was
+written down `on` quietly meant *"system awake, screen may sleep"* on macOS and *"system
+awake **and** screen pinned"* on Linux — because `idle`, which is what logind blanks the
+screen on, was in the Linux default. It is now in `display`, where it belongs:
+
+| `awake` | macOS (`caffeinate`) | Linux (`systemd-inhibit --what=`) |
+|---|---|---|
+| `on` | `-i -s` — system stays up, screen blanks on its own timer | `sleep` — same |
+| `display` | `-d -i -s` — system up **and** screen pinned | `idle:sleep:handle-lid-switch` — same, **and a closed lid is ignored** |
+| `off` | nothing | nothing |
+
+**One asymmetry is left, and it cannot be removed:** on Linux, `display` also inhibits
+`handle-lid-switch`, so closing the lid does not suspend. macOS has no equivalent to
+switch off — a closed lid always sleeps there, which is the caveat above. If you want the
+Linux box to behave like the Mac on a lid close, use `on`.
+
+### When it cannot hold one at all
+
+`systemd-inhibit` being installed is not the same as logind being willing. A box with no
+login session — a container, a CI runner, some headless setups — gets
+`Failed to inhibit: Access denied` for every `--what`, and because the inhibitor is armed
+detached with its stderr discarded, nothing about that used to reach you. `--status` now
+asks the question directly and reports the refusal instead of the reassuring default:
+
+```bash
+fleet-awake --status
+# no inhibitor could be armed: logind refused (Access denied) — this box has no login session
+```
+
+`fleet-serve` logs the same line at startup (`awake: …`), so a daemon that cannot keep its
+host awake says so in the first thing it writes rather than being discovered by a fleet
+that froze overnight. Nothing fails over it: arming is still silent and still exits 0.
+
 The file is read at every launch, so it survives relaunches and terminals that never
 sourced your shell rc — `CLAUDE_FLEET_AWAKE=display` works too, but only for the process
 you set it on, which is one forgotten relaunch away from locking again. The env var still
