@@ -31,8 +31,8 @@ bug — that is its purpose:
 
 Anyone who reaches this service runs code as the user. And the data is not incidental
 either: the grid's own `LAST MSG` column renders conversation text, and fleet transcripts
-contain `DATABASE_URL` for hosted Neon, Clerk keys, and — for the acme-api fleet — real
-customer items belonging to real people.
+contain `DATABASE_URL` for hosted Neon, Clerk keys, and — on a fleet working a production
+codebase — customer records belonging to real people.
 
 So the security posture is not "add a login page." It is: **the service is never publicly
 routable, and every mutating call is authenticated, confirmed and recorded.** Everything
@@ -52,15 +52,15 @@ Two thirds of this is built.
 ```
 $ node bin/fleet-grid.mjs cf-acme-api tmux/cf.tmux.conf --plain
 0 need you · 2 working · 4 ready
-TAB         CHECKOUT     BRANCH                   AGENT   STATUS   LAST MSG                   IDLE
-policy-beside  policy-beside   feat/policy-policy-beside…  claude  working  All three states present…   busy 20s
-docs-sweep docs-sweep  investigate/vendor-age…  claude  ready    Done. Draft PR **#1165**…   50m ago
+TAB         CHECKOUT      BRANCH                    AGENT    STATUS     LAST MSG                                      IDLE
+api-fix     api-fix       feat/retry-backoff        claude   working    All three cases covered. Running the full s…  busy 41s
+docs-pass   docs-pass     docs/openapi-examples     opencode ready      Done. Draft PR #212 — the drift was two sch…  50m ago
 ```
 
 And it is fast enough that polling is not a design problem:
 
 ```
-busiest fleet (acme-api, 6 live sessions)   0.39s
+busiest fleet (6 live sessions)             0.39s
 all 14 projects                             0.17s   (most are empty and exit immediately)
 ```
 
@@ -93,13 +93,15 @@ with the scars.
 
 ## 4. `fleet-grid.mjs --json`
 
-`--plain` is formatted for a TTY: branches elide to `feat/policy-policy-beside-fo…` and at
-narrow widths columns collide (`people-dupespeople-dupes`). The *values* are already
+`--plain` is formatted for a TTY: the last message clips at 44 columns, and a value that
+fills its column touches the next one (`adapter-pro…adapter-probe`). The *values* are already
 computed by `cardLines()` — they are truncated on the way out. `--json` emits them whole.
 
 The schema is deliberately **exactly what `cardLines()` consumes** — with two deliberate
 additions, both noted under the block — so the phone renders from the same inputs the TUI
-does and the two cannot disagree:
+does and the two cannot disagree. The values below are `web/fixtures/grid-acme-api.json`:
+two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, since
+`acme-api` has no free worktree. `test/helpers/doc-fixtures.mjs` holds them to that.
 
 ```jsonc
 {
@@ -115,7 +117,7 @@ does and the two cannot disagree:
       "folder":    "acme-api",            // the main checkout — the repo itself
       "branch":    "main",
       "agent":     "claude",
-      "msg":       "Dispatched the batch work to list-pages.",
+      "msg":       "Dispatched the retry work to api-fix. Waiting on its PR.",
       "age":       95,
       "attached":  true,
       "sched":     null,
@@ -123,14 +125,14 @@ does and the two cannot disagree:
       "lead":      true                   // not a worker: no stop, no reclaim, no rename
     },
     {
-      "name":      "policy-beside",          // what fleet-send/fleet-read address
+      "name":      "api-fix",             // what fleet-send/fleet-read address
       "label":     null,                  // titles the card when set; name moves to line 2
       "status":    "working",             // the nine-value vocabulary, verbatim
-      "folder":    "policy-beside",          // the worktree it sits in
-      "branch":    "feat/policy-policy-beside-form",
+      "folder":    "api-fix",             // the worktree it sits in
+      "branch":    "feat/retry-backoff",
       "agent":     "claude",              // rendered only when != claude
-      "msg":       "All three states present. Running the full suite…",
-      "age":       20,                    // seconds; null when unknown
+      "msg":       "All three cases covered. Running the full suite before I touch the migration.",
+      "age":       41,                    // seconds; null when unknown
       "attached":  false,
       "sched":     null,                  // { "at": <epoch>, "msg": "…" } → card shows @HH:MM
       "limit_at":  null,                  // "10:20pm" → card shows ↻ 10:20pm
@@ -138,7 +140,7 @@ does and the two cannot disagree:
     }
   ],
   "free_worktrees": [
-    { "path": "/Users/…/api-3", "branch": "feat/x", "task": "…" }
+    { "path": "/Users/pgarces/gf-demo/toolbox-3", "branch": "feat/x", "task": "rework the CSV column mapper" }
   ]
 }
 ```
@@ -252,7 +254,7 @@ public.
 **Explicitly not Tailscale Funnel.** That is the feature that publishes to the internet.
 
 **Acceptable alternative: Cloudflare Tunnel + Cloudflare Access.** `cloudflared` is
-already installed on this machine (the acme-api dev-stack skill uses it). Outbound-only,
+already installed on this machine (another project's dev-stack skill uses it). Outbound-only,
 no open ports, and Access adds SSO, policy and audit logs. Choose it if a real URL is
 wanted. The tradeoff is honest: the hostname *is* publicly routable and all the security
 lives in the Access policy being right, so it fails *open*.
@@ -359,11 +361,11 @@ cols()` — so **a phone is `nc = 1`**. The card is the same five lines `cardLin
 produces:
 
 ```
-╭─ 1 policy-beside ───────────────╮
-│ ◆ working            busy 41s │   status · age (or ↻ reset, or @scheduled)
-│ policy-beside · feat/policy-poli…   │   worktree · branch  (+ agent when != claude)
-│ "All three states present."   │   last message
-╰───────────────────────────────╯
+╭─ 2 api-fix ──────────────────╮
+│ ◆ working           busy 41s │   status · age (or ↻ reset, or @scheduled)
+│ api-fix · feat/retry-backo…  │   worktree · branch  (+ agent when != claude)
+│ "All three cases covered. R… │   last message
+╰──────────────────────────────╯
 ```
 
 The `+ new session` card and the grey `FREE` worktree cards carry over unchanged, because
@@ -397,9 +399,9 @@ and becomes about *proving who is doing it, and leaving a record*:
   inheriting them *is* parity rather than an addition:
 
   ```
-  kill session 'policy-beside'?          y = yes · any other key = cancel
-  remove worktree 'api-3' (feat/x)?   y = yes · any other key = cancel
-                                      f = remove anyway
+  kill session 'api-fix'?                y = yes · any other key = cancel
+  remove worktree 'toolbox-3' (feat/x)?  y = yes · any other key = cancel
+                                         f = remove anyway
   ```
 
   A phone confirmation is a second deliberate tap, and `--force` needs its own.
@@ -697,7 +699,7 @@ building a chat client.
 **Still open:**
 
 3. **Content is served unredacted.** A secret-pattern filter was proposed and dropped.
-   Transcripts do hold live-shaped credentials — measured across the acme-api transcripts:
+   Transcripts do hold live-shaped credentials — measured across this machine's transcripts:
    16 `sk_live_`, 139 `sk_test_`, 194 JWTs, 2 AWS key IDs, 51 `CLERK_SECRET`, 4213
    `DATABASE_URL`, in a corpus whose largest single file is 46 MB. But under this
    transport there is no adversary it defends against. The public internet cannot route

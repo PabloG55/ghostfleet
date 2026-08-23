@@ -33,7 +33,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 5bb4e56a801b
+// CLIENT-HASH: b8457df7449e
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.

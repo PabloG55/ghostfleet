@@ -302,7 +302,7 @@ its own worktree doctrine (a `.worktrees/` directory, or one declared in `.gitig
 gets its worktrees there instead. `CLAUDE_FLEET_WORKTREE_DIR` overrides either way;
 `sibling` forces the classic layout.
 
-This matters when the repo *enforces* its convention. acme-api has a `PreToolUse` guard
+This matters when the repo *enforces* its convention. One repo here has a `PreToolUse` guard
 that denies any edit whose path lacks `.worktrees/` — it never asks git whether the path
 *is* a worktree — so a sibling worktree was refused as "the shared main checkout", the
 agent obeyed the refusal, and created a **second worktree nested inside the first**, plus
@@ -310,10 +310,10 @@ a full dependency install. Two worktrees per task, with the session attached to 
 that wasn't being edited.
 
 **A project can also be several clones.** `fleet-worktrees` spans every clone under the
-project root, not just the one you're standing in. acme-api registers `~/acme-api`, which
-isn't a repo at all — it holds four independent clones, each owning its own worktrees. A
-lead saw 2 and was blind to the other 17, so *reuse before proliferate* could never fire
-and every task made another one. `--here` restricts it to the current repo.
+project root, not just the one you're standing in. One project here registers a *container*
+directory that isn't a repo at all — it holds four independent clones, each owning its own
+worktrees. A lead saw 2 and was blind to the other 17, so *reuse before proliferate* could
+never fire and every task made another one. `--here` restricts it to the current repo.
 
 **A branch name git already reads as a ref is refused up front.** git resolves a bare
 name as `$GIT_DIR/<name>` *before* `refs/heads/<name>`, and the git dir is a shared
@@ -345,8 +345,8 @@ then the repo itself, so both conventions route.
 **Point it at the repo** when the project *is* one repo. Every step above is then exact,
 and nothing has to guess.
 
-**Point it at the container** when the project is genuinely several clones (acme-api is
-four) — that's the only path that can name them all, and `fleet-worktrees` needs it to
+**Point it at the container** when the project is genuinely several clones (one project
+here is four) — that's the only path that can name them all, and `fleet-worktrees` needs it to
 see every clone's worktrees. Two things to know when you do:
 
 - **Name the main checkout after the project.** `<root>/<name>` is step 2 for
