@@ -171,6 +171,15 @@ is('there is a session fixture longer than one page', true,
 // opens to arrive, and in between a phone reported a bug that was already fixed. Both
 // halves have to be present for one open to be enough: the worker must CLAIM the page,
 // and the page must react when it does.
+// AND IT HAS TO BE ANSWERABLE ON THE DEVICE. Three rounds of "is the fix live?" were spent
+// inferring the running version from fleet-serve's request log, because nothing in the app
+// said. The worker is the only authority on which bytes you got, so it answers a version
+// message and the app prints the reply.
+is('the worker answers which version it is', true,
+   /type === 'version'[\s\S]{0,160}postMessage\(\{ version: VERSION \}\)/.test(JS['sw.js']));
+is('...and the client asks it', true, /askShellVersion/.test(JS['app.js']));
+is('...and shows the answer', true, /client \$\{swVersion/.test(JS['app.js']));
+
 is('the worker claims open pages', true, /clients\.claim\(\)/.test(JS['sw.js']));
 is('...and the client reacts to being claimed', true,
    /addEventListener\('controllerchange'/.test(JS['app.js']));

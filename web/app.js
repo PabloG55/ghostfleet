@@ -919,6 +919,26 @@ function restoreChatScroll(box) {
 // pwa-check enforces that every top-level declaration precedes the first top-level
 // statement — that is what makes a temporal-dead-zone reference structurally impossible,
 // and putting this beside the setInterval that uses it broke the rule.
+// The version of the SHELL that is actually serving this page — asked of the worker,
+// because it is the only thing that knows which bytes you got. Shown in settings so the
+// question "is the fix on my phone yet" is answerable ON the phone, instead of by reading
+// fleet-serve's request log and inferring.
+let swVersion = '';
+export function shellVersion() { return swVersion; }
+export async function askShellVersion() {
+  try {
+    const c = navigator.serviceWorker && navigator.serviceWorker.controller;
+    if (!c) { swVersion = 'no worker'; return swVersion; }   // served straight from the network
+    const ch = new MessageChannel();
+    swVersion = await new Promise((res) => {
+      const t = setTimeout(() => res('unknown'), 600);       // an old worker will not answer
+      ch.port1.onmessage = (e) => { clearTimeout(t); res((e.data && e.data.version) || 'unknown'); };
+      c.postMessage({ type: 'version' }, [ch.port2]);
+    });
+  } catch { swVersion = 'unknown'; }
+  return swVersion;
+}
+
 // Set when a newer service worker has taken control and this page is now the stale one.
 let swReloadPending = false;
 export function takeNewClientIfIdle() {
@@ -1725,6 +1745,10 @@ async function sheetSettings() {
     el('div', { text: '· the stack — it exists to put sessions side by side, and a phone has no side. At nc = 1 that is the card list.' }),
     el('div', { text: '· Ctrl-t terminal / Ctrl-n editor tabs — they open a shell and neovim in the session\'s folder, and there is no local shell here.' })]));
   kids.push(el('div', { class: 'row' }, [btn('esc back', closeSheet)]));
+  // Last row, and deliberately plain: it is diagnostic, not a setting. `no worker` means
+  // you are on the network rather than a cached shell; `unknown` means the worker serving
+  // you is too old to answer, which is itself the thing you wanted to know.
+  kids.push(el('div', { class: 'dim small', text: `client ${swVersion || 'unknown'}` }));
   openSheet(sheet('settings', S.screen === 'projects' ? 'per project' : 'per session', kids), false);
 }
 
@@ -1872,6 +1896,7 @@ document.addEventListener('visibilitychange', () => {
 // are typing, it waits, and the poll spends it when you are not.
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
+  askShellVersion();
   let hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) { hadController = true; return; }
