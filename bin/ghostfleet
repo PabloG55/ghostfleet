@@ -80,6 +80,14 @@ case "$_awake_mode" in
      fi ;;
 esac
 
+# The separator for the CHOICE the node screens print on stdout for split_choice below
+# ("new\x1f<cwd>\x1f<name>\x1f<agent>"). It stays \x1f and it must: `read` collapses runs
+# of IFS WHITESPACE, so a tab would eat an empty field and shift every later one left.
+#   It is NOT the separator for a tmux `-F` format, and the difference is not cosmetic:
+# tmux <= 3.5 vis-escapes command output, so a \x1f there comes back as the literal
+# `\037` and the record never splits (see bin/fleet-grid.mjs's TF, and bin/fleet-stack's
+# move_pane). This wire never touches tmux — node writes it, this loop reads it — so it
+# is unaffected. Don't "fix" it to match.
 US=$'\x1f'
 PROJECTS_CFG="$HOME/.config/ghostfleet/projects"
 # The control plane is a long-lived bash loop, so a `cf-sync` upgrade would otherwise

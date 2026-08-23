@@ -1936,6 +1936,161 @@ if command -v tmux >/dev/null 2>&1; then
 else
   skip "stack reorder (real panes)" "tmux not available"
 fi
+# ── 4e. A TMUX THAT REWRITES OUR SEPARATOR (<= 3.5) ──────────────────────────
+# tmux <= 3.5 pushed every byte of command output through vis(3) — utf8_strvis() with
+# VIS_OCTAL|VIS_CSTYLE|VIS_NOSLASH, from server_client_print() via
+# cmdq_print_data(item, 0, …). So a `\x1f` separator inside a `-F` format came back as
+# the four literal characters `\037`, the record never split, and the WHOLE row landed in
+# the first field: CLAUDE.md's "the leftover lands on the last variable, and it looks
+# like data", arriving through tmux's formatter instead of through `read`. tmux 3.6
+# stopped, by passing parse=1 unconditionally in cmd-queue.c.
+#
+# Ubuntu 24.04's apt tmux is 3.4; Homebrew's is 3.7b. That is the ENTIRE difference —
+# measured: tmux 3.4 on a Mac reproduces 122 of the Linux leg's 125 failures, group for
+# group. So this is a tmux-VERSION bug that one platform merely exposes.
+#
+# AND IT IS UNTESTABLE WHERE IT IS DEVELOPED, which is the whole reason for the shim: on
+# 3.7b a tab and a \x1f behave identically, so an assertion about the fix would pass
+# either way — the same as having no assertion. test/helpers/tmux-vis35.mjs runs the real
+# tmux and re-applies that escaping; its output is byte-identical to real tmux 3.4's.
+# The first two assertions prove the shim really mangles BEFORE anything trusts it, and
+# that it leaves a tab alone, which is the single property the fix rests on.
+group "tmux <= 3.5 escapes what it prints"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  VS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$VS/bin"
+  # a `tmux` that behaves like 3.4, first on PATH
+  printf '#!/usr/bin/env bash\nexec node %s %s "$@"\n' \
+    "$ROOT/test/helpers/tmux-vis35.mjs" "$(command -v tmux)" > "$VS/bin/tmux"
+  chmod +x "$VS/bin/tmux"
+  tmux -L cfvis35 kill-server 2>/dev/null
+  tmux -L cfvis35 new-session -d -s master   -c "$VS" 'sleep 90' 2>/dev/null
+  tmux -L cfvis35 new-session -d -s worker-a -c "$VS" 'sleep 90' 2>/dev/null
+  sleep 1
+  shimmed() { PATH="$VS/bin:$PATH" "$@"; }
+  # 1. THE SHIM IS DOING ITS JOB, asked of it DIRECTLY. Without this the rest is
+  # decoration — a shim that quietly did nothing would make every assertion below pass.
+  #   Not through tmux, on purpose: the suite has to run on 3.4 as well, where the real
+  # tmux has ALREADY escaped and the shim would be escaping an escape. Handing it
+  # /usr/bin/printf instead of tmux tests the one thing it is for, on any machine.
+  vis35() { node "$ROOT/test/helpers/tmux-vis35.mjs" /usr/bin/printf "$1" 2>/dev/null; }
+  is "the shim escapes \\x1f as \\037"  'A\037B'            "$(vis35 'A\037B')"
+  is "...and \$name as \\\$name"        'x=\$HOME'          "$(vis35 'x=$HOME')"
+  is "...and 0x1b as \\033"             'e\033[1m'          "$(vis35 'e\033[1m')"
+  # UTF-8 passes whole (utf8_strvis walks codepoints), which is why the pane detectors
+  # are not collateral damage on <= 3.5 — their spinner glyphs arrive intact.
+  is "...but leaves UTF-8 alone"        "$(printf '\342\234\273')" "$(vis35 '\342\234\273')"
+  # 2. THE ONE PROPERTY THE FIX RESTS ON: a tab is the only byte under 0x20 that vis
+  # leaves alone with this flag set (VIS_TAB is not in it), so it crosses every tmux from
+  # 3.4 to 3.7b unchanged. Asserted of the shim, and of whatever tmux is actually here —
+  # that second one is the assertion that would catch a tmux which broke the premise.
+  is "a tab survives the shim"          "$(printf 'A\tB')"    "$(vis35 'A\tB')"
+  is "...and this machine's real tmux"  "2" \
+     "$(tmux -L cfvis35 list-sessions -F "A$(printf '\t')B" 2>/dev/null \
+        | awk -F'\t' '{print NF}' | head -1)"
+  is "...and the shim over that tmux"   "2" \
+     "$(shimmed tmux -L cfvis35 list-sessions -F "A$(printf '\t')B" 2>/dev/null \
+        | awk -F'\t' '{print NF}' | head -1)"
+
+  # 3. THE GRID, end to end, on a tmux that escapes. Before the fix this printed
+  # "(no sessions)": every record arrived as one field, so the whole row was the name and
+  # isTab()/the status join threw them all away.
+  gp() { shimmed env CLAUDE_FLEET_DIR="$VS" node "$ROOT/bin/fleet-grid.mjs" cfvis35 --plain 2>/dev/null; }
+  is "--plain still finds the worker"   "1" "$(gp | grep -c '^worker-a ' || true)"
+  # the CHECKOUT column comes from #{session_path}, so it is only right if the record
+  # split — the header's counts print the same "0 need you" whether it did or not
+  is "...with its checkout column"      "1" \
+     "$(gp | grep -c "^worker-a *$(basename "$VS")" || true)"
+  gj() { shimmed env CLAUDE_FLEET_DIR="$VS" node "$ROOT/bin/fleet-grid.mjs" cfvis35 --json 2>/dev/null; }
+  is "--json names the session, not the row" "worker-a" \
+     "$(gj | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+          const j=JSON.parse(s); const c=(j.cards||[]).find(x=>!x.lead);
+          console.log(c ? c.name : "(none)"); })' 2>/dev/null)"
+  # THE MIDDLE COLUMN, which is the one an unsplit record loses most quietly: `folder`
+  # is derived from #{session_path}, so it can only be right if the record really split.
+  is "...and #{session_path} landed too"  "$(basename "$VS")" \
+     "$(gj | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+          const j=JSON.parse(s); const c=(j.cards||[]).find(x=>!x.lead);
+          console.log(c ? c.folder : "(none)"); })' 2>/dev/null)"
+  # 4. AND IT SAYS SO when a record does not split, instead of reporting an empty fleet.
+  # That silence is why one formatter change became 122 red assertions rather than one.
+  is "an unsplit record is reported"    "1" \
+     "$(sed 's/^const TF = .*$/const TF = "\\x1f";/' "$ROOT/bin/fleet-grid.mjs" > "$VS/old.mjs"
+        shimmed env CLAUDE_FLEET_DIR="$VS" node "$VS/old.mjs" cfvis35 --plain 2>&1 >/dev/null \
+        | grep -c 'rewrote the separator' || true)"
+  tmux -L cfvis35 kill-server 2>/dev/null
+
+  # 5. THE STACK'S RECORD, on the same tmux. Four fields, and the last two are EMPTY on a
+  # pane that predates them — which is why the parse stays \x1f-based behind a `tr`: a
+  # `tr` is a 1:1 byte map so an empty field stays empty, while `IFS=$'\t' read` would
+  # collapse it (tab is IFS WHITESPACE) and shift the stamps into the tty.
+  MS=cfvis35st
+  tmux -L $MS kill-server 2>/dev/null
+  tmux -L $MS -f "$ROOT/tmux/cf-stack.tmux.conf" new-session -d -s stack -x 200 -y 50 'sleep 120' 2>/dev/null
+  tmux -L $MS split-window -h -t stack 'sleep 120' 2>/dev/null
+  tmux -L $MS select-layout -t stack even-horizontal 2>/dev/null
+  mi=0; for m in one two; do
+    tmux -L $MS set-option -p -t "stack.$mi" @cf_sock "cf-$m" 2>/dev/null
+    tmux -L $MS set-option -p -t "stack.$mi" @cf_sess master 2>/dev/null
+    mi=$((mi + 1))
+  done
+  tmux -L $MS set-option -g @cf_fleet_dir "$VS" 2>/dev/null
+  tmux -L $MS select-pane -t stack.0 2>/dev/null
+  printf 'cf-one\tmaster\ncf-two\tmaster\n' > "$VS/stack.tsv"
+  MSOCK="$(tmux -L $MS display-message -p '#{socket_path}' 2>/dev/null)"
+  pn() { tmux -L $MS list-panes -t '=stack' -F '#{@cf_sock}' 2>/dev/null | tr '\n' ' '; }
+  MV() { shimmed "$ROOT/bin/fleet-stack" move "$1" \
+           "$(tmux -L $MS list-panes -t '=stack' -F '#{?pane_active,#{pane_tty},}' 2>/dev/null | tr -d ' \n')" \
+           "$MSOCK" 2>&1; }
+  is "stack panes start in file order"  "cf-one cf-two " "$(pn)"
+  MV right >/dev/null 2>&1
+  is "a move works on that tmux too"    "cf-two cf-one " "$(pn)"
+  # THE EMPTY-FIELD DIRECTION. Clear @cf_sess only: the record still has four columns,
+  # the fourth one empty. It must refuse for the RIGHT reason — "which member is this
+  # pane" — and not for the one a collapsed field produces, where the stamps slide left
+  # and the tty stops matching any pane.
+  tmux -L $MS set-option -pu -t stack.0 @cf_sess 2>/dev/null
+  emsg="$(MV right)"
+  is "an empty stamp: refuses on the stamp" "1" "$(printf '%s' "$emsg" | grep -c "don't say which member" || true)"
+  is "...and NOT on a shifted tty"          "0" "$(printf '%s' "$emsg" | grep -c 'not a pane' || true)"
+  tmux -L $MS kill-server 2>/dev/null; rm -rf "$VS"
+else
+  skip "tmux <= 3.5 escaping" "tmux or node missing"
+fi
+
+# THE TWO PARSES, side by side, because the choice between them is the whole reason the
+# stack translates at the boundary instead of reading tabs straight. A tab is IFS
+# WHITESPACE, so `IFS=$'\t' read` collapses an empty field and shifts every later one
+# left — CLAUDE.md's opening entry, and why \x1f was picked for our own wires in the
+# first place. `tr` is a 1:1 byte map, so it cannot collapse anything.
+#   Neither line tests ghostfleet; both pin the property ghostfleet is built on, in both
+# directions, so "just use IFS=$'\t'" cannot look harmless to the next reader.
+group "an empty field survives \x1f and not a tab"
+rec="$(printf 'a\tb\t\td')"
+IFS=$'\t'   read -r f1 f2 f3 f4 <<< "$rec"
+IFS=$'\x1f' read -r g1 g2 g3 g4 < <(printf '%s' "$rec" | tr '\t' '\037')
+is "IFS=tab shifts the fields left" "a|b|d|" "$f1|$f2|$f3|$f4"
+is "tr to \x1f keeps the empty one" "a|b||d" "$g1|$g2|$g3|$g4"
+
+# THE INVARIANT, so the next `-F` cannot quietly reintroduce this. A separator inside a
+# tmux format has to be a tab; \x1f is for our OWN wires (the grid's choice line, the
+# hooks' jq records, the reply-to file), where `read` is the parser and a tab would
+# collapse an empty field. Both directions: the tmux side must have none, and our own
+# side must still have some, or a grep that passes because somebody removed every \x1f
+# would look identical.
+group "the tmux wire separator is a tab, ours is \$'\\x1f'"
+FSRC="$ROOT/bin $ROOT/mcp $ROOT/hooks $ROOT/tmux"
+is "no tmux -F format carries \\x1f" "0" \
+   "$(grep -rn -- '#{' $FSRC 2>/dev/null | grep -c 'x1f\|\\\\037\|\${US}' || true)"
+is "the grid's -F does use a tab"    "1" \
+   "$(grep -c 'session_name}\${TF}#{session_path}' "$ROOT/bin/fleet-grid.mjs" || true)"
+is "the stack's -F does too"         "1" \
+   "$(grep -c 'pane_id}\${TF}#{pane_tty}' "$ROOT/bin/fleet-stack" || true)"
+# ...and the stack still parses with \x1f, behind the tr that keeps empty fields
+is "the stack translates at the edge" "1" \
+   "$(grep -c "tr '\\\\t' '\\\\037'" "$ROOT/bin/fleet-stack" || true)"
+is "our own wires still use \\x1f"    "1" \
+   "$([ "$(grep -c "US=\\\$'\\\\x1f'" "$ROOT/bin/ghostfleet" || true)" -ge 1 ] && echo 1 || echo 0)"
+
 
 # The prefixed form, which is the one that works in every terminal: Apple Terminal sends
 # nothing for ⌃⇧← (it emits a bare ESC [ D, the same bytes as an unmodified ←), so the
