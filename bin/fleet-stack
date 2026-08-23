@@ -366,15 +366,29 @@ move_pane() {                       # $1=left|right $2=tty
   local dir="$1" tty="$2" panes fdir body plan moved tmp
   local pid ptty psock psess extra pos=-1 n=0 i j
   local ids=() rows=()
-  local US=$'\x1f'
+  local US=$'\x1f' TF=$'\t'
   case "$dir" in left|right) ;; *) echo "fleet-stack: move takes left or right" >&2; return 1 ;; esac
   [ -n "$tty" ] || { echo "fleet-stack: move needs the tty of the pane to move" >&2; return 1; }
 
-  # \x1f, not a tab: @cf_sock/@cf_sess are EMPTY on a pane that predates them, and
-  # `IFS=$'\t'` collapses empty fields (tab is IFS whitespace), which would shift the
-  # stamps into the tty and read as a pane that just isn't the one we want.
+  # BOTH SEPARATORS, ONE RECORD, and each is the only one that works on its side.
+  #
+  # A TAB CROSSING TMUX. tmux <= 3.5 pushes every byte of command output through vis(3)
+  # (utf8_strvis with VIS_OCTAL|VIS_CSTYLE|VIS_NOSLASH, from server_client_print), so a
+  # \x1f in the FORMAT comes back as the four literal characters `\037` and the record
+  # never splits — the whole row lands in $pid, $ptty is empty, and this reads as "that
+  # tty is not a pane of the stack". Ubuntu 24.04 ships tmux 3.4, Homebrew ships 3.7b,
+  # which is the entire reason it looked like a Linux problem. Of every byte under 0x20
+  # (plus 0x7f), a tab is the ONLY one all of 3.4/3.5/3.6/3.7b emit verbatim, and tmux
+  # will not let a tab into a session name in the first place.
+  #
+  # \x1f FOR `read`. @cf_sock/@cf_sess are EMPTY on a pane that predates them, and
+  # `IFS=$'\t' read` collapses empty fields because tab is IFS WHITESPACE — which would
+  # shift the stamps into the tty and read as a pane that just isn't the one we want.
+  # So translate at the boundary: `tr` is a 1:1 byte map, so an empty field stays empty,
+  # and \x1f never goes near tmux.
   panes="$(ST list-panes -t "=$STACK_SESS" \
-             -F "#{pane_id}${US}#{pane_tty}${US}#{@cf_sock}${US}#{@cf_sess}" 2>/dev/null)"
+             -F "#{pane_id}${TF}#{pane_tty}${TF}#{@cf_sock}${TF}#{@cf_sess}" 2>/dev/null \
+           | tr '\t' '\037')"
   [ -n "$panes" ] || { echo "fleet-stack: no stack window on $ST_ADDR — nothing to reorder" >&2; return 1; }
   while IFS="$US" read -r pid ptty psock psess extra; do
     [ -n "$pid" ] || continue
