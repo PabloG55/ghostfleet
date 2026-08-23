@@ -25,8 +25,26 @@
 # guarantee across a lid close, stay on AC in clamshell, or pre-schedule the wake:
 #   sudo pmset schedule wake "MM/dd/yy HH:mm:ss"
 #
+# THE TWO PLATFORMS ARE NOT THE SAME ASSERTION, and until this was written down the
+# same setting quietly meant two different things:
+#
+#             macOS (caffeinate)        Linux (systemd-inhibit --what=)
+#   default   -i -s                     sleep
+#   --display -d -i -s                  idle:sleep:handle-lid-switch
+#
+# `idle` is what logind blanks the SCREEN on, so it belongs with --display and not
+# in the default — which is what it used to be. A Linux box on plain `on` was
+# getting macOS's `display` behaviour, pinning a backlight nobody asked for, and no
+# line of documentation or output distinguished the two. `sleep` alone is the honest
+# equivalent of `-i -s`: the machine stays up, the screen is left to its own timer.
+#
+# One asymmetry survives, because there is no macOS equivalent to switch off:
+# --display on Linux also takes handle-lid-switch, so a closed lid is ignored there
+# and is NOT on macOS (see the CAVEAT above). Documented in docs/OPERATIONS.md.
+#
 # Silent on purpose when arming (the control plane calls it mid-screen), and a
 # no-op on any platform without an inhibitor — never a reason to fail the caller.
+# "No-op" must still be SAYABLE, though: see the refusal probe in --status.
 set -uo pipefail
 
 # --- status -----------------------------------------------------------------
@@ -45,11 +63,84 @@ if [ "${1:-}" = "--status" ]; then
     fi
   done < <(pgrep -f "caffeinate .*-w " 2>/dev/null | while read -r p; do
              printf '%s %s\n' "$p" "$(ps -o args= -p "$p" 2>/dev/null)"; done)
-  # Linux side
-  while read -r p; do
-    [ -n "$p" ] && { found=1; printf 'holding sleep — systemd-inhibit pid %s\n' "$p"; }
-  done < <(pgrep -f "systemd-inhibit .*awake-" 2>/dev/null)
-  [ "$found" = 1 ] || echo "nothing held — the machine can idle-sleep"
+  # Linux side. THE SAME SHAPE AS ABOVE, and that is the whole point of this block.
+  # It used to print `holding sleep — systemd-inhibit pid <ipid>`: the INHIBITOR's pid,
+  # never the watched one, and never the words "for pid". bin/fleet-serve.mjs decides a
+  # hold is its own with `lines.find(l => l.includes(\`for pid ${process.pid} \`))`, so on
+  # Linux that match was structurally unsatisfiable — the daemon logged `NOT held` for
+  # its whole life while systemd-inhibit was holding perfectly, and the two suite
+  # assertions that watch for it could not pass on any Linux box at all. The matcher is
+  # right and stays as it is (its comment explains why refusing a hold that is not ours
+  # matters); the line it reads was the half that was wrong.
+  #
+  # The watched pid was there the whole time: we arm with --why="awake-<pid> ", so read
+  # it back out of the args exactly as the caffeinate loop reads its -w.
+  while read -r ipid iargs; do
+    [ -n "${ipid:-}" ] || continue
+    found=1
+    # TEST FOR THE SEPARATOR, NOT FOR EMPTINESS. `${x##*awake-}` on a string with no
+    # `awake-` in it returns the string UNCHANGED — so a `ps` that lost the race and
+    # printed nothing would put the whole args line in wpid, non-empty, and sail past
+    # any `[ -n ]` guard into a confidently wrong "stale, watching dead pid <argv>".
+    case "$iargs" in
+      *awake-*) wpid="${iargs##*awake-}"; wpid="${wpid%% *}" ;;
+      *)        wpid="" ;;
+    esac
+    case "$wpid" in ''|*[!0-9]*) wpid="" ;; esac
+    # idle is the display half (see the header table); lid is display-only too.
+    case "$iargs" in *--what=*idle*|*handle-lid-switch*) what="sleep + display" ;;
+                     *)                                  what="sleep" ;; esac
+    if [ -z "$wpid" ]; then
+      printf 'holding %s — inhibitor pid %s (cannot tell whose: no awake- marker in its args)\n' \
+        "$what" "$ipid"
+    elif kill -0 "$wpid" 2>/dev/null; then
+      printf 'holding %s for pid %s (%s) — inhibitor pid %s\n' \
+        "$what" "$wpid" "$(ps -o comm= -p "$wpid" 2>/dev/null | sed 's:.*/::')" "$ipid"
+    else
+      printf 'stale inhibitor pid %s (watching dead pid %s)\n' "$ipid" "$wpid"
+    fi
+  done < <(pgrep -f "systemd-inhibit .*awake-" 2>/dev/null | while read -r p; do
+             printf '%s %s\n' "$p" "$(ps -o args= -p "$p" 2>/dev/null)"; done)
+
+  # NOTHING HELD IS TWO DIFFERENT FACTS ON LINUX, and they used to print the same line.
+  # Either nobody asked for an inhibitor, or logind REFUSED to give one — and the arm
+  # path cannot tell you which, by design: it backgrounds systemd-inhibit with stderr
+  # discarded and exits 0 so it can never fail its caller. Measured on a GitHub
+  # ubuntu-latest runner, where systemd is running and logind is active and
+  # `systemd-inhibit --list` answers fine: every `--mode=block` arm returns
+  # `Failed to inhibit: Access denied`, for every --what, because the caller belongs to
+  # no login session (`loginctl list-sessions` → "No sessions"). The inhibitor exits
+  # instantly into the discarded stderr and the whole feature is a silent no-op that
+  # reads exactly like success — which is the failure this repo keeps writing
+  # both-directions tests to avoid, sitting in the one place nobody was looking.
+  #
+  # So ASK, here, where saying so costs nothing: hold one over `true` and report the
+  # refusal. --why deliberately carries no `awake-` marker, so this probe can never be
+  # mistaken by the loop above, or by the arm path's dedupe, for a real hold.
+  can_arm() {
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 5 systemd-inhibit --what=sleep --who=ghostfleet --why='probe ' --mode=block true
+    else
+      systemd-inhibit --what=sleep --who=ghostfleet --why='probe ' --mode=block true
+    fi
+  }
+  if [ "$found" = 1 ]; then :
+  elif command -v caffeinate >/dev/null 2>&1; then
+    echo "nothing held — the machine can idle-sleep"
+  elif command -v systemd-inhibit >/dev/null 2>&1; then
+    if perr="$(can_arm 2>&1)"; then
+      echo "nothing held — the machine can idle-sleep"
+    else
+      why="${perr##*: }"; [ -n "$why" ] || why="no reason given"
+      sess=""
+      command -v loginctl >/dev/null 2>&1 \
+        && [ -z "$(loginctl list-sessions --no-legend 2>/dev/null)" ] \
+        && sess=" — this box has no login session"
+      printf 'no inhibitor could be armed: logind refused (%s)%s\n' "$why" "$sess"
+    fi
+  else
+    echo "nothing held — no inhibitor on this platform"
+  fi
   # The OS is the authority, not our process list; show what it actually thinks.
   if command -v pmset >/dev/null 2>&1; then
     printf 'kernel: PreventUserIdleSystemSleep=%s PreventUserIdleDisplaySleep=%s\n' \
@@ -85,9 +176,19 @@ if command -v caffeinate >/dev/null 2>&1; then
 elif command -v systemd-inhibit >/dev/null 2>&1; then
   # Linux equivalent. systemd-inhibit has no "watch a pid" flag, so it wraps a
   # process that exits when ours does; --why carries the pid as our dedupe marker.
-  # `idle` is what logind blanks the screen on, so it covers the -d case too.
-  what="idle:sleep"; [ "$SCREEN" = 1 ] && what="idle:sleep:handle-lid-switch"
-  held "systemd-inhibit .*awake-$PID " && exit 0
+  #
+  # `sleep`, not `idle:sleep`, for the default: see the mapping table in the header.
+  # `idle` is what logind blanks the SCREEN on, so it is the -d half — putting it in
+  # the default gave every Linux box macOS's --display behaviour under plain `on`.
+  what="sleep"; [ "$SCREEN" = 1 ] && what="idle:sleep:handle-lid-switch"
+  # MATCH ON THE FLAG SET, like the caffeinate branch two lines up and for the reason
+  # its comment gives: this used to key on the awake-<pid> marker alone, so switching
+  # modes on a live pid looked exactly like an existing hold and returned early —
+  # `--display` on an already-awake fleet silently kept giving you the dark screen,
+  # which is the same silent-wrong-answer the mode split above exists to end. Now that
+  # the two modes really do pass different --what values, that early return would be a
+  # visible bug rather than a latent one.
+  held "systemd-inhibit --what=$what .*awake-$PID " && exit 0
   nohup systemd-inhibit --what="$what" --who=ghostfleet --why="awake-$PID " --mode=block \
     tail --pid="$PID" -f /dev/null >/dev/null 2>&1 &
 fi

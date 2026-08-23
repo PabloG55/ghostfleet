@@ -4012,6 +4012,165 @@ group "fleet-awake guards"
 "$ROOT/bin/fleet-awake" 999999 >/dev/null 2>&1; is "dead pid: exits 0, no inhibitor" "0" "$?"
 "$ROOT/bin/fleet-awake" abc    >/dev/null 2>&1; is "junk arg: exits 0"               "0" "$?"
 
+# ── fleet-awake says the same thing on both platforms ────────────────────────
+# WHY THESE ARE FAKED PROCESS TABLES rather than real inhibitors: the thing under test
+# is what --status SAYS about a hold, and a real hold cannot be arranged on every box
+# the suite runs on. macOS has no systemd-inhibit at all, and a Linux CI runner has
+# systemd-inhibit but no login session, so logind answers `Failed to inhibit: Access
+# denied` to every --mode=block arm (measured on ubuntu-latest; see the group further
+# down). Testing only against a real hold means testing the Linux branch nowhere — and
+# "nowhere" is exactly how it came to print a shape bin/fleet-serve.mjs cannot read,
+# on the only platform that branch ever runs on.
+#
+# So: a stub pgrep/ps pair reading a fake table, on a PATH that contains ONLY what
+# --status calls. That last part is what makes the Linux branch reachable from a Mac —
+# `command -v caffeinate` has to be able to come back FALSE.
+group "fleet-awake --status: one shape on both platforms"
+AWD="$(mktemp -d)"; AWBASH="$(command -v bash)"
+mkdir -p "$AWD/bin"
+for r in sed grep awk cat; do ln -sf "$(command -v $r)" "$AWD/bin/$r" 2>/dev/null; done
+cat > "$AWD/bin/pgrep" <<STUB
+#!/bin/sh
+pat=""
+while [ \$# -gt 0 ]; do case "\$1" in -*) ;; *) pat="\$1" ;; esac; shift; done
+o="\$(grep -E -- "\$pat" "$AWD/ptable" 2>/dev/null | awk '{print \$1}')"
+[ -n "\$o" ] || exit 1
+printf '%s\n' "\$o"
+STUB
+cat > "$AWD/bin/ps" <<STUB
+#!/bin/sh
+fmt=""; pid=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in -o) fmt="\$2"; shift ;; -p) pid="\$2"; shift ;; esac; shift
+done
+case "\$fmt" in comm=) echo node; exit 0 ;; esac
+l="\$(grep -E "^\$pid " "$AWD/pstable" 2>/dev/null)"
+[ -n "\$l" ] || exit 1
+printf '%s\n' "\${l#* }"
+STUB
+chmod +x "$AWD/bin/pgrep" "$AWD/bin/ps"
+# $1 = the table both stubs read ("" = nothing running). pstable defaults to the same.
+awtable() { printf '%s\n' "$1" > "$AWD/ptable"; printf '%s\n' "${2-$1}" > "$AWD/pstable"; }
+awstatus() { PATH="$AWD/bin" "$AWBASH" "$ROOT/bin/fleet-awake" --status 2>/dev/null; }
+# A real, live pid to be the watched one — `kill -0` decides holding vs stale, and a
+# fixture pid that happens to be dead would make every "holding" case read as stale.
+sleep 45 & AWLIVE=$!
+
+# The macOS branch, as the reference shape. caffeinate present (its own stub is enough
+# — only `command -v` is asked).
+: > "$AWD/bin/caffeinate"; chmod +x "$AWD/bin/caffeinate"
+awtable "8001 caffeinate -i -s -w $AWLIVE"
+is "macOS: names the WATCHED pid" "1" "$(awstatus | grep -c "for pid $AWLIVE " || true)"
+is "...and the inhibitor pid too"  "1" "$(awstatus | grep -c 'inhibitor pid 8001' || true)"
+rm -f "$AWD/bin/caffeinate"
+
+# THE FIX. Same fact, Linux, and until now it printed `holding sleep — systemd-inhibit
+# pid 8002`: the inhibitor's pid, never the watched one, never the words "for pid".
+awtable "8002 systemd-inhibit --what=sleep --who=ghostfleet --why=awake-$AWLIVE  --mode=block tail --pid=$AWLIVE -f /dev/null"
+is "Linux: names the WATCHED pid"  "1" "$(awstatus | grep -c "for pid $AWLIVE " || true)"
+is "...not just the inhibitor's"   "1" "$(awstatus | grep -c 'inhibitor pid 8002' || true)"
+# The consumer's predicate, spelled the way the consumer spells it. This is the whole
+# contract: bin/fleet-serve.mjs keeps `for pid <pid> ` and this line has to satisfy it.
+is "...and satisfies fleet-serve's own test" "1" \
+   "$(awstatus | awk -v p="for pid $AWLIVE " 'index($0,p){n++} END{print n+0}')"
+is "fleet-serve still asks for that string"  "1" \
+   "$(grep -c 'includes(`for pid ${process.pid} `)' "$ROOT/bin/fleet-serve.mjs" || true)"
+# The direction that makes the three above mean something: a hold for SOMEBODY ELSE
+# must not answer to our pid, or the matcher fleet-serve trusts would accept a
+# stranger's inhibitor — the precise thing its comment says it exists to refuse.
+awtable "8003 systemd-inhibit --what=sleep --who=ghostfleet --why=awake-777777  --mode=block tail --pid=777777 -f /dev/null"
+is "a hold for another pid is not ours" "0" "$(awstatus | grep -c "for pid $AWLIVE " || true)"
+is "...it is reported as stale"         "1" "$(awstatus | grep -c 'stale inhibitor pid 8003' || true)"
+
+# The mode is readable from the args, both directions — `on` and `display` now pass
+# different --what values, so --status has to tell them apart or the split is invisible.
+awtable "8004 systemd-inhibit --what=sleep --who=ghostfleet --why=awake-$AWLIVE  --mode=block tail --pid=$AWLIVE -f /dev/null"
+is "default reads as sleep only"   "1" "$(awstatus | grep -c "holding sleep for pid $AWLIVE " || true)"
+awtable "8005 systemd-inhibit --what=idle:sleep:handle-lid-switch --who=ghostfleet --why=awake-$AWLIVE  --mode=block tail --pid=$AWLIVE -f /dev/null"
+is "display reads as sleep + display" "1" "$(awstatus | grep -c "holding sleep + display for pid $AWLIVE " || true)"
+
+# THE SEPARATOR TRAP, in the one place this file could still hit it. `${args##*awake-}`
+# on a string with no `awake-` returns the string UNCHANGED, so a `ps` that lost the
+# race and printed nothing would put the whole argv in wpid — non-empty, so every
+# `[ -n ]` guard sails past it — and report `stale ... watching dead pid <the entire
+# command line>`. pgrep sees the row; ps does not.
+awtable "8006 systemd-inhibit --what=sleep --why=awake-$AWLIVE  --mode=block tail" ""
+is "no args from ps: says it cannot tell" "1" "$(awstatus | grep -c 'cannot tell whose' || true)"
+is "...and never invents a dead pid"      "0" "$(awstatus | grep -c 'watching dead pid' || true)"
+kill $AWLIVE 2>/dev/null; wait $AWLIVE 2>/dev/null
+
+# ── and when it CANNOT arm one, it has to say so ─────────────────────────────
+# The silent no-op this whole group exists to end: on a box where logind refuses, the
+# arm path backgrounds systemd-inhibit with stderr discarded and exits 0, so nothing
+# anywhere distinguishes "nobody asked" from "the OS said no". Both directions, because
+# a message that is always printed is worth as much as one that never is.
+group "fleet-awake --status: a refusal is not silence"
+awtable ""
+cat > "$AWD/bin/systemd-inhibit" <<'STUB'
+#!/bin/sh
+echo "Failed to inhibit: Access denied" >&2
+exit 1
+STUB
+chmod +x "$AWD/bin/systemd-inhibit"
+is "logind refuses: it says so"     "1" "$(awstatus | grep -c 'no inhibitor could be armed' || true)"
+is "...and quotes logind's reason"  "1" "$(awstatus | grep -c 'Access denied' || true)"
+is "...and never reads as fine"     "0" "$(awstatus | grep -c 'nothing held' || true)"
+# The no-session detail, which is the actual cause on a runner and the thing that turns
+# "refused" into something you can act on.
+cat > "$AWD/bin/loginctl" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+chmod +x "$AWD/bin/loginctl"
+is "no sessions: names that too" "1" "$(awstatus | grep -c 'no login session' || true)"
+cat > "$AWD/bin/loginctl" <<'STUB'
+#!/bin/sh
+echo "3 runner seat0 tty1"
+STUB
+chmod +x "$AWD/bin/loginctl"
+is "a box WITH a session: not named" "0" "$(awstatus | grep -c 'no login session' || true)"
+rm -f "$AWD/bin/loginctl"
+# The other direction: an inhibitor that WOULD be granted must not be slandered.
+cat > "$AWD/bin/systemd-inhibit" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+chmod +x "$AWD/bin/systemd-inhibit"
+is "it would be granted: plain nothing held" "1" "$(awstatus | grep -c 'nothing held' || true)"
+is "...and no refusal is claimed"            "0" "$(awstatus | grep -c 'could not be armed\|no inhibitor could be armed' || true)"
+rm -f "$AWD/bin/systemd-inhibit"
+
+# ── the arm path passes the flags the header table claims ────────────────────
+# `on` was arming --what=idle:sleep, and `idle` is what logind blanks the screen on —
+# so every Linux box on the default was silently getting macOS's --display behaviour.
+# A recording stub, because the assertion is about the argv and nothing else.
+group "fleet-awake arms the flags its table claims"
+mkdir -p "$AWD/arm"
+ln -sf "$(command -v nohup)" "$AWD/bin/nohup" 2>/dev/null
+cat > "$AWD/bin/systemd-inhibit" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$AWD/arm/log"
+exit 0
+STUB
+chmod +x "$AWD/bin/systemd-inhibit"
+sleep 45 & AWLIVE2=$!
+awarm() { : > "$AWD/arm/log"; awtable "${2:-}"
+          PATH="$AWD/bin" "$AWBASH" "$ROOT/bin/fleet-awake" $1 "$AWLIVE2" >/dev/null 2>&1
+          sleep 0.4; cat "$AWD/arm/log" 2>/dev/null; }
+is "default arms --what=sleep"      "1" "$(awarm ''   | grep -c -- '--what=sleep --who' || true)"
+is "...and never blanks the screen" "0" "$(awarm ''   | grep -c -- '--what=idle' || true)"
+is "-d arms idle and the lid"       "1" "$(awarm '-d' | grep -c -- '--what=idle:sleep:handle-lid-switch' || true)"
+is "...and carries the watched pid" "1" "$(awarm ''   | grep -c -- "--why=awake-$AWLIVE2" || true)"
+# Dedupe on the FULL flag set, like the caffeinate branch. Keyed on the awake-<pid>
+# marker alone, switching modes on a live pid looked like an existing hold and returned
+# early — so `--display` on an already-awake fleet silently kept the dark screen. Both
+# directions: the same mode must NOT re-arm, a different one MUST.
+HELD_SLEEP="9001 systemd-inhibit --what=sleep --who=ghostfleet --why=awake-$AWLIVE2  --mode=block tail --pid=$AWLIVE2 -f /dev/null"
+is "same mode already held: no second" "0" "$(awarm ''   "$HELD_SLEEP" | grep -c 'what=' || true)"
+is "switching to display DOES re-arm"  "1" "$(awarm '-d' "$HELD_SLEEP" | grep -c -- '--what=idle:sleep:handle-lid-switch' || true)"
+kill $AWLIVE2 2>/dev/null; wait $AWLIVE2 2>/dev/null
+rm -rf "$AWD"
+
 # ── 6. the adapter table ─────────────────────────────────────────────────────
 group "agent adapter"
 is "claude is the default agent" "claude" "$("$ROOT/bin/fleet-agent" of __no_such_session__ 2>/dev/null)"
@@ -4964,6 +5123,18 @@ is "...and never as a pass"            "0" \
    "$(PATH="$SV/noshim" HOME="$SV/home" TMUX= "$(command -v node)" "$SV/bin/fleet-serve.mjs" check 2>&1 | grep -c 'funnel     off' || true)"
 
 group "fleet-serve holds a sleep inhibitor while it runs"
+# CAN this box arm one at all? `command -v systemd-inhibit` says the binary exists, which
+# is a different question from whether logind will grant a --mode=block lock, and the
+# gap between the two is where the two assertions below spent two CI runs being red for
+# somebody else's reason. Ask by doing it: hold one over `true`. --why deliberately
+# carries no `awake-` marker, so this can never be picked up as a real hold by the
+# pgrep patterns in this group or by fleet-awake's own dedupe.
+can_arm_here() {
+  command -v caffeinate >/dev/null 2>&1 && return 0
+  command -v systemd-inhibit >/dev/null 2>&1 || return 1
+  systemd-inhibit --what=sleep --who=ghostfleet-test --why='suite probe ' \
+    --mode=block true >/dev/null 2>&1
+}
 # §8: this Mac is set to sleep after one minute idle ON AC, and the fleet survives only
 # because ttyskeepawake holds it up while tmux ttys are active. A daemon nobody is
 # attached to has no tty, so it holds its own — through bin/fleet-awake, which already
@@ -4985,13 +5156,37 @@ if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/nul
        "$(tr '\n' ' ' < "$SV/log.awake" 2>/dev/null | cut -c1-180)"
    skip "fleet-serve inhibitor" "the daemon never got as far as arming one"
    kill $apid 2>/dev/null
-  else
+  elif can_arm_here; then
    is "it reports holding one for its pid" "1" "$(grep -c "awake: holding .* for pid $apid " "$SV/log.awake" || true)"
    is "the OS agrees an inhibitor exists" "1" \
       "$( (pgrep -f "caffeinate .*-w $apid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$apid " >/dev/null 2>&1) && echo 1 || echo 0)"
    kill $apid 2>/dev/null; sleep 1
    is "and it is released when we stop"    "0" \
       "$( (pgrep -f "caffeinate .*-w $apid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$apid " >/dev/null 2>&1) && echo 1 || echo 0)"
+  else
+   # HAVING THE BINARY IS NOT BEING ALLOWED TO USE IT, and for two CI runs those two
+   # states were indistinguishable here: both assertions above came back `expected 1,
+   # got 0` on ubuntu-latest and read as a broken inhibitor in our code. It is not ours.
+   # logind answers `Failed to inhibit: Access denied` to every --mode=block arm on that
+   # box, for every --what, because the caller belongs to no login session
+   # (`loginctl list-sessions` → "No sessions"), and systemd-inhibit is armed with its
+   # stderr discarded, so it dies instantly and silently.
+   #
+   # Note WHICH of the four assertions used to pass there: "released when we stop" and
+   # "off holds none", both of which expect ZERO inhibitors and got zero from a machine
+   # that could never have had one. Two greens measuring nothing, which is the exact
+   # shape this suite writes both-directions tests to refuse.
+   #
+   # So skip the two that this box cannot answer, and assert the one it can — that the
+   # daemon SAYS it could not arm one instead of going quiet. That assertion is only
+   # reachable on a box like this, which is why it lives here and not with the stubbed
+   # groups in §5.
+   is "the daemon says it could not arm one" "1" \
+      "$(grep -c 'no inhibitor could be armed' "$SV/log.awake" || true)"
+   is "...and never claims a hold it lacks"  "0" \
+      "$(grep -c "awake: holding " "$SV/log.awake" || true)"
+   skip "fleet-serve inhibitor" "logind refuses to inhibit on this box — no login session"
+   kill $apid 2>/dev/null; sleep 1
   fi
   # off must mean off, or "on" proves nothing
   HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.awakeoff" 2>&1 &
