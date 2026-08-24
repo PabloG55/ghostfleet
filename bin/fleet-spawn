@@ -623,9 +623,10 @@ session_live() {                   # is $sid still a session on this fleet?
 # block, so a message that spends six lines explaining itself before it says what to do is
 # a message whose advice that form throws away. Headline, cause, what to run, what is on
 # disk — then the reasoning, which is the part that can afford to be cut.
-spawn_failed() {                   # <headline> <cause> — refuse, and NAME what is on disk
+spawn_failed() {                   # <headline> <cause> [<hint>] — and NAME what is on disk
   { echo "fleet-spawn: $1"
     echo "  $2"
+    [ -n "${3:-}" ] && echo "  $3"
     echo "  Nothing was removed. Re-run against the same tree once that is fixed:"
     echo "      fleet-spawn $NAME --reuse $(basename "$WT")"
     echo "  Still on disk:  worktree  $WT"
@@ -636,16 +637,26 @@ spawn_failed() {                   # <headline> <cause> — refuse, and NAME wha
     echo "  is not all inside the repo — removing the tree could destroy state that is not"
     echo "  ours to reclaim, and the slot is claimed per worktree path so a --reuse keeps"
     echo "  it. fleet-clean is the command that decides that, not this one.${SLOT:+
-  Give the slot back by hand with: fleet-slot release \"$WT\"}"; } >&2
+  Give the slot back by hand with: fleet-slot release \"$WT\"}"
+    echo "  Other things that make a pane come straight back: agent-here not on PATH"
+    echo "  (./install.sh), or a staged runtime caught half-synced (cf-sync)."; } >&2
   exit 1
 }
 [ -n "$sid" ] || spawn_failed \
   "tmux would not start session '$name' on fleet $SOCK — nothing is running in that worktree." \
   "tmux said why on the line above this one."
 sleep 0.5
+# THE AGENT BINARY FIRST, because that is what it has actually been. Measured on
+# cf-superkey: a claude-code package update left bin/ holding only a WINDOWS claude.exe
+# for ~20 minutes, so every spawn in that window died on "cannot execute binary file" —
+# tmux made the session, the exec failed, the session went. docs/OPERATIONS.md ("Updating
+# Claude Code under a fleet") already documents the neighbouring case, an exec landing on
+# the ~300MB file while the updater is still writing it. The window is real, it is short,
+# and before this check every spawn inside it reported success.
 session_live || spawn_failed \
   "session '$name' ($sid) on fleet $SOCK exited the instant it started." \
-  "Its pane ran 'agent-here' and that came straight back — usually not on PATH (./install.sh), or a half-synced runtime (cf-sync)."
+  "Its pane ran 'agent-here' and that came straight back — the agent binary could not exec." \
+  "Check that first: '$( [ "$AGENT" = claude ] && echo claude || echo "$AGENT" ) --version'. A package update mid-install leaves one that cannot run."
 
 echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)${AGENT:+ [agent: $AGENT]}"
 

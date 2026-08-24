@@ -1216,6 +1216,14 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   mkdir -p "$SW/home/.config/ghostfleet" "$SW/ok" "$SW/dies" "$SW/broken"
   printf '#!/usr/bin/env bash\nsleep 60\n' > "$SW/ok/agent-here";   chmod +x "$SW/ok/agent-here"
   printf '#!/usr/bin/env bash\nexit 0\n'   > "$SW/dies/agent-here"; chmod +x "$SW/dies/agent-here"
+  # THE CAUSE THIS ACTUALLY WAS, and it needs no stub of ours at all: a `claude` that is a
+  # binary for the wrong platform. A claude-code package update left bin/ holding only a
+  # Windows claude.exe for ~20 minutes on the machine that reported this, so every spawn
+  # in that window died on "cannot execute binary file". Two bytes of MZ header reproduce
+  # it, and this variant runs the REAL launcher chain (agent-here -> claude-here -> claude)
+  # instead of replacing it, which is what makes it the faithful case.
+  mkdir -p "$SW/winbin"
+  printf 'MZ\220\000\003\000\000\000' > "$SW/winbin/claude"; chmod +x "$SW/winbin/claude"
   : > "$SW/broken/notadir"                 # TMUX_TMPDIR here cannot hold a socket dir
   SWOUT=""; SWRC=0
   spawnsw() {                    # $1 = which agent-here, $2 = TMUX_TMPDIR, rest = extra args
@@ -1270,7 +1278,10 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "...and does NOT say started"        "0" "$(printf '%s' "$SWOUT" | grep -c "started 'w1'" || true)"
   is "...blaming the pane's own command"  "1" \
      "$(printf '%s' "$SWOUT" | grep -c 'exited the instant it started' || true)"
-  is "...and naming agent-here"           "1" "$(printf '%s' "$SWOUT" | grep -c "agent-here" || true)"
+  # named at least once: the cause line says it, and the trailing "other things" list
+  # names it again for the PATH case
+  is "...and naming agent-here"           "1" \
+     "$([ "$(printf '%s' "$SWOUT" | grep -c 'agent-here' || true)" -ge 1 ] && echo 1 || echo 0)"
   is "...and leaves NO manifest row"      "0" "$(mfrow)"
 
   # ── the same, WITH --prompt ──
@@ -1283,6 +1294,16 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "no prompt is promised on failure"   "0" \
      "$(printf '%s' "$SWOUT" | grep -c 'will dispatch the initial prompt' || true)"
   is "...and it still fails loudly"       "1" "$([ "$SWRC" = 0 ] && echo 0 || echo 1)"
+
+  # ── the real one: a wrong-platform agent binary, through the real launcher chain ──
+  spawnsw winbin "$TMUX_TMPDIR"
+  is "a wrong-platform claude fails"      "1" "$([ "$SWRC" = 0 ] && echo 0 || echo 1)"
+  is "...and does NOT say started"        "0" "$(printf '%s' "$SWOUT" | grep -c "started 'w1'" || true)"
+  is "...pointing at the agent binary"    "1" \
+     "$(printf '%s' "$SWOUT" | grep -c 'agent binary could not exec' || true)"
+  is "...and how to check it"             "1" \
+     "$(printf '%s' "$SWOUT" | grep -c -- "claude --version" || true)"
+  is "...and leaves NO manifest row"      "0" "$(mfrow)"
 
   # THE CHECK IS BY SESSION ID AND WITHOUT -t, because a session NAME can be tmux TARGET
   # SYNTAX (a leading `+` is an expression, and which session it resolves to is
