@@ -417,7 +417,61 @@ async function reorder(name, delta) {
 // and pretending otherwise wastes a minute of listening), inline code keeps its text
 // without its backticks, links become "link", and the emphasis marks go. Capped, because
 // a whole turn can be thousands of characters and there is no way to skim a voice.
+//
+// AND IDENTIFIERS ARE NAMED, NOT SPELLED. "it has a bunch of numbers and stuff that is not
+// relevant" — a 40-character sha is read one character at a time, which is most of a minute
+// for a string nobody could write down from a speaker anyway. Neither could they write down
+// a UUID, an ISO timestamp, `\x1f`, or four directories on the way to a filename.
+//
+// THE LINE IS NOT "NUMBERS ARE NOISE", and a normaliser that dropped every digit would be
+// worse than doing nothing. It is ADDRESS versus FACT. An address is a thing you would have
+// to READ to act on, so speech can only name it: say that a commit was involved, not which.
+// A fact is a thing you act on BY EAR and it has to survive intact — "1885 passed, 0 failed"
+// is the whole content of that sentence, and so are #1171, 2.1.241, 40% and 6s. Those are
+// asserted, in test/helpers/speak-check.mjs, in both directions on purpose: a test that only
+// checks that noise is gone is passed by returning the empty string.
 const SPEAK_MAX = 1200;
+// A left edge that cannot itself be part of an identifier, as a capturing group rather than
+// a lookbehind: lookbehind only reached Safari in 16.4, this app supports the phones that
+// installed it (§9's 16.4+ is about Web Push, not about parsing), and an unsupported regex
+// literal is a PARSE error — the whole client, blank, not one feature degraded.
+const IDENT_EDGE = '(^|[^\\w./~@+-])';
+const pathSpoken = (p, line) => {
+  // The basename is a NAME — it is usually what the sentence is about ("fixed fleet-grid")
+  // — and everything left of it is the address. The line number stays: it is one short
+  // word by ear, and it is the difference between "there is a bug in that file" and "there
+  // is a bug at that spot", which is the only part of a path a listener can act on.
+  const base = p.replace(/\/+$/, '').split('/').pop() || p;
+  return line ? `${base} line ${line.slice(1)}` : base;
+};
+function sayIdentifiers(t) {
+  // Most specific first, because the general patterns would eat the parts of these: the
+  // sha rule matches the first block of a UUID, and the octal rule the tail of an escape.
+  t = t.replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, 'a timestamp');
+  t = t.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, 'an id');
+  t = t.replace(/\b0x[0-9a-f]+\b/gi, 'a hex id');
+  t = t.replace(/\\(?:x[0-9a-f]{2}|u\{?[0-9a-f]{4,6}\}?|[0-7]{2,3})/gi, 'an escape code');
+  // A path, rooted (/a/b, ./a, ../a, ~/a) or relative with a dotted last segment (bin/x.mjs).
+  // The dot is what keeps `@anthropic-ai/claude-code` and `feat/retry-backoff` whole: a
+  // package and a branch are names you act on, and they read perfectly well aloud.
+  t = t.replace(new RegExp(IDENT_EDGE + '((?:~|\\.{1,2})?\\/[\\w.@+~-]+(?:\\/[\\w.@+~-]+)*)(:\\d+)?(?::\\d+)?', 'g'),
+                (m, pre, p, line) => pre + pathSpoken(p, line));
+  t = t.replace(new RegExp(IDENT_EDGE + '([\\w.@+~-]+(?:\\/[\\w.@+~-]+)*\\/[\\w.@+~-]*\\.\\w+)(:\\d+)?(?::\\d+)?', 'g'),
+                (m, pre, p, line) => pre + pathSpoken(p, line));
+  t = t.replace(new RegExp(IDENT_EDGE + '([\\w.@+~-]*\\.\\w+):(\\d+)(?::\\d+)?', 'g'),
+                (m, pre, f, n) => `${pre}${f} line ${n}`);
+  // A git sha. The guard is what separates it from a count and from a word: below 12
+  // characters it has to look like hex ON PURPOSE — at least one digit AND at least one
+  // a-f — so "1234567" stays a number and "cabbage" stays a word. At 12 and up, nothing
+  // that long is anything but an address. Called "a commit" because in this app's
+  // transcripts that is what it always is; a hash that is not one still comes out as
+  // "an address was elided here", which is the part that matters.
+  t = t.replace(new RegExp('(^|[^\\w.-])([0-9a-f]{7,40})(?![\\w.-])', 'g'),
+                (m, pre, h) => (h.length >= 12 || (/\d/.test(h) && /[a-f]/.test(h))) ? pre + 'a commit' : m);
+  // "1885 passed / 0 failed" is spoken "slash", which is a word that is not in the sentence.
+  t = t.replace(/ \/ /g, ', ');
+  return t;
+}
 export function speakable(text) {
   let t = String(text || '');
   t = t.replace(/```[\s\S]*?```/g, ' … code block … ');   // fenced code: named, not read
@@ -427,6 +481,10 @@ export function speakable(text) {
   t = t.replace(/^\s{0,3}#{1,6}\s+/gm, '');               // heading marks
   t = t.replace(/^\s{0,3}[-*+]\s+/gm, '');                // bullet marks
   t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, '$1$2$3');
+  // AFTER the markdown pass, so a path inside backticks is a path by the time it gets here
+  // and a URL is already the word "link"; BEFORE the cap, so the 1200 characters are spent
+  // on words instead of on an address that will not be read out.
+  t = sayIdentifiers(t);
   t = t.replace(/\s+/g, ' ').trim();
   return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, '') + '… and it goes on.' : t;
 }
