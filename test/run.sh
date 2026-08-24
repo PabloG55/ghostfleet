@@ -1396,7 +1396,16 @@ fi
 group "the grid's create lands on the grid's own fleet"
 if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   GP="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$GP/fleet" "$GP/stub"
-  printf '#!/usr/bin/env bash\nsleep 60\n' > "$GP/stub/agent-here"; chmod +x "$GP/stub/agent-here"
+  # A STUB `claude`, NOT A STUB `agent-here`. createWorktree prepends the repo's OWN bin/
+  # to PATH (it has to, so fleet-agent is findable), which shadows any agent-here a test
+  # puts there — so the session runs the real one, which execs claude-here, which execs
+  # `claude`. On a dev box that exists and the session lives; on a CI runner it does not,
+  # the pane comes straight back, and the session is gone before the assertion looks.
+  #   That went unnoticed until fleet-spawn started verifying its session: the old code
+  # printed "started" and wrote the manifest regardless, so this asserted the manifest of
+  # a session that had already died. Stubbing the thing at the END of the chain is what
+  # makes the test mean the same on both.
+  printf '#!/usr/bin/env bash\nsleep 60\n' > "$GP/stub/claude"; chmod +x "$GP/stub/claude"
   git init -q -b main "$GP/repo" 2>/dev/null
   git -C "$GP/repo" config user.email t@t; git -C "$GP/repo" config user.name t
   : > "$GP/repo/f"; git -C "$GP/repo" add -A; git -C "$GP/repo" commit -qm init 2>/dev/null
