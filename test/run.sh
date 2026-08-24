@@ -5436,6 +5436,164 @@ fi
 chmod 700 "$CS/rt2/web" 2>/dev/null || true
 rm -rf "$CS"
 
+# ── the runtime knows WHICH commit it is, and the control plane says when it is behind ──
+# Seen live: four PRs merged, nobody ran cf-sync, and ~/.local/libexec/ghostfleet served
+# the PRE-FIX fleet-grid.mjs, fleet-stack, ghostfleet and fleet-awake for about an hour
+# while the git repo was current. Nothing anywhere said so. On macOS the difference was
+# invisible; on any box with tmux <= 3.5 the stale grid parser IS the bug #68 had just
+# fixed. CLAUDE.md opens with "editing a file changes nothing until it's synced" and the
+# repo could not tell you when it hadn't been.
+#
+# BOTH DIRECTIONS MATTER MORE THAN USUAL HERE. A warning that fires on a current runtime
+# gets ignored, and an ignored warning is worse than none — so the silent cases are
+# asserted as hard as the loud one, and asserted as EXACTLY empty rather than "does not
+# match": a wrong line on stdout is the failure mode, whatever it says. And silence must
+# never be reachable by claiming "in sync": every uncertain case (no stamp, no source, not
+# a checkout, a source that is gone, a stamp about a different source) is silence with no
+# claim attached, which is why none of these assert a positive message.
+group "stale runtime warning"
+if ! command -v git >/dev/null 2>&1; then
+  skip "stale runtime warning" "git is not installed"
+else
+  # pwd -P for the same reason §0 uses it: /tmp and /var here are symlinks, cf-sync
+  # records the path it was HANDED, and two spellings of one directory is the trap that
+  # already cost this repo a config key nothing could find.
+  SY="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$SY/repo/bin" "$SY/repo/hooks"
+  printf '#!/bin/sh\necho one\n' > "$SY/repo/bin/thing"
+  # The fixture repo carries the REAL control plane, because that is how the runtime gets
+  # one: cf-sync mirrors bin/ with --delete, so a copy dropped into the runtime by hand is
+  # deleted by the next sync — which is exactly what happened to the first version of this
+  # group, and it looked like the reader was broken rather than the fixture.
+  cp "$ROOT/bin/ghostfleet" "$SY/repo/bin/ghostfleet"
+  # A CI runner has no git identity and a developer's box may sign commits by default;
+  # both would fail `git commit` here for reasons that have nothing to do with the code.
+  git -C "$SY/repo" init -q .                      2>/dev/null
+  git -C "$SY/repo" config user.email t@t.invalid  2>/dev/null
+  git -C "$SY/repo" config user.name  suite        2>/dev/null
+  git -C "$SY/repo" config commit.gpgsign false    2>/dev/null
+  gitc() { git -C "$SY/repo" add -A >/dev/null 2>&1; git -C "$SY/repo" commit -qm "$1" >/dev/null 2>&1; }
+  gitc "first"
+  if ! git -C "$SY/repo" rev-parse HEAD >/dev/null 2>&1; then
+    skip "stale runtime warning" "git in this environment cannot commit"
+  else
+    # The stamp under test is written by the REAL cf-sync, not forged here: a hand-written
+    # fixture would keep passing after the writer stopped agreeing with the reader.
+    CLAUDE_FLEET_HOME="$SY/rt" "$ROOT/bin/cf-sync" "$SY/repo" >/dev/null 2>&1
+    is "a sync stamps the commit it copied" "$(git -C "$SY/repo" rev-parse HEAD)" \
+       "$(head -1 "$SY/rt/.synced" 2>/dev/null)"
+    is "...and names the source it read"    "$SY/repo" \
+       "$(sed -n 's/^source //p' "$SY/rt/.synced" 2>/dev/null)"
+    is "...and dates it for a human"        "1" \
+       "$(grep -c '^synced 20[0-9][0-9]-' "$SY/rt/.synced" 2>/dev/null || true)"
+
+    # The control plane resolves its runtime root from its OWN location, so the copy under
+    # test is the one the sync just installed, in the runtime. A symlink would resolve back
+    # into the repo — correct for ~/.local/bin/ghostfleet, wrong for the runtime root, and
+    # that difference is the whole subject of this group.
+    RTG="$SY/rt/bin/ghostfleet"
+    is "the sync delivered the control plane" "yes" "$([ -x "$RTG" ] && echo yes || echo no)"
+    # Not named sc(): §2 already defines one for split_choice, and redefining a
+    # suite-wide helper here would silently hand every later caller of it this function.
+    synccheck() { bash "$RTG" --sync-check 2>&1; }
+
+    # DIRECTION 1: level with the repo, one second after a real sync.
+    is "a fresh sync warns about nothing"   ""    "$(synccheck)"
+
+    # DIRECTION 2: the repo moves and the runtime does not.
+    printf '#!/bin/sh\necho two\n' > "$SY/repo/bin/thing"; gitc "second"
+    out1="$(synccheck)"
+    is "one commit behind is reported"      "1"   "$(printf '%s' "$out1" | grep -c 'runtime is 1 commit behind' || true)"
+    is "...singular, not '1 commits'"       "0"   "$(printf '%s' "$out1" | grep -c '1 commits' || true)"
+    is "...and it names the fix"            "1"   "$(printf '%s' "$out1" | grep -c 'run cf-sync' || true)"
+    is "...and the commit it is stuck on"   "1"   "$(printf '%s' "$out1" | grep -c "synced $(git -C "$SY/repo" rev-parse --short=7 HEAD~1)" || true)"
+    gitc_more() { printf '%s\n' "$1" > "$SY/repo/bin/thing"; gitc "$1"; }
+    gitc_more three; gitc_more four
+    is "the count follows the repo"         "1"   "$(synccheck | grep -c 'runtime is 3 commits behind' || true)"
+    is "...on ONE line, quietly"            "1"   "$(synccheck | wc -l | tr -d ' ')"
+
+    # A sync clears it. This is the assertion that proves the two halves are the same
+    # mechanism rather than two settings that happen to agree.
+    CLAUDE_FLEET_HOME="$SY/rt" "$ROOT/bin/cf-sync" "$SY/repo" >/dev/null 2>&1
+    is "syncing again silences it"          ""    "$(synccheck)"
+
+    # DIRECTION 3: every uncertain case, each asserted as EXACTLY silent. None of them may
+    # be reached by concluding "in sync" — there is no such conclusion in the code, which
+    # is what these are really pinning down.
+    cp "$SY/rt/.synced" "$SY/keep.synced"
+    gitc_more five                                  # so a WRONG answer would be a warning
+    # 'behind the repo', not 'commits behind': one commit is SINGULAR, and a pattern that
+    # only matches the plural silently stops testing the very state it is setting up.
+    is "behind again, so the rest is meaningful" "1" "$(synccheck | grep -c 'behind the repo' || true)"
+    mv "$SY/rt/.synced" "$SY/rt/.synced.off"
+    is "no stamp: silence, not a verdict"   ""    "$(synccheck)"
+    mv "$SY/rt/.synced.off" "$SY/rt/.synced"
+    mv "$SY/rt/.source" "$SY/rt/.source.off"
+    is "no recorded source: silence"        ""    "$(synccheck)"
+    mv "$SY/rt/.source.off" "$SY/rt/.source"
+    printf '%s\n' "$SY/gone" > "$SY/rt/.source"
+    is "the source is gone: silence"        ""    "$(synccheck)"
+    mkdir -p "$SY/notarepo"; printf '%s\n' "$SY/notarepo" > "$SY/rt/.source"
+    is "the source is not a checkout: silence" ""  "$(synccheck)"
+    printf '%s\n' "$SY/repo" > "$SY/rt/.source"
+    # A stamp ABOUT ANOTHER SOURCE cannot be measured against this one. install.sh really
+    # does produce that pair: it puts a clone's pointer back after an npx-cache install.
+    sed 's|^source .*|source '"$SY"'/elsewhere|' "$SY/keep.synced" > "$SY/rt/.synced"
+    is "stamp names a different source: silence" "" "$(synccheck)"
+    # Not a sha. `rev-parse HEAD` in a repo with an unborn HEAD prints the word HEAD, and a
+    # stamp holding it would compare unequal forever — a warning nothing could ever clear.
+    { echo HEAD; echo "source $SY/repo"; } > "$SY/rt/.synced"
+    is "a stamp that is not a sha: silence" ""    "$(synccheck)"
+    # A sha this repo has never heard of: measurable-looking, not measurable. It must not
+    # come out as "0 commits behind", which is the shape a naive count would print.
+    { echo 0123456789abcdef0123456789abcdef01234567; echo "source $SY/repo"; } > "$SY/rt/.synced"
+    out2="$(synccheck)"
+    is "an unknown commit says so"          "1"   "$(printf '%s' "$out2" | grep -c "not in this repo's HEAD" || true)"
+    is "...and never says 0 commits behind" "0"   "$(printf '%s' "$out2" | grep -c '0 commits behind' || true)"
+
+    # A PARTIAL sync leaves $DEST holding neither commit, so the stamp must be REMOVED and
+    # not left at its previous value: a stale value is a specific, wrong distance reported
+    # for a directory whose contents nothing knows.
+    cp "$SY/keep.synced" "$SY/rt/.synced"; printf '%s\n' "$SY/repo" > "$SY/rt/.source"
+    chmod 000 "$SY/repo/hooks" 2>/dev/null || true
+    if ls "$SY/repo/hooks" >/dev/null 2>&1; then
+      chmod 755 "$SY/repo/hooks" 2>/dev/null || true
+      skip "a failed sync drops the stamp" "this user can read a 000 dir (root?)"
+    else
+      CLAUDE_FLEET_HOME="$SY/rt" "$ROOT/bin/cf-sync" "$SY/repo" >/dev/null 2>&1
+      chmod 755 "$SY/repo/hooks" 2>/dev/null || true
+      is "a failed sync drops the stamp"    "no"  "$([ -e "$SY/rt/.synced" ] && echo yes || echo no)"
+      is "...and the runtime then says nothing" "" "$(synccheck)"
+    fi
+
+    # A source with no commits to name gets no stamp either — and an older stamp is about
+    # code that is no longer in the runtime, so it goes. Into a SECOND runtime dir: this
+    # sync would mirror bin/ from a source that has no control plane in it, and deleting
+    # the copy under test three assertions before the end is a way to fail that says
+    # nothing about the code.
+    mkdir -p "$SY/plain/bin" "$SY/rt2"; printf 'x\n' > "$SY/plain/bin/f"
+    cp "$SY/keep.synced" "$SY/rt2/.synced"
+    CLAUDE_FLEET_HOME="$SY/rt2" "$ROOT/bin/cf-sync" "$SY/plain" >/dev/null 2>&1
+    is "a non-git source leaves no stamp"   "no"  "$([ -e "$SY/rt2/.synced" ] && echo yes || echo no)"
+
+    # ORDERING. --sync-check answers above the tmux/node requirement checks and above the
+    # sleep inhibitor, because a status question must not need a terminal multiplexer and
+    # must NOT arm caffeinate/systemd-inhibit on whatever machine asked. Proved by a
+    # fleet-awake that would leave a trace if it were reached.
+    printf '#!/bin/sh\ntouch "%s/awake-was-armed"\n' "$SY" > "$SY/rt/bin/fleet-awake"
+    chmod +x "$SY/rt/bin/fleet-awake"
+    CLAUDE_FLEET_AWAKE=display bash "$RTG" --sync-check >/dev/null 2>&1
+    is "--sync-check arms no inhibitor"     "no"  "$([ -e "$SY/awake-was-armed" ] && echo yes || echo no)"
+    # PATH without tmux: the answer still comes, so the check cannot be gated behind a
+    # requirement it does not have.
+    mkdir -p "$SY/nobin"
+    printf '%s\n' "$SY/repo" > "$SY/rt/.source"; cp "$SY/keep.synced" "$SY/rt/.synced"
+    is "...and needs no tmux" "1" \
+       "$(PATH="$SY/nobin:/usr/bin:/bin" bash "$RTG" --sync-check 2>&1 | grep -c 'behind the repo' || true)"
+  fi
+  rm -rf "$SY"
+fi
+
 # ── the client picks the right backend when the DAEMON is what served it ─────
 # Found on a real phone: the client fleet-serve serves ran on fixtures, because `gf.base`
 # unset meant "fixtures" and nothing ever set it. The phone showed four projects that do
