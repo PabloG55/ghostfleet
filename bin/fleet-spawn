@@ -564,15 +564,96 @@ else
     fleet-agent set -s "$SOCK" "$name" "$AGENT" 2>/dev/null
 fi
 
-# fresh session in the worktree, background (lead keeps working)
-tmux -L "$SOCK" new-session -d -s "$name" -c "$WT" \
+# SAY "STARTED" ONLY WHEN A SESSION IS ACTUALLY THERE.
+#
+# This printed the success line unconditionally, one line below a `new-session` whose
+# exit status nobody read. tmux's own error was never suppressed — it went to stderr all
+# along — but it was immediately contradicted by "started '<name>' in <worktree>", and a
+# reader believes the last thing they are told. So every failure mode looked exactly like
+# a success: `fleet-spawn coi-query --reuse coi-query` printed the whole success block,
+# including the promise to dispatch the initial prompt, and no session ever existed.
+# Reported twice from cf-superkey after three re-runs, because nothing in the output
+# distinguished the attempts.
+#
+# It reaches further than a wrong message. bin/fleet-grid.mjs's createWorktree parses this
+# very line — /started '([^']+)'/ — to learn which session to attach to, so a failed
+# spawn became a confident attach to nothing and the card drew "· FREE — no session yet".
+# That is byte-for-byte the symptom of the socket-routing bug fixed in #64, and telling
+# the two apart cost a lead real time.
+#
+# -P -F '#{session_id}' rather than trusting the exit status alone: it gives us the
+# identity of the session that was just made, which is what the check below needs. The id
+# never reaches stdout — the grid parses that stream, and a stray line in it is a hazard
+# for no benefit.
+sid="$(tmux -L "$SOCK" new-session -d -P -F '#{session_id}' -s "$name" -c "$WT" \
   -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
   -e "CLAUDE_FLEET_MODEL=$MODEL" -e "CLAUDE_FLEET_AGENT=$AGENT" -e "CLAUDE_FLEET_SLOT=$SLOT" \
-  "exec agent-here \"$name\""
+  "exec agent-here \"$name\"")" || sid=""
+sid="${sid%%$'\n'*}"
+
+# ...AND EXIT 0 ONLY THEN. tmux can return 0 and the session still be gone a moment
+# later: the pane runs `exec agent-here <name>`, and if that cannot exec — not on PATH
+# because ./install.sh was never run, or the staged runtime is half-synced — the pane's
+# command exits at once and tmux takes the session down with it (`remain-on-exit off`,
+# set in tmux/cf.tmux.conf and tmux's own default). "The pane is the truth" applies to
+# whether a session exists at all, not only to what it is doing.
+#
+# A SETTLE, NOT A RETRY. The thing being looked for is a session that dies on its own, so
+# the check has to happen AFTER the death would have happened. Any poll-until-present
+# loop would report the doomed session as healthy on its first tick — it would paper over
+# precisely the failure this exists to catch. 0.5s is the same order as bin/fleet-answer
+# and fleet-pause use for tmux to settle, and it costs a successful spawn half a second
+# against a worktree create and a dependency install; a slow spawn is slow because the
+# AGENT boots slowly, and the session exists from the first instant either way.
+session_live() {                   # is $sid still a session on this fleet?
+  # BY SESSION ID, AND WITHOUT `-t`. A session NAME can be tmux TARGET SYNTAX — a leading
+  # `+` is the expression "the next session", so `has-session -t '=+foo'` answers yes
+  # about a session that is not ours, and WHICH one it answers about is version-dependent
+  # (see CLAUDE.md). Every `-t` is a resolution and can therefore lie. Comparing the ids
+  # that `list-sessions -F` prints is the only form that cannot: `$N` is assigned by tmux,
+  # is unique for the life of the server, and is not an expression. Do not "simplify"
+  # this to has-session.
+  local s
+  while IFS= read -r s; do [ "$s" = "$sid" ] && return 0; done < <(
+    tmux -L "$SOCK" list-sessions -F '#{session_id}' 2>/dev/null)
+  return 1
+}
+#   ACTION BEFORE RATIONALE, and short lines. fleet-grid.mjs's new-worktree form shows
+# only the OPENING lines of a refusal (spawnFailLines, added in #64) in a fixed-height
+# block, so a message that spends six lines explaining itself before it says what to do is
+# a message whose advice that form throws away. Headline, cause, what to run, what is on
+# disk — then the reasoning, which is the part that can afford to be cut.
+spawn_failed() {                   # <headline> <cause> — refuse, and NAME what is on disk
+  { echo "fleet-spawn: $1"
+    echo "  $2"
+    echo "  Nothing was removed. Re-run against the same tree once that is fixed:"
+    echo "      fleet-spawn $NAME --reuse $(basename "$WT")"
+    echo "  Still on disk:  worktree  $WT"
+    echo "                  branch    $BRANCH${SLOT:+  ·  slot $SLOT}"
+    echo
+    echo "  Not cleaned up on purpose: .ghostfleet/post-create has already run in there,"
+    echo "  and what it provisions (a scoped secret, a seeded database, a per-slot bucket)"
+    echo "  is not all inside the repo — removing the tree could destroy state that is not"
+    echo "  ours to reclaim, and the slot is claimed per worktree path so a --reuse keeps"
+    echo "  it. fleet-clean is the command that decides that, not this one.${SLOT:+
+  Give the slot back by hand with: fleet-slot release \"$WT\"}"; } >&2
+  exit 1
+}
+[ -n "$sid" ] || spawn_failed \
+  "tmux would not start session '$name' on fleet $SOCK — nothing is running in that worktree." \
+  "tmux said why on the line above this one."
+sleep 0.5
+session_live || spawn_failed \
+  "session '$name' ($sid) on fleet $SOCK exited the instant it started." \
+  "Its pane ran 'agent-here' and that came straight back — usually not on PATH (./install.sh), or a half-synced runtime (cf-sync)."
+
 echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)${AGENT:+ [agent: $AGENT]}"
 
 # record what this worktree is for, so fleet-worktrees (and a lead that restarted
 # and lost its memory) can see intent without guessing. Keyed by worktree path.
+#   AFTER the session is confirmed, not before: a manifest row is a claim that this
+# worktree is being worked on, and one naming a session that never existed sends the next
+# lead looking for a worker that is not there.
 MANIFEST="${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}/$SOCK.manifest.tsv"
 mkdir -p "$(dirname "$MANIFEST")" 2>/dev/null
 task="${PROMPT:--}"; task="$(printf '%s' "$task" | tr '\n\r\t' '   ' | cut -c1-200)"

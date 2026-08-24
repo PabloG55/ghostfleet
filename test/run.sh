@@ -1186,6 +1186,120 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
 else
   skip "post-create hook" "git/tmux missing"
 fi
+# ── 4a9c. a spawn that says "started" must have started something ────────────
+# fleet-spawn printed its success line one statement below a `new-session` whose exit
+# status nobody read, so EVERY failure mode printed "started '<name>' in <worktree>" and
+# exited 0. tmux's own error was on stderr all along — and immediately contradicted by
+# the success line under it, which is the one a reader believes. Reported from
+# cf-superkey after the same spawn was re-run three times, because nothing in the output
+# told the attempts apart.
+#
+# Worse than a wrong message: bin/fleet-grid.mjs's createWorktree reads that very line
+# (/started '([^']+)'/) to decide which session to attach to. So a failed spawn became a
+# confident attach to nothing and the card drew "· FREE — no session yet" — byte-for-byte
+# the symptom of the socket-routing bug fixed in #64, which is what made the two
+# expensive to tell apart.
+#
+# NO SHIM NEEDED; both halves are deterministic with the real tmux:
+#   * new-session FAILS when its socket directory cannot be made. TMUX_TMPDIR pointing at
+#     a FILE gives "couldn't create directory … (Not a directory)" and exit 1.
+#   * new-session SUCCEEDS and the session dies anyway when the pane's command comes
+#     straight back — rc=0, a real session id, and gone before the settle is over. That
+#     is the live cause: agent-here missing because ./install.sh was never run, or a
+#     half-synced runtime. Modelled with an agent-here that exits 0, which is the same
+#     observable and needs no PATH surgery.
+# Both directions, because a check that refused every spawn would "fix" this by breaking
+# the only path that is supposed to work.
+group "a spawn only says 'started' when it did"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  SW="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$SW/home/.config/ghostfleet" "$SW/ok" "$SW/dies" "$SW/broken"
+  printf '#!/usr/bin/env bash\nsleep 60\n' > "$SW/ok/agent-here";   chmod +x "$SW/ok/agent-here"
+  printf '#!/usr/bin/env bash\nexit 0\n'   > "$SW/dies/agent-here"; chmod +x "$SW/dies/agent-here"
+  : > "$SW/broken/notadir"                 # TMUX_TMPDIR here cannot hold a socket dir
+  SWOUT=""; SWRC=0
+  spawnsw() {                    # $1 = which agent-here, $2 = TMUX_TMPDIR, rest = extra args
+    rm -rf "$SW/repo" "$SW/w1" "$SW/fleet" "$SW/slots"; mkdir -p "$SW/fleet"
+    git init -q -b main "$SW/repo" 2>/dev/null
+    git -C "$SW/repo" config user.email t@t; git -C "$SW/repo" config user.name t
+    : > "$SW/repo/f"; git -C "$SW/repo" add -A; git -C "$SW/repo" commit -qm init 2>/dev/null
+    SWOUT="$( cd "$SW/repo" && HOME="$SW/home" env -u TMUX \
+      TMUX_TMPDIR="$2" CLAUDE_FLEET_SOCK=cfsayswhat CLAUDE_FLEET_DIR="$SW/fleet" \
+      CLAUDE_FLEET_SLOTS="$SW/slots" PATH="$SW/$1:$ROOT/bin:$PATH" \
+      "$ROOT/bin/fleet-spawn" w1 --new "${@:3}" 2>&1 )"; SWRC=$?
+    tmux -L cfsayswhat kill-server 2>/dev/null      # the RUN's namespace, not the spawn's
+  }
+  # ALWAYS A NUMBER. `grep -c` on a file that does not EXIST prints nothing at all — the
+  # complaint goes to stderr and no count is written — so no `|| true` can rescue it and
+  # the assertion compares "0" against "". A missing manifest IS the answer zero here,
+  # and it is the answer the interesting cases produce.
+  mfrow() {
+    local f="$SW/fleet/cfsayswhat.manifest.tsv"
+    [ -f "$f" ] || { echo 0; return 0; }
+    grep -c "$SW/w1" "$f" 2>/dev/null || true
+  }
+
+  # ── the happy path, which must not regress ──
+  spawnsw ok "$TMUX_TMPDIR"
+  is "a real spawn still says started"  "1" "$(printf '%s' "$SWOUT" | grep -c "started 'w1'" || true)"
+  is "...and exits 0"                   "0" "$SWRC"
+  is "...and records the manifest row"  "1" "$(mfrow)"
+
+  # ── new-session FAILS: the socket directory cannot be created ──
+  spawnsw ok "$SW/broken/notadir"
+  is "a failed new-session exits nonzero" "1" "$([ "$SWRC" = 0 ] && echo 0 || echo 1)"
+  is "...and does NOT say started"        "0" "$(printf '%s' "$SWOUT" | grep -c "started 'w1'" || true)"
+  is "...and passes tmux's error through" "1" \
+     "$(printf '%s' "$SWOUT" | grep -c "couldn't create directory" || true)"
+  # a phrase both failure paths share, so the assertion does not track one headline
+  is "...and says nothing was removed"    "1" \
+     "$(printf '%s' "$SWOUT" | grep -c 'Nothing was removed' || true)"
+  is "...and offers the re-run command"   "1" \
+     "$(printf '%s' "$SWOUT" | grep -c 'fleet-spawn w1 --reuse w1' || true)"
+  # THE ORPHAN IS THE EXPENSIVE HALF: the worktree is fully provisioned by the time
+  # new-session runs, so the refusal has to name it or a lead never learns it is there.
+  is "...and names the worktree it left"  "1" \
+     "$([ "$(printf '%s' "$SWOUT" | grep -c "$SW/w1" || true)" -ge 1 ] && echo 1 || echo 0)"
+  is "...leaving NO manifest row"         "0" "$(mfrow)"
+  # ...and the tree really is still there, i.e. "nothing has been removed" is true
+  is "...which really does still exist"   "1" "$([ -d "$SW/w1" ] && echo 1 || echo 0)"
+
+  # ── new-session RETURNS 0 and the session dies anyway ──
+  spawnsw dies "$TMUX_TMPDIR"
+  is "a vanished session is a failure"    "1" "$([ "$SWRC" = 0 ] && echo 0 || echo 1)"
+  is "...and does NOT say started"        "0" "$(printf '%s' "$SWOUT" | grep -c "started 'w1'" || true)"
+  is "...blaming the pane's own command"  "1" \
+     "$(printf '%s' "$SWOUT" | grep -c 'exited the instant it started' || true)"
+  is "...and naming agent-here"           "1" "$(printf '%s' "$SWOUT" | grep -c "agent-here" || true)"
+  is "...and leaves NO manifest row"      "0" "$(mfrow)"
+
+  # ── the same, WITH --prompt ──
+  # The promise is the part that wasted the most time downstream: the old code printed
+  # "will dispatch the initial prompt once 'w1' is ready for input" and armed a detached
+  # poller that spends 90 x 2s watching capture-pane on a session that will never appear,
+  # then fires fleet-send into nothing. Without --prompt that line never prints either
+  # way, so asking for one is what makes this assertion mean anything.
+  spawnsw dies "$TMUX_TMPDIR" --prompt 'do the thing'
+  is "no prompt is promised on failure"   "0" \
+     "$(printf '%s' "$SWOUT" | grep -c 'will dispatch the initial prompt' || true)"
+  is "...and it still fails loudly"       "1" "$([ "$SWRC" = 0 ] && echo 0 || echo 1)"
+
+  # THE CHECK IS BY SESSION ID AND WITHOUT -t, because a session NAME can be tmux TARGET
+  # SYNTAX (a leading `+` is an expression, and which session it resolves to is
+  # version-dependent — CLAUDE.md). Pinned in the source, since "simplify it to
+  # has-session" is the obvious wrong edit and it would still pass every case above.
+  # comments stripped first: the comment in there EXPLAINS why -t is wrong, so grepping
+  # the whole function matches the explanation and passes for a function that uses it
+  is "the liveness check avoids -t"       "0" \
+     "$(sed -n '/^session_live() {/,/^}/p' "$ROOT/bin/fleet-spawn" \
+        | grep -v '^[[:space:]]*#' | grep -c 'has-session\| -t ' || true)"
+  is "...and compares session ids"        "1" \
+     "$(sed -n '/^session_live() {/,/^}/p' "$ROOT/bin/fleet-spawn" | grep -c "session_id" || true)"
+  rm -rf "$SW"
+else
+  skip "spawn verifies its session" "git or tmux missing"
+fi
+
 
 # ── 4a10. a worker must not spawn workers ────────────────────────────────────
 # A session finishes a PR, is told "branch off fresh main", and reaches for the
