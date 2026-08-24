@@ -25,6 +25,8 @@
 #   ghostfleet <profile> --new create that profile's (empty) projects list
 #   ghostfleet <project>       jump straight into a known work project's Master Claude
 #   ghostfleet <project> --plain   one-shot non-interactive list (for scripts)
+#   ghostfleet --sync-check    print one line if the RUNTIME is behind its source repo
+#                                (nothing when it is current, or when it cannot tell)
 set -uo pipefail
 
 # Resolve this script through the ~/.local/bin symlink to find the repo root.
@@ -37,6 +39,79 @@ BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
 REPO="$(cd "$BIN_DIR/.." && pwd)"
 GRID="$BIN_DIR/fleet-grid.mjs"
 CONF="$REPO/tmux/cf.tmux.conf"
+
+# --- is the runtime you are about to run the code that is in the repo? -------
+# CLAUDE.md opens with "editing a file changes nothing until it's synced", and until now
+# nothing in here could tell you when it hadn't been. Seen live: four PRs merged, nobody
+# ran cf-sync, and $REPO served the pre-fix fleet-grid.mjs, fleet-stack, ghostfleet and
+# fleet-awake for about an hour while the git repo was current. On macOS the difference
+# was invisible; on any box with tmux <= 3.5 the stale grid parser IS the bug #68 had just
+# fixed. CI cannot see this — the merge is on GitHub, the staleness is on this disk.
+#
+# EVERY UNCERTAIN CASE IS SILENT, and that is not the same as "in sync": no stamp (a
+# runtime older than the stamp, or one a partial sync left mixed), no recorded source, the
+# source gone, not a checkout, no git, an unreadable sha. This function only ever reports
+# a distance it has actually measured, because a warning that fires when it should not is
+# a warning that gets ignored — and then it is worse than not being here at all.
+#   Nothing here claims the runtime IS current, either. Silence is the absence of a
+# measurement; the only positive statement in this file is a number.
+#
+# COST: one `git rev-parse` against a local repo on the fast path, no network, no fetch,
+# and nothing at all when a stamp or the source is missing. The count costs a second fork
+# and only runs once the two shas are already known to differ.
+#   It compares COMMITS, so an uncommitted edit in the repo is not stale by this measure
+# and stays silent. That is deliberate: the mtime comparison that would catch it fires on
+# a touched file and a reverted one too, and this has to be trustworthy more than it has
+# to be complete.
+_is_sha() { case "$1" in *[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = 40 ]; }
+sync_status() {                    # prints ONE line if the runtime is stale; else nothing
+  local stamp="$REPO/.synced" srcfile="$REPO/.source"
+  local line="" stamped="" ssrc="" sdate="" recorded="" head="" n=""
+  [ -r "$stamp" ] && [ -r "$srcfile" ] || return 0
+  # First line is the bare sha, on purpose: the reader needs no parser and cannot be
+  # confused by a key it does not know. The rest is optional context.
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ -z "$stamped" ]; then stamped="$line"; continue; fi
+    case "$line" in
+      "source "*) ssrc="${line#source }" ;;
+      "synced "*) sdate="${line#synced }" ;;
+    esac
+  done < "$stamp"
+  _is_sha "$stamped" || return 0
+  IFS= read -r recorded < "$srcfile" || true
+  [ -n "$recorded" ] && [ -d "$recorded" ] || return 0
+  # The stamp and .source can legitimately name different places: install.sh puts a
+  # clone's pointer back after an npx-cache install. A distance measured from one source
+  # to another's HEAD is a number that means nothing, so refuse to compute it. Both
+  # strings are written by cf-sync in the same run, so agreement is exact-match.
+  [ -n "$ssrc" ] && [ "$ssrc" = "$recorded" ] || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  head="$(git -C "$recorded" rev-parse HEAD 2>/dev/null)"
+  _is_sha "$head" || return 0
+  [ "$head" = "$stamped" ] && return 0                  # the runtime IS the repo: silence
+  n="$(git -C "$recorded" rev-list --count "$stamped..$head" 2>/dev/null)"
+  case "$n" in
+    ''|*[!0-9]*|0)
+      # HEAD differs but nothing new is reachable from it: the runtime came from a commit
+      # this HEAD does not descend from (a branch switch, a reset, a rebase away), or the
+      # stamped commit is not in this repo at all. Saying "0 commits behind" would be
+      # absurd and saying nothing would hide a real mismatch, so name the shape of it.
+      printf 'ghostfleet: runtime was synced from %s, which is not in this repo'\''s HEAD — run cf-sync\n' "${stamped:0:7}" ;;
+    # The action goes LAST, because the last thing on the line is the thing that gets read.
+    1) printf 'ghostfleet: runtime is 1 commit behind the repo%s — run cf-sync\n'   "$(_synced_tail "$stamped" "$sdate")" ;;
+    *) printf 'ghostfleet: runtime is %s commits behind the repo%s — run cf-sync\n' "$n" "$(_synced_tail "$stamped" "$sdate")" ;;
+  esac
+}
+# "(synced 2c9d4b1, 2026-08-22)" — the date is the stamp's own, trimmed to the day. No
+# `date` call: the value was written in ISO order precisely so a string cut is enough, and
+# `date -r` is macOS-only anyway (Linux and WSL are supported).
+_synced_tail() { printf ' (synced %s%s)' "${1:0:7}" "${2:+, ${2%%T*}}"; }
+
+# A one-shot report of the same thing, in the spirit of `fleet-grid.mjs --plain`: it
+# exercises the real check without drawing a screen, so the suite can assert both
+# directions. Deliberately ABOVE the requirement checks and the sleep inhibitor below —
+# a status question must not need tmux and must not arm caffeinate.
+if [ "${1:-}" = "--sync-check" ]; then sync_status; exit 0; fi
 
 command -v node  >/dev/null 2>&1 || { echo "ghostfleet: node is required"; exit 1; }
 command -v tmux  >/dev/null 2>&1 || { echo "ghostfleet: tmux is required (brew install tmux)"; exit 1; }
@@ -545,6 +620,7 @@ fi
 
 _clear
 LAST_PROJECT=""    # the project we last stepped out of — Projects re-selects it
+SYNC_SAID=""       # the stale-runtime line already shown, so it is said once per state
 GOTO=""            # "grid" -> skip master, open the sessions grid (^S from Projects)
 GRID_EXIT=""       # "projects" -> the grid asked to go up to Projects (^P)
 JUMP_SESS=""       # session index pending from a C-f <p> <s> jump
@@ -552,6 +628,27 @@ while true; do
   # LEVEL 0 — pick a project
   if [ -z "$PROJECT" ]; then
     maybe_reexec                 # pick up a cf-sync upgrade before drawing Projects
+    # AFTER maybe_reexec, never before: the answer has to be about the runtime you are
+    # about to run. Before it, a cf-sync that just landed would still be measured against
+    # the copy this process started with, and the one moment the warning matters most —
+    # the reload — is the one it would get wrong.
+    #
+    # It runs on every visit to Projects rather than once at startup, because the failure
+    # this exists for happens to a control plane that is ALREADY UP: you merge, you don't
+    # sync, and nothing about this process changes, so a startup-only check would never
+    # fire for the hour that actually went wrong. Deduped on the message, so a stale
+    # runtime says it once and a new merge (a different count) says it again.
+    _sync_line="$(sync_status)"
+    if [ -n "$_sync_line" ] && [ "$_sync_line" != "$SYNC_SAID" ]; then
+      SYNC_SAID="$_sync_line"
+      # The Projects screen is a node TUI on the ALTERNATE screen buffer, so this line is
+      # invisible from the instant it draws and the primary buffer only comes back when you
+      # quit — measured with capture-pane, which sees no trace of it. Hold it long enough
+      # to read and let any key dismiss it. The cost lands only on a runtime that IS
+      # stale: a current one never reaches this branch, and never waits.
+      printf '\033[38;5;179m%s\033[0m\n' "$_sync_line" >/dev/tty 2>/dev/null || true
+      read -rs -t 2 -n 1 _k </dev/tty 2>/dev/null || true
+    fi
     sel="$(node "$GRID" - --screen projects --select "$LAST_PROJECT" </dev/tty)" || true; _clear
     case "$sel" in
       "") break ;;                                   # quit

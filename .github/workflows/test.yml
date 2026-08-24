@@ -83,3 +83,50 @@ jobs:
       # runs can share a machine. A CI runner is the easy case of that.
       - name: ./test/run.sh
         run: ./test/run.sh
+
+  # ── the half CI cannot do, said honestly ────────────────────────────────────
+  # The job above proves the COMMIT. The thing that actually broke was not the commit:
+  # four PRs merged, nobody ran cf-sync, and ~/.local/libexec/ghostfleet went on serving
+  # the pre-fix bin/ for about an hour while the repo was current — invisible on macOS,
+  # and on tmux <= 3.5 it IS the bug #68 had just fixed. That state lives on a developer's
+  # disk. Nothing here can see it, reach it, or verify it, and a step that implied
+  # otherwise would be worse than no step: green would start meaning "deployed".
+  #
+  # So this writes a REMINDER and nothing else. It never fails the build (a merged, tested
+  # commit is not broken because a laptop has not caught up), it makes no claim about any
+  # machine, and it names the commit so the sync you run can be checked against it. The
+  # real check is local and lives in bin/ghostfleet, which compares <runtime>/.synced with
+  # the source repo's HEAD every time the Projects screen is drawn.
+  #
+  # A job summary rather than a PR comment, deliberately: this fires on push to main, where
+  # the pull request is already closed — a comment would arrive after the fact on a thread
+  # nobody is reading, notify every participant about a chore on someone else's laptop, and
+  # need `pull-requests: write` on a workflow that currently needs no permissions at all.
+  # The summary is attached to the run you are already looking at when you check the merge.
+  #
+  # needs: test, so a red suite produces no reminder — being told to deploy a commit whose
+  # suite just failed is the one thing this must not say. It is also why this is a separate
+  # job and not a step in the matrix: as a step it would run once per OS leg and write the
+  # same paragraph twice.
+  sync-reminder:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remind that the runtime is a separate thing
+        # The subject arrives through the environment, not through ${{ }} inside the script:
+        # a commit message is attacker-controlled text and interpolating it into a shell
+        # line is how that becomes code. No checkout needed either — the push payload
+        # already carries everything this says.
+        env:
+          SUBJECT: ${{ github.event.head_commit.message }}
+        run: |
+          short="${GITHUB_SHA:0:12}"
+          subject="${SUBJECT%%$'\n'*}"
+          {
+            printf '### `main` moved — the runtime has not\n\n'
+            printf 'Merged **`%s`** — %s\n\n' "$short" "$subject"
+            printf 'The code that actually executes is the staged copy at `~/.local/libexec/ghostfleet`, not the repo. On every machine running a fleet:\n\n'
+            printf '```bash\ncf-sync\n```\n\n'
+            printf 'CI cannot check that — the merge happened here, the staleness is on your disk. `bin/ghostfleet` does: it compares `<runtime>/.synced` against the source repo'"'"'s HEAD on the Projects screen and says how far behind it is. `ghostfleet --sync-check` asks the same question from a script.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
