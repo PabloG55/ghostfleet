@@ -275,6 +275,36 @@ function headText(p, maxBytes = 4096) {
   } catch { return ''; }
 }
 
+// A CARD LINE IS ONE TRUNCATED LINE, SO IT IS STRIPPED RATHER THAN RENDERED. Reported
+// from a phone: card summaries read literally `**PR #76 is up — both CI l…`. The chat
+// renders markdown (web/md.js) and a card cannot: cardLines() builds a 28-column box out
+// of STRINGS, and both this file and web/grid.js draw it from the same strings — which is
+// the only thing keeping the phone's card and the TUI's identical. Rendering here would
+// either diverge the two or put markup into a terminal, and half a bold inside an ellipsis
+// is worse than plain text either way.
+//   Stripped HERE, where the message is produced, rather than in either drawer: one
+// implementation for the TUI, --plain and --json alike, and nothing for grid-parity to
+// keep in step.
+//   AND IT IS ITS OWN SIX LINES RATHER THAN AN IMPORT OF web/md.js. That was the first
+// version, and the suite refused it inside a minute: `test/run.sh`'s vis35 group copies
+// THIS FILE to a temp directory and runs the copy, so a relative import of a sibling
+// directory resolves to nothing and the whole control plane fails to load. A grid that
+// cannot start because a CLIENT file moved is a worse bug than the one being fixed. The
+// chat's renderer builds a DOM tree; this flattens one line of text — same input, two
+// jobs, and each is tested against what it actually has to do.
+const preview = (t) => String(t == null ? '' : t)
+  .replace(/```[\s\S]*?```/g, ' ')                  // a fenced block is not a summary
+  .replace(/`([^`]*)`/g, '$1')                       // inline code: the text, not the ticks
+  .replace(/!?\[([^\]]*)\]\([^)\s]*\)/g, '$1')       // [label](url) -> label
+  .replace(/^\s{0,3}#{1,6}\s+/gm, '')                // heading marks
+  .replace(/^\s{0,3}(?:[-*+]|\d{1,9}[.)])\s+/gm, '')  // bullet and numbered marks
+  // Emphasis, and NOT in the middle of a word: `2*3*4` is arithmetic and `a*b*c` is a
+  // glob, and eating those asterisks changes what the line says. Same rule web/md.js
+  // keeps, and the same reason `_` is left alone entirely — these messages are full of
+  // DATABASE_URL and fleet_send.
+  .replace(/(^|[^A-Za-z0-9])\*\*(\S(?:[\s\S]*?\S)?)\*\*/g, '$1$2')
+  .replace(/(^|[^A-Za-z0-9])\*([^\s*](?:[\s\S]*?\S)?)\*/g, '$1$2')
+  .replace(/\s+/g, ' ').trim();
 function lastAssistant(p) {
   if (!p) return '';
   const lines = tailText(p).split('\n').filter(Boolean);
@@ -285,7 +315,7 @@ function lastAssistant(p) {
         const c = o.message?.content;
         if (Array.isArray(c)) {
           const t = c.filter(x => x.type === 'text').map(x => x.text).join(' ').trim();
-          if (t) return t.replace(/\s+/g, ' ');
+          if (t) return preview(t);
         }
       }
       // codex rollout records. Disjoint from Claude's by `type`, so one reader handles
@@ -295,7 +325,7 @@ function lastAssistant(p) {
       // draft the way the message record it summarises can.
       if (o.type === 'event_msg' && o.payload?.type === 'task_complete') {
         const t = (o.payload.last_agent_message || '').trim();
-        if (t) return t.replace(/\s+/g, ' ');
+        if (t) return preview(t);
       }
       if (o.type === 'response_item' && o.payload?.role === 'assistant') {
         const c = o.payload.content;
@@ -304,7 +334,7 @@ function lastAssistant(p) {
           // uses); accept both rather than depend on which side wrote the record.
           const t = c.filter(x => x.type === 'output_text' || x.type === 'text')
                      .map(x => x.text).join(' ').trim();
-          if (t) return t.replace(/\s+/g, ' ');
+          if (t) return preview(t);
         }
       }
     } catch {}

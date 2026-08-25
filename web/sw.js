@@ -15,7 +15,14 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v11 puts profile tabs on the Projects screen, so a
+// BUMPED WHEN THE CLIENT CHANGES — v13 stops the phone clipping itself: the send button
+// rendering "senc", the ⋯ half off the right edge, the page sliding sideways when the
+// sheet opened, and a card grid whose track was a character wider than the screen. An old
+// client keeps every one of them, and they are the kind you live with rather than report
+// twice. v12 stops the phone clipping itself: the send button
+// rendering "senc", the ⋯ half off the right edge, and the whole page sliding sideways
+// when the sheet opened. An old client keeps every one of them, and they are the kind you
+// live with rather than report twice. v11 puts profile tabs on the Projects screen, so a
 // phone on the old client cannot separate work from personal at all. v10 renders an
 // assistant's markdown instead of showing
 // its source, and adds a FILE (md.js) to the precache list, which is the version bump that
@@ -44,11 +51,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 9326da1a498d
+// CLIENT-HASH: 18a4125b7177
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v12';
+const VERSION = 'ghostfleet-v13';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

@@ -25,6 +25,18 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+/* THE PAGE NEVER SCROLLS SIDEWAYS. docs/mobile.md has said so since #48 — wide content
+ * scrolls inside its OWN overflow-x box — and it was a rule somebody had to keep rather
+ * than a rule the stylesheet kept. Reported from a real iPhone: with the actions sheet
+ * open every element was displaced ~40px left, the back chevron off-screen and the labels
+ * reading "ne fleet.s lead" and "esc back". That is the body itself scrolled.
+ *   `clip`, not `hidden`: hidden makes the element a scroll CONTAINER, which would give
+ * the page a scrollport it does not want and break `position: fixed` children on some
+ * engines. clip forbids the scroll instead of providing one. The overflowing thing is
+ * still a bug and the rows below are fixed so nothing overflows; this is the backstop that
+ * turns "the whole app slid" into "one label is short". */
+html, body { overflow-x: clip; }
+#app { overflow-x: clip; }
 body {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   /* Prose, buttons and headers are sized for reading. --fs is NOT inherited here: it is
@@ -120,7 +132,16 @@ html.shell, html.shell body { height: 100%; overflow: hidden; }
  * and .cards would otherwise measure it at body's size while the card art is drawn at
  * --fs, which fitCards() sets by measuring. A track minimum in the wrong unit is a card
  * wider than its column. */
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(33ch, 1fr));
+/*   `min(33ch, 100%)`, not a bare 33ch, and the difference is the whole of a phone. --fs
+ * is chosen by fitCards() so that a 32-column card SPANS the viewport, so 33ch — the card
+ * plus the TUI's one-column gutter — is by construction about one character WIDER than the
+ * space there is. As a track minimum that is not a gutter, it is an overflow: measured at
+ * 320px the track came out 313.5px inside a 304px box and the card's right edge landed two
+ * pixels past the viewport, which is the body scrolling sideways on every card screen.
+ * `min(…, 100%)` says what was meant — at least one card wide, but never wider than the
+ * column it is in — and a tablet still gets its three or four tracks, because there 33ch
+ * is the smaller of the two. */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(33ch, 100%), 1fr));
          gap: 0; align-content: start; font-size: var(--fs); }
 .card { color: var(--c); cursor: pointer; -webkit-tap-highlight-color: transparent; }
 /* line-height 1: a terminal's cell height IS its line height, so anything looser
@@ -191,10 +212,16 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
   position: fixed; inset: 0; background: rgba(4, 6, 8, .86);
   display: flex; align-items: flex-end; z-index: 10;
 }
+/* 92dvh, not 92vh, and a TOP inset. vh counts the URL bar on iOS, so a tall sheet was
+ * taller than the visual viewport and its first rows ended up under the status bar — the
+ * clock sitting on top of the app's own text. The bottom inset was already here for the
+ * home indicator; the top one was missing because a bottom sheet is not supposed to reach
+ * that far, and a long one does. */
 .sheet {
-  width: 100%; max-height: 92vh; overflow: auto; background: var(--bg);
+  width: 100%; max-width: 100%; min-width: 0; overflow: auto; background: var(--bg);
+  max-height: 92vh; max-height: 92dvh;
   border-top: 1px solid var(--hair);
-  padding: 1em .8em calc(env(safe-area-inset-bottom) + 1em);
+  padding: calc(env(safe-area-inset-top) + 1em) .8em calc(env(safe-area-inset-bottom) + 1em);
 }
 .sheet h2 { font: inherit; font-weight: 700; color: var(--white); margin: 0 0 .2em; }
 .sheet h2 .sub { color: var(--dim); font-weight: 400; }
@@ -285,10 +312,32 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
   display: flex; align-items: center; gap: .5em;
   padding: .1em .1em .5em; border-bottom: 1px solid var(--hair); margin-bottom: .5em;
 }
+.sbar { min-width: 0; }
 .sbar .who { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
 .sbar .who .nm { font-weight: 700; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sbar .who .st { font-size: 12px; }
-.sbar button { padding: .35em .6em; }
+/* THE STATUS LINE ELLIPSISES TOO. `.who` may shrink to nothing, but a child with
+ * `overflow: visible` paints past it whatever its parent's width says — and this line is
+ * "◆ working" plus the project and the folder, which on a real fleet is longer than the
+ * name above it. Only `.nm` had the rule; the line under it was the one running out. */
+.sbar .who .st { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* THE CHROME DOES NOT SCALE WITH THE TEXT, AND THIS IS THE FIX FOR THE ⋯ HALF OFF THE
+ * EDGE. Measured at 320px with the body text at 30px — an iPhone with Dynamic Type turned
+ * up, which is what the reporter's screenshots are of: `.who` and the mode chip had both
+ * already shrunk to ZERO, and the row still needed 406px, because `chat|pane` alone was
+ * 231 of it and the two buttons 56 each. Everything shrinkable had shrunk; what was left
+ * was three controls sized in `em`.
+ *   A name is content and scales. A back chevron, a view switch and a ⋯ are affordances —
+ * they are the same size on every phone because what they need to be is TAPPABLE, not
+ * proportional to somebody's reading preference. Fixed px here caps the row at about
+ * 190px whatever the text does. */
+.sbar button { padding: .35em .6em; flex: 0 0 auto; font-size: 14px; }
+.sbar > .seg { flex: 0 1 auto; min-width: 0; }
+.sbar > .seg button { font-size: 13px; }
+/* ...and the last resort, so that no text size anybody chooses can push a control off the
+ * screen: the row wraps instead. `.who` shrinks first (it is the only `flex: 1 1 auto`
+ * here), so this costs nothing until the fixed controls genuinely do not fit, and then it
+ * costs one extra row instead of a button you cannot reach. */
+.sbar { flex-wrap: wrap; }
 /* The view switch, as a segmented control rather than two loose buttons. */
 .seg { display: flex; border: 1px solid var(--hair); }
 .seg button { border: 0; padding: .35em .7em; }
@@ -347,7 +396,15 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .chat .blocked .t { flex: 1 1 auto; }
 
 /* ── the composer ───────────────────────────────────────────────────────── */
-.composer { display: flex; gap: .45em; align-items: flex-end; padding: .5em .1em 0; border-top: 1px solid var(--hair); }
+/* `flex: 0 0 auto` on the row itself: under the shell this is a child of a full-height
+ * flex COLUMN, where a growing box is a box the column is entitled to shrink back. That is
+ * what capped the textarea at one line no matter what the grow code did. */
+.composer { display: flex; gap: .45em; align-items: flex-end; min-width: 0; flex: 0 0 auto;
+  padding: .5em .1em 0; border-top: 1px solid var(--hair); }
+/* Reported as the send button rendering "senc" — its last character past the right edge.
+ * The textarea is the one thing here that may shrink, and the buttons must not: with every
+ * child shrinkable the browser is free to take the width out of whichever it likes. */
+.composer button { flex: 0 0 auto; }
 .composer textarea {
   flex: 1 1 auto; min-width: 0; resize: none; font: inherit; font-size: 15px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;

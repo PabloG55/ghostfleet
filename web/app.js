@@ -870,6 +870,16 @@ function turn(mine, text, when, pending = false, key = '') {
 // It is drawn in the PANE view too, on purpose: watching a worker work and then telling it
 // something is one motion, and making you switch views to find the box would be the same
 // mistake the sheet was.
+// Up to the CSS max (`max-height`), then it scrolls inside itself — a composer that grows
+// without a ceiling eats the conversation it is a reply to. The height is cleared first so
+// scrollHeight measures the CONTENT rather than the box we last set.
+function growComposer(box) {
+  try {
+    box.style.height = 'auto';
+    box.style.height = Math.min(box.scrollHeight, COMPOSER_MAX_PX) + 'px';
+  } catch {}
+}
+const COMPOSER_MAX_PX = 160;
 function composer(card) {
   const box = el('textarea', { rows: '1', placeholder: 'message this session…',
                                autocapitalize: 'sentences', spellcheck: 'false' });
@@ -881,12 +891,15 @@ function composer(card) {
   // keyboard when its focused node is destroyed — so the box that survives is one you
   // have to tap again, every five seconds, which is not a box you can type in. The poll
   // has to actually stop; see pollPaused().
-  box.addEventListener('input', () => {
-    S.draft = box.value;
-    // Grow with the text, up to the CSS max — a one-line box for a paragraph is the
-    // "chat is very small" complaint in miniature.
-    try { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight, 160) + 'px'; } catch {}
-  });
+  box.addEventListener('input', () => { S.draft = box.value; growComposer(box); });
+  // ...AND ON EVERY RENDER, not only on a keystroke. render() rebuilds this element from
+  // scratch on the 5s poll, on a toast, on a view switch — with rows="1" and the draft
+  // poured back in — so a two-line message came back as one line and a clipped sliver of
+  // the second, which is what "you cannot see what you are typing" looked like from a
+  // phone. The listener had never run against THIS element. Next frame, because a node
+  // that is not in the document yet reports a scrollHeight of 0.
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => growComposer(box));
+  else growComposer(box);
   // NO SPEAKER HERE ANY MORE. It lived in the composer because lastAgentText() was the
   // only thing that could be spoken, which made "the newest message" the whole feature.
   // Now any bubble can be played (see turn()), so the composer is a text box and a send
