@@ -94,6 +94,25 @@ for (const ic of man.icons) {
   is(`icon ${ic.src} exists`, true, exists(rel));
   if (exists(rel)) is(`icon ${ic.src} really is ${ic.sizes}`, ic.sizes, pngSize(rel));
 }
+// ── the phone's own edges ─────────────────────────────────────────────────
+// Structural, because a stylesheet's INSETS cannot be exercised in a headless browser:
+// safe-area-inset-* are 0 on every desktop engine, so the only place the difference shows
+// is the device that reported it. test/helpers/viewport-check.mjs measures the part that
+// CAN be measured (nothing past the right edge, at two widths and at 30px text); these
+// three are the declarations that were missing when the screenshots were taken.
+is('the page is forbidden to scroll sideways', true, /html, body \{ overflow-x: clip; \}/.test(CSS));
+// A bottom sheet that grows tall enough reaches the top of the screen, and 92vh on iOS
+// counts the URL bar — so its first rows ended up under the status bar, with the clock
+// sitting on the app's own text.
+is('...and the sheet keeps clear of the status bar', true,
+   /\.sheet \{[^}]*padding: calc\(env\(safe-area-inset-top\)/s.test(CSS));
+is('...measured against the visual viewport, not the URL bar', true, /max-height: 92dvh/.test(CSS));
+// The session bar's controls are affordances, not prose: sized in em they grew with iOS
+// Dynamic Type until the ⋯ was pushed off the right edge. Measured at 320px with the body
+// at 30px, the row needed 406px of which `chat|pane` alone was 231.
+is('the session bar\'s chrome does not scale with the text', true,
+   /\.sbar button \{[^}]*font-size: 14px/.test(CSS) && /\.sbar > \.seg button \{ font-size: 13px; \}/.test(CSS));
+is('...and the row wraps rather than pushing a control off', true, /\.sbar \{ flex-wrap: wrap; \}/.test(CSS));
 is('an apple-touch-icon is linked', true, /rel="apple-touch-icon"/.test(HTML));
 is('...and it is 180x180', '180x180', exists('icons/apple-touch-icon.png') ? pngSize('icons/apple-touch-icon.png') : 'missing');
 
@@ -117,7 +136,16 @@ is('the service worker never caches a verb', true, /req\.method !== 'GET'/.test(
 // as fit. Either one without the other is the bug.
 const manifest = JSON.parse(read('manifest.webmanifest'));
 is('rotation is not pinned to portrait', true, manifest.orientation !== 'portrait');
-is('...and the cards lay out in columns', true, /repeat\(auto-fill, *minmax\(33ch/.test(read('app.css')));
+is('...and the cards lay out in columns', true,
+   /repeat\(auto-fill, *minmax\(min\(33ch, *100%\), *1fr\)\)/.test(CSS));
+// ...AND THE TRACK MINIMUM IS CAPPED AT THE COLUMN. This asserted a bare `minmax(33ch` and
+// the bare form is an overflow on a phone: --fs is chosen so a 32-column card SPANS the
+// viewport, so 33ch is by construction about one character wider than the room there is.
+// Measured at 320px, the track came out 313.5px in a 304px box and the card's right edge
+// landed two pixels past the screen — the body scrolling sideways on every card screen,
+// which is half of what the phone was reporting. viewport-check.mjs measures it; this
+// keeps the shape from coming back.
+is('...without a track that is wider than the screen', false, /minmax\(33ch/.test(CSS));
 // `ch` resolves against the element's own font, and fitCards() sets --fs at runtime: a
 // track minimum measured at body's size is a card wider than its column.
 is('...with ch measured at the card size', true, /\.cards \{[^}]*font-size: var\(--fs\)/s.test(read('app.css')));

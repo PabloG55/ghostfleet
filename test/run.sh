@@ -4186,6 +4186,67 @@ else
   skip "--json big payload" "tmux missing"
 fi
 
+# ── 4d-bis. a card's message is a PREVIEW, so the markdown comes out ─────────
+# Reported from a phone: card summaries read literally `**PR #76 is up — both CI l…`. The
+# chat renders markdown (web/md.js) and a card cannot — cardLines() builds a 28-column box
+# out of strings, and this file and web/grid.js draw it from the SAME strings, which is the
+# only thing keeping the two cards identical. So it is stripped where the message is
+# PRODUCED, in lastAssistant(), which is one implementation for the TUI, --plain and --json
+# alike, and nothing for grid-parity to keep in step.
+#   Both directions, and the second is the point: a stripper that returned "" would pass any
+# check for absent asterisks. The words have to still be there, in order.
+group "a card's message is stripped of markdown, not of meaning"
+if command -v tmux >/dev/null 2>&1; then
+  MD="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$MD/fleet"
+  node -e '
+    const fs=require("fs"),path=require("path");
+    const MD=process.argv[1], n=Math.floor(Date.now()/1000);
+    const say=(t)=>JSON.stringify({type:"assistant",message:{role:"assistant",content:[{type:"text",text:t}]}});
+    const cases={
+      m1:"**PR #76 is up** — both CI legs green.",
+      m2:"Run `./test/run.sh`: 2087 passed / 0 failed.",
+      m3:"## Done\n\n- rebased onto `main`\n- see [the design](https://x.test/a)",
+    };
+    for(const [s,t] of Object.entries(cases)){
+      fs.mkdirSync(path.join(MD,"wt",s),{recursive:true});
+      const tr=path.join(MD,s+".jsonl");
+      fs.writeFileSync(tr,say(t)+"\n");
+      fs.writeFileSync(path.join(MD,"fleet",s+".json"),JSON.stringify(
+        {sock:"cfmdp",slot:s,cwd:path.join(MD,"wt",s),folder:s,branch:"main",
+         status:"ready",transcript:tr,ts:n-60}));
+    }
+  ' "$MD"
+  tmux -L cfmdp kill-server 2>/dev/null
+  for s in m1 m2 m3; do
+    tmux -L cfmdp new-session -d -s "$s" -c "$MD/wt/$s" -x 200 -y 40 'sleep 300' 2>/dev/null
+  done
+  sleep 0.8
+  mdj="$(CLAUDE_FLEET_DIR="$MD/fleet" CLAUDE_FLEET_ROOT= CLAUDE_CONFIG_DIR="$MD/cfg" \
+         CLAUDE_FLEET_SCOPE=mdp node "$ROOT/bin/fleet-grid.mjs" cfmdp --json 2>/dev/null)"
+  mdq() { printf '%s' "$mdj" | node -e '
+    let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+      try{ console.log(String(new Function("o","return ("+process.argv[1]+")")(JSON.parse(s)))) }
+      catch{ console.log("unparseable") }});
+  ' "$1"; }
+  is "the three cards are there"        "3" "$(mdq 'o.cards.length')"
+  M1="$(mdq 'o.cards.find(c=>c.name==="m1").msg')"
+  M2="$(mdq 'o.cards.find(c=>c.name==="m2").msg')"
+  M3="$(mdq 'o.cards.find(c=>c.name==="m3").msg')"
+  # THE WORDS SURVIVE — asserted first, and as whole strings, so an empty result cannot
+  # pass by having no asterisks in it.
+  is "bold loses its stars, not its words"  "PR #76 is up — both CI legs green." "$M1"
+  is "a code span loses its backticks"      "Run ./test/run.sh: 2087 passed / 0 failed." "$M2"
+  is "a heading and bullets flatten to one line" "Done rebased onto main see the design" "$M3"
+  # ...and nothing that reads as markup is left anywhere in them.
+  is "no asterisks reach a card"   "0" "$(printf '%s' "$M1$M2$M3" | grep -c '[*]' || true)"
+  is "no backticks reach a card"   "0" "$(printf '%s' "$M1$M2$M3" | grep -c '`' || true)"
+  is "no link brackets reach a card" "0" "$(printf '%s' "$M1$M2$M3" | grep -c '](http' || true)"
+  tmux -L cfmdp kill-server 2>/dev/null
+  rm -rf "$MD"
+else
+  skip "card message markdown" "tmux missing"
+fi
+
 # ── 4e. the governor parks on a fossil its own park created ──────────────────
 # A Claude pane only repaints when it does something, so a worker RESUMED a moment ago
 # still shows the figure it was painting when it was parked. Skipping PARKED panes was
@@ -5940,6 +6001,37 @@ if [ -d "$ROOT/web" ]; then
   # the repo. Left out of that list, the PWA 404s in the browser while every file in the
   # repo is perfectly correct: the same "the file on disk was current, the process was
   # not" trap CLAUDE.md records for a stale MCP server, and just as invisible from here.
+  # ── the page never scrolls sideways, measured in a real engine ─────────────
+  # docs/mobile.md has said since #48 that ONE region scrolls and the page never moves
+  # sideways. It was a rule somebody had to keep, and on an iPhone at v11 it was not being
+  # kept: the send button rendered "senc", the ⋯ sat half off the right edge, and with the
+  # actions sheet open every element was displaced ~40px left. Whether a flex row fits is
+  # the product of font metrics, padding, shrink rules and the real strings — no amount of
+  # reading the stylesheet answers it — so this one drives a headless Chrome and asks
+  # documentElement.scrollWidth <= clientWidth on every screen at 390 and at 320.
+  #   Watched going red on the real pre-fix state (chrome sized in `em`, no clip backstop):
+  # "the header row still fits" and "nothing past the right edge  got=button.@400", which is
+  # the ⋯ 80px past a 320px phone. And the probe proves itself on a deliberately 900px page,
+  # because "no overflow anywhere" is what a blind measurement says too.
+  #   SKIPPED where there is no Chrome. The suite's promise is that it needs no
+  # dependencies, and this is the one check that cannot keep it.
+  VPO="$(mktemp -d "$TEST_RUNS.$$.vp.XXXXXX")"
+  node "$ROOT/test/helpers/viewport-check.mjs" > "$VPO/out" 2> "$VPO/err"
+  vprc=$?
+  if grep -q 'no chrome' "$VPO/out" 2>/dev/null; then
+    skip "the page never scrolls sideways" "no chrome to measure in"
+  else
+    is "viewport-check ran"             "0" "$vprc"
+    is "...without complaining"         ""  "$(head -2 "$VPO/err" | tr '\n' ' ' | sed 's/ *$//')"
+    # A floor, for the reason pwa-check documents: a browser that fails to start emits a
+    # couple of rows and a bare "no mismatches" would call that green.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$VPO/out")" -ge 35 ] && echo yes || echo "no: $(wc -l < "$VPO/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      is "$name" "$want" "$got"
+    done < "$VPO/out"
+  fi
+  rm -rf "$VPO"
+
   is "cf-sync syncs web/ into the runtime" "yes" \
      "$(grep -qE '^for d in .*\bweb\b' "$ROOT/bin/cf-sync" && echo yes || echo no)"
   is "...and npm ships it"                 "yes" \
