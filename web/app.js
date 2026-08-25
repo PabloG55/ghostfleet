@@ -18,6 +18,7 @@ import * as G from './grid.js';
 import * as api from './api.js';
 import * as pk from './passkey.js';
 import * as ansi from './ansi.js';
+import * as md from './md.js';
 
 // ── state ─────────────────────────────────────────────────────────────────
 const S = {
@@ -273,7 +274,7 @@ function projectsScreen() {
   list.append(cardEl(G.addProjectCard(S.sel === projects.length), {
     tap: () => sheetAddProject(),
   }, projects.length));
-  out.push(confirmBar(), list);
+  out.push(confirmBar(), watchScroll('projects', list));
   out.push(el('div', { class: 'verbs' }, [
     btn('⏎ open', () => openProject((projects[S.sel] || {}).name)),
     // the projects screen schedules a message to THAT project's master
@@ -302,6 +303,8 @@ function toProjects() {
 function openProject(name) {
   if (!name) return;
   S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null;
+  // Another project's card list is a different list; row 12 of it means nothing here.
+  scrollMem.delete('grid');
   pushNav();                          // so the back gesture returns to Projects, not out
   render(); refresh();
 }
@@ -363,7 +366,7 @@ function gridScreen() {
       }, idx));
     }
   });
-  out.push(list);
+  out.push(watchScroll('grid', list));
   const it = its[S.sel] || {};
   out.push(el('div', { class: 'verbs' }, [
     btn('⏎ enter', () => { if (it.card) openSession(it.card.name); else if (it.freeWt) sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path }); else sheetPicker(); }),
@@ -417,7 +420,61 @@ async function reorder(name, delta) {
 // and pretending otherwise wastes a minute of listening), inline code keeps its text
 // without its backticks, links become "link", and the emphasis marks go. Capped, because
 // a whole turn can be thousands of characters and there is no way to skim a voice.
+//
+// AND IDENTIFIERS ARE NAMED, NOT SPELLED. "it has a bunch of numbers and stuff that is not
+// relevant" — a 40-character sha is read one character at a time, which is most of a minute
+// for a string nobody could write down from a speaker anyway. Neither could they write down
+// a UUID, an ISO timestamp, `\x1f`, or four directories on the way to a filename.
+//
+// THE LINE IS NOT "NUMBERS ARE NOISE", and a normaliser that dropped every digit would be
+// worse than doing nothing. It is ADDRESS versus FACT. An address is a thing you would have
+// to READ to act on, so speech can only name it: say that a commit was involved, not which.
+// A fact is a thing you act on BY EAR and it has to survive intact — "1885 passed, 0 failed"
+// is the whole content of that sentence, and so are #1171, 2.1.241, 40% and 6s. Those are
+// asserted, in test/helpers/speak-check.mjs, in both directions on purpose: a test that only
+// checks that noise is gone is passed by returning the empty string.
 const SPEAK_MAX = 1200;
+// A left edge that cannot itself be part of an identifier, as a capturing group rather than
+// a lookbehind: lookbehind only reached Safari in 16.4, this app supports the phones that
+// installed it (§9's 16.4+ is about Web Push, not about parsing), and an unsupported regex
+// literal is a PARSE error — the whole client, blank, not one feature degraded.
+const IDENT_EDGE = '(^|[^\\w./~@+-])';
+const pathSpoken = (p, line) => {
+  // The basename is a NAME — it is usually what the sentence is about ("fixed fleet-grid")
+  // — and everything left of it is the address. The line number stays: it is one short
+  // word by ear, and it is the difference between "there is a bug in that file" and "there
+  // is a bug at that spot", which is the only part of a path a listener can act on.
+  const base = p.replace(/\/+$/, '').split('/').pop() || p;
+  return line ? `${base} line ${line.slice(1)}` : base;
+};
+function sayIdentifiers(t) {
+  // Most specific first, because the general patterns would eat the parts of these: the
+  // sha rule matches the first block of a UUID, and the octal rule the tail of an escape.
+  t = t.replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, 'a timestamp');
+  t = t.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, 'an id');
+  t = t.replace(/\b0x[0-9a-f]+\b/gi, 'a hex id');
+  t = t.replace(/\\(?:x[0-9a-f]{2}|u\{?[0-9a-f]{4,6}\}?|[0-7]{2,3})/gi, 'an escape code');
+  // A path, rooted (/a/b, ./a, ../a, ~/a) or relative with a dotted last segment (bin/x.mjs).
+  // The dot is what keeps `@anthropic-ai/claude-code` and `feat/retry-backoff` whole: a
+  // package and a branch are names you act on, and they read perfectly well aloud.
+  t = t.replace(new RegExp(IDENT_EDGE + '((?:~|\\.{1,2})?\\/[\\w.@+~-]+(?:\\/[\\w.@+~-]+)*)(:\\d+)?(?::\\d+)?', 'g'),
+                (m, pre, p, line) => pre + pathSpoken(p, line));
+  t = t.replace(new RegExp(IDENT_EDGE + '([\\w.@+~-]+(?:\\/[\\w.@+~-]+)*\\/[\\w.@+~-]*\\.\\w+)(:\\d+)?(?::\\d+)?', 'g'),
+                (m, pre, p, line) => pre + pathSpoken(p, line));
+  t = t.replace(new RegExp(IDENT_EDGE + '([\\w.@+~-]*\\.\\w+):(\\d+)(?::\\d+)?', 'g'),
+                (m, pre, f, n) => `${pre}${f} line ${n}`);
+  // A git sha. The guard is what separates it from a count and from a word: below 12
+  // characters it has to look like hex ON PURPOSE — at least one digit AND at least one
+  // a-f — so "1234567" stays a number and "cabbage" stays a word. At 12 and up, nothing
+  // that long is anything but an address. Called "a commit" because in this app's
+  // transcripts that is what it always is; a hash that is not one still comes out as
+  // "an address was elided here", which is the part that matters.
+  t = t.replace(new RegExp('(^|[^\\w.-])([0-9a-f]{7,40})(?![\\w.-])', 'g'),
+                (m, pre, h) => (h.length >= 12 || (/\d/.test(h) && /[a-f]/.test(h))) ? pre + 'a commit' : m);
+  // "1885 passed / 0 failed" is spoken "slash", which is a word that is not in the sentence.
+  t = t.replace(/ \/ /g, ', ');
+  return t;
+}
 export function speakable(text) {
   let t = String(text || '');
   t = t.replace(/```[\s\S]*?```/g, ' … code block … ');   // fenced code: named, not read
@@ -427,6 +484,10 @@ export function speakable(text) {
   t = t.replace(/^\s{0,3}#{1,6}\s+/gm, '');               // heading marks
   t = t.replace(/^\s{0,3}[-*+]\s+/gm, '');                // bullet marks
   t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, '$1$2$3');
+  // AFTER the markdown pass, so a path inside backticks is a path by the time it gets here
+  // and a URL is already the word "link"; BEFORE the cap, so the 1200 characters are spent
+  // on words instead of on an address that will not be read out.
+  t = sayIdentifiers(t);
   t = t.replace(/\s+/g, ' ').trim();
   return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, '') + '… and it goes on.' : t;
 }
@@ -488,8 +549,8 @@ function openSession(name) {
   // that question; a sticky preference would sometimes answer a different one.
   S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
   S.draft = ''; S.pending = null; stopSpeaking();
-  paneScroll = null;          // another session's offset means nothing in this one's pane
-  chatScroll = null;
+  // Another session's offset means nothing in this one's pane or transcript.
+  scrollMem.delete('pane'); scrollMem.delete('chat');
   pushNav();
   render(); refresh();
 }
@@ -577,14 +638,19 @@ function chatView(card) {
   if (s.next_before) {
     wrap.append(el('div', { class: 'row l' }, [
       btn(`load ${api.PAGE} older`, async () => {
+        // Hold the reader's place: a page prepended above them would otherwise throw them
+        // to the top of a conversation they were reading the middle of.
+        //   MEASURED BEFORE THE AWAIT, armed after it. A 5s poll landing mid-fetch rebuilds
+        // this list and leaves `wrap` detached, and a detached node measures a scrollHeight
+        // of 0 — which would record a distance-from-the-end of 0, and 0 from the end IS the
+        // end, the one place this must never send anybody.
+        const held = measureFromEnd('chat', wrap);
         try {
           const older = await api.getSession(S.project, S.session, s.next_before);
           S.sess = { ...older, messages: [...(older.messages || []), ...(s.messages || [])],
                      next_before: older.next_before, pages: (s.pages || 1) + 1 };
         } catch (e) { toast(String(e.message || e), 'bad'); }
-        // Hold the reader's place: a page prepended above them would otherwise throw them
-        // to the top of a conversation they were reading the middle of.
-        chatScroll = { keepFromEnd: true };
+        holdScrollFromEnd('chat', held);
         render();
       }),
     ]));
@@ -596,13 +662,22 @@ function chatView(card) {
   // own message disappears for five seconds reads as a send that failed, and this app's
   // whole job is telling you what is actually happening.
   if (S.pending) wrap.append(turn(true, S.pending.text, 'sending…', true));
-  wrap.addEventListener('scroll', () => rememberChatScroll(wrap));
-  restoreChatScroll(wrap);
+  watchScroll('chat', wrap);
   return wrap;
 }
 function turn(mine, text, when, pending = false) {
+  const bub = el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : '') });
+  // AN ASSISTANT'S TURN IS MARKDOWN AND WAS BEING SHOWN AS ITS OWN SOURCE — "the messages
+  // are not in nice .md format, they have the ****" — because this was one `text:`, which
+  // is textContent. web/md.js turns it into nodes; nothing here ever touches innerHTML.
+  //   YOUR OWN TURN IS NOT RENDERED, and that is the one asymmetry. A user bubble is the
+  // prompt that was SENT, and this is a tool where the exact bytes of a prompt matter — a
+  // literal `**` you typed showing as emphasis would leave you unable to tell whether the
+  // asterisks reached the agent. What you typed is what you see.
+  if (mine) bub.textContent = String(text || '');
+  else bub.appendChild(md.render(String(text || ''), document));
   return el('div', { class: 'turn ' + (mine ? 'me' : 'them') }, [
-    el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : ''), text: String(text || '') }),
+    bub,
     el('div', { class: 'meta', text: when }),
   ]);
 }
@@ -639,7 +714,13 @@ function composer(card) {
   const last = lastAgentText();
   if (canSpeak() && last) {
     const on = S.speaking === speakable(last);
-    kids.push(btn(on ? '■' : '🔊', () => toggleSpeak(last), 'speak' + (on ? ' on' : '')));
+    // ONE BUTTON, TWO STATES, AND BOTH OF THEM EMOJI. It was 🔊 idle and ■ playing — a
+    // colour emoji against U+25A0 BLACK SQUARE, which is a thin monochrome glyph a third of
+    // the size. Tapping it changed the control's weight, its colour and its apparent size,
+    // so it read as a different button appearing rather than as this one being pressed, and
+    // the .speak.on background it already has was doing all the work of saying "playing".
+    // 🔇 is the same face, same weight, same metrics, and it says what pressing again does.
+    kids.push(btn(on ? '🔇' : '🔊', () => toggleSpeak(last), 'speak' + (on ? ' on' : '')));
   }
   kids.push(btn('send', () => sendDraft(), 'go'));
   return el('div', { class: 'composer' }, kids);
@@ -657,7 +738,7 @@ async function sendDraft() {
   // failed send cannot sit there looking sent forever.
   S.pending = { text, at: Math.floor(Date.now() / 1000) };
   S.draft = '';
-  chatScroll = null;                 // a message you just sent belongs on screen
+  scrollMem.delete('chat');          // a message you just sent belongs on screen
   render();
   const r = await doVerb('fleet_send', { project: S.project, session: S.session, prompt: text }, { quiet: true });
   if (!r) { S.pending = null; render(); }        // doVerb already said why
@@ -724,17 +805,138 @@ const PFS_MIN = 6, PFS_MAX = 28;
 const PANE_HISTORY = 200;       // rows of scrollback the `history` toggle asks for
 
 let paneBoxNode = null, paneNode = null, paneGeomNode = null;
-// WHERE THE READER HAD SCROLLED TO, kept OUTSIDE the nodes, because the nodes do not
-// survive. refresh()'s 5s grid poll ends in render(), which rebuilds the whole session
-// screen — so a freshly built .pane-box starts at scrollTop 0 and the "open at the end"
-// rule then threw the reader to the bottom of the pane every five seconds, and to column 0
-// with it. Measured in a real browser: scrolled to (40, 300), five seconds later (253, 0).
-// A toast, a verb and a view switch all do the same thing, so the fix is not "render less"
-// — it is that the position belongs to the SESSION, not to a div.
-//   `atEnd` rather than a raw offset for the tail case: a pane that has grown (history on,
-// or a taller capture) has a different bottom, and a reader who was at the end wants the
-// new end, not the old number.
-let paneScroll = null;         // { top, left, atEnd } | null = never scrolled yet
+
+// ── where the reader had scrolled to ────────────────────────────────────────
+// KEPT OUTSIDE THE NODES, BECAUSE THE NODES DO NOT SURVIVE. refresh()'s 5s poll ends in
+// render(), render() does `app.textContent = ''` and rebuilds the screen, and a freshly
+// built element starts at scrollTop 0. That is one bug with three faces, and it was fixed
+// three times: the pane got `paneScroll`, the chat got `chatScroll`, and the two CARD
+// LISTS got nothing at all — so they were still doing it. Reported as two different
+// complaints because the fallbacks differ: "when scrolling up on a chat it suddenly goes
+// to the end" (the chat sticks to the bottom when it has no position) and "it also happens
+// on the projects and session list, it suddenly goes to the top" (a new element is at 0).
+// Measured on the grid at 390x844, 8 cards: parked at 290, and five seconds later 0, with
+// the node identity changed under it.
+//
+// SO THERE IS ONE OF THESE NOW, KEYED BY LIST, and that is not tidiness. The third copy of
+// an idea is where its bugs live: `chatScroll` was assigned a hand-built `{ keepFromEnd:
+// true }` with no `fromEnd` in it, and the restore then computed `scrollHeight - undefined`
+// = NaN, which the DOM lands on 0 — the button whose entire job is "do not throw the reader
+// to the top" threw them to the top. A caller cannot build a half-shaped position here:
+// the only ways in are rememberScroll() and holdScrollFromEnd(), and both measure first.
+const scrollMem = new Map();   // key -> { top, left, atEnd, fromEnd, keepFromEnd?, wrote? }
+// Per list, because they do not all want the same thing when nobody has scrolled yet.
+// `end: true` = a box that has never been touched opens at the BOTTOM, and a reader who is
+// at the bottom is kept there as it grows. True of a terminal, where the newest output is
+// at the end, and of a chat, where the newest message is. NOT true of a list of cards: the
+// end of a card list is not where the news is, and a fresh one belongs at the top, which is
+// where the browser already puts it. `slack` is how close to the bottom still counts as
+// being at it — a pane is measured in exact rows, a chat in fat bubbles.
+const SCROLLERS = {
+  pane:     { end: true,  slack: 6 },
+  chat:     { end: true,  slack: 24 },
+  projects: { end: false, slack: 24 },
+  grid:     { end: false, slack: 24 },
+};
+const numOf = v => Number(v) || 0;
+
+function rememberScroll(key, box) {
+  const s = SCROLLERS[key]; if (!s || !box) return;
+  const h = numOf(box.scrollHeight), top = numOf(box.scrollTop), ch = numOf(box.clientHeight);
+  // A NODE THAT IS NOT IN THE DOCUMENT MEASURES ZERO, AND ZERO READS AS "AT THE END".
+  // Measured in Chrome 151: tear a box that was scrolled to 400 out of the page and it
+  // reports { scrollTop: 0, scrollHeight: 0, clientHeight: 0 } — and 0 - 0 - 0 is inside
+  // every slack there is. Record that and the list is pinned to the bottom for the rest of
+  // the session, which is the reported "it suddenly goes to the end". There is nothing to
+  // learn from a detached box, so learn nothing.
+  if (!h) return;
+  const prev = scrollMem.get(key);
+  // A POSITION THIS CODE WROTE IS NOT THE READER CHOOSING IT. Measured in Chrome: assigning
+  // scrollTop fires no 'scroll' event synchronously, and the event has arrived by the next
+  // animation frame — so it reaches this listener looking exactly like a finger. That is
+  // harmless when the write landed where it aimed, and not harmless when it had to CLAMP:
+  // ask for 700 in a list whose maximum is now 300 and the DOM gives you 300 immediately
+  // and reports 300 to the listener, which is within `slack` of the end, so `atEnd` goes
+  // true and the list is glued to the bottom from then on — the reported symptom, arriving
+  // from a list that merely got shorter. One-shot: the next real scroll is the reader's.
+  if (prev && prev.wrote === top) { delete prev.wrote; return; }
+  scrollMem.set(key, { top, left: numOf(box.scrollLeft), atEnd: h - top - ch < s.slack, fromEnd: h - top });
+}
+
+// "A page of older messages is about to be prepended ABOVE the reader." The distance to the
+// BOTTOM is the one number a prepend does not move, so that is what is held.
+//   MEASURING AND ARMING ARE TWO CALLS, and the gap between them is a network fetch. They
+// were one, and a 5s poll landing mid-fetch re-rendered the chat, spent the marker on the
+// list as it was BEFORE the page arrived, and left the real render to fall back to the
+// absolute offset. Seen in Chrome, intermittently, which is the worst way to see anything:
+// distance from the end 1367 before the press and 1715 after, where the whole point is that
+// it is the same number. Nothing can spend a marker that has not been armed yet.
+function measureFromEnd(key, box) {
+  rememberScroll(key, box);
+  const m = scrollMem.get(key);
+  return m ? m.fromEnd : null;
+}
+function holdScrollFromEnd(key, fromEnd) {
+  // The measurement is the ARGUMENT, so a marker cannot exist without one. It used to be
+  // hand-built at the call site as a bare keepFromEnd flag with no distance in it at all,
+  // and `scrollHeight - undefined` is NaN, which the DOM lands on 0: the button whose only
+  // job is "do not throw the reader to the top" threw them to the top.
+  if (fromEnd == null) return;
+  const m = scrollMem.get(key) || { top: 0, left: 0 };
+  // atEnd is tested before keepFromEnd in restoreScroll and would win, and it is true
+  // whenever the whole transcript already fits on one screen — which is exactly when this
+  // button is still on screen to be pressed. The press says "hold my place"; say only that.
+  scrollMem.set(key, { ...m, atEnd: false, fromEnd, keepFromEnd: true });
+}
+
+function writeScroll(key, box, top, left) {
+  try {
+    box.scrollTop = numOf(top);
+    if (left != null) box.scrollLeft = numOf(left);
+    // WRITE IT BACK INTO THE MEMORY HERE, rather than waiting for the scroll event to say
+    // where we ended up. Measured in Chrome 151: assigning scrollTop fires no event during
+    // the assignment and the event has arrived by the next animation frame — so a second
+    // render in between would restore the value from BEFORE this one, and the position
+    // would spring back. Re-read rather than trust what was asked for, because the DOM
+    // clamps to the current maximum synchronously and the clamp is where it really is.
+    //   `atEnd` is deliberately NOT recomputed. It is the reader's intent — "I am reading
+    // the newest" — and a clamp is not an intent; recomputing it from a list that merely
+    // got shorter is how a reader who was in the middle ends up glued to the bottom.
+    const m = scrollMem.get(key);
+    if (m) { m.top = numOf(box.scrollTop); m.left = numOf(box.scrollLeft); m.wrote = m.top; }
+  } catch {}
+}
+
+function restoreScroll(key, box, prepare) {
+  const s = SCROLLERS[key]; if (!s || !box) return;
+  const go = () => {
+    try {
+      if (prepare) prepare(box);
+      const m = scrollMem.get(key);
+      if (!m) { if (s.end) writeScroll(key, box, box.scrollHeight); return; }
+      if (m.atEnd && s.end) writeScroll(key, box, box.scrollHeight);
+      else if (m.keepFromEnd) { writeScroll(key, box, numOf(box.scrollHeight) - numOf(m.fromEnd)); delete m.keepFromEnd; }
+      else writeScroll(key, box, m.top, m.left);
+    } catch {}
+  };
+  // NEXT FRAME, NOT THIS ONE. The element is not in the document until render() appends
+  // it, and a detached node reports a scrollHeight of 0 — so an inline pass is an
+  // assignment that clamps to 0 and looks like it worked. Where there is no rAF a
+  // microtask is the nearest thing to "after this is built"; inline is the one moment
+  // guaranteed to be too early.
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(go);
+  else if (typeof queueMicrotask === 'function') queueMicrotask(go);
+  else go();
+}
+
+// One call, because attaching the listener and restoring the position are two halves of the
+// same thing and a list that got only the first half is a list that forgets.
+function watchScroll(key, box, prepare) {
+  if (!box) return box;
+  try { box.addEventListener('scroll', () => rememberScroll(key, box)); } catch {}
+  restoreScroll(key, box, prepare);
+  return box;
+}
 
 function paneView() {
   const wrap = el('div', { class: 'paneview' });
@@ -778,31 +980,9 @@ function paneView() {
   paneBoxNode = box; paneNode = pre;
   // Recorded as the reader scrolls, so the next render can put them back. Cheap, and the
   // only place `atEnd` is decided from a real layout rather than inferred.
-  box.addEventListener('scroll', () => rememberPaneScroll(box));
+  watchScroll('pane', box, sizePaneBox);
   wrap.append(box);
-  restorePaneScroll(box);
   return wrap;
-}
-
-function rememberPaneScroll(box) {
-  const h = Number(box.scrollHeight) || 0, top = Number(box.scrollTop) || 0, ch = Number(box.clientHeight) || 0;
-  paneScroll = { top, left: Number(box.scrollLeft) || 0, atEnd: h - top - ch < 6 };
-}
-
-// The newest output — the spinner, the ❯ prompt, a permission dialog — is at the BOTTOM of
-// a pane, so a pane opened for the first time opens there. Every render after that restores
-// where the reader actually was.
-function restorePaneScroll(box) {
-  const go = () => {
-    sizePaneBox(box);
-    try {
-      if (!paneScroll || paneScroll.atEnd) box.scrollTop = box.scrollHeight;
-      else { box.scrollTop = paneScroll.top; box.scrollLeft = paneScroll.left; }
-    } catch {}
-  };
-  // Next frame, not this one: the node is not in the document yet when this runs, so
-  // scrollHeight is 0 and the assignment would be a no-op that looks like it worked.
-  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(go); else go();
 }
 
 // The box takes exactly the screen that is left below it — MEASURED, not a vh fraction.
@@ -867,33 +1047,6 @@ function fitPane() {
   // SHAPE of a 269-column pane, and clamping it to a readable size would silently refuse
   // to do the thing it was tapped for.
   setPfs(Math.max(1, Math.min(PFS_MAX, avail * 100 / (cols * per100))));
-}
-
-// ── the chat's scroll, on the pane's proven idiom ───────────────────────────
-// The same problem and the same answer: render() rebuilds this list on every poll, so
-// something has to remember where the reader was or the conversation jumps under them —
-// which is half of "the screen moves around". A chat's default is not the pane's, though:
-// a terminal opens at the bottom because the newest output is there, and a chat opens at
-// the bottom because that is where the newest MESSAGE is, so both stick to the end unless
-// the reader has scrolled up. `keepFromEnd` is the one exception — prepending a page of
-// older messages must not throw you to the top of them.
-let chatScroll = null;
-function rememberChatScroll(box) {
-  const h = Number(box.scrollHeight) || 0, top = Number(box.scrollTop) || 0, ch = Number(box.clientHeight) || 0;
-  chatScroll = { top, atEnd: h - top - ch < 24, fromEnd: h - top };
-}
-function restoreChatScroll(box) {
-  const go = () => {
-    try {
-      if (!chatScroll || chatScroll.atEnd) box.scrollTop = box.scrollHeight;
-      else if (chatScroll.keepFromEnd) box.scrollTop = Math.max(0, box.scrollHeight - chatScroll.fromEnd);
-      else box.scrollTop = chatScroll.top;
-    } catch {}
-  };
-  go();
-  // Twice, like the pane's: the first pass runs before the browser has laid the bubbles
-  // out, so scrollHeight is still the old one.
-  try { requestAnimationFrame(go); } catch {}
 }
 
 // ── the pane's own poll ───────────────────────────────────────────────────
@@ -1038,9 +1191,9 @@ function paintPane() {
   S.paneGeom = { rows: r.rows, cols: r.cols };
   // A terminal's tail behaviour: follow the end only for a reader who was already at it.
   // Someone who has scrolled up to read a command stays where they put themselves.
-  rememberPaneScroll(box);
+  rememberScroll('pane', box);
   pre.innerHTML = r.html;
-  if (paneScroll.atEnd) { try { box.scrollTop = box.scrollHeight; } catch {} }
+  if ((scrollMem.get('pane') || {}).atEnd) writeScroll('pane', box, box.scrollHeight);
   if (paneGeomNode) paneGeomNode.textContent = `${r.cols}×${r.rows}`;
 }
 

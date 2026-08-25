@@ -5777,6 +5777,43 @@ if [ -d "$ROOT/web" ]; then
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PW/docs"
+
+  # ── what the 🔊 button says ────────────────────────────────────────────────
+  # speakable() is pure and exported and had no coverage at all, which is how it shipped
+  # reading a 40-character sha out one character at a time — "a bunch of numbers and stuff
+  # that is not relevant", from the phone. The table is in both directions on purpose and
+  # the SECOND one is the point: a normaliser that deleted every digit would pass every
+  # "the sha is gone" check and would be worse than doing nothing, because "1885 passed,
+  # 0 failed" is the whole content of that sentence. Every row was watched going red —
+  # the pass removed, the pass returning "", the sha guard dropped (which is how the first
+  # draft's "cabbage" row was caught proving nothing), the path rule widened, the line
+  # number dropped, the URL rule removed and the spoken-slash rule removed.
+  node "$ROOT/test/helpers/speak-check.mjs" > "$PW/speak" 2> "$PW/speak.err"
+  is "speak-check ran"                "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PW/speak.err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A floor, for the reason pwa-check documents: this helper `await import`s web/app.js, so
+  # a boot that throws emits no rows at all and a bare "no mismatches" would call it green.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/speak")" -ge 50 ] && echo yes || echo "no: $(wc -l < "$PW/speak") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PW/speak"
+
+  # ── the markdown a bubble renders ──────────────────────────────────────────
+  # "the messages are not in nice .md format, they have the ****" — turn() set the bubble
+  # with textContent, so every assistant turn was its own source. web/md.js parses to
+  # blocks (pure, no DOM) and builds NODES, never innerHTML.
+  #   The survival rows come first and they are the point: `return ''` has no asterisks in
+  # it either, so every case asserts the WORDS are still there before it asserts the marks
+  # are gone. Watched going red with the renderer bypassed, with emphasis allowed to start
+  # mid-word (which eats the stars out of 2*3*4), with the code fence re-parsed as markdown,
+  # and with safeHref opened up to any scheme.
+  node "$ROOT/test/helpers/md-check.mjs" > "$PW/md" 2> "$PW/md.err"
+  is "md-check ran"                   "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PW/md.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/md")" -ge 55 ] && echo yes || echo "no: $(wc -l < "$PW/md") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PW/md"
   rm -rf "$PW"
 
   # cf-sync mirrors only a whitelist of directories into the runtime, and the client is
