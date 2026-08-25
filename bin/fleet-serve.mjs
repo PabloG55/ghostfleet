@@ -79,12 +79,24 @@ function sameSecret(a, b) {
 // `fleet-serve revoke <id>` take effect on the NEXT REQUEST of a running daemon instead
 // of at the next restart. §12: a phone is lost more often than a laptop, so revocation
 // has to be one action — and an action that needs a restart to land is two.
+const PUSH_DEFAULTS = {
+  detail: 'named',        // 'named' = project/session on the lock screen · 'anonymous' = count only
+  debounce: 30,           // leading-edge, seconds — the master nudge's window and its reasoning
+  quiet_after_poll: 30,   // a client that polled this recently is being LOOKED AT: send nothing
+  scan: 3,                // seconds between fleet-dir scans; only runs when something is subscribed
+  ttl: 900,               // how long the push service may hold it for a phone that is off
+  max_per_client: 4,      // one phone, one PWA install, some slack — not a growth surface
+  subject: '',            // VAPID `sub`: a mailto:/https: the push service can complain to
+  vapid: null,
+};
+
 const DEFAULTS = {
   bind: '', port: 8787, rp_id: '', origins: [], tls: null,
   session_ttl: 900,          // §5: the assertion mints a SHORT-lived token (~15 min)
   confirm_ttl: 120,          // a destructive action confirmed now, not twenty minutes ago
   enroll_ttl: 900,
   rate: { window: 60, read: 240, write: 30, auth: 10 },
+  push: null,                // filled from PUSH_DEFAULTS below — see the push section
   clients: [],
 };
 let cfg = null, cfgStamp = '';
@@ -98,7 +110,12 @@ function loadConfig({ force = false } = {}) {
     try { raw = JSON.parse(fs.readFileSync(CONFIG, 'utf8')); }
     catch (e) { throw new Error(`${CONFIG}: ${e.message}`); }
   }
-  cfg = { ...DEFAULTS, ...raw, rate: { ...DEFAULTS.rate, ...(raw.rate || {}) } };
+  // `rate` and `push` are merged one level down. A shallow spread would let a config
+  // that sets a single push key silently drop every default beside it — including the
+  // suppression window, whose absence would turn into notifications while he is looking.
+  cfg = { ...DEFAULTS, ...raw,
+          rate: { ...DEFAULTS.rate, ...(raw.rate || {}) },
+          push: { ...PUSH_DEFAULTS, ...(raw.push || {}) } };
   cfg.clients = Array.isArray(cfg.clients) ? cfg.clients : [];
   cfgStamp = stamp;
   return cfg;
@@ -937,6 +954,332 @@ function allowedHosts(c) {
 // web/api.js sends `Authorization: Bearer <token>` on everything and nothing else, so
 // these three are the only paths reachable without one — they are how a token is
 // obtained. Every other /api/* path requires a live, assertion-minted token.
+// ── push: the two events worth waking a phone for ───────────────────────────
+// docs/mobile.md §9 argued against building this, and it was right at the time. Two
+// things changed. The origin is now a real <name>.ts.net with a Let's Encrypt cert, and
+// Web Push needs exactly that — a self-signed origin cannot subscribe at all. And the
+// events worth a buzz turn out to be the two the fleet already emits, so the expensive
+// half was built long ago. What §9 got right and still shapes every line below is the
+// throttling: iOS rations pushes and kills the worker aggressively, so this sends RARE,
+// HIGH-VALUE events and nothing else. It is a bell, not a feed.
+//
+// THE PAYLOAD IS THE POINT. It carries a kind, a count, and at most four
+// project/session identifiers. There is no field a sentence could live in, which is not
+// a filter that could be forgotten but the shape of pushPayload() below: every key is
+// written literally, nothing is spread in from the event, and the two strings that do
+// travel are matched against NAME_OK first. The sender never opens a transcript — its
+// whole input is the status files the hook writes, and those hold a status word, not
+// prose.
+const PUSH_KINDS = new Set(['needs-you', 'answer']);
+// Deliberately narrow, and deliberately NOT a sanitiser: a name that does not look like
+// a name is dropped rather than trimmed into one. Project names come from the projects
+// file (a space is legal in a folder name) and session names from fleet-rename, which
+// already restricts itself to this class.
+const NAME_OK = /^[A-Za-z0-9][A-Za-z0-9 ._~/-]{0,47}$/;
+const safeName = (s) => (NAME_OK.test(String(s || '')) ? String(s) : '');
+
+// ── VAPID: an ES256 JWT, which node:crypto signs natively ───────────────────
+// No dependency, and none needed: the whole of VAPID is a JWT with two claims and a
+// P-256 signature. `dsaEncoding: 'ieee-p1363'` is the line that matters — node signs
+// ECDSA as DER by default, and a push service reading a DER blob where it expects raw
+// r||s rejects the token with a 401 that says nothing about why.
+function ensureVapid() {
+  const c = loadConfig();
+  if (c.push.vapid && c.push.vapid.jwk && c.push.vapid.public) return c.push.vapid;
+  const { privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const jwk = privateKey.export({ format: 'jwk' });
+  const pub = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]);
+  c.push.vapid = { jwk, public: pub.toString('base64url'), created: now() };
+  saveConfig(c);                                  // 0600, beside the other secrets
+  log('push: generated a VAPID key pair');
+  return c.push.vapid;
+}
+function vapidAuth(endpoint) {
+  const v = ensureVapid(), c = loadConfig();
+  const head = b64u(JSON.stringify({ typ: 'JWT', alg: 'ES256' }));
+  const body = b64u(JSON.stringify({
+    aud: new URL(endpoint).origin,                // the push SERVICE's origin, not ours
+    exp: now() + 12 * 3600,
+    sub: c.push.subject || `mailto:ghostfleet@${os.hostname()}`,
+  }));
+  const sig = crypto.sign('sha256', Buffer.from(`${head}.${body}`), {
+    key: crypto.createPrivateKey({ key: v.jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363',
+  });
+  return { auth: `vapid t=${head}.${body}.${sig.toString('base64url')}, k=${v.public}`, key: v.public };
+}
+
+// ── the body: RFC 8291 aes128gcm, RFC 8188 framing ──────────────────────────
+// Also no dependency: ECDH, HKDF and AES-128-GCM are all node builtins. The two HKDF
+// steps look repetitive and are not interchangeable — the first is salted with the
+// subscription's `auth` secret and mixes both public keys, the second and third with the
+// random record salt. Getting either wrong produces a body the phone silently discards,
+// which is why test/helpers/push-probe.mjs decrypts it with an independent
+// implementation rather than trusting this one.
+function encryptPush(sub, plaintext) {
+  const ua = Buffer.from(sub.p256dh, 'base64url');          // 65: 0x04 || x || y
+  const authSecret = Buffer.from(sub.auth, 'base64url');    // 16
+  const ecdh = crypto.createECDH('prime256v1'); ecdh.generateKeys();
+  const as = ecdh.getPublicKey();
+  const shared = ecdh.computeSecret(ua);
+  const salt = crypto.randomBytes(16);
+  const ikm = Buffer.from(crypto.hkdfSync('sha256', shared, authSecret,
+    Buffer.concat([Buffer.from('WebPush: info\0'), ua, as]), 32));
+  const cek = Buffer.from(crypto.hkdfSync('sha256', ikm, salt, Buffer.from('Content-Encoding: aes128gcm\0'), 16));
+  const nonce = Buffer.from(crypto.hkdfSync('sha256', ikm, salt, Buffer.from('Content-Encoding: nonce\0'), 12));
+  const cipher = crypto.createCipheriv('aes-128-gcm', cek, nonce);
+  // 0x02 is RFC 8188's "last record" delimiter. Without it the phone decrypts to a
+  // JSON.parse error inside the worker, which on iOS is a push that showed nothing.
+  const ct = Buffer.concat([cipher.update(Buffer.concat([plaintext, Buffer.from([2])])), cipher.final(), cipher.getAuthTag()]);
+  const rs = Buffer.alloc(4); rs.writeUInt32BE(4096, 0);
+  return Buffer.concat([salt, rs, Buffer.from([as.length]), as, ct]);
+}
+
+// An endpoint is a URL this daemon will POST to, so it is checked like one. https only:
+// every real push service is public and TLS-only, and http would let an enrolled client
+// aim the daemon at a plaintext port. The loopback hole is for the suite's fake push
+// service and is opt-in through the environment, so it cannot be reached by anything a
+// client sends.
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+function endpointProblem(u) {
+  if (typeof u !== 'string' || !u || u.length > 1024) return 'endpoint must be a URL under 1024 characters';
+  let x; try { x = new URL(u); } catch { return 'endpoint is not a URL'; }
+  if (x.protocol === 'https:') return null;
+  if (x.protocol === 'http:' && process.env.GHOSTFLEET_PUSH_ALLOW_HTTP === '1' && LOOPBACK_HOSTS.has(x.hostname)) return null;
+  return 'endpoint must be https — a push service is a public service';
+}
+function keysProblem(k) {
+  if (!k || typeof k !== 'object') return 'keys{p256dh,auth} are required';
+  let p, a;
+  try { p = Buffer.from(String(k.p256dh || ''), 'base64url'); a = Buffer.from(String(k.auth || ''), 'base64url'); }
+  catch { return 'keys are not base64url'; }
+  if (p.length !== 65 || p[0] !== 4) return 'p256dh must be a 65-byte uncompressed P-256 point';
+  if (a.length !== 16) return 'auth must be 16 bytes';
+  return null;
+}
+
+// ── who is subscribed, and what makes a subscription die ────────────────────
+// Stored ON THE CLIENT, which is what makes `fleet-serve revoke <id>` kill the push with
+// the device: a revoked client is skipped here and its rows are dropped there, so a lost
+// phone stops receiving fleet state in the same one action that stops it reading it.
+function allSubs() {
+  const out = [];
+  for (const cl of loadConfig().clients) {
+    if (cl.revoked) continue;
+    for (const s of (cl.push || [])) if (s && s.endpoint) out.push({ client: cl.id, ...s });
+  }
+  return out;
+}
+// 404/410 is the push service saying this endpoint is gone for good. Unpruned they
+// accumulate and every send "succeeds" while nothing arrives — the silence-as-symptom
+// failure CLAUDE.md keeps naming, with a config file that grows.
+function dropSub(endpoint, why) {
+  const c = loadConfig(); let hit = false;
+  for (const cl of c.clients) {
+    const before = (cl.push || []).length;
+    if (!before) continue;
+    cl.push = cl.push.filter(s => s.endpoint !== endpoint);
+    if (cl.push.length !== before) hit = true;
+    if (!cl.push.length) delete cl.push;
+  }
+  if (hit) { try { saveConfig(c); } catch (e) { log('push: could not persist a prune:', e.message); } log(`push: dropped a dead endpoint (${why})`); }
+  return hit;
+}
+
+function pushPost(sub, body) {
+  const u = new URL(sub.endpoint), c = loadConfig();
+  const { auth } = vapidAuth(sub.endpoint);
+  const mod = u.protocol === 'http:' ? http : https;
+  return new Promise((resolve) => {
+    const req = mod.request({
+      method: 'POST', hostname: u.hostname, port: u.port || (u.protocol === 'http:' ? 80 : 443),
+      path: u.pathname + u.search,
+      headers: {
+        'content-type': 'application/octet-stream',
+        'content-encoding': 'aes128gcm',
+        'content-length': body.length,
+        ttl: String(c.push.ttl || 900),
+        urgency: 'high',
+        authorization: auth,
+      },
+      timeout: 10000,
+    }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode || 0)); });
+    req.on('timeout', () => { req.destroy(new Error('timeout')); });
+    req.on('error', (e) => resolve({ err: e.message }));
+    req.end(body);
+  });
+}
+
+// EVERY KEY IS WRITTEN HERE, LITERALLY. Nothing is spread in from an event, so a field
+// that appears in a status file — a note, a message, a transcript path — has no route
+// into this object even if someone adds one to the hook tomorrow. That is Pablo's stated
+// requirement made structural rather than reviewed.
+function pushPayload(events, detail) {
+  const kinds = new Set(events.map(e => (PUSH_KINDS.has(e.kind) ? e.kind : 'answer')));
+  const out = { v: 1, kind: kinds.size === 1 ? [...kinds][0] : 'mixed', n: events.length, at: now() };
+  if (detail !== 'anonymous') {
+    const sessions = [];
+    for (const e of events.slice(0, 4)) {
+      const project = safeName(e.project), session = safeName(e.session);
+      if (project && session) sessions.push({ project, session, kind: PUSH_KINDS.has(e.kind) ? e.kind : 'answer' });
+    }
+    if (sessions.length) out.sessions = sessions;
+  }
+  return out;
+}
+
+// ── the watcher ─────────────────────────────────────────────────────────────
+// EVERY PROFILE, because a push channel scoped to one fleet dir is the failure CLAUDE.md
+// describes: work projects would notify and personal ones would be silent, with no error
+// and nothing to grep. The dirs come from projects(), the same list the rest of this
+// server resolves against, so a new profile cannot be missing from one and present in
+// the other.
+function fleetDirs() {
+  const seen = new Map();
+  for (const t of projects()) {
+    seen.set(path.join(t.cfg, 'fleet'), true);
+  }
+  return [...seen.keys()];
+}
+function sockProjects() {
+  const m = new Map();
+  for (const t of projects()) m.set(t.sock, t.name);
+  return m;
+}
+// The hook's status files are the whole input: {sock, slot, status, ts, …}. Only those
+// four fields are read. There is no transcript in a status file and this never opens one.
+//
+// NEWEST PER (sock, slot), which is not tidiness — it is the difference between a bell
+// and a phone that buzzes every thirty seconds forever. Status files are keyed by SESSION
+// ID, and two of them can name one session: a worker killed without a SessionEnd leaves
+// its file behind with its last status, and the next session in that slot writes a second
+// one. Both then answer for the same key, so every scan sees the status flip and every
+// flip looks like a transition. Measured while building this, with a leftover need-you
+// beside a live working: one push per scan, naming a session that was doing nothing.
+// fleet-grid.mjs's fleetBySlot() has had this fix for a while — "keeping the newest entry
+// per slot (avoids a stale/duplicate file shadowing the live one)" — and a second reader
+// of the same files needs the same rule, or the two disagree about what the fleet is.
+function scanFleet() {
+  const newest = new Map();
+  for (const dir of fleetDirs()) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const n of names) {
+      if (!n.endsWith('.json') || n.startsWith('.')) continue;
+      let j;
+      try { j = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8')); } catch { continue; }
+      if (!j || typeof j !== 'object' || !j.sock || !j.slot) continue;   // not a fleet session
+      const row = { sock: String(j.sock), slot: String(j.slot), status: String(j.status || ''), ts: Number(j.ts) || 0 };
+      const key = `${row.sock}/${row.slot}`;
+      const prev = newest.get(key);
+      if (!prev || row.ts > prev.ts) newest.set(key, row);
+    }
+  }
+  return [...newest.values()];
+}
+
+const pushState = new Map();      // "<sock>/<slot>" -> the status we last saw
+const lastRead = new Map();       // client id -> when it last polled anything
+let pushLastSent = 0;
+
+// Which transitions are worth a phone buzzing. Both are Pablo's own words: "has an
+// answer for me" and "is blocked on me".
+//
+// DERIVED FROM THE STATUS TRANSITION rather than from a new event in the hook, and the
+// master is the reason. hooks/fleet-event.sh gates its inbox block on `SLOT != master`
+// deliberately — that inbox exists for things needing the master, and a master's own
+// turns do not belong in it — but an answer from the MASTER is exactly what was asked
+// for. Deleting the gate would pollute the inbox to feed the phone; adding a second
+// emitter would put a new write on the hottest path in the repo. The status file the
+// hook already writes for every session, master included, carries the transition
+// itself, so nothing new has to be emitted at all.
+// A TRANSITION, WHICH MEANS THE FIRST SIGHT OF A SESSION IS A BASELINE AND NEVER A BUZZ.
+// That is not only about the daemon's first scan. A status file that cannot be parsed on
+// one tick — read while a writer had truncated it and not yet written — drops out of the
+// scan, and a key that drops out is pruned; without this rule it comes back as brand new
+// and a `need-you` sitting there since yesterday reads as a fresh block. Measured while
+// building this: a non-atomic writer produced a second notification for a session nothing
+// had happened to. The hook writes its files atomically (tmp + mv) so a real fleet does
+// not tear them, and one MISSED buzz in the case where something else does is much
+// cheaper than a phantom one — a bell that rings for nothing is a bell you learn to
+// ignore, and §9's whole argument is that these have to be rare and true.
+function pushEvents(rows) {
+  const names = sockProjects(), events = [], seen = new Set();
+  for (const r of rows) {
+    const key = `${r.sock}/${r.slot}`;
+    seen.add(key);
+    const known = pushState.has(key);
+    const prev = pushState.get(key);
+    pushState.set(key, r.status);
+    if (!known || prev === r.status) continue;
+    const project = names.get(r.sock) || r.sock.replace(/^cf-/, '');
+    if (r.status === 'need-you') events.push({ kind: 'needs-you', project, session: r.slot });
+    // working -> ready is a turn that ENDED. `idle` (SessionStart) is not an answer, and
+    // ready -> ready is the same session sitting where it was.
+    else if (r.status === 'ready' && prev === 'working') events.push({ kind: 'answer', project, session: r.slot });
+  }
+  for (const k of [...pushState.keys()]) if (!seen.has(k)) pushState.delete(k);
+  return events;
+}
+
+async function pushTick() {
+  let c;
+  try { c = loadConfig(); } catch { return; }
+  const subs = allSubs();
+  // Nothing subscribed: do no work at all, and forget the baseline so the first
+  // subscription starts from what is on disk instead of replaying the day.
+  if (!subs.length) { pushState.clear(); return; }
+  // No separate seeding pass: pushEvents() treats every key's first sight as a baseline,
+  // so the first scan after a subscription is silent by the same rule that keeps a
+  // reappearing file quiet. One rule is one thing to get right.
+  const events = pushEvents(scanFleet());
+  if (!events.length) return;
+  // ONE NOTIFICATION PER BURST, leading edge — the same shape and the same default
+  // window as the master nudge in hooks/fleet-event.sh, for the same reason: five
+  // workers finishing is one thing to look at, not five. A scan that sees all five at
+  // once sends one push that says so; stragglers inside the window are dropped, and the
+  // stamp is NOT moved when nothing was sent, so the next event is not also swallowed.
+  if (now() - pushLastSent < (c.push.debounce ?? 30)) return;
+  const detail = c.push.detail === 'anonymous' ? 'anonymous' : 'named';
+  const payload = pushPayload(events, detail);
+  const body = Buffer.from(JSON.stringify(payload));
+  let sent = 0;
+  for (const s of subs) {
+    // SUPPRESSION HAPPENS HERE, BEFORE SENDING, and it can happen nowhere else: iOS may
+    // revoke a subscription whose worker takes a push and shows no notification, so
+    // "decide not to bother him" inside the worker costs the subscription. If he polled
+    // a moment ago he is holding the phone with the app open, and the answer is already
+    // on his screen.
+    const seen = lastRead.get(s.client) || 0;
+    if (now() - seen < (c.push.quiet_after_poll ?? 30)) continue;
+    let st;
+    try { st = await pushPost(s, encryptPush(s, body)); }
+    catch (e) { log(`push: ${s.client} encrypt/post failed: ${e.message}`); continue; }
+    if (st && st.err) { log(`push: ${s.client} unreachable: ${st.err}`); continue; }
+    if (st === 404 || st === 410) { dropSub(s.endpoint, `HTTP ${st}`); continue; }
+    if (st >= 200 && st < 300) {
+      // The one trace that a push happened. Without it, "my phone did not buzz" has
+      // nothing on the Mac to check it against — and this repo's recurring failure is
+      // the silent path, not the loud one. It names the kind and the count, never the
+      // session: a log file is a surface too.
+      log(`push: -> ${s.client} kind=${payload.kind} n=${payload.n}`);
+      sent++; continue;
+    }
+    log(`push: ${s.client} refused with HTTP ${st}`);
+  }
+  if (sent) pushLastSent = now();
+}
+
+function armPushWatch() {
+  const c = loadConfig();
+  const every = Math.max(1, Number(c.push.scan) || 3) * 1000;
+  let running = false;
+  setInterval(() => {
+    if (running) return;                      // a slow push service must not stack ticks
+    running = true;
+    pushTick().catch(e => log('push: tick failed:', e.message)).finally(() => { running = false; });
+  }, every).unref();
+}
+
 const OPEN = new Set(['/api/auth/challenge', '/api/auth/register', '/api/auth/assert']);
 
 function serveStatic(req, res, pathname) {
@@ -1048,6 +1391,13 @@ async function api(req, res, url, ip) {
     const s = liveSession(bearer);
     if (!s) return send(res, 401, { ok: false, text: 'no live session — assert a passkey at /api/auth (a token is only ever minted by one, and it expires)', needs: 'passkey' });
     req.client = s.cl; req.session = s;
+    // WHEN DID THIS DEVICE LAST LOOK. A GET from a live token is the phone polling, which
+    // it only does while the app is on screen (web/app.js stops the timer on
+    // document.hidden, and iOS hides a backgrounded PWA). That is the signal the push
+    // sender uses to shut up: a notification for something already on screen is noise,
+    // and the decision has to be made HERE rather than in the service worker, because a
+    // push the worker declines to show can cost the subscription (iOS).
+    if (req.method === 'GET') lastRead.set(s.cl.id, now());
     if (!rateOk(req.method === 'POST' ? 'write' : 'read', `id:${s.cl.id}`, res))
       return send(res, 429, { ok: false, text: 'rate limited' });
   }
@@ -1258,6 +1608,51 @@ async function api(req, res, url, ip) {
     const lim = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') || 50) || 50));
     return send(res, 200, { ok: true, chain: auditVerify(), total: lines.length,
       rows: lines.slice(-lim).map(l => { try { return JSON.parse(l); } catch { return { unparseable: l }; } }) });
+  }
+
+  // ── push: the subscription is a credential, so it lives behind the same gate ──
+  // Everything below the OPEN set already needs a live session token, which means a
+  // passkey signed for it minutes ago. That is the whole control: anyone who can
+  // subscribe receives fleet state, so subscribing is exactly as hard as reading it.
+  if (p === '/api/push/key' && req.method === 'GET') {
+    const v = ensureVapid();
+    const mine = (req.client.push || []).map(x => x.endpoint);
+    return send(res, 200, { ok: true, key: v.public, detail: c.push.detail === 'anonymous' ? 'anonymous' : 'named',
+                            subscribed: mine.length, endpoints: mine.map(e => e.slice(0, 48) + (e.length > 48 ? '…' : '')) });
+  }
+
+  if (p === '/api/push/subscribe' && req.method === 'POST') {
+    const ep = String(body.endpoint || '');
+    const bad = endpointProblem(ep) || keysProblem(body.keys);
+    if (bad) return send(res, 400, { ok: false, text: bad });
+    const cc = loadConfig();
+    const cl = cc.clients.find(x => x.id === req.client.id);
+    if (!cl) return send(res, 401, { ok: false, text: 'that client is gone' });
+    cl.push = (cl.push || []).filter(x => x.endpoint !== ep);
+    cl.push.push({ endpoint: ep, p256dh: String(body.keys.p256dh), auth: String(body.keys.auth), at: now() });
+    // Newest wins. A phone that reinstalls the PWA gets a new endpoint every time and the
+    // old ones are already dead; keeping them would mean every tick posts into nothing.
+    if (cl.push.length > (cc.push.max_per_client || 4)) cl.push = cl.push.slice(-(cc.push.max_per_client || 4));
+    saveConfig(cc);
+    log(`push: ${req.client.id} subscribed (${cl.push.length} endpoint${cl.push.length === 1 ? '' : 's'})`);
+    // AUDITED, like a mutation, because that is what it is: after this call a device
+    // receives fleet state without asking again. The log exists to answer "when did this
+    // start", and a subscription taken out by a stolen token is exactly the question.
+    // The HOST, not the endpoint — the full URL is the credential half of a subscription.
+    try { auditAppend({ ts: now(), client: req.client.id, ip, verb: 'push_subscribe', subject: new URL(ep).host, result: 'ran', output: `${cl.push.length} endpoint(s), detail=${cc.push.detail}` }); } catch {}
+    return send(res, 201, { ok: true, subscribed: cl.push.length, detail: cc.push.detail });
+  }
+
+  if (p === '/api/push/unsubscribe' && req.method === 'POST') {
+    const ep = String(body.endpoint || '');
+    if (!ep) return send(res, 400, { ok: false, text: 'endpoint is required' });
+    const cc = loadConfig();
+    const cl = cc.clients.find(x => x.id === req.client.id);
+    const before = (cl && cl.push ? cl.push.length : 0);
+    if (cl && cl.push) { cl.push = cl.push.filter(x => x.endpoint !== ep); if (!cl.push.length) delete cl.push; saveConfig(cc); }
+    const removed = before - (cl && cl.push ? cl.push.length : 0);
+    if (removed) try { auditAppend({ ts: now(), client: req.client.id, ip, verb: 'push_unsubscribe', subject: (() => { try { return new URL(ep).host; } catch { return '?'; } })(), result: 'ran', output: `${removed} removed` }); } catch {}
+    return send(res, 200, { ok: true, removed });
   }
 
   if (p === '/api/health' && req.method === 'GET') {
@@ -1501,6 +1896,12 @@ async function serve(argv) {
   if (!ch0.ok && ch0.n) log(`  WARNING: audit chain broken at row ${ch0.at} (${ch0.why})`);
   armAwake();
   setInterval(sweep, 30000).unref();
+  armPushWatch();
+  {
+    const n = allSubs().length, pc = loadConfig().push;
+    log(n ? `  push: ${n} subscription${n === 1 ? '' : 's'}, ${pc.detail} · scan ${pc.scan}s · one per ${pc.debounce}s · silent while polled within ${pc.quiet_after_poll}s`
+          : '  push: nothing subscribed — a home-screen PWA subscribes from its settings sheet (docs/mobile.md §9)');
+  }
   // SHUTTING DOWN IS THE SAME TRUNCATION BUG AS process.exit() AFTER A console.log, one
   // layer out: a socket write is asynchronous, so tearing the process down while a
   // response is still draining cuts it at the pipe buffer with no error on either side —
@@ -1531,6 +1932,9 @@ const USAGE = `fleet-serve — the fleet's HTTP endpoint, for the phone (docs/mo
   fleet-serve clients                      who is enrolled, and who is revoked
   fleet-serve revoke <client-id>           kill a client's token and its live sessions
   fleet-serve audit [-n N] [--verify]      the append-only log of every mutation
+  fleet-serve push [--detail named|anonymous] [--test]
+                                           who is subscribed, what a lock screen shows,
+                                           and one real notification to prove it arrives
   fleet-serve check                        preflight: bind, funnel, config — no listen
   fleet-serve check-bind <addr>            classify one address and exit
 
@@ -1581,6 +1985,7 @@ async function main() {
     console.log(`client     ${(() => { try { return fs.statSync(WEB).isDirectory() ? WEB : `${WEB} is not a directory`; } catch { return `NONE at ${WEB}`; } })()}`);
     console.log(`funnel     ${f.checked ? (f.on.length ? `ON for ${f.on.join(', ')} — REFUSED` : 'off (asserted)') : `unverified (${f.why})`}`);
     console.log(`audit      ${chain.ok ? `ok, ${chain.n} rows` : `BROKEN at row ${chain.at}: ${chain.why}`}`);
+    console.log(`push       ${(() => { const n = allSubs().length; return `${c.push.detail}, ${n} subscription${n === 1 ? '' : 's'}${c.push.vapid ? '' : ', no VAPID key yet'}`; })()}`);
     console.log(`awake      ${awakeMode()}`);
     if (pm) console.log(`sleep      WARNING: ${pm}`);
     const bad = !b.ok || !c.rp_id || !(c.origins || []).length || (f.checked && f.on.length) || (!chain.ok && chain.n);
@@ -1656,9 +2061,55 @@ async function main() {
     // another token. The row stays, marked revoked — the record of which device this was
     // is the thing you want afterwards.
     x.revoked = true; x.creds = []; x.revoked_at = now();
+    // AND ITS PUSH. A revoked phone that kept receiving would be the one place fleet
+    // state still reached a device that can no longer read it — a lock screen is a
+    // surface too. allSubs() skips revoked clients as well, so this holds even if a row
+    // survives somewhere.
+    if ((x.push || []).length) { log(`fleet-serve: dropping ${x.push.length} push endpoint(s) with '${id}'`); delete x.push; }
     saveConfig(c);
     auditAppend({ ts: now(), client: id, ip: 'cli', verb: 'revoke', subject: id, result: 'ran', output: 'token and passkeys removed' });
     console.log(`fleet-serve: revoked '${id}' — bearer token and passkeys dropped; its live sessions die on the daemon's next request.`);
+    return;
+  }
+
+  // §9's open question, and the only one that is not a code decision: his project names
+  // ARE client names, and a lock screen is readable by anyone holding the phone. So the
+  // granularity is configuration with a default, not a choice made in a source file.
+  // --test is here because a push that does not arrive fails SILENTLY on every layer —
+  // wrong VAPID key, wrong endpoint, a phone that revoked the subscription — and one
+  // button that either buzzes or names the HTTP status is worth more than all of them.
+  if (cmd === 'push') {
+    const c = loadConfig();
+    const want = flag('--detail');
+    if (want !== null) {
+      if (want !== 'named' && want !== 'anonymous') {
+        console.error("fleet-serve: --detail takes 'named' (project/session on the lock screen) or 'anonymous' (a count only)");
+        process.exitCode = 2; return;
+      }
+      c.push.detail = want; saveConfig(c);
+      console.log(`fleet-serve: push detail is now '${want}'`);
+    }
+    const subs = allSubs();
+    const v = c.push.vapid;
+    console.log(`detail     ${c.push.detail}${c.push.detail === 'anonymous' ? '  (a count only — no project or session names leave this machine)' : '  (project/session travel to the lock screen)'}`);
+    console.log(`vapid      ${v && v.public ? v.public.slice(0, 24) + '…  (private key in ' + CONFIG + ', 0600)' : 'not generated yet — the first subscription makes one'}`);
+    console.log(`debounce   one push per ${c.push.debounce}s, leading edge`);
+    console.log(`quiet      nothing sent while a client has polled within ${c.push.quiet_after_poll}s`);
+    console.log(`scan       every ${c.push.scan}s, over ${fleetDirs().length} fleet dir(s): ${fleetDirs().join(' ') || '(none — no projects registered)'}`);
+    console.log(`subscribed ${subs.length ? subs.map(x => `${x.client} ${new URL(x.endpoint).host}`).join(', ') : '(nobody — a home-screen PWA subscribes from its settings sheet)'}`);
+    if (!argv.includes('--test')) return;
+    if (!subs.length) { console.error('fleet-serve: nothing to test — no subscriptions'); process.exitCode = 1; return; }
+    // The same payload builder and the same encryption the watcher uses, so a test that
+    // arrives proves the real path rather than a simpler one beside it.
+    const payload = pushPayload([{ kind: 'answer', project: 'ghostfleet', session: 'push-test' }], c.push.detail);
+    for (const sb of subs) {
+      let st;
+      try { st = await pushPost(sb, encryptPush(sb, Buffer.from(JSON.stringify(payload)))); }
+      catch (e) { console.log(`${sb.client}  FAILED to encrypt/post: ${e.message}`); continue; }
+      if (st && st.err) { console.log(`${sb.client}  unreachable: ${st.err}`); continue; }
+      if (st === 404 || st === 410) { dropSub(sb.endpoint, `HTTP ${st}`); console.log(`${sb.client}  HTTP ${st} — endpoint is dead, dropped it`); continue; }
+      console.log(`${sb.client}  HTTP ${st}${st >= 200 && st < 300 ? ' — accepted; the phone should buzz' : ''}`);
+    }
     return;
   }
 

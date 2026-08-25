@@ -138,7 +138,7 @@ dismiss.
 | `ansi.js` | the pane, as HTML: SGR escapes → coloured spans, cells → 1ch boxes. Pure, no DOM, no fetch |
 | `md.js` | an assistant's turn, as DOM: bold, italic, code, fences, links, lists, headings. `parse()` is pure; `toDom()` is the only part that needs a document, and it builds NODES — the one attribute it writes is an href it has already checked |
 | `passkey.js` | the WebAuthn ceremonies (§5, §7) |
-| `sw.js` | offline: cache-first for the app, network-first with fallback for `/api/*` |
+| `sw.js` | offline: cache-first for the app, network-first with fallback for `/api/*` — and the push handler, which always shows a notification because a worker that does not can lose the subscription |
 | `fixtures/` | §4 payloads, and the projects/checkouts/settings/session/pane reads |
 | `icons/make-icons.mjs` | rasterises the grid's own `SHIP` sprite into the home-screen icons |
 
@@ -230,7 +230,28 @@ GET  /api/auth/challenge                    -> { challenge, rp_id, user, enrolli
 POST /api/auth/register { code, id, … }     -> { token, expires_at }
 POST /api/auth/assert                       -> { token, expires_at }
 GET  /api/health                            -> { ok, version, … }    the probe's target
+GET  /api/push/key                          -> { key, detail, subscribed, endpoints }
+POST /api/push/subscribe { endpoint, keys } -> { ok, subscribed, detail }   201
+POST /api/push/unsubscribe { endpoint }     -> { ok, removed }
 ```
+
+### Notifications
+
+Behind the same session token as everything else, and that is the whole access control: a
+subscription receives fleet state, so taking one out is exactly as hard as reading it.
+`endpoint` must be `https:` and `keys.p256dh` / `keys.auth` must be a 65-byte P-256 point
+and a 16-byte secret — refused with a reason rather than accepted and dropped later. The
+rows are stored **against the enrolled client**, so `fleet-serve revoke <id>` kills the
+push with the device.
+
+Two events reach a phone: a session that **needs you** and a session that **has an
+answer**. Never anything else, and never any transcript text — the payload is
+`{ v, kind, n, at, sessions?: [{ project, session, kind }] }`, and every word on the lock
+screen is written by `sw.js` from those. `fleet-serve push --detail anonymous` drops the
+`sessions` array so the count is all that travels.
+
+Only a **home-screen install** can subscribe: on iOS a Safari tab has no Push API at all,
+so the settings sheet says so instead of offering a button that opens no prompt.
 
 ### Enrolling the phone
 
