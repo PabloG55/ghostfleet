@@ -6282,6 +6282,12 @@ if [ -d "$ROOT/web" ]; then
     # couple of rows and a bare "no mismatches" would call that green.
     is "...and produced its checks"     "yes" "$([ "$(wc -l < "$VPO/out")" -ge 35 ] && echo yes || echo "no: $(wc -l < "$VPO/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
+      # A GROUP THE BROWSER CANNOT RUN SAYS SO INSTEAD OF ASSERTING SOMETHING WEAKER — the
+      # same precedent as skipping the whole file where there is no Chrome. Element.focus()
+      # only takes when the page is considered focused, and a headless window is not
+      # activated on every platform: the keyboard checks passed on Linux and collapsed on
+      # macOS for that reason alone.
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
       is "$name" "$want" "$got"
     done < "$VPO/out"
   fi
