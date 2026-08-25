@@ -90,6 +90,7 @@ class Node_ {
     this.kids.push(k); return k;
   }
   remove() {}
+  setPointerCapture() {} releasePointerCapture() {}   // the drag calls these; nothing to capture here
   // Records the focused node on the document too, not just a flag on itself: the poll
   // guard asks `document.activeElement === composerNode`, which is the only way to
   // tell "you are typing" that cannot go stale when a render drops the element.
@@ -182,8 +183,18 @@ for (const [name, value] of [
 // off disk, and only those: anything else falls through to the real fetch, which is what
 // the origin probe and every server-mode request still use.
 const realFetch = globalThis.fetch;
+// A HAND-WRITTEN FLEET, for the cases the shipped fixture cannot be: one profile only,
+// a profile nobody anticipated, and a hidden project BETWEEN two visible ones. Changing
+// projects.json itself would move the CLIENT-HASH and stale the seven images that were
+// shot against it, for cases that are about the client's arithmetic rather than about
+// the demo data.
+let fixtureOverride = null;    // { 'projects.json': <object> } | null
 globalThis.fetch = (url, opts) => {
   const m = /^\.\/fixtures\/([A-Za-z0-9._-]+)$/.exec(String(url));
+  if (m && fixtureOverride && fixtureOverride[m[1]]) {
+    const body = fixtureOverride[m[1]];
+    return Promise.resolve({ ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(body)) });
+  }
   if (!m) return realFetch(url, opts);
   const file = new URL(`../../web/fixtures/${m[1]}`, import.meta.url);
   let body;
@@ -294,6 +305,172 @@ is('...and does not offer to enrol', false, !!btnWith(/enrol this phone/));
 click(btnWith(/continue without a passkey/));
 is('past the lock, the header names the backend', true, /⚠ fixtures/.test(app.textContent));
 is('...on the projects screen', true, /ghostfleet/.test(app.textContent) && /projects/.test(app.textContent));
+
+// ── the profile tabs, and the number that must not move ───────────────────
+// "add like tabs on the projects page to differentiate between work and personal."
+//
+// BOTH DIRECTIONS ON EVERY TAB. "hides the other profile" is passed by a screen that
+// shows nothing at all, so each tab is asserted to hide what belongs to the others AND to
+// still draw its own. And the number is asserted separately, because the tempting
+// implementation — filter the array, index the filtered one — passes every visibility
+// check while quietly renaming the cards.
+const tabStrip = () => app.find(n => n.className.split(/\s+/).join(' ').includes('seg tabs'));
+const tabBtn = (label) => { const t = tabStrip(); return t && t.all(n => n.tag === 'button')
+  .find(b => b.textContent.replace(/\s+/g, ' ').trim().startsWith(label)); };
+const projectCards = () => app.all(n => n.className.split(/\s+/).includes('card'))
+  .map(n => n.textContent.replace(/\s+/g, ' '));
+// "╭ ─ 5 scratch ─ …" — one span per cell, so whitespace-collapsed. The DIGIT is the point.
+const numberOf = (name) => {
+  const c = projectCards().find(t => new RegExp('\\u2500 (?:\\d+ )?' + name + ' ').test(t));
+  const m = c && /─ (\d+) /.exec(c);
+  return m ? Number(m[1]) : null;
+};
+const shows = (name) => projectCards().some(t => new RegExp('\\u2500 (?:\\d+ )?' + name + ' ').test(t));
+
+await until(() => !!tabStrip(), 4000);
+is('two profiles in the fleet draw a tab strip', true, !!tabStrip());
+is('...offering all, then each profile', 'all,work,personal',
+   (tabStrip() ? tabStrip().all(n => n.tag === 'button')
+      .map(b => b.textContent.replace(/\s+/g, ' ').trim().replace(/ ●\d+$/, '')).join(',') : ''));
+is('...with all selected on a first run', true, !!(tabBtn('all') || {}).className && /\bon\b/.test(tabBtn('all').className));
+
+// The numbers every card has while nothing is filtered — the addresses `Ctrl-f` uses.
+const GLOBAL = { 'acme-api': numberOf('acme-api'), 'acme-web': numberOf('acme-web'),
+                 'toolbox': numberOf('toolbox'), 'billing-svc': numberOf('billing-svc'),
+                 'scratch': numberOf('scratch') };
+is('all shows every project', true, Object.values(GLOBAL).every(n => n != null));
+is('...numbered 1..5 in the file\'s order', '1,2,3,4,5', Object.values(GLOBAL).join(','));
+
+click(tabBtn('work'));
+await tick(5);
+is('the work tab keeps its own projects', true, shows('acme-api') && shows('billing-svc'));
+is('...and hides the other profile\'s', false, shows('scratch'));
+is('...without renaming anything it draws', '1,4',
+   [numberOf('acme-api'), numberOf('billing-svc')].join(','));
+
+click(tabBtn('personal'));
+await tick(5);
+is('the personal tab keeps its own project', true, shows('scratch'));
+is('...and hides work\'s', false, shows('acme-api') || shows('billing-svc'));
+// THE ROW THIS WHOLE SECTION EXISTS FOR. `scratch` is the fifth line of the projects
+// file, so it is `Ctrl-f 5` at the desk whatever tab the phone is on. Filtering the array
+// and numbering the result would print 1 here, and 1 opens acme-api.
+is('...and scratch is still project 5, not 1', GLOBAL['scratch'], numberOf('scratch'));
+
+click(tabBtn('all'));
+await tick(5);
+is('all comes back', true, shows('acme-api') && shows('scratch'));
+is('...with the numbers it started with', '1,2,3,4,5', Object.values(GLOBAL).join(',') === '1,2,3,4,5'
+   ? [numberOf('acme-api'), numberOf('acme-web'), numberOf('toolbox'), numberOf('billing-svc'), numberOf('scratch')].join(',') : 'baseline moved');
+
+// A BLOCKED PROJECT IN A TAB YOU ARE NOT LOOKING AT is the one thing a filter must not
+// swallow — §1's whole question, and the same failure as a summary reading "0 need you"
+// over a blocked lead. The degraded fixture puts need-you into every project's rollup.
+//   Driven by leaving the screen and coming back, because that is what re-reads
+// /api/projects: the count is computed from the rollup, and a re-render alone would only
+// redraw the numbers the screen already had.
+const tapHere = (name) => {
+  const c = app.all(n => n.className.split(/\s+/).includes('card'))
+    .find(t => new RegExp('\u2500 (?:\\d+ )?' + name + ' ').test(t.textContent.replace(/\s+/g, ' ')));
+  if (!c) return false;
+  (c.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: c, pointerId: 1 }));
+  (c.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: c, pointerId: 1 }));
+  return true;
+};
+is('the tab strip is quiet when nothing needs you', false, /●\d/.test(tabStrip().textContent));
+api.setFixtureName('grid-degraded.json');
+is('...opened a project to re-read the rollup', true, tapHere('acme-api'));
+await until(() => !btnWith(/add project/), 4000);
+swipeBack();
+await until(() => !!tabStrip(), 4000);
+is('a tab says how many need you', true, await until(() => /●\d/.test((tabStrip() || { textContent: '' }).textContent), 5000));
+api.setFixtureName('grid-acme-api.json');
+
+// ── the fleets the shipped fixture is not ─────────────────────────────────
+const fleetOf = (...rows) => ({ home: '/Users/pgarces', projects: rows.map(([name, profile]) => ({
+  name, profile, path: `/Users/pgarces/gf-demo/${name}`, agent: null, socket: `cf-${name}`,
+  sessions: { need: 0, working: 0, parked: 0, total: 0 }, sched: null, nudge: true, budget: 'enforced' })) });
+const reopenProjects = async () => {
+  // Leaving and returning is what re-reads /api/projects, which is where the tabs come
+  // from. Whatever card is FIRST, by name — the fleet changes under this helper, and a
+  // hard-coded project is one that has already gone by the time it is tapped.
+  const first = app.all(n => n.className.split(/\s+/).includes('card'))
+    .find(n => !/add project/.test(n.textContent));
+  if (first) {
+    (first.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: first, pointerId: 1 }));
+    (first.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: first, pointerId: 1 }));
+  }
+  await until(() => !btnWith(/add project/), 4000);
+  swipeBack();
+  await until(() => !!btnWith(/add project/), 4000);
+};
+
+// ONE PROFILE IS THE COMMON CASE — everything is 'work' — and a control whose only option
+// is the one you are already on is furniture, not a choice.
+fixtureOverride = { 'projects.json': fleetOf(['one', 'work'], ['two', 'work']) };
+await reopenProjects();
+is('one profile draws no tab strip at all', false, !!tabStrip());
+is('...and still draws its projects', true, shows('one') && shows('two'));
+
+// A PROFILE NOBODY ANTICIPATED. `ghostfleet <profile>` takes any name, and readProjects()
+// defaults a blank column to 'work' — so a free-text profile must get its own tab rather
+// than vanish, and a blank one must land where the desk puts it.
+fixtureOverride = { 'projects.json': fleetOf(['alpha', 'work'], ['beta', 'demo'], ['gamma', '']) };
+await reopenProjects();
+is('an unanticipated profile gets its own tab', 'all,work,demo',
+   (tabStrip() ? tabStrip().all(n => n.tag === 'button')
+      .map(b => b.textContent.replace(/\s+/g, ' ').trim().replace(/ ●\d+$/, '')).join(',') : ''));
+is('...and nothing has vanished from all', true, shows('alpha') && shows('beta') && shows('gamma'));
+click(tabBtn('demo'));
+await tick(5);
+is('the demo tab shows its own project', true, shows('beta'));
+is('...and hides the others', false, shows('alpha') || shows('gamma'));
+is('...keeping beta\'s number', 2, numberOf('beta'));
+click(tabBtn('work'));
+await tick(5);
+is('a blank profile lands in work, where the desk puts it', true, shows('gamma'));
+is('...numbered where it really is', 3, numberOf('gamma'));
+
+// REORDER INSIDE A TAB MOVES PAST THE HIDDEN ONE. This writes the shared order file the
+// desk counts, so a single-step swap inside a filter would trade places with a card you
+// cannot see: from the reader's side, nothing happened. The discriminator is the CURSOR —
+// moving `gamma` up lands it beside `alpha` at index 0 and selects a card that is on
+// screen, where a single step would select the hidden `beta` and leave nothing selected.
+const selectedCard = () => app.all(n => n.className.split(/\s+/).includes('sel'))
+  .map(n => n.textContent.replace(/\s+/g, ' '))[0] || '';
+{
+  const card = app.all(n => n.className.split(/\s+/).includes('card'))
+    .find(t => /─ (?:\d+ )?gamma /.test(t.textContent.replace(/\s+/g, ' ')));
+  const grip = card && card.find(n => n.className.split(/\s+/).includes('t'));
+  is('the hidden-neighbour case is set up', true, !!grip);
+  if (grip) {
+    // THE REAL GESTURE: a drag by the title line, one row up. `reorder` is wired to the
+    // pointer handlers and to nothing else — the phone has no ⇧hjkl — so firing anything
+    // else here would be a test of a code path that does not exist.
+    const ev = (y) => ({ clientX: 0, clientY: y, target: grip, pointerId: 1, preventDefault() {} });
+    (card.listeners.pointerdown || []).forEach(f => f(ev(0)));
+    (card.listeners.pointerup || []).forEach(f => f(ev(-card.getBoundingClientRect().height)));
+    await tick(30);
+  }
+  is('...and the cursor lands on a card that is on screen', true, /alpha|gamma/.test(selectedCard()));
+}
+// A TAB THAT NO LONGER MATCHES ANYTHING. The projects file is edited between opens and a
+// profile is free text, so the stored tab can name something that is simply not there any
+// more — and the one thing this must never do is draw an empty screen over a fleet that
+// has projects in it. Asserted as the OUTCOME rather than as the clamp, because the clamp
+// on restore and the fallback in the filter are two defences for one promise.
+click(tabBtn('demo'));
+await tick(5);
+is('parked on a tab that is about to disappear', true, shows('beta'));
+fixtureOverride = { 'projects.json': fleetOf(['alpha', 'work'], ['gamma', 'work']) };
+await reopenProjects();
+is('a tab that matches nothing shows everything', true, shows('alpha') && shows('gamma'));
+is('...rather than an empty screen', true, projectCards().length > 1);
+
+// ...and hand the rest of this file back the fleet it was written against.
+fixtureOverride = null;
+await reopenProjects();
+is('the shipped fleet is back', true, await until(() => shows('acme-api') && shows('scratch'), 4000));
 
 // ── the LEAD's card, and the three buttons that must not be on it ─────────
 // docs/mobile.md §4: `master` is a card here because a phone is the only way to reach it,
