@@ -1,19 +1,24 @@
 # Attachments: can we send pictures?
 
 **Status: research, nothing built.** The question is whether you can attach a photo on the
-phone and have it reach the agent in a session. The answer is **yes for `claude` workers,
-no for `codex`, and unknowable-in-advance for `opencode`** — and that split is the whole
-design problem, because a feature that silently does nothing for two of three agents is
-exactly the dishonest degradation [docs/multi-agent-sessions.md](multi-agent-sessions.md)
-forbids.
+phone and have it reach the agent in a session. The answer is **yes for `claude`, yes for
+`codex`, and model-dependent for `opencode`**.
 
-**Recommendation: build it, narrowly, or not at all.** Narrowly means one new *verb* rather
-than a new endpoint, ~1600px JPEG produced on the phone, bytes under the fleet dir, and a
-composer that says out loud when the worker it is aimed at cannot see images. Built that
-way it is small, because the size problem solves itself and the security machinery already
-exists. Built as a generic "attachments" feature it is a trap: it becomes the first
-endpoint that writes externally-supplied bytes to disk, and it lies to two thirds of the
-fleet.
+> **Corrected 2026-08-24.** The first version of this document said codex could not, on the
+> strength of an `Unable to inspect image` and a timing-out tool router. That was wrong, and
+> it was wrong in the way this repo distrusts most: an *inference* presented next to
+> measurements. The cause was macOS Gatekeeper holding codex's helper binary at a
+> first-launch quarantine dialog. With the dialog cleared, codex reads images from a path
+> and gets them right (§2). The correction is kept visible rather than edited away, because
+> the failure mode it introduces is real and is now §2a.
+
+**Recommendation: build it, narrowly.** Narrowly means one new *verb* rather than a new
+endpoint, ~1600px JPEG produced on the phone, bytes under the fleet dir, and a composer that
+warns when the worker it is aimed at may not be able to see images. Built that way it is
+small, because the size problem solves itself and the security machinery already exists.
+The honesty burden is smaller than it first looked — two of three agents work — but it has
+not gone away, because the third cannot be identified in advance
+([docs/multi-agent-sessions.md](multi-agent-sessions.md)).
 
 Everything below was measured on this machine before any of it was argued. Where something
 could not be measured — every claim about iOS — it says so and says what it would take.
@@ -54,40 +59,69 @@ the one that counts, because it is the path the phone would drive.
 
 Same probe, a fresh unguessable token per agent so no answer could leak between them.
 
+**These are measurements of specific builds on a specific day, not properties of the
+agents.** All of it on this Mac, **2026-08-24** (the codex re-run at ~21:40 EDT):
+
+| agent | build | model it actually ran |
+| --- | --- | --- |
+| `claude` | Claude Code **2.1.243** | Haiku 4.5 |
+| `codex` | `codex-cli` **0.147.0** | `gpt-5.6-terra` |
+| `opencode` | **1.18.21** | `opencode/big-pickle` (asked it directly) |
+
+Any of those moving can move the answer — and one of them did, twice, inside this
+document's own lifetime: codex's row flipped from "no" to "yes" without codex changing at
+all (§2a), and the whole point of §2's last paragraph is that opencode's row is a property
+of a *model id* that a user can change with one config edit. **Re-run the probe rather than
+trusting this table.** The images that produce it are twenty lines of `zlib` and no
+dependencies; the prompt is one sentence.
+
 | agent | image from a path in the prompt | notes |
 | --- | --- | --- |
 | `claude` | **yes** — `Read 1 file`, correct text and colour | verified end-to-end through `fleet-send` |
-| `codex` | **no** — "Unable to inspect image" | but see below: it *can* see images, just not this way |
+| `codex` | **yes** — after clearing a Gatekeeper prompt (§2a) | reproduced three times |
 | `opencode` | **no, on the model configured here** | and it says so out loud, unprompted |
 
-**codex is the interesting one.** It has an explicit flag:
+The first two probes used a nonsense token drawn in a homemade 5×7 bitmap font, which turns
+out to be genuinely hard to OCR and made the results harder to read than they needed to be.
+The confirming probe drops text entirely: **N solid orange squares on dark green**. Counting
+them needs vision and not OCR, and the answer is unguessable from a file called `photo.png`.
 
 ```
--i, --image <FILE>...    Optional image(s) to attach to the initial prompt
+$ codex exec "Look at ./photo.png . Reply with ONLY: how many squares, what colour the
+              squares are, what colour the background is."
+6 squares, orange, dark green          # the file had 6.  Reproduced with 3: "3 orange
+                                       # squares, dark green background"
 ```
 
-and with `-i` it answered `MUOSON7, purple` — right colour, letters mangled by my 8-pixel
-glyphs, but plainly *seeing* the image. Given the same file as a path in the prompt text it
-said `Unable to inspect image` after its tool router timed out. So codex's limitation is
-not vision, it is **delivery**: the image has to be attached at launch, and the fleet's
-channel is a paste into an already-running pane, which can never carry a `-i`. A
-`fleet-spawn --prompt` could in principle pass one; a photo sent to a live worker cannot.
+Three codex runs, all correct on colour, two exactly correct on count. **codex reads an
+image from a path in the prompt text**, which is the channel the fleet actually has.
 
-*Honest caveat:* `error=timed out negotiating with the code-mode host` appeared in both
-codex runs, so something in this environment is degraded. The `-i` run succeeded anyway,
-which is why I read the path failure as "the tool it wanted was unavailable" rather than
-"codex cannot do this" — but that is inference, and it should be re-run on a healthy codex
-before anyone relies on it.
+codex also has an explicit `-i, --image <FILE>...` flag for attaching images to an initial
+prompt, and it works — but it is unreachable from here, because the fleet pastes into an
+already-running pane and a flag can only be passed at launch. It does not matter: the path
+in prompt text works, which is the thing the fleet can actually do.
 
-**opencode refuses honestly, and that is the useful part.** It ran the Read and then said:
+**opencode refuses honestly, and that reply IS the measurement** — not a summary of one.
+It is what `opencode 1.18.21` running `opencode/big-pickle` printed on 2026-08-24, twice,
+to two different probes. Verbatim, first to the token probe:
 
 > I can't read the image — this model doesn't support image input, so the photo.png failed
 > to load and I can't extract the text or background colour from it.
 > You could try running OCR locally instead, e.g. `tesseract photo.png stdout`.
 
-Note *why*: the tool fired, the **model** rejected the image. opencode routes to whatever
-model is configured (`build · big-pickle` here). A vision-capable model under opencode would
-presumably work. **So "opencode cannot see images" is not a fact ghostfleet can assert.** It
+and again to the OCR-free shapes probe, which rules out "it saw the image and could not read
+the font":
+
+> I can't read the image — this model doesn't support image input, so I can't count the
+> squares or identify colours in photo.png.
+
+Both runs show `→ Read photo.png` in the transcript first. So the *tool* fired and the
+**model** rejected the image — which is a different fact from "opencode cannot show an agent
+an image", and the difference is the whole of §2's point. opencode routes to whatever
+model is configured — `opencode/big-pickle` here, which it will tell you if you ask it. A
+vision-capable model under opencode would presumably work; that was not tested, because
+changing the owner's model configuration to find out is not mine to do.
+**So "opencode cannot see images" is not a fact ghostfleet can assert.** It
 is a property of a session's configured model, which the fleet does not know and cannot
 cheaply discover. Any static per-agent capability table in the client would itself be the
 dishonest thing.
@@ -95,12 +129,50 @@ dishonest thing.
 That gives the honesty rule its shape:
 
 - **`claude`** — attach freely.
-- **`codex`** — the composer must refuse, and say the worker cannot receive images through
-  this channel. Sending a path that gets ignored is the failure mode the repo has spent
-  three PRs eliminating elsewhere.
+- **`codex`** — attach freely too, now that this is measured rather than inferred. Worth a
+  note in the docs about §2a's first-run Gatekeeper step, but not a reason for the composer
+  to refuse.
 - **`opencode`** — the composer must *warn*, not refuse: "this worker may not be able to see
   images; it depends on its model." Refusing would be wrong, and claiming it works would be
   wrong.
+
+That is a materially smaller honesty burden than the first version of this document
+described, and it is worth being precise about *why* it shrank: nothing about the design
+changed, an inference was replaced by a measurement and the inference had been wrong.
+
+## 2a. The failure that made codex look incapable, and why it will happen again
+
+The first probe produced this, twice:
+
+```
+codex
+I'll inspect the image directly.
+ERROR codex_core::tools::router: error=timed out negotiating with the code-mode host
+ERROR codex_core::tools::router: error=timed out negotiating with the code-mode host
+codex
+Unable to inspect image.
+```
+
+The cause was **macOS Gatekeeper**. Reading an image makes codex launch a helper —
+`/opt/homebrew/Caskroom/codex/0.147.0/bin/codex-code-mode-host` — and on its first ever run
+macOS held it at the quarantine dialog. codex did not report that; it reported a tool-router
+timeout and then a plausible, entirely wrong conclusion about its own capability. Clearing
+the dialog changed the answer with no other change.
+
+Two things worth keeping from that:
+
+- **The quarantine attribute survives approval.** `xattr -l` still shows
+  `com.apple.quarantine` on the binary that now works, so you cannot test for this by the
+  attribute's absence. The only reliable signal is the behaviour.
+- **A fleet worker cannot clear that dialog.** It is a system-modal prompt on the Mac's
+  GUI. A codex worker in a detached tmux pane has nobody to click it, and someone driving
+  that worker from the phone cannot reach it at all — they would see a worker that says
+  "Unable to inspect image" and no way to act on it. *(That last step is reasoning, not
+  measurement: I did not re-quarantine the owner's binary to prove it, and would not.)*
+
+  So the first image sent to a codex worker on a fresh machine is expected to fail this
+  way. The mitigation is a one-time `codex exec -i <any image> "describe this"` run at the
+  Mac, before relying on it — the same class of one-time local step as `./install.sh`.
 
 ## 3. Size: the phone downscales, and the 1 MB cap stops being a problem
 
@@ -307,8 +379,9 @@ Pick → `createImageBitmap` → canvas → `toBlob('image/jpeg', 0.8)` at 1600p
 → the returned path is **appended to the composer text where the user can see it**, so what
 gets sent is never a mystery. Preview painted into a `<canvas>`, not an `<img>` (§4).
 
-Aimed at a `codex` worker the control should be disabled with a reason; aimed at `opencode`
-it should warn (§2).
+Aimed at an `opencode` worker it should warn (§2); aimed at `claude` or `codex` it needs no
+special case. That is one warning string, not a capability matrix — and it is the whole of
+the honesty requirement now that codex is measured rather than inferred.
 
 **The TUI does not want this and should not get it.** On the Mac the file is already on the
 filesystem: you type or paste its path, which is what the measured mechanism in §1 needs
@@ -318,13 +391,14 @@ is the only place where the bytes are not already reachable.
 
 ## 9. What this does not do
 
-- **It does not make images work for `codex` workers.** The channel cannot carry them (§2).
 - **It does not promise images work for `opencode` workers.** That depends on a model
-  ghostfleet does not know about.
+  ghostfleet does not know about (§2).
+- **It does not clear codex's first-run Gatekeeper prompt for you** (§2a), and nothing
+  reachable from the phone can.
 - **It does not send the image to the agent.** It puts a file on the disk and puts its path
   in a prompt. The agent decides to read it. If the agent does not, nothing here notices —
-  and per §2 that is a real possibility for two of three agents, which is why the composer
-  has to be honest up front rather than reporting afterwards.
+  and per §2 that remains possible for an `opencode` worker, which is why the composer warns
+  up front rather than reporting afterwards.
 - **It does not preserve the original.** The phone re-encodes to JPEG at ~1600px. A photo of
   a whiteboard survives that; a screenshot with 8px text may not. If someone needs a
   full-resolution artefact on the Mac, this is the wrong tool and AirDrop is the right one.
@@ -334,30 +408,96 @@ is the only place where the bytes are not already reachable.
 - **It does not survive `fleet-clean`.** Attachments are disposable by design; anything worth
   keeping should be committed by the worker.
 
-## 10. What I could not settle
+## 10. The one unknown that gates this, and the five-minute test for it
 
-**Everything about iOS.** There is no iPhone in this loop, and every number above came from
-Chrome 151 on macOS. Specifically unverified:
+**Everything about iOS is still unmeasured.** Every number above came from Chrome 151 on
+macOS, and the two that the design leans on hardest — §3's sizes and §4's "only
+`createImageBitmap` survives the CSP" — were measured in the wrong browser on the wrong
+device. Three questions, one of which blocks everything:
 
 - **Does `createImageBitmap` accept a HEIC Blob in iOS Safari?** Safari has the system HEIC
   codec, so it very likely does — and if it does, the downscale step *is* the HEIC
-  conversion step, because the canvas re-encodes to JPEG regardless of what went in. No HEIC
-  library needed. But "very likely" is not a measurement, and this is the one thing that
-  must be checked on a real device before anyone commits to the design, because if it throws
-  the whole client-side path needs rethinking.
-- **What iOS actually hands to `<input type="file" accept="image/*">`** — HEIC, or a JPEG
-  that iOS transcoded on the way out. Reported behaviour varies by iOS version and by
-  whether the source is the camera or the library. It does not change the design (the canvas
-  re-encodes either way) but it changes what the error path has to say.
-- **Whether the downscale is fast enough to feel instant** on a phone rather than a laptop.
+  conversion step, because the canvas re-encodes to JPEG regardless of what went in, so no
+  HEIC library is needed anywhere. But "very likely" is not a measurement, and a **no** here
+  invalidates §3 and §5 rather than adjusting them.
+- **What iOS actually hands to `<input type="file" accept="image/*">`** — HEIC, or a JPEG it
+  transcoded on the way out. Behaviour varies by iOS version and by camera-vs-library. It
+  does not change the design (the canvas re-encodes either way) but it changes what the
+  error path has to say.
+- **Whether the downscale feels instant** on a phone rather than a laptop.
 
-**What it would take:** the probe in §4 is about forty lines and already written; serving it
-from `fleet-serve` and opening it on the phone would answer all three in one sitting. That
-should happen before any of §5–§7 is built, because a "no" on the first question changes the
-shape of everything downstream.
+The probe answers all three in one tap.
 
-**The codex result deserves a re-run** on an environment where its tool router is healthy
-(§2).
+**The probe is written and committed: `scripts/heic-probe.mjs`.** Five minutes, no build
+step, nothing stored:
+
+```bash
+node scripts/heic-probe.mjs $(tailscale ip -4)
+```
+
+Open the printed URL on the iPhone, tap **Pick a photo**, choose a recent **camera** photo
+(not a screenshot — screenshots are already PNG and would answer the wrong question). The
+result prints in the terminal you started it from.
+
+It binds the tailnet address for the same reason `fleet-serve` does — the phone has to
+reach it — and it serves its page under the **identical CSP**
+(`default-src 'self'; …`), because a probe served without that header answers a question
+nobody asked: §4 measured that the policy blocks `blob:` and `data:` in an `<img>` and
+forbids inline script, so the probe keeps its JS in a separate same-origin file exactly as
+the real client does. It has no upload endpoint and writes nothing; the photo never leaves
+the phone, and the only POST carries a few lines of text back so you are not transcribing
+from a phone screen.
+
+What it reports, and what each answer means:
+
+| what you see | what it means |
+| --- | --- |
+| `createImageBitmap: OK 4032x3024` | **The design in §3–§5 holds.** Safari decodes it, the canvas re-encodes to JPEG, and the HEIC question is answered by the same step that does the downscale — no HEIC library, no new dependency. Proceed. |
+| `createImageBitmap: FAILED — …` | **The blocking answer.** The client-side path needs rethinking before any server work: either a HEIC decoder shipped to the phone (large, and a new dependency on a zero-dependency client), or upload-the-original and convert on the Mac (which breaks §3's whole size argument and puts a decoder on the server instead). Stop and redesign. |
+| `file: type=image/jpeg` | iOS transcoded on the way out of the picker. Nothing changes; the canvas re-encode is a no-op conversion. Worth knowing for what the error path says. |
+| `file: type=image/heic` | iOS handed over the original. Also fine *if* the row above says OK — that is precisely the case being tested. |
+| `1600px … FITS the 1 MB cap` | §3's numbers hold on a real photo rather than my synthetic one. |
+| `1600px … OVER the 1 MB cap` | A real photo compresses worse than expected. Drop to 1280px (§3 measured 0.55 MB base64 there) — the design survives, the constant changes. |
+| `blob: URL -> <img>: BLOCKED` | §4's CSP measurement holds on Safari too, so the preview must be a `<canvas>`. |
+| `blob: URL -> <img>: LOADED` | Safari is more permissive here than Chrome. Do **not** rely on it — the canvas preview costs nothing and works on both. |
+
+### What the probe proves, and what it does not
+
+**How long:** about five minutes, nearly all of it walking to the phone. One `node` command,
+one URL, one tap, one photo. No build step, no install, no dependency; it is a single file
+using only `node:http`. Ctrl-C when the answer prints.
+
+**What it proves.** Exactly four things, all on the device and browser that will actually run
+the client:
+
+1. whether iOS Safari's `createImageBitmap` decodes what the picker hands over — the gating
+   question, and the only one here that can invalidate the design rather than adjust it;
+2. what the picker hands over (HEIC or an iOS-transcoded JPEG), and how big it is;
+3. what §3's downscale actually produces from a **real** photo, against the 1 MB cap — my
+   numbers came from a synthetic image deliberately made harder to compress than a photo;
+4. whether §4's CSP result (`blob:` in an `<img>` is blocked) holds on Safari as well as
+   Chrome.
+
+**What it does not prove.**
+
+- **It does not test the feature**, because there is no feature. Nothing is uploaded, nothing
+  is written, no endpoint is exercised. The photo never leaves the phone; the only thing sent
+  to the Mac is a few lines of text so you are not transcribing from a phone screen.
+- **It says nothing about the server side** — §5's verb, §6's storage, §7's sniffing and
+  quota are all untouched by it. A green probe means the *client* half is viable, not that
+  the design is safe.
+- **It is one phone, one iOS version, one photo.** It cannot tell you that every iPhone
+  behaves this way, and a screenshot instead of a camera photo would answer the wrong
+  question entirely (screenshots are already PNG, so the HEIC path is never taken — hence
+  the instruction to pick a camera photo).
+- **It does not tell you whether any of this is worth having.** That is §11 and a week of
+  real use, not a probe.
+
+Run it **before** any of §5–§7 is built: a "no" on the first row changes the shape of
+everything downstream, and it is by a wide margin the cheapest question here to answer.
+
+**The codex re-run is done** and the result changed — see §2 and §2a. What was inference is
+now three measured runs.
 
 **Not measured: what a worker actually does with a photo.** Every test here asked "what does
 this image show", which proves the mechanism and nothing about whether the feature is
@@ -373,11 +513,18 @@ security machinery that a byte-writing endpoint needs already exists and is inhe
 making it a verb (§5). What is left is a sniffer, a path generator, a quota, and a cleanup
 rule — small, and almost all of it §7.
 
-**Not worth building as a generic feature.** Two of three agents cannot use it through this
-channel, and one of those two cannot even be *statically identified*. If the per-agent
-honesty from §2 is not in the first version, the feature ships a silent no-op for most of the
-fleet, and silent no-ops are the specific thing this repo keeps having to go back and fix.
+**The honesty burden is real but small.** Two of three agents read images from a path;
+`opencode` depends on a model ghostfleet cannot see. So the composer needs one warning, not
+a capability matrix — and that warning has to be in the first version, because a silent
+no-op for a worker that cannot see the photo is the specific thing this repo keeps having to
+go back and fix.
 
-The order that makes sense: verify HEIC on a real phone (§10), then the verb and the
-sniffer, then the composer with the per-agent rules built in from the first commit rather
-than added after someone notices.
+The order that makes sense, unchanged by the codex correction: **run
+`scripts/heic-probe.mjs` on the phone first** (§10) — it is five minutes and a "no" there
+reshapes everything downstream — then the verb and the sniffer, then the composer with the
+`opencode` warning built in from the first commit rather than added after someone notices.
+
+One more thing the correction is worth on its own: an agent reporting its own incapacity is
+not evidence of incapacity. codex said `Unable to inspect image` and meant "a helper I
+needed did not start". Believing it cost this document a wrong headline, and the same
+mistake is available to anyone reading a worker's output on the phone.
