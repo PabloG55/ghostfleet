@@ -294,6 +294,18 @@ In each config dir (`~/.claude`, `~/.claude-*`): remove the fleet `hooks` blocks
 and delete `skills/ghostfleet-orchestrate`. Then delete the symlinks in `~/.local/bin`, and
 `tmux -L cf-<project> kill-server` for any live fleets.
 
+## Support, and what to expect
+
+This is one person's daily driver that happens to be public. **Bugs are very welcome** —
+especially on Linux and WSL2, which I do not run every day and where most of the surprises
+have been environmental rather than logical. **There is no SLA**, and **features are often
+declined**, which is not a verdict on the idea: every option here has to keep working
+across four agents, three platforms and several tmux versions.
+
+The issue form asks for your OS and `tmux -V` before it asks what went wrong, and that
+ordering is deliberate — see [CONTRIBUTING.md](CONTRIBUTING.md) for why, and for the one
+rule worth knowing before sending a patch: a test that cannot fail proves nothing.
+
 ## License
 
 MIT © 2026 Pablo Garces
