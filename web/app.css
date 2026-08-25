@@ -368,14 +368,14 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * the view switch off the end of it. */
 .sbar .mode { max-width: 7em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .hint.lead1 { padding: .15em .2em .3em; font-size: 12px; }
-.chat .bub {
+.chat .bub, .chat .thinking .dots {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   font-size: 15px; line-height: 1.45;
   padding: .55em .7em; border-radius: 14px; max-width: 88%;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .chat .bub.user { align-self: flex-end; background: #1d3a5c; color: #eaf2ff; border-bottom-right-radius: 4px; }
-.chat .bub.agent { align-self: flex-start; background: #14181d; border: 1px solid var(--hair); border-bottom-left-radius: 4px; }
+.chat .bub.agent, .chat .thinking .dots { align-self: flex-start; background: #14181d; border: 1px solid var(--hair); border-bottom-left-radius: 4px; }
 /* A message that has been sent but has not come back in the transcript yet. It is dimmed
  * rather than absent, because a chat where your own message vanishes for five seconds
  * reads as a send that failed. */
@@ -423,7 +423,27 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .chat .turn { display: flex; flex-direction: column; gap: .15em; max-width: 88%; }
 .chat .turn.me { align-self: flex-end; align-items: flex-end; }
 .chat .turn.them { align-self: flex-start; align-items: flex-start; }
-.chat .turn .bub { max-width: 100%; }
+.chat .turn .bub, .chat .turn .thinking .dots { max-width: 100%; }
+/* ── the session is working ──────────────────────────────────────────────────
+ * An agent-side bubble holding three dots, at the end of the transcript, for as long as
+ * the card says `working`. It shares the two rules above rather than restating them, so
+ * it cannot drift out of looking like the turn it is standing in for.
+ *   The dots are TEXT, so the state is legible with no CSS at all; the animation only
+ * moves them. Staggered opacity rather than a translate: a bubble whose contents move
+ * changes its own height on some line-height roundings, and this thing appears and
+ * disappears at the end of a scroller that is holding a reader's place. */
+.chat .thinking .dots { display: flex; gap: .12em; letter-spacing: .06em; }
+.chat .thinking .dot { animation: gf-dot 1.2s infinite ease-in-out; opacity: .25; }
+.chat .thinking .dot:nth-child(2) { animation-delay: .2s; }
+.chat .thinking .dot:nth-child(3) { animation-delay: .4s; }
+@keyframes gf-dot { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+/* DECORATION IS THE ANIMATION, NOT THE STATE. With motion off the dots stop moving and go
+ * solid — the answer to "is it working" is still on screen, which is the whole point of
+ * the indicator. Turning it off entirely would take the state away with the motion. */
+@media (prefers-reduced-motion: reduce) {
+  .chat .thinking .dot { animation: none; opacity: 1; }
+}
+
 /* ── rendered markdown inside a bubble (web/md.js) ───────────────────────────
  * The turn used to be set with textContent, so an assistant's markdown arrived as its own
  * source: "the messages are not in nice .md format, they have the ****". These are the

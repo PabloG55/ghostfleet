@@ -174,14 +174,19 @@ for (const [name, value] of [
   // and this file stops at the sheet rather than touching navigator.credentials.
   ['window', { isSecureContext: true, PublicKeyCredential: function PublicKeyCredential() {} }],
   ['navigator', {}],
-  // app.js polls every 5s; left real, the process would never exit.
-  ['setInterval', () => 0],
+  // app.js polls every 5s; left real, the process would never exit. The callback is KEPT
+  // rather than dropped, so a test can fire exactly one poll and know it has: the whole
+  // point of the thinking indicator is that it is a mirror of a status the poll delivers,
+  // and "it went away" is only worth asserting if the thing that clears it is the real
+  // poll body rather than a re-render the test arranged.
+  ['setInterval', (fn, ms) => { if (ms === 5000) pollTick = fn; return 0; }],
 ]) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 // FIXTURE MODE HAS TO BE ABLE TO READ ITS FIXTURES. api.js fetches them as
 // `./fixtures/<file>` — a relative URL, which in a browser resolves against the page and
 // here resolves against nothing ("Failed to parse URL"). So the shipped files are served
 // off disk, and only those: anything else falls through to the real fetch, which is what
 // the origin probe and every server-mode request still use.
+let pollTick = null;                 // app.js's own 5s poll body, fired by hand below
 const realFetch = globalThis.fetch;
 // A HAND-WRITTEN FLEET, for the cases the shipped fixture cannot be: one profile only,
 // a profile nobody anticipated, and a hidden project BETWEEN two visible ones. Changing
@@ -588,6 +593,10 @@ is('...and the agent\'s are the other', true,
    app.all(n => n.className.split(/\s+/).includes('agent')).length >= 2);
 // A composer, not a full-screen form: `send a prompt` used to be three taps and a screen
 // change for the verb this app exists to use most.
+// The absence half, on a session that is genuinely `ready` in the shipped fixture rather
+// than one this file arranged — the paired presence check is further down, on api-fix.
+is('...and a ready session shows no thinking indicator', false,
+   !!app.find(n => n.className.split(/\s+/).includes('thinking')));
 is('...with a composer in place of the prompt sheet', true, !!app.find(n => n.tag === 'textarea'));
 is('...and a send button', true, !!btnWith(/^send$/));
 is('...and the prompt sheet is gone', false, !!btnWith(/send a prompt/));
@@ -776,6 +785,135 @@ await until(() => { const b = chatBox(); return !!b && b.scrollHeight > b.client
   await tick(5);
   const after = chatBox();
   is('a reader at the end stays at the end', true, after.scrollTop === after.scrollHeight - after.clientHeight);
+}
+
+// ── "it is working on it" ────────────────────────────────────────────────
+// A sent prompt used to go quiet: the pending bubble clears the moment the transcript
+// echoes it, and from there to the answer landing the screen said nothing at all. The
+// indicator mirrors the card status the poll already delivers, so the two directions here
+// are the feature rather than decoration — one that always rendered would look identical
+// to this one on the very screen that motivated it.
+//
+// THE FIXTURE HAS TO BE PUT BACK FIRST. The section above left the DEGRADED fleet
+// selected, where api-fix is need-you, and the overlay still carries what this run did to
+// the fleet — so without both of these the status under test would be the test's own
+// footprint and the indicator would be absent for a reason that has nothing to do with it.
+api.resetOverlay();
+api.setFixtureName('grid-acme-api.json');
+await pollTick();
+is('the busy fleet is back, with api-fix working', true,
+   await until(() => !app.find(n => n.className.split(/\s+/).includes('blocked')), 4000));
+
+// The same fixture with ONE field changed, so working and ready differ in nothing else: a
+// second hand-written grid would let some other difference do the work.
+const readyGrid = JSON.parse(fs.readFileSync(new URL('../../web/fixtures/grid-acme-api.json', import.meta.url), 'utf8'));
+for (const c of readyGrid.cards) if (c.name === 'api-fix') c.status = 'ready';
+
+const thinkingNode = () => app.find(n => n.className.split(/\s+/).includes('thinking'));
+// EVERY READ OF IT GOES THROUGH THESE. A client that stopped drawing the indicator at all
+// makes thinkingNode() null, and a bare `.className` on that throws — which ends the whole
+// helper, emits zero rows, and reports as "pwa-render ran: 1" rather than as the two
+// assertions that actually noticed. A red line has to point at its own subject.
+const tHas = (c) => (thinkingNode() || { className: '' }).className.split(/\s+/).includes(c);
+// THE WHOLE SUBTREE, not the wrapper. "Style it as an agent turn" is one `turn()` call
+// away from nesting a real .bub inside this, which would leave the wrapper's own class
+// list looking innocent while the bubble it contains collects a play control and becomes
+// the last message in the list.
+const tSub = (c) => { const t = thinkingNode(); if (!t) return false;
+  return t.className.split(/\s+/).includes(c) || !!t.find(n => n.className.split(/\s+/).includes(c)); };
+const tText = () => (thinkingNode() || { textContent: '' }).textContent.replace(/\s+/g, '');
+const tButtons = () => (thinkingNode() || { all: () => [] }).all(n => n.tag === 'button').length;
+const chatKids = () => (chatBox() || { kids: [] }).kids;
+const bubs = () => app.all(n => n.className.split(/\s+/).includes('bub'));
+
+is('a working session draws a thinking indicator', true, !!thinkingNode());
+is('...at the end of the transcript', true, (() => {
+  const k = chatKids(); return k.length > 0 && k[k.length - 1].className.split(/\s+/).includes('thinking');
+})());
+is('...on the agent side, where the answer will appear', true, tHas('them'));
+// Real characters, which is also what makes the reduced-motion form legible: app.css only
+// stops the dots moving, and text that was never there could not go static.
+is('...with dots that are real text', '...', tText());
+is('...and exactly one of it, not one per render', 1,
+   chatKids().filter(n => n.className.split(/\s+/).includes('thinking')).length);
+
+// IT IS NOT A MESSAGE. Everything that reads the tail of this list as content has to miss
+// it — the card's preview line, reconcilePending, read-aloud. It carries no `bub`, so even
+// a query written later cannot mistake it for one.
+is('...it is not a bubble, at any depth', false, tSub('bub'));
+is('...so the last bubble is still the last real message', true,
+   /Running the full suite before I touch the migration/.test(bubs()[bubs().length - 1].textContent));
+
+// NOT SPEAKABLE, ASSERTED WITH SYNTHESIS PRESENT. Until here the harness has none, so
+// every bubble is untappable and "the indicator has no play control" would pass on a
+// client that gave it one. Installed now, after the no-synthesis check above has had its
+// turn: canSpeak() is read per render, so the next render has speech.
+Object.defineProperty(globalThis, 'speechSynthesis', { configurable: true, writable: true,
+  value: { getVoices: () => [], addEventListener() {}, speak() {}, cancel() {} } });
+Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: true, writable: true,
+  value: function SpeechSynthesisUtterance() {} });
+appmod.renderUnlessTyping();
+await tick(5);
+const lastAgentBub = () => bubs().filter(n => n.className.split(/\s+/).includes('agent')).pop();
+is('with synthesis, a real agent turn is tappable', true,
+   lastAgentBub().className.split(/\s+/).includes('tappable'));
+is('...and nothing in the indicator is', false, tSub('tappable'));
+// A bubble's handler reads e.target (a tap on a link inside it must not toggle the
+// control), so it needs a real event — `click()` above fires with none, which is fine for
+// a button and is not for this.
+const tapBubble = (n) => (n.listeners.click || []).forEach(f => f({ target: n }));
+tapBubble(lastAgentBub());
+await tick(5);
+is('...tapping a real turn reveals a play control', true, !!btnWith(/🔊/));
+is('...exactly one, on the turn that was tapped', 1,
+   app.all(n => n.tag === 'button' && /🔊|🔇/.test(n.textContent)).length);
+is('...and never on the indicator', 0, tButtons());
+
+// ── and it must not yank the reader, appearing OR vanishing ──────────────
+// #72 gave this list scroll memory precisely so a poll that rebuilds it moves nobody. A
+// node arriving and leaving at the END is the height change that fights it, so both edges
+// are measured — and the HEIGHT is asserted at each, because a transition that did not
+// actually change the box would make the position assertion say nothing at all.
+{
+  const box = chatBox();
+  box.scrollTop = Math.round((box.scrollHeight - box.clientHeight) / 3);
+  await tick(5);
+  const parkedAt = box.scrollTop, tallWith = box.scrollHeight;
+  is('the reader parks mid-conversation', true, parkedAt > 0);
+
+  // The session stops working under them. Delivered by app.js's OWN 5s poll body rather
+  // than a re-render this test arranged, so what clears the indicator is the real path.
+  fixtureOverride = { 'grid-acme-api.json': readyGrid };
+  await pollTick();
+  is('the indicator goes when the session stops working', true,
+     await until(() => !thinkingNode(), 4000));
+  await tick(5);
+  const gone = chatBox();
+  is('...and the list really did get shorter', true, gone.scrollHeight < tallWith);
+  is('...and the reader has not moved', parkedAt, gone.scrollTop);
+
+  // ...and back, which is the edge a reader actually hits: an answer lands, the next
+  // prompt goes, and the indicator returns underneath them.
+  fixtureOverride = null;
+  await pollTick();
+  is('the indicator comes back when work resumes', true, await until(() => !!thinkingNode(), 4000));
+  await tick(5);
+  const back = chatBox();
+  is('...and the list is taller again', tallWith, back.scrollHeight);
+  is('...and the reader STILL has not moved', parkedAt, back.scrollTop);
+
+  // The other direction of the scroll rule, which has to survive both edges too: a reader
+  // who is following along at the newest message keeps following.
+  back.scrollTop = back.scrollHeight;
+  await tick(5);
+  fixtureOverride = { 'grid-acme-api.json': readyGrid };
+  await pollTick();
+  await until(() => !thinkingNode(), 4000);
+  await tick(5);
+  const end = chatBox();
+  is('a reader at the end is still at the end', true,
+     end.scrollTop === end.scrollHeight - end.clientHeight);
+  fixtureOverride = null;
 }
 
 console.log(rows.join('\n'));

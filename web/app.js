@@ -809,8 +809,39 @@ function chatView(card) {
   // own message disappears for five seconds reads as a send that failed, and this app's
   // whole job is telling you what is actually happening.
   if (S.pending) wrap.append(turn(true, S.pending.text, 'sending…', true));
+  // ── "it is working on it" ──────────────────────────────────────────────
+  // Between the transcript echoing your prompt and the answer landing, this screen said
+  // nothing at all, and a chat that goes quiet reads as a send that went nowhere. The
+  // pending bubble covers the first few seconds; this covers the rest of the wait.
+  //
+  // FROM THE STATUS THAT IS ALREADY HERE. `card` is the grid card the poll already
+  // fetched, and `working` is the same verdict the grid card shows — no second signal, no
+  // second endpoint, and nothing for the two to disagree about.
+  if (card && card.status === 'working') wrap.append(thinking());
   watchScroll('chat', wrap);
   return wrap;
+}
+// NOT A MESSAGE, AND DELIBERATELY NOT BUILT BY turn(). It looks like an agent bubble
+// because that is where the answer is going to appear, but every path that treats the tail
+// of this list as content has to miss it: read-aloud keys off msgKey() and only turn()
+// mints one, so there is no play control here and speakable() is never handed it; it is
+// not in S.sess.messages, so reconcilePending and the card's own preview line cannot see
+// it either. Sharing turn() would have given it all three for free, which is the reason
+// this is fifteen lines instead of one argument.
+//   THE POLL IS 5s AND THIS DOES NOT PRETEND OTHERWISE. A turn that starts and finishes
+// inside one poll is never seen as working, and a status that flaps will flicker. Both are
+// accepted rather than smoothed with a minimum visible duration, because a floor is a
+// timer that keeps saying "working" after the answer is already on screen above it — this
+// client's one job is being accurate about what is happening, and an indicator that
+// outlives the truth is worse than one that was too quick to catch. It is a mirror of the
+// status, and it is exactly as fine-grained as the status is.
+//   The dots are real characters, so the state survives with no CSS and with animation
+// turned off (app.css honours prefers-reduced-motion with a static ellipsis).
+function thinking() {
+  return el('div', { class: 'turn them thinking' }, [
+    el('div', { class: 'dots', 'aria-label': 'working', role: 'status' },
+       ['.', '.', '.'].map(d => el('span', { class: 'dot', text: d }))),
+  ]);
 }
 // PER-MESSAGE PLAYBACK WITHOUT A SPEAKER ON EVERY BUBBLE.
 //

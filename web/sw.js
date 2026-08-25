@@ -37,6 +37,8 @@
 // reloads on `controllerchange`, so one cold open picks up a deploy instead of two. This
 // is the last version anybody should have to install by hand. v6 stops the 5s poll while
 // you are typing, and that was
+// v14 adds the working indicator to the chat: a phone on v13 shows a sent prompt going
+// quiet, which is the exact complaint, so an unbumped deploy of it is invisible.
 // the bump that matters most so far: without it a phone keeps a client whose keyboard
 // closes every five seconds, and the fix is invisible until the shell is refetched. v5
 // renames every fixture: the demo data used to be real
@@ -51,11 +53,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 18a4125b7177
+// CLIENT-HASH: 4aea15d1b453
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v13';
+const VERSION = 'ghostfleet-v14';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

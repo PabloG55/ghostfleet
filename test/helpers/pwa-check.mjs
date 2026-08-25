@@ -150,6 +150,23 @@ is('...without a track that is wider than the screen', false, /minmax\(33ch/.tes
 // track minimum measured at body's size is a card wider than its column.
 is('...with ch measured at the card size', true, /\.cards \{[^}]*font-size: var\(--fs\)/s.test(read('app.css')));
 
+// ── the thinking indicator honours prefers-reduced-motion ─────────────────
+// The one requirement on it that the running-client harness cannot reach: pwa-render has
+// a DOM but no CSS engine and no media queries, so this is where it is pinned.
+//   BOTH DIRECTIONS, because either half alone is satisfied by doing nothing. A rule that
+// disables an animation nobody declared is cargo, and a declared animation with no
+// reduced-motion escape is the actual complaint.
+is('the working dots are animated', true, /\.chat \.thinking \.dot \{[^}]*animation:\s*gf-dot/.test(CSS));
+is('...by a keyframe that exists', true, /@keyframes gf-dot\b/.test(CSS));
+const rm = (/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\n\}/.exec(CSS) || [''])[0];
+is('...and reduced motion stops them', true, /\.thinking \.dot \{[^}]*animation:\s*none/.test(rm));
+// STATIC, NOT ABSENT. The animation is decoration; the dots are the state. A media query
+// that hid them would answer "is it working" with nothing on the screen where the answer
+// goes, which is the bug the indicator was added to fix, restored for anyone who turns
+// motion off.
+is('...and leave them visible', true, /\.thinking \.dot \{[^}]*opacity:\s*1/.test(rm));
+is('...rather than hiding them', false, /\.thinking[^}]*(display:\s*none|visibility:\s*hidden)/.test(rm));
+
 // ── the speaker moved off the composer ────────────────────────────────────
 // It was there only because lastAgentText() was the sole speakable thing. Both directions:
 // gone from the composer, present on a bubble — a change that only removed it would ship a
