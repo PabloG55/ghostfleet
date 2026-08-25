@@ -123,6 +123,11 @@ const documentStub = {
   documentElement: new Node_('html'),
   body: new Node_('body'),
   createElement: (t) => new Node_(t),
+  // The read-aloud icon is an inline SVG, and SVG only exists in its own namespace — an
+  // <svg> made with createElement is an unknown HTML element that draws nothing. The ns is
+  // RECORDED rather than discarded so the assertion can say the icon is really an SVG and
+  // not a same-named div, which is exactly the mistake this stub would otherwise hide.
+  createElementNS: (ns, t) => { const n = new Node_(t); n.ns = ns; return n; },
   createTextNode: (t) => { const n = new Node_('#text'); n.textContent = t; return n; },
   createDocumentFragment: () => new Node_('#fragment'),
   getElementById: (id) => (id === 'app' ? app : id === 'sheet' ? sheetHost : null),
@@ -244,7 +249,12 @@ const closeSheetFromTest = () => {
 };
 // Null-safe on purpose: a button that is not there has to come out as a red ROW from the
 // assertion above it, not as a dead helper that emits nothing at all.
-const click = (n) => (n && (n.listeners.click || []).map(f => f())[0]);
+//   IT PASSES AN EVENT. It used to call the handler with nothing, which is a click no
+// browser ever delivers — and the first handler to read the event (the speaker's
+// stopPropagation, which is what keeps a tap on the control off the bubble underneath it)
+// died on `undefined` inside the helper, taking every remaining row with it.
+const clickEv = (n) => ({ stopPropagation() {}, preventDefault() {}, target: n });
+const click = (n) => (n && (n.listeners.click || []).map(f => f(clickEv(n)))[0]);
 
 // ── served by the daemon: it says so, and offers ENROLMENT ────────────────
 await api.ready();
@@ -661,11 +671,97 @@ is('...then the transcript claims it', true, await until(() =>
 is('...and it is still on screen, as a real turn', true,
    app.all(n => n.className.split(/\s+/).includes('bub')).some(n => /run the suite and report back/.test(n.textContent)));
 
-// ── reading the last message aloud ──────────────────────────────────────
-// The harness has no speechSynthesis, which is the case a phone without it hits: the
-// button must be ABSENT rather than dead. Its presence is covered by the unit check on
-// speakable() and by pwa-check's availability guard.
-is('no speak button without synthesis', false, !!btnWith(/🔊/));
+// ── reading a message aloud, and the icon that does it ──────────────────
+// MATCHED ON THE CLASS, NOT ON A GLYPH. This check used to be `btnWith(/🔊/)` and it went
+// vacuous the moment the emoji became an SVG: an icon-only button has no text, so that
+// regex could no longer match whether synthesis existed or not, and a check that can only
+// pass proves nothing (CLAUDE.md). The class is what the control actually is.
+const speakBtn = () => app.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('speak'));
+const tapBub = () => {
+  const bubs = app.all(n => n.className.split(/\s+/).includes('bub'));
+  const b = bubs[bubs.length - 1];
+  if (b) (b.listeners.click || []).forEach(f => f({ target: b }));
+  return !!b;
+};
+// A phone with no speech synthesis at all: the control must be ABSENT, not dead. This is
+// the first half of the pair — until the stub below lands, canSpeak() is false.
+//   IT TAPS A BUBBLE FIRST, and that is not ceremony. The speaker only exists on a bubble
+// you tapped, so "no button on screen" is ALSO true of a synthesis-capable phone nobody
+// has tapped yet — measured: with canSpeak() forced true, the untapped assertion stayed
+// green. Tapping is what makes the row able to fail.
+is('no bubble offers to be tapped without synthesis', false,
+   !!app.find(n => n.className.split(/\s+/).includes('tappable')));
+is('...and tapping one anyway reveals no speaker', false, (tapBub(), !!speakBtn()));
+
+// ── and now WITH synthesis, which is the half that had no DOM test ───────
+// Installed here rather than at the top so the absence above is a real measurement and not
+// an ordering accident. Two voices in two languages, because the picker groups on `lang`.
+const spoken = [];
+const voiceList = [
+  { name: 'Alex', lang: 'en-US', voiceURI: 'urn:alex', default: true },
+  { name: 'Daniel', lang: 'en-GB', voiceURI: 'urn:daniel' },
+  { name: 'Mónica', lang: 'es-ES', voiceURI: 'urn:monica' },
+];
+Object.defineProperty(globalThis, 'speechSynthesis', { configurable: true, writable: true, value: {
+  getVoices: () => voiceList,
+  speak: (u) => spoken.push(u.text),
+  cancel: () => {},
+  addEventListener: () => {},
+} });
+Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: true, writable: true,
+  value: function SpeechSynthesisUtterance(t) { this.text = t; } });
+const allVoicesReported = () => { try { return speechSynthesis.getVoices().length; } catch { return 0; } };
+appmod.renderUnlessTyping();
+// NOTHING IS SPOKEN BY THE TAP ITSELF, and nothing is offered before it: the control is
+// revealed by tapping a bubble and belongs to that bubble only (see turn()).
+is('with synthesis, a bubble offers to be tapped', true,
+   !!app.find(n => n.className.split(/\s+/).includes('tappable')));
+is('...but no speaker is on screen until one is tapped', false, !!speakBtn());
+is('...tapped a bubble', true, tapBub());
+is('...which reveals exactly one speaker', 1,
+   app.all(n => n.tag === 'button' && n.className.split(/\s+/).includes('speak')).length);
+is('...and speaks nothing by itself', 0, spoken.length);
+
+// THE ICON, AND THE ONE PROPERTY THIS CONTROL KEEPS LOSING. It was 🔊 idle / ■ playing —
+// two typefaces, two weights, three times the size — so a tap read as a different button
+// appearing. Both states are asserted to be the SAME drawing with one path swapped, which
+// is the shape that cannot regress into that.
+const idle = speakBtn();
+const svgOf = (b) => (b && b.kids.find(k => k.tag === 'svg')) || null;
+const pathsOf = (b) => { const s2 = svgOf(b); return s2 ? s2.kids.filter(k => k.tag === 'path').map(k => k.attrs.d) : []; };
+is('the speaker is an inline svg', 'svg', (svgOf(idle) || {}).tag);
+is('...in the svg namespace, not a div called svg', 'http://www.w3.org/2000/svg', (svgOf(idle) || {}).ns);
+is('...stroked in currentColor, so it is the button\'s colour', 'currentColor', (svgOf(idle) || { attrs: {} }).attrs.stroke);
+is('...and filled with nothing, so weight is the stroke only', 'none', (svgOf(idle) || { attrs: {} }).attrs.fill);
+// An icon contributes no text. That is the whole reason the label below is mandatory.
+is('...and contributes no text of its own', '', (idle ? idle.textContent : 'x').trim());
+is('...so the aria-label is its only name', true, /read this message aloud/.test((idle || { attrs: {} }).attrs['aria-label'] || ''));
+is('...and the state is in aria-pressed, not only in the drawing', 'false',
+   (idle || { attrs: {} }).attrs['aria-pressed']);
+const idleBox = (svgOf(idle) || { attrs: {} }).attrs.viewBox;
+const idleWidth = (svgOf(idle) || { attrs: {} }).attrs['stroke-width'];
+const idlePaths = pathsOf(idle);
+is('...drawn from a viewBox', true, !!idleBox);
+is('...as two strokes: the horn and one decoration', 2, idlePaths.length);
+
+// Press it. Same button, pressed — not a different button.
+click(idle);
+const on = speakBtn();
+is('pressing it speaks', 1, spoken.length);
+is('...and lights the same control', true, !!on && on.className.split(/\s+/).includes('on'));
+is('...whose label now says how to stop it', true, /stop reading this message aloud/.test((on || { attrs: {} }).attrs['aria-label'] || ''));
+is('...and whose aria-pressed flipped', 'true', (on || { attrs: {} }).attrs['aria-pressed']);
+// THE FOUR ROWS THIS SECTION EXISTS FOR.
+is('the pressed state uses the SAME viewBox', idleBox, (svgOf(on) || { attrs: {} }).attrs.viewBox);
+is('...the SAME stroke width', idleWidth, (svgOf(on) || { attrs: {} }).attrs['stroke-width']);
+is('...the same amount of ink: two strokes again', 2, pathsOf(on).length);
+is('...the identical horn, so only the decoration changed', idlePaths[0], pathsOf(on)[0]);
+is('...and the decoration DID change', true, !!pathsOf(on)[1] && pathsOf(on)[1] !== idlePaths[1]);
+// Pressing it again is a stop, on the control that was lit — not a second utterance.
+click(on);
+is('pressing the lit one stops it', false,
+   !!(speakBtn() || { className: '' }).className.split(/\s+/).includes('on'));
+is('...without speaking again', 1, spoken.length);
 
 // ── the ten buttons are one sheet now ───────────────────────────────────
 is('the verb wall is gone', false, !!btnWith(/answer keys/));
@@ -844,14 +940,17 @@ is('...it is not a bubble, at any depth', false, tSub('bub'));
 is('...so the last bubble is still the last real message', true,
    /Running the full suite before I touch the migration/.test(bubs()[bubs().length - 1].textContent));
 
-// NOT SPEAKABLE, ASSERTED WITH SYNTHESIS PRESENT. Until here the harness has none, so
-// every bubble is untappable and "the indicator has no play control" would pass on a
-// client that gave it one. Installed now, after the no-synthesis check above has had its
-// turn: canSpeak() is read per render, so the next render has speech.
-Object.defineProperty(globalThis, 'speechSynthesis', { configurable: true, writable: true,
-  value: { getVoices: () => [], addEventListener() {}, speak() {}, cancel() {} } });
-Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: true, writable: true,
-  value: function SpeechSynthesisUtterance() {} });
+// NOT SPEAKABLE, ASSERTED WITH SYNTHESIS PRESENT — which it already is. This block used to
+// install its own stub here, with the note that "until here the harness has none". That is
+// no longer where the line falls: the read-aloud section above runs its no-synthesis pair
+// and then installs a stub, so the premise this needs — that the indicator is measured on a
+// client which CAN speak, or "the indicator has no play control" passes for the wrong reason
+// — is satisfied before this point. A second install would have replaced that stub with an
+// empty-voiced one and taken the voice-count rows at the end of this file down with it
+// (measured: four of them red, for a reason that has nothing to do with the indicator).
+// One stub, installed once, is the whole fix.
+is('the indicator is measured on a client that can speak', true,
+   typeof speechSynthesis !== 'undefined' && allVoicesReported() > 0);
 appmod.renderUnlessTyping();
 await tick(5);
 const lastAgentBub = () => bubs().filter(n => n.className.split(/\s+/).includes('agent')).pop();
@@ -864,10 +963,26 @@ is('...and nothing in the indicator is', false, tSub('tappable'));
 const tapBubble = (n) => (n.listeners.click || []).forEach(f => f({ target: n }));
 tapBubble(lastAgentBub());
 await tick(5);
-is('...tapping a real turn reveals a play control', true, !!btnWith(/🔊/));
+// MATCHED ON THE CLASS. These two read `btnWith(/🔊/)` and a count of buttons whose text is
+// /🔊|🔇/, which the SVG control cannot satisfy in either direction — an icon-only button
+// has no text at all. Both went red on the rebase rather than quietly vacuous, which is the
+// good version of this, but the claim they make is about the control existing and being
+// unique, not about which glyph it wears.
+is('...tapping a real turn reveals a play control', true, !!speakBtn());
 is('...exactly one, on the turn that was tapped', 1,
-   app.all(n => n.tag === 'button' && /🔊|🔇/.test(n.textContent)).length);
+   app.all(n => n.tag === 'button' && n.className.split(/\s+/).includes('speak')).length);
 is('...and never on the indicator', 0, tButtons());
+// WHERE IT LANDS, with the indicator on screen. The control belongs to the meta row of the
+// turn you tapped; the indicator is a sibling at the end of the same list, so "it is in the
+// list somewhere" is not the same claim as "it is in that turn". Both are asserted, because
+// a control that drifted to the end would look correct in a screenshot of one message.
+const turnsWithSpeaker = () => app.all(n => n.className.split(/\s+/).includes('turn'))
+  .filter(t => !!t.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('speak')));
+is('...inside one turn, next to that turn\'s own bubble', true,
+   turnsWithSpeaker().length === 1 && !!turnsWithSpeaker()[0].find(n => n.className.split(/\s+/).includes('bub')));
+is('...and the indicator is still the last thing in the list', true, (() => {
+  const k = chatKids(); return k.length > 0 && k[k.length - 1].className.split(/\s+/).includes('thinking');
+})());
 
 // ── and it must not yank the reader, appearing OR vanishing ──────────────
 // #72 gave this list scroll memory precisely so a poll that rebuilds it moves nobody. A
@@ -888,6 +1003,10 @@ is('...and never on the indicator', 0, tButtons());
   is('the indicator goes when the session stops working', true,
      await until(() => !thinkingNode(), 4000));
   await tick(5);
+  // The revealed control is drawn from S.speakSel on every render, and the renders that
+  // add and remove the indicator are renders like any other — so the tapped turn must
+  // still have its speaker, and still only one, on both edges.
+  is('...and the tapped turn keeps its speaker', 1, turnsWithSpeaker().length);
   const gone = chatBox();
   is('...and the list really did get shorter', true, gone.scrollHeight < tallWith);
   is('...and the reader has not moved', parkedAt, gone.scrollTop);
@@ -898,6 +1017,8 @@ is('...and never on the indicator', 0, tButtons());
   await pollTick();
   is('the indicator comes back when work resumes', true, await until(() => !!thinkingNode(), 4000));
   await tick(5);
+  is('...and the speaker is still on that turn, not on the indicator', '1,0',
+     [turnsWithSpeaker().length, tButtons()].join(','));
   const back = chatBox();
   is('...and the list is taller again', tallWith, back.scrollHeight);
   is('...and the reader STILL has not moved', parkedAt, back.scrollTop);
@@ -915,5 +1036,43 @@ is('...and never on the indicator', 0, tButtons());
      end.scrollTop === end.scrollHeight - end.clientHeight);
   fixtureOverride = null;
 }
+// ── the voice picker REPORTS what the device gave it ─────────────────────
+// AT THE END, AND ON THE GRID, because `, settings` is a verb of the grid and the projects
+// screen — the session screen has no settings button, so the sheet cannot be opened from
+// the chat this section used to sit in.
+click(btnWith(/‹/));
+await until(() => !!btnWith(/n\s+new/), 4000);
+// "I only see the default voice" and "the list never populated" are the same screen from
+// the outside and have different causes, so the count is on it. Asserted through the real
+// sheet because the count is the only diagnostic a phone with no console can quote back.
+//   IT READS THE SAME STUB the read-aloud section installed, which is why nothing between
+// here and there may install a second one — see the indicator section.
+click(btnWith(/settings/));
+await tick(20);
+const vset = sheetHost.firstChild;
+is('settings offers a voice picker', true, !!vset && !!vset.find(n => n.tag === 'select' && /vpick/.test(n.className)));
+is('...and says how many voices this device reported', true, !!vset && /3 voices reported by this device/.test(vset.textContent));
+is('...and in how many languages', true, !!vset && /in 3 languages/.test(vset.textContent));
+is('...grouped by lang, so a populated list is legible', 'en-GB,en-US,es-ES',
+   !vset ? '' : vset.all(n => n.tag === 'optgroup').map(g => g.attrs.label).join(','));
+is('...with the voice names inside the groups', true, !!vset &&
+   vset.all(n => n.tag === 'optgroup').some(g => g.kids.some(o => o.textContent === 'Mónica')));
+// THREE voices is a normal list, so the unverified iOS hint must NOT be on screen. This is
+// the direction that catches a hint pinned on unconditionally — which would be a guess
+// presented as a diagnosis on every device.
+is('...and no iOS suggestion when the list is populated', false, !!vset && /Spoken Content/.test(vset.textContent));
+closeSheetFromTest();
+
+// The other direction: one voice, which is what the phone reports. The count says one and
+// the suggestion appears — worded as a guess, because nobody here has measured it.
+voiceList.length = 1;
+click(btnWith(/settings/));
+await tick(20);
+const vone = sheetHost.firstChild;
+is('one voice is counted as one', true, !!vone && /1 voice reported by this device/.test(vone.textContent));
+is('...not pluralised, and no language count for one group', false, !!vone && /1 voices|in 1 languages/.test(vone.textContent));
+is('...and the iOS path is offered', true, !!vone && /Settings → Accessibility → Spoken Content → Voices/.test(vone.textContent));
+is('...as a guess and not a promise', true, !!vone && /That is a guess, not a fix/.test(vone.textContent));
+closeSheetFromTest();
 
 console.log(rows.join('\n'));

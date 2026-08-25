@@ -857,6 +857,55 @@ function thinking() {
 //   Nothing is spoken by the tap itself. Tap reveals, the control plays — because a tap
 // that started talking would make scrolling a transcript hazardous, and because the
 // control is what carries the stop state.
+// ── the read-aloud icon, and why both states are the same drawing ───────────
+//
+// THIS CONTROL HAS ALREADY BEEN GOT WRONG ONCE, in the direction an icon makes easy. It
+// was 🔊 idle and ■ playing: a colour emoji against U+25A0, two typefaces at two weights
+// and about a third of the size. Tapping it changed the button's colour, its weight and
+// its apparent size all at once, which reads as a DIFFERENT control appearing rather than
+// as this one being pressed. The 🔊/🔇 pair fixed that by being one face at one weight —
+// at the cost of a colour emoji in an app whose entire visual language is monospace
+// terminal chrome, where it looks pasted on.
+//   An SVG pair is the third answer and it is only an improvement if it does not walk back
+// into the first problem. So these are NOT two icons. They are one horn plus one swapped
+// decoration, from the same viewBox, at the same stroke width, two strokes of ink each —
+// and every one of those is a single constant below rather than a copy in each branch,
+// because a viewBox that can only be written once cannot drift, and drift is the whole
+// failure mode. If you add a third state, add a decoration; do not add a viewBox.
+//   Stroked in `currentColor` and sized in `em`, so it is the button's colour and the
+// button's size in both states — including `.speak.on`, which inverts to background-on-
+// yellow and would strand any hard-coded stroke.
+//   24 UNITS AT A STROKE OF 2 IS MEASURED, not convention worship. The first draft was 16
+// at 1.6, which puts a 2.4-unit-wide horn against a 1.6-unit stroke — 0.8 units of interior
+// left unpainted — and it rendered as a solid blob that outweighed its own decoration, the
+// same imbalance in miniature that this control is here to stop having.
+//   AND THE WEIGHTS WERE COUNTED, in Chrome, each state alone at 240px: the pressed one
+// carries 88% of the idle one's ink and both occupy an identical 160px-tall box. The cross
+// reaches y 8.6..15.4 rather than the 9.5..14.5 it started at for exactly that reason — the
+// short version measured 83%, and the arcs are long. If you redraw either decoration,
+// re-count; "looks about the same" is what produced the emoji-against-a-square pair.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const ICON_BOX = '0 0 24 24';
+const ICON_STROKE = '2';
+const ICON_HORN = 'M11 5 6 9H2v6h4l5 4z';   // shared: most of the ink
+const ICON_WAVE = 'M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14';   // idle: will speak
+const ICON_STOP = 'M17.2 8.6l5.6 6.8M22.8 8.6l-5.6 6.8';             // on: tap to stop
+function speakIcon(on) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  // aria-hidden because the BUTTON carries the name — see the label at the call site. An
+  // icon that also announced itself would be read twice.
+  for (const [k, v] of Object.entries({
+    viewBox: ICON_BOX, fill: 'none', stroke: 'currentColor', 'stroke-width': ICON_STROKE,
+    'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
+    focusable: 'false',
+  })) svg.setAttribute(k, v);
+  for (const d of [ICON_HORN, on ? ICON_STOP : ICON_WAVE]) {
+    const path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', d);
+    svg.appendChild(path);
+  }
+  return svg;
+}
 function msgKey(m) { return String(m.role || '') + '|' + String(m.ts || ''); }
 function turn(mine, text, when, pending = false, key = '') {
   const bub = el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : '') });
@@ -884,11 +933,19 @@ function turn(mine, text, when, pending = false, key = '') {
   }
   if (speakableHere && S.speakSel === key) {
     const on = S.speaking === speakable(text);
-    // Same glyph pair and same reasoning as the composer button it replaces: 🔊/🔇 is one
-    // face at one weight, so pressing it reads as this control changing rather than a
-    // different control appearing.
-    meta.append(btn(on ? '🔇' : '🔊', (e) => { e.stopPropagation(); toggleSpeak(text); },
-                    'speak tiny' + (on ? ' on' : '')));
+    // NOT btn(): that helper assigns textContent, which would print the markup. The icon is
+    // a real child element — see speakIcon() for why both states are the same drawing.
+    //   THE LABEL IS THE BUTTON'S ONLY NAME. An icon contributes no text, so without this
+    // VoiceOver announces "button" and nothing else — strictly worse than the emoji it
+    // replaces, which at least said "speaker". aria-pressed carries the on/off half, so the
+    // state is not conveyed by the drawing alone.
+    meta.append(el('button', {
+      class: 'speak tiny' + (on ? ' on' : ''),
+      'aria-label': on ? 'stop reading this message aloud' : 'read this message aloud',
+      'aria-pressed': on ? 'true' : 'false',
+      title: on ? 'stop reading' : 'read aloud',
+      onclick: (e) => { e.stopPropagation(); toggleSpeak(text); },
+    }, [speakIcon(on)]));
   }
   return el('div', { class: 'turn ' + (mine ? 'me' : 'them') }, [bub, meta]);
 }
@@ -2132,10 +2189,27 @@ async function sheetSettings() {
     // "default" is a real choice and the first one, because it is what an unset preference
     // means AND what a saved-but-absent voice falls back to — the same state, named once.
     sel.append(el('option', { value: '', text: 'default (whatever this device picks)' }));
+    // GROUPED BY LANGUAGE. A populated iOS list is dozens of entries and `Karen` on its own
+    // tells you nothing about which of them will read English back to you; `lang` is the one
+    // field every implementation fills in, so it is the one thing worth grouping on. It also
+    // makes the count below legible: eight voices in one language and eight in eight are
+    // very different answers to "why does this sound wrong".
+    const byLang = new Map();
     for (const v of vs) {
-      const o = el('option', { value: v.voiceURI, text: `${v.name}${v.lang ? ' · ' + v.lang : ''}` });
-      if (cur && (cur.uri === v.voiceURI || (!vs.some(x => x.voiceURI === cur.uri) && cur.name === v.name))) o.selected = true;
-      sel.append(o);
+      const k = String(v.lang || 'unknown');
+      if (!byLang.has(k)) byLang.set(k, []);
+      byLang.get(k).push(v);
+    }
+    const chosen = (v) => !!cur && (cur.uri === v.voiceURI ||
+      (!vs.some(x => x.voiceURI === cur.uri) && cur.name === v.name));
+    for (const k of [...byLang.keys()].sort()) {
+      const g = el('optgroup', { label: k });
+      for (const v of byLang.get(k)) {
+        const o = el('option', { value: v.voiceURI, text: v.name });
+        if (chosen(v)) o.selected = true;
+        g.append(o);
+      }
+      sel.append(g);
     }
     sel.addEventListener('change', () => {
       setSavedVoice(vs.find(v => v.voiceURI === sel.value) || null);
@@ -2144,11 +2218,28 @@ async function sheetSettings() {
     });
     kids.push(el('h2', { text: 'read-aloud voice' }));
     kids.push(sel);
-    // The list arrives asynchronously in Safari (see allVoices), so an empty picker is a
-    // state a user can actually be looking at. Say which it is rather than showing a box
-    // with one entry and no explanation.
-    if (!vs.length) kids.push(el('div', { class: 'dim small',
-      text: 'no voices reported yet — this list fills in a moment after the first open' }));
+    // THE COUNT, BECAUSE ONE OPTION AND NO LIST LOOK IDENTICAL FROM THE OUTSIDE. "I only
+    // see the default voice" has at least two causes — the device really reports one, or the
+    // list never populated (see allVoices: getVoices() answers [] on the first call in
+    // Safari) — and from a phone with no console attached neither is distinguishable from
+    // the other. A number is. It is also the only thing on this screen anybody can quote
+    // back, so it says `reported by this device` rather than naming a total it is not.
+    kids.push(el('div', { class: 'dim small',
+      text: `${vs.length} ${vs.length === 1 ? 'voice' : 'voices'} reported by this device` +
+            (byLang.size > 1 ? `, in ${byLang.size} languages` : '') }));
+    // A SUGGESTION, NOT A DIAGNOSIS, and phrased as one on purpose. No iPhone was in this
+    // loop: the count above is measured on whatever device is reading it, this line is not.
+    // iOS is documented to expose a reduced voice list to Web Speech until the enhanced
+    // voices are downloaded in Settings, which WOULD explain a count of one — but nobody
+    // here has watched that number change after downloading one, so it must not read as a
+    // promise that it will. The count is the thing to trust; if the count stays put, this
+    // text is wrong and should go.
+    if (vs.length <= 1) kids.push(el('div', { class: 'dim small' }, [
+      el('div', { text: vs.length
+        ? 'one voice is fewer than a phone normally reports.'
+        : 'nothing reported yet — this list can fill in a moment after the first open, so reopen this sheet before reading anything into it.' }),
+      el('div', { text: 'on iOS it may be worth looking at Settings → Accessibility → Spoken Content → Voices and downloading a voice there. That is a guess, not a fix: if it is the right one, the count above goes up.' }),
+    ]));
     if (cur && !pickVoice()) kids.push(el('div', { class: 'dim small',
       text: `“${cur.name}” is not installed on this device — using the default until it is` }));
     const rate = savedRate();
