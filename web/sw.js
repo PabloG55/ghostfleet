@@ -15,7 +15,9 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v10 renders an assistant's markdown instead of showing
+// BUMPED WHEN THE CLIENT CHANGES — v11 puts profile tabs on the Projects screen, so a
+// phone on the old client cannot separate work from personal at all. v10 renders an
+// assistant's markdown instead of showing
 // its source, and adds a FILE (md.js) to the precache list, which is the version bump that
 // matters most: an old shell has no md.js in its cache, so a phone that does not refetch is
 // a phone whose chat cannot load. v9 stops the read-aloud spelling out shas, UUIDs,
@@ -42,11 +44,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 131449f03fc0
+// CLIENT-HASH: d5a2a395ebc9
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v10';
+const VERSION = 'ghostfleet-v11';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

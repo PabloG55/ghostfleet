@@ -432,6 +432,32 @@ Physical constraints, not policy:
   vocabulary §7 enumerates. Reading a pane and owning a shell are not the same surface, and
   "we already show a terminal" is not an argument for the second.
 
+### The one place the phone shows LESS, and why the numbers did not move
+
+**Profile tabs on the Projects screen** — `all`, then one per profile — are a control the
+TUI does not have. Everything else here is the desk's screen at `nc = 1`; this is the
+phone deciding what to draw. It earns that because a phone is a glance and a fleet is not
+one list: *"add like tabs on the projects page to differentiate between work and
+personal."* `all` is the default and hiding nothing is the first run, because §1's
+question is *is anything blocked on me* and that must not need two looks — which is also
+why a tab carries its own `need you` count when it has one. A tab that hid a blocked
+project silently would be the summary lying at exactly the glance you would act on.
+
+**The number on a card is an address, and it stays global.** `Ctrl-f <p>` resolves through
+`proj_nth()` in `bin/ghostfleet`, which counts **every** non-comment line of
+`~/.config/ghostfleet/projects` — no profile filter anywhere on that path, and
+`fleet-grid`'s `pBuild()` and `fleet-serve`'s `/api/projects` are equally unfiltered. So
+the phone's merged list has always agreed with the desk, and it goes on agreeing: filter
+the array and number the result, and `scratch` would be card 1 in the personal tab while
+`Ctrl-f 1` opens `acme-api`. **The tab decides what is drawn, never what a card is
+called** — a digit that sends someone to the wrong project is worse than no digit.
+
+Two consequences worth stating, because both look like bugs until you know: a digit key
+still opens the project with that number even when the tab is not showing it (it is an
+address, not a position on screen), and a drag inside a tab moves a project past the
+neighbours it is hiding, so one press is one *visible* step. The alternative — a single
+step that swaps with a card you cannot see — reads as the gesture doing nothing.
+
 Everything else maps: `n` new · `w` worktree · `s` schedule · `p`/`P` pause and resume ·
 `x` kill or remove · `,` settings · `⇧hjkl` reorder · `Ctrl-f` jump · `Ctrl-p`/`Q`
 projects · `q` back.

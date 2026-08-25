@@ -233,7 +233,12 @@ If a window is ever mis-matched, pin it in `~/.config/ghostfleet/windows`
 Each popup leads with the **`Ctrl-f` chord that lands on that exact session** — e.g.
 `Ctrl-f 2 1 · acme-api-1 — …`, or `Ctrl-f 2 ⏎` for a master. It's first in the string
 because notifications truncate from the right, and that's the part you act on. Neither
-digit is guessable: the project's is its position in *its profile's* list, and the
+digit is guessable: the project's is its position in the **whole projects file**, across
+every profile — `proj_nth()` in `bin/ghostfleet` counts every non-comment line of it and
+filters by nothing, and `fleet-grid`'s own projects screen reads the same list the same
+way. (This said "its position in its profile's list" and was simply wrong. It is the
+sentence that would talk somebody into numbering the phone's profile tabs per-tab, which
+is why it is corrected here rather than left as a harmless slip.) The
 session's is its position in the grid's **card order**, which `⇧hjkl` can rewrite — so
 the chord is read from the same source `Ctrl-f` itself counts through. When it can't be
 worked out (an unregistered project, or a position past 9, which the chord can't

@@ -26,6 +26,7 @@ const S = {
   project: null,        // the fleet being looked at
   session: null,        // the card opened on the session screen
   projects: null,       // last /api/projects payload
+  profile: 'all',       // the projects screen's tab: 'all' | a profile name (see PROFILES)
   grid: null,           // last §4 payload
   sess: null,           // last /api/session payload  { messages, next_before, … }
   view: 'chat',         // the session screen: 'chat' (the conversation) | 'pane' (the terminal)
@@ -68,7 +69,7 @@ function save() {
       // session and reopening restored the session SCREEN with nothing on it: "'null' is
       // not on this fleet's grid any more". It was always broken and was easy to miss
       // while that screen was a card and a row of buttons; it is the whole viewport now.
-      session: S.session, view: S.view,
+      session: S.session, view: S.view, profile: S.profile,
       projects: S.projects, grid: S.grid,
     }));
   } catch {}
@@ -82,6 +83,13 @@ function restore() {
   // 'msgs' was the old list view's name and is not a view any more; anything unrecognised
   // falls to the default rather than rendering neither.
   S.view = j.view === 'pane' ? 'pane' : DEFAULT_VIEW;
+  // THE SAME CLAMP, FOR THE SAME REASON. A profile is free text and a projects file is
+  // edited between opens, so the stored tab can name something that no longer exists —
+  // and a tab matching nothing would draw an empty screen over a fleet that has projects
+  // in it. Unknown falls to `all`, which is also the default: hiding projects on a first
+  // run would be a surprise, and "is anything blocked on me" must not need two looks.
+  const tabs = profileTabs(S.projects || []);
+  S.profile = (j.profile && (j.profile === PROFILE_ALL || tabs.includes(j.profile))) ? j.profile : PROFILE_ALL;
   // A CLAMP, not a trust. Half-written state is how the screen above happened, and the
   // rule is simple enough to state: you cannot be on a screen whose subject is missing.
   if (S.screen === 'session' && !S.session) S.screen = S.project ? 'grid' : 'projects';
@@ -258,19 +266,80 @@ function modeChip() {
   return el('span', { class: 'mode ' + r.mode, text, title: r.detail });
 }
 
-// ── the projects screen ───────────────────────────────────────────────────
+// ── the projects screen, and its tabs ─────────────────────────────────────
+// "add like tabs on the projects page to differentiate between work and personal."
+//
+// THE NUMBER ON A PROJECT CARD IS AN ADDRESS, NOT A POSITION IN WHAT YOU CAN SEE, and
+// that is the whole reason this is not a one-line filter. `Ctrl-f <p>` at the desk
+// resolves through bin/ghostfleet's proj_nth(), which counts EVERY non-comment line of
+// ~/.config/ghostfleet/projects — no profile filter anywhere on that path, and
+// fleet-grid's own pBuild() and fleet-serve's /api/projects are equally unfiltered. So
+// the digit is global, across profiles, and the phone's merged list has always agreed
+// with it. Number a filtered array and card "2" in the personal tab is a project that
+// `Ctrl-f 2` does not open — a digit that sends you to the wrong project is worse than
+// no digit. The tab decides what is DRAWN and never what a card is CALLED.
+//   (docs/OPERATIONS.md said the project digit was "its position in its profile's list".
+// It was not, and that sentence is corrected in this change: it is exactly the belief
+// that would turn this into a per-tab index.)
+const PROFILE_ALL = 'all';
+// `profile || 'work'` is readProjects()'s own default (bin/fleet-grid.mjs), so a project
+// whose column is blank lands in the same tab the desk puts it in. The field is free
+// text — `ghostfleet <profile>` takes any name — so the tabs are DERIVED and a profile
+// nobody anticipated gets its own tab rather than disappearing.
+const profileOf = (p) => (p && p.profile) || 'work';
+function profileTabs(projects) {
+  const seen = [];
+  for (const p of projects || []) { const k = profileOf(p); if (!seen.includes(k)) seen.push(k); }
+  return seen;                     // in the projects file's own order, which is the address order
+}
+// Every entry carries the index it has in the WHOLE list, because that index is the name.
+// Falls back to showing everything when the stored tab matches nothing: a clamp runs on
+// restore (below), and this is the second line of defence, because the one thing this
+// must never do is draw an empty screen over a fleet that has projects in it.
+function visibleProjects() {
+  const all = S.projects || [];
+  const rows = all.map((p, i) => ({ p, i }));
+  if (S.profile === PROFILE_ALL) return rows;
+  const mine = rows.filter(({ p }) => profileOf(p) === S.profile);
+  return mine.length ? mine : rows;
+}
+function setProfile(name) {
+  S.profile = name;
+  // The cursor is a GLOBAL index too, so switching tabs has to move it to something that
+  // is on screen — otherwise `⏎ open` and `x remove` act on a card nobody can see.
+  const vis = visibleProjects();
+  S.sel = vis.length ? vis[0].i : 0;
+  save();
+  render();
+}
 function projectsScreen() {
   const out = header(null);
   const list = el('div', { class: 'cards' });
   const projects = S.projects || [];
-  projects.forEach((p, i) => {
-    const block = G.projectCard(p, i, i === S.sel);
+  const tabs = profileTabs(projects);
+  // NO STRIP WHEN THERE IS NO CHOICE. One profile is the common case — everything is
+  // 'work' — and a control whose only option is the one you are already on is furniture.
+  if (tabs.length > 1) {
+    out.push(el('div', { class: 'seg tabs' }, [PROFILE_ALL, ...tabs].map(t => {
+      // THE NEED-YOU COUNT RIDES ON THE TAB, and only when it is not zero. §1 says this
+      // app exists to answer "is anything blocked on me", and a tab is the one control
+      // here that can HIDE the answer — a blocked project in the other profile would be
+      // off screen with nothing anywhere to say so, which is the same failure as the
+      // summary reading "0 need you" over a blocked lead. Silent when there is nothing
+      // to report, so the strip stays a chooser rather than a dashboard.
+      const need = projects.filter(p => t === PROFILE_ALL || profileOf(p) === t)
+                           .reduce((n, p) => n + (((p.sessions || {}).need) || 0), 0);
+      return btn(need ? `${t} ●${need}` : t, () => setProfile(t), S.profile === t ? 'on' : '');
+    })));
+  }
+  for (const { p, i } of visibleProjects()) {
+    const block = G.projectCard(p, i, i === S.sel);   // i is the GLOBAL index, on purpose
     list.append(cardEl(block, {
       tap: () => openProject(p.name),
       longPress: () => { S.confirm = { kind: 'project', name: p.name }; render(); },
       reorder: d => reorderProject(p.name, d),
     }, i));
-  });
+  }
   list.append(cardEl(G.addProjectCard(S.sel === projects.length), {
     tap: () => sheetAddProject(),
   }, projects.length));
@@ -315,8 +384,19 @@ async function reorderProject(name, delta) {
   const names = (S.projects || []).map(p => p.name);
   const i = names.indexOf(name);
   if (i < 0 || !delta) return;
-  const ni = Math.max(0, Math.min(names.length - 1, i + delta));
-  if (ni === i) return;
+  // ONE PRESS IS ONE VISIBLE STEP, which means moving PAST the hidden ones. This writes
+  // the shared order file that the desk then counts, and inside a tab the neighbour above
+  // may be in another profile: a single-step swap would either look like nothing happened
+  // (it traded places with a card you cannot see) or like a jump of two. The gesture has
+  // to mean what it looks like, so the target is the next VISIBLE neighbour and the
+  // project lands directly beside it in the real order.
+  //   In the `all` tab every neighbour is visible, so this is exactly the single step it
+  // has always been — one path, not a special case.
+  const vis = visibleProjects().map(v => v.i);
+  const at = vis.indexOf(i);
+  const to = at + (delta > 0 ? 1 : -1);
+  if (at < 0 || to < 0 || to >= vis.length) return;
+  const ni = vis[to];
   names.splice(ni, 0, ...names.splice(i, 1));
   S.sel = ni;
   await doVerb('fleet_project_order', { order: names }, { quiet: true });
@@ -1953,7 +2033,22 @@ function onKey(e) {
     ? [...(S.projects || []).map(p => ({ project: p })), { add: true }]
     : items();
   const it = list[S.sel] || {};
-  const move = d => { const n = S.sel + d; if (n >= 0 && n < list.length) { S.sel = n; render(); } };
+  // ARROWS WALK WHAT IS DRAWN; DIGITS STAY GLOBAL. `list` is deliberately the unfiltered
+  // one, so `5` opens project 5 the way `Ctrl-f 5` does at the desk and the way the card
+  // says — the digit is an address and an address does not change with the tab. Stepping
+  // is the other thing: j/k through cards that are not on screen is a cursor that
+  // disappears, so on the projects screen a step goes to the next VISIBLE index (plus the
+  // `+ new project` card, which is always drawn).
+  const move = d => {
+    let n = S.sel + d;
+    if (S.screen === 'projects' && S.profile !== PROFILE_ALL) {
+      const stops = [...visibleProjects().map(v => v.i), (S.projects || []).length];
+      const at = stops.indexOf(S.sel);
+      n = at >= 0 ? stops[at + (d > 0 ? 1 : -1)] : stops[0];
+      if (n == null) return;
+    }
+    if (n >= 0 && n < list.length) { S.sel = n; render(); }
+  };
   switch (k) {
     case 'ArrowUp': case 'k': move(-1); break;
     case 'ArrowDown': case 'j': move(1); break;
