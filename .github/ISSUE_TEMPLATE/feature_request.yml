@@ -1,0 +1,48 @@
+name: Feature request
+description: Something ghostfleet does not do yet.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Please read this before writing, because it saves you the writing.** ghostfleet is
+        maintained by one person alongside a full-time job. Features get declined here more
+        often than they get accepted, and a decline is not a verdict on the idea — every
+        option in this repo has to keep working across four agents, three platforms and
+        several tmux versions, and the ones that already exist are what the reliability
+        budget is spent on.
+
+        What gets accepted most readily, roughly in order:
+
+        1. A fix for something that is already wrong.
+        2. Support for an environment that nearly works — a tmux version, a distro, a shell.
+        3. A new signal or detector, if you can show it firing **and** staying quiet, which
+           is the bar the existing suite holds itself to.
+        4. Genuinely new surface area. This is the hardest one, and the honest answer is
+           often no.
+
+        If you would be disappointed by a no, say so in the issue — I would rather tell you
+        early than let it sit.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you actually trying to do?
+      description: The situation, not the solution. Most good changes here started as somebody describing a moment where the fleet lied to them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: What do you do today instead?
+      description: Including "nothing, I gave up" — that is useful signal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind (optional)
+    validations:
+      required: false

@@ -1,0 +1,86 @@
+name: Bug report
+description: Something behaves differently than the docs say it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **The environment questions come first on purpose.** Nearly every bug that has
+        been hard to find in this project turned out to be environmental rather than
+        logical — the clearest one being that tmux **≤ 3.5** escapes the `\x1f` byte this
+        code uses as a field separator, so identical code splits records correctly on
+        Homebrew's tmux 3.7b and fails on Ubuntu 24.04's apt tmux 3.4. That reads as
+        "broken on Linux" and is nothing of the kind.
+
+        So: your `tmux -V` is usually more useful than your stack trace. Please don't
+        skip it, even when the bug looks unrelated to tmux.
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and version
+      description: macOS 15.5, Ubuntu 24.04, WSL2 on Windows 11, …
+      placeholder: macOS 15.5 (Apple silicon)
+    validations:
+      required: true
+
+  - type: input
+    id: tmux
+    attributes:
+      label: Output of `tmux -V`
+      description: The whole line, please — `3.4` and `3.4a` are not always the same build.
+      placeholder: tmux 3.7b
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Output of `node -v` and `claude --version`
+      placeholder: v20.11.0 / 2.1.241
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - npx ghostfleet-cli
+        - cloned the repo and ran ./install.sh
+        - something else (say so below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected instead
+      description: |
+        If a session, pane or worktree is involved, say which — a status that is wrong for
+        one session and right for another is a different bug from one that is wrong for all
+        of them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: From a fresh fleet if you can. "It happens sometimes" is still worth filing — say that instead of guessing at steps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: |
+        Whatever is relevant. `ghostfleet <project> --plain` prints the real status path
+        without drawing the TUI, which is usually the most useful single thing to paste.
+
+        **Please read what you paste before you post it.** The Projects screen is your whole
+        project list, and a screenshot of it publishes every client name on your machine.
+      render: shell
+    validations:
+      required: false
