@@ -409,6 +409,35 @@ export async function authPost(kind, body) {     // kind: 'register' | 'assert'
   return j;
 }
 
+// ── push (docs/mobile.md §9) ──────────────────────────────────────────────
+// Three calls, all behind the same session token as everything else, which is the whole
+// access control: a subscription receives fleet state, so taking one out is exactly as
+// hard as reading it. Fixture mode has no push at all and says so rather than pretending
+// — there is no server to send one, and a toggle that appears to work would be worse than
+// an absent one.
+export async function pushKey() {
+  if ((await ready()).mode !== 'server') return null;
+  return get('/api/push/key');
+}
+export async function pushSubscribe(sub) {
+  if ((await ready()).mode !== 'server') throw new Error('push needs a real fleet-serve, not fixtures');
+  if (!haveToken()) throw new AuthError('no live session token');
+  return authFetch('subscribe', '/api/push/subscribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(sub),
+  });
+}
+export async function pushUnsubscribe(endpoint) {
+  if ((await ready()).mode !== 'server') return { ok: true, removed: 0 };
+  if (!haveToken()) throw new AuthError('no live session token');
+  return authFetch('unsubscribe', '/api/push/unsubscribe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ endpoint }),
+  });
+}
+
 // ── writes ────────────────────────────────────────────────────────────────
 // `assertion` is the fresh WebAuthn assertion for a destructive verb. It is passed
 // through to the server, which is what decides whether it counts.
