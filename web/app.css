@@ -279,6 +279,12 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .seg { display: flex; border: 1px solid var(--hair); }
 .seg button { border: 0; padding: .35em .7em; }
 .seg button.on { color: var(--bg); background: var(--cyan); }
+/* The projects screen's profile tabs are the session screen's chat/pane control, on
+ * purpose: one kind of tab in this app, not two. Full width because they sit alone on
+ * their row, and wrapping because a fleet can have more profiles than fit — `ghostfleet
+ * <profile>` takes any name. */
+.seg.tabs { flex-wrap: wrap; margin: 0 0 .4em; }
+.seg.tabs button { flex: 1 0 auto; }
 
 /* ── the chat ───────────────────────────────────────────────────────────────
  * "can we literally convert it to a normal chat like the Claude app". So: oldest at the
