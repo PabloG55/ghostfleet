@@ -667,7 +667,34 @@ plus `fleet-serve` holding a `caffeinate` handle for as long as it runs (already
 in this repo, and already guarded as macOS-only). `womp 1` gives Wake-on-LAN, which is
 LAN-only and does not help from a café.
 
-## 9. Push, and an honest gap
+## 9. Push
+
+> **Built, and this section is what it was built against.** Everything below the line was
+> written as an argument for NOT doing this, and two of its premises expired: the origin is
+> now a real `<name>.ts.net` with a Let's Encrypt certificate — Web Push requires exactly
+> that, and a self-signed origin cannot subscribe at all — and the two events worth a buzz
+> turned out to be the two the fleet already emits, so the expensive half was already
+> built. What did NOT expire is the throttling paragraph, and it is the reason this sends
+> **rare, high-value events and nothing else**: two kinds (a session that needs you, a
+> session that has an answer), one notification per burst, and nothing at all while the
+> phone is being looked at. It is still a bell, not a feed.
+>
+> Shape, in one paragraph. `bin/fleet-serve.mjs` watches every profile's fleet dir for the
+> status transitions the hook already writes (`→ need-you`, `working → ready`), so nothing
+> new is emitted anywhere — which is also how the MASTER's own turns are covered, since the
+> inbox block in `hooks/fleet-event.sh` deliberately skips them. VAPID is an ES256 JWT and
+> the body is RFC 8291 `aes128gcm`; both are `node:crypto`, so the zero-dependency rule
+> holds. The payload is `{ v, kind, n, at, sessions?: [{ project, session, kind }] }` —
+> there is no field a sentence could live in, which is Pablo's "never transcript text" made
+> structural rather than reviewed. Suppression happens on the SERVER, before sending, using
+> the poll it just answered: iOS may revoke a subscription whose worker takes a push and
+> shows no notification, so the worker is never allowed an opinion. `fleet-serve push
+> --detail anonymous` reduces the payload to a count, because his project names are client
+> names and a lock screen is readable by whoever is holding the phone.
+>
+> Native Claude Code push (below) is still worth having and is not replaced by this: it
+> fires on the permission prompts inside ONE session, and this says which of thirty
+> sessions to open.
 
 iOS Web Push works for home-screen-installed PWAs (16.4+), but it is throttled, the
 service worker is killed aggressively, and there is no background fetch while closed. For

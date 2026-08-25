@@ -128,6 +128,10 @@ function fitCards() {
 
 // ── loading ───────────────────────────────────────────────────────────────
 async function refresh() {
+  // Once per unlock, and only ever a no-op after that: a rotated push endpoint is
+  // invisible from the phone (push simply stops), so the check rides along with the poll
+  // that is already running rather than waiting for someone to open the settings sheet.
+  maybeSyncPush();
   try {
     if (S.screen === 'projects') S.projects = (await api.getProjects()).projects;
     else if (S.screen === 'grid') S.grid = await api.getGrid(S.project);
@@ -1374,6 +1378,142 @@ export async function askShellVersion() {
   return swVersion;
 }
 
+// ── push (docs/mobile.md §9) ────────────────────────────────────────────────
+// HOME SCREEN ONLY, and that is not a preference we can nudge. On iOS a Safari TAB
+// cannot subscribe at all — `PushManager` is absent, and `Notification.requestPermission`
+// either is missing or resolves to a prompt that never appears. So the UI has to SAY
+// which state it is in: a permission dialog that silently never opens is indistinguishable
+// from a broken button, and this app has already spent twenty minutes of someone's
+// evening on exactly that shape of bug (see api.js's authFetch).
+let pushSynced = false;
+export function pushStandalone() {
+  try {
+    if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true;
+  } catch {}
+  return navigator.standalone === true;                      // iOS's own, older spelling
+}
+export function pushSupported() {
+  return !!(navigator.serviceWorker && typeof window !== 'undefined' && 'PushManager' in window
+            && typeof Notification !== 'undefined');
+}
+export function pushPermission() {
+  try { return typeof Notification === 'undefined' ? 'unsupported' : Notification.permission; }
+  catch { return 'unsupported'; }
+}
+// Why it CANNOT be turned on, in the words that say what to do about it. Returns '' when
+// it can.
+export function pushBlockedReason() {
+  // 'probing' is a real third mode (api.js says so), and the settings sheet is reachable
+  // from the lock screen while it is still running. Answering "fixtures have nothing to
+  // send one" there would be confidently wrong about a question not yet decided.
+  if (api.mode() === 'probing') return 'still working out which fleet this is — try again in a moment';
+  if (api.mode() !== 'server') return 'push needs a real fleet-serve — fixtures have nothing to send one';
+  // THE HOME-SCREEN RULE IS iOS's, so it is only said on iOS. A desktop browser in a tab
+  // subscribes perfectly well, and telling it that only a home-screen app can is the
+  // mistake #73 recorded in the voice picker: a cause pinned on every device when it
+  // belongs to one. The capability check goes first for the same reason — it is the
+  // measured half, and on an iOS tab it is the thing that is actually true.
+  if (!pushSupported()) return iosLike() && !pushStandalone()
+    ? 'no Push API in a tab — on iOS only a home-screen app has one: Share → Add to Home Screen, then open it from the icon'
+    : 'this browser has no Push API';
+  if (iosLike() && !pushStandalone())
+    return 'iOS only allows notifications for a home-screen app: Share → Add to Home Screen, then open it from the icon';
+  if (pushPermission() === 'denied') return 'notifications are blocked for this app — iOS Settings → Notifications → ghostfleet';
+  return '';
+}
+// iPadOS reports itself as a Mac, which is why the touch-point half is here: without it an
+// iPad in a tab is told a desktop's story.
+function iosLike() {
+  const ua = (navigator.userAgent || '');
+  return /iPad|iPhone|iPod/.test(ua)
+    || (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);
+}
+const b64uToBytes = (s) => {
+  const pad = s.replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(pad + '='.repeat((4 - pad.length % 4) % 4));
+  return Uint8Array.from(raw, ch => ch.charCodeAt(0));
+};
+async function pushRegistration() {
+  if (!navigator.serviceWorker) return null;
+  try { return await navigator.serviceWorker.ready; } catch { return null; }
+}
+export async function pushCurrent() {
+  const reg = await pushRegistration();
+  if (!reg || !reg.pushManager) return null;
+  try { return await reg.pushManager.getSubscription(); } catch { return null; }
+}
+export async function pushEnable() {
+  const why = pushBlockedReason();
+  if (why) throw new Error(why);
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') throw new Error('notifications were not allowed');
+  const k = await api.pushKey();
+  if (!k || !k.key) throw new Error('the fleet has no VAPID key to subscribe with');
+  const reg = await pushRegistration();
+  if (!reg || !reg.pushManager) throw new Error('no service worker to subscribe with');
+  const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBytes(k.key) });
+  // Stash the key where sw.js can find it: on a rotated subscription the worker has to
+  // re-subscribe with the SAME application key and cannot ask the server for it (no
+  // token). See sw.js's pushsubscriptionchange.
+  try { const c = await caches.open(await shellVersionOrGuess()); await c.put('./__push-key', new Response(k.key)); } catch {}
+  const j = sub.toJSON ? sub.toJSON() : sub;
+  await api.pushSubscribe({ endpoint: j.endpoint, keys: j.keys });
+  try { localStorage.setItem('gf.push.endpoint', j.endpoint); } catch {}
+  return j.endpoint;
+}
+export async function pushDisable() {
+  const sub = await pushCurrent();
+  const ep = sub ? (sub.endpoint || '') : '';
+  // Server FIRST. Unsubscribing in the browser before the daemon has been told leaves the
+  // daemon posting to an endpoint that will 410 — recoverable, but it means the row lives
+  // until the next send, and "off" should be off the moment it says so.
+  try { if (ep) await api.pushUnsubscribe(ep); } catch {}
+  try { if (sub) await sub.unsubscribe(); } catch {}
+  try { localStorage.removeItem('gf.push.endpoint'); } catch {}
+}
+// A subscription's endpoint can be REPLACED by the browser without asking (an OS update,
+// a reinstall), and the daemon then posts into a 410 forever. sw.js catches the event it
+// can and leaves the new subscription in the cache, but the event is not reliable on
+// every platform — so the durable check is this one, run once per unlock: whatever the
+// browser says our subscription is now, tell the server if it is not what we last sent.
+async function maybeSyncPush() {
+  if (pushSynced || !api.haveToken() || api.mode() !== 'server') return;
+  pushSynced = true;
+  try {
+    const cacheName = await shellVersionOrGuess();
+    try {
+      const c = await caches.open(cacheName);
+      const pending = await c.match('./__push-pending');
+      if (pending) {
+        const j = await pending.json();
+        if (j && j.endpoint && j.keys) {
+          await api.pushSubscribe({ endpoint: j.endpoint, keys: j.keys });
+          try { localStorage.setItem('gf.push.endpoint', j.endpoint); } catch {}
+        }
+        await c.delete('./__push-pending');
+      }
+    } catch {}
+    const sub = await pushCurrent();
+    if (!sub) return;
+    const j = sub.toJSON ? sub.toJSON() : sub;
+    let last = '';
+    try { last = localStorage.getItem('gf.push.endpoint') || ''; } catch {}
+    if (j.endpoint && j.endpoint !== last) {
+      await api.pushSubscribe({ endpoint: j.endpoint, keys: j.keys });
+      try { localStorage.setItem('gf.push.endpoint', j.endpoint); } catch {}
+    }
+  } catch {}
+}
+// The cache the worker is actually using. Falls back to a name that is wrong-but-harmless
+// rather than throwing: a stash we cannot reach costs a re-subscribe on the next open,
+// which maybeSyncPush does anyway.
+async function shellVersionOrGuess() {
+  const v = shellVersion();
+  if (v && /^ghostfleet-v/.test(v)) return v;
+  try { const keys = await caches.keys(); const hit = keys.find(k => /^ghostfleet-v/.test(k)); if (hit) return hit; } catch {}
+  return 'ghostfleet-push';
+}
+
 // Set when a newer service worker has taken control and this page is now the stale one.
 let swReloadPending = false;
 export function takeNewClientIfIdle() {
@@ -2166,6 +2306,42 @@ async function sheetSettings() {
       ? btn('register', async () => { try { await pk.register(); toast('passkey registered', 'good'); } catch (e) { toast(String(e.message || e), 'bad'); } closeSheet(); }) : null,
     pk.registered() ? btn('forget this device\'s passkey', () => { pk.forget(); toast('forgotten — a lost phone is revoked server-side too', 'good'); closeSheet(); }, 'danger') : null,
   ].filter(Boolean)));
+
+  // ── notifications ───────────────────────────────────────────────────────
+  // SAY WHICH STATE IT IS IN. Every branch here is a state someone can be standing in
+  // with a phone, and the one that has to be named out loud is the tab: on iOS a Safari
+  // tab cannot subscribe at all, so a button would open no prompt and change nothing —
+  // which reads exactly like a bug. It says "add it to your home screen" instead.
+  kids.push(el('h2', { text: 'notifications' }));
+  kids.push(el('p', { text: 'a buzz when a session has an answer for you or is blocked on you — those two, and nothing else. Never any transcript text: the payload carries a state and a name.' }));
+  const pwhy = pushBlockedReason();
+  if (pwhy) {
+    kids.push(el('p', { class: 'dim', text: pwhy }));
+  } else {
+    const sub = await pushCurrent();
+    let meta = null;
+    try { meta = await api.pushKey(); } catch {}
+    const on = !!sub;
+    kids.push(el('p', { text: on
+      ? `on for this device${meta && meta.subscribed ? '' : ' (the fleet has not been told yet — it will be on the next unlock)'}`
+      : 'off for this device' }));
+    // WHOSE NAMES REACH THE LOCK SCREEN — the one thing that is Pablo's call and not
+    // this file's. Set on the Mac (`fleet-serve push --detail anonymous`) because the
+    // payload is built there; shown here because the phone is where the consequence is.
+    if (meta) kids.push(el('p', { class: 'dim small', text: meta.detail === 'anonymous'
+      ? 'detail: anonymous — a count only, no project or session names (fleet-serve push --detail named to change it)'
+      : 'detail: named — project/session on the lock screen (fleet-serve push --detail anonymous to stop that)' }));
+    kids.push(el('div', { class: 'row' }, [
+      on ? btn('turn off', async () => {
+            try { await pushDisable(); toast('notifications off', 'good'); } catch (e) { toast(String(e.message || e), 'bad'); }
+            closeSheet();
+          }, 'danger')
+         : btn('turn on', async () => {
+            try { await pushEnable(); toast('notifications on', 'good'); } catch (e) { toast(String(e.message || e), 'bad'); }
+            closeSheet();
+          }, 'go'),
+    ]));
+  }
 
   // the audit trail — a log that appears in the app is a control; one nobody reads is
   // a compliance gesture (§7)

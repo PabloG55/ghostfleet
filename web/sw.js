@@ -15,7 +15,22 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v13 stops the phone clipping itself: the send button
+// BUMPED WHEN THE CLIENT CHANGES — v17 is the first client that can be NOTIFIED: it adds
+// the push handler, the notification tap, the rotated-subscription repair and the settings
+// section that turns it on. A phone on an older client has no push handler at all, so a
+// subscription taken out by any means would deliver pushes to a worker that shows nothing —
+// which on iOS is how a subscription gets revoked. This is therefore a bump where the OLD
+// client is not merely stale but actively harmful, and the settings sheet says which one you
+// are on.
+//   WHY v17 AND NOT v16: main is v15, but `fix/overflow-sweep-wide` already holds v16 while
+// it waits to land. Two branches naming one cache key means whoever merges second re-bumps
+// AND re-pins the hash below, so this skips instead. If that branch lands after this one the
+// numbers arrive out of order, which costs nothing — the value is a cache key, not a
+// sequence.
+// v15 drew the speaker icon instead of pasting an emoji of one (#82) and left no note here;
+// this line is that note, because this block is the record of what each version changed and
+// a gap in it is indistinguishable from a version that changed nothing.
+// v13 stops the phone clipping itself: the send button
 // rendering "senc", the ⋯ half off the right edge, the page sliding sideways when the
 // sheet opened, and a card grid whose track was a character wider than the screen. An old
 // client keeps every one of them, and they are the kind you live with rather than report
@@ -53,11 +68,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: e973d7385755
+// CLIENT-HASH: 1dbadcc43bcc
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v15';
+const VERSION = 'ghostfleet-v17';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
@@ -102,10 +117,108 @@ self.addEventListener('message', e => {
   }
 });
 
+// ── push: a bell, and one that ALWAYS rings ─────────────────────────────────
+// iOS may revoke a subscription whose worker takes a push and shows no notification, so
+// this handler has exactly one job and no discretion: show something. Every decision
+// about whether Pablo should be disturbed was already made by the server, which knows
+// when the phone last polled and can therefore tell "he is holding it" from "it is in a
+// pocket" — see the suppression note in bin/fleet-serve.mjs. A worker that decides not
+// to bother him costs the subscription, which is a far worse outcome than one buzz.
+//
+// THE PAYLOAD HAS NO PROSE IN IT. It carries a kind, a count, and at most four
+// project/session identifiers, so every word below is written HERE, from an enum. A
+// malformed or empty payload still shows a notification, because the alternative is
+// silence plus a revoked subscription.
+const PUSH_TAG = 'ghostfleet-attention';
+function pushText(d) {
+  // A PAYLOAD IT CANNOT READ STILL HAS TO RING, and it must not invent what it says. The
+  // first draft rendered an empty payload as "1 sessions have answers" — a count and a
+  // kind, both made up, from nothing. Say the true thing instead: something wants you and
+  // this is not the surface that knows what.
+  const usable = d && typeof d.n === 'number' && d.n > 0 && typeof d.kind === 'string';
+  if (!usable) return { title: 'ghostfleet', body: 'something needs you — open to see which' };
+  const n = d.n;
+  const named = Array.isArray(d.sessions) ? d.sessions.filter(x => x && x.project && x.session) : [];
+  const kind = d.kind === 'needs-you' ? 'needs-you' : d.kind === 'mixed' ? 'mixed' : 'answer';
+  const verb = kind === 'needs-you' ? 'needs you' : kind === 'mixed' ? 'needs you' : 'has an answer';
+  if (n === 1) {
+    // ONE, SO NOT "1 sessions". In anonymous mode there is no name to put in front of the
+    // verb, and a count of one printed through the plural branch is the tell that a lock
+    // screen line was assembled rather than written — measured by rendering every shape
+    // this can take, which is how both of these were found.
+    return named.length === 1
+      ? { title: `${named[0].session} ${verb}`, body: named[0].project }
+      : { title: `a session ${verb}`, body: 'open ghostfleet to see which' };
+  }
+  const what = kind === 'needs-you' ? 'need you' : kind === 'mixed' ? 'want you' : 'have answers';
+  return { title: `${n} sessions ${what}`,
+           // No names to list is the POINT of anonymous mode, not a degraded version of
+           // the other one, so it says what to do instead of showing an empty list.
+           body: named.length ? named.map(x => `${x.project}/${x.session}`).join(' · ') : 'open ghostfleet to see which' };
+}
+self.addEventListener('push', e => {
+  let d = null;
+  try { d = e.data ? e.data.json() : null; } catch { d = null; }
+  const t = pushText(d || {});
+  e.waitUntil(self.registration.showNotification(t.title, {
+    body: t.body,
+    tag: PUSH_TAG,            // a second buzz replaces the first rather than stacking
+    renotify: true,
+    icon: './icons/icon-192.png',
+    badge: './icons/icon-192.png',
+    data: { at: (d && d.at) || 0 },
+  }));
+});
+
+// Tapping it opens the app — the grid, not a deep link. The card list is one tap from
+// everywhere and a URL that named a session would be a second route to keep in step with
+// app.js's own navigation for no gain.
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil((async () => {
+    const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    for (const c of all) if ('focus' in c) return c.focus();
+    return self.clients.openWindow('./');
+  })());
+});
+
+// A ROTATED SUBSCRIPTION IS A DEAD ONE, silently. The browser can replace an endpoint
+// (an OS update, a reinstall) and the server keeps posting to the old one, where 410
+// prunes it and push simply stops with nothing on screen to say so.
+//
+// This worker cannot repair that on its own: uploading a subscription needs the session
+// token, and the token deliberately lives in the page's memory rather than in storage, so
+// there is nothing here to authenticate with while the app is closed. So it does the half
+// it can — take out a new subscription with the key the page stashed, and leave it where
+// the page will find it — and web/app.js does the upload on the next open. It also
+// compares endpoints on EVERY open, which is what covers a rotation this event never
+// fired for.
+const PUSH_KEY_URL = './__push-key';        // stashed by app.js at subscribe time
+const PUSH_PENDING_URL = './__push-pending';
+self.addEventListener('pushsubscriptionchange', e => {
+  e.waitUntil((async () => {
+    try {
+      const c = await caches.open(VERSION);
+      let key = e.oldSubscription && e.oldSubscription.options && e.oldSubscription.options.applicationServerKey;
+      if (!key) { const hit = await c.match(PUSH_KEY_URL); if (hit) key = await hit.text(); }
+      if (!key) return;
+      const sub = await self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      await c.put(PUSH_PENDING_URL, new Response(JSON.stringify(sub.toJSON ? sub.toJSON() : sub),
+        { headers: { 'content-type': 'application/json' } }));
+    } catch {}
+  })());
+});
+
 self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;                    // never a verb
   const url = new URL(req.url);
+  // The two push stash keys are cache entries, not files: nothing must go looking for
+  // them on the network, and a 404 for one must not reach the shell fallback below.
+  if (url.pathname.endsWith('/__push-key') || url.pathname.endsWith('/__push-pending')) {
+    e.respondWith(caches.open(VERSION).then(c => c.match(req)).then(r => r || new Response('', { status: 404 })));
+    return;
+  }
   const isApi = url.pathname.startsWith('/api/');
 
   if (isApi) {

@@ -5,6 +5,7 @@
 #   fleet-serve enroll phone                 open a one-time passkey enrolment
 #   fleet-serve                              run it
 #   fleet-serve check                        preflight without listening
+#   fleet-serve push [--detail …] [--test]   who is subscribed, and what a phone would see
 #
 # A launcher, exactly like bin/ghostfleet is for fleet-grid.mjs: the daemon is node, and
 # this is what puts `fleet-serve` on PATH with a readable error when node is missing.

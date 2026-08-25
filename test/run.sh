@@ -5414,6 +5414,261 @@ else
 fi
 sv_rate 4000 4000 4000
 
+# ── push: a bell for the two things worth one, and silence for everything else ──
+# docs/mobile.md §9 argued against building this. What changed is in the PR; what did NOT
+# change is the reason every assertion below comes in pairs. A push that fires when he is
+# already looking is noise, a push that never fires is indistinguishable from a fleet with
+# nothing to say, and on iOS a worker that takes a push without showing a notification can
+# lose the subscription — so "did not send" has to be a decision made HERE, before the
+# send, and it has to be provable.
+#
+# THE FAKE PUSH SERVICE DECRYPTS. Everything that can be wrong with Web Push is wrong
+# silently and identically: a DER signature where the service wants raw r||s, a mis-salted
+# HKDF, a missing record delimiter — all of them are accepted by the service and show
+# nothing on the phone. A test that counted POSTs would pass for every one of them, so
+# test/helpers/push-probe.mjs decrypts the body with its own implementation of RFC 8291
+# and verifies the VAPID JWT, and these assert the PLAINTEXT.
+group "fleet-serve: push tells a phone about the two events, and shuts up otherwise"
+if ! command -v curl >/dev/null 2>&1; then
+  skip "push" "curl is not installed"
+else
+  PU="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$PU/home/.config/ghostfleet" "$PU/home/.claude/fleet" "$PU/home/.claude-personal/fleet" "$PU/repo" "$PU/prepo"
+  # TWO PROFILES, because a push channel scoped to one fleet dir is the failure CLAUDE.md
+  # names: work notifies, personal is silent, and silence has no error in it to find.
+  printf 'demo\t%s\twork\npers\t%s\tpersonal\n' "$PU/repo" "$PU/prepo" > "$PU/home/.config/ghostfleet/projects"
+  PUPORT="$(free_port)"; PUPORT="${PUPORT:-18901}"
+  OKPORT="$(free_port)"; OKPORT="${OKPORT:-18902}"
+  GONEPORT="$(free_port)"; GONEPORT="${GONEPORT:-18903}"
+  PUBASE="http://localhost:$PUPORT"
+  # Its own config and its own HOME: the daemon above has two work projects and no push
+  # config, and this group changes both.
+  pu() { GHOSTFLEET_SERVE_CONFIG="$PU/serve.json" GHOSTFLEET_SERVE_AUDIT="$PU/audit.jsonl" \
+         GHOSTFLEET_PUSH_ALLOW_HTTP=1 HOME="$PU/home" TMUX= CLAUDE_FLEET_AWAKE=off \
+         node "$ROOT/bin/fleet-serve.mjs" "$@"; }
+  # A status file, exactly as hooks/fleet-event.sh writes one — INCLUDING the fields that
+  # must never reach a lock screen. The transcript path and the note are planted secrets:
+  # they are what the payload assertions below are looking for and must not find.
+  pu_status() {   # $1=fleet-dir $2=file-id $3=sock $4=slot $5=status
+    # tmp + mv, because that is what hooks/fleet-event.sh does and the difference is
+    # observable: `> file` truncates first, so a reader landing in that window sees an
+    # empty file. The daemon treats an unparsable file as "no news" rather than as a new
+    # session precisely so that cannot become a notification — this writes atomically so
+    # the fixture exercises the real writer's behaviour rather than one the hook never has.
+    printf '{"session_id":"%s","zellij":"","sock":"%s","slot":"%s","cwd":"/x/%s","folder":"%s","branch":"main","status":"%s","transcript":"/tmp/SECRET-CLIENT-NAME.jsonl","note":"the DATABASE_URL is postgres://secret","ts":%s}\n' \
+      "$2" "$3" "$4" "$4" "$4" "$5" "$(date +%s)" > "$1/.$2.tmp"
+    mv -f "$1/.$2.tmp" "$1/$2.json"
+  }
+  pu_cfg() {      # scan/debounce/quiet, and rate caps a probe phase will not trip
+    node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));
+      c.rate={window:60,read:4000,write:4000,auth:4000};
+      c.push={...(c.push||{}),scan:1,debounce:+process.argv[2],quiet_after_poll:+process.argv[3]};
+      fs.writeFileSync(p,JSON.stringify(c,null,2))' "$PU/serve.json" "$1" "$2"
+  }
+  pu_lines() { wc -l < "$1" 2>/dev/null | tr -d ' '; }
+  pu_wait() {     # $1=file $2=lines wanted — waits for an EVENT rather than sleeping for one
+    i=0; while [ "$i" -lt 80 ]; do
+      [ "$(pu_lines "$1")" -ge "$2" ] 2>/dev/null && return 0
+      i=$((i+1)); sleep 0.1
+    done; return 1
+  }
+  pu_payload() { tail -1 "$1" 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.stringify(JSON.parse(d).payload))}catch{console.log("")}})'; }
+  pu_field() {   # $1=file $2=jsonpath-ish key of the LAST row
+    tail -1 "$1" 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);const v=process.argv[1].split(".").reduce((o,k)=>o==null?o:o[k],j);console.log(typeof v==="object"?JSON.stringify(v):String(v))}catch{console.log("")}})' "$2"; }
+
+  pu init --bind 127.0.0.1 --port "$PUPORT" >/dev/null 2>&1
+  # debounce 4s, quiet 5s. THE DEBOUNCE HAS TO OUTLAST THE GAP the burst case leaves
+  # between its two halves (2s) or two pushes is the CORRECT answer there — and it has to
+  # be shorter than the 6s each case waits before it starts, or one case's push suppresses
+  # the next case's and every later assertion passes for the wrong reason. Both directions
+  # were measured: at debounce=1 the burst case was red on correct code, and the mutation
+  # that deletes the debounce was red for that same reason rather than its own.
+  pu_cfg 4 5
+  : > "$PU/ok.jsonl"; : > "$PU/gone.jsonl"
+  # Two fake push services: one that accepts, one that answers 410 Gone. Both directions of
+  # pruning in one event — the dead endpoint has to go and the live one has to stay, and a
+  # pruner that dropped both would look identical from the "it was removed" side.
+  node "$ROOT/test/helpers/push-probe.mjs" --port "$OKPORT"   --status 201 --sub "$PU/sub-ok.json"   --out "$PU/ok.jsonl"   > "$PU/probe-ok.log" 2>&1 &
+  SERVE_PIDS="$SERVE_PIDS $!"
+  node "$ROOT/test/helpers/push-probe.mjs" --port "$GONEPORT" --status 410 --sub "$PU/sub-gone.json" --out "$PU/gone.jsonl" > "$PU/probe-gone.log" 2>&1 &
+  SERVE_PIDS="$SERVE_PIDS $!"
+  pu > "$PU/serve.log" 2>&1 &
+  SERVE_PIDS="$SERVE_PIDS $!"
+  pu_up=0
+  i=0; while [ "$i" -lt 80 ]; do
+    curl -s -m1 "$PUBASE/healthz" >/dev/null 2>&1 && { pu_up=1; break; }
+    i=$((i+1)); sleep 0.1
+  done
+  if [ "$pu_up" = 0 ]; then
+    bad "the push daemon comes up" "listening on $PUBASE" "$(tr '\n' ' ' < "$PU/serve.log" | cut -c1-160)"
+  elif ! { [ -f "$PU/sub-ok.json" ] && [ -f "$PU/sub-gone.json" ]; }; then
+    bad "the fake push services come up" "two subscription files" "$(ls "$PU" | tr '\n' ' ')"
+  else
+    # ── the subscription is a credential ────────────────────────────────────
+    node "$ROOT/test/helpers/serve-probe.mjs" "$PUBASE" push "$(pu enroll phone | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "$PU/sub-ok.json" \
+      > "$PU/probe.push" 2>"$PU/probe.push.err"
+    ppf() { grep -m1 "^$1$US" "$PU/probe.push" | cut -d "$US" -f2; }
+    ppb() { grep -m1 "^$1$US" "$PU/probe.push" | cut -d "$US" -f3; }
+    TOK="$(ppb token | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).token||"")}catch{console.log("")}})')"
+    is "the VAPID key needs a live token"      "401" "$(ppf subscribe.noToken)"
+    is "the key is offered to a real one"      "200" "$(ppf key)"
+    is "keys are required"                     "400" "$(ppf subscribe.noKeys)"
+    is "a non-https endpoint is refused"       "400" "$(ppf subscribe.httpEndpoint)"
+    is "a short auth secret is refused"        "400" "$(ppf subscribe.shortAuth)"
+    is "a real subscription is taken"          "201" "$(ppf subscribe.ok)"
+    is "...and the client can see it"          "1"   "$(ppb key.after | grep -c '"subscribed":1' || true)"
+    is "a token was minted for the rest"       "43"  "${#TOK}"
+
+    # ── ONE: a worker blocked on him, with nobody looking ──────────────────
+    # THE PROBE ABOVE WAS A POLL. Its last request was a GET, which is exactly the signal
+    # the sender reads as "he is looking at it" — so the first delivery case has to wait
+    # out the quiet window, or it measures the suppression it is not testing yet. Found by
+    # this assertion going red for the right reason.
+    sleep 6
+    : > "$PU/ok.jsonl"
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
+    sleep 2                                    # let the scan take a baseline
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
+    if pu_wait "$PU/ok.jsonl" 1; then
+      is "a need-you reaches the phone"        "1" "$(pu_lines "$PU/ok.jsonl")"
+      is "...encrypted the way iOS requires"   "aes128gcm" "$(pu_field "$PU/ok.jsonl" content_encoding)"
+      is "...with a VAPID JWT that VERIFIES"   "verified"  "$(pu_field "$PU/ok.jsonl" vapid.sig)"
+      is "...signed ES256"                     "ES256"     "$(pu_field "$PU/ok.jsonl" vapid.alg)"
+      is "...for the push service's origin"    "http://127.0.0.1:$OKPORT" "$(pu_field "$PU/ok.jsonl" vapid.aud)"
+      is "...and a record delimiter of 0x02"   "2"         "$(pu_field "$PU/ok.jsonl" delimiter)"
+      is "the payload says what happened"      '{"v":1,"kind":"needs-you","n":1,"at":AT,"sessions":[{"project":"demo","session":"api-2","kind":"needs-you"}]}' \
+         "$(pu_payload "$PU/ok.jsonl" | sed 's/"at":[0-9]*/"at":AT/')"
+      # THE WHOLE OF HIS STATED REQUIREMENT, and structural rather than a spot check: the
+      # payload's key set is fixed, so there is no field a sentence could live in. The
+      # status file that produced this push carried a transcript path naming a client and
+      # a note with a DATABASE_URL in it; neither has anywhere to go.
+      is "...and carries no other keys"        '["at","kind","n","sessions","v"]' \
+         "$(pu_payload "$PU/ok.jsonl" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.stringify(Object.keys(JSON.parse(d)).sort())))')"
+      is "...nor any nested ones"              '["kind","project","session"]' \
+         "$(pu_payload "$PU/ok.jsonl" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.stringify(Object.keys(JSON.parse(d).sessions[0]).sort())))')"
+      is "NO transcript path in the payload"   "0" "$(pu_field "$PU/ok.jsonl" payload_text | grep -c 'SECRET-CLIENT-NAME' || true)"
+      is "NO note text in the payload"         "0" "$(pu_field "$PU/ok.jsonl" payload_text | grep -c 'DATABASE_URL\|postgres' || true)"
+      is "...and no cwd either"                "0" "$(pu_field "$PU/ok.jsonl" payload_text | grep -c '/x/' || true)"
+    else
+      bad "a need-you reaches the phone" "1 push" "$(pu_lines "$PU/ok.jsonl") — daemon log: $(tr '\n' ' ' < "$PU/serve.log" | tail -c 200)"
+    fi
+
+    # ── TWO: he is holding the phone, so say nothing ────────────────────────
+    # The suppression has to happen BEFORE the send. A worker that decides not to show a
+    # notification can cost the subscription on iOS, so "he is already looking" is a
+    # decision only the server can take — and the signal is the poll it just served.
+    #   THE WAIT IS LOAD-BEARING: without it the previous case's push is still inside the
+    # debounce window, and this case's silence would prove the cooldown works rather than
+    # the suppression. Two mechanisms that produce the same zero have to be separated in
+    # time or the assertion cannot say which one it caught.
+    sleep 6
+    : > "$PU/ok.jsonl"
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
+    sleep 2
+    curl -s -o /dev/null -m2 -H "Authorization: Bearer $TOK" "$PUBASE/api/health"
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
+    sleep 3
+    is "a poll a second ago means silence"     "0" "$(pu_lines "$PU/ok.jsonl")"
+    # ...and the other direction on the same transition, or a sender that had simply
+    # stopped working would look exactly like this.
+    sleep 4                                    # older than quiet_after_poll (5s)
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
+    sleep 2
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
+    if pu_wait "$PU/ok.jsonl" 1; then is "once he stops looking, it sends"  "1" "$(pu_lines "$PU/ok.jsonl")"
+    else bad "once he stops looking, it sends" "1 push" "0"; fi
+
+    # ── THREE: a NON-WORK profile, and the master's own turn ────────────────
+    # Two of CLAUDE.md's scars in one assertion. A sender that watched only ~/.claude/fleet
+    # would be silent here with no error anywhere; and the master's turns are exactly what
+    # the inbox block in hooks/fleet-event.sh deliberately skips, which is why this reads
+    # the status transition instead of that feed.
+    : > "$PU/ok.jsonl"; sleep 6
+    pu_status "$PU/home/.claude-personal/fleet" m1 cf-personal-pers master working
+    sleep 2
+    pu_status "$PU/home/.claude-personal/fleet" m1 cf-personal-pers master ready
+    if pu_wait "$PU/ok.jsonl" 1; then
+      is "a personal-profile session delivers" '{"v":1,"kind":"answer","n":1,"at":AT,"sessions":[{"project":"pers","session":"master","kind":"answer"}]}' \
+         "$(pu_payload "$PU/ok.jsonl" | sed 's/"at":[0-9]*/"at":AT/')"
+    else
+      bad "a personal-profile session delivers" "1 push naming pers/master" "nothing — every profile's fleet dir has to be watched"
+    fi
+
+    # ── FOUR: five finishing over a few seconds is one buzz ────────────────
+    # DELIBERATELY STRADDLING TWO SCANS. The first version flipped all five at once, and
+    # that passes on the coalescing inside a single scan alone — proved by deleting the
+    # debounce and watching it stay green, which is the "a test that can only pass proves
+    # nothing" case CLAUDE.md is about. Three, then a scan, then two more: the second
+    # group is a separate tick and only the leading-edge cooldown can swallow it.
+    : > "$PU/ok.jsonl"; sleep 6
+    for n in 1 2 3 4 5; do pu_status "$PU/home/.claude/fleet" b$n cf-demo bulk-$n working; done
+    sleep 2
+    for n in 1 2 3; do pu_status "$PU/home/.claude/fleet" b$n cf-demo bulk-$n ready; done
+    sleep 2
+    for n in 4 5; do pu_status "$PU/home/.claude/fleet" b$n cf-demo bulk-$n ready; done
+    sleep 3
+    is "a burst is ONE notification"           "1" "$(pu_lines "$PU/ok.jsonl")"
+    is "...and it says more than one"          "1" "$(head -1 "$PU/ok.jsonl" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(/^[2-9]$/.test(String(JSON.parse(d).payload.n))?1:0)}catch{console.log(0)}})')"
+    is "...naming at most four"                "1" "$(head -1 "$PU/ok.jsonl" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log((JSON.parse(d).payload.sessions||[]).length<=4?1:0)}catch{console.log(0)}})')"
+
+    # ── FIVE: a dead endpoint is dropped, a live one is not ────────────────
+    curl -s -o /dev/null -m2 -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+      --data "$(cat "$PU/sub-gone.json")" "$PUBASE/api/push/subscribe"
+    is "the daemon holds two endpoints now"    "2" \
+       "$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log((c.clients[0].push||[]).length)' "$PU/serve.json")"
+    : > "$PU/ok.jsonl"; : > "$PU/gone.jsonl"; sleep 6
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
+    sleep 2
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 ready
+    pu_wait "$PU/gone.jsonl" 1 || true
+    pu_wait "$PU/ok.jsonl" 1 || true
+    sleep 1
+    is "the 410 endpoint was tried"            "1" "$(pu_lines "$PU/gone.jsonl")"
+    is "...and dropped"                        "1" \
+       "$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log((c.clients[0].push||[]).length)' "$PU/serve.json")"
+    is "...while the 201 endpoint survived"    "1" \
+       "$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const p=(c.clients[0].push||[]);console.log(p.length===1&&p[0].endpoint.includes(":'"$OKPORT"'")?1:0)' "$PU/serve.json")"
+
+    # ── SIX: his names are HIS call, so it is a knob and not a code decision ─
+    # §9's open question. His project names are client names and a lock screen is readable
+    # by whoever is holding the phone, so the default names things and one flag stops it.
+    is "the CLI reports the granularity"       "1" "$(pu push 2>&1 | grep -c '^detail     named' || true)"
+    is "...and switches it"                    "1" "$(pu push --detail anonymous 2>&1 | grep -c "now 'anonymous'" || true)"
+    is "...and refuses a third value"          "1" "$(pu push --detail loud 2>&1 | grep -c "takes 'named'" || true)"
+    : > "$PU/ok.jsonl"; sleep 6
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
+    sleep 2
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
+    if pu_wait "$PU/ok.jsonl" 1; then
+      is "anonymous sends the count only"      '{"v":1,"kind":"needs-you","n":1,"at":AT}' \
+         "$(pu_payload "$PU/ok.jsonl" | sed 's/"at":[0-9]*/"at":AT/')"
+      is "...with no name anywhere in it"      "0" "$(pu_field "$PU/ok.jsonl" payload_text | grep -c 'demo\|api-2' || true)"
+    else
+      bad "anonymous sends the count only" "1 push" "0"
+    fi
+    pu push --detail named >/dev/null 2>&1
+
+    # ── SEVEN: --test proves the whole path from the Mac ───────────────────
+    : > "$PU/ok.jsonl"
+    is "push --test posts a real one"          "1" "$(pu push --test 2>&1 | grep -c 'accepted; the phone should buzz' || true)"
+    is "...and it arrives decryptable"         "push-test" "$(pu_wait "$PU/ok.jsonl" 1 && pu_field "$PU/ok.jsonl" payload.sessions.0.session)"
+
+    # ── EIGHT: revoking the device takes its push with it ──────────────────
+    # A revoked phone that kept buzzing would be the one surface where fleet state still
+    # reached a device that can no longer read it.
+    pu revoke phone >/dev/null 2>&1
+    is "revoke drops the subscriptions"        "0" \
+       "$(node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));console.log((c.clients[0].push||[]).length)' "$PU/serve.json")"
+    : > "$PU/ok.jsonl"; sleep 6
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
+    sleep 2
+    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
+    sleep 3
+    is "...and nothing is sent after that"     "0" "$(pu_lines "$PU/ok.jsonl")"
+  fi
+  rm -rf "$PU"
+fi
+
 group "fleet-serve asserts Tailscale Funnel is off"
 # §11.1: Funnel is the one setting that would undo all of §5, "and it should be asserted,
 # not remembered". Three directions, because two of them look alike from outside: on

@@ -119,7 +119,15 @@ is('...and it is 180x180', '180x180', exists('icons/apple-touch-icon.png') ? png
 // The precache list, in BOTH directions. A stale entry breaks nothing visibly; a
 // MISSING entry breaks the app only offline, only on the first try, and only for
 // whoever is standing on a train.
-const shell = [...read('sw.js').matchAll(/'(\.\/[^']*)'/g)].map(m => m[1].replace(/^\.\//, '')).filter(Boolean);
+// THE PRECACHE LIST, from the array that IS the precache list. This used to scrape every
+// './…' string literal in sw.js, which is the same thing only while every such literal is
+// a file — and the push handlers added two that are cache KEYS, not files ('./__push-key',
+// where the page leaves the application server key for the worker). The scrape then
+// reported two missing files that were never meant to exist. Read SHELL itself, and go red
+// if it cannot be found rather than silently falling back to the heuristic.
+const shellBlock = (/const SHELL = \[([\s\S]*?)\n\];/.exec(read('sw.js')) || [])[1] || '';
+is('the precache list is where it says it is', true, !!shellBlock);
+const shell = [...shellBlock.matchAll(/'(\.\/[^']*)'/g)].map(m => m[1].replace(/^\.\//, '')).filter(Boolean);
 is('every precached file exists', '', shell.filter(f => f && !exists(f)).join(','));
 const shipped = [
   'index.html', 'app.css', ...JS_FILES.filter(f => f !== 'sw.js'), 'manifest.webmanifest',
@@ -222,6 +230,74 @@ is('...and sized in em, so it is the button\'s size', true,
 is('the picker says how many voices it got', true, /reported by this device/.test(appcode));
 is('...and the iOS suggestion is conditional', true, /vs\.length <= 1\) kids\.push/.test(appcode));
 is('...and hedged, not promised', true, /a guess, not a fix/.test(appcode));
+// ── push: a bell that always rings, and only from a home screen ─────────────
+// Two iOS rules that are invisible until a phone is in someone's hand:
+//
+//   1. A push whose service worker does not call showNotification can have the
+//      SUBSCRIPTION REVOKED. So the worker may not have an opinion about whether to
+//      bother anybody — every suppression decision belongs on the server, which is the
+//      only side that knows when the phone last polled. A `return` on the way to
+//      showNotification is that opinion, spelled in code.
+//   2. A Safari TAB cannot subscribe at all; only a home-screen install can. A button
+//      that opens no prompt is indistinguishable from a broken one, so the app has to say
+//      which state it is in rather than fail quietly.
+const swjs = read('sw.js');
+const pushHandler = (/addEventListener\('push',[\s\S]*?\n\}\);/.exec(swjs) || [''])[0];
+is('the worker handles a push', true, !!pushHandler);
+is('...and always shows a notification', true, /showNotification\(/.test(pushHandler));
+// No early exit anywhere in the handler: not `return`, not a guard that skips the show.
+is('...with no path that shows nothing', false, /\breturn\b/.test(pushHandler));
+// A payload it cannot parse still has to ring, which is what the fallback is for.
+is('...even for an unreadable payload', true, /catch\s*{\s*d = null;?\s*}/.test(swjs) && /pushText\(d \|\| \{\}\)/.test(swjs));
+is('a tap on it opens the app', true, /addEventListener\('notificationclick'/.test(swjs));
+// A rotated endpoint is a dead subscription and nothing on the phone says so.
+is('a rotated subscription is handled', true, /addEventListener\('pushsubscriptionchange'/.test(swjs));
+
+// THE NOTIFICATION'S WORDS ARE THE WORKER'S, NOT THE PAYLOAD'S. The payload carries a
+// kind, a count and identifiers; every sentence a lock screen shows is written in sw.js
+// from those. So the worker must never read a free-text field — there is none to read,
+// and this is what keeps it that way when someone adds one to the sender.
+is('the text is written here, not sent', false, /\bd\.(body|text|message|note|detail|title|prose)\b/.test(swjs));
+is('...from an enum of kinds', true, /kind === 'needs-you'/.test(swjs));
+
+// The client's own half of rule 2: detect it, and SAY it.
+is('the app detects a home-screen install', true, /display-mode: standalone/.test(appjs));
+is('...and iOS\'s older spelling too', true, /navigator\.standalone/.test(appjs));
+is('...and says what to do about a tab', true, /Add to Home Screen/.test(appjs));
+is('...and names a denied permission', true, /Notifications → ghostfleet|iOS Settings/.test(appjs));
+// Fixtures have no server to send a push, and a toggle that looked live against them
+// would be the same lie api.js's three-way connection picker exists to stop.
+is('...and refuses to pretend in fixtures', true, /push needs a real fleet-serve/.test(appjs));
+is('the subscription is uploaded with the token', true, /pushSubscribe\(/.test(read('api.js')));
+
+// THE WORDING IS THE PRODUCT, so it is RENDERED here rather than pattern-matched. sw.js
+// cannot be imported — its top-level `self.addEventListener` throws outside a worker — so
+// the one pure function in it is lifted out and called. Every shape a payload can take was
+// run through this while it was being written, and two of them were wrong: an anonymous
+// count of one printed "1 sessions need you", and a payload the worker could not parse
+// rendered "1 sessions have answers", inventing both the number and the kind from nothing.
+// A regex would have passed for both.
+const pushTextSrc = (/function pushText\(d\) \{[\s\S]*?\n\}/.exec(swjs) || [''])[0];
+let pushTextFn = null;
+try { pushTextFn = eval(`(${pushTextSrc})`); } catch {}
+is('the notification wording is testable', 'function', typeof pushTextFn);
+if (typeof pushTextFn === 'function') {
+  const say = (d) => { const t = pushTextFn(d); return `${t.title} | ${t.body}`; };
+  is('one named session reads as itself', 'api-2 needs you | acme-api',
+     say({ v: 1, kind: 'needs-you', n: 1, sessions: [{ project: 'acme-api', session: 'api-2', kind: 'needs-you' }] }));
+  is('an answer says so', 'master has an answer | acme-api',
+     say({ v: 1, kind: 'answer', n: 1, sessions: [{ project: 'acme-api', session: 'master', kind: 'answer' }] }));
+  is('a burst says how many', '3 sessions have answers | acme-api/api-2 · web/master',
+     say({ v: 1, kind: 'answer', n: 3, sessions: [{ project: 'acme-api', session: 'api-2', kind: 'answer' }, { project: 'web', session: 'master', kind: 'answer' }] }));
+  // ONE IS SINGULAR, with or without a name to put in front of it.
+  is('anonymous never says "1 sessions"', 'a session needs you | open ghostfleet to see which',
+     say({ v: 1, kind: 'needs-you', n: 1 }));
+  is('...and names nothing at all', '4 sessions have answers | open ghostfleet to see which',
+     say({ v: 1, kind: 'answer', n: 4 }));
+  // An empty payload is a real state (a push with no data, a body that would not decrypt)
+  // and it still has to ring — with no count and no kind, because it has neither.
+  is('an unreadable payload invents nothing', 'ghostfleet | something needs you — open to see which', say({}));
+}
 
 // A CACHE VERSION THAT DID NOT MOVE IS A DEPLOY THAT DID NOT LAND. sw.js says so itself —
 // "forgetting it is worse than shipping nothing" — because the shell is served CACHE-FIRST:
