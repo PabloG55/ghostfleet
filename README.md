@@ -78,6 +78,7 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | **[docs/mobile.md](docs/mobile.md)** · **[web/README.md](web/README.md)** | The phone client — the design argument, and the client itself |
 | **[docs/stack-view.md](docs/stack-view.md)** | Why the stack is nested attaches and not `join-pane`, and what was measured to find out |
 | **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex` and `opencode` workers beside `claude`, and what degrades |
+| **[docs/attachments.md](docs/attachments.md)** | **Research, nothing built.** Can you send a photo from the phone to an agent? What was measured, the cheapest honest design, and the five-minute phone test that gates it |
 | **[docs/ROADMAP.md](docs/ROADMAP.md)** · **[docs/IDEAS.md](docs/IDEAS.md)** | What is next, and what is only an idea |
 | **[CLAUDE.md](CLAUDE.md)** | For working *on* ghostfleet: how to deploy a change, what the tests cover, and the failure modes that have bitten more than once |
 
