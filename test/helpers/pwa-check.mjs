@@ -110,6 +110,32 @@ const shipped = [
 is('every shipped file is precached', '', shipped.filter(f => !shell.includes(f)).join(','));
 is('the service worker never caches a verb', true, /req\.method !== 'GET'/.test(read('sw.js')));
 
+// ── rotation, and why unlocking it alone would have been a regression ──────
+// The manifest no longer pins portrait. On its own that gives a tablet ONE card stretched
+// across a landscape viewport, which is worse than the lock — so the two go together and
+// are asserted together: rotation is allowed AND the card list lays out in as many columns
+// as fit. Either one without the other is the bug.
+const manifest = JSON.parse(read('manifest.webmanifest'));
+is('rotation is not pinned to portrait', true, manifest.orientation !== 'portrait');
+is('...and the cards lay out in columns', true, /repeat\(auto-fill, *minmax\(33ch/.test(read('app.css')));
+// `ch` resolves against the element's own font, and fitCards() sets --fs at runtime: a
+// track minimum measured at body's size is a card wider than its column.
+is('...with ch measured at the card size', true, /\.cards \{[^}]*font-size: var\(--fs\)/s.test(read('app.css')));
+
+// ── the speaker moved off the composer ────────────────────────────────────
+// It was there only because lastAgentText() was the sole speakable thing. Both directions:
+// gone from the composer, present on a bubble — a change that only removed it would ship a
+// client that cannot read anything out.
+const appjs = read('app.js');
+const composer = (/function composer\([\s\S]*?\n\}/.exec(appjs) || [''])[0];
+is('the composer has no speaker', false, /toggleSpeak/.test(composer));
+is('...and a bubble does', true, /function turn\([\s\S]*?toggleSpeak/.test(appjs));
+// ONE on screen at a time is what answers the button-wall objection the old comment
+// recorded: the control is drawn only for the bubble whose key matches the tap.
+is('...only on the tapped one', true, /S\.speakSel === key/.test(appjs));
+is('...and the old rationale was replaced, not deleted', true,
+   /button wall/.test(appjs));
+
 // A CACHE VERSION THAT DID NOT MOVE IS A DEPLOY THAT DID NOT LAND. sw.js says so itself —
 // "forgetting it is worse than shipping nothing" — because the shell is served CACHE-FIRST:
 // a phone that already has the old version paints the old app.js on the first open after a

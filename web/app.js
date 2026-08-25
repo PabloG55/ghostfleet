@@ -33,6 +33,9 @@ const S = {
   pane: null,           // last /api/pane payload   { pane, at, … }
   paneGeom: null,       // { rows, cols } — measured from that payload, not claimed by it
   paneErr: '',          // the last pane read's failure, shown once rather than per poll
+  speakSel: '',         // key of the bubble that was TAPPED — the only one showing a play
+                        // control. See turn(): this is what keeps per-message playback
+                        // from becoming a speaker on every bubble.
   pscroll: 0,           // scrollback rows asked for; 0 = exactly what an attach shows
   pfs: 0,               // the pane's font size in px, 0 until restore() or PFS_DEFAULT
   sel: 0,               // the TUI's `sel` — which card the verbs act on
@@ -56,6 +59,8 @@ const S = {
 const DEFAULT_VIEW = 'chat';
 const LS_LAST = 'gf.last';   // last fetched state, for a cold offline open
 const LS_PFS = 'gf.pfs';    // the pane's font size, which is a per-eyesight preference
+const LS_VOICE = 'gf.voice'; // { uri, name } of the chosen voice — see pickVoice()
+const LS_RATE = 'gf.rate';   // speaking rate, the other half of "make it listenable"
 
 // ── persistence: something to show before the network answers ─────────────
 // "Usable offline enough to show the last fetched state rather than a blank page."
@@ -361,7 +366,7 @@ function projectsScreen() {
 function toProjects() {
   const n = navDepth;
   S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null;
-  S.pending = null; stopSpeaking();
+  S.pending = null; S.speakSel = ''; stopSpeaking();
   navDepth = 0;
   if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
     try { history.go(-n); } catch {}    // popstate fires; popTo() sees screen==='projects'
@@ -575,6 +580,62 @@ const canSpeak = () => {
   try { return typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance === 'function'; }
   catch { return false; }
 };
+
+// ── which voice, and the three ways asking that question goes wrong ──────────
+//
+// THE LIST IS EMPTY THE FIRST TIME YOU ASK. getVoices() returns [] on the first call in
+// Safari and fills in later, announcing it with `voiceschanged`. A picker built once, at
+// boot, therefore ships empty on the device this app is for. So: subscribe once, and
+// re-render the sheet if it is open when the list arrives.
+let voicesCache = [];
+let voicesHooked = false;
+export function allVoices() {
+  if (!canSpeak()) return [];
+  try {
+    const v = speechSynthesis.getVoices();
+    if (v && v.length) voicesCache = v;
+  } catch {}
+  if (!voicesHooked) {
+    voicesHooked = true;
+    try {
+      speechSynthesis.addEventListener('voiceschanged', () => {
+        try { voicesCache = speechSynthesis.getVoices() || voicesCache; } catch {}
+        // Only if the settings sheet is the thing on screen: a list arriving while you are
+        // reading a transcript must not redraw the transcript under your thumb.
+        if (S.sheet === 'settings') render();
+      });
+    } catch {}
+  }
+  return voicesCache;
+}
+// THE LIST DIFFERS PER DEVICE, so what is stored is an IDENTITY and not an index: a phone
+// and a tablet do not have the same voices, and position 7 is a different person on each.
+// Both fields are kept because voiceURI is the exact match and name is what survives an OS
+// upgrade that renumbers the URIs.
+function savedVoice() {
+  try { const j = JSON.parse(localStorage.getItem(LS_VOICE) || 'null');
+        return (j && typeof j === 'object' && (j.uri || j.name)) ? j : null; } catch { return null; }
+}
+function setSavedVoice(v) {
+  try { v ? localStorage.setItem(LS_VOICE, JSON.stringify({ uri: v.voiceURI, name: v.name }))
+          : localStorage.removeItem(LS_VOICE); } catch {}
+}
+// A SAVED VOICE THAT IS NOT HERE MUST STILL SPEAK. Returning null means "whatever the
+// browser defaults to", which is what an unset preference means too — so the phone that
+// has the voice and the tablet that does not both read the message out, and neither shows
+// an error about a preference. Falling back loudly would be a setting that breaks the app
+// on the second device.
+export function pickVoice() {
+  const want = savedVoice();
+  if (!want) return null;
+  const vs = allVoices();
+  return vs.find(v => v.voiceURI === want.uri) || vs.find(v => v.name === want.name) || null;
+}
+export function savedRate() {
+  let r = NaN;
+  try { r = Number(localStorage.getItem(LS_RATE)); } catch {}
+  return Number.isFinite(r) && r >= 0.5 && r <= 2 ? r : 1.05;
+}
 function stopSpeaking() {
   if (!canSpeak()) { S.speaking = ''; return; }
   try { speechSynthesis.cancel(); } catch {}
@@ -582,7 +643,7 @@ function stopSpeaking() {
 }
 // A TOGGLE, and it is the same button both ways: tapping the one that is speaking stops
 // it. Two voices at once is the failure mode of a play button that is really two buttons.
-function toggleSpeak(text) {
+export function toggleSpeak(text) {
   if (!canSpeak()) { toast('this browser has no speech synthesis', 'bad'); return; }
   const say = speakable(text);
   if (!say) { toast('nothing to read out in that message', 'bad'); return; }
@@ -592,7 +653,13 @@ function toggleSpeak(text) {
   S.speaking = say;
   try {
     const u = new SpeechSynthesisUtterance(say);
-    u.rate = 1.05;
+    // The rate that was hardcoded here is now the default of a setting; the voice is null
+    // when nothing is saved or the saved one is absent, and null is exactly what the
+    // browser treats as "your default". speakable() is untouched by either — what gets
+    // normalised and what reads it out are different questions.
+    u.rate = savedRate();
+    const voice = pickVoice();
+    if (voice) { u.voice = voice; if (voice.lang) u.lang = voice.lang; }
     // Cleared when it finishes on its own, or the button stays lit for a voice that
     // stopped talking a minute ago. `onerror` too: iOS refuses to speak at all until a
     // gesture has unlocked audio, and a stuck highlight is how that looks from outside.
@@ -737,7 +804,7 @@ function chatView(card) {
   } else if (s.total) {
     wrap.append(el('div', { class: 'meta l', text: '— the beginning of the transcript —' }));
   }
-  for (const m of (s.messages || [])) wrap.append(turn(m.role === 'user', m.text, G.clockLabel(m.ts)));
+  for (const m of (s.messages || [])) wrap.append(turn(m.role === 'user', m.text, G.clockLabel(m.ts), false, msgKey(m)));
   // Sent, not yet echoed by the transcript. Dimmed rather than absent: a chat where your
   // own message disappears for five seconds reads as a send that failed, and this app's
   // whole job is telling you what is actually happening.
@@ -745,7 +812,22 @@ function chatView(card) {
   watchScroll('chat', wrap);
   return wrap;
 }
-function turn(mine, text, when, pending = false) {
+// PER-MESSAGE PLAYBACK WITHOUT A SPEAKER ON EVERY BUBBLE.
+//
+// The composer used to carry the only 🔊, and the comment there said why: a speaker on
+// every bubble is the button wall this client keeps having to fight. That objection was
+// right and it still is — so this does not put N buttons on screen. It puts ONE, on the
+// bubble you tapped, and moves it when you tap another. The count of visible speakers is
+// the same as it was; what changed is that you choose which message it is attached to,
+// instead of it always being the newest.
+//   A TAP, not a long-press: long-press is already `x kill` on a card and already the
+// text-selection gesture inside a bubble, and a third meaning for it would be the worst
+// kind of hidden. A tap has no meaning on a bubble today, so it is free.
+//   Nothing is spoken by the tap itself. Tap reveals, the control plays — because a tap
+// that started talking would make scrolling a transcript hazardous, and because the
+// control is what carries the stop state.
+function msgKey(m) { return String(m.role || '') + '|' + String(m.ts || ''); }
+function turn(mine, text, when, pending = false, key = '') {
   const bub = el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : '') });
   // AN ASSISTANT'S TURN IS MARKDOWN AND WAS BEING SHOWN AS ITS OWN SOURCE — "the messages
   // are not in nice .md format, they have the ****" — because this was one `text:`, which
@@ -756,10 +838,28 @@ function turn(mine, text, when, pending = false) {
   // asterisks reached the agent. What you typed is what you see.
   if (mine) bub.textContent = String(text || '');
   else bub.appendChild(md.render(String(text || ''), document));
-  return el('div', { class: 'turn ' + (mine ? 'me' : 'them') }, [
-    bub,
-    el('div', { class: 'meta', text: when }),
-  ]);
+  const meta = el('div', { class: 'meta', text: when });
+  const speakableHere = !pending && key && canSpeak() && speakable(text);
+  if (speakableHere) {
+    bub.classList.add('tappable');
+    bub.addEventListener('click', (e) => {
+      // A link is a link, and a selection is a selection. Tapping either must not also
+      // toggle a control — copying a sha out of a bubble is a thing people do here.
+      if (e.target && e.target.closest && e.target.closest('a')) return;
+      try { if (String(getSelection && getSelection() || '').length) return; } catch {}
+      S.speakSel = (S.speakSel === key) ? '' : key;
+      render();
+    });
+  }
+  if (speakableHere && S.speakSel === key) {
+    const on = S.speaking === speakable(text);
+    // Same glyph pair and same reasoning as the composer button it replaces: 🔊/🔇 is one
+    // face at one weight, so pressing it reads as this control changing rather than a
+    // different control appearing.
+    meta.append(btn(on ? '🔇' : '🔊', (e) => { e.stopPropagation(); toggleSpeak(text); },
+                    'speak tiny' + (on ? ' on' : '')));
+  }
+  return el('div', { class: 'turn ' + (mine ? 'me' : 'them') }, [bub, meta]);
 }
 
 // ── the composer ────────────────────────────────────────────────────────────
@@ -787,28 +887,12 @@ function composer(card) {
     // "chat is very small" complaint in miniature.
     try { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight, 160) + 'px'; } catch {}
   });
-  const kids = [box];
-  // Read the newest thing the agent said. ONE button, deliberately: a speaker on every
-  // bubble is the button wall again, and the newest message is the one you want read out —
-  // it is also the one nearest the thumb, at the bottom of the column.
-  const last = lastAgentText();
-  if (canSpeak() && last) {
-    const on = S.speaking === speakable(last);
-    // ONE BUTTON, TWO STATES, AND BOTH OF THEM EMOJI. It was 🔊 idle and ■ playing — a
-    // colour emoji against U+25A0 BLACK SQUARE, which is a thin monochrome glyph a third of
-    // the size. Tapping it changed the control's weight, its colour and its apparent size,
-    // so it read as a different button appearing rather than as this one being pressed, and
-    // the .speak.on background it already has was doing all the work of saying "playing".
-    // 🔇 is the same face, same weight, same metrics, and it says what pressing again does.
-    kids.push(btn(on ? '🔇' : '🔊', () => toggleSpeak(last), 'speak' + (on ? ' on' : '')));
-  }
-  kids.push(btn('send', () => sendDraft(), 'go'));
+  // NO SPEAKER HERE ANY MORE. It lived in the composer because lastAgentText() was the
+  // only thing that could be spoken, which made "the newest message" the whole feature.
+  // Now any bubble can be played (see turn()), so the composer is a text box and a send
+  // button again — which is what it is for.
+  const kids = [box, btn('send', () => sendDraft(), 'go')];
   return el('div', { class: 'composer' }, kids);
-}
-function lastAgentText() {
-  const ms = (S.sess && S.sess.messages) || [];
-  for (let i = ms.length - 1; i >= 0; i--) if (ms[i].role !== 'user' && String(ms[i].text || '').trim()) return ms[i].text;
-  return '';
 }
 async function sendDraft() {
   const text = String(S.draft || '').trim();
@@ -1090,6 +1174,23 @@ function sizePaneBox(box) {
   if (Number.isFinite(h) && h > 140) box.style.maxHeight = Math.round(h) + 'px';
 }
 
+// The resolved column count of the card grid. getComputedStyle returns the USED value of
+// grid-template-columns — a space-separated list of pixel widths, one per track — so its
+// length is the number of columns the engine settled on. No parsing of ch units, no
+// duplicate of the CSS breakpoint in JS, and nothing to keep in sync when the CSS changes.
+export function gridColsFrom(tracks) {
+  const t = String(tracks || '').trim();
+  if (!t || t === 'none') return 1;
+  return Math.max(1, t.split(/\s+/).filter(Boolean).length);
+}
+function gridCols() {
+  try {
+    const list = document.querySelector('#app .cards');
+    if (!list) return 1;
+    return gridColsFrom(getComputedStyle(list).gridTemplateColumns);
+  } catch { return 1; }
+}
+
 function restoredPfs() {
   // Guarded like every other storage read here: a browser with site data blocked throws
   // on the getter, and a pane that will not draw because of a font-size preference would
@@ -1302,7 +1403,7 @@ function pushNav() {
 function popTo() {
   if (S.sheet) { closeSheet(); return; }
   if (S.confirm) { cancel(); return; }
-  if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; stopSpeaking(); }
+  if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; S.speakSel = ''; stopSpeaking(); }
   else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; }
   else return;                                  // at the root: let the platform have it
   navDepth = Math.max(0, navDepth - 1);
@@ -1977,6 +2078,42 @@ async function sheetSettings() {
   kids.push(el('div', { class: 'absent' }, [el('div', { text: 'not here, on purpose (§7):' }),
     el('div', { text: '· the stack — it exists to put sessions side by side, and a phone has no side. At nc = 1 that is the card list.' }),
     el('div', { text: '· Ctrl-t terminal / Ctrl-n editor tabs — they open a shell and neovim in the session\'s folder, and there is no local shell here.' })]));
+  // ── the voice, next to the diagnostic line it sits above ──────────────────
+  // A <select> and not a list of buttons: the list is however many voices the OS ships
+  // (dozens on iOS) and that is the one place a native control beats anything drawn here.
+  if (canSpeak()) {
+    const vs = allVoices();
+    const cur = savedVoice();
+    const sel = el('select', { class: 'vpick' });
+    // "default" is a real choice and the first one, because it is what an unset preference
+    // means AND what a saved-but-absent voice falls back to — the same state, named once.
+    sel.append(el('option', { value: '', text: 'default (whatever this device picks)' }));
+    for (const v of vs) {
+      const o = el('option', { value: v.voiceURI, text: `${v.name}${v.lang ? ' · ' + v.lang : ''}` });
+      if (cur && (cur.uri === v.voiceURI || (!vs.some(x => x.voiceURI === cur.uri) && cur.name === v.name))) o.selected = true;
+      sel.append(o);
+    }
+    sel.addEventListener('change', () => {
+      setSavedVoice(vs.find(v => v.voiceURI === sel.value) || null);
+      stopSpeaking();                       // whatever is talking is talking in the old voice
+      render();
+    });
+    kids.push(el('h2', { text: 'read-aloud voice' }));
+    kids.push(sel);
+    // The list arrives asynchronously in Safari (see allVoices), so an empty picker is a
+    // state a user can actually be looking at. Say which it is rather than showing a box
+    // with one entry and no explanation.
+    if (!vs.length) kids.push(el('div', { class: 'dim small',
+      text: 'no voices reported yet — this list fills in a moment after the first open' }));
+    if (cur && !pickVoice()) kids.push(el('div', { class: 'dim small',
+      text: `“${cur.name}” is not installed on this device — using the default until it is` }));
+    const rate = savedRate();
+    kids.push(el('div', { class: 'row' }, [
+      el('div', { class: 'dim small', text: `rate ${rate.toFixed(2)}×` }),
+      btn('− slower', () => { try { localStorage.setItem(LS_RATE, String(Math.max(0.5, rate - 0.15))); } catch {} stopSpeaking(); render(); }),
+      btn('+ faster', () => { try { localStorage.setItem(LS_RATE, String(Math.min(2, rate + 0.15))); } catch {} stopSpeaking(); render(); }),
+    ]));
+  }
   kids.push(el('div', { class: 'row' }, [btn('esc back', closeSheet)]));
   // Last row, and deliberately plain: it is diagnostic, not a setting. `no worker` means
   // you are on the network rather than a cached shell; `unknown` means the worker serving
@@ -2049,10 +2186,19 @@ function onKey(e) {
     }
     if (n >= 0 && n < list.length) { S.sel = n; render(); }
   };
+  // HOW MANY COLUMNS ARE ACTUALLY ON SCREEN, asked of the browser rather than computed
+  // from an assumed character width. The CSS picks the count with auto-fill (see
+  // app.css), so the only place the truth lives is the resolved grid — and reading it back
+  // means the keys agree with what the eye sees at any viewport, including the one the
+  // rotation unlock just made possible. Falls back to 1, which is every phone.
+  const nc = gridCols();
   switch (k) {
-    case 'ArrowUp': case 'k': move(-1); break;
-    case 'ArrowDown': case 'j': move(1); break;
-    // At nc = 1 left/right are the same one-card step up and down the column.
+    // Up and down cross a ROW, which is nc cards — the TUI's ⇧K/⇧J arithmetic, and at
+    // nc = 1 it is the one-card step it has always been.
+    case 'ArrowUp': case 'k': move(-nc); break;
+    case 'ArrowDown': case 'j': move(nc); break;
+    // Left and right are always one card. At nc = 1 that makes them the same step as up
+    // and down, which is what they used to be unconditionally.
     case 'ArrowLeft': case 'h': move(-1); break;
     case 'ArrowRight': case 'l': move(1); break;
     case 'H': case 'K': if (it.card) reorder(it.card.name, -1); break;
