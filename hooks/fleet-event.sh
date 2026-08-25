@@ -99,14 +99,144 @@ fi
 
 # A wake PASTES into a session's input box and presses Enter, so it must only fire when
 # that box is EMPTY — otherwise it submits whatever a human was half-way through typing
-# with the nudge glued onto the end. Anything left after the ❯ prompt (once the box
-# drawing is stripped) counts as half-typed. Skipping is safe: the event stays in the
-# inbox and the next wake, with a clear box, delivers it. Shared by both wakes below.
-_input_empty() {                      # $1=socket $2=session -> 0 when safe to paste
-  local inl
-  inl="$(tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null | grep '❯' | tail -1)"
-  inl="$(printf '%s' "${inl#*❯}" | tr -d '[:space:]│╭╮╰╯─|')"
-  [ -z "$inl" ]
+# with the nudge glued onto the end.
+#
+# FIND THE BOX; DO NOT GUESS AT IT. This used to grep the whole visible pane for ❯ and
+# take the last match, on the assumption that the last ❯ on screen is the input box. It
+# is not, and the assumption fails in both directions:
+#
+#   * Claude Code echoes every SUBMITTED message back into the transcript as `❯ <text>`,
+#     and those stay on screen. Measured on a live master: `❯ did it finsih and it didnt
+#     send a message?` — submitted minutes earlier, sitting in no box at all.
+#   * Any RENDERED CONTENT can carry one: a tool result showing another pane, a file
+#     being displayed — and, fittingly, this hook's own source, because the old line
+#     `grep '❯'` contains one.
+#
+# Each of those reads as "half-typed", so the wake is skipped and the master is never
+# told a worker finished. Two events did exactly that on 2026-08-25 (22:16 and 22:24);
+# the stamp, written only on a successful send, still read 22:02.
+#
+# WHAT ACTUALLY LOCATES THE COMPOSER is the frame around it, and bin/fleet-send's
+# in_input() had the insight first: the composer is the region between the LAST TWO
+# boundary lines, because below it there is only the status bar, which carries text.
+#   NOT a copy of its regex, though, and the difference is measured rather than stylistic.
+# in_input tests for a line of NOTHING but rule glyphs and spaces. On a live worker pane
+# that matches a BLANK line (an empty string satisfies it) and misses the labelled edge
+# the fleet draws, so its pair straddles the wrong lines — it happens to still contain the
+# composer, which is why in_input works in practice, but it is right by luck. The version
+# below anchors on a run of rule glyphs instead, which is why it needs no luck.
+#
+# THREE ANSWERS, NOT TWO, and the caller needs the difference:
+#   0  composer found and EMPTY          -> safe to paste
+#   1  composer found and OCCUPIED       -> never paste; a human is mid-sentence
+#   2  no composer found                 -> never paste either. A permission dialog, a
+#                                           full-screen overlay or a scrolled-back pane
+#                                           has no box, and pasting into one is exactly
+#                                           as wrong as clobbering a message.
+# Refusing on "unknown" is only affordable because a refusal is no longer a drop — see
+# _defer_nudge below. The two changes are one change: the guard can be strict precisely
+# because a skip now comes back.
+#   LC_ALL=C AND NO BRACKET EXPRESSIONS, both of which were learned the hard way against
+# live panes. A capture can contain a byte that is not valid UTF-8 — a spinner glyph split
+# across a redraw — and BSD awk in a UTF-8 locale does not shrug that off, it aborts the
+# record with `towc: multibyte conversion failure` and stops classifying. Under LC_ALL=C
+# there is no conversion to fail. But a bracket expression like [─╭╰╮╯] is then a set of
+# BYTES, not of characters, so it half-matches every other multibyte glyph on the line;
+# every pattern below is therefore a literal alternation, which is the same bytes in both
+# locales. `length("❯")` is 3 under C and 1 under UTF-8, and substr counts in the same
+# units either way, so the skip past the glyph is right in both.
+_input_state() {                      # $1=socket $2=session -> 0 empty / 1 typed / 2 none
+  tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null | LC_ALL=C awk '
+    # A RULE MAY CARRY A LABEL. Requiring a line of NOTHING but rule glyphs looked right
+    # and rejected the top edge of the composer on every worker pane, because the fleet
+    # draws a labelled separator — `────── ghostfleet/docs-sync ─`. Measured on a live
+    # worker: only ONE of the two edges matched, so the region was never found and every
+    # wake read "no box". So: starts with a rule glyph and carries a long run of them. The
+    # composer line starts with the prompt glyph and never qualifies; prose does not either.
+    function isrule(s) { return s ~ /^[ \t]*(─|│|╭|╮|╰|╯)/ && s ~ /────────/ }
+    { l[NR]=$0; if (isrule($0)) b[++n]=NR }
+    END { if (n < 2) exit 2
+          found = 0; rest = ""
+          for (i = b[n-1] + 1; i < b[n]; i++) {
+            line = l[i]
+            # only the FIRST ❯ is the prompt glyph; anything after it on that line, and
+            # every continuation line below it, is what the human has typed
+            if (!found) { p = index(line, "❯")
+                          if (p) { found = 1; line = substr(line, p + length("❯")) } }
+            rest = rest line
+          }
+          if (!found) exit 2
+          # NOT JUST ASCII SPACE. A live empty composer pads with U+00A0 (c2 a0), not
+          # U+0020 — measured on this fleet, where the box reads `❯` followed by a
+          # NON-BREAKING space. Strip that and its neighbours too, or an empty box counts
+          # as typed and the wake is skipped forever. The padding has already changed once;
+          # anything space-like belongs on this list.
+          gsub(/─|│|╭|╮|╰|╯|\||[ \t]|\302\240|\342\200[\200-\213\257]|\343\200\200/, "", rest)
+          exit (rest == "" ? 0 : 1) }' 2>/dev/null
+}
+_input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
+
+# A SKIPPED WAKE MUST NOT VANISH.
+#
+# The skip used to leave nothing behind, on the reasoning that "the next event re-checks
+# right away instead of waiting out the cooldown". That only holds if another event comes.
+# When the LAST worker to finish is the one that gets skipped, nothing re-checks — ever.
+# The master sits idle with a DONE in its inbox and no reason to look, which is
+# indistinguishable from no worker having finished: no error, no row, nothing to grep.
+#
+# So a skip arms a detached re-check instead. Delayed, never dropped.
+#
+# ONE PER FLEET, and that is not a shortcut: a single wake covers every row in the inbox,
+# which is the same reason the debounce below coalesces a burst of finishes into one
+# nudge. Five workers finishing while a human types must not queue five pastes for the
+# moment the box clears. The lock holds the re-check's pid, so a dead one never blocks a
+# live event from arming a fresh one.
+#
+# It re-enters the SAME debounce-and-stamp path rather than sending directly, so a
+# re-check that wakes up after a fresh event already nudged simply exits — the stamp it
+# reads is the other path's.
+#
+# BOUNDED, because a human who walks away mid-sentence would otherwise leave a process
+# polling forever. On giving up it writes a marker naming what went undelivered, so the
+# end state is still greppable rather than silent — the whole complaint about the old
+# behaviour was the absence of a trace, and a retry that expires quietly would recreate it
+# at a longer timescale.
+_defer_nudge() {                      # $1=socket — re-check until the box is clear
+  # declared separately, not `local a=$1 b=…$a…`: bash expands every assignment word in a
+  # single `local` before binding any of them, so the second would read an unset $sock and
+  # abort the hook under `set -u`
+  local sock lock p
+  sock="$1"; lock="$FLEET_DIR/$sock.notify.retry"
+  p="$(cat "$lock" 2>/dev/null)"
+  case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
+  export -f _input_state _input_empty
+  FLEET_DIR="$FLEET_DIR" nohup bash -c '
+    sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"
+    echo $$ > "$lock" 2>/dev/null
+    trap "rm -f \"$lock\"" EXIT
+    i=0
+    while [ "$i" -lt "$tries" ]; do
+      sleep "$every"; i=$((i + 1))
+      tmux -L "$sock" has-session -t master 2>/dev/null || continue
+      stamp="$FLEET_DIR/$sock.notify.stamp"
+      last="$(cat "$stamp" 2>/dev/null || echo 0)"
+      case "$last" in ""|*[!0-9]*) last=0 ;; esac
+      win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"
+      case "$win" in ""|*[!0-9]*) win=30 ;; esac
+      now="$(date +%s)"
+      # a fresh event already woke it: nothing left to deliver
+      [ "$(( now - last ))" -ge "$win" ] || exit 0
+      if _input_empty "$sock" master; then
+        printf "%s\n" "$now" > "$stamp" 2>/dev/null
+        fleet-send -s "$sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1
+        exit 0
+      fi
+    done
+    printf "%s deferred wake expired after %ss with the input box never clear\n" \
+      "$(date +%Y-%m-%dT%H:%M:%S)" "$(( every * tries ))" \
+      >> "$FLEET_DIR/$sock.notify.undelivered" 2>/dev/null
+  ' _ "$sock" "$lock" "${CLAUDE_FLEET_NOTIFY_RETRY_EVERY:-20}" \
+       "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" >/dev/null 2>&1 &
 }
 
 # Did this turn already hand the answer to the asker DIRECTLY? fleet-send --reply-to now
@@ -205,12 +335,16 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
       last="$(cat "$stamp" 2>/dev/null || echo 0)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
       win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"; case "$win" in ''|*[!0-9]*) win=30 ;; esac
       if [ "$(( now - last ))" -ge "$win" ]; then
-        # Don't clobber a half-typed message (see _input_empty). Don't stamp on skip,
-        # so the next event re-checks right away instead of waiting out the cooldown.
+        # Don't clobber a half-typed message, and don't paste into a pane with no box at
+        # all (see _input_state). Don't stamp on skip, so the next event re-checks right
+        # away instead of waiting out the cooldown — and arm a re-check, because when the
+        # LAST worker to finish is the skipped one there is no next event (_defer_nudge).
         if _input_empty "$CLAUDE_FLEET_SOCK" master; then
           printf '%s\n' "$now" > "$stamp" 2>/dev/null
           _sock="$CLAUDE_FLEET_SOCK"
           ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+        else
+          _defer_nudge "$CLAUDE_FLEET_SOCK"
         fi
       fi
     fi

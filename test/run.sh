@@ -3132,6 +3132,125 @@ else
   skip "fleet-send composer detector" "awk missing"
 fi
 
+# ── 4d5b. the wake must find the INPUT BOX, not the last ❯ on screen ─────────
+# hooks/fleet-event.sh only pastes a worker-finished nudge into master when the composer
+# is empty, or it would submit whatever a human was half-way through typing with the nudge
+# glued on. It identified that box as "the last line containing ❯", which is not the box:
+#
+#   * Claude Code echoes every SUBMITTED message back into the transcript as `❯ <text>`
+#     and those stay on screen — claude-composer-empty.txt has one, plus THREE prose lines
+#     that mention ❯, one of which is the old guard's own `grep '❯'`;
+#   * a pane with no composer at all — a shell tab, a permission dialog — has a last ❯
+#     that means something else entirely, or none at all.
+#
+# Both directions, and the second is the one that must never regress: a nudge that pastes
+# over a half-typed message is worse than a nudge that waits.
+group "the wake finds the input box, not the last ❯"
+if command -v awk >/dev/null 2>&1; then
+  # the real function, lifted from the hook with only its tmux call swapped for a file —
+  # the same way the fleet-send composer detector is tested above
+  eval "$(sed -n '/^_input_state() {/,/^}/p' "$ROOT/hooks/fleet-event.sh" \
+          | sed 's|tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null|cat "$1"|')"
+  st() { _input_state "$FIX/$1" x; echo $?; }          # 0 empty · 1 typed · 2 no box
+  is "an empty composer is safe to paste"   "0" "$(st claude-composer-empty.txt)"
+  is "a typed composer is NEVER clobbered"  "1" "$(st claude-composer-typed.txt)"
+  is "a permission dialog has no box"       "2" "$(st claude-permission-dialog-sgr.txt)"
+  is "a shell pane has no box either"       "2" "$(st shell-pane-no-composer.txt)"
+  # the older captures, which must not regress
+  is "...and the plain-space empty box"     "0" "$(st claude-input-submitted.txt)"
+  is "...and the plain-space typed box"     "1" "$(st claude-input-pending.txt)"
+
+  # THE TRAPS, asserted to actually BE in the fixture — a fixture that quietly lost them
+  # would leave the assertions above passing for the wrong reason
+  is "the empty fixture has an echoed ❯ msg" "1" \
+     "$([ "$(LC_ALL=C grep -c '^❯' "$FIX/claude-composer-empty.txt")" -ge 2 ] && echo 1 || echo 0)"
+  is "...and prose that mentions ❯"          "1" \
+     "$([ "$(grep -c '❯' "$FIX/claude-composer-empty.txt")" -ge 4 ] && echo 1 || echo 0)"
+  # U+00A0. A live empty composer pads with a NON-BREAKING space, not U+0020 — so a
+  # detector that only strips ASCII whitespace reads an empty box as typed and skips the
+  # wake forever. Pinned, because the padding has already changed once.
+  is "...and pads with U+00A0, not a space"  "1" \
+     "$(LC_ALL=C grep -c "$(printf '\302\240')" "$FIX/claude-composer-empty.txt" >/dev/null 2>&1 && echo 1 || echo 0)"
+
+  # AND WHAT THE OLD GUARD DID, so the fix is visible rather than asserted. It answers
+  # "paste" for a pane with no composer at all, which is how a nudge could be typed into
+  # a shell and submitted.
+  old_guard() { local inl; inl="$(grep '❯' "$1" | tail -1)"
+                inl="$(printf '%s' "${inl#*❯}" | tr -d '[:space:]│╭╮╰╯─|')"
+                [ -z "$inl" ] && echo paste || echo skip; }
+  is "the old guard pastes into a shell"    "paste" "$(old_guard "$FIX/shell-pane-no-composer.txt")"
+  is "...and the new one refuses"           "2"     "$(st shell-pane-no-composer.txt)"
+else
+  skip "wake input-box guard" "awk missing"
+fi
+
+# ── 4d5c. a skipped wake must be delayed, never dropped ──────────────────────
+# The skip used to leave nothing behind, reasoning that "the next event re-checks right
+# away". That holds only if another event comes. When the LAST worker to finish is the one
+# skipped, nothing re-checks — ever: the master sits idle with a DONE in its inbox and no
+# reason to look, which is indistinguishable from no worker having finished. Measured on
+# the live fleet: two DONE rows wrote their inbox entries and sent no nudge, and the stamp
+# (written only on a successful send) still read 14 and 22 minutes earlier.
+group "a skipped wake comes back"
+if command -v tmux >/dev/null 2>&1; then
+  ND="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$ND/bin"
+  # a fleet-send that records instead of pasting
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent.log"\n' "$ND" > "$ND/bin/fleet-send"
+  chmod +x "$ND/bin/fleet-send"
+  eval "$(sed -n '/^_defer_nudge() {/,/^}/p' "$ROOT/hooks/fleet-event.sh")"
+  # THE GUARD IS STUBBED HERE ON PURPOSE. Its correctness is the group above, against real
+  # captured panes; what this group tests is the DEFERRAL — that a skip comes back. Feeding
+  # it a scripted answer is also the only way to make "the box was busy, then it cleared"
+  # deterministic, and replaying a 65-line fixture into a tmux pane does not do that: the
+  # pane reflows it at its own width and the composer stops being where it was.
+  # ND is exported because _defer_nudge runs its re-check in a DETACHED bash -c and
+  # carries the guard across with `export -f` — an exported function whose body reads an
+  # un-exported variable is a stub that always answers "not empty" over there
+  export ND
+  _input_state() { return "$(cat "$ND/state" 2>/dev/null || echo 2)"; }
+  _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
+  echo 1 > "$ND/state"                       # the human is mid-sentence
+  FLEET_DIR="$ND"; export FLEET_DIR
+  tmux -L cfnudge kill-server 2>/dev/null
+  tmux -L cfnudge new-session -d -s master 'sleep 120' 2>/dev/null; sleep 1
+  CLAUDE_FLEET_NOTIFY_RETRY_EVERY=1 CLAUDE_FLEET_NOTIFY_RETRY_TRIES=40 PATH="$ND/bin:$PATH" \
+    _defer_nudge cfnudge
+  sleep 2
+  is "the skip armed a re-check"          "1" "$([ -f "$ND/cfnudge.notify.retry" ] && echo 1 || echo 0)"
+  is "...with a live pid in it"           "1" \
+     "$(p=$(cat "$ND/cfnudge.notify.retry" 2>/dev/null); kill -0 "$p" 2>/dev/null && echo 1 || echo 0)"
+  is "...and it has sent nothing yet"     "0" \
+     "$([ -f "$ND/sent.log" ] && wc -l < "$ND/sent.log" | tr -d ' ' || echo 0)"
+  # ONE PER FLEET: five workers finishing while a human types must not queue five pastes
+  first="$(cat "$ND/cfnudge.notify.retry" 2>/dev/null)"
+  CLAUDE_FLEET_NOTIFY_RETRY_EVERY=1 CLAUDE_FLEET_NOTIFY_RETRY_TRIES=40 PATH="$ND/bin:$PATH" \
+    _defer_nudge cfnudge
+  sleep 1
+  is "a second skip does not arm another" "$first" "$(cat "$ND/cfnudge.notify.retry" 2>/dev/null)"
+  # the human submits: the box clears. NOTHING else happens — no new event, no new hook
+  # run — and the wake must still arrive. That is the whole bug.
+  echo 0 > "$ND/state"
+  for i in $(seq 1 25); do [ -s "$ND/sent.log" ] && break; sleep 1; done
+  is "the deferred wake arrives by itself"     "1" "$([ -s "$ND/sent.log" ] && echo 1 || echo 0)"
+  is "...addressed to master"                  "1" "$(grep -c master "$ND/sent.log" 2>/dev/null || echo 0)"
+  is "...exactly once"                         "1" "$(wc -l < "$ND/sent.log" | tr -d ' ')"
+  is "...and stamped, so a burst coalesces"    "1" "$([ -s "$ND/cfnudge.notify.stamp" ] && echo 1 || echo 0)"
+  is "...and released its single-flight lock"  "0" "$([ -f "$ND/cfnudge.notify.retry" ] && echo 1 || echo 0)"
+  # AND THE OTHER DIRECTION: a box that never clears must not paste, and must not vanish
+  # silently either — it leaves a trace naming what went undelivered.
+  rm -f "$ND/sent.log" "$ND/cfnudge.notify.stamp"; echo 1 > "$ND/state"
+  CLAUDE_FLEET_NOTIFY_RETRY_EVERY=1 CLAUDE_FLEET_NOTIFY_RETRY_TRIES=2 PATH="$ND/bin:$PATH" \
+    _defer_nudge cfnudge
+  for i in $(seq 1 15); do [ -s "$ND/cfnudge.notify.undelivered" ] && break; sleep 1; done
+  is "a box that never clears sends nothing"   "0" \
+     "$([ -f "$ND/sent.log" ] && wc -l < "$ND/sent.log" | tr -d ' ' || echo 0)"
+  is "...and leaves a trace, not silence"      "1" \
+     "$([ -s "$ND/cfnudge.notify.undelivered" ] && echo 1 || echo 0)"
+  tmux -L cfnudge kill-server 2>/dev/null; rm -rf "$ND"
+else
+  skip "deferred wake" "tmux missing"
+fi
+
 # ── 4d6. selecting with the mouse must reach the system clipboard ────────────
 # `mouse on` is what creates this problem: tmux captures the drag, so the terminal's own
 # selection never happens and what you highlight lands in tmux's private buffer —
