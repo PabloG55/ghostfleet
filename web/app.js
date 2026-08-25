@@ -18,6 +18,7 @@ import * as G from './grid.js';
 import * as api from './api.js';
 import * as pk from './passkey.js';
 import * as ansi from './ansi.js';
+import * as md from './md.js';
 
 // ── state ─────────────────────────────────────────────────────────────────
 const S = {
@@ -665,8 +666,18 @@ function chatView(card) {
   return wrap;
 }
 function turn(mine, text, when, pending = false) {
+  const bub = el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : '') });
+  // AN ASSISTANT'S TURN IS MARKDOWN AND WAS BEING SHOWN AS ITS OWN SOURCE — "the messages
+  // are not in nice .md format, they have the ****" — because this was one `text:`, which
+  // is textContent. web/md.js turns it into nodes; nothing here ever touches innerHTML.
+  //   YOUR OWN TURN IS NOT RENDERED, and that is the one asymmetry. A user bubble is the
+  // prompt that was SENT, and this is a tool where the exact bytes of a prompt matter — a
+  // literal `**` you typed showing as emphasis would leave you unable to tell whether the
+  // asterisks reached the agent. What you typed is what you see.
+  if (mine) bub.textContent = String(text || '');
+  else bub.appendChild(md.render(String(text || ''), document));
   return el('div', { class: 'turn ' + (mine ? 'me' : 'them') }, [
-    el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : ''), text: String(text || '') }),
+    bub,
     el('div', { class: 'meta', text: when }),
   ]);
 }
@@ -703,7 +714,13 @@ function composer(card) {
   const last = lastAgentText();
   if (canSpeak() && last) {
     const on = S.speaking === speakable(last);
-    kids.push(btn(on ? '■' : '🔊', () => toggleSpeak(last), 'speak' + (on ? ' on' : '')));
+    // ONE BUTTON, TWO STATES, AND BOTH OF THEM EMOJI. It was 🔊 idle and ■ playing — a
+    // colour emoji against U+25A0 BLACK SQUARE, which is a thin monochrome glyph a third of
+    // the size. Tapping it changed the control's weight, its colour and its apparent size,
+    // so it read as a different button appearing rather than as this one being pressed, and
+    // the .speak.on background it already has was doing all the work of saying "playing".
+    // 🔇 is the same face, same weight, same metrics, and it says what pressing again does.
+    kids.push(btn(on ? '🔇' : '🔊', () => toggleSpeak(last), 'speak' + (on ? ' on' : '')));
   }
   kids.push(btn('send', () => sendDraft(), 'go'));
   return el('div', { class: 'composer' }, kids);

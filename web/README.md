@@ -136,6 +136,7 @@ dismiss.
 | `app.js` | the three screens, the four gestures, the verbs and the confirmations |
 | `api.js` | **the only file that talks to the network**, the fixture backend, and the probe that decides between them |
 | `ansi.js` | the pane, as HTML: SGR escapes → coloured spans, cells → 1ch boxes. Pure, no DOM, no fetch |
+| `md.js` | an assistant's turn, as DOM: bold, italic, code, fences, links, lists, headings. `parse()` is pure; `toDom()` is the only part that needs a document, and it builds NODES — the one attribute it writes is an href it has already checked |
 | `passkey.js` | the WebAuthn ceremonies (§5, §7) |
 | `sw.js` | offline: cache-first for the app, network-first with fallback for `/api/*` |
 | `fixtures/` | §4 payloads, and the projects/checkouts/settings/session/pane reads |
@@ -352,6 +353,7 @@ node test/helpers/pwa-check.mjs        # self-containment, precache, icons, §4 
 node test/helpers/pane-check.mjs      # the pane renderer, against real `capture-pane -e` bytes
 node test/helpers/pane-render.mjs     # < an /api/pane body: what a phone would SHOW, as text
 node test/helpers/doc-fixtures.mjs    # every session/project these docs name still exists in fixtures/
+node test/helpers/md-check.mjs        # the markdown a bubble renders, and the text it must not lose
 node test/helpers/pwa-origin.mjs <base>            # which backend it picks, against a LIVE fleet-serve
 node test/helpers/pwa-render.mjs <base>            # app.js actually RUNS, and paints what it decided
 node test/helpers/pwa-enrol.mjs <base> <code> <id> # the enrolment ceremony, end to end

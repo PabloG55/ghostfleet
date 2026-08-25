@@ -80,8 +80,15 @@ class Node_ {
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return this.attrs[k]; }
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
-  append(...ks) { for (const k of ks) if (k != null) this.kids.push(k); }
-  appendChild(k) { this.kids.push(k); return k; }
+  append(...ks) { for (const k of ks) if (k != null) this.appendChild(k); }
+  // A fragment SPLICES, it does not nest — web/md.js builds a bubble's blocks into one and
+  // appends it, and a model that kept the fragment as a child would put every rendered
+  // message one level deeper than the browser does, which is the level the assertions
+  // below count at.
+  appendChild(k) {
+    if (k && k.tag === '#fragment') { for (const c of k.kids) this.kids.push(c); k.kids.length = 0; return k; }
+    this.kids.push(k); return k;
+  }
   remove() {}
   // Records the focused node on the document too, not just a flag on itself: the poll
   // guard asks `document.activeElement === composerNode`, which is the only way to
@@ -116,6 +123,7 @@ const documentStub = {
   body: new Node_('body'),
   createElement: (t) => new Node_(t),
   createTextNode: (t) => { const n = new Node_('#text'); n.textContent = t; return n; },
+  createDocumentFragment: () => new Node_('#fragment'),
   getElementById: (id) => (id === 'app' ? app : id === 'sheet' ? sheetHost : null),
   // markSel() reaches for this on every pointerdown — it moves the selection without a
   // re-render, because re-rendering mid-gesture replaces the node under the finger. It is

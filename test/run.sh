@@ -5797,6 +5797,23 @@ if [ -d "$ROOT/web" ]; then
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PW/speak"
+
+  # ── the markdown a bubble renders ──────────────────────────────────────────
+  # "the messages are not in nice .md format, they have the ****" — turn() set the bubble
+  # with textContent, so every assistant turn was its own source. web/md.js parses to
+  # blocks (pure, no DOM) and builds NODES, never innerHTML.
+  #   The survival rows come first and they are the point: `return ''` has no asterisks in
+  # it either, so every case asserts the WORDS are still there before it asserts the marks
+  # are gone. Watched going red with the renderer bypassed, with emphasis allowed to start
+  # mid-word (which eats the stars out of 2*3*4), with the code fence re-parsed as markdown,
+  # and with safeHref opened up to any scheme.
+  node "$ROOT/test/helpers/md-check.mjs" > "$PW/md" 2> "$PW/md.err"
+  is "md-check ran"                   "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PW/md.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/md")" -ge 55 ] && echo yes || echo "no: $(wc -l < "$PW/md") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PW/md"
   rm -rf "$PW"
 
   # cf-sync mirrors only a whitelist of directories into the runtime, and the client is
