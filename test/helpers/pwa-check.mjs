@@ -181,6 +181,48 @@ is('...only on the tapped one', true, /S\.speakSel === key/.test(appjs));
 is('...and the old rationale was replaced, not deleted', true,
    /button wall/.test(appjs));
 
+// ── the speaker is an icon, and there is only ONE of it ───────────────────
+// THE STRUCTURAL HALF. pwa-render asserts the two rendered states share a viewBox; this
+// asserts they CANNOT stop sharing one, which is the stronger statement and the reason the
+// geometry lives in constants. The count is the check: a second viewBox literal anywhere in
+// the file is somebody having written the pressed state as its own icon, which is exactly
+// how this control got to be a colour emoji idle and a thin square playing the first time.
+//   COMMENTS STRIPPED, the same trap as the ansi.js rule below and md-check's innerHTML
+// row: speakIcon()'s comment is three paragraphs about viewBoxes and emoji, and measured
+// here first — it made both rows red while the code was correct.
+const appcode = appjs.replace(/^\s*\/\/.*$/gm, '');
+is('the icon geometry is written once', 1, (appcode.match(/viewBox/g) || []).length);
+is('...and so is its stroke width', 1, (appcode.match(/'stroke-width'/g) || []).length);
+// COUNTING THE WORD IS NOT ENOUGH, measured: rewriting the attribute as
+// `viewBox: on ? '0 0 16 16' : '0 0 16 16'` keeps the count at one and reintroduces exactly
+// the branch these constants exist to forbid. So both attributes are asserted to come FROM
+// the constant, and each constant to be declared once.
+is('...taken from the shared constant, not a branch', true, /viewBox: ICON_BOX\b/.test(appcode));
+is('...and the width likewise', true, /'stroke-width': ICON_STROKE\b/.test(appcode));
+is('...each declared exactly once', '1,1',
+   [(appcode.match(/const ICON_BOX =/g) || []).length,
+    (appcode.match(/const ICON_STROKE =/g) || []).length].join(','));
+// The horn is shared verbatim; only the decoration is chosen. Both branches naming the
+// same constant is what makes the two states the same weight.
+is('...with one shared shape and one swapped one', true,
+   /\[ICON_HORN, on \? ICON_STOP : ICON_WAVE\]/.test(appjs));
+// The emoji is gone from the client entirely — it was the whole complaint.
+is('...and no speaker emoji is left in the client', '', (appcode.match(/[\u{1F507}-\u{1F50A}]/gu) || []).join(''));
+// A CSS-sized icon, so `.speak.on`'s inverted palette carries the glyph with it. A hex
+// stroke would be invisible on the yellow that state paints.
+is('...stroked in currentColor, not a colour', true, /stroke: 'currentColor'/.test(appcode));
+is('...and sized in em, so it is the button\'s size', true,
+   /\.speak\.tiny svg \{[^}]*width: [\d.]+em/.test(CSS));
+
+// ── the voice picker reports rather than guesses ──────────────────────────
+// The count is the measured half — whatever the device reported, said as a number, because
+// "one option" and "the list never populated" are otherwise the same screen. The iOS path
+// is the INFERRED half, and it must stay conditional and stay hedged: an unverified cause
+// pinned on every device is the mistake #73 recorded, an inference presented as a finding.
+is('the picker says how many voices it got', true, /reported by this device/.test(appcode));
+is('...and the iOS suggestion is conditional', true, /vs\.length <= 1\) kids\.push/.test(appcode));
+is('...and hedged, not promised', true, /a guess, not a fix/.test(appcode));
+
 // A CACHE VERSION THAT DID NOT MOVE IS A DEPLOY THAT DID NOT LAND. sw.js says so itself —
 // "forgetting it is worse than shipping nothing" — because the shell is served CACHE-FIRST:
 // a phone that already has the old version paints the old app.js on the first open after a

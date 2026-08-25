@@ -495,4 +495,10 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * a timestamp, not in the verb bar. */
 .chat .meta { display: flex; align-items: center; gap: .5em; }
 .chat .meta .speak.tiny { padding: 0 .45em; min-height: 0; line-height: 1.5; font-size: 1em; }
+/* The icon is sized in em so it is the button's size, and the SAME size in both states —
+   see speakIcon() in app.js for why that is the one property this control cannot lose.
+   1.15em because a stroked glyph at 1em reads smaller than the emoji it replaced; the
+   negative baseline shift keeps the button's box the height line-height already gave it,
+   so swapping the emoji for this moves nothing else in the meta row. */
+.chat .meta .speak.tiny svg { width: 1.15em; height: 1.15em; vertical-align: -.22em; }
 .chat .bub.tappable { cursor: pointer; }
