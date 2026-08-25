@@ -48,7 +48,12 @@ body {
   overscroll-behavior-y: contain;   /* no rubber-band reload while dragging a card */
 }
 #app {
-  padding: calc(env(safe-area-inset-top) + 8px) 8px calc(env(safe-area-inset-bottom) + 8px);
+  /* THE BOTTOM INSET IS FOR THE HOME INDICATOR, AND THE KEYBOARD COVERS THE HOME
+   * INDICATOR. While the keyboard is up it is dead space stacked on top of it — reported
+   * as "you are leaving too much space between the text box and the bottom". --kb-inset is
+   * the inset normally and 0 while the keyboard is open; app.js sets it from
+   * visualViewport, which is the only thing on iOS that knows. */
+  padding: calc(env(safe-area-inset-top) + 8px) 8px calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px);
   max-width: 46em;                  /* a wide screen keeps the phone layout: nc = 1 */
   margin: 0 auto;
 }
@@ -65,8 +70,19 @@ body {
  * flex child that owns its own scrollTop. 100dvh, not 100vh, because iOS counts the URL
  * bar in vh and the bottom of a 100vh column sits under it. */
 html.shell, html.shell body { height: 100%; overflow: hidden; }
+/*   ...AND THE KEYBOARD IS NOT PART OF THE DYNAMIC VIEWPORT. That is the whole of the
+ * remaining bug: on iOS the software keyboard does not shrink dvh, so this column stayed
+ * full height, the keyboard covered its bottom, and the only move Safari had left was to
+ * SCROLL THE PAGE to bring the focused composer into view. Reported exactly that way —
+ * "the scroll happens when I click on the text box to type". And once the page is
+ * scrollable in one axis, anything marginally too wide is scrollable in the other.
+ *   --vvh is visualViewport.height, which is the only number on iOS that knows where the
+ * usable bottom actually is; app.js keeps it current. The dvh line stays underneath it as
+ * the fallback for everything that has no visualViewport, and 100vh under that for
+ * everything with no dvh. NOT `position: fixed`, which is the thing that fights iOS
+ * keyboards hardest. */
 #app.shell {
-  height: 100vh; height: 100dvh;
+  height: 100vh; height: 100dvh; height: var(--vvh, 100dvh);
   display: flex; flex-direction: column; gap: 0;
 }
 /* The scrolling region. `min-height: 0` is the whole trick — a flex child's default
@@ -194,6 +210,19 @@ html.shell, html.shell body { height: 100%; overflow: hidden; }
 
 /* ── the footer verb bar: the TUI's key hints, as buttons ───────────────── */
 .verbs { display: flex; flex-wrap: wrap; gap: .4em; padding: .6em .2em; border-top: 1px solid var(--hair); }
+/* A BUTTON NEVER LEAVES THE SCREEN, IT TRUNCATES. The bar already wrapped, which handles
+ * "too many buttons" and does nothing at all for "one button wider than the phone" — at
+ * iOS's largest accessibility text `x remove` on its own is 342px against a 304px column,
+ * so it wrapped onto a line of its own and hung off the end of it. Truncating keeps it
+ * tappable, which is the property that matters; capping the font instead would keep the
+ * label whole and unreadable to the person who asked for big text. */
+.verbs button, .seg button, .srow button, .sheet .row button {
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* ...and the general form, because the three selectors above were each added after a
+ * different row was found hanging off the edge. A control that is wider than the thing
+ * containing it is never what was wanted, at any text size, anywhere in this app. */
+button { max-width: 100%; }
 button {
   font: inherit; color: var(--fg); background: #14181d; border: 1px solid var(--hair);
   padding: .45em .7em; border-radius: 2px; cursor: pointer;
@@ -225,7 +254,10 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 }
 .sheet h2 { font: inherit; font-weight: 700; color: var(--white); margin: 0 0 .2em; }
 .sheet h2 .sub { color: var(--dim); font-weight: 400; }
-.sheet p { margin: .35em 0; color: var(--dim); }
+/* An origin is one unbreakable token — `http://mac-studio-2.tailfe8c.ts.net:8787` — and
+ * the settings sheet prints the resolved one in prose. At large text that single word was
+ * 480px inside a 329px sheet. */
+.sheet p { margin: .35em 0; color: var(--dim); overflow-wrap: anywhere; }
 .sheet .field { display: block; margin: .8em 0 .2em; color: var(--dim); }
 .sheet input[type=text], .sheet textarea, .sheet select {
   font: inherit; width: 100%; color: var(--white); background: #101418;
@@ -239,9 +271,15 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 
 /* the settings rows (per-session nudge, per-project columns) */
 .rows { margin: .6em 0; }
-.srow { display: flex; align-items: center; gap: .6em; padding: .45em .2em; border-bottom: 1px solid var(--hair); }
+/* Wraps, because this row is a project name and two toggles and at large text the three
+ * of them do not fit beside each other. */
+.srow { display: flex; flex-wrap: wrap; align-items: center; gap: .6em; padding: .45em .2em; border-bottom: 1px solid var(--hair); }
 .srow .nm { flex: 1; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.srow .badge { min-width: 8.5em; }
+/* `min(8.5em, 45%)`, not a bare 8.5em: the em keeps the toggles aligned in a column at
+ * ordinary sizes, and at 38px text 8.5em is 323px — a minimum wider than the sheet it is
+ * in, which is a minimum that has stopped meaning "align these" and started meaning
+ * "overflow". */
+.srow .badge { min-width: min(8.5em, 45%); }
 .on { color: var(--green); } .off { color: var(--red); } .inherit { color: var(--dim); }
 .bud-on { color: var(--yellow); }
 
@@ -339,7 +377,10 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * costs one extra row instead of a button you cannot reach. */
 .sbar { flex-wrap: wrap; }
 /* The view switch, as a segmented control rather than two loose buttons. */
-.seg { display: flex; border: 1px solid var(--hair); }
+/* ...and the segmented controls wrap for the same reason. The chat/pane switch in the
+ * session bar is pinned to 13px and never reaches this; the profile tabs scale with the
+ * page and do. */
+.seg { display: flex; flex-wrap: wrap; border: 1px solid var(--hair); max-width: 100%; }
 .seg button { border: 0; padding: .35em .7em; }
 .seg button.on { color: var(--bg); background: var(--cyan); }
 /* The projects screen's profile tabs are the session screen's chat/pane control, on
