@@ -107,7 +107,21 @@ html.shell, html.shell body { height: 100%; overflow: hidden; }
 .confirm .row { display: flex; gap: .6em; margin-top: .6em; }
 
 /* ── cards ──────────────────────────────────────────────────────────────── */
-.cards { display: flex; flex-direction: column; gap: 0; }
+/* MORE COLUMNS, NOT A TABLET LAYOUT. The TUI picks its column count from the terminal
+ * width — cols() is floor(W / (CW + 3)) — and the card is the same fixed block of
+ * characters here as it is there, so the only thing a wider viewport needs is more of
+ * them side by side. auto-fill does that arithmetic in the engine: each track is at least
+ * one card wide (CARD_COLS + 1 = 33ch, the same +1 gutter the TUI leaves), so a phone
+ * gets exactly one column and nothing about the phone changes.
+ *   This is why allowing rotation is safe. Unlocking the manifest on its own would have
+ * given a tablet one card stretched across a landscape viewport, which is worse than the
+ * lock; with this it gets three or four cards and the desk's own geometry.
+ *   font-size is pinned to --fs on purpose: `ch` resolves against the element's OWN font,
+ * and .cards would otherwise measure it at body's size while the card art is drawn at
+ * --fs, which fitCards() sets by measuring. A track minimum in the wrong unit is a card
+ * wider than its column. */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(33ch, 1fr));
+         gap: 0; align-content: start; font-size: var(--fs); }
 .card { color: var(--c); cursor: pointer; -webkit-tap-highlight-color: transparent; }
 /* line-height 1: a terminal's cell height IS its line height, so anything looser
  * leaves leading between the rows and the card's │ and ╰ stop touching — the box comes
@@ -397,3 +411,11 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * and "the passkey is unavailable, and here is why". `.sheet .warn` existed; this one did
  * not, so both were drawn in body grey next to everything else. */
 .lock .warn { color: var(--yellow); }
+
+/* The per-message play control (turn()). It lives in the .meta row of the bubble you
+ * tapped, so there is one on screen at most — see the comment on turn() for why that is
+ * the whole point. Sized off the meta text rather than the button scale: this sits beside
+ * a timestamp, not in the verb bar. */
+.chat .meta { display: flex; align-items: center; gap: .5em; }
+.chat .meta .speak.tiny { padding: 0 .45em; min-height: 0; line-height: 1.5; font-size: 1em; }
+.chat .bub.tappable { cursor: pointer; }

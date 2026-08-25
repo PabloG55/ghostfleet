@@ -26,6 +26,7 @@
 // is duplicated is twenty lines of stub, and only because importing app.js runs its boot
 // block; nothing here touches a screen.
 
+import fs from 'node:fs';
 const US = '\x1f';
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
@@ -61,7 +62,11 @@ const documentStub = {
 };
 for (const [name, value] of [
   ['document', documentStub],
-  ['localStorage', { getItem: () => null, setItem: noop, removeItem: noop }],
+  // A REAL map, not a null getter: the voice preference is the thing under test and a
+  // store that forgets every write would make every "saved voice" assertion vacuous.
+  ['localStorage', (() => { const m = new Map(); return {
+      getItem: k => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => m.set(k, String(v)), removeItem: k => m.delete(k), _m: m }; })()],
   ['addEventListener', noop],
   ['history', { length: 1, pushState: noop, replaceState: noop, back: noop, go: noop }],
   ['window', { isSecureContext: false }],
@@ -72,7 +77,26 @@ for (const [name, value] of [
 // No fixture is read here; the probe must simply not reach the network.
 globalThis.fetch = () => Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
 
-const { speakable } = await import(new URL('../../web/app.js', import.meta.url).href);
+// ── the speech stub, driveable ────────────────────────────────────────────
+// getVoices() answers [] until `voices` is filled, exactly as Safari does, and every
+// cancel/speak is recorded so "a second play stops the first" is an observation rather
+// than a claim about intent.
+const V = (uri, name, lang) => ({ voiceURI: uri, name, lang, default: false });
+const synth = {
+  voices: [], calls: [], listeners: {},
+  getVoices() { return this.voices; },
+  cancel() { this.calls.push('cancel'); },
+  speak(u) { this.calls.push('speak:' + (u.voice ? u.voice.name : 'default') + '@' + u.rate); },
+  addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); },
+  fire(ev) { for (const fn of (this.listeners[ev] || [])) fn(); },
+};
+Object.defineProperty(globalThis, 'speechSynthesis', { configurable: true, writable: true, value: synth });
+Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: true, writable: true,
+  value: class { constructor(t) { this.text = t; this.rate = 1; this.voice = null; this.lang = ''; } } });
+Object.defineProperty(globalThis, 'getSelection', { configurable: true, writable: true, value: () => '' });
+
+const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom } =
+  await import(new URL('../../web/app.js', import.meta.url).href);
 is('web/app.js exports speakable()', 'function', typeof speakable);
 
 // ── 1. the four messages this was measured on, whole ──────────────────────
@@ -173,5 +197,76 @@ is('a long turn is capped', true, long.length <= 1250);
 is('...and says that it goes on', true, long.endsWith('… and it goes on.'));
 is('empty in, empty out', '', speakable(''));
 is('null in, empty out', '', speakable(null));
+
+// ── 6. the voice picker, and the three ways it breaks ─────────────────────
+// EMPTY ON THE FIRST CALL is not an edge case, it is Safari's documented behaviour: the
+// list is populated asynchronously and announced with `voiceschanged`. A picker built once
+// at boot therefore ships empty on the device this whole client exists for.
+is('getVoices() is empty at first', 0, allVoices().length);
+// SUBSCRIBING IS THE POINT, and asserting "the list is populated later" does NOT test it:
+// allVoices() re-asks getVoices() every call, so that assertion passes with no listener at
+// all. Measured — removing the subscription left it green. What the listener is actually
+// for is re-rendering an ALREADY-OPEN picker, so the two things worth asserting are that
+// it is registered, and that the cache does not flicker back to empty once filled.
+is('...and it subscribed to voiceschanged', true, (synth.listeners.voiceschanged || []).length > 0);
+synth.voices = [V('urn:a', 'Ada', 'en-GB'), V('urn:b', 'Blaise', 'en-US')];
+synth.fire('voiceschanged');
+is('...and the list arrives with the event', 2, allVoices().length);
+// Safari has been observed handing back [] again on a later call; a picker that emptied
+// itself mid-scroll is the same bug as one that ships empty.
+synth.voices = [];
+is('...and a later empty answer does not undo it', 2, allVoices().length);
+synth.voices = [V('urn:a', 'Ada', 'en-GB'), V('urn:b', 'Blaise', 'en-US')];
+is('...and the picker would draw both', true, /const vs = allVoices\(\)/.test(
+  fs.readFileSync(new URL('../../web/app.js', import.meta.url), 'utf8')));
+
+// A SAVED VOICE THAT IS NOT ON THIS DEVICE MUST STILL SPEAK. A phone and a tablet do not
+// have the same list, so this is the ordinary case on the second device, not a corner.
+localStorage.setItem('gf.voice', JSON.stringify({ uri: 'urn:a', name: 'Ada' }));
+is('a saved voice resolves by URI', 'Ada', (pickVoice() || {}).name);
+localStorage.setItem('gf.voice', JSON.stringify({ uri: 'urn:gone', name: 'Blaise' }));
+is('...or by name when the URI moved', 'Blaise', (pickVoice() || {}).name);
+localStorage.setItem('gf.voice', JSON.stringify({ uri: 'urn:gone', name: 'Nobody' }));
+is('an absent voice resolves to null', null, pickVoice());
+synth.calls.length = 0;
+toggleSpeak('the deploy finished cleanly');
+is('...and it still speaks, with the default', 1, synth.calls.filter(c => c.startsWith('speak:')).length);
+is('...specifically the browser default', true, synth.calls.some(c => c.startsWith('speak:default@')));
+
+// THE RATE IS A SETTING NOW, and its default is the 1.05 that used to be hardcoded.
+localStorage.removeItem('gf.rate');
+is('rate defaults to the old constant', 1.05, savedRate());
+localStorage.setItem('gf.rate', '9');
+is('...and a junk rate falls back, not throws', 1.05, savedRate());
+localStorage.setItem('gf.rate', '0.8');
+is('...and a real one is used', 0.8, savedRate());
+
+// TWO VOICES AT ONCE MUST STAY IMPOSSIBLE. This is the assertion that per-message
+// playback could break: with one button there was only ever one thing to stop.
+localStorage.setItem('gf.voice', JSON.stringify({ uri: 'urn:a', name: 'Ada' }));
+synth.calls.length = 0;
+toggleSpeak('message M');
+toggleSpeak('message N');
+is('playing N cancelled first', true, synth.calls.indexOf('cancel') < synth.calls.indexOf('speak:Ada@0.8'));
+// one cancel per speak: an orphan utterance is exactly the overlap this must prevent
+is('...one cancel for every speak', true,
+   synth.calls.filter(c => c === 'cancel').length === synth.calls.filter(c => c.startsWith('speak:')).length);
+is('...every speak is preceded by a cancel', true,
+   synth.calls.filter((c, i) => c.startsWith('speak:') && synth.calls[i - 1] !== 'cancel').length === 0);
+// and the toggle: tapping the one that is talking stops it and starts nothing
+synth.calls.length = 0;
+toggleSpeak('message N');
+is('tapping the talking one only cancels', 0, synth.calls.filter(c => c.startsWith('speak:')).length);
+is('...and it did cancel', 1, synth.calls.filter(c => c === 'cancel').length);
+
+// ── 7. the column count, which is what makes rotation safe ────────────────
+// gridColsFrom reads the USED value of grid-template-columns, so the keys agree with what
+// the engine actually laid out rather than with a breakpoint copied into JS.
+is('no grid -> one column', 1, gridColsFrom('none'));
+is('empty -> one column', 1, gridColsFrom(''));
+is('one track -> one column', 1, gridColsFrom('390px'));
+is('two tracks -> two columns', 2, gridColsFrom('384px 384px'));
+is('four tracks -> four columns', 4, gridColsFrom('298.5px 298.5px 298.5px 298.5px'));
+is('extra whitespace is not a column', 2, gridColsFrom('  384px   384px  '));
 
 console.log(rows.join('\n'));
