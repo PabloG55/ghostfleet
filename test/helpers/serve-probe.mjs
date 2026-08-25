@@ -10,6 +10,7 @@
 // and the rate phase needs a config the others must not have. One server, several phases.
 //
 // Output:  <name>\x1f<http status>\x1f<json body on one line>
+import fs from 'node:fs';
 import { Authenticator, request } from './serve-client.mjs';
 
 const US = '\x1f';
@@ -63,6 +64,30 @@ if (phase === 'auth') {
 
   row('host.wrong', await request(base, 'GET', '/api/projects', { headers: { ...a.headers(), host: 'evil.example' } }));
   row('origin.wrong', await request(base, 'POST', '/api/verb', { headers: { ...a.headers(), origin: 'https://evil.example' }, body: { tool: 'fleet_list', args: { project: 'demo' } } }));
+}
+
+// PUSH (docs/mobile.md §9). One phase, because the whole property is a SEQUENCE across
+// the daemon's own scan: subscribe, let a session transition, and see what the fake push
+// service was handed. The steps that have to happen between requests — writing a status
+// file, polling to look busy — belong to the shell, so this phase does the parts that
+// need a passkey and prints the token for the rest.
+//
+//     node serve-probe.mjs <base> push <enrol-code> <subscription-file>
+if (phase === 'push') {
+  const sub = JSON.parse(fs.readFileSync(process.argv[5], 'utf8'));
+  await a.enroll(base, arg);
+  console.log(`token${US}0${US}${JSON.stringify({ token: a.token, cred: a.credentialId })}`);
+  // The subscription endpoint is a URL the daemon will POST to, so it is validated like
+  // one. Both directions: the shapes that must be refused, and then the real one.
+  row('key', await a.api(base, 'GET', '/api/push/key'));
+  row('subscribe.noKeys', await a.api(base, 'POST', '/api/push/subscribe', { endpoint: sub.endpoint }));
+  row('subscribe.httpEndpoint', await a.api(base, 'POST', '/api/push/subscribe', { endpoint: 'http://evil.example/x', keys: sub.keys }));
+  row('subscribe.shortAuth', await a.api(base, 'POST', '/api/push/subscribe', { endpoint: sub.endpoint, keys: { p256dh: sub.keys.p256dh, auth: 'AAAA' } }));
+  row('subscribe.ok', await a.api(base, 'POST', '/api/push/subscribe', sub));
+  // ...and with no token at all, which is the control that matters: a subscription
+  // receives fleet state, so it must be exactly as hard to take out as a read.
+  row('subscribe.noToken', await request(base, 'POST', '/api/push/subscribe', { body: sub }));
+  row('key.after', await a.api(base, 'GET', '/api/push/key'));
 }
 
 if (phase === 'verbs') {
