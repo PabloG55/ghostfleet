@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Is it a tmux version problem?
+    url: https://github.com/PabloG55/ghostfleet/blob/main/README.md#prerequisites
+    about: "tmux <= 3.5 escapes the byte this code separates fields with. If records look merged, or a status is blank that should not be, check tmux -V first."
