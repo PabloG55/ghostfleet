@@ -397,9 +397,28 @@ is('...and it never runs while hidden', true, /panePollWanted = \(\) =>\s*\n?\s*
 // the fix — the offset lives outside the nodes, and the jump-to-end is conditional — and
 // verified as behaviour in a browser, because an assertion against a stub DOM would only
 // prove the stub.
-is('the pane scroll offset outlives the nodes', true, /^let paneScroll = null;/m.test(APP));
-is('...and the jump-to-end is conditional', true, /if \(!paneScroll \|\| paneScroll\.atEnd\)/.test(APP));
-is('...fed by the box\'s own scroll events', true, /addEventListener\('scroll', \(\) => rememberPaneScroll/.test(APP));
+//   THERE IS ONE OF THESE NOW, not one per list. The pane had it, the chat had its own
+// copy, and the two CARD LISTS had none at all and were still being thrown to the top on
+// every poll. A fourth copy was the wrong answer: the third one is where the NaN lived.
+is('the scroll offsets outlive the nodes', true, /^const scrollMem = new Map\(\);/m.test(APP));
+is('...and every list that scrolls is in the table', '',
+   ['pane', 'chat', 'projects', 'grid'].filter(k => !new RegExp(`^  ${k}: *\\{ end:`, 'm').test(APP)).join(','));
+is('...and the jump-to-end is conditional', true, /if \(m\.atEnd && s\.end\)/.test(APP));
+is('...and is NOT what a card list does', true, /^  (?:projects|grid): *\{ end: false,/m.test(APP));
+is('...fed by the box\'s own scroll events', true, /addEventListener\('scroll', \(\) => rememberScroll\(key, box\)\)/.test(APP));
+// The one shape a caller could get wrong, and did: a "hold my place" marker carrying no
+// measurement. It cannot be built by hand any more — the only thing that sets keepFromEnd
+// is the function that has just measured fromEnd.
+is('the load-more marker is set in exactly one place', 1,
+   (APP.match(/keepFromEnd\s*[:=]\s*true/g) || []).length);
+// ...and the measurement is an ARGUMENT, so it cannot be armed without one — and it is
+// taken before the fetch and armed after it, or a poll landing in the gap spends it.
+is('...and the measurement is its argument', true,
+   /function holdScrollFromEnd\(key, fromEnd\)/.test(APP));
+is('...measured before the fetch', true,
+   /const held = measureFromEnd\('chat', wrap\);\n *try \{/.test(APP));
+is('...and armed after it, next to the render that spends it', true,
+   /holdScrollFromEnd\('chat', held\);\n *render\(\);/.test(APP));
 
 // A tap on a card lands on the CHAT, and that is a change of mind with a reason: #45 made
 // it the pane because a message list could not show a command, and the person using the app
@@ -413,9 +432,15 @@ is('...and the pane is one tap away', true, /btn\('pane', \(\) => setView\('pane
 // a blocked session says so in the chat and offers the pane, where the answer is typed.
 is('a blocked session is called out in the chat', true, /card\.status === 'need-you'/.test(APP));
 is('...with a way to the pane from there', true, /btn\('open the pane', \(\) => setView\('pane'\)\)/.test(APP));
-// The chat's scroll is remembered the way the pane's is, or every poll throws the reader.
-is('the chat scroll offset outlives the nodes', true, /^let chatScroll = null;/m.test(APP));
-is('...fed by its own scroll events', true, /addEventListener\('scroll', \(\) => rememberChatScroll/.test(APP));
+// The chat's scroll is remembered the way the pane's is, or every poll throws the reader —
+// through the same helper now, and so are both card lists.
+is('the chat is watched', true, /watchScroll\('chat', wrap\)/.test(APP));
+is('...and so is the projects list', true, /watchScroll\('projects', list\)/.test(APP));
+is('...and the grid\'s', true, /watchScroll\('grid', list\)/.test(APP));
+// Attaching the listener and restoring the position are two halves of one thing, and a
+// list that got only the first half is a list that forgets. One call does both.
+is('...by the call that does both halves', true,
+   /function watchScroll\(key, box, prepare\) \{[\s\S]*?addEventListener\('scroll'[\s\S]*?restoreScroll\(key, box, prepare\);/.test(APP));
 // ONE region scrolls, and the page does not. This is the structural half of "the screen
 // moves around": a document that re-renders every poll cannot hold a scroll position.
 is('the shell owns the viewport', true, /document\.documentElement\.classList\.toggle\('shell', shell\)/.test(APP));

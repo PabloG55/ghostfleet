@@ -347,6 +347,33 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .chat .turn.me { align-self: flex-end; align-items: flex-end; }
 .chat .turn.them { align-self: flex-start; align-items: flex-start; }
 .chat .turn .bub { max-width: 100%; }
+/* ── rendered markdown inside a bubble (web/md.js) ───────────────────────────
+ * The turn used to be set with textContent, so an assistant's markdown arrived as its own
+ * source: "the messages are not in nice .md format, they have the ****". These are the
+ * four block shapes md.js emits, sized for a bubble rather than for a document. */
+.chat .bub .md-p, .chat .bub .md-h, .chat .bub .md-list, .chat .bub .md-code { margin: 0; }
+.chat .bub > * + * { margin-top: .5em; }
+/* A heading in a chat is a heavier LINE, not a document title — the browser's own h1..h6
+ * sizes are larger than the message they head. */
+.chat .bub .md-h { font-weight: 700; color: var(--white); }
+.chat .bub .md-list { padding-left: 1.25em; }
+.chat .bub .md-list li + li { margin-top: .25em; }
+.chat .bub code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em;
+  background: #0b0d10; border: 1px solid var(--hair); border-radius: 4px; padding: .05em .3em; }
+/* THE ONE THAT COULD BREAK THE SHELL. A fenced block is as wide as its longest line — a
+ * 90-column command against a 390pt phone — and #48's whole structure is that ONE region
+ * scrolls and the page never moves sideways. So the block scrolls inside itself, and
+ * `min-width: 0` is what lets it: a flex item's default minimum is its content, so without
+ * it the <pre> pushes the bubble, the bubble pushes the chat, and the header and the
+ * composer slide off the screen with it. */
+.chat .bub .md-code {
+  min-width: 0; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  background: #0b0d10; border: 1px solid var(--hair); border-radius: 8px;
+  padding: .5em .6em; white-space: pre;
+}
+.chat .bub .md-code code { background: none; border: 0; padding: 0; font-size: .88em; }
+.chat .bub a { color: var(--cyan); }
 .toast {
   position: fixed; left: 8px; right: 8px; bottom: calc(env(safe-area-inset-bottom) + 8px);
   background: #14181d; border: 1px solid var(--hair); padding: .6em .7em; z-index: 20;

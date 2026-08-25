@@ -33,10 +33,23 @@ const BASE = (process.argv[2] || '').replace(/\/+$/, '');
 
 // ── a DOM, as small as app.js allows ──────────────────────────────────────
 const TEXTUAL = new Set(['input', 'textarea', 'select']);
+// ── enough of a scroller to say where the reader is ───────────────────────
+// MODELLED, not stubbed, because the geometry IS the bug. A rebuilt element starts at
+// scrollTop 0, which is what threw the card lists to the top; and the browser CLAMPS a
+// write to the current maximum and then reports the CLAMPED value to the scroll listener,
+// which is how a list that merely got shorter can be recorded as "the reader is at the
+// end" and glued there. Both are expressible here, and neither is if scrollTop is a plain
+// property.
+//   The event is dispatched ASYNCHRONOUSLY on purpose. Measured in Chrome 151 against a
+// real element: assigning scrollTop fires no 'scroll' event during the assignment, and the
+// event has arrived by the next animation frame. A model that called the listener inline
+// would prove the opposite of what the code has to survive.
+const ROW_H = 100;   // one card is five lines; one bubble is about the same
 class Node_ {
   constructor(tag) {
     this.tag = tag; this.kids = []; this.attrs = {}; this.listeners = {};
     this.className = ''; this._text = null; this.value = ''; this.checked = false;
+    this._top = 0; this.scrollLeft = 0; this.clientHeight = ROW_H * 4;
     this.style = { cssText: '', setProperty() {} };
     this.dataset = {};
     const has = (c) => this.className.split(/\s+/).includes(c);
@@ -46,6 +59,16 @@ class Node_ {
       remove: (...cs) => { this.className = this.className.split(/\s+/).filter(x => x && !cs.includes(x)).join(' '); },
       toggle: (c, on) => (on ? this.classList.add(c) : this.classList.remove(c)),
     };
+  }
+  // Height comes from the children, so "the list got shorter" is a thing a test can do.
+  get scrollHeight() { return Math.max(this.clientHeight, this.kids.length * ROW_H); }
+  get scrollTop() { return this._top; }
+  set scrollTop(v) {
+    const max = Math.max(0, this.scrollHeight - this.clientHeight);
+    const next = Math.min(max, Math.max(0, Number(v) || 0));   // NaN lands on 0, as it does
+    if (next === this._top) return;                            // a no-op write fires nothing
+    this._top = next;
+    queueMicrotask(() => { for (const f of this.listeners.scroll || []) f({ type: 'scroll' }); });
   }
   set textContent(v) { this.kids.length = 0; this._text = String(v); }
   // The whole subtree's text, which is what "the lock screen says X" means.
@@ -57,8 +80,15 @@ class Node_ {
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return this.attrs[k]; }
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
-  append(...ks) { for (const k of ks) if (k != null) this.kids.push(k); }
-  appendChild(k) { this.kids.push(k); return k; }
+  append(...ks) { for (const k of ks) if (k != null) this.appendChild(k); }
+  // A fragment SPLICES, it does not nest — web/md.js builds a bubble's blocks into one and
+  // appends it, and a model that kept the fragment as a child would put every rendered
+  // message one level deeper than the browser does, which is the level the assertions
+  // below count at.
+  appendChild(k) {
+    if (k && k.tag === '#fragment') { for (const c of k.kids) this.kids.push(c); k.kids.length = 0; return k; }
+    this.kids.push(k); return k;
+  }
   remove() {}
   // Records the focused node on the document too, not just a flag on itself: the poll
   // guard asks `document.activeElement === composerNode`, which is the only way to
@@ -93,6 +123,7 @@ const documentStub = {
   body: new Node_('body'),
   createElement: (t) => new Node_(t),
   createTextNode: (t) => { const n = new Node_('#text'); n.textContent = t; return n; },
+  createDocumentFragment: () => new Node_('#fragment'),
   getElementById: (id) => (id === 'app' ? app : id === 'sheet' ? sheetHost : null),
   // markSel() reaches for this on every pointerdown — it moves the selection without a
   // re-render, because re-rendering mid-gesture replaces the node under the finger. It is
@@ -297,7 +328,64 @@ is('...and says why instead', true, /this fleet's lead/.test(app.textContent));
 // point: `counts` is a fold over the cards, and the lead is one of them.
 // Open the lead by tapping its card. The card is a <div>, not a button, so this goes
 // through the same tap handler a finger does.
-const cardTitled = (re) => app.find(n => n.className.split(/\s+/).includes('card') && re.test(n.textContent));
+// TITLED, which means the title LINE and not "the word appears somewhere in the card".
+// A card's last message is part of its text, and master's is "Dispatched the retry work to
+// api-fix" — so `cardTitled(/api-fix/)` matched MASTER, and every assertion below that
+// believed it had opened the worker was quietly reading the lead's screen. It passed,
+// because master has a transcript and a pane too. Anchored on the box-drawing title now,
+// which is the only place a card's own name appears.
+const cardTitled = (re) => app.find(n => {
+  if (!n.className.split(/\s+/).includes('card')) return false;
+  // Whitespace-collapsed, because a card is drawn one span per cell (ansi.js's rule, and
+  // grid.js's `cells()`) and this DOM joins children with a space — so the title line
+  // arrives here as "\u256d \u2500 2 api-fix \u2500 \u2500 \u2500".
+  const t = n.textContent.replace(/\s+/g, ' ');
+  return new RegExp('\u256d ?\u2500 (?:\\d+ )?' + re.source + ' ').test(t);
+});
+
+// ── where the reader was, across the 5s poll ──────────────────────────────
+// "it also happens on the projects and session list, it suddenly goes to the top."
+// refresh() ends in render(), render() empties #app and rebuilds it, and a fresh .cards
+// element starts at scrollTop 0 — the chat and the pane each had their own memory and the
+// card lists had none. Driven through renderUnlessTyping(), which is the poll's own render
+// path, so this is the reported sequence and not an imitation of it.
+//   BOTH DIRECTIONS, because "always restore something" and "never restore anything" are
+// each passed by half of this: a list the reader moved must hold its place, and a list the
+// reader never touched must stay where a fresh one naturally sits.
+const scroller = () => app.kids.find(n => n.className.split(/\s+/).includes('cards'));
+{
+  const before = scroller();
+  is('the grid card list is a scroller', true, !!before && before.scrollHeight > before.clientHeight);
+  is('...and an untouched one sits at the top', 0, before ? before.scrollTop : -1);
+  // A poll over a list nobody has scrolled must not invent a position either.
+  appmod.renderUnlessTyping();
+  await tick(5);
+  is('...and a poll leaves it there', 0, (scroller() || {}).scrollTop);
+  // Now the reader scrolls, and the poll rebuilds the node under them.
+  const box = scroller();
+  box.scrollTop = 200;
+  await tick(5);
+  is('the reader scrolls the card list', 200, box.scrollTop);
+  appmod.renderUnlessTyping();
+  await tick(5);
+  const after = scroller();
+  is('...the poll really did rebuild it', false, after === box);
+  is('...and the reader is still at 200', 200, after ? after.scrollTop : -1);
+  // A card vanishing under them must not throw them somewhere arbitrary. The cards are a
+  // uniform five lines each, so a pixel offset IS a position in the list; when the list
+  // gets SHORTER than the offset the browser clamps, and the reader lands at the end of
+  // the list rather than at a number that no longer means anything.
+  const tall = after.scrollHeight;
+  after.scrollTop = tall;                       // park at the very bottom
+  await tick(5);
+  const parked = after.scrollTop;
+  is('...parked at the bottom of the list', true, parked > 0);
+  appmod.renderUnlessTyping();
+  await tick(5);
+  is('...and a poll keeps them there', parked, (scroller() || {}).scrollTop);
+
+}
+
 const tap = (n) => (n && (n.listeners.pointerdown || []).length
   ? ((n.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 })),
      (n.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 })))
@@ -464,5 +552,53 @@ is('...naming what a transcript cannot show', true, /a transcript cannot show on
 // the two views: the chat is the better place to read, the pane the only place to unblock.
 click(btnWith(/open the pane/));
 is('...and it opens the pane', true, await until(() => /Claude Code/.test(app.textContent), 4000));
+
+// ── "load 20 older" must not throw the reader anywhere ────────────────────
+// The button exists for exactly one reason, in its own words: "a page prepended above them
+// would otherwise throw them to the top of a conversation they were reading the middle of."
+// It did precisely that. `chatScroll` was replaced with a hand-built `{ keepFromEnd: true }`
+// carrying no `fromEnd`, so the restore computed `scrollHeight - undefined` = NaN, and the
+// DOM lands NaN on 0. Confirmed in Chrome before the fix: press it and scrollTop is 0.
+//   THE INVARIANT IS THE DISTANCE FROM THE END, not the offset: everything below the reader
+// is unchanged by a prepend, everything above it moves. Asserted as that distance, so it
+// cannot be satisfied by 0 (the top, the old bug) or by the bottom (the other direction,
+// which is what defaulting fromEnd to 0 would silently do).
+
+const chatBox = () => app.kids.find(n => n.className.split(/\s+/).includes('chat'));
+
+// api-fix, not the lead: master's transcript is five messages and fits on one screen, so
+// there is no page above it and nothing for this to press.
+click(btnWith(/‹/));
+is('back on the grid for the scroll checks', true, await until(() => !!btnWith(/n\s+new/), 4000));
+tap(cardTitled(/api-fix/));
+is('...and api-fix opens', true, await until(() => !!chatBox(), 4000));
+await until(() => { const b = chatBox(); return !!b && b.scrollHeight > b.clientHeight; }, 4000);
+{
+  const box = chatBox();
+  is('the chat is a scroller', true, !!box && box.scrollHeight > box.clientHeight);
+  is('...and a chat opens at the newest message', true, !!box && box.scrollTop === box.scrollHeight - box.clientHeight);
+  // The reader goes up to the middle and presses the button at the ceiling.
+  box.scrollTop = Math.round((box.scrollHeight - box.clientHeight) / 3);
+  await tick(5);
+  const fromEndBefore = box.scrollHeight - box.scrollTop;
+  is('the reader scrolls up', true, box.scrollTop > 0);
+  const older = btnWith(/load \d+ older/);
+  is('...and there is a page above them to load', true, !!older);
+  click(older);
+  is('...the page arrives', true, await until(() => { const b = chatBox(); return !!b && b.scrollHeight > box.scrollHeight; }, 4000));
+  await tick(5);
+  const now = chatBox();
+  is('...and the reader is held where they were', fromEndBefore, now.scrollHeight - now.scrollTop);
+  is('...not thrown to the top', true, now.scrollTop > 0);
+  is('...and not to the bottom', false, now.scrollTop === now.scrollHeight - now.clientHeight);
+  // ...and the other direction, which is the behaviour that must NOT be lost: a reader who
+  // is at the newest message stays at the newest message when a new one arrives.
+  now.scrollTop = now.scrollHeight;
+  await tick(5);
+  appmod.renderUnlessTyping();
+  await tick(5);
+  const after = chatBox();
+  is('a reader at the end stays at the end', true, after.scrollTop === after.scrollHeight - after.clientHeight);
+}
 
 console.log(rows.join('\n'));

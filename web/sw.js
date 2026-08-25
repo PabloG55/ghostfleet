@@ -15,7 +15,13 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v8 makes the running version VISIBLE on the device,
+// BUMPED WHEN THE CLIENT CHANGES — v10 renders an assistant's markdown instead of showing
+// its source, and adds a FILE (md.js) to the precache list, which is the version bump that
+// matters most: an old shell has no md.js in its cache, so a phone that does not refetch is
+// a phone whose chat cannot load. v9 stops the read-aloud spelling out shas, UUIDs,
+// timestamps and paths, and stops every list losing the reader's place on the 5s poll: a
+// phone that keeps the old client keeps the old voice AND keeps being thrown to the top of
+// its own project list. v8 makes the running version VISIBLE on the device,
 // because three rounds of "is the fix live?" were spent inferring it from a server log.
 // If the settings sheet shows no `client` line at all, that IS the answer: the client is
 // older than v8. v7 makes the client take a new one by itself: app.js
@@ -36,14 +42,14 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 824650f55b19
+// CLIENT-HASH: 131449f03fc0
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v8';
+const VERSION = 'ghostfleet-v10';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
-  './ansi.js',
+  './ansi.js', './md.js',
   './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',
