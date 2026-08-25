@@ -22,22 +22,27 @@
 // which on iOS is how a subscription gets revoked. This is therefore a bump where the OLD
 // client is not merely stale but actively harmful, and the settings sheet says which one you
 // are on.
-//   WHY v17 AND NOT v16: main is v15, but `fix/overflow-sweep-wide` already holds v16 while
-// it waits to land. Two branches naming one cache key means whoever merges second re-bumps
-// AND re-pins the hash below, so this skips instead. If that branch lands after this one the
-// numbers arrive out of order, which costs nothing — the value is a cache key, not a
-// sequence.
+//   v17 SKIPPED v16 BECAUSE THIS BRANCH ALREADY HELD IT, and this is the branch — so the
+// numbers land out of order, which costs nothing: the value is a cache key, not a sequence.
+// v16 is the one that fixes the scroll people were actually feeling. The shell follows the
+// VISUAL viewport now, so opening the keyboard no longer leaves the browser to scroll the
+// page around a composer it has covered, and the bottom safe-area inset collapses while the
+// keyboard is up instead of stacking on top of it. An old client keeps both, and they are
+// the kind you feel on every message you type.
 // v15 drew the speaker icon instead of pasting an emoji of one (#82) and left no note here;
 // this line is that note, because this block is the record of what each version changed and
-// a gap in it is indistinguishable from a version that changed nothing.
-// v13 stops the phone clipping itself: the send button
-// rendering "senc", the ⋯ half off the right edge, the page sliding sideways when the
-// sheet opened, and a card grid whose track was a character wider than the screen. An old
-// client keeps every one of them, and they are the kind you live with rather than report
-// twice. v12 stops the phone clipping itself: the send button
-// rendering "senc", the ⋯ half off the right edge, and the whole page sliding sideways
-// when the sheet opened. An old client keeps every one of them, and they are the kind you
-// live with rather than report twice. v11 puts profile tabs on the Projects screen, so a
+// a gap in it is indistinguishable from a version that changed nothing. v14 says when a
+// worker is thinking, so a sent prompt going quiet stops reading as a send that failed.
+// v13 stops the phone clipping itself: the send button rendering "senc", the ⋯ half off
+// the right edge, the page sliding sideways when the sheet opened, and a card grid whose
+// track was a character wider than the screen. An old client keeps every one of them, and
+// they are the kind you live with rather than report twice. v12 lets any message be played
+// rather than only the newest, picks a voice, and unpins rotation so a tablet gets more
+// than one column. (v12 and v13 both used to carry v13's sentence: a version comment
+// rebased onto itself in #79 clobbered #78's line and left the duplicate behind. A history
+// that describes the wrong release is worse than none, so it is corrected here — again,
+// because the merge that brought v17 in restored the duplicate along with it.)
+// v11 puts profile tabs on the Projects screen, so a
 // phone on the old client cannot separate work from personal at all. v10 renders an
 // assistant's markdown instead of showing
 // its source, and adds a FILE (md.js) to the precache list, which is the version bump that
@@ -68,11 +73,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 1dbadcc43bcc
+// CLIENT-HASH: e3de88fde071
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v17';
+const VERSION = 'ghostfleet-v16';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

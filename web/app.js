@@ -962,6 +962,42 @@ function turn(mine, text, when, pending = false, key = '') {
 // It is drawn in the PANE view too, on purpose: watching a worker work and then telling it
 // something is one motion, and making you switch views to find the box would be the same
 // mistake the sheet was.
+// ── the keyboard, which is the one viewport nothing else reports ──────────
+// THE SOFTWARE KEYBOARD IS NOT PART OF THE DYNAMIC VIEWPORT. On iOS `100dvh` does not
+// shrink when the keyboard opens, so the shell column stayed full height, the keyboard
+// covered its bottom, and Safari's only remaining move was to SCROLL THE PAGE to bring the
+// focused composer into view. Reported in those words: "the scroll happens when I click on
+// the text box to type". And a page that scrolls at all is a page that will also scroll
+// SIDEWAYS the moment anything is marginally too wide, which is why this and the clipping
+// were one report.
+//   visualViewport is the only thing that knows. Its `height` is what is actually visible
+// with the keyboard in place, and `offsetTop` is how far Safari has already panned; both
+// are written into CSS custom properties and the layout follows them, rather than the
+// layout being fixed and the browser panning around it.
+//   The bottom safe-area inset goes to 0 while the keyboard is up. It is there for the home
+// indicator, the keyboard covers the home indicator, and stacking one on the other is the
+// "too much space between the text box and the bottom" half of the same report.
+function syncViewport() {
+  try {
+    const vv = typeof visualViewport !== 'undefined' ? visualViewport : null;
+    const root = document.documentElement;
+    if (!vv) return;
+    const h = Number(vv.height) || 0;
+    const full = Number(innerHeight) || h;
+    // A threshold, not equality: the URL bar and the address-bar collapse move this by a
+    // few pixels all the time, and a keyboard takes a third of the screen. 120px is well
+    // above the former and well below the latter.
+    const keyboard = full - h > 120;
+    root.style.setProperty('--vvh', h ? h + 'px' : '');
+    root.style.setProperty('--kb-inset', keyboard ? '0px' : '');
+    root.classList.toggle('kb', keyboard);
+    // Safari may already have panned before we resized the column. Undo it: with the
+    // height correct there is nothing to reveal, and leaving the pan is the app sitting
+    // visibly off its own top-left.
+    if (keyboard && (Number(vv.offsetTop) || 0) > 0) { try { scrollTo(0, 0); } catch {} }
+  } catch {}
+}
+
 // Up to the CSS max (`max-height`), then it scrolls inside itself — a composer that grows
 // without a ceiling eats the conversation it is a reply to. The height is cleared first so
 // scrollHeight measures the CONTENT rather than the box we last set.
@@ -2568,9 +2604,21 @@ restore();
 fitCards();
 addEventListener('resize', () => {
   fitCards();
+  syncViewport();
   // An orientation change moves the fold, and the pane box was sized against the old one.
   if (paneBoxNode) sizePaneBox(paneBoxNode);
 });
+// visualViewport fires its OWN resize when the keyboard opens — window's does not, on iOS
+// — so this is a second registration rather than a tidier one. `scroll` too: that is the
+// event Safari sends while it pans the page around a focused field, and it is the one
+// chance to put it back.
+syncViewport();
+try {
+  if (typeof visualViewport !== 'undefined' && visualViewport) {
+    visualViewport.addEventListener('resize', syncViewport);
+    visualViewport.addEventListener('scroll', syncViewport);
+  }
+} catch {}
 addEventListener('keydown', onKey);
 // The system back gesture. Every backward move in the app comes through here, so a swipe
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and

@@ -101,6 +101,33 @@ for (const ic of man.icons) {
 // CAN be measured (nothing past the right edge, at two widths and at 30px text); these
 // three are the declarations that were missing when the screenshots were taken.
 is('the page is forbidden to scroll sideways', true, /html, body \{ overflow-x: clip; \}/.test(CSS));
+// ── the keyboard, whose effect no desktop engine can show ─────────────────
+// viewport-check.mjs proves the JS half against a shrunken visual viewport — the column
+// takes its height, the class goes on, --kb-inset becomes 0. It cannot prove the CSS half:
+// `env(safe-area-inset-bottom)` is 0 in every desktop browser, so an inset that collapses
+// and one that does not both compute to the same 8px. Deleting the `var()` from the
+// padding was measured as changing nothing at all. So the consumption is asserted here,
+// where it can be, and the two halves together are the fix.
+//   The bottom inset is for the home indicator; the keyboard covers the home indicator; so
+// while it is up the inset is dead space stacked on the keyboard — "you are leaving too
+// much space between the text box and the bottom".
+is('the bottom inset can collapse for the keyboard', true,
+   /padding: calc\(env\(safe-area-inset-top\) \+ 8px\) 8px calc\(var\(--kb-inset, env\(safe-area-inset-bottom\)\) \+ 8px\)/.test(CSS));
+// ...and the column follows the VISUAL viewport, which is the only thing on iOS that knows
+// where the usable bottom is: the keyboard is not part of the dynamic viewport, so 100dvh
+// does not shrink for it and the browser scrolls the page instead.
+is('...and the shell height follows the visual viewport', true,
+   /height: var\(--vvh, 100dvh\)/.test(CSS));
+is('...with dvh still under it for anything that has no visualViewport', true,
+   /height: 100vh; height: 100dvh; height: var\(--vvh/.test(CSS));
+is('the client sets both from visualViewport', true,
+   /visualViewport\.addEventListener\('resize', syncViewport\)/.test(JS['app.js']) &&
+   /root\.style\.setProperty\('--vvh'/.test(JS['app.js']) &&
+   /root\.style\.setProperty\('--kb-inset'/.test(JS['app.js']));
+// NOT position: fixed. It is the obvious reach for "pin this to the bottom" and it is the
+// thing that fights iOS keyboards hardest — the composer is a flex child of a column whose
+// height is correct, which needs no pinning.
+is('...and the composer is not pinned with position: fixed', false, /\.composer \{[^}]*position: fixed/s.test(CSS));
 // A bottom sheet that grows tall enough reaches the top of the screen, and 92vh on iOS
 // counts the URL bar — so its first rows ended up under the status bar, with the clock
 // sitting on the app's own text.
