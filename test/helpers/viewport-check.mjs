@@ -550,23 +550,35 @@ async function keyboard(w, h, { indicator = true } = {}) {
     return;
   }
   is(`${w}px keyboard: the composer really has focus`, true, open.focused);
-  // THE FIX. The column follows the visual viewport, so there is nothing below the fold for
-  // the browser to go looking for.
-  is(`${w}px keyboard: the column shrinks to what is visible`, true,
-     open.visible != null && Math.abs(open.appH - open.visible) <= 2);
-  is(`${w}px ...and it is driven by visualViewport, not dvh`, true, /^\d+px$/.test(open.vvh));
+
+  // WHAT THIS GROUP CAN AND CANNOT PROVE — read before adding to it, because the previous
+  // version of these rows was GREEN while the app was unusable on a real iPhone.
+  //
+  // It fakes visualViewport to the shape iOS presents: layout viewport unchanged, visual
+  // viewport short by a keyboard. That much is faithful. What no desktop engine does is
+  // RESPOND like Safari: it does not pan the page to reveal the focused field, and it does
+  // not leave height and offsetTop unreverted afterwards. The old rows asserted our
+  // reaction to the fake and read that as the feature working. It was not: driving the
+  // column's height from visualViewport.height and calling scrollTo(0,0) on its scroll
+  // event put the composer at the TOP of the screen over the status bar with the transcript
+  // black beneath it, and opened chats scrolled past their own content.
+  //
+  // So this asserts only what is actually observable here: THE LAYOUT DOES NOT BREAK when
+  // the visual viewport shrinks. Whether the composer is reachable above a real keyboard is
+  // Safari's pan doing its job, and it can only be confirmed on a device. Do not add a row
+  // that claims otherwise.
+  is(`${w}px keyboard: the column stays the layout viewport`, true,
+     Math.abs(open.appH - before.innerH) <= 2);
+  is(`${w}px ...because nothing writes a --vvh any more`, '', open.vvh);
   // The bottom inset is for the home indicator and the keyboard covers the home indicator:
-  // "you are leaving too much space between the text box and the bottom".
+  // "you are leaving too much space between the text box and the bottom". This is the one
+  // thing the client still does with the keyboard, and it is a padding, not a geometry.
   is(`${w}px ...and the bottom safe-area inset collapses`, '0px', open.kbInset);
-  is(`${w}px ...and the app says a keyboard is up`, true, open.kbClass);
-  // The composer ends inside the visible area rather than under the keyboard, which is the
-  // whole reason the page was being scrolled.
-  is(`${w}px ...and the composer sits above the keyboard`, true,
-     open.taBottom != null && open.visible != null && open.taBottom <= open.visible);
-  // ...and neither axis moved.
+  // Sideways is still ours to hold: it is a property of the content, not of the keyboard.
   is(`${w}px keyboard: the page has not scrolled sideways`, 0, open.overX);
-  is(`${w}px ...nor down`, 0, open.scrollY);
   is(`${w}px ...nor across`, 0, open.scrollX);
+  // NOT scrollY. Safari pans vertically around a focused field and that is now allowed —
+  // asserting 0 here would be asserting that the browser does not do its job.
   const m = await evaluate(OVERFLOW);
   is(`${w}px keyboard: every row still fits its own box`, '', m.boxes.join(','));
 
