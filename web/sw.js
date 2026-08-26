@@ -15,7 +15,15 @@
 // Never caches a POST: /api/verb changes the fleet, and a replayed verb is a second
 // spawn or a second stop.
 
-// BUMPED WHEN THE CLIENT CHANGES — v17 is the first client that can be NOTIFIED: it adds
+// BUMPED WHEN THE CLIENT CHANGES — v20 can send a photo: a camera beside the composer,
+// the original bytes up to the Mac, and the path it comes back with dropped into the box
+// where you can see it before you send. An older client has no camera at all, so the
+// feature is simply absent there rather than broken.
+//   v19 STOPPED TRYING TO OUT-MANOEUVRE THE iOS KEYBOARD: the shell is 100dvh again and
+// Safari pans as it likes. v18 put the client version back above the one already deployed.
+// Neither left a line here, and this is that line — a gap in this block is
+// indistinguishable from a version that changed nothing.
+// v17 is the first client that can be NOTIFIED: it adds
 // the push handler, the notification tap, the rotated-subscription repair and the settings
 // section that turns it on. A phone on an older client has no push handler at all, so a
 // subscription taken out by any means would deliver pushes to a worker that shows nothing —
@@ -24,10 +32,12 @@
 // are on.
 //   v17 SKIPPED v16 BECAUSE THIS BRANCH ALREADY HELD IT, and this is the branch — so the
 // numbers land out of order, which costs nothing: the value is a cache key, not a sequence.
-// v16 is the one that fixes the scroll people were actually feeling. The shell follows the
-// VISUAL viewport now, so opening the keyboard no longer leaves the browser to scroll the
-// page around a composer it has covered, and the bottom safe-area inset collapses while the
-// keyboard is up instead of stacking on top of it. An old client keeps both, and they are
+// v16 made the shell follow the VISUAL viewport, so that opening the keyboard would not
+// leave the browser scrolling the page around a composer it had covered. SUPERSEDED BY
+// v19, which took it out again: on a real iPhone it pinned the composer to the top of the
+// screen with the transcript black beneath it. Left here rather than deleted, because the
+// next person to meet the iOS keyboard should find out that this was tried. Its other
+// half — the bottom safe-area inset collapsing while the keyboard is up — is
 // the kind you feel on every message you type.
 // v15 drew the speaker icon instead of pasting an emoji of one (#82) and left no note here;
 // this line is that note, because this block is the record of what each version changed and
@@ -73,11 +83,11 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 5da747c08315
+// CLIENT-HASH: 08acc6a0cd8d
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
-const VERSION = 'ghostfleet-v19';
+const VERSION = 'ghostfleet-v20';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

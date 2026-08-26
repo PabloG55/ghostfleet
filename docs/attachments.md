@@ -1,6 +1,30 @@
 # Attachments: can we send pictures?
 
-**Status: research, nothing built.** The question is whether you can attach a photo on the
+**Status: BUILT.** A camera sits beside the composer, the photo goes up as-is, the Mac
+converts it, and the path lands in the box where you can see it before you send. What
+follows is the research that decided the shape; two of its recommendations were overturned
+on the way and both are marked in place rather than edited away.
+
+> **What was built differently, and why.** §3-§4 planned to downscale on the PHONE
+> (`createImageBitmap` → canvas → `toBlob`) and keep the 1 MB body cap. Every measurement
+> behind that was taken in Chrome on macOS, and the device this feature exists for hands out
+> **HEIC** — whether Safari's `createImageBitmap` decodes a HEIC Blob is *still* unmeasured
+> (`scripts/heic-probe.mjs` remains unrun). So the original bytes go up and `/usr/bin/sips`
+> converts them here, which makes the answer irrelevant instead of load-bearing. The cost is
+> the body: that ONE route accepts 9 MB where every other still accepts 1, and a photo over
+> 6 MB is refused with a message that says 6 MB.
+>   §5 argued for a *verb* rather than an endpoint, so it would inherit the Origin check,
+> the session gate, the rate class and the audit chain. It is a **route** — because all of
+> that machinery turned out to be central and keyed on nothing: it runs above the router, so
+> a new POST path gets every bit of it by existing. What a verb could *not* have is its own
+> body cap, since the body is read once before dispatch and the tool name is inside it. The
+> thing §5 was protecting is kept; the one thing it could not give is gained.
+>   Everything else was built as written: bytes under the fleet dir keyed `<sock>.<session>`,
+> filenames generated here and never the client's, content sniffed and SVG refused by name,
+> no route that serves the bytes back, a per-session quota, and the path put in the composer
+> rather than sent invisibly.
+
+**Status of the research below: as measured on 2026-08-24.** The question is whether you can attach a photo on the
 phone and have it reach the agent in a session. The answer is **yes for `claude`, yes for
 `codex`, and model-dependent for `opencode`**.
 
