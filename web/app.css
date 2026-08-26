@@ -76,13 +76,19 @@ html.shell, html.shell body { height: 100%; overflow: hidden; }
  * SCROLL THE PAGE to bring the focused composer into view. Reported exactly that way —
  * "the scroll happens when I click on the text box to type". And once the page is
  * scrollable in one axis, anything marginally too wide is scrollable in the other.
- *   --vvh is visualViewport.height, which is the only number on iOS that knows where the
- * usable bottom actually is; app.js keeps it current. The dvh line stays underneath it as
- * the fallback for everything that has no visualViewport, and 100vh under that for
- * everything with no dvh. NOT `position: fixed`, which is the thing that fights iOS
- * keyboards hardest. */
+ *   THIS DOES NOT TRY TO OUT-MANOEUVRE THE KEYBOARD ANY MORE, and that is the fix. A
+ * previous version drove this height from visualViewport.height and called scrollTo(0,0)
+ * on every visualViewport scroll to undo Safari's pan. On a real iPhone that produced a
+ * composer pinned to the TOP of the screen over the status bar with the whole transcript
+ * black beneath it, and a chat that opened scrolled past its own content. The pattern is
+ * known-fragile for exactly this reason: visualViewport's height and offsetTop do not
+ * reliably revert when the keyboard closes, so anything positioned from them ends up
+ * misaligned, and a scrollTo in a scroll handler fights the user for the scrollbar.
+ *   dvh, and let Safari pan. It pans to reveal a focused field on its own, and a pan that
+ * ends is survivable where a layout that never recovers is not. NOT `position: fixed`
+ * either, which is the thing that fights iOS keyboards hardest. */
 #app.shell {
-  height: 100vh; height: 100dvh; height: var(--vvh, 100dvh);
+  height: 100vh; height: 100dvh;
   display: flex; flex-direction: column; gap: 0;
 }
 /* The scrolling region. `min-height: 0` is the whole trick — a flex child's default

@@ -980,21 +980,20 @@ function turn(mine, text, when, pending = false, key = '') {
 function syncViewport() {
   try {
     const vv = typeof visualViewport !== 'undefined' ? visualViewport : null;
-    const root = document.documentElement;
     if (!vv) return;
     const h = Number(vv.height) || 0;
     const full = Number(innerHeight) || h;
-    // A threshold, not equality: the URL bar and the address-bar collapse move this by a
-    // few pixels all the time, and a keyboard takes a third of the screen. 120px is well
-    // above the former and well below the latter.
+    // A threshold, not equality: the URL bar moves this by a few pixels all the time and a
+    // keyboard takes a third of the screen. 120px is well above the former, well below the
+    // latter.
     const keyboard = full - h > 120;
-    root.style.setProperty('--vvh', h ? h + 'px' : '');
-    root.style.setProperty('--kb-inset', keyboard ? '0px' : '');
-    root.classList.toggle('kb', keyboard);
-    // Safari may already have panned before we resized the column. Undo it: with the
-    // height correct there is nothing to reveal, and leaving the pan is the app sitting
-    // visibly off its own top-left.
-    if (keyboard && (Number(vv.offsetTop) || 0) > 0) { try { scrollTo(0, 0); } catch {} }
+    // THE ONLY THING THIS WRITES IS A PADDING. It used to drive the shell's HEIGHT from
+    // vv.height and scrollTo(0,0) away Safari's pan; on a real iPhone that put the composer
+    // at the top of the screen over the status bar with the transcript black below it. The
+    // layout is dvh now and Safari is allowed to pan. An inset that is briefly wrong is a
+    // cosmetic 34px; a height driven by a number that does not reliably revert is a dead
+    // screen.
+    document.documentElement.style.setProperty('--kb-inset', keyboard ? '0px' : '');
   } catch {}
 }
 
@@ -2609,14 +2608,14 @@ addEventListener('resize', () => {
   if (paneBoxNode) sizePaneBox(paneBoxNode);
 });
 // visualViewport fires its OWN resize when the keyboard opens — window's does not, on iOS
-// — so this is a second registration rather than a tidier one. `scroll` too: that is the
-// event Safari sends while it pans the page around a focused field, and it is the one
-// chance to put it back.
+// — so this is a second registration rather than a tidier one. There is deliberately NO
+// `scroll` listener: that fires while Safari pans around a focused field, and the handler
+// that used it called scrollTo(0,0), which is a scroll handler fighting the user for the
+// scrollbar. Safari's pan is now left alone.
 syncViewport();
 try {
   if (typeof visualViewport !== 'undefined' && visualViewport) {
     visualViewport.addEventListener('resize', syncViewport);
-    visualViewport.addEventListener('scroll', syncViewport);
   }
 } catch {}
 addEventListener('keydown', onKey);

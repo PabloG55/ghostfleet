@@ -113,17 +113,31 @@ is('the page is forbidden to scroll sideways', true, /html, body \{ overflow-x: 
 // much space between the text box and the bottom".
 is('the bottom inset can collapse for the keyboard', true,
    /padding: calc\(env\(safe-area-inset-top\) \+ 8px\) 8px calc\(var\(--kb-inset, env\(safe-area-inset-bottom\)\) \+ 8px\)/.test(CSS));
-// ...and the column follows the VISUAL viewport, which is the only thing on iOS that knows
-// where the usable bottom is: the keyboard is not part of the dynamic viewport, so 100dvh
-// does not shrink for it and the browser scrolls the page instead.
-is('...and the shell height follows the visual viewport', true,
-   /height: var\(--vvh, 100dvh\)/.test(CSS));
-is('...with dvh still under it for anything that has no visualViewport', true,
-   /height: 100vh; height: 100dvh; height: var\(--vvh/.test(CSS));
-is('the client sets both from visualViewport', true,
+// ...and THE HEIGHT IS dvh, not the visual viewport. These three assertions are inverted
+// from what they said a version ago, and the inversion is the point: driving this height
+// from visualViewport.height, and calling scrollTo(0,0) on visualViewport's scroll event to
+// undo Safari's pan, was measured on a real iPhone as a composer pinned to the top of the
+// screen over the status bar with the transcript black beneath it, and a chat that opened
+// scrolled past its own content. The pattern is known-fragile: visualViewport's height and
+// offsetTop do not reliably revert when the keyboard closes, so anything positioned from
+// them is left misaligned — and a scrollTo inside a scroll handler fights the user for the
+// scrollbar. Safari pans to reveal a focused field by itself; a pan that ends is survivable
+// where a layout that never recovers is not.
+//   So these fail if anyone reintroduces it, which is the only reason they exist.
+is('the shell height is dvh, not the visual viewport', true,
+   /#app\.shell \{\s*height: 100vh; height: 100dvh;/.test(CSS));
+is('...and nothing drives that height from visualViewport', false, /--vvh/.test(CSS));
+is('...and the client never writes a --vvh at all', false, /--vvh/.test(JS['app.js']));
+// The keyboard is still DETECTED, because the collapsing bottom inset above needs to know.
+// Detection only — one padding, no height, no scrolling.
+is('the keyboard is still detected for the inset', true,
    /visualViewport\.addEventListener\('resize', syncViewport\)/.test(JS['app.js']) &&
-   /root\.style\.setProperty\('--vvh'/.test(JS['app.js']) &&
-   /root\.style\.setProperty\('--kb-inset'/.test(JS['app.js']));
+   /setProperty\('--kb-inset'/.test(JS['app.js']));
+// NO scroll listener, and no scrollTo anywhere near one. This is the assertion that would
+// have caught the regression, and it did not exist.
+is('...and it does not listen for visualViewport scroll', false,
+   /visualViewport\.addEventListener\('scroll'/.test(JS['app.js']));
+is('...and never scrolls the window itself', false, /\bscrollTo\(0, 0\)/.test(JS['app.js']));
 // NOT position: fixed. It is the obvious reach for "pin this to the bottom" and it is the
 // thing that fights iOS keyboards hardest — the composer is a flex child of a column whose
 // height is correct, which needs no pinning.
