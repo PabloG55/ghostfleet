@@ -6310,6 +6310,28 @@ if [ -d "$ROOT/web" ]; then
     node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$f" 2>/dev/null \
       && ok "$(basename "$f") is valid JSON" || bad "$(basename "$f") is valid JSON" "ok" "parse error"
   done
+  # ── the version has to be ABOVE main's, not merely different ──────────────
+  # The pin above catches "changed the client, forgot to bump". It has no notion of ORDER,
+  # and order is what has bitten: #83 took v17, #81 was numbered v16 before it and merged
+  # after, so main went BACKWARDS and #84 existed only to undo that; then #86 was numbered
+  # v19 while #85 was also v19, caught by hand. Both leave a hash that matches its own
+  # bytes, so both are green here without this.
+  #   THIS ONE SKIPS ON MAIN, and that is not the same as passing: on main, or on a branch
+  # that has already landed, there is nothing to be ahead of. It also skips in a clone with
+  # no origin/main — but NOT in CI on a pull request, where the absence of the ref means the
+  # check silently did nothing in the one place it is the point. See the helper's header.
+  SWV="$(mktemp -d "$TEST_RUNS.$$.swv.XXXXXX")"
+  node "$ROOT/test/helpers/sw-version.mjs" > "$SWV/out" 2> "$SWV/err"
+  is "sw-version ran"                 "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$SWV/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A floor, for the reason pwa-check documents: this file's whole job is one verdict, and
+  # a helper that died before reaching it emits a handful of rows and no mismatches.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$SWV/out")" -ge 20 ] && echo yes || echo "no: $(wc -l < "$SWV/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+    is "$name" "$want" "$got"
+  done < "$SWV/out"
+  rm -rf "$SWV"
 else
   skip "phone client" "web/ not present"
 fi
