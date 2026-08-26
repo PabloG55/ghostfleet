@@ -446,12 +446,29 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 /* `flex: 0 0 auto` on the row itself: under the shell this is a child of a full-height
  * flex COLUMN, where a growing box is a box the column is entitled to shrink back. That is
  * what capped the textarea at one line no matter what the grow code did. */
-.composer { display: flex; gap: .45em; align-items: flex-end; min-width: 0; flex: 0 0 auto;
+/* WRAPS, since the camera arrived. Two controls and a box fit beside each other at every
+ * ordinary text size and stop fitting at the accessibility ones — measured at 390px/53px,
+ * the row wanted 422 of 374. The buttons drop to their own line there rather than being
+ * squeezed or pushed off: `send` truncated to `se…` would be worse than a second row, and
+ * capping the font would keep the word whole and unreadable to the person who asked for
+ * big text. Caught by test/helpers/viewport-check.mjs the first time the button existed. */
+.composer { display: flex; flex-wrap: wrap; gap: .45em; align-items: flex-end; min-width: 0; flex: 0 0 auto;
   padding: .5em .1em 0; border-top: 1px solid var(--hair); }
 /* Reported as the send button rendering "senc" — its last character past the right edge.
  * The textarea is the one thing here that may shrink, and the buttons must not: with every
  * child shrinkable the browser is free to take the width out of whichever it likes. */
 .composer button { flex: 0 0 auto; }
+/* The picker itself is never seen: iOS styles a file input as a button we cannot size or
+ * colour, so the visible control is a real <button> that clicks it. `display: none` rather
+ * than an off-screen position — nothing needs to focus it, and an off-screen input is a
+ * thing screen readers announce. */
+.composer .pick { display: none; }
+/* Sized like the send button beside it, so the row reads as two controls and a box rather
+ * than a box with something stuck to it. The SVG is em-sized for the same reason #82 gave:
+ * it is the button's size, not a glyph's. */
+.composer button.cam { display: inline-flex; align-items: center; justify-content: center; }
+.composer button.cam svg { width: 1.25em; height: 1.25em; display: block; }
+.composer button.cam.busy { opacity: .55; }
 .composer textarea {
   flex: 1 1 auto; min-width: 0; resize: none; font: inherit; font-size: 15px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;

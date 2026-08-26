@@ -46,6 +46,7 @@ const S = {
   stale: 0,             // epoch of the payload on screen, when it came from the cache
   hiddenAt: 0,
   draft: '',            // the composer's text, kept across repaints (a poll must not eat it)
+  attaching: false,     // a photo is on its way up; the camera button says so and refuses a second
   pending: null,        // { text, at } — sent, not yet back in the transcript
   speaking: '',         // the text currently being read aloud, '' when silent
 };
@@ -894,22 +895,70 @@ const ICON_STROKE = '2';
 const ICON_HORN = 'M11 5 6 9H2v6h4l5 4z';   // shared: most of the ink
 const ICON_WAVE = 'M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14';   // idle: will speak
 const ICON_STOP = 'M17.2 8.6l5.6 6.8M22.8 8.6l-5.6 6.8';             // on: tap to stop
-function speakIcon(on) {
+// ONE PLACE THE GEOMETRY IS WRITTEN, for every icon in the app. #82 made that a rule and
+// pwa-check counts it — and the count is what caught the camera below being added as a
+// second copy of this block rather than a second caller of it. Two icons drawn from two
+// copies of "the box is 24 and the stroke is 2" is how the app ends up with two icon
+// languages, which is the emoji-against-a-square problem one layer up.
+//   aria-hidden because the BUTTON carries the name — see the labels at the call sites. An
+// icon that also announced itself would be read twice.
+function iconSvg(...ds) {
   const svg = document.createElementNS(SVG_NS, 'svg');
-  // aria-hidden because the BUTTON carries the name — see the label at the call site. An
-  // icon that also announced itself would be read twice.
   for (const [k, v] of Object.entries({
     viewBox: ICON_BOX, fill: 'none', stroke: 'currentColor', 'stroke-width': ICON_STROKE,
     'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
     focusable: 'false',
   })) svg.setAttribute(k, v);
-  for (const d of [ICON_HORN, on ? ICON_STOP : ICON_WAVE]) {
+  for (const d of ds) {
     const path = document.createElementNS(SVG_NS, 'path');
     path.setAttribute('d', d);
     svg.appendChild(path);
   }
   return svg;
 }
+function speakIcon(on) { return iconSvg(ICON_HORN, on ? ICON_STOP : ICON_WAVE); }
+// A DRAWN CAMERA, for the reason #82 drew the speaker: an emoji next to an SVG is two
+// different weights, two colour models and two metrics in one row, and that read as a
+// different control appearing rather than as this one being pressed.
+const ICON_CAM_BODY = 'M3 8h3.2l1.6-2h8.4l1.6 2H21v11H3z';
+const ICON_CAM_LENS = 'M12 13.4m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0';
+function cameraIcon() { return iconSvg(ICON_CAM_BODY, ICON_CAM_LENS); }
+
+// ── a photo becomes a path in the box you are about to send ───────────────
+// "can I send a picture?", twice. The mechanism docs/attachments.md measured is that an
+// agent given a PATH reads the pixels — so this uploads the file and then puts the path it
+// gets back into the composer, WHERE YOU CAN SEE IT. What is sent is an ordinary prompt
+// that happens to name a file, through the same fleet_send every other message uses:
+// nothing here touches the send path, which is the most scarred code in the repo and the
+// one place a stranded prompt costs the most (#77).
+//
+// NO THUMBNAIL, DELIBERATELY. The CSP is `default-src 'self'`, so a blob: in an <img> is
+// refused and the only route is decoding to a canvas — and the format an iPhone actually
+// hands over is HEIC, which the browser may not decode at all (unmeasured, and the whole
+// reason the bytes are converted on the Mac instead). A preview that worked for a JPEG
+// from a laptop and silently showed nothing on the phone this feature exists for would be
+// worse than none. The path in the box is the confirmation, and it is the same string the
+// agent will be given.
+async function attachPhoto(file, card) {
+  if (!file) return;
+  if (S.attaching) return;
+  S.attaching = true; render();
+  try {
+    const r = await api.attach(S.project, S.session, file);
+    const sep = S.draft && !/\s$/.test(S.draft) ? ' ' : '';
+    S.draft = (S.draft || '') + sep + r.path + ' ';
+    const kb = Math.max(1, Math.round(r.bytes / 1024));
+    toast(r.converted ? `photo converted and stored, ${kb} KB` : `photo stored, ${kb} KB`);
+    // ...and the one honesty requirement the research left standing: two of the three
+    // agents read images and the third depends on a model ghostfleet cannot see.
+    if (card && card.agent === 'opencode')
+      toast('this worker runs opencode — whether it can read an image depends on its model', 'bad');
+  } catch (e) {
+    toast(String((e && e.message) || e), 'bad');
+  }
+  S.attaching = false; render();
+}
+
 function msgKey(m) { return String(m.role || '') + '|' + String(m.ts || ''); }
 function turn(mine, text, when, pending = false, key = '') {
   const bub = el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : '') });
@@ -1031,7 +1080,22 @@ function composer(card) {
   // only thing that could be spoken, which made "the newest message" the whole feature.
   // Now any bubble can be played (see turn()), so the composer is a text box and a send
   // button again — which is what it is for.
-  const kids = [box, btn('send', () => sendDraft(), 'go')];
+  // The picker is a hidden <input type=file>; the visible control is a button, so it can
+  // be styled and sized like the one beside it. accept="image/*" is what makes iOS offer
+  // the camera and the library rather than a file browser.
+  const pick = el('input', { type: 'file', accept: 'image/*', class: 'pick' });
+  pick.addEventListener('change', () => {
+    const f = pick.files && pick.files[0];
+    pick.value = '';                       // so picking the SAME photo twice still fires
+    attachPhoto(f, card);
+  });
+  const cam = btn('', () => pick.click(), 'cam' + (S.attaching ? ' busy' : ''));
+  cam.textContent = '';
+  cam.appendChild(cameraIcon());
+  cam.setAttribute('aria-label', S.attaching ? 'sending a photo' : 'attach a photo');
+  cam.setAttribute('title', 'attach a photo');
+  if (S.attaching) cam.setAttribute('disabled', 'disabled');
+  const kids = [pick, cam, box, btn('send', () => sendDraft(), 'go')];
   return el('div', { class: 'composer' }, kids);
 }
 async function sendDraft() {
