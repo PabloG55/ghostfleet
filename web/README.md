@@ -229,6 +229,8 @@ POST /api/verb   { tool, args }             -> { ok, text }         Bearer token
 GET  /api/auth/challenge                    -> { challenge, rp_id, user, enrolling }
 POST /api/auth/register { code, id, … }     -> { token, expires_at }
 POST /api/auth/assert                       -> { token, expires_at }
+POST /api/attach { project, session, data } -> { ok, path, bytes, from, converted }
+                                            Bearer token required; 9 MB body cap, 6 MB photo
 GET  /api/health                            -> { ok, version, … }    the probe's target
 GET  /api/push/key                          -> { key, detail, subscribed, endpoints }
 POST /api/push/subscribe { endpoint, keys } -> { ok, subscribed, detail }   201

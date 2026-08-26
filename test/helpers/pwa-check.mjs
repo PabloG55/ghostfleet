@@ -101,6 +101,27 @@ for (const ic of man.icons) {
 // CAN be measured (nothing past the right edge, at two widths and at 30px text); these
 // three are the declarations that were missing when the screenshots were taken.
 is('the page is forbidden to scroll sideways', true, /html, body \{ overflow-x: clip; \}/.test(CSS));
+// ── the attachment limit is stated twice and must be one number ───────────
+// The server's copy is the control (an upload past it is refused there whatever the client
+// did); the client's is a courtesy that saves a phone from spending five megabytes over a
+// tunnel to be told the number. They are only useful together if they AGREE — a client
+// that refuses what the server would have taken is a feature that looks broken, and the
+// other way round is a wasted upload.
+{
+  const serveSrc = fs.readFileSync(path.join(ROOT, 'bin', 'fleet-serve.mjs'), 'utf8');
+  const nOf = (src, name) => (new RegExp(`${name} = ([0-9*\\s]+);`).exec(src) || [])[1];
+  const ev = (x) => { try { return x ? Function(`return (${x})`)() : null; } catch { return null; } };
+  const server = ev(nOf(serveSrc, 'ATTACH_MAX_BYTES'));
+  const client = ev(nOf(JS['api.js'], 'ATTACH_MAX_BYTES'));
+  is('the photo limit is a real number on the server', true, server > 0);
+  is('...and the client refuses at exactly the same one', server, client);
+  // ...and the body cap has to leave room for base64, or the decoded check is unreachable:
+  // 6 MB of photo is 8 MB of body, so a cap AT 8 would refuse every oversized photo on the
+  // body instead and the message naming the photo's size would never be seen. Measured
+  // that way round the first time.
+  const cap = ev(nOf(serveSrc, 'ATTACH_BODY_CAP'));
+  is('the body cap leaves room for base64', true, cap > server * 4 / 3);
+}
 // ── the keyboard, whose effect no desktop engine can show ─────────────────
 // viewport-check.mjs proves the JS half against a shrunken visual viewport — the column
 // takes its height, the class goes on, --kb-inset becomes 0. It cannot prove the CSS half:
@@ -253,8 +274,17 @@ is('...each declared exactly once', '1,1',
     (appcode.match(/const ICON_STROKE =/g) || []).length].join(','));
 // The horn is shared verbatim; only the decoration is chosen. Both branches naming the
 // same constant is what makes the two states the same weight.
+//   Matched as an ARGUMENT LIST rather than the array literal it used to be: the geometry
+// moved into a shared iconSvg() when the camera arrived, which is what the two rows above
+// exist to force. The claim is unchanged — one shape kept, one swapped.
 is('...with one shared shape and one swapped one', true,
-   /\[ICON_HORN, on \? ICON_STOP : ICON_WAVE\]/.test(appjs));
+   /ICON_HORN, on \? ICON_STOP : ICON_WAVE/.test(appjs));
+// ...and every icon goes through the one drawer, so a second one cannot arrive with its
+// own idea of how big a box is.
+is('...and there is one place an icon is drawn', 1, (appcode.match(/function iconSvg\(/g) || []).length);
+is('...which every icon calls', true,
+   /function speakIcon\([^)]*\) \{ return iconSvg\(/.test(appcode) &&
+   /function cameraIcon\([^)]*\) \{ return iconSvg\(/.test(appcode));
 // The emoji is gone from the client entirely — it was the whole complaint.
 is('...and no speaker emoji is left in the client', '', (appcode.match(/[\u{1F507}-\u{1F50A}]/gu) || []).join(''));
 // A CSS-sized icon, so `.speak.on`'s inverted palette carries the glyph with it. A hex

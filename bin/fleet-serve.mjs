@@ -917,7 +917,11 @@ async function readBody(req, cap = 1024 * 1024) {
     let n = 0; const parts = [];
     req.on('data', (d) => {
       n += d.length;
-      if (n > cap) { reject(new Error(`body larger than ${cap} bytes`)); req.destroy(); return; }
+      // PAUSED, NOT DESTROYED. Killing the socket here means the caller's 413 never
+      // reaches anybody: the client sees a connection reset and has to guess why, which
+      // for an upload that is one megabyte over a limit is the least useful answer there
+      // is. The handler answers and then hangs up (see the catch around readBody).
+      if (n > cap) { req.pause(); reject(Object.assign(new Error(`body larger than ${cap} bytes`), { tooBig: true, cap })); return; }
       parts.push(d);
     });
     req.on('end', () => {
@@ -1369,6 +1373,111 @@ function resolveProject(name) {
 }
 const proj = (name) => resolveProject(name).t || null;
 
+// ── attachments: a photo from the phone, as a file on this machine ─────────
+// "can I send a picture?", twice. docs/attachments.md measured the hard part and found it
+// already works: fleet-send pastes TEXT, so a photo has to become a file here and the
+// prompt has to name its path — and given a path, claude and codex both read the pixels
+// (opencode is model-dependent, which the composer warns about).
+//
+// THE ORIGINAL BYTES COME UP AND THE CONVERSION HAPPENS HERE, which is a deliberate
+// departure from what that document recommended. Its plan was to downscale on the phone
+// with createImageBitmap, and every measurement behind that was taken in Chrome on macOS.
+// iOS hands out HEIC, and whether Safari's createImageBitmap decodes a HEIC Blob is STILL
+// unmeasured — scripts/heic-probe.mjs exists to answer it and has not been run. Designing
+// around the answer costs a bigger request body; designing on top of it risks the whole
+// feature failing on the one device it is for. macOS has had /usr/bin/sips forever and it
+// speaks HEIC.
+//
+// THE COST IS THE BODY, AND IT IS REAL: an unconverted iPhone photo is 2-5 MB and base64
+// adds a third. So this ONE path gets a bigger cap and every other route keeps the 1 MB
+// that has always protected it — a cap is per purpose here, not global, and the refusal
+// says the number rather than dying opaquely.
+const ATTACH_BODY_CAP = 9 * 1024 * 1024;   // 6 MB of photo is 8 MB of base64, plus room
+const ATTACH_MAX_BYTES = 6 * 1024 * 1024;  // ...and the decoded length is checked too
+const ATTACH_QUOTA = 24 * 1024 * 1024;     // per session, oldest deleted first
+const ATTACH_MAX_PX = 1600;                // what a converter downscales to, when there is one
+const ATTACH_RESIZE_OVER = 512 * 1024;     // below this an already-readable image is kept as it is
+
+// SNIFFED, NEVER DECLARED. The client's content-type is a hint from a phone; the magic
+// bytes are what the file is. SVG is refused loudly and specifically further down: it is an
+// image that is also a script container.
+function sniffImage(buf) {
+  if (buf.length < 12) return null;
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'jpg';
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'png';
+  // HEIC/HEIF is ISO-BMFF: a size, then 'ftyp', then a brand.
+  if (buf.slice(4, 8).toString('latin1') === 'ftyp') {
+    const brand = buf.slice(8, 12).toString('latin1');
+    if (['heic', 'heix', 'hevc', 'heim', 'heis', 'hevm', 'hevs', 'mif1', 'msf1'].includes(brand)) return 'heic';
+  }
+  if (buf.slice(0, 5).toString('latin1').trim().startsWith('<')) return 'markup';
+  return null;
+}
+
+// LINUX IS SUPPORTED AND sips IS NOT ON IT (CLAUDE.md: every macOS-only call needs a
+// guard). Probed in order and remembered, because three spawns per photo to re-learn the
+// same answer is three spawns per photo.
+let converterCache;
+function imageConverter() {
+  if (converterCache !== undefined) return converterCache;
+  const has = (bin) => { try { return execFileSync('command', ['-v', bin], { shell: '/bin/sh', encoding: 'utf8' }).trim(); } catch { return ''; } };
+  for (const [bin, kind] of [['sips', 'sips'], ['heif-convert', 'heif'], ['magick', 'magick']]) {
+    const at = has(bin);
+    if (at) { converterCache = { bin: at, kind }; return converterCache; }
+  }
+  converterCache = null;
+  return converterCache;
+}
+
+// Returns '' on success, or a sentence saying what could not be done. Never throws into
+// the request path: a silently dropped attachment is the worst outcome this feature has.
+function convertImage(kind, src, dst) {
+  const c = imageConverter();
+  if (!c) return 'no image converter on this machine (looked for sips, heif-convert, magick)';
+  try {
+    if (c.kind === 'sips') {
+      execFileSync(c.bin, ['-s', 'format', 'jpeg', '-Z', String(ATTACH_MAX_PX), src, '--out', dst],
+                   { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
+    } else if (c.kind === 'heif') {
+      // heif-convert only reads HEIF; a JPEG or PNG that reaches it would fail, so those
+      // are copied instead (below) and this only ever sees HEIC.
+      execFileSync(c.bin, [src, dst], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
+    } else {
+      execFileSync(c.bin, [src, '-auto-orient', '-resize', `${ATTACH_MAX_PX}x${ATTACH_MAX_PX}>`, dst],
+                   { stdio: ['ignore', 'ignore', 'pipe'], timeout: 30000 });
+    }
+  } catch (e) {
+    return `${c.kind} could not convert it: ${String((e.stderr || e.message || '')).split('\n')[0].slice(0, 160)}`;
+  }
+  try { if (!fs.statSync(dst).size) return `${c.kind} produced an empty file`; } catch { return `${c.kind} produced no file`; }
+  return '';
+}
+
+// $CLAUDE_FLEET_DIR/attach/<sock>.<session>/<random>.jpg — the same <sock>.<session> key
+// every other piece of per-session state under that directory already uses, so a directory
+// whose session is gone is an orphan of a class fleet-clean already understands.
+function attachDir(sock, session) {
+  return path.join(process.env.CLAUDE_FLEET_DIR || path.join(os.homedir(), '.claude', 'fleet'),
+                   'attach', `${sock}.${session}`);
+}
+// OLDEST FIRST, to a fixed ceiling. fleet-clean can only help once a session is dead; a
+// session that lives for weeks and gets a photo a day needs the bound enforced here.
+function enforceQuota(dir) {
+  let files = [];
+  try {
+    files = fs.readdirSync(dir).map(f => {
+      const full = path.join(dir, f);
+      try { const st = fs.statSync(full); return { full, size: st.size, at: st.mtimeMs }; } catch { return null; }
+    }).filter(Boolean).sort((a, b) => a.at - b.at);
+  } catch { return 0; }
+  let total = files.reduce((n, f) => n + f.size, 0), dropped = 0;
+  while (total > ATTACH_QUOTA && files.length > 1) {
+    const oldest = files.shift();
+    try { fs.unlinkSync(oldest.full); total -= oldest.size; dropped++; } catch { break; }
+  }
+  return dropped;
+}
+
 async function api(req, res, url, ip) {
   let c;
   try { c = loadConfig(); } catch (e) { return send(res, 500, { ok: false, text: `config unreadable: ${e.message}` }); }
@@ -1402,7 +1511,30 @@ async function api(req, res, url, ip) {
       return send(res, 429, { ok: false, text: 'rate limited' });
   }
 
-  const body = req.method === 'POST' ? await readBody(req) : {};
+  // PER PURPOSE, NOT GLOBAL. Every other POST keeps the 1 MB that has always bounded it;
+  // the attachment route alone gets a cap sized for an unconverted phone photo, because
+  // that is the one request that legitimately carries one. Keyed on the path because this
+  // is the only point where the body is read and the path is already known.
+  let body;
+  try {
+    body = req.method === 'POST'
+      ? await readBody(req, p === '/api/attach' ? ATTACH_BODY_CAP : undefined) : {};
+  } catch (e) {
+    // ...and the refusal says the NUMBER. "body larger than 8388608 bytes" is actionable;
+    // a dropped connection is what this used to do.
+    if (!e.tooBig) return send(res, 400, { ok: false, text: e.message });
+    const mb = Math.round(e.cap / 1048576);
+    send(res, 413, { ok: false,
+      text: `that is bigger than this endpoint accepts: the limit is ${e.cap} bytes (${mb} MB) of request body` });
+    // AND THEN DRAIN, rather than hang up. Destroying the socket mid-upload means the
+    // client is still writing when its end goes away, so it reports a connection reset and
+    // never reads the 413 that says the number — measured: the probe threw instead of
+    // seeing the refusal. Draining costs the rest of one body on an authenticated route,
+    // which is the cheaper of the two mistakes; the client also checks the size before it
+    // sends, so this is the backstop rather than the path anybody takes.
+    try { req.resume(); } catch {}
+    return;
+  }
 
   // ── auth: the passkey's three requests ────────────────────────────────────
   if (p === '/api/auth/challenge') {
@@ -1671,6 +1803,97 @@ async function api(req, res, url, ip) {
       tools: Object.fromEntries(Object.entries(TOOLS_ALLOWED).map(([k, v]) =>
         [k, { fields: v.fields, mutating: !!v.write, passkey: !!v.passkey, needs_project: !v.noProject }])),
       not_yet: NOT_YET });
+
+  // ── a photo, as a file on this machine ────────────────────────────────────
+  // A ROUTE RATHER THAN A VERB, and only because of the cap. docs/attachments.md argued
+  // for a verb so it would inherit the security machinery — but that machinery is CENTRAL
+  // and keyed on nothing: the Origin check, the write rate class, the passkey session gate
+  // and the per-client limit all run above, before any route is chosen, so a new POST path
+  // gets every one of them by existing. What a verb could NOT have is its own body cap:
+  // the body is read once, before dispatch, and the tool name is inside it. So the thing
+  // the document was protecting is kept, and the one thing it could not give is gained.
+  // (/api/push/subscribe is the standing precedent for a POST route that audits itself.)
+  if (p === '/api/attach') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    const rp = resolveProject(String(body.project || ''));
+    if (rp.error) return send(res, 400, { ok: false, text: rp.error });
+    // THE SESSION NAME IS A PATH COMPONENT AND COMES FROM A PHONE. Validated by shape
+    // rather than sanitised: sanitising is a list of things somebody remembered, and this
+    // string is about to name a directory AND end up inside a prompt that gets pasted into
+    // a terminal. Everything else in the path is generated here.
+    const session = String(body.session || '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(session) || session.includes('..'))
+      return send(res, 400, { ok: false, text: `'${session.slice(0, 40)}' is not a usable session name here — letters, digits, dot, dash and underscore only` });
+
+    let buf;
+    try { buf = Buffer.from(String(body.data || ''), 'base64'); }
+    catch { return send(res, 400, { ok: false, text: "'data' is not base64" }); }
+    if (!buf.length) return send(res, 400, { ok: false, text: "'data' is empty" });
+    // Checked again after decoding: base64 that decodes to something implausible is a
+    // signal in itself, and the body cap alone does not bound the decoded length.
+    if (buf.length > ATTACH_MAX_BYTES)
+      return send(res, 413, { ok: false, text: `that photo is ${Math.round(buf.length / 1048576 * 10) / 10} MB and the limit is ${Math.round(ATTACH_MAX_BYTES / 1048576)} MB` });
+
+    const kind = sniffImage(buf);
+    if (kind === 'markup')
+      return send(res, 415, { ok: false, text: 'that looks like markup, not a photo. SVG is refused here on purpose: it is an image that is also a script container' });
+    if (!kind)
+      return send(res, 415, { ok: false, text: 'that is not a JPEG, a PNG or a HEIC — the type is read from the file itself, not from what the phone called it' });
+    // HEIC is the iPhone's default and cannot be handed to an agent as-is.
+    if (kind === 'heic' && !imageConverter())
+      return send(res, 501, { ok: false, text: 'that is a HEIC and this machine has no converter for it — looked for sips (macOS), heif-convert and magick. Send a JPEG, or install one of those' });
+
+    const dir = attachDir(rp.t.sock, session);
+    let out = '';
+    try {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const id = crypto.randomBytes(8).toString('hex');
+      const raw = path.join(dir, `.in-${id}`);
+      // O_EXCL on a name nothing has seen: never write through a path that existed before
+      // this request, and never follow a symlink into one.
+      fs.writeFileSync(raw, buf, { flag: 'wx', mode: 0o600 });
+      const conv = imageConverter();
+      // HEIC ALWAYS, because no agent reads it. Anything already readable is only put
+      // through a converter when it is big enough for that to be worth doing: measured,
+      // sips turns a 70-byte PNG into a 41 KB JPEG, so re-encoding by reflex can make a
+      // small picture bigger AND lossier for nothing.
+      const worthResizing = buf.length > ATTACH_RESIZE_OVER;
+      if (kind === 'heic' || (conv && conv.kind !== 'heif' && worthResizing)) {
+        out = path.join(dir, `${id}.jpg`);
+        const bad = convertImage(kind, raw, out);
+        if (bad) { try { fs.unlinkSync(raw); } catch {} try { fs.unlinkSync(out); } catch {}
+          return send(res, 500, { ok: false, text: bad }); }
+        fs.unlinkSync(raw);
+      } else {
+        // No converter, and it is already something an agent can read: keep the original
+        // rather than refuse. This is the Linux-without-sips path.
+        out = path.join(dir, `${id}.${kind}`);
+        fs.renameSync(raw, out);
+      }
+      fs.chmodSync(out, 0o600);
+    } catch (e) {
+      return send(res, 500, { ok: false, text: `could not store it: ${e.message}` });
+    }
+    const dropped = enforceQuota(dir);
+    const size = (() => { try { return fs.statSync(out).size; } catch { return 0; } })();
+    // THE PATH IS ABOUT TO BE PUT IN A PROMPT AND PASTED INTO A TERMINAL. Every component
+    // of it is either from the projects file or generated here, so this can only fail if
+    // one of those assumptions breaks — which is exactly when it should.
+    if (!/^[A-Za-z0-9._\/-]+$/.test(out)) {
+      try { fs.unlinkSync(out); } catch {}
+      return send(res, 500, { ok: false, text: 'refusing to hand back a path with characters a shell would read' });
+    }
+    log(`attach: ${session} <- ${Math.round(size / 1024)} KB ${path.extname(out).slice(1)}${dropped ? ` (${dropped} older dropped)` : ''}`);
+    // AUDITED LIKE A MUTATION, because it is one: after this call there are bytes on the
+    // fleet's disk that were not there before. The subject is the session it is for.
+    try {
+      auditAppend({ ts: now(), client: req.client.id, ip, verb: 'attach', project: rp.t.name,
+        subject: session, result: 'ran',
+        output: `${path.basename(out)} ${size} bytes from ${kind}${dropped ? `, ${dropped} older dropped` : ''}` });
+    } catch {}
+    return send(res, 201, { ok: true, path: out, bytes: size, from: kind,
+      converted: path.extname(out) === '.jpg' && kind !== 'jpg', dropped });
+  }
 
   // ── writes ────────────────────────────────────────────────────────────────
   if (p === '/api/verb') {

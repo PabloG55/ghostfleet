@@ -6120,6 +6120,74 @@ is "the MCP server no longer execs"      "0" \
 for v in CLAUDE_FLEET_SOCK CLAUDE_CONFIG_DIR CLAUDE_FLEET_DIR CLAUDE_FLEET_PROFILE CLAUDE_FLEET_SCOPE CLAUDE_FLEET_ROOT; do
   is "the dispatch sets $v per target" "1" "$(grep -c "$v: " "$ROOT/mcp/fleet-dispatch.mjs" || true)"
 done
+# ── attachments: the first bytes this server ever writes to disk ─────────────
+# "can I send a picture?", twice. docs/attachments.md measured that an agent given a PATH
+# reads the pixels, so the feature is: put the file on this machine, put its path in the
+# prompt. That makes /api/attach the first route in ghostfleet that writes externally
+# supplied bytes anywhere, and most of what is asserted here is therefore refusals.
+#   BOTH DIRECTIONS ON EVERY ONE. A server that refused everything would pass a file full
+# of "is it refused?" rows while being useless, so each refusal is paired with the accept
+# that proves the route works — and the accepted ones are checked on DISK, because a 201
+# with a path in it is not evidence that a file exists.
+group "fleet-serve: a photo becomes a file, and everything else is refused"
+if sv_start attach; then
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" attach "$(sv_code att)" > "$SV/probe.att" 2>"$SV/probe.att.err"
+  is "attach-probe ran"                    ""    "$(head -2 "$SV/probe.att.err" | tr '\n' ' ' | sed 's/ *$//')"
+  # AUTH: this route changes the filesystem, so it wants the same live token every other
+  # mutating call does — and gets it from the central gate rather than its own.
+  is "no token, no upload"                 "401" "$(pf attach.noToken att)"
+  # ...and the same body with a token lands.
+  is "a PNG is stored"                     "201" "$(pf attach.png att)"
+  is "a JPEG is stored"                    "201" "$(pf attach.jpg att)"
+  # THE FILE IS ON DISK, which the status code does not prove.
+  apath="$(pb attach.png att | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).path||"")}catch{console.log("")}})')"
+  is "...and the path it returned exists"  "yes" "$([ -n "$apath" ] && [ -f "$apath" ] && echo yes || echo "no: '$apath'")"
+  is "...under the fleet dir, keyed by session" "yes" \
+     "$(printf '%s' "$apath" | grep -q '/fleet/attach/[^/]*\.attachtest/' && echo yes || echo "no: $apath")"
+  # THE PATH IS ABOUT TO BE PASTED INTO A TERMINAL. Nothing in it may be a character a
+  # shell would read, and no component of it came from the client.
+  is "...and holds nothing a shell would read" "yes" \
+     "$(printf '%s' "$apath" | grep -qE '^[A-Za-z0-9._/-]+$' && echo yes || echo "no: $apath")"
+  is "...with a server-generated name"     "yes" \
+     "$(basename "$apath" 2>/dev/null | grep -qE '^[0-9a-f]{16}\.(jpg|png)$' && echo yes || echo "no: $(basename "$apath" 2>/dev/null)")"
+  is "...and is not group- or world-readable" "600" \
+     "$(ls -l "$apath" 2>/dev/null | awk '{print $1}' | sed 's/^-//;s/rw-------/600/;s/[^0-9]*$//' | head -c3)"
+  # SNIFFED, NOT DECLARED. SVG is refused BY NAME because it is an image that is also a
+  # script container, and the refusal has to say so or somebody re-adds it as "just an
+  # image format".
+  is "an SVG is refused"                   "415" "$(pf attach.svg att)"
+  is "...and says why, not just no"        "1"   "$(pb attach.svg att | grep -c 'script container' || true)"
+  is "a text file is refused"              "415" "$(pf attach.junk att)"
+  is "an empty body is refused"            "400" "$(pf attach.empty att)"
+  # THE SESSION NAME IS A PATH COMPONENT FROM A PHONE. Refused by shape, so traversal
+  # cannot be reached by a case somebody forgot to sanitise.
+  is "traversal in the session is refused" "400" "$(pf attach.traversal att)"
+  is "a slash in the session is refused"   "400" "$(pf attach.slash att)"
+  is "a bare .. is refused"                "400" "$(pf attach.dots att)"
+  is "an empty session is refused"         "400" "$(pf attach.emptySession att)"
+  is "an unknown project is refused"       "400" "$(pf attach.badProject att)"
+  # ...and nothing escaped while trying: no directory outside the attach root was made.
+  is "nothing was written outside the key" "0" \
+     "$(find "$SV/home/.claude/fleet/attach" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | grep -vc '\.attachtest$' || true)"
+  # TOO BIG SAYS THE NUMBER. 7 MB decoded is inside the 8 MB body cap and outside the 6 MB
+  # decoded limit, so this is the second check — the one the body cap cannot make.
+  is "an oversized photo is refused"       "413" "$(pf attach.tooBig att)"
+  is "...naming the limit rather than dying" "1" "$(pb attach.tooBig att | grep -c '6 MB' || true)"
+  # ...and the OTHER ceiling, which is a different check in a different place: the body cap
+  # fires while the bytes are still arriving, before anything is decoded. It has to answer
+  # rather than drop the connection, which is what it used to do.
+  is "a body past the cap is refused"      "413" "$(pf attach.pastCap att)"
+  is "...and answers instead of dropping"  "1" "$(pb attach.pastCap att | grep -c 'request body' || true)"
+  # AUDITED LIKE A MUTATION, because it is one: bytes exist that did not before.
+  # Two, because two uploads landed — an exact count, so a route that audited only the
+  # first or audited twice per call would both show up.
+  is "both uploads are in the audit log"   "2" \
+     "$(grep -c '"verb":"attach"' "$SV/audit.jsonl" 2>/dev/null || true)"
+  serve_stop
+else
+  skip "attachments" "$SV_WHY"
+fi
+
 rm -rf "$SV"
 fi
 serve_stop

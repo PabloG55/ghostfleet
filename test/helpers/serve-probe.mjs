@@ -18,6 +18,55 @@ const [base, phase, arg] = process.argv.slice(2);
 const row = (name, r) => console.log(`${name}${US}${r.status}${US}${JSON.stringify(r.json)}`);
 const a = new Authenticator({ rpId: new URL(base).hostname, origin: base });
 
+// ── attachments: bytes on the fleet's disk ────────────────────────────────
+// The first route in ghostfleet that writes externally-supplied bytes anywhere, so most of
+// what is asked here is refusals. Both directions on every one: a server that said no to
+// everything would pass a file of "is it refused?" rows and be useless.
+if (phase === 'attach') {
+  const enrol = await a.enroll(base, arg);
+  if (!enrol.json || !enrol.json.token) { row('attach.enrol', enrol); process.exit(0); }
+  // A 1x1 PNG and a 1x1 JPEG, written out as bytes rather than fetched from anywhere.
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(64, 0x20), Buffer.from([0xff, 0xd9])]);
+  const post = (body) => a.api(base, 'POST', '/api/attach', body);
+  const b64 = (b) => b.toString('base64');
+
+  // AUTH FIRST, because this route changes the filesystem: no live token, no request.
+  row('attach.noToken', await request(base, 'POST', '/api/attach',
+    { body: { project: 'demo', session: 'w', data: b64(PNG) } }));
+  // ...and the same body WITH one, or the row above proves only that the server says no.
+  row('attach.png', await post({ project: 'demo', session: 'attachtest', data: b64(PNG) }));
+  row('attach.jpg', await post({ project: 'demo', session: 'attachtest', data: b64(JPG) }));
+
+  // SNIFFED, NOT DECLARED. An SVG is refused by name because it is an image that is also a
+  // script container; anything else unrecognised is refused as not-an-image.
+  row('attach.svg', await post({ project: 'demo', session: 'attachtest',
+    data: b64(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>')) }));
+  row('attach.junk', await post({ project: 'demo', session: 'attachtest',
+    data: b64(Buffer.from('this is a text file wearing a photo hat, at some length')) }));
+  row('attach.empty', await post({ project: 'demo', session: 'attachtest', data: '' }));
+
+  // THE SESSION NAME IS A PATH COMPONENT AND COMES FROM A PHONE. Traversal is refused by
+  // shape rather than sanitised away, and the refusal names what is allowed.
+  row('attach.traversal', await post({ project: 'demo', session: '../../../../etc/x', data: b64(PNG) }));
+  row('attach.slash', await post({ project: 'demo', session: 'a/b', data: b64(PNG) }));
+  row('attach.dots', await post({ project: 'demo', session: '..', data: b64(PNG) }));
+  row('attach.emptySession', await post({ project: 'demo', session: '', data: b64(PNG) }));
+  row('attach.badProject', await post({ project: 'nope', session: 'attachtest', data: b64(PNG) }));
+
+  // TWO CEILINGS, AND THEY ARE DIFFERENT CHECKS. The decoded limit is 6 MB and the body cap
+  // is 9 MB, and the gap between them is deliberate: base64 inflates by a third, so 6 MB of
+  // photo is 8 MB of body and a cap set AT 8 would make the decoded check unreachable —
+  // every oversized photo would die on the body instead, and the message that names the
+  // photo's size would never be seen. Measured that way round the first time.
+  const big = Buffer.concat([PNG, Buffer.alloc(6.5 * 1024 * 1024, 0x41)]);   // ~8.7 MB of body
+  row('attach.tooBig', await post({ project: 'demo', session: 'attachtest', data: b64(big) }));
+  // ...and past the body cap, which fires while the bytes are still arriving.
+  const huge = Buffer.concat([PNG, Buffer.alloc(9 * 1024 * 1024, 0x41)]);
+  row('attach.pastCap', await post({ project: 'demo', session: 'attachtest', data: b64(huge) }));
+  process.exit(0);
+}
+
 if (phase === 'auth') {
   // Before anything is enrolled and before any token exists.
   row('cold.read', await request(base, 'GET', '/api/projects'));

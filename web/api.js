@@ -441,6 +441,57 @@ export async function pushUnsubscribe(endpoint) {
 // ── writes ────────────────────────────────────────────────────────────────
 // `assertion` is the fresh WebAuthn assertion for a destructive verb. It is passed
 // through to the server, which is what decides whether it counts.
+// ── a photo, on its way to becoming a file on the Mac ─────────────────────
+// THE ORIGINAL BYTES GO UP. The obvious client-side plan is to downscale first —
+// createImageBitmap, a canvas, toBlob — and every measurement behind that (docs/
+// attachments.md §3-§4) was taken in Chrome on macOS. An iPhone hands out HEIC, and
+// whether Safari's createImageBitmap decodes a HEIC Blob is unmeasured. Sending what the
+// picker gave us and converting on the Mac (sips) means the answer does not matter, which
+// on a feature that has already been reported broken three times is worth the bytes.
+//   Its own route, not a verb, because it is the one request that legitimately carries
+// megabytes and the body cap is per purpose (bin/fleet-serve.mjs).
+// The same number bin/fleet-serve.mjs enforces. Stated twice on purpose — the server's
+// copy is the control and this one is the courtesy — and asserted equal in the suite so
+// they cannot drift into a client that refuses what the server would have taken.
+export const ATTACH_MAX_BYTES = 6 * 1024 * 1024;
+export async function attach(project, session, file) {
+  if ((await ready()).mode !== 'server') {
+    // In fixture mode there is no disk to write to and no agent to read it. Say so rather
+    // than inventing a path that would go into a prompt and name nothing.
+    throw new Error('attachments need a real fleet — there is nowhere to put a file in fixture mode');
+  }
+  if (!haveToken()) throw new AuthError('no live session token');
+  // CHECKED BEFORE IT IS SENT. The server caps this too and has to, but a phone that
+  // uploads five megabytes over a tunnel to be told the number would have spent the five
+  // megabytes. Same limit, said the same way, before the cost is paid.
+  if (file.size > ATTACH_MAX_BYTES) {
+    const mb = (n) => Math.round(n / 1048576 * 10) / 10;
+    throw new Error(`that photo is ${mb(file.size)} MB and the limit is ${mb(ATTACH_MAX_BYTES)} MB`);
+  }
+  const data = await new Promise((res, rej) => {
+    const fr = new FileReader();
+    // readAsDataURL rather than ArrayBuffer + manual base64: the browser does the encoding,
+    // and a hand-rolled base64 over a 5 MB buffer is a loop that blocks the one thread the
+    // composer is drawn on.
+    fr.onload = () => res(String(fr.result || '').split(',')[1] || '');
+    fr.onerror = () => rej(new Error('could not read that file off the phone'));
+    fr.readAsDataURL(file);
+  });
+  let r;
+  try {
+    r = await fetch(baseUrl() + '/api/attach', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ project, session, data }),
+    });
+  } catch (e) { throw new OfflineError(String(e && e.message || e)); }
+  if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server refused the upload'); }
+  const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+  record('attach', { project, session, bytes: file.size }, j.ok ? `ok: ${j.path}` : `refused: ${j.text || r.status}`);
+  if (!j.ok) throw new Error(j.text || `attach failed (HTTP ${r.status})`);
+  return j;
+}
+
 export async function verb(tool, args, assertion = null) {
   if ((await ready()).mode === 'server') {
     if (!haveToken()) throw new AuthError('no live session token');
