@@ -38,6 +38,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # THE CLONE ABOVE IS SHALLOW and fetches only the ref under test — no fetch-depth is
+      # set, so it is depth 1 and there is no `origin/main` in it at all. Measured against a
+      # real `git clone --depth=1 --single-branch`: `git rev-parse origin/main` fails, and so
+      # does every comparison built on it.
+      #   test/helpers/sw-version.mjs needs it, because the thing it checks is ORDER: this
+      # branch's client VERSION against the one already on main. #83 took v17, #81 was
+      # numbered v16 before it and merged after, main went backwards, and #84 existed only to
+      # put it back. The pin in pwa-check cannot see that — a version bumped DOWNWARDS still
+      # matches its own bytes.
+      #   ONE REF, ONE COMMIT DEEP. That is all the check reads (main's web/sw.js and whether
+      # HEAD is already contained in it), and it keeps this step at a few hundred milliseconds
+      # instead of unshallowing the whole history.
+      #   `|| true` and NOT a hard failure here, deliberately: if the ref does not arrive, the
+      # helper is the thing that refuses — on a pull_request run it FAILS, in a readable
+      # sentence, rather than skipping. A guard that silently no-ops in CI reads as covered
+      # and is worse than no guard. Letting the fetch kill the job would replace that sentence
+      # with a git error, and on the push-to-main leg there is nothing to compare anyway.
+      - name: Fetch main, for the client-version ordering check
+        run: git fetch --depth=1 origin +refs/heads/main:refs/remotes/origin/main || true
+
       # tmux is on neither runner image; jq is on both today, and that is not a
       # promise. Both are installed rather than assumed. No npm step: the suite has
       # no dependencies and the repo has no lockfile.
