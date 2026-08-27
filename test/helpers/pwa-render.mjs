@@ -199,7 +199,16 @@ const realFetch = globalThis.fetch;
 // shot against it, for cases that are about the client's arithmetic rather than about
 // the demo data.
 let fixtureOverride = null;    // { 'projects.json': <object> } | null
-globalThis.fetch = (url, opts) => {
+// GF_SLOW_MS=<n> ADDS n MILLISECONDS TO EVERY FETCH, and it is the only reason the bug
+// this file spent two CI runs on was findable. The symptom was macos-latest failing seven
+// rows that ubuntu passed on the identical commit — unreproducible on the machine this is
+// developed on, which is simply faster. At GF_SLOW_MS=30 it reproduces in twenty seconds,
+// and the same knob is what proves a fix holds: 0, 30, 60, 120 and 250 all green is a
+// different claim from "it passed once".
+//   Inert when unset, so a normal run is untouched.
+const SLOW_MS = Number(process.env.GF_SLOW_MS || 0);
+const slow = (p) => SLOW_MS ? p.then(v => new Promise(r => setTimeout(() => r(v), SLOW_MS))) : p;
+globalThis.fetch = (url, opts) => slow((() => {
   const m = /^\.\/fixtures\/([A-Za-z0-9._-]+)$/.exec(String(url));
   if (m && fixtureOverride && fixtureOverride[m[1]]) {
     const body = fixtureOverride[m[1]];
@@ -211,7 +220,7 @@ globalThis.fetch = (url, opts) => {
   try { body = fs.readFileSync(file, 'utf8'); }
   catch { return Promise.resolve({ ok: false, status: 404, json: async () => ({}) }); }
   return Promise.resolve({ ok: true, status: 200, json: async () => JSON.parse(body) });
-};
+})());
 
 const U = BASE ? new URL(BASE) : null;
 globalThis.location = U ? { href: U.href, origin: U.origin, protocol: U.protocol, host: U.host, hostname: U.hostname }
@@ -405,19 +414,35 @@ api.setFixtureName('grid-acme-api.json');
 const fleetOf = (...rows) => ({ home: '/Users/pgarces', projects: rows.map(([name, profile]) => ({
   name, profile, path: `/Users/pgarces/gf-demo/${name}`, agent: null, socket: `cf-${name}`,
   sessions: { need: 0, working: 0, parked: 0, total: 0 }, sched: null, nudge: true, budget: 'enforced' })) });
-const reopenProjects = async () => {
-  // Leaving and returning is what re-reads /api/projects, which is where the tabs come
-  // from. Whatever card is FIRST, by name — the fleet changes under this helper, and a
-  // hard-coded project is one that has already gone by the time it is tapped.
-  const first = app.all(n => n.className.split(/\s+/).includes('card'))
-    .find(n => !/add project/.test(n.textContent));
-  if (first) {
-    (first.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: first, pointerId: 1 }));
-    (first.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: first, pointerId: 1 }));
+// Leaving and returning is what re-reads /api/projects, which is where the tabs and the
+// cards come from. Whatever card is FIRST, by name — the fleet changes under this helper,
+// and a hard-coded project is one that has already gone by the time it is tapped.
+//
+// TWO THINGS IT USED TO GET WRONG, both silent and both only under latency:
+//   · it did not check that it LEFT. When the tap had not opened a project yet, the wait
+//     timed out, swipeBack() popped nothing (popTo returns at the root), the refresh never
+//     ran, and the caller asserted against the fleet that was already on screen.
+//   · the screen comes back BEFORE the refresh it triggered lands, so `ready` — what the
+//     caller is actually waiting for — has to be waited on here, not guessed at with a
+//     tick outside.
+// Bounded retries, and it RETURNS whether it got there: no caller is waited into passing,
+// and one that never renders the new fleet still fails its own assertion.
+const reopenProjects = async (ready) => {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const first = app.all(n => n.className.split(/\s+/).includes('card'))
+      .find(n => !/add project/.test(n.textContent));
+    if (first) {
+      (first.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: first, pointerId: 1 }));
+      (first.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: first, pointerId: 1 }));
+    }
+    if (await until(() => !btnWith(/add project/), 4000)) {
+      swipeBack();
+      await until(() => !!btnWith(/add project/), 4000);
+    }
+    if (!ready) return true;
+    if (await until(ready, 4000)) return true;
   }
-  await until(() => !btnWith(/add project/), 4000);
-  swipeBack();
-  await until(() => !!btnWith(/add project/), 4000);
+  return false;
 };
 
 // ONE PROFILE IS THE COMMON CASE — everything is 'work' — and a control whose only option
@@ -478,7 +503,7 @@ click(tabBtn('demo'));
 await tick(5);
 is('parked on a tab that is about to disappear', true, shows('beta'));
 fixtureOverride = { 'projects.json': fleetOf(['alpha', 'work'], ['gamma', 'work']) };
-await reopenProjects();
+await reopenProjects(() => shows('alpha') && shows('gamma'));
 is('a tab that matches nothing shows everything', true, shows('alpha') && shows('gamma'));
 is('...rather than an empty screen', true, projectCards().length > 1);
 
@@ -493,6 +518,7 @@ is('the shipped fleet is back', true, await until(() => shows('acme-api') && sho
 // cardTitled() is defined further down, for the GRID's cards; these are the projects
 // screen's, whose text projectCards() already returns.
 const projText = (name) => projectCards().find(t => t.includes(name)) || '';
+const LONG_PRESS_MS = 600;     // cardEl's, in web/app.js — kept in step by the check below
 // '+ add project' is a CARD, not a button — the same affordance a finger uses, and
 // btnWith() cannot see it. tap() and cardTitled() are defined further down for the grid,
 // so this is their projects-screen twin.
@@ -584,8 +610,7 @@ is('...and the card names it beside the profile', true,
   wire.projects[1].agent = 'codex';
   wire.agents = [{ name: 'claude', caveat: '' }, { name: 'codex', caveat: 'no fleet events' }];
   fixtureOverride = { 'projects.json': wire };
-  await reopenProjects();
-  await until(() => projText('plain'), 4000);
+  await reopenProjects(() => projText('plain') && projText('odd'));
   is("the wire's 'claude' is not printed as a choice", false, /· claude/.test(projText('plain')));
   is('...while a real one still is', true, /work · codex/.test(projText('odd')));
   fixtureOverride = null;
@@ -613,14 +638,43 @@ is('...without falling back to the word claude', false, /· claude/.test(projTex
 let _g = 0; while (sheetNow() && _g++ < 5) closeSheetFromTest();
 // PUT THE SELECTION BACK, because this section moved it. Tapping the '+ add project'
 // card selects it (pointerdown → S.sel = its index), and the footer's `⏎ open` opens
-// `projects[S.sel]` — which for the add card is undefined. The next section opens
-// acme-api that way and got nothing, and every assertion after it failed on a screen
-// that had never changed. A pointerdown alone is exactly what selecting is; a pointerup
-// as well would open the project, which is not what is being restored.
+// `projects[S.sel]` — which for the add card is undefined.
+//
+// A BARE POINTERDOWN IS NOT A SELECTION, IT IS A LONG-PRESS IN THE MAKING. That is what
+// this used to be, and it armed cardEl's 600ms timer with no pointerup to clear it — so
+// `S.confirm = {kind:'project'}` appeared half a second later, in the background, on a
+// screen the test had already left. It then did two things, both silent and both far from
+// here: pollPaused() returns true while a confirmation is up, so the indicator section's
+// pollTick() became a no-op and its fixture switch never landed; and popTo() dismisses a
+// confirmation INSTEAD of navigating, so the next back press was eaten and the voice
+// section ran on the session screen. Seven assertions reporting "this device has no
+// voices", from a finger that never lifted.
+//
+// The gesture that selects and does nothing else is down, a small move, up: the move is
+// past MOVE_SLOP so cardEl clears the long-press timer, and under SWIPE so the pointerup
+// is neither a tap nor a swipe. It is what a finger resting on a card and shifting does.
 {
   const first = projCardNode(/acme-api/);
-  if (first) (first.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: first, pointerId: 1 }));
+  if (first) {
+    const ev = (x) => ({ clientX: x, clientY: 0, target: first, pointerId: 1 });
+    (first.listeners.pointerdown || []).forEach(f => f(ev(0)));
+    (first.listeners.pointermove || []).forEach(f => f(ev(20)));   // > MOVE_SLOP: disarms it
+    (first.listeners.pointerup   || []).forEach(f => f(ev(20)));   // < SWIPE: acts on nothing
+  }
 }
+// PROVEN, NOT ASSUMED, because the whole failure was that nothing here noticed. A
+// confirmation armed by this block is invisible on the screen it fires on and only shows
+// up as somebody else's red, three sections away.
+//   PAST THE TIMER, DELIBERATELY. cardEl's long-press is 600ms, so an assertion made
+// immediately outruns the very thing it is looking for — checked, and it did: with the
+// bad gesture restored this line stayed green at full speed and only went red once the
+// run was slow enough to still be here when the timer fired. A guard that depends on
+// being slow is not a guard.
+await tick(LONG_PRESS_MS + 100);
+is('the long-press window this waited out is the app\'s', true,
+   new RegExp('LONG_PRESS\\s*=\\s*' + LONG_PRESS_MS + '\\b').test(fs.readFileSync(new URL('../../web/app.js', import.meta.url), 'utf8')));
+is('...and armed no confirmation on the way out', false,
+   !!app.find(n => n.className.split(/\s+/).includes('confirm')));
 // The save above fires a refresh() this test does not await; let it land before the next
 // section navigates, or its render arrives on top of a screen that has already moved on.
 await until(() => !!btnWith(/⏎\s+open/), 4000);
@@ -1193,15 +1247,22 @@ is('back on the grid for the voice checks', 'grid', await until(() => !!btnWith(
 // sheet because the count is the only diagnostic a phone with no console can quote back.
 //   IT READS THE SAME STUB the read-aloud section installed, which is why nothing between
 // here and there may install a second one — see the indicator section.
-click(btnWith(/settings/));
-// WAITED FOR, NOT SLEPT THROUGH. On the GRID screen sheetSettings() awaits
+// ONE WAY TO OPEN THIS SHEET, and it waits. On the GRID screen sheetSettings() awaits
 // api.getSettings() before it renders anything, so a fixed tick is a race against an HTTP
-// round-trip to the daemon — and when it lost, all seven assertions below reported an
-// empty voice list, which reads as "this device has no voices" rather than as "the sheet
-// had not been drawn yet". Lost once on a macos-latest runner while ubuntu passed the
-// same commit, which is the shape of every timing flake: green everywhere it is quick.
-await until(() => { const v = sheetHost.firstChild; return !!v && v.find(n => n.tag === 'select' && /vpick/.test(n.className)); }, 4000);
-const vset = sheetHost.firstChild;
+// round-trip to the daemon — and when it lost, every assertion below reported an empty
+// voice list, which reads as "this device has no voices" rather than as "the sheet had not
+// been drawn yet". #88 fixed the first of the two copies of that fixed tick and left the
+// second, which is why `one voice is counted as one` outlived the fix. One helper now.
+//   IT STILL RETURNS THE SHEET WHEN THE PICKER NEVER COMES. The wait is for a picker that
+// is on its way, not a precondition — a version that skipped the assertions when it timed
+// out would turn "this build has no voice picker" into a green run.
+const openVoiceSheet = async () => {
+  click(btnWith(/settings/));
+  await until(() => { const v = sheetHost.firstChild;
+                      return !!v && v.find(n => n.tag === 'select' && /vpick/.test(n.className)); }, 8000);
+  return sheetHost.firstChild;
+};
+const vset = await openVoiceSheet();
 is('settings offers a voice picker', true, !!vset && !!vset.find(n => n.tag === 'select' && /vpick/.test(n.className)));
 is('...and says how many voices this device reported', true, !!vset && /3 voices reported by this device/.test(vset.textContent));
 is('...and in how many languages', true, !!vset && /in 3 languages/.test(vset.textContent));
@@ -1218,9 +1279,7 @@ closeSheetFromTest();
 // The other direction: one voice, which is what the phone reports. The count says one and
 // the suggestion appears — worded as a guess, because nobody here has measured it.
 voiceList.length = 1;
-click(btnWith(/settings/));
-await tick(20);
-const vone = sheetHost.firstChild;
+const vone = await openVoiceSheet();
 is('one voice is counted as one', true, !!vone && /1 voice reported by this device/.test(vone.textContent));
 is('...not pluralised, and no language count for one group', false, !!vone && /1 voices|in 1 languages/.test(vone.textContent));
 is('...and the iOS path is offered', true, !!vone && /Settings → Accessibility → Spoken Content → Voices/.test(vone.textContent));
