@@ -37,7 +37,7 @@ MODEL=()
 # --- this session's PEER NAME ------------------------------------------------
 # Claude Code registers every session under a name that other sessions can address
 # directly (SendMessage / ListAgents, ~/.claude/sessions/<pid>.json). Left alone it
-# DERIVES that name from the directory — search-index-61, acme-web-06 — which no
+# DERIVES that name from the directory — billing-svc-61, acme-api-06 — which no
 # fleet command knows and no agent can be told to reply to, so the one reliable way
 # an answer could come back was unusable.
 #

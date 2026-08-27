@@ -756,7 +756,7 @@ function gridJson(t) {
       // 64 MB. TWO fields in §4 are emitted WHOLE and are user-authored: `msg`, the last
       // assistant line, and since #41 `sched.msg`, the text a scheduled send will deliver.
       // Neither has a bound, and the cards multiply them. Measured on the live fleets:
-      // acme-api 17.5 KB across six sessions, acme-web 13.3 KB — so this is three orders
+      // 17.5 KB across six sessions on one fleet, 13.3 KB on another — so this is three orders
       // of magnitude of headroom rather than a guess, and the overflow path below reports
       // itself instead of parsing a payload that was cut off mid-string.
       { encoding: 'utf8', env: gridEnv(t), timeout: 20000, maxBuffer: 64 * 1024 * 1024 },
