@@ -134,7 +134,14 @@ async function refresh() {
   // that is already running rather than waiting for someone to open the settings sheet.
   maybeSyncPush();
   try {
-    if (S.screen === 'projects') S.projects = (await api.getProjects()).projects;
+    if (S.screen === 'projects') {
+      // The payload carries the agent CATALOGUE beside the projects, and both are needed:
+      // the list draws the cards, the catalogue fills the picker. Keeping only `.projects`
+      // (which is what this line did) left the picker with nothing to offer and no way to
+      // tell that apart from a machine with one agent installed.
+      const j = await api.getProjects();
+      S.projects = j.projects; S.agents = j.agents || [];
+    }
     else if (S.screen === 'grid') S.grid = await api.getGrid(S.project);
     else if (S.screen === 'session') {
       S.grid = await api.getGrid(S.project);
@@ -2252,18 +2259,96 @@ function sheetLabel(name) {
   ]));
 }
 
+// ── which CLI a project's master runs ────────────────────────────────────────
+// "the master cant be selected as open code or codex add that pls". The 4th column of
+// the projects file has been the project's default agent for a while, bin/ghostfleet
+// reads it into CLAUDE_FLEET_AGENT and hands it to the master at creation, and
+// `fleet-project add --agent` could write it — but nothing on any SCREEN could, so the
+// only way to change it was editing a text file.
+//
+// THE OPTIONS COME FROM THE MACHINE. /api/projects carries `agents`, built by the daemon
+// from `fleet-agent list` filtered by `fleet-agent installed`, so a fourth agent appears
+// here without this file changing, and an agent that is not installed is never offered —
+// picking one that cannot run would leave the next master dead at `exec agent-here` with
+// nothing on screen to say why.
+//
+// AND EACH OPTION CARRIES WHAT IT COSTS. `fleet-agent caveat` composes that from the
+// registry's own capability fields, measured rather than assumed (2026-08-26): opencode
+// is fully visible to the fleet but has no fleet_* tools registered, and codex has
+// neither those nor an event bridge, so its card status is pane guesswork and a question
+// it asks may never reach the inbox. Shipping the option without saying so would be a
+// silent footgun — the fleet would look broken rather than degraded.
+const agentCatalogue = () => (S.agents || []);
+// The empty option is FIRST and is not the word "claude": an absent 4th column is what
+// every existing project has, and it is what the card's "profile · agent" line keys off.
+// Writing 'claude' would make every default project start printing "· claude".
+function agentPicker(current, onPick) {
+  const cat = agentCatalogue();
+  const note = el('p', { class: 'hint' });
+  const paint = (v) => {
+    const hit = cat.find(a => a.name === v);
+    note.className = hit && hit.caveat ? 'warn' : 'hint';
+    note.textContent = !v ? 'claude — the default; nothing is given up.'
+      : hit && hit.caveat ? `${v} — ${hit.caveat}`
+      : `${v} — the full fleet: events, tools and resume.`;
+  };
+  const row = el('div', { class: 'seg wrap' });
+  const draw = () => {
+    row.textContent = '';          // clears children in a browser and in the test DOM
+    const opts = [{ name: '', label: 'claude (default)' }, ...cat.filter(a => a.name !== 'claude').map(a => ({ name: a.name, label: a.name }))];
+    for (const o of opts) {
+      row.append(btn(o.label, () => { current = o.name; onPick(o.name); paint(o.name); draw(); },
+                     current === o.name ? 'on' : ''));
+    }
+  };
+  draw(); paint(current);
+  // A CATALOGUE THAT NEVER ARRIVED MUST SAY SO. On a daemon too old to send `agents`, or
+  // a hand-written fixture, this list is empty — and a picker offering one option reads
+  // as "there is only claude" rather than as "the machine was never asked".
+  if (!cat.length) note.textContent = 'this fleet did not report which agents are installed — only the default is offered.';
+  return { row, note };
+}
+// THE RUNNING MASTER DOES NOT CHANGE, said at the point of change. CLAUDE_FLEET_AGENT is
+// read once, by agent-here, when the tmux session is created; the session has already
+// exec'd its CLI and nothing re-reads the projects file. Without this line the setting
+// looks broken — you pick codex, the master keeps answering as claude, and nothing
+// anywhere explains it. Same family as every long-lived-process trap in CLAUDE.md.
+const NEXT_MASTER = 'takes effect on the NEXT master — a running one keeps the CLI it started with (stop it, or open the project again, to switch).';
+
+// The edit path for a project that already exists — reached from the projects screen's
+// settings sheet, where the other two per-project settings live. A sheet of its own
+// rather than a cycling button in that row, because the option that matters most about
+// this setting is the sentence under it: what the choice costs, and that it applies to
+// the next master rather than the one that is running.
+function sheetProjectAgent(p) {
+  let agent = p.agent && p.agent !== 'claude' ? p.agent : '';
+  const pick = agentPicker(agent, v => { agent = v; });
+  const go = async () => {
+    closeSheet();
+    await doVerb('fleet_project_agent', { name: p.name, agent });
+    refresh();                       // the card's "profile · agent" line is now stale
+  };
+  openSheet(sheet(`agent · ${p.name}`, NEXT_MASTER, [
+    pick.row, pick.note,
+    el('div', { class: 'row' }, [btn('save', go, 'go'), btn('esc back', closeSheet)]),
+  ]));
+}
+
 function sheetAddProject() {
   const p = input('', { placeholder: '/Users/you/some-repo' });
   const nm = input('');
   const start = el('input', { type: 'checkbox' });
+  let agent = '';
+  const pick = agentPicker('', v => { agent = v; });
   const go = async () => {
     const path = (p.value || '').trim();
     if (!path) { toast('a path is required', 'bad'); return; }
     closeSheet();
-    await doVerb('fleet_project_add', { path, name: (nm.value || '').trim(), start: start.checked });
+    await doVerb('fleet_project_add', { path, name: (nm.value || '').trim(), agent, start: start.checked });
   };
   openSheet(sheet('add project', 'the repo, or a folder holding its checkouts', [
     field('path', p), field('name  (default: the folder name)', nm),
+    el('div', { class: 'field' }, [el('label', { text: "master's agent" }), pick.row, pick.note]),
     el('label', { class: 'field' }, [start, document.createTextNode(' also start its master session')]),
     el('div', { class: 'row' }, [btn('add', go, 'go'), btn('esc back', closeSheet)]),
   ]));
@@ -2343,10 +2428,22 @@ async function sheetSettings() {
   } else {
     kids.push(el('p', { text: 'auto-nudge: a worker that finishes or needs help pings its master to drain fleet-inbox' }));
     kids.push(el('p', { text: 'budget limit: enforced = the governor parks all workers near the 5h usage ceiling · ignored = keep running' }));
+    // THE AGENT SITS WITH THE OTHER TWO PER-PROJECT SETTINGS, and that placement is the
+    // point rather than convenience: the TUI's `,` page is a table of projects with a
+    // column per setting, and this is the same table. A project created before today —
+    // which is all of them — had no edit path at all on the phone, so a picker that only
+    // worked at creation time would not have answered the request.
+    kids.push(el('p', { text: "agent: which coding CLI this project's master runs. It " + NEXT_MASTER }));
     const rows = el('div', { class: 'rows' });
     for (const p of S.projects || []) {
       rows.append(el('div', { class: 'srow' }, [
         el('div', { class: 'nm', text: p.name }),
+        // Labelled with what it IS, not with a verb: the row is a state readout first.
+        // 'claude' rather than blank, because a blank cell reads as "not loaded" — the
+        // empty COLUMN is a storage detail and this is the only place it should not leak.
+        btn(p.agent && p.agent !== 'claude' ? p.agent : 'claude',
+            () => { closeSheet(); sheetProjectAgent(p); },
+            p.agent && p.agent !== 'claude' ? 'on' : ''),
         btn(p.nudge ? '● on' : '○ off', async () => { await doVerb('fleet_nudge', { project: p.name, state: p.nudge ? 'off' : 'on' }); closeSheet(); }, p.nudge ? 'on' : 'off'),
         btn(p.budget === 'ignored' ? '● ignored' : '○ enforced', async () => { await doVerb('fleet_budget', { project: p.name, state: p.budget === 'ignored' ? 'enforced' : 'ignored' }); closeSheet(); }),
       ]));

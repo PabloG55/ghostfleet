@@ -176,6 +176,13 @@ agent_field() {
         interrupt_re)    printf '%s' '^  ⎿.*Interrupted' ;;
         interrupt_re_js) printf '%s' '^  ⎿.*Interrupted' ;;
         hooks)      printf 'yes' ;;
+        # Can this agent CALL the fleet — fleet_spawn, fleet_inbox, fleet_send — rather
+        # than only be watched by it? Measured 2026-08-26, not assumed: install.sh's
+        # register_mcp() writes ghostfleet into every profile's .claude.json, and
+        # `jq .mcpServers.ghostfleet` finds it in ~/.claude and ~/.claude-personal on this
+        # machine. The orchestrate skill is symlinked into <profile>/skills/ by the same
+        # function. Both are Claude Code features, which is why the other two say no.
+        mcp)        printf 'yes' ;;
         budget)     printf 'yes' ;;
         resume)     printf 'yes' ;;
         verified)   printf 'yes' ;;
@@ -190,6 +197,12 @@ agent_field() {
         blocked_re) printf '%s' 'Permission required|Allow once' ;;
         ready_re)   printf '%s' 'ctrl\+p commands|OpenCode [0-9]' ;;
         hooks)      printf 'yes' ;;   # permission.asked -> need-you, session.idle -> done
+        # NO, and this is a wiring gap rather than a limitation: `opencode mcp` exists, so
+        # the server COULD be registered — install.sh simply does not, and `opencode mcp
+        # list` on this machine answers "No MCP servers configured" (measured 2026-08-26).
+        # So an opencode master is fully VISIBLE to the fleet and cannot DRIVE it from a
+        # tool call; the fleet-* commands still work from its shell.
+        mcp)        printf 'no'  ;;
         budget)     printf 'no'  ;;   # "13.8K (7%)" is CONTEXT, not the 5h account window
         resume)     printf 'yes' ;;   # --continue is cwd-scoped (verified both ways)
         verified)   printf 'yes' ;;
@@ -224,6 +237,11 @@ agent_field() {
         # fleet-spawn silently fell back to its timed send.
         ready_re)   printf '%s' '· [~/]' ;;
         hooks)      printf 'no'  ;;
+        # Same gap as opencode and the same measurement: `codex mcp add` exists, nothing
+        # registers ghostfleet, and `codex mcp list` answers "No MCP servers configured
+        # yet" (2026-08-26). Combined with hooks=no this is the most degraded of the
+        # three — see the `caveat` command, which is what the UIs actually print.
+        mcp)        printf 'no'  ;;
         budget)     printf 'no'  ;;
         # NO, and the reason is subtle enough to write down. `codex resume --last` IS
         # cwd-scoped and works — verified both directions plus the empty case, using
@@ -310,6 +328,23 @@ case "$cmd" in
     for a in $KNOWN_AGENTS; do
       command -v "$(agent_field "$a" bin)" >/dev/null 2>&1 && printf '%s\n' "$a"
     done ;;
+  # WHAT A UI HAS TO WARN ABOUT, in one place because there are now three UIs that must
+  # say the same thing (the phone's add-project sheet, the phone's project settings, and
+  # the TUI's `,` page). COMPOSED from the capability fields rather than written out per
+  # agent, so a fourth agent gets its warning from declaring `hooks` and `mcp` — the same
+  # reason `list` exists instead of every caller spelling the three names.
+  #   Empty output = nothing is lost. Callers test for empty, not for a word.
+  caveat)
+    a="${1:?fleet-agent: usage: fleet-agent caveat <agent>}"
+    is_agent "$a" || { echo "fleet-agent: unknown agent '$a'" >&2; exit 1; }
+    out=""
+    [ "$(agent_field "$a" hooks)" = yes ] || \
+      out="no fleet events: status is guessed from its pane, and a question it asks may never reach the inbox"
+    [ "$(agent_field "$a" mcp)" = yes ] || \
+      out="${out:+$out. }no fleet_* tools: it cannot spawn or answer siblings from a tool call, only by running fleet-* in its own shell"
+    [ "$(agent_field "$a" resume)" = yes ] || \
+      out="${out:+$out. }no resume: recycling its pane loses the conversation"
+    printf '%s' "$out" ;;
   field)
     a="${1:?fleet-agent: usage: fleet-agent field <agent> <field>}"
     f="${2:?fleet-agent: usage: fleet-agent field <agent> <field>}"

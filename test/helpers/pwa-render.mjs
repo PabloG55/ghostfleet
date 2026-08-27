@@ -487,6 +487,145 @@ fixtureOverride = null;
 await reopenProjects();
 is('the shipped fleet is back', true, await until(() => shows('acme-api') && shows('scratch'), 4000));
 
+// ── which CLI a project's master runs ────────────────────────────────────
+// "the master cant be selected as open code or codex add that pls". The column has been
+// readable for a while and nothing on a SCREEN could write it.
+// cardTitled() is defined further down, for the GRID's cards; these are the projects
+// screen's, whose text projectCards() already returns.
+const projText = (name) => projectCards().find(t => t.includes(name)) || '';
+// '+ add project' is a CARD, not a button — the same affordance a finger uses, and
+// btnWith() cannot see it. tap() and cardTitled() are defined further down for the grid,
+// so this is their projects-screen twin.
+const projCardNode = (re) => app.all(n => n.className.split(/\s+/).includes('card'))
+  .find(n => re.test(n.textContent.replace(/\s+/g, ' ')));
+const tapCard = (n) => { if (!n) return false;
+  (n.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 }));
+  (n.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 }));
+  return true; };
+const sheetNow = () => sheetHost.firstChild;
+const sheetHas = (re) => { const s = sheetNow(); return !!s && re.test(s.textContent); };
+// SCOPED TO THE SHEET. btnWith() searches #app and a sheet renders into #sheet, so it
+// cannot see any of these — and every one of them would come back "button not found",
+// which reads as the control being absent rather than as the finder looking in the wrong
+// tree. The picker lives entirely inside a sheet, so nothing here can use btnWith.
+const sBtn = (re) => { const s = sheetNow(); return s && s.find(n => n.tag === 'button' && re.test(n.textContent)); };
+const sClick = (re) => { const b = sBtn(re); if (b) (b.listeners.click || []).forEach(f => f()); return !!b; };
+
+// 1. AT CREATION TIME. The options come off the wire (`agents` on /api/projects, built
+// from `fleet-agent list` filtered by `fleet-agent installed`), never from a list in the
+// client — so a fourth agent appears here without app.js changing.
+is('the add-project card is on screen', true, tapCard(projCardNode(/add project/)));
+await tick(20);
+is('the add sheet offers an agent', true, sheetHas(/master's agent/));
+is('...with the default first, spelled out', true, !!sBtn(/claude \(default\)/));
+is('...and the other installed agents', true, !!sBtn(/^opencode$/) && !!sBtn(/^codex$/));
+// The default gives nothing up, so it must NOT carry a warning — a picker that warns
+// about every option is one nobody reads.
+is('...saying the default costs nothing', true, sheetHas(/nothing is given up/));
+is('...and warning about neither yet', false, sheetHas(/no fleet events|no fleet_\* tools/));
+// EACH OPTION CARRIES WHAT IT COSTS, and the two differ: opencode is visible to the
+// fleet and cannot drive it; codex is neither. Shipping the option without saying so
+// would be a silent footgun — the fleet reads as broken rather than as degraded.
+sClick(/^codex$/);
+await tick(5);
+is('choosing codex says it is blind to events', true, sheetHas(/no fleet events/));
+is('...and cannot call the fleet', true, sheetHas(/no fleet_\* tools/));
+sClick(/^opencode$/);
+await tick(5);
+is('opencode says it cannot call the fleet', true, sheetHas(/no fleet_\* tools/));
+is('...but is NOT called blind to events', false, sheetHas(/no fleet events/));
+closeSheetFromTest();
+
+// 2. AND AFTER, WHICH IS THE HALF THAT ANSWERS THE REQUEST. Every project Pablo has
+// already exists, so a picker that only worked at creation time would not have helped.
+// It lives with the other two per-project settings, which is where the TUI's `,` page
+// keeps them.
+const openProjSettings = () => click(btnWith(/,\s+settings/));
+openProjSettings();
+await tick(20);
+is('project settings lists the agent', true, sheetHas(/which coding CLI/));
+// THE RUNNING MASTER DOES NOT CHANGE, said at the point of change. CLAUDE_FLEET_AGENT is
+// read once, when the tmux session is created; without this the setting reads as broken.
+is('...and says it is the NEXT master', true, sheetHas(/NEXT master/));
+// toolbox is `codex` in the fixture and acme-api has none — both directions on one screen.
+is('...showing a project that has one', true, !!sBtn(/^codex$/));
+is('...and claude for one that has not', true, !!sBtn(/^claude$/));
+sClick(/^claude$/);            // acme-api's row: opens its own sheet
+await tick(20);
+is('a project opens its own agent sheet', true, sheetHas(/agent · /));
+is('...repeating the next-master rule', true, sheetHas(/NEXT master/));
+sClick(/^opencode$/);
+await tick(5);
+is('...and warns before you save', true, sheetHas(/no fleet_\* tools/));
+// GATED ON BEING IN THE RIGHT SHEET. The projects settings sheet has a `save` of its own
+// — the connection one, which re-points the whole client at a different backend — so an
+// unguarded /^save$/ press after a control went missing did not fail, it changed the
+// BACKEND, navigated off the projects screen, and surfaced three sections later as
+// `box.scrollTop` on an undefined grid box.
+const saveAgent = () => sheetHas(/agent · /) && sClick(/^save$/);
+is('the save belongs to the agent sheet', true, saveAgent());
+is('saving reports the change', true, await until(() => /will start its master as opencode/.test(app.textContent), 4000));
+// ASSERTED ON THE CARD, not on client state: the card is what the request was about, and
+// it is the only end of this that proves the write went all the way round — verb, refresh,
+// payload, render. THE CARD SHOWS IT ONLY WHEN IT DIFFERS: the daemon normalises an empty
+// 4th column to the word 'claude' before it goes on the wire, so a bare truthiness test
+// printed "work · claude" on every card of a real fleet, hiding the one that differs.
+is('...and the card names it beside the profile', true,
+   await until(() => /work · opencode/.test(projText('acme-api')), 4000));
+// ...and NOT when it is the default. THE DAEMON NORMALISES an empty 4th column to the
+// literal word 'claude' before it goes on the wire (bin/fleet-serve.mjs), which the
+// shipped fixture does not — it sends null — so a bare truthiness test in grid.js passed
+// here for years while printing "work · claude" on every card of a REAL fleet, hiding the
+// one project that differs. Reproduced with the wire's own shape rather than the
+// fixture's, or this assertion proves nothing.
+{
+  const wire = fleetOf(['plain', 'work'], ['odd', 'work']);
+  wire.projects[0].agent = 'claude';        // what the daemon sends for "no agent set"
+  wire.projects[1].agent = 'codex';
+  wire.agents = [{ name: 'claude', caveat: '' }, { name: 'codex', caveat: 'no fleet events' }];
+  fixtureOverride = { 'projects.json': wire };
+  await reopenProjects();
+  await until(() => projText('plain'), 4000);
+  is("the wire's 'claude' is not printed as a choice", false, /· claude/.test(projText('plain')));
+  is('...while a real one still is', true, /work · codex/.test(projText('odd')));
+  fixtureOverride = null;
+  await reopenProjects();
+  is('the shipped fleet is back for the rest', true, await until(() => shows('acme-api'), 4000));
+}
+// ...and CLEARING returns it to the default, which is the direction a picker that only
+// ever sets would fail silently.
+openProjSettings();
+await tick(20);
+sClick(/^opencode$/);          // acme-api's row now reads opencode
+await tick(20);
+sClick(/claude \(default\)/);
+await tick(5);
+is('the clear is saved from the agent sheet', true, saveAgent());
+is('clearing reports the default', true, await until(() => /back to the default agent/.test(app.textContent), 4000));
+await until(() => !/· opencode/.test(projText('acme-api')), 4000);
+is('...and the card stops naming one', false, /· opencode/.test(projText('acme-api')));
+is('...without falling back to the word claude', false, /· claude/.test(projText('acme-api')));
+// LEAVE THE SCREEN AS THIS SECTION FOUND IT, whatever it found. If a control here goes
+// missing, sClick() is a no-op and every step after it operates on a sheet that never
+// opened — which ended, three sections later, as `box.scrollTop` on an undefined grid
+// box: a crash that emits no rows at all, in place of the two or three reds that
+// actually noticed. A red line has to point at its own subject.
+let _g = 0; while (sheetNow() && _g++ < 5) closeSheetFromTest();
+// PUT THE SELECTION BACK, because this section moved it. Tapping the '+ add project'
+// card selects it (pointerdown → S.sel = its index), and the footer's `⏎ open` opens
+// `projects[S.sel]` — which for the add card is undefined. The next section opens
+// acme-api that way and got nothing, and every assertion after it failed on a screen
+// that had never changed. A pointerdown alone is exactly what selecting is; a pointerup
+// as well would open the project, which is not what is being restored.
+{
+  const first = projCardNode(/acme-api/);
+  if (first) (first.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: first, pointerId: 1 }));
+}
+// The save above fires a refresh() this test does not await; let it land before the next
+// section navigates, or its render arrives on top of a screen that has already moved on.
+await until(() => !!btnWith(/⏎\s+open/), 4000);
+await tick(50);
+
 // ── the LEAD's card, and the three buttons that must not be on it ─────────
 // docs/mobile.md §4: `master` is a card here because a phone is the only way to reach it,
 // and the bug it fixes was reported as "it's not opening the main agent, just the
@@ -1040,15 +1179,28 @@ is('...and the indicator is still the last thing in the list', true, (() => {
 // AT THE END, AND ON THE GRID, because `, settings` is a verb of the grid and the projects
 // screen — the session screen has no settings button, so the sheet cannot be opened from
 // the chat this section used to sit in.
+// ASSERTED, because everything below depends on it and nothing here said so. The `,
+// settings` button is a verb of the GRID; if this navigation has not landed, click(null)
+// is a no-op, sheetHost stays empty, and all seven voice assertions report an empty list
+// — which reads as "this device has no voices". Seen exactly that way on a macos-latest
+// runner while ubuntu passed the same commit. The `got` names the screen it is really on,
+// so the next failure does not need a second CI run to explain itself.
 click(btnWith(/‹/));
-await until(() => !!btnWith(/n\s+new/), 4000);
+is('back on the grid for the voice checks', 'grid', await until(() => !!btnWith(/n\s+new/), 8000)
+   ? 'grid' : String(app.textContent).replace(/\s+/g, ' ').slice(0, 60));
 // "I only see the default voice" and "the list never populated" are the same screen from
 // the outside and have different causes, so the count is on it. Asserted through the real
 // sheet because the count is the only diagnostic a phone with no console can quote back.
 //   IT READS THE SAME STUB the read-aloud section installed, which is why nothing between
 // here and there may install a second one — see the indicator section.
 click(btnWith(/settings/));
-await tick(20);
+// WAITED FOR, NOT SLEPT THROUGH. On the GRID screen sheetSettings() awaits
+// api.getSettings() before it renders anything, so a fixed tick is a race against an HTTP
+// round-trip to the daemon — and when it lost, all seven assertions below reported an
+// empty voice list, which reads as "this device has no voices" rather than as "the sheet
+// had not been drawn yet". Lost once on a macos-latest runner while ubuntu passed the
+// same commit, which is the shape of every timing flake: green everywhere it is quick.
+await until(() => { const v = sheetHost.firstChild; return !!v && v.find(n => n.tag === 'select' && /vpick/.test(n.className)); }, 4000);
 const vset = sheetHost.firstChild;
 is('settings offers a voice picker', true, !!vset && !!vset.find(n => n.tag === 'select' && /vpick/.test(n.className)));
 is('...and says how many voices this device reported', true, !!vset && /3 voices reported by this device/.test(vset.textContent));

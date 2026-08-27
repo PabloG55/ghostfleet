@@ -43,17 +43,28 @@ case "$cmd" in
         projects) ;;
         *) case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac ;;
       esac
-      # Name the AGENT column too, even though it's optional. `read` hands the LAST
-      # variable everything remaining, so reading three fields from a four-field line
-      # glued the agent onto the profile ("work<TAB>opencode") — and the fleet socket,
-      # which is derived from the profile, came out wrong with it. Same family as the
-      # IFS trap already documented in CLAUDE.md: name every column the format has.
-      while IFS=$'\t' read -r n p prof agent; do
+      # NAMING EVERY COLUMN WAS HALF THE FIX. The other half is the separator: tab is
+      # IFS-WHITESPACE, so `IFS=$'\t' read` collapses a RUN of tabs into one and an EMPTY
+      # column 3 shifts every later field left. A project with no profile and an agent set
+      # — `name<TAB>path<TAB><TAB>opencode` — came back as profile=opencode, agent=claude,
+      # and therefore FLEET=cf-opencode-name: a socket that belongs to no fleet, printed
+      # with confidence. Exactly CLAUDE.md's first entry, and it was reachable the moment
+      # anything could set column 4 on a project whose column 3 was blank.
+      #   awk with -F'\t' does NOT collapse (it is a field separator, not a whitespace
+      # class), so it re-emits the row on \x1f, which is not IFS-whitespace either. Every
+      # other reader of this file already went through awk; this was the one that did not.
+      while IFS=$'\x1f' read -r n p prof agent; do
         case "$n" in ''|\#*) continue ;; esac
         [ -n "$p" ] || continue
         prof="${prof:-work}"
         printf '%-18s %-10s %-10s %-26s %s\n' "$n" "$prof" "${agent:-claude}" "$(sock_for "$n" "$prof")" "${p/#\~/$HOME}"
-      done < "$f"
+      #   OFS IS BUILT FROM A BYTE, NOT WRITTEN AS AN ESCAPE. `awk -v OFS='\x1f'` is a
+      # gawk-ism: BSD awk (which is /usr/bin/awk on macOS, where this is developed) does
+      # not decode \x, so OFS became the literal text and `IFS=$'\x1f' read` — bash DOES
+      # decode it — found no separator, put the whole row in $n, and `[ -n "$p" ]` skipped
+      # every project. An empty `fleet-project list`, from a fix for a field-shift bug.
+      # sprintf("%c",31) is the same byte in every awk there is.
+      done < <(awk -F'\t' 'BEGIN{ OFS = sprintf("%c", 31) } { print $1, $2, $3, $4 }' "$f")
     done
     ;;
 
@@ -122,6 +133,71 @@ case "$cmd" in
     fi
     ;;
 
+  # SET OR CLEAR the 4th column on a project that already exists. Everything downstream
+  # of the projects file could already read an agent and nothing could write one after
+  # `add`, so a project created before this — which is all of Pablo's — had no way to
+  # change it short of editing the file by hand.
+  #
+  # `--none` CLEARS IT BACK TO AN EMPTY COLUMN, and the empty column is load-bearing: the
+  # phone's card prints "profile · agent" only when the agent is truthy, so writing the
+  # literal word `claude` would make every default project start displaying "· claude".
+  # Absent means claude; that is the contract set_project() already implements.
+  agent)
+    NAME="${1:-}"; WANT="${2-}"
+    [ -n "$NAME" ] || { echo "fleet-project: usage: fleet-project agent <name> [<agent>|--none]" >&2; exit 1; }
+    case "$WANT" in
+      --none|none|'') WANT="" ;;
+      *) if command -v fleet-agent >/dev/null 2>&1; then
+           fleet-agent list 2>/dev/null | grep -qx -- "$WANT" \
+             || { echo "fleet-project: unknown agent '$WANT' (known: $(fleet-agent list | tr '\n' ' '))" >&2; exit 1; }
+         else
+           case "$WANT" in *[!a-z0-9_-]*) echo "fleet-project: bad agent '$WANT'" >&2; exit 1 ;; esac
+         fi ;;
+    esac
+    found=0
+    for f in "$CFG_HOME"/projects "$CFG_HOME"/projects.*; do
+      [ -f "$f" ] || continue
+      case "${f##*/}" in
+        projects) ;;
+        *) case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac ;;
+      esac
+      awk -F'\t' -v n="$NAME" '$1==n{f=1} END{exit !f}' "$f" || continue
+      tmp="$f.$$.tmp"
+      # REWRITTEN WITH awk, AND THE COMMENTS SURVIVE. `$1==n` never matches a comment line,
+      # so they and the blanks pass through untouched — the header this file ships with is
+      # the only documentation of the format and losing it to an edit would be silent.
+      #   NF is forced to 4 ONLY on the row being changed, and only when an agent is being
+      # set: a plain three-column line elsewhere in the file stays three columns, which is
+      # what keeps `add` and every existing reader looking at the format they were written
+      # for. Clearing drops back to 3 for the same reason.
+      awk -F'\t' -v OFS='\t' -v n="$NAME" -v a="$WANT" '
+        $1 != n { print; next }
+        # ASSIGNING $4 IS WHAT MAKES COLUMN 3, and that is awk doing it, not this code:
+        # setting a field past NF extends the record and fills the gap with empty
+        # strings. A hand-rolled loop to create column 3 was here and could not be made
+        # to fail — dead defence reads exactly like live defence, so it is gone.
+        { if (a == "") { NF = (NF > 3 ? 3 : NF) }
+          else         { $4 = a; NF = 4 }
+          print }
+      ' "$f" > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" && found=1
+      rm -f "$tmp" 2>/dev/null
+    done
+    [ "$found" = 1 ] || { echo "fleet-project: no project '$NAME'" >&2; exit 1; }
+    if [ -n "$WANT" ]; then
+      echo "fleet-project: '$NAME' will start its master as $WANT"
+      cav="$(fleet-agent caveat "$WANT" 2>/dev/null || true)"
+      [ -n "$cav" ] && echo "fleet-project: heads up — $cav"
+    else
+      echo "fleet-project: '$NAME' is back to the default agent (claude)"
+    fi
+    # THE RUNNING MASTER DOES NOT CHANGE, and saying so here is the whole difference
+    # between a setting and a broken feature. CLAUDE_FLEET_AGENT is read once, by
+    # `agent-here`, at the moment the tmux session is created; the session then exec'd its
+    # CLI and nothing re-reads this file. Same family as every long-lived-process entry in
+    # CLAUDE.md — a governor, an MCP server, a PWA shell.
+    echo "fleet-project: the RUNNING master keeps the agent it started with — this applies to the next one"
+    ;;
+
   rm|remove)
     NAME="${1:-}"; [ -n "$NAME" ] || { echo "fleet-project: usage: fleet-project rm <name>" >&2; exit 1; }
     found=0
@@ -145,6 +221,7 @@ case "$cmd" in
   *)
     echo "fleet-project: usage:" >&2
     echo "  fleet-project add <path> [--name N] [--profile P] [--agent A] [--start]" >&2
+    echo "  fleet-project agent <name> [<agent>|--none]" >&2
     echo "  fleet-project list" >&2
     echo "  fleet-project rm <name>" >&2
     exit 1 ;;
