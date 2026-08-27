@@ -242,7 +242,7 @@ holding an assertion. [UPSTREAM]
 | `Ctrl-t` / `Ctrl-n` | a **terminal / editor tab at the selected project's root**, without booting its master first — you often want a shell in a repo, not a Claude session in it. Opens the project's tmux server if it has never been entered |
 | `Ctrl-s` | **straight to that project's grid**, skipping master | README |
 | `s` / `S` | schedule a message to that project's master | README |
-| `,` | opens the **settings** screen (see below — it has 2 columns, not 1) | README (incomplete) |
+| `,` | opens the **settings** screen (see below — it has 3 columns, not 1) | README (incomplete) |
 | `x` | asks for confirmation (`y`/`Y`) to remove the project from the list | README |
 | **digit `1`-`9`** | **insta-jump**: opens the project at that position directly | [CODE] not in the README |
 | **left click** (mouse) | selects and opens the card under the cursor | [CODE] not in the README |
@@ -250,15 +250,26 @@ holding an assertion. [UPSTREAM]
 | `Ctrl-C` (twice, <2s) | quits to the shell — the ONLY screen where quitting exits everything | README |
 | `Ctrl-f …` | jump chord (same as in tmux — see above), also works standing on Projects | [CODE] |
 
-### Project settings (`,`) — **2 columns, not 1**
+### Project settings (`,`) — **3 columns, not 1**
 
 `h`/`l` (or `←`/`→`) switch **column**; `↑↓`/`k j` switch row (project); `space`/`⏎`
-toggles the selected cell. The columns are:
+toggles or cycles the selected cell. The columns are:
 
 | column | what it toggles | values | source |
 |---|---|---|---|
 | **AUTO-NUDGE** | whether a worker that finishes/needs help wakes the master | `on` / `off` | README (the only one it mentions) |
 | **BUDGET LIMIT** | whether the budget governor (`fleet-governor`) can park workers once usage hits the ceiling | `enforced` / `ignored` | **[CODE] — not in the README at all.** This is the visual toggle for what the README only describes as touching the `governor-off` file by hand. |
+| **AGENT** | the project's **default agent** — what its master runs, and what a new session in it inherits | cycles through the agents actually **installed** | **[CODE]** — the 4th column of the projects file, which used to be reachable only by editing it by hand |
+
+`space` **cycles** on AGENT rather than toggling, because there are more than two and the
+set is whatever `fleet-agent installed` reports. Only installed agents appear: an option
+that cannot run leaves the next master dead at `exec agent-here` with nothing on screen to
+say why. The blurb under the column carries the short form of what choosing it gives up —
+the full version is the capability matrix in
+[docs/multi-agent-sessions.md](multi-agent-sessions.md).
+
+**A master that is already running does not change.** The setting is read when a master is
+created, so this takes effect on the next one.
 
 `Esc`/`` ` ``/`Ctrl-C` closes the settings screen, no confirmation needed.
 
@@ -470,6 +481,16 @@ work at stack width, and the governor's 5h usage scrape cannot read a pane narro
 | `ghostfleet <profile> --new` | create an empty projects list for a new profile — an unknown profile is otherwise **refused**, not silently created | [UPSTREAM] |
 
 ---
+
+## 4b. The phone's controls, which are not keys
+
+This document is the terminal's. The phone client has gained several controls that have no
+keyboard equivalent — profile tabs on the Projects screen, a play control revealed by
+tapping a bubble, a voice and rate picker in settings, and a camera in the composer — and
+they are documented where the rest of that client's design lives, in
+[docs/mobile.md](mobile.md). The one thing worth repeating here, because it is a rule about
+*this* document's subject: the digit on a phone project card is the same digit `Ctrl-f`
+counts, across every profile, and the tabs deliberately do not renumber it.
 
 ## 5. Non-obvious behaviors
 
