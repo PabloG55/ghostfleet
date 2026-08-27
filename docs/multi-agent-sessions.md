@@ -59,6 +59,13 @@ assumed; Codex degrades to nothing, because it could not be run at all.)*
 - **Resume semantics differ.** `claude-here` guarantees re-opening a session resumes its
   conversation. OpenCode matches this via cwd-scoped `--continue` (verified). Codex is
   unverified: opening it starts fresh, and it says so at launch rather than pretending.
+- **Tools without instructions, and (for codex) without a fleet.** Since 2026-08-27 all
+  three agents have the `fleet_*` tools. Two things still degrade: neither non-Claude agent
+  gets `skill/ghostfleet-orchestrate`, so it has the tools and no instructions for them; and
+  a **codex** session must pass `project` explicitly, because codex starts MCP servers with
+  a scrubbed environment and the tools cannot otherwise tell which fleet they are in. See
+  Q4 for the measurements. Hooks are unaffected by any of it — MCP is tools, hooks are push
+  events, and codex still supplies none.
 - **A missing busy regex is not "never busy".** An agent with no validated detector is
   reported as *unknown*, never as idle — the always-idle failure mode is the one this repo
   has been bitten by before.
@@ -274,8 +281,70 @@ untested**, and its busy regex is empty — which the adapter layer treats as "t
 working detector", not as "never busy". It must be validated against a real codex before
 anyone relies on it.
 
-### Q4 (still open). MCP registration
+### Q4 (answered 2026-08-27). MCP registration — wired, with one asymmetry
 
-`install.sh` registers the fleet's MCP server via `claude mcp add` into `.claude.json`.
-OpenCode has both an `mcp` key in `opencode.json` and an `opencode mcp` subcommand, so the
-bridge is clearly writable — not wired up in this PR.
+`install.sh` registers the fleet's MCP server for **all three** agents now:
+
+| agent | where | how |
+|---|---|---|
+| claude | `<config dir>/.claude.json`, **once per profile** | `claude mcp add -s user` (or jq, if the CLI is absent) |
+| codex | `~/.codex/config.toml`, **once, globally** | `codex mcp add ghostfleet -- node <server>` |
+| opencode | `~/.config/opencode/opencode.jsonc`, **once, globally** | jq — not `opencode mcp add`, see below |
+
+One registration per CLI is correct rather than a compromise: for Claude a profile *is* a
+config dir, while codex and opencode keep a single global config and have no per-profile
+equivalent. The server does not carry a fleet — `mcp/fleet-mcp.mjs` resolves which fleet
+and profile it serves from the session's `CLAUDE_FLEET_SOCK` / `CLAUDE_CONFIG_DIR` at
+runtime, and `agent-here` exports both per session — so one entry serves every fleet and
+every profile.
+
+**`fleet_list` from a codex session needs an explicit `project`; from opencode it does
+not.** This is the one asymmetry, and it is codex's behaviour rather than a gap in the
+wiring. Measured by *calling* the tool, not by reading `codex mcp list`:
+
+```
+# codex, CLAUDE_FLEET_SOCK exported, fleet_list with no arguments:
+mcp: ghostfleet/fleet_list (completed)
+fleet-list: no socket (run inside a fleet session, or pass -s <socket>)
+
+# codex, same session, fleet_list(project: "ghostfleet"):
+SESSION                STATUS
+ci                     ready
+docs-sync              working
+master                 ready       …
+
+# opencode, CLAUDE_FLEET_SOCK exported, fleet_list with NO arguments:
+SESSION                STATUS
+install-nonint         working    (you)          <- resolved its own fleet
+```
+
+codex launches an MCP server with a **scrubbed environment**, so nothing the session
+exported reaches the server and the tools cannot tell which fleet they are in.
+`-c shell_environment_policy.inherit=all` does not change it — that policy governs codex's
+shell tool, not its MCP children. So from codex, name the project on every call
+(`fleet_list(project: …)`, `fleet_send(project: …, …)`); `fleet_send`'s `reply_to` needs a
+resolvable self and is unavailable there for the same reason. This is recorded as the
+`mcp_self` field in `bin/fleet-agent` and printed in its caveat, so the pickers say it too.
+
+**Why `opencode mcp add` is not used.** It exists and takes a command after `--`
+(undocumented in its `--help`), but it cannot be pointed at a file: with
+`XDG_CONFIG_HOME` set it created a directory literally named `undefined` in the working
+directory, and with `HOME` set it ignored it and wrote the invoking user's real
+`~/.config/opencode/opencode.jsonc`. Both exited 0 printing "added to <path>", one of them
+naming a path it had not written. A tool that reports success while writing elsewhere
+cannot be tested without editing the developer's own config, so the installer writes the
+JSONC itself — the same fallback it already has for `.claude.json`. A `.jsonc` that jq
+cannot parse (it may hold comments) is left untouched, with the entry printed for pasting.
+
+**MCP is tools; hooks are push events.** Wiring MCP gives codex neither hooks nor the
+orchestrate skill: it writes no inbox row, wakes no master, its status is still read from
+its pane, and nothing tells the session the fleet exists. "You can see it, you will not be
+told" is exactly as true for codex after this as before. opencode has both halves and
+reaches near parity, minus the skill. `skill/ghostfleet-orchestrate` is a Claude Code
+feature and stays Claude-only — both non-Claude agents have the tools without the
+instructions for using them.
+
+**Already-running sessions do not gain the tools.** An MCP server is spawned once per
+session and lives as long as it, so a session open when the installer ran keeps the server
+it started with. `install.sh` says this in its own output, because the person who needs it
+has usually just re-run the installer to fix exactly this.

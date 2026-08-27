@@ -744,7 +744,12 @@ STUB
   is "...and it prints the command"         "1" "$(printf '%s' "$out" | grep -c "codex mcp add ghostfleet -- node $MR/rt/mcp/fleet-mcp.mjs" || true)"
   # Not installed at all: skip, say so, touch nothing.
   : > "$MR/ran"
-  out="$(FLEET_HOME="$MR/rt" MR_RAN="$MR/ran" PATH="$MR/empty" bash -c 'set -uo pipefail; source "$0"; register_codex_mcp' "$MR/lib.sh" 2>&1)"
+  # ABSOLUTE BASH. `PATH=/nowhere bash -c …` cannot start: bash applies the assignment
+  # before it looks the command up, so the interpreter is what goes missing and the probe
+  # prints NOTHING — which reads exactly like a function that stayed silent. Same trick the
+  # funnel group uses for node.
+  BASH_ABS="$(command -v bash)"
+  out="$(FLEET_HOME="$MR/rt" MR_RAN="$MR/ran" PATH="$MR/empty" "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_codex_mcp' "$MR/lib.sh" 2>&1)"
   is "no codex: it says so"                 "1" "$(printf '%s' "$out" | grep -c 'codex not installed' || true)"
   is "...and runs nothing"                  ""  "$(cat "$MR/ran")"
 
@@ -761,11 +766,20 @@ STUB
   is "...leaving other servers alone"      '{"type":"local","command":["true"]}' "$(jq -c '.mcp.other' "$cfg")"
   is "...and unrelated keys"               '"keep-me"' "$(jq -c '.theme' "$cfg")"
   # IDEMPOTENT: install.sh is re-run routinely, and a second entry under one name is not
-  # even expressible in JSON — but a second RUN could still duplicate the servers around it.
+  # even expressible in JSON — but a second RUN could still duplicate the servers around it,
+  # or drop one.
+  #   COUNTED AS WHAT IT MEANS, not as a total. The first cut asserted `.mcp | keys | length`
+  # == 1 and went red with 2, which was the ASSERTION being wrong: the fixture plants an
+  # unrelated server beside ours on purpose, so two keys is the correct answer and a total
+  # cannot say which of them changed. So: exactly one ghostfleet, and the set of OTHER keys
+  # identical to what it was before the run.
+  others_before="$(jq -c '[.mcp | keys[] | select(. != "ghostfleet")] | sort' "$cfg")"
   out="$(mr "$X" register_opencode_mcp)"
-  is "a second run adds nothing"           "1" "$(jq '.mcp | keys | length' "$cfg")"
-  is "...still exactly one ghostfleet"     "1" "$(jq '[.mcp | keys[] | select(. == "ghostfleet")] | length' "$cfg")"
-  is "...and `other` survived it"          '{"type":"local","command":["true"]}' "$(jq -c '.mcp.other' "$cfg")"
+  is "a second run keeps one ghostfleet"   "1" "$(jq '[.mcp | keys[] | select(. == "ghostfleet")] | length' "$cfg")"
+  is "...and touches no other server"      "$others_before" "$(jq -c '[.mcp | keys[] | select(. != "ghostfleet")] | sort' "$cfg")"
+  is "...leaving that server intact"       '{"type":"local","command":["true"]}' "$(jq -c '.mcp.other' "$cfg")"
+  # ...and the entry it rewrote still points at the runtime, so "idempotent" is not "inert".
+  is "...and ours still points at the server" "$MR/rt/mcp/fleet-mcp.mjs" "$(jq -r '.mcp.ghostfleet.command[1]' "$cfg")"
   # A FRESH machine has no config at all: one is created rather than the write being skipped.
   Y="$MR/x3"
   out="$(mr "$Y" register_opencode_mcp)"
@@ -782,7 +796,7 @@ STUB
   is "a commented .jsonc is not clobbered"  "$before" "$(cat "$Z/opencode/opencode.jsonc")"
   is "...and it says what to paste"         "1" "$(printf '%s' "$out" | grep -c '"mcp": { "ghostfleet"' || true)"
   is "...without claiming success"          "0" "$(printf '%s' "$out" | grep -c '✓' || true)"
-  out="$(FLEET_HOME="$MR/rt" PATH="$MR/empty" bash -c 'set -uo pipefail; source "$0"; register_opencode_mcp' "$MR/lib.sh" 2>&1)"
+  out="$(FLEET_HOME="$MR/rt" PATH="$MR/empty" "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_opencode_mcp' "$MR/lib.sh" 2>&1)"
   is "no opencode: it says so"              "1" "$(printf '%s' "$out" | grep -c 'opencode not installed' || true)"
 
   # ── the installer says the part that makes a correct install look broken ──
@@ -795,6 +809,21 @@ STUB
      "$(grep -c 'spawned once per session' "$ROOT/install.sh" || true)"
   # UNINSTALL COVERS THE NEW HOMES, or removing ghostfleet leaves a server registered
   # against a runtime that no longer exists.
+  # THE FINDING BELONGS WHERE SOMEONE WILL HIT IT. A codex session that calls fleet_list and
+  # reads "no socket" should find the sentence, not rediscover it — docs/multi-agent-sessions.md
+  # is where the capability matrix lives (#88), so Q4 has to say so rather than still asking.
+  is "the doc answers Q4 rather than asking" "0" \
+     "$(grep -c '^### Q4 (still open)' "$ROOT/docs/multi-agent-sessions.md" || true)"
+  # PRESENCE, NOT A COUNT — the same rule the install-list group states: "does it appear at
+  # all", not "exactly once". Both of these went red at 1-expected-2, because the finding is
+  # deliberately in two places (the degradation summary AND Q4's detail), and pinning a count
+  # would make writing the doc better fail a test about whether the doc says it.
+  is "...and names the codex asymmetry"      "yes" \
+     "$(grep -q 'scrubbed environment' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
+  is "...with the fix a reader needs"        "yes" \
+     "$(grep -q 'fleet_list(project' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
+  is "...and keeps tools and hooks apart"    "yes" \
+     "$(grep -q 'MCP is tools; hooks are push events' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
   is "uninstall covers codex"               "1" "$(grep -c 'codex mcp remove ghostfleet' "$ROOT/README.md" || true)"
   is "...and opencode's MCP entry"          "1" "$(grep -c 'del(.mcp.ghostfleet)' "$ROOT/README.md" || true)"
   is "...and opencode's event bridge"       "1" "$(grep -c 'plugin/ghostfleet-event.js' "$ROOT/README.md" || true)"
