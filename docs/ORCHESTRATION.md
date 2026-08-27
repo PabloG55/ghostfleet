@@ -132,11 +132,11 @@ ignored no matter how long you waited. `--reply-to me` (MCP: `reply_to: true`) m
 conversation, and the answer comes back two ways:
 
 ```bash
-fleet-send -s cf-getmycoi --reply-to me master "Does your /cois endpoint dedupe by externalId?"
-# → arrives in your session as a message from getmycoi/master, even mid-turn
+fleet-send -s cf-acme-api --reply-to me master "Does your /invoices endpoint dedupe by externalId?"
+# → arrives in your session as a message from acme-api/master, even mid-turn
 # …or, if it couldn't reach you, without polling:
-fleet-inbox        # → 14:05  getmycoi/master  ANSWERED  yes — same externalId returns deduped:true…
-fleet-read -s cf-getmycoi master 3      # the full reply
+fleet-inbox        # → 14:05  acme-api/master  ANSWERED  yes — same externalId returns deduped:true…
+fleet-read -s cf-acme-api master 3      # the full reply
 ```
 
 Every fleet session is **named `<project>/<session>`** for Claude Code's cross-session messaging

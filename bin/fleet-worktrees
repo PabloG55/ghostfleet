@@ -94,8 +94,8 @@ wts_of() {                         # path<TAB>branch for one repo; first line = 
 
 # ONE PROJECT CAN BE SEVERAL CLONES, and a worktree belongs to exactly one of them.
 #
-# A project root is not always a repo. superkey registers ~/superkey, which holds four
-# INDEPENDENT clones (superkey, superkey-1, superkey-3, superkey-xd), each with its own
+# A project root is not always a repo. One project here registers ~/acme-api, which holds
+# four INDEPENDENT clones (acme-api, acme-api-1, acme-api-3, acme-api-xd), each with its own
 # .git and therefore its own private set of worktrees. A lead standing in one of them saw
 # 2 and was blind to the other 17 — so "reuse before you spawn", which is built on this
 # list, could never fire, and every task made another one. Nineteen worktrees, fifteen

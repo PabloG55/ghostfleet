@@ -95,7 +95,7 @@ matches() { grep -cE -- "$1" "$2" 2>/dev/null || true; }
 # unset, and cf-stack is the lead's live stack screen. ab8fff5 caught exactly
 # that by hand, after the suite had spent who knows how long tearing down real
 # stacks; under a private TMUX_TMPDIR the same slip cannot reach out of the run
-# at all. Nothing started here can touch cf-superkey or cf-ghostfleet now even if
+# at all. Nothing started here can touch cf-acme-api or cf-ghostfleet now even if
 # it asks for them by name.
 #
 # It also leaves the names alone, and the names are load-bearing. `${SOCK#cf-}`
@@ -1383,8 +1383,8 @@ fi
 # ── 4a9. pinning the primary, and the repo's own setup hook ──────────────────
 # Deriving the primary checkout is a guess about someone's disk layout, and it is wrong
 # exactly where it costs most: a project registered at a plain CONTAINER directory
-# holding several clones AND unrelated products. superkey's root is one of those — four
-# superkey clones plus `platform` and `gmc-crosswalk` — so the child-scan would hand
+# holding several clones AND unrelated products. One project's root here is one of those —
+# four acme-api clones plus `billing-svc` and `toolbox` — so the child-scan would hand
 # slot 0 to a different product entirely. An explicit pin skips the guess.
 group "dev-stack slots: pinned primary"
 if command -v git >/dev/null 2>&1; then
@@ -1452,7 +1452,7 @@ fi
 # status nobody read, so EVERY failure mode printed "started '<name>' in <worktree>" and
 # exited 0. tmux's own error was on stderr all along — and immediately contradicted by
 # the success line under it, which is the one a reader believes. Reported from
-# cf-superkey after the same spawn was re-run three times, because nothing in the output
+# one project after the same spawn was re-run three times, because nothing in the output
 # told the attempts apart.
 #
 # Worse than a wrong message: bin/fleet-grid.mjs's createWorktree reads that very line
@@ -2791,13 +2791,13 @@ fi
 
 # ── 4c3. a fleet session is addressable by name ───────────────────────────────
 # Claude Code names every session for its cross-session messaging, and left alone it
-# DERIVES that name from the directory: broker-agencies-61, getmycoi-06, platform-4b.
+# DERIVES that name from the directory: billing-svc-61, acme-api-06, toolbox-4b.
 # Nothing in the fleet knows those, so "reply to master" named nothing and the direct
 # reply path could not be used at all. claude-here now passes the address the fleet
 # already uses, <project>/<session> — the same string fleet-send computes for --reply-to
 # and the hook prints in an inbox row.
 #
-# Both directions, because a HALF name is worse than none: "/master" or "superkey/" is
+# Both directions, because a HALF name is worse than none: "/master" or "acme-api/" is
 # unaddressable and would still displace the derived one, so a session missing either half
 # must go unnamed rather than named wrongly.
 group "peer name (claude-here --name)"
@@ -2814,30 +2814,30 @@ ARGV() {                        # $1 = CLAUDE_FLEET_SOCK ("" = unset), rest = cl
       /bin/bash "$ROOT/bin/claude-here" "$@" 2>/dev/null ) | tr '\n' ' '
 }
 NAMED() { ARGV "$@" | sed -n 's/.*--name \([^ ]*\).*/\1/p'; }
-is "named <project>/<session>"        "superkey/master" "$(NAMED cf-superkey master)"
+is "named <project>/<session>"        "acme-api/master" "$(NAMED cf-acme-api master)"
 # The SAME expansion fleet-send uses (${sock#cf-}), so a socket without the prefix spells
 # one name on both sides instead of two that never meet.
 is "...however the socket is spelled" "weird/master"    "$(NAMED weird master)"
 is "no socket -> no name"             ""                "$(NAMED '' master)"
-is "no session -> no name"           ""                 "$(NAMED cf-superkey)"
+is "no session -> no name"           ""                 "$(NAMED cf-acme-api)"
 # A name has to be spellable back at us: fleet-send refuses these characters in a reply
 # address, and Claude Code renames a session whose name it won't take.
-is "an unspellable name is dropped"   ""                "$(NAMED cf-superkey 'mas ter')"
+is "an unspellable name is dropped"   ""                "$(NAMED cf-acme-api 'mas ter')"
 # The caller's own --name wins, and a second one would be an argument error.
-is "an explicit --name is left alone" "boss"            "$(NAMED cf-superkey master -- --name boss)"
+is "an explicit --name is left alone" "boss"            "$(NAMED cf-acme-api master -- --name boss)"
 is "...and never doubled"             "1" \
-   "$(ARGV cf-superkey master -- --name boss | tr ' ' '\n' | grep -c -- '--name' || true)"
+   "$(ARGV cf-acme-api master -- --name boss | tr ' ' '\n' | grep -c -- '--name' || true)"
 is "...nor in the --name=x spelling"  "1" \
-   "$(ARGV cf-superkey master -- --name=boss | tr ' ' '\n' | grep -c -- '--name' || true)"
+   "$(ARGV cf-acme-api master -- --name=boss | tr ' ' '\n' | grep -c -- '--name' || true)"
 # THE PATH A FLEET SESSION ACTUALLY TAKES is the resume one — a session is created once
 # and re-opened for the rest of its life, so a name that only lands on a fresh start would
 # be missing from every session anyone talks to.
 enc="$(printf '%s' "$CH/work" | sed 's#[/.]#-#g')"; mkdir -p "$CH/cfg/projects/$enc"
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"hi"}}' \
   > "$CH/cfg/projects/$enc/abc123.jsonl"
-res="$(ARGV cf-superkey master)"
+res="$(ARGV cf-acme-api master)"
 is "a resumed session is named too"   "1" "$(printf '%s' "$res" | grep -c -- '--resume abc123' || true)"
-is "...with the same name"            "superkey/master" "$(NAMED cf-superkey master)"
+is "...with the same name"            "acme-api/master" "$(NAMED cf-acme-api master)"
 rm -rf "$CH"
 
 
@@ -3594,7 +3594,7 @@ is "set in agent-here"         "1" "$(grep -c 'export DISABLE_AUTOUPDATER=1' "$R
 rm -rf "$AH"
 
 # ── 4d8. a worktree goes where the REPO says worktrees go ────────────────────
-# A sibling was the only layout and is still the default. But superkey's PreToolUse guard
+# A sibling was the only layout and is still the default. But one repo's PreToolUse guard
 # denies any edit whose PATH lacks `.worktrees/` — it never asks git whether the path IS a
 # worktree — so our sibling (a real, isolated worktree on its own branch) was refused as
 # "the shared main checkout", the agent obeyed the refusal, and created a SECOND worktree
@@ -3634,7 +3634,7 @@ else
 fi
 
 # ── 4d9. one project can be several clones ───────────────────────────────────
-# superkey registers ~/superkey, which is NOT a repo — it holds four independent clones,
+# One project here registers ~/acme-api, which is NOT a repo — it holds four independent clones,
 # each with its own .git and therefore its own private worktrees. fleet-worktrees walked
 # only the clone it stood in: 2 visible, 17 invisible. So reuse-before-proliferate could
 # never fire and every task made another worktree.
@@ -3894,7 +3894,7 @@ fi
 
 # ── 4d12. --json: the contract the phone renders from ────────────────────────
 # `--plain` is formatted FOR A TERMINAL and cannot be parsed. In the fixture below the
-# branch elides to `feat/coi-policy-beside-fo…`, the message is clipped at 44 columns,
+# branch elides to `feat/rate-limit-beside-fo…`, the message is clipped at 44 columns,
 # and STATUS runs straight into LAST MSG with no separator — `interruptedwas mid-turn`
 # — which on a real fleet reads `people-dupespeople-dupes`. The VALUES are whole:
 # cardLines() computes the full branch, the full message and the exact idle seconds and
@@ -3960,7 +3960,7 @@ if command -v tmux >/dev/null 2>&1; then
     // said "ready" would come back ready and never exercise `unknown` at all.
     mk("w-unknown",   {status:"?"},       [A("cannot tell")]);
     // The long values are the whole reason --json exists: both are elided by --plain.
-    mk("w-long",      {status:"ready",branch:"feat/coi-policy-beside-form-and-a-very-long-tail"},
+    mk("w-long",      {status:"ready",branch:"feat/rate-limit-beside-form-and-a-very-long-tail"},
                       [A("All three states present. Running the full suite before I push, then I will open the PR.")]);
     fs.writeFileSync(path.join(F,SOCK+".w-parked.parked"),"");
     // An agent with no adapter entry, so it has no validated busy detector -> unknown.
@@ -4059,8 +4059,8 @@ if command -v tmux >/dev/null 2>&1; then
   # ── the values are UNTRUNCATED, which is the point ─────────────────────────
   # Both directions: --plain must be shown to elide, or "json carries it whole" would
   # pass just as happily against a fixture short enough that nothing was ever clipped.
-  is "plain elides the long branch"  "1" "$(grep -ac 'feat/coi-policy-beside-fo…' "$JS/out.plain" || true)"
-  is "json carries it whole"         "feat/coi-policy-beside-form-and-a-very-long-tail" "$(C w-long branch)"
+  is "plain elides the long branch"  "1" "$(grep -ac 'feat/rate-limit-beside-fo…' "$JS/out.plain" || true)"
+  is "json carries it whole"         "feat/rate-limit-beside-form-and-a-very-long-tail" "$(C w-long branch)"
   is "plain clips the long message"  "1" "$(grep -ac 'Running the full …' "$JS/out.plain" || true)"
   is "json carries it whole"         "All three states present. Running the full suite before I push, then I will open the PR." \
                                      "$(C w-long msg)"
@@ -5255,7 +5255,7 @@ group "fleet-serve: reads proxy the grid, per project, and bound the tail"
 # whole bug: a daemon that lets SCOPE/ROOT inherit its own values hands this a root from
 # one project and a socket from another, the pairing cannot see the sessions, and
 # OCCUPIED worktrees come back as FREE. Measured on the deployed runtime: querying
-# cf-superkey with a ghostfleet environment advertised fleet-pwa, fleet-serve and
+# another project's socket with a ghostfleet environment advertised fleet-pwa, fleet-serve and
 # grid-json as free while live agents were mid-turn in all three.
 cat > "$SV/bin/fleet-grid.mjs" <<'STUB'
 #!/usr/bin/env node
@@ -5543,7 +5543,7 @@ group "fleet-serve: the REAL grid, two projects, one daemon process"
 # against tmuxList()'s cwds on CLAUDE_FLEET_SOCK, so a daemon that inherits its own values
 # hands those two functions a root from one project and a socket from another. The pairing
 # then cannot see the sessions, and a worktree with a live agent in it is advertised as
-# FREE. Measured on the deployed runtime against cf-superkey from a ghostfleet environment:
+# FREE. Measured on the deployed runtime against another project from a ghostfleet environment:
 # fleet-pwa, fleet-serve and grid-json all came back free, all three mid-turn.
 if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
 RG="$TMUX_TMPDIR/realgrid"; mkdir -p "$RG"
@@ -6672,6 +6672,40 @@ if [ -d "$ROOT/web" ]; then
   rm -rf "$SWV"
 else
   skip "phone client" "web/ not present"
+fi
+
+# ── 6a2. no real project, client or employer name in the tree ────────────────
+# The repo is public, and about twenty comments named the projects that produced the fixes
+# they document — the natural way to write "this is where I saw it", and a name that ships
+# in the npm tarball. The names are gone from the comments now, but a one-time sweep only
+# fixes today: the next comment somebody writes is the one that puts one back.
+#   NOT GATED ON web/. This reads every file git tracks — bin, hooks, mcp, scripts, skill,
+# tmux, layouts, test, docs, install.sh and the markdown — so it belongs outside the phone
+# client's `if`.
+#   THE LIST IS STORED ONE-WAY, which is not decoration: a helper containing the names would
+# publish exactly what it exists to remove, and in a worse form than a comment does — one
+# tidy machine-readable roster. See the helper's header for what a digest does and does not
+# buy, and CLAUDE.md's "Comments and docs" for the rule this enforces.
+#   BOTH DIRECTIONS, and the failing one was measured with the real names rather than only
+# with the canary: each was planted in a tracked file in turn and the row went red for all
+# of them, plus for the spellings they actually arrive in — a socket, a `~/` path, an
+# address, an email, a camelCase suffix and a repo URL. The canary in section 3 is what
+# keeps that provable from inside the suite, since a real name cannot be committed here.
+group "no real project name in the tree"
+if command -v git >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  NSW="$(mktemp -d "$TEST_RUNS.$$.nsw.XXXXXX")"
+  node "$ROOT/test/helpers/name-sweep.mjs" > "$NSW/out" 2> "$NSW/err"
+  is "name-sweep ran"                 "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$NSW/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A floor, for the reason pwa-check documents: the tree row is ONE assertion, and a helper
+  # that died before reaching it emits a few rows and no mismatches — which reads as clean.
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$NSW/out")" -ge 24 ] && echo yes || echo "no: $(wc -l < "$NSW/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$NSW/out"
+  rm -rf "$NSW"
+else
+  skip "no real project name in the tree" "git or node missing"
 fi
 
 # ── 6b. every command is actually installed ──────────────────────────────────

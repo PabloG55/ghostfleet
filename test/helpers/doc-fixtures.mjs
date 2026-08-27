@@ -33,7 +33,7 @@
 //     next one too.
 //
 // In prose a name is only recognisable by its shape, so a backticked token is checked
-// when it is kebab-cased (`coi-beside`) and left alone otherwise: a one-word check would
+// when it is kebab-cased (`rate-limit`) and left alone otherwise: a one-word check would
 // have to allowlist most of English before it could flag `koji`. Inside the example data
 // — where every name that has ever drifted has lived — position does the work and the
 // shape rule is not used at all.
@@ -100,8 +100,8 @@ for (const m of ['notify-lead', 'fleet-client', 'fleet-server']) VOCAB.add(m);
 
 // ── 3. pull the names out of a document ───────────────────────────────────
 // Positional first: inside a payload sample, a card or a confirmation there is no doubt
-// what a token is, so nothing is filtered by shape and `superkey` is caught as readily
-// as `coi-beside`.
+// what a token is, so nothing is filtered by shape and a bare `oldname` is caught as
+// readily as `old-name`.
 function namesIn(src) {
   const hits = [];
   const hit = (tok, where, vocabOk = false) => {

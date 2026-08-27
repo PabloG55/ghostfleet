@@ -756,7 +756,7 @@ function gridJson(t) {
       // 64 MB. TWO fields in §4 are emitted WHOLE and are user-authored: `msg`, the last
       // assistant line, and since #41 `sched.msg`, the text a scheduled send will deliver.
       // Neither has a bound, and the cards multiply them. Measured on the live fleets:
-      // superkey 17.5 KB across six sessions, getmycoi 13.3 KB — so this is three orders
+      // 17.5 KB across six sessions on one fleet, 13.3 KB on another — so this is three orders
       // of magnitude of headroom rather than a guess, and the overflow path below reports
       // itself instead of parsing a payload that was cut off mid-string.
       { encoding: 'utf8', env: gridEnv(t), timeout: 20000, maxBuffer: 64 * 1024 * 1024 },
@@ -1647,7 +1647,7 @@ function agentCatalogue() {
   // ── reads ─────────────────────────────────────────────────────────────────
   if (p === '/api/projects' && req.method === 'GET') {
     // `home` is what the client abbreviates paths against (grid.js's homeTilde), so the
-    // phone shows ~/superkey the way the TUI does.
+    // phone shows ~/acme-api the way the TUI does.
     //
     // The per-project rollup comes from the grid's CARDS, counted here — never from
     // summing `counts`. §4's counts object carries six keys while a card can hold nine

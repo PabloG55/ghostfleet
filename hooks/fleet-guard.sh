@@ -7,7 +7,7 @@
 # master told "start a worktree and open a PR" reaches for it, the worktree appears,
 # and master silently walks off its own checkout — no new session, no new pane, and
 # the lead you were talking to is now somewhere else. It looks half-right, which is
-# why it went unnoticed twice (getmycoi, superkey-1).
+# why it went unnoticed twice, in two different projects.
 #
 # fleet-spawn's own nesting guard cannot catch this: it only fires if fleet-spawn is
 # called at all, and here it never was. So the refusal has to sit in front of the

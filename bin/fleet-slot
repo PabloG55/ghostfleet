@@ -30,8 +30,8 @@
 # project on purpose: two products' primaries both being 0 only collide if both repos
 # derive the same ports from it, which is a decision inside those repos.
 #   "Primary" means the checkout the project is REGISTERED at — the one `master` runs
-# in — not "the first entry of git worktree list". Sibling clones (superkey-1,
-# superkey-2 …) are each their own repo's first entry, so that test would hand slot 0
+# in — not "the first entry of git worktree list". Sibling clones (acme-api-1,
+# acme-api-2 …) are each their own repo's first entry, so that test would hand slot 0
 # to every one of them and collide them all onto the primary's ports, which is the
 # exact failure this exists to remove.
 #
@@ -65,10 +65,10 @@ abspath() {
 # An EXPLICIT pin wins over any derivation: "<project><TAB><abs path>" per line in
 # ~/.config/ghostfleet/primaries. Deriving the primary is a guess about someone's disk
 # layout, and it is wrong exactly where it is most expensive — a project registered at a
-# plain container directory holding several clones AND unrelated products. superkey's
-# root is such a directory (four superkey clones plus `platform` and `gmc-crosswalk`);
+# plain container directory holding several clones AND unrelated products. One project's
+# root here is such a directory (four acme-api clones plus `billing-svc` and `toolbox`);
 # <root>/<name> happens to resolve there, but the child-scan fallback one line below it
-# would pick `platform` — a different product — and hand it slot 0. Pin it and the guess
+# would pick `billing-svc` — a different product — and hand it slot 0. Pin it and the guess
 # never runs.
 pinned() {
   local f="$CFG_HOME/primaries" name="$1" p=""
