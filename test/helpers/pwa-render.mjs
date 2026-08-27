@@ -1179,8 +1179,15 @@ is('...and the indicator is still the last thing in the list', true, (() => {
 // AT THE END, AND ON THE GRID, because `, settings` is a verb of the grid and the projects
 // screen — the session screen has no settings button, so the sheet cannot be opened from
 // the chat this section used to sit in.
+// ASSERTED, because everything below depends on it and nothing here said so. The `,
+// settings` button is a verb of the GRID; if this navigation has not landed, click(null)
+// is a no-op, sheetHost stays empty, and all seven voice assertions report an empty list
+// — which reads as "this device has no voices". Seen exactly that way on a macos-latest
+// runner while ubuntu passed the same commit. The `got` names the screen it is really on,
+// so the next failure does not need a second CI run to explain itself.
 click(btnWith(/‹/));
-await until(() => !!btnWith(/n\s+new/), 4000);
+is('back on the grid for the voice checks', 'grid', await until(() => !!btnWith(/n\s+new/), 8000)
+   ? 'grid' : String(app.textContent).replace(/\s+/g, ' ').slice(0, 60));
 // "I only see the default voice" and "the list never populated" are the same screen from
 // the outside and have different causes, so the count is on it. Asserted through the real
 // sheet because the count is the only diagnostic a phone with no console can quote back.
