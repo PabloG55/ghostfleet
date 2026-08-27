@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
-# fleet-merged [repo-dir]
+# fleet-merged [--prs] [--cached] [--warm] [repo-dir]
 #
 # Print the branch names whose PR has been MERGED, one per line. The answer to
 # "is this worktree finished?" — and the reason a fleet fills up with worktrees whose
 # work shipped weeks ago.
+#
+#   fleet-merged                 merged branch names, one per line   (unchanged)
+#   fleet-merged --prs           branch <US> number <US> state, every PR it knows
+#   fleet-merged --cached        never runs gh: the cache or nothing
+#   fleet-merged --warm          refresh the cache if stale, print nothing
+#
+# ONE CACHE, NOT TWO. The card grid wants the PR NUMBER for a branch and this already
+# resolves branches to PR state — so it asks gh for the number and the state at the same
+# time and keeps one file, rather than growing a second cache that can disagree with this
+# one about the same repo. The default output is a PROJECTION of that file (state ==
+# MERGED, first field only), byte-for-byte what it printed before: fleet-clean and
+# fleet-worktrees both match it with `grep -qxF`, so the line format is load-bearing and
+# is not allowed to move.
+#   The cache FILE is renamed for that reason. A `merged.<slug>` written by the old version
+# holds bare branch names, and reading one as a three-field record would parse a branch as
+# a branch with no number — harmless, but it would also be served for the rest of its TTL
+# and hide the new fields. `prs.<slug>` cannot be confused with it; the old file is simply
+# abandoned, so there is still exactly one cache in play.
 #
 # WHY NOT ASK GIT. Every git-side test for "did this land" compares commits, and a
 # SQUASH-MERGE does not put the branch's commits in main — it puts one new commit there
@@ -20,34 +38,119 @@
 #
 # Cached, because a lead calls this from fleet-inbox on every look and the answer moves
 # at the speed of merges, not keystrokes.
+#
+# --cached IS FOR A DRAW LOOP, and it is the reason the grid can carry a PR number at all.
+# The grid repaints every couple of seconds; a gh call in that path would freeze the TUI on
+# somebody's slow network, which is worse than a card with no number on it. So --cached is
+# pure file I/O and CANNOT reach gh — asserted below by refusing to fetch rather than by
+# being called carefully.
+#   It ignores the TTL on purpose. A PR NUMBER NEVER CHANGES once assigned, so a stale
+# number is still the right number; only "has it merged yet" goes off, and that is what the
+# fresh path and --warm are for. Expiring the numbers would blank them on every card for the
+# ten minutes after a TTL lapse, which is the failure that looks like a broken feature.
+#
+# --warm IS THE OTHER HALF. Something has to fill the cache or --cached answers nothing
+# forever, and the honest answer to "who" is: whoever notices it is stale, in the
+# background. It takes a LOCK, so a 2s draw loop finding a stale cache can fire one of these
+# on every tick and still cause exactly one fetch — without it, a 3-second gh call under a
+# 2-second repaint spawns overlapping fetches until it lands.
 set -uo pipefail
+
+MODE=list                                      # list | prs
+CACHED=0
+WARM=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --prs)    MODE=prs ;;
+    --cached) CACHED=1 ;;
+    --warm)   WARM=1 ;;
+    --)       shift; break ;;
+    -*)       printf 'fleet-merged: unknown option %s\n' "$1" >&2; exit 2 ;;
+    *)        break ;;
+  esac
+  shift
+done
 
 REPO_DIR="${1:-$PWD}"
 TTL="${CLAUDE_FLEET_MERGED_TTL:-600}"          # seconds; 0 forces a refresh
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+US=$'\x1f'                                     # our own wire, per CLAUDE.md — never a tab
 
-command -v gh  >/dev/null 2>&1 || exit 0
+# git is needed to name the repo even in --cached mode; gh only to refresh it.
 command -v git >/dev/null 2>&1 || exit 0
+[ "$CACHED" = 1 ] || command -v gh >/dev/null 2>&1 || exit 0
 slug="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null \
         | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##')"
 [ -n "$slug" ] || exit 0
 
 mkdir -p "$FLEET_DIR" 2>/dev/null
-cache="$FLEET_DIR/merged.$(printf '%s' "$slug" | tr '/' '_')"
+key="$(printf '%s' "$slug" | tr '/' '_')"
+cache="$FLEET_DIR/prs.$key"
+lock="$FLEET_DIR/prs.$key.lock"
+
+# The default output is a projection of the cache, so there is one file and one truth. Field
+# 3 is the state as gh spells it; field 1 alone, MERGED only, is exactly the old format.
+emit() {
+  if [ "$MODE" = prs ]; then cat
+  else awk -F"$US" '$3=="MERGED" && $1!=""{print $1}'
+  fi
+}
 
 # Serve the cache while it is fresh. `find -newermt` would be cleaner but is not portable
 # to the BSD find on macOS, and `stat -f` is macOS-only — so compare mtimes the long way.
-if [ -f "$cache" ] && [ "$TTL" -gt 0 ]; then
-  now="$(date +%s)"
-  mt="$(date -r "$cache" +%s 2>/dev/null || stat -c %Y "$cache" 2>/dev/null || echo 0)"
-  [ $((now - mt)) -lt "$TTL" ] && { cat "$cache"; exit 0; }
+age_of() {   # seconds since mtime, or a very large number if it cannot be read
+  local mt
+  mt="$(date -r "$1" +%s 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0)"
+  printf '%s' "$(( $(date +%s) - mt ))"
+}
+fresh() { [ -f "$cache" ] && [ "$TTL" -gt 0 ] && [ "$(age_of "$cache")" -lt "$TTL" ]; }
+
+# --cached NEVER FETCHES, and this is where that is enforced rather than trusted. The TTL is
+# not consulted: see the header — a PR number does not go stale, and blanking every card's
+# number for ten minutes is the failure that reads as a broken feature.
+if [ "$CACHED" = 1 ]; then
+  [ -f "$cache" ] && emit < "$cache"
+  exit 0
 fi
 
-# --limit is deliberately generous: a short page would silently under-report, and an
-# under-report here reads as "not merged", which is the safe direction but makes the
-# whole feature look broken on a busy repo.
-out="$(gh pr list --repo "$slug" --state merged --limit 300 \
-        --json headRefName --jq '.[].headRefName' 2>/dev/null)" || exit 0
+fresh && { [ "$WARM" = 1 ] && exit 0; emit < "$cache"; exit 0; }
+
+# ONE FETCH AT A TIME. mkdir is the atomic test-and-set every shell has; a draw loop firing
+# --warm on every tick has to collapse to a single gh call, or a fetch slower than the
+# repaint interval spawns another on top of itself until it finishes.
+#   The lock is BOUNDED, because a process killed mid-fetch would otherwise wedge this
+# permanently: a directory older than five minutes is debris, not a running fetch.
+if [ -d "$lock" ] && [ "$(age_of "$lock")" -gt 300 ]; then rmdir "$lock" 2>/dev/null; fi
+if ! mkdir "$lock" 2>/dev/null; then
+  # Somebody else is fetching. Serve what we have rather than waiting — stale beats blocked,
+  # and the caller that is fetching will have written it by the next look.
+  [ "$WARM" = 1 ] && exit 0
+  [ -f "$cache" ] && emit < "$cache"
+  exit 0
+fi
+trap 'rmdir "$lock" 2>/dev/null' EXIT INT TERM
+
+# TWO QUERIES, NOT `--state all`. The merged list feeds fleet-clean, and --limit is
+# deliberately generous there: a short page silently under-reports, which reads as "not
+# merged" — the safe direction, but it makes the whole feature look broken on a busy repo.
+# `--state all --limit 300` would be ONE round trip and would quietly cut that coverage,
+# because the 300 most recent PRs on an active repo are not 300 merged ones. So: 300 merged
+# for the callers that already depend on it, 300 open for the numbers, one cache.
+#   OPEN IS WRITTEN FIRST. A branch can carry more than one PR over its life (reopened, or a
+# branch name reused), and the one a live session is working on is the open one.
+q() {   # $1 = state
+  gh pr list --repo "$slug" --state "$1" --limit 300 \
+     --json headRefName,number,state \
+     --jq '.[] | select(.headRefName != null and .number != null)
+                 | .headRefName + "\u001f" + (.number|tostring) + "\u001f" + .state' 2>/dev/null
+}
+# The merged query is the one whose failure means "I don't know": it is what the existing
+# callers read, so if it cannot be answered this prints nothing and every one of them falls
+# back, exactly as before. A failing OPEN query only costs the numbers.
+merged="$(q merged)" || exit 0
+open="$(q open)"     || open=""
+out="$(printf '%s\n%s\n' "$open" "$merged" | grep -v '^$')"
 [ -n "$out" ] || exit 0
 printf '%s\n' "$out" > "$cache" 2>/dev/null
-printf '%s\n' "$out"
+[ "$WARM" = 1 ] && exit 0
+printf '%s\n' "$out" | emit
