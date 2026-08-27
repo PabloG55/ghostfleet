@@ -266,7 +266,8 @@ export async function getProjects() {
   // screen must not tell. On a server the daemon computes it from sessionStatuses,
   // which is where the `sessions` field in the fixture comes from.
   const projects = [];
-  for (const p of j.projects || []) projects.push({ ...p, sessions: await rollup(p.name) });
+  for (const p of j.projects || []) projects.push({ ...p, sessions: await rollup(p.name),
+    agent: overlay.projAgent.has(p.name) ? overlay.projAgent.get(p.name) : p.agent });
   return { ...j, projects };
 }
 async function rollup(project) {
@@ -523,7 +524,7 @@ export async function verb(tool, args, assertion = null) {
 // Kept as an OVERLAY rather than by editing the fixture in memory, so reloading always
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
-const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map() };
+const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map() };
 function applyOverlay(g) {
   let cards = (g.cards || [])
     .filter(c => !overlay.gone.has(c.name))
@@ -625,6 +626,15 @@ function fixtureVerb(tool, a) {
     case 'fleet_project_order':  return ok('project order saved');
     case 'fleet_project_remove': return ok(`removed '${a.name}' from the projects list (its sessions and history are untouched)`);
     case 'fleet_project_add':    return ok(`registered '${a.name || a.path}'`);
+    // The picker is a WRITE, so fixtures have to make it stick or the sheet reads as a
+    // control that does nothing — the same reason every other verb here has an overlay.
+    // An empty agent stores '' rather than deleting the key: '' is the real answer (back
+    // to the default) and a missing key means "the fixture never said", which is what
+    // the card would fall back to and would look like the clear had failed.
+    case 'fleet_project_agent':
+      overlay.projAgent.set(a.name, String(a.agent || ''));
+      return ok(a.agent ? `'${a.name}' will start its master as ${a.agent}`
+                        : `'${a.name}' is back to the default agent (claude)`);
     case 'fleet_nudge':  return ok(`auto-nudge for '${a.session}' → ${a.state}`);
     case 'fleet_budget': return ok(`budget limit for '${a.project}' → ${a.state}`);
     default: return { ok: false, text: `fixture mode has no handler for ${tool}` };

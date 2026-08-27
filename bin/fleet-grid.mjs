@@ -2271,6 +2271,35 @@ function toggleIgnoreLimit(proj) {
          try { fs.writeFileSync(f, ''); } catch {} }
 }
 
+// ── per-project: which CLI its master runs ──────────────────────────────────
+// The 4th column of the projects file. Read here, written through `fleet-project agent`
+// rather than by this file editing the list itself: removeProject and reorderProject
+// above rewrite that file too, and a THIRD writer of one format is how the format drifts.
+// fleet-project already owns adding and removing rows; setting a column belongs with it.
+//
+// THE RING IS ASKED FOR, NOT SPELLED. `fleet-agent installed` is the list of agents whose
+// binary is actually on this machine, so a fourth one joins the cycle by existing and one
+// that is not installed is never offered — space would otherwise set a default that
+// leaves the next master dead at `exec agent-here`. '' leads the ring because an absent
+// column is what every project has and what the card's agent line keys off.
+// installedAgents() is the spawn picker's, defined above — reused rather than copied,
+// which is the same reason the ring is asked for instead of spelled. A second cache of
+// the same list is the third place a fourth agent would have to be remembered.
+function agentRing() { return ['', ...installedAgents().filter(a => a !== 'claude')]; }
+function cycleAgent(proj) {
+  const ring = agentRing();
+  const cur = proj.agent && proj.agent !== 'claude' ? proj.agent : '';
+  const next = ring[(Math.max(0, ring.indexOf(cur)) + 1) % ring.length];
+  for (const bin of [path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-project'), 'fleet-project']) {
+    try {
+      execFileSync(bin, ['agent', proj.name, next || '--none'],
+                   { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      proj.agent = next;              // so the row repaints before the next readProjects()
+      return;
+    } catch {}
+  }
+}
+
 // the settings page's columns (rows are projects)
 const SETCOLS = [
   { title: 'AUTO-NUDGE', onColor: C.green, toggle: togglePush,
@@ -2279,7 +2308,31 @@ const SETCOLS = [
   { title: 'BUDGET LIMIT', onColor: C.yellow, toggle: toggleIgnoreLimit,
     blurb: `${C.dim}budget limit: ${C.reset}${C.bold}enforced${C.reset}${C.dim} = governor parks all workers near the 5h usage ceiling · ${C.reset}${C.bold}ignored${C.reset}${C.dim} = keep running (releases its parks)${C.reset}`,
     state: p => { const ig = ignoreLimit(p); return { on: ig, label: ig ? 'ignored' : 'enforced' }; } },
+  // The blurb is where the two things a picker must say get said, and this page has one
+  // blurb line per column, so they go here rather than beside every row: it applies to
+  // the NEXT master (CLAUDE_FLEET_AGENT is read once, when the tmux session is created),
+  // and what the non-default choices cost. `fleet-agent caveat` composes that from the
+  // registry's measured capability fields, so a fourth agent brings its own warning.
+  { title: 'AGENT', onColor: C.cyan, toggle: cycleAgent,
+    blurb: `${C.dim}agent: which CLI this project's master runs — ${C.reset}${C.bold}the NEXT one${C.reset}${C.dim}; a running master keeps what it started with. ${C.reset}${C.yellow}${agentCaveats()}${C.reset}`,
+    state: p => { const a = p.agent && p.agent !== 'claude' ? p.agent : ''; return { on: !!a, label: a || 'claude' }; } },
 ];
+// One line naming only the agents that HAVE a caveat, so a fully-capable fourth agent
+// adds nothing to it and the line stays readable at 80 columns.
+function agentCaveats() {
+  const bits = [];
+  for (const a of installedAgents()) {
+    if (a === 'claude') continue;
+    for (const bin of [SIBLING_AGENT_BIN, 'fleet-agent']) {
+      try {
+        const c = execFileSync(bin, ['caveat', a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        if (c) bits.push(`${a}: ${c.split(':')[0]}`);
+        break;
+      } catch {}
+    }
+  }
+  return bits.length ? bits.join(' · ') : '';
+}
 function pBuild() {
   pItems = [...readProjects().map(p => ({ project: p })), { add: true }];
   if (!pSelInit) {           // first build: land on the just-exited project, if any
