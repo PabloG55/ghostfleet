@@ -219,7 +219,9 @@ export const TOOLS = [
   { name: 'fleet_rename', description: "Rename a worker's session AND move its worktree folder (git worktree move) in one step, so the two never drift apart. Migrates its pause marker, notify-lead override, pending scheduled send, fleet_worktrees manifest row, and its slot in the grid's card order to the new name. Refuses on a live-session/path collision or a dirty worktree git won't move. Can't rename 'master'.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'current session name' }, new_name: { type: 'string', description: 'new name for both the session and its worktree folder' } }, required: ['session', 'new_name'], additionalProperties: false } },
   { name: 'fleet_project_add', description: "Register a NEW project (its own fleet) from a path — the CLI form of the Projects screen's '+ add project'. Use this when work belongs to a repo that is NOT part of any existing fleet: registering it and starting its master is correct, whereas spawning a worker inside your own fleet would put it on the wrong socket and under the wrong project. start:true boots its master immediately so you can fleet_send to it.",
-    inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'project root: the repo, or a folder holding its checkouts' }, name: { type: 'string', description: 'project name (default: the folder name)' }, profile: { type: 'string', description: 'work (default) or another profile' }, start: { type: 'boolean', description: 'also start its master session' } }, required: ['path'], additionalProperties: false } },
+    inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'project root: the repo, or a folder holding its checkouts' }, name: { type: 'string', description: 'project name (default: the folder name)' }, profile: { type: 'string', description: 'work (default) or another profile' }, agent: { type: 'string', description: "default coding CLI for this project's master and its workers (fleet-agent list; omit for claude)" }, start: { type: 'boolean', description: 'also start its master session' } }, required: ['path'], additionalProperties: false } },
+  { name: 'fleet_project_agent', description: "Set or clear an EXISTING project's default agent — the 4th column of the projects list, inherited by the next master it starts and by workers spawned in it that do not name one. Omit `agent` (or pass an empty string) to clear it back to the default, claude. The RUNNING master is unaffected: CLAUDE_FLEET_AGENT is read once, when its tmux session is created, so this applies to the next one.",
+    inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'project name (from fleet_projects)' }, agent: { type: 'string', description: 'an agent from fleet-agent list; empty or omitted clears it back to claude' } }, required: ['name'], additionalProperties: false } },
   { name: 'fleet_worktree_remove', description: "Remove ONE git worktree that no session is using — the `x` on a grey FREE card in the grid. Whether removal is safe is decided by fleet-clean's own gates (clean tree, fully pushed or merged, no live session); if they decline, the worktree is kept and the reason is printed. force:true is the escalation for exactly that case — the grid's `f = remove anyway` — and it DELETES UNCOMMITTED WORK. It still refuses a main checkout, a worktree a live session is standing in, and Claude's own .claude/worktrees trees. Use fleet_stop reclaim for a worktree that still has a session on it.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "the project whose worktree this is (name from fleet_projects); omit for your own fleet" }, path: { type: 'string', description: 'absolute path of the worktree to remove' }, force: { type: 'boolean', description: 'remove it past those gates — destroys uncommitted work; the deliberate second step after a plain removal was declined' } }, required: ['path'], additionalProperties: false } },
   { name: 'fleet_project_remove', description: "Unregister a project — drop its entry from the projects list. Its sessions, worktrees and history are untouched; this is the `x` on the Projects screen, not a delete.",
@@ -320,9 +322,15 @@ export function plan(name, a = {}) {
       const args = ['add', String(a.path)];
       if (a.name) args.push('--name', String(a.name));
       if (a.profile) args.push('--profile', String(a.profile));
+      if (a.agent) args.push('--agent', String(a.agent));
       if (a.start) args.push('--start');
       return run('fleet-project', args);
     }
+    // Empty/absent CLEARS. `--none` rather than an empty argument, so the intent is in
+    // the argv a user can read back out of a log — an empty string there is
+    // indistinguishable from an argument that got lost on the way.
+    case 'fleet_project_agent':
+      return run('fleet-project', ['agent', String(a.name), String(a.agent || '').trim() || '--none']);
     case 'fleet_projects': return { kind: 'text', text: projectTable() };
     case 'fleet_list': return run('fleet-list', [], t);
     case 'fleet_send': {

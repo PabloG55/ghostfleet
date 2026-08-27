@@ -569,6 +569,105 @@ is "unknown agent is not written"  "0" "$(grep -c 'notreal' "$cf" || true)"
 is "unknown agent aborts the add"  "0" "$(awk -F'\t' '$1=="bad"' "$cf" | wc -l | tr -d ' ')"
 rm -rf "$T"
 
+# ── setting the agent AFTER the project exists ──────────────────────────────
+# "the master cant be selected as open code or codex". Everything downstream of the 4th
+# column could already READ it and nothing could write one after `add` — so every project
+# that already existed, which is all of them, had no way to change it but a text editor.
+group "fleet-project agent (the edit path)"
+T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet"
+cf="$T/.config/ghostfleet/projects"
+fp() { PATH="$ROOT/bin:$PATH" HOME="$T" "$ROOT/bin/fleet-project" "$@"; }
+{ printf '# a comment the format documents itself with\n'
+  printf 'three\t~/a\twork\n'
+  printf 'noprof\t~/b\t\n'
+  printf 'twocol\t~/c\n'
+  printf 'already\t~/d\twork\tcodex\n'; } > "$cf"
+fp agent three opencode >/dev/null 2>&1
+is "sets the 4th column"            "opencode" "$(awk -F'\t' '$1=="three"{print $4}' "$cf")"
+is "...and leaves the profile"      "work"     "$(awk -F'\t' '$1=="three"{print $3}' "$cf")"
+is "...on exactly 4 fields"         "4"        "$(awk -F'\t' '$1=="three"{print NF}' "$cf")"
+is "...touching nobody else"        "codex"    "$(awk -F'\t' '$1=="already"{print $4}' "$cf")"
+# The header is the only documentation of this format; an edit that ate it would be silent.
+is "the comment survives an edit"   "1"        "$(grep -c '^# a comment' "$cf" || true)"
+# CLEARING IS AN EMPTY COLUMN, NOT THE WORD claude. grid.js prints "profile · agent" on
+# any truthy agent, so writing 'claude' would make every default project start saying
+# "· claude" — hiding the one project that actually differs.
+fp agent three --none >/dev/null 2>&1
+is "--none clears it"               ""         "$(awk -F'\t' '$1=="three"{print $4}' "$cf")"
+is "...back to 3 fields"            "3"        "$(awk -F'\t' '$1=="three"{print NF}' "$cf")"
+is "...and never the word claude"   "0"        "$(grep -c 'claude' "$cf" || true)"
+# THE TRAP THIS FEATURE WALKS INTO. A project with an EMPTY profile plus an agent is
+# `name<TAB>path<TAB><TAB>agent`, and tab is IFS-whitespace: `IFS=$'\t' read` collapses
+# the run, the agent lands in `prof`, and the fleet socket — derived from the profile —
+# comes out as cf-<agent>-<name>. Measured on main before the fix: profile=opencode,
+# agent=claude, FLEET=cf-opencode-noprof. That is CLAUDE.md's first entry arriving
+# through a feature that made it reachable from a button.
+fp agent noprof opencode >/dev/null 2>&1
+is "empty profile: agent lands in 4" "opencode" "$(awk -F'\t' '$1=="noprof"{print $4}' "$cf")"
+is "...and column 3 stays empty"     ""         "$(awk -F'\t' '$1=="noprof"{print $3}' "$cf")"
+lst="$(fp list 2>/dev/null)"
+is "...the reader does not shift it"  "work"     "$(awk '$1=="noprof"{print $2}' <<<"$lst")"
+is "...the agent is read as an agent" "opencode" "$(awk '$1=="noprof"{print $3}' <<<"$lst")"
+# The one that actually costs something: the socket is name+profile, and a shifted
+# profile moves the whole fleet somewhere nothing else is looking.
+is "...and the SOCKET is unchanged"   "cf-noprof" "$(awk '$1=="noprof"{print $4}' <<<"$lst")"
+# ...and the list is not empty for some unrelated reason, which is how the first cut of
+# that fix passed: `awk -v OFS='\x1f'` is a gawk-ism, BSD awk left the literal text, and
+# every row was dropped. A green "no shift" over an empty list proves nothing.
+is "...and every project is listed"   "4"         "$(grep -cE '^(three|noprof|twocol|already) ' <<<"$lst" || true)"
+# A 2-column line has no profile field at all; column 3 has to be MADE, not skipped.
+fp agent twocol codex >/dev/null 2>&1
+is "2-col: grows to 4 fields"        "4"        "$(awk -F'\t' '$1=="twocol"{print NF}' "$cf")"
+is "2-col: agent is in column 4"     "codex"    "$(awk -F'\t' '$1=="twocol"{print $4}' "$cf")"
+is "2-col: socket still bare"        "cf-twocol" "$(fp list 2>/dev/null | awk '$1=="twocol"{print $4}')"
+# Refusals, both of them, or the picker could write a default that never applies.
+fp agent three notreal >/dev/null 2>&1; is "unknown agent is refused"  "1" "$?"
+is "...and nothing was written"      "0"        "$(grep -c 'notreal' "$cf" || true)"
+fp agent nosuchproject codex >/dev/null 2>&1; is "unknown project is refused" "1" "$?"
+# THE RUNNING MASTER DOES NOT CHANGE, and the command has to say so — CLAUDE_FLEET_AGENT
+# is read once, when the tmux session is created. Without this line the setting reads as
+# broken: you pick codex and the master goes on answering as claude.
+is "it says the running master is unaffected" "1" \
+   "$(fp agent already opencode 2>&1 | grep -c 'RUNNING master keeps the agent' || true)"
+is "...and warns what the choice costs"       "1" \
+   "$(fp agent already codex 2>&1 | grep -c 'heads up' || true)"
+is "...and does not warn for the default"     "0" \
+   "$(fp agent already --none 2>&1 | grep -c 'heads up' || true)"
+rm -rf "$T"
+
+# ── what a non-claude master actually loses ─────────────────────────────────
+# MEASURED 2026-08-26, not assumed, and the UI reads these rather than spelling them:
+# install.sh registers the ghostfleet MCP into every claude profile's .claude.json and
+# symlinks the orchestrate skill beside it, and does neither for the other two — both of
+# which DO support MCP (`opencode mcp`, `codex mcp`), so this is a wiring gap rather than
+# a limitation. codex additionally has no event bridge at all (hooks/fleet-event.sh is
+# Claude's, hooks/opencode-fleet-event.js is opencode's, nothing is codex's).
+group "agent capabilities are declared, not hardcoded"
+fa() { "$ROOT/bin/fleet-agent" "$@"; }
+# A NAMED HELPER, not a `case` inside $( ). macOS ships bash 3.2 and this suite runs on
+# it: `$(case "$x" in a|b) echo 1 ;; esac)` mis-parses there — the `)` closing the pattern
+# is taken for the one closing the substitution — so every one of these came back empty
+# and read as a missing declaration rather than as a quoting bug.
+yn() { case "$1" in yes|no) echo 1 ;; *) echo 0 ;; esac; }
+for a in $(fa list); do
+  is "$a declares hooks" "1" "$(yn "$(fa field "$a" hooks)")"
+  is "$a declares mcp"   "1" "$(yn "$(fa field "$a" mcp)")"
+done
+# The caveat is COMPOSED from those fields, so a fourth agent gets a warning by declaring
+# them. Both directions, because a composer that always returned text would be as useless
+# as one that never did: the fully-capable agent must come back EMPTY.
+is "claude gives up nothing"          ""  "$(fa caveat claude)"
+is "opencode: no tools, but events"   "1" "$(fa caveat opencode | grep -c 'no fleet_\* tools' || true)"
+is "...and it is NOT blind to events" "0" "$(fa caveat opencode | grep -c 'no fleet events' || true)"
+is "codex: no events either"          "1" "$(fa caveat codex | grep -c 'no fleet events' || true)"
+is "...nor tools"                     "1" "$(fa caveat codex | grep -c 'no fleet_\* tools' || true)"
+is "an unknown agent is refused"      "1" "$(fa caveat nosuch >/dev/null 2>&1; echo $?)"
+# `installed` is what the pickers offer from, and it is a SUBSET of `list` — an option
+# that cannot run is worse than a missing one, because picking it leaves the next master
+# dead at `exec agent-here` with nothing on screen to say why.
+is "installed is a subset of list" "0" \
+   "$(comm -13 <(fa list | sort) <(fa installed | sort) | wc -l | tr -d ' ')"
+
 group "projects screen reads the agent column"
 T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a" "$T/b"
 printf 'oc\t%s/a\twork\topencode\npl\t%s/b\twork\n' "$T" "$T" > "$T/.config/ghostfleet/projects"
@@ -6107,11 +6206,20 @@ is "fleet-serve imports the dispatch"   "1" \
    "$(grep -c "from '../mcp/fleet-dispatch.mjs'" "$ROOT/bin/fleet-serve.mjs" || true)"
 is "the MCP server imports it too"      "1" \
    "$(grep -c "from './fleet-dispatch.mjs'" "$ROOT/mcp/fleet-mcp.mjs" || true)"
-# The ONLY bin/ commands the daemon runs by hand are the one read producer (§3) and the
-# sleep inhibitor (§8). Every fleet VERB goes through the shared planner, so a future edit
-# that shells out to fleet-send directly turns this red rather than passing quietly.
-is "it runs only the grid + fleet-awake" "fleet-awake fleet-grid.mjs" \
+# The ONLY bin/ commands the daemon runs by hand are READS with no user input in them:
+# the grid producer (§3), the sleep inhibitor (§8), and the agent registry, which answers
+# `list`/`installed`/`caveat` — a static capability table with literal subcommands, where
+# even `caveat <a>` is fed a name that came out of `list` itself. Every fleet VERB still
+# goes through the shared planner, so an edit that shells out to fleet-send — or that
+# hands one of these an argument off the wire — turns this red rather than passing
+# quietly. The list is the assertion: a fourth name here has to be argued for.
+is "it runs only reads, by hand" "fleet-agent fleet-awake fleet-grid.mjs" \
    "$(grep -oE "join\(BIN, '[^']+'" "$ROOT/bin/fleet-serve.mjs" | sed "s/.*'\(.*\)'/\1/" | sort -u | tr '\n' ' ' | sed 's/ $//')"
+# ...and the registry really is fed literals. A request field reaching it would make the
+# daemon a second, unvalidated entry point to a bin/ command, which is the whole thing
+# mcp/fleet-dispatch.mjs exists to prevent.
+is "...and the registry takes no wire input" "0" \
+   "$(sed -n '/function agentCatalogue/,/^}/p' "$ROOT/bin/fleet-serve.mjs" | grep -cE 'req\.|url\.|rawArgs|body' || true)"
 is "and every verb goes through it"      "1" \
    "$([ "$(grep -c 'callToolAsync(' "$ROOT/bin/fleet-serve.mjs" || true)" -ge 1 ] && echo 1 || echo 0)"
 is "the MCP server no longer execs"      "0" \

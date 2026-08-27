@@ -564,8 +564,14 @@ const TOOLS_ALLOWED = {
   fleet_stop:            { fields: ['project', 'session', 'reclaim', 'force'], write: true, passkey: true, subject: 'session' },
   fleet_rename:          { fields: ['project', 'session', 'new_name'],         write: true, passkey: true, subject: 'session' },
   fleet_worktree_remove: { fields: ['project', 'path', 'branch', 'force'],     write: true, passkey: true, subject: 'path' },
-  fleet_project_add:     { fields: ['path', 'name', 'profile', 'start'],       write: true, passkey: true, noProject: true, subject: 'name' },
+  fleet_project_add:     { fields: ['path', 'name', 'profile', 'agent', 'start'], write: true, passkey: true, noProject: true, subject: 'name' },
   fleet_project_remove:  { fields: ['name'],                                   write: true, noProject: true, subject: 'name' },
+  // NOT passkey-gated, and the line between the two is "does this run code". Adding a
+  // project can boot a master (start:true), which is why it is; changing which CLI the
+  // NEXT master will use writes one word into a text file and starts nothing. Gating it
+  // would put Face ID in front of a preference, which is how a passkey stops meaning
+  // anything on the taps that matter.
+  fleet_project_agent:   { fields: ['name', 'agent'],                          write: true, noProject: true, subject: 'name' },
 };
 // `branch` is accepted on fleet_worktree_remove and thrown away: web/api.js sends it so
 // its fixture backend can name the branch in a refusal. Silently ignoring an argument is
@@ -1611,6 +1617,33 @@ async function api(req, res, url, ip) {
     return send(res, 200, { ok: true, token: sess.token, expires_at: sess.expires_at, client_id: v.client.id });
   }
 
+// WHICH AGENTS THE PHONE MAY OFFER, asked of the machine rather than listed here. The
+// names come from `fleet-agent list`, the presence from `fleet-agent installed`, and the
+// warning from `fleet-agent caveat` — so a fourth agent appears in the picker, with its
+// own caveat, without a line changing in this file or in the client. Hardcoding the three
+// names here would put the list in a fourth place and guarantee it drifts.
+//
+// ONLY WHAT IS INSTALLED IS OFFERED. An option that cannot run is worse than a missing
+// one: picking it would leave the next master dead at `exec agent-here` with nothing on
+// screen to say why.
+//
+// Cached for a minute, not for the process lifetime: this daemon runs for days, somebody
+// installing codex should not have to restart it to see the option, and re-running six
+// subprocesses on every 5s poll is not the alternative.
+let agentCache = { at: 0, list: [] };
+function agentCatalogue() {
+  const now = Date.now();
+  if (now - agentCache.at < 60000) return agentCache.list;
+  const ask = (args) => { try { return execFileSync(path.join(BIN, 'fleet-agent'), args,
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 4000 }).trim(); } catch { return ''; } };
+  const installed = new Set(ask(['installed']).split('\n').filter(Boolean));
+  const list = ask(['list']).split('\n').filter(Boolean)
+    .filter(a => installed.has(a))
+    .map(a => ({ name: a, caveat: ask(['caveat', a]) }));
+  agentCache = { at: now, list };
+  return list;
+}
+
   // ── reads ─────────────────────────────────────────────────────────────────
   if (p === '/api/projects' && req.method === 'GET') {
     // `home` is what the client abbreviates paths against (grid.js's homeTilde), so the
@@ -1639,7 +1672,7 @@ async function api(req, res, url, ip) {
         parked: cards.filter(x => x.status === 'parked').length,
         total: cards.length } };
     }));
-    return send(res, 200, { home: HOME, projects: counted });
+    return send(res, 200, { home: HOME, projects: counted, agents: agentCatalogue() });
   }
 
   if (p === '/api/grid' && req.method === 'GET') {

@@ -198,7 +198,12 @@ export function projectCard(p, idx = -1, selected = false) {
   // The project's default agent appears beside its profile only when it HAS one: the
   // overwhelming case is claude, and printing it everywhere would hide the one project
   // that actually differs.
-  const who = p.agent ? `${p.profile} · ${p.agent}` : p.profile;
+  //   ...and 'claude' is not one of those, which is the same test the SESSION card two
+  // functions up already makes. The daemon normalises the empty 4th column to the word
+  // 'claude' before it goes on the wire, so a bare truthiness check printed "work · claude"
+  // on every card on a real fleet — hiding the one project that actually differs, which is
+  // the exact thing this line exists to show. The fixtures say null and never caught it.
+  const who = p.agent && p.agent !== 'claude' ? `${p.profile} · ${p.agent}` : p.profile;
   const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
   return boxCard(`${num}${p.name}`, [who, homeTilde(p.path), line], color, selected, 'project');
 }
