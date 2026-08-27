@@ -3825,6 +3825,213 @@ else
   skip "workspace symlink guard" "git missing"
 fi
 
+# ── the grid must not lose a session creation in silence ────────────────────
+# Pressed `n` in a project, came back to a fleet holding only master and its tabs, and
+# nothing anywhere said why. Both grid_loop branches ran a bare `TM new-session` whose
+# result was never tested and then an attach that swallowed its own failure — so the
+# create and the report of the create were both absent. This is #70's fleet-spawn bug
+# living on in the keyboard path, while bin/fleet-companion refused loudly on the same
+# operation from the CLI.
+#
+# DRIVEN, NOT GREPPED, and the failing direction is the whole point: a check that only
+# runs on the happy path is the thing being replaced.
+group "the grid refuses a session that did not start"
+if command -v tmux >/dev/null 2>&1; then
+  NS="$(mktemp -d)"; mkdir -p "$NS/bin" "$NS/empty" "$NS/repo" "$NS/home/.claude/fleet"
+  # The helper, alone, out of the real file — the branches call it and nothing else
+  # decides whether a create worked. Extracted rather than reimplemented, so this cannot
+  # pass against a copy that has drifted from the one that ships.
+  sed -n '/^_new_session()/,/^}/p' "$ROOT/bin/ghostfleet" > "$NS/helper.sh"
+  is "the helper was found in bin/ghostfleet" "1" "$(grep -c '^_new_session()' "$NS/helper.sh" || true)"
+  cat > "$NS/drive.sh" <<DRV
+#!/usr/bin/env bash
+set -uo pipefail
+SOCK="\$1"; CFG_DIR="$NS/home/.claude"
+TM() { tmux -L "\$SOCK" "\$@"; }
+$(cat "$NS/helper.sh")
+_new_session "\$2" "$NS/repo" "" "\$3" && echo OK || echo FAILED
+DRV
+  chmod +x "$NS/drive.sh"
+  # TMUX STAYS ON PATH IN EVERY CASE BELOW, and that is not incidental. The first cut of
+  # this group ran the failing cases with PATH="$NS/bin:/usr/bin:/bin", which drops
+  # Homebrew's bin — so `tmux` itself was not found, the helper got an empty id, and
+  # "a session that dies is reported FAILED" passed because the test could not run tmux
+  # at all. It stayed green with the check deleted. Measured, not assumed: tmux answers
+  # rc=0 with a real id in BOTH failure shapes below, so nothing here is caught by the
+  # exit status and a test that thinks it is proves nothing.
+  TMUXBIN="$(dirname "$(command -v tmux)")"
+  # ── the direction that must WORK: agent-here on PATH, session survives
+  printf '#!/bin/sh\nexec sleep 120\n' > "$NS/bin/agent-here"; chmod +x "$NS/bin/agent-here"
+  tmux -L cfnsok kill-server 2>/dev/null
+  got="$(PATH="$NS/bin:$PATH" "$NS/drive.sh" cfnsok live "")"
+  is "a session that starts is reported OK" "OK" "$got"
+  is "...and it really is on the fleet"     "1" \
+     "$(tmux -L cfnsok list-sessions -F '#{session_name}' 2>/dev/null | grep -cx live || true)"
+  # ── FAILURE SHAPE 1: agent-here is not on PATH. install.sh never run, or a runtime
+  # half-synced. tmux returns 0 and hands back an id, and the session is ALREADY GONE by
+  # the time it does — so the id alone says the opposite of the truth.
+  rm -f "$NS/bin/agent-here"
+  tmux -L cfnsbad kill-server 2>/dev/null
+  got="$(PATH="$NS/empty:$TMUXBIN:/usr/bin:/bin" "$NS/drive.sh" cfnsbad doomed "")"
+  is "not-on-PATH is reported FAILED" "FAILED" "$got"
+  is "...and left nothing behind"     "0" \
+     "$(tmux -L cfnsbad list-sessions -F '#{session_name}' 2>/dev/null | grep -cx doomed || true)"
+  # ── FAILURE SHAPE 2, AND THE ONE THE SETTLE IS FOR: agent-here exists and exits at
+  # once. tmux returns 0, the session is present the instant we look, and it is gone half
+  # a second later. Nothing but waiting can tell this from a healthy start — which is why
+  # the helper waits instead of polling until present, and why this case is here: with the
+  # sleep removed, everything above still passes and only this goes red.
+  printf '#!/bin/sh\nexit 1\n' > "$NS/bin/agent-here"; chmod +x "$NS/bin/agent-here"
+  tmux -L cfnsdie kill-server 2>/dev/null
+  got="$(PATH="$NS/bin:$PATH" "$NS/drive.sh" cfnsdie diesoon "")"
+  is "a session that dies a moment later is reported FAILED" "FAILED" "$got"
+  # The fresh variant takes the same path, or the two branches drift apart again — which
+  # is exactly how one of them ended up checked and the other not.
+  printf '#!/bin/sh\nexec sleep 120\n' > "$NS/bin/agent-here"; chmod +x "$NS/bin/agent-here"
+  tmux -L cfnsfr kill-server 2>/dev/null
+  is "the fresh variant reports OK too" "OK" "$(PATH="$NS/bin:$PATH" "$NS/drive.sh" cfnsfr fresh1 1)"
+  is "...and passes CLAUDE_FLEET_FRESH"  "1" \
+     "$(tmux -L cfnsfr show-environment -t fresh1 CLAUDE_FLEET_FRESH 2>/dev/null | grep -c '^CLAUDE_FLEET_FRESH=1' || true)"
+  # ...and NOT on the plain one, or "fresh" would mean nothing.
+  is "...and the plain one does not"     "0" \
+     "$(tmux -L cfnsok show-environment -t live CLAUDE_FLEET_FRESH 2>/dev/null | grep -c '^CLAUDE_FLEET_FRESH=1' || true)"
+  for s in cfnsok cfnsbad cfnsdie cfnsfr; do tmux -L "$s" kill-server 2>/dev/null; done
+  # BOTH BRANCHES GO THROUGH IT, and neither still calls new-session by hand. A branch
+  # that kept its own create would pass every assertion above and still lose a failure.
+  is "both grid_loop branches call it" "2" \
+     "$(grep -c 'if _new_session "\$name" "\$cwd" "\$agent"' "$ROOT/bin/ghostfleet" || true)"
+  is "...and neither creates by hand"  "1" \
+     "$(grep -c 'TM new-session -d -P -F' "$ROOT/bin/ghostfleet" || true)"
+  is "...and a failure is SAID, not swallowed" "2" \
+     "$(grep -c '_fail "could not start' "$ROOT/bin/ghostfleet" || true)"
+  # The keyboard path and the CLI path have to agree — the CLI already refused loudly and
+  # that difference is what made this look like nothing had happened.
+  is "fleet-companion still refuses loudly too" "1" \
+     "$(grep -c 'fleet-companion: failed to start session' "$ROOT/bin/fleet-companion" || true)"
+  rm -rf "$NS"
+else
+  skip "grid session creation" "tmux missing"
+fi
+
+# ── N is advertised where a person looks BEFORE pressing something ──────────
+group "the grid says both new-session keys"
+hint="$(grep -a 'n new · N parallel' "$ROOT/bin/fleet-grid.mjs" || true)"
+is "the footer offers n AND N"       "1" "$(printf '%s' "$hint" | grep -c 'n new · N parallel' || true)"
+# The convention it follows, still there — this was added BECAUSE p/P set the precedent.
+is "...beside the p/P it copies"     "1" \
+   "$([ "$(grep -ac 'p pause · P resume' "$ROOT/bin/fleet-grid.mjs" || true)" -ge 1 ] && echo 1 || echo 0)"
+# WIDTH IS THE OTHER HALF, AND IT IS MEASURED ON THE DRAWN PANE. This footer WRAPS rather
+# than truncating and nothing sizes the card area against it, so the cost of an entry is a
+# wrapped line — and counting characters in the source cannot see that: the string is
+# three template chunks joined with `+`, and the first regex written for it captured only
+# the first and reported a footer a third of its real length, green.
+#   Pinned at two widths so the next entry has to be measured rather than appended on
+# faith: CLAUDE.md is full of rows that fit at one width and clip at another.
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  FW="$(mktemp -d)"; mkdir -p "$FW/.claude/fleet" "$FW/repo"
+  tmux -L cffoot kill-server 2>/dev/null
+  for s in master a b c d e f g; do tmux -L cffoot new-session -d -s "$s" -c "$FW/repo" 'sleep 90' 2>/dev/null; done
+  # WAITED FOR, NOT SLEPT THROUGH. A fixed sleep here is a race against node booting and
+  # drawing, and this suite runs it on a loaded machine: measured, a 1.5s sleep lost under
+  # the full run and reported an EMPTY pane as a 0-line footer — three rows red, including
+  # one that had got shorter and should have passed. A capture that has no footer in it is
+  # not a measurement of the footer.
+  draw_at() {                      # $1 = width; leaves the pane up for the caller
+    tmux -L cffootd kill-server 2>/dev/null
+    tmux -L cffootd new-session -d -s d -x "$1" -y 24 \
+      "HOME='$FW' CLAUDE_FLEET_DIR='$FW/.claude/fleet' CLAUDE_FLEET_ROOT='$FW/repo' node '$ROOT/bin/fleet-grid.mjs' cffoot" 2>/dev/null
+    local i=0
+    while [ "$i" -lt 80 ]; do
+      tmux -L cffootd capture-pane -p -t d 2>/dev/null | grep -q '↑↓←→/hjkl move' && return 0
+      i=$((i+1)); sleep 0.1
+    done
+    return 1
+  }
+  footer_lines() {                 # $1 = width -> rows the footer occupies once drawn
+    draw_at "$1" || { echo "the grid never drew at $1"; return; }
+    tmux -L cffootd capture-pane -p -t d 2>/dev/null \
+      | awk '/↑↓←→\/hjkl move/{f=1} f && NF {n++} END{print n+0}'
+  }
+  is "the drawn footer is 2 lines at 120" "2" "$(footer_lines 120)"
+  is "...and 3 at 104, the cost of the entry" "3" "$(footer_lines 104)"
+  # The banner is what a longer footer pushes off, and at 120 it must survive — that is
+  # the property the width budget is protecting, rather than the line count itself.
+  is "...and the banner is still on screen at 120" "1" \
+     "$(draw_at 120 && tmux -L cffootd capture-pane -p -t d 2>/dev/null | grep -ci 'ghostfleet' || echo 0)"
+  tmux -L cffootd kill-server 2>/dev/null; tmux -L cffoot kill-server 2>/dev/null
+  rm -rf "$FW"
+else
+  skip "footer width" "tmux or node missing"
+fi
+# And the surprising half is said where the checkout is picked: `n` RESUMES, which is what
+# made a second session on master's own checkout read as a duplicate of master.
+is "the picker says n resumes"   "1" "$(grep -ac "RESUMES that checkout's conversation" "$ROOT/bin/fleet-grid.mjs" || true)"
+is "...and names N as the other" "1" "$(grep -ac 'instead for a fresh one' "$ROOT/bin/fleet-grid.mjs" || true)"
+is "...and N says it is fresh"   "1" "$(grep -ac 'a FRESH conversation, alongside' "$ROOT/bin/fleet-grid.mjs" || true)"
+
+# ── a second session in one worktree is reachable from MCP ──────────────────
+# fleet-companion is the answer to "give me another session here" and had a CLI and no
+# tool, so an agent restricted to MCP could not reach it at all. #89 made that worse by
+# giving codex and opencode the tools without the orchestrate skill that would have
+# mentioned the command.
+group "fleet_companion is a tool, and it says what it costs"
+is "the tool exists"            "1" "$(grep -c "name: 'fleet_companion'" "$ROOT/mcp/fleet-dispatch.mjs" || true)"
+is "...and it is dispatched"    "1" "$(grep -c "case 'fleet_companion':" "$ROOT/mcp/fleet-dispatch.mjs" || true)"
+is "...to the command that owns it" "1" "$(grep -c "run('fleet-companion'" "$ROOT/mcp/fleet-dispatch.mjs" || true)"
+# THE WARNING IS THE POINT. bin/fleet-companion's header says two sessions in one tree can
+# conflict and to keep the companion to questions and reading; the caller of a tool has no
+# header to have read, so a description that omits it hands out a footgun.
+cdesc="$(node -e '
+  const m = await import(process.argv[1]);
+  const t = (m.TOOLS || []).find(x => x.name === "fleet_companion");
+  console.log(t ? t.description : "");
+' "$ROOT/mcp/fleet-dispatch.mjs" 2>/dev/null)"
+is "the description warns about the shared tree" "1" "$(printf '%s' "$cdesc" | grep -c 'same worktree\|SAME worktree' || true)"
+is "...says there is no locking"                 "1" "$(printf '%s' "$cdesc" | grep -ci 'no locking' || true)"
+is "...and what to keep it to"                   "1" "$(printf '%s' "$cdesc" | grep -ci 'questions and reading' || true)"
+# ...and points at the tool that DOES isolate, or the warning is a dead end.
+is "...and names the isolated alternative"       "1" "$(printf '%s' "$cdesc" | grep -c 'fleet_spawn' || true)"
+# The command's own header still carries it, since the tool text is a copy of that promise
+# and a copy whose original changed is the drift this pins.
+is "the command still warns too" "1" "$(grep -c 'keep the companion to questions/reading' "$ROOT/bin/fleet-companion" || true)"
+# The schema takes what the CLI takes and nothing else: a `session` it resolves to a
+# worktree, and `project` for another fleet. An argument the schema declares and the
+# dispatch drops reaches the command as nothing at all (#38).
+is "session reaches the argv"  "1" "$(grep -c 'a.session ? \[String(a.session)\]' "$ROOT/mcp/fleet-dispatch.mjs" || true)"
+# EVERY MCP TOOL GETS A TRUE ANSWER FROM THE DAEMON. Until this one, the two sets were the
+# same modulo NOT_YET, so bin/fleet-serve's fallback branch really did mean "typo". A tool
+# with no phone surface is a THIRD case, and calling it `unknown tool` to a caller holding
+# it would be the daemon lying about which kind of no it is. Partitioned, not counted:
+# a name has to fall in exactly one bucket, so the next tool is a deliberate choice.
+# THE SCRIPT GOES IN A FILE, not in -e. The first cut inlined it in a single-quoted shell
+# string that itself contained a single quote — which CLOSED the string mid-program, so
+# node was handed a mangled script and the assertion's `got` came back as fragments of its
+# own source. Caught by CI rather than by the run before the push, which is the whole
+# argument for not inlining a program inside a quote you are also using.
+PARTD="$(mktemp -d)"
+cat > "$PARTD/part.mjs" <<'PARTEOF'
+import fs from 'node:fs';
+const root = process.argv[2];
+const m = await import(root + '/mcp/fleet-dispatch.mjs');
+const src = fs.readFileSync(root + '/bin/fleet-serve.mjs', 'utf8');
+const allowed = new Set([...src.matchAll(/^ {2}(fleet_[a-z_]+): *\{ fields:/gm)].map(x => x[1]));
+const notyet  = new Set([...src.matchAll(/^ {2}(fleet_[a-z_]+): '/gm)].map(x => x[1]));
+if (!allowed.size || !notyet.size) { console.log('PARSED-NOTHING'); process.exit(0); }
+const orphan = m.TOOLS.map(t => t.name).filter(n => !allowed.has(n) && !notyet.has(n));
+console.log(orphan.join(',') || 'none');
+PARTEOF
+# ...and it says so when its regexes matched nothing, rather than answering "no orphans"
+# to a parse that found no lists at all — which is the same green-for-the-wrong-reason
+# this whole group is about.
+part="$(node "$PARTD/part.mjs" "$ROOT" 2>/dev/null)"
+rm -rf "$PARTD"
+is "the daemon's two lists were parsed" "1" "$([ "$part" != PARSED-NOTHING ] && echo 1 || echo 0)"
+is "the only unserved MCP tool is the companion" "fleet_companion" "$part"
+is "...and the daemon says so, rather than 'unknown'" "1" \
+   "$(grep -c 'is an MCP tool, but this daemon does not serve it' "$ROOT/bin/fleet-serve.mjs" || true)"
+is "...keeping 'unknown tool' for a real typo"        "1" \
+   "$(grep -c "unknown tool ." "$ROOT/bin/fleet-serve.mjs" || true)"
+
 # ...and an agent can actually reach it, which was half the gap: there is no clean tool
 # in MCP at all, so a lead had to shell out to a command that was all-or-nothing.
 group "reclaim is reachable from MCP"

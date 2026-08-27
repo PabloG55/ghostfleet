@@ -1353,8 +1353,18 @@ function renderGrid() {
   // `x` means two different things depending on what's selected, so the footer says
   // which one it means RIGHT NOW rather than making you find out by pressing it.
   const xVerb = items[sel]?.freeWt ? 'x remove wt' : 'x kill';
-  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 enter · n new · w worktree · t stack · s sched · ` +
-         `p pause · P resume · ${xVerb} · , settings · Ctrl-t term · Ctrl-n edit · Ctrl-f jump · ` +
+  // N EARNS ITS OWN ENTRY, next to `n`, for the same reason `p pause · P resume` has two:
+  // the shift variant is not guessable from the base one. It was bound and documented on
+  // the picker's own header and nowhere a person looks BEFORE pressing something —
+  // reported as not being able to find it at all, after landing on what looked like a
+  // duplicate of master.
+  //   Measured rather than eyeballed, because CLAUDE.md is full of rows that fit at one
+  // width and clip at another: this footer WRAPS, it never truncates, and nothing sizes
+  // the card area against its height. At 8 cards in 24 rows it costs one more wrapped
+  // line between 93 and 106 columns and none above; at 80 the banner was already being
+  // pushed off by the footer as it stood, which is its own problem and not this one.
+  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 enter · n new · N parallel · w worktree · t stack · ` +
+         `s sched · p pause · P resume · ${xVerb} · , settings · Ctrl-t term · Ctrl-n edit · Ctrl-f jump · ` +
          `Ctrl-p/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
   out(buf);
@@ -1362,9 +1372,14 @@ function renderGrid() {
 
 function renderPicker() {
   let buf = '\x1b[H';
+  // WHICH HALF IS SURPRISING: `n` RESUMES. Picking a checkout that already has a
+  // conversation — master's own, most obviously — reopens that conversation, so the new
+  // card reads as a duplicate of the session you already had rather than as a second one.
+  // That is the whole of the report this line answers, so it is said on the screen where
+  // the checkout is picked and not only in the release notes.
   buf += pickFresh
-    ? ` ${C.bold}new PARALLEL session${C.reset} ${C.dim}— fresh conversation in a checkout under ~/${Z}${C.reset}\x1b[K\n\x1b[K\n`
-    : ` ${C.bold}new session${C.reset} ${C.dim}— pick a checkout under ~/${Z}${C.reset}\x1b[K\n\x1b[K\n`;
+    ? ` ${C.bold}new PARALLEL session${C.reset} ${C.dim}— a FRESH conversation, alongside whatever is already in that checkout${C.reset}\x1b[K\n\x1b[K\n`
+    : ` ${C.bold}new session${C.reset} ${C.dim}— RESUMES that checkout's conversation (press ${C.reset}N${C.dim} instead for a fresh one)${C.reset}\x1b[K\n\x1b[K\n`;
   if (checkouts.length === 0) {
     buf += `${C.yellow}  no git checkouts found automatically${C.reset}\x1b[K\n`;
     buf += `${C.dim}  looked in: ${discoverRoots().map(r => r.replace(HOME, '~')).join(', ')}${C.reset}\x1b[K\n`;

@@ -204,6 +204,16 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, n: { type: 'number', description: 'how many recent assistant messages (default 1)' }, json: { type: 'boolean', description: "return the messages as DATA — {ts, role, text} per message plus a next_before cursor — instead of as text. For a machine consumer (bin/fleet-serve's /api/session); a reader wanting the output should leave it off and use n" }, limit: { type: 'number', description: 'with json: how many messages in this page (default 20)' }, before: { type: 'string', description: "with json: page backwards from this message's ts (the previous page's next_before)" } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_spawn', description: "Create a new git worktree and start a fresh parallel session in it (in the background), optionally with an initial task prompt. Defaults to YOUR OWN repo; pass `project` to spawn a worker into ANOTHER project's fleet (name from fleet_projects) — it runs in that project's checkout and the worker lands on that fleet, with that project's default agent. Call fleet_worktrees FIRST (same `project`): if free worktrees exist, spawn refuses unless you reuse one (reuse) or force a new one (force_new).",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, from: { type: 'string', description: 'base ref for a new branch; bases on your LOCAL ref (use "HEAD" for current), falls back to the remote tip only if local is behind' }, prompt: { type: 'string', description: 'initial task to send once it boots' }, model: { type: 'string', description: 'model for the worker (e.g. opus); default = account default' }, reuse: { type: 'string', description: 'start in this EXISTING free worktree (name or path); combine with branch+from to clean & rebranch it in one step' }, force_new: { type: 'boolean', description: 'create a new worktree even if free ones exist' } }, required: ['name'], additionalProperties: false } },
+  // A SECOND SESSION IN THE SAME WORKTREE, which had a CLI and no tool. fleet-companion
+  // is the answer to "give me another session here" and an agent restricted to MCP could
+  // not reach it — an asymmetry that got worse when #89 gave codex and opencode the
+  // tools, because neither has the orchestrate skill that would have mentioned the CLI.
+  //   THE WARNING IS PART OF THE TOOL. bin/fleet-companion's own header says two Claudes
+  // editing the same files can conflict and to keep the companion to questions and
+  // reading; a tool that hands out that footgun without repeating it is worse than no
+  // tool, because the caller has no header to have read.
+  { name: 'fleet_companion', description: "Start a SECOND session in the SAME worktree as an existing one — same files, same branch, a separate and always-fresh conversation. Nothing is branched, copied or checked out. Use it for a second pair of eyes on work in progress: asking questions about a running task, or reading around the change while the first session keeps going. WARNING: the two sessions share one working tree and there is NO locking, so both editing it will conflict and can lose work — keep a companion to questions and reading unless you specifically mean otherwise. For an ISOLATED parallel worker with its own checkout and branch, use fleet_spawn instead.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: "the session whose worktree to join (from fleet_list); omit to use the directory you are standing in" } }, additionalProperties: false } },
   { name: 'fleet_worktrees', description: "Inventory every git worktree of a repo — branch, whether a session is live on it, git state, and which are FREE to reuse. Call this BEFORE fleet_spawn so you reuse an idle worktree instead of proliferating new ones. Defaults to your own repo; pass `project` to inventory ANOTHER project's.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" } }, additionalProperties: false } },
   { name: 'fleet_inbox', description: "Drain the lead's attention feed: worker 'need-you' events (permission / usage-limit / real questions), governor park/resume, and answers relayed back from sessions you asked with fleet_send reply_to that could not message you directly (the usual case now is a direct message in the conversation, so a missing ANSWERED row is not a missing answer). One call replaces polling every sibling — shows only what is new since last call. Pass `project` to drain ANOTHER project's feed instead of your own.",
@@ -370,6 +380,13 @@ export function plan(name, a = {}) {
       // addressed by socket. See invocation()'s note.
       return run('fleet-spawn', args, t, { noSock: true, cwd: t ? checkoutOf(t) : undefined });
     }
+    // Positional session|path, exactly as the CLI takes it, and -s comes from `t` the way
+    // every other targeted command here gets it. With no session it falls through to the
+    // command's own "companion for the worktree you're standing in" — so cwd is set for a
+    // cross-project call, or standing-in-the-wrong-place would pick the caller's tree.
+    case 'fleet_companion':
+      return run('fleet-companion', a.session ? [String(a.session)] : [], t,
+                 { cwd: t ? checkoutOf(t) : undefined });
     case 'fleet_worktrees': return run('fleet-worktrees', [], t, { cwd: t ? checkoutOf(t) : undefined });
     case 'fleet_inbox': return run('fleet-inbox', a.all ? ['--all'] : [], t);
     case 'fleet_answer': {

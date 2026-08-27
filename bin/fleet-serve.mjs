@@ -42,7 +42,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { callToolAsync, projects, BIN } from '../mcp/fleet-dispatch.mjs';
+import { callToolAsync, projects, BIN, TOOLS } from '../mcp/fleet-dispatch.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -621,6 +621,13 @@ function buildArgs(tool, rawArgs) {
   if (!v) {
     if (NOT_YET[tool])
       return { error: `${tool} is not an MCP tool yet — ${NOT_YET[tool]}. Adding it means giving those markers a command that owns them; it is deliberately not done by writing them from here.`, status: 501 };
+    // "UNKNOWN" HAS TO MEAN UNKNOWN. Every name in the MCP tool list used to be either
+    // served here or listed in NOT_YET, so this branch really was a typo — and then
+    // fleet_companion arrived as an MCP tool with no phone surface, which this would have
+    // called unknown to a caller holding the tool in its hand. The two sets are allowed to
+    // differ; the message is not allowed to lie about which kind of no this is.
+    if (TOOLS.some(t => t.name === tool))
+      return { error: `${tool} is an MCP tool, but this daemon does not serve it — no phone surface uses it, so it is reachable from an agent's MCP client and not over HTTP.`, status: 501 };
     return { error: `unknown tool '${tool}' (this server serves: ${Object.keys(TOOLS_ALLOWED).join(', ')})` };
   }
   const a = rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? rawArgs : {};
