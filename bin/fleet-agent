@@ -32,6 +32,19 @@
 #   ready_re    ERE matching "the input box exists, a prompt will land" — fleet-spawn
 #               waits for this before dispatching an initial prompt.
 #   hooks       yes = pushes need-you/done into the fleet event file by itself
+#   mcp         yes = the ghostfleet MCP server is registered for this CLI, so a session
+#               can CALL fleet_spawn/fleet_inbox/… as a tool instead of shelling out
+#   skill       yes = it also gets skill/ghostfleet-orchestrate, i.e. the INSTRUCTIONS for
+#               using those tools. Separate from `mcp` on purpose: since 2026-08-27 codex
+#               and opencode have the tools and neither has the skill, so a caveat composed
+#               from `mcp` alone would say nothing is missing when something is
+#   mcp_self    yes = a tool call with NO `project` argument resolves THIS session's own
+#               fleet. That needs the session's CLAUDE_FLEET_SOCK to reach the MCP server,
+#               which is the agent's choice and not ours: measured 2026-08-27, opencode
+#               passes its environment to the server and codex scrubs it. A third field
+#               rather than a footnote on `mcp`, because "can call the tools" and "knows
+#               which fleet it is in" are different capabilities and codex has only the
+#               first — see the caveat
 #   limit_re    ERE matching "this account is spent until the window rolls over".
 #               Empty/absent = this agent has no such signal. NEVER sufficient on its
 #               own — the caller must also see the session's own usage figure at 100%+,
@@ -180,9 +193,14 @@ agent_field() {
         # than only be watched by it? Measured 2026-08-26, not assumed: install.sh's
         # register_mcp() writes ghostfleet into every profile's .claude.json, and
         # `jq .mcpServers.ghostfleet` finds it in ~/.claude and ~/.claude-personal on this
-        # machine. The orchestrate skill is symlinked into <profile>/skills/ by the same
-        # function. Both are Claude Code features, which is why the other two say no.
+        # machine. All three agents say yes since 2026-08-27; what is still Claude-only is
+        # the skill below.
         mcp)        printf 'yes' ;;
+        # The orchestrate skill is symlinked into <profile>/skills/ by the same function.
+        # A Claude Code feature, and the reason the other two say no even now that they
+        # have the tools.
+        skill)      printf 'yes' ;;
+        mcp_self)   printf 'yes' ;;   # the server is the session's own child and inherits everything
         budget)     printf 'yes' ;;
         resume)     printf 'yes' ;;
         verified)   printf 'yes' ;;
@@ -197,12 +215,19 @@ agent_field() {
         blocked_re) printf '%s' 'Permission required|Allow once' ;;
         ready_re)   printf '%s' 'ctrl\+p commands|OpenCode [0-9]' ;;
         hooks)      printf 'yes' ;;   # permission.asked -> need-you, session.idle -> done
-        # NO, and this is a wiring gap rather than a limitation: `opencode mcp` exists, so
-        # the server COULD be registered — install.sh simply does not, and `opencode mcp
-        # list` on this machine answers "No MCP servers configured" (measured 2026-08-26).
-        # So an opencode master is fully VISIBLE to the fleet and cannot DRIVE it from a
-        # tool call; the fleet-* commands still work from its shell.
-        mcp)        printf 'no'  ;;
+        # YES since 2026-08-27: install.sh writes the server into
+        # ~/.config/opencode/opencode.jsonc (with jq, not via `opencode mcp add` — see the
+        # comment on register_opencode_mcp for the two ways that CLI writes somewhere
+        # else). Measured by calling a tool, not by reading a list.
+        #   With hooks=yes as well, opencode is the one non-claude agent at near parity:
+        # it both sees the fleet and can drive it. What it still lacks is the skill.
+        mcp)        printf 'yes' ;;
+        skill)      printf 'no'  ;;   # ghostfleet-orchestrate is a Claude Code skill
+        # YES, measured by CALLING it: `opencode run` with CLAUDE_FLEET_SOCK exported
+        # answered fleet_list with no arguments, listed the live fleet, and marked the
+        # calling session "(you)". So opencode hands the MCP server its own environment and
+        # the server resolves the fleet exactly as it does under Claude.
+        mcp_self)   printf 'yes' ;;
         budget)     printf 'no'  ;;   # "13.8K (7%)" is CONTEXT, not the 5h account window
         resume)     printf 'yes' ;;   # --continue is cwd-scoped (verified both ways)
         verified)   printf 'yes' ;;
@@ -237,11 +262,29 @@ agent_field() {
         # fleet-spawn silently fell back to its timed send.
         ready_re)   printf '%s' '· [~/]' ;;
         hooks)      printf 'no'  ;;
-        # Same gap as opencode and the same measurement: `codex mcp add` exists, nothing
-        # registers ghostfleet, and `codex mcp list` answers "No MCP servers configured
-        # yet" (2026-08-26). Combined with hooks=no this is the most degraded of the
-        # three — see the `caveat` command, which is what the UIs actually print.
-        mcp)        printf 'no'  ;;
+        # YES since 2026-08-27: install.sh runs `codex mcp add ghostfleet -- node <server>`,
+        # which writes [mcp_servers.ghostfleet] into ~/.codex/config.toml. Proven by CALLING
+        # fleet_list from a real codex session in a scratch fleet, not by reading
+        # `codex mcp list` — a registration that lists and cannot be called is a feature
+        # that did not ship.
+        #   THIS DOES NOT GIVE IT HOOKS, and the two are easy to conflate: MCP is tools,
+        # hooks are push events. codex still writes no inbox row and wakes no master, so it
+        # remains the most degraded of the three — it can now drive the fleet while the
+        # fleet still cannot be told anything by it. See the `caveat` command.
+        mcp)        printf 'yes' ;;
+        skill)      printf 'no'  ;;   # ghostfleet-orchestrate is a Claude Code skill
+        # NO, and this is the half of the wiring that did NOT work — found by calling the
+        # tool rather than by reading `codex mcp list`, which says "enabled" either way.
+        # codex launches an MCP server with a SCRUBBED environment: a real session with
+        # CLAUDE_FLEET_SOCK=cf-mcptest exported called fleet_list, and the server's child
+        # answered `fleet-list: no socket (run inside a fleet session, or pass -s <socket>)`.
+        # `-c shell_environment_policy.inherit=all` does not change it — that policy governs
+        # its shell tool, not its MCP children.
+        #   So a codex session must NAME the project: fleet_list(project: "ghostfleet")
+        # returned the live fleet in the same test, because fleet-dispatch then builds the
+        # child's env from the projects file instead of inheriting one. Everything except
+        # "my own fleet" works; fleet_send's reply_to needs a self too, so it stays out.
+        mcp_self)   printf 'no'  ;;
         budget)     printf 'no'  ;;
         # NO, and the reason is subtle enough to write down. `codex resume --last` IS
         # cwd-scoped and works — verified both directions plus the empty case, using
@@ -340,8 +383,18 @@ case "$cmd" in
     out=""
     [ "$(agent_field "$a" hooks)" = yes ] || \
       out="no fleet events: status is guessed from its pane, and a question it asks may never reach the inbox"
+    # SHRUNK, NOT DELETED, on 2026-08-27. This clause used to read "no fleet_* tools: it
+    # cannot spawn or answer siblings from a tool call" for codex and opencode, and that
+    # became false the moment install.sh registered the MCP server for both — a warning
+    # that is no longer true is worse than none, because the next one is believed less.
+    # What survives is the half that is still true: they got the TOOLS, not the
+    # INSTRUCTIONS, so nothing tells the session the fleet exists or when to look at it.
     [ "$(agent_field "$a" mcp)" = yes ] || \
       out="${out:+$out. }no fleet_* tools: it cannot spawn or answer siblings from a tool call, only by running fleet-* in its own shell"
+    [ "$(agent_field "$a" mcp_self)" = yes ] || \
+      out="${out:+$out. }fleet_* tools must name the project: it starts the MCP server without the session's environment, so a call with no project cannot tell which fleet it is in"
+    [ "$(agent_field "$a" skill)" = yes ] || \
+      out="${out:+$out. }no orchestrate skill: it has the fleet_* tools but not the instructions, so it will not drain the inbox or dispatch siblings unless you tell it to"
     [ "$(agent_field "$a" resume)" = yes ] || \
       out="${out:+$out. }no resume: recycling its pane loses the conversation"
     printf '%s' "$out" ;;

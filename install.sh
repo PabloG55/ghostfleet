@@ -328,6 +328,107 @@ for d in "$HOME"/.claude-*; do                   # personal + any other profiles
   [ -d "$d" ] && is_config_dir "$d" && wire_hooks "$d"
 done
 
+# --- the other two agents' MCP: one registration each, and that is correct ----
+# WHY THIS LOOKS WRONG NEXT TO THE CLAUDE PATH ABOVE, AND IS NOT. register_mcp() runs once
+# PER CLAUDE CONFIG DIR because for Claude a profile IS a config dir — ~/.claude and
+# ~/.claude-personal are different accounts with different settings.json files, so the
+# server has to be named in each. codex keeps ONE global config (~/.codex/config.toml) and
+# opencode likewise (~/.config/opencode/opencode.jsonc); neither has a per-profile
+# equivalent to register into.
+#   That is not a compromise, because the server does not carry a fleet: mcp/fleet-mcp.mjs
+# resolves which fleet and which profile it is serving from the SESSION's environment at
+# runtime — CLAUDE_FLEET_SOCK and CLAUDE_CONFIG_DIR, read per call in
+# mcp/fleet-dispatch.mjs — and agent-here exports both when it starts a session in a pane.
+# So one registration is right for every fleet and every profile at once, and a second one
+# would be the same line written twice.
+#   ...WITH ONE MEASURED EXCEPTION, and it is codex's, not ours. That runtime resolution
+# needs the session's CLAUDE_FLEET_SOCK to reach the server, and opencode passes its
+# environment to an MCP child while codex SCRUBS it (2026-08-27: a codex session with the
+# variable exported called fleet_list and the server's child answered "fleet-list: no
+# socket"; `-c shell_environment_policy.inherit=all` changes nothing, since that policy is
+# about its shell tool). A codex session therefore has to name the project —
+# fleet_list(project: "ghostfleet") works, fleet_list() cannot — which is recorded as the
+# `mcp_self` field in bin/fleet-agent and printed in its caveat. It does not change WHERE
+# to register: there is still exactly one place per CLI to put it.
+#
+# WHAT THIS DOES NOT GIVE THEM, said here because the two are easy to conflate: MCP is
+# TOOLS, hooks are PUSH EVENTS. A codex session can now CALL the fleet; it still tells the
+# fleet nothing. It writes no inbox row, wakes no master, and its status is still read from
+# its pane by fleet-agent's busy_re. "You can see it, you will not be told" is exactly as
+# true after this as before. opencode has both halves (hooks/opencode-fleet-event.js), so
+# opencode reaches near parity; codex does not.
+#   Neither gets the orchestrate skill, which is a Claude Code feature — see
+# skill/ghostfleet-orchestrate and the note in bin/fleet-agent's `skill` field. They have
+# the tools without the instructions for using them.
+register_codex_mcp() {
+  local mcp="$FLEET_HOME/mcp/fleet-mcp.mjs"
+  if ! command -v codex >/dev/null 2>&1; then
+    echo "· codex not installed — skipping its MCP registration (fleet-spawn --agent codex will refuse until it is)"
+    return 0
+  fi
+  # IDEMPOTENT BY MEASUREMENT, not by hope: a second `codex mcp add` of the same name
+  # rewrites that one [mcp_servers.ghostfleet] table and leaves every other key in
+  # config.toml alone (checked with `model`/`approval_policy` present, codex-cli 0.149.1).
+  # So no remove-first dance, and re-running the installer cannot stack up entries.
+  if codex mcp add ghostfleet -- node "$mcp" >/dev/null 2>&1; then
+    echo "✓ registered ghostfleet MCP -> ${CODEX_HOME:-$HOME/.codex}/config.toml (codex, global)"
+  else
+    echo "! could not 'codex mcp add' — run: codex mcp add ghostfleet -- node $mcp"
+  fi
+}
+
+# opencode's OWN CLI IS NOT USED, and this is the same call install.sh already makes for
+# .claude.json when the claude binary is absent: write the config file directly.
+# `opencode mcp add <name> -- <cmd>` exists and is non-interactive (the command after `--`
+# is undocumented in its --help), but measured on opencode 1.18.21 it cannot be pointed at
+# a file:
+#   - with XDG_CONFIG_HOME set it created a directory literally named `undefined` in the
+#     CWD and wrote undefined/<tail>/opencode/opencode.jsonc — inside the repo, in the case
+#     that found this
+#   - with HOME set and XDG unset it ignored HOME and wrote the invoking user's real
+#     ~/.config/opencode/opencode.jsonc
+#   - both exited 0 and printed "added to <path>", one of them naming a path it had not
+#     written
+# A tool that reports success while writing somewhere else cannot be tested without
+# editing the developer's own config, and an installer that shells out to it cannot say
+# whether it worked. jq can, and the entry it writes is byte-shaped like the CLI's own
+# output ({type:"local", command:[…]}), which is where that shape came from.
+register_opencode_mcp() {
+  local mcp="$FLEET_HOME/mcp/fleet-mcp.mjs"
+  if ! command -v opencode >/dev/null 2>&1; then
+    echo "· opencode not installed — skipping its MCP registration"
+    return 0
+  fi
+  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode" cfg t
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "! could not create $dir — opencode gets no fleet_* tools"
+    return 0
+  fi
+  # .jsonc is what opencode writes and what exists on a machine that has run it, but a
+  # plain .json is equally valid to it — so an existing one is edited rather than shadowed
+  # by a second file whose precedence nobody here can state.
+  cfg="$dir/opencode.jsonc"
+  [ -f "$cfg" ] || { [ -f "$dir/opencode.json" ] && cfg="$dir/opencode.json"; }
+  [ -f "$cfg" ] || printf '{\n  "$schema": "https://opencode.ai/config.json"\n}\n' > "$cfg"
+  t="$(mktemp)"
+  # `.mcp = (.mcp // {}) + {…}` REPLACES our key and keeps every other server, which is
+  # what makes a re-install idempotent — the same assignment shape register_mcp() uses on
+  # .claude.json.
+  if jq --arg m "$mcp" '.mcp = ((.mcp // {}) + { ghostfleet: { type: "local", command: ["node", $m] } })' "$cfg" > "$t" 2>/dev/null; then
+    mv "$t" "$cfg"
+    echo "✓ wrote ghostfleet MCP -> $cfg (opencode, global)"
+  else
+    rm -f "$t"
+    # A .jsonc may legally hold comments, which jq cannot read. Refusing to touch it is the
+    # only safe answer — rewriting it would silently delete somebody's comments — so say
+    # exactly what to paste instead of failing quietly.
+    echo "! $cfg is not readable as JSON (a .jsonc may contain comments), so it was left alone."
+    echo "  Add this to it by hand:  \"mcp\": { \"ghostfleet\": { \"type\": \"local\", \"command\": [\"node\", \"$mcp\"] } }"
+  fi
+}
+register_codex_mcp
+register_opencode_mcp
+
 # --- PATH hint ---------------------------------------------------------------
 case ":$PATH:" in
   *":$BIN_DIR:"*) : ;;
@@ -363,6 +464,21 @@ if ! command -v tmux >/dev/null 2>&1; then
     exit 1
   fi
 fi
+
+# --- and the trap that makes a correct install look broken -------------------
+# AN MCP SERVER IS SPAWNED ONCE PER SESSION AND LIVES AS LONG AS IT. Everything above is
+# written to config files, and a session that is already running read those files when it
+# started — so no session open right now gains the fleet_* tools, however many times this
+# is re-run. CLAUDE.md records the live case: a worker called fleet_stop(reclaim: true) on
+# a five-day-old server, which accepted the argument and silently ignored it, because the
+# file on disk was current and the PROCESS was not.
+#   This is in the installer's own output and not only in the docs, because the person who
+# needs it is the person who has just re-run the installer to fix exactly this and is about
+# to conclude it did not work.
+echo
+echo "The fleet_* tools reach NEW sessions only. An MCP server is spawned once per session and"
+echo "lives as long as it, so anything open right now — claude, codex or opencode — keeps the"
+echo "server it started with. Quit and reopen a session to pick these up."
 
 echo
 echo "Done. In a zellij pane:"

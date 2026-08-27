@@ -636,12 +636,21 @@ is "...and does not warn for the default"     "0" \
 rm -rf "$T"
 
 # ── what a non-claude master actually loses ─────────────────────────────────
-# MEASURED 2026-08-26, not assumed, and the UI reads these rather than spelling them:
-# install.sh registers the ghostfleet MCP into every claude profile's .claude.json and
-# symlinks the orchestrate skill beside it, and does neither for the other two — both of
-# which DO support MCP (`opencode mcp`, `codex mcp`), so this is a wiring gap rather than
-# a limitation. codex additionally has no event bridge at all (hooks/fleet-event.sh is
-# Claude's, hooks/opencode-fleet-event.js is opencode's, nothing is codex's).
+# MEASURED, not assumed, and the UI reads these rather than spelling them. The wiring gap
+# #88 recorded is CLOSED as of 2026-08-27: install.sh now registers the ghostfleet MCP for
+# codex (~/.codex/config.toml) and opencode (~/.config/opencode/opencode.jsonc) as well as
+# into every claude profile, so `no fleet_* tools` is no longer true of any of them and
+# these assertions had to move with it — a stale warning is worse than none.
+#
+# WHAT STAYS TRUE, and the three fields keep them apart:
+#   hooks     codex still pushes NO events. MCP is tools; hooks are push events. It can now
+#             drive the fleet and still cannot tell it anything, so its status is read from
+#             its pane and a question it asks may never reach the inbox.
+#   mcp_self  codex starts an MCP server with a scrubbed environment (measured by calling
+#             the tool: fleet_list with no arguments answered "fleet-list: no socket"), so
+#             its sessions must NAME the project. opencode passes its env and does not.
+#   skill     ghostfleet-orchestrate is a Claude Code skill and stays Claude-only, so the
+#             other two have the tools without the instructions for using them.
 group "agent capabilities are declared, not hardcoded"
 fa() { "$ROOT/bin/fleet-agent" "$@"; }
 # A NAMED HELPER, not a `case` inside $( ). macOS ships bash 3.2 and this suite runs on
@@ -650,23 +659,176 @@ fa() { "$ROOT/bin/fleet-agent" "$@"; }
 # and read as a missing declaration rather than as a quoting bug.
 yn() { case "$1" in yes|no) echo 1 ;; *) echo 0 ;; esac; }
 for a in $(fa list); do
-  is "$a declares hooks" "1" "$(yn "$(fa field "$a" hooks)")"
-  is "$a declares mcp"   "1" "$(yn "$(fa field "$a" mcp)")"
+  is "$a declares hooks"    "1" "$(yn "$(fa field "$a" hooks)")"
+  is "$a declares mcp"      "1" "$(yn "$(fa field "$a" mcp)")"
+  is "$a declares mcp_self" "1" "$(yn "$(fa field "$a" mcp_self)")"
+  is "$a declares skill"    "1" "$(yn "$(fa field "$a" skill)")"
 done
+# Every agent has the TOOLS now, which is the change; the fields below are where they differ.
+is "all three have the fleet_* tools" "yes" \
+   "$([ "$(fa field claude mcp)" = yes ] && [ "$(fa field opencode mcp)" = yes ] && [ "$(fa field codex mcp)" = yes ] && echo yes || echo no)"
+is "...and only claude has the skill" "claude" \
+   "$(for a in $(fa list); do [ "$(fa field "$a" skill)" = yes ] && printf '%s' "$a"; done)"
+is "...and only codex needs a project" "codex" \
+   "$(for a in $(fa list); do [ "$(fa field "$a" mcp_self)" = no ] && printf '%s' "$a"; done)"
 # The caveat is COMPOSED from those fields, so a fourth agent gets a warning by declaring
 # them. Both directions, because a composer that always returned text would be as useless
 # as one that never did: the fully-capable agent must come back EMPTY.
 is "claude gives up nothing"          ""  "$(fa caveat claude)"
-is "opencode: no tools, but events"   "1" "$(fa caveat opencode | grep -c 'no fleet_\* tools' || true)"
+# THE CLAUSE THAT HAD TO GO. Both of these said "no fleet_* tools" until the MCP server was
+# registered for them; asserting its ABSENCE is what stops it coming back by accident.
+is "opencode: tools, not a warning"   "0" "$(fa caveat opencode | grep -c 'no fleet_\* tools' || true)"
+is "codex: tools either"              "0" "$(fa caveat codex | grep -c 'no fleet_\* tools' || true)"
 is "...and it is NOT blind to events" "0" "$(fa caveat opencode | grep -c 'no fleet events' || true)"
-is "codex: no events either"          "1" "$(fa caveat codex | grep -c 'no fleet events' || true)"
-is "...nor tools"                     "1" "$(fa caveat codex | grep -c 'no fleet_\* tools' || true)"
+is "codex: no events, still"          "1" "$(fa caveat codex | grep -c 'no fleet events' || true)"
+# What replaced it, per agent — and the other direction on each, since a composer that
+# printed every clause for everybody would pass all the positives above.
+is "codex must name the project"      "1" "$(fa caveat codex | grep -c 'must name the project' || true)"
+is "...and opencode must not"         "0" "$(fa caveat opencode | grep -c 'must name the project' || true)"
+is "opencode: no orchestrate skill"   "1" "$(fa caveat opencode | grep -c 'no orchestrate skill' || true)"
+is "codex: no skill either"           "1" "$(fa caveat codex | grep -c 'no orchestrate skill' || true)"
+is "...and claude keeps its skill"    "0" "$(fa caveat claude | grep -c 'no orchestrate skill' || true)"
 is "an unknown agent is refused"      "1" "$(fa caveat nosuch >/dev/null 2>&1; echo $?)"
 # `installed` is what the pickers offer from, and it is a SUBSET of `list` — an option
 # that cannot run is worse than a missing one, because picking it leaves the next master
 # dead at `exec agent-here` with nothing on screen to say why.
 is "installed is a subset of list" "0" \
    "$(comm -13 <(fa list | sort) <(fa installed | sort) | wc -l | tr -d ' ')"
+
+# ── the MCP server reaches codex and opencode, once, globally ────────────────
+# EXTRACTED AND DRIVEN WITH STUBS, for two reasons that both matter. Neither CLI exists on
+# a CI runner, so a test that shelled out to the real ones would silently become a skip on
+# the only machines that run this suite unattended. And `opencode mcp add` cannot be
+# sandboxed AT ALL — measured 2026-08-27, it ignores both HOME and XDG_CONFIG_HOME and
+# writes the invoking user's real ~/.config/opencode/opencode.jsonc, so a suite that called
+# it would edit the developer's own config on every run (it did, once, while this was being
+# written). install.sh writes that file with jq for exactly that reason, and jq is testable.
+group "install.sh registers the MCP for codex and opencode"
+if ! command -v jq >/dev/null 2>&1; then
+  skip "codex/opencode MCP registration" "jq is not installed"
+else
+  MR="$(cd "$(mktemp -d)" && pwd -P)"
+  # The two functions, lifted out of the installer. bash, not zsh: they use arrays and
+  # `local`, and this file is bash already.
+  sed -n '/^register_codex_mcp() {/,/^}/p'    "$ROOT/install.sh" >  "$MR/lib.sh"
+  sed -n '/^register_opencode_mcp() {/,/^}/p' "$ROOT/install.sh" >> "$MR/lib.sh"
+  is "the codex registrar was extracted"    "1" "$(grep -c '^register_codex_mcp() {' "$MR/lib.sh")"
+  is "the opencode registrar too"           "1" "$(grep -c '^register_opencode_mcp() {' "$MR/lib.sh")"
+  is "...and both parse"                    "ok" "$(bash -n "$MR/lib.sh" 2>&1 && echo ok)"
+  mkdir -p "$MR/bin" "$MR/rt/mcp"
+  printf '#!/bin/sh\nexit 0\n' > "$MR/rt/mcp/fleet-mcp.mjs"
+  # A codex that RECORDS its argv: the thing worth asserting is the exact command line,
+  # because `codex mcp add NAME -- COMMAND` is the syntax and a missing `--` would register
+  # a server with no command and fail only when a session tried to use it.
+  cat > "$MR/bin/codex" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$MR_RAN"
+exit "${MR_CODEX_RC:-0}"
+STUB
+  printf '#!/bin/sh\nexit 0\n' > "$MR/bin/opencode"      # only needs to EXIST
+  chmod +x "$MR/bin/codex" "$MR/bin/opencode"
+  mr() {   # $1=xdg-config-home ... runs one registrar with the stubs in front
+    ( FLEET_HOME="$MR/rt" XDG_CONFIG_HOME="$1" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" \
+      bash -c 'set -uo pipefail; source "$0"; shift; "$@"' "$MR/lib.sh" x "$2" 2>&1 )
+  }
+
+  # ── codex: the argv, and the failure path ─────────────────────────────────
+  : > "$MR/ran"
+  out="$(mr "$MR/x1" register_codex_mcp)"
+  is "codex is registered by the CLI"       "1" "$(printf '%s' "$out" | grep -c 'registered ghostfleet MCP' || true)"
+  is "...with the exact argv"               "mcp add ghostfleet -- node $MR/rt/mcp/fleet-mcp.mjs" "$(cat "$MR/ran")"
+  is "...and the config file is named"      "1" "$(printf '%s' "$out" | grep -c 'config.toml (codex, global)' || true)"
+  # A CLI that fails must not be reported as success — and must say what to run by hand.
+  out="$(MR_CODEX_RC=1 mr "$MR/x1" register_codex_mcp)"
+  is "a failing codex add is not a success" "0" "$(printf '%s' "$out" | grep -c '✓' || true)"
+  is "...and it prints the command"         "1" "$(printf '%s' "$out" | grep -c "codex mcp add ghostfleet -- node $MR/rt/mcp/fleet-mcp.mjs" || true)"
+  # Not installed at all: skip, say so, touch nothing.
+  : > "$MR/ran"
+  # ABSOLUTE BASH. `PATH=/nowhere bash -c …` cannot start: bash applies the assignment
+  # before it looks the command up, so the interpreter is what goes missing and the probe
+  # prints NOTHING — which reads exactly like a function that stayed silent. Same trick the
+  # funnel group uses for node.
+  BASH_ABS="$(command -v bash)"
+  out="$(FLEET_HOME="$MR/rt" MR_RAN="$MR/ran" PATH="$MR/empty" "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_codex_mcp' "$MR/lib.sh" 2>&1)"
+  is "no codex: it says so"                 "1" "$(printf '%s' "$out" | grep -c 'codex not installed' || true)"
+  is "...and runs nothing"                  ""  "$(cat "$MR/ran")"
+
+  # ── opencode: the file we write, and what we refuse to touch ─────────────
+  X="$MR/x2"; mkdir -p "$X/opencode"
+  printf '{\n  "$schema": "https://opencode.ai/config.json",\n  "theme": "keep-me",\n  "mcp": { "other": { "type": "local", "command": ["true"] } }\n}\n' > "$X/opencode/opencode.jsonc"
+  out="$(mr "$X" register_opencode_mcp)"
+  cfg="$X/opencode/opencode.jsonc"
+  is "opencode's config is written"         "1" "$(printf '%s' "$out" | grep -c 'wrote ghostfleet MCP' || true)"
+  # The SHAPE opencode's own CLI produces — type + a command ARRAY — because that is where
+  # this shape came from, and a string command there is silently ignored by opencode.
+  is "...with the shape opencode uses"     '{"type":"local","command":["node","'"$MR"'/rt/mcp/fleet-mcp.mjs"]}' \
+     "$(jq -c '.mcp.ghostfleet' "$cfg")"
+  is "...leaving other servers alone"      '{"type":"local","command":["true"]}' "$(jq -c '.mcp.other' "$cfg")"
+  is "...and unrelated keys"               '"keep-me"' "$(jq -c '.theme' "$cfg")"
+  # IDEMPOTENT: install.sh is re-run routinely, and a second entry under one name is not
+  # even expressible in JSON — but a second RUN could still duplicate the servers around it,
+  # or drop one.
+  #   COUNTED AS WHAT IT MEANS, not as a total. The first cut asserted `.mcp | keys | length`
+  # == 1 and went red with 2, which was the ASSERTION being wrong: the fixture plants an
+  # unrelated server beside ours on purpose, so two keys is the correct answer and a total
+  # cannot say which of them changed. So: exactly one ghostfleet, and the set of OTHER keys
+  # identical to what it was before the run.
+  others_before="$(jq -c '[.mcp | keys[] | select(. != "ghostfleet")] | sort' "$cfg")"
+  out="$(mr "$X" register_opencode_mcp)"
+  is "a second run keeps one ghostfleet"   "1" "$(jq '[.mcp | keys[] | select(. == "ghostfleet")] | length' "$cfg")"
+  is "...and touches no other server"      "$others_before" "$(jq -c '[.mcp | keys[] | select(. != "ghostfleet")] | sort' "$cfg")"
+  is "...leaving that server intact"       '{"type":"local","command":["true"]}' "$(jq -c '.mcp.other' "$cfg")"
+  # ...and the entry it rewrote still points at the runtime, so "idempotent" is not "inert".
+  is "...and ours still points at the server" "$MR/rt/mcp/fleet-mcp.mjs" "$(jq -r '.mcp.ghostfleet.command[1]' "$cfg")"
+  # A FRESH machine has no config at all: one is created rather than the write being skipped.
+  Y="$MR/x3"
+  out="$(mr "$Y" register_opencode_mcp)"
+  is "a missing config is created"          "yes" "$([ -f "$Y/opencode/opencode.jsonc" ] && echo yes || echo no)"
+  is "...with the server in it"             "node" "$(jq -r '.mcp.ghostfleet.command[0]' "$Y/opencode/opencode.jsonc" 2>/dev/null)"
+  is "...and a \$schema, like opencode's"   "1" "$(jq 'has("$schema")' "$Y/opencode/opencode.jsonc" | grep -c true || true)"
+  # A .jsonc MAY hold comments, which jq cannot read. Rewriting it would delete somebody's
+  # comments, so the file is LEFT ALONE and the entry is printed instead. This is the
+  # direction that matters: a silent clobber of a config file is unrecoverable.
+  Z="$MR/x4"; mkdir -p "$Z/opencode"
+  printf '{\n  // my notes\n  "theme": "mine"\n}\n' > "$Z/opencode/opencode.jsonc"
+  before="$(cat "$Z/opencode/opencode.jsonc")"
+  out="$(mr "$Z" register_opencode_mcp)"
+  is "a commented .jsonc is not clobbered"  "$before" "$(cat "$Z/opencode/opencode.jsonc")"
+  is "...and it says what to paste"         "1" "$(printf '%s' "$out" | grep -c '"mcp": { "ghostfleet"' || true)"
+  is "...without claiming success"          "0" "$(printf '%s' "$out" | grep -c '✓' || true)"
+  out="$(FLEET_HOME="$MR/rt" PATH="$MR/empty" "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_opencode_mcp' "$MR/lib.sh" 2>&1)"
+  is "no opencode: it says so"              "1" "$(printf '%s' "$out" | grep -c 'opencode not installed' || true)"
+
+  # ── the installer says the part that makes a correct install look broken ──
+  # An MCP server is spawned once per session and lives as long as it, so nothing already
+  # running gains the tools. That belongs in the OUTPUT, not only in the docs, because the
+  # person who needs it has just re-run the installer to fix exactly this.
+  is "the installer warns about live sessions" "1" \
+     "$(grep -c 'reach NEW sessions only' "$ROOT/install.sh" || true)"
+  is "...and says why (one server per session)" "1" \
+     "$(grep -c 'spawned once per session' "$ROOT/install.sh" || true)"
+  # UNINSTALL COVERS THE NEW HOMES, or removing ghostfleet leaves a server registered
+  # against a runtime that no longer exists.
+  # THE FINDING BELONGS WHERE SOMEONE WILL HIT IT. A codex session that calls fleet_list and
+  # reads "no socket" should find the sentence, not rediscover it — docs/multi-agent-sessions.md
+  # is where the capability matrix lives (#88), so Q4 has to say so rather than still asking.
+  is "the doc answers Q4 rather than asking" "0" \
+     "$(grep -c '^### Q4 (still open)' "$ROOT/docs/multi-agent-sessions.md" || true)"
+  # PRESENCE, NOT A COUNT — the same rule the install-list group states: "does it appear at
+  # all", not "exactly once". Both of these went red at 1-expected-2, because the finding is
+  # deliberately in two places (the degradation summary AND Q4's detail), and pinning a count
+  # would make writing the doc better fail a test about whether the doc says it.
+  is "...and names the codex asymmetry"      "yes" \
+     "$(grep -q 'scrubbed environment' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
+  is "...with the fix a reader needs"        "yes" \
+     "$(grep -q 'fleet_list(project' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
+  is "...and keeps tools and hooks apart"    "yes" \
+     "$(grep -q 'MCP is tools; hooks are push events' "$ROOT/docs/multi-agent-sessions.md" && echo yes || echo no)"
+  is "uninstall covers codex"               "1" "$(grep -c 'codex mcp remove ghostfleet' "$ROOT/README.md" || true)"
+  is "...and opencode's MCP entry"          "1" "$(grep -c 'del(.mcp.ghostfleet)' "$ROOT/README.md" || true)"
+  is "...and opencode's event bridge"       "1" "$(grep -c 'plugin/ghostfleet-event.js' "$ROOT/README.md" || true)"
+  rm -rf "$MR"
+fi
 
 group "projects screen reads the agent column"
 T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a" "$T/b"
