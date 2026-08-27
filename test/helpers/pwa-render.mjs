@@ -1187,7 +1187,13 @@ await until(() => !!btnWith(/n\s+new/), 4000);
 //   IT READS THE SAME STUB the read-aloud section installed, which is why nothing between
 // here and there may install a second one — see the indicator section.
 click(btnWith(/settings/));
-await tick(20);
+// WAITED FOR, NOT SLEPT THROUGH. On the GRID screen sheetSettings() awaits
+// api.getSettings() before it renders anything, so a fixed tick is a race against an HTTP
+// round-trip to the daemon — and when it lost, all seven assertions below reported an
+// empty voice list, which reads as "this device has no voices" rather than as "the sheet
+// had not been drawn yet". Lost once on a macos-latest runner while ubuntu passed the
+// same commit, which is the shape of every timing flake: green everywhere it is quick.
+await until(() => { const v = sheetHost.firstChild; return !!v && v.find(n => n.tag === 'select' && /vpick/.test(n.className)); }, 4000);
 const vset = sheetHost.firstChild;
 is('settings offers a voice picker', true, !!vset && !!vset.find(n => n.tag === 'select' && /vpick/.test(n.className)));
 is('...and says how many voices this device reported', true, !!vset && /3 voices reported by this device/.test(vset.textContent));
