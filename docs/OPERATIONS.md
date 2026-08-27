@@ -214,6 +214,61 @@ MagicDNS name (`tailscale cert <name>.ts.net`) and point `tls` at it in
 open internet; `fleet-serve` refuses to start while it is on, and says so when it cannot
 check.
 
+### Pushing to the phone
+
+The phone can be **notified** rather than polled, for two events only: a session that needs
+you, and a session that has an answer. It is a bell, not a feed — one notification per
+burst, and nothing at all while you are looking at the phone, because a push a backgrounded
+service worker declines to show can cost the subscription on iOS.
+
+Turn it on in the phone's **settings** sheet and approve the browser prompt — that is the
+whole setup. There is no key to generate: the VAPID keypair is written to `serve.json` by
+the first subscription.
+
+```bash
+fleet-serve push                       # detail, keypair, debounce, quiet window, who is subscribed
+fleet-serve push --detail anonymous    # counts only, no names on a lock screen
+fleet-serve push --test                # send one to every subscriber, through the real path
+```
+
+Two requirements that are easy to miss and produce silence rather than an error: the origin
+needs a **real certificate** (Web Push will not subscribe to a self-signed one at all), and
+on iOS the app has to be **installed to the home screen** first. `--test` is the fastest way
+to tell those apart — it encrypts and posts the same payload the watcher does, and prints
+the HTTP status per subscriber rather than a guess.
+
+`--detail anonymous` is worth a thought rather than a default. The payload carries a state
+and a name and never transcript text, but a project name is a client name and a lock screen
+is readable by whoever is holding the phone; anonymous reduces it to a count.
+
+### Photos from the phone, and who deletes them
+
+The camera in the composer uploads the **original** bytes and this machine converts them —
+`sips` on macOS, else `heif-convert`, else `magick`. On a machine with none of the three a
+JPEG or a PNG is stored as it is; a **HEIC is refused**, naming all three, because an
+iPhone's default format is not something an agent can read.
+
+Bytes land under the fleet dir, keyed the way every other per-session file is:
+
+```
+$CLAUDE_FLEET_DIR/attach/<sock>.<session>/<random>.jpg
+```
+
+Deliberately **not** in the worktree: an untracked file there reads as *dirty* to
+`fleet-clean`, `fleet-worktrees` and `fleet-spawn` alike, so one photo would permanently
+remove a worktree from both the reuse pool and the cleanup sweep.
+
+**Two bounds, and they do different jobs.** A single photo over **6 MB** is refused with a
+message that says 6 MB (the request body cap is 9 MB, which is that same 6 MB after base64).
+And each session's directory is held to **24 MB, oldest deleted first**, enforced on every
+upload — `fleet-clean` can only help once a session is dead, and a session that lives for
+weeks and gets a photo a day needs the bound while it is still running.
+
+Nothing serves those bytes back out: there is no read route, which removes a whole class of
+problem by not existing. Filenames are generated here and never the client's, and content is
+sniffed rather than taken on trust — SVG is refused by name, because it is an image that is
+also a script container.
+
 ## Notifications
 
 Notifications post via **`osascript`** by default — reliable on modern macOS since it goes through a
@@ -261,8 +316,18 @@ sideproj	~/projects/sideproj	personal
 
 The 4th column is the project's **default agent** (`claude` · `opencode` · `codex`) —
 inherited by its master and by every session created in it, and pre-selected on the
-grid's agent screen so you don't re-pick it each time. Omit it for `claude`. Set it
-without hand-editing: `fleet-project add <path> --agent opencode`.
+grid's agent screen so you don't re-pick it each time. Omit it for `claude`.
+
+Set it without hand-editing, from any of three places: the command line
+(`fleet-project add <path> --agent opencode` for a new project, `fleet-project agent <name>
+<agent>` for one that already exists, `--none` to put it back to the default), the `AGENT`
+column on the TUI's `,` page (space cycles it), or the phone — on the add-project sheet,
+and on a per-project row in its `, settings` sheet for the projects that already exist.
+**Only agents whose binary is actually installed are offered**, because picking one that
+cannot run leaves the next master dead with nothing on screen to say why, and each option
+carries what choosing it costs — see the capability
+matrix in [docs/multi-agent-sessions.md](multi-agent-sessions.md). Changing it does not
+touch a master that is already running; the next one gets it.
 
 Each project's sessions live on their own socket under that account's config dir, so accounts never
 mix. Work keeps the bare `cf-<project>`; every other profile is namespaced `cf-<profile>-<project>`,

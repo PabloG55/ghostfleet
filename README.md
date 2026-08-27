@@ -39,7 +39,8 @@ own git worktree; you get one screen that shows what every one of them is doing.
 <p align="center">
   <b>Unblock one from anywhere.</b> <sub>The same grid as an installable web app. A session is
   a chat; its <code>pane</code> tab is the real terminal, so a worker stuck on a permission
-  prompt gets an answer from your pocket.</sub>
+  prompt gets an answer from your pocket. It <b>notifies</b> when a worker is blocked or has
+  an answer, and you can <b>send it a photo</b>.</sub>
 </p>
 
 <p align="center">
@@ -77,9 +78,10 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | **[docs/OPERATIONS.md](docs/OPERATIONS.md)** | **The special cases.** Adopting Claude sessions you started by hand, the phone client, notifications, work-vs-personal profiles, staying awake, where a worktree goes, the two ways to register a project, which fleet a worker lands on, and updating Claude Code under a live fleet |
 | **[docs/mobile.md](docs/mobile.md)** · **[web/README.md](web/README.md)** | The phone client — the design argument, and the client itself |
 | **[docs/stack-view.md](docs/stack-view.md)** | Why the stack is nested attaches and not `join-pane`, and what was measured to find out |
-| **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex` and `opencode` workers beside `claude`, and what degrades |
-| **[docs/attachments.md](docs/attachments.md)** | **Research, nothing built.** Can you send a photo from the phone to an agent? What was measured, the cheapest honest design, and the five-minute phone test that gates it |
+| **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex` and `opencode` beside `claude` — the measured capability matrix (hooks, MCP, skill, resume) and what picking a non-default agent costs |
+| **[docs/attachments.md](docs/attachments.md)** | Sending a photo from the phone: what was measured per agent, why the bytes are converted on the Mac rather than the phone, and the two recommendations the build overturned |
 | **[docs/ROADMAP.md](docs/ROADMAP.md)** · **[docs/IDEAS.md](docs/IDEAS.md)** | What is next, and what is only an idea |
+| **[CHANGELOG.md](CHANGELOG.md)** | What changed between releases, and whether it is a reason to upgrade |
 | **[CLAUDE.md](CLAUDE.md)** | For working *on* ghostfleet: how to deploy a change, what the tests cover, and the failure modes that have bitten more than once |
 
 ## Prerequisites
@@ -188,8 +190,9 @@ every Claude config dir it finds (`~/.claude`, `~/.claude-*`, backing each up), 
 guard that stops Claude Code's built-in `EnterWorktree` from walking a fleet session off its own
 checkout (it is *appended* to `PreToolUse`, so hooks you already have there survive); **registers the
 fleet MCP server** into each config dir's `.claude.json` via `claude mcp add -s user` (Claude Code
-reads MCP from `.claude.json`/`.mcp.json`, *not* `settings.json`); installs the
-`ghostfleet-orchestrate` skill; and links the zellij layout. Re-run any time; it's idempotent.
+reads MCP from `.claude.json`/`.mcp.json`, *not* `settings.json`) **and once, globally, for
+`codex` and `opencode`**, which keep one config each and have no per-profile equivalent;
+installs the `ghostfleet-orchestrate` skill; and links the zellij layout. Re-run any time; it's idempotent.
 
 <details>
 <summary>Why the runtime is staged out of the repo (macOS TCC)</summary>
