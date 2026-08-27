@@ -23,7 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HOME = os.homedir();
@@ -1011,13 +1011,18 @@ function newCardLines(selected) {
 // a worktree that exists but has no live session — ⏎ jumps straight to naming one,
 // skipping the checkout picker entirely (the worktree is already identified)
 function freeCardLines(w, selected, idx) {
-  const color = C.grey;
+  const color = w.removing ? C.yellow : C.grey;
   const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
   const title = clip(`─ ${num}${path.basename(w.path)} `, CW);
   const top = `╭${title}${'─'.repeat(Math.max(0, CW - vis(title)))}╮`;
-  const l1 = `│ ${padEndV('· FREE', CW - 2)} │`;
+  // THE CARD, NOT JUST THE BANNER. The removal now outlives the keystroke, so the user can
+  // move around while it runs — and the one thing this card must never say in that minute
+  // is FREE, which is what it said before the state existed. Yellow because it matches the
+  // banner the confirmation used, and "deleting…" because the count of files is the reason
+  // it is slow and the only useful thing to say while waiting.
+  const l1 = `│ ${padEndV(w.removing ? '⋯ REMOVING' : '· FREE', CW - 2)} │`;
   const l2 = `│ ${padEndV(w.branch, CW - 2)} │`;
-  const l3 = `│ ${padEndV(w.task ? `"${w.task}"` : '(no session yet)', CW - 2)} │`;
+  const l3 = `│ ${padEndV(w.removing ? 'deleting the checkout…' : (w.task ? `"${w.task}"` : '(no session yet)'), CW - 2)} │`;
   const bot = `╰${'─'.repeat(CW)}╯`;
   const wrap = (s, isTop) => selected
     ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}`
@@ -1063,7 +1068,20 @@ function collectRepos(roots) {
 // fleet-worktrees/fleet-spawn already trust.
 function worktreesOf(repoPath) {
   try {
-    const out = execFileSync('git', ['-C', repoPath, 'worktree', 'list', '--porcelain'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = execFileSync('git', ['-C', repoPath, 'worktree', 'list', '--porcelain'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    // A REMOVAL THAT DIED HALF WAY leaves the directory gone and the administrative entry
+    // behind, and git reports exactly that: `prunable gitdir file points to non-existent
+    // location` (measured). Pruning THEN, and only then, is what makes "let the child
+    // finish detached" safe to choose over "refuse to exit" — the cost of a grid that dies
+    // mid-removal is one entry that the next read of this list clears. `git worktree prune`
+    // is idempotent and silent with nothing to do, but it is still a write, so it does not
+    // run on every 1.2s poll: no prunable line, no extra process.
+    if (/^prunable /m.test(out)) {
+      try {
+        execFileSync('git', ['-C', repoPath, 'worktree', 'prune'], { stdio: 'ignore' });
+        out = execFileSync('git', ['-C', repoPath, 'worktree', 'list', '--porcelain'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      } catch {}
+    }
     return out.split('\n\n').filter(Boolean).map(block => {
       const wt = /^worktree (.+)$/m.exec(block)?.[1];
       const br = /^branch refs\/heads\/(.+)$/m.exec(block)?.[1];
@@ -1202,7 +1220,12 @@ function freeWorktrees() {
   const liveCwds = tmuxList().map(s => s.cwd).filter(Boolean);
   return all
     .filter(w => w.path !== repo && !liveCwds.some(c => c === w.path || c.startsWith(w.path + '/')))
-    .map(w => ({ path: w.path, branch: w.branch, task: manifestTask(w.path) }));
+    // `removing` rides along with the row rather than being looked up by each renderer,
+    // so the card, --json and --plain cannot disagree about which worktree is busy. A
+    // worktree mid-removal stays IN this list: git still lists it until the removal
+    // finishes, and dropping it here would make the card vanish and reappear — or, worse,
+    // read "· FREE" while its files are being deleted.
+    .map(w => ({ path: w.path, branch: w.branch, task: manifestTask(w.path), removing: isRemoving(w.path) }));
 }
 
 // ── worktrees: create · remove ────────────────────────────────────────────
@@ -1284,25 +1307,145 @@ function createWorktree({ name, branch, from, agent }) {
 // is a working copy, and deleting someone's branch because they tidied up a folder
 // is not a thing you can undo. git refuses on a dirty tree — that refusal is the
 // message the caller shows, and forcing past it is a different, deliberate keystroke.
-function removeWorktree(wtPath, force) {
-  const repo = mainRepo();
-  if (!repo) return { ok: false, msg: 'no git checkout found for this project' };
+// THE MESSAGE, kept as a pure function of (stderr, path) when the removal became
+// asynchronous — because it is the part with the scars and the part a rewrite quietly
+// loses. git names the worktree by its FULL path, which on a real checkout is long enough
+// to push the actual reason off the end of the line (measured: 198 characters for a dirty
+// tree under this scratch dir); the first cut of this showed half a path and nothing else.
+// The card already says WHICH worktree this is, so what belongs here is why git said no,
+// and that `f` is the answer to "use --force".
+//   Pure so the suite can drive it with real git stderr — see the --wt-remove-msg mode at
+// the bottom of this file, which exists for the same reason --plain does.
+function removeFailMsg(stderr, wtPath) {
+  const raw = `${stderr || ''}`.trim().split('\n').filter(Boolean).pop() || 'git worktree remove failed';
+  return raw
+    .replace(/^fatal:\s*/, '')
+    .replaceAll(wtPath, path.basename(wtPath))
+    .replaceAll(HOME, '~')
+    .replace(/,?\s*use --force to delete it\.?$/, '');
+}
+
+// ── a removal in flight is FLEET STATE, not a variable in one process ────────
+// `git worktree remove` on a real checkout — one with a true node_modules rather than the
+// symlink fleet-spawn makes — is tens of thousands of files and takes the better part of a
+// minute. It used to run synchronously here, which froze the whole TUI: the banner said
+// "this can take a minute" and then no key, no poll and no redraw answered for that
+// minute. Reported as "the app froze and then it deleted it".
+//
+// The marker is a FILE, next to .parked/.sched/.agent and namespaced by socket the same
+// way, rather than a Map in this process. Three readers need this state and only one of
+// them is us: this grid's own 1.2s poll, `--json`/`--plain` (which is another process
+// entirely, and how the suite can see it at all), and a SECOND grid on the same fleet —
+// the stack screen and the phone both read this fleet, and a worktree that looks FREE in
+// one pane while it is being deleted in another is exactly the lie the card must not tell.
+// It carries the pid so a marker left behind by a grid that died can be told from a live
+// removal, which is the only way "still going" and "gave up half way" are distinguishable
+// from the outside.
+function removingFile(wtPath) { return path.join(FLEET_DIR, `${SOCK}.${path.basename(wtPath)}.removing`); }
+function markRemoving(wtPath, force) {
   try {
-    execFileSync('git', ['-C', repo, 'worktree', 'remove', ...(force ? ['--force'] : []), wtPath],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    return { ok: true };
-  } catch (e) {
-    const raw = `${e.stderr || ''}`.trim().split('\n').filter(Boolean).pop() || 'git worktree remove failed';
-    // git names the worktree by its FULL path, which on a real checkout is long enough
-    // to push the actual reason off the end of the line — the first cut of this showed
-    // half a path and nothing else. The card already says which worktree this is; what
-    // you need here is why git said no, and that `f` is the answer to "use --force".
-    return { ok: false, msg: raw
-      .replace(/^fatal:\s*/, '')
-      .replaceAll(wtPath, path.basename(wtPath))
-      .replaceAll(HOME, '~')
-      .replace(/,?\s*use --force to delete it\.?$/, '') };
+    fs.mkdirSync(FLEET_DIR, { recursive: true });
+    fs.writeFileSync(removingFile(wtPath), JSON.stringify({ pid: process.pid, at: Math.floor(Date.now() / 1000), force: !!force }));
+  } catch {}
+}
+function clearRemoving(wtPath) { try { fs.unlinkSync(removingFile(wtPath)); } catch {} }
+// A marker whose writer is gone is not a removal, and leaving it would strand the card in
+// a state nothing can clear. `kill(pid, 0)` is the liveness test the rest of the fleet uses
+// (fleet-event.sh's nudge lock does the same with `kill -0`); a marker we cannot parse is
+// treated the same way as a dead one, since a state nobody can read is not a state.
+// A SURVIVING REMOVAL OUTLIVES ITS MARKER'S OWNER, which is the cost of letting the child
+// finish: the file is written here and cleared by the callback, and if the grid leaves
+// first there is no callback. isRemoving() drops a stale marker whenever something asks
+// about that worktree — but once the worktree is gone nothing asks again, so the file would
+// sit in the fleet dir forever. One readdir at startup closes that, and only at startup:
+// buildItems() runs four times a second and this is a write.
+function sweepRemovingMarkers() {
+  let names = [];
+  try { names = fs.readdirSync(FLEET_DIR); } catch { return; }
+  const prefix = `${SOCK}.`;
+  for (const n of names) {
+    if (!n.startsWith(prefix) || !n.endsWith('.removing')) continue;
+    let m;
+    try { m = JSON.parse(fs.readFileSync(path.join(FLEET_DIR, n), 'utf8')); } catch { m = null; }
+    const pid = Number(m && m.pid);
+    if (Number.isInteger(pid) && pid > 0) {
+      try { process.kill(pid, 0); continue; } catch {}      // its grid is still there
+    }
+    try { fs.unlinkSync(path.join(FLEET_DIR, n)); } catch {}
   }
+}
+function isRemoving(wtPath) {
+  let m;
+  try { m = JSON.parse(fs.readFileSync(removingFile(wtPath), 'utf8')); } catch { return false; }
+  const pid = Number(m && m.pid);
+  if (Number.isInteger(pid) && pid > 0) {
+    try { process.kill(pid, 0); return true; } catch {}
+  }
+  clearRemoving(wtPath);                    // stale: its grid is gone
+  return false;
+}
+
+// ── remove a free worktree's checkout, asynchronously ────────────────────────
+// The BRANCH is left alone on purpose: a worktree is a working copy, and deleting
+// someone's branch because they tidied up a folder is not a thing you can undo. git
+// refuses on a dirty tree — that refusal is the message the caller shows, and forcing past
+// it is a different, deliberate keystroke.
+//
+// IT OUTLIVES THE SCREEN, and that took a measurement to get right. Pressing ` while a
+// removal runs must not abort it half way — the user asked for the worktree to go — and the
+// alternative (refusing to leave until git finishes) was rejected because ⌃C and ` have to
+// answer in a TUI, and trapping someone behind a minute of git on a slow disk is worse than
+// anything it protects against.
+//
+// `detached: true` + unref() is NOT enough, which is the part worth writing down: the grid
+// runs in a tmux pane, and when the pane's process exits the pane dies and its session
+// takes a SIGHUP. Measured with a ticking child three ways — detached with pipes, detached
+// with no stdio at all, and detached under `nohup` — the first two stop the instant the
+// pane closes and only the third keeps going. So SIGHUP is the killer and the pipes are
+// irrelevant, which is lucky: stderr stays a pipe and the refusal message still arrives
+// while the grid is alive to show it.
+//   nohup is invoked with an argv array rather than a shell string on purpose. A worktree
+// path can contain a space, and `sh -c "trap '' HUP; exec git …"` would need that path
+// quoted into a shell line — a quoting bug there deletes the wrong directory. If nohup is
+// somehow missing, the removal still runs (see the fallback below) and merely reverts to
+// dying with the pane, which is the recoverable case rather than a broken one.
+//
+// AND IT IS RECOVERABLE ANYWAY, because a SIGKILL is not survivable by any of this: a
+// removal cut off half way leaves the directory gone and the administrative entry behind,
+// git reports that entry as `prunable`, and worktreesOf() prunes exactly then. Re-running a
+// removal whose directory is already gone also succeeds silently (measured, git 2.55). So
+// the worst case is one stale entry and one stale marker, both cleared by the next read.
+function beginRemoveWorktree(wtPath, force, done) {
+  const repo = mainRepo();
+  if (!repo) return done({ ok: false, msg: 'no git checkout found for this project' });
+  markRemoving(wtPath, force);
+  const gitArgv = ['git', '-C', repo, 'worktree', 'remove', ...(force ? ['--force'] : []), wtPath];
+  const opts = { encoding: 'utf8', detached: true };
+  const finished = (err, _so, se) => {
+    clearRemoving(wtPath);
+    done(err ? { ok: false, msg: removeFailMsg(se, wtPath) } : { ok: true });
+  };
+  // THE FALLBACK HAS TO LIVE IN THE CALLBACK, not in a try/catch, and that distinction is
+  // the whole reason this is written out: a missing BINARY is not a thrown error from
+  // execFile, it is an ENOENT delivered asynchronously. A try/catch around it can never
+  // fire, so the first cut of this would have reported "git worktree remove failed" on any
+  // machine without nohup while never running git at all — a removal that silently does
+  // nothing, which is worse than the freeze.
+  //   err.code is the discriminator: a STRING ('ENOENT') for a spawn that never happened, a
+  // NUMBER for a git that ran and exited non-zero. So only the first retries, and a missing
+  // git falls through the retry and is reported.
+  const start = (useNohup) => {
+    const child = useNohup
+      ? execFile('nohup', gitArgv, opts, (err, so, se) => {
+          if (err && err.code === 'ENOENT') { start(false); return; }   // no nohup here
+          finished(err, so, se);
+        })
+      : execFile(gitArgv[0], gitArgv.slice(1), opts, finished);
+    child.unref();
+    return child;
+  };
+  try { return start(true); }
+  catch (e) { clearRemoving(wtPath); return done({ ok: false, msg: removeFailMsg(e.message, wtPath) }); }
 }
 
 function discoverCheckouts() {
@@ -1362,6 +1505,14 @@ let wtSel = 0;               // selected field on that form
 let wtMsg = '';              // what fleet-spawn complained about last time (may be several lines)
 let wtBusy = false;          // mid-create — a fetch + a session boot is not instant
 let confirmWt = null;        // { path, branch, msg, force } — free worktree awaiting removal
+// A removal's OUTCOME, which now arrives after the keystroke that asked for it and so has
+// nowhere else to land. Deliberately NOT named wtMsg: that one belongs to the new-worktree
+// FORM and is rendered as its own multi-line block, and one name for two unrelated messages
+// is how a refusal ends up on the wrong screen. (It was, for one edit — the declaration
+// collided and node refused to parse the file, which is the good version of that mistake.)
+//   Cleared by the next key, the way the stack screen clears sMsg: a refusal has to stay on
+// screen long enough to read, and the 1.2s poll must not wipe it.
+let wtRmMsg = '';
 let labelFor = null;         // session being labelled (from the settings page's 'l')
 let labelInput = '';         // editable, pre-filled with the current label
 
@@ -1445,6 +1596,8 @@ function renderGrid() {
         `${C.red} — f = remove anyway · any key = cancel${C.reset}\x1b[K\n`
       : `${C.red}${C.bold} remove worktree '${path.basename(confirmWt.path)}' (${confirmWt.branch})?${C.reset}` +
         `${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
+  else if (wtRmMsg)
+    buf += `${C.yellow}${C.bold} ${clip(wtRmMsg, Math.max(20, W() - 2))}${C.reset}\x1b[K\n`;
   else
     buf += (jumpStage ? jumpHint() : '') + '\x1b[K\n';
   const nc = cols();
@@ -1797,6 +1950,12 @@ function onKey(key) {
     return;   // swallow other mouse events (release, scroll, non-grid modes, misses)
   }
   if (mode === 'grid') {
+    // The outcome of the last removal is cleared by the NEXT key, not by the poll — the
+    // same rule the stack screen uses for sMsg. The poll redraws four times a second and
+    // would blink a refusal off the screen before it could be read; a key is the signal
+    // that it HAS been read. Set later in this same call, so the press that produces a
+    // message keeps it.
+    if (!confirmWt && !confirmKill) wtRmMsg = '';
     if (gSettings) {                                 // per-session auto-nudge toggles
       const names = cards.map(c => c.name);
       if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') gSettings = false;
@@ -1823,18 +1982,36 @@ function onKey(key) {
       // just refused is a reflex, and this particular one throws away real work.
       const said = confirmWt.force ? (key === 'f' || key === 'F') : (key === 'y' || key === 'Y');
       if (said) {
-        // `git worktree remove` deletes the whole checkout, and on a big repo — one
-        // with a real node_modules rather than the symlink fleet-spawn makes — that is
-        // tens of thousands of files and takes the better part of a minute. It runs
-        // SYNCHRONOUSLY, so the grid cannot redraw or take a key until it returns:
-        // reported as "the app froze for a minute and then it deleted it". Say what is
-        // happening first, the way the new-worktree form does, so the wait reads as
-        // work rather than as a hang.
-        confirmWt = { ...confirmWt, busy: true };
-        render();
-        const res = removeWorktree(confirmWt.path, confirmWt.force);
-        if (res.ok) { confirmWt = null; buildItems(); }
-        else confirmWt = { ...confirmWt, busy: false, msg: res.msg, force: true };
+        // ASYNCHRONOUS, and the prompt closes immediately. This used to run
+        // execFileSync, which on a checkout with a real node_modules meant the whole TUI
+        // stopped for the better part of a minute — no key, no poll, no redraw, with the
+        // "this can take a minute" banner frozen on screen. The card carries the state
+        // now (see freeCardLines), so there is nothing left for a modal to hold on to and
+        // holding one would only stop the user moving while they wait.
+        const wt = confirmWt.path, force = confirmWt.force, wtBranch = confirmWt.branch;
+        confirmWt = null;
+        wtRmMsg = '';
+        beginRemoveWorktree(wt, force, (res) => {
+          // THE REFUSAL REOPENS THE PROMPT, IN FORCE MODE — it does not become a line of
+          // text. git declining a dirty tree is the guard, not an obstacle, and the answer
+          // to it is one keystroke (`f`), so the refusal has to arrive as the thing that
+          // takes that keystroke. The first cut of this async version put the message on
+          // the grid's message line saying "x then f to force", and that was a lie I only
+          // found by driving it: `x` opens a FRESH prompt whose force flag is false, so `f`
+          // there cancels instead of forcing. The two-step is exactly the one this screen
+          // always had — y, refusal, f — it just now arrives a second after the key.
+          //   Not if another prompt has opened in the meantime: a modal that replaces the
+          // one you are reading would take your keystroke for a different worktree.
+          if (!res.ok) {
+            if (!confirmWt && !confirmKill && mode === 'grid' && !gSettings)
+              confirmWt = { path: wt, branch: wtBranch, msg: res.msg, force: true };
+            else
+              wtRmMsg = `${path.basename(wt)}: ${res.msg} — press x on it again to force`;
+          }
+          buildItems();
+          if (mode === 'grid' && !gSettings) render();
+        });
+        buildItems();
       } else confirmWt = null;
       render(); return;
     }
@@ -1875,7 +2052,22 @@ function onKey(key) {
     else if (key === 'x' || key === 'X') {
       const it = items[sel];
       if (it?.card) confirmKill = it.card.name;
-      else if (it?.freeWt) confirmWt = { path: it.freeWt.path, branch: it.freeWt.branch, msg: '', force: false };
+      else if (it?.freeWt) {
+        // ONE REMOVAL PER WORKTREE, AND PARALLEL ACROSS DIFFERENT ONES — decided by
+        // measurement rather than by folklore. Two `git worktree remove` calls at once in
+        // one repo were expected to collide on a lock; on git 2.55 they do not, and neither
+        // does the same worktree twice (6000-file checkouts, both reported ok, no leftover
+        // administrative entries). So parallel is allowed for different worktrees, which is
+        // what someone tidying up three at once actually wants and what the per-card state
+        // now makes legible.
+        //   The SAME worktree is still refused, and not for git's sake: a second press
+        // cannot make it any more removed, it spawns a child whose only possible output is
+        // a confusing message about a worktree that is already going away, and on an older
+        // git than the one measured here it is the case most likely to race. Refusing costs
+        // a keystroke and says why.
+        if (it.freeWt.removing) wtRmMsg = `already removing '${path.basename(it.freeWt.path)}' — it will disappear when git finishes`;
+        else confirmWt = { path: it.freeWt.path, branch: it.freeWt.branch, msg: '', force: false };
+      }
     }
     else if (key === 's' || key === 'S') { const it = items[sel]; if (it?.card) { schedFor = it.card.name; schedInput = ''; mode = 'schedule'; } }
     else if (key === 'p') { const it = items[sel]; if (it?.card) pauseSession(it.card.name); }
@@ -2160,6 +2352,29 @@ if (JSON_OUT) {
   process.exit(0);
 }
 
+// ── the removal refusal, formatted, without a TUI ────────────────────────────
+// `fleet-grid.mjs <sock> --wt-remove-msg <worktree-path>` reads git's stderr on stdin and
+// prints what the grid would put on its message line. It exists for the reason --plain
+// does: the interactive path cannot be driven by the suite, and this is the part of it
+// with the scars — a full path pushing the actual reason off the end of the line. The
+// suite feeds it real `git worktree remove` stderr and asserts the shaped result.
+if (process.argv.includes('--wt-remove-msg')) {
+  const wtPath = process.argv[process.argv.indexOf('--wt-remove-msg') + 1] || '';
+  // readFileSync(0) rather than stdin events, so this is a real early exit like --plain's
+  // and not a callback that lets the TUI start underneath it. An empty stdin is a case
+  // worth having: it is what a git that said nothing at all produces.
+  let raw = '';
+  try { raw = fs.readFileSync(0, 'utf8'); } catch {}
+  // writeSync + exit, NOT process.stdout.write(cb) + exit-in-callback. The callback form
+  // schedules the exit for later, so execution falls straight through this branch into the
+  // TUI bootstrap at the bottom of the file — measured: the first cut of this printed the
+  // message AND opened the alt-screen. The --json path can use the callback because it is
+  // written to be the last thing that happens; this one is not, so it exits synchronously.
+  // One short line, so a partial write is not a concern the way it is for a 200KB payload.
+  try { fs.writeSync(1, removeFailMsg(raw, wtPath) + '\n'); } catch {}
+  process.exit(0);
+}
+
 // ── plain (non-interactive) mode ──────────────────────────────────────────
 if (PLAIN) {
   const rows = gather();
@@ -2180,6 +2395,11 @@ if (PLAIN) {
     ].join(''));
   }
   if (!rows.length) console.log('(no sessions)');
+  // A REMOVAL IN FLIGHT IS STATE, so the path that exists to check the fleet without
+  // drawing it has to show it. One line per worktree and only while it is happening —
+  // this is the output people read to answer "is anything wrong", and a worktree whose
+  // files are being deleted is the difference between "gone" and "going".
+  for (const w of freeWorktrees()) if (w.removing) console.log(`removing: ${path.basename(w.path)}`);
   process.exit(0);
 }
 
@@ -2837,6 +3057,7 @@ if (SCREEN === 'projects') {
   timer = setInterval(() => { sBuild(); sRender(); }, 2500);
 } else {
   process.stdin.on('data', onKey);
+  sweepRemovingMarkers();          // a previous grid may have left one behind (see above)
   buildItems();
   if (!checkJump()) render();
   timer = setInterval(() => { if (mode === 'grid') { buildItems(); if (checkJump()) return; render(); } }, 1200);

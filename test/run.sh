@@ -3215,6 +3215,118 @@ else
   skip "grid tab keys" "tmux or node missing"
 fi
 
+# ── removing a worktree does not freeze the grid ─────────────────────────────
+# THE BUG: removeWorktree() ran execFileSync, and the grid is a single-threaded Node TUI,
+# so a checkout with a real node_modules (tens of thousands of files, the better part of a
+# minute) took the event loop with it. The banner said "this can take a minute" and then no
+# key, no poll and no redraw answered until it finished — reported as "the app froze".
+#
+# What the suite can hold on to is the two things that are not the drawing: the refusal
+# MESSAGE, which is the part with the scars and the part an async rewrite quietly loses,
+# and whether a removal in flight is VISIBLE in the status output. The interactive half is
+# in the PR, driven through a real tmux pane.
+group "worktree removal: the refusal survives, and the wait is visible"
+if ! command -v git >/dev/null 2>&1; then
+  skip "worktree removal" "git is not installed"
+else
+  WR="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$WR/fleet"
+  git -C "$WR" init -q repo 2>/dev/null
+  git -C "$WR/repo" config user.email t@t.invalid 2>/dev/null
+  git -C "$WR/repo" config user.name suite 2>/dev/null
+  git -C "$WR/repo" config commit.gpgsign false 2>/dev/null
+  printf 'x\n' > "$WR/repo/a.txt"
+  git -C "$WR/repo" add -A >/dev/null 2>&1; git -C "$WR/repo" commit -qm first >/dev/null 2>&1
+  if ! git -C "$WR/repo" rev-parse HEAD >/dev/null 2>&1; then
+    skip "worktree removal" "git in this environment cannot commit"
+  else
+    git -C "$WR/repo" worktree add -q "$WR/dirtywt" -b dirtywt 2>/dev/null
+    git -C "$WR/repo" worktree add -q "$WR/cleanwt" -b cleanwt 2>/dev/null
+    printf 'uncommitted\n' >> "$WR/dirtywt/a.txt"
+    wg() { CLAUDE_FLEET_DIR="$WR/fleet" CLAUDE_FLEET_ROOT="$WR/repo" node "$ROOT/bin/fleet-grid.mjs" cfwtsuite "$@"; }
+
+    # ── the refusal, shaped, from REAL git stderr ───────────────────────────
+    # Not a fixture string: the thing that must not drift is what this formatter does to
+    # what GIT actually prints, and git's wording is git's to change.
+    raw="$(git -C "$WR/repo" worktree remove "$WR/dirtywt" 2>&1 >/dev/null)"
+    is "git refuses a dirty worktree"        "1" "$(printf '%s' "$raw" | grep -c 'contains modified or untracked' || true)"
+    is "...naming it by its FULL path"       "1" "$(printf '%s' "$raw" | grep -c "$WR/dirtywt" || true)"
+    msg="$(printf '%s' "$raw" | wg --wt-remove-msg "$WR/dirtywt")"
+    # Every one of these four is a rule the message already had, and the reason each exists
+    # is that the full path pushes the actual reason off the end of a one-line banner.
+    is "the shown message keeps the reason"  "1" "$(printf '%s' "$msg" | grep -c 'contains modified or untracked files' || true)"
+    is "...names the worktree by basename"   "1" "$(printf '%s' "$msg" | grep -c "'dirtywt'" || true)"
+    is "...and NOT by its full path"         "0" "$(printf '%s' "$msg" | grep -c "$WR/dirtywt" || true)"
+    is "...drops git's 'fatal:' prefix"      "0" "$(printf '%s' "$msg" | grep -c 'fatal' || true)"
+    # The card already says `f` is the force key, so the tail is noise that costs the width
+    # the reason needs.
+    is "...drops the 'use --force' tail"     "0" "$(printf '%s' "$msg" | grep -c 'use --force' || true)"
+    is "...and fits a banner"                "yes" "$([ "${#msg}" -le 80 ] && echo yes || echo "no: ${#msg} chars")"
+    # $HOME -> ~, on a path that is NOT the worktree's own (that one is already a basename).
+    home_msg="$(printf "fatal: '%s' is locked by '%s/elsewhere'\n" "$WR/dirtywt" "$HOME" | wg --wt-remove-msg "$WR/dirtywt")"
+    is "a path under HOME shortens to ~"     "1" "$(printf '%s' "$home_msg" | grep -c '~/elsewhere' || true)"
+    is "...and the home path itself is gone" "0" "$(printf '%s' "$home_msg" | grep -c "$HOME/elsewhere" || true)"
+    # git saying nothing at all is a real case: it must not print an empty line.
+    is "silence still says something"        "1" "$(printf '' | wg --wt-remove-msg "$WR/dirtywt" | grep -c 'git worktree remove failed' || true)"
+
+    # ── a removal in flight is VISIBLE, and a dead one is not ───────────────
+    # The marker is a FILE for this reason: the state has to be readable by a process that
+    # is not the grid — this one, --json, another pane's grid. It carries the writer's pid,
+    # so "still going" and "the grid died" are distinguishable from outside.
+    printf '{"pid":%s,"at":1,"force":false}' "$$" > "$WR/fleet/cfwtsuite.cleanwt.removing"
+    is "--plain says a removal is running"   "1" "$(wg --plain | grep -c '^removing: cleanwt' || true)"
+    is "--json flags that worktree"          "true" \
+       "$(wg --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const w=JSON.parse(d).free_worktrees.find(x=>x.path.endsWith("/cleanwt"));console.log(String(w&&w.removing))})')"
+    is "...and not the other one"            "false" \
+       "$(wg --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const w=JSON.parse(d).free_worktrees.find(x=>x.path.endsWith("/dirtywt"));console.log(String(w&&w.removing))})')"
+    # THE OTHER DIRECTION. A marker whose grid is gone is not a removal — reporting one
+    # would strand the card in a state nothing can clear, which is worse than the freeze
+    # this change is fixing.
+    printf '{"pid":999999,"at":1,"force":false}' > "$WR/fleet/cfwtsuite.cleanwt.removing"
+    is "a dead writer is not a removal"      "0" "$(wg --plain | grep -c '^removing:' || true)"
+    is "...and --json agrees"                "false" \
+       "$(wg --json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const w=JSON.parse(d).free_worktrees.find(x=>x.path.endsWith("/cleanwt"));console.log(String(w&&w.removing))})')"
+    is "...and the stale marker is cleared"  "no" \
+       "$([ -e "$WR/fleet/cfwtsuite.cleanwt.removing" ] && echo yes || echo no)"
+
+    # ── a removal cut off half way heals itself ─────────────────────────────
+    # This is what makes "let the child finish, do not trap the user on this screen" a
+    # defensible choice: a SIGKILL leaves the directory gone and the administrative entry
+    # behind, git reports that entry as `prunable`, and ONE read of the status prunes it.
+    rm -rf "$WR/cleanwt"
+    is "git calls the leftover prunable"     "1" "$(git -C "$WR/repo" worktree list --porcelain | grep -c '^prunable ' || true)"
+    wg --json >/dev/null
+    is "...and one status read heals it"     "0" "$(git -C "$WR/repo" worktree list --porcelain | grep -c '^prunable ' || true)"
+    is "...leaving the live worktree alone"  "1" "$(git -C "$WR/repo" worktree list | grep -c dirtywt || true)"
+
+    # ── and it is actually asynchronous ────────────────────────────────────
+    # A structural guard, because the whole point is one call that must not block: the next
+    # person to touch this should have to argue with a red suite before making it sync again.
+    # A REGEX, and it has to exclude the OTHER worktree calls: worktreesOf() legitimately
+    # runs execFileSync for `worktree list` and `worktree prune`, and only `remove` is the
+    # one that takes a minute. Point 5 of the brief in one assertion — this fix is about one
+    # call, not about asyncing the twenty-odd fast reads around it.
+    is "the removal is not execFileSync"     "0" \
+       "$(grep -cE 'execFileSync.*worktree.*remove' "$ROOT/bin/fleet-grid.mjs" || true)"
+    # PRESENCE, not a count: worktreesOf() reads the list twice (once, then again after a
+    # prune), and pinning the number would fail the next time somebody reads it a third
+    # time — which says nothing about whether the removal blocks.
+    is "...the list still is (sync is fine)" "yes" \
+       "$(grep -qE 'execFileSync.*worktree., .list' "$ROOT/bin/fleet-grid.mjs" && echo yes || echo no)"
+    is "...and the removal is execFile"      "1" "$(grep -c "execFile('nohup', gitArgv" "$ROOT/bin/fleet-grid.mjs" || true)"
+    # nohup, and detached: measured — without SIGHUP ignored the child dies the moment the
+    # pane closes, so pressing ` would abort the removal half way.
+    is "...under nohup, so it outlives the pane" "1" "$(grep -c 'nohup is invoked with an argv array' "$ROOT/bin/fleet-grid.mjs" || true)"
+    # Also presence: this file detaches several children (tabs, the stack), and the count
+    # of them is not what this row is about.
+    is "...and detached from the pane"       "yes" \
+       "$(grep -q 'detached: true' "$ROOT/bin/fleet-grid.mjs" && echo yes || echo no)"
+    # The card must never read FREE while its files are being deleted.
+    is "the card has its own removing state" "1" "$(grep -c '⋯ REMOVING' "$ROOT/bin/fleet-grid.mjs" || true)"
+  fi
+  rm -rf "$WR"
+fi
+
 # THE PROJECTS SCREEN KEEPS ITS OWN COPY OF THESE KEYS. That is exactly how ^T went on
 # opening the stack there long after the session grid AND tmux had both moved to ^X —
 # one chord meaning two different things one screen apart, and nothing to notice it.
@@ -4517,7 +4629,13 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "...by absolute path"              "proj-2" "$(JW_ 'require("path").basename(o.free_worktrees[0].path)')"
   is "...with its branch"               "feat/x" "$(JW_ 'o.free_worktrees[0].branch')"
   is "...and what it was spun up for"   "teach the phone to read the grid" "$(JW_ 'o.free_worktrees[0].task')"
-  is "free_worktrees keys"              "path branch task" "$(JW_ 'Object.keys(o.free_worktrees[0]).join(" ")')"
+  # `removing` joined this row when the removal became asynchronous: a worktree whose files
+  # are being deleted must not read as free to ANY client, and this wire format is what the
+  # phone renders from. Pinned as the whole key set on purpose — that is what caught the
+  # addition and made it a decision instead of a drift.
+  is "free_worktrees keys"              "path branch task removing" "$(JW_ 'Object.keys(o.free_worktrees[0]).join(" ")')"
+  is "...and `removing` is a boolean"   "boolean" "$(JW_ 'typeof o.free_worktrees[0].removing')"
+  is "...false when nothing is going on" "false"  "$(JW_ 'String(o.free_worktrees[0].removing)')"
   # both directions: the two trees that must NOT be offered
   is "the main checkout is not free"    "0" "$(JW_ 'o.free_worktrees.filter(w=>w.path.endsWith("/proj")).length')"
   is "an occupied worktree is not free" "0" "$(JW_ 'o.free_worktrees.filter(w=>w.path.endsWith("/proj-3")).length')"
