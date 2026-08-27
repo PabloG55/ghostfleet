@@ -83,14 +83,14 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 39a4de18d8eb
+// CLIENT-HASH: 7033faf5d37a
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
 // v21 puts the project's agent on a screen: the 4th column of the projects list has been
 // read by bin/ghostfleet for a while and nothing could WRITE it, so "the master cant be
 // selected as open code or codex" had no answer that was not a text editor.
-const VERSION = 'ghostfleet-v21';
+const VERSION = 'ghostfleet-v22';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

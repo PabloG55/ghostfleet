@@ -216,4 +216,64 @@ is('a schedule outranks both', `@${PWA.clockLabel(1700000000)}`,
    rightOf({ ...base, status: 'limit', age: 3300, limit_at: '10:20pm', sched: { at: 1700000000 } }));
 is('no age, nothing on the right', '◆ working', rightOf({ ...base, status: 'working', age: null }));
 
+// ── 6. the PR number, and the width it must not cost ──────────────────────
+// A working session's most useful single fact was only ever visible inside `msg` — the
+// last assistant line — so the number came and went as the agent talked. It comes off
+// fleet-merged's cache now and lives in l2's right-hand slot.
+//   BOTH DIRECTIONS, and the second one is the point: a card with no PR has to render
+// EXACTLY as it did before this field existed, byte for byte, on both renderers. `pr:
+// null` and no `pr` key at all are both that case — the wire sends null, and an older
+// daemon sends neither.
+const l2of = c => PWA.cardLines(c, false, 0).lines[2];
+const wide = { ...base, status: 'working', age: 41, folder: 'api-fix', branch: 'feat/rate-limit' };
+is('a card with no PR is unchanged by the field', l2of(wide), l2of({ ...wide, pr: null }));
+is('...and an absent key is the same case', l2of(wide), l2of({ ...wide, pr: undefined }));
+is('...and it still shows worktree · branch', '│ api-fix · feat/rate-limit    │', l2of(wide));
+// ...and the direction that must FAIL if the feature is gone. Asserted as the WHOLE line,
+// so the row reads as a picture of the card rather than as a claim about a substring — and
+// so a number that appeared in the right slot but ate the wrong characters is still red.
+is('a card with a PR shows it',
+   '│ api-fix · feat/rate-l… #1184 │', l2of({ ...wide, pr: '1184' }));
+is('...five digits too, because #1184 is four',
+   '│ api-fix · feat/rate-… #12345 │', l2of({ ...wide, pr: '12345' }));
+// A non-claude agent already owns this slot. Both are shown, and the NUMBER IS RIGHTMOST
+// so it sits in the same column on every card — scanning nine of them for a number is the
+// whole point, and one that shifts left on the single codex card is one you hunt for.
+is('the agent keeps its place beside it',
+   '│ api-fix · feat/… codex #1184 │', l2of({ ...wide, pr: '1184', agent: 'codex' }));
+is('...with the number last, always', true,
+   l2of({ ...wide, pr: '1184', agent: 'opencode' }).trimEnd().endsWith('#1184 │'));
+is('...and an agent with no PR is untouched',
+   '│ api-fix · feat/rate-l… codex │', l2of({ ...wide, agent: 'codex' }));
+
+// THE GEOMETRY, AT THE WIDTH THAT ACTUALLY SHIPS AND WITH THE WORST STRINGS THERE ARE.
+// A detector or a label measured at full width that goes blind in a narrow one is the most
+// repeated bug in this repo, so every combination is measured rather than argued: the card
+// is CW+2 columns on every line, and the NUMBER is never the thing that gets clipped —
+// twoCol truncates its left argument, and the number is on the right.
+const LONGEST = { ...wide, folder: 'worktree-with-a-long-name',
+                  branch: 'feat/rate-limit-per-key-and-a-very-long-tail' };
+for (const [what, c] of [
+  ['nothing extra',            LONGEST],
+  ['a 4-digit PR',             { ...LONGEST, pr: '1184' }],
+  ['a 5-digit PR',             { ...LONGEST, pr: '12345' }],
+  ['a 5-digit PR + codex',     { ...LONGEST, pr: '12345', agent: 'codex' }],
+  ['a 5-digit PR + opencode',  { ...LONGEST, pr: '12345', agent: 'opencode' }],
+  ['a label as well',          { ...LONGEST, pr: '12345', agent: 'opencode', label: 'ship the retry work end to end' }],
+]) {
+  const lines = PWA.cardLines(c, false, 0).lines;
+  is(`every line is CW+2 with ${what}`, String(PWA.CW + 2), [...new Set(lines.map(PWA.vis))].join(','));
+  if (c.pr) is(`...and the PR survives ${what}`, true, lines[2].includes('#' + c.pr));
+  // ...and the TUI agrees, which is what keeps the two renderers one design.
+  is(`...TUI and phone agree with ${what}`,
+     TUI.cardLines(toTui(c), false, 0).map(strip).join('\n'), lines.join('\n'));
+}
+
+// twoCol's OWN floor, well below anything the card can reach, recorded so a future width
+// change has a number to check against rather than a habit. 28 is what l2 passes.
+const floorFor = r => { for (let w = 40; w >= 2; w--) if (PWA.vis(PWA.twoCol(LONGEST.branch, r, w)) > w) return w; return 0; };
+is('#12345 holds down to a 8-column slot', 7, floorFor('#12345'));
+is('...and `opencode #12345` down to 17', 16, floorFor('opencode #12345'));
+is('...against the 28 the card gives it', 28, PWA.CW - 2);
+
 console.log(rows.join('\n'));

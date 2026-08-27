@@ -117,7 +117,39 @@ export function cardLines(card, selected = false, idx = -1) {
   const l2text = card.label
     ? `${card.name} · ${card.folder}`
     : (card.branch && card.branch !== card.folder ? `${card.folder} · ${card.branch}` : (card.folder || card.branch));
-  const l2 = `│ ${padEndV(twoCol(l2text, card.agent && card.agent !== 'claude' ? card.agent : '', CW - 2), CW - 2)} │`;
+  // ── the right-hand slot of l2: the agent, the PR number, or both ─────────
+  // WHERE THE PR NUMBER GOES, and why not the other two places it could have gone.
+  //
+  //   NOT THE TITLE. It is the most prominent line, but it is also the one with no spare
+  //   room by construction: the filler dashes it would sit in are whatever a long session
+  //   name did not use, so the number would appear on short names and vanish on long ones.
+  //   It already carries the 1-9 jump digit too, and a card reading `1 api-fix … #1184` puts
+  //   two unrelated numbers on one line, one of which is a keystroke.
+  //   NOT l1. `twoCol` there clips the LEFT, and the left is the status label — the single
+  //   most important word on the card. '⚠ interrupted' (13) plus '#12345 busy 12m' (15) plus
+  //   a gap is 29 in a 28-column line, so the thing that would give way is the status.
+  //   So: l2's right slot, which is empty on every card running the default agent.
+  //
+  // PRECEDENCE WHEN BOTH ARE PRESENT: show both. They are 5-8 characters each, neither is
+  // derivable from anything else on the grid, and dropping either loses a whole fact. What
+  // gives way is the left side — `worktree · branch` — and that is the right thing to lose,
+  // because the PR number is a shorter name for the same identity the branch is there to
+  // carry. A card that says `#1184` has told you which branch it is.
+  //
+  // THE NUMBER IS RIGHTMOST, always, so it lands in the same column whether or not an agent
+  // shares the slot. Scanning nine cards for a PR number is the thing this exists for, and
+  // a number that moves left by six characters on the one codex card is a number you have
+  // to hunt for.
+  //
+  // MEASURED, because a label measured at full width going blind in a narrow one is this
+  // repo's most repeated bug. Every line stays exactly CW+2 in all of it — `#12345` alone,
+  // with `opencode` beside it, and against a 44-character branch — because twoCol clips the
+  // LEFT and the number is on the right, so the number is the one thing that cannot be
+  // truncated. twoCol's own floor is below anything reachable here: with `#12345` it holds
+  // down to a 8-column slot and with `opencode #12345` down to 17, against the 28 this uses.
+  const agentTag = card.agent && card.agent !== 'claude' ? card.agent : '';
+  const prTag = card.pr ? `#${card.pr}` : '';
+  const l2 = `│ ${padEndV(twoCol(l2text, [agentTag, prTag].filter(Boolean).join(' '), CW - 2), CW - 2)} │`;
   const l3 = `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
   const bot = `╰${'─'.repeat(CW)}╯`;
   return { lines: [top, l1, l2, l3, bot], color: meta.color, selected, kind: 'card', status: card.status };

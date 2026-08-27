@@ -117,6 +117,7 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
       "folder":    "acme-api",            // the main checkout — the repo itself
       "branch":    "main",
       "agent":     "claude",
+      "pr":        null,                  // PR number for `branch`, as a string; null = unknown
       "msg":       "Dispatched the retry work to api-fix. Waiting on its PR.",
       "age":       95,
       "attached":  true,
@@ -131,6 +132,10 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
       "folder":    "api-fix",             // the worktree it sits in
       "branch":    "feat/retry-backoff",
       "agent":     "claude",              // rendered only when != claude
+      "pr":        "1184",                // string, not a number: an identifier, never arithmetic.
+                                          // null means "could not tell" — no gh, no network, no
+                                          // PR and a cold cache all land there, and the card
+                                          // then draws exactly as it did before the field
       "msg":       "All three cases covered. Running the full suite before I touch the migration.",
       "age":       41,                    // seconds; null when unknown
       "attached":  false,
@@ -363,7 +368,7 @@ produces:
 ```
 ╭─ 2 api-fix ──────────────────╮
 │ ◆ working           busy 41s │   status · age (or ↻ reset, or @scheduled)
-│ api-fix · feat/retry-backo…  │   worktree · branch  (+ agent when != claude)
+│ api-fix · feat/retry… #1184  │   worktree · branch  (+ agent when != claude, then the PR)
 │ "All three cases covered. R… │   last message
 ╰──────────────────────────────╯
 ```

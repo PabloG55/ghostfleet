@@ -2037,12 +2037,12 @@ else
 fi
 
 # ── 4a11. a session's display label ──────────────────────────────────────────
-# The card can be titled something a human chose ("PR 964 doc verify") while the tmux
+# The card can be titled something a human chose ("PR 1184 retry work") while the tmux
 # session keeps its name. That separation is the whole point: fleet-rename exists to keep
 # "worktree basename == session name" true, and fleet-send, the Ctrl-f chord, the
 # dev-stack slot and the manifest all key off it. So the label is cosmetic BY
 # CONSTRUCTION — a marker file only the card reads — and the card still shows the session
-# name, because a card titled "PR 964 doc verify" otherwise tells you nothing to type.
+# name, because a card titled "PR 1184 retry work" otherwise tells you nothing to type.
 group "session display label"
 if command -v tmux >/dev/null 2>&1; then
   LB="$(mktemp -d)"; mkdir -p "$LB/fleet"
@@ -2081,8 +2081,8 @@ if command -v tmux >/dev/null 2>&1; then
   # THE WORKTREE LEADS. It was invisible before: a session in "wt-folder" on branch
   # "feature-x" showed only the branch, so the card never said which checkout it was.
   is "worktree first, branch appended"        "wt-folder · feature-x" "$(cardline2)"
-  printf 'PR 964 doc verify\n' > "$LB/fleet/cflbltest.w1.label"
-  is "labelled: the card is the label"        "PR 964 doc verify" "$(cardtitle)"
+  printf 'PR 1184 retry work\n' > "$LB/fleet/cflbltest.w1.label"
+  is "labelled: the card is the label"        "PR 1184 retry work" "$(cardtitle)"
   # the session name must stay ON the card — it is what fleet-send takes
   is "...and the session name is still shown" "1" "$(cardline2 | grep -c '^w1 · ' || true)"
   # and the branch is NOT repeated when it says the same thing as the folder
@@ -3698,7 +3698,11 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   echo scratch > "$FD/repo/.worktrees/messy/dirty.txt"
   # Seed fleet-merged's cache instead of reaching the network: same code path, same
   # file, no gh call. Only feat/shipped has a merged PR.
-  printf 'feat/shipped\n' > "$FD/fleet/merged.acme_widget"
+  #   THE RECORD IS THREE FIELDS NOW — branch, number, state — and the file is `prs.<slug>`
+  # rather than `merged.<slug>`, so an old cache holding bare branch names can never be
+  # read as a new one. \x1f and not a tab: this is our own wire (CLAUDE.md), and a tab
+  # would collapse an empty field and shift the state left into the number.
+  printf 'feat/shipped\x1f77\x1fMERGED\n' > "$FD/fleet/prs.acme_widget"
   tmux -L cffin kill-server 2>/dev/null; tmux -L cffin new-session -d -s master 'sleep 60' 2>/dev/null
   wt() { ( cd "$FD/repo" && env -u TMUX CLAUDE_FLEET_DIR="$FD/fleet" CLAUDE_FLEET_SOCK=cffin \
            "$ROOT/bin/fleet-worktrees" "$@" 2>/dev/null ); }
@@ -3727,11 +3731,142 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "...and still surfaces it"      "1" "$(ib | grep -c 'finished & reclaimable (1)' || true)"
   is "...naming the worktree"        "1" "$(ib | grep -c 'shipped  (feat/shipped)' || true)"
   # and says nothing when there is nothing — a footer that always fires is noise
-  rm -f "$FD/fleet/merged.acme_widget"
+  rm -f "$FD/fleet/prs.acme_widget"
   is "silent when nothing is finished" "0" "$(ib | grep -c 'finished & reclaimable' || true)"
   tmux -L cffin kill-server 2>/dev/null; rm -rf "$FD"
 else
   skip "finished worktrees" "git or tmux missing"
+fi
+
+# ── 4d10b. fleet-merged also answers "which PR", without ever blocking ───────
+# The PR number is the most useful single fact about a working session and it was only ever
+# visible inside `msg` — the last assistant line, which changes every turn, so a card built
+# from that text would gain and lose the number as the agent talks and would show a stray
+# issue reference as a PR. So the grid asks fleet-merged, which already resolves branches to
+# PR state and already caches.
+#
+# THE OLD OUTPUT SHAPE IS LOAD-BEARING and is asserted first. fleet-clean and
+# fleet-worktrees both match it with `grep -qxF` — an exact whole-line test — so a
+# three-field record on stdout would silently make `is_merged` false everywhere: fleet-clean
+# would refuse everything (safe, but the feature stops) and fleet-worktrees would call
+# finished work FREE. The group above covers those two through their own commands; these
+# rows pin the format they depend on.
+#
+# AND --cached CANNOT REACH gh. That is not a convention here, it is the property that lets
+# a 2-second repaint carry this at all — so it is measured with an exploding gh on PATH that
+# leaves a marker file behind, at TTL=0 where the fresh path would certainly fetch.
+group "fleet-merged: numbers as well as names, and never a network call in a draw"
+if command -v git >/dev/null 2>&1; then
+  MG="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$MG/fleet" "$MG/bin" "$MG/repo"
+  git -C "$MG/repo" init -q 2>/dev/null
+  git -C "$MG/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null
+  printf 'feat/live\x1f1184\x1fOPEN\nfix/csv\x1f1170\x1fMERGED\nfeat/old\x1f99\x1fMERGED\n' \
+    > "$MG/fleet/prs.acme_widget"
+  fm() { env CLAUDE_FLEET_DIR="$MG/fleet" "$ROOT/bin/fleet-merged" "$@" "$MG/repo" 2>/dev/null; }
+  # 1. the shape fleet-clean and fleet-worktrees read: MERGED branch names, one per line,
+  #    and NOTHING else on the line.
+  is "default output is bare branch names" "fix/csv feat/old" "$(fm | tr '\n' ' ' | sed 's/ *$//')"
+  is "...with no open PR among them"       "0" "$(fm | grep -c 'feat/live' || true)"
+  is "...and no second field to confuse grep -qxF" "0" "$(fm | grep -c "$(printf '\037')" || true)"
+  # 2. the new shape, for the card
+  is "--prs carries branch, number and state" "feat/live|1184|OPEN" \
+     "$(fm --prs | head -1 | tr '\037' '|')"
+  is "...for every PR it knows, open and merged" "3" "$(fm --prs | grep -c . || true)"
+  # 3. --cached is sealed. The marker proves the exploder actually runs, so the negative
+  #    result above it is a measurement and not an absence of evidence.
+  printf '#!/bin/sh\ntouch %s/GH_RAN\nexit 1\n' "$MG" > "$MG/bin/gh"; chmod +x "$MG/bin/gh"
+  cfm() { env PATH="$MG/bin:$PATH" CLAUDE_FLEET_DIR="$MG/fleet" CLAUDE_FLEET_MERGED_TTL=0 \
+          "$ROOT/bin/fleet-merged" "$@" "$MG/repo" 2>/dev/null; }
+  rm -f "$MG/GH_RAN"
+  is "--cached still answers with a stale cache" "3" "$(cfm --cached --prs | grep -c . || true)"
+  is "...without calling gh"                     "no" "$([ -f "$MG/GH_RAN" ] && echo yes || echo no)"
+  cfm --prs >/dev/null
+  is "...and the fresh path DOES call it"        "yes" "$([ -f "$MG/GH_RAN" ] && echo yes || echo no)"
+  is "...leaving the cache undamaged"            "3" "$(fm --prs | grep -c . || true)"
+  is "...and no lock behind it"                  "0" "$(find "$MG/fleet" -name '*.lock' 2>/dev/null | grep -c . || true)"
+  # 4. no cache at all is the cold-start case a card must survive: nothing, exit 0.
+  rm -f "$MG/fleet/prs.acme_widget"
+  is "no cache: --cached prints nothing"   ""  "$(cfm --cached --prs)"
+  is "...and still exits 0"               "0" "$(cfm --cached --prs >/dev/null; echo $?)"
+  is "...and never called gh for it"      "no" "$(rm -f "$MG/GH_RAN"; cfm --cached --prs >/dev/null; [ -f "$MG/GH_RAN" ] && echo yes || echo no)"
+  # 5. no gh on PATH AT ALL is the other cold case — the one the header promises about.
+  is "no gh: --cached is still fine"      "0" \
+     "$(env -i PATH=/usr/bin:/bin HOME="$HOME" CLAUDE_FLEET_DIR="$MG/fleet" \
+        "$ROOT/bin/fleet-merged" --cached --prs "$MG/repo" >/dev/null 2>&1; echo $?)"
+  rm -rf "$MG"
+else
+  skip "fleet-merged numbers" "git missing"
+fi
+
+# ── 4d10c. the number on the card, and the one it must NOT put there ─────────
+# FOUND ON THE LIVE FLEET, an hour after the feature worked. The lead's card sits on `main`
+# and came back as #1, because the very first PR in this repo was opened FROM main INTO
+# main — so the grid labelled the lead with a stranger's four-year-old PR. A session on the
+# default branch has no PR of its own by construction, and any row keyed on that branch is a
+# fork's PR or somebody's early mistake.
+#   Driven through the REAL grid rather than through a unit of it: the rule lives in
+# prNumbers(), which reads fleet-merged's cache and asks git for the default branch, and a
+# test of either half separately would not have caught this. Both directions in one fixture —
+# the same cache holds a row for `main` AND one for the feature branch, so "it dropped the
+# right one" is the assertion rather than "it dropped something".
+group "the card carries the PR number, and not the default branch's"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  PC="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$PC/fleet"
+  git init -q -b main "$PC/repo" 2>/dev/null
+  git -C "$PC/repo" config user.email t@t; git -C "$PC/repo" config user.name t
+  : > "$PC/repo/f"; git -C "$PC/repo" add -A; git -C "$PC/repo" commit -qm i 2>/dev/null
+  git -C "$PC/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null
+  # The local ref the rule reads. Set by hand because `git clone` is what normally writes
+  # it and there is no clone here — and its ABSENCE is covered by the fallback rows below.
+  git -C "$PC/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main 2>/dev/null
+  git -C "$PC/repo" worktree add -q "$PC/repo/.worktrees/feat" -b feat/thing 2>/dev/null
+  # main HAS a row in the cache, and that is the point: the rule has to drop it while
+  # keeping the feature branch beside it.
+  printf 'main\x1f1\x1fMERGED\nfeat/thing\x1f1184\x1fOPEN\n' > "$PC/fleet/prs.acme_widget"
+  tmux -L cfprnum kill-server 2>/dev/null
+  tmux -L cfprnum new-session -d -s master -c "$PC/repo" 'sleep 60' 2>/dev/null
+  tmux -L cfprnum new-session -d -s feat -c "$PC/repo/.worktrees/feat" 'sleep 60' 2>/dev/null
+  sleep 0.8
+  PJ="$PC/out.json"
+  env -u TMUX CLAUDE_FLEET_DIR="$PC/fleet" CLAUDE_FLEET_ROOT="$PC/repo" CLAUDE_FLEET_SCOPE=pn \
+    node "$ROOT/bin/fleet-grid.mjs" cfprnum --json > "$PJ" 2>/dev/null
+  PQ() { node -e '
+    const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+    const c=o.cards.find(c=>c.name===process.argv[2]);
+    console.log(c===undefined?"(no card)":JSON.stringify(c.pr));
+  ' "$PJ" "$1"; }
+  is "the feature branch gets its number"   '"1184"' "$(PQ feat)"
+  is "...and the default branch does NOT"   "null"   "$(PQ master)"
+  # ...and the card DRAWS it, which is a different claim from the wire carrying it.
+  is "...and the card shows it"             "1" \
+     "$(node -e '
+        const fs=require("fs");
+        import(process.argv[2]).then(g=>{
+          const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+          const c=o.cards.find(c=>c.name==="feat");
+          console.log(g.cardLines(c,false,0).lines[2].includes("#1184")?1:0);
+        });
+     ' "$PJ" "$ROOT/web/grid.js" 2>/dev/null)"
+  # THE FALLBACK, with origin/HEAD deleted: `main` must still be dropped, or a repo that was
+  # never cloned (every repo made by `git init`, including this one before the line above)
+  # puts a stranger's PR on its lead card.
+  git -C "$PC/repo" symbolic-ref -d refs/remotes/origin/HEAD 2>/dev/null
+  env -u TMUX CLAUDE_FLEET_DIR="$PC/fleet" CLAUDE_FLEET_ROOT="$PC/repo" CLAUDE_FLEET_SCOPE=pn \
+    node "$ROOT/bin/fleet-grid.mjs" cfprnum --json > "$PJ" 2>/dev/null
+  is "with no origin/HEAD, main is still dropped" "null"   "$(PQ master)"
+  is "...and the feature branch is untouched"     '"1184"' "$(PQ feat)"
+  # AND THE COLD CASE: no cache at all is what a fresh machine, a private repo or a missing
+  # gh all look like, and the answer must be a card with no number rather than a hole.
+  rm -f "$PC/fleet/prs.acme_widget"
+  env -u TMUX CLAUDE_FLEET_DIR="$PC/fleet" CLAUDE_FLEET_ROOT="$PC/repo" CLAUDE_FLEET_SCOPE=pn \
+    node "$ROOT/bin/fleet-grid.mjs" cfprnum --json > "$PJ" 2>/dev/null
+  is "no cache: the number is null, not missing" "null" "$(PQ feat)"
+  is "...and the card still has its key"         "0" \
+     "$(node -e 'const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+                 console.log(o.cards.filter(c=>!("pr" in c)).length)' "$PJ")"
+  tmux -L cfprnum kill-server 2>/dev/null; rm -rf "$PC"
+else
+  skip "the card carries the PR number" "git, tmux or node missing"
 fi
 
 # ── 4d11. "this worker is done" in one command ───────────────────────────────
@@ -3753,7 +3888,7 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   git -C "$RC/repo" worktree add -q "$RC/repo/.worktrees/shipped" -b feat/shipped 2>/dev/null
   git -C "$RC/repo" worktree add -q "$RC/repo/.worktrees/wip"     -b feat/wip 2>/dev/null
   echo scratch > "$RC/repo/.worktrees/wip/dirty.txt"
-  printf 'feat/shipped\n' > "$RC/fleet/merged.acme_widget"     # seed, so no gh call
+  printf 'feat/shipped\x1f77\x1fMERGED\n' > "$RC/fleet/prs.acme_widget"   # seed, so no gh call
   tmux -L cfrecl kill-server 2>/dev/null
   tmux -L cfrecl new-session -d -s master  -c "$RC/repo" 'sleep 90' 2>/dev/null
   tmux -L cfrecl new-session -d -s shipped -c "$RC/repo/.worktrees/shipped" 'sleep 90' 2>/dev/null
@@ -3965,7 +4100,7 @@ if command -v tmux >/dev/null 2>&1; then
     fs.writeFileSync(path.join(F,SOCK+".w-parked.parked"),"");
     // An agent with no adapter entry, so it has no validated busy detector -> unknown.
     fs.writeFileSync(path.join(F,SOCK+".w-unknown.agent"),"gemini\n");
-    fs.writeFileSync(path.join(F,SOCK+".w-long.label"),"PR 964 doc verify\n");
+    fs.writeFileSync(path.join(F,SOCK+".w-long.label"),"PR 1184 retry work\n");
     // A real scheduled prompt, plus the pid the marker carries and the wire must not.
     fs.writeFileSync(path.join(F,SOCK+".w-ready.sched"),JSON.stringify(
       {at:now+3600,msg:"pick the review back up and push if the suite is green",pid:4242}));
@@ -4039,7 +4174,7 @@ if command -v tmux >/dev/null 2>&1; then
   # names, so a rename is a broken client, not a refactor.
   is "top-level keys"    "project profile counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
   is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
-  is "card keys"         "name label status folder branch agent msg age attached sched limit_at lead" \
+  is "card keys"         "name label status folder branch agent pr msg age attached sched limit_at lead" \
                          "$(J 'Object.keys(o.cards[0]).join(" ")')"
   is "project is the fleet's project" "demoproj" "$(J 'o.project')"
   is "profile is the profile"         "work"     "$(J 'o.profile')"
@@ -4075,6 +4210,15 @@ if command -v tmux >/dev/null 2>&1; then
   # branch is '' rather than null when git cannot answer, because that is what the card
   # is handed; pinned so a client knows which falsy value to expect.
   is "an unknown branch is empty"     '""'     "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-fresh").branch)')"
+  # `pr` IS PRESENT AND NULL HERE, and both halves are the assertion. There is no gh in this
+  # fixture and no cache behind it, which is the commonest real case — no network, a cold
+  # cache, a repo with no PRs — and the contract for it is "the key is there, the value is
+  # null, the card draws as it did before the field existed". J prints '' for a MISSING key
+  # and 'null' for a null one, so this row tells those two apart: an omitted field would
+  # read as false in a client exactly like a real null, right up until it did not.
+  is "pr is null when nothing can tell" "null" "$(C w-working pr)"
+  is "...on every card, never omitted"  "0" \
+     "$(J 'o.cards.filter(c=>!("pr" in c)).length')"
 
   # ── invariant 1: all nine statuses, no collapsing ─────────────────────────
   # The vocabulary comes from the STATUS table the TUI renders from, so dropping or
@@ -4148,7 +4292,7 @@ if command -v tmux >/dev/null 2>&1; then
   # card titled by a label" instead of two. A MISSING key would read as empty here too,
   # which is why the assertions go through JSON.stringify.
   is "label: null when unlabelled"   "null" "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-ready").label)')"
-  is "label: the string when set"    "PR 964 doc verify" "$(C w-long label)"
+  is "label: the string when set"    "PR 1184 retry work" "$(C w-long label)"
   is "sched: null when none"         "null" "$(J 'JSON.stringify(o.cards.find(c=>c.name==="w-idle").sched)')"
   # The time AND the prompt, and NOT the pid. `@10:30pm` with no way to say what will be
   # sent is half a fact, and on a phone you cannot step into the session and look; the pid

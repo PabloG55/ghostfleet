@@ -395,7 +395,7 @@ is('...and activate drops the old ones', true, /if \(k !== VERSION\) await cache
 // ── 3. the fixtures are §4, exactly ───────────────────────────────────────
 const NINE = ['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted'];
 const TOP = ['project', 'profile', 'counts', 'cards', 'free_worktrees'].sort().join(',');
-const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead'].sort().join(',');
+const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'pr', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead'].sort().join(',');
 const COUNTS = ['need_you', 'working', 'ready', 'parked', 'limit', 'interrupted'].sort().join(',');
 const fixDir = path.join(WEB, 'fixtures');
 const grids = fs.readdirSync(fixDir).filter(f => /^grid-.*\.json$/.test(f)).sort();
