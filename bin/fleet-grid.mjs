@@ -690,6 +690,9 @@ function gather({ lead = false } = {}) {
   ];
   const fleet = fleetBySlot();
   const nowS = Math.floor(Date.now() / 1000);
+  // Once, here, and not inside the map: see prNumbers() for why nine calls is the wrong
+  // shape and for why this one cannot reach the network.
+  const prs = prNumbers();
   return sessions.map(s => {
     const st = fleet.get(s.name);
     const agent = agentOf(s.name);
@@ -721,7 +724,11 @@ function gather({ lead = false } = {}) {
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
     return { name: s.name, cwd: s.cwd || '', folder, branch, status, age, msg: lastAssistant(transcript),
-             attached: s.attached, sched, agent, label: labelOf(s.name), limitAt, lead: isLead(s.name) };
+             attached: s.attached, sched, agent, label: labelOf(s.name), limitAt, lead: isLead(s.name),
+             // null, never 0 or '': the card tests it for truth, and a PR numbered 0 does
+             // not exist while an empty string would read as "no PR" in one place and as a
+             // present-but-blank field in another.
+             pr: (branch && prs.get(branch)) || null };
   });
 }
 
@@ -941,18 +948,50 @@ function cardLines(card, selected, idx) {
   // This line leads with the WORKTREE, because that is the thing the session is sitting
   // in and it was previously invisible: it read `branch || folder`, so the branch always
   // won and the folder only showed when there wasn't one. On a fleet where the two
-  // differ — a session in `doc-verify-stepper` on branch `acord-document-verification` —
+  // differ — a session in `cache-keys` on branch `feat/invoice-cache-warming` —
   // the card named the branch and never said which checkout it was.
   // The branch is appended only when it ADDS something; on most worktrees it is the same
   // string twice, and the line is 28 columns.
   //   With a label on top, the session name takes the second slot instead: it is what
-  // fleet-send/fleet-read address, and a card titled "PR 964 doc verify" that doesn't
+  // fleet-send/fleet-read address, and a card titled "PR 1184 retry work" that doesn't
   // show it tells you nothing about what to type.
   const l2text = card.label
     ? `${card.name} · ${card.folder}`
     : (card.branch && card.branch !== card.folder ? `${card.folder} · ${card.branch}` : (card.folder || card.branch));
+  // ── the right-hand slot of l2: the agent, the PR number, or both ─────────
+  // WHERE THE PR NUMBER GOES, and why not the other two places it could have gone.
+  //
+  //   NOT THE TITLE. It is the most prominent line, but it is also the one with no spare
+  //   room by construction: the filler dashes it would sit in are whatever a long session
+  //   name did not use, so the number would appear on short names and vanish on long ones.
+  //   It already carries the 1-9 jump digit too, and a card reading `1 api-fix … #1184` puts
+  //   two unrelated numbers on one line, one of which is a keystroke.
+  //   NOT l1. `twoCol` there clips the LEFT, and the left is the status label — the single
+  //   most important word on the card. '⚠ interrupted' (13) plus '#12345 busy 12m' (15) plus
+  //   a gap is 29 in a 28-column line, so the thing that would give way is the status.
+  //   So: l2's right slot, which is empty on every card running the default agent.
+  //
+  // PRECEDENCE WHEN BOTH ARE PRESENT: show both. They are 5-8 characters each, neither is
+  // derivable from anything else on the grid, and dropping either loses a whole fact. What
+  // gives way is the left side — `worktree · branch` — and that is the right thing to lose,
+  // because the PR number is a shorter name for the same identity the branch is there to
+  // carry. A card that says `#1184` has told you which branch it is.
+  //
+  // THE NUMBER IS RIGHTMOST, always, so it lands in the same column whether or not an agent
+  // shares the slot. Scanning nine cards for a PR number is the thing this exists for, and
+  // a number that moves left by six characters on the one codex card is a number you have
+  // to hunt for.
+  //
+  // MEASURED, because a label measured at full width going blind in a narrow one is this
+  // repo's most repeated bug. Every line stays exactly CW+2 in all of it — `#12345` alone,
+  // with `opencode` beside it, and against a 44-character branch — because twoCol clips the
+  // LEFT and the number is on the right, so the number is the one thing that cannot be
+  // truncated. twoCol's own floor is below anything reachable here: with `#12345` it holds
+  // down to a 8-column slot and with `opencode #12345` down to 17, against the 28 this uses.
+  const agentTag = card.agent && card.agent !== 'claude' ? card.agent : '';
+  const prTag = card.pr ? `#${card.pr}` : '';
   const l2 = `│ ${padEndV(twoCol(l2text,
-                                 card.agent && card.agent !== 'claude' ? card.agent : '', CW - 2), CW - 2)} │`;
+                                 [agentTag, prTag].filter(Boolean).join(' '), CW - 2), CW - 2)} │`;
   const l3 = `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
   const bot = `╰${'─'.repeat(CW)}╯`;
   const wrap = (s, isTop) => selected
@@ -1068,6 +1107,78 @@ function mainRepo() {
     return kids.find(isMainCheckout) || kids[0] || root;
   } catch {}
   return root;
+}
+// ── the PR number for a branch, and the two things it must never do ──────
+// A working session's most useful single fact is its PR number, and until now the only
+// place it appeared was inside `msg` — the last assistant line, which changes every turn.
+// A card built from that text would GAIN AND LOSE the number as the agent talks, and would
+// show a stray issue reference as a PR. So the number comes from the same place
+// fleet-merged already resolves branches to PR state.
+//
+// IT NEVER TOUCHES THE NETWORK ON THIS PATH. `--cached` is pure file I/O and refuses to
+// fetch (see fleet-merged's header); this runs inside a repaint that happens every couple of
+// seconds, and a gh call there would freeze the TUI on a slow connection. A card with no
+// number is a fine card. A grid that hangs is not.
+//   ONE CALL PER DRAW, not one per card: measured at 20.5 ms a call, nine cards would add
+// 184 ms to every repaint and one adds 20 ms. mainRepo() is what it asks about, because that
+// function already answers "which checkout is this project" for the container-directory
+// layout where CLAUDE_FLEET_ROOT is not itself a repo.
+//
+// AND SOMETHING HAS TO FILL THE CACHE, or --cached answers nothing forever and the feature
+// only works after you happen to visit the worktrees screen. So a refresh is fired into the
+// BACKGROUND — detached, unref'd, never awaited — and `--warm` takes a lock, so firing one
+// per repaint still causes exactly one gh call. Throttled here as well, because the honest
+// cost of a no-op warm is still a process.
+const MERGED_BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-merged');
+let prWarmedAt = 0;
+// THE DEFAULT BRANCH IS NOT A PR, and this is not a hypothetical. Found on the live fleet
+// the hour this was written: the lead's card sits on `main` and came back as #1, because the
+// very first PR in this repo was opened FROM main INTO main. A session on the default branch
+// has no PR of its own by construction — you do not open one from main to main — so any row
+// keyed on it is a fork's PR or somebody's early mistake, and neither is this session's work.
+//   Read from `refs/remotes/origin/HEAD`, which is a local ref: no network, and it is right
+// on a repo whose default is neither of the two obvious names. Memoised because it does not
+// change while the grid is open. When it is not set locally the fallback drops both common
+// names rather than guessing one, since a wrong number on a lead card is the failure being
+// fixed and an absent one is merely the status quo.
+const defBranchCache = new Map();
+function defaultBranch(repo) {
+  if (defBranchCache.has(repo)) return defBranchCache.get(repo);
+  let out = '';
+  try {
+    out = execFileSync('git', ['-C', repo, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().replace(/^origin\//, '');
+  } catch {}
+  defBranchCache.set(repo, out);
+  return out;
+}
+function prNumbers() {
+  const repo = mainRepo();
+  if (!repo) return new Map();
+  const m = new Map();
+  try {
+    const out = execFileSync(MERGED_BIN, ['--prs', '--cached', repo],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 });
+    for (const line of out.split('\n')) {
+      const [branch, num, state] = line.split('\x1f');
+      // A number is required and is checked as DIGITS: a truncated cache line would
+      // otherwise put NaN on a card, and `#NaN` is worse than no number at all.
+      if (!branch || !/^\d+$/.test(num || '')) continue;
+      // OPEN WINS. A branch can carry more than one PR over its life — reopened, or a
+      // branch name reused — and the one a live session is working on is the open one.
+      if (!m.has(branch) || state === 'OPEN') m.set(branch, num);
+    }
+    // Dropped from the MAP rather than checked at the call site, so "this branch's own PR"
+    // has one definition and the card does not have to know the rule.
+    const def = defaultBranch(repo);
+    if (def) m.delete(def); else { m.delete('main'); m.delete('master'); }
+  } catch { /* no gh, no cache, no repo: no numbers, and the card is unchanged */ }
+  const now = Date.now();
+  if (now - prWarmedAt > 60000) {
+    prWarmedAt = now;
+    try { spawn(MERGED_BIN, ['--warm', repo], { detached: true, stdio: 'ignore' }).unref(); } catch {}
+  }
+  return m;
 }
 // what a worktree was spun up for, from the manifest fleet-spawn writes (keyed by path)
 function manifestTask(wtPath) {
@@ -1434,7 +1545,7 @@ function renderAgentPick() {
 // one adapter field, cached per (agent,field) — used only to annotate the picker
 const _fieldCache = new Map();
 function agentField(agent, field) {
-  const k = `${agent} ${field}`;
+  const k = `${agent}\u0000${field}`;
   if (_fieldCache.has(k)) return _fieldCache.get(k);
   let v = '';
   for (const bin of [SIBLING_AGENT_BIN, 'fleet-agent']) {
@@ -2009,6 +2120,12 @@ if (JSON_OUT) {
       folder:   c.folder,
       branch:   c.branch,
       agent:    c.agent,          // the card only draws it when != claude
+      // The PR number for this session's branch, as a STRING and null when unknown.
+      // A string because it is an identifier that gets printed, never arithmetic — and
+      // because JSON's number type invites a client to reformat it. Unknown is null and
+      // means exactly "we could not tell": no gh, no network, no PR and a cold cache all
+      // land here, and the card draws as it did before this field existed.
+      pr:       c.pr || null,
       msg:      c.msg,
       age:      c.age,            // seconds since the last transcript write; null = unknown
       attached: c.attached,
