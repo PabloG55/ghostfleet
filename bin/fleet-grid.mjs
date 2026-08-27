@@ -1043,8 +1043,8 @@ function worktreesOf(repoPath) {
 //   Step 2 is enter_master's `$PROJECT_ROOT/$PROJECT` only when CLAUDE_FLEET_SCOPE is
 //   set. Every real caller sets it (bin/ghostfleet, fleet-serve.mjs, fleet-dispatch.mjs),
 //   but the fallback is SOCKET-derived, and a non-work profile's socket carries its
-//   profile: `cf-personal-galapass` gives Z = `personal-galapass`, which is not a
-//   directory anybody has. So a hand-run `fleet-grid.mjs cf-personal-galapass --plain`
+//   profile: `cf-personal-scratch` gives Z = `personal-scratch`, which is not a
+//   directory anybody has. So a hand-run `fleet-grid.mjs cf-personal-scratch --plain`
 //   — the documented way to exercise this path without the TUI — skips step 2 entirely
 //   and lands on step 3. That is exactly why step 3 has to be safe rather than lucky.
 //
@@ -1958,7 +1958,7 @@ if (process.argv.includes('--order')) {
 //
 // UNTRUNCATED, which is the point. --plain clips the branch to 26 columns and the
 // message to 44 and pads both, so a consumer of that text cannot tell an elided branch
-// from a real one — `feat/coi-policy-beside-fo…` is a plausible branch name. These are
+// from a real one — `feat/rate-limit-beside-fo…` is a plausible branch name. These are
 // the values as computed.
 //
 // Checked BEFORE --plain so `--json --plain` gives the parseable one: a caller that

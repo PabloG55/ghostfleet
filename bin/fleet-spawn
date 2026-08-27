@@ -140,14 +140,14 @@ PARENT="$(dirname "$GITROOT")"
 #
 # A sibling was the only layout for a long time and is still the default. But a repo
 # that runs its own worktree doctrine puts them somewhere specific, and ours fought it:
-# superkey has a PreToolUse guard that denies any edit whose PATH does not contain
+# one repo here has a PreToolUse guard that denies any edit whose PATH does not contain
 # `.worktrees/` — it never asks git whether the path IS a worktree. So a sibling (a real,
 # isolated worktree on its own branch) was refused as "the shared main checkout", the
 # agent dutifully obeyed the instructions in the refusal, and created a SECOND worktree
 # nested inside the first:
 #
-#     ~/proj/broker-unassign                            <- ours, where the session sits
-#     ~/proj/broker-unassign/.worktrees/broker-unassign <- the guard's, where edits land
+#     ~/proj/cache-keys                        <- ours, where the session sits
+#     ~/proj/cache-keys/.worktrees/cache-keys  <- the guard's, where edits land
 #
 # Two worktrees and a full dependency install per task, with the session attached to the
 # one that wasn't being edited. Nineteen worktrees across four clones, fifteen of them
@@ -254,7 +254,7 @@ EOF
 free_worktrees() {                     # "<label> (<branch>, clean)" per free worktree
   # ASK fleet-worktrees, which looks across every clone under the project root. That is
   # the whole reason this guard was toothless here: a project can be several independent
-  # clones (superkey is four), each owning its own worktrees, and this function only ever
+  # clones (one project here is four), each owning its own worktrees, and this function only ever
   # walked the one clone it was standing in — 2 visible, 17 invisible. So it found nothing
   # free and dutifully created another, nineteen times over.
   #   Sharing the enumerator also keeps "free" meaning one thing: two definitions of it
@@ -418,7 +418,7 @@ link_node_modules() {
 # --- resolve the worktree: reuse an existing free one, or create a new one -----
 if [ -n "$REUSE" ]; then
   # ACCEPT WHAT fleet-worktrees PRINTS. That list now spans every clone under the project
-  # root, and its labels are project-root-relative (`superkey-1/.worktrees/foo`), so the
+  # root, and its labels are project-root-relative (`acme-api-1/.worktrees/foo`), so the
   # old "$PARENT/$REUSE" + "is it a worktree of THIS repo" pair rejected most of what a
   # lead had just been told it could reuse. Resolve the label, then ask GIT — in the
   # target — whether it really is a linked worktree; that is exact and does not care which
@@ -570,9 +570,9 @@ fi
 # exit status nobody read. tmux's own error was never suppressed — it went to stderr all
 # along — but it was immediately contradicted by "started '<name>' in <worktree>", and a
 # reader believes the last thing they are told. So every failure mode looked exactly like
-# a success: `fleet-spawn coi-query --reuse coi-query` printed the whole success block,
+# a success: `fleet-spawn cache-keys --reuse cache-keys` printed the whole success block,
 # including the promise to dispatch the initial prompt, and no session ever existed.
-# Reported twice from cf-superkey after three re-runs, because nothing in the output
+# Reported twice from one project after three re-runs, because nothing in the output
 # distinguished the attempts.
 #
 # It reaches further than a wrong message. bin/fleet-grid.mjs's createWorktree parses this
@@ -647,7 +647,7 @@ spawn_failed() {                   # <headline> <cause> [<hint>] — and NAME wh
   "tmux said why on the line above this one."
 sleep 0.5
 # THE AGENT BINARY FIRST, because that is what it has actually been. Measured on
-# cf-superkey: a claude-code package update left bin/ holding only a WINDOWS claude.exe
+# a live fleet: a claude-code package update left bin/ holding only a WINDOWS claude.exe
 # for ~20 minutes, so every spawn in that window died on "cannot execute binary file" —
 # tmux made the session, the exec failed, the session went. docs/OPERATIONS.md ("Updating
 # Claude Code under a fleet") already documents the neighbouring case, an exec landing on

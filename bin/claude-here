@@ -37,13 +37,13 @@ MODEL=()
 # --- this session's PEER NAME ------------------------------------------------
 # Claude Code registers every session under a name that other sessions can address
 # directly (SendMessage / ListAgents, ~/.claude/sessions/<pid>.json). Left alone it
-# DERIVES that name from the directory — broker-agencies-61, getmycoi-06 — which no
+# DERIVES that name from the directory — billing-svc-61, acme-api-06 — which no
 # fleet command knows and no agent can be told to reply to, so the one reliable way
 # an answer could come back was unusable.
 #
 # Name it what the fleet ALREADY calls this session: <project>/<session>, byte-for-byte
 # the address hooks/fleet-event.sh prints in an inbox row and fleet-send computes for
-# --reply-to. That makes "answer superkey/master" an address that resolves instead of a
+# --reply-to. That makes "answer acme-api/master" an address that resolves instead of a
 # label. It also dodges a collision the derived scheme doesn't have to think about:
 # every project has a session called `master`, and a bare `master` would make Claude
 # Code rename ours out from under the address.
@@ -57,7 +57,7 @@ _peer_sess="${CLAUDE_FLEET_SLOT:-}"
 # An explicit --name is the caller's business, and a second one is an argument error, so
 # don't add ours. Both spellings, since only one of them looks like a flag.
 for _arg in "$@"; do case "$_arg" in --name|--name=*) _peer_proj="" ;; esac; done
-# HALF A NAME IS WORSE THAN NO NAME: "/master" or "superkey/" is a name nothing can
+# HALF A NAME IS WORSE THAN NO NAME: "/master" or "acme-api/" is a name nothing can
 # address, and passing it would still displace the derived one — so a session with only
 # half its identity in the environment goes unnamed and keeps today's behaviour. Same
 # for a name that isn't spellable back at us (fleet-send refuses those characters in a

@@ -393,8 +393,8 @@ see every clone's worktrees. Two things to know when you do:
   `enter_master` and `checkoutOf()`; `mainRepo()` uses `CLAUDE_FLEET_SCOPE` for that
   step, which every real caller sets to the project name — but its fallback is derived
   from the *socket*, and a non-work profile's socket carries its profile
-  (`cf-personal-galapass` → `personal-galapass`), which is nobody's directory. So a
-  hand-run `fleet-grid.mjs cf-personal-galapass --plain` skips step 2.
+  (`cf-personal-scratch` → `personal-scratch`), which is nobody's directory. So a
+  hand-run `fleet-grid.mjs cf-personal-scratch --plain` skips step 2.
 - **Step 3 is a scan, and a linked worktree is a repo too.** It used to return whatever
   `readdir` yielded first, and on a container root that was a *worktree* — whereupon
   `fleet-spawn`, run there, correctly refused to spawn a worker from inside a worktree,

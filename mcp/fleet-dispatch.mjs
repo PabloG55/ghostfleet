@@ -147,7 +147,7 @@ function invocation(p) {
   // Claude session (its own values happen to be the fleet it is in) and wrong the moment
   // anything targets another project: fleet-grid.mjs derives `project` from
   // CLAUDE_FLEET_SCOPE and its free-worktree list from CLAUDE_FLEET_ROOT, so querying
-  // cf-superkey from a ghostfleet session answered `project: "ghostfleet"` and listed
+  // another project's socket from a ghostfleet session answered `project: "ghostfleet"` and listed
   // GHOSTFLEET's worktrees as free. On a phone that is a "reuse this free worktree"
   // button naming a checkout in the wrong repo, with fleet_spawn behind it — wrong data
   // driving a destructive verb, not a cosmetic mislabel. A long-lived daemon is the

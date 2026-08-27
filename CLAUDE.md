@@ -13,6 +13,34 @@
   reliability fixes where the cause was non-obvious, and that reasoning is the part
   worth keeping.
 
+## Comments and docs
+
+Same doctrine as a commit message, with one extra constraint: **this repo is public.**
+
+- **Cite the failure, never the project.** A comment earns its place by the *shape* of
+  the failure, and the shape is what carries forward: "reported twice from one project
+  after three re-runs" teaches exactly as much as naming the project, and "it went
+  unnoticed twice" is the whole of what "twice" was doing there. Counts, sizes, timings
+  and orderings all survive the substitution — they are the measurement. A name is not.
+- **A comment that needs a real name to make sense is describing the wrong thing.**
+  The name is standing in for a structure that should be spelled out instead: that the
+  root held four independent clones, that a derived peer name looked like `name-06`,
+  that two products shared a container directory. Write the structure and the comment
+  gets *better* — the reader learns the layout rather than a label they cannot see.
+- **Use the placeholder vocabulary the demo data already uses** — `acme-api`,
+  `acme-web`, `toolbox`, `billing-svc`, `scratch` and the session names beside them in
+  `web/fixtures/`. They read as examples rather than as redactions, and a reader can
+  match them against a fleet they can actually open. Never `REDACTED`, never `xxx`: a
+  comment full of holes is worse than a generic example, because the hole tells you
+  something was removed and still teaches nothing.
+- **This is checked, not remembered.** `test/run.sh`'s name sweep reads every tracked
+  file and refuses a set of names it stores as one-way digests, so the check itself
+  publishes nothing. Adding one to the sweep needs no name in the diff either — the
+  helper prints the digest to paste. And the docs have a second, stronger guard:
+  `test/helpers/doc-fixtures.mjs` asks whether an example name is *in* `web/fixtures/`
+  rather than whether it is on a list, which catches the next name and not just the
+  last one. Prefer that shape wherever it fits.
+
 ## Deploying a change
 
 The repo is the source; the **runtime** that actually executes is the staged copy at
