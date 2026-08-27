@@ -86,7 +86,10 @@ const sibling = t => { const m = /^(.+)-\d+$/.exec(t); return !!m && PROJECTS.ha
 // all things that already exist somewhere checkable, and a hand-written list of them
 // would go stale the first time one is renamed. The literals below are the remainder:
 // vocabulary from tmux and CSS that happens to be kebab-cased.
-const VOCAB = new Set(['capture-pane', 'font-weight', 'apple-touch-icon']);
+const VOCAB = new Set(['capture-pane', 'font-weight', 'apple-touch-icon',
+  // ...and the web platform's own kebab-cased vocabulary, which reads exactly like a
+  // session name to a rule that can only judge by shape.
+  'aria-label', 'aria-pressed', 'prefers-reduced-motion', 'safe-area-inset', 'overflow-wrap']);
 for (const d of ['bin', 'hooks', 'mcp', 'test/helpers', 'web', 'docs', 'tmux', 'layouts', 'scripts']) {
   let entries = [];
   try { entries = fs.readdirSync(path.join(ROOT, d)); } catch { continue; }

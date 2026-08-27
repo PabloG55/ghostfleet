@@ -380,6 +380,69 @@ The one screen that is **not** a mirror of a TUI screen is the session screen, b
 TUI has no such screen: `⏎` on a card *attaches to the pane*. §7a is what that means on a
 phone, and getting it wrong was the first thing a user noticed.
 
+### Text size, rotation, and the keyboard
+
+Three things about the viewport that were each reported from a phone and each measured
+before they were changed.
+
+**The chrome does not scale with the reader's text.** iOS Dynamic Type takes body text to
+about 53px at its largest accessibility size, and every control in the session bar had been
+sized in `em`. Measured at 320px with the body at 30px: `.who` and the mode chip had both
+already shrunk to **zero** and the row still needed 406px, of which `chat|pane` alone was
+231. A row wider than the phone makes the body scrollable sideways, and once the page is
+scrolled *every* screen shows a clipped right edge — which is why the send button reading
+`senc` and the ⋯ hanging off the edge were one bug and not three.
+So a name is content and scales; a back chevron, a view switch and a ⋯ are affordances and
+are sized in px, because what they need to be is tappable rather than proportional. Rows
+wrap as a last resort, buttons truncate rather than leave the screen, and `overflow-x: clip`
+on `html, body` is the backstop that turns "the whole app slid" into "one label is short".
+The rule this file has stated since #48 — one region scrolls, the page never moves sideways
+— is a rule the stylesheet keeps now rather than one somebody has to remember.
+
+**Rotation is unlocked, and that is only safe because the grid grew columns.** The manifest
+no longer pins portrait. On its own that gives a tablet one card stretched across a
+landscape viewport, which is worse than the lock — so `.cards` is a grid whose track
+minimum is one card wide (`min(33ch, 100%)`, the card plus the gutter the TUI leaves, capped
+so a phone's single column can never be wider than the phone). A wider viewport gets *more
+cards*, which is exactly what `cols()` does at the desk. Measured across the three font
+sizes `fitCards()` lands on: phones are **1 column at every size**, an iPad portrait 2–3, an
+iPad Pro landscape 3–6. `font-size: var(--fs)` on `.cards` is load-bearing — `ch` resolves
+against the element's own font, and measuring it at `body`'s size while the art is drawn at
+`--fs` laid a 269px card into a 265px column.
+*Not verified:* whether iOS honours `orientation` for a standalone PWA at all. It has
+historically ignored it and no desktop browser can answer the question. If it still does,
+nothing regresses — the tablet stays portrait with fewer columns.
+
+**And the software keyboard is left alone, after one attempt at handling it.** This is worth
+reading before anybody tries again.
+
+The problem is real: on iOS the keyboard is not part of the dynamic viewport, so `100dvh`
+does not shrink when it opens, and Safari's own move is to **pan the page** to bring the
+focused composer into view. The attempted fix drove the shell column's height from
+`visualViewport.height` and called `scrollTo(0, 0)` from visualViewport's `scroll` handler to
+undo that pan. On a real iPhone it produced the opposite of the intent — the composer pinned
+to the **top** of the screen over the status bar, the transcript black beneath it — because
+a `scrollTo` inside a scroll handler is a fight for the scrollbar that the page loses, and
+because visualViewport's `height` and `offsetTop` do not reliably revert when the keyboard
+closes, so geometry derived from them is left misaligned. That is a documented property of
+the API, not a bug in the attempt.
+
+It is `dvh` again and Safari pans as it likes: a pan that ends is survivable where a layout
+that never recovers is not. The one piece kept is the bottom safe-area inset collapsing while
+the keyboard is up — that is a *padding* rather than a geometry, so its worst case is 34px
+wrong for a moment. `interactive-widget=resizes-content` would be the clean answer and Safari
+does not implement it.
+
+**Why the suite was green through all of it**, which is the part with the lesson in it. The
+harness fakes visualViewport to the shape iOS presents — layout viewport unchanged, visual
+viewport short by a keyboard — and *that much is faithful*. What no desktop engine does is
+**respond** the way Safari does: it does not pan, and it does not leave those values
+unreverted. So the rows asserted the client's reaction to a fake and read that as the feature
+working. `the composer sits above the keyboard` was measurably true in Chrome and false in a
+hand. It is deleted rather than weakened, with a comment saying not to add it back: whether
+the composer is comfortably reachable above a real keyboard is a **device** question, and no
+amount of headless measurement can stand in for it.
+
 ## 7. Full parity, and where the guardrails actually live
 
 **The phone gets the whole verb set, including `spawn` and `stop --reclaim`.** A
@@ -643,6 +706,101 @@ is legible and the keystroke is obvious. That chain is what makes the app worth 
 from a café, so it is tested as a chain: the pane carries a real permission dialog, the
 verb clears it, and the pane afterwards is different. Any one of those alone proves
 nothing, because a pane that never changes and a verb that does nothing look identical.
+
+### Playing a message aloud
+
+**Any message, not the newest one.** The control used to live in the composer, and it lived
+there only because "the last thing the agent said" was the only speakable thing — which made
+*the newest message* the whole feature rather than a default. Tapping a bubble reveals a play
+control on that bubble, and tapping another moves it. The count of visible speakers is
+exactly what it was, which is one: a speaker on every bubble is the button wall this screen
+was rebuilt to get rid of.
+
+A **tap** reveals it and the control plays. Long-press is already `x kill` on a card and
+already the text-selection gesture inside a bubble, and a third meaning would be the worst
+kind of hidden. A tap that started talking would make scrolling dangerous.
+
+**What is spoken is not what is written**, and the gap is bigger than markdown. Fenced blocks
+become the words "code block", inline code loses its backticks, links become "link" — and
+identifiers are **named rather than spelled**. A synthesiser reads a 40-character sha one
+character at a time: about fifty seconds, for a string nobody could write down from a speaker
+anyway, wrapped in a four-word sentence.
+
+The line is not "numbers are noise" — a filter that dropped every digit would be worse than
+none. It is **address versus fact**:
+
+| named, not spelled | kept, because it is the sentence |
+|---|---|
+| shas → *a commit* · UUIDs → *an id* | counts and results — `1885 passed`, `0 failed` |
+| ISO timestamps → *a timestamp* | PR and issue numbers — `#1171` |
+| `0x…` → *a hex id* · `\x1f` → *an escape code* | versions — `2.1.241`, `v0.147.0` |
+| paths → their basename, plus `line 86` | percentages, durations, sizes — `40%`, `6s`, `5.9 KB` |
+
+A path keeps its basename because that is usually what the sentence is about, and its line
+number because that is one short word by ear and the difference between a bug *in that file*
+and a bug *at that spot*. `feat/retry-backoff` and `@anthropic-ai/claude-code` survive whole:
+a dotted last segment is what separates a path from something that merely contains a slash.
+
+**A voice picker and a rate** sit in settings, and the list reports how many voices it
+actually got — a picker that silently offers one entry looks broken in the same way an empty
+one does. The button is a **drawn icon** rather than an emoji: one horn plus a swapped
+decoration, the viewBox, the stroke width and the horn each written once so the two states
+cannot drift into different weights. The `aria-label` is load-bearing rather than a nicety —
+an icon contributes no text, so without it a screen reader says "button" and nothing else,
+which is strictly worse than the emoji it replaced.
+
+### The thinking indicator
+
+> *"can we add a `...` animation while it is working?"*
+
+Between the transcript echoing your prompt and the answer landing, this screen used to draw
+nothing. The optimistic bubble covers the first few seconds and then clears itself, and from
+there the wait is indistinguishable from a send that went nowhere — on the one screen whose
+whole job is saying what is actually happening.
+
+Three dots on an agent-side bubble at the end of the transcript, for exactly as long as the
+card says `working`. **The status is the one the 5s poll already delivers** and the grid card
+already shows: no new signal, no new endpoint, and nothing for two sources to disagree about.
+
+It is not a message, and each of those is asserted rather than assumed: it is not built by
+`turn()`, so it is never spoken and never gets a play control; it is not in `S.sess.messages`,
+so it cannot become "the last thing the agent said"; and the card's preview line is computed
+on the server, so it cannot leak there either. A reader parked mid-conversation stays parked
+across it arriving **and** leaving — a node appearing and disappearing at the end of a
+scroller is exactly the height change §7a's scroll memory exists to survive.
+`prefers-reduced-motion` gets a static ellipsis rather than nothing.
+
+### Sending a photo
+
+A camera beside the composer. Pick a photo, and the path it lands at appears **in the box you
+are about to send**, where you can see it before you send it — what reaches the agent is an
+ordinary prompt that happens to name a file, through the same `fleet_send` every other
+message uses.
+
+That is the whole mechanism, and it works because of a measurement rather than a feature:
+`fleet-send` pastes **text**, so a photo has to become a file on the Mac and the prompt has to
+name its path — and given a path, `claude` and `codex` both read the pixels. `opencode`
+depends on its model, which is why the composer says so when you aim one at an opencode
+worker. [docs/attachments.md](attachments.md) is the research behind all of it.
+
+**The original bytes go up and the Mac converts them**, which is a deliberate inversion of
+the obvious design. Downscaling on the phone means `createImageBitmap`, and every measurement
+behind that was taken in Chrome on macOS — while the device this exists for hands out
+**HEIC**, and whether Safari decodes a HEIC blob is *still* unmeasured. Converting here with
+`sips` makes that answer irrelevant instead of load-bearing. The cost is the request body:
+this one route accepts 9 MB where every other accepts 1, and a photo over **6 MB** is refused
+with a message that says 6 MB.
+
+**No thumbnail, deliberately.** The CSP is `default-src 'self'`, so a `blob:` in an `<img>`
+is refused and the only route is decoding to a canvas — which is the same HEIC question
+again. A preview that worked for a JPEG from a laptop and silently showed nothing on the
+phone the feature is for would be worse than none. The path in the composer is the
+confirmation, and it is the same string the agent is given.
+
+Everything about where the bytes land, what is refused and who deletes them is in
+[docs/OPERATIONS.md](OPERATIONS.md); the short version is that filenames are generated here
+and never the client's, content is sniffed rather than declared, SVG is refused by name, and
+nothing ever serves the bytes back out.
 
 ## 8. Availability: the measurement that nearly sinks it
 

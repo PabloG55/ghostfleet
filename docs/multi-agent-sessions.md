@@ -82,6 +82,60 @@ PATH, *before* it creates a worktree — a half-built worker whose pane dropped 
 shell is worse than a clear error. It also prints a warning when the chosen adapter is
 unverified or can't resume.
 
+## What a non-Claude master actually loses
+
+The plumbing to run a project's master on `codex` or `opencode` has been there for a while
+and was unreachable from any screen — the answer to "make the master opencode" was *edit
+`~/.config/ghostfleet/projects` by hand*. It is a picker now, on the phone's **add project**
+sheet and on its **per-project settings** row, and as an `AGENT` column on the TUI's `,`
+page. Only **installed** agents are offered: an option that cannot run is worse than a
+missing one, because picking it leaves the next master dead at `exec agent-here` with
+nothing on screen to say why.
+
+**Probed on this machine on 2026-08-26**, and the MCP rows re-probed on the 27th when that
+wiring landed, because the cost of the choice is the part that had to be established rather
+than guessed:
+
+| | claude | opencode | codex |
+|---|---|---|---|
+| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ❌ **nothing** |
+| ghostfleet MCP registered | ✅ per profile, in `.claude.json` | ✅ `opencode.jsonc` | ✅ `~/.codex/config.toml` |
+| …and a call with no `project` finds its own fleet | ✅ | ✅ | ❌ **name it every time** |
+| orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ❌ |
+| resume across a pane kill | ✅ | ✅ | ❌ |
+
+The MCP row went green for all three on 2026-08-27, and the row under it is what that did
+*not* buy. **MCP gives tools; hooks give push events**, and one is not a substitute for the
+other: a codex master can now call the fleet — list it, send to it, spawn into it — and
+still cannot tell it anything. No inbox row, no master woken, its status read from its pane
+exactly as before. "You can see it, you will not be told."
+
+The third row is codex's own behaviour rather than a gap in the installer: it starts an MCP
+server with a **scrubbed environment**, so nothing the session exported reaches the tools
+and `fleet_list` with no arguments cannot tell which fleet it is in — where the identical
+call from opencode resolves its own. From codex, name the project on every call. Q4 has both
+transcripts.
+
+What that costs in practice is composed from the five capability fields rather than
+written out per agent, so a fourth agent gets its warning by declaring them — and a clause
+that stops being true is shrunk rather than left standing, which is what happened to the
+"no fleet_* tools" line on the 27th:
+
+```
+$ fleet-agent caveat claude     (empty — nothing is given up)
+$ fleet-agent caveat opencode   no orchestrate skill: it has the fleet_* tools but not the
+                                instructions, so it will not drain the inbox or dispatch
+                                siblings unless you tell it to
+$ fleet-agent caveat codex      no fleet events: status is guessed from its pane, and a
+                                question it asks may never reach the inbox. fleet_* tools
+                                must name the project: … . no orchestrate skill: … . no
+                                resume: recycling its pane loses the conversation
+```
+
+Both pickers print that beside the option and the TUI column carries the short form.
+**Shipping the option silently would be worse than not shipping it** — a fleet whose codex
+master never reaches the inbox reads as broken rather than as degraded.
+
 ## What shipped
 
 | Piece | Where |
@@ -89,7 +143,7 @@ unverified or can't resume.
 | the adapter table + per-session agent marker | `bin/fleet-agent` |
 | launcher dispatch (default path unchanged) | `bin/agent-here` |
 | OpenCode launch/resume | `bin/opencode-here` |
-| Codex launch — **untested** | `bin/codex-here` |
+| Codex launch | `bin/codex-here` |
 | OpenCode → fleet events | `hooks/opencode-fleet-event.js` |
 
 A session's agent is recorded in `<sock>.<session>.agent`, alongside the existing
@@ -141,8 +195,9 @@ pattern is inlined and `agent-here` execs `claude-here` directly.
   practice the turn starts and busy goes true, which confirms it; only a turn that
   finishes faster than the poll can emit a spurious "could not confirm submit"
   warning. The prompt still lands.
-- `fleet-agent installed` reports codex whenever `codex` is on PATH — which it is here,
-  even though the wrapper is broken. "On PATH" is not "works".
+- `fleet-agent installed` reports an agent whenever its binary is on PATH. "On PATH" is
+  not "works" — see the codex note below, where the binary was on PATH and every
+  invocation died until a first-launch dialog was cleared.
 - The OpenCode bridge is installed globally into `~/.config/opencode/plugin/`. It is
   inert without `CLAUDE_FLEET_SOCK`, so ordinary `opencode` use is unaffected.
 
@@ -150,7 +205,9 @@ pattern is inlined and `agent-here` execs `claude-here` directly.
 
 Measured 2026-08-01 against **OpenCode 1.18.11** on macOS. Every OpenCode claim below was
 produced by running the real binary; the captures are quoted verbatim. **Codex could not be
-tested at all** — see the codex section, and treat everything there as unverified.
+run on the day these were taken** — see the codex section, which records both what that
+turned out to be (a first-launch dialog, not a missing binary) and the two things about
+codex that are still genuinely unverified.
 
 ### Q1. Stable, resumable session id pinned to a cwd?
 
@@ -256,16 +313,25 @@ cost. Neither is Claude's 5h account window. There is no equivalent signal, so O
 sessions must be treated as unmeterable — never counted toward the ceiling, never parked on a
 reading taken from a Claude pane.
 
-### Codex — NOT VERIFIED, could not be executed
+### Codex — the "could not be executed" was a dialog, not a limitation
 
-Codex is on `PATH` but **not runnable on this machine**: `@openai/codex` is a thin Node
-wrapper that spawns a vendored native binary, and that binary is absent, so every invocation
-(`codex --version` included) dies with `ENOENT` on
-`…/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex`. Machine-level issue, out of
-scope for this branch, deliberately not worked around.
+> **Corrected.** This section said codex was *not runnable on this machine* — every
+> invocation, `codex --version` included, dying with `ENOENT` on a vendored native binary —
+> and concluded that no answer for codex could be evidence-backed. **The binary was there.**
+> macOS Gatekeeper was holding it at a first-launch quarantine dialog, and an unanswered
+> dialog looks exactly like a missing file to anything that only reads the exit status. With
+> the dialog cleared codex runs, and it has since been measured: it reads an image from a
+> path (`docs/attachments.md` §2), its busy and idle panes are captured as fixtures
+> (`test/fixtures/codex-*.txt`) and its detectors are asserted against them in both
+> directions, and the capability matrix above was probed against a running binary.
+>
+> The correction is kept visible rather than edited away, because the failure mode is real
+> and will recur: a first-launch dialog on a machine nobody is looking at is
+> indistinguishable from a broken install, and "not runnable" was an *inference* printed
+> beside measurements. What remains genuinely unverified for codex is narrower and is marked
+> as such below.
 
-Consequently **no Q1/Q2/Q3 answer for Codex is evidence-backed.** What can be established
-without executing it:
+What was established without executing it, and still stands:
 
 - `~/.codex/sessions/YYYY/MM/DD/rollout-<ISO8601>-<uuid>.jsonl` exists on disk with 19 real
   rollout files, so sessions *are* persisted per-conversation with a UUID in the filename —
@@ -274,12 +340,16 @@ without executing it:
   (`[projects."/path"] trust_level`), so a `notify` key has somewhere to live.
 - Codex's `notify` hook is documented as a program invoked with a JSON argument; it is the
   plausible `need-you` bridge, but **nothing here was observed firing.**
-- Its busy/idle pane text is **unknown**. No regex is guessed for it.
+- Its `notify` hook is still **not wired**, which is the `❌ fleet event hooks` row in the
+  matrix above: a codex master's status is read from its pane, and a question it asks may
+  never reach the inbox.
+- `codex resume <id>` pinning to a cwd remains **untested**, and the matrix records the
+  consequence rather than the mechanism: recycling a codex pane loses the conversation.
 
-The codex adapter in this branch is therefore structurally complete but **explicitly marked
-untested**, and its busy regex is empty — which the adapter layer treats as "this agent has no
-working detector", not as "never busy". It must be validated against a real codex before
-anyone relies on it.
+Its busy and idle pane text is no longer unknown — the fixtures are in `test/fixtures/` and
+the detectors run against them in both directions, which is the bar CLAUDE.md sets for
+calling a signal reliable. What is still missing for codex is the event bridge and resume,
+both of which the matrix above states at the point where the choice is made.
 
 ### Q4 (answered 2026-08-27). MCP registration — wired, with one asymmetry
 
