@@ -289,10 +289,29 @@ and `fleet-*` tools):
 
 ## Uninstall
 
-In each config dir (`~/.claude`, `~/.claude-*`): remove the fleet `hooks` blocks and the
-`ghostfleet` entry under `mcpServers` from `settings.json` (or restore a `settings.json.bak.*`),
-and delete `skills/ghostfleet-orchestrate`. Then delete the symlinks in `~/.local/bin`, and
+**Claude** — in each config dir (`~/.claude`, `~/.claude-*`): remove the fleet `hooks` blocks
+and the `ghostfleet` entry under `mcpServers` from `settings.json` (or restore a
+`settings.json.bak.*`), delete the `ghostfleet` key from `.claude.json`'s `mcpServers`
+(`claude mcp remove -s user ghostfleet` does it), and delete
+`skills/ghostfleet-orchestrate`.
+
+**codex and opencode** — these are registered ONCE, globally, not per profile (see the
+comment above `register_codex_mcp` in `install.sh` for why that is correct rather than a
+shortcut):
+
+```bash
+codex mcp remove ghostfleet                                    # ~/.codex/config.toml
+tmp=$(mktemp); jq 'del(.mcp.ghostfleet)' ~/.config/opencode/opencode.jsonc > "$tmp" \
+  && mv "$tmp" ~/.config/opencode/opencode.jsonc              # opencode's MCP entry
+rm -f ~/.config/opencode/plugin/ghostfleet-event.js            # opencode's event bridge
+```
+
+Then delete the symlinks in `~/.local/bin`, `rm -rf ~/.local/libexec/ghostfleet`, and
 `tmux -L cf-<project> kill-server` for any live fleets.
+
+**Leave any of the four registrations behind and it points at a runtime you have deleted** —
+each one names `~/.local/libexec/ghostfleet/mcp/fleet-mcp.mjs`, and an agent that starts one
+after the runtime is gone fails per tool call rather than at startup.
 
 ## Support, and what to expect
 
