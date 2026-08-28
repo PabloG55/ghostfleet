@@ -3936,13 +3936,48 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   # the full run and reported an EMPTY pane as a 0-line footer — three rows red, including
   # one that had got shorter and should have passed. A capture that has no footer in it is
   # not a measurement of the footer.
+  #   ONE BOOT, THEN RESIZES, because the wait must not be a wait for node to START. This
+  # killed the server and created a fresh session per width, so a three-row group paid
+  # three cold starts of a Node TUI, and on a loaded runner a cold start outruns whatever
+  # budget you pick. The tell was that the group came back red with a DIFFERENT row failing
+  # on each re-run — whichever boot happened to be the slow one, while the other two passed.
+  # A failure that moves inside one group is a timeout being used as an assertion, so
+  # raising the budget only moves the edge; the fix is to stop paying for it three times.
+  # Resizing re-measures because the grid reads its width fresh on every render (W() is
+  # process.stderr.columns) and repaints on a 1.2s timer, so nothing depends on a resize
+  # handler, and tmux resize-window does reach a DETACHED session's process (checked with
+  # a node loop printing process.stderr.columns: it follows the resize).
+  #   WHAT TO WAIT FOR IS NOT "the pane changed". tmux truncates the pane ITSELF the
+  # instant the window narrows, so the capture differs 50ms after resize-window and still
+  # holds the previous render: measured going 120→104, the capture was already different
+  # at 0.05s and still counted the OLD two-line footer until the repaint landed at 1.23s.
+  # A change-detector returns there and measures 2 at 104 — green, and wrong. What is
+  # actually being waited for is the GRID having written, and tmux keeps that:
+  # #{window_activity} advances only on output (a pane running `sleep` holds its stamp
+  # still). Read the stamp AFTER the resize and every write it lets past is a later one,
+  # and the width a render used is the width at render time. Its resolution is one second,
+  # which can only cost an extra repaint, never return early.
+  wrote_since() {                  # $1 = an activity stamp; has the grid drawn past it?
+    local act
+    act="$(tmux -L cffootd display-message -p -t d '#{window_activity}' 2>/dev/null || true)"
+    [ -n "$act" ] && [ "$act" -gt "$1" ]
+  }
+  footer_drawn() {                 # is a footer on the pane at all?
+    tmux -L cffootd capture-pane -p -t d 2>/dev/null | grep -q '↑↓←→/hjkl move'
+  }
   draw_at() {                      # $1 = width; leaves the pane up for the caller
-    tmux -L cffootd kill-server 2>/dev/null
-    tmux -L cffootd new-session -d -s d -x "$1" -y 24 \
-      "HOME='$FW' CLAUDE_FLEET_DIR='$FW/.claude/fleet' CLAUDE_FLEET_ROOT='$FW/repo' node '$ROOT/bin/fleet-grid.mjs' cffoot" 2>/dev/null
-    local i=0
-    while [ "$i" -lt 80 ]; do
-      tmux -L cffootd capture-pane -p -t d 2>/dev/null | grep -q '↑↓←→/hjkl move' && return 0
+    local i=0 at stamp=''
+    at="$(tmux -L cffootd display-message -p -t d '#{window_width}' 2>/dev/null || true)"
+    if [ -z "$at" ]; then          # the one cold start, and the only long wait in here
+      tmux -L cffootd kill-server 2>/dev/null
+      tmux -L cffootd new-session -d -s d -x "$1" -y 24 \
+        "HOME='$FW' CLAUDE_FLEET_DIR='$FW/.claude/fleet' CLAUDE_FLEET_ROOT='$FW/repo' node '$ROOT/bin/fleet-grid.mjs' cffoot" 2>/dev/null
+    elif [ "$at" != "$1" ]; then   # already up: re-measure by resizing, and wait for the
+      tmux -L cffootd resize-window -t d -x "$1" -y 24 2>/dev/null   # repaint that follows
+      stamp="$(tmux -L cffootd display-message -p -t d '#{window_activity}' 2>/dev/null || echo 0)"
+    fi                             # same width as it is already drawn at: nothing to wait for
+    while [ "$i" -lt 200 ]; do
+      { [ -z "$stamp" ] || wrote_since "$stamp"; } && footer_drawn && return 0
       i=$((i+1)); sleep 0.1
     done
     return 1
@@ -3956,8 +3991,13 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   is "...and 3 at 104, the cost of the entry" "3" "$(footer_lines 104)"
   # The banner is what a longer footer pushes off, and at 120 it must survive — that is
   # the property the width budget is protecting, rather than the line count itself.
+  # It names the width it never drew at too, like the two rows above: a harness that gave
+  # up and a footer that really did push the banner off are different bugs, and a bare 0
+  # is both of them.
   is "...and the banner is still on screen at 120" "1" \
-     "$(draw_at 120 && tmux -L cffootd capture-pane -p -t d 2>/dev/null | grep -ci 'ghostfleet' || echo 0)"
+     "$(draw_at 120 \
+        && (tmux -L cffootd capture-pane -p -t d 2>/dev/null | grep -ci 'ghostfleet' || true) \
+        || echo 'the grid never drew at 120')"
   tmux -L cffootd kill-server 2>/dev/null; tmux -L cffoot kill-server 2>/dev/null
   rm -rf "$FW"
 else
