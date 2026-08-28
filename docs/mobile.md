@@ -145,7 +145,8 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
     }
   ],
   "free_worktrees": [
-    { "path": "/Users/pgarces/gf-demo/toolbox-3", "branch": "feat/x", "task": "rework the CSV column mapper" }
+    { "path": "/Users/pgarces/gf-demo/toolbox-3", "branch": "feat/x", "task": "rework the CSV column mapper",
+      "removing": false }                // true while `git worktree remove` is still running
   ]
 }
 ```
@@ -185,6 +186,11 @@ byte-for-byte what they were.
   most important `need_you` on the fleet, and "0 need you" over it would be the summary
   lying at exactly the glance you would act on. The TUI's header counts no lead because the
   TUI's cards contain none — one rule, two card lists.
+- **`removing` on a free worktree** is true while a grid is deleting that checkout —
+  `git worktree remove` on a big one takes the better part of a minute, so it is a state and
+  not an instant. The TUI paints those cards `⋯ REMOVING` and refuses a second removal of
+  the same one. The phone does not render it yet and shows such a worktree as free, which is
+  the one place this wire format is currently ahead of the client.
 - **`+ new session` and the FREE worktree cards are untouched.** `free_worktrees` already
   excluded the main checkout ("that's master's slot, never a free card"), so the lead
   arriving as a card takes nothing away from that list and adds nothing to it.
