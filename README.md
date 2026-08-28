@@ -63,6 +63,7 @@ debugging — and that most wrappers get wrong:
 | every project has a session called `master`, so their statuses collide | status is scoped by the fleet's socket, not by name |
 | a dispatched prompt silently lands in the input box without submitting | dispatch waits for the paste, submits, then verifies a turn actually started |
 | one account: 5 agents drain the budget 5× faster and all stall together | a non-Claude governor meters usage and parks workers at the ceiling, resuming on reset (it can't be the lead — the lead stalls too) |
+| one laptop: 5 agents running tests can fill the process table and wedge the machine | the same governor watches the kernel's own memory-pressure level and the process table, and parks workers before the OOM killer does |
 | you already run agents by hand in a dozen panes | `fleet-adopt` finds those conversations and rebuilds them as one fleet |
 
 ## Documentation

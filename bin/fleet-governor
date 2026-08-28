@@ -12,6 +12,21 @@
 # at once; when the window recovers below --resume (default 90%) it resumes the ones
 # IT parked (never a worker you paused by hand).
 #
+# TWO CEILINGS, AND THE MACHINE ONE GOES FIRST. Tokens are not the only shared pool a
+# wide fan-out drains: every worker runs tests on ONE laptop. On 2026-08-27 a fleet on
+# this box put 358 node processes and 269 GB of requested RSS against 64 GB of RAM; the
+# OOM killer then fought launchd for 80 minutes, the process table filled to its
+# 16,000 cap, fork() began failing system-wide, and the machine had to be power-cycled.
+# Running out of budget stalls the fleet; running out of MACHINE takes the box with it,
+# so the resource ceiling is checked first and overrides.
+#
+# It reads the same signals that failed that day, and unlike the budget figure both are
+# LIVE KERNEL COUNTERS rather than something scraped off a pane — so there is no fossil
+# problem here, no blind-pane problem, and no need to distrust a reading:
+#   - kern.memorystatus_vm_pressure_level  1 normal / 2 warning / 4 critical. This is
+#     the very signal whose escalation preceded the jetsam cascade.
+#   - ps ax vs kern.maxproc                the process table that actually wedged it.
+#
 #   -s SOCKET      fleet socket (default: $CLAUDE_FLEET_SOCK)
 #   --pause-at P   notify + park ALL workers at/above this 5h usage % (default 98)
 #   --resume P     resume governor-parked workers below this % (default 90)
@@ -20,12 +35,17 @@
 #                  (default 20; 0 parks on the first reading). The status bar's figure
 #                  is not live — after an account/team switch every pane keeps
 #                  reporting the OLD window until Claude next repaints it.
+#   --mem-level L  park when kern.memorystatus_vm_pressure_level reaches L
+#                  (1 normal, 2 warning, 4 critical; default 2)
+#   --proc-pct P   park when the process table is P% of kern.maxproc (default 60)
+#   --no-resource  budget ceiling only — do not watch machine resources
 #   --once         run one tick and exit (for testing / cron)
 #   --dry-run      log decisions, don't actually pause/resume/notify
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
 INTERVAL=60; PAUSE_AT=98; RESUME=90; ONCE=0; DRY=0; CONFIRM=20
+MEM_LEVEL=2; PROC_PCT=60; RESOURCE=1
 COOLDOWN=900                          # min seconds between macOS "budget" alerts (anti-spam)
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,6 +54,9 @@ while [ $# -gt 0 ]; do
     --resume)   RESUME="${2:?}"; shift 2 ;;
     --interval) INTERVAL="${2:?}"; shift 2 ;;
     --confirm)  CONFIRM="${2:?}";  shift 2 ;;
+    --mem-level)  MEM_LEVEL="${2:?}"; shift 2 ;;
+    --proc-pct)   PROC_PCT="${2:?}";  shift 2 ;;
+    --no-resource) RESOURCE=0; shift ;;
     --once)     ONCE=1; shift ;;
     --dry-run)  DRY=1; shift ;;
     *) echo "fleet-governor: unknown arg $1" >&2; exit 1 ;;
@@ -189,6 +212,16 @@ workers_newest_first() {
 is_parked()  { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
 gov_parked() { is_parked "$1" && grep -q '^governor' "$FLEET_DIR/$SOCK.$1.parked" 2>/dev/null; }
 
+# THE TWO CEILINGS MUST NOT UN-PARK EACH OTHER. Both write the same .parked file — they
+# have to, or is_parked stops seeing the park and the other ceiling parks the worker a
+# second time — so the FIRST TOKEN records which ceiling earned it. Matching bare
+# '^governor' would make the budget path resume a worker parked for memory the moment
+# the token window recovered, handing the machine straight back the load that was
+# crushing it. The trailing space is load-bearing: 'governor ' must not match
+# 'governor-resource'.
+budget_parked() { is_parked "$1" && grep -q '^governor '          "$FLEET_DIR/$SOCK.$1.parked" 2>/dev/null; }
+res_parked()    { is_parked "$1" && grep -q '^governor-resource ' "$FLEET_DIR/$SOCK.$1.parked" 2>/dev/null; }
+
 # Resume every worker THIS governor parked (never a hand-paused one). Reports the
 # count in $RELEASED — NOT on stdout, because this function also logs there and a
 # command substitution would capture the log lines as the "count".
@@ -204,7 +237,7 @@ release_gov_parked() {
   RELEASED=0
   for w in $(workers_newest_first); do
     [ -n "$cap" ] && [ "$RELEASED" -ge "$cap" ] && break
-    if gov_parked "$w"; then
+    if budget_parked "$w"; then
       log "  resume $w"
       if [ "$DRY" != 1 ]; then
         "$BIN_DIR/fleet-resume" -s "$SOCK" "$w" >/dev/null 2>&1
@@ -213,6 +246,113 @@ release_gov_parked() {
       RELEASED=$((RELEASED + 1))
     fi
   done
+}
+
+# ── machine resources ────────────────────────────────────────────────────────
+# Both readings are LIVE KERNEL COUNTERS, which is what makes this ceiling simpler than
+# the budget one: nothing to fingerprint, nothing to distrust, no pane to be too narrow.
+# Sets RES_LEVEL / RES_PROCS / RES_PROC_PCT / RES_WHY rather than echoing, for the same
+# subshell reason budget() documents.
+#
+# Absent counters mean UNKNOWN, NOT ZERO, and unknown must never trip the ceiling — a
+# governor that parked the fleet because a sysctl was missing would be worse than one
+# that never parked it at all. Linux has no kern.maxproc, so pid_max stands in.
+RES_LEVEL=1; RES_PROCS=0; RES_PROC_PCT=0; RES_WHY=""
+resources() {
+  local maxproc=""
+  RES_LEVEL=1; RES_PROCS=0; RES_PROC_PCT=0; RES_WHY=""
+
+  # 1 normal / 2 warning / 4 critical — the kernel's own jetsam signal
+  RES_LEVEL="$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)"
+  case "$RES_LEVEL" in ''|*[!0-9]*) RES_LEVEL=1 ;; esac
+
+  RES_PROCS="$(ps ax 2>/dev/null | wc -l | tr -d ' ')"
+  case "$RES_PROCS" in ''|*[!0-9]*) RES_PROCS=0 ;; esac
+  maxproc="$(sysctl -n kern.maxproc 2>/dev/null || cat /proc/sys/kernel/pid_max 2>/dev/null)"
+  case "$maxproc" in ''|*[!0-9]*) maxproc=0 ;; esac
+  [ "$maxproc" -gt 0 ] && RES_PROC_PCT=$(( RES_PROCS * 100 / maxproc ))
+
+  [ "$RES_LEVEL" -ge "$MEM_LEVEL" ] && RES_WHY="memory pressure level ${RES_LEVEL}"
+  if [ "$RES_PROC_PCT" -ge "$PROC_PCT" ]; then
+    RES_WHY="${RES_WHY:+$RES_WHY, }process table ${RES_PROC_PCT}% (${RES_PROCS}/${maxproc})"
+  fi
+}
+
+# 0 = the machine ceiling is in force and the budget tick must be SKIPPED this pass.
+# 1 = nothing doing here, carry on to the budget ceiling.
+#
+# Resume needs hysteresis the budget path gets for free from its separate --resume knob:
+# parking drops the process count below the ceiling almost immediately, so resuming at
+# the same number would oscillate. Ten points under, and one worker per tick.
+resource_tick() {
+  local w="" active=() n=0 fp=""
+  [ "$RESOURCE" = 1 ] || return 1
+
+  if [ -f "$FLEET_DIR/$SOCK.resource-off" ]; then
+    for w in $(workers_newest_first); do
+      if res_parked "$w"; then
+        log "resource ceiling ignored -> resume $w"
+        if [ "$DRY" != 1 ]; then
+          "$BIN_DIR/fleet-resume" -s "$SOCK" "$w" >/dev/null 2>&1
+          inbox "$w" resumed "governor: resource ceiling ignored"
+        fi
+      fi
+    done
+    return 1
+  fi
+
+  resources
+  if [ -n "$RES_WHY" ]; then
+    active=()
+    for w in $(workers_newest_first); do is_parked "$w" || active+=("$w"); done
+    n=${#active[@]}
+    # Look twice, as the budget path does — but for the opposite reason. The figure is
+    # not stale here, it is SPIKY: a turbo build or a test suite starting up crosses
+    # both lines for a few seconds by design. Parking on that would fight normal work.
+    if [ "$n" -gt 0 ] && [ "$CONFIRM" -gt 0 ]; then
+      log "resources: ${RES_WHY} — re-reading in ${CONFIRM}s before parking ${n} worker(s)"
+      sleep "$CONFIRM"
+      resources
+      if [ -z "$RES_WHY" ]; then
+        log "  re-read clear — transient spike, not parking"
+        return 1
+      fi
+      active=()
+      for w in $(workers_newest_first); do is_parked "$w" || active+=("$w"); done
+      n=${#active[@]}
+    fi
+    if [ "$n" -gt 0 ]; then
+      log "resources: ${RES_WHY} -> parking ALL ${n} worker(s)"
+      notify "machine under load (${RES_WHY}) — parked ${n} worker(s)"
+      for w in "${active[@]}"; do
+        log "  park $w"
+        fp="$(pct_fingerprint "$w")"
+        if [ "$DRY" != 1 ] && "$BIN_DIR/fleet-pause" -s "$SOCK" "$w" >/dev/null 2>&1; then
+          printf 'governor-resource %s\n' "$(date +%s)" > "$FLEET_DIR/$SOCK.$w.parked"
+          printf '%s' "$fp" > "$(stale_f "$w")" 2>/dev/null
+          inbox "$w" parked "governor: ${RES_WHY} — machine ceiling, parked all"
+        fi
+      done
+    else
+      log "resources: ${RES_WHY} — all workers parked, holding for recovery"
+    fi
+    return 0
+  fi
+
+  # RECOVERED -> hand back one worker per tick, newest first
+  if [ "$RES_LEVEL" -lt "$MEM_LEVEL" ] && [ "$RES_PROC_PCT" -lt $(( PROC_PCT - 10 )) ]; then
+    for w in $(workers_newest_first); do
+      if res_parked "$w"; then
+        log "resources recovered (level ${RES_LEVEL}, procs ${RES_PROC_PCT}%) -> resume $w"
+        if [ "$DRY" != 1 ]; then
+          "$BIN_DIR/fleet-resume" -s "$SOCK" "$w" >/dev/null 2>&1
+          inbox "$w" resumed "governor: machine recovered"
+        fi
+        return 0
+      fi
+    done
+  fi
+  return 1
 }
 
 tick() {
@@ -302,7 +442,7 @@ tick() {
     # which is the question actually being asked.
     resumed=0
     for w in $(workers_newest_first); do
-      if gov_parked "$w"; then
+      if budget_parked "$w"; then
         log "budget ${pct}% < ${RESUME}% -> resume $w"
         if [ "$DRY" != 1 ]; then
           "$BIN_DIR/fleet-resume" -s "$SOCK" "$w" >/dev/null 2>&1
@@ -321,13 +461,17 @@ tick() {
 }
 
 modelabel="ACTIVE (parks all at ceiling)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"
-log "started on $SOCK — $modelabel — pause-all>=${PAUSE_AT}%, resume<${RESUME}%, interval ${INTERVAL}s"
+reslabel="mem-level>=${MEM_LEVEL}, procs>=${PROC_PCT}%"; [ "$RESOURCE" = 1 ] || reslabel="off"
+log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<${RESUME}%; resources ${reslabel}; interval ${INTERVAL}s"
+# The machine ceiling runs FIRST and short-circuits: with the box itself under threat,
+# a token reading is beside the point, and letting the budget path also act on the same
+# pass could resume for one ceiling what the other just parked for.
 if [ "$ONCE" = 1 ]; then
-  tick
+  resource_tick || tick
 else
   while true; do
     tmux -L "$SOCK" list-sessions >/dev/null 2>&1 || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
-    tick
+    resource_tick || tick
     sleep "$INTERVAL"
   done
 fi
