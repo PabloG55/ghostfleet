@@ -203,7 +203,55 @@ _clear() { printf '\033[?1004l\033[2J\033[3J\033[H' >/dev/tty 2>/dev/null || tru
 # can take a beat on a big conversation. Say what's happening instead of showing a
 # blank screen (the thing that made a stray escape look like a glitch).
 _loading() { _clear; printf '\033[38;5;245m  %s…\033[0m\r' "$1" >/dev/tty 2>/dev/null || true; }
+# A FAILURE HAS TO OUTLIVE THE NEXT RENDER. grid_loop redraws immediately, so anything
+# printed and not waited on is gone before it can be read — which is indistinguishable
+# from nothing having happened, and "nothing happened" is exactly the report this exists
+# to answer.
+_fail() {
+  _clear
+  printf '\033[31m  %s\033[0m\n\n' "$1" >/dev/tty 2>/dev/null || true
+  [ -n "${2:-}" ] && printf '\033[38;5;245m  %s\033[0m\n\n' "$2" >/dev/tty 2>/dev/null || true
+  printf '\033[38;5;245m  press any key\033[0m' >/dev/tty 2>/dev/null || true
+  read -rsn1 _k </dev/tty 2>/dev/null || true
+  _clear
+}
 TM() { tmux -L "$SOCK" -f "$CONF" "$@"; }
+# CREATE A SESSION AND PROVE IT EXISTS — the same check #70 put in fleet-spawn, which
+# this path never got. Both grid_loop branches used a bare `TM new-session` whose result
+# was never tested, followed by an attach that swallowed its own failure with
+# `2>/dev/null || true` — so a creation that failed dropped you back on the grid with the
+# fleet unchanged and nothing anywhere saying why. Reported exactly that way: pressed `n`,
+# and afterwards the project had only master and its tabs.
+#   bin/fleet-companion already refuses loudly on the same operation, so the CLI said so
+# and the keyboard did not. One helper for both branches now, so they cannot drift apart
+# again, and it is the loud one.
+#
+#   -P -F '#{session_id}' rather than the exit status alone, for fleet-spawn's reason: it
+# hands back the identity of what was just made, which is what the settle below needs.
+#
+#   AND A SETTLE, NOT A RETRY. tmux can return 0 and the session still be gone a moment
+# later: the pane runs `exec agent-here <name>`, and if that cannot exec — not on PATH
+# because ./install.sh was never run, or a half-synced runtime — the command exits at once
+# and tmux takes the session down with it. A poll-until-present loop would report the
+# doomed session as healthy on its first tick, papering over the one failure this catches.
+# Half a second, the same order fleet-spawn and fleet-answer use, and only on the create.
+#
+#   BY ID, NOT BY NAME. A session NAME can be tmux target syntax (CLAUDE.md), so every
+# `-t` is a resolution that can answer about somebody else; `$N` ids from list-sessions
+# cannot be expressions.
+_new_session() {                     # $1=name $2=cwd $3=agent $4=fresh("1" or "")
+  local name="$1" cwd="$2" agent="$3" sid
+  local extra=(); [ "${4:-}" = 1 ] && extra=(-e "CLAUDE_FLEET_FRESH=1")
+  sid="$(TM new-session -d -P -F '#{session_id}' -s "$name" -c "$cwd" \
+    -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" \
+    ${extra[@]+"${extra[@]}"} -e "CLAUDE_FLEET_AGENT=$agent" \
+    "exec agent-here \"$name\"")" || sid=""
+  sid="${sid%%$'\n'*}"
+  [ -n "$sid" ] || return 1
+  sleep 0.5
+  TM list-sessions -F '#{session_id}' 2>/dev/null | grep -qxF -- "$sid"
+}
+
 # Re-source the bindings on a LIVE server (a cf-sync only reaches a running fleet
 # this way) and hand it our absolute bin dir. The ⇧←/⇧→ bindings shell out to
 # fleet-cycle, and a tmux server inherits whatever PATH it was born with — which,
@@ -510,9 +558,17 @@ grid_loop() {
         base="$name"; i=2
         while TM has-session -t "$name" 2>/dev/null; do name="$base-$i"; i=$((i + 1)); done
         remember_agent "$name" "$agent"
-        TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_AGENT=$agent" "exec agent-here \"$name\""
-        tm_wire     # this may be the call that CREATED the server — @cf_bin isn't set yet
-        last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
+        if _new_session "$name" "$cwd" "$agent" ""; then
+          tm_wire   # this may be the call that CREATED the server — @cf_bin isn't set yet
+          last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear
+        else
+          # The marker goes with it. remember_agent wrote <sock>.<name>.agent before the
+          # session existed, and a marker outliving its session is a default that gets
+          # picked up by the NEXT session to take that name.
+          "$BIN_DIR/fleet-agent" forget -s "$SOCK" "$name" 2>/dev/null || true
+          _fail "could not start '$name' in ${cwd/#$HOME/\~}" \
+                "its pane exits immediately when agent-here is not on PATH — run ./install.sh, or cf-sync if the runtime is half-synced"
+        fi ;;
       newfresh${US}*)
         split_choice "${choice#newfresh${US}}"
         base="$name"; i=2
@@ -522,9 +578,14 @@ grid_loop() {
         # called ~2.
         while TM has-session -t "$name" 2>/dev/null; do name="$base~$i"; i=$((i + 1)); done
         remember_agent "$name" "$agent"
-        TM new-session -d -s "$name" -c "$cwd" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" -e "CLAUDE_FLEET_AGENT=$agent" "exec agent-here \"$name\""
-        tm_wire     # ditto — a fresh server has no @cf_bin until we hand it one
-        last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear ;;
+        if _new_session "$name" "$cwd" "$agent" 1; then
+          tm_wire   # ditto — a fresh server has no @cf_bin until we hand it one
+          last="$name"; _loading "starting $name"; TM attach -t "$name" 2>/dev/null || true; _clear
+        else
+          "$BIN_DIR/fleet-agent" forget -s "$SOCK" "$name" 2>/dev/null || true
+          _fail "could not start '$name' in ${cwd/#$HOME/\~}" \
+                "its pane exits immediately when agent-here is not on PATH — run ./install.sh, or cf-sync if the runtime is half-synced"
+        fi ;;
     esac
   done
 }
