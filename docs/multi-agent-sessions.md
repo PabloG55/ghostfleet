@@ -17,6 +17,14 @@ What *is* Claude-specific is four things, and they're the whole job:
 | 3 | **`need-you` / `done` events** — Claude Code hooks (`Notification`, `Stop`, `SessionStart`, `UserPromptSubmit`, `SessionEnd`) wired into each config dir by `install.sh` | `hooks/fleet-event.sh` | No — neither has the same hook contract |
 | 4 | **Budget metering** — scrapes `NN%(` (the 5h usage figure) out of Claude's status bar to park workers at the ceiling | `bin/fleet-governor` (`pct_of`) | No — no equivalent signal |
 
+The governor's OTHER ceiling is deliberately not on this list. **Machine metering** —
+`kern.memorystatus_vm_pressure_level` and the process table vs `kern.maxproc` — reads
+kernel counters rather than a pane, so it needs no adapter and already governs a fleet
+of any agent, Claude or not. Where budget metering asks *whose account is this and what
+does its status bar say*, the machine ceiling asks a question every agent answers the
+same way: how much of this box is left.
+
+
 Everything else — `fleet-spawn`, `fleet-worktrees`, `fleet-pause`/`resume`, `fleet-schedule`,
 `fleet-cycle`, the grid, profiles — is agent-agnostic already.
 
