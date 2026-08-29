@@ -45,7 +45,16 @@ set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
 INTERVAL=60; PAUSE_AT=98; RESUME=90; ONCE=0; DRY=0; CONFIRM=20
-MEM_LEVEL=2; PROC_PCT=60; RESOURCE=1
+# MEM_LEVEL DEFAULTS TO 4 (critical), NOT 2 (warning), and the difference is the whole
+# fleet. macOS sits at level 2 for long stretches on a machine that is completely healthy —
+# it is what memory compression looks like from the outside, not a problem. Parking every
+# worker there made the fleet unusable on a working machine: measured on a 64 GB Mac during
+# a normal session, level 2 held for over fifteen minutes while the process table was at
+# EIGHT PERCENT and the machine was responsive throughout. The governor parked all workers,
+# resumed, and re-parked them every 90 seconds for as long as that lasted.
+#   Level 4 is the signal the jetsam cascade actually escalates through, and it is what this
+# check was written for. Level 2 as the trigger turned a safety net into a stoppage.
+MEM_LEVEL=4; PROC_PCT=60; RESOURCE=1
 COOLDOWN=900                          # min seconds between macOS "budget" alerts (anti-spam)
 while [ $# -gt 0 ]; do
   case "$1" in
