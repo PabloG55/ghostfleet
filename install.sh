@@ -309,11 +309,14 @@ wire_hooks() {
     # PreToolUse is SHARED GROUND — unlike the five above, other tools legitimately
     # live here, so ours is APPENDED, never assigned over the top. Stanzas pointing at
     # our guard are dropped first so re-installing (or changing the matcher) replaces
-    # rather than stacks up copies.
+    # rather than stacks up copies — which is what makes ADDING a tool to the matcher a
+    # safe re-install rather than a second stanza racing the first.
+    # The matcher is a regex over the tool name: EnterWorktree would move this session,
+    # and Agent (Task in older builds) would do the work somewhere the fleet cannot see.
     | .hooks.PreToolUse = (
         [ (.hooks.PreToolUse // [])[]
           | select([.hooks[]?.command] | index($guard) | not) ]
-        + [ { matcher: "EnterWorktree",
+        + [ { matcher: "EnterWorktree|Agent|Task",
               hooks: [ { type: "command", command: $guard } ] } ] )
     | (if .mcpServers then .mcpServers |= del(.["ghostfleet"]) else . end)
     | (if (.mcpServers // {}) == {} then del(.mcpServers) else . end)
