@@ -49,6 +49,25 @@
 //   --wait MS     settle after navigation (default 900)
 //   --page N      which page of a PDF (default 1; needs pdftoppm for N > 1)
 //   --tree        also print the accessibility tree (structure, not pixels)
+//   --golden P    compare against the reference at P instead of just printing a shot
+//   --update      write/refresh that reference rather than comparing (say so loudly)
+//   --max-diff R  fraction of pixels allowed to differ (default 0.005)
+//
+// THE COMPARISON IS THE BEST-EVIDENCED PART, AND THE EASIEST TO GET KILLED.
+// A bug-free reference lifted median precision from 34-50% to 100% in the study above,
+// against 20% recall for open-ended looking — so comparing beats judging by a wide margin.
+// But golden images drift on antialiasing, font rendering and browser versions, and a
+// check that goes red for reasons nobody can read gets deleted. #44 is that story already.
+// Three guards, all of them here rather than in a doc:
+//   - the verdict is a FRACTION of differing pixels against a threshold, never equality
+//   - on failure the expected, actual AND diff images are written next to each other and
+//     their paths printed, so the reason is a picture rather than a number
+//   - the Chrome build is printed on every comparison, because a golden captured on
+//     another version is a stale baseline and must not read as a regression
+//
+// AND THE DIFF RUNS INSIDE THE BROWSER. node has no PNG decoder and this package has no
+// dependencies; the browser already open for the screenshot has a canvas, so both images
+// are drawn into one and compared with getImageData. No decoder, no library, no dep.
 //   --out PATH    where to write the PNG (default: a temp file, path printed)
 import fs from 'node:fs';
 import os from 'node:os';
@@ -68,6 +87,7 @@ const flag = (name) => argv.includes('--' + name);
 const target = argv[0];
 const WIDTH = Number(opt('width', 1280)), HEIGHT = Number(opt('height', 800));
 const WAIT = Number(opt('wait', 900)), PAGE = Number(opt('page', 1));
+const GOLDEN = opt('golden', ''), MAXDIFF = Number(opt('max-diff', 0.005));
 const OUT = opt('out', path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-look-')), 'shot.png'));
 
 const report = (rows, outPath) => {
@@ -131,6 +151,8 @@ let b;
 try { b = await launch({ width: WIDTH, height: HEIGHT }); }
 catch (e) { if (srv) srv.close(); die(String((e && e.message) || e)); }
 
+const b_ = b;
+const chromeBuild = (b.chromePath || '').split('/').pop() || 'chrome';
 let status = null, failed = null;
 try {
   await b.call('Page.navigate', { url });
@@ -174,6 +196,66 @@ try {
     console.log('accessibility tree (' + seen.length + (seen.length >= 60 ? '+' : '') + ' named nodes)');
     console.log(seen.join('\n') || '  (nothing named — that is itself the finding)');
     console.log('');
+  }
+  // ── the comparison, when a reference was named ───────────────────────────
+  if (GOLDEN) {
+    const gp = path.resolve(GOLDEN);
+    if (flag('update') || !fs.existsSync(gp)) {
+      fs.mkdirSync(path.dirname(gp), { recursive: true });
+      fs.copyFileSync(OUT, gp);
+      // Loudly: a run that silently WRITES a baseline is a run that can never fail, and
+      // the first one is the one most likely to bake in a bug as the expectation.
+      console.log(flag('update') ? 'BASELINE UPDATED — nothing was compared this run'
+                                 : 'BASELINE CREATED — nothing was compared this run');
+      console.log('reference     ' + gp);
+      report([['looked at', url], ['chrome', chromeBuild]], OUT);
+      process.exit(0);
+    }
+    const a = 'data:image/png;base64,' + fs.readFileSync(gp).toString('base64');
+    const b = 'data:image/png;base64,' + fs.readFileSync(OUT).toString('base64');
+    const d = await b_.evaluate(async (aSrc, bSrc) => {
+      const load = (src) => new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+      const [ia, ib] = await Promise.all([load(aSrc), load(bSrc)]);
+      if (ia.width !== ib.width || ia.height !== ib.height)
+        return { sizeMismatch: `${ia.width}x${ia.height} vs ${ib.width}x${ib.height}` };
+      const c = (im) => { const cv = document.createElement('canvas'); cv.width = im.width; cv.height = im.height;
+        const x = cv.getContext('2d'); x.drawImage(im, 0, 0); return x.getImageData(0, 0, cv.width, cv.height); };
+      const A = c(ia), B = c(ib);
+      const out = document.createElement('canvas'); out.width = ia.width; out.height = ia.height;
+      const ox = out.getContext('2d'); const D = ox.createImageData(ia.width, ia.height);
+      let diff = 0;
+      for (let i = 0; i < A.data.length; i += 4) {
+        // Per-channel tolerance: subpixel antialiasing moves a channel by a few units on
+        // a font the eye cannot tell apart, and counting those is how a suite goes red
+        // for a reason nobody can read.
+        const dr = Math.abs(A.data[i] - B.data[i]), dg = Math.abs(A.data[i+1] - B.data[i+1]), db = Math.abs(A.data[i+2] - B.data[i+2]);
+        const off = dr > 12 || dg > 12 || db > 12;
+        if (off) { diff++; D.data[i] = 255; D.data[i+1] = 0; D.data[i+2] = 0; D.data[i+3] = 255; }
+        else { const g = (A.data[i] + A.data[i+1] + A.data[i+2]) / 3;
+               D.data[i] = D.data[i+1] = D.data[i+2] = 220 - g * 0.35 | 0; D.data[i+3] = 255; }
+      }
+      ox.putImageData(D, 0, 0);
+      return { total: A.data.length / 4, diff, ratio: diff / (A.data.length / 4), png: out.toDataURL('image/png') };
+    }, a, b);
+    if (d && d.sizeMismatch) die(`the reference is a different size: ${d.sizeMismatch} — a golden captured at another viewport is a stale baseline, not a regression. Re-take it with --update if that is what you meant.`);
+    const pct = (d.ratio * 100).toFixed(3);
+    if (d.ratio > MAXDIFF) {
+      // THE PAIR ON RED. A number nobody can picture is what gets a golden deleted.
+      const dir = path.dirname(OUT);
+      const dp = path.join(dir, 'diff.png'), ep = path.join(dir, 'expected.png');
+      fs.writeFileSync(dp, Buffer.from(String(d.png).split(',')[1], 'base64'));
+      fs.copyFileSync(gp, ep);
+      console.error(`fleet-look: ${pct}% of pixels differ (allowed ${(MAXDIFF*100).toFixed(3)}%) — ${d.diff} of ${d.total}`);
+      console.error('  expected  ' + ep);
+      console.error('  actual    ' + OUT);
+      console.error('  diff      ' + dp + '   (differences in red)');
+      console.error('  chrome    ' + chromeBuild + '   — a reference taken on another build is a stale baseline, not a regression');
+      process.exit(1);
+    }
+    console.log(`matches the reference   ${pct}% of pixels differ, allowed ${(MAXDIFF*100).toFixed(3)}%`);
+    console.log('reference     ' + gp);
+    report([['looked at', url], ['chrome', chromeBuild]], OUT);
+    process.exit(0);
   }
   report([['looked at', url],
           ['http status', String(status)],

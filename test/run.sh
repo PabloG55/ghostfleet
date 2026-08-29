@@ -2144,6 +2144,13 @@ if command -v git >/dev/null 2>&1; then
   # back into a productivity slogan.
   is "...and does not hold the turn open"     "1" "$(argvhas 'do not hold the turn open to wait')"
   is "...because ending it is what notifies"  "1" "$(argvhas 'Ending the turn is what notifies')"
+  # AND IT NAMES THE INSTRUMENT. fleet-look was built to back the observe clause, shipped,
+  # tested, and put on PATH — and nothing told a worker it existed. A mechanism nobody is
+  # told about is never reached, and from outside it looks exactly like an instruction
+  # nobody followed: the screen goes unopened either way. Asserted so the two cannot drift
+  # apart again — the clause and the command ship together or the suite says so.
+  is "...and names fleet-look"                "1" "$(argvhas 'fleet-look.mjs')"
+  is "...and the tree flag beside it"         "1" "$(argvhas 'add --tree')"
   # The user's own arguments must survive it — an array spliced into the wrong place
   # would eat them, and nothing else in the session would say so.
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
@@ -2242,6 +2249,46 @@ HTML
     is "the tree names a labelled control"  "1" "$(printf '%s' "$LKTREE" | grep -c 'textbox: message' || true)"
     is "...and the button by its role"      "1" "$(printf '%s' "$LKTREE" | grep -c 'button: send' || true)"
     is "...and it is off by default"        "0" "$(printf '%s' "$LKOK" | grep -c 'accessibility tree' || true)"
+
+    # ── the golden comparison ──────────────────────────────────────────────
+    # The best-evidenced instrument in the research (a reference lifted median precision
+    # from 34-50% to 100%, against 20% recall for open-ended looking) and the one most
+    # likely to be deleted: goldens drift on antialiasing and font rendering, and a check
+    # that is red for reasons nobody can read gets removed to make the suite quiet. So the
+    # assertions here are about the GUARDS, not just the verdict.
+    cat > "$LK/g.html" <<'HTML'
+<!doctype html><title>Golden</title><body style="margin:0;font:16px system-ui"><h1>hello</h1>
+HTML
+    G1="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 300 --height 200 --golden "$LK/ref.png" --out "$LK/g1.png" 2>&1)"
+    # A first run that silently WRITES a baseline is a run that can never fail, and the
+    # first one is the most likely to bake a bug in as the expectation. It must say so.
+    is "creating a baseline says so"        "1" "$(printf '%s' "$G1" | grep -c 'BASELINE CREATED' || true)"
+    is "...and says nothing was compared"   "1" "$(printf '%s' "$G1" | grep -c 'nothing was compared' || true)"
+
+    G2="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 300 --height 200 --golden "$LK/ref.png" --out "$LK/g2.png" 2>&1)"; G2RC=$?
+    is "an unchanged page matches"          "0" "$G2RC"
+    is "...and reports the fraction"        "1" "$(printf '%s' "$G2" | grep -c 'of pixels differ, allowed' || true)"
+
+    # The direction that matters: it must actually catch a change, or every row above is
+    # a green that proved nothing.
+    cat > "$LK/g.html" <<'HTML'
+<!doctype html><title>Golden</title><body style="margin:0;font:16px system-ui"><h1>hello</h1><p>an extra paragraph nobody asked for</p>
+HTML
+    G3="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 300 --height 200 --golden "$LK/ref.png" --out "$LK/g3.png" 2>&1)"; G3RC=$?
+    is "a changed page is caught"           "1" "$G3RC"
+    is "...and the pair is written on red"  "1" "$([ -f "$LK/expected.png" ] && [ -f "$LK/diff.png" ] && echo 1 || echo 0)"
+    is "...and their paths are printed"     "1" "$(printf '%s' "$G3" | grep -c 'differences in red' || true)"
+    # A reference taken on another browser build is a stale baseline, not a regression —
+    # so the build is named on every comparison, or the next reader misdiagnoses it.
+    is "...and the browser build is named"  "1" "$(printf '%s' "$G3" | grep -c 'chrome' || true)"
+    # A threshold, never equality: subpixel antialiasing moves channels by a few units on
+    # text the eye cannot tell apart, and counting those is how this gets deleted.
+    is "...the verdict is a fraction"       "1" "$(printf '%s' "$G3" | grep -cE '[0-9]+\.[0-9]+% of pixels differ' || true)"
+    # A different viewport is a stale baseline too, and must say which rather than red-ing
+    # with a pixel count that looks like a redesign.
+    G4="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 420 --height 200 --golden "$LK/ref.png" --out "$LK/g4.png" 2>&1)"; G4RC=$?
+    is "a resized reference is refused"     "1" "$G4RC"
+    is "...as a stale baseline, by name"    "1" "$(printf '%s' "$G4" | grep -c 'stale baseline' || true)"
   else
     skip "fleet-look happy path" "no chrome on this machine"
   fi
@@ -2285,6 +2332,39 @@ if command -v node >/dev/null 2>&1; then
      "$(printf '%s' " $SYNCD " | grep -c ' lib ' || true)"
 else
   skip "bin import sync" "node missing"
+fi
+
+# ── 4a10b6. nothing ships that the name sweep never read ─────────────────────
+# SEEN LIVE, ON npm. Version 0.1.0 shipped web/fixtures/ containing a third party's real
+# project and session names and captured terminal content, and npm tarballs are immutable:
+# no commit fixes a published one. The sweep reads every TRACKED file, and the tarball is
+# built from tracked files — so the two agree today by coincidence of overlap, not by
+# construction. Add one generated or untracked path to package.json's `files` and the
+# package ships something nothing ever swept, with no signal anywhere.
+#
+# So this asserts the overlap directly: every path npm would pack is a path git tracks.
+# Structural, so the NEXT addition is caught rather than this one.
+group "the npm package ships only files the sweep reads"
+if command -v npm >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  PKD="$(cd "$ROOT" && npm pack --dry-run --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{JSON.parse(s)[0].files.forEach(f=>console.log(f.path))}catch{}})')"
+  is "npm reports a file list at all"   "1" "$([ -n "$PKD" ] && echo 1 || echo 0)"
+  TRACKED="$(cd "$ROOT" && git ls-files)"
+  UNSWEPT=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in package.json|README.md|LICENSE) continue ;; esac   # npm adds these itself
+    printf '%s\n' "$TRACKED" | grep -qxF "$f" || UNSWEPT="$UNSWEPT $f"
+  done <<< "$PKD"
+  is "...and every packed path is tracked" "" "${UNSWEPT# }"
+  # Both directions: the check must be able to SEE an untracked path, or it is green by
+  # blindness — the exact shape this suite keeps finding elsewhere.
+  UNSWEPT2=""
+  for f in $(printf '%s\n' "$PKD" | head -3) "generated/not-tracked.json"; do
+    printf '%s\n' "$TRACKED" | grep -qxF "$f" || UNSWEPT2="$UNSWEPT2 $f"
+  done
+  is "...and it would notice an untracked one" "generated/not-tracked.json" "${UNSWEPT2# }"
+else
+  skip "npm package sweep" "npm or git missing"
 fi
 
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
@@ -5182,7 +5262,12 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   # phone renders from. Pinned as the whole key set on purpose — that is what caught the
   # addition and made it a decision instead of a drift.
   is "free_worktrees keys"              "path branch task removing" "$(JW_ 'Object.keys(o.free_worktrees[0]).join(" ")')"
-  is "...and `removing` is a boolean"   "boolean" "$(JW_ 'typeof o.free_worktrees[0].removing')"
+  # Single quotes around the NAME, not double: backticks inside a double-quoted string are
+  # command substitution, so the shell ran `removing` on every suite invocation, printed
+  # "command not found" into the log, and rendered this assertion's name with a hole where
+  # the word should be. It passed the whole time, which is why it survived — the failure
+  # was in the label, and nobody reads a label that is green.
+  is '...and `removing` is a boolean'   "boolean" "$(JW_ 'typeof o.free_worktrees[0].removing')"
   is "...false when nothing is going on" "false"  "$(JW_ 'String(o.free_worktrees[0].removing)')"
   # both directions: the two trees that must NOT be offered
   is "the main checkout is not free"    "0" "$(JW_ 'o.free_worktrees.filter(w=>w.path.endsWith("/proj")).length')"
