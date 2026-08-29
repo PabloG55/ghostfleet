@@ -2113,6 +2113,14 @@ if command -v git >/dev/null 2>&1; then
   # second product worked in after being told not to.
   is "...and the deliverable axis"            "1" "$(argvhas 'WHAT IS DELIVERED')"
   is "...and the target-repo axis"            "1" "$(argvhas 'WHICH repository or checkout')"
+  # The extraction clause, from the 19-of-36 bucket of requirements the human already
+  # held and never wrote down. Its shape is the load-bearing part: it demands the
+  # ASSUMPTION be stated, because "anything else I should know" is the saturated question
+  # — closing with a question moves the rework rate not at all — so both halves are
+  # asserted, the axes AND the refusal to just ask.
+  is "...and the extraction axes"             "1" "$(argvhas 'what the UNIT is')"
+  is "...and the reuse-not-recreate axis"     "1" "$(argvhas 'reuse instead of recreating')"
+  is "...and states an assumption, not a Q"   "1" "$(argvhas 'rather than asking whether anything is missing')"
   # The user's own arguments must survive it — an array spliced into the wrong place
   # would eat them, and nothing else in the session would say so.
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
