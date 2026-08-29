@@ -15,7 +15,7 @@
 [38;5;231m⏺[39m Independently confirmed. [38;5;153mgit log -S 'match") === "fuzzy"'[39m returns [1mexactly one[0m commit — [38;5;153m6338c994c[39m — and in it the guard is already [38;5;153mrequirePermission("contacts:read")[39m, identical to today. The param has had one guard since the moment it existed. Their comment, written a
   week later, was never true.
 
-  [38;5;246mPushed to [1minvestigate/broker-agency-dupe-source[0m[38;5;246m, ran [1m1[0m[38;5;246m shell command [39m
+  [38;5;246mPushed to [1minvestigate/duplicate-rows[0m[38;5;246m, ran [1m1[0m[38;5;246m shell command [39m
 [38;5;246m  ⎿  “Verified; took the fact, declined the re-ranking” → uds:/tmp/cc-socks/3481.sock[39m
 
 [38;5;231m⏺[39m Verified their archaeology in my own repo before taking it:
@@ -46,7 +46,7 @@
 
   ---
 
-  [1mWhere PR #1165 stands[0m
+  [1mWhere PR #42 stands[0m
 
   Six rounds with them. The PR now [1masserts materially less and defends all of it[0m. §1 — the canonical-key check on our own create path, 59% of the volume — is the one claim that survived every round without amendment, and remains the only place with proven canonical
   duplicates.
@@ -58,8 +58,8 @@
 
 [38;5;246m✻[39m [38;5;246mCogitated for 1m 31s[39m
 
-[38;5;37m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[38;5;16m[48;5;37m superkey/dupe-source [38;5;37m[49m─
+[38;5;37m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[38;5;16m[48;5;37m superkey/api-fix [38;5;37m[49m─
 [39m❯ 
 [38;5;37m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-[39m  [33mpablo@superkey.com[38;5;246m | [1m[37mSuperkey Fallback[0m[38;5;246m | [34mdupe-source[38;5;246m | [35m  investigate/broker-agency-dupe-source[38;5;246m | [36mOpus 5 (1M context)[38;5;246m | [1m[33mctx:60%[0m[38;5;246m | [1m[33m86%(12m)[0m[38;5;246m | [32m7d:18%(148h 32m)[39m
-  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · PR[39m [4m[38;5;246m]8;id=11maie;https://github.com/SuperkeyHQ/superkey/pull/1165\#1165[0m[38;5;246m]8;;\ · ← 1 agent[39m
+[39m  [33mpablo@example.com[38;5;246m | [1m[37mExample Account Fallback[0m[38;5;246m | [34mapi-fix[38;5;246m | [35m  investigate/duplicate-rows[38;5;246m | [36mOpus 5 (1M context)[38;5;246m | [1m[33mctx:60%[0m[38;5;246m | [1m[33m86%(12m)[0m[38;5;246m | [32m7d:18%(148h 32m)[39m
+  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · PR[39m [4m[38;5;246m]8;id=11maie;https://github.com/Example AccountHQ/superkey/pull/42\#42[0m[38;5;246m]8;;\ · ← 1 agent[39m

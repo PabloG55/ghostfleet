@@ -5668,7 +5668,7 @@ is "an empty bind is refused"              "no"  "$(verdict '')"
 # Cloudflare Tunnel's cloudflared connects to loopback.
 is "loopback is allowed"                   "yes" "$(verdict 127.0.0.1)"
 is "...including ::1"                      "yes" "$(verdict ::1)"
-is "the tailnet CGNAT range is allowed"    "yes" "$(verdict 100.108.68.93)"
+is "the tailnet CGNAT range is allowed"    "yes" "$(verdict 100.100.100.100)"
 is "...and the low end of 100.64/10"       "yes" "$(verdict 100.64.0.1)"
 is "...and the high end"                   "yes" "$(verdict 100.127.255.254)"
 is "...but 100.128.x is NOT in it"         "no"  "$(verdict 100.128.0.1)"
