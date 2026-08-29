@@ -2106,6 +2106,13 @@ if command -v git >/dev/null 2>&1; then
   is "...and carries the receipt clause"      "1" "$(argvhas 'before you start working')"
   is "...and the divergence clause"           "1" "$(argvhas 'would visibly differ')"
   is "...which is NOT ask-when-unsure"        "1" "$(argvhas 'Do not ask because you feel uncertain')"
+  # The two axes the first version missed. Written product-shaped ("different screens or
+  # different stored data"), the clause did not cover the readings that actually diverge
+  # in practice: WHAT is delivered, and WHERE it lands. Both were misread on the session
+  # that produced this contract — an analysis request read as a mandate to build, and a
+  # second product worked in after being told not to.
+  is "...and the deliverable axis"            "1" "$(argvhas 'WHAT IS DELIVERED')"
+  is "...and the target-repo axis"            "1" "$(argvhas 'WHICH repository or checkout')"
   # The user's own arguments must survive it — an array spliced into the wrong place
   # would eat them, and nothing else in the session would say so.
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
