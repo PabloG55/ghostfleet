@@ -2334,6 +2334,39 @@ else
   skip "bin import sync" "node missing"
 fi
 
+# ── 4a10b6. nothing ships that the name sweep never read ─────────────────────
+# SEEN LIVE, ON npm. Version 0.1.0 shipped web/fixtures/ containing a third party's real
+# project and session names and captured terminal content, and npm tarballs are immutable:
+# no commit fixes a published one. The sweep reads every TRACKED file, and the tarball is
+# built from tracked files — so the two agree today by coincidence of overlap, not by
+# construction. Add one generated or untracked path to package.json's `files` and the
+# package ships something nothing ever swept, with no signal anywhere.
+#
+# So this asserts the overlap directly: every path npm would pack is a path git tracks.
+# Structural, so the NEXT addition is caught rather than this one.
+group "the npm package ships only files the sweep reads"
+if command -v npm >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  PKD="$(cd "$ROOT" && npm pack --dry-run --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{JSON.parse(s)[0].files.forEach(f=>console.log(f.path))}catch{}}')"
+  is "npm reports a file list at all"   "1" "$([ -n "$PKD" ] && echo 1 || echo 0)"
+  TRACKED="$(cd "$ROOT" && git ls-files)"
+  UNSWEPT=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in package.json|README.md|LICENSE) continue ;; esac   # npm adds these itself
+    printf '%s\n' "$TRACKED" | grep -qxF "$f" || UNSWEPT="$UNSWEPT $f"
+  done <<< "$PKD"
+  is "...and every packed path is tracked" "" "${UNSWEPT# }"
+  # Both directions: the check must be able to SEE an untracked path, or it is green by
+  # blindness — the exact shape this suite keeps finding elsewhere.
+  UNSWEPT2=""
+  for f in $(printf '%s\n' "$PKD" | head -3) "generated/not-tracked.json"; do
+    printf '%s\n' "$TRACKED" | grep -qxF "$f" || UNSWEPT2="$UNSWEPT2 $f"
+  done
+  is "...and it would notice an untracked one" "generated/not-tracked.json" "${UNSWEPT2# }"
+else
+  skip "npm package sweep" "npm or git missing"
+fi
+
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
 # They are git worktrees like any other, so a stale one lands in the free-list looking
 # clean and sessionless. fleet-spawn then shadows itself: it offers a tree you cannot
@@ -5229,7 +5262,12 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   # phone renders from. Pinned as the whole key set on purpose — that is what caught the
   # addition and made it a decision instead of a drift.
   is "free_worktrees keys"              "path branch task removing" "$(JW_ 'Object.keys(o.free_worktrees[0]).join(" ")')"
-  is "...and `removing` is a boolean"   "boolean" "$(JW_ 'typeof o.free_worktrees[0].removing')"
+  # Single quotes around the NAME, not double: backticks inside a double-quoted string are
+  # command substitution, so the shell ran `removing` on every suite invocation, printed
+  # "command not found" into the log, and rendered this assertion's name with a hole where
+  # the word should be. It passed the whole time, which is why it survived — the failure
+  # was in the label, and nobody reads a label that is green.
+  is '...and `removing` is a boolean'   "boolean" "$(JW_ 'typeof o.free_worktrees[0].removing')"
   is "...false when nothing is going on" "false"  "$(JW_ 'String(o.free_worktrees[0].removing)')"
   # both directions: the two trees that must NOT be offered
   is "the main checkout is not free"    "0" "$(JW_ 'o.free_worktrees.filter(w=>w.path.endsWith("/proj")).length')"
