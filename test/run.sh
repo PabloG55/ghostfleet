@@ -2125,6 +2125,13 @@ if command -v git >/dev/null 2>&1; then
   # a feature built in thirty minutes took its last correction nearly three hours later —
   # "it should backfill the already created drafts". A migration, arriving as a clause.
   is "...and the retroactivity axis"          "1" "$(argvhas 'RETROACTIVELY to records that already exist')"
+  # THE REFERENCE. The brief behind that session named the goal, the prepared asset and
+  # three exact file:line locations — it was not thin — and still drew "make it bigger",
+  # "dont make it bold keep it the same pic", and a backfill. The first correction's own
+  # words were "look at a previous coi": the reference existed all along and arrived only
+  # after two wrong guesses. So this axis is asked, not hoped for.
+  is "...and the rendered-artifact axis"      "1" "$(argvhas 'RENDERED ARTIFACT')"
+  is "...which asks for an existing one"      "1" "$(argvhas 'whether there is an existing one to match')"
   # DO NOT WATCH THE PIPELINE. Same session: 173 tool calls between the finishing commit
   # and the first human word, 28 of them sleeps totalling ~16,000 seconds, against TWO
   # records touching anything that could render the artifact the feature was about.
