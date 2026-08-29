@@ -2135,7 +2135,14 @@ if command -v git >/dev/null 2>&1; then
   # DO NOT WATCH THE PIPELINE. Same session: 173 tool calls between the finishing commit
   # and the first human word, 28 of them sleeps totalling ~16,000 seconds, against TWO
   # records touching anything that could render the artifact the feature was about.
-  is "...and do not poll a pipeline"          "1" "$(argvhas 'do not sit and poll a pipeline')"
+  # The correction that matters is WHY, not whether. The first version said a watched run
+  # finishes no sooner — true, and not the cost. The human had stepped away, so the clock
+  # was never going to be shorter. The cost is that ENDING a turn is what fires the Stop
+  # hook, hence `done` in fleet-inbox and the push — so waiting held shut the one channel
+  # built to reach someone who left the desk. Assert the mechanism, or the clause decays
+  # back into a productivity slogan.
+  is "...and does not hold the turn open"     "1" "$(argvhas 'do not hold the turn open to wait')"
+  is "...because ending it is what notifies"  "1" "$(argvhas 'Ending the turn is what notifies')"
   # The user's own arguments must survive it — an array spliced into the wrong place
   # would eat them, and nothing else in the session would say so.
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
