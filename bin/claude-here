@@ -69,10 +69,35 @@ if [ -n "$_peer_proj" ] && [ -n "$_peer_sess" ]; then
   esac
 fi
 
+# THE OBSERVATION CONTRACT — the one standing instruction every fleet session carries.
+#
+# MEASURED, over a corpus of real work: of 172 build turns that changed a screen file,
+# 154 ran a test, lint or build and FOUR ever opened a browser — on exactly the surfaces
+# whose defects came back as photographs. And the toolchain was not buying safety: build
+# turns that ran a test drew a correction 39.6% of the time against 26.3% for turns that
+# ran nothing. (Confounded by change size, certainly — but it points the wrong way for
+# "run the tests and you are covered", which is the belief this contract is aimed at.)
+# The human's eyes were the only rendering-layer oracle the work had.
+#
+# WHY THE SYSTEM PROMPT AND NOT THE BRIEF. A brief is issued once and decays. The same
+# corpus holds an agent's own report — "Nobody has opened the UI. I've said this four
+# times and it's still true" — from a session where that instruction had already been
+# given. A system prompt is re-presented every turn, which is the whole difference
+# between a rule that is remembered and a rule that is in force. The subagent guard in
+# hooks/fleet-guard.sh is the same argument one step further: in front of the tool.
+#
+# Claude-only, deliberately: codex and opencode take no equivalent flag, so their
+# sessions keep today's behaviour rather than being handed an argument that is dropped.
+CONTRACT=()
+case "${CLAUDE_FLEET_NO_OBSERVE_CONTRACT:-0}" in
+  1|true|yes|on) ;;
+  *) CONTRACT=(--append-system-prompt 'Before you report work as done, state what you OBSERVED and what you could not check. Running the test suite is not observing the thing you changed. Name what you actually looked at - the rendered screen, the real command output, the stored row - and where you could not look, say which criterion is unchecked rather than letting it read as passed. An unchecked criterion named is worth more than a green that proved nothing.') ;;
+esac
+
 # A parallel session (grid `N`) is a deliberately NEW conversation in this dir —
 # never resume, even if the checkout already has one.
 case "${CLAUDE_FLEET_FRESH:-0}" in
-  1|true|yes|on) echo "claude-here: fresh parallel session in $PWD" >&2; exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "$@" ;;
+  1|true|yes|on) echo "claude-here: fresh parallel session in $PWD" >&2; exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "${CONTRACT[@]}" "$@" ;;
 esac
 
 enc="$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
@@ -139,7 +164,7 @@ if [ -n "$resume_id" ]; then
     FORK=(--fork-session)
   fi
   echo "claude-here: resuming $resume_id in $PWD" >&2
-  exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" --resume "$resume_id" "${FORK[@]}" "$@"
+  exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "${CONTRACT[@]}" --resume "$resume_id" "${FORK[@]}" "$@"
 fi
 echo "claude-here: no resumable conversation in $PWD — starting fresh" >&2
-exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "$@"
+exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "${CONTRACT[@]}" "$@"

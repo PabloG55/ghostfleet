@@ -2065,6 +2065,68 @@ else
   skip "subagent dispatch guard" "git or jq missing"
 fi
 
+# ── 4a10b3. every fleet session carries the observation contract ─────────────
+# MEASURED, and it is the reason this exists: of 172 build turns that changed a screen
+# file, 154 ran a test/lint/build and FOUR opened a browser — on exactly the surfaces
+# whose defects came back as photographs. Turns that ran a test drew a correction MORE
+# often than turns that ran nothing (39.6% vs 26.3%), so "the suite is green" was never
+# the observation it was being read as.
+#
+# It rides --append-system-prompt rather than the spawn brief because a brief is issued
+# once and decays; the corpus holds an agent reporting "I've said this four times and
+# it's still true" about an instruction it had already been given. So the assertion that
+# matters is that it reaches EVERY exec path, not just the fresh one — a contract that
+# is dropped on resume would be in force for a new worker and absent for every long-
+# running one, which is the half-working shape this repo keeps getting bitten by.
+group "the observation contract reaches claude"
+if command -v git >/dev/null 2>&1; then
+  OC="$(mktemp -d)"; mkdir -p "$OC/bin" "$OC/work" "$OC/.claude/projects"
+  # A stub claude that records its argv, so the exec is observable without a real one.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/argv"\n' "$OC" > "$OC/bin/claude"
+  chmod +x "$OC/bin/claude"
+  ch() { rm -f "$OC/argv"
+         ( cd "$OC/work" && env -u CLAUDE_FLEET_NO_OBSERVE_CONTRACT -u CLAUDE_FLEET_FRESH \
+             PATH="$OC/bin:$PATH" HOME="$OC" CLAUDE_CONFIG_DIR="$OC/.claude" "$@" \
+             bash "$ROOT/bin/claude-here" -- --some-user-arg >/dev/null 2>&1 ); }
+  # `-- ` is not decoration: claude-here's first positional is the SLOT, so a bare
+  # --some-user-arg is swallowed as a tab label and never reaches claude. Passing it
+  # wrongly the first time is what proved this assertion can fail.
+  argvhas() { grep -c -- "$1" "$OC/argv" 2>/dev/null || true; }
+
+  ch
+  is "a fresh session gets the contract"      "1" "$(argvhas '^--append-system-prompt$')"
+  is "...and it is about OBSERVING"           "1" "$(argvhas 'state what you OBSERVED')"
+  is "...and it names the test-suite trap"    "1" "$(argvhas 'not observing the thing you changed')"
+  # The user's own arguments must survive it — an array spliced into the wrong place
+  # would eat them, and nothing else in the session would say so.
+  is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
+
+  # The parallel-session path (grid `N`) is a SECOND exec, and it was the one most
+  # likely to be missed: it returns before the resume logic is ever reached.
+  ch CLAUDE_FLEET_FRESH=1
+  is "a parallel session gets it too"         "1" "$(argvhas '^--append-system-prompt$')"
+
+  # ── the direction that proves it is not simply always appended ──
+  ch CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1
+  is "the opt-out really opts out"            "0" "$(argvhas '^--append-system-prompt$')"
+  is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
+
+  # Every exec path in the file, counted rather than trusted: a fourth one added later
+  # without the array is exactly the silent half-coverage described above.
+  # NOT anchored to the start of the line. One of the three execs sits after an `echo`
+  # on the same line, so `^ *exec claude` counts two of three — and the assertion then
+  # compares 2 against 2 and goes green while blind to the parallel-session path, which
+  # is the one most likely to be missed. Caught by counting the file by hand; the
+  # anchored version could not have failed.
+  EXECS="$(grep -c 'exec claude "' "$ROOT/bin/claude-here" || true)"
+  WITHC="$(grep -c 'exec claude ".*CONTRACT\[@\]' "$ROOT/bin/claude-here" || true)"
+  is "there are three exec paths at all"      "3" "$EXECS"
+  is "...and every one carries the contract"  "$EXECS" "$WITHC"
+  rm -rf "$OC"
+else
+  skip "observation contract" "git missing"
+fi
+
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
 # They are git worktrees like any other, so a stale one lands in the free-list looking
 # clean and sessionless. fleet-spawn then shadows itself: it offers a tree you cannot
