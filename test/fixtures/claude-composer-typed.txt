@@ -5,7 +5,7 @@
 
   Ran 3 sxxxx cxxxxxxx
 
-⏺ Nxxxxxxxx sxxxxxxx the fxxxxx — sxxxxxx sxxxx 5 in the pxxxxxxx tab. Now the txxxx.
+⏺ Nxxxxxxxx sxxxxxxx the fxxxxx — sxxxxxx sxxxx 5 in the scratchx tab. Now the txxxx.
 
   Ran 10 sxxxx cxxxxxxx
 
@@ -15,40 +15,40 @@
 
 ⏺ Bxxxx E dxxxxxxxxxxxx now. Bxxxx C is cxxxxx by run.sh's row-xxxxx fxxxx rxxxxx than a nxxxx row — I'll dxxxxxxx that. Now the docs.
 
-  Cxxxxxxxx 0000000, pxxxxx to feat/xxxxxxxx-xxxx, cxxxxxx PR #76, ran 7 sxxxx cxxxxxxx
+  Cxxxxxxxx 0000000, pxxxxx to feat/composer-grid, cxxxxxx PR #76, ran 7 sxxxx cxxxxxxx
 
 ⏺ PR #76 is up — both CI legs gxxxx, Mxxxxxxxx, sxxxx Cxxxx. hxxxx://xxxxxx.com/xxxxxx55/xxxxxxx/w1/76
 
   The nxxxxxxxx trap — sxxxxxx from the sxxxxx, and it went the oxxxx way from the doc
 
-  proj_nth() in bin/xxxxxxx cxxxxx exxxx non-xxxxxxx line of the pxxxxxxx file and fxxxxxx by nxxxxxx; fxxxx-xxxx's pxxxxx() and fxxxx-xxxxx's /api/xxxxxxxx read the same list the same way. Txxxx is no pxxxxxx fxxxxx axxxxxxx on that path — so the dxxxx is gxxxxx
-  axxxxx pxxxxxxx, and the pxxxx's mxxxxx list has axxxxx axxxxx with the desk.
+  proj_nth() in bin/xxxxxxx cxxxxx exxxx non-xxxxxxx line of the scratchx file and fxxxxxx by nxxxxxx; fxxxx-xxxx's pxxxxx() and fxxxx-xxxxx's /api/xxxxxxxx read the same list the same way. Txxxx is no scratch fxxxxx axxxxxxx on that path — so the dxxxx is gxxxxx
+  axxxxx scratchx, and the pxxxx's mxxxxx list has axxxxx axxxxx with the desk.
 
-  So it's your sxxxxx oxxxxxx: the dxxxxx are gxxxxx and must stay gxxxxx. pxxxxxxxxxx() gets the ixxxx in the wxxxx list; the tab dxxxxxx only what is dxxxx.
+  So it's your sxxxxx oxxxxxx: the dxxxxx are gxxxxx and must stay gxxxxx. scratchxxxx() gets the ixxxx in the wxxxx list; the tab dxxxxxx only what is dxxxx.
 
   ┌─────┬─────────────────────────────────────────────────────────────────┬───────────────┬───────────┐
-  │     │                               all                               │     work      │ pxxxxxxx  │
+  │     │                               all                               │     work      │ scratchx  │
   ├─────┼─────────────────────────────────────────────────────────────────┼───────────────┼───────────┤
   │     │ 1 acme-api · 2 acme-web · 3 txxxxxx · 4 bxxxxxx-svc · 5 sxxxxxx │ 1 · 2 · 3 · 4 │ 5 sxxxxxx │
   └─────┴─────────────────────────────────────────────────────────────────┴───────────────┴───────────┘
 
-  docs/xxxxxxxxxx.md was wxxxx — it said the pxxxxxx dxxxx is "its pxxxxxxx in its pxxxxxx's list". Cxxxxxxxx in this PR, bxxxxxx that sxxxxxxx is pxxxxxxxx what wxxxx talk the next pxxxxx into a per-tab ixxxx.
+  docs/xxxxxxxxxx.md was wxxxx — it said the scratch dxxxx is "its scratchx in its scratch's list". Cxxxxxxxx in this PR, bxxxxxx that sxxxxxxx is scratchxx what wxxxx talk the next pxxxxx into a per-tab ixxxx.
 
   Rxxxxxx ixxxxx a tab
 
   I took your lean: one pxxxx is one vxxxxxx step, mxxxxx past hxxxxx nxxxxxxxxx. In the all tab exxxx nxxxxxxxx is vxxxxxx, so it rxxxxxx to the sxxxxx step it has axxxxx been — one code path. The cxxxxx is gxxxxx too, so sxxxxxxxx tabs mxxxx it onto sxxxxxxxx on
-  sxxxxx; axxxxx step bxxxxxx vxxxxxx pxxxxxxx, wxxxx dxxxxx dxxxxxxxxxxx stay gxxxxx bxxxxxx a dxxxx is an axxxxxx.
+  sxxxxx; axxxxx step bxxxxxx vxxxxxx scratchx, wxxxx dxxxxx dxxxxxxxxxxx stay gxxxxx bxxxxxx a dxxxx is an axxxxxx.
 
   The rest
 
-  No sxxxx when one pxxxxxx. Tabs dxxxxxx from the data, so a free-xxxx pxxxxxx gets its own and a bxxxx cxxxxx lxxxx in work like the desk puts it. A sxxxx tab fxxxx back to all txxxx over — a cxxxx on rxxxxxx and a fxxxxxxx in the fxxxxx — bxxxxxx the sxxxxx must
-  nxxxx be exxxx over a fxxxx that has pxxxxxxx.
+  No sxxxx when one scratch. Tabs dxxxxxx from the data, so a free-xxxx scratch gets its own and a bxxxx cxxxxx lxxxx in work like the desk puts it. A sxxxx tab fxxxx back to all txxxx over — a cxxxx on rxxxxxx and a fxxxxxxx in the fxxxxx — bxxxxxx the sxxxxx must
+  nxxxx be exxxx over a fxxxx that has scratchx.
 
-  Need-you cxxxx on the tab, only when non-xxxx. A tab is the only cxxxxxx here that can hide §1's axxxxx, and a bxxxxxx pxxxxxx in the pxxxxxx you aren't lxxxxxx at wxxxx be off sxxxxx with nxxxxxx to say so — the same fxxxxxx as "0 need you" over a bxxxxxx lead.
+  Need-you cxxxx on the tab, only when non-xxxx. A tab is the only cxxxxxx here that can hide §1's axxxxx, and a bxxxxxx scratch in the scratch you aren't lxxxxxx at wxxxx be off sxxxxx with nxxxxxx to say so — the same fxxxxxx as "0 need you" over a bxxxxxx lead.
 
   Two dxxxxxxxxxx
 
-  The rxxxxxx axxxxxxxx was vxxxxxx when I fxxxx wxxxx it — I fxxxx a kxxxxxx that nxxxxxx lxxxxxx for (the pxxxx has no ⇧xxxx; rxxxxxx is wxxxx to the pxxxxxx drag axxxx), so it pxxxxx with the fix and wxxxxxx it. It only bxxxxx a test once it dxxxx the real drag.
+  The rxxxxxx axxxxxxxx was vxxxxxx when I fxxxx wxxxx it — I fxxxx a kxxxxxx that nxxxxxx lxxxxxx for (the pxxxx has no ⇧xxxx; rxxxxxx is wxxxx to the scratch drag axxxx), so it pxxxxx with the fix and wxxxxxx it. It only bxxxxx a test once it dxxxx the real drag.
   That's the sxxxxx time this week the bxxxx-it-xxxxx rule cxxxxx a test of mine rxxxxx than code.
 
   The sxxxx-tab bxxxx is cxxxxx by run.sh's row-xxxxx fxxxx, not a nxxxx row — that bxxxx also kxxxx the hxxxxx dxxxxxxxxx, and a hxxxxx that dies exxxx nxxxxxx.
@@ -58,8 +58,8 @@
 
 ✻ Bxxxxx for 35m 48s
 
-────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── pxxxxxx/w1 ─
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── scratch/w1 ─
 ❯ Mxxxxx as 0000000 — axxxxxxx left you'd flag?
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  pxxxx@xxxxxxx.com | Exxxxxx Axxxxxx | gf-xxxxxx |   feat/xxxxxxxx-xxxx | Opus 5 (1M cxxxxxx) | ctx:60% | 26%(1h 35m) | 7d:34%(65h 35m)
-  ⏵⏵ bxxxxx pxxxxxxxxxx on (xxxxx+tab to cxxxx) · PR #76 · ← 1 axxxx
+  pablo@example.com | Example Account | gf-review |   feat/composer-grid | Opus 5 (1M context) | ctx:60% | 26%(1h 35m) | 7d:34%(65h 35m)
+  ⏵⏵ bypass permissions on (xxxxx+tab to cxxxx) · PR #76 · ← 1 agent

@@ -24,15 +24,15 @@
   sxxxx grep '❯' cxxxxxxx one.
 
   The half that mxxxx it dxxxxxxxx is the rxxxxxxx lxxxx. A skip dxxxxxxxxxxx dxxxx't sxxxx, rxxxxxxxx that "the next exxxx re-xxxxxx rxxxx away." That only hxxxx if axxxxxx exxxx cxxxx. When the last wxxxxx to fxxxxx gets sxxxxxx, nxxxxxx ever re-xxxxxx — you sit idle
-  with a DONE in the ixxxx and no rxxxxx to look. No exxxx, no row, nxxxxxx to grep. From your side it's ixxxxxxxxxxxxxxxx from no wxxxxx hxxxxx fxxxxxxx, wxxxx is the pxxxxxx fxxxxxx sxxxx your Cxxxxx.md kxxxx wxxxxxx axxxx.
+  with a DONE in the ixxxx and no rxxxxx to look. No exxxx, no row, nxxxxxx to grep. From your side it's ixxxxxxxxxxxxxxxx from no wxxxxx hxxxxx fxxxxxxx, wxxxx is the scratch fxxxxxx sxxxx your Cxxxxx.md kxxxx wxxxxxx axxxx.
 
-  w1 is on it, with both hxxxxx in the bxxxx and the rxxxxxxxxxx that the fxxxxxx txxxx pxxxx it in both dxxxxxxxxx — a gxxxx that axxxxx says "xxxxx" wxxxx pass a one-xxxxx test wxxxx re-xxxxxxxxxxx the mxxxxxx-xxxxxxxxxx bug it exxxxx to pxxxxxx.
+  w1 is on it, with both hxxxxx in the bxxxx and the rxxxxxxxxxx that the fxxxxxx txxxx pxxxx it in both dxxxxxxxxx — a gxxxx that axxxxx says "xxxxx" wxxxx pass a one-xxxxx test wxxxx re-xxxxxxxxxxx the mxxxxxx-xxxxxxxxxx bug it exxxxx to scratch.
 
-  Mxxxxxxxx #76 is mxxxxx — the pxxxxxxx tabs, with card nxxxxxx sxxxx mxxxxxx what Ctrl-f mxxxx. Main is at 0000000 and sxxxxx to the rxxxxxx; the pxxxx nxxxx axxxxxx sxxxx-xxxx rxxxxxxx to pick up the tabs.
+  Mxxxxxxxx #76 is mxxxxx — the scratchx tabs, with card nxxxxxx sxxxx mxxxxxx what Ctrl-f mxxxx. Main is at 0000000 and sxxxxx to the rxxxxxx; the pxxxx nxxxx axxxxxx sxxxx-xxxx rxxxxxxx to pick up the tabs.
 
   Sxxxx wxxxxxx on your call for #75 (the leak sxxxx) — mxxxx as-is, mxxxx wxxxxxx the cxxxxx-xxxxx cxxxxxxxxxx, or keep it uxxxxxxx.
 
-✻ Bxxxx for 3m 37s · 1 mxxxxxx sxxxx rxxxxxx
+✻ Bxxxx for 3m 37s · 1 message sxxxx rxxxxxx
 
 ✻ Cxxxxx rxxxxxxx /xxxx wxxxxx (Aug 24 10:41pm)
 
@@ -45,21 +45,21 @@
   Ran 1 sxxxx cxxxxxx
 
 ⏺ Mxxxxxx(xxxxxxx wxxxxx done/xxxx-you exxxxx (xxxxx file, bxxxxxxx the uxxxxxxxxx nxxxx))
-  ⎿  Mxxxxxx sxxxxxx · task bo61t6s6g · pxxxxxxxxx
+  ⎿  Mxxxxxx sxxxxxx · task bo61t6s6g · scratchxxx
 
 ⏺ Self-xxxxxx, and this rxxxx the wake sxxxxx cxxxxxx. Sxxxx I just pxxxxx the nxxxx sxxxxxxx dxxxx exxxxx, I've axxxx a Mxxxxxx txxxxxx the fxxxx ixxxx file dxxxxxxx (cf-xxxxxxx.xxxxx), fxxxxxxx to done and need-you. That bxxxxxxx the bxxxxx _xxxxx_xxxxx gate
   exxxxxxx — the ixxxx row was wxxxxxx cxxxxxxxx both txxxx a nxxxx went mxxxxxx, so the file is the rxxxxxxx sxxxxx and the push isn't.
 
-  This pass: nxxxxxx to mxxxx. #75 is the only open PR and I'm hxxxxxx it for your dxxxxxxx on wxxxxxx to pxxxxxx the cxxxxx-xxxxx cxxxxxxxxxx. w1 is mid-fix on the nxxxx bug; w1, ci and ixxxxxx-xxxxxx are idle with no qxxxxx work.
+  This pass: nxxxxxx to mxxxx. #75 is the only open PR and I'm hxxxxxx it for your dxxxxxxx on wxxxxxx to scratch the cxxxxx-xxxxx cxxxxxxxxxx. w1 is mid-fix on the nxxxx bug; w1, ci and ixxxxxx-xxxxxx are idle with no qxxxxx work.
 
-  Fxxxxxxx hxxxxxxxx bxxxx is long on pxxxxxx — the Mxxxxxx is now the pxxxxxx sxxxxx, so pxxxxxxx txxxx are just oxxxxxxx.
+  Fxxxxxxx hxxxxxxxx bxxxx is long on scratch — the Mxxxxxx is now the scratch sxxxxx, so scratchx txxxx are just oxxxxxxx.
 
 ⏺ Loop is live. #75 sxxxx nxxxx your call wxxxxxxx you want to give it — mxxxx as-is, mxxxx wxxxxxx the cxxxxx cxxxxxxxxxx, or lxxxx it uxxxxxxx as a lxxxx dxxxxxxx doc.
 
-✻ Bxxxx for 43s · 1 mxxxxxx sxxxx rxxxxxx
+✻ Bxxxx for 43s · 1 message sxxxx rxxxxxx
 
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ❯ 
 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  pxxxx@xxxxxxx.com | Exxxxxx Axxxxxx | pxxxxxx |   main | Opus 5 | ctx:18% | 30%(1h 18m) | 7d:35%(65h 18m)
-  ⏵⏵ bxxxxx pxxxxxxxxxx on · 1 mxxxxxx · ← 1 axxxx
+  pablo@example.com | Example Account | scratch |   main | Opus 5 | ctx:18% | 30%(1h 18m) | 7d:35%(65h 18m)
+  ⏵⏵ bypass permissions on · 1 message · ← 1 agent
