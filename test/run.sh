@@ -1975,15 +1975,94 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   WIRED="$(printf '%s' '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/mine"}]}]}}' \
     | jq -c --arg guard /G '.hooks.PreToolUse = ([ (.hooks.PreToolUse // [])[]
           | select([.hooks[]?.command] | index($guard) | not) ]
-        + [ { matcher: "EnterWorktree", hooks: [ { type: "command", command: $guard } ] } ])')"
+        + [ { matcher: "EnterWorktree|Agent|Task", hooks: [ { type: "command", command: $guard } ] } ])')"
   is "wiring keeps a foreign PreToolUse hook" "1" "$(printf '%s' "$WIRED" | grep -c '/mine' || true)"
   RE="$(printf '%s' "$WIRED" | jq -c --arg guard /G '.hooks.PreToolUse = ([ (.hooks.PreToolUse // [])[]
           | select([.hooks[]?.command] | index($guard) | not) ]
-        + [ { matcher: "EnterWorktree", hooks: [ { type: "command", command: $guard } ] } ])')"
+        + [ { matcher: "EnterWorktree|Agent|Task", hooks: [ { type: "command", command: $guard } ] } ])')"
   is "...and re-installing does not stack up" "1" "$(printf '%s' "$RE" | grep -o '/G' | grep -c . || true)"
   rm -rf "$GW"
 else
   skip "EnterWorktree guard" "git or jq missing"
+fi
+
+# ── 4a10b2. a subagent is not a worker ───────────────────────────────────────
+# The Agent tool (Task in older builds) does the work INSIDE the lead's own
+# conversation. It WORKS, which is why it goes unnoticed — and the fleet can see none
+# of it: no fleet-list row, no `done` in fleet-inbox, no fleet-worktrees entry, and the
+# governor parks SESSIONS so it cannot shed that usage when the account tightens.
+# Seen live: a lead reached for two subagents in a row while five workers sat live on
+# the project's own socket, and justified it by machine load — which is precisely the
+# call the governor exists to make and could not, because it could not see them.
+#
+# Both directions matter MORE here than for EnterWorktree. A guard that refused every
+# Agent call would break read-only research (nothing in fleet-spawn is shaped like it)
+# and would strand a WORKER, for whom fleet-spawn is already refused — leaving it no
+# way to fan out at all. So the passes below are the real assertions; the block is easy.
+group "a subagent is refused where a worker was meant"
+if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  SA="$(mktemp -d)"
+  git init -q -b main "$SA/repo" 2>/dev/null
+  git -C "$SA/repo" config user.email t@t; git -C "$SA/repo" config user.name t
+  : > "$SA/repo/f"; git -C "$SA/repo" add -A; git -C "$SA/repo" commit -qm init 2>/dev/null
+  git -C "$SA/repo" worktree add -q "$SA/wt-a" -b wt-a 2>/dev/null
+  # Clean env every time, same reasoning as the EnterWorktree group: the suite usually
+  # runs INSIDE a fleet, and an inherited $TMUX would decide "allowed outside a fleet".
+  sag() { local json="$1"; shift
+    SOUT="$(printf '%s' "$json" | env -u TMUX -u CLAUDE_FLEET_SOCK \
+      -u CLAUDE_FLEET_ALLOW_SUBAGENTS "$@" bash "$ROOT/hooks/fleet-guard.sh" 2>&1)"; SRC=$?; }
+  # tool_input carries subagent_type; the 4th arg is omitted for the default, unnamed
+  # type — which is the shape the real slip had, and must still be refused.
+  sj() { local ev="$1" tool="$2" cwd="$3" sub="${4:-}"
+    if [ -n "$sub" ]; then
+      printf '{"hook_event_name":"%s","tool_name":"%s","cwd":"%s","tool_input":{"subagent_type":"%s"}}' "$ev" "$tool" "$cwd" "$sub"
+    else
+      printf '{"hook_event_name":"%s","tool_name":"%s","cwd":"%s","tool_input":{}}' "$ev" "$tool" "$cwd"
+    fi; }
+  shas() { printf '%s' "$SOUT" | grep -c -- "$1" || true; }
+
+  sag "$(sj PreToolUse Agent "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "Agent is blocked in a lead session"     "2" "$SRC"
+  is "...and hands over fleet-spawn"          "1" "$(shas 'fleet-spawn <name> --reuse')"
+  is "...and says the fleet cannot see it"    "1" "$(shas 'fleet cannot see it')"
+  # Two different mistakes, two different pieces of advice. Neither may answer for the
+  # other: a lead told to re-run fleet-spawn because it typed EnterWorktree learns
+  # nothing, and this is how one guard growing a second job goes quietly wrong.
+  is "...and is NOT the EnterWorktree text"   "0" "$(shas 'MOVE THIS SESSION')"
+
+  sag "$(sj PreToolUse Task "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "Task (older builds) is blocked too"     "2" "$SRC"
+
+  # ── the directions that prove it is not "deny every subagent" ──
+  sag "$(sj PreToolUse Agent "$SA/repo" Explore)" CLAUDE_FLEET_SOCK=cf-x
+  is "read-only Explore passes"               "0" "$SRC"
+  sag "$(sj PreToolUse Agent "$SA/repo" Plan)" CLAUDE_FLEET_SOCK=cf-x
+  is "read-only Plan passes"                  "0" "$SRC"
+  sag "$(sj PreToolUse Agent "$SA/repo" general-purpose)" CLAUDE_FLEET_SOCK=cf-x
+  is "a type that BUILDS is still blocked"    "2" "$SRC"
+
+  # A WORKER may fan out. fleet-spawn refuses from a linked worktree, so refusing here
+  # too would leave a leaf with no way to delegate anything.
+  sag "$(sj PreToolUse Agent "$SA/wt-a")" CLAUDE_FLEET_SOCK=cf-x
+  is "a leaf's own subagents are allowed"     "0" "$SRC"
+
+  sag "$(sj PreToolUse Agent "$SA/repo")"
+  is "allowed outside a fleet"                "0" "$SRC"
+  is "...and stays silent there"              ""  "$SOUT"
+
+  sag "$(sj PreToolUse Agent "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_ALLOW_SUBAGENTS=1
+  is "the override is a real escape hatch"    "0" "$SRC"
+
+  sag "$(sj Stop Agent "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "only PreToolUse is inspected"           "0" "$SRC"
+
+  # …and the older refusal did not grow the newer one's advice.
+  sag "$(sj PreToolUse EnterWorktree "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "EnterWorktree is still blocked"         "2" "$SRC"
+  is "...and does NOT mention subagents"      "0" "$(shas 'subagent')"
+  rm -rf "$SA"
+else
+  skip "subagent dispatch guard" "git or jq missing"
 fi
 
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
