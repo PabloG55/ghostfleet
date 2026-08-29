@@ -131,10 +131,12 @@ export function candidates(line) {
 }
 
 // ── 1. the tree ───────────────────────────────────────────────────────────
-// EXEMPT, EXPLICITLY AND BY PATH — never by directory. These two are captured panes: real
-// terminal output recorded byte-for-byte, which several detector assertions match against.
-// Editing them is a different job with a different risk (and one of them holds more than a
-// name), so they are excluded pending that decision rather than silently rewritten.
+// EXEMPT, EXPLICITLY AND BY PATH — never by directory.
+//   TWO CAPTURED PANES USED TO BE HERE, and their removal is this list working rather than
+// this list shrinking. They were excluded "pending that decision"; the decision was taken
+// and they were sanitised to the placeholder vocabulary the other nine captures already
+// used. Section 2's still-contaminated assertion is what noticed: it went red on both the
+// moment they were clean, which is the check asking for its own exemption to be deleted.
 //   A path here is not a blanket pass. Section 2 asserts each one is STILL contaminated, so
 // an exemption that has been dealt with turns red and asks to be deleted instead of
 // quietly covering a file nobody has looked at in a year.
@@ -143,8 +145,6 @@ export function candidates(line) {
 // project is contacted, not a comment citing a case, so it is not something to rewrite in a
 // cleanup pass — flagged, exempt, and left to the person whose inbox it is.
 const EXEMPT = [
-  'test/fixtures/claude-working-pane-sgr.txt',
-  'test/fixtures/claude-idle-quoting-limit.txt',
   'CONTRIBUTING.md',
 ];
 
