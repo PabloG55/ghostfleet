@@ -294,6 +294,49 @@ const OVERFLOW = () => {
   return { over, past, boxes };
 };
 
+// ── the composer row, as a SHAPE ──────────────────────────────────────────
+// THE WIDTH WAS NEVER THE WHOLE QUESTION, and a suite that only asked about width was
+// green while the phone was unusable. `.composer` is `flex-wrap: wrap`, so a row that no
+// longer fits does not overflow — it WRAPS, and every width assertion in this file goes on
+// reading clean while the send button moves onto a line of its own under the text box.
+// Measured in this engine at 390px with the body at 53px (iOS AX5, which is where the
+// reporter has it): the composer was 296px tall and 148 of those sat between the bottom of
+// the text box and the bottom of the row. From the phone that is the whole of two separate
+// reports — "a large empty gap between the text box and the keyboard, about 150px" and
+// "the send button is clipped" — the gap and the button being the same 148px band seen
+// from either end, because with the keyboard up that band is exactly what the keyboard
+// covers. Identical at 320, 360, 375, 390, 393 and 430, so it was never a width the row
+// grew out of.
+//   So the row is asked what it IS: how many lines it takes, and how much of the screen
+// sits under the box you type in. Both are numbers, and both were unmeasured.
+const COMPOSER = () => {
+  const d = document.documentElement;
+  const c = document.querySelector('.composer');
+  if (!c) return null;
+  const kids = [...c.children].filter(n => getComputedStyle(n).display !== 'none');
+  const box = c.querySelector('textarea');
+  const go = [...c.querySelectorAll('button')].pop();
+  const r = (n) => n.getBoundingClientRect();
+  // One "line" per distinct flex row: group the children by top edge, allowing for the
+  // baseline jitter between a button and a textarea of different heights.
+  const tops = [];
+  for (const n of kids) {
+    const y = Math.round(r(n).top);
+    if (!tops.some(t => Math.abs(t - y) < 30)) tops.push(y);
+  }
+  return {
+    lines: tops.length,
+    height: Math.round(r(c).height),
+    // What is between the box and the bottom of the row. Nothing, when the row is one line.
+    under: Math.round(r(c).bottom - r(box).bottom),
+    goRight: Math.round(r(go).right),
+    goText: go.textContent.trim(),
+    // Is `send` beside the box or below it — the question the reporter's photograph asks.
+    goBeside: Math.round(r(go).top) < Math.round(r(box).bottom),
+    vw: d.clientWidth,
+  };
+};
+
 const clickText = (t) => evaluate((t) => {
   const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim().startsWith(t));
   if (!b) return false; b.click(); return true;
@@ -329,6 +372,14 @@ async function walk(w, h) {
       const m = await evaluate(OVERFLOW);
       is(`${w}px/${fs} ${label}: the page does not scroll sideways`, 0, m.over);
       is(`${w}px/${fs} ${label}: ...and every row fits its own box`, '', m.boxes.join(','));
+      // ...AND NOTHING IS PAST THE RIGHT EDGE AT THIS RUNG, which is the row that was
+      // missing. It was taken once, after the loop, with the font-size cleared — so the
+      // whole ladder was walked and then the one measurement that names a clipped control
+      // was made at the DEFAULT text size, the one size the reporter is not on. The two
+      // assertions above cannot stand in for it: the page cannot scroll (the app clips at
+      // the body as a backstop) and a wrapping row never exceeds its own box, so both go
+      // quiet on exactly the failure this file exists to catch.
+      is(`${w}px/${fs} ${label}: ...and nothing sits past the right edge`, '', m.past.join(','));
     }
     await evaluate(() => { document.body.style.fontSize = ''; return null; });
     await sleep(60);
@@ -360,17 +411,35 @@ async function walk(w, h) {
   await escSheet(); await sleep(250);
   await tapCard('─ 2 api-fix '); await sleep(1500);
   await at('session/chat');
-  // The two controls the photographs showed cut in half.
-  const edges = await evaluate(() => {
-    const d = document.documentElement;
-    const go = [...document.querySelectorAll('.composer button')].pop();
-    const dots = [...document.querySelectorAll('.sbar button')].find(b => b.textContent.trim() === '⋯');
-    const r = (n) => (n ? Math.round(n.getBoundingClientRect().right) : null);
-    return { vw: d.clientWidth, go: r(go), dots: r(dots), goText: go ? go.textContent.trim() : '' };
-  });
-  is(`${w}px the send button is inside the viewport`, true, edges.go != null && edges.go <= edges.vw);
-  is(`${w}px ...and it is the whole word`, 'send', edges.goText);
-  is(`${w}px the ⋯ button is inside the viewport`, true, edges.dots != null && edges.dots <= edges.vw);
+  // The two controls the photographs showed cut in half — AT EVERY TEXT SIZE, not only at
+  // this browser's default. Walking the ladder here rather than once at the end is the
+  // whole correction: `send` and `⋯` are the controls the reports are about, and they were
+  // being measured at the one size nobody reported a problem at.
+  for (const fs of LADDER) {
+    await evaluate((fs) => { document.body.style.fontSize = fs + 'px'; return null; }, fs);
+    await sleep(120);
+    const edges = await evaluate(() => {
+      const d = document.documentElement;
+      const dots = [...document.querySelectorAll('.sbar button')].find(b => b.textContent.trim() === '⋯');
+      return { dots: dots ? Math.round(dots.getBoundingClientRect().right) : null, vw: d.clientWidth };
+    });
+    const c = await evaluate(COMPOSER);
+    is(`${w}px/${fs} the send button is inside the viewport`, true, !!c && c.goRight <= c.vw);
+    is(`${w}px/${fs} ...and it is the whole word`, 'send', c ? c.goText : '');
+    is(`${w}px/${fs} the ⋯ button is inside the viewport`, true, edges.dots != null && edges.dots <= edges.vw);
+    // THE ROW IS ONE ROW. Pinning the composer's buttons to 14px — the rule `.sbar` has
+    // kept since the ⋯ went off the edge — is what holds this at every rung; the wrap
+    // stays underneath as a backstop, and a backstop that fires is a bug report.
+    is(`${w}px/${fs} the composer is one row`, 1, c ? c.lines : 0);
+    is(`${w}px/${fs} ...with send beside the box, not under it`, true, !!c && c.goBeside);
+    // ...AND THIS IS THE 150px. Whatever sits between the bottom of the box you type in
+    // and the bottom of the row is what the keyboard covers, and the reporter photographed
+    // 148 of it. A one-line row has none: the two controls are the same height as the box
+    // or shorter, so the number is 0 and any slack is the button's own padding.
+    is(`${w}px/${fs} ...and nothing is stacked under the text box`, true, !!c && c.under <= 8);
+  }
+  await evaluate(() => { document.body.style.fontSize = ''; return null; });
+  await sleep(90);
   // A DRAFT THE HEIGHT OF A PARAGRAPH. render() rebuilds this box on every poll, so the
   // height has to be re-applied on render and not only on a keystroke.
   const grew = await evaluate(() => {
