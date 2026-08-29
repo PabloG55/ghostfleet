@@ -83,6 +83,13 @@ is_sha() { case "$1" in *[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = 40 ]; }
 # copy only the runtime dirs (not .git / README / tests); preserve perms so the
 # exec bits survive. Mirror each dir so deletions in the repo propagate.
 #
+# `lib` is in this list because a bin that imports from it is only as installed as its
+# imports. fleet-look.mjs was linked onto PATH, passed thirteen assertions IN THE REPO,
+# and died on its first real invocation with ERR_MODULE_NOT_FOUND on lib/browser.mjs —
+# because the suite runs from the repo, where the import resolves, and the shipped command
+# runs from $DEST, where it did not. Green here, broken in the hand: the exact split this
+# whole file exists to close, arriving through a directory nobody had needed before.
+#
 # `web` is in this list because the phone client is a RUNTIME asset: fleet-serve serves
 # those static files from $DEST, not from the repo, so a client left out of the sync 404s
 # in the browser while every file on disk looks perfectly correct — the same shape of
@@ -101,7 +108,7 @@ is_sha() { case "$1" in *[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = 40 ]; }
 # CLAUDE.md was the thing asserting the trap had not happened.
 mkdir -p "$DEST" || { echo "cf-sync: cannot create $DEST" >&2; exit 1; }
 failed=""
-for d in bin tmux hooks mcp skill layouts web; do
+for d in bin lib tmux hooks mcp skill layouts web; do
   [ -d "$REPO/$d" ] || continue
   if command -v rsync >/dev/null 2>&1; then
     rsync -a --delete "$REPO/$d/" "$DEST/$d/"; rc=$?
