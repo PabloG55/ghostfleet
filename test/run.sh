@@ -2278,8 +2278,11 @@ if command -v node >/dev/null 2>&1; then
   # Both directions: the check must be able to SEE an import, or it is green by blindness.
   is "the check actually finds imports" "1" \
      "$(grep -c "from '\.\./lib/browser.mjs'" "$ROOT/bin/fleet-look.mjs" 2>/dev/null || echo 0)"
+  # NOT a case inside $( ): the `)` that ends a case PATTERN also ends the command
+  # substitution it sits in, and bash reports it as a syntax error at a line number in
+  # the middle of an assertion. Word-match on the padded list instead.
   is "...and lib is in the list it read" "1" \
-     "$(case " $SYNCD " in *" lib "*) echo 1 ;; *) echo 0 ;; esac)"
+     "$(printf '%s' " $SYNCD " | grep -c ' lib ' || true)"
 else
   skip "bin import sync" "node missing"
 fi
@@ -6882,7 +6885,13 @@ if sv_start web; then
 else
   skip "fleet-serve static" "server did not come up: $SV_WHY"
 fi
-is "cf-sync copies web/ to the runtime" "1" "$(grep -c 'for d in bin tmux hooks mcp skill layouts web' "$ROOT/bin/cf-sync" || true)"
+# WEB IS IN THE LIST — asked as membership, not as the list's exact spelling. The first
+# version grepped for the whole line, so it went red the day `lib` was legitimately added
+# and reported it as "cf-sync no longer copies web", which is a false statement about a
+# real change. A pinned string cannot tell an addition from a removal; membership can.
+CFSYNC_D="$(sed -n 's/^for d in \(.*\); do$/\1/p' "$ROOT/bin/cf-sync" | head -1)"
+is "cf-sync copies web/ to the runtime" "1" "$(printf '%s' " $CFSYNC_D " | grep -c ' web ' || true)"
+is "...and bin, which carries the rest" "1" "$(printf '%s' " $CFSYNC_D " | grep -c ' bin ' || true)"
 
 # ── cf-sync reports the truth about whether it synced ────────────────────────
 # It used to run rsync and never look at the status — `set -uo pipefail` has no `-e` — so
