@@ -51,7 +51,7 @@ are sitting in. When you finish a PR and are asked to start fresh work, re-branc
 you stand:
 
 ```bash
-git fetch origin && git checkout -B <new-branch> origin/main
+git fetch origin && git checkout -B <new-branch> origin/staging
 ```
 
 That is the whole operation: same worktree, same session, same dev-stack slot, and the
