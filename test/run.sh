@@ -2097,6 +2097,15 @@ if command -v git >/dev/null 2>&1; then
   is "a fresh session gets the contract"      "1" "$(argvhas '^--append-system-prompt$')"
   is "...and it is about OBSERVING"           "1" "$(argvhas 'state what you OBSERVED')"
   is "...and it names the test-suite trap"    "1" "$(argvhas 'not observing the thing you changed')"
+  # Three clauses, three measurements, asserted separately — a contract that silently
+  # lost one would still pass a test that only asked "is there a system prompt".
+  #   receipt:    30 of 50 measurable re-reports had NO file changed between the two
+  #               statements; the reporter could not see the agent working.
+  #   divergence: end-of-turn asking is saturated (25.6% of turns, no effect), so the
+  #               clause is about BEHAVIOURAL divergence, not felt uncertainty.
+  is "...and carries the receipt clause"      "1" "$(argvhas 'before you start working')"
+  is "...and the divergence clause"           "1" "$(argvhas 'would visibly differ')"
+  is "...which is NOT ask-when-unsure"        "1" "$(argvhas 'Do not ask because you feel uncertain')"
   # The user's own arguments must survive it — an array spliced into the wrong place
   # would eat them, and nothing else in the session would say so.
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"

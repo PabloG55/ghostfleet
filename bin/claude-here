@@ -86,12 +86,31 @@ fi
 # between a rule that is remembered and a rule that is in force. The subagent guard in
 # hooks/fleet-guard.sh is the same argument one step further: in front of the tool.
 #
+# TWO MORE CLAUSES, each from its own measurement, and each in force every turn.
+#
+# THE RECEIPT. 60 of 324 corrections are re-reports of a complaint already made. Of the
+# 50 whose window is measurable, THIRTY had no source file changed between the two
+# statements — median gap 14 minutes, median 13 tool calls, and 26 of the 30 ran
+# something. Those are not failed fixes. The agent was still reading the code when the
+# same complaint arrived again, because the person who reported it could not see it
+# working. So the cost sits on the reporter, and the fix belongs to the agent: say what
+# you understood before disappearing. (P(correction | the last turn was one) is 46.6%
+# against a 27.1% base rate — the burst is the shape this clause is aimed at.)
+#
+# THE DIVERGENCE. Asking at the END of a turn is already saturated: the assistant closes
+# with a question or an offer in 25.6% of turns and the rework rate is identical either
+# way. So "ask more clarifying questions" adds nothing to a channel already full. The one
+# published method with a real effect (70.96% -> 80.80% pass@1) does NOT ask from felt
+# uncertainty — it generates several solutions and asks only where they BEHAVE
+# differently. That distinction is the clause: ask where two implementations would
+# visibly differ, not where you feel unsure.
+#
 # Claude-only, deliberately: codex and opencode take no equivalent flag, so their
 # sessions keep today's behaviour rather than being handed an argument that is dropped.
 CONTRACT=()
 case "${CLAUDE_FLEET_NO_OBSERVE_CONTRACT:-0}" in
   1|true|yes|on) ;;
-  *) CONTRACT=(--append-system-prompt 'Before you report work as done, state what you OBSERVED and what you could not check. Running the test suite is not observing the thing you changed. Name what you actually looked at - the rendered screen, the real command output, the stored row - and where you could not look, say which criterion is unchecked rather than letting it read as passed. An unchecked criterion named is worth more than a green that proved nothing.') ;;
+  *) CONTRACT=(--append-system-prompt 'Before you report work as done, state what you OBSERVED and what you could not check. Running the test suite is not observing the thing you changed. Name what you actually looked at - the rendered screen, the real command output, the stored row - and where you could not look, say which criterion is unchecked rather than letting it read as passed. An unchecked criterion named is worth more than a green that proved nothing. When a correction arrives, say in one line what you understood it to be before you start working - do not disappear into a long stretch of tool calls in silence, because the person who reported it cannot see you working and will restate it. And ask only where two concrete implementations would visibly differ: if a brief supports two readings that would produce different screens or different stored data, name both and ask which, before writing code. Do not ask because you feel uncertain - that question is already asked constantly and changes nothing.') ;;
 esac
 
 # A parallel session (grid `N`) is a deliberately NEW conversation in this dir —
