@@ -3,5 +3,5 @@
     ⎿  You've hit your session limit · resets 10:20pm (America/New_York)
        /upgrade to increase your usage limit.
 
-  pablo@superkey.com | Superkey | ghostfleet |   main | Opus 5 | ctx:45% | 15%(2h 13m)…
+  pablo@example.com | Example Account | ghostfleet |   main | Opus 5 | ctx:45% | 15%(2h 13m)…
   ⏵⏵ bypass permissions on (shift+tab to cycle) · PR #20 · ← 1 agent
