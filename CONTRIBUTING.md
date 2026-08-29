@@ -71,5 +71,11 @@ changing anything load-bearing.
 
 ## Security
 
-Please do not open a public issue for a vulnerability. Email pablo@superkey.com instead,
-and give me a chance to fix it before it is public.
+Please do not open a public issue for a vulnerability. Use GitHub's private vulnerability
+reporting instead — the **Report a vulnerability** button under this repository's *Security*
+tab — which opens a private thread with the maintainer and gives me a chance to fix it before
+it is public.
+
+No address is published here on purpose: an email in a public file is scraped, and this one
+used to be a work address, which told a reader more about where the project lives than the
+security process needed them to know.

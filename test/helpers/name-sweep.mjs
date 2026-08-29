@@ -144,9 +144,12 @@ export function candidates(line) {
 // send a vulnerability report to. Where security mail goes is a decision about how this
 // project is contacted, not a comment citing a case, so it is not something to rewrite in a
 // cleanup pass — flagged, exempt, and left to the person whose inbox it is.
-const EXEMPT = [
-  'CONTRIBUTING.md',
-];
+// EMPTY, AND THAT IS THE POINT. Every path that was here has been dealt with rather than
+// permanently excused: two captured panes were sanitised, and CONTRIBUTING.md's security
+// contact was replaced by GitHub's private vulnerability reporting, so there is no address
+// in the tree to exempt. Section 2 asserted each entry was STILL contaminated, which is what
+// turned each one red the moment it was fixed and asked for its own deletion.
+const EXEMPT = [];
 
 const tracked = execFileSync('git', ['-C', ROOT, 'ls-files', '-z'], { encoding: 'utf8' })
   .split('\0').filter(Boolean);
