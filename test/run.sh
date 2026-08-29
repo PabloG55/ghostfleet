@@ -2128,8 +2128,9 @@ if command -v git >/dev/null 2>&1; then
   # THE REFERENCE. The brief behind that session named the goal, the prepared asset and
   # three exact file:line locations — it was not thin — and still drew "make it bigger",
   # "dont make it bold keep it the same pic", and a backfill. The first correction's own
-  # words were "look at a previous coi": the reference existed all along and arrived only
-  # after two wrong guesses. So this axis is asked, not hoped for.
+  # correction pointed at an earlier document of the same kind the product had already
+  # produced: a reference that existed all along and arrived only after two wrong
+  # guesses. So this axis is asked, not hoped for.
   is "...and the rendered-artifact axis"      "1" "$(argvhas 'RENDERED ARTIFACT')"
   is "...which asks for an existing one"      "1" "$(argvhas 'whether there is an existing one to match')"
   # DO NOT WATCH THE PIPELINE. Same session: 173 tool calls between the finishing commit

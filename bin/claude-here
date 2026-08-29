@@ -177,8 +177,9 @@ fi
 # ("make the signature bigger"). No fidelity constraint ("dont make it bold keep it the
 # same pic"). No retroactivity ("it should backfill the already created drafts").
 #
-# The sharpest detail is the first correction's own words: "look at a previous coi". The
-# reference EXISTED the whole time and reached the agent only after two wrong guesses. So
+# The sharpest detail is what the first correction pointed AT: an earlier document of the
+# same kind that the product had already produced — a reference that existed from the
+# start and reached the agent only after two wrong guesses. So
 # the axis is not "ask for a better description" — it is: when what you are changing comes
 # out as a rendered artifact, ask what it should look like and whether there is an existing
 # one to match. The asker almost always has it; nobody thinks to hand it over, because to
