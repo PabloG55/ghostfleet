@@ -2250,6 +2250,40 @@ else
   skip "fleet-look" "node missing"
 fi
 
+# ── 4a10b5. a bin is only as installed as the things it imports ──────────────
+# SEEN LIVE, and it is the repo-vs-runtime trap arriving through a directory nobody had
+# needed before. fleet-look.mjs was linked onto PATH, passed thirteen assertions, and died
+# on its first real invocation: ERR_MODULE_NOT_FOUND on lib/browser.mjs. The suite runs
+# from the REPO, where a relative import resolves; the shipped command runs from $DEST,
+# where cf-sync had never copied lib/ because no bin had ever imported from outside bin/.
+# Green here, broken in the hand — which is the split cf-sync exists to close.
+#
+# STRUCTURAL, not a list. It reads the imports out of the bins and asks whether each
+# directory is in the one cf-sync actually loops over, so the NEXT directory is caught
+# rather than only this one. (The doc-fixtures helper takes the same shape for the same
+# reason.) A hardcoded "lib is synced" would go green forever and prove nothing about
+# whatever gets added next.
+group "every dir a bin imports from is one cf-sync copies"
+if command -v node >/dev/null 2>&1; then
+  SYNCD="$(sed -n 's/^for d in \(.*\); do$/\1/p' "$ROOT/bin/cf-sync" | head -1)"
+  is "cf-sync's list is readable at all" "1" "$([ -n "$SYNCD" ] && echo 1 || echo 0)"
+  MISS=""
+  for f in "$ROOT"/bin/*.mjs; do
+    # every ../<dir>/ reached by a static import in that file
+    for d in $(grep -oE "from '\.\./[A-Za-z0-9_-]+/" "$f" 2>/dev/null | sed "s#from '\.\./##; s#/##" | sort -u); do
+      case " $SYNCD " in *" $d "*) ;; *) MISS="$MISS $(basename "$f"):$d" ;; esac
+    done
+  done
+  is "...and no bin imports outside it" "" "${MISS# }"
+  # Both directions: the check must be able to SEE an import, or it is green by blindness.
+  is "the check actually finds imports" "1" \
+     "$(grep -c "from '\.\./lib/browser.mjs'" "$ROOT/bin/fleet-look.mjs" 2>/dev/null || echo 0)"
+  is "...and lib is in the list it read" "1" \
+     "$(case " $SYNCD " in *" lib "*) echo 1 ;; *) echo 0 ;; esac)"
+else
+  skip "bin import sync" "node missing"
+fi
+
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
 # They are git worktrees like any other, so a stale one lands in the free-list looking
 # clean and sessionless. fleet-spawn then shadows itself: it offers a tree you cannot
