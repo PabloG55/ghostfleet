@@ -118,12 +118,31 @@ fi
 # differently. That distinction is the clause: ask where two implementations would
 # visibly differ, not where you feel unsure.
 #
+# THE EXTRACTION. The largest addressable bucket is 19 of 36 late requirements that were
+# "already known to the human and simply not said" — and the first reading of that was
+# that nothing could reach them, since a domain rule the asker holds does not look like
+# two readings to anyone else. Reading the 23 actual cases says otherwise: they are not
+# idiosyncratic, they recur on a few STRUCTURAL axes, and every one is askable without
+# knowing the domain. From the data: what the unit is (per line, per document, per
+# policy); whether an existing surface this must match, or an existing artifact it should
+# reuse instead of recreating; what must be true before the user may advance; whether a
+# list handed over is complete or will grow; who is eligible; and how a thing leaves.
+#
+# Two details decide the shape. First, "is there anything else I should know" is the
+# saturated question — it earns "no" and then a correction, which is measured: closing
+# with a question changes the rework rate not at all. So the clause requires the
+# ASSUMPTION to be stated, not the question asked; a wrong concrete answer gets corrected
+# where an open question does not. Second, MEASURED: the late requirement is usually the
+# same size as the feature — "host this stepper inside the other surface too" arrived at
+# #27 of 40 for a component built for one host — so the axes are cheap against what they
+# prevent. One of them was asked at #39 and again at #45 of the same 67-turn run.
+#
 # Claude-only, deliberately: codex and opencode take no equivalent flag, so their
 # sessions keep today's behaviour rather than being handed an argument that is dropped.
 CONTRACT=()
 case "${CLAUDE_FLEET_NO_OBSERVE_CONTRACT:-0}" in
   1|true|yes|on) ;;
-  *) CONTRACT=(--append-system-prompt 'Before you report work as done, state what you OBSERVED and what you could not check. Running the test suite is not observing the thing you changed. Name what you actually looked at - the rendered screen, the real command output, the stored row - and where you could not look, say which criterion is unchecked rather than letting it read as passed. An unchecked criterion named is worth more than a green that proved nothing. When a correction arrives, say in one line what you understood it to be before you start working - do not disappear into a long stretch of tool calls in silence, because the person who reported it cannot see you working and will restate it. And ask only where two concrete implementations would visibly differ: if a brief supports two readings that would produce different screens or different stored data, name both and ask which, before writing code. Do not ask because you feel uncertain - that question is already asked constantly and changes nothing. Two readings also differ when they differ in WHAT IS DELIVERED - an answer, a report, a change in the working tree, a pushed branch, an open PR, a deployment - or in WHICH repository or checkout the work lands in. Those are the readings least likely to be stated, because the person asking already knows which one they meant. Name them back before you start, not after.') ;;
+  *) CONTRACT=(--append-system-prompt 'Before you report work as done, state what you OBSERVED and what you could not check. Running the test suite is not observing the thing you changed. Name what you actually looked at - the rendered screen, the real command output, the stored row - and where you could not look, say which criterion is unchecked rather than letting it read as passed. An unchecked criterion named is worth more than a green that proved nothing. When a correction arrives, say in one line what you understood it to be before you start working - do not disappear into a long stretch of tool calls in silence, because the person who reported it cannot see you working and will restate it. And ask only where two concrete implementations would visibly differ: if a brief supports two readings that would produce different screens or different stored data, name both and ask which, before writing code. Do not ask because you feel uncertain - that question is already asked constantly and changes nothing. Two readings also differ when they differ in WHAT IS DELIVERED - an answer, a report, a change in the working tree, a pushed branch, an open PR, a deployment - or in WHICH repository or checkout the work lands in. Those are the readings least likely to be stated, because the person asking already knows which one they meant. Name them back before you start, not after. And before building anything with structure, state the structural assumptions you are making as concrete answers rather than asking whether anything is missing - an open question earns a yes and then a correction. The axes that recur: what the UNIT is (per line, per document, per policy); whether there is an EXISTING surface this must match or an existing artifact it should reuse instead of recreating; what must be TRUE before the user may advance; whether a list you were handed is COMPLETE or will grow; who is ELIGIBLE; and how a thing LEAVES. Answer the ones that apply in one line each and ask which are wrong.') ;;
 esac
 
 # A parallel session (grid `N`) is a deliberately NEW conversation in this dir —
