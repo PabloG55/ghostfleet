@@ -1975,15 +1975,180 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   WIRED="$(printf '%s' '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/mine"}]}]}}' \
     | jq -c --arg guard /G '.hooks.PreToolUse = ([ (.hooks.PreToolUse // [])[]
           | select([.hooks[]?.command] | index($guard) | not) ]
-        + [ { matcher: "EnterWorktree", hooks: [ { type: "command", command: $guard } ] } ])')"
+        + [ { matcher: "EnterWorktree|Agent|Task", hooks: [ { type: "command", command: $guard } ] } ])')"
   is "wiring keeps a foreign PreToolUse hook" "1" "$(printf '%s' "$WIRED" | grep -c '/mine' || true)"
   RE="$(printf '%s' "$WIRED" | jq -c --arg guard /G '.hooks.PreToolUse = ([ (.hooks.PreToolUse // [])[]
           | select([.hooks[]?.command] | index($guard) | not) ]
-        + [ { matcher: "EnterWorktree", hooks: [ { type: "command", command: $guard } ] } ])')"
+        + [ { matcher: "EnterWorktree|Agent|Task", hooks: [ { type: "command", command: $guard } ] } ])')"
   is "...and re-installing does not stack up" "1" "$(printf '%s' "$RE" | grep -o '/G' | grep -c . || true)"
   rm -rf "$GW"
 else
   skip "EnterWorktree guard" "git or jq missing"
+fi
+
+# ── 4a10b2. a subagent is not a worker ───────────────────────────────────────
+# The Agent tool (Task in older builds) does the work INSIDE the lead's own
+# conversation. It WORKS, which is why it goes unnoticed — and the fleet can see none
+# of it: no fleet-list row, no `done` in fleet-inbox, no fleet-worktrees entry, and the
+# governor parks SESSIONS so it cannot shed that usage when the account tightens.
+# Seen live: a lead reached for two subagents in a row while five workers sat live on
+# the project's own socket, and justified it by machine load — which is precisely the
+# call the governor exists to make and could not, because it could not see them.
+#
+# Both directions matter MORE here than for EnterWorktree. A guard that refused every
+# Agent call would break read-only research (nothing in fleet-spawn is shaped like it)
+# and would strand a WORKER, for whom fleet-spawn is already refused — leaving it no
+# way to fan out at all. So the passes below are the real assertions; the block is easy.
+group "a subagent is refused where a worker was meant"
+if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  SA="$(mktemp -d)"
+  git init -q -b main "$SA/repo" 2>/dev/null
+  git -C "$SA/repo" config user.email t@t; git -C "$SA/repo" config user.name t
+  : > "$SA/repo/f"; git -C "$SA/repo" add -A; git -C "$SA/repo" commit -qm init 2>/dev/null
+  git -C "$SA/repo" worktree add -q "$SA/wt-a" -b wt-a 2>/dev/null
+  # Clean env every time, same reasoning as the EnterWorktree group: the suite usually
+  # runs INSIDE a fleet, and an inherited $TMUX would decide "allowed outside a fleet".
+  sag() { local json="$1"; shift
+    SOUT="$(printf '%s' "$json" | env -u TMUX -u CLAUDE_FLEET_SOCK \
+      -u CLAUDE_FLEET_ALLOW_SUBAGENTS "$@" bash "$ROOT/hooks/fleet-guard.sh" 2>&1)"; SRC=$?; }
+  # tool_input carries subagent_type; the 4th arg is omitted for the default, unnamed
+  # type — which is the shape the real slip had, and must still be refused.
+  sj() { local ev="$1" tool="$2" cwd="$3" sub="${4:-}"
+    if [ -n "$sub" ]; then
+      printf '{"hook_event_name":"%s","tool_name":"%s","cwd":"%s","tool_input":{"subagent_type":"%s"}}' "$ev" "$tool" "$cwd" "$sub"
+    else
+      printf '{"hook_event_name":"%s","tool_name":"%s","cwd":"%s","tool_input":{}}' "$ev" "$tool" "$cwd"
+    fi; }
+  shas() { printf '%s' "$SOUT" | grep -c -- "$1" || true; }
+
+  sag "$(sj PreToolUse Agent "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "Agent is blocked in a lead session"     "2" "$SRC"
+  is "...and hands over fleet-spawn"          "1" "$(shas 'fleet-spawn <name> --reuse')"
+  is "...and says the fleet cannot see it"    "1" "$(shas 'fleet cannot see it')"
+  # Two different mistakes, two different pieces of advice. Neither may answer for the
+  # other: a lead told to re-run fleet-spawn because it typed EnterWorktree learns
+  # nothing, and this is how one guard growing a second job goes quietly wrong.
+  is "...and is NOT the EnterWorktree text"   "0" "$(shas 'MOVE THIS SESSION')"
+
+  sag "$(sj PreToolUse Task "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "Task (older builds) is blocked too"     "2" "$SRC"
+
+  # ── the directions that prove it is not "deny every subagent" ──
+  sag "$(sj PreToolUse Agent "$SA/repo" Explore)" CLAUDE_FLEET_SOCK=cf-x
+  is "read-only Explore passes"               "0" "$SRC"
+  sag "$(sj PreToolUse Agent "$SA/repo" Plan)" CLAUDE_FLEET_SOCK=cf-x
+  is "read-only Plan passes"                  "0" "$SRC"
+  sag "$(sj PreToolUse Agent "$SA/repo" general-purpose)" CLAUDE_FLEET_SOCK=cf-x
+  is "a type that BUILDS is still blocked"    "2" "$SRC"
+
+  # A WORKER may fan out. fleet-spawn refuses from a linked worktree, so refusing here
+  # too would leave a leaf with no way to delegate anything.
+  sag "$(sj PreToolUse Agent "$SA/wt-a")" CLAUDE_FLEET_SOCK=cf-x
+  is "a leaf's own subagents are allowed"     "0" "$SRC"
+
+  sag "$(sj PreToolUse Agent "$SA/repo")"
+  is "allowed outside a fleet"                "0" "$SRC"
+  is "...and stays silent there"              ""  "$SOUT"
+
+  sag "$(sj PreToolUse Agent "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_ALLOW_SUBAGENTS=1
+  is "the override is a real escape hatch"    "0" "$SRC"
+
+  sag "$(sj Stop Agent "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "only PreToolUse is inspected"           "0" "$SRC"
+
+  # …and the older refusal did not grow the newer one's advice.
+  sag "$(sj PreToolUse EnterWorktree "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "EnterWorktree is still blocked"         "2" "$SRC"
+  is "...and does NOT mention subagents"      "0" "$(shas 'subagent')"
+  rm -rf "$SA"
+else
+  skip "subagent dispatch guard" "git or jq missing"
+fi
+
+# ── 4a10b3. every fleet session carries the observation contract ─────────────
+# MEASURED, and it is the reason this exists: of 172 build turns that changed a screen
+# file, 154 ran a test/lint/build and FOUR opened a browser — on exactly the surfaces
+# whose defects came back as photographs. Turns that ran a test drew a correction MORE
+# often than turns that ran nothing (39.6% vs 26.3%), so "the suite is green" was never
+# the observation it was being read as.
+#
+# It rides --append-system-prompt rather than the spawn brief because a brief is issued
+# once and decays; the corpus holds an agent reporting "I've said this four times and
+# it's still true" about an instruction it had already been given. So the assertion that
+# matters is that it reaches EVERY exec path, not just the fresh one — a contract that
+# is dropped on resume would be in force for a new worker and absent for every long-
+# running one, which is the half-working shape this repo keeps getting bitten by.
+group "the observation contract reaches claude"
+if command -v git >/dev/null 2>&1; then
+  OC="$(mktemp -d)"; mkdir -p "$OC/bin" "$OC/work" "$OC/.claude/projects"
+  # A stub claude that records its argv, so the exec is observable without a real one.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/argv"\n' "$OC" > "$OC/bin/claude"
+  chmod +x "$OC/bin/claude"
+  ch() { rm -f "$OC/argv"
+         ( cd "$OC/work" && env -u CLAUDE_FLEET_NO_OBSERVE_CONTRACT -u CLAUDE_FLEET_FRESH \
+             PATH="$OC/bin:$PATH" HOME="$OC" CLAUDE_CONFIG_DIR="$OC/.claude" "$@" \
+             bash "$ROOT/bin/claude-here" -- --some-user-arg >/dev/null 2>&1 ); }
+  # `-- ` is not decoration: claude-here's first positional is the SLOT, so a bare
+  # --some-user-arg is swallowed as a tab label and never reaches claude. Passing it
+  # wrongly the first time is what proved this assertion can fail.
+  argvhas() { grep -c -- "$1" "$OC/argv" 2>/dev/null || true; }
+
+  ch
+  is "a fresh session gets the contract"      "1" "$(argvhas '^--append-system-prompt$')"
+  is "...and it is about OBSERVING"           "1" "$(argvhas 'state what you OBSERVED')"
+  is "...and it names the test-suite trap"    "1" "$(argvhas 'not observing the thing you changed')"
+  # Three clauses, three measurements, asserted separately — a contract that silently
+  # lost one would still pass a test that only asked "is there a system prompt".
+  #   receipt:    30 of 50 measurable re-reports had NO file changed between the two
+  #               statements; the reporter could not see the agent working.
+  #   divergence: end-of-turn asking is saturated (25.6% of turns, no effect), so the
+  #               clause is about BEHAVIOURAL divergence, not felt uncertainty.
+  is "...and carries the receipt clause"      "1" "$(argvhas 'before you start working')"
+  is "...and the divergence clause"           "1" "$(argvhas 'would visibly differ')"
+  is "...which is NOT ask-when-unsure"        "1" "$(argvhas 'Do not ask because you feel uncertain')"
+  # The two axes the first version missed. Written product-shaped ("different screens or
+  # different stored data"), the clause did not cover the readings that actually diverge
+  # in practice: WHAT is delivered, and WHERE it lands. Both were misread on the session
+  # that produced this contract — an analysis request read as a mandate to build, and a
+  # second product worked in after being told not to.
+  is "...and the deliverable axis"            "1" "$(argvhas 'WHAT IS DELIVERED')"
+  is "...and the target-repo axis"            "1" "$(argvhas 'WHICH repository or checkout')"
+  # The extraction clause, from the 19-of-36 bucket of requirements the human already
+  # held and never wrote down. Its shape is the load-bearing part: it demands the
+  # ASSUMPTION be stated, because "anything else I should know" is the saturated question
+  # — closing with a question moves the rework rate not at all — so both halves are
+  # asserted, the axes AND the refusal to just ask.
+  is "...and the extraction axes"             "1" "$(argvhas 'what the UNIT is')"
+  is "...and the reuse-not-recreate axis"     "1" "$(argvhas 'reuse instead of recreating')"
+  is "...and states an assumption, not a Q"   "1" "$(argvhas 'rather than asking whether anything is missing')"
+  # The user's own arguments must survive it — an array spliced into the wrong place
+  # would eat them, and nothing else in the session would say so.
+  is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
+
+  # The parallel-session path (grid `N`) is a SECOND exec, and it was the one most
+  # likely to be missed: it returns before the resume logic is ever reached.
+  ch CLAUDE_FLEET_FRESH=1
+  is "a parallel session gets it too"         "1" "$(argvhas '^--append-system-prompt$')"
+
+  # ── the direction that proves it is not simply always appended ──
+  ch CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1
+  is "the opt-out really opts out"            "0" "$(argvhas '^--append-system-prompt$')"
+  is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
+
+  # Every exec path in the file, counted rather than trusted: a fourth one added later
+  # without the array is exactly the silent half-coverage described above.
+  # NOT anchored to the start of the line. One of the three execs sits after an `echo`
+  # on the same line, so `^ *exec claude` counts two of three — and the assertion then
+  # compares 2 against 2 and goes green while blind to the parallel-session path, which
+  # is the one most likely to be missed. Caught by counting the file by hand; the
+  # anchored version could not have failed.
+  EXECS="$(grep -c 'exec claude "' "$ROOT/bin/claude-here" || true)"
+  WITHC="$(grep -c 'exec claude ".*CONTRACT\[@\]' "$ROOT/bin/claude-here" || true)"
+  is "there are three exec paths at all"      "3" "$EXECS"
+  is "...and every one carries the contract"  "$EXECS" "$WITHC"
+  rm -rf "$OC"
+else
+  skip "observation contract" "git missing"
 fi
 
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
