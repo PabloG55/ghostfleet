@@ -2144,6 +2144,13 @@ if command -v git >/dev/null 2>&1; then
   # back into a productivity slogan.
   is "...and does not hold the turn open"     "1" "$(argvhas 'do not hold the turn open to wait')"
   is "...because ending it is what notifies"  "1" "$(argvhas 'Ending the turn is what notifies')"
+  # AND IT NAMES THE INSTRUMENT. fleet-look was built to back the observe clause, shipped,
+  # tested, and put on PATH — and nothing told a worker it existed. A mechanism nobody is
+  # told about is never reached, and from outside it looks exactly like an instruction
+  # nobody followed: the screen goes unopened either way. Asserted so the two cannot drift
+  # apart again — the clause and the command ship together or the suite says so.
+  is "...and names fleet-look"                "1" "$(argvhas 'fleet-look.mjs')"
+  is "...and the tree flag beside it"         "1" "$(argvhas 'add --tree')"
   # The user's own arguments must survive it — an array spliced into the wrong place
   # would eat them, and nothing else in the session would say so.
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
