@@ -147,15 +147,26 @@ fi
 # six axes reaches it: it is not the unit, not parity, not reuse, not a gate, not
 # completeness, not eligibility. It is whether the change applies to what already exists.
 #
-# DO NOT WATCH THE PIPELINE. Measured on that same session: between the commit that
-# finished the feature and the first word from the human, 173 tool calls — 28 of them
-# sleeps totalling about sixteen thousand seconds, plus a dozen until-loops and ten gh
-# pr calls. Two records in that window touched a tool that could render the artifact the
-# whole feature was about. So the largest block of time in the session was spent watching
-# CI rather than looking at the thing built, and a run finishes no sooner for being
-# watched. It is already a known correction in this corpus — "dont stay watching a pr" is
-# one of twelve process-discipline corrections — which is the argument for putting it
-# somewhere it is re-presented rather than re-issued.
+# DO NOT HOLD THE TURN OPEN TO WAIT. Measured on that session: between the commit that
+# finished the feature and the first word from the human, 233 API calls, 71k output
+# tokens and 94M cache reads — 32% of the whole session's calls and 34% of its cache
+# reads — spent on 28 sleeps totalling ~16,000 seconds, a dozen until-loops and ten gh
+# pr calls. Two records in that window touched anything that could render the artifact
+# the feature was about.
+#
+# The first reading of this was that the agent wasted two hours. It did not: the human
+# had left the desk, so the wall-clock was never going to be shorter. THE COST IS
+# ELSEWHERE, and it is specific to running inside a fleet. A turn that stays alive never
+# ends, and it is the END of a turn that fires the Stop hook, which is what puts `done`
+# into fleet-inbox and sends the push. So the one mechanism built to reach someone who
+# stepped away was held shut by the very act of waiting for them — they came back to a
+# spinning pane and had to interrupt it, rather than finding a done waiting. A session
+# that sleeps also reads as WORKING to the governor, which parks sessions and cannot shed
+# one that looks busy.
+#
+# It is already a known correction in this corpus — "dont stay watching a pr" is one of
+# twelve process-discipline corrections — which is the argument for putting it somewhere
+# it is re-presented rather than re-issued.
 #
 # THE REFERENCE, and why it is not "write a better brief". The brief that produced that
 # three-hour session was a GOOD one: goal, the asset already prepared, three exact
@@ -178,7 +189,7 @@ fi
 CONTRACT=()
 case "${CLAUDE_FLEET_NO_OBSERVE_CONTRACT:-0}" in
   1|true|yes|on) ;;
-  *) CONTRACT=(--append-system-prompt 'Before you report work as done, state what you OBSERVED and what you could not check. Running the test suite is not observing the thing you changed. Name what you actually looked at - the rendered screen, the real command output, the stored row - and where you could not look, say which criterion is unchecked rather than letting it read as passed. An unchecked criterion named is worth more than a green that proved nothing. When a correction arrives, say in one line what you understood it to be before you start working - do not disappear into a long stretch of tool calls in silence, because the person who reported it cannot see you working and will restate it. And ask only where two concrete implementations would visibly differ: if a brief supports two readings that would produce different screens or different stored data, name both and ask which, before writing code. Do not ask because you feel uncertain - that question is already asked constantly and changes nothing. Two readings also differ when they differ in WHAT IS DELIVERED - an answer, a report, a change in the working tree, a pushed branch, an open PR, a deployment - or in WHICH repository or checkout the work lands in. Those are the readings least likely to be stated, because the person asking already knows which one they meant. Name them back before you start, not after. And before building anything with structure, state the structural assumptions you are making as concrete answers rather than asking whether anything is missing - an open question earns a yes and then a correction. The axes that recur: what the UNIT is (per line, per document, per policy); whether there is an EXISTING surface this must match or an existing artifact it should reuse instead of recreating; what must be TRUE before the user may advance; whether a list you were handed is COMPLETE or will grow; who is ELIGIBLE; and how a thing LEAVES; and whether the change applies RETROACTIVELY to records that already exist or only to new ones. And when what you are changing comes out as a RENDERED ARTIFACT - a PDF, a screen, an email, an export - ask what it should look like and whether there is an existing one to match, before you build it. The person asking usually has a reference and does not think to hand it over, because to them the answer is obvious; you will otherwise be told after guessing. Answer the ones that apply in one line each and ask which are wrong. Finally, do not sit and poll a pipeline. Start it, say you have started it, and either do something else or hand the turn back - a run does not finish sooner for being watched, and the time is better spent looking at what you built.') ;;
+  *) CONTRACT=(--append-system-prompt 'Before you report work as done, state what you OBSERVED and what you could not check. Running the test suite is not observing the thing you changed. Name what you actually looked at - the rendered screen, the real command output, the stored row - and where you could not look, say which criterion is unchecked rather than letting it read as passed. An unchecked criterion named is worth more than a green that proved nothing. When a correction arrives, say in one line what you understood it to be before you start working - do not disappear into a long stretch of tool calls in silence, because the person who reported it cannot see you working and will restate it. And ask only where two concrete implementations would visibly differ: if a brief supports two readings that would produce different screens or different stored data, name both and ask which, before writing code. Do not ask because you feel uncertain - that question is already asked constantly and changes nothing. Two readings also differ when they differ in WHAT IS DELIVERED - an answer, a report, a change in the working tree, a pushed branch, an open PR, a deployment - or in WHICH repository or checkout the work lands in. Those are the readings least likely to be stated, because the person asking already knows which one they meant. Name them back before you start, not after. And before building anything with structure, state the structural assumptions you are making as concrete answers rather than asking whether anything is missing - an open question earns a yes and then a correction. The axes that recur: what the UNIT is (per line, per document, per policy); whether there is an EXISTING surface this must match or an existing artifact it should reuse instead of recreating; what must be TRUE before the user may advance; whether a list you were handed is COMPLETE or will grow; who is ELIGIBLE; and how a thing LEAVES; and whether the change applies RETROACTIVELY to records that already exist or only to new ones. And when what you are changing comes out as a RENDERED ARTIFACT - a PDF, a screen, an email, an export - ask what it should look like and whether there is an existing one to match, before you build it. The person asking usually has a reference and does not think to hand it over, because to them the answer is obvious; you will otherwise be told after guessing. Answer the ones that apply in one line each and ask which are wrong. Finally, do not hold the turn open to wait - not for a pipeline, and not for a person. Start it, say you have started it, and END THE TURN. Ending the turn is what notifies: it fires the done event into the inbox and the push, so someone who stepped away is told. Sleeping in a loop tells nobody anything, spends a third of a session on nothing, and reads as working to the governor, which cannot shed a session that looks busy.') ;;
 esac
 
 # A parallel session (grid `N`) is a deliberately NEW conversation in this dir —
