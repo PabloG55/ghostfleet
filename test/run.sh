@@ -2346,7 +2346,7 @@ fi
 # Structural, so the NEXT addition is caught rather than this one.
 group "the npm package ships only files the sweep reads"
 if command -v npm >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
-  PKD="$(cd "$ROOT" && npm pack --dry-run --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{JSON.parse(s)[0].files.forEach(f=>console.log(f.path))}catch{}}')"
+  PKD="$(cd "$ROOT" && npm pack --dry-run --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{JSON.parse(s)[0].files.forEach(f=>console.log(f.path))}catch{}})')"
   is "npm reports a file list at all"   "1" "$([ -n "$PKD" ] && echo 1 || echo 0)"
   TRACKED="$(cd "$ROOT" && git ls-files)"
   UNSWEPT=""
