@@ -2173,6 +2173,82 @@ else
   skip "observation contract" "git missing"
 fi
 
+# ── 4a10b4. fleet-look: an instruction to observe needs something to observe WITH ─
+# MEASURED: of 172 build turns that changed a screen file, 154 ran a test, lint or build
+# and FOUR opened a browser. And the sessions where the human was the renderer are the
+# ones that iterated — 12 delivering sessions with no screenshot turn took 17 corrections
+# across 76 turns, against 215 across 671 for the 7 with fifteen or more.
+#
+# The assertion that carries this group is the REFUSAL. A 404 renders as a page and
+# photographs as a perfectly good PNG; a tool that hands that back lets "I looked at it"
+# mean nothing, which is §2.1's failure class arriving through the camera. So the
+# not-reachable case must exit non-zero and say why, and that is asserted before anything
+# about the happy path.
+group "fleet-look photographs, and refuses to photograph nothing"
+if command -v node >/dev/null 2>&1; then
+  LK="$(mktemp -d)"
+  cat > "$LK/p.html" <<'HTML'
+<!doctype html><title>Look probe</title><body style="margin:0"><button>send</button>
+HTML
+  cat > "$LK/a.html" <<'HTML'
+<!doctype html><title>Labelled</title><body style="margin:0">
+<input aria-label="message"><button>send</button>
+HTML
+  # NAMESPACED ON PURPOSE. The first version called one of these PASS — which is the
+  # harness's own pass COUNTER. ok() then ran PASS=$((PASS+1)) over a sentence, bash
+  # evaluated its words as an arithmetic expression, and a bare "at" from the message
+  # became an unbound variable that killed the whole run mid-group, after four green rows,
+  # with an error naming a line in the harness and no hint which group did it. A group can
+  # silently clobber the harness it reports into; prefix anything you define here.
+  #
+  # No Chrome: it must SAY so and fail, not quietly produce nothing and exit 0 — the
+  # skip-that-says-why discipline, in a bin rather than a helper. This case also could not
+  # be written at first, because $CHROME pointing at nothing fell THROUGH to another
+  # browser; that it was untestable was the bug.
+  NOCH="$(CHROME=/nonexistent/chrome node "$ROOT/bin/fleet-look.mjs" "$LK/p.html" 2>&1)"; NOCHRC=$?
+  is "no chrome fails rather than passing" "1" "$NOCHRC"
+  is "...and names the reason"             "1" "$(printf '%s' "$NOCH" | grep -c 'no chrome' || true)"
+
+  # Unreachable: an image IS produced (so it can be inspected) but the exit is non-zero
+  # and the message says a photograph of an error page is not an observation.
+  UNRE="$(node "$ROOT/bin/fleet-look.mjs" 'http://127.0.0.1:9/nope' 2>&1)"; UNRERC=$?
+  is "an unreachable page is an error"     "1" "$UNRERC"
+  is "...and says why, in those words"     "1" "$(printf '%s' "$UNRE" | grep -c 'not an observation' || true)"
+
+  # An image needs no renderer, and saying "rendered by nothing" is more honest than
+  # silently re-encoding it through a browser.
+  printf '\211PNG\r\n\032\n' > "$LK/x.png"
+  LKIMG="$(node "$ROOT/bin/fleet-look.mjs" "$LK/x.png" 2>&1)"
+  is "an image passes through"             "1" "$(printf '%s' "$LKIMG" | grep -c 'already an image' || true)"
+
+  # The happy path, only where there is a browser to walk it.
+  if node -e 'import("./lib/browser.mjs").then(m=>process.exit(m.findChrome()?0:1))' 2>/dev/null; then
+    OUTP="$LK/shot.png"
+    LKOK="$(node "$ROOT/bin/fleet-look.mjs" "$LK/p.html" --width 390 --height 300 --out "$OUTP" 2>&1)"; LKOKRC=$?
+    is "a local page is photographed"      "0" "$LKOKRC"
+    is "...and the status is printed"      "1" "$(printf '%s' "$LKOK" | grep -c 'http status   200' || true)"
+    is "...and the title, so a blank page shows" "1" "$(printf '%s' "$LKOK" | grep -c 'Look probe' || true)"
+    is "...and a real PNG lands on disk"   "PNG" "$(head -c4 "$OUTP" 2>/dev/null | tail -c3)"
+    # Scale 2 is deliberate: a phone-width shot at 1x is unreadable when a human opens it.
+    is "...at deviceScaleFactor 2"         "780" "$(node -e 'const b=require("fs").readFileSync(process.argv[1]);console.log(b.readUInt32BE(16))' "$OUTP" 2>/dev/null)"
+    # THE STRUCTURAL CHANNEL, and it is not decoration. Measured on real visual defects, a
+    # model asked whether a screen looks right recalls 20% of LAYOUT bugs and 14% of
+    # appearance ones; what fixed that in the same study was a reference image, not a
+    # better reader. "Is the control there, named and reachable" is a question about
+    # structure, and the tree answers it directly — so the assertion is that a labelled
+    # control comes back by its LABEL, which pixels cannot give at any resolution.
+    LKTREE="$(node "$ROOT/bin/fleet-look.mjs" "$LK/a.html" --tree --out "$LK/t.png" 2>&1)"
+    is "the tree names a labelled control"  "1" "$(printf '%s' "$LKTREE" | grep -c 'textbox: message' || true)"
+    is "...and the button by its role"      "1" "$(printf '%s' "$LKTREE" | grep -c 'button: send' || true)"
+    is "...and it is off by default"        "0" "$(printf '%s' "$LKOK" | grep -c 'accessibility tree' || true)"
+  else
+    skip "fleet-look happy path" "no chrome on this machine"
+  fi
+  rm -rf "$LK"
+else
+  skip "fleet-look" "node missing"
+fi
+
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
 # They are git worktrees like any other, so a stale one lands in the free-list looking
 # clean and sessionless. fleet-spawn then shadows itself: it offers a tree you cannot
