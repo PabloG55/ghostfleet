@@ -2132,6 +2132,15 @@ if command -v git >/dev/null 2>&1; then
   # produced: a reference that existed all along and arrived only after two wrong
   # guesses. So this axis is asked, not hoped for.
   is "...and the rendered-artifact axis"      "1" "$(argvhas 'RENDERED ARTIFACT')"
+  # CLOSING THE LOOP. Entry and observation were both governed and nothing joined them:
+  # an agent can truthfully report what it observed and still have built the wrong thing.
+  # Target measured at 23 of 79 agent-behaviour corrections ("that is not what I asked").
+  # Three halves asserted separately because each carries its own weight — restate the
+  # criteria, justify "met" by observation rather than by the code reading right, and say
+  # so when none were named, which is the only visible sign the asking half was skipped.
+  is "...and closes the loop at done"         "1" "$(argvhas 'CLOSE THE LOOP')"
+  is "...met because you LOOKED, not read"    "1" "$(argvhas 'because you looked at the thing it is about')"
+  is "...and admits when none were named"     "1" "$(argvhas 'the asking half did not happen')"
   is "...which asks for an existing one"      "1" "$(argvhas 'whether there is an existing one to match')"
   # DO NOT WATCH THE PIPELINE. Same session: 173 tool calls between the finishing commit
   # and the first human word, 28 of them sleeps totalling ~16,000 seconds, against TWO
