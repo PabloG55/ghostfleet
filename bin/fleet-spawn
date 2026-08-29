@@ -112,7 +112,7 @@ GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
   || { echo "fleet-spawn: not inside a git repo" >&2; exit 1; }
 # A WORKER MUST NOT SPAWN WORKERS. Run from inside a linked worktree, this would add
 # another worktree beside the one you are already sitting in — which is what happens
-# when a session finishes a PR, is told "branch off fresh main", and reaches for the
+# when a session finishes a PR, is told "branch off fresh staging", and reaches for the
 # orchestrate skill instead of just re-branching where it stands. The fleet's shape is
 # master in the main checkout and workers as leaves; nesting is never what was meant.
 #   A linked worktree has its own git-dir under the shared common dir; the main
@@ -125,7 +125,7 @@ if [ "${CLAUDE_FLEET_ALLOW_NESTED:-0}" != 1 ] \
     echo "  Spawning here would add another one beside it, which is almost never what was meant."
     echo
     echo "  Starting fresh work in THIS worktree — no new worktree, no new session:"
-    echo "      git fetch origin && git checkout -B <new-branch> origin/main"
+    echo "      git fetch origin && git checkout -B <new-branch> origin/staging"
     echo
     echo "  Really want another worker? Run it from the main checkout:"
     echo "      (cd ${_main:-<main checkout>} && fleet-spawn $NAME …)"

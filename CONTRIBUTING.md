@@ -39,6 +39,32 @@ yeses and new surface area is usually a no.
 If you would rather not write it up for a likely no, open a short issue asking first. That
 is a completely reasonable thing to do and I will not think less of the idea for it.
 
+## Branches
+
+**Open your PR against `staging`, not `main`.** `staging` is the default branch, so a
+plain `gh pr create` or the GitHub UI already picks it — this note is for anyone whose
+muscle memory says otherwise.
+
+| branch | what it is | how it moves |
+|---|---|---|
+| `staging` | where everything integrates; the default branch | one PR at a time, suite green on both platforms |
+| `main` | the publishable branch — what a release points at | only by a `staging` → `main` PR, at release time |
+
+Both are protected: a pull request is required and both suite legs (`ubuntu-latest`,
+`macos-latest`) must pass. Neither can be force-pushed or deleted.
+
+Required checks are deliberately **not** "strict" — you do not have to rebase onto the
+tip of `staging` before merging. This repo's whole subject is running agents in parallel,
+and a strict gate would make every merge invalidate every other open PR. The trade is
+real and worth naming: two PRs can each be green against an older `staging` and still
+break it together. That is what the push-triggered run on `staging` is for, and it is why
+a red `staging` belongs to whoever is around, not to whoever merged last.
+
+**Releases go `staging` → `main` as a merge commit, never a squash.** A squash would put
+a brand-new commit on `main` that shares no history with the branch it came from, so the
+*next* release would conflict with everything in between. A merge keeps `main` a genuine
+ancestor of `staging` and every release after it trivial.
+
 ## Pull requests
 
 Run the suite first:
