@@ -174,7 +174,11 @@ is('a bare CSI-looking string is text', '[31mnot a colour', A.render('[31mnot a 
 // the desk. (The first cut of the "loses no character" check above stripped only CSI and
 // so expected the URL to survive; the renderer was right and the check was wrong.)
 is('the capture really has an OSC 8 link', true, /\x1b\]8;id=/.test(WORKING));
-is('the link label survives', true, w.html.includes('#1165'));
+// The label is pinned to the fixture's own PR number, so sanitising that fixture moves
+// this line too. It stays a literal rather than being read back out of the capture:
+// deriving the expectation from the input under test is how an assertion starts
+// agreeing with whatever it is given.
+is('the link label survives', true, w.html.includes('#42'));
 is('...and the URL does not print', false, w.html.includes('github.com'));
 
 // ── 7. the escapes that are not colours ───────────────────────────────────
