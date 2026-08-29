@@ -2121,6 +2121,14 @@ if command -v git >/dev/null 2>&1; then
   is "...and the extraction axes"             "1" "$(argvhas 'what the UNIT is')"
   is "...and the reuse-not-recreate axis"     "1" "$(argvhas 'reuse instead of recreating')"
   is "...and states an assumption, not a Q"   "1" "$(argvhas 'rather than asking whether anything is missing')"
+  # RETROACTIVITY, and the reason it is here rather than in the first six: observed live,
+  # a feature built in thirty minutes took its last correction nearly three hours later —
+  # "it should backfill the already created drafts". A migration, arriving as a clause.
+  is "...and the retroactivity axis"          "1" "$(argvhas 'RETROACTIVELY to records that already exist')"
+  # DO NOT WATCH THE PIPELINE. Same session: 173 tool calls between the finishing commit
+  # and the first human word, 28 of them sleeps totalling ~16,000 seconds, against TWO
+  # records touching anything that could render the artifact the feature was about.
+  is "...and do not poll a pipeline"          "1" "$(argvhas 'do not sit and poll a pipeline')"
   # The user's own arguments must survive it — an array spliced into the wrong place
   # would eat them, and nothing else in the session would say so.
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
