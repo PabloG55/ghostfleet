@@ -69,7 +69,22 @@ body {
  * The shell fixes both: the page itself never scrolls, and the one region that does is a
  * flex child that owns its own scrollTop. 100dvh, not 100vh, because iOS counts the URL
  * bar in vh and the bottom of a 100vh column sits under it. */
-html.shell, html.shell body { height: 100%; overflow: hidden; }
+/* `overflow-x: clip`, NOT the `hidden` this shorthand used to set on both axes — and the
+ * difference is the whole of "the page still scrolls left to right with the keyboard open".
+ * Thirty lines above, this file forbids a sideways scroll and says exactly why the keyword
+ * matters: hidden makes the element a scroll CONTAINER, which HANDS the page a scrollport
+ * it does not want, where clip forbids the scroll instead of providing one. Then this rule
+ * — which applies to the grid, the projects list and the session screen, i.e. every screen
+ * anybody actually uses — quietly gave it back, because `overflow: hidden` is a shorthand
+ * and sets the x axis too. Measured in a real engine on the session screen: computed
+ * overflow-x was `hidden`, so the page was a horizontal scroller on precisely the screens
+ * the rule exists for.
+ *   Nothing in the app is wide enough to pan today (viewport-check measures that at six
+ * text sizes and two widths), so this is not what cut the send button — it is what turned
+ * anything marginally wide into a page you can slide, which is how the earlier round's
+ * "every element displaced 40px left" looked. The y axis stays `hidden`: the shell owns
+ * vertical scrolling and gives it to one child. */
+html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden; }
 /*   ...AND THE KEYBOARD IS NOT PART OF THE DYNAMIC VIEWPORT. That is the whole of the
  * remaining bug: on iOS the software keyboard does not shrink dvh, so this column stayed
  * full height, the keyboard covered its bottom, and the only move Safari had left was to
@@ -446,14 +461,28 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 /* `flex: 0 0 auto` on the row itself: under the shell this is a child of a full-height
  * flex COLUMN, where a growing box is a box the column is entitled to shrink back. That is
  * what capped the textarea at one line no matter what the grow code did. */
-/* WRAPS, since the camera arrived. Two controls and a box fit beside each other at every
- * ordinary text size and stop fitting at the accessibility ones — measured at 390px/53px,
- * the row wanted 422 of 374. The buttons drop to their own line there rather than being
- * squeezed or pushed off: `send` truncated to `se…` would be worse than a second row, and
- * capping the font would keep the word whole and unreadable to the person who asked for
- * big text. Caught by test/helpers/viewport-check.mjs the first time the button existed. */
-.composer { display: flex; flex-wrap: wrap; gap: .45em; align-items: flex-end; min-width: 0; flex: 0 0 auto;
-  padding: .5em .1em 0; border-top: 1px solid var(--hair); }
+/* THE CHROME DOES NOT SCALE WITH THE TEXT — the rule the session bar already keeps, and
+ * the one this row was left out of. A back chevron, a view switch and a ⋯ are pinned to
+ * 14px there because what an affordance needs to be is TAPPABLE, not proportional to
+ * somebody's reading preference. `send` and the camera are the same kind of thing, and
+ * they were the last controls in the app still sized in inherited `em`.
+ *   WHAT THAT COST, MEASURED at the largest accessibility text size (53px, iOS AX5) in a
+ * real engine: `send` alone was 204px wide and 124px TALL, the row no longer fit, and it
+ * wrapped — putting the send button on a line of its own UNDER the text box. From the
+ * phone that is a 148px band between the box you are typing in and the top of the
+ * keyboard, with the button that sends the message somewhere below the fold. Reported as
+ * two separate bugs, "a large empty gap between the text box and the keyboard" and "the
+ * send button is clipped", which are the same 148px seen from either end. Identical at
+ * 320, 360, 375, 390, 393 and 430px wide: the wrap is not a width the row grew out of,
+ * it is the row growing at all.
+ *   The wrap STAYS as the last resort, for the reason the session bar keeps its own: no
+ * text size anybody chooses may push a control off the screen. Pinned, it does not fire —
+ * the two buttons and the gaps come to 94px of a 304px row at the narrowest phone — and a
+ * backstop that never fires is what a backstop is for.
+ *   The gap and the row's padding are pinned with them. They are the spacing BETWEEN
+ * affordances, not text, and at 53px `.45em` was a 24px gutter either side of the box. */
+.composer { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-end; min-width: 0; flex: 0 0 auto;
+  padding: 7px 1px 0; border-top: 1px solid var(--hair); }
 /* Reported as the send button rendering "senc" — its last character past the right edge.
  * The textarea is the one thing here that may shrink, and the buttons must not: with every
  * child shrinkable the browser is free to take the width out of whichever it likes. */
@@ -473,9 +502,17 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
   flex: 1 1 auto; min-width: 0; resize: none; font: inherit; font-size: 15px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   background: #14181d; color: var(--fg); border: 1px solid var(--hair); border-radius: 12px;
-  padding: .5em .7em; max-height: 8em; line-height: 1.35;
+  /* THE SAME NUMBER AS COMPOSER_MAX_PX IN app.js, and it has to be: growComposer() caps
+   * the height it writes at that constant and this caps what the browser will honour, so
+   * the smaller of the two is the real ceiling. They were 160 and `8em` of a 15px font
+   * = 120, which meant the documented constant had been dead for everything above 120px
+   * — a growing box that stops for a reason nobody had written down. */
+  padding: .5em .7em; max-height: 120px; line-height: 1.35;
 }
-.composer button { padding: .5em .7em; }
+/* 14px, the same as `.sbar button` and for the same reason. This is the number that keeps
+ * the row one line high at every text size, so it is the one to change if the row ever has
+ * to grow — not the wrap above it. */
+.composer button { padding: .5em .7em; font-size: 14px; }
 .composer button.go { color: var(--bg); background: var(--green); border-color: var(--green); }
 /* Speaking is a toggle, and it says which state it is in — a play button that is really a
  * stop button is how you end up with two voices at once. */

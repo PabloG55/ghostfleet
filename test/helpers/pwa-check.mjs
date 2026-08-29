@@ -101,6 +101,16 @@ for (const ic of man.icons) {
 // CAN be measured (nothing past the right edge, at two widths and at 30px text); these
 // three are the declarations that were missing when the screenshots were taken.
 is('the page is forbidden to scroll sideways', true, /html, body \{ overflow-x: clip; \}/.test(CSS));
+// ...AND THE SHELL DOES NOT HAND IT BACK. The rule above is on bare `html, body`; the shell
+// screens — grid, projects, session, which is every screen anybody uses — then set
+// `overflow: hidden`, and that shorthand covers the x axis. hidden makes the element a
+// scroll container (this file says so, thirty lines up, as the reason for choosing clip in
+// the first place), so the page got its sideways scrollport straight back on the only
+// screens that matter. Measured in a real engine on the session screen: computed overflow-x
+// was `hidden`. Asserted as the absence of the shorthand rather than the presence of the
+// axis, because the shorthand is the mistake and it is the thing that will be typed again.
+is('...and the shell does not hand the scrollport back', false,
+   /html\.shell, html\.shell body \{[^}]*overflow:\s*hidden/.test(CSS));
 // ── the attachment limit is stated twice and must be one number ───────────
 // The server's copy is the control (an upload past it is refused there whatever the client
 // did); the client's is a courtesy that saves a phone from spending five megabytes over a
@@ -793,5 +803,58 @@ is('...and it sits behind the token gate', false,
 // which backend it is talking to.
 is('only api.js reads the backend setting', '',
    ['app.js', 'passkey.js', 'grid.js'].filter(f => /gf\.base/.test(JS[f])).join(','));
+
+// ── the chrome does not scale with the reader's text ──────────────────────
+// #79 pinned the session bar's controls to a fixed px size after the ⋯ walked off the
+// right edge of a phone with Dynamic Type turned up, and wrote the rule down: a name is
+// content and scales, a back chevron and a view switch are affordances and do not. The
+// composer was never brought under it, so when a camera button joined `send` there in the
+// same row, the two of them grew with somebody's reading preference until the row no
+// longer fit — and `flex-wrap` moved `send` onto a line of its own UNDER the text box.
+// Measured in a real engine at 390px/53px: a 296px composer with a 148px band between the
+// box you type in and the bottom of the row, which is what the keyboard covers.
+//   STRUCTURAL, because the wrap makes the failure invisible to a width check: a row that
+// wraps never exceeds its own box, so the page never scrolls and nothing is ever past the
+// right edge. viewport-check.mjs measures the consequence (one row, send beside the box);
+// this names the cause, so the next control added to either row cannot quietly reopen it.
+{
+  const noComments = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
+  const pinned = (sel) => {
+    const re = new RegExp('(?:^|[},])\\s*' + sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{([^}]*)\\}', 'g');
+    return [...noComments.matchAll(re)].some(m => /font-size:\s*\d+px/.test(m[1]));
+  };
+  for (const sel of ['.sbar button', '.composer button']) {
+    is(`${sel} is pinned to a px size, not the reader's`, true, pinned(sel));
+  }
+}
+
+// ── a timer may not repaint over a keyboard ───────────────────────────────
+// "the keyboard closes by itself after a while, and I had not typed anything." render()
+// empties #app, and a mobile browser lowers the keyboard when the focused node is
+// destroyed — so every render that fires on a TIMER rather than on a tap is a chance to
+// close a keyboard nobody was finished with. There were two: the 4.2s toast expiry, and
+// refresh()'s trailing render, which the 5s poll guards at the START of a request and
+// which then lands at the END of one, a whole round trip later.
+//   The rule is not "no render in a timer" — the poll itself legitimately renders, once it
+// has asked. It is that a timer callback which renders must ASK FIRST, through pollPaused()
+// or through renderUnlessTyping(), which is the deferring wrapper built for exactly this.
+// Brace-counted rather than line-matched: these callbacks are multi-line and a regex over
+// lines cannot see which `render()` is inside which timer.
+{
+  const src = JS['app.js'];
+  const offenders = [];
+  for (const m of src.matchAll(/\b(setTimeout|setInterval)\s*\(/g)) {
+    let i = m.index + m[0].length, depth = 1;
+    for (; i < src.length && depth > 0; i++) {
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')') depth--;
+    }
+    const body = src.slice(m.index, i);
+    if (/(?<![\w$.])render\(\)/.test(body) && !/pollPaused\(\)|renderUnlessTyping\(\)/.test(body)) {
+      offenders.push(m[1] + '@' + src.slice(0, m.index).split('\n').length);
+    }
+  }
+  is('no timer repaints without asking whether you are typing', '', offenders.join(','));
+}
 
 console.log(rows.join('\n'));
