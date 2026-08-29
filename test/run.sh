@@ -2249,6 +2249,46 @@ HTML
     is "the tree names a labelled control"  "1" "$(printf '%s' "$LKTREE" | grep -c 'textbox: message' || true)"
     is "...and the button by its role"      "1" "$(printf '%s' "$LKTREE" | grep -c 'button: send' || true)"
     is "...and it is off by default"        "0" "$(printf '%s' "$LKOK" | grep -c 'accessibility tree' || true)"
+
+    # ── the golden comparison ──────────────────────────────────────────────
+    # The best-evidenced instrument in the research (a reference lifted median precision
+    # from 34-50% to 100%, against 20% recall for open-ended looking) and the one most
+    # likely to be deleted: goldens drift on antialiasing and font rendering, and a check
+    # that is red for reasons nobody can read gets removed to make the suite quiet. So the
+    # assertions here are about the GUARDS, not just the verdict.
+    cat > "$LK/g.html" <<'HTML'
+<!doctype html><title>Golden</title><body style="margin:0;font:16px system-ui"><h1>hello</h1>
+HTML
+    G1="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 300 --height 200 --golden "$LK/ref.png" --out "$LK/g1.png" 2>&1)"
+    # A first run that silently WRITES a baseline is a run that can never fail, and the
+    # first one is the most likely to bake a bug in as the expectation. It must say so.
+    is "creating a baseline says so"        "1" "$(printf '%s' "$G1" | grep -c 'BASELINE CREATED' || true)"
+    is "...and says nothing was compared"   "1" "$(printf '%s' "$G1" | grep -c 'nothing was compared' || true)"
+
+    G2="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 300 --height 200 --golden "$LK/ref.png" --out "$LK/g2.png" 2>&1)"; G2RC=$?
+    is "an unchanged page matches"          "0" "$G2RC"
+    is "...and reports the fraction"        "1" "$(printf '%s' "$G2" | grep -c 'of pixels differ, allowed' || true)"
+
+    # The direction that matters: it must actually catch a change, or every row above is
+    # a green that proved nothing.
+    cat > "$LK/g.html" <<'HTML'
+<!doctype html><title>Golden</title><body style="margin:0;font:16px system-ui"><h1>hello</h1><p>an extra paragraph nobody asked for</p>
+HTML
+    G3="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 300 --height 200 --golden "$LK/ref.png" --out "$LK/g3.png" 2>&1)"; G3RC=$?
+    is "a changed page is caught"           "1" "$G3RC"
+    is "...and the pair is written on red"  "1" "$([ -f "$LK/expected.png" ] && [ -f "$LK/diff.png" ] && echo 1 || echo 0)"
+    is "...and their paths are printed"     "1" "$(printf '%s' "$G3" | grep -c 'differences in red' || true)"
+    # A reference taken on another browser build is a stale baseline, not a regression —
+    # so the build is named on every comparison, or the next reader misdiagnoses it.
+    is "...and the browser build is named"  "1" "$(printf '%s' "$G3" | grep -c 'chrome' || true)"
+    # A threshold, never equality: subpixel antialiasing moves channels by a few units on
+    # text the eye cannot tell apart, and counting those is how this gets deleted.
+    is "...the verdict is a fraction"       "1" "$(printf '%s' "$G3" | grep -cE '[0-9]+\.[0-9]+% of pixels differ' || true)"
+    # A different viewport is a stale baseline too, and must say which rather than red-ing
+    # with a pixel count that looks like a redesign.
+    G4="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 420 --height 200 --golden "$LK/ref.png" --out "$LK/g4.png" 2>&1)"; G4RC=$?
+    is "a resized reference is refused"     "1" "$G4RC"
+    is "...as a stale baseline, by name"    "1" "$(printf '%s' "$G4" | grep -c 'stale baseline' || true)"
   else
     skip "fleet-look happy path" "no chrome on this machine"
   fi
