@@ -69,10 +69,86 @@ if [ -n "$_peer_proj" ] && [ -n "$_peer_sess" ]; then
   esac
 fi
 
+# THE OBSERVATION CONTRACT — the one standing instruction every fleet session carries.
+#
+# MEASURED, over a corpus of real work: of 172 build turns that changed a screen file,
+# 154 ran a test, lint or build and FOUR ever opened a browser — on exactly the surfaces
+# whose defects came back as photographs. And the toolchain was not buying safety: build
+# turns that ran a test drew a correction 39.6% of the time against 26.3% for turns that
+# ran nothing. (Confounded by change size, certainly — but it points the wrong way for
+# "run the tests and you are covered", which is the belief this contract is aimed at.)
+# The human's eyes were the only rendering-layer oracle the work had.
+#
+# WHY THE SYSTEM PROMPT AND NOT THE BRIEF. A brief is issued once and decays. The same
+# corpus holds an agent's own report — "Nobody has opened the UI. I've said this four
+# times and it's still true" — from a session where that instruction had already been
+# given. A system prompt is re-presented every turn, which is the whole difference
+# between a rule that is remembered and a rule that is in force. The subagent guard in
+# hooks/fleet-guard.sh is the same argument one step further: in front of the tool.
+#
+# TWO MORE CLAUSES, each from its own measurement, and each in force every turn.
+#
+# THE RECEIPT. 60 of 324 corrections are re-reports of a complaint already made. Of the
+# 50 whose window is measurable, THIRTY had no source file changed between the two
+# statements — median gap 14 minutes, median 13 tool calls, and 26 of the 30 ran
+# something. Those are not failed fixes. The agent was still reading the code when the
+# same complaint arrived again, because the person who reported it could not see it
+# working. So the cost sits on the reporter, and the fix belongs to the agent: say what
+# you understood before disappearing. (P(correction | the last turn was one) is 46.6%
+# against a 27.1% base rate — the burst is the shape this clause is aimed at.)
+#
+# THE TWO AXES THE DIVERGENCE CLAUSE KEPT MISSING. Written as "two readings that would
+# produce different screens or different stored data", it is product-shaped, and the
+# readings that actually go wrong are not. MEASURED IN THIS REPO, on the session that
+# produced these commits: a lead was asked to work out what could have been done
+# differently, read it as a mandate to BUILD, and shipped a branch and a PR into another
+# product before being stopped — then, told to stay out of that product, proposed work in
+# it twice more. Two corrections, neither about what to build and both about what the
+# deliverable was and where it would land. It is the same shape as the corpus's largest
+# late-requirement bucket (19 of 36 "already known to the human and simply not said"):
+# the person asking knows which one they meant, so it never gets written down.
+# Weaker evidence than the three clauses above — one session plus a category — and worth
+# saying so rather than dressing n=1 as a measurement.
+#
+# THE DIVERGENCE. Asking at the END of a turn is already saturated: the assistant closes
+# with a question or an offer in 25.6% of turns and the rework rate is identical either
+# way. So "ask more clarifying questions" adds nothing to a channel already full. The one
+# published method with a real effect (70.96% -> 80.80% pass@1) does NOT ask from felt
+# uncertainty — it generates several solutions and asks only where they BEHAVE
+# differently. That distinction is the clause: ask where two implementations would
+# visibly differ, not where you feel unsure.
+#
+# THE EXTRACTION. The largest addressable bucket is 19 of 36 late requirements that were
+# "already known to the human and simply not said" — and the first reading of that was
+# that nothing could reach them, since a domain rule the asker holds does not look like
+# two readings to anyone else. Reading the 23 actual cases says otherwise: they are not
+# idiosyncratic, they recur on a few STRUCTURAL axes, and every one is askable without
+# knowing the domain. From the data: what the unit is (per line, per document, per
+# policy); whether an existing surface this must match, or an existing artifact it should
+# reuse instead of recreating; what must be true before the user may advance; whether a
+# list handed over is complete or will grow; who is eligible; and how a thing leaves.
+#
+# Two details decide the shape. First, "is there anything else I should know" is the
+# saturated question — it earns "no" and then a correction, which is measured: closing
+# with a question changes the rework rate not at all. So the clause requires the
+# ASSUMPTION to be stated, not the question asked; a wrong concrete answer gets corrected
+# where an open question does not. Second, MEASURED: the late requirement is usually the
+# same size as the feature — "host this stepper inside the other surface too" arrived at
+# #27 of 40 for a component built for one host — so the axes are cheap against what they
+# prevent. One of them was asked at #39 and again at #45 of the same 67-turn run.
+#
+# Claude-only, deliberately: codex and opencode take no equivalent flag, so their
+# sessions keep today's behaviour rather than being handed an argument that is dropped.
+CONTRACT=()
+case "${CLAUDE_FLEET_NO_OBSERVE_CONTRACT:-0}" in
+  1|true|yes|on) ;;
+  *) CONTRACT=(--append-system-prompt 'Before you report work as done, state what you OBSERVED and what you could not check. Running the test suite is not observing the thing you changed. Name what you actually looked at - the rendered screen, the real command output, the stored row - and where you could not look, say which criterion is unchecked rather than letting it read as passed. An unchecked criterion named is worth more than a green that proved nothing. When a correction arrives, say in one line what you understood it to be before you start working - do not disappear into a long stretch of tool calls in silence, because the person who reported it cannot see you working and will restate it. And ask only where two concrete implementations would visibly differ: if a brief supports two readings that would produce different screens or different stored data, name both and ask which, before writing code. Do not ask because you feel uncertain - that question is already asked constantly and changes nothing. Two readings also differ when they differ in WHAT IS DELIVERED - an answer, a report, a change in the working tree, a pushed branch, an open PR, a deployment - or in WHICH repository or checkout the work lands in. Those are the readings least likely to be stated, because the person asking already knows which one they meant. Name them back before you start, not after. And before building anything with structure, state the structural assumptions you are making as concrete answers rather than asking whether anything is missing - an open question earns a yes and then a correction. The axes that recur: what the UNIT is (per line, per document, per policy); whether there is an EXISTING surface this must match or an existing artifact it should reuse instead of recreating; what must be TRUE before the user may advance; whether a list you were handed is COMPLETE or will grow; who is ELIGIBLE; and how a thing LEAVES. Answer the ones that apply in one line each and ask which are wrong.') ;;
+esac
+
 # A parallel session (grid `N`) is a deliberately NEW conversation in this dir —
 # never resume, even if the checkout already has one.
 case "${CLAUDE_FLEET_FRESH:-0}" in
-  1|true|yes|on) echo "claude-here: fresh parallel session in $PWD" >&2; exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "$@" ;;
+  1|true|yes|on) echo "claude-here: fresh parallel session in $PWD" >&2; exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "${CONTRACT[@]}" "$@" ;;
 esac
 
 enc="$(printf '%s' "$PWD" | sed 's#[/.]#-#g')"
@@ -139,7 +215,7 @@ if [ -n "$resume_id" ]; then
     FORK=(--fork-session)
   fi
   echo "claude-here: resuming $resume_id in $PWD" >&2
-  exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" --resume "$resume_id" "${FORK[@]}" "$@"
+  exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "${CONTRACT[@]}" --resume "$resume_id" "${FORK[@]}" "$@"
 fi
 echo "claude-here: no resumable conversation in $PWD — starting fresh" >&2
-exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "$@"
+exec claude "${YOLO[@]}" "${MODEL[@]}" "${NAME[@]}" "${CONTRACT[@]}" "$@"
