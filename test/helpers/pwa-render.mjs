@@ -47,7 +47,7 @@ const TEXTUAL = new Set(['input', 'textarea', 'select']);
 const ROW_H = 100;   // one card is five lines; one bubble is about the same
 class Node_ {
   constructor(tag) {
-    this.tag = tag; this.kids = []; this.attrs = {}; this.listeners = {};
+    this.tag = tag; this.kids = []; this.attrs = {}; this.listeners = {}; this.parent = null;
     this.className = ''; this._text = null; this.value = ''; this.checked = false;
     this._top = 0; this.scrollLeft = 0; this.clientHeight = ROW_H * 4;
     this.style = { cssText: '', setProperty() {} };
@@ -70,7 +70,12 @@ class Node_ {
     this._top = next;
     queueMicrotask(() => { for (const f of this.listeners.scroll || []) f({ type: 'scroll' }); });
   }
-  set textContent(v) { this.kids.length = 0; this._text = String(v); }
+  // `app.textContent = ''` is how render() empties the screen, so this is where a composer
+  // stops being part of the document. It DETACHES rather than merely forgetting: a child
+  // left holding a parent pointer to a node that no longer holds it back would report
+  // itself connected forever, and "is this element still in the document" is the exact
+  // question two guards in app.js now ask.
+  set textContent(v) { for (const k of this.kids) k.parent = null; this.kids.length = 0; this._text = String(v); }
   // The whole subtree's text, which is what "the lock screen says X" means.
   get textContent() {
     if (this._text != null && !this.kids.length) return this._text;
@@ -86,10 +91,10 @@ class Node_ {
   // message one level deeper than the browser does, which is the level the assertions
   // below count at.
   appendChild(k) {
-    if (k && k.tag === '#fragment') { for (const c of k.kids) this.kids.push(c); k.kids.length = 0; return k; }
-    this.kids.push(k); return k;
+    if (k && k.tag === '#fragment') { for (const c of k.kids) { c.parent = this; this.kids.push(c); } k.kids.length = 0; return k; }
+    k.parent = this; this.kids.push(k); return k;
   }
-  remove() {}
+  remove() { if (this.parent) { this.parent.kids = this.parent.kids.filter(k => k !== this); this.parent = null; } }
   setPointerCapture() {} releasePointerCapture() {}   // the drag calls these; nothing to capture here
   // Records the focused node on the document too, not just a flag on itself: the poll
   // guard asks `document.activeElement === composerNode`, which is the only way to
@@ -97,6 +102,21 @@ class Node_ {
   focus() { this.focused = true; try { documentStub.activeElement = this; } catch {} }
   blur()  { this.focused = false; try { if (documentStub.activeElement === this) documentStub.activeElement = null; } catch {} }
   get firstChild() { return this.kids[0] || null; }
+  // The DOM spells it this way and app.js reads it that way — pollPaused() asks the focused
+  // element what it IS before it asks anything else, and a stub with only a lowercase `tag`
+  // would answer "not a textarea" to every question and pass the guard by never firing.
+  get tagName() { return String(this.tag || '').toUpperCase(); }
+  get parentElement() { return this.parent; }
+  get parentNode() { return this.parent; }
+  // ATTACHED TO THE DOCUMENT, walked rather than flagged — the same answer the DOM's own
+  // `isConnected` gives, and modelled for the same reason scrollTop is modelled above: the
+  // geometry IS the bug. app.js refuses to let a detached element write state or hold the
+  // poll, and a stub that answered `true` for everything would make both guards untestable
+  // while looking like it had tested them.
+  get isConnected() {
+    for (let e = this; e; e = e.parent) if (e === documentStub.documentElement) return true;
+    return false;
+  }
   getBoundingClientRect() { return { width: 800, height: 20 }; }   // 8px per column, at 100px
   // A comma-separated tag list is the only selector app.js uses (renderSheet's first field).
   querySelector(sel) {
@@ -141,6 +161,14 @@ const documentStub = {
     : []),
   addEventListener() {},
 };
+// ...AND THE TWO HOSTS ARE IN THE DOCUMENT. `#app` and `#sheet` are elements a real page
+// serves inside <body>; here they were free-floating, which made every node in the app
+// permanently detached and `isConnected` a constant `false`. Rooting them is what turns
+// that getter into a measurement instead of an opinion.
+documentStub.documentElement.appendChild(documentStub.body);
+documentStub.body.appendChild(app);
+documentStub.body.appendChild(sheetHost);
+
 const winListeners = {};
 const fireWindow = (ev) => { for (const f of winListeners[ev] || []) f({ type: ev }); };
 // THE GESTURE, both halves. A swipe pops the entry and then fires popstate; firing alone
@@ -863,6 +891,107 @@ is('...then the transcript claims it', true, await until(() =>
   !app.find(n => n.className.split(/\s+/).includes('pending')), 8000));
 is('...and it is still on screen, as a real turn', true,
    app.all(n => n.className.split(/\s+/).includes('bub')).some(n => /run the suite and report back/.test(n.textContent)));
+
+// ── a node the app has thrown away cannot write the app's state ──────────
+// THE MESSAGE THAT ARRIVED CARRYING THE PREVIOUS MESSAGE'S TEXT. Reported with a
+// photograph of two bubbles: a sent one holding a photo path and a sentence, and under it
+// a second one holding that same path, that same sentence AND a new photo's path — a draft
+// that had been cleared, sent, and then came back.
+//
+// THE TRIGGER IS iOS AND THE INVARIANT IS NOT. Tapping send blurs the box, and a blur is
+// when the iOS keyboard COMMITS whatever marked or predictive text it was holding — which
+// fires one last `input` event. By then sendDraft() has emptied S.draft and render() has
+// replaced the composer, so that event lands on a detached node whose `.value` is still the
+// old message, and the listener wrote it straight back into the app. No desktop engine
+// commits predictive text, so the trigger cannot be reproduced here and is not what is
+// asserted: what is asserted is the property that makes the trigger harmless — an element
+// that is no longer in the document cannot reach S.draft. That is reproducible anywhere,
+// and it is the half that has to hold.
+//   The send itself is not driven, deliberately: it would leave a second optimistic bubble
+// the shipped transcript never claims, and the sections below count bubbles. What is driven
+// is the state the send leaves behind — a cleared draft and a detached box still holding
+// the old text — which is the same three lines with no message in flight.
+//
+// BOTH DIRECTIONS, because "ignore input events" is passed by a box you cannot type in.
+const draftOf = () => { const t = app.find(n => n.tag === 'textarea'); return t ? t.value : null; };
+const typeInto = (t, v) => { t.value = v; (t.listeners.input || []).forEach(f => f()); };
+const live1 = app.find(n => n.tag === 'textarea');
+typeInto(live1, 'the live box still types');
+appmod.renderUnlessTyping();                       // nothing is focused, so this paints
+is('the live composer writes the draft', 'the live box still types', draftOf());
+const detached = live1;
+is('...and a repaint leaves the box that was typed in detached', false, detached.isConnected);
+is('...still holding what was typed into it', 'the live box still types', detached.value);
+// Cleared the way sendDraft() clears it, and repainted the way render() repaints.
+typeInto(app.find(n => n.tag === 'textarea'), '');
+appmod.renderUnlessTyping();
+is('...and the draft is empty again', '', draftOf());
+// The commit, arriving late. Against the version this fixes, this one line put the whole
+// sent message back into the composer, where the next attachment appended to it.
+(detached.listeners.input || []).forEach(f => f());
+appmod.renderUnlessTyping();
+is('a detached composer cannot resurrect the draft', '', draftOf());
+// ...and the box that IS on screen still works, which is the direction a guard breaks.
+const live2 = app.find(n => n.tag === 'textarea');
+is('...and the box on screen is a different element', true, live2 !== detached && live2.isConnected);
+typeInto(live2, 'and the new one types too');
+appmod.renderUnlessTyping();
+is('...and it still writes the draft', 'and the new one types too', draftOf());
+typeInto(app.find(n => n.tag === 'textarea'), '');
+appmod.renderUnlessTyping();
+
+// ── the poll asks the element, not a remembered node ─────────────────────
+// pollPaused() used to compare `document.activeElement` against a module global that
+// render() nulls and composer() re-sets, so the answer depended on those two writes
+// landing in the right order on every path that draws a screen. It asks the focused
+// element about itself now: is it a textarea, is it still attached, is it inside a
+// composer. Three things a node knows about itself, none of which can go stale.
+//   AND THE IDENTITY TEST WAS NOT WHAT CLOSED THE KEYBOARD — said plainly, because the
+// obvious reading is that a stale reference let a poll through while somebody was typing,
+// and it did not. A render that replaces the composer also DESTROYS the focused node, so
+// both forms agree on every state this app can currently reach; what actually closed the
+// keyboard is the two renders below that never asked at all. This form is here because it
+// cannot go stale — the answer stops depending on two module-global writes landing in the
+// right order on every path that draws a screen — and the rows below are what pin it.
+const box1 = app.find(n => n.tag === 'textarea');
+box1.focus();
+is('the poll pauses for the box that has focus', true, appmod.pollPaused());
+box1.blur();
+is('...and lets go the moment it loses it', false, appmod.pollPaused());
+// A node the app has thrown away must not hold it either. `detached` is a real former
+// composer — same tag, same class, same ancestry — and the ONLY thing separating it from
+// the live one is that it is no longer in the document. A guard that answered on shape
+// alone would freeze the fleet behind a box that is not on the screen.
+detached.focus();
+is('...and a discarded box does not hold it at all', false, appmod.pollPaused());
+detached.blur();
+box1.focus();
+is('...while the box on screen still does', true, appmod.pollPaused());
+box1.blur();
+
+// ── the render that lands AFTER the network, not before it ───────────────
+// "the keyboard closes by itself after a while, and I had not typed anything." The 5s poll
+// checks pollPaused() before it calls refresh(), and refresh() then AWAITS the network and
+// ends in a render — so the guard was read at the START of a request and acted on at the
+// END of one. Tap into the composer inside that window and the reply rebuilds #app under
+// the keyboard. Over a tailnet from a phone the window is a whole round trip wide, which is
+// exactly why it reads as happening on its own.
+//   Driven that way: fire the real poll body with nothing focused, focus the box while its
+// requests are in flight, and assert the element survives them.
+is('the poll body is the real one', true, typeof pollTick === 'function');
+pollTick();                                        // spend anything already owed
+await until(() => !appmod.renderWasDeferred(), 3000);
+is('nothing is owed before this', false, appmod.renderWasDeferred());
+pollTick();
+const during = app.find(n => n.tag === 'textarea');
+during.focus();                                    // ...while its fetches are in flight
+const owed = await until(() => appmod.renderWasDeferred(), 4000);
+is('a poll that started before you touched the box owes a render', true, owed);
+is('...and did not take the box to pay it', true,
+   during.isConnected && app.find(n => n.tag === 'textarea') === during);
+is('...so the box still has focus', true, documentStub.activeElement === during);
+during.blur();
+is('...and the render lands once you let go', true, appmod.renderUnlessTyping());
 
 // ── reading a message aloud, and the icon that does it ──────────────────
 // MATCHED ON THE CLASS, NOT ON A GLYPH. This check used to be `btnWith(/🔊/)` and it went

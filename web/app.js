@@ -176,7 +176,16 @@ async function refresh() {
     if (!S.stale) S.stale = lastFetchedAt();
     toast(e instanceof api.OfflineError ? 'offline — showing the last state fetched' : String(e.message || e), 'bad');
   }
-  render();
+  // NOT render(). The poll checks pollPaused() before it calls this, and then this awaits
+  // the network — so the guard was read at the START of a request and acted on at the END
+  // of one. Tap into the composer during that window and the keyboard opens, the reply
+  // lands, and this line rebuilds #app under it. Over a tailnet from a phone that window is
+  // a whole round trip wide, and it is the "the keyboard closes by itself after a while,
+  // and I had not typed anything" report: nothing the reader did closed it, a request they
+  // never saw came back. Deferred, not dropped — renderWasDeferred() spends it on the next
+  // poll after the box loses focus, so the fleet on screen is never more than one interval
+  // stale.
+  renderUnlessTyping();
 }
 function lastFetchedAt() {
   try { return (JSON.parse(localStorage.getItem(LS_LAST) || '{}').at) || Math.floor(Date.now() / 1000); }
@@ -211,7 +220,13 @@ function btn(label, onclick, cls = '') {
 function toast(text, kind = '') {
   S.toast = { text, kind };
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { S.toast = null; render(); }, 4200);
+  // ...AND ITS EXPIRY IS A RENDER ON A TIMER, which is the other way the keyboard closed
+  // with nobody touching anything. attachPhoto() ends in a toast, and the flow it exists
+  // for is: attach a photo, tap the box to say what to do with it, and 4.2 seconds later
+  // the toast quietly rebuilt the screen and took the keyboard with it. A toast that
+  // outstays its welcome by a few seconds is a toast; one that closes the keyboard is a
+  // bug, so this one waits its turn.
+  toast._t = setTimeout(() => { S.toast = null; renderUnlessTyping(); }, 4200);
 }
 
 // ── render ────────────────────────────────────────────────────────────────
@@ -949,21 +964,47 @@ function cameraIcon() { return iconSvg(ICON_CAM_BODY, ICON_CAM_LENS); }
 async function attachPhoto(file, card) {
   if (!file) return;
   if (S.attaching) return;
+  // WHOSE DRAFT THIS IS, decided before the upload rather than after it. An upload from a
+  // phone takes seconds and the screen is live throughout — so `S.session` at the moment
+  // the bytes land is not necessarily the session that asked for them, and appending a
+  // path to whatever draft happens to be on screen puts one worker's photo in another
+  // worker's message box. The same discipline readPane() already keeps for a capture that
+  // arrives after the screen moved.
+  const want = { project: S.project, session: S.session };
   S.attaching = true; render();
+  let note = '', bad = false;
   try {
-    const r = await api.attach(S.project, S.session, file);
-    const sep = S.draft && !/\s$/.test(S.draft) ? ' ' : '';
-    S.draft = (S.draft || '') + sep + r.path + ' ';
+    const r = await api.attach(want.project, want.session, file);
     const kb = Math.max(1, Math.round(r.bytes / 1024));
-    toast(r.converted ? `photo converted and stored, ${kb} KB` : `photo stored, ${kb} KB`);
-    // ...and the one honesty requirement the research left standing: two of the three
-    // agents read images and the third depends on a model ghostfleet cannot see.
-    if (card && card.agent === 'opencode')
-      toast('this worker runs opencode — whether it can read an image depends on its model', 'bad');
+    if (S.project !== want.project || S.session !== want.session) {
+      // Not silently dropped and not pasted somewhere it does not belong: the file is
+      // stored and its path is the only thing that makes it usable, so the path is what
+      // the message says.
+      note = `photo stored for ${want.session} — you have moved on, so it is at ${r.path}`;
+    } else {
+      const sep = S.draft && !/\s$/.test(S.draft) ? ' ' : '';
+      S.draft = (S.draft || '') + sep + r.path + ' ';
+      note = r.converted ? `photo converted and stored, ${kb} KB` : `photo stored, ${kb} KB`;
+      // ...and the one honesty requirement the research left standing: two of the three
+      // agents read images and the third depends on a model ghostfleet cannot see. ONE
+      // toast, not two: S.toast is a single slot, so a second call did not add a warning,
+      // it replaced the confirmation — and the size, which is the half that says the
+      // upload worked at all, was the half nobody on an opencode worker ever saw.
+      if (card && card.agent === 'opencode')
+        note += ' — this worker runs opencode, so whether it can read an image depends on its model';
+    }
   } catch (e) {
-    toast(String((e && e.message) || e), 'bad');
+    note = String((e && e.message) || e); bad = true;
   }
-  S.attaching = false; render();
+  S.attaching = false;
+  // THE PATH GOES INTO THE BOX YOU ARE LOOKING AT, WITHOUT REBUILDING IT. render() would
+  // show the new draft and close the keyboard doing it — the composer is where you were
+  // about to type the sentence that goes with the photo. So the live box is patched in
+  // place, the way paintPane() patches the pane, and the rest of the screen (the camera's
+  // busy state) repaints on the next poll that is allowed to run.
+  if (isLive(composerNode)) { composerNode.value = S.draft || ''; growComposer(composerNode); }
+  toast(note, bad ? 'bad' : '');
+  renderUnlessTyping();
 }
 
 function msgKey(m) { return String(m.role || '') + '|' + String(m.ts || ''); }
@@ -1053,6 +1094,17 @@ function syncViewport() {
   } catch {}
 }
 
+// IS THIS NODE STILL PART OF THE APP. The one question both the input guard above and
+// pollPaused() below are really asking, and the reason neither of them asks it of a stored
+// reference any more: a reference says which node was drawn LAST, which is a different
+// question from whether the node in your hand is attached to the document. They agree
+// until something writes the reference out of order, and then they disagree silently.
+//   `isConnected` is the DOM's own answer and it is exact. The `!== false` shape is for the
+// suite's DOM, where an unimplemented property is undefined rather than false — a stub that
+// cannot answer must not be read as "detached", or every keystroke in the harness is
+// ignored and the test that proves typing works passes for the wrong reason.
+const isLive = (n) => !!n && n.isConnected !== false;
+
 // Up to the CSS max (`max-height`), then it scrolls inside itself — a composer that grows
 // without a ceiling eats the conversation it is a reply to. The height is cleared first so
 // scrollHeight measures the CONTENT rather than the box we last set.
@@ -1062,7 +1114,11 @@ function growComposer(box) {
     box.style.height = Math.min(box.scrollHeight, COMPOSER_MAX_PX) + 'px';
   } catch {}
 }
-const COMPOSER_MAX_PX = 160;
+// The ceiling, and app.css's `.composer textarea { max-height }` is the same number on
+// purpose: this caps the height growComposer WRITES, that caps what the browser HONOURS,
+// and the smaller of the two wins. They disagreed (160 here, 120 there), so this constant
+// had no effect above 120px and the box stopped growing for a reason not written anywhere.
+const COMPOSER_MAX_PX = 120;
 function composer(card) {
   const box = el('textarea', { rows: '1', placeholder: 'message this session…',
                                autocapitalize: 'sentences', spellcheck: 'false' });
@@ -1074,7 +1130,21 @@ function composer(card) {
   // keyboard when its focused node is destroyed — so the box that survives is one you
   // have to tap again, every five seconds, which is not a box you can type in. The poll
   // has to actually stop; see pollPaused().
-  box.addEventListener('input', () => { S.draft = box.value; growComposer(box); });
+  // A DETACHED BOX MUST NOT WRITE STATE, and that is not hypothetical tidiness — it is the
+  // message that arrived carrying the PREVIOUS message's text. Reported with a photograph
+  // of two bubbles: a sent one holding a photo path and a sentence, and under it a second
+  // one holding that same path, that same sentence, AND the new photo's path.
+  //   The sequence is: tap send, sendDraft() empties S.draft and render() throws this
+  // element away — and only THEN does iOS commit the keyboard's marked/predictive text,
+  // which fires one last `input` on the node that is already gone. The listener obligingly
+  // wrote its stale value back into S.draft, and every later append built on top of it.
+  // A blur commit is the trigger; the defect is that a node the app has discarded could
+  // still reach the app's state at all, so the guard is on the property and not on the
+  // trigger — which is also the only half of this a desktop engine can be made to prove.
+  box.addEventListener('input', () => {
+    if (!isLive(box)) return;
+    S.draft = box.value; growComposer(box);
+  });
   // ...AND ON EVERY RENDER, not only on a keystroke. render() rebuilds this element from
   // scratch on the 5s poll, on a toast, on a view switch — with rows="1" and the draft
   // poured back in — so a two-line message came back as one line and a clipped sliver of
@@ -1111,7 +1181,16 @@ async function sendDraft() {
   // Optimistic, and reconciled against the transcript rather than trusted: reconcilePending
   // clears this when the real message comes back, and gives up on it after a while so a
   // failed send cannot sit there looking sent forever.
-  S.pending = { text, at: Math.floor(Date.now() / 1000) };
+  // ...AND HOW MANY TIMES THE TRANSCRIPT ALREADY SAID IT. The only id a sent prompt has is
+  // its own text (see reconcilePending), and matching on text alone means the SECOND time
+  // you send the same thing — "run the suite", "check again", the two words this app is
+  // used for most — the FIRST one already sitting in the transcript answers for it. The
+  // bubble stops saying `sending…` before the message has gone anywhere, which is the same
+  // lie as one that says it forever, told the other way round.
+  //   A count, not a timestamp. The obvious fix is "only match a message newer than this
+  // one", but `at` is the PHONE's clock and `m.ts` is the Mac's, and the two are as close
+  // as whatever synced them last. Counting occurrences needs no clock at all.
+  S.pending = { text, at: Math.floor(Date.now() / 1000), seen: countSaid(text) };
   S.draft = '';
   scrollMem.delete('chat');          // a message you just sent belongs on screen
   render();
@@ -1123,11 +1202,24 @@ async function sendDraft() {
 // errored has already cleared this, but one that vanished for any other reason must not
 // leave a permanent "sending…" on a screen whose whole purpose is being accurate.
 const PENDING_TTL = 180;
+// How many of the transcript's user turns say exactly this. The pending bubble is cleared
+// by the count GOING UP, not by the text being present — see sendDraft for why.
+function countSaid(text) {
+  const want = String(text || '').trim();
+  const ms = (S.sess && S.sess.messages) || [];
+  return ms.filter(m => m.role === 'user' && String(m.text || '').trim() === want).length;
+}
 function reconcilePending() {
   if (!S.pending) return;
-  const want = S.pending.text.trim();
-  const ms = (S.sess && S.sess.messages) || [];
-  if (ms.some(m => m.role === 'user' && String(m.text || '').trim() === want)) { S.pending = null; return; }
+  const said = countSaid(S.pending.text);
+  // The baseline FOLLOWS THE TRANSCRIPT DOWN. /api/session serves a page, and a long
+  // conversation rolls — so an identical turn that was in the transcript when the count was
+  // taken can be gone from it by the time the new one lands, and an arrival would then read
+  // as no change at all and sit on `sending…` until the 180s give-up. Counting relative to
+  // what is on screen now is what makes "one more of these appeared" the question, whichever
+  // direction the window moved.
+  if (said < (S.pending.seen || 0)) S.pending.seen = said;
+  if (said > (S.pending.seen || 0)) { S.pending = null; return; }
   if (Math.floor(Date.now() / 1000) - S.pending.at > PENDING_TTL) S.pending = null;
 }
 
@@ -1645,17 +1737,36 @@ export function renderWasDeferred() { return renderDeferred; }
 
 export function pollPaused() {
   if (document.hidden || S.locked || S.sheet || S.confirm) return true;
-  // Typing counts. refresh() ends in render(), render() empties #app and rebuilds it, so
+  // Typing counts. refresh() ends in a render, render() empties #app and rebuilds it, so
   // a poll that lands while the composer has focus destroys the element the keyboard is
   // attached to. Reported as "it hides the keyboard every time, I cannot type for more
   // than five seconds" — five being this interval, exactly.
-  try { if (composerNode && document.activeElement === composerNode) return true; } catch {}
+  //   ASKED OF THE ACTIVE ELEMENT, NOT OF A STORED NODE. This used to compare
+  // `document.activeElement === composerNode`, a module global that render() nulls and
+  // composer() re-sets — so the answer depended on the two of them being written in the
+  // right order by every path that draws a screen, which is a promise the file cannot
+  // keep on its own. The question is a property of the element that has focus: is it a
+  // textarea, is it still attached, and is it inside a composer. Three things the node
+  // knows about itself, none of which can go stale.
+  try {
+    const a = document.activeElement;
+    if (a && String(a.tagName || '').toLowerCase() === 'textarea' && isLive(a) && insideComposer(a)) return true;
+  } catch {}
   return false;
 }
 
-// The live composer <textarea>, so the poll can tell whether you are typing in it.
-// A node, not a boolean: a flag set by focus/blur goes stale the moment a render
-// throws the element away without firing blur, and then the poll never resumes.
+// The composer row an element sits in, by walking its own ancestry. Not `closest()`: the
+// suite's DOM has parents and no selector engine, and this is one loop.
+function insideComposer(n) {
+  for (let e = n; e; e = e.parentElement || e.parentNode) {
+    try { if (e.classList && e.classList.contains && e.classList.contains('composer')) return true; } catch {}
+  }
+  return false;
+}
+
+// The live composer <textarea>. Still kept, because attachPhoto() has to put a path into
+// the box you are looking at without rebuilding it — but nothing DECIDES anything from it
+// any more; the two guards above ask the element instead.
 let composerNode = null;
 
 const PANE_POLL_MS = 2000, PANE_POLL_HISTORY_MS = 4000;
