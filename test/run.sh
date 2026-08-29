@@ -1584,7 +1584,7 @@ fi
 
 
 # ── 4a10. a worker must not spawn workers ────────────────────────────────────
-# A session finishes a PR, is told "branch off fresh main", and reaches for the
+# A session finishes a PR, is told "branch off fresh staging", and reaches for the
 # orchestrate skill — which spawns. But it is ALREADY in a worktree, so it gets a second
 # one beside the first instead of re-branching where it stands. The fleet's shape is
 # master in the main checkout and workers as leaves; nesting is never what was meant.
@@ -7470,10 +7470,18 @@ if [ -d "$ROOT/web" ]; then
   # after, so main went BACKWARDS and #84 existed only to undo that; then #86 was numbered
   # v19 while #85 was also v19, caught by hand. Both leave a hash that matches its own
   # bytes, so both are green here without this.
-  #   THIS ONE SKIPS ON MAIN, and that is not the same as passing: on main, or on a branch
-  # that has already landed, there is nothing to be ahead of. It also skips in a clone with
-  # no origin/main — but NOT in CI on a pull request, where the absence of the ref means the
-  # check silently did nothing in the one place it is the point. See the helper's header.
+  #   THIS ONE SKIPS ON STAGING, and that is not the same as passing: on staging, or on a
+  # branch that has already landed, there is nothing to be ahead of. It also skips in a clone
+  # with no origin/staging — but NOT in CI on a pull request, where the absence of the ref
+  # means the check silently did nothing in the one place it is the point. See the helper's
+  # header.
+  #   THE REF IS `origin/staging`, NOT `origin/main`, and the distinction became load-bearing
+  # the moment main stopped taking day-to-day merges. The question this asks is "has somebody
+  # else already taken this number", and after that split the answer lives on staging: main
+  # moves once per release, so comparing against it would leave every branch trivially above
+  # a months-old number while three of them raced for the same one — which is #87, the exact
+  # bug this exists to prevent, reintroduced by pointing the guard at a branch that stopped
+  # moving.
   SWV="$(mktemp -d "$TEST_RUNS.$$.swv.XXXXXX")"
   node "$ROOT/test/helpers/sw-version.mjs" > "$SWV/out" 2> "$SWV/err"
   is "sw-version ran"                 "0" "$?"

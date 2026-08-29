@@ -109,7 +109,7 @@ if [ "$TOOL" != "EnterWorktree" ]; then
     echo "  Hand it to a worker — you keep this thread and can keep working:"
     echo "      fleet-worktrees                                    # REUSE BEFORE PROLIFERATE"
     echo "      fleet-spawn <name> --reuse <worktree> --prompt \"…\""
-    echo "      fleet-spawn <name> --branch <b> --from origin/main --new --prompt \"…\""
+    echo "      fleet-spawn <name> --branch <b> --from origin/staging --new --prompt \"…\""
     echo "  or the MCP tool: fleet_spawn with name/branch/prompt."
     echo
     echo "  Small enough to just do? Do it here — that needs no worker at all."
@@ -129,10 +129,10 @@ fi
   if [ "$_gd" != "$_gcd" ]; then
     echo "  You are already IN a worktree ($GITROOT, branch $_br) — you are a worker, a leaf."
     echo "  Start fresh work where you stand; no new worktree, no new session:"
-    echo "      git fetch origin && git checkout -B <new-branch> origin/main"
+    echo "      git fetch origin && git checkout -B <new-branch> origin/staging"
   else
     echo "  Hand the work to a worker instead (you keep this thread and can keep working):"
-    echo "      fleet-spawn <name> --branch <branch> --from origin/main --prompt \"…\""
+    echo "      fleet-spawn <name> --branch <branch> --from origin/staging --prompt \"…\""
     echo "  or the MCP tool: fleet_spawn with name/branch/prompt."
     echo "  REUSE BEFORE PROLIFERATE — check 'fleet-worktrees' for a free one first."
     echo

@@ -2,8 +2,21 @@
 
 ## Commits
 
-- **Never push to `main` directly — every change lands through a PR.** Branch, commit
-  there, open the PR; let review happen even when the change looks obvious.
+- **Branch off `staging`, and open the PR against `staging`.** `staging` is the default
+  branch and where all work integrates; `main` is the publishable branch and moves only
+  on a release. `git fetch origin && git checkout -B <branch> origin/staging` — a branch
+  cut from `main` is cut from the last release, not from what everyone else has landed,
+  and it will conflict on the way back in.
+- **Never push to `staging` or `main` directly — every change lands through a PR.** Both
+  are protected: a PR is required, and both suite legs (`ubuntu-latest`, `macos-latest`)
+  must be green. Let review happen even when the change looks obvious.
+  - The protection is *not* `strict`, so a PR does not have to be rebased onto the tip
+    of `staging` to merge. That is deliberate — it is what lets a fleet of workers land
+    in parallel instead of queueing behind each other — and the cost is that two PRs can
+    each be green against an older `staging` and break it together. The push-triggered
+    run on `staging` is what catches that, so **a red `staging` is everyone's, not the
+    last merger's alone.**
+  - Admin bypass is on. It exists for a runner outage, not for a hurry.
 - **Never add a `Co-Authored-By:` trailer**, and don't add any other AI attribution
   (no "generated with", no tool footer). Commits are authored by the repo owner, full
   stop.
