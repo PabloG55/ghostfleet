@@ -8026,8 +8026,13 @@ if command -v jq >/dev/null 2>&1; then
             bash "$ROOT/hooks/fleet-observe.sh" 2>&1 1>/dev/null)"
     rc=$?
     OBS_EXITS="$OBS_EXITS$rc"
-    if   printf '%s\n' "$out" | grep -qE '^[[:space:]]*observe-check:[[:space:]]*warn\b'; then verdict=warn
-    elif printf '%s\n' "$out" | grep -qE '^[[:space:]]*observe-check:[[:space:]]*ok\b';   then verdict=ok
+    # HERE-STRINGS, NOT PIPES. `grep -q` stops at its first match and the writer then takes
+    # SIGPIPE, which `set -o pipefail` promotes to the pipeline's status — so a MATCH can
+    # come back as 141 and this `if` would take the WRONG branch, reading a warn as silent.
+    # $out is a hook's whole output, which is exactly the unbounded left-hand side that
+    # blocks long enough for it to happen. The suite sweeps itself for the pipe form.
+    if   grep -qE '^[[:space:]]*observe-check:[[:space:]]*warn\b' <<< "$out"; then verdict=warn
+    elif grep -qE '^[[:space:]]*observe-check:[[:space:]]*ok\b'   <<< "$out"; then verdict=ok
     else verdict=silent; fi
     is "$1" "$2" "$verdict"
   }
