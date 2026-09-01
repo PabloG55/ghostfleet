@@ -2447,13 +2447,23 @@ fi
 # There is nothing to assert about a kernel buffer, so assert the SHAPE. A here-string
 # has no writer to signal, its exit status is the reader's alone, and it costs nothing
 # at these sizes. Structural, so the next one is caught instead of this one.
+#
+# THE PATTERN IS ANCHORED PAST THE COMMENT MARKER, and that is not tidiness: without the
+# anchor this group counted the paragraph above, because the clearest way to describe a
+# forbidden shape is to write it out. It went red on both legs for its own prose. `[^#]*`
+# cannot cross a `#`, so a line that starts with one can never match, and what is being
+# swept is executable text — which is the only place the bug can live.
 group "no assertion pipes into a short-circuiting reader"
-is "the suite has no pipe into grep -q" "0" "$(matches '[|] *grep -q' "$ROOT/test/run.sh")"
+is "the suite has no pipe into grep -q" "0" "$(matches '^[^#]*[|] *grep -q' "$ROOT/test/run.sh")"
 # ...and the sweep can SEE one, or it is green by blindness. The bar is a variable
 # because writing the bad shape literally here would make this file fail its own sweep.
 BAR='|'
 is "...and the sweep would see one"     "1" \
-   "$(grep -cE '[|] *grep -q' <<< "$(printf 'printf x %s grep -q y\n' "$BAR")" || true)"
+   "$(grep -cE '^[^#]*[|] *grep -q' <<< "$(printf 'printf x %s grep -q y\n' "$BAR")" || true)"
+# ...and that it does NOT see the same shape inside a comment, which is the direction that
+# made it red: a sweep that cannot tell code from prose forbids explaining itself.
+is "...and not one in a comment"        "0" \
+   "$(grep -cE '^[^#]*[|] *grep -q' <<< "$(printf '# a bad line: printf x %s grep -q y\n' "$BAR")" || true)"
 
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
 # They are git worktrees like any other, so a stale one lands in the free-list looking
