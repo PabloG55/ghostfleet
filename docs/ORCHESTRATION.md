@@ -23,7 +23,8 @@ which is what keeps a long-running or restarted lead from getting lost:
 
 | goal | command |
 |------|---------|
-| every worktree + which are **FREE** | `fleet-worktrees` |
+| every worktree + which are **FREE** | `fleet-worktrees` — ASKED beside UNDERSTOOD |
+| record what you heard (as a worker) | `fleet-ack "<one line>" --from "<decisions>"` |
 | live sessions + status | `fleet-list` |
 | who needs you / what **finished** (drains since last look) | `fleet-inbox` |
 | dispatch a self-contained brief | `fleet-send <session> "…"` |
