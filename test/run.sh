@@ -1305,7 +1305,7 @@ nreq=0; badreq=0
 while IFS="$US" read -r c e txt; do
   case "$c" in req:*) ;; *) continue ;; esac
   nreq=$((nreq+1)); k="${c##*.}"; tool="${c#req:}"; tool="${tool%%.*}"
-  if [ "$e" = 1 ] && printf '%s' "$txt" | grep -qF "$tool: missing required argument '$k'"; then :
+  if [ "$e" = 1 ] && grep -qF "$tool: missing required argument '$k'" <<< "$txt"; then :
   else badreq=$((badreq+1)); fi
 done < "$AG/out"
 is "every declared required arg is refused by name" "0" "$badreq"
@@ -2411,18 +2411,104 @@ if command -v npm >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in package.json|README.md|LICENSE) continue ;; esac   # npm adds these itself
-    printf '%s\n' "$TRACKED" | grep -qxF "$f" || UNSWEPT="$UNSWEPT $f"
+    # A HERE-STRING, NOT A PIPE — see the pipefail/SIGPIPE note in CLAUDE.md. `grep -q`
+    # exits on its first match, and under `set -o pipefail` the writer's EPIPE (141)
+    # becomes the pipeline's status, so a MATCH reads as a failure.
+    grep -qxF "$f" <<< "$TRACKED" || UNSWEPT="$UNSWEPT $f"
   done <<< "$PKD"
   is "...and every packed path is tracked" "" "${UNSWEPT# }"
   # Both directions: the check must be able to SEE an untracked path, or it is green by
   # blindness — the exact shape this suite keeps finding elsewhere.
   UNSWEPT2=""
   for f in $(printf '%s\n' "$PKD" | head -3) "generated/not-tracked.json"; do
-    printf '%s\n' "$TRACKED" | grep -qxF "$f" || UNSWEPT2="$UNSWEPT2 $f"
+    grep -qxF "$f" <<< "$TRACKED" || UNSWEPT2="$UNSWEPT2 $f"
   done
   is "...and it would notice an untracked one" "generated/not-tracked.json" "${UNSWEPT2# }"
 else
   skip "npm package sweep" "npm or git missing"
+fi
+
+# ── 4a10b7. no assertion may pipe into a short-circuiting reader ──────────────
+# THIS ONE FAILED ON ONE LEG OF ONE RUN AND BLAMED AN INNOCENT FILE. `set -uo pipefail`
+# is on (top of this file), and `grep -q` stops reading at its FIRST match — so the
+# writer on its left can take SIGPIPE, and under pipefail that writer's 141 becomes the
+# whole pipeline's status. A MATCH therefore reads as a no-match, and only when the
+# writer had enough left to block: the tracked-file list is ~4KB, which fits the buffer
+# a pipe usually gets and does not fit the smaller one the kernel hands out when it
+# cannot spare that. Measured: same commit, green on one runner, red on the other,
+# naming the FIRST path in the list — the only iteration that ran with a cold pipe.
+#
+# The sweep found five more of the same shape, three of them worse: `while ! tmux
+# capture-pane | grep -q <pattern>` inverts the status, so a spurious 141 reads as "the
+# pattern is not there yet" and the wait loop runs its full count and then asserts against
+# a pane it decided never arrived. That failure would surface in a LATER assertion, about
+# something else entirely.
+#
+# There is nothing to assert about a kernel buffer, so assert the SHAPE. A here-string
+# has no writer to signal, its exit status is the reader's alone, and it costs nothing
+# at these sizes. Structural, so the next one is caught instead of this one.
+#
+# THE PATTERN IS ANCHORED PAST THE COMMENT MARKER, and that is not tidiness: without the
+# anchor this group counted the paragraph above, because the clearest way to describe a
+# forbidden shape is to write it out. It went red on both legs for its own prose. `[^#]*`
+# cannot cross a `#`, so a line that starts with one can never match, and what is being
+# swept is executable text — which is the only place the bug can live.
+group "no assertion pipes into a short-circuiting reader"
+is "the suite has no pipe into grep -q" "0" "$(matches '^[^#]*[|] *grep -q' "$ROOT/test/run.sh")"
+# ...and the sweep can SEE one, or it is green by blindness. The bar is a variable
+# because writing the bad shape literally here would make this file fail its own sweep.
+BAR='|'
+is "...and the sweep would see one"     "1" \
+   "$(grep -cE '^[^#]*[|] *grep -q' <<< "$(printf 'printf x %s grep -q y\n' "$BAR")" || true)"
+# ...and that it does NOT see the same shape inside a comment, which is the direction that
+# made it red: a sweep that cannot tell code from prose forbids explaining itself.
+is "...and not one in a comment"        "0" \
+   "$(grep -cE '^[^#]*[|] *grep -q' <<< "$(printf '# a bad line: printf x %s grep -q y\n' "$BAR")" || true)"
+# ── 4a10b8. a dispatch leaves a trace ────────────────────────────────────────
+# SEEN TWICE, on two profiles, hours apart: a session's first turn was the single word
+# "the" and its real brief never arrived. From the receiving side that is indistinguishable
+# from a worker ignoring its instructions, and from the sending side there was nothing at
+# all — nothing recorded what went into the tmux buffer. Three theories were investigated
+# and disproved at an hour each, because the only evidence was the transcript of the thing
+# that received it.
+#
+# The log records length and a digest and NOTHING of the body. That constraint is the half
+# of this group worth keeping: the first draft logged the opening and closing forty
+# characters, and the assertion below caught that for a message under eighty bytes those
+# windows overlap and hand back the whole brief. So both directions here are privacy
+# directions — the log must tell a full brief from a one-word fragment, and it must do it
+# without becoming a second copy of every brief on disk.
+group "fleet-send records what it dispatched"
+if command -v tmux >/dev/null 2>&1; then
+  SNL="$(mktemp -d)"
+  tmux -L sndlog kill-server 2>/dev/null
+  tmux -L sndlog new-session -d -s w1 'sleep 60' 2>/dev/null; sleep 0.4
+  SND() { CLAUDE_FLEET_DIR="$SNL" "$ROOT/bin/fleet-send" -s sndlog w1 "$1" >/dev/null 2>&1; }
+  SND "a brief long enough to have two distinct ends"
+  SND "the"
+  # UNDER EIGHTY BYTES — the length at which a first-40/last-40 excerpt reconstructs the
+  # whole message. This is the case that went red, so it stays as its own row.
+  SND "sync acme-api to staging"
+  SNLOG="$SNL/sndlog.sent"
+  is "the log exists after a send"        "1" "$([ -f "$SNLOG" ] && echo 1 || echo 0)"
+  is "...one line per dispatch"           "3" "$(grep -c . "$SNLOG" 2>/dev/null || echo 0)"
+  # THE POINT: a full brief and a one-word fragment must be told apart from the log alone,
+  # because that is the comparison nobody could make when this happened.
+  is "...a long brief records its length"  "1" "$(awk -F'\t' '$3>40' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  is "...and a 3-byte one records 3"       "1" "$(awk -F'\t' '$3==3' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  # It must NOT be a copy of the brief, at ANY length.
+  is "...the body is not stored"           "0" "$(grep -c 'long enough to have two distinct ends' "$SNLOG" 2>/dev/null || true)"
+  is "...nor a short one, which overlaps"  "0" "$(grep -c 'acme-api' "$SNLOG" 2>/dev/null || true)"
+  # THE DIGEST IS THE FIELD THE WHOLE LOG TURNS ON, and it is written by whichever of two
+  # tools the host has. An empty one would look like a logged dispatch and answer nothing,
+  # so assert its shape, that different bodies differ, and that one body is stable.
+  is "...the digest is 12 hex"             "3" "$(awk -F'\t' '$4 ~ /^[0-9a-f]{12}$/' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  is "...and three bodies gave 3 digests"  "3" "$(awk -F'\t' '{print $4}' "$SNLOG" 2>/dev/null | sort -u | grep -c . || true)"
+  SND "the"
+  is "...and the same body repeats one"    "2" "$(awk -F'\t' '$3==3 {print $4}' "$SNLOG" 2>/dev/null | sort | uniq -c | awk '{print $1}' | head -1)"
+  tmux -L sndlog kill-server 2>/dev/null; rm -rf "$SNL"
+else
+  skip "dispatch log" "tmux missing"
 fi
 
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
@@ -4649,7 +4735,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     [ -n "$act" ] && [ "$act" -gt "$1" ]
   }
   footer_drawn() {                 # is a footer on the pane at all?
-    tmux -L cffootd capture-pane -p -t d 2>/dev/null | grep -q '↑↓←→/hjkl move'
+    grep -q '↑↓←→/hjkl move' <<< "$(tmux -L cffootd capture-pane -p -t d 2>/dev/null)"
   }
   draw_at() {                      # $1 = width; leaves the pane up for the caller
     local i=0 at stamp=''
@@ -6381,12 +6467,12 @@ tmux -L cf-demo new-session -d -s dlg -x 100 -y 30 "$PN/dialog.sh" 2>/dev/null
 # work. So `dlg` exists on cf-other too, saying something unmistakable, and the assertion
 # below is that it never appears.
 tmux -L cf-other new-session -d -s dlg -x 100 -y 30 "sh -c 'clear; echo WRONG-FLEET-PANE; sleep 600'" 2>/dev/null
-i=0; while [ "$i" -lt 40 ] && ! tmux -L cf-other capture-pane -p -t dlg 2>/dev/null | grep -q 'WRONG-FLEET-PANE'; do i=$((i+1)); sleep 0.1; done
+i=0; while [ "$i" -lt 40 ] && ! grep -q 'WRONG-FLEET-PANE' <<< "$(tmux -L cf-other capture-pane -p -t dlg 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
 is "the decoy fleet has a 'dlg' too"        "1"   "$(tmux -L cf-other capture-pane -p -t dlg 2>/dev/null | grep -c 'WRONG-FLEET-PANE' || true)"
 # Wait for the dialog to be ON the pane before asserting anything about it: `cat` into a
 # fresh pane is fast but not instant, and a race here would read an empty pane and blame
 # the endpoint.
-i=0; while [ "$i" -lt 60 ] && ! tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null | grep -q 'Do you want to create'; do i=$((i+1)); sleep 0.1; done
+i=0; while [ "$i" -lt 60 ] && ! grep -q 'Do you want to create' <<< "$(tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
 is "the fixture reached a real pane"        "1"   "$(tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null | grep -c 'Do you want to create' || true)"
 
 PNPORT="$(free_port)"; PNPORT="${PNPORT:-18799}"
@@ -7372,13 +7458,13 @@ if sv_start attach; then
   apath="$(pb attach.png att | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).path||"")}catch{console.log("")}})')"
   is "...and the path it returned exists"  "yes" "$([ -n "$apath" ] && [ -f "$apath" ] && echo yes || echo "no: '$apath'")"
   is "...under the fleet dir, keyed by session" "yes" \
-     "$(printf '%s' "$apath" | grep -q '/fleet/attach/[^/]*\.attachtest/' && echo yes || echo "no: $apath")"
+     "$(grep -q '/fleet/attach/[^/]*\.attachtest/' <<< "$apath" && echo yes || echo "no: $apath")"
   # THE PATH IS ABOUT TO BE PASTED INTO A TERMINAL. Nothing in it may be a character a
   # shell would read, and no component of it came from the client.
   is "...and holds nothing a shell would read" "yes" \
-     "$(printf '%s' "$apath" | grep -qE '^[A-Za-z0-9._/-]+$' && echo yes || echo "no: $apath")"
+     "$(grep -qE '^[A-Za-z0-9._/-]+$' <<< "$apath" && echo yes || echo "no: $apath")"
   is "...with a server-generated name"     "yes" \
-     "$(basename "$apath" 2>/dev/null | grep -qE '^[0-9a-f]{16}\.(jpg|png)$' && echo yes || echo "no: $(basename "$apath" 2>/dev/null)")"
+     "$(grep -qE '^[0-9a-f]{16}\.(jpg|png)$' <<< "$(basename "$apath" 2>/dev/null)" && echo yes || echo "no: $(basename "$apath" 2>/dev/null)")"
   is "...and is not group- or world-readable" "600" \
      "$(ls -l "$apath" 2>/dev/null | awk '{print $1}' | sed 's/^-//;s/rw-------/600/;s/[^0-9]*$//' | head -c3)"
   # SNIFFED, NOT DECLARED. SVG is refused BY NAME because it is an image that is also a
@@ -7673,6 +7759,142 @@ if command -v git >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   rm -rf "$NSW"
 else
   skip "no real project name in the tree" "git or node missing"
+fi
+
+# ── 6a3. the utilization meter reads a transcript ────────────────────────────
+# bin/fleet-meter.mjs turns the corpus under ~/.claude/projects into the numbers plan item
+# #2 is judged against. Nothing else in this repo parses that wire format, and a parser is
+# exactly the kind of code that fails silently: every one of the four ways this can be wrong
+# produces a plausible number rather than an error.
+#   THE FIXTURE IS BUILT SO THE FAILING DIRECTION IS THE INTERESTING ONE. Its sidechain
+# records carry a `sleep 999`, an Edit of a file nothing else touches, a browser call and
+# the word "Done." — the same shapes as the real turns beside them. A reader that has lost
+# its eligibility filter does not crash; it reports 1034 seconds of sleep instead of 35,
+# three files instead of two, and a done-claim on turn 1 instead of turn 2. So the numbers
+# below are asserted as exact values, not as "greater than zero": every one of them moves if
+# the filter goes, and none of them moves to something that looks broken.
+#   AND THE SAME RECORDS ARE READ TWICE. Section three of the fixture is s1 with every
+# isSidechain flipped to true and nothing else changed, so the identical eleven records that
+# produce 3 turns and 9 tool calls above must produce 0 and 0 there. That is the pair the
+# repo's rule asks for: a detector is only proven by a capture it must match AND a capture
+# it must stay silent on, and a meter that counts everything and a meter that counts nothing
+# are both green against a fixture read only once.
+#   THE PRIVACY ASSERTION IS NOT DECORATION. The corpus is not this repo's — it holds other
+# people's work — so the meter emits counts and digests and never a body, a path or a branch
+# name. The fixture's branch names and file paths go IN; the group greps the JSON that comes
+# out for each of them and requires zero hits. A regression that starts echoing a path would
+# otherwise be invisible until it had been committed to a public repo.
+group "the utilization meter"
+if command -v node >/dev/null 2>&1; then
+  MTR="$(mktemp -d "$TEST_RUNS.$$.meter.XXXXXX")"
+  mkdir -p "$MTR/corpus/acme-web-proj" "$MTR/empty" "$MTR/ineligible/acme-web-proj"
+
+  # Two sessions. s1 runs three human turns and crosses a branch partway; s2 is one turn
+  # that never claims done. Between s1's turns sit the three record kinds that look like a
+  # human prompt and are not: a tool_result carrier (most of the file, by volume), an isMeta
+  # record — whose text says "No, that is wrong" precisely so a lost filter would score a
+  # correction — and a sidechain pair holding a subagent's own tool calls.
+  cat > "$MTR/corpus/acme-web-proj/s1.jsonl" <<'MJSON'
+{"type":"user","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"add a signature-template picker to the Documents step"}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 5; ./test/run.sh"}},{"type":"tool_use","name":"Read","input":{"file_path":"/w/acme-web/src/never-edited.ts"}},{"type":"tool_use","name":"Edit","input":{"file_path":"/w/acme-web/src/a.ts"}},{"type":"text","text":"Working on it, more to do."}]}}
+{"type":"user","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:02:00Z","message":{"role":"user","content":[{"type":"tool_result","content":"3506 passed"}]}}
+{"type":"user","isMeta":true,"isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:03:00Z","message":{"role":"user","content":"No, that is wrong: a meta record that must not be a turn"}}
+{"type":"user","isSidechain":true,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:04:00Z","message":{"role":"user","content":"subagent brief"}}
+{"type":"assistant","isSidechain":true,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:05:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 999"}},{"type":"tool_use","name":"Edit","input":{"file_path":"/w/acme-web/src/sidechain-only.ts"}},{"type":"tool_use","name":"mcp__chrome-devtools__navigate_page","input":{"url":"http://127.0.0.1:8787/"}},{"type":"text","text":"Done."}]}}
+{"type":"user","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:06:00Z","message":{"role":"user","content":"No, that is not what I asked for."}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:07:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"mcp__chrome-devtools__take_screenshot","input":{}},{"type":"tool_use","name":"Edit","input":{"file_path":"/w/acme-web/src/b.ts"}}]}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:08:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Done. The picker is on the Documents step."}]}}
+{"type":"user","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s1","timestamp":"2026-01-01T00:09:00Z","message":{"role":"user","content":"now wire the same thing on the api side"}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s1","timestamp":"2026-01-01T00:10:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 600 &"}},{"type":"tool_use","name":"Bash","input":{"command":"sleep 30; tail -f log","run_in_background":true}},{"type":"tool_use","name":"Bash","input":{"command":"sleep 10; sleep 20"}},{"type":"tool_use","name":"Write","input":{"file_path":"/w/acme-web/src/a.ts"}},{"type":"text","text":"Next I will check the wire format."}]}}
+MJSON
+  cat > "$MTR/corpus/acme-web-proj/s2.jsonl" <<'MJSON'
+{"type":"user","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s2","timestamp":"2026-01-02T00:00:00Z","message":{"role":"user","content":"why is the toolbox pane blank"}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s2","timestamp":"2026-01-02T00:00:30Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"fleet-look.mjs http://127.0.0.1:8787/"}},{"type":"text","text":"The pane is blank because the socket is wrong."}]}}
+MJSON
+  # The same eleven records, every one of them a sidechain. Derived from s1 rather than
+  # written out again, so the two can never drift apart and leave the zero direction
+  # passing against a fixture that no longer resembles the one it is paired with.
+  sed 's/"isSidechain":false/"isSidechain":true/g' \
+      "$MTR/corpus/acme-web-proj/s1.jsonl" > "$MTR/ineligible/acme-web-proj/s3.jsonl"
+
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/corpus"     --json > "$MTR/full.json" 2> "$MTR/err"
+  is "meter ran"                        "0"  "$?"
+  is "...without complaining"           ""   "$(head -2 "$MTR/err" | tr '\n' ' ' | sed 's/ *$//')"
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/empty"      --json > "$MTR/empty.json" 2>/dev/null
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/ineligible" --json > "$MTR/inel.json"  2>/dev/null
+
+  # process.stdout.write of a String(), never console.log of a bare value: the header
+  # explains what util.inspect does to a number, and this helper answers into an `is`.
+  m() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      let v = r; for (const k of process.argv[2].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2"; }
+
+  # ── the parse: every value hand-computed from the fixture above ──
+  is "meter: 2 files, 13 records"     "2 13"  "$(m "$MTR/full.json" corpus.files) $(m "$MTR/full.json" corpus.records)"
+  is "meter: 4 human turns of 13"     "4"     "$(m "$MTR/full.json" corpus.turns)"
+  is "meter: s1 turns"                "3"     "$(m "$MTR/full.json" per_session.0.observed.turns)"
+  is "meter: s1 tool calls"           "9"     "$(m "$MTR/full.json" per_session.0.observed.tool_calls)"
+  is "meter: s1 tool calls per turn"  "3"     "$(m "$MTR/full.json" per_session.0.observed.tool_calls_per_turn_mean)"
+  # 35, not 1034: the sidechain's `sleep 999` is not this session's.
+  is "meter: s1 sleep seconds"        "35"    "$(m "$MTR/full.json" per_session.0.observed.sleep_seconds)"
+  # 3, not 5: `sleep 600 &` returns at once and a run_in_background call does too.
+  is "meter: s1 sleeps counted"       "3"     "$(m "$MTR/full.json" per_session.0.observed.sleep_calls)"
+  is "meter: s1 browser calls"        "1"     "$(m "$MTR/full.json" per_session.0.observed.browser_calls)"
+  # 2, not 3: a Read carries a file_path and is not a touch.
+  is "meter: s1 distinct files"       "2"     "$(m "$MTR/full.json" per_session.0.observed.distinct_files)"
+  is "meter: s1 turns to done"        "2"     "$(m "$MTR/full.json" per_session.0.labelled.turns_to_done)"
+  is "meter: s1 browser before done"  "true"  "$(m "$MTR/full.json" per_session.0.labelled.browser_before_done_claim)"
+  # 1, not 2: the isMeta record says "No, that is wrong" and is not a human turn.
+  is "meter: s1 corrections"          "1"     "$(m "$MTR/full.json" per_session.0.labelled.corrections)"
+  is "meter: s1 corrections/file"     "0.5"   "$(m "$MTR/full.json" per_session.0.labelled.corrections_per_distinct_file)"
+  # s2 never claims done, and has no files, so the ratio is absent rather than zero.
+  is "meter: s2 turns to done"        "null"  "$(m "$MTR/full.json" per_session.1.labelled.turns_to_done)"
+  is "meter: s2 corrections/file"     "null"  "$(m "$MTR/full.json" per_session.1.labelled.corrections_per_distinct_file)"
+  # A session crosses a branch partway, so a TURN carries the branch, not a session.
+  is "meter: 2 branches"              "2"     "$(m "$MTR/full.json" corpus.branches)"
+  is "meter: branch id is the digest" "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)" "$(m "$MTR/full.json" per_branch.0.id)"
+  is "meter: acme-web turns"          "2"     "$(m "$MTR/full.json" per_branch.0.observed.turns)"
+  is "meter: acme-api turns"          "2"     "$(m "$MTR/full.json" per_branch.1.observed.turns)"
+  is "meter: acme-api sleep seconds"  "30"    "$(m "$MTR/full.json" per_branch.1.observed.sleep_seconds)"
+  # The two that cannot be pooled are absent from the pooled block and present in the cohort.
+  is "meter: pooled has no to-done"   "(missing)" "$(m "$MTR/full.json" pooled.labelled.turns_to_done)"
+  is "meter: cohort to-done median"   "2"     "$(m "$MTR/full.json" cohort.per_session.turns_to_done_median)"
+
+  # ── the zero direction: the same records, all ineligible ──
+  is "meter: ineligible records read" "11"    "$(m "$MTR/inel.json" corpus.records)"
+  is "meter: ineligible turns"        "0"     "$(m "$MTR/inel.json" corpus.turns)"
+  is "meter: ineligible tool calls"   "0"     "$(m "$MTR/inel.json" pooled.observed.tool_calls)"
+  is "meter: ineligible sleep"        "0"     "$(m "$MTR/inel.json" pooled.observed.sleep_seconds)"
+  is "meter: ineligible browser"      "0"     "$(m "$MTR/inel.json" pooled.observed.browser_calls)"
+  is "meter: ineligible files"        "0"     "$(m "$MTR/inel.json" pooled.observed.distinct_files)"
+  is "meter: ineligible done-claims"  "0"     "$(m "$MTR/inel.json" pooled.labelled.done_claim_turns)"
+
+  # ── the empty direction ──
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/empty" >/dev/null 2>&1
+  is "meter: empty corpus exits 0"    "0"     "$?"
+  is "meter: empty files"             "0"     "$(m "$MTR/empty.json" corpus.files)"
+  is "meter: empty turns"             "0"     "$(m "$MTR/empty.json" corpus.turns)"
+  is "meter: empty tool calls"        "0"     "$(m "$MTR/empty.json" pooled.observed.tool_calls)"
+  # null, not 0. "median turns to done: 0" on an empty cohort reads as the best possible
+  # result and means the opposite.
+  is "meter: empty to-done median"    "null"  "$(m "$MTR/empty.json" cohort.per_session.turns_to_done_median)"
+  is "meter: empty corrections/file"  "null"  "$(m "$MTR/empty.json" pooled.labelled.corrections_per_distinct_file)"
+
+  # ── counts and digests, never content ──
+  # Every one of these is IN the fixture the meter just read.
+  for leak in acme-web acme-api never-edited sidechain-only 'Documents step' 'toolbox pane' '/w/'; do
+    is "meter: '$leak' is not in the output" "0" "$(grep -c -- "$leak" "$MTR/full.json" | tr -d ' ')"
+  done
+
+  # An exclusion that has stopped matching must say so rather than quietly excluding
+  # nothing — the whole point of naming them in the output.
+  is "meter: --why reports absence"   "4"     "$(node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/corpus" --why | grep -c 'NOT FOUND')"
+  is "meter: --digest is stable"      "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)" "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)"
+  rm -rf "$MTR"
+else
+  skip "the utilization meter" "node missing"
 fi
 
 # ── 6b. every command is actually installed ──────────────────────────────────

@@ -204,5 +204,18 @@ prefer proof over assertion:
   trust a test only after watching it go red, and a phantom red looks exactly like a real
   one. Per-run `$TMUX_TMPDIR` now, plus a startup sweep for the servers a killed run
   leaves behind, since a unique name has nobody to kill it next time.
+- **Under `pipefail`, a `grep -q` that MATCHES can make the pipeline fail.** `grep -q`
+  closes its input on the first match; the writer to its left then takes SIGPIPE, and
+  `pipefail` promotes that writer's 141 to the pipeline's status — so a match reads as a
+  no-match. Whether the writer got far enough to block is a race with the kernel's pipe
+  buffer, which is why it presents as an environment bug: the suite's tracked-file list is
+  ~4KB, fits the buffer a pipe usually gets, and does not fit the smaller one the kernel
+  hands out when it cannot spare that. Measured: same commit, green on one runner, red on
+  the other, blaming the FIRST path in the list — the only iteration that ran with a cold
+  pipe. Reproduce it deterministically with 240KB, which no buffer holds. The inverted form
+  is worse: `while ! tmux capture-pane | grep -q <pat>` reads the spurious 141 as "not there
+  yet", spins its whole count, and fails a LATER assertion about something else. Use a
+  here-string — `grep -q <pat> <<< "$out"` — whose status is the reader's alone. `test/run.sh`
+  sweeps itself for the pipe form, so the next one is caught rather than this one.
 - **macOS-only calls need a guard**: `stat -f`, `date -r`, `osascript`, `caffeinate`. Linux
   and WSL are supported.

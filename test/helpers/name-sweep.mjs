@@ -140,13 +140,14 @@ export function candidates(line) {
 //   A path here is not a blanket pass. Section 2 asserts each one is STILL contaminated, so
 // an exemption that has been dealt with turns red and asks to be deleted instead of
 // quietly covering a file nobody has looked at in a year.
-//   The third is not a comment either: it is the address CONTRIBUTING.md tells people to
-// send a vulnerability report to. Where security mail goes is a decision about how this
-// project is contacted, not a comment citing a case, so it is not something to rewrite in a
-// cleanup pass — flagged, exempt, and left to the person whose inbox it is.
-const EXEMPT = [
-  'CONTRIBUTING.md',
-];
+//   THE LIST IS EMPTY, AND THAT IS THE POINT. The last entry was CONTRIBUTING.md, held back
+// on the argument that where security mail goes is a decision about how the project is
+// contacted rather than a comment to rewrite in a cleanup pass. The argument was sound and
+// the conclusion was wrong: the decision did not need an address at all. GitHub's private
+// vulnerability reporting opens the same private thread with no address to publish, so the
+// exemption had nothing left to protect and its "still contaminated" assertion is what
+// forced the question. An exemption is a debt, not a category.
+const EXEMPT = [];
 
 const tracked = execFileSync('git', ['-C', ROOT, 'ls-files', '-z'], { encoding: 'utf8' })
   .split('\0').filter(Boolean);
