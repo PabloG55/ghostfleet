@@ -97,5 +97,9 @@ changing anything load-bearing.
 
 ## Security
 
-Please do not open a public issue for a vulnerability. Email pablo@superkey.com instead,
-and give me a chance to fix it before it is public.
+Please do not open a public issue for a vulnerability. Use GitHub's private vulnerability
+reporting — **Security → Report a vulnerability** on this repository — which opens a private
+thread with the maintainer and gives a chance to fix it before it is public.
+
+If that is unavailable to you, open a public issue saying only that you have a security
+report and no details, and you will be contacted privately.
