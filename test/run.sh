@@ -2082,66 +2082,115 @@ group "the observation contract reaches claude"
 if command -v git >/dev/null 2>&1; then
   OC="$(mktemp -d)"; mkdir -p "$OC/bin" "$OC/work" "$OC/.claude/projects"
   # A stub claude that records its argv, so the exec is observable without a real one.
-  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/argv"\n' "$OC" > "$OC/bin/claude"
+  # argv, argc, AND the one argument that follows --append-system-prompt, separately.
+  { echo '#!/usr/bin/env bash'
+    echo 'printf "%s\n" "$@" > "'"$OC"'/argv"'
+    echo 'printf "%s" "$#" > "'"$OC"'/argc"'
+    echo 'want=0; for a in "$@"; do'
+    echo '  if [ "$want" = 1 ]; then printf "%s" "$a" > "'"$OC"'/contract"; want=0; fi'
+    echo '  [ "$a" = --append-system-prompt ] && want=1'
+    echo 'done'; } > "$OC/bin/claude"
   chmod +x "$OC/bin/claude"
-  ch() { rm -f "$OC/argv"
+  # THE STUB WRITES ONLY THE CONTRACT ARGUMENT, and that is the whole point of this
+  # rewrite. It used to dump every argv entry into one file, and every assertion below
+  # grepped that file — so when a stray apostrophe in the contract text ended its
+  # single-quoted string, splitting it into a truncated argument plus four bare words plus
+  # a 2895-character remainder, every clause was still FOUND somewhere in the file and
+  # every row stayed green. Two thirds of the contract had silently stopped reaching the
+  # system prompt, and Claude Code was taking the first bare word as an initial prompt and
+  # submitting it as a turn in every new session. Asserting on the whole argv is asserting
+  # that the text exists somewhere, which is not the claim.
+  ch() { rm -f "$OC/argv" "$OC/argc" "$OC/contract"
          ( cd "$OC/work" && env -u CLAUDE_FLEET_NO_OBSERVE_CONTRACT -u CLAUDE_FLEET_FRESH \
              PATH="$OC/bin:$PATH" HOME="$OC" CLAUDE_CONFIG_DIR="$OC/.claude" "$@" \
              bash "$ROOT/bin/claude-here" -- --some-user-arg >/dev/null 2>&1 ); }
   # `-- ` is not decoration: claude-here's first positional is the SLOT, so a bare
   # --some-user-arg is swallowed as a tab label and never reaches claude. Passing it
   # wrongly the first time is what proved this assertion can fail.
-  argvhas() { grep -c -- "$1" "$OC/argv" 2>/dev/null || true; }
+  argvhas()     { grep -c -- "$1" "$OC/argv"     2>/dev/null || true; }
+  contracthas() { grep -c -- "$1" "$OC/contract" 2>/dev/null || true; }
 
   ch
   is "a fresh session gets the contract"      "1" "$(argvhas '^--append-system-prompt$')"
-  is "...and it is about OBSERVING"           "1" "$(argvhas 'state what you OBSERVED')"
-  is "...and it names the test-suite trap"    "1" "$(argvhas 'not observing the thing you changed')"
+  # NO POSITIONAL ARGUMENT MAY REACH claude, because Claude Code takes the first one as an
+  # INITIAL PROMPT and submits it as a turn. That is what a broken quote produced: four
+  # bare words after the truncation, the first of which became a message in every new
+  # session. The count is pinned rather than bounded — a fifth argument appearing is either
+  # a deliberate change to this launcher or a string that came apart, and both deserve a
+  # red line rather than a shrug.
+  # NOT A COUNT. The first version pinned argc at six and went red on CI with four,
+  # because `--name <name>` is only added when CLAUDE_FLEET_SOCK and CLAUDE_FLEET_SLOT are
+  # set — true in a fleet, false on a clean runner. A number that depends on where the test
+  # ran is the trap CLAUDE.md names, and pinning it asserted the environment rather than the
+  # code.
+  #   What actually matters is that NO BARE WORD reaches claude, because Claude Code takes a
+  # positional argument as an INITIAL PROMPT and submits it as a turn. So walk argv: every
+  # entry must be a flag, the value of a flag that takes one, or the caller's own argument.
+  # Anything else is a string that came apart — which is exactly what "the control there and"
+  # was.
+  POSITIONALS="$(awk '
+    BEGIN { skip = 0 }
+    { if (skip) { skip = 0; next }
+      if ($0 ~ /^--?[A-Za-z]/) { if ($0 == "--name" || $0 == "--model" || $0 == "--append-system-prompt") skip = 1; next }
+      print $0 }' "$OC/argv" 2>/dev/null | head -4 | tr '\n' ' ')"
+  is "...and no bare word reaches claude"     "" "${POSITIONALS% }"
+  # ...AND THE CONTRACT IS ONE ARGUMENT, whole. Length compared against the source, so a
+  # truncation cannot hide: the broken version delivered 673 of 3589 characters and every
+  # clause still grepped fine out of the argv dump.
+  is "...and it arrives whole, not truncated" "$(python3 - <<'PYX'
+import io,re
+s=io.open("bin/claude-here",encoding="utf-8").read()
+m=re.search(r"CONTRACT=\(--append-system-prompt '(.*?)'\) ;;", s, re.S)
+print(len(m.group(1)) if m else 0)
+PYX
+)" "$(wc -c < "$OC/contract" 2>/dev/null | tr -d ' ')"
+  is "...and it is about OBSERVING"           "1" "$(contracthas 'state what you OBSERVED')"
+  is "...and it names the test-suite trap"    "1" "$(contracthas 'not observing the thing you changed')"
   # Three clauses, three measurements, asserted separately — a contract that silently
   # lost one would still pass a test that only asked "is there a system prompt".
   #   receipt:    30 of 50 measurable re-reports had NO file changed between the two
   #               statements; the reporter could not see the agent working.
   #   divergence: end-of-turn asking is saturated (25.6% of turns, no effect), so the
   #               clause is about BEHAVIOURAL divergence, not felt uncertainty.
-  is "...and carries the receipt clause"      "1" "$(argvhas 'before you start working')"
-  is "...and the divergence clause"           "1" "$(argvhas 'would visibly differ')"
-  is "...which is NOT ask-when-unsure"        "1" "$(argvhas 'Do not ask because you feel uncertain')"
+  is "...and carries the receipt clause"      "1" "$(contracthas 'before you start working')"
+  is "...and the divergence clause"           "1" "$(contracthas 'would visibly differ')"
+  is "...which is NOT ask-when-unsure"        "1" "$(contracthas 'Do not ask because you feel uncertain')"
   # The two axes the first version missed. Written product-shaped ("different screens or
   # different stored data"), the clause did not cover the readings that actually diverge
   # in practice: WHAT is delivered, and WHERE it lands. Both were misread on the session
   # that produced this contract — an analysis request read as a mandate to build, and a
   # second product worked in after being told not to.
-  is "...and the deliverable axis"            "1" "$(argvhas 'WHAT IS DELIVERED')"
-  is "...and the target-repo axis"            "1" "$(argvhas 'WHICH repository or checkout')"
+  is "...and the deliverable axis"            "1" "$(contracthas 'WHAT IS DELIVERED')"
+  is "...and the target-repo axis"            "1" "$(contracthas 'WHICH repository or checkout')"
   # The extraction clause, from the 19-of-36 bucket of requirements the human already
   # held and never wrote down. Its shape is the load-bearing part: it demands the
   # ASSUMPTION be stated, because "anything else I should know" is the saturated question
   # — closing with a question moves the rework rate not at all — so both halves are
   # asserted, the axes AND the refusal to just ask.
-  is "...and the extraction axes"             "1" "$(argvhas 'what the UNIT is')"
-  is "...and the reuse-not-recreate axis"     "1" "$(argvhas 'reuse instead of recreating')"
-  is "...and states an assumption, not a Q"   "1" "$(argvhas 'rather than asking whether anything is missing')"
+  is "...and the extraction axes"             "1" "$(contracthas 'what the UNIT is')"
+  is "...and the reuse-not-recreate axis"     "1" "$(contracthas 'reuse instead of recreating')"
+  is "...and states an assumption, not a Q"   "1" "$(contracthas 'rather than asking whether anything is missing')"
   # RETROACTIVITY, and the reason it is here rather than in the first six: observed live,
   # a feature built in thirty minutes took its last correction nearly three hours later —
   # "it should backfill the already created drafts". A migration, arriving as a clause.
-  is "...and the retroactivity axis"          "1" "$(argvhas 'RETROACTIVELY to records that already exist')"
+  is "...and the retroactivity axis"          "1" "$(contracthas 'RETROACTIVELY to records that already exist')"
   # THE REFERENCE. The brief behind that session named the goal, the prepared asset and
   # three exact file:line locations — it was not thin — and still drew "make it bigger",
   # "dont make it bold keep it the same pic", and a backfill. The first correction's own
   # correction pointed at an earlier document of the same kind the product had already
   # produced: a reference that existed all along and arrived only after two wrong
   # guesses. So this axis is asked, not hoped for.
-  is "...and the rendered-artifact axis"      "1" "$(argvhas 'RENDERED ARTIFACT')"
+  is "...and the rendered-artifact axis"      "1" "$(contracthas 'RENDERED ARTIFACT')"
   # CLOSING THE LOOP. Entry and observation were both governed and nothing joined them:
   # an agent can truthfully report what it observed and still have built the wrong thing.
   # Target measured at 23 of 79 agent-behaviour corrections ("that is not what I asked").
   # Three halves asserted separately because each carries its own weight — restate the
   # criteria, justify "met" by observation rather than by the code reading right, and say
   # so when none were named, which is the only visible sign the asking half was skipped.
-  is "...and closes the loop at done"         "1" "$(argvhas 'CLOSE THE LOOP')"
-  is "...met because you LOOKED, not read"    "1" "$(argvhas 'because you looked at the thing it is about')"
-  is "...and admits when none were named"     "1" "$(argvhas 'the asking half did not happen')"
-  is "...which asks for an existing one"      "1" "$(argvhas 'whether there is an existing one to match')"
+  is "...and closes the loop at done"         "1" "$(contracthas 'CLOSE THE LOOP')"
+  is "...met because you LOOKED, not read"    "1" "$(contracthas 'because you looked at the thing it is about')"
+  is "...and admits when none were named"     "1" "$(contracthas 'the asking half did not happen')"
+  is "...which asks for an existing one"      "1" "$(contracthas 'whether there is an existing one to match')"
   # DO NOT WATCH THE PIPELINE. Same session: 173 tool calls between the finishing commit
   # and the first human word, 28 of them sleeps totalling ~16,000 seconds, against TWO
   # records touching anything that could render the artifact the feature was about.
@@ -2151,15 +2200,15 @@ if command -v git >/dev/null 2>&1; then
   # hook, hence `done` in fleet-inbox and the push — so waiting held shut the one channel
   # built to reach someone who left the desk. Assert the mechanism, or the clause decays
   # back into a productivity slogan.
-  is "...and does not hold the turn open"     "1" "$(argvhas 'do not hold the turn open to wait')"
-  is "...because ending it is what notifies"  "1" "$(argvhas 'Ending the turn is what notifies')"
+  is "...and does not hold the turn open"     "1" "$(contracthas 'do not hold the turn open to wait')"
+  is "...because ending it is what notifies"  "1" "$(contracthas 'Ending the turn is what notifies')"
   # AND IT NAMES THE INSTRUMENT. fleet-look was built to back the observe clause, shipped,
   # tested, and put on PATH — and nothing told a worker it existed. A mechanism nobody is
   # told about is never reached, and from outside it looks exactly like an instruction
   # nobody followed: the screen goes unopened either way. Asserted so the two cannot drift
   # apart again — the clause and the command ship together or the suite says so.
-  is "...and names fleet-look"                "1" "$(argvhas 'fleet-look.mjs')"
-  is "...and the tree flag beside it"         "1" "$(argvhas 'add --tree')"
+  is "...and names fleet-look"                "1" "$(contracthas 'fleet-look.mjs')"
+  is "...and the tree flag beside it"         "1" "$(contracthas 'add --tree')"
   # The user's own arguments must survive it — an array spliced into the wrong place
   # would eat them, and nothing else in the session would say so.
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
