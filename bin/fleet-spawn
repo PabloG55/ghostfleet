@@ -15,7 +15,16 @@
 #   --from    base ref for a new branch. Respects LOCAL commits: bases off your
 #             local ref (use HEAD for the current one) and only falls back to the
 #             remote tip when local is strictly BEHIND its upstream (warns if ahead).
-#   --prompt  initial task to send once the session boots (~7s later)
+#   --prompt  initial task to send once the session boots (~7s later). A brief with no
+#             done-criterion, or one that reads as several deliverables, draws a WARNING
+#             that names what is missing and why — it never refuses, the exit status is
+#             unchanged, and the spawn proceeds. Every prompted spawn is counted in
+#             <fleet dir>/<socket>.brief.tsv (verdict, length, digest — never the body)
+#             so the bypass rate can be measured before anything is promoted to a gate.
+#             Every dispatch also prints `brief-check: ok|warn …` at the head of a line on
+#             STDOUT, and that same line is appended to what the worker receives — the
+#             objection happens in the lead and the outcome happens in the worker, and
+#             nothing else joins those two transcripts.
 #   --model   model for the new session (e.g. opus); default = account default
 #   --agent   which coding CLI runs the session (claude | opencode | codex).
 #             Default claude. See bin/fleet-agent for what each one can actually
@@ -133,6 +142,128 @@ if [ "${CLAUDE_FLEET_ALLOW_NESTED:-0}" != 1 ] \
     echo "  Override deliberately with CLAUDE_FLEET_ALLOW_NESTED=1."; } >&2
   exit 1
 fi
+
+# ── IS THIS BRIEF ONE THING, AND DOES IT SAY WHAT DONE LOOKS LIKE? ───────────
+#
+# A WARNING, NEVER A REFUSAL, and that distinction is the whole design. The obvious
+# version of this is a gate, and a gate here would be built on a null result: of six
+# brief features measured across this corpus — length, naming a file, naming a route,
+# STATING A DONE-CRITERION, carrying a reference image, human-vs-lead authorship — all
+# six sit in a 20-30% correction band with fully overlapping intervals. Gating on one of
+# them is gating on nothing. Worse, its failure mode is this repo's dominant one:
+# "Done when: implemented" passes any parser, the worker echoes it back, every visible
+# field looks disciplined, and the decision the human never made is still unmade. A
+# signal that reports a state other than the one it is in is what 41% of this repo's PRs
+# exist to fix, and a gate here would have manufactured a new one. So: say what is thin,
+# COUNT it (below, beside the manifest), and let a later evaluation against a baseline
+# decide whether any of it ever earns a refusal. Exit status is untouched.
+#
+# ONE WARNING PER BRIEF, not one per missing field. A wall of warnings is read as
+# decoration, which is the same failure arriving by a different route.
+#
+# THE DELIVERABLE COUNT IS NOT A LIST COUNT, deliberately. A numbered list is
+# presentation: it can be one change's acceptance criteria, a research method, or a set
+# of named UI states, and counting its items would call all three "three asks". What is
+# counted is a BUILD VERB in a STARTING position — line start, after a bullet or a
+# number, after a sentence end, or after "then"/"also". read/run/check/verify are left
+# out on purpose: those are method steps, and counting them turns "investigate the
+# flake, read the suite, run it twice" into three deliverables. It undercounts prose
+# that bundles without a conjunction ("fix the parser and add a test" reads as one), and
+# undercounting is the right direction to miss in for something that must not become
+# noise.
+BRIEF_VERBS='add|build|implement|create|write|fix|update|refactor|remove|delete|rename|migrate|port|wire|ship|document|redesign|replace|extract|split|introduce|expose|support'
+BRIEF_START='(^[[:space:]]*((-|\*|•)[[:space:]]+)?([0-9]+[.)][[:space:]]+)?|^[[:space:]]*(and[[:space:]]+then|then|also)[[:space:]]+|[.;!?][[:space:]]+|[[:space:]]+(and[[:space:]]+then|then|also)[[:space:]]+)'
+BRIEF_DONE=yes; BRIEF_ITEMS=0
+# A HERE-STRING AND NOT A PIPE INTO grep -q. `grep -q` closes its input on the first
+# match, the writer takes SIGPIPE, and `set -o pipefail` promotes that 141 to the
+# pipeline status — so a MATCH would read as a no-match, and only on the runs where the
+# kernel handed out a small pipe buffer. That is a live bug in this repo's own suite; do
+# not reintroduce its shape here.
+if [ -n "$PROMPT" ]; then
+  grep -qiE 'done when|acceptance criteri|definition of done|success criteri|^[[:space:]]*done[[:space:]]*:' <<<"$PROMPT" || BRIEF_DONE=no
+  BRIEF_ITEMS="$(grep -oiE "$BRIEF_START($BRIEF_VERBS)([[:space:]]|\$)" <<<"$PROMPT" | wc -l | tr -d ' ')"
+fi
+# THE VERDICT, as one machine-readable line, and the reason it has no `fleet-spawn:`
+# prefix like every other line this command prints. It is a MARKER: the item #5 evaluator
+# identifies which sessions were treated by this machinery by finding it at the HEAD of a
+# line, and it has to, because the string alone is not evidence — the evaluator's first
+# run classified the session that was WRITING this file as treated, and the treated arm
+# would have filled with the treatment's own construction work. A marker is a position,
+# not a substring.
+#
+# ONE STRING, printed to the lead AND appended to what the worker receives. The objection
+# happens in the lead and the outcome happens in the worker, and nothing else joins those
+# two transcripts: a verdict left behind on the lead makes a false refusal unmeasurable
+# from either end. Identical bytes in both places is what makes them joinable.
+BRIEF_VERDICT=ok
+if [ "$BRIEF_DONE" = no ] || [ "${BRIEF_ITEMS:-0}" -gt 1 ]; then BRIEF_VERDICT=warn; fi
+BRIEF_MARK="brief-check: $BRIEF_VERDICT done-criterion=$BRIEF_DONE deliverables=${BRIEF_ITEMS:-0}"
+[ "$BRIEF_VERDICT" = warn ] && BRIEF_MARK="$BRIEF_MARK — warning only, nothing was blocked; if a decision you need is missing, ask before you build"
+
+# Short, one-way, and computed here so the body never leaves this process — the same
+# boundary the dispatch log keeps. Enough to tell one brief from another and to spot a
+# re-send of the same one; none of what was said.
+brief_digest() {
+  if   command -v shasum   >/dev/null 2>&1; then shasum -a 256
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum
+  else cksum; fi | awk '{print substr($1,1,12)}'
+}
+
+# WARN EARLY, COUNT LATE. The warning is advice about the brief and is worth having
+# before the reuse-before-proliferate stop below, so a lead re-running the command can fix
+# both in one go. The COUNT goes next to the manifest write, after the session is
+# confirmed — a row is a claim that a dispatch happened, and one written for a spawn that
+# died on a missing agent binary would corrupt the denominator that makes the bypass rate
+# mean anything.
+#
+# STDOUT, NOT STDERR, and this is measured rather than stylistic. mcp/fleet-dispatch.mjs
+# returns `execFileSync(...)` — stdout alone — on the SUCCESS path, and only merges stderr
+# in when the command fails. A lead dispatching through the fleet_spawn MCP tool, which
+# the orchestrate skill tells it to prefer, would therefore see none of this on the one
+# path where everything worked. A warning delivered only when the spawn breaks is not a
+# warning about the brief.
+if [ -n "$PROMPT" ]; then
+  echo "$BRIEF_MARK"
+  if [ "$BRIEF_VERDICT" = warn ]; then
+    echo "fleet-spawn: the brief is thin — dispatching anyway, and nothing below blocks it."
+    if [ "$BRIEF_DONE" = no ]; then
+      echo "  NO DONE-CRITERION: nothing in it says how the worker knows it is finished. Every"
+      echo "    session carries a contract that CLOSES on the criteria named at the start, so a"
+      echo "    brief naming none leaves it nothing to close — and the honest done-report is then"
+      echo "    that none were named, which lands back on you later as a question."
+    fi
+    if [ "${BRIEF_ITEMS:-0}" -gt 1 ]; then
+      echo "  READS AS $BRIEF_ITEMS DELIVERABLES (build verbs in a starting position). One worker"
+      echo "    reporting done after the first is indistinguishable from one that did them all."
+    fi
+    echo
+    echo "  ADDING A DONE LINE IS NOT THE FIX, and would not show up in any measurement: it is"
+    echo "  one of six brief features measured at NO effect here. What IS measured is the other"
+    echo "  half — 36 of 163 screen-attributed corrections were requirements stated for the"
+    echo "  first time mid-flight, and 19 of those were already known to the human and simply"
+    echo "  not said. So before you re-send, run the ask against the eight axes and put the"
+    echo "  unanswered MATERIAL ones back to the human as a NUMBERED LIST:"
+    echo "      UNIT (per line, per document, per policy) · PARITY with an existing surface ·"
+    echo "      REUSE rather than recreate · the GATE before advancing · COMPLETENESS of a list ·"
+    echo "      ELIGIBILITY and how a thing LEAVES · RETROACTIVITY to records that already exist ·"
+    echo "      and for a rendered artifact, whether there is an existing one to match."
+    echo "  Then put the ANSWERS in the brief. The worker records which of them it is working"
+    echo "  from with fleet-ack, and fleet-worktrees shows ASKED beside UNDERSTOOD — so a worker"
+    echo "  building from a decision nobody made is visible now instead of at turn 30."
+    echo
+    echo "  Counted — verdict, length and a digest, never the body — in <fleet dir>/$SOCK.brief.tsv"
+  fi
+fi
+
+# WHAT THE WORKER ACTUALLY RECEIVES. The marker rides along as a trailing line rather than
+# a leading one: the head of the brief is what the worker reads first and what the manifest
+# shows in ASKED, and putting machinery in front of the human ask degrades both. $PROMPT
+# itself is left alone, so the manifest and the brief counter keep measuring the ASK rather
+# than the ask plus our own footer — fleet-send has its own log for what was really sent.
+DISPATCH_PROMPT="$PROMPT"
+[ -n "$PROMPT" ] && DISPATCH_PROMPT="$PROMPT
+
+$BRIEF_MARK"
 
 PARENT="$(dirname "$GITROOT")"
 
@@ -672,6 +803,39 @@ mtmp="$MANIFEST.$$.tmp"
 { [ -f "$MANIFEST" ] && awk -F'\t' -v w="$WT" '$1!=w' "$MANIFEST"
   printf '%s\t%s\t%s\t%s\n' "$WT" "$name" "$BRANCH" "$task"; } >"$mtmp" 2>/dev/null \
   && mv -f "$mtmp" "$MANIFEST" 2>/dev/null || rm -f "$mtmp" 2>/dev/null
+#
+# FOUR COLUMNS, and the fifth and sixth are not ours to write. fleet-ack appends what the
+# WORKER understood and which of the decisions it is working from; a row written here
+# claims only what was ASKED, and a spawn that has not been acknowledged yet must be
+# indistinguishable from one whose worker has not read the brief — because it is. The
+# same replacement is why a re-dispatch into a reused worktree clears an older ack rather
+# than carrying it forward: an acknowledgement belongs to the ask it acknowledged, and a
+# stale one shown beside a new brief is exactly the "looks disciplined, reports the wrong
+# state" failure this pair of features exists to make visible.
+
+# ── the brief counter: so the bypass rate is measurable later ────────────────
+# Nothing above blocks, so every warning IS a bypass — which makes the warned count
+# meaningless on its own. Every prompted spawn gets a row, warned or not, so there is a
+# denominator:
+#
+#     awk -F'\t' '$4=="no"||$5>1{w++}{n++}END{print w"/"n}' ~/.claude/fleet/*.brief.tsv
+#
+# HERE and not where the warning printed, for the same reason the manifest row is written
+# here: a row is a claim that a dispatch happened, and one recorded for a spawn that died
+# on a missing agent binary would corrupt that denominator.
+#
+# NEVER THE BODY — verdict, length and a short digest only, the boundary the dispatch log
+# already keeps. The digest tells one brief from another and spots a re-send of the same
+# one; it carries none of what was said. Appended rather than rewritten: this file is a
+# measurement series, and a rewrite is how a series quietly loses the rows that would
+# have contradicted it.
+if [ -n "$PROMPT" ]; then
+  BRIEFLOG="${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}/$SOCK.brief.tsv"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date +%s)" "$WT" "$name" "$BRIEF_DONE" "${BRIEF_ITEMS:-0}" \
+    "$(printf '%s' "$PROMPT" | wc -c | tr -d ' ')" \
+    "$(printf '%s' "$PROMPT" | brief_digest)" >>"$BRIEFLOG" 2>/dev/null
+fi
 
 # optional initial prompt — dispatch once the worker's Claude is actually READY for
 # input, NOT after a fixed delay: v2.1 boot can take a minute+, and a prompt sent
@@ -701,6 +865,6 @@ if [ -n "$PROMPT" ]; then
     fi
     sleep 1
     fleet-send -s "$sock" "$name" "$msg"
-  ' _ "$SOCK" "$name" "$PROMPT" "$READY_RE" >/dev/null 2>&1 &
+  ' _ "$SOCK" "$name" "$DISPATCH_PROMPT" "$READY_RE" >/dev/null 2>&1 &
   echo "fleet-spawn: will dispatch the initial prompt once '$name' is ready for input"
 fi
