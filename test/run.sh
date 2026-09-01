@@ -8635,6 +8635,180 @@ else
 fi
 rm -rf "$MFX"
 
+# ── 6d. the Stop-hook observation check ───────────────────────────────────────
+# hooks/fleet-observe.sh records whether a LEAD's turn changed a renderable surface and never
+# looked at it. MEASURED, and the measurement is the reason it exists: 67 of 118 sessions that
+# claimed done had opened a browser first — 0.568. And of 172 build turns that changed a screen
+# file, 154 ran a test, lint or build while FOUR ever opened a browser, on exactly the surfaces
+# whose defects came back as photographs.
+#
+# WARN ONLY, AND THAT IS THE DESIGN RATHER THAN A FIRST STEP. The numbers above justify
+# instrumenting the gap; they do not say a refusal closes it. docs/improvement-plan.md #5
+# exists because v1 of that plan shipped a hard gate on a correlation, and promoting this to a
+# refusal is #5's decision against #5's numbers. So every assertion below is about a RECORD,
+# and one of them is that the run did not change.
+#
+# IT KEYS ON MECHANICAL EVIDENCE, NEVER THE PROSE. A check that reads the done-report for the
+# word "observed" is satisfied by a fake observation, and then it measures fluency — the
+# performative-compliance failure docs/plan-critique.md names. So it reads the transcript and
+# asks whether an observation tool RAN, using bin/fleet-meter.mjs's `observed` rules so the
+# check and the meter cannot disagree about what a browser is.
+#
+# TWO HALVES BELOW, split by what each can prove.
+#
+# THE UNIT HALF drives the hook directly with synthesised transcripts, one per decision, and
+# needs no `claude` — so it runs on both CI legs. Every row is a direction: it warns on a
+# surface with no look, records `ok` when the look happened or nothing renderable changed, and
+# says NOTHING at all where it could not judge. The three verdicts are distinct on purpose: a
+# missing line means untreated, and `ok` means checked-and-clean, and #5's cohort is built from
+# the difference. A hook that emitted `ok` when it had not actually looked would put untreated
+# sessions in the treated arm, which is the contamination its marker rule exists to stop.
+#   THE SCOPING ROW IS THE SHARP ONE: an observation made in an EARLIER turn must not excuse
+# this one. Scoped wrongly, the check reports `ok` for every session that ever opened a browser
+# once, and it would look like it was working forever.
+#
+# NO PIPELINE INTO THE ASSERTION, and that is not style. `{ transcript } | obs_run` puts
+# obs_run in a SUBSHELL, so `is` would print its red line and increment PASS/FAIL in a copy of
+# the shell that then exits — the suite stays green with the defect on screen, which is the
+# exact failure this file exists to prevent. The transcript is written to a file first.
+group "the Stop-hook observation check"
+if command -v jq >/dev/null 2>&1; then
+  OBS="$(mktemp -d "$TEST_RUNS.$$.obs.XXXXXX")"
+  OBS_EXITS=""
+  # Records, as command substitutions rather than as writers, so a transcript reads as a list
+  # of what happened in the turn.
+  obs_u()    { printf '{"type":"user","promptId":"%s","message":{"role":"user","content":"make the send button fit"}}' "$1"; }
+  obs_tool() { printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"%s","input":%s}]}}' "$1" "$2"; }
+  obs_text() { printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}'; }
+  obs_write() { : > "$OBS/t.jsonl"; local l; for l in "$@"; do printf '%s\n' "$l" >> "$OBS/t.jsonl"; done; }
+  # $1=name $2=want-verdict (warn|ok|silent) $3=prompt_id $4=stop_hook_active.
+  # THE VERDICT IS READ FROM THE MARKER AT THE HEAD OF A LINE, not from the message body — the
+  # advice text under a warn mentions fleet-look and a grep for that would pass on prose.
+  obs_run() {
+    local rc out verdict
+    out="$(printf '{"hook_event_name":"Stop","transcript_path":"%s","prompt_id":"%s","stop_hook_active":%s,"cwd":"%s"}' \
+      "$OBS/t.jsonl" "$3" "$4" "$ROOT" \
+      | env CLAUDE_FLEET_SOCK="${OBS_SOCK-cf-acme-api}" CLAUDE_FLEET_SLOT="${OBS_SLOT-master}" \
+            CLAUDE_FLEET_ALLOW_UNOBSERVED="${OBS_OVERRIDE-0}" TMUX= \
+            bash "$ROOT/hooks/fleet-observe.sh" 2>&1 1>/dev/null)"
+    rc=$?
+    OBS_EXITS="$OBS_EXITS$rc"
+    # HERE-STRINGS, NOT PIPES. `grep -q` stops at its first match and the writer then takes
+    # SIGPIPE, which `set -o pipefail` promotes to the pipeline's status — so a MATCH can
+    # come back as 141 and this `if` would take the WRONG branch, reading a warn as silent.
+    # $out is a hook's whole output, which is exactly the unbounded left-hand side that
+    # blocks long enough for it to happen. The suite sweeps itself for the pipe form.
+    if   grep -qE '^[[:space:]]*observe-check:[[:space:]]*warn\b' <<< "$out"; then verdict=warn
+    elif grep -qE '^[[:space:]]*observe-check:[[:space:]]*ok\b'   <<< "$out"; then verdict=ok
+    else verdict=silent; fi
+    is "$1" "$2" "$verdict"
+  }
+  OBS_W='{"file_path":"/repo/web/app.js"}'      # a renderable surface, the way this repo ships one
+  OBS_H='{"file_path":"/repo/report.html"}'     # renderable anywhere, by extension
+  OBS_N='{"file_path":"/repo/bin/fleet-send"}'  # nothing fleet-look could render
+  OBS_TEST='{"command":"./test/run.sh"}'
+  OBS_LOOK='{"command":"fleet-look.mjs http://127.0.0.1:8787"}'
+  OBS_CURL='{"command":"curl -s http://127.0.0.1:8787 | head"}'
+
+  # THE ONE IT EXISTS FOR: a surface changed, a test run, nothing looked at.
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_TEST")" "$(obs_text)"
+  obs_run "warns on a lead turn that changed a surface and never looked" warn P1 false
+  # CURL IS NOT A BROWSER. A 200 says the route answered; it does not say the screen drew, and
+  # turns that changed a screen and never looked at one are the entire finding.
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_CURL")"
+  obs_run "...and curl does not count as looking" warn P1 false
+  obs_write "$(obs_u P1)" "$(obs_tool Write "$OBS_H")" "$(obs_tool Bash "$OBS_TEST")"
+  obs_run "...on a .html surface too" warn P1 false
+
+  # `ok` — the check ran and had nothing to object to. Distinct from silence, because `ok` is
+  # what puts a turn in #5's treated cohort and silence is what keeps it out.
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_LOOK")"
+  obs_run "records ok when fleet-look ran in the same turn" ok P1 false
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool mcp__chrome-devtools__take_screenshot '{}')"
+  obs_run "...or a chrome-devtools call" ok P1 false
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_N")" "$(obs_tool Bash "$OBS_TEST")"
+  obs_run "...and when nothing renderable changed" ok P1 false
+  obs_write "$(obs_u P1)" "$(obs_text)"
+  obs_run "...and when the turn made no tool calls at all" ok P1 false
+
+  # SILENT, on every path where it could not actually judge the turn. An `ok` on any of these
+  # would claim a check that did not happen.
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_TEST")"
+  obs_run "says nothing on the SECOND Stop of the same turn" silent P1 true
+  OBS_SLOT=api-2 obs_run "...for a worker rather than the lead" silent P1 false
+  OBS_SOCK= obs_run "...outside a fleet altogether" silent P1 false
+  OBS_OVERRIDE=1 obs_run "...under the documented override" silent P1 false
+  printf 'not json\n{ oops\n' > "$OBS/t.jsonl"
+  obs_run "...on a transcript it cannot parse" silent P1 false
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_TEST")"
+  obs_run "...when the payload carries no prompt_id" silent "" false
+
+  # SCOPED TO THIS TURN — the row that would otherwise pass forever while the check reported ok
+  # for everybody: a browser opened in an EARLIER turn must not excuse this one.
+  obs_write "$(obs_u P0)" "$(obs_tool Bash "$OBS_LOOK")" "$(obs_u P1)" \
+            "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_TEST")"
+  obs_run "an observation in a PREVIOUS turn does not excuse this one" warn P1 false
+  obs_write "$(obs_u P0)" "$(obs_tool Bash "$OBS_TEST")" "$(obs_u P1)" \
+            "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_LOOK")"
+  obs_run "...and one in THIS turn records ok" ok P1 false
+
+  # A missing transcript is the commonest silent path in practice and the easiest to break by
+  # reordering the guards, so it gets its own row rather than being assumed.
+  OBS_MISSING="$(printf '{"hook_event_name":"Stop","transcript_path":"%s","prompt_id":"P1","stop_hook_active":false}' \
+    "$OBS/definitely-not-here.jsonl" \
+    | env CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=master TMUX= \
+      bash "$ROOT/hooks/fleet-observe.sh" 2>&1 1>/dev/null)"
+  is "...and on a transcript that is not there" "" "$OBS_MISSING"
+
+  # WARN ONLY, ASSERTED RATHER THAN INTENDED. Every path above must exit 0: a non-zero exit
+  # from a Stop hook is a REFUSAL that re-opens the turn, which is exactly what this item was
+  # corrected not to ship. One row over every case, so a single stray `exit 2` cannot hide.
+  OBS_NONZERO="$(printf '%s' "$OBS_EXITS" | tr -d 0)"
+  is "never exits non-zero on any path" "all zero over 15 cases" \
+     "$([ -z "$OBS_NONZERO" ] && echo "all zero over ${#OBS_EXITS} cases" || echo "non-zero somewhere: $OBS_EXITS")"
+  # And the source carries no other exit at all, which is what stops a future edit from adding
+  # one below the last assertion here.
+  is "...and the source has no non-zero exit in it" "yes" \
+     "$(grep -qE '^[[:space:]]*exit [1-9]' "$ROOT/hooks/fleet-observe.sh" && echo no || echo yes)"
+  rm -rf "$OBS"
+
+  # WIRED, not merely present. A hook nobody installed never fires, and that is
+  # indistinguishable from one that had nothing to say — the same argument as the install-list
+  # group below. Stop carries TWO of ours, so assert both rather than "Stop is wired".
+  is "install.sh wires the check onto Stop" "yes" \
+     "$(grep -q 'OBSERVE="\$FLEET_HOME/hooks/fleet-observe.sh"' "$ROOT/install.sh" \
+        && grep -q 'command: \$observe' "$ROOT/install.sh" && echo yes || echo no)"
+  is "...alongside the status hook, not instead of it" "yes" \
+     "$(grep -q 'Stop: stopentry' "$ROOT/install.sh" && echo yes || echo no)"
+else
+  skip "the Stop-hook observation check" "no jq, and the hook declines without it"
+fi
+
+# ── the same check, in real sessions ─────────────────────────────────────────
+# THE FIXTURE HALF. Four things cannot be asserted from a synthesised transcript, and each is
+# something Claude Code could change under us where the hook would simply go quiet: that the
+# warning lands at the POSITION #5's evaluator can trust, that it does NOT re-open the turn,
+# that the agent is not told, and — recorded but deliberately unused — that a Stop hook could
+# block if #5 ever asks for a refusal.
+#   Skipped where there is no `claude`, same bargain as the group above it.
+OCO="$(mktemp -d "$TEST_RUNS.$$.oco.XXXXXX")"
+node "$ROOT/test/helpers/observe-check.mjs" > "$OCO/out" 2> "$OCO/err"
+ocorc=$?
+if grep -q '^#SKIP' "$OCO/out" 2>/dev/null; then
+  skip "the observation check, in a real session" "$(head -1 "$OCO/out" | cut -d "$US" -f3)"
+else
+  is "observe-check ran"          "0" "$ocorc"
+  is "...without complaining"     ""  "$(head -2 "$OCO/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A floor, for the reason pwa-check documents: a helper that died before its assertions emits
+  # a couple of rows and no mismatches, which reads as clean.
+  is "...and produced its checks" "yes" \
+     "$([ "$(wc -l < "$OCO/out")" -ge 12 ] && echo yes || echo "no: $(wc -l < "$OCO/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$OCO/out"
+fi
+rm -rf "$OCO"
+
 # ── 7. every command parses ──────────────────────────────────────────────────
 group "syntax"
 for f in "$ROOT"/bin/*; do

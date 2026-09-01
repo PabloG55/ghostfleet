@@ -206,11 +206,121 @@ correlation. It is also the honest answer to *"did any of this work"*.
 
 ---
 
-### #6 — Stop-hook enforcer — **the condition is met; it is no longer conditional**
+### #6 — Stop-hook observation check — **built, and WARN ONLY**
 
-A `Stop` hook reads the turn's own output and refuses a done-report naming no observation.
-Conditional on the spike: if Claude Code cannot expose turn-scoped output to a hook, this item
-does not exist and should be struck rather than attempted.
+A `Stop` hook records whether a **lead's** turn changed a surface somebody could look at and
+never looked at it. It does not refuse, does not exit non-zero, and does not change what the
+session does next. `hooks/fleet-observe.sh`, wired onto `Stop` beside `fleet-event.sh`.
+
+**Warn and not refuse, which is a correction to this item as written.** v2 specified a hook
+that *"refuses a done-report naming no observation"*. That is a hard gate, and #5 in this same
+document says only a failure mode that shows up in its evaluation earns one. The evidence here
+is a gap, not a remedy: **67 of 118 sessions that claimed done had opened a browser first —
+0.568**, and separately 4 of 172 build turns that changed a screen file ever opened a browser.
+That justifies instrumenting the gap. It does not say a refusal is what closes it, and nothing
+in this repo can currently say so. Shipping the refusal would have been asserting the fix
+works — the exact shape of error #5 exists to prevent, and the one the critique caught in v1.
+Promotion is #5's call against #5's numbers.
+
+**It keys on mechanical evidence, never on the prose of the done-claim.** A hook that reads the
+report for the word "observed" is satisfied by naming a *fake* observation, and then it measures
+fluency instead of work — `docs/plan-critique.md`'s performative-compliance finding, arriving
+through the door this item opens. So it reads the transcript and asks whether an observation
+tool actually **ran**, reusing `bin/fleet-meter.mjs`'s `observed` rules (chrome-devtools tools,
+or a shell command naming `fleet-look` / `playwright` / `puppeteer` / `chromium`; **curl
+excluded** — a 200 says the route answered, not that the screen drew).
+
+#### The three questions, measured
+
+**Q1 — can a `Stop` hook block? YES, and it is deliberately not used.** exit 2 puts the hook's
+stderr into the conversation as a user message prefixed `Stop hook feedback:` and the session
+keeps working; the second `Stop` of the same turn carries `stop_hook_active: true`, which is
+the re-entry flag that keeps such a refusal from looping. Both are pinned by the suite using a
+**test-only** hook, so that if #5 ever says promote, the mechanism is known to work rather than
+hoped to — but the shipped behaviour does not depend on the answer.
+
+**Q2 — does `last_assistant_message` carry the whole final message? NO — only its last text
+block.** A scripted final message of two text blocks arrived as the second one alone. It is the
+obvious thing to key on and it is wrong twice over: it is prose, and it is partial. Recorded so
+that the day it changes, the row that changes is a row about a fact.
+
+**Q3 — can a `Stop` hook see the turn's tool calls? YES, and scoped exactly.** The payload's
+`prompt_id` equals the `promptId` on the transcript's user records, so the turn is everything
+after the **first** user record carrying that id. First and not last: a blocked-and-continued
+turn gets a *second* user record with the same id (the injected feedback), so scoping to the
+last one would hide every tool call made before the objection — the turn would look emptier the
+more it had been told to do.
+
+#### A fourth question nobody asked, and it decided the design
+
+**Where can a non-blocking `Stop` hook's warning actually go?** Four channels, each driven
+through a real session and scored by the model turns it caused:
+
+| channel | model turns | in transcript | reaches the agent |
+|---|---|---|---|
+| stderr, exit 0 | **2** (the baseline) | yes | no |
+| stdout `{"systemMessage":…}` | 2 | yes | no |
+| stdout, plain text | 2 | yes | no |
+| stdout `{"additionalContext":…}` | **10** | yes | **yes** |
+
+`additionalContext` is the tempting one — the only channel that reaches the agent without
+exit 2 — and it is **not a warning**: it re-opens the turn. The session went round eight extra
+times, each `Stop` appending another copy of the same context, with nothing in the payload
+saying so. A "warn-only" hook built on it would quietly multiply every lead turn that touched a
+surface, which is worse than the refusal it was avoiding. So the hook uses **stderr with
+exit 0**, the agent is not told, and the contract in the system prompt remains what speaks to
+the agent.
+
+#### The marker, and a position #5 does not yet declare
+
+Per #5's rule — a marker is a **position**, not a string, because its first run classified a
+session as treated on a bare word match and the session it matched was the one *writing* the
+marker. Measured, this is where the line lands:
+
+> an `attachment` record, `attachment.type == "hook_success"`,
+> `attachment.hookEvent == "Stop"`, the line at the head of `attachment.stderr`
+
+```
+observe-check: ok   surfaces=<n> looked=<0|1>     the check ran and had nothing to say
+observe-check: warn surfaces=<names> looked=0     a surface changed and nothing looked
+```
+
+Both levels are emitted, because **in force** (the machinery ran) is the cohort and **fired**
+(it objected) is the denominator — a cohort defined by "fired" contains only turns the check
+disliked, which is #5's own warning. Nothing is emitted at all where the check could not
+actually judge the turn, so an untreated session never lands in the treated arm.
+
+**This is a FOURTH position, and #5 declares only three** (`prompt`, `output`, `command`). A
+hook-stderr attachment is none of them, and no agent's prose can forge that record — it is a
+stronger position than the three, not a weaker one. **#5 has to add it or this item is
+unmeasurable**, and that is a dependency stated rather than assumed. The pattern to add:
+
+```
+observe_check_in_force: { of: '#6', level: 'in force', where: ['hook_stderr'],
+  re: /(?:^|\n)[^\S\n]*observe-check:[ \t]*(?:ok|warn)\b/i }
+observe_check_fired:    { of: '#6', level: 'fired',    where: ['hook_stderr'],
+  re: /(?:^|\n)[^\S\n]*observe-check:[ \t]*warn\b/i }
+```
+
+#### Scope, and where it stays quiet
+
+Lead only (`CLAUDE_FLEET_SLOT` = `master`), so one session per fleet is instrumented and a rule
+that turns out to be wrong costs one turn rather than the whole fleet's. Silent — not even
+`ok` — on every path where it could not judge: no `jq`, no transcript, an unreadable or
+truncated one, no `prompt_id`, a second `Stop` of the same turn, outside a fleet, not a lead, or
+`CLAUDE_FLEET_ALLOW_UNOBSERVED=1`.
+
+**"Renderable surface" is a definition this item had to invent, and it is the one real judgment
+call in here.** `fleet-meter.mjs` deliberately does not define "screen file" — it says so, and
+emits the unconditioned number instead. Warning on *any* changed file would fire on shell
+scripts and TUI code where no render exists to satisfy it, so the rule is: extensions that are
+always a rendering layer (`.html .css .scss .svg .jsx .tsx .vue .svelte` …), plus a plain script
+under a `web/` `public/` `client/` `www/` directory, which is how this repo ships its own
+screens. **A bare `.js` outside those directories is a known blind spot, left blind on
+purpose** — widen it when the meter shows cases being missed, not on a guess.
+
+**What is NOT established.** Whether warning changes anything. That is the whole point of
+leaving it to #5, and this item ships the instrument, not the claim.
 
 **MEASURED by #1, and this is the finding that most repays having built it.** The `Stop`
 payload carries `last_assistant_message`, and in the fixture run its value was the exact
