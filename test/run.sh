@@ -2118,9 +2118,22 @@ if command -v git >/dev/null 2>&1; then
   # session. The count is pinned rather than bounded — a fifth argument appearing is either
   # a deliberate change to this launcher or a string that came apart, and both deserve a
   # red line rather than a shrug.
-  # Six: yolo, --name, the name, --append-system-prompt, the contract, and the caller's
-  # own --some-user-arg that ch() passes after `--`.
-  is "...and exactly the args we intend"      "6" "$(cat "$OC/argc" 2>/dev/null)"
+  # NOT A COUNT. The first version pinned argc at six and went red on CI with four,
+  # because `--name <name>` is only added when CLAUDE_FLEET_SOCK and CLAUDE_FLEET_SLOT are
+  # set — true in a fleet, false on a clean runner. A number that depends on where the test
+  # ran is the trap CLAUDE.md names, and pinning it asserted the environment rather than the
+  # code.
+  #   What actually matters is that NO BARE WORD reaches claude, because Claude Code takes a
+  # positional argument as an INITIAL PROMPT and submits it as a turn. So walk argv: every
+  # entry must be a flag, the value of a flag that takes one, or the caller's own argument.
+  # Anything else is a string that came apart — which is exactly what "the control there and"
+  # was.
+  POSITIONALS="$(awk '
+    BEGIN { skip = 0 }
+    { if (skip) { skip = 0; next }
+      if ($0 ~ /^--?[A-Za-z]/) { if ($0 == "--name" || $0 == "--model" || $0 == "--append-system-prompt") skip = 1; next }
+      print $0 }' "$OC/argv" 2>/dev/null | head -4 | tr '\n' ' ')"
+  is "...and no bare word reaches claude"     "" "${POSITIONALS% }"
   # ...AND THE CONTRACT IS ONE ARGUMENT, whole. Length compared against the source, so a
   # truncation cannot hide: the broken version delivered 673 of 3589 characters and every
   # clause still grepped fine out of the argv dump.
