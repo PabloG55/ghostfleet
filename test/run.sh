@@ -8356,6 +8356,194 @@ else
   skip "the utilization meter" "node missing"
 fi
 
+# ── 6a4. the evaluator refuses a verdict it cannot support ───────────────────
+# Plan item #5 promotes a warning to a hard gate only where a failure mode SHOWS UP. Four
+# measurements decide it, and on the day it ships all four are unmeasurable: #3 and #4 are
+# not merged, so nothing has ever left a treatment marker and every rate is over an empty
+# denominator.
+#   THE REFUSAL IS THE FEATURE, AND IT IS WHAT THIS GROUP MOSTLY TESTS. A rate of 0/0 comes
+# out either NaN or a tidy 0, and a tidy 0 here reads as "no false refusals, no bypass, no
+# added latency" — the most favourable result available, measuring nothing. That is exactly
+# how v1 of the plan was going to justify a gate on a correlation. So the blocked rows are
+# asserted to have NO VALUE KEY AT ALL rather than a zero one: "(missing)" is the expected
+# value, and a regression that starts emitting 0 goes red instead of looking like good news.
+#   BOTH DIRECTIONS ARE REAL CORPORA, NOT A FLAG. The measurable direction is a generated
+# corpus big enough to clear every floor, with values that are arithmetic on the counts at
+# the top of test/helpers/meter-corpus.mjs. The refusing directions are: a corpus where the
+# markers appear only as PROSE, a baseline that froze no sessions, and one whose rule digests
+# do not match.
+#   THE PROSE CORPUS IS THE ONE THAT CAUGHT A REAL BUG. The evaluator's first run classified
+# a session as treated because the word `fleet-ack` appeared in it — and the session it
+# appeared in was the one writing the marker. The treated arm would have filled with the
+# treatment's own construction, which is unusually careful work, and the treatment would have
+# looked like it worked. Markers are matched by POSITION now (a command invoked, a line a
+# program printed) as well as by string, and the prose corpus is what keeps that provable.
+group "the evaluator refuses what it cannot support"
+if command -v node >/dev/null 2>&1; then
+  EVD="$(mktemp -d "$TEST_RUNS.$$.eval.XXXXXX")"
+  node "$ROOT/test/helpers/meter-corpus.mjs" "$EVD" > "$EVD/gen" 2> "$EVD/err"
+  is "evaluator fixture built"        "0"  "$?"
+  is "...without complaining"         ""   "$(head -2 "$EVD/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # The generator duplicates the reader's salt because importing the reader would run it.
+  # One assertion is what stops that duplicate from drifting into a baseline whose ids match
+  # nothing — which would present as a control arm of zero, not as an error.
+  is "generator salt matches reader"  "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)" \
+                                      "$(node "$ROOT/test/helpers/meter-corpus.mjs" --digest acme-web)"
+
+  M="$ROOT/bin/fleet-meter.mjs"
+  node "$M" --corpus "$EVD/corpus" --evaluate --baseline-file "$EVD/baseline.json"       --json > "$EVD/full.json" 2>/dev/null
+  node "$M" --corpus "$EVD/prose"  --evaluate --baseline-file "$EVD/baseline.json"       --json > "$EVD/prose.json" 2>/dev/null
+  node "$M" --corpus "$EVD/corpus" --evaluate --baseline-file "$EVD/baseline-empty.json" --json > "$EVD/noctl.json" 2>/dev/null
+  node "$M" --corpus "$EVD/corpus" --evaluate --baseline-file "$EVD/baseline-wrong-rules.json" --json > "$EVD/wrong.json" 2>/dev/null
+
+  # Reads one dotted path. process.stdout.write of a String(), never console.log of a bare
+  # value — see the note on util.inspect at the head of this file.
+  ev() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      let v = r; for (const k of process.argv[2].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2"; }
+  # Finds a measurement by name rather than by index, so reordering MEASUREMENTS does not
+  # silently re-point every assertion at a different metric.
+  mm() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      const m = r.measurements.find((x) => x.measurement === process.argv[2]);
+      let v = m; for (const k of process.argv[3].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2" "$3"; }
+
+  # ── the arms. 40 treated and 35 control, never 75 and 0 ──
+  is "eval: treated sessions"         "40"    "$(ev "$EVD/full.json" arms.treated.sessions)"
+  is "eval: treated turns"            "73"    "$(ev "$EVD/full.json" arms.treated.turns)"
+  is "eval: control sessions"         "35"    "$(ev "$EVD/full.json" arms.control.sessions)"
+  is "eval: baseline cohort found"    "35"    "$(ev "$EVD/full.json" baseline.sessions_still_on_disk)"
+  is "eval: verdict is reportable"    "true"  "$(ev "$EVD/full.json" verdict.reportable)"
+
+  # ── the four, each at a value derived by hand from the generator's counts ──
+  # 30 briefs warned; 18 of them drew a correction, so 12 ran clean.
+  is "eval: false refusals n"         "30"    "$(mm "$EVD/full.json" false_refusals n_treated)"
+  is "eval: false refusals bound"     "0.4"   "$(mm "$EVD/full.json" false_refusals treated_upper_bound)"
+  # ...and it is one-armed by construction: there is no untreated rate to compare with.
+  is "eval: false refusals no control" "null" "$(mm "$EVD/full.json" false_refusals n_control)"
+  # 30 briefs carried a criterion, 9 named nothing observable; control 7 of 35.
+  is "eval: bypass n treated"         "30"    "$(mm "$EVD/full.json" bypass_rate n_treated)"
+  is "eval: bypass treated"           "0.3"   "$(mm "$EVD/full.json" bypass_rate treated_rate)"
+  is "eval: bypass control"           "0.2"   "$(mm "$EVD/full.json" bypass_rate control_rate)"
+  # 12s to the first tool call against 4s.
+  is "eval: latency treated"          "12"    "$(mm "$EVD/full.json" added_latency_seconds treated_median_seconds)"
+  is "eval: latency control"          "4"     "$(mm "$EVD/full.json" added_latency_seconds control_median_seconds)"
+  is "eval: latency added"            "8"     "$(mm "$EVD/full.json" added_latency_seconds added_seconds)"
+  # 18 of 30 done-claiming sessions carried on afterwards; control 15 of 35, from the
+  # committed columns rather than a re-read.
+  is "eval: rework treated rate"      "0.6"    "$(mm "$EVD/full.json" rework_turns treated_rate)"
+  is "eval: rework control rate"      "0.4286" "$(mm "$EVD/full.json" rework_turns control_rate)"
+  is "eval: rework treated median"    "1.5"    "$(mm "$EVD/full.json" rework_turns treated_median_turns)"
+  is "eval: rework control median"    "0"      "$(mm "$EVD/full.json" rework_turns control_median_turns)"
+
+  # ── the refusing direction: markers present only as prose ──
+  is "eval: prose treated sessions"   "0"      "$(ev "$EVD/prose.json" arms.treated.sessions)"
+  is "eval: prose verdict"            "false"  "$(ev "$EVD/prose.json" verdict.reportable)"
+  is "eval: prose says why"           "the treated cohort is empty: no session in this corpus carries a treatment marker" \
+                                      "$(ev "$EVD/prose.json" verdict.reason)"
+  for k in brief_check_in_force brief_check_fired ack_in_force ack_resolved_decisions observe_check_in_force observe_check_fired; do
+    is "eval: prose does not set $k"  "0"      "$(ev "$EVD/prose.json" "treatment_markers.$k.sessions_seen")"
+  done
+  # ...and the same four ARE set when the machinery actually emitted them.
+  for k in brief_check_in_force ack_in_force ack_resolved_decisions; do
+    is "eval: fixture sets $k"        "yes"    "$([ "$(ev "$EVD/full.json" "treatment_markers.$k.sessions_seen")" -gt 0 ] && echo yes || echo no)"
+  done
+
+  # ── A BLOCKED MEASUREMENT HAS NO VALUE, NOT A ZERO ──
+  # The single most important pair in this group. A regression that reports 0.0 here would
+  # read as the best possible result on a sample that cannot support any result at all.
+  is "eval: prose omits bypass rate"     "(missing)" "$(mm "$EVD/prose.json" bypass_rate treated_rate)"
+  is "eval: prose omits control rate"    "(missing)" "$(mm "$EVD/prose.json" bypass_rate control_rate)"
+  is "eval: prose omits refusal bound"   "(missing)" "$(mm "$EVD/prose.json" false_refusals treated_upper_bound)"
+  is "eval: prose omits latency median"  "(missing)" "$(mm "$EVD/prose.json" added_latency_seconds treated_median_seconds)"
+  is "eval: prose omits added seconds"   "(missing)" "$(mm "$EVD/prose.json" added_latency_seconds added_seconds)"
+  is "eval: prose omits rework rate"     "(missing)" "$(mm "$EVD/prose.json" rework_turns treated_rate)"
+  is "eval: prose omits rework median"   "(missing)" "$(mm "$EVD/prose.json" rework_turns treated_median_turns)"
+  is "eval: prose bypass blocked"     "false"  "$(mm "$EVD/prose.json" bypass_rate reportable)"
+  is "eval: prose names the floor"    "treated n=0, need 30" "$(mm "$EVD/prose.json" bypass_rate blocked_by.0)"
+  # The sample size IS a fact and is still reported; only the result is withheld.
+  is "eval: prose still reports n"    "0"      "$(mm "$EVD/prose.json" bypass_rate n_treated)"
+
+  # ── the refusing direction: a baseline that froze no sessions ──
+  # Per-metric, not all-or-nothing: the one-armed measurement survives an empty control.
+  is "eval: no control, bypass blocked"  "false" "$(mm "$EVD/noctl.json" bypass_rate reportable)"
+  is "eval: no control, latency blocked" "false" "$(mm "$EVD/noctl.json" added_latency_seconds reportable)"
+  is "eval: no control, names control"   "control n=0, need 30" "$(mm "$EVD/noctl.json" bypass_rate blocked_by.0)"
+  is "eval: one-armed still reports"     "true"  "$(mm "$EVD/noctl.json" false_refusals reportable)"
+
+  # ── the fourth position: a hook's own stderr, which no agent writes ──
+  # Requested by #6, which cannot be measured without it. It is a stronger position than the
+  # other three — prompt, output and command all sit somewhere an agent's text can reach,
+  # while a hook_success attachment is written by the harness from the hook's own stderr.
+  #   THE THIRD CORPUS IS THE ONE THAT MAKES IT A POSITION. `hookwrong` carries a
+  # byte-identical `observe-check: warn` line and differs only in attachment.type and
+  # hookEvent, so it fails unless the record's own fields are what is being read. Without it
+  # this is a string search wearing a longer name, and a hook_additional_context attachment —
+  # which an agent CAN influence, since it is fed back into the turn — would read as proof
+  # that the machinery ran.
+  node "$M" --corpus "$EVD/hook"      --evaluate --baseline-file "$EVD/baseline.json" --json > "$EVD/hook.json" 2>/dev/null
+  node "$M" --corpus "$EVD/hookwrong" --evaluate --baseline-file "$EVD/baseline.json" --json > "$EVD/hookw.json" 2>/dev/null
+  is "eval: hook stderr sets in-force"  "5" "$(ev "$EVD/hook.json" treatment_markers.observe_check_in_force.sessions_seen)"
+  # ...and `fired` is the smaller set, or a cohort defined by it would hold only the turns
+  # the check objected to — #5's own warning, applied to #6.
+  is "eval: ...and fired only where it warned" "3" "$(ev "$EVD/hook.json" treatment_markers.observe_check_fired.sessions_seen)"
+  is "eval: wrong attachment type is not it"   "0" "$(ev "$EVD/hookw.json" treatment_markers.observe_check_in_force.sessions_seen)"
+  is "eval: wrong hookEvent is not it"         "0" "$(ev "$EVD/hookw.json" treatment_markers.observe_check_fired.sessions_seen)"
+  # #6 IS DECLARED, NOT FOLDED IN. A session treated only by the Stop hook carries no
+  # brief-check, so counting it in the #3/#4 arm would put it in the denominator of a rate it
+  # cannot contribute a numerator to.
+  is "eval: #6 does not define the #3/#4 arm"  "0" "$(ev "$EVD/hook.json" arms.treated.sessions)"
+  is "eval: --contract pins it to hook_stderr" "2" \
+     "$(node "$M" --contract | grep -c 'only where it can have been emitted: hook_stderr')"
+
+  # ── the two arms must have been measured with the same ruler ──
+  is "eval: rules match"              "true"   "$(ev "$EVD/full.json" rules_match_baseline)"
+  is "eval: mismatched rules caught"  "false"  "$(ev "$EVD/wrong.json" rules_match_baseline)"
+  # ...and against the REAL committed baseline, which is the invariant that keeps every
+  # number in docs/meter-baseline-2026-09-01.json comparable to a future run. If a rule in
+  # bin/fleet-meter.mjs is edited, this goes red and the baseline has to be retaken.
+  mkdir -p "$EVD/none"
+  is "eval: committed baseline's rules still current" "true" \
+     "$(node "$M" --corpus "$EVD/none" --evaluate --baseline-file "$ROOT/docs/meter-baseline-2026-09-01.json" --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).rules_match_baseline)))')"
+
+  # ── a missing baseline is an error, not an empty result ──
+  node "$M" --corpus "$EVD/none" --evaluate --baseline-file "$EVD/nope.json" >/dev/null 2>"$EVD/miss"
+  is "eval: missing baseline exits 2" "2"      "$?"
+  is "eval: ...and says so"           "yes"    "$(grep -q 'cannot read the baseline' "$EVD/miss" && echo yes || echo no)"
+
+  # ── the contract is printable, because unwritten code has to know what to emit ──
+  # Counted, not spot-checked: a marker added without a permitted position would be a string
+  # search again, and this row is what makes adding one cost a deliberate edit here.
+  is "eval: --contract lists every marker with its position" "6" \
+     "$(node "$M" --contract | grep -c 'only where it can have been emitted')"
+  # A here-string, not a pipe: `grep -q` stops at its first match and `node` then takes
+  # SIGPIPE, which pipefail promotes to the pipeline's status — so a MATCH can answer 141,
+  # the `&&` never fires, and this row reads "no" for a contract that does say the join.
+  is "eval: --contract names the join" "yes"   "$(grep -q 'carry its verdict INTO the dispatched prompt' <<< "$(node "$M" --contract)" && echo yes || echo no)"
+
+  # ── counts and digests, never content — same boundary as the baseline ──
+  # Read line by line: two of these contain a space, and a `for` over a bare word list
+  # would split them into four assertions about words that are not the thing being checked.
+  while IFS= read -r leak; do
+    [ -n "$leak" ] || continue
+    is "eval: '$leak' is not in the output" "0" "$(grep -c -- "$leak" "$EVD/full.json" | tr -d ' ')"
+  done <<'LEAKS'
+acme-web
+acme-api
+meter-eval
+per document
+one picker
+build the thing
+LEAKS
+  rm -rf "$EVD"
+else
+  skip "the evaluator refuses what it cannot support" "node missing"
+fi
+
 # ── 6b. every command is actually installed ──────────────────────────────────
 # A new command that never reaches the install list is invisible until someone hits
 # "command not found" — and worse, the SUMMARY line was hand-maintained separately from

@@ -9,6 +9,9 @@
 //     fleet-meter --include-excluded   do NOT apply the exclusion list
 //     fleet-meter --why                say which sessions the exclusion list matched
 //     fleet-meter --digest STRING      print the id to paste into EXCLUDE
+//     fleet-meter --evaluate           plan item #5, against the committed baseline
+//     fleet-meter --evaluate --baseline-file P   ...against some other baseline
+//     fleet-meter --contract           what #3 and #4 must emit for #5 to be measurable
 //
 // WHY THIS EXISTS. Every number in docs/improvement-plan.md was produced by hand, weeks
 // after the fact, by reading transcripts. Numbers gathered that way cannot be re-gathered:
@@ -50,6 +53,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 // ── identity ────────────────────────────────────────────────────────────────
 // Public salt, same trick as test/helpers/name-sweep.mjs: it defeats a precomputed table
@@ -170,6 +174,206 @@ const RULES = {
 };
 for (const k of ['sleep', 'browser', 'file_touched', 'done_claim', 'correction']) RULES[k].digest = id(JSON.stringify(RULES[k]));
 
+// ════════════════════════════════════════════════════════════════════════════
+// PLAN ITEM #5 — THE EVALUATOR
+// ════════════════════════════════════════════════════════════════════════════
+// Item #5 promotes a warning to a hard gate only when a failure mode SHOWS UP in
+// measurement. Four measurements decide it: false refusals, bypass rate, added latency per
+// dispatch, and rework. Everything above this line is the ruler; this is the reading.
+//
+// ── THE THING THIS FILE MUST DO ON THE DAY IT SHIPS IS REFUSE ───────────────
+// #3 and #4 are not merged. The treated cohort is therefore empty, and every rate over an
+// empty denominator is either NaN or, worse, a tidy 0 — which reads as "no false refusals,
+// no bypass, no added latency", the most flattering result available, and is the precise
+// mistake v1 of the plan was going to make: justify a gate on a number that measured
+// nothing. So "not measurable" is a first-class output here, it says why, and it says what
+// it is waiting for. It is the same correction as the medians above returning null rather
+// than 0 on an empty cohort, applied to a whole verdict instead of one field.
+//
+// ── WHAT MAKES A SESSION *TREATED*, AND WHY NOT BY DATE ─────────────────────
+// A date cut is the obvious move and it is wrong. #3 and #4 land in `fleet-spawn` and the
+// manifest, not in every session: a session that ran an hour after the merge, from a shell
+// that never invoked the changed path, is untreated in every respect except its timestamp.
+// A date cut sweeps all of those in, and since they behave exactly like the control it
+// dilutes any real effect toward zero — a treatment that worked would read as no effect.
+// So treatment is identified MECHANICALLY, by a marker the machinery itself leaves in the
+// transcript.
+//
+// ── AND THAT MAKES THIS FILE A CONTRACT, WHICH IS DELIBERATE ────────────────
+// The markers below do not exist yet, because the code that emits them does not exist yet.
+// Pre-registering them is the point: #3 and #4 have to emit these to be measurable, and an
+// implementation that ships without them gets an EMPTY treated cohort rather than a wrong
+// one — the evaluator says "marker not found" instead of quietly measuring some other
+// population. If a future implementer picks different words, the fix is to change the
+// marker here in one place and say in the commit that the pre-registration moved.
+//   `--contract` prints exactly what has to be emitted, so nobody has to read this comment
+// to find out.
+//
+// Two levels per intervention, and conflating them is the trap: IN FORCE means the
+// machinery ran at all (this is what defines the cohort), FIRED means it actually objected
+// (this is the denominator for false refusals). A cohort defined by "fired" would contain
+// only briefs the checker disliked, so the false-refusal rate would be measured against a
+// population selected for being warned — which is how you get a rate of 100%.
+//
+// ── A MARKER IS A POSITION AS WELL AS A STRING, AND THE FIRST VERSION WAS NOT ─
+// MEASURED, on the first run of this evaluator: `/\bfleet-ack\b/` classified a session as
+// TREATED because the word appeared in it. Nothing had run — the transcript merely talked
+// about the marker, which is precisely what the session BUILDING #3 and #4 does all day.
+// The treated arm would therefore have filled up with the treatment's own construction, and
+// since those sessions are unusually careful, the treatment would have looked like it
+// worked. That is the same contamination the baseline's exclusion list exists to stop,
+// arriving through a door the exclusion list does not cover.
+//   So a marker now declares WHERE it may appear, and each position is somewhere only the
+// machinery can put it:
+//     prompt   the text of a human turn      — #3's verdict carried into the dispatch
+//     output   a tool_result's text          — what a command printed
+//     command  a Bash/Monitor command string — the agent invoking something
+//     hook_stderr  the stderr of a hook_success attachment on a Stop event
+//
+// THE FOURTH POSITION IS STRONGER THAN THE OTHER THREE, and it is worth saying why rather
+// than treating it as one more entry. `prompt`, `output` and `command` all sit somewhere an
+// agent's own text can reach: an agent can type `observe-check: warn` into a prompt, echo it
+// from a command, or have it appear in output it produced. Each is therefore only as good as
+// its anchoring, which is why the anchoring exists. A hook_success attachment is different in
+// kind — the AGENT DOES NOT WRITE THAT RECORD. The harness writes it, from the hook's own
+// stderr, after running the hook itself. No prose can forge one, so a marker in that position
+// needs no argument about whether the machinery really ran.
+//   Requested by #6, which cannot be measured without it, and which stated the dependency
+// rather than assuming this file would guess at it. The two patterns below are copied from
+// docs/improvement-plan.md on that branch rather than retyped, so a transcription slip cannot
+// quietly become the contract.
+// A worker INVOKES fleet-ack, so `command`. fleet-ack PRINTS its acknowledgement, so
+// `output`. Talking about either in prose is neither, and no longer counts.
+//   ANCHORING DOES THE OTHER HALF. Every pattern is pinned to the start of a line and
+// requires the machinery's own payload after it — `brief-check:` alone is prose, and
+// `brief-check: warn` at the head of a line is a program talking. Same correction as the
+// done-claim rule above, for the same reason: an unanchored common word matches everything.
+//   THIS IS BEING FIXED BEFORE ANYTHING HAS BEEN MEASURED AGAINST IT, which is the only
+// time changing a pre-registered rule is legitimate. Once a treated cohort exists, moving
+// these means starting the measurement again and saying so.
+const TREATMENT = {
+  brief_check_in_force: {
+    of: '#3', level: 'in force', where: ['output', 'prompt'],
+    contract: "fleet-spawn must print a line beginning 'brief-check: ok' or 'brief-check: warn' on every dispatch, and carry it into the dispatched prompt",
+    re: /(?:^|\n)[^\S\n]*brief-check:[ \t]*(?:ok|warn)\b/i,
+  },
+  brief_check_fired: {
+    of: '#3', level: 'fired', where: ['output', 'prompt'],
+    contract: "when the brief has no done-criterion or reads as several asks, that line must read 'brief-check: warn'",
+    re: /(?:^|\n)[^\S\n]*brief-check:[ \t]*warn\b/i,
+  },
+  ack_in_force: {
+    of: '#4', level: 'in force', where: ['command'],
+    contract: "the worker's acknowledgement recorder must be invoked as a command named 'fleet-ack'",
+    re: /(?:^|[;&|(]|\n)[ \t]*fleet-ack(?:\s|$)/,
+  },
+  ack_resolved_decisions: {
+    of: '#4', level: 'fired', where: ['output'],
+    contract: "fleet-ack must print a line beginning 'understood:' naming which of the lead's resolved decisions the worker is working from",
+    re: /(?:^|\n)[^\S\n]*understood:[ \t]*\S/i,
+  },
+  observe_check_in_force: {
+    of: '#6', level: 'in force', where: ['hook_stderr'],
+    contract: "the Stop hook must print a line beginning 'observe-check: ok' or 'observe-check: warn' to its stderr on every turn it could judge, and nothing at all on a turn it could not",
+    re: /(?:^|\n)[^\S\n]*observe-check:[ \t]*(?:ok|warn)\b/i,
+  },
+  observe_check_fired: {
+    of: '#6', level: 'fired', where: ['hook_stderr'],
+    contract: "when a renderable surface changed and nothing looked, that line must read 'observe-check: warn'",
+    re: /(?:^|\n)[^\S\n]*observe-check:[ \t]*warn\b/i,
+  },
+};
+for (const [k, v] of Object.entries(TREATMENT)) { v.pattern = String(v.re); v.digest = id(k + '|' + v.pattern + '|' + v.where.join(',')); }
+
+// ── THE MARKER HAS TO REACH THE SESSION WHOSE OUTCOME IS BEING JUDGED ───────
+// This is the one demand the evaluator makes of #3 rather than merely observing it, and it
+// is worth stating plainly because it is a design constraint on unwritten code.
+//   A false refusal is "the checker objected AND the work turned out fine". The objection
+// happens in the LEAD; the work turning out fine happens in the WORKER. Nothing links one
+// transcript to the other — a session id in the lead's tool output is not in the worker's
+// records — so measured from the lead's side the outcome is invisible, and measured from the
+// worker's side the objection is. Either way the rate cannot be computed.
+//   So the contract requires the verdict to travel WITH the dispatch, into the prompt the
+// worker receives. Then both halves are in one transcript and the measurement is
+// session-local, which is the only shape that works without a join nothing supports.
+// Stated as a limitation rather than hidden: if #3 ships without carrying its verdict
+// forward, false refusals are not measurable at all and this file will say so.
+
+// ── measurement 1 (labelled): a false refusal ───────────────────────────────
+// Denominator: sessions whose brief carried a FIRED brief-check. Numerator: those that then
+// went fine anyway — reached a done-claim and drew no correction. "Went fine" is the
+// judgment, and it is composed of the two labelled rules above rather than a new one, so a
+// reader who has already rejected the correction rule does not have to reject a second
+// thing for the same reason.
+//   IT IS AN UPPER BOUND, NOT A RATE. A brief the checker warned about may have been fixed
+// by the human before dispatch, in which case the warning was RIGHT and the smooth run is
+// the warning working. Nothing in the transcript distinguishes that from a warning that was
+// never needed. So this counts warnings-followed-by-clean-runs, which is the largest the
+// false-refusal rate could be, and the output names it `_upper_bound` so nobody quotes it
+// as the rate itself.
+
+// ── measurement 2 (labelled): a vacuous done-criterion ─────────────────────
+// The plan's own example is `Done when: implemented`, which passes any parser and says
+// nothing. Vacuity is judged by asking whether the criterion names anything a person could
+// go and LOOK AT: a path, a command, a count, a named artifact. That is the same standard
+// the contract in every session's system prompt applies to a done-report, so the rule is
+// not invented here.
+//   SHORTNESS ALONE IS NOT VACUITY and the floor is deliberately low. `Done when: CI green`
+// is eight characters and perfectly observable. What makes a criterion vacuous is the
+// absence of an observable, not its length, so the length floor only catches the degenerate
+// case where there is not room for one.
+const DONE_WHEN = /(?:^|\n)[\s*_#>-]*done\s+when\s*:?[ \t]*([\s\S]{0,400}?)(?=\n\s*\n|\n[\s*_#>-]*[a-z-]+\s*:|$)/i;
+const OBSERVABLE = /(`[^`]+`)|(\S+\/\S+)|(\b\w+\.(?:mjs|js|ts|tsx|json|sh|md|html|css|py|go|yml|yaml)\b)|(\b\d+\b)|(\b(?:test|tests|suite|green|red|screen|render|renders|rendered|pr|exit|row|rows|log|logs|output|column|columns|assert|asserts|passes|prints|reports|emits)\b)/i;
+const VACUOUS_MIN_CHARS = 8;
+
+// ── measurement 3 (observed): added latency per dispatch ───────────────────
+// Seconds from the human record's timestamp to the timestamp of the first assistant message
+// in that turn that actually calls a tool. Nothing in it reads message text, so it sits on
+// the observed side.
+//   IT INCLUDES MODEL TIME AND IS USELESS AS AN ABSOLUTE. The gap covers the model reading,
+// thinking and generating, which dwarfs anything a pre-dispatch protocol adds. Only the
+// DIFFERENCE between two arms means anything, and only when both arms were measured over a
+// comparable period — which is exactly why the control here is the baseline's frozen cohort
+// and not a number retyped from the plan.
+
+// ── measurement 4 (labelled): rework ───────────────────────────────────────
+// Turns after the first done-claim. The count is arithmetic; the BOUNDARY is a label, since
+// it is the done-claim rule that decides where "after" starts, so the whole measurement is
+// labelled. Its control needs no re-reading at all: the committed baseline already carries
+// `turns` and `turns_to_done`, and rework is the subtraction.
+
+const MEASUREMENTS = {
+  false_refusals: {
+    kind: 'labelled', unit: 'session',
+    of: 'a session whose brief carried a fired brief-check, that then reached a done-claim with no correction',
+    min_n: 30,
+    why_min_n: 'the rule of three: with 0 events in 30 trials the 95% upper bound on the rate is 3/30 = 10%. Below 30 the interval is wider than any effect that would justify promoting a warning to a gate, so a number there could not decide the question it is being asked',
+    needs: ['brief_check_fired', 'done_claim', 'correction'],
+  },
+  bypass_rate: {
+    kind: 'labelled', unit: 'session',
+    of: 'a brief carrying a Done when: whose criterion names nothing observable',
+    min_n: 30,
+    why_min_n: 'the rule of three, as above: this is a proportion and 30 is where its interval becomes narrower than the effect',
+    needs: ['done_when', 'observable'],
+  },
+  added_latency_seconds: {
+    kind: 'observed', unit: 'turn',
+    of: 'seconds from a human turn to the first tool call in it; reported as the difference of medians between arms',
+    min_n: 20,
+    why_min_n: 'a median, not a proportion. The nonparametric interval on a median is built from order statistics, and below about 20 it spans nearly the whole sample — an "added latency" would be indistinguishable from the spread it was drawn out of',
+    needs: [],
+  },
+  rework_turns: {
+    kind: 'labelled', unit: 'session',
+    of: 'turns after the first done-claim, and the share of done-claiming sessions with any',
+    min_n: 30,
+    why_min_n: 'reported both as a rate (share of sessions with any rework) and a median, so it takes the stricter of the two floors',
+    needs: ['done_claim'],
+  },
+};
+for (const [k, v] of Object.entries(MEASUREMENTS)) v.digest = id(k + '|' + JSON.stringify(v));
+
 // ── the exclusion list ──────────────────────────────────────────────────────
 // THE SESSIONS THAT PRODUCED THE PLAN THIS METER EXISTS TO TEST. They are outliers on every
 // axis the meter measures, and leaving them in would let the plan's own authoring inflate
@@ -211,7 +415,46 @@ const newTurn = (branch, ts) => ({
   branch, started: ts, ended: ts,
   tools: 0, sleepSeconds: 0, sleepCalls: 0, browser: 0,
   files: new Set(), doneClaim: false, correction: false, nudge: false,
+  // ── item #5's fields. Added beside the baseline's rather than folded into them, and
+  // nothing above reads them, so the pre-registered numbers and their digests are exactly
+  // what they were the day the baseline was taken. A metric that changes when a new metric
+  // is added is not a baseline.
+  firstToolAt: null,          // timestamp of the first tool-calling message in this turn
+  doneWhen: null,             // 'observable' | 'vacuous' — only ever set on a session's first turn
+  treated: new Set(),         // which TREATMENT markers this turn saw
 });
+
+// Marker scanning is one function so the four markers are applied uniformly to every place
+// text can arrive, rather than three of them being checked in one branch and forgotten in
+// another — which is how a cohort ends up defined by where somebody remembered to look.
+function markTreatment(turn, text, where) {
+  if (!text) return;
+  for (const [k, v] of Object.entries(TREATMENT))
+    if (v.where.includes(where) && v.re.test(text)) turn.treated.add(k);
+}
+
+// A tool_result's content is often a plain string rather than text blocks, and textOf()
+// returns '' for it. That emptiness is why this exists: the markers live in command output,
+// which is exactly the shape textOf() cannot see.
+function rawText(m) {
+  const c = m?.content;
+  if (typeof c === 'string') return strip(c);
+  if (!Array.isArray(c)) return '';
+  return strip(c.map((b) => (typeof b?.content === 'string' ? b.content
+    : Array.isArray(b?.content) ? b.content.map((x) => x?.text || '').join('\n')
+    : b?.text || '')).join('\n'));
+}
+
+// null when the brief has no `Done when:` at all — which is NOT the same as a vacuous one
+// and must not be pooled with it. The bypass rate's denominator is briefs that carried a
+// criterion; a brief with none never entered the question.
+function classifyDoneWhen(text) {
+  const m = DONE_WHEN.exec(text || '');
+  if (!m) return null;
+  const crit = String(m[1] || '').trim();
+  if (crit.length < VACUOUS_MIN_CHARS) return 'vacuous';
+  return OBSERVABLE.test(crit) ? 'observable' : 'vacuous';
+}
 
 async function readSession(file) {
   const rl = readline.createInterface({ input: fs.createReadStream(file), crlfDelay: Infinity });
@@ -227,15 +470,42 @@ async function readSession(file) {
     if (r.sessionId && !sessionId) sessionId = r.sessionId;
 
     if (r.type === 'user') {
-      if (isMeta(r) || hasToolResult(r.message)) continue;
+      // A tool_result is not a turn — but it is where a command's OUTPUT lands, and three of
+      // the four treatment markers are things a command prints. So it is scanned for markers
+      // on the way past and then dropped, exactly as before, without becoming a turn. Miss
+      // this and `fleet-spawn: brief-check: warn` is invisible: the cohort comes out empty
+      // for a fleet that is fully treated, which looks identical to a fleet that is not.
+      if (isMeta(r) || hasToolResult(r.message)) {
+        if (cur) markTreatment(cur, rawText(r.message) || textOf(r.message), 'output');
+        continue;
+      }
       const branch = r.gitBranch || '';
       if (branch) branches.add(branch);
       cur = newTurn(branch, r.timestamp || null);
       const t = textOf(r.message);
       cur.nudge = NUDGE.test(t);
+      markTreatment(cur, t, 'prompt');
+      // Only the FIRST turn of a session carries the brief, so only it is asked for a
+      // done-criterion. A `Done when:` typed in a later turn is a mid-flight requirement,
+      // not the criterion the dispatch was judged against, and counting it would let one
+      // session contribute several denominators.
+      if (turns.length === 0) cur.doneWhen = classifyDoneWhen(t);
       // The first turn of a session is the brief. See CORRECTION above.
       cur.correction = turns.length > 0 && CORRECTION.test(t);
       turns.push(cur);
+      continue;
+    }
+
+    // The fourth position. Matched on the RECORD's own fields — attachment.type and
+    // hookEvent — and not merely on finding the string somewhere in an attachment, because
+    // it is those fields that make the position unforgeable. A hook_additional_context
+    // attachment, or a hook_success one for some other event, is a different thing and does
+    // not count. The stderr is passed verbatim: strip() exists to remove wrappers the harness
+    // puts around AGENT text, and this is a program's own output.
+    if (r.type === 'attachment') {
+      const a = r.attachment;
+      if (cur && a && a.type === 'hook_success' && a.hookEvent === 'Stop' && typeof a.stderr === 'string')
+        markTreatment(cur, a.stderr, 'hook_stderr');
       continue;
     }
 
@@ -244,10 +514,11 @@ async function readSession(file) {
     const content = r.message?.content;
     if (!Array.isArray(content)) continue;
 
-    let sawText = false, lastText = '';
+    let sawText = false, lastText = '', sawTool = false;
     for (const b of content) {
       if (b?.type === 'text') { sawText = true; lastText = b.text || ''; continue; }
       if (b?.type !== 'tool_use') continue;
+      sawTool = true;
       cur.tools++;
       const name = b.name || '';
       const inp = b.input || {};
@@ -256,6 +527,9 @@ async function readSession(file) {
       if (name === 'Bash' || name === 'Monitor') {
         const cmd = String(inp.command ?? '');
         if (BROWSER_BASH.test(cmd)) cur.browser++;
+        // #4's marker is the worker INVOKING its recorder, so it is in the command the
+        // agent wrote, not in anything printed back.
+        markTreatment(cur, cmd, 'command');
         if (name === 'Bash' && inp.run_in_background !== true && !BACKGROUNDED.test(cmd)) {
           SLEEP_RE.lastIndex = 0;
           let m;
@@ -263,6 +537,10 @@ async function readSession(file) {
         }
       }
     }
+    // The FIRST tool-calling message fixes the latency, so a later one must not move it.
+    // Written as an explicit null check rather than `||=` because a turn whose first action
+    // came at second zero is a real measurement and must not be overwritten as absent.
+    if (sawTool && cur.firstToolAt === null && r.timestamp) cur.firstToolAt = r.timestamp;
     // The turn's final assistant text is whatever the last text-bearing message said. A
     // later message with only tool calls does not clear it — the claim was still made.
     if (sawText) cur.doneClaim = DONE_CLAIM.test(strip(lastText));
@@ -359,6 +637,183 @@ function cohort(rows) {
   };
 }
 
+// ── item #5: reading a baseline file back ───────────────────────────────────
+// The committed baseline is columns-and-rows, so this turns one of its tables back into
+// objects keyed by session id. WHY IT MATTERS THAT THE COHORT IS IN THAT FILE: it froze a
+// LIST OF SESSIONS, not just a set of totals, and a frozen list of sessions is a control
+// group. A column the baseline never computed can still be computed over exactly those
+// sessions later and remain a pre-registered control, because what pre-registration buys is
+// the population, not the arithmetic. That is what lets latency and bypass — neither of
+// which the baseline holds a column for — be measured against it honestly.
+//   The alternative was an addendum recomputed over "the corpus as it is now", which has
+// grown by every session run since, including the sessions that BUILT the treatment. A
+// control arm containing the treatment's own construction is not a control arm.
+function readBaseline(file) {
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const rows = (t) => {
+    const out = new Map();
+    for (const r of t.rows) out.set(r[0], Object.fromEntries(t.columns.map((c, i) => [c, r[i]])));
+    return out;
+  };
+  const obs = rows(raw.per_session.observed);
+  const lab = rows(raw.per_session.labelled);
+  return { file, date: raw.date, generated_at: raw.generated_at, rules: raw.rules, obs, lab,
+           ids: new Set(obs.keys()) };
+}
+
+// ── item #5: the four measurements ──────────────────────────────────────────
+// THE COHORT IS #3 AND #4, AND #6 IS DELIBERATELY NOT IN IT. The four measurements above are
+// about the brief-check and the acknowledgement handshake: false refusals and bypass are
+// rates over briefs that #3 judged. A session treated only by #6's Stop hook has no brief
+// -check at all, so folding it in here would put it in the denominator of a rate it cannot
+// contribute a numerator to, and every one of those rates would fall for a reason that has
+// nothing to do with the thing being measured. #6's markers are declared, contracted and
+// counted — see treatment_markers — and when #6 wants a verdict it gets its own cohort.
+const isTreated = (sess) => sess.turns.some((t) => t.treated.has('brief_check_in_force') || t.treated.has('ack_in_force'));
+
+const latencies = (sessions) => sessions.flatMap((s) => s.turns
+  .filter((t) => t.started && t.firstToolAt)
+  .map((t) => Math.max(0, (Date.parse(t.firstToolAt) - Date.parse(t.started)) / 1000)));
+
+function falseRefusals(sessions) {
+  const warned = sessions.filter((s) => s.turns.some((t) => t.treated.has('brief_check_fired')));
+  const fine = warned.filter((s) => s.turns.some((t) => t.doneClaim) && !s.turns.some((t) => t.correction));
+  return { n: warned.length, events: fine.length };
+}
+
+function bypass(sessions) {
+  const withCriterion = sessions.filter((s) => s.turns[0]?.doneWhen !== null && s.turns[0]?.doneWhen !== undefined);
+  const vacuous = withCriterion.filter((s) => s.turns[0].doneWhen === 'vacuous');
+  return { n: withCriterion.length, events: vacuous.length };
+}
+
+function rework(sessions) {
+  const claimed = [];
+  for (const s of sessions) {
+    const i = s.turns.findIndex((t) => t.doneClaim);
+    if (i < 0) continue;
+    claimed.push(s.turns.length - (i + 1));
+  }
+  return { n: claimed.length, events: claimed.filter((x) => x > 0).length, values: claimed };
+}
+
+// Rework for the CONTROL arm needs no transcript at all: the committed baseline already
+// carries `turns` and `turns_to_done` per session, and rework is the subtraction. This is
+// the only one of the four whose control is the frozen file itself rather than a
+// recomputation over the frozen cohort, and the difference is worth keeping visible —
+// `control_source` says which, per measurement, so nobody has to assume they are equal.
+function reworkFromBaseline(base) {
+  const vals = [];
+  for (const [id_, lab] of base.lab) {
+    if (lab.turns_to_done === null || lab.turns_to_done === undefined) continue;
+    const obs = base.obs.get(id_);
+    if (!obs) continue;
+    vals.push(obs.turns - lab.turns_to_done);
+  }
+  return { n: vals.length, events: vals.filter((x) => x > 0).length, values: vals };
+}
+
+function evaluate(kept, base) {
+  const treated = kept.filter(isTreated);
+  const treatedIds = new Set(treated.map((s) => s.id));
+  // A baseline session cannot be treated — the code did not exist — but it is excluded
+  // explicitly anyway. A control arm that can contain a treated unit is not one, and the
+  // day that assumption stops holding is the day nobody re-checks it.
+  const control = kept.filter((s) => base.ids.has(s.id) && !treatedIds.has(s.id));
+
+  const seen = {};
+  for (const k of Object.keys(TREATMENT)) seen[k] = kept.filter((s) => s.turns.some((t) => t.treated.has(k))).length;
+
+  const rate = (x) => (x.n ? round(x.events / x.n, 4) : null);
+  const t = {
+    false_refusals: falseRefusals(treated), bypass_rate: bypass(treated),
+    added_latency_seconds: latencies(treated), rework_turns: rework(treated),
+  };
+  const c = {
+    false_refusals: null,                      // the machinery did not exist: not 0, absent
+    bypass_rate: bypass(control), added_latency_seconds: latencies(control),
+    rework_turns: reworkFromBaseline(base),
+  };
+  const CONTROL_SOURCE = {
+    false_refusals: 'not_applicable — a brief-check cannot have fired before it existed, so there is no untreated rate to compare against. This measurement is one-armed and is reported as an upper bound on the treated arm alone',
+    bypass_rate: 'baseline_cohort — recomputed over exactly the session ids the baseline froze',
+    added_latency_seconds: 'baseline_cohort — recomputed over exactly the session ids the baseline froze',
+    rework_turns: 'baseline_file — derived from the committed columns (turns minus turns_to_done); no transcript re-read',
+  };
+
+  const nOf = (x) => (x === null ? null : Array.isArray(x) ? x.length : x.n);
+  const out = [];
+  for (const [name, spec] of Object.entries(MEASUREMENTS)) {
+    const nT = nOf(t[name]), nC = nOf(c[name]);
+    const blocked = [];
+    if (nT < spec.min_n) blocked.push(`treated n=${nT}, need ${spec.min_n}`);
+    if (nC !== null && nC < spec.min_n) blocked.push(`control n=${nC}, need ${spec.min_n}`);
+    const row = {
+      measurement: name, kind: spec.kind, unit: spec.unit, of: spec.of, digest: spec.digest,
+      control_source: CONTROL_SOURCE[name],
+      min_n: spec.min_n, why_min_n: spec.why_min_n,
+      n_treated: nT, n_control: nC,
+      reportable: blocked.length === 0,
+    };
+    // THE VALUE IS OMITTED, NOT ZEROED, when the sample cannot carry it. A field reading
+    // 0 is a claim; an absent field is the truth. This is the whole reason the file exists
+    // in the shape it does, so it is enforced here rather than left to the printer.
+    if (blocked.length) { row.blocked_by = blocked; out.push(row); continue; }
+    if (name === 'added_latency_seconds') {
+      row.treated_median_seconds = round(median(t[name]), 1);
+      row.control_median_seconds = round(median(c[name]), 1);
+      row.added_seconds = round(median(t[name]) - median(c[name]), 1);
+    } else if (name === 'rework_turns') {
+      row.treated_rate = rate(t[name]); row.control_rate = rate(c[name]);
+      row.treated_median_turns = round(median(t[name].values), 1);
+      row.control_median_turns = round(median(c[name].values), 1);
+    } else if (name === 'false_refusals') {
+      row.treated_upper_bound = rate(t[name]);
+      row.note = 'an upper bound, not a rate: a warning the human acted on before dispatching produces the same clean run as a warning that was never needed';
+    } else {
+      row.treated_rate = rate(t[name]); row.control_rate = rate(c[name]);
+    }
+    out.push(row);
+  }
+
+  const unmet = out.filter((m) => !m.reportable);
+  const waiting = Object.entries(TREATMENT).filter(([k]) => seen[k] === 0)
+    .map(([k, v]) => ({ marker: k, of: v.of, level: v.level, contract: v.contract, pattern: v.pattern, digest: v.digest, seen: 0 }));
+
+  return {
+    ran_at: new Date().toISOString(),
+    baseline: { file: path.relative(process.cwd(), base.file) || base.file, date: base.date, taken_at: base.generated_at,
+                sessions_frozen: base.ids.size,
+                sessions_still_on_disk: [...base.ids].filter((x) => kept.some((s) => s.id === x)).length,
+                rule_digests: Object.fromEntries(Object.entries(base.rules).filter(([, v]) => v && v.digest).map(([k, v]) => [k, v.digest])) },
+    // If a rule digest here differs from the one the baseline recorded, the comparison is
+    // between two different rulers and the delta is meaningless. Checked rather than
+    // assumed, because the failure is silent and the number still prints.
+    rules_match_baseline: Object.entries(RULES).filter(([, v]) => v && v.digest)
+      .every(([k, v]) => !base.rules[k]?.digest || base.rules[k].digest === v.digest),
+    arms: {
+      treated: { sessions: treated.length, turns: treated.reduce((a, s) => a + s.turns.length, 0),
+                 identified_by: 'a transcript carrying brief_check_in_force or ack_in_force — mechanically, never by date' },
+      control: { sessions: control.length, turns: control.reduce((a, s) => a + s.turns.length, 0),
+                 identified_by: 'session id present in the baseline file, and not treated' },
+    },
+    treatment_markers: Object.fromEntries(Object.entries(TREATMENT)
+      .map(([k, v]) => [k, { of: v.of, level: v.level, where: v.where, contract: v.contract, pattern: v.pattern, digest: v.digest, sessions_seen: seen[k] }])),
+    measurements: out,
+    verdict: unmet.length === 0
+      ? { reportable: true, reason: 'every measurement has a sample at or above its floor' }
+      : { reportable: false,
+          reason: treated.length === 0
+            ? 'the treated cohort is empty: no session in this corpus carries a treatment marker'
+            : `${unmet.length} of ${out.length} measurements are below their sample floor`,
+          detail: treated.length === 0
+            ? 'Plan items #3 and #4 are not merged, so the machinery that would leave a marker has never run. This is the expected answer until they land, and it is printed instead of numbers because every rate over an empty denominator is either NaN or a flattering 0 — and a 0 here would read as "no false refusals, no bypass, no added latency", which is the most favourable result available and measures nothing.'
+            : 'The markers are present, so the machinery is running; there is simply not enough of it yet. Re-run when the counts below reach their floors.',
+          waiting_for: waiting,
+          unmet: unmet.map((m) => ({ measurement: m.measurement, blocked_by: m.blocked_by })) },
+  };
+}
+
 // ── main ────────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -372,7 +827,12 @@ if (has('--digest')) {
 }
 if (has('-h') || has('--help')) {
   console.log(fs.readFileSync(new URL(import.meta.url), 'utf8')
-    .split('\n').slice(1, 12).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+    // Bounded by the blank comment line that ends the usage block rather than by a
+    // hand-counted length: the count was 12, the block grew to 13, and --contract stopped
+    // being mentioned anywhere a user would look.
+    .split('\n').slice(1).map((l) => l.replace(/^\/\/ ?/, ''))
+    .slice(0, 40).reduce((acc, l) => (acc.done || l.trim() === '' && acc.out.length > 3
+      ? { ...acc, done: true } : { out: [...acc.out, l], done: false }), { out: [], done: false }).out.join('\n'));
   process.exit(0);
 }
 
@@ -454,6 +914,63 @@ const report = {
   per_session: perSession,
   per_branch: perBranch,
 };
+
+// ── item #5: --evaluate ─────────────────────────────────────────────────────
+if (has('--evaluate') || has('--contract')) {
+  const bfile = path.resolve(val('--baseline-file',
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'meter-baseline-2026-09-01.json')));
+  if (has('--contract')) {
+    console.log('What #3 and #4 must emit for item #5 to be measurable.\n');
+    for (const [k, v] of Object.entries(TREATMENT))
+      console.log(`  ${v.of} (${v.level})  ${k}\n    ${v.contract}\n    matched by ${v.pattern}\n    only where it can have been emitted: ${v.where.join(', ')}   digest ${v.digest}\n`);
+    console.log('  ...and #3 must carry its verdict INTO the dispatched prompt, so the objection and');
+    console.log('  the outcome land in one transcript. Nothing joins a lead\'s records to a worker\'s,');
+    console.log('  so a verdict left behind in the lead makes false refusals unmeasurable.');
+    process.exit(0);
+  }
+  let base;
+  try { base = readBaseline(bfile); }
+  catch (e) { console.error(`fleet-meter: cannot read the baseline at ${bfile}\n  ${e.message}`); process.exit(2); }
+  const ev = evaluate(kept, base);
+  if (has('--json')) { console.log(JSON.stringify(ev, null, 2)); process.exit(0); }
+
+  const V = ev.verdict;
+  console.log(`baseline  ${ev.baseline.file}  taken ${ev.baseline.date}  ${ev.baseline.sessions_frozen} sessions frozen, ${ev.baseline.sessions_still_on_disk} still on disk`);
+  console.log(`rules     ${ev.rules_match_baseline ? 'match the baseline' : 'DO NOT MATCH the baseline — the two arms were measured with different rulers'}`);
+  console.log(`arms      treated ${ev.arms.treated.sessions} sessions / ${ev.arms.treated.turns} turns    control ${ev.arms.control.sessions} / ${ev.arms.control.turns}`);
+  console.log(`          treated is identified ${ev.arms.treated.identified_by}\n`);
+
+  console.log(V.reportable ? 'VERDICT: reportable' : 'VERDICT: NOT MEASURABLE');
+  console.log(`  ${V.reason}`);
+  if (V.detail) console.log(`\n  ${V.detail.replace(/(.{1,88})(\s|$)/g, '$1\n  ').trimEnd()}`);
+  console.log('');
+
+  for (const m of ev.measurements) {
+    const head = `  ${m.measurement.padEnd(24)}${m.kind === 'observed' ? 'observed' : 'labelled'}`;
+    if (!m.reportable) {
+      // No number, of any kind, on this branch. Not a 0, not a NaN, not a dash that a
+      // spreadsheet will coerce. The sample size is a fact and is printed; the result is
+      // not a fact and is not.
+      console.log(`${head}  — not measurable: ${m.blocked_by.join('; ')}`);
+      continue;
+    }
+    if (m.measurement === 'added_latency_seconds')
+      console.log(`${head}  treated ${m.treated_median_seconds}s  control ${m.control_median_seconds}s  added ${m.added_seconds}s`);
+    else if (m.measurement === 'rework_turns')
+      console.log(`${head}  rate ${m.treated_rate} vs ${m.control_rate}   median turns ${m.treated_median_turns} vs ${m.control_median_turns}`);
+    else if (m.measurement === 'false_refusals')
+      console.log(`${head}  upper bound ${m.treated_upper_bound} (n=${m.n_treated}); one-armed by construction`);
+    else
+      console.log(`${head}  treated ${m.treated_rate} vs control ${m.control_rate}`);
+  }
+
+  if (!V.reportable && V.waiting_for.length) {
+    console.log('\nwaiting for  — no session has ever carried these');
+    for (const w of V.waiting_for) console.log(`  ${w.of} ${w.level.padEnd(9)} ${w.contract}`);
+    console.log('\n  fleet-meter --contract  prints this as a checklist for whoever builds #3 and #4.');
+  }
+  process.exit(0);
+}
 
 if (has('--json')) { console.log(JSON.stringify(report, null, 2)); process.exit(0); }
 
