@@ -56,6 +56,43 @@ users, so there is no test-only copy to drift.
 **What it does NOT do.** It cannot prove an agent complied with a clause — the model's
 decisions are the script. It proves the machinery around them.
 
+**BUILT, AND THE ANSWER IS YES.** `test/helpers/model-fixture.mjs`, one group in
+`test/run.sh`, `node:http` only. It cost hours rather than the 1–2 days budgeted, because
+the door was already open: Claude Code reads `ANTHROPIC_BASE_URL` and posts an ordinary
+`POST /v1/messages?beta=true` to whatever is there, with `x-api-key: fixture` and nothing
+on the other end validating it. **No agent code patched**, which was the property worth
+copying.
+
+What was OBSERVED, in order, driving the real 2.1.252 binary through `bin/claude-here`:
+
+- the request arrives — a standard Messages API body, `stream: true`, so the fixture has to
+  answer in SSE rather than JSON; tool input comes back as a JSON **string** in
+  `partial_json`, and sending the object instead calls the tool with no arguments
+- **the shipped contract is in it.** A 3-block `system` array whose last block carries the
+  3589 characters extracted from `bin/claude-here` at run time. There is no test-only copy,
+  which was gentle-ai's load-bearing detail and transfers intact
+- a scripted `Write` produced a real file with the scripted bytes
+- **a real `PreToolUse` hook refused a scripted tool call and its reason came back into the
+  conversation as an ordinary `tool_result`, where the fixture read it.** That is the
+  assertion class `docs/external-tools-review.md` says this suite could not write at all.
+  Scripted `Agent` from a lead → `hooks/fleet-guard.sh` exits 2 → its stderr returns
+- the whole session costs **0.6 seconds**. The E2E-leg cost the review warned about does not
+  materialise, because the latency being removed is the model's
+
+**The gap the review named is closed.** Its own "one gap that would change a
+recommendation" was that the technique was verified for OpenCode — the runtime whose
+ghostfleet path carries no contract — and unverified for Claude Code, the one that has it.
+It is now verified for Claude Code, on the contract, by the assertion above.
+
+**And it settles #6 rather than only enabling it** — see there.
+
+**The honest limits.** It skips where there is no `claude`, `git` or `jq`, so it runs on a
+developer machine and skips on both CI legs; a green CI leg is not evidence this ran. It
+proves plumbing, not compliance, exactly as stated above. And nothing here was
+packet-captured: the telemetry-suppressing environment variables are set and every model
+call went to loopback, but "no egress at all" is asserted from the fixture's request log,
+not measured at the socket.
+
 ---
 
 ### #2 — Baseline meter, and a pre-registered sample, before anything is changed
@@ -169,11 +206,32 @@ correlation. It is also the honest answer to *"did any of this work"*.
 
 ---
 
-### #6 — Stop-hook enforcer — **only if #1 proved turn-scoped behaviour**
+### #6 — Stop-hook enforcer — **the condition is met; it is no longer conditional**
 
 A `Stop` hook reads the turn's own output and refuses a done-report naming no observation.
 Conditional on the spike: if Claude Code cannot expose turn-scoped output to a hook, this item
 does not exist and should be struck rather than attempted.
+
+**MEASURED by #1, and this is the finding that most repays having built it.** The `Stop`
+payload carries `last_assistant_message`, and in the fixture run its value was the exact
+string the fixture scripted — `the guard stopped the dispatch.` So a `Stop` hook does see
+turn-scoped model output, and the enforcer has an input. `stop_hook_active` is in the same
+payload, which is the re-entry flag such an enforcer needs in order to refuse once rather
+than loop.
+
+**Why a fixture was needed to learn this and a live session was not enough.** Against a
+real model the hook would have been handed *some* string, and "the hook can see the turn's
+output" would have been believable without being measurable — there would have been nothing
+to compare it to. Under a scripted model the expected value is chosen in the test, so the
+claim is an equality rather than an impression. That is the whole argument for the harness,
+and it happens to be the first thing the harness proved.
+
+**Two things #1 did NOT establish, and the enforcer should not assume them.** Whether a
+`Stop` hook can *block* (the guard's exit-2 refusal was demonstrated at `PreToolUse`, which
+is a different event with a different contract), and whether `last_assistant_message`
+carries a turn's *whole* final message or only its last text block — the scripted turn had
+exactly one block, so the two cases were indistinguishable. Both are one more fixture run
+each.
 
 ---
 
