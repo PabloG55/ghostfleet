@@ -2534,6 +2534,117 @@ else
   skip "dispatch log" "tmux missing"
 fi
 
+# ── 4a10b9. fleet-look must not leave a browser behind ───────────────────────
+# MEASURED, AND NOT AS A FAILURE: 266 orphaned headless Chromes and 145 profile
+# directories on the machine that wrote this file, from a group that photographs a handful
+# of pages per run. Nothing about it looked wrong — the picture was right, the exit code
+# was right, and the only symptom was a load average that got blamed on the test suites
+# running at the time.
+#
+# The cause is one line of control flow: cleanup lived in a `finally`, and every exit in
+# fleet-look sat INSIDE the try it was attached to. `process.exit()` does not unwind, so
+# the finally never ran on any path that mattered — which is every path that succeeded.
+#
+# ASSERTED ON THE PROFILE DIRECTORY, NOT THE PROCESS, deliberately: an orphaned Chrome
+# sometimes notices its debugging socket has closed and exits by itself, which makes a
+# process count a coin flip and an assertion on it a flake. The directory is created by
+# launch() and removed by close() and by nothing else, so its survival is exactly
+# equivalent to "close() was not called", with no timing in it.
+#
+# EVERY PATH IS COMPARED BY SET DIFFERENCE, never by count, and never cleaned with a glob.
+# Two runs of this suite are allowed to overlap (§0), and a live overlapping run owns a
+# profile directory with this same prefix — a glob-and-remove would delete another run's
+# browser out from under it, which is the fixed-socket-name disaster in a different costume.
+#
+# A PER-RUN $TMPDIR, for the reason §0 gives every tmux server its own socket directory.
+# The profiles are named `gf-browser-*` in the system temp dir, and two runs of this suite
+# are allowed to overlap — so a set difference taken over the SHARED prefix attributes a
+# concurrent run's leak to this one. Measured while writing this: three directories appeared
+# between the before and after snapshots of a run whose own four paths were each provably
+# clean in isolation, because two other worktrees were running the suite at that moment and
+# one of them was on a branch without the fix. That is a phantom red, and a phantom red is
+# indistinguishable from a real one.
+#   Pointing the child at its own TMPDIR makes the difference EXACT rather than merely
+# quieter: no other run can put a directory into it, and this run cannot put one anywhere
+# else. It also makes the process check below precise, since the profile path it greps for
+# is now unique to this run.
+#
+# THE DELIBERATE LEAK IS KILLED, NOT EXITED, AND THAT IS NOT A CONVENIENCE. lib/browser.mjs
+# now registers a synchronous `exit` handler, so a launch that merely forgets to close still
+# cleans up on the way out — which is the point of it, and which would leave the row below
+# green by blindness, proving only that the fixture no longer leaks. SIGKILL is the one exit
+# no handler runs on, so it is the only way left to manufacture a real orphan, and it is
+# also the real-world case the handler cannot cover: a crash, an OOM, a Ctrl-C on the runner.
+group "fleet-look closes what it opened"
+if command -v node >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1; then
+  LKC="$(mktemp -d)"
+  LKT="$LKC/tmp"; mkdir -p "$LKT"
+  printf '<!doctype html><title>Closer</title><body style="margin:0">x\n' > "$LKC/p.html"
+  lkdirs()  { ls -d "$LKT"/gf-browser-* 2>/dev/null | sort; }
+  # Every process of a headless Chrome carries --user-data-dir, helpers included: measured,
+  # ten processes for one browser and all ten match. So this counts the whole tree, which is
+  # the thing that was surviving, and not just the one process we spawned.
+  lkprocs() { pgrep -f -- "--user-data-dir=$LKT/gf-browser-" 2>/dev/null | wc -l | tr -d ' '; }
+  lkdirs > "$LKC/before"
+  TMPDIR="$LKT" node "$ROOT/bin/fleet-look.mjs" "$LKC/p.html" --out "$LKC/ok.png" >/dev/null 2>&1
+  LKRC_OK=$?
+  # The UNREACHABLE path too, because it leaves through die() rather than off the end of the
+  # file, and die() was one of the exits that skipped the cleanup.
+  TMPDIR="$LKT" node "$ROOT/bin/fleet-look.mjs" 'http://127.0.0.1:9/nope' --out "$LKC/bad.png" >/dev/null 2>&1
+  LKRC_BAD=$?
+  sleep 1
+  lkdirs > "$LKC/after"
+  if [ "$LKRC_OK" = 0 ]; then
+    is "two looks leave no profile behind"  "" "$(comm -13 "$LKC/before" "$LKC/after" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and the unreachable one still failed" "1" "$LKRC_BAD"
+    # THE ROW THIS GROUP WAS RED FOR, and it is NOT a process count taken after the two looks
+    # above. That was tried first and it passed with the bug fully restored: on an idle
+    # machine the nine helpers notice their parent died within milliseconds, so anything that
+    # sleeps before counting reads zero either way. The leak is those nine failing to be
+    # SCHEDULED in time, which only happens on a machine that is already busy — and a machine
+    # is already busy largely because of the last time this happened.
+    #   So the helper's fixture stops them outright instead of hoping to catch them late, and
+    # the difference stops being a race: nine survivors against the old close, zero against
+    # the new one, no variation across runs. See test/helpers/browser-leak.mjs for why a
+    # stopped process is the honest stand-in for an unscheduled one.
+    is "...and no helper survives, even one that never noticed" "procs=0 dir=no" \
+       "$(TMPDIR="$LKT" node "$ROOT/test/helpers/browser-leak.mjs" 2>/dev/null)"
+    # AND BOTH CHECKS CAN SEE A LEAK, or they are green by blindness on any host where the
+    # two looks above did nothing. A real launch, SIGKILLed so no exit handler runs.
+    TMPDIR="$LKT" node -e '
+      import("'"$ROOT"'/lib/browser.mjs")
+        .then((m) => m.launch({ width: 200, height: 200 }))
+        .then(() => setTimeout(() => {}, 30000))
+        .catch(() => process.exit(0));' >/dev/null 2>&1 &
+    LKPID=$!
+    LKI=0
+    while [ "$LKI" -lt 200 ]; do
+      [ -n "$(comm -13 "$LKC/after" <(lkdirs))" ] && [ "$(lkprocs)" -gt 0 ] && break
+      LKI=$((LKI+1)); sleep 0.1
+    done
+    kill -9 "$LKPID" 2>/dev/null; wait "$LKPID" 2>/dev/null
+    sleep 1
+    lkdirs > "$LKC/leaked"
+    LKNEW="$(comm -13 "$LKC/after" "$LKC/leaked")"
+    LKP="$(lkprocs)"
+    is "...and it would see one that was killed mid-look" "yes" \
+       "$([ -n "$LKNEW" ] && [ "$LKP" -gt 0 ] && echo yes \
+          || echo "no: new profile='$(printf '%s' "$LKNEW" | tr '\n' ' ')' surviving procs=$LKP")"
+    # Undo the deliberate leak, by the exact paths it created and no others. The browser
+    # first, or removing its profile leaves it running against a directory that is gone.
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      pkill -f -- "--user-data-dir=$d" 2>/dev/null
+      rm -rf "$d" 2>/dev/null
+    done <<< "$LKNEW"
+  else
+    skip "fleet-look cleanup" "no chrome on this host (fleet-look exited $LKRC_OK)"
+  fi
+  rm -rf "$LKC"
+else
+  skip "fleet-look cleanup" "node or pgrep missing"
+fi
+
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
 # They are git worktrees like any other, so a stale one lands in the free-list looking
 # clean and sessionless. fleet-spawn then shadows itself: it offers a tree you cannot
