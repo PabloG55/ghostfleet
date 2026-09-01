@@ -236,17 +236,32 @@ fi
 # creation; this paste being unquoted) and every one of them cost an hour, because the only
 # evidence was the transcript of the thing that received it.
 #
-# So the dispatch leaves a trace: target, byte length, a digest, and the first and last
-# forty characters. Not the message — a full copy of every brief in a log is a second place
-# for client material to live, and this repo has spent a day removing the first. The length
-# and the digest are enough to answer "is what arrived what was sent", which is the only
-# question that was ever unanswerable.
+# So the dispatch leaves a trace: target, byte length, digest. NOT the message, and not an
+# excerpt of it either — a copy of every brief on disk is a second place for client material
+# to live, and this repo has spent a day removing the first.
+#
+# The first draft logged the opening and closing forty characters, and its own test caught
+# that for anything under eighty bytes those two windows OVERLAP and reconstruct the whole
+# brief verbatim: a 44-byte message came back complete, and short messages are exactly the
+# ones a lead dashes off without thinking. There is no window size that fixes this, because
+# the excerpt was never what answered the question. Length plus digest is: a 3-byte dispatch
+# is the bug on sight, and re-hashing the brief you MEANT to send settles "is what arrived
+# what was sent" exactly, which is the only thing that was ever unanswerable.
+#
+# The digest is written through whichever of the two usual tools this host has, and never
+# left blank: an empty field would look like a logged dispatch while answering nothing.
 _sent_log="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}/$SOCK.sent"
-{ printf '%s\t%s\t%s\t%s\t%s…%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" "${#MSG}" \
-    "$(printf '%s' "$MSG" | shasum -a 256 2>/dev/null | cut -c1-12)" \
-    "$(printf '%s' "$MSG" | head -c 40 | tr '\n\t' '  ')" \
-    "$(printf '%s' "$MSG" | tail -c 40 | tr '\n\t' '  ')"
+_sent_digest() {                   # shasum on macOS, sha256sum on most Linux, else say so
+  local h
+  h="$(printf '%s' "$1" | shasum -a 256 2>/dev/null)" || h=""
+  [ -n "$h" ] || h="$(printf '%s' "$1" | sha256sum 2>/dev/null)" || h=""
+  h="${h%% *}"
+  printf '%s' "${h:0:12}"
+  [ -n "$h" ] || printf 'no-digest-tool'
+}
+{ printf '%s\t%s\t%s\t%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" \
+    "$(printf '%s' "$MSG" | wc -c | tr -d ' ')" "$(_sent_digest "$MSG")"
 } >> "$_sent_log" 2>/dev/null || true
 
 tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
