@@ -2376,6 +2376,39 @@ else
   skip "npm package sweep" "npm or git missing"
 fi
 
+# ── 4a10b7. a dispatch leaves a trace ────────────────────────────────────────
+# SEEN TWICE, on two profiles, hours apart: a session's first turn was the single word
+# "the" and its real brief never arrived. From the receiving side that is indistinguishable
+# from a worker ignoring its instructions, and from the sending side there was nothing at
+# all — nothing recorded what went into the tmux buffer. Three theories were investigated
+# and disproved at an hour each, because the only evidence was the transcript of the thing
+# that received it.
+#
+# The log records length and a digest, NOT the message: a copy of every brief on disk is a
+# second place for client material to live, and this repo has just spent a day removing the
+# first. Length plus digest answers "is what arrived what was sent", which is the only
+# question that was unanswerable.
+group "fleet-send records what it dispatched"
+if command -v tmux >/dev/null 2>&1; then
+  SNL="$(mktemp -d)"
+  tmux -L sndlog kill-server 2>/dev/null
+  tmux -L sndlog new-session -d -s w1 'sleep 60' 2>/dev/null; sleep 0.4
+  CLAUDE_FLEET_DIR="$SNL" "$ROOT/bin/fleet-send" -s sndlog w1 "a brief long enough to have two distinct ends" >/dev/null 2>&1
+  CLAUDE_FLEET_DIR="$SNL" "$ROOT/bin/fleet-send" -s sndlog w1 "the" >/dev/null 2>&1
+  SNLOG="$SNL/sndlog.sent"
+  is "the log exists after a send"        "1" "$([ -f "$SNLOG" ] && echo 1 || echo 0)"
+  is "...one line per dispatch"           "2" "$(grep -c . "$SNLOG" 2>/dev/null || echo 0)"
+  # THE POINT: a full brief and a one-word fragment must be told apart from the log alone,
+  # because that is the comparison nobody could make when this happened.
+  is "...a long brief records its length"  "1" "$(awk -F'\t' '$3>40' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  is "...and a 3-byte one records 3"       "1" "$(awk -F'\t' '$3==3' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  # It must NOT be a copy of the brief — that would put every dispatched message on disk.
+  is "...the body is not stored"           "0" "$(grep -c 'long enough to have two distinct ends' "$SNLOG" 2>/dev/null || true)"
+  tmux -L sndlog kill-server 2>/dev/null; rm -rf "$SNL"
+else
+  skip "dispatch log" "tmux missing"
+fi
+
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
 # They are git worktrees like any other, so a stale one lands in the free-list looking
 # clean and sessionless. fleet-spawn then shadows itself: it offers a tree you cannot
