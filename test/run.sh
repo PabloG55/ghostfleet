@@ -1305,7 +1305,7 @@ nreq=0; badreq=0
 while IFS="$US" read -r c e txt; do
   case "$c" in req:*) ;; *) continue ;; esac
   nreq=$((nreq+1)); k="${c##*.}"; tool="${c#req:}"; tool="${tool%%.*}"
-  if [ "$e" = 1 ] && printf '%s' "$txt" | grep -qF "$tool: missing required argument '$k'"; then :
+  if [ "$e" = 1 ] && grep -qF "$tool: missing required argument '$k'" <<< "$txt"; then :
   else badreq=$((badreq+1)); fi
 done < "$AG/out"
 is "every declared required arg is refused by name" "0" "$badreq"
@@ -2411,20 +2411,59 @@ if command -v npm >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in package.json|README.md|LICENSE) continue ;; esac   # npm adds these itself
-    printf '%s\n' "$TRACKED" | grep -qxF "$f" || UNSWEPT="$UNSWEPT $f"
+    # A HERE-STRING, NOT A PIPE — see the pipefail/SIGPIPE note in CLAUDE.md. `grep -q`
+    # exits on its first match, and under `set -o pipefail` the writer's EPIPE (141)
+    # becomes the pipeline's status, so a MATCH reads as a failure.
+    grep -qxF "$f" <<< "$TRACKED" || UNSWEPT="$UNSWEPT $f"
   done <<< "$PKD"
   is "...and every packed path is tracked" "" "${UNSWEPT# }"
   # Both directions: the check must be able to SEE an untracked path, or it is green by
   # blindness — the exact shape this suite keeps finding elsewhere.
   UNSWEPT2=""
   for f in $(printf '%s\n' "$PKD" | head -3) "generated/not-tracked.json"; do
-    printf '%s\n' "$TRACKED" | grep -qxF "$f" || UNSWEPT2="$UNSWEPT2 $f"
+    grep -qxF "$f" <<< "$TRACKED" || UNSWEPT2="$UNSWEPT2 $f"
   done
   is "...and it would notice an untracked one" "generated/not-tracked.json" "${UNSWEPT2# }"
 else
   skip "npm package sweep" "npm or git missing"
 fi
 
+# ── 4a10b7. no assertion may pipe into a short-circuiting reader ──────────────
+# THIS ONE FAILED ON ONE LEG OF ONE RUN AND BLAMED AN INNOCENT FILE. `set -uo pipefail`
+# is on (top of this file), and `grep -q` stops reading at its FIRST match — so the
+# writer on its left can take SIGPIPE, and under pipefail that writer's 141 becomes the
+# whole pipeline's status. A MATCH therefore reads as a no-match, and only when the
+# writer had enough left to block: the tracked-file list is ~4KB, which fits the buffer
+# a pipe usually gets and does not fit the smaller one the kernel hands out when it
+# cannot spare that. Measured: same commit, green on one runner, red on the other,
+# naming the FIRST path in the list — the only iteration that ran with a cold pipe.
+#
+# The sweep found five more of the same shape, three of them worse: `while ! tmux
+# capture-pane | grep -q <pattern>` inverts the status, so a spurious 141 reads as "the
+# pattern is not there yet" and the wait loop runs its full count and then asserts against
+# a pane it decided never arrived. That failure would surface in a LATER assertion, about
+# something else entirely.
+#
+# There is nothing to assert about a kernel buffer, so assert the SHAPE. A here-string
+# has no writer to signal, its exit status is the reader's alone, and it costs nothing
+# at these sizes. Structural, so the next one is caught instead of this one.
+#
+# THE PATTERN IS ANCHORED PAST THE COMMENT MARKER, and that is not tidiness: without the
+# anchor this group counted the paragraph above, because the clearest way to describe a
+# forbidden shape is to write it out. It went red on both legs for its own prose. `[^#]*`
+# cannot cross a `#`, so a line that starts with one can never match, and what is being
+# swept is executable text — which is the only place the bug can live.
+group "no assertion pipes into a short-circuiting reader"
+is "the suite has no pipe into grep -q" "0" "$(matches '^[^#]*[|] *grep -q' "$ROOT/test/run.sh")"
+# ...and the sweep can SEE one, or it is green by blindness. The bar is a variable
+# because writing the bad shape literally here would make this file fail its own sweep.
+BAR='|'
+is "...and the sweep would see one"     "1" \
+   "$(grep -cE '^[^#]*[|] *grep -q' <<< "$(printf 'printf x %s grep -q y\n' "$BAR")" || true)"
+# ...and that it does NOT see the same shape inside a comment, which is the direction that
+# made it red: a sweep that cannot tell code from prose forbids explaining itself.
+is "...and not one in a comment"        "0" \
+   "$(grep -cE '^[^#]*[|] *grep -q' <<< "$(printf '# a bad line: printf x %s grep -q y\n' "$BAR")" || true)"
 # ── 4a10b8. a dispatch leaves a trace ────────────────────────────────────────
 # SEEN TWICE, on two profiles, hours apart: a session's first turn was the single word
 # "the" and its real brief never arrived. From the receiving side that is indistinguishable
@@ -4696,7 +4735,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     [ -n "$act" ] && [ "$act" -gt "$1" ]
   }
   footer_drawn() {                 # is a footer on the pane at all?
-    tmux -L cffootd capture-pane -p -t d 2>/dev/null | grep -q '↑↓←→/hjkl move'
+    grep -q '↑↓←→/hjkl move' <<< "$(tmux -L cffootd capture-pane -p -t d 2>/dev/null)"
   }
   draw_at() {                      # $1 = width; leaves the pane up for the caller
     local i=0 at stamp=''
@@ -6428,12 +6467,12 @@ tmux -L cf-demo new-session -d -s dlg -x 100 -y 30 "$PN/dialog.sh" 2>/dev/null
 # work. So `dlg` exists on cf-other too, saying something unmistakable, and the assertion
 # below is that it never appears.
 tmux -L cf-other new-session -d -s dlg -x 100 -y 30 "sh -c 'clear; echo WRONG-FLEET-PANE; sleep 600'" 2>/dev/null
-i=0; while [ "$i" -lt 40 ] && ! tmux -L cf-other capture-pane -p -t dlg 2>/dev/null | grep -q 'WRONG-FLEET-PANE'; do i=$((i+1)); sleep 0.1; done
+i=0; while [ "$i" -lt 40 ] && ! grep -q 'WRONG-FLEET-PANE' <<< "$(tmux -L cf-other capture-pane -p -t dlg 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
 is "the decoy fleet has a 'dlg' too"        "1"   "$(tmux -L cf-other capture-pane -p -t dlg 2>/dev/null | grep -c 'WRONG-FLEET-PANE' || true)"
 # Wait for the dialog to be ON the pane before asserting anything about it: `cat` into a
 # fresh pane is fast but not instant, and a race here would read an empty pane and blame
 # the endpoint.
-i=0; while [ "$i" -lt 60 ] && ! tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null | grep -q 'Do you want to create'; do i=$((i+1)); sleep 0.1; done
+i=0; while [ "$i" -lt 60 ] && ! grep -q 'Do you want to create' <<< "$(tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
 is "the fixture reached a real pane"        "1"   "$(tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null | grep -c 'Do you want to create' || true)"
 
 PNPORT="$(free_port)"; PNPORT="${PNPORT:-18799}"
@@ -7419,13 +7458,13 @@ if sv_start attach; then
   apath="$(pb attach.png att | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).path||"")}catch{console.log("")}})')"
   is "...and the path it returned exists"  "yes" "$([ -n "$apath" ] && [ -f "$apath" ] && echo yes || echo "no: '$apath'")"
   is "...under the fleet dir, keyed by session" "yes" \
-     "$(printf '%s' "$apath" | grep -q '/fleet/attach/[^/]*\.attachtest/' && echo yes || echo "no: $apath")"
+     "$(grep -q '/fleet/attach/[^/]*\.attachtest/' <<< "$apath" && echo yes || echo "no: $apath")"
   # THE PATH IS ABOUT TO BE PASTED INTO A TERMINAL. Nothing in it may be a character a
   # shell would read, and no component of it came from the client.
   is "...and holds nothing a shell would read" "yes" \
-     "$(printf '%s' "$apath" | grep -qE '^[A-Za-z0-9._/-]+$' && echo yes || echo "no: $apath")"
+     "$(grep -qE '^[A-Za-z0-9._/-]+$' <<< "$apath" && echo yes || echo "no: $apath")"
   is "...with a server-generated name"     "yes" \
-     "$(basename "$apath" 2>/dev/null | grep -qE '^[0-9a-f]{16}\.(jpg|png)$' && echo yes || echo "no: $(basename "$apath" 2>/dev/null)")"
+     "$(grep -qE '^[0-9a-f]{16}\.(jpg|png)$' <<< "$(basename "$apath" 2>/dev/null)" && echo yes || echo "no: $(basename "$apath" 2>/dev/null)")"
   is "...and is not group- or world-readable" "600" \
      "$(ls -l "$apath" 2>/dev/null | awk '{print $1}' | sed 's/^-//;s/rw-------/600/;s/[^0-9]*$//' | head -c3)"
   # SNIFFED, NOT DECLARED. SVG is refused BY NAME because it is an image that is also a
