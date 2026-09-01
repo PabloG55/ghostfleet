@@ -77,10 +77,32 @@ import { fileURLToPath } from 'node:url';
 import { launch, serveDir, sleep } from '../lib/browser.mjs';
 
 const argv = process.argv.slice(2);
-const die = (m) => { console.error('fleet-look: ' + m); process.exit(1); };
+// EVERYTHING THAT MUST BE CLOSED, in the order it was opened. This existed as a `finally`
+// and the `finally` never ran: `process.exit()` does not unwind, and every exit in this
+// file sat INSIDE the try it was attached to. So each invocation left a headless Chrome
+// running and its profile directory on disk — measured on the machine that wrote this,
+// 266 orphaned browsers and 145 profiles, from a suite group that photographs a handful of
+// pages per run. It presents as the machine being busy, never as a failure here: the
+// picture is correct, the exit code is correct, and the only symptom is a load average
+// nobody attributes to the tool that caused it.
+//
+// AND THE CLOSERS ARE AWAITED, which is why die/finish are async and every call to them
+// carries an `await`. Closing a browser properly means ASKING it to shut down and waiting
+// for it to finish — see lib/browser.mjs — and an un-awaited promise immediately before
+// process.exit() does not resolve. That would be this same bug wearing an await instead of
+// a finally: the cleanup exists, is reachable, and never completes.
+//   `die` in particular MUST be awaited at every call site or it stops being fatal: an
+// un-awaited async die returns a promise, the caller reads it as falsy-ish and carries on
+// past the line that was supposed to end the program. test/run.sh greps this file for a
+// call to die or finish that is not preceded by await, so the next one added is caught rather
+// than this batch only.
+const CLOSERS = [];
+const shutdown = async () => { while (CLOSERS.length) { const c = CLOSERS.pop(); try { await c(); } catch {} } };
+const die = async (m) => { console.error('fleet-look: ' + m); await shutdown(); process.exit(1); };
+const finish = async (code) => { await shutdown(); process.exit(code); };
 if (!argv.length || argv[0] === '-h' || argv[0] === '--help') {
   console.log('usage: fleet-look <url | file.html | file.pdf | file.png> [--width N] [--height N] [--full] [--wait MS] [--page N] [--tree] [--out PATH]');
-  process.exit(argv.length ? 0 : 1);
+  await finish(argv.length ? 0 : 1);
 }
 const opt = (name, dflt) => { const i = argv.indexOf('--' + name); return i < 0 ? dflt : argv[i + 1]; };
 const flag = (name) => argv.includes('--' + name);
@@ -104,9 +126,9 @@ const report = (rows, outPath) => {
 // ── an image needs no rendering; say so rather than pretending to work ─────
 if (/\.(png|jpe?g|gif|webp)$/i.test(target)) {
   const p = path.resolve(target);
-  if (!fs.existsSync(p)) die(`no such file: ${p}`);
+  if (!fs.existsSync(p)) await die(`no such file: ${p}`);
   report([['looked at', p], ['rendered by', 'nothing — it is already an image']], p);
-  process.exit(0);
+  await finish(0);
 }
 
 // ── a PDF: the deployment renderer, not a browser's guess at one ───────────
@@ -116,12 +138,12 @@ if (/\.(png|jpe?g|gif|webp)$/i.test(target)) {
 // rather than producing nothing and exiting 0.
 if (/\.pdf$/i.test(target)) {
   const p = path.resolve(target);
-  if (!fs.existsSync(p)) die(`no such file: ${p}`);
+  if (!fs.existsSync(p)) await die(`no such file: ${p}`);
   const which = (b) => { try { return String(execFileSync('/bin/sh', ['-c', `command -v ${b}`])).trim(); } catch { return ''; } };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fleet-look-pdf-'));
   let renderer = '';
   if (PAGE > 1 || !which('qlmanage')) {
-    if (!which('pdftoppm')) die(`cannot render a PDF here: qlmanage is macOS-only and pdftoppm is not installed${PAGE > 1 ? ' (and page ' + PAGE + ' needs pdftoppm)' : ''}`);
+    if (!which('pdftoppm')) await die(`cannot render a PDF here: qlmanage is macOS-only and pdftoppm is not installed${PAGE > 1 ? ' (and page ' + PAGE + ' needs pdftoppm)' : ''}`);
     execFileSync('pdftoppm', ['-png', '-r', '150', '-f', String(PAGE), '-l', String(PAGE), p, path.join(dir, 'p')]);
     renderer = 'pdftoppm (page ' + PAGE + ')';
   } else {
@@ -129,12 +151,12 @@ if (/\.pdf$/i.test(target)) {
     renderer = 'qlmanage (page 1)';
   }
   const made = fs.readdirSync(dir).filter(f => /\.png$/i.test(f));
-  if (!made.length) die(`the renderer produced no image for ${p} — it may not be a readable PDF`);
+  if (!made.length) await die(`the renderer produced no image for ${p} — it may not be a readable PDF`);
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   fs.copyFileSync(path.join(dir, made[0]), OUT);
   fs.rmSync(dir, { recursive: true, force: true });
   report([['looked at', p], ['rendered by', renderer]], OUT);
-  process.exit(0);
+  await finish(0);
 }
 
 // ── a page: a real engine, and the status printed beside the picture ───────
@@ -142,15 +164,17 @@ const isUrl = /^https?:\/\//i.test(target);
 let url = target, srv = null;
 if (!isUrl) {
   const p = path.resolve(target);
-  if (!fs.existsSync(p)) die(`no such file: ${p}`);
+  if (!fs.existsSync(p)) await die(`no such file: ${p}`);
   srv = await serveDir(path.dirname(p), path.basename(p));
+  CLOSERS.push(() => srv.close());
   url = `${srv.base}/${path.basename(p)}`;
 }
 
 let b;
 try { b = await launch({ width: WIDTH, height: HEIGHT }); }
-catch (e) { if (srv) srv.close(); die(String((e && e.message) || e)); }
+catch (e) { if (srv) srv.close(); await die(String((e && e.message) || e)); }
 
+CLOSERS.push(() => b.close());
 const b_ = b;
 const chromeBuild = (b.chromePath || '').split('/').pop() || 'chrome';
 let status = null, failed = null;
@@ -179,7 +203,7 @@ try {
   fs.writeFileSync(OUT, Buffer.from(data, 'base64'));
   // A page that could not be reached must not be handed back as a photograph. The image
   // of a 404 is a perfectly good image, and that is exactly the problem.
-  if (failed) die(`${url} answered ${failed} — a photograph of an error page is not an observation. Image left at ${OUT}`);
+  if (failed) await die(`${url} answered ${failed} — a photograph of an error page is not an observation. Image left at ${OUT}`);
   // The tree BEFORE the image, because it answers a different question and answers it
   // better: "is the control there, named, and reachable" is structure, and a VLM reading
   // pixels for that recalls one layout bug in five.
@@ -209,7 +233,7 @@ try {
                                  : 'BASELINE CREATED — nothing was compared this run');
       console.log('reference     ' + gp);
       report([['looked at', url], ['chrome', chromeBuild]], OUT);
-      process.exit(0);
+      await finish(0);
     }
     const a = 'data:image/png;base64,' + fs.readFileSync(gp).toString('base64');
     const b = 'data:image/png;base64,' + fs.readFileSync(OUT).toString('base64');
@@ -237,7 +261,7 @@ try {
       ox.putImageData(D, 0, 0);
       return { total: A.data.length / 4, diff, ratio: diff / (A.data.length / 4), png: out.toDataURL('image/png') };
     }, a, b);
-    if (d && d.sizeMismatch) die(`the reference is a different size: ${d.sizeMismatch} — a golden captured at another viewport is a stale baseline, not a regression. Re-take it with --update if that is what you meant.`);
+    if (d && d.sizeMismatch) await die(`the reference is a different size: ${d.sizeMismatch} — a golden captured at another viewport is a stale baseline, not a regression. Re-take it with --update if that is what you meant.`);
     const pct = (d.ratio * 100).toFixed(3);
     if (d.ratio > MAXDIFF) {
       // THE PAIR ON RED. A number nobody can picture is what gets a golden deleted.
@@ -250,19 +274,28 @@ try {
       console.error('  actual    ' + OUT);
       console.error('  diff      ' + dp + '   (differences in red)');
       console.error('  chrome    ' + chromeBuild + '   — a reference taken on another build is a stale baseline, not a regression');
-      process.exit(1);
+      await finish(1);
     }
     console.log(`matches the reference   ${pct}% of pixels differ, allowed ${(MAXDIFF*100).toFixed(3)}%`);
     console.log('reference     ' + gp);
     report([['looked at', url], ['chrome', chromeBuild]], OUT);
-    process.exit(0);
+    await finish(0);
   }
   report([['looked at', url],
           ['http status', String(status)],
           ['title', info.title],
           ['first text', info.text || '(the page rendered no text)'],
           ['viewport', `${WIDTH}x${HEIGHT}${flag('full') ? ' (full page)' : ''}`]], OUT);
+} catch (e) {
+  // ANY failure to observe the page is one failure to the caller, and it must say so in
+  // the same words. Chrome reports an unreachable host as HTTP 0 on one platform and as a
+  // thrown CDP error on another, and the second path used to escape as an unhandled
+  // rejection: a stack trace, exit 1, and no mention of an observation. The exit code was
+  // right, so the assertion that checked only the code stayed green — while the row that
+  // checked the WORDS went red on one CI leg and not the other, for the same commit.
+  await die(`${url} could not be observed (${String((e && e.message) || e).split('\n')[0].slice(0, 160)}) `
+      + `— a photograph of an error page is not an observation.`
+      + (fs.existsSync(OUT) ? ` Image left at ${OUT}` : ''));
 } finally {
-  try { b && b.close(); } catch {}
-  try { srv && srv.close(); } catch {}
+  await shutdown();
 }
