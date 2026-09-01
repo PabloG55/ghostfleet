@@ -8061,7 +8061,10 @@ if command -v node >/dev/null 2>&1; then
   # search again, and this row is what makes adding one cost a deliberate edit here.
   is "eval: --contract lists every marker with its position" "6" \
      "$(node "$M" --contract | grep -c 'only where it can have been emitted')"
-  is "eval: --contract names the join" "yes"   "$(node "$M" --contract | grep -q 'carry its verdict INTO the dispatched prompt' && echo yes || echo no)"
+  # A here-string, not a pipe: `grep -q` stops at its first match and `node` then takes
+  # SIGPIPE, which pipefail promotes to the pipeline's status — so a MATCH can answer 141,
+  # the `&&` never fires, and this row reads "no" for a contract that does say the join.
+  is "eval: --contract names the join" "yes"   "$(grep -q 'carry its verdict INTO the dispatched prompt' <<< "$(node "$M" --contract)" && echo yes || echo no)"
 
   # ── counts and digests, never content — same boundary as the baseline ──
   # Read line by line: two of these contain a space, and a `for` over a bare word list
