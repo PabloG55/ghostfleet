@@ -17,8 +17,11 @@ You cannot see the fleet; you have to *look*. Your context drifts and a restarte
 lead starts blank, so **do not act from memory — read the real state first:**
 
 - **`fleet-worktrees`** — every git worktree of this repo: its branch, whether a
-  session is live on it, git state (clean/dirty, ahead/behind), the task it was
-  spun up for, and a **"Free to reuse"** line. This is your map.
+  session is live on it, git state (clean/dirty, ahead/behind), **ASKED** (the task it
+  was spun up for) beside **UNDERSTOOD** (what its worker said it heard, and which of
+  your decisions it is building from), and a **"Free to reuse"** line. This is your map.
+  A blank UNDERSTOOD means the worker has not acknowledged yet; `(no decisions)` means
+  it acknowledged while naming none — worth a `fleet-read` before it gets far.
 - **`fleet-inbox`** — what has needed you since you last looked (see below).
 - **`fleet-list`** — the live sessions and their status.
 
@@ -159,6 +162,7 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | check who needs you / what finished | `fleet-inbox` — its footer also names worktrees whose PR merged and are safe to reclaim |
 | a worker is done for good | `fleet-stop --reclaim <session>` — stops it AND removes its worktree when safe, or keeps it and says why. One call, not stop-then-remove: the worktree path is read from the live session, and a two-step teardown leaves a window for the session to come back |
 | dispatch a task | `fleet-send <session> "<self-contained brief>"` |
+| **record what you heard** (you are the worker) | `fleet-ack "<one line of what you understood>" --from "<the decisions you are working from>"` |
 | **ask** a session something (answer comes back) | `fleet-send --reply-to me <session> "<question>"` |
 | read a worker's output | `fleet-read <session> [n]` |
 | **look at what was built** | `fleet-look.mjs <url \| file.html \| file.pdf>` — renders it and prints a PNG path; `Read` that path to actually see it. `--tree` for the accessibility tree |
@@ -193,6 +197,17 @@ actually run lint/typecheck/tests.
   current turn — fine for the *next* task; don't fire several at a working session.
 - **Prompts must be self-contained.** A sibling has its own context — paste the full
   brief (task, files/paths, done-criteria), not "the thing we discussed".
+- **Resolve the ambiguity BEFORE you dispatch, not after.** Run the ask against the eight
+  axes — the UNIT (per line, per document, per policy) · PARITY with an existing surface ·
+  REUSE rather than recreate · the GATE before advancing · COMPLETENESS of a list ·
+  ELIGIBILITY and how a thing LEAVES · RETROACTIVITY to records that already exist · and
+  for a rendered artifact, whether there is an existing one to match — and put the
+  unanswered **material** ones back to the human as a numbered list. Then put the answers
+  in the brief. MEASURED: 36 of 163 screen-attributed corrections were requirements stated
+  for the first time mid-flight, and 19 of those were already known to the human and simply
+  not said. `fleet-spawn` warns when a brief has no done-criterion or reads as several
+  deliverables — it never refuses, and the warning is not the point; the resolved decisions
+  are.
 - **You can't see a worker's screen.** Use `fleet-read` / `fleet-inbox` to observe,
   never assume.
 - Only sessions in *your* fleet (same `CLAUDE_FLEET_SOCK`) are reachable.

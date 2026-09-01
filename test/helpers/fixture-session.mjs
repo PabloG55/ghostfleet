@@ -9,6 +9,13 @@
 // is a second caller, not before, and do not converge a file in the same change that
 // introduces the thing calling it.
 //
+// THE MECHANISM, which is what this file is. An agent's model call is an HTTP POST carrying
+// messages and tool definitions; the response names the next tool to call. That protocol is
+// standardised, so anything that speaks it is, to the agent, a model. Point the real `claude`
+// binary at a `node:http` server on loopback with `ANTHROPIC_BASE_URL`, hand it the literal
+// API key "fixture" — nothing on the other end is a vendor API, so nothing validates it — and
+// the whole stack runs for real except the model's reasoning.
+//
 // THE ONE THING THAT IS EASY TO GET WRONG, and it cost a whole probe run to find:
 // NOT EVERY REQUEST IS A CONVERSATION TURN. Claude Code also asks the model to write a
 // session title, and that call arrives FIRST, carrying one user message, NO `tools` array,
@@ -67,6 +74,11 @@ export function missingPrerequisite() {
 }
 
 // ── the contract, read from the launcher that SHIPS it ────────────────────
+// The point of the whole exercise, in one line: this is the same file a user's session reads,
+// so there is no second copy to fall out of step. The contract is a single-quoted bash string
+// and CLAUDE.md forbids an apostrophe inside it, so [^']* is not a guess about the grammar —
+// it is that invariant, used.
+//
 // THE `\)` IS LOAD-BEARING. Bash ends a single-quoted string at the FIRST apostrophe, so an
 // apostrophe inside the contract truncates what the session receives — 3589 characters to
 // 673, measured, green for a day. Anchored only on the quotes, this regex truncates in
@@ -81,9 +93,10 @@ export function shippedContract(root) {
 
 // ── the wire ─────────────────────────────────────────────────────────────
 // `stream: true` on every request, so a JSON body is not an option: this has to be SSE in
-// the Messages API's event order. Tool input arrives as a JSON STRING in `partial_json`,
-// not as an object — send the object and the block parses as empty and the tool is called
-// with no arguments at all.
+// the Messages API's event order: message_start, then per block a start / an input_json_delta
+// or text_delta / a stop, then message_delta carrying stop_reason, then message_stop. Tool
+// input arrives as a JSON STRING in `partial_json`, not as an object — send the object and the
+// block parses as empty and the tool is called with no arguments at all.
 const sse = (res, ev, data) => res.write(`event: ${ev}\ndata: ${JSON.stringify(data)}\n\n`);
 export function respond(res, blocks, stop_reason) {
   res.statusCode = 200;
@@ -168,8 +181,12 @@ export async function runSession({ root, world, hooks, prompt, env: extraEnv = {
     req.on('end', () => {
       let b; try { b = JSON.parse(body); } catch { res.statusCode = 400; res.end('{}'); return; }
       requests.push(b);
+      // The system prompt arrives as an array of cache-scoped blocks, not a string.
       sysText = (Array.isArray(b.system) ? b.system : [{ text: String(b.system || '') }])
         .map((s) => s.text || '').join('\n');
+      // A BLOCKED TOOL COMES BACK AS AN ORDINARY tool_result whose content is the hook's
+      // stderr — which is why a refusal is observable from out here at all, and the reason a
+      // PreToolUse guard can be asserted on rather than merely trusted.
       for (const m of b.messages || []) {
         if (!Array.isArray(m.content)) continue;
         for (const c of m.content) {

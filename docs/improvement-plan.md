@@ -322,6 +322,27 @@ purpose** — widen it when the meter shows cases being missed, not on a guess.
 **What is NOT established.** Whether warning changes anything. That is the whole point of
 leaving it to #5, and this item ships the instrument, not the claim.
 
+**MEASURED by #1, and this is the finding that most repays having built it.** The `Stop`
+payload carries `last_assistant_message`, and in the fixture run its value was the exact
+string the fixture scripted — `the guard stopped the dispatch.` So a `Stop` hook does see
+turn-scoped model output, and the enforcer has an input. `stop_hook_active` is in the same
+payload, which is the re-entry flag such an enforcer needs in order to refuse once rather
+than loop.
+
+**Why a fixture was needed to learn this and a live session was not enough.** Against a
+real model the hook would have been handed *some* string, and "the hook can see the turn's
+output" would have been believable without being measurable — there would have been nothing
+to compare it to. Under a scripted model the expected value is chosen in the test, so the
+claim is an equality rather than an impression. That is the whole argument for the harness,
+and it happens to be the first thing the harness proved.
+
+**Two things #1 did NOT establish, and the enforcer should not assume them.** Whether a
+`Stop` hook can *block* (the guard's exit-2 refusal was demonstrated at `PreToolUse`, which
+is a different event with a different contract), and whether `last_assistant_message`
+carries a turn's *whole* final message or only its last text block — the scripted turn had
+exactly one block, so the two cases were indistinguishable. Both are one more fixture run
+each.
+
 ---
 
 ### #7 — Doctor envelope, when the reaper is actually built

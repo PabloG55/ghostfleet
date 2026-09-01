@@ -2191,6 +2191,29 @@ PYX
   is "...met because you LOOKED, not read"    "1" "$(contracthas 'because you looked at the thing it is about')"
   is "...and admits when none were named"     "1" "$(contracthas 'the asking half did not happen')"
   is "...which asks for an existing one"      "1" "$(contracthas 'whether there is an existing one to match')"
+  # THE HANDSHAKE, both ends of one loop and therefore one clause. The clauses above
+  # govern a session READING a brief; this one governs the moment a brief is written and
+  # the moment one is received. It is a single clause because the contract is delivered
+  # identically to every session — splitting it would address each half to a session that
+  # cannot act on it — so it scopes itself: a main checkout dispatches, a linked worktree
+  # is a leaf and only acknowledges.
+  #   Measured on the asking half: 36 of 163 screen-attributed corrections were
+  # requirements stated for the first time mid-flight, 19 already known to the human and
+  # simply not said. On the acknowledging half: 23 of 79 agent-behaviour corrections are
+  # "that is not what I asked".
+  is "...and the dispatch half of the loop"   "1" "$(contracthas 'NUMBERED LIST')"
+  is "...scoped to a main checkout"           "1" "$(contracthas 'a leaf and dispatches nothing')"
+  # A RESTATEMENT ALONE WAS THE FIRST DESIGN AND WAS NOT ENOUGH: it makes disagreement
+  # displayable, not preventable, since a worker can paraphrase the ask perfectly and
+  # still build from a wrong assumption underneath it. The binding to the DECISIONS is
+  # the correction, so it is asserted separately from the ack itself — a clause that lost
+  # it would still pass a test that only asked whether fleet-ack was named.
+  is "...and the acknowledging half"          "1" "$(contracthas 'the decisions you are working from')"
+  # AND IT NAMES THE COMMAND, for the same reason the fleet-look row above exists: a
+  # mechanism nobody is told about is never reached, and from outside that is
+  # indistinguishable from an instruction nobody followed.
+  is "...naming fleet-ack, not just the idea" "1" "$(contracthas 'fleet-ack')"
+  is "...and where the gap becomes visible"   "1" "$(contracthas 'ASKED next to UNDERSTOOD')"
   # DO NOT WATCH THE PIPELINE. Same session: 173 tool calls between the finishing commit
   # and the first human word, 28 of them sleeps totalling ~16,000 seconds, against TWO
   # records touching anything that could render the artifact the feature was about.
@@ -2509,6 +2532,117 @@ if command -v tmux >/dev/null 2>&1; then
   tmux -L sndlog kill-server 2>/dev/null; rm -rf "$SNL"
 else
   skip "dispatch log" "tmux missing"
+fi
+
+# ── 4a10b9. fleet-look must not leave a browser behind ───────────────────────
+# MEASURED, AND NOT AS A FAILURE: 266 orphaned headless Chromes and 145 profile
+# directories on the machine that wrote this file, from a group that photographs a handful
+# of pages per run. Nothing about it looked wrong — the picture was right, the exit code
+# was right, and the only symptom was a load average that got blamed on the test suites
+# running at the time.
+#
+# The cause is one line of control flow: cleanup lived in a `finally`, and every exit in
+# fleet-look sat INSIDE the try it was attached to. `process.exit()` does not unwind, so
+# the finally never ran on any path that mattered — which is every path that succeeded.
+#
+# ASSERTED ON THE PROFILE DIRECTORY, NOT THE PROCESS, deliberately: an orphaned Chrome
+# sometimes notices its debugging socket has closed and exits by itself, which makes a
+# process count a coin flip and an assertion on it a flake. The directory is created by
+# launch() and removed by close() and by nothing else, so its survival is exactly
+# equivalent to "close() was not called", with no timing in it.
+#
+# EVERY PATH IS COMPARED BY SET DIFFERENCE, never by count, and never cleaned with a glob.
+# Two runs of this suite are allowed to overlap (§0), and a live overlapping run owns a
+# profile directory with this same prefix — a glob-and-remove would delete another run's
+# browser out from under it, which is the fixed-socket-name disaster in a different costume.
+#
+# A PER-RUN $TMPDIR, for the reason §0 gives every tmux server its own socket directory.
+# The profiles are named `gf-browser-*` in the system temp dir, and two runs of this suite
+# are allowed to overlap — so a set difference taken over the SHARED prefix attributes a
+# concurrent run's leak to this one. Measured while writing this: three directories appeared
+# between the before and after snapshots of a run whose own four paths were each provably
+# clean in isolation, because two other worktrees were running the suite at that moment and
+# one of them was on a branch without the fix. That is a phantom red, and a phantom red is
+# indistinguishable from a real one.
+#   Pointing the child at its own TMPDIR makes the difference EXACT rather than merely
+# quieter: no other run can put a directory into it, and this run cannot put one anywhere
+# else. It also makes the process check below precise, since the profile path it greps for
+# is now unique to this run.
+#
+# THE DELIBERATE LEAK IS KILLED, NOT EXITED, AND THAT IS NOT A CONVENIENCE. lib/browser.mjs
+# now registers a synchronous `exit` handler, so a launch that merely forgets to close still
+# cleans up on the way out — which is the point of it, and which would leave the row below
+# green by blindness, proving only that the fixture no longer leaks. SIGKILL is the one exit
+# no handler runs on, so it is the only way left to manufacture a real orphan, and it is
+# also the real-world case the handler cannot cover: a crash, an OOM, a Ctrl-C on the runner.
+group "fleet-look closes what it opened"
+if command -v node >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1; then
+  LKC="$(mktemp -d)"
+  LKT="$LKC/tmp"; mkdir -p "$LKT"
+  printf '<!doctype html><title>Closer</title><body style="margin:0">x\n' > "$LKC/p.html"
+  lkdirs()  { ls -d "$LKT"/gf-browser-* 2>/dev/null | sort; }
+  # Every process of a headless Chrome carries --user-data-dir, helpers included: measured,
+  # ten processes for one browser and all ten match. So this counts the whole tree, which is
+  # the thing that was surviving, and not just the one process we spawned.
+  lkprocs() { pgrep -f -- "--user-data-dir=$LKT/gf-browser-" 2>/dev/null | wc -l | tr -d ' '; }
+  lkdirs > "$LKC/before"
+  TMPDIR="$LKT" node "$ROOT/bin/fleet-look.mjs" "$LKC/p.html" --out "$LKC/ok.png" >/dev/null 2>&1
+  LKRC_OK=$?
+  # The UNREACHABLE path too, because it leaves through die() rather than off the end of the
+  # file, and die() was one of the exits that skipped the cleanup.
+  TMPDIR="$LKT" node "$ROOT/bin/fleet-look.mjs" 'http://127.0.0.1:9/nope' --out "$LKC/bad.png" >/dev/null 2>&1
+  LKRC_BAD=$?
+  sleep 1
+  lkdirs > "$LKC/after"
+  if [ "$LKRC_OK" = 0 ]; then
+    is "two looks leave no profile behind"  "" "$(comm -13 "$LKC/before" "$LKC/after" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and the unreachable one still failed" "1" "$LKRC_BAD"
+    # THE ROW THIS GROUP WAS RED FOR, and it is NOT a process count taken after the two looks
+    # above. That was tried first and it passed with the bug fully restored: on an idle
+    # machine the nine helpers notice their parent died within milliseconds, so anything that
+    # sleeps before counting reads zero either way. The leak is those nine failing to be
+    # SCHEDULED in time, which only happens on a machine that is already busy — and a machine
+    # is already busy largely because of the last time this happened.
+    #   So the helper's fixture stops them outright instead of hoping to catch them late, and
+    # the difference stops being a race: nine survivors against the old close, zero against
+    # the new one, no variation across runs. See test/helpers/browser-leak.mjs for why a
+    # stopped process is the honest stand-in for an unscheduled one.
+    is "...and no helper survives, even one that never noticed" "procs=0 dir=no" \
+       "$(TMPDIR="$LKT" node "$ROOT/test/helpers/browser-leak.mjs" 2>/dev/null)"
+    # AND BOTH CHECKS CAN SEE A LEAK, or they are green by blindness on any host where the
+    # two looks above did nothing. A real launch, SIGKILLed so no exit handler runs.
+    TMPDIR="$LKT" node -e '
+      import("'"$ROOT"'/lib/browser.mjs")
+        .then((m) => m.launch({ width: 200, height: 200 }))
+        .then(() => setTimeout(() => {}, 30000))
+        .catch(() => process.exit(0));' >/dev/null 2>&1 &
+    LKPID=$!
+    LKI=0
+    while [ "$LKI" -lt 200 ]; do
+      [ -n "$(comm -13 "$LKC/after" <(lkdirs))" ] && [ "$(lkprocs)" -gt 0 ] && break
+      LKI=$((LKI+1)); sleep 0.1
+    done
+    kill -9 "$LKPID" 2>/dev/null; wait "$LKPID" 2>/dev/null
+    sleep 1
+    lkdirs > "$LKC/leaked"
+    LKNEW="$(comm -13 "$LKC/after" "$LKC/leaked")"
+    LKP="$(lkprocs)"
+    is "...and it would see one that was killed mid-look" "yes" \
+       "$([ -n "$LKNEW" ] && [ "$LKP" -gt 0 ] && echo yes \
+          || echo "no: new profile='$(printf '%s' "$LKNEW" | tr '\n' ' ')' surviving procs=$LKP")"
+    # Undo the deliberate leak, by the exact paths it created and no others. The browser
+    # first, or removing its profile leaves it running against a directory that is gone.
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      pkill -f -- "--user-data-dir=$d" 2>/dev/null
+      rm -rf "$d" 2>/dev/null
+    done <<< "$LKNEW"
+  else
+    skip "fleet-look cleanup" "no chrome on this host (fleet-look exited $LKRC_OK)"
+  fi
+  rm -rf "$LKC"
+else
+  skip "fleet-look cleanup" "node or pgrep missing"
 fi
 
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
@@ -7522,6 +7656,331 @@ is "fleet-stop delegates, not git"       "0" \
 is "...it calls fleet-clean --force"     "1" \
    "$(grep -c -- '--only "\$WT" --go --force' "$ROOT/bin/fleet-stop" || true)"
 
+
+# ── 5z. the brief protocol: warn about a thin brief, and never refuse ────────
+# The gate version of this was designed first and was WRONG, so the assertions here are
+# shaped to hold the correction in place rather than to prove the feature works.
+#
+# It cannot be a gate because it would be a gate on a null result: of six brief features
+# measured across this corpus — length, naming a file, naming a route, STATING A
+# DONE-CRITERION, carrying a reference image, human-vs-lead authorship — all six sit in a
+# 20-30% correction band with fully overlapping intervals. And its failure mode is this
+# repo's dominant one: "Done when: implemented" passes any parser, so a gate would buy a
+# field that looks disciplined while the decision the human never made stays unmade.
+#
+# So the load-bearing assertions are the NEGATIVE ones — exit status unchanged, the spawn
+# still happens, the source of the warning contains no `exit` — because a later edit that
+# "improves" this into a refusal would pass every positive assertion in the group.
+group "fleet-spawn warns about a thin brief and dispatches anyway"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  BW="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$BW/home/.config/ghostfleet" "$BW/ok"
+  # It PRINTS THE READY MARKER and then sleeps. fleet-spawn dispatches the initial prompt
+  # only once the pane looks ready for input, so a pane that never says so would make the
+  # dispatcher wait out its ~3min fallback and the "what the worker receives" assertion
+  # below could not be written at all. `bypass permissions` is one of the real markers
+  # fleet-spawn polls for.
+  printf '#!/usr/bin/env bash\nprintf "bypass permissions\\n"\nsleep 60\n' > "$BW/ok/agent-here"
+  chmod +x "$BW/ok/agent-here"
+  # A fleet-send that records the message it was handed, so what the WORKER receives is
+  # observable without a real Claude on the other end. First on PATH, so the backgrounded
+  # dispatcher finds it instead of the real one.
+  # KEYED BY TARGET SESSION, and that is not tidiness. Every spawn above leaves a
+  # BACKGROUNDED dispatcher behind — fleet-spawn returns before it fires — so a single
+  # shared path is written by whichever dispatcher happens to reach it, and a wait loop
+  # that breaks on "the file is non-empty" can read another spawn's brief entirely.
+  # Measured: with the marker deliberately removed, "the ask is still first" went red
+  # against a message from a DIFFERENT spawn, which means the green run before it had
+  # been passing on the same confusion. One file per target session; the case below uses
+  # a session name no other case spawns.
+  { echo '#!/usr/bin/env bash'
+    echo 'while [ $# -gt 2 ]; do shift; done'
+    echo 'printf "%s" "$2" > "'"$BW"'/sent.$1"'; } > "$BW/ok/fleet-send"
+  chmod +x "$BW/ok/fleet-send"
+  BWOUT=""; BWRC=0
+  spawnbw() {                              # $@ = extra fleet-spawn args
+    rm -rf "$BW/repo" "$BW/w1" "$BW/slots"; mkdir -p "$BW/fleet"
+    git init -q -b main "$BW/repo" 2>/dev/null
+    git -C "$BW/repo" config user.email t@t; git -C "$BW/repo" config user.name t
+    : > "$BW/repo/f"; git -C "$BW/repo" add -A; git -C "$BW/repo" commit -qm init 2>/dev/null
+    BWOUT="$( cd "$BW/repo" && HOME="$BW/home" env -u TMUX \
+      CLAUDE_FLEET_SOCK=cfbrief CLAUDE_FLEET_DIR="$BW/fleet" CLAUDE_FLEET_SLOTS="$BW/slots" \
+      PATH="$BW/ok:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" w1 --new "$@" 2>&1 )"; BWRC=$?
+    tmux -L cfbrief kill-server 2>/dev/null
+  }
+  bwhas() { printf '%s' "$BWOUT" | grep -c -- "$1" 2>/dev/null || true; }
+  briefrows() { [ -f "$BW/fleet/cfbrief.brief.tsv" ] && wc -l < "$BW/fleet/cfbrief.brief.tsv" | tr -d ' ' || echo 0; }
+
+  # ── a thin brief: no done-criterion, one deliverable ──
+  spawnbw --prompt 'Fix the parser so it stops dropping the last field'
+  is "a brief with no done-criterion warns"   "1" "$(bwhas 'the brief is thin')"
+  # THE MARKER IS A POSITION, NOT A SUBSTRING, and the anchor is the assertion. The item #5
+  # evaluator identifies treated sessions by finding this at the HEAD of a line; its first
+  # run classified a session as treated because the string appeared anywhere in it, and
+  # that session was the one WRITING the marker — so the treated arm would have filled
+  # with the treatment being built. Anchored here, or the anchoring is not tested.
+  is "...and prints the verdict marker"       "1" "$(printf '%s' "$BWOUT" | grep -c '^brief-check: warn' || true)"
+  is "...carrying the two fields it judged"   "1" \
+     "$(printf '%s' "$BWOUT" | grep -c '^brief-check: warn done-criterion=no deliverables=1' || true)"
+  # STDOUT, not stderr: mcp/fleet-dispatch.mjs returns stdout ALONE on the success path and
+  # merges stderr in only when the command fails, so a marker on stderr would be invisible
+  # to every dispatch through the fleet_spawn MCP tool — which is the path the orchestrate
+  # skill tells a lead to prefer. Captured with stderr closed, which is the only way to
+  # tell the two apart.
+  BWSTDOUT="$( cd "$BW/repo" && HOME="$BW/home" env -u TMUX \
+    CLAUDE_FLEET_SOCK=cfbrief CLAUDE_FLEET_DIR="$BW/fleet" CLAUDE_FLEET_SLOTS="$BW/slots" \
+    PATH="$BW/ok:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" w9 --new \
+    --prompt 'Fix the parser' 2>/dev/null )"
+  tmux -L cfbrief kill-server 2>/dev/null
+  is "...on STDOUT, where an MCP lead sees it" "1" "$(printf '%s' "$BWSTDOUT" | grep -c '^brief-check: warn' || true)"
+  is "...and the teaching text with it"        "1" "$(printf '%s' "$BWSTDOUT" | grep -c 'the brief is thin' || true)"
+  is "...and names what is missing"           "1" "$(bwhas 'NO DONE-CRITERION')"
+  # The register borrowed from hooks/fleet-guard.sh: name the thing, say why it costs, hand
+  # over the next action. A warning that only says "this is thin" is decoration.
+  is "...and says why it costs something"     "1" "$(bwhas 'nothing to close')"
+  is "...and hands over the eight axes"       "1" "$(bwhas 'NUMBERED LIST')"
+  is "...naming the retroactivity axis"       "1" "$(bwhas 'RETROACTIVITY')"
+  is "...and names the acknowledging half"    "1" "$(bwhas 'fleet-ack')"
+  # THE HALF THAT MUST NOT REGRESS, and the reason this group exists at all.
+  is "...and the exit status is still 0"      "0" "$BWRC"
+  is "...and the spawn actually happened"     "1" "$(bwhas "started 'w1'")"
+  is "...and the prompt is still dispatched"  "1" "$(bwhas 'will dispatch the initial prompt')"
+
+  # ── the OTHER direction: a brief that says what done looks like, one deliverable ──
+  # Without this the group would pass for a warning that fires on everything, which is
+  # the same as a warning that fires on nothing.
+  spawnbw --prompt 'Add the ASKED column to fleet-worktrees. Done when: the header prints ASKED beside UNDERSTOOD.'
+  is "a brief with a done-criterion is quiet" "0" "$(bwhas 'the brief is thin')"
+  # ...but NOT silent. The marker prints on EVERY dispatch, warned or not: a marker that
+  # only appears when the machinery objected cannot separate a treated session that passed
+  # from one the machinery never ran in, and the untreated arm would quietly absorb every
+  # good brief.
+  is "...but still prints an ok marker"       "1" "$(printf '%s' "$BWOUT" | grep -c '^brief-check: ok' || true)"
+  is "...with the fields that earned it"      "1" \
+     "$(printf '%s' "$BWOUT" | grep -c '^brief-check: ok done-criterion=yes deliverables=1' || true)"
+  is "...and still spawns"                    "1" "$(bwhas "started 'w1'")"
+  is "...with the same exit status"           "0" "$BWRC"
+
+  # ── several deliverables ──
+  spawnbw --prompt "$(printf 'Add the column\nUpdate the docs\nWrite a test\n')"
+  is "three build verbs read as three"        "1" "$(bwhas 'READS AS 3 DELIVERABLES')"
+  is "...and STILL does not refuse"           "0" "$BWRC"
+  is "...and still spawns"                    "1" "$(bwhas "started 'w1'")"
+
+  # A NUMBERED LIST IS PRESENTATION, NOT A DELIVERABLE COUNT — the objection that killed
+  # the gate version, kept honest here. Acceptance criteria are a numbered list, and so is
+  # a research method; counting list items would call both of them three asks.
+  spawnbw --prompt "$(printf 'Build the picker.\nDone when:\n1. The Documents step shows one row per document\n2. The saved row carries the template id\n3. An old envelope renders blank\n')"
+  is "criteria as a list are not deliverables" "0" "$(bwhas 'DELIVERABLES')"
+  is "...and that brief warns not at all"      "0" "$(bwhas 'the brief is thin')"
+  spawnbw --prompt "$(printf 'Investigate the flake.\n1. Read test/run.sh\n2. Run the suite twice\n3. Check the socket namespace\n')"
+  is "a method list is not deliverables"       "0" "$(bwhas 'DELIVERABLES')"
+  # ...and it is still thin in the OTHER way, so the row above is not passing because the
+  # whole warning went silent.
+  is "...though it still has no criterion"     "1" "$(bwhas 'NO DONE-CRITERION')"
+
+  # ── the counter, so the bypass rate has a denominator ──
+  # Nothing blocks, so every warning IS a bypass; a warned count with no total measures
+  # nothing. Every PROMPTED spawn writes a row, warned or not.
+  rm -f "$BW/fleet/cfbrief.brief.tsv"
+  spawnbw --prompt 'Fix the parser'
+  is "a warned dispatch is counted"           "1" "$(briefrows)"
+  spawnbw --prompt 'Add the column. Done when: the header prints it.'
+  is "...and so is an unwarned one"           "2" "$(briefrows)"
+  is "...the verdict column says no"          "1" "$(awk -F'\t' '$4=="no"' "$BW/fleet/cfbrief.brief.tsv" | wc -l | tr -d ' ')"
+  is "...and yes for the other"               "1" "$(awk -F'\t' '$4=="yes"' "$BW/fleet/cfbrief.brief.tsv" | wc -l | tr -d ' ')"
+  is "...seven columns, none of them empty"   "0" \
+     "$(awk -F'\t' 'NF!=7 || $7==""' "$BW/fleet/cfbrief.brief.tsv" | wc -l | tr -d ' ')"
+  # NEVER THE BODY — the same privacy boundary the dispatch log keeps. A distinctive word
+  # from a brief that was just counted must not be findable in the file.
+  is "...and the brief body is NOT in it"     "0" \
+     "$(grep -c 'parser' "$BW/fleet/cfbrief.brief.tsv" 2>/dev/null || true)"
+  # A spawn with no brief at all has nothing to judge and nothing to count: a row for it
+  # would inflate the denominator with dispatches the warning could never have seen.
+  rm -f "$BW/fleet/cfbrief.brief.tsv"
+  spawnbw
+  is "a spawn with no prompt counts nothing"  "0" "$(briefrows)"
+  is "...and warns about nothing"             "0" "$(bwhas 'the brief is thin')"
+
+  # ── the verdict has to reach the WORKER, not just the lead ──
+  # The objection happens in the lead and the outcome happens in the worker, and nothing
+  # else joins those two transcripts — a verdict left behind on the lead makes a false
+  # refusal unmeasurable from either end. So the marker rides along in the dispatched
+  # prompt, and this asserts what the worker was actually handed rather than what the lead
+  # printed. The recording fleet-send stub above is what makes that observable.
+  # SPAWNED BY HAND rather than through spawnbw, for two reasons that both have to hold:
+  # the session name must be one no other case uses (so no other dispatcher can write this
+  # file), and the tmux server must stay UP until the send lands — spawnbw kills it on the
+  # way out, which would leave the dispatcher polling a dead pane for its ~3min fallback.
+  BWASK='Fix the parser so it stops dropping the last field'
+  rm -f "$BW/sent.wdisp"
+  rm -rf "$BW/repo" "$BW/wdisp"
+  git init -q -b main "$BW/repo" 2>/dev/null
+  git -C "$BW/repo" config user.email t@t; git -C "$BW/repo" config user.name t
+  : > "$BW/repo/f"; git -C "$BW/repo" add -A; git -C "$BW/repo" commit -qm init 2>/dev/null
+  ( cd "$BW/repo" && HOME="$BW/home" env -u TMUX \
+      CLAUDE_FLEET_SOCK=cfbrief CLAUDE_FLEET_DIR="$BW/fleet" CLAUDE_FLEET_SLOTS="$BW/slots" \
+      PATH="$BW/ok:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" wdisp --new \
+      --prompt "$BWASK" >/dev/null 2>&1 )
+  # the dispatcher is backgrounded and waits for the pane to look ready; the stub agent
+  # prints the marker immediately, so this is ~1s, not the ~3min fallback.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ -s "$BW/sent.wdisp" ] && break; sleep 1; done
+  tmux -L cfbrief kill-server 2>/dev/null
+  is "the worker is handed something"         "1" "$([ -s "$BW/sent.wdisp" ] && echo 1 || echo 0)"
+  is "...carrying the verdict marker"         "1" "$(grep -c '^brief-check: warn' "$BW/sent.wdisp" 2>/dev/null || true)"
+  # ...and the human ask is still the HEAD of the brief. The marker is a trailing line
+  # precisely so it does not push the ask down: the first line is what the worker reads
+  # first and what the manifest shows in ASKED.
+  is "...with the ask still first"            "1" "$(head -1 "$BW/sent.wdisp" 2>/dev/null | grep -c '^Fix the parser' || true)"
+  is "...and the marker last"                 "1" "$(tail -1 "$BW/sent.wdisp" 2>/dev/null | grep -c '^brief-check:' || true)"
+  # The manifest and the counter keep measuring the ASK, not the ask plus our own footer,
+  # or the digest of a brief would never match the brief that was written.
+  # The manifest and the counter keep measuring the ASK, not the ask plus our own footer,
+  # or a digest of the brief would never match the brief that was written.
+  is "...but ASKED is the ask alone"          "0" \
+     "$(grep -c 'brief-check' "$BW/fleet/cfbrief.manifest.tsv" 2>/dev/null || true)"
+  # ...and EXACTLY the ask, compared against the brief that was written rather than against
+  # a threshold: the marker is ~140 characters, so a counter that had measured the
+  # augmented prompt would be obvious against a bound and is unmistakable against equality.
+  is "...and so is the counted length"        "$(printf '%s' "$BWASK" | wc -c | tr -d ' ')" \
+     "$(awk -F'\t' 'END{print $6}' "$BW/fleet/cfbrief.brief.tsv" 2>/dev/null)"
+
+  # ── the structural guard: this may not become a gate ──
+  # Every assertion above would still pass if someone added an `exit 1` to the end of the
+  # warning and a --force to get past it. The plan rejected exactly that, on the grounds
+  # that a gate built on a null feature is a gate built on nothing, so the refusal to
+  # refuse is pinned in the source rather than left to the reviewer of the next diff.
+  BWBLOCK="$(sed -n '/the brief is thin/,/brief.tsv/p' "$ROOT/bin/fleet-spawn")"
+  is "the warning block contains no exit"     "0" "$(printf '%s' "$BWBLOCK" | grep -cE '(^|[[:space:]])exit[[:space:]]' || true)"
+  is "...and there is no --force to add"      "0" "$(grep -c -- '--force' "$ROOT/bin/fleet-spawn" || true)"
+  rm -rf "$BW"
+else
+  skip "the brief warning" "git or tmux missing"
+fi
+
+# ── 5z2. the acknowledgement handshake: what the worker heard ────────────────
+# The manifest recorded what the LEAD asked and nothing recorded what the worker heard.
+# MEASURED: of 79 corrections that are about the agent rather than the code, 23 are "that
+# is not what I asked" — the largest of those kinds.
+#
+# A restatement ALONE was the first design and it was not enough: it makes disagreement
+# displayable, not preventable, because a worker can paraphrase the ask perfectly and
+# still build from a wrong assumption underneath it. So the ack carries the DECISIONS it
+# is working from, and the case with no other symptom — a worker proceeding from a
+# decision nobody made — is what fleet-worktrees has to report. Both directions: an ack
+# that names decisions must NOT print the marker, or the marker means nothing.
+group "fleet-ack records the worker half beside the lead half"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  AW="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$AW/proj" "$AW/fleet"
+  git init -q -b main "$AW/proj/repo" 2>/dev/null
+  git -C "$AW/proj/repo" config user.email t@t; git -C "$AW/proj/repo" config user.name t
+  : > "$AW/proj/repo/f"; git -C "$AW/proj/repo" add -A
+  git -C "$AW/proj/repo" commit -qm init 2>/dev/null
+  git -C "$AW/proj/repo" worktree add -q "$AW/proj/w1" -b feat/w1 2>/dev/null
+  git -C "$AW/proj/repo" worktree add -q "$AW/proj/w2" -b feat/w2 2>/dev/null
+  MF="$AW/fleet/cfack.manifest.tsv"
+  # w1: a normal spawn row. w2: a row written BEFORE these columns existed — four fields,
+  # which is what every manifest on disk holds today.
+  printf '%s\tw1\tfeat/w1\t%s\n' "$AW/proj/w1" 'build the per-document picker' >  "$MF"
+  printf '%s\tw2\tfeat/w2\t%s\n' "$AW/proj/w2" 'port the exporter'             >> "$MF"
+  ack() { ( cd "$AW/proj/w1" && CLAUDE_FLEET_DIR="$AW/fleet" env -u TMUX \
+              "$ROOT/bin/fleet-ack" -s cfack "$@" 2>&1 ); }
+  col() { awk -F'\t' -v w="$AW/proj/$1" -v c="$2" '$1==w{print $c; exit}' "$MF"; }
+
+  ACKOUT="$(ack 'add a template picker to the Documents step' --from 'UNIT=per document; RETRO=new drafts only')"
+  ACKRC=$?
+  is "an ack exits 0"                        "0" "$ACKRC"
+  is "...and records the restatement"        "add a template picker to the Documents step" "$(col w1 5)"
+  is "...and the decisions beside it"        "UNIT=per document; RETRO=new drafts only"    "$(col w1 6)"
+  # WHAT WAS ASKED IS NOT THE WORKER'S TO EDIT. A worker that could rewrite the ask could
+  # make any disagreement disappear, which is the one thing this column exists to prevent.
+  is "...and does NOT touch what was asked"  "build the per-document picker" "$(col w1 4)"
+  is "...leaving one row for that worktree"  "1" "$(awk -F'\t' -v w="$AW/proj/w1" '$1==w' "$MF" | wc -l | tr -d ' ')"
+  is "...and the other worktree untouched"   "port the exporter" "$(col w2 4)"
+  # THE MARKER, anchored the same way and for the same reason as brief-check above: the
+  # evaluator reads a POSITION. The decisions ride on that line rather than a line below,
+  # because the claim being made is not that the worker restated something but what it is
+  # building FROM.
+  is "...and prints the understood marker"   "1" "$(printf '%s' "$ACKOUT" | grep -c '^understood: ' || true)"
+  is "...naming the decisions on that line"  "1" \
+     "$(printf '%s' "$ACKOUT" | grep -c '^understood: .* · from: UNIT=per document' || true)"
+  is "...beside what was asked"              "1" "$(printf '%s' "$ACKOUT" | grep -c '^asked: ' || true)"
+
+  # ── an ack that names NO decision is recorded AS naming none ──
+  # It is not upgraded, not defaulted, and not refused. A signal that quietly makes itself
+  # look compliant is the failure this whole pair of features exists to expose.
+  ACKOUT="$(ack 'add a template picker' )"; ACKRC=$?
+  is "an ack with no decisions still works"  "0" "$ACKRC"
+  is "...and leaves the decisions empty"     "" "$(col w1 6)"
+  is "...but says so, plainly"               "1" "$(printf '%s' "$ACKOUT" | grep -c 'none named' || true)"
+  # ON THE MARKER LINE ITSELF, not only in the prose below it. An omitted field and a
+  # deliberate "none" are the same bytes to a reader and are not the same event, so the
+  # marker states it rather than leaving the field off.
+  is "...on the marker line itself"          "1" \
+     "$(printf '%s' "$ACKOUT" | grep -c '^understood: .* · from: (none named)' || true)"
+
+  # ONE LINE MEANS ONE LINE: a pasted paragraph would otherwise put a newline into a
+  # newline-delimited file and a tab into a tab-delimited one, shifting every later field
+  # of every later row — the failure CLAUDE.md names twice.
+  ack "$(printf 'first line\nsecond\tline')" --from "$(printf 'a\nb')" >/dev/null 2>&1
+  is "a multi-line ack is flattened"         "1" "$(awk -F'\t' -v w="$AW/proj/w1" '$1==w' "$MF" | wc -l | tr -d ' ')"
+  is "...into exactly six fields"            "6" "$(awk -F'\t' -v w="$AW/proj/w1" '$1==w{print NF; exit}' "$MF")"
+
+  # ── the usage error, which is an argument error and not a gate ──
+  AUOUT="$( ( cd "$AW/proj/w1" && CLAUDE_FLEET_DIR="$AW/fleet" env -u TMUX \
+                "$ROOT/bin/fleet-ack" -s cfack 2>&1 ) )"; AURC=$?
+  is "an ack with no restatement is usage"   "1" "$AURC"
+  # PRESENCE, not a count: the usage text names --from on three lines (the flag, the
+  # worked example, and the sentence explaining it), so pinning a number would assert the
+  # prose rather than the behaviour and go red on any rewording of the help.
+  is "...and shows how to write one"         "1" \
+     "$([ "$(printf '%s' "$AUOUT" | grep -c -- '--from' || true)" -ge 1 ] && echo 1 || echo 0)"
+  is "...under a usage heading"              "1" "$(printf '%s' "$AUOUT" | grep -c 'fleet-ack: usage' || true)"
+
+  # ── what a lead actually reads ──
+  # fleet-worktrees blanks both columns for a worktree with no live session (the manifest
+  # then describes a session that is gone), so the row only exists to be read while a
+  # session is sitting in it.
+  printf '%s\tw1\tfeat/w1\t%s\t%s\t%s\n' "$AW/proj/w1" 'build the per-document picker' \
+     'add a template picker to the Documents step' 'UNIT=per document' > "$MF"
+  printf '%s\tw2\tfeat/w2\t%s\n' "$AW/proj/w2" 'port the exporter' >> "$MF"
+  tmux -L cfack kill-server 2>/dev/null
+  tmux -L cfack new-session -d -s w1 -c "$AW/proj/w1" 'sleep 60' 2>/dev/null
+  tmux -L cfack new-session -d -s w2 -c "$AW/proj/w2" 'sleep 60' 2>/dev/null
+  sleep 0.5
+  WTOUT="$( cd "$AW/proj/repo" && CLAUDE_FLEET_DIR="$AW/fleet" env -u TMUX \
+              "$ROOT/bin/fleet-worktrees" -s cfack 2>&1 )"
+  is "the header shows ASKED"                "1" "$(printf '%s' "$WTOUT" | grep -c 'ASKED' || true)"
+  is "...and UNDERSTOOD beside it"           "1" "$(printf '%s' "$WTOUT" | grep -c 'UNDERSTOOD' || true)"
+  is "...and TASK is gone"                   "0" "$(printf '%s' "$WTOUT" | grep -c 'TASK' || true)"
+  is "an acked worktree shows both"          "1" \
+     "$(printf '%s' "$WTOUT" | grep -c 'build the per-document picker.*add a template picker' || true)"
+  # RETROACTIVITY: a row written before these columns existed has no fifth field. It must
+  # read as blank — an old entry is not a disagreement — and it must not break the table.
+  is "a pre-existing 4-column row is blank"  "1" \
+     "$(printf '%s' "$WTOUT" | grep -c 'port the exporter *-' || true)"
+  is "...and the table still lists both"     "2" \
+     "$(printf '%s' "$WTOUT" | grep -cE '^(w1|w2) ' || true)"
+
+  # ── the marker, in BOTH directions ──
+  # An ack that names decisions must NOT print "(no decisions)", or the marker is
+  # decoration; an ack that names none must, or the case it exists for is invisible.
+  is "an ack with decisions has no marker"   "0" "$(printf '%s' "$WTOUT" | grep -c 'no decisions' || true)"
+  printf '%s\tw1\tfeat/w1\t%s\t%s\t\n' "$AW/proj/w1" 'build the per-document picker' \
+     'add a template picker to the Documents step' > "$MF"
+  WTOUT2="$( cd "$AW/proj/repo" && CLAUDE_FLEET_DIR="$AW/fleet" env -u TMUX \
+               "$ROOT/bin/fleet-worktrees" -s cfack 2>&1 )"
+  is "an ack with none is marked as such"    "1" "$(printf '%s' "$WTOUT2" | grep -c '(no decisions)' || true)"
+  # It prints FIRST, so a long restatement cannot truncate the marker away — the column is
+  # cut at a fixed width and the absence is the part that must survive the cut.
+  is "...and the marker leads the column"    "1" \
+     "$(printf '%s' "$WTOUT2" | grep -c '(no decisions) add a template picker' || true)"
+  tmux -L cfack kill-server 2>/dev/null
+  rm -rf "$AW"
+else
+  skip "the acknowledgement handshake" "git or tmux missing"
+fi
 
 # ── 6a. the phone client (web/) ───────────────────────────────────────────────
 # The PWA renders the SAME cards as the TUI, from the §4 JSON. Two helpers do the work
