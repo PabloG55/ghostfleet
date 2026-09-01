@@ -2,7 +2,8 @@
 # ghostfleet installer.
 # - STAGES the runtime out of the repo into a non-TCC dir (see below), then:
 # - symlinks bin/ghostfleet + bin/claude-here (and helpers) onto your PATH
-# - wires hooks/fleet-event.sh into ~/.claude/settings.json (backing it up first)
+# - wires hooks/fleet-event.sh into ~/.claude/settings.json (backing it up first), plus
+#   hooks/fleet-guard.sh on PreToolUse and hooks/fleet-observe.sh alongside it on Stop
 # - registers the fleet MCP server into <config>/.claude.json (via `claude mcp add`;
 #   Claude does NOT read MCP from settings.json)
 # - links the example zellij layout if you use zellij
@@ -223,6 +224,7 @@ chmod +x "$FLEET_HOME"/hooks/*.sh "$FLEET_HOME"/bin/* 2>/dev/null || true
 # Everything below points at the STAGED runtime, never the repo.
 HOOK="$FLEET_HOME/hooks/fleet-event.sh"
 GUARD="$FLEET_HOME/hooks/fleet-guard.sh"
+OBSERVE="$FLEET_HOME/hooks/fleet-observe.sh"
 
 mkdir -p "$BIN_DIR"
 CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read
@@ -301,10 +303,20 @@ wire_hooks() {
   tmp="$(mktemp)"
   # Hooks belong in settings.json; MCP does NOT (see register_mcp). Wire the hooks
   # and strip any stale ghostfleet MCP entry an older installer wrote here.
-  jq --arg hook "$HOOK" --arg guard "$GUARD" '
+  jq --arg hook "$HOOK" --arg guard "$GUARD" --arg observe "$OBSERVE" '
     def entry: [ { matcher: "", hooks: [ { type: "command", command: $hook } ] } ];
+    # STOP CARRIES TWO OF OURS: the status/notify hook, and the observation enforcer that
+    # refuses a lead done-claim on a turn that changed a surface and never looked at it.
+    #   ORDER, and it is deliberate. fleet-event.sh runs FIRST because it always exits 0 and
+    # its whole job is to record state; fleet-observe.sh runs second because it may exit 2.
+    # A refused Stop therefore leaves the status file briefly saying `ready` while the session
+    # works on — harmless, and checked: the worker->inbox block in fleet-event.sh is gated on
+    # the slot NOT being master, and the enforcer only ever fires for master, so a refused
+    # stop cannot emit a false `done` to anybody.
+    def stopentry: [ { matcher: "", hooks: [ { type: "command", command: $hook },
+                                             { type: "command", command: $observe } ] } ];
     .hooks = ((.hooks // {}) + {
-      Notification: entry, Stop: entry, UserPromptSubmit: entry,
+      Notification: entry, Stop: stopentry, UserPromptSubmit: entry,
       SessionStart: entry, SessionEnd: entry })
     # PreToolUse is SHARED GROUND — unlike the five above, other tools legitimately
     # live here, so ours is APPENDED, never assigned over the top. Stanzas pointing at
