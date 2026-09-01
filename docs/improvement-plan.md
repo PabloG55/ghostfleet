@@ -1,0 +1,236 @@
+# Improvement plan — v2, after critique
+
+**The goal, in the words it was asked in:** something that makes the master smart enough to
+ask questions back, understand all the problems, and send the work to agents accordingly.
+
+**This is a rewrite.** v1 was reviewed by an independent critic that did not share its author's
+context (`docs/plan-critique.md`, codex/gpt-5.6-terra), and the critique was largely upheld.
+What changed and why is recorded in §4 rather than quietly absorbed, because the reasons are
+more useful than the conclusions.
+
+The single most damaging finding, stated in the critic's words: v1 rejected a brief-quality
+gate on prompt features because six such features show no measurable effect — and then made
+`Done when:` mandatory, **which is one of those six features.** *"Calling it 'structure' does
+not remove the conflict."* That is correct, and it is the kind of contradiction an author
+cannot see in their own plan.
+
+---
+
+## 0. What is already in force, so this is not read as starting from zero
+
+- a ten-clause contract in every session's system prompt, delivered whole (3589 chars,
+  verified by capturing the argument rather than grepping the file — it was silently truncated
+  to 673 for a day while twenty-two green assertions failed to notice)
+- `fleet-look` — render a URL, page, PDF or image to a PNG the agent can read; `--tree` for the
+  accessibility tree; golden comparison with a pixel-fraction threshold and an
+  expected/actual/diff triple written on failure
+- a `PreToolUse` guard refusing dispatch-by-subagent from a lead
+- a dispatch log: what was sent, its length and digest, never its body
+
+---
+
+## 1. The plan
+
+### #1 — Fixture feasibility spike. Find out if the harness is even possible
+
+**First, and it may end here.** Stand up a loopback HTTP server speaking the model wire
+protocol, point a real session at it, and answer one question: **can Claude Code be driven
+this way at all, with the shipped prompt asset and real hooks?** If it cannot, stop — and
+several later items lose their foundation, which is worth knowing in a day rather than after
+building on them.
+
+**Why this moved from last to first.** v1 argued a fixture server replaces the model, so it
+cannot show that an agent complied, only that surrounding machinery responded — and demoted it
+to seventh. The mechanism claim is still true. The ordering was wrong: a Stop-hook enforcer is
+being planned against a hook API nobody has verified can see turn-scoped output. Building the
+enforcer first is building on an assumption; the spike is how the assumption gets tested, and
+it is cheap.
+
+**Verified in gentle-ai's code, not just their docs:** seven `httptest.NewServer` sites in
+`e2e/organicruntime/`, an OpenAI-compatible provider pointed at loopback with the literal API
+key `fixture`, no agent code patched. The prompt asset is read from the same file shipped to
+users, so there is no test-only copy to drift.
+
+**Cost.** 1–2 days for the spike. `node:http`, no dependency.
+
+**What it does NOT do.** It cannot prove an agent complied with a clause — the model's
+decisions are the script. It proves the machinery around them.
+
+---
+
+### #2 — Baseline meter, and a pre-registered sample, before anything is changed
+
+A reader over `~/.claude/projects/` emitting, per session and per branch: tool calls per turn,
+whether a browser was opened before a done-claim, turns-to-done, seconds spent sleeping inside
+a turn, corrections per distinct file touched.
+
+**Two rules the critique insisted on and v1 did not have.**
+
+- **Mechanically observable events stay separate from hand-labelled corrections.** A sleep count
+  is a fact; "this was a correction" is a judgment. Mixing them produces a number nobody can
+  audit.
+- **The sample is pre-registered, and it is drawn BEFORE the interventions ship.** v1's
+  falsification compared a future sample against past numbers on a moving corpus with no
+  control. That cannot attribute a change to a cause. State the cohort, the protocol and the
+  exclusions in advance — including that the sessions which produced this plan are outliers and
+  are excluded by name.
+
+**Why it is second rather than sixth.** Everything below is judged against it. Shipping the
+interventions first and measuring afterwards is what makes a result unfalsifiable.
+
+**MEASURED, and all of it retrospectively by hand — which is the argument for automating it:**
+4 of 172 build turns that changed a screen file ever opened a browser; one window carried 173
+tool calls of which 28 were sleeps totalling ~16,000 seconds, 32% of that session's API calls;
+median 4 turns for sessions with 0–1 corrections against 63 for the 5+ group; 0.009 corrections
+per distinct file touched against 0.116.
+
+**Cost.** 1–2 days. No dependency. Privacy boundary stated explicitly: counts and digests, never
+message bodies — the same rule the dispatch log already follows.
+
+---
+
+### #3 — A closed-loop brief protocol. **Warning-only. Not a gate.**
+
+Before dispatch, the lead runs the ask against the eight extraction axes and puts the
+**unanswered material ones** back as a numbered list. `fleet-spawn` **warns** when a brief has
+no done-criterion or reads as several asks. It does not refuse.
+
+**Why warning and not refusing — this is the correction that matters most.** v1 made it a hard
+gate and justified it as gating on *structure* rather than on *quality*. That distinction does
+not survive: `Done when:` is literally one of the six prompt features measured at no effect
+(length, naming a file, naming a route, stating a done-criterion, carrying a reference image,
+human-vs-lead authorship — all in a 20–30% band with fully overlapping intervals). A gate built
+on a null feature is a gate built on nothing.
+
+**And its named failure mode is this repo's own dominant one.** In the critic's words:
+*"performative compliance: the lead manufactures one deliverable and a vacuous done line, the
+worker echoes it, every visible field looks disciplined, and the human's missing choice remains
+missing."* `Done when: implemented` passes any parser. A signal that reports a state other than
+the one it is in is exactly what 41% of this repo's PRs exist to fix, and a hard gate here
+would have manufactured a new one.
+
+**What the evidence actually supports.** The two-session contrast — *"build a per-document
+signature-template picker on the envelope builder's Documents step"* at 2 turns and 0
+corrections, against *"three items … item 3 is research first"* at 67 turns and 26 — is n=2 and
+confounded on its face: it does not separate bundling from scope, difficulty, task type or human
+availability. That 17 clean sessions bundled no multiple asks is a conditional association. Both
+are reasons to **warn and count**, not to block.
+
+**The axes**, each derived from a late requirement that actually arrived: the **unit** (per line,
+per document, per policy) · **parity** with an existing surface · **reuse** rather than recreate ·
+the **gate** before advancing · **completeness** of a list · **eligibility and exit** ·
+**retroactivity** · and for a rendered artifact, **is there an existing one to match**.
+
+**MEASURED.** 36 of 163 screen-attributed corrections were requirements stated for the first time
+mid-flight. By knowability: 5 unknowable until the screen existed, 11 implied and never written
+down, 19 already known to the human and not said — **30 of 36 addressable.** They arrived at
+positions #3, #4, #5, #7, #15 of runs that took 24, 34 and 42 corrections; one was restated at
+#39 and again at #45 of 67.
+
+**Not "ask more questions".** End-of-turn asking is saturated at **25.6% of turns** with a
+statistically identical rework rate. The axes are specific and answerable in seconds.
+
+**Cost.** Hours for the clause. ~1 day for the warning and its counters.
+
+**Ceiling, stated where a reader would otherwise oversell it.** The axes make the lead *ask*
+whether grouping is per-line or per-document. They do not supply the answer. The 19 requirements
+held and unsaid become questions, not correct guesses.
+
+---
+
+### #4 — Worker acknowledgement handshake, tied to resolved decisions
+
+The worker's first act records its one-line restatement **and which of the lead's stated
+decisions it is working from**, into the manifest. `fleet-worktrees` shows ASKED beside
+UNDERSTOOD.
+
+**Why "tied to resolved decisions" and not just a restatement.** v1 proposed the restatement
+alone; the critique's objection is that it *"makes disagreement displayable, not preventable"* —
+a worker can restate correctly and build something else, and nothing closes the loop. Binding
+the acknowledgement to the specific answers from #3 gives the pair something to disagree
+*about*, and makes a worker proceeding without a resolved decision visible.
+
+**MEASURED.** 23 of 79 corrections that are about the agent rather than the code are *"that is
+not what I asked / you went the wrong way"* — the largest of those kinds. The manifest records
+what the lead asked and nothing records what the worker heard.
+
+**Cost.** ~half a day.
+
+---
+
+### #5 — Evaluate, then promote only demonstrated failures to hard gates
+
+Against the #2 baseline, measure: false refusals, bypass rate (how often `Done when:` is
+vacuous), added latency per dispatch, and rework. **Only a failure mode that shows up here earns
+a hard gate.**
+
+This is the item v1 did not have at all, and its absence is why v1 could ship a gate on a
+correlation. It is also the honest answer to *"did any of this work"*.
+
+---
+
+### #6 — Stop-hook enforcer — **only if #1 proved turn-scoped behaviour**
+
+A `Stop` hook reads the turn's own output and refuses a done-report naming no observation.
+Conditional on the spike: if Claude Code cannot expose turn-scoped output to a hook, this item
+does not exist and should be struck rather than attempted.
+
+---
+
+### #7 — Doctor envelope, when the reaper is actually built
+
+`reason_code`, `safe_next_step`, and `--plan` / `--dry-run` / `--apply` on destructive commands.
+Adopted as a shape from `engram`, not a dependency.
+
+**Deferred, not dropped, and the reason is a correction.** v1 ranked this fourth on the argument
+that it must exist *before* the docker-stack reaper. That still holds — but no reaper exists yet,
+and a convention with nothing applying it is documentation. It lands with the reaper.
+
+Its value is concrete: today `fleet-stop --reclaim` printed *"kept the worktree (see the reason
+above)"* and the reason had scrolled off. With the envelope that is
+`reason_code: session_gone_path_unknown` plus the exact command.
+
+---
+
+## 2. Dropped
+
+**`Derivation` (`measured | proxy | unobservable` as a type, from gentle-ai).** v1 ranked it
+fifth. It is a good shape and it does not earn a place yet: nothing consumes the field until #2
+exists, and #2 can emit its own honest nulls without adopting a type system for them. Revisit if
+#2's output starts being read by something that could confuse a proxy for a measurement.
+
+---
+
+## 3. Rejected — and three of v1's rejections were wrong
+
+| | status |
+|---|---|
+| `engram` as an installed memory system | **rejected on cost** — a binary and a daemon on a port. But v1 overreached: *"do not install engram"* is supportable, *"this memory failure cannot exist"* is not. A PR does not retain unanswered questions, rejected approaches, or lead context. The gap is real; the product is not the answer |
+| `engram`'s private-redaction | rejected — strictly weaker than the digest-based name sweep already here |
+| `gentle-ai` as configurator/installer | rejected — inverts ownership of `install.sh` |
+| RDD, receipts, lifecycle gates | rejected — branch protection already gates |
+| personas and output styles | rejected — asserted where this repo is measured |
+| the SDD artifact chain | **v1's rejection was wrong in inference.** A rate for generic end-of-turn questions cannot refute a *conditional* lightweight decision record used only where ambiguity is material. Reject the large artifact chain; do not reject every durable clarification artifact. What survives is folded into #3 |
+| a council or debate layer | **v1 over-rejected.** The token result rules out a general debate layer, not one cheap independent pre-dispatch critic checking a resolved brief against known code. That is a candidate for the #5 experiment, not a settled rejection — and this document is the evidence, since an independent critic just found a contradiction its author could not |
+| a hard brief-quality gate | rejected **as a gate**, kept as a warning in #3, for the reason in #3 |
+
+---
+
+## 4. What changed from v1, and why
+
+| | v1 | v2 |
+|---|---|---|
+| the brief gate | hard refusal, ranked #1, justified as "structure not features" | **warning only**, ranked #3 — `Done when:` *is* one of the six null features |
+| fixture server | ranked #7, on the argument that it cannot prove compliance | **ranked #1 as a feasibility spike** — the enforcer below it rests on an unverified hook API |
+| the meter | ranked #6, "measures rather than treats" | **ranked #2** — a baseline drawn *before* the change, or nothing below it is attributable |
+| falsification | future sample vs past numbers | **pre-registered cohort, stated exclusions, mechanical events kept apart from labels** |
+| restatement | worker echoes the ask | **tied to resolved decisions** — echoing displays disagreement without preventing it |
+| an evaluation step | absent | **#5, and its absence is why v1 could gate on a correlation** |
+| `Derivation` | ranked #5 | **dropped** |
+| doctor envelope | ranked #4, "before the reaper" | **deferred to the reaper** |
+| council / SDD / memory rejections | stated as settled | **three narrowed or reopened** |
+
+**One thing v1 got right and is worth keeping:** a clause is read once and decays — this corpus
+holds an agent's own *"Nobody has opened the UI. I've said this four times and it's still
+true."* That argument is why #3 still ships a mechanism rather than a paragraph. It is only the
+strength of that mechanism that was wrong.
