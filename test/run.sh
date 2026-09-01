@@ -3578,35 +3578,55 @@ if command -v tmux >/dev/null 2>&1; then
   # session. Assert the name resolves to ITSELF — has-session cannot catch this.
   is "...and the name resolves to itself" "_term-api-2" \
      "$(tmux -L cftabt display-message -p -t _term-api-2 '#{session_name}' 2>/dev/null)"
-  # AND THE ASSERTION ABOVE HAS TEETH, because a + name does NOT resolve to itself.
+  # AND THE ASSERTION ABOVE NEEDS TEETH, because on its own it cannot fail for the reason
+  # it exists: a name resolving to itself is unremarkable unless something shows what the
+  # alternative does.
   #
-  # DO NOT RESTORE the assertion that used to stand here — "a + name resolves
-  # ELSEWHERE", expecting 0. It went red on untouched main, and not because anything
-  # regressed: what a + target answers is version-dependent. `+` is not part of a name,
-  # it is a target expression, and it is answered relative to whatever session tmux
-  # considers CURRENT. tmux 3.7b answers the current session itself, and the session
-  # created last is current — so `-t '+term-api-2'`, measured right after creating
-  # `+term-api-2`, answered `+term-api-2` and the old expectation inverted. Older tmux
-  # answers the session AFTER the current one, which lands back on `+term-api-2` just as
-  # easily given the wrong ordering. Neither spelling is something to assert. The `_`
-  # prefix in bin/fleet-tab stays regardless: the hazard is live on the tmux other people
-  # are running, and this repo has it written down as one.
+  # TWO PHRASINGS HAVE BEEN TRIED HERE AND BOTH WERE UNSTABLE, so do not restore either.
+  # The first asserted that a + name "resolves ELSEWHERE"; the second, that its answer
+  # MOVES when another session is created. Both assert on which session a + target lands
+  # on, and that is decided relative to whatever tmux considers the CURRENT session —
+  # which, with no client attached, is whatever the server last used. Nothing in a test
+  # sets it, so the row passes or fails on scheduling.
+  #   MEASURED, chasing exactly that: the "moved" phrasing was green here eight runs out
+  # of eight and red on another machine running the SAME tmux 3.7b, expecting `moved` and
+  # getting `same`. A red that is indistinguishable from a real one, on a suite whose rule
+  # is to trust a test only after watching it go red, is worse than no row at all.
+  #   The drift is easy to see once it is looked for: `-t +term-api-2` answered
+  # `+term-api-2` at one moment and `zz-elsewhere` a moment later, with the session of
+  # that name never touched in between.
   #
-  # What IS the same on every tmux, and IS the hazard, is that the answer MOVES when some
-  # other session becomes current — while the session of that name is not touched at all.
-  # A name does not do that. So make another session current and measure both names
-  # across it: the + one drifts, the _ one does not. The second assertion is the control;
-  # without it a tmux that answered the current session for EVERY target would satisfy
-  # the first one and the `_` fix would be worth nothing.
-  tmux -L cftabt new-session -d -s '+term-api-2' -c "$TB/api-3" 'sleep 60' 2>/dev/null
+  # WHAT IS STABLE IS THE HAZARD ITSELF, and it needs no notion of current, no ordering,
+  # and no second measurement across time: a + target does not consult the rest of the
+  # string at all. So two DIFFERENT sessions whose names both begin with + answer the SAME
+  # session, while two whose names begin with _ each answer themselves. That is precisely
+  # what breaks every status reader here — they target a bare -t "$name", so with + names
+  # they would read one tab while believing they read another.
+  #
+  # MEASURED on tmux 3.4 (built from source for this) and on 3.7b, byte-identical on both:
+  #     -t +term-api-2 -> +term-api-3      -t +term-api-3 -> +term-api-3     (one session)
+  #     -t _term-api-2 -> _term-api-2      -t _term-api-3 -> _term-api-3     (two)
+  # and `has-session -t +term-api-2` says yes on both, which is why has-session never
+  # caught this and why the check has to be a target-RESOLVING command.
+  #
+  # THE PREFIX IS READ BACK FROM WHAT fleet-tab ACTUALLY NAMED THE TAB rather than
+  # hardcoded, because the row exists to protect that choice: reverting bin/fleet-tab to
+  # `+` has to make these two fail, and against a hardcoded `_term-…` they would instead
+  # pass while measuring a session fleet-tab never made.
+  tabs_now="$(tmux -L cftabt list-sessions -F '#{session_name}' 2>/dev/null)"
+  tab2="$(grep -E 'term-api-2$' <<<"$tabs_now" | sed -n '1p')"
+  sib="${tab2%term-api-2}term-probe"
+  tmux -L cftabt new-session -d -s "$sib" -c "$TB/api-3" 'sleep 60' 2>/dev/null
   resolves() { tmux -L cftabt display-message -p -t "$1" '#{session_name}' 2>/dev/null; }
-  was_plus="$(resolves '+term-api-2')"; was_under="$(resolves _term-api-2)"
-  tmux -L cftabt new-session -d -s zz-elsewhere -c "$TB/api-3" 'sleep 60' 2>/dev/null
-  is "...unlike a + name, which answers whoever is current" "moved" \
-     "$([ "$was_plus" = "$(resolves '+term-api-2')" ] && echo same || echo moved)"
-  is "...while the _ name keeps answering itself"           "same" \
-     "$([ "$was_under" = "$(resolves _term-api-2)" ] && echo same || echo moved)"
-  tmux -L cftabt kill-session -t '=zz-elsewhere' 2>/dev/null
+  is "...and a second tab is a SECOND session" "different" \
+     "$([ "$(resolves "$tab2")" = "$(resolves "$sib")" ] && echo same || echo different)"
+  # ...each answering its own name, which rules out the other way two answers can differ:
+  # both being wrong.
+  is "...each answering its own name"          "$tab2|$sib" \
+     "$(resolves "$tab2")|$(resolves "$sib")"
+  # `=` forces an exact name match, so this kills the probe even when its name is a target
+  # expression; a bare -t would kill whichever session the expression happens to name.
+  tmux -L cftabt kill-session -t "=$sib" 2>/dev/null
 
   ft term "$TSOCK" "$TB/api-2" api-2
   is "pressing it twice REUSES the tab" "1" "$(nsess '^_term-api-2$')"
