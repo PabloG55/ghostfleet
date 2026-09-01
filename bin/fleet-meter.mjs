@@ -228,6 +228,20 @@ for (const k of ['sleep', 'browser', 'file_touched', 'done_claim', 'correction']
 //     prompt   the text of a human turn      — #3's verdict carried into the dispatch
 //     output   a tool_result's text          — what a command printed
 //     command  a Bash/Monitor command string — the agent invoking something
+//     hook_stderr  the stderr of a hook_success attachment on a Stop event
+//
+// THE FOURTH POSITION IS STRONGER THAN THE OTHER THREE, and it is worth saying why rather
+// than treating it as one more entry. `prompt`, `output` and `command` all sit somewhere an
+// agent's own text can reach: an agent can type `observe-check: warn` into a prompt, echo it
+// from a command, or have it appear in output it produced. Each is therefore only as good as
+// its anchoring, which is why the anchoring exists. A hook_success attachment is different in
+// kind — the AGENT DOES NOT WRITE THAT RECORD. The harness writes it, from the hook's own
+// stderr, after running the hook itself. No prose can forge one, so a marker in that position
+// needs no argument about whether the machinery really ran.
+//   Requested by #6, which cannot be measured without it, and which stated the dependency
+// rather than assuming this file would guess at it. The two patterns below are copied from
+// docs/improvement-plan.md on that branch rather than retyped, so a transcription slip cannot
+// quietly become the contract.
 // A worker INVOKES fleet-ack, so `command`. fleet-ack PRINTS its acknowledgement, so
 // `output`. Talking about either in prose is neither, and no longer counts.
 //   ANCHORING DOES THE OTHER HALF. Every pattern is pinned to the start of a line and
@@ -257,6 +271,16 @@ const TREATMENT = {
     of: '#4', level: 'fired', where: ['output'],
     contract: "fleet-ack must print a line beginning 'understood:' naming which of the lead's resolved decisions the worker is working from",
     re: /(?:^|\n)[^\S\n]*understood:[ \t]*\S/i,
+  },
+  observe_check_in_force: {
+    of: '#6', level: 'in force', where: ['hook_stderr'],
+    contract: "the Stop hook must print a line beginning 'observe-check: ok' or 'observe-check: warn' to its stderr on every turn it could judge, and nothing at all on a turn it could not",
+    re: /(?:^|\n)[^\S\n]*observe-check:[ \t]*(?:ok|warn)\b/i,
+  },
+  observe_check_fired: {
+    of: '#6', level: 'fired', where: ['hook_stderr'],
+    contract: "when a renderable surface changed and nothing looked, that line must read 'observe-check: warn'",
+    re: /(?:^|\n)[^\S\n]*observe-check:[ \t]*warn\b/i,
   },
 };
 for (const [k, v] of Object.entries(TREATMENT)) { v.pattern = String(v.re); v.digest = id(k + '|' + v.pattern + '|' + v.where.join(',')); }
@@ -472,6 +496,19 @@ async function readSession(file) {
       continue;
     }
 
+    // The fourth position. Matched on the RECORD's own fields — attachment.type and
+    // hookEvent — and not merely on finding the string somewhere in an attachment, because
+    // it is those fields that make the position unforgeable. A hook_additional_context
+    // attachment, or a hook_success one for some other event, is a different thing and does
+    // not count. The stderr is passed verbatim: strip() exists to remove wrappers the harness
+    // puts around AGENT text, and this is a program's own output.
+    if (r.type === 'attachment') {
+      const a = r.attachment;
+      if (cur && a && a.type === 'hook_success' && a.hookEvent === 'Stop' && typeof a.stderr === 'string')
+        markTreatment(cur, a.stderr, 'hook_stderr');
+      continue;
+    }
+
     if (r.type !== 'assistant' || !cur) continue;
     if (r.timestamp) cur.ended = r.timestamp;
     const content = r.message?.content;
@@ -625,6 +662,13 @@ function readBaseline(file) {
 }
 
 // ── item #5: the four measurements ──────────────────────────────────────────
+// THE COHORT IS #3 AND #4, AND #6 IS DELIBERATELY NOT IN IT. The four measurements above are
+// about the brief-check and the acknowledgement handshake: false refusals and bypass are
+// rates over briefs that #3 judged. A session treated only by #6's Stop hook has no brief
+// -check at all, so folding it in here would put it in the denominator of a rate it cannot
+// contribute a numerator to, and every one of those rates would fall for a reason that has
+// nothing to do with the thing being measured. #6's markers are declared, contracted and
+// counted — see treatment_markers — and when #6 wants a verdict it gets its own cohort.
 const isTreated = (sess) => sess.turns.some((t) => t.treated.has('brief_check_in_force') || t.treated.has('ack_in_force'));
 
 const latencies = (sessions) => sessions.flatMap((s) => s.turns

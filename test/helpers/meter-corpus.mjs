@@ -145,6 +145,47 @@ fs.writeFileSync(path.join(DIR, 'baseline-empty.json'), JSON.stringify({
                  labelled: { columns: ['id', 'turns_to_done'], rows: [] } },
 }, null, 2));
 
+// ── the fourth position: a hook's own stderr ───────────────────────────────
+// The record the harness writes after running a Stop hook, which is what makes this position
+// unforgeable: the agent does not author it. Three sessions where the check objected and two
+// where it ran and had nothing to say, so `in force` and `fired` are distinguishable — a
+// cohort defined by "fired" would contain only turns the check disliked.
+const hook = path.join(DIR, 'hook', 'acme-web-proj');
+fs.mkdirSync(hook, { recursive: true });
+const hookRec = (sess, br, at, atype, event, stderr) => JSON.stringify({
+  type: 'attachment', isSidechain: false, gitBranch: br, sessionId: sess, timestamp: iso(at),
+  attachment: { type: atype, hookName: 'observe-check', hookEvent: event, toolUseID: null,
+                content: '', stdout: '', stderr, exitCode: 0, command: 'hooks/fleet-event.sh', durationMs: 12 },
+});
+for (let i = 0; i < 5; i++) {
+  const sess = `meter-eval-h${String(i).padStart(3, '0')}`;
+  const line = i < 3 ? 'observe-check: warn surfaces=acme-web/app.css looked=0'
+                     : 'observe-check: ok   surfaces=2 looked=1';
+  const L = turn({ sess, br: 'acme-web', at: 0, gap: TREATED_GAP,
+    prompt: 'restyle the composer', cmd: 'echo edit', out: 'ok', say: 'Working on it.' });
+  L.push(hookRec(sess, 'acme-web', 20, 'hook_success', 'Stop', line + '\n'));
+  fs.writeFileSync(path.join(hook, `${sess}.jsonl`), L.join('\n') + '\n');
+}
+
+// ── the same line in a record that is NOT the one the contract names ───────
+// A position is the record's own fields, not a string found somewhere near them. The line
+// here is byte-identical to the one above; only `attachment.type` and `hookEvent` differ, and
+// both must come out untreated. Without this the position check is just a string search
+// wearing a longer name, and a hook_additional_context attachment — which an agent CAN
+// influence, since it is fed back into the turn — would count as proof the machinery ran.
+const hookwrong = path.join(DIR, 'hookwrong', 'acme-web-proj');
+fs.mkdirSync(hookwrong, { recursive: true });
+const WARN = 'observe-check: warn surfaces=acme-web/app.css looked=0';
+for (const [i, [atype, event]] of [['hook_additional_context', 'Stop'],
+                                   ['hook_success', 'PostToolUse'],
+                                   ['hook_success', 'UserPromptSubmit']].entries()) {
+  const sess = `meter-eval-x${String(i).padStart(3, '0')}`;
+  const L = turn({ sess, br: 'acme-web', at: 0, gap: TREATED_GAP,
+    prompt: 'restyle the composer', cmd: 'echo edit', out: 'ok', say: 'Working on it.' });
+  L.push(hookRec(sess, 'acme-web', 20, atype, event, WARN + '\n'));
+  fs.writeFileSync(path.join(hookwrong, `${sess}.jsonl`), L.join('\n') + '\n');
+}
+
 // ── the corpus that only TALKS about the markers ───────────────────────────
 // This is the failing direction for the position rule, and it is not hypothetical: the
 // evaluator's first run classified a session as treated because the word `fleet-ack`
@@ -161,11 +202,11 @@ for (let i = 0; i < 4; i++) {
   const sess = `meter-eval-p${String(i).padStart(3, '0')}`;
   fs.writeFileSync(path.join(prose, `${sess}.jsonl`), turn({
     sess, br: 'acme-web', at: 0, gap: TREATED_GAP,
-    prompt: 'add a brief-check: line to fleet-spawn, and make fleet-ack print understood: when it records the restatement',
-    cmd: `grep -n 'fleet-ack' bin/fleet-spawn && echo "prints understood: later"`,
-    out: 'the contract says brief-check: ok or brief-check: warn, and fleet-ack prints understood:',
+    prompt: 'add a brief-check: line to fleet-spawn, make fleet-ack print understood: when it records the restatement, and have the Stop hook emit observe-check: warn when nothing looked',
+    cmd: `grep -n 'fleet-ack' bin/fleet-spawn && echo "prints understood: later, plus observe-check: warn"`,
+    out: 'the contract says brief-check: ok or brief-check: warn, fleet-ack prints understood:, and the hook prints observe-check: warn',
     say: 'Working on it.',
   }).join('\n') + '\n');
 }
 
-console.log(`treated ${N_TREATED} control ${N_CONTROL} prose 4 -> ${proj}`);
+console.log(`treated ${N_TREATED} control ${N_CONTROL} hook 5 hookwrong 3 prose 4 -> ${proj}`);

@@ -7986,7 +7986,7 @@ if command -v node >/dev/null 2>&1; then
   is "eval: prose verdict"            "false"  "$(ev "$EVD/prose.json" verdict.reportable)"
   is "eval: prose says why"           "the treated cohort is empty: no session in this corpus carries a treatment marker" \
                                       "$(ev "$EVD/prose.json" verdict.reason)"
-  for k in brief_check_in_force brief_check_fired ack_in_force ack_resolved_decisions; do
+  for k in brief_check_in_force brief_check_fired ack_in_force ack_resolved_decisions observe_check_in_force observe_check_fired; do
     is "eval: prose does not set $k"  "0"      "$(ev "$EVD/prose.json" "treatment_markers.$k.sessions_seen")"
   done
   # ...and the same four ARE set when the machinery actually emitted them.
@@ -8016,6 +8016,31 @@ if command -v node >/dev/null 2>&1; then
   is "eval: no control, names control"   "control n=0, need 30" "$(mm "$EVD/noctl.json" bypass_rate blocked_by.0)"
   is "eval: one-armed still reports"     "true"  "$(mm "$EVD/noctl.json" false_refusals reportable)"
 
+  # ── the fourth position: a hook's own stderr, which no agent writes ──
+  # Requested by #6, which cannot be measured without it. It is a stronger position than the
+  # other three — prompt, output and command all sit somewhere an agent's text can reach,
+  # while a hook_success attachment is written by the harness from the hook's own stderr.
+  #   THE THIRD CORPUS IS THE ONE THAT MAKES IT A POSITION. `hookwrong` carries a
+  # byte-identical `observe-check: warn` line and differs only in attachment.type and
+  # hookEvent, so it fails unless the record's own fields are what is being read. Without it
+  # this is a string search wearing a longer name, and a hook_additional_context attachment —
+  # which an agent CAN influence, since it is fed back into the turn — would read as proof
+  # that the machinery ran.
+  node "$M" --corpus "$EVD/hook"      --evaluate --baseline-file "$EVD/baseline.json" --json > "$EVD/hook.json" 2>/dev/null
+  node "$M" --corpus "$EVD/hookwrong" --evaluate --baseline-file "$EVD/baseline.json" --json > "$EVD/hookw.json" 2>/dev/null
+  is "eval: hook stderr sets in-force"  "5" "$(ev "$EVD/hook.json" treatment_markers.observe_check_in_force.sessions_seen)"
+  # ...and `fired` is the smaller set, or a cohort defined by it would hold only the turns
+  # the check objected to — #5's own warning, applied to #6.
+  is "eval: ...and fired only where it warned" "3" "$(ev "$EVD/hook.json" treatment_markers.observe_check_fired.sessions_seen)"
+  is "eval: wrong attachment type is not it"   "0" "$(ev "$EVD/hookw.json" treatment_markers.observe_check_in_force.sessions_seen)"
+  is "eval: wrong hookEvent is not it"         "0" "$(ev "$EVD/hookw.json" treatment_markers.observe_check_fired.sessions_seen)"
+  # #6 IS DECLARED, NOT FOLDED IN. A session treated only by the Stop hook carries no
+  # brief-check, so counting it in the #3/#4 arm would put it in the denominator of a rate it
+  # cannot contribute a numerator to.
+  is "eval: #6 does not define the #3/#4 arm"  "0" "$(ev "$EVD/hook.json" arms.treated.sessions)"
+  is "eval: --contract pins it to hook_stderr" "2" \
+     "$(node "$M" --contract | grep -c 'only where it can have been emitted: hook_stderr')"
+
   # ── the two arms must have been measured with the same ruler ──
   is "eval: rules match"              "true"   "$(ev "$EVD/full.json" rules_match_baseline)"
   is "eval: mismatched rules caught"  "false"  "$(ev "$EVD/wrong.json" rules_match_baseline)"
@@ -8032,7 +8057,10 @@ if command -v node >/dev/null 2>&1; then
   is "eval: ...and says so"           "yes"    "$(grep -q 'cannot read the baseline' "$EVD/miss" && echo yes || echo no)"
 
   # ── the contract is printable, because unwritten code has to know what to emit ──
-  is "eval: --contract lists four"    "4"      "$(node "$M" --contract | grep -c 'only where it can have been emitted')"
+  # Counted, not spot-checked: a marker added without a permitted position would be a string
+  # search again, and this row is what makes adding one cost a deliberate edit here.
+  is "eval: --contract lists every marker with its position" "6" \
+     "$(node "$M" --contract | grep -c 'only where it can have been emitted')"
   is "eval: --contract names the join" "yes"   "$(node "$M" --contract | grep -q 'carry its verdict INTO the dispatched prompt' && echo yes || echo no)"
 
   # ── counts and digests, never content — same boundary as the baseline ──
