@@ -2425,6 +2425,53 @@ else
   skip "npm package sweep" "npm or git missing"
 fi
 
+# ── 4a10b8. a dispatch leaves a trace ────────────────────────────────────────
+# SEEN TWICE, on two profiles, hours apart: a session's first turn was the single word
+# "the" and its real brief never arrived. From the receiving side that is indistinguishable
+# from a worker ignoring its instructions, and from the sending side there was nothing at
+# all — nothing recorded what went into the tmux buffer. Three theories were investigated
+# and disproved at an hour each, because the only evidence was the transcript of the thing
+# that received it.
+#
+# The log records length and a digest and NOTHING of the body. That constraint is the half
+# of this group worth keeping: the first draft logged the opening and closing forty
+# characters, and the assertion below caught that for a message under eighty bytes those
+# windows overlap and hand back the whole brief. So both directions here are privacy
+# directions — the log must tell a full brief from a one-word fragment, and it must do it
+# without becoming a second copy of every brief on disk.
+group "fleet-send records what it dispatched"
+if command -v tmux >/dev/null 2>&1; then
+  SNL="$(mktemp -d)"
+  tmux -L sndlog kill-server 2>/dev/null
+  tmux -L sndlog new-session -d -s w1 'sleep 60' 2>/dev/null; sleep 0.4
+  SND() { CLAUDE_FLEET_DIR="$SNL" "$ROOT/bin/fleet-send" -s sndlog w1 "$1" >/dev/null 2>&1; }
+  SND "a brief long enough to have two distinct ends"
+  SND "the"
+  # UNDER EIGHTY BYTES — the length at which a first-40/last-40 excerpt reconstructs the
+  # whole message. This is the case that went red, so it stays as its own row.
+  SND "sync acme-api to staging"
+  SNLOG="$SNL/sndlog.sent"
+  is "the log exists after a send"        "1" "$([ -f "$SNLOG" ] && echo 1 || echo 0)"
+  is "...one line per dispatch"           "3" "$(grep -c . "$SNLOG" 2>/dev/null || echo 0)"
+  # THE POINT: a full brief and a one-word fragment must be told apart from the log alone,
+  # because that is the comparison nobody could make when this happened.
+  is "...a long brief records its length"  "1" "$(awk -F'\t' '$3>40' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  is "...and a 3-byte one records 3"       "1" "$(awk -F'\t' '$3==3' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  # It must NOT be a copy of the brief, at ANY length.
+  is "...the body is not stored"           "0" "$(grep -c 'long enough to have two distinct ends' "$SNLOG" 2>/dev/null || true)"
+  is "...nor a short one, which overlaps"  "0" "$(grep -c 'acme-api' "$SNLOG" 2>/dev/null || true)"
+  # THE DIGEST IS THE FIELD THE WHOLE LOG TURNS ON, and it is written by whichever of two
+  # tools the host has. An empty one would look like a logged dispatch and answer nothing,
+  # so assert its shape, that different bodies differ, and that one body is stable.
+  is "...the digest is 12 hex"             "3" "$(awk -F'\t' '$4 ~ /^[0-9a-f]{12}$/' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  is "...and three bodies gave 3 digests"  "3" "$(awk -F'\t' '{print $4}' "$SNLOG" 2>/dev/null | sort -u | grep -c . || true)"
+  SND "the"
+  is "...and the same body repeats one"    "2" "$(awk -F'\t' '$3==3 {print $4}' "$SNLOG" 2>/dev/null | sort | uniq -c | awk '{print $1}' | head -1)"
+  tmux -L sndlog kill-server 2>/dev/null; rm -rf "$SNL"
+else
+  skip "dispatch log" "tmux missing"
+fi
+
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
 # They are git worktrees like any other, so a stale one lands in the free-list looking
 # clean and sessionless. fleet-spawn then shadows itself: it offers a tree you cannot
