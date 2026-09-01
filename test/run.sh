@@ -7675,6 +7675,142 @@ else
   skip "no real project name in the tree" "git or node missing"
 fi
 
+# ── 6a3. the utilization meter reads a transcript ────────────────────────────
+# bin/fleet-meter.mjs turns the corpus under ~/.claude/projects into the numbers plan item
+# #2 is judged against. Nothing else in this repo parses that wire format, and a parser is
+# exactly the kind of code that fails silently: every one of the four ways this can be wrong
+# produces a plausible number rather than an error.
+#   THE FIXTURE IS BUILT SO THE FAILING DIRECTION IS THE INTERESTING ONE. Its sidechain
+# records carry a `sleep 999`, an Edit of a file nothing else touches, a browser call and
+# the word "Done." — the same shapes as the real turns beside them. A reader that has lost
+# its eligibility filter does not crash; it reports 1034 seconds of sleep instead of 35,
+# three files instead of two, and a done-claim on turn 1 instead of turn 2. So the numbers
+# below are asserted as exact values, not as "greater than zero": every one of them moves if
+# the filter goes, and none of them moves to something that looks broken.
+#   AND THE SAME RECORDS ARE READ TWICE. Section three of the fixture is s1 with every
+# isSidechain flipped to true and nothing else changed, so the identical eleven records that
+# produce 3 turns and 9 tool calls above must produce 0 and 0 there. That is the pair the
+# repo's rule asks for: a detector is only proven by a capture it must match AND a capture
+# it must stay silent on, and a meter that counts everything and a meter that counts nothing
+# are both green against a fixture read only once.
+#   THE PRIVACY ASSERTION IS NOT DECORATION. The corpus is not this repo's — it holds other
+# people's work — so the meter emits counts and digests and never a body, a path or a branch
+# name. The fixture's branch names and file paths go IN; the group greps the JSON that comes
+# out for each of them and requires zero hits. A regression that starts echoing a path would
+# otherwise be invisible until it had been committed to a public repo.
+group "the utilization meter"
+if command -v node >/dev/null 2>&1; then
+  MTR="$(mktemp -d "$TEST_RUNS.$$.meter.XXXXXX")"
+  mkdir -p "$MTR/corpus/acme-web-proj" "$MTR/empty" "$MTR/ineligible/acme-web-proj"
+
+  # Two sessions. s1 runs three human turns and crosses a branch partway; s2 is one turn
+  # that never claims done. Between s1's turns sit the three record kinds that look like a
+  # human prompt and are not: a tool_result carrier (most of the file, by volume), an isMeta
+  # record — whose text says "No, that is wrong" precisely so a lost filter would score a
+  # correction — and a sidechain pair holding a subagent's own tool calls.
+  cat > "$MTR/corpus/acme-web-proj/s1.jsonl" <<'MJSON'
+{"type":"user","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"add a signature-template picker to the Documents step"}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 5; ./test/run.sh"}},{"type":"tool_use","name":"Read","input":{"file_path":"/w/acme-web/src/never-edited.ts"}},{"type":"tool_use","name":"Edit","input":{"file_path":"/w/acme-web/src/a.ts"}},{"type":"text","text":"Working on it, more to do."}]}}
+{"type":"user","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:02:00Z","message":{"role":"user","content":[{"type":"tool_result","content":"3506 passed"}]}}
+{"type":"user","isMeta":true,"isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:03:00Z","message":{"role":"user","content":"No, that is wrong: a meta record that must not be a turn"}}
+{"type":"user","isSidechain":true,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:04:00Z","message":{"role":"user","content":"subagent brief"}}
+{"type":"assistant","isSidechain":true,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:05:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 999"}},{"type":"tool_use","name":"Edit","input":{"file_path":"/w/acme-web/src/sidechain-only.ts"}},{"type":"tool_use","name":"mcp__chrome-devtools__navigate_page","input":{"url":"http://127.0.0.1:8787/"}},{"type":"text","text":"Done."}]}}
+{"type":"user","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:06:00Z","message":{"role":"user","content":"No, that is not what I asked for."}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:07:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"mcp__chrome-devtools__take_screenshot","input":{}},{"type":"tool_use","name":"Edit","input":{"file_path":"/w/acme-web/src/b.ts"}}]}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:08:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Done. The picker is on the Documents step."}]}}
+{"type":"user","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s1","timestamp":"2026-01-01T00:09:00Z","message":{"role":"user","content":"now wire the same thing on the api side"}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s1","timestamp":"2026-01-01T00:10:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 600 &"}},{"type":"tool_use","name":"Bash","input":{"command":"sleep 30; tail -f log","run_in_background":true}},{"type":"tool_use","name":"Bash","input":{"command":"sleep 10; sleep 20"}},{"type":"tool_use","name":"Write","input":{"file_path":"/w/acme-web/src/a.ts"}},{"type":"text","text":"Next I will check the wire format."}]}}
+MJSON
+  cat > "$MTR/corpus/acme-web-proj/s2.jsonl" <<'MJSON'
+{"type":"user","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s2","timestamp":"2026-01-02T00:00:00Z","message":{"role":"user","content":"why is the toolbox pane blank"}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s2","timestamp":"2026-01-02T00:00:30Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"fleet-look.mjs http://127.0.0.1:8787/"}},{"type":"text","text":"The pane is blank because the socket is wrong."}]}}
+MJSON
+  # The same eleven records, every one of them a sidechain. Derived from s1 rather than
+  # written out again, so the two can never drift apart and leave the zero direction
+  # passing against a fixture that no longer resembles the one it is paired with.
+  sed 's/"isSidechain":false/"isSidechain":true/g' \
+      "$MTR/corpus/acme-web-proj/s1.jsonl" > "$MTR/ineligible/acme-web-proj/s3.jsonl"
+
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/corpus"     --json > "$MTR/full.json" 2> "$MTR/err"
+  is "meter ran"                        "0"  "$?"
+  is "...without complaining"           ""   "$(head -2 "$MTR/err" | tr '\n' ' ' | sed 's/ *$//')"
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/empty"      --json > "$MTR/empty.json" 2>/dev/null
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/ineligible" --json > "$MTR/inel.json"  2>/dev/null
+
+  # process.stdout.write of a String(), never console.log of a bare value: the header
+  # explains what util.inspect does to a number, and this helper answers into an `is`.
+  m() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      let v = r; for (const k of process.argv[2].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2"; }
+
+  # ── the parse: every value hand-computed from the fixture above ──
+  is "meter: 2 files, 13 records"     "2 13"  "$(m "$MTR/full.json" corpus.files) $(m "$MTR/full.json" corpus.records)"
+  is "meter: 4 human turns of 13"     "4"     "$(m "$MTR/full.json" corpus.turns)"
+  is "meter: s1 turns"                "3"     "$(m "$MTR/full.json" per_session.0.observed.turns)"
+  is "meter: s1 tool calls"           "9"     "$(m "$MTR/full.json" per_session.0.observed.tool_calls)"
+  is "meter: s1 tool calls per turn"  "3"     "$(m "$MTR/full.json" per_session.0.observed.tool_calls_per_turn_mean)"
+  # 35, not 1034: the sidechain's `sleep 999` is not this session's.
+  is "meter: s1 sleep seconds"        "35"    "$(m "$MTR/full.json" per_session.0.observed.sleep_seconds)"
+  # 3, not 5: `sleep 600 &` returns at once and a run_in_background call does too.
+  is "meter: s1 sleeps counted"       "3"     "$(m "$MTR/full.json" per_session.0.observed.sleep_calls)"
+  is "meter: s1 browser calls"        "1"     "$(m "$MTR/full.json" per_session.0.observed.browser_calls)"
+  # 2, not 3: a Read carries a file_path and is not a touch.
+  is "meter: s1 distinct files"       "2"     "$(m "$MTR/full.json" per_session.0.observed.distinct_files)"
+  is "meter: s1 turns to done"        "2"     "$(m "$MTR/full.json" per_session.0.labelled.turns_to_done)"
+  is "meter: s1 browser before done"  "true"  "$(m "$MTR/full.json" per_session.0.labelled.browser_before_done_claim)"
+  # 1, not 2: the isMeta record says "No, that is wrong" and is not a human turn.
+  is "meter: s1 corrections"          "1"     "$(m "$MTR/full.json" per_session.0.labelled.corrections)"
+  is "meter: s1 corrections/file"     "0.5"   "$(m "$MTR/full.json" per_session.0.labelled.corrections_per_distinct_file)"
+  # s2 never claims done, and has no files, so the ratio is absent rather than zero.
+  is "meter: s2 turns to done"        "null"  "$(m "$MTR/full.json" per_session.1.labelled.turns_to_done)"
+  is "meter: s2 corrections/file"     "null"  "$(m "$MTR/full.json" per_session.1.labelled.corrections_per_distinct_file)"
+  # A session crosses a branch partway, so a TURN carries the branch, not a session.
+  is "meter: 2 branches"              "2"     "$(m "$MTR/full.json" corpus.branches)"
+  is "meter: branch id is the digest" "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)" "$(m "$MTR/full.json" per_branch.0.id)"
+  is "meter: acme-web turns"          "2"     "$(m "$MTR/full.json" per_branch.0.observed.turns)"
+  is "meter: acme-api turns"          "2"     "$(m "$MTR/full.json" per_branch.1.observed.turns)"
+  is "meter: acme-api sleep seconds"  "30"    "$(m "$MTR/full.json" per_branch.1.observed.sleep_seconds)"
+  # The two that cannot be pooled are absent from the pooled block and present in the cohort.
+  is "meter: pooled has no to-done"   "(missing)" "$(m "$MTR/full.json" pooled.labelled.turns_to_done)"
+  is "meter: cohort to-done median"   "2"     "$(m "$MTR/full.json" cohort.per_session.turns_to_done_median)"
+
+  # ── the zero direction: the same records, all ineligible ──
+  is "meter: ineligible records read" "11"    "$(m "$MTR/inel.json" corpus.records)"
+  is "meter: ineligible turns"        "0"     "$(m "$MTR/inel.json" corpus.turns)"
+  is "meter: ineligible tool calls"   "0"     "$(m "$MTR/inel.json" pooled.observed.tool_calls)"
+  is "meter: ineligible sleep"        "0"     "$(m "$MTR/inel.json" pooled.observed.sleep_seconds)"
+  is "meter: ineligible browser"      "0"     "$(m "$MTR/inel.json" pooled.observed.browser_calls)"
+  is "meter: ineligible files"        "0"     "$(m "$MTR/inel.json" pooled.observed.distinct_files)"
+  is "meter: ineligible done-claims"  "0"     "$(m "$MTR/inel.json" pooled.labelled.done_claim_turns)"
+
+  # ── the empty direction ──
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/empty" >/dev/null 2>&1
+  is "meter: empty corpus exits 0"    "0"     "$?"
+  is "meter: empty files"             "0"     "$(m "$MTR/empty.json" corpus.files)"
+  is "meter: empty turns"             "0"     "$(m "$MTR/empty.json" corpus.turns)"
+  is "meter: empty tool calls"        "0"     "$(m "$MTR/empty.json" pooled.observed.tool_calls)"
+  # null, not 0. "median turns to done: 0" on an empty cohort reads as the best possible
+  # result and means the opposite.
+  is "meter: empty to-done median"    "null"  "$(m "$MTR/empty.json" cohort.per_session.turns_to_done_median)"
+  is "meter: empty corrections/file"  "null"  "$(m "$MTR/empty.json" pooled.labelled.corrections_per_distinct_file)"
+
+  # ── counts and digests, never content ──
+  # Every one of these is IN the fixture the meter just read.
+  for leak in acme-web acme-api never-edited sidechain-only 'Documents step' 'toolbox pane' '/w/'; do
+    is "meter: '$leak' is not in the output" "0" "$(grep -c -- "$leak" "$MTR/full.json" | tr -d ' ')"
+  done
+
+  # An exclusion that has stopped matching must say so rather than quietly excluding
+  # nothing — the whole point of naming them in the output.
+  is "meter: --why reports absence"   "4"     "$(node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/corpus" --why | grep -c 'NOT FOUND')"
+  is "meter: --digest is stable"      "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)" "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)"
+  rm -rf "$MTR"
+else
+  skip "the utilization meter" "node missing"
+fi
+
 # ── 6b. every command is actually installed ──────────────────────────────────
 # A new command that never reaches the install list is invisible until someone hits
 # "command not found" — and worse, the SUMMARY line was hand-maintained separately from
