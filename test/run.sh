@@ -8026,6 +8026,59 @@ for f in "$ROOT"/bin/*; do
      "$(grep -qE "(^|[( ])$b([ )]|\$)" "$ROOT/install.sh" 2>/dev/null && echo yes || echo no)"
 done
 
+# ── 6c. the contract and the hooks, driven by a scripted model ───────────────
+# THE MISSING HALF of the group at the top of this file. That one proves the contract
+# string reaches the `claude` exec — it was passed. It cannot ask whether it ARRIVED, or
+# what happened next, and that is the gap an apostrophe drove through: the system prompt
+# was truncated from 3589 characters to 673, the word "the" was submitted as a turn in
+# every new session, and twenty-two green assertions failed to notice for a day because
+# they grepped the whole argv rather than one argument.
+#
+# test/helpers/model-fixture.mjs closes it by pointing the real `claude` binary at a
+# node:http server on loopback with ANTHROPIC_BASE_URL and the literal API key "fixture".
+# Everything except the model's reasoning is real: the binary, bin/claude-here and the
+# contract IT ships (extracted from that file at run time, so there is no test-only copy
+# to drift), hooks/fleet-guard.sh and hooks/fleet-event.sh as installed hooks, a git
+# checkout, the filesystem. One session, three scripted turns, and the row that matters
+# is the one this suite could not previously write at all: a real PreToolUse hook refused
+# a scripted tool call and its reason came BACK into the conversation, where the fixture
+# read it.
+#   BOTH DIRECTIONS, for the reason every pane assertion here runs against a busy capture
+# AND an idle one. Turn 1 calls a tool the guard does not guard and turn 2 calls the one it
+# does, so a guard that refuses everything fails a different row than a guard that can
+# never fire. Watched going red on four deliberate breaks: an apostrophe planted in the
+# contract, the guard's refusal replaced by exit 0, the guard widened to every tool, and
+# the fixture's tool input sent as an object instead of the JSON string partial_json
+# requires. Each reddened the row it belongs to and no others — except the apostrophe,
+# which reddened two, because word-splitting the rest of the contract also hands the
+# session an initial prompt and the run stops being the run under test.
+#
+# SKIPPED where there is no `claude`, `git` or `jq`, and the last two are not fussiness:
+# both hooks open with `command -v jq || exit 0`, so without jq the guard declines in
+# silence and "the guard refused" would go red for a reason that has nothing to do with
+# the guard. CI runners carry none of the three, so this group skips there and runs on a
+# developer machine — the same bargain as viewport-check and its Chrome, and stated here
+# rather than left to be discovered.
+group "a scripted model drives a real session"
+MFX="$(mktemp -d "$TEST_RUNS.$$.mfx.XXXXXX")"
+node "$ROOT/test/helpers/model-fixture.mjs" > "$MFX/out" 2> "$MFX/err"
+mfxrc=$?
+if grep -q '^#SKIP' "$MFX/out" 2>/dev/null; then
+  skip "a scripted model drives a real session" \
+       "$(head -1 "$MFX/out" | cut -d "$US" -f3)"
+else
+  is "model-fixture ran"          "0" "$mfxrc"
+  is "...without complaining"     ""  "$(head -2 "$MFX/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A floor, for the reason pwa-check documents: a helper that died before reaching its
+  # assertions emits a couple of rows and no mismatches, which reads as clean.
+  is "...and produced its checks" "yes" \
+     "$([ "$(wc -l < "$MFX/out")" -ge 7 ] && echo yes || echo "no: $(wc -l < "$MFX/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$MFX/out"
+fi
+rm -rf "$MFX"
+
 # ── 7. every command parses ──────────────────────────────────────────────────
 group "syntax"
 for f in "$ROOT"/bin/*; do
