@@ -3552,6 +3552,61 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   rm -f "$T/fleet/stack.tsv"
   is "space twice leaves it empty"   "0"        "$(ui Space Space Escape >/dev/null; grep -c . "$T/fleet/stack.tsv" 2>/dev/null || true)"
   is "esc/q backs out"               "back"     "$(ui q)"
+  # ── the mouse, on the same real screen ──────────────────────────────────────
+  # The tracking modes were always on; this handler never parsed them, so every click
+  # arrived as one multi-character string that matched no comparison and redrew for
+  # nothing. What is asserted here is not "a click did something" but WHICH session it
+  # picked: the row of a session is found by READING THE PANE, so if the hit-test and the
+  # renderer ever disagree about where a line landed, this row goes red naming the wrong
+  # session. That is the failure the grid's card hit-test actually shipped when a banner
+  # was added above the cards, and a formula-based test would have agreed with the formula.
+  mstart() {                 # bring the screen up and LEAVE it up
+    tmux -L cfstkui kill-server 2>/dev/null
+    tmux -L cfstkui new-session -d -x 100 -y 30 \
+      -e HOME="$T" -e CLAUDE_FLEET_DIR="$T/fleet" \
+      -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' - --screen stack > '$T/out' 2>'$T/err'; sleep 6" 2>/dev/null
+    sleep 2.5
+  }
+  mrow()   { tmux -L cfstkui capture-pane -p 2>/dev/null | grep -n -- "$1" | head -1 | cut -d: -f1; }
+  mclick() { tmux -L cfstkui send-keys -l -- "$(printf '\033[<0;5;%sM' "$1")" 2>/dev/null; sleep 0.8; }
+  mwheel() { tmux -L cfstkui send-keys -l -- "$(printf '\033[<%s;5;10M' "$1")" 2>/dev/null; sleep 0.8; }
+  # grep -c PRINTS 0 and EXITS 1 when nothing matched, so `|| echo 0` appends a SECOND
+  # zero and the value becomes "0\n0" — which is not 0 and fails every comparison. Assign
+  # first, then default the empty (missing-file) case.
+  scount() { local n; n="$(grep -c "$1" "$T/fleet/stack.tsv" 2>/dev/null)" || true; printf '%s' "${n:-0}"; }
+  members() { scount .; }
+
+  rm -f "$T/fleet/stack.tsv"; mstart
+  WROW="$(mrow 'worker')"; MROW="$(mrow 'master')"
+  is "the pane really drew both rows" "yes" \
+     "$([ -n "$WROW" ] && [ -n "$MROW" ] && [ "$WROW" != "$MROW" ] && echo yes || echo "no: w=$WROW m=$MROW")"
+  mclick "$WROW"
+  is "a click stacks the row it landed on" "1" "$(members)"
+  # THE DISCRIMINATION: a hit-test one row out would stack master instead, and the count
+  # above would still say 1. Naming the member is what makes this test able to fail.
+  is "...and it is worker, not master"     "1" "$(scount worker)"
+  is "...master was not touched"           "0" "$(scount master)"
+  # Same click, both directions — a click that could only add would look identical here.
+  mclick "$WROW"
+  is "clicking it again unstacks it"       "0" "$(members)"
+  # A row the renderer never recorded must be inert, not resolved to the nearest one.
+  mclick 1
+  is "a click on the title does nothing"   "0" "$(members)"
+  # The wheel moves the selection; button 65 is scroll-down. Read the cursor mark off the
+  # pane rather than trusting an internal — the mark is the only thing the operator sees.
+  # SCROLL UP, not down: the clicks above left the cursor on the LAST session, where
+  # sMoveStack(1) correctly refuses to move — the first version of this row read that
+  # refusal as a broken wheel. Direction matters, so pick the one with somewhere to go.
+  SELB="$(tmux -L cfstkui capture-pane -p 2>/dev/null | grep -n '▸' | head -1 | cut -d: -f1)"
+  mwheel 64
+  SELA="$(tmux -L cfstkui capture-pane -p 2>/dev/null | grep -n '▸' | head -1 | cut -d: -f1)"
+  is "the wheel moves the selection"       "yes" \
+     "$([ -n "$SELB" ] && [ -n "$SELA" ] && [ "$SELB" != "$SELA" ] && echo yes || echo "no: $SELB -> $SELA")"
+  is "no crash from any mouse event"       "0" \
+     "$(grep -cE 'ReferenceError|TypeError|is not defined' "$T/err" 2>/dev/null || true)"
+  tmux -L cfstkui kill-server 2>/dev/null
+
   # And the way in: `t` on the grid must emit exactly the word grid_loop switches on.
   tmux -L cfstkses kill-server 2>/dev/null
   tmux -L cfstkses new-session -d -x 100 -y 30 -e HOME="$T" -e CLAUDE_FLEET_DIR="$T/fleet" \
