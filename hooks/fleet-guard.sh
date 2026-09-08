@@ -71,11 +71,57 @@ IFS=$'\x1f' read -r EVENT TOOL CWD SUBAGENT < <(
 
 [ "$EVENT" = "PreToolUse" ] || exit 0
 case "$TOOL" in EnterWorktree|Agent|Task) ;; *) exit 0 ;; esac
-[ -n "${CLAUDE_FLEET_SOCK:-}" ] || exit 0        # not a fleet session — built-ins are fine
 
 CWD="${CWD:-$PWD}"
 GITROOT="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)"
 [ -n "$GITROOT" ] || exit 0                      # not a repo — nothing to redirect to
+
+# ── am I somewhere this advice applies? ───────────────────────────────────────
+# This used to be one line — `[ -n "$CLAUDE_FLEET_SOCK" ] || exit 0`, on the reasoning
+# that a plain session outside a fleet keeps the built-in because there is no fleet to
+# confuse. MEASURED WRONG: a lead in a registered a registered project's main checkout dispatched a
+# general-purpose subagent and was not refused, because it had been started as a plain
+# `claude` in that directory rather than through the fleet. The project had five live
+# workers at the time. The advice was declined exactly where it was most needed — the
+# session could not see the fleet, so neither could the guard.
+#
+# So the question is no longer "am I inside a fleet" but "is there a fleet here to use".
+# Two conditions, and BOTH are required, because a refusal with no alternative is the
+# mistake this file already warns about for leaves:
+#   1. this checkout belongs to a REGISTERED project, and
+#   2. that project has a LIVE tmux server, since fleet-spawn refuses without a socket.
+# If either fails there is genuinely nothing to redirect to and the built-in is right.
+registered_project() {                 # $1 = a git toplevel -> the project name, or nothing
+  local me="${1%/}" cfg name root
+  for cfg in "$HOME/.config/ghostfleet/projects" "$HOME/.config/ghostfleet"/projects.*; do
+    [ -f "$cfg" ] || continue
+    # awk to \x1f and THEN read: a tab is IFS-whitespace, so `IFS=$'\t' read` collapses an
+    # empty profile column and shifts root into it. The trap CLAUDE.md opens with.
+    while IFS=$'\x1f' read -r name root; do
+      [ -n "$name" ] && [ -n "$root" ] || continue
+      root="${root/#\~/$HOME}"; root="${root%/}"
+      # PHYSICAL PATHS ON BOTH SIDES. git rev-parse hands back the resolved path, and a
+      # registered root can be a symlinked one — /var is a symlink to /private/var here, and
+      # /tmp to /private/tmp — so a string compare silently never matches. Caught by the
+      # first test written against a mktemp fixture, which is exactly where it hides; the
+      # same trap fleet-slot documents about a config key written from $PWD.
+      [ -d "$root" ] && root="$(cd "$root" 2>/dev/null && pwd -P)" || root="${root}"
+      [ -n "$root" ] || continue
+      [ "$me" = "$root" ] && { printf '%s' "$name"; return 0; }
+      # under it, with the slash required: root /a/b must not match a checkout at /a/bc
+      case "$me" in "$root"/*) printf '%s' "$name"; return 0 ;; esac
+    done < <(awk -F'\t' '/^[[:space:]]*#/ || NF<2 { next } { printf "%s\x1f%s\n", $1, $2 }' "$cfg" 2>/dev/null)
+  done
+  return 1
+}
+OUTSIDE=0; PROJ=""
+if [ -z "${CLAUDE_FLEET_SOCK:-}" ]; then
+  command -v tmux >/dev/null 2>&1 || exit 0
+  PROJ="$(registered_project "$GITROOT")" || exit 0
+  [ -n "$PROJ" ] || exit 0
+  tmux -L "cf-$PROJ" list-sessions >/dev/null 2>&1 || exit 0
+  OUTSIDE=1
+fi
 
 # Which advice applies turns on whether this session is a lead or already a leaf.
 # A linked worktree has its own git-dir under the shared common dir; in the main
@@ -99,6 +145,25 @@ if [ "$TOOL" != "EnterWorktree" ]; then
   # no branch and no worktree, and no fleet-spawn is shaped like them. Anything else —
   # including the default, unnamed type — is dispatch.
   case "$SUBAGENT" in Explore|Plan) exit 0 ;; esac
+  if [ "$OUTSIDE" = 1 ]; then
+    { echo "ghostfleet: this checkout belongs to project '$PROJ', which has a LIVE fleet."
+      echo "  This session was not started through it, so a subagent here is invisible to that"
+      echo "  fleet: no row in fleet-list, no 'done' in its inbox, and its governor — which parks"
+      echo "  SESSIONS when the account tightens — cannot shed usage it cannot see."
+      echo
+      echo "  Dispatch into the fleet that already exists, naming its socket:"
+      echo "      fleet-worktrees -s cf-$PROJ                      # REUSE BEFORE PROLIFERATE"
+      echo "      fleet-spawn -s cf-$PROJ <name> --reuse <worktree> --prompt \"…\""
+      echo "      fleet-spawn -s cf-$PROJ <name> --branch <b> --from origin/main --new --prompt \"…\""
+      echo "  The -s is needed because this session has no socket of its own to inherit."
+      echo
+      echo "  Or work in the fleet instead of beside it:  ghostfleet $PROJ"
+      echo
+      echo "  Small enough to just do? Do it here — that needs no worker at all."
+      echo "  Read-only research is NOT blocked: subagent_type Explore or Plan."
+      echo "  Deliberate override: CLAUDE_FLEET_ALLOW_SUBAGENTS=1"; } >&2
+    exit 2
+  fi
   { echo "ghostfleet: dispatch through the fleet, not a Claude subagent."
     echo "  A subagent runs INSIDE this conversation, so the fleet cannot see it: no row in"
     echo "  fleet-list, no 'done' in fleet-inbox, nothing in fleet-worktrees, and the"
@@ -121,6 +186,22 @@ fi
 
 # ── EnterWorktree ────────────────────────────────────────────────────────────
 [ "${CLAUDE_FLEET_ALLOW_BUILTIN_WORKTREE:-0}" != 1 ] || exit 0
+if [ "$OUTSIDE" = 1 ]; then
+  { echo "ghostfleet: this checkout belongs to project '$PROJ', which has a LIVE fleet."
+    echo "  EnterWorktree would create <repo>/.claude/worktrees/… and MOVE THIS SESSION into it,"
+    echo "  leaving the thread you are talking to somewhere else — and that tree would be"
+    echo "  invisible to the fleet beside it: nothing in fleet-worktrees, no slot, no manifest."
+    echo
+    echo "  Hand it to that fleet instead, naming its socket:"
+    echo "      fleet-spawn -s cf-$PROJ <name> --branch <branch> --from origin/main --prompt \"…\""
+    echo "  or work inside it:  ghostfleet $PROJ"
+    echo
+    echo "  Doing it yourself, right here, is also fine — that needs no worktree at all:"
+    echo "      git checkout -b <branch> && …"
+    echo
+    echo "  Deliberate override: CLAUDE_FLEET_ALLOW_BUILTIN_WORKTREE=1"; } >&2
+  exit 2
+fi
 { echo "ghostfleet: EnterWorktree is the WRONG tool in a fleet session."
   echo "  It would create <repo>/.claude/worktrees/… and MOVE THIS SESSION into it —"
   echo "  leaving the thread you are talking to somewhere else. ghostfleet worktrees are"
