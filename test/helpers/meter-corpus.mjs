@@ -58,12 +58,20 @@ const rec = (o) => JSON.stringify(o);
 // what the command printed, and a closing assistant text. Four records, because the four
 // treatment positions the reader distinguishes — prompt, command, output — only exist if the
 // fixture actually puts text in each of them.
-function turn({ sess, br, at, gap, prompt, cmd, out, say }) {
+function turn({ sess, br, at, gap, prompt, cmd, out, say, ask = 0 }) {
   const base = { isSidechain: false, gitBranch: br, sessionId: sess };
   const L = [];
   L.push(rec({ ...base, type: 'user', timestamp: iso(at), message: { role: 'user', content: prompt } }));
+  // `ask` appends real AskUserQuestion tool_use blocks. A tool_use record is the only thing
+  // that counts as having asked, which is the whole point of the prose corpus below.
   L.push(rec({ ...base, type: 'assistant', timestamp: iso(at + gap),
-    message: { role: 'assistant', content: [{ type: 'tool_use', name: 'Bash', input: { command: cmd } }] } }));
+    message: { role: 'assistant', content: [
+      { type: 'tool_use', name: 'Bash', input: { command: cmd } },
+      ...Array.from({ length: ask }, (_, i) => ({ type: 'tool_use', name: 'AskUserQuestion',
+        input: { questions: [{ question: `which unit, ${i}?`, header: 'Unit', multiSelect: false,
+                               options: [{ label: 'per document', description: 'one' },
+                                         { label: 'per line', description: 'two' }] }] } })),
+    ] } }));
   L.push(rec({ ...base, type: 'user', timestamp: iso(at + gap + 1),
     message: { role: 'user', content: [{ type: 'tool_result', content: out }] } }));
   L.push(rec({ ...base, type: 'assistant', timestamp: iso(at + gap + 2),
@@ -145,6 +153,69 @@ fs.writeFileSync(path.join(DIR, 'baseline-empty.json'), JSON.stringify({
                  labelled: { columns: ['id', 'turns_to_done'], rows: [] } },
 }, null, 2));
 
+// ── the ambiguity gap: recognising, asking, and the distance between ──────
+// Ten sessions arranged so all three rates are arithmetic on the counts:
+//   0-2  named an ambiguity AND asked      -> recognised, asked, NOT in the gap
+//   3-6  named an ambiguity, never asked   -> recognised, in the gap
+//   7-8  asked, never named one            -> asked only
+//   9    neither
+// so asked=5, recognised=7, gap=4 of 10.
+const askdir = path.join(DIR, 'ask', 'acme-web-proj');
+fs.mkdirSync(askdir, { recursive: true });
+for (let i = 0; i < 10; i++) {
+  const sess = `meter-eval-a${String(i).padStart(3, '0')}`;
+  const names = i < 7;
+  const asks = i < 3 || i >= 7 && i < 9;
+  fs.writeFileSync(path.join(askdir, `${sess}.jsonl`), turn({
+    sess, br: 'acme-web', at: 0, gap: TREATED_GAP,
+    prompt: 'wire up the picker', cmd: 'echo build', out: 'ok', ask: asks ? 1 : 0,
+    say: names ? 'Assuming the unit is per document rather than per line, I built it that way.'
+               : 'Built it and the suite is green.',
+  }).join('\n') + '\n');
+}
+
+// ── the corpus that TALKS about asking, which is not asking ───────────────
+// The signal is a tool_use record, and this is the corpus that proves it. Every one of these
+// sessions names AskUserQuestion in the prompt, in a command, in output and in the
+// assistant's own prose, and quotes the paper's title too — because this brief and that title
+// are both going to end up in a real transcript, and neither is a question anybody asked.
+// The ask count must be zero.
+//   IT ALSO PROVES THE OTHER HALF, DELIBERATELY. The labelled rule DOES match this prose,
+// because recognising an ambiguity has no unforgeable position the way a tool call does — it
+// is prose by definition. The suite asserts both: asked=0 and recognised>0, so the difference
+// between a fact and a label is visible in a row rather than only in a comment.
+const talk = path.join(DIR, 'asktalk', 'acme-web-proj');
+fs.mkdirSync(talk, { recursive: true });
+for (let i = 0; i < 4; i++) {
+  const sess = `meter-eval-q${String(i).padStart(3, '0')}`;
+  fs.writeFileSync(path.join(talk, `${sess}.jsonl`), turn({
+    sess, br: 'acme-web', at: 0, gap: TREATED_GAP,
+    prompt: 'count the AskUserQuestion calls in the corpus and read Knowing but Not Showing: LLMs Recognize Ambiguity but Rarely Ask Clarifying Questions',
+    cmd: `grep -c '"name":"AskUserQuestion"' ~/transcript.jsonl`,
+    out: 'AskUserQuestion appears 57 times; models Recognize Ambiguity but rarely ask',
+    say: 'The ambiguous case is that AskUserQuestion is a tool call, so assuming a string match would overcount.',
+  }).join('\n') + '\n');
+}
+
+// ── the ambiguity named by the HUMAN, which is not the session noticing ───
+// The measurement asks whether the SESSION recognised something, so the rule reads the
+// assistant's own text. A human writing "this is ambiguous, assume per document" in the
+// brief has done the recognising FOR it — counting that would score the session for the
+// human's care and would make the recognition rate rise whenever the asks got clearer,
+// which is backwards. So the prompts here are thick with the rule's own vocabulary and the
+// assistant says nothing of the kind; recognition must be zero.
+const askhuman = path.join(DIR, 'askhuman', 'acme-web-proj');
+fs.mkdirSync(askhuman, { recursive: true });
+for (let i = 0; i < 3; i++) {
+  const sess = `meter-eval-u${String(i).padStart(3, '0')}`;
+  fs.writeFileSync(path.join(askhuman, `${sess}.jsonl`), turn({
+    sess, br: 'acme-web', at: 0, gap: TREATED_GAP,
+    prompt: 'This is ambiguous and two readings are possible: assuming the unit is per document, with parity with the existing surface, and it applies retroactively.',
+    cmd: 'echo build', out: 'ok',
+    say: 'Built it and the suite is green.',
+  }).join('\n') + '\n');
+}
+
 // ── the fourth position: a hook's own stderr ───────────────────────────────
 // The record the harness writes after running a Stop hook, which is what makes this position
 // unforgeable: the agent does not author it. Three sessions where the check objected and two
@@ -209,4 +280,4 @@ for (let i = 0; i < 4; i++) {
   }).join('\n') + '\n');
 }
 
-console.log(`treated ${N_TREATED} control ${N_CONTROL} hook 5 hookwrong 3 prose 4 -> ${proj}`);
+console.log(`treated ${N_TREATED} control ${N_CONTROL} ask 10 asktalk 4 askhuman 3 hook 5 hookwrong 3 prose 4 -> ${proj}`);

@@ -8564,6 +8564,140 @@ else
   skip "the evaluator refuses what it cannot support" "node missing"
 fi
 
+# ── 6a5. recognising an ambiguity is not asking about one ────────────────────
+# The frame is Su and Cardie, "Knowing but Not Showing: LLMs Recognize Ambiguity but Rarely
+# Ask Clarifying Questions": on AmbigQA a model judges a question ambiguous with 60-80%
+# accuracy when asked to judge, then answers the same question directly over 95% of the time
+# when simply asked to answer. Latent awareness, almost no behaviour. Three numbers here, and
+# they are three on purpose — a single "gap" figure would hide which half a reader has to
+# accept in order to believe it.
+#
+# THE TWO HALVES FALL ON OPPOSITE SIDES OF THIS FILE'S SPLIT, AND THE SUITE SHOWS IT.
+# Asking is an AskUserQuestion tool_use record: a fact, and one no prose can forge. Naming an
+# ambiguity is prose by definition, so it has no unforgeable position and stays a label.
+#   The `asktalk` corpus is where that difference stops being a comment. Every session in it
+# names AskUserQuestion in the prompt, in a command, in output and in the assistant's own
+# text, and quotes the paper's title as well — because this brief and that title are both
+# going to end up in a real transcript. Its ask count must be ZERO, and its recognition count
+# must NOT be, and both are asserted. A row that showed one without the other would mean the
+# split had collapsed in one direction or the other.
+#
+# WHAT IS NOT MEASURED, asserted rather than left to a reader's charity: whether the question
+# was a GOOD question. That is a judgment nobody here can make mechanically and no attempt is
+# made, so the tool says so in its own output and this group checks that it still does.
+group "recognising an ambiguity is not asking about one"
+if command -v node >/dev/null 2>&1; then
+  AQD="$(mktemp -d "$TEST_RUNS.$$.ask.XXXXXX")"
+  node "$ROOT/test/helpers/meter-corpus.mjs" "$AQD" > "$AQD/gen" 2> "$AQD/err"
+  is "ask fixture built"              "0"  "$?"
+  is "...without complaining"         ""   "$(head -2 "$AQD/err" | tr '\n' ' ' | sed 's/ *$//')"
+  M="$ROOT/bin/fleet-meter.mjs"
+  node "$M" --corpus "$AQD/ask"     --json > "$AQD/ask.json"  2>/dev/null
+  node "$M" --corpus "$AQD/asktalk" --json > "$AQD/talk.json" 2>/dev/null
+  aq() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      let v = r; for (const k of process.argv[2].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2"; }
+
+  # ── the three numbers, each arithmetic on the counts at the top of the generator ──
+  # 10 sessions: 3 named and asked, 4 named and did not, 2 asked without naming, 1 neither.
+  is "ask: asked (observed)"          "5"      "$(aq "$AQD/ask.json" cohort.per_session.asked_units)"
+  is "ask: asking rate"               "0.5"    "$(aq "$AQD/ask.json" cohort.per_session.asking_rate)"
+  is "ask: AskUserQuestion calls"     "5"      "$(aq "$AQD/ask.json" pooled.observed.ask_calls)"
+  is "ask: recognised (labelled)"     "7"      "$(aq "$AQD/ask.json" cohort.per_session.named_ambiguity_units)"
+  is "ask: recognition rate"          "0.7"    "$(aq "$AQD/ask.json" cohort.per_session.recognition_rate)"
+  is "ask: the gap (derived)"         "4"      "$(aq "$AQD/ask.json" cohort.per_session.knowing_not_showing_units)"
+  is "ask: ...as a rate"              "0.4"    "$(aq "$AQD/ask.json" cohort.per_session.knowing_not_showing_rate)"
+  # ...and conditioned on having recognised anything, which is the paper's own framing.
+  is "ask: gap among recognisers"     "0.5714" "$(aq "$AQD/ask.json" cohort.per_session.knowing_not_showing_of_recognisers)"
+
+  # ── THE ROW THE SIGNAL EXISTS FOR: talking about asking is not asking ──
+  is "ask: prose about it asks nothing"   "0" "$(aq "$AQD/talk.json" pooled.observed.ask_calls)"
+  is "ask: ...and no session counts as having asked" "0" "$(aq "$AQD/talk.json" cohort.per_session.asked_units)"
+  # ── and the same corpus proves the OTHER half is a label, not a fact ──
+  # The prose does match the recognition rule, because there is no hook that writes "this
+  # session noticed something". That is the honest limit and it belongs in a row.
+  is "ask: ...while the LABEL does match prose" "4" "$(aq "$AQD/talk.json" cohort.per_session.named_ambiguity_units)"
+
+  # ── the rule reads the SESSION's text, not the human's ──
+  # A brief that says "this is ambiguous, assume per document" has done the recognising for
+  # the session. Counting it would score the session for the human's care, and would make the
+  # recognition rate RISE as the asks got clearer — backwards. The prompts in this corpus are
+  # thick with the rule's own vocabulary and the assistant says nothing of the kind.
+  node "$M" --corpus "$AQD/askhuman" --json > "$AQD/human.json" 2>/dev/null
+  is "ask: the human naming it is not the session noticing" "0" \
+     "$(aq "$AQD/human.json" cohort.per_session.named_ambiguity_units)"
+  is "ask: ...and those sessions are read at all" "3" "$(aq "$AQD/human.json" corpus.turns)"
+
+  # ── the split is declared, not just implemented ──
+  is "ask: asking is observed"        "observed" "$(aq "$AQD/ask.json" rules.ask.kind)"
+  is "ask: recognising is labelled"   "labelled" "$(aq "$AQD/ask.json" rules.named_ambiguity.kind)"
+  is "ask: the label carries a digest" "12"      "$(printf '%s' "$(aq "$AQD/ask.json" rules.named_ambiguity.digest)" | wc -c | tr -d ' ')"
+  # node, not a `case`: a close-paren inside a case pattern terminates the command
+  # substitution it sits in, so the row asserted against a fragment of its own shell.
+  is "ask: quality is disclaimed"     "yes"      "$(node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      process.stdout.write(/not measured/.test(String(r.rules.ask.note)) ? "yes" : "no");' "$AQD/ask.json")"
+
+  # ── adding a measurement must not disturb a pre-registered rule ──
+  # The five the committed baseline recorded are derived from their own contents, so two new
+  # keys cannot move them. Checked against the real committed file, not a fixture.
+  mkdir -p "$AQD/none"
+  is "ask: committed baseline's rules still current" "true" \
+     "$(node "$M" --corpus "$AQD/none" --evaluate --baseline-file "$ROOT/docs/meter-baseline-2026-09-01.json" --json 2>/dev/null \
+        | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).rules_match_baseline)))')"
+
+  # ── the fifth measurement, and the floor it refuses under ──
+  node "$M" --corpus "$AQD/corpus" --evaluate --baseline-file "$AQD/baseline.json" --json > "$AQD/ev.json" 2>/dev/null
+  mm5() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      const m = r.measurements.find((x) => x.measurement === "ambiguity_gap");
+      let v = m; for (const k of process.argv[2].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2"; }
+  is "ask: it is a measurement"       "labelled" "$(mm5 "$AQD/ev.json" kind)"
+  is "ask: reportable at n=40"        "true"     "$(mm5 "$AQD/ev.json" reportable)"
+  # ...and below the floor it withholds the value rather than printing a flattering zero,
+  # exactly as the other four do.
+  node "$M" --corpus "$AQD/ask" --evaluate --baseline-file "$AQD/baseline.json" --json > "$AQD/ev2.json" 2>/dev/null
+  is "ask: below the floor it refuses"    "false"     "$(mm5 "$AQD/ev2.json" reportable)"
+  is "ask: ...and omits the rate"         "(missing)" "$(mm5 "$AQD/ev2.json" treated_asking_rate)"
+
+  # ── the contract-version gap is STATED, not worked around ──
+  # The clause this measurement would most want to evaluate changed, and the corpus cannot
+  # say which version a session carried. That is reported as a gap with its reason and with
+  # the workaround it refuses, the same way a never-fired marker is reported.
+  is "ask: the gap is named"          "1" "$(node -e '
+      const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+      process.stdout.write(String((r.gaps||[]).filter(g=>/contract/.test(g.what)).length));' "$AQD/ev.json")"
+  is "ask: ...and refuses a date cut" "yes" "$(node -e '
+      const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+      const g=(r.gaps||[])[0]||{};
+      process.stdout.write(/date cut/i.test(String(g.refused_workaround))?"yes":"no");' "$AQD/ev.json")"
+  # The 5 transcripts that DO contain the contract text contain both versions of the clause,
+  # so the text marks a session that edited the file rather than one that ran under it. If
+  # that stops being said, the number reads as a usable marker.
+  is "ask: ...and says why those 5 are not evidence" "yes" "$(node -e '
+      const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+      const g=(r.gaps||[])[0]||{};
+      process.stdout.write(/anti-correlated/i.test(String(g.and_worse))?"yes":"no");' "$AQD/ev.json")"
+
+  # ── counts and digests, never content ──
+  while IFS= read -r leak; do
+    [ -n "$leak" ] || continue
+    is "ask: '$leak' is not in the output" "0" "$(grep -c -- "$leak" "$AQD/ask.json" | tr -d ' ')"
+  done <<'AQLEAKS'
+acme-web
+meter-eval
+per document
+wire up the picker
+AQLEAKS
+  rm -rf "$AQD"
+else
+  skip "recognising an ambiguity is not asking about one" "node missing"
+fi
+
 # ── 6b. every command is actually installed ──────────────────────────────────
 # A new command that never reaches the install list is invisible until someone hits
 # "command not found" — and worse, the SUMMARY line was hand-maintained separately from
