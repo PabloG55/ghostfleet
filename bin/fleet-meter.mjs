@@ -163,6 +163,52 @@ const DONE_CLAIM = /(?:^|\n)[\s*_#>-]*(?:✅|✓|☑|(?:all\s+)?done\b|complete[
 // failed at something it had not been asked to do yet.
 const CORRECTION = /\b(?:no,|nope\b|wrong\b|not what i (?:asked|wanted|meant)|that'?s not|you (?:missed|broke|didn'?t|forgot|were supposed)|still (?:broken|failing|wrong|not)|revert\b|undo\b|instead of|i (?:said|told you)|why did you|stop\b|doesn'?t work|didn'?t work|does not work|it'?s (?:still )?(?:broken|failing))/i;
 
+// ── rule 5 (observed): the session ASKED ────────────────────────────────────
+// An AskUserQuestion tool call. A tool invocation, not prose, so it sits with tool calls and
+// sleeps: the records say it happened and two readers who disagree disagree about counting.
+//   WHAT IS NOT MEASURED, said plainly rather than left for someone to assume. Whether the
+// question was a GOOD question — material, answerable, asked at the right moment — is a
+// judgment nobody here can make mechanically, and no attempt is made. A session that asked
+// four vacuous questions counts four. The number is "did it ask", never "did it ask well".
+const ASK_TOOL = 'AskUserQuestion';
+
+// ── rule 6 (labelled): the session NAMED an ambiguity ───────────────────────
+// The frame is Su and Cardie, "Knowing but Not Showing: LLMs Recognize Ambiguity but Rarely
+// Ask Clarifying Questions": on AmbigQA a model classifies a question as ambiguous with
+// 60-80% accuracy when asked to judge it, then answers the same question directly over 95%
+// of the time when simply asked to answer. Latent awareness, almost no behaviour. The gap is
+// the thing worth measuring, and this rule is the recognition half of it.
+//   MATCHED AGAINST THE ASSISTANT'S OWN TEXT, not the human's. "The brief is ambiguous" in a
+// prompt is the human saying so; the measurement is about whether the SESSION noticed.
+//   AND IT IS NOT THE PAPER'S RECOGNITION NUMBER, which is the easiest thing to get wrong
+// about this. The 60-80% is a model CLASSIFYING a question when explicitly asked to judge
+// whether it is ambiguous. Nothing here asks anything: this counts ambiguity a session named
+// unprompted, mid-work, which is a strictly harder bar and comes out far lower. So the pair
+// below is not a replication and must not be quoted as one — the paper supplies the frame,
+// this corpus supplies its own two numbers, and only the DISTANCE between them is comparable
+// in spirit.
+//   AND THIS ONE HAS NO UNFORGEABLE POSITION, which is the honest limit and the reason it is
+// labelled rather than observed. The marker positions elsewhere in this file work because a
+// hook writes a record an agent cannot author. Recognising an ambiguity has no such record —
+// it is prose by definition, so a session reasoning ABOUT ambiguity (this file's own author,
+// for one) matches the same way a session recognising one does. Discard this half and the
+// asking rate above still stands on its own.
+const NAMED_AMBIGUITY = new RegExp([
+  // an assumption stated as one, at the head of a line where it is a claim rather than an aside
+  "(?:^|\\n)[\\s*_#>-]*(?:i(?:'ll| will)? assum|assuming\\b|assumption)",
+  "\\bstat(?:e|ed|ing) (?:my |the )?assumption",
+  // two readings named as two
+  "\\b(?:two|both) (?:possible )?readings?\\b",
+  "\\bambiguous\\b|\\bambiguit(?:y|ies)\\b",
+  "\\bunclear whether\\b|\\bcould be read as\\b|\\bcould mean either\\b",
+  "\\bwhich of (?:the )?(?:two|these)\\b",
+  // the contract's own extraction axes, spelled the way this repo spells them
+  "\\bthe unit is\\b|\\bper (?:line|document|policy) or per\\b",
+  "\\bparity with\\b|\\bretroactiv(?:e|ely|ity)\\b",
+  "\\breuse (?:rather than|instead of)\\b",
+  "\\bexisting (?:surface|artifact|one to match)\\b",
+].join('|'), 'i');
+
 const RULES = {
   turn: 'opens at an eligible human user record, runs to the next one or to end of file',
   eligibility: 'a user record that is not isSidechain, not isMeta, and carries no tool_result block',
@@ -171,8 +217,13 @@ const RULES = {
   file_touched: { kind: 'observed', tools: [...WRITE_TOOL], note: 'written, not read — see WRITE_TOOL' },
   done_claim: { kind: 'labelled', pattern: String(DONE_CLAIM), applied_to: "the turn's final assistant text" },
   correction: { kind: 'labelled', pattern: String(CORRECTION), applied_to: 'a human turn other than the first of its session' },
+  ask: { kind: 'observed', tool: ASK_TOOL, note: 'the call is counted; whether the question was a good one is not measured' },
+  named_ambiguity: { kind: 'labelled', pattern: String(NAMED_AMBIGUITY), applied_to: "the assistant's own text in a turn" },
 };
-for (const k of ['sleep', 'browser', 'file_touched', 'done_claim', 'correction']) RULES[k].digest = id(JSON.stringify(RULES[k]));
+// NEW KEYS ONLY. A rule's digest is derived from its own contents, so adding `ask` and
+// `named_ambiguity` cannot move the five the committed baseline recorded — and the
+// same-ruler check passes a key the baseline does not carry rather than failing on it.
+for (const k of ['sleep', 'browser', 'file_touched', 'done_claim', 'correction', 'ask', 'named_ambiguity']) RULES[k].digest = id(JSON.stringify(RULES[k]));
 
 // ════════════════════════════════════════════════════════════════════════════
 // PLAN ITEM #5 — THE EVALUATOR
@@ -364,6 +415,13 @@ const MEASUREMENTS = {
     why_min_n: 'a median, not a proportion. The nonparametric interval on a median is built from order statistics, and below about 20 it spans nearly the whole sample — an "added latency" would be indistinguishable from the spread it was drawn out of',
     needs: [],
   },
+  ambiguity_gap: {
+    kind: 'labelled', unit: 'session',
+    of: 'the distance between naming an ambiguity and asking about it: an asking rate that is observed, a recognition rate that is labelled, and the sessions that did the first and not the second',
+    min_n: 30,
+    why_min_n: 'the rule of three, as for the other proportions. It matters more here than elsewhere because the interesting quantity is a DIFFERENCE of two rates, whose interval is wider than either of theirs',
+    needs: ['ask', 'named_ambiguity'],
+  },
   rework_turns: {
     kind: 'labelled', unit: 'session',
     of: 'turns after the first done-claim, and the share of done-claiming sessions with any',
@@ -396,6 +454,7 @@ const EXCLUDE = [
 // ── reading ─────────────────────────────────────────────────────────────────
 function corpusFiles(root) {
   const out = [];
+  let skipped = 0;
   let dirs = [];
   try { dirs = fs.readdirSync(root); } catch { return out; }
   for (const d of dirs) {
@@ -404,8 +463,25 @@ function corpusFiles(root) {
     if (!st.isDirectory()) continue;
     let fl = []; try { fl = fs.readdirSync(p); } catch { continue; }
     for (const f of fl) if (f.endsWith('.jsonl')) out.push(path.join(p, f));
+    // SUBAGENT TRANSCRIPTS ARE NOT SESSIONS, and they live one level deeper:
+    // <project>/<session-uuid>/subagents/agent-*.jsonl. Not recursing already skipped them,
+    // but by accident of depth rather than by rule — so they are counted here and reported,
+    // because the difference has already cost one disagreement. A hand count of this corpus
+    // came to 275 transcripts against this reader's 235, and the 40 were these: a subagent's
+    // own conversation, which is exactly the population the isSidechain filter exists to
+    // remove when it arrives inline instead. Counting them would put a subagent's work in a
+    // per-session denominator.
+    for (const d2 of fl) {
+      const sub = path.join(p, d2, 'subagents');
+      try { if (fs.statSync(sub).isDirectory()) skipped += fs.readdirSync(sub).filter((x) => x.endsWith('.jsonl')).length; }
+      catch {}
+    }
   }
-  return out.sort();
+  // sort() returns the same array, but assign after it anyway: a future `return [...out]`
+  // would silently drop a property hung off the array, and this one ends up in the output.
+  out.sort();
+  out.subagentFilesSkipped = skipped;
+  return out;
 }
 
 // One turn's accumulator. Text is looked at as it arrives and then dropped: nothing here
@@ -419,6 +495,8 @@ const newTurn = (branch, ts) => ({
   // nothing above reads them, so the pre-registered numbers and their digests are exactly
   // what they were the day the baseline was taken. A metric that changes when a new metric
   // is added is not a baseline.
+  askCalls: 0,                // AskUserQuestion invocations — observed
+  namedAmbiguity: false,      // the assistant said so in prose — labelled
   firstToolAt: null,          // timestamp of the first tool-calling message in this turn
   doneWhen: null,             // 'observable' | 'vacuous' — only ever set on a session's first turn
   treated: new Set(),         // which TREATMENT markers this turn saw
@@ -516,13 +594,21 @@ async function readSession(file) {
 
     let sawText = false, lastText = '', sawTool = false;
     for (const b of content) {
-      if (b?.type === 'text') { sawText = true; lastText = b.text || ''; continue; }
+      if (b?.type === 'text') {
+        sawText = true; lastText = b.text || '';
+        // Every block, not only the turn's last: an ambiguity is usually named on the way
+        // in, before the work, and the done-claim rule below deliberately reads only the
+        // final one. Two questions, two places to look.
+        if (!cur.namedAmbiguity && NAMED_AMBIGUITY.test(strip(lastText))) cur.namedAmbiguity = true;
+        continue;
+      }
       if (b?.type !== 'tool_use') continue;
       sawTool = true;
       cur.tools++;
       const name = b.name || '';
       const inp = b.input || {};
       if (BROWSER_TOOL.test(name)) cur.browser++;
+      if (name === ASK_TOOL) cur.askCalls++;
       if (WRITE_TOOL.has(name) && typeof inp.file_path === 'string' && inp.file_path) cur.files.add(id(inp.file_path));
       if (name === 'Bash' || name === 'Monitor') {
         const cmd = String(inp.command ?? '');
@@ -583,6 +669,8 @@ function summarise(turns) {
     distinct_files: files.size,
     wall_seconds: turns.length ? secs(turns[0].started, turns[turns.length - 1].ended) : 0,
     nudge_turns: turns.filter((t) => t.nudge).length,
+    ask_calls: turns.reduce((a, t) => a + t.askCalls, 0),
+    ask_turns: turns.filter((t) => t.askCalls > 0).length,
   };
 
   const doneIdx = turns.findIndex((t) => t.doneClaim);
@@ -599,6 +687,11 @@ function summarise(turns) {
     browser_calls_before_done_claim: upToDone ? upToDone.reduce((a, t) => a + t.browser, 0) : null,
     corrections,
     corrections_per_distinct_file: files.size ? round(corrections / files.size, 4) : null,
+    named_ambiguity_turns: turns.filter((t) => t.namedAmbiguity).length,
+    // THE DERIVED NUMBER, and the one the paper is about: it recognised and did not act.
+    // Composed of one label and one fact, so it inherits the label's rejectability — which
+    // is why it lives here and not beside ask_calls.
+    named_without_asking: turns.some((t) => t.namedAmbiguity) && !turns.some((t) => t.askCalls > 0),
   };
   return { observed, labelled };
 }
@@ -634,6 +727,23 @@ function cohort(rows) {
     sleep_seconds_median_of_units: rows.length ? round(median(rows.map((r) => r.observed.sleep_seconds)), 1) : null,
     corrections_per_distinct_file_median_of_units: withFiles.length
       ? round(median(withFiles.map((r) => r.labelled.corrections_per_distinct_file)), 4) : null,
+    // ── the three numbers of the ambiguity gap ──
+    // Deliberately three and not one. The asking rate is a fact and survives on its own; the
+    // recognition rate rests on a prose rule; the gap needs both, so it is only as good as
+    // the weaker one. Reporting a single "gap" figure would hide which half a reader has to
+    // accept in order to believe it.
+    asked_units: rows.filter((r) => r.observed.ask_turns > 0).length,
+    asking_rate: rows.length ? round(rows.filter((r) => r.observed.ask_turns > 0).length / rows.length, 4) : null,
+    ask_calls_per_unit: rows.length ? round(rows.reduce((a, r) => a + r.observed.ask_calls, 0) / rows.length, 4) : null,
+    named_ambiguity_units: rows.filter((r) => r.labelled.named_ambiguity_turns > 0).length,
+    recognition_rate: rows.length ? round(rows.filter((r) => r.labelled.named_ambiguity_turns > 0).length / rows.length, 4) : null,
+    knowing_not_showing_units: rows.filter((r) => r.labelled.named_without_asking).length,
+    knowing_not_showing_rate: rows.length ? round(rows.filter((r) => r.labelled.named_without_asking).length / rows.length, 4) : null,
+    // ...and the same gap conditioned on having recognised anything at all, which is the
+    // paper's own framing: of the sessions that noticed, how many said nothing.
+    knowing_not_showing_of_recognisers: rows.filter((r) => r.labelled.named_ambiguity_turns > 0).length
+      ? round(rows.filter((r) => r.labelled.named_without_asking).length
+              / rows.filter((r) => r.labelled.named_ambiguity_turns > 0).length, 4) : null,
   };
 }
 
@@ -725,20 +835,32 @@ function evaluate(kept, base) {
   for (const k of Object.keys(TREATMENT)) seen[k] = kept.filter((s) => s.turns.some((t) => t.treated.has(k))).length;
 
   const rate = (x) => (x.n ? round(x.events / x.n, 4) : null);
+  // One session, one contribution. The denominator is sessions rather than turns because a
+  // long session naming an ambiguity twenty times is one session that noticed, not twenty.
+  const ambiguity = (sessions) => {
+    const asked = sessions.filter((x) => x.turns.some((t) => t.askCalls > 0));
+    const named = sessions.filter((x) => x.turns.some((t) => t.namedAmbiguity));
+    const gap = sessions.filter((x) => x.turns.some((t) => t.namedAmbiguity) && !x.turns.some((t) => t.askCalls > 0));
+    return { n: sessions.length, events: gap.length, asked: asked.length, named: named.length,
+             calls: sessions.reduce((a, x) => a + x.turns.reduce((b, t) => b + t.askCalls, 0), 0) };
+  };
   const t = {
     false_refusals: falseRefusals(treated), bypass_rate: bypass(treated),
     added_latency_seconds: latencies(treated), rework_turns: rework(treated),
+    ambiguity_gap: ambiguity(treated),
   };
   const c = {
     false_refusals: null,                      // the machinery did not exist: not 0, absent
     bypass_rate: bypass(control), added_latency_seconds: latencies(control),
     rework_turns: reworkFromBaseline(base),
+    ambiguity_gap: ambiguity(control),
   };
   const CONTROL_SOURCE = {
     false_refusals: 'not_applicable — a brief-check cannot have fired before it existed, so there is no untreated rate to compare against. This measurement is one-armed and is reported as an upper bound on the treated arm alone',
     bypass_rate: 'baseline_cohort — recomputed over exactly the session ids the baseline froze',
     added_latency_seconds: 'baseline_cohort — recomputed over exactly the session ids the baseline froze',
     rework_turns: 'baseline_file — derived from the committed columns (turns minus turns_to_done); no transcript re-read',
+    ambiguity_gap: 'baseline_cohort — recomputed over exactly the session ids the baseline froze. The baseline holds no column for either half of this, and could not: it was taken before there was a reason to look',
   };
 
   const nOf = (x) => (x === null ? null : Array.isArray(x) ? x.length : x.n);
@@ -767,6 +889,15 @@ function evaluate(kept, base) {
       row.treated_rate = rate(t[name]); row.control_rate = rate(c[name]);
       row.treated_median_turns = round(median(t[name].values), 1);
       row.control_median_turns = round(median(c[name].values), 1);
+    } else if (name === 'ambiguity_gap') {
+      const rate = (x, k) => (x.n ? round(x[k] / x.n, 4) : null);
+      row.treated_asking_rate = rate(t[name], 'asked');
+      row.control_asking_rate = rate(c[name], 'asked');
+      row.treated_recognition_rate = rate(t[name], 'named');
+      row.control_recognition_rate = rate(c[name], 'named');
+      row.treated_knowing_not_showing = rate(t[name], 'events');
+      row.control_knowing_not_showing = rate(c[name], 'events');
+      row.note = 'the asking rate is a tool-call count and survives rejecting the label; the other two do not';
     } else if (name === 'false_refusals') {
       row.treated_upper_bound = rate(t[name]);
       row.note = 'an upper bound, not a rate: a warning the human acted on before dispatching produces the same clean run as a warning that was never needed';
@@ -800,6 +931,33 @@ function evaluate(kept, base) {
     treatment_markers: Object.fromEntries(Object.entries(TREATMENT)
       .map(([k, v]) => [k, { of: v.of, level: v.level, where: v.where, contract: v.contract, pattern: v.pattern, digest: v.digest, sessions_seen: seen[k] }])),
     measurements: out,
+    // ── WHAT CANNOT BE MEASURED HERE, NAMED RATHER THAN WORKED AROUND ──────
+    // Reported the same way #6's never-fired markers are: as a gap with a reason, because a
+    // measurement that quietly substitutes a worse proxy is harder to catch than one that
+    // says it cannot be made.
+    gaps: [{
+      what: 'the asking rate cannot be split by which contract the session carried',
+      why: [
+        "The standing contract in bin/claude-here now tells a session to ask when the PROMPT is",
+        'uncertain, where it previously forbade asking from uncertainty. That change is exactly what',
+        'this measurement would want to evaluate, and it cannot: the system prompt is not recorded in',
+        'a transcript. Measured — 5 of 275 transcripts contain the contract text at all.',
+      ].join(' '),
+      and_worse: [
+        'Those 5 are not evidence either. Every one of them contains BOTH the old clause and the new',
+        'one, which no session could have carried, so what the text marks is a session that READ OR',
+        'EDITED bin/claude-here — not one that ran under it. The marker is not merely rare, it is',
+        'anti-correlated with the thing it would measure.',
+      ].join(' '),
+      refused_workaround: [
+        'A date cut. The contract changed on a known date, so splitting the corpus there is the',
+        'obvious move and it is the error the mechanical-cohort rule in this file already exists to',
+        'prevent: a session that ran after the change did not necessarily carry it, and those',
+        'sessions behave like the old arm while counting as the new one, diluting any effect toward',
+        'zero. If this needs measuring, the contract has to leave a marker — a version line a hook',
+        'prints, in a position an agent cannot author — and then it is measurable and not before.',
+      ].join(' '),
+    }],
     verdict: unmet.length === 0
       ? { reportable: true, reason: 'every measurement has a sample at or above its floor' }
       : { reportable: false,
@@ -888,6 +1046,7 @@ const pooled = {
     done_claim_turns: pooledAll.labelled.done_claim_turns,
     corrections: pooledAll.labelled.corrections,
     corrections_per_distinct_file: pooledAll.labelled.corrections_per_distinct_file,
+    named_ambiguity_turns: pooledAll.labelled.named_ambiguity_turns,
   },
 };
 const perSession = kept.map((s) => ({ id: s.id, ...summarise(s.turns) }))
@@ -903,6 +1062,7 @@ const report = {
   generated_at: new Date().toISOString(),
   corpus: {
     files: files.length, records, unparsable_lines: unparsable,
+    subagent_files_skipped: files.subagentFilesSkipped || 0,
     sessions_read: sessions.length, sessions_kept: kept.length,
     branches: perBranch.length, turns: allTurns.length,
   },
@@ -958,10 +1118,18 @@ if (has('--evaluate') || has('--contract')) {
       console.log(`${head}  treated ${m.treated_median_seconds}s  control ${m.control_median_seconds}s  added ${m.added_seconds}s`);
     else if (m.measurement === 'rework_turns')
       console.log(`${head}  rate ${m.treated_rate} vs ${m.control_rate}   median turns ${m.treated_median_turns} vs ${m.control_median_turns}`);
+    else if (m.measurement === 'ambiguity_gap')
+      console.log(`${head}  asked ${m.treated_asking_rate} vs ${m.control_asking_rate}   recognised ${m.treated_recognition_rate} vs ${m.control_recognition_rate}   gap ${m.treated_knowing_not_showing} vs ${m.control_knowing_not_showing}`);
     else if (m.measurement === 'false_refusals')
       console.log(`${head}  upper bound ${m.treated_upper_bound} (n=${m.n_treated}); one-armed by construction`);
     else
       console.log(`${head}  treated ${m.treated_rate} vs control ${m.control_rate}`);
+  }
+
+  for (const g of ev.gaps) {
+    console.log(`\nNOT MEASURABLE HERE, and not worked around: ${g.what}`);
+    for (const line of [g.why, g.and_worse, g.refused_workaround])
+      console.log('  ' + line.replace(/(.{1,86})(\s|$)/g, '$1\n  ').trimEnd());
   }
 
   if (!V.reportable && V.waiting_for.length) {
@@ -1122,14 +1290,25 @@ console.log(`  tool calls per turn        mean ${o.tool_calls_per_turn_mean}  me
 console.log(`  seconds sleeping per turn  total ${o.sleep_seconds}  mean ${o.sleep_seconds_per_turn_mean}  max ${o.sleep_seconds_max_turn}  (${o.sleep_calls} sleeps in ${o.sleep_turns} turns)`);
 console.log(`  browser opened             ${o.browser_turns} turns  ${o.browser_calls} calls`);
 console.log(`  distinct files touched     ${o.distinct_files}`);
+console.log(`  asked a question           ${o.ask_turns} turns  ${o.ask_calls} AskUserQuestion calls  (whether they were GOOD questions is not measured)`);
 console.log(`  automated nudges counted as human turns  ${o.nudge_turns}`);
+console.log(`  subagent transcripts skipped (not sessions)  ${report.corpus.subagent_files_skipped}`);
 console.log('\nlabelled  — a pattern stood in for a judgment; see rules.*.digest');
 console.log(`  done-claim turns           ${l.done_claim_turns}`);
 console.log(`  corrections                ${l.corrections}   per distinct file ${l.corrections_per_distinct_file}`);
+console.log(`  named an ambiguity         ${l.named_ambiguity_turns} turns`);
 console.log(`\nacross ${c.units} ${BY === 'branch' ? 'branches' : 'sessions'}  — the two numbers that cannot be pooled`);
 console.log(`  turns to first done-claim  median ${c.turns_to_done_median}  mean ${c.turns_to_done_mean}  (${c.units_never_claiming_done} never claimed)`);
 console.log(`  browser before done-claim  ${c.browser_before_done_claim_units}/${c.units_claiming_done} = ${c.browser_before_done_claim_fraction}`);
 console.log(`  medians of the per-unit    tc/turn ${c.tool_calls_per_turn_median_of_units}  sleep s ${c.sleep_seconds_median_of_units}  corr/file ${c.corrections_per_distinct_file_median_of_units}`);
+console.log(`\nthe ambiguity gap  — recognising is not asking (Su & Cardie, "Knowing but Not Showing")`);
+console.log(`  ASKED       (observed) ${c.asked_units}/${c.units} = ${c.asking_rate}   ${c.ask_calls_per_unit} calls per ${BY}`);
+console.log(`  RECOGNISED  (labelled) ${c.named_ambiguity_units}/${c.units} = ${c.recognition_rate}`);
+console.log(`  THE GAP     (derived)  ${c.knowing_not_showing_units}/${c.units} = ${c.knowing_not_showing_rate}   named an ambiguity and never asked`);
+console.log(`                         ${c.knowing_not_showing_of_recognisers} of those that recognised anything at all`);
+console.log(`  the asked line is a tool-call count and stands alone; the other two rest on a prose rule.`);
+console.log(`  NOT the paper's 60-80%: that is a model judging ambiguity when asked to. This counts`);
+console.log(`  ambiguity named unprompted, a harder bar — the frame is comparable, the number is not.`);
 console.log(`\nper ${BY} (top 15 by turns)`);
 console.log(`  ${'id'.padEnd(10)}${'turns'.padStart(7)}${'tc/turn'.padStart(9)}${'sleep s'.padStart(9)}${'brws'.padStart(6)}${'files'.padStart(7)}${'to-done'.padStart(9)}${'corr/file'.padStart(11)}`);
 for (const r of rows.slice(0, 15)) {
