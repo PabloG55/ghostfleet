@@ -716,10 +716,25 @@ while true; do
       addproject)
         p="$(node "$GRID" - --screen addproject </dev/tty)" || true; _clear
         p="${p#newproject${US}}"
+        # THE AGENT IS AN OPTIONAL LAST FIELD, so split on the SEPARATOR rather than
+        # trusting emptiness: `${x#*$SEP}` on a string with no separator returns the string
+        # UNCHANGED, which would set the agent to the whole path — non-empty, so every
+        # `[ -n ... ]` test downstream sails straight past it. CLAUDE.md's own example.
+        np_agent=""
+        case "$p" in *"${US}"*) np_agent="${p#*${US}}"; p="${p%%${US}*}" ;; esac
         if [ -n "$p" ] && [ "$p" != "newproject" ] && [ -d "$p" ]; then
           nm="$(basename "$p")"
-          awk -F'\t' -v n="$nm" '$1==n{f=1} END{exit !f}' "$PROJECTS_CFG" 2>/dev/null \
-            || printf '%s\t%s\t%s\n' "$nm" "$p" "$PROFILE" >> "$PROJECTS_CFG"
+          # A 4-COLUMN LINE ONLY WHEN THERE IS AN AGENT. The reader splits on tabs and a
+          # tab is IFS-whitespace, so an empty profile column with an agent after it
+          # arrives as profile=<agent> — fleet-project records that exact bug. $PROFILE is
+          # always set here, but writing three columns when nothing was chosen keeps the
+          # single-agent machine byte-identical to what it wrote before.
+          if awk -F'\t' -v n="$nm" '$1==n{f=1} END{exit !f}' "$PROJECTS_CFG" 2>/dev/null; then :
+          elif [ -n "$np_agent" ]; then
+            printf '%s\t%s\t%s\t%s\n' "$nm" "$p" "$PROFILE" "$np_agent" >> "$PROJECTS_CFG"
+          else
+            printf '%s\t%s\t%s\n' "$nm" "$p" "$PROFILE" >> "$PROJECTS_CFG"
+          fi
           set_project "$nm"
         fi ;;
       project${US}*) set_project "${sel#project${US}}" ;;

@@ -2675,6 +2675,85 @@ fi
 # `worktree remove` AND `remove --force` both refuse a locked tree, and `worktree prune`
 # skips it. So --agents promised a sweep it could not perform, and the leftover sat
 # there forever. Both directions: the default must still keep its hands off.
+# ── 4a10c9. adding a project asks which agent, when there is a choice ───────
+# `fleet-project add` has accepted --agent for as long as the agent axis has existed, and
+# the projects file has carried a 4th column for it. The TUI that adds a project never
+# asked — so every project added that way silently got no agent, which reads as claude for
+# every session in it, forever. The two paths drifted because the control plane writes
+# that line ITSELF instead of calling fleet-project, so the flag and the screen had no
+# single place to disagree in.
+group "adding a project picks its agent"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  AP="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$AP/.config/ghostfleet" "$AP/bin" "$AP/target"
+  : > "$AP/.config/ghostfleet/projects"
+  apick() {                      # $1 = the agent list the fake reports; keys after that
+    local list="$1"; shift
+    printf '#!/usr/bin/env bash\n[ "$1" = installed ] && printf "%%s" "%s"\n' "$list" > "$AP/bin/fleet-agent"
+    chmod +x "$AP/bin/fleet-agent"
+    tmux -L cfapick kill-server 2>/dev/null
+    tmux -L cfapick new-session -d -x 100 -y 24 -e HOME="$AP" -e PATH="$AP/bin:$PATH" \
+      -e CLAUDE_FLEET_PROJECTS="$AP/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' - --screen addproject > '$AP/out' 2>'$AP/err'; sleep 4" 2>/dev/null
+    sleep 2.2
+    local k; for k in "$@"; do tmux -L cfapick send-keys "$k"; sleep 0.6; done
+    sleep 0.8
+    # THE PANE HAS TO OUTLIVE THE PROGRAM. The last key is usually ⏎, which finishes
+    # fleet-grid — node exits, tmux reaps the session, and a capture taken after that
+    # returns NOTHING. Every screen assertion then reads 0 and blames the screen for a
+    # pane that no longer exists, which is how the first two versions of this group
+    # failed. The trailing `sleep` keeps the pane up long enough to photograph.
+    # CAPTURED TO A FILE, not to a variable. This function is called inside a command
+    # substitution, which is a SUBSHELL — a variable assigned in here never reaches the
+    # caller, and under `set -u` the caller then dies on the unbound name rather than
+    # reading a stale one. The first version of this group failed exactly that way, three
+    # rows at a time. A file crosses the boundary; an assignment does not.
+    tmux -L cfapick capture-pane -p > "$AP/screen" 2>/dev/null
+    tmux -L cfapick kill-server 2>/dev/null
+  }
+  apscreen() { grep -c "$1" "$AP/screen" 2>/dev/null || true; }
+  apout()    { cat "$AP/out" 2>/dev/null; }
+  US_="$(printf '\037')"
+
+  # THREE agents installed: the screen must appear, and picking the second must come back
+  # in the record. Naming WHICH agent is what makes this able to fail — a detour that
+  # always returned claude would satisfy a test that only checked a third field exists.
+  apick 'claude
+opencode
+codex' s Down Enter
+  OUT="$(apout)"
+  is "the agent step appears"            "1" "$(apscreen '^ agent —')"
+  is "...and says it is the default"     "1" "$(apscreen 'every session in it')"
+  # The warnings are the reason this screen exists at all, not decoration.
+  is "...and warns what codex gives up"  "1" "$(apscreen 'no done/need-you nudges')"
+  is "...and esc goes back to the FOLDER" "1" "$(apscreen 'back to the folder')"
+  is "the record carries the picked agent" "opencode" "${OUT##*"$US_"}"
+  is "...and still carries the folder"   "1" "$(printf '%s' "$OUT" | grep -c "$AP" || true)"
+
+  # ONE agent installed: no detour at all, and the record keeps its old two-field shape.
+  # Without this the change would silently add a keystroke to every machine that has only
+  # claude, which is most of them.
+  apick 'claude' s
+  OUT1="$(apout)"
+  is "one agent means no agent step"     "0" "$(printf '%s' "$APSCREEN" | grep -c '^ agent —' || true)"
+  is "...and the record has no 3rd field" "1" \
+     "$(case "$OUT1" in *"$US_"*"$US_"*) echo 0 ;; *"$US_"*) echo 1 ;; *) echo 0 ;; esac)"
+
+  # THE CONSUMER SIDE. The agent is an optional LAST field, and `${x#*$SEP}` on a string
+  # with no separator returns it UNCHANGED — which would set the agent to the whole path,
+  # non-empty, so every emptiness test downstream passes it through. So the branch has to
+  # test for the SEPARATOR, and it has to write four columns only when there is one.
+  is "the control plane splits on the separator" "1" \
+     "$(grep -c 'case "$p" in \*"${US}"\*)' "$ROOT/bin/ghostfleet" || true)"
+  is "...and writes a 4-column line"     "1" \
+     "$(grep -c "printf '%s.t%s.t%s.t%s.n' \"\$nm\" \"\$p\" \"\$PROFILE\" \"\$np_agent\"" "$ROOT/bin/ghostfleet" || true)"
+  is "...and keeps 3 columns when none"  "1" \
+     "$(grep -c "printf '%s.t%s.t%s.n' \"\$nm\" \"\$p\" \"\$PROFILE\"" "$ROOT/bin/ghostfleet" || true)"
+  is "no crash on the way through"       "0" "$(grep -cE 'ReferenceError|TypeError' "$AP/err" 2>/dev/null || true)"
+  tmux -L cfapick kill-server 2>/dev/null; rm -rf "$AP"
+else
+  skip "add-project agent step" "tmux or node missing"
+fi
+
 group "fleet-clean and Claude's locked worktrees"
 if command -v git >/dev/null 2>&1; then
   FC="$(mktemp -d)"

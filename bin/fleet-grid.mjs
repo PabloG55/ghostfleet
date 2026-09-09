@@ -1478,6 +1478,8 @@ function H() { return process.stderr.rows || 24; }
 function out(s) { tty.write(s); }
 
 let mode = 'grid';           // 'grid' | 'picker' | 'nameprompt' | 'agentpick' | 'rename' | 'schedule' | 'newwt'
+let agentPickFor = '';       // caption for the agent screen; empty = the session-naming flow
+let dAgent = 0;              // the add-project screen is showing the agent step
 let sel = 0;                 // selection index in grid
 let cards = [];
 let items = [];              // grid items: cards + {new:true}
@@ -1693,7 +1695,11 @@ function installedAgents() {
 function renderAgentPick() {
   const agents = installedAgents();
   let buf = '\x1b[H';
-  buf += ` ${C.bold}agent${C.reset} ${C.dim}— ${nameInput} in ${nameCwd.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  // The caption is the caller's, because this screen now serves two flows: naming a new
+  // SESSION, and adding a PROJECT — where the choice becomes the project's default for
+  // every session in it, which is a different sentence and worth saying.
+  const cap = agentPickFor || `${nameInput} in ${nameCwd.replace(HOME, '~')}`;
+  buf += ` ${C.bold}agent${C.reset} ${C.dim}— ${cap}${C.reset}\x1b[K\n\x1b[K\n`;
   agents.forEach((a, i) => {
     const on = i === agentSel;
     const mark = on ? `${C.bold}${C.white} ▸ ` : '   ';
@@ -1707,7 +1713,10 @@ function renderAgentPick() {
     const note = caps.length ? `  ${C.dim}(${caps.join(' · ')})${C.reset}` : '';
     buf += `${mark}${on ? C.bold + C.white : C.reset}${padEndV(a, 12)}${C.reset}${note}\x1b[K\n`;
   });
-  buf += `\x1b[K\n${C.dim} ↑↓/jk move · ⏎ create · esc/\` back to the name${C.reset}\x1b[K\n\x1b[J`;
+  // "back to the name" is only true in the session flow; the add-project flow arrives
+  // here from the FOLDER picker and esc returns there. A footer that names the wrong
+  // previous screen is a small lie the reader has to test by pressing the key.
+  buf += `\x1b[K\n${C.dim} ↑↓/jk move · ⏎ create · esc/\` back to the ${agentPickFor ? 'folder' : 'name'}${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // one adapter field, cached per (agent,field) — used only to annotate the picker
@@ -2951,6 +2960,18 @@ function dRender() {
   out(buf);
 }
 function onKeyAdd(key) {
+  // The agent step of the add-project flow. It lives here rather than in the grid's mode
+  // machine because this screen has its own stdin handler — the grid's `mode` never runs.
+  if (dAgent) {
+    const agents = installedAgents();
+    if (key === '\x1b' || key === '\x03' || key === '\x60') { dAgent = 0; agentPickFor = ''; dRender(); return; }
+    if (key === '\x1b[A' || key === 'k') agentSel = Math.max(0, agentSel - 1);
+    else if (key === '\x1b[B' || key === 'j') agentSel = Math.min(agents.length - 1, agentSel + 1);
+    else if (key === '\r' || key === '\n') {
+      return finish(`newproject${US}${curDir}${US}${agents[agentSel] || 'claude'}`);
+    }
+    renderAgentPick(); return;
+  }
   if (key === '\x1b' || key === '\x03' || key === '\x60') return finish('');
   if (key === '\x1b[A' || key === 'k') dSel = Math.max(0, dSel - 1);
   else if (key === '\x1b[B' || key === 'j') dSel = Math.min(dirEntries.length - 1, dSel + 1);
@@ -2959,7 +2980,27 @@ function onKeyAdd(key) {
     const e = dirEntries[dSel];
     curDir = e === '..' ? path.dirname(curDir) : path.join(curDir, e);
     dSel = 0; dBuild();
-  } else if (key === 's' || key === 'S') return finish(`newproject${US}${curDir}`);
+  } else if (key === 's' || key === 'S') {
+    // THE SAME DETOUR THE SESSION FLOW ALREADY TAKES, and the reason this was missing is
+    // worth recording: `fleet-project add` has accepted --agent since the agent axis
+    // existed, and the projects file has carried a 4th column for it, but the control
+    // plane writes that line ITSELF rather than calling fleet-project — so the flag and
+    // the TUI drifted apart and every project added from this screen silently got no
+    // agent, which reads as claude for every session in it, forever.
+    //
+    // Only detour when there is a choice, exactly as the naming flow decides it: on a
+    // machine with one agent installed this screen behaves as it always did.
+    if (installedAgents().length > 1) {
+      const def = process.env.CLAUDE_FLEET_AGENT || 'claude';
+      const i = installedAgents().indexOf(def);
+      agentSel = i >= 0 ? i : 0;
+      // Named for what the choice MEANS here: not this one session, but the default for
+      // every session the project will ever start.
+      agentPickFor = `default for ${path.basename(curDir)} — every session in it`;
+      dAgent = 1; renderAgentPick(); return;
+    }
+    return finish(`newproject${US}${curDir}`);
+  }
   dRender();
 }
 
