@@ -843,6 +843,111 @@ got="$(HOME="$T" node -e '
 is "4th column parsed per project" "oc:opencode pl:claude" "$got"
 rm -rf "$T"
 
+group "the agent column says it cycles"
+# WHY THIS IS DRIVEN AND NOT ASSERTED: the failure was that a completed lap of the ring
+# is indistinguishable from a keystroke that did nothing. Three presses return the row
+# to the default AND rewrite it to three columns — which is byte-for-byte the row of a
+# project whose agent was never set. So neither the file nor a single frame can tell the
+# two apart; only watching the position change across presses can, which is what this
+# does. Measured from a real screen that sat on claude while wanting codex.
+#
+# WHY THE PATH IS SCRUBBED, and this is the half that took two runs to get right: the
+# ring's length is `fleet-agent installed`, which asks `command -v` for each agent's
+# binary. Adding stubs to the front of the suite's own PATH can only make the ring
+# LONGER — on a machine where the real CLIs are installed, removing a stub changes
+# nothing and the two-agent arm silently tests the three-agent one instead. It passed
+# under a break that should have reddened it, which is the same "a test can pass because
+# of where it ran" scar as the codex ready-pattern. So the PATH here holds ONLY what the
+# screen and its two helpers call, and `command -v codex` has to be able to answer FALSE.
+T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a" "$T/bin"
+# `sleep` belongs on this list and finding out cost a run: the pane's command ends in
+# one, so a PATH without it exits the pane instantly and the server is simply gone.
+for r in sh bash node tmux git grep egrep awk sed cat tr cut head tail wc sort sleep \
+         mv rm mkdir ln cp printf env uname dirname basename readlink stat date id; do
+  src="$(command -v "$r" 2>/dev/null)" && ln -sf "$src" "$T/bin/$r" 2>/dev/null
+done
+agent_stub() { printf '#!/bin/sh\nexit 0\n' > "$T/bin/$1"; chmod +x "$T/bin/$1"; }
+# Driven twice on the same screen: once with a ring of three, once with a ring of two.
+# The second is not a formality — a two-state ring IS a toggle and a counter on one is
+# noise, so the counter has to be absent there for the right reason.
+agcol() {            # $1..$n = the agents whose binaries exist; echoes row|footer per press
+  printf 'acme-api\t%s/a\twork\n' "$T" > "$T/.config/ghostfleet/projects"
+  rm -f "$T/bin/claude" "$T/bin/codex" "$T/bin/opencode"
+  for a in "$@"; do agent_stub "$a"; done
+  tmux -L cfagcol kill-server 2>/dev/null
+  # PATH IS SET INSIDE THE COMMAND, NOT WITH -e, and that is not a style choice: on this
+  # tmux the pane came up with the SERVER's PATH and ignored `-e PATH=`, so the scrub
+  # silently did nothing and both arms tested the same ring. HOME does come through `-e`
+  # (every other group here relies on that); PATH is the one that has to be assigned in
+  # the shell tmux runs. Measured by printing $PATH from inside the pane.
+  tmux -L cfagcol new-session -d -x 120 -y 24 -e HOME="$T" \
+    -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
+    "PATH='$T/bin'; export PATH; '$T/bin/node' '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 20" 2>/dev/null
+  sleep 2
+  tmux -L cfagcol send-keys ','; sleep 1
+}
+agrow()  { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'acme-api' | head -1; }
+agfoot() { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'esc/. back' | head -1; }
+agtoAGENT() { tmux -L cfagcol send-keys 'l'; sleep 0.4; tmux -L cfagcol send-keys 'l'; sleep 1; }
+if command -v tmux >/dev/null 2>&1; then
+  agcol claude opencode codex
+  # Proof the scrub took: on an unscrubbed PATH this says three even with no stubs, so a
+  # wrong answer here is what tells you the arm below is testing the wrong ring.
+  is "the scrubbed PATH is what sets the ring" "claude opencode codex" \
+     "$(PATH="$T/bin" "$ROOT/bin/fleet-agent" installed 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+  # The binary columns are honest as toggles and must KEEP saying so — the per-column
+  # verb is only worth having if it still distinguishes them.
+  is "binary column still says toggle" "yes" \
+     "$(grep -q 'space/⏎ toggle' <<< "$(agfoot)" && echo yes || echo no)"
+  agtoAGENT
+  is "agent column says cycle"         "yes" \
+     "$(grep -q 'space/⏎ cycle' <<< "$(agfoot)" && echo yes || echo no)"
+  is "ring starts at 1 of 3"           "yes" \
+     "$(grep -q 'claude 1/3' <<< "$(agrow)" && echo yes || echo no)"
+  tmux -L cfagcol send-keys Space; sleep 1
+  is "one press advances the position"  "yes" \
+     "$(grep -q 'opencode 2/3' <<< "$(agrow)" && echo yes || echo no)"
+  tmux -L cfagcol send-keys Space; sleep 1
+  is "two presses reach the last"       "yes" \
+     "$(grep -q 'codex 3/3' <<< "$(agrow)" && echo yes || echo no)"
+  tmux -L cfagcol send-keys Space; sleep 1
+  # THE LAP IS THE BUG. Landing back on claude is correct; landing there with no way to
+  # see it happened is what read as a dead key.
+  is "the lap wraps, visibly"           "yes" \
+     "$(grep -q 'claude 1/3' <<< "$(agrow)" && echo yes || echo no)"
+  is "...and the row is a 3-column row again" "3" \
+     "$(awk -F'\t' '/^acme-api/{print NF}' "$T/.config/ghostfleet/projects")"
+
+  agcol claude codex          # a ring of two: a real toggle, and no counter on it
+  is "two installed is a ring of two"  "claude codex" \
+     "$(PATH="$T/bin" "$ROOT/bin/fleet-agent" installed 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+  agtoAGENT
+  is "two agents show no counter"      "no" \
+     "$(grep -qE 'claude [0-9]/[0-9]' <<< "$(agrow)" && echo yes || echo no)"
+  is "...and still name the default"   "yes" \
+     "$(grep -q 'claude' <<< "$(agrow)" && echo yes || echo no)"
+  is "...and one press still sets it"  "yes" \
+     "$(tmux -L cfagcol send-keys Space; sleep 1; grep -q 'codex' <<< "$(agrow)" && echo yes || echo no)"
+  # AN AGENT THAT IS NOT INSTALLED HERE HAS NO POSITION IN THE RING, and the fudge that
+  # placed it at the default's index is what this arm exists to keep out: a project set
+  # up on another machine, or whose CLI was uninstalled since, printed `1/3` — the
+  # position of claude — beside its own name. The counter is the one number on this
+  # screen a reader has no way to check, so a made-up one is worse than none.
+  agcol claude opencode codex
+  printf 'acme-api\t%s/a\twork\tzed\n' "$T" > "$T/.config/ghostfleet/projects"
+  tmux -L cfagcol send-keys '\`'; sleep 0.6      # out and back in, to re-read the file
+  tmux -L cfagcol send-keys ','; sleep 1
+  agtoAGENT
+  is "an uninstalled agent is still named" "yes" \
+     "$(grep -q 'zed' <<< "$(agrow)" && echo yes || echo no)"
+  is "...but gets no invented position"    "no" \
+     "$(grep -qE 'zed [0-9]/[0-9]' <<< "$(agrow)" && echo yes || echo no)"
+  tmux -L cfagcol kill-server 2>/dev/null
+else
+  skip "the agent column says it cycles" "tmux not available"
+fi
+rm -rf "$T"
+
 group "projects banner"
 # The sprite costs six rows. On a short or narrow window the cards matter more than
 # the logo, so it must collapse to the one-line header instead of pushing projects
