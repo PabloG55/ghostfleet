@@ -2675,6 +2675,69 @@ fi
 # `worktree remove` AND `remove --force` both refuse a locked tree, and `worktree prune`
 # skips it. So --agents promised a sweep it could not perform, and the leftover sat
 # there forever. Both directions: the default must still keep its hands off.
+# ── 4a10d0. the teardown half of the worktree lifecycle ──────────────────────
+# fleet-spawn runs .ghostfleet/post-create so a repo can provision what a worktree needs
+# from its slot. NOTHING RAN THE COUNTERPART, so a reclaim removed the checkout and left
+# every provisioned resource running. Measured on one project: 29 containers and 16
+# volumes, about 1.3GB, across NINE worktrees that no longer existed — invisible because
+# the leak lives in a system ghostfleet knows nothing about and still must not.
+group "a worktree gets a teardown, not just a setup"
+if command -v git >/dev/null 2>&1; then
+  TD="$(cd "$(mktemp -d)" && pwd -P)"
+  git init -q -b main "$TD/repo" 2>/dev/null
+  mkdir -p "$TD/repo/.ghostfleet"
+  # The hook has to be COMMITTED, and that is not incidental to the test: an untracked
+  # hook makes the worktree dirty, fleet-clean keeps a dirty worktree, and the first
+  # version of this fixture never reached the removal path at all.
+  printf '#!/usr/bin/env bash\nprintf "slot=%%s\\n" "${CLAUDE_FLEET_SLOT:-none}" > "$(dirname "$CLAUDE_FLEET_WORKTREE")/ran-$(basename "$CLAUDE_FLEET_WORKTREE")"\n' \
+    > "$TD/repo/.ghostfleet/pre-remove"
+  chmod +x "$TD/repo/.ghostfleet/pre-remove"
+  git -C "$TD/repo" add -A
+  git -C "$TD/repo" -c user.email=t@t -c user.name=t commit -q -m init 2>/dev/null
+  git -C "$TD/repo" worktree add -q "$TD/ok"   -b scratch/ok   >/dev/null 2>&1
+  git -C "$TD/repo" worktree add -q "$TD/bad"  -b scratch/bad  >/dev/null 2>&1
+  git -C "$TD/repo" worktree add -q "$TD/none" -b scratch/none >/dev/null 2>&1
+  ( cd "$TD/bad" && printf '#!/usr/bin/env bash\nexit 3\n' > .ghostfleet/pre-remove \
+    && git add -A && git -c user.email=t@t -c user.name=t commit -q -m fail ) >/dev/null 2>&1
+  ( cd "$TD/none" && git rm -q .ghostfleet/pre-remove \
+    && git -c user.email=t@t -c user.name=t commit -q -m nohook ) >/dev/null 2>&1
+  tmux -L cftdwn kill-server 2>/dev/null
+  tmux -L cftdwn new-session -d -s s 'sleep 60' 2>/dev/null; sleep 0.4
+  fc() { CLAUDE_FLEET_SOCK=cftdwn bash "$ROOT/bin/fleet-clean" "$@" 2>&1; }
+
+  # A DRY RUN MUST NOT RUN IT. Every other line fleet-clean prints is a git command whose
+  # effect it can predict; a repo hook is arbitrary and destructive, so the dry run says
+  # it would run and stops. Asserted on the FILESYSTEM, not on the wording.
+  DRY="$(cd "$TD/repo" && fc)"
+  # TWO of the three worktrees ship a hook, so the announcement count is 2 — and asserting
+  # the NUMBER rather than the presence is what makes this row carry both directions at
+  # once: 3 would mean the hookless worktree was announced too, 0 would mean the hook is
+  # never seen at all. The first version expected 1 and failed for arithmetic.
+  is "announced for exactly the two with a hook" "2" "$(grep -c 'would run: .ghostfleet/pre-remove' <<< "$DRY" || true)"
+  is "...and does not execute it"         "0" "$(ls "$TD" | grep -c '^ran-' || true)"
+  is "...and removes nothing"             "3" "$(ls -d "$TD"/ok "$TD"/bad "$TD"/none 2>/dev/null | grep -c . || true)"
+
+  GO="$(cd "$TD/repo" && fc --go)"
+  is "the hook ran for the clean one"     "1" "$([ -f "$TD/ran-ok" ] && echo 1 || echo 0)"
+  is "...and that worktree is gone"       "0" "$([ -d "$TD/ok" ] && echo 1 || echo 0)"
+  # A FAILED TEARDOWN KEEPS THE WORKTREE. post-create failing leaves a worktree that needs
+  # setting up, which is survivable; pre-remove failing and removing anyway destroys the
+  # only copy of the teardown and converts a loud failure into a silent leak.
+  is "a failed hook KEEPS the worktree"   "1" "$([ -d "$TD/bad" ] && echo 1 || echo 0)"
+  is "...and says why"                    "1" "$(grep -c 'pre-remove FAILED' <<< "$GO" || true)"
+  # AND THE OTHER DIRECTION, or this group would pass on a build where the hook never runs
+  # at all: a worktree whose repo ships NO hook must be removed exactly as before. The
+  # count above is what proves it was not announced; a second grep of the same output
+  # would have asserted the same thing under a name that claimed otherwise, which is how
+  # the first version of this row came to say "nothing was announced" while counting
+  # announcements.
+  is "no hook means no change"            "0" "$([ -d "$TD/none" ] && echo 1 || echo 0)"
+  is "...and it left no marker behind"    "0" "$([ -f "$TD/ran-none" ] && echo 1 || echo 0)"
+  tmux -L cftdwn kill-server 2>/dev/null; rm -rf "$TD"
+else
+  skip "worktree teardown hook" "git missing"
+fi
+
 group "fleet-clean and Claude's locked worktrees"
 if command -v git >/dev/null 2>&1; then
   FC="$(mktemp -d)"
