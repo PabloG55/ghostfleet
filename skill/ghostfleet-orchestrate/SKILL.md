@@ -167,6 +167,7 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | read a worker's output | `fleet-read <session> [n]` |
 | **look at what was built** | `fleet-look.mjs <url \| file.html \| file.pdf>` — renders it and prints a PNG path; `Read` that path to actually see it. `--tree` for the accessibility tree |
 | **have another model read your diff** | `fleet-review` — runs the reviewing CLI's own non-interactive review. Defaults to uncommitted changes, else this branch against the integration branch, and to an agent OTHER than yours. Exactly one of the three ships a review; the rest say so rather than faking one |
+| **photograph a flow for a human to approve** | `fleet-shots --flow <f.json>` — walks the steps, shoots each one, records the REQUESTS it made, and writes a folder whose `index.html` opens with no server. A 404 behind a page that looks right is the thing this catches and a screenshot cannot |
 | reuse a free worktree | `fleet-spawn <name> --reuse <worktree> [--prompt "…"]` |
 | recycle a worktree onto a new branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from <base>` |
 | new worker (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] [--new] [--prompt "…"]` |
