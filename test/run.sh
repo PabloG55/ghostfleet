@@ -2060,6 +2060,78 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   sag "$(sj PreToolUse EnterWorktree "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
   is "EnterWorktree is still blocked"         "2" "$SRC"
   is "...and does NOT mention subagents"      "0" "$(shas 'subagent')"
+
+  # ── the hole: a lead that was never IN the fleet ────────────────────────────
+  # MEASURED, from a real transcript. A lead in a registered project`s main checkout
+  # dispatched a general-purpose subagent and was NOT refused, three weeks after this
+  # guard shipped — because it had been started as a plain `claude` in that directory
+  # rather than through the fleet, so $CLAUDE_FLEET_SOCK was unset and the guard declined
+  # with "not a fleet session — built-ins are fine". The project had live workers at the
+  # time. The advice was skipped exactly where it was most useful.
+  #
+  # The condition is now "is there a fleet here to use", which needs BOTH a registered
+  # project and a live server for it: fleet-spawn exits 1 without a socket, so refusing
+  # when no fleet is running would leave the session with no alternative at all — the
+  # same mistake this guard already avoids for leaves.
+  if command -v tmux >/dev/null 2>&1; then
+    mkdir -p "$SA/.config/ghostfleet"
+    # The root is the repo`s PARENT, which is the shape that actually bites: one project
+    # here is registered at a container directory holding several checkouts, so a match
+    # has to be "under the root", not "equal to it".
+    printf 'sagproj\t%s\twork\n' "$SA" > "$SA/.config/ghostfleet/projects"
+    tmux -L cf-sagproj kill-server 2>/dev/null
+    # NO server yet: nothing to redirect to, so the built-in has to be allowed.
+    sag "$(sj PreToolUse Agent "$SA/repo" general-purpose)" HOME="$SA"
+    is "outside a fleet, no live server: allowed" "0" "$SRC"
+    tmux -L cf-sagproj new-session -d -s s 'sleep 60' 2>/dev/null; sleep 0.4
+    sag "$(sj PreToolUse Agent "$SA/repo" general-purpose)" HOME="$SA"
+    is "...with the server live: REFUSED"         "2" "$SRC"
+    is "...and it names the project"              "1" "$(shas "project 'sagproj'")"
+    # THE COMMAND HAS TO WORK FROM OUT HERE. fleet-spawn refuses without a socket, so an
+    # instruction that omits -s sends the reader into a second failure.
+    # One SPECIFIC line, not the count: the message offers both a --reuse and a --branch
+    # form, so counting occurrences asserts how many examples are printed rather than that
+    # the socket is named. The first version of this row expected 1 and got 2.
+    is "...and hands over a -s socket"            "1" "$(shas 'fleet-spawn -s cf-sagproj <name> --reuse')"
+    # A leaf is still a leaf, fleet or no fleet.
+    sag "$(sj PreToolUse Agent "$SA/wt-a" general-purpose)" HOME="$SA"
+    is "...a leaf outside a fleet is allowed"     "0" "$SRC"
+    # Read-only research is still read-only research.
+    sag "$(sj PreToolUse Agent "$SA/repo" Explore)" HOME="$SA"
+    is "...Explore outside a fleet is allowed"    "0" "$SRC"
+    # AND THE OTHER DIRECTION, or this refuses in every repo on the machine: a checkout
+    # that belongs to no registered project keeps its built-ins even with a server up.
+    #   OUTSIDE $SA, and that is the whole point of a separate directory. The first version
+    # of this row put the "unregistered" repo at $SA/unreg — inside the very root the
+    # fixture registers — so the guard refused it, correctly, and the row blamed the guard.
+    # A control that is not actually outside the treatment is not a control.
+    UNREG="$(cd "$(mktemp -d)" && pwd -P)"
+    git init -q -b main "$UNREG/repo" 2>/dev/null
+    git -C "$UNREG/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+    sag "$(sj PreToolUse Agent "$UNREG/repo" general-purpose)" HOME="$SA"
+    is "an unregistered repo is left alone"       "0" "$SRC"
+    rm -rf "$UNREG"
+    # EnterWorktree takes the same route and must say the same thing.
+    sag "$(sj PreToolUse EnterWorktree "$SA/repo")" HOME="$SA"
+    is "EnterWorktree outside a fleet: REFUSED"   "2" "$SRC"
+    is "...and names the project too"             "1" "$(shas "project 'sagproj'")"
+    # PHYSICAL PATHS. git hands back a resolved path and a registered root can be a
+    # symlinked one — on this platform /var is a symlink to /private/var — so a string
+    # compare silently never matches. The first version of this code failed exactly here,
+    # against a mktemp fixture, which is where it hides.
+    mkdir -p "$SA/link-target"; ln -sfn "$SA/link-target" "$SA/link-alias" 2>/dev/null
+    git init -q -b main "$SA/link-target/r" 2>/dev/null
+    git -C "$SA/link-target/r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+    printf 'sagproj\t%s\twork\nlinked\t%s\twork\n' "$SA" "$SA/link-alias" > "$SA/.config/ghostfleet/projects"
+    tmux -L cf-linked kill-server 2>/dev/null
+    tmux -L cf-linked new-session -d -s s 'sleep 60' 2>/dev/null; sleep 0.4
+    sag "$(sj PreToolUse Agent "$SA/link-target/r" general-purpose)" HOME="$SA"
+    is "a symlinked project root still matches"   "2" "$SRC"
+    tmux -L cf-linked kill-server 2>/dev/null
+    tmux -L cf-sagproj kill-server 2>/dev/null
+  else
+    skip "guard outside a fleet" "tmux missing"
+  fi
   rm -rf "$SA"
 else
   skip "subagent dispatch guard" "git or jq missing"
