@@ -196,6 +196,16 @@ prefer proof over assertion:
   enough to look correct). The part that holds everywhere is that the answer MOVES when
   some other session becomes current, without the session of that name being touched — a
   `+` name is an expression, not a name, and it is right only by luck.
+- **The `=` exact-match prefix is right for some tmux commands and silently wrong for
+  `show-options`.** `has-session -t '=name'` and `switch-client -t '=name'` are exactly
+  what the `+`-name entry above asks for — but `show-options -qv -t '=name' @opt` returns
+  **empty**, while a bare `-t 'name'` returns the value. Measured on the same session in
+  the same breath on 3.7b: bare gives `master`, `=`-prefixed gives ``. With `-q` there is
+  no error, so a read written this way makes every session look like it has no options —
+  and a walk that depends on one takes zero steps while the code reads as correct. That
+  is how a fix for tabs-beget-tabs was written, verified as "syntactically fine", and did
+  nothing. Bare `-t` is safe *here* only because tab names start with `_`; that prefix
+  exists precisely so a bare target cannot be read as an expression.
 - **A suite with fixed socket names cannot be run twice at once, and the second run
   lies.** `test/run.sh` used forty-odd fixed names, and nearly every group opens with
   `kill-server`, so two worktrees testing together tore each other's fixtures down
