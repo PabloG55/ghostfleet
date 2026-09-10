@@ -409,6 +409,18 @@ function setLabel(name, text) {
   } catch {}
 }
 
+// The agent a LIVE session is actually running, for a project that is not the current
+// one — the same explicit (dir, sock) shape readSched takes, because FLEET_DIR and SOCK
+// are the screen's own profile and the Projects screen draws every profile's projects.
+// Returns '' when there is no marker, which is NOT the same as claude: absent means
+// nothing recorded, and only the caller knows whether a session exists to have recorded it.
+function agentOfIn(dir, sock, name) {
+  try {
+    const a = fs.readFileSync(path.join(dir, `${sock}.${name}.agent`), 'utf8').trim();
+    return /^[a-z0-9_-]+$/.test(a) ? a : '';
+  } catch { return ''; }
+}
+
 function agentOf(name) {
   try {
     const a = fs.readFileSync(path.join(FLEET_DIR, `${SOCK}.${name}.agent`), 'utf8').trim();
@@ -2752,7 +2764,26 @@ function pRender() {
       // Show the project's default agent beside its profile, but only when it HAS one
       // — the overwhelming case is claude, and printing it on every card would be noise
       // that hides the single project which actually differs.
-      const who = it.project.agent ? `${it.project.profile} · ${it.project.agent}` : it.project.profile;
+      //
+      // AND SHOW WHAT IS RUNNING WHEN THAT IS NOT THE DEFAULT. The 4th column is the
+      // project's default and a session receives it AT BIRTH: the control plane passes
+      // CLAUDE_FLEET_AGENT on new-session, so setting the column later cannot reach a
+      // master that already exists. MEASURED: a project set to codex advertised codex on
+      // this card for nineteen minutes while its master — created before the column was
+      // written — ran claude, and nothing anywhere said so. Setting an agent on an
+      // existing project is the ordinary way to arrive here, not an edge case.
+      //   `running→default` rather than a colour, because the fix is to restart the
+      //   session and an arrow says which direction that goes. Plain text on purpose:
+      //   this string is clipped to the card width, and an escape inside it would be
+      //   counted as visible columns.
+      //   Same rule this file applies to a busy detector that cannot fire: never render
+      //   a configured value as though it were an observed one.
+      const pdir = path.join(profileDir(it.project.profile), 'fleet');
+      const want = it.project.agent || 'claude';
+      const live = st.total > 0 ? (agentOfIn(pdir, sockOf(it.project), 'master') || 'claude') : '';
+      const who = (live && live !== want)
+        ? `${it.project.profile} · ${live}→${want}`
+        : (it.project.agent ? `${it.project.profile} · ${it.project.agent}` : it.project.profile);
       return boxCard(`${i + j < 9 ? `${i + j + 1} ` : ''}${it.project.name}`, [who, it.project.path.replace(HOME, '~'), line], color, sel);
     });
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';

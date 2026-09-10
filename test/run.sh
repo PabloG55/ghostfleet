@@ -2810,6 +2810,64 @@ else
   skip "worktree teardown hook" "git missing"
 fi
 
+# ── 4a10c8. the card says what is RUNNING, not what is configured ───────────
+# MEASURED, and the timeline is the whole bug: a project was set to codex at 01:26 while
+# its master had been created at 01:07. The Projects card read the file live and said
+# codex; the session had been given CLAUDE_FLEET_AGENT at BIRTH, so it ran claude, and
+# `fleet-agent of master` said claude. Nineteen minutes of a screen confidently naming an
+# agent the session was not running, with nothing anywhere reporting the divergence.
+# Setting an agent on a project that already has a master is the ORDINARY way to reach
+# this state, not an edge case.
+group "the projects card shows the running agent"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  PC="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$PC/.config/ghostfleet" "$PC/.claude-personal/fleet" "$PC/a" "$PC/b" "$PC/c"
+  # Three projects, all defaulting to codex, differing only in what is actually running:
+  #   a — a live master with NO recorded agent, i.e. born before the column (the real case)
+  #   b — a live master that recorded codex, so there is nothing to report
+  #   c — no session at all, so there is nothing to compare against
+  for n in a b c; do printf 'proj%s\t%s/%s\tpersonal\tcodex\n' "$n" "$PC" "$n" >> "$PC/.config/ghostfleet/projects.personal"; done
+  printf 'codex\n' > "$PC/.claude-personal/fleet/cf-personal-projb.master.agent"
+  for n in a b; do
+    tmux -L "cf-personal-proj$n" kill-server 2>/dev/null
+    tmux -L "cf-personal-proj$n" new-session -d -s master 'sleep 60' 2>/dev/null
+  done
+  tmux -L cf-personal-projc kill-server 2>/dev/null
+  tmux -L cfpcard kill-server 2>/dev/null
+  tmux -L cfpcard new-session -d -x 120 -y 30 -e HOME="$PC" \
+    -e CLAUDE_FLEET_PROJECTS="$PC/.config/ghostfleet/projects.personal" -e CLAUDE_FLEET_PROFILE=personal \
+    "node '$ROOT/bin/fleet-grid.mjs' - --screen projects > '$PC/out' 2>'$PC/err'" 2>/dev/null
+  sleep 2.6
+  tmux -L cfpcard capture-pane -p > "$PC/screen" 2>/dev/null
+  pc() { grep -c "$1" "$PC/screen" 2>/dev/null || true; }
+
+  # THE DIVERGENCE IS SHOWN, and it names BOTH agents — running first, default after the
+  # arrow, because the fix is to restart the session and the arrow says which way that goes.
+  is "a diverged project shows running→default" "1" "$(pc 'personal · claude→codex')"
+  # AND ONLY WHERE IT DIVERGES. Without these two rows the assertion above would pass for
+  # an implementation that printed the arrow on every card, which would be worse than the
+  # bug: a warning that is always on carries no information.
+  # TWO cards, and enumerating which is the point: projb AGREES with its default, and
+  # projc has no session to disagree with. Both must render the plain default, and the
+  # count is what distinguishes "one of them regressed to an arrow" from "both are calm".
+  # Written as 1 first, which is the arithmetic mistake this file keeps warning about in
+  # other words: a count asserted without naming which fixtures produce it.
+  is "the calm cases show one agent, both of them" "2" "$(pc 'personal · codex')"
+  is "...and the arrow appears exactly once"    "1" "$(pc '→codex')"
+  # A project with NO session has nothing to compare, so it must show its plain default
+  # rather than a divergence against an imagined claude. `agentOfIn` returning '' for a
+  # missing marker rather than 'claude' is what makes that possible.
+  is "...projects drawn"                        "1" "$([ "$(pc 'projc')" -ge 1 ] && echo 1 || echo 0)"
+  is "no crash drawing any of them"             "0" "$(grep -cE 'ReferenceError|TypeError' "$PC/err" 2>/dev/null || true)"
+  # NO ESCAPES IN THAT STRING. The card clips its lines to a fixed width, so a colour code
+  # inside the text is counted as visible columns and the box loses its right edge.
+  is "the box is not broken by the new text"    "2" "$(pc '│ personal · c')"
+  for n in a b c; do tmux -L "cf-personal-proj$n" kill-server 2>/dev/null; done
+  tmux -L cfpcard kill-server 2>/dev/null; rm -rf "$PC"
+else
+  skip "projects card agent" "tmux or node missing"
+fi
+
 group "fleet-clean and Claude's locked worktrees"
 if command -v git >/dev/null 2>&1; then
   FC="$(mktemp -d)"
