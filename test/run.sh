@@ -2331,7 +2331,21 @@ PYX
   #               clause is about BEHAVIOURAL divergence, not felt uncertainty.
   is "...and carries the receipt clause"      "1" "$(contracthas 'before you start working')"
   is "...and the divergence clause"           "1" "$(contracthas 'would visibly differ')"
-  is "...which is NOT ask-when-unsure"        "1" "$(contracthas 'Do not ask because you feel uncertain')"
+  # ASK WHEN THE PROMPT IS UNCERTAIN — AND THE GUARD MOVED FROM A BAN TO A FORM. The
+  # earlier contract forbade asking from felt uncertainty outright, on a real measurement:
+  # end-of-turn asking is already saturated at 25.6% of turns with no effect on rework, so
+  # "ask when unsure" buys nothing. But a flat ban is the wrong lesson from that number —
+  # the paper this clause came from found models RECOGNISE ambiguity and stay quiet, so the
+  # 25.6% is bare end-of-turn checking, not questions that could be answered.
+  #   So the contract now asks for the ANSWERABLE FORM instead: a numbered list of the
+  # concrete alternatives, and where the alternatives cannot be named, a stated assumption
+  # rather than a question. That is what keeps the saturated shape out, so it is what these
+  # rows assert. Asserting the deleted sentence outlived the sentence and failed CI on both
+  # legs while the contract was correct — a test pinned to wording rather than to the
+  # behaviour the wording was for.
+  is "...and asks when the prompt is unclear" "1" "$(contracthas 'ASK ALSO WHEN THE PROMPT ITSELF IS UNCERTAIN')"
+  is "...but only in an answerable form"      "1" "$(contracthas 'never as a bare request to clarify')"
+  is "...and states an assumption otherwise"  "1" "$(contracthas 'state the assumption you are proceeding on')"
   # The two axes the first version missed. Written product-shaped ("different screens or
   # different stored data"), the clause did not cover the readings that actually diverge
   # in practice: WHAT is delivered, and WHERE it lands. Both were misread on the session
