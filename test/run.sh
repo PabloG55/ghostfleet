@@ -4000,6 +4000,67 @@ fi
 # the transcript lookup handed it the ORIGIN'S last message — a terminal card reading
 # "✓ ready" over work it had no part in. The grid, the ring and the shell fallback all
 # have to agree, or a digit means one session on the grid and another to ⇧→.
+group "a tab is a session, so tabs must not beget tabs"
+# THE KEYBINDINGS HAND OVER `#{session_name}`, and from inside a tab that is the TAB. So
+# C-t in the editor asked for a terminal whose origin was `_edit-<x>`, got the name
+# `_term-_edit-<x>`, found nothing by it, and dealt a second terminal; C-n in that
+# terminal did the mirror image. Reported from a real fleet as "it opens another one".
+# The reuse rule was never wrong — each tab it made really was the only one of its name
+# -- so the count is the only thing that can tell the two apart, and this group counts.
+if command -v tmux >/dev/null 2>&1; then
+  TT="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$TT/w" "$TT/bin"
+  # A REAL, PERSISTENT editor. `cat` was tried and exits at once on a directory, so the
+  # edit tab died before it could be counted and the fixture proved nothing.
+  printf '#!/bin/sh\nexec sleep 120\n' > "$TT/bin/fakevim"; chmod +x "$TT/bin/fakevim"
+  tmux -L cftabb kill-server 2>/dev/null
+  tmux -L cftabb new-session -d -s master -c "$TT/w" 'sleep 120' 2>/dev/null
+  BS="$(tmux -L cftabb display-message -p '#{socket_path}' 2>/dev/null)"
+  fb() { CLAUDE_FLEET_EDITOR="$TT/bin/fakevim" "$ROOT/bin/fleet-tab" "$@" >/dev/null 2>&1; }
+  nall() { tmux -L cftabb list-sessions -F '#{session_name}' 2>/dev/null | grep -c . || true; }
+  has() { tmux -L cftabb has-session -t "=$1" 2>/dev/null && echo 1 || echo 0; }
+
+  fb term "$BS" "$TT/w" master
+  fb edit "$BS" "$TT/w" master
+  is "both tabs opened from master"      "3" "$(nall)"
+  # THE WALK'S INPUT. Without this the two rows below could pass because the option is
+  # missing and every session looks like a non-tab — which is green for the wrong reason.
+  is "the edit tab records its origin"   "master" \
+     "$(tmux -L cftabb show-options -qv -t '_edit-master' @cf_tab_from 2>/dev/null)"
+
+  # C-t from inside the editor, exactly as the binding calls it: FROM is the tab.
+  fb term "$BS" "$TT/w" _edit-master
+  is "C-t in the editor makes no new tab" "3" "$(nall)"
+  is "...and no _term-_edit-master"       "0" "$(has _term-_edit-master)"
+  # ...and the mirror, or this group would pass on a build that special-cased one kind.
+  fb edit "$BS" "$TT/w" _term-master
+  is "C-n in the terminal makes no new tab" "3" "$(nall)"
+  is "...and no _edit-_term-master"       "0" "$(has _edit-_term-master)"
+  # THE OTHER DIRECTION: collapsing an origin must not stop a tab being made at all.
+  is "the terminal tab still exists"      "1" "$(has _term-master)"
+  is "the editor tab still exists"        "1" "$(has _edit-master)"
+
+  # WHY THE TARGET IS BARE, asserted in BOTH directions because on tmux 3.7b the `=`
+  # exact-match prefix — correct on has-session and switch-client, and used by every
+  # other read in this file — makes show-options answer NOTHING with -q. A walk written
+  # with `=` takes zero steps, so the bug survives a fix that looks right. Measured on
+  # the same session in the same breath, which is the only way this reads as a fact
+  # about the prefix rather than about the session.
+  is "bare -t reads the option"          "master" \
+     "$(tmux -L cftabb show-options -qv -t '_edit-master' @cf_tab_from 2>/dev/null)"
+  is "...and =-prefixed reads EMPTY"     "" \
+     "$(tmux -L cftabb show-options -qv -t '=_edit-master' @cf_tab_from 2>/dev/null)"
+  # ...while the prefix is still right for the command the rest of the file uses it on,
+  # so this is a difference between COMMANDS, not a reason to drop `=` everywhere.
+  is "...though = is fine for has-session" "1" "$(has _edit-master)"
+
+  # `back` must still reach master rather than the tab we collapsed through.
+  is "back still names master"           "master" \
+     "$(tmux -L cftabb show-options -qv -t '_term-master' @cf_tab_from 2>/dev/null)"
+  tmux -L cftabb kill-server 2>/dev/null; rm -rf "$TT"
+else
+  skip "tabs beget tabs" "tmux not available"
+fi
+
 group "tabs are not sessions"
 if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   TH="$(mktemp -d)"; mkdir -p "$TH/main" "$TH/api-2"
