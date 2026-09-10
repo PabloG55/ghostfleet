@@ -56,6 +56,54 @@ MAIN="$(git -C "$GITROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 
 
 run() { if [ "$GO" = 1 ]; then eval "$1"; else echo "      would: $1"; fi; }
 
+# ── the other half of post-create ────────────────────────────────────────────
+# fleet-spawn runs .ghostfleet/post-create so a repo can provision what a worktree needs
+# from its slot: ports, a database, a bucket. NOTHING RAN THE COUNTERPART. A reclaim
+# removed the checkout and left every one of those resources running, and the asymmetry
+# was invisible because the leak is in a system ghostfleet knows nothing about.
+# Measured on one project: 29 containers and 16 volumes, about 1.3GB, across NINE
+# worktrees that no longer existed.
+#
+# ghostfleet still knows nothing about what leaked, and must not — the same line
+# fleet-slot draws about ports and database names. It hands the repo the slot and the
+# path and lets the repo tear down the names it owns.
+#
+# THREE THINGS IT DOES DIFFERENTLY FROM post-create, and each is deliberate:
+#   - it runs BEFORE `git worktree remove`, because the hook lives inside the worktree
+#     and a removed checkout has taken its own teardown with it.
+#   - a FAILURE KEEPS THE WORKTREE. post-create failing is survivable: you get a worktree
+#     that needs setting up. pre-remove failing is not, because removing the checkout
+#     anyway destroys the only thing that knew how to clean up, and turns a loud failure
+#     into a silent leak. Refusing leaves both the resources and the hook where a person
+#     can see them.
+#   - it is NOT RUN AT ALL in a dry run. Everything else here is a git command whose
+#     effect this file can predict and print; a repo hook is arbitrary and destructive,
+#     so the dry run says it would run and stops there.
+# Opt-in by file presence, exactly like post-create: a repo shipping no hook is untouched,
+# which is asserted rather than assumed.
+pre_remove() {                     # $1 = worktree path; non-zero means DO NOT remove it
+  local wt="$1" h slot
+  h="$wt/.ghostfleet/pre-remove"
+  [ -x "$h" ] || return 0
+  # Read the slot BEFORE the removal, while the checkout still holds one — `fleet-slot
+  # reclaim` at the end of this run is what frees it, and a hook that provisioned
+  # per-slot state needs the same number back to find it again.
+  slot="$("$(dirname "$0")/fleet-slot" of "$wt" 2>/dev/null)" || slot=""
+  case "$slot" in ''|*[!0-9]*) slot="" ;; esac
+  if [ "$GO" != 1 ]; then
+    echo "      would run: .ghostfleet/pre-remove${slot:+ (slot $slot)}"
+    return 0
+  fi
+  echo "      running .ghostfleet/pre-remove${slot:+ (slot $slot)} …"
+  if ( cd "$wt" && CLAUDE_FLEET_SLOT="$slot" CLAUDE_FLEET_WORKTREE="$wt" "$h" ) >&2; then
+    echo "      pre-remove finished"
+    return 0
+  fi
+  echo "      KEEP — .ghostfleet/pre-remove FAILED, so the worktree stays: removing it now"
+  echo "      would delete the only copy of the teardown and leak whatever it provisions."
+  return 1
+}
+
 echo "fleet-clean · $SOCK · repo $GITROOT · main=$MAIN · $([ "$GO" = 1 ] && echo 'EXECUTING' || echo 'DRY RUN (add --go to apply)')"
 git -C "$GITROOT" fetch --prune --quiet origin 2>/dev/null || true   # refresh 'gone' upstream tracking
 
@@ -110,6 +158,9 @@ while IFS=$'\t' read -r wt br; do
   [ -z "$s" ] || { echo "  keep $base — live session '$s'"; kept=$((kept+1)); continue; }
   if [ "$FORCE" = 1 ]; then
     echo "  remove $base ($br) — FORCED past the gates, on request (uncommitted or unpushed work is being deleted)"
+    # --force skips the WORK gates, not the teardown: a leaked stack is not work in
+    # progress and nobody asked for it to survive.
+    pre_remove "$wt" || { kept=$((kept+1)); continue; }
     run "git -C '$GITROOT' worktree remove --force$rmflags '$wt'"
     removed=$((removed+1))
     continue                     # and no branch deletion: the branch may be the only copy
@@ -138,6 +189,7 @@ while IFS=$'\t' read -r wt br; do
   [ "$safe" = 1 ] || { echo "  keep $base — unpushed local commits on '$br'"; kept=$((kept+1)); continue; }
 
   echo "  remove $base ($br) — $why"
+  pre_remove "$wt" || { kept=$((kept+1)); continue; }
   run "git -C '$GITROOT' worktree remove$rmflags '$wt'"
   del=0; dwhy=""
   case "$br" in scratch/*) del=1; dwhy="scratch" ;; esac
