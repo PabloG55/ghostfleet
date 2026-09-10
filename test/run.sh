@@ -4224,6 +4224,75 @@ else
   skip "tabs beget tabs" "tmux not available"
 fi
 
+group "your own terminal can be stacked beside your agent"
+# WHAT WAS ASKED FOR: put the terminal or editor on screen next to the agent. Tabs were
+# excluded from the stack picker for a good reason — that screen walks EVERY project, so
+# including them put every terminal in every project into the list as an "idle" session
+# you could stack. That objection is about REACH, not about tabs, so the door opens only
+# for the fleet the screen was opened from and stays shut for the rest.
+#   THE REGRESSION THIS GROUP EXISTS FOR is the other caller: sessionStatuses is the ONE
+# status reader the Projects cards and the stack screen share, so opting tabs in per call
+# had to leave the cards alone. A project with a terminal open must not report a session
+# it does not have, and that is asserted here with a NUMBER, because "2 sessions" and
+# "5 sessions" are the same shape of card.
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  SK="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$SK/.config/ghostfleet" "$SK/.claude/fleet" "$SK/a" "$SK/b"
+  printf 'mine\t%s/a\twork\nother\t%s/b\twork\n' "$SK" "$SK" > "$SK/.config/ghostfleet/projects"
+  # Two fleets, each with two agents and three tabs — and the SAME shape in both, so a
+  # row that shows up for `other` can only be the reach bug and nothing else.
+  for f in cf-mine cf-other; do
+    tmux -L "$f" kill-server 2>/dev/null
+    for x in master w1 _term-master _edit-w1 _term-w1; do
+      tmux -L "$f" new-session -d -s "$x" -c "$SK/a" 'sleep 120' 2>/dev/null
+    done
+  done
+  skdrive() {          # $1 = --screen argument; echoes the pane
+    tmux -L cfstk kill-server 2>/dev/null
+    tmux -L cfstk new-session -d -x 110 -y 30 -c "$ROOT" -e HOME="$SK" \
+      -e CLAUDE_FLEET_PROJECTS="$SK/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' cf-mine --screen $1; sleep 25" 2>/dev/null
+    sleep 2
+    tmux -L cfstk capture-pane -p 2>/dev/null
+    tmux -L cfstk kill-server 2>/dev/null
+  }
+  SP_OUT="$(skdrive stack)"
+  # THIS fleet's tabs are there, named for what they are rather than for a turn state.
+  is "the stack lists this fleet's terminal" "2" "$(grep -c 'terminal' <<< "$SP_OUT" || true)"
+  is "...and its editor"                     "1" "$(grep -c 'editor' <<< "$SP_OUT" || true)"
+  # A tab has no turn state, so it must not wear one — SCOPED TO THIS PROJECT'S SECTION,
+  # because the pane also lists `other`, whose two agents are idle too. Counting the whole
+  # screen expected 2 and measured 4, which is the right answer to a different question:
+  # the arithmetic was the test's, not the code's.
+  #   Two agents under `mine` means exactly two idles there; five would mean its three
+  # tabs came through wearing a turn state.
+  is "...and only the agents read as idle"   "2" \
+     "$(sed -n '/^ mine$/,/^ other$/p' <<< "$SP_OUT" | grep -c 'idle' || true)"
+  # The plumbing prefix never reaches the screen, and the origin does.
+  is "...with no _term- prefix on screen"    "0" "$(grep -c '_term-' <<< "$SP_OUT" || true)"
+  is "...and marked as hanging off a session" "3" "$(grep -c '↳' <<< "$SP_OUT" || true)"
+  # GROUPED: the agent, then its tabs. tmux lists sessions alphabetically, so `_edit-w1`
+  # sorts nowhere near `w1` and an ungrouped list interleaves them.
+  is "...grouped under their origin" "1" \
+     "$(grep -A 1 '\] master  *idle' <<< "$SP_OUT" | grep -c '↳ master' || true)"
+  # THE REACH LIMIT, and it is the whole reason this was shut before: `other` has the same
+  # three tabs and must contribute none of them.
+  is "another project's tabs stay hidden" "2" \
+     "$(sed -n '/^ other$/,$p' <<< "$SP_OUT" | grep -c '\[ \]' || true)"
+  is "...and none of them are marked"     "0" \
+     "$(sed -n '/^ other$/,$p' <<< "$SP_OUT" | grep -c '↳' || true)"
+
+  # THE SHARED READER IS UNCHANGED. Same fixture, the other screen: the card counts
+  # AGENTS, and a terminal is not one.
+  PJ_OUT="$(skdrive projects)"
+  is "the projects card still counts 2"   "1" "$(grep -c '2 sessions' <<< "$PJ_OUT" || true)"
+  is "...and never 5"                     "0" "$(grep -c '5 sessions' <<< "$PJ_OUT" || true)"
+  for f in cf-mine cf-other; do tmux -L "$f" kill-server 2>/dev/null; done
+  rm -rf "$SK"
+else
+  skip "stacking a tab" "tmux or node missing"
+fi
+
 group "tabs are not sessions"
 if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   TH="$(mktemp -d)"; mkdir -p "$TH/main" "$TH/api-2"
