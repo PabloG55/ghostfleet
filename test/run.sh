@@ -830,6 +830,116 @@ STUB
   rm -rf "$MR"
 fi
 
+group "fleet-review asks a DIFFERENT model, or says it cannot"
+# WHY THE REFUSALS ARE THE POINT. Exactly one of the three agents ships a non-interactive
+# review, and the tempting fallback — send the diff as an ordinary prompt and print the
+# answer — spends the account's usage and produces prose indistinguishable from a real
+# review. That is the empty-busy-regex shape again: a fallback that cannot be told apart
+# from a result. So every arm below asserts a REFUSAL as carefully as it asserts a run.
+#   All of it runs under --dry-run against stub binaries. A group that actually called a
+# reviewer would cost usage on every suite run and could not assert on the output anyway.
+fr() { "$ROOT/bin/fleet-review" "$@" 2>&1; }
+is "codex declares a review"        "review" "$(fa field codex review)"
+# BOTH DIRECTIONS, and the empty ones matter more: they are what the refusal reads, and a
+# field that quietly gained a value would turn a refusal into a spend.
+is "claude declares none"           ""       "$(fa field claude review)"
+is "opencode declares none"         ""       "$(fa field opencode review)"
+# ...and empty must be DECLARED, not missing: `field` exits 0 for a known agent with no
+# value and non-zero for an unknown one, which is the only thing separating "you spelled
+# it wrong" from "that CLI cannot do this".
+is "empty is declared, not unknown" "0" \
+   "$("$ROOT/bin/fleet-agent" field claude review >/dev/null 2>&1; echo $?)"
+is "an unknown agent exits non-zero" "1" \
+   "$("$ROOT/bin/fleet-agent" field zed review >/dev/null 2>&1; echo $?)"
+
+if command -v git >/dev/null 2>&1; then
+  FR="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$FR/repo" "$FR/bin"
+  # A STUB REVIEWER. `command -v` is all fleet-review checks before running it, and a real
+  # codex here would bill the account for a fixture.
+  printf '#!/bin/sh\nexit 0\n' > "$FR/bin/codex"; chmod +x "$FR/bin/codex"
+  git init -q -b main "$FR/repo" 2>/dev/null
+  ( cd "$FR/repo" && printf 'a\n' > f.txt && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -q -m init ) >/dev/null 2>&1
+
+  # A DIRTY TREE IS THE DEFAULT SUBJECT, because the moment you want a second opinion is
+  # before you commit.
+  printf 'b\n' >> "$FR/repo/f.txt"
+  got="$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run)"
+  is "a dirty tree reviews uncommitted" "1" "$(grep -c -- '--uncommitted' <<< "$got" || true)"
+  is "...and names the reviewing agent"  "1" "$(grep -c 'asking codex' <<< "$got" || true)"
+  # THE DEFAULT CROSSES MODELS. Called from a codex session it must not pick codex, or the
+  # one thing this command is for — a second set of blind spots — is silently skipped.
+  got="$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=codex fr --dry-run)"
+  is "from codex it will not pick codex" "0" "$(grep -c 'asking codex' <<< "$got" || true)"
+  is "...and says so rather than running" "1" "$(grep -c 'no installed agent other than' <<< "$got" || true)"
+
+  # A CLEAN TREE FALLS BACK TO THE BRANCH, and the base must be where it FORKED FROM: a
+  # worker branches off the integration branch, whose `main` can be a release behind, so
+  # the wrong base reviews other people's work as though it were yours.
+  ( cd "$FR/repo" && git add -A && git -c user.email=t@t -c user.name=t commit -q -m two ) >/dev/null 2>&1
+  got="$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run --base main)"
+  is "an explicit base is honoured"      "1" "$(grep -c -- '--base main' <<< "$got" || true)"
+  # ...and with nothing uncommitted and no upstream and no origin/HEAD, it must SAY it has
+  # no base rather than invent one — a review of the wrong range reads exactly like a
+  # review of the right one.
+  got="$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run)"
+  is "no base is a refusal, not a guess" "1" "$(grep -c 'no integration branch' <<< "$got" || true)"
+
+  # INSTRUCTIONS AND A SELECTOR ARE MUTUALLY EXCLUSIVE, which the reviewer's own CLI
+  # decides, not this wrapper: `codex review --uncommitted 'x'` dies with
+  #     error: the argument '--uncommitted' cannot be used with '[PROMPT]'
+  # while PRINTING `Usage: codex review --uncommitted [PROMPT]` in the same breath. The
+  # first version of this command passed both, so every call with instructions failed
+  # before reviewing anything — and the first version of THIS ROW asserted the string
+  # appeared in the dry-run output, i.e. it asserted our own printf and could not fail.
+  # Assert the refusal instead, which is a decision this code actually makes.
+  is "instructions + a selector is refused" "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run --base main -- 'focus on the shell quoting' | grep -c 'mutually exclusive' || true)"
+  is "...and it does not run anyway"      "0" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run --base main -- 'x' | grep -c 'would run' || true)"
+  is "--title reaches the argv"          "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run --base main --title 'T' | grep -c -- '--title' || true)"
+  # A known agent that cannot, and an unknown one, must not print the same thing.
+  is "a known agent that cannot says so" "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" fr --dry-run --agent claude | grep -c 'has no non-interactive review' || true)"
+  is "an unknown agent is named unknown" "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" fr --dry-run --agent zed | grep -c "unknown agent 'zed'" || true)"
+  is "...and the two differ"             "0" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" fr --dry-run --agent zed | grep -c 'has no non-interactive review' || true)"
+  # A MISSING BINARY IS NOT A MISSING CAPABILITY. Same scrubbed-PATH trick as the agent
+  # column group: `command -v codex` has to be able to answer false.
+  is "a declared-but-absent binary says so" "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin2:/usr/bin:/bin" fr --dry-run --agent codex 2>&1 | grep -c 'not on PATH' || true)"
+  is "outside a repo it refuses"         "1" \
+     "$(cd "$FR" && PATH="$FR/bin:$PATH" fr --dry-run --base main | grep -c 'not a git repository' || true)"
+
+  # THE BASE IS THE INTEGRATION BRANCH, NEVER @{upstream} — the bug this command found in
+  # itself when pointed at its own diff. `git push -u origin feature` makes @{upstream}
+  # resolve to origin/FEATURE, so the old default compared the branch with itself: an
+  # EMPTY subject, which a reviewer reports as nothing wrong. A clean review of nothing is
+  # indistinguishable from a clean review of something, so this asserts the base by NAME.
+  ( cd "$FR/repo" && git remote add origin "$FR/repo" \
+      && git branch -q feature && git checkout -q feature \
+      && printf 'b\n' >> f.txt && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -q -m work \
+      && git update-ref refs/remotes/origin/feature HEAD \
+      && git update-ref refs/remotes/origin/main "$(git rev-parse main)" \
+      && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main \
+      && git branch --set-upstream-to=origin/feature feature ) >/dev/null 2>&1
+  got="$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run)"
+  is "a self-tracking branch uses origin/main" "1" "$(grep -c -- '--base origin/main' <<< "$got" || true)"
+  # ...and the other direction, which is the whole regression: it must NOT pick the branch.
+  is "...and never its own upstream"      "0" "$(grep -c 'origin/feature' <<< "$got" || true)"
+  # LEVEL WITH THE BASE IS A REFUSAL. Handing a reviewer an empty range and repeating what
+  # it says about it is the same failure wearing a different hat.
+  ( cd "$FR/repo" && git checkout -q main && git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
+  is "level with the base refuses"        "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run | grep -c 'no changes to review' || true)"
+  rm -rf "$FR"
+else
+  skip "fleet-review" "git missing"
+fi
+
 group "projects screen reads the agent column"
 T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a" "$T/b"
 printf 'oc\t%s/a\twork\topencode\npl\t%s/b\twork\n' "$T" "$T" > "$T/.config/ghostfleet/projects"

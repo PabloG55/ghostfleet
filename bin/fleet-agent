@@ -31,6 +31,15 @@
 #   blocked_re  ERE matching "stopped, waiting on a human" in the pane. Empty = none.
 #   ready_re    ERE matching "the input box exists, a prompt will land" — fleet-spawn
 #               waits for this before dispatching an initial prompt.
+#   review      the subcommand that runs a NON-INTERACTIVE code review, or EMPTY when
+#               this CLI has none. Empty is the honest answer for two of the three and
+#               must stay readable as "cannot", never as "not measured": a review is the
+#               one thing here worth paying a second model for, so a caller that guessed
+#               would spend usage and print nothing. Measured from `--help` on the
+#               installed builds, 2026-09-09: codex ships `codex review` with --base /
+#               --uncommitted / --commit; claude has -p/--print but no review subcommand
+#               (its /review is an interactive slash command, which a pane cannot be
+#               asked for from outside); opencode has `run` and no review.
 #   hooks       yes = pushes need-you/done into the fleet event file by itself
 #   mcp         yes = the ghostfleet MCP server is registered for this CLI, so a session
 #               can CALL fleet_spawn/fleet_inbox/… as a tool instead of shelling out
@@ -188,6 +197,11 @@ agent_field() {
         # ordinary one it looks like; a literal " " here matches nothing at all.
         interrupt_re)    printf '%s' '^  ⎿.*Interrupted' ;;
         interrupt_re_js) printf '%s' '^  ⎿.*Interrupted' ;;
+        # EMPTY: -p/--print is a oneshot prompt, not a review. Naming it here would make
+        # `fleet-review` compose its own brief and call the result a review — the same
+        # shape as an empty busy regex being fed to grep, where the fallback is worse
+        # than the refusal because it cannot be told apart from a real answer.
+        review)     printf '' ;;
         hooks)      printf 'yes' ;;
         # Can this agent CALL the fleet — fleet_spawn, fleet_inbox, fleet_send — rather
         # than only be watched by it? Measured 2026-08-26, not assumed: install.sh's
@@ -214,6 +228,9 @@ agent_field() {
         busy_re_js) printf '%s' 'esc interrupt' ;;
         blocked_re) printf '%s' 'Permission required|Allow once' ;;
         ready_re)   printf '%s' 'ctrl\+p commands|OpenCode [0-9]' ;;
+        # EMPTY: `opencode run <message>` is a oneshot, not a review. Same reason as
+        # claude's — see the field doc at the top.
+        review)     printf '' ;;
         hooks)      printf 'yes' ;;   # permission.asked -> need-you, session.idle -> done
         # YES since 2026-08-27: install.sh writes the server into
         # ~/.config/opencode/opencode.jsonc (with jq, not via `opencode mcp add` — see the
@@ -261,6 +278,12 @@ agent_field() {
         # every REAL worktree lives under $HOME, so it never matched in practice and
         # fleet-spawn silently fell back to its timed send.
         ready_re)   printf '%s' '· [~/]' ;;
+        # THE ONE AGENT THAT HAS THIS. `codex review` is a documented non-interactive
+        # subcommand and takes the selector itself (--base BRANCH, --uncommitted,
+        # --commit SHA) plus custom instructions as a positional, so fleet-review passes
+        # a selection through rather than diffing and pasting. Read off `codex review
+        # --help` on the installed build, not assumed from `exec`.
+        review)     printf 'review' ;;
         hooks)      printf 'no'  ;;
         # YES since 2026-08-27: install.sh runs `codex mcp add ghostfleet -- node <server>`,
         # which writes [mcp_servers.ghostfleet] into ~/.codex/config.toml. Proven by CALLING
