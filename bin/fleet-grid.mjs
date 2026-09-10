@@ -2983,6 +2983,13 @@ function stackMembers() {              // Set of "sock\tsession", live members o
   return new Set(stackRun(['members']).split('\n').filter(Boolean));
 }
 let sItems = [], sSel = 0, sMembers = new Set(), sMsg = '';
+// TERMINAL ROW -> index into sItems, written by sRender as it emits and read by the
+// click hit-test. RECORDED, not derived, and that is the point: the grid's own card
+// hit-test was a formula that had to agree with the renderer, and it silently stopped
+// agreeing the day a banner was added above the cards — every click resolved a row too
+// low. This screen cannot drift that way, because the only thing that fills this map is
+// the loop that draws the lines. A row nobody drew is a row nobody can click.
+let sHitRow = new Map();
 function sBuild() {
   sMembers = stackMembers();
   sItems = [];
@@ -3021,13 +3028,21 @@ function sRender() {
   let start = Math.max(0, sSel - Math.floor(maxShow / 2));
   const end = Math.min(sItems.length, start + maxShow);
   start = Math.max(0, end - maxShow);
-  if (!sItems.length) buf += ` ${C.dim}(no live sessions in any project)${C.reset}\x1b[K\n`;
+  // Three lines are always emitted above the list: the title, the count, and the message
+  // slot. `row` walks with the buffer from there so a session's row is whatever line it
+  // actually landed on — a header costs TWO (a blank, then its name) and a session one,
+  // which is exactly the arithmetic a formula would have to duplicate and get wrong.
+  let row = 3;
+  sHitRow = new Map();
+  if (!sItems.length) { buf += ` ${C.dim}(no live sessions in any project)${C.reset}\x1b[K\n`; row++; }
   for (let i = start; i < end; i++) {
     const it = sItems[i];
     if (it.header) {
       buf += `\x1b[K\n ${C.bold}${C.white}${it.header}${C.reset}${it.profile && it.profile !== 'work' ? ` ${C.yellow}${it.profile}${C.reset}` : ''}\x1b[K\n`;
+      row += 2;
       continue;
     }
+    row++; sHitRow.set(row, i);
     const inStack = sMembers.has(`${it.sock}\t${it.name}`);
     const sel = i === sSel;
     const box = inStack ? `${C.green}${C.bold}[✓]${C.reset}` : `${C.dim}[ ]${C.reset}`;
@@ -3035,10 +3050,35 @@ function sRender() {
     const nm = (sel ? C.bold + C.white : C.reset) + padEndV(it.name, 24) + C.reset;
     buf += `${sel ? `${C.bold}${C.white}▸ ` : '  '}${box} ${nm} ${col}${padEndV(it.status, 10)}${C.reset}\x1b[K\n`;
   }
-  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space add/remove · ⏎ open the stack · c clear · esc/q/\` back${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓/jk/wheel move · space or click add/remove · ⏎ open the stack · c clear · esc/q/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function onKeyStack(key) {
+  // THE MOUSE, and it has to come first: an SGR event arrives as one multi-character
+  // string, so every comparison below misses it and the screen redrew for nothing. The
+  // tracking modes were already on for every screen — only this handler never read them.
+  const mev = parseMouse(key);
+  if (mev) {
+    // Wheel up/down are buttons 64/65 and move the selection, which is what a wheel means
+    // on a list. They arrive as a press with no release, so acting on the press is right.
+    if (mev.press && (mev.button === 64 || mev.button === 65)) {
+      sMoveStack(mev.button === 64 ? -1 : 1); sMsg = ''; sRender(); return;
+    }
+    // A left press on a drawn session row moves the cursor there AND toggles it — this is
+    // a checkbox list, and a click that only moved the cursor would make the mouse a
+    // slower keyboard. Rows nobody drew (the title, a group name, the footer) are absent
+    // from the map, so a click there is a no-op rather than a guess at the nearest row.
+    if (mev.press && mev.button === 0 && sHitRow.has(mev.y)) {
+      const i = sHitRow.get(mev.y), it = sItems[i];
+      if (it && !it.header) {
+        sSel = i; sMsg = '';
+        stackRun(['toggle', it.sock, it.name]); sMembers = stackMembers();
+        sRender();
+      }
+      return;
+    }
+    return;   // releases, drags, right-clicks, and clicks on chrome
+  }
   if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') return finish('back');
   sMsg = '';
   if (key === '\x1b[A' || key === 'k') sMoveStack(-1);
