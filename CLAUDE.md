@@ -214,6 +214,15 @@ prefer proof over assertion:
   trust a test only after watching it go red, and a phantom red looks exactly like a real
   one. Per-run `$TMUX_TMPDIR` now, plus a startup sweep for the servers a killed run
   leaves behind, since a unique name has nobody to kill it next time.
+- **`grep -c` counts LINES, and "is it there" is not a count.** Pinning an exact number
+  when the question was presence makes the assertion depend on the markup: a commit that
+  appears in a header AND in a string some button builds is two lines, both correct, and
+  the test that expected 1 fails over a layout change that broke nothing. It has bitten
+  four times now — three in one sitting — which is why it is here and not only in a comment
+  beside the last one. Use `[ "$(grep -c …)" -ge 1 ]`, or count something the code decides
+  (how many worktrees ship a hook) rather than something the renderer decides. And when a
+  number IS the point, say what the other numbers would mean: 3 announcements where 2 are
+  expected is a different bug from 0.
 - **Under `pipefail`, a `grep -q` that MATCHES can make the pipeline fail.** `grep -q`
   closes its input on the first match; the writer to its left then takes SIGPIPE, and
   `pipefail` promotes that writer's 141 to the pipeline's status — so a match reads as a

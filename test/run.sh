@@ -2574,6 +2574,141 @@ fi
 # mean nothing, which is §2.1's failure class arriving through the camera. So the
 # not-reachable case must exit non-zero and say why, and that is asserted before anything
 # about the happy path.
+group "fleet-shots walks a flow, and a 404 is not a pass"
+# THE HALF THAT IS NOT A SCREENSHOT is what these rows are mostly about. A picture of a
+# green success toast proves a toast rendered; it cannot say the mutation went to the right
+# endpoint, went once, or went at all. The fixture below is built around exactly that: a
+# sign-in that POSTs to a path which 404s while the page shows "Welcome back" and the
+# expect-text is found. Screenshot perfect, assertion green, flow broken — and the first
+# version of this command reported "3 steps, 5 requests" and nothing else.
+FSH="$(cd "$(mktemp -d)" && pwd -P)"
+# ── the argument surface, with no browser ─────────────────────────────────────
+# --dry-run exists so this part is covered on every machine. Chrome is the one dependency
+# the suite cannot assume, and without a dry run the flow parser, the base resolution and
+# the output path would be tested only where it happens to be installed.
+is "nothing to photograph is an error"  "1" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" --dry-run >/dev/null 2>&1; echo $?)"
+is "...and it names how to fix it"      "1" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" --dry-run 2>&1 | grep -c -- '--flow' || true)"
+printf 'not json at all' > "$FSH/bad.json"
+is "a non-JSON flow says which file"    "1" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/bad.json" --dry-run 2>&1 | grep -c 'is not JSON' || true)"
+printf '{"base":"http://x"}' > "$FSH/nosteps.json"
+is "a flow with no steps says so"       "1" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/nosteps.json" --dry-run 2>&1 | grep -c 'no "steps"' || true)"
+# Bare URLs are the commonest case; making them require a JSON file would mean it does not
+# get used, so the no-flow form has to keep working.
+is "bare urls become steps"             "2" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" http://a.test/x http://a.test/y --dry-run 2>&1 | grep -c '\.png' || true)"
+# A DRY RUN MUST NOT WRITE. The directory used to be created during argument resolution,
+# so --dry-run left a folder behind. Asserted on the filesystem, not on the wording.
+printf '{"base":"http://x","steps":[{"name":"a","goto":"/a"}]}' > "$FSH/one.json"
+node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/one.json" --out "$FSH/dry" --dry-run >/dev/null 2>&1
+is "...and the dry run wrote nothing"   "0" "$([ -d "$FSH/dry" ] && echo 1 || echo 0)"
+# The relative path in a flow is joined to the base, and an absolute one overrides it —
+# a step that silently lost its base would photograph the wrong host.
+is "a relative step takes the base"     "1" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/one.json" --dry-run 2>&1 | grep -c 'goto http://x/a' || true)"
+
+# ── the real thing, where there is a Chrome ───────────────────────────────────
+mkdir -p "$FSH/app"
+cat > "$FSH/app/server.mjs" <<'SRV'
+import http from 'node:http';
+const P = (b) => `<!doctype html><meta charset=utf-8><body>${b}`;
+http.createServer((req, res) => {
+  const u = new URL(req.url, 'http://x');
+  if (u.pathname === '/login') { res.writeHead(200, {'content-type':'text/html'});
+    return res.end(P(`<h1>Sign in</h1><input id=e><button id=go>go</button><div id=m></div>
+      <script>document.getElementById('go').onclick=async()=>{
+      try{await fetch('/api/v1/signin',{method:'POST'})}catch(e){}
+      document.getElementById('m').textContent='Welcome back';};</script>`)); }
+  if (u.pathname === '/old') { res.writeHead(302, {location:'/login'}); return res.end(''); }
+  if (u.pathname === '/clean') { res.writeHead(200, {'content-type':'text/html'});
+    return res.end(P('<h1>All good</h1><script>fetch("/api/ok")</script>')); }
+  if (u.pathname === '/api/ok') { res.writeHead(200, {'content-type':'application/json'}); return res.end('{}'); }
+  res.writeHead(404, {'content-type':'text/plain'}); res.end('nope');
+}).listen(Number(process.argv[2]), '127.0.0.1', () => console.error('up'));
+SRV
+# A port nobody else is on, chosen the way the rest of this file does it: ask the kernel.
+FSPORT="$(node -e 'const n=require("net"),s=n.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+node "$FSH/app/server.mjs" "$FSPORT" 2>/dev/null &
+FSPID=$!
+sleep 1
+cat > "$FSH/flow.json" <<FLOW
+{ "base": "http://127.0.0.1:$FSPORT", "viewport": { "width": 700, "height": 500 },
+  "steps": [
+    { "name": "the sign-in screen", "goto": "/login", "expect": "Sign in" },
+    { "name": "after signing in", "click": "#go", "wait": 500, "expect": "Welcome back" },
+    { "name": "a redirect", "goto": "/old" },
+    { "name": "a clean screen", "goto": "/clean", "expect": "All good" }
+  ] }
+FLOW
+# CHROME COUNTED BEFORE AND AFTER, because a browser is ten processes holding a profile
+# open and this repo has already paid for a command that exited past its own cleanup —
+# 266 stranded Chromes. A leak here would be invisible in every other assertion.
+fschromes() { pgrep -fl 'gf-browser-' 2>/dev/null | grep -c . || true; }
+FSBEFORE="$(fschromes)"
+FSOUT="$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/run" 2>&1)"
+if grep -q 'no chrome' <<< "$FSOUT"; then
+  skip "fleet-shots against a real page" "no chrome to photograph in"
+else
+  is "it writes a page, a manifest and shots" "yes" \
+     "$([ -f "$FSH/run/index.html" ] && [ -f "$FSH/run/manifest.json" ] && \
+        [ "$(ls "$FSH/run"/*.png 2>/dev/null | grep -c .)" = 4 ] && echo yes || echo no)"
+  # A STEP THAT THREW STILL GETS A ROW, so the count is asserted rather than the presence:
+  # a flow of four rendering as three looks complete.
+  is "...one row per step"                "4" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps.length)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+
+  # THE 404 IS THE POINT. The page said "Welcome back" and the expect found it; only the
+  # request log knows the POST answered 404, and the note is what carries that up to the
+  # summary instead of leaving it in a table nobody reads.
+  is "the expect-text was found"          "true" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[1].expect.found)' "$FSH/run/manifest.json" 2>/dev/null)"
+  is "...and the 404 is still flagged"    "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[1].notes.filter(n=>/404/.test(n)).length)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+  is "...so the run does not read clean"  "1" \
+     "$(grep -c 'SOMETHING TO LOOK AT' <<< "$FSOUT" || true)"
+  # AND THE OTHER DIRECTION, or every row above would pass on a build that flags
+  # everything: a screen whose requests all succeeded must carry no note at all.
+  is "a clean step carries no note"       "0" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[3].notes.length)' "$FSH/run/manifest.json" 2>/dev/null || echo 9)"
+  # NOT EVERY NON-2xx IS A DEFECT. A missing favicon 404s on every dev server alive, and
+  # flagging it trains you to ignore the flag — so it is RECORDED and not flagged.
+  is "the favicon 404 was recorded"       "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps.some(s=>s.requests.some(r=>/favicon/.test(r.url)&&r.status===404))?1:0)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+  is "...and not flagged"                 "0" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[0].notes.length)' "$FSH/run/manifest.json" 2>/dev/null || echo 9)"
+
+  # WHERE IT ENDED UP, NOT WHERE IT WAS SENT. A redirect to a login screen photographs
+  # perfectly well, and this line is the only thing that distinguishes the two.
+  is "a redirect records the final url"   "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(/\/login$/.test(m.steps[2].at)?1:0)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+
+  # PROVENANCE, because a capture with no context is an assertion wearing a photograph.
+  is "the manifest names the commit"      "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(/^[0-9a-f]{40}$/.test(m.provenance.commit||"")?1:0)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+  # PRESENCE, NOT A COUNT, and this row got it wrong first: `grep -c` counts LINES, the
+  # commit legitimately appears twice — once in the header and once in the string the
+  # copy-verdict button builds — and the assertion expected 1. Third time this shape has
+  # bitten in one sitting: whenever the question is "is it there", the count is an accident
+  # of the markup and pinning it makes the test fail on a layout change that broke nothing.
+  is "...and the page shows it"           "yes" \
+     "$([ "$(grep -c "$(node -e 'const m=require(process.argv[1]);console.log((m.provenance.commit||"x").slice(0,8))' "$FSH/run/manifest.json" 2>/dev/null)" "$FSH/run/index.html" || true)" -ge 1 ] && echo yes || echo no)"
+  is "...and counts what to look at"      "1" \
+     "$(grep -c 'step to look at' "$FSH/run/index.html" || true)"
+  # SELF-CONTAINED, or it opens over file:// as a blank page. No CDN, no remote font, no
+  # fetch — asserted as the absence of an off-origin URL in the shipped markup.
+  is "the page loads nothing remote"      "0" \
+     "$(grep -coE '(src|href)="https?://' "$FSH/run/index.html" || true)"
+
+  is "no chrome was left behind"          "$FSBEFORE" "$(fschromes)"
+fi
+# `wait` after the kill absorbs the shell's own "Terminated" notice, which otherwise lands
+# in the middle of the suite's output looking exactly like something went wrong.
+{ kill "$FSPID"; wait "$FSPID"; } 2>/dev/null || true
+rm -rf "$FSH"
+
 group "fleet-look photographs, and refuses to photograph nothing"
 if command -v node >/dev/null 2>&1; then
   LK="$(mktemp -d)"
