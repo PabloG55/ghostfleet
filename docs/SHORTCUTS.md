@@ -262,7 +262,14 @@ toggles or cycles the selected cell. The columns are:
 | **AGENT** | the project's **default agent** — what its master runs, and what a new session in it inherits | cycles through the agents actually **installed** | **[CODE]** — the 4th column of the projects file, which used to be reachable only by editing it by hand |
 
 `space` **cycles** on AGENT rather than toggling, because there are more than two and the
-set is whatever `fleet-agent installed` reports. Only installed agents appear: an option
+set is whatever `fleet-agent installed` reports. The cell shows its place in that ring as
+`N/M` — `codex 3/3` — and the footer says `cycle` there where the other two columns say
+`toggle`. Both exist because a full lap is otherwise invisible: it lands back on the
+default and rewrites the row to three columns, which is byte-for-byte the row of a project
+whose agent was never set, so one press too many looked exactly like a key that did
+nothing. A ring of two gets no counter, since two states are a toggle. An agent the
+projects file names but that is not installed here gets no counter either — it has no
+place in the ring, and the position is measured rather than configured. Only installed agents appear: an option
 that cannot run leaves the next master dead at `exec agent-here` with nothing on screen to
 say why. The blurb under the column carries the short form of what choosing it gives up —
 the full version is the capability matrix in
