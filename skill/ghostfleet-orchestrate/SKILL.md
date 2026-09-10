@@ -166,6 +166,7 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | **ask** a session something (answer comes back) | `fleet-send --reply-to me <session> "<question>"` |
 | read a worker's output | `fleet-read <session> [n]` |
 | **look at what was built** | `fleet-look.mjs <url \| file.html \| file.pdf>` — renders it and prints a PNG path; `Read` that path to actually see it. `--tree` for the accessibility tree |
+| **have another model read your diff** | `fleet-review` — runs the reviewing CLI's own non-interactive review. Defaults to uncommitted changes, else this branch against the integration branch, and to an agent OTHER than yours. Exactly one of the three ships a review; the rest say so rather than faking one |
 | reuse a free worktree | `fleet-spawn <name> --reuse <worktree> [--prompt "…"]` |
 | recycle a worktree onto a new branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from <base>` |
 | new worker (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] [--new] [--prompt "…"]` |
