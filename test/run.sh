@@ -870,8 +870,35 @@ agent_stub() { printf '#!/bin/sh\nexit 0\n' > "$T/bin/$1"; chmod +x "$T/bin/$1";
 # Driven twice on the same screen: once with a ring of three, once with a ring of two.
 # The second is not a formality — a two-state ring IS a toggle and a counter on one is
 # noise, so the counter has to be absent there for the right reason.
-agcol() {            # $1..$n = the agents whose binaries exist; echoes row|footer per press
-  printf 'acme-api\t%s/a\twork\n' "$T" > "$T/.config/ghostfleet/projects"
+# WAIT FOR THE SCREEN, DO NOT SLEEP AT IT. The first version slept 2s for the grid to
+# start and 1s for `,` to land, which is fine on a laptop and not on a shared runner: a
+# key sent before the grid is up goes to the SHELL, and the next one lands on a screen
+# nobody expected. Poll for something the screen actually drew instead.
+#   Here-string, not a pipe: under `pipefail` a `grep -q` that MATCHES can fail the
+# pipeline when the writer takes SIGPIPE, which reads as "not there yet" and spins the
+# whole count. That is swept for elsewhere in this file; do not reintroduce it here.
+agwait() {           # $1 = text to wait for, up to ~12s
+  local i=0
+  while [ "$i" -lt 60 ]; do
+    grep -q "$1" <<< "$(tmux -L cfagcol capture-pane -p 2>/dev/null)" && return 0
+    sleep 0.2; i=$((i+1))
+  done
+  return 1
+}
+# THE ROW'S AGENT IS SEEDED BEFORE THE GRID STARTS, which is what killed the flake. The
+# uninstalled-agent arm used to rewrite the file under a RUNNING grid and then press ` to
+# leave the settings page and `,` to re-enter so the file would be re-read. On the projects
+# screen ` is BACK, and back exits the grid — so if the earlier `,` had not landed yet, the
+# ` killed the whole pane and every row after it read as absent. Measured red on
+# ubuntu-latest while green on four local runs, which is exactly what a start-up race looks
+# like. Nothing needs to be re-read if the file was right before the process opened it.
+AGROW_AGENT=""
+agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = the row's 4th column
+  if [ -n "$AGROW_AGENT" ]; then
+    printf 'acme-api\t%s/a\twork\t%s\n' "$T" "$AGROW_AGENT" > "$T/.config/ghostfleet/projects"
+  else
+    printf 'acme-api\t%s/a\twork\n' "$T" > "$T/.config/ghostfleet/projects"
+  fi
   rm -f "$T/bin/claude" "$T/bin/codex" "$T/bin/opencode"
   for a in "$@"; do agent_stub "$a"; done
   tmux -L cfagcol kill-server 2>/dev/null
@@ -883,12 +910,15 @@ agcol() {            # $1..$n = the agents whose binaries exist; echoes row|foot
   tmux -L cfagcol new-session -d -x 120 -y 24 -e HOME="$T" \
     -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
     "PATH='$T/bin'; export PATH; '$T/bin/node' '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 20" 2>/dev/null
-  sleep 2
-  tmux -L cfagcol send-keys ','; sleep 1
+  agwait 'acme-api' || true      # the projects screen has painted; keys reach the grid now
+  tmux -L cfagcol send-keys ','
+  agwait 'settings' || true      # ...and the settings page is up
 }
 agrow()  { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'acme-api' | head -1; }
 agfoot() { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'esc/. back' | head -1; }
-agtoAGENT() { tmux -L cfagcol send-keys 'l'; sleep 0.4; tmux -L cfagcol send-keys 'l'; sleep 1; }
+# Two column steps, then wait for the AGENT blurb rather than for a duration: the blurb is
+# per column, so its arrival IS the cursor having got there.
+agtoAGENT() { tmux -L cfagcol send-keys 'l'; tmux -L cfagcol send-keys 'l'; agwait 'agent: which CLI' || true; }
 if command -v tmux >/dev/null 2>&1; then
   agcol claude opencode codex
   # Proof the scrub took: on an unscrubbed PATH this says three even with no stubs, so a
@@ -933,10 +963,7 @@ if command -v tmux >/dev/null 2>&1; then
   # up on another machine, or whose CLI was uninstalled since, printed `1/3` — the
   # position of claude — beside its own name. The counter is the one number on this
   # screen a reader has no way to check, so a made-up one is worse than none.
-  agcol claude opencode codex
-  printf 'acme-api\t%s/a\twork\tzed\n' "$T" > "$T/.config/ghostfleet/projects"
-  tmux -L cfagcol send-keys '\`'; sleep 0.6      # out and back in, to re-read the file
-  tmux -L cfagcol send-keys ','; sleep 1
+  AGROW_AGENT=zed; agcol claude opencode codex; AGROW_AGENT=""
   agtoAGENT
   is "an uninstalled agent is still named" "yes" \
      "$(grep -q 'zed' <<< "$(agrow)" && echo yes || echo no)"
