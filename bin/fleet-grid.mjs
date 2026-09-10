@@ -2677,9 +2677,33 @@ const SETCOLS = [
   // the NEXT master (CLAUDE_FLEET_AGENT is read once, when the tmux session is created),
   // and what the non-default choices cost. `fleet-agent caveat` composes that from the
   // registry's measured capability fields, so a fourth agent brings its own warning.
-  { title: 'AGENT', onColor: C.cyan, toggle: cycleAgent,
+  // A RING DRAWN AS A RADIO READS AS A DEAD KEY. The other two columns are genuinely
+  // binary, so `○`/`●` and a footer that says "toggle" are honest for them; this one
+  // cycles through however many agents are installed, and three presses land back on
+  // the default — which rewrites the row to three columns, exactly the row a project
+  // that was never set has. So a completed lap and an ignored keystroke are the same
+  // pixels AND the same bytes on disk: measured from a real screen where a project
+  // wanted codex, sat on claude, and looked untouched. `verb` renames the footer for
+  // this column and `N/M` in the cell gives the ring a position, so the wrap is
+  // something you watch happen rather than something you deduce afterwards.
+  { title: 'AGENT', onColor: C.cyan, toggle: cycleAgent, verb: 'cycle',
     blurb: `${C.dim}agent: which CLI this project's master runs — ${C.reset}${C.bold}the NEXT one${C.reset}${C.dim}; a running master keeps what it started with. ${C.reset}${C.yellow}${agentCaveats()}${C.reset}`,
-    state: p => { const a = p.agent && p.agent !== 'claude' ? p.agent : ''; return { on: !!a, label: a || 'claude' }; } },
+    state: p => {
+      const ring = agentRing();
+      const a = p.agent && p.agent !== 'claude' ? p.agent : '';
+      // Counted only from three, because two states ARE a toggle and `1/2` on one is
+      // noise. A claude-only machine has a ring of one and never reaches this branch.
+      //   AND ONLY WHEN THE AGENT IS ACTUALLY IN THE RING. A project can name an agent
+      // whose binary is not installed here — set on another machine, or uninstalled
+      // since — and that agent has no position to report. `Math.max(0, indexOf)` was
+      // here and printed `1/3` for it, which is the position of the DEFAULT: a made-up
+      // observation, and the one number on this screen a reader would trust. No counter
+      // is the honest answer; the name still shows, because the name is configured and
+      // the position is measured.
+      const i = ring.indexOf(a);
+      const pos = (ring.length > 2 && i >= 0) ? ` ${i + 1}/${ring.length}` : '';
+      return { on: !!a, label: (a || 'claude') + pos };
+    } },
 ];
 // One line naming only the agents that HAVE a caveat, so a fully-capable fourth agent
 // adds nothing to it and the line stays readable at 80 columns.
@@ -2820,7 +2844,8 @@ function pRenderSettings() {
     });
     buf += `${cur}${padEndV('', 6)}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}\x1b[K\n`;
   });
-  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ toggle · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  // Named per column, so the key's own description changes with what it will do.
+  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ ${SETCOLS[pSetCol].verb || 'toggle'} · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // schedule a message to a project's master (mirrors the grid's renderSchedule)
