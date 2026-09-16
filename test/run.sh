@@ -136,11 +136,48 @@ kill_servers_in() {                # $1 = a run directory
 # left one alive for half an hour. It is found by its own argv, which names the dead run's
 # directory, so this can only ever reach a daemon THIS file started under a directory that
 # is provably nobody's any more.
-kill_serves_in() {                 # $1 = a run directory
-  local p
-  for p in $(pgrep -f "$1/.*fleet-serve.mjs" 2>/dev/null); do
-    [ "$p" = "$$" ] || kill "$p" 2>/dev/null
+# A DAEMON THAT WILL NOT BE REASONED WITH MUST STILL BE REAPED, and every teardown path
+# here used a bare `kill`. That is SIGTERM, which is a request: fleet-serve answers it by
+# DRAINING — it stops accepting, lets in-flight responses finish, and only exits after a
+# 15s grace — so a polite kill is not even supposed to be instant. And measured live on
+# this machine after a night of runs: eight leaked daemons where `kill` returned 0, and
+# `kill -TERM` again returned 0, and the process was still there in state R both times.
+# Whatever wedges them, the reaper cannot depend on their cooperation.
+#   ESCALATE: ask, wait a beat, then insist. The wait is short on purpose — at teardown
+# nobody is reading the response a drain is protecting, so the grace that is right for a
+# live restart is only latency here.
+# THE REGISTRY IS A FILE, NOT A VARIABLE, and that took an instrumented run to see. The
+# EXIT trap read $SERVE_PIDS and found it EMPTY while six sites append to it — because the
+# daemon section keeps a helper that reaps its own servers and then resets the list to "",
+# so a variable is exactly as durable as whoever last touched it. Nothing was wrong with
+# the appends or with reap; the state lived somewhere a function could scope away.
+#   A file under the run directory cannot be reset by a function, survives a subshell, and
+# the trap already knows the path. Registration is append-only and the trap is the only
+# reader, so the in-section helper can go on reaping and resetting its own variable without
+# ever hiding a daemon from the teardown that always runs.
+sv_reg() { [ -n "${1:-}" ] && printf '%s\n' "$1" >> "$TMUX_TMPDIR/serve.pids"; return 0; }
+sv_all() { tr '\n' ' ' < "$TMUX_TMPDIR/serve.pids" 2>/dev/null || true; }
+reap() {                           # $1.. = pids; returns once none of them exist
+  local p i left
+  for p in "$@"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
+  i=0
+  while [ "$i" -lt 20 ]; do
+    left=""
+    for p in "$@"; do [ -n "$p" ] && kill -0 "$p" 2>/dev/null && left="$left $p"; done
+    [ -z "$left" ] && return 0
+    sleep 0.1; i=$((i+1))
   done
+  # SIGKILL cannot be handled, ignored or blocked, which is the whole reason it is the
+  # floor. A process that gets here was asked twice and did not answer.
+  for p in $left; do kill -9 "$p" 2>/dev/null; done
+  return 0
+}
+kill_serves_in() {                 # $1 = a run directory
+  local p pids=""
+  for p in $(pgrep -f "$1/.*fleet-serve.mjs" 2>/dev/null); do
+    [ "$p" = "$$" ] || pids="$pids $p"
+  done
+  [ -n "$pids" ] && reap $pids
   return 0
 }
 sweep_dead_runs() {                # $1 = the <prefix> of <prefix>.<pid>.XXXXXX
@@ -158,7 +195,7 @@ sweep_dead_runs() {                # $1 = the <prefix> of <prefix>.<pid>.XXXXXX
 # fleet-serve is a background node child, not a tmux server, so the sweep above cannot
 # reach it — and a leaked daemon holding a TCP port is the same cross-run interference
 # this section exists to stop. $SERVE_PIDS is set by the fleet-serve group.
-trap 'rc=$?; kill ${SERVE_PIDS:-} 2>/dev/null; kill_serves_in "$TMUX_TMPDIR"; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
+trap 'rc=$?; reap ${SERVE_PIDS:-} $(sv_all); kill_serves_in "$TMUX_TMPDIR"; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
 trap 'exit 130' INT
 sweep_dead_runs "$TEST_RUNS"
 
@@ -939,6 +976,92 @@ if command -v git >/dev/null 2>&1; then
 else
   skip "fleet-review" "git missing"
 fi
+
+group "every backgrounded daemon is registered for teardown"
+# THE SELF-SWEEP, and it is here because the registry kept being the thing that was wrong.
+# Four sites started a fleet-serve in the background and never told the EXIT trap about it;
+# each had a local `kill` 80-odd lines later, which is teardown that only happens if
+# nothing between here and there exits first. Registering them by hand fixes today and not
+# tomorrow — a fifth site is one copy-paste away, and the symptom is a daemon holding a
+# port on somebody's laptop a week later, attributed to anything but this.
+#   So the rule is checked rather than remembered, the same shape as the `grep -q`-into-a-
+# pipe sweep further down: a line that backgrounds fleet-serve must be followed within
+# three lines by a SERVE_PIDS registration. Reported as the LINE NUMBERS, because "3" tells
+# you nothing about which.
+SVSWEEP="$(awk '
+  /fleet-serve\.mjs/ && /&[[:space:]]*$/ && !/^[[:space:]]*#/ { start[NR]=1 }
+  { for (n in start) if (NR > n && NR <= n+3 && /SERVE_PIDS/) delete start[n] }
+  END { for (n in start) printf "%s ", n }' "$0" | tr -s ' ')"
+is "no unregistered daemon start" "" "$(printf '%s' "${SVSWEEP% }")"
+
+group "a daemon that ignores SIGTERM is still reaped"
+# WHY `reap` ESCALATES, and the first version of this comment got the reason wrong, so it
+# is worth stating what was actually measured. SIGTERM is a REQUEST: fleet-serve answers it
+# by DRAINING — stop accepting, let in-flight responses finish, exit after a 15s grace — so
+# a polite kill is not meant to be instant. Watching a leaked daemon two seconds after
+# `kill` and finding it alive was read as "it ignores SIGTERM"; it does not. Sent TERM on
+# its own, a survivor died at once.
+#   The escalation still earns its place: it BOUNDS the wait. A teardown that sends a
+# request and hopes is open-ended, and at exit nobody is reading the response a drain is
+# protecting. The stub below is the worst case stated plainly rather than a claim about
+# fleet-serve.
+#   The stub below ignores SIGTERM outright, which is the worst case stated plainly. If
+# `reap` only asked, this group hangs at the first row instead of failing — so the row
+# after it asserts the ELAPSED time, which is the only thing that can tell "SIGKILL worked"
+# from "it happened to exit on its own".
+RPD="$(cd "$(mktemp -d)" && pwd -P)"
+cat > "$RPD/deaf.mjs" <<'DEAF'
+// A daemon that will not be reasoned with: it takes SIGTERM and does nothing at all.
+process.on('SIGTERM', () => {});
+process.on('SIGINT', () => {});
+setInterval(() => {}, 1000);
+console.log('up');
+DEAF
+if command -v node >/dev/null 2>&1; then
+  node "$RPD/deaf.mjs" > "$RPD/out" 2>&1 &
+  DEAFPID=$!
+  i=0; while [ "$i" -lt 40 ] && ! grep -q up "$RPD/out" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+  is "the deaf stub is running"        "0" "$(kill -0 "$DEAFPID" 2>/dev/null; echo $?)"
+  is "...and it really does ignore TERM" "0" \
+     "$(kill "$DEAFPID" 2>/dev/null; sleep 0.5; kill -0 "$DEAFPID" 2>/dev/null; echo $?)"
+  reap "$DEAFPID"
+  # WAIT BEFORE ASKING, because a SIGKILLed CHILD IS A ZOMBIE UNTIL IT IS REAPED, and
+  # `kill -0` on a zombie SUCCEEDS — the pid still exists, there is simply nothing behind
+  # it. The first version of this row asserted before waiting and read a correctly killed
+  # process as alive, which is a fact about process tables and not about `reap` at all.
+  wait "$DEAFPID" 2>/dev/null || true
+  is "reap gets it anyway"            "1" "$(kill -0 "$DEAFPID" 2>/dev/null; echo $?)"
+
+  # THE OTHER DIRECTION: a well-behaved daemon must not be waited out for the full
+  # escalation window, or every teardown pays two seconds per process. It exits on the
+  # request, so reap returns while the grace is still running.
+  cat > "$RPD/polite.mjs" <<'POLITE'
+process.on('SIGTERM', () => process.exit(0));
+setInterval(() => {}, 1000);
+console.log('up');
+POLITE
+  node "$RPD/polite.mjs" > "$RPD/out2" 2>&1 &
+  POLPID=$!
+  i=0; while [ "$i" -lt 40 ] && ! grep -q up "$RPD/out2" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+  T0="$(date +%s)"
+  reap "$POLPID"
+  T1="$(date +%s)"
+  wait "$POLPID" 2>/dev/null || true      # same zombie rule as above
+  is "a polite daemon is reaped too"  "1" "$(kill -0 "$POLPID" 2>/dev/null; echo $?)"
+  # The escalation window is 2s. Anything under that means the loop noticed it had gone
+  # rather than sitting out the clock — and a whole suite's teardown depends on that.
+  is "...without sitting out the grace" "yes" \
+     "$([ "$((T1 - T0))" -le 1 ] && echo yes || echo "no: $((T1 - T0))s")"
+
+  # AND REAP MUST SURVIVE NONSENSE, because the EXIT trap passes it whatever SERVE_PIDS
+  # holds — which is empty on a run that failed before the fleet-serve group, and stale
+  # after a daemon exited on its own. Either must not take the trap down with it.
+  is "an empty list is not an error"  "0" "$(reap; echo $?)"
+  is "a dead pid is not an error"     "0" "$(reap 999999; echo $?)"
+else
+  skip "the reaper" "node missing"
+fi
+rm -rf "$RPD"
 
 group "projects screen reads the agent column"
 T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a" "$T/b"
@@ -2709,8 +2832,11 @@ else
 
   # WHERE IT ENDED UP, NOT WHERE IT WAS SENT. A redirect to a login screen photographs
   # perfectly well, and this line is the only thing that distinguishes the two.
+  # `url`, not `at` — the key was renamed because provenance uses `at` for a TIMESTAMP, and
+  # this row asserted the old name. Self-inflicted, and the reason the rename was worth
+  # doing anyway: one key with two meanings caught a careful reader and then caught me.
   is "a redirect records the final url"   "1" \
-     "$(node -e 'const m=require(process.argv[1]);console.log(/\/login$/.test(m.steps[2].at)?1:0)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+     "$(node -e 'const m=require(process.argv[1]);console.log(/\/login$/.test(m.steps[2].url)?1:0)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
 
   # PROVENANCE, because a capture with no context is an assertion wearing a photograph.
   is "the manifest names the commit"      "1" \
@@ -2722,8 +2848,10 @@ else
   # of the markup and pinning it makes the test fail on a layout change that broke nothing.
   is "...and the page shows it"           "yes" \
      "$([ "$(grep -c "$(node -e 'const m=require(process.argv[1]);console.log((m.provenance.commit||"x").slice(0,8))' "$FSH/run/manifest.json" 2>/dev/null)" "$FSH/run/index.html" || true)" -ge 1 ] && echo yes || echo no)"
+  # Pinned to the PHRASE, not the sentence: the count's wording changed once already and
+  # this row failed over a redesign that broke nothing.
   is "...and counts what to look at"      "1" \
-     "$(grep -c 'step to look at' "$FSH/run/index.html" || true)"
+     "$(grep -c 'to look at' "$FSH/run/index.html" || true)"
   # SELF-CONTAINED, or it opens over file:// as a blank page. No CDN, no remote font, no
   # fetch — asserted as the absence of an off-origin URL in the shipped markup.
   is "the page loads nothing remote"      "0" \
@@ -2735,6 +2863,271 @@ fi
 # in the middle of the suite's output looking exactly like something went wrong.
 { kill "$FSPID"; wait "$FSPID"; } 2>/dev/null || true
 rm -rf "$FSH"
+
+group "a fill that the framework ignores is not a fill"
+# REPORTED FROM A REAL RUN AGAINST A REAL APP, and it is the worst failure this tool can
+# have. `el.value = v` plus a synthetic `input` event is SWALLOWED by React: the framework
+# keeps a `_valueTracker` on the node, assigning `.value` updates that tracker as a side
+# effect, so when the event arrives React compares node-value against its own cache, sees
+# no change, and suppresses the synthetic onChange. The component's state setter never
+# runs.
+#   What made it urgent is the shape: the screenshot showed the typed text sitting in the
+# search box with the list below it completely UNFILTERED. A reader flipping through shots
+# would say "yes, it searched". That is this command's own thesis — success that renders
+# identically to nothing having happened — occurring inside the instrument.
+#   The fix is the prototype's property-descriptor setter, which goes round the tracker.
+FW="$(cd "$(mktemp -d)" && pwd -P)"
+# THE FIXTURE HAS TO DISCRIMINATE, and the first one did not: it asserted a row that is
+# present in the UNFILTERED list too, so the broken code passed it. A test that can only
+# pass proves nothing. This reports a COUNT, which reads "showing 1 of 4" only when the
+# filter actually ran.
+cat > "$FW/app.mjs" <<'APP'
+import http from 'node:http';
+http.createServer((_q, r) => { r.writeHead(200, {'content-type':'text/html'}); r.end(`<!doctype html>
+<meta charset=utf-8><body><input id=q><ul id=list></ul><script>
+var ALL=['borSigningLink','programCycleLabel','programEffectiveDate','associationDbaName'];
+var el=document.getElementById('q'), out=document.getElementById('list');
+// React's tracker, reproduced without React: the cache updates as a side effect of the
+// property set, which is precisely what makes a plain assignment invisible to the handler.
+var cache=el.value, d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');
+Object.defineProperty(el,'value',{get:function(){return d.get.call(this)},
+  set:function(v){cache=v; d.set.call(this,v)},configurable:true});
+function render(q){var m=ALL.filter(function(t){return !q||t.toLowerCase().indexOf(q.toLowerCase())>=0});
+  out.innerHTML='<li>showing '+m.length+' of '+ALL.length+'</li>'+m.map(function(t){return '<li>'+t+'</li>'}).join('')}
+el.addEventListener('input',function(){ if(d.get.call(el)===cache) return; cache=d.get.call(el); render(cache); });
+render('');
+</script>`); }).listen(Number(process.argv[2]),'127.0.0.1',()=>console.error('up'));
+APP
+# NOT `readonly`, WHICH WAS THE FIRST ATTEMPT AND DOES NOT WORK. readonly blocks USER
+# input; a programmatic `value` set succeeds on it, so the readback matched and the row
+# could never fire. A NUMBER input given text is the real thing: the HTML value-sanitisation
+# algorithm discards anything that is not a valid floating-point number, so the field ends
+# up EMPTY and the readback disagrees with what was asked for — which is exactly the class
+# of silent non-fill this note exists to catch, and it happens in real forms.
+cat > "$FW/ro.mjs" <<'APP'
+import http from 'node:http';
+http.createServer((_q, r) => { r.writeHead(200, {'content-type':'text/html'});
+  r.end('<!doctype html><meta charset=utf-8><input id=q type=number>'); })
+  .listen(Number(process.argv[2]),'127.0.0.1',()=>console.error('up'));
+APP
+FWP="$(node -e 'const n=require("net"),s=n.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+FWP2="$(node -e 'const n=require("net"),s=n.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+node "$FW/app.mjs" "$FWP" 2>/dev/null &  FWPID=$!
+node "$FW/ro.mjs"  "$FWP2" 2>/dev/null & FWPID2=$!
+sleep 1
+printf '{ "base":"http://127.0.0.1:%s","viewport":{"width":600,"height":400},"steps":[{"name":"search","goto":"/","fill":{"#q":"bor"},"settle":400,"expect":"showing 1 of 4"}]}' "$FWP" > "$FW/f.json"
+printf '{ "base":"http://127.0.0.1:%s","viewport":{"width":600,"height":400},"steps":[{"name":"a number field given text","goto":"/","fill":{"#q":"not-a-number"},"settle":300}]}' "$FWP2" > "$FW/ro.json"
+FWOUT="$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FW/f.json" --out "$FW/run" 2>&1)"
+if grep -q 'no chrome' <<< "$FWOUT"; then
+  skip "fill drives a controlled input" "no chrome"
+else
+  # THE FILTER RAN. `showing 1 of 4` exists only if the framework's handler fired, so this
+  # row fails on the exact pre-fix code and cannot pass by the text merely being present.
+  is "the framework saw the fill"      "true" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[0].expect.found)' "$FW/run/manifest.json" 2>/dev/null)"
+  is "...and nothing was flagged"      "0" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[0].notes.length)' "$FW/run/manifest.json" 2>/dev/null || echo 9)"
+  # It must use the setter that goes round the tracker, not an assignment. Asserted on the
+  # source as well as the behaviour: the fixture is a stand-in for React, and the day it
+  # drifts this row still says which mechanism the tool relies on.
+  is "by the descriptor's setter"      "1" \
+     "$(grep -c "getOwnPropertyDescriptor(proto, 'value')" "$ROOT/bin/fleet-shots.mjs" || true)"
+
+  # AND THE OTHER DIRECTION: a fill that LANDS and does not stick used to be silent — the
+  # only note was for a missed SELECTOR. A readonly input is the honest way to produce that
+  # without breaking the tool: the element is found, the value cannot take.
+  node "$ROOT/bin/fleet-shots.mjs" --flow "$FW/ro.json" --out "$FW/ro" >/dev/null 2>&1
+  is "a fill that will not stick is flagged" "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[0].notes.filter(n=>/did not stick/.test(n)).length)' "$FW/ro/manifest.json" 2>/dev/null || echo 0)"
+  # The note has to carry BOTH sides, or it is just "something went wrong": what was asked
+  # for and what the field actually holds is the whole diagnosis.
+  is "...and it says what was asked for" "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(/not-a-number/.test(m.steps[0].notes.join(" "))?1:0)' "$FW/ro/manifest.json" 2>/dev/null || echo 0)"
+  # THE PER-STEP URL IS CALLED `url`. It was `at` — the same key provenance uses for a
+  # TIMESTAMP — and a reader of a real manifest concluded the URL was absent and rebuilt
+  # the landing pages from page titles instead. One key, two meanings, in one document.
+  is "the step records its final url"  "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(/^http/.test(m.steps[0].url||"")?1:0)' "$FW/run/manifest.json" 2>/dev/null || echo 0)"
+  is "...and not under provenance's key" "0" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[0].at===undefined?0:1)' "$FW/run/manifest.json" 2>/dev/null || echo 9)"
+  # A CLEAN TREE IS NOT AN UNKNOWN TREE. `false || null` gave null for a clean checkout,
+  # which is the same answer as "git is absent" — and null is the only way this file has to
+  # say "not determined". Asserted as a TYPE, because the wrong value here is `null`.
+  is "dirty is a boolean, not null"    "boolean" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(typeof m.provenance.dirty)' "$FW/run/manifest.json" 2>/dev/null)"
+fi
+{ kill "$FWPID" "$FWPID2"; wait "$FWPID" "$FWPID2"; } 2>/dev/null || true
+rm -rf "$FW"
+
+group "the stepper: one at a time, and a flag needs a reason"
+# DRIVEN, because both of this feature's bugs were invisible in the source. A `\n` inside the
+# page's outer template literal emitted a real newline into a single-quoted JS string, so the
+# whole script was a syntax error while the page still LOOKED right — the action bar is
+# static markup and drew perfectly. Then the checkbox-era toggle survived into the stepper,
+# so pressing approve on an already-approved step UNSET it and refused to advance: the button
+# appeared dead on exactly the second press.
+#   The helper spawns the real `serve` and clicks the real page, rather than rendering a copy
+# of the generator — a test with its own renderer passes against code nobody ships.
+STEPO="$(mktemp -d "$TEST_RUNS.$$.st.XXXXXX")"
+node "$ROOT/test/helpers/stepper-check.mjs" > "$STEPO/out" 2> "$STEPO/err"
+if grep -q 'no chrome' "$STEPO/out" "$STEPO/err" 2>/dev/null; then
+  skip "the stepper" "no chrome to click in"
+else
+  is "stepper-check produced rows" "yes" \
+     "$([ "$(grep -c . "$STEPO/out")" -ge 12 ] && echo yes || echo "no: $(grep -c . "$STEPO/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    is "$name" "$want" "$got"
+  done < "$STEPO/out"
+fi
+rm -rf "$STEPO"
+
+group "the review server answers every page it links to"
+# A TEMPORAL DEAD ZONE IS INVISIBLE UNTIL SOMETHING RENDERS, and then it is not a wrong
+# pixel, it is a DEAD PROCESS: `serve` parks the module with `await new Promise(() => {})`
+# so it can hold the port, which means every module-level `const` written below that point
+# is never initialised and the first request that touches one throws "cannot access X before
+# initialization" and takes the server with it. It happened three times in one file — the
+# verdict helpers, then the stylesheet, then the per-step URL reader — and each time the
+# command started, printed its URL, and died on the first page anyone opened.
+#   Selective enough to read as random, too: `function esc(){}` below the park is fine,
+# because function declarations are hoisted AND initialised while `const` is hoisted into a
+# dead zone. So the guard cannot be "read the file carefully". It has to be: ask the server
+# for every page it links to, and require a 200.
+SRV="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$SRV/root/2026-01-01_00-00-00"
+printf '\x89PNG\r\n\x1a\n' > "$SRV/root/2026-01-01_00-00-00/01-a.png"
+cat > "$SRV/root/2026-01-01_00-00-00/manifest.json" <<'MAN'
+{ "provenance": { "commit": "0123456789abcdef0123456789abcdef01234567", "branch": "b",
+                  "dirty": false, "base": "http://x", "slot": 7,
+                  "viewport": { "width": 800, "height": 600 }, "at": "2026-01-01T00:00:00.000Z" },
+  "steps": [ { "n": 1, "name": "a step", "file": "01-a.png", "url": "http://x/a", "title": "T",
+               "expect": { "text": "hi", "found": true, "how": "exact" }, "notes": [],
+               "requests": [ { "method": "GET", "url": "http://x/a", "status": 200, "type": "Document" },
+                             { "method": "GET", "url": "http://x/f.woff2", "status": 404, "type": "Font" } ] } ],
+  "problems": 0 }
+MAN
+if command -v node >/dev/null 2>&1; then
+  SRVP="$(node -e 'const n=require("net"),s=n.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+  node "$ROOT/bin/fleet-shots.mjs" serve --dir "$SRV/root" --port "$SRVP" > "$SRV/log" 2>&1 &
+  SRVPID=$!
+  sv_reg "${SRVPID}"
+  i=0; while [ "$i" -lt 60 ] && ! curl -s -m1 -o /dev/null "http://127.0.0.1:$SRVP/" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+  code() { curl -s -m2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$SRVP$1" 2>/dev/null; }
+  is "the index renders"            "200" "$(code /)"
+  is "a run page renders"           "200" "$(code /r/2026-01-01_00-00-00/)"
+  is "its screenshot is served"     "200" "$(code /r/2026-01-01_00-00-00/01-a.png)"
+  # ...and it is still ALIVE after all of that, which is the half a status code alone does
+  # not tell you: a TDZ throw kills the process, so the next request would fail to connect.
+  is "and the process survived"     "0" "$(kill -0 "$SRVPID" 2>/dev/null; echo $?)"
+  is "...still answering"           "200" "$(code /)"
+  # LOOPBACK ONLY, asserted rather than trusted, because this serves screenshots of whatever
+  # the author was building and there is deliberately no --bind to reconsider later.
+  is "it binds no other address"    "0" \
+     "$(grep -c "flag('--bind'" "$ROOT/bin/fleet-shots.mjs" || true)"
+  is "...and names 127.0.0.1"       "1" \
+     "$(grep -c "server.listen(want, '127.0.0.1'" "$ROOT/bin/fleet-shots.mjs" || true)"
+  # The page must carry its own styling: it opens over file:// from a copied folder, where a
+  # linked stylesheet is a silently unstyled page.
+  is "the page carries its own css"  "1" \
+     "$(curl -s -m2 "http://127.0.0.1:$SRVP/r/2026-01-01_00-00-00/" | grep -c '<style>' || true)"
+  is "...and loads nothing remote"   "0" \
+     "$(curl -s -m2 "http://127.0.0.1:$SRVP/r/2026-01-01_00-00-00/" | grep -coE '(src|href)="https?://' || true)"
+  # A FONT 404 IS AN ASSET, NOT A CALL. The display partition has to match the flagging
+  # partition, or the caption says "1 failed" over something nothing flagged.
+  is "an asset failure is not a call" "1" \
+     "$(curl -s -m2 "http://127.0.0.1:$SRVP/r/2026-01-01_00-00-00/" | grep -c '1 call' || true)"
+  { kill "$SRVPID"; wait "$SRVPID"; } 2>/dev/null || true
+else
+  skip "the review server" "node missing"
+fi
+rm -rf "$SRV"
+
+group "a review that cannot say no is a ceremony"
+# THE GATE. Marking steps in the page and copying the text was useful and stopped nothing:
+# a worker could call itself done over a step marked `problem`, which makes the review a
+# courtesy. --check is what refuses, and every row here is about a way it could fail to.
+#   No browser needed: the gate reads manifest.json and verdict.json, so it is built by
+# hand. A group that had to photograph something first would only run where Chrome is.
+GT="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$GT/run"
+cat > "$GT/run/manifest.json" <<'MAN'
+{ "provenance": { "commit": null, "branch": "b", "dirty": null, "base": "http://x",
+                  "viewport": { "width": 700, "height": 500 }, "at": "2026-09-10T00:00:00.000Z" },
+  "steps": [
+    { "n": 1, "name": "the sign-in screen", "file": "01.png", "at": "http://x/login",
+      "title": "", "expect": null, "notes": [], "requests": [] },
+    { "n": 2, "name": "after signing in", "file": "02.png", "at": "http://x/login",
+      "title": "", "expect": { "text": "Welcome back", "found": true },
+      "notes": ["POST http://x/api/v1/signin answered 404"], "requests": [] }
+  ], "problems": 1 }
+MAN
+gs() { node "$ROOT/bin/fleet-shots.mjs" "$@" 2>&1; }
+gsrc() { node "$ROOT/bin/fleet-shots.mjs" "$@" >/dev/null 2>&1; echo $?; }
+
+# SILENCE IS NOT APPROVAL, which is the same rule the standing contract states about an
+# unchecked criterion: a run of two steps with none marked is not 0 problems, it is
+# 2 unreviewed. A gate that passed here would approve every flow nobody opened.
+is "no verdict at all is a refusal"     "1" "$(gsrc --check "$GT/run")"
+is "...and it names them unreviewed"    "2" "$(gs --check "$GT/run" | grep -c '^unreviewed' || true)"
+# ...and the run's OWN finding is reported even before anybody clicks anything.
+is "...and reports the run's own flag"  "1" "$(gs --check "$GT/run" | grep -c '^flagged.*404' || true)"
+
+# THE CHANNEL IS THE CLIPBOARD, so the parser has to survive exactly what the page's copy
+# button produces — including its header line, which is not a verdict.
+cat > "$GT/paste" <<'PASTE'
+flow review — b 1234abcd
+- [ok] 1. the sign-in screen
+- [problem] 2. after signing in — the POST goes to the wrong path
+PASTE
+is "the page's text is recorded"        "2" \
+   "$(gs verdict "$GT/run" < "$GT/paste" | grep -oE 'recorded [0-9]+' | grep -oE '[0-9]+' || echo 0)"
+is "...and the header line is ignored"  "0" \
+   "$(node -e 'const v=require(process.argv[1]);console.log(Object.keys(v).filter(k=>!/^[0-9]+$/.test(k)).length)' "$GT/run/verdict.json" 2>/dev/null || echo 9)"
+is "...and the note comes with it"      "1" \
+   "$(node -e 'const v=require(process.argv[1]);console.log(/wrong path/.test(v["2"].note)?1:0)' "$GT/run/verdict.json" 2>/dev/null || echo 0)"
+is "a problem blocks"                   "1" "$(gsrc --check "$GT/run")"
+# NOTHING RECOGNISABLE IS AN ERROR, not an empty success: a paste that went wrong must not
+# read as "reviewed and fine".
+is "unparseable stdin is refused"       "1" "$(printf 'hello\n' | node "$ROOT/bin/fleet-shots.mjs" verdict "$GT/run" >/dev/null 2>&1; echo $?)"
+# A step number this run does not have is dropped rather than stored: two folders open at
+# once and the wrong paste is an ordinary mistake.
+is "a step this run lacks is dropped"   "0" \
+   "$(printf -- '- [ok] 9. nope\n' | node "$ROOT/bin/fleet-shots.mjs" verdict "$GT/run" >/dev/null 2>&1; node -e 'const v=require(process.argv[1]);console.log(v["9"]?1:0)' "$GT/run/verdict.json" 2>/dev/null || echo 0)"
+
+# A FLAG THAT CANNOT BE CLEARED IS A WALL, and a gate nobody can get past is one people
+# route around: sometimes the 404 really is fine and the reviewer is who knows it. So `ok`
+# clears a flag — but only WITH A REASON, and the reason is printed. `ok` with no note is
+# still blocked, and says what is missing rather than just refusing.
+printf -- '- [ok] 1. the sign-in screen\n- [ok] 2. after signing in\n' > "$GT/p2"
+gs verdict "$GT/run" < "$GT/p2" >/dev/null
+is "ok with no reason does NOT clear it" "1" "$(gsrc --check "$GT/run")"
+is "...and says a note is what clears"   "1" \
+   "$(gs --check "$GT/run" | grep -c 'a note is what clears a flag' || true)"
+printf -- '- [ok] 1. the sign-in screen\n- [ok] 2. after signing in — the stub server has no v1 route\n' > "$GT/p3"
+gs verdict "$GT/run" < "$GT/p3" >/dev/null
+is "ok WITH a reason clears it"          "0" "$(gsrc --check "$GT/run")"
+# ON THE RECORD, or the override is a click that evaporates. The reason is what a reader
+# sees later instead of an unexplained green.
+is "...and the reason is printed"        "1" \
+   "$(gs --check "$GT/run" | grep -c '^accepted.*v1 route' || true)"
+
+# SKIP IS A REVIEWED STATE, deliberately: a human looked and said this one does not apply,
+# and treating that as unreviewed would make the honest answer impossible to give.
+mkdir -p "$GT/clean"
+sed 's/"notes": \["POST[^]]*\]/"notes": []/; s/"problems": 1/"problems": 0/' "$GT/run/manifest.json" > "$GT/clean/manifest.json"
+printf -- '- [ok] 1. a\n- [skip] 2. b\n' | node "$ROOT/bin/fleet-shots.mjs" verdict "$GT/clean" >/dev/null 2>&1
+is "a clean flow, ok and skip, passes"  "0" "$(gsrc --check "$GT/clean")"
+# ...and the other direction, or the row above would pass on a build that approves anything:
+# drop one verdict and it must refuse again.
+printf '{"1":{"v":"ok","note":""}}' > "$GT/clean/verdict.json"
+is "...and one missing verdict refuses" "1" "$(gsrc --check "$GT/clean")"
+
+# A FOLDER THAT IS NOT ONE OF OURS SAYS SO, rather than reading as an empty clean run.
+mkdir -p "$GT/notours"
+is "a foreign folder is refused"        "1" "$(gsrc --check "$GT/notours")"
+is "...and names what it wanted"        "1" "$(gs --check "$GT/notours" | grep -c 'manifest.json' || true)"
+rm -rf "$GT"
 
 group "fleet-look photographs, and refuses to photograph nothing"
 if command -v node >/dev/null 2>&1; then
@@ -6871,7 +7264,7 @@ else
 fi
 SERVE_PIDS=""
 serve_stop() {
-  [ -n "${SERVE_PIDS:-}" ] && kill $SERVE_PIDS 2>/dev/null
+  [ -n "${SERVE_PIDS:-}" ] && reap $SERVE_PIDS
   SERVE_PIDS=""
   # Wait for the port to come back, or the next group's listen() races a kill that has not
   # landed yet and dies with EADDRINUSE — which looks exactly like a broken server.
@@ -6954,7 +7347,7 @@ printf 'demo\t%s\twork\nother\t%s\twork\n' "$SV/repo" "$SV/other" > "$SV/home/.c
 PORT="$(free_port)"; PORT="${PORT:-18787}"
 BASE="http://localhost:$PORT"
 export GHOSTFLEET_SERVE_CONFIG="$SV/serve.json" GHOSTFLEET_SERVE_AUDIT="$SV/audit.jsonl" SV_RAN="$SV/ran" SV_ROOT="$SV"
-sv_cli() { HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" "$@"; }
+sv_cli() { [ $# -gt 0 ] || { echo "fleet-serve helper called with NO VERB — that starts the DAEMON, in the foreground, unregistered and unkillable by the trap" >&2; return 2; }; HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" "$@"; }
 sv_code() { sv_cli enroll "$1" | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}'; }
 # WHY it did not come up, not just THAT it did not. Six groups used to skip with the bare
 # words "server did not come up" while the daemon's own first line said exactly what was
@@ -6968,6 +7361,7 @@ sv_start() {
   HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.$1" 2>&1 &
   svp=$!
   SERVE_PIDS="$SERVE_PIDS $svp"
+  sv_reg "${svp}"
   i=0; while [ "$i" -lt 60 ]; do
     curl -s -m1 "$BASE/healthz" >/dev/null 2>&1 && { SV_WHY=""; return 0; }
     kill -0 "$svp" 2>/dev/null || break        # already exited: its log is the answer
@@ -7401,12 +7795,16 @@ is "the fixture reached a real pane"        "1"   "$(tmux -L cf-demo capture-pan
 PNPORT="$(free_port)"; PNPORT="${PNPORT:-18799}"
 PNBASE="http://localhost:$PNPORT"
 pn_cli() { GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
-           HOME="$PN/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" "$@"; }
+           [ $# -gt 0 ] || { echo "fleet-serve helper called with NO VERB — that starts the DAEMON, in the foreground, unregistered and unkillable by the trap" >&2; return 2; }; HOME="$PN/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" "$@"; }
 pn_cli init --bind 127.0.0.1 --port "$PNPORT" >/dev/null 2>&1
 node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$PN/serve.json"
 GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
   HOME="$PN/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$ROOT/bin/fleet-serve.mjs" > "$PN/log" 2>&1 &
 PN_PID=$!
+SERVE_PIDS="$SERVE_PIDS $PN_PID"   # registered as well as killed locally: the local kill
+sv_reg "${PN_PID}"
+# is 80-odd lines later in some of these, and anything that exits in between leaked a
+# daemon holding a port. The EXIT trap is the only teardown that always runs.
 i=0; up=no; while [ "$i" -lt 60 ]; do curl -s -m1 "$PNBASE/healthz" >/dev/null 2>&1 && { up=yes; break; }; i=$((i+1)); sleep 0.1; done
 if [ "$up" != yes ]; then
   skip "/api/pane" "server did not come up"
@@ -7535,6 +7933,7 @@ GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl
   HOME="$RG/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$ROOT/bin/fleet-serve.mjs" > "$RG/log" 2>&1 &
 rgp=$!
 SERVE_PIDS="$SERVE_PIDS $rgp"
+sv_reg "${rgp}"
 i=0; while [ "$i" -lt 60 ] && ! curl -s -m1 "$RBASE/healthz" >/dev/null 2>&1; do
   kill -0 "$rgp" 2>/dev/null || break          # already exited: its log is the answer
   i=$((i+1)); sleep 0.1
@@ -7713,10 +8112,13 @@ else
   # pruner that dropped both would look identical from the "it was removed" side.
   node "$ROOT/test/helpers/push-probe.mjs" --port "$OKPORT"   --status 201 --sub "$PU/sub-ok.json"   --out "$PU/ok.jsonl"   > "$PU/probe-ok.log" 2>&1 &
   SERVE_PIDS="$SERVE_PIDS $!"
+  sv_reg "$!"
   node "$ROOT/test/helpers/push-probe.mjs" --port "$GONEPORT" --status 410 --sub "$PU/sub-gone.json" --out "$PU/gone.jsonl" > "$PU/probe-gone.log" 2>&1 &
   SERVE_PIDS="$SERVE_PIDS $!"
+  sv_reg "$!"
   pu > "$PU/serve.log" 2>&1 &
   SERVE_PIDS="$SERVE_PIDS $!"
+  sv_reg "$!"
   pu_up=0
   i=0; while [ "$i" -lt 80 ]; do
     curl -s -m1 "$PUBASE/healthz" >/dev/null 2>&1 && { pu_up=1; break; }
@@ -7905,10 +8307,22 @@ chmod +x "$SV/shim/tailscale"
 # Bounded, because the whole point is that this invocation must DIE. Run it straight and
 # it hangs the suite the moment the guard is missing — a red assertion wearing a hang, and
 # a hang is not a test result. Verified by removing the refusal: it went red here.
-( PATH="$SV/shim:$PATH" HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" >"$SV/funnel.out" 2>&1; echo "rc=$?" >>"$SV/funnel.out" ) &
+# NOT A SUBSHELL, and that was a leak with a note on it. `( … node … ) &` makes `$!` the
+# SUBSHELL's pid, so `kill $fpid` kills the wrapper and node carries on — reparented to
+# launchd, holding its port, invisible to a reaper that was given the pid it was told to
+# use. It only bites on the branch where the guard fails to refuse, which is the branch
+# this group exists to catch, so the leak was hiding behind the bug.
+#   rc is taken from `wait` instead of from an echo inside the subshell: if node refused on
+# its own the kill is a no-op and wait yields its real status, and if node had to be killed
+# wait yields 143 — which fails the rc=1 row, correctly, because the guard did not work.
+PATH="$SV/shim:$PATH" HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" >"$SV/funnel.out" 2>&1 &
 fpid=$!
+SERVE_PIDS="$SERVE_PIDS $fpid"   # registered as well as killed locally: the local kill
+sv_reg "${fpid}"
+# is 80-odd lines later in some of these, and anything that exits in between leaked a
+# daemon holding a port. The EXIT trap is the only teardown that always runs.
 i=0; while [ "$i" -lt 60 ] && kill -0 $fpid 2>/dev/null; do i=$((i+1)); sleep 0.1; done
-kill $fpid 2>/dev/null; wait $fpid 2>/dev/null
+kill $fpid 2>/dev/null; wait $fpid 2>/dev/null; echo "rc=$?" >>"$SV/funnel.out"
 out="$(cat "$SV/funnel.out" 2>/dev/null)"
 is "funnel on: it refuses to start"    "1" "$(printf '%s' "$out" | grep -c 'Funnel is ON' || true)"
 is "funnel on: nonzero exit"           "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
@@ -7946,6 +8360,10 @@ can_arm_here() {
 if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/null 2>&1; then
   HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=on node "$SV/bin/fleet-serve.mjs" > "$SV/log.awake" 2>&1 &
   apid=$!
+  SERVE_PIDS="$SERVE_PIDS $apid"   # registered as well as killed locally: the local kill
+  sv_reg "${apid}"
+  # is 80-odd lines later in some of these, and anything that exits in between leaked a
+  # daemon holding a port. The EXIT trap is the only teardown that always runs.
   i=0; while [ "$i" -lt 60 ] && kill -0 "$apid" 2>/dev/null \
         && ! grep -q 'awake:' "$SV/log.awake" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
   # A DAEMON THAT NEVER STARTED READS AS AN INHIBITOR THAT NEVER FIRED: both assertions
@@ -7993,6 +8411,10 @@ if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/nul
   # off must mean off, or "on" proves nothing
   HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.awakeoff" 2>&1 &
   bpid=$!
+  SERVE_PIDS="$SERVE_PIDS $bpid"   # registered as well as killed locally: the local kill
+  sv_reg "${bpid}"
+  # is 80-odd lines later in some of these, and anything that exits in between leaked a
+  # daemon holding a port. The EXIT trap is the only teardown that always runs.
   i=0; while [ "$i" -lt 40 ] && ! grep -q 'awake:' "$SV/log.awakeoff" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
   is "CLAUDE_FLEET_AWAKE=off holds none" "0" \
      "$( (pgrep -f "caffeinate .*-w $bpid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$bpid " >/dev/null 2>&1) && echo 1 || echo 0)"
