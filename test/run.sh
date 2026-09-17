@@ -7370,6 +7370,15 @@ sv_start() {
   SV_WHY="$(tr '\n' ' ' < "$SV/log.$1" 2>/dev/null | cut -c1-180)"
   [ -n "$SV_WHY" ] || SV_WHY="nothing at all in $SV/log.$1"
   bad "the daemon comes up ($1)" "listening on $BASE" "$SV_WHY"
+  # A FAILED START MUST NOT LEAVE A LISTENER, and this is the difference between one red
+  # line and six. Coming up "wrong" is not the same as not coming up: a daemon that bound
+  # a port $BASE is not watching is ALIVE, so the wait above times out rather than seeing
+  # it exit, every caller takes the failure branch — which skips serve_stop — and the
+  # process keeps the port. The next five groups then died on EADDRINUSE, naming code none
+  # of them had touched, and the one real cause was the first line of the six. Reaping here
+  # costs nothing when the daemon already exited (reap tolerates a dead pid) and bounds the
+  # blast radius of every future start failure to the group that caused it.
+  reap "$svp"
   return 1
 }
 sv_cli init --bind 127.0.0.1 --port "$PORT" >/dev/null 2>&1
@@ -7794,9 +7803,29 @@ is "the fixture reached a real pane"        "1"   "$(tmux -L cf-demo capture-pan
 
 PNPORT="$(free_port)"; PNPORT="${PNPORT:-18799}"
 PNBASE="http://localhost:$PNPORT"
-pn_cli() { GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
-           [ $# -gt 0 ] || { echo "fleet-serve helper called with NO VERB — that starts the DAEMON, in the foreground, unregistered and unkillable by the trap" >&2; return 2; }; HOME="$PN/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" "$@"; }
+# THE GUARD COMES FIRST, AND THAT ORDER IS THE WHOLE BUG THIS SHAPE ONCE HAD. An env
+# prefix binds to ONE simple command, and the `[ ... ] || { ...; }` guard is a command —
+# so writing the prefix, then the guard, then `; node …` put $PN's config on the GUARD and
+# left the node call to inherit the EXPORTED config of the shared daemon two groups up.
+# Every verb this helper ran then read and wrote the wrong file. What it cost, measured:
+# `init --port` wrote this group's port into the SHARED config, so the next five groups
+# started a daemon on a port their $BASE was not watching — one honest failure and five
+# EADDRINUSE echoes pointing at innocent code — while THIS group's config was never
+# written at all, so its daemon could not start and the group SKIPPED. A skip exits 0, so
+# the three assertions this group exists for had not run in any green suite since.
+pn_cli() { [ $# -gt 0 ] || { echo "fleet-serve helper called with NO VERB — that starts the DAEMON, in the foreground, unregistered and unkillable by the trap" >&2; return 2; }
+           GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
+           HOME="$PN/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" "$@"; }
 pn_cli init --bind 127.0.0.1 --port "$PNPORT" >/dev/null 2>&1
+# A HELPER WRITES WHERE IT CLAIMS TO, asserted rather than read. Both directions, because
+# each one alone passes under the bug that made this necessary: the first says this group's
+# own config exists and holds this group's port, and the second says the SHARED daemon's
+# config two groups up still holds ITS port. An env prefix that slides off the node call
+# fails exactly these two and nothing else nearby — the visible damage was five groups
+# later and looked like a port-in-use problem in code that had not changed.
+cfgport() { node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).port)}catch(e){console.log("no config: "+e.code)}' "$1"; }
+is "pn_cli wrote ITS OWN config"           "$PNPORT" "$(cfgport "$PN/serve.json")"
+is "...and left the shared one alone"      "$PORT"   "$(cfgport "$SV/serve.json")"
 node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$PN/serve.json"
 GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
   HOME="$PN/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$ROOT/bin/fleet-serve.mjs" > "$PN/log" 2>&1 &
@@ -7807,7 +7836,13 @@ sv_reg "${PN_PID}"
 # daemon holding a port. The EXIT trap is the only teardown that always runs.
 i=0; up=no; while [ "$i" -lt 60 ]; do curl -s -m1 "$PNBASE/healthz" >/dev/null 2>&1 && { up=yes; break; }; i=$((i+1)); sleep 0.1; done
 if [ "$up" != yes ]; then
-  skip "/api/pane" "server did not come up"
+  # NOT A SKIP. The same argument sv_start's comment makes, and this group is where it was
+  # learned the hard way: its config was being written to the wrong file, so the daemon
+  # never came up and the group skipped — exit 0, no red, and the three assertions it
+  # exists for silently absent from every green run. This daemon is the suite's own
+  # fixture, not a platform capability that might be missing.
+  bad "the pane daemon comes up" "listening on $PNBASE" \
+      "$(tr '\n' ' ' < "$PN/log" 2>/dev/null | cut -c1-180)"
 else
   pncode="$(pn_cli enroll phone | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')"
   node "$ROOT/test/helpers/serve-probe.mjs" "$PNBASE" pane "$pncode" > "$PN/probe" 2>"$PN/probe.err"
