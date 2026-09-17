@@ -692,6 +692,20 @@ async function keyboard(w, h, { indicator = true } = {}) {
     return { top: Math.round(c.scrollTop), thinking: !!document.querySelector('.chat .thinking') };
   });
   is(`${w}px ...the indicator leaves once the poll resumes`, false, gone.thinking);
+  // DO NOT RELAX THIS ROW. It fails intermittently — measured 2026-09-10 across seven runs
+  // of IDENTICAL client code: four green, three reporting top=0 where 300 was parked. That
+  // is not a timing problem in this file, and two plausible "fixes" were tried and thrown
+  // away before writing this down:
+  //   - Waiting for the indicator to disappear instead of sleeping FAILED RELIABLY, which
+  //     looked like proof the restore lands later. It is not: a 500ms trace of scrollTop
+  //     across the whole 14s window after blur shows it holding at 300 the entire time and
+  //     never touching 0, with the indicator flipping at ~3.5s. The list rebuilds and the
+  //     scroll survives — in a run that passes.
+  //   - A settle-detector cannot help for the same reason. There is no transient to wait
+  //     out; in a failing run the value simply is 0.
+  // So the assertion is right and #72's scroll memory intermittently loses the reader's
+  // position on a rebuild. Loosening this hides a real defect in what the phone does to
+  // somebody mid-conversation. Fix the client, or reproduce it in the client's own terms.
   is(`${w}px ...and the reader is still parked`, park, gone.top);
   // ...and back again, which is the other direction and the one a flicker would break.
   await evaluate(() => { try { localStorage.setItem('gf.fixture', 'grid-acme-api.json'); } catch {} return null; });
