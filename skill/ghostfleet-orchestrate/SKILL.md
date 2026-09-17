@@ -184,6 +184,54 @@ is *behind* — so a worker never misses your just-committed, unpushed work. A f
 worktree also gets the main checkout's `node_modules` symlinked in, so workers can
 actually run lint/typecheck/tests.
 
+## Asking for a visual verification
+
+`fleet-shots` is how a worker hands back something you can LOOK at instead of a claim. The
+brief below is the one that works; the parts that look fussy are each a failure that already
+happened once.
+
+```
+When you're done, produce a visual verification:
+
+1. Write a flow.json for the path a REAL USER walks through what you changed — 3-6 steps,
+   not a tour of the app.
+   { "base": "http://localhost:<your slot's web port>",
+     "viewport": { "width": 1280, "height": 900 },
+     "steps": [ { "name": "<plain english>", "goto": "/path", "expect": "<text on screen>" },
+                { "name": "...", "click": "<css>", "wait": 1500, "expect": "..." },
+                { "name": "...", "fill": {"<css>": "value"}, "settle": 800 } ] }
+2. ONLY routes and selectors you have verified in the source. Do not invent a path, a
+   selector or a token. If a step needs a fixture you don't have, drop it and say so.
+3. It must be YOUR worktree's stack. If another worktree's is up on a different port, do
+   not point at it. If nothing is running for your slot, say so and stop.
+4. Run it and let the output path DEFAULT — do not pass --out:  fleet-shots --flow flow.json
+   Keep flow.json out of git.
+5. Do NOT call the task done until this exits zero:  fleet-shots --check <the folder>
+6. Report the folder and quote the full output. Say what you OBSERVED. If nothing was
+   flagged, say so explicitly.
+```
+
+Then `fleet-shots serve` and review it — one step at a time, approve / changes / skip.
+
+**Why each line is there:**
+
+- **Let `--out` default (4).** Both the run and `fleet-shots serve` default to
+  `$CLAUDE_FLEET_DIR/shots`, so they meet with no paths passed. The first real run went to
+  the worker's own scratchpad and simply did not appear in the reviewer's list.
+- **Its OWN stack (3).** A worker found a sibling worktree's stack live on another port and
+  refused it, unprompted — screenshots of somebody else's branch look exactly like yours,
+  and the provenance header would have recorded a truthful commit and base URL while a
+  different branch answered. That is the one failure a header cannot catch.
+- **Verified selectors (2).** Two of the five selectors in that run did not grep literally
+  (a `data-testid` built from a template literal, a placeholder with a real `…`). An invented
+  selector produces a step that photographs an unchanged screen.
+- **`--check` before done (5).** Unreviewed fails exactly as rejected does, so the task
+  cannot close until a human has looked. A flag the RUN raised needs a one-line reason to
+  clear, and the reason is printed — a click alone cannot launder a measured failure.
+- **PROFILES DO NOT SHARE A SHOTS FOLDER.** `CLAUDE_FLEET_DIR` is `<config>/fleet`, so a
+  `personal` worker's runs land under `~/.claude-personal` and a server started from a
+  `work` session will not see them. Run `serve` from the same profile, or pass `--dir`.
+
 ## Rules
 
 - **Look before you spawn.** `fleet-worktrees` first; reuse a FREE worktree; only
