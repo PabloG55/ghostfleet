@@ -65,6 +65,33 @@ a brand-new commit on `main` that shares no history with the branch it came from
 *next* release would conflict with everything in between. A merge keeps `main` a genuine
 ancestor of `staging` and every release after it trivial.
 
+## Arm the pre-push hook, first thing
+
+This repo is public, and it is written by people whose day job is not. Comments, fixtures
+and captured panes all want to name the project that produced the bug they document, and
+`test/run.sh`'s name sweep exists to refuse that. The sweep reads every file git *tracks* —
+which means it is silent about a branch you never checked out and never ran it on.
+
+That gap has been measured, on this repo: 37 branches were once live on the public remote
+carrying hundreds of occurrences of names that were on `main` and `staging` nowhere, with
+every suite run green throughout. A push is the moment private becomes public, so there is
+a check at the push:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+One command, per clone — `core.hooksPath` is repo-local config and a fresh clone does not
+inherit it. Run it before your first push. `.githooks/pre-push` then refuses a push whose
+tip tree, *file names*, newly-introduced blobs, commit messages or branch name carry a
+withheld name, and prints what it found and where. The last two are worth calling out
+because the tracked-file sweep structurally cannot see either one.
+
+It shares the sweep's tokenizer and its one-way digest list rather than carrying a copy, so
+there is a single matcher to keep honest. If it fires on an ordinary English word, the list
+is in `test/helpers/name-sweep.mjs` and `--digest` prints a line to paste without putting a
+name in the diff. To override once, knowing what you are doing: `git push --no-verify`.
+
 ## Pull requests
 
 Run the suite first:
