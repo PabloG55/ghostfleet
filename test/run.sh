@@ -9497,6 +9497,40 @@ else
   skip "no real project name in the tree" "git or node missing"
 fi
 
+group "no withheld name in what npm actually ships"
+# THE SWEEP ABOVE READS `git ls-files`; `npm pack` READS THE WORKING DIRECTORY. Those are
+# different sets, and the gap ships: measured, an untracked file dropped into any directory
+# named in package.json's `files` reaches the registry while the sweep meant to guard the
+# release cannot see it. `prepublishOnly` runs this suite, so a release LOOKED checked while
+# the set being checked was not the set that leaves.
+#   This is the shape the repo keeps repeating rather than a new one. #59 scrubbed the
+# fixtures and #63 found the document those fixtures are an implementation OF — "the leak
+# stayed open in the file that gets read the most, two PRs after it was declared closed".
+# Then the tracked-file sweep was silent about 37 branches live on the public remote. Each
+# guard checked a PROXY for the artifact. So this asks npm what it will ship and reads THAT,
+# the same way doc-fixtures asks whether a name is IN web/fixtures/ rather than on a list.
+#   The untracked row is not "untracked is wrong" — it is that such a file is invisible to
+# every other check here, so it has to be looked at deliberately instead of shipping because
+# no one was watching that set.
+group_needs_npm=0
+command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && group_needs_npm=1
+if [ "$group_needs_npm" = 1 ]; then
+  PKS="$(mktemp -d "$TEST_RUNS.$$.pks.XXXXXX")"
+  node "$ROOT/test/helpers/pack-sweep.mjs" > "$PKS/out" 2> "$PKS/err"
+  is "pack-sweep ran"          "0"   "$?"
+  # A FLOOR, because a helper that died early emits no mismatches, which reads as clean —
+  # and "nothing found" must never be spelled the same way as "nothing looked at".
+  is "...and produced its checks" "yes" \
+     "$([ "$(grep -c . "$PKS/out")" -ge 4 ] && echo yes || echo "no: $(grep -c . "$PKS/out") rows — $(tr '\n' ' ' < "$PKS/err" | cut -c1-120)")"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    is "$name" "$want" "$got"
+  done < "$PKS/out"
+  rm -rf "$PKS"
+else
+  skip "no withheld name in what npm ships" "npm or node missing"
+fi
+
 # ── 6a3. the utilization meter reads a transcript ────────────────────────────
 # bin/fleet-meter.mjs turns the corpus under ~/.claude/projects into the numbers plan item
 # #2 is judged against. Nothing else in this repo parses that wire format, and a parser is
