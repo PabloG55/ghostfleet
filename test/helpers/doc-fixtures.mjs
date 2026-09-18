@@ -34,7 +34,7 @@
 //
 // In prose a name is only recognisable by its shape, so a backticked token is checked
 // when it is kebab-cased (`rate-limit`) and left alone otherwise: a one-word check would
-// have to allowlist most of English before it could flag `scratch`. Inside the example data
+// have to allowlist most of English before it could flag a short one. Inside the example data
 // — where every name that has ever drifted has lived — position does the work and the
 // shape rule is not used at all.
 

@@ -2038,7 +2038,7 @@ fi
 # The grid is the caller that was actually bitten, and reproducing it needs no props: a
 # tmux server whose socket happens to start with "cf-" is all $TMUX has to say for
 # fleet-spawn to prefer it, and the grid runs in a pane. So run the real TUI on a pane of
-# cf-gpsn, point it at a fleet on cf-toolbox, press `w` and create — the manifest filename
+# cf-gpsn, point it at a fleet on another socket, press `w` and create — the manifest filename
 # says which fleet the worker actually landed on.
 group "the grid's create lands on the grid's own fleet"
 if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
@@ -2056,24 +2056,24 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   git init -q -b main "$GP/repo" 2>/dev/null
   git -C "$GP/repo" config user.email t@t; git -C "$GP/repo" config user.name t
   : > "$GP/repo/f"; git -C "$GP/repo" add -A; git -C "$GP/repo" commit -qm init 2>/dev/null
-  tmux -L cf-toolbox kill-server 2>/dev/null; tmux -L cf-gpsn kill-server 2>/dev/null
-  tmux -L cf-toolbox new-session -d -s master -c "$GP/repo" 'sleep 90' 2>/dev/null
+  tmux -L cf-gpna kill-server 2>/dev/null; tmux -L cf-gpsn kill-server 2>/dev/null
+  tmux -L cf-gpna new-session -d -s master -c "$GP/repo" 'sleep 90' 2>/dev/null
   # a launcher script, not an inline command: PATH has to be EXPANDED at run time and a
   # $PATH inside tmux's own quoting is the sort of thing that silently ends up literal,
   # which reads back as "the grid never started" rather than as a quoting mistake
   { echo '#!/usr/bin/env bash'
     echo "export CLAUDE_FLEET_ROOT='$GP/repo' CLAUDE_FLEET_DIR='$GP/fleet'"
     echo "export PATH=\"$GP/stub:$ROOT/bin:\$PATH\""
-    echo "exec node '$ROOT/bin/fleet-grid.mjs' cf-toolbox >/dev/null 2>&1"; } > "$GP/launch"
+    echo "exec node '$ROOT/bin/fleet-grid.mjs' cf-gpna >/dev/null 2>&1"; } > "$GP/launch"
   chmod +x "$GP/launch"
   tmux -L cf-gpsn new-session -d -x 120 -y 40 "$GP/launch" 2>/dev/null
   sleep 2
   tmux -L cf-gpsn send-keys w 2>/dev/null;      sleep 1
   tmux -L cf-gpsn send-keys wkr 2>/dev/null;    sleep 1
   tmux -L cf-gpsn send-keys Enter 2>/dev/null;  sleep 6
-  tmux -L cf-gpsn kill-server 2>/dev/null; tmux -L cf-toolbox kill-server 2>/dev/null
+  tmux -L cf-gpsn kill-server 2>/dev/null; tmux -L cf-gpna kill-server 2>/dev/null
   is "the worktree really got made" "1" "$([ -d "$GP/wkr" ] && echo 1 || echo 0)"
-  is "the worker is on cf-toolbox"     "cf-toolbox" \
+  is "the worker is on cf-gpna"     "cf-gpna" \
      "$( cd "$GP/fleet" && ls *.manifest.tsv 2>/dev/null | sed 's/\.manifest\.tsv$//' )"
   rm -rf "$GP"
 else
