@@ -96,6 +96,20 @@ export const DENY = new Set([
 'b7b1d45c9dd780be',   // 5 chars
   '8cd4594d611fa412',   // 27 chars
   'f56266800c580984',   // 18 chars
+  // ADDED 2026-09-18, and every one of these was found the same way: not by the sweep, but
+  // by reading 28 pull request BODIES that were describing the earlier leaks and therefore
+  // enumerated the names they had removed. The list only ever holds what somebody thought
+  // of, and what somebody thought of was the tree — so a name that never appeared in a
+  // tracked file was never added, and the prose about removing it stayed public for weeks.
+  '191c13ecda83379e',   // 16 chars
+  '1ebf617faac5cebd',   // 13 chars
+  'f0e6c15464f8fc90',   // 13 chars
+  'b810e389ad1cd42d',   // 12 chars
+  'e0013b5c1d3e98a1',   // 12 chars
+  '5785bdae238a877d',   // 12 chars
+  '001ef18b21f55e4e',   // 12 chars
+  '626df54a92b7c6a8',   // 4 chars
+  'a40206b2f501cb94',   // 4 chars
   'CANARY',             // replaced in section 3
 ]);
 

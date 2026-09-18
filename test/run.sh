@@ -1499,7 +1499,7 @@ if command -v tmux >/dev/null 2>&1; then
     };
     for(const s of ["c1","c2","c3","c4","c5","c6"]) fs.mkdirSync(wt(s),{recursive:true});
     // c1 talked to codex; c2 has only started it; c3 has no rollout of its own at all
-    roll("00-10-00",wt("c1"),"binder slots line up now");
+    roll("00-10-00",wt("c1"),"list pages line up now");
     roll("00-11-00",wt("c2"),"");
     // c6 is a RECYCLED worktree: an older finished conversation and a newer one, same cwd
     roll("00-12-00",wt("c6"),"the previous tenant");
@@ -1532,7 +1532,7 @@ if command -v tmux >/dev/null 2>&1; then
   cxstat() { cxcol "$1" 62-72; }
   cxmsg()  { cxcol "$1" 73-118; }
   is "finished a turn          -> ready"      "ready" "$(cxstat c1)"
-  is "and its last line is shown"            "binder slots line up now" "$(cxmsg c1)"
+  is "and its last line is shown"            "list pages line up now" "$(cxmsg c1)"
   # codex writes the header at STARTUP, so a file exists before you have said anything —
   # handing that back would call a brand-new pane "ready", which means "has history".
   is "started, never spoken to -> idle"      "idle"  "$(cxstat c2)"
@@ -2038,7 +2038,7 @@ fi
 # The grid is the caller that was actually bitten, and reproducing it needs no props: a
 # tmux server whose socket happens to start with "cf-" is all $TMUX has to say for
 # fleet-spawn to prefer it, and the grid runs in a pane. So run the real TUI on a pane of
-# cf-gpsn, point it at a fleet on cf-gpin, press `w` and create — the manifest filename
+# cf-gpsn, point it at a fleet on another socket, press `w` and create — the manifest filename
 # says which fleet the worker actually landed on.
 group "the grid's create lands on the grid's own fleet"
 if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
@@ -2056,24 +2056,24 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   git init -q -b main "$GP/repo" 2>/dev/null
   git -C "$GP/repo" config user.email t@t; git -C "$GP/repo" config user.name t
   : > "$GP/repo/f"; git -C "$GP/repo" add -A; git -C "$GP/repo" commit -qm init 2>/dev/null
-  tmux -L cf-gpin kill-server 2>/dev/null; tmux -L cf-gpsn kill-server 2>/dev/null
-  tmux -L cf-gpin new-session -d -s master -c "$GP/repo" 'sleep 90' 2>/dev/null
+  tmux -L cf-gpna kill-server 2>/dev/null; tmux -L cf-gpsn kill-server 2>/dev/null
+  tmux -L cf-gpna new-session -d -s master -c "$GP/repo" 'sleep 90' 2>/dev/null
   # a launcher script, not an inline command: PATH has to be EXPANDED at run time and a
   # $PATH inside tmux's own quoting is the sort of thing that silently ends up literal,
   # which reads back as "the grid never started" rather than as a quoting mistake
   { echo '#!/usr/bin/env bash'
     echo "export CLAUDE_FLEET_ROOT='$GP/repo' CLAUDE_FLEET_DIR='$GP/fleet'"
     echo "export PATH=\"$GP/stub:$ROOT/bin:\$PATH\""
-    echo "exec node '$ROOT/bin/fleet-grid.mjs' cf-gpin >/dev/null 2>&1"; } > "$GP/launch"
+    echo "exec node '$ROOT/bin/fleet-grid.mjs' cf-gpna >/dev/null 2>&1"; } > "$GP/launch"
   chmod +x "$GP/launch"
   tmux -L cf-gpsn new-session -d -x 120 -y 40 "$GP/launch" 2>/dev/null
   sleep 2
   tmux -L cf-gpsn send-keys w 2>/dev/null;      sleep 1
   tmux -L cf-gpsn send-keys wkr 2>/dev/null;    sleep 1
   tmux -L cf-gpsn send-keys Enter 2>/dev/null;  sleep 6
-  tmux -L cf-gpsn kill-server 2>/dev/null; tmux -L cf-gpin kill-server 2>/dev/null
+  tmux -L cf-gpsn kill-server 2>/dev/null; tmux -L cf-gpna kill-server 2>/dev/null
   is "the worktree really got made" "1" "$([ -d "$GP/wkr" ] && echo 1 || echo 0)"
-  is "the worker is on cf-gpin"     "cf-gpin" \
+  is "the worker is on cf-gpna"     "cf-gpna" \
      "$( cd "$GP/fleet" && ls *.manifest.tsv 2>/dev/null | sed 's/\.manifest\.tsv$//' )"
   rm -rf "$GP"
 else
