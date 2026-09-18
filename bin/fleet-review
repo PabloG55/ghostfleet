@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# fleet-review — have a DIFFERENT model read what this one just wrote.
+#
+#     fleet-review [--agent A] [--base REF | --uncommitted | --commit SHA]
+#                  [--title T] [--dry-run]
+#
+# WHY A COMMAND AND NOT A PARAGRAPH. The standing contract already tells a session to say
+# what it OBSERVED rather than what it ran, and the same gap that made `fleet-look`
+# necessary applies here: a session grading its own diff is the author marking their own
+# paper, and asking it to "get a second opinion" with no mechanism is an instruction that
+# cannot be followed. So: one command, and it names the model that answered.
+#
+# THE SECOND MODEL IS THE WHOLE POINT. Reviewing with the same CLI that wrote the code
+# buys the least — it shares the blind spots that produced the diff. Measured in this
+# repo's own history: a codex read of a report written here caught four things its author
+# had wrong, including one the author had marked as certain. That is the value, and it is
+# why the default is an agent OTHER than the caller's.
+#
+# WHAT IT REFUSES TO DO QUIETLY. Of the three agents this fleet knows, exactly one ships a
+# non-interactive review (see `fleet-agent field <a> review`). A wrapper that fell back to
+# "send the diff as a prompt and call the answer a review" would spend the account's usage
+# and print something indistinguishable from a real review — the same failure shape as an
+# empty busy regex reaching grep, where the fallback is worse than the refusal. So an
+# agent with no review says so, names the ones that have it, and exits non-zero.
+set -uo pipefail
+
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Sibling first, for the reason busyReFor and installedAgents both do it: a PATH miss
+# would silently answer "no agent has a review" and the refusal above would fire for the
+# wrong reason, which reads exactly like codex not being installed.
+FA=""
+for c in "$BIN_DIR/fleet-agent" fleet-agent; do
+  command -v "$c" >/dev/null 2>&1 && { FA="$c"; break; }
+done
+[ -n "$FA" ] || { echo "fleet-review: fleet-agent not found (run ./install.sh)" >&2; exit 1; }
+
+AGENT=""; MODE=""; BASE=""; SHA=""; TITLE=""; DRY=0; EXTRA=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --agent)       AGENT="${2:?--agent needs a name}"; shift 2 ;;
+    --base)        MODE=base; BASE="${2:?--base needs a ref}"; shift 2 ;;
+    --uncommitted) MODE=uncommitted; shift ;;
+    --commit)      MODE=commit; SHA="${2:?--commit needs a sha}"; shift 2 ;;
+    --title)       TITLE="${2:?--title needs a string}"; shift 2 ;;
+    --dry-run|-n)  DRY=1; shift ;;
+    -h|--help)     sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --)            shift; EXTRA="$*"; break ;;
+    *)             echo "fleet-review: unknown option '$1' (try --help)" >&2; exit 1 ;;
+  esac
+done
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || {
+  echo "fleet-review: not a git repository" >&2; exit 1; }
+
+# ── which agent ──────────────────────────────────────────────────────────────
+# Default to the first INSTALLED agent that has a review and is not the one running this
+# session, so the ordinary case needs no flag and still crosses models. CLAUDE_FLEET_AGENT
+# is the caller's own CLI when a fleet pane set it; empty means claude, since that is what
+# a pane with no marker runs.
+SELF="${CLAUDE_FLEET_AGENT:-claude}"
+if [ -z "$AGENT" ]; then
+  for a in $("$FA" installed 2>/dev/null); do
+    [ "$a" = "$SELF" ] && continue
+    [ -n "$("$FA" field "$a" review 2>/dev/null)" ] || continue
+    AGENT="$a"; break
+  done
+fi
+if [ -z "$AGENT" ]; then
+  # Name every agent that COULD do it, installed or not: "nothing is available" and "the
+  # one thing that does this is not installed" are different problems with different fixes.
+  able=""
+  for a in $("$FA" list 2>/dev/null); do
+    [ -n "$("$FA" field "$a" review 2>/dev/null)" ] && able="$able $a"
+  done
+  echo "fleet-review: no installed agent other than '$SELF' has a non-interactive review." >&2
+  [ -n "$able" ] && echo "fleet-review: the ones that do:$able — install one, or pass --agent." >&2 \
+                 || echo "fleet-review: no agent in the registry has one." >&2
+  exit 1
+fi
+
+# TWO DIFFERENT NO'S, AND THE ADAPTER ALREADY TELLS THEM APART: an unknown agent exits
+# non-zero, a known one with no review exits 0 and prints nothing. Collapsing them with
+# `|| true` was the first version, and it answered a typo'd --agent with "it has no
+# review" — which reads as a fact about a real CLI and sends you looking for a flag to
+# enable. Keep the exit status; it is the only thing that separates "you spelled it wrong"
+# from "that CLI cannot do this".
+if ! REVIEW_CMD="$("$FA" field "$AGENT" review 2>/dev/null)"; then
+  echo "fleet-review: unknown agent '$AGENT' (known: $("$FA" list 2>/dev/null | tr '\n' ' '))" >&2
+  exit 1
+fi
+[ -n "$REVIEW_CMD" ] || {
+  echo "fleet-review: '$AGENT' has no non-interactive review — it cannot be asked for one" >&2
+  echo "fleet-review: (fleet-agent field $AGENT review is empty; that means cannot, not unmeasured)" >&2
+  exit 1; }
+BINARY="$("$FA" field "$AGENT" bin 2>/dev/null || printf '%s' "$AGENT")"
+command -v "$BINARY" >/dev/null 2>&1 || {
+  echo "fleet-review: '$BINARY' is not on PATH" >&2; exit 1; }
+
+# ── what to review ───────────────────────────────────────────────────────────
+# A DIRTY TREE IS ALMOST ALWAYS THE ANSWER, because the moment you want a second opinion is
+# before you commit. Only when there is nothing uncommitted does the branch itself become
+# the subject — and then the base has to be where this branch FORKED FROM, not the local
+# default: a fleet worker branches off the integration branch and its `main` can be a
+# release behind, so diffing against that reviews a week of other people's work as though
+# it were yours.
+if [ -z "$MODE" ]; then
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    MODE=uncommitted
+  else
+    MODE=base
+    # NOT @{upstream}, AND THAT WAS THE FIRST VERSION'S BUG — caught by pointing this very
+    # command at its own diff. A branch pushed with `git push -u` tracks origin/<itself>,
+    # so @{upstream} is the branch, not the base: after a push the two tips coincide and
+    # the review subject is EMPTY, which prints as a clean review of nothing; before a
+    # push it silently narrows to only the unpushed commits. Both read exactly like a
+    # review that found no problems, which is the one outcome this file must never fake.
+    #   The base is the INTEGRATION branch — what origin/HEAD points at — because that is
+    # what a worker forks from and what its PR will be measured against.
+    BASE="$(git symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    [ -n "$BASE" ] || for c in origin/staging origin/main origin/master; do
+      git rev-parse --verify -q "$c" >/dev/null 2>&1 && { BASE="$c"; break; }
+    done
+    [ -n "$BASE" ] || { echo "fleet-review: nothing uncommitted, and no integration branch to compare against — pass --base" >&2; exit 1; }
+    # ALREADY ON THE BASE means there is nothing of yours to review, and saying so beats
+    # handing a reviewer an empty range and reporting whatever it says about it.
+    HEAD_REF="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [ "$(git rev-parse -q --verify "$BASE" 2>/dev/null)" = "$(git rev-parse -q --verify HEAD 2>/dev/null)" ]; then
+      echo "fleet-review: '$HEAD_REF' is level with $BASE and nothing is uncommitted — no changes to review" >&2
+      echo "fleet-review: (pass --base <ref> or --commit <sha> to review something else)" >&2
+      exit 1
+    fi
+  fi
+fi
+
+case "$MODE" in
+  uncommitted) SEL=(--uncommitted); WHAT="staged, unstaged and untracked changes" ;;
+  base)        SEL=(--base "$BASE"); WHAT="this branch against $BASE" ;;
+  commit)      SEL=(--commit "$SHA"); WHAT="commit $SHA" ;;
+esac
+[ -n "$TITLE" ] && SEL+=(--title "$TITLE")
+
+# A SELECTOR AND CUSTOM INSTRUCTIONS CANNOT BE COMBINED, and the CLI's own usage line says
+# otherwise — `codex review --uncommitted [PROMPT]` is printed by the very error that
+# refuses it:
+#     error: the argument '--uncommitted' cannot be used with '[PROMPT]'
+# Measured on codex-cli 0.153.4 for --uncommitted and --base alike. This wrapper always
+# picks a selector, so the first version's `-- <instructions>` could not work at all: every
+# such call died before reviewing anything. Refusing beats a fallback that drops one of the
+# two silently — dropping the selector reviews the wrong range, dropping the instructions
+# answers a question nobody asked, and neither is visible in prose.
+if [ -n "$EXTRA" ]; then
+  echo "fleet-review: custom instructions cannot be combined with a review selector." >&2
+  echo "fleet-review: $BINARY refuses '$REVIEW_CMD ${SEL[0]} <prompt>' — the two are mutually exclusive." >&2
+  echo "fleet-review: run '$BINARY $REVIEW_CMD \"<your instructions>\"' with no selector to let it choose the subject." >&2
+  exit 1
+fi
+
+# ── say what will happen, always ─────────────────────────────────────────────
+# Printed on the real run too, not only under --dry-run. The output of a review is prose,
+# and prose about the wrong diff is indistinguishable from prose about the right one —
+# there is no exit code for "reviewed something else". So the subject is stated beside the
+# answer, the way fleet-look prints the status and title beside the path.
+echo "fleet-review: asking $AGENT to review $WHAT"
+[ -n "$EXTRA" ] && echo "fleet-review: extra instructions: $EXTRA"
+# A COST, NOT A RISK. This spends the reviewing account's usage, which is why the plan is
+# announced — but it changes nothing on disk, so it runs rather than making you repeat it
+# with --go the way fleet-clean and fleet-adopt do.
+if [ "$DRY" = 1 ]; then
+  printf 'fleet-review: dry run — would run: %s %s' "$BINARY" "$REVIEW_CMD"
+  for a in "${SEL[@]}"; do printf ' %q' "$a"; done
+  printf '\n'
+  exit 0
+fi
+
+"$BINARY" "$REVIEW_CMD" "${SEL[@]}"
+rc=$?
+# The reviewer's own exit code, passed through. A review that could not run must not read
+# as a review that found nothing — that is the whole distinction this file exists to keep.
+[ "$rc" -eq 0 ] || echo "fleet-review: $AGENT exited $rc — treat this as NO review, not a clean one" >&2
+exit "$rc"

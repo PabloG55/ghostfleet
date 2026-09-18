@@ -4,6 +4,83 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
+## 0.3.0 — 2026-09-18
+
+**This release is about proof.** 0.2.0 taught the phone to survive a real device; this one
+is mostly about not having to take an agent's word for anything — what it changed, whether
+the page it built actually renders, whether a second model agrees, and whether a name that
+should never have left this machine is about to.
+
+Nothing here is breaking. No config file changes shape, and every new field has a default
+that means "what happened before". The phone client goes `ghostfleet-v21` → **`ghostfleet-v23`**,
+and the same caveat as last time applies: swipe the app away and relaunch, because reopening
+from the app switcher is a resume, not a navigation.
+
+### If you install one thing from this release
+
+**`git config core.hooksPath .githooks`.** One command, per clone. It arms a pre-push hook
+that refuses to publish a withheld project or client name — from the tree, from a *file
+name*, from a commit message, from the branch name, or from a blob added and deleted inside
+the same push. It exists because the sweep that was supposed to prevent this reads the files
+git tracks, which is the tree you happen to be standing in: 37 branches were live on a public
+remote carrying names that were on neither integration branch, with every suite run green
+throughout. (#134)
+
+### New
+
+- **`fleet-shots` — photograph a flow and review it one step at a time.** Give it a flow
+  file (`goto`, `fill`, `click`, `waitFor`, `expect`) and it drives real Chrome, screenshots
+  each step, records the requests the page actually made, and writes a run you open in a
+  local server. The review is a **stepper**, not a scrolling list, because a list of five
+  screenshots gets skimmed: approve, changes or skip, one at a time, with a rail to go back
+  to the one you were unsure about. `changes` deliberately does not advance — the step you
+  are rejecting is the one worth writing a note on. A step the run itself flagged clears
+  only with a verdict **and** a reason, so a click cannot launder a measured failure, and
+  `fleet-shots --check <dir>` exits non-zero until it is genuinely reviewed. (#132, #133)
+- **`fleet-review` — ask a different model to read the diff.** A session grading its own
+  work is the author marking their own paper. This hands the diff to an installed CLI that
+  is *not* the one running, names which model answered, and **refuses rather than faking it**
+  when no other agent ships a non-interactive review — an agent with none says so and exits
+  non-zero, because prose that looks like a review is worse than no review. (#129)
+- **Your own terminal and editor belong on the stack.** `Ctrl-t` and `Ctrl-n` are now one
+  per folder rather than one per press, and both are stackable beside the agent. Tabs are
+  sessions, so they appear on the stack screen grouped under the session they came from.
+  (#128, #130)
+- **A worktree gets a teardown**, since it already had a setup hook. (#125)
+- **The agent column cycles**, and now says so — a ring drawn as a radio button reads as a
+  dead key, so it shows its position. (#127)
+
+### Fixed
+
+- **`fleet-look` left a headless Chrome behind on every call.** Closing the browser kills one
+  of its ten processes; it is now asked to close. (#118)
+- **A tab could beget tabs**, because a tab is a session and the origin was only resolved
+  conditionally. (#128)
+- **A `+` session name is tmux target syntax, not a name** — `has-session` says yes while
+  `display-message` answers for a different session entirely. Every reader targets a bare
+  name now, and tab names start with `_` so they cannot be read as an expression. (#120)
+- **The projects card named the configured agent as though it were the running one.** (#126)
+- **The stack screen had mouse tracking on and never read an event.** (#123)
+- **An apostrophe truncated the contract to a fifth of itself** and typed a word into every
+  session it reached. (#108)
+- **The composer grew with the reader's text until send was under the keyboard.** (#98)
+- **A `grep` that matched could read as a failure** under `pipefail`, on one runner only:
+  `grep -q` closes its input on the first match, the writer takes SIGPIPE, and 141 becomes
+  the pipeline's status. The suite now sweeps itself for the shape. (#111)
+- **A daemon is parked before the machine dies, not just before the budget does**, and a
+  daemon that cannot be reached is reaped rather than left holding a port. (#133)
+
+### Safety
+
+- **Nothing ships that has not been looked at.** `prepublishOnly` ran the suite, but the
+  suite read `git ls-files` while `npm pack` reads the working directory — so an untracked
+  file inside a published directory reached the registry unswept. The release now asks npm
+  what it will ship and reads *that*, including file names and anything shipping that git
+  does not track. (#134)
+- **A real tailnet address and a live link were in a fixture.** (#103)
+- **A subagent is refused where a fleet exists**, not only where the session is already in
+  one. (#122)
+
 ## 0.2.0 — 2026-08-27
 
 **The phone client stopped being a viewer.** In 0.1.0 it showed you the fleet and let you

@@ -17,8 +17,11 @@ You cannot see the fleet; you have to *look*. Your context drifts and a restarte
 lead starts blank, so **do not act from memory — read the real state first:**
 
 - **`fleet-worktrees`** — every git worktree of this repo: its branch, whether a
-  session is live on it, git state (clean/dirty, ahead/behind), the task it was
-  spun up for, and a **"Free to reuse"** line. This is your map.
+  session is live on it, git state (clean/dirty, ahead/behind), **ASKED** (the task it
+  was spun up for) beside **UNDERSTOOD** (what its worker said it heard, and which of
+  your decisions it is building from), and a **"Free to reuse"** line. This is your map.
+  A blank UNDERSTOOD means the worker has not acknowledged yet; `(no decisions)` means
+  it acknowledged while naming none — worth a `fleet-read` before it gets far.
 - **`fleet-inbox`** — what has needed you since you last looked (see below).
 - **`fleet-list`** — the live sessions and their status.
 
@@ -51,7 +54,7 @@ are sitting in. When you finish a PR and are asked to start fresh work, re-branc
 you stand:
 
 ```bash
-git fetch origin && git checkout -B <new-branch> origin/main
+git fetch origin && git checkout -B <new-branch> origin/staging
 ```
 
 That is the whole operation: same worktree, same session, same dev-stack slot, and the
@@ -159,8 +162,12 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | check who needs you / what finished | `fleet-inbox` — its footer also names worktrees whose PR merged and are safe to reclaim |
 | a worker is done for good | `fleet-stop --reclaim <session>` — stops it AND removes its worktree when safe, or keeps it and says why. One call, not stop-then-remove: the worktree path is read from the live session, and a two-step teardown leaves a window for the session to come back |
 | dispatch a task | `fleet-send <session> "<self-contained brief>"` |
+| **record what you heard** (you are the worker) | `fleet-ack "<one line of what you understood>" --from "<the decisions you are working from>"` |
 | **ask** a session something (answer comes back) | `fleet-send --reply-to me <session> "<question>"` |
 | read a worker's output | `fleet-read <session> [n]` |
+| **look at what was built** | `fleet-look.mjs <url \| file.html \| file.pdf>` — renders it and prints a PNG path; `Read` that path to actually see it. `--tree` for the accessibility tree |
+| **have another model read your diff** | `fleet-review` — runs the reviewing CLI's own non-interactive review. Defaults to uncommitted changes, else this branch against the integration branch, and to an agent OTHER than yours. Exactly one of the three ships a review; the rest say so rather than faking one |
+| **photograph a flow for a human to approve** | `fleet-shots --flow <f.json>` — walks the steps, shoots each one, records the REQUESTS it made, and writes a folder whose `index.html` opens with no server. A 404 behind a page that looks right is the thing this catches and a screenshot cannot |
 | reuse a free worktree | `fleet-spawn <name> --reuse <worktree> [--prompt "…"]` |
 | recycle a worktree onto a new branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from <base>` |
 | new worker (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] [--new] [--prompt "…"]` |
@@ -177,6 +184,54 @@ is *behind* — so a worker never misses your just-committed, unpushed work. A f
 worktree also gets the main checkout's `node_modules` symlinked in, so workers can
 actually run lint/typecheck/tests.
 
+## Asking for a visual verification
+
+`fleet-shots` is how a worker hands back something you can LOOK at instead of a claim. The
+brief below is the one that works; the parts that look fussy are each a failure that already
+happened once.
+
+```
+When you're done, produce a visual verification:
+
+1. Write a flow.json for the path a REAL USER walks through what you changed — 3-6 steps,
+   not a tour of the app.
+   { "base": "http://localhost:<your slot's web port>",
+     "viewport": { "width": 1280, "height": 900 },
+     "steps": [ { "name": "<plain english>", "goto": "/path", "expect": "<text on screen>" },
+                { "name": "...", "click": "<css>", "wait": 1500, "expect": "..." },
+                { "name": "...", "fill": {"<css>": "value"}, "settle": 800 } ] }
+2. ONLY routes and selectors you have verified in the source. Do not invent a path, a
+   selector or a token. If a step needs a fixture you don't have, drop it and say so.
+3. It must be YOUR worktree's stack. If another worktree's is up on a different port, do
+   not point at it. If nothing is running for your slot, say so and stop.
+4. Run it and let the output path DEFAULT — do not pass --out:  fleet-shots --flow flow.json
+   Keep flow.json out of git.
+5. Do NOT call the task done until this exits zero:  fleet-shots --check <the folder>
+6. Report the folder and quote the full output. Say what you OBSERVED. If nothing was
+   flagged, say so explicitly.
+```
+
+Then `fleet-shots serve` and review it — one step at a time, approve / changes / skip.
+
+**Why each line is there:**
+
+- **Let `--out` default (4).** Both the run and `fleet-shots serve` default to
+  `$CLAUDE_FLEET_DIR/shots`, so they meet with no paths passed. The first real run went to
+  the worker's own scratchpad and simply did not appear in the reviewer's list.
+- **Its OWN stack (3).** A worker found a sibling worktree's stack live on another port and
+  refused it, unprompted — screenshots of somebody else's branch look exactly like yours,
+  and the provenance header would have recorded a truthful commit and base URL while a
+  different branch answered. That is the one failure a header cannot catch.
+- **Verified selectors (2).** Two of the five selectors in that run did not grep literally
+  (a `data-testid` built from a template literal, a placeholder with a real `…`). An invented
+  selector produces a step that photographs an unchanged screen.
+- **`--check` before done (5).** Unreviewed fails exactly as rejected does, so the task
+  cannot close until a human has looked. A flag the RUN raised needs a one-line reason to
+  clear, and the reason is printed — a click alone cannot launder a measured failure.
+- **PROFILES DO NOT SHARE A SHOTS FOLDER.** `CLAUDE_FLEET_DIR` is `<config>/fleet`, so a
+  `personal` worker's runs land under `~/.claude-personal` and a server started from a
+  `work` session will not see them. Run `serve` from the same profile, or pass `--dir`.
+
 ## Rules
 
 - **Look before you spawn.** `fleet-worktrees` first; reuse a FREE worktree; only
@@ -192,6 +247,17 @@ actually run lint/typecheck/tests.
   current turn — fine for the *next* task; don't fire several at a working session.
 - **Prompts must be self-contained.** A sibling has its own context — paste the full
   brief (task, files/paths, done-criteria), not "the thing we discussed".
+- **Resolve the ambiguity BEFORE you dispatch, not after.** Run the ask against the eight
+  axes — the UNIT (per line, per document, per policy) · PARITY with an existing surface ·
+  REUSE rather than recreate · the GATE before advancing · COMPLETENESS of a list ·
+  ELIGIBILITY and how a thing LEAVES · RETROACTIVITY to records that already exist · and
+  for a rendered artifact, whether there is an existing one to match — and put the
+  unanswered **material** ones back to the human as a numbered list. Then put the answers
+  in the brief. MEASURED: 36 of 163 screen-attributed corrections were requirements stated
+  for the first time mid-flight, and 19 of those were already known to the human and simply
+  not said. `fleet-spawn` warns when a brief has no done-criterion or reads as several
+  deliverables — it never refuses, and the warning is not the point; the resolved decisions
+  are.
 - **You can't see a worker's screen.** Use `fleet-read` / `fleet-inbox` to observe,
   never assume.
 - Only sessions in *your* fleet (same `CLAUDE_FLEET_SOCK`) are reachable.

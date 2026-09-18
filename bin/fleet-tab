@@ -97,6 +97,31 @@ fi
 [ -d "${CWD:-}" ] || CWD="$PWD"
 [ -n "$FROM" ] || FROM="$(T display-message -p '#{session_name}' 2>/dev/null)"
 
+# A TAB IS A SESSION, SO TABS BEGET TABS. The keybindings hand over `#{session_name}`,
+# which from inside a tab is the TAB's name — so C-t in the editor asked for a terminal
+# whose origin was `_edit-<x>`, got the name `_term-_edit-<x>`, found nothing by it, and
+# dealt a second terminal. C-n inside that terminal did the mirror image. The reuse rule
+# below was never wrong: every tab it made was correctly the only one of its name. The
+# ORIGIN was, and from the keyboard the two are the same event — you press the key you
+# always press and get another pane.
+#   @cf_tab_from already holds each tab's true origin (`back` has read it since tabs grew
+# a back key), so walking it collapses a chain to the session a human actually started
+# from, and both keys become idempotent for that folder's session.
+#   BOUNDED, because a tab created by an older build can name another tab as its origin,
+# and an unbounded walk over state written by code that is no longer here is a hang
+# rather than a wrong answer.
+#   AND THE TARGET IS BARE. `-t "=$FROM"` returns EMPTY from show-options on tmux 3.7b —
+# the `=` exact-match prefix, which is correct on has-session and switch-client, makes
+# this read silently answer nothing, so every tab would look like a non-tab and the walk
+# would never take a single step. Measured: bare gives `master`, `=`-prefixed gives ``.
+# Safe here only because a tab name starts with `_`; that prefix exists precisely so a
+# bare -t cannot be read as target syntax (a leading `+` means "the next session").
+for _ in 1 2 3 4; do
+  _orig="$(T show-options -qv -t "$FROM" @cf_tab_from 2>/dev/null)"
+  [ -n "$_orig" ] && [ "$_orig" != "$FROM" ] || break
+  FROM="$_orig"
+done
+
 # One tab per kind per origin session, REUSED. Pressing C-t twice should put you back in
 # the terminal you already have, not deal you a second one — the same "reuse before
 # proliferate" rule the worktrees follow, for the same reason: a pile of near-identical

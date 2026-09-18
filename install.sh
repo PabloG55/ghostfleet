@@ -2,7 +2,8 @@
 # ghostfleet installer.
 # - STAGES the runtime out of the repo into a non-TCC dir (see below), then:
 # - symlinks bin/ghostfleet + bin/claude-here (and helpers) onto your PATH
-# - wires hooks/fleet-event.sh into ~/.claude/settings.json (backing it up first)
+# - wires hooks/fleet-event.sh into ~/.claude/settings.json (backing it up first), plus
+#   hooks/fleet-guard.sh on PreToolUse and hooks/fleet-observe.sh alongside it on Stop
 # - registers the fleet MCP server into <config>/.claude.json (via `claude mcp add`;
 #   Claude does NOT read MCP from settings.json)
 # - links the example zellij layout if you use zellij
@@ -223,13 +224,14 @@ chmod +x "$FLEET_HOME"/hooks/*.sh "$FLEET_HOME"/bin/* 2>/dev/null || true
 # Everything below points at the STAGED runtime, never the repo.
 HOOK="$FLEET_HOME/hooks/fleet-event.sh"
 GUARD="$FLEET_HOME/hooks/fleet-guard.sh"
+OBSERVE="$FLEET_HOME/hooks/fleet-observe.sh"
 
 mkdir -p "$BIN_DIR"
 CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read
          fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar
-         fleet-worktrees fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy fleet-merged
+         fleet-worktrees fleet-ack fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy fleet-merged fleet-look.mjs fleet-shots.mjs
          fleet-clean fleet-open fleet-project fleet-adopt fleet-awake fleet-cycle
-         fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve
+         fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-meter.mjs fleet-review
          agent-here opencode-here codex-here)
 linked=()
 for b in "${CF_BINS[@]}"; do
@@ -301,19 +303,32 @@ wire_hooks() {
   tmp="$(mktemp)"
   # Hooks belong in settings.json; MCP does NOT (see register_mcp). Wire the hooks
   # and strip any stale ghostfleet MCP entry an older installer wrote here.
-  jq --arg hook "$HOOK" --arg guard "$GUARD" '
+  jq --arg hook "$HOOK" --arg guard "$GUARD" --arg observe "$OBSERVE" '
     def entry: [ { matcher: "", hooks: [ { type: "command", command: $hook } ] } ];
+    # STOP CARRIES TWO OF OURS: the status/notify hook, and the observation enforcer that
+    # refuses a lead done-claim on a turn that changed a surface and never looked at it.
+    #   ORDER, and it is deliberate. fleet-event.sh runs FIRST because it always exits 0 and
+    # its whole job is to record state; fleet-observe.sh runs second because it may exit 2.
+    # A refused Stop therefore leaves the status file briefly saying `ready` while the session
+    # works on — harmless, and checked: the worker->inbox block in fleet-event.sh is gated on
+    # the slot NOT being master, and the enforcer only ever fires for master, so a refused
+    # stop cannot emit a false `done` to anybody.
+    def stopentry: [ { matcher: "", hooks: [ { type: "command", command: $hook },
+                                             { type: "command", command: $observe } ] } ];
     .hooks = ((.hooks // {}) + {
-      Notification: entry, Stop: entry, UserPromptSubmit: entry,
+      Notification: entry, Stop: stopentry, UserPromptSubmit: entry,
       SessionStart: entry, SessionEnd: entry })
     # PreToolUse is SHARED GROUND — unlike the five above, other tools legitimately
     # live here, so ours is APPENDED, never assigned over the top. Stanzas pointing at
     # our guard are dropped first so re-installing (or changing the matcher) replaces
-    # rather than stacks up copies.
+    # rather than stacks up copies — which is what makes ADDING a tool to the matcher a
+    # safe re-install rather than a second stanza racing the first.
+    # The matcher is a regex over the tool name: EnterWorktree would move this session,
+    # and Agent (Task in older builds) would do the work somewhere the fleet cannot see.
     | .hooks.PreToolUse = (
         [ (.hooks.PreToolUse // [])[]
           | select([.hooks[]?.command] | index($guard) | not) ]
-        + [ { matcher: "EnterWorktree",
+        + [ { matcher: "EnterWorktree|Agent|Task",
               hooks: [ { type: "command", command: $guard } ] } ] )
     | (if .mcpServers then .mcpServers |= del(.["ghostfleet"]) else . end)
     | (if (.mcpServers // {}) == {} then del(.mcpServers) else . end)

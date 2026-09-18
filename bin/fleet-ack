@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# fleet-ack "<one line of what you understood>" [--from "<decisions>"] [-s SOCKET]
+#
+# The worker half of the brief handshake. A lead resolves the material ambiguities
+# before it dispatches (see the contract in bin/claude-here, and fleet-spawn's warning);
+# this is where the worker says, in one line, what it understood the ask to be AND which
+# of the lead's stated decisions it is building from. Both land in the SAME manifest
+# fleet-spawn already writes, keyed by worktree path, so fleet-worktrees can print
+# ASKED beside UNDERSTOOD.
+#
+# WHY THE DECISIONS AND NOT JUST A RESTATEMENT. A restatement alone makes disagreement
+# DISPLAYABLE, not preventable: a worker can paraphrase the ask perfectly, share the same
+# wrong assumption underneath it, and build the other thing. Naming the decisions is what
+# gives the pair something concrete to disagree about — and it makes the case that has no
+# other symptom visible, which is a worker proceeding from a decision nobody ever made.
+# MEASURED: of 79 corrections that are about the agent rather than the code, 23 are "that
+# is not what I asked" — the largest of those kinds. The manifest recorded what the lead
+# asked and nothing recorded what the worker heard.
+#
+# IT BLOCKS NOTHING, and that is deliberate. There is no gate here, no non-zero exit for
+# an ack that names no decisions, and no refusal to work without one. An ack that names
+# none is recorded AS naming none and shows up that way in fleet-worktrees, because a
+# signal that quietly upgrades itself to look compliant is the exact failure this pair of
+# features exists to expose.
+#
+# IT PRINTS A MARKER, at the head of a line: `understood: <restatement> · from: <decisions>`,
+# with "(none named)" where the ack names none. That line is how the item #5 evaluator
+# identifies a session the handshake actually reached — by position, not by the word
+# fleet-ack appearing somewhere in a transcript.
+#
+#   --from    the decisions you are working from, free text — "UNIT=per document;
+#             GATE=none; RETROACTIVE=new records only", or the numbers of the list the
+#             lead put back to the human. --decisions is the same flag.
+#   -s        the fleet socket, overriding $TMUX / $CLAUDE_FLEET_SOCK.
+set -uo pipefail
+
+UNDERSTOOD=""; DECISIONS=""; SOCK_FORCE=""
+usage() {
+  { echo "fleet-ack: usage: fleet-ack \"<one line of what you understood>\" [--from \"<decisions>\"] [-s SOCKET]"
+    echo
+    echo "  Run this as your FIRST act on a brief handed to you by a lead. One line, in your own"
+    echo "  words, of what you understood the ask to be — not a paste of the brief back, which"
+    echo "  proves only that you can copy. Then --from: which of the decisions the lead stated"
+    echo "  you are actually building from."
+    echo
+    echo "      fleet-ack \"add a per-document template picker to the envelope builder\" \\"
+    echo "                --from \"UNIT=per document; PARITY=the existing Documents step; RETRO=new drafts only\""
+    echo
+    echo "  It writes into the manifest fleet-spawn already keeps, so fleet-worktrees shows it"
+    echo "  beside what was asked. Nothing here blocks or refuses."; } >&2
+}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --from|--decisions) DECISIONS="${2:?}"; shift 2 ;;
+    -s|--socket)        SOCK_FORCE="${2:?}"; shift 2 ;;
+    -h|--help)          usage; exit 0 ;;
+    -*) echo "fleet-ack: unknown option $1" >&2; usage; exit 1 ;;
+    *)  [ -z "$UNDERSTOOD" ] && { UNDERSTOOD="$1"; shift; } \
+          || { echo "fleet-ack: unexpected arg $1 — the restatement is ONE quoted argument" >&2; exit 1; } ;;
+  esac
+done
+[ -n "$UNDERSTOOD" ] || { usage; exit 1; }
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+# $TMUX over the env var, -s over both — the same order as every other command here, and
+# for the same reason: a long-running --resume/--fork Claude can carry a stale
+# CLAUDE_FLEET_SOCK, while the tmux server it is sitting in cannot be out of date.
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+if [ -n "$SOCK_FORCE" ]; then
+  case "$SOCK_FORCE" in
+    *[!A-Za-z0-9._-]*) echo "fleet-ack: -s '$SOCK_FORCE' is not a tmux socket name" >&2; exit 1 ;;
+  esac
+  SOCK="$SOCK_FORCE"
+fi
+[ -n "$SOCK" ] || { echo "fleet-ack: no fleet socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
+command -v git >/dev/null 2>&1 || { echo "fleet-ack: git required" >&2; exit 1; }
+
+# The manifest is keyed by WORKTREE PATH, and git reports the resolved one — which is the
+# spelling fleet-spawn stored and the spelling tmux reports for a pane. Two spellings of
+# one directory (/tmp against /private/tmp) is a trap this repo has already paid for once.
+WT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
+  || { echo "fleet-ack: not inside a git repo" >&2; exit 1; }
+[ -n "$WT" ] || { echo "fleet-ack: not inside a git repo" >&2; exit 1; }
+BRANCH="$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '-')"
+
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+MANIFEST="$FLEET_DIR/$SOCK.manifest.tsv"
+
+# ONE LINE MEANS ONE LINE. Tabs and newlines are the record separator and the field
+# separator of the file this lands in, so a pasted paragraph would not just look wrong —
+# it would shift every later field of every later row. Same normalisation and the same
+# 200-character cut fleet-spawn applies to the task, so the two columns are comparable.
+oneline() { printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/^ *//' | cut -c1-200; }
+UNDERSTOOD="$(oneline "$UNDERSTOOD")"
+DECISIONS="$(oneline "$DECISIONS")"
+
+# WHAT WAS ASKED comes from the existing row and is never overwritten here: this command
+# records what the worker heard, and a worker that could edit the ask could make any
+# disagreement disappear. A worktree with no row yet (an adopted session, a checkout a
+# lead never spawned into) still gets one, with the ask left as "-" rather than invented.
+ASKED="-"; SESSION="${CLAUDE_FLEET_SLOT:-}"
+if [ -f "$MANIFEST" ]; then
+  _row="$(awk -F'\t' -v w="$WT" '$1==w{print $4 "\x1f" $2; exit}' "$MANIFEST" 2>/dev/null)"
+  # \x1f and not tab to carry these two back: the ASK may be "-" but the SESSION can be
+  # empty, and tab is IFS-whitespace — an empty second field would collapse and the ask
+  # would land in the session variable. Our own wire, inside one process, so \x1f is
+  # exactly the right choice (the tmux formatter that mangles it is nowhere near this).
+  if [ -n "$_row" ]; then
+    IFS=$'\x1f' read -r _a _s <<<"$_row"
+    [ -n "${_a:-}" ] && ASKED="$_a"
+    [ -n "${_s:-}" ] && SESSION="$_s"
+  fi
+fi
+[ -n "$SESSION" ] || SESSION="$(basename "$WT")"
+
+mkdir -p "$FLEET_DIR" 2>/dev/null
+mtmp="$MANIFEST.$$.tmp"
+{ [ -f "$MANIFEST" ] && awk -F'\t' -v w="$WT" '$1!=w' "$MANIFEST"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$WT" "$SESSION" "$BRANCH" "$ASKED" "$UNDERSTOOD" "$DECISIONS"; } \
+  >"$mtmp" 2>/dev/null && mv -f "$mtmp" "$MANIFEST" 2>/dev/null \
+  || { rm -f "$mtmp" 2>/dev/null; echo "fleet-ack: could not write $MANIFEST" >&2; exit 1; }
+
+# `understood:` AT THE HEAD OF A LINE, and the decisions ON that line. This is the marker
+# the item #5 evaluator reads to tell which sessions were treated by the handshake, and it
+# reads a POSITION rather than a substring — measured, because its first run classified a
+# session as treated on the strength of the word fleet-ack appearing in it, and that
+# session was the one writing this file. The treated arm would have filled with the
+# treatment being built, which is unusually careful work, and the treatment would have
+# looked like it worked.
+#   The decisions ride on the same line rather than a line below because that is the claim
+# being made: not that the worker restated something, but what it is building FROM. An ack
+# that names none says so on the line instead of omitting the field — an absent field and a
+# deliberate "none" are the same bytes to a reader, and they are not the same event.
+echo "fleet-ack: recorded for '$SESSION' ($WT)"
+echo "asked:      $ASKED"
+if [ -n "$DECISIONS" ]; then
+  echo "understood: $UNDERSTOOD · from: $DECISIONS"
+else
+  echo "understood: $UNDERSTOOD · from: (none named)"
+  # Said once, plainly, and then nothing further happens — no exit code, no retry demand.
+  # The row is written either way and fleet-worktrees prints it as "(no decisions)", which
+  # is the point: the absence is the signal, so it must not be smoothed over here.
+  echo "  no decisions named — fleet-worktrees will show this ack as (no decisions)."
+  echo "  If the brief stated any, name them with --from; if it stated none, that is worth"
+  echo "  asking the lead about before you build."
+fi
+if [ "$ASKED" = "-" ]; then
+  echo "  note: no lead brief is recorded for this worktree, so there is nothing to compare"
+  echo "        this against — the ack stands alone rather than beside an ask."
+fi

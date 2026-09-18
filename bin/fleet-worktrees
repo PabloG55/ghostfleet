@@ -7,10 +7,21 @@
 # to the same free/occupied logic before it will create a new worktree.
 #
 # For each worktree it shows: branch · live fleet session (if any) · state ·
-# git (clean/dirty + ahead/behind) · the task it was spun up for (from the
+# git (clean/dirty + ahead/behind) · ASKED, the task it was spun up for (from the
+# manifest) · and UNDERSTOOD, what its worker said it heard (fleet-ack, same
 # manifest). A worktree is FREE = it exists, has NO live session on this fleet,
 # and its working tree is clean (a dirty, sessionless worktree has unfinished
 # work, so it's left alone, not offered for reuse).
+#
+# THE TWO COLUMNS SIT SIDE BY SIDE BECAUSE THE GAP BETWEEN THEM IS THE SIGNAL.
+# MEASURED: of 79 corrections that are about the agent rather than the code, 23 are
+# "that is not what I asked" — the largest of those kinds — and until fleet-ack there
+# was nothing recording what the worker heard, only what the lead sent. UNDERSTOOD is
+# blank for a worktree whose worker has not acknowledged, and blank for every row
+# written before the column existed; neither is a disagreement, and neither is guessed
+# at. What IS reported is a worker that acknowledged while naming no decision it is
+# building from — that prints as "(no decisions)" and prints FIRST, so the truncation
+# at the end of a long restatement can never be what hides it.
 #
 # Socket defaults to $CLAUDE_FLEET_SOCK.
 set -uo pipefail
@@ -70,7 +81,16 @@ is_parked() { [ -f "$FLEET_DIR/$SOCK.$1.parked" ]; }
 # a confident DONE.
 MERGED="$("$(dirname "$0")/fleet-merged" "$PWD" 2>/dev/null || true)"
 is_merged() { [ -n "$MERGED" ] && printf '%s\n' "$MERGED" | grep -qxF -- "$1"; }
-task_for()  { awk -F'\t' -v w="$1" '$1==w{print $4; exit}' "$MANIFEST" 2>/dev/null; }
+asked_for() { awk -F'\t' -v w="$1" '$1==w{print $4; exit}' "$MANIFEST" 2>/dev/null; }
+# Columns 5 and 6 (fleet-ack). A four-column row — every row written before this existed,
+# and every spawn whose worker has not acknowledged yet — yields empty ones under
+# `awk -F'\t'`, which is the whole reason the manifest is read with awk and not with
+# `read`: tab is IFS-whitespace, so a shell read would collapse the missing fields and
+# shift the row. Empty prints empty; an old entry is not a disagreement.
+und_for()   { awk -F'\t' -v w="$1" '$1==w{
+                if ($5 == "") { print ""; exit }
+                if ($6 == "" || $6 == "-") { print "(no decisions) " $5; exit }
+                print $5 " · " $6; exit }' "$MANIFEST" 2>/dev/null; }
 git_state() {                      # "clean|dirty" (+ahead / -behind vs upstream)
   local wt="$1" d="" ab="" behind="" ahead="" extra=""
   [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ] && d=dirty || d=clean
@@ -149,7 +169,7 @@ EOF
 # from it, so seeing it here is what makes "which stack is this?" answerable without
 # digging. Blank when this checkout has none; 0 is the project's primary.
 slot_for() { "$(dirname "$0")/fleet-slot" of "$1" 2>/dev/null || printf '-'; }
-{ [ "$FREE_ONLY" = 1 ] || [ "$DONE_ONLY" = 1 ]; } || printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' WORKTREE BRANCH SESSION STATE SLOT GIT TASK
+{ [ "$FREE_ONLY" = 1 ] || [ "$DONE_ONLY" = 1 ]; } || printf '%-38s %-22s %-14s %-7s %-5s %-14s %-40s %s\n' WORKTREE BRANCH SESSION STATE SLOT GIT ASKED UNDERSTOOD
 # A LABEL YOU CAN PASTE BACK. Basenames repeat across clones once several of them keep a
 # .worktrees/ each, so the old bare basename was ambiguous AND wrong to hand to --reuse.
 # Relative to the project root it is unique, readable, and exactly what --reuse resolves.
@@ -176,11 +196,12 @@ while IFS=$'\t' read -r wt br; do
   # a worktree dir that git still lists but no longer exists on disk (removed with
   # rm -rf instead of `git worktree remove`) — flag it; `git worktree prune` tidies it.
   if [ ! -d "$wt" ]; then
-    { [ "$FREE_ONLY" = 1 ] || [ "$DONE_ONLY" = 1 ]; } || printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' "${base:0:38}" "${br:0:22}" "-" "gone" "-" "-" "git worktree prune"
+    { [ "$FREE_ONLY" = 1 ] || [ "$DONE_ONLY" = 1 ]; } || printf '%-38s %-22s %-14s %-7s %-5s %-14s %-40s %s\n' "${base:0:38}" "${br:0:22}" "-" "gone" "-" "-" "git worktree prune" "-"
     continue
   fi
   sess="$(sess_for "$wt")"
-  state=""; git=""; task="$(task_for "$wt")"; [ -n "$task" ] || task="-"
+  state=""; git=""; asked="$(asked_for "$wt")"; [ -n "$asked" ] || asked="-"
+  und="$(und_for "$wt")"; [ -n "$und" ] || und="-"
   git="$(git_state "$wt")"
   if is_root "$wt"; then                          # a clone's own checkout — a lead's home
     if [ "$sess" = master ]; then state=LEAD; elif [ -n "$sess" ]; then state="${sess:0:7}"; else state=main; sess="-"; fi
@@ -189,7 +210,11 @@ while IFS=$'\t' read -r wt br; do
     elif busy "$sess"; then state=busy
     else state=idle; fi
   else
-    sess="-"; task="-"    # no live session -> the manifest task refers to a gone session; don't show it stale
+    # no live session -> both manifest columns refer to a session that is gone; don't show
+    # either one stale. They blank TOGETHER on purpose: an ASKED with no UNDERSTOOD beside
+    # it reads as "dispatched, never acknowledged", which would be a false report about a
+    # worker that acknowledged and then finished.
+    sess="-"; asked="-"; und="-"
     case "$git" in
       clean*) if is_merged "$br"; then state=DONE; done_list="$done_list $base"
               else state=FREE; fi
@@ -202,8 +227,9 @@ while IFS=$'\t' read -r wt br; do
   elif [ "$FREE_ONLY" = 1 ]; then
     { [ "$state" = FREE ] || [ "$state" = DONE ]; } && printf '%s\t%s\n' "$wt" "$br"
   else
-    printf '%-38s %-22s %-14s %-7s %-5s %-14s %s\n' \
-      "${base:0:38}" "${br:0:22}" "${sess:0:14}" "$state" "$(slot_for "$wt")" "$git" "${task:0:60}"
+    printf '%-38s %-22s %-14s %-7s %-5s %-14s %-40s %s\n' \
+      "${base:0:38}" "${br:0:22}" "${sess:0:14}" "$state" "$(slot_for "$wt")" "$git" \
+      "${asked:0:40}" "${und:0:44}"
   fi
 done <<EOF
 $wts

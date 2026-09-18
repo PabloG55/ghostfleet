@@ -83,14 +83,20 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 7033faf5d37a
+// CLIENT-HASH: b6930967dadc
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
 // v21 puts the project's agent on a screen: the 4th column of the projects list has been
 // read by bin/ghostfleet for a while and nothing could WRITE it, so "the master cant be
 // selected as open code or codex" had no answer that was not a text editor.
-const VERSION = 'ghostfleet-v22';
+// v23 is the composer: its buttons no longer grow with the reader's text size (which had
+// wrapped `send` onto a 148px line under the text box, where the keyboard covers it), a
+// node the app has discarded can no longer write back into the draft it was cleared from,
+// and the two renders that fired on timers now wait for the keyboard. Every one of those
+// is invisible until it is on a phone, which is the case this bump exists for: the shell is
+// cache-first, so a device that already has v22 goes on running it.
+const VERSION = 'ghostfleet-v23';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

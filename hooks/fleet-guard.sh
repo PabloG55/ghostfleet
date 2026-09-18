@@ -19,13 +19,36 @@
 # one typo away from failing a session on every event.
 #
 # Scope, kept narrow on purpose:
-#   - only PreToolUse, only EnterWorktree
+#   - only PreToolUse, only EnterWorktree (and, below, the Agent tool)
 #   - only inside a fleet (a plain Claude Code session outside ghostfleet keeps the
 #     built-in — it is the right tool there, and there is no fleet to confuse)
 #   - ExitWorktree is NEVER blocked: a session that already got moved (or one from
 #     before this hook existed) needs its way back out.
 #   - CLAUDE_FLEET_ALLOW_BUILTIN_WORKTREE=1 overrides, same escape-hatch shape as
 #     CLAUDE_FLEET_ALLOW_NESTED in fleet-spawn.
+#
+# THE SECOND WRONG TOOL: a subagent, where a worker was meant.
+#
+# Claude Code can also spawn subagents in-conversation (the Agent tool; Task in older
+# builds). For a LEAD that is the same shape of mistake as EnterWorktree and it hides
+# better, because it works: the work gets done and something is returned. What is lost
+# is that it happened inside this conversation. Nothing appears in fleet-list; the
+# governor parks SESSIONS, so a subagent's usage is spent but cannot be shed;
+# fleet-inbox never carries its `done`; and fleet-worktrees cannot see a tree it made.
+# The lead ends up leading a fleet that does not contain the work it just started.
+#
+# Measured, in a lead session: told to analyse and then to dispatch, the lead reached
+# for two subagents in a row while five workers sat live on the project's own socket —
+# and the reason it gave itself was machine load, which is precisely the decision the
+# governor exists to make and could not, because it could not see them. Asked about it
+# afterwards the answer was "why are u using claude agents and not ghostfleet".
+#
+# So the Agent branch below refuses DISPATCH from a lead and nothing else:
+#   - read-only research types (Explore, Plan) pass — they gather, they do not build,
+#     and there is no fleet-spawn shaped like them
+#   - a LEAF passes: a worker already in its worktree has no fleet-spawn alternative
+#     (fleet-spawn refuses from a linked worktree) and its subagents are its own business
+#   - CLAUDE_FLEET_ALLOW_SUBAGENTS=1 overrides
 
 # Route by the LIVE tmux server, not a possibly-stale CLAUDE_FLEET_SOCK — same
 # reasoning as fleet-event.sh: a --resume/--fork Claude can carry an old env var.
@@ -35,21 +58,70 @@ _t="${TMUX:-}"; case "${_t##*/}" in cf-*) CLAUDE_FLEET_SOCK="${_t%%,*}"; CLAUDE_
 command -v jq >/dev/null 2>&1 || exit 0
 
 input="$(cat)"
-IFS=$'\x1f' read -r EVENT TOOL CWD < <(
+# \x1f and not tab, because SUBAGENT is OPTIONAL and tab is IFS-whitespace: an absent
+# subagent_type would collapse and shift the field order. Our own wire, so \x1f is the
+# right choice here — the rule about tmux's formatter rewriting it does not reach a hook.
+IFS=$'\x1f' read -r EVENT TOOL CWD SUBAGENT < <(
   printf '%s' "$input" | jq -r '
     [ (.hook_event_name // ""),
       (.tool_name // ""),
-      (.cwd // .workspace.current_dir // "") ] | join("\u001f")' 2>/dev/null
+      (.cwd // .workspace.current_dir // ""),
+      (.tool_input.subagent_type // "") ] | join("\u001f")' 2>/dev/null
 )
 
 [ "$EVENT" = "PreToolUse" ] || exit 0
-[ "$TOOL" = "EnterWorktree" ] || exit 0
-[ "${CLAUDE_FLEET_ALLOW_BUILTIN_WORKTREE:-0}" != 1 ] || exit 0
-[ -n "${CLAUDE_FLEET_SOCK:-}" ] || exit 0        # not a fleet session — built-in is fine
+case "$TOOL" in EnterWorktree|Agent|Task) ;; *) exit 0 ;; esac
 
 CWD="${CWD:-$PWD}"
 GITROOT="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)"
 [ -n "$GITROOT" ] || exit 0                      # not a repo — nothing to redirect to
+
+# ── am I somewhere this advice applies? ───────────────────────────────────────
+# This used to be one line — `[ -n "$CLAUDE_FLEET_SOCK" ] || exit 0`, on the reasoning
+# that a plain session outside a fleet keeps the built-in because there is no fleet to
+# confuse. MEASURED WRONG: a lead in a registered a registered project's main checkout dispatched a
+# general-purpose subagent and was not refused, because it had been started as a plain
+# `claude` in that directory rather than through the fleet. The project had five live
+# workers at the time. The advice was declined exactly where it was most needed — the
+# session could not see the fleet, so neither could the guard.
+#
+# So the question is no longer "am I inside a fleet" but "is there a fleet here to use".
+# Two conditions, and BOTH are required, because a refusal with no alternative is the
+# mistake this file already warns about for leaves:
+#   1. this checkout belongs to a REGISTERED project, and
+#   2. that project has a LIVE tmux server, since fleet-spawn refuses without a socket.
+# If either fails there is genuinely nothing to redirect to and the built-in is right.
+registered_project() {                 # $1 = a git toplevel -> the project name, or nothing
+  local me="${1%/}" cfg name root
+  for cfg in "$HOME/.config/ghostfleet/projects" "$HOME/.config/ghostfleet"/projects.*; do
+    [ -f "$cfg" ] || continue
+    # awk to \x1f and THEN read: a tab is IFS-whitespace, so `IFS=$'\t' read` collapses an
+    # empty profile column and shifts root into it. The trap CLAUDE.md opens with.
+    while IFS=$'\x1f' read -r name root; do
+      [ -n "$name" ] && [ -n "$root" ] || continue
+      root="${root/#\~/$HOME}"; root="${root%/}"
+      # PHYSICAL PATHS ON BOTH SIDES. git rev-parse hands back the resolved path, and a
+      # registered root can be a symlinked one — /var is a symlink to /private/var here, and
+      # /tmp to /private/tmp — so a string compare silently never matches. Caught by the
+      # first test written against a mktemp fixture, which is exactly where it hides; the
+      # same trap fleet-slot documents about a config key written from $PWD.
+      [ -d "$root" ] && root="$(cd "$root" 2>/dev/null && pwd -P)" || root="${root}"
+      [ -n "$root" ] || continue
+      [ "$me" = "$root" ] && { printf '%s' "$name"; return 0; }
+      # under it, with the slash required: root /a/b must not match a checkout at /a/bc
+      case "$me" in "$root"/*) printf '%s' "$name"; return 0 ;; esac
+    done < <(awk -F'\t' '/^[[:space:]]*#/ || NF<2 { next } { printf "%s\x1f%s\n", $1, $2 }' "$cfg" 2>/dev/null)
+  done
+  return 1
+}
+OUTSIDE=0; PROJ=""
+if [ -z "${CLAUDE_FLEET_SOCK:-}" ]; then
+  command -v tmux >/dev/null 2>&1 || exit 0
+  PROJ="$(registered_project "$GITROOT")" || exit 0
+  [ -n "$PROJ" ] || exit 0
+  tmux -L "cf-$PROJ" list-sessions >/dev/null 2>&1 || exit 0
+  OUTSIDE=1
+fi
 
 # Which advice applies turns on whether this session is a lead or already a leaf.
 # A linked worktree has its own git-dir under the shared common dir; in the main
@@ -59,6 +131,77 @@ _gd="$(git -C "$CWD" rev-parse --git-dir 2>/dev/null)"
 _gcd="$(git -C "$CWD" rev-parse --git-common-dir 2>/dev/null)"
 _br="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
 
+# ── the Agent tool: dispatch belongs to the fleet ─────────────────────────────
+# Placed before the EnterWorktree message rather than beside it: the two share the
+# lead/leaf test above and nothing else, and interleaving them would put one tool's
+# escape hatch in the other's path.
+if [ "$TOOL" != "EnterWorktree" ]; then
+  [ "${CLAUDE_FLEET_ALLOW_SUBAGENTS:-0}" != 1 ] || exit 0
+  # A LEAF's subagents are its own business: fleet-spawn refuses from a linked worktree,
+  # so there is nothing to redirect it to. Refusing here would leave a worker with no
+  # way to fan out at all, which is a worse fleet than the one this guard is protecting.
+  [ "$_gd" = "$_gcd" ] || exit 0
+  # Read-only research passes. These gather and return; they do not build, they leave
+  # no branch and no worktree, and no fleet-spawn is shaped like them. Anything else —
+  # including the default, unnamed type — is dispatch.
+  case "$SUBAGENT" in Explore|Plan) exit 0 ;; esac
+  if [ "$OUTSIDE" = 1 ]; then
+    { echo "ghostfleet: this checkout belongs to project '$PROJ', which has a LIVE fleet."
+      echo "  This session was not started through it, so a subagent here is invisible to that"
+      echo "  fleet: no row in fleet-list, no 'done' in its inbox, and its governor — which parks"
+      echo "  SESSIONS when the account tightens — cannot shed usage it cannot see."
+      echo
+      echo "  Dispatch into the fleet that already exists, naming its socket:"
+      echo "      fleet-worktrees -s cf-$PROJ                      # REUSE BEFORE PROLIFERATE"
+      echo "      fleet-spawn -s cf-$PROJ <name> --reuse <worktree> --prompt \"…\""
+      echo "      fleet-spawn -s cf-$PROJ <name> --branch <b> --from origin/main --new --prompt \"…\""
+      echo "  The -s is needed because this session has no socket of its own to inherit."
+      echo
+      echo "  Or work in the fleet instead of beside it:  ghostfleet $PROJ"
+      echo
+      echo "  Small enough to just do? Do it here — that needs no worker at all."
+      echo "  Read-only research is NOT blocked: subagent_type Explore or Plan."
+      echo "  Deliberate override: CLAUDE_FLEET_ALLOW_SUBAGENTS=1"; } >&2
+    exit 2
+  fi
+  { echo "ghostfleet: dispatch through the fleet, not a Claude subagent."
+    echo "  A subagent runs INSIDE this conversation, so the fleet cannot see it: no row in"
+    echo "  fleet-list, no 'done' in fleet-inbox, nothing in fleet-worktrees, and the"
+    echo "  governor — which parks SESSIONS — cannot shed its usage when the account"
+    echo "  tightens. It WORKS, which is exactly why it goes unnoticed; what is lost is"
+    echo "  every handle the fleet has on the work you just started."
+    echo
+    echo "  Hand it to a worker — you keep this thread and can keep working:"
+    echo "      fleet-worktrees                                    # REUSE BEFORE PROLIFERATE"
+    echo "      fleet-spawn <name> --reuse <worktree> --prompt \"…\""
+    echo "      fleet-spawn <name> --branch <b> --from origin/staging --new --prompt \"…\""
+    echo "  or the MCP tool: fleet_spawn with name/branch/prompt."
+    echo
+    echo "  Small enough to just do? Do it here — that needs no worker at all."
+    echo
+    echo "  Read-only research is NOT blocked: subagent_type Explore or Plan."
+    echo "  Deliberate override: CLAUDE_FLEET_ALLOW_SUBAGENTS=1"; } >&2
+  exit 2
+fi
+
+# ── EnterWorktree ────────────────────────────────────────────────────────────
+[ "${CLAUDE_FLEET_ALLOW_BUILTIN_WORKTREE:-0}" != 1 ] || exit 0
+if [ "$OUTSIDE" = 1 ]; then
+  { echo "ghostfleet: this checkout belongs to project '$PROJ', which has a LIVE fleet."
+    echo "  EnterWorktree would create <repo>/.claude/worktrees/… and MOVE THIS SESSION into it,"
+    echo "  leaving the thread you are talking to somewhere else — and that tree would be"
+    echo "  invisible to the fleet beside it: nothing in fleet-worktrees, no slot, no manifest."
+    echo
+    echo "  Hand it to that fleet instead, naming its socket:"
+    echo "      fleet-spawn -s cf-$PROJ <name> --branch <branch> --from origin/main --prompt \"…\""
+    echo "  or work inside it:  ghostfleet $PROJ"
+    echo
+    echo "  Doing it yourself, right here, is also fine — that needs no worktree at all:"
+    echo "      git checkout -b <branch> && …"
+    echo
+    echo "  Deliberate override: CLAUDE_FLEET_ALLOW_BUILTIN_WORKTREE=1"; } >&2
+  exit 2
+fi
 { echo "ghostfleet: EnterWorktree is the WRONG tool in a fleet session."
   echo "  It would create <repo>/.claude/worktrees/… and MOVE THIS SESSION into it —"
   echo "  leaving the thread you are talking to somewhere else. ghostfleet worktrees are"
@@ -67,10 +210,10 @@ _br="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
   if [ "$_gd" != "$_gcd" ]; then
     echo "  You are already IN a worktree ($GITROOT, branch $_br) — you are a worker, a leaf."
     echo "  Start fresh work where you stand; no new worktree, no new session:"
-    echo "      git fetch origin && git checkout -B <new-branch> origin/main"
+    echo "      git fetch origin && git checkout -B <new-branch> origin/staging"
   else
     echo "  Hand the work to a worker instead (you keep this thread and can keep working):"
-    echo "      fleet-spawn <name> --branch <branch> --from origin/main --prompt \"…\""
+    echo "      fleet-spawn <name> --branch <branch> --from origin/staging --prompt \"…\""
     echo "  or the MCP tool: fleet_spawn with name/branch/prompt."
     echo "  REUSE BEFORE PROLIFERATE — check 'fleet-worktrees' for a free one first."
     echo

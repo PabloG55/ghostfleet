@@ -2,8 +2,21 @@
 
 ## Commits
 
-- **Never push to `main` directly — every change lands through a PR.** Branch, commit
-  there, open the PR; let review happen even when the change looks obvious.
+- **Branch off `staging`, and open the PR against `staging`.** `staging` is the default
+  branch and where all work integrates; `main` is the publishable branch and moves only
+  on a release. `git fetch origin && git checkout -B <branch> origin/staging` — a branch
+  cut from `main` is cut from the last release, not from what everyone else has landed,
+  and it will conflict on the way back in.
+- **Never push to `staging` or `main` directly — every change lands through a PR.** Both
+  are protected: a PR is required, and both suite legs (`ubuntu-latest`, `macos-latest`)
+  must be green. Let review happen even when the change looks obvious.
+  - The protection is *not* `strict`, so a PR does not have to be rebased onto the tip
+    of `staging` to merge. That is deliberate — it is what lets a fleet of workers land
+    in parallel instead of queueing behind each other — and the cost is that two PRs can
+    each be green against an older `staging` and break it together. The push-triggered
+    run on `staging` is what catches that, so **a red `staging` is everyone's, not the
+    last merger's alone.**
+  - Admin bypass is on. It exists for a runner outage, not for a hurry.
 - **Never add a `Co-Authored-By:` trailer**, and don't add any other AI attribution
   (no "generated with", no tool footer). Commits are authored by the repo owner, full
   stop.
@@ -183,6 +196,16 @@ prefer proof over assertion:
   enough to look correct). The part that holds everywhere is that the answer MOVES when
   some other session becomes current, without the session of that name being touched — a
   `+` name is an expression, not a name, and it is right only by luck.
+- **The `=` exact-match prefix is right for some tmux commands and silently wrong for
+  `show-options`.** `has-session -t '=name'` and `switch-client -t '=name'` are exactly
+  what the `+`-name entry above asks for — but `show-options -qv -t '=name' @opt` returns
+  **empty**, while a bare `-t 'name'` returns the value. Measured on the same session in
+  the same breath on 3.7b: bare gives `master`, `=`-prefixed gives ``. With `-q` there is
+  no error, so a read written this way makes every session look like it has no options —
+  and a walk that depends on one takes zero steps while the code reads as correct. That
+  is how a fix for tabs-beget-tabs was written, verified as "syntactically fine", and did
+  nothing. Bare `-t` is safe *here* only because tab names start with `_`; that prefix
+  exists precisely so a bare target cannot be read as an expression.
 - **A suite with fixed socket names cannot be run twice at once, and the second run
   lies.** `test/run.sh` used forty-odd fixed names, and nearly every group opens with
   `kill-server`, so two worktrees testing together tore each other's fixtures down
@@ -191,5 +214,27 @@ prefer proof over assertion:
   trust a test only after watching it go red, and a phantom red looks exactly like a real
   one. Per-run `$TMUX_TMPDIR` now, plus a startup sweep for the servers a killed run
   leaves behind, since a unique name has nobody to kill it next time.
+- **`grep -c` counts LINES, and "is it there" is not a count.** Pinning an exact number
+  when the question was presence makes the assertion depend on the markup: a commit that
+  appears in a header AND in a string some button builds is two lines, both correct, and
+  the test that expected 1 fails over a layout change that broke nothing. It has bitten
+  four times now — three in one sitting — which is why it is here and not only in a comment
+  beside the last one. Use `[ "$(grep -c …)" -ge 1 ]`, or count something the code decides
+  (how many worktrees ship a hook) rather than something the renderer decides. And when a
+  number IS the point, say what the other numbers would mean: 3 announcements where 2 are
+  expected is a different bug from 0.
+- **Under `pipefail`, a `grep -q` that MATCHES can make the pipeline fail.** `grep -q`
+  closes its input on the first match; the writer to its left then takes SIGPIPE, and
+  `pipefail` promotes that writer's 141 to the pipeline's status — so a match reads as a
+  no-match. Whether the writer got far enough to block is a race with the kernel's pipe
+  buffer, which is why it presents as an environment bug: the suite's tracked-file list is
+  ~4KB, fits the buffer a pipe usually gets, and does not fit the smaller one the kernel
+  hands out when it cannot spare that. Measured: same commit, green on one runner, red on
+  the other, blaming the FIRST path in the list — the only iteration that ran with a cold
+  pipe. Reproduce it deterministically with 240KB, which no buffer holds. The inverted form
+  is worse: `while ! tmux capture-pane | grep -q <pat>` reads the spurious 141 as "not there
+  yet", spins its whole count, and fails a LATER assertion about something else. Use a
+  here-string — `grep -q <pat> <<< "$out"` — whose status is the reader's alone. `test/run.sh`
+  sweeps itself for the pipe form, so the next one is caught rather than this one.
 - **macOS-only calls need a guard**: `stat -f`, `date -r`, `osascript`, `caffeinate`. Linux
   and WSL are supported.

@@ -409,6 +409,18 @@ function setLabel(name, text) {
   } catch {}
 }
 
+// The agent a LIVE session is actually running, for a project that is not the current
+// one — the same explicit (dir, sock) shape readSched takes, because FLEET_DIR and SOCK
+// are the screen's own profile and the Projects screen draws every profile's projects.
+// Returns '' when there is no marker, which is NOT the same as claude: absent means
+// nothing recorded, and only the caller knows whether a session exists to have recorded it.
+function agentOfIn(dir, sock, name) {
+  try {
+    const a = fs.readFileSync(path.join(dir, `${sock}.${name}.agent`), 'utf8').trim();
+    return /^[a-z0-9_-]+$/.test(a) ? a : '';
+  } catch { return ''; }
+}
+
 function agentOf(name) {
   try {
     const a = fs.readFileSync(path.join(FLEET_DIR, `${SOCK}.${name}.agent`), 'utf8').trim();
@@ -2512,16 +2524,22 @@ function sockOf(proj) { const p = proj.profile; return (!p || p === 'work' || p 
 // the sessions themselves). Two copies of this would drift, and the two screens
 // disagreeing about whether a worker is busy is precisely the bug class this repo keeps
 // paying for. Includes master: it's the project's lead session, and stackable.
-function sessionStatuses(proj) {
+function sessionStatuses(proj, includeTabs = false) {
   const sock = sockOf(proj);
   let names = [];
   try {
     const o = execFileSync('tmux', ['-L', sock, 'list-sessions', '-F', '#{session_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    // Tabs are filtered HERE as well as in tmuxList: the stack screen reaches other
-    // projects' fleets through this path, not that one, so the grid hiding them was no
-    // help — every terminal in every project turned up in the stack picker as an "idle"
-    // session you could stack. Stacking a shell is never what that screen is for.
-    names = o.split('\n').filter(Boolean).filter(n => !isTab(n));
+    // TABS ARE FILTERED HERE BY DEFAULT, and the default is the part worth keeping: this
+    // is the ONE status reader the Projects cards and the stack screen share, so counting
+    // tabs would make a project with a terminal open report a session it does not have.
+    //   The original reason was stronger than that, though, and it was about REACH: the
+    // stack screen walks every project, so including tabs put every terminal in every
+    // project into the picker as an "idle" session you could stack, which is noise you
+    // cannot navigate past. What was wanted all along is narrower — your OWN terminal or
+    // editor beside your OWN agent — so the caller opts in per project and the stack
+    // screen opts in for exactly one: the fleet it was opened from. Other projects' tabs
+    // stay hidden, so the objection that closed this door the first time still holds.
+    names = o.split('\n').filter(Boolean).filter(n => includeTabs || !isTab(n));
   } catch { return []; }
   const dir = path.join(profileDir(proj.profile), 'fleet');
   const bySlot = new Map();
@@ -2665,9 +2683,33 @@ const SETCOLS = [
   // the NEXT master (CLAUDE_FLEET_AGENT is read once, when the tmux session is created),
   // and what the non-default choices cost. `fleet-agent caveat` composes that from the
   // registry's measured capability fields, so a fourth agent brings its own warning.
-  { title: 'AGENT', onColor: C.cyan, toggle: cycleAgent,
+  // A RING DRAWN AS A RADIO READS AS A DEAD KEY. The other two columns are genuinely
+  // binary, so `○`/`●` and a footer that says "toggle" are honest for them; this one
+  // cycles through however many agents are installed, and three presses land back on
+  // the default — which rewrites the row to three columns, exactly the row a project
+  // that was never set has. So a completed lap and an ignored keystroke are the same
+  // pixels AND the same bytes on disk: measured from a real screen where a project
+  // wanted codex, sat on claude, and looked untouched. `verb` renames the footer for
+  // this column and `N/M` in the cell gives the ring a position, so the wrap is
+  // something you watch happen rather than something you deduce afterwards.
+  { title: 'AGENT', onColor: C.cyan, toggle: cycleAgent, verb: 'cycle',
     blurb: `${C.dim}agent: which CLI this project's master runs — ${C.reset}${C.bold}the NEXT one${C.reset}${C.dim}; a running master keeps what it started with. ${C.reset}${C.yellow}${agentCaveats()}${C.reset}`,
-    state: p => { const a = p.agent && p.agent !== 'claude' ? p.agent : ''; return { on: !!a, label: a || 'claude' }; } },
+    state: p => {
+      const ring = agentRing();
+      const a = p.agent && p.agent !== 'claude' ? p.agent : '';
+      // Counted only from three, because two states ARE a toggle and `1/2` on one is
+      // noise. A claude-only machine has a ring of one and never reaches this branch.
+      //   AND ONLY WHEN THE AGENT IS ACTUALLY IN THE RING. A project can name an agent
+      // whose binary is not installed here — set on another machine, or uninstalled
+      // since — and that agent has no position to report. `Math.max(0, indexOf)` was
+      // here and printed `1/3` for it, which is the position of the DEFAULT: a made-up
+      // observation, and the one number on this screen a reader would trust. No counter
+      // is the honest answer; the name still shows, because the name is configured and
+      // the position is measured.
+      const i = ring.indexOf(a);
+      const pos = (ring.length > 2 && i >= 0) ? ` ${i + 1}/${ring.length}` : '';
+      return { on: !!a, label: (a || 'claude') + pos };
+    } },
 ];
 // One line naming only the agents that HAVE a caveat, so a fully-capable fourth agent
 // adds nothing to it and the line stays readable at 80 columns.
@@ -2752,7 +2794,26 @@ function pRender() {
       // Show the project's default agent beside its profile, but only when it HAS one
       // — the overwhelming case is claude, and printing it on every card would be noise
       // that hides the single project which actually differs.
-      const who = it.project.agent ? `${it.project.profile} · ${it.project.agent}` : it.project.profile;
+      //
+      // AND SHOW WHAT IS RUNNING WHEN THAT IS NOT THE DEFAULT. The 4th column is the
+      // project's default and a session receives it AT BIRTH: the control plane passes
+      // CLAUDE_FLEET_AGENT on new-session, so setting the column later cannot reach a
+      // master that already exists. MEASURED: a project set to codex advertised codex on
+      // this card for nineteen minutes while its master — created before the column was
+      // written — ran claude, and nothing anywhere said so. Setting an agent on an
+      // existing project is the ordinary way to arrive here, not an edge case.
+      //   `running→default` rather than a colour, because the fix is to restart the
+      //   session and an arrow says which direction that goes. Plain text on purpose:
+      //   this string is clipped to the card width, and an escape inside it would be
+      //   counted as visible columns.
+      //   Same rule this file applies to a busy detector that cannot fire: never render
+      //   a configured value as though it were an observed one.
+      const pdir = path.join(profileDir(it.project.profile), 'fleet');
+      const want = it.project.agent || 'claude';
+      const live = st.total > 0 ? (agentOfIn(pdir, sockOf(it.project), 'master') || 'claude') : '';
+      const who = (live && live !== want)
+        ? `${it.project.profile} · ${live}→${want}`
+        : (it.project.agent ? `${it.project.profile} · ${it.project.agent}` : it.project.profile);
       return boxCard(`${i + j < 9 ? `${i + j + 1} ` : ''}${it.project.name}`, [who, it.project.path.replace(HOME, '~'), line], color, sel);
     });
     for (let li = 0; li < 5; li++) buf += ' ' + lines.map(l => l[li]).join(' ') + '\x1b[K\n';
@@ -2789,7 +2850,8 @@ function pRenderSettings() {
     });
     buf += `${cur}${padEndV('', 6)}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}\x1b[K\n`;
   });
-  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ toggle · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  // Named per column, so the key's own description changes with what it will do.
+  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ ${SETCOLS[pSetCol].verb || 'toggle'} · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // schedule a message to a project's master (mirrors the grid's renderSchedule)
@@ -2983,14 +3045,37 @@ function stackMembers() {              // Set of "sock\tsession", live members o
   return new Set(stackRun(['members']).split('\n').filter(Boolean));
 }
 let sItems = [], sSel = 0, sMembers = new Set(), sMsg = '';
+// TERMINAL ROW -> index into sItems, written by sRender as it emits and read by the
+// click hit-test. RECORDED, not derived, and that is the point: the grid's own card
+// hit-test was a formula that had to agree with the renderer, and it silently stopped
+// agreeing the day a banner was added above the cards — every click resolved a row too
+// low. This screen cannot drift that way, because the only thing that fills this map is
+// the loop that draws the lines. A row nobody drew is a row nobody can click.
+let sHitRow = new Map();
 function sBuild() {
   sMembers = stackMembers();
   sItems = [];
   for (const p of readProjects()) {
-    const ss = sessionStatuses(p);
+    // TABS FROM THIS FLEET ONLY. SOCK is the socket this grid was started on, so the
+    // project you came from is the one whose terminal and editor you can put beside your
+    // agent — which is the whole request — while every other project's tabs stay out of a
+    // list you have to scroll. A tab is a real tmux session, so fleet-stack joins it like
+    // any other member; nothing downstream needs to know it is a shell.
+    const mine = sockOf(p) === SOCK;
+    const ss = sessionStatuses(p, mine);
     if (!ss.length) continue;
     sItems.push({ header: p.name, profile: p.profile });
-    for (const s of ss) sItems.push({ proj: p.name, sock: s.sock, name: s.name, status: s.status });
+    // GROUPED UNDER THE SESSION THEY HANG OFF, because the reader's eye is the only thing
+    // that relates them: tmux lists sessions alphabetically, so `_edit-w1` sorts nowhere
+    // near `w1` and a fleet with several sessions interleaves every tab away from its
+    // origin. Key on the ORIGIN, then put the agent ahead of its tabs — the agent is what
+    // you are looking for and the tabs are what you might add beside it.
+    const rows = ss.map(x => ({ proj: p.name, sock: x.sock, name: x.name, status: x.status, tab: isTab(x.name) }));
+    rows.sort((a, b) => {
+      const oa = a.name.replace(/^_(?:term|edit)-/, ''), ob = b.name.replace(/^_(?:term|edit)-/, '');
+      return oa === ob ? (a.tab ? 1 : 0) - (b.tab ? 1 : 0) : (oa < ob ? -1 : 1);
+    });
+    for (const r of rows) sItems.push(r);
   }
   // Land on a session, never on a project header — space/⏎ would have nothing to act on.
   if (sSel >= sItems.length) sSel = sItems.length - 1;
@@ -3021,24 +3106,71 @@ function sRender() {
   let start = Math.max(0, sSel - Math.floor(maxShow / 2));
   const end = Math.min(sItems.length, start + maxShow);
   start = Math.max(0, end - maxShow);
-  if (!sItems.length) buf += ` ${C.dim}(no live sessions in any project)${C.reset}\x1b[K\n`;
+  // Three lines are always emitted above the list: the title, the count, and the message
+  // slot. `row` walks with the buffer from there so a session's row is whatever line it
+  // actually landed on — a header costs TWO (a blank, then its name) and a session one,
+  // which is exactly the arithmetic a formula would have to duplicate and get wrong.
+  let row = 3;
+  sHitRow = new Map();
+  if (!sItems.length) { buf += ` ${C.dim}(no live sessions in any project)${C.reset}\x1b[K\n`; row++; }
   for (let i = start; i < end; i++) {
     const it = sItems[i];
     if (it.header) {
       buf += `\x1b[K\n ${C.bold}${C.white}${it.header}${C.reset}${it.profile && it.profile !== 'work' ? ` ${C.yellow}${it.profile}${C.reset}` : ''}\x1b[K\n`;
+      row += 2;
       continue;
     }
+    row++; sHitRow.set(row, i);
     const inStack = sMembers.has(`${it.sock}\t${it.name}`);
     const sel = i === sSel;
     const box = inStack ? `${C.green}${C.bold}[✓]${C.reset}` : `${C.dim}[ ]${C.reset}`;
-    const col = STC[it.status] || C.grey;
-    const nm = (sel ? C.bold + C.white : C.reset) + padEndV(it.name, 24) + C.reset;
-    buf += `${sel ? `${C.bold}${C.white}▸ ` : '  '}${box} ${nm} ${col}${padEndV(it.status, 10)}${C.reset}\x1b[K\n`;
+    // A TAB IS NOT AN AGENT, AND MUST NOT BORROW ITS VOCABULARY. Every other row's second
+    // column is a turn state — working, need-you, ready — and a shell has none of those:
+    // the status reader has no detector for it, so it lands on `idle`, and an `idle` row
+    // beside real ones reads as an agent waiting for work you could dispatch to. Say what
+    // it is instead. That is the same distinction install.sh's note draws about tabs: no
+    // agent, no hooks, nothing to send to.
+    const kind = it.tab ? (/^_term-/.test(it.name) ? 'terminal' : 'editor') : it.status;
+    const col = it.tab ? C.yellow : (STC[it.status] || C.grey);
+    // NOT the sanitised session name: the prefix is plumbing (`_` so a bare -t cannot read
+    // as target syntax) and `_term-api_2` is not what anyone called that worktree. But the
+    // stripped origin alone was worse — a session with both tabs open drew three rows all
+    // reading `master`, distinguished only by the far column, which looks like the list
+    // repeated itself. `↳` says this row HANGS OFF the one named beside it, so the origin
+    // stays readable and the kind column is the difference rather than the only clue.
+    const label = it.tab ? `↳ ${it.name.replace(/^_(?:term|edit)-/, '')}` : it.name;
+    const nm = (sel ? C.bold + C.white : C.reset) + padEndV(label, 24) + C.reset;
+    buf += `${sel ? `${C.bold}${C.white}▸ ` : '  '}${box} ${nm} ${col}${padEndV(kind, 10)}${C.reset}\x1b[K\n`;
   }
-  buf += `\x1b[K\n${C.dim} ↑↓/jk move · space add/remove · ⏎ open the stack · c clear · esc/q/\` back${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓/jk/wheel move · space or click add/remove · ⏎ open the stack · c clear · esc/q/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function onKeyStack(key) {
+  // THE MOUSE, and it has to come first: an SGR event arrives as one multi-character
+  // string, so every comparison below misses it and the screen redrew for nothing. The
+  // tracking modes were already on for every screen — only this handler never read them.
+  const mev = parseMouse(key);
+  if (mev) {
+    // Wheel up/down are buttons 64/65 and move the selection, which is what a wheel means
+    // on a list. They arrive as a press with no release, so acting on the press is right.
+    if (mev.press && (mev.button === 64 || mev.button === 65)) {
+      sMoveStack(mev.button === 64 ? -1 : 1); sMsg = ''; sRender(); return;
+    }
+    // A left press on a drawn session row moves the cursor there AND toggles it — this is
+    // a checkbox list, and a click that only moved the cursor would make the mouse a
+    // slower keyboard. Rows nobody drew (the title, a group name, the footer) are absent
+    // from the map, so a click there is a no-op rather than a guess at the nearest row.
+    if (mev.press && mev.button === 0 && sHitRow.has(mev.y)) {
+      const i = sHitRow.get(mev.y), it = sItems[i];
+      if (it && !it.header) {
+        sSel = i; sMsg = '';
+        stackRun(['toggle', it.sock, it.name]); sMembers = stackMembers();
+        sRender();
+      }
+      return;
+    }
+    return;   // releases, drags, right-clicks, and clicks on chrome
+  }
   if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') return finish('back');
   sMsg = '';
   if (key === '\x1b[A' || key === 'k') sMoveStack(-1);

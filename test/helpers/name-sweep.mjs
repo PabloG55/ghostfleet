@@ -43,7 +43,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const US = '\x1f';
@@ -74,7 +74,7 @@ if (process.argv[2] === '--digest') {
 // domain term are none of those. That is the standing weakness of a denylist and the reason
 // doc-fixtures' membership test is the better shape wherever it fits. Add to this when you
 // find one; `--digest` means doing so costs no name in the diff.
-const DENY = new Set([
+export const DENY = new Set([
   'd376caa575c4bc6a',   // 7 chars
   'a273e332152a4cae',   // 8 chars
   '5e1e022d237aa135',   // 10 chars
@@ -96,6 +96,20 @@ const DENY = new Set([
 'b7b1d45c9dd780be',   // 5 chars
   '8cd4594d611fa412',   // 27 chars
   'f56266800c580984',   // 18 chars
+  // ADDED 2026-09-18, and every one of these was found the same way: not by the sweep, but
+  // by reading 28 pull request BODIES that were describing the earlier leaks and therefore
+  // enumerated the names they had removed. The list only ever holds what somebody thought
+  // of, and what somebody thought of was the tree — so a name that never appeared in a
+  // tracked file was never added, and the prose about removing it stayed public for weeks.
+  '191c13ecda83379e',   // 16 chars
+  '1ebf617faac5cebd',   // 13 chars
+  'f0e6c15464f8fc90',   // 13 chars
+  'b810e389ad1cd42d',   // 12 chars
+  'e0013b5c1d3e98a1',   // 12 chars
+  '5785bdae238a877d',   // 12 chars
+  '001ef18b21f55e4e',   // 12 chars
+  '626df54a92b7c6a8',   // 4 chars
+  'a40206b2f501cb94',   // 4 chars
   'CANARY',             // replaced in section 3
 ]);
 
@@ -130,6 +144,18 @@ export function candidates(line) {
   return out;
 }
 
+// ── running as a script, or imported? ─────────────────────────────────────
+// EVERYTHING BELOW IS THE SUITE'S CHECK, and it has two side effects that make a plain
+// import unusable: it prints its rows to stdout, and section 3 ADDS a canary digest to
+// DENY to prove the sweep can fail at all. `.githooks/pre-push` needs the tokenizer and
+// the list and nothing else — so it imports this file, and importing must not run a test
+// or grow the list it is about to check against. Guarding here keeps ONE tokenizer and
+// ONE list in the repo: a hook that carried its own copy would be the "renderer nobody
+// ships" shape, passing against a matcher that is not the one the suite proves.
+const IS_MAIN = !!process.argv[1] &&
+  pathToFileURL(process.argv[1]).href === import.meta.url;
+if (IS_MAIN) {
+
 // ── 1. the tree ───────────────────────────────────────────────────────────
 // EXEMPT, EXPLICITLY AND BY PATH — never by directory.
 //   TWO CAPTURED PANES USED TO BE HERE, and their removal is this list working rather than
@@ -140,15 +166,13 @@ export function candidates(line) {
 //   A path here is not a blanket pass. Section 2 asserts each one is STILL contaminated, so
 // an exemption that has been dealt with turns red and asks to be deleted instead of
 // quietly covering a file nobody has looked at in a year.
-//   The third is not a comment either: it is the address CONTRIBUTING.md tells people to
-// send a vulnerability report to. Where security mail goes is a decision about how this
-// project is contacted, not a comment citing a case, so it is not something to rewrite in a
-// cleanup pass — flagged, exempt, and left to the person whose inbox it is.
-// EMPTY, AND THAT IS THE POINT. Every path that was here has been dealt with rather than
-// permanently excused: two captured panes were sanitised, and CONTRIBUTING.md's security
-// contact was replaced by GitHub's private vulnerability reporting, so there is no address
-// in the tree to exempt. Section 2 asserted each entry was STILL contaminated, which is what
-// turned each one red the moment it was fixed and asked for its own deletion.
+//   THE LIST IS EMPTY, AND THAT IS THE POINT. The last entry was CONTRIBUTING.md, held back
+// on the argument that where security mail goes is a decision about how the project is
+// contacted rather than a comment to rewrite in a cleanup pass. The argument was sound and
+// the conclusion was wrong: the decision did not need an address at all. GitHub's private
+// vulnerability reporting opens the same private thread with no address to publish, so the
+// exemption had nothing left to protect and its "still contaminated" assertion is what
+// forced the question. An exemption is a debt, not a category.
 const EXEMPT = [];
 
 const tracked = execFileSync('git', ['-C', ROOT, 'ls-files', '-z'], { encoding: 'utf8' })
@@ -262,3 +286,5 @@ is('...but a hyphenated one is', true, [...candidates(`${SHORT}-policy`)].includ
 is('...and the canary is really on the list', true, DENY.has(digest(SHORT)));
 
 console.log(rows.join('\n'));
+
+}   // end IS_MAIN

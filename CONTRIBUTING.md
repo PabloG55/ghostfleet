@@ -39,6 +39,59 @@ yeses and new surface area is usually a no.
 If you would rather not write it up for a likely no, open a short issue asking first. That
 is a completely reasonable thing to do and I will not think less of the idea for it.
 
+## Branches
+
+**Open your PR against `staging`, not `main`.** `staging` is the default branch, so a
+plain `gh pr create` or the GitHub UI already picks it — this note is for anyone whose
+muscle memory says otherwise.
+
+| branch | what it is | how it moves |
+|---|---|---|
+| `staging` | where everything integrates; the default branch | one PR at a time, suite green on both platforms |
+| `main` | the publishable branch — what a release points at | only by a `staging` → `main` PR, at release time |
+
+Both are protected: a pull request is required and both suite legs (`ubuntu-latest`,
+`macos-latest`) must pass. Neither can be force-pushed or deleted.
+
+Required checks are deliberately **not** "strict" — you do not have to rebase onto the
+tip of `staging` before merging. This repo's whole subject is running agents in parallel,
+and a strict gate would make every merge invalidate every other open PR. The trade is
+real and worth naming: two PRs can each be green against an older `staging` and still
+break it together. That is what the push-triggered run on `staging` is for, and it is why
+a red `staging` belongs to whoever is around, not to whoever merged last.
+
+**Releases go `staging` → `main` as a merge commit, never a squash.** A squash would put
+a brand-new commit on `main` that shares no history with the branch it came from, so the
+*next* release would conflict with everything in between. A merge keeps `main` a genuine
+ancestor of `staging` and every release after it trivial.
+
+## Arm the pre-push hook, first thing
+
+This repo is public, and it is written by people whose day job is not. Comments, fixtures
+and captured panes all want to name the project that produced the bug they document, and
+`test/run.sh`'s name sweep exists to refuse that. The sweep reads every file git *tracks* —
+which means it is silent about a branch you never checked out and never ran it on.
+
+That gap has been measured, on this repo: 37 branches were once live on the public remote
+carrying hundreds of occurrences of names that were on `main` and `staging` nowhere, with
+every suite run green throughout. A push is the moment private becomes public, so there is
+a check at the push:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+One command, per clone — `core.hooksPath` is repo-local config and a fresh clone does not
+inherit it. Run it before your first push. `.githooks/pre-push` then refuses a push whose
+tip tree, *file names*, newly-introduced blobs, commit messages or branch name carry a
+withheld name, and prints what it found and where. The last two are worth calling out
+because the tracked-file sweep structurally cannot see either one.
+
+It shares the sweep's tokenizer and its one-way digest list rather than carrying a copy, so
+there is a single matcher to keep honest. If it fires on an ordinary English word, the list
+is in `test/helpers/name-sweep.mjs` and `--digest` prints a line to paste without putting a
+name in the diff. To override once, knowing what you are doing: `git push --no-verify`.
+
 ## Pull requests
 
 Run the suite first:
@@ -72,10 +125,8 @@ changing anything load-bearing.
 ## Security
 
 Please do not open a public issue for a vulnerability. Use GitHub's private vulnerability
-reporting instead — the **Report a vulnerability** button under this repository's *Security*
-tab — which opens a private thread with the maintainer and gives me a chance to fix it before
-it is public.
+reporting — **Security → Report a vulnerability** on this repository — which opens a private
+thread with the maintainer and gives a chance to fix it before it is public.
 
-No address is published here on purpose: an email in a public file is scraped, and this one
-used to be a work address, which told a reader more about where the project lives than the
-security process needed them to know.
+If that is unavailable to you, open a public issue saying only that you have a security
+report and no details, and you will be contacted privately.

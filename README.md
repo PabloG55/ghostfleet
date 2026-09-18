@@ -81,6 +81,7 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | **[docs/stack-view.md](docs/stack-view.md)** | Why the stack is nested attaches and not `join-pane`, and what was measured to find out |
 | **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex` and `opencode` beside `claude` — the measured capability matrix (hooks, MCP, skill, resume) and what picking a non-default agent costs |
 | **[docs/attachments.md](docs/attachments.md)** | Sending a photo from the phone: what was measured per agent, why the bytes are converted on the Mac rather than the phone, and the two recommendations the build overturned |
+| **[docs/agent-council.md](docs/agent-council.md)** | Would a second agent checking the first one's work reduce iteration? Measured against 3,494 real turns and this repo's own history: misread intent is the *smallest* correction category, three quarters of the rest are found by a human looking at a screen, and a browser-based verifier would have passed the bug it was built for |
 | **[docs/ROADMAP.md](docs/ROADMAP.md)** · **[docs/IDEAS.md](docs/IDEAS.md)** | What is next, and what is only an idea |
 | **[CHANGELOG.md](CHANGELOG.md)** | What changed between releases, and whether it is a reason to upgrade |
 | **[CLAUDE.md](CLAUDE.md)** | For working *on* ghostfleet: how to deploy a change, what the tests cover, and the failure modes that have bitten more than once |

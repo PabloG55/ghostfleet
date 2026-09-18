@@ -136,11 +136,48 @@ kill_servers_in() {                # $1 = a run directory
 # left one alive for half an hour. It is found by its own argv, which names the dead run's
 # directory, so this can only ever reach a daemon THIS file started under a directory that
 # is provably nobody's any more.
-kill_serves_in() {                 # $1 = a run directory
-  local p
-  for p in $(pgrep -f "$1/.*fleet-serve.mjs" 2>/dev/null); do
-    [ "$p" = "$$" ] || kill "$p" 2>/dev/null
+# A DAEMON THAT WILL NOT BE REASONED WITH MUST STILL BE REAPED, and every teardown path
+# here used a bare `kill`. That is SIGTERM, which is a request: fleet-serve answers it by
+# DRAINING — it stops accepting, lets in-flight responses finish, and only exits after a
+# 15s grace — so a polite kill is not even supposed to be instant. And measured live on
+# this machine after a night of runs: eight leaked daemons where `kill` returned 0, and
+# `kill -TERM` again returned 0, and the process was still there in state R both times.
+# Whatever wedges them, the reaper cannot depend on their cooperation.
+#   ESCALATE: ask, wait a beat, then insist. The wait is short on purpose — at teardown
+# nobody is reading the response a drain is protecting, so the grace that is right for a
+# live restart is only latency here.
+# THE REGISTRY IS A FILE, NOT A VARIABLE, and that took an instrumented run to see. The
+# EXIT trap read $SERVE_PIDS and found it EMPTY while six sites append to it — because the
+# daemon section keeps a helper that reaps its own servers and then resets the list to "",
+# so a variable is exactly as durable as whoever last touched it. Nothing was wrong with
+# the appends or with reap; the state lived somewhere a function could scope away.
+#   A file under the run directory cannot be reset by a function, survives a subshell, and
+# the trap already knows the path. Registration is append-only and the trap is the only
+# reader, so the in-section helper can go on reaping and resetting its own variable without
+# ever hiding a daemon from the teardown that always runs.
+sv_reg() { [ -n "${1:-}" ] && printf '%s\n' "$1" >> "$TMUX_TMPDIR/serve.pids"; return 0; }
+sv_all() { tr '\n' ' ' < "$TMUX_TMPDIR/serve.pids" 2>/dev/null || true; }
+reap() {                           # $1.. = pids; returns once none of them exist
+  local p i left
+  for p in "$@"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
+  i=0
+  while [ "$i" -lt 20 ]; do
+    left=""
+    for p in "$@"; do [ -n "$p" ] && kill -0 "$p" 2>/dev/null && left="$left $p"; done
+    [ -z "$left" ] && return 0
+    sleep 0.1; i=$((i+1))
   done
+  # SIGKILL cannot be handled, ignored or blocked, which is the whole reason it is the
+  # floor. A process that gets here was asked twice and did not answer.
+  for p in $left; do kill -9 "$p" 2>/dev/null; done
+  return 0
+}
+kill_serves_in() {                 # $1 = a run directory
+  local p pids=""
+  for p in $(pgrep -f "$1/.*fleet-serve.mjs" 2>/dev/null); do
+    [ "$p" = "$$" ] || pids="$pids $p"
+  done
+  [ -n "$pids" ] && reap $pids
   return 0
 }
 sweep_dead_runs() {                # $1 = the <prefix> of <prefix>.<pid>.XXXXXX
@@ -158,7 +195,7 @@ sweep_dead_runs() {                # $1 = the <prefix> of <prefix>.<pid>.XXXXXX
 # fleet-serve is a background node child, not a tmux server, so the sweep above cannot
 # reach it — and a leaked daemon holding a TCP port is the same cross-run interference
 # this section exists to stop. $SERVE_PIDS is set by the fleet-serve group.
-trap 'rc=$?; kill ${SERVE_PIDS:-} 2>/dev/null; kill_serves_in "$TMUX_TMPDIR"; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
+trap 'rc=$?; reap ${SERVE_PIDS:-} $(sv_all); kill_serves_in "$TMUX_TMPDIR"; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
 trap 'exit 130' INT
 sweep_dead_runs "$TEST_RUNS"
 
@@ -830,6 +867,202 @@ STUB
   rm -rf "$MR"
 fi
 
+group "fleet-review asks a DIFFERENT model, or says it cannot"
+# WHY THE REFUSALS ARE THE POINT. Exactly one of the three agents ships a non-interactive
+# review, and the tempting fallback — send the diff as an ordinary prompt and print the
+# answer — spends the account's usage and produces prose indistinguishable from a real
+# review. That is the empty-busy-regex shape again: a fallback that cannot be told apart
+# from a result. So every arm below asserts a REFUSAL as carefully as it asserts a run.
+#   All of it runs under --dry-run against stub binaries. A group that actually called a
+# reviewer would cost usage on every suite run and could not assert on the output anyway.
+fr() { "$ROOT/bin/fleet-review" "$@" 2>&1; }
+is "codex declares a review"        "review" "$(fa field codex review)"
+# BOTH DIRECTIONS, and the empty ones matter more: they are what the refusal reads, and a
+# field that quietly gained a value would turn a refusal into a spend.
+is "claude declares none"           ""       "$(fa field claude review)"
+is "opencode declares none"         ""       "$(fa field opencode review)"
+# ...and empty must be DECLARED, not missing: `field` exits 0 for a known agent with no
+# value and non-zero for an unknown one, which is the only thing separating "you spelled
+# it wrong" from "that CLI cannot do this".
+is "empty is declared, not unknown" "0" \
+   "$("$ROOT/bin/fleet-agent" field claude review >/dev/null 2>&1; echo $?)"
+is "an unknown agent exits non-zero" "1" \
+   "$("$ROOT/bin/fleet-agent" field zed review >/dev/null 2>&1; echo $?)"
+
+if command -v git >/dev/null 2>&1; then
+  FR="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$FR/repo" "$FR/bin"
+  # A STUB REVIEWER. `command -v` is all fleet-review checks before running it, and a real
+  # codex here would bill the account for a fixture.
+  printf '#!/bin/sh\nexit 0\n' > "$FR/bin/codex"; chmod +x "$FR/bin/codex"
+  git init -q -b main "$FR/repo" 2>/dev/null
+  ( cd "$FR/repo" && printf 'a\n' > f.txt && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -q -m init ) >/dev/null 2>&1
+
+  # A DIRTY TREE IS THE DEFAULT SUBJECT, because the moment you want a second opinion is
+  # before you commit.
+  printf 'b\n' >> "$FR/repo/f.txt"
+  got="$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run)"
+  is "a dirty tree reviews uncommitted" "1" "$(grep -c -- '--uncommitted' <<< "$got" || true)"
+  is "...and names the reviewing agent"  "1" "$(grep -c 'asking codex' <<< "$got" || true)"
+  # THE DEFAULT CROSSES MODELS. Called from a codex session it must not pick codex, or the
+  # one thing this command is for — a second set of blind spots — is silently skipped.
+  got="$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=codex fr --dry-run)"
+  is "from codex it will not pick codex" "0" "$(grep -c 'asking codex' <<< "$got" || true)"
+  is "...and says so rather than running" "1" "$(grep -c 'no installed agent other than' <<< "$got" || true)"
+
+  # A CLEAN TREE FALLS BACK TO THE BRANCH, and the base must be where it FORKED FROM: a
+  # worker branches off the integration branch, whose `main` can be a release behind, so
+  # the wrong base reviews other people's work as though it were yours.
+  ( cd "$FR/repo" && git add -A && git -c user.email=t@t -c user.name=t commit -q -m two ) >/dev/null 2>&1
+  got="$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run --base main)"
+  is "an explicit base is honoured"      "1" "$(grep -c -- '--base main' <<< "$got" || true)"
+  # ...and with nothing uncommitted and no upstream and no origin/HEAD, it must SAY it has
+  # no base rather than invent one — a review of the wrong range reads exactly like a
+  # review of the right one.
+  got="$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run)"
+  is "no base is a refusal, not a guess" "1" "$(grep -c 'no integration branch' <<< "$got" || true)"
+
+  # INSTRUCTIONS AND A SELECTOR ARE MUTUALLY EXCLUSIVE, which the reviewer's own CLI
+  # decides, not this wrapper: `codex review --uncommitted 'x'` dies with
+  #     error: the argument '--uncommitted' cannot be used with '[PROMPT]'
+  # while PRINTING `Usage: codex review --uncommitted [PROMPT]` in the same breath. The
+  # first version of this command passed both, so every call with instructions failed
+  # before reviewing anything — and the first version of THIS ROW asserted the string
+  # appeared in the dry-run output, i.e. it asserted our own printf and could not fail.
+  # Assert the refusal instead, which is a decision this code actually makes.
+  is "instructions + a selector is refused" "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run --base main -- 'focus on the shell quoting' | grep -c 'mutually exclusive' || true)"
+  is "...and it does not run anyway"      "0" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run --base main -- 'x' | grep -c 'would run' || true)"
+  is "--title reaches the argv"          "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run --base main --title 'T' | grep -c -- '--title' || true)"
+  # A known agent that cannot, and an unknown one, must not print the same thing.
+  is "a known agent that cannot says so" "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" fr --dry-run --agent claude | grep -c 'has no non-interactive review' || true)"
+  is "an unknown agent is named unknown" "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" fr --dry-run --agent zed | grep -c "unknown agent 'zed'" || true)"
+  is "...and the two differ"             "0" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" fr --dry-run --agent zed | grep -c 'has no non-interactive review' || true)"
+  # A MISSING BINARY IS NOT A MISSING CAPABILITY. Same scrubbed-PATH trick as the agent
+  # column group: `command -v codex` has to be able to answer false.
+  is "a declared-but-absent binary says so" "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin2:/usr/bin:/bin" fr --dry-run --agent codex 2>&1 | grep -c 'not on PATH' || true)"
+  is "outside a repo it refuses"         "1" \
+     "$(cd "$FR" && PATH="$FR/bin:$PATH" fr --dry-run --base main | grep -c 'not a git repository' || true)"
+
+  # THE BASE IS THE INTEGRATION BRANCH, NEVER @{upstream} — the bug this command found in
+  # itself when pointed at its own diff. `git push -u origin feature` makes @{upstream}
+  # resolve to origin/FEATURE, so the old default compared the branch with itself: an
+  # EMPTY subject, which a reviewer reports as nothing wrong. A clean review of nothing is
+  # indistinguishable from a clean review of something, so this asserts the base by NAME.
+  ( cd "$FR/repo" && git remote add origin "$FR/repo" \
+      && git branch -q feature && git checkout -q feature \
+      && printf 'b\n' >> f.txt && git add -A \
+      && git -c user.email=t@t -c user.name=t commit -q -m work \
+      && git update-ref refs/remotes/origin/feature HEAD \
+      && git update-ref refs/remotes/origin/main "$(git rev-parse main)" \
+      && git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main \
+      && git branch --set-upstream-to=origin/feature feature ) >/dev/null 2>&1
+  got="$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run)"
+  is "a self-tracking branch uses origin/main" "1" "$(grep -c -- '--base origin/main' <<< "$got" || true)"
+  # ...and the other direction, which is the whole regression: it must NOT pick the branch.
+  is "...and never its own upstream"      "0" "$(grep -c 'origin/feature' <<< "$got" || true)"
+  # LEVEL WITH THE BASE IS A REFUSAL. Handing a reviewer an empty range and repeating what
+  # it says about it is the same failure wearing a different hat.
+  ( cd "$FR/repo" && git checkout -q main && git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
+  is "level with the base refuses"        "1" \
+     "$(cd "$FR/repo" && PATH="$FR/bin:$PATH" CLAUDE_FLEET_AGENT=claude fr --dry-run | grep -c 'no changes to review' || true)"
+  rm -rf "$FR"
+else
+  skip "fleet-review" "git missing"
+fi
+
+group "every backgrounded daemon is registered for teardown"
+# THE SELF-SWEEP, and it is here because the registry kept being the thing that was wrong.
+# Four sites started a fleet-serve in the background and never told the EXIT trap about it;
+# each had a local `kill` 80-odd lines later, which is teardown that only happens if
+# nothing between here and there exits first. Registering them by hand fixes today and not
+# tomorrow — a fifth site is one copy-paste away, and the symptom is a daemon holding a
+# port on somebody's laptop a week later, attributed to anything but this.
+#   So the rule is checked rather than remembered, the same shape as the `grep -q`-into-a-
+# pipe sweep further down: a line that backgrounds fleet-serve must be followed within
+# three lines by a SERVE_PIDS registration. Reported as the LINE NUMBERS, because "3" tells
+# you nothing about which.
+SVSWEEP="$(awk '
+  /fleet-serve\.mjs/ && /&[[:space:]]*$/ && !/^[[:space:]]*#/ { start[NR]=1 }
+  { for (n in start) if (NR > n && NR <= n+3 && /SERVE_PIDS/) delete start[n] }
+  END { for (n in start) printf "%s ", n }' "$0" | tr -s ' ')"
+is "no unregistered daemon start" "" "$(printf '%s' "${SVSWEEP% }")"
+
+group "a daemon that ignores SIGTERM is still reaped"
+# WHY `reap` ESCALATES, and the first version of this comment got the reason wrong, so it
+# is worth stating what was actually measured. SIGTERM is a REQUEST: fleet-serve answers it
+# by DRAINING — stop accepting, let in-flight responses finish, exit after a 15s grace — so
+# a polite kill is not meant to be instant. Watching a leaked daemon two seconds after
+# `kill` and finding it alive was read as "it ignores SIGTERM"; it does not. Sent TERM on
+# its own, a survivor died at once.
+#   The escalation still earns its place: it BOUNDS the wait. A teardown that sends a
+# request and hopes is open-ended, and at exit nobody is reading the response a drain is
+# protecting. The stub below is the worst case stated plainly rather than a claim about
+# fleet-serve.
+#   The stub below ignores SIGTERM outright, which is the worst case stated plainly. If
+# `reap` only asked, this group hangs at the first row instead of failing — so the row
+# after it asserts the ELAPSED time, which is the only thing that can tell "SIGKILL worked"
+# from "it happened to exit on its own".
+RPD="$(cd "$(mktemp -d)" && pwd -P)"
+cat > "$RPD/deaf.mjs" <<'DEAF'
+// A daemon that will not be reasoned with: it takes SIGTERM and does nothing at all.
+process.on('SIGTERM', () => {});
+process.on('SIGINT', () => {});
+setInterval(() => {}, 1000);
+console.log('up');
+DEAF
+if command -v node >/dev/null 2>&1; then
+  node "$RPD/deaf.mjs" > "$RPD/out" 2>&1 &
+  DEAFPID=$!
+  i=0; while [ "$i" -lt 40 ] && ! grep -q up "$RPD/out" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+  is "the deaf stub is running"        "0" "$(kill -0 "$DEAFPID" 2>/dev/null; echo $?)"
+  is "...and it really does ignore TERM" "0" \
+     "$(kill "$DEAFPID" 2>/dev/null; sleep 0.5; kill -0 "$DEAFPID" 2>/dev/null; echo $?)"
+  reap "$DEAFPID"
+  # WAIT BEFORE ASKING, because a SIGKILLed CHILD IS A ZOMBIE UNTIL IT IS REAPED, and
+  # `kill -0` on a zombie SUCCEEDS — the pid still exists, there is simply nothing behind
+  # it. The first version of this row asserted before waiting and read a correctly killed
+  # process as alive, which is a fact about process tables and not about `reap` at all.
+  wait "$DEAFPID" 2>/dev/null || true
+  is "reap gets it anyway"            "1" "$(kill -0 "$DEAFPID" 2>/dev/null; echo $?)"
+
+  # THE OTHER DIRECTION: a well-behaved daemon must not be waited out for the full
+  # escalation window, or every teardown pays two seconds per process. It exits on the
+  # request, so reap returns while the grace is still running.
+  cat > "$RPD/polite.mjs" <<'POLITE'
+process.on('SIGTERM', () => process.exit(0));
+setInterval(() => {}, 1000);
+console.log('up');
+POLITE
+  node "$RPD/polite.mjs" > "$RPD/out2" 2>&1 &
+  POLPID=$!
+  i=0; while [ "$i" -lt 40 ] && ! grep -q up "$RPD/out2" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+  T0="$(date +%s)"
+  reap "$POLPID"
+  T1="$(date +%s)"
+  wait "$POLPID" 2>/dev/null || true      # same zombie rule as above
+  is "a polite daemon is reaped too"  "1" "$(kill -0 "$POLPID" 2>/dev/null; echo $?)"
+  # The escalation window is 2s. Anything under that means the loop noticed it had gone
+  # rather than sitting out the clock — and a whole suite's teardown depends on that.
+  is "...without sitting out the grace" "yes" \
+     "$([ "$((T1 - T0))" -le 1 ] && echo yes || echo "no: $((T1 - T0))s")"
+
+  # AND REAP MUST SURVIVE NONSENSE, because the EXIT trap passes it whatever SERVE_PIDS
+  # holds — which is empty on a run that failed before the fleet-serve group, and stale
+  # after a daemon exited on its own. Either must not take the trap down with it.
+  is "an empty list is not an error"  "0" "$(reap; echo $?)"
+  is "a dead pid is not an error"     "0" "$(reap 999999; echo $?)"
+else
+  skip "the reaper" "node missing"
+fi
+rm -rf "$RPD"
+
 group "projects screen reads the agent column"
 T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a" "$T/b"
 printf 'oc\t%s/a\twork\topencode\npl\t%s/b\twork\n' "$T" "$T" > "$T/.config/ghostfleet/projects"
@@ -841,6 +1074,138 @@ got="$(HOME="$T" node -e '
   console.log(l.map(x=>{const c=x.split("\t");return (c[0]+":"+(c[3]||"claude"))}).join(" "));
 ' "$T/.config/ghostfleet/projects")"
 is "4th column parsed per project" "oc:opencode pl:claude" "$got"
+rm -rf "$T"
+
+group "the agent column says it cycles"
+# WHY THIS IS DRIVEN AND NOT ASSERTED: the failure was that a completed lap of the ring
+# is indistinguishable from a keystroke that did nothing. Three presses return the row
+# to the default AND rewrite it to three columns — which is byte-for-byte the row of a
+# project whose agent was never set. So neither the file nor a single frame can tell the
+# two apart; only watching the position change across presses can, which is what this
+# does. Measured from a real screen that sat on claude while wanting codex.
+#
+# WHY THE PATH IS SCRUBBED, and this is the half that took two runs to get right: the
+# ring's length is `fleet-agent installed`, which asks `command -v` for each agent's
+# binary. Adding stubs to the front of the suite's own PATH can only make the ring
+# LONGER — on a machine where the real CLIs are installed, removing a stub changes
+# nothing and the two-agent arm silently tests the three-agent one instead. It passed
+# under a break that should have reddened it, which is the same "a test can pass because
+# of where it ran" scar as the codex ready-pattern. So the PATH here holds ONLY what the
+# screen and its two helpers call, and `command -v codex` has to be able to answer FALSE.
+T="$(mktemp -d)"; mkdir -p "$T/.config/ghostfleet" "$T/a" "$T/bin"
+# `sleep` belongs on this list and finding out cost a run: the pane's command ends in
+# one, so a PATH without it exits the pane instantly and the server is simply gone.
+for r in sh bash node tmux git grep egrep awk sed cat tr cut head tail wc sort sleep \
+         mv rm mkdir ln cp printf env uname dirname basename readlink stat date id; do
+  src="$(command -v "$r" 2>/dev/null)" && ln -sf "$src" "$T/bin/$r" 2>/dev/null
+done
+agent_stub() { printf '#!/bin/sh\nexit 0\n' > "$T/bin/$1"; chmod +x "$T/bin/$1"; }
+# Driven twice on the same screen: once with a ring of three, once with a ring of two.
+# The second is not a formality — a two-state ring IS a toggle and a counter on one is
+# noise, so the counter has to be absent there for the right reason.
+# WAIT FOR THE SCREEN, DO NOT SLEEP AT IT. The first version slept 2s for the grid to
+# start and 1s for `,` to land, which is fine on a laptop and not on a shared runner: a
+# key sent before the grid is up goes to the SHELL, and the next one lands on a screen
+# nobody expected. Poll for something the screen actually drew instead.
+#   Here-string, not a pipe: under `pipefail` a `grep -q` that MATCHES can fail the
+# pipeline when the writer takes SIGPIPE, which reads as "not there yet" and spins the
+# whole count. That is swept for elsewhere in this file; do not reintroduce it here.
+agwait() {           # $1 = text to wait for, up to ~12s
+  local i=0
+  while [ "$i" -lt 60 ]; do
+    grep -q "$1" <<< "$(tmux -L cfagcol capture-pane -p 2>/dev/null)" && return 0
+    sleep 0.2; i=$((i+1))
+  done
+  return 1
+}
+# THE ROW'S AGENT IS SEEDED BEFORE THE GRID STARTS, which is what killed the flake. The
+# uninstalled-agent arm used to rewrite the file under a RUNNING grid and then press ` to
+# leave the settings page and `,` to re-enter so the file would be re-read. On the projects
+# screen ` is BACK, and back exits the grid — so if the earlier `,` had not landed yet, the
+# ` killed the whole pane and every row after it read as absent. Measured red on
+# ubuntu-latest while green on four local runs, which is exactly what a start-up race looks
+# like. Nothing needs to be re-read if the file was right before the process opened it.
+AGROW_AGENT=""
+agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = the row's 4th column
+  if [ -n "$AGROW_AGENT" ]; then
+    printf 'acme-api\t%s/a\twork\t%s\n' "$T" "$AGROW_AGENT" > "$T/.config/ghostfleet/projects"
+  else
+    printf 'acme-api\t%s/a\twork\n' "$T" > "$T/.config/ghostfleet/projects"
+  fi
+  rm -f "$T/bin/claude" "$T/bin/codex" "$T/bin/opencode"
+  for a in "$@"; do agent_stub "$a"; done
+  tmux -L cfagcol kill-server 2>/dev/null
+  # PATH IS SET INSIDE THE COMMAND, NOT WITH -e, and that is not a style choice: on this
+  # tmux the pane came up with the SERVER's PATH and ignored `-e PATH=`, so the scrub
+  # silently did nothing and both arms tested the same ring. HOME does come through `-e`
+  # (every other group here relies on that); PATH is the one that has to be assigned in
+  # the shell tmux runs. Measured by printing $PATH from inside the pane.
+  tmux -L cfagcol new-session -d -x 120 -y 24 -e HOME="$T" \
+    -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
+    "PATH='$T/bin'; export PATH; '$T/bin/node' '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 20" 2>/dev/null
+  agwait 'acme-api' || true      # the projects screen has painted; keys reach the grid now
+  tmux -L cfagcol send-keys ','
+  agwait 'settings' || true      # ...and the settings page is up
+}
+agrow()  { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'acme-api' | head -1; }
+agfoot() { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'esc/. back' | head -1; }
+# Two column steps, then wait for the AGENT blurb rather than for a duration: the blurb is
+# per column, so its arrival IS the cursor having got there.
+agtoAGENT() { tmux -L cfagcol send-keys 'l'; tmux -L cfagcol send-keys 'l'; agwait 'agent: which CLI' || true; }
+if command -v tmux >/dev/null 2>&1; then
+  agcol claude opencode codex
+  # Proof the scrub took: on an unscrubbed PATH this says three even with no stubs, so a
+  # wrong answer here is what tells you the arm below is testing the wrong ring.
+  is "the scrubbed PATH is what sets the ring" "claude opencode codex" \
+     "$(PATH="$T/bin" "$ROOT/bin/fleet-agent" installed 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+  # The binary columns are honest as toggles and must KEEP saying so — the per-column
+  # verb is only worth having if it still distinguishes them.
+  is "binary column still says toggle" "yes" \
+     "$(grep -q 'space/⏎ toggle' <<< "$(agfoot)" && echo yes || echo no)"
+  agtoAGENT
+  is "agent column says cycle"         "yes" \
+     "$(grep -q 'space/⏎ cycle' <<< "$(agfoot)" && echo yes || echo no)"
+  is "ring starts at 1 of 3"           "yes" \
+     "$(grep -q 'claude 1/3' <<< "$(agrow)" && echo yes || echo no)"
+  tmux -L cfagcol send-keys Space; sleep 1
+  is "one press advances the position"  "yes" \
+     "$(grep -q 'opencode 2/3' <<< "$(agrow)" && echo yes || echo no)"
+  tmux -L cfagcol send-keys Space; sleep 1
+  is "two presses reach the last"       "yes" \
+     "$(grep -q 'codex 3/3' <<< "$(agrow)" && echo yes || echo no)"
+  tmux -L cfagcol send-keys Space; sleep 1
+  # THE LAP IS THE BUG. Landing back on claude is correct; landing there with no way to
+  # see it happened is what read as a dead key.
+  is "the lap wraps, visibly"           "yes" \
+     "$(grep -q 'claude 1/3' <<< "$(agrow)" && echo yes || echo no)"
+  is "...and the row is a 3-column row again" "3" \
+     "$(awk -F'\t' '/^acme-api/{print NF}' "$T/.config/ghostfleet/projects")"
+
+  agcol claude codex          # a ring of two: a real toggle, and no counter on it
+  is "two installed is a ring of two"  "claude codex" \
+     "$(PATH="$T/bin" "$ROOT/bin/fleet-agent" installed 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+  agtoAGENT
+  is "two agents show no counter"      "no" \
+     "$(grep -qE 'claude [0-9]/[0-9]' <<< "$(agrow)" && echo yes || echo no)"
+  is "...and still name the default"   "yes" \
+     "$(grep -q 'claude' <<< "$(agrow)" && echo yes || echo no)"
+  is "...and one press still sets it"  "yes" \
+     "$(tmux -L cfagcol send-keys Space; sleep 1; grep -q 'codex' <<< "$(agrow)" && echo yes || echo no)"
+  # AN AGENT THAT IS NOT INSTALLED HERE HAS NO POSITION IN THE RING, and the fudge that
+  # placed it at the default's index is what this arm exists to keep out: a project set
+  # up on another machine, or whose CLI was uninstalled since, printed `1/3` — the
+  # position of claude — beside its own name. The counter is the one number on this
+  # screen a reader has no way to check, so a made-up one is worse than none.
+  AGROW_AGENT=zed; agcol claude opencode codex; AGROW_AGENT=""
+  agtoAGENT
+  is "an uninstalled agent is still named" "yes" \
+     "$(grep -q 'zed' <<< "$(agrow)" && echo yes || echo no)"
+  is "...but gets no invented position"    "no" \
+     "$(grep -qE 'zed [0-9]/[0-9]' <<< "$(agrow)" && echo yes || echo no)"
+  tmux -L cfagcol kill-server 2>/dev/null
+else
+  skip "the agent column says it cycles" "tmux not available"
+fi
 rm -rf "$T"
 
 group "projects banner"
@@ -1134,7 +1499,7 @@ if command -v tmux >/dev/null 2>&1; then
     };
     for(const s of ["c1","c2","c3","c4","c5","c6"]) fs.mkdirSync(wt(s),{recursive:true});
     // c1 talked to codex; c2 has only started it; c3 has no rollout of its own at all
-    roll("00-10-00",wt("c1"),"binder slots line up now");
+    roll("00-10-00",wt("c1"),"list pages line up now");
     roll("00-11-00",wt("c2"),"");
     // c6 is a RECYCLED worktree: an older finished conversation and a newer one, same cwd
     roll("00-12-00",wt("c6"),"the previous tenant");
@@ -1167,7 +1532,7 @@ if command -v tmux >/dev/null 2>&1; then
   cxstat() { cxcol "$1" 62-72; }
   cxmsg()  { cxcol "$1" 73-118; }
   is "finished a turn          -> ready"      "ready" "$(cxstat c1)"
-  is "and its last line is shown"            "binder slots line up now" "$(cxmsg c1)"
+  is "and its last line is shown"            "list pages line up now" "$(cxmsg c1)"
   # codex writes the header at STARTUP, so a file exists before you have said anything —
   # handing that back would call a brand-new pane "ready", which means "has history".
   is "started, never spoken to -> idle"      "idle"  "$(cxstat c2)"
@@ -1305,7 +1670,7 @@ nreq=0; badreq=0
 while IFS="$US" read -r c e txt; do
   case "$c" in req:*) ;; *) continue ;; esac
   nreq=$((nreq+1)); k="${c##*.}"; tool="${c#req:}"; tool="${tool%%.*}"
-  if [ "$e" = 1 ] && printf '%s' "$txt" | grep -qF "$tool: missing required argument '$k'"; then :
+  if [ "$e" = 1 ] && grep -qF "$tool: missing required argument '$k'" <<< "$txt"; then :
   else badreq=$((badreq+1)); fi
 done < "$AG/out"
 is "every declared required arg is refused by name" "0" "$badreq"
@@ -1584,7 +1949,7 @@ fi
 
 
 # ── 4a10. a worker must not spawn workers ────────────────────────────────────
-# A session finishes a PR, is told "branch off fresh main", and reaches for the
+# A session finishes a PR, is told "branch off fresh staging", and reaches for the
 # orchestrate skill — which spawns. But it is ALREADY in a worktree, so it gets a second
 # one beside the first instead of re-branching where it stands. The fleet's shape is
 # master in the main checkout and workers as leaves; nesting is never what was meant.
@@ -1673,7 +2038,7 @@ fi
 # The grid is the caller that was actually bitten, and reproducing it needs no props: a
 # tmux server whose socket happens to start with "cf-" is all $TMUX has to say for
 # fleet-spawn to prefer it, and the grid runs in a pane. So run the real TUI on a pane of
-# cf-gpsn, point it at a fleet on cf-gpin, press `w` and create — the manifest filename
+# cf-gpsn, point it at a fleet on another socket, press `w` and create — the manifest filename
 # says which fleet the worker actually landed on.
 group "the grid's create lands on the grid's own fleet"
 if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
@@ -1691,24 +2056,24 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   git init -q -b main "$GP/repo" 2>/dev/null
   git -C "$GP/repo" config user.email t@t; git -C "$GP/repo" config user.name t
   : > "$GP/repo/f"; git -C "$GP/repo" add -A; git -C "$GP/repo" commit -qm init 2>/dev/null
-  tmux -L cf-gpin kill-server 2>/dev/null; tmux -L cf-gpsn kill-server 2>/dev/null
-  tmux -L cf-gpin new-session -d -s master -c "$GP/repo" 'sleep 90' 2>/dev/null
+  tmux -L cf-gpna kill-server 2>/dev/null; tmux -L cf-gpsn kill-server 2>/dev/null
+  tmux -L cf-gpna new-session -d -s master -c "$GP/repo" 'sleep 90' 2>/dev/null
   # a launcher script, not an inline command: PATH has to be EXPANDED at run time and a
   # $PATH inside tmux's own quoting is the sort of thing that silently ends up literal,
   # which reads back as "the grid never started" rather than as a quoting mistake
   { echo '#!/usr/bin/env bash'
     echo "export CLAUDE_FLEET_ROOT='$GP/repo' CLAUDE_FLEET_DIR='$GP/fleet'"
     echo "export PATH=\"$GP/stub:$ROOT/bin:\$PATH\""
-    echo "exec node '$ROOT/bin/fleet-grid.mjs' cf-gpin >/dev/null 2>&1"; } > "$GP/launch"
+    echo "exec node '$ROOT/bin/fleet-grid.mjs' cf-gpna >/dev/null 2>&1"; } > "$GP/launch"
   chmod +x "$GP/launch"
   tmux -L cf-gpsn new-session -d -x 120 -y 40 "$GP/launch" 2>/dev/null
   sleep 2
   tmux -L cf-gpsn send-keys w 2>/dev/null;      sleep 1
   tmux -L cf-gpsn send-keys wkr 2>/dev/null;    sleep 1
   tmux -L cf-gpsn send-keys Enter 2>/dev/null;  sleep 6
-  tmux -L cf-gpsn kill-server 2>/dev/null; tmux -L cf-gpin kill-server 2>/dev/null
+  tmux -L cf-gpsn kill-server 2>/dev/null; tmux -L cf-gpna kill-server 2>/dev/null
   is "the worktree really got made" "1" "$([ -d "$GP/wkr" ] && echo 1 || echo 0)"
-  is "the worker is on cf-gpin"     "cf-gpin" \
+  is "the worker is on cf-gpna"     "cf-gpna" \
      "$( cd "$GP/fleet" && ls *.manifest.tsv 2>/dev/null | sed 's/\.manifest\.tsv$//' )"
   rm -rf "$GP"
 else
@@ -1975,15 +2340,1196 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   WIRED="$(printf '%s' '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/mine"}]}]}}' \
     | jq -c --arg guard /G '.hooks.PreToolUse = ([ (.hooks.PreToolUse // [])[]
           | select([.hooks[]?.command] | index($guard) | not) ]
-        + [ { matcher: "EnterWorktree", hooks: [ { type: "command", command: $guard } ] } ])')"
+        + [ { matcher: "EnterWorktree|Agent|Task", hooks: [ { type: "command", command: $guard } ] } ])')"
   is "wiring keeps a foreign PreToolUse hook" "1" "$(printf '%s' "$WIRED" | grep -c '/mine' || true)"
   RE="$(printf '%s' "$WIRED" | jq -c --arg guard /G '.hooks.PreToolUse = ([ (.hooks.PreToolUse // [])[]
           | select([.hooks[]?.command] | index($guard) | not) ]
-        + [ { matcher: "EnterWorktree", hooks: [ { type: "command", command: $guard } ] } ])')"
+        + [ { matcher: "EnterWorktree|Agent|Task", hooks: [ { type: "command", command: $guard } ] } ])')"
   is "...and re-installing does not stack up" "1" "$(printf '%s' "$RE" | grep -o '/G' | grep -c . || true)"
   rm -rf "$GW"
 else
   skip "EnterWorktree guard" "git or jq missing"
+fi
+
+# ── 4a10b2. a subagent is not a worker ───────────────────────────────────────
+# The Agent tool (Task in older builds) does the work INSIDE the lead's own
+# conversation. It WORKS, which is why it goes unnoticed — and the fleet can see none
+# of it: no fleet-list row, no `done` in fleet-inbox, no fleet-worktrees entry, and the
+# governor parks SESSIONS so it cannot shed that usage when the account tightens.
+# Seen live: a lead reached for two subagents in a row while five workers sat live on
+# the project's own socket, and justified it by machine load — which is precisely the
+# call the governor exists to make and could not, because it could not see them.
+#
+# Both directions matter MORE here than for EnterWorktree. A guard that refused every
+# Agent call would break read-only research (nothing in fleet-spawn is shaped like it)
+# and would strand a WORKER, for whom fleet-spawn is already refused — leaving it no
+# way to fan out at all. So the passes below are the real assertions; the block is easy.
+group "a subagent is refused where a worker was meant"
+if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  SA="$(mktemp -d)"
+  git init -q -b main "$SA/repo" 2>/dev/null
+  git -C "$SA/repo" config user.email t@t; git -C "$SA/repo" config user.name t
+  : > "$SA/repo/f"; git -C "$SA/repo" add -A; git -C "$SA/repo" commit -qm init 2>/dev/null
+  git -C "$SA/repo" worktree add -q "$SA/wt-a" -b wt-a 2>/dev/null
+  # Clean env every time, same reasoning as the EnterWorktree group: the suite usually
+  # runs INSIDE a fleet, and an inherited $TMUX would decide "allowed outside a fleet".
+  sag() { local json="$1"; shift
+    SOUT="$(printf '%s' "$json" | env -u TMUX -u CLAUDE_FLEET_SOCK \
+      -u CLAUDE_FLEET_ALLOW_SUBAGENTS "$@" bash "$ROOT/hooks/fleet-guard.sh" 2>&1)"; SRC=$?; }
+  # tool_input carries subagent_type; the 4th arg is omitted for the default, unnamed
+  # type — which is the shape the real slip had, and must still be refused.
+  sj() { local ev="$1" tool="$2" cwd="$3" sub="${4:-}"
+    if [ -n "$sub" ]; then
+      printf '{"hook_event_name":"%s","tool_name":"%s","cwd":"%s","tool_input":{"subagent_type":"%s"}}' "$ev" "$tool" "$cwd" "$sub"
+    else
+      printf '{"hook_event_name":"%s","tool_name":"%s","cwd":"%s","tool_input":{}}' "$ev" "$tool" "$cwd"
+    fi; }
+  shas() { printf '%s' "$SOUT" | grep -c -- "$1" || true; }
+
+  sag "$(sj PreToolUse Agent "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "Agent is blocked in a lead session"     "2" "$SRC"
+  is "...and hands over fleet-spawn"          "1" "$(shas 'fleet-spawn <name> --reuse')"
+  is "...and says the fleet cannot see it"    "1" "$(shas 'fleet cannot see it')"
+  # Two different mistakes, two different pieces of advice. Neither may answer for the
+  # other: a lead told to re-run fleet-spawn because it typed EnterWorktree learns
+  # nothing, and this is how one guard growing a second job goes quietly wrong.
+  is "...and is NOT the EnterWorktree text"   "0" "$(shas 'MOVE THIS SESSION')"
+
+  sag "$(sj PreToolUse Task "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "Task (older builds) is blocked too"     "2" "$SRC"
+
+  # ── the directions that prove it is not "deny every subagent" ──
+  sag "$(sj PreToolUse Agent "$SA/repo" Explore)" CLAUDE_FLEET_SOCK=cf-x
+  is "read-only Explore passes"               "0" "$SRC"
+  sag "$(sj PreToolUse Agent "$SA/repo" Plan)" CLAUDE_FLEET_SOCK=cf-x
+  is "read-only Plan passes"                  "0" "$SRC"
+  sag "$(sj PreToolUse Agent "$SA/repo" general-purpose)" CLAUDE_FLEET_SOCK=cf-x
+  is "a type that BUILDS is still blocked"    "2" "$SRC"
+
+  # A WORKER may fan out. fleet-spawn refuses from a linked worktree, so refusing here
+  # too would leave a leaf with no way to delegate anything.
+  sag "$(sj PreToolUse Agent "$SA/wt-a")" CLAUDE_FLEET_SOCK=cf-x
+  is "a leaf's own subagents are allowed"     "0" "$SRC"
+
+  sag "$(sj PreToolUse Agent "$SA/repo")"
+  is "allowed outside a fleet"                "0" "$SRC"
+  is "...and stays silent there"              ""  "$SOUT"
+
+  sag "$(sj PreToolUse Agent "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_ALLOW_SUBAGENTS=1
+  is "the override is a real escape hatch"    "0" "$SRC"
+
+  sag "$(sj Stop Agent "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "only PreToolUse is inspected"           "0" "$SRC"
+
+  # …and the older refusal did not grow the newer one's advice.
+  sag "$(sj PreToolUse EnterWorktree "$SA/repo")" CLAUDE_FLEET_SOCK=cf-x
+  is "EnterWorktree is still blocked"         "2" "$SRC"
+  is "...and does NOT mention subagents"      "0" "$(shas 'subagent')"
+
+  # ── the hole: a lead that was never IN the fleet ────────────────────────────
+  # MEASURED, from a real transcript. A lead in a registered project`s main checkout
+  # dispatched a general-purpose subagent and was NOT refused, three weeks after this
+  # guard shipped — because it had been started as a plain `claude` in that directory
+  # rather than through the fleet, so $CLAUDE_FLEET_SOCK was unset and the guard declined
+  # with "not a fleet session — built-ins are fine". The project had live workers at the
+  # time. The advice was skipped exactly where it was most useful.
+  #
+  # The condition is now "is there a fleet here to use", which needs BOTH a registered
+  # project and a live server for it: fleet-spawn exits 1 without a socket, so refusing
+  # when no fleet is running would leave the session with no alternative at all — the
+  # same mistake this guard already avoids for leaves.
+  if command -v tmux >/dev/null 2>&1; then
+    mkdir -p "$SA/.config/ghostfleet"
+    # The root is the repo`s PARENT, which is the shape that actually bites: one project
+    # here is registered at a container directory holding several checkouts, so a match
+    # has to be "under the root", not "equal to it".
+    printf 'sagproj\t%s\twork\n' "$SA" > "$SA/.config/ghostfleet/projects"
+    tmux -L cf-sagproj kill-server 2>/dev/null
+    # NO server yet: nothing to redirect to, so the built-in has to be allowed.
+    sag "$(sj PreToolUse Agent "$SA/repo" general-purpose)" HOME="$SA"
+    is "outside a fleet, no live server: allowed" "0" "$SRC"
+    tmux -L cf-sagproj new-session -d -s s 'sleep 60' 2>/dev/null; sleep 0.4
+    sag "$(sj PreToolUse Agent "$SA/repo" general-purpose)" HOME="$SA"
+    is "...with the server live: REFUSED"         "2" "$SRC"
+    is "...and it names the project"              "1" "$(shas "project 'sagproj'")"
+    # THE COMMAND HAS TO WORK FROM OUT HERE. fleet-spawn refuses without a socket, so an
+    # instruction that omits -s sends the reader into a second failure.
+    # One SPECIFIC line, not the count: the message offers both a --reuse and a --branch
+    # form, so counting occurrences asserts how many examples are printed rather than that
+    # the socket is named. The first version of this row expected 1 and got 2.
+    is "...and hands over a -s socket"            "1" "$(shas 'fleet-spawn -s cf-sagproj <name> --reuse')"
+    # A leaf is still a leaf, fleet or no fleet.
+    sag "$(sj PreToolUse Agent "$SA/wt-a" general-purpose)" HOME="$SA"
+    is "...a leaf outside a fleet is allowed"     "0" "$SRC"
+    # Read-only research is still read-only research.
+    sag "$(sj PreToolUse Agent "$SA/repo" Explore)" HOME="$SA"
+    is "...Explore outside a fleet is allowed"    "0" "$SRC"
+    # AND THE OTHER DIRECTION, or this refuses in every repo on the machine: a checkout
+    # that belongs to no registered project keeps its built-ins even with a server up.
+    #   OUTSIDE $SA, and that is the whole point of a separate directory. The first version
+    # of this row put the "unregistered" repo at $SA/unreg — inside the very root the
+    # fixture registers — so the guard refused it, correctly, and the row blamed the guard.
+    # A control that is not actually outside the treatment is not a control.
+    UNREG="$(cd "$(mktemp -d)" && pwd -P)"
+    git init -q -b main "$UNREG/repo" 2>/dev/null
+    git -C "$UNREG/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+    sag "$(sj PreToolUse Agent "$UNREG/repo" general-purpose)" HOME="$SA"
+    is "an unregistered repo is left alone"       "0" "$SRC"
+    rm -rf "$UNREG"
+    # EnterWorktree takes the same route and must say the same thing.
+    sag "$(sj PreToolUse EnterWorktree "$SA/repo")" HOME="$SA"
+    is "EnterWorktree outside a fleet: REFUSED"   "2" "$SRC"
+    is "...and names the project too"             "1" "$(shas "project 'sagproj'")"
+    # PHYSICAL PATHS. git hands back a resolved path and a registered root can be a
+    # symlinked one — on this platform /var is a symlink to /private/var — so a string
+    # compare silently never matches. The first version of this code failed exactly here,
+    # against a mktemp fixture, which is where it hides.
+    mkdir -p "$SA/link-target"; ln -sfn "$SA/link-target" "$SA/link-alias" 2>/dev/null
+    git init -q -b main "$SA/link-target/r" 2>/dev/null
+    git -C "$SA/link-target/r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+    printf 'sagproj\t%s\twork\nlinked\t%s\twork\n' "$SA" "$SA/link-alias" > "$SA/.config/ghostfleet/projects"
+    tmux -L cf-linked kill-server 2>/dev/null
+    tmux -L cf-linked new-session -d -s s 'sleep 60' 2>/dev/null; sleep 0.4
+    sag "$(sj PreToolUse Agent "$SA/link-target/r" general-purpose)" HOME="$SA"
+    is "a symlinked project root still matches"   "2" "$SRC"
+    tmux -L cf-linked kill-server 2>/dev/null
+    tmux -L cf-sagproj kill-server 2>/dev/null
+  else
+    skip "guard outside a fleet" "tmux missing"
+  fi
+  rm -rf "$SA"
+else
+  skip "subagent dispatch guard" "git or jq missing"
+fi
+
+# ── 4a10b3. every fleet session carries the observation contract ─────────────
+# MEASURED, and it is the reason this exists: of 172 build turns that changed a screen
+# file, 154 ran a test/lint/build and FOUR opened a browser — on exactly the surfaces
+# whose defects came back as photographs. Turns that ran a test drew a correction MORE
+# often than turns that ran nothing (39.6% vs 26.3%), so "the suite is green" was never
+# the observation it was being read as.
+#
+# It rides --append-system-prompt rather than the spawn brief because a brief is issued
+# once and decays; the corpus holds an agent reporting "I've said this four times and
+# it's still true" about an instruction it had already been given. So the assertion that
+# matters is that it reaches EVERY exec path, not just the fresh one — a contract that
+# is dropped on resume would be in force for a new worker and absent for every long-
+# running one, which is the half-working shape this repo keeps getting bitten by.
+group "the observation contract reaches claude"
+if command -v git >/dev/null 2>&1; then
+  OC="$(mktemp -d)"; mkdir -p "$OC/bin" "$OC/work" "$OC/.claude/projects"
+  # A stub claude that records its argv, so the exec is observable without a real one.
+  # argv, argc, AND the one argument that follows --append-system-prompt, separately.
+  { echo '#!/usr/bin/env bash'
+    echo 'printf "%s\n" "$@" > "'"$OC"'/argv"'
+    echo 'printf "%s" "$#" > "'"$OC"'/argc"'
+    echo 'want=0; for a in "$@"; do'
+    echo '  if [ "$want" = 1 ]; then printf "%s" "$a" > "'"$OC"'/contract"; want=0; fi'
+    echo '  [ "$a" = --append-system-prompt ] && want=1'
+    echo 'done'; } > "$OC/bin/claude"
+  chmod +x "$OC/bin/claude"
+  # THE STUB WRITES ONLY THE CONTRACT ARGUMENT, and that is the whole point of this
+  # rewrite. It used to dump every argv entry into one file, and every assertion below
+  # grepped that file — so when a stray apostrophe in the contract text ended its
+  # single-quoted string, splitting it into a truncated argument plus four bare words plus
+  # a 2895-character remainder, every clause was still FOUND somewhere in the file and
+  # every row stayed green. Two thirds of the contract had silently stopped reaching the
+  # system prompt, and Claude Code was taking the first bare word as an initial prompt and
+  # submitting it as a turn in every new session. Asserting on the whole argv is asserting
+  # that the text exists somewhere, which is not the claim.
+  ch() { rm -f "$OC/argv" "$OC/argc" "$OC/contract"
+         ( cd "$OC/work" && env -u CLAUDE_FLEET_NO_OBSERVE_CONTRACT -u CLAUDE_FLEET_FRESH \
+             PATH="$OC/bin:$PATH" HOME="$OC" CLAUDE_CONFIG_DIR="$OC/.claude" "$@" \
+             bash "$ROOT/bin/claude-here" -- --some-user-arg >/dev/null 2>&1 ); }
+  # `-- ` is not decoration: claude-here's first positional is the SLOT, so a bare
+  # --some-user-arg is swallowed as a tab label and never reaches claude. Passing it
+  # wrongly the first time is what proved this assertion can fail.
+  argvhas()     { grep -c -- "$1" "$OC/argv"     2>/dev/null || true; }
+  contracthas() { grep -c -- "$1" "$OC/contract" 2>/dev/null || true; }
+
+  ch
+  is "a fresh session gets the contract"      "1" "$(argvhas '^--append-system-prompt$')"
+  # NO POSITIONAL ARGUMENT MAY REACH claude, because Claude Code takes the first one as an
+  # INITIAL PROMPT and submits it as a turn. That is what a broken quote produced: four
+  # bare words after the truncation, the first of which became a message in every new
+  # session. The count is pinned rather than bounded — a fifth argument appearing is either
+  # a deliberate change to this launcher or a string that came apart, and both deserve a
+  # red line rather than a shrug.
+  # NOT A COUNT. The first version pinned argc at six and went red on CI with four,
+  # because `--name <name>` is only added when CLAUDE_FLEET_SOCK and CLAUDE_FLEET_SLOT are
+  # set — true in a fleet, false on a clean runner. A number that depends on where the test
+  # ran is the trap CLAUDE.md names, and pinning it asserted the environment rather than the
+  # code.
+  #   What actually matters is that NO BARE WORD reaches claude, because Claude Code takes a
+  # positional argument as an INITIAL PROMPT and submits it as a turn. So walk argv: every
+  # entry must be a flag, the value of a flag that takes one, or the caller's own argument.
+  # Anything else is a string that came apart — which is exactly what "the control there and"
+  # was.
+  POSITIONALS="$(awk '
+    BEGIN { skip = 0 }
+    { if (skip) { skip = 0; next }
+      if ($0 ~ /^--?[A-Za-z]/) { if ($0 == "--name" || $0 == "--model" || $0 == "--append-system-prompt") skip = 1; next }
+      print $0 }' "$OC/argv" 2>/dev/null | head -4 | tr '\n' ' ')"
+  is "...and no bare word reaches claude"     "" "${POSITIONALS% }"
+  # ...AND THE CONTRACT IS ONE ARGUMENT, whole. Length compared against the source, so a
+  # truncation cannot hide: the broken version delivered 673 of 3589 characters and every
+  # clause still grepped fine out of the argv dump.
+  is "...and it arrives whole, not truncated" "$(python3 - <<'PYX'
+import io,re
+s=io.open("bin/claude-here",encoding="utf-8").read()
+m=re.search(r"CONTRACT=\(--append-system-prompt '(.*?)'\) ;;", s, re.S)
+print(len(m.group(1)) if m else 0)
+PYX
+)" "$(wc -c < "$OC/contract" 2>/dev/null | tr -d ' ')"
+  is "...and it is about OBSERVING"           "1" "$(contracthas 'state what you OBSERVED')"
+  is "...and it names the test-suite trap"    "1" "$(contracthas 'not observing the thing you changed')"
+  # Three clauses, three measurements, asserted separately — a contract that silently
+  # lost one would still pass a test that only asked "is there a system prompt".
+  #   receipt:    30 of 50 measurable re-reports had NO file changed between the two
+  #               statements; the reporter could not see the agent working.
+  #   divergence: end-of-turn asking is saturated (25.6% of turns, no effect), so the
+  #               clause is about BEHAVIOURAL divergence, not felt uncertainty.
+  is "...and carries the receipt clause"      "1" "$(contracthas 'before you start working')"
+  is "...and the divergence clause"           "1" "$(contracthas 'would visibly differ')"
+  # ASK WHEN THE PROMPT IS UNCERTAIN — AND THE GUARD MOVED FROM A BAN TO A FORM. The
+  # earlier contract forbade asking from felt uncertainty outright, on a real measurement:
+  # end-of-turn asking is already saturated at 25.6% of turns with no effect on rework, so
+  # "ask when unsure" buys nothing. But a flat ban is the wrong lesson from that number —
+  # the paper this clause came from found models RECOGNISE ambiguity and stay quiet, so the
+  # 25.6% is bare end-of-turn checking, not questions that could be answered.
+  #   So the contract now asks for the ANSWERABLE FORM instead: a numbered list of the
+  # concrete alternatives, and where the alternatives cannot be named, a stated assumption
+  # rather than a question. That is what keeps the saturated shape out, so it is what these
+  # rows assert. Asserting the deleted sentence outlived the sentence and failed CI on both
+  # legs while the contract was correct — a test pinned to wording rather than to the
+  # behaviour the wording was for.
+  is "...and asks when the prompt is unclear" "1" "$(contracthas 'ASK ALSO WHEN THE PROMPT ITSELF IS UNCERTAIN')"
+  is "...but only in an answerable form"      "1" "$(contracthas 'never as a bare request to clarify')"
+  is "...and states an assumption otherwise"  "1" "$(contracthas 'state the assumption you are proceeding on')"
+  # The two axes the first version missed. Written product-shaped ("different screens or
+  # different stored data"), the clause did not cover the readings that actually diverge
+  # in practice: WHAT is delivered, and WHERE it lands. Both were misread on the session
+  # that produced this contract — an analysis request read as a mandate to build, and a
+  # second product worked in after being told not to.
+  is "...and the deliverable axis"            "1" "$(contracthas 'WHAT IS DELIVERED')"
+  is "...and the target-repo axis"            "1" "$(contracthas 'WHICH repository or checkout')"
+  # The extraction clause, from the 19-of-36 bucket of requirements the human already
+  # held and never wrote down. Its shape is the load-bearing part: it demands the
+  # ASSUMPTION be stated, because "anything else I should know" is the saturated question
+  # — closing with a question moves the rework rate not at all — so both halves are
+  # asserted, the axes AND the refusal to just ask.
+  is "...and the extraction axes"             "1" "$(contracthas 'what the UNIT is')"
+  is "...and the reuse-not-recreate axis"     "1" "$(contracthas 'reuse instead of recreating')"
+  is "...and states an assumption, not a Q"   "1" "$(contracthas 'rather than asking whether anything is missing')"
+  # RETROACTIVITY, and the reason it is here rather than in the first six: observed live,
+  # a feature built in thirty minutes took its last correction nearly three hours later —
+  # "it should backfill the already created drafts". A migration, arriving as a clause.
+  is "...and the retroactivity axis"          "1" "$(contracthas 'RETROACTIVELY to records that already exist')"
+  # THE REFERENCE. The brief behind that session named the goal, the prepared asset and
+  # three exact file:line locations — it was not thin — and still drew "make it bigger",
+  # "dont make it bold keep it the same pic", and a backfill. The first correction's own
+  # correction pointed at an earlier document of the same kind the product had already
+  # produced: a reference that existed all along and arrived only after two wrong
+  # guesses. So this axis is asked, not hoped for.
+  is "...and the rendered-artifact axis"      "1" "$(contracthas 'RENDERED ARTIFACT')"
+  # CLOSING THE LOOP. Entry and observation were both governed and nothing joined them:
+  # an agent can truthfully report what it observed and still have built the wrong thing.
+  # Target measured at 23 of 79 agent-behaviour corrections ("that is not what I asked").
+  # Three halves asserted separately because each carries its own weight — restate the
+  # criteria, justify "met" by observation rather than by the code reading right, and say
+  # so when none were named, which is the only visible sign the asking half was skipped.
+  is "...and closes the loop at done"         "1" "$(contracthas 'CLOSE THE LOOP')"
+  is "...met because you LOOKED, not read"    "1" "$(contracthas 'because you looked at the thing it is about')"
+  is "...and admits when none were named"     "1" "$(contracthas 'the asking half did not happen')"
+  is "...which asks for an existing one"      "1" "$(contracthas 'whether there is an existing one to match')"
+  # THE HANDSHAKE, both ends of one loop and therefore one clause. The clauses above
+  # govern a session READING a brief; this one governs the moment a brief is written and
+  # the moment one is received. It is a single clause because the contract is delivered
+  # identically to every session — splitting it would address each half to a session that
+  # cannot act on it — so it scopes itself: a main checkout dispatches, a linked worktree
+  # is a leaf and only acknowledges.
+  #   Measured on the asking half: 36 of 163 screen-attributed corrections were
+  # requirements stated for the first time mid-flight, 19 already known to the human and
+  # simply not said. On the acknowledging half: 23 of 79 agent-behaviour corrections are
+  # "that is not what I asked".
+  is "...and the dispatch half of the loop"   "1" "$(contracthas 'NUMBERED LIST')"
+  is "...scoped to a main checkout"           "1" "$(contracthas 'a leaf and dispatches nothing')"
+  # A RESTATEMENT ALONE WAS THE FIRST DESIGN AND WAS NOT ENOUGH: it makes disagreement
+  # displayable, not preventable, since a worker can paraphrase the ask perfectly and
+  # still build from a wrong assumption underneath it. The binding to the DECISIONS is
+  # the correction, so it is asserted separately from the ack itself — a clause that lost
+  # it would still pass a test that only asked whether fleet-ack was named.
+  is "...and the acknowledging half"          "1" "$(contracthas 'the decisions you are working from')"
+  # AND IT NAMES THE COMMAND, for the same reason the fleet-look row above exists: a
+  # mechanism nobody is told about is never reached, and from outside that is
+  # indistinguishable from an instruction nobody followed.
+  is "...naming fleet-ack, not just the idea" "1" "$(contracthas 'fleet-ack')"
+  is "...and where the gap becomes visible"   "1" "$(contracthas 'ASKED next to UNDERSTOOD')"
+  # DO NOT WATCH THE PIPELINE. Same session: 173 tool calls between the finishing commit
+  # and the first human word, 28 of them sleeps totalling ~16,000 seconds, against TWO
+  # records touching anything that could render the artifact the feature was about.
+  # The correction that matters is WHY, not whether. The first version said a watched run
+  # finishes no sooner — true, and not the cost. The human had stepped away, so the clock
+  # was never going to be shorter. The cost is that ENDING a turn is what fires the Stop
+  # hook, hence `done` in fleet-inbox and the push — so waiting held shut the one channel
+  # built to reach someone who left the desk. Assert the mechanism, or the clause decays
+  # back into a productivity slogan.
+  is "...and does not hold the turn open"     "1" "$(contracthas 'do not hold the turn open to wait')"
+  is "...because ending it is what notifies"  "1" "$(contracthas 'Ending the turn is what notifies')"
+  # AND IT NAMES THE INSTRUMENT. fleet-look was built to back the observe clause, shipped,
+  # tested, and put on PATH — and nothing told a worker it existed. A mechanism nobody is
+  # told about is never reached, and from outside it looks exactly like an instruction
+  # nobody followed: the screen goes unopened either way. Asserted so the two cannot drift
+  # apart again — the clause and the command ship together or the suite says so.
+  is "...and names fleet-look"                "1" "$(contracthas 'fleet-look.mjs')"
+  is "...and the tree flag beside it"         "1" "$(contracthas 'add --tree')"
+  # The user's own arguments must survive it — an array spliced into the wrong place
+  # would eat them, and nothing else in the session would say so.
+  is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
+
+  # The parallel-session path (grid `N`) is a SECOND exec, and it was the one most
+  # likely to be missed: it returns before the resume logic is ever reached.
+  ch CLAUDE_FLEET_FRESH=1
+  is "a parallel session gets it too"         "1" "$(argvhas '^--append-system-prompt$')"
+
+  # ── the direction that proves it is not simply always appended ──
+  ch CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1
+  is "the opt-out really opts out"            "0" "$(argvhas '^--append-system-prompt$')"
+  is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
+
+  # Every exec path in the file, counted rather than trusted: a fourth one added later
+  # without the array is exactly the silent half-coverage described above.
+  # NOT anchored to the start of the line. One of the three execs sits after an `echo`
+  # on the same line, so `^ *exec claude` counts two of three — and the assertion then
+  # compares 2 against 2 and goes green while blind to the parallel-session path, which
+  # is the one most likely to be missed. Caught by counting the file by hand; the
+  # anchored version could not have failed.
+  EXECS="$(grep -c 'exec claude "' "$ROOT/bin/claude-here" || true)"
+  WITHC="$(grep -c 'exec claude ".*CONTRACT\[@\]' "$ROOT/bin/claude-here" || true)"
+  is "there are three exec paths at all"      "3" "$EXECS"
+  is "...and every one carries the contract"  "$EXECS" "$WITHC"
+  rm -rf "$OC"
+else
+  skip "observation contract" "git missing"
+fi
+
+# ── 4a10b4. fleet-look: an instruction to observe needs something to observe WITH ─
+# MEASURED: of 172 build turns that changed a screen file, 154 ran a test, lint or build
+# and FOUR opened a browser. And the sessions where the human was the renderer are the
+# ones that iterated — 12 delivering sessions with no screenshot turn took 17 corrections
+# across 76 turns, against 215 across 671 for the 7 with fifteen or more.
+#
+# The assertion that carries this group is the REFUSAL. A 404 renders as a page and
+# photographs as a perfectly good PNG; a tool that hands that back lets "I looked at it"
+# mean nothing, which is §2.1's failure class arriving through the camera. So the
+# not-reachable case must exit non-zero and say why, and that is asserted before anything
+# about the happy path.
+group "fleet-shots walks a flow, and a 404 is not a pass"
+# THE HALF THAT IS NOT A SCREENSHOT is what these rows are mostly about. A picture of a
+# green success toast proves a toast rendered; it cannot say the mutation went to the right
+# endpoint, went once, or went at all. The fixture below is built around exactly that: a
+# sign-in that POSTs to a path which 404s while the page shows "Welcome back" and the
+# expect-text is found. Screenshot perfect, assertion green, flow broken — and the first
+# version of this command reported "3 steps, 5 requests" and nothing else.
+FSH="$(cd "$(mktemp -d)" && pwd -P)"
+# ── the argument surface, with no browser ─────────────────────────────────────
+# --dry-run exists so this part is covered on every machine. Chrome is the one dependency
+# the suite cannot assume, and without a dry run the flow parser, the base resolution and
+# the output path would be tested only where it happens to be installed.
+is "nothing to photograph is an error"  "1" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" --dry-run >/dev/null 2>&1; echo $?)"
+is "...and it names how to fix it"      "1" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" --dry-run 2>&1 | grep -c -- '--flow' || true)"
+printf 'not json at all' > "$FSH/bad.json"
+is "a non-JSON flow says which file"    "1" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/bad.json" --dry-run 2>&1 | grep -c 'is not JSON' || true)"
+printf '{"base":"http://x"}' > "$FSH/nosteps.json"
+is "a flow with no steps says so"       "1" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/nosteps.json" --dry-run 2>&1 | grep -c 'no "steps"' || true)"
+# Bare URLs are the commonest case; making them require a JSON file would mean it does not
+# get used, so the no-flow form has to keep working.
+is "bare urls become steps"             "2" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" http://a.test/x http://a.test/y --dry-run 2>&1 | grep -c '\.png' || true)"
+# A DRY RUN MUST NOT WRITE. The directory used to be created during argument resolution,
+# so --dry-run left a folder behind. Asserted on the filesystem, not on the wording.
+printf '{"base":"http://x","steps":[{"name":"a","goto":"/a"}]}' > "$FSH/one.json"
+node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/one.json" --out "$FSH/dry" --dry-run >/dev/null 2>&1
+is "...and the dry run wrote nothing"   "0" "$([ -d "$FSH/dry" ] && echo 1 || echo 0)"
+# The relative path in a flow is joined to the base, and an absolute one overrides it —
+# a step that silently lost its base would photograph the wrong host.
+is "a relative step takes the base"     "1" \
+   "$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/one.json" --dry-run 2>&1 | grep -c 'goto http://x/a' || true)"
+
+# ── the real thing, where there is a Chrome ───────────────────────────────────
+mkdir -p "$FSH/app"
+cat > "$FSH/app/server.mjs" <<'SRV'
+import http from 'node:http';
+const P = (b) => `<!doctype html><meta charset=utf-8><body>${b}`;
+http.createServer((req, res) => {
+  const u = new URL(req.url, 'http://x');
+  if (u.pathname === '/login') { res.writeHead(200, {'content-type':'text/html'});
+    return res.end(P(`<h1>Sign in</h1><input id=e><button id=go>go</button><div id=m></div>
+      <script>document.getElementById('go').onclick=async()=>{
+      try{await fetch('/api/v1/signin',{method:'POST'})}catch(e){}
+      document.getElementById('m').textContent='Welcome back';};</script>`)); }
+  if (u.pathname === '/old') { res.writeHead(302, {location:'/login'}); return res.end(''); }
+  if (u.pathname === '/clean') { res.writeHead(200, {'content-type':'text/html'});
+    return res.end(P('<h1>All good</h1><script>fetch("/api/ok")</script>')); }
+  if (u.pathname === '/api/ok') { res.writeHead(200, {'content-type':'application/json'}); return res.end('{}'); }
+  res.writeHead(404, {'content-type':'text/plain'}); res.end('nope');
+}).listen(Number(process.argv[2]), '127.0.0.1', () => console.error('up'));
+SRV
+# A port nobody else is on, chosen the way the rest of this file does it: ask the kernel.
+FSPORT="$(node -e 'const n=require("net"),s=n.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+node "$FSH/app/server.mjs" "$FSPORT" 2>/dev/null &
+FSPID=$!
+sleep 1
+cat > "$FSH/flow.json" <<FLOW
+{ "base": "http://127.0.0.1:$FSPORT", "viewport": { "width": 700, "height": 500 },
+  "steps": [
+    { "name": "the sign-in screen", "goto": "/login", "expect": "Sign in" },
+    { "name": "after signing in", "click": "#go", "wait": 500, "expect": "Welcome back" },
+    { "name": "a redirect", "goto": "/old" },
+    { "name": "a clean screen", "goto": "/clean", "expect": "All good" }
+  ] }
+FLOW
+# CHROME COUNTED BEFORE AND AFTER, because a browser is ten processes holding a profile
+# open and this repo has already paid for a command that exited past its own cleanup —
+# 266 stranded Chromes. A leak here would be invisible in every other assertion.
+fschromes() { pgrep -fl 'gf-browser-' 2>/dev/null | grep -c . || true; }
+FSBEFORE="$(fschromes)"
+FSOUT="$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/run" 2>&1)"
+if grep -q 'no chrome' <<< "$FSOUT"; then
+  skip "fleet-shots against a real page" "no chrome to photograph in"
+else
+  is "it writes a page, a manifest and shots" "yes" \
+     "$([ -f "$FSH/run/index.html" ] && [ -f "$FSH/run/manifest.json" ] && \
+        [ "$(ls "$FSH/run"/*.png 2>/dev/null | grep -c .)" = 4 ] && echo yes || echo no)"
+  # A STEP THAT THREW STILL GETS A ROW, so the count is asserted rather than the presence:
+  # a flow of four rendering as three looks complete.
+  is "...one row per step"                "4" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps.length)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+
+  # THE 404 IS THE POINT. The page said "Welcome back" and the expect found it; only the
+  # request log knows the POST answered 404, and the note is what carries that up to the
+  # summary instead of leaving it in a table nobody reads.
+  is "the expect-text was found"          "true" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[1].expect.found)' "$FSH/run/manifest.json" 2>/dev/null)"
+  is "...and the 404 is still flagged"    "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[1].notes.filter(n=>/404/.test(n)).length)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+  is "...so the run does not read clean"  "1" \
+     "$(grep -c 'SOMETHING TO LOOK AT' <<< "$FSOUT" || true)"
+  # AND THE OTHER DIRECTION, or every row above would pass on a build that flags
+  # everything: a screen whose requests all succeeded must carry no note at all.
+  is "a clean step carries no note"       "0" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[3].notes.length)' "$FSH/run/manifest.json" 2>/dev/null || echo 9)"
+  # NOT EVERY NON-2xx IS A DEFECT. A missing favicon 404s on every dev server alive, and
+  # flagging it trains you to ignore the flag — so it is RECORDED and not flagged.
+  is "the favicon 404 was recorded"       "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps.some(s=>s.requests.some(r=>/favicon/.test(r.url)&&r.status===404))?1:0)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+  is "...and not flagged"                 "0" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[0].notes.length)' "$FSH/run/manifest.json" 2>/dev/null || echo 9)"
+
+  # WHERE IT ENDED UP, NOT WHERE IT WAS SENT. A redirect to a login screen photographs
+  # perfectly well, and this line is the only thing that distinguishes the two.
+  # `url`, not `at` — the key was renamed because provenance uses `at` for a TIMESTAMP, and
+  # this row asserted the old name. Self-inflicted, and the reason the rename was worth
+  # doing anyway: one key with two meanings caught a careful reader and then caught me.
+  is "a redirect records the final url"   "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(/\/login$/.test(m.steps[2].url)?1:0)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+
+  # PROVENANCE, because a capture with no context is an assertion wearing a photograph.
+  is "the manifest names the commit"      "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(/^[0-9a-f]{40}$/.test(m.provenance.commit||"")?1:0)' "$FSH/run/manifest.json" 2>/dev/null || echo 0)"
+  # PRESENCE, NOT A COUNT, and this row got it wrong first: `grep -c` counts LINES, the
+  # commit legitimately appears twice — once in the header and once in the string the
+  # copy-verdict button builds — and the assertion expected 1. Third time this shape has
+  # bitten in one sitting: whenever the question is "is it there", the count is an accident
+  # of the markup and pinning it makes the test fail on a layout change that broke nothing.
+  is "...and the page shows it"           "yes" \
+     "$([ "$(grep -c "$(node -e 'const m=require(process.argv[1]);console.log((m.provenance.commit||"x").slice(0,8))' "$FSH/run/manifest.json" 2>/dev/null)" "$FSH/run/index.html" || true)" -ge 1 ] && echo yes || echo no)"
+  # Pinned to the PHRASE, not the sentence: the count's wording changed once already and
+  # this row failed over a redesign that broke nothing.
+  is "...and counts what to look at"      "1" \
+     "$(grep -c 'to look at' "$FSH/run/index.html" || true)"
+  # SELF-CONTAINED, or it opens over file:// as a blank page. No CDN, no remote font, no
+  # fetch — asserted as the absence of an off-origin URL in the shipped markup.
+  is "the page loads nothing remote"      "0" \
+     "$(grep -coE '(src|href)="https?://' "$FSH/run/index.html" || true)"
+
+  is "no chrome was left behind"          "$FSBEFORE" "$(fschromes)"
+fi
+# `wait` after the kill absorbs the shell's own "Terminated" notice, which otherwise lands
+# in the middle of the suite's output looking exactly like something went wrong.
+{ kill "$FSPID"; wait "$FSPID"; } 2>/dev/null || true
+rm -rf "$FSH"
+
+group "a fill that the framework ignores is not a fill"
+# REPORTED FROM A REAL RUN AGAINST A REAL APP, and it is the worst failure this tool can
+# have. `el.value = v` plus a synthetic `input` event is SWALLOWED by React: the framework
+# keeps a `_valueTracker` on the node, assigning `.value` updates that tracker as a side
+# effect, so when the event arrives React compares node-value against its own cache, sees
+# no change, and suppresses the synthetic onChange. The component's state setter never
+# runs.
+#   What made it urgent is the shape: the screenshot showed the typed text sitting in the
+# search box with the list below it completely UNFILTERED. A reader flipping through shots
+# would say "yes, it searched". That is this command's own thesis — success that renders
+# identically to nothing having happened — occurring inside the instrument.
+#   The fix is the prototype's property-descriptor setter, which goes round the tracker.
+FW="$(cd "$(mktemp -d)" && pwd -P)"
+# THE FIXTURE HAS TO DISCRIMINATE, and the first one did not: it asserted a row that is
+# present in the UNFILTERED list too, so the broken code passed it. A test that can only
+# pass proves nothing. This reports a COUNT, which reads "showing 1 of 4" only when the
+# filter actually ran.
+cat > "$FW/app.mjs" <<'APP'
+import http from 'node:http';
+http.createServer((_q, r) => { r.writeHead(200, {'content-type':'text/html'}); r.end(`<!doctype html>
+<meta charset=utf-8><body><input id=q><ul id=list></ul><script>
+var ALL=['borSigningLink','programCycleLabel','programEffectiveDate','associationDbaName'];
+var el=document.getElementById('q'), out=document.getElementById('list');
+// React's tracker, reproduced without React: the cache updates as a side effect of the
+// property set, which is precisely what makes a plain assignment invisible to the handler.
+var cache=el.value, d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');
+Object.defineProperty(el,'value',{get:function(){return d.get.call(this)},
+  set:function(v){cache=v; d.set.call(this,v)},configurable:true});
+function render(q){var m=ALL.filter(function(t){return !q||t.toLowerCase().indexOf(q.toLowerCase())>=0});
+  out.innerHTML='<li>showing '+m.length+' of '+ALL.length+'</li>'+m.map(function(t){return '<li>'+t+'</li>'}).join('')}
+el.addEventListener('input',function(){ if(d.get.call(el)===cache) return; cache=d.get.call(el); render(cache); });
+render('');
+</script>`); }).listen(Number(process.argv[2]),'127.0.0.1',()=>console.error('up'));
+APP
+# NOT `readonly`, WHICH WAS THE FIRST ATTEMPT AND DOES NOT WORK. readonly blocks USER
+# input; a programmatic `value` set succeeds on it, so the readback matched and the row
+# could never fire. A NUMBER input given text is the real thing: the HTML value-sanitisation
+# algorithm discards anything that is not a valid floating-point number, so the field ends
+# up EMPTY and the readback disagrees with what was asked for — which is exactly the class
+# of silent non-fill this note exists to catch, and it happens in real forms.
+cat > "$FW/ro.mjs" <<'APP'
+import http from 'node:http';
+http.createServer((_q, r) => { r.writeHead(200, {'content-type':'text/html'});
+  r.end('<!doctype html><meta charset=utf-8><input id=q type=number>'); })
+  .listen(Number(process.argv[2]),'127.0.0.1',()=>console.error('up'));
+APP
+FWP="$(node -e 'const n=require("net"),s=n.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+FWP2="$(node -e 'const n=require("net"),s=n.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+node "$FW/app.mjs" "$FWP" 2>/dev/null &  FWPID=$!
+node "$FW/ro.mjs"  "$FWP2" 2>/dev/null & FWPID2=$!
+sleep 1
+printf '{ "base":"http://127.0.0.1:%s","viewport":{"width":600,"height":400},"steps":[{"name":"search","goto":"/","fill":{"#q":"bor"},"settle":400,"expect":"showing 1 of 4"}]}' "$FWP" > "$FW/f.json"
+printf '{ "base":"http://127.0.0.1:%s","viewport":{"width":600,"height":400},"steps":[{"name":"a number field given text","goto":"/","fill":{"#q":"not-a-number"},"settle":300}]}' "$FWP2" > "$FW/ro.json"
+FWOUT="$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FW/f.json" --out "$FW/run" 2>&1)"
+if grep -q 'no chrome' <<< "$FWOUT"; then
+  skip "fill drives a controlled input" "no chrome"
+else
+  # THE FILTER RAN. `showing 1 of 4` exists only if the framework's handler fired, so this
+  # row fails on the exact pre-fix code and cannot pass by the text merely being present.
+  is "the framework saw the fill"      "true" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[0].expect.found)' "$FW/run/manifest.json" 2>/dev/null)"
+  is "...and nothing was flagged"      "0" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[0].notes.length)' "$FW/run/manifest.json" 2>/dev/null || echo 9)"
+  # It must use the setter that goes round the tracker, not an assignment. Asserted on the
+  # source as well as the behaviour: the fixture is a stand-in for React, and the day it
+  # drifts this row still says which mechanism the tool relies on.
+  is "by the descriptor's setter"      "1" \
+     "$(grep -c "getOwnPropertyDescriptor(proto, 'value')" "$ROOT/bin/fleet-shots.mjs" || true)"
+
+  # AND THE OTHER DIRECTION: a fill that LANDS and does not stick used to be silent — the
+  # only note was for a missed SELECTOR. A readonly input is the honest way to produce that
+  # without breaking the tool: the element is found, the value cannot take.
+  node "$ROOT/bin/fleet-shots.mjs" --flow "$FW/ro.json" --out "$FW/ro" >/dev/null 2>&1
+  is "a fill that will not stick is flagged" "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[0].notes.filter(n=>/did not stick/.test(n)).length)' "$FW/ro/manifest.json" 2>/dev/null || echo 0)"
+  # The note has to carry BOTH sides, or it is just "something went wrong": what was asked
+  # for and what the field actually holds is the whole diagnosis.
+  is "...and it says what was asked for" "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(/not-a-number/.test(m.steps[0].notes.join(" "))?1:0)' "$FW/ro/manifest.json" 2>/dev/null || echo 0)"
+  # THE PER-STEP URL IS CALLED `url`. It was `at` — the same key provenance uses for a
+  # TIMESTAMP — and a reader of a real manifest concluded the URL was absent and rebuilt
+  # the landing pages from page titles instead. One key, two meanings, in one document.
+  is "the step records its final url"  "1" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(/^http/.test(m.steps[0].url||"")?1:0)' "$FW/run/manifest.json" 2>/dev/null || echo 0)"
+  is "...and not under provenance's key" "0" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(m.steps[0].at===undefined?0:1)' "$FW/run/manifest.json" 2>/dev/null || echo 9)"
+  # A CLEAN TREE IS NOT AN UNKNOWN TREE. `false || null` gave null for a clean checkout,
+  # which is the same answer as "git is absent" — and null is the only way this file has to
+  # say "not determined". Asserted as a TYPE, because the wrong value here is `null`.
+  is "dirty is a boolean, not null"    "boolean" \
+     "$(node -e 'const m=require(process.argv[1]);console.log(typeof m.provenance.dirty)' "$FW/run/manifest.json" 2>/dev/null)"
+fi
+{ kill "$FWPID" "$FWPID2"; wait "$FWPID" "$FWPID2"; } 2>/dev/null || true
+rm -rf "$FW"
+
+group "the stepper: one at a time, and a flag needs a reason"
+# DRIVEN, because both of this feature's bugs were invisible in the source. A `\n` inside the
+# page's outer template literal emitted a real newline into a single-quoted JS string, so the
+# whole script was a syntax error while the page still LOOKED right — the action bar is
+# static markup and drew perfectly. Then the checkbox-era toggle survived into the stepper,
+# so pressing approve on an already-approved step UNSET it and refused to advance: the button
+# appeared dead on exactly the second press.
+#   The helper spawns the real `serve` and clicks the real page, rather than rendering a copy
+# of the generator — a test with its own renderer passes against code nobody ships.
+STEPO="$(mktemp -d "$TEST_RUNS.$$.st.XXXXXX")"
+node "$ROOT/test/helpers/stepper-check.mjs" > "$STEPO/out" 2> "$STEPO/err"
+if grep -q 'no chrome' "$STEPO/out" "$STEPO/err" 2>/dev/null; then
+  skip "the stepper" "no chrome to click in"
+else
+  is "stepper-check produced rows" "yes" \
+     "$([ "$(grep -c . "$STEPO/out")" -ge 12 ] && echo yes || echo "no: $(grep -c . "$STEPO/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    is "$name" "$want" "$got"
+  done < "$STEPO/out"
+fi
+rm -rf "$STEPO"
+
+group "the pre-push hook refuses to publish a withheld name"
+# WHY A HOOK IS TESTED AT ALL, and why the suite could not have caught what it catches.
+# This file's name sweep reads every file git TRACKS, which is the tree you are standing in
+# — so it is silent about a branch you never checked out and never ran it on. Measured
+# 2026-09-18: 37 branches were live on the PUBLIC remote carrying 650 occurrences of 13
+# withheld names, none on main or staging, every suite run green throughout. Two of the
+# shapes are ones this sweep structurally cannot see — a name in a FILE NAME (it reads
+# `ls-files` contents, never the names) and a name in a COMMIT MESSAGE.
+#   EVERY WAY THE HOOK CAN BREAK LEAVES IT EXITING ZERO: a failed import, a range that
+# resolves empty, an exit on the wrong branch. All of those are indistinguishable from
+# "nothing to find", which is the one answer it must never fake — the empty-busy-regex
+# shape again. So it is DRIVEN against a real bare remote, and the assertion is the exit
+# status. The helper pushes a CANARY it injects into a copy of the list, not a real name,
+# for the reason section 3 of name-sweep gives: writing one here would put it back.
+PPO="$(mktemp -d "$TEST_RUNS.$$.pp.XXXXXX")"
+node "$ROOT/test/helpers/prepush-check.mjs" > "$PPO/out" 2> "$PPO/err"
+is "prepush-check produced rows" "yes" \
+   "$([ "$(grep -c . "$PPO/out")" -ge 8 ] && echo yes || echo "no: $(grep -c . "$PPO/out") rows — $(tr '\n' ' ' < "$PPO/err" | cut -c1-140)")"
+while IFS=$'\x1f' read -r name want got; do
+  [ -n "$name" ] || continue
+  is "$name" "$want" "$got"
+done < "$PPO/out"
+# AND THE HOOK IS WIRED, not merely present. A file in .githooks/ that git never consults
+# is the same silence as no hook at all, and `core.hooksPath` is repo-local config that a
+# fresh clone does not inherit — so this asserts the file is executable and names the one
+# command that arms it, rather than asserting the config of whoever happens to be running.
+is "the hook is executable"        "yes" "$([ -x "$ROOT/.githooks/pre-push" ] && echo yes || echo no)"
+is "...and README says how to arm it" "1" \
+   "$([ "$(grep -c 'core.hooksPath' "$ROOT/CONTRIBUTING.md" 2>/dev/null || echo 0)" -ge 1 ] && echo 1 || echo 0)"
+rm -rf "$PPO"
+
+group "the review server answers every page it links to"
+# A TEMPORAL DEAD ZONE IS INVISIBLE UNTIL SOMETHING RENDERS, and then it is not a wrong
+# pixel, it is a DEAD PROCESS: `serve` parks the module with `await new Promise(() => {})`
+# so it can hold the port, which means every module-level `const` written below that point
+# is never initialised and the first request that touches one throws "cannot access X before
+# initialization" and takes the server with it. It happened three times in one file — the
+# verdict helpers, then the stylesheet, then the per-step URL reader — and each time the
+# command started, printed its URL, and died on the first page anyone opened.
+#   Selective enough to read as random, too: `function esc(){}` below the park is fine,
+# because function declarations are hoisted AND initialised while `const` is hoisted into a
+# dead zone. So the guard cannot be "read the file carefully". It has to be: ask the server
+# for every page it links to, and require a 200.
+SRV="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$SRV/root/2026-01-01_00-00-00"
+printf '\x89PNG\r\n\x1a\n' > "$SRV/root/2026-01-01_00-00-00/01-a.png"
+cat > "$SRV/root/2026-01-01_00-00-00/manifest.json" <<'MAN'
+{ "provenance": { "commit": "0123456789abcdef0123456789abcdef01234567", "branch": "b",
+                  "dirty": false, "base": "http://x", "slot": 7,
+                  "viewport": { "width": 800, "height": 600 }, "at": "2026-01-01T00:00:00.000Z" },
+  "steps": [ { "n": 1, "name": "a step", "file": "01-a.png", "url": "http://x/a", "title": "T",
+               "expect": { "text": "hi", "found": true, "how": "exact" }, "notes": [],
+               "requests": [ { "method": "GET", "url": "http://x/a", "status": 200, "type": "Document" },
+                             { "method": "GET", "url": "http://x/f.woff2", "status": 404, "type": "Font" } ] } ],
+  "problems": 0 }
+MAN
+if command -v node >/dev/null 2>&1; then
+  SRVP="$(node -e 'const n=require("net"),s=n.createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+  node "$ROOT/bin/fleet-shots.mjs" serve --dir "$SRV/root" --port "$SRVP" > "$SRV/log" 2>&1 &
+  SRVPID=$!
+  sv_reg "${SRVPID}"
+  i=0; while [ "$i" -lt 60 ] && ! curl -s -m1 -o /dev/null "http://127.0.0.1:$SRVP/" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+  code() { curl -s -m2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$SRVP$1" 2>/dev/null; }
+  is "the index renders"            "200" "$(code /)"
+  is "a run page renders"           "200" "$(code /r/2026-01-01_00-00-00/)"
+  is "its screenshot is served"     "200" "$(code /r/2026-01-01_00-00-00/01-a.png)"
+  # ...and it is still ALIVE after all of that, which is the half a status code alone does
+  # not tell you: a TDZ throw kills the process, so the next request would fail to connect.
+  is "and the process survived"     "0" "$(kill -0 "$SRVPID" 2>/dev/null; echo $?)"
+  is "...still answering"           "200" "$(code /)"
+  # LOOPBACK ONLY, asserted rather than trusted, because this serves screenshots of whatever
+  # the author was building and there is deliberately no --bind to reconsider later.
+  is "it binds no other address"    "0" \
+     "$(grep -c "flag('--bind'" "$ROOT/bin/fleet-shots.mjs" || true)"
+  is "...and names 127.0.0.1"       "1" \
+     "$(grep -c "server.listen(want, '127.0.0.1'" "$ROOT/bin/fleet-shots.mjs" || true)"
+  # The page must carry its own styling: it opens over file:// from a copied folder, where a
+  # linked stylesheet is a silently unstyled page.
+  is "the page carries its own css"  "1" \
+     "$(curl -s -m2 "http://127.0.0.1:$SRVP/r/2026-01-01_00-00-00/" | grep -c '<style>' || true)"
+  is "...and loads nothing remote"   "0" \
+     "$(curl -s -m2 "http://127.0.0.1:$SRVP/r/2026-01-01_00-00-00/" | grep -coE '(src|href)="https?://' || true)"
+  # A FONT 404 IS AN ASSET, NOT A CALL. The display partition has to match the flagging
+  # partition, or the caption says "1 failed" over something nothing flagged.
+  is "an asset failure is not a call" "1" \
+     "$(curl -s -m2 "http://127.0.0.1:$SRVP/r/2026-01-01_00-00-00/" | grep -c '1 call' || true)"
+  { kill "$SRVPID"; wait "$SRVPID"; } 2>/dev/null || true
+else
+  skip "the review server" "node missing"
+fi
+rm -rf "$SRV"
+
+group "a review that cannot say no is a ceremony"
+# THE GATE. Marking steps in the page and copying the text was useful and stopped nothing:
+# a worker could call itself done over a step marked `problem`, which makes the review a
+# courtesy. --check is what refuses, and every row here is about a way it could fail to.
+#   No browser needed: the gate reads manifest.json and verdict.json, so it is built by
+# hand. A group that had to photograph something first would only run where Chrome is.
+GT="$(cd "$(mktemp -d)" && pwd -P)"
+mkdir -p "$GT/run"
+cat > "$GT/run/manifest.json" <<'MAN'
+{ "provenance": { "commit": null, "branch": "b", "dirty": null, "base": "http://x",
+                  "viewport": { "width": 700, "height": 500 }, "at": "2026-09-10T00:00:00.000Z" },
+  "steps": [
+    { "n": 1, "name": "the sign-in screen", "file": "01.png", "at": "http://x/login",
+      "title": "", "expect": null, "notes": [], "requests": [] },
+    { "n": 2, "name": "after signing in", "file": "02.png", "at": "http://x/login",
+      "title": "", "expect": { "text": "Welcome back", "found": true },
+      "notes": ["POST http://x/api/v1/signin answered 404"], "requests": [] }
+  ], "problems": 1 }
+MAN
+gs() { node "$ROOT/bin/fleet-shots.mjs" "$@" 2>&1; }
+gsrc() { node "$ROOT/bin/fleet-shots.mjs" "$@" >/dev/null 2>&1; echo $?; }
+
+# SILENCE IS NOT APPROVAL, which is the same rule the standing contract states about an
+# unchecked criterion: a run of two steps with none marked is not 0 problems, it is
+# 2 unreviewed. A gate that passed here would approve every flow nobody opened.
+is "no verdict at all is a refusal"     "1" "$(gsrc --check "$GT/run")"
+is "...and it names them unreviewed"    "2" "$(gs --check "$GT/run" | grep -c '^unreviewed' || true)"
+# ...and the run's OWN finding is reported even before anybody clicks anything.
+is "...and reports the run's own flag"  "1" "$(gs --check "$GT/run" | grep -c '^flagged.*404' || true)"
+
+# THE CHANNEL IS THE CLIPBOARD, so the parser has to survive exactly what the page's copy
+# button produces — including its header line, which is not a verdict.
+cat > "$GT/paste" <<'PASTE'
+flow review — b 1234abcd
+- [ok] 1. the sign-in screen
+- [problem] 2. after signing in — the POST goes to the wrong path
+PASTE
+is "the page's text is recorded"        "2" \
+   "$(gs verdict "$GT/run" < "$GT/paste" | grep -oE 'recorded [0-9]+' | grep -oE '[0-9]+' || echo 0)"
+is "...and the header line is ignored"  "0" \
+   "$(node -e 'const v=require(process.argv[1]);console.log(Object.keys(v).filter(k=>!/^[0-9]+$/.test(k)).length)' "$GT/run/verdict.json" 2>/dev/null || echo 9)"
+is "...and the note comes with it"      "1" \
+   "$(node -e 'const v=require(process.argv[1]);console.log(/wrong path/.test(v["2"].note)?1:0)' "$GT/run/verdict.json" 2>/dev/null || echo 0)"
+is "a problem blocks"                   "1" "$(gsrc --check "$GT/run")"
+# NOTHING RECOGNISABLE IS AN ERROR, not an empty success: a paste that went wrong must not
+# read as "reviewed and fine".
+is "unparseable stdin is refused"       "1" "$(printf 'hello\n' | node "$ROOT/bin/fleet-shots.mjs" verdict "$GT/run" >/dev/null 2>&1; echo $?)"
+# A step number this run does not have is dropped rather than stored: two folders open at
+# once and the wrong paste is an ordinary mistake.
+is "a step this run lacks is dropped"   "0" \
+   "$(printf -- '- [ok] 9. nope\n' | node "$ROOT/bin/fleet-shots.mjs" verdict "$GT/run" >/dev/null 2>&1; node -e 'const v=require(process.argv[1]);console.log(v["9"]?1:0)' "$GT/run/verdict.json" 2>/dev/null || echo 0)"
+
+# A FLAG THAT CANNOT BE CLEARED IS A WALL, and a gate nobody can get past is one people
+# route around: sometimes the 404 really is fine and the reviewer is who knows it. So `ok`
+# clears a flag — but only WITH A REASON, and the reason is printed. `ok` with no note is
+# still blocked, and says what is missing rather than just refusing.
+printf -- '- [ok] 1. the sign-in screen\n- [ok] 2. after signing in\n' > "$GT/p2"
+gs verdict "$GT/run" < "$GT/p2" >/dev/null
+is "ok with no reason does NOT clear it" "1" "$(gsrc --check "$GT/run")"
+is "...and says a note is what clears"   "1" \
+   "$(gs --check "$GT/run" | grep -c 'a note is what clears a flag' || true)"
+printf -- '- [ok] 1. the sign-in screen\n- [ok] 2. after signing in — the stub server has no v1 route\n' > "$GT/p3"
+gs verdict "$GT/run" < "$GT/p3" >/dev/null
+is "ok WITH a reason clears it"          "0" "$(gsrc --check "$GT/run")"
+# ON THE RECORD, or the override is a click that evaporates. The reason is what a reader
+# sees later instead of an unexplained green.
+is "...and the reason is printed"        "1" \
+   "$(gs --check "$GT/run" | grep -c '^accepted.*v1 route' || true)"
+
+# SKIP IS A REVIEWED STATE, deliberately: a human looked and said this one does not apply,
+# and treating that as unreviewed would make the honest answer impossible to give.
+mkdir -p "$GT/clean"
+sed 's/"notes": \["POST[^]]*\]/"notes": []/; s/"problems": 1/"problems": 0/' "$GT/run/manifest.json" > "$GT/clean/manifest.json"
+printf -- '- [ok] 1. a\n- [skip] 2. b\n' | node "$ROOT/bin/fleet-shots.mjs" verdict "$GT/clean" >/dev/null 2>&1
+is "a clean flow, ok and skip, passes"  "0" "$(gsrc --check "$GT/clean")"
+# ...and the other direction, or the row above would pass on a build that approves anything:
+# drop one verdict and it must refuse again.
+printf '{"1":{"v":"ok","note":""}}' > "$GT/clean/verdict.json"
+is "...and one missing verdict refuses" "1" "$(gsrc --check "$GT/clean")"
+
+# A FOLDER THAT IS NOT ONE OF OURS SAYS SO, rather than reading as an empty clean run.
+mkdir -p "$GT/notours"
+is "a foreign folder is refused"        "1" "$(gsrc --check "$GT/notours")"
+is "...and names what it wanted"        "1" "$(gs --check "$GT/notours" | grep -c 'manifest.json' || true)"
+rm -rf "$GT"
+
+group "fleet-look photographs, and refuses to photograph nothing"
+if command -v node >/dev/null 2>&1; then
+  LK="$(mktemp -d)"
+  cat > "$LK/p.html" <<'HTML'
+<!doctype html><title>Look probe</title><body style="margin:0"><button>send</button>
+HTML
+  cat > "$LK/a.html" <<'HTML'
+<!doctype html><title>Labelled</title><body style="margin:0">
+<input aria-label="message"><button>send</button>
+HTML
+  # NAMESPACED ON PURPOSE. The first version called one of these PASS — which is the
+  # harness's own pass COUNTER. ok() then ran PASS=$((PASS+1)) over a sentence, bash
+  # evaluated its words as an arithmetic expression, and a bare "at" from the message
+  # became an unbound variable that killed the whole run mid-group, after four green rows,
+  # with an error naming a line in the harness and no hint which group did it. A group can
+  # silently clobber the harness it reports into; prefix anything you define here.
+  #
+  # No Chrome: it must SAY so and fail, not quietly produce nothing and exit 0 — the
+  # skip-that-says-why discipline, in a bin rather than a helper. This case also could not
+  # be written at first, because $CHROME pointing at nothing fell THROUGH to another
+  # browser; that it was untestable was the bug.
+  NOCH="$(CHROME=/nonexistent/chrome node "$ROOT/bin/fleet-look.mjs" "$LK/p.html" 2>&1)"; NOCHRC=$?
+  is "no chrome fails rather than passing" "1" "$NOCHRC"
+  is "...and names the reason"             "1" "$(printf '%s' "$NOCH" | grep -c 'no chrome' || true)"
+
+  # Unreachable: an image IS produced (so it can be inspected) but the exit is non-zero
+  # and the message says a photograph of an error page is not an observation.
+  UNRE="$(node "$ROOT/bin/fleet-look.mjs" 'http://127.0.0.1:9/nope' 2>&1)"; UNRERC=$?
+  is "an unreachable page is an error"     "1" "$UNRERC"
+  is "...and says why, in those words"     "1" "$(printf '%s' "$UNRE" | grep -c 'not an observation' || true)"
+
+  # An image needs no renderer, and saying "rendered by nothing" is more honest than
+  # silently re-encoding it through a browser.
+  printf '\211PNG\r\n\032\n' > "$LK/x.png"
+  LKIMG="$(node "$ROOT/bin/fleet-look.mjs" "$LK/x.png" 2>&1)"
+  is "an image passes through"             "1" "$(printf '%s' "$LKIMG" | grep -c 'already an image' || true)"
+
+  # The happy path, only where there is a browser to walk it.
+  if node -e 'import("./lib/browser.mjs").then(m=>process.exit(m.findChrome()?0:1))' 2>/dev/null; then
+    OUTP="$LK/shot.png"
+    LKOK="$(node "$ROOT/bin/fleet-look.mjs" "$LK/p.html" --width 390 --height 300 --out "$OUTP" 2>&1)"; LKOKRC=$?
+    is "a local page is photographed"      "0" "$LKOKRC"
+    is "...and the status is printed"      "1" "$(printf '%s' "$LKOK" | grep -c 'http status   200' || true)"
+    is "...and the title, so a blank page shows" "1" "$(printf '%s' "$LKOK" | grep -c 'Look probe' || true)"
+    is "...and a real PNG lands on disk"   "PNG" "$(head -c4 "$OUTP" 2>/dev/null | tail -c3)"
+    # Scale 2 is deliberate: a phone-width shot at 1x is unreadable when a human opens it.
+    is "...at deviceScaleFactor 2"         "780" "$(node -e 'const b=require("fs").readFileSync(process.argv[1]);console.log(b.readUInt32BE(16))' "$OUTP" 2>/dev/null)"
+    # THE STRUCTURAL CHANNEL, and it is not decoration. Measured on real visual defects, a
+    # model asked whether a screen looks right recalls 20% of LAYOUT bugs and 14% of
+    # appearance ones; what fixed that in the same study was a reference image, not a
+    # better reader. "Is the control there, named and reachable" is a question about
+    # structure, and the tree answers it directly — so the assertion is that a labelled
+    # control comes back by its LABEL, which pixels cannot give at any resolution.
+    LKTREE="$(node "$ROOT/bin/fleet-look.mjs" "$LK/a.html" --tree --out "$LK/t.png" 2>&1)"
+    is "the tree names a labelled control"  "1" "$(printf '%s' "$LKTREE" | grep -c 'textbox: message' || true)"
+    is "...and the button by its role"      "1" "$(printf '%s' "$LKTREE" | grep -c 'button: send' || true)"
+    is "...and it is off by default"        "0" "$(printf '%s' "$LKOK" | grep -c 'accessibility tree' || true)"
+
+    # ── the golden comparison ──────────────────────────────────────────────
+    # The best-evidenced instrument in the research (a reference lifted median precision
+    # from 34-50% to 100%, against 20% recall for open-ended looking) and the one most
+    # likely to be deleted: goldens drift on antialiasing and font rendering, and a check
+    # that is red for reasons nobody can read gets removed to make the suite quiet. So the
+    # assertions here are about the GUARDS, not just the verdict.
+    cat > "$LK/g.html" <<'HTML'
+<!doctype html><title>Golden</title><body style="margin:0;font:16px system-ui"><h1>hello</h1>
+HTML
+    G1="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 300 --height 200 --golden "$LK/ref.png" --out "$LK/g1.png" 2>&1)"
+    # A first run that silently WRITES a baseline is a run that can never fail, and the
+    # first one is the most likely to bake a bug in as the expectation. It must say so.
+    is "creating a baseline says so"        "1" "$(printf '%s' "$G1" | grep -c 'BASELINE CREATED' || true)"
+    is "...and says nothing was compared"   "1" "$(printf '%s' "$G1" | grep -c 'nothing was compared' || true)"
+
+    G2="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 300 --height 200 --golden "$LK/ref.png" --out "$LK/g2.png" 2>&1)"; G2RC=$?
+    is "an unchanged page matches"          "0" "$G2RC"
+    is "...and reports the fraction"        "1" "$(printf '%s' "$G2" | grep -c 'of pixels differ, allowed' || true)"
+
+    # The direction that matters: it must actually catch a change, or every row above is
+    # a green that proved nothing.
+    cat > "$LK/g.html" <<'HTML'
+<!doctype html><title>Golden</title><body style="margin:0;font:16px system-ui"><h1>hello</h1><p>an extra paragraph nobody asked for</p>
+HTML
+    G3="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 300 --height 200 --golden "$LK/ref.png" --out "$LK/g3.png" 2>&1)"; G3RC=$?
+    is "a changed page is caught"           "1" "$G3RC"
+    is "...and the pair is written on red"  "1" "$([ -f "$LK/expected.png" ] && [ -f "$LK/diff.png" ] && echo 1 || echo 0)"
+    is "...and their paths are printed"     "1" "$(printf '%s' "$G3" | grep -c 'differences in red' || true)"
+    # A reference taken on another browser build is a stale baseline, not a regression —
+    # so the build is named on every comparison, or the next reader misdiagnoses it.
+    is "...and the browser build is named"  "1" "$(printf '%s' "$G3" | grep -c 'chrome' || true)"
+    # A threshold, never equality: subpixel antialiasing moves channels by a few units on
+    # text the eye cannot tell apart, and counting those is how this gets deleted.
+    is "...the verdict is a fraction"       "1" "$(printf '%s' "$G3" | grep -cE '[0-9]+\.[0-9]+% of pixels differ' || true)"
+    # A different viewport is a stale baseline too, and must say which rather than red-ing
+    # with a pixel count that looks like a redesign.
+    G4="$(node "$ROOT/bin/fleet-look.mjs" "$LK/g.html" --width 420 --height 200 --golden "$LK/ref.png" --out "$LK/g4.png" 2>&1)"; G4RC=$?
+    is "a resized reference is refused"     "1" "$G4RC"
+    is "...as a stale baseline, by name"    "1" "$(printf '%s' "$G4" | grep -c 'stale baseline' || true)"
+  else
+    skip "fleet-look happy path" "no chrome on this machine"
+  fi
+  rm -rf "$LK"
+else
+  skip "fleet-look" "node missing"
+fi
+
+# ── 4a10b5. a bin is only as installed as the things it imports ──────────────
+# SEEN LIVE, and it is the repo-vs-runtime trap arriving through a directory nobody had
+# needed before. fleet-look.mjs was linked onto PATH, passed thirteen assertions, and died
+# on its first real invocation: ERR_MODULE_NOT_FOUND on lib/browser.mjs. The suite runs
+# from the REPO, where a relative import resolves; the shipped command runs from $DEST,
+# where cf-sync had never copied lib/ because no bin had ever imported from outside bin/.
+# Green here, broken in the hand — which is the split cf-sync exists to close.
+#
+# STRUCTURAL, not a list. It reads the imports out of the bins and asks whether each
+# directory is in the one cf-sync actually loops over, so the NEXT directory is caught
+# rather than only this one. (The doc-fixtures helper takes the same shape for the same
+# reason.) A hardcoded "lib is synced" would go green forever and prove nothing about
+# whatever gets added next.
+group "every dir a bin imports from is one cf-sync copies"
+if command -v node >/dev/null 2>&1; then
+  SYNCD="$(sed -n 's/^for d in \(.*\); do$/\1/p' "$ROOT/bin/cf-sync" | head -1)"
+  is "cf-sync's list is readable at all" "1" "$([ -n "$SYNCD" ] && echo 1 || echo 0)"
+  MISS=""
+  for f in "$ROOT"/bin/*.mjs; do
+    # every ../<dir>/ reached by a static import in that file
+    for d in $(grep -oE "from '\.\./[A-Za-z0-9_-]+/" "$f" 2>/dev/null | sed "s#from '\.\./##; s#/##" | sort -u); do
+      case " $SYNCD " in *" $d "*) ;; *) MISS="$MISS $(basename "$f"):$d" ;; esac
+    done
+  done
+  is "...and no bin imports outside it" "" "${MISS# }"
+  # Both directions: the check must be able to SEE an import, or it is green by blindness.
+  is "the check actually finds imports" "1" \
+     "$(grep -c "from '\.\./lib/browser.mjs'" "$ROOT/bin/fleet-look.mjs" 2>/dev/null || echo 0)"
+  # NOT a case inside $( ): the `)` that ends a case PATTERN also ends the command
+  # substitution it sits in, and bash reports it as a syntax error at a line number in
+  # the middle of an assertion. Word-match on the padded list instead.
+  is "...and lib is in the list it read" "1" \
+     "$(printf '%s' " $SYNCD " | grep -c ' lib ' || true)"
+else
+  skip "bin import sync" "node missing"
+fi
+
+# ── 4a10b6. nothing ships that the name sweep never read ─────────────────────
+# SEEN LIVE, ON npm. Version 0.1.0 shipped web/fixtures/ containing a third party's real
+# project and session names and captured terminal content, and npm tarballs are immutable:
+# no commit fixes a published one. The sweep reads every TRACKED file, and the tarball is
+# built from tracked files — so the two agree today by coincidence of overlap, not by
+# construction. Add one generated or untracked path to package.json's `files` and the
+# package ships something nothing ever swept, with no signal anywhere.
+#
+# So this asserts the overlap directly: every path npm would pack is a path git tracks.
+# Structural, so the NEXT addition is caught rather than this one.
+group "the npm package ships only files the sweep reads"
+if command -v npm >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  PKD="$(cd "$ROOT" && npm pack --dry-run --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{JSON.parse(s)[0].files.forEach(f=>console.log(f.path))}catch{}})')"
+  is "npm reports a file list at all"   "1" "$([ -n "$PKD" ] && echo 1 || echo 0)"
+  TRACKED="$(cd "$ROOT" && git ls-files)"
+  UNSWEPT=""
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in package.json|README.md|LICENSE) continue ;; esac   # npm adds these itself
+    # A HERE-STRING, NOT A PIPE — see the pipefail/SIGPIPE note in CLAUDE.md. `grep -q`
+    # exits on its first match, and under `set -o pipefail` the writer's EPIPE (141)
+    # becomes the pipeline's status, so a MATCH reads as a failure.
+    grep -qxF "$f" <<< "$TRACKED" || UNSWEPT="$UNSWEPT $f"
+  done <<< "$PKD"
+  is "...and every packed path is tracked" "" "${UNSWEPT# }"
+  # Both directions: the check must be able to SEE an untracked path, or it is green by
+  # blindness — the exact shape this suite keeps finding elsewhere.
+  UNSWEPT2=""
+  for f in $(printf '%s\n' "$PKD" | head -3) "generated/not-tracked.json"; do
+    grep -qxF "$f" <<< "$TRACKED" || UNSWEPT2="$UNSWEPT2 $f"
+  done
+  is "...and it would notice an untracked one" "generated/not-tracked.json" "${UNSWEPT2# }"
+else
+  skip "npm package sweep" "npm or git missing"
+fi
+
+# ── 4a10b7. no assertion may pipe into a short-circuiting reader ──────────────
+# THIS ONE FAILED ON ONE LEG OF ONE RUN AND BLAMED AN INNOCENT FILE. `set -uo pipefail`
+# is on (top of this file), and `grep -q` stops reading at its FIRST match — so the
+# writer on its left can take SIGPIPE, and under pipefail that writer's 141 becomes the
+# whole pipeline's status. A MATCH therefore reads as a no-match, and only when the
+# writer had enough left to block: the tracked-file list is ~4KB, which fits the buffer
+# a pipe usually gets and does not fit the smaller one the kernel hands out when it
+# cannot spare that. Measured: same commit, green on one runner, red on the other,
+# naming the FIRST path in the list — the only iteration that ran with a cold pipe.
+#
+# The sweep found five more of the same shape, three of them worse: `while ! tmux
+# capture-pane | grep -q <pattern>` inverts the status, so a spurious 141 reads as "the
+# pattern is not there yet" and the wait loop runs its full count and then asserts against
+# a pane it decided never arrived. That failure would surface in a LATER assertion, about
+# something else entirely.
+#
+# There is nothing to assert about a kernel buffer, so assert the SHAPE. A here-string
+# has no writer to signal, its exit status is the reader's alone, and it costs nothing
+# at these sizes. Structural, so the next one is caught instead of this one.
+#
+# THE PATTERN IS ANCHORED PAST THE COMMENT MARKER, and that is not tidiness: without the
+# anchor this group counted the paragraph above, because the clearest way to describe a
+# forbidden shape is to write it out. It went red on both legs for its own prose. `[^#]*`
+# cannot cross a `#`, so a line that starts with one can never match, and what is being
+# swept is executable text — which is the only place the bug can live.
+group "no assertion pipes into a short-circuiting reader"
+is "the suite has no pipe into grep -q" "0" "$(matches '^[^#]*[|] *grep -q' "$ROOT/test/run.sh")"
+# ...and the sweep can SEE one, or it is green by blindness. The bar is a variable
+# because writing the bad shape literally here would make this file fail its own sweep.
+BAR='|'
+is "...and the sweep would see one"     "1" \
+   "$(grep -cE '^[^#]*[|] *grep -q' <<< "$(printf 'printf x %s grep -q y\n' "$BAR")" || true)"
+# ...and that it does NOT see the same shape inside a comment, which is the direction that
+# made it red: a sweep that cannot tell code from prose forbids explaining itself.
+is "...and not one in a comment"        "0" \
+   "$(grep -cE '^[^#]*[|] *grep -q' <<< "$(printf '# a bad line: printf x %s grep -q y\n' "$BAR")" || true)"
+# ── 4a10b8. a dispatch leaves a trace ────────────────────────────────────────
+# SEEN TWICE, on two profiles, hours apart: a session's first turn was the single word
+# "the" and its real brief never arrived. From the receiving side that is indistinguishable
+# from a worker ignoring its instructions, and from the sending side there was nothing at
+# all — nothing recorded what went into the tmux buffer. Three theories were investigated
+# and disproved at an hour each, because the only evidence was the transcript of the thing
+# that received it.
+#
+# The log records length and a digest and NOTHING of the body. That constraint is the half
+# of this group worth keeping: the first draft logged the opening and closing forty
+# characters, and the assertion below caught that for a message under eighty bytes those
+# windows overlap and hand back the whole brief. So both directions here are privacy
+# directions — the log must tell a full brief from a one-word fragment, and it must do it
+# without becoming a second copy of every brief on disk.
+group "fleet-send records what it dispatched"
+if command -v tmux >/dev/null 2>&1; then
+  SNL="$(mktemp -d)"
+  tmux -L sndlog kill-server 2>/dev/null
+  tmux -L sndlog new-session -d -s w1 'sleep 60' 2>/dev/null; sleep 0.4
+  SND() { CLAUDE_FLEET_DIR="$SNL" "$ROOT/bin/fleet-send" -s sndlog w1 "$1" >/dev/null 2>&1; }
+  SND "a brief long enough to have two distinct ends"
+  SND "the"
+  # UNDER EIGHTY BYTES — the length at which a first-40/last-40 excerpt reconstructs the
+  # whole message. This is the case that went red, so it stays as its own row.
+  SND "sync acme-api to staging"
+  SNLOG="$SNL/sndlog.sent"
+  is "the log exists after a send"        "1" "$([ -f "$SNLOG" ] && echo 1 || echo 0)"
+  is "...one line per dispatch"           "3" "$(grep -c . "$SNLOG" 2>/dev/null || echo 0)"
+  # THE POINT: a full brief and a one-word fragment must be told apart from the log alone,
+  # because that is the comparison nobody could make when this happened.
+  is "...a long brief records its length"  "1" "$(awk -F'\t' '$3>40' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  is "...and a 3-byte one records 3"       "1" "$(awk -F'\t' '$3==3' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  # It must NOT be a copy of the brief, at ANY length.
+  is "...the body is not stored"           "0" "$(grep -c 'long enough to have two distinct ends' "$SNLOG" 2>/dev/null || true)"
+  is "...nor a short one, which overlaps"  "0" "$(grep -c 'acme-api' "$SNLOG" 2>/dev/null || true)"
+  # THE DIGEST IS THE FIELD THE WHOLE LOG TURNS ON, and it is written by whichever of two
+  # tools the host has. An empty one would look like a logged dispatch and answer nothing,
+  # so assert its shape, that different bodies differ, and that one body is stable.
+  is "...the digest is 12 hex"             "3" "$(awk -F'\t' '$4 ~ /^[0-9a-f]{12}$/' "$SNLOG" 2>/dev/null | grep -c . || true)"
+  is "...and three bodies gave 3 digests"  "3" "$(awk -F'\t' '{print $4}' "$SNLOG" 2>/dev/null | sort -u | grep -c . || true)"
+  SND "the"
+  is "...and the same body repeats one"    "2" "$(awk -F'\t' '$3==3 {print $4}' "$SNLOG" 2>/dev/null | sort | uniq -c | awk '{print $1}' | head -1)"
+  tmux -L sndlog kill-server 2>/dev/null; rm -rf "$SNL"
+else
+  skip "dispatch log" "tmux missing"
+fi
+
+# ── 4a10b9. fleet-look must not leave a browser behind ───────────────────────
+# MEASURED, AND NOT AS A FAILURE: 266 orphaned headless Chromes and 145 profile
+# directories on the machine that wrote this file, from a group that photographs a handful
+# of pages per run. Nothing about it looked wrong — the picture was right, the exit code
+# was right, and the only symptom was a load average that got blamed on the test suites
+# running at the time.
+#
+# The cause is one line of control flow: cleanup lived in a `finally`, and every exit in
+# fleet-look sat INSIDE the try it was attached to. `process.exit()` does not unwind, so
+# the finally never ran on any path that mattered — which is every path that succeeded.
+#
+# ASSERTED ON THE PROFILE DIRECTORY, NOT THE PROCESS, deliberately: an orphaned Chrome
+# sometimes notices its debugging socket has closed and exits by itself, which makes a
+# process count a coin flip and an assertion on it a flake. The directory is created by
+# launch() and removed by close() and by nothing else, so its survival is exactly
+# equivalent to "close() was not called", with no timing in it.
+#
+# EVERY PATH IS COMPARED BY SET DIFFERENCE, never by count, and never cleaned with a glob.
+# Two runs of this suite are allowed to overlap (§0), and a live overlapping run owns a
+# profile directory with this same prefix — a glob-and-remove would delete another run's
+# browser out from under it, which is the fixed-socket-name disaster in a different costume.
+#
+# A PER-RUN $TMPDIR, for the reason §0 gives every tmux server its own socket directory.
+# The profiles are named `gf-browser-*` in the system temp dir, and two runs of this suite
+# are allowed to overlap — so a set difference taken over the SHARED prefix attributes a
+# concurrent run's leak to this one. Measured while writing this: three directories appeared
+# between the before and after snapshots of a run whose own four paths were each provably
+# clean in isolation, because two other worktrees were running the suite at that moment and
+# one of them was on a branch without the fix. That is a phantom red, and a phantom red is
+# indistinguishable from a real one.
+#   Pointing the child at its own TMPDIR makes the difference EXACT rather than merely
+# quieter: no other run can put a directory into it, and this run cannot put one anywhere
+# else. It also makes the process check below precise, since the profile path it greps for
+# is now unique to this run.
+#
+# THE DELIBERATE LEAK IS KILLED, NOT EXITED, AND THAT IS NOT A CONVENIENCE. lib/browser.mjs
+# now registers a synchronous `exit` handler, so a launch that merely forgets to close still
+# cleans up on the way out — which is the point of it, and which would leave the row below
+# green by blindness, proving only that the fixture no longer leaks. SIGKILL is the one exit
+# no handler runs on, so it is the only way left to manufacture a real orphan, and it is
+# also the real-world case the handler cannot cover: a crash, an OOM, a Ctrl-C on the runner.
+group "fleet-look closes what it opened"
+if command -v node >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1; then
+  LKC="$(mktemp -d)"
+  LKT="$LKC/tmp"; mkdir -p "$LKT"
+  printf '<!doctype html><title>Closer</title><body style="margin:0">x\n' > "$LKC/p.html"
+  lkdirs()  { ls -d "$LKT"/gf-browser-* 2>/dev/null | sort; }
+  # Every process of a headless Chrome carries --user-data-dir, helpers included: measured,
+  # ten processes for one browser and all ten match. So this counts the whole tree, which is
+  # the thing that was surviving, and not just the one process we spawned.
+  lkprocs() { pgrep -f -- "--user-data-dir=$LKT/gf-browser-" 2>/dev/null | wc -l | tr -d ' '; }
+  lkdirs > "$LKC/before"
+  TMPDIR="$LKT" node "$ROOT/bin/fleet-look.mjs" "$LKC/p.html" --out "$LKC/ok.png" >/dev/null 2>&1
+  LKRC_OK=$?
+  # The UNREACHABLE path too, because it leaves through die() rather than off the end of the
+  # file, and die() was one of the exits that skipped the cleanup.
+  TMPDIR="$LKT" node "$ROOT/bin/fleet-look.mjs" 'http://127.0.0.1:9/nope' --out "$LKC/bad.png" >/dev/null 2>&1
+  LKRC_BAD=$?
+  sleep 1
+  lkdirs > "$LKC/after"
+  if [ "$LKRC_OK" = 0 ]; then
+    is "two looks leave no profile behind"  "" "$(comm -13 "$LKC/before" "$LKC/after" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and the unreachable one still failed" "1" "$LKRC_BAD"
+    # THE ROW THIS GROUP WAS RED FOR, and it is NOT a process count taken after the two looks
+    # above. That was tried first and it passed with the bug fully restored: on an idle
+    # machine the nine helpers notice their parent died within milliseconds, so anything that
+    # sleeps before counting reads zero either way. The leak is those nine failing to be
+    # SCHEDULED in time, which only happens on a machine that is already busy — and a machine
+    # is already busy largely because of the last time this happened.
+    #   So the helper's fixture stops them outright instead of hoping to catch them late, and
+    # the difference stops being a race: nine survivors against the old close, zero against
+    # the new one, no variation across runs. See test/helpers/browser-leak.mjs for why a
+    # stopped process is the honest stand-in for an unscheduled one.
+    is "...and no helper survives, even one that never noticed" "procs=0 dir=no" \
+       "$(TMPDIR="$LKT" node "$ROOT/test/helpers/browser-leak.mjs" 2>/dev/null)"
+    # AND BOTH CHECKS CAN SEE A LEAK, or they are green by blindness on any host where the
+    # two looks above did nothing. A real launch, SIGKILLed so no exit handler runs.
+    TMPDIR="$LKT" node -e '
+      import("'"$ROOT"'/lib/browser.mjs")
+        .then((m) => m.launch({ width: 200, height: 200 }))
+        .then(() => setTimeout(() => {}, 30000))
+        .catch(() => process.exit(0));' >/dev/null 2>&1 &
+    LKPID=$!
+    LKI=0
+    while [ "$LKI" -lt 200 ]; do
+      [ -n "$(comm -13 "$LKC/after" <(lkdirs))" ] && [ "$(lkprocs)" -gt 0 ] && break
+      LKI=$((LKI+1)); sleep 0.1
+    done
+    kill -9 "$LKPID" 2>/dev/null; wait "$LKPID" 2>/dev/null
+    sleep 1
+    lkdirs > "$LKC/leaked"
+    LKNEW="$(comm -13 "$LKC/after" "$LKC/leaked")"
+    LKP="$(lkprocs)"
+    is "...and it would see one that was killed mid-look" "yes" \
+       "$([ -n "$LKNEW" ] && [ "$LKP" -gt 0 ] && echo yes \
+          || echo "no: new profile='$(printf '%s' "$LKNEW" | tr '\n' ' ')' surviving procs=$LKP")"
+    # Undo the deliberate leak, by the exact paths it created and no others. The browser
+    # first, or removing its profile leaves it running against a directory that is gone.
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      pkill -f -- "--user-data-dir=$d" 2>/dev/null
+      rm -rf "$d" 2>/dev/null
+    done <<< "$LKNEW"
+  else
+    skip "fleet-look cleanup" "no chrome on this host (fleet-look exited $LKRC_OK)"
+  fi
+  rm -rf "$LKC"
+else
+  skip "fleet-look cleanup" "node or pgrep missing"
 fi
 
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
@@ -2016,6 +3562,127 @@ fi
 # `worktree remove` AND `remove --force` both refuse a locked tree, and `worktree prune`
 # skips it. So --agents promised a sweep it could not perform, and the leftover sat
 # there forever. Both directions: the default must still keep its hands off.
+# ── 4a10d0. the teardown half of the worktree lifecycle ──────────────────────
+# fleet-spawn runs .ghostfleet/post-create so a repo can provision what a worktree needs
+# from its slot. NOTHING RAN THE COUNTERPART, so a reclaim removed the checkout and left
+# every provisioned resource running. Measured on one project: 29 containers and 16
+# volumes, about 1.3GB, across NINE worktrees that no longer existed — invisible because
+# the leak lives in a system ghostfleet knows nothing about and still must not.
+group "a worktree gets a teardown, not just a setup"
+if command -v git >/dev/null 2>&1; then
+  TD="$(cd "$(mktemp -d)" && pwd -P)"
+  git init -q -b main "$TD/repo" 2>/dev/null
+  mkdir -p "$TD/repo/.ghostfleet"
+  # The hook has to be COMMITTED, and that is not incidental to the test: an untracked
+  # hook makes the worktree dirty, fleet-clean keeps a dirty worktree, and the first
+  # version of this fixture never reached the removal path at all.
+  printf '#!/usr/bin/env bash\nprintf "slot=%%s\\n" "${CLAUDE_FLEET_SLOT:-none}" > "$(dirname "$CLAUDE_FLEET_WORKTREE")/ran-$(basename "$CLAUDE_FLEET_WORKTREE")"\n' \
+    > "$TD/repo/.ghostfleet/pre-remove"
+  chmod +x "$TD/repo/.ghostfleet/pre-remove"
+  git -C "$TD/repo" add -A
+  git -C "$TD/repo" -c user.email=t@t -c user.name=t commit -q -m init 2>/dev/null
+  git -C "$TD/repo" worktree add -q "$TD/ok"   -b scratch/ok   >/dev/null 2>&1
+  git -C "$TD/repo" worktree add -q "$TD/bad"  -b scratch/bad  >/dev/null 2>&1
+  git -C "$TD/repo" worktree add -q "$TD/none" -b scratch/none >/dev/null 2>&1
+  ( cd "$TD/bad" && printf '#!/usr/bin/env bash\nexit 3\n' > .ghostfleet/pre-remove \
+    && git add -A && git -c user.email=t@t -c user.name=t commit -q -m fail ) >/dev/null 2>&1
+  ( cd "$TD/none" && git rm -q .ghostfleet/pre-remove \
+    && git -c user.email=t@t -c user.name=t commit -q -m nohook ) >/dev/null 2>&1
+  tmux -L cftdwn kill-server 2>/dev/null
+  tmux -L cftdwn new-session -d -s s 'sleep 60' 2>/dev/null; sleep 0.4
+  fc() { CLAUDE_FLEET_SOCK=cftdwn bash "$ROOT/bin/fleet-clean" "$@" 2>&1; }
+
+  # A DRY RUN MUST NOT RUN IT. Every other line fleet-clean prints is a git command whose
+  # effect it can predict; a repo hook is arbitrary and destructive, so the dry run says
+  # it would run and stops. Asserted on the FILESYSTEM, not on the wording.
+  DRY="$(cd "$TD/repo" && fc)"
+  # TWO of the three worktrees ship a hook, so the announcement count is 2 — and asserting
+  # the NUMBER rather than the presence is what makes this row carry both directions at
+  # once: 3 would mean the hookless worktree was announced too, 0 would mean the hook is
+  # never seen at all. The first version expected 1 and failed for arithmetic.
+  is "announced for exactly the two with a hook" "2" "$(grep -c 'would run: .ghostfleet/pre-remove' <<< "$DRY" || true)"
+  is "...and does not execute it"         "0" "$(ls "$TD" | grep -c '^ran-' || true)"
+  is "...and removes nothing"             "3" "$(ls -d "$TD"/ok "$TD"/bad "$TD"/none 2>/dev/null | grep -c . || true)"
+
+  GO="$(cd "$TD/repo" && fc --go)"
+  is "the hook ran for the clean one"     "1" "$([ -f "$TD/ran-ok" ] && echo 1 || echo 0)"
+  is "...and that worktree is gone"       "0" "$([ -d "$TD/ok" ] && echo 1 || echo 0)"
+  # A FAILED TEARDOWN KEEPS THE WORKTREE. post-create failing leaves a worktree that needs
+  # setting up, which is survivable; pre-remove failing and removing anyway destroys the
+  # only copy of the teardown and converts a loud failure into a silent leak.
+  is "a failed hook KEEPS the worktree"   "1" "$([ -d "$TD/bad" ] && echo 1 || echo 0)"
+  is "...and says why"                    "1" "$(grep -c 'pre-remove FAILED' <<< "$GO" || true)"
+  # AND THE OTHER DIRECTION, or this group would pass on a build where the hook never runs
+  # at all: a worktree whose repo ships NO hook must be removed exactly as before. The
+  # count above is what proves it was not announced; a second grep of the same output
+  # would have asserted the same thing under a name that claimed otherwise, which is how
+  # the first version of this row came to say "nothing was announced" while counting
+  # announcements.
+  is "no hook means no change"            "0" "$([ -d "$TD/none" ] && echo 1 || echo 0)"
+  is "...and it left no marker behind"    "0" "$([ -f "$TD/ran-none" ] && echo 1 || echo 0)"
+  tmux -L cftdwn kill-server 2>/dev/null; rm -rf "$TD"
+else
+  skip "worktree teardown hook" "git missing"
+fi
+
+# ── 4a10c8. the card says what is RUNNING, not what is configured ───────────
+# MEASURED, and the timeline is the whole bug: a project was set to codex at 01:26 while
+# its master had been created at 01:07. The Projects card read the file live and said
+# codex; the session had been given CLAUDE_FLEET_AGENT at BIRTH, so it ran claude, and
+# `fleet-agent of master` said claude. Nineteen minutes of a screen confidently naming an
+# agent the session was not running, with nothing anywhere reporting the divergence.
+# Setting an agent on a project that already has a master is the ORDINARY way to reach
+# this state, not an edge case.
+group "the projects card shows the running agent"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  PC="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$PC/.config/ghostfleet" "$PC/.claude-personal/fleet" "$PC/a" "$PC/b" "$PC/c"
+  # Three projects, all defaulting to codex, differing only in what is actually running:
+  #   a — a live master with NO recorded agent, i.e. born before the column (the real case)
+  #   b — a live master that recorded codex, so there is nothing to report
+  #   c — no session at all, so there is nothing to compare against
+  for n in a b c; do printf 'proj%s\t%s/%s\tpersonal\tcodex\n' "$n" "$PC" "$n" >> "$PC/.config/ghostfleet/projects.personal"; done
+  printf 'codex\n' > "$PC/.claude-personal/fleet/cf-personal-projb.master.agent"
+  for n in a b; do
+    tmux -L "cf-personal-proj$n" kill-server 2>/dev/null
+    tmux -L "cf-personal-proj$n" new-session -d -s master 'sleep 60' 2>/dev/null
+  done
+  tmux -L cf-personal-projc kill-server 2>/dev/null
+  tmux -L cfpcard kill-server 2>/dev/null
+  tmux -L cfpcard new-session -d -x 120 -y 30 -e HOME="$PC" \
+    -e CLAUDE_FLEET_PROJECTS="$PC/.config/ghostfleet/projects.personal" -e CLAUDE_FLEET_PROFILE=personal \
+    "node '$ROOT/bin/fleet-grid.mjs' - --screen projects > '$PC/out' 2>'$PC/err'" 2>/dev/null
+  sleep 2.6
+  tmux -L cfpcard capture-pane -p > "$PC/screen" 2>/dev/null
+  pc() { grep -c "$1" "$PC/screen" 2>/dev/null || true; }
+
+  # THE DIVERGENCE IS SHOWN, and it names BOTH agents — running first, default after the
+  # arrow, because the fix is to restart the session and the arrow says which way that goes.
+  is "a diverged project shows running→default" "1" "$(pc 'personal · claude→codex')"
+  # AND ONLY WHERE IT DIVERGES. Without these two rows the assertion above would pass for
+  # an implementation that printed the arrow on every card, which would be worse than the
+  # bug: a warning that is always on carries no information.
+  # TWO cards, and enumerating which is the point: projb AGREES with its default, and
+  # projc has no session to disagree with. Both must render the plain default, and the
+  # count is what distinguishes "one of them regressed to an arrow" from "both are calm".
+  # Written as 1 first, which is the arithmetic mistake this file keeps warning about in
+  # other words: a count asserted without naming which fixtures produce it.
+  is "the calm cases show one agent, both of them" "2" "$(pc 'personal · codex')"
+  is "...and the arrow appears exactly once"    "1" "$(pc '→codex')"
+  # A project with NO session has nothing to compare, so it must show its plain default
+  # rather than a divergence against an imagined claude. `agentOfIn` returning '' for a
+  # missing marker rather than 'claude' is what makes that possible.
+  is "...projects drawn"                        "1" "$([ "$(pc 'projc')" -ge 1 ] && echo 1 || echo 0)"
+  is "no crash drawing any of them"             "0" "$(grep -cE 'ReferenceError|TypeError' "$PC/err" 2>/dev/null || true)"
+  # NO ESCAPES IN THAT STRING. The card clips its lines to a fixed width, so a colour code
+  # inside the text is counted as visible columns and the box loses its right edge.
+  is "the box is not broken by the new text"    "2" "$(pc '│ personal · c')"
+  for n in a b c; do tmux -L "cf-personal-proj$n" kill-server 2>/dev/null; done
+  tmux -L cfpcard kill-server 2>/dev/null; rm -rf "$PC"
+else
+  skip "projects card agent" "tmux or node missing"
+fi
+
 group "fleet-clean and Claude's locked worktrees"
 if command -v git >/dev/null 2>&1; then
   FC="$(mktemp -d)"
@@ -2893,6 +4560,61 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   rm -f "$T/fleet/stack.tsv"
   is "space twice leaves it empty"   "0"        "$(ui Space Space Escape >/dev/null; grep -c . "$T/fleet/stack.tsv" 2>/dev/null || true)"
   is "esc/q backs out"               "back"     "$(ui q)"
+  # ── the mouse, on the same real screen ──────────────────────────────────────
+  # The tracking modes were always on; this handler never parsed them, so every click
+  # arrived as one multi-character string that matched no comparison and redrew for
+  # nothing. What is asserted here is not "a click did something" but WHICH session it
+  # picked: the row of a session is found by READING THE PANE, so if the hit-test and the
+  # renderer ever disagree about where a line landed, this row goes red naming the wrong
+  # session. That is the failure the grid's card hit-test actually shipped when a banner
+  # was added above the cards, and a formula-based test would have agreed with the formula.
+  mstart() {                 # bring the screen up and LEAVE it up
+    tmux -L cfstkui kill-server 2>/dev/null
+    tmux -L cfstkui new-session -d -x 100 -y 30 \
+      -e HOME="$T" -e CLAUDE_FLEET_DIR="$T/fleet" \
+      -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' - --screen stack > '$T/out' 2>'$T/err'; sleep 6" 2>/dev/null
+    sleep 2.5
+  }
+  mrow()   { tmux -L cfstkui capture-pane -p 2>/dev/null | grep -n -- "$1" | head -1 | cut -d: -f1; }
+  mclick() { tmux -L cfstkui send-keys -l -- "$(printf '\033[<0;5;%sM' "$1")" 2>/dev/null; sleep 0.8; }
+  mwheel() { tmux -L cfstkui send-keys -l -- "$(printf '\033[<%s;5;10M' "$1")" 2>/dev/null; sleep 0.8; }
+  # grep -c PRINTS 0 and EXITS 1 when nothing matched, so `|| echo 0` appends a SECOND
+  # zero and the value becomes "0\n0" — which is not 0 and fails every comparison. Assign
+  # first, then default the empty (missing-file) case.
+  scount() { local n; n="$(grep -c "$1" "$T/fleet/stack.tsv" 2>/dev/null)" || true; printf '%s' "${n:-0}"; }
+  members() { scount .; }
+
+  rm -f "$T/fleet/stack.tsv"; mstart
+  WROW="$(mrow 'worker')"; MROW="$(mrow 'master')"
+  is "the pane really drew both rows" "yes" \
+     "$([ -n "$WROW" ] && [ -n "$MROW" ] && [ "$WROW" != "$MROW" ] && echo yes || echo "no: w=$WROW m=$MROW")"
+  mclick "$WROW"
+  is "a click stacks the row it landed on" "1" "$(members)"
+  # THE DISCRIMINATION: a hit-test one row out would stack master instead, and the count
+  # above would still say 1. Naming the member is what makes this test able to fail.
+  is "...and it is worker, not master"     "1" "$(scount worker)"
+  is "...master was not touched"           "0" "$(scount master)"
+  # Same click, both directions — a click that could only add would look identical here.
+  mclick "$WROW"
+  is "clicking it again unstacks it"       "0" "$(members)"
+  # A row the renderer never recorded must be inert, not resolved to the nearest one.
+  mclick 1
+  is "a click on the title does nothing"   "0" "$(members)"
+  # The wheel moves the selection; button 65 is scroll-down. Read the cursor mark off the
+  # pane rather than trusting an internal — the mark is the only thing the operator sees.
+  # SCROLL UP, not down: the clicks above left the cursor on the LAST session, where
+  # sMoveStack(1) correctly refuses to move — the first version of this row read that
+  # refusal as a broken wheel. Direction matters, so pick the one with somewhere to go.
+  SELB="$(tmux -L cfstkui capture-pane -p 2>/dev/null | grep -n '▸' | head -1 | cut -d: -f1)"
+  mwheel 64
+  SELA="$(tmux -L cfstkui capture-pane -p 2>/dev/null | grep -n '▸' | head -1 | cut -d: -f1)"
+  is "the wheel moves the selection"       "yes" \
+     "$([ -n "$SELB" ] && [ -n "$SELA" ] && [ "$SELB" != "$SELA" ] && echo yes || echo "no: $SELB -> $SELA")"
+  is "no crash from any mouse event"       "0" \
+     "$(grep -cE 'ReferenceError|TypeError|is not defined' "$T/err" 2>/dev/null || true)"
+  tmux -L cfstkui kill-server 2>/dev/null
+
   # And the way in: `t` on the grid must emit exactly the word grid_loop switches on.
   tmux -L cfstkses kill-server 2>/dev/null
   tmux -L cfstkses new-session -d -x 100 -y 30 -e HOME="$T" -e CLAUDE_FLEET_DIR="$T/fleet" \
@@ -3053,35 +4775,55 @@ if command -v tmux >/dev/null 2>&1; then
   # session. Assert the name resolves to ITSELF — has-session cannot catch this.
   is "...and the name resolves to itself" "_term-api-2" \
      "$(tmux -L cftabt display-message -p -t _term-api-2 '#{session_name}' 2>/dev/null)"
-  # AND THE ASSERTION ABOVE HAS TEETH, because a + name does NOT resolve to itself.
+  # AND THE ASSERTION ABOVE NEEDS TEETH, because on its own it cannot fail for the reason
+  # it exists: a name resolving to itself is unremarkable unless something shows what the
+  # alternative does.
   #
-  # DO NOT RESTORE the assertion that used to stand here — "a + name resolves
-  # ELSEWHERE", expecting 0. It went red on untouched main, and not because anything
-  # regressed: what a + target answers is version-dependent. `+` is not part of a name,
-  # it is a target expression, and it is answered relative to whatever session tmux
-  # considers CURRENT. tmux 3.7b answers the current session itself, and the session
-  # created last is current — so `-t '+term-api-2'`, measured right after creating
-  # `+term-api-2`, answered `+term-api-2` and the old expectation inverted. Older tmux
-  # answers the session AFTER the current one, which lands back on `+term-api-2` just as
-  # easily given the wrong ordering. Neither spelling is something to assert. The `_`
-  # prefix in bin/fleet-tab stays regardless: the hazard is live on the tmux other people
-  # are running, and this repo has it written down as one.
+  # TWO PHRASINGS HAVE BEEN TRIED HERE AND BOTH WERE UNSTABLE, so do not restore either.
+  # The first asserted that a + name "resolves ELSEWHERE"; the second, that its answer
+  # MOVES when another session is created. Both assert on which session a + target lands
+  # on, and that is decided relative to whatever tmux considers the CURRENT session —
+  # which, with no client attached, is whatever the server last used. Nothing in a test
+  # sets it, so the row passes or fails on scheduling.
+  #   MEASURED, chasing exactly that: the "moved" phrasing was green here eight runs out
+  # of eight and red on another machine running the SAME tmux 3.7b, expecting `moved` and
+  # getting `same`. A red that is indistinguishable from a real one, on a suite whose rule
+  # is to trust a test only after watching it go red, is worse than no row at all.
+  #   The drift is easy to see once it is looked for: `-t +term-api-2` answered
+  # `+term-api-2` at one moment and `zz-elsewhere` a moment later, with the session of
+  # that name never touched in between.
   #
-  # What IS the same on every tmux, and IS the hazard, is that the answer MOVES when some
-  # other session becomes current — while the session of that name is not touched at all.
-  # A name does not do that. So make another session current and measure both names
-  # across it: the + one drifts, the _ one does not. The second assertion is the control;
-  # without it a tmux that answered the current session for EVERY target would satisfy
-  # the first one and the `_` fix would be worth nothing.
-  tmux -L cftabt new-session -d -s '+term-api-2' -c "$TB/api-3" 'sleep 60' 2>/dev/null
+  # WHAT IS STABLE IS THE HAZARD ITSELF, and it needs no notion of current, no ordering,
+  # and no second measurement across time: a + target does not consult the rest of the
+  # string at all. So two DIFFERENT sessions whose names both begin with + answer the SAME
+  # session, while two whose names begin with _ each answer themselves. That is precisely
+  # what breaks every status reader here — they target a bare -t "$name", so with + names
+  # they would read one tab while believing they read another.
+  #
+  # MEASURED on tmux 3.4 (built from source for this) and on 3.7b, byte-identical on both:
+  #     -t +term-api-2 -> +term-api-3      -t +term-api-3 -> +term-api-3     (one session)
+  #     -t _term-api-2 -> _term-api-2      -t _term-api-3 -> _term-api-3     (two)
+  # and `has-session -t +term-api-2` says yes on both, which is why has-session never
+  # caught this and why the check has to be a target-RESOLVING command.
+  #
+  # THE PREFIX IS READ BACK FROM WHAT fleet-tab ACTUALLY NAMED THE TAB rather than
+  # hardcoded, because the row exists to protect that choice: reverting bin/fleet-tab to
+  # `+` has to make these two fail, and against a hardcoded `_term-…` they would instead
+  # pass while measuring a session fleet-tab never made.
+  tabs_now="$(tmux -L cftabt list-sessions -F '#{session_name}' 2>/dev/null)"
+  tab2="$(grep -E 'term-api-2$' <<<"$tabs_now" | sed -n '1p')"
+  sib="${tab2%term-api-2}term-probe"
+  tmux -L cftabt new-session -d -s "$sib" -c "$TB/api-3" 'sleep 60' 2>/dev/null
   resolves() { tmux -L cftabt display-message -p -t "$1" '#{session_name}' 2>/dev/null; }
-  was_plus="$(resolves '+term-api-2')"; was_under="$(resolves _term-api-2)"
-  tmux -L cftabt new-session -d -s zz-elsewhere -c "$TB/api-3" 'sleep 60' 2>/dev/null
-  is "...unlike a + name, which answers whoever is current" "moved" \
-     "$([ "$was_plus" = "$(resolves '+term-api-2')" ] && echo same || echo moved)"
-  is "...while the _ name keeps answering itself"           "same" \
-     "$([ "$was_under" = "$(resolves _term-api-2)" ] && echo same || echo moved)"
-  tmux -L cftabt kill-session -t '=zz-elsewhere' 2>/dev/null
+  is "...and a second tab is a SECOND session" "different" \
+     "$([ "$(resolves "$tab2")" = "$(resolves "$sib")" ] && echo same || echo different)"
+  # ...each answering its own name, which rules out the other way two answers can differ:
+  # both being wrong.
+  is "...each answering its own name"          "$tab2|$sib" \
+     "$(resolves "$tab2")|$(resolves "$sib")"
+  # `=` forces an exact name match, so this kills the probe even when its name is a target
+  # expression; a bare -t would kill whichever session the expression happens to name.
+  tmux -L cftabt kill-session -t "=$sib" 2>/dev/null
 
   ft term "$TSOCK" "$TB/api-2" api-2
   is "pressing it twice REUSES the tab" "1" "$(nsess '^_term-api-2$')"
@@ -3131,6 +4873,136 @@ fi
 # the transcript lookup handed it the ORIGIN'S last message — a terminal card reading
 # "✓ ready" over work it had no part in. The grid, the ring and the shell fallback all
 # have to agree, or a digit means one session on the grid and another to ⇧→.
+group "a tab is a session, so tabs must not beget tabs"
+# THE KEYBINDINGS HAND OVER `#{session_name}`, and from inside a tab that is the TAB. So
+# C-t in the editor asked for a terminal whose origin was `_edit-<x>`, got the name
+# `_term-_edit-<x>`, found nothing by it, and dealt a second terminal; C-n in that
+# terminal did the mirror image. Reported from a real fleet as "it opens another one".
+# The reuse rule was never wrong — each tab it made really was the only one of its name
+# -- so the count is the only thing that can tell the two apart, and this group counts.
+if command -v tmux >/dev/null 2>&1; then
+  TT="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$TT/w" "$TT/bin"
+  # A REAL, PERSISTENT editor. `cat` was tried and exits at once on a directory, so the
+  # edit tab died before it could be counted and the fixture proved nothing.
+  printf '#!/bin/sh\nexec sleep 120\n' > "$TT/bin/fakevim"; chmod +x "$TT/bin/fakevim"
+  tmux -L cftabb kill-server 2>/dev/null
+  tmux -L cftabb new-session -d -s master -c "$TT/w" 'sleep 120' 2>/dev/null
+  BS="$(tmux -L cftabb display-message -p '#{socket_path}' 2>/dev/null)"
+  fb() { CLAUDE_FLEET_EDITOR="$TT/bin/fakevim" "$ROOT/bin/fleet-tab" "$@" >/dev/null 2>&1; }
+  nall() { tmux -L cftabb list-sessions -F '#{session_name}' 2>/dev/null | grep -c . || true; }
+  has() { tmux -L cftabb has-session -t "=$1" 2>/dev/null && echo 1 || echo 0; }
+
+  fb term "$BS" "$TT/w" master
+  fb edit "$BS" "$TT/w" master
+  is "both tabs opened from master"      "3" "$(nall)"
+  # THE WALK'S INPUT. Without this the two rows below could pass because the option is
+  # missing and every session looks like a non-tab — which is green for the wrong reason.
+  is "the edit tab records its origin"   "master" \
+     "$(tmux -L cftabb show-options -qv -t '_edit-master' @cf_tab_from 2>/dev/null)"
+
+  # C-t from inside the editor, exactly as the binding calls it: FROM is the tab.
+  fb term "$BS" "$TT/w" _edit-master
+  is "C-t in the editor makes no new tab" "3" "$(nall)"
+  is "...and no _term-_edit-master"       "0" "$(has _term-_edit-master)"
+  # ...and the mirror, or this group would pass on a build that special-cased one kind.
+  fb edit "$BS" "$TT/w" _term-master
+  is "C-n in the terminal makes no new tab" "3" "$(nall)"
+  is "...and no _edit-_term-master"       "0" "$(has _edit-_term-master)"
+  # THE OTHER DIRECTION: collapsing an origin must not stop a tab being made at all.
+  is "the terminal tab still exists"      "1" "$(has _term-master)"
+  is "the editor tab still exists"        "1" "$(has _edit-master)"
+
+  # WHY THE TARGET IS BARE, asserted in BOTH directions because on tmux 3.7b the `=`
+  # exact-match prefix — correct on has-session and switch-client, and used by every
+  # other read in this file — makes show-options answer NOTHING with -q. A walk written
+  # with `=` takes zero steps, so the bug survives a fix that looks right. Measured on
+  # the same session in the same breath, which is the only way this reads as a fact
+  # about the prefix rather than about the session.
+  is "bare -t reads the option"          "master" \
+     "$(tmux -L cftabb show-options -qv -t '_edit-master' @cf_tab_from 2>/dev/null)"
+  is "...and =-prefixed reads EMPTY"     "" \
+     "$(tmux -L cftabb show-options -qv -t '=_edit-master' @cf_tab_from 2>/dev/null)"
+  # ...while the prefix is still right for the command the rest of the file uses it on,
+  # so this is a difference between COMMANDS, not a reason to drop `=` everywhere.
+  is "...though = is fine for has-session" "1" "$(has _edit-master)"
+
+  # `back` must still reach master rather than the tab we collapsed through.
+  is "back still names master"           "master" \
+     "$(tmux -L cftabb show-options -qv -t '_term-master' @cf_tab_from 2>/dev/null)"
+  tmux -L cftabb kill-server 2>/dev/null; rm -rf "$TT"
+else
+  skip "tabs beget tabs" "tmux not available"
+fi
+
+group "your own terminal can be stacked beside your agent"
+# WHAT WAS ASKED FOR: put the terminal or editor on screen next to the agent. Tabs were
+# excluded from the stack picker for a good reason — that screen walks EVERY project, so
+# including them put every terminal in every project into the list as an "idle" session
+# you could stack. That objection is about REACH, not about tabs, so the door opens only
+# for the fleet the screen was opened from and stays shut for the rest.
+#   THE REGRESSION THIS GROUP EXISTS FOR is the other caller: sessionStatuses is the ONE
+# status reader the Projects cards and the stack screen share, so opting tabs in per call
+# had to leave the cards alone. A project with a terminal open must not report a session
+# it does not have, and that is asserted here with a NUMBER, because "2 sessions" and
+# "5 sessions" are the same shape of card.
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  SK="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$SK/.config/ghostfleet" "$SK/.claude/fleet" "$SK/a" "$SK/b"
+  printf 'mine\t%s/a\twork\nother\t%s/b\twork\n' "$SK" "$SK" > "$SK/.config/ghostfleet/projects"
+  # Two fleets, each with two agents and three tabs — and the SAME shape in both, so a
+  # row that shows up for `other` can only be the reach bug and nothing else.
+  for f in cf-mine cf-other; do
+    tmux -L "$f" kill-server 2>/dev/null
+    for x in master w1 _term-master _edit-w1 _term-w1; do
+      tmux -L "$f" new-session -d -s "$x" -c "$SK/a" 'sleep 120' 2>/dev/null
+    done
+  done
+  skdrive() {          # $1 = --screen argument; echoes the pane
+    tmux -L cfstk kill-server 2>/dev/null
+    tmux -L cfstk new-session -d -x 110 -y 30 -c "$ROOT" -e HOME="$SK" \
+      -e CLAUDE_FLEET_PROJECTS="$SK/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' cf-mine --screen $1; sleep 25" 2>/dev/null
+    sleep 2
+    tmux -L cfstk capture-pane -p 2>/dev/null
+    tmux -L cfstk kill-server 2>/dev/null
+  }
+  SP_OUT="$(skdrive stack)"
+  # THIS fleet's tabs are there, named for what they are rather than for a turn state.
+  is "the stack lists this fleet's terminal" "2" "$(grep -c 'terminal' <<< "$SP_OUT" || true)"
+  is "...and its editor"                     "1" "$(grep -c 'editor' <<< "$SP_OUT" || true)"
+  # A tab has no turn state, so it must not wear one — SCOPED TO THIS PROJECT'S SECTION,
+  # because the pane also lists `other`, whose two agents are idle too. Counting the whole
+  # screen expected 2 and measured 4, which is the right answer to a different question:
+  # the arithmetic was the test's, not the code's.
+  #   Two agents under `mine` means exactly two idles there; five would mean its three
+  # tabs came through wearing a turn state.
+  is "...and only the agents read as idle"   "2" \
+     "$(sed -n '/^ mine$/,/^ other$/p' <<< "$SP_OUT" | grep -c 'idle' || true)"
+  # The plumbing prefix never reaches the screen, and the origin does.
+  is "...with no _term- prefix on screen"    "0" "$(grep -c '_term-' <<< "$SP_OUT" || true)"
+  is "...and marked as hanging off a session" "3" "$(grep -c '↳' <<< "$SP_OUT" || true)"
+  # GROUPED: the agent, then its tabs. tmux lists sessions alphabetically, so `_edit-w1`
+  # sorts nowhere near `w1` and an ungrouped list interleaves them.
+  is "...grouped under their origin" "1" \
+     "$(grep -A 1 '\] master  *idle' <<< "$SP_OUT" | grep -c '↳ master' || true)"
+  # THE REACH LIMIT, and it is the whole reason this was shut before: `other` has the same
+  # three tabs and must contribute none of them.
+  is "another project's tabs stay hidden" "2" \
+     "$(sed -n '/^ other$/,$p' <<< "$SP_OUT" | grep -c '\[ \]' || true)"
+  is "...and none of them are marked"     "0" \
+     "$(sed -n '/^ other$/,$p' <<< "$SP_OUT" | grep -c '↳' || true)"
+
+  # THE SHARED READER IS UNCHANGED. Same fixture, the other screen: the card counts
+  # AGENTS, and a terminal is not one.
+  PJ_OUT="$(skdrive projects)"
+  is "the projects card still counts 2"   "1" "$(grep -c '2 sessions' <<< "$PJ_OUT" || true)"
+  is "...and never 5"                     "0" "$(grep -c '5 sessions' <<< "$PJ_OUT" || true)"
+  for f in cf-mine cf-other; do tmux -L "$f" kill-server 2>/dev/null; done
+  rm -rf "$SK"
+else
+  skip "stacking a tab" "tmux or node missing"
+fi
+
 group "tabs are not sessions"
 if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   TH="$(mktemp -d)"; mkdir -p "$TH/main" "$TH/api-2"
@@ -4210,7 +6082,7 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     [ -n "$act" ] && [ "$act" -gt "$1" ]
   }
   footer_drawn() {                 # is a footer on the pane at all?
-    tmux -L cffootd capture-pane -p -t d 2>/dev/null | grep -q '↑↓←→/hjkl move'
+    grep -q '↑↓←→/hjkl move' <<< "$(tmux -L cffootd capture-pane -p -t d 2>/dev/null)"
   }
   draw_at() {                      # $1 = width; leaves the pane up for the caller
     local i=0 at stamp=''
@@ -4881,7 +6753,12 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   # phone renders from. Pinned as the whole key set on purpose — that is what caught the
   # addition and made it a decision instead of a drift.
   is "free_worktrees keys"              "path branch task removing" "$(JW_ 'Object.keys(o.free_worktrees[0]).join(" ")')"
-  is "...and `removing` is a boolean"   "boolean" "$(JW_ 'typeof o.free_worktrees[0].removing')"
+  # Single quotes around the NAME, not double: backticks inside a double-quoted string are
+  # command substitution, so the shell ran `removing` on every suite invocation, printed
+  # "command not found" into the log, and rendered this assertion's name with a hole where
+  # the word should be. It passed the whole time, which is why it survived — the failure
+  # was in the label, and nobody reads a label that is green.
+  is '...and `removing` is a boolean'   "boolean" "$(JW_ 'typeof o.free_worktrees[0].removing')"
   is "...false when nothing is going on" "false"  "$(JW_ 'String(o.free_worktrees[0].removing)')"
   # both directions: the two trees that must NOT be offered
   is "the main checkout is not free"    "0" "$(JW_ 'o.free_worktrees.filter(w=>w.path.endsWith("/proj")).length')"
@@ -5418,7 +7295,7 @@ else
 fi
 SERVE_PIDS=""
 serve_stop() {
-  [ -n "${SERVE_PIDS:-}" ] && kill $SERVE_PIDS 2>/dev/null
+  [ -n "${SERVE_PIDS:-}" ] && reap $SERVE_PIDS
   SERVE_PIDS=""
   # Wait for the port to come back, or the next group's listen() races a kill that has not
   # landed yet and dies with EADDRINUSE — which looks exactly like a broken server.
@@ -5501,7 +7378,7 @@ printf 'demo\t%s\twork\nother\t%s\twork\n' "$SV/repo" "$SV/other" > "$SV/home/.c
 PORT="$(free_port)"; PORT="${PORT:-18787}"
 BASE="http://localhost:$PORT"
 export GHOSTFLEET_SERVE_CONFIG="$SV/serve.json" GHOSTFLEET_SERVE_AUDIT="$SV/audit.jsonl" SV_RAN="$SV/ran" SV_ROOT="$SV"
-sv_cli() { HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" "$@"; }
+sv_cli() { [ $# -gt 0 ] || { echo "fleet-serve helper called with NO VERB — that starts the DAEMON, in the foreground, unregistered and unkillable by the trap" >&2; return 2; }; HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" "$@"; }
 sv_code() { sv_cli enroll "$1" | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}'; }
 # WHY it did not come up, not just THAT it did not. Six groups used to skip with the bare
 # words "server did not come up" while the daemon's own first line said exactly what was
@@ -5515,6 +7392,7 @@ sv_start() {
   HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.$1" 2>&1 &
   svp=$!
   SERVE_PIDS="$SERVE_PIDS $svp"
+  sv_reg "${svp}"
   i=0; while [ "$i" -lt 60 ]; do
     curl -s -m1 "$BASE/healthz" >/dev/null 2>&1 && { SV_WHY=""; return 0; }
     kill -0 "$svp" 2>/dev/null || break        # already exited: its log is the answer
@@ -5523,6 +7401,15 @@ sv_start() {
   SV_WHY="$(tr '\n' ' ' < "$SV/log.$1" 2>/dev/null | cut -c1-180)"
   [ -n "$SV_WHY" ] || SV_WHY="nothing at all in $SV/log.$1"
   bad "the daemon comes up ($1)" "listening on $BASE" "$SV_WHY"
+  # A FAILED START MUST NOT LEAVE A LISTENER, and this is the difference between one red
+  # line and six. Coming up "wrong" is not the same as not coming up: a daemon that bound
+  # a port $BASE is not watching is ALIVE, so the wait above times out rather than seeing
+  # it exit, every caller takes the failure branch — which skips serve_stop — and the
+  # process keeps the port. The next five groups then died on EADDRINUSE, naming code none
+  # of them had touched, and the one real cause was the first line of the six. Reaping here
+  # costs nothing when the daemon already exited (reap tolerates a dead pid) and bounds the
+  # blast radius of every future start failure to the group that caused it.
+  reap "$svp"
   return 1
 }
 sv_cli init --bind 127.0.0.1 --port "$PORT" >/dev/null 2>&1
@@ -5937,26 +7824,56 @@ tmux -L cf-demo new-session -d -s dlg -x 100 -y 30 "$PN/dialog.sh" 2>/dev/null
 # work. So `dlg` exists on cf-other too, saying something unmistakable, and the assertion
 # below is that it never appears.
 tmux -L cf-other new-session -d -s dlg -x 100 -y 30 "sh -c 'clear; echo WRONG-FLEET-PANE; sleep 600'" 2>/dev/null
-i=0; while [ "$i" -lt 40 ] && ! tmux -L cf-other capture-pane -p -t dlg 2>/dev/null | grep -q 'WRONG-FLEET-PANE'; do i=$((i+1)); sleep 0.1; done
+i=0; while [ "$i" -lt 40 ] && ! grep -q 'WRONG-FLEET-PANE' <<< "$(tmux -L cf-other capture-pane -p -t dlg 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
 is "the decoy fleet has a 'dlg' too"        "1"   "$(tmux -L cf-other capture-pane -p -t dlg 2>/dev/null | grep -c 'WRONG-FLEET-PANE' || true)"
 # Wait for the dialog to be ON the pane before asserting anything about it: `cat` into a
 # fresh pane is fast but not instant, and a race here would read an empty pane and blame
 # the endpoint.
-i=0; while [ "$i" -lt 60 ] && ! tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null | grep -q 'Do you want to create'; do i=$((i+1)); sleep 0.1; done
+i=0; while [ "$i" -lt 60 ] && ! grep -q 'Do you want to create' <<< "$(tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
 is "the fixture reached a real pane"        "1"   "$(tmux -L cf-demo capture-pane -p -t dlg 2>/dev/null | grep -c 'Do you want to create' || true)"
 
 PNPORT="$(free_port)"; PNPORT="${PNPORT:-18799}"
 PNBASE="http://localhost:$PNPORT"
-pn_cli() { GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
+# THE GUARD COMES FIRST, AND THAT ORDER IS THE WHOLE BUG THIS SHAPE ONCE HAD. An env
+# prefix binds to ONE simple command, and the `[ ... ] || { ...; }` guard is a command —
+# so writing the prefix, then the guard, then `; node …` put $PN's config on the GUARD and
+# left the node call to inherit the EXPORTED config of the shared daemon two groups up.
+# Every verb this helper ran then read and wrote the wrong file. What it cost, measured:
+# `init --port` wrote this group's port into the SHARED config, so the next five groups
+# started a daemon on a port their $BASE was not watching — one honest failure and five
+# EADDRINUSE echoes pointing at innocent code — while THIS group's config was never
+# written at all, so its daemon could not start and the group SKIPPED. A skip exits 0, so
+# the three assertions this group exists for had not run in any green suite since.
+pn_cli() { [ $# -gt 0 ] || { echo "fleet-serve helper called with NO VERB — that starts the DAEMON, in the foreground, unregistered and unkillable by the trap" >&2; return 2; }
+           GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
            HOME="$PN/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" "$@"; }
 pn_cli init --bind 127.0.0.1 --port "$PNPORT" >/dev/null 2>&1
+# A HELPER WRITES WHERE IT CLAIMS TO, asserted rather than read. Both directions, because
+# each one alone passes under the bug that made this necessary: the first says this group's
+# own config exists and holds this group's port, and the second says the SHARED daemon's
+# config two groups up still holds ITS port. An env prefix that slides off the node call
+# fails exactly these two and nothing else nearby — the visible damage was five groups
+# later and looked like a port-in-use problem in code that had not changed.
+cfgport() { node -e 'try{console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).port)}catch(e){console.log("no config: "+e.code)}' "$1"; }
+is "pn_cli wrote ITS OWN config"           "$PNPORT" "$(cfgport "$PN/serve.json")"
+is "...and left the shared one alone"      "$PORT"   "$(cfgport "$SV/serve.json")"
 node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$PN/serve.json"
 GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
   HOME="$PN/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$ROOT/bin/fleet-serve.mjs" > "$PN/log" 2>&1 &
 PN_PID=$!
+SERVE_PIDS="$SERVE_PIDS $PN_PID"   # registered as well as killed locally: the local kill
+sv_reg "${PN_PID}"
+# is 80-odd lines later in some of these, and anything that exits in between leaked a
+# daemon holding a port. The EXIT trap is the only teardown that always runs.
 i=0; up=no; while [ "$i" -lt 60 ]; do curl -s -m1 "$PNBASE/healthz" >/dev/null 2>&1 && { up=yes; break; }; i=$((i+1)); sleep 0.1; done
 if [ "$up" != yes ]; then
-  skip "/api/pane" "server did not come up"
+  # NOT A SKIP. The same argument sv_start's comment makes, and this group is where it was
+  # learned the hard way: its config was being written to the wrong file, so the daemon
+  # never came up and the group skipped — exit 0, no red, and the three assertions it
+  # exists for silently absent from every green run. This daemon is the suite's own
+  # fixture, not a platform capability that might be missing.
+  bad "the pane daemon comes up" "listening on $PNBASE" \
+      "$(tr '\n' ' ' < "$PN/log" 2>/dev/null | cut -c1-180)"
 else
   pncode="$(pn_cli enroll phone | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')"
   node "$ROOT/test/helpers/serve-probe.mjs" "$PNBASE" pane "$pncode" > "$PN/probe" 2>"$PN/probe.err"
@@ -6082,6 +7999,7 @@ GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl
   HOME="$RG/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$ROOT/bin/fleet-serve.mjs" > "$RG/log" 2>&1 &
 rgp=$!
 SERVE_PIDS="$SERVE_PIDS $rgp"
+sv_reg "${rgp}"
 i=0; while [ "$i" -lt 60 ] && ! curl -s -m1 "$RBASE/healthz" >/dev/null 2>&1; do
   kill -0 "$rgp" 2>/dev/null || break          # already exited: its log is the answer
   i=$((i+1)); sleep 0.1
@@ -6260,10 +8178,13 @@ else
   # pruner that dropped both would look identical from the "it was removed" side.
   node "$ROOT/test/helpers/push-probe.mjs" --port "$OKPORT"   --status 201 --sub "$PU/sub-ok.json"   --out "$PU/ok.jsonl"   > "$PU/probe-ok.log" 2>&1 &
   SERVE_PIDS="$SERVE_PIDS $!"
+  sv_reg "$!"
   node "$ROOT/test/helpers/push-probe.mjs" --port "$GONEPORT" --status 410 --sub "$PU/sub-gone.json" --out "$PU/gone.jsonl" > "$PU/probe-gone.log" 2>&1 &
   SERVE_PIDS="$SERVE_PIDS $!"
+  sv_reg "$!"
   pu > "$PU/serve.log" 2>&1 &
   SERVE_PIDS="$SERVE_PIDS $!"
+  sv_reg "$!"
   pu_up=0
   i=0; while [ "$i" -lt 80 ]; do
     curl -s -m1 "$PUBASE/healthz" >/dev/null 2>&1 && { pu_up=1; break; }
@@ -6452,10 +8373,22 @@ chmod +x "$SV/shim/tailscale"
 # Bounded, because the whole point is that this invocation must DIE. Run it straight and
 # it hangs the suite the moment the guard is missing — a red assertion wearing a hang, and
 # a hang is not a test result. Verified by removing the refusal: it went red here.
-( PATH="$SV/shim:$PATH" HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" >"$SV/funnel.out" 2>&1; echo "rc=$?" >>"$SV/funnel.out" ) &
+# NOT A SUBSHELL, and that was a leak with a note on it. `( … node … ) &` makes `$!` the
+# SUBSHELL's pid, so `kill $fpid` kills the wrapper and node carries on — reparented to
+# launchd, holding its port, invisible to a reaper that was given the pid it was told to
+# use. It only bites on the branch where the guard fails to refuse, which is the branch
+# this group exists to catch, so the leak was hiding behind the bug.
+#   rc is taken from `wait` instead of from an echo inside the subshell: if node refused on
+# its own the kill is a no-op and wait yields its real status, and if node had to be killed
+# wait yields 143 — which fails the rc=1 row, correctly, because the guard did not work.
+PATH="$SV/shim:$PATH" HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" >"$SV/funnel.out" 2>&1 &
 fpid=$!
+SERVE_PIDS="$SERVE_PIDS $fpid"   # registered as well as killed locally: the local kill
+sv_reg "${fpid}"
+# is 80-odd lines later in some of these, and anything that exits in between leaked a
+# daemon holding a port. The EXIT trap is the only teardown that always runs.
 i=0; while [ "$i" -lt 60 ] && kill -0 $fpid 2>/dev/null; do i=$((i+1)); sleep 0.1; done
-kill $fpid 2>/dev/null; wait $fpid 2>/dev/null
+kill $fpid 2>/dev/null; wait $fpid 2>/dev/null; echo "rc=$?" >>"$SV/funnel.out"
 out="$(cat "$SV/funnel.out" 2>/dev/null)"
 is "funnel on: it refuses to start"    "1" "$(printf '%s' "$out" | grep -c 'Funnel is ON' || true)"
 is "funnel on: nonzero exit"           "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
@@ -6493,6 +8426,10 @@ can_arm_here() {
 if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/null 2>&1; then
   HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=on node "$SV/bin/fleet-serve.mjs" > "$SV/log.awake" 2>&1 &
   apid=$!
+  SERVE_PIDS="$SERVE_PIDS $apid"   # registered as well as killed locally: the local kill
+  sv_reg "${apid}"
+  # is 80-odd lines later in some of these, and anything that exits in between leaked a
+  # daemon holding a port. The EXIT trap is the only teardown that always runs.
   i=0; while [ "$i" -lt 60 ] && kill -0 "$apid" 2>/dev/null \
         && ! grep -q 'awake:' "$SV/log.awake" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
   # A DAEMON THAT NEVER STARTED READS AS AN INHIBITOR THAT NEVER FIRED: both assertions
@@ -6540,6 +8477,10 @@ if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/nul
   # off must mean off, or "on" proves nothing
   HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.awakeoff" 2>&1 &
   bpid=$!
+  SERVE_PIDS="$SERVE_PIDS $bpid"   # registered as well as killed locally: the local kill
+  sv_reg "${bpid}"
+  # is 80-odd lines later in some of these, and anything that exits in between leaked a
+  # daemon holding a port. The EXIT trap is the only teardown that always runs.
   i=0; while [ "$i" -lt 40 ] && ! grep -q 'awake:' "$SV/log.awakeoff" 2>/dev/null; do i=$((i+1)); sleep 0.2; done
   is "CLAUDE_FLEET_AWAKE=off holds none" "0" \
      "$( (pgrep -f "caffeinate .*-w $bpid" >/dev/null 2>&1 || pgrep -f "systemd-inhibit .*awake-$bpid " >/dev/null 2>&1) && echo 1 || echo 0)"
@@ -6584,7 +8525,13 @@ if sv_start web; then
 else
   skip "fleet-serve static" "server did not come up: $SV_WHY"
 fi
-is "cf-sync copies web/ to the runtime" "1" "$(grep -c 'for d in bin tmux hooks mcp skill layouts web' "$ROOT/bin/cf-sync" || true)"
+# WEB IS IN THE LIST — asked as membership, not as the list's exact spelling. The first
+# version grepped for the whole line, so it went red the day `lib` was legitimately added
+# and reported it as "cf-sync no longer copies web", which is a false statement about a
+# real change. A pinned string cannot tell an addition from a removal; membership can.
+CFSYNC_D="$(sed -n 's/^for d in \(.*\); do$/\1/p' "$ROOT/bin/cf-sync" | head -1)"
+is "cf-sync copies web/ to the runtime" "1" "$(printf '%s' " $CFSYNC_D " | grep -c ' web ' || true)"
+is "...and bin, which carries the rest" "1" "$(printf '%s' " $CFSYNC_D " | grep -c ' bin ' || true)"
 
 # ── cf-sync reports the truth about whether it synced ────────────────────────
 # It used to run rsync and never look at the status — `set -uo pipefail` has no `-e` — so
@@ -6922,13 +8869,13 @@ if sv_start attach; then
   apath="$(pb attach.png att | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).path||"")}catch{console.log("")}})')"
   is "...and the path it returned exists"  "yes" "$([ -n "$apath" ] && [ -f "$apath" ] && echo yes || echo "no: '$apath'")"
   is "...under the fleet dir, keyed by session" "yes" \
-     "$(printf '%s' "$apath" | grep -q '/fleet/attach/[^/]*\.attachtest/' && echo yes || echo "no: $apath")"
+     "$(grep -q '/fleet/attach/[^/]*\.attachtest/' <<< "$apath" && echo yes || echo "no: $apath")"
   # THE PATH IS ABOUT TO BE PASTED INTO A TERMINAL. Nothing in it may be a character a
   # shell would read, and no component of it came from the client.
   is "...and holds nothing a shell would read" "yes" \
-     "$(printf '%s' "$apath" | grep -qE '^[A-Za-z0-9._/-]+$' && echo yes || echo "no: $apath")"
+     "$(grep -qE '^[A-Za-z0-9._/-]+$' <<< "$apath" && echo yes || echo "no: $apath")"
   is "...with a server-generated name"     "yes" \
-     "$(basename "$apath" 2>/dev/null | grep -qE '^[0-9a-f]{16}\.(jpg|png)$' && echo yes || echo "no: $(basename "$apath" 2>/dev/null)")"
+     "$(grep -qE '^[0-9a-f]{16}\.(jpg|png)$' <<< "$(basename "$apath" 2>/dev/null)" && echo yes || echo "no: $(basename "$apath" 2>/dev/null)")"
   is "...and is not group- or world-readable" "600" \
      "$(ls -l "$apath" 2>/dev/null | awk '{print $1}' | sed 's/^-//;s/rw-------/600/;s/[^0-9]*$//' | head -c3)"
   # SNIFFED, NOT DECLARED. SVG is refused BY NAME because it is an image that is also a
@@ -6986,6 +8933,331 @@ is "fleet-stop delegates, not git"       "0" \
 is "...it calls fleet-clean --force"     "1" \
    "$(grep -c -- '--only "\$WT" --go --force' "$ROOT/bin/fleet-stop" || true)"
 
+
+# ── 5z. the brief protocol: warn about a thin brief, and never refuse ────────
+# The gate version of this was designed first and was WRONG, so the assertions here are
+# shaped to hold the correction in place rather than to prove the feature works.
+#
+# It cannot be a gate because it would be a gate on a null result: of six brief features
+# measured across this corpus — length, naming a file, naming a route, STATING A
+# DONE-CRITERION, carrying a reference image, human-vs-lead authorship — all six sit in a
+# 20-30% correction band with fully overlapping intervals. And its failure mode is this
+# repo's dominant one: "Done when: implemented" passes any parser, so a gate would buy a
+# field that looks disciplined while the decision the human never made stays unmade.
+#
+# So the load-bearing assertions are the NEGATIVE ones — exit status unchanged, the spawn
+# still happens, the source of the warning contains no `exit` — because a later edit that
+# "improves" this into a refusal would pass every positive assertion in the group.
+group "fleet-spawn warns about a thin brief and dispatches anyway"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  BW="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$BW/home/.config/ghostfleet" "$BW/ok"
+  # It PRINTS THE READY MARKER and then sleeps. fleet-spawn dispatches the initial prompt
+  # only once the pane looks ready for input, so a pane that never says so would make the
+  # dispatcher wait out its ~3min fallback and the "what the worker receives" assertion
+  # below could not be written at all. `bypass permissions` is one of the real markers
+  # fleet-spawn polls for.
+  printf '#!/usr/bin/env bash\nprintf "bypass permissions\\n"\nsleep 60\n' > "$BW/ok/agent-here"
+  chmod +x "$BW/ok/agent-here"
+  # A fleet-send that records the message it was handed, so what the WORKER receives is
+  # observable without a real Claude on the other end. First on PATH, so the backgrounded
+  # dispatcher finds it instead of the real one.
+  # KEYED BY TARGET SESSION, and that is not tidiness. Every spawn above leaves a
+  # BACKGROUNDED dispatcher behind — fleet-spawn returns before it fires — so a single
+  # shared path is written by whichever dispatcher happens to reach it, and a wait loop
+  # that breaks on "the file is non-empty" can read another spawn's brief entirely.
+  # Measured: with the marker deliberately removed, "the ask is still first" went red
+  # against a message from a DIFFERENT spawn, which means the green run before it had
+  # been passing on the same confusion. One file per target session; the case below uses
+  # a session name no other case spawns.
+  { echo '#!/usr/bin/env bash'
+    echo 'while [ $# -gt 2 ]; do shift; done'
+    echo 'printf "%s" "$2" > "'"$BW"'/sent.$1"'; } > "$BW/ok/fleet-send"
+  chmod +x "$BW/ok/fleet-send"
+  BWOUT=""; BWRC=0
+  spawnbw() {                              # $@ = extra fleet-spawn args
+    rm -rf "$BW/repo" "$BW/w1" "$BW/slots"; mkdir -p "$BW/fleet"
+    git init -q -b main "$BW/repo" 2>/dev/null
+    git -C "$BW/repo" config user.email t@t; git -C "$BW/repo" config user.name t
+    : > "$BW/repo/f"; git -C "$BW/repo" add -A; git -C "$BW/repo" commit -qm init 2>/dev/null
+    BWOUT="$( cd "$BW/repo" && HOME="$BW/home" env -u TMUX \
+      CLAUDE_FLEET_SOCK=cfbrief CLAUDE_FLEET_DIR="$BW/fleet" CLAUDE_FLEET_SLOTS="$BW/slots" \
+      PATH="$BW/ok:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" w1 --new "$@" 2>&1 )"; BWRC=$?
+    tmux -L cfbrief kill-server 2>/dev/null
+  }
+  bwhas() { printf '%s' "$BWOUT" | grep -c -- "$1" 2>/dev/null || true; }
+  briefrows() { [ -f "$BW/fleet/cfbrief.brief.tsv" ] && wc -l < "$BW/fleet/cfbrief.brief.tsv" | tr -d ' ' || echo 0; }
+
+  # ── a thin brief: no done-criterion, one deliverable ──
+  spawnbw --prompt 'Fix the parser so it stops dropping the last field'
+  is "a brief with no done-criterion warns"   "1" "$(bwhas 'the brief is thin')"
+  # THE MARKER IS A POSITION, NOT A SUBSTRING, and the anchor is the assertion. The item #5
+  # evaluator identifies treated sessions by finding this at the HEAD of a line; its first
+  # run classified a session as treated because the string appeared anywhere in it, and
+  # that session was the one WRITING the marker — so the treated arm would have filled
+  # with the treatment being built. Anchored here, or the anchoring is not tested.
+  is "...and prints the verdict marker"       "1" "$(printf '%s' "$BWOUT" | grep -c '^brief-check: warn' || true)"
+  is "...carrying the two fields it judged"   "1" \
+     "$(printf '%s' "$BWOUT" | grep -c '^brief-check: warn done-criterion=no deliverables=1' || true)"
+  # STDOUT, not stderr: mcp/fleet-dispatch.mjs returns stdout ALONE on the success path and
+  # merges stderr in only when the command fails, so a marker on stderr would be invisible
+  # to every dispatch through the fleet_spawn MCP tool — which is the path the orchestrate
+  # skill tells a lead to prefer. Captured with stderr closed, which is the only way to
+  # tell the two apart.
+  BWSTDOUT="$( cd "$BW/repo" && HOME="$BW/home" env -u TMUX \
+    CLAUDE_FLEET_SOCK=cfbrief CLAUDE_FLEET_DIR="$BW/fleet" CLAUDE_FLEET_SLOTS="$BW/slots" \
+    PATH="$BW/ok:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" w9 --new \
+    --prompt 'Fix the parser' 2>/dev/null )"
+  tmux -L cfbrief kill-server 2>/dev/null
+  is "...on STDOUT, where an MCP lead sees it" "1" "$(printf '%s' "$BWSTDOUT" | grep -c '^brief-check: warn' || true)"
+  is "...and the teaching text with it"        "1" "$(printf '%s' "$BWSTDOUT" | grep -c 'the brief is thin' || true)"
+  is "...and names what is missing"           "1" "$(bwhas 'NO DONE-CRITERION')"
+  # The register borrowed from hooks/fleet-guard.sh: name the thing, say why it costs, hand
+  # over the next action. A warning that only says "this is thin" is decoration.
+  is "...and says why it costs something"     "1" "$(bwhas 'nothing to close')"
+  is "...and hands over the eight axes"       "1" "$(bwhas 'NUMBERED LIST')"
+  is "...naming the retroactivity axis"       "1" "$(bwhas 'RETROACTIVITY')"
+  is "...and names the acknowledging half"    "1" "$(bwhas 'fleet-ack')"
+  # THE HALF THAT MUST NOT REGRESS, and the reason this group exists at all.
+  is "...and the exit status is still 0"      "0" "$BWRC"
+  is "...and the spawn actually happened"     "1" "$(bwhas "started 'w1'")"
+  is "...and the prompt is still dispatched"  "1" "$(bwhas 'will dispatch the initial prompt')"
+
+  # ── the OTHER direction: a brief that says what done looks like, one deliverable ──
+  # Without this the group would pass for a warning that fires on everything, which is
+  # the same as a warning that fires on nothing.
+  spawnbw --prompt 'Add the ASKED column to fleet-worktrees. Done when: the header prints ASKED beside UNDERSTOOD.'
+  is "a brief with a done-criterion is quiet" "0" "$(bwhas 'the brief is thin')"
+  # ...but NOT silent. The marker prints on EVERY dispatch, warned or not: a marker that
+  # only appears when the machinery objected cannot separate a treated session that passed
+  # from one the machinery never ran in, and the untreated arm would quietly absorb every
+  # good brief.
+  is "...but still prints an ok marker"       "1" "$(printf '%s' "$BWOUT" | grep -c '^brief-check: ok' || true)"
+  is "...with the fields that earned it"      "1" \
+     "$(printf '%s' "$BWOUT" | grep -c '^brief-check: ok done-criterion=yes deliverables=1' || true)"
+  is "...and still spawns"                    "1" "$(bwhas "started 'w1'")"
+  is "...with the same exit status"           "0" "$BWRC"
+
+  # ── several deliverables ──
+  spawnbw --prompt "$(printf 'Add the column\nUpdate the docs\nWrite a test\n')"
+  is "three build verbs read as three"        "1" "$(bwhas 'READS AS 3 DELIVERABLES')"
+  is "...and STILL does not refuse"           "0" "$BWRC"
+  is "...and still spawns"                    "1" "$(bwhas "started 'w1'")"
+
+  # A NUMBERED LIST IS PRESENTATION, NOT A DELIVERABLE COUNT — the objection that killed
+  # the gate version, kept honest here. Acceptance criteria are a numbered list, and so is
+  # a research method; counting list items would call both of them three asks.
+  spawnbw --prompt "$(printf 'Build the picker.\nDone when:\n1. The Documents step shows one row per document\n2. The saved row carries the template id\n3. An old envelope renders blank\n')"
+  is "criteria as a list are not deliverables" "0" "$(bwhas 'DELIVERABLES')"
+  is "...and that brief warns not at all"      "0" "$(bwhas 'the brief is thin')"
+  spawnbw --prompt "$(printf 'Investigate the flake.\n1. Read test/run.sh\n2. Run the suite twice\n3. Check the socket namespace\n')"
+  is "a method list is not deliverables"       "0" "$(bwhas 'DELIVERABLES')"
+  # ...and it is still thin in the OTHER way, so the row above is not passing because the
+  # whole warning went silent.
+  is "...though it still has no criterion"     "1" "$(bwhas 'NO DONE-CRITERION')"
+
+  # ── the counter, so the bypass rate has a denominator ──
+  # Nothing blocks, so every warning IS a bypass; a warned count with no total measures
+  # nothing. Every PROMPTED spawn writes a row, warned or not.
+  rm -f "$BW/fleet/cfbrief.brief.tsv"
+  spawnbw --prompt 'Fix the parser'
+  is "a warned dispatch is counted"           "1" "$(briefrows)"
+  spawnbw --prompt 'Add the column. Done when: the header prints it.'
+  is "...and so is an unwarned one"           "2" "$(briefrows)"
+  is "...the verdict column says no"          "1" "$(awk -F'\t' '$4=="no"' "$BW/fleet/cfbrief.brief.tsv" | wc -l | tr -d ' ')"
+  is "...and yes for the other"               "1" "$(awk -F'\t' '$4=="yes"' "$BW/fleet/cfbrief.brief.tsv" | wc -l | tr -d ' ')"
+  is "...seven columns, none of them empty"   "0" \
+     "$(awk -F'\t' 'NF!=7 || $7==""' "$BW/fleet/cfbrief.brief.tsv" | wc -l | tr -d ' ')"
+  # NEVER THE BODY — the same privacy boundary the dispatch log keeps. A distinctive word
+  # from a brief that was just counted must not be findable in the file.
+  is "...and the brief body is NOT in it"     "0" \
+     "$(grep -c 'parser' "$BW/fleet/cfbrief.brief.tsv" 2>/dev/null || true)"
+  # A spawn with no brief at all has nothing to judge and nothing to count: a row for it
+  # would inflate the denominator with dispatches the warning could never have seen.
+  rm -f "$BW/fleet/cfbrief.brief.tsv"
+  spawnbw
+  is "a spawn with no prompt counts nothing"  "0" "$(briefrows)"
+  is "...and warns about nothing"             "0" "$(bwhas 'the brief is thin')"
+
+  # ── the verdict has to reach the WORKER, not just the lead ──
+  # The objection happens in the lead and the outcome happens in the worker, and nothing
+  # else joins those two transcripts — a verdict left behind on the lead makes a false
+  # refusal unmeasurable from either end. So the marker rides along in the dispatched
+  # prompt, and this asserts what the worker was actually handed rather than what the lead
+  # printed. The recording fleet-send stub above is what makes that observable.
+  # SPAWNED BY HAND rather than through spawnbw, for two reasons that both have to hold:
+  # the session name must be one no other case uses (so no other dispatcher can write this
+  # file), and the tmux server must stay UP until the send lands — spawnbw kills it on the
+  # way out, which would leave the dispatcher polling a dead pane for its ~3min fallback.
+  BWASK='Fix the parser so it stops dropping the last field'
+  rm -f "$BW/sent.wdisp"
+  rm -rf "$BW/repo" "$BW/wdisp"
+  git init -q -b main "$BW/repo" 2>/dev/null
+  git -C "$BW/repo" config user.email t@t; git -C "$BW/repo" config user.name t
+  : > "$BW/repo/f"; git -C "$BW/repo" add -A; git -C "$BW/repo" commit -qm init 2>/dev/null
+  ( cd "$BW/repo" && HOME="$BW/home" env -u TMUX \
+      CLAUDE_FLEET_SOCK=cfbrief CLAUDE_FLEET_DIR="$BW/fleet" CLAUDE_FLEET_SLOTS="$BW/slots" \
+      PATH="$BW/ok:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" wdisp --new \
+      --prompt "$BWASK" >/dev/null 2>&1 )
+  # the dispatcher is backgrounded and waits for the pane to look ready; the stub agent
+  # prints the marker immediately, so this is ~1s, not the ~3min fallback.
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ -s "$BW/sent.wdisp" ] && break; sleep 1; done
+  tmux -L cfbrief kill-server 2>/dev/null
+  is "the worker is handed something"         "1" "$([ -s "$BW/sent.wdisp" ] && echo 1 || echo 0)"
+  is "...carrying the verdict marker"         "1" "$(grep -c '^brief-check: warn' "$BW/sent.wdisp" 2>/dev/null || true)"
+  # ...and the human ask is still the HEAD of the brief. The marker is a trailing line
+  # precisely so it does not push the ask down: the first line is what the worker reads
+  # first and what the manifest shows in ASKED.
+  is "...with the ask still first"            "1" "$(head -1 "$BW/sent.wdisp" 2>/dev/null | grep -c '^Fix the parser' || true)"
+  is "...and the marker last"                 "1" "$(tail -1 "$BW/sent.wdisp" 2>/dev/null | grep -c '^brief-check:' || true)"
+  # The manifest and the counter keep measuring the ASK, not the ask plus our own footer,
+  # or the digest of a brief would never match the brief that was written.
+  # The manifest and the counter keep measuring the ASK, not the ask plus our own footer,
+  # or a digest of the brief would never match the brief that was written.
+  is "...but ASKED is the ask alone"          "0" \
+     "$(grep -c 'brief-check' "$BW/fleet/cfbrief.manifest.tsv" 2>/dev/null || true)"
+  # ...and EXACTLY the ask, compared against the brief that was written rather than against
+  # a threshold: the marker is ~140 characters, so a counter that had measured the
+  # augmented prompt would be obvious against a bound and is unmistakable against equality.
+  is "...and so is the counted length"        "$(printf '%s' "$BWASK" | wc -c | tr -d ' ')" \
+     "$(awk -F'\t' 'END{print $6}' "$BW/fleet/cfbrief.brief.tsv" 2>/dev/null)"
+
+  # ── the structural guard: this may not become a gate ──
+  # Every assertion above would still pass if someone added an `exit 1` to the end of the
+  # warning and a --force to get past it. The plan rejected exactly that, on the grounds
+  # that a gate built on a null feature is a gate built on nothing, so the refusal to
+  # refuse is pinned in the source rather than left to the reviewer of the next diff.
+  BWBLOCK="$(sed -n '/the brief is thin/,/brief.tsv/p' "$ROOT/bin/fleet-spawn")"
+  is "the warning block contains no exit"     "0" "$(printf '%s' "$BWBLOCK" | grep -cE '(^|[[:space:]])exit[[:space:]]' || true)"
+  is "...and there is no --force to add"      "0" "$(grep -c -- '--force' "$ROOT/bin/fleet-spawn" || true)"
+  rm -rf "$BW"
+else
+  skip "the brief warning" "git or tmux missing"
+fi
+
+# ── 5z2. the acknowledgement handshake: what the worker heard ────────────────
+# The manifest recorded what the LEAD asked and nothing recorded what the worker heard.
+# MEASURED: of 79 corrections that are about the agent rather than the code, 23 are "that
+# is not what I asked" — the largest of those kinds.
+#
+# A restatement ALONE was the first design and it was not enough: it makes disagreement
+# displayable, not preventable, because a worker can paraphrase the ask perfectly and
+# still build from a wrong assumption underneath it. So the ack carries the DECISIONS it
+# is working from, and the case with no other symptom — a worker proceeding from a
+# decision nobody made — is what fleet-worktrees has to report. Both directions: an ack
+# that names decisions must NOT print the marker, or the marker means nothing.
+group "fleet-ack records the worker half beside the lead half"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  AW="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$AW/proj" "$AW/fleet"
+  git init -q -b main "$AW/proj/repo" 2>/dev/null
+  git -C "$AW/proj/repo" config user.email t@t; git -C "$AW/proj/repo" config user.name t
+  : > "$AW/proj/repo/f"; git -C "$AW/proj/repo" add -A
+  git -C "$AW/proj/repo" commit -qm init 2>/dev/null
+  git -C "$AW/proj/repo" worktree add -q "$AW/proj/w1" -b feat/w1 2>/dev/null
+  git -C "$AW/proj/repo" worktree add -q "$AW/proj/w2" -b feat/w2 2>/dev/null
+  MF="$AW/fleet/cfack.manifest.tsv"
+  # w1: a normal spawn row. w2: a row written BEFORE these columns existed — four fields,
+  # which is what every manifest on disk holds today.
+  printf '%s\tw1\tfeat/w1\t%s\n' "$AW/proj/w1" 'build the per-document picker' >  "$MF"
+  printf '%s\tw2\tfeat/w2\t%s\n' "$AW/proj/w2" 'port the exporter'             >> "$MF"
+  ack() { ( cd "$AW/proj/w1" && CLAUDE_FLEET_DIR="$AW/fleet" env -u TMUX \
+              "$ROOT/bin/fleet-ack" -s cfack "$@" 2>&1 ); }
+  col() { awk -F'\t' -v w="$AW/proj/$1" -v c="$2" '$1==w{print $c; exit}' "$MF"; }
+
+  ACKOUT="$(ack 'add a template picker to the Documents step' --from 'UNIT=per document; RETRO=new drafts only')"
+  ACKRC=$?
+  is "an ack exits 0"                        "0" "$ACKRC"
+  is "...and records the restatement"        "add a template picker to the Documents step" "$(col w1 5)"
+  is "...and the decisions beside it"        "UNIT=per document; RETRO=new drafts only"    "$(col w1 6)"
+  # WHAT WAS ASKED IS NOT THE WORKER'S TO EDIT. A worker that could rewrite the ask could
+  # make any disagreement disappear, which is the one thing this column exists to prevent.
+  is "...and does NOT touch what was asked"  "build the per-document picker" "$(col w1 4)"
+  is "...leaving one row for that worktree"  "1" "$(awk -F'\t' -v w="$AW/proj/w1" '$1==w' "$MF" | wc -l | tr -d ' ')"
+  is "...and the other worktree untouched"   "port the exporter" "$(col w2 4)"
+  # THE MARKER, anchored the same way and for the same reason as brief-check above: the
+  # evaluator reads a POSITION. The decisions ride on that line rather than a line below,
+  # because the claim being made is not that the worker restated something but what it is
+  # building FROM.
+  is "...and prints the understood marker"   "1" "$(printf '%s' "$ACKOUT" | grep -c '^understood: ' || true)"
+  is "...naming the decisions on that line"  "1" \
+     "$(printf '%s' "$ACKOUT" | grep -c '^understood: .* · from: UNIT=per document' || true)"
+  is "...beside what was asked"              "1" "$(printf '%s' "$ACKOUT" | grep -c '^asked: ' || true)"
+
+  # ── an ack that names NO decision is recorded AS naming none ──
+  # It is not upgraded, not defaulted, and not refused. A signal that quietly makes itself
+  # look compliant is the failure this whole pair of features exists to expose.
+  ACKOUT="$(ack 'add a template picker' )"; ACKRC=$?
+  is "an ack with no decisions still works"  "0" "$ACKRC"
+  is "...and leaves the decisions empty"     "" "$(col w1 6)"
+  is "...but says so, plainly"               "1" "$(printf '%s' "$ACKOUT" | grep -c 'none named' || true)"
+  # ON THE MARKER LINE ITSELF, not only in the prose below it. An omitted field and a
+  # deliberate "none" are the same bytes to a reader and are not the same event, so the
+  # marker states it rather than leaving the field off.
+  is "...on the marker line itself"          "1" \
+     "$(printf '%s' "$ACKOUT" | grep -c '^understood: .* · from: (none named)' || true)"
+
+  # ONE LINE MEANS ONE LINE: a pasted paragraph would otherwise put a newline into a
+  # newline-delimited file and a tab into a tab-delimited one, shifting every later field
+  # of every later row — the failure CLAUDE.md names twice.
+  ack "$(printf 'first line\nsecond\tline')" --from "$(printf 'a\nb')" >/dev/null 2>&1
+  is "a multi-line ack is flattened"         "1" "$(awk -F'\t' -v w="$AW/proj/w1" '$1==w' "$MF" | wc -l | tr -d ' ')"
+  is "...into exactly six fields"            "6" "$(awk -F'\t' -v w="$AW/proj/w1" '$1==w{print NF; exit}' "$MF")"
+
+  # ── the usage error, which is an argument error and not a gate ──
+  AUOUT="$( ( cd "$AW/proj/w1" && CLAUDE_FLEET_DIR="$AW/fleet" env -u TMUX \
+                "$ROOT/bin/fleet-ack" -s cfack 2>&1 ) )"; AURC=$?
+  is "an ack with no restatement is usage"   "1" "$AURC"
+  # PRESENCE, not a count: the usage text names --from on three lines (the flag, the
+  # worked example, and the sentence explaining it), so pinning a number would assert the
+  # prose rather than the behaviour and go red on any rewording of the help.
+  is "...and shows how to write one"         "1" \
+     "$([ "$(printf '%s' "$AUOUT" | grep -c -- '--from' || true)" -ge 1 ] && echo 1 || echo 0)"
+  is "...under a usage heading"              "1" "$(printf '%s' "$AUOUT" | grep -c 'fleet-ack: usage' || true)"
+
+  # ── what a lead actually reads ──
+  # fleet-worktrees blanks both columns for a worktree with no live session (the manifest
+  # then describes a session that is gone), so the row only exists to be read while a
+  # session is sitting in it.
+  printf '%s\tw1\tfeat/w1\t%s\t%s\t%s\n' "$AW/proj/w1" 'build the per-document picker' \
+     'add a template picker to the Documents step' 'UNIT=per document' > "$MF"
+  printf '%s\tw2\tfeat/w2\t%s\n' "$AW/proj/w2" 'port the exporter' >> "$MF"
+  tmux -L cfack kill-server 2>/dev/null
+  tmux -L cfack new-session -d -s w1 -c "$AW/proj/w1" 'sleep 60' 2>/dev/null
+  tmux -L cfack new-session -d -s w2 -c "$AW/proj/w2" 'sleep 60' 2>/dev/null
+  sleep 0.5
+  WTOUT="$( cd "$AW/proj/repo" && CLAUDE_FLEET_DIR="$AW/fleet" env -u TMUX \
+              "$ROOT/bin/fleet-worktrees" -s cfack 2>&1 )"
+  is "the header shows ASKED"                "1" "$(printf '%s' "$WTOUT" | grep -c 'ASKED' || true)"
+  is "...and UNDERSTOOD beside it"           "1" "$(printf '%s' "$WTOUT" | grep -c 'UNDERSTOOD' || true)"
+  is "...and TASK is gone"                   "0" "$(printf '%s' "$WTOUT" | grep -c 'TASK' || true)"
+  is "an acked worktree shows both"          "1" \
+     "$(printf '%s' "$WTOUT" | grep -c 'build the per-document picker.*add a template picker' || true)"
+  # RETROACTIVITY: a row written before these columns existed has no fifth field. It must
+  # read as blank — an old entry is not a disagreement — and it must not break the table.
+  is "a pre-existing 4-column row is blank"  "1" \
+     "$(printf '%s' "$WTOUT" | grep -c 'port the exporter *-' || true)"
+  is "...and the table still lists both"     "2" \
+     "$(printf '%s' "$WTOUT" | grep -cE '^(w1|w2) ' || true)"
+
+  # ── the marker, in BOTH directions ──
+  # An ack that names decisions must NOT print "(no decisions)", or the marker is
+  # decoration; an ack that names none must, or the case it exists for is invisible.
+  is "an ack with decisions has no marker"   "0" "$(printf '%s' "$WTOUT" | grep -c 'no decisions' || true)"
+  printf '%s\tw1\tfeat/w1\t%s\t%s\t\n' "$AW/proj/w1" 'build the per-document picker' \
+     'add a template picker to the Documents step' > "$MF"
+  WTOUT2="$( cd "$AW/proj/repo" && CLAUDE_FLEET_DIR="$AW/fleet" env -u TMUX \
+               "$ROOT/bin/fleet-worktrees" -s cfack 2>&1 )"
+  is "an ack with none is marked as such"    "1" "$(printf '%s' "$WTOUT2" | grep -c '(no decisions)' || true)"
+  # It prints FIRST, so a long restatement cannot truncate the marker away — the column is
+  # cut at a fixed width and the absence is the part that must survive the cut.
+  is "...and the marker leads the column"    "1" \
+     "$(printf '%s' "$WTOUT2" | grep -c '(no decisions) add a template picker' || true)"
+  tmux -L cfack kill-server 2>/dev/null
+  rm -rf "$AW"
+else
+  skip "the acknowledgement handshake" "git or tmux missing"
+fi
 
 # ── 6a. the phone client (web/) ───────────────────────────────────────────────
 # The PWA renders the SAME cards as the TUI, from the §4 JSON. Two helpers do the work
@@ -7163,10 +9435,18 @@ if [ -d "$ROOT/web" ]; then
   # after, so main went BACKWARDS and #84 existed only to undo that; then #86 was numbered
   # v19 while #85 was also v19, caught by hand. Both leave a hash that matches its own
   # bytes, so both are green here without this.
-  #   THIS ONE SKIPS ON MAIN, and that is not the same as passing: on main, or on a branch
-  # that has already landed, there is nothing to be ahead of. It also skips in a clone with
-  # no origin/main — but NOT in CI on a pull request, where the absence of the ref means the
-  # check silently did nothing in the one place it is the point. See the helper's header.
+  #   THIS ONE SKIPS ON STAGING, and that is not the same as passing: on staging, or on a
+  # branch that has already landed, there is nothing to be ahead of. It also skips in a clone
+  # with no origin/staging — but NOT in CI on a pull request, where the absence of the ref
+  # means the check silently did nothing in the one place it is the point. See the helper's
+  # header.
+  #   THE REF IS `origin/staging`, NOT `origin/main`, and the distinction became load-bearing
+  # the moment main stopped taking day-to-day merges. The question this asks is "has somebody
+  # else already taken this number", and after that split the answer lives on staging: main
+  # moves once per release, so comparing against it would leave every branch trivially above
+  # a months-old number while three of them raced for the same one — which is #87, the exact
+  # bug this exists to prevent, reintroduced by pointing the guard at a branch that stopped
+  # moving.
   SWV="$(mktemp -d "$TEST_RUNS.$$.swv.XXXXXX")"
   node "$ROOT/test/helpers/sw-version.mjs" > "$SWV/out" 2> "$SWV/err"
   is "sw-version ran"                 "0" "$?"
@@ -7217,6 +9497,498 @@ else
   skip "no real project name in the tree" "git or node missing"
 fi
 
+group "no withheld name in what npm actually ships"
+# THE SWEEP ABOVE READS `git ls-files`; `npm pack` READS THE WORKING DIRECTORY. Those are
+# different sets, and the gap ships: measured, an untracked file dropped into any directory
+# named in package.json's `files` reaches the registry while the sweep meant to guard the
+# release cannot see it. `prepublishOnly` runs this suite, so a release LOOKED checked while
+# the set being checked was not the set that leaves.
+#   This is the shape the repo keeps repeating rather than a new one. #59 scrubbed the
+# fixtures and #63 found the document those fixtures are an implementation OF — "the leak
+# stayed open in the file that gets read the most, two PRs after it was declared closed".
+# Then the tracked-file sweep was silent about 37 branches live on the public remote. Each
+# guard checked a PROXY for the artifact. So this asks npm what it will ship and reads THAT,
+# the same way doc-fixtures asks whether a name is IN web/fixtures/ rather than on a list.
+#   The untracked row is not "untracked is wrong" — it is that such a file is invisible to
+# every other check here, so it has to be looked at deliberately instead of shipping because
+# no one was watching that set.
+group_needs_npm=0
+command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && group_needs_npm=1
+if [ "$group_needs_npm" = 1 ]; then
+  PKS="$(mktemp -d "$TEST_RUNS.$$.pks.XXXXXX")"
+  node "$ROOT/test/helpers/pack-sweep.mjs" > "$PKS/out" 2> "$PKS/err"
+  is "pack-sweep ran"          "0"   "$?"
+  # A FLOOR, because a helper that died early emits no mismatches, which reads as clean —
+  # and "nothing found" must never be spelled the same way as "nothing looked at".
+  is "...and produced its checks" "yes" \
+     "$([ "$(grep -c . "$PKS/out")" -ge 4 ] && echo yes || echo "no: $(grep -c . "$PKS/out") rows — $(tr '\n' ' ' < "$PKS/err" | cut -c1-120)")"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    is "$name" "$want" "$got"
+  done < "$PKS/out"
+  rm -rf "$PKS"
+else
+  skip "no withheld name in what npm ships" "npm or node missing"
+fi
+
+# ── 6a3. the utilization meter reads a transcript ────────────────────────────
+# bin/fleet-meter.mjs turns the corpus under ~/.claude/projects into the numbers plan item
+# #2 is judged against. Nothing else in this repo parses that wire format, and a parser is
+# exactly the kind of code that fails silently: every one of the four ways this can be wrong
+# produces a plausible number rather than an error.
+#   THE FIXTURE IS BUILT SO THE FAILING DIRECTION IS THE INTERESTING ONE. Its sidechain
+# records carry a `sleep 999`, an Edit of a file nothing else touches, a browser call and
+# the word "Done." — the same shapes as the real turns beside them. A reader that has lost
+# its eligibility filter does not crash; it reports 1034 seconds of sleep instead of 35,
+# three files instead of two, and a done-claim on turn 1 instead of turn 2. So the numbers
+# below are asserted as exact values, not as "greater than zero": every one of them moves if
+# the filter goes, and none of them moves to something that looks broken.
+#   AND THE SAME RECORDS ARE READ TWICE. Section three of the fixture is s1 with every
+# isSidechain flipped to true and nothing else changed, so the identical eleven records that
+# produce 3 turns and 9 tool calls above must produce 0 and 0 there. That is the pair the
+# repo's rule asks for: a detector is only proven by a capture it must match AND a capture
+# it must stay silent on, and a meter that counts everything and a meter that counts nothing
+# are both green against a fixture read only once.
+#   THE PRIVACY ASSERTION IS NOT DECORATION. The corpus is not this repo's — it holds other
+# people's work — so the meter emits counts and digests and never a body, a path or a branch
+# name. The fixture's branch names and file paths go IN; the group greps the JSON that comes
+# out for each of them and requires zero hits. A regression that starts echoing a path would
+# otherwise be invisible until it had been committed to a public repo.
+group "the utilization meter"
+if command -v node >/dev/null 2>&1; then
+  MTR="$(mktemp -d "$TEST_RUNS.$$.meter.XXXXXX")"
+  mkdir -p "$MTR/corpus/acme-web-proj" "$MTR/empty" "$MTR/ineligible/acme-web-proj"
+
+  # Two sessions. s1 runs three human turns and crosses a branch partway; s2 is one turn
+  # that never claims done. Between s1's turns sit the three record kinds that look like a
+  # human prompt and are not: a tool_result carrier (most of the file, by volume), an isMeta
+  # record — whose text says "No, that is wrong" precisely so a lost filter would score a
+  # correction — and a sidechain pair holding a subagent's own tool calls.
+  cat > "$MTR/corpus/acme-web-proj/s1.jsonl" <<'MJSON'
+{"type":"user","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"add a signature-template picker to the Documents step"}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 5; ./test/run.sh"}},{"type":"tool_use","name":"Read","input":{"file_path":"/w/acme-web/src/never-edited.ts"}},{"type":"tool_use","name":"Edit","input":{"file_path":"/w/acme-web/src/a.ts"}},{"type":"text","text":"Working on it, more to do."}]}}
+{"type":"user","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:02:00Z","message":{"role":"user","content":[{"type":"tool_result","content":"3506 passed"}]}}
+{"type":"user","isMeta":true,"isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:03:00Z","message":{"role":"user","content":"No, that is wrong: a meta record that must not be a turn"}}
+{"type":"user","isSidechain":true,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:04:00Z","message":{"role":"user","content":"subagent brief"}}
+{"type":"assistant","isSidechain":true,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:05:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 999"}},{"type":"tool_use","name":"Edit","input":{"file_path":"/w/acme-web/src/sidechain-only.ts"}},{"type":"tool_use","name":"mcp__chrome-devtools__navigate_page","input":{"url":"http://127.0.0.1:8787/"}},{"type":"text","text":"Done."}]}}
+{"type":"user","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:06:00Z","message":{"role":"user","content":"No, that is not what I asked for."}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:07:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"mcp__chrome-devtools__take_screenshot","input":{}},{"type":"tool_use","name":"Edit","input":{"file_path":"/w/acme-web/src/b.ts"}}]}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-web","sessionId":"meter-s1","timestamp":"2026-01-01T00:08:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Done. The picker is on the Documents step."}]}}
+{"type":"user","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s1","timestamp":"2026-01-01T00:09:00Z","message":{"role":"user","content":"now wire the same thing on the api side"}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s1","timestamp":"2026-01-01T00:10:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"sleep 600 &"}},{"type":"tool_use","name":"Bash","input":{"command":"sleep 30; tail -f log","run_in_background":true}},{"type":"tool_use","name":"Bash","input":{"command":"sleep 10; sleep 20"}},{"type":"tool_use","name":"Write","input":{"file_path":"/w/acme-web/src/a.ts"}},{"type":"text","text":"Next I will check the wire format."}]}}
+MJSON
+  cat > "$MTR/corpus/acme-web-proj/s2.jsonl" <<'MJSON'
+{"type":"user","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s2","timestamp":"2026-01-02T00:00:00Z","message":{"role":"user","content":"why is the toolbox pane blank"}}
+{"type":"assistant","isSidechain":false,"gitBranch":"acme-api","sessionId":"meter-s2","timestamp":"2026-01-02T00:00:30Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"fleet-look.mjs http://127.0.0.1:8787/"}},{"type":"text","text":"The pane is blank because the socket is wrong."}]}}
+MJSON
+  # The same eleven records, every one of them a sidechain. Derived from s1 rather than
+  # written out again, so the two can never drift apart and leave the zero direction
+  # passing against a fixture that no longer resembles the one it is paired with.
+  sed 's/"isSidechain":false/"isSidechain":true/g' \
+      "$MTR/corpus/acme-web-proj/s1.jsonl" > "$MTR/ineligible/acme-web-proj/s3.jsonl"
+
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/corpus"     --json > "$MTR/full.json" 2> "$MTR/err"
+  is "meter ran"                        "0"  "$?"
+  is "...without complaining"           ""   "$(head -2 "$MTR/err" | tr '\n' ' ' | sed 's/ *$//')"
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/empty"      --json > "$MTR/empty.json" 2>/dev/null
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/ineligible" --json > "$MTR/inel.json"  2>/dev/null
+
+  # process.stdout.write of a String(), never console.log of a bare value: the header
+  # explains what util.inspect does to a number, and this helper answers into an `is`.
+  m() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      let v = r; for (const k of process.argv[2].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2"; }
+
+  # ── the parse: every value hand-computed from the fixture above ──
+  is "meter: 2 files, 13 records"     "2 13"  "$(m "$MTR/full.json" corpus.files) $(m "$MTR/full.json" corpus.records)"
+  is "meter: 4 human turns of 13"     "4"     "$(m "$MTR/full.json" corpus.turns)"
+  is "meter: s1 turns"                "3"     "$(m "$MTR/full.json" per_session.0.observed.turns)"
+  is "meter: s1 tool calls"           "9"     "$(m "$MTR/full.json" per_session.0.observed.tool_calls)"
+  is "meter: s1 tool calls per turn"  "3"     "$(m "$MTR/full.json" per_session.0.observed.tool_calls_per_turn_mean)"
+  # 35, not 1034: the sidechain's `sleep 999` is not this session's.
+  is "meter: s1 sleep seconds"        "35"    "$(m "$MTR/full.json" per_session.0.observed.sleep_seconds)"
+  # 3, not 5: `sleep 600 &` returns at once and a run_in_background call does too.
+  is "meter: s1 sleeps counted"       "3"     "$(m "$MTR/full.json" per_session.0.observed.sleep_calls)"
+  is "meter: s1 browser calls"        "1"     "$(m "$MTR/full.json" per_session.0.observed.browser_calls)"
+  # 2, not 3: a Read carries a file_path and is not a touch.
+  is "meter: s1 distinct files"       "2"     "$(m "$MTR/full.json" per_session.0.observed.distinct_files)"
+  is "meter: s1 turns to done"        "2"     "$(m "$MTR/full.json" per_session.0.labelled.turns_to_done)"
+  is "meter: s1 browser before done"  "true"  "$(m "$MTR/full.json" per_session.0.labelled.browser_before_done_claim)"
+  # 1, not 2: the isMeta record says "No, that is wrong" and is not a human turn.
+  is "meter: s1 corrections"          "1"     "$(m "$MTR/full.json" per_session.0.labelled.corrections)"
+  is "meter: s1 corrections/file"     "0.5"   "$(m "$MTR/full.json" per_session.0.labelled.corrections_per_distinct_file)"
+  # s2 never claims done, and has no files, so the ratio is absent rather than zero.
+  is "meter: s2 turns to done"        "null"  "$(m "$MTR/full.json" per_session.1.labelled.turns_to_done)"
+  is "meter: s2 corrections/file"     "null"  "$(m "$MTR/full.json" per_session.1.labelled.corrections_per_distinct_file)"
+  # A session crosses a branch partway, so a TURN carries the branch, not a session.
+  is "meter: 2 branches"              "2"     "$(m "$MTR/full.json" corpus.branches)"
+  is "meter: branch id is the digest" "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)" "$(m "$MTR/full.json" per_branch.0.id)"
+  is "meter: acme-web turns"          "2"     "$(m "$MTR/full.json" per_branch.0.observed.turns)"
+  is "meter: acme-api turns"          "2"     "$(m "$MTR/full.json" per_branch.1.observed.turns)"
+  is "meter: acme-api sleep seconds"  "30"    "$(m "$MTR/full.json" per_branch.1.observed.sleep_seconds)"
+  # The two that cannot be pooled are absent from the pooled block and present in the cohort.
+  is "meter: pooled has no to-done"   "(missing)" "$(m "$MTR/full.json" pooled.labelled.turns_to_done)"
+  is "meter: cohort to-done median"   "2"     "$(m "$MTR/full.json" cohort.per_session.turns_to_done_median)"
+
+  # ── the zero direction: the same records, all ineligible ──
+  is "meter: ineligible records read" "11"    "$(m "$MTR/inel.json" corpus.records)"
+  is "meter: ineligible turns"        "0"     "$(m "$MTR/inel.json" corpus.turns)"
+  is "meter: ineligible tool calls"   "0"     "$(m "$MTR/inel.json" pooled.observed.tool_calls)"
+  is "meter: ineligible sleep"        "0"     "$(m "$MTR/inel.json" pooled.observed.sleep_seconds)"
+  is "meter: ineligible browser"      "0"     "$(m "$MTR/inel.json" pooled.observed.browser_calls)"
+  is "meter: ineligible files"        "0"     "$(m "$MTR/inel.json" pooled.observed.distinct_files)"
+  is "meter: ineligible done-claims"  "0"     "$(m "$MTR/inel.json" pooled.labelled.done_claim_turns)"
+
+  # ── the empty direction ──
+  node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/empty" >/dev/null 2>&1
+  is "meter: empty corpus exits 0"    "0"     "$?"
+  is "meter: empty files"             "0"     "$(m "$MTR/empty.json" corpus.files)"
+  is "meter: empty turns"             "0"     "$(m "$MTR/empty.json" corpus.turns)"
+  is "meter: empty tool calls"        "0"     "$(m "$MTR/empty.json" pooled.observed.tool_calls)"
+  # null, not 0. "median turns to done: 0" on an empty cohort reads as the best possible
+  # result and means the opposite.
+  is "meter: empty to-done median"    "null"  "$(m "$MTR/empty.json" cohort.per_session.turns_to_done_median)"
+  is "meter: empty corrections/file"  "null"  "$(m "$MTR/empty.json" pooled.labelled.corrections_per_distinct_file)"
+
+  # ── counts and digests, never content ──
+  # Every one of these is IN the fixture the meter just read.
+  for leak in acme-web acme-api never-edited sidechain-only 'Documents step' 'toolbox pane' '/w/'; do
+    is "meter: '$leak' is not in the output" "0" "$(grep -c -- "$leak" "$MTR/full.json" | tr -d ' ')"
+  done
+
+  # An exclusion that has stopped matching must say so rather than quietly excluding
+  # nothing — the whole point of naming them in the output.
+  is "meter: --why reports absence"   "4"     "$(node "$ROOT/bin/fleet-meter.mjs" --corpus "$MTR/corpus" --why | grep -c 'NOT FOUND')"
+  is "meter: --digest is stable"      "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)" "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)"
+  rm -rf "$MTR"
+else
+  skip "the utilization meter" "node missing"
+fi
+
+# ── 6a4. the evaluator refuses a verdict it cannot support ───────────────────
+# Plan item #5 promotes a warning to a hard gate only where a failure mode SHOWS UP. Four
+# measurements decide it, and on the day it ships all four are unmeasurable: #3 and #4 are
+# not merged, so nothing has ever left a treatment marker and every rate is over an empty
+# denominator.
+#   THE REFUSAL IS THE FEATURE, AND IT IS WHAT THIS GROUP MOSTLY TESTS. A rate of 0/0 comes
+# out either NaN or a tidy 0, and a tidy 0 here reads as "no false refusals, no bypass, no
+# added latency" — the most favourable result available, measuring nothing. That is exactly
+# how v1 of the plan was going to justify a gate on a correlation. So the blocked rows are
+# asserted to have NO VALUE KEY AT ALL rather than a zero one: "(missing)" is the expected
+# value, and a regression that starts emitting 0 goes red instead of looking like good news.
+#   BOTH DIRECTIONS ARE REAL CORPORA, NOT A FLAG. The measurable direction is a generated
+# corpus big enough to clear every floor, with values that are arithmetic on the counts at
+# the top of test/helpers/meter-corpus.mjs. The refusing directions are: a corpus where the
+# markers appear only as PROSE, a baseline that froze no sessions, and one whose rule digests
+# do not match.
+#   THE PROSE CORPUS IS THE ONE THAT CAUGHT A REAL BUG. The evaluator's first run classified
+# a session as treated because the word `fleet-ack` appeared in it — and the session it
+# appeared in was the one writing the marker. The treated arm would have filled with the
+# treatment's own construction, which is unusually careful work, and the treatment would have
+# looked like it worked. Markers are matched by POSITION now (a command invoked, a line a
+# program printed) as well as by string, and the prose corpus is what keeps that provable.
+group "the evaluator refuses what it cannot support"
+if command -v node >/dev/null 2>&1; then
+  EVD="$(mktemp -d "$TEST_RUNS.$$.eval.XXXXXX")"
+  node "$ROOT/test/helpers/meter-corpus.mjs" "$EVD" > "$EVD/gen" 2> "$EVD/err"
+  is "evaluator fixture built"        "0"  "$?"
+  is "...without complaining"         ""   "$(head -2 "$EVD/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # The generator duplicates the reader's salt because importing the reader would run it.
+  # One assertion is what stops that duplicate from drifting into a baseline whose ids match
+  # nothing — which would present as a control arm of zero, not as an error.
+  is "generator salt matches reader"  "$(node "$ROOT/bin/fleet-meter.mjs" --digest acme-web)" \
+                                      "$(node "$ROOT/test/helpers/meter-corpus.mjs" --digest acme-web)"
+
+  M="$ROOT/bin/fleet-meter.mjs"
+  node "$M" --corpus "$EVD/corpus" --evaluate --baseline-file "$EVD/baseline.json"       --json > "$EVD/full.json" 2>/dev/null
+  node "$M" --corpus "$EVD/prose"  --evaluate --baseline-file "$EVD/baseline.json"       --json > "$EVD/prose.json" 2>/dev/null
+  node "$M" --corpus "$EVD/corpus" --evaluate --baseline-file "$EVD/baseline-empty.json" --json > "$EVD/noctl.json" 2>/dev/null
+  node "$M" --corpus "$EVD/corpus" --evaluate --baseline-file "$EVD/baseline-wrong-rules.json" --json > "$EVD/wrong.json" 2>/dev/null
+
+  # Reads one dotted path. process.stdout.write of a String(), never console.log of a bare
+  # value — see the note on util.inspect at the head of this file.
+  ev() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      let v = r; for (const k of process.argv[2].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2"; }
+  # Finds a measurement by name rather than by index, so reordering MEASUREMENTS does not
+  # silently re-point every assertion at a different metric.
+  mm() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      const m = r.measurements.find((x) => x.measurement === process.argv[2]);
+      let v = m; for (const k of process.argv[3].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2" "$3"; }
+
+  # ── the arms. 40 treated and 35 control, never 75 and 0 ──
+  is "eval: treated sessions"         "40"    "$(ev "$EVD/full.json" arms.treated.sessions)"
+  is "eval: treated turns"            "73"    "$(ev "$EVD/full.json" arms.treated.turns)"
+  is "eval: control sessions"         "35"    "$(ev "$EVD/full.json" arms.control.sessions)"
+  is "eval: baseline cohort found"    "35"    "$(ev "$EVD/full.json" baseline.sessions_still_on_disk)"
+  is "eval: verdict is reportable"    "true"  "$(ev "$EVD/full.json" verdict.reportable)"
+
+  # ── the four, each at a value derived by hand from the generator's counts ──
+  # 30 briefs warned; 18 of them drew a correction, so 12 ran clean.
+  is "eval: false refusals n"         "30"    "$(mm "$EVD/full.json" false_refusals n_treated)"
+  is "eval: false refusals bound"     "0.4"   "$(mm "$EVD/full.json" false_refusals treated_upper_bound)"
+  # ...and it is one-armed by construction: there is no untreated rate to compare with.
+  is "eval: false refusals no control" "null" "$(mm "$EVD/full.json" false_refusals n_control)"
+  # 30 briefs carried a criterion, 9 named nothing observable; control 7 of 35.
+  is "eval: bypass n treated"         "30"    "$(mm "$EVD/full.json" bypass_rate n_treated)"
+  is "eval: bypass treated"           "0.3"   "$(mm "$EVD/full.json" bypass_rate treated_rate)"
+  is "eval: bypass control"           "0.2"   "$(mm "$EVD/full.json" bypass_rate control_rate)"
+  # 12s to the first tool call against 4s.
+  is "eval: latency treated"          "12"    "$(mm "$EVD/full.json" added_latency_seconds treated_median_seconds)"
+  is "eval: latency control"          "4"     "$(mm "$EVD/full.json" added_latency_seconds control_median_seconds)"
+  is "eval: latency added"            "8"     "$(mm "$EVD/full.json" added_latency_seconds added_seconds)"
+  # 18 of 30 done-claiming sessions carried on afterwards; control 15 of 35, from the
+  # committed columns rather than a re-read.
+  is "eval: rework treated rate"      "0.6"    "$(mm "$EVD/full.json" rework_turns treated_rate)"
+  is "eval: rework control rate"      "0.4286" "$(mm "$EVD/full.json" rework_turns control_rate)"
+  is "eval: rework treated median"    "1.5"    "$(mm "$EVD/full.json" rework_turns treated_median_turns)"
+  is "eval: rework control median"    "0"      "$(mm "$EVD/full.json" rework_turns control_median_turns)"
+
+  # ── the refusing direction: markers present only as prose ──
+  is "eval: prose treated sessions"   "0"      "$(ev "$EVD/prose.json" arms.treated.sessions)"
+  is "eval: prose verdict"            "false"  "$(ev "$EVD/prose.json" verdict.reportable)"
+  is "eval: prose says why"           "the treated cohort is empty: no session in this corpus carries a treatment marker" \
+                                      "$(ev "$EVD/prose.json" verdict.reason)"
+  for k in brief_check_in_force brief_check_fired ack_in_force ack_resolved_decisions observe_check_in_force observe_check_fired; do
+    is "eval: prose does not set $k"  "0"      "$(ev "$EVD/prose.json" "treatment_markers.$k.sessions_seen")"
+  done
+  # ...and the same four ARE set when the machinery actually emitted them.
+  for k in brief_check_in_force ack_in_force ack_resolved_decisions; do
+    is "eval: fixture sets $k"        "yes"    "$([ "$(ev "$EVD/full.json" "treatment_markers.$k.sessions_seen")" -gt 0 ] && echo yes || echo no)"
+  done
+
+  # ── A BLOCKED MEASUREMENT HAS NO VALUE, NOT A ZERO ──
+  # The single most important pair in this group. A regression that reports 0.0 here would
+  # read as the best possible result on a sample that cannot support any result at all.
+  is "eval: prose omits bypass rate"     "(missing)" "$(mm "$EVD/prose.json" bypass_rate treated_rate)"
+  is "eval: prose omits control rate"    "(missing)" "$(mm "$EVD/prose.json" bypass_rate control_rate)"
+  is "eval: prose omits refusal bound"   "(missing)" "$(mm "$EVD/prose.json" false_refusals treated_upper_bound)"
+  is "eval: prose omits latency median"  "(missing)" "$(mm "$EVD/prose.json" added_latency_seconds treated_median_seconds)"
+  is "eval: prose omits added seconds"   "(missing)" "$(mm "$EVD/prose.json" added_latency_seconds added_seconds)"
+  is "eval: prose omits rework rate"     "(missing)" "$(mm "$EVD/prose.json" rework_turns treated_rate)"
+  is "eval: prose omits rework median"   "(missing)" "$(mm "$EVD/prose.json" rework_turns treated_median_turns)"
+  is "eval: prose bypass blocked"     "false"  "$(mm "$EVD/prose.json" bypass_rate reportable)"
+  is "eval: prose names the floor"    "treated n=0, need 30" "$(mm "$EVD/prose.json" bypass_rate blocked_by.0)"
+  # The sample size IS a fact and is still reported; only the result is withheld.
+  is "eval: prose still reports n"    "0"      "$(mm "$EVD/prose.json" bypass_rate n_treated)"
+
+  # ── the refusing direction: a baseline that froze no sessions ──
+  # Per-metric, not all-or-nothing: the one-armed measurement survives an empty control.
+  is "eval: no control, bypass blocked"  "false" "$(mm "$EVD/noctl.json" bypass_rate reportable)"
+  is "eval: no control, latency blocked" "false" "$(mm "$EVD/noctl.json" added_latency_seconds reportable)"
+  is "eval: no control, names control"   "control n=0, need 30" "$(mm "$EVD/noctl.json" bypass_rate blocked_by.0)"
+  is "eval: one-armed still reports"     "true"  "$(mm "$EVD/noctl.json" false_refusals reportable)"
+
+  # ── the fourth position: a hook's own stderr, which no agent writes ──
+  # Requested by #6, which cannot be measured without it. It is a stronger position than the
+  # other three — prompt, output and command all sit somewhere an agent's text can reach,
+  # while a hook_success attachment is written by the harness from the hook's own stderr.
+  #   THE THIRD CORPUS IS THE ONE THAT MAKES IT A POSITION. `hookwrong` carries a
+  # byte-identical `observe-check: warn` line and differs only in attachment.type and
+  # hookEvent, so it fails unless the record's own fields are what is being read. Without it
+  # this is a string search wearing a longer name, and a hook_additional_context attachment —
+  # which an agent CAN influence, since it is fed back into the turn — would read as proof
+  # that the machinery ran.
+  node "$M" --corpus "$EVD/hook"      --evaluate --baseline-file "$EVD/baseline.json" --json > "$EVD/hook.json" 2>/dev/null
+  node "$M" --corpus "$EVD/hookwrong" --evaluate --baseline-file "$EVD/baseline.json" --json > "$EVD/hookw.json" 2>/dev/null
+  is "eval: hook stderr sets in-force"  "5" "$(ev "$EVD/hook.json" treatment_markers.observe_check_in_force.sessions_seen)"
+  # ...and `fired` is the smaller set, or a cohort defined by it would hold only the turns
+  # the check objected to — #5's own warning, applied to #6.
+  is "eval: ...and fired only where it warned" "3" "$(ev "$EVD/hook.json" treatment_markers.observe_check_fired.sessions_seen)"
+  is "eval: wrong attachment type is not it"   "0" "$(ev "$EVD/hookw.json" treatment_markers.observe_check_in_force.sessions_seen)"
+  is "eval: wrong hookEvent is not it"         "0" "$(ev "$EVD/hookw.json" treatment_markers.observe_check_fired.sessions_seen)"
+  # #6 IS DECLARED, NOT FOLDED IN. A session treated only by the Stop hook carries no
+  # brief-check, so counting it in the #3/#4 arm would put it in the denominator of a rate it
+  # cannot contribute a numerator to.
+  is "eval: #6 does not define the #3/#4 arm"  "0" "$(ev "$EVD/hook.json" arms.treated.sessions)"
+  is "eval: --contract pins it to hook_stderr" "2" \
+     "$(node "$M" --contract | grep -c 'only where it can have been emitted: hook_stderr')"
+
+  # ── the two arms must have been measured with the same ruler ──
+  is "eval: rules match"              "true"   "$(ev "$EVD/full.json" rules_match_baseline)"
+  is "eval: mismatched rules caught"  "false"  "$(ev "$EVD/wrong.json" rules_match_baseline)"
+  # ...and against the REAL committed baseline, which is the invariant that keeps every
+  # number in docs/meter-baseline-2026-09-01.json comparable to a future run. If a rule in
+  # bin/fleet-meter.mjs is edited, this goes red and the baseline has to be retaken.
+  mkdir -p "$EVD/none"
+  is "eval: committed baseline's rules still current" "true" \
+     "$(node "$M" --corpus "$EVD/none" --evaluate --baseline-file "$ROOT/docs/meter-baseline-2026-09-01.json" --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).rules_match_baseline)))')"
+
+  # ── a missing baseline is an error, not an empty result ──
+  node "$M" --corpus "$EVD/none" --evaluate --baseline-file "$EVD/nope.json" >/dev/null 2>"$EVD/miss"
+  is "eval: missing baseline exits 2" "2"      "$?"
+  is "eval: ...and says so"           "yes"    "$(grep -q 'cannot read the baseline' "$EVD/miss" && echo yes || echo no)"
+
+  # ── the contract is printable, because unwritten code has to know what to emit ──
+  # Counted, not spot-checked: a marker added without a permitted position would be a string
+  # search again, and this row is what makes adding one cost a deliberate edit here.
+  is "eval: --contract lists every marker with its position" "6" \
+     "$(node "$M" --contract | grep -c 'only where it can have been emitted')"
+  # A here-string, not a pipe: `grep -q` stops at its first match and `node` then takes
+  # SIGPIPE, which pipefail promotes to the pipeline's status — so a MATCH can answer 141,
+  # the `&&` never fires, and this row reads "no" for a contract that does say the join.
+  is "eval: --contract names the join" "yes"   "$(grep -q 'carry its verdict INTO the dispatched prompt' <<< "$(node "$M" --contract)" && echo yes || echo no)"
+
+  # ── counts and digests, never content — same boundary as the baseline ──
+  # Read line by line: two of these contain a space, and a `for` over a bare word list
+  # would split them into four assertions about words that are not the thing being checked.
+  while IFS= read -r leak; do
+    [ -n "$leak" ] || continue
+    is "eval: '$leak' is not in the output" "0" "$(grep -c -- "$leak" "$EVD/full.json" | tr -d ' ')"
+  done <<'LEAKS'
+acme-web
+acme-api
+meter-eval
+per document
+one picker
+build the thing
+LEAKS
+  rm -rf "$EVD"
+else
+  skip "the evaluator refuses what it cannot support" "node missing"
+fi
+
+# ── 6a5. recognising an ambiguity is not asking about one ────────────────────
+# The frame is Su and Cardie, "Knowing but Not Showing: LLMs Recognize Ambiguity but Rarely
+# Ask Clarifying Questions": on AmbigQA a model judges a question ambiguous with 60-80%
+# accuracy when asked to judge, then answers the same question directly over 95% of the time
+# when simply asked to answer. Latent awareness, almost no behaviour. Three numbers here, and
+# they are three on purpose — a single "gap" figure would hide which half a reader has to
+# accept in order to believe it.
+#
+# THE TWO HALVES FALL ON OPPOSITE SIDES OF THIS FILE'S SPLIT, AND THE SUITE SHOWS IT.
+# Asking is an AskUserQuestion tool_use record: a fact, and one no prose can forge. Naming an
+# ambiguity is prose by definition, so it has no unforgeable position and stays a label.
+#   The `asktalk` corpus is where that difference stops being a comment. Every session in it
+# names AskUserQuestion in the prompt, in a command, in output and in the assistant's own
+# text, and quotes the paper's title as well — because this brief and that title are both
+# going to end up in a real transcript. Its ask count must be ZERO, and its recognition count
+# must NOT be, and both are asserted. A row that showed one without the other would mean the
+# split had collapsed in one direction or the other.
+#
+# WHAT IS NOT MEASURED, asserted rather than left to a reader's charity: whether the question
+# was a GOOD question. That is a judgment nobody here can make mechanically and no attempt is
+# made, so the tool says so in its own output and this group checks that it still does.
+group "recognising an ambiguity is not asking about one"
+if command -v node >/dev/null 2>&1; then
+  AQD="$(mktemp -d "$TEST_RUNS.$$.ask.XXXXXX")"
+  node "$ROOT/test/helpers/meter-corpus.mjs" "$AQD" > "$AQD/gen" 2> "$AQD/err"
+  is "ask fixture built"              "0"  "$?"
+  is "...without complaining"         ""   "$(head -2 "$AQD/err" | tr '\n' ' ' | sed 's/ *$//')"
+  M="$ROOT/bin/fleet-meter.mjs"
+  node "$M" --corpus "$AQD/ask"     --json > "$AQD/ask.json"  2>/dev/null
+  node "$M" --corpus "$AQD/asktalk" --json > "$AQD/talk.json" 2>/dev/null
+  aq() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      let v = r; for (const k of process.argv[2].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2"; }
+
+  # ── the three numbers, each arithmetic on the counts at the top of the generator ──
+  # 10 sessions: 3 named and asked, 4 named and did not, 2 asked without naming, 1 neither.
+  is "ask: asked (observed)"          "5"      "$(aq "$AQD/ask.json" cohort.per_session.asked_units)"
+  is "ask: asking rate"               "0.5"    "$(aq "$AQD/ask.json" cohort.per_session.asking_rate)"
+  is "ask: AskUserQuestion calls"     "5"      "$(aq "$AQD/ask.json" pooled.observed.ask_calls)"
+  is "ask: recognised (labelled)"     "7"      "$(aq "$AQD/ask.json" cohort.per_session.named_ambiguity_units)"
+  is "ask: recognition rate"          "0.7"    "$(aq "$AQD/ask.json" cohort.per_session.recognition_rate)"
+  is "ask: the gap (derived)"         "4"      "$(aq "$AQD/ask.json" cohort.per_session.knowing_not_showing_units)"
+  is "ask: ...as a rate"              "0.4"    "$(aq "$AQD/ask.json" cohort.per_session.knowing_not_showing_rate)"
+  # ...and conditioned on having recognised anything, which is the paper's own framing.
+  is "ask: gap among recognisers"     "0.5714" "$(aq "$AQD/ask.json" cohort.per_session.knowing_not_showing_of_recognisers)"
+
+  # ── THE ROW THE SIGNAL EXISTS FOR: talking about asking is not asking ──
+  is "ask: prose about it asks nothing"   "0" "$(aq "$AQD/talk.json" pooled.observed.ask_calls)"
+  is "ask: ...and no session counts as having asked" "0" "$(aq "$AQD/talk.json" cohort.per_session.asked_units)"
+  # ── and the same corpus proves the OTHER half is a label, not a fact ──
+  # The prose does match the recognition rule, because there is no hook that writes "this
+  # session noticed something". That is the honest limit and it belongs in a row.
+  is "ask: ...while the LABEL does match prose" "4" "$(aq "$AQD/talk.json" cohort.per_session.named_ambiguity_units)"
+
+  # ── the rule reads the SESSION's text, not the human's ──
+  # A brief that says "this is ambiguous, assume per document" has done the recognising for
+  # the session. Counting it would score the session for the human's care, and would make the
+  # recognition rate RISE as the asks got clearer — backwards. The prompts in this corpus are
+  # thick with the rule's own vocabulary and the assistant says nothing of the kind.
+  node "$M" --corpus "$AQD/askhuman" --json > "$AQD/human.json" 2>/dev/null
+  is "ask: the human naming it is not the session noticing" "0" \
+     "$(aq "$AQD/human.json" cohort.per_session.named_ambiguity_units)"
+  is "ask: ...and those sessions are read at all" "3" "$(aq "$AQD/human.json" corpus.turns)"
+
+  # ── the split is declared, not just implemented ──
+  is "ask: asking is observed"        "observed" "$(aq "$AQD/ask.json" rules.ask.kind)"
+  is "ask: recognising is labelled"   "labelled" "$(aq "$AQD/ask.json" rules.named_ambiguity.kind)"
+  is "ask: the label carries a digest" "12"      "$(printf '%s' "$(aq "$AQD/ask.json" rules.named_ambiguity.digest)" | wc -c | tr -d ' ')"
+  # node, not a `case`: a close-paren inside a case pattern terminates the command
+  # substitution it sits in, so the row asserted against a fragment of its own shell.
+  is "ask: quality is disclaimed"     "yes"      "$(node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      process.stdout.write(/not measured/.test(String(r.rules.ask.note)) ? "yes" : "no");' "$AQD/ask.json")"
+
+  # ── adding a measurement must not disturb a pre-registered rule ──
+  # The five the committed baseline recorded are derived from their own contents, so two new
+  # keys cannot move them. Checked against the real committed file, not a fixture.
+  mkdir -p "$AQD/none"
+  is "ask: committed baseline's rules still current" "true" \
+     "$(node "$M" --corpus "$AQD/none" --evaluate --baseline-file "$ROOT/docs/meter-baseline-2026-09-01.json" --json 2>/dev/null \
+        | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String(JSON.parse(s).rules_match_baseline)))')"
+
+  # ── the fifth measurement, and the floor it refuses under ──
+  node "$M" --corpus "$AQD/corpus" --evaluate --baseline-file "$AQD/baseline.json" --json > "$AQD/ev.json" 2>/dev/null
+  mm5() { node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      const m = r.measurements.find((x) => x.measurement === "ambiguity_gap");
+      let v = m; for (const k of process.argv[2].split(".")) v = (v === null || v === undefined) ? v : v[k];
+      process.stdout.write(v === undefined ? "(missing)" : String(v));
+    ' "$1" "$2"; }
+  is "ask: it is a measurement"       "labelled" "$(mm5 "$AQD/ev.json" kind)"
+  is "ask: reportable at n=40"        "true"     "$(mm5 "$AQD/ev.json" reportable)"
+  # ...and below the floor it withholds the value rather than printing a flattering zero,
+  # exactly as the other four do.
+  node "$M" --corpus "$AQD/ask" --evaluate --baseline-file "$AQD/baseline.json" --json > "$AQD/ev2.json" 2>/dev/null
+  is "ask: below the floor it refuses"    "false"     "$(mm5 "$AQD/ev2.json" reportable)"
+  is "ask: ...and omits the rate"         "(missing)" "$(mm5 "$AQD/ev2.json" treated_asking_rate)"
+
+  # ── the contract-version gap is STATED, not worked around ──
+  # The clause this measurement would most want to evaluate changed, and the corpus cannot
+  # say which version a session carried. That is reported as a gap with its reason and with
+  # the workaround it refuses, the same way a never-fired marker is reported.
+  is "ask: the gap is named"          "1" "$(node -e '
+      const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+      process.stdout.write(String((r.gaps||[]).filter(g=>/contract/.test(g.what)).length));' "$AQD/ev.json")"
+  is "ask: ...and refuses a date cut" "yes" "$(node -e '
+      const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+      const g=(r.gaps||[])[0]||{};
+      process.stdout.write(/date cut/i.test(String(g.refused_workaround))?"yes":"no");' "$AQD/ev.json")"
+  # The 5 transcripts that DO contain the contract text contain both versions of the clause,
+  # so the text marks a session that edited the file rather than one that ran under it. If
+  # that stops being said, the number reads as a usable marker.
+  is "ask: ...and says why those 5 are not evidence" "yes" "$(node -e '
+      const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+      const g=(r.gaps||[])[0]||{};
+      process.stdout.write(/anti-correlated/i.test(String(g.and_worse))?"yes":"no");' "$AQD/ev.json")"
+
+  # ── counts and digests, never content ──
+  while IFS= read -r leak; do
+    [ -n "$leak" ] || continue
+    is "ask: '$leak' is not in the output" "0" "$(grep -c -- "$leak" "$AQD/ask.json" | tr -d ' ')"
+  done <<'AQLEAKS'
+acme-web
+meter-eval
+per document
+wire up the picker
+AQLEAKS
+  rm -rf "$AQD"
+else
+  skip "recognising an ambiguity is not asking about one" "node missing"
+fi
+
 # ── 6b. every command is actually installed ──────────────────────────────────
 # A new command that never reaches the install list is invisible until someone hits
 # "command not found" — and worse, the SUMMARY line was hand-maintained separately from
@@ -7234,6 +10006,233 @@ for f in "$ROOT"/bin/*; do
   is "$b is in install.sh's list" "yes" \
      "$(grep -qE "(^|[( ])$b([ )]|\$)" "$ROOT/install.sh" 2>/dev/null && echo yes || echo no)"
 done
+
+# ── 6c. the contract and the hooks, driven by a scripted model ───────────────
+# THE MISSING HALF of the group at the top of this file. That one proves the contract
+# string reaches the `claude` exec — it was passed. It cannot ask whether it ARRIVED, or
+# what happened next, and that is the gap an apostrophe drove through: the system prompt
+# was truncated from 3589 characters to 673, the word "the" was submitted as a turn in
+# every new session, and twenty-two green assertions failed to notice for a day because
+# they grepped the whole argv rather than one argument.
+#
+# test/helpers/model-fixture.mjs closes it by pointing the real `claude` binary at a
+# node:http server on loopback with ANTHROPIC_BASE_URL and the literal API key "fixture".
+# Everything except the model's reasoning is real: the binary, bin/claude-here and the
+# contract IT ships (extracted from that file at run time, so there is no test-only copy
+# to drift), hooks/fleet-guard.sh and hooks/fleet-event.sh as installed hooks, a git
+# checkout, the filesystem. One session, three scripted turns, and the row that matters
+# is the one this suite could not previously write at all: a real PreToolUse hook refused
+# a scripted tool call and its reason came BACK into the conversation, where the fixture
+# read it.
+#   BOTH DIRECTIONS, for the reason every pane assertion here runs against a busy capture
+# AND an idle one. Turn 1 calls a tool the guard does not guard and turn 2 calls the one it
+# does, so a guard that refuses everything fails a different row than a guard that can
+# never fire. Watched going red on four deliberate breaks: an apostrophe planted in the
+# contract, the guard's refusal replaced by exit 0, the guard widened to every tool, and
+# the fixture's tool input sent as an object instead of the JSON string partial_json
+# requires. Each reddened the row it belongs to and no others — except the apostrophe,
+# which reddened two, because word-splitting the rest of the contract also hands the
+# session an initial prompt and the run stops being the run under test.
+#
+# SKIPPED where there is no `claude`, `git` or `jq`, and the last two are not fussiness:
+# both hooks open with `command -v jq || exit 0`, so without jq the guard declines in
+# silence and "the guard refused" would go red for a reason that has nothing to do with
+# the guard. CI runners carry none of the three, so this group skips there and runs on a
+# developer machine — the same bargain as viewport-check and its Chrome, and stated here
+# rather than left to be discovered.
+group "a scripted model drives a real session"
+MFX="$(mktemp -d "$TEST_RUNS.$$.mfx.XXXXXX")"
+node "$ROOT/test/helpers/model-fixture.mjs" > "$MFX/out" 2> "$MFX/err"
+mfxrc=$?
+if grep -q '^#SKIP' "$MFX/out" 2>/dev/null; then
+  skip "a scripted model drives a real session" \
+       "$(head -1 "$MFX/out" | cut -d "$US" -f3)"
+else
+  is "model-fixture ran"          "0" "$mfxrc"
+  is "...without complaining"     ""  "$(head -2 "$MFX/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A floor, for the reason pwa-check documents: a helper that died before reaching its
+  # assertions emits a couple of rows and no mismatches, which reads as clean.
+  is "...and produced its checks" "yes" \
+     "$([ "$(wc -l < "$MFX/out")" -ge 7 ] && echo yes || echo "no: $(wc -l < "$MFX/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$MFX/out"
+fi
+rm -rf "$MFX"
+
+# ── 6d. the Stop-hook observation check ───────────────────────────────────────
+# hooks/fleet-observe.sh records whether a LEAD's turn changed a renderable surface and never
+# looked at it. MEASURED, and the measurement is the reason it exists: 67 of 118 sessions that
+# claimed done had opened a browser first — 0.568. And of 172 build turns that changed a screen
+# file, 154 ran a test, lint or build while FOUR ever opened a browser, on exactly the surfaces
+# whose defects came back as photographs.
+#
+# WARN ONLY, AND THAT IS THE DESIGN RATHER THAN A FIRST STEP. The numbers above justify
+# instrumenting the gap; they do not say a refusal closes it. docs/improvement-plan.md #5
+# exists because v1 of that plan shipped a hard gate on a correlation, and promoting this to a
+# refusal is #5's decision against #5's numbers. So every assertion below is about a RECORD,
+# and one of them is that the run did not change.
+#
+# IT KEYS ON MECHANICAL EVIDENCE, NEVER THE PROSE. A check that reads the done-report for the
+# word "observed" is satisfied by a fake observation, and then it measures fluency — the
+# performative-compliance failure docs/plan-critique.md names. So it reads the transcript and
+# asks whether an observation tool RAN, using bin/fleet-meter.mjs's `observed` rules so the
+# check and the meter cannot disagree about what a browser is.
+#
+# TWO HALVES BELOW, split by what each can prove.
+#
+# THE UNIT HALF drives the hook directly with synthesised transcripts, one per decision, and
+# needs no `claude` — so it runs on both CI legs. Every row is a direction: it warns on a
+# surface with no look, records `ok` when the look happened or nothing renderable changed, and
+# says NOTHING at all where it could not judge. The three verdicts are distinct on purpose: a
+# missing line means untreated, and `ok` means checked-and-clean, and #5's cohort is built from
+# the difference. A hook that emitted `ok` when it had not actually looked would put untreated
+# sessions in the treated arm, which is the contamination its marker rule exists to stop.
+#   THE SCOPING ROW IS THE SHARP ONE: an observation made in an EARLIER turn must not excuse
+# this one. Scoped wrongly, the check reports `ok` for every session that ever opened a browser
+# once, and it would look like it was working forever.
+#
+# NO PIPELINE INTO THE ASSERTION, and that is not style. `{ transcript } | obs_run` puts
+# obs_run in a SUBSHELL, so `is` would print its red line and increment PASS/FAIL in a copy of
+# the shell that then exits — the suite stays green with the defect on screen, which is the
+# exact failure this file exists to prevent. The transcript is written to a file first.
+group "the Stop-hook observation check"
+if command -v jq >/dev/null 2>&1; then
+  OBS="$(mktemp -d "$TEST_RUNS.$$.obs.XXXXXX")"
+  OBS_EXITS=""
+  # Records, as command substitutions rather than as writers, so a transcript reads as a list
+  # of what happened in the turn.
+  obs_u()    { printf '{"type":"user","promptId":"%s","message":{"role":"user","content":"make the send button fit"}}' "$1"; }
+  obs_tool() { printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"%s","input":%s}]}}' "$1" "$2"; }
+  obs_text() { printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}'; }
+  obs_write() { : > "$OBS/t.jsonl"; local l; for l in "$@"; do printf '%s\n' "$l" >> "$OBS/t.jsonl"; done; }
+  # $1=name $2=want-verdict (warn|ok|silent) $3=prompt_id $4=stop_hook_active.
+  # THE VERDICT IS READ FROM THE MARKER AT THE HEAD OF A LINE, not from the message body — the
+  # advice text under a warn mentions fleet-look and a grep for that would pass on prose.
+  obs_run() {
+    local rc out verdict
+    out="$(printf '{"hook_event_name":"Stop","transcript_path":"%s","prompt_id":"%s","stop_hook_active":%s,"cwd":"%s"}' \
+      "$OBS/t.jsonl" "$3" "$4" "$ROOT" \
+      | env CLAUDE_FLEET_SOCK="${OBS_SOCK-cf-acme-api}" CLAUDE_FLEET_SLOT="${OBS_SLOT-master}" \
+            CLAUDE_FLEET_ALLOW_UNOBSERVED="${OBS_OVERRIDE-0}" TMUX= \
+            bash "$ROOT/hooks/fleet-observe.sh" 2>&1 1>/dev/null)"
+    rc=$?
+    OBS_EXITS="$OBS_EXITS$rc"
+    # HERE-STRINGS, NOT PIPES. `grep -q` stops at its first match and the writer then takes
+    # SIGPIPE, which `set -o pipefail` promotes to the pipeline's status — so a MATCH can
+    # come back as 141 and this `if` would take the WRONG branch, reading a warn as silent.
+    # $out is a hook's whole output, which is exactly the unbounded left-hand side that
+    # blocks long enough for it to happen. The suite sweeps itself for the pipe form.
+    if   grep -qE '^[[:space:]]*observe-check:[[:space:]]*warn\b' <<< "$out"; then verdict=warn
+    elif grep -qE '^[[:space:]]*observe-check:[[:space:]]*ok\b'   <<< "$out"; then verdict=ok
+    else verdict=silent; fi
+    is "$1" "$2" "$verdict"
+  }
+  OBS_W='{"file_path":"/repo/web/app.js"}'      # a renderable surface, the way this repo ships one
+  OBS_H='{"file_path":"/repo/report.html"}'     # renderable anywhere, by extension
+  OBS_N='{"file_path":"/repo/bin/fleet-send"}'  # nothing fleet-look could render
+  OBS_TEST='{"command":"./test/run.sh"}'
+  OBS_LOOK='{"command":"fleet-look.mjs http://127.0.0.1:8787"}'
+  OBS_CURL='{"command":"curl -s http://127.0.0.1:8787 | head"}'
+
+  # THE ONE IT EXISTS FOR: a surface changed, a test run, nothing looked at.
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_TEST")" "$(obs_text)"
+  obs_run "warns on a lead turn that changed a surface and never looked" warn P1 false
+  # CURL IS NOT A BROWSER. A 200 says the route answered; it does not say the screen drew, and
+  # turns that changed a screen and never looked at one are the entire finding.
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_CURL")"
+  obs_run "...and curl does not count as looking" warn P1 false
+  obs_write "$(obs_u P1)" "$(obs_tool Write "$OBS_H")" "$(obs_tool Bash "$OBS_TEST")"
+  obs_run "...on a .html surface too" warn P1 false
+
+  # `ok` — the check ran and had nothing to object to. Distinct from silence, because `ok` is
+  # what puts a turn in #5's treated cohort and silence is what keeps it out.
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_LOOK")"
+  obs_run "records ok when fleet-look ran in the same turn" ok P1 false
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool mcp__chrome-devtools__take_screenshot '{}')"
+  obs_run "...or a chrome-devtools call" ok P1 false
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_N")" "$(obs_tool Bash "$OBS_TEST")"
+  obs_run "...and when nothing renderable changed" ok P1 false
+  obs_write "$(obs_u P1)" "$(obs_text)"
+  obs_run "...and when the turn made no tool calls at all" ok P1 false
+
+  # SILENT, on every path where it could not actually judge the turn. An `ok` on any of these
+  # would claim a check that did not happen.
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_TEST")"
+  obs_run "says nothing on the SECOND Stop of the same turn" silent P1 true
+  OBS_SLOT=api-2 obs_run "...for a worker rather than the lead" silent P1 false
+  OBS_SOCK= obs_run "...outside a fleet altogether" silent P1 false
+  OBS_OVERRIDE=1 obs_run "...under the documented override" silent P1 false
+  printf 'not json\n{ oops\n' > "$OBS/t.jsonl"
+  obs_run "...on a transcript it cannot parse" silent P1 false
+  obs_write "$(obs_u P1)" "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_TEST")"
+  obs_run "...when the payload carries no prompt_id" silent "" false
+
+  # SCOPED TO THIS TURN — the row that would otherwise pass forever while the check reported ok
+  # for everybody: a browser opened in an EARLIER turn must not excuse this one.
+  obs_write "$(obs_u P0)" "$(obs_tool Bash "$OBS_LOOK")" "$(obs_u P1)" \
+            "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_TEST")"
+  obs_run "an observation in a PREVIOUS turn does not excuse this one" warn P1 false
+  obs_write "$(obs_u P0)" "$(obs_tool Bash "$OBS_TEST")" "$(obs_u P1)" \
+            "$(obs_tool Edit "$OBS_W")" "$(obs_tool Bash "$OBS_LOOK")"
+  obs_run "...and one in THIS turn records ok" ok P1 false
+
+  # A missing transcript is the commonest silent path in practice and the easiest to break by
+  # reordering the guards, so it gets its own row rather than being assumed.
+  OBS_MISSING="$(printf '{"hook_event_name":"Stop","transcript_path":"%s","prompt_id":"P1","stop_hook_active":false}' \
+    "$OBS/definitely-not-here.jsonl" \
+    | env CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=master TMUX= \
+      bash "$ROOT/hooks/fleet-observe.sh" 2>&1 1>/dev/null)"
+  is "...and on a transcript that is not there" "" "$OBS_MISSING"
+
+  # WARN ONLY, ASSERTED RATHER THAN INTENDED. Every path above must exit 0: a non-zero exit
+  # from a Stop hook is a REFUSAL that re-opens the turn, which is exactly what this item was
+  # corrected not to ship. One row over every case, so a single stray `exit 2` cannot hide.
+  OBS_NONZERO="$(printf '%s' "$OBS_EXITS" | tr -d 0)"
+  is "never exits non-zero on any path" "all zero over 15 cases" \
+     "$([ -z "$OBS_NONZERO" ] && echo "all zero over ${#OBS_EXITS} cases" || echo "non-zero somewhere: $OBS_EXITS")"
+  # And the source carries no other exit at all, which is what stops a future edit from adding
+  # one below the last assertion here.
+  is "...and the source has no non-zero exit in it" "yes" \
+     "$(grep -qE '^[[:space:]]*exit [1-9]' "$ROOT/hooks/fleet-observe.sh" && echo no || echo yes)"
+  rm -rf "$OBS"
+
+  # WIRED, not merely present. A hook nobody installed never fires, and that is
+  # indistinguishable from one that had nothing to say — the same argument as the install-list
+  # group below. Stop carries TWO of ours, so assert both rather than "Stop is wired".
+  is "install.sh wires the check onto Stop" "yes" \
+     "$(grep -q 'OBSERVE="\$FLEET_HOME/hooks/fleet-observe.sh"' "$ROOT/install.sh" \
+        && grep -q 'command: \$observe' "$ROOT/install.sh" && echo yes || echo no)"
+  is "...alongside the status hook, not instead of it" "yes" \
+     "$(grep -q 'Stop: stopentry' "$ROOT/install.sh" && echo yes || echo no)"
+else
+  skip "the Stop-hook observation check" "no jq, and the hook declines without it"
+fi
+
+# ── the same check, in real sessions ─────────────────────────────────────────
+# THE FIXTURE HALF. Four things cannot be asserted from a synthesised transcript, and each is
+# something Claude Code could change under us where the hook would simply go quiet: that the
+# warning lands at the POSITION #5's evaluator can trust, that it does NOT re-open the turn,
+# that the agent is not told, and — recorded but deliberately unused — that a Stop hook could
+# block if #5 ever asks for a refusal.
+#   Skipped where there is no `claude`, same bargain as the group above it.
+OCO="$(mktemp -d "$TEST_RUNS.$$.oco.XXXXXX")"
+node "$ROOT/test/helpers/observe-check.mjs" > "$OCO/out" 2> "$OCO/err"
+ocorc=$?
+if grep -q '^#SKIP' "$OCO/out" 2>/dev/null; then
+  skip "the observation check, in a real session" "$(head -1 "$OCO/out" | cut -d "$US" -f3)"
+else
+  is "observe-check ran"          "0" "$ocorc"
+  is "...without complaining"     ""  "$(head -2 "$OCO/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A floor, for the reason pwa-check documents: a helper that died before its assertions emits
+  # a couple of rows and no mismatches, which reads as clean.
+  is "...and produced its checks" "yes" \
+     "$([ "$(wc -l < "$OCO/out")" -ge 12 ] && echo yes || echo "no: $(wc -l < "$OCO/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$OCO/out"
+fi
+rm -rf "$OCO"
 
 # ── 7. every command parses ──────────────────────────────────────────────────
 group "syntax"
