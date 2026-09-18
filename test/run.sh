@@ -2982,6 +2982,37 @@ else
 fi
 rm -rf "$STEPO"
 
+group "the pre-push hook refuses to publish a withheld name"
+# WHY A HOOK IS TESTED AT ALL, and why the suite could not have caught what it catches.
+# This file's name sweep reads every file git TRACKS, which is the tree you are standing in
+# — so it is silent about a branch you never checked out and never ran it on. Measured
+# 2026-09-18: 37 branches were live on the PUBLIC remote carrying 650 occurrences of 13
+# withheld names, none on main or staging, every suite run green throughout. Two of the
+# shapes are ones this sweep structurally cannot see — a name in a FILE NAME (it reads
+# `ls-files` contents, never the names) and a name in a COMMIT MESSAGE.
+#   EVERY WAY THE HOOK CAN BREAK LEAVES IT EXITING ZERO: a failed import, a range that
+# resolves empty, an exit on the wrong branch. All of those are indistinguishable from
+# "nothing to find", which is the one answer it must never fake — the empty-busy-regex
+# shape again. So it is DRIVEN against a real bare remote, and the assertion is the exit
+# status. The helper pushes a CANARY it injects into a copy of the list, not a real name,
+# for the reason section 3 of name-sweep gives: writing one here would put it back.
+PPO="$(mktemp -d "$TEST_RUNS.$$.pp.XXXXXX")"
+node "$ROOT/test/helpers/prepush-check.mjs" > "$PPO/out" 2> "$PPO/err"
+is "prepush-check produced rows" "yes" \
+   "$([ "$(grep -c . "$PPO/out")" -ge 8 ] && echo yes || echo "no: $(grep -c . "$PPO/out") rows — $(tr '\n' ' ' < "$PPO/err" | cut -c1-140)")"
+while IFS=$'\x1f' read -r name want got; do
+  [ -n "$name" ] || continue
+  is "$name" "$want" "$got"
+done < "$PPO/out"
+# AND THE HOOK IS WIRED, not merely present. A file in .githooks/ that git never consults
+# is the same silence as no hook at all, and `core.hooksPath` is repo-local config that a
+# fresh clone does not inherit — so this asserts the file is executable and names the one
+# command that arms it, rather than asserting the config of whoever happens to be running.
+is "the hook is executable"        "yes" "$([ -x "$ROOT/.githooks/pre-push" ] && echo yes || echo no)"
+is "...and README says how to arm it" "1" \
+   "$([ "$(grep -c 'core.hooksPath' "$ROOT/CONTRIBUTING.md" 2>/dev/null || echo 0)" -ge 1 ] && echo 1 || echo 0)"
+rm -rf "$PPO"
+
 group "the review server answers every page it links to"
 # A TEMPORAL DEAD ZONE IS INVISIBLE UNTIL SOMETHING RENDERS, and then it is not a wrong
 # pixel, it is a DEAD PROCESS: `serve` parks the module with `await new Promise(() => {})`

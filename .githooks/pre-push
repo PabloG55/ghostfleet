@@ -1,0 +1,131 @@
+#!/usr/bin/env node
+// .githooks/pre-push — refuse to publish a real project, client or employer name.
+//
+// WHY A HOOK AND NOT A TEST. `test/run.sh`'s name sweep already reads every tracked file,
+// and it is the reason HEAD is clean. It cannot help with the thing that actually leaked:
+// a branch you never ran the suite on. Measured 2026-09-18 on this repo — 37 branches were
+// live on the public remote carrying 650 occurrences of 13 names, none of them on main or
+// staging, none of them caught by a green suite, because a suite only sees the tree you
+// happen to be standing in. The push is the moment the data becomes public, so the push is
+// where the check belongs.
+//
+// WHAT IT READS. The same tokenizer and the same one-way digest list the suite uses,
+// imported rather than copied: a hook carrying its own matcher would be the "renderer
+// nobody ships" shape — green against a matcher the suite never proves. name-sweep.mjs
+// guards its own self-test so importing it runs nothing and grows no list.
+//
+// WHAT IT CHECKS, and each one is here because it was found dirty in this repo:
+//   - the tip tree's file CONTENTS      (650 occurrences across 37 branches)
+//   - the tip tree's PATH NAMES         (9 committed paths; the suite sweep reads
+//                                        `ls-files` contents and never the names)
+//   - every blob INTRODUCED in the range, so a name added and deleted inside the
+//     pushed history is still refused — the commit that removes it does not unpublish it
+//   - the COMMIT MESSAGES in the range  (30 of 371 messages)
+//   - the REF NAME itself               (a branch can be named after a project)
+//
+// IT PRINTS THE MATCH. Locally, to your own terminal, because "something is wrong
+// somewhere" is not actionable and the whole point is to show you what you nearly pushed.
+// Nothing is written to a file.
+//
+// Bypass, if you are certain: `git push --no-verify`. Wire it with
+// `git config core.hooksPath .githooks`.
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const ZERO = '0'.repeat(40);
+const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+const sweep = path.join(root, 'test', 'helpers', 'name-sweep.mjs');
+
+// NO SWEEP, NO PUSH — and that is deliberate. A hook that cannot find its matcher and
+// exits 0 is worse than no hook: it reports success for every push forever, which is the
+// empty-busy-regex shape CLAUDE.md keeps naming. Say so and refuse.
+if (!fs.existsSync(sweep)) {
+  console.error(`pre-push: cannot find ${path.relative(root, sweep)} — refusing to push unchecked.`);
+  console.error('pre-push: if that file really is gone, push with --no-verify and fix the hook.');
+  process.exit(1);
+}
+const { digest, candidates, DENY } = await import(pathToFileURL(sweep).href);
+
+const git = (...a) => execFileSync('git', ['-C', root, ...a], { maxBuffer: 1 << 28 });
+const txt = (...a) => git(...a).toString();
+const hits = (s) => {
+  const out = new Set();
+  for (const line of String(s).split('\n'))
+    for (const c of candidates(line)) if (DENY.has(digest(c))) out.add(c);
+  return out;
+};
+
+const stdin = fs.readFileSync(0, 'utf8').trim();
+if (!stdin) process.exit(0);                       // nothing to push
+
+const remote = process.argv[2] || 'origin';
+const bad = [];                                    // {where, what:Set}
+const blobSeen = new Set();
+
+const checkBlob = (sha, where) => {
+  if (blobSeen.has(sha)) return;
+  blobSeen.add(sha);
+  let b; try { b = git('cat-file', 'blob', sha); } catch { return; }
+  if (b.includes(0)) return;                       // binary, by content not extension
+  const h = hits(b.toString('utf8'));
+  if (h.size) bad.push({ where, what: h });
+};
+
+for (const line of stdin.split('\n')) {
+  const [localRef, localSha, remoteRef, remoteSha] = line.trim().split(/\s+/);
+  if (!localSha || localSha === ZERO) continue;    // a deletion publishes nothing
+
+  // THE REF NAME travels to the remote too.
+  for (const r of [localRef, remoteRef]) {
+    const h = hits(String(r || '').replace(/^refs\/heads\//, ''));
+    if (h.size) bad.push({ where: `the ref name ${r}`, what: h });
+  }
+
+  // THE TIP TREE — contents and path names. This is the tree the remote will serve.
+  let tree = '';
+  try { tree = txt('ls-tree', '-r', '--format=%(objectname) %(path)', localSha); } catch {}
+  for (const row of tree.trim().split('\n')) {
+    if (!row) continue;
+    const sp = row.indexOf(' ');
+    const sha = row.slice(0, sp), p = row.slice(sp + 1);
+    const ph = hits(p);
+    if (ph.size) bad.push({ where: `${p} (in the FILE NAME)`, what: ph });
+    checkBlob(sha, p);
+  }
+
+  // EVERY BLOB AND MESSAGE INTRODUCED IN THE RANGE. Deleting a name in a later commit of
+  // the same push does not unpublish it: the blob still travels and stays reachable.
+  const range = (!remoteSha || remoteSha === ZERO)
+    ? [localSha, '--not', `--remotes=${remote}`]   // a new branch: everything not already there
+    : [`${remoteSha}..${localSha}`];
+  let revs = [];
+  try { revs = txt('rev-list', ...range).trim().split('\n').filter(Boolean); } catch {}
+  for (const c of revs) {
+    const h = hits(txt('log', '-1', '--format=%B', c));
+    if (h.size) bad.push({ where: `the commit message of ${c.slice(0, 12)}`, what: h });
+    let objs = '';
+    try { objs = txt('diff-tree', '-r', '--no-commit-id', '--format=', c); } catch {}
+    for (const row of objs.trim().split('\n')) {
+      // :100644 100644 <old> <new> M\tpath
+      const m = row.match(/^:\S+\s+\S+\s+\S+\s+([0-9a-f]{40})\s+\S+\t(.+)$/);
+      if (m && m[1] !== ZERO) checkBlob(m[1], `${m[2]} (introduced by ${c.slice(0, 12)})`);
+    }
+  }
+}
+
+if (!bad.length) process.exit(0);
+
+const names = new Set(bad.flatMap(b => [...b.what]));
+console.error('');
+console.error(`pre-push: REFUSED — ${names.size} withheld name(s) in ${bad.length} place(s).`);
+console.error(`pre-push: this remote is PUBLIC; a push is the moment it stops being private.`);
+console.error('');
+for (const b of bad.slice(0, 40)) console.error(`  ${b.where}\n      ${[...b.what].join(', ')}`);
+if (bad.length > 40) console.error(`  … and ${bad.length - 40} more`);
+console.error('');
+console.error('  fix the tree, or drop the branch. If this is a false positive, the list is');
+console.error('  in test/helpers/name-sweep.mjs. To override once: git push --no-verify');
+console.error('');
+process.exit(1);
