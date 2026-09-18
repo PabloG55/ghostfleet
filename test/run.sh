@@ -2982,6 +2982,37 @@ else
 fi
 rm -rf "$STEPO"
 
+group "the pre-push hook refuses to publish a withheld name"
+# WHY A HOOK IS TESTED AT ALL, and why the suite could not have caught what it catches.
+# This file's name sweep reads every file git TRACKS, which is the tree you are standing in
+# — so it is silent about a branch you never checked out and never ran it on. Measured
+# 2026-09-18: 37 branches were live on the PUBLIC remote carrying 650 occurrences of 13
+# withheld names, none on main or staging, every suite run green throughout. Two of the
+# shapes are ones this sweep structurally cannot see — a name in a FILE NAME (it reads
+# `ls-files` contents, never the names) and a name in a COMMIT MESSAGE.
+#   EVERY WAY THE HOOK CAN BREAK LEAVES IT EXITING ZERO: a failed import, a range that
+# resolves empty, an exit on the wrong branch. All of those are indistinguishable from
+# "nothing to find", which is the one answer it must never fake — the empty-busy-regex
+# shape again. So it is DRIVEN against a real bare remote, and the assertion is the exit
+# status. The helper pushes a CANARY it injects into a copy of the list, not a real name,
+# for the reason section 3 of name-sweep gives: writing one here would put it back.
+PPO="$(mktemp -d "$TEST_RUNS.$$.pp.XXXXXX")"
+node "$ROOT/test/helpers/prepush-check.mjs" > "$PPO/out" 2> "$PPO/err"
+is "prepush-check produced rows" "yes" \
+   "$([ "$(grep -c . "$PPO/out")" -ge 8 ] && echo yes || echo "no: $(grep -c . "$PPO/out") rows — $(tr '\n' ' ' < "$PPO/err" | cut -c1-140)")"
+while IFS=$'\x1f' read -r name want got; do
+  [ -n "$name" ] || continue
+  is "$name" "$want" "$got"
+done < "$PPO/out"
+# AND THE HOOK IS WIRED, not merely present. A file in .githooks/ that git never consults
+# is the same silence as no hook at all, and `core.hooksPath` is repo-local config that a
+# fresh clone does not inherit — so this asserts the file is executable and names the one
+# command that arms it, rather than asserting the config of whoever happens to be running.
+is "the hook is executable"        "yes" "$([ -x "$ROOT/.githooks/pre-push" ] && echo yes || echo no)"
+is "...and README says how to arm it" "1" \
+   "$([ "$(grep -c 'core.hooksPath' "$ROOT/CONTRIBUTING.md" 2>/dev/null || echo 0)" -ge 1 ] && echo 1 || echo 0)"
+rm -rf "$PPO"
+
 group "the review server answers every page it links to"
 # A TEMPORAL DEAD ZONE IS INVISIBLE UNTIL SOMETHING RENDERS, and then it is not a wrong
 # pixel, it is a DEAD PROCESS: `serve` parks the module with `await new Promise(() => {})`
@@ -9464,6 +9495,40 @@ if command -v git >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   rm -rf "$NSW"
 else
   skip "no real project name in the tree" "git or node missing"
+fi
+
+group "no withheld name in what npm actually ships"
+# THE SWEEP ABOVE READS `git ls-files`; `npm pack` READS THE WORKING DIRECTORY. Those are
+# different sets, and the gap ships: measured, an untracked file dropped into any directory
+# named in package.json's `files` reaches the registry while the sweep meant to guard the
+# release cannot see it. `prepublishOnly` runs this suite, so a release LOOKED checked while
+# the set being checked was not the set that leaves.
+#   This is the shape the repo keeps repeating rather than a new one. #59 scrubbed the
+# fixtures and #63 found the document those fixtures are an implementation OF — "the leak
+# stayed open in the file that gets read the most, two PRs after it was declared closed".
+# Then the tracked-file sweep was silent about 37 branches live on the public remote. Each
+# guard checked a PROXY for the artifact. So this asks npm what it will ship and reads THAT,
+# the same way doc-fixtures asks whether a name is IN web/fixtures/ rather than on a list.
+#   The untracked row is not "untracked is wrong" — it is that such a file is invisible to
+# every other check here, so it has to be looked at deliberately instead of shipping because
+# no one was watching that set.
+group_needs_npm=0
+command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && group_needs_npm=1
+if [ "$group_needs_npm" = 1 ]; then
+  PKS="$(mktemp -d "$TEST_RUNS.$$.pks.XXXXXX")"
+  node "$ROOT/test/helpers/pack-sweep.mjs" > "$PKS/out" 2> "$PKS/err"
+  is "pack-sweep ran"          "0"   "$?"
+  # A FLOOR, because a helper that died early emits no mismatches, which reads as clean —
+  # and "nothing found" must never be spelled the same way as "nothing looked at".
+  is "...and produced its checks" "yes" \
+     "$([ "$(grep -c . "$PKS/out")" -ge 4 ] && echo yes || echo "no: $(grep -c . "$PKS/out") rows — $(tr '\n' ' ' < "$PKS/err" | cut -c1-120)")"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    is "$name" "$want" "$got"
+  done < "$PKS/out"
+  rm -rf "$PKS"
+else
+  skip "no withheld name in what npm ships" "npm or node missing"
 fi
 
 # ── 6a3. the utilization meter reads a transcript ────────────────────────────

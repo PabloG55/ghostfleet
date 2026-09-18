@@ -43,7 +43,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const US = '\x1f';
@@ -74,7 +74,7 @@ if (process.argv[2] === '--digest') {
 // domain term are none of those. That is the standing weakness of a denylist and the reason
 // doc-fixtures' membership test is the better shape wherever it fits. Add to this when you
 // find one; `--digest` means doing so costs no name in the diff.
-const DENY = new Set([
+export const DENY = new Set([
   'd376caa575c4bc6a',   // 7 chars
   'a273e332152a4cae',   // 8 chars
   '5e1e022d237aa135',   // 10 chars
@@ -129,6 +129,18 @@ export function candidates(line) {
   }
   return out;
 }
+
+// ── running as a script, or imported? ─────────────────────────────────────
+// EVERYTHING BELOW IS THE SUITE'S CHECK, and it has two side effects that make a plain
+// import unusable: it prints its rows to stdout, and section 3 ADDS a canary digest to
+// DENY to prove the sweep can fail at all. `.githooks/pre-push` needs the tokenizer and
+// the list and nothing else — so it imports this file, and importing must not run a test
+// or grow the list it is about to check against. Guarding here keeps ONE tokenizer and
+// ONE list in the repo: a hook that carried its own copy would be the "renderer nobody
+// ships" shape, passing against a matcher that is not the one the suite proves.
+const IS_MAIN = !!process.argv[1] &&
+  pathToFileURL(process.argv[1]).href === import.meta.url;
+if (IS_MAIN) {
 
 // ── 1. the tree ───────────────────────────────────────────────────────────
 // EXEMPT, EXPLICITLY AND BY PATH — never by directory.
@@ -260,3 +272,5 @@ is('...but a hyphenated one is', true, [...candidates(`${SHORT}-policy`)].includ
 is('...and the canary is really on the list', true, DENY.has(digest(SHORT)));
 
 console.log(rows.join('\n'));
+
+}   // end IS_MAIN
