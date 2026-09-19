@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: b6930967dadc
+// CLIENT-HASH: 4b22d3699dfc
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -96,7 +96,12 @@
 // and the two renders that fired on timers now wait for the keyboard. Every one of those
 // is invisible until it is on a phone, which is the case this bump exists for: the shell is
 // cache-first, so a device that already has v22 goes on running it.
-const VERSION = 'ghostfleet-v23';
+// v24 is the reader's place: restoring a scroll position re-read scrollTop after assigning
+// it so the DOM's clamp would win, which is right once layout has settled and wrong while
+// it is still happening — a rebuilt list measures shorter for a frame, the request clamps
+// to 0, and writing that back destroyed the only record of where the reader was. It read as
+// "sometimes forgets" because one short frame was enough to lose it for good.
+const VERSION = 'ghostfleet-v24';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
