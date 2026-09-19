@@ -703,9 +703,18 @@ async function keyboard(w, h, { indicator = true } = {}) {
   //     scroll survives — in a run that passes.
   //   - A settle-detector cannot help for the same reason. There is no transient to wait
   //     out; in a failing run the value simply is 0.
-  // So the assertion is right and #72's scroll memory intermittently loses the reader's
-  // position on a rebuild. Loosening this hides a real defect in what the phone does to
-  // somebody mid-conversation. Fix the client, or reproduce it in the client's own terms.
+  // So the assertion is right and #72's scroll memory intermittently lost the reader's
+  // position on a rebuild. Loosening this would have hidden a real defect in what the phone
+  // does to somebody mid-conversation — and it WAS one, found by taking that seriously:
+  // writeScroll re-read scrollTop after assigning it, so the DOM's clamp won. That is
+  // correct once layout has settled and wrong while it is still happening, because a
+  // rebuilt list can measure shorter than the position being restored for a frame. The
+  // clamp to 0 was then written back as the reader's position, destroying the only record
+  // of where they were — one short frame and the place was gone for good, which is exactly
+  // why this presented as "sometimes forgets" rather than as a consistent bug.
+  //   Measured on the fix, alternating on one machine: 3 of 6 runs failed without it and
+  // 0 of 14 with it. Kept at full strength deliberately — it is the only assertion that
+  // ever caught this, and it caught it as a flake for weeks before anyone read it as one.
   is(`${w}px ...and the reader is still parked`, park, gone.top);
   // ...and back again, which is the other direction and the one a flicker would break.
   await evaluate(() => { try { localStorage.setItem('gf.fixture', 'grid-acme-api.json'); } catch {} return null; });
