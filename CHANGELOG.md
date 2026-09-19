@@ -52,6 +52,14 @@ throughout. (#134)
 
 ### Fixed
 
+- **The phone lost your place in a conversation.** Restoring a scroll position re-read
+  `scrollTop` after assigning it so the DOM's clamp would win — right once layout has
+  settled, wrong while it is still happening. A rebuilt list measures shorter for a frame,
+  the request clamps to 0, and writing that back destroyed the only record of where you
+  were reading. One short frame and the place was gone for good, which is why it read as
+  "sometimes forgets". It had also been failing its own test one run in three for weeks,
+  and `prepublishOnly` runs the suite — so it was quietly killing a third of all releases.
+  (#139)
 - **`fleet-look` left a headless Chrome behind on every call.** Closing the browser kills one
   of its ten processes; it is now asked to close. (#118)
 - **A tab could beget tabs**, because a tab is a session and the origin was only resolved
