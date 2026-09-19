@@ -1358,7 +1358,8 @@ function holdScrollFromEnd(key, fromEnd) {
 
 function writeScroll(key, box, top, left) {
   try {
-    box.scrollTop = numOf(top);
+    const want = numOf(top);
+    box.scrollTop = want;
     if (left != null) box.scrollLeft = numOf(left);
     // WRITE IT BACK INTO THE MEMORY HERE, rather than waiting for the scroll event to say
     // where we ended up. Measured in Chrome 151: assigning scrollTop fires no event during
@@ -1369,9 +1370,45 @@ function writeScroll(key, box, top, left) {
     //   `atEnd` is deliberately NOT recomputed. It is the reader's intent — "I am reading
     // the newest" — and a clamp is not an intent; recomputing it from a list that merely
     // got shorter is how a reader who was in the middle ends up glued to the bottom.
+    //   BUT A CLAMP AGAINST A BOX THAT IS STILL TOO SHORT IS NOT A POSITION. The re-read
+    // above is right once layout has settled and wrong while it is still happening: on a
+    // rebuild the list is re-appended and can briefly measure shorter than the position
+    // being restored, so the DOM clamps the request to 0 — and writing that back makes the
+    // reader's place UNRECOVERABLE, because the only record of it has just been replaced by
+    // the clamp. One frame of short content and the position is gone for good, which is why
+    // this reads as "intermittently forgets" rather than as a consistent bug.
+    //   So the two cases are separated by asking whether the box COULD have held it. If the
+    // maximum is below what was asked for, the shortfall is the content not being laid out
+    // yet: keep the request as the intent and re-apply when the box can hold it. If the box
+    // could hold it and the DOM still moved us, that IS where the reader is — keep it.
+    const got = numOf(box.scrollTop);
+    const max = numOf(box.scrollHeight) - numOf(box.clientHeight);
+    const transient = got < want && max < want;
     const m = scrollMem.get(key);
-    if (m) { m.top = numOf(box.scrollTop); m.left = numOf(box.scrollLeft); m.wrote = m.top; }
+    if (m) { m.top = transient ? want : got; m.left = numOf(box.scrollLeft); m.wrote = m.top; }
+    // BOUNDED, because a box that never grows must not spin forever — and re-applying is
+    // only ever worth it while the box is still growing toward the request.
+    if (transient) reapplyScroll(key, box, want, left, 0);
   } catch {}
+}
+
+// Re-apply a position the box was too short to take, once per frame while it is still
+// growing. It stops the moment the box can hold the request (the write in writeScroll then
+// records the real value) or after enough frames that the content is clearly not coming.
+function reapplyScroll(key, box, want, left, n) {
+  if (n >= 12) return;
+  const again = () => {
+    try {
+      if (!box.isConnected) return;
+      const m = scrollMem.get(key);
+      // Someone scrolled, or a later restore took over: their intent wins over this retry.
+      if (!m || m.wrote !== m.top || numOf(m.top) !== numOf(want)) return;
+      if (numOf(box.scrollHeight) - numOf(box.clientHeight) >= want) writeScroll(key, box, want, left);
+      else reapplyScroll(key, box, want, left, n + 1);
+    } catch {}
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(again);
+  else if (typeof queueMicrotask === 'function') queueMicrotask(again);
 }
 
 function restoreScroll(key, box, prepare) {
