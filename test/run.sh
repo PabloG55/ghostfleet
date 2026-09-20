@@ -4195,6 +4195,63 @@ fi
 # skips masters entirely — so the usual cross-project target reported to no one. From the
 # asking side that is indistinguishable from being ignored, which is what makes it worth
 # testing in every direction: a relay that never fires looks exactly like today's bug.
+group "a reply that cannot arrive is not promised"
+# THE PROMISE WAS THE BUG. --reply-to asks the target for a SendMessage and keeps the
+# turn-end relay as a fallback, which is right same-profile. Claude Code's peer registry
+# lives under the CONFIG dir (<config>/sessions), so two profiles are two registries and
+# the name never resolves across them — by design, not a fault. fleet-send derived the peer
+# name as a pure string and printed "it was asked to answer X directly (SendMessage)" with
+# no hedge.
+#   REPORTED BY THE AGENT IT COST: it asked across profiles, read that line, told its human
+# the answer would arrive on its own, and sat idle for an hour while the answer waited in an
+# inbox it had been told it did not need to drain. The ANSWERED row was correct throughout;
+# only the sentence was wrong — the shape this repo keeps naming, a confident claim with
+# nothing able to refute it.
+# BOTH DIRECTIONS, because a fix that always warns would pass the interesting half alone and
+# make every same-profile send read as broken.
+if command -v tmux >/dev/null 2>&1; then
+  XPD="$(mktemp -d "$TEST_RUNS.$$.xp.XXXXXX")"; mkdir -p "$XPD/fA" "$XPD/fB"
+  tmux -L cfxpA new-session -d -s master 'sleep 90' 2>/dev/null
+  tmux -L cfxpA new-session -d -s asker  'sleep 90' 2>/dev/null
+  tmux -L cfxpB new-session -d -s asker  'sleep 90' 2>/dev/null
+  # THE CONFIG DIR IS THE SIGNAL, not the fleet dir: a fleet dir differs for reasons that
+  # have nothing to do with profiles (an explicit --reply-dir, a fixture isolating two
+  # fleets in two temp dirs), and warning on those would call a working direct reply
+  # impossible. Both askers therefore get an explicit CLAUDE_CONFIG_DIR.
+  tmux -L cfxpA setenv -t asker CLAUDE_CONFIG_DIR "$XPD/cfgA" 2>/dev/null
+  tmux -L cfxpB setenv -t asker CLAUDE_CONFIG_DIR "$XPD/cfgB" 2>/dev/null
+  xp_send() { CLAUDE_CONFIG_DIR="$XPD/cfgA" CLAUDE_FLEET_DIR="$XPD/fA" "$ROOT/bin/fleet-send" -s cfxpA --reply-to "$1" master "ping" 2>&1; }
+  xp_same="$(xp_send cfxpA/asker)"
+  xp_cross="$(xp_send cfxpB/asker)"
+  # SAME PROFILE: the direct path genuinely works, so it is still named.
+  is "same profile still promises the direct reply" "1" \
+     "$([ "$(grep -c 'directly (SendMessage)' <<< "$xp_same")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and does not warn about profiles"          "0" \
+     "$(grep -c 'another profile' <<< "$xp_same" || true)"
+  # CROSS PROFILE: say it cannot arrive, and say what to do instead.
+  is "cross profile says NO direct reply"           "1" \
+     "$([ "$(grep -c 'NO direct reply is possible' <<< "$xp_cross")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and names the inbox as the path"           "1" \
+     "$([ "$(grep -c 'ANSWERED row in your fleet-inbox' <<< "$xp_cross")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and never claims the direct ask"           "0" \
+     "$(grep -c 'directly (SendMessage)' <<< "$xp_cross" || true)"
+  # AND THE THIRD CASE, which is the one that caught the first version of this fix: when
+  # the asker's config dir cannot be read, that is "I could not tell", not "another
+  # profile". Warning there would send a caller to poll an inbox while a message was
+  # already on its way — and it broke three existing assertions that pass --reply-dir for
+  # fixture isolation alone.
+  tmux -L cfxpA setenv -u -t asker CLAUDE_CONFIG_DIR 2>/dev/null
+  xp_unknown="$(xp_send cfxpA/asker)"
+  is "an unreadable config dir does not warn"       "0" \
+     "$(grep -c 'another profile' <<< "$xp_unknown" || true)"
+  is "...and still promises the direct reply"       "1" \
+     "$([ "$(grep -c 'directly (SendMessage)' <<< "$xp_unknown")" -ge 1 ] && echo 1 || echo 0)"
+  tmux -L cfxpA kill-server 2>/dev/null; tmux -L cfxpB kill-server 2>/dev/null
+  rm -rf "$XPD"
+else
+  skip "cross-profile reply-to" "tmux missing"
+fi
+
 group "reply relay (hook routing)"
 if command -v jq >/dev/null 2>&1; then
   T="$(mktemp -d)"; RF="$T/resp/fleet"; AF="$T/ask/fleet"; mkdir -p "$RF" "$AF"

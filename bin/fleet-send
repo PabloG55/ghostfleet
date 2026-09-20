@@ -47,6 +47,9 @@ case "${_t##*/}" in cf-*)
 ;; esac
 
 REPLY_TO=""; REPLY_DIR=""
+# Set for real beside the asker's fleet dir; declared here so `set -u` cannot trip on a
+# send that has no --reply-to at all.
+XPROF=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)          SOCK="${2:-}";      shift 2 ;;
@@ -127,6 +130,34 @@ if [ -n "$REPLY_TO" ]; then
     _c="${_c#CLAUDE_CONFIG_DIR=}"; case "$_c" in /*) rdir="$_c/fleet" ;; esac
   fi
   [ -n "$rdir" ] || rdir="$FLEET_DIR"           # ...then same-profile, which it usually is
+
+  # CAN THE DIRECT REPLY EVEN ARRIVE? Claude Code's peer registry lives under the CONFIG
+  # dir (<config>/sessions), so two profiles are two registries and neither can see the
+  # other: SendMessage to a peer on another profile fails with "No agent named … is
+  # reachable", every time, by design. The asker's fleet dir is the profile, and it is
+  # already computed above — so the one comparison that answers this costs nothing.
+  #   IT MATTERS BECAUSE THE CALLER PLANS AROUND IT. Reported by an agent that asked
+  # across profiles, was told its answer would arrive directly, said so to its human, and
+  # then sat idle for an hour while the answer waited in an inbox it had been told it did
+  # not need to drain. The ANSWERED row was correct the whole time; only the sentence
+  # promising the other path was wrong. A promise that cannot be checked is worse than no
+  # promise, which is the same rule this file already applies to the busy detector.
+  #   THE SIGNAL IS THE CONFIG DIR, NOT THE FLEET DIR, and the difference is not academic.
+  # A fleet dir can differ for reasons that have nothing to do with profiles — a caller that
+  # passes --reply-dir explicitly, a test fixture that isolates two fleets in two temp
+  # directories — and treating those as "another profile" warns about a direct reply that
+  # would have worked perfectly. The peer registry is keyed on <CLAUDE_CONFIG_DIR>/sessions,
+  # so the config dir is the thing that actually decides whether the name can resolve.
+  #   POSITIVE EVIDENCE ONLY. The warning fires when both config dirs are KNOWN and DIFFER,
+  # never on a failure to read one. An unreadable env is "I could not tell", and the old
+  # behaviour — ask for the direct reply, keep the relay as the fallback — is the right
+  # answer to that: the ask costs one tool call if it turns out to be unreachable, while a
+  # wrong warning would send a caller to poll an inbox when a message was already coming.
+  XPROF=0
+  _ourcfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  _askcfg="$(tmux -L "$RSOCK" show-environment -t "$RSESS" CLAUDE_CONFIG_DIR 2>/dev/null)"
+  _askcfg="${_askcfg#CLAUDE_CONFIG_DIR=}"
+  case "$_askcfg" in /*) [ "$_askcfg" = "$_ourcfg" ] || XPROF=1 ;; esac
   mkdir -p "$FLEET_DIR" 2>/dev/null
   # Three MANDATORY fields on one line. \x1f, not a tab: a tab is IFS-whitespace, so a
   # `read` over it collapses an empty field and shifts every later one left — and the
@@ -161,7 +192,7 @@ if [ -n "$REPLY_TO" ]; then
   # that dies takes the tool call with it — so the answer has to be in the last message too,
   # or the fallback relays "(no text)". The hook suppresses its row when it can PROVE the
   # SendMessage landed, so saying it twice does not answer twice.
-  if [ -z "$_a" ] || [ "$_a" = claude ]; then
+  if { [ -z "$_a" ] || [ "$_a" = claude ]; } && [ "$XPROF" = 0 ]; then
     MSG="[fleet] This request comes from another agent ($RPEER), not a human, and it is
 waiting on the answer. Answer it BOTH ways, in this order:
   1. call SendMessage with to: \"$RPEER\" and the full answer as the message — that
@@ -170,6 +201,18 @@ waiting on the answer. Answer it BOTH ways, in this order:
   2. then end your turn with that same answer as your final message — if the name isn't
      reachable, ending the turn is what gets relayed back instead.
 Self-contained either way: they don't share your context.
+
+$MSG"
+  elif [ -z "$_a" ] || [ "$_a" = claude ]; then
+    # CROSS-PROFILE: do not send it looking for a door that is not there. Asking anyway
+    # costs the target two tool calls and a retry before it works out that the name is
+    # unreachable — measured, that is exactly what happened — and worse, it invites it to
+    # report "I messaged them" when nothing was delivered.
+    MSG="[fleet] This request comes from another agent ($RPEER) on a DIFFERENT profile, not
+a human, and it is waiting on the answer. SendMessage cannot reach them from here — the two
+profiles keep separate peer registries, so the name will not resolve; do not spend a call on
+it. End your turn with the full answer as your final message: that is relayed back to them
+and is the only path. Self-contained: they don't share your context.
 
 $MSG"
   else
@@ -347,7 +390,13 @@ if [ -n "$RSESS" ]; then
   if [ -z "$_a" ] || [ "$_a" = claude ]; then
     # Name BOTH paths: the caller is about to wait, and "watch your inbox" alone would be
     # wrong now — the usual delivery is a message that arrives in this session directly.
-    echo "fleet-send: it was asked to answer ${RPEER:-$RSOCK/$RSESS} directly (SendMessage), and its turn-end message is relayed to $RSOCK/$RSESS as the fallback"
+    if [ "$XPROF" = 1 ]; then
+      # The caller is about to decide whether to wait or to drain. Say which.
+      echo "fleet-send: $RSOCK/$RSESS is on another profile — NO direct reply is possible (separate peer registries)."
+      echo "fleet-send: its answer arrives as an ANSWERED row in your fleet-inbox; drain it rather than waiting for a message."
+    else
+      echo "fleet-send: it was asked to answer ${RPEER:-$RSOCK/$RSESS} directly (SendMessage), and its turn-end message is relayed to $RSOCK/$RSESS as the fallback"
+    fi
   else
     echo "fleet-send: its answer will be relayed to $RSOCK/$RSESS when its turn ends"
   fi
