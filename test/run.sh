@@ -2982,6 +2982,43 @@ else
 fi
 rm -rf "$STEPO"
 
+group "the installer arms the pre-push guard"
+# A COMMITTED HOOK IS NOT AN ARMED HOOK. core.hooksPath is repo-local git config, so it does
+# not survive a clone: .githooks/pre-push ships in the tree and does nothing until somebody
+# runs one command they have no reason to remember. The whole guard was one forgotten step
+# from being decorative, on a public repo written against private work.
+#   The installer is the step nobody skips, so it arms it — and it must NOT clobber a
+# hooksPath somebody set deliberately, because that would silently disable whatever their
+# own hook manager was doing.
+if command -v git >/dev/null 2>&1; then
+  IAG="$(mktemp -d "$TEST_RUNS.$$.iag.XXXXXX")"
+  git init -q "$IAG/clone" 2>/dev/null
+  ia_arm() {   # the installer's block, verbatim in behaviour
+    REPO="$1" bash -c '
+      _hp="$(git -C "$REPO" config --get core.hooksPath 2>/dev/null || true)"
+      if [ -z "$_hp" ]; then git -C "$REPO" config core.hooksPath .githooks; fi' >/dev/null 2>&1
+  }
+  is "a fresh clone starts with no guard" "" \
+     "$(git -C "$IAG/clone" config --get core.hooksPath 2>/dev/null || true)"
+  ia_arm "$IAG/clone"
+  is "...and the installer arms it"       ".githooks" \
+     "$(git -C "$IAG/clone" config --get core.hooksPath 2>/dev/null || true)"
+  # THE OTHER DIRECTION: somebody else's choice survives. A guard that overwrites a
+  # deliberate setting trades one silent failure for another.
+  git init -q "$IAG/theirs" 2>/dev/null
+  git -C "$IAG/theirs" config core.hooksPath .their-hooks 2>/dev/null
+  ia_arm "$IAG/theirs"
+  is "an existing hooksPath is left alone" ".their-hooks" \
+     "$(git -C "$IAG/theirs" config --get core.hooksPath 2>/dev/null || true)"
+  # AND THE INSTALLER REALLY CONTAINS IT, so this group cannot pass against a copy of the
+  # logic that ships nowhere.
+  is "install.sh sets core.hooksPath"     "1" \
+     "$([ "$(grep -c 'config core.hooksPath .githooks' "$ROOT/install.sh")" -ge 1 ] && echo 1 || echo 0)"
+  rm -rf "$IAG"
+else
+  skip "installer arms the guard" "git missing"
+fi
+
 group "the pre-push hook refuses to publish a withheld name"
 # WHY A HOOK IS TESTED AT ALL, and why the suite could not have caught what it catches.
 # This file's name sweep reads every file git TRACKS, which is the tree you are standing in

@@ -495,6 +495,37 @@ echo "The fleet_* tools reach NEW sessions only. An MCP server is spawned once p
 echo "lives as long as it, so anything open right now — claude, codex or opencode — keeps the"
 echo "server it started with. Quit and reopen a session to pick these up."
 
+# ── arm the pre-push guard, because a clone that forgets has no guard ────────
+# THE GUARD IS COMMITTED BUT core.hooksPath IS NOT. It is repo-local git config, so it does
+# not survive a clone — and .githooks/pre-push is inert until somebody runs one command they
+# have no reason to remember. That is not a hypothetical gap: this repo is public, it is
+# written against private work, and the last leak was 37 branches that reached the remote
+# because the only check read the tree you happened to be standing in.
+#   So the installer arms it. The installer is the one step nobody skips, and a guard that
+# arms itself is the difference between a rule and a hope.
+#   NEVER SILENTLY OVERWRITE somebody else's choice: an existing hooksPath pointing somewhere
+# else is a deliberate setup (a shared hook manager, a personal override) and clobbering it
+# would disable whatever it was doing. Say so and move on.
+if [ -d "$REPO/.git" ] || [ -f "$REPO/.git" ]; then
+  _hp="$(git -C "$REPO" config --get core.hooksPath 2>/dev/null || true)"
+  if [ -z "$_hp" ]; then
+    if git -C "$REPO" config core.hooksPath .githooks 2>/dev/null; then
+      echo
+      echo "✓ armed the pre-push guard (core.hooksPath -> .githooks)"
+      echo "  It refuses a push whose tree, FILE NAMES, commit messages or branch name carry a"
+      echo "  withheld project name. Override a false positive once with: git push --no-verify"
+    fi
+  elif [ "$_hp" = .githooks ]; then
+    echo
+    echo "✓ pre-push guard already armed"
+  else
+    echo
+    echo "! core.hooksPath is set to '$_hp', so .githooks/pre-push is NOT active."
+    echo "  Left alone on purpose — that is your setting, not mine. To use the guard instead:"
+    echo "      git -C \"$REPO\" config core.hooksPath .githooks"
+  fi
+fi
+
 echo
 echo "Done. In a zellij pane:"
 echo "    ghostfleet            # work profile   (~/.claude)"
