@@ -22,6 +22,9 @@
 #   ghostfleet <profile>       a separate profile — its own projects list
 #                                (projects.<profile>) + config dir (~/.claude-<profile>)
 #                                an UNKNOWN profile is refused, not created
+#   ghostfleet demo            the one profile that BUILDS itself: three throwaway repos
+#                                under ~/gf-demo, created if absent and reused if not
+#                                (bin/fleet-demo). Otherwise an ordinary profile.
 #   ghostfleet <profile> --new create that profile's (empty) projects list
 #   ghostfleet <project>       jump straight into a known work project's Master Claude
 #   ghostfleet <project> --plain   one-shot non-interactive list (for scripts)
@@ -309,6 +312,27 @@ ensure_projects() {
 # Add from the picker ("+ add project"), or edit here, e.g.:
 #   myapp<TAB>~/code/myapp<TAB>work
 EOF
+}
+
+# Register a project — through bin/fleet-project, which is the one writer of this file.
+#
+# THIS USED TO BE AN INLINE awk + printf RIGHT HERE, a second implementation of a format
+# whose column rules have already cost this repo two field-shift bugs (CLAUDE.md's first
+# two entries, both found in readers of THIS file). It also skipped every check
+# fleet-project makes: the name went in unvalidated, so a folder called `my repo` or
+# `api:v2` was written straight to the list, and the damage showed up later and elsewhere
+# — a project name becomes the fleet socket `cf-<name>`, and a session NAME can be tmux
+# target syntax, so the failure surfaced as another project's pane being read.
+#
+# Its refusal is shown rather than swallowed: fleet-project exits non-zero and says why on
+# stderr, and a picker that silently declines to add the folder you just chose is
+# indistinguishable from one that is broken.
+add_project() {                    # <path> <name> -> 0 if the list now has it
+  local out rc
+  out="$("$BIN_DIR/fleet-project" add "$1" --name "$2" --profile "$PROFILE" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && return 0
+  _fail "could not add '$2'" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+  return 1
 }
 
 # select a project: export everything the grid/hooks/sessions key off
@@ -640,6 +664,48 @@ case "$PROFILE" in
   *)            PROJECTS_CFG="$CFG_HOME/projects.$PROFILE" ;;
 esac
 
+# `ghostfleet demo` — the one command a new reader has already been shown.
+#
+# It is not a subcommand and deliberately isn't: `demo` is a PROFILE like any other, so
+# everything below this line treats it exactly as it treats `personal`, and the jump test
+# above still wins — someone whose WORK profile has a project called `demo` keeps jumping
+# into it, because that test runs first and never reaches here.
+#
+# What is special is only that this profile can be BUILT. Both recordings open with
+# `ghostfleet demo` (worktree.tape, stack.tape) and so do the README's GIFs, but the
+# profile behind them was made by hand on one machine — so on every other machine the
+# refusal below fired and the one demonstrated command was the one that could not work.
+# fleet-demo creates what is missing and reuses what is not; see its header for why it
+# would rather stop than repair.
+#
+#   --if-needed IS WHAT KEEPS THIS FREE. A complete demo profile makes it exit 0 having
+# printed nothing, so the hundredth `ghostfleet demo` goes straight to the screen and the
+# tapes record what they always recorded. Only a run that actually SET SOMETHING UP
+# prints, and only that run pauses — the login note below is the single most useful thing
+# this command says, and a note that scrolls under a TUI one frame later has not been said
+# at all. The Projects screen is a node TUI on the ALTERNATE buffer, exactly as the
+# stale-runtime warning above discovered the hard way.
+#
+#   NOT under --new: that flag means "give me an empty list for this profile", and
+# seeding three projects into it is the opposite of what was asked.
+if [ "$PROFILE" = demo ] && [ "$NEW_PROFILE" = 0 ] && [ "${CLAUDE_FLEET_REEXEC:-0}" != 1 ] \
+   && [ -x "$BIN_DIR/fleet-demo" ]; then
+  if _demo_out="$("$BIN_DIR/fleet-demo" --if-needed 2>&1)"; then
+    if [ -n "$_demo_out" ]; then
+      printf '%s\n\n' "$_demo_out" >/dev/tty 2>/dev/null || printf '%s\n\n' "$_demo_out"
+      printf '\033[38;5;245m  press any key to open the fleet\033[0m' >/dev/tty 2>/dev/null || true
+      read -rsn1 _k </dev/tty 2>/dev/null || true
+      _clear
+    fi
+  else
+    # A refusal is the whole point of fleet-demo's conflict path, so it must NOT be
+    # swallowed into the empty-profile message below — that would report "no profile
+    # demo" for a machine whose demo setup stopped on purpose, naming nothing it found.
+    printf '%s\n' "$_demo_out" >&2
+    exit 1
+  fi
+fi
+
 # An unknown profile used to be indistinguishable from a new one: ensure_projects
 # would conjure an empty list and drop you at a blank picker. A typo and a PERSONAL
 # project's name both land here (the jump test above only searches the WORK list),
@@ -718,9 +784,29 @@ while true; do
         p="${p#newproject${US}}"
         if [ -n "$p" ] && [ "$p" != "newproject" ] && [ -d "$p" ]; then
           nm="$(basename "$p")"
-          awk -F'\t' -v n="$nm" '$1==n{f=1} END{exit !f}' "$PROJECTS_CFG" 2>/dev/null \
-            || printf '%s\t%s\t%s\n' "$nm" "$p" "$PROFILE" >> "$PROJECTS_CFG"
-          set_project "$nm"
+          add_project "$p" "$nm" && set_project "$nm"
+        fi ;;
+      # FIRST RUN: the same folder browser, plus a naming step, landing on the GRID.
+      # Only reachable from an empty projects list (fleet-grid.mjs decides that and says
+      # so by sending `firstproject` instead of `addproject`), so the flow above is
+      # untouched for anyone who already has projects.
+      #   GOTO=grid rather than master, and that is the point of the whole path: master is
+      # a Claude session that has to boot before it shows anything, whereas the grid is
+      # where `n` lives — the key step 3 just promised. Landing on master would answer a
+      # screen that says "press n" with a screen that has no n.
+      firstproject)
+        p="$(node "$GRID" - --screen addproject </dev/tty)" || true; _clear
+        p="${p#newproject${US}}"
+        if [ -n "$p" ] && [ "$p" != "newproject" ] && [ -d "$p" ]; then
+          nm="$(node "$GRID" - --screen nameproject --select "$p" </dev/tty)" || true; _clear
+          # Test for the SEPARATOR, never for emptiness: `${x#*$US}` on a string WITHOUT
+          # one returns it unchanged, so a cancelled screen (empty output) would otherwise
+          # leave nm holding the literal text and register a project called "projectname".
+          case "$nm" in
+            projectname${US}*)
+              nm="${nm#projectname${US}}"
+              if [ -n "$nm" ] && add_project "$p" "$nm"; then set_project "$nm"; GOTO=grid; fi ;;
+          esac
         fi ;;
       project${US}*) set_project "${sel#project${US}}" ;;
       sessions${US}*) set_project "${sel#sessions${US}}"; GOTO=grid ;;   # ^S: straight to the grid

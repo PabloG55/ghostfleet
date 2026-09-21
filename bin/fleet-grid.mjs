@@ -1610,6 +1610,14 @@ function renderGrid() {
         `${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
   else if (wtRmMsg)
     buf += `${C.yellow}${C.bold} ${clip(wtRmMsg, Math.max(20, W() - 2))}${C.reset}\x1b[K\n`;
+  else if (!cards.length && !jumpStage)
+    // STEP 3 OF THE FIRST-RUN PATH, and it lands here rather than on the Projects screen
+    // because this is where the key works. A project with no sessions draws exactly one
+    // card, `+ new session`, which says what it is and not that `n` is how you get one —
+    // and `n` is the whole point of the screen. The line costs a row that was already
+    // blank (it is the slot the confirm prompts use), and only on a fleet with nothing
+    // running, so it cannot crowd a screen anyone is actually working on.
+    buf += ` ${C.green}nothing running yet${C.reset} ${C.dim}— press ${C.reset}n${C.dim} to start your first session, or ${C.reset}w${C.dim} to cut a worktree for one${C.reset}\x1b[K\n`;
   else
     buf += (jumpStage ? jumpHint() : '') + '\x1b[K\n';
   const nc = cols();
@@ -2727,8 +2735,17 @@ function agentCaveats() {
   }
   return bits.length ? bits.join(' · ') : '';
 }
+// FIRST RUN IS "THE LIST IS EMPTY", measured here and nowhere else. The projects file
+// is the only thing that decides it, so a reader who removes their last project gets the
+// guided screen back rather than the bare `+ add project` card they started from — which
+// is right: at zero projects there is nothing to pick and nothing on screen says what to
+// do about it. It is NOT a once-ever flag on disk; a flag would have to be kept in step
+// with a file that can be edited by hand, and this cannot go stale.
+let pFirstRun = false;
 function pBuild() {
-  pItems = [...readProjects().map(p => ({ project: p })), { add: true }];
+  const projs = readProjects();
+  pFirstRun = projs.length === 0;
+  pItems = [...projs.map(p => ({ project: p })), { add: true }];
   if (!pSelInit) {           // first build: land on the just-exited project, if any
     pSelInit = true;
     if (SELECT) { const i = pItems.findIndex(it => it.project && it.project.name === SELECT); if (i >= 0) pSel = i; }
@@ -2765,9 +2782,46 @@ function reorderProject(name, delta) {
   try { fs.writeFileSync(PROJECTS_CFG, [...comments, ...projs].join('\n') + '\n'); } catch {}
   return ni;
 }
+// ── the first-run screen ────────────────────────────────────────────────────
+// WHAT THIS REPLACES. An empty projects list drew the picker with exactly one card on it,
+// `+ add project`, and nothing else: no statement of what a project IS here, no route to
+// a session, and — the part that actually stalls people — no hint that `n` is what starts
+// one once a project exists. Somebody who has just run ./install.sh arrives at precisely
+// this screen, so it is the first thing the product ever shows and it explained none of
+// itself.
+//
+// IT IS THE SAME SCREEN, NOT A NEW ONE. Same banner, same boxCard, same footer grammar as
+// the picker it stands in for — the three steps are drawn as cards because cards are what
+// this screen is made of, and a reader who has seen one screenshot of ghostfleet should
+// not have to learn a second visual language to get past the first one.
+//
+// The demo line is last and deliberately quiet: somebody who wants to look before they
+// register a real folder has a way through that does not touch anything of theirs, and
+// somebody who came here to add their own repo does not have to read past it to do that.
+function pRenderFirstRun() {
+  let buf = '\x1b[H';
+  const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
+  buf += banner([`${C.bold}ghostfleet${C.reset}${profTag}`, `${C.dim}— first run${C.reset}`])
+      ?? ` ${C.bold}ghostfleet${C.reset}${profTag} ${C.dim}— first run${C.reset}\x1b[K\n`;
+  buf += `\x1b[K\n`;
+  buf += ` ${C.bold}No projects yet.${C.reset} ${C.dim}A project is a folder this watches — a git repo, or one folder holding several checkouts of it.${C.reset}\x1b[K\n\x1b[K\n`;
+  const steps = [
+    boxCard('1 · pick a folder', ['your repo, or the', 'folder its checkouts', 'live in'], C.green, true),
+    boxCard('2 · name it', ['what the fleet calls', 'it — defaults to the', "folder's own name"], C.cyan, false),
+    boxCard('3 · press n', ['starts your first', 'session in that', 'checkout'], C.grey, false),
+  ];
+  for (let li = 0; li < 5; li++) buf += ' ' + steps.map(l => l[li]).join(' ') + '\x1b[K\n';
+  buf += '\x1b[K\n';
+  const armed = pQuitArmed && Date.now() - pQuitArmed < QUIT_WINDOW;
+  const quit = armed ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}` : '⌃C ⌃C quit';
+  buf += `${C.dim} ⏎ start · ${quit}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` ${C.dim}Just looking? ${C.reset}ghostfleet demo${C.dim} builds three throwaway projects to explore — it touches nothing of yours.${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
 function pRender() {
   if (pSettings) return pRenderSettings();
   if (pSchedFor) return pRenderSchedule();
+  if (pFirstRun && !pConfirmRemove) return pRenderFirstRun();
   let buf = '\x1b[H';
   const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
   buf += banner([`${C.bold}ghostfleet${C.reset}${profTag}`, `${C.dim}— projects${C.reset}`])
@@ -2880,6 +2934,10 @@ function pMove(d) { const nc = cols(); let n = pSel; if (d === 'left') n--; else
 function onKeyProjects(key) {
   const mev = parseMouse(key);
   if (mev) {
+    // On the first-run screen the three boxes are STEPS, not projects, so cardAt would
+    // resolve a click to a project index that does not exist. Any click there means the
+    // one thing the screen offers.
+    if (mev.press && mev.button === 0 && pFirstRun && !pSettings && !pSchedFor && !pConfirmRemove) return finish('firstproject');
     if (mev.press && mev.button === 0 && !pConfirmRemove && !pSchedFor && !pSettings) {
       const idx = cardAt(mev.x, mev.y, cols());
       if (idx >= 0 && idx < pItems.length) {
@@ -2935,6 +2993,15 @@ function onKeyProjects(key) {
     pQuitArmed = Date.now(); pRender(); return;
   }
   if (pQuitArmed) pQuitArmed = 0;                    // any other key disarms a pending quit
+  // FIRST RUN HAS ONE ACTION, so it consumes every other key rather than falling through.
+  // The picker's keys below all act on `pItems[pSel]` — a project — and there is no
+  // project; `x`, `s`, ⇧hjkl and the digits would each find `undefined` and do nothing,
+  // which from the reader's side is a screen that ignores the keyboard. Placed AFTER the
+  // ⌃C handling above on purpose: quitting must work from here too.
+  if (pFirstRun) {
+    if (key === '\r' || key === '\n' || key === ' ') return finish('firstproject');
+    pRender(); return;
+  }
   if (key === '\x1b[A' || key === 'k') pMove('up');
   else if (key === '\x1b[B' || key === 'j') pMove('down');
   else if (key === '\x1b[C' || key === 'l') pMove('right');
@@ -3023,6 +3090,64 @@ function onKeyAdd(key) {
     dSel = 0; dBuild();
   } else if (key === 's' || key === 'S') return finish(`newproject${US}${curDir}`);
   dRender();
+}
+
+// ── name-the-project (first run only) ───────────────────────────────────────
+// Step 2 of the guided path, and it exists because the name is not cosmetic: it is the
+// project's identity everywhere — the card, `ghostfleet <name>`, and the tmux fleet
+// socket `cf-<name>` that every status read is scoped by. The folder browser derives it
+// from the basename, which is usually right and is silently wrong for a checkout called
+// `src`, `repo`, or `main`.
+//
+// SAME CHARSET AS fleet-project, and refused HERE rather than there. The add is run by
+// bin/fleet-project (one writer for this file, see bin/ghostfleet), which exits non-zero
+// on a bad name — but that happens after this screen has closed, so the refusal would
+// arrive as a flash on a screen the reader has already left. The rule is duplicated on
+// purpose and the two are pinned together by the suite.
+//
+// Deliberately NOT wired into `+ add project`: that path is unchanged for people who
+// already have projects, and a naming step appearing in a flow they know is a regression
+// dressed as a feature.
+// pn* and not name*: `pnInput` is already the NEW-SESSION naming box further up this
+// file (mode 'nameprompt'). Every screen here shares one module scope, so a second `let
+// pnInput` is a SyntaxError that takes the whole grid pane down — the file is one
+// program, not one screen.
+let pnInput = '', pnPath = '', pnMsg = '';
+const NAME_OK = /^[A-Za-z0-9._-]+$/;
+function nRender() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}name this project${C.reset} ${C.dim}— step 2 of 3${C.reset}\x1b[K\n`;
+  buf += ` ${C.cyan}${pnPath.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` name:  ${C.bold}${pnInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += (pnMsg ? ` ${C.red}${pnMsg}${C.reset}` : '') + '\x1b[K\n';
+  buf += ` ${C.dim}letters, digits, . _ - — it names the card, ${C.reset}ghostfleet ${pnInput || '<name>'}${C.dim}, and the fleet socket${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ add it · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+function onKeyName(key) {
+  if (key === '\x1b' || key === '\x03' || key === '\x60') return finish('');
+  if (key === '\r' || key === '\n') {
+    const v = pnInput.trim();
+    if (!v) { pnMsg = 'a name is required'; nRender(); return; }
+    if (!NAME_OK.test(v)) { pnMsg = `'${v}' cannot be a project name — use letters, digits, . _ or -`; nRender(); return; }
+    return finish(`projectname${US}${v}`);
+  }
+  if (key === '\x7f' || key === '\b') { pnInput = pnInput.slice(0, -1); pnMsg = ''; }
+  else {
+    // A PASTE arrives as one multi-character read, so `key.length === 1` would drop it
+    // silently — and a path is exactly the kind of thing that gets pasted here.
+    //
+    //   typedText() is the file's existing helper for this and is NOT reusable here: it
+    // strips '.' and ':' because it feeds a tmux SESSION name, which cannot contain them.
+    // A PROJECT name can — fleet-project's charset allows a dot — so borrowing it would
+    // quietly turn `acme.api` into `acmeapi` and register a project under a name the
+    // reader never typed. Whatever else arrives is shown as typed and refused, loudly, by
+    // the ⏎ check above; a character removed without a word is the one outcome that
+    // leaves nothing to correct.
+    const t = (!key || key.startsWith('\x1b')) ? '' : [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
+    if (t) { pnInput += t; pnMsg = ''; }
+  }
+  nRender();
 }
 
 // ── the stack screen ────────────────────────────────────────────────────────
@@ -3199,6 +3324,12 @@ if (SCREEN === 'projects') {
   timer = setInterval(() => { pBuild(); pRender(); }, 2500);
 } else if (SCREEN === 'addproject') {
   dBuild(); dRender(); process.stdin.on('data', onKeyAdd);
+} else if (SCREEN === 'nameproject') {
+  // --select carries the folder the browser landed on; the basename pre-fills the box so
+  // ⏎ alone is the whole of the common case.
+  pnPath = SELECT || HOME;
+  pnInput = path.basename(pnPath);
+  nRender(); process.stdin.on('data', onKeyName);
 } else if (SCREEN === 'stack') {
   sBuild(); sRender(); process.stdin.on('data', onKeyStack);
   timer = setInterval(() => { sBuild(); sRender(); }, 2500);

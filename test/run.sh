@@ -672,6 +672,241 @@ is "...and does not warn for the default"     "0" \
    "$(fp agent already --none 2>&1 | grep -c 'heads up' || true)"
 rm -rf "$T"
 
+# ── the demo profile, built rather than hand-made ────────────────────────────
+# `ghostfleet demo` is the first line of BOTH recordings (worktree.tape:58,
+# stack.tape:44) and of the README's GIFs — and until now the profile behind it existed
+# on exactly one machine, made by hand. Everywhere else bin/ghostfleet resolved the bare
+# argument as a profile, found no projects.demo, and exited 1: the one command a new
+# reader has been shown is the one command that could not work for them.
+group "fleet-demo builds a demo fleet, and twice is the same as once"
+DT="$(mktemp -d)"
+fd() { HOME="$DT" "$ROOT/bin/fleet-demo" "$@"; }
+out1="$(fd 2>&1)"; rc1=$?
+cfg="$DT/.config/ghostfleet/projects.demo"
+is "a clean machine is set up"          "0" "$rc1"
+# THE COUNT IS THE POINT HERE, not presence: two rows means one project silently missing,
+# which on the Projects screen is a card that never appears with nothing to say why. The
+# three names are the ones web/fixtures/ renders and the GIFs show, so a demo that hands
+# over a different fleet than the pictures is a demo that undercuts them.
+is "three projects registered"          "3" "$(awk -F'\t' '$1=="acme-api"||$1=="acme-web"||$1=="toolbox"' "$cfg" 2>/dev/null | wc -l | tr -d ' ')"
+is "...all in the demo profile"         "3" "$(awk -F'\t' '$3=="demo"' "$cfg" 2>/dev/null | wc -l | tr -d ' ')"
+is "...on three columns, like fleet-project writes" "3" "$(awk -F'\t' '$1=="acme-api"{print NF}' "$cfg" 2>/dev/null)"
+for p in acme-api acme-web toolbox; do
+  is "$p is a real checkout"            "yes" "$([ -d "$DT/gf-demo/$p/.git" ] && echo yes || echo no)"
+done
+# A REPO WITH NO COMMIT HAS NO BRANCHES, and looks completely fine until `w` — the flow
+# the demo exists to show, and the one worktree.tape records — dies on it.
+#   THE COMMAND SHAPE IS THE ASSERTION. fleet-spawn:627 runs
+# `git worktree add <path> -b <branch> <base>`, and it is the BASE that does not resolve
+# on a commitless repo (measured, git 2.55: `fatal: invalid reference: main`). A bare
+# `worktree add -b x <path>` with no base SUCCEEDS on that same repo — git infers
+# `--orphan` — so the obvious probe is the one that proves nothing, and an earlier cut of
+# this test used it and stayed green with the commit deliberately removed.
+is "...with a commit in it"             "1"   "$(git -C "$DT/gf-demo/acme-api" rev-list --count HEAD 2>/dev/null || echo 0)"
+is "...and a branch to cut from"        "main" "$(git -C "$DT/gf-demo/acme-api" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+is "...so fleet-spawn's add resolves"   "yes" "$(git -C "$DT/gf-demo/acme-api" worktree add "$DT/gf-demo/probe" -b probe main >/dev/null 2>&1 && echo yes || echo no)"
+# The login wall is the thing that decides whether this is worth shipping: a session in
+# the demo profile sits at "Please run /login" because credentials are per config dir
+# (stack.tape:30 has recorded that since the recordings were shot). Somebody who does not
+# know that reads an empty pane as a broken product. Naming the fix is half of it; naming
+# what does NOT need it is the half that keeps them going.
+is "it names the login command"         "yes" "$(grep -q 'CLAUDE_CONFIG_DIR=~/.claude-demo claude' <<<"$out1" && echo yes || echo no)"
+is "...and what needs no login at all"  "yes" "$(grep -q 'WHAT YOU CAN SEE RIGHT NOW' <<<"$out1" && echo yes || echo no)"
+is "...saying an empty pane is not a bug" "yes" "$(grep -q 'not a broken fleet' <<<"$out1" && echo yes || echo no)"
+# A path printed with a stray backslash is not cosmetic here: this one is a `rm -rf` the
+# reader is invited to paste, and `\~/gf-demo` names a literal directory called ~.
+# bash 3.2 (macOS, one of the two suite legs) keeps the backslash in a replacement.
+is "...and no path carries a stray backslash" "0" "$(grep -c '\\~' <<<"$out1" || true)"
+# IDEMPOTENT, and non-destructive with it.
+before="$(cat "$cfg")"
+out2="$(fd 2>&1)"; rc2=$?
+is "a second run succeeds"              "0" "$rc2"
+is "...changing no rows"                "$before" "$(cat "$cfg")"
+is "...and saying it reused them"       "yes" "$(grep -q 'reused' <<<"$out2" && echo yes || echo no)"
+# --if-needed IS WHAT KEEPS `ghostfleet demo` FREE. It runs on every launch, so a
+# complete profile has to print nothing: the alternative is a wall of setup output in
+# front of a screen the reader has already seen, and six seconds of every recording.
+sil="$(fd --if-needed 2>&1)"; rcs=$?
+is "--if-needed is silent when complete" ""  "$sil"
+is "...and still exits 0"                "0" "$rcs"
+# ...and the other direction, or a silent no-op would be indistinguishable from a
+# seeder that had simply stopped working.
+rm -rf "$DT/gf-demo/toolbox"
+part="$(fd --if-needed 2>&1)"
+is "...but speaks up when a repo is gone" "yes" "$(grep -q 'created' <<<"$part" && echo yes || echo no)"
+is "...and restores only that one"        "yes" "$([ -d "$DT/gf-demo/toolbox/.git" ] && echo yes || echo no)"
+is "...leaving the rows alone"            "$before" "$(cat "$cfg")"
+CT="$(mktemp -d)"
+chk="$(HOME="$CT" "$ROOT/bin/fleet-demo" --check 2>&1)"
+is "--check says what it would do"      "yes" "$(grep -q 'would create' <<<"$chk" && echo yes || echo no)"
+is "...and creates nothing"             "no"  "$([ -e "$CT/gf-demo" ] && echo yes || echo no)"
+is "...and registers nothing"           "no"  "$([ -e "$CT/.config/ghostfleet/projects.demo" ] && echo yes || echo no)"
+rm -rf "$DT" "$CT"
+
+# ── the refusal, which is the whole design ───────────────────────────────────
+# A demo command is run by somebody who has not decided to trust this yet, in a home
+# directory full of real work. REUSE is safe; REPAIR is not. So anything it did not
+# create, it will not touch — and it says what it found instead of guessing at a fix.
+group "fleet-demo stops rather than repairing"
+RT="$(mktemp -d)"; mkdir -p "$RT/gf-demo/acme-web"
+printf 'not ours\n' > "$RT/gf-demo/acme-web/keep.txt"
+ref="$(HOME="$RT" "$ROOT/bin/fleet-demo" 2>&1)"; rcr=$?
+is "a non-git dir in the way is refused"  "1" "$rcr"
+is "...naming what it found"              "yes" "$(grep -q 'is not a git repository' <<<"$ref" && echo yes || echo no)"
+is "...the existing file untouched"       "not ours" "$(cat "$RT/gf-demo/acme-web/keep.txt")"
+# NOTHING was written, not even the two projects it could safely have made. The plan runs
+# in FULL before anything happens, so a refusal is never a half-setup to unpick — and a
+# reader who is told "nothing was created" can believe it.
+is "...and no other repo was created"     "no" "$([ -e "$RT/gf-demo/acme-api" ] && echo yes || echo no)"
+is "...and no projects file"              "no" "$([ -e "$RT/.config/ghostfleet/projects.demo" ] && echo yes || echo no)"
+CR="$(mktemp -d)"; mkdir -p "$CR/.config/ghostfleet" "$CR/mine"
+printf 'acme-api\t%s/mine\tdemo\n' "$CR" > "$CR/.config/ghostfleet/projects.demo"
+keep="$(cat "$CR/.config/ghostfleet/projects.demo")"
+ref2="$(HOME="$CR" "$ROOT/bin/fleet-demo" 2>&1)"; rcc=$?
+is "a row pointing elsewhere is refused"  "1" "$rcc"
+is "...and names the project"             "yes" "$(grep -q "acme-api" <<<"$ref2" && echo yes || echo no)"
+is "...leaving that list byte-identical"  "$keep" "$(cat "$CR/.config/ghostfleet/projects.demo")"
+# ONE RUN REPORTS EVERY CONFLICT. Stopping at the first makes the reader fix them one
+# command at a time, re-running a setup that refuses again for a reason it already knew.
+# 1 here would mean it bailed early; 0 would mean it found neither.
+BT="$(mktemp -d)"; mkdir -p "$BT/.config/ghostfleet" "$BT/gf-demo/toolbox" "$BT/other"
+printf 'acme-web\t%s/other\tdemo\n' "$BT" > "$BT/.config/ghostfleet/projects.demo"
+is "two conflicts are both reported"      "2" "$(HOME="$BT" "$ROOT/bin/fleet-demo" 2>&1 | grep -c '^  · ' || true)"
+rm -rf "$RT" "$CR" "$BT"
+
+group "ghostfleet demo is a profile that can build itself"
+if ! command -v tmux >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "ghostfleet demo wiring" "tmux or node not available"
+else
+  GT="$(mktemp -d)"; mkdir -p "$GT/gf-demo/acme-api"; : > "$GT/gf-demo/acme-api/f"
+  # The REFUSAL must reach the user as itself. Swallowed, it becomes the `no profile
+  # "demo"` message below it in bin/ghostfleet — which reports a machine that stopped on
+  # purpose as one that was never set up, and sends the reader to `--new`, which would
+  # create an empty demo profile and bury the conflict for good.
+  gout="$(HOME="$GT" CLAUDE_FLEET_AWAKE=off "$ROOT/bin/ghostfleet" demo </dev/null 2>&1)"; grc=$?
+  is "a demo refusal exits non-zero"        "1"   "$grc"
+  is "...carrying the real reason"          "yes" "$(grep -q 'not a git repository' <<<"$gout" && echo yes || echo no)"
+  is "...not 'no profile demo'"             "no"  "$(grep -q 'no profile' <<<"$gout" && echo yes || echo no)"
+  rm -rf "$GT"
+fi
+
+# ── the first screen the product ever shows ──────────────────────────────────
+# An empty projects list drew the picker with exactly one card on it, `+ add project`,
+# and nothing else: no statement of what a project IS here, and no hint that `n` is what
+# starts a session once there is one. Somebody who has just run ./install.sh arrives at
+# precisely that screen — so it is the product's first impression and it explained none
+# of itself. Driven through a real pane, because this is a rendering decision.
+group "an empty projects list guides instead of stalling"
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "first-run screen" "tmux not available"
+else
+  ET="$(mktemp -d)"; mkdir -p "$ET/.config/ghostfleet" "$ET/acme-api"
+  pscr() {   # $1.. = extra fleet-grid args -> what the screen draws
+    tmux -L cffirst kill-server 2>/dev/null
+    tmux -L cffirst new-session -d -x 110 -y 32 -e HOME="$ET" \
+      -e CLAUDE_FLEET_PROJECTS="$ET/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' - $* ; sleep 8" 2>/dev/null
+    sleep 2
+    tmux -L cffirst capture-pane -p 2>/dev/null
+    tmux -L cffirst kill-server 2>/dev/null
+  }
+  : > "$ET/.config/ghostfleet/projects"
+  empty="$(pscr --screen projects)"
+  is "an empty list gets the first-run screen" "yes" "$(grep -q 'No projects yet' <<<"$empty" && echo yes || echo no)"
+  # Asserted one at a time, not as a count: at this width the three card titles land on
+  # ONE captured line, so `grep -c` over all three would answer 1 whether three steps
+  # rendered or only the first.
+  is "...step 1 says pick a folder"      "yes" "$(grep -q 'pick a folder' <<<"$empty" && echo yes || echo no)"
+  is "...step 2 says name it"            "yes" "$(grep -q 'name it'       <<<"$empty" && echo yes || echo no)"
+  is "...step 3 names the key"           "yes" "$(grep -q 'press n'       <<<"$empty" && echo yes || echo no)"
+  is "...and offers the demo as a way in" "yes" "$(grep -q 'ghostfleet demo' <<<"$empty" && echo yes || echo no)"
+  # THE DIRECTION THAT WOULD OTHERWISE ROT. A first-run screen that also fired for
+  # existing users would have replaced the product's home screen, and every assertion
+  # above would still be green. `+ add project` is unchanged for them by decision, so the
+  # picker has to come back the moment there is one project to pick.
+  printf 'acme-api\t%s/acme-api\twork\n' "$ET" > "$ET/.config/ghostfleet/projects"
+  full="$(pscr --screen projects)"
+  is "one project brings the picker back"  "no"  "$(grep -q 'No projects yet' <<<"$full" && echo yes || echo no)"
+  is "...with its add card"                "yes" "$(grep -q 'add project'  <<<"$full" && echo yes || echo no)"
+  is "...and the project on it"            "yes" "$(grep -q 'acme-api'     <<<"$full" && echo yes || echo no)"
+  # Step 2's screen. The name is not cosmetic — it becomes the card, `ghostfleet <name>`
+  # and the fleet socket `cf-<name>` every status read is scoped by — so it is offered
+  # rather than derived, pre-filled with the basename so ⏎ alone is the common case.
+  nm="$(pscr --screen nameproject --select "$ET/acme-api")"
+  is "the naming screen names the step"    "yes" "$(grep -q 'step 2 of 3'  <<<"$nm" && echo yes || echo no)"
+  is "...pre-filled with the basename"     "yes" "$(grep -q 'name:  acme-api' <<<"$nm" && echo yes || echo no)"
+  is "...and shows the folder it is for"   "yes" "$(grep -q 'acme-api'     <<<"$nm" && echo yes || echo no)"
+  # Step 3 lands on the session GRID, and the hint lives there because that is where `n`
+  # works. A project with no sessions draws one card, `+ new session`, which says what it
+  # is and not that `n` is how you get one.
+  hint="$(pscr "cfnosuchfleet" "$ROOT/tmux/cf.tmux.conf")"
+  is "an empty grid says which key to press" "yes" "$(grep -q 'press n to start your first session' <<<"$hint" && echo yes || echo no)"
+  rm -rf "$ET"
+fi
+
+# ── what the installer says before you have seen anything ────────────────────
+# The old ending handed over to an empty screen: it said `ghostfleet`, which on a
+# just-installed machine opens a picker with no projects in it, and then "press 'n' to
+# add a session" — a key that does nothing on that screen, because `n` lives on a
+# project's session GRID and you cannot reach one without registering a project first.
+# Under it sat every step of a wiring run: forty-odd command names on one wrapped line,
+# a line per config dir, a line per agent.
+group "the installer's first screen is short, and lands somewhere"
+if ! command -v jq >/dev/null 2>&1; then
+  skip "installer output" "jq is not installed"
+else
+  IR="$(mktemp -d)"
+  # A COPY, NOT THE REPO. install.sh arms the pre-push guard by writing core.hooksPath
+  # into $REPO's git config, and a suite that mutates the checkout it is testing is a
+  # suite with a side effect nobody asked for. Copying only cf-sync's own dir list makes
+  # $REPO a non-repo, so that branch is skipped entirely — which is also the npx case.
+  mkdir -p "$IR/src"
+  cp -Rp "$ROOT"/bin "$ROOT"/lib "$ROOT"/tmux "$ROOT"/hooks "$ROOT"/mcp "$ROOT"/skill \
+         "$ROOT"/layouts "$ROOT"/web "$ROOT"/install.sh "$IR/src/" 2>/dev/null
+  mkdir -p "$IR/h/.claude"
+  inst() { env HOME="$IR/h" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" \
+               PATH="$IR/h/bin:$PATH" "$IR/src/install.sh" "$@" 2>&1; }
+  first="$(inst)"
+  # The number is the claim, so it is the assertion. Generous by design — this is "a
+  # screen you can read", not a byte count — but it went red at the 20-plus lines the
+  # installer printed before, and it is what stops the narration creeping back one
+  # helpful line at a time.
+  is "a first install fits on a screen"   "yes" "$([ "$(wc -l <<<"$first")" -le 12 ] && echo yes || echo no)"
+  is "...and does not list every command"  "no"  "$(grep -q 'claude-here cf-sync' <<<"$first" && echo yes || echo no)"
+  # It still has to say the main work happened. Quieting the per-profile narration
+  # without replacing it would leave the output claiming only that symlinks were made.
+  is "...but says the hooks + MCP landed"  "yes" "$(grep -q 'wired hooks + MCP into' <<<"$first" && echo yes || echo no)"
+  is "...and how many commands"            "yes" "$(grep -q 'linked .* commands' <<<"$first" && echo yes || echo no)"
+  # THE NEXT STEP IS THE POINT OF THE WHOLE CHANGE.
+  is "...and leads with the demo"          "yes" "$(grep -q 'ghostfleet demo' <<<"$first" && echo yes || echo no)"
+  # THE MCP CAVEAT IS THE MOST CONFUSING FAILURE THIS PROJECT HAS, and it can only happen
+  # to somebody who already had sessions open — which is a RE-install. On a first install
+  # it describes something that cannot have happened yet, to a reader with no way to tell
+  # it apart from the other things they are being told to worry about. Both directions,
+  # because "always" and "never" are the two ways this goes wrong.
+  is "a first install omits the MCP caveat" "0" "$(grep -c 'reach NEW sessions only' <<<"$first" || true)"
+  second="$(inst)"
+  is "...and a RE-install carries it"       "1" "$(grep -c 'reach NEW sessions only' <<<"$second" || true)"
+  # --verbose is where the narration went. If it did not, the flag is a promise the
+  # installer does not keep and the detail is simply gone.
+  verb="$(inst --verbose)"
+  is "--verbose lists every command"        "yes" "$(grep -q 'claude-here cf-sync' <<<"$verb" && echo yes || echo no)"
+  is "...names each config dir wired"       "yes" "$(grep -q 'wired hooks into'    <<<"$verb" && echo yes || echo no)"
+  is "...and carries the MCP caveat too"    "1"   "$(grep -c 'reach NEW sessions only' <<<"$verb" || true)"
+  is "...and is longer than the summary"    "yes" "$([ "$(wc -l <<<"$verb")" -gt "$(wc -l <<<"$first")" ] && echo yes || echo no)"
+  # A WARNING NEVER MOVES BEHIND A FLAG. The whole value of quieting the successes is
+  # that a failure becomes the only thing on the screen; a quiet mode that also ate the
+  # `!` lines would have made the install less legible, not more.
+  # The ambient PATH, NOT a stripped one: emptying PATH takes `node` with it and the
+  # installer exits at its first requirement check, long before the line under test — a
+  # green "no warning" that proves only that the probe broke. All this needs is for
+  # BIN_DIR to be absent from PATH, which it is, because inst() is what puts it there.
+  warn="$(env HOME="$IR/h" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" \
+              "$IR/src/install.sh" 2>&1)"
+  is "a PATH warning survives quiet mode"   "yes" "$(grep -q 'is not on your PATH' <<<"$warn" && echo yes || echo no)"
+  rm -rf "$IR"
+fi
+
 # ── what a non-claude master actually loses ─────────────────────────────────
 # MEASURED, not assumed, and the UI reads these rather than spelling them. The wiring gap
 # #88 recorded is CLOSED as of 2026-08-27: install.sh now registers the ghostfleet MCP for
@@ -749,8 +984,17 @@ else
   # `local`, and this file is bash already.
   sed -n '/^register_codex_mcp() {/,/^}/p'    "$ROOT/install.sh" >  "$MR/lib.sh"
   sed -n '/^register_opencode_mcp() {/,/^}/p' "$ROOT/install.sh" >> "$MR/lib.sh"
+  # vsay TOO, or the registrars cannot run at all. They narrate their success through it
+  # now that the installer's default output is a summary, and a function this file lifts
+  # out with sed brings none of its callees with it: sourcing them alone gave
+  # "vsay: command not found", every ✓ line vanished, and five assertions here went red
+  # for a reason that had nothing to do with MCP registration. A one-LINE function, so
+  # the range form above would run to the next `^}` in the file and drag half the
+  # installer in with it.
+  sed -n '/^vsay() {/p'                      "$ROOT/install.sh" >> "$MR/lib.sh"
   is "the codex registrar was extracted"    "1" "$(grep -c '^register_codex_mcp() {' "$MR/lib.sh")"
   is "the opencode registrar too"           "1" "$(grep -c '^register_opencode_mcp() {' "$MR/lib.sh")"
+  is "...and the helper they print through" "1" "$(grep -c '^vsay() {' "$MR/lib.sh")"
   is "...and both parse"                    "ok" "$(bash -n "$MR/lib.sh" 2>&1 && echo ok)"
   mkdir -p "$MR/bin" "$MR/rt/mcp"
   printf '#!/bin/sh\nexit 0\n' > "$MR/rt/mcp/fleet-mcp.mjs"
@@ -764,8 +1008,12 @@ exit "${MR_CODEX_RC:-0}"
 STUB
   printf '#!/bin/sh\nexit 0\n' > "$MR/bin/opencode"      # only needs to EXIST
   chmod +x "$MR/bin/codex" "$MR/bin/opencode"
+  # VERBOSE=1, because that is where these lines now live. The registrars' ✓ output is
+  # --verbose detail in the installer's own run (one line per agent, and the default is a
+  # summary), so asserting on it means asking for it. The quiet direction is asserted
+  # below rather than assumed.
   mr() {   # $1=xdg-config-home ... runs one registrar with the stubs in front
-    ( FLEET_HOME="$MR/rt" XDG_CONFIG_HOME="$1" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" \
+    ( FLEET_HOME="$MR/rt" XDG_CONFIG_HOME="$1" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" VERBOSE=1 \
       bash -c 'set -uo pipefail; source "$0"; shift; "$@"' "$MR/lib.sh" x "$2" 2>&1 )
   }
 
@@ -786,7 +1034,7 @@ STUB
   # prints NOTHING — which reads exactly like a function that stayed silent. Same trick the
   # funnel group uses for node.
   BASH_ABS="$(command -v bash)"
-  out="$(FLEET_HOME="$MR/rt" MR_RAN="$MR/ran" PATH="$MR/empty" "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_codex_mcp' "$MR/lib.sh" 2>&1)"
+  out="$(FLEET_HOME="$MR/rt" MR_RAN="$MR/ran" PATH="$MR/empty" VERBOSE=1 "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_codex_mcp' "$MR/lib.sh" 2>&1)"
   is "no codex: it says so"                 "1" "$(printf '%s' "$out" | grep -c 'codex not installed' || true)"
   is "...and runs nothing"                  ""  "$(cat "$MR/ran")"
 
@@ -833,8 +1081,15 @@ STUB
   is "a commented .jsonc is not clobbered"  "$before" "$(cat "$Z/opencode/opencode.jsonc")"
   is "...and it says what to paste"         "1" "$(printf '%s' "$out" | grep -c '"mcp": { "ghostfleet"' || true)"
   is "...without claiming success"          "0" "$(printf '%s' "$out" | grep -c '✓' || true)"
-  out="$(FLEET_HOME="$MR/rt" PATH="$MR/empty" "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_opencode_mcp' "$MR/lib.sh" 2>&1)"
+  out="$(FLEET_HOME="$MR/rt" PATH="$MR/empty" VERBOSE=1 "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_opencode_mcp' "$MR/lib.sh" 2>&1)"
   is "no opencode: it says so"              "1" "$(printf '%s' "$out" | grep -c 'opencode not installed' || true)"
+  # THE QUIET DIRECTION, or "it narrates under --verbose" would be half a claim. vsay
+  # reads ${VERBOSE:-0} so that it survives exactly this extraction: sourced with the
+  # variable unset, under `set -u`, it must print nothing rather than abort.
+  quiet="$(FLEET_HOME="$MR/rt" XDG_CONFIG_HOME="$MR/x5" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" \
+           "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_opencode_mcp' "$MR/lib.sh" 2>&1)"
+  is "...and says nothing without VERBOSE"  "0" "$(printf '%s' "$quiet" | grep -c '✓' || true)"
+  is "...while still writing the config"    "node" "$(jq -r '.mcp.ghostfleet.command[0]' "$MR/x5/opencode/opencode.jsonc" 2>/dev/null)"
 
   # ── the installer says the part that makes a correct install look broken ──
   # An MCP server is spawned once per session and lives as long as it, so nothing already

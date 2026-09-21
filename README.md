@@ -133,15 +133,38 @@ me, so file an issue if something bites.)*
 
 ```bash
 npx ghostfleet-cli          # installs, no clone needed
-ghostfleet
+ghostfleet demo             # see it working, on three throwaway projects
 ```
+
+`ghostfleet demo` is the fastest way to find out whether you want this. It creates three
+scratch git repos under `~/gf-demo`, registers them in a separate `demo` profile, and
+opens the real control plane on them — the same screens the GIFs above were recorded
+against. It is additive and it never repairs: anything already there is reused and said
+so, and if it finds something it cannot safely reuse it stops and tells you what it found
+rather than guessing. Your own profiles are untouched; `rm -rf ~/gf-demo
+~/.config/ghostfleet/projects.demo ~/.claude-demo` removes every trace.
+
+**Every screen works before you log anything in** — the Projects picker, a project's
+session grid, the new-worktree form, the stack. What needs a login is an *agent taking a
+turn*: Claude Code keeps credentials per config dir, so the demo profile has its own, and
+a session you open will sit at its login prompt until you do this once:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-demo claude     # then /login
+```
+
+An empty pane before that is the login prompt, not a broken fleet.
+
+Ready to point it at your own work? `ghostfleet` opens your projects — and with none
+registered yet it walks you through picking a folder, naming it, and starting the first
+session, rather than showing you an empty screen.
 
 Prefer to clone the repo (e.g. to develop against it)?
 
 ```bash
 git clone https://github.com/PabloG55/ghostfleet.git
 cd ghostfleet
-./install.sh
+./install.sh                # add --verbose to watch every step
 ```
 
 Both run the same `install.sh` — `npx ghostfleet-cli` just fetches the package and runs it

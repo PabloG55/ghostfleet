@@ -32,6 +32,10 @@ ghostfleet installer
     ./install.sh [-y|--yes]          from a clone
     npx ghostfleet-cli [-y|--yes]    without cloning (args pass straight through)
 
+  -v, --verbose  Narrate every step — what was staged, each command linked, each
+                 config dir wired, each MCP registration. Same as CLAUDE_FLEET_VERBOSE=1.
+                 The default prints a summary and what to run next; warnings and errors
+                 print either way.
   -y, --yes    Install missing dependencies (tmux, jq) WITHOUT prompting, using the
                OS package manager — with sudo on Linux where that needs it. For
                unattended installs (CI, a Dockerfile, `curl | bash`) where there is
@@ -59,9 +63,35 @@ case "${CLAUDE_FLEET_YES:-}" in
   ""|0|n|N|no|No|NO|false|False|FALSE|off|Off|OFF) ;;
   *) ASSUME_YES=1; YES_VIA="CLAUDE_FLEET_YES" ;;
 esac
+
+# --- how much of this to say ------------------------------------------------
+# WHAT WAS WRONG WITH SAYING ALL OF IT. This installer wires a lot — a staged runtime,
+# forty-odd symlinks, hooks and an MCP server into every Claude profile on the machine,
+# two more agents, a zellij layout, a pre-push guard — and it narrated every step. That is
+# the right output for the person debugging an install and exactly the wrong output for
+# the person doing their first one, who cannot tell which of those lines they are supposed
+# to act on, and whose actual next step ("now run something") was the last line under all
+# of it.
+#   So the default is a summary and a next step, and the narration moves behind --verbose.
+# WARNINGS DO NOT MOVE. Every `!` line is unconditional, here and below: the whole value
+# of quieting the successes is that a failure is now the only thing on the screen.
+VERBOSE=0
+case "${CLAUDE_FLEET_VERBOSE:-}" in
+  ""|0|n|N|no|No|NO|false|False|FALSE|off|Off|OFF) ;;
+  *) VERBOSE=1 ;;
+esac
+# ${VERBOSE:-0}, not $VERBOSE: test/run.sh lifts the two MCP registrars out of this file
+# with sed and sources them on their own, so this function has to work with none of the
+# rest of the script around it. Under `set -u` a bare $VERBOSE would abort the extracted
+# copy instead of printing.
+#   `return 0` because the last command is a test that is FALSE in the quiet case, and a
+# helper whose status flips with a verbosity setting is a helper that will eventually be
+# the reason a caller's `&&` chain stops running.
+vsay() { [ "${VERBOSE:-0}" = 1 ] && printf '%s\n' "$*"; return 0; }
 for a in "$@"; do
   case "$a" in
     -y|--yes)  ASSUME_YES=1; YES_VIA="--yes" ;;
+    -v|--verbose) VERBOSE=1 ;;
     -h|--help) usage; exit 0 ;;
     # A MISTYPED flag must not be ignored: `--yse` in a Dockerfile would otherwise
     # produce exactly the silent tmux-less install that --yes exists to prevent, and
@@ -73,10 +103,16 @@ for a in "$@"; do
 done
 
 echo "ghostfleet installer"
-echo "  repo:     $REPO   (development)"
-echo "  runtime:  $FLEET_HOME   (executed from here)"
-echo "  bin dir:  $BIN_DIR"
+vsay "  repo:     $REPO   (development)"
+vsay "  runtime:  $FLEET_HOME   (executed from here)"
+vsay "  bin dir:  $BIN_DIR"
 [ "$ASSUME_YES" = 1 ] && echo "  deps:     $YES_VIA given — missing dependencies will be installed WITHOUT asking"
+
+# IS THIS A RE-INSTALL? Measured BEFORE cf-sync stages anything, because afterwards the
+# runtime always exists and the question can no longer be asked. It decides one thing: a
+# first-timer does not need the live-sessions caveat at the end (they have no sessions),
+# and somebody re-running the installer very often needs nothing else.
+REINSTALL=0; [ -d "$FLEET_HOME/bin" ] && REINSTALL=1
 echo
 
 command -v node >/dev/null 2>&1 || { echo "error: node is required (the v2 grid is a Node TUI)"; exit 1; }
@@ -212,7 +248,15 @@ if ! is_repo "$REPO"; then
   prev="$(cat "$FLEET_HOME/.source" 2>/dev/null || true)"
   if [ -n "$prev" ] && [ "$prev" != "$REPO" ] && is_repo "$prev"; then KEEP_SOURCE="$prev"; fi
 fi
-CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" "$REPO"
+# cf-sync narrates its own success in two lines. Keep them for --verbose, and on a
+# FAILURE keep them unconditionally: it prints "the runtime is now a MIX of old and new
+# code, do not trust it" to stderr, and that must never be something a quiet mode ate.
+if [ "$VERBOSE" = 1 ]; then
+  CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" "$REPO"
+else
+  _sync_out="$(CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" "$REPO")" \
+    || printf '%s\n' "$_sync_out"
+fi
 if [ -n "$KEEP_SOURCE" ]; then
   printf '%s\n' "$KEEP_SOURCE" > "$FLEET_HOME/.source"
   echo "· this install ran from $REPO, which is not a git repo,"
@@ -230,7 +274,7 @@ mkdir -p "$BIN_DIR"
 CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read
          fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar
          fleet-worktrees fleet-ack fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy fleet-merged fleet-look.mjs fleet-shots.mjs
-         fleet-clean fleet-open fleet-project fleet-adopt fleet-awake fleet-cycle
+         fleet-clean fleet-open fleet-project fleet-demo fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-meter.mjs fleet-review
          agent-here opencode-here codex-here)
 linked=()
@@ -243,7 +287,11 @@ ln -sf "$FLEET_HOME/bin/ghostfleet" "$BIN_DIR/claude-fleet"   # back-compat: the
 # had already drifted twice — it was still missing fleet-stack, and then fleet-slot, so
 # an installer that had just linked a new command told you it hadn't. A summary
 # maintained separately from the work it summarises is a summary that will lie.
-echo "✓ linked ${#linked[@]} commands (${linked[*]}) -> $BIN_DIR"
+# The COUNT by default, the roster under --verbose. The roster is forty-odd names on one
+# wrapped line and is the single biggest block of output here; it is also the thing you
+# want when a command is missing, which is a --verbose question.
+if [ "$VERBOSE" = 1 ]; then echo "✓ linked ${#linked[@]} commands (${linked[*]}) -> $BIN_DIR"
+else                        echo "✓ linked ${#linked[@]} commands -> $BIN_DIR"; fi
 
 # --- OpenCode event bridge (optional, only if opencode is installed) --------
 # The counterpart of wire_hooks below: Claude Code learns about the fleet through
@@ -255,12 +303,12 @@ if command -v opencode >/dev/null 2>&1; then
   OC_PLUGIN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugin"
   if mkdir -p "$OC_PLUGIN_DIR" 2>/dev/null; then
     ln -sf "$FLEET_HOME/hooks/opencode-fleet-event.js" "$OC_PLUGIN_DIR/ghostfleet-event.js"
-    echo "✓ installed the OpenCode event bridge -> $OC_PLUGIN_DIR/ghostfleet-event.js"
+    vsay "✓ installed the OpenCode event bridge -> $OC_PLUGIN_DIR/ghostfleet-event.js"
   else
     echo "! could not create $OC_PLUGIN_DIR — OpenCode workers will fall back to pane-only detection"
   fi
 else
-  echo "· opencode not installed — skipping its event bridge (fleet-spawn --agent opencode will refuse until it is)"
+  vsay "· opencode not installed — skipping its event bridge (fleet-spawn --agent opencode will refuse until it is)"
 fi
 
 # --- wire hooks into every Claude config dir (profile) ----------------------
@@ -278,7 +326,7 @@ register_mcp() {
     CLAUDE_CONFIG_DIR="$dir" claude mcp remove -s user ghostfleet   >/dev/null 2>&1 || true
     CLAUDE_CONFIG_DIR="$dir" claude mcp remove -s user claude-fleet >/dev/null 2>&1 || true   # pre-rename name
     if CLAUDE_CONFIG_DIR="$dir" claude mcp add -s user --transport stdio ghostfleet -- node "$mcp" >/dev/null 2>&1; then
-      echo "✓ registered ghostfleet MCP (user scope) -> $dir/.claude.json"
+      vsay "✓ registered ghostfleet MCP (user scope) -> $dir/.claude.json"
     else
       echo "! could not 'claude mcp add' in $dir — run: CLAUDE_CONFIG_DIR=$dir claude mcp add -s user --transport stdio ghostfleet -- node $mcp"
     fi
@@ -286,7 +334,7 @@ register_mcp() {
     # no claude CLI on PATH — write the top-level mcpServers into .claude.json directly
     local cj="$dir/.claude.json" t; [ -f "$cj" ] || echo '{}' > "$cj"; t="$(mktemp)"
     if jq --arg m "$mcp" '.mcpServers = ((.mcpServers // {}) + { "ghostfleet": { type:"stdio", command:"node", args:[$m], env:{} } })' "$cj" > "$t" 2>/dev/null; then
-      mv "$t" "$cj"; echo "✓ wrote ghostfleet MCP -> $cj"
+      mv "$t" "$cj"; vsay "✓ wrote ghostfleet MCP -> $cj"
     else rm -f "$t"; echo "! failed to write MCP into $cj"; fi
   fi
 }
@@ -333,15 +381,29 @@ wire_hooks() {
     | (if .mcpServers then .mcpServers |= del(.["ghostfleet"]) else . end)
     | (if (.mcpServers // {}) == {} then del(.mcpServers) else . end)
   ' "$settings" > "$tmp" && mv "$tmp" "$settings"
-  echo "✓ wired hooks into $settings (backup saved)"
+  vsay "✓ wired hooks into $settings (backup saved)"
+  # COUNTED HERE, where the work happens, rather than by re-deriving the profile list for
+  # the summary. A summary maintained separately from the work it summarises is a summary
+  # that will lie — the linked-commands line above carries that exact scar.
+  N_WIRED=$((N_WIRED + 1))
   register_mcp "$dir"
 }
 is_config_dir() { [ -f "$1/settings.json" ] || [ -d "$1/projects" ] || [ -f "$1/.claude.json" ]; }
+N_WIRED=0
 
 wire_hooks "$HOME/.claude"                       # work (default)
 for d in "$HOME"/.claude-*; do                   # personal + any other profiles
   [ -d "$d" ] && is_config_dir "$d" && wire_hooks "$d"
 done
+# ONE LINE FOR THE WHOLE LOOP, and it has to exist: quieting the per-profile narration
+# without replacing it would leave the default output claiming only that some symlinks
+# were made, with nothing saying the hooks and the MCP server — the parts that make a
+# session report its status and a lead able to drive one — reached anything at all. A
+# summary that omits the main work is not quieter, it is wrong.
+#   The COUNT is what matters here rather than the names: "2 profiles" answers "did it
+# find my personal profile too", which is the question this loop exists for, and
+# --verbose still names each file it wrote.
+echo "✓ wired hooks + MCP into $N_WIRED Claude profile$([ "$N_WIRED" = 1 ] || echo s)"
 
 # --- the other two agents' MCP: one registration each, and that is correct ----
 # WHY THIS LOOKS WRONG NEXT TO THE CLAUDE PATH ABOVE, AND IS NOT. register_mcp() runs once
@@ -378,7 +440,7 @@ done
 register_codex_mcp() {
   local mcp="$FLEET_HOME/mcp/fleet-mcp.mjs"
   if ! command -v codex >/dev/null 2>&1; then
-    echo "· codex not installed — skipping its MCP registration (fleet-spawn --agent codex will refuse until it is)"
+    vsay "· codex not installed — skipping its MCP registration (fleet-spawn --agent codex will refuse until it is)"
     return 0
   fi
   # IDEMPOTENT BY MEASUREMENT, not by hope: a second `codex mcp add` of the same name
@@ -386,7 +448,7 @@ register_codex_mcp() {
   # config.toml alone (checked with `model`/`approval_policy` present, codex-cli 0.149.1).
   # So no remove-first dance, and re-running the installer cannot stack up entries.
   if codex mcp add ghostfleet -- node "$mcp" >/dev/null 2>&1; then
-    echo "✓ registered ghostfleet MCP -> ${CODEX_HOME:-$HOME/.codex}/config.toml (codex, global)"
+    vsay "✓ registered ghostfleet MCP -> ${CODEX_HOME:-$HOME/.codex}/config.toml (codex, global)"
   else
     echo "! could not 'codex mcp add' — run: codex mcp add ghostfleet -- node $mcp"
   fi
@@ -411,7 +473,7 @@ register_codex_mcp() {
 register_opencode_mcp() {
   local mcp="$FLEET_HOME/mcp/fleet-mcp.mjs"
   if ! command -v opencode >/dev/null 2>&1; then
-    echo "· opencode not installed — skipping its MCP registration"
+    vsay "· opencode not installed — skipping its MCP registration"
     return 0
   fi
   local dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode" cfg t
@@ -431,7 +493,7 @@ register_opencode_mcp() {
   # .claude.json.
   if jq --arg m "$mcp" '.mcp = ((.mcp // {}) + { ghostfleet: { type: "local", command: ["node", $m] } })' "$cfg" > "$t" 2>/dev/null; then
     mv "$t" "$cfg"
-    echo "✓ wrote ghostfleet MCP -> $cfg (opencode, global)"
+    vsay "✓ wrote ghostfleet MCP -> $cfg (opencode, global)"
   else
     rm -f "$t"
     # A .jsonc may legally hold comments, which jq cannot read. Refusing to touch it is the
@@ -456,7 +518,7 @@ if [ -d "$HOME/.config/zellij" ]; then
   ZL="$HOME/.config/zellij/layouts"
   mkdir -p "$ZL"
   ln -sf "$FLEET_HOME/layouts/fleet.kdl" "$ZL/fleet.kdl"
-  echo "✓ linked layout -> $ZL/fleet.kdl  (launch: zellij --layout fleet attach -c fleet)"
+  vsay "✓ linked layout -> $ZL/fleet.kdl  (launch: zellij --layout fleet attach -c fleet)"
 fi
 
 # --- did tmux actually land? -------------------------------------------------
@@ -490,10 +552,22 @@ fi
 #   This is in the installer's own output and not only in the docs, because the person who
 # needs it is the person who has just re-run the installer to fix exactly this and is about
 # to conclude it did not work.
-echo
-echo "The fleet_* tools reach NEW sessions only. An MCP server is spawned once per session and"
-echo "lives as long as it, so anything open right now — claude, codex or opencode — keeps the"
-echo "server it started with. Quit and reopen a session to pick these up."
+#
+#   AND THAT SENTENCE IS ALSO WHO IT IS FOR. It is the most confusing failure this project
+# has, and it can only happen to somebody who ALREADY HAD SESSIONS OPEN when they ran this
+# — which is precisely a re-install. On a first install there is no running session for a
+# stale server to be attached to, so the warning describes something that cannot have
+# happened yet, to a reader with no way to tell it apart from the other things they are
+# being told to worry about. It costs them the attention that should go to the next step.
+#   So: unconditional on a RE-install (the case it is about), always under --verbose, and
+# out of a first-timer's way. $REINSTALL is measured at the top, before cf-sync stages the
+# runtime and makes the question unanswerable.
+if [ "$REINSTALL" = 1 ] || [ "$VERBOSE" = 1 ]; then
+  echo
+  echo "The fleet_* tools reach NEW sessions only. An MCP server is spawned once per session and"
+  echo "lives as long as it, so anything open right now — claude, codex or opencode — keeps the"
+  echo "server it started with. Quit and reopen a session to pick these up."
+fi
 
 # ── arm the pre-push guard, because a clone that forgets has no guard ────────
 # THE GUARD IS COMMITTED BUT core.hooksPath IS NOT. It is repo-local git config, so it does
@@ -510,14 +584,14 @@ if [ -d "$REPO/.git" ] || [ -f "$REPO/.git" ]; then
   _hp="$(git -C "$REPO" config --get core.hooksPath 2>/dev/null || true)"
   if [ -z "$_hp" ]; then
     if git -C "$REPO" config core.hooksPath .githooks 2>/dev/null; then
-      echo
-      echo "✓ armed the pre-push guard (core.hooksPath -> .githooks)"
-      echo "  It refuses a push whose tree, FILE NAMES, commit messages or branch name carry a"
-      echo "  withheld project name. Override a false positive once with: git push --no-verify"
+      vsay ""
+      vsay "✓ armed the pre-push guard (core.hooksPath -> .githooks)"
+      vsay "  It refuses a push whose tree, FILE NAMES, commit messages or branch name carry a"
+      vsay "  withheld project name. Override a false positive once with: git push --no-verify"
     fi
   elif [ "$_hp" = .githooks ]; then
-    echo
-    echo "✓ pre-push guard already armed"
+    vsay ""
+    vsay "✓ pre-push guard already armed"
   else
     echo
     echo "! core.hooksPath is set to '$_hp', so .githooks/pre-push is NOT active."
@@ -526,8 +600,19 @@ if [ -d "$REPO/.git" ] || [ -f "$REPO/.git" ]; then
   fi
 fi
 
+# --- what to do next --------------------------------------------------------
+# THE OLD ENDING HANDED OVER TO AN EMPTY SCREEN. It said `ghostfleet`, which on a machine
+# that has just been installed opens the Projects picker with no projects in it — and the
+# next instruction, "press n to add a session", is not even true there: `n` is a key on a
+# project's session GRID, and you cannot reach one without registering a project first. So
+# the last line of the install told a first-timer to press a key that does nothing on the
+# screen they were about to land on.
+#   `ghostfleet demo` is the answer to that: it builds three throwaway projects and opens
+# a real fleet on them, touching nothing of yours (bin/fleet-demo). The empty picker now
+# guides too, so the second line is no longer a dead end either — but the demo is the one
+# that shows the product rather than asking the reader to supply it.
 echo
-echo "Done. In a zellij pane:"
-echo "    ghostfleet            # work profile   (~/.claude)"
-echo "    ghostfleet personal   # personal       (~/.claude-personal)"
-echo "Then press 'n' to add a session. (Layout: zellij --layout fleet attach -c <project>.)"
+echo "Done. Next:"
+echo "    ghostfleet demo       # three throwaway projects — see it working, touches nothing of yours"
+echo "    ghostfleet            # your own projects (the empty screen walks you through adding one)"
+[ "$VERBOSE" = 1 ] || echo "    ./install.sh --verbose   # everything this just did, step by step"

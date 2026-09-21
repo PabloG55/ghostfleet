@@ -1,0 +1,300 @@
+#!/usr/bin/env bash
+# fleet-demo — set up the `demo` profile, so `ghostfleet demo` works on a machine
+# that has never seen this repo.
+#
+#     fleet-demo                 report what is there, create what is not, then say
+#                                what the demo can and cannot show you
+#     fleet-demo --if-needed     silent no-op when the demo profile is already complete
+#                                (what `ghostfleet demo` calls — see bin/ghostfleet)
+#     fleet-demo --check         report only; create nothing, write nothing
+#     fleet-demo --root DIR      somewhere other than ~/gf-demo
+#
+# WHY THIS EXISTS. `ghostfleet demo` was already the first line of both recordings
+# (worktree.tape, stack.tape) and of the README's GIFs — but the profile it opens was
+# built BY HAND, once, on one machine. Everywhere else that command exits 1 with
+# `no profile "demo"`, because bin/ghostfleet resolves a bare argument as a profile and
+# refuses an unknown one. So the one command a new reader sees demonstrated is the one
+# command that cannot work for them, and nothing anywhere says why.
+#
+# IT IS ADDITIVE AND IT NEVER REPAIRS. Every step is create-if-absent, reuse-and-say-so
+# otherwise; there is no branch here that deletes, truncates, resets or rewrites. When
+# something exists in a shape this cannot safely reuse — a plain directory where a repo
+# should be, a projects row of the right name pointing somewhere else — it STOPS, names
+# what it found and what it would take, and writes nothing at all. That is the whole
+# design: a demo command is run by someone who has not yet decided to trust this, often
+# in a home directory full of real work, and a command that eats real work once is a
+# command nobody runs a second time. Guessing at a repair is how that happens, so the
+# guess is not available.
+#
+# THE THREE PROJECTS ARE NOT ARBITRARY. acme-api, acme-web and toolbox are what
+# ~/.config/ghostfleet/projects.demo has held since the recordings were shot, what
+# web/fixtures/ renders, and what the README's GIFs show. A demo that hands you a
+# different fleet than the one in the pictures is a demo that undercuts them.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+
+PROFILE=demo
+CFG_HOME="$HOME/.config/ghostfleet"
+PROJECTS_CFG="$CFG_HOME/projects.$PROFILE"
+CFG_DIR="$HOME/.claude-$PROFILE"
+ROOT="${CLAUDE_FLEET_DEMO_ROOT:-$HOME/gf-demo}"
+PROJECTS=(acme-api acme-web toolbox)
+
+MODE=run          # run | check | if-needed
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check)     MODE=check;     shift ;;
+    --if-needed) MODE=if-needed; shift ;;
+    --root)      ROOT="${2:?fleet-demo: --root needs a directory}"; shift 2 ;;
+    -h|--help)   sed -n '2,15p' "$src" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "fleet-demo: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+ROOT="${ROOT/#\~/$HOME}"
+
+# ~ FOR $HOME, AND THE TILDE COMES FROM A VARIABLE. The spelling used elsewhere in this
+# tree puts a backslash-escaped tilde in the replacement half of a ${x/#$HOME/...}
+# expansion, and that is wrong on bash 3.2: the replacement is substituted, not
+# re-parsed, so the backslash SURVIVES and the line prints a stray one before the path.
+# macOS ships bash 3.2.57 and macos-latest is one of the two suite legs, so this is not
+# theoretical — and the line it corrupts worst is the `rm -rf` offered below for throwing
+# the demo away, where that backslash turns a path under $HOME into a literal directory
+# named `~`. A parameter expansion is never re-parsed, so $TILDE is right on every version.
+TILDE='~'
+short() { printf '%s' "${1/#$HOME/$TILDE}"; }
+
+# Output is buffered and printed at the END, never as it goes. A run that stops on a
+# conflict must not have already announced half a setup it then abandoned — the reader
+# would be left unable to tell which of the lines above the error actually happened.
+REPORT=""
+say() { REPORT="$REPORT$1"$'\n'; }
+CONFLICTS=()
+CREATED=0; REUSED=0
+
+# ── 1. plan, in full, before touching anything ──────────────────────────────
+# Every check runs even after the first failure, so one run reports every conflict
+# instead of making the reader fix them one command at a time. A partial plan is how a
+# "just re-run it" loop starts.
+#
+#   THE VERDICT COMES BACK IN A GLOBAL, NOT ON STDOUT, and that is not a style choice.
+# `PLAN="$(plan_repo "$p")"` runs the function in a SUBSHELL, so every `CONFLICTS+=(…)`
+# inside it is written to a copy that is discarded the moment the substitution closes —
+# the plan would read `stop` while the conflict list came back EMPTY, and the guard below
+# ("are there conflicts?") would wave through a run that had already decided not to
+# proceed. The dangerous half is that it looks right: the string the function prints is
+# correct, so the only symptom is the array nobody re-checked.
+plan_root() {
+  if [ -e "$ROOT" ] && [ ! -d "$ROOT" ]; then
+    CONFLICTS+=("$ROOT exists and is not a directory — the demo needs that path for its throwaway repos")
+  fi
+}
+
+# A repo is REUSABLE when it is a real checkout: a .git DIRECTORY. A .git FILE is a
+# linked worktree, and a worktree cannot be a project root here — fleet-spawn refuses to
+# nest, so master would open somewhere that can spawn nothing and every `w` would fail
+# for a reason nothing on screen explains (the same distinction bin/ghostfleet's
+# master_checkout draws, and for the same cost).
+plan_repo() {                      # $1 = project name  -> sets PLAN
+  local d="$ROOT/$1"
+  if [ ! -e "$d" ]; then PLAN=create; return 0; fi
+  if [ ! -d "$d" ]; then
+    CONFLICTS+=("$d exists and is not a directory"); PLAN=stop; return 0
+  fi
+  if [ -d "$d/.git" ]; then PLAN=reuse; return 0; fi
+  if [ -e "$d/.git" ]; then
+    CONFLICTS+=("$d is a linked git worktree, not a checkout — a project root cannot be a worktree, so master would open somewhere that can spawn nothing"); PLAN=stop; return 0
+  fi
+  CONFLICTS+=("$d exists and is not a git repository — the demo will not run 'git init' over a directory it did not create"); PLAN=stop
+}
+
+# The row is matched on NAME, and the conflict is a name that already points elsewhere.
+# awk -F'\t' and not `read`: tab is IFS-whitespace, so `IFS=$'\t' read` collapses a run
+# of them and an empty profile column shifts every later field left (CLAUDE.md's first
+# entry, and fleet-project has the scars).
+row_path() {                       # $1 = project name -> its registered path, or empty
+  [ -f "$PROJECTS_CFG" ] || return 0
+  awk -F'\t' -v n="$1" '$1==n{print $2; exit}' "$PROJECTS_CFG" 2>/dev/null
+}
+plan_row() {                       # $1 = project name  -> sets PLAN
+  local want="$ROOT/$1" got; got="$(row_path "$1")"
+  [ -n "$got" ] || { PLAN=add; return 0; }
+  got="${got/#\~/$HOME}"
+  [ "$got" = "$want" ] && { PLAN=reuse; return 0; }
+  CONFLICTS+=("the demo profile already lists a project called '$1' at $got, not $want — rename or remove that entry (fleet-project rm $1) and re-run")
+  PLAN=stop
+}
+
+plan_root
+PLAN=""
+declare -a REPO_PLAN=() ROW_PLAN=()
+for p in "${PROJECTS[@]}"; do
+  plan_repo "$p"; REPO_PLAN+=("$PLAN")
+  plan_row  "$p"; ROW_PLAN+=("$PLAN")
+done
+
+if [ "${#CONFLICTS[@]}" -gt 0 ]; then
+  {
+    echo "fleet-demo: stopping — the demo setup would have to change something it did not create."
+    echo
+    for c in "${CONFLICTS[@]}"; do echo "  · $c"; done
+    echo
+    echo "  Nothing was created, moved or written. Point the demo somewhere else instead:"
+    echo "      fleet-demo --root ~/some-empty-dir"
+  } >&2
+  exit 1
+fi
+
+# ── 2. is there anything to do at all? ──────────────────────────────────────
+# `ghostfleet demo` calls this on EVERY launch, including the hundredth, so a complete
+# profile has to cost nothing and say nothing: the alternative is a wall of setup output
+# in front of a screen the reader has already seen, and (measured on the tapes) six
+# seconds of recording spent on it.
+TODO=0
+for i in "${!PROJECTS[@]}"; do
+  [ "${REPO_PLAN[$i]}" = create ] && TODO=1
+  [ "${ROW_PLAN[$i]}"  = add    ] && TODO=1
+done
+[ -d "$CFG_DIR" ] || TODO=1
+if [ "$TODO" = 0 ] && [ "$MODE" = if-needed ]; then exit 0; fi
+
+# ── 3. do it ────────────────────────────────────────────────────────────────
+# A REPO WITH NO COMMIT HAS NO BRANCHES, and that is what breaks the `w` form — the flow
+# the demo exists to show and the one worktree.tape records. fleet-spawn runs
+# `git worktree add <path> -b <branch> <base>` (bin/fleet-spawn:627), and on a commitless
+# repo the base ref does not exist yet: measured on git 2.55, `git branch` lists nothing,
+# `rev-parse --abbrev-ref HEAD` errors, and the add dies with `fatal: invalid reference:
+# main`.
+#   Not to be confused with a BARE `worktree add -b x <path>`, which SUCCEEDS on the same
+# repo — git infers `--orphan` and makes a branch with no history. So "can a worktree be
+# cut from this" has two answers depending on the command shape, and the one that matters
+# is the shape fleet-spawn actually uses. One commit is the whole fix.
+#
+#   AN IDENTITY IS PASSED IN, NOT READ. `git commit` on a machine with no user.email
+# fails with "Please tell me who you are", and a demo that dies there has asked the
+# reader to configure git before it will show them anything. The values are set as repo
+# LOCAL config so a later commit in the demo repo works too, and .invalid is the TLD
+# reserved (RFC 2606) for exactly this — it can never be somebody's address.
+#
+#   `git init` THEN symbolic-ref, rather than `git init -b main`: -b arrived in git 2.28
+# and this is the one command a brand-new machine runs first. Before any commit exists,
+# pointing HEAD at refs/heads/main is the same thing and works everywhere.
+make_repo() {                      # $1 = project name
+  local d="$ROOT/$1"
+  mkdir -p "$d/src" || return 1
+  git init -q "$d" >/dev/null 2>&1 || return 1
+  git -C "$d" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1 || true
+  git -C "$d" config user.name  'ghostfleet demo'   >/dev/null 2>&1 || true
+  git -C "$d" config user.email 'demo@ghostfleet.invalid' >/dev/null 2>&1 || true
+  cat > "$d/README.md" <<EOF
+# $1
+
+A throwaway repo, created by \`ghostfleet demo\`. Nothing here is real — it exists so the
+fleet has a genuine git checkout to cut worktrees from, which is what the \`w\` form does.
+
+Delete the whole of \`$(short "$ROOT")\` whenever you like; \`fleet-project rm $1\` drops it
+from the demo profile's list.
+EOF
+  printf 'export function hello() {\n  return "%s";\n}\n' "$1" > "$d/src/index.js"
+  git -C "$d" add -A >/dev/null 2>&1 || return 1
+  git -C "$d" commit -q -m 'initial commit' >/dev/null 2>&1 || return 1
+  return 0
+}
+
+if [ "$MODE" != check ]; then
+  mkdir -p "$ROOT" 2>/dev/null
+  mkdir -p "$CFG_DIR/fleet" 2>/dev/null
+fi
+
+for i in "${!PROJECTS[@]}"; do
+  p="${PROJECTS[$i]}"
+  case "${REPO_PLAN[$i]}" in
+    create)
+      if [ "$MODE" = check ]; then say "  would create  $(short "$ROOT")/$p"
+      elif make_repo "$p"; then say "  created  $(short "$ROOT")/$p"; CREATED=$((CREATED+1))
+      else
+        echo "fleet-demo: could not create $ROOT/$p — is git installed and is $ROOT writable?" >&2
+        exit 1
+      fi ;;
+    reuse) say "  reused   $(short "$ROOT")/$p  (already a git repo — left exactly as it is)"; REUSED=$((REUSED+1)) ;;
+  esac
+done
+
+# The row is written by fleet-project, not here. It is the one writer of this format —
+# it validates the name, resolves the path, and appends the three columns every reader
+# expects — and a second copy of that write is a second thing to keep in step with a
+# file whose column rules have already cost this repo two field-shift bugs.
+for i in "${!PROJECTS[@]}"; do
+  p="${PROJECTS[$i]}"
+  case "${ROW_PLAN[$i]}" in
+    add)
+      if [ "$MODE" = check ]; then say "  would register  $p  in $PROFILE"
+      elif out="$("$BIN_DIR/fleet-project" add "$ROOT/$p" --name "$p" --profile "$PROFILE" 2>&1)"; then
+        say "  registered  $p"
+      else
+        echo "fleet-demo: could not register $p:" >&2; echo "$out" >&2; exit 1
+      fi ;;
+    reuse) say "  already registered  $p" ;;
+  esac
+done
+
+# ── 4. say what this can and cannot show you ────────────────────────────────
+# THE PART THAT DECIDES WHETHER THE DEMO IS WORTH SHIPPING. A demo profile has its own
+# Claude config dir, and credentials are PER CONFIG DIR — so being logged in at your desk
+# is not enough and a session opened here sits at "Please run /login" (stack.tape's header
+# has recorded that since the recordings were shot). Somebody who does not know that reads
+# an empty pane as a broken product and stops.
+#   So: name the line, and name what does NOT need it. Nearly all of the control plane —
+# every screen this thing IS — renders with no agent logged in at all. What needs a login
+# is narrower than it looks from the pane you happen to be staring at: an agent taking a
+# turn.
+#   NOT AUTOMATED, deliberately. Copying credentials between config dirs, or pointing the
+# demo at ~/.claude to borrow them, would make the one command whose promise is "this
+# touches nothing of yours" reach straight into the profile that holds everything.
+logged_in() {
+  # Claude Code keeps credentials per config dir; on macOS they can live in the Keychain
+  # instead of on disk, so a missing file is NOT proof of a missing login. This only ever
+  # reports a positive it has actually seen, and stays quiet otherwise — the note below
+  # is written to be worth reading either way.
+  [ -s "$CFG_DIR/.credentials.json" ]
+}
+
+{
+  if [ "$TODO" = 0 ]; then
+    echo "ghostfleet demo — already set up (${#PROJECTS[@]} projects under $(short "$ROOT"))"
+  elif [ "$MODE" = check ]; then
+    echo "ghostfleet demo — what a run would do:"
+  else
+    echo "ghostfleet demo — ready"
+  fi
+  [ -n "$REPORT" ] && { echo; printf '%s' "$REPORT"; }
+  echo
+  echo "  ${#PROJECTS[@]} throwaway projects (${PROJECTS[*]}) in the '$PROFILE' profile."
+  echo "  Your own profiles are untouched: this writes only to $(short "$PROJECTS_CFG"),"
+  echo "  $(short "$CFG_DIR") and $(short "$ROOT")."
+  echo
+  echo "  WHAT YOU CAN SEE RIGHT NOW, with nothing logged in:"
+  echo "    the Projects screen · a project's session grid · the new-worktree form (w) ·"
+  echo "    the stack · every key in docs/SHORTCUTS.md. That is the control plane, and it"
+  echo "    is the whole of what ghostfleet is."
+  echo
+  if logged_in; then
+    echo "  The $PROFILE profile is logged in, so a session will also run a real agent."
+  else
+    echo "  WHAT NEEDS A LOGIN: an agent actually taking a turn. Credentials are per config"
+    echo "  dir, so being logged in at your desk is not enough — a session you open will sit"
+    echo "  at Claude's login prompt until you do this once:"
+    echo
+    echo "      CLAUDE_CONFIG_DIR=$(short "$CFG_DIR") claude       # then /login"
+    echo
+    echo "  An empty pane before that is the login prompt, not a broken fleet."
+  fi
+  if [ "$MODE" != check ]; then
+    echo
+    echo "  Open it with:  ghostfleet $PROFILE"
+    echo "  Throw it away: rm -rf $(short "$ROOT") $(short "$PROJECTS_CFG") $(short "$CFG_DIR")"
+  fi
+}
+exit 0
