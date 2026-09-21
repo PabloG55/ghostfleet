@@ -8937,6 +8937,73 @@ fi
 chmod 700 "$CS/rt2/web" 2>/dev/null || true
 rm -rf "$CS"
 
+# ── cf-sync BUILDS the phone client, and a build it cannot do is not a sync ─────────────
+# web/ holds built output now (projects.js, the ported Projects screen, plus its preact.js
+# chunk). The output is committed, so a clone serves with no toolchain — but a SYNC is a
+# deploy, and copying the committed bytes after somebody edited web/src/ is the
+# repo-vs-runtime trap in the one disguise it has not worn before: `git status` clean, the
+# repo current, and only the runtime's copy of one screen behind.
+#
+# The rule is cf-sync's existing one, applied to a new way of failing: any non-zero means
+# the runtime must not be trusted, so a build that cannot run copies NOTHING. The tests
+# below are behavioural — they run the real script — because every other cf-sync assertion
+# greps the source, and grepping cannot tell whether an exit status is acted on. That is
+# the same reason the failed-sync group above exists.
+#
+# WATCHED GOING RED, each with its own break: with the `exit 1` after the node_modules
+# branch removed, "nothing was copied" fails with the file present; with the whole build
+# block removed, "a build failure is not a sync" exits 0 and claims it synced.
+group "cf-sync will not deploy a client it could not build"
+CB="$(mktemp -d)"
+# A SOURCE WITH NOTHING TO BUILD STILL SYNCS, and this is the npx case rather than a
+# loophole: package.json's `files` list ships web/ already built and does NOT ship
+# vite.config.mjs, so an unpacked cache legitimately has no build step. Asserted FIRST, so
+# that a later failure is known to be the build gate and not the setup.
+mkdir -p "$CB/plain/bin" "$CB/plain/web"
+printf '#!/bin/sh\necho hi\n' > "$CB/plain/bin/thing"; chmod +x "$CB/plain/bin/thing"
+printf 'export const x=1;\n' > "$CB/plain/web/projects.js"
+out_plain="$(CLAUDE_FLEET_HOME="$CB/rt0" "$ROOT/bin/cf-sync" "$CB/plain" 2>&1)"; rc_plain=$?
+is "a source with no build step still syncs"  "0"   "$rc_plain"
+is "...and never mentions a build"            "0"   "$(printf '%s' "$out_plain" | grep -c 'building the phone client' || true)"
+is "...and the client really landed"          "yes" "$([ -f "$CB/rt0/web/projects.js" ] && echo yes || echo no)"
+
+# Now a source that DOES have a build, with no node_modules to do it with. This is the
+# state of a fresh clone, so the message has to name the directory and the one command —
+# an exit code cannot spell "npm install".
+mkdir -p "$CB/src/bin" "$CB/src/web/src"
+printf '#!/bin/sh\necho hi\n' > "$CB/src/bin/thing"; chmod +x "$CB/src/bin/thing"
+printf 'export default {};\n' > "$CB/src/vite.config.mjs"
+printf 'export const x=1;\n' > "$CB/src/web/src/projects.jsx"
+out_nm="$(CLAUDE_FLEET_HOME="$CB/rt1" "$ROOT/bin/cf-sync" "$CB/src" 2>&1)"; rc_nm=$?
+is "no node_modules is a refusal"        "yes" "$([ "$rc_nm" -ne 0 ] && echo yes || echo no)"
+is "...and NEVER claims it synced"       "0"   "$(printf '%s' "$out_nm" | grep -c 'synced runtime' || true)"
+is "...and says NOT SYNCED"              "1"   "$(printf '%s' "$out_nm" | grep -c 'NOT SYNCED' || true)"
+is "...and names the missing directory"  "1"   "$(printf '%s' "$out_nm" | grep -c 'node_modules' || true)"
+is "...and the command that fixes it"    "1"   "$(printf '%s' "$out_nm" | grep -c 'npm install --prefix' || true)"
+# THE POINT OF FAILING EARLY. A partial copy is the state that runs half-new code, so a
+# build that cannot run must not get as far as rsync — not even for the dirs it could do.
+is "...and copied NOTHING"               "no"  "$([ -e "$CB/rt1/bin/thing" ] && echo yes || echo no)"
+
+# ...and a build that RUNS and fails. Same refusal, reached down a different branch: this
+# one is npm's exit status rather than a missing directory, and it is the branch a real
+# syntax error in web/src/ arrives through.
+if command -v npm >/dev/null 2>&1; then
+  mkdir -p "$CB/bad/node_modules"
+  cp -R "$CB/src/bin" "$CB/src/web" "$CB/src/vite.config.mjs" "$CB/bad/" 2>/dev/null
+  printf '{"name":"x","private":true,"scripts":{"build":"exit 3"}}\n' > "$CB/bad/package.json"
+  out_bb="$(CLAUDE_FLEET_HOME="$CB/rt2" "$ROOT/bin/cf-sync" "$CB/bad" 2>&1)"; rc_bb=$?
+  is "a build failure is not a sync"       "yes" "$([ "$rc_bb" -ne 0 ] && echo yes || echo no)"
+  is "...and NEVER claims it synced"       "0"   "$(printf '%s' "$out_bb" | grep -c 'synced runtime' || true)"
+  is "...and names the build"              "1"   "$(printf '%s' "$out_bb" | grep -c 'FAILED to build the phone client' || true)"
+  is "...and copied NOTHING"               "no"  "$([ -e "$CB/rt2/bin/thing" ] && echo yes || echo no)"
+  # A stamp is a claim about which commit is in $DEST, and there is no commit in an empty
+  # one. The absence of proof is UNKNOWN, never "in sync" — this file's opening rule.
+  is "...and wrote no stamp"               "no"  "$([ -e "$CB/rt2/.synced" ] && echo yes || echo no)"
+else
+  skip "cf-sync build failure path" "npm is not installed"
+fi
+rm -rf "$CB"
+
 # ── the runtime knows WHICH commit it is, and the control plane says when it is behind ──
 # Seen live: four PRs merged, nobody ran cf-sync, and ~/.local/libexec/ghostfleet served
 # the PRE-FIX fleet-grid.mjs, fleet-stack, ghostfleet and fleet-awake for about an hour
@@ -9778,6 +9845,104 @@ if [ -d "$ROOT/web" ]; then
     node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$f" 2>/dev/null \
       && ok "$(basename "$f") is valid JSON" || bad "$(basename "$f") is valid JSON" "ok" "parse error"
   done
+
+  # ── the committed build is what the committed source builds to ────────────
+  # web/projects.js and web/preact.js are vite's output and they are TRACKED — because
+  # package.json's `files` ships web/ and `npm pack` reads the working directory, so
+  # gitignoring them would put untracked files on the registry, which is the gap
+  # test/helpers/pack-sweep.mjs exists to close. Committed output buys a clone that serves
+  # with no toolchain and a CLIENT-HASH derivable from bytes in git; what it costs is a new
+  # way to be wrong that no other check here can see — edit web/src/, forget to build, and
+  # every guard in this file stays green over a screen nobody rebuilt. The pin cannot catch
+  # it (the output matches its own bytes), node --check cannot (it parses), and
+  # pwa-render.mjs cannot (it runs the stale file perfectly).
+  #
+  # So this rebuilds and compares bytes. Out of tree, into the run's own temp dir: building
+  # over web/ mid-suite would change files the groups above and below are reading.
+  #
+  # SKIPPED, NOT PASSED, WITHOUT THE TOOLCHAIN — and that is the honest half. CI installs
+  # no npm packages (the suite's promise is no dependencies and a couple of seconds), so in
+  # CI this says so out loud rather than reporting a check it did not make. The place it
+  # actually bites is a dev machine and .githooks/pre-push, which is where the source gets
+  # edited. Watched going red by editing one character of web/src/projects.jsx without
+  # rebuilding: "the committed build matches its source  want=identical  got=projects.js
+  # differs".
+  if [ ! -f "$ROOT/vite.config.mjs" ]; then
+    skip "the committed build matches its source" "no vite.config.mjs"
+  elif ! command -v npm >/dev/null 2>&1; then
+    skip "the committed build matches its source" "npm is not installed"
+  elif [ ! -d "$ROOT/node_modules" ]; then
+    skip "the committed build matches its source" "no node_modules — run: npm install"
+  else
+    BOUT="$(mktemp -d "$TEST_RUNS.$$.build.XXXXXX")"
+    if ( cd "$ROOT" && npx --no-install vite build --outDir "$BOUT" ) > "$BOUT.log" 2>&1; then
+      drift=""
+      for f in projects.js preact.js; do
+        cmp -s "$BOUT/$f" "$ROOT/web/$f" || drift="$drift $f differs"
+      done
+      # Named the other way round too: a build that emitted a file web/ has never heard of
+      # is a config change nobody re-pinned, and it would otherwise read as "identical".
+      for f in "$BOUT"/*.js; do
+        [ -e "$f" ] || continue
+        [ -f "$ROOT/web/$(basename "$f")" ] || drift="$drift $(basename "$f") is not committed"
+      done
+      is "the committed build matches its source" "identical" "${drift:-identical}"
+    else
+      bad "the committed build matches its source" "a build" "vite failed: $(tail -1 "$BOUT.log" 2>/dev/null)"
+    fi
+
+    # ── grid.js is imported, never copied — asked of an entry that would COPY it ────
+    # vite.config.mjs marks the client's own modules external so the bundler cannot inline
+    # a second copy of grid.js; two copies is two answers to "how many cells is this
+    # glyph", which cells() and the pane view exist to prevent.
+    #
+    # THE OBVIOUS PLACE TO ASSERT THAT IS AGAINST web/projects.js, AND IT PROVES NOTHING
+    # THERE. The ported screen imports only clockLabel, so the tree-shaker drops the card
+    # functions whether the plugin works or not: that row was green against every break
+    # available, including deleting the plugin outright. Measured — with the plugin gone
+    # the bundle DOES inline grid.js, and a check looking for `function projectCard(` in it
+    # still passed, because nothing had asked for projectCard.
+    #
+    # So this builds an entry that asks. A probe module importing projectCard is exactly
+    # the shape of the next screen to be ported, and with the plugin working it must come
+    # out as an `import` of ./grid.js with no definition inlined. Watched going red by
+    # emptying `plugins` in the real config: "got=inlined projectCard".
+    #
+    # It reuses the REAL config (spread, then input and outDir overridden) rather than a
+    # hand-written one, or it would be testing a second configuration nobody ships.
+    #
+    # THE PROBE MIRRORS web/'s LAYOUT — src/probe.jsx beside a copy of grid.js — so the
+    # specifier is '../grid.js', the same one the real source uses and the one the plugin's
+    # pattern matches. With a copy of grid.js actually on disk, the broken case INLINES it
+    # (the informative red) instead of merely failing to resolve (a red that says nothing
+    # about what went wrong). Measured both ways: plugin on → imports=yes inlines=no; a
+    # `plugins: []` config → imports=no inlines=yes.
+    PRB="$(mktemp -d "$TEST_RUNS.$$.probe.XXXXXX")"
+    mkdir -p "$PRB/web/src"
+    cp "$ROOT/web/grid.js" "$PRB/web/grid.js"
+    cat > "$PRB/web/src/probe.jsx" <<'PROBE'
+import { projectCard } from '../grid.js';
+export const lines = (p) => projectCard(p, 0, false).lines;
+PROBE
+    cat > "$PRB/probe.config.mjs" <<CFG
+import base from '$ROOT/vite.config.mjs';
+export default { ...base, build: { ...base.build, outDir: '$PRB/out',
+  rollupOptions: { ...base.build.rollupOptions, input: { probe: '$PRB/web/src/probe.jsx' } } } };
+CFG
+    if ( cd "$ROOT" && npx --no-install vite build --config "$PRB/probe.config.mjs" ) > "$PRB/log" 2>&1; then
+      # Both halves, because either alone is passable by a broken build: a bundle that
+      # inlined grid.js has no import, and one that somehow kept both would still be wrong.
+      pimp="no"; pdef="no"
+      grep -qE "from *['\"]\./grid\.js['\"]" "$PRB/out/probe.js" && pimp="yes"
+      grep -q "function projectCard" "$PRB/out/probe.js" && pdef="yes"
+      is "an entry that uses grid.js imports it"   "yes" "$pimp"
+      is "...and does not get a copy inlined"      "no"  "$pdef"
+    else
+      bad "an entry that uses grid.js imports it" "a build" "vite failed: $(tail -1 "$PRB/log" 2>/dev/null)"
+    fi
+    rm -rf "$PRB"
+    rm -rf "$BOUT" "$BOUT.log"
+  fi
   # ── the version has to be ABOVE main's, not merely different ──────────────
   # The pin above catches "changed the client, forgot to bump". It has no notion of ORDER,
   # and order is what has bitten: #83 took v17, #81 was numbered v16 before it and merged

@@ -29,6 +29,27 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 const US = '\x1f';
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
+// THE ROWS IT ALREADY HAS SURVIVE A CRASH, and this is registered HERE rather than beside
+// the print at the bottom — the bottom is a line this file never reaches when it matters.
+//
+// Everything is emitted at the end, so a throw anywhere above used to discard every row
+// already collected: what reached test/run.sh was "pwa-render ran: got 1", a stack trace,
+// and a zero-row floor, while the assertion that NAMED the cause sat in a variable nobody
+// printed. Measured: a Preact listener registered as `Click` instead of `click` left every
+// Preact-built button dead, which killed navigation twelve sections later at a
+// `boxNode.focus()` on a screen the run never reached. The row saying which event was
+// miscased had already been computed and was thrown away with the rest.
+//
+// The exit status is unchanged, so `pwa-render ran` is still the failure signal and the row
+// floor still catches a helper that stopped early. This only means the rows it did produce
+// arrive alongside them, pointing at the cause instead of at the wreckage.
+const flushOnCrash = (e) => {
+  try { console.log(rows.join('\n')); } catch {}
+  console.error(String((e && e.stack) || e));
+  process.exit(1);
+};
+process.on('uncaughtException', flushOnCrash);
+process.on('unhandledRejection', flushOnCrash);
 const BASE = (process.argv[2] || '').replace(/\/+$/, '');
 
 // ── a DOM, as small as app.js allows ──────────────────────────────────────
@@ -82,10 +103,29 @@ class Node_ {
     return (this._text || '') + this.kids.map(k => k.textContent).join(' ');
   }
   set innerHTML(v) { this._text = String(v); }
-  setAttribute(k, v) { this.attrs[k] = String(v); }
+  // `class` REFLECTS INTO className, because the DOM does and Preact depends on it.
+  // Preact sets a class by attribute (`'class' in dom` is false on a real element, so its
+  // property fast-path declines and it falls through to setAttribute) while every
+  // assertion in this file — and app.js's own markSel() and classList — reads className.
+  // Without the reflection each of those sees an empty string on a Preact-built node, and
+  // "the tab strip is not on screen" is the shape that takes.
+  setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'class') this.className = String(v); }
+  removeAttribute(k) { delete this.attrs[k]; if (k === 'class') this.className = ''; }
   getAttribute(k) { return this.attrs[k]; }
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
+  removeEventListener(ev, fn) {
+    if (this.listeners[ev]) this.listeners[ev] = this.listeners[ev].filter(f => f !== fn);
+  }
   append(...ks) { for (const k of ks) if (k != null) this.appendChild(k); }
+  // The seam in web/src/projects.jsx uses this to put app.js's card nodes into the Preact-
+  // owned .cards container. It DETACHES what it replaces, like textContent above and for
+  // the same reason: a card left holding a parent pointer would report itself connected
+  // after the list it was in had been thrown away.
+  replaceChildren(...ks) {
+    for (const k of this.kids) k.parent = null;
+    this.kids.length = 0; this._text = null;
+    this.append(...ks);
+  }
   // A fragment SPLICES, it does not nest — web/md.js builds a bubble's blocks into one and
   // appends it, and a model that kept the fragment as a child would put every rendered
   // message one level deeper than the browser does, which is the level the assertions
@@ -95,6 +135,39 @@ class Node_ {
     k.parent = this; this.kids.push(k); return k;
   }
   remove() { if (this.parent) { this.parent.kids = this.parent.kids.filter(k => k !== this); this.parent = null; } }
+  // ── the four calls a RECONCILER makes and an append-only app never did ──────────────
+  // app.js builds a screen by appending to an empty parent, so appendChild and
+  // textContent were the whole of it. Preact draws the Projects screen now, and a
+  // reconciler does not build — it MOVES a node that is already somewhere, inserts before
+  // a sibling it found, and removes one by name. Modelled rather than stubbed for the
+  // reason scrollTop is: ordering IS the thing that can go wrong, and a stub that appended
+  // everything would put the confirm bar under the verbs and still report a screen.
+  //   This does widen what a file in web/ is allowed to reach for, and that is a real cost
+  // of the build: the note at the top of this section — "anything it does not implement,
+  // app.js is not allowed to reach for" — now holds for app.js and not for Preact.
+  insertBefore(node, ref) {
+    if (node && node.tag === '#fragment') { for (const c of [...node.kids]) this.insertBefore(c, ref); node.kids.length = 0; return node; }
+    if (node.parent) node.remove();                 // a move, not a second copy
+    node.parent = this;
+    const i = ref ? this.kids.indexOf(ref) : -1;
+    if (i < 0) this.kids.push(node); else this.kids.splice(i, 0, node);
+    return node;
+  }
+  removeChild(k) { if (k && k.parent === this) k.remove(); return k; }
+  get childNodes() { return this.kids; }
+  get nextSibling() {
+    const sibs = this.parent && this.parent.kids;
+    if (!sibs) return null;
+    const i = sibs.indexOf(this);
+    return i < 0 ? null : (sibs[i + 1] || null);
+  }
+  // 3 is a text node and 1 is an element; Preact branches on exactly that to decide
+  // whether to patch `.data` or diff attributes. A model answering 1 for both would send
+  // every text update down the element path.
+  get nodeType() { return this.tag === '#text' ? 3 : this.tag === '#fragment' ? 11 : 1; }
+  get localName() { return this.tag; }
+  get data() { return this._text == null ? '' : this._text; }
+  set data(v) { this._text = String(v); }
   setPointerCapture() {} releasePointerCapture() {}   // the drag calls these; nothing to capture here
   // Records the focused node on the document too, not just a flag on itself: the poll
   // guard asks `document.activeElement === composerNode`, which is the only way to
@@ -137,6 +210,24 @@ class Node_ {
   }
   all(pred, out = []) { for (const k of this.kids) { if (pred(k)) out.push(k); k.all(pred, out); } return out; }
 }
+// ── a real element HAS an `onclick` property, and Preact reads it to pick the case ─────
+// Preact decides what to call an event by asking the element: for a prop named `onClick`
+// it tests `'onclick' in dom`, and uses the lowercase name when the element admits to
+// having one — which every real element does, for every standard event. This stub did not,
+// so Preact fell back to the JSX spelling and registered **`Click`**. Nothing threw,
+// nothing was logged: `addEventListener('Click', …)` is perfectly legal, and every tap on
+// a Preact-built control simply did nothing. Measured as fourteen red rows about profile
+// tabs that "did not filter", which is what a dead listener looks like from the outside.
+//
+// Declared on the PROTOTYPE, because `in` walks it and a real element's handler properties
+// live there too. The guard below is the other half — a list can be missed, and the way it
+// is missed is silent.
+const DOM_EVENTS = ['click', 'input', 'change', 'submit', 'keydown', 'keyup', 'keypress',
+  'focus', 'blur', 'focusin', 'focusout', 'scroll', 'load', 'error', 'contextmenu',
+  'pointerdown', 'pointermove', 'pointerup', 'pointercancel',
+  'touchstart', 'touchmove', 'touchend', 'touchcancel'];
+for (const e of DOM_EVENTS) Node_.prototype['on' + e] = null;
+
 const app = new Node_('div'), sheetHost = new Node_('div');
 const documentStub = {
   hidden: false,
@@ -290,8 +381,16 @@ const closeSheetFromTest = () => {
 // browser ever delivers — and the first handler to read the event (the speaker's
 // stopPropagation, which is what keeps a tap on the control off the bubble underneath it)
 // died on `undefined` inside the helper, taking every remaining row with it.
-const clickEv = (n) => ({ stopPropagation() {}, preventDefault() {}, target: n });
-const click = (n) => (n && (n.listeners.click || []).map(f => f(clickEv(n)))[0]);
+const clickEv = (n) => ({ type: 'click', stopPropagation() {}, preventDefault() {}, target: n, currentTarget: n });
+// CALLED WITH `this` BOUND TO THE NODE, AND CARRYING A `type`, because that is what
+// addEventListener does and Preact is the first thing here to need it. It does not attach
+// your handler: it attaches one shared proxy per node and dispatches through
+// `this._listeners[e.type]`, so an unbound call lands on `undefined` and a click on a
+// Preact-built button — every tab, every verb, both confirm buttons — throws instead of
+// firing. app.js's own handlers are closures that never look at either, which is why this
+// was invisible until now.
+const dispatch = (n, ev, e) => (n.listeners[ev] || []).map(f => f.call(n, e));
+const click = (n) => (n && dispatch(n, 'click', clickEv(n))[0]);
 
 // ── served by the daemon: it says so, and offers ENROLMENT ────────────────
 await api.ready();
@@ -385,6 +484,18 @@ is('...offering all, then each profile', 'all,work,personal',
    (tabStrip() ? tabStrip().all(n => n.tag === 'button')
       .map(b => b.textContent.replace(/\s+/g, ' ').trim().replace(/ ●\d+$/, '')).join(',') : ''));
 is('...with all selected on a first run', true, !!(tabBtn('all') || {}).className && /\bon\b/.test(tabBtn('all').className));
+
+// ...AND EVERY LISTENER ON THE SCREEN IS NAMED THE WAY A BROWSER NAMES ONE. The other half
+// of DOM_EVENTS above, and the reason it is an assertion rather than a careful list: a name
+// missing from that list makes Preact register `Click` instead of `click`, which throws
+// nothing, logs nothing, and just never fires. It cost fourteen rows that all read as "the
+// tab did not filter" and none of which pointed here. Asked of the WHOLE tree, so the next
+// event this screen starts using is covered without anybody remembering to add a row.
+{
+  const named = [...new Set([app, ...app.all(() => true)].flatMap(n => Object.keys(n.listeners)))];
+  is('preact attached its events by their browser names', '',
+     named.filter(k => k !== k.toLowerCase()).join(','));
+}
 
 // The numbers every card has while nothing is filtered — the addresses `Ctrl-f` uses.
 const GLOBAL = { 'acme-api': numberOf('acme-api'), 'acme-web': numberOf('acme-web'),

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 4b22d3699dfc
+// CLIENT-HASH: 2126f76c1fa4
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -101,10 +101,22 @@
 // it is still happening — a rebuilt list measures shorter for a frame, the request clamps
 // to 0, and writing that back destroyed the only record of where the reader was. It read as
 // "sometimes forgets" because one short frame was enough to lose it for good.
-const VERSION = 'ghostfleet-v24';
+// v25 is the first client with a BUILD STEP in it. The Projects screen is Preact now, which
+// means two files the shell has never had before — projects.js (the screen) and preact.js
+// (its dependency chunk) — and app.js statically imports the first of them. THIS IS A
+// VERSION WHERE THE OLD CLIENT DOES NOT DEGRADE, IT DIES: a phone still holding v24 has
+// neither file in its cache, so the moment it paints the new app.js the import fails and
+// the app does not start at all. Same shape as v10, which added md.js. Nothing else
+// changed on screen — the port is meant to be invisible — so the only thing that says the
+// deploy landed is the client line in the settings sheet.
+const VERSION = 'ghostfleet-v25';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
+  // Built, not written: web/src/projects.jsx through vite. Stable filenames, no content
+  // hash, which is what lets them sit in this hand-written list at all — see
+  // vite.config.mjs, where that is the whole reason hashing is switched off.
+  './projects.js', './preact.js',
   './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',

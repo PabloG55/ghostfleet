@@ -19,6 +19,11 @@ import * as api from './api.js';
 import * as pk from './passkey.js';
 import * as ansi from './ansi.js';
 import * as md from './md.js';
+// THE ONE BUILT FILE IN web/. Everything above is served exactly as written; this one is
+// vite's output from web/src/projects.jsx, committed beside its source. The seam between
+// what it draws and what this file still draws is documented at the top of that source —
+// read it before porting a second screen.
+import * as projectsUI from './projects.js';
 
 // ── state ─────────────────────────────────────────────────────────────────
 const S = {
@@ -235,6 +240,10 @@ function toast(text, kind = '') {
 // bars, and the grid has a card list under a header — both are columns of a known height,
 // which is what stops the layout moving on a poll.
 const SHELL_SCREENS = new Set(['session', 'grid', 'projects']);
+// Whether Preact currently owns #app. Not derivable from S.screen: the screen can change
+// in the same breath as the lock, and what has to be known here is who put the nodes on
+// screen, not who would put them there now.
+let projectsUp = false;
 function render() {
   const app = document.getElementById('app');
   // Toggled on <html> as well: the page must not scroll behind a screen that owns the
@@ -246,14 +255,40 @@ function render() {
     app.classList.toggle('shell', shell);
     document.documentElement.classList.toggle('shell', shell);
   } catch {}
+  // ── the Preact screen ──────────────────────────────────────────────────────────────
+  // It DIFFS, so this path must not empty #app first: the whole gain is that the .cards
+  // node survives the 5s poll and keeps the reader's scroll position instead of being
+  // rebuilt at scrollTop 0. Emptying happens exactly once, on the way IN from another
+  // screen, and then never again while this screen is up.
+  //   Preact renders a fragment straight into #app rather than into a host div, and that is
+  // not a style choice: app.css reaches the bands with CHILD selectors
+  // (`#app.shell > .cards`, `> .hdr`, `> .verbs`), so one div of nesting would stop the
+  // card list being the screen's scrolling region and let the whole page scroll.
+  if (!S.locked && S.screen === 'projects') {
+    if (!projectsUp) {
+      app.textContent = '';
+      paneBoxNode = paneNode = paneGeomNode = null;
+      composerNode = null;
+      projectsUp = true;
+    }
+    projectsUI.mount(app, projectsProps());
+    renderSheet();
+    syncPanePoll();
+    return;
+  }
+  // LEAVING IT IS AN UNMOUNT, NOT A `textContent = ''`. Clearing the container behind
+  // Preact's back leaves it holding a vnode tree whose DOM is gone, and the next time this
+  // screen opens it diffs against nodes that no longer exist. Rendering null is what tears
+  // the tree down — and it has to happen BEFORE the wipe below, while the nodes are still
+  // there to be removed.
+  if (projectsUp) { projectsUI.unmount(app); projectsUp = false; }
   app.textContent = '';
   // The pane's nodes are about to be thrown away; drop the references with them, so a
   // poll that lands mid-render patches nothing rather than a detached <pre>.
   paneBoxNode = paneNode = paneGeomNode = null;
   composerNode = null;                      // re-set by composer() if this render draws one
   if (S.locked) { app.append(lockScreen()); renderSheet(); syncPanePoll(); return; }
-  if (S.screen === 'projects') app.append(...projectsScreen());
-  else if (S.screen === 'grid') app.append(...gridScreen());
+  if (S.screen === 'grid') app.append(...gridScreen());
   else app.append(...sessionScreen());
   if (S.toast) app.append(el('div', { class: 'toast ' + S.toast.kind, text: S.toast.text }));
   renderSheet();
@@ -267,10 +302,13 @@ function render() {
 // phone gets exactly what a narrow terminal gets: the one-line header. Split over two
 // rows only because 60 columns of it will not fit in 32, which is the same split the
 // TUI itself makes when it draws the ship beside the counts.
+// THE TWO UNPORTED SCREENS ONLY. The Projects screen draws its own header in Preact from
+// the same data (see projectsProps), so the `— projects` branch that used to live here is
+// gone rather than left behind unreachable — an unreachable branch holding a second copy of
+// a string the other renderer prints is precisely how the two would drift without anybody
+// being able to see it happen. Porting the grid screen is what deletes the rest of this.
 function header(counts) {
-  const scope = S.screen === 'projects'
-    ? el('span', { class: 'scope', text: '— projects' })
-    : el('span', { class: 'scope', text: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]` });
+  const scope = el('span', { class: 'scope', text: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]` });
   const kids = [el('span', { class: 'name', text: 'ghostfleet' }), scope, modeChip()];
   if (counts) {
     const c = el('span', { class: 'counts' });
@@ -290,12 +328,24 @@ function header(counts) {
 // recognising the project names. So the answer lives in the header, which every screen
 // draws, and it names the ORIGIN rather than saying "server" — two fleets are two
 // origins, and "server" would not tell them apart.
-function modeChip() {
+// SPLIT INTO THE ANSWER AND THE DRAWING OF IT, because two screens now draw it with two
+// renderers. The ported Projects screen builds this span in Preact and the grid and session
+// screens build it with el(); if each decided for itself what "server" is called, the
+// header would name the fleet differently depending on which screen you were looking at.
+// The words are decided once, here.
+function modeSpec() {
   const r = api.resolution();
-  const text = r.mode === 'server' ? '\u25cf ' + api.modeLabel()
-             : r.mode === 'probing' ? '\u2026 looking for a fleet'
-             : '\u26a0 fixtures';
-  return el('span', { class: 'mode ' + r.mode, text, title: r.detail });
+  return {
+    kind: r.mode,
+    detail: r.detail,
+    text: r.mode === 'server' ? '\u25cf ' + api.modeLabel()
+        : r.mode === 'probing' ? '\u2026 looking for a fleet'
+        : '\u26a0 fixtures',
+  };
+}
+function modeChip() {
+  const m = modeSpec();
+  return el('span', { class: 'mode ' + m.kind, text: m.text, title: m.detail });
 }
 
 // ── the projects screen, and its tabs ─────────────────────────────────────
@@ -344,47 +394,67 @@ function setProfile(name) {
   save();
   render();
 }
-function projectsScreen() {
-  const out = header(null);
-  const list = el('div', { class: 'cards' });
+// THIS SCREEN IS DRAWN BY PREACT, and this function is everything the components need to
+// know. It builds no boxes: web/src/projects.jsx owns the header, the tab strip, the
+// .cards container, the verbs and the hint, and the seam between the two is written out at
+// the top of that file. What stays here is the part that is SHARED with the grid screen —
+// the card and its four gestures — plus every string, because §7's guardrails are the
+// TUI's own words and pwa-check reads them out of this file.
+function projectsProps() {
   const projects = S.projects || [];
-  const tabs = profileTabs(projects);
-  // NO STRIP WHEN THERE IS NO CHOICE. One profile is the common case — everything is
-  // 'work' — and a control whose only option is the one you are already on is furniture.
-  if (tabs.length > 1) {
-    out.push(el('div', { class: 'seg tabs' }, [PROFILE_ALL, ...tabs].map(t => {
+  const names = profileTabs(projects);
+  return {
+    scope: '— projects',
+    mode: modeSpec(),
+    stale: S.stale,
+    // NO STRIP WHEN THERE IS NO CHOICE. One profile is the common case — everything is
+    // 'work' — and a control whose only option is the one you are already on is furniture.
+    // The component redraws nothing when this is null.
+    tabs: names.length > 1 ? [PROFILE_ALL, ...names].map(name => ({
+      name,
+      on: S.profile === name,
       // THE NEED-YOU COUNT RIDES ON THE TAB, and only when it is not zero. §1 says this
       // app exists to answer "is anything blocked on me", and a tab is the one control
       // here that can HIDE the answer — a blocked project in the other profile would be
       // off screen with nothing anywhere to say so, which is the same failure as the
       // summary reading "0 need you" over a blocked lead. Silent when there is nothing
       // to report, so the strip stays a chooser rather than a dashboard.
-      const need = projects.filter(p => t === PROFILE_ALL || profileOf(p) === t)
-                           .reduce((n, p) => n + (((p.sessions || {}).need) || 0), 0);
-      return btn(need ? `${t} ●${need}` : t, () => setProfile(t), S.profile === t ? 'on' : '');
-    })));
-  }
-  for (const { p, i } of visibleProjects()) {
-    const block = G.projectCard(p, i, i === S.sel);   // i is the GLOBAL index, on purpose
-    list.append(cardEl(block, {
-      tap: () => openProject(p.name),
-      longPress: () => { S.confirm = { kind: 'project', name: p.name }; render(); },
-      reorder: d => reorderProject(p.name, d),
-    }, i));
-  }
-  list.append(cardEl(G.addProjectCard(S.sel === projects.length), {
-    tap: () => sheetAddProject(),
-  }, projects.length));
-  out.push(confirmBar(), watchScroll('projects', list));
-  out.push(el('div', { class: 'verbs' }, [
-    btn('⏎ open', () => openProject((projects[S.sel] || {}).name)),
-    // the projects screen schedules a message to THAT project's master
-    btn('s schedule', () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); }),
-    btn(', settings', () => sheetSettings()),
-    btn('x remove', () => { const p = projects[S.sel]; if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } }, 'danger'),
-  ]));
-  out.push(el('div', { class: 'hint', text: 'tap a project · long-press to remove it from the list · drag its title to reorder' }));
-  return out.filter(Boolean);
+      need: projects.filter(p => name === PROFILE_ALL || profileOf(p) === name)
+                    .reduce((n, p) => n + (((p.sessions || {}).need) || 0), 0),
+    })) : null,
+    onTab: setProfile,
+    confirm: confirmSpec(),
+    // ── the seam ────────────────────────────────────────────────────────────────────
+    // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
+    // the list and is told nothing else about them; see web/src/projects.jsx.
+    cards: [
+      ...visibleProjects().map(({ p, i }) =>
+        // i is the GLOBAL index, on purpose
+        cardEl(G.projectCard(p, i, i === S.sel), {
+          tap: () => openProject(p.name),
+          longPress: () => { S.confirm = { kind: 'project', name: p.name }; render(); },
+          reorder: d => reorderProject(p.name, d),
+        }, i)),
+      cardEl(G.addProjectCard(S.sel === projects.length), {
+        tap: () => sheetAddProject(),
+      }, projects.length),
+    ],
+    // THE SCROLL MEMORY STAYS HERE, and it is still the same one call that does both
+    // halves. It fires once, when Preact creates the list, rather than on every render —
+    // because the list is no longer rebuilt on every render, which is the thing this whole
+    // port is meant to demonstrate. What it still has to do is restore a position after
+    // the screen has been LEFT and come back to.
+    listRef: (list) => { if (list) watchScroll('projects', list); },
+    verbs: [
+      { label: '⏎ open', onClick: () => openProject((projects[S.sel] || {}).name) },
+      // the projects screen schedules a message to THAT project's master
+      { label: 's schedule', onClick: () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); } },
+      { label: ', settings', onClick: () => sheetSettings() },
+      { label: 'x remove', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
+    ],
+    hint: 'tap a project · long-press to remove it from the list · drag its title to reorder',
+    toast: S.toast,
+  };
 }
 // `Q` / Ctrl-p jumps straight to Projects from anywhere, which is neither forward nor
 // back. Unwinding our own entries keeps the stack honest: pushing here would leave the
@@ -2012,45 +2082,56 @@ function markSel() {
 // Reproduced, not reinvented (§7). "A phone confirmation is a second deliberate tap,
 // and --force needs its own" — so the force step is a DIFFERENT button with a
 // different letter, never a second press of the one that just refused.
-function confirmBar() {
+// THE QUESTION IS DATA, AND THE DRAWING OF IT IS NOT — same split as modeSpec() above, for
+// a sharper reason. §7 says the guardrails ARE the TUI's own prompts, so these strings are
+// the thing pwa-check greps this file for; the Projects screen draws its confirmation in
+// Preact now, and a second copy of `remove 'x' from projects?` over there would be a string
+// that check can no longer see. One spelling, two renderers.
+function confirmSpec() {
   const c = S.confirm;
   if (!c) return null;
+  const yn = 'y = yes · any other key = cancel';
+  const cancelBtn = { label: 'cancel', onClick: cancel };
   if (c.kind === 'kill' || c.kind === 'reclaim-kill') {
-    return bar('red', `kill session '${c.name}'?`, 'y = yes · any other key = cancel', [
-      btn('y = yes', () => c.kind === 'kill' ? confirmedKill(c.name) : askReclaimWorktree(c.name), 'danger'),
-      btn('cancel', cancel),
-    ]);
+    return { cls: 'red', q: `kill session '${c.name}'?`, keys: yn, buttons: [
+      { label: 'y = yes', cls: 'danger', onClick: () => c.kind === 'kill' ? confirmedKill(c.name) : askReclaimWorktree(c.name) },
+      cancelBtn,
+    ] };
   }
   if (c.kind === 'wt') {
-    if (c.busy) return bar('busy', `removing worktree '${G.basename(c.path)}'…`, 'deleting the checkout — this can take a minute on a big one', []);
-    if (c.force) return bar('red', c.msg, 'f = remove anyway · any key = cancel', [
-      btn('f = remove anyway', () => removeWorktree(c, true), 'danger'),
-      btn('cancel', cancel),
-    ]);
-    return bar('red', `remove worktree '${G.basename(c.path)}' (${c.branch})?`, 'y = yes · any other key = cancel', [
-      btn('y = yes', () => removeWorktree(c, false), 'danger'),
-      btn('cancel', cancel),
-    ]);
+    if (c.busy) return { cls: 'busy', q: `removing worktree '${G.basename(c.path)}'…`, keys: 'deleting the checkout — this can take a minute on a big one', buttons: [] };
+    if (c.force) return { cls: 'red', q: c.msg, keys: 'f = remove anyway · any key = cancel', buttons: [
+      { label: 'f = remove anyway', cls: 'danger', onClick: () => removeWorktree(c, true) },
+      cancelBtn,
+    ] };
+    return { cls: 'red', q: `remove worktree '${G.basename(c.path)}' (${c.branch})?`, keys: yn, buttons: [
+      { label: 'y = yes', cls: 'danger', onClick: () => removeWorktree(c, false) },
+      cancelBtn,
+    ] };
   }
   if (c.kind === 'reclaim-wt') {
-    return bar('red', `remove worktree '${c.folder}' (${c.branch})?`, 'y = yes · any other key = cancel', [
-      btn('y = yes', () => confirmedReclaim(c.name), 'danger'),
-      btn('cancel', cancel),
-    ]);
+    return { cls: 'red', q: `remove worktree '${c.folder}' (${c.branch})?`, keys: yn, buttons: [
+      { label: 'y = yes', cls: 'danger', onClick: () => confirmedReclaim(c.name) },
+      cancelBtn,
+    ] };
   }
   if (c.kind === 'project') {
-    return bar('red', `remove '${c.name}' from projects?`, 'y = yes · any other key = cancel', [
-      btn('y = yes', () => doVerb('fleet_project_remove', { name: c.name }).then(cancel), 'danger'),
-      btn('cancel', cancel),
-    ]);
+    return { cls: 'red', q: `remove '${c.name}' from projects?`, keys: yn, buttons: [
+      { label: 'y = yes', cls: 'danger', onClick: () => doVerb('fleet_project_remove', { name: c.name }).then(cancel) },
+      cancelBtn,
+    ] };
   }
   return null;
 }
-function bar(cls, q, keys, buttons) {
-  return el('div', { class: 'confirm ' + cls }, [
-    el('span', { class: 'q', text: ' ' + q }),
-    el('span', { class: 'keys', text: '  ' + keys }),
-    buttons.length ? el('div', { class: 'row' }, buttons) : null,
+function confirmBar() {
+  const s = confirmSpec();
+  return s ? bar(s) : null;
+}
+function bar(s) {
+  return el('div', { class: 'confirm ' + s.cls }, [
+    el('span', { class: 'q', text: ' ' + s.q }),
+    el('span', { class: 'keys', text: '  ' + s.keys }),
+    s.buttons.length ? el('div', { class: 'row' }, s.buttons.map(b => btn(b.label, b.onClick, b.cls || ''))) : null,
   ]);
 }
 function cancel() { S.confirm = null; render(); }

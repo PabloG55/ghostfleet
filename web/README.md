@@ -59,7 +59,9 @@ enrolment and no real fleet data in the frame:
 
 Open it at a 390x844 viewport with `devicePixelRatio` 2, take the fixture bypass on the
 lock screen, and shoot each screen. Note that the cards are not `<button>`s and they do
-not listen for `click`: the tap handler is `pointerup` on `.card` (`app.js:1083`), guarded
+not listen for `click`: the tap handler is `pointerup` on `.card` (`wire()` in `app.js` —
+named rather than given a line number, which this one had and which pointed at an
+unrelated comment two ports later), guarded
 by a movement slop and a long-press timer, so a driver that only dispatches `click` selects
 a card and never opens it. Downscale the 2x captures to the 390-wide convention, and build
 each GIF from its frames with the concat demuxer, a `duration` per frame — the screens are
@@ -77,13 +79,26 @@ ffmpeg -f concat -safe 0 -i list.txt -filter_complex \
 
 ## Running it
 
-Zero dependencies, no build step, no `npm install` — plain HTML, CSS and ES modules that
-any static server can serve:
+**Serving it needs nothing.** Every file under `web/` is committed ready to serve —
+including the two that are built — so a clone, an `npm pack` tarball and the staged
+runtime are all servable by any static server, with no toolchain and no install step:
 
 ```bash
 cd web && python3 -m http.server 8000     # or any static server
 open http://localhost:8000
 ```
+
+**Changing `web/src/` needs a build.** One screen is Preact now (see *A build step, for one
+screen* below); the rest of the client is still plain ES modules edited in place.
+
+```bash
+npm install          # once: 15 packages, vite + preact
+npm run build        # web/src/projects.jsx -> web/projects.js + web/preact.js
+```
+
+`bin/cf-sync` runs that build before it copies anything, so deploying to the runtime cannot
+skip it — and refuses to copy at all if it cannot, rather than putting a stale screen
+behind a "synced runtime" line.
 
 `localhost` matters if you want the passkey: WebAuthn needs a secure context, and
 `http://` on a LAN or tailnet IP is not one. The app says so rather than failing
@@ -133,7 +148,10 @@ dismiss.
 |---|---|
 | `index.html` | the shell — small on purpose, it is what a cold offline open paints |
 | `grid.js` | the cards, as strings. Mirrors `cardLines`/`newCardLines`/`freeCardLines`/`boxCard`/the counts header. No DOM, no fetch |
-| `app.js` | the three screens, the four gestures, the verbs and the confirmations |
+| `app.js` | the three screens, the four gestures, the verbs and the confirmations. Hand-written, served as written |
+| `src/projects.jsx` | **source.** The Projects screen, as Preact components. The seam between what it draws and what `app.js` still draws is written out at the top of the file |
+| `projects.js` | **built** from `src/projects.jsx` by `vite.config.mjs`. Committed, unminified, stable filename |
+| `preact.js` | **built.** The dependency chunk, split out so `projects.js` stays readable — npm ships preact pre-minified and inlining it would bury the screen in it |
 | `api.js` | **the only file that talks to the network**, the fixture backend, and the probe that decides between them |
 | `ansi.js` | the pane, as HTML: SGR escapes → coloured spans, cells → 1ch boxes. Pure, no DOM, no fetch |
 | `md.js` | an assistant's turn, as DOM: bold, italic, code, fences, links, lists, headings. `parse()` is pure; `toDom()` is the only part that needs a document, and it builds NODES — the one attribute it writes is an href it has already checked |
@@ -141,6 +159,41 @@ dismiss.
 | `sw.js` | offline: cache-first for the app, network-first with fallback for `/api/*` — and the push handler, which always shows a notification because a worker that does not can lose the subscription |
 | `fixtures/` | §4 payloads, and the projects/checkouts/settings/session/pane reads |
 | `icons/make-icons.mjs` | rasterises the grid's own `SHIP` sprite into the home-screen icons |
+
+## A build step, for one screen
+
+The client was 5,688 lines of hand-rolled ES modules with no framework, and the bugs it
+produced were UI-complexity bugs: a scroll position destroyed by a clamp on rebuild, a
+composer that grew under the on-screen keyboard until `send` was off the bottom, a phone
+running old code with the new bytes already in its cache. A component model and real state
+management are the answer to that class — and a big-bang rewrite is not, because this file
+is mostly a record of fixes that only reproduce on a real device, and a rewrite would spend
+the debugging and rediscover it on a phone.
+
+So: **Vite + Preact, static output, ported one screen at a time.** The Projects screen is
+the first and, for now, the only one. Everything else is the same hand-written file it was.
+
+**No content hashing in the output filenames, deliberately.** `sw.js` precaches a
+hand-written `SHELL` list and carries a `CLIENT-HASH` pinned to the bytes of everything in
+it. Hashed names would make that list build-generated and re-pinned on every build, which
+turns a guard that catches "you changed the client and forgot to bump `VERSION`" into a
+line somebody re-pastes without reading. Cache-busting is `VERSION`'s job and always was.
+
+**No minification, in any mode.** Every phone-only bug here was found by opening the file
+the device fetched and reading it. That is the one thing a build takes away, so it is not
+taken: `web/projects.js` is the source laid out flat. `preact.js` is split out rather than
+inlined for the same reason — npm ships preact pre-minified, and inlining it would bury the
+screen in 17 kB of single-letter variables.
+
+**What it costs, and it is a real cost.** Editing `web/src/` no longer shows up by
+reloading — there is a build between you and the phone, and a deploy is now
+`npm run build` → `cf-sync` → swipe the PWA away and relaunch, where it used to be
+`cf-sync` and a relaunch. On a device that is one more place to be out of date and one
+more thing to forget. Three things push back on that: `cf-sync` runs the build itself and
+**refuses to copy anything if it cannot**, so the runtime can never be a stale screen under
+a success line; `test/run.sh` rebuilds and compares bytes, so a source edited without a
+rebuild is a red row rather than a surprise; and everything not yet ported still has no
+build between you and it at all.
 
 ## Screens and gestures
 
@@ -388,12 +441,22 @@ a folded `unknown`, a swapped counts clause, a reworded confirmation, a fixture 
 of the precache, a CDN link in the HTML, a same-origin default put back to fixtures, a
 registration that forgets the enrolment code, and a fixture passkey counted as a server's.
 
-`pwa-render.mjs` builds a ~60-line DOM and **imports `app.js` for real**, because
+`pwa-render.mjs` builds a small DOM and **imports `app.js` for real**, because
 `node --check` proves syntax and not that it runs — this file has already been blank once
 from a ReferenceError in a version that parsed perfectly (see the boot block's comment).
 It reads back the painted text: which origin the lock screen names, that server mode
 offers *enrol this phone* and hides the fixture bypass, and that the header says
 `⚠ fixtures` once you are past the lock.
+
+That DOM grew when the Projects screen became Preact, and it is worth saying why rather
+than leaving it looking like drift. Its rule was "anything it does not implement, `app.js`
+is not allowed to reach for" — a deliberately small surface, so that a reach for something
+exotic showed up as a crash. A reconciler needs more than an append-only app does: it
+moves a node that is already somewhere, inserts before a sibling, removes one by name, and
+patches a text node's `data`. Those are modelled rather than stubbed, for the reason
+`scrollTop` is modelled — ordering is exactly what can go wrong, and a stub that appended
+everything would put the confirm bar under the verbs and still report a screen. The rule
+now holds for `app.js` and not for Preact, which is a real if small loss.
 
 `pwa-origin.mjs` wants a real `fleet-serve` on loopback (`run.sh` starts one and passes
 its base), because the signal the client leans on is a **response nobody wrote down** —

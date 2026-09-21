@@ -107,6 +107,61 @@ is_sha() { case "$1" in *[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = 40 ]; }
 # runtime is current, so the one safeguard against the repo-vs-runtime trap at the top of
 # CLAUDE.md was the thing asserting the trap had not happened.
 mkdir -p "$DEST" || { echo "cf-sync: cannot create $DEST" >&2; exit 1; }
+
+# --- build the phone client BEFORE copying anything -------------------------
+# web/ has one built file in it now: projects.js (the ported Projects screen) plus its
+# preact.js chunk, from web/src/ through vite. The output is COMMITTED, so a clone is
+# serveable with no toolchain and CI needs no npm — but a sync is a DEPLOY, and deploying
+# the committed bytes after editing the source is the repo-vs-runtime trap this whole file
+# exists to close, wearing the one disguise it has not worn yet: the repo would be current
+# too, and only web/projects.js would be behind.
+#
+# SO IT BUILDS FIRST AND A FAILURE IS FATAL. Not a warning over a sync that happened
+# anyway: this script's rule is that any non-zero means the runtime must not be trusted,
+# and a stale screen deployed under a "synced runtime" line is precisely the success
+# message asserting that the trap did not happen while it had. Nothing is copied, no stamp
+# is written, exit 1.
+#
+# WHY THE BUILD IS CONDITIONAL, which is the first thing to wonder about here.
+#
+# There are two kinds of source this script syncs FROM, and only one of them can build:
+#
+#   a git clone           has vite.config.mjs and web/src/, and its web/projects.js may be
+#                         behind the source sitting next to it. It must build.
+#   an unpacked npx cache has web/ ALREADY BUILT and no vite.config.mjs at all, because
+#                         package.json's `files` list ships web/ and not the build config.
+#                         There is nothing to build and nothing that could be stale: the
+#                         source IS the output.
+#
+# So the gate asks which of the two this is, by looking for the build's own inputs. It is
+# NOT a fallback that lets a real checkout sync stale code quietly — a clone always has
+# both, so a clone always builds. Without the gate, everyone who installed from npm and
+# never cloned would get "NOT SYNCED — node_modules is missing" for a build that was never
+# theirs to run, on a runtime that was already correct.
+if [ -f "$REPO/vite.config.mjs" ] && [ -d "$REPO/web/src" ]; then
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "cf-sync: NOT SYNCED — the phone client needs a build and npm is not on PATH." >&2
+    echo "cf-sync: install Node 20.19+ (which brings npm), then re-run. Nothing was copied." >&2
+    exit 1
+  fi
+  if [ ! -d "$REPO/node_modules" ]; then
+    # The single likeliest failure, and the one an exit code cannot spell. Name the
+    # directory and the one command, the way the TCC branch below names its cause.
+    echo "cf-sync: NOT SYNCED — $REPO/node_modules is missing, so the phone client cannot be built." >&2
+    echo "cf-sync: run:  npm install --prefix $REPO" >&2
+    echo "cf-sync: nothing was copied; the runtime at $DEST is untouched." >&2
+    exit 1
+  fi
+  echo "cf-sync: building the phone client (web/src -> web/)…"
+  # A subshell `cd`, not `npm --prefix`: the build writes RELATIVE to the working
+  # directory, and this script is run from wherever you happen to be standing.
+  if ! ( cd "$REPO" && npm run --silent build ); then
+    echo "cf-sync: FAILED to build the phone client" >&2
+    echo "cf-sync: NOT SYNCED — nothing was copied; the runtime at $DEST is untouched." >&2
+    exit 1
+  fi
+fi
+
 failed=""
 for d in bin lib tmux hooks mcp skill layouts web; do
   [ -d "$REPO/$d" ] || continue
