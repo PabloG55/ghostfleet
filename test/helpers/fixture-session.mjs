@@ -161,7 +161,8 @@ export const hookEntry = (...cmds) => [{ matcher: '', hooks: cmds.map((command) 
 // `script` is called with ({ agentTurn, body, requests }) and returns { blocks, stop } —
 // agentTurn counts only requests that carry tools, for the reason in the header.
 export async function runSession({ root, world, hooks, prompt, env: extraEnv = {},
-                                   launcher = true, slot = 'master', timeoutMs = 120000, script }) {
+                                   launcher = true, slot = 'master', timeoutMs = 120000,
+                                  nonTurnFirst = false, script }) {
   fs.writeFileSync(path.join(world.cfg, 'settings.json'), JSON.stringify({ hooks }, null, 2));
 
   const requests = [];
@@ -205,6 +206,35 @@ export async function runSession({ root, world, hooks, prompt, env: extraEnv = {
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const PORT = server.address().port;
+  // EXPOSED so a caller can post a NON-TURN request on purpose. It used to be enough to wait
+  // for Claude Code's own session-title call, which carries no tools — but that call is doubly
+  // conditional (suppressed by CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, and again by a session
+  // that already has a --name) and on 2.1.278 it stopped arriving at all. A property this
+  // file's whole indexing scheme rests on must not be provable only while an upstream side
+  // effect happens to occur.
+  const baseUrl = `http://127.0.0.1:${PORT}`;
+
+  // A NON-TURN REQUEST, SENT ON PURPOSE AND FIRST, when the caller asks for one.
+  // The indexing scheme this file rests on is "a turn is a request that carries tools", and
+  // the only thing that ever proved it was Claude Code's own session-title call — which
+  // carries no tools and arrives before the conversation. That call is doubly conditional:
+  // suppressed by CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, and independently by a session
+  // that already has a --name. On 2.1.278 it stopped arriving at all, and the row that
+  // depended on it went red three runs in a row with nothing in this repo having changed.
+  //   So the test stops waiting for an upstream side effect and performs the thing it is
+  // asserting about. FIRST, before the child is spawned, because the property is that it
+  // does not CONSUME the scripted turn: the session's real turn must still receive script[0].
+  // A probe sent afterwards would prove only that the counter increments.
+  if (nonTurnFirst) {
+    try {
+      await fetch(`${baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'x', max_tokens: 16,
+                               messages: [{ role: 'user', content: 'name this conversation' }] }),
+      });
+    } catch { /* the assertion reads auxCalls; a failed probe shows up there as 0 */ }
+  }
 
   const env = { ...process.env,
     ANTHROPIC_BASE_URL: `http://127.0.0.1:${PORT}`,

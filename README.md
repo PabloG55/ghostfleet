@@ -3,7 +3,8 @@
 </p>
 
 **Run a fleet of Claude Code agents in parallel, from one terminal.** Each agent gets its
-own git worktree; you get one screen that shows what every one of them is doing.
+own git worktree — cut, branched, dependency-linked and booted in one keystroke — and you
+get one screen that shows what every one of them is doing.
 
 > A *ghost fleet* is a fleet of autonomous, unmanned vessels under one command — agents
 > working with nobody in the seat, and one control plane steering them.
@@ -65,6 +66,28 @@ debugging — and that most wrappers get wrong:
 | one account: 5 agents drain the budget 5× faster and all stall together | a non-Claude governor meters usage and parks workers at the ceiling, resuming on reset (it can't be the lead — the lead stalls too) |
 | one laptop: 5 agents running tests can fill the process table and wedge the machine | the same governor watches the kernel's own memory-pressure level and the process table, and parks workers before the OOM killer does |
 | you already run agents by hand in a dozen panes | `fleet-adopt` finds those conversations and rebuilds them as one fleet |
+
+## A worktree you can actually work in
+
+`git worktree add` gives you a directory. An agent needs more than that before it can do
+anything, and the gap is where the fiddly parts live — so `fleet-spawn` closes it:
+
+| | why it matters |
+| --- | --- |
+| **`node_modules` symlinked** from the main checkout | the worker can run lint, typecheck and tests on its first turn instead of waiting out an install |
+| **a dev-stack slot allocated** | two workers don't both try to bind port 3000 and one of them silently lose |
+| **the task recorded in a manifest** | `fleet-worktrees` shows what each tree is *for*, which is how a lead rebuilds its map after a restart instead of guessing |
+| **reuse before create** | it refuses to cut a new tree while a free one is sitting there, and lists them — so the disk doesn't fill with abandoned checkouts |
+| **a session started in it**, on the agent you picked | a worktree with nobody in it isn't a worker |
+
+The branch is cut from your **local** ref, not the remote tip, so a worker never misses
+work you committed but haven't pushed. And `fleet-spawn` refuses to run from inside a
+worktree: a session already in one is a leaf, and spawning there would put a second tree
+beside the one you're standing in rather than starting a worker.
+
+Recycling an existing tree onto fresh work is one command — `fleet-spawn <name> --reuse
+<worktree> --branch <new> --from <base>` cleans it and checks out the new branch — which is
+the usual case once a fleet has been running for a while.
 
 ## Documentation
 
