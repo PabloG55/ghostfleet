@@ -203,6 +203,47 @@ is('...and the sweep read them', true, scanned > 50);
 // count cannot tell "the four captured panes with escape sequences in them" from "a source
 // file nobody is scanning any more" — which is exactly what happened to THIS file while the
 // count read as healthy. Listing them means a new one has to be looked at.
+// ── 4. a binary nobody read is not a binary nobody has to read ───────────
+// NAMING THE SKIPPED FILES WAS NOT ENOUGH. The list below said "a new one has to be
+// looked at", and for weeks nobody did: docs/img/pane-permission-dialog.png sat in the
+// docs showing a real fleet header and a real session name, through six leak hunts, three
+// history rewrites and two repo deletions. Every text guard was green the whole time,
+// because every text guard skips it — and so does git-filter-repo's --replace-text, which
+// is why two rewrites left it untouched. It was found by a human asking "did we get the
+// gifs?" and by then opening the file.
+//   SO THE LIST IS A REVIEW RECORD, not an inventory. Each entry is the digest of a file
+// somebody has actually LOOKED AT and confirmed carries no withheld name. Change a binary
+// or add one and this goes red with the digest to paste — which is the moment to open it
+// and look, because nothing else in this repo can.
+//   A DIGEST IS NOT A READING. This cannot tell whether an image is clean; it can only
+// tell whether it is the same bytes as the one somebody vouched for. That is the whole of
+// what is being claimed, and it is worth exactly as much as the look that preceded it.
+const BINARY_REVIEWED = new Set([
+  '2c785a8e51bcab64',   // docs/img/pane-fit.png
+  '265c13b1e022d32c',   // docs/img/pane-permission-dialog.png
+  '080c1e0698887409',   // docs/mobile/confirm.png
+  '0c597815fcfff9ae',   // docs/mobile/grid.gif
+  '6b9a2c7462f96499',   // docs/mobile/pane.gif
+  'a0984c7bfa12adba',   // docs/mobile/phone-demo.gif
+  '368e981ec5f385c5',   // docs/mobile/projects.png
+  '5e4795d75230ae92',   // docs/mobile/session.gif
+  '95240291927ad942',   // docs/mobile/statuses.png
+  '07b65ab7235ca1d3',   // docs/stack-demo.gif
+  'ef987172757ffd8c',   // docs/stack-demo.mp4
+  '23ec45657a6e9e92',   // docs/worktree-demo.gif
+  '6e433873d5794276',   // docs/worktree-demo.mp4
+  '37954347dcba219e',   // web/icons/apple-touch-icon.png
+  '3c5c79f7450c7e04',   // web/icons/icon-192.png
+  '162cb00d56e8857e',   // web/icons/icon-512.png
+]);
+{
+  const unreviewed = skipped.filter(f => {
+    const b = fs.readFileSync(path.join(ROOT, f));
+    return !BINARY_REVIEWED.has(crypto.createHash('sha256').update(b).digest('hex').slice(0, 16));
+  });
+  is('every skipped binary has been looked at', '', unreviewed.join(' '));
+}
+
 const BINARY_EXPECTED = [
   'docs/img/pane-fit.png', 'docs/img/pane-permission-dialog.png',
   'docs/mobile/confirm.png', 'docs/mobile/grid.gif', 'docs/mobile/pane.gif',
