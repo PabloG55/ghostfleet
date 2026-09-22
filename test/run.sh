@@ -3237,6 +3237,71 @@ else
 fi
 rm -rf "$STEPO"
 
+# ── a manifest.json that is not OURS must not take the review server down ──────────────
+# `serve` and `list` find runs by looking for a `manifest.json` in each subdirectory of
+# --dir, and `manifest.json` is one of the most common filenames in computing. --dir is
+# routinely a directory we do not own.
+#
+# SEEN LIVE, AND IT KILLED THE SERVER RATHER THAN SKIPPING A ROW. A browser update unpacked
+# its components into the directory being served — one directory per component, each with a
+# manifest.json of a completely unrelated schema: valid JSON, no `steps`. The only guard was
+# a try/catch around JSON.parse, which asks whether the bytes are JSON — a PROXY for "is this
+# one of ours" that anything well-formed walks straight past. The next request read
+# m.steps.length, threw inside the request handler, and node exited 1. From the client:
+# connection refused. From test/helpers/stepper-check.mjs, which was serving that shared
+# directory: six rows about a stepper that had never loaded, and the server's stack trace
+# discarded with its stderr. Green at 16:43, red at 16:57, nothing in the repo changed, and
+# 6,092 entries in the directory by then.
+#
+# THE FIXTURE IS NAMED FOR THE SHAPE, NOT FOR THE PROGRAM THAT DID IT. This test creates the
+# directory, so nothing has to match a real vendor's path — and the next person to hit this
+# will hit it with some other program's leftovers. What has to be faithful is the CONTENT: a
+# manifest.json that parses cleanly and has no `steps`.
+#
+# Both directions, because "the server stayed up" is what a server with nothing to serve
+# says too: the foreign manifest is ignored AND the real run beside it is still listed.
+group "a foreign manifest.json does not take the review server down"
+FMD="$(mktemp -d "$TEST_RUNS.$$.fm.XXXXXX")"
+mkdir -p "$FMD/run1" "$FMD/some-other-program-unpacker.aA1bB2"
+cat > "$FMD/run1/manifest.json" <<'MANI'
+{"provenance":{"commit":"0000000000000000000000000000000000000000","branch":"b","dirty":false,
+ "base":"http://x","slot":1,"viewport":{"width":800,"height":600},"at":"2026-01-01T00:00:00.000Z"},
+ "steps":[{"n":1,"name":"a clean step","file":null,"url":"http://x/a","title":"A",
+ "expect":null,"notes":[],"requests":[]}],"problems":0}
+MANI
+# Exactly the shape the real one had: parses cleanly, and has no `steps`.
+printf '{"manifest_version":3,"name":"Some Component","version":"1.0.0"}\n' \
+  > "$FMD/some-other-program-unpacker.aA1bB2/manifest.json"
+
+# `list` first: no browser needed, and it had the same bug one exit code quieter.
+FM_LIST="$(node "$ROOT/bin/fleet-shots.mjs" list --dir "$FMD" 2>&1)"; fm_rc=$?
+is "list survives a foreign manifest"   "0"   "$fm_rc"
+is "...and still names the real run"    "1"   "$(printf '%s' "$FM_LIST" | grep -c 'run1' || true)"
+is "...and never mentions the stranger" "0"   "$(printf '%s' "$FM_LIST" | grep -c "some-other-program" || true)"
+
+FMP="$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+node "$ROOT/bin/fleet-shots.mjs" serve --dir "$FMD" --port "$FMP" > "$FMD/srv.log" 2>&1 &
+FMPID=$!
+# Poll rather than sleep: the crash is on the FIRST request, so the question is what the
+# first request gets, and a fixed sleep would only choose how long to wait to ask it.
+for _ in $(seq 1 60); do
+  curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$FMP/" 2>/dev/null && break
+  sleep 0.1
+done
+FM_CODE="$(curl -s -o "$FMD/body.html" -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FMP/" 2>/dev/null || echo 000)"
+is "the index answers"                  "200" "$FM_CODE"
+# THE ROW THIS GROUP EXISTS FOR. Before the fix the process was gone by now.
+is "...and the server is still alive"   "yes" "$(kill -0 "$FMPID" 2>/dev/null && echo yes || echo no)"
+is "...and did not throw"               "0"   "$(grep -c 'TypeError' "$FMD/srv.log" || true)"
+# PRESENCE, NOT A COUNT. The run's name legitimately appears twice in the index — once as
+# the link and once in the row beside it — and pinning 1 makes this row fail on a layout
+# change that broke nothing. It is the trap CLAUDE.md records as having bitten four times,
+# and it caught this line on the way in: measured got=2 against a want of 1.
+is "...and the real run is listed"      "yes" \
+   "$([ "$(grep -c 'run1' "$FMD/body.html" 2>/dev/null || echo 0)" -ge 1 ] && echo yes || echo no)"
+{ kill "$FMPID"; wait "$FMPID"; } 2>/dev/null || true
+rm -rf "$FMD"
+
 group "the installer arms the pre-push guard"
 # A COMMITTED HOOK IS NOT AN ARMED HOOK. core.hooksPath is repo-local git config, so it does
 # not survive a clone: .githooks/pre-push ships in the tree and does nothing until somebody
@@ -3754,6 +3819,47 @@ fi
 # green by blindness, proving only that the fixture no longer leaks. SIGKILL is the one exit
 # no handler runs on, so it is the only way left to manufacture a real orphan, and it is
 # also the real-world case the handler cannot cover: a crash, an OOM, a Ctrl-C on the runner.
+# ── a page error must say WHAT it was ─────────────────────────────────────────────────
+# CDP's exceptionDetails.text is a fixed prefix, not a message: measured on Chrome 153 by
+# throwing a known error on purpose, it is the literal string "Uncaught" for every error
+# there is, and the thrown value's own message lives in exception.description.
+# lib/browser.mjs read only `.text`, so EVERY page error in this repo arrived as that one
+# word. Seen live: `stepper-check ran  want=yes  got=no: Uncaught` — a row naming a failure
+# and saying nothing about it, for a TypeError that named the exact line when finally read.
+# The word appears in none of our source, so the first move is always to hunt for a string
+# that was never there.
+#   The canary is thrown DELIBERATELY, which is the only way to know the capture works at
+# all — absence of output from a probe nobody has verified is not evidence of absence.
+group "a page error is reported by its message, not by CDP's prefix"
+if [ -n "${CHROME:-}" ] || command -v /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome >/dev/null 2>&1 \
+   || command -v google-chrome >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1; then
+  ERRO="$(mktemp -d "$TEST_RUNS.$$.err.XXXXXX")"
+  # A DYNAMIC import, because an ESM specifier must be a literal — the first version of
+  # this canary wrote `import { launch } from process.argv[2]`, which is a syntax error, so
+  # the probe printed nothing and the rows below would have read as "no chrome". A probe
+  # that fails silently is the exact thing this group exists to stop, and it managed to be
+  # that thing on the way in.
+  cat > "$ERRO/canary.mjs" <<'CANARY'
+const { launch } = await import(process.argv[2]);
+const b = await launch({ width: 300, height: 200 });
+try { await b.evaluate(() => { throw new TypeError('DELIBERATE canary 12345'); }); console.log('NO THROW'); }
+catch (e) { console.log(e.message); }
+finally { await b.close(); }
+CANARY
+  CANOUT="$(node "$ERRO/canary.mjs" "file://$ROOT/lib/browser.mjs" 2>/dev/null | head -1)"
+  if [ -z "$CANOUT" ]; then
+    skip "a page error names itself" "no chrome to throw in"
+  else
+    is "the thrown message survives"      "1" "$(printf '%s' "$CANOUT" | grep -c 'DELIBERATE canary 12345' || true)"
+    is "...and its type"                  "1" "$(printf '%s' "$CANOUT" | grep -c 'TypeError' || true)"
+    # THE REGRESSION, named: a bare "Uncaught" is the old behaviour and tells you nothing.
+    is "...and it is not just \"Uncaught\"" "no" "$([ "$CANOUT" = "Uncaught" ] && echo yes || echo no)"
+  fi
+  rm -rf "$ERRO"
+else
+  skip "a page error names itself" "no chrome to throw in"
+fi
+
 group "fleet-look closes what it opened"
 if command -v node >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1; then
   LKC="$(mktemp -d)"

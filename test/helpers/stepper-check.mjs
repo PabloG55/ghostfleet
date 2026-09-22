@@ -23,7 +23,24 @@ const is = (name, want, got) => rows.push(`${name}${US}${want}${US}${got}`);
 // A run with one clean step and one the RUN flagged, which is the whole matrix: a flagged
 // step is the only place the reason requirement applies, and a clean one proves the
 // requirement is not applied everywhere.
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gf-stepper-'));
+// A ROOT THIS FILE OWNS, with the run INSIDE it — not the run in $TMPDIR and `serve`
+// pointed at $TMPDIR's parent listing.
+//
+// It used to be the latter, and `--dir` was therefore the whole shared temp directory:
+// every run this machine had ever made, plus anything else that happens to live there.
+// `serve` lists a directory by looking for a `manifest.json` in it, and `manifest.json` is
+// one of the most common filenames in computing. Measured: a browser update unpacked its
+// components into that directory, each one carrying a manifest.json of an unrelated schema
+// — and the server died on its first request, so this helper drove a browser at a refused
+// connection and reported six rows about a stepper that had never loaded.
+//   bin/fleet-shots.mjs no longer crashes on a foreign manifest, and that is the real fix.
+// This is the other half: a test that shares a directory with the rest of the machine is
+// a test whose result depends on what else is on the machine, and no amount of hardening
+// in the thing under test makes that a controlled experiment. 6,092 entries were in that
+// directory when this was written.
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gf-stepper-'));
+const dir = path.join(root, 'run');
+fs.mkdirSync(dir);
 fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({
   provenance: { commit: '0'.repeat(40), branch: 'b', dirty: false, base: 'http://x',
                 slot: 1, viewport: { width: 800, height: 600 }, at: '2026-01-01T00:00:00.000Z' },
@@ -45,18 +62,42 @@ const port = await new Promise((res) => {
   s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); });
 });
 const { spawn } = await import('node:child_process');
-const srv = spawn(process.execPath, [bin, 'serve', '--dir', path.dirname(dir), '--port', String(port)],
-  { stdio: ['ignore', 'ignore', 'ignore'], detached: false });
+// STDERR IS KEPT, NOT DISCARDED. It was `['ignore','ignore','ignore']`, and when the
+// server died on its first request the only trace was six rows saying the stepper had no
+// state — a crash reported as a UI that does not work. The server's own stack trace names
+// the cause in one line and was being thrown away at the moment it was written.
+const srv = spawn(process.execPath, [bin, 'serve', '--dir', root, '--port', String(port)],
+  { stdio: ['ignore', 'ignore', 'pipe'], detached: false });
+let srvErr = '';
+srv.stderr.on('data', (d) => { srvErr += String(d); });
+let srvExit = null;
+srv.on('exit', (code, signal) => { srvExit = signal ? `signal ${signal}` : `code ${code}`; });
 const base = `http://127.0.0.1:${port}`;
 const runName = path.basename(dir);
 
 let b = null;
 try {
-  // wait for it to answer at all
+  // WAIT FOR IT TO ANSWER, AND REFUSE TO CARRY ON IF IT NEVER DOES. This loop used to run
+  // out and fall through, so a server that never came up produced a browser pointed at a
+  // refused connection and six rows about a stepper with no state — every one of them
+  // describing the page, none of them true, and the actual cause (the server exited 1 on
+  // its first request) thrown away with its stderr.
+  //   A precondition that fails is ONE row naming the precondition, not a screenful about
+  // the thing it was a precondition for.
+  let up = false;
   for (let i = 0; i < 80; i++) {
-    try { const r = await fetch(base + '/'); if (r.ok) break; } catch {}
+    if (srvExit !== null) break;                    // it died; stop waiting for it
+    try { const r = await fetch(base + '/'); if (r.ok) { up = true; break; } } catch {}
     await sleep(100);
   }
+  if (!up) {
+    const why = srvExit !== null ? `exited ${srvExit}` : 'never answered in 8s';
+    // The server's own first error line, which is the thing worth reading.
+    const line = (srvErr.split('\n').find(l => /Error|error:/.test(l)) || '').trim().slice(0, 120);
+    is('the review server came up', 'yes', `no: ${why}${line ? ` — ${line}` : ''}`);
+    throw new Error(`review server ${why}`);
+  }
+  is('the review server came up', 'yes', 'yes');
   b = await launch({ width: 1000, height: 700, scale: 1 });
   await b.call('Page.navigate', { url: `${base}/r/${encodeURIComponent(runName)}/` });
   for (let i = 0; i < 80; i++) { if (await b.evaluate(() => document.readyState) === 'complete') break; await sleep(100); }
@@ -134,6 +175,8 @@ try {
 } finally {
   if (b) { try { await b.close(); } catch {} }
   try { srv.kill('SIGKILL'); } catch {}
-  fs.rmSync(dir, { recursive: true, force: true });
+  // The ROOT, not just the run inside it — or every invocation leaves an empty directory
+  // in $TMPDIR forever, which is the same accumulation that made this bug findable.
+  fs.rmSync(root, { recursive: true, force: true });
 }
 process.stdout.write(rows.join('\n') + '\n');

@@ -419,6 +419,11 @@ if (ARGV[0] === 'list') {
   for (const d of names.sort().reverse()) {
     const dir = path.join(root, d);
     let m; try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch { continue; }
+    // Not ours, so not listed — the same check `serve` makes above, for the same reason
+    // and against the same real case: another program's manifest.json in a shared --dir.
+    // Here the consequence is quieter and exactly as wrong — it aborts the whole listing
+    // on the first foreign file instead of taking a server down.
+    if (!m || !Array.isArray(m.steps)) continue;
     const v = readVerdict(dir);
     const total = m.steps.length;
     const marked = m.steps.filter(st => (v[String(st.n)] || {}).v).length;
@@ -467,6 +472,23 @@ if (ARGV[0] === 'serve') {
     return names.sort().reverse().map(d => {
       const dir = path.join(root, d);
       let m = null; try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch { return null; }
+      // ...AND IT HAS TO BE *OURS*. `manifest.json` is one of the most common filenames in
+      // computing, and --dir is frequently a directory we do not exclusively own — a shared
+      // temp dir, a downloads folder, anywhere a run was written beside other programs'
+      // work. The guard above asks only whether the bytes are JSON, which is a PROXY for
+      // the real question and lets anything well-formed through.
+      //   SEEN LIVE, AND IT TOOK THE WHOLE SERVER DOWN RATHER THAN SKIPPING ONE ROW. A
+      // browser update unpacked its components into the directory this was serving, each
+      // component directory holding a manifest.json of a completely different schema —
+      // valid JSON, no `steps`. The next request read m.steps.length, threw inside the
+      // request handler, and node exited 1. From the client that is a connection refused
+      // with no body; from here, a review UI that worked in the morning and was dead in the
+      // afternoon with nothing in this repo changed. One stranger's file, every run
+      // unreachable, and the crash is on the FIRST request rather than at startup — so the
+      // process prints its banner, claims a port, and dies the moment it is used.
+      //   The general shape: any long-lived scan of a directory you do not own must decide
+      // whether each hit is yours by its CONTENT, and must survive the answer being no.
+      if (!m || !Array.isArray(m.steps)) return null;
       const v = readVerdict(dir);
       const total = m.steps.length;
       const marked = m.steps.filter(st => (v[String(st.n)] || {}).v).length;
