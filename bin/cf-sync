@@ -139,23 +139,35 @@ mkdir -p "$DEST" || { echo "cf-sync: cannot create $DEST" >&2; exit 1; }
 # never cloned would get "NOT SYNCED — node_modules is missing" for a build that was never
 # theirs to run, on a runtime that was already correct.
 if [ -f "$REPO/vite.config.mjs" ] && [ -d "$REPO/web/src" ]; then
-  if ! command -v npm >/dev/null 2>&1; then
-    echo "cf-sync: NOT SYNCED — the phone client needs a build and npm is not on PATH." >&2
-    echo "cf-sync: install Node 20.19+ (which brings npm), then re-run. Nothing was copied." >&2
+  # WHICH PACKAGE MANAGER, decided by what is on the machine rather than by a hardcoded
+  # name. pnpm is what this repo uses and what the lockfile is for, so it is preferred —
+  # but refusing to build on a machine that has only npm would turn a working setup into a
+  # NOT SYNCED for no reason, and the build itself does not care which one ran it. So:
+  # pnpm if present, npm otherwise, and the error names pnpm because that is the one whose
+  # lockfile is committed.
+  PM=""
+  command -v pnpm >/dev/null 2>&1 && PM=pnpm
+  [ -z "$PM" ] && command -v npm >/dev/null 2>&1 && PM=npm
+  if [ -z "$PM" ]; then
+    echo "cf-sync: NOT SYNCED — the phone client needs a build and neither pnpm nor npm is on PATH." >&2
+    echo "cf-sync: install pnpm (https://pnpm.io/installation), then re-run. Nothing was copied." >&2
     exit 1
   fi
   if [ ! -d "$REPO/node_modules" ]; then
     # The single likeliest failure, and the one an exit code cannot spell. Name the
     # directory and the one command, the way the TCC branch below names its cause.
     echo "cf-sync: NOT SYNCED — $REPO/node_modules is missing, so the phone client cannot be built." >&2
-    echo "cf-sync: run:  npm install --prefix $REPO" >&2
+    # The flags differ: pnpm takes --dir, npm takes --prefix. Printing the wrong one is
+    # worse than printing none, because it is a command that looks right and fails.
+    if [ "$PM" = pnpm ]; then _inst="pnpm install --dir $REPO"; else _inst="npm install --prefix $REPO"; fi
+    echo "cf-sync: run:  $_inst" >&2
     echo "cf-sync: nothing was copied; the runtime at $DEST is untouched." >&2
     exit 1
   fi
-  echo "cf-sync: building the phone client (web/src -> web/)…"
-  # A subshell `cd`, not `npm --prefix`: the build writes RELATIVE to the working
+  echo "cf-sync: building the phone client (web/src -> web/) with ${PM}…"
+  # A subshell `cd`, not a --prefix/--dir flag: the build writes RELATIVE to the working
   # directory, and this script is run from wherever you happen to be standing.
-  if ! ( cd "$REPO" && npm run --silent build ); then
+  if ! ( cd "$REPO" && "$PM" run --silent build ); then
     echo "cf-sync: FAILED to build the phone client" >&2
     echo "cf-sync: NOT SYNCED — nothing was copied; the runtime at $DEST is untouched." >&2
     exit 1

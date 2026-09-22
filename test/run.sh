@@ -8979,10 +8979,48 @@ is "no node_modules is a refusal"        "yes" "$([ "$rc_nm" -ne 0 ] && echo yes
 is "...and NEVER claims it synced"       "0"   "$(printf '%s' "$out_nm" | grep -c 'synced runtime' || true)"
 is "...and says NOT SYNCED"              "1"   "$(printf '%s' "$out_nm" | grep -c 'NOT SYNCED' || true)"
 is "...and names the missing directory"  "1"   "$(printf '%s' "$out_nm" | grep -c 'node_modules' || true)"
-is "...and the command that fixes it"    "1"   "$(printf '%s' "$out_nm" | grep -c 'npm install --prefix' || true)"
+# The hint names the manager that will actually run, and the FLAG differs between them
+# (pnpm --dir, npm --prefix). Printing the other one's flag is worse than printing none: it
+# is a command that looks right and fails. Asserted against whichever is on this machine.
+_pmhint='npm install --prefix'; command -v pnpm >/dev/null 2>&1 && _pmhint='pnpm install --dir'
+is "...and the command that fixes it"    "1"   "$(printf '%s' "$out_nm" | grep -c "$_pmhint" || true)"
 # THE POINT OF FAILING EARLY. A partial copy is the state that runs half-new code, so a
 # build that cannot run must not get as far as rsync — not even for the dirs it could do.
 is "...and copied NOTHING"               "no"  "$([ -e "$CB/rt1/bin/thing" ] && echo yes || echo no)"
+
+# ...AND THE PATH THAT SUCCEEDS, which had no row at all until a one-character bug proved
+# it needed one. `$PM…` — a bare variable followed by the ellipsis in the progress line — is
+# parsed by bash as a variable NAMED "PM…", so under `set -u` cf-sync aborted before copying
+# anything. Every assertion above stayed green, because they only ever exercise the
+# REFUSALS: no node_modules, no manager, a build that exits non-zero. The branch this script
+# exists to run had nothing asserting it ran at all, so the deploy tool could be broken
+# outright with the suite fully green.
+#   The build is STUBBED (a package.json whose build script exits 0), the same shape as the
+# failure fixture below. This row is about cf-sync reaching and completing its build branch,
+# not about vite — a real build would make it depend on a toolchain and turn a check into a
+# skip on exactly the machines that most need it.
+mkdir -p "$CB/good/node_modules"
+cp -R "$CB/src/bin" "$CB/src/web" "$CB/src/vite.config.mjs" "$CB/good/" 2>/dev/null
+printf '{"name":"x","private":true,"scripts":{"build":"exit 0"}}\n' > "$CB/good/package.json"
+# The committed build output, which a real clone has because this repo commits it — the
+# stub build cannot produce it, and the point of the last row is that cf-sync COPIED it.
+printf 'export const built=1;\n' > "$CB/good/web/projects.js"
+out_ok="$(CLAUDE_FLEET_HOME="$CB/rt3" "$ROOT/bin/cf-sync" "$CB/good" 2>&1)"; rc_ok=$?
+is "a buildable source builds and syncs"  "0"   "$rc_ok"
+is "...and says it is building"           "1"   "$([ "$(printf '%s' "$out_ok" | grep -c 'building the phone client')" -ge 1 ] && echo 1 || echo 0)"
+# THE ROW THAT WOULD HAVE CAUGHT IT. An unbound variable is fatal under `set -u` and prints
+# to stderr; without this the only symptom is a missing file nobody looked for.
+#   MATCHED WITH bash's OWN `case`, NOT grep, and that is not a style preference. The message
+# bash prints names the offending variable, and the variable here is only mis-parsed BECAUSE
+# the source has a multibyte character glued to it — so the error text itself carries an
+# invalid byte. Measured: `grep -c` over that output prints NOTHING and exits 1 (not "0" and
+# not an error anybody reads), in a UTF-8 locale and under LC_ALL=C alike, so the assertion
+# compared "0" against "" and its failure looked like a failure of the thing it was testing.
+# The first version of this row shipped green against the very bug it was written for.
+_unbound=no; case "$out_ok" in *"unbound variable"*) _unbound=yes ;; esac
+is "...with no unbound-variable error"    "no"  "$_unbound"
+is "...and it really claims a sync"       "1"   "$(printf '%s' "$out_ok" | grep -c 'synced runtime' || true)"
+is "...and the client really landed"      "yes" "$([ -f "$CB/rt3/web/projects.js" ] && echo yes || echo no)"
 
 # ...and a build that RUNS and fails. Same refusal, reached down a different branch: this
 # one is npm's exit status rather than a missing directory, and it is the branch a real

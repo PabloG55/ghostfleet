@@ -63,7 +63,17 @@ const clientModulesStayExternal = {
 };
 
 export default {
-  plugins: [clientModulesStayExternal],
+  plugins: [
+    // Rewrites pnpm's content-addressed path back to the flat one, so an npm build and a
+    // pnpm build of the same commit are byte-identical. Output-only: it touches comments
+    // vite emits, never code.
+    {
+      name: 'normalise-node-modules-paths',
+      renderChunk(code) {
+        const out = code.replace(/node_modules\/\.pnpm\/[^/]+\/node_modules\//g, 'node_modules/');
+        return out === code ? null : { code: out, map: null };
+      },
+    },clientModulesStayExternal],
   root: path.resolve(import.meta.dirname),
   // No index.html, no public/. This build has one JS entry and emits one JS file; a public
   // dir would copy web/ over itself.
@@ -114,6 +124,18 @@ export default {
         // The three names that would otherwise carry a content hash. Entry and chunk
         // names are what sw.js's SHELL list spells out by hand; an asset name would be
         // too, if this build ever emitted one.
+        // BUILT BYTES MUST NOT DEPEND ON WHERE node_modules LIVES. vite labels each region
+        // of the bundle with the source file's path, and that path is the INSTALL layout:
+        // npm writes `node_modules/preact/…` and pnpm writes
+        // `node_modules/.pnpm/preact@10.29.8/node_modules/preact/…`. The code is identical —
+        // measured, the only difference between an npm build and a pnpm build of the same
+        // commit is six comment lines — but the bytes are not, so the committed output and
+        // its CLIENT-HASH pin would flip according to which manager the last person used,
+        // and the suite would report a mismatch that means nothing. cf-sync accepts either
+        // manager on purpose; this is what makes that safe rather than a trap.
+        //   Normalised in renderChunk (below) rather than by turning the comments off: they
+        // are worth having when reading the emitted file, which is the whole reason this
+        // build stays unminified.
         entryFileNames: '[name].js',
         chunkFileNames: '[name].js',
         assetFileNames: '[name].[ext]',
