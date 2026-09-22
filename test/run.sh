@@ -11389,7 +11389,7 @@ for f in "$ROOT"/bin/*; do
                    *) bash -n "$f"      >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error" ;;
   esac
 done
-for f in "$ROOT"/hooks/*.sh; do
+for f in "$ROOT"/hooks/*.sh "$ROOT"/test/helpers/*.sh; do
   bash -n "$f" >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error"
 done
 for f in "$ROOT"/mcp/*.mjs "$ROOT"/test/helpers/*.mjs; do
