@@ -1380,6 +1380,9 @@ agwait() {           # $1 = text to wait for, up to ~12s
 # ` killed the whole pane and every row after it read as absent. Measured red on
 # ubuntu-latest while green on four local runs, which is exactly what a start-up race looks
 # like. Nothing needs to be re-read if the file was right before the process opened it.
+# Whether agcol() got a live session. Initialised because run.sh is `set -u`:
+# an unset read here would abort the whole suite rather than skip one arm.
+AGUP=0
 AGROW_AGENT=""
 agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = the row's 4th column
   if [ -n "$AGROW_AGENT" ]; then
@@ -1397,18 +1400,38 @@ agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = 
   # the shell tmux runs. Measured by printing $PATH from inside the pane.
   tmux -L cfagcol new-session -d -x 120 -y 24 -e HOME="$T" \
     -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
-    "PATH='$T/bin'; export PATH; '$T/bin/node' '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 20" 2>/dev/null
-  agwait 'acme-api' || true      # the projects screen has painted; keys reach the grid now
+    "PATH='$T/bin'; export PATH; '$T/bin/node' '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 20"
+  agwait 'acme-api' || { AGUP=0; bad "the agent-column session comes up" "the projects screen" "nothing drawn in 12s"; return 1; }
   tmux -L cfagcol send-keys ','
-  agwait 'settings' || true      # ...and the settings page is up
+  agwait 'settings' || { AGUP=0; bad "the agent-column session comes up" "the settings page" "',' did not land in 12s"; return 1; }
+  AGUP=1
 }
 agrow()  { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'acme-api' | head -1; }
 agfoot() { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'esc/. back' | head -1; }
+# DOES THE ROW LACK THIS, AND WAS THERE A ROW AT ALL? The second half is the whole point.
+# `grep -qE <pat> <<< "$(agrow)"` answers "no" when the pattern is absent AND when the
+# capture is EMPTY, and an empty capture is what a dead tmux server produces. So a row
+# asserting "no counter is shown" went green in exactly the case it most needed to fail:
+# the session had gone, the screen it is about did not exist, and the absence of a counter
+# on a screen that was not there read as the feature working.
+#   Seen live on ubuntu-latest: the session for one arm never came up, three rows in this
+# group read an empty pane, two of them went red — and this one went GREEN. The reds were
+# the symptom; this was the defect, and nobody would ever have looked at it.
+#   So the precondition is proved first and the question asked second, which is the same
+# shape as asserting a stylesheet has applied before asserting what it computed. `(no row)`
+# matches neither "yes" nor "no", so a missing pane is a red whichever way the row is
+# written.
+aglacks() {          # $1 = pattern -> no | yes | (no row)
+  local row; row="$(agrow)"
+  [ -n "$row" ] || { printf '(no row)\n'; return; }
+  grep -qE "$1" <<< "$row" && printf 'yes\n' || printf 'no\n'
+}
 # Two column steps, then wait for the AGENT blurb rather than for a duration: the blurb is
 # per column, so its arrival IS the cursor having got there.
 agtoAGENT() { tmux -L cfagcol send-keys 'l'; tmux -L cfagcol send-keys 'l'; agwait 'agent: which CLI' || true; }
 if command -v tmux >/dev/null 2>&1; then
   agcol claude opencode codex
+  if [ "$AGUP" = 1 ]; then
   # Proof the scrub took: on an unscrubbed PATH this says three even with no stubs, so a
   # wrong answer here is what tells you the arm below is testing the wrong ring.
   is "the scrubbed PATH is what sets the ring" "claude opencode codex" \
@@ -1436,27 +1459,32 @@ if command -v tmux >/dev/null 2>&1; then
   is "...and the row is a 3-column row again" "3" \
      "$(awk -F'\t' '/^acme-api/{print NF}' "$T/.config/ghostfleet/projects")"
 
+  else skip "the agent column: a ring of three" "the session did not come up"; fi
   agcol claude codex          # a ring of two: a real toggle, and no counter on it
+  if [ "$AGUP" = 1 ]; then
   is "two installed is a ring of two"  "claude codex" \
      "$(PATH="$T/bin" "$ROOT/bin/fleet-agent" installed 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
   agtoAGENT
   is "two agents show no counter"      "no" \
-     "$(grep -qE 'claude [0-9]/[0-9]' <<< "$(agrow)" && echo yes || echo no)"
+     "$(aglacks 'claude [0-9]/[0-9]')"
   is "...and still name the default"   "yes" \
      "$(grep -q 'claude' <<< "$(agrow)" && echo yes || echo no)"
   is "...and one press still sets it"  "yes" \
      "$(tmux -L cfagcol send-keys Space; sleep 1; grep -q 'codex' <<< "$(agrow)" && echo yes || echo no)"
+  else skip "the agent column: a ring of two" "the session did not come up"; fi
   # AN AGENT THAT IS NOT INSTALLED HERE HAS NO POSITION IN THE RING, and the fudge that
   # placed it at the default's index is what this arm exists to keep out: a project set
   # up on another machine, or whose CLI was uninstalled since, printed `1/3` — the
   # position of claude — beside its own name. The counter is the one number on this
   # screen a reader has no way to check, so a made-up one is worse than none.
   AGROW_AGENT=zed; agcol claude opencode codex; AGROW_AGENT=""
+  if [ "$AGUP" = 1 ]; then
   agtoAGENT
   is "an uninstalled agent is still named" "yes" \
      "$(grep -q 'zed' <<< "$(agrow)" && echo yes || echo no)"
   is "...but gets no invented position"    "no" \
-     "$(grep -qE 'zed [0-9]/[0-9]' <<< "$(agrow)" && echo yes || echo no)"
+     "$(aglacks 'zed [0-9]/[0-9]')"
+  else skip "the agent column: an uninstalled agent" "the session did not come up"; fi
   tmux -L cfagcol kill-server 2>/dev/null
 else
   skip "the agent column says it cycles" "tmux not available"
