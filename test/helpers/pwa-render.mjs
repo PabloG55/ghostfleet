@@ -242,6 +242,12 @@ const DOM_EVENTS = ['click', 'input', 'change', 'submit', 'keydown', 'keyup', 'k
 for (const e of DOM_EVENTS) Node_.prototype['on' + e] = null;
 
 const app = new Node_('div'), sheetHost = new Node_('div');
+const docListeners = {};
+// The two halves of an app switch, in the order the platform delivers them. `hidden` is set
+// BEFORE the event, because that is what the handler reads.
+const fireDoc = (ev) => { for (const f of docListeners[ev] || []) f({ type: ev }); };
+const goHidden = () => { documentStub.hidden = true; fireDoc('visibilitychange'); };
+const goVisible = () => { documentStub.hidden = false; fireDoc('visibilitychange'); };
 const documentStub = {
   hidden: false,
   documentElement: new Node_('html'),
@@ -263,7 +269,15 @@ const documentStub = {
   querySelectorAll: (sel) => (sel === '#app .card'
     ? app.all(n => n.className.split(/\s+/).includes('card'))
     : []),
-  addEventListener() {},
+  // A REAL REGISTRY, NOT A NO-OP, AND THIS WAS A HOLE RATHER THAN A SIMPLIFICATION. The
+  // client registers exactly one listener on `document` — visibilitychange — and it is the
+  // only code in the app that can throw a LIVE SESSION away: it calls lock(), which clears
+  // the token. Swallowed here, that handler had never been executed by a single test, in a
+  // repo whose rule is that an assertion is trusted only after it has been watched going
+  // red. The bug it was hiding is the one below (returning from the Face ID sheet locked
+  // the app the user was unlocking). `window.addEventListener` next to it has been a real
+  // registry all along, which is what made the gap look deliberate.
+  addEventListener: (ev, fn) => { (docListeners[ev] = docListeners[ev] || []).push(fn); },
 };
 // ...AND THE TWO HOSTS ARE IN THE DOCUMENT. `#app` and `#sheet` are elements a real page
 // serves inside <body>; here they were free-floating, which made every node in the app
@@ -340,7 +354,16 @@ let fixtureOverride = null;    // { 'projects.json': <object> } | null
 //   Inert when unset, so a normal run is untouched.
 const SLOW_MS = Number(process.env.GF_SLOW_MS || 0);
 const slow = (p) => SLOW_MS ? p.then(v => new Promise(r => setTimeout(() => r(v), SLOW_MS))) : p;
+// ── A REQUEST THIS TEST CAN HOLD OPEN ─────────────────────────────────────
+// The bug below lives in a WINDOW — between the Face ID sheet closing and the token
+// arriving — and a window cannot be aimed at, only widened until it is certain. GF_SLOW_MS
+// widens every request by a fixed amount, which is the right tool for a race that is merely
+// likely; this one has to be CERTAIN, because the assertion is "the app did not lock during
+// the window" and a window that closed early would make that pass for the wrong reason.
+// So the challenge request is held open explicitly and released by hand.
+let stallAuth = null;                  // set to a promise to hold /api/auth/* open
 globalThis.fetch = (url, opts) => slow((() => {
+  if (stallAuth && /\/api\/auth\//.test(String(url))) return stallAuth.then(() => realFetch(url, opts));
   const m = /^\.\/fixtures\/([A-Za-z0-9._-]+)$/.exec(String(url));
   if (m && fixtureOverride && fixtureOverride[m[1]]) {
     const body = fixtureOverride[m[1]];
@@ -443,6 +466,76 @@ if (BASE) {
   const answered = await until(() => !!sheet && /(a window is open for|no enrolment is open)/.test(sheet.textContent));
   is('the sheet reports the window state', true, answered);
   is('...and stops saying it is asking', false, !!sheet && /whether an enrolment window is open/.test(sheet.textContent));
+}
+
+// ── COMING BACK FROM FACE ID MUST NOT LOCK THE APP ────────────────────────
+// Reported from a real iPhone: "it ask me to authencitcate i put my face and then it asked
+// me again". The Face ID prompt is a SYSTEM SHEET — it takes the foreground, so the page
+// goes hidden when it opens and visible again the instant the face matches. That is an app
+// switch, and app.js reacts to one by asking whether it should re-lock. It asked
+// `!haveToken()`, which is unconditionally true for the whole width of the round trip that
+// is fetching the token, so it locked the app mid-unlock and CLEARED the session the
+// assertion was about to fill in.
+//
+// DRIVEN THROUGH THE REAL HANDLER, on the real document, with a real ceremony in flight.
+// Every piece of that is load-bearing: the handler was unreachable until the stub above
+// started keeping listeners, and a ceremony that had already finished would make the
+// interesting row pass for the boring reason.
+//
+// WHAT THIS PINS AND WHAT IT DOES NOT. It pins the DECISION — that returning to a visible
+// page mid-ceremony is not a re-lock — in all four states, including the release of the
+// guard afterwards, which is the direction a counter fails in. It does NOT prove the owner's
+// screen: whether he saw the lock screen return or the Face ID sheet a second time is not
+// answerable from this process, and the two are different bugs. That question is asked of
+// him rather than guessed at here.
+if (BASE) {
+  const pk = await import(new URL('../../web/passkey.js', import.meta.url).href);
+  is('the client registers exactly one document listener', 1, (docListeners.visibilitychange || []).length);
+
+  // Stand the client where the phone was: server mode, a credential on the device, locked.
+  stored.set(pk.credKey(), 'ZmFrZS1zZXJ2ZXItY3JlZA');
+  is('...and the device looks enrolled, as the phone did', true, pk.registered());
+  api.clearToken();
+  is('...with no token yet, which is a cold open', false, api.haveToken());
+
+  // No ceremony: coming back with no token IS a lock, and that behaviour is kept.
+  is('coming back with no token locks', 'lock', appmod.onVisibleAction());
+
+  // Now the ceremony. The challenge request is held open, so open() is parked INSIDE the
+  // window this bug lives in for as long as the assertions below need.
+  let release;
+  stallAuth = new Promise(r => { release = r; });
+  const ceremony = pk.open().catch(() => 'rejected');   // never awaited while it matters
+  await tick(5);
+  is('a ceremony in flight is visible to the app', true, pk.busy());
+  // THE ROW THIS PR EXISTS FOR.
+  is('...and coming back mid-ceremony does NOT lock', 'wait', appmod.onVisibleAction());
+  // ...and through the LISTENER, because the fix has to be WIRED as well as correct.
+  //   BE CLEAR ABOUT WHICH ROW CATCHES WHAT, because these two are weaker than they read
+  // and a row whose strength is overstated is the thing this repo keeps writing down.
+  // Measured by putting the no-op stub back: only `exactly one document listener` above
+  // goes red. These two pass with the listener swallowed, because `hidden` is set by the
+  // driver and `busy()` is true either way. What they prove is that the real handler can be
+  // driven end to end without throwing — worth having, and NOT proof that it ran.
+  goHidden();
+  is('the sheet opening backgrounds the app', true, documentStub.hidden);
+  goVisible();
+  await tick(5);
+  is('...and the ceremony survived the round trip', true, pk.busy());
+
+  release(); stallAuth = null;
+  await ceremony;
+  await tick(20);
+  is('the ceremony completed rather than being abandoned', false, pk.busy());
+  // ...and the guard RELEASES. A counter that leaked would leave the app permanently
+  // un-lockable, which is a worse bug than the one being fixed — so the other direction is
+  // asserted in the same breath rather than assumed from the `finally`.
+  api.clearToken();
+  is('...so a later return with no token locks again', 'lock', appmod.onVisibleAction());
+  api.setToken('a-real-one', Date.now() / 1000 + 600);
+  is('...and with a token it refreshes instead', 'refresh', appmod.onVisibleAction());
+  api.clearToken();
+  stored.delete(pk.credKey());
 }
 
 // ── re-pointed at an origin with no fleet: fixtures, said out loud ────────

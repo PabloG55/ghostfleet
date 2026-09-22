@@ -127,7 +127,12 @@ export async function enrolmentState() {
 // right not to: the endpoint is remote code execution, and trust-on-first-use loses to
 // whoever wins the race to be first. The client had no way to send one, so registration
 // was a guaranteed 403 — the code is the missing field, not a softening of the rule.
-export async function register(code = '') {
+// WRAPPED FOR THE SAME REASON open() IS — enrolment runs the same system sheet, so the
+// same visibility transition lands in the same place, and a phone that locked itself
+// halfway through enrolling would be the worse version of this bug: there is no credential
+// to retry with yet.
+export async function register(code = '') { return ceremony(() => registerOnce(code)); }
+async function registerOnce(code = '') {
   if (!available()) throw new Error(unavailableReason());
   const { challenge: ch, rpId, user, enrolling } = await challenge();
   const server = api.mode() === 'server';
@@ -168,9 +173,34 @@ export async function register(code = '') {
   return true;
 }
 
+// ── A CEREMONY IS A STATE, AND THE APP HAS TO BE ABLE TO SEE IT ───────────
+// FACE ID IS AN APP SWITCH. On iOS the WebAuthn prompt is a system sheet that takes the
+// foreground, so the page goes HIDDEN when it opens and VISIBLE again the instant the face
+// matches — while the assertion it just produced is still crossing the network, because the
+// token is the thing being fetched. Anything that reacts to "the app came back" therefore
+// runs in the middle of an unlock, at the one moment when there is provably no token.
+//   app.js's visibilitychange handler did exactly that: `!haveToken() && !bypassAllowed()`
+// is unconditionally TRUE for the whole width of a round trip, so returning from the sensor
+// locked the app the user was unlocking AND cleared the token. It self-heals a moment later
+// when authPost lands, so on a fast link it is a flash; over a tailnet it is a lock screen
+// sitting there long enough to be tapped, and tapping it re-enters the same race. That is
+// "i put my face and then it asked me again".
+//   A COUNTER, NOT A FLAG: fresh() can be asked for while open() is still settling, and a
+// flag would be cleared by whichever of the two finished first — leaving the app unguarded
+// for the remainder of the other.
+let ceremonies = 0;
+export function busy() { return ceremonies > 0; }
+async function ceremony(fn) {
+  ceremonies++;
+  // finally, so a dismissed prompt or a refused assertion releases it too. A counter that
+  // leaks on the error path would wedge the app permanently un-lockable, which is a worse
+  // bug than the one this fixes.
+  try { return await fn(); } finally { ceremonies--; }
+}
+
 // One assertion. `purpose` is carried into the server's audit row (§7) so the log says
 // what the fingerprint was for, not merely that one happened.
-async function assert(purpose) {
+async function assertOnce(purpose) {
   if (!available()) throw new Error(unavailableReason());
   if (!registered()) throw new Error('no passkey on this device yet');
   const { challenge: ch, rpId } = await challenge();
@@ -192,15 +222,22 @@ async function assert(purpose) {
   return a;
 }
 
+// WRAPPED, AND THE WRAPPER SPANS MORE THAN THE SENSOR. The window that matters is not the
+// prompt — it is from the prompt opening to the TOKEN EXISTING, and authPost() below is the
+// larger half of that on any link worth worrying about.
+const assert = (purpose) => ceremony(() => assertOnce(purpose));
+
 // Cold start / after backgrounding: assert, then hold the token the API will send.
 export async function open() {
-  const a = await assert('open');
-  if (api.mode() === 'server') {
-    await api.authPost('assert', a);
-  } else {
-    api.setToken('fixture-stub', Date.now() / 1000 + TOKEN_TTL);
-  }
-  return true;
+  return ceremony(async () => {
+    const a = await assertOnce('open');
+    if (api.mode() === 'server') {
+      await api.authPost('assert', a);
+    } else {
+      api.setToken('fixture-stub', Date.now() / 1000 + TOKEN_TTL);
+    }
+    return true;
+  });
 }
 
 // The destructive-verb prompt. A separate ceremony every time — never a cached "you

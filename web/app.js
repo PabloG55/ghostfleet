@@ -1468,6 +1468,28 @@ function sheetActions(name = S.session) {
   ].filter(Boolean)), false);
 }
 
+// ── WHAT COMING BACK MEANS, AS A VALUE RATHER THAN AS THREE BRANCHES ──────
+// NAMED AND EXPORTED BECAUSE THE LISTENER BELOW WAS UNREACHABLE FROM THE SUITE. The fake
+// DOM's `document.addEventListener` was a no-op, so this — the one handler in the client
+// that can throw a live session away — had never been executed by a single test, in a repo
+// whose rule is that an assertion is only trusted after it has been watched going red.
+// That is the durable half of this fix: the decision is now a function the suite can ask.
+//
+// 'wait' IS THE CASE THAT WAS MISSING, and it is what the bug was. Face ID is a system
+// sheet: the page goes hidden when it opens and visible again the moment the face matches,
+// which is BEFORE the assertion has crossed the network — so this ran mid-unlock, with no
+// token, and locked the app the user was in the middle of unlocking. lock() also clears the
+// token, so the assertion that landed a second later was minting a session into a client
+// that had just thrown one away. On a fast link it is a flash; over a tailnet the lock
+// screen is up long enough to tap, and tapping it starts the same race again — "i put my
+// face and then it asked me again". A three-state answer is the point: "no token" and "no
+// token YET" are different facts and a two-way test cannot hold both.
+export function onVisibleAction(now = Date.now()) {
+  if (pk.busy()) return 'wait';          // an unlock is in progress; it IS the answer
+  if (S.hiddenAt && now - S.hiddenAt > pk.RELOCK_AFTER_HIDDEN) return 'lock';
+  if (!api.haveToken() && !pk.bypassAllowed()) return 'lock';
+  return 'refresh';
+}
 // ── the pane ──────────────────────────────────────────────────────────────
 // NEVER WRAPPED, NEVER REFLOWED. The pane was captured at the width the desktop layout
 // gave it — 269 columns on this machine's fleets, measured, against a phone's ~40 — and
@@ -3210,9 +3232,9 @@ document.addEventListener('visibilitychange', () => {
   // difference between an app that stops polling in a pocket and one that keeps waking
   // the radio every two seconds to decide it should not have.
   if (document.hidden) { S.hiddenAt = Date.now(); stopPanePoll(); return; }
-  if (S.hiddenAt && Date.now() - S.hiddenAt > pk.RELOCK_AFTER_HIDDEN) lock();
-  else if (!api.haveToken() && !pk.bypassAllowed()) lock();
-  else refresh();
+  const act = onVisibleAction();
+  if (act === 'lock') lock();
+  else if (act === 'refresh') refresh();
   syncPanePoll();
 });
 // THE SHELL IS CACHE-FIRST, so a deploy does not reach a phone that already has the app

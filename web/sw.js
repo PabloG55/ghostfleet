@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: abfeb3367eea
+// CLIENT-HASH: e3429c05f6b9
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -118,6 +118,14 @@
 // client is stale rather than broken here; what it keeps is the screen this version exists
 // to replace, which is invisible from the server log and is exactly why this bump is not
 // optional.
+// v29 IS THE FACE ID FIX. Returning from the Face ID sheet locked the app that was
+// unlocking: the prompt is a system sheet, so the page goes hidden when it opens and
+// visible the instant the face matches — before the assertion has crossed the network —
+// and the handler that reacts to the app coming back asked `!haveToken()`, which is
+// unconditionally true for the width of that round trip. It called lock(), which clears
+// the token and redraws the lock screen over an unlock still in flight. A phone on v28
+// keeps that, and it is the bug that stops the app being usable at all, so this bump is
+// the one that matters most since v25.
 // v25 is the first client with a BUILD STEP in it. The Projects screen is Preact now, which
 // means two files the shell has never had before — projects.js (the screen) and preact.js
 // (its dependency chunk) — and app.js statically imports the first of them. THIS IS A
@@ -126,7 +134,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v28';
+const VERSION = 'ghostfleet-v29';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
