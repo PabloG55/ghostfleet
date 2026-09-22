@@ -26,8 +26,111 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIX="$ROOT/test/fixtures"
 FILTER="${1:-}"
+
+# ── a filter SKIPS the groups it does not name ───────────────────────────────
+# `FILTER` used to gate PRINTING only: every group still ran, so a worker who wanted to
+# watch one new row go red paid for the whole suite — 13 minutes here, 15 in CI. That is
+# the tax on every iteration of every change to this file, and it is paid most often by
+# whoever is changing it most.
+#
+# The file is already segmented: 168 `group "..."` lines at column 0, and nothing between
+# two of them belongs to anybody else. So a filtered run is the preamble, the groups whose
+# names match, and the summary — generated and `exec`ed in place of this one.
+# `./test/run.sh "the agent column"` is 5.4s against a 13 minute full run.
+#
+# A GROUP THAT LOSES ITS SETUP MUST REFUSE TO RUN, NOT RUN BADLY. Twelve `fleet-serve:`
+# groups share one daemon started by `free_port answers in digits, colour or not`; drop
+# that and they do not fail cleanly — they fail the way this repo keeps getting bitten. A
+# pane or a daemon that was never started reads as an EMPTY capture, and a row asserting an
+# absence answers "no" against nothing and goes GREEN: faster, quieter, and proving less
+# than its name claims. `set -u` does not catch it either, because it fires only where a
+# skipped group's variable is actually READ, and the silent cases are the ones that read
+# nothing. So a group declares what it needs with `# needs:`, the need is checked BEFORE a
+# single assertion runs, and an unmet one names both halves and prints the command that
+# would work. Nothing is auto-included: quietly running more than was asked for is how a
+# declaration goes stale without anyone finding out.
+#
+# SEVERAL FILTERS, because one substring cannot name both a group and its provider —
+# "destructive verbs" and "free_port answers" share no text, so a single-argument filter
+# could never satisfy its own requirement.
+cf_only() {                        # $CF_F = filters, one per line;  $1 = source;  $2 = dest
+  # Through the ENVIRONMENT, not `-v`: awk's -v cannot carry a literal newline, and a
+  # group name can hold anything a shell word can, so there is no safe single-character
+  # separator to squeeze them onto one line with.
+  awk -v root="$ROOT" '
+    BEGIN { nf = split(ENVIRON["CF_F"], F, "\n"); for (i = 1; i <= nf; i++) if (F[i] == "") { delete F[i] } }
+    { line[NR] = $0 }
+    /^printf / && index($0, "passed") && index($0, "failed") && !epi { epi = NR }
+    /^group "/ { n++; start[n] = NR; nm = $0; sub(/^group "/, "", nm); sub(/".*$/, "", nm); name[n] = nm }
+    /^# needs: / && n > 0 { r = $0; sub(/^# needs: /, "", r); need[n] = need[n] (need[n] == "" ? "" : "\n") r }
+    END {
+      if (!epi || !n) { print "cannot segment this file" > "/dev/stderr"; exit 4 }
+      for (i = 1; i <= n; i++) {
+        last[i] = (i < n ? start[i+1] - 1 : epi - 1)
+        for (f in F) if (index(name[i], F[f]) > 0) keep[i] = 1
+        if (keep[i]) kept++
+      }
+      if (!kept) { printf("no group matches %s\n", filt) > "/dev/stderr"; exit 2 }
+      for (i = 1; i <= n; i++) {
+        if (!keep[i] || need[i] == "") continue
+        nn = split(need[i], N, "\n")
+        for (q = 1; q <= nn; q++) {
+          met = 0
+          for (j = 1; j <= n; j++) if (keep[j] && index(name[j], N[q]) > 0) met = 1
+          if (met) continue
+          if (!said) { print "refusing to run a filtered suite that would prove nothing:" > "/dev/stderr"; said = 1 }
+          printf("\n  group  %s\n  needs  %s\n         ...which this filter does not keep. A group whose setup\n         never ran does not fail cleanly here: it reads an empty\n         capture and asserts an absence against nothing.\n", name[i], N[q]) > "/dev/stderr"
+          extra[N[q]] = 1; unmet = 1
+        }
+      }
+      if (unmet) {
+        line2 = ""
+        for (f in F) line2 = line2 " \047" F[f] "\047"
+        for (e in extra) line2 = line2 " \047" e "\047"
+        printf("\n  run:  ./test/run.sh%s\n", line2) > "/dev/stderr"
+        exit 3
+      }
+      # ROOT comes from BASH_SOURCE and the generated copy does not live in the repo.
+      for (k = 1; k < start[1]; k++)
+        if (line[k] ~ /^ROOT="\$\(cd /) printf("ROOT=%c%s%c\n", 39, root, 39); else print line[k]
+      for (i = 1; i <= n; i++) if (keep[i]) for (k = start[i]; k <= last[i]; k++) print line[k]
+      for (k = epi; k <= NR; k++) print line[k]
+    }' "$1" > "$2"
+}
+if [ -n "$FILTER" ] && [ -z "${CF_ONLY:-}" ]; then
+  CF_F=""; for cf_a in "$@"; do CF_F="$CF_F$cf_a
+"; done
+  export CF_F
+  # Under the same prefix the dead-run sweep already reaps, and keyed on this pid, so a
+  # filtered run does not leave a copy of the suite in /tmp for every invocation.
+  CF_DIR="$(mktemp -d "/tmp/ghostfleet-test.$$.onlyXXXXXX")"
+  # NOT `if cf_only ...; then exec; fi; exit $?` — after an `if` whose condition FAILED,
+  # `$?` is the status of the `if` statement itself, which is 0. That spelling made a
+  # refusal exit 0: the message printed, and every caller read it as a pass.
+  cf_only "${BASH_SOURCE[0]}" "$CF_DIR/run.sh"; cf_rc=$?
+  # A GENERATED SUITE THAT DOES NOT PARSE MUST NOT RUN. Two groups of 171 sit inside a
+  # block that opens before them and closes after the next one, so lifting either one out
+  # on its own leaves an unbalanced `if` — and bash does not fail at the top, it runs
+  # everything down to the break and then dies on "unexpected end of file", which reads as
+  # a suite that ran and crashed rather than one that was never assembled. Checked here so
+  # the answer is a refusal instead of a partial run with a syntax error at the end of it.
+  if [ "$cf_rc" -eq 0 ] && ! bash -n "$CF_DIR/run.sh" 2>/dev/null; then
+    printf 'this filter cannot be lifted out on its own:\n\n' >&2
+    printf '  the groups it keeps sit inside a block that spans other groups, so the\n' >&2
+    printf '  extract does not parse. Widen the filter, or run the whole suite.\n' >&2
+    cf_rc=5
+  fi
+  [ "$cf_rc" -eq 0 ] && CF_ONLY=1 exec bash "$CF_DIR/run.sh"
+  rm -rf "$CF_DIR"; exit "$cf_rc"
+fi
 PASS=0; FAIL=0; SKIP=0; GROUP=""
 R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; D=$'\033[2m'; N=$'\033[0m'
+# OUR OWN wire separator, and it is the file's, not one group's. It was defined inside
+# `wire format (split_choice)` and inherited by eight later groups, which made those groups
+# depend on an earlier one for a constant — the kind of coupling that only shows up when
+# something tries to run them apart. (Seven other groups declare it again locally, which is
+# why nobody noticed.) Tab at the tmux boundary, \x1f on our own wires: see the header.
+US=$'\x1f'
 
 # ── the run's environment: NOTHING may force colour ──────────────────────────
 # Every value this suite compares is captured through a pipe, and node decides whether to
@@ -74,6 +177,60 @@ is()    { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
           if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "$2" "$3"; fi; }
 # grep -c, but never let a non-match kill the run under pipefail
 matches() { grep -cE -- "$1" "$2" 2>/dev/null || true; }
+# A UTILITY, NOT ONE GROUP'S FIXTURE. This lived between two groups further down, which
+# made it part of no group at all: a filtered run that kept the group that calls it lost
+# the definition and reported `free_port: command not found` as two red rows about ports.
+# String(p), NOT a bare number: console.log() runs a non-string through util.inspect,
+# which colourises under FORCE_COLOR, and a port with $'\033[33m' round it poisons
+# everything downstream — $BASE becomes a URL curl cannot reach, `init --port` parses NaN
+# and writes null, the daemon falls back to its built-in 8787 and is abandoned there
+# holding the port, and the next group dies EADDRINUSE. Six groups skipped as "server did
+# not come up" while the daemon was up the whole time on a port nobody asked for.
+free_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(String(p)))})' 2>/dev/null; }
+
+# ── waiting for a condition, instead of sleeping at a guess ──────────────────
+# This file blocked for 334.9s of an 801.6s run inside fixed sleeps — 338 calls across 137
+# sites, measured by shimming `sleep` for a whole run. A fixed sleep is a guess at how long
+# tmux, node or a daemon needs, and it is wrong in both directions at once: too long on
+# every ordinary run, and too short on the loaded runner, which is the only run where being
+# wrong costs anything. A sleep that is USUALLY long enough is the exact shape of a flake.
+#
+# THE DANGER IN THE FIX IS WORSE THAN THE SLEEP, and it is why every conversion in this
+# file was watched failing before it was trusted. A poll whose condition is already true
+# returns instantly, makes the suite quick, asserts nothing, and stays GREEN — so nobody
+# finds out. Ask what the condition would be if the thing under test were broken; if the
+# answer is "still true", it is not a condition, it is a no-op.
+#
+# THE BUDGET IS A BACKSTOP, NOT A SCHEDULE. It is paid only when something is already
+# wrong, so it is generous on purpose. SECONDS is a bash builtin and costs no subprocess —
+# EPOCHREALTIME does not exist on the bash 3.2 macOS still ships — and the +1 is load
+# bearing: SECONDS can tick over the instant after it is read, so `wait_for 1` without it
+# could give up after a single poll, which is a no-op wearing a timeout's clothes.
+# Measured over 25 trials started at random points inside a second: shortest 1.25s.
+#
+# A TIMEOUT THAT SAYS NOTHING IS WORSE THAN A SLEEP, so this names the condition that never
+# came true and the caller turns that into a red row rather than limping on.
+WAITED=""                          # polls spent, or "timeout" — for the row that reports it
+WAIT_UNMET=""                      # what the last timeout was waiting for
+wait_for() {                       # <seconds> <description> <shell condition>
+  local limit="$1" what="$2" cond="$3" deadline polls=0
+  deadline=$(( SECONDS + limit + 1 ))
+  while :; do
+    if eval "$cond" >/dev/null 2>&1; then WAITED="$polls"; return 0; fi
+    [ "$SECONDS" -ge "$deadline" ] && break
+    sleep 0.05; polls=$(( polls + 1 ))
+  done
+  WAITED=timeout; WAIT_UNMET="$what"; return 1
+}
+# The commonest condition in this file: a pane has drawn something. Here-string, never a
+# pipe — under pipefail a `grep -q` that MATCHES can fail the pipeline when the writer
+# takes SIGPIPE, which reads as "not there yet" and spins the whole budget. That trap is
+# swept for elsewhere in this file; this is the shape that avoids it.
+pane_has() {                       # <socket> <pattern> [target]
+  local sock="$1" pat="$2" tgt="${3:-}"
+  if [ -n "$tgt" ]; then grep -qE "$pat" <<< "$(tmux -L "$sock" capture-pane -p -t "$tgt" 2>/dev/null)"
+  else                   grep -qE "$pat" <<< "$(tmux -L "$sock" capture-pane -p 2>/dev/null)"; fi
+}
 
 # ── 0. one tmux socket namespace per RUN ─────────────────────────────────────
 # Every server this file starts used to have a FIXED name — cftabh, cfstka,
@@ -156,7 +313,12 @@ kill_servers_in() {                # $1 = a run directory
 # reader, so the in-section helper can go on reaping and resetting its own variable without
 # ever hiding a daemon from the teardown that always runs.
 sv_reg() { [ -n "${1:-}" ] && printf '%s\n' "$1" >> "$TMUX_TMPDIR/serve.pids"; return 0; }
-sv_all() { tr '\n' ' ' < "$TMUX_TMPDIR/serve.pids" 2>/dev/null || true; }
+# `2>/dev/null` does NOT cover this: bash opens the input redirection before it applies
+# the error redirection, so a missing file is announced on the way in and the suppression
+# arrives too late. Harmless in a full run, where the fleet-serve group has registered
+# something by the time the trap fires — and one spurious error line at the end of every
+# run that never started a daemon, which is every filtered one.
+sv_all() { [ -f "$TMUX_TMPDIR/serve.pids" ] && tr '\n' ' ' < "$TMUX_TMPDIR/serve.pids"; return 0; }
 reap() {                           # $1.. = pids; returns once none of them exist
   local p i left
   for p in "$@"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
@@ -192,12 +354,47 @@ sweep_dead_runs() {                # $1 = the <prefix> of <prefix>.<pid>.XXXXXX
   done
   return 0
 }
+# A HAND-STARTED fleet-serve IS NOBODY'S CHILD, and that is the whole difference. The
+# daemons this suite starts live under $TMUX_TMPDIR/serve/bin, are reaped by the EXIT trap,
+# and are found by sweep_dead_runs above when a run dies before reaching it. The ones that
+# actually pile up are started BY HAND — the browser helpers need a live base to talk to —
+# and orphaned the moment the launching shell exits: argv naming this checkout's own bin,
+# ppid 1, and nothing that will ever come back for them. Measured on this machine: 55 of
+# them, going back a week.
+#
+# TWO CONDITIONS, AND THE SECOND IS THE ONE THAT MATTERS. The argv must name THIS
+# checkout's bin directory, and the parent must be init. The live tailnet daemon that
+# serves the owner's phone runs from ~/.local/libexec/ghostfleet/bin and a sibling
+# worktree's runs from its own path, so neither can match the first; a daemon that still
+# has a parent is somebody's running child, including this suite's own, so it cannot match
+# the second. Both are asserted in the group below, in the direction that matters — that a
+# daemon belonging to another directory is still alive afterwards — because a reaper is
+# exactly the kind of code whose happy path proves nothing about its blast radius.
+#
+# The root is an ARGUMENT rather than $ROOT so the test can aim it at a scratch directory
+# and watch it work, instead of the test having to start a real daemon out of the real bin
+# to find out.
+sweep_orphan_serves() {            # $1 = a checkout root; reaps only ITS orphans
+  local p pids="" pp
+  for p in $(pgrep -f "$1/bin/fleet-serve" 2>/dev/null); do
+    [ "$p" = "$$" ] && continue
+    pp="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    [ "$pp" = "1" ] || continue    # still has a parent: not an orphan, not ours to take
+    pids="$pids $p"
+  done
+  # reap, not kill: fleet-serve answers SIGTERM by DRAINING for 15s, and the leaked ones
+  # measured here ignored two of them. Ask, wait a beat, then insist.
+  [ -n "$pids" ] && reap $pids
+  return 0
+}
+
 # fleet-serve is a background node child, not a tmux server, so the sweep above cannot
 # reach it — and a leaked daemon holding a TCP port is the same cross-run interference
 # this section exists to stop. $SERVE_PIDS is set by the fleet-serve group.
 trap 'rc=$?; reap ${SERVE_PIDS:-} $(sv_all); kill_serves_in "$TMUX_TMPDIR"; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
 trap 'exit 130' INT
 sweep_dead_runs "$TEST_RUNS"
+sweep_orphan_serves "$ROOT"
 
 # Proven, not asserted: every other group now rests on this, so it goes first and
 # goes red on its own rather than being taken on trust. Both directions on the
@@ -230,6 +427,51 @@ if command -v tmux >/dev/null 2>&1; then
 else
   skip "socket namespace" "tmux not available"
 fi
+
+group "the orphan sweep takes this checkout's leaks and nobody else's"
+# A REAPER'S HAPPY PATH PROVES NOTHING ABOUT ITS BLAST RADIUS. What has to be true here is
+# not that it kills the daemon it is aimed at — it is that it CANNOT reach the one serving
+# the owner's phone from ~/.local/libexec/ghostfleet/bin, or a sibling worktree's from its
+# own checkout. So all three arms run against scratch roots, and the two that matter are
+# the ones where the process is still alive afterwards.
+#   `exec -a "$0"` so the fixture's own path is its argv[0]: that is what pgrep -f reads,
+# and it leaves ONE process rather than a shell holding a sleep that outlives the kill.
+#   `( cmd & )` so the subshell exits immediately and the child is reparented to init —
+# a real orphan, which is what the sweep keys on. Asserted below rather than assumed,
+# because a fixture that is quietly somebody's child would make the first arm pass for
+# entirely the wrong reason.
+OS="$(cd "$(mktemp -d "$TEST_RUNS.$$.orph.XXXXXX")" && pwd -P)"
+mkdir -p "$OS/mine/bin" "$OS/theirs/bin"
+for d in mine theirs; do
+  printf '#!/usr/bin/env bash\nexec -a "$0" sleep 300\n' > "$OS/$d/bin/fleet-serve"
+  chmod +x "$OS/$d/bin/fleet-serve"
+done
+( "$OS/mine/bin/fleet-serve"   & echo $! > "$OS/mine.pid" )
+( "$OS/theirs/bin/fleet-serve" & echo $! > "$OS/theirs.pid" )
+"$OS/mine/bin/fleet-serve" & OWNCHILD=$!     # our path, but it still has a parent: us
+oalive() { kill -0 "${1:-0}" 2>/dev/null && echo 1 || echo 0; }
+oppid()  { ps -o ppid= -p "${1:-0}" 2>/dev/null | tr -d ' '; }
+# Polled, not slept at: the fixtures are up when the kernel says so.
+oi=0; while [ "$oi" -lt 80 ]; do
+  [ -s "$OS/mine.pid" ] && [ -s "$OS/theirs.pid" ] && [ "$(oppid "$(cat "$OS/mine.pid")")" = "1" ] && break
+  oi=$((oi+1)); sleep 0.05
+done
+OMINE="$(cat "$OS/mine.pid" 2>/dev/null)"; OTHEIRS="$(cat "$OS/theirs.pid" 2>/dev/null)"
+is "our leaked daemon is up to begin with"      "1" "$(oalive "$OMINE")"
+is "...and is really an orphan, not our child"  "1" "$(oppid "$OMINE")"
+is "another checkout's daemon is up too"        "1" "$(oalive "$OTHEIRS")"
+is "...and so is a live child of ours"          "1" "$(oalive "$OWNCHILD")"
+sweep_orphan_serves "$OS/mine"
+is "the sweep reaps THIS checkout's orphan"     "0" "$(oalive "$OMINE")"
+# THE TWO THAT MATTER. Same binary name, same argv shape, one directory apart.
+is "...and cannot reach another checkout's"     "1" "$(oalive "$OTHEIRS")"
+is "...nor a daemon that still has a parent"    "1" "$(oalive "$OWNCHILD")"
+# And aimed at the OTHER root it does the job there, so the first arm is not passing
+# because the sweep simply kills nothing.
+sweep_orphan_serves "$OS/theirs"
+is "...but aimed there, it does reap that one"  "0" "$(oalive "$OTHEIRS")"
+kill "$OWNCHILD" 2>/dev/null; wait "$OWNCHILD" 2>/dev/null
+rm -rf "$OS"
 
 # The other precondition every group rests on, proven the same way and for the same
 # reason: a guard that is never exercised looks exactly like one that works. So put the
@@ -5696,8 +5938,22 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     rm -f "$GK/choice"; tmux -L cfgkout kill-server 2>/dev/null
     tmux -L cfgkout new-session -d -x 200 -y 50 \
       "node '$ROOT/bin/fleet-grid.mjs' cfgkin > '$GK/choice' 2>/dev/null" 2>/dev/null
-    sleep 2
-    tmux -L cfgkout send-keys "$1" 2>/dev/null; sleep 2
+    # DRAWN, not slept at: a key sent before the grid is up goes to the SHELL, and the
+    # next one lands on a screen nobody expected. `api-2` is a row only the real grid
+    # draws, so this cannot be satisfied by an empty pane or a dead server.
+    #   THE REASON IS THE RETURN VALUE, not a row of its own. This runs inside $( ), so
+    # anything a `bad` printed here would be captured as the value of the assertion that
+    # called it rather than shown as its own line — a red row whose `got:` holds another
+    # red row, escape codes and all. Saying why in the value keeps one row per question
+    # and still names the condition that never came true.
+    wait_for 8 "the grid to draw its rows" 'pane_has cfgkout "api-2"' \
+      || { tmux -L cfgkout kill-server 2>/dev/null; printf 'the grid drew nothing in 8s\n'; return; }
+    tmux -L cfgkout send-keys "$1" 2>/dev/null
+    # THE CHOICE IS THE EVENT. The grid writes its answer and exits, so a non-empty file
+    # IS the keypress having been handled — there is nothing to estimate. It stays empty
+    # forever if the key does nothing, which is what the budget is there to end.
+    wait_for 8 "the grid to answer $1" '[ -s "$GK/choice" ]' \
+      || { tmux -L cfgkout kill-server 2>/dev/null; printf 'no choice for %s in 8s\n' "$1"; return; }
     tmux -L cfgkout kill-server 2>/dev/null
     tr '\037' '|' < "$GK/choice" 2>/dev/null
   }
@@ -5839,8 +6095,11 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     rm -f "$PK/choice"; tmux -L cfpkout kill-server 2>/dev/null
     tmux -L cfpkout new-session -d -x 200 -y 50 \
       "CLAUDE_FLEET_PROJECTS='$PK/projects' node '$ROOT/bin/fleet-grid.mjs' - --screen projects > '$PK/choice' 2>/dev/null" 2>/dev/null
-    sleep 2
-    tmux -L cfpkout send-keys "$1" 2>/dev/null; sleep 2
+    wait_for 8 "the projects screen to draw" 'pane_has cfpkout "demo"' \
+      || { tmux -L cfpkout kill-server 2>/dev/null; printf 'the projects screen drew nothing in 8s\n'; return; }
+    tmux -L cfpkout send-keys "$1" 2>/dev/null
+    wait_for 8 "the projects screen to answer $1" '[ -s "$PK/choice" ]' \
+      || { tmux -L cfpkout kill-server 2>/dev/null; printf 'no choice for %s in 8s\n' "$1"; return; }
     tmux -L cfpkout kill-server 2>/dev/null
     tr '\037' '|' < "$PK/choice" 2>/dev/null
   }
@@ -7707,6 +7966,7 @@ kill $AWLIVE 2>/dev/null; wait $AWLIVE 2>/dev/null
 # anywhere distinguishes "nobody asked" from "the OS said no". Both directions, because
 # a message that is always printed is worth as much as one that never is.
 group "fleet-awake --status: a refusal is not silence"
+# needs: fleet-awake --status: one shape on both platforms
 awtable ""
 cat > "$AWD/bin/systemd-inhibit" <<'STUB'
 #!/bin/sh
@@ -7747,6 +8007,7 @@ rm -f "$AWD/bin/systemd-inhibit"
 # so every Linux box on the default was silently getting macOS's --display behaviour.
 # A recording stub, because the assertion is about the argv and nothing else.
 group "fleet-awake arms the flags its table claims"
+# needs: fleet-awake --status: one shape on both platforms
 mkdir -p "$AWD/arm"
 ln -sf "$(command -v nohup)" "$AWD/bin/nohup" 2>/dev/null
 cat > "$AWD/bin/systemd-inhibit" <<STUB
@@ -7851,6 +8112,7 @@ fi
 # the copy's stubs.
 
 group "fleet-serve refuses a bind that is not the tailnet"
+# needs: free_port answers in digits
 # Pure classification, no listener — which is the point: this half has to work on a
 # machine where Tailscale has never been installed, because that is exactly the machine
 # where somebody reaches for 0.0.0.0 to "just make it work". `--any` drops the
@@ -7911,7 +8173,6 @@ rm -rf "$bindrefuse"
 # there holding the port, and the next group dies EADDRINUSE. Six groups skipped as
 # "server did not come up" while the daemon was up the whole time on a port nobody asked
 # for. See the unset at the top of this file for the general guard; this is the local one.
-free_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(String(p)))})' 2>/dev/null; }
 # Proven at the site, with the variable put BACK: everything below depends on this being a
 # number a URL can hold, and the unset at the top of the file is not allowed to be the
 # only reason it is. Both directions — digits with colour forced, and a port that actually
@@ -8055,6 +8316,7 @@ pb() { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f3; }   # body
 
 # ── auth ─────────────────────────────────────────────────────────────────────
 group "fleet-serve: a token exists only because a passkey signed for it"
+# needs: free_port answers in digits
 if sv_start auth; then
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" auth "$(sv_code phone)" > "$SV/probe.auth" 2>"$SV/probe.auth.err"
   is "a cold read is refused"                "401" "$(pf cold.read auth)"
@@ -8109,6 +8371,7 @@ fi
 
 # ── verbs ────────────────────────────────────────────────────────────────────
 group "fleet-serve: destructive verbs need a fresh passkey, on the tool name"
+# needs: free_port answers in digits
 : > "$SV/ran"
 if sv_start verbs; then
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" verbs "$(sv_code v)" > "$SV/probe.verbs" 2>"$SV/probe.verbs.err"
@@ -8247,6 +8510,7 @@ fi
 
 # ── reads ────────────────────────────────────────────────────────────────────
 group "fleet-serve: the grid is never launched without --json"
+# needs: free_port answers in digits
 : > "$SV/ran"; : > "$SV/gridran"
 # An unknown flag falls through to the interactive TUI, which blocks on the tty forever
 # (CLAUDE.md). So the flag is looked for in the FILE first, exactly as bin/ghostfleet does
@@ -8273,6 +8537,7 @@ else
 fi
 
 group "fleet-serve: reads proxy the grid, per project, and bound the tail"
+# needs: free_port answers in digits
 : > "$SV/ran"
 # The §4 payload, echoing back the four env vars the daemon is supposed to set per
 # project. That is the whole point of this stub: a daemon that let SCOPE and ROOT inherit
@@ -8428,6 +8693,7 @@ fi
 # replayed into a pane that then blocks on a keystroke, which keeps Claude's own escapes
 # while leaving the key handling deterministic enough for a suite.
 group "fleet-serve: /api/pane is the pane, and answer keys clears what it shows"
+# needs: free_port answers in digits
 if [ -z "$SV" ]; then
   skip "/api/pane" "node missing"
 else
@@ -8720,6 +8986,7 @@ else
 fi
 
 group "fleet-serve rate limits a token that leaked"
+# needs: free_port answers in digits
 sv_rate 3 2 200
 if sv_start rate; then
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" rate "$(sv_code rl)" > "$SV/probe.rate" 2>/dev/null
@@ -8992,6 +9259,7 @@ else
 fi
 
 group "fleet-serve asserts Tailscale Funnel is off"
+# needs: free_port answers in digits
 # §11.1: Funnel is the one setting that would undo all of §5, "and it should be asserted,
 # not remembered". Three directions, because two of them look alike from outside: on
 # (refuse), off (start), and no CLI at all (say UNVERIFIED rather than pass).
@@ -9036,6 +9304,7 @@ is "...and never as a pass"            "0" \
    "$(PATH="$SV/noshim" HOME="$SV/home" TMUX= "$(command -v node)" "$SV/bin/fleet-serve.mjs" check 2>&1 | grep -c 'funnel     off' || true)"
 
 group "fleet-serve holds a sleep inhibitor while it runs"
+# needs: free_port answers in digits
 # CAN this box arm one at all? `command -v systemd-inhibit` says the binary exists, which
 # is a different question from whether logind will grant a --mode=block lock, and the
 # gap between the two is where the two assertions below spent two CI runs being red for
@@ -9121,6 +9390,7 @@ else
 fi
 
 group "fleet-serve serves the client, and says when there is none"
+# needs: free_port answers in digits
 # The repo-vs-runtime trap: cf-sync mirrors a hardcoded dir list, and web/ was not on it,
 # so a staged runtime had no client at all while the repo looked perfect. Reported once at
 # boot rather than as a 404 per request, which reads as the client's bug.
@@ -9494,6 +9764,7 @@ fi
 # and the whole point is that this is measured and not assumed. It brings its own static
 # servers for the other direction.
 group "phone client: served by the daemon means talking to the daemon"
+# needs: free_port answers in digits
 if sv_start origin; then
   PWO="$(mktemp -d "$TEST_RUNS.$$.pwo.XXXXXX")"
   node "$ROOT/test/helpers/pwa-origin.mjs" "$BASE" > "$PWO/out" 2> "$PWO/err"
@@ -9593,6 +9864,7 @@ done
 # that proves the route works — and the accepted ones are checked on DISK, because a 201
 # with a path in it is not evidence that a file exists.
 group "fleet-serve: a photo becomes a file, and everything else is refused"
+# needs: free_port answers in digits
 if sv_start attach; then
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" attach "$(sv_code att)" > "$SV/probe.att" 2>"$SV/probe.att.err"
   is "attach-probe ran"                    ""    "$(head -2 "$SV/probe.att.err" | tr '\n' ' ' | sed 's/ *$//')"
