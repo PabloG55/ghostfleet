@@ -370,9 +370,69 @@ const PROFILE_ALL = 'all';
 // text — `ghostfleet <profile>` takes any name — so the tabs are DERIVED and a profile
 // nobody anticipated gets its own tab rather than disappearing.
 const profileOf = (p) => (p && p.profile) || 'work';
-function profileTabs(projects) {
+
+// ── the demo fleet, and when it is in the way ─────────────────────────────
+// "hide the demo account from the real phone."
+//
+// THIS IS THE ONLY MERGED SCREEN, which is why the demo shows up here and on no other
+// screen. Every screen a person browses is scoped to ONE profile — bin/ghostfleet sets
+// PROJECTS_CFG per profile, fleet-grid's pBuild() reads that one file, and the stack
+// screen reads it too — so a `demo` profile is invisible at the desk unless you type
+// `ghostfleet demo`. /api/projects merges every projects.* file (mcp/fleet-dispatch.mjs),
+// and this list is what that returns. So this is not a phone-specific carve-out: it is
+// the one SCREEN the merge reaches.
+//   OTHER MERGED READERS EXIST AND MUST STAY COMPLETE. `fleet-project list`, `rm` and
+// `agent` walk every profile on purpose, bin/ghostfleet walks them to explain an unknown
+// profile, and the MCP's projects() does too. Those are explicit enumerations — you asked
+// for every project — and a demo row hidden from them is one you can no longer see or
+// remove. Hiding belongs in the surface somebody BROWSES, never in the data underneath.
+//
+// THE RULE IS DERIVED, NOT CONFIGURED: the demo is hidden once there is real work to hide
+// it from, and shown IN FULL when it is all there is. A setting would be a second thing to
+// keep in step with a file anyone can edit by hand, and this cannot go stale — it is the
+// same shape as the tab strip below, which does not draw itself when there is only one
+// profile to choose.
+//   THE CASE THIS IS OPTIMISED FOR IS THE NEW USER. Somebody who followed the README ran
+// `ghostfleet demo` and has nothing else; hiding it from THEM would open the app on an
+// empty screen and undo the first-run flow that put them there. A rule that makes the demo
+// invisible to the person it was built for is worse than the bug it fixes, so the "all
+// there is" branch is the one that comes first here.
+//
+// It costs a false positive: somebody whose OWN profile is called `demo` sees it hidden on
+// the phone once they have other projects. `demo` is the name bin/fleet-demo writes and
+// bin/ghostfleet documents as the profile that builds itself, so it is ours by convention
+// — and the recovery is to call the profile something else. Recorded because it is a real
+// case, not because it is a likely one.
+const DEMO_PROFILE = 'demo';
+const isDemo = (p) => profileOf(p) === DEMO_PROFILE;
+export function demoHidden(projects) {
+  const all = projects || [];
+  return all.some(isDemo) && all.some(p => !isDemo(p));
+}
+// Every row keeps the index it has in the WHOLE list. Hiding is a DRAWING decision, the
+// same as a tab — see the address note above: the digit on a card is what `Ctrl-f <p>`
+// counts at the desk and what the number key opens here, and `list` in the key handler is
+// deliberately the unfiltered one. Filter the array the index counts and every card after
+// the demo block is renamed, which is the one thing this screen must never do.
+// The need count behind a tab's ● badge. Over the SHOWN rows, for the same reason the
+// tabs are built from them: an `all` badge that includes a hidden demo advertises a
+// blocked project with no card anywhere to open — the "a tab can hide the answer" failure
+// this count exists to prevent, arriving from the other side.
+export function tabNeed(projects, name) {
+  return shownProjects(projects)
+    .filter(({ p }) => name === PROFILE_ALL || profileOf(p) === name)
+    .reduce((n, { p }) => n + (((p.sessions || {}).need) || 0), 0);
+}
+export function shownProjects(projects) {
+  const rows = (projects || []).map((p, i) => ({ p, i }));
+  return demoHidden(projects) ? rows.filter(({ p }) => !isDemo(p)) : rows;
+}
+export function profileTabs(projects) {
   const seen = [];
-  for (const p of projects || []) { const k = profileOf(p); if (!seen.includes(k)) seen.push(k); }
+  // Built from what is DRAWN, so a hidden demo takes its tab with it. Leaving the tab
+  // would answer "hide the demo" with the word `demo` still on screen, one tap from the
+  // thing that was meant to be gone.
+  for (const { p } of shownProjects(projects)) { const k = profileOf(p); if (!seen.includes(k)) seen.push(k); }
   return seen;                     // in the projects file's own order, which is the address order
 }
 // Every entry carries the index it has in the WHOLE list, because that index is the name.
@@ -380,10 +440,13 @@ function profileTabs(projects) {
 // restore (below), and this is the second line of defence, because the one thing this
 // must never do is draw an empty screen over a fleet that has projects in it.
 function visibleProjects() {
-  const all = S.projects || [];
-  const rows = all.map((p, i) => ({ p, i }));
+  const rows = shownProjects(S.projects || []);
   if (S.profile === PROFILE_ALL) return rows;
   const mine = rows.filter(({ p }) => profileOf(p) === S.profile);
+  // The fallback is why this cannot leak the demo back: a stored `demo` tab survives in
+  // S.profile until the next load clamps it (see restore), and while it does, `mine` is
+  // empty — so this returns the SHOWN rows rather than the raw list. Returning `all` here
+  // would put the demo back on screen at the one moment the user is on its tab.
   return mine.length ? mine : rows;
 }
 function setProfile(name) {
@@ -404,6 +467,14 @@ function setProfile(name) {
 function projectsProps() {
   const projects = S.projects || [];
   const names = profileTabs(projects);
+  // THE CURSOR CANNOT SIT ON A CARD NOBODY DRAWS. S.sel is a global index and starts at 0,
+  // which is normally the first work project — but the merged order is the work file and
+  // then projects.* alphabetically, so an empty work file puts a `demo` row at index 0
+  // while personal projects exist further down. The cursor would then be on a hidden card:
+  // no ring anywhere, and `⏎ open` acting on a project that is not on screen. Same clamp
+  // the file already applies on the grid screen, for the same reason.
+  const shown = shownProjects(projects);
+  if (shown.length && !shown.some(v => v.i === S.sel) && S.sel !== projects.length) S.sel = shown[0].i;
   return {
     scope: '— projects',
     mode: modeSpec(),
@@ -420,8 +491,7 @@ function projectsProps() {
       // off screen with nothing anywhere to say so, which is the same failure as the
       // summary reading "0 need you" over a blocked lead. Silent when there is nothing
       // to report, so the strip stays a chooser rather than a dashboard.
-      need: projects.filter(p => name === PROFILE_ALL || profileOf(p) === name)
-                    .reduce((n, p) => n + (((p.sessions || {}).need) || 0), 0),
+      need: tabNeed(projects, name),
     })) : null,
     onTab: setProfile,
     confirm: confirmSpec(),
@@ -3120,7 +3190,12 @@ function onKey(e) {
   // `+ new project` card, which is always drawn).
   const move = d => {
     let n = S.sel + d;
-    if (S.screen === 'projects' && S.profile !== PROFILE_ALL) {
+    // WAS `S.profile !== PROFILE_ALL`, and a hidden demo is exactly the case that breaks:
+    // on the `all` tab the visible set is now smaller than the list, so the old condition
+    // walked j/k straight onto demo cards that are not drawn — a cursor that disappears,
+    // which is the failure this branch already existed to prevent. Ask whether anything is
+    // hidden, not which tab is on.
+    if (S.screen === 'projects' && visibleProjects().length !== (S.projects || []).length) {
       const stops = [...visibleProjects().map(v => v.i), (S.projects || []).length];
       const at = stops.indexOf(S.sel);
       n = at >= 0 ? stops[at + (d > 0 ? 1 : -1)] : stops[0];

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 8c8b29d263ab
+// CLIENT-HASH: 2971e06b19ef
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -101,6 +101,21 @@
 // it is still happening — a rebuilt list measures shorter for a frame, the request clamps
 // to 0, and writing that back destroyed the only record of where the reader was. It read as
 // "sometimes forgets" because one short frame was enough to lose it for good.
+// v32 HIDES THE DEMO FLEET. `ghostfleet demo` registers three throwaway projects in a
+// `demo` profile, and the Projects screen is the only surface anywhere that merges
+// profiles — so on a real phone they sat in the same list as real work. They are hidden
+// now once there is real work to hide them from, and shown in full when they are all there
+// is, which is the new user who followed the README. An older client DEGRADES rather than
+// dies: it keeps mixing the demo into the list, which is precisely the complaint this
+// version answers and is invisible from the server log, so the bump is what makes the fix
+// reach a phone that already has the client before it.
+//   THE NUMBER IS ONE ABOVE WHATEVER SHIPPED, and that is the whole rule — not a number
+// chosen on a branch. This change has been rebased past three releases while it waited,
+// and each time the bump it was carrying had already been spent by something else. Two
+// branches that both bump the same number produce one name for two different clients,
+// which is precisely the drift the pin exists to catch: the phone keeps the cache it has,
+// and the only symptom is a fix that never arrives. So on every rebase this is re-derived
+// from the version already on the branch below, never incremented again on top of itself.
 // v28 IS THE SESSION HEADER: six controls that wrapped to three rows and 80px, the ⋯ alone
 // on the last one, become one row of 43px. The fleet chip moved onto the detail line under
 // the name, and the bar shrinks instead of wrapping — so the project is what gives and the
@@ -150,7 +165,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v31';
+const VERSION = 'ghostfleet-v32';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

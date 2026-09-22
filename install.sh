@@ -274,7 +274,7 @@ mkdir -p "$BIN_DIR"
 CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fleet-read
          fleet-spawn fleet-jump fleet-pause fleet-resume fleet-governor fleet-statusbar
          fleet-worktrees fleet-ack fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy fleet-merged fleet-look.mjs fleet-shots.mjs
-         fleet-clean fleet-open fleet-project fleet-demo fleet-adopt fleet-awake fleet-cycle
+         fleet-clean fleet-open fleet-project fleet-demo fleet-phone fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-meter.mjs fleet-review
          agent-here opencode-here codex-here)
 linked=()
@@ -615,4 +615,10 @@ echo
 echo "Done. Next:"
 echo "    ghostfleet demo       # three throwaway projects — see it working, touches nothing of yours"
 echo "    ghostfleet            # your own projects (the empty screen walks you through adding one)"
+# THE PHONE CLIENT HAD NO ROUTE INTO IT. It is the largest thing here by setup — a daemon,
+# a transport, a passkey, an install — and nothing in the first-run path said it existed:
+# you found it by reading docs/mobile.md, which is a 900-line design document. One line
+# here, because this list is where a new install looks for what to do next, and
+# `fleet-phone` is the step rather than a pointer at a document.
+echo "    fleet-phone           # put the fleet on your phone — it reports what is left to do"
 [ "$VERBOSE" = 1 ] || echo "    ./install.sh --verbose   # everything this just did, step by step"

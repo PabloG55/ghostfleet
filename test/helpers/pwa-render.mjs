@@ -289,6 +289,10 @@ documentStub.body.appendChild(sheetHost);
 
 const winListeners = {};
 const fireWindow = (ev) => { for (const f of winListeners[ev] || []) f({ type: ev }); };
+// app.js binds its key handler with a bare `addEventListener('keydown', onKey)` — the
+// global one, captured just below — so this is the only way to drive the keyboard here.
+// `target` is an object because onKey's first guard reads target.tagName.
+const pressKey = (key) => { for (const f of winListeners.keydown || []) f({ type: 'keydown', key, target: {}, preventDefault() {} }); };
 // THE GESTURE, both halves. A swipe pops the entry and then fires popstate; firing alone
 // would model half of it and leave the depth assertions passing for the wrong reason.
 const swipeBack = () => { if (histDepth > 0) histDepth--; fireWindow('popstate'); };
@@ -674,9 +678,13 @@ is('a tab says how many need you', true, await until(() => /●\d/.test((tabStri
 api.setFixtureName('grid-acme-api.json');
 
 // ── the fleets the shipped fixture is not ─────────────────────────────────
-const fleetOf = (...rows) => ({ home: '/Users/pgarces', projects: rows.map(([name, profile]) => ({
+const fleetOf = (...rows) => ({ home: '/Users/pgarces', projects: rows.map(([name, profile, need]) => ({
   name, profile, path: `/Users/pgarces/gf-demo/${name}`, agent: null, socket: `cf-${name}`,
-  sessions: { need: 0, working: 0, parked: 0, total: 0 }, sched: null, nudge: true, budget: 'enforced' })) });
+  // The third element is OPTIONAL and every existing caller omits it, so they all keep
+  // need: 0. It exists because a tab badge can only be tested by a fleet that has
+  // something blocked in it.
+  sessions: { need: need || 0, working: 0, parked: 0, total: need ? 1 : 0 },
+  sched: null, nudge: true, budget: 'enforced' })) });
 // Leaving and returning is what re-reads /api/projects, which is where the tabs and the
 // cards come from. Whatever card is FIRST, by name — the fleet changes under this helper,
 // and a hard-coded project is one that has already gone by the time it is tapped.
@@ -718,15 +726,20 @@ is('...and still draws its projects', true, shows('one') && shows('two'));
 // A PROFILE NOBODY ANTICIPATED. `ghostfleet <profile>` takes any name, and readProjects()
 // defaults a blank column to 'work' — so a free-text profile must get its own tab rather
 // than vanish, and a blank one must land where the desk puts it.
-fixtureOverride = { 'projects.json': fleetOf(['alpha', 'work'], ['beta', 'demo'], ['gamma', '']) };
+//   THE NAME HERE USED TO BE `demo`, chosen precisely because it was arbitrary. It is not
+// arbitrary any more: `demo` is what bin/fleet-demo writes and what the block at the end
+// of this file hides once there is real work beside it, so this row would now be asserting
+// the opposite rule with the same words. Any other free-text name tests what this always
+// meant to test.
+fixtureOverride = { 'projects.json': fleetOf(['alpha', 'work'], ['beta', 'scratch'], ['gamma', '']) };
 await reopenProjects();
-is('an unanticipated profile gets its own tab', 'all,work,demo',
+is('an unanticipated profile gets its own tab', 'all,work,scratch',
    (tabStrip() ? tabStrip().all(n => n.tag === 'button')
       .map(b => b.textContent.replace(/\s+/g, ' ').trim().replace(/ ●\d+$/, '')).join(',') : ''));
 is('...and nothing has vanished from all', true, shows('alpha') && shows('beta') && shows('gamma'));
-click(tabBtn('demo'));
+click(tabBtn('scratch'));
 await tick(5);
-is('the demo tab shows its own project', true, shows('beta'));
+is('that profile\'s tab shows its own project', true, shows('beta'));
 is('...and hides the others', false, shows('alpha') || shows('gamma'));
 is('...keeping beta\'s number', 2, numberOf('beta'));
 click(tabBtn('work'));
@@ -767,13 +780,87 @@ const selectedCard = () => {
 // more — and the one thing this must never do is draw an empty screen over a fleet that
 // has projects in it. Asserted as the OUTCOME rather than as the clamp, because the clamp
 // on restore and the fallback in the filter are two defences for one promise.
-click(tabBtn('demo'));
+click(tabBtn('scratch'));
 await tick(5);
 is('parked on a tab that is about to disappear', true, shows('beta'));
 fixtureOverride = { 'projects.json': fleetOf(['alpha', 'work'], ['gamma', 'work']) };
 await reopenProjects(() => shows('alpha') && shows('gamma'));
 is('a tab that matches nothing shows everything', true, shows('alpha') && shows('gamma'));
 is('...rather than an empty screen', true, projectCards().length > 1);
+
+// ── the demo fleet, painted ───────────────────────────────────────────────
+// "hide the demo account from the real phone." The pure rule is driven through the exports
+// at the end of this file; this is the screen actually painting it, which is the only thing
+// that answers the complaint as it was made.
+fixtureOverride = { 'projects.json': fleetOf(
+  ['acme-api', 'work'], ['acme-web', 'demo'], ['toolbox', 'demo'], ['billing-svc', 'personal']) };
+await reopenProjects(() => shows('acme-api'));
+is('a demo beside real work is not painted', false, shows('acme-web') || shows('toolbox'));
+is('...while the real projects still are', true, shows('acme-api') && shows('billing-svc'));
+is('...and no demo tab is offered either', false, !!tabBtn('demo'));
+// THE INVARIANT, END TO END. billing-svc is the 4th row of the projects file, with two
+// hidden cards above it, and its card still says 4 — because hiding is a drawing decision
+// and the number is an address. A filter on the list would paint it as 2, and the digit
+// would open acme-web.
+is('...and a hidden card does not renumber the next one', 4, numberOf('billing-svc'));
+// j/k WALK WHAT IS DRAWN. The step already had a branch for this, but it asked whether a
+// TAB was on — and a hidden demo narrows the list while the tab is still `all`, so the old
+// condition stepped straight onto cards nobody draws: a cursor that disappears, which is
+// the failure that branch exists to prevent. From acme-api the next stop is billing-svc,
+// two hidden cards further down.
+//   ON THE `all` TAB EXPLICITLY, and that is the whole point: the old condition asked
+// whether a TAB was on, so any other tab takes the same branch as the fix and the test
+// goes green either way. S.profile survives across these fixtures, and an earlier block
+// left it on a real tab — measured, by reverting the fix and watching this stay green.
+click(tabBtn('all'));
+await tick(5);
+is('...on the all tab, where nothing is filtered by a tab', 'acme-api', selectedCard());
+//   `l`/`h`, NOT `j`/`k`: up and down cross a ROW, which is nc cards, and nc here is
+// whatever this DOM shim reports for the resolved grid — measured at 3, so `j` from card 0
+// lands on index 3 by arithmetic and passes even with the fix reverted. Left and right are
+// always ONE card, so they are the step that actually has to skip something. That is
+// CLAUDE.md's "a test can pass because of where it ran", found by reverting this and
+// watching `j` stay green.
+is('a step skips the hidden cards', 'billing-svc', (pressKey('l'), selectedCard()));
+is('...and steps back the same way', 'acme-api', (pressKey('h'), selectedCard()));
+
+// A BLOCKED DEMO MUST NOT ADVERTISE ITSELF ON A TAB WHOSE CARDS EXCLUDE IT. §1 says this
+// app exists to answer "is anything blocked on me", and the need badge is the answer — so
+// an `all` badge counting a project with no card anywhere to open is the same failure as
+// the summary reading 0 over a blocked lead, arriving from the other side. Three profiles,
+// because two shown ones are what make the strip draw at all.
+fixtureOverride = { 'projects.json': fleetOf(
+  ['acme-api', 'work'], ['acme-web', 'demo', 3], ['billing-svc', 'personal']) };
+await reopenProjects(() => shows('acme-api'));
+const badges = () => (tabStrip() ? tabStrip().all(n => n.tag === 'button')
+  .map(b => b.textContent.replace(/\s+/g, ' ').trim()).join(',') : '');
+is('...and the strip is still the two shown profiles', 'all,work,personal',
+   badges().replace(/ ●\d+/g, ''));
+// THE BADGE ITSELF IS DRIVEN THROUGH THE EXPORT, not the paint, and the reason is worth
+// writing down: in this harness a project's rollup comes from its own GRID fixture, never
+// from projects.json, so `sessions.need` set in a projects fixture reaches nothing. An
+// assertion on the painted ● here reads like a test and cannot fail — measured, by
+// reverting the count to the unfiltered list and watching it stay green.
+
+// THE CURSOR CANNOT SIT ON A CARD NOBODY DRAWS. S.sel is a global index starting at 0,
+// normally the first work project — but /api/projects merges the work file first and then
+// projects.* alphabetically, so an EMPTY work file puts a demo row at index 0 while real
+// projects sit below it. Without the clamp the ring is on a hidden card: nothing selected
+// anywhere on screen, and `⏎ open` acting on a project that is not there.
+fixtureOverride = { 'projects.json': fleetOf(
+  ['acme-api', 'demo'], ['acme-web', 'demo'], ['billing-svc', 'personal']) };
+await reopenProjects(() => shows('billing-svc'));
+is('the cursor never lands on a hidden card', 'billing-svc', selectedCard());
+
+// THE CASE THIS RULE IS OPTIMISED FOR: somebody who followed the README ran `ghostfleet
+// demo` and has nothing else yet. Hiding it from THEM would open the app on an empty
+// screen and undo the first-run flow that sent them here — a rule that makes the demo
+// invisible to the person it was built for is worse than the bug it fixes.
+fixtureOverride = { 'projects.json': fleetOf(['acme-api', 'demo'], ['acme-web', 'demo']) };
+await reopenProjects(() => shows('acme-api'));
+is('a demo that is all there is IS painted', true, shows('acme-api') && shows('acme-web'));
+is('...rather than an empty screen', true, projectCards().length > 1);
+is('...and draws no strip, being one profile', false, !!tabStrip());
 
 // ...and hand the rest of this file back the fleet it was written against.
 fixtureOverride = null;
@@ -1688,4 +1775,58 @@ is('...and the iOS path is offered', true, !!vone && /Settings → Accessibility
 is('...as a guess and not a promise', true, !!vone && /That is a guess, not a fix/.test(vone.textContent));
 closeSheetFromTest();
 
+// ── the demo fleet is hidden once there is real work ──────────────────────
+// "hide the demo account from the real phone." The projects screen is the ONLY merged
+// surface anywhere — every desk screen is scoped to one profile — so a `demo` profile
+// sits in the same list as real work here and nowhere else.
+//
+// DRIVEN THROUGH THE EXPORTS, not the paint, and that is deliberate: this harness runs
+// against a live daemon serving whatever projects THIS machine happens to have, and the
+// rule is about what happens when there is, and is not, other work. Both sides have to be
+// supplied, so the list is handed in.
+const P = (name, profile, need) => ({ name, profile, path: `/home/u/${name}`, sessions: { need: need || 0 } });
+const namesOf = (rows) => rows.map(({ p }) => p.name).join(',');
+const idxOf   = (rows) => rows.map(({ i }) => i).join(',');
+
+// The reported case: demo projects mixed into real ones on a real phone.
+const mixed = [P('acme-api', 'work'), P('acme-web', 'demo'), P('toolbox', 'demo'), P('billing-svc', 'personal')];
+is('a demo beside real work is hidden', true, appmod.demoHidden(mixed));
+// The tab badge, over hand-made rows so a blocked demo actually exists to be counted.
+const blocked = [P('acme-api', 'work'), P('acme-web', 'demo', 3), P('billing-svc', 'personal')];
+is('a hidden demo adds nothing to the all badge', 0, appmod.tabNeed(blocked, 'all'));
+is('...and nothing to its own, which is not drawn', 0, appmod.tabNeed(blocked, 'demo'));
+// ...and the count is not simply dead: a blocked project that IS shown still counts.
+const blockedReal = [P('acme-api', 'work', 2), P('acme-web', 'demo', 3)];
+is('a blocked demo counts when it is all there is', 3, appmod.tabNeed([P('acme-web', 'demo', 3)], 'all'));
+is('...and a blocked real project always counts', 2, appmod.tabNeed(blockedReal, 'work'));
+is('...so it is not drawn', 'acme-api,billing-svc', namesOf(appmod.shownProjects(mixed)));
+
+// THE INVARIANT, and the reason this is a drawing decision and not a filter on the list.
+// The number on a card is what `Ctrl-f <p>` counts at the desk and what a number key opens
+// here — app.js's key handler indexes the UNFILTERED list on purpose. Shortening the array
+// would rename every card after the demo block: billing-svc would become 2 and the digit
+// would open acme-web. The indices that come back must be the ones it had.
+is('...keeping the index each card had', '0,3', idxOf(appmod.shownProjects(mixed)));
+
+// THE CASE MOST LIKELY TO BREAK, and the one this rule is optimised for: somebody who
+// followed the README ran `ghostfleet demo` and has nothing else. Hiding it from them
+// opens the app on an empty screen and undoes the first-run flow that sent them here.
+const demoOnly = [P('acme-api', 'demo'), P('acme-web', 'demo'), P('toolbox', 'demo')];
+is('a demo that is ALL there is stays visible', false, appmod.demoHidden(demoOnly));
+is('...with every project on screen', 'acme-api,acme-web,toolbox', namesOf(appmod.shownProjects(demoOnly)));
+
+// And a fleet with no demo at all is untouched — the rule must not be a no-op that only
+// looks right because it never fires, nor one that fires on everybody.
+const noDemo = [P('acme-api', 'work'), P('billing-svc', 'personal')];
+is('a fleet with no demo is unchanged', false, appmod.demoHidden(noDemo));
+is('...and draws everything', 'acme-api,billing-svc', namesOf(appmod.shownProjects(noDemo)));
+is('an empty fleet hides nothing', false, appmod.demoHidden([]));
+
+// THE TAB GOES WITH IT, or "hide the demo" leaves the word `demo` on screen, one tap from
+// the thing that was meant to be gone. The strip is built from this same list.
+is('the demo tab goes with it', 'work,personal', appmod.profileTabs(mixed).join(','));
+is('...but is the only tab when demo is all there is', 'demo', appmod.profileTabs(demoOnly).join(','));
+// One profile draws no strip at all (the screen treats a single name as furniture), so
+// the new user gets cards and nothing else — which is the point of showing it to them.
+is('...which is a single name, so no strip', 1, appmod.profileTabs(demoOnly).length);
 console.log(rows.join('\n'));

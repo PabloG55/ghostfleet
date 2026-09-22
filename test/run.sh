@@ -790,6 +790,150 @@ else
   rm -rf "$GT"
 fi
 
+
+# ── the phone client had no route into it ────────────────────────────────────
+# "add an step on onborading for users to configure their phone app." The phone client is
+# the largest thing here by setup — a daemon, a transport, a passkey, an install — and
+# nothing in the first-run path said it existed. You found it by reading docs/mobile.md,
+# a 900-line design document, or docs/OPERATIONS.md, which you have to already know to
+# look in.
+group "fleet-phone is the step, and it never runs anything"
+if ! command -v node >/dev/null 2>&1; then
+  skip "fleet-phone" "node is not available"
+else
+PT="$(mktemp -d)"
+fp() { HOME="$PT" "$ROOT/bin/fleet-phone" "$@"; }
+# free_port() is defined much further down this file and a group cannot call a function
+# that has not been sourced yet — so this one asks for its own. Same one-liner, local scope.
+ph_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(String(p)))})' 2>/dev/null; }
+mkdir -p "$PT/.config/ghostfleet"
+
+# ── nothing done yet ────────────────────────────────────────────────────────
+out="$(fp 2>&1)"; rc=$?
+is "a clean machine gets the step"      "0" "$rc"
+is "...counting nothing done"           "1" "$(grep -c '0 of 3 steps done' <<<"$out" || true)"
+is "...and the next command is init"    "yes" "$(grep -q 'fleet-serve init --bind' <<<"$(fp --next 2>&1)" && echo yes || echo no)"
+# IT REPORTS, IT NEVER RUNS. Every step opens a port, writes a config or spends a passkey,
+# and the one thing an onboarding command must not do is perform those because somebody
+# typed a word that sounded informational.
+is "...writing no config"               "no"  "$([ -e "$PT/.config/ghostfleet/serve.json" ] && echo yes || echo no)"
+# The four things the brief asked it to cover, each asserted on the words a reader needs
+# rather than on a heading: a phrase that moves is a doc that changed, and this is the one
+# place a person meets any of it.
+is "it says a phone client exists"      "yes" "$(grep -q 'installable app' <<<"$out" && echo yes || echo no)"
+is "...names the transport"             "yes" "$(grep -q 'Tailscale' <<<"$out" && echo yes || echo no)"
+is "...and that a bind is refused"      "yes" "$(grep -q 'REFUSES a' <<<"$out" && echo yes || echo no)"
+is "...says it installs as a PWA"       "yes" "$(grep -q 'Add to Home' <<<"$out" && echo yes || echo no)"
+is "...and the passkey is server-side"  "yes" "$(grep -q 'ENFORCED SERVER-SIDE' <<<"$out" && echo yes || echo no)"
+# THE ONE THAT COSTS REAL TIME. An installed iOS PWA resumed from the app switcher does
+# NOT pick up a new client: the shell is cache-first, so reopening is a resume and not a
+# navigation. CLAUDE.md records it with a measured case; a command that says how to
+# INSTALL the app and not how to UPDATE it sends people to that exact wall.
+is "...and how to actually update it"   "yes" "$(grep -q 'Swipe the app away and relaunch' <<<"$out" && echo yes || echo no)"
+is "...saying why a resume is not one"  "yes" "$(grep -q 'RESUME, not a navigation' <<<"$out" && echo yes || echo no)"
+# Before `init` there is no origin anywhere, so it must not point at a line that is not on
+# screen — an instruction that names something absent stops being followable.
+is "...and points at no absent origin"  "0"   "$(grep -c 'open the origin$' <<<"$out" || true)"
+
+# ── configured, not enrolled ────────────────────────────────────────────────
+printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[]}\n' \
+  > "$PT/.config/ghostfleet/serve.json"
+out2="$(fp 2>&1)"
+is "a configured fleet says so"         "yes" "$(grep -q 'configured — 127.0.0.1:1' <<<"$out2" && echo yes || echo no)"
+is "...and the next step is enrol"      "fleet-serve enroll phone" "$(fp --next 2>&1)"
+is "...naming the origin to open"       "yes" "$(grep -q 'http://localhost:1' <<<"$out2" && echo yes || echo no)"
+# A CLIENT WITH NO PASSKEYS IS NOT ENROLLED. That is somebody who opened an enrolment and
+# never finished it — exactly the state people get stuck in — so it has to count as not
+# done, or the step that finishes the job is the one it stops offering.
+printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","creds":[]}]}\n' \
+  > "$PT/.config/ghostfleet/serve.json"
+is "an empty client is not enrolled"    "fleet-serve enroll phone" "$(fp --next 2>&1)"
+# ...and a revoked one is not enrolled either.
+printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","revoked":true,"creds":[{"id":"a"}]}]}\n' \
+  > "$PT/.config/ghostfleet/serve.json"
+is "a revoked client is not enrolled"   "fleet-serve enroll phone" "$(fp --next 2>&1)"
+
+# ── enrolled, daemon down ───────────────────────────────────────────────────
+printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' \
+  > "$PT/.config/ghostfleet/serve.json"
+is "enrolled but down asks for the daemon" "fleet-serve" "$(fp --next 2>&1)"
+is "...and --if-needed still speaks"    "yes" "$([ -n "$(fp --if-needed 2>&1)" ] && echo yes || echo no)"
+
+# ── everything done: it goes quiet ──────────────────────────────────────────
+# THE PROBE IS THE BIND ADDRESS AND THE PORT, not the port alone. 8787 is this project's
+# own default, so asking only about the port answers "is ANYTHING listening" — measured
+# while writing this: a sandboxed HOME with the default port reported the daemon up,
+# because the real one on this machine holds it.
+PP="$(ph_port)"
+if [ -z "$PP" ]; then
+  skip "fleet-phone goes quiet when set up" "could not get a port"
+else
+  node -e 'require("net").createServer().listen(Number(process.argv[1]),"127.0.0.1",()=>setTimeout(()=>process.exit(0),8000))' "$PP" &
+  PH_PID=$!
+  # A listener is not up the instant the process starts; wait for the socket rather than
+  # sleeping a guess, or this reads as "not running" on a slow runner and the row goes red
+  # for a reason that is not the code.
+  i=0; while [ "$i" -lt 40 ] && ! node -e 'const n=require("net");const s=n.connect(Number(process.argv[1]),"127.0.0.1");s.on("connect",()=>{s.end();process.exit(0)});s.on("error",()=>process.exit(1))' "$PP" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+  printf '{"bind":"127.0.0.1","port":%s,"rp_id":"localhost","origins":["http://localhost:%s"],"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' "$PP" "$PP" \
+    > "$PT/.config/ghostfleet/serve.json"
+  is "a set-up fleet has no next step"  ""    "$(fp --next 2>&1)"
+  is "...and --if-needed says nothing"  ""    "$(fp --if-needed 2>&1)"
+  is "...while a plain run still reports" "yes" "$(grep -q 'set up and serving' <<<"$(fp 2>&1)" && echo yes || echo no)"
+  # ...and the same config on a DIFFERENT port is not running, or the probe is answering
+  # about the machine rather than about this config.
+  printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' \
+    > "$PT/.config/ghostfleet/serve.json"
+  is "...and a different port is not it" "fleet-serve" "$(fp --next 2>&1)"
+  # AND THE BIND, WHICH IS THE HALF THAT WAS WRONG. Same port, different address: a
+  # port-only probe answers "is ANYTHING listening on this number" and calls somebody
+  # else's daemon yours. Measured before the fix — a sandboxed HOME on the default 8787
+  # reported the daemon up because the real one on this machine holds it, so a fleet that
+  # was not serving at all was told it had nothing left to do.
+  printf '{"bind":"100.64.0.9","port":%s,"rp_id":"box.example.ts.net","origins":["https://box.example.ts.net:%s"],"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' "$PP" "$PP" \
+    > "$PT/.config/ghostfleet/serve.json"
+  is "...nor the same port on another bind" "fleet-serve" "$(fp --next 2>&1)"
+  kill "$PH_PID" 2>/dev/null; wait "$PH_PID" 2>/dev/null
+fi
+
+# A broken config must leave it able to report, not take it down — this is the command you
+# run BECAUSE the phone is not working.
+printf 'not json at all\n' > "$PT/.config/ghostfleet/serve.json"
+is "a corrupt config still reports"     "0"   "$(fp >/dev/null 2>&1; echo $?)"
+is "...as not configured"               "yes" "$(grep -q 'not configured yet' <<<"$(fp 2>&1)" && echo yes || echo no)"
+rm -rf "$PT"
+fi
+
+# ── and the onboarding actually points at it ─────────────────────────────────
+group "the first-run path mentions the phone, once"
+is "the installer's next steps name it" "yes" \
+   "$(grep -q 'fleet-phone           # put the fleet on your phone' "$ROOT/install.sh" && echo yes || echo no)"
+is "the README leads to it too"         "yes" \
+   "$(grep -q '^fleet-phone  ' "$ROOT/README.md" && echo yes || echo no)"
+# THE SCREEN, IN BOTH DIRECTIONS. "shown only when it is useful" is half a rule: the half
+# that rots is the one where it keeps showing to somebody who did it months ago, because
+# nothing fails when a hint is merely redundant.
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "first-run screen offers the phone" "tmux not available"
+else
+  FR="$(mktemp -d)"; mkdir -p "$FR/.config/ghostfleet"; : > "$FR/.config/ghostfleet/projects"
+  frscr() {
+    tmux -L cfphone kill-server 2>/dev/null
+    tmux -L cfphone new-session -d -x 120 -y 34 -e HOME="$FR" \
+      -e CLAUDE_FLEET_PROJECTS="$FR/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 8" 2>/dev/null
+    sleep 2
+    tmux -L cfphone capture-pane -p 2>/dev/null
+    tmux -L cfphone kill-server 2>/dev/null
+  }
+  rm -f "$FR/.config/ghostfleet/serve.json"
+  is "an unset-up phone is offered"     "yes" "$(grep -q 'On your phone too' <<<"$(frscr)" && echo yes || echo no)"
+  printf '{"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' > "$FR/.config/ghostfleet/serve.json"
+  is "...and an enrolled one is not lectured" "no" "$(grep -q 'On your phone too' <<<"$(frscr)" && echo yes || echo no)"
+  # ...and the screen itself is still there, or "no" above would pass on a blank pane.
+  is "...on a screen that still drew"   "yes" "$(grep -q 'No projects yet' <<<"$(frscr)" && echo yes || echo no)"
+  rm -rf "$FR"
+fi
+
 # ── the first screen the product ever shows ──────────────────────────────────
 # An empty projects list drew the picker with exactly one card on it, `+ add project`,
 # and nothing else: no statement of what a project IS here, and no hint that `n` is what

@@ -2798,6 +2798,25 @@ function reorderProject(name, delta) {
 // The demo line is last and deliberately quiet: somebody who wants to look before they
 // register a real folder has a way through that does not touch anything of theirs, and
 // somebody who came here to add their own repo does not have to read past it to do that.
+// IS THE PHONE ALREADY SET UP? Read once and remembered, not per frame: this screen
+// redraws on a 2.5s timer, and a file read per redraw to decide whether to print one line
+// is a cost with no reader. The question only changes when somebody runs `fleet-serve
+// enroll`, which is not something that happens while they are looking at this screen.
+//   ENROLMENT is the signal, not the config file: a config with no passkey is somebody who
+// ran `init` and stopped, which is the state this line most needs to reach. Guarded at
+// every step — a hand-edited or half-written serve.json must leave this saying "not set up"
+// rather than taking the screen down with it (CLAUDE.md: a ReferenceError here kills the
+// whole pane).
+let _phoneReady = null;
+function phoneReady() {
+  if (_phoneReady !== null) return _phoneReady;
+  _phoneReady = false;
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(HOME, '.config', 'ghostfleet', 'serve.json'), 'utf8'));
+    _phoneReady = (c.clients || []).some(x => x && !x.revoked && (x.creds || []).length);
+  } catch {}
+  return _phoneReady;
+}
 function pRenderFirstRun() {
   let buf = '\x1b[H';
   const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
@@ -2815,7 +2834,13 @@ function pRenderFirstRun() {
   const armed = pQuitArmed && Date.now() - pQuitArmed < QUIT_WINDOW;
   const quit = armed ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}` : '⌃C ⌃C quit';
   buf += `${C.dim} ⏎ start · ${quit}${C.reset}\x1b[K\n\x1b[K\n`;
-  buf += ` ${C.dim}Just looking? ${C.reset}ghostfleet demo${C.dim} builds three throwaway projects to explore — it touches nothing of yours.${C.reset}\x1b[K\n\x1b[J`;
+  buf += ` ${C.dim}Just looking? ${C.reset}ghostfleet demo${C.dim} builds three throwaway projects to explore — it touches nothing of yours.${C.reset}\x1b[K\n`;
+  // ONLY WHEN IT IS USEFUL. Somebody who enrolled a phone months ago does not need to be
+  // told this every time they empty their projects list, and a first-run screen that
+  // lectures is one people learn to read past. Same rule as the demo line above it: it is
+  // an offer, not an instruction, so it sits under the steps rather than becoming one.
+  buf += phoneReady() ? '\x1b[K\n\x1b[J'
+    : ` ${C.dim}On your phone too? ${C.reset}fleet-phone${C.dim} — serve it over your tailnet, install it, answer a prompt from your pocket.${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function pRender() {

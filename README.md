@@ -159,6 +159,27 @@ Ready to point it at your own work? `ghostfleet` opens your projects — and wit
 registered yet it walks you through picking a folder, naming it, and starting the first
 session, rather than showing you an empty screen.
 
+**And put it on your phone:**
+
+```bash
+fleet-phone                 # what is left to do, and the one command that does it
+```
+
+The same fleet as an installable app — every session as a chat, the real pane one tap
+away, and a notification when a worker is blocked, so a permission prompt gets answered
+from your pocket. `fleet-phone` reports which of the three steps you have done (configure,
+enrol a passkey, run the daemon) and prints the next one; it never runs any of them for
+you, because each opens a port, writes a config or spends a passkey. It reaches the phone
+over **Tailscale** — `fleet-serve` refuses a wildcard, a LAN address or a public one before
+the socket opens, because this endpoint runs commands. See [docs/mobile.md](docs/mobile.md)
+for the design and the threat model.
+
+Two things that cost people time, so they are in that command's output too: the passkey is
+enforced server-side, so until a phone is enrolled the app sits on its lock screen and the
+API answers 401 — and **an installed iOS PWA resumed from the app switcher does not pick up
+a new client version.** The shell is served cache-first, so reopening is a resume, not a
+navigation; swipe the app away and relaunch.
+
 Prefer to clone the repo (e.g. to develop against it)?
 
 ```bash
