@@ -879,9 +879,17 @@ function sessionScreen() {
         // of it do not. A lead sits in the main checkout, which is usually named after the
         // project — printing both gave "acme-api · acme-api".
         el('span', { class: 'scope', text: ` ${S.project || ''}${c && c.folder && c.folder !== S.session && c.folder !== S.project ? ' · ' + c.folder : ''}` }),
+        // WHICH FLEET, ON THE DETAIL LINE RATHER THAN AS ITS OWN CONTROL. It was a
+        // top-row flex item and the row could not hold five of them: measured at 390px,
+        // back 27 + name 150 + chip 72 + toggle 101 + ⋯ 27 plus four gaps is 409px in a
+        // 374px box, so it wrapped to THREE rows and 80px — the ⋯ alone on the last one.
+        //   Here it costs the bar no width at all. It sits inside `.st`, which already
+        // ellipsises, so a long tailnet hostname can no longer push the view toggle off
+        // the end; it shortens the line it is on instead. Its own 7em clamp stays, because
+        // the chip must not eat the status and the project either.
+        modeChip(),
       ]),
     ]),
-    modeChip(),
     el('div', { class: 'seg' }, [
       btn('chat', () => setView('chat'), S.view === 'chat' ? 'on' : ''),
       btn('pane', () => setView('pane'), S.view === 'pane' ? 'on' : ''),

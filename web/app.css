@@ -449,7 +449,18 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * `overflow: visible` paints past it whatever its parent's width says — and this line is
  * "◆ working" plus the project and the folder, which on a real fleet is longer than the
  * name above it. Only `.nm` had the rule; the line under it was the one running out. */
-.sbar .who .st { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* THE DETAIL LINE, AND WHAT GIVES WAY ON IT. Status, project and the fleet chip share one
+ * line under the name. Laid out as a flex row rather than as one ellipsised string so the
+ * PROJECT is what shrinks: as plain text the line clipped from the right, which ate the
+ * chip and left "acme-api ⚠ fixtu…" — the fleet you are looking at being the thing cut, and
+ * the chip exists precisely so two fleets cannot be confused for one another.
+ *   So `.scope` is the only shrinkable child; the status word and the chip keep their size,
+ * and the chip keeps its own 7em clamp below for the case where the hostname is the long
+ * thing. `min-width: 0` on the row is what lets a flex child ellipsise at all. */
+.sbar .who .st { display: flex; align-items: baseline; gap: .35em; min-width: 0;
+                 font-size: 12px; overflow: hidden; white-space: nowrap; }
+.sbar .who .st > .scope { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sbar .who .st > .mode { flex: 0 0 auto; }
 /* THE CHROME DOES NOT SCALE WITH THE TEXT, AND THIS IS THE FIX FOR THE ⋯ HALF OFF THE
  * EDGE. Measured at 320px with the body text at 30px — an iPhone with Dynamic Type turned
  * up, which is what the reporter's screenshots are of: `.who` and the mode chip had both
@@ -461,13 +472,28 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * proportional to somebody's reading preference. Fixed px here caps the row at about
  * 190px whatever the text does. */
 .sbar button { padding: .35em .6em; flex: 0 0 auto; font-size: 14px; }
-.sbar > .seg { flex: 0 1 auto; min-width: 0; }
+/* THE VIEW TOGGLE DOES NOT SHRINK. It was `flex: 0 1 auto`, so once the bar stopped
+ * wrapping the toggle became a thing that could give way — measured at 320 with a tailnet
+ * hostname in the chip it was squeezed from 101px to 46px, which clips `chat`/`pane` to
+ * nothing legible. It is a MODE SWITCH: a mode switch you cannot read is worse than a
+ * truncated name, because the name is on screen twice and the current mode is not. So
+ * `.who` is the only thing here that gives. */
+.sbar > .seg { flex: 0 0 auto; }
 .sbar > .seg button { font-size: 13px; }
-/* ...and the last resort, so that no text size anybody chooses can push a control off the
- * screen: the row wraps instead. `.who` shrinks first (it is the only `flex: 1 1 auto`
- * here), so this costs nothing until the fixed controls genuinely do not fit, and then it
- * costs one extra row instead of a button you cannot reach. */
-.sbar { flex-wrap: wrap; }
+/* ONE ROW, AND IT SHRINKS RATHER THAN WRAPS. This was `flex-wrap: wrap`, as a last resort
+ * so that no text size could push a control off the screen — and wrapping is exactly what
+ * it did, at every size: measured at 390px, back 27 + name 150 + chip 72 + toggle 101 + ⋯
+ * 27 plus four gaps is 409px in a 374px box, so the bar took THREE rows and 80px with the
+ * ⋯ alone on the last one. A flex container that may wrap prefers wrapping to shrinking,
+ * so `.who` never gave up the width it had.
+ *   Nowrap makes `.who` the thing that gives, which is the right thing to lose: the session
+ * NAME ellipsises and stays legible, while the back chevron, the chat/pane toggle and the ⋯
+ * keep their full size. Nothing can be pushed off, because every other child is
+ * `flex: 0 0 auto` at a PINNED font size (see the rule above — 14px and 13px, deliberately
+ * not scaling with the body) and `.who` has `min-width: 0`, so the row's fixed width is a
+ * constant 179px at any Dynamic Type setting against 304px of content box at 320. That is
+ * a stronger promise than wrapping ever made, and viewport-check measures it. */
+.sbar { flex-wrap: nowrap; }
 /* The view switch, as a segmented control rather than two loose buttons. */
 /* ...and the segmented controls wrap for the same reason. The chat/pane switch in the
  * session bar is pinned to 13px and never reaches this; the profile tabs scale with the

@@ -870,6 +870,74 @@ try {
   await swipeChat(10, 400, 250, 405); await sleep(700);
   is('...and a swipe from the left edge changes nothing', first, await openName());
 
+  // ── the session header is ONE row, at both widths and both chip lengths ──
+  // It packed six controls and wrapped to THREE rows and 80px, the ⋯ alone on the last —
+  // 60px of an 844px screen spent on one button. Measured at 390: back 27 + name 150 +
+  // chip 72 + toggle 101 + ⋯ 27 plus four gaps is 409px in a 374px box.
+  //
+  // `rows === 1` IS NOT THE ASSERTION THAT CATCHES A SIXTH CONTROL, and that matters more
+  // than it looks. The bar is `flex-wrap: nowrap` now, so it CANNOT wrap — a row count of
+  // one is true no matter what is added, which would make it exactly the permanently-green
+  // row this repo keeps warning about. It is kept only because it would go red if someone
+  // restored `flex-wrap: wrap` and the bar then overflowed.
+  //   The detector is HORIZONTAL OVERFLOW: under nowrap, one control too many makes the
+  // bar's content wider than its box, and that is measurable. Watched going red by adding
+  // a sixth control.
+  //
+  // BOTH CHIP LENGTHS, because 'fixtures' is short enough to hide the bug the 7em clamp
+  // exists for: a tailnet hostname is what pushed the view toggle off the end. The text is
+  // set directly on the chip — reaching real server mode needs a passkey this helper
+  // cannot mint, and it is the WIDTH that drives the layout, which CSS computes the same
+  // way however the characters arrived.
+  const header = () => evaluate(() => {
+    const s = document.querySelector('#app > .sbar');
+    if (!s) return { found: false };
+    const kids = [...s.children].filter(n => getComputedStyle(n).display !== 'none');
+    // A wrapped row is one whose children do not overlap vertically. Counting distinct
+    // `top` values is wrong here: `.who` is a two-line column and the buttons are centred
+    // against it, so their tops differ by design and every bar would look wrapped.
+    const boxes = kids.map(n => n.getBoundingClientRect()).sort((a, b) => a.top - b.top);
+    let rows = 0, bottom = -Infinity;
+    for (const r of boxes) { if (r.top >= bottom - 1) { rows++; bottom = r.bottom; } else { bottom = Math.max(bottom, r.bottom); } }
+    const w = (sel) => { const n = s.querySelector(sel); return n ? Math.round(n.getBoundingClientRect().width) : -1; };
+    return {
+      found: true, rows,
+      overflow: Math.max(0, s.scrollWidth - s.clientWidth),
+      name: w('.nm'), seg: w('.seg'), mode: w('.mode'), back: w('button'),
+      // The chip's own clamp is 7em at 12px = 84px. Anything wider means the clamp is gone.
+      modeClamped: w('.mode') <= 85,
+      page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    };
+  });
+  const setChip = (t) => evaluate((t) => {
+    const m = document.querySelector('#app > .sbar .mode');
+    if (m) m.textContent = t; return !!m;
+  }, t);
+
+  for (const [w, h] of [[390, 844], [320, 568]]) {
+    await viewport(w, h); await sleep(400);
+    for (const [label, chip] of [
+      ['fixtures', '\u26a0 fixtures'],
+      ['a tailnet hostname', '\u25cf mac-studio.tail9f2c3b.ts.net'],
+    ]) {
+      await setChip(chip); await sleep(250);
+      const hd = await header();
+      is(`${w}px/${label}: the session header is one row`, 1, hd.rows);
+      // THE ROW THAT CATCHES A SIXTH CONTROL.
+      is(`${w}px/${label}: ...and nothing is pushed off it`, 0, hd.overflow);
+      // The name is what tells you which worker you are talking to; it must stay legible
+      // even as the project beside it gives way.
+      is(`${w}px/${label}: ...the session name is still legible`, true, hd.name >= 40);
+      // A mode switch you cannot read makes the current mode unreadable, so the toggle
+      // does not shrink — it was squeezed from 101px to 46px before it was pinned.
+      is(`${w}px/${label}: ...the chat/pane toggle keeps its size`, true, hd.seg >= 95);
+      is(`${w}px/${label}: ...the fleet chip is clamped, not unbounded`, true, hd.modeClamped);
+      is(`${w}px/${label}: ...and the page does not scroll sideways`, 0, hd.page);
+    }
+    await setChip('\u26a0 fixtures');
+  }
+  await viewport(390, 844); await sleep(300);
+
   // ── and the probe can see an overflow when there IS one ─────────────────
   // 900px of content in a 390px viewport. If this row is ever green, every row above it
   // means nothing: they are all this same measurement, and a blind one reports 0 forever.

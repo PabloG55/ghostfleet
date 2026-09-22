@@ -249,7 +249,21 @@ is('...measured against the visual viewport, not the URL bar', true, /max-height
 // at 30px, the row needed 406px of which `chat|pane` alone was 231.
 is('the session bar\'s chrome does not scale with the text', true,
    /\.sbar button \{[^}]*font-size: 14px/.test(CSS) && /\.sbar > \.seg button \{ font-size: 13px; \}/.test(CSS));
-is('...and the row wraps rather than pushing a control off', true, /\.sbar \{ flex-wrap: wrap; \}/.test(CSS));
+// ...AND THE ROW NO LONGER WRAPS, WHICH IS THE STRONGER FORM OF THE SAME PROMISE. This
+// asserted `flex-wrap: wrap`, on the reasoning that a row which wraps can never push a
+// control off the screen. True, and it wrapped at EVERY size rather than as a last resort:
+// a flex container that may wrap prefers wrapping to shrinking, so the session header took
+// three rows and 80px with the ⋯ alone on the last one — 60px of an 844px screen for one
+// button. The safety net was load-bearing furniture.
+//   Nowrap plus a single shrinkable child is the promise kept properly: `.who` has
+// `min-width: 0` and gives way, every other child is `flex: 0 0 auto` at a PINNED font size
+// (the row above), so the fixed width is a constant that does not move with Dynamic Type.
+// What used to be argued from a wrap rule is now MEASURED — viewport-check reads the bar's
+// own overflow at 390 and 320, with a short chip and a tailnet hostname, and that is what
+// goes red if a sixth control is ever added back.
+is('...and the row shrinks rather than wrapping', true, /\.sbar \{ flex-wrap: nowrap; \}/.test(CSS));
+is('...with exactly one child able to give way', true,
+   /\.sbar \.who \{[^}]*flex: 1 1 auto/s.test(CSS) && /\.sbar > \.seg \{ flex: 0 0 auto; \}/.test(CSS));
 is('an apple-touch-icon is linked', true, /rel="apple-touch-icon"/.test(HTML));
 is('...and it is 180x180', '180x180', exists('icons/apple-touch-icon.png') ? pngSize('icons/apple-touch-icon.png') : 'missing');
 
