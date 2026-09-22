@@ -298,6 +298,19 @@ is('...and the cards lay out in columns', true,
 // which is a stronger guard than either deleted row, because it measures rather than greps.
 is('...with the track still capped at the column', true, /minmax\(min\(/.test(CSS));
 is('...and no bare ch track that could outgrow it', false, /minmax\(\d+ch/.test(CSS));
+// ── the flick settles on a card ───────────────────────────────────────────
+// PROXIMITY, NOT MANDATORY, and the difference is felt rather than seen. `mandatory` fights
+// a deliberate short drag and makes a long list sticky; worse, on a list whose items are
+// taller than the viewport it can trap an item you cannot scroll past. `proximity` snaps
+// when the reader was nearly there anyway, which is the ask — "if u scroll that gets u to
+// the next one".
+//   Asserted on the SOURCE because the computed value drops it: Chrome normalises
+// `y proximity` to `y`, proximity being the initial strictness. viewport-check measures in
+// a real engine that snapping is on at all; this is the half that says which kind.
+is('the card list snaps by proximity', true, /scroll-snap-type: *y +proximity/.test(CSS));
+is('...and never mandatory, which traps a tall card', false, /scroll-snap-type:[^;]*mandatory/.test(CSS));
+// ...and a pull at the top must not bounce the installed app loose.
+is('the scrollers contain their overscroll', true, /\.cards \{[^}]*overscroll-behavior: contain/s.test(CSS));
 
 // ── the thinking indicator honours prefers-reduced-motion ─────────────────
 // The one requirement on it that the running-client harness cannot reach: pwa-render has

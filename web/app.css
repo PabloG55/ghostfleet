@@ -277,7 +277,14 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
 .verbs button { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center;
                 justify-content: center; gap: 6px; padding: 0 12px; border-radius: 10px; }
 .verbs button svg { width: 17px; height: 17px; flex: 0 0 auto; }
+.verbs button .vl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The primary verb takes the room left over, so `open` is the wide target and the rest are
+ * the same size as each other — a row where every button is equally wide makes the one you
+ * reach for most no easier to hit than the one that kills a session. */
 .verbs button.go { flex: 1 1 auto; }
+/* `more` with nothing selected: still there, still the same size, visibly inert. A control
+ * that disappears as the selection moves is a control whose position you cannot learn. */
+.verbs button.off { opacity: .4; }
 
 /* ── the count strip: the summary as numbers, not as a sentence ────────────
  * `0 need you · 2 working · 5 ready` is a sentence you have to read. The same counts as

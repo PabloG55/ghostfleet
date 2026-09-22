@@ -15,6 +15,40 @@ function Btn({ label, onClick, cls = "" }) {
 		children: label
 	});
 }
+var ICONS = {
+	enter: ["M5 12h14M12 5l7 7-7 7"],
+	clock: ["M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0", "M12 7v5l3 2"],
+	gear: ["M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0", "M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.5a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9.5a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"],
+	more: ["M6 12h.01M12 12h.01M18 12h.01"]
+};
+function Icon({ name }) {
+	const ds = ICONS[name];
+	if (!ds) return null;
+	return /* @__PURE__ */ u("svg", {
+		viewBox: "0 0 24 24",
+		fill: "none",
+		stroke: "currentColor",
+		"stroke-width": "2",
+		"stroke-linecap": "round",
+		"stroke-linejoin": "round",
+		"aria-hidden": "true",
+		focusable: "false",
+		children: ds.map((d, i) => /* @__PURE__ */ u("path", { d }, i))
+	});
+}
+function VerbBtn({ verb, label, icon, onClick, cls = "" }) {
+	return /* @__PURE__ */ u("button", {
+		class: cls || null,
+		"data-verb": verb,
+		onClick,
+		title: label,
+		"aria-label": label,
+		children: [/* @__PURE__ */ u(Icon, { name: icon }), /* @__PURE__ */ u("span", {
+			class: "vl",
+			children: label
+		})]
+	});
+}
 function Header({ scope, mode, stale }) {
 	return /* @__PURE__ */ u(S, { children: [/* @__PURE__ */ u("div", {
 		class: "hdr",
@@ -109,11 +143,13 @@ function ProjectsScreen(p) {
 		}) : null,
 		/* @__PURE__ */ u("div", {
 			class: "verbs",
-			children: p.verbs.map((v, i) => /* @__PURE__ */ u(Btn, {
+			children: p.verbs.map((v) => /* @__PURE__ */ u(VerbBtn, {
+				verb: v.verb,
 				label: v.label,
+				icon: v.icon,
 				cls: v.cls,
 				onClick: v.onClick
-			}, i))
+			}, v.verb))
 		}),
 		/* @__PURE__ */ u("div", {
 			class: "hint",

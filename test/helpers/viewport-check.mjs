@@ -337,6 +337,13 @@ const COMPOSER = () => {
   };
 };
 
+// CLICKS A FOOTER VERB BY NAME. The labels lost their key letters, so clicking `', settings'`
+// matches nothing — and loosening it to /settings/ would also hit the settings sheet's own
+// rows. `data-verb` is what the button IS.
+const clickVerb = (v) => evaluate((v) => {
+  const b = document.querySelector(`#app .verbs button[data-verb="${v}"]`);
+  if (!b) return false; b.click(); return true;
+}, v);
 const clickText = (t) => evaluate((t) => {
   const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim().startsWith(t));
   if (!b) return false; b.click(); return true;
@@ -407,7 +414,7 @@ async function walk(w, h) {
   // THE SHEETS, none of which the first version of this file ever opened — and the
   // settings one is where the worst of it was: #78's voice <select>, the per-project rows
   // and a resolved origin printed as prose, which is one unbreakable 480px word.
-  await clickText(', settings'); await sleep(500);
+  await clickVerb('settings'); await sleep(500);
   await at('projects/settings sheet');
   await escSheet(); await sleep(250);
   await tapCard('\\+ add project'); await sleep(500);
@@ -415,7 +422,7 @@ async function walk(w, h) {
   await escSheet(); await sleep(250);
   await tapCard('acme-api'); await sleep(1100);
   await at('grid');
-  await clickText('s schedule'); await sleep(500);
+  await clickVerb('sched'); await sleep(500);
   await at('grid/schedule sheet');
   await escSheet(); await sleep(250);
   await tapCard('api-fix'); await sleep(1500);
@@ -552,7 +559,7 @@ async function sheetCeiling() {
   await evaluate(() => { try { localStorage.clear(); } catch {} return null; });
   await goto(BASE); await sleep(700);
   await clickText('continue without a passkey'); await sleep(800);
-  await clickText(', settings'); await sleep(600);
+  await clickVerb('settings'); await sleep(600);
   const at = async (fs) => {
     await evaluate((fs) => { document.body.style.fontSize = fs + 'px'; return null; }, fs);
     await sleep(120);
@@ -747,6 +754,121 @@ try {
   await sheetCeiling();
   await keyboard(390, 844);
   await keyboard(320, 568, { indicator: false });
+
+  // ── the touch footer, measured ──────────────────────────────────────────
+  // The key-letter buttons are gone and these are what replaced them, so the claim is a
+  // SIZE claim and it is measured rather than declared: 44px is the floor a finger needs
+  // and 8px is the floor between adjacent targets. Both are read off the real layout at
+  // the width that ships, because a min-height in CSS is not a guarantee that the button
+  // got it — a flex row can compress a child below its minimum.
+  await viewport(390, 844);
+  await goto(BASE);
+  await evaluate(() => { try { localStorage.clear(); } catch {} return null; });
+  await goto(BASE);
+  await clickText('continue without a passkey'); await sleep(900);
+  await tapCard('acme-api'); await sleep(1200);
+  const foot = await evaluate(() => {
+    const bs = [...document.querySelectorAll('#app .verbs button')];
+    const r = bs.map(b => b.getBoundingClientRect());
+    let minGap = Infinity;
+    for (let i = 0; i < r.length; i++) for (let j = i + 1; j < r.length; j++) {
+      // Only pairs that share a row; a wrapped row is separated by the row gap instead.
+      if (Math.abs(r[i].top - r[j].top) > 4) continue;
+      const g = Math.max(r[j].left - r[i].right, r[i].left - r[j].right);
+      if (g >= 0) minGap = Math.min(minGap, g);
+    }
+    return {
+      verbs: bs.map(b => b.dataset.verb),
+      short: r.filter(x => x.height < 44).length,
+      narrow: r.filter(x => x.width < 44).length,
+      minGap: minGap === Infinity ? null : Math.round(minGap),
+      keyLetters: bs.filter(b => /^[⏎a-zA-Z,] /.test(b.textContent.trim())).length,
+      icons: bs.filter(b => b.querySelector('svg')).length,
+    };
+  });
+  is('the footer verbs are named, not lettered', 'enter,new,worktree,more,settings,projects', (foot.verbs || []).join(','));
+  is('...every target is at least 44px tall', 0, foot.short);
+  is('...and at least 44px wide', 0, foot.narrow);
+  is('...with at least 8px between them', true, foot.minGap === null || foot.minGap >= 8);
+  is('...and no key letter survives', 0, foot.keyLetters);
+  is('...each one carrying an icon', 6, foot.icons);
+  // ── the card list snaps, and stops snapping when motion is not wanted ───
+  // MEASURED UNDER AN EXPLICIT MOTION PREFERENCE, in both directions, because the honest
+  // answer depends on one and the runners disagree about it.
+  //
+  // THIS ROW WAS RED ON macOS AND GREEN ON UBUNTU, same commit. Not a race and not the
+  // wrong node — the diagnosis is below, and it was MY OWN CSS: app.css gates every
+  // animation behind `prefers-reduced-motion: reduce`, and that block also turns snapping
+  // off, because a list that jumps under the finger is motion too. The macOS runner's
+  // headless Chrome reports `reduce`; Ubuntu's reports `no-preference`. So the property
+  // genuinely WAS `none` there, correctly, and the test was asking a question whose answer
+  // depended on the machine. CLAUDE.md: a test can pass because of where it ran.
+  //
+  // Emulating the preference removes the environment from the question and turns one flaky
+  // row into two that say more: snapping is ON when motion is wanted, and OFF when it is
+  // not — which is the reduced-motion gate itself, and it had no test before this.
+  //   NOTHING HERE TOLERATES `none` AS A PASS. `none` is the property's initial value, so a
+  // row that accepted it could never fail; it is asserted only where it is the REQUIRED
+  // answer, under an emulated `reduce`, and the opposite row demands `y`.
+  //
+  // GUARDED FIRST, so neither answer can be produced by a race or by reading the wrong
+  // element: the stylesheet has to have landed (a non-initial property on the same node)
+  // and the node has to be the direct child of #app that app.css targets.
+  const cardsProbe = () => evaluate(() => {
+    const c = document.querySelector('#app > .cards');
+    if (!c) return { found: false };
+    const cs = getComputedStyle(c);
+    return { found: true, direct: c.parentElement.id === 'app', cards: c.querySelectorAll('.card').length,
+             landed: cs.overflowY, snap: cs.scrollSnapType };
+  });
+  const setMotion = (v) => call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: v }] });
+
+  await setMotion('no-preference');
+  await sleep(250);
+  const snapOn = await cardsProbe();
+  is('the card list is there to snap', true, snapOn.found && snapOn.direct);
+  is('...with cards in it', true, snapOn.cards > 0);
+  // The stylesheet landed at all — `auto` is not the initial value, so this cannot be the
+  // "read before the CSS applied" case masquerading as an answer about snapping.
+  is('...and app.css has applied to it', 'auto', snapOn.landed);
+  is('the card list snaps to a card', 'y', snapOn.snap);
+
+  await setMotion('reduce');
+  await sleep(250);
+  const snapOff = await cardsProbe();
+  is('...and stops snapping when motion is not wanted', 'none', snapOff.snap);
+  // ...while the list itself still works, which is the point of gating only the motion.
+  is('...while the list still scrolls', 'auto', snapOff.landed);
+  await setMotion('no-preference');
+  await sleep(200);
+
+  // ── swipe the transcript to the next session, and NOT otherwise ─────────
+  // BOTH DIRECTIONS, and the silences are the half that matters: a gesture that fires on
+  // everything is worse than one that never fires, because it moves you off the screen you
+  // were reading. The pane is deliberately not covered — it scrolls sideways on purpose.
+  await tapCard('api-fix'); await sleep(1400);
+  const swipeChat = (x0, y0, x1, y1) => evaluate((a) => {
+    const c = document.querySelector('#app .chat'); if (!c) return false;
+    c.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: a[0], clientY: a[1], pointerId: 1 }));
+    c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: a[2], clientY: a[3], pointerId: 1 }));
+    return true;
+  }, [x0, y0, x1, y1]);
+  const openName = () => evaluate(() => {
+    const t = document.querySelector('#app > .sbar');
+    return t ? (t.textContent.match(/[a-z][a-z0-9-]{2,}/) || [''])[0] : '';
+  });
+  const first = await openName();
+  await swipeChat(300, 400, 100, 405); await sleep(1300);
+  const afterNext = await openName();
+  is('a swipe left opens the next session', true, !!afterNext && afterNext !== first);
+  await swipeChat(100, 400, 300, 405); await sleep(1300);
+  is('...and a swipe right comes back', first, await openName());
+  // A vertical drag is the transcript scrolling and must never change session.
+  await swipeChat(200, 600, 205, 200); await sleep(700);
+  is('...a vertical drag changes nothing', first, await openName());
+  // The left edge belongs to iOS's own back gesture.
+  await swipeChat(10, 400, 250, 405); await sleep(700);
+  is('...and a swipe from the left edge changes nothing', first, await openName());
 
   // ── and the probe can see an overflow when there IS one ─────────────────
   // 900px of content in a 390px viewport. If this row is ever green, every row above it

@@ -457,11 +457,15 @@ function projectsProps() {
     // the screen has been LEFT and come back to.
     listRef: (list) => { if (list) watchScroll('projects', list); },
     verbs: [
-      { label: '⏎ open', onClick: () => openProject((projects[S.sel] || {}).name) },
+      // Screen verbs only, named rather than key-lettered — see the grid footer above for
+      // the split and why `data-verb` is the hook the driven helpers use. `remove` stays in
+      // the footer here because a project has no actions sheet to move it into, and it is
+      // still gated by the confirm bar carrying the TUI's own question.
+      { verb: 'enter', label: 'open', icon: 'enter', onClick: () => openProject((projects[S.sel] || {}).name), cls: 'go' },
       // the projects screen schedules a message to THAT project's master
-      { label: 's schedule', onClick: () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); } },
-      { label: ', settings', onClick: () => sheetSettings() },
-      { label: 'x remove', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
+      { verb: 'sched', label: 'schedule', icon: 'clock', onClick: () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); } },
+      { verb: 'settings', label: 'settings', icon: 'gear', onClick: () => sheetSettings() },
+      { verb: 'remove', label: 'remove', icon: 'more', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
     ],
     hint: 'tap a project · long-press to remove it from the list · drag its title to reorder',
     toast: S.toast,
@@ -592,20 +596,28 @@ function gridScreen() {
   });
   out.push(watchScroll('grid', list));
   const it = its[S.sel] || {};
+  // ── the footer: touch targets, and only the SCREEN's verbs ────────────────
+  // Nine key-letter buttons wrapped to three rows, ate ~190px and overlaid the last card.
+  // The letters were muscle memory borrowed from the TUI, and there is no keyboard on a
+  // phone for them to transfer to.
+  //   WHAT SPLIT THEM: a verb that acts on the SCREEN stays in the footer; a verb that acts
+  // on the SELECTED CARD moves into that card's actions sheet, behind `more`. That is not
+  // just tidying — a footer button that acts on whatever happens to be selected is the
+  // control most likely to be pressed against the wrong thing, and the sheet names the
+  // session in its title before it offers anything destructive.
+  //   The gestures that already existed cover the common two without either: swipe ← pause,
+  // swipe → resume, long-press = x. The hint line below says so, as it always did.
   out.push(el('div', { class: 'verbs' }, [
-    btn('⏎ enter', () => { if (it.card) openSession(it.card.name); else if (it.freeWt) sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path }); else sheetPicker(); }),
-    btn('n new', () => sheetPicker()),
-    btn('w worktree', () => sheetWorktree()),
-    btn('s sched', () => { if (it.card) sheetSchedule(it.card.name); }),
-    btn('p pause', () => { if (it.card) pauseSession(it.card.name); }),
-    btn('P resume', () => { if (it.card) resumeSession(it.card.name); }),
-    // The footer says which `x` means right now, exactly as the TUI's does, because
-    // finding out by pressing it costs a worktree — and on the lead it means nothing at
-    // all, which is worth saying before the tap rather than in the toast after it.
-    btn(it.freeWt ? 'x remove wt' : it.card?.lead ? 'x — not the lead' : 'x kill',
-        () => { if (it.card) askKill(it.card.name); else if (it.freeWt) askRemoveWorktree(it.freeWt); }, 'danger'),
-    btn(', settings', () => sheetSettings()),
-    btn('Q projects', () => toProjects()),
+    vbtn('enter', 'open', iconSvg(ICON_ENTER),
+         () => { if (it.card) openSession(it.card.name); else if (it.freeWt) sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path }); else sheetPicker(); }, 'go'),
+    vbtn('new', 'new', iconSvg(ICON_PLUS), () => sheetPicker()),
+    vbtn('worktree', 'worktrees', iconSvg(ICON_TREE_N, ICON_TREE), () => sheetWorktree()),
+    // `more` is disabled with nothing selected rather than hidden: a control that appears
+    // and disappears as the selection moves is a control you cannot learn the position of.
+    it.card ? vbtn('more', 'more', iconSvg(ICON_MORE), () => sheetActions(it.card.name))
+            : vbtn('more', 'more', iconSvg(ICON_MORE), () => {}, 'off'),
+    vbtn('settings', 'settings', iconSvg(ICON_GEAR_C, ICON_GEAR), () => sheetSettings()),
+    vbtn('projects', 'projects', iconSvg(ICON_FOLDER), () => toProjects()),
   ]));
   out.push(el('div', { class: 'hint', text: 'tap a card · swipe ← pause · swipe → resume · long-press = x · drag a card\'s title to reorder' }));
   return out.filter(Boolean);
@@ -908,8 +920,53 @@ function setView(v) {
 // with the one button that goes where the answer has to be typed — the pane. The chat is
 // the better place to read a conversation; the pane is the only place to unblock one, and
 // this is the seam between them rather than a thing to discover.
+// ── swipe the transcript to the previous / next session ───────────────────
+// "like the pc app, if u scroll that gets u to the next one" — the phone's j/k.
+//
+// WHY IT IS BOUND TO THE CHAT AND NOT THE SCREEN. The PANE scrolls sideways ON PURPOSE: it
+// is real terminal output, often much wider than a phone, and a horizontal drag there is
+// the reader moving along a line. Binding this to the whole session screen would make one
+// gesture mean two things depending on a view toggle, which is the exact trap the grid's
+// cards already avoid (← / → are pause/resume there, so this could not live on a card
+// either).
+//
+// AND IT IGNORES THE LEFT EDGE. iOS's own back gesture starts there; a swipe that begins
+// within EDGE px is the system's, not ours, and stealing it would break the way out of the
+// screen. Vertical intent wins outright — the transcript scrolls, and a drag that is more
+// down than across is never a session change.
+const SWIPE_NEXT = 60, EDGE = 24;
+function wireSessionSwipe(node) {
+  let x0 = 0, y0 = 0, live = false;
+  node.addEventListener('pointerdown', ev => {
+    live = ev.clientX > EDGE;             // the left edge belongs to the system
+    x0 = ev.clientX; y0 = ev.clientY;
+  });
+  node.addEventListener('pointerup', ev => {
+    if (!live) return;
+    live = false;
+    const dx = ev.clientX - x0, dy = ev.clientY - y0;
+    // Mostly horizontal, and far enough to be deliberate — the same two tests wire() makes
+    // for a card swipe, with the same constants, so the two gestures feel like one gesture.
+    if (Math.abs(dx) < SWIPE_NEXT || Math.abs(dx) <= Math.abs(dy) * 2) return;
+    stepSession(dx < 0 ? 1 : -1);
+  });
+  return node;
+}
+// STOPS AT THE ENDS RATHER THAN WRAPPING. A wrap on a list with no visible edge means a
+// flick at the last session silently shows the first, and the reader has no way to tell
+// that from "it did not move". It also walks the SAME order the grid draws, so the phone's
+// next-session and the desk's j are the same next.
+function stepSession(delta) {
+  const names = items().filter(i => i.card).map(i => i.card.name);
+  const at = names.indexOf(S.session);
+  if (at < 0) return;
+  const to = at + delta;
+  if (to < 0 || to >= names.length) return;
+  openSession(names[to]);
+}
+
 function chatView(card) {
-  const wrap = el('div', { class: 'chat' });
+  const wrap = wireSessionSwipe(el('div', { class: 'chat' }));
   const s = S.sess;
   if (card && card.status === 'need-you') {
     wrap.append(el('div', { class: 'blocked' }, [
@@ -1054,6 +1111,38 @@ function speakIcon(on) { return iconSvg(ICON_HORN, on ? ICON_STOP : ICON_WAVE); 
 // A DRAWN CAMERA, for the reason #82 drew the speaker: an emoji next to an SVG is two
 // different weights, two colour models and two metrics in one row, and that read as a
 // different control appearing rather than as this one being pressed.
+// ── the footer's icons ─────────────────────────────────────────────────────
+// SVG, never emoji: an emoji is a font-dependent picture that renders differently on every
+// device and measures two cells in some of them (grid.js's WIDE table exists because of
+// exactly that). These are stroked paths in the button's own currentColor, so a danger verb
+// is red because the BUTTON is red and nothing has to be recoloured twice.
+const ICON_ENTER = 'M5 12h14M12 5l7 7-7 7';
+const ICON_PLUS = 'M12 5v14M5 12h14';
+const ICON_TREE = 'M6 8.5v7M8.5 6h4a3 3 0 0 1 3 3v1M8.5 18h4a3 3 0 0 0 3-3v-1';
+const ICON_TREE_N = 'M6 6m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M6 18m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M18 12m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0';
+const ICON_MORE = 'M6 12h.01M12 12h.01M18 12h.01';
+const ICON_GEAR_C = 'M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0';
+const ICON_GEAR = 'M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.5a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9.5a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z';
+const ICON_FOLDER = 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z';
+const ICON_CLOCK_C = 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0';
+const ICON_CLOCK = 'M12 7v5l3 2';
+
+// A FOOTER BUTTON, WITH A STABLE NAME ON IT. `data-verb` is the hook the driven helpers
+// use — test/helpers/pwa-render.mjs and viewport-check.mjs used to find these buttons by
+// their LABEL (`btnWith(/⏎ open/)`), which stopped working the moment the labels lost their
+// key letters. A label is what the design changes; a verb name is what the button IS.
+//   The label is still rendered, and still the TUI's own word for the verb (§7) — only the
+// keystroke prefix is gone, because there is no keyboard on a phone for it to transfer to.
+// `title`/`aria-label` carry it too, so an icon-only button at a narrow width is still named
+// for a screen reader and for a driver.
+function vbtn(verb, label, icon, onclick, cls = '') {
+  const b = el('button', { class: cls || null, onclick, title: label, 'aria-label': label });
+  b.dataset.verb = verb;
+  if (icon) b.append(icon);
+  b.append(el('span', { class: 'vl', text: label }));
+  return b;
+}
+
 const ICON_CAM_BODY = 'M3 8h3.2l1.6-2h8.4l1.6 2H21v11H3z';
 const ICON_CAM_LENS = 'M12 13.4m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0';
 function cameraIcon() { return iconSvg(ICON_CAM_BODY, ICON_CAM_LENS); }
@@ -1339,8 +1428,12 @@ function reconcilePending() {
 // The ten buttons that used to sit between the card and the conversation. Nothing here is
 // new and nothing was dropped — the lead's three refusals are still absent for the reasons
 // leadGuard documents, and `stop + reclaim` still takes both of the TUI's confirmations.
-function sheetActions() {
-  const c = cardOf(S.session);
+// TAKES THE SESSION IT ACTS ON, rather than reading S.session. The grid's `more` button
+// opens this for the SELECTED card while S.session is still null (nothing is open yet), and
+// a sheet that silently acted on whatever was last opened is the shape that kills the wrong
+// worker. Defaults to S.session so the session screen's own ⋯ is unchanged.
+function sheetActions(name = S.session) {
+  const c = cardOf(name);
   const lead = !!(c && c.lead);
   const parked = c && c.status === 'parked';
   const go = (fn) => () => { closeSheet(); fn(); };
@@ -1348,19 +1441,19 @@ function sheetActions() {
     // The motivating case (§1): a worker blocked on "Allow pnpm test?" since 9pm. That is
     // fleet_answer — keystrokes into a dialog — not a prompt, which would queue behind the
     // block instead of clearing it. It is the first row for that reason.
-    btn('answer keys', go(() => sheetAnswer(S.session))),
+    btn('answer keys', go(() => sheetAnswer(name))),
     lead && !parked ? null
-      : btn(parked ? 'P resume' : 'p pause', go(() => (parked ? resumeSession(S.session) : pauseSession(S.session)))),
-    btn('s sched', go(() => sheetSchedule(S.session))),
-    btn('l label', go(() => sheetLabel(S.session))),
-    lead ? null : btn('r rename', go(() => sheetRename(S.session)), 'danger'),
-    lead ? null : btn('x kill', go(() => askKill(S.session)), 'danger'),
+      : btn(parked ? 'P resume' : 'p pause', go(() => (parked ? resumeSession(name) : pauseSession(name)))),
+    btn('s sched', go(() => sheetSchedule(name))),
+    btn('l label', go(() => sheetLabel(name))),
+    lead ? null : btn('r rename', go(() => sheetRename(name)), 'danger'),
+    lead ? null : btn('x kill', go(() => askKill(name)), 'danger'),
     // §7 puts stop --reclaim on the phone on purpose, and §12 is why it takes two
     // confirmations: fleet-clean's gates decide whether removal is SAFE, never whether
     // it was intended.
-    lead ? null : btn('stop + reclaim worktree', go(() => askReclaim(S.session)), 'danger'),
+    lead ? null : btn('stop + reclaim worktree', go(() => askReclaim(name)), 'danger'),
   ].filter(Boolean);
-  openSheet(sheet('actions', S.session, [
+  openSheet(sheet('actions', name, [
     el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
     lead ? el('p', { text: "the lead cannot be stopped, reclaimed, renamed or paused — every project needs one, and its checkout is the repo itself" }) : null,
     el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
@@ -2091,11 +2184,16 @@ function cardEl(m, h, idx) {
 // touch-action:none, so a vertical drag anywhere else on the card still scrolls.
 const LONG_PRESS = 600, MOVE_SLOP = 10, SWIPE = 60;
 function wire(node, h, idx) {
-  let x0 = 0, y0 = 0, t0 = 0, held = false, dragging = false, timer = 0, rowH = 0;
+  // `travelled` is NOT derivable from the pointerup position, and that is the whole reason
+  // this variable exists: a finger that went down, moved 40px and came back to where it
+  // started reports dx = dy = 0 at the end, exactly like one that never moved. They are
+  // different gestures — the second is a tap, the first is a drag the reader thought
+  // better of — and only a flag set DURING the move can tell them apart.
+  let x0 = 0, y0 = 0, t0 = 0, held = false, dragging = false, timer = 0, rowH = 0, travelled = false;
   const clear = () => { clearTimeout(timer); timer = 0; };
   node.addEventListener('pointerdown', ev => {
     if (idx >= 0) { S.sel = idx; markSel(); }
-    x0 = ev.clientX; y0 = ev.clientY; t0 = Date.now(); held = false;
+    x0 = ev.clientX; y0 = ev.clientY; t0 = Date.now(); held = false; travelled = false;
     dragging = !!h.reorder && ev.target.classList.contains('t');
     if (dragging) {
       rowH = node.getBoundingClientRect().height;
@@ -2107,7 +2205,7 @@ function wire(node, h, idx) {
   });
   node.addEventListener('pointermove', ev => {
     const dx = ev.clientX - x0, dy = ev.clientY - y0;
-    if (Math.hypot(dx, dy) > MOVE_SLOP) clear();
+    if (Math.hypot(dx, dy) > MOVE_SLOP) { clear(); travelled = true; }
     if (!dragging) return;
     ev.preventDefault();
     const steps = rowH ? Math.round(dy / rowH) : 0;
@@ -2121,7 +2219,23 @@ function wire(node, h, idx) {
     if (dragging) {
       dragging = false;
       const steps = rowH ? Math.round(dy / rowH) : 0;
-      if (steps) h.reorder(steps);
+      if (steps) { h.reorder(steps); return; }
+      // A PRESS ON THE GRIP THAT NEVER MOVED IS A TAP, NOT A CANCELLED DRAG. This branch
+      // used to `return` on any press of the title line, so the title was a DEAD ZONE: tap
+      // anywhere else on the card and it opens, tap the name and nothing happens at all.
+      // It hid for as long as the card was four identical monospace lines and nobody aimed
+      // at one of them; the redesign made the name the biggest, boldest thing on the card,
+      // which turned the one dead target into the one a thumb goes for.
+      //   TWO CONDITIONS, and the second is the one a naive `steps === 0` check gets wrong.
+      // `steps` is zero both for a finger that never left the grip AND for one that moved
+      // half a row and came back, because both end where they started. Only `travelled`
+      // separates them, and a drag the reader abandoned must do nothing rather than open
+      // the thing they were dragging.
+      //   NO TIME BOUND HERE, unlike the tap below. The grip arms no long-press timer (see
+      // pointerdown), so there is no second meaning for a slow press to collide with — and
+      // a bound would leave a deliberate, slow press on the title still dead, which is the
+      // complaint rather than half of it.
+      if (!travelled && h.tap) { h.tap(); return; }
       return;
     }
     if (held) return;                                        // long-press already fired

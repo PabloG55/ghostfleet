@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 20f8feef96cf
+// CLIENT-HASH: 2fbefcffc685
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -101,6 +101,11 @@
 // it is still happening — a rebuilt list measures shorter for a frame, the request clamps
 // to 0, and writing that back destroyed the only record of where the reader was. It read as
 // "sometimes forgets" because one short frame was enough to lose it for good.
+// v27 FINISHES THE FOOTER AND ADDS THE GESTURE. The nine key-letter buttons became six
+// named touch targets with icons — the letters were muscle memory borrowed from a keyboard
+// the phone does not have — and the per-card verbs moved behind `more`, into the sheet that
+// names the session before it offers anything destructive. A swipe across the transcript
+// now walks to the previous/next session, which is the phone's j/k.
 // v26 IS THE REDESIGN: the cards stopped being a picture of the TUI's cards. Box drawing
 // out, a surface with a status rail and one chip in, and the agent's last line given two
 // real lines instead of one clipped at 28 columns — which is the line the app is opened to
@@ -116,7 +121,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v26';
+const VERSION = 'ghostfleet-v27';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

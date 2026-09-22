@@ -81,6 +81,43 @@ function Btn({ label, onClick, cls = '' }) {
   return <button class={cls || null} onClick={onClick}>{label}</button>;
 }
 
+// ── a footer verb: an icon, a word, and a NAME that does not move ─────────────────────
+// The key letters are gone (see app.js's footer for why), so the driven helpers can no
+// longer find these by label. `data-verb` is the hook they use instead: a label is what the
+// design changes, a verb name is what the button IS. The word is still rendered and is
+// still the TUI's own, and title/aria-label carry it so an icon-heavy row stays named for a
+// screen reader as well as for a test.
+//
+// THE ICONS ARE DRAWN HERE RATHER THAN PASSED IN, because a vnode cannot cross the props
+// boundary from app.js — it builds real DOM and this side builds vnodes. The paths are the
+// same ones app.js uses for the grid's footer; ICONS is the one table both read from, so
+// `settings` cannot end up as two different pictures on two screens.
+const ICONS = {
+  enter: ['M5 12h14M12 5l7 7-7 7'],
+  clock: ['M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0', 'M12 7v5l3 2'],
+  gear: ['M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0',
+         'M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.5a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9.5a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z'],
+  more: ['M6 12h.01M12 12h.01M18 12h.01'],
+};
+function Icon({ name }) {
+  const ds = ICONS[name];
+  if (!ds) return null;
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+      {ds.map((d, i) => <path key={i} d={d} />)}
+    </svg>
+  );
+}
+function VerbBtn({ verb, label, icon, onClick, cls = '' }) {
+  return (
+    <button class={cls || null} data-verb={verb} onClick={onClick} title={label} aria-label={label}>
+      <Icon name={icon} />
+      <span class="vl">{label}</span>
+    </button>
+  );
+}
+
 // ── the one-line header, plus the offline line under it ───────────────────────────────
 // The banner does not fit a phone, so this is exactly what a narrow terminal gets. `stale`
 // is an epoch rather than a rendered sentence: clockLabel is grid.js's, and the phone and
@@ -180,7 +217,7 @@ function ProjectsScreen(p) {
           equivalent slot is directly above the composer; here it is above the verbs. */}
       {p.toast ? <div class={('toast ' + (p.toast.kind || '')).trim()}>{p.toast.text}</div> : null}
       <div class="verbs">
-        {p.verbs.map((v, i) => <Btn key={i} label={v.label} cls={v.cls} onClick={v.onClick} />)}
+        {p.verbs.map((v) => <VerbBtn key={v.verb} verb={v.verb} label={v.label} icon={v.icon} cls={v.cls} onClick={v.onClick} />)}
       </div>
       <div class="hint">{p.hint}</div>
     </Fragment>

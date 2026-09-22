@@ -109,7 +109,20 @@ class Node_ {
   // assertion in this file — and app.js's own markSel() and classList — reads className.
   // Without the reflection each of those sees an empty string on a Preact-built node, and
   // "the tab strip is not on screen" is the shape that takes.
-  setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'class') this.className = String(v); }
+  setAttribute(k, v) {
+    this.attrs[k] = String(v);
+    if (k === 'class') this.className = String(v);
+    // `data-verb` REFLECTS INTO dataset.verb, because a real element does and because the
+    // two halves of this app set it differently: app.js writes `node.dataset.verb` and
+    // Preact writes the ATTRIBUTE (it has no dataset fast-path). Without the reflection a
+    // footer button built by Preact would be invisible to a lookup by verb while the
+    // identical button built by app.js was found — the two screens disagreeing for a
+    // reason that exists only in this stub.
+    if (k.startsWith('data-')) {
+      const camel = k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      this.dataset[camel] = String(v);
+    }
+  }
   removeAttribute(k) { delete this.attrs[k]; if (k === 'class') this.className = ''; }
   getAttribute(k) { return this.attrs[k]; }
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
@@ -369,6 +382,11 @@ async function until(pred, ms = 4000) {
   return pred();
 }
 const btnWith = (re) => app.find(n => n.tag === 'button' && re.test(n.textContent));
+// FOUND BY WHAT THE BUTTON IS, NOT BY WHAT IT SAYS. The footer's key letters are gone, so
+// `btnWith(/⏎ open/)` matches nothing — and a regex relaxed to /open/ would also match
+// "continue without a passkey" on the lock screen and "open the pane" in the chat. The verb
+// name is the stable hook; the label is free to change with the design.
+const verbBtn = (v) => app.find(n => n.tag === 'button' && n.dataset && n.dataset.verb === v);
 // The sheet's own "esc back", so a test closes it the way a finger does.
 const closeSheetFromTest = () => {
   const host = sheetHost.firstChild;
@@ -449,7 +467,7 @@ await until(() => api.mode() === 'fixtures');
 is('an origin with no fleet resolves to fixtures', 'fixtures', api.mode());
 await until(() => /fixtures — nothing answered/.test(app.textContent));
 is('the lock screen now says fixtures', true, /fixtures — nothing answered/.test(app.textContent));
-is('...and re-locked, because the backend changed', true, !btnWith(/⏎ open/));
+is('...and re-locked, because the backend changed', true, !verbBtn('enter'));
 is('...and offers the way past the gate', true, !!btnWith(/continue without a passkey/));
 is('...and offers to look again', true, !!btnWith(/look again/));
 is('...and does not offer to enrol', false, !!btnWith(/enrol this phone/));
@@ -723,7 +741,10 @@ closeSheetFromTest();
 // already exists, so a picker that only worked at creation time would not have helped.
 // It lives with the other two per-project settings, which is where the TUI's `,` page
 // keeps them.
-const openProjSettings = () => click(btnWith(/,\s+settings/));
+// By verb, not by label: the footer's key letters are gone, so `/,\s+settings/` matches
+// nothing — and a bare /settings/ would also hit the settings SHEET's own rows once it is
+// open, which is how a helper starts clicking the thing it just opened.
+const openProjSettings = () => click(verbBtn('settings'));
 openProjSettings();
 await tick(20);
 is('project settings lists the agent', true, sheetHas(/which coding CLI/));
@@ -834,7 +855,7 @@ is('...and armed no confirmation on the way out', false,
    !!app.find(n => n.className.split(/\s+/).includes('confirm')));
 // The save above fires a refresh() this test does not await; let it land before the next
 // section navigates, or its render arrives on top of a screen that has already moved on.
-await until(() => !!btnWith(/⏎\s+open/), 4000);
+await until(() => !!verbBtn('enter'), 4000);
 await tick(50);
 
 // ── the LEAD's card, and the three buttons that must not be on it ─────────
@@ -854,18 +875,26 @@ is('the projects list arrives', true, await until(() => /acme-api/.test(app.text
 // with a space — so a footer button reads "⏎  open", with two. Every match below is
 // whitespace-loose for that reason; a single-space regex silently matches nothing, and
 // click(null) is a no-op that looks like a screen that did not change.
-click(btnWith(/⏎\s+open/));                            // the first project — acme-api
+click(verbBtn('enter'));                               // the first project — acme-api
 await until(() => /master/.test(app.textContent), 4000);
 is('the grid draws the lead as a card', true, /master/.test(app.textContent));
 // The lead is card 1, so it is what the footer is aimed at on arrival — and that footer
 // names which `x` means right now, exactly as the TUI's does, because finding out by
 // pressing it costs a worktree. Over the lead it means nothing, and says so.
-is('...selected first, with x disclaimed', true, !!btnWith(/not the lead/));
-// Press it anyway: the confirmation must not open, and the refusal has to be VISIBLE.
-// A guard that silently does nothing is a button that looks broken.
-click(btnWith(/^x/));
-is('...pressing x opens no kill prompt', false, /kill session 'master'/.test(app.textContent));
-is('...and says why instead', true, /this fleet's lead/.test(app.textContent));
+// THE DISCLAIMER MOVED WITH THE VERB. `x` is no longer a footer button — the per-card
+// verbs live in the card's actions sheet now, behind `more`, so the sheet is where the
+// lead's refusal has to be visible. The CLAIM is unchanged and is the one that matters:
+// the lead cannot be killed, and the app says so BEFORE the tap rather than in a toast
+// after it. A guard that silently does nothing is a button that looks broken.
+click(verbBtn('more'));
+await tick(50);
+const leadSheet = sheetHost.firstChild;
+is('...the lead\'s sheet offers no kill', false,
+   !!leadSheet && !!leadSheet.find(n => n.tag === 'button' && /^x kill/.test(n.textContent)));
+is('...and says why instead', true,
+   !!leadSheet && /cannot be stopped, reclaimed, renamed or paused/.test(leadSheet.textContent));
+closeSheetFromTest();
+await tick(20);
 // ...and the summary above it counts the lead, which on the degraded fixture is the whole
 // point: `counts` is a fold over the cards, and the lead is one of them.
 // Open the lead by tapping its card. The card is a <div>, not a button, so this goes
@@ -1242,7 +1271,7 @@ is('...and none of them set a url', true, histPushedUrls.every(u => u === locati
 // The gesture itself. popstate is the ONLY path backwards, so this is exactly what a swipe
 // does — not a second code path that happens to agree.
 swipeBack();
-is('the gesture goes back to the grid', true, await until(() => !!btnWith(/n\s+new/), 4000));
+is('the gesture goes back to the grid', true, await until(() => !!verbBtn('new'), 4000));
 is('...and not out of the app', true, /master/.test(app.textContent));
 swipeBack();
 is('...then to projects', true, await until(() => /— projects/.test(app.textContent), 4000));
@@ -1251,7 +1280,7 @@ is('...then to projects', true, await until(() => /— projects/.test(app.textCo
 is('...and the stack is unwound', 0, histDepth);
 
 // ── THE OTHER DIRECTION: a worker keeps all of it ───────────────────────
-click(btnWith(/⏎\s+open/));
+click(verbBtn('enter'));
 is('a project opens again', true, await until(() => !!cardTitled(/api-fix/), 4000));
 tap(cardTitled(/api-fix/));
 await until(() => !!app.find(n => n.tag === 'textarea'), 4000);
@@ -1276,7 +1305,7 @@ is('a ready session has no banner', false, !!app.find(n => n.className.split(/\s
 api.resetOverlay();
 api.setFixtureName('grid-degraded.json');
 click(btnWith(/‹/));
-is('back to the grid', true, await until(() => !!btnWith(/n\s+new/), 4000));
+is('back to the grid', true, await until(() => !!verbBtn('new'), 4000));
 await until(() => {
   const c = cardTitled(/master/);
   return c && /NEEDS YOU/.test(c.textContent);
@@ -1306,7 +1335,7 @@ const chatBox = () => app.kids.find(n => n.className.split(/\s+/).includes('chat
 // api-fix, not the lead: master's transcript is five messages and fits on one screen, so
 // there is no page above it and nothing for this to press.
 click(btnWith(/‹/));
-is('back on the grid for the scroll checks', true, await until(() => !!btnWith(/n\s+new/), 4000));
+is('back on the grid for the scroll checks', true, await until(() => !!verbBtn('new'), 4000));
 tap(cardTitled(/api-fix/));
 is('...and api-fix opens', true, await until(() => !!chatBox(), 4000));
 await until(() => { const b = chatBox(); return !!b && b.scrollHeight > b.clientHeight; }, 4000);
@@ -1502,7 +1531,7 @@ is('...and the indicator is still the last thing in the list', true, (() => {
 // runner while ubuntu passed the same commit. The `got` names the screen it is really on,
 // so the next failure does not need a second CI run to explain itself.
 click(btnWith(/‹/));
-is('back on the grid for the voice checks', 'grid', await until(() => !!btnWith(/n\s+new/), 8000)
+is('back on the grid for the voice checks', 'grid', await until(() => !!verbBtn('new'), 8000)
    ? 'grid' : String(app.textContent).replace(/\s+/g, ' ').slice(0, 60));
 // "I only see the default voice" and "the list never populated" are the same screen from
 // the outside and have different causes, so the count is on it. Asserted through the real

@@ -9976,6 +9976,33 @@ if [ -d "$ROOT/web" ]; then
   fi
   rm -rf "$VPO"
 
+  # ── the card's title is a tap target, not a dead zone ─────────────────────
+  # wire() set `dragging` on any press of the grip and pointerup then returned without ever
+  # calling h.tap(), so tapping a card's NAME did nothing while tapping anywhere else on it
+  # opened the session. Pre-existing, and invisible while a card was four identical
+  # monospace lines nobody aimed at one of; the surface-card redesign made the name the
+  # biggest thing on the card and turned the one dead target into the one a thumb goes for.
+  #   ITS OWN HELPER, not a section of viewport-check: written there first, it took that
+  # file from 1m45s to over twenty minutes, because six cases each reloading the app
+  # interacted with the state the sections before it leave behind. Standalone it is ~28s.
+  GRP="$(mktemp -d "$TEST_RUNS.$$.grip.XXXXXX")"
+  node "$ROOT/test/helpers/grip-check.mjs" > "$GRP/out" 2> "$GRP/err"
+  grprc=$?
+  if grep -q 'no chrome' "$GRP/out" 2>/dev/null; then
+    skip "the card grip" "no chrome to tap in"
+  else
+    is "grip-check ran"                 "0" "$grprc"
+    is "...without complaining"         ""  "$(head -2 "$GRP/err" | tr '\n' ' ' | sed 's/ *$//')"
+    # A floor, for the reason pwa-check documents: a browser that fails to start emits a
+    # row or two and a bare "no mismatches" would call that green.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$GRP/out")" -ge 8 ] && echo yes || echo "no: $(wc -l < "$GRP/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$GRP/out"
+  fi
+  rm -rf "$GRP"
+
   is "cf-sync syncs web/ into the runtime" "yes" \
      "$(grep -qE '^for d in .*\bweb\b' "$ROOT/bin/cf-sync" && echo yes || echo no)"
   is "...and npm ships it"                 "yes" \
