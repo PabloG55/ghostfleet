@@ -92,8 +92,8 @@ open http://localhost:8000
 screen* below); the rest of the client is still plain ES modules edited in place.
 
 ```bash
-npm install          # once: 15 packages, vite + preact
-npm run build        # web/src/projects.jsx -> web/projects.js + web/preact.js
+pnpm install         # once: 15 packages, vite + preact
+pnpm run build       # web/src/projects.jsx -> web/projects.js + web/preact.js
 ```
 
 `bin/cf-sync` runs that build before it copies anything, so deploying to the runtime cannot
@@ -187,7 +187,7 @@ screen in 17 kB of single-letter variables.
 
 **What it costs, and it is a real cost.** Editing `web/src/` no longer shows up by
 reloading — there is a build between you and the phone, and a deploy is now
-`npm run build` → `cf-sync` → swipe the PWA away and relaunch, where it used to be
+`pnpm run build` → `cf-sync` → swipe the PWA away and relaunch, where it used to be
 `cf-sync` and a relaunch. On a device that is one more place to be out of date and one
 more thing to forget. Three things push back on that: `cf-sync` runs the build itself and
 **refuses to copy anything if it cannot**, so the runtime can never be a stale screen under

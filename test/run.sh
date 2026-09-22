@@ -9107,7 +9107,8 @@ is "...and the client really landed"          "yes" "$([ -f "$CB/rt0/web/project
 
 # Now a source that DOES have a build, with no node_modules to do it with. This is the
 # state of a fresh clone, so the message has to name the directory and the one command —
-# an exit code cannot spell "npm install".
+# an exit code cannot spell "pnpm install". (The hint below names whichever manager is
+# actually on the machine, because their FLAGS differ — see bin/cf-sync.)
 mkdir -p "$CB/src/bin" "$CB/src/web/src"
 printf '#!/bin/sh\necho hi\n' > "$CB/src/bin/thing"; chmod +x "$CB/src/bin/thing"
 printf 'export default {};\n' > "$CB/src/vite.config.mjs"
@@ -10070,15 +10071,29 @@ if [ -d "$ROOT/web" ]; then
   # edited. Watched going red by editing one character of web/src/projects.jsx without
   # rebuilding: "the committed build matches its source  want=identical  got=projects.js
   # differs".
+  # THE MANAGER THIS REPO ACTUALLY USES, and the one the reader actually has. #4 moved the
+  # repo to pnpm and deleted package-lock.json, and three lines here did not follow:
+  #   - the gate asked for `npm`, so a machine with only pnpm skipped a check it could run
+  #     perfectly well, and said "npm is not installed" as though that were the reason
+  #   - the hint said `npm install`, which on a repo with a pnpm-lock.yaml and no
+  #     package-lock.json is an instruction that sends someone to the wrong tool
+  #   - the runner was `npx`, which only exists because npm does
+  # A skip reason is guidance somebody follows, and nobody reads one twice — so a wrong one
+  # stays wrong for months. Same shape as bin/cf-sync's own hint, which already picks the
+  # manager that will really run and prints ITS flag, because printing the other one's is a
+  # command that looks right and fails.
+  PMB=""
+  command -v pnpm >/dev/null 2>&1 && PMB=pnpm
+  [ -z "$PMB" ] && command -v npm >/dev/null 2>&1 && PMB=npm
   if [ ! -f "$ROOT/vite.config.mjs" ]; then
     skip "the committed build matches its source" "no vite.config.mjs"
-  elif ! command -v npm >/dev/null 2>&1; then
-    skip "the committed build matches its source" "npm is not installed"
+  elif [ -z "$PMB" ]; then
+    skip "the committed build matches its source" "neither pnpm nor npm is installed"
   elif [ ! -d "$ROOT/node_modules" ]; then
-    skip "the committed build matches its source" "no node_modules — run: npm install"
+    skip "the committed build matches its source" "no node_modules — run: $PMB install"
   else
     BOUT="$(mktemp -d "$TEST_RUNS.$$.build.XXXXXX")"
-    if ( cd "$ROOT" && npx --no-install vite build --outDir "$BOUT" ) > "$BOUT.log" 2>&1; then
+    if ( cd "$ROOT" && "$PMB" exec vite build --outDir "$BOUT" ) > "$BOUT.log" 2>&1; then
       drift=""
       for f in projects.js preact.js; do
         cmp -s "$BOUT/$f" "$ROOT/web/$f" || drift="$drift $f differs"
