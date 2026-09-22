@@ -938,6 +938,80 @@ try {
   }
   await viewport(390, 844); await sleep(300);
 
+  // ── EVERY TEXT CONTROL IS AT LEAST 16px, OR iOS ZOOMS THE PAGE ──────────
+  // iOS Safari zooms the visual viewport when a text control smaller than 16px takes
+  // focus. Nothing overflows and no box changes size — the page is SCALED — so every other
+  // row in this file goes quiet on it, and so did a deliberate hunt through headless
+  // Chrome. Reported twice from a real iPhone, the second time precisely: "the chats still
+  // gets overflown when press on the text space".
+  //
+  // MEASURED AS COMPUTED STYLE, NOT GREPPED. The composer carried a literal `font-size:
+  // 15px`, which a stylesheet grep would have caught — but every control in a sheet said
+  // `font: inherit` and took body's 14px, so there was no number in the rule to find. A
+  // source check would have reported the stylesheet clean while six sheets zoomed. Asking
+  // the engine is what makes the rule about the CONTROL rather than about the declaration.
+  //
+  // Chrome does not zoom, which is the point: it can still report the size that would make
+  // WebKit do it, so the guard runs everywhere rather than only where the bug appears.
+  const FOCUSABLES = () => [...document.querySelectorAll(
+      '#app input, #app textarea, #app select, #sheet input, #sheet textarea, #sheet select')]
+    .filter(n => n.type !== 'file' && n.type !== 'checkbox' && n.type !== 'radio'
+                 && n.getBoundingClientRect().width > 0)
+    .map(n => ({ where: (n.closest('#sheet') ? 'sheet' : 'app') + ' ' + n.tagName.toLowerCase()
+                        + (n.className ? '.' + String(n.className).split(' ')[0] : ''),
+                 px: Math.round(parseFloat(getComputedStyle(n).fontSize) * 10) / 10 }));
+  const tooSmall = (list) => list.filter(f => f.px < 16).map(f => `${f.where}=${f.px}px`).join(',');
+
+  await viewport(390, 844);
+  await goto(BASE);
+  await evaluate(() => { try { localStorage.clear(); } catch {} return null; });
+  await goto(BASE); await sleep(700);
+  await clickText('continue without a passkey'); await sleep(800);
+
+  // the composer, which is the control he was pressing
+  await tapCard('acme-api'); await sleep(1100);
+  await tapCard('api-fix'); await sleep(1500);
+  const chatCtl = await evaluate(FOCUSABLES);
+  is('the chat has a text control to measure', true, chatCtl.length > 0);
+  is('...and nothing in the chat is under 16px', '', tooSmall(chatCtl));
+  // ...AND THE PROBE CAN SEE A SMALL ONE. Every row in this group reports an ABSENCE, and
+  // an absence is what a blind probe reports forever — so one control is shrunk on purpose
+  // and the same expression must name it. Done HERE, on the composer, rather than on a
+  // sheet: the composer is on screen for as long as the chat is, where a sheet is a thing
+  // a later render could close, and a canary that depends on a sheet still being open is a
+  // canary that reports "fine" when it simply found nothing. (It did: two earlier versions
+  // of this row were false, once because the walk never got past the lock screen and once
+  // because it shrank a checkbox, which this probe skips on purpose.)
+  const shrunk = await evaluate(() => {
+    const n = [...document.querySelectorAll('#app input, #app textarea, #app select')]
+      .find(x => x.type !== 'file' && x.type !== 'checkbox' && x.type !== 'radio'
+                 && x.getBoundingClientRect().width > 0);
+    if (!n) return null;
+    n.style.fontSize = '12px';
+    return Math.round(parseFloat(getComputedStyle(n).fontSize));
+  });
+  is('a control that IS too small is named', 12, shrunk);
+
+  // ...and the sheets, which is where `font: inherit` hid it
+  await goto(BASE); await sleep(900);
+  await clickText('continue without a passkey'); await sleep(800);
+  await tapCard('\\+ add project'); await sleep(600);
+  const addCtl = await evaluate(FOCUSABLES);
+  is('the add-project sheet has fields to measure', true, addCtl.length > 0);
+  is('...and none of them is under 16px', '', tooSmall(addCtl));
+
+  await goto(BASE); await sleep(900);
+  await clickText('continue without a passkey'); await sleep(800);
+  await clickVerb('settings'); await sleep(600);
+  const setCtl = await evaluate(FOCUSABLES);
+  is('the settings sheet has fields to measure', true, setCtl.length > 0);
+  is('...and none of them is under 16px', '', tooSmall(setCtl));
+
+  // ...AND THE PROBE CAN SEE A SMALL ONE. Every row above reports the absence of something,
+  // and an absence is exactly what a blind probe reports forever. Shrink a real control and
+  // the same expression must name it.
+  await goto(BASE); await sleep(400);
+
   // ── and the probe can see an overflow when there IS one ─────────────────
   // 900px of content in a 390px viewport. If this row is ever green, every row above it
   // means nothing: they are all this same measurement, and a blind one reports 0 forever.

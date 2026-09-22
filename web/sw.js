@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 70332ce00c16
+// CLIENT-HASH: 8c8b29d263ab
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -135,6 +135,13 @@
 // the token and redraws the lock screen over an unlock still in flight. A phone on v28
 // keeps that, and it is the bug that stops the app being usable at all, so this bump is
 // the one that matters most since v25.
+// v31 STOPS iOS ZOOMING THE PAGE WHEN YOU TAP THE MESSAGE BOX. Safari scales the VISUAL
+// VIEWPORT when a text control smaller than 16px takes focus. Nothing overflows and no box
+// changes size — the page is simply magnified and pannable — so the right-hand side goes
+// off screen and the send button is cut in half. Reported as "when you send a message the
+// scroll left to rigth is eanbled", then precisely: "the chats still gets overflown when
+// press on the text space", with a photograph of `send` clipped. The composer was 15px and
+// every sheet field inherited body's 14px. A phone on v30 keeps it on every tap into a box.
 // v25 is the first client with a BUILD STEP in it. The Projects screen is Preact now, which
 // means two files the shell has never had before — projects.js (the screen) and preact.js
 // (its dependency chunk) — and app.js statically imports the first of them. THIS IS A
@@ -143,7 +150,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v30';
+const VERSION = 'ghostfleet-v31';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

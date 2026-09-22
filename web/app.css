@@ -351,8 +351,25 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * 480px inside a 329px sheet. */
 .sheet p { margin: .35em 0; color: var(--dim); overflow-wrap: anywhere; }
 .sheet .field { display: block; margin: .8em 0 .2em; color: var(--dim); }
+/* ── 16px, AND IT IS NOT A TYPOGRAPHY CHOICE ──────────────────────────────────────────
+ * iOS Safari ZOOMS THE PAGE when a text control smaller than 16px takes focus. It is not
+ * a scroll and nothing overflows — the layout is untouched and every element still fits
+ * its box — the VISUAL VIEWPORT is scaled up and panned, so the right-hand side of every
+ * row goes off screen and the page can suddenly be dragged sideways. Reported from a real
+ * iPhone twice: "when you send a message the scroll left to rigth is eanbled", then more
+ * precisely "the chats still gets overflown when press on the text space" — pressing, not
+ * sending, which is the tap that moves focus.
+ *   IT IS INVISIBLE IN CHROME, headless or not, which is why it survived a deliberate
+ * hunt: no engine but WebKit does this, and an element-by-element sweep for
+ * scrollWidth > clientWidth finds nothing on a zoomed page because nothing IS overflowing.
+ *   `font: inherit` was the trap here. It takes body's 14px, so there is no font-size in
+ * this rule to notice and no grep of the stylesheet can see the number — which is why the
+ * guard for it measures COMPUTED style in a real engine rather than reading this file.
+ *   Do NOT "fix" this with `maximum-scale=1` or `user-scalable=no` on the viewport meta:
+ * that disables pinch-zoom for everyone, which is a real accessibility loss, and iOS has
+ * ignored it in some versions anyway. 16px is the actual threshold and the actual fix. */
 .sheet input[type=text], .sheet textarea, .sheet select {
-  font: inherit; width: 100%; color: var(--white); background: #101418;
+  font: inherit; font-size: 16px; width: 100%; color: var(--white); background: #101418;
   border: 1px solid var(--hair); padding: .5em; border-radius: 2px;
 }
 .sheet textarea { min-height: 5.5em; resize: vertical; }
@@ -596,7 +613,20 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .composer button.cam svg { width: 1.25em; height: 1.25em; display: block; }
 .composer button.cam.busy { opacity: .55; }
 .composer textarea {
-  flex: 1 1 auto; min-width: 0; resize: none; font: inherit; font-size: 15px;
+  /* 16px, for the reason spelled out on `.sheet input` above: below it, focusing this box
+   * makes iOS Safari zoom the whole page and the chat goes off the right edge. This is the
+   * control the owner was actually pressing when he reported it. */
+  /* flex-basis 0, NOT auto, AND THAT IS WHAT KEEPS THE ROW ONE LINE. A container that may
+   * wrap prefers WRAPPING to SHRINKING: the browser lays items out at their hypothetical
+   * size (the basis) and only shrinks what already shares a line, so an `auto` basis here
+   * is the textarea's intrinsic width — 20 default cols of its own font — and that is what
+   * decides whether `send` fits beside it. Raising this box from 15px to 16px widened that
+   * intrinsic size by about 7% and tipped 320px over: measured, the composer went to two
+   * lines at every text rung, with send stacked under the box, which is the exact shape of
+   * the "senc" report this row already carries a comment about. A basis of 0 makes the box
+   * purely the leftover, so the row wraps when the BUTTONS genuinely do not fit and never
+   * because of the text inside it. */
+  flex: 1 1 0; min-width: 0; resize: none; font: inherit; font-size: 16px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   background: #14181d; color: var(--fg); border: 1px solid var(--hair); border-radius: 12px;
   /* THE SAME NUMBER AS COMPOSER_MAX_PX IN app.js, and it has to be: growComposer() caps
