@@ -534,7 +534,18 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  *
  * Prose, not code: the chat is the one place a proportional face is right. Everything
  * else in this file is monospace because it is a terminal; a paragraph is not. */
-.chat { padding: 0 .1em; display: flex; flex-direction: column; gap: .55em; }
+/* ── THE CHAT HAD NO GUTTER AND TOO LITTLE LEADING ─────────────────────────
+ * "ther is alot of empty spaces that is not being used that makes the app feel compacted
+ * on the sessions and on the chat". Those two halves are consistent, and measuring says
+ * where: at 390x844 the chat's own chrome is only 123pt (14.6%) — it is not short of
+ * vertical room — while `padding: 0 .1em` at body's 14px is **1.4px**, so every bubble is
+ * jammed against the glass, and the column opposite it sits 54pt empty. Space in the wrong
+ * place, which is exactly what he described.
+ *   12px is a real gutter, and it is the same edge distance the cards keep. The bubble
+ * keeps its 88% so the empty column still reads as "who is speaking" at a glance, which is
+ * what an asymmetric bubble is FOR — it is only wasted when the other side is touching the
+ * edge, because then it looks like a mistake rather than a margin. */
+.chat { padding: 0 12px; display: flex; flex-direction: column; gap: .5em; }
 /* A SHORT conversation sits on the composer, not at the top of an empty column — which is
  * where every chat on the phone puts it. `margin-top: auto` on the first child rather than
  * `justify-content: flex-end`, because that one clips the top of a LONG conversation out of
@@ -544,10 +555,18 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * the view switch off the end of it. */
 .sbar .mode { max-width: 7em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .hint.lead1 { padding: .15em .2em .3em; font-size: 12px; }
+/* 16px AND 1.55, BOTH FROM THE SAME PLACE. 16px is the readable-body floor on a phone, and
+ * this app has just paid for learning it from the other direction: #14 raised the composer
+ * to 16px because below it iOS ZOOMS the page on focus. The message you read should not be
+ * smaller than the message you type. 1.45 was under the 1.5-1.75 band for body text, which
+ * on a narrow column is where leading matters most — a phone bubble wraps every two or
+ * three words, so the lines are what you are reading, not the sentence.
+ *   The family is unchanged and deliberately not the body font: this is prose, and the rest
+ * of the client is a terminal. */
 .chat .bub, .chat .thinking .dots {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  font-size: 15px; line-height: 1.45;
-  padding: .55em .7em; border-radius: 14px; max-width: 88%;
+  font-size: 16px; line-height: 1.55;
+  padding: .6em .8em; border-radius: 16px; max-width: 88%;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .chat .bub.user { align-self: flex-end; background: #1d3a5c; color: #eaf2ff; border-bottom-right-radius: 4px; }
@@ -648,7 +667,13 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 /* One message: the bubble and its timestamp, aligned as a pair. Grouped so the gap
  * between TURNS is bigger than the gap inside one, which is what makes a column of
  * bubbles read as a conversation rather than as a list. */
+/* A RUN OF ONE SPEAKER IS ONE THING; A REPLY IS A NEW ONE. Every turn was the same .55em
+ * from the last, so a worker's four-message run and the answer to your question were
+ * equally far apart, and the eye got no help finding where the reply starts. The gap
+ * between turns is smaller now and a speaker CHANGE earns the difference back — grouping
+ * by proximity, which costs no colour, no rule and no extra element. */
 .chat .turn { display: flex; flex-direction: column; gap: .15em; max-width: 88%; }
+.chat .turn.me + .turn.them, .chat .turn.them + .turn.me { margin-top: .45em; }
 .chat .turn.me { align-self: flex-end; align-items: flex-end; }
 .chat .turn.them { align-self: flex-start; align-items: flex-start; }
 .chat .turn .bub, .chat .turn .thinking .dots { max-width: 100%; }
@@ -710,9 +735,22 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * chat screen it sits directly above the composer and pushes nothing over anything.
  *   The non-shell case (the lock screen) has no flex column to join, so it keeps a
  * static band at the end of the document — still in flow, still not over anything. */
+/* ── A TOAST IS A NOTICE, NOT A DOCUMENT ───────────────────────────────────
+ * "also change the intrusive toasts like when u added a picture the toast will block the
+ * chat". #6 already stopped it landing ON the composer by making it a band of the column
+ * rather than a fixed overlay — but a band takes its height from its text, and attachPhoto
+ * ends in a toast carrying a FILE PATH, which wraps to three or four lines. On the session
+ * screen the transcript is what gives that height back, so a quarter of the conversation
+ * disappears for the 4.2 seconds the toast is up.
+ *   Clamped to two lines, which is the same idiom the cards use for an agent's last line
+ * (-webkit-line-clamp). Two lines is enough for every message this app actually raises, and
+ * a path that does not fit is one you can already see in the composer, where attachPhoto
+ * just put it. Bounded rather than truncated: a short toast is unchanged. */
 .toast {
-  background: #14181d; border: 1px solid var(--hair); padding: .6em .7em;
+  background: #14181d; border: 1px solid var(--hair); padding: .55em .7em;
   margin: 6px 0 0; border-radius: 8px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  overflow-wrap: anywhere;
 }
 .toast.bad { color: var(--red); border-color: #40202a; }
 .toast.good { color: var(--green); }

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 2971e06b19ef
+// CLIENT-HASH: dd79e1c4ea9a
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -157,6 +157,15 @@
 // scroll left to rigth is eanbled", then precisely: "the chats still gets overflown when
 // press on the text space", with a photograph of `send` clipped. The composer was 15px and
 // every sheet field inherited body's 14px. A phone on v30 keeps it on every tap into a box.
+// v33 IS THE CHAT, GIVEN THE ROOM IT WAS MISSING. "ther is alot of empty spaces that is not
+// being used that makes the app feel compacted." Measured at 390x844: the chat's chrome is
+// only 14.6% of the viewport, so it was never short of room — but its side padding was
+// `.1em`, which at body's 14px is 1.4 PIXELS, so every bubble sat against the glass while
+// the column opposite it was 54pt of nothing. 12px of gutter, 16px text (the readable floor,
+// and the size #14 raised the composer to), 1.55 leading, and a speaker change now earns
+// more space than the next message from the same speaker. The toast is clamped to two lines
+// as well: a photo's toast carries a file path, wrapped to four lines, and took that height
+// out of the transcript for 4.2 seconds — "the toast will block the chat".
 // v25 is the first client with a BUILD STEP in it. The Projects screen is Preact now, which
 // means two files the shell has never had before — projects.js (the screen) and preact.js
 // (its dependency chunk) — and app.js statically imports the first of them. THIS IS A
@@ -165,7 +174,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v32';
+const VERSION = 'ghostfleet-v33';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
