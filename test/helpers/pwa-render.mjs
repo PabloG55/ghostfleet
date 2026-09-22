@@ -130,7 +130,7 @@ class Node_ {
     if (this.listeners[ev]) this.listeners[ev] = this.listeners[ev].filter(f => f !== fn);
   }
   append(...ks) { for (const k of ks) if (k != null) this.appendChild(k); }
-  // The seam in web/src/projects.jsx uses this to put app.js's card nodes into the Preact-
+  // The seam in web/src/screens.jsx uses this to put app.js's card nodes into the Preact-
   // owned .cards container. It DETACHES what it replaces, like textContent above and for
   // the same reason: a card left holding a parent pointer would report itself connected
   // after the list it was in had been thrown away.
@@ -1029,7 +1029,7 @@ const scroller = () => app.kids.find(n => n.className.split(/\s+/).includes('car
   appmod.renderUnlessTyping();
   await tick(5);
   is('...and a poll leaves it there', 0, (scroller() || {}).scrollTop);
-  // Now the reader scrolls, and the poll rebuilds the node under them.
+  // Now the reader scrolls, and the poll comes round.
   const box = scroller();
   box.scrollTop = 200;
   await tick(5);
@@ -1037,8 +1037,26 @@ const scroller = () => app.kids.find(n => n.className.split(/\s+/).includes('car
   appmod.renderUnlessTyping();
   await tick(5);
   const after = scroller();
-  is('...the poll really did rebuild it', false, after === box);
+  // ── THE PREMISE OF THIS ROW DIED; IT IS NOT AN EXPECTATION BEING RETUNED ──
+  // It read `is('...the poll really did rebuild it', false, after === box)` — asserting
+  // that the poll REBUILDS the card list node. That was true when it was written, because
+  // rebuilding is simply what gridScreen() did, so the row recorded a MECHANISM as an
+  // invariant. The mechanism was the bug: a fresh element starts at scrollTop 0, which is
+  // why the scroll memory had to RESCUE a position every five seconds and why it sometimes
+  // lost the race. Reported from a real iPhone: "i scroll the sessions and after some
+  // seconds it goes all the way up again" — "some seconds" being the poll interval.
+  //   The grid is a Preact screen now and the container outlives the render, so there is no
+  // position to rescue. Same shape as #6's 33ch track and its ch-at-card-size rows: the
+  // thing the row was about stopped existing, rather than the answer changing.
+  is('...and the poll did NOT rebuild the node', true, after === box);
   is('...and the reader is still at 200', 200, after ? after.scrollTop : -1);
+  // SEVERAL POLLS, AND BOTH HALVES, because either alone is passable for the wrong reason:
+  // sameness alone passes on a screen that never polls at all, and an offset alone passes
+  // on a lucky rescue — which is precisely what the old code did on the runs where it
+  // happened to win. The pair, held across four polls, is the claim.
+  for (let i = 0; i < 4; i++) { appmod.renderUnlessTyping(); await tick(5); }
+  is('...and it is STILL the same node four polls later', true, scroller() === box);
+  is('...with the reader still at 200', 200, (scroller() || {}).scrollTop);
   // A card vanishing under them must not throw them somewhere arbitrary. The cards are a
   // uniform five lines each, so a pixel offset IS a position in the list; when the list
   // gets SHORTER than the offset the browser clamps, and the reader lands at the end of

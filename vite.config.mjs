@@ -1,12 +1,16 @@
 // vite.config.mjs — the phone client's build, deliberately the smallest one that can
 // compile a component.
 //
-// WHAT IS BUILT AND WHAT IS NOT. Exactly one entry: web/src/projects.jsx, the Projects
-// screen, emitted as web/projects.js. web/app.js, api.js, grid.js, ansi.js, md.js,
-// passkey.js and sw.js are NOT built — they are served as written, the way they have been
-// since there was no build at all. That is the point of the first pass: a phone-only bug
-// in any of them is still diagnosed by reading the file the phone actually fetched, and
-// only one file in web/ is now a thing you cannot read that way.
+// WHAT IS BUILT AND WHAT IS NOT. Exactly one entry: web/src/screens.jsx, which holds the
+// two ported screens (Projects and the grid), emitted as web/screens.js. web/app.js,
+// api.js, grid.js, ansi.js, md.js, passkey.js and sw.js are NOT built — they are served as
+// written, the way they have been since there was no build at all. That remains the point:
+// a phone-only bug in any of them is still diagnosed by reading the file the phone actually
+// fetched, and only one file in web/ is a thing you cannot read that way.
+//   ONE ENTRY FOR TWO SCREENS, NOT ONE PER SCREEN, because they share Btn, Icon, VerbBtn,
+// Header, ConfirmBar and CardList. Two entries would either duplicate all six into both
+// bundles or need a third shared chunk and a third name in sw.js's SHELL list, to save
+// nothing: the phone fetches both screens in the same session anyway.
 //
 // ── NO CONTENT HASHING IN THE FILENAMES, AND THIS IS LOAD-BEARING ──────────────────────
 // web/sw.js precaches a hand-written 26-entry SHELL list and carries a CLIENT-HASH digest
@@ -31,7 +35,7 @@ import path from 'node:path';
 
 // ── the client's own modules stay OUT of the bundle ───────────────────────────────────
 // grid.js and api.js are imported by the ported screen and by app.js alike. Bundling them
-// would put a SECOND copy of each inside projects.js, and two copies of grid.js is two
+// would put a SECOND copy of each inside screens.js, and two copies of grid.js is two
 // answers to "how wide is this card" — exactly the split that cells() and the pane view
 // exist to prevent. So they are marked external and left as real `import` statements in
 // the output, resolved by the browser against web/ at runtime.
@@ -104,7 +108,7 @@ export default {
     // this on the way to the phone.
     reportCompressedSize: false,
     rollupOptions: {
-      input: { projects: path.resolve(import.meta.dirname, 'web/src/projects.jsx') },
+      input: { screens: path.resolve(import.meta.dirname, 'web/src/screens.jsx') },
       // THE ENTRY IS A LIBRARY, NOT A PAGE, and without this line the build silently
       // produces nothing. vite's default for an app build is `false` — entries are assumed
       // to be run for their side effects, so their exports are dropped and the tree-shaker
@@ -114,11 +118,11 @@ export default {
       preserveEntrySignatures: 'exports-only',
       output: {
         format: 'es',
-        // PREACT GETS ITS OWN FILE so that projects.js stays readable. npm ships preact
+        // PREACT GETS ITS OWN FILE so that screens.js stays readable. npm ships preact
         // pre-minified — `minify: false` cannot undo that — and inlining it would bury the
         // ported screen in 17 kB of single-letter variables, which is exactly the
-        // debuggability this build is supposed to keep. Split, web/projects.js is the
-        // screen as written and web/preact.js is the dependency, and the one you open on a
+        // debuggability this build is supposed to keep. Split, web/screens.js is the
+        // screens as written and web/preact.js is the dependency, and the one you open on a
         // phone is the one you wrote.
         manualChunks: (id) => (id.includes('node_modules') ? 'preact' : undefined),
         // The three names that would otherwise carry a content hash. Entry and chunk

@@ -9076,7 +9076,7 @@ chmod 700 "$CS/rt2/web" 2>/dev/null || true
 rm -rf "$CS"
 
 # ── cf-sync BUILDS the phone client, and a build it cannot do is not a sync ─────────────
-# web/ holds built output now (projects.js, the ported Projects screen, plus its preact.js
+# web/ holds built output now (screens.js, holding both ported screens, plus its preact.js
 # chunk). The output is committed, so a clone serves with no toolchain — but a SYNC is a
 # deploy, and copying the committed bytes after somebody edited web/src/ is the
 # repo-vs-runtime trap in the one disguise it has not worn before: `git status` clean, the
@@ -9099,11 +9099,11 @@ CB="$(mktemp -d)"
 # that a later failure is known to be the build gate and not the setup.
 mkdir -p "$CB/plain/bin" "$CB/plain/web"
 printf '#!/bin/sh\necho hi\n' > "$CB/plain/bin/thing"; chmod +x "$CB/plain/bin/thing"
-printf 'export const x=1;\n' > "$CB/plain/web/projects.js"
+printf 'export const x=1;\n' > "$CB/plain/web/screens.js"
 out_plain="$(CLAUDE_FLEET_HOME="$CB/rt0" "$ROOT/bin/cf-sync" "$CB/plain" 2>&1)"; rc_plain=$?
 is "a source with no build step still syncs"  "0"   "$rc_plain"
 is "...and never mentions a build"            "0"   "$(printf '%s' "$out_plain" | grep -c 'building the phone client' || true)"
-is "...and the client really landed"          "yes" "$([ -f "$CB/rt0/web/projects.js" ] && echo yes || echo no)"
+is "...and the client really landed"          "yes" "$([ -f "$CB/rt0/web/screens.js" ] && echo yes || echo no)"
 
 # Now a source that DOES have a build, with no node_modules to do it with. This is the
 # state of a fresh clone, so the message has to name the directory and the one command —
@@ -9112,7 +9112,7 @@ is "...and the client really landed"          "yes" "$([ -f "$CB/rt0/web/project
 mkdir -p "$CB/src/bin" "$CB/src/web/src"
 printf '#!/bin/sh\necho hi\n' > "$CB/src/bin/thing"; chmod +x "$CB/src/bin/thing"
 printf 'export default {};\n' > "$CB/src/vite.config.mjs"
-printf 'export const x=1;\n' > "$CB/src/web/src/projects.jsx"
+printf 'export const x=1;\n' > "$CB/src/web/src/screens.jsx"
 out_nm="$(CLAUDE_FLEET_HOME="$CB/rt1" "$ROOT/bin/cf-sync" "$CB/src" 2>&1)"; rc_nm=$?
 is "no node_modules is a refusal"        "yes" "$([ "$rc_nm" -ne 0 ] && echo yes || echo no)"
 is "...and NEVER claims it synced"       "0"   "$(printf '%s' "$out_nm" | grep -c 'synced runtime' || true)"
@@ -9143,7 +9143,7 @@ cp -R "$CB/src/bin" "$CB/src/web" "$CB/src/vite.config.mjs" "$CB/good/" 2>/dev/n
 printf '{"name":"x","private":true,"scripts":{"build":"exit 0"}}\n' > "$CB/good/package.json"
 # The committed build output, which a real clone has because this repo commits it — the
 # stub build cannot produce it, and the point of the last row is that cf-sync COPIED it.
-printf 'export const built=1;\n' > "$CB/good/web/projects.js"
+printf 'export const built=1;\n' > "$CB/good/web/screens.js"
 out_ok="$(CLAUDE_FLEET_HOME="$CB/rt3" "$ROOT/bin/cf-sync" "$CB/good" 2>&1)"; rc_ok=$?
 is "a buildable source builds and syncs"  "0"   "$rc_ok"
 is "...and says it is building"           "1"   "$([ "$(printf '%s' "$out_ok" | grep -c 'building the phone client')" -ge 1 ] && echo 1 || echo 0)"
@@ -9159,7 +9159,7 @@ is "...and says it is building"           "1"   "$([ "$(printf '%s' "$out_ok" | 
 _unbound=no; case "$out_ok" in *"unbound variable"*) _unbound=yes ;; esac
 is "...with no unbound-variable error"    "no"  "$_unbound"
 is "...and it really claims a sync"       "1"   "$(printf '%s' "$out_ok" | grep -c 'synced runtime' || true)"
-is "...and the client really landed"      "yes" "$([ -f "$CB/rt3/web/projects.js" ] && echo yes || echo no)"
+is "...and the client really landed"      "yes" "$([ -f "$CB/rt3/web/screens.js" ] && echo yes || echo no)"
 
 # ...and a build that RUNS and fails. Same refusal, reached down a different branch: this
 # one is npm's exit status rather than a missing directory, and it is the branch a real
@@ -10051,7 +10051,7 @@ if [ -d "$ROOT/web" ]; then
   done
 
   # ── the committed build is what the committed source builds to ────────────
-  # web/projects.js and web/preact.js are vite's output and they are TRACKED — because
+  # web/screens.js and web/preact.js are vite's output and they are TRACKED — because
   # package.json's `files` ships web/ and `npm pack` reads the working directory, so
   # gitignoring them would put untracked files on the registry, which is the gap
   # test/helpers/pack-sweep.mjs exists to close. Committed output buys a clone that serves
@@ -10068,8 +10068,8 @@ if [ -d "$ROOT/web" ]; then
   # no npm packages (the suite's promise is no dependencies and a couple of seconds), so in
   # CI this says so out loud rather than reporting a check it did not make. The place it
   # actually bites is a dev machine and .githooks/pre-push, which is where the source gets
-  # edited. Watched going red by editing one character of web/src/projects.jsx without
-  # rebuilding: "the committed build matches its source  want=identical  got=projects.js
+  # edited. Watched going red by editing one character of web/src/screens.jsx without
+  # rebuilding: "the committed build matches its source  want=identical  got=screens.js
   # differs".
   # THE MANAGER THIS REPO ACTUALLY USES, and the one the reader actually has. #4 moved the
   # repo to pnpm and deleted package-lock.json, and three lines here did not follow:
@@ -10095,7 +10095,7 @@ if [ -d "$ROOT/web" ]; then
     BOUT="$(mktemp -d "$TEST_RUNS.$$.build.XXXXXX")"
     if ( cd "$ROOT" && "$PMB" exec vite build --outDir "$BOUT" ) > "$BOUT.log" 2>&1; then
       drift=""
-      for f in projects.js preact.js; do
+      for f in screens.js preact.js; do
         cmp -s "$BOUT/$f" "$ROOT/web/$f" || drift="$drift $f differs"
       done
       # Named the other way round too: a build that emitted a file web/ has never heard of
@@ -10114,8 +10114,8 @@ if [ -d "$ROOT/web" ]; then
     # a second copy of grid.js; two copies is two answers to "how many cells is this
     # glyph", which cells() and the pane view exist to prevent.
     #
-    # THE OBVIOUS PLACE TO ASSERT THAT IS AGAINST web/projects.js, AND IT PROVES NOTHING
-    # THERE. The ported screen imports only clockLabel, so the tree-shaker drops the card
+    # THE OBVIOUS PLACE TO ASSERT THAT IS AGAINST web/screens.js, AND IT PROVES NOTHING
+    # THERE. The ported screens import only clockLabel, so the tree-shaker drops the card
     # functions whether the plugin works or not: that row was green against every break
     # available, including deleting the plugin outright. Measured — with the plugin gone
     # the bundle DOES inline grid.js, and a check looking for `function projectCard(` in it

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: e3429c05f6b9
+// CLIENT-HASH: 70332ce00c16
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -118,6 +118,15 @@
 // client is stale rather than broken here; what it keeps is the screen this version exists
 // to replace, which is invisible from the server log and is exactly why this bump is not
 // optional.
+// v30 IS THE SCROLL FIX, and it renames a precached file. The sessions list used to jump
+// back to the top every five seconds — the poll interval — because the grid screen rebuilt
+// its scrolling container on every render and a fresh element starts at scrollTop 0. The
+// grid is a Preact screen now, so the container outlives the render and the reader's
+// position is simply never disturbed. That port put both card screens in one bundle, so
+// projects.js became screens.js: A PHONE ON v29 HAS NO screens.js IN ITS CACHE, and the new
+// app.js statically imports it, so this is another bump where the old client does not
+// degrade but dies — same shape as v25 and v10. Reported from a real iPhone, which is where
+// it was always going to be reported from: no headless run scrolls a list and then waits.
 // v29 IS THE FACE ID FIX. Returning from the Face ID sheet locked the app that was
 // unlocking: the prompt is a system sheet, so the page goes hidden when it opens and
 // visible the instant the face matches — before the assertion has crossed the network —
@@ -134,14 +143,15 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v29';
+const VERSION = 'ghostfleet-v30';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
-  // Built, not written: web/src/projects.jsx through vite. Stable filenames, no content
-  // hash, which is what lets them sit in this hand-written list at all — see
-  // vite.config.mjs, where that is the whole reason hashing is switched off.
-  './projects.js', './preact.js',
+  // Built, not written: web/src/screens.jsx through vite — BOTH card screens, which is why
+  // this is screens.js and was projects.js up to v28. Stable filenames, no content hash,
+  // which is what lets them sit in this hand-written list at all — see vite.config.mjs,
+  // where that is the whole reason hashing is switched off.
+  './screens.js', './preact.js',
   './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',

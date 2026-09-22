@@ -93,7 +93,7 @@ screen* below); the rest of the client is still plain ES modules edited in place
 
 ```bash
 pnpm install         # once: 15 packages, vite + preact
-pnpm run build       # web/src/projects.jsx -> web/projects.js + web/preact.js
+pnpm run build       # web/src/screens.jsx -> web/screens.js + web/preact.js
 ```
 
 `bin/cf-sync` runs that build before it copies anything, so deploying to the runtime cannot
@@ -149,9 +149,9 @@ dismiss.
 | `index.html` | the shell — small on purpose, it is what a cold offline open paints |
 | `grid.js` | the cards, as strings. Mirrors `cardLines`/`newCardLines`/`freeCardLines`/`boxCard`/the counts header. No DOM, no fetch |
 | `app.js` | the three screens, the four gestures, the verbs and the confirmations. Hand-written, served as written |
-| `src/projects.jsx` | **source.** The Projects screen, as Preact components. The seam between what it draws and what `app.js` still draws is written out at the top of the file |
-| `projects.js` | **built** from `src/projects.jsx` by `vite.config.mjs`. Committed, unminified, stable filename |
-| `preact.js` | **built.** The dependency chunk, split out so `projects.js` stays readable — npm ships preact pre-minified and inlining it would bury the screen in it |
+| `src/screens.jsx` | **source.** The Projects screen and the grid, as Preact components. The seam between what they draw and what `app.js` still draws is written out at the top of the file |
+| `screens.js` | **built** from `src/screens.jsx` by `vite.config.mjs`. Committed, unminified, stable filename. Was `projects.js` up to client v28, when it held one screen |
+| `preact.js` | **built.** The dependency chunk, split out so `screens.js` stays readable — npm ships preact pre-minified and inlining it would bury the screens in it |
 | `api.js` | **the only file that talks to the network**, the fixture backend, and the probe that decides between them |
 | `ansi.js` | the pane, as HTML: SGR escapes → coloured spans, cells → 1ch boxes. Pure, no DOM, no fetch |
 | `md.js` | an assistant's turn, as DOM: bold, italic, code, fences, links, lists, headings. `parse()` is pure; `toDom()` is the only part that needs a document, and it builds NODES — the one attribute it writes is an href it has already checked |
@@ -170,8 +170,21 @@ management are the answer to that class — and a big-bang rewrite is not, becau
 is mostly a record of fixes that only reproduce on a real device, and a rewrite would spend
 the debugging and rediscover it on a phone.
 
-So: **Vite + Preact, static output, ported one screen at a time.** The Projects screen is
-the first and, for now, the only one. Everything else is the same hand-written file it was.
+So: **Vite + Preact, static output, ported one screen at a time.** Projects came first;
+the grid (the sessions list) followed, and for a reason worth recording because it is the
+first time the component model paid for itself rather than merely being tidier. The grid
+rebuilt its scrolling container on every render, and `render()` runs on the 5s poll — so a
+reader who scrolled the sessions list was returned to the top every five seconds, which is
+exactly how it was reported from a real iPhone. A fresh element starts at `scrollTop` 0,
+and the scroll memory that tried to rescue the position afterwards had to beat layout to do
+it. Preact keeps the node, so there is nothing to rescue. **That bug could not be fixed in
+the old renderer; it could only be raced.** The session screen, the pane, the lock screen
+and every sheet are still the same hand-written `el()` calls they were.
+
+**Both ported screens live in one bundle**, `web/screens.js`, because they share six
+components (`Btn`, `Icon`, `VerbBtn`, `Header`, `ConfirmBar`, `CardList`). One entry per
+screen would either duplicate all six or need a third shared chunk and a third name in
+`SHELL`, to save nothing — the phone fetches both in the same session anyway.
 
 **No content hashing in the output filenames, deliberately.** `sw.js` precaches a
 hand-written `SHELL` list and carries a `CLIENT-HASH` pinned to the bytes of everything in
@@ -181,9 +194,9 @@ line somebody re-pastes without reading. Cache-busting is `VERSION`'s job and al
 
 **No minification, in any mode.** Every phone-only bug here was found by opening the file
 the device fetched and reading it. That is the one thing a build takes away, so it is not
-taken: `web/projects.js` is the source laid out flat. `preact.js` is split out rather than
+taken: `web/screens.js` is the source laid out flat. `preact.js` is split out rather than
 inlined for the same reason — npm ships preact pre-minified, and inlining it would bury the
-screen in 17 kB of single-letter variables.
+screens in 17 kB of single-letter variables.
 
 **What it costs, and it is a real cost.** Editing `web/src/` no longer shows up by
 reloading — there is a build between you and the phone, and a deploy is now

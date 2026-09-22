@@ -44,14 +44,14 @@ const api = await import(new URL('../../web/api.js', import.meta.url).href);
 const HTML = read('index.html');
 const CSS = read('app.css');
 // EVERY .js THE BROWSER LOADS, which since the build step includes two files nobody wrote
-// by hand: projects.js is vite's output for the ported Projects screen and preact.js is the
-// dependency chunk beside it. They are listed here rather than left out because every rule
+// by hand: screens.js is vite's output for the two ported screens (Projects and the grid)
+// and preact.js is the dependency chunk beside it. They are listed here rather than left out because every rule
 // below is about what the PHONE fetches, not about what a human typed — a bundle that
 // reached for a CDN, or that shipped without being precached, would be exactly as dead on
 // the tailnet as a hand-written file doing the same thing. The list is spelled out rather
 // than globbed for the reason the SHELL list is: a new file in web/ should have to be
 // thought about once, here, and `readdirSync` would silently adopt anything that appeared.
-const JS_FILES = ['app.js', 'api.js', 'grid.js', 'passkey.js', 'sw.js', 'projects.js', 'preact.js'];
+const JS_FILES = ['app.js', 'api.js', 'grid.js', 'passkey.js', 'sw.js', 'screens.js', 'preact.js'];
 const JS = Object.fromEntries(JS_FILES.map(f => [f, read(f)]));
 
 // ── 1. nothing loads from off this machine ────────────────────────────────
@@ -79,23 +79,23 @@ is('every imported module exists', '',
 // because breaking it is so natural: a screen that fetches its own thing works
 // perfectly against fixtures and then reaches for a URL that does not exist. (sw.js is
 // exempt: intercepting fetch is what a service worker IS.)
-// projects.js is in this list too. The ported screen is handed its data as props and must
-// stay that way: a component that fetched its own would work perfectly against fixtures
-// and then reach for a URL api.js knows how to resolve and it does not.
-for (const f of ['app.js', 'grid.js', 'passkey.js', 'projects.js']) {
+// screens.js is in this list too. The ported screens are handed their data as props and
+// must stay that way: a component that fetched its own would work perfectly against
+// fixtures and then reach for a URL api.js knows how to resolve and it does not.
+for (const f of ['app.js', 'grid.js', 'passkey.js', 'screens.js']) {
   is(`${f} does not fetch directly`, 0, (JS[f].match(/\bfetch\(/g) || []).length);
 }
 is('api.js is the file that does', true, (JS['api.js'].match(/\bfetch\(/g) || []).length > 0);
 
 // ── 1b. the build, and the three ways a build step rots a client ──────────
-// web/ has one built file now (projects.js, the ported Projects screen) and one dependency
+// web/ has one built file (screens.js, holding both ported screens) and one dependency
 // chunk (preact.js). Everything else is still served as written. These guard the properties
 // that make that survivable; the honesty of the output itself — that it was rebuilt from
 // the source beside it — cannot be checked without running vite, so test/run.sh runs that
 // separately and SKIPS with a reason where the toolchain is absent.
 const SRC = path.join(WEB, 'src');
-const JSX_PATH = path.join(SRC, 'projects.jsx');
-is('the ported screen ships its source', true, fs.existsSync(JSX_PATH));
+const JSX_PATH = path.join(SRC, 'screens.jsx');
+is('the ported screens ship their source', true, fs.existsSync(JSX_PATH));
 // READ THROUGH A FALLBACK, so a missing source is the red row above rather than an
 // exception here. A helper that dies emits NO rows, and a group that prints nothing looks
 // exactly like one that passed — which is why test/run.sh puts a floor under the count.
@@ -108,9 +108,14 @@ const JSX = fs.existsSync(JSX_PATH) ? fs.readFileSync(JSX_PATH, 'utf8') : '';
 // opening the file the device fetched and reading it; if esbuild ever starts mangling
 // these names, a stack trace off a phone stops naming anything you can search for.
 // Asserted on names the SOURCE defines, so it cannot pass by matching preact's own code.
-is('the built screen keeps its names', '',
-   ['ProjectsScreen', 'CardList', 'ConfirmBar', 'ProfileTabs']
-     .filter(n => !new RegExp(`function ${n}\\(`).test(JS['projects.js'])).join(','));
+// BOTH SCREENS ARE NAMED HERE, and GridScreen is the one that matters most: it is the
+// screen this bundle gained, and a build that emitted only what was already there would
+// otherwise pass every other row in this file — the output parses, it is served, it
+// precaches and it hashes perfectly. That is not hypothetical, it is the measured failure
+// this repo carries a scar for (`✓ built in 13ms` over 14.8 kB of preact and no screen).
+is('the built screens keep their names', '',
+   ['ProjectsScreen', 'GridScreen', 'CardScreen', 'CardList', 'CountStrip', 'ConfirmBar', 'ProfileTabs']
+     .filter(n => !new RegExp(`function ${n}\\(`).test(JS['screens.js'])).join(','));
 
 // ...AND grid.js IS NOT IN IT TWICE. The bundler will happily inline an imported module,
 // and a second copy of grid.js is a second answer to "how many cells is this glyph" — the
@@ -118,7 +123,7 @@ is('the built screen keeps its names', '',
 // is the assertion that the marking still takes, because when it silently stopped taking
 // the build exited 0 and said "✓ built in 13ms" over the top of it.
 is('the bundle imports grid.js rather than copying it', true,
-   /from\s*['"]\.\/grid\.js['"]/.test(JS['projects.js']));
+   /from\s*['"]\.\/grid\.js['"]/.test(JS['screens.js']));
 // THE STRONGER VERSION OF THIS ROW IS NOT HERE, and that is deliberate. "...and the bundle
 // defines none of grid.js's card geometry" belongs beside this one and was written here
 // first — but the ported screen imports only clockLabel, so the tree-shaker removes the
@@ -131,12 +136,18 @@ is('the bundle imports grid.js rather than copying it', true,
 // rather than one it waits for. It needs vite, so it skips where the toolchain is absent,
 // which is the honest trade for a row that can actually go red.
 
-// THE ONE RULE THAT NOW EXISTS TWICE. A partial port duplicates the footer button's
-// "key letter stays in the label" convention — app.js's btn() draws it for the two screens
-// that are not ported and projects.jsx's Btn() draws it for the one that is. A duplicated
-// rule drifts, and this one drifts INVISIBLY: `⏎ open` would still render, just without the
-// bold key, and nobody photographs a footer. So the two spellings are compared rather than
-// trusted. Porting the grid screen deletes app.js's copy and this row with it.
+// THE ONE RULE THAT EXISTS TWICE, AND IT IS NOT GOING AWAY. A partial port duplicates the
+// button's "key letter stays in the label" convention — screens.jsx's Btn() draws it for the
+// two ported screens and app.js's btn() draws it everywhere else. A duplicated rule drifts,
+// and this one drifts INVISIBLY: `⏎ open` would still render, just without the bold key, and
+// nobody photographs a footer. So the two spellings are compared rather than trusted.
+//   THE PREVIOUS VERSION OF THIS COMMENT SAID PORTING THE GRID WOULD DELETE app.js's COPY
+// AND THIS ROW WITH IT. That was wrong, and worth recording rather than quietly correcting:
+// btn()'s callers were never mostly the grid. They are the ~40 sheets, the lock screen, the
+// pane's zoom row, the composer and the session bar — none of which is a card screen, and
+// none of which this port touched. Only header() actually died. A prediction about which
+// code a refactor will delete is worth checking against `grep -c` before it is written
+// down, because the next person reads it as a plan.
 const keyRuleApp = /const m = \/\^\(\\S\+\) \(\.\+\)\$\/\.exec\(label\);[\s\S]{0,160}?m\[1\]\.length <= 2/.test(JS['app.js']);
 const keyRuleJsx = /VERB = \/\^\(\\S\+\) \(\.\+\)\$\//.test(JSX) && /\[\.\.\.m\[1\]\]\.length <= 2/.test(JSX);
 is('the verb-key rule is the same in both renderers', true, keyRuleApp && keyRuleJsx);
@@ -892,7 +903,19 @@ is('empty is not a time', null, at(''));
 
 // ── 8. the offline promise ────────────────────────────────────────────────
 is('the last payload is kept for a cold open', true, /localStorage\.setItem\(LS_LAST/.test(APP));
-is('...and a stale screen says how old it is', true, /offline — last fetched/.test(APP));
+// ...AND THIS ROW WENT RED WHEN THE GRID WAS PORTED, WHICH IS THE CHECK WORKING. It used
+// to grep web/app.js for the sentence, because header() drew it there. header() is gone and
+// the sentence moved into screens.jsx — the exact failure the seam comment warns about
+// ("a string retyped here would be a string that check can no longer see"), arriving as a
+// string MOVED rather than retyped. Re-pointed at the file the phone actually fetches, and
+// split, because "the client tells you how stale it is" is two independent things and one
+// row could only ever catch whichever half it happened to be looking at:
+is('...and a stale screen says how old it is', true, /offline — last fetched/.test(JS['screens.js']));
+// the half that stays in app.js — a screen cannot report staleness it was never handed, and
+// a props builder that quietly stopped passing it would leave the sentence above intact and
+// unreachable, which is the silent version of this bug.
+is('...and app.js still hands the staleness over', 2,
+   (APP.match(/^\s*stale: S\.stale,$/gm) || []).length);
 // §5's rule about the token, checked as CODE and not as prose: the first version of
 // this assertion matched api.js's own comment explaining why the token is not stored,
 // and so passed while proving nothing. Only a real write counts.

@@ -20,10 +20,11 @@ import * as pk from './passkey.js';
 import * as ansi from './ansi.js';
 import * as md from './md.js';
 // THE ONE BUILT FILE IN web/. Everything above is served exactly as written; this one is
-// vite's output from web/src/projects.jsx, committed beside its source. The seam between
-// what it draws and what this file still draws is documented at the top of that source —
-// read it before porting a second screen.
-import * as projectsUI from './projects.js';
+// vite's output from web/src/screens.jsx, committed beside its source. It holds BOTH card
+// screens — Projects and the grid — which is why it is no longer called projects.js. The
+// seam between what it draws and what this file still draws is documented at the top of
+// that source; read it before porting a third.
+import * as screensUI from './screens.js';
 
 // ── state ─────────────────────────────────────────────────────────────────
 const S = {
@@ -240,10 +241,12 @@ function toast(text, kind = '') {
 // bars, and the grid has a card list under a header — both are columns of a known height,
 // which is what stops the layout moving on a poll.
 const SHELL_SCREENS = new Set(['session', 'grid', 'projects']);
+// THE TWO SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
+const PREACT_SCREENS = new Set(['projects', 'grid']);
 // Whether Preact currently owns #app. Not derivable from S.screen: the screen can change
 // in the same breath as the lock, and what has to be known here is who put the nodes on
 // screen, not who would put them there now.
-let projectsUp = false;
+let preactUp = false;
 function render() {
   const app = document.getElementById('app');
   // Toggled on <html> as well: the page must not scroll behind a screen that owns the
@@ -255,23 +258,25 @@ function render() {
     app.classList.toggle('shell', shell);
     document.documentElement.classList.toggle('shell', shell);
   } catch {}
-  // ── the Preact screen ──────────────────────────────────────────────────────────────
-  // It DIFFS, so this path must not empty #app first: the whole gain is that the .cards
+  // ── the Preact screens ─────────────────────────────────────────────────────────────
+  // They DIFF, so this path must not empty #app first: the whole gain is that the .cards
   // node survives the 5s poll and keeps the reader's scroll position instead of being
-  // rebuilt at scrollTop 0. Emptying happens exactly once, on the way IN from another
-  // screen, and then never again while this screen is up.
+  // rebuilt at scrollTop 0. Emptying happens exactly once, on the way IN from a screen this
+  // file draws, and then never again while a card screen is up — INCLUDING across the walk
+  // from Projects into a project, which is a screen change Preact handles by keying the two
+  // apart (see screens.jsx) rather than by wiping the container out from under it.
   //   Preact renders a fragment straight into #app rather than into a host div, and that is
   // not a style choice: app.css reaches the bands with CHILD selectors
   // (`#app.shell > .cards`, `> .hdr`, `> .verbs`), so one div of nesting would stop the
   // card list being the screen's scrolling region and let the whole page scroll.
-  if (!S.locked && S.screen === 'projects') {
-    if (!projectsUp) {
+  if (!S.locked && PREACT_SCREENS.has(S.screen)) {
+    if (!preactUp) {
       app.textContent = '';
       paneBoxNode = paneNode = paneGeomNode = null;
       composerNode = null;
-      projectsUp = true;
+      preactUp = true;
     }
-    projectsUI.mount(app, projectsProps());
+    screensUI.mount(app, S.screen, S.screen === 'grid' ? gridProps() : projectsProps());
     renderSheet();
     syncPanePoll();
     return;
@@ -281,14 +286,17 @@ function render() {
   // screen opens it diffs against nodes that no longer exist. Rendering null is what tears
   // the tree down — and it has to happen BEFORE the wipe below, while the nodes are still
   // there to be removed.
-  if (projectsUp) { projectsUI.unmount(app); projectsUp = false; }
+  if (preactUp) { screensUI.unmount(app); preactUp = false; }
   app.textContent = '';
   // The pane's nodes are about to be thrown away; drop the references with them, so a
   // poll that lands mid-render patches nothing rather than a detached <pre>.
   paneBoxNode = paneNode = paneGeomNode = null;
   composerNode = null;                      // re-set by composer() if this render draws one
   if (S.locked) { app.append(lockScreen()); renderSheet(); syncPanePoll(); return; }
-  const screen = S.screen === 'grid' ? gridScreen() : sessionScreen();
+  // Only the session screen reaches here now: `projects` and `grid` returned above, and
+  // the lock screen returned above that. Left as a bare call rather than a ternary with one
+  // live arm, which would read as a choice that no longer exists.
+  const screen = sessionScreen();
   // THE TOAST GOES ABOVE THE COMPOSER, IN FLOW — it is a band of the shell column now, not
   // a fixed overlay, so where it sits in this array is where it sits on screen. Appending
   // it last put it BELOW the input on the session screen, which with the old
@@ -309,30 +317,12 @@ function render() {
   syncPanePoll();
 }
 
-// The banner does not fit a phone — bannerFits() wants 76 columns and 26 rows — so the
-// phone gets exactly what a narrow terminal gets: the one-line header. Split over two
-// rows only because 60 columns of it will not fit in 32, which is the same split the
-// TUI itself makes when it draws the ship beside the counts.
-// THE TWO UNPORTED SCREENS ONLY. The Projects screen draws its own header in Preact from
-// the same data (see projectsProps), so the `— projects` branch that used to live here is
-// gone rather than left behind unreachable — an unreachable branch holding a second copy of
-// a string the other renderer prints is precisely how the two would drift without anybody
-// being able to see it happen. Porting the grid screen is what deletes the rest of this.
-function header(counts) {
-  const scope = el('span', { class: 'scope', text: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]` });
-  const kids = [el('span', { class: 'name', text: 'ghostfleet' }), scope, modeChip()];
-  if (counts) {
-    const c = el('span', { class: 'counts' });
-    for (const seg of G.countsSegments(counts)) {
-      c.append(el('span', { style: seg.color ? `color:${G.COLORS[seg.color]}` : null, text: seg.text }));
-    }
-    kids.push(c);
-  }
-  const rows = [el('div', { class: 'hdr' }, kids)];
-  if (S.stale) rows.push(el('div', { class: 'stale', text: `⚠ offline — last fetched ${G.clockLabel(S.stale)}` }));
-  return rows;
-}
-
+// header() USED TO LIVE HERE AND IS GONE. It drew the one-line header for the two screens
+// that were not ported; gridScreen() was its last caller, and porting the grid took that
+// caller with it. The header is now drawn once, by screens.jsx's Header, from the same data
+// — which is the point of the port and not a side effect of it: two renderers each holding
+// their own copy of `[profile:project] ⚠ offline …` is how a header comes to say different
+// things on two screens without anybody being able to see it happen.
 // WHICH FLEET AM I LOOKING AT — on every screen, without opening settings. The lock
 // screen has always said it, and the lock screen is the one thing you dismiss: the phone
 // that was shown four fictional projects had gone past it, and the only clue left was
@@ -406,7 +396,7 @@ function setProfile(name) {
   render();
 }
 // THIS SCREEN IS DRAWN BY PREACT, and this function is everything the components need to
-// know. It builds no boxes: web/src/projects.jsx owns the header, the tab strip, the
+// know. It builds no boxes: web/src/screens.jsx owns the header, the tab strip, the
 // .cards container, the verbs and the hint, and the seam between the two is written out at
 // the top of that file. What stays here is the part that is SHARED with the grid screen —
 // the card and its four gestures — plus every string, because §7's guardrails are the
@@ -437,7 +427,7 @@ function projectsProps() {
     confirm: confirmSpec(),
     // ── the seam ────────────────────────────────────────────────────────────────────
     // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
-    // the list and is told nothing else about them; see web/src/projects.jsx.
+    // the list and is told nothing else about them; see web/src/screens.jsx.
     cards: [
       ...visibleProjects().map(({ p, i }) =>
         // i is the GLOBAL index, on purpose
@@ -540,23 +530,30 @@ const STRIP = [
   ['ready', 'ready', 'green'],
   ['parked', 'parked', 'grey'],
 ];
-function countStrip(counts) {
+// THE FOUR WORDS STAY IN THIS FILE, and the tiles cross the seam as data. §7 is that the
+// guardrails ARE the TUI's own prompts, and what enforces it is pwa-check grepping
+// web/app.js for that wording — so a label moved into screens.jsx is a label that check can
+// no longer see. screens.jsx's CountStrip draws boxes and is handed the words, the numbers
+// and the resolved hue; it writes none of the three.
+function stripTiles(counts) {
   const c = counts || {};
-  return el('div', { class: 'strip' }, STRIP.map(([label, key, color]) => {
-    const n = c[key] || 0;
-    const t = el('div', { class: 'stat' + (n ? ' on' : '') });
-    t.style.setProperty('--c', G.COLORS[color]);
-    t.append(el('div', { class: 'n', text: String(n) }), el('div', { class: 'l', text: label }));
-    return t;
-  }));
+  return STRIP.map(([label, key, color]) => ({ label, n: c[key] || 0, color: G.COLORS[color] }));
 }
 
-function gridScreen() {
+// ── the grid screen, as props ─────────────────────────────────────────────
+// PROPS, NOT NODES, AND THAT IS THE WHOLE FIX. This used to be gridScreen(), which built a
+// fresh div.cards on every call — and render() is called by the 5s poll. A fresh element
+// starts at scrollTop 0, so the scroll memory had to RESCUE the reader's position after
+// every poll, racing layout to do it before the eye caught up. Reported from a real iPhone:
+// "i scroll the sessions and after some seconds it goes all the way up again". Now the
+// container is Preact's and outlives the render, so there is no position to rescue.
+function gridProps() {
   const g = S.grid || { cards: [], free_worktrees: [] };
+  const its = items();
   // buildItems() clamps `sel` after every rebuild, and so does this: a session that was
   // stopped while you were on another screen leaves the selection past the end, and every
   // verb in the footer then acts on `undefined` — silently, since each one guards.
-  S.sel = Math.max(0, Math.min(S.sel, items().length - 1));
+  S.sel = Math.max(0, Math.min(S.sel, its.length - 1));
   // From the CARDS, as renderGrid does, so the summary cannot disagree with what is
   // under it. §4 ships `counts` as well; if the two ever differ, the cards win —
   // they are what you can see.
@@ -564,63 +561,78 @@ function gridScreen() {
   // clause you have to read to the end before you know whether it concerns you; four tiles
   // are a thing you glance at, and the one that matters is the one that is not zero.
   //   The WORDS and the ARITHMETIC are unchanged — countsFrom() over the cards, and the
-  // TUI's own vocabulary — so the strip and the desk's header cannot disagree. header()
+  // TUI's own vocabulary — so the strip and the desk's header cannot disagree. The header
   // still gets the same counts and still draws them, because on a narrow screen the strip
   // is the glance and the header line is the detail (interrupted, at limit, parked, which
   // are appended only when non-zero and would make four tiles into eight).
   const counts = G.countsFrom(g.cards || []);
-  const out = header(counts);
-  out.push(countStrip(counts));
-  out.push(confirmBar());
-  const list = el('div', { class: 'cards' });
-  const its = items();
-  its.forEach((it, idx) => {
-    const sel = idx === S.sel;
-    if (it.newCard) {
-      list.append(cardEl(G.newModel(sel), { tap: () => sheetPicker() }, idx));
-    } else if (it.freeWt) {
-      list.append(cardEl(G.freeModel(it.freeWt, sel, idx), {
-        tap: () => sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path }),
-        longPress: () => askRemoveWorktree(it.freeWt),
-      }, idx));
-    } else {
+  const sel = its[S.sel] || {};
+  return {
+    scope: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]`,
+    mode: modeSpec(),
+    stale: S.stale,
+    // WORDED AND COLOURED HERE, drawn there. countsSegments() is grid.js's, so the phone's
+    // header and the desk's are the same sentence; the palette lookup happens on this side
+    // of the seam so that screens.jsx contains no hex at all.
+    counts: G.countsSegments(counts).map(seg => ({ text: seg.text, color: seg.color ? G.COLORS[seg.color] : null })),
+    strip: stripTiles(counts),
+    confirm: confirmSpec(),
+    // ── the seam ────────────────────────────────────────────────────────────────────
+    // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
+    // the list and is told nothing else about them; see web/src/screens.jsx.
+    cards: its.map((it, idx) => {
+      const isSel = idx === S.sel;
+      if (it.newCard) return cardEl(G.newModel(isSel), { tap: () => sheetPicker() }, idx);
+      if (it.freeWt) {
+        return cardEl(G.freeModel(it.freeWt, isSel, idx), {
+          tap: () => sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path }),
+          longPress: () => askRemoveWorktree(it.freeWt),
+        }, idx);
+      }
       const c = it.card;
-      list.append(cardEl(G.cardModel(c, sel, idx), {
+      return cardEl(G.cardModel(c, isSel, idx), {
         tap: () => openSession(c.name),
         longPress: () => askKill(c.name),
         swipeLeft: () => pauseSession(c.name),
         swipeRight: () => resumeSession(c.name),
         reorder: d => reorder(c.name, d),
-      }, idx));
-    }
-  });
-  out.push(watchScroll('grid', list));
-  const it = its[S.sel] || {};
-  // ── the footer: touch targets, and only the SCREEN's verbs ────────────────
-  // Nine key-letter buttons wrapped to three rows, ate ~190px and overlaid the last card.
-  // The letters were muscle memory borrowed from the TUI, and there is no keyboard on a
-  // phone for them to transfer to.
-  //   WHAT SPLIT THEM: a verb that acts on the SCREEN stays in the footer; a verb that acts
-  // on the SELECTED CARD moves into that card's actions sheet, behind `more`. That is not
-  // just tidying — a footer button that acts on whatever happens to be selected is the
-  // control most likely to be pressed against the wrong thing, and the sheet names the
-  // session in its title before it offers anything destructive.
-  //   The gestures that already existed cover the common two without either: swipe ← pause,
-  // swipe → resume, long-press = x. The hint line below says so, as it always did.
-  out.push(el('div', { class: 'verbs' }, [
-    vbtn('enter', 'open', iconSvg(ICON_ENTER),
-         () => { if (it.card) openSession(it.card.name); else if (it.freeWt) sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path }); else sheetPicker(); }, 'go'),
-    vbtn('new', 'new', iconSvg(ICON_PLUS), () => sheetPicker()),
-    vbtn('worktree', 'worktrees', iconSvg(ICON_TREE_N, ICON_TREE), () => sheetWorktree()),
-    // `more` is disabled with nothing selected rather than hidden: a control that appears
-    // and disappears as the selection moves is a control you cannot learn the position of.
-    it.card ? vbtn('more', 'more', iconSvg(ICON_MORE), () => sheetActions(it.card.name))
-            : vbtn('more', 'more', iconSvg(ICON_MORE), () => {}, 'off'),
-    vbtn('settings', 'settings', iconSvg(ICON_GEAR_C, ICON_GEAR), () => sheetSettings()),
-    vbtn('projects', 'projects', iconSvg(ICON_FOLDER), () => toProjects()),
-  ]));
-  out.push(el('div', { class: 'hint', text: 'tap a card · swipe ← pause · swipe → resume · long-press = x · drag a card\'s title to reorder' }));
-  return out.filter(Boolean);
+      }, idx);
+    }),
+    // ONCE, WHEN PREACT BUILDS THE LIST — not on every render, which is what the old
+    // `out.push(watchScroll('grid', list))` amounted to. What it still has to do is restore
+    // a position after the screen has been LEFT and come back to; what it no longer has to
+    // do is rescue one from a rebuild that no longer happens.
+    listRef: (list) => { if (list) watchScroll('grid', list); },
+    // ── the footer: touch targets, and only the SCREEN's verbs ────────────────
+    // Nine key-letter buttons wrapped to three rows, ate ~190px and overlaid the last card.
+    // The letters were muscle memory borrowed from the TUI, and there is no keyboard on a
+    // phone for them to transfer to.
+    //   WHAT SPLIT THEM: a verb that acts on the SCREEN stays in the footer; a verb that
+    // acts on the SELECTED CARD moves into that card's actions sheet, behind `more`. That is
+    // not just tidying — a footer button that acts on whatever happens to be selected is the
+    // control most likely to be pressed against the wrong thing, and the sheet names the
+    // session in its title before it offers anything destructive.
+    //   The gestures that already existed cover the common two without either: swipe ←
+    // pause, swipe → resume, long-press = x. The hint line below says so, as it always did.
+    //   THE ICONS ARE NAMES NOW, not SVG nodes: a vnode cannot cross this boundary, so
+    // screens.jsx's ICONS table draws them and this side says which. That deleted app.js's
+    // eight copies of the same path data — the duplication the previous comment here called
+    // "the one table both read from" while there were visibly two of them.
+    verbs: [
+      { verb: 'enter', label: 'open', icon: 'enter', cls: 'go',
+        onClick: () => { if (sel.card) openSession(sel.card.name); else if (sel.freeWt) sheetName({ cwd: sel.freeWt.path, name: G.basename(sel.freeWt.path), reuse: sel.freeWt.path }); else sheetPicker(); } },
+      { verb: 'new', label: 'new', icon: 'plus', onClick: () => sheetPicker() },
+      { verb: 'worktree', label: 'worktrees', icon: 'tree', onClick: () => sheetWorktree() },
+      // `more` is disabled with nothing selected rather than hidden: a control that appears
+      // and disappears as the selection moves is a control you cannot learn the position of.
+      sel.card ? { verb: 'more', label: 'more', icon: 'more', onClick: () => sheetActions(sel.card.name) }
+               : { verb: 'more', label: 'more', icon: 'more', cls: 'off', onClick: () => {} },
+      { verb: 'settings', label: 'settings', icon: 'gear', onClick: () => sheetSettings() },
+      { verb: 'projects', label: 'projects', icon: 'folder', onClick: () => toProjects() },
+    ],
+    hint: 'tap a card · swipe ← pause · swipe → resume · long-press = x · drag a card\'s title to reorder',
+    toast: S.toast,
+  };
 }
 
 // ⇧hjkl → drag. reorderSession(name, delta) is the TUI's own move, and at nc = 1 all
@@ -1119,37 +1131,19 @@ function speakIcon(on) { return iconSvg(ICON_HORN, on ? ICON_STOP : ICON_WAVE); 
 // A DRAWN CAMERA, for the reason #82 drew the speaker: an emoji next to an SVG is two
 // different weights, two colour models and two metrics in one row, and that read as a
 // different control appearing rather than as this one being pressed.
-// ── the footer's icons ─────────────────────────────────────────────────────
-// SVG, never emoji: an emoji is a font-dependent picture that renders differently on every
-// device and measures two cells in some of them (grid.js's WIDE table exists because of
-// exactly that). These are stroked paths in the button's own currentColor, so a danger verb
-// is red because the BUTTON is red and nothing has to be recoloured twice.
-const ICON_ENTER = 'M5 12h14M12 5l7 7-7 7';
-const ICON_PLUS = 'M12 5v14M5 12h14';
-const ICON_TREE = 'M6 8.5v7M8.5 6h4a3 3 0 0 1 3 3v1M8.5 18h4a3 3 0 0 0 3-3v-1';
-const ICON_TREE_N = 'M6 6m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M6 18m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M18 12m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0';
-const ICON_MORE = 'M6 12h.01M12 12h.01M18 12h.01';
-const ICON_GEAR_C = 'M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0';
-const ICON_GEAR = 'M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.5a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9.5a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z';
-const ICON_FOLDER = 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z';
-const ICON_CLOCK_C = 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0';
-const ICON_CLOCK = 'M12 7v5l3 2';
-
-// A FOOTER BUTTON, WITH A STABLE NAME ON IT. `data-verb` is the hook the driven helpers
-// use — test/helpers/pwa-render.mjs and viewport-check.mjs used to find these buttons by
-// their LABEL (`btnWith(/⏎ open/)`), which stopped working the moment the labels lost their
-// key letters. A label is what the design changes; a verb name is what the button IS.
-//   The label is still rendered, and still the TUI's own word for the verb (§7) — only the
-// keystroke prefix is gone, because there is no keyboard on a phone for it to transfer to.
-// `title`/`aria-label` carry it too, so an icon-only button at a narrow width is still named
-// for a screen reader and for a driver.
-function vbtn(verb, label, icon, onclick, cls = '') {
-  const b = el('button', { class: cls || null, onclick, title: label, 'aria-label': label });
-  b.dataset.verb = verb;
-  if (icon) b.append(icon);
-  b.append(el('span', { class: 'vl', text: label }));
-  return b;
-}
+// ── the footer's icons ARE NOT HERE ANY MORE ──────────────────────────────
+// Eight stroked paths (enter, plus, worktree, more, gear, folder) and vbtn() used to sit
+// here to draw the grid's footer. Porting the grid screen took their only caller, so they
+// are gone and web/src/screens.jsx's ICONS table is now the ONE place a verb's picture is
+// written — which the comment beside that table already claimed while there were plainly
+// two copies of every path in the client. One caller, one table, and `settings` can no
+// longer be two different pictures on two screens.
+//   A CLOCK WAS ALREADY DEAD BEFORE THIS PASS: ICON_CLOCK_C/ICON_CLOCK were declared here
+// and referenced nowhere, left behind when the schedule verb moved to the ported screen.
+// Nothing said so — an unused const is not a warning in a file nobody bundles — which is
+// the small argument for a build step reading this directory one day.
+//   What stays: iconSvg() itself, and the speaker and camera paths below, because turn()
+// and the composer still draw those with el() on screens that are not ported.
 
 const ICON_CAM_BODY = 'M3 8h3.2l1.6-2h8.4l1.6 2H21v11H3z';
 const ICON_CAM_LENS = 'M12 13.4m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0';
@@ -2149,7 +2143,7 @@ function back() {
 
 // ── cards, and the four gestures ──────────────────────────────────────────
 // A SURFACE CARD, NOT BOX ART — and rewritten IN PLACE rather than ported into Preact,
-// which is the seam web/src/projects.jsx documents: Preact owns every box on the screen,
+// which is the seam web/src/screens.jsx documents: Preact owns every box on the screen,
 // this owns what goes inside .cards, and wire() below stays the one gesture machine for
 // both card lists. A redesign lands squarely on that seam, and the cheap half is this one.
 //

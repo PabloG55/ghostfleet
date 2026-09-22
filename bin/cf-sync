@@ -109,12 +109,12 @@ is_sha() { case "$1" in *[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = 40 ]; }
 mkdir -p "$DEST" || { echo "cf-sync: cannot create $DEST" >&2; exit 1; }
 
 # --- build the phone client BEFORE copying anything -------------------------
-# web/ has one built file in it now: projects.js (the ported Projects screen) plus its
+# web/ has one built file in it now: screens.js (both ported screens) plus its
 # preact.js chunk, from web/src/ through vite. The output is COMMITTED, so a clone is
 # serveable with no toolchain and CI needs no npm — but a sync is a DEPLOY, and deploying
 # the committed bytes after editing the source is the repo-vs-runtime trap this whole file
 # exists to close, wearing the one disguise it has not worn yet: the repo would be current
-# too, and only web/projects.js would be behind.
+# too, and only web/screens.js would be behind.
 #
 # SO IT BUILDS FIRST AND A FAILURE IS FATAL. Not a warning over a sync that happened
 # anyway: this script's rule is that any non-zero means the runtime must not be trusted,
@@ -126,7 +126,7 @@ mkdir -p "$DEST" || { echo "cf-sync: cannot create $DEST" >&2; exit 1; }
 #
 # There are two kinds of source this script syncs FROM, and only one of them can build:
 #
-#   a git clone           has vite.config.mjs and web/src/, and its web/projects.js may be
+#   a git clone           has vite.config.mjs and web/src/, and its web/screens.js may be
 #                         behind the source sitting next to it. It must build.
 #   an unpacked npx cache has web/ ALREADY BUILT and no vite.config.mjs at all, because
 #                         package.json's `files` list ships web/ and not the build config.
