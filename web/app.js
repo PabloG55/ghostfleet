@@ -288,9 +288,20 @@ function render() {
   paneBoxNode = paneNode = paneGeomNode = null;
   composerNode = null;                      // re-set by composer() if this render draws one
   if (S.locked) { app.append(lockScreen()); renderSheet(); syncPanePoll(); return; }
-  if (S.screen === 'grid') app.append(...gridScreen());
-  else app.append(...sessionScreen());
-  if (S.toast) app.append(el('div', { class: 'toast ' + S.toast.kind, text: S.toast.text }));
+  const screen = S.screen === 'grid' ? gridScreen() : sessionScreen();
+  // THE TOAST GOES ABOVE THE COMPOSER, IN FLOW — it is a band of the shell column now, not
+  // a fixed overlay, so where it sits in this array is where it sits on screen. Appending
+  // it last put it BELOW the input on the session screen, which with the old
+  // `position: fixed` meant it landed on top of the input and the newest message:
+  // "dont blok the chat with toasts". Splicing it in front of the composer is what makes
+  // overlap impossible rather than merely unlikely — the scroller above simply gets shorter
+  // by the toast's height for as long as it is up.
+  if (S.toast) {
+    const t = el('div', { class: ('toast ' + (S.toast.kind || '')).trim(), text: S.toast.text });
+    const ci = screen.findIndex(n => n && n.classList && n.classList.contains('composer'));
+    if (ci >= 0) screen.splice(ci, 0, t); else screen.push(t);
+  }
+  app.append(...screen);
   renderSheet();
   // Every state change that matters to the pane's timer — the screen, the view, a sheet,
   // a confirmation, the lock — has already been applied by the time we get here, which is
@@ -430,12 +441,12 @@ function projectsProps() {
     cards: [
       ...visibleProjects().map(({ p, i }) =>
         // i is the GLOBAL index, on purpose
-        cardEl(G.projectCard(p, i, i === S.sel), {
+        cardEl(G.projectModel(p, i, i === S.sel), {
           tap: () => openProject(p.name),
           longPress: () => { S.confirm = { kind: 'project', name: p.name }; render(); },
           reorder: d => reorderProject(p.name, d),
         }, i)),
-      cardEl(G.addProjectCard(S.sel === projects.length), {
+      cardEl(G.addProjectModel(S.sel === projects.length), {
         tap: () => sheetAddProject(),
       }, projects.length),
     ],
@@ -515,6 +526,27 @@ function items() {
     { newCard: true },
   ];
 }
+// The four counts that fit a phone row, each a tile. ONLY A NON-ZERO COUNT IS COLOURED:
+// a strip where every tile is lit says nothing, and the question this app exists to answer
+// is which one is not zero. The hue is the status's own — the same one the card's rail and
+// chip use — so the strip and the cards teach one colour vocabulary.
+const STRIP = [
+  ['need you', 'need_you', 'red'],
+  ['working', 'working', 'cyan'],
+  ['ready', 'ready', 'green'],
+  ['parked', 'parked', 'grey'],
+];
+function countStrip(counts) {
+  const c = counts || {};
+  return el('div', { class: 'strip' }, STRIP.map(([label, key, color]) => {
+    const n = c[key] || 0;
+    const t = el('div', { class: 'stat' + (n ? ' on' : '') });
+    t.style.setProperty('--c', G.COLORS[color]);
+    t.append(el('div', { class: 'n', text: String(n) }), el('div', { class: 'l', text: label }));
+    return t;
+  }));
+}
+
 function gridScreen() {
   const g = S.grid || { cards: [], free_worktrees: [] };
   // buildItems() clamps `sel` after every rebuild, and so does this: a session that was
@@ -524,22 +556,32 @@ function gridScreen() {
   // From the CARDS, as renderGrid does, so the summary cannot disagree with what is
   // under it. §4 ships `counts` as well; if the two ever differ, the cards win —
   // they are what you can see.
-  const out = header(G.countsFrom(g.cards || []));
+  // THE SUMMARY AS NUMBERS, NOT AS A SENTENCE. `0 need you · 2 working · 5 ready` is a
+  // clause you have to read to the end before you know whether it concerns you; four tiles
+  // are a thing you glance at, and the one that matters is the one that is not zero.
+  //   The WORDS and the ARITHMETIC are unchanged — countsFrom() over the cards, and the
+  // TUI's own vocabulary — so the strip and the desk's header cannot disagree. header()
+  // still gets the same counts and still draws them, because on a narrow screen the strip
+  // is the glance and the header line is the detail (interrupted, at limit, parked, which
+  // are appended only when non-zero and would make four tiles into eight).
+  const counts = G.countsFrom(g.cards || []);
+  const out = header(counts);
+  out.push(countStrip(counts));
   out.push(confirmBar());
   const list = el('div', { class: 'cards' });
   const its = items();
   its.forEach((it, idx) => {
     const sel = idx === S.sel;
     if (it.newCard) {
-      list.append(cardEl(G.newCardLines(sel), { tap: () => sheetPicker() }, idx));
+      list.append(cardEl(G.newModel(sel), { tap: () => sheetPicker() }, idx));
     } else if (it.freeWt) {
-      list.append(cardEl(G.freeCardLines(it.freeWt, sel, idx), {
+      list.append(cardEl(G.freeModel(it.freeWt, sel, idx), {
         tap: () => sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path }),
         longPress: () => askRemoveWorktree(it.freeWt),
       }, idx));
     } else {
       const c = it.card;
-      list.append(cardEl(G.cardLines(c, sel, idx), {
+      list.append(cardEl(G.cardModel(c, sel, idx), {
         tap: () => openSession(c.name),
         longPress: () => askKill(c.name),
         swipeLeft: () => pauseSession(c.name),
@@ -1983,31 +2025,57 @@ function back() {
 }
 
 // ── cards, and the four gestures ──────────────────────────────────────────
-function cardEl(block, h, idx) {
-  const d = el('div', { class: 'card' + (block.selected ? ' sel' : '') + (block.dim ? ' dim' : ''), role: 'button', tabindex: '0' });
-  d.style.setProperty('--c', G.COLORS[block.color] || G.COLORS.grey);
-  // One block span per line and NO newline between them. The spans are display:block, so
-  // they already stack; a literal "\n" inside a <pre> then adds a line box of its own and
-  // the card renders double-spaced — the │ and ╰ stop touching and the box comes apart
-  // into a column of dashes. It looked like a line-height problem and was not.
-  //
-  // Inside a line, every non-ASCII code point goes in its own 1ch box (see cells() in
-  // grid.js): ⧗ measures 1.27 cells and ⏸ 1.05 in every monospace font on this machine,
-  // which is enough to walk a card's right border off the end of its own box.
-  const pre = el('pre');
-  block.lines.forEach((line, i) => {
-    const span = el('span', { class: 'l' + (i === 0 ? ' t' : '') });
-    for (const tok of G.cells(line)) {
-      // `wide` came in with the pane view: cells() now says when tmux gave a character
-      // TWO columns, and the card honours it for the same reason the pane does — one
-      // answer to "how many cells is this", not two that can disagree. No card glyph is
-      // wide today, so this changes nothing on screen and everything about which of the
-      // two files has to be right.
-      span.append(tok.cell ? el('i', { class: tok.wide ? 'c w' : 'c', text: tok.text }) : document.createTextNode(tok.text));
-    }
-    pre.append(span);
+// A SURFACE CARD, NOT BOX ART — and rewritten IN PLACE rather than ported into Preact,
+// which is the seam web/src/projects.jsx documents: Preact owns every box on the screen,
+// this owns what goes inside .cards, and wire() below stays the one gesture machine for
+// both card lists. A redesign lands squarely on that seam, and the cheap half is this one.
+//
+// WHAT WENT AND WHY. The card was a faithful transcription of the TUI: five lines of
+// ╭─╮ in monospace, at a font size fitCards() measured so the art would line up. It cost
+// ~210px to state three short facts, triple-encoded status as border-colour AND glyph AND
+// word, and clipped the agent's last line mid-word at 28 columns — the one line you opened
+// the app to read. The box is gone, the status is one chip, and the message gets two real
+// lines (-webkit-line-clamp: 2 in app.css).
+//
+// WHAT STAYED. Every string still comes from web/grid.js's models, so the phone and the
+// desk cannot disagree about what a card SAYS — only about how it looks, which is the
+// intended difference and what test/helpers/grid-parity.mjs now asserts. The status word
+// is the TUI's own (§7), the 1-9 digit is still the card's address, and `--c` still carries
+// the status hue so one declaration colours the rail, the chip and the selection.
+function cardEl(m, h, idx) {
+  const d = el('div', {
+    class: 'card' + (m.selected ? ' sel' : '') + (m.dim ? ' dim' : '') + ` k-${m.kind}` + (m.status ? ` s-${m.status}` : ''),
+    role: 'button', tabindex: '0',
   });
-  d.append(pre);
+  d.style.setProperty('--c', G.COLORS[m.color] || G.COLORS.grey);
+  // ── the title row: number, name, lead, and when ────────────────────────
+  const top = el('div', { class: 'c-top' });
+  if (m.num != null) top.append(el('span', { class: 'c-num', text: String(m.num) }));
+  top.append(el('span', { class: 'c-name', text: m.title }));
+  if (m.lead) top.append(el('span', { class: 'chip lead', text: 'lead' }));
+  if (m.when) top.append(el('span', { class: 'c-when', text: m.when }));
+  d.append(top);
+  // ── the meta row: the status chip, then where it is, then agent and PR ──
+  const meta = el('div', { class: 'c-meta' });
+  if (m.statusLabel) meta.append(el('span', { class: 'chip st', text: m.statusLabel }));
+  if (m.where) meta.append(el('span', { class: 'c-where', text: m.where }));
+  if (m.path) meta.append(el('span', { class: 'c-where', text: m.path }));
+  if (m.agent) meta.append(el('span', { class: 'chip tag', text: m.agent }));
+  if (m.pr) meta.append(el('span', { class: 'chip tag', text: m.pr }));
+  if (meta.childNodes.length) d.append(meta);
+  // ── the agent's last line, two real lines of it ─────────────────────────
+  // THE POINT OF THE REDESIGN. Rendered as text, never as markup: this is whatever the
+  // agent last said, and app.css clamps it rather than the client truncating it — so the
+  // browser decides where two lines end, at whatever size the reader has chosen.
+  if (m.msg || m.placeholder) {
+    d.append(el('div', { class: 'c-msg' + (m.msg ? '' : ' none'), text: m.msg || m.placeholder }));
+  }
+  // THE GRIP IS STILL EXACTLY ONE LINE, and it is now the title row rather than the top
+  // border. `.c-top` carries `touch-action: none` in app.css so a drag that starts there
+  // reorders, and a vertical drag anywhere else on the card still scrolls the list. That
+  // one-line grip is the reason reorder does not fight the page scroll, so it did not get
+  // wider just because the card got a nicer surface.
+  top.classList.add('t');
   if (idx >= 0) d.dataset.idx = String(idx);
   wire(d, h, idx);
   return d;

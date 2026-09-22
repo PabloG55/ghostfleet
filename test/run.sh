@@ -6276,14 +6276,18 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   ' "$PJ" "$1"; }
   is "the feature branch gets its number"   '"1184"' "$(PQ feat)"
   is "...and the default branch does NOT"   "null"   "$(PQ master)"
-  # ...and the card DRAWS it, which is a different claim from the wire carrying it.
+  # ...and the card SHOWS it, which is a different claim from the wire carrying it. Asked
+  # of the card MODEL rather than of a drawn line: the phone stopped rendering box art, so
+  # `lines[2].includes('#1184')` had nothing to read. The claim is unchanged — the number
+  # reaches the thing the card is built from — and it is now asked of the one place that
+  # decides it for both renderers.
   is "...and the card shows it"             "1" \
      "$(node -e '
         const fs=require("fs");
         import(process.argv[2]).then(g=>{
           const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
           const c=o.cards.find(c=>c.name==="feat");
-          console.log(g.cardLines(c,false,0).lines[2].includes("#1184")?1:0);
+          console.log(g.cardModel(c,false,0).pr==="#1184"?1:0);
         });
      ' "$PJ" "$ROOT/web/grid.js" 2>/dev/null)"
   # THE FALLBACK, with origin/HEAD deleted: `main` must still be dropped, or a repo that was

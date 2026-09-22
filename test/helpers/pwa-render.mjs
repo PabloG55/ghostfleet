@@ -468,15 +468,29 @@ is('...on the projects screen', true, /ghostfleet/.test(app.textContent) && /pro
 const tabStrip = () => app.find(n => n.className.split(/\s+/).join(' ').includes('seg tabs'));
 const tabBtn = (label) => { const t = tabStrip(); return t && t.all(n => n.tag === 'button')
   .find(b => b.textContent.replace(/\s+/g, ' ').trim().startsWith(label)); };
-const projectCards = () => app.all(n => n.className.split(/\s+/).includes('card'))
-  .map(n => n.textContent.replace(/\s+/g, ' '));
-// "╭ ─ 5 scratch ─ …" — one span per cell, so whitespace-collapsed. The DIGIT is the point.
-const numberOf = (name) => {
-  const c = projectCards().find(t => new RegExp('\\u2500 (?:\\d+ )?' + name + ' ').test(t));
-  const m = c && /─ (\d+) /.exec(c);
-  return m ? Number(m[1]) : null;
+// ── READING A CARD, BY ITS PARTS RATHER THAN BY ITS PICTURE ────────────────
+// These used to parse the drawn title — `╭ ─ 5 scratch ─ …`, whitespace-collapsed, with
+// the digit picked out of the box rule. The cards are not box art any more, so that regex
+// matched nothing and 147 rows went red at once, every one of them describing a screen
+// that was rendering perfectly.
+//   The replacement reads the ELEMENTS the card is built from: `.c-name` is the name and
+// `.c-num` is the 1-9 address. That is a stable hook rather than a looser pattern — a
+// regex relaxed enough to match both spellings would have proved neither, and the digit
+// is the whole point of numberOf(): it is what `Ctrl-f <n>` counts at the desk, so a card
+// renamed by its own index is the bug these rows exist to catch.
+const cardEls = () => app.all(n => n.className.split(/\s+/).includes('card'));
+const partOf = (card, cls) => {
+  const n = card.find(x => x.className.split(/\s+/).includes(cls));
+  return n ? n.textContent.trim() : '';
 };
-const shows = (name) => projectCards().some(t => new RegExp('\\u2500 (?:\\d+ )?' + name + ' ').test(t));
+const cardNamed = (name) => cardEls().find(c => partOf(c, 'c-name') === name);
+const projectCards = () => cardEls().map(n => n.textContent.replace(/\s+/g, ' '));
+const numberOf = (name) => {
+  const c = cardNamed(name);
+  const d = c && partOf(c, 'c-num');
+  return d ? Number(d) : null;
+};
+const shows = (name) => !!cardNamed(name);
 
 await until(() => !!tabStrip(), 4000);
 is('two profiles in the fleet draw a tab strip', true, !!tabStrip());
@@ -533,8 +547,7 @@ is('...with the numbers it started with', '1,2,3,4,5', Object.values(GLOBAL).joi
 // /api/projects: the count is computed from the rollup, and a re-render alone would only
 // redraw the numbers the screen already had.
 const tapHere = (name) => {
-  const c = app.all(n => n.className.split(/\s+/).includes('card'))
-    .find(t => new RegExp('\u2500 (?:\\d+ )?' + name + ' ').test(t.textContent.replace(/\s+/g, ' ')));
+  const c = cardNamed(name);
   if (!c) return false;
   (c.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: c, pointerId: 1 }));
   (c.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: c, pointerId: 1 }));
@@ -615,11 +628,16 @@ is('...numbered where it really is', 3, numberOf('gamma'));
 // cannot see: from the reader's side, nothing happened. The discriminator is the CURSOR —
 // moving `gamma` up lands it beside `alpha` at index 0 and selects a card that is on
 // screen, where a single step would select the hidden `beta` and leave nothing selected.
-const selectedCard = () => app.all(n => n.className.split(/\s+/).includes('sel'))
-  .map(n => n.textContent.replace(/\s+/g, ' '))[0] || '';
+const selectedCard = () => {
+  const c = app.all(n => n.className.split(/\s+/).includes('sel'))[0];
+  return c ? partOf(c, 'c-name') : '';
+};
 {
-  const card = app.all(n => n.className.split(/\s+/).includes('card'))
-    .find(t => /─ (?:\d+ )?gamma /.test(t.textContent.replace(/\s+/g, ' ')));
+  // By its name element, like every other card lookup here — and the grip is still the
+  // TITLE ROW, which is what carries `t`. It moved from the drawn top border to `.c-top`
+  // when the cards stopped being art, and it is still exactly one line, which is the
+  // property that keeps a reorder drag from fighting the list's own scroll.
+  const card = cardNamed('gamma');
   const grip = card && card.find(n => n.className.split(/\s+/).includes('t'));
   is('the hidden-neighbour case is set up', true, !!grip);
   if (grip) {
@@ -858,13 +876,17 @@ is('...and says why instead', true, /this fleet's lead/.test(app.textContent));
 // believed it had opened the worker was quietly reading the lead's screen. It passed,
 // because master has a transcript and a pane too. Anchored on the box-drawing title now,
 // which is the only place a card's own name appears.
+// ANCHORED ON THE CARD'S NAME ELEMENT, which is the only place a card's own name appears
+// — and which survived the cards ceasing to be box art. It used to anchor on the drawn
+// `╭ ─ 2 api-fix ─ ─ ─` title for exactly the same reason: master's card mentions
+// `api-fix` in its message line, so a bare /api-fix/ matched MASTER and every assertion
+// below believed it had opened the worker while quietly reading the lead's screen. It
+// passed, because master has a transcript and a pane too.
+//   Matched WHOLE, not as a substring, so `api-fix` cannot match `api-fix-2`.
 const cardTitled = (re) => app.find(n => {
   if (!n.className.split(/\s+/).includes('card')) return false;
-  // Whitespace-collapsed, because a card is drawn one span per cell (ansi.js's rule, and
-  // grid.js's `cells()`) and this DOM joins children with a space — so the title line
-  // arrives here as "\u256d \u2500 2 api-fix \u2500 \u2500 \u2500".
-  const t = n.textContent.replace(/\s+/g, ' ');
-  return new RegExp('\u256d ?\u2500 (?:\\d+ )?' + re.source + ' ').test(t);
+  const nm = n.find(x => x.className.split(/\s+/).includes('c-name'));
+  return !!nm && new RegExp('^(?:' + re.source + ')$').test(nm.textContent.trim());
 });
 
 // ── where the reader was, across the 5s poll ──────────────────────────────

@@ -345,9 +345,18 @@ const escSheet = () => evaluate(() => {
   const b = [...document.querySelectorAll('button')].find(x => /esc\s+back/.test(x.textContent));
   if (b) b.click(); return null;
 });
+// TAPS A CARD BY ITS NAME ELEMENT. The arguments used to be drawn titles — `'─ 1 acme-api '`
+// — because a card was box art and that string was the only place its own name appeared
+// unambiguously (master's card mentions api-fix in its message line). The cards are not
+// art any more, so those matched nothing and every assertion about the SESSION screen went
+// red while describing a screen the run had never reached.
+//   `.c-name` is the stable hook that replaced it, matched whole so `api-fix` cannot also
+// match `api-fix-2`.
 const tapCard = (re) => evaluate((re) => {
-  const c = [...document.querySelectorAll('#app .card')]
-    .find(n => new RegExp(re).test(n.textContent.replace(/\s+/g, ' ')));
+  const c = [...document.querySelectorAll('#app .card')].find(n => {
+    const nm = n.querySelector('.c-name');
+    return !!nm && new RegExp('^(?:' + re + ')$').test(nm.textContent.trim());
+  });
   if (!c) return false;
   for (const t of ['pointerdown', 'pointerup']) c.dispatchEvent(new PointerEvent(t, { bubbles: true, clientX: 5, clientY: 5 }));
   return true;
@@ -401,15 +410,15 @@ async function walk(w, h) {
   await clickText(', settings'); await sleep(500);
   await at('projects/settings sheet');
   await escSheet(); await sleep(250);
-  await tapCard('add project'); await sleep(500);
+  await tapCard('\\+ add project'); await sleep(500);
   await at('projects/add sheet');
   await escSheet(); await sleep(250);
-  await tapCard('─ 1 acme-api '); await sleep(1100);
+  await tapCard('acme-api'); await sleep(1100);
   await at('grid');
   await clickText('s schedule'); await sleep(500);
   await at('grid/schedule sheet');
   await escSheet(); await sleep(250);
-  await tapCard('─ 2 api-fix '); await sleep(1500);
+  await tapCard('api-fix'); await sleep(1500);
   await at('session/chat');
   // The two controls the photographs showed cut in half — AT EVERY TEXT SIZE, not only at
   // this browser's default. Walking the ladder here rather than once at the end is the
@@ -484,8 +493,8 @@ async function bigText() {
   await evaluate(() => { try { localStorage.clear(); } catch {} return null; });
   await goto(BASE); await sleep(700);
   await clickText('continue without a passkey'); await sleep(800);
-  await tapCard('─ 1 acme-api '); await sleep(1100);
-  await tapCard('─ 2 api-fix '); await sleep(1500);
+  await tapCard('acme-api'); await sleep(1100);
+  await tapCard('api-fix'); await sleep(1500);
   await evaluate(() => { document.body.style.fontSize = '30px'; return null; });
   await sleep(400);
   const m = await evaluate(() => {
@@ -572,8 +581,8 @@ async function keyboard(w, h, { indicator = true } = {}) {
   await evaluate(() => { try { localStorage.clear(); } catch {} return null; });
   await goto(BASE); await sleep(700);
   await clickText('continue without a passkey'); await sleep(800);
-  await tapCard('─ 1 acme-api '); await sleep(1100);
-  await tapCard('─ 2 api-fix '); await sleep(1500);
+  await tapCard('acme-api'); await sleep(1100);
+  await tapCard('api-fix'); await sleep(1500);
   const before = await evaluate(() => {
     const app = document.getElementById('app');
     return { appH: Math.round(app.getBoundingClientRect().height), innerH: innerHeight };

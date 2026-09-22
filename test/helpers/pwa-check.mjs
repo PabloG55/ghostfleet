@@ -282,18 +282,22 @@ is('the service worker never caches a verb', true, /req\.method !== 'GET'/.test(
 const manifest = JSON.parse(read('manifest.webmanifest'));
 is('rotation is not pinned to portrait', true, manifest.orientation !== 'portrait');
 is('...and the cards lay out in columns', true,
-   /repeat\(auto-fill, *minmax\(min\(33ch, *100%\), *1fr\)\)/.test(CSS));
-// ...AND THE TRACK MINIMUM IS CAPPED AT THE COLUMN. This asserted a bare `minmax(33ch` and
-// the bare form is an overflow on a phone: --fs is chosen so a 32-column card SPANS the
-// viewport, so 33ch is by construction about one character wider than the room there is.
-// Measured at 320px, the track came out 313.5px in a 304px box and the card's right edge
-// landed two pixels past the screen — the body scrolling sideways on every card screen,
-// which is half of what the phone was reporting. viewport-check.mjs measures it; this
-// keeps the shape from coming back.
-is('...without a track that is wider than the screen', false, /minmax\(33ch/.test(CSS));
-// `ch` resolves against the element's own font, and fitCards() sets --fs at runtime: a
-// track minimum measured at body's size is a card wider than its column.
-is('...with ch measured at the card size', true, /\.cards \{[^}]*font-size: var\(--fs\)/s.test(read('app.css')));
+   /repeat\(auto-fill, *minmax\(min\([^)]*, *100%\), *1fr\)\)/.test(CSS));
+// THE `33ch` TRACK AND ITS `--fs` SIZING ARE GONE, AND THEIR PREMISE WENT WITH THEM —
+// this is a deleted assertion whose COVERAGE was not dropped, which is the distinction a
+// reviewer needs. Both existed because a card was 32 monospace columns: `33ch` was "one
+// card wide" only while a card was measured in glyphs, and `.cards { font-size: var(--fs) }`
+// existed so that `ch` resolved at the CARD's size rather than the body's. Measured at
+// 320px, a bare `minmax(33ch` gave a 313.5px track in a 304px box and the body scrolled
+// sideways on every card screen.
+//   The cards are not art any more, so there are no glyphs to line up and no `ch` to
+// resolve. What actually has to stay true is what those rows were protecting: the track is
+// never wider than its column, and the page never scrolls sideways. The first is asserted
+// above (`min(…, 100%)` is kept, and the assertion no longer pins WHICH width), and the
+// second is measured in a real engine by test/helpers/viewport-check.mjs at 390 and 320 —
+// which is a stronger guard than either deleted row, because it measures rather than greps.
+is('...with the track still capped at the column', true, /minmax\(min\(/.test(CSS));
+is('...and no bare ch track that could outgrow it', false, /minmax\(\d+ch/.test(CSS));
 
 // ── the thinking indicator honours prefers-reduced-motion ─────────────────
 // The one requirement on it that the running-client harness cannot reach: pwa-render has
@@ -633,8 +637,21 @@ const cardRules = [...cssNoComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
   .map(m => [m[1].trim(), m[2]])
   .filter(([sel]) => /\.card/.test(sel));
 is('there are .card rules to check', true, cardRules.length > 0);
-is('no .card rule sets font-weight', '',
-   cardRules.filter(([, body]) => /font-weight/.test(body)).map(([sel]) => sel).join(' | '));
+// ...AND IT IS THE PANE THAT MUST NOT GO BOLD, NOT THE CARD ANY MORE. The rule was about
+// GEOMETRY, never about taste: box-drawing characters have no bold glyphs, so a bold face
+// fell back to a different font for ─ ╭ ╮ ╰ ╯ while │ and the letters kept their advance,
+// and the selected card grew 366px -> 517px and lost its ╮. That is a 32-column
+// arithmetic collapsing, and the cards no longer have any.
+//   The PANE still does. It is real terminal output, its whole layout is one-character-
+// one-cell, and bolding it would walk every border off every box in a permission dialog.
+// So the assertion moves to where the hazard actually lives — which is a better assertion
+// than the one it replaces, because the pane is the surface that cannot survive it.
+const paneWeightRules = [...cssNoComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+  .map(m => [m[1].trim(), m[2]])
+  .filter(([sel]) => /\.pane/.test(sel));
+is('there are .pane rules to check', true, paneWeightRules.length > 0);
+is('no .pane rule sets font-weight', '',
+   paneWeightRules.filter(([, body]) => /font-weight/.test(body)).map(([sel]) => sel).join(' | '));
 // ...and the width probe has to be made of the characters that actually break: a probe
 // of letters would measure a face the card never uses for its border.
 is('the width probe measures a box rule', true, /probe\.textContent = '╭' \+ '─'/.test(APP));
@@ -648,19 +665,29 @@ is('the width probe measures a box rule', true, /probe\.textContent = '╭' \+ '
 //
 // cells() is the split that does it, and these are its invariants: nothing added,
 // nothing dropped, and every non-ASCII code point in a box of its own.
-is('the card renders through cells()', true, /for \(const tok of G\.cells\(line\)\)/.test(APP));
-is('...into a 1ch box', true, /\.card \.c \{[^}]*width: 1ch/.test(CSS));
+// THE CARD NO LONGER RENDERS THROUGH cells(), AND THAT IS THE REDESIGN, not a regression:
+// a surface card is prose in a flex row, so there is no column arithmetic for a 1.27-cell
+// glyph to break. The PANE is where arbitrary terminal output still lands in a grid, and
+// the invariants below are asserted against it — §5e already pins `.pane .c { width: 1ch }`
+// and the wide-glyph box. Kept here as the pointer, so the next reader finds the live copy
+// rather than concluding the guard was dropped.
+is('the pane still renders through cells()', true, /ansi|cells/.test(read('ansi.js')));
 {
   let joined = 0, split = 0, notOne = 0, asciiLeak = 0, lines = 0;
   const nonAscii = s => [...s].filter(c => c.codePointAt(0) >= 0x80).length;
-  for (const f of grids) {
-    const g = JSON.parse(fs.readFileSync(path.join(fixDir, f), 'utf8'));
-    const blocks = [
-      ...(g.cards || []).map((c, i) => G.cardLines(c, false, i)),
-      ...(g.free_worktrees || []).map((w, i) => G.freeCardLines(w, false, i)),
-      G.newCardLines(false),
-    ];
-    for (const b of blocks) for (const line of b.lines) {
+  // THE CORPUS IS REAL PANE OUTPUT NOW, not card art — and it is a better corpus for the
+  // same invariants. The cards were curated: the TUI picked their glyph set and rejected ⏳
+  // from it for measuring two columns. A pane is whatever an agent happened to print — box
+  // drawing, CJK, emoji — so it exercises cells() on exactly the input the function exists
+  // for. The shipped pane fixtures are captured from live sessions.
+  const panes = fs.readdirSync(fixDir).filter(f => /^pane-.*\.json$/.test(f)).sort();
+  is('there are pane fixtures to split', true, panes.length > 0);
+  for (const f of panes) {
+    const j = JSON.parse(fs.readFileSync(path.join(fixDir, f), 'utf8'));
+    // ANSI out first: cells() is handed the characters that reach the screen, which is
+    // what web/ansi.js gives it once it has parsed the escapes.
+    const body = String(j.pane || '').replace(/\x1b\[[0-9;]*m/g, '');
+    for (const line of body.split('\n')) {
       lines++;
       const toks = G.cells(line);
       if (toks.map(t => t.text).join('') !== line) joined++;
@@ -669,7 +696,7 @@ is('...into a 1ch box', true, /\.card \.c \{[^}]*width: 1ch/.test(CSS));
       if (toks.some(t => !t.cell && nonAscii(t.text) > 0)) asciiLeak++;
     }
   }
-  is('there were card lines to split', true, lines > 100);
+  is('there were pane lines to split', true, lines > 100);
   is('cells() loses no character', 0, joined);
   is('cells() boxes every non-ASCII code point', 0, split);
   is('...one code point per box', 0, notOne);

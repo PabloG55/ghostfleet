@@ -58,12 +58,6 @@ export const STATUSES = ['need-you', 'working', 'ready', 'parked', 'idle', 'star
 // truncation and the two grids would disagree on where a branch name ends.
 export function vis(s) { return [...s].length; }
 export function clip(s, w) { s = String(s ?? ''); return vis(s) <= w ? s : [...s].slice(0, Math.max(0, w - 1)).join('') + '…'; }
-export function padEndV(s, w) { s = clip(s, w); return s + ' '.repeat(Math.max(0, w - vis(s))); }
-export function twoCol(l, r, w) {
-  l = clip(l, w - vis(r) - 1);
-  const gap = Math.max(1, w - vis(l) - vis(r));
-  return l + ' '.repeat(gap) + r;
-}
 export function humanAge(a) {
   if (a == null) return '';
   if (a < 60) return `${a}s`;
@@ -85,6 +79,10 @@ export function basename(p) {
 }
 
 // ── the card ──────────────────────────────────────────────────────────────
+// THE PANE'S RULER, NOT THE CARD'S, SINCE THE CARDS STOPPED BEING ART. app.js's
+// fitCards() still draws a 32-column box rule with these and measures it to set --fs —
+// which now sizes only the pane, where a cell really is a cell. The names are the TUI's
+// and are kept so the two files still say the same word for the same number.
 export const CW = 30;        // inner content width — the same 30 the TUI uses
 export const CARD_COLS = CW + 2;
 
@@ -94,96 +92,70 @@ export const CARD_COLS = CW + 2;
 // limited card that looks merely stale, which is the exact lie §4.3 is about.
 function limitAtOf(card) { return card.limit_at ?? card.limitAt ?? null; }
 
-// The five lines of a session card, minus the ANSI. `color` is a key of COLORS; the
-// whole card is drawn in it, as in the TUI, and `selected` reverses the title line.
-export function cardLines(card, selected = false, idx = -1) {
+// ── THE CARD, AS FACTS ────────────────────────────────────────────────────
+// The phone stopped drawing box art (it draws a surface card with a status chip and two
+// real lines of the agent's last message), so it needs the card's CONTENT rather than its
+// picture. This is that content, and it is deliberately the ONLY place the content is
+// decided: cardLines() below formats this into the TUI's 32 columns, and web/app.js's
+// cardEl() lays the same fields out as DOM.
+//
+// WHY ONE SOURCE AND NOT TWO RENDERERS READING THE CARD THEMSELVES. Every rule here is a
+// judgement that took an argument to settle — which of `folder` and `branch` is redundant,
+// that `claude` is the agent you do NOT print, that a limited session shows its reset time
+// instead of how long ago it spoke, that a scheduled send outranks both. A second reader
+// re-deriving those from the raw §4 object would drift on exactly the cases the comments
+// below exist to pin, and drift silently, because both would still render something.
+export function cardModel(card, selected = false, idx = -1) {
   const meta = STATUS[card.status] || STATUS.starting;
-  // 1-9 prefix = the digit that jumps straight to this card in the TUI; on the phone
-  // it is the card's position, which is what ⇧hjkl (drag) rewrites.
-  const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
-  const title = clip(`─ ${num}${card.label || card.name} `, CW);
-  const top = `╭${title}${'─'.repeat(Math.max(0, CW - vis(title)))}╮`;
+  // 1-9 = the digit that jumps straight to this card in the TUI; on the phone it is the
+  // card's position, which is what a drag rewrites.
+  const num = idx >= 0 && idx < 9 ? idx + 1 : null;
   const idle = card.age == null ? '' : (card.status === 'working' ? `busy ${humanAge(card.age)}` : `${humanAge(card.age)} ago`);
   // For a limited session the reset time is the only number that matters — "55m ago"
   // says when it last spoke, which is not the question you are asking of that card.
-  const right = card.sched ? `@${clockLabel(card.sched.at)}`
-              : card.status === 'limit' && limitAtOf(card) ? `↻ ${limitAtOf(card)}`
-              : idle;   // @ = scheduled send
-  const l1 = `│ ${padEndV(twoCol(meta.label, right, CW - 2), CW - 2)} │`;
+  const when = card.sched ? `@${clockLabel(card.sched.at)}`
+             : card.status === 'limit' && limitAtOf(card) ? `↻ ${limitAtOf(card)}`
+             : idle;   // @ = scheduled send
   // Leads with the WORKTREE — the thing the session is sitting in. The branch is
   // appended only when it ADDS something; on most worktrees it is the same string
   // twice. With a label on top, the session name takes the second slot instead: it is
   // what fleet-send/fleet-read address.
-  const l2text = card.label
+  const where = card.label
     ? `${card.name} · ${card.folder}`
     : (card.branch && card.branch !== card.folder ? `${card.folder} · ${card.branch}` : (card.folder || card.branch));
-  // ── the right-hand slot of l2: the agent, the PR number, or both ─────────
-  // WHERE THE PR NUMBER GOES, and why not the other two places it could have gone.
-  //
-  //   NOT THE TITLE. It is the most prominent line, but it is also the one with no spare
-  //   room by construction: the filler dashes it would sit in are whatever a long session
-  //   name did not use, so the number would appear on short names and vanish on long ones.
-  //   It already carries the 1-9 jump digit too, and a card reading `1 api-fix … #1184` puts
-  //   two unrelated numbers on one line, one of which is a keystroke.
-  //   NOT l1. `twoCol` there clips the LEFT, and the left is the status label — the single
-  //   most important word on the card. '⚠ interrupted' (13) plus '#12345 busy 12m' (15) plus
-  //   a gap is 29 in a 28-column line, so the thing that would give way is the status.
-  //   So: l2's right slot, which is empty on every card running the default agent.
-  //
-  // PRECEDENCE WHEN BOTH ARE PRESENT: show both. They are 5-8 characters each, neither is
-  // derivable from anything else on the grid, and dropping either loses a whole fact. What
-  // gives way is the left side — `worktree · branch` — and that is the right thing to lose,
-  // because the PR number is a shorter name for the same identity the branch is there to
-  // carry. A card that says `#1184` has told you which branch it is.
-  //
-  // THE NUMBER IS RIGHTMOST, always, so it lands in the same column whether or not an agent
-  // shares the slot. Scanning nine cards for a PR number is the thing this exists for, and
-  // a number that moves left by six characters on the one codex card is a number you have
-  // to hunt for.
-  //
-  // MEASURED, because a label measured at full width going blind in a narrow one is this
-  // repo's most repeated bug. Every line stays exactly CW+2 in all of it — `#12345` alone,
-  // with `opencode` beside it, and against a 44-character branch — because twoCol clips the
-  // LEFT and the number is on the right, so the number is the one thing that cannot be
-  // truncated. twoCol's own floor is below anything reachable here: with `#12345` it holds
-  // down to a 8-column slot and with `opencode #12345` down to 17, against the 28 this uses.
-  const agentTag = card.agent && card.agent !== 'claude' ? card.agent : '';
-  const prTag = card.pr ? `#${card.pr}` : '';
-  const l2 = `│ ${padEndV(twoCol(l2text, [agentTag, prTag].filter(Boolean).join(' '), CW - 2), CW - 2)} │`;
-  const l3 = `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
-  const bot = `╰${'─'.repeat(CW)}╯`;
-  return { lines: [top, l1, l2, l3, bot], color: meta.color, selected, kind: 'card', status: card.status };
+  return {
+    kind: 'card', num, selected,
+    title: card.label || card.name,
+    name: card.name,
+    status: card.status,
+    // The TUI's own word for the status, glyph and all. §7: the vocabulary is the TUI's,
+    // so the chip prints what the desk prints rather than a synonym chosen for a phone.
+    statusLabel: meta.label,
+    color: meta.color,
+    when, where,
+    agent: card.agent && card.agent !== 'claude' ? card.agent : '',
+    pr: card.pr ? `#${card.pr}` : '',
+    // The agent's last line. On the phone this is the single most valuable thing on the
+    // screen and it now gets two full lines; the TUI quotes it into one.
+    msg: card.msg || '',
+    // What stands in for it when there is none — a session that is attached says so, and
+    // anything else has simply not spoken yet.
+    placeholder: card.attached ? '(attached)' : '…',
+    lead: !!card.lead,
+  };
 }
 
-export function newCardLines(selected = false) {
-  const t = clip('─ + new session ', CW);
-  const top = `╭${t}${'─'.repeat(Math.max(0, CW - vis(t)))}╮`;
-  const mk = s => `│ ${padEndV(s, CW - 2)} │`;
-  const bot = `╰${'─'.repeat(CW)}╯`;
-  return { lines: [top, mk('start a Claude session'), mk('in a checkout…'), mk(''), bot],
-           color: 'yellow', selected, kind: 'new', dim: !selected };
-}
+// The five lines of a session card, minus the ANSI. `color` is a key of COLORS; the
+// whole card is drawn in it, as in the TUI, and `selected` reverses the title line.
+//
+// BUILT FROM cardModel(), so the two renderers cannot disagree about what the card says —
+// only about how it looks, which is now the intended difference.
+
 
 // A worktree that exists with no live session on it. ⏎ (tap) goes straight to naming
 // one — the worktree is already identified, so the checkout picker is skipped.
-export function freeCardLines(w, selected = false, idx = -1) {
-  const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
-  const title = clip(`─ ${num}${basename(w.path)} `, CW);
-  const top = `╭${title}${'─'.repeat(Math.max(0, CW - vis(title)))}╮`;
-  const mk = s => `│ ${padEndV(s, CW - 2)} │`;
-  const bot = `╰${'─'.repeat(CW)}╯`;
-  return { lines: [top, mk('· FREE'), mk(w.branch), mk(w.task ? `"${w.task}"` : '(no session yet)'), bot],
-           color: 'grey', selected, kind: 'free' };
-}
 
 // The projects screen's card (boxCard): a title and three free-text rows.
-export function boxCard(title, rows, color, selected = false, kind = 'project') {
-  const t = clip(`─ ${title} `, CW);
-  const top = `╭${t}${'─'.repeat(Math.max(0, CW - vis(t)))}╮`;
-  const body = [0, 1, 2].map(i => `│ ${padEndV(rows[i] || '', CW - 2)} │`);
-  const bot = `╰${'─'.repeat(CW)}╯`;
-  return { lines: [top, ...body, bot], color, selected, kind };
-}
 
 // ── the counts line ───────────────────────────────────────────────────────
 // Computed from the CARDS, the way renderGrid does, so the summary cannot disagree
@@ -211,36 +183,70 @@ export function countsSegments(counts) {
   if (c.parked) seg.push({ text: ' · ' }, { text: `${c.parked} parked`, color: 'grey' });
   return seg;
 }
+// The same counts as ONE string. Its caller is test/helpers/grid-parity.mjs, and that is
+// a real caller rather than rot: the phone's count strip and the TUI's header must agree
+// on the words and the numbers, and comparing one string to one string is how that is
+// asked. The strip renders the SEGMENTS (it colours each clause); this is the same data
+// flattened, so the two cannot drift.
 export function countsLine(counts) { return countsSegments(counts).map(s => s.text).join(''); }
 
 // ── the projects card ─────────────────────────────────────────────────────
 // pRender's rules, in order: need > working > all-parked > any sessions > none. The
 // order is the whole content of the card — a project with one blocked worker and four
 // happy ones is a project that needs you, and nothing else about it matters yet.
-export function projectCard(p, idx = -1, selected = false) {
+
+// ── the other three cards, as facts ───────────────────────────────────────
+// Same contract as cardModel() above: the FACTS, decided once, formatted by whoever is
+// drawing. projectModel shares projectCard()'s rollup rules by calling it for the one
+// derived string that carries a judgement — which of need/working/parked/ready wins.
+export function projectModel(p, idx = -1, selected = false) {
   const st = p.sessions || { need: 0, working: 0, parked: 0, total: 0 };
+  // pRender's order, and the order IS the content: a project with one blocked worker and
+  // four happy ones is a project that needs you, and nothing else about it matters yet.
   let line, color;
   if (st.need > 0) { line = `● ${st.need} need you`; color = 'red'; }
   else if (st.working > 0) { line = `◆ ${st.working} working`; color = 'cyan'; }
   else if (st.parked > 0 && st.parked === st.total) { line = `⏸ ${st.parked} parked`; color = 'grey'; }
   else if (st.total > 0) { line = `${st.total} session${st.total > 1 ? 's' : ''} · ready`; color = 'green'; }
   else { line = 'no sessions yet'; color = 'grey'; }
-  // a message scheduled to this project's master shows as @<time> on the card
-  if (p.sched && p.sched.at) line += `  @${clockLabel(p.sched.at)}`;
-  // The project's default agent appears beside its profile only when it HAS one: the
-  // overwhelming case is claude, and printing it everywhere would hide the one project
-  // that actually differs.
-  //   ...and 'claude' is not one of those, which is the same test the SESSION card two
-  // functions up already makes. The daemon normalises the empty 4th column to the word
-  // 'claude' before it goes on the wire, so a bare truthiness check printed "work · claude"
-  // on every card on a real fleet — hiding the one project that actually differs, which is
-  // the exact thing this line exists to show. The fixtures say null and never caught it.
-  const who = p.agent && p.agent !== 'claude' ? `${p.profile} · ${p.agent}` : p.profile;
-  const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
-  return boxCard(`${num}${p.name}`, [who, homeTilde(p.path), line], color, selected, 'project');
+  return {
+    kind: 'project', selected, color,
+    num: idx >= 0 && idx < 9 ? idx + 1 : null,
+    title: p.name,
+    // The project's default agent appears beside its profile only when it HAS one: the
+    // daemon normalises the empty column to 'claude', so printing it everywhere would hide
+    // the one project that actually differs — which is the whole point of showing it.
+    where: p.agent && p.agent !== 'claude' ? `${p.profile} · ${p.agent}` : p.profile,
+    path: homeTilde(p.path),
+    statusLabel: line,
+    when: p.sched && p.sched.at ? `@${clockLabel(p.sched.at)}` : '',
+    msg: '', placeholder: '', agent: '', pr: '', lead: false,
+  };
 }
-export function addProjectCard(selected = false) {
-  return boxCard('+ add project', ['choose a root', 'folder…', ''], 'yellow', selected, 'addproject');
+export function addProjectModel(selected = false) {
+  return { kind: 'addproject', selected, color: 'yellow', num: null,
+           title: '+ add project', where: 'choose a root folder…', path: '',
+           statusLabel: '', when: '', msg: '', placeholder: '', agent: '', pr: '', lead: false };
+}
+export function newModel(selected = false) {
+  return { kind: 'new', selected, color: 'yellow', num: null,
+           title: '+ new session', where: 'start a Claude session in a checkout…', path: '',
+           statusLabel: '', when: '', msg: '', placeholder: '', agent: '', pr: '', lead: false };
+}
+// A worktree that exists with no live session on it. A tap goes straight to naming one —
+// the worktree is already identified, so the checkout picker is skipped.
+export function freeModel(w, selected = false, idx = -1) {
+  return {
+    kind: 'free', selected, color: 'grey',
+    num: idx >= 0 && idx < 9 ? idx + 1 : null,
+    title: basename(w.path),
+    statusLabel: '· FREE',
+    where: w.branch || '', path: '',
+    when: '',
+    msg: w.task || '',
+    placeholder: '(no session yet)',
+    agent: '', pr: '', lead: false,
+  };
 }
 // The TUI shortens $HOME to ~ everywhere it prints a path. The phone has no idea what
 // $HOME is, so the server sends `home` and this applies the same shortening — without

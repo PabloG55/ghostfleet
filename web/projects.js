@@ -103,6 +103,10 @@ function ProjectsScreen(p) {
 			nodes: p.cards,
 			listRef: p.listRef
 		}),
+		p.toast ? /* @__PURE__ */ u("div", {
+			class: ("toast " + (p.toast.kind || "")).trim(),
+			children: p.toast.text
+		}) : null,
 		/* @__PURE__ */ u("div", {
 			class: "verbs",
 			children: p.verbs.map((v, i) => /* @__PURE__ */ u(Btn, {
@@ -114,11 +118,7 @@ function ProjectsScreen(p) {
 		/* @__PURE__ */ u("div", {
 			class: "hint",
 			children: p.hint
-		}),
-		p.toast ? /* @__PURE__ */ u("div", {
-			class: ("toast " + (p.toast.kind || "")).trim(),
-			children: p.toast.text
-		}) : null
+		})
 	] });
 }
 function mount(container, props) {

@@ -174,11 +174,15 @@ function ProjectsScreen(p) {
       <ProfileTabs tabs={p.tabs} onTab={p.onTab} />
       <ConfirmBar confirm={p.confirm} />
       <CardList nodes={p.cards} listRef={p.listRef} />
+      {/* ABOVE THE FOOTER, IN FLOW. The toast is a band of the shell column now rather than
+          a fixed overlay, so its position in this fragment is its position on screen — and
+          the one place it must never be is over a control. On the session screen the
+          equivalent slot is directly above the composer; here it is above the verbs. */}
+      {p.toast ? <div class={('toast ' + (p.toast.kind || '')).trim()}>{p.toast.text}</div> : null}
       <div class="verbs">
         {p.verbs.map((v, i) => <Btn key={i} label={v.label} cls={v.cls} onClick={v.onClick} />)}
       </div>
       <div class="hint">{p.hint}</div>
-      {p.toast ? <div class={('toast ' + (p.toast.kind || '')).trim()}>{p.toast.text}</div> : null}
     </Fragment>
   );
 }
