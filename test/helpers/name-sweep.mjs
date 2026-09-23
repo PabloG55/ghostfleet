@@ -75,6 +75,7 @@ if (process.argv[2] === '--digest') {
 // doc-fixtures' membership test is the better shape wherever it fits. Add to this when you
 // find one; `--digest` means doing so costs no name in the diff.
 export const DENY = new Set([
+  '91bd7c698252b8db',   // the identity a merge composed into two commits
   'd376caa575c4bc6a',   // 7 chars
   'a273e332152a4cae',   // 8 chars
   '5e1e022d237aa135',   // 10 chars
@@ -264,6 +265,36 @@ hits.sort();
 // failure itself reprinting what it is complaining about — in CI logs, which are public too.
 is('no real project name in the tree', '', hits.join(' '));
 
+// ── 1b. the commits, not just the tree ───────────────────────────────────
+// A TREE CAN BE CLEAN WHILE ITS HISTORY IS NOT, and the history is what a clone publishes.
+// Two things reach a public branch that no file in the tree records: the author/committer
+// of every commit, and whatever a server-side merge composes into the message — GitHub's
+// squash writes its own Co-authored-by trailers from the account's linked addresses, and
+// that commit never passes through a local pre-push hook. Measured: two work addresses as
+// author fields and two more as squash trailers, all behind a sweep that reported clean.
+//   Runs on whatever history this clone has. CI's checkout is shallow, so on a push to
+// staging it reads the one commit that push produced — which is exactly the merge commit
+// GitHub composed, the one nothing else ever inspects. Locally it reads everything.
+function commitHits(logText) {
+  const out = new Set();
+  for (const line of logText.split('\n')) for (const c of candidates(line)) if (DENY.has(digest(c))) out.add(c);
+  return out;
+}
+let log = '';
+try {
+  log = execFileSync('git', ['-C', ROOT, 'log', '--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%B%x1e', '-n', '2000', 'HEAD'],
+    { encoding: 'utf8', maxBuffer: 64 << 20 });
+} catch {}
+is('the history this clone has is readable', true, log.length > 0);
+const badCommits = [];
+for (const rec of log.split('\x1e')) {
+  const f = rec.trim().split('\x1f');
+  if (f.length < 6) continue;
+  if (commitHits(f.slice(1).join('\n')).size) badCommits.push(f[0].slice(0, 12));
+}
+// Location only, never the name — CI logs are public too.
+is('no real name in any commit author, committer or message', '', badCommits.join(' '));
+
 // ── 2. the exemptions are live, not stale ────────────────────────────────
 for (const rel of EXEMPT) {
   const abs = path.join(ROOT, rel);
@@ -291,6 +322,14 @@ DENY.add(digest(CANARY));
 
 const caught = (line) => [...candidates(line)].some(c => DENY.has(digest(c)));
 is('a planted name is caught', true, caught(`# seen once on ${CANARY} last week`));
+// ...and in the fields section 1b reads, which a tree sweep never saw. Both shapes a work
+// identity actually took: an author address, and a trailer a squash merge composed.
+is('a planted name in an AUTHOR address is caught', true,
+   commitHits(`Jordan Doe\njdoe@${CANARY}.example\nGitHub\nnoreply@github.com`).size > 0);
+is('a planted name in a squash Co-authored-by trailer is caught', true,
+   commitHits(`Fix a thing (#12)\n\nCo-authored-by: someone <x@${CANARY}.example>`).size > 0);
+is('...and a clean record is not', 0,
+   commitHits('Fix a thing (#12)\n\nPabloG55\n1+PabloG55@users.noreply.github.com').size);
 is('...and an ordinary comment is not', false, caught('# the pane is the truth for "is it working"'));
 
 // EVERY SPELLING A NAME ACTUALLY ARRIVES IN. Each of these is a shape that was really in

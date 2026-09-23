@@ -17,6 +17,13 @@
     run on `staging` is what catches that, so **a red `staging` is everyone's, not the
     last merger's alone.**
   - Admin bypass is on. It exists for a runner outage, not for a hurry.
+- **Commit with the identity git is already configured with — never set one per command.**
+  No `-c user.email=…`, no `--author`, no `GIT_AUTHOR_*`. An agent's session context supplies
+  the account's address "for authorship", and taking that literally published a work address
+  as the author of five commits, which GitHub's squash merge then promoted into a
+  `Co-authored-by` trailer on a public branch. The pre-push hook and the suite's name sweep
+  now refuse a listed name in author, committer and message alike; merge with an explicit
+  `--subject`/`--body` so GitHub composes nothing of its own.
 - **Never add a `Co-Authored-By:` trailer**, and don't add any other AI attribution
   (no "generated with", no tool footer). Commits are authored by the repo owner, full
   stop.
