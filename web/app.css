@@ -116,12 +116,18 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
-/* THE FOOTER USED TO CARRY env(safe-area-inset-bottom) AND IT IS GONE, so the card list now
- * runs to the physical bottom of the screen — under the home indicator, where the last card
- * is half covered and awkward to tap. The inset moves here with the space it was
- * protecting. This is the thing deleting a bottom band silently takes away, and nothing on
- * a desktop engine would ever show it: the insets are 0 on every one of them. */
-#app.shell > .cards { padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+/* THE FOOTER USED TO CARRY env(safe-area-inset-bottom) AND IT IS GONE, so the card list
+ * needs the last card clear of the home indicator rather than half under it.
+ *   THE INSET IS THE PARENT'S, AND IT IS ONLY OWED ONCE. #app already ends in
+ * calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px), and box-sizing is border-box
+ * with height: 100dvh — so this list's box already STOPS that far above the physical
+ * bottom. Adding the inset again here spent it twice: 22px + 2 × inset of scrollable
+ * nothing after the last card, which is ~90pt on a phone whose inset is 34. Reported as a
+ * band of unused space above the bottom of the screen.
+ *   Nothing on a desktop engine shows it, which is why it survived review and why the
+ * suite now asks the question structurally instead: every inset on this path is 0 on
+ * every desktop engine, so both the bug and the fix render identically there. */
+#app.shell > .cards { padding-bottom: 14px; }
 #app.shell > .paneview {
   flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0;
 }

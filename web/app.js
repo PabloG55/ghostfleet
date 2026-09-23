@@ -198,7 +198,13 @@ function lastFetchedAt() {
   catch { return Math.floor(Date.now() / 1000); }
 }
 
-function lock() { S.locked = true; api.clearToken(); render(); }
+function lock() {
+  S.locked = true; api.clearToken(); render();
+  // The session just ended, so a swap that was waiting for it is free now — and this is
+  // the moment the poll cannot cover, because the poll does not run while locked. Without
+  // this, deferring under a live session would defer until the next cold open.
+  takeNewClientIfIdle();
+}
 
 // ── tiny DOM ──────────────────────────────────────────────────────────────
 function el(tag, attrs = {}, kids = []) {
@@ -2079,9 +2085,27 @@ async function shellVersionOrGuess() {
 
 // Set when a newer service worker has taken control and this page is now the stale one.
 let swReloadPending = false;
+// WHEN IT IS FREE TO SWAP CLIENTS, as a value rather than as a condition inside the
+// caller — the same reason onVisibleAction above is named and exported: the listener that
+// arms this is `controllerchange`, which the suite's DOM does not have, so the decision
+// had never been executed by a single assertion.
+export function reloadAction(pending, typing, authed) {
+  if (!pending) return 'none';
+  if (typing) return 'wait';               // never mid-sentence: a reload eats S.draft
+  // NEVER UNDER A LIVE SESSION, and this is the whole fix. The token is in memory by
+  // design, so a reload ENDS the session — do it while somebody is holding one and they
+  // land on the lock screen they just cleared, and the passkey they just spent bought
+  // them one second of app.
+  //   It used to be guarded on pollPaused(), which counts S.locked as paused. That
+  // deferred the swap while locked and spent it the instant the app unlocked — waiting
+  // for precisely the transition that costs a Face ID. Locked is the FREE moment: there is
+  // no session to lose and the reader is about to authenticate anyway, so the new client
+  // is what they authenticate into.
+  if (authed) return 'wait';
+  return 'reload';
+}
 export function takeNewClientIfIdle() {
-  if (!swReloadPending) return false;
-  if (pollPaused()) return false;          // not while you are typing into it
+  if (reloadAction(swReloadPending, typingNow(), api.haveToken()) !== 'reload') return false;
   try { location.reload(); } catch { return false; }
   return true;
 }
@@ -2102,6 +2126,15 @@ export function renderWasDeferred() { return renderDeferred; }
 
 export function pollPaused() {
   if (document.hidden || S.locked || S.sheet || S.confirm) return true;
+  return typingNow();
+}
+// THE TYPING HALF ON ITS OWN. pollPaused() answers "should the 5s poll hold off", and
+// S.locked is a perfectly good reason for that — but it is the WRONG question for the
+// client swap below, which is free precisely when the app is locked. Sharing one
+// implementation of the sentence test keeps the two from drifting; the difference between
+// them is which other states they add to it, and that difference is the bug this split
+// exists to fix.
+export function typingNow() {
   // Typing counts. refresh() ends in a render, render() empties #app and rebuilds it, so
   // a poll that lands while the composer has focus destroys the element the keyboard is
   // attached to. Reported as "it hides the keyboard every time, I cannot type for more

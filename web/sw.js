@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 83ef01db81d2
+// CLIENT-HASH: 526b3b9af655
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -175,6 +175,17 @@
 // more space than the next message from the same speaker. The toast is clamped to two lines
 // as well: a photo's toast carries a file path, wrapped to four lines, and took that height
 // out of the transcript for 4.2 seconds — "the toast will block the chat".
+// v37 STOPS A CLIENT SWAP COSTING A FACE ID, and takes back a doubled safe-area inset.
+// The swap: a pending service worker was held back by pollPaused(), which counts S.locked
+// as paused — so it waited for the unlock and spent itself one second after the passkey,
+// reloading the page and dropping the in-memory token. One Face ID to unlock, a second to
+// stay. It waits for a live session to end now, and a lock spends it.
+//   The inset: #app already ends in the bottom inset and box-sizing is border-box, so the
+// card list was adding it a second time — 22px + 2 x inset of scrollable nothing after the
+// last card.
+//   THIS BUMP IS THE FIX FOR ANYBODY ALREADY LOOPING, and also the last loop they are
+// asked to sit through: taking this version is itself one more swap, so it costs the
+// second Face ID one final time and every deploy after it is free.
 // v35 MOVES THE GRID'S FOOTER INTO A ⋯ IN THE HEADER. Six icon+label buttons wrapped to
 // two rows, plus a three-line hint under them, cost 179 of 844 points at 390x844 — 21% of
 // the screen. Measured: chrome was 292pt (34.6%) and the card list got 536, which fits
@@ -196,7 +207,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v36';
+const VERSION = 'ghostfleet-v37';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

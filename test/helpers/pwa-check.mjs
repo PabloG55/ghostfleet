@@ -235,6 +235,32 @@ is('the shell height is dvh, not the visual viewport', true,
    /#app\.shell \{\s*height: 100vh; height: 100dvh;/.test(CSS));
 is('...and nothing drives that height from visualViewport', false, /--vvh/.test(CSS));
 is('...and the client never writes a --vvh at all', false, /--vvh/.test(JS['app.js']));
+
+// ── the bottom inset is owed ONCE ─────────────────────────────────────────
+// Reported as a band of unused space above the bottom of the screen. #app ends in
+// calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px), box-sizing is border-box and
+// the shell is height: 100dvh — so every child's box ALREADY stops that far above the
+// physical bottom. A child that adds the inset again spends it twice; the card list did,
+// which came to 22px + 2 x inset of scrollable nothing after the last card.
+//
+// STRUCTURAL, BECAUSE NO ENGINE HERE CAN SHOW IT. env(safe-area-inset-*) is 0 on every
+// desktop browser and in headless Chrome, so the bug and the fix render pixel-identical to
+// every instrument this suite has — viewport-check included. The only thing that can tell
+// them apart is a device with a home indicator, which CI does not have. So the rule is
+// counted in the stylesheet instead.
+const css = CSS;
+const bottomInsetRules = css.split('\n')
+  .filter(l => /env\(safe-area-inset-bottom\)/.test(l) && !/^\s*\*/.test(l) && !/^\s*\/\*/.test(l));
+is('the bottom inset is declared where it is owed', 2, bottomInsetRules.length);
+// #app is the one that owns it for the whole shell...
+is('...once on #app itself', 1, bottomInsetRules.filter(l => /--kb-inset/.test(l)).length);
+// ...and the only other is the sheet, which is an overlay OUTSIDE #app's padding box and
+// therefore owes its own. A third would be a child paying twice.
+is('...and once on the sheet, which is not inside it', 1,
+   bottomInsetRules.filter(l => !/--kb-inset/.test(l)).length);
+// The row that goes red if a shell CHILD starts re-adding it.
+is('no shell child re-adds the bottom inset', 0,
+   bottomInsetRules.filter(l => /#app\.shell\s*>/.test(l)).length);
 // The keyboard is still DETECTED, because the collapsing bottom inset above needs to know.
 // Detection only — one padding, no height, no scrolling.
 is('the keyboard is still detected for the inset', true,
@@ -555,14 +581,38 @@ is('there is a session fixture longer than one page', true,
 is('the worker answers which version it is', true,
    /type === 'version'[\s\S]{0,160}postMessage\(\{ version: VERSION \}\)/.test(JS['sw.js']));
 is('...and the client asks it', true, /askShellVersion/.test(JS['app.js']));
+
+// ── the client swap must not spend somebody's passkey ─────────────────────
+// The decision itself is driven in pwa-render (reloadAction). What that cannot see is how
+// takeNewClientIfIdle FEEDS it, and the wiring is where the bug lived: it asked
+// pollPaused(), which counts S.locked as paused, so a pending swap was held back while the
+// app was locked and spent the instant it unlocked — the one transition that costs a Face
+// ID. Structural, because the arming event is `controllerchange` and no fake DOM has one.
+const swap = (/export function takeNewClientIfIdle\(\)[\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
+is('the swap guard exists', true, swap.length > 0);
+is('...and asks whether a session is live', true, /haveToken\(\)/.test(swap));
+// The row that would go red if the locked-conflation came back.
+is('...and not whether the POLL is paused', false, /pollPaused\(\)/.test(swap));
+is('...asking the typing question directly instead', true, /typingNow\(\)/.test(swap));
+// ...and locking spends a swap that was waiting, or deferring under a live session would
+// defer until the next cold open — the poll cannot cover it, because it does not run while
+// locked.
+const lockFn = (/function lock\(\)[\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
+is('locking spends a pending swap', true, /takeNewClientIfIdle\(\)/.test(lockFn));
 is('...and shows the answer', true, /client \$\{swVersion/.test(JS['app.js']));
 
 is('the worker claims open pages', true, /clients\.claim\(\)/.test(JS['sw.js']));
 is('...and the client reacts to being claimed', true,
    /addEventListener\('controllerchange'/.test(JS['app.js']));
 // ...but never mid-sentence: a reload throws away the draft, which lives in memory.
+//   THIS ROW USED TO PIN pollPaused(), and that premise changed rather than the coverage
+// being dropped. pollPaused() answers "should the 5s poll hold off" and counts S.locked as
+// a reason — which is right for the poll and wrong here, because locked is precisely when
+// a client swap is FREE. Pinning it was pinning the bug: the swap waited for the unlock and
+// spent itself one second after the passkey. The intent is unchanged and is asked of the
+// typing question directly.
 is('...without reloading while you type', true,
-   /function takeNewClientIfIdle[\s\S]{0,300}pollPaused\(\)/.test(JS['app.js']));
+   /function takeNewClientIfIdle[\s\S]{0,300}typingNow\(\)/.test(JS['app.js']));
 
 // ── 4. §7's guardrails, in §7's words ─────────────────────────────────────
 // Extracted from fleet-grid.mjs rather than typed here, so a reworded TUI prompt shows

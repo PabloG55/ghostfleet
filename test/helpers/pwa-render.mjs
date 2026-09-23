@@ -1859,4 +1859,28 @@ is('...but is the only tab when demo is all there is', 'demo', appmod.profileTab
 // One profile draws no strip at all (the screen treats a single name as furniture), so
 // the new user gets cards and nothing else — which is the point of showing it to them.
 is('...which is a single name, so no strip', 1, appmod.profileTabs(demoOnly).length);
+// ── a client swap must not cost a Face ID ─────────────────────────────────
+// REPORTED: "unlocks with Face ID, it succeeds, and it throws him back to the lock screen
+// and asks again." It is not the assertion racing a re-lock — that was fixed, and the log
+// shows it working: the assert returns 200 and /api/grid and /api/session both answer
+// [homescreen] a second later. What follows is a full page NAVIGATION — `GET /` and the
+// whole shell re-fetched — and then a fresh load with no token, a 401 probe, and a second
+// challenge.
+//
+// The navigation is this app reloading itself to pick up a deployed client. The session
+// token is deliberately in memory only (api.js: "a token that outlives the tab outlives
+// the lock"), so a reload always ends the session — and the pending swap used to be
+// deferred by pollPaused(), which is TRUE while S.locked. So it waited for exactly the
+// moment that costs a passkey: the unlock. One Face ID to unlock, the swap spends itself,
+// and the second Face ID is the one that sticks. Once per deploy, which is why it reads as
+// an intermittent loop rather than an update.
+is('no pending swap is not a reload', 'none', appmod.reloadAction(false, false));
+is('...and still not one while typing', 'none', appmod.reloadAction(false, true));
+is('a pending swap waits for the keyboard', 'wait', appmod.reloadAction(true, true));
+// THE ROW THAT FAILS BEFORE THE FIX. A live session must hold the swap off: reloading
+// under it drops the token and sends the reader back to the lock screen they just cleared.
+is('a pending swap waits for a live session', 'wait', appmod.reloadAction(true, false, true));
+// ...and the moment it IS free: locked, nothing typed, no session to lose. This is the
+// case the old guard refused, because pollPaused() counts S.locked as "paused".
+is('a locked app is when it is free to swap', 'reload', appmod.reloadAction(true, false, false));
 console.log(rows.join('\n'));
