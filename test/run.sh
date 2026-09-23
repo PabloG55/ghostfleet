@@ -11458,6 +11458,74 @@ done
 for f in "$ROOT"/mcp/*.mjs "$ROOT"/test/helpers/*.mjs; do
   node --check "$f" >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error"
 done
+# ── fleet-restart: every session comes back to ITS OWN conversation ──────────
+# THE BUG THIS EXISTS FOR, measured on a real machine rather than imagined: one
+# checkout held TWELVE live sessions, all reading "scratch · main", each with its
+# own conversation id. The only resume path in the code was `--continue`, which
+# reopens the most recent conversation IN THAT FOLDER — so it can reach exactly one
+# of the twelve and the other eleven are unreachable. Reported as "i use parallel
+# session and if i type exit the session is completely remove it and i cant reopen
+# it easily", and it is also why a fleet could not be moved onto a new Claude Code
+# version without losing work.
+#
+# THE CHECKS LIVE IN THE SCRIPT, not here, and this runs them. They need no tmux
+# and no live fleet — what is being proved is the LOOKUP and the DECISION, and both
+# are pure functions of the records on disk, so a test that had to stand up twelve
+# real sessions would be a test nobody runs. `--self-test` prints the same
+# "name <US> want <US> got" rows every other helper here prints.
+#
+# WATCHED GOING RED by making sid_for resolve the way --continue does (newest in
+# the folder, ignoring which session asked): "each resolves to ITS OWN conversation
+# id" went to got=13 of 14 wrong, and "a slot with no record resolves to nothing"
+# started returning somebody else's id — which is the silent half of the bug.
+group "fleet-restart resumes by recorded id, never by --continue"
+if [ -x "$ROOT/bin/fleet-restart" ]; then
+  FRO="$(mktemp -d "$TEST_RUNS.$$.frst.XXXXXX")"
+  PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" --self-test > "$FRO/out" 2> "$FRO/err"
+  is "fleet-restart --self-test ran"    "0"   "$?"
+  is "...without complaining"           ""    "$(head -2 "$FRO/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A FLOOR, for the same reason every driven helper here has one: a script that
+  # dies emits nothing, and in a 4000-assertion run that is indistinguishable from
+  # a group that passed.
+  is "...and produced its checks"       "yes" "$([ "$(wc -l < "$FRO/out")" -ge 18 ] && echo yes || echo "no: $(wc -l < "$FRO/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$FRO/out"
+  rm -rf "$FRO"
+else
+  skip "fleet-restart resumes by recorded id" "bin/fleet-restart is not executable"
+fi
+
+# ── ...and it refuses rather than guessing ───────────────────────────────────
+# The two refusals are the whole safety property: a session with no recorded id is
+# REPORTED, never opened with --continue in a folder that holds somebody else's
+# conversation. Asserted against the real script with an empty fleet directory, so
+# there is nothing for it to find and it still must not fall back.
+group "fleet-restart refuses rather than guessing"
+if [ -x "$ROOT/bin/fleet-restart" ]; then
+  FRD="$(mktemp -d "$TEST_RUNS.$$.frd.XXXXXX")"
+  mkdir -p "$FRD/fleet"
+  out="$(CLAUDE_FLEET_DIR="$FRD/fleet" PATH="$ROOT/bin:$PATH" \
+         "$ROOT/bin/fleet-restart" -s cf-nope --reopen anything 2>&1)"
+  is "reopening with no record is refused"     "1" "$(printf '%s' "$out" | grep -c 'no recorded conversation' || true)"
+  is "...and it says it will not use --continue" "1" "$(printf '%s' "$out" | grep -c -- '--continue' || true)"
+  is "...and a bare --reopen with no name is an argument error" "2" \
+     "$(CLAUDE_FLEET_DIR="$FRD/fleet" "$ROOT/bin/fleet-restart" --reopen >/dev/null 2>&1; echo $?)"
+  # A ROW THAT ASSERTED "--dry-run WRITES NO SNAPSHOT" USED TO BE HERE AND IS GONE.
+  # It could not fail. This suite exports its own TMUX_TMPDIR (line ~271) so its tmux
+  # servers are reachable from this run and nowhere else — which also means there are
+  # no cf-* sockets under it, so `fleet-restart --all` finds nothing to plan, exits at
+  # "no sessions found", and never reaches write_snapshot at all. The row was green
+  # for the same reason with the guard deliberately removed: watched, and it stayed
+  # green, which is the only reason it was caught.
+  #   CLAUDE.md already names this shape — "a test can pass because of where it ran" —
+  # and the honest replacement is in the script's own --self-test, where write_snapshot
+  # is called against a plan the test constructs, so there is something to write.
+  rm -rf "$FRD"
+else
+  skip "fleet-restart refuses rather than guessing" "bin/fleet-restart is not executable"
+fi
+
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
 
 printf '\n%s passed  %s%s failed%s  %s skipped\n' "$PASS" "$([ "$FAIL" -gt 0 ] && printf '%s' "$R")" "$FAIL" "$N" "$SKIP"
