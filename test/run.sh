@@ -3868,6 +3868,27 @@ else
   skip "no withheld name in a PR title or body" "node missing"
 fi
 
+group "nothing a checkout makes for itself is tracked"
+# A WORKTREE'S node_modules IS A SYMLINK, and `.gitignore` said `node_modules/`. A trailing
+# slash means "directories only", and git records a symlink as a file, so the pattern never
+# matched it: a worker's `git add -A` committed the link fleet-spawn makes in every worktree,
+# pointing at an absolute path in one person's home. It merged, and a checkout reset onto
+# that commit replaced its real node_modules with a link to itself — `pnpm install` then
+# failed with ELOOP and the phone client could not be built. Asked of the INDEX, not the
+# ignore file, because the ignore file is what was wrong.
+tracked_nm="$(git -C "$ROOT" ls-files -- node_modules 'node_modules/*' | head -1)"
+is "node_modules is not tracked"                "" "$tracked_nm"
+abs_links=""
+while IFS= read -r f; do
+  t="$(readlink "$ROOT/$f" 2>/dev/null || true)"
+  case "$t" in /*) abs_links="$abs_links $f" ;; esac
+done < <(git -C "$ROOT" ls-files -s | awk '$1=="120000"{print $4}')
+is "no tracked symlink points outside the repo" "" "${abs_links# }"
+# ...and the rule can fail: a symlink to an absolute path is exactly what it looks for.
+probe="$(mktemp -d)"; ln -s /tmp "$probe/l"
+t="$(readlink "$probe/l")"; case "$t" in /*) caught=yes ;; *) caught=no ;; esac
+is "...an absolute symlink is what it catches"  "yes" "$caught"; rm -rf "$probe"
+
 group "the pre-push hook refuses to publish a withheld name"
 # WHY A HOOK IS TESTED AT ALL, and why the suite could not have caught what it catches.
 # This file's name sweep reads every file git TRACKS, which is the tree you are standing in
