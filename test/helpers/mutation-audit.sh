@@ -78,10 +78,28 @@ subject_of() {                     # $1 = group name; echoes a path or ""
   esac
 }
 MAP="$(awk '
-  function flush(  k, best, bn) {
+  # RANK, because a tie decided by hash order is a coin toss that invents findings.
+  # `fleet-stop flag order` names bin/fleet-stop once and a SKILL.md once; picking the
+  # document made the group look like it survived a break that never reached its real
+  # subject. Executable code outranks prose, and the path breaks the rest, so two runs
+  # of this tool agree with each other.
+  # No apostrophes in here: this whole program is one single-quoted shell word.
+  function rank(f) {
+    if (f ~ /^bin\//)   return 6
+    if (f ~ /^lib\//)   return 5
+    if (f ~ /^hooks\//) return 4
+    if (f ~ /^mcp\//)   return 3
+    if (f ~ /^web\//)   return 2
+    return 1
+  }
+  function flush(  k, best, bn, br) {
     if (cur == "") return
-    best = ""; bn = 0
-    for (k in cnt) if (cnt[k] > bn) { bn = cnt[k]; best = k }
+    best = ""; bn = 0; br = 0
+    for (k in cnt) {
+      if (cnt[k] > bn || (cnt[k] == bn && (rank(k) > br || (rank(k) == br && k < best)))) {
+        bn = cnt[k]; br = rank(k); best = k
+      }
+    }
     printf "%s\t%s\t%s\n", cur, best, need
   }
   /^printf / && index($0, "passed") && index($0, "failed") { epi = 1 }
@@ -93,7 +111,10 @@ MAP="$(awk '
     s = $0
     while (match(s, /\$\{?ROOT\}?\/[A-Za-z0-9_.\/-]+/)) {
       p = substr(s, RSTART, RLENGTH); p = substr(p, index(p, "/") + 1)
-      cnt[p]++
+      # NEVER A TEST FILE. Breaking a helper is breaking the test, which reddens the
+      # group and proves nothing about the product — the one mistake this whole tool
+      # exists to avoid. Seen: a group whose most-named path was push-probe.mjs.
+      if (p !~ /^test\//) cnt[p]++
       s = substr(s, RSTART + RLENGTH)
     }
   }
@@ -145,9 +166,12 @@ while IFS=$'\t' read -r grp file need; do
     f_="$(printf '%s' "$sum" | sed -n 's/.* \([0-9]*\) failed.*/\1/p')"
     k_="$(printf '%s' "$sum" | sed -n 's/.* \([0-9]*\) skipped.*/\1/p')"
     counts="${p_:-?}p/${f_:-?}f/${k_:-?}s"
+    # No summary line at all means the run did not reach the end — a crash, not a group
+    # that ran and asserted nothing. Calling that VANISHED would invent a finding.
     # A filter that REFUSED is not a red row — the suite never ran. Told apart by the
     # refusal text, because the exit code is non-zero either way.
-    if grep -qE 'refusing to run|cannot be lifted out|no group matches' "$ROOT/.mutation-run"; then verdict=not-run
+    if [ -z "$sum" ]; then verdict=crashed
+    elif grep -qE 'refusing to run|cannot be lifted out|no group matches' "$ROOT/.mutation-run"; then verdict=not-run
     elif [ "${f_:-0}" -gt 0 ]; then verdict=red; RED=$((RED+1))
     elif [ "${p_:-0}" -eq 0 ]; then verdict=VANISHED; VANI=$((VANI+1))
     else verdict=SURVIVED; SURV=$((SURV+1)); fi

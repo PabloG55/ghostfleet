@@ -163,7 +163,31 @@ US=$'\x1f'
 unset FORCE_COLOR CLICOLOR_FORCE
 
 group() { GROUP="$1"; case "$GROUP" in *"$FILTER"*) printf '\n%s%s%s\n' "$D" "$GROUP" "$N" ;; esac; }
-skip()  { case "$GROUP" in *"$FILTER"*) SKIP=$((SKIP+1)); printf '  %s○%s %s %s(%s)%s\n' "$Y" "$N" "$1" "$D" "$2" "$N" ;; esac; }
+# ── a skip may only blame the ENVIRONMENT ────────────────────────────────────
+# A skip exits 0, so a group that skips has tested nothing and said nothing about it.
+# That is right when the machine genuinely lacks tmux or a browser, and it is a hole
+# when the reason is that the SUBJECT produced nothing — the suite then cannot tell
+# "there is no chrome here" from "the thing I test is broken", and reports the second
+# as the first, in green.
+#
+# Measured with test/helpers/mutation-audit.sh: break bin/fleet-agent and `pane
+# detectors (busy_re)` skipped all three rows with "no detector declared" — blaming a
+# missing declaration for a broken binary — and the run exited 0. Two groups did that.
+#
+# So a reason must name something the MACHINE is missing. Anything else is the subject
+# failing, and that is a red row wherever it happens, including at sites nobody has
+# thought about yet. The list is phrases rather than exact strings because most of these
+# read "git or tmux missing" and the useful half is the last word.
+SKIP_ENV='missing|not available|not installed|no chrome|no claude|no node_modules|no vite.config|no jq|web/ not present|logind refuses|cannot commit|no caffeinate|read a 000 dir|neither pnpm nor npm'
+skip()  { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
+          if grep -qE "$SKIP_ENV" <<< "$2"; then
+            SKIP=$((SKIP+1)); printf '  %s○%s %s %s(%s)%s\n' "$Y" "$N" "$1" "$D" "$2" "$N"
+          else
+            # Not an environment reason, so the subject is what went missing. Named as a
+            # failure rather than counted as a skip, because the whole point of the
+            # distinction is that one of them is allowed to be silent and the other is not.
+            bad "$1" "either a result, or a reason the MACHINE cannot run this" "skipped: $2"
+          fi; }
 ok()    { PASS=$((PASS+1)); printf '  %s✔%s %s\n' "$G" "$N" "$1"; }
 # A red line has to be legible, and two values that differ only in bytes a terminal does
 # not draw print as the same value — which is how "expected: 1 / got: 1" happened above.
@@ -477,6 +501,27 @@ rm -rf "$OS"
 # reason: a guard that is never exercised looks exactly like one that works. So put the
 # variable BACK and check the probe changes — without that direction this group would pass
 # just as happily on a node that colourises nothing, and the unset would be cargo.
+group "a skip may only blame the environment"
+# THE CLASSIFIER IS LOAD-BEARING NOW, so it is proven in both directions like every
+# other detector in this file. One direction would pass for a pattern that matches
+# everything (no skip is ever allowed, and CI goes red on a runner with no chrome) and
+# equally for one that matches nothing (every skip is allowed, and the hole is back).
+#   The first list is every reason a real run has actually produced — the three CI emits
+# are in it verbatim, because getting those wrong turns a green leg red for no reason.
+#   The second is what a subject failing looks like. Each of these was a silent skip
+# before, and `no detector declared` is the one that cost a group all three of its rows.
+for r in "tmux not available" "git or tmux missing" "node missing" "jq is not installed" \
+         "no chrome to measure in" "no claude binary to drive" "no vite.config.mjs" \
+         "no node_modules — run: npm install" "web/ not present" \
+         "logind refuses to inhibit on this box — no login session"; do
+  is "the machine: $r" "yes" "$(grep -qE "$SKIP_ENV" <<< "$r" && echo yes || echo no)"
+done
+for r in "no detector declared" "server did not come up: nothing in the log" \
+         "the session did not come up" "could not get a port" \
+         "the daemon never got as far as arming one"; do
+  is "the subject: $r" "no" "$(grep -qE "$SKIP_ENV" <<< "$r" && echo yes || echo no)"
+done
+
 group "the harness captures plain bytes"
 if command -v node >/dev/null 2>&1; then
   ESC="$(printf '\033')"
@@ -518,7 +563,15 @@ is "explicit claude beats project's"   "/c/foo|w|claude"   "$(sc "/c/foo${US}w${
 group "pane detectors (busy_re)"
 for a in claude opencode codex; do
   re="$("$ROOT/bin/fleet-agent" field "$a" busy_re 2>/dev/null)"
-  if [ -z "$re" ]; then skip "$a busy_re" "no detector declared"; continue; fi
+  # A DETECTOR THAT IS NOT THERE IS A RED ROW, NOT A SKIP. This read "no detector
+  # declared" and skipped, which is a sentence about the config and was in fact a
+  # sentence about the binary: break bin/fleet-agent and all three rows skipped, the
+  # group reported 0 passed / 0 failed / 3 skipped, and the run exited 0. A detector
+  # this suite exists to prove in both directions was not being proven in either, and
+  # nothing said so. All three agents declare one, so an empty answer is a failure.
+  is "$a declares a busy_re" "yes" \
+     "$([ -n "$re" ] && echo yes || echo "no: fleet-agent printed nothing")"
+  [ -n "$re" ] || continue
   is "$a: matches a real BUSY pane"  "1" "$(matches "$re" "$FIX/$a-busy.txt")"
   idle="$FIX/$a-idle.txt"; [ -f "$idle" ] || idle="$FIX/$a-idle-home.txt"
   is "$a: silent on a real IDLE pane" "0" "$(matches "$re" "$idle")"
@@ -4260,9 +4313,19 @@ try { await b.evaluate(() => { throw new TypeError('DELIBERATE canary 12345'); }
 catch (e) { console.log(e.message); }
 finally { await b.close(); }
 CANARY
-  CANOUT="$(node "$ERRO/canary.mjs" "file://$ROOT/lib/browser.mjs" 2>/dev/null | head -1)"
+  # STDERR IS KEPT, because the row below has to be able to say why. It was discarded,
+  # so the one thing that could explain an empty answer was thrown away at the point of
+  # asking.
+  CANOUT="$(node "$ERRO/canary.mjs" "file://$ROOT/lib/browser.mjs" 2>"$ERRO/why" | head -1)"
   if [ -z "$CANOUT" ]; then
-    skip "a page error names itself" "no chrome to throw in"
+    # NOT "no chrome to throw in" — THIS BRANCH HAS ALREADY ESTABLISHED THERE IS ONE.
+    # The enclosing `if` found a browser, so an empty answer here means the canary could
+    # not run it: lib/browser.mjs broken, the import failing, launch refused. Every one
+    # of those was reported as a missing browser and skipped, in green. This file already
+    # warns, eight lines up, that a probe which fails silently is the exact thing the
+    # group exists to stop; it was being that thing in its own else-branch.
+    bad "a page error names itself" "a thrown message" \
+        "the canary printed nothing though a browser is present: $(tr '\n' ' ' < "$ERRO/why" 2>/dev/null | cut -c1-140)"
   else
     is "the thrown message survives"      "1" "$(printf '%s' "$CANOUT" | grep -c 'DELIBERATE canary 12345' || true)"
     is "...and its type"                  "1" "$(printf '%s' "$CANOUT" | grep -c 'TypeError' || true)"
