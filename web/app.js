@@ -668,7 +668,7 @@ function gridProps() {
       }
       const c = it.card;
       return cardEl(G.cardModel(c, isSel, idx), {
-        tap: () => openSession(c.name),
+        tap: () => (c.asleep ? wakeSession(c.name) : openSession(c.name)),
         longPress: () => askKill(c.name),
         swipeLeft: () => pauseSession(c.name),
         swipeRight: () => resumeSession(c.name),
@@ -2321,7 +2321,13 @@ function cardEl(m, h, idx) {
   //   `⏎ resumes` on the desk and `open it and press enter` here are the same route: the
   // pane is held by bin/agent-here and is already asking for Enter, so the way back in is
   // the way in. No new verb, no new gesture.
-  if (m.exited) meta.append(el('span', { class: 'chip st exited', text: 'exited' }));
+  // ASLEEP OUTRANKS THE STATUS for the same reason `exited` does: both mean no agent is
+  // running, so the status underneath is the last thing it was doing rather than what it is
+  // doing, and showing it beside "asleep" would read as a live session.
+  //   No new chip colour — the palette is fixed, and a state that needs its own colour to be
+  // understood is a state whose WORDS are wrong. The plain chip plus the line below carries it.
+  if (m.asleep) meta.append(el('span', { class: 'chip st', text: 'asleep' }));
+  else if (m.exited) meta.append(el('span', { class: 'chip st exited', text: 'exited' }));
   else if (m.statusLabel) meta.append(el('span', { class: 'chip st', text: m.statusLabel }));
   if (m.where) meta.append(el('span', { class: 'c-where', text: m.where }));
   if (m.path) meta.append(el('span', { class: 'c-where', text: m.path }));
@@ -2332,7 +2338,12 @@ function cardEl(m, h, idx) {
   // THE POINT OF THE REDESIGN. Rendered as text, never as markup: this is whatever the
   // agent last said, and app.css clamps it rather than the client truncating it — so the
   // browser decides where two lines end, at whatever size the reader has chosen.
-  if (m.exited) {
+  if (m.asleep) {
+    // The card says what to DO, not what happened to it. An exited card waits for a person
+    // to press enter because a person ended it; this one was ended by the fleet to give the
+    // memory back, so the way home is a tap and the card is the thing that knows it.
+    d.append(el('div', { class: 'c-msg none', text: 'asleep — tap to wake' }));
+  } else if (m.exited) {
     d.append(el('div', { class: 'c-msg none', text: 'the agent exited — open it and press enter to resume this conversation' }));
   } else if (m.msg || m.placeholder) {
     d.append(el('div', { class: 'c-msg' + (m.msg ? '' : ' none'), text: m.msg || m.placeholder }));
@@ -2524,6 +2535,20 @@ function pauseSession(name) {
 }
 function resumeSession(name) {
   if (name) doVerb('fleet_resume', { project: S.project, session: name });
+}
+// ── waking is NOT resuming, and the two are one letter apart in the UI ────────
+// fleet_resume un-parks a session that is still running. fleet_wake starts a process that
+// is gone and replays its conversation into it, which takes seconds rather than
+// milliseconds and can fail in ways un-parking cannot — a folder that was never trusted, a
+// transcript too large to replay inside the timeout. So the tap goes through the verb and
+// waits for its answer instead of opening optimistically: opening first would show an empty
+// pane for a session that never came back, which is the failure looking exactly like
+// success that this repo keeps paying for.
+async function wakeSession(name) {
+  if (!name) return;
+  const r = await doVerb('fleet_wake', { project: S.project, session: name });
+  if (r && r.ok === false) return;          // doVerb has already surfaced the reason
+  openSession(name);
 }
 
 function askKill(name) { if (name && !leadGuard(name, 'stopped')) { S.confirm = { kind: 'kill', name }; render(); } }

@@ -222,6 +222,8 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
   { name: 'fleet_pause', description: "Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work. Can't park 'master': it is the fleet's lead, and a fleet whose lead is off dispatches nothing (the governor excludes it for the same reason).",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_wake', description: "Wake a session that fleet-hibernate put to sleep: start its process again and replay its conversation by id. Different from fleet_resume, which un-parks a session that never stopped running — this one's process is gone. Fails loudly if the folder was never trusted or the transcript does not replay inside the timeout.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_resume', description: 'Un-park a worker paused with fleet_pause; optionally dispatch a prompt to wake it immediately.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_stop', description: "Cleanly STOP a worker for good: kill its session and clear its fleet state (status file, park/schedule markers + the schedule waiter, manifest entry). Use for a finished worker, or an ORPHAN whose git worktree was removed (its session lingers in fleet_list otherwise). Unlike fleet_pause (which only parks), this removes it. reclaim:true ALSO removes its git worktree — the one-call \"this one is done\", instead of stopping here and running `git worktree remove` somewhere else. Whether removal is safe is decided by fleet-clean's own gates (clean tree, no other session, PR merged or fully pushed); if it isn't, the session still stops and the worktree is kept with the reason. force:true (with reclaim) is the escalation for exactly that case — `git worktree remove --force`, which DELETES uncommitted work; ask for it only after a plain reclaim reported why it declined. Without reclaim it does not touch git. Can't stop 'master': it is the fleet's lead, and reclaim would aim at the repo's own main checkout.",
@@ -393,6 +395,11 @@ export function plan(name, a = {}) {
       const args = [String(a.session), String(a.text)];
       if (a.no_enter) args.push('--no-enter');
       return run('fleet-answer', args, t);
+    }
+    case 'fleet_wake': {
+      // No lead guard: a lead can be hibernated (its fleet is idle too), and waking one is
+      // the opposite of the thing notTheLead exists to prevent.
+      return run('fleet-hibernate', ['--wake', String(a.session)], t);
     }
     case 'fleet_pause': {
       // Pause is a WORKER verb — its own description says "park a worker" — and the

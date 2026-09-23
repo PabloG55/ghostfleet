@@ -150,6 +150,16 @@ export function cardModel(card, selected = false, idx = -1) {
     //   BESIDE THE STATUS, NOT ONE OF THEM. The nine statuses say what a RUNNING agent
     // is doing, and an exited one is doing none of them.
     exited: !!card.exited,
+    // ── ASLEEP: THE PROCESS IS GONE AND THE CONVERSATION IS NOT ──────────────
+    // Beside the status for the same reason `exited` is: the statuses describe what a
+    // RUNNING agent is doing, and a hibernated one is not running. Folding it in would make
+    // every consumer ask "is asleep a kind of idle" and answer differently.
+    //   The difference from `exited` is who ended it and whether it comes back by itself:
+    // an agent exits because somebody typed `exit`, and the card waits for a human to open
+    // it; a session is hibernated BY the fleet to give memory back, and the card advertises
+    // its own way home. Same shape, two different sentences, one builder — so the phone and
+    // the TUI cannot disagree about which of the two happened.
+    asleep: !!card.asleep,
   };
 }
 

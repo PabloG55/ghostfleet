@@ -11288,6 +11288,312 @@ else
   skip "recognising an ambiguity is not asking about one" "node missing"
 fi
 
+# ── 4a10c9. hibernation refuses before it acts ───────────────────────────────
+# Hibernation ends processes. Every row here is a way for it to end the wrong one, and the
+# defaults are arranged so that the thing you get by typing the command is a LIST.
+#
+# THE FIRST ROW IS THE ONE THAT MATTERS TO THIS SUITE. fleet-hibernate finds fleets by
+# scanning $TMUX_TMPDIR, so under the suite's own per-run TMUX_TMPDIR (§0) it can only see
+# sessions this run created — and the live fleet on the same machine is invisible to it.
+# That is what makes it safe to test a command whose job is killing sessions at all. If that
+# scoping ever breaks, a suite run becomes a fleet-wide outage, so it is asserted first and
+# in both directions: the run's own socket IS found, and a socket outside the run is NOT.
+group "hibernation refuses before it acts"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  HIB="$(mktemp -d "$TEST_RUNS.$$.hib.XXXXXX")"
+  export CLAUDE_FLEET_DIR="$HIB/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  HIBOUT="$HIB/out"
+  # `case` patterns contain a close-paren, and a close-paren inside $( ) ends the
+  # substitution — so the assertion reads back a fragment of its own shell instead of a
+  # value. Wrapped in a function, the parens are the function body's and never the caller's.
+  has() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  yn()  { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+
+  # A fleet of this run's own: a socket under the run's TMUX_TMPDIR, holding one pane that
+  # is not an agent at all — nothing here needs a real one, and a real one could not be
+  # safely killed by a test.
+  tmux -L cf-acme-api new-session -d -s toolbox -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.5
+  is "hib: the run's own fleet exists" "1" \
+     "$(tmux -L cf-acme-api has-session -t '=toolbox' 2>/dev/null && echo 1 || echo 0)"
+
+  # ── the FLEET_DIR guard ──
+  # Every marker this writes and removes lives under $FLEET_DIR. Empty, it does not fail —
+  # it resolves, and "$FLEET_DIR/x.asleep" becomes a path at the root.
+  CLAUDE_FLEET_DIR= "$ROOT/bin/fleet-hibernate" > "$HIBOUT" 2>&1
+  is "hib: empty FLEET_DIR refuses"    "2"   "$?"
+  is "hib: ...and says why"            "yes" "$(yn grep -q 'refusing to run with FLEET_DIR' "$HIBOUT")"
+
+  # ── off until somebody turns it on ──
+  "$ROOT/bin/fleet-hibernate" --apply --idle-hours 0 > "$HIBOUT" 2>&1
+  is "hib: --apply refuses while off" "1"   "$?"
+  is "hib: ...and names the switch"   "yes" "$(yn grep -q 'hibernate.enabled' "$HIBOUT")"
+  is "hib: ...and killed nothing"     "1"   "$(tmux -L cf-acme-api has-session -t '=toolbox' 2>/dev/null && echo 1 || echo 0)"
+
+  # ── the default is a list, not an action ──
+  "$ROOT/bin/fleet-hibernate" --idle-hours 0 > "$HIBOUT" 2>&1
+  is "hib: the bare command exits 0"  "0"   "$?"
+  is "hib: ...prints a plan"          "yes" "$(yn grep -qE 'WOULD SLEEP|stays up' "$HIBOUT")"
+  is "hib: ...and still killed nothing" "1" "$(tmux -L cf-acme-api has-session -t '=toolbox' 2>/dev/null && echo 1 || echo 0)"
+  is "hib: ...and says it is off"     "yes" "$(yn grep -q 'hibernation is OFF' "$HIBOUT")"
+
+  # ── the scoping that makes this testable at all ──
+  is "hib: sees only this run's fleets" "cf-acme-api" \
+     "$("$ROOT/bin/fleet-hibernate" --idle-hours 0 --json 2>/dev/null | jq -r '[.[].sock] | unique | join(",")')"
+
+  # ── the veto list, one row per way to destroy something ──
+  # A record with no conversation id cannot be woken, so it must never be slept.
+  mk_state() {   # slot status ts_age_s session_id transcript_age_h
+    local slot="$1" st="$2" ts_age="$3" sid="$4" tr_age="$5"
+    local tr="$HIB/tr-$slot.jsonl"
+    : > "$tr"
+    [ -n "$tr_age" ] && touch -t "$(date -v-"${tr_age}"H +%Y%m%d%H%M 2>/dev/null || date -d "-${tr_age} hours" +%Y%m%d%H%M)" "$tr" 2>/dev/null
+    jq -n --arg id "$sid" --arg slot "$slot" --arg st "$st" --arg tr "$tr" \
+          --arg cwd "$HIB" --argjson ts "$(( $(date +%s) - ts_age ))" \
+      '{session_id:$id, sock:"cf-acme-api", slot:$slot, cwd:$cwd, folder:"toolbox",
+        branch:"main", status:$st, transcript:$tr, ts:$ts}' > "$CLAUDE_FLEET_DIR/$sid.json"
+  }
+  why_for() { "$ROOT/bin/fleet-hibernate" --idle-hours 48 --json 2>/dev/null | jq -r --arg s "$1" '.[] | select(.slot==$s) | .why'; }
+
+  tmux -L cf-acme-api new-session -d -s billing-svc -x 80 -y 24 "sleep 600" 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s scratch     -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.5
+  # no id at all
+  jq -n '{session_id:"", sock:"cf-acme-api", slot:"billing-svc", cwd:"/nope", status:"ready", transcript:"", ts:0}' \
+     > "$CLAUDE_FLEET_DIR/noid.json"
+  is "hib: no conversation id -> never" "yes" \
+     "$(yn has 'no recorded conversation id' "$(why_for billing-svc)")"
+
+  # busy AND recent -> vetoed; busy and STALE -> not vetoed for being busy.
+  # Measured on a real fleet: a session marked `working` whose transcript had not moved in
+  # 26.8 days. Vetoing on the word alone pins that memory forever.
+  mk_state scratch working 60 sid-busy-fresh 100
+  is "hib: working within the hour -> never" "yes" \
+     "$(yn has 'and said so within the hour' "$(why_for scratch)")"
+  mk_state scratch working 7200 sid-busy-fresh 100
+  is "hib: ...but a stale 'working' does not veto" "no" \
+     "$(yn has 'said so within the hour' "$(why_for scratch)")"
+
+  # ── the folder must be trustable, or waking it is a dialog nobody sees ──
+  # Observed on a throwaway: a session resumed in an untrusted folder stops at "Is this a
+  # project you created or one you trust?" and never reaches a prompt.
+  mk_state scratch ready 0 sid-busy-fresh 1
+  is "hib: an untrusted folder is never slept" "yes" \
+     "$(yn has 'no trust record' "$(why_for scratch)")"
+  # ...and with the folder trusted, the idle clock is the TRANSCRIPT. Trust is read from
+  # $CLAUDE_CONFIG_DIR, which is where a profile keeps it, so this needs no test-only seam.
+  export CLAUDE_CONFIG_DIR="$HIB/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  jq -n --arg d "$HIB" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  is "hib: a fresh transcript is under threshold" "yes" \
+     "$(yn has 'h threshold' "$(why_for scratch)")"
+  # ── AND THE SAME ANSWER UNDER A GNU-SHAPED stat ─────────────────────────────
+  # The one failure a macOS developer cannot see. `stat -f %m FILE` is correct here and wrong
+  # on Linux, where -f is --file-system and takes no format: %m is read as a second FILE, that
+  # one fails, the real one SUCCEEDS and prints a filesystem line to stdout, and the command
+  # exits non-zero — so an `A || B` fallback hands back garbage with the right number stuck on
+  # the end. Fed to awk as the idle clock, a transcript touched one second earlier compared as
+  # "would be slept": a Linux fleet ending the session somebody was using.
+  #   Asserted HERE, against a fixture that is both fresh and trusted, because this is the one
+  # point where the idle clock is the only thing left to decide the answer — anywhere earlier
+  # a cheaper veto fires first and the row passes without reading the clock at all.
+  #   test/helpers/shims/stat gives stat GNU's argument shape on any host, the way
+  # tmux-vis35.mjs gives tmux an old one. The ubuntu leg found this; the shim is what stops it
+  # coming back on the platform that cannot see it.
+  is "hib: ...and still under it with a GNU-shaped stat" "yes" \
+     "$(PATH="$ROOT/test/helpers/shims:$PATH" yn has 'h threshold' \
+        "$(PATH="$ROOT/test/helpers/shims:$PATH" why_for scratch)")"
+  # ...and an old one is not. 100h against a 48h threshold: nothing vetoes it.
+  mk_state scratch ready 7200 sid-busy-fresh 100
+  is "hib: a 100h-idle session would sleep" "" "$(why_for scratch)"
+  unset CLAUDE_CONFIG_DIR
+
+  # a tab is not an agent
+  tmux -L cf-acme-api new-session -d -s _term-toolbox -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.3
+  is "hib: a _ tab is never slept" "yes" \
+     "$(yn has 'a tab, not an agent' "$(why_for _term-toolbox)")"
+
+  # ── the governor points at the verb that can relieve what it measured ──────
+  # It already read kern.memorystatus_vm_pressure_level and already acted; the action was
+  # fleet-pause, which interrupts a turn and frees nothing. Asserted through the governor's
+  # own --dry-run rather than by grepping the source, so a rename of the helper cannot keep
+  # this green while the behaviour moves.
+  # THE INVOCATION, NOT A MENTION. The first version of this row grepped the block for the
+  # string and stayed green when the real call was swapped back to fleet-pause — because the
+  # dry-run line beside it still PRINTS the word. Only the line that actually runs something
+  # ($BIN_DIR/...) is evidence of what it runs.
+  govcall() { sed -n "$1"',/^      fi$/p' "$ROOT/bin/fleet-governor" \
+              | sed -n 's|.*"\$BIN_DIR/\([a-z-]*\)".*|\1|p' | head -1; }
+  is "hib: the governor's memory path hibernates" "fleet-hibernate" "$(govcall '/resources: .* -> hibernating/')"
+  is "hib: ...and the BUDGET path still parks"    "fleet-pause"     "$(govcall '/budget .* -> parking ALL/')"
+  is "hib: ...and it has a swap trigger"          "yes" \
+     "$(yn grep -q 'swap-pct' "$ROOT/bin/fleet-governor")"
+
+  # ── a state file for EVERY session, not only launcher-started ones ──────────
+  # sock and slot came from the launcher's environment alone, so a session started any other
+  # way wrote a record with both empty: it had an id, so it looked recorded, and could not be
+  # found by fleet. Measured on a real fleet: 28 of 64 running sessions, and they were the
+  # oldest. Driven here by calling the hook the way the harness does, with the environment
+  # silent and only $TMUX to go on.
+  if command -v jq >/dev/null 2>&1; then
+    tmux -L cf-acme-web new-session -d -s scratch -x 80 -y 24 "sleep 600" 2>/dev/null
+    sleep 0.4
+    HKID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    TM="$(tmux -L cf-acme-web display-message -p '#{socket_path},0,0' 2>/dev/null)"
+    printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s","transcript_path":"%s"}' \
+      "$HKID" "$HIB" "$HIB/tr.jsonl" \
+      | env -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK TMUX="$TM" \
+            CLAUDE_FLEET_DIR="$CLAUDE_FLEET_DIR" bash "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+    is "hib: a hook with no env still records the fleet" "cf-acme-web" \
+       "$(jq -r '.sock // ""' "$CLAUDE_FLEET_DIR/$HKID.json" 2>/dev/null)"
+    is "hib: ...and the session name"                    "scratch" \
+       "$(jq -r '.slot // ""' "$CLAUDE_FLEET_DIR/$HKID.json" 2>/dev/null)"
+    tmux -L cf-acme-web kill-server 2>/dev/null
+  fi
+
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  unset CLAUDE_FLEET_DIR
+  rm -rf "$HIB"
+else
+  skip "hibernation refuses before it acts" "tmux or jq missing"
+fi
+
+# ── 4a10c10. a session sleeps, and comes back ────────────────────────────────
+# The round trip, and the reason it can run in a suite at all: everything here happens on a
+# socket under this run's own $TMUX_TMPDIR, against a STUB agent this group puts on PATH.
+# No real agent is started and no real session is reachable — fleet-hibernate finds fleets by
+# scanning $TMUX_TMPDIR, which the group above asserts in both directions.
+#
+# THE STUB IS NOT A SHORTCUT, IT IS THE ONLY HONEST FIXTURE. A real agent cannot be killed by
+# a test, and a test that avoided killing anything would not be testing hibernation. The stub
+# prints the agent's own ready marker and then waits, so the wake path's poll — the thing that
+# decides whether a wake worked — is exercised for real.
+group "a session sleeps and comes back"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  HW="$(mktemp -d "$TEST_RUNS.$$.hibw.XXXXXX")"
+  export CLAUDE_FLEET_DIR="$HW/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$HW/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  mkdir -p "$HW/bin" "$HW/wt"
+  # Its own copy rather than the previous group's: a function defined inside an `if` that
+  # skipped does not exist, and a row asserting against a missing helper fails for a reason
+  # that has nothing to do with what it is testing.
+  wyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  jq -n --arg d "$HW/wt" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  touch "$CLAUDE_FLEET_DIR/hibernate.enabled"
+
+  # the stub agent: prints what a ready agent prints, then holds the pane
+  printf '#!/bin/sh\necho "  ctx:3%%%%  auto mode on"\nexec sleep 600\n' > "$HW/bin/agent-here"
+  chmod +x "$HW/bin/agent-here"
+  OLDPATH="$PATH"; export PATH="$HW/bin:$PATH"
+
+  # a transcript dated well past the threshold, and a record that points at it
+  TR="$HW/old.jsonl"; : > "$TR"
+  touch -t "$(date -v-100H +%Y%m%d%H%M 2>/dev/null || date -d '-100 hours' +%Y%m%d%H%M)" "$TR" 2>/dev/null
+  jq -n --arg tr "$TR" --arg cwd "$HW/wt" \
+    '{session_id:"11111111-2222-3333-4444-555555555555", sock:"cf-acme-web", slot:"billing-svc",
+      cwd:$cwd, folder:"billing-svc", branch:"main", status:"ready", transcript:$tr, ts:0}' \
+    > "$CLAUDE_FLEET_DIR/sleeper.json"
+  tmux -L cf-acme-web new-session -d -s billing-svc -c "$HW/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.5
+  is "wake: the session starts up"     "1" "$(tmux -L cf-acme-web has-session -t '=billing-svc' 2>/dev/null && echo 1 || echo 0)"
+
+  "$ROOT/bin/fleet-hibernate" --apply > "$HW/apply" 2>&1
+  is "wake: --apply exits 0"           "0" "$?"
+  sleep 0.5
+  is "wake: the pane is gone"          "0" "$(tmux -L cf-acme-web has-session -t '=billing-svc' 2>/dev/null && echo 1 || echo 0)"
+  is "wake: a marker was written"      "1" "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep" ] && echo 1 || echo 0)"
+  # THE MARKER CARRIES THE WAY HOME. Without the conversation id it is a tombstone, not a
+  # sleeping session — and it is written BEFORE the kill for exactly that reason.
+  is "wake: ...holding the conversation id" "11111111-2222-3333-4444-555555555555" \
+     "$(cut -f2 "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep")"
+
+  # the card the phone and the TUI draw
+  is "wake: the card says asleep" "true" \
+     "$(node -e 'import("'"$ROOT"'/web/grid.js").then(G=>process.stdout.write(String(G.cardModel({name:"billing-svc",asleep:true}).asleep)))')"
+  is "wake: ...and an ordinary card does not" "false" \
+     "$(node -e 'import("'"$ROOT"'/web/grid.js").then(G=>process.stdout.write(String(G.cardModel({name:"billing-svc"}).asleep)))')"
+
+  "$ROOT/bin/fleet-hibernate" --wake billing-svc --timeout 25 > "$HW/wake" 2>&1
+  is "wake: --wake exits 0"            "0" "$?"
+  is "wake: the pane is back"          "1" "$(tmux -L cf-acme-web has-session -t '=billing-svc' 2>/dev/null && echo 1 || echo 0)"
+  is "wake: the marker is consumed"    "0" "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep" ] && echo 1 || echo 0)"
+
+  # ── A WAKE THAT STALLS MUST SAY SO ───────────────────────────────────────────
+  # Observed on a throwaway: a session resumed in an untrusted folder sits on the trust
+  # dialog forever. Returning 0 there would paint a live card over a session that never came
+  # back — the failure wearing success, which is what this repo keeps paying for.
+  tmux -L cf-acme-web kill-server 2>/dev/null; sleep 0.3
+  printf '#!/bin/sh\necho "Do you trust the files in this folder?"\nexec sleep 600\n' > "$HW/bin/agent-here"
+  printf '%s\t%s\t%s\t%s\n' 0 "11111111-2222-3333-4444-555555555555" "$HW/wt" 100 \
+    > "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep"
+  "$ROOT/bin/fleet-hibernate" --wake billing-svc --timeout 10 > "$HW/stall" 2>&1
+  is "wake: a trust dialog fails loudly" "1" "$?"
+  is "wake: ...and names the dialog"     "yes" "$(wyn grep -q 'folder-trust dialog' "$HW/stall")"
+  is "wake: ...and the marker is KEPT"   "1" "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep" ] && echo 1 || echo 0)"
+
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  export PATH="$OLDPATH"
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$HW"
+else
+  skip "a session sleeps and comes back" "tmux or jq missing"
+fi
+
+# ── 4a10c11. how long a wake actually takes ──────────────────────────────────
+# The one number the design rests on, and the one most likely to be wrong. Hibernation is
+# only worth having if a slept session comes back fast enough that a tap feels like opening
+# a card rather than starting a machine.
+#   MEASURED, AND FLAT: 0.6s to a prompt at 800 records, 0.6s at 5,000, 0.6s at 20,000 — a
+# 9.2 MB transcript. The agent draws its prompt and loads the history behind it, so the size
+# of the conversation does not decide how long it takes to come back. That was the open
+# question the design rested on and it is answered.
+#   THE FIRST ATTEMPT SAID 26s AND WAS TIMING A DIALOG, which is why this group builds its
+# fixture rather than pointing at a directory. A fresh config directory sends the agent into
+# first-run onboarding, and it stops on a theme picker; past that it stops on folder trust,
+# because the trust key was recorded for the path as typed while the agent looks up the
+# resolved one (/tmp is a symlink to /private/tmp — CLAUDE.md's own entry). From outside,
+# both are indistinguishable from a slow resume. test/helpers/synth-transcript.mjs
+# pre-answers both, so what is timed is the resume.
+#   IT ASSERTS ARRIVAL, NOT A DURATION. A wall-clock threshold on a loaded laptop is a
+# flake; the thing worth catching is "it stopped arriving at all". The number is printed
+# beside the row so a change in it is visible without being a red.
+#   It needs a real agent binary, so it skips where there is none. A green CI leg is not
+# evidence this ran.
+group "how long a wake actually takes"
+if command -v claude >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  BN="$(mktemp -d "$TEST_RUNS.$$.bench.XXXXXX")"
+  mkdir -p "$BN/cfg" "$BN/wt"
+  BSID="$(node -e 'process.stdout.write(require("crypto").randomUUID())')"
+  node "$ROOT/test/helpers/synth-transcript.mjs" "$BSID" "$BN/wt" "$BN/cfg" 800 > "$BN/gen" 2>&1
+  is "bench: a synthetic transcript was built" "0" "$?"
+  # The generator PRINTS the path it wrote, and this reads it back rather than rebuilding it.
+  # Rebuilding meant mangling the path as typed while the generator mangles the resolved one,
+  # so the row looked for a file under /tmp/... that had been written under /private/tmp/...
+  # — the same symlink trap the generator itself documents, one level up.
+  is "bench: ...of the size asked for"  "800" \
+     "$(wc -l < "$(sed -n 's/^[0-9]* records -> //p' "$BN/gen")" | tr -d ' ')"
+
+  tmux -L cf-toolbox kill-server 2>/dev/null
+  BT0="$(node -e 'process.stdout.write(String(Date.now()))')"
+  tmux -L cf-toolbox new-session -d -s toolbox -x 200 -y 50 -c "$BN/wt" \
+    "CLAUDE_CONFIG_DIR=$BN/cfg claude --resume $BSID" 2>/dev/null
+  BREADY=no
+  for _ in $(seq 1 120); do
+    if tmux -L cf-toolbox capture-pane -p -t toolbox 2>/dev/null > "$BN/pane"; then
+      if grep -qE 'mode on|ctx:[0-9]|for shortcuts' "$BN/pane"; then BREADY=yes; break; fi
+    fi
+    sleep 0.5
+  done
+  BT1="$(node -e 'process.stdout.write(String(Date.now()))')"
+  is "bench: an 800-record conversation resumes to a prompt" "yes" "$BREADY"
+  printf '  %s· resume-to-ready, 800 records: %ss%s\n' "$D" \
+    "$(node -e 'process.stdout.write(((Number(process.argv[2])-Number(process.argv[1]))/1000).toFixed(1))' "$BT0" "$BT1")" "$N"
+  tmux -L cf-toolbox kill-server 2>/dev/null
+  rm -rf "$BN"
+else
+  skip "how long a wake actually takes" "no claude/tmux/node on this host — the benchmark needs a real agent"
+fi
+
 # ── 6b. every command is actually installed ──────────────────────────────────
 # A new command that never reaches the install list is invisible until someone hits
 # "command not found" — and worse, the SUMMARY line was hand-maintained separately from

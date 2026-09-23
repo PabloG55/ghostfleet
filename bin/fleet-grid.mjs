@@ -607,6 +607,16 @@ function isExited(name) {
   try { return fs.existsSync(exitedFile(name)); } catch { return false; }
 }
 
+// ── ASLEEP: hibernated by the fleet, not exited by a person ──────────────────
+// Same marker shape and the same socket namespacing as `.exited`, and beside the status for
+// the same reason. bin/fleet-hibernate writes it before it kills the pane, holding the
+// conversation id that brings the session back, so a card can advertise its own way home
+// rather than leaving a name with nothing behind it.
+function asleepFile(name) { return path.join(FLEET_DIR, SOCK + '.' + name + '.asleep'); }
+function isAsleep(name) {
+  try { return fs.existsSync(asleepFile(name)); } catch { return false; }
+}
+
 function gitBranch(cwd) {
   try {
     return execFileSync('git', ['-C', cwd, '--no-optional-locks', 'rev-parse', '--abbrev-ref', 'HEAD'],
@@ -759,6 +769,7 @@ function gather({ lead = false } = {}) {
              // which is docs/mobile.md §3's rule, one producer of "what is this session
              // doing".
              exited: isExited(s.name),
+             asleep: isAsleep(s.name),
              // null, never 0 or '': the card tests it for truth, and a PR numbered 0 does
              // not exist while an empty string would read as "no PR" in one place and as a
              // present-but-blank field in another.

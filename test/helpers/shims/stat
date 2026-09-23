@@ -1,0 +1,47 @@
+#!/bin/sh
+# test/helpers/shims/stat — a stat with GNU's argument shape, for a suite running on BSD.
+#
+# NAMED `stat`, WHICH IS THE WHOLE TRICK AND THE EASY THING TO GET WRONG. It shadows the real
+# one only for a command that is explicitly prefixed with this directory on PATH; called
+# `gnu-stat` it shadows nothing, `command -v stat` still answers /usr/bin/stat, and the row
+# using it passes for the same reason it would have passed with no shim at all — measured,
+# on the first attempt at this guard.
+#
+# Put its directory first on PATH and `stat` behaves the way it does on the ubuntu leg. This
+# exists because the bug it catches is INVISIBLE on macOS: `stat -f %m FILE` is the correct
+# incantation here and returns an epoch, while on GNU coreutils `-f` is --file-system and
+# takes no format — so %m is read as a second FILE, that one fails, the real one SUCCEEDS and
+# prints a filesystem line to stdout, and the command exits non-zero. An `A || B` fallback
+# then appends the right number to that garbage.
+#   Measured consequence before the fix: the idle clock became a two-line string, awk refused
+# the assignment, and a transcript touched one second earlier compared as "would be slept" —
+# a Linux fleet hibernating the session somebody was using. The ubuntu leg caught one row of
+# it; this shim reproduces all six on any host.
+#   Same shape as test/helpers/tmux-vis35.mjs, and for the same reason: the platform that
+# would have told you is not the platform you are on.
+case "$1" in
+  -f) shift
+      for a in "$@"; do
+        if [ "$a" = "%m" ] || [ "$a" = "%Y" ]; then
+          echo "stat: cannot read file system information for '$a': No such file or directory" >&2
+        else
+          echo "  File: \"$a\"  ID: 0 Namelen: 255  Type: ext2/ext3"
+        fi
+      done
+      exit 1 ;;
+  -c) fmt="$2"; shift 2
+      # THE REAL STAT UNDERNEATH SPEAKS ITS OWN DIALECT, AND THIS HAS TO WORK ON BOTH.
+      # The first version hard-coded the BSD form here, which is correct on the host this
+      # shim was written on and is the BROKEN form on Linux — so on the ubuntu leg the shim
+      # sabotaged a stat that was already fine, and the row it guards went red for the
+      # opposite reason to the one it exists to catch. A guard that only works where the bug
+      # cannot happen is not a guard.
+      case "$fmt" in
+        %Y) m="$(/usr/bin/stat -c %Y "$@" 2>/dev/null)" || m=""
+            case "$m" in ''|*[!0-9]*) m="$(/usr/bin/stat -f %m "$@" 2>/dev/null)" ;; esac
+            case "$m" in ''|*[!0-9]*) exit 1 ;; esac
+            printf '%s\n' "$m" ;;
+        *)  echo "stat: invalid directive" >&2; exit 1 ;;
+      esac ;;
+  *)  exec /usr/bin/stat "$@" ;;
+esac

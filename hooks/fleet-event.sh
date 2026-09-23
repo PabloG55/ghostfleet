@@ -49,6 +49,27 @@ folder="${CWD##*/}"
 branch="$(git -C "${CWD:-.}" --no-optional-locks rev-parse --abbrev-ref HEAD 2>/dev/null)"
 ZELL="${ZELLIJ_SESSION_NAME:-}"
 SLOT="${CLAUDE_FLEET_SLOT:-}"
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+# ── EVERY SESSION ON EVERY FLEET, not only the ones launched through the fleet ──
+# sock and slot came from the launcher's environment alone, so a session started any other
+# way — an agent run by hand in a pane, a fleet whose panes predate the launcher — wrote a
+# record with both fields empty. It still had a session_id, so it looked recorded; it simply
+# could not be found BY FLEET. Measured on a real fleet: 28 of 64 running sessions had no
+# addressable record, 8.57 GB of them, and they were the oldest — exactly the ones anything
+# idle-driven wants to find.
+#   Derived from $TMUX when the environment is silent, the same way fleet-pause derives it
+# and for the same reason: $TMUX names the server this pane is actually on, so it cannot go
+# stale the way an exported variable can behind a long-running --resume.
+if [ -z "$SOCK" ] && [ -n "${TMUX:-}" ]; then
+  _s="${TMUX%%,*}"; _s="${_s##*/}"
+  case "$_s" in cf-*) SOCK="$_s" ;; esac
+fi
+if [ -z "$SLOT" ] && [ -n "$SOCK" ]; then
+  SLOT="$(tmux -L "$SOCK" display-message -p '#{session_name}' 2>/dev/null)"
+  # A leading `_` is a tab, not an agent (CLAUDE.md), and a `+` name is a tmux expression
+  # rather than a name — neither is a slot this should claim.
+  case "$SLOT" in _*|+*) SLOT="" ;; esac
+fi
 now="$(date +%s)"
 
 case "$EVENT" in
@@ -85,7 +106,7 @@ esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"
 if jq -n \
   --arg id "$SESSION" --arg z "$ZELL" --arg slot "$SLOT" \
-  --arg sock "${CLAUDE_FLEET_SOCK:-}" \
+  --arg sock "$SOCK" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
   --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" \
   '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, cwd:$cwd, folder:$folder,
