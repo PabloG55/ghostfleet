@@ -3828,6 +3828,46 @@ else
   skip "installer arms the guard" "git missing"
 fi
 
+group "no withheld name in a PR title or body"
+# THE LAST PIECE OF TEXT NOBODY READ. Every other guard here checks something that exists
+# when it runs: tracked files, the commits in a push, the tip tree, the hook on the way
+# out. A pull request BODY is in none of them — it is not in the repository at all until
+# GitHub composes it into the commit message at squash-merge, which happens after the last
+# check has passed and the last reviewer has looked. So it reached public history read by
+# nothing, and it did: a body carrying a restart snapshot with real session names in it
+# became a commit message on staging.
+#   The gate is a CI job on pull_request, including `edited`, because a body can change
+# after a green run. Proven here rather than only in CI: a check nobody can exercise
+# locally is one that gets debugged by pushing.
+if command -v node >/dev/null 2>&1; then
+  while IFS=$US read -r name want got; do is "$name" "$want" "$got"; done \
+    < <(node "$ROOT/test/helpers/pr-text-sweep.mjs" --selftest 2>/dev/null)
+  # AND THE REAL GATE, not just its pure half — the exit code CI actually reads, with the
+  # name handed over the environment exactly as the workflow hands it. The planted name is
+  # assembled at run time from two halves, so the literal is in no file for the tree sweep
+  # to find; that is the same trick the sweep plays on itself, for the same reason.
+  PRT="$(node -e 'process.stdout.write(["super","key"].join(""))')"
+  is "the gate passes a clean title and body" "0" \
+     "$(PR_TITLE='The card list snaps to a card' PR_BODY='Measured on acme-api/api-fix.' \
+        node "$ROOT/test/helpers/pr-text-sweep.mjs" >/dev/null 2>&1; echo $?)"
+  is "...and refuses one in the body" "1" \
+     "$(PR_TITLE='A tidy title' PR_BODY="seen on $PRT last week" \
+        node "$ROOT/test/helpers/pr-text-sweep.mjs" >/dev/null 2>&1; echo $?)"
+  is "...and one in the title" "1" \
+     "$(PR_TITLE="A fix for $PRT" PR_BODY='nothing here' \
+        node "$ROOT/test/helpers/pr-text-sweep.mjs" >/dev/null 2>&1; echo $?)"
+  # IT MUST SAY WHERE WITHOUT SAYING WHAT. A CI log on a public repository is as public as
+  # the repository, so a guard that prints its find publishes the thing it exists to stop.
+  PROUT="$(PR_TITLE='A tidy title' PR_BODY="seen on $PRT last week" \
+           node "$ROOT/test/helpers/pr-text-sweep.mjs" 2>&1)"
+  is "...naming the place it found it" "yes" \
+     "$(grep -q 'the body, line 1' <<< "$PROUT" && echo yes || echo no)"
+  is "...and never the name itself"    "yes" \
+     "$(grep -q "$PRT" <<< "$PROUT" && echo no || echo yes)"
+else
+  skip "no withheld name in a PR title or body" "node missing"
+fi
+
 group "the pre-push hook refuses to publish a withheld name"
 # WHY A HOOK IS TESTED AT ALL, and why the suite could not have caught what it catches.
 # This file's name sweep reads every file git TRACKS, which is the tree you are standing in
