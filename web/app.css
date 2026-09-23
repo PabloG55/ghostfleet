@@ -301,6 +301,18 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  * away with them — they moved to `.hdr .more` below, which is the one control that replaced
  * the six, and to the sheet rows, which were already built to the same floor. */
 
+/* ── AN EXITED CARD: STILL THERE, VISIBLY NOT RUNNING ──────────────────────
+ * `exit` used to take the tmux session and the card with it. bin/agent-here holds the
+ * pane now, so the card survives its agent — and a card that looks identical to a live
+ * one would be worse than the old behaviour, because it would claim a session that is
+ * not there. Dimmed, and its rail goes grey: the status hue said what the agent was
+ * DOING, and it is not doing it.
+ *   No new colour — `--dim` and `--hair` are the palette's own, and the rail is simply
+ * the same grey the parked status already uses. */
+.card.exited { opacity: .62; }
+.card.exited { --c: var(--hair); }
+.card.exited .chip.st.exited { color: var(--dim); border-color: var(--hair); background: transparent; }
+
 /* ── the count strip: the summary as numbers, not as a sentence ────────────
  * `0 need you · 2 working · 5 ready` is a sentence you have to read. The same counts as
  * four tiles are a thing you glance at, and the one that matters — need-you — is the one

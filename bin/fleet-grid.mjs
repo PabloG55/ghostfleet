@@ -590,6 +590,23 @@ function isParked(name) {
   try { return fs.existsSync(parkedFile(name)); } catch { return false; }
 }
 
+// ── A SESSION WHOSE AGENT HAS EXITED, BUT WHOSE CARD IS STILL HERE ───────────
+// "i use parallel session and if i type exit the session is completely remove it and
+// i cant reopen it easily." Typing `exit` used to end the agent, end the pane's
+// command, and take the tmux session — and the card — down with it, leaving the
+// conversation on disk with nothing on screen pointing at it.
+//   bin/agent-here holds the pane now and writes this marker, so the session survives
+// its agent. Namespaced by socket for the same reason .parked is: every project has a
+// `master`, and a bare marker would report another fleet's card as exited.
+//   IT IS NOT A TENTH STATUS. The nine are what a RUNNING agent is doing, and an
+// exited one is not doing any of them; folding it in would make every consumer's
+// status switch answer a different question in one branch. It rides beside the status
+// the way `lead` and `parked`'s marker do.
+function exitedFile(name) { return path.join(FLEET_DIR, SOCK + '.' + name + '.exited'); }
+function isExited(name) {
+  try { return fs.existsSync(exitedFile(name)); } catch { return false; }
+}
+
 function gitBranch(cwd) {
   try {
     return execFileSync('git', ['-C', cwd, '--no-optional-locks', 'rev-parse', '--abbrev-ref', 'HEAD'],
@@ -737,6 +754,11 @@ function gather({ lead = false } = {}) {
     const sched = (mk && mk.at > nowS) ? mk : null;
     return { name: s.name, cwd: s.cwd || '', folder, branch, status, age, msg: lastAssistant(transcript),
              attached: s.attached, sched, agent, label: labelOf(s.name), limitAt, lead: isLead(s.name),
+             // ONE BUILDER FEEDS BOTH SCREENS: bin/fleet-serve.mjs shells out to this
+             // file's --json, so the phone gets this field without a second producer —
+             // which is docs/mobile.md §3's rule, one producer of "what is this session
+             // doing".
+             exited: isExited(s.name),
              // null, never 0 or '': the card tests it for truth, and a PR numbered 0 does
              // not exist while an empty string would read as "no PR" in one place and as a
              // present-but-blank field in another.
@@ -952,7 +974,17 @@ function cardLines(card, selected, idx) {
   const right = card.sched ? `@${clockLabel(card.sched.at)}`
               : card.status === 'limit' && card.limitAt ? `↻ ${card.limitAt}`
               : idle;   // @ = scheduled send
-  const l1 = `│ ${padEndV(twoCol(meta.label, right, CW - 2), CW - 2)} │`;
+  // ── AN EXITED SESSION SAYS SO WHERE ITS STATUS WOULD BE ───────────────────
+  // The agent is gone; the pane and the card are not (bin/agent-here holds them). None
+  // of the nine statuses describes that — they are what a RUNNING agent is doing — and
+  // the one it would otherwise show is whatever it was doing when it stopped, which is
+  // the most misleading thing the card could say. The status slot is where the eye
+  // already goes, so it is where this belongs.
+  //   `⏎ resumes` because the way back is the way in: entering the session lands on the
+  // held pane, which is already asking for Enter. No new verb, no new key.
+  const l1 = card.exited
+    ? `│ ${padEndV(twoCol('✗ exited', '⏎ resumes', CW - 2), CW - 2)} │`
+    : `│ ${padEndV(twoCol(meta.label, right, CW - 2), CW - 2)} │`;
   // Name the agent on the card whenever it isn't the default. Without this an
   // "unknown" or a differently-behaving status is unreadable — you can't tell whether
   // the fleet is confused or the session simply isn't Claude. Claude cards are left

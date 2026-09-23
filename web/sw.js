@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 2b4a84603900
+// CLIENT-HASH: 83ef01db81d2
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -181,6 +181,13 @@
 // THREE of nine sessions. The verbs are the same verbs with the same words, reached from
 // one control the session screen has had since v27. An older client keeps the footer, and
 // with it six of the nine cards it could have shown.
+// v36 KEEPS THE CARD WHEN A SESSION EXITS. Typing `exit` ended the agent, ended the
+// pane's command, and tmux took the session — and the card — down with it, leaving the
+// conversation on disk with nothing on screen pointing at it: "i use parallel session and
+// if i type exit the session is completely remove it and i cant reopen it easily". The
+// pane is held now, the card stays, and it says so instead of showing whatever the agent
+// happened to be doing when it stopped. An older client shows the card with a stale
+// status and no way back.
 // v25 is the first client with a BUILD STEP in it. The Projects screen is Preact now, which
 // means two files the shell has never had before — projects.js (the screen) and preact.js
 // (its dependency chunk) — and app.js statically imports the first of them. THIS IS A
@@ -189,7 +196,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v35';
+const VERSION = 'ghostfleet-v36';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

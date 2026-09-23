@@ -142,6 +142,14 @@ export function cardModel(card, selected = false, idx = -1) {
     // anything else has simply not spoken yet.
     placeholder: card.attached ? '(attached)' : '…',
     lead: !!card.lead,
+    // ── THE AGENT HAS EXITED AND THE CARD IS STILL HERE ──────────────────────
+    // Typing `exit` used to take the tmux session and the card with it, leaving the
+    // conversation on disk with nothing pointing at it. bin/agent-here holds the pane
+    // now and writes a marker; bin/fleet-grid.mjs reads it onto the card, and one
+    // builder feeds both screens (§3: one producer of "what is this session doing").
+    //   BESIDE THE STATUS, NOT ONE OF THEM. The nine statuses say what a RUNNING agent
+    // is doing, and an exited one is doing none of them.
+    exited: !!card.exited,
   };
 }
 
@@ -220,18 +228,18 @@ export function projectModel(p, idx = -1, selected = false) {
     path: homeTilde(p.path),
     statusLabel: line,
     when: p.sched && p.sched.at ? `@${clockLabel(p.sched.at)}` : '',
-    msg: '', placeholder: '', agent: '', pr: '', lead: false,
+    msg: '', placeholder: '', agent: '', pr: '', lead: false, exited: false,
   };
 }
 export function addProjectModel(selected = false) {
   return { kind: 'addproject', selected, color: 'yellow', num: null,
            title: '+ add project', where: 'choose a root folder…', path: '',
-           statusLabel: '', when: '', msg: '', placeholder: '', agent: '', pr: '', lead: false };
+           statusLabel: '', when: '', msg: '', placeholder: '', agent: '', pr: '', lead: false, exited: false };
 }
 export function newModel(selected = false) {
   return { kind: 'new', selected, color: 'yellow', num: null,
            title: '+ new session', where: 'start a Claude session in a checkout…', path: '',
-           statusLabel: '', when: '', msg: '', placeholder: '', agent: '', pr: '', lead: false };
+           statusLabel: '', when: '', msg: '', placeholder: '', agent: '', pr: '', lead: false, exited: false };
 }
 // A worktree that exists with no live session on it. A tap goes straight to naming one —
 // the worktree is already identified, so the checkout picker is skipped.
@@ -245,7 +253,7 @@ export function freeModel(w, selected = false, idx = -1) {
     when: '',
     msg: w.task || '',
     placeholder: '(no session yet)',
-    agent: '', pr: '', lead: false,
+    agent: '', pr: '', lead: false, exited: false,
   };
 }
 // The TUI shortens $HOME to ~ everywhere it prints a path. The phone has no idea what

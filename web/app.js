@@ -2260,7 +2260,11 @@ function back() {
 // the status hue so one declaration colours the rail, the chip and the selection.
 function cardEl(m, h, idx) {
   const d = el('div', {
-    class: 'card' + (m.selected ? ' sel' : '') + (m.dim ? ' dim' : '') + ` k-${m.kind}` + (m.status ? ` s-${m.status}` : ''),
+    // `exited` is a CLASS, not a status: the nine statuses say what a running agent is
+    // doing and this one is not running, so it rides beside the status rather than
+    // replacing the vocabulary. app.css dims the card and recolours the chip from it.
+    class: 'card' + (m.selected ? ' sel' : '') + (m.dim ? ' dim' : '') + ` k-${m.kind}`
+           + (m.status ? ` s-${m.status}` : '') + (m.exited ? ' exited' : ''),
     role: 'button', tabindex: '0',
   });
   d.style.setProperty('--c', G.COLORS[m.color] || G.COLORS.grey);
@@ -2273,7 +2277,15 @@ function cardEl(m, h, idx) {
   d.append(top);
   // ── the meta row: the status chip, then where it is, then agent and PR ──
   const meta = el('div', { class: 'c-meta' });
-  if (m.statusLabel) meta.append(el('span', { class: 'chip st', text: m.statusLabel }));
+  // AN EXITED SESSION'S OLD STATUS IS THE MOST MISLEADING THING THE CARD COULD SAY —
+  // it is whatever the agent was doing at the moment it stopped. The chip is where the
+  // eye already goes for "what is this doing", so it is where "it is not" belongs, and
+  // the status it replaces is gone rather than shown beside it.
+  //   `⏎ resumes` on the desk and `open it and press enter` here are the same route: the
+  // pane is held by bin/agent-here and is already asking for Enter, so the way back in is
+  // the way in. No new verb, no new gesture.
+  if (m.exited) meta.append(el('span', { class: 'chip st exited', text: 'exited' }));
+  else if (m.statusLabel) meta.append(el('span', { class: 'chip st', text: m.statusLabel }));
   if (m.where) meta.append(el('span', { class: 'c-where', text: m.where }));
   if (m.path) meta.append(el('span', { class: 'c-where', text: m.path }));
   if (m.agent) meta.append(el('span', { class: 'chip tag', text: m.agent }));
@@ -2283,7 +2295,9 @@ function cardEl(m, h, idx) {
   // THE POINT OF THE REDESIGN. Rendered as text, never as markup: this is whatever the
   // agent last said, and app.css clamps it rather than the client truncating it — so the
   // browser decides where two lines end, at whatever size the reader has chosen.
-  if (m.msg || m.placeholder) {
+  if (m.exited) {
+    d.append(el('div', { class: 'c-msg none', text: 'the agent exited — open it and press enter to resume this conversation' }));
+  } else if (m.msg || m.placeholder) {
     d.append(el('div', { class: 'c-msg' + (m.msg ? '' : ' none'), text: m.msg || m.placeholder }));
   }
   // THE GRIP IS STILL EXACTLY ONE LINE, and it is now the title row rather than the top

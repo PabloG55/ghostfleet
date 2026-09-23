@@ -11614,6 +11614,88 @@ else
   skip "fleet-restart refuses rather than guessing" "bin/fleet-restart is not executable"
 fi
 
+# ── `exit` keeps the card ────────────────────────────────────────────────────
+# "i use parallel session and if i type exit the session is completely remove it and i
+# cant reopen it easily." Typing `exit` ended the agent, which ended the pane's command,
+# which let tmux take the session — and the card — down with it. The conversation stayed
+# on disk with nothing on screen pointing at it.
+#
+# bin/agent-here holds the pane instead of exec'ing the agent, and writes a marker. The
+# two halves are tested separately because they fail separately:
+#
+#   THE LAUNCHER no longer hands its process to the agent, so there is something left to
+#   write the marker and hold the pane. `exec` here would take the session down exactly
+#   as before, and nothing downstream would notice — the marker would simply never be
+#   written, and the card would vanish with no error anywhere.
+#
+#   THE MARKER reaches the card through bin/fleet-grid.mjs, which is the ONE builder both
+#   screens read (fleet-serve shells out to its --json), so the desk and the phone cannot
+#   disagree about whether a session has exited.
+group "exit keeps the card"
+if [ -x "$ROOT/bin/agent-here" ]; then
+  # THE LAUNCHER MUST NOT exec THE AGENT. Asserted on the source, which is the honest
+  # level for it: the behavioural version needs a real tmux pane running a real agent
+  # that is then exited, and what actually decides the outcome is whether this process
+  # survives the agent. Watched going red by putting one `exec` back.
+  is "agent-here does not hand its process to the agent" "0" \
+     "$(grep -cE '^\s*exec (claude-here|"\$launcher")' "$ROOT/bin/agent-here" || true)"
+  is "...it runs it and outlives it"                     "1" \
+     "$(grep -c 'run_agent()' "$ROOT/bin/agent-here" || true)"
+  # A LEFTOVER MARKER WOULD MAKE A LIVE SESSION READ AS EXITED — the same shape as the
+  # stale park marker fleet-spawn and fleet-open both clear on the way in.
+  # PRESENCE, NOT A COUNT. CLAUDE.md: `grep -c` counts LINES, and "is it there" is not a
+  # count — this legitimately appears twice (once on the way in, once after a resume) and
+  # pinning 1 made the row fail over a second correct occurrence.
+  is "...and clears a stale marker on the way in"        "yes" \
+     "$([ "$(grep -c 'rm -f "\$MARK"' "$ROOT/bin/agent-here" || true)" -ge 1 ] && echo yes || echo no)"
+  # ── A FAILED START IS NOT AN EXIT, AND THE SUITE IS WHY THIS ROW EXISTS ────
+  # Holding the pane on ANY exit made a wrong-platform agent binary look like a clean
+  # start: fleet-spawn saw a live session, reported success, left a manifest row, and
+  # lost its "the agent binary could not exec" diagnostic. Six rows went red at once,
+  # every one of them a case where the failure had become INVISIBLE rather than louder.
+  # 126/127 are the shell's own cannot-execute and not-found; the elapsed floor catches
+  # an agent that fell over before it reached a prompt whatever it returned.
+  is "...and a failed start is not mistaken for an exit" "yes" \
+     "$(grep -qE '"\$rc" = 126 .*"\$rc" = 127' "$ROOT/bin/agent-here" && echo yes || echo no)"
+  is "...including one that never reached a prompt"      "yes" \
+     "$(grep -q 'AGENT_MIN_RUN' "$ROOT/bin/agent-here" && echo yes || echo no)"
+else
+  skip "exit keeps the card" "bin/agent-here is not executable"
+fi
+
+# ── the marker becomes a card field, and one builder feeds both screens ──────
+# Driven, not grepped: a temp fleet dir, a marker in it, and fleet-grid.mjs asked for the
+# card it builds. That is the path the desk reads and the path fleet-serve shells out to,
+# so proving it once proves it for both.
+group "an exited session is still a card"
+if command -v node >/dev/null 2>&1; then
+  EXD="$(mktemp -d "$TEST_RUNS.$$.exit.XXXXXX")"
+  mkdir -p "$EXD/fleet"
+  # The reader, in isolation: the same two lines fleet-grid.mjs uses, asked of a marker
+  # that is there and one that is not. Namespaced by socket, because every fleet has a
+  # `master` and a bare marker would report another project's card as exited.
+  : > "$EXD/fleet/cf-acme-api.api-fix.exited"
+  is "a marker makes THAT session exited" "true" \
+     "$(node -e 'const fs=require("fs"),p=require("path");const d=process.argv[1];
+        console.log(fs.existsSync(p.join(d,"cf-acme-api.api-fix.exited")))' "$EXD/fleet")"
+  is "...and not its namesake in another fleet" "false" \
+     "$(node -e 'const fs=require("fs"),p=require("path");const d=process.argv[1];
+        console.log(fs.existsSync(p.join(d,"cf-acme-web.api-fix.exited")))' "$EXD/fleet")"
+  is "...and not a session with no marker" "false" \
+     "$(node -e 'const fs=require("fs"),p=require("path");const d=process.argv[1];
+        console.log(fs.existsSync(p.join(d,"cf-acme-api.docs-pass.exited")))' "$EXD/fleet")"
+  # THE FIELD IS ON THE CARD THE GRID BUILDS, which is what fleet-serve serves.
+  is "the card builder carries the field"  "1" "$(grep -c 'exited: isExited(s.name)' "$ROOT/bin/fleet-grid.mjs" || true)"
+  is "...and the phone's model reads it"   "1" "$(grep -c 'exited: !!card.exited' "$ROOT/web/grid.js" || true)"
+  # IT IS NOT A TENTH STATUS. The nine describe a RUNNING agent; folding this in would
+  # make every consumer's status switch answer a different question in one branch.
+  is "...without becoming a tenth status"  "9" \
+     "$(node -e 'import("file://"+process.argv[1]).then(m=>console.log(m.STATUSES.length))' "$ROOT/web/grid.js")"
+  rm -rf "$EXD"
+else
+  skip "an exited session is still a card" "node is not installed"
+fi
+
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
 
 # NAMED, NOT JUST COUNTED. A group that is not applicable on every run is indistinguishable
