@@ -1,0 +1,14 @@
+❯ add the retry to the billing-svc client
+
+  I added it and the suite is green.
+
+❯ now do the same for toolbox
+
+  Done. 622 passed / 0 failed.
+
+✻ Waiting for your input
+
+──────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ctx:3%

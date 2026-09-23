@@ -11594,6 +11594,142 @@ else
   skip "how long a wake actually takes" "no claude/tmux/node on this host — the benchmark needs a real agent"
 fi
 
+# ── 4a10c12. the vetoes that made hibernation do nothing ─────────────────────
+# Shipped, switched on, and the first real dry run over 120 sessions offered ONE. Three
+# vetoes were firing on sessions they had no business protecting — all of them failing SAFE,
+# which is why nothing looked broken and the feature simply did not work. A veto that is
+# wrong in the safe direction is the hardest kind to notice: the tally is the only symptom.
+group "the vetoes that made hibernation do nothing"
+if command -v jq >/dev/null 2>&1; then
+  VT="$(mktemp -d "$TEST_RUNS.$$.veto.XXXXXX")"
+  vyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+
+  # ── 1. the draft veto read the whole pane ──
+  # Every prompt ever sent is still in the scrollback, drawn with the glyph the composer
+  # uses, so any session that had been talked to looked like it had something typed.
+  # Measured live: 20 flagged, 12 of them with an empty composer.
+  #   The composer is the box between the LAST two rules; everything above has been sent and
+  # cannot be lost. Driven through the real command by capturing a fixture into a pane, so
+  # what is tested is has_draft and not a copy of it.
+  draft_says() {
+    tmux -L cf-acme-web kill-session -t "=toolbox" 2>/dev/null
+    tmux -L cf-acme-web new-session -d -s toolbox -x 300 -y 70 "cat '$1'; sleep 600" 2>/dev/null
+    sleep 0.5
+    jq -n --arg tr "$VT/tr.jsonl" --arg cwd "$VT" \
+      '{session_id:"11111111-2222-3333-4444-555555555555",sock:"cf-acme-web",slot:"toolbox",
+        cwd:$cwd,status:"ready",transcript:$tr,ts:0}' > "$CLAUDE_FLEET_DIR/d.json"
+    "$ROOT/bin/fleet-hibernate" -s cf-acme-web --idle-hours 0 --json 2>/dev/null \
+      | jq -r '.[] | select(.slot=="toolbox") | .why'
+  }
+  export CLAUDE_FLEET_DIR="$VT/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$VT/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  jq -n --arg d "$VT" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  : > "$VT/tr.jsonl"
+
+  # THE ROW THE LIVE FLEET WAS FAILING: past prompts above, nothing typed below.
+  is "veto: past prompts are not a draft" "no" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/pane-scrollback-empty-composer.txt")")"
+  # ...and a real draft is still caught, or the veto has been deleted rather than fixed.
+  is "veto: a typed composer still is"    "yes" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/claude-composer-typed.txt")")"
+  is "veto: an empty composer is not"     "no" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/claude-composer-empty.txt")")"
+  # A wrapped or newline-continued draft has no glyph on its later lines.
+  is "veto: a multi-line draft counts"    "yes" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/pane-draft-multiline.txt")")"
+  # No box drawn means no answer, and no answer must not read as "something is typed" —
+  # that is the direction that pins memory forever.
+  is "veto: no composer box is not a draft" "no" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/pane-no-composer-box.txt")")"
+  # THE ROW THE LINUX LEG WENT RED ON — AND IT CANNOT FAIL ON THIS ONE.
+  # Restoring the old rule leaves this green on macOS, because there the sed strips the glyph
+  # and the space class covers the padding; the bug needs GNU sed, mawk, or a non-UTF-8
+  # locale to appear. So this row pins the BEHAVIOUR and the ubuntu leg is what tests it,
+  # the same division as the stat shim. What makes the fix trustworthy is not this row but
+  # that nothing in the rule depends on the toolchain any more: no interval expression, no
+  # glyph named in a pattern, no character class deciding what counts as blank. The old rule stripped the prompt glyph by name and then
+  # asked whether anything was left, which is three bets on the toolchain at once: an interval
+  # expression mawk does not take, a multibyte literal whose match depends on the locale, and a
+  # space class that leaves whatever the locale does not call space. An empty composer carrying
+  # padding came back looking typed. Nothing is stripped by name now — the first non-blank run
+  # goes, whatever it renders as.
+  is "veto: a padded empty composer is not a draft" "no" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/pane-empty-composer-padded.txt")")"
+  tmux -L cf-acme-web kill-server 2>/dev/null
+
+  # ── 2. the idle clock read mtime, which moves without anybody typing ──
+  # A transcript is appended to by hook records, tool results and compactions. Measured:
+  # fifteen sessions across unrelated projects all reporting the same idle in one pass.
+  # The clock is the last record that is a PERSON TYPING — type "user" with a STRING content.
+  # A tool result is also type "user" and its content is an array of blocks.
+  mkjsonl() {   # file  prompt_age_h  toolresult_age_h
+    : > "$1"
+    node -e '
+      const fs=require("fs");const [f,ph,th]=process.argv.slice(1);
+      const at=(h)=>new Date(Date.now()-h*3600000).toISOString();
+      const L=[];
+      L.push(JSON.stringify({type:"user",message:{role:"user",content:"the last thing a person typed"},timestamp:at(+ph)}));
+      L.push(JSON.stringify({type:"assistant",message:{role:"assistant",content:[{type:"text",text:"ok"}]},timestamp:at(+ph)}));
+      // a tool result AFTER it: same type "user", array content, and not a person
+      L.push(JSON.stringify({type:"user",message:{role:"user",content:[{type:"tool_result",content:"622 passed"}]},timestamp:at(+th)}));
+      fs.writeFileSync(f,L.join("\n")+"\n");
+    ' "$1" "$2" "$3"
+  }
+  idle_of() {
+    jq -n --arg tr "$1" --arg cwd "$VT" \
+      '{session_id:"11111111-2222-3333-4444-555555555555",sock:"cf-acme-api",slot:"billing-svc",
+        cwd:$cwd,status:"ready",transcript:$tr,ts:0}' > "$CLAUDE_FLEET_DIR/i.json"
+    "$ROOT/bin/fleet-hibernate" -s cf-acme-api --idle-hours 48 --json 2>/dev/null \
+      | jq -r '.[] | select(.slot=="billing-svc") | .idle_hours'
+  }
+  rm -f "$CLAUDE_FLEET_DIR/d.json"
+  tmux -L cf-acme-api new-session -d -s billing-svc -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  # prompt 100h ago, a tool result one minute ago: mtime says fresh, the person says 100h.
+  mkjsonl "$VT/old.jsonl" 100 0.016
+  is "veto: the clock is the last PROMPT, not the last write" "100" \
+     "$(idle_of "$VT/old.jsonl" | cut -d. -f1)"
+  # ...and a session somebody typed into an hour ago is not ancient.
+  mkjsonl "$VT/new.jsonl" 1 0.016
+  is "veto: ...so a recent prompt reads as recent" "1" \
+     "$(idle_of "$VT/new.jsonl" | cut -d. -f1)"
+  # A transcript with no human turn at all falls back to mtime rather than reading as ancient.
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[]},"timestamp":"2020-01-01T00:00:00.000Z"}' > "$VT/none.jsonl"
+  is "veto: no prompt at all falls back to mtime" "0" "$(idle_of "$VT/none.jsonl" | cut -d. -f1)"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+
+  # ── 3. an id is recovered from evidence, or not at all ──
+  # A wrong id does not fail loudly: it resumes somebody else's conversation into a card
+  # wearing the right name. So every branch either returns an id it was TOLD, or nothing.
+  # `sleep 600 --resume X` makes sleep reject the argument and exit, taking the session with
+  # it — the fixture has to both CARRY the argument and stay alive to be read.
+  # tmux runs the command through `sh -c`, which execs a simple command directly — so the
+  # arguments have to belong to a process that STAYS, not to a shell that hands over.
+  # No `exec`: exec REPLACES the shell, and with it the argv that carries --resume. The
+  # script has to stay the process whose arguments are being read.
+  printf '#!/bin/sh\nsleep 600\n' > "$VT/fakeagent"; chmod +x "$VT/fakeagent"
+  tmux -L cf-toolbox new-session -d -s scratch -c "$VT" -x 80 -y 24 \
+    "'$VT/fakeagent' --resume 22222222-3333-4444-5555-666666666666" 2>/dev/null
+  sleep 0.4
+  rm -f "$CLAUDE_FLEET_DIR"/*.json
+  is "veto: an id on the command line is recovered" "22222222-3333-4444-5555-666666666666" \
+     "$("$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 48 --json 2>/dev/null \
+        | jq -r '.[] | select(.slot=="scratch") | .why' >/dev/null 2>&1; \
+        jq -r '.session_id // empty' "$CLAUDE_FLEET_DIR"/22222222-3333-4444-5555-666666666666.json 2>/dev/null)"
+  tmux -L cf-toolbox kill-session -t "=scratch" 2>/dev/null
+  # ...and a session that never had one keeps the veto rather than being given a guess.
+  tmux -L cf-toolbox new-session -d -s billing-svc -c "$VT" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  is "veto: no evidence means the veto stands" "yes" \
+     "$(vyn grep -q 'no recorded conversation id' <<< "$("$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 48 --json 2>/dev/null | jq -r '.[] | select(.slot=="billing-svc") | .why')")"
+  tmux -L cf-toolbox kill-server 2>/dev/null
+
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$VT"
+else
+  skip "the vetoes that made hibernation do nothing" "jq missing"
+fi
+
 # ── 6b. every command is actually installed ──────────────────────────────────
 # A new command that never reaches the install list is invisible until someone hits
 # "command not found" — and worse, the SUMMARY line was hand-maintained separately from

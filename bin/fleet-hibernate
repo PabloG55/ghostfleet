@@ -142,12 +142,67 @@ field_for() {   # sock slot column -> newest record's value
 # fire for things that are not the conversation — so it drifts later than the transcript and
 # would keep a dead session awake. The transcript is appended to when, and only when, the
 # session actually does something.
+# ── WHEN DID A PERSON LAST TYPE INTO THIS SESSION ────────────────────────────
+# The transcript's mtime was the first answer and it is contaminated: the file is appended to
+# by things that are not somebody talking — hook records, tool results, a compaction, an
+# attachment written behind a turn that ended days ago. Measured on a live fleet: fifteen
+# sessions across unrelated projects all reported the same 0.74h idle in one pass, and a
+# session whose last human prompt was five days old had its transcript modified that morning.
+# An idle clock that every session shares is not measuring any of them.
+#
+# So the clock is the last record that is a PERSON TYPING: type "user" whose message content
+# is a plain string. A tool result is also type "user" and its content is an array of blocks —
+# that is the transport for a tool's output, not a human, and the eligibility rule elsewhere
+# in this repo already turns on exactly that distinction.
+#
+# TAIL-READ, BECAUSE THIS RUNS PER SESSION PER GOVERNOR TICK. The largest transcript on the
+# machine that asked for this is 157 MB across 35,433 records; parsing that eighty times a
+# minute is its own denial of service. The last prompt is almost always near the end, so a
+# bounded tail answers it — and the first line of a tail is usually half a record, so it is
+# dropped rather than fed to a parser.
+#   IT ESCALATES ONCE AND THEN GIVES UP. A long stretch of tool output can push the last
+# human turn out of a small window, so a wider read is tried before falling back to mtime.
+# Falling back is safe in the direction that matters: mtime is never OLDER than the last
+# prompt, so the worst it does is make a session look busier than it is and keep it awake.
+TAIL_SMALL="${CLAUDE_FLEET_TAIL_SMALL:-262144}"
+TAIL_BIG="${CLAUDE_FLEET_TAIL_BIG:-4194304}"
+last_prompt_ts() {
+  local tr="$1" bytes ts
+  [ -s "$tr" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  local size
+  size="$(wc -c < "$tr" 2>/dev/null | tr -d ' ')"
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  for bytes in "$TAIL_SMALL" "$TAIL_BIG"; do
+    # fromdateiso8601 rather than `date`, which needs -j -f here and -d there: one more
+    # macOS-only call is one more thing that silently means something else on the other leg.
+    #   THE FRACTION HAS TO GO FIRST. Every timestamp in a transcript carries milliseconds,
+    # and jq's fromdateiso8601 parses "%Y-%m-%dT%H:%M:%SZ" exactly — it REJECTS "…:41.565Z".
+    # Wrapped in try/catch that rejection is silent, every session falls back to mtime, and
+    # the clock this function exists to replace is the one still being used. It fails safe
+    # and it fails completely, which is the combination that does not get noticed.
+    # DROP THE FIRST LINE ONLY IF THE TAIL ACTUALLY CUT ONE. A tail that starts mid-file
+    # begins with half a record, which no parser should see — but when the whole file fits
+    # inside the window nothing was cut, and dropping line 1 throws away a real record. On a
+    # short transcript that record is often the ONLY human turn, so the clock fell back to
+    # mtime for exactly the sessions whose prompt was easiest to find.
+    local skip=2; [ "$size" -le "$bytes" ] && skip=1
+    ts="$(tail -c "$bytes" "$tr" 2>/dev/null | tail -n +$skip \
+          | grep '"type":"user"' 2>/dev/null \
+          | jq -r 'select((.message.content | type) == "string") | .timestamp // empty
+                   | sub("\\.[0-9]+Z$"; "Z") | try fromdateiso8601 catch empty' 2>/dev/null \
+          | tail -1)"
+    case "$ts" in ''|*[!0-9]*) ;; *) printf '%s' "$ts"; return 0 ;; esac
+  done
+  return 1
+}
+
 idle_hours() {
   local tr="$1" m
   [ -n "$tr" ] || { printf ''; return; }
-  m="$(mtime "$tr")"
-  # Checked again here rather than trusting mtime(): this number decides whether a process
-  # is killed, and the failure above was invisible precisely because a non-number reached
+  m="$(last_prompt_ts "$tr")" || m="$(mtime "$tr")"
+  # Checked again here rather than trusting the source: this number decides whether a process
+  # is killed, and an earlier failure was invisible precisely because a non-number reached
   # arithmetic and came out looking like an answer. An unreadable date must produce NOTHING,
   # which the veto list reads as "no transcript to date it by" and leaves the session awake.
   case "$m" in ''|*[!0-9]*) printf ''; return ;; esac
@@ -188,13 +243,53 @@ is_trusted() {
 }
 
 # ── has this session got something typed but not sent? ────────────────────────
-# Sleeping would throw it away with no trace. The composer draws the text after its prompt
-# glyph, so a non-empty line there is a draft. Read from a capture, never from the agent.
+# Sleeping would throw it away with no trace, so this veto has to be right in both
+# directions — and the first version was wrong in the expensive one.
+#
+# IT READ THE WHOLE PANE. Every prompt the human has EVER sent is still in the scrollback,
+# drawn with the same glyph the composer uses, so any session that had been talked to looked
+# like it had something typed. Measured on a live fleet: 20 sessions flagged, and reading the
+# composer alone shows 12 of them empty — a veto that fails safe, and by failing safe on 60%
+# of its subjects made the whole feature do nothing.
+#
+# THE COMPOSER IS THE BOX AT THE BOTTOM, which the agent draws between a pair of horizontal
+# rules. So the region between the LAST two rules is the only thing read. Everything above is
+# history: it cannot be lost by sleeping, because it has already been sent.
+#   The glyph itself is not content. An empty composer is a glyph and a space, which is why
+# matching "glyph followed by something" on the whole pane found a past prompt instead.
+#   A MULTI-LINE DRAFT COUNTS. Wrapped or newline-continued input has no glyph on its later
+# lines, so every line of the region is checked rather than only the one that starts it.
+#   NO RULES DRAWN MEANS NO ANSWER, and no answer means no draft: a pane that is mid-redraw,
+# or an agent that draws no box at all, must not be read as "something is typed" — that is
+# the direction that pins memory forever.
 has_draft() {
-  local sock="$1" slot="$2"
-  tmux -L "$sock" capture-pane -p -t "$slot" 2>/dev/null \
-    | grep -qE '^[[:space:]]*(>|❯)[[:space:]]+[^[:space:]]' && return 0
-  return 1
+  local sock="$1" slot="$2" pane
+  pane="$(tmux -L "$sock" capture-pane -p -t "$slot" 2>/dev/null)" || return 1
+  [ -n "$pane" ] || return 1
+  # ── ONE awk, NO GLYPH LITERAL, NO INTERVAL EXPRESSION ──────────────────────
+  # The first version stripped the prompt glyph with sed and then asked whether anything was
+  # left. That works here and went red on the Linux leg, because every part of it is a bet on
+  # the toolchain: `─{10,}` is an interval expression, which Ubuntu's default awk (mawk) does
+  # not take; `s/❯//` is a multibyte literal whose match depends on the locale tmux and sed
+  # happen to be in; and `tr -d '[:space:]'` leaves anything the locale does not call space,
+  # so a padded empty composer came back looking typed.
+  #   None of that is necessary. The composer is empty when its first line is nothing but the
+  # glyph, whatever the glyph renders as — so drop the FIRST non-blank run instead of a named
+  # character, and ask whether anything survives. A rule line is found by ten literal box
+  # characters rather than a counted repeat, which is the same test without the syntax mawk
+  # refuses.
+  printf '%s\n' "$pane" | awk '
+    /^[ \t]*──────────/ { a = b; b = NR }
+    { L[NR] = $0 }
+    END {
+      if (!a || !b) exit 1                       # no box drawn: no answer, and no draft
+      for (i = a + 1; i < b; i++) {
+        s = L[i]
+        if (i == a + 1) sub(/^[ \t]*[^ \t]+[ \t]*/, "", s)   # the glyph, whatever it is
+        if (s ~ /[^ \t]/) exit 0                  # something a person typed
+      }
+      exit 1
+    }'
 }
 
 # a lead whose fleet still has somebody working is the one card that must stay up
@@ -209,6 +304,93 @@ master_with_live_workers() {
     case "$st" in working|need-you) return 0 ;; esac
   done < <(tmux -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null)
   return 1
+}
+
+# ── RECOVERING A CONVERSATION ID THE STATE FILE NEVER GOT ────────────────────
+# A session started before the hook learned to record sock and slot has an id on disk that
+# nothing can address by fleet, so it reads as "no recorded conversation id" and can never be
+# eligible. Three places may still know it, tried in the order of how much each one is
+# EVIDENCE rather than inference:
+#
+#   1. the process's own arguments — `--resume <id>` or `--session-id <id>`. The agent was
+#      told the id; there is nothing to infer.
+#   2. ~/.claude/sessions/<pid>.json, which the agent writes for itself and which carries
+#      sessionId and cwd. Also not an inference: the file is keyed by the pid it belongs to.
+#
+# THERE WAS A THIRD SOURCE AND IT HAD TO GO. "The project directory for that cwd, when it
+# holds exactly one transcript" reads like evidence and is inference: one transcript in a
+# folder does not mean it belongs to THIS pane. Caught by this repo's own suite — a fixture
+# pane started in this checkout was handed the session id of the LIVE session running the
+# tests, and a state file was written claiming that conversation belonged to a worker called
+# scratch. Waking it would have resumed somebody else's conversation into a card wearing the
+# right name, which is the exact failure the "never guess" rule exists to prevent. A source
+# that is right most of the time is the worst kind here, because the times it is wrong are
+# silent.
+#
+# NEVER GUESS. Every branch either returns an id it was told, or returns nothing and leaves
+# the veto in place. A wrong id does not fail loudly — it resumes the wrong conversation into
+# a card wearing the right name, which is worse than a session that stays awake.
+#
+# MEASURED, AND THE ANSWER FOR THE FLEET THAT PROMPTED THIS IS "NOTHING TO RECOVER": of 40
+# sessions reading no-id, 37 have no project directory at all and 2 have an empty one — they
+# were started and never used, so there is no conversation to resume and the veto is right.
+# One had a transcript. The recovery is still here because it is correct for the sessions
+# that DO have one, and because the alternative is a veto nobody can ever clear.
+# Does this session's agent run with permissions bypassed? If so no trust dialog is drawn on
+# a resume, because the flag is passed again by the same launcher.
+skips_trust_dialog() {
+  local pid args
+  pid="$(pane_pid_of "$1" "$2")"
+  [ -n "$pid" ] || return 1
+  args="$(ps -o command= -p "$pid" 2>/dev/null)"
+  case "$args" in *--dangerously-skip-permissions*) return 0 ;; *) return 1 ;; esac
+}
+
+pane_pid_of() {
+  tmux -L "$1" list-panes -t "$2" -F '#{pane_pid}' 2>/dev/null | head -1
+}
+is_uuid() {
+  case "$1" in
+    [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-*-*-*-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+recover_sid() {
+  local sock="$1" slot="$2" pid args id
+  pid="$(pane_pid_of "$sock" "$slot")"
+  [ -n "$pid" ] || return 1
+
+  # 1. told to the process
+  args="$(ps -o command= -p "$pid" 2>/dev/null)"
+  # -E, not a BRE with \|: alternation inside \( \) is a GNU extension that BSD sed does not
+  # take, so the basic form matches nothing here and everything there — a recovery that
+  # silently finds no id on one platform and works on the other.
+  id="$(printf '%s\n' "$args" | sed -nE 's/.*--(resume|session-id)[= ]+([^ ]+).*/\2/p' | head -1)"
+  id="${id##*/}"; id="${id%.jsonl}"
+  if is_uuid "$id"; then printf '%s' "$id"; return 0; fi
+
+  # 2. the agent's own note about itself
+  if [ -f "$HOME/.claude/sessions/$pid.json" ] && command -v jq >/dev/null 2>&1; then
+    id="$(jq -r '.sessionId // empty' "$HOME/.claude/sessions/$pid.json" 2>/dev/null)"
+    if is_uuid "$id"; then printf '%s' "$id"; return 0; fi
+  fi
+
+  # No third guess. If neither the process nor its own note knows the id, nothing here does.
+  return 1
+}
+
+# Written where the hook would have written it, so the NEXT read finds it without this walk
+# and the grid sees the same session the plan does. Never over a record that already has an
+# id: this fills a hole, it does not correct anybody.
+backfill_sid() {
+  local sock="$1" slot="$2" id="$3" cwd="$4" f="${FLEET_DIR:?}/$3.json"
+  command -v jq >/dev/null 2>&1 || return 0
+  [ -f "$f" ] && [ -n "$(jq -r '.sock // empty' "$f" 2>/dev/null)" ] && return 0
+  jq -n --arg id "$id" --arg sock "$sock" --arg slot "$slot" --arg cwd "$cwd" \
+        --argjson ts "$(now)" \
+    '{session_id:$id, zellij:"", sock:$sock, slot:$slot, cwd:$cwd,
+      folder:($cwd|split("/")|last), branch:"", status:"unknown", transcript:"", ts:$ts}' \
+    > "$f.tmp.$$" 2>/dev/null && mv -f "$f.tmp.$$" "$f" 2>/dev/null || rm -f "$f.tmp.$$" 2>/dev/null
 }
 
 # ── the veto list ─────────────────────────────────────────────────────────────
@@ -232,7 +414,23 @@ veto_for() {
   esac
   has_draft "$sock" "$slot" && { printf 'something is typed and unsent'; return; }
   master_with_live_workers "$sock" "$slot" && { printf 'a lead with workers still running'; return; }
-  is_trusted "$cwd" || { printf 'its folder has no trust record — it would wake into a dialog'; return; }
+  # ── TRUST ONLY MATTERS IF A DIALOG CAN ACTUALLY APPEAR ──────────────────────
+  # The veto exists because a resumed session in an untrusted folder stops on "Is this a
+  # project you created or one you trust?" and never reaches a prompt — observed, on a
+  # throwaway. But that throwaway was a BARE `claude --resume`, and the fleet does not wake
+  # anything that way: claude-here's resume path passes --dangerously-skip-permissions, which
+  # is what 63 of the 70 live sessions on this machine are running with right now. With that
+  # flag there is no dialog to stall on, and the veto is refusing to sleep a session to
+  # protect it from something that cannot happen.
+  #   Read off the LIVE PROCESS rather than assumed: a session running with the flag will be
+  # relaunched by the same launcher with the same flag. A session running without it gets the
+  # veto, because for that one the dialog is real.
+  #   Belt and braces either way — the wake polls for the dialog and fails loudly with the
+  # marker kept, so a folder that does turn out to be untrusted costs one manual step and
+  # never the conversation.
+  if ! skips_trust_dialog "$sock" "$slot"; then
+    is_trusted "$cwd" || { printf 'its folder has no trust record and its agent would be asked'; return; }
+  fi
   [ -n "$idle" ] || { printf 'no transcript to date it by'; return; }
   awk -v i="$idle" -v t="$IDLE_HOURS" 'BEGIN{exit !(i < t)}' \
     && { printf 'idle %.1fh, under the %sh threshold' "$idle" "$IDLE_HOURS"; return; }
@@ -250,6 +448,17 @@ build_plan() {
       st="$(field_for "$sock" "$slot" 5)"; ts="$(field_for "$sock" "$slot" 3)"
       id="$(field_for "$sock" "$slot" 4)"; tr="$(field_for "$sock" "$slot" 6)"
       cwd="$(field_for "$sock" "$slot" 7)"
+      # A missing id is a hole in the RECORD, not necessarily in the world. Ask the running
+      # process before writing the session off as unwakeable.
+      if [ -z "$id" ]; then
+        case "$slot" in _*) ;; *)
+          id="$(recover_sid "$sock" "$slot")" || id=""
+          if [ -n "$id" ]; then
+            [ -n "$cwd" ] || cwd="$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
+            backfill_sid "$sock" "$slot" "$id" "$cwd"
+          fi ;;
+        esac
+      fi
       idle="$(idle_hours "$tr")"
       why="$(veto_for "$sock" "$slot" "$st" "$ts" "$cwd" "$id" "$idle")"
       # ── \x1f, NOT A TAB, and this row is exactly why CLAUDE.md says so ──────
