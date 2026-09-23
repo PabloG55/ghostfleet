@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: dd79e1c4ea9a
+// CLIENT-HASH: b2ada69ff967
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -157,6 +157,15 @@
 // scroll left to rigth is eanbled", then precisely: "the chats still gets overflown when
 // press on the text space", with a photograph of `send` clipped. The composer was 15px and
 // every sheet field inherited body's 14px. A phone on v30 keeps it on every tap into a box.
+// v34 MAKES `interrupted` YELLOW. It is the one status whose glyph and colour disagreed:
+// it already wore ⚠, the warning vocabulary, over a failure colour. Red is reserved for
+// need-you — the single state that means a human must act now — and an interrupted turn is
+// a transient (the machine slept, the API hiccuped, a governor parked something). Worth
+// noticing, not worth alarming, which is what yellow already means here for starting, at
+// limit and unknown.
+//   An older client DEGRADES rather than dies: it keeps painting the old colour, which is
+// invisible from the server log and is the entire content of this change, so the bump is
+// what makes it arrive at all.
 // v33 IS THE CHAT, GIVEN THE ROOM IT WAS MISSING. "ther is alot of empty spaces that is not
 // being used that makes the app feel compacted." Measured at 390x844: the chat's chrome is
 // only 14.6% of the viewport, so it was never short of room — but its side padding was
@@ -174,7 +183,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v33';
+const VERSION = 'ghostfleet-v34';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

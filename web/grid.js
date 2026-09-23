@@ -45,7 +45,7 @@ export const STATUS = {
   idle:         { label: '· idle',        color: 'grey' },
   starting:     { label: '… starting',    color: 'yellow' },
   limit:        { label: '⧗ limit',       color: 'yellow' },
-  interrupted:  { label: '⚠ interrupted', color: 'red' },
+  interrupted:  { label: '⚠ interrupted', color: 'yellow' },
   unknown:      { label: '? unknown',     color: 'yellow' },
 };
 // The vocabulary, in the order §4 lists it. Exported so the settings screen and the
@@ -178,7 +178,7 @@ export function countsSegments(counts) {
     { text: ' · ' },
     { text: `${c.ready || 0} ready`, color: 'green' },
   ];
-  if (c.interrupted) seg.push({ text: ' · ' }, { text: `${c.interrupted} interrupted`, color: 'red' });
+  if (c.interrupted) seg.push({ text: ' · ' }, { text: `${c.interrupted} interrupted`, color: 'yellow' });
   if (c.limit) seg.push({ text: ' · ' }, { text: `${c.limit} at limit`, color: 'yellow' });
   if (c.parked) seg.push({ text: ' · ' }, { text: `${c.parked} parked`, color: 'grey' });
   return seg;

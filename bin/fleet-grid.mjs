@@ -100,7 +100,7 @@ const STATUS = {
   limit:      { label: '⧗ limit',     color: C.yellow },
   // Turn cut short, waiting on a human — a park does this, so a governor episode makes
   // them in bulk. Also NOT ready, and for the same reason: the input box looks normal.
-  interrupted:{ label: '⚠ interrupted', color: C.red },
+  interrupted:{ label: '⚠ interrupted', color: C.yellow },
   unknown:    { label: '? unknown',   color: C.yellow },
 };
 
@@ -1585,7 +1585,7 @@ function renderGrid() {
   let buf = '\x1b[H';
   const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
-    (cut ? ` · ${C.red}${cut} interrupted${C.reset}` : '') +
+    (cut ? ` · ${C.yellow}${cut} interrupted${C.reset}` : '') +
     (limited ? ` · ${C.yellow}${limited} at limit${C.reset}` : '') +
     (parked ? ` · ${C.grey}${parked} parked${C.reset}` : '');
   // Same banner as the Projects screen, with the live counts beside the ship. Falls

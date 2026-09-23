@@ -216,6 +216,36 @@ for (const [name, n, w, r, cut, lim, park] of CASES) {
   is(`counts: ${name}`, tuiCounts(n, w, r, cut, lim, park),
      PWA.countsLine({ need_you: n, working: w, ready: r, interrupted: cut, limit: lim, parked: park }));
 }
+// ── 3b. the counts COLOURS, which the comparison above deliberately strips ──
+// hdrExpr removes every ${C.x} so the words and the numbers can be compared as one string.
+// That is right for the text, and it leaves the COLOUR of each clause compared by nobody.
+// MEASURED, not assumed: changing the TUI's `interrupted` clause from red to yellow and
+// leaving the phone's alone keeps every row in §3 green, and nothing else in the suite
+// noticed either.
+//   The colour is half of what the status vocabulary means here — red is need-you's alone,
+// and yellow is the warning family — so two copies that agree on the words and disagree on
+// the colour are still saying different things to a reader glancing at one screen. Pinned
+// per clause rather than as a whole line, so a failure names WHICH one drifted.
+const tuiClauseColour = (word) => {
+  const m = new RegExp('\\$\\{C\\.(\\w+)\\}\\$\\{\\w+\\} ' + word).exec(hdrStmt);
+  return m ? m[1] : `(no '${word}' clause in the TUI header)`;
+};
+const ALL_ON = { need_you: 1, working: 1, ready: 1, interrupted: 1, limit: 1, parked: 1 };
+const pwaClauseColour = (word) => {
+  const seg = PWA.countsSegments(ALL_ON).find(x => new RegExp(`^\\d+ ${word}$`).test(x.text || ''));
+  return seg ? (seg.color || '(no colour)') : `(no '${word}' segment on the phone)`;
+};
+for (const word of ['need you', 'working', 'ready', 'interrupted', 'at limit', 'parked']) {
+  is(`counts colour: ${word}`, tuiClauseColour(word), pwaClauseColour(word));
+}
+// ...and the one the change above is about, stated as a VALUE rather than only as parity:
+// both could drift together and stay equal. Red is reserved for need-you; interrupted
+// wears ⚠ and belongs with the warnings.
+is('need-you is the only red clause', 'red', tuiClauseColour('need you'));
+is('...and interrupted is a warning, not a failure', 'yellow', tuiClauseColour('interrupted'));
+is('...on the phone too', 'yellow', pwaClauseColour('interrupted'));
+is('...while need-you stays red there', 'red', pwaClauseColour('need you'));
+
 // ...and the same line built from the CARDS, which is what the phone actually renders
 for (const f of grids) {
   const g = JSON.parse(fs.readFileSync(path.join(fixDir, f), 'utf8'));
