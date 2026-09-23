@@ -222,13 +222,13 @@ is('...and the sweep read them', true, scanned > 50);
 const BINARY_REVIEWED = new Set([
   '2c785a8e51bcab64',   // docs/img/pane-fit.png
   '265c13b1e022d32c',   // docs/img/pane-permission-dialog.png
-  '080c1e0698887409',   // docs/mobile/confirm.png
-  '0c597815fcfff9ae',   // docs/mobile/grid.gif
-  '6b9a2c7462f96499',   // docs/mobile/pane.gif
-  'a0984c7bfa12adba',   // docs/mobile/phone-demo.gif
-  '368e981ec5f385c5',   // docs/mobile/projects.png
-  '5e4795d75230ae92',   // docs/mobile/session.gif
-  '95240291927ad942',   // docs/mobile/statuses.png
+  '242a6f9c498399a1',   // docs/mobile/confirm.png
+  '8b962f74b4b387eb',   // docs/mobile/grid.gif
+  '391976337517eac8',   // docs/mobile/pane.gif
+  '57f0372775587188',   // docs/mobile/phone-demo.gif
+  'd6ea272da209deef',   // docs/mobile/projects.png
+  'a8580058a434195a',   // docs/mobile/session.gif
+  '4f2218f03a99a458',   // docs/mobile/statuses.png
   '07b65ab7235ca1d3',   // docs/stack-demo.gif
   'ef987172757ffd8c',   // docs/stack-demo.mp4
   '23ec45657a6e9e92',   // docs/worktree-demo.gif

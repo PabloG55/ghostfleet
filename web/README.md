@@ -29,7 +29,7 @@ that still renders is a card that still looks right.
 | the grid, `nc = 1`, scrolling | the session, which is a chat | its live pane |
 |---|---|---|
 | ![grid](../docs/mobile/grid.gif) | ![session](../docs/mobile/session.gif) | ![pane](../docs/mobile/pane.gif) |
-| the card list is the one region that scrolls — the page itself never does | at rest, scrolled back through older turns, a draft in the composer, and the `⋯` sheet | as attached, then `fit`, then zoomed, then scrollback |
+| the card list is the one region that scrolls — the page itself never does | at rest, scrolled back through older turns, a draft typed into the composer, and a swipe to the next session and back | as attached, then zoomed in twice, then `fit`, then scrollback |
 
 | all nine statuses | projects | the TUI's own confirmation, and its force step |
 |---|---|---|
@@ -57,23 +57,33 @@ enrolment and no real fleet data in the frame:
 (cd web && python3 -m http.server 8899 --bind 127.0.0.1)
 ```
 
-Open it at a 390x844 viewport with `devicePixelRatio` 2, take the fixture bypass on the
-lock screen, and shoot each screen. Note that the cards are not `<button>`s and they do
-not listen for `click`: the tap handler is `pointerup` on `.card` (`wire()` in `app.js` —
-named rather than given a line number, which this one had and which pointed at an
-unrelated comment two ports later), guarded
-by a movement slop and a long-press timer, so a driver that only dispatches `click` selects
-a card and never opens it. Downscale the 2x captures to the 390-wide convention, and build
-each GIF from its frames with the concat demuxer, a `duration` per frame — the screens are
-static between interactions, so 5fps is enough, and `stats_mode=diff` is what keeps a dark
-UI from banding. The grid's loop ping-pongs back to the top so it reads as a scroll rather
-than a jump cut:
+Open it at a 390x844 viewport, take the fixture bypass on the lock screen, and shoot each
+screen. Note that the cards are not `<button>`s and they do not listen for `click`: the tap
+handler is `pointerup` on `.card` (`wire()` in `app.js`), guarded by a movement slop and a
+long-press timer, so a driver that only dispatches `click` selects a card and never opens
+it. A swipe and a long-press have to be *held and moved* for the same reason — the client
+tells them apart from the pointer track, not from the event name.
+
+CLEAR THE SERVICE WORKER BEFORE THE FIRST NAVIGATION. It is cache-first, so a shell left
+from an earlier run serves the fixtures it was built with and the recording looks perfect
+while documenting data that is gone. Unregister, delete the caches, reload, and then read
+`caches.keys()` back to confirm which shell actually answered.
+
+Shoot at `deviceScaleFactor` 1 — the convention is 390 wide, and capturing at 2x only to
+downscale softens terminal text that is already pixel-aligned. 5fps is enough because the
+screens are static between interactions, and `stats_mode=diff` is what keeps a dark UI from
+banding.
+
+`dither=none`, which is a change: this UI is flat blocks of a dozen terminal colours with
+no gradient to band, so ordered dithering only adds noise that no GIF can compress.
+Measured on the same 82 frames of the demo walk — bayer 558kB, none 421kB, and the frames
+are indistinguishable. Every file here is under what it replaced.
 
 ```bash
-ffmpeg -f concat -safe 0 -i list.txt -filter_complex \
-  "fps=5,scale=390:-1:flags=lanczos,split[a][b];\
-   [a]palettegen=max_colors=128:stats_mode=diff[p];\
-   [b][p]paletteuse=dither=bayer:bayer_scale=3" \
+ffmpeg -framerate 5 -i frames/f%04d.png \
+  -vf "palettegen=max_colors=128:stats_mode=diff" palette.png -y
+ffmpeg -framerate 5 -i frames/f%04d.png -i palette.png \
+  -lavfi "paletteuse=dither=none:diff_mode=rectangle" \
   -loop 0 docs/mobile/phone-demo.gif -y
 ```
 
