@@ -15,15 +15,7 @@ function Btn({ label, onClick, cls = "" }) {
 		children: label
 	});
 }
-var ICONS = {
-	enter: ["M5 12h14M12 5l7 7-7 7"],
-	clock: ["M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0", "M12 7v5l3 2"],
-	plus: ["M12 5v14M5 12h14"],
-	tree: ["M6 6m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M6 18m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M18 12m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0", "M6 8.5v7M8.5 6h4a3 3 0 0 1 3 3v1M8.5 18h4a3 3 0 0 0 3-3v-1"],
-	folder: ["M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
-	gear: ["M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0", "M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.5a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9.5a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"],
-	more: ["M6 12h.01M12 12h.01M18 12h.01"]
-};
+var ICONS = { more: ["M6 12h.01M12 12h.01M18 12h.01"] };
 function Icon({ name }) {
 	const ds = ICONS[name];
 	if (!ds) return null;
@@ -39,20 +31,7 @@ function Icon({ name }) {
 		children: ds.map((d, i) => /* @__PURE__ */ u("path", { d }, i))
 	});
 }
-function VerbBtn({ verb, label, icon, onClick, cls = "" }) {
-	return /* @__PURE__ */ u("button", {
-		class: cls || null,
-		"data-verb": verb,
-		onClick,
-		title: label,
-		"aria-label": label,
-		children: [/* @__PURE__ */ u(Icon, { name: icon }), /* @__PURE__ */ u("span", {
-			class: "vl",
-			children: label
-		})]
-	});
-}
-function Header({ scope, mode, stale, counts }) {
+function Header({ scope, mode, stale, counts, onMore }) {
 	return /* @__PURE__ */ u(S, { children: [/* @__PURE__ */ u("div", {
 		class: "hdr",
 		children: [
@@ -75,6 +54,13 @@ function Header({ scope, mode, stale, counts }) {
 					style: s.color ? `color:${s.color}` : null,
 					children: s.text
 				}, i))
+			}) : null,
+			onMore ? /* @__PURE__ */ u("button", {
+				class: "more",
+				onClick: onMore,
+				title: "actions",
+				"aria-label": "actions",
+				children: /* @__PURE__ */ u(Icon, { name: "more" })
 			}) : null
 		]
 	}), stale ? /* @__PURE__ */ u("div", {
@@ -148,13 +134,14 @@ function CardList({ nodes, listRef }) {
 		ref: box
 	});
 }
-function CardScreen({ scope, mode, stale, counts, band, confirm, cards, listRef, toast, verbs, hint }) {
+function CardScreen({ scope, mode, stale, counts, onMore, band, confirm, cards, listRef, toast }) {
 	return /* @__PURE__ */ u(S, { children: [
 		/* @__PURE__ */ u(Header, {
 			scope,
 			mode,
 			stale,
-			counts
+			counts,
+			onMore
 		}),
 		band,
 		/* @__PURE__ */ u(ConfirmBar, { confirm }),
@@ -165,21 +152,7 @@ function CardScreen({ scope, mode, stale, counts, band, confirm, cards, listRef,
 		toast ? /* @__PURE__ */ u("div", {
 			class: ("toast " + (toast.kind || "")).trim(),
 			children: toast.text
-		}) : null,
-		/* @__PURE__ */ u("div", {
-			class: "verbs",
-			children: verbs.map((v) => /* @__PURE__ */ u(VerbBtn, {
-				verb: v.verb,
-				label: v.label,
-				icon: v.icon,
-				cls: v.cls,
-				onClick: v.onClick
-			}, v.verb))
-		}),
-		/* @__PURE__ */ u("div", {
-			class: "hint",
-			children: hint
-		})
+		}) : null
 	] });
 }
 function ProjectsScreen(p) {

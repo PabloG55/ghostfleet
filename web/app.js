@@ -516,21 +516,21 @@ function projectsProps() {
     // port is meant to demonstrate. What it still has to do is restore a position after
     // the screen has been LEFT and come back to.
     listRef: (list) => { if (list) watchScroll('projects', list); },
-    verbs: [
-      // Screen verbs only, named rather than key-lettered — see the grid footer above for
-      // the split and why `data-verb` is the hook the driven helpers use. `remove` stays in
-      // the footer here because a project has no actions sheet to move it into, and it is
-      // still gated by the confirm bar carrying the TUI's own question.
-      { verb: 'enter', label: 'open', icon: 'enter', onClick: () => openProject((projects[S.sel] || {}).name), cls: 'go' },
+    // BEHIND THE `⋯`, NOT A FOOTER. Same verbs, same words — this is still screen verbs
+    // only, and `remove` is still here rather than in a per-card sheet because a project
+    // has no such sheet, and it is still gated by the confirm bar carrying the TUI's own
+    // question. What changed is where you reach them from.
+    onMore: () => sheetMore('actions', '— projects', [
+      { label: 'open', cls: 'go', onClick: () => openProject((projects[S.sel] || {}).name) },
       // the projects screen schedules a message to THAT project's master
-      { verb: 'sched', label: 'schedule', icon: 'clock', onClick: () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); } },
-      { verb: 'settings', label: 'settings', icon: 'gear', onClick: () => sheetSettings() },
-      { verb: 'remove', label: 'remove', icon: 'more', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
-    ],
-    hint: 'tap a project · long-press to remove it from the list · drag its title to reorder',
+      { label: 'schedule', onClick: () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); } },
+      { label: 'settings', onClick: () => sheetSettings() },
+      { label: 'remove', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
+    ], PROJECTS_HINT),
     toast: S.toast,
   };
 }
+const PROJECTS_HINT = 'tap a project · long-press to remove it from the list · drag its title to reorder';
 // `Q` / Ctrl-p jumps straight to Projects from anywhere, which is neither forward nor
 // back. Unwinding our own entries keeps the stack honest: pushing here would leave the
 // gesture retracing grid → session screens you have already left, and leaving the stack
@@ -683,27 +683,30 @@ function gridProps() {
     // control most likely to be pressed against the wrong thing, and the sheet names the
     // session in its title before it offers anything destructive.
     //   The gestures that already existed cover the common two without either: swipe ←
-    // pause, swipe → resume, long-press = x. The hint line below says so, as it always did.
-    //   THE ICONS ARE NAMES NOW, not SVG nodes: a vnode cannot cross this boundary, so
-    // screens.jsx's ICONS table draws them and this side says which. That deleted app.js's
-    // eight copies of the same path data — the duplication the previous comment here called
-    // "the one table both read from" while there were visibly two of them.
-    verbs: [
-      { verb: 'enter', label: 'open', icon: 'enter', cls: 'go',
+    // pause, swipe → resume, long-press = x. The sheet's last line says so.
+    //   AND THE FOOTER ITSELF IS GONE. Two rows of 44px plus a three-line hint was 179 of
+    // 844 points, 21% of the screen, and the card list got 536 — three of nine sessions.
+    // The verbs are the same verbs with the same words, reached from the `⋯` in the header,
+    // which is the control the session screen has had since #7.
+    onMore: () => sheetMore('actions', `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]`, [
+      { label: 'open', cls: 'go',
         onClick: () => { if (sel.card) openSession(sel.card.name); else if (sel.freeWt) sheetName({ cwd: sel.freeWt.path, name: G.basename(sel.freeWt.path), reuse: sel.freeWt.path }); else sheetPicker(); } },
-      { verb: 'new', label: 'new', icon: 'plus', onClick: () => sheetPicker() },
-      { verb: 'worktree', label: 'worktrees', icon: 'tree', onClick: () => sheetWorktree() },
-      // `more` is disabled with nothing selected rather than hidden: a control that appears
-      // and disappears as the selection moves is a control you cannot learn the position of.
-      sel.card ? { verb: 'more', label: 'more', icon: 'more', onClick: () => sheetActions(sel.card.name) }
-               : { verb: 'more', label: 'more', icon: 'more', cls: 'off', onClick: () => {} },
-      { verb: 'settings', label: 'settings', icon: 'gear', onClick: () => sheetSettings() },
-      { verb: 'projects', label: 'projects', icon: 'folder', onClick: () => toProjects() },
-    ],
-    hint: 'tap a card · swipe ← pause · swipe → resume · long-press = x · drag a card\'s title to reorder',
+      { label: 'new', onClick: () => sheetPicker() },
+      { label: 'worktrees', onClick: () => sheetWorktree() },
+      // Only when there is something for it to act on — see sheetMore on why a disabled
+      // row earns a line in a footer and not in a sheet.
+      sel.card ? { label: 'more', onClick: () => sheetActions(sel.card.name) }
+               : { label: 'more', cls: 'off', onClick: () => {} },
+      { label: 'settings', onClick: () => sheetSettings() },
+      { label: 'projects', onClick: () => toProjects() },
+    ], GRID_HINT),
     toast: S.toast,
   };
 }
+// THE GRID'S HINT, STILL THIS FILE'S STRING. It is the TUI's own wording (§7) and pwa-check
+// greps web/app.js for it; it moved out of a permanent band and into the sheet, not out of
+// this file.
+const GRID_HINT = 'tap a card · swipe ← pause · swipe → resume · long-press = x · drag a card\'s title to reorder';
 
 // ⇧hjkl → drag. reorderSession(name, delta) is the TUI's own move, and at nc = 1 all
 // four of its keys collapse to ±1 — H/L move one card, K/J move one row, and one row
@@ -1504,6 +1507,32 @@ function reconcilePending() {
 // opens this for the SELECTED card while S.session is still null (nothing is open yet), and
 // a sheet that silently acted on whatever was last opened is the shape that kills the wrong
 // worker. Defaults to S.session so the session screen's own ⋯ is unchanged.
+// ── THE SCREEN'S OWN ACTIONS, WHICH USED TO BE A FOOTER ───────────────────
+// Six buttons in two rows of 44px plus a three-line hint cost 179 of 844 points on the grid
+// — 21% of the screen — and the card list got 536, which fits THREE of nine sessions. They
+// are in here now, behind the `⋯` in the header, and the list is the same list: this takes
+// the `verbs` array the screen was already being handed, so not one label is retyped and
+// every string §7 cares about is still in this file where pwa-check greps for it.
+//   A DISABLED ROW IS NOT WORTH A LINE IN A SHEET. `more` is drawn inert in a footer on
+// purpose — a control that appears and disappears as the selection moves is one you cannot
+// learn the position of — but a sheet is a list you read top to bottom, and an entry that
+// does nothing is just a thing to skip. The footer's reason does not transfer, so the
+// disabled verb is filtered out rather than carried across.
+//   THE GESTURES COME WITH IT. They were a permanent three-line band saying what a swipe
+// and a long-press do; here they are one line at the bottom of the sheet you open when you
+// want to know what you can do, which is the moment they are worth reading.
+function sheetMore(title, sub, verbs, hint) {
+  const go = (fn) => () => { closeSheet(); fn(); };
+  const rows = (verbs || [])
+    .filter(v => v.cls !== 'off')
+    .map(v => btn(v.label, go(v.onClick), v.cls || ''));
+  openSheet(sheet(title, sub, [
+    el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
+    hint ? el('p', { class: 'gest', text: hint }) : null,
+    el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+  ].filter(Boolean)), false);
+}
+
 function sheetActions(name = S.session) {
   const c = cardOf(name);
   const lead = !!(c && c.lead);

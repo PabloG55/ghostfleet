@@ -92,32 +92,16 @@ function Btn({ label, onClick, cls = '' }) {
   return <button class={cls || null} onClick={onClick}>{label}</button>;
 }
 
-// ── a footer verb: an icon, a word, and a NAME that does not move ─────────────────────
-// The key letters are gone (see app.js's footer for why), so the driven helpers can no
-// longer find these by label. `data-verb` is the hook they use instead: a label is what the
-// design changes, a verb name is what the button IS. The word is still rendered and is
-// still the TUI's own, and title/aria-label carry it so an icon-heavy row stays named for a
-// screen reader as well as for a test.
-//
-// THE ICONS ARE DRAWN HERE RATHER THAN PASSED IN, because a vnode cannot cross the props
-// boundary from app.js — it builds real DOM and this side builds vnodes. app.js says WHICH
-// icon by name and this table says what it looks like.
-//   THIS IS NOW THE ONLY COPY, which it was not before. Porting the grid deleted eight
-// identical path strings from app.js, where they were the grid footer's half of a
-// duplication the previous version of this comment described as "the one table both read
-// from" while there were plainly two of them. A path is 400 characters of arcs that nobody
-// diffs by eye, so two copies is precisely the kind that drifts silently: `settings` could
-// have become two different pictures on two screens and the only symptom would have been a
-// gear that looked slightly wrong on one of them.
+// ── the one icon this client still draws in a component ───────────────────────────────
+// VerbBtn AND FIVE ICON PATHS USED TO BE HERE. They drew the six-button footer, and moving
+// the verbs into a sheet took their only caller — a sheet is a list of labelled actions, the
+// same shape every other sheet in this app already has, and an icon beside each row would be
+// a second vocabulary for the same six words.
+//   `more` survives because the header's `⋯` is it. Kept as a path rather than the character
+// "⋯" for the reason #82 gave for the speaker: an emoji or a glyph is a font-dependent
+// picture that renders differently on every device and measures two cells in some of them.
+// This is a stroked path in the button's own currentColor.
 const ICONS = {
-  enter: ['M5 12h14M12 5l7 7-7 7'],
-  clock: ['M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0-18 0', 'M12 7v5l3 2'],
-  plus: ['M12 5v14M5 12h14'],
-  tree: ['M6 6m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M6 18m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0M18 12m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0',
-         'M6 8.5v7M8.5 6h4a3 3 0 0 1 3 3v1M8.5 18h4a3 3 0 0 0 3-3v-1'],
-  folder: ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'],
-  gear: ['M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0',
-         'M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 8.9 19a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 8.9a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9.5a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9.5a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z'],
   more: ['M6 12h.01M12 12h.01M18 12h.01'],
 };
 function Icon({ name }) {
@@ -130,26 +114,19 @@ function Icon({ name }) {
     </svg>
   );
 }
-function VerbBtn({ verb, label, icon, onClick, cls = '' }) {
-  return (
-    <button class={cls || null} data-verb={verb} onClick={onClick} title={label} aria-label={label}>
-      <Icon name={icon} />
-      <span class="vl">{label}</span>
-    </button>
-  );
-}
 
-// ── the one-line header, plus the offline line under it ───────────────────────────────
-// The banner does not fit a phone, so this is exactly what a narrow terminal gets. `stale`
-// is an epoch rather than a rendered sentence: clockLabel is grid.js's, and the phone and
-// the TUI print a time the same way or they are two clocks.
-//
-// `counts` ARRIVES ALREADY WORDED AND ALREADY COLOURED — app.js maps grid.js's
-// countsSegments() through the palette before handing it over, so the desk's header and
-// the phone's cannot disagree about either the arithmetic or the vocabulary, and neither
-// the words nor the hexes are written in this file. Absent on the Projects screen, which
-// counts projects rather than sessions; the header simply has one span fewer.
-function Header({ scope, mode, stale, counts }) {
+// ── ⋯ LIVES HERE NOW, AND THE FOOTER IS GONE ──────────────────────────────────────────
+// Six verb buttons wrapped to two rows of 44px and a three-line hint under them cost 179 of
+// 844 points — 21% of the screen — to say things you stop reading after the first day.
+// Measured at 390x844: chrome was 292pt (34.6%) and the card list got 536, which fits THREE
+// of nine sessions. The owner, looking at a photograph of that footer: "i think we can
+// simply this with a 3 dots on the header i beleive".
+//   It is also the idiom this client already has. The session screen has carried exactly
+// this since #7 — a bar whose last control is `⋯` opening the actions sheet — so the two
+// screens now agree instead of one having a footer and the other a header button.
+//   The verbs did not go away and neither did the gestures: both are in the sheet, which
+// names what it is acting on before it offers anything destructive.
+function Header({ scope, mode, stale, counts, onMore }) {
   return (
     <Fragment>
       <div class="hdr">
@@ -160,6 +137,11 @@ function Header({ scope, mode, stale, counts }) {
           ? <span class="counts">
               {counts.map((s, i) => <span key={i} style={s.color ? `color:${s.color}` : null}>{s.text}</span>)}
             </span>
+          : null}
+        {onMore
+          ? <button class="more" onClick={onMore} title="actions" aria-label="actions">
+              <Icon name="more" />
+            </button>
           : null}
       </div>
       {stale ? <div class="stale">{`⚠ offline — last fetched ${clockLabel(stale)}`}</div> : null}
@@ -267,18 +249,18 @@ function CardList({ nodes, listRef }) {
 // its position on screen, and the one place it must never be is over a control ("dont blok
 // the chat with toasts"). Two copies of this order is one screen where that is true and one
 // where it is true until somebody appends something.
-function CardScreen({ scope, mode, stale, counts, band, confirm, cards, listRef, toast, verbs, hint }) {
+function CardScreen({ scope, mode, stale, counts, onMore, band, confirm, cards, listRef, toast }) {
   return (
     <Fragment>
-      <Header scope={scope} mode={mode} stale={stale} counts={counts} />
+      <Header scope={scope} mode={mode} stale={stale} counts={counts} onMore={onMore} />
       {band}
       <ConfirmBar confirm={confirm} />
       <CardList nodes={cards} listRef={listRef} />
+      {/* STILL THE LAST BAND, AND STILL IN FLOW. The toast is a band of this column rather
+          than a fixed overlay, so its position here is its position on screen — and with the
+          footer gone the one control it must never cover is the ⋯ at the top, which it
+          cannot reach. */}
       {toast ? <div class={('toast ' + (toast.kind || '')).trim()}>{toast.text}</div> : null}
-      <div class="verbs">
-        {verbs.map(v => <VerbBtn key={v.verb} verb={v.verb} label={v.label} icon={v.icon} cls={v.cls} onClick={v.onClick} />)}
-      </div>
-      <div class="hint">{hint}</div>
     </Fragment>
   );
 }

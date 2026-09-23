@@ -116,6 +116,12 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
+/* THE FOOTER USED TO CARRY env(safe-area-inset-bottom) AND IT IS GONE, so the card list now
+ * runs to the physical bottom of the screen — under the home indicator, where the last card
+ * is half covered and awkward to tap. The inset moves here with the space it was
+ * protecting. This is the thing deleting a bottom band silently takes away, and nothing on
+ * a desktop engine would ever show it: the insets are 0 on every one of them. */
+#app.shell > .cards { padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
 #app.shell > .paneview {
   flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0;
 }
@@ -126,12 +132,26 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
 /* Everything that is not the scroller is a fixed band: the header and the confirm bar
  * above, the verbs or the composer below. That is what makes the card list scroll under a
  * header that stays put, instead of the whole page moving. */
-#app.shell > .sbar, #app.shell > .composer, #app.shell > .verbs, #app.shell > .toast,
+#app.shell > .sbar, #app.shell > .composer, #app.shell > .toast,
 #app.shell > .strip,
 #app.shell > .hdr, #app.shell > .confirm, #app.shell > .hint, #app.shell > .stale { flex: 0 0 auto; }
 
 /* ── header ─────────────────────────────────────────────────────────────── */
-.hdr { display: flex; flex-wrap: wrap; gap: .3em .9em; align-items: baseline; padding: .2em .2em .6em; font-size: 13px; }
+/* ABSOLUTE, NOT A FLEX CHILD, AND THAT IS THE POINT. `.hdr` wraps on purpose — the counts
+ * line drops to a second row on a narrow screen — and a `margin-left: auto` control inside a
+ * wrapping row goes wherever the wrap leaves it, which on a narrow screen is the end of the
+ * COUNTS line rather than the top right. Taking it out of flow pins it to the corner at
+ * every width and every text size, and the reserved padding on the right is what keeps the
+ * text from running under it. */
+.hdr { position: relative; display: flex; flex-wrap: wrap; gap: .3em .9em; align-items: baseline;
+       padding: .2em 46px .6em .2em; font-size: 13px; }
+/* 44px, the same floor the footer's buttons were held to and for the same reason: it is the
+ * size a finger needs, not the size the glyph needs. It is the ONLY control on this screen
+ * now, so it is the one that must not be fiddly. */
+.hdr .more { position: absolute; top: -4px; right: -4px; width: 44px; height: 44px;
+             display: inline-flex; align-items: center; justify-content: center;
+             padding: 0; border-radius: 10px; }
+.hdr .more svg { width: 20px; height: 20px; display: block; }
 .hdr .name { font-weight: 700; color: var(--white); }
 .hdr .scope { color: var(--dim); }
 /* The counts line WRAPS. It was nowrap, and on a 390pt screen "· 2 at limit · 2 parked"
@@ -272,19 +292,14 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  * touch buttons at 44px, the size a finger actually needs, and the letters stay at the desk.
  *   `gap: 8px` is the minimum separation between adjacent targets; 44px is the minimum
  * size. Both are floors, not suggestions — a row that merely fits is a row that mis-taps. */
-.verbs { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 2px calc(8px + env(safe-area-inset-bottom));
-         border-top: 1px solid var(--hair); }
-.verbs button { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center;
-                justify-content: center; gap: 6px; padding: 0 12px; border-radius: 10px; }
-.verbs button svg { width: 17px; height: 17px; flex: 0 0 auto; }
-.verbs button .vl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The primary verb takes the room left over, so `open` is the wide target and the rest are
- * the same size as each other — a row where every button is equally wide makes the one you
- * reach for most no easier to hit than the one that kills a session. */
-.verbs button.go { flex: 1 1 auto; }
-/* `more` with nothing selected: still there, still the same size, visibly inert. A control
- * that disappears as the selection moves is a control whose position you cannot learn. */
-.verbs button.off { opacity: .4; }
+/* ── THE FOOTER IS GONE; ITS VERBS ARE BEHIND THE ⋯ IN THE HEADER ──────────
+ * Six icon+label buttons at 44px wrapped to two rows, plus a three-line hint under them,
+ * cost 179 of 844 points at 390x844 — 21% of the screen. Measured: chrome was 292pt (34.6%)
+ * and the card list got 536, which fits THREE of nine sessions. The owner, on a photograph
+ * of it: "i think we can simply this with a 3 dots on the header i beleive".
+ *   The 44px floor and the 8px separation those buttons were built to honour did not go
+ * away with them — they moved to `.hdr .more` below, which is the one control that replaced
+ * the six, and to the sheet rows, which were already built to the same floor. */
 
 /* ── the count strip: the summary as numbers, not as a sentence ────────────
  * `0 need you · 2 working · 5 ready` is a sentence you have to read. The same counts as
@@ -308,7 +323,7 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  * so it wrapped onto a line of its own and hung off the end of it. Truncating keeps it
  * tappable, which is the property that matters; capping the font instead would keep the
  * label whole and unreadable to the person who asked for big text. */
-.verbs button, .seg button, .srow button, .sheet .row button {
+.seg button, .srow button, .sheet .row button, .hdr .more {
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* ...and the general form, because the three selectors above were each added after a
@@ -373,6 +388,12 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
   border: 1px solid var(--hair); padding: .5em; border-radius: 2px;
 }
 .sheet textarea { min-height: 5.5em; resize: vertical; }
+/* THE GESTURES, WHERE THEY ARE WORTH READING. They were a permanent three-line band on the
+ * grid — 66 of 844 points, every second the screen was open, saying what a swipe does. Here
+ * they sit under the actions, in the sheet you open when you want to know what you can do.
+ * Dim and small on purpose: this is reference, not a control. */
+.sheet .gest { margin: .9em 0 0; padding-top: .7em; border-top: 1px solid var(--hair);
+               color: var(--dim); font-size: 12px; line-height: 1.5; }
 .sheet .row { display: flex; flex-wrap: wrap; gap: .5em; margin-top: 1em; }
 .sheet .err { color: var(--red); }
 .sheet .ok { color: var(--green); }
@@ -383,6 +404,19 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 /* Wraps, because this row is a project name and two toggles and at large text the three
  * of them do not fit beside each other. */
 .srow { display: flex; flex-wrap: wrap; align-items: center; gap: .6em; padding: .45em .2em; border-bottom: 1px solid var(--hair); }
+/* ── THE 44px FLOOR FOLLOWED THE VERBS IN HERE ─────────────────────────────
+ * The footer held its buttons to 44px tall and 8px apart, because that is the size a
+ * finger needs and the separation that stops a mis-tap. Moving the verbs into this sheet
+ * moved the targets, and the floor did not come with them — measured in a real engine at
+ * 390x844, all six rows were UNDER 44px. A control does not become easier to hit by
+ * changing which container it is in, and the sheet is now where the destructive ones live
+ * (`x kill`, `stop + reclaim worktree`), which is an argument for more room rather than
+ * less.
+ *   On the ROW rather than the button, so the whole line is the target and a name that
+ * wraps grows the row instead of leaving a 44px button beside a taller label. */
+.srow { min-height: 44px; }
+.srow button { min-height: 44px; }
+.rows .srow + .srow { margin-top: 8px; }
 .srow .nm { flex: 1; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* `min(8.5em, 45%)`, not a bare 8.5em: the em keeps the toggles aligned in a column at
  * ordinary sizes, and at 38px text 8.5em is 323px — a minimum wider than the sheet it is

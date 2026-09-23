@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: b2ada69ff967
+// CLIENT-HASH: 2b4a84603900
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -175,6 +175,12 @@
 // more space than the next message from the same speaker. The toast is clamped to two lines
 // as well: a photo's toast carries a file path, wrapped to four lines, and took that height
 // out of the transcript for 4.2 seconds — "the toast will block the chat".
+// v35 MOVES THE GRID'S FOOTER INTO A ⋯ IN THE HEADER. Six icon+label buttons wrapped to
+// two rows, plus a three-line hint under them, cost 179 of 844 points at 390x844 — 21% of
+// the screen. Measured: chrome was 292pt (34.6%) and the card list got 536, which fits
+// THREE of nine sessions. The verbs are the same verbs with the same words, reached from
+// one control the session screen has had since v27. An older client keeps the footer, and
+// with it six of the nine cards it could have shown.
 // v25 is the first client with a BUILD STEP in it. The Projects screen is Preact now, which
 // means two files the shell has never had before — projects.js (the screen) and preact.js
 // (its dependency chunk) — and app.js statically imports the first of them. THIS IS A
@@ -183,7 +189,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v34';
+const VERSION = 'ghostfleet-v35';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

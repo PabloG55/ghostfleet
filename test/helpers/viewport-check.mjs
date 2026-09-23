@@ -412,7 +412,7 @@ const OVERFLOW = () => {
   // NOT `.sheet`: it is `overflow: auto`, so content wider than it scrolls INSIDE it,
   // which is the rule rather than a breach of it. Everything below lays out horizontally
   // and has nowhere to put the excess.
-  const boxes = ['.cards', '.chat', '.composer', '.sbar', '.verbs', '.seg', '.srow', '.sheet .row']
+  const boxes = ['.cards', '.chat', '.composer', '.sbar', '.seg', '.srow', '.sheet .row']
     .flatMap(sel => [...document.querySelectorAll(sel)]
       .filter(n => n.clientWidth > 0 && n.scrollWidth > n.clientWidth + 1)
       .map(n => `${sel} needs ${Math.round(n.scrollWidth)} in ${Math.round(n.clientWidth)}`))
@@ -507,10 +507,30 @@ const act = async (what, fn, ...args) => {
     await sleep(25);
   }
 };
-const clickVerb = (v) => act(`the ${v} verb`, (v) => {
-  const b = document.querySelector(`#app .verbs button[data-verb="${v}"]`);
-  if (!b) return false; b.click(); return true;
-}, v);
+// ── THE VERBS MOVED BEHIND THE HEADER'S ⋯, SO THIS GOES THROUGH IT ───────────
+// They were a six-button footer selected by `data-verb`. The footer cost 179 of 844
+// points at 390x844 — the whole chrome was 34.6% and the card list got three of nine
+// sessions — so it is one control in the header now and the verbs are rows in the
+// sheet it opens.
+//   BY LABEL, NOT BY A `data-verb` HOOK, and that is a deliberate downgrade. The hook
+// existed because the footer's labels lost their key letters and a driver had nothing
+// stable to match; a sheet row is a full word in a list, which is what a person reads
+// too, so matching what is written is matching what is there. The verb NAMES are kept
+// as the argument so every call site below reads unchanged.
+const VERB_LABEL = {
+  enter: 'open', new: 'new', worktree: 'worktrees', more: 'more',
+  settings: 'settings', projects: 'projects', sched: 'schedule', remove: 'remove',
+};
+const clickVerb = (v) => act(`the ${v} verb`, (label) => {
+  // already open? click the row. otherwise open the ⋯ first and let the retry land it.
+  const row = [...document.querySelectorAll('#sheet .srow button')]
+    .find(b => b.textContent.trim() === label);
+  if (row) { row.click(); return true; }
+  const more = document.querySelector('#app .hdr button.more');
+  if (!more) return false;
+  more.click();
+  return false;                       // act() retries; the sheet is up on the next pass
+}, VERB_LABEL[v] || v);
 const clickText = (t) => act(`the "${t}" button`, (t) => {
   const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim().startsWith(t));
   if (!b) return false; b.click(); return true;
@@ -931,41 +951,76 @@ try {
   await keyboard(390, 844);
   await keyboard(320, 568, { indicator: false });
 
-  // ── the touch footer, measured ──────────────────────────────────────────
-  // The key-letter buttons are gone and these are what replaced them, so the claim is a
-  // SIZE claim and it is measured rather than declared: 44px is the floor a finger needs
-  // and 8px is the floor between adjacent targets. Both are read off the real layout at
-  // the width that ships, because a min-height in CSS is not a guarantee that the button
-  // got it — a flex row can compress a child below its minimum.
+  // ── the touch targets, measured ─────────────────────────────────────────
+  // THE PREMISE OF THE OLD VERSION OF THIS GROUP DIED, and that is why it reads
+  // differently rather than being retuned. It measured a six-button FOOTER — its verb
+  // names, its icons, the gaps between the pairs that shared a row. There is no footer:
+  // it cost 179 of 844 points at 390x844 (chrome was 34.6% of the screen and the card
+  // list got three of nine sessions), so the verbs are rows in the sheet behind the
+  // header's ⋯.
+  //   THE SIZE CLAIM IS UNCHANGED AND STILL MEASURED, because it was never about the
+  // footer: 44px is the floor a finger needs and 8px is the floor between adjacent
+  // targets, and a min-height in CSS is not a guarantee the control got it — a flex row
+  // can compress a child below its minimum. Same two numbers, asked of the one control
+  // that replaced the six and of the rows it opens.
   await viewport(390, 844);
   await fresh();
   await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
   await tapCard('acme-api'); await seeingCard('api-fix');
-  const foot = await evaluate(() => {
-    const bs = [...document.querySelectorAll('#app .verbs button')];
+  const hdrBtn = await evaluate(() => {
+    const b = document.querySelector('#app .hdr button.more');
+    if (!b) return null;
+    const r = b.getBoundingClientRect();
+    const d = document.documentElement;
+    return {
+      w: Math.round(r.width), h: Math.round(r.height),
+      icon: !!b.querySelector('svg'),
+      named: (b.getAttribute('aria-label') || '').trim(),
+      // it must be ON the screen, not merely sized — an absolutely positioned control
+      // is exactly the kind that can be pinned off the right edge.
+      past: Math.round(Math.max(0, r.right - d.clientWidth)),
+    };
+  });
+  is('the header carries the actions control', true, !!hdrBtn);
+  is('...at least 44px tall', true, !!hdrBtn && hdrBtn.h >= 44);
+  is('...and at least 44px wide', true, !!hdrBtn && hdrBtn.w >= 44);
+  is('...drawn, not an emoji', true, !!hdrBtn && hdrBtn.icon);
+  // An icon contributes no text, so without this a screen reader announces "button".
+  is('...and named for a screen reader', 'actions', hdrBtn ? hdrBtn.named : '');
+  is('...and not past the right edge', 0, hdrBtn ? hdrBtn.past : -1);
+
+  // OPEN THE SHEET WITHOUT CHOOSING ANYTHING. An earlier version of this clicked the
+  // `more` ROW, which is the per-card actions sheet — so it measured "answer keys, s
+  // sched, l label" and reported the screen verbs missing. The ⋯ alone is the screen's
+  // own sheet.
+  await act('the header actions control', () => {
+    const b = document.querySelector('#app .hdr button.more');
+    if (!b) return false; b.click(); return true;
+  });
+  await seeing('sheet', 'the actions sheet');
+  // NOT `rows`: that is this file's own results array, and shadowing it made every
+  // assertion after this point vanish into "rows.splice is not a function".
+  const sheetRows = await evaluate(() => {
+    const bs = [...document.querySelectorAll('#sheet .srow button')];
     const r = bs.map(b => b.getBoundingClientRect());
     let minGap = Infinity;
-    for (let i = 0; i < r.length; i++) for (let j = i + 1; j < r.length; j++) {
-      // Only pairs that share a row; a wrapped row is separated by the row gap instead.
-      if (Math.abs(r[i].top - r[j].top) > 4) continue;
-      const g = Math.max(r[j].left - r[i].right, r[i].left - r[j].right);
+    for (let i = 1; i < r.length; i++) {
+      const g = r[i].top - r[i - 1].bottom;
       if (g >= 0) minGap = Math.min(minGap, g);
     }
     return {
-      verbs: bs.map(b => b.dataset.verb),
+      labels: bs.map(b => b.textContent.trim()),
       short: r.filter(x => x.height < 44).length,
-      narrow: r.filter(x => x.width < 44).length,
       minGap: minGap === Infinity ? null : Math.round(minGap),
       keyLetters: bs.filter(b => /^[⏎a-zA-Z,] /.test(b.textContent.trim())).length,
-      icons: bs.filter(b => b.querySelector('svg')).length,
     };
   });
-  is('the footer verbs are named, not lettered', 'enter,new,worktree,more,settings,projects', (foot.verbs || []).join(','));
-  is('...every target is at least 44px tall', 0, foot.short);
-  is('...and at least 44px wide', 0, foot.narrow);
-  is('...with at least 8px between them', true, foot.minGap === null || foot.minGap >= 8);
-  is('...and no key letter survives', 0, foot.keyLetters);
-  is('...each one carrying an icon', 6, foot.icons);
+  is('the sheet carries the screen verbs, in the TUI words', 'open,new,worktrees,more,settings,projects',
+     (sheetRows.labels || []).join(','));
+  is('...every row at least 44px tall', 0, sheetRows.short);
+  is('...with at least 8px between them', true, sheetRows.minGap === null || sheetRows.minGap >= 8);
+  is('...and no key letter survives', 0, sheetRows.keyLetters);
+  await escSheet();
   // ── the card list snaps, and stops snapping when motion is not wanted ───
   // MEASURED UNDER AN EXPLICIT MOTION PREFERENCE, in both directions, because the honest
   // answer depends on one and the runners disagree about it.
