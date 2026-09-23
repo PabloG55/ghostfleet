@@ -123,7 +123,7 @@ if [ -n "$FILTER" ] && [ -z "${CF_ONLY:-}" ]; then
   [ "$cf_rc" -eq 0 ] && CF_ONLY=1 exec bash "$CF_DIR/run.sh"
   rm -rf "$CF_DIR"; exit "$cf_rc"
 fi
-PASS=0; FAIL=0; SKIP=0; GROUP=""
+PASS=0; FAIL=0; SKIP=0; NA=0; GROUP=""
 R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; D=$'\033[2m'; N=$'\033[0m'
 # OUR OWN wire separator, and it is the file's, not one group's. It was defined inside
 # `wire format (split_choice)` and inherited by eight later groups, which made those groups
@@ -188,6 +188,27 @@ skip()  { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
             # distinction is that one of them is allowed to be silent and the other is not.
             bad "$1" "either a result, or a reason the MACHINE cannot run this" "skipped: $2"
           fi; }
+# ── not applicable: the question does not arise for this ref ─────────────────
+# A THIRD ANSWER, because two were not enough and staging went red proving it. `skip`
+# says the MACHINE cannot run this. `bad` says the SUBJECT is wrong. sw-version on a push
+# to staging is neither: HEAD is already in staging, so "is this version ahead of
+# staging" has nothing to be right or wrong about. The rule above read a correct
+# not-applicable as a hole, because the reason named no missing capability — and it was
+# right that it is not a missing capability, and wrong that it must therefore be a bug.
+#
+# WHAT STOPS THIS BEING THE OLD HOLE WEARING A NEW LABEL is not the word. It is that an
+# n/a must rest on a fact the SUBJECT CANNOT INFLUENCE, and that the check ordered ahead
+# of it still fires. For sw-version: whether HEAD is an ancestor of origin/staging is a
+# git fact, and nothing anyone writes in web/sw.js can change it — while an unreadable
+# VERSION is decided FIRST and fails, so a broken subject can never reach the n/a. That
+# ordering is the guarantee, so it is asserted in the helper rather than assumed here.
+#
+# It is not a pass: it never counts as one, and a run that is all n/a has proven nothing.
+# It is named at the end of the run, so a group that is not applicable every single time
+# is visible rather than quietly absent for months.
+na()    { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
+          NA=$((NA+1)); printf '%s\n' "$1" >> "${NA_LOG:-/dev/null}"
+          printf '  %s–%s %s %s(n/a: %s)%s\n' "$Y" "$N" "$1" "$D" "$2" "$N"; }
 ok()    { PASS=$((PASS+1)); printf '  %s✔%s %s\n' "$G" "$N" "$1"; }
 # A red line has to be legible, and two values that differ only in bytes a terminal does
 # not draw print as the same value — which is how "expected: 1 / got: 1" happened above.
@@ -417,6 +438,7 @@ sweep_orphan_serves() {            # $1 = a checkout root; reaps only ITS orphan
 # this section exists to stop. $SERVE_PIDS is set by the fleet-serve group.
 trap 'rc=$?; reap ${SERVE_PIDS:-} $(sv_all); kill_serves_in "$TMUX_TMPDIR"; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
 trap 'exit 130' INT
+NA_LOG="$TMUX_TMPDIR/na.rows"
 sweep_dead_runs "$TEST_RUNS"
 sweep_orphan_serves "$ROOT"
 
@@ -10479,6 +10501,8 @@ if [ -d "$ROOT/web" ]; then
       # activated on every platform: the keyboard checks passed on Linux and collapsed on
       # macOS for that reason alone.
       if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+    if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
+      if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
       is "$name" "$want" "$got"
     done < "$VPO/out"
   fi
@@ -10506,6 +10530,8 @@ if [ -d "$ROOT/web" ]; then
     is "...and produced its checks"     "yes" "$([ "$(wc -l < "$GRP/out")" -ge 8 ] && echo yes || echo "no: $(wc -l < "$GRP/out") rows")"
     while IFS=$'\x1f' read -r name want got; do
       if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+    if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
+      if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
       is "$name" "$want" "$got"
     done < "$GRP/out"
   fi
@@ -10667,6 +10693,7 @@ CFG
   is "...and produced its checks"     "yes" "$([ "$(wc -l < "$SWV/out")" -ge 20 ] && echo yes || echo "no: $(wc -l < "$SWV/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+    if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
     is "$name" "$want" "$got"
   done < "$SWV/out"
   rm -rf "$SWV"
@@ -11528,5 +11555,11 @@ fi
 
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
 
-printf '\n%s passed  %s%s failed%s  %s skipped\n' "$PASS" "$([ "$FAIL" -gt 0 ] && printf '%s' "$R")" "$FAIL" "$N" "$SKIP"
+# NAMED, NOT JUST COUNTED. A group that is not applicable on every run is indistinguishable
+# from one nobody wrote, unless the run says which rows they were.
+if [ "$NA" -gt 0 ] && [ -s "${NA_LOG:-/dev/null}" ]; then
+  printf '\n%snot applicable here:%s\n' "$D" "$N"
+  while IFS= read -r nrow; do printf '  %s–%s %s\n' "$Y" "$N" "$nrow"; done < "$NA_LOG"
+fi
+printf '\n%s passed  %s%s failed%s  %s skipped  %s n/a\n' "$PASS" "$([ "$FAIL" -gt 0 ] && printf '%s' "$R")" "$FAIL" "$N" "$SKIP" "$NA"
 [ "$FAIL" -eq 0 ]

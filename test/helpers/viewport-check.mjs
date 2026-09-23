@@ -799,8 +799,14 @@ async function keyboard(w, h, { indicator = true } = {}) {
   // diagnosis. If the browser genuinely will not give the page focus, the whole group skips
   // with that reason rather than asserting anything weaker.
   if (!open.focused) {
+    // "FOCUS DOES NOT STICK" NAMED NO MISSING THING, and the suite now sorts a skip by
+    // whether it does: a reason that does not name a capability the machine lacks reads
+    // as a group hiding a broken subject. This one is a real capability gap — a headless
+    // window that is never activated cannot hold focus, which is why the emulation switch
+    // exists — so it says so in those terms. Latent until it fires, and it has fired, on
+    // macOS in CI and not locally.
     skipGroup(`${w}px the keyboard group`,
-      'focus does not stick in this browser; Emulation.setFocusEmulationEnabled: ' +
+      'focus emulation is not available in this browser; Emulation.setFocusEmulationEnabled: ' +
       (focusEmulated === true ? 'accepted but ineffective' : String(focusEmulated)));
     return;
   }
