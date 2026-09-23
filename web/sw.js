@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 2991b14bc544
+// CLIENT-HASH: 35ed29d46ffc
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -175,6 +175,15 @@
 // more space than the next message from the same speaker. The toast is clamped to two lines
 // as well: a photo's toast carries a file path, wrapped to four lines, and took that height
 // out of the transcript for 4.2 seconds — "the toast will block the chat".
+// v40 MEASURES THE SCREEN FROM THE DEVICE. "still it doesnt use the full screen", in the
+// installed app. The suspicion is that the shell's `height: 100dvh` resolves shorter than
+// the physical screen in iOS standalone with a black-translucent status bar — but no
+// engine here can reproduce it: dvh on a desktop IS the window, and the home-screen app
+// cannot be driven from this machine. So the phone reports its own numbers — viewport,
+// screen, the shell's resolved bottom, the composer's, the band, and both safe-area
+// insets — and the log settles it before anything is changed.
+//   NO FIX IN THIS VERSION, deliberately. Two shaped-like-this guesses have already been
+// shipped against this app; the number comes first now.
 // v38 IS A PROBE, NOT A FIX. The unlock loop survived v37, and the log admits more than
 // one story: a controlled page still fetches the whole shell (this worker revalidates
 // behind the paint), so the request burst cannot tell a cold start from a swap, and the
@@ -216,7 +225,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v39';
+const VERSION = 'ghostfleet-v40';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

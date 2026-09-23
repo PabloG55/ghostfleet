@@ -582,6 +582,28 @@ is('the worker answers which version it is', true,
    /type === 'version'[\s\S]{0,160}postMessage\(\{ version: VERSION \}\)/.test(JS['sw.js']));
 is('...and the client asks it', true, /askShellVersion/.test(JS['app.js']));
 
+// ── the geometry probe measures the shell, not the lock screen ────────────
+// "still it doesnt use the full screen", in the installed app. No engine here reproduces
+// it — dvh on a desktop is the window, and the home-screen app cannot be driven from this
+// machine — so the device reports its own numbers and the log is the instrument.
+//
+// THE PROBE HAS ONE WAY TO LIE, and it did on its first run: `#app` only carries `.shell`
+// (and therefore `height: 100dvh`) once a real screen is drawn, so a report sent at load
+// measures the LOCK SCREEN. Measured: sl524 against ih844 — the ship and two buttons, not
+// a viewport. A number that looks like a short shell and is actually a short page would
+// have sent the next change in the wrong direction entirely.
+const geo = (/function reportGeometry\(\)[\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
+is('the geometry probe exists', true, geo.length > 0);
+is('...and waits for the shell', true, /classList\.contains\('shell'\)/.test(geo));
+is('...rather than reporting whatever is drawn', true, /geoTries/.test(geo));
+// Both screen and viewport, or the comparison that decides this cannot be made: the
+// suspicion is that the VIEWPORT is short of the SCREEN, not that the shell is short of
+// the viewport, and only one of those is visible from inside the page without both.
+is('...reporting the viewport', true, /ih.*innerHeight/.test(geo));
+is('...and the physical screen beside it', true, /sh.*screen\.height/.test(geo));
+// Path segments, never a query: fleet-serve logs (req.url).split('?')[0].
+is('...and it beacons through api.diag', true, /api\.diag\('geo'/.test(geo));
+
 // ── the client swap must not spend somebody's passkey ─────────────────────
 // The decision itself is driven in pwa-render (reloadAction). What that cannot see is how
 // takeNewClientIfIdle FEEDS it, and the wiring is where the bug lived: it asked

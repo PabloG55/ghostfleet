@@ -198,6 +198,61 @@ function lastFetchedAt() {
   catch { return Math.floor(Date.now() / 1000); }
 }
 
+// ── what the screen ACTUALLY measures, from the device ────────────────────
+// "still it doesnt use the full screen", in the installed app. The suspicion is that the
+// shell's `height: 100dvh` resolves SHORTER than the physical screen in iOS standalone
+// with a black-translucent status bar — but that is a suspicion, and the only engine that
+// can settle it is the one on the phone. No desktop viewport reproduces it (dvh there is
+// the window), and the home-screen app cannot be driven from here.
+//
+// So the device reports its own geometry, once, after the first layout has settled.
+// Everything is an integer in the PATH, because fleet-serve drops query strings.
+//
+//   ih  innerHeight            sh  screen.height        (CSS px)
+//   sl  the shell's bottom edge                          <- 100dvh, resolved
+//   cb  the composer's bottom edge, when one is drawn
+//   gap innerHeight - the lowest painted edge            <- the band, measured
+//   sat/sab  the safe-area insets this page actually resolves
+//
+// If `sl` comes back short of `sh` by about a status bar, the suspicion is the cause and
+// the shape has to stop being sized by dvh. If they match, it is something else and this
+// says so before anything is changed.
+//   IT WAITS FOR THE SHELL. `#app` only carries `.shell` — and therefore `height: 100dvh`
+// — once a real screen is drawn; on the lock screen it is content-height, so a report sent
+// at load measures the lock screen and says nothing about the thing under suspicion.
+// Measured locally: it came back sl524 against ih844, which is the ship and two buttons,
+// not a viewport. So it retries until the shell exists and gives up rather than lying.
+let geoSent = false, geoTries = 0;
+function reportGeometry() {
+  if (geoSent) return;
+  const el = document.getElementById('app');
+  if (!el || !el.classList.contains('shell')) {
+    if (++geoTries < 40) setTimeout(reportGeometry, 1500);
+    return;
+  }
+  geoSent = true;
+  try {
+    const shell = el;
+    const comp = document.querySelector('.composer');
+    // env() cannot be read directly; a throwaway element resolves it for us.
+    const probe = document.createElement('div');
+    probe.style.cssText = 'position:fixed;left:-9999px;top:0;'
+      + 'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
+    document.body.appendChild(probe);
+    const ps = getComputedStyle(probe);
+    const sat = Math.round(parseFloat(ps.paddingTop) || 0);
+    const sab = Math.round(parseFloat(ps.paddingBottom) || 0);
+    probe.remove();
+    const r = shell.getBoundingClientRect();
+    const c = comp ? comp.getBoundingClientRect() : null;
+    const low = c ? c.bottom : (r ? r.bottom : 0);
+    const sa = (() => { try { return matchMedia('(display-mode: standalone)').matches || navigator.standalone ? 1 : 0; } catch { return 0; } })();
+    api.diag('geo', 'sa' + sa, 'ih' + Math.round(innerHeight), 'sh' + Math.round(screen.height),
+             'sl' + Math.round(r ? r.bottom : 0), 'cb' + Math.round(c ? c.bottom : 0),
+             'gap' + Math.round(innerHeight - low), 'sat' + sat, 'sab' + sab);
+  } catch {}
+}
+
 function lock(why = 'x') {
   api.diag('lock', why, 'tok' + (api.haveToken() ? 1 : 0), 'pend' + (swReloadPending ? 1 : 0));
   S.locked = true; api.clearToken(); render();
@@ -3451,6 +3506,9 @@ if ('serviceWorker' in navigator) {
   });
 }
 render();
+// One measurement, after layout has settled — early enough to be in the same log burst as
+// the launch, late enough that the shell has been sized.
+setTimeout(reportGeometry, 1200);
 // Paint first, ask second. The lock screen above is drawn against the 'probing' mode —
 // the ship, and one line saying which origin is being asked — so this only ever fills in
 // the answer. Waiting for the probe before the first paint would put a blank page in
