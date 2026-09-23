@@ -597,7 +597,7 @@ is('...asking the typing question directly instead', true, /typingNow\(\)/.test(
 // ...and locking spends a swap that was waiting, or deferring under a live session would
 // defer until the next cold open — the poll cannot cover it, because it does not run while
 // locked.
-const lockFn = (/function lock\(\)[\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
+const lockFn = (/function lock\([^)]*\)[\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
 is('locking spends a pending swap', true, /takeNewClientIfIdle\(\)/.test(lockFn));
 is('...and shows the answer', true, /client \$\{swVersion/.test(JS['app.js']));
 

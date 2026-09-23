@@ -206,6 +206,41 @@ export function fixtureName() {
 }
 export function setFixtureName(f) { try { localStorage.setItem(LS.fixture, f); } catch {} }
 
+// ── a temporary beacon, because the phone is the only place it happens ────
+// The unlock loop reproduces on one installed iOS home-screen app and on no instrument in
+// this repo, so the only way to stop guessing is to have the device say what it did.
+// fleet-serve logs every request path, so a request that 404s is still a line in the log:
+// no server change, and nothing to deploy but the client.
+//
+// IN THE PATH, NOT A QUERY. fleet-serve logs `(req.url || '').split('?')[0]`, so a query
+// string is dropped before it is ever written. Everything worth reading has to be a path
+// segment.
+//
+// IT LIVES HERE because this is the one module that talks to the network — the rule
+// pwa-check enforces, and it is right: a caller that reaches for its own URL works against
+// fixtures and then asks for something no resolver knows about.
+//
+// Off with localStorage['gf.diag'] = '0'. It comes out again once the log has answered;
+// a probe that ships twice is a feature nobody designed.
+//   READ LAZILY, NOT AT MODULE SCOPE. node's own `localStorage` global warns on stderr
+// unless --localstorage-file is given, and the suite asserts its helpers write nothing
+// there — so touching it while this module is merely IMPORTED turns a probe into a red
+// row in a group that has nothing to do with it. Measured: that is exactly what happened.
+let diagOn = null;
+function diagEnabled() {
+  if (diagOn !== null) return diagOn;
+  diagOn = true;
+  try { if (typeof localStorage !== 'undefined') diagOn = localStorage.getItem('gf.diag') !== '0'; } catch {}
+  return diagOn;
+}
+export function diag(...parts) {
+  if (typeof fetch !== 'function' || !diagEnabled()) return;
+  try {
+    const p = parts.map(x => String(x).replace(/[^A-Za-z0-9._-]/g, '')).filter(Boolean).join('/');
+    fetch('./__diag/' + p, { cache: 'no-store' }).catch(() => {});
+  } catch {}
+}
+
 // ── the session token (§5) ────────────────────────────────────────────────
 // Deliberately NOT in localStorage. A token that outlives the tab outlives the lock,
 // and the whole point of the passkey is that a phone in someone else's hand is not the

@@ -174,7 +174,7 @@ async function refresh() {
     S.stale = 0;
     save();
   } catch (e) {
-    if (e instanceof api.AuthError) return lock();
+    if (e instanceof api.AuthError) return lock('refresh');
     // Offline: keep the cards that are on screen and say how old they are. A blank
     // screen with an error on it is strictly less useful than a stale fleet with a
     // date on it — the question this app answers is "is anything blocked on me", and
@@ -198,7 +198,8 @@ function lastFetchedAt() {
   catch { return Math.floor(Date.now() / 1000); }
 }
 
-function lock() {
+function lock(why = 'x') {
+  api.diag('lock', why, 'tok' + (api.haveToken() ? 1 : 0), 'pend' + (swReloadPending ? 1 : 0));
   S.locked = true; api.clearToken(); render();
   // The session just ended, so a swap that was waiting for it is free now — and this is
   // the moment the poll cannot cover, because the poll does not run while locked. Without
@@ -2105,7 +2106,10 @@ export function reloadAction(pending, typing, authed) {
   return 'reload';
 }
 export function takeNewClientIfIdle() {
-  if (reloadAction(swReloadPending, typingNow(), api.haveToken()) !== 'reload') return false;
+  const typing = typingNow(), authed = api.haveToken();
+  const act = reloadAction(swReloadPending, typing, authed);
+  if (swReloadPending) api.diag('swap', act, 'typ' + (typing ? 1 : 0), 'auth' + (authed ? 1 : 0));
+  if (act !== 'reload') return false;
   try { location.reload(); } catch { return false; }
   return true;
 }
@@ -2208,7 +2212,7 @@ async function readPane() {
     S.pane = j;
     if (S.paneErr) { S.paneErr = ''; renderUnlessTyping(); }
   } catch (e) {
-    if (e instanceof api.AuthError) return lock();
+    if (e instanceof api.AuthError) return lock('poll');
     const msg = e instanceof api.OfflineError
       ? 'offline — this is the last pane captured' : String(e.message || e);
     // Rendered only when it CHANGES. The poll is every two seconds; re-rendering the
@@ -2579,7 +2583,7 @@ async function doVerb(tool, args, opts = {}) {
     await refresh();
     return r;
   } catch (e) {
-    if (e instanceof api.AuthError) { lock(); return null; }
+    if (e instanceof api.AuthError) { lock('pane'); return null; }
     toast(String(e.message || e), 'bad');
     render();
     return null;
@@ -3378,7 +3382,7 @@ document.addEventListener('visibilitychange', () => {
   // the radio every two seconds to decide it should not have.
   if (document.hidden) { S.hiddenAt = Date.now(); stopPanePoll(); return; }
   const act = onVisibleAction();
-  if (act === 'lock') lock();
+  if (act === 'lock') lock('visible');
   else if (act === 'refresh') refresh();
   syncPanePoll();
 });
@@ -3394,10 +3398,28 @@ document.addEventListener('visibilitychange', () => {
 //   Never mid-sentence. A reload throws away S.draft, which lives in memory — so if you
 // are typing, it waits, and the poll spends it when you are not.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js').catch(() => {});
-  askShellVersion();
+  // WHAT THE PAGE WOKE UP AS. `hadController` is the guard that decides whether a
+  // controllerchange is a first install (ignore) or a swap (reload), and it is read once,
+  // here, at module evaluation. If it reads wrong, every conclusion after it is wrong —
+  // and the log cannot show it, because a controlled page still hits the network for the
+  // whole shell (sw.js revalidates behind the paint). So the page says it out loud.
   let hadController = !!navigator.serviceWorker.controller;
+  api.diag('load', 'ctl' + (hadController ? 1 : 0),
+       'sa' + ((() => { try { return matchMedia('(display-mode: standalone)').matches || navigator.standalone ? 1 : 0; } catch { return 0; } })()),
+       'lock' + (S.locked ? 1 : 0));
+  navigator.serviceWorker.register('./sw.js').then(reg => {
+    // WHICH STATES EXIST AT REGISTRATION. A worker that installs on every launch is the
+    // whole puzzle: this says whether one was already active, whether a new one is
+    // installing, and whether one is stuck waiting.
+    if (!reg) return;
+    const st = r => (r ? r.state : 'none');
+    api.diag('reg', 'i-' + st(reg.installing), 'w-' + st(reg.waiting), 'a-' + st(reg.active));
+    reg.addEventListener('updatefound', () => api.diag('updatefound', 'a-' + st(reg.active)));
+  }).catch(() => api.diag('reg', 'failed'));
+  askShellVersion();
   navigator.serviceWorker.addEventListener('controllerchange', () => {
+    api.diag('cc', 'had' + (hadController ? 1 : 0), 'tok' + (api.haveToken() ? 1 : 0),
+         'lock' + (S.locked ? 1 : 0));
     if (!hadController) { hadController = true; return; }
     swReloadPending = true;
     takeNewClientIfIdle();

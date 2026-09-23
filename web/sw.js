@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 526b3b9af655
+// CLIENT-HASH: d924ff7ad395
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -175,6 +175,15 @@
 // more space than the next message from the same speaker. The toast is clamped to two lines
 // as well: a photo's toast carries a file path, wrapped to four lines, and took that height
 // out of the transcript for 4.2 seconds — "the toast will block the chat".
+// v38 IS A PROBE, NOT A FIX. The unlock loop survived v37, and the log admits more than
+// one story: a controlled page still fetches the whole shell (this worker revalidates
+// behind the paint), so the request burst cannot tell a cold start from a swap, and the
+// one number that decides it — whether a controller existed at load — is only knowable on
+// the device. So this version adds a gated beacon that says it out loud: controller at
+// load, registration states, every controllerchange, every lock and why, and the swap
+// decision with its three inputs. It 404s; the log line IS the datum, and no server change
+// is needed for any of it.
+//   IT COMES OUT AGAIN. A probe that ships twice is a feature nobody designed.
 // v37 STOPS A CLIENT SWAP COSTING A FACE ID, and takes back a doubled safe-area inset.
 // The swap: a pending service worker was held back by pollPaused(), which counts S.locked
 // as paused — so it waited for the unlock and spent itself one second after the passkey,
@@ -207,7 +216,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v37';
+const VERSION = 'ghostfleet-v38';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
