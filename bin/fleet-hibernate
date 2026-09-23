@@ -262,34 +262,54 @@ is_trusted() {
 #   NO RULES DRAWN MEANS NO ANSWER, and no answer means no draft: a pane that is mid-redraw,
 # or an agent that draws no box at all, must not be read as "something is typed" — that is
 # the direction that pins memory forever.
-has_draft() {
-  local sock="$1" slot="$2" pane
-  pane="$(tmux -L "$sock" capture-pane -p -t "$slot" 2>/dev/null)" || return 1
-  [ -n "$pane" ] || return 1
-  # ── ONE awk, NO GLYPH LITERAL, NO INTERVAL EXPRESSION ──────────────────────
-  # The first version stripped the prompt glyph with sed and then asked whether anything was
-  # left. That works here and went red on the Linux leg, because every part of it is a bet on
-  # the toolchain: `─{10,}` is an interval expression, which Ubuntu's default awk (mawk) does
-  # not take; `s/❯//` is a multibyte literal whose match depends on the locale tmux and sed
-  # happen to be in; and `tr -d '[:space:]'` leaves anything the locale does not call space,
-  # so a padded empty composer came back looking typed.
-  #   None of that is necessary. The composer is empty when its first line is nothing but the
-  # glyph, whatever the glyph renders as — so drop the FIRST non-blank run instead of a named
-  # character, and ask whether anything survives. A rule line is found by ten literal box
-  # characters rather than a counted repeat, which is the same test without the syntax mawk
-  # refuses.
-  printf '%s\n' "$pane" | awk '
+# ── THE COMPOSER BOX, PARSED ONCE ────────────────────────────────────────────
+# The agent draws its input box between a pair of horizontal rules at the bottom of the pane.
+# Two different questions are answered from it — "is there a draft in there" and "has this
+# session finished starting up" — and they were drifting apart, so they read the same region
+# through the same function.
+#   Ten literal box characters rather than a counted repeat: an interval expression is
+# syntax Ubuntu's default awk does not take.
+composer_lines() {
+  printf '%s\n' "$1" | awk '
     /^[ \t]*──────────/ { a = b; b = NR }
     { L[NR] = $0 }
-    END {
-      if (!a || !b) exit 1                       # no box drawn: no answer, and no draft
-      for (i = a + 1; i < b; i++) {
-        s = L[i]
-        if (i == a + 1) sub(/^[ \t]*[^ \t]+[ \t]*/, "", s)   # the glyph, whatever it is
-        if (s ~ /[^ \t]/) exit 0                  # something a person typed
-      }
-      exit 1
-    }'
+    END { if (!a || !b) exit 1; for (i = a + 1; i < b; i++) print L[i] }'
+}
+
+has_draft() {
+  local sock="$1" slot="$2" pane composer
+  pane="$(tmux -L "$sock" capture-pane -p -t "$slot" 2>/dev/null)" || return 1
+  [ -n "$pane" ] || return 1
+  composer="$(composer_lines "$pane")" || return 1
+  # A composer is empty when its first line is nothing but the glyph, whatever the glyph
+  # renders as — so the first non-blank RUN goes, rather than a character named in a pattern.
+  printf '%s\n' "$composer" | awk '
+    NR == 1 { sub(/^[ \t]*[^ \t]+[ \t]*/, "") }
+    /[^ \t]/ { found = 1 }
+    END { exit !found }'
+}
+
+# ── IS THIS SESSION AT A PROMPT? ─────────────────────────────────────────────
+# The first version read the footer: 'mode on|ctx:[0-9]|esc to interrupt|for shortcuts'. Both
+# halves of that were wrong on the fleet it shipped to.
+#   EVERY FLEET SESSION RUNS WITH PERMISSIONS BYPASSED, and its footer says "⏵⏵ bypass
+# permissions on" — "permissions on", not "mode on". Measured: seven of eight live sessions.
+#   AND A NARROW PANE TRUNCATES THE REST. CLAUDE.md's own entry: a detector measured at full
+# width goes blind in a narrow one. The statusline drops ctx: and the hints before it drops
+# anything else, so the remaining signals vanish exactly where the pane is smallest.
+# Observed consequence: a wake that had already succeeded — conversation drawn, prompt
+# waiting — sat in its poll for the full 300 seconds and was about to be reported as failed.
+#
+# So readiness is the COMPOSER BOX being drawn. The agent paints it when it is ready for
+# input and not before, it does not depend on which permission mode is on, and it cannot be
+# truncated away: the rules span whatever width there is. The footer phrases stay as extra
+# signals — including the one that was missing — because a second way to say yes costs
+# nothing, and only their ABSENCE was ever the bug.
+is_ready() {
+  local pane="$1"
+  [ -n "$pane" ] || return 1
+  composer_lines "$pane" >/dev/null 2>&1 && return 0
+  printf '%s\n' "$pane" | grep -qE 'mode on|permissions on|ctx:[0-9]|esc to interrupt|for shortcuts'
 }
 
 # a lead whose fleet still has somebody working is the one card that must stay up
@@ -517,7 +537,7 @@ wake_one() {
     # a session woken in manual mode draws "⏸ manual mode on" — ready, at a prompt, and
     # invisible to the check, so the wake would have timed out on a session that was already
     # waiting for input. Matched on the part that does not vary.
-    if grep -qE 'mode on|ctx:[0-9]|esc to interrupt|for shortcuts' <<< "$pane"; then
+    if is_ready "$pane"; then
       rm -f "$marker" 2>/dev/null
       echo "fleet-hibernate: '$slot' is awake (${waited}s)"
       return 0
@@ -528,7 +548,20 @@ wake_one() {
     fi
     sleep 1; waited=$((waited+1))
   done
-  echo "fleet-hibernate: '$slot' did not reach a prompt in ${WAKE_TIMEOUT}s — left running, last line: $(tail -1 <<< "$pane" | cut -c1-80)" >&2
+  # ── A LIVE SESSION UNDER AN "ASLEEP" CARD IS THE WORSE ERROR ────────────────
+  # The marker used to be kept on every timeout, on the reasoning that a failed wake must not
+  # lose the way home. That is right when nothing came back and wrong when something did: the
+  # grid would draw "asleep — tap to wake" over a session that is running and waiting for
+  # input, and the next tap would try to start a second one under the same name.
+  #   So the question on timeout is not "did the poll succeed" but "is it alive". If the pane
+  # is there, the wake worked and only the detector was late — clear the marker and say so.
+  # If the pane is gone, keep the marker: that is the case it exists for.
+  if tmux -L "$sock" has-session -t "=$slot" 2>/dev/null; then
+    rm -f "$marker" 2>/dev/null
+    echo "fleet-hibernate: '$slot' is running but never showed a prompt in ${WAKE_TIMEOUT}s — cleared the asleep marker anyway, because a live session behind an asleep card is worse than a slow one. Last line: $(tail -1 <<< "$pane" | cut -c1-80)" >&2
+    return 1
+  fi
+  echo "fleet-hibernate: '$slot' did not come back in ${WAKE_TIMEOUT}s and its pane is gone — marker kept so it can be woken again" >&2
   return 1
 }
 

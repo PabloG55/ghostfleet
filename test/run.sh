@@ -11730,6 +11730,78 @@ else
   skip "the vetoes that made hibernation do nothing" "jq missing"
 fi
 
+# ── 4a10c13. a wake that worked must not report failure ──────────────────────
+# Deployed, and the first real wake resumed in seconds — conversation drawn, prompt waiting —
+# then sat in its poll for the full five minutes and was about to be reported as failed, with
+# the asleep marker left behind. The card would have said "asleep — tap to wake" over a
+# session that was running.
+#
+# THE DETECTOR READ THE FOOTER, AND THE FOOTER IS THE ONE THING THAT MOVES. Every fleet
+# session runs with permissions bypassed, whose footer says "bypass permissions on" — not
+# "mode on", which is what the pattern looked for; measured, seven of eight live sessions. And
+# a narrow pane truncates the statusline before ctx:, so the remaining signals disappear
+# exactly where the pane is smallest. CLAUDE.md already has the entry: a detector measured at
+# full width goes blind in a narrow one.
+#   Readiness is the COMPOSER BOX now — the same region the draft veto reads. The agent draws
+# it when it is ready for input, it does not depend on the permission mode, and the rules span
+# whatever width there is so it cannot be truncated away.
+group "a wake that worked must not report failure"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  WK="$(mktemp -d "$TEST_RUNS.$$.wake.XXXXXX")"
+  export CLAUDE_FLEET_DIR="$WK/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  mkdir -p "$WK/bin" "$WK/wt"
+  wkyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+
+  # The stub prints a captured pane and then holds. What is exercised is the real wake poll
+  # against real rendered output, not a copy of the rule.
+  wake_with() {
+    printf '#!/bin/sh\ncat %s\nexec sleep 600\n' "$1" > "$WK/bin/agent-here"
+    chmod +x "$WK/bin/agent-here"
+    tmux -L cf-acme-web kill-session -t "=toolbox" 2>/dev/null
+    printf '%s\t%s\t%s\t%s\n' 0 "11111111-2222-3333-4444-555555555555" "$WK/wt" 100 \
+      > "$CLAUDE_FLEET_DIR/cf-acme-web.toolbox.asleep"
+    PATH="$WK/bin:$PATH" "$ROOT/bin/fleet-hibernate" -s cf-acme-web --wake toolbox --timeout "$2" >"$WK/out" 2>&1
+    echo $?
+  }
+
+  # ── every mode, at both widths. The 56-column bypass pane is the live failure. ──
+  for m in bypass auto manual; do
+    for w in 200 56; do
+      is "wake: ready in $m mode at ${w} columns" "0" "$(wake_with "$FIX/pane-ready-$m-${w}col.txt" 20)"
+    done
+  done
+  # ...and the marker is consumed, or the card stays asleep over a live session.
+  is "wake: ...and the marker is consumed" "0" \
+     "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.toolbox.asleep" ] && echo 1 || echo 0)"
+
+  # ── the old rule went blind on exactly one of those six ──
+  # Kept as a row so the regression has a name: if somebody reinstates a footer-only detector,
+  # this says which pane it stops seeing.
+  is "wake: the old footer-only rule missed bypass-at-56" "no" \
+     "$(wkyn grep -qE 'mode on|ctx:[0-9]|esc to interrupt|for shortcuts' "$FIX/pane-ready-bypass-56col.txt")"
+  is "wake: ...while the composer box is there" "yes" \
+     "$(wkyn grep -qE '^[[:space:]]*──────────' "$FIX/pane-ready-bypass-56col.txt")"
+
+  # ── A LIVE SESSION UNDER AN ASLEEP CARD IS THE WORSE ERROR ──
+  # A pane that never draws a box times out. The wake still failed — but the session is
+  # THERE, so the marker must go: the alternative is a card advertising "tap to wake" over
+  # something already running, and a second one started under the same name on the next tap.
+  rc="$(wake_with "$FIX/pane-not-ready-loading.txt" 4)"
+  is "wake: a pane that never shows a prompt fails"  "1" "$rc"
+  is "wake: ...but the marker is cleared anyway"     "0" \
+     "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.toolbox.asleep" ] && echo 1 || echo 0)"
+  is "wake: ...and it says why"                      "yes" \
+     "$(wkyn grep -q 'live session behind an asleep card' "$WK/out")"
+  is "wake: ...and the session really is still up"   "1" \
+     "$(tmux -L cf-acme-web has-session -t '=toolbox' 2>/dev/null && echo 1 || echo 0)"
+
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  unset CLAUDE_FLEET_DIR
+  rm -rf "$WK"
+else
+  skip "a wake that worked must not report failure" "tmux or jq missing"
+fi
+
 # ── 6b. every command is actually installed ──────────────────────────────────
 # A new command that never reaches the install list is invisible until someone hits
 # "command not found" — and worse, the SUMMARY line was hand-maintained separately from
