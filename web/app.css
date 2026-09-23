@@ -103,9 +103,76 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  * ends is survivable where a layout that never recovers is not. NOT `position: fixed`
  * either, which is the thing that fights iOS keyboards hardest. */
 #app.shell {
-  height: 100vh; height: 100dvh;
+  /* PINNED TO THE SCREEN, NOT SIZED BY THE VIEWPORT, and the device is what settled it.
+   * Measured in the installed app (the geo probe, one line):
+   *
+   *     ih759  sh812  sl759  cb751  gap8  sat53  sab29
+   *
+   * innerHeight 759 against a physical screen of 812 — short by exactly the top inset, 53.
+   * With viewport-fit=cover and a black-translucent status bar the page is drawn from y=0
+   * UNDER the status bar, and iOS still subtracts the status bar from the viewport height.
+   * So `height: 100dvh` is 759 and ends 53pt above the physical bottom, which is the band.
+   *   The shell was never the thing that was wrong: sl759 == ih759 says it filled the
+   * viewport it was given, exactly. What was wrong is asking the viewport at all.
+   *
+   * NOTHING ON A DESKTOP ENGINE SHOWS THIS. There dvh IS the window, so the bug and a
+   * correct layout measure identically — 844 against 844 at 390x844 headless, gap 0. Only
+   * the device could tell the two apart, and it did. */
+  position: fixed; inset: 0;
   display: flex; flex-direction: column; gap: 0;
+  /* A transformed child during a screen transition must not become page scroll. The bands
+   * inside have their own scrollers; this box has never needed one, and clipping here is
+   * what keeps `documentElement.scrollWidth <= clientWidth` true mid-animation — the rule
+   * viewport-check exists to hold. */
+  overflow: hidden;
 }
+
+/* ── moving between screens ──────────────────────────────────────────────────
+ * "add cool animations ... like getting out of a session." The screens are a stack —
+ * Projects, a project's grid, a session — and the one thing motion can say here that a
+ * static swap cannot is WHICH WAY you went. So it is directional and nothing else: in
+ * from the right going deeper, in from the left coming back, matching the swipe that
+ * already walks between sessions. No fades on cards, no springs, no stagger.
+ *   160ms because it has to finish before the thumb expects the screen: long enough to
+ * read as motion, short enough that the back gesture never feels held up.
+ *   TRANSFORM AND OPACITY ONLY — both composited, so this cannot cost a layout on a phone
+ * that is already polling every five seconds. */
+@media (prefers-reduced-motion: no-preference) {
+  #app.shell.nav-fwd  { animation: gf-nav-fwd 160ms cubic-bezier(.22,.61,.36,1) both; }
+  #app.shell.nav-back { animation: gf-nav-back 160ms cubic-bezier(.22,.61,.36,1) both; }
+}
+/* A WIPE, NOT A SLIDE, AND THE REASON IS MEASURED. The first cut translated the shell 5%
+ * and viewport-check went red at every width: `div.hdr@396` against a 390 viewport. It was
+ * right to. A transform is part of an element's box, so every child's rect hangs past the
+ * screen for the 160ms the animation runs — `overflow: hidden` clips the PAINT and changes
+ * no rect, and the rule that nothing may sit past the right edge is checked continuously,
+ * not at rest. (The page still could not scroll: documentElement.scrollWidth stayed within
+ * clientWidth. The rect is the stricter question and the one being asked.)
+ *   clip-path moves nothing. The screen is revealed FROM the side it arrived from, which
+ * says the same thing about direction, and no box anywhere leaves the viewport — so the
+ * assertion keeps its teeth instead of being taught to wait for animations. */
+@keyframes gf-nav-fwd  { from { clip-path: inset(0 0 0 92%); opacity: .35 }
+                         to   { clip-path: inset(0);         opacity: 1 } }
+@keyframes gf-nav-back { from { clip-path: inset(0 92% 0 0); opacity: .35 }
+                         to   { clip-path: inset(0);         opacity: 1 } }
+
+/* ── waiting, in the shape of the thing being waited for ─────────────────────
+ * A skeleton rather than a spinner, because the screen then does not JUMP when the data
+ * lands: the placeholder already occupies the final layout, so the real cards swap into
+ * the boxes the eye is already looking at. A spinner in the middle of an empty screen
+ * moves everything twice.
+ *   BUILT FROM THE GROUND, NOT A NEW HEX — white at 3% is the card's own background, and
+ * the bar is white at 7% over it. The palette does not gain colours (see .card above). */
+.card.skel { pointer-events: none; }
+.skel-bar {
+  height: .85em; border-radius: 3px; margin: .35em 0;
+  background: rgba(255, 255, 255, .07);
+}
+.skel-bar.w1 { width: 45% } .skel-bar.w2 { width: 72% } .skel-bar.w3 { width: 58% }
+@media (prefers-reduced-motion: no-preference) {
+  .card.skel .skel-bar { animation: gf-skel 1.1s ease-in-out infinite; }
+}
+@keyframes gf-skel { 0%, 100% { opacity: .55 } 50% { opacity: 1 } }
 /* The scrolling region. `min-height: 0` is the whole trick — a flex child's default
  * min-height is its content, so without it the column grows past the viewport and the
  * page scrolls again, which is exactly the bug. */

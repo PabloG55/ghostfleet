@@ -231,8 +231,15 @@ is('the bottom inset can collapse for the keyboard', true,
 // scrollbar. Safari pans to reveal a focused field by itself; a pan that ends is survivable
 // where a layout that never recovers is not.
 //   So these fail if anyone reintroduces it, which is the only reason they exist.
-is('the shell height is dvh, not the visual viewport', true,
-   /#app\.shell \{\s*height: 100vh; height: 100dvh;/.test(CSS));
+//   THIS ROW USED TO PIN THE LITERAL `height: 100vh; height: 100dvh;`, and the premise
+// changed rather than the coverage being dropped. Its own paragraph above says what it is
+// really for: nothing may drive this height from visualViewport. dvh was the answer to that
+// when it was written; the shell is `position: fixed; inset: 0` now, because the device
+// measured dvh resolving 53pt short of the physical screen in standalone (ih759 vs sh812).
+// Both answers satisfy the rule this row exists to enforce, so it asks the rule — and the
+// two --vvh rows below, which are the sharp end of it, are untouched.
+is('the shell height is not driven by the visual viewport', false,
+   /visualViewport[^\n]*height/.test(JS['app.js'].replace(/\/\/[^\n]*/g, '')));
 is('...and nothing drives that height from visualViewport', false, /--vvh/.test(CSS));
 is('...and the client never writes a --vvh at all', false, /--vvh/.test(JS['app.js']));
 
@@ -581,6 +588,86 @@ is('there is a session fixture longer than one page', true,
 is('the worker answers which version it is', true,
    /type === 'version'[\s\S]{0,160}postMessage\(\{ version: VERSION \}\)/.test(JS['sw.js']));
 is('...and the client asks it', true, /askShellVersion/.test(JS['app.js']));
+
+// ── moving between screens says WHICH WAY ─────────────────────────────────
+// "add cool animations ... like getting out of a session." The screens are a stack, so the
+// one thing motion can say that a static swap cannot is the direction you went. That makes
+// three things load-bearing, and each is a way this goes wrong rather than a style note.
+const nav = (/function markNav\([\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
+is('the transition is directional', true, /SCREEN_DEPTH/.test(nav) && /nav-back/.test(nav) && /nav-fwd/.test(nav));
+// ONLY ON A REAL SCREEN CHANGE. render() runs on the 5s poll and after every verb — animate
+// there and the slide replays every five seconds on a screen nobody moved away from, which
+// is also why the Preact path deliberately never empties #app.
+is('...and only when the screen actually changed', true, /navFrom === screen\) return/.test(nav));
+is('...with the first paint treated as an arrival', true, /from === null\) return/.test(nav));
+// TRANSFORM AND OPACITY ONLY: both composited. Animating width/height/top/left on a client
+// that already polls every five seconds buys a layout per frame on the reader's phone.
+//   EXTRACTED TO THE AT-RULE'S OWN CLOSE, not to the next line that starts with `}`. These
+// keyframes end `} }` on one line, so the lazy `\n}` form ran past them and swallowed the
+// rules below — the row went red on CSS it was never meant to read.
+const keyframes = (CSS.match(/@keyframes gf-nav-[^{]*\{[\s\S]*?\}\s*\}/g) || []).join('\n');
+is('the transition animates composited properties', true, keyframes.length > 0);
+//   `clip-path` and `opacity` only — both composited, neither in the box. A transform
+// would be composited too and is still wrong here: it is part of the element's box, so a
+// translated shell puts every child's rect past the screen for the length of the animation
+// and viewport-check goes red at every width. Measured, not predicted: div.hdr@396 against
+// a 390 viewport.
+is('...and lays nothing out', false, /\b(width|height|top|left|right|bottom|margin|padding)\s*:/.test(keyframes));
+is('...and moves no box', false, /transform\s*:/.test(keyframes));
+// Motion is a preference, and the platform exposes it.
+is('...behind prefers-reduced-motion', true, /@media \(prefers-reduced-motion: no-preference\)[\s\S]*?nav-fwd/.test(CSS));
+// A transformed child must not become page scroll — the rule viewport-check holds.
+//   ASKED OF THE RULE'S OWN DECLARATIONS. `/#app\.shell\{[\s\S]*?overflow:hidden/` searches
+// past the rule's closing brace and finds any `overflow: hidden` later in the file, so it
+// stayed green with the declaration deleted — measured, by deleting it.
+is('...and the shell clips it', true,
+   /overflow:\s*hidden/.test(((/#app\.shell\s*\{[\s\S]*?\n}/.exec(CSS) || [''])[0]).replace(/\/\*[\s\S]*?\*\//g, '')));
+
+// ── waiting looks like the thing being waited for ─────────────────────────
+// A skeleton, not a spinner, so nothing MOVES when the data lands: the placeholder already
+// occupies the final layout and the real cards swap into boxes the eye is resting on.
+// Observed: 4 skeleton cards and 12 bars while a slow backend was held, 0 skeletons and 6
+// real cards after it answered.
+is('a wait is drawn card-shaped', true, /function skeletonCards\(/.test(JS['app.js']));
+// NULL IS NOT EMPTY, and this is the whole correctness of it: an empty list is a real
+// answer and belongs to the first-run path, a null one has not been answered yet. `items()`
+// always carries the `+ new` card, so length alone cannot tell the two apart.
+is('...only while the answer is still missing', 2,
+   (JS['app.js'].match(/S\.(projects|grid) == null \? skeletonCards\(/g) || []).length);
+
+// ── the shell is pinned to the screen, not sized by the viewport ──────────
+// MEASURED ON THE DEVICE, in one line from the installed app:
+//     ih759  sh812  sl759  cb751  gap8  sat53  sab29
+// innerHeight 759 against a physical screen of 812, short by exactly the top inset. With
+// viewport-fit=cover and a black-translucent status bar the page is drawn from y=0 under
+// the status bar and iOS STILL subtracts it from the viewport height — so `height: 100dvh`
+// ends 53pt above the physical bottom. sl759 == ih759 says the shell filled the viewport it
+// was given, exactly; asking the viewport at all was the mistake.
+//
+// PINNED HERE BECAUSE NO ENGINE IN THIS SUITE CAN SEE IT. On a desktop dvh IS the window,
+// so the bug and the fix measure identically — 844 against 844 at 390x844, gap 0. Every
+// instrument here is blind to it, which is exactly why the shape needs an assertion rather
+// than a screenshot.
+//   COMMENTS STRIPPED BEFORE THE TEST, because the rule's own comment explains the bug in
+// the words `100dvh` — and the first cut of this row went red on its own prose. A guard
+// that reads documentation as code fails the moment somebody documents the thing properly.
+const shellRule = (/#app\.shell\s*\{[\s\S]*?\n}/.exec(CSS) || [''])[0];
+const shellDecls = shellRule.replace(/\/\*[\s\S]*?\*\//g, '');
+is('the shell rule exists', true, shellRule.length > 0);
+is('...pinned to the screen', true, /position:\s*fixed/.test(shellDecls) && /inset:\s*0/.test(shellDecls));
+is('...and not sized by the viewport', false, /\b\d+(dvh|vh|svh|lvh)\b/.test(shellDecls));
+
+// ── --kb-inset is REMOVED when the keyboard closes, never zeroed ──────────
+// `padding-bottom: calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px)` reaches its
+// fallback only when the property is ABSENT. setProperty(name, '') does not reliably remove
+// a custom property in WebKit, so the fallback never applied: measured gap8 against sab29,
+// i.e. 0 + 8. Harmless only while the shell stopped short of the bottom — the moment it
+// reaches the real bottom, that puts the composer on the home indicator. The two findings
+// came from one log line and are fixed together.
+const kb = (JS['app.js'].match(/[^\n]*--kb-inset[^\n]*/g) || []).join('\n');
+is('the keyboard inset is removed, not emptied', true, /removeProperty\('--kb-inset'\)/.test(kb));
+is('...and never set to an empty string', false, /setProperty\('--kb-inset',\s*(keyboard[^)]*)?''/.test(kb));
+is('...while the keyboard-open path still writes 0', true, /setProperty\('--kb-inset',\s*'0px'\)/.test(kb));
 
 // ── the geometry probe measures the shell, not the lock screen ────────────
 // "still it doesnt use the full screen", in the installed app. No engine here reproduces

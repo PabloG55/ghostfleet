@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 35ed29d46ffc
+// CLIENT-HASH: ada32d7548a7
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -175,6 +175,26 @@
 // more space than the next message from the same speaker. The toast is clamped to two lines
 // as well: a photo's toast carries a file path, wrapped to four lines, and took that height
 // out of the transcript for 4.2 seconds — "the toast will block the chat".
+// v41 ALSO MOVES BETWEEN SCREENS, AND SHOWS THE WAIT. The screens are a stack, so a transition
+// that slides in from the right going deeper and from the left coming back says which way
+// you went — which a static swap cannot. Directional and nothing else: no fades on cards,
+// no stagger, transform and opacity only so it cannot cost a layout on a phone already
+// polling every five seconds, and behind prefers-reduced-motion.
+//   And a wait is now card-shaped. A skeleton rather than a spinner means nothing MOVES
+// when the data lands: the placeholder already holds the final layout and the real cards
+// swap into boxes the eye is resting on. Keyed on a NULL answer, never an empty one — an
+// empty list is a real answer and belongs to the first-run path.
+//   An older client is stale rather than broken here; no new files.
+// v41 REACHES THE BOTTOM OF THE SCREEN, and stops standing on the home indicator. The
+// device measured it: ih759 against a physical sh812, short by exactly the top inset of 53
+// — with viewport-fit=cover and a black-translucent bar the page is drawn from y=0 under
+// the status bar and iOS still subtracts it from the viewport, so 100dvh ended 53pt high.
+// The shell is pinned to the screen now instead of sized by the viewport.
+//   The same line carried the second half: gap8 against sab29, i.e. the composer padded
+// 0 + 8 rather than inset + 8, because setProperty('--kb-inset', '') leaves a property
+// behind instead of removing it and the fallback never applied. Harmless only while the
+// shell stopped short; once it reaches the real bottom that is the composer ON the home
+// indicator. Removed, not emptied, and the keyboard-open path still writes 0.
 // v40 MEASURES THE SCREEN FROM THE DEVICE. "still it doesnt use the full screen", in the
 // installed app. The suspicion is that the shell's `height: 100dvh` resolves shorter than
 // the physical screen in iOS standalone with a black-translucent status bar — but no
@@ -225,7 +245,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v40';
+const VERSION = 'ghostfleet-v41';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

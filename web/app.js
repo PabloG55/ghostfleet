@@ -303,6 +303,29 @@ function toast(text, kind = '') {
 // bars, and the grid has a card list under a header — both are columns of a known height,
 // which is what stops the layout moving on a poll.
 const SHELL_SCREENS = new Set(['session', 'grid', 'projects']);
+// The screens are a STACK, and the depth is what makes a transition directional: the only
+// thing motion can say here that a static swap cannot is which way you went.
+const SCREEN_DEPTH = { projects: 0, grid: 1, session: 2 };
+// ONLY ON A REAL SCREEN CHANGE. render() runs on the 5s poll and after every verb, so
+// animating on render would re-run the slide every five seconds on a screen nobody moved
+// away from — the Preact path deliberately does not even empty #app, for the same reason.
+let navFrom = null, navTimer = null;
+function markNav(app, screen) {
+  if (navFrom === screen) return;
+  const from = navFrom; navFrom = screen;
+  if (from === null) return;                       // the first paint is an arrival, not a move
+  const d = (SCREEN_DEPTH[screen] ?? 0) - (SCREEN_DEPTH[from] ?? 0);
+  if (!d) return;
+  try {
+    app.classList.remove('nav-fwd', 'nav-back');
+    // Reading offsetWidth restarts a CSS animation that is already on the element —
+    // without it, walking two screens in under 160ms plays the second one not at all.
+    void app.offsetWidth;
+    app.classList.add(d > 0 ? 'nav-fwd' : 'nav-back');
+    clearTimeout(navTimer);
+    navTimer = setTimeout(() => { try { app.classList.remove('nav-fwd', 'nav-back'); } catch {} }, 260);
+  } catch {}
+}
 // THE TWO SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
 const PREACT_SCREENS = new Set(['projects', 'grid']);
 // Whether Preact currently owns #app. Not derivable from S.screen: the screen can change
@@ -320,6 +343,7 @@ function render() {
     app.classList.toggle('shell', shell);
     document.documentElement.classList.toggle('shell', shell);
   } catch {}
+  if (shell) markNav(app, S.screen); else navFrom = null;
   // ── the Preact screens ─────────────────────────────────────────────────────────────
   // They DIFF, so this path must not empty #app first: the whole gain is that the .cards
   // node survives the 5s poll and keeps the reader's scroll position instead of being
@@ -560,7 +584,10 @@ function projectsProps() {
     // ── the seam ────────────────────────────────────────────────────────────────────
     // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
     // the list and is told nothing else about them; see web/src/screens.jsx.
-    cards: [
+    // NULL, NOT EMPTY, is the difference between "still asking" and "you have no projects".
+    // An empty list is a real answer and gets the first-run path; a null one has not been
+    // answered yet and gets the wait.
+    cards: S.projects == null ? skeletonCards(4) : [
       ...visibleProjects().map(({ p, i }) =>
         // i is the GLOBAL index, on purpose
         cardEl(G.projectModel(p, i, i === S.sel), {
@@ -712,7 +739,10 @@ function gridProps() {
     // ── the seam ────────────────────────────────────────────────────────────────────
     // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
     // the list and is told nothing else about them; see web/src/screens.jsx.
-    cards: its.map((it, idx) => {
+    // Same rule as the projects screen: a null grid has not been answered yet, an empty one
+    // has. `its` always carries the `+ new session` card, so length alone cannot tell them
+    // apart — ask S.grid itself.
+    cards: S.grid == null ? skeletonCards(6) : its.map((it, idx) => {
       const isSel = idx === S.sel;
       if (it.newCard) return cardEl(G.newModel(isSel), { tap: () => sheetPicker() }, idx);
       if (it.freeWt) {
@@ -1428,7 +1458,18 @@ function syncViewport() {
     // layout is dvh now and Safari is allowed to pan. An inset that is briefly wrong is a
     // cosmetic 34px; a height driven by a number that does not reliably revert is a dead
     // screen.
-    document.documentElement.style.setProperty('--kb-inset', keyboard ? '0px' : '');
+    // REMOVED, NOT SET TO EMPTY, and that distinction was costing the home indicator.
+    // `padding-bottom: calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px)` only
+    // reaches its fallback when --kb-inset is ABSENT. setProperty(name, '') does not
+    // reliably remove a custom property in WebKit — it leaves one whose value substitutes
+    // as nothing or as zero — so the fallback never applied and the composer's padding
+    // resolved to 0 + 8.
+    //   MEASURED on the device: gap8 against sab29. Harmless only while the shell stopped
+    // 53pt short of the bottom; the moment it reaches the real bottom, 8px of padding puts
+    // the composer ON the home indicator. The two findings arrived in one log line and had
+    // to be fixed in one change.
+    if (keyboard) document.documentElement.style.setProperty('--kb-inset', '0px');
+    else          document.documentElement.style.removeProperty('--kb-inset');
   } catch {}
 }
 
@@ -2350,6 +2391,25 @@ function back() {
 // intended difference and what test/helpers/grid-parity.mjs now asserts. The status word
 // is the TUI's own (§7), the 1-9 digit is still the card's address, and `--c` still carries
 // the status hue so one declaration colours the rail, the chip and the selection.
+// ── a card-shaped wait ────────────────────────────────────────────────────
+// Three bars in a card, so the placeholder occupies the layout the real card will. The
+// point is that nothing MOVES when the data lands — the cards swap into boxes the eye is
+// already resting on, instead of appearing under a spinner that was in the middle of an
+// empty screen and pushing everything down.
+//   Built here rather than in the ported screen, and that is a constraint rather than a
+// preference: web/screens.js is vite output and this checkout has no node_modules, so the
+// JSX cannot be rebuilt. The card screens take REAL DOM for their cards (see the seam in
+// projectsProps), which is the one door open from this file.
+function skeletonCards(n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push(el('div', { class: 'card skel', 'aria-hidden': 'true' }, [
+      el('div', { class: 'skel-bar w1' }), el('div', { class: 'skel-bar w2' }), el('div', { class: 'skel-bar w3' }),
+    ]));
+  }
+  return out;
+}
+
 function cardEl(m, h, idx) {
   const d = el('div', {
     // `exited` is a CLASS, not a status: the nine statuses say what a running agent is
@@ -2719,7 +2779,8 @@ function lockScreen() {
       }, 'go'));
     } else if (pk.available()) {
       row.append(btn('unlock with Face ID', async () => {
-        try { await pk.open(); S.locked = false; render(); refresh(); }
+        try { api.diag('auth', 'start'); await pk.open(); api.diag('auth', 'ok');
+              S.locked = false; render(); refresh(); }
         catch (e) { toast(String(e.message || e), 'bad'); }
       }, 'go'));
     }
@@ -3505,6 +3566,25 @@ if ('serviceWorker' in navigator) {
     takeNewClientIfIdle();
   });
 }
+// ── the navigation nothing of ours admits to ──────────────────────────────
+// A launch logged `load`, then a second `load` seven seconds later with no cc, no swap and
+// no lock line before it — so something navigated that none of our reload paths issued,
+// and it landed while the first Face ID sheet was open. Guessing at it is what the last two
+// rounds cost, so the page reports its own lifecycle instead:
+//
+//   pagehide p1  the page went into the back/forward cache (a restore is coming)
+//   pagehide p0  the page is being torn down — a REAL navigation
+//   pageshow p1  restored from bfcache, which fetches no shell and would explain a
+//                `load` with no requests behind it
+//   pageshow p0  a fresh document
+//   unload       the last thing a document ever does
+//
+// Paired with auth/start above, the order settles it: a pagehide between `auth/start` and
+// the assert means the WebAuthn sheet is what tore the document down.
+addEventListener('pageshow', e => api.diag('pageshow', 'p' + (e && e.persisted ? 1 : 0)));
+addEventListener('pagehide', e => api.diag('pagehide', 'p' + (e && e.persisted ? 1 : 0)));
+addEventListener('unload', () => api.diag('unload'));
+
 render();
 // One measurement, after layout has settled — early enough to be in the same log burst as
 // the launch, late enough that the shell has been sized.
