@@ -721,11 +721,43 @@ function codexTranscript(cwd) {
 // is also just true: the lead is the card you are looking for.
 //   The card ORDER the fleet numbers by is untouched — --order still excludes the lead,
 // so `Ctrl-f <p> <s>` and ⇧←→ at the desk count the same sessions they always did.
+// ── A SLEPT SESSION HAS NO TMUX SESSION, AND HAD NO CARD ────────────────────
+// Cards were built from the live tmux list alone, so hibernating one did not mark it asleep
+// — it DELETED it from the grid and from the phone. Twelve sessions vanished on the fleet
+// this shipped to, and the owner's words for it were "they need to show somewhere". The
+// `asleep` field added for the card could never be reached, because the row it belonged to
+// was gone before anything asked.
+//   So the marker is a source of sessions too. It holds the cwd and the conversation id
+// written at the moment of sleeping, which is everything a card needs to say what it is and
+// everything a wake needs to bring it back. Synthesised here rather than in each renderer:
+// one builder still feeds the desk and the phone.
+function asleepSessions(liveNames) {
+  const out = [];
+  let files = [];
+  try { files = fs.readdirSync(FLEET_DIR); } catch { return out; }
+  const pre = SOCK + '.';
+  for (const f of files) {
+    if (!f.startsWith(pre) || !f.endsWith('.asleep')) continue;
+    const name = f.slice(pre.length, -'.asleep'.length);
+    if (!name || liveNames.has(name)) continue;      // a live session is not asleep
+    let cwd = '', at = 0, id = '';
+    try {
+      const [ts, sid, dir] = fs.readFileSync(path.join(FLEET_DIR, f), 'utf8').trim().split('\t');
+      at = Number(ts) || 0; id = sid || ''; cwd = dir || '';
+    } catch {}
+    out.push({ name, cwd, attached: false, asleepAt: at, asleepId: id });
+  }
+  return out;
+}
+
 function gather({ lead = false } = {}) {
   const live = tmuxList();
+  const liveNames = new Set(live.map(s => s.name));
+  const slept = asleepSessions(liveNames);
   const sessions = [
     ...(lead ? live.filter(s => isLead(s.name)) : []),
     ...applyOrder(live.filter(s => !isLead(s.name))),
+    ...slept,
   ];
   const fleet = fleetBySlot();
   const nowS = Math.floor(Date.now() / 1000);
@@ -741,11 +773,23 @@ function gather({ lead = false } = {}) {
     // cwd, so on a worktree that USED to run claude it happily returns that old transcript
     // for the codex session standing there now — a wrong answer that looks like a right
     // one, since the card would show a real message with a real timestamp.
-    const transcript = st?.transcript ||
-      (agent === 'codex' ? codexTranscript(s.cwd || '') : newestTranscript(s.cwd || ''));
+    // A SLEPT CARD READS ITS OWN CONVERSATION, NOT THE FOLDER'S NEWEST. Every session in a
+    // checkout shares a project directory, so newestTranscript() answers with whichever
+    // conversation was written last — which for a sleeping session is somebody else's. Seen
+    // immediately: seven slept cards in one fleet all showing the same last message, each of
+    // them a neighbour's. The marker records the conversation id that was live at the moment
+    // of sleeping, which is exactly the one the card is about.
+    const transcript = (s.asleepId && s.cwd)
+      ? path.join(CFG, 'projects', s.cwd.replace(/[^A-Za-z0-9]/g, '-'), s.asleepId + '.jsonl')
+      : (st?.transcript ||
+         (agent === 'codex' ? codexTranscript(s.cwd || '') : newestTranscript(s.cwd || '')));
     const tmt = transcript ? mtimeSec(transcript) : 0;    // last transcript write = age display only
-    const busy = paneBusy(SOCK, s.name);
-    let status = deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
+    // A slept session has no pane to read, so it is never asked. Probing one costs a tmux
+    // round trip that answers "not found" and would land as "not busy", which reads as
+    // ready — a card claiming a session is waiting for input when its process is gone.
+    const busy = s.asleepAt ? false : paneBusy(SOCK, s.name);
+    let status = s.asleepAt ? (st?.status || 'unknown')
+                            : deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
     if (!busy && isParked(s.name)) status = 'parked';     // intentionally off (fleet-pause)
     // Checked last and only on a session that is neither generating nor deliberately
     // off: those two already describe it better. A limited session looks exactly like a
@@ -769,7 +813,10 @@ function gather({ lead = false } = {}) {
              // which is docs/mobile.md §3's rule, one producer of "what is this session
              // doing".
              exited: isExited(s.name),
-             asleep: isAsleep(s.name),
+             // Either the marker put it here, or one exists beside a live session (a wake
+             // that timed out leaves that shape). Both are asleep as far as a card is
+             // concerned, and the second is how a live session ends up under an asleep card.
+             asleep: !!s.asleepAt || isAsleep(s.name),
              // null, never 0 or '': the card tests it for truth, and a PR numbered 0 does
              // not exist while an empty string would read as "no PR" in one place and as a
              // present-but-blank field in another.
@@ -2398,6 +2445,15 @@ if (JSON_OUT) {
       pr:       c.pr || null,
       msg:      c.msg,
       age:      c.age,            // seconds since the last transcript write; null = unknown
+      // ── THE TWO STATES THAT ARE NOT STATUSES, AND WERE NOT ON THE WIRE ──────
+      // `exited` and `asleep` ride beside the status because the nine statuses describe
+      // what a RUNNING agent is doing. Both were computed on the card and neither was
+      // copied into --json, which is the only thing the phone ever sees — so a hibernated
+      // session reached the client as an ordinary card with a stale status, and the
+      // "asleep — tap to wake" line the client already knows how to draw had nothing to
+      // trigger it. The field existed at both ends and nothing carried it between them.
+      exited:   !!c.exited,
+      asleep:   !!c.asleep,
       attached: c.attached,
       // The epoch AND the prompt, but not the pid. `@10:30pm` with no way to say WHAT
       // will be sent is half a fact: in the TUI you are one keystroke from the session
@@ -2469,7 +2525,10 @@ if (PLAIN) {
     console.log([
       clip(c.name, 12).padEnd(12), clip(c.folder, 14).padEnd(14), clip(c.branch, 26).padEnd(26),
       clip(c.agent, 9).padEnd(9),
-      clip(c.status, 11).padEnd(11), clip(c.msg, 44).padEnd(46), idle,
+      // asleep and exited REPLACE the status here, for the reason they ride beside it on a
+      // card: the nine statuses say what a RUNNING agent is doing, and neither of these is
+      // running. Printing the last status it happened to hold reads as a live session.
+      clip(c.asleep ? 'asleep' : c.exited ? 'exited' : c.status, 11).padEnd(11), clip(c.msg, 44).padEnd(46), idle,
     ].join(''));
   }
   if (!rows.length) console.log('(no sessions)');

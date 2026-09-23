@@ -7441,7 +7441,7 @@ if command -v tmux >/dev/null 2>&1; then
   # names, so a rename is a broken client, not a refactor.
   is "top-level keys"    "project profile counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
   is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
-  is "card keys"         "name label status folder branch agent pr msg age attached sched limit_at lead" \
+  is "card keys"         "name label status folder branch agent pr msg age exited asleep attached sched limit_at lead" \
                          "$(J 'Object.keys(o.cards[0]).join(" ")')"
   is "project is the fleet's project" "demoproj" "$(J 'o.project')"
   is "profile is the profile"         "work"     "$(J 'o.profile')"
@@ -11800,6 +11800,70 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   rm -rf "$WK"
 else
   skip "a wake that worked must not report failure" "tmux or jq missing"
+fi
+
+# ── 4a10c14. a hibernated session has to show somewhere ──────────────────────
+# Hibernation shipped, twelve sessions were slept, and every one of them DISAPPEARED from the
+# grid and from the phone. Not "shown asleep" — gone. The owner's words for it were that they
+# need to show somewhere, which is the whole of the requirement.
+#   Cards were built from the live tmux list alone, so a session whose process has ended has
+# nothing to hang a card on, and the `asleep` field added for exactly this case could never be
+# reached: the row it belonged to was deleted before anything asked. The marker is a source of
+# sessions now — it holds the cwd and the conversation id written at the moment of sleeping,
+# which is everything a card needs to say what it is and a wake needs to bring it back.
+group "a hibernated session shows on the grid"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  GD="$(mktemp -d "$TEST_RUNS.$$.asleepcard.XXXXXX")"
+  export CLAUDE_FLEET_DIR="$GD/fleet"; export CLAUDE_CONFIG_DIR="$GD/cfg"
+  mkdir -p "$CLAUDE_FLEET_DIR" "$CLAUDE_CONFIG_DIR" "$GD/wt"
+  SID_A=11111111-1111-1111-1111-111111111111
+  SID_B=22222222-2222-2222-2222-222222222222
+  PDIR="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$GD/wt" | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$PDIR"
+  # TWO conversations in ONE checkout — the shape every fleet has, and the reason a slept card
+  # cannot be dated or quoted from "the newest transcript in the folder".
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"the sleeping one said this"}]},"timestamp":"2026-01-01T00:00:00.000Z"}' > "$PDIR/$SID_A.jsonl"
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a neighbour said this later"}]},"timestamp":"2026-01-02T00:00:00.000Z"}' > "$PDIR/$SID_B.jsonl"
+  touch "$PDIR/$SID_B.jsonl"                      # the neighbour is the newest
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$SID_A" "$GD/wt" 120 \
+    > "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep"
+
+  gj() { node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --json 2>/dev/null \
+         | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+             const j=JSON.parse(s); const c=(j.cards||[]).find(x=>x.name==="billing-svc");
+             let v=c; for(const k of process.argv[1].split(".")) v=(v==null)?v:v[k];
+             process.stdout.write(v===undefined?"(missing)":String(v));})' "$1"; }
+
+  # THE ROW THE FLEET WAS FAILING: no tmux session, and the card must still exist.
+  is "asleep card: it exists with no tmux session" "billing-svc" "$(gj name)"
+  is "asleep card: ...and says it is asleep"       "true"        "$(gj asleep)"
+  # `asleep` is computed on the card and --json copies a SUBSET of fields; it was not among
+  # them, so the phone — which only ever sees --json — got an ordinary card with a stale
+  # status. The field existed at both ends with nothing carrying it between.
+  is "asleep card: ...on the wire the phone reads"  "true"       "$(gj asleep)"
+  is "asleep card: ...and exited rides with it"     "false"      "$(gj exited)"
+  # Every session in a checkout shares a project directory, so "the newest transcript" is a
+  # neighbour's conversation. Seen live: seven slept cards all quoting the same message.
+  is "asleep card: it quotes its OWN conversation"  "the sleeping one said this" "$(gj msg)"
+  # The desk table prints asleep in place of the status, for the reason it rides beside it on
+  # a card: the statuses say what a RUNNING agent is doing.
+  is "asleep card: the desk table says asleep"      "yes" \
+     "$(grep -q 'billing-svc.*asleep' <<< "$(node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --plain 2>/dev/null)" && echo yes || echo no)"
+  # ...and the phone's own builder agrees, from the same field.
+  is "asleep card: the phone model agrees"          "true" \
+     "$(node -e 'import("'"$ROOT"'/web/grid.js").then(G=>process.stdout.write(String(G.cardModel({name:"billing-svc",asleep:true}).asleep)))')"
+  # A LIVE SESSION IS NOT ASLEEP even if a stale marker sits beside it — that is the shape a
+  # timed-out wake leaves, and the card must follow the process, not the file.
+  tmux -L cf-acme-web new-session -d -s billing-svc -c "$GD/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  is "asleep card: a live session is listed once"   "1" \
+     "$(node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String((JSON.parse(s).cards||[]).filter(c=>c.name==="billing-svc").length)))')"
+  tmux -L cf-acme-web kill-server 2>/dev/null
+
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$GD"
+else
+  skip "a hibernated session shows on the grid" "node or tmux missing"
 fi
 
 # ── 6b. every command is actually installed ──────────────────────────────────
