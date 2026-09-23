@@ -589,6 +589,36 @@ is('the worker answers which version it is', true,
    /type === 'version'[\s\S]{0,160}postMessage\(\{ version: VERSION \}\)/.test(JS['sw.js']));
 is('...and the client asks it', true, /askShellVersion/.test(JS['app.js']));
 
+// ── in standalone the shell is one status bar TALLER than the viewport ────
+// Measured on the device twice, and the second reading corrected the first:
+//     v40  sl759 (height: 100dvh)        v41  sl759 (position: fixed; inset: 0)
+// sl759 both times against sh812. PINNING DID NOTHING: a fixed box with inset: 0 resolves
+// against the initial containing block, which in iOS standalone IS the short layout
+// viewport. sl == ih every time — the shell filled what it was given; the viewport is what
+// is short, by exactly env(safe-area-inset-top) = 53, because the page is drawn from y=0
+// under a black-translucent bar while iOS still subtracts that bar from the height. So the
+// box is told to be taller than the viewport by that inset.
+const standaloneRules = (CSS.match(/[^\n]*height:\s*calc\(100dvh \+ env\(safe-area-inset-top\)\)[^\n]*/g) || []);
+is('standalone extends the shell by the top inset', true, standaloneRules.length >= 1);
+// BOTH SIGNALS, and this is the part a CSS-only fix gets wrong. The probe reports
+// standalone as `matchMedia(...) || navigator.standalone`, so `sa1` from the device does
+// not say WHICH was true — and iOS has honoured the legacy property while the media query
+// lagged. A media query alone would then match nothing and cost another launch to discover.
+// Verified locally with navigator.standalone forced true and the query false: the class
+// still lands and the rule still applies.
+is('...keyed on the media query', true, /@media \(display-mode: standalone\)/.test(CSS));
+is('...and on a class the client can set from either signal', true, /html\.standalone #app\.shell/.test(CSS));
+is('...which the client actually sets', true, /classList\.toggle\('standalone'/.test(JS['app.js']));
+is('...from navigator.standalone as well', true, /navigator\.standalone/.test(JS['app.js']));
+// ...and re-asked when the window changes shape, or a rotation leaves it wrong.
+is('...and again on rotation', true, /orientationchange['"]?,\s*markStandalone/.test(JS['app.js']));
+
+// The probe has to measure the screen that HAS a composer. Keyed per screen: the grid has
+// none, so the first reading came back cb0/gap0 and said nothing about the band.
+is('the geometry probe measures each screen once', true, /geoSent\.has\(where\)/.test(JS['app.js']));
+is('...naming which screen it measured', true, /api\.diag\('geo', where/.test(JS['app.js']));
+is('...and reports the two standalone signals apart', true, /'mm' \+/.test(JS['app.js']) && /'ns' \+/.test(JS['app.js']));
+
 // ── moving between screens says WHICH WAY ─────────────────────────────────
 // "add cool animations ... like getting out of a session." The screens are a stack, so the
 // one thing motion can say that a static swap cannot is the direction you went. That makes

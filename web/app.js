@@ -198,6 +198,16 @@ function lastFetchedAt() {
   catch { return Math.floor(Date.now() / 1000); }
 }
 
+// Installed, by either signal. iOS has honoured navigator.standalone since before the
+// media query existed and the two have not always agreed, so anything that depends on
+// being installed asks both — and the probe reports them SEPARATELY, so one launch says
+// which is true here instead of leaving an OR nobody can attribute.
+const mmStandalone = () => { try { return !!matchMedia('(display-mode: standalone)').matches; } catch { return false; } };
+const navStandalone = () => { try { return !!navigator.standalone; } catch { return false; } };
+function markStandalone() {
+  try { document.documentElement.classList.toggle('standalone', mmStandalone() || navStandalone()); } catch {}
+}
+
 // ── what the screen ACTUALLY measures, from the device ────────────────────
 // "still it doesnt use the full screen", in the installed app. The suspicion is that the
 // shell's `height: 100dvh` resolves SHORTER than the physical screen in iOS standalone
@@ -222,15 +232,22 @@ function lastFetchedAt() {
 // at load measures the lock screen and says nothing about the thing under suspicion.
 // Measured locally: it came back sl524 against ih844, which is the ship and two buttons,
 // not a viewport. So it retries until the shell exists and gives up rather than lying.
-let geoSent = false, geoTries = 0;
+//   ONCE PER SCREEN, NOT ONCE PER LAUNCH. The first version reported whichever shell
+// appeared first, which is the grid — and the grid has no composer, so it came back cb0
+// gap0 and said nothing about the thing the band is under. The composer only exists on the
+// chat screen, so the measurement has to be taken there too. Keyed by screen so a launch
+// that visits both sends both, and neither repeats on the 5s poll.
+const geoSent = new Set();
+let geoTries = 0;
 function reportGeometry() {
-  if (geoSent) return;
   const el = document.getElementById('app');
+  const where = S.screen;
   if (!el || !el.classList.contains('shell')) {
     if (++geoTries < 40) setTimeout(reportGeometry, 1500);
     return;
   }
-  geoSent = true;
+  if (geoSent.has(where)) return;
+  geoSent.add(where);
   try {
     const shell = el;
     const comp = document.querySelector('.composer');
@@ -246,8 +263,8 @@ function reportGeometry() {
     const r = shell.getBoundingClientRect();
     const c = comp ? comp.getBoundingClientRect() : null;
     const low = c ? c.bottom : (r ? r.bottom : 0);
-    const sa = (() => { try { return matchMedia('(display-mode: standalone)').matches || navigator.standalone ? 1 : 0; } catch { return 0; } })();
-    api.diag('geo', 'sa' + sa, 'ih' + Math.round(innerHeight), 'sh' + Math.round(screen.height),
+    const sa = (mmStandalone() || navStandalone()) ? 1 : 0;
+    api.diag('geo', where, 'sa' + sa, 'mm' + (mmStandalone() ? 1 : 0), 'ns' + (navStandalone() ? 1 : 0), 'ih' + Math.round(innerHeight), 'sh' + Math.round(screen.height),
              'sl' + Math.round(r ? r.bottom : 0), 'cb' + Math.round(c ? c.bottom : 0),
              'gap' + Math.round(innerHeight - low), 'sat' + sat, 'sab' + sab);
   } catch {}
@@ -343,7 +360,11 @@ function render() {
     app.classList.toggle('shell', shell);
     document.documentElement.classList.toggle('shell', shell);
   } catch {}
-  if (shell) markNav(app, S.screen); else navFrom = null;
+  if (shell) {
+    markNav(app, S.screen);
+    // A screen this launch has not measured yet gets measured, once it has settled.
+    if (!geoSent.has(S.screen)) { geoTries = 0; setTimeout(reportGeometry, 900); }
+  } else navFrom = null;
   // ── the Preact screens ─────────────────────────────────────────────────────────────
   // They DIFF, so this path must not empty #app first: the whole gain is that the .cards
   // node survives the 5s poll and keeps the reader's scroll position instead of being
@@ -3585,6 +3606,9 @@ addEventListener('pageshow', e => api.diag('pageshow', 'p' + (e && e.persisted ?
 addEventListener('pagehide', e => api.diag('pagehide', 'p' + (e && e.persisted ? 1 : 0)));
 addEventListener('unload', () => api.diag('unload'));
 
+markStandalone();
+addEventListener('orientationchange', markStandalone);
+addEventListener('resize', markStandalone);
 render();
 // One measurement, after layout has settled — early enough to be in the same log burst as
 // the launch, late enough that the shell has been sized.
