@@ -29,7 +29,7 @@ that still renders is a card that still looks right.
 | the grid, `nc = 1`, scrolling | the session, which is a chat | its live pane |
 |---|---|---|
 | ![grid](../docs/mobile/grid.gif) | ![session](../docs/mobile/session.gif) | ![pane](../docs/mobile/pane.gif) |
-| the card list is the one region that scrolls — the page itself never does | at rest, scrolled back through older turns, a draft in the composer, and the `⋯` sheet | as attached, then `fit`, then zoomed, then scrollback |
+| the card list is the one region that scrolls — the page itself never does | at rest, scrolled back through older turns, a draft typed into the composer, and a swipe to the next session and back | as attached, then zoomed in twice, then `fit`, then scrollback |
 
 | all nine statuses | projects | the TUI's own confirmation, and its force step |
 |---|---|---|
@@ -57,33 +57,58 @@ enrolment and no real fleet data in the frame:
 (cd web && python3 -m http.server 8899 --bind 127.0.0.1)
 ```
 
-Open it at a 390x844 viewport with `devicePixelRatio` 2, take the fixture bypass on the
-lock screen, and shoot each screen. Note that the cards are not `<button>`s and they do
-not listen for `click`: the tap handler is `pointerup` on `.card` (`app.js:1083`), guarded
-by a movement slop and a long-press timer, so a driver that only dispatches `click` selects
-a card and never opens it. Downscale the 2x captures to the 390-wide convention, and build
-each GIF from its frames with the concat demuxer, a `duration` per frame — the screens are
-static between interactions, so 5fps is enough, and `stats_mode=diff` is what keeps a dark
-UI from banding. The grid's loop ping-pongs back to the top so it reads as a scroll rather
-than a jump cut:
+Open it at a 390x844 viewport, take the fixture bypass on the lock screen, and shoot each
+screen. Note that the cards are not `<button>`s and they do not listen for `click`: the tap
+handler is `pointerup` on `.card` (`wire()` in `app.js`), guarded by a movement slop and a
+long-press timer, so a driver that only dispatches `click` selects a card and never opens
+it. A swipe and a long-press have to be *held and moved* for the same reason — the client
+tells them apart from the pointer track, not from the event name.
+
+CLEAR THE SERVICE WORKER BEFORE THE FIRST NAVIGATION. It is cache-first, so a shell left
+from an earlier run serves the fixtures it was built with and the recording looks perfect
+while documenting data that is gone. Unregister, delete the caches, reload, and then read
+`caches.keys()` back to confirm which shell actually answered.
+
+Shoot at `deviceScaleFactor` 1 — the convention is 390 wide, and capturing at 2x only to
+downscale softens terminal text that is already pixel-aligned. 5fps is enough because the
+screens are static between interactions, and `stats_mode=diff` is what keeps a dark UI from
+banding.
+
+`dither=none`, which is a change: this UI is flat blocks of a dozen terminal colours with
+no gradient to band, so ordered dithering only adds noise that no GIF can compress.
+Measured on the same 82 frames of the demo walk — bayer 558kB, none 421kB, and the frames
+are indistinguishable. Every file here is under what it replaced.
 
 ```bash
-ffmpeg -f concat -safe 0 -i list.txt -filter_complex \
-  "fps=5,scale=390:-1:flags=lanczos,split[a][b];\
-   [a]palettegen=max_colors=128:stats_mode=diff[p];\
-   [b][p]paletteuse=dither=bayer:bayer_scale=3" \
+ffmpeg -framerate 5 -i frames/f%04d.png \
+  -vf "palettegen=max_colors=128:stats_mode=diff" palette.png -y
+ffmpeg -framerate 5 -i frames/f%04d.png -i palette.png \
+  -lavfi "paletteuse=dither=none:diff_mode=rectangle" \
   -loop 0 docs/mobile/phone-demo.gif -y
 ```
 
 ## Running it
 
-Zero dependencies, no build step, no `npm install` — plain HTML, CSS and ES modules that
-any static server can serve:
+**Serving it needs nothing.** Every file under `web/` is committed ready to serve —
+including the two that are built — so a clone, an `npm pack` tarball and the staged
+runtime are all servable by any static server, with no toolchain and no install step:
 
 ```bash
 cd web && python3 -m http.server 8000     # or any static server
 open http://localhost:8000
 ```
+
+**Changing `web/src/` needs a build.** One screen is Preact now (see *A build step, for one
+screen* below); the rest of the client is still plain ES modules edited in place.
+
+```bash
+pnpm install         # once: 15 packages, vite + preact
+pnpm run build       # web/src/screens.jsx -> web/screens.js + web/preact.js
+```
+
+`bin/cf-sync` runs that build before it copies anything, so deploying to the runtime cannot
+skip it — and refuses to copy at all if it cannot, rather than putting a stale screen
+behind a "synced runtime" line.
 
 `localhost` matters if you want the passkey: WebAuthn needs a secure context, and
 `http://` on a LAN or tailnet IP is not one. The app says so rather than failing
@@ -133,7 +158,10 @@ dismiss.
 |---|---|
 | `index.html` | the shell — small on purpose, it is what a cold offline open paints |
 | `grid.js` | the cards, as strings. Mirrors `cardLines`/`newCardLines`/`freeCardLines`/`boxCard`/the counts header. No DOM, no fetch |
-| `app.js` | the three screens, the four gestures, the verbs and the confirmations |
+| `app.js` | the three screens, the four gestures, the verbs and the confirmations. Hand-written, served as written |
+| `src/screens.jsx` | **source.** The Projects screen and the grid, as Preact components. The seam between what they draw and what `app.js` still draws is written out at the top of the file |
+| `screens.js` | **built** from `src/screens.jsx` by `vite.config.mjs`. Committed, unminified, stable filename. Was `projects.js` up to client v28, when it held one screen |
+| `preact.js` | **built.** The dependency chunk, split out so `screens.js` stays readable — npm ships preact pre-minified and inlining it would bury the screens in it |
 | `api.js` | **the only file that talks to the network**, the fixture backend, and the probe that decides between them |
 | `ansi.js` | the pane, as HTML: SGR escapes → coloured spans, cells → 1ch boxes. Pure, no DOM, no fetch |
 | `md.js` | an assistant's turn, as DOM: bold, italic, code, fences, links, lists, headings. `parse()` is pure; `toDom()` is the only part that needs a document, and it builds NODES — the one attribute it writes is an href it has already checked |
@@ -141,6 +169,54 @@ dismiss.
 | `sw.js` | offline: cache-first for the app, network-first with fallback for `/api/*` — and the push handler, which always shows a notification because a worker that does not can lose the subscription |
 | `fixtures/` | §4 payloads, and the projects/checkouts/settings/session/pane reads |
 | `icons/make-icons.mjs` | rasterises the grid's own `SHIP` sprite into the home-screen icons |
+
+## A build step, for one screen
+
+The client was 5,688 lines of hand-rolled ES modules with no framework, and the bugs it
+produced were UI-complexity bugs: a scroll position destroyed by a clamp on rebuild, a
+composer that grew under the on-screen keyboard until `send` was off the bottom, a phone
+running old code with the new bytes already in its cache. A component model and real state
+management are the answer to that class — and a big-bang rewrite is not, because this file
+is mostly a record of fixes that only reproduce on a real device, and a rewrite would spend
+the debugging and rediscover it on a phone.
+
+So: **Vite + Preact, static output, ported one screen at a time.** Projects came first;
+the grid (the sessions list) followed, and for a reason worth recording because it is the
+first time the component model paid for itself rather than merely being tidier. The grid
+rebuilt its scrolling container on every render, and `render()` runs on the 5s poll — so a
+reader who scrolled the sessions list was returned to the top every five seconds, which is
+exactly how it was reported from a real iPhone. A fresh element starts at `scrollTop` 0,
+and the scroll memory that tried to rescue the position afterwards had to beat layout to do
+it. Preact keeps the node, so there is nothing to rescue. **That bug could not be fixed in
+the old renderer; it could only be raced.** The session screen, the pane, the lock screen
+and every sheet are still the same hand-written `el()` calls they were.
+
+**Both ported screens live in one bundle**, `web/screens.js`, because they share six
+components (`Btn`, `Icon`, `VerbBtn`, `Header`, `ConfirmBar`, `CardList`). One entry per
+screen would either duplicate all six or need a third shared chunk and a third name in
+`SHELL`, to save nothing — the phone fetches both in the same session anyway.
+
+**No content hashing in the output filenames, deliberately.** `sw.js` precaches a
+hand-written `SHELL` list and carries a `CLIENT-HASH` pinned to the bytes of everything in
+it. Hashed names would make that list build-generated and re-pinned on every build, which
+turns a guard that catches "you changed the client and forgot to bump `VERSION`" into a
+line somebody re-pastes without reading. Cache-busting is `VERSION`'s job and always was.
+
+**No minification, in any mode.** Every phone-only bug here was found by opening the file
+the device fetched and reading it. That is the one thing a build takes away, so it is not
+taken: `web/screens.js` is the source laid out flat. `preact.js` is split out rather than
+inlined for the same reason — npm ships preact pre-minified, and inlining it would bury the
+screens in 17 kB of single-letter variables.
+
+**What it costs, and it is a real cost.** Editing `web/src/` no longer shows up by
+reloading — there is a build between you and the phone, and a deploy is now
+`pnpm run build` → `cf-sync` → swipe the PWA away and relaunch, where it used to be
+`cf-sync` and a relaunch. On a device that is one more place to be out of date and one
+more thing to forget. Three things push back on that: `cf-sync` runs the build itself and
+**refuses to copy anything if it cannot**, so the runtime can never be a stale screen under
+a success line; `test/run.sh` rebuilds and compares bytes, so a source edited without a
+rebuild is a red row rather than a surprise; and everything not yet ported still has no
+build between you and it at all.
 
 ## Screens and gestures
 
@@ -388,12 +464,22 @@ a folded `unknown`, a swapped counts clause, a reworded confirmation, a fixture 
 of the precache, a CDN link in the HTML, a same-origin default put back to fixtures, a
 registration that forgets the enrolment code, and a fixture passkey counted as a server's.
 
-`pwa-render.mjs` builds a ~60-line DOM and **imports `app.js` for real**, because
+`pwa-render.mjs` builds a small DOM and **imports `app.js` for real**, because
 `node --check` proves syntax and not that it runs — this file has already been blank once
 from a ReferenceError in a version that parsed perfectly (see the boot block's comment).
 It reads back the painted text: which origin the lock screen names, that server mode
 offers *enrol this phone* and hides the fixture bypass, and that the header says
 `⚠ fixtures` once you are past the lock.
+
+That DOM grew when the Projects screen became Preact, and it is worth saying why rather
+than leaving it looking like drift. Its rule was "anything it does not implement, `app.js`
+is not allowed to reach for" — a deliberately small surface, so that a reach for something
+exotic showed up as a crash. A reconciler needs more than an append-only app does: it
+moves a node that is already somewhere, inserts before a sibling, removes one by name, and
+patches a text node's `data`. Those are modelled rather than stubbed, for the reason
+`scrollTop` is modelled — ordering is exactly what can go wrong, and a stub that appended
+everything would put the confirm bar under the verbs and still report a screen. The rule
+now holds for `app.js` and not for Preact, which is a real if small loss.
 
 `pwa-origin.mjs` wants a real `fleet-serve` on loopback (`run.sh` starts one and passes
 its base), because the signal the client leans on is a **response nobody wrote down** —

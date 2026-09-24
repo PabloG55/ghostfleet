@@ -35,7 +35,9 @@
 #                  (default 20; 0 parks on the first reading). The status bar's figure
 #                  is not live — after an account/team switch every pane keeps
 #                  reporting the OLD window until Claude next repaints it.
-#   --mem-level L  park when kern.memorystatus_vm_pressure_level reaches L
+#   --mem-level L  act when kern.memorystatus_vm_pressure_level reaches L
+#   --swap-pct P   ...or when swap is P% used (default 90), which moves sooner than the
+#                  kernel's own level does
 #                  (1 normal, 2 warning, 4 critical; default 2)
 #   --proc-pct P   park when the process table is P% of kern.maxproc (default 60)
 #   --no-resource  budget ceiling only — do not watch machine resources
@@ -54,7 +56,7 @@ INTERVAL=60; PAUSE_AT=98; RESUME=90; ONCE=0; DRY=0; CONFIRM=20
 # resumed, and re-parked them every 90 seconds for as long as that lasted.
 #   Level 4 is the signal the jetsam cascade actually escalates through, and it is what this
 # check was written for. Level 2 as the trigger turned a safety net into a stoppage.
-MEM_LEVEL=4; PROC_PCT=60; RESOURCE=1
+MEM_LEVEL=4; PROC_PCT=60; RESOURCE=1; SWAP_PCT=90
 COOLDOWN=900                          # min seconds between macOS "budget" alerts (anti-spam)
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -64,6 +66,7 @@ while [ $# -gt 0 ]; do
     --interval) INTERVAL="${2:?}"; shift 2 ;;
     --confirm)  CONFIRM="${2:?}";  shift 2 ;;
     --mem-level)  MEM_LEVEL="${2:?}"; shift 2 ;;
+    --swap-pct)   SWAP_PCT="${2:?}"; shift 2 ;;
     --proc-pct)   PROC_PCT="${2:?}";  shift 2 ;;
     --no-resource) RESOURCE=0; shift ;;
     --once)     ONCE=1; shift ;;
@@ -266,10 +269,10 @@ release_gov_parked() {
 # Absent counters mean UNKNOWN, NOT ZERO, and unknown must never trip the ceiling — a
 # governor that parked the fleet because a sysctl was missing would be worse than one
 # that never parked it at all. Linux has no kern.maxproc, so pid_max stands in.
-RES_LEVEL=1; RES_PROCS=0; RES_PROC_PCT=0; RES_WHY=""
+RES_LEVEL=1; RES_PROCS=0; RES_PROC_PCT=0; RES_WHY=""; RES_SWAP_WHY=""
 resources() {
   local maxproc=""
-  RES_LEVEL=1; RES_PROCS=0; RES_PROC_PCT=0; RES_WHY=""
+  RES_LEVEL=1; RES_PROCS=0; RES_PROC_PCT=0; RES_WHY=""; RES_SWAP_WHY=""
 
   # 1 normal / 2 warning / 4 critical — the kernel's own jetsam signal
   RES_LEVEL="$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)"
@@ -281,7 +284,34 @@ resources() {
   case "$maxproc" in ''|*[!0-9]*) maxproc=0 ;; esac
   [ "$maxproc" -gt 0 ] && RES_PROC_PCT=$(( RES_PROCS * 100 / maxproc ))
 
+  # ── SWAP, BECAUSE THE PRESSURE LEVEL ALONE IS A LAGGING SIGNAL ──────────────
+  # Measured on the machine that asked for this: 39.6 of 40.0 GB of swap in use, 169 MB of
+  # RAM unused, load in the twenties — and kern.memorystatus_vm_pressure_level still reading
+  # 2, not 4. Waiting for the kernel to call it critical means acting after the machine is
+  # already unusable, which is where the eighty-minute OOM fight in this file's header came
+  # from. Swap percentage says the same thing earlier and in a number a person recognises.
+  RES_SWAP_PCT=0
+  swapline="$(sysctl -n vm.swapusage 2>/dev/null)"
+  if [ -n "$swapline" ]; then
+    RES_SWAP_PCT="$(printf '%s' "$swapline" | awk '{
+      for (i=1;i<=NF;i++) { if ($i=="total") t=$(i+2)+0; if ($i=="used") u=$(i+2)+0 }
+      if (t>0) printf "%d", u*100/t; else print 0 }')"
+  elif [ -r /proc/meminfo ]; then
+    RES_SWAP_PCT="$(awk '/^SwapTotal:/{t=$2} /^SwapFree:/{f=$2} END{ if (t>0) printf "%d", (t-f)*100/t; else print 0 }' /proc/meminfo)"
+  fi
+  case "$RES_SWAP_PCT" in ''|*[!0-9]*) RES_SWAP_PCT=0 ;; esac
+
   [ "$RES_LEVEL" -ge "$MEM_LEVEL" ] && RES_WHY="memory pressure level ${RES_LEVEL}"
+  # ── SWAP IS ITS OWN SIGNAL AND DELIBERATELY NOT PART OF RES_WHY ─────────────
+  # RES_WHY does two jobs: it names the ceiling, and a non-empty one SUPPRESSES the budget
+  # tick for the pass. Folding swap into it made both fire together, and on a machine sitting
+  # at 96% swap — the one that asked for this feature — that is permanent: the fleet would
+  # stop managing its token budget for as long as the laptop was swapping, which is exactly
+  # when it can least afford to. Measured as seven pre-existing governor rows going red.
+  #   So swap gets its own name. It is enough to start hibernating, which gives memory back,
+  # and it is not enough to stop the budget ceiling from working.
+  RES_SWAP_WHY=""
+  [ "$RES_SWAP_PCT" -ge "$SWAP_PCT" ] && RES_SWAP_WHY="swap ${RES_SWAP_PCT}%"
   if [ "$RES_PROC_PCT" -ge "$PROC_PCT" ]; then
     RES_WHY="${RES_WHY:+$RES_WHY, }process table ${RES_PROC_PCT}% (${RES_PROCS}/${maxproc})"
   fi
@@ -296,6 +326,20 @@ resources() {
 resource_tick() {
   local w="" active=() n=0 fp=""
   [ "$RESOURCE" = 1 ] || return 1
+
+  # SWAP ALONE: hibernate, then return 1 so the budget ceiling still gets its pass. This is
+  # the branch that fires on a laptop deep in swap but below the kernel's own pressure level
+  # — measured at 39.6/40.0 GB used with the level still reading 2, which is to say the
+  # kernel calls it critical only once the machine is already unusable.
+  if [ -z "$RES_WHY" ] && [ -n "${RES_SWAP_WHY:-}" ]; then
+    log "resources: ${RES_SWAP_WHY} -> hibernating idle worker(s), oldest first"
+    if [ "$DRY" != 1 ]; then
+      "$BIN_DIR/fleet-hibernate" -s "$SOCK" --pressure 2>&1 | while IFS= read -r line; do log "  $line"; done
+    else
+      log "  (dry run) would: fleet-hibernate -s $SOCK --pressure"
+    fi
+    return 1
+  fi
 
   if [ -f "$FLEET_DIR/$SOCK.resource-off" ]; then
     for w in $(workers_newest_first); do
@@ -331,17 +375,25 @@ resource_tick() {
       n=${#active[@]}
     fi
     if [ "$n" -gt 0 ]; then
-      log "resources: ${RES_WHY} -> parking ALL ${n} worker(s)"
-      notify "machine under load (${RES_WHY}) — parked ${n} worker(s)"
-      for w in "${active[@]}"; do
-        log "  park $w"
-        fp="$(pct_fingerprint "$w")"
-        if [ "$DRY" != 1 ] && "$BIN_DIR/fleet-pause" -s "$SOCK" "$w" >/dev/null 2>&1; then
-          printf 'governor-resource %s\n' "$(date +%s)" > "$FLEET_DIR/$SOCK.$w.parked"
-          printf '%s' "$fp" > "$(stale_f "$w")" 2>/dev/null
-          inbox "$w" parked "governor: ${RES_WHY} — machine ceiling, parked all"
-        fi
-      done
+      # ── UNDER MEMORY PRESSURE, PARKING IS THE WRONG VERB ───────────────────
+      # Parking interrupts the turn and leaves the process up, so it answers a BUDGET
+      # ceiling exactly right and a MEMORY ceiling not at all: measured, a parked session
+      # holds the same ~350 MB it held while working, and 64 of them held 21.75 GB on a
+      # machine with 169 MB of RAM unused. The governor had the trigger wired to the one
+      # action that cannot relieve it.
+      #   So this path hibernates — ends the process, keeps the conversation — oldest-idle
+      # first, and stops as soon as the kernel says the pressure is gone. The budget path
+      # below still parks, because tokens are what parking is for.
+      #   It is a no-op until somebody switches hibernation on; fleet-hibernate refuses
+      # --apply otherwise and says so, which is the behaviour wanted on a machine where
+      # ending the wrong process costs a day's work.
+      log "resources: ${RES_WHY} -> hibernating idle worker(s), oldest first"
+      notify "machine under load (${RES_WHY}) — hibernating idle sessions"
+      if [ "$DRY" != 1 ]; then
+        "$BIN_DIR/fleet-hibernate" -s "$SOCK" --pressure 2>&1 | while IFS= read -r line; do log "  $line"; done
+      else
+        log "  (dry run) would: fleet-hibernate -s $SOCK --pressure"
+      fi
     else
       log "resources: ${RES_WHY} — all workers parked, holding for recovery"
     fi
@@ -470,7 +522,7 @@ tick() {
 }
 
 modelabel="ACTIVE (parks all at ceiling)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"
-reslabel="mem-level>=${MEM_LEVEL}, procs>=${PROC_PCT}%"; [ "$RESOURCE" = 1 ] || reslabel="off"
+reslabel="mem-level>=${MEM_LEVEL}, swap>=${SWAP_PCT}%, procs>=${PROC_PCT}%"; [ "$RESOURCE" = 1 ] || reslabel="off"
 log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<${RESUME}%; resources ${reslabel}; interval ${INTERVAL}s"
 # The machine ceiling runs FIRST and short-circuits: with the box itself under threat,
 # a token reading is beside the point, and letting the budget path also act on the same

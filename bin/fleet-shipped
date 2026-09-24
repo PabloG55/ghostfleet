@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# fleet-shipped [-s SOCKET] <session>
+#
+# Has this worker FINISHED a task, and has that task SHIPPED? Exit 0 and print one short
+# reason if so; exit 1, silently, otherwise — including every case it cannot tell.
+#
+# WHY IT EXISTS. A worker that finished a task carries all of it into the next one: the
+# files it read, the approach it settled on, the dead ends it half-remembers. Handing it a
+# second, unrelated brief is how a fleet gets work shaped by a task nobody asked about any
+# more. The FOLDER is safe to reuse (fleet-spawn --reuse starts a new conversation in it);
+# the SESSION is not. fleet-send asks this before it dispatches, and fleet-inbox asks it
+# about every live session so the lead is told which ones to fleet-stop --reclaim.
+#
+# "Shipped" is deliberately NARROW, because a yes refuses a send. All of these must hold:
+#   * the session is in a LINKED worktree — a main checkout is a lead's home, not a task
+#   * it has finished a turn SINCE IT STARTED: a `done` row in the inbox no older than
+#     the tmux session. The name is all a row carries, and a new session reusing an old
+#     name must not inherit its predecessor's finished task
+#   * its branch has NO OPEN PR — an open PR is the same task still in flight, and a red
+#     CI row or a review note belongs in it
+#   * and EITHER the branch's PR merged, OR the tree is clean with no commits beyond the
+#     integration branch (origin/HEAD) — work that is nowhere but in this session's head.
+#
+# The failure direction matters. A wrong yes blocks a legitimate send (recoverable:
+# --anyway); a wrong no lets a contaminated one through, which is where we were before.
+# So every "could not tell" — no inbox, no gh, no PR data, no remote — answers no.
+set -uo pipefail
+
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+_t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -s) SOCK="${2:-}"; shift 2 ;;
+    *)  break ;;
+  esac
+done
+SESSION="${1:-}"
+[ -n "$SOCK" ] && [ -n "$SESSION" ] || exit 1
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+US=$'\x1f'
+
+cwd="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+[ -n "$cwd" ] || exit 1
+wt="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || exit 1
+[ "$(git -C "$wt" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null)" ] || exit 1
+
+created="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{session_created}' 2>/dev/null)"
+case "$created" in ''|*[!0-9]*) exit 1 ;; esac
+awk -F'\t' -v s="$SESSION" -v c="$created" '$2==s && $3=="done" && $1+0>=c+0 {f=1} END{exit !f}' \
+  "$FLEET_DIR/$SOCK.inbox" 2>/dev/null || exit 1
+
+br="$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null)" || br=""
+if [ -n "$br" ]; then
+  prs="$("$(dirname "$0")/fleet-merged" --prs "$wt" 2>/dev/null)"
+  st="$(printf '%s\n' "$prs" | awk -F"$US" -v b="$br" '$1==b && $3=="OPEN"{o=1} $1==b && $3=="MERGED"{m=$2} END{if(o)print "OPEN"; else if(m!="")print "MERGED " m}')"
+  case "$st" in
+    OPEN)     exit 1 ;;
+    MERGED*)  echo "its PR #${st#MERGED } merged"; exit 0 ;;
+  esac
+fi
+
+[ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || exit 1
+base="$(git -C "$wt" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" || exit 1
+[ "$(git -C "$wt" rev-list --count "$base..HEAD" 2>/dev/null || echo x)" = 0 ] || exit 1
+echo "clean and even with $base"

@@ -113,7 +113,7 @@ function scriptFor({ observe, surface }) {
   };
 }
 
-async function scenario({ observe, slot, hooks, launcher = true, env = {} }) {
+async function scenario({ observe, slot, hooks, launcher = true, env = {}, nonTurnFirst = false }) {
   const world = makeWorld();
   try {
     const surface = path.join(world.cwd, 'web', 'app.js');
@@ -129,6 +129,7 @@ async function scenario({ observe, slot, hooks, launcher = true, env = {} }) {
       root: ROOT, world, prompt: 'make the send button fit and report', slot, launcher,
       hooks: hooks ? hooks({ world, recorder }) : { Stop: hookEntry(recorder, HOOK) },
       env: { CLAUDE_FLEET_SOCK: 'cf-acme-api', ...env },
+      nonTurnFirst,
       script: scriptFor({ observe, surface }),
     });
     let payloads = [];
@@ -179,11 +180,19 @@ is('a WORKER doing exactly the same thing gets no line', 'no observe-check line'
 // generated (1 of 1 through bare `claude`, 0 of 1 through the launcher). Doubly dormant is the
 // worst kind of trap: a fixture keyed on request order passes every test today and mis-scripts
 // the day somebody needs either of those different, by writing the surface from the wrong step.
-const withTitleCall = await scenario({ observe: false, slot: 'master', launcher: false,
+//   AND IT NO LONGER WAITS FOR CLAUDE CODE TO MAKE ONE. The title call was the vehicle, not
+// the property. It stopped arriving on 2.1.278 and this row went red three runs running with
+// nothing in the repo changed — and a test that can only pass while an upstream side effect
+// happens to occur will eventually report a fault nobody introduced. fixture-session.mjs now
+// sends a tools-less request itself, FIRST, before the child is spawned, which is exactly where
+// the title call used to land. The property asserted is unchanged; the proof no longer depends
+// on anybody else's behaviour.
+const withNonTurn = await scenario({ observe: false, slot: 'master', launcher: false,
+  nonTurnFirst: true,
   env: { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: undefined, CLAUDE_FLEET_SLOT: 'master' } });
-is('a non-turn request does not consume a scripted turn', 'a title call arrived, and the turn still warned',
-   `${withTitleCall.auxCalls > 0 ? 'a title call arrived' : 'no title call arrived'}, and the turn ${
-     withTitleCall.verdicts.includes('warn') ? 'still warned' : 'did not warn'}`);
+is('a non-turn request does not consume a scripted turn', 'the non-turn request arrived, and the turn still warned',
+   `${withNonTurn.auxCalls > 0 ? 'the non-turn request arrived' : 'no non-turn request arrived'}, and the turn ${
+     withNonTurn.verdicts.includes('warn') ? 'still warned' : 'did not warn'}`);
 
 // ── Q1: a Stop hook CAN block — measured, and deliberately unused ────────
 // A TEST-ONLY hook, not the shipped one. The shipped behaviour must not depend on this answer;

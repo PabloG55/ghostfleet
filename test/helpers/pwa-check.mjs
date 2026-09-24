@@ -43,7 +43,15 @@ const api = await import(new URL('../../web/api.js', import.meta.url).href);
 
 const HTML = read('index.html');
 const CSS = read('app.css');
-const JS_FILES = ['app.js', 'api.js', 'grid.js', 'passkey.js', 'sw.js'];
+// EVERY .js THE BROWSER LOADS, which since the build step includes two files nobody wrote
+// by hand: screens.js is vite's output for the two ported screens (Projects and the grid)
+// and preact.js is the dependency chunk beside it. They are listed here rather than left out because every rule
+// below is about what the PHONE fetches, not about what a human typed — a bundle that
+// reached for a CDN, or that shipped without being precached, would be exactly as dead on
+// the tailnet as a hand-written file doing the same thing. The list is spelled out rather
+// than globbed for the reason the SHELL list is: a new file in web/ should have to be
+// thought about once, here, and `readdirSync` would silently adopt anything that appeared.
+const JS_FILES = ['app.js', 'api.js', 'grid.js', 'passkey.js', 'sw.js', 'screens.js', 'preact.js'];
 const JS = Object.fromEntries(JS_FILES.map(f => [f, read(f)]));
 
 // ── 1. nothing loads from off this machine ────────────────────────────────
@@ -71,10 +79,78 @@ is('every imported module exists', '',
 // because breaking it is so natural: a screen that fetches its own thing works
 // perfectly against fixtures and then reaches for a URL that does not exist. (sw.js is
 // exempt: intercepting fetch is what a service worker IS.)
-for (const f of ['app.js', 'grid.js', 'passkey.js']) {
+// screens.js is in this list too. The ported screens are handed their data as props and
+// must stay that way: a component that fetched its own would work perfectly against
+// fixtures and then reach for a URL api.js knows how to resolve and it does not.
+for (const f of ['app.js', 'grid.js', 'passkey.js', 'screens.js']) {
   is(`${f} does not fetch directly`, 0, (JS[f].match(/\bfetch\(/g) || []).length);
 }
 is('api.js is the file that does', true, (JS['api.js'].match(/\bfetch\(/g) || []).length > 0);
+
+// ── 1b. the build, and the three ways a build step rots a client ──────────
+// web/ has one built file (screens.js, holding both ported screens) and one dependency
+// chunk (preact.js). Everything else is still served as written. These guard the properties
+// that make that survivable; the honesty of the output itself — that it was rebuilt from
+// the source beside it — cannot be checked without running vite, so test/run.sh runs that
+// separately and SKIPS with a reason where the toolchain is absent.
+const SRC = path.join(WEB, 'src');
+const JSX_PATH = path.join(SRC, 'screens.jsx');
+is('the ported screens ship their source', true, fs.existsSync(JSX_PATH));
+// READ THROUGH A FALLBACK, so a missing source is the red row above rather than an
+// exception here. A helper that dies emits NO rows, and a group that prints nothing looks
+// exactly like one that passed — which is why test/run.sh puts a floor under the count.
+// Better still not to need the floor: the row that names the problem should be the one
+// that fires.
+const JSX = fs.existsSync(JSX_PATH) ? fs.readFileSync(JSX_PATH, 'utf8') : '';
+
+// THE OUTPUT IS STILL READABLE, which is the one thing a build step takes away and the
+// reason this one is configured not to. Every phone-only bug in this repo was found by
+// opening the file the device fetched and reading it; if esbuild ever starts mangling
+// these names, a stack trace off a phone stops naming anything you can search for.
+// Asserted on names the SOURCE defines, so it cannot pass by matching preact's own code.
+// BOTH SCREENS ARE NAMED HERE, and GridScreen is the one that matters most: it is the
+// screen this bundle gained, and a build that emitted only what was already there would
+// otherwise pass every other row in this file — the output parses, it is served, it
+// precaches and it hashes perfectly. That is not hypothetical, it is the measured failure
+// this repo carries a scar for (`✓ built in 13ms` over 14.8 kB of preact and no screen).
+is('the built screens keep their names', '',
+   ['ProjectsScreen', 'GridScreen', 'CardScreen', 'CardList', 'CountStrip', 'ConfirmBar', 'ProfileTabs']
+     .filter(n => !new RegExp(`function ${n}\\(`).test(JS['screens.js'])).join(','));
+
+// ...AND grid.js IS NOT IN IT TWICE. The bundler will happily inline an imported module,
+// and a second copy of grid.js is a second answer to "how many cells is this glyph" — the
+// split cells() and the pane view exist to prevent. vite.config.mjs marks it external; this
+// is the assertion that the marking still takes, because when it silently stopped taking
+// the build exited 0 and said "✓ built in 13ms" over the top of it.
+is('the bundle imports grid.js rather than copying it', true,
+   /from\s*['"]\.\/grid\.js['"]/.test(JS['screens.js']));
+// THE STRONGER VERSION OF THIS ROW IS NOT HERE, and that is deliberate. "...and the bundle
+// defines none of grid.js's card geometry" belongs beside this one and was written here
+// first — but the ported screen imports only clockLabel, so the tree-shaker removes the
+// card functions whether the externals plugin works or not, and the row was green against
+// every break I could invent. A row that cannot fail is the thing this repo keeps writing
+// down, and being written for a future screen does not save it: nothing would tell the
+// person who adds that screen to go back and check it had started working.
+//   So it lives in test/run.sh instead, where it BUILDS a probe entry that imports
+// projectCard and asserts on that — a condition the check constructs for itself, today,
+// rather than one it waits for. It needs vite, so it skips where the toolchain is absent,
+// which is the honest trade for a row that can actually go red.
+
+// THE ONE RULE THAT EXISTS TWICE, AND IT IS NOT GOING AWAY. A partial port duplicates the
+// button's "key letter stays in the label" convention — screens.jsx's Btn() draws it for the
+// two ported screens and app.js's btn() draws it everywhere else. A duplicated rule drifts,
+// and this one drifts INVISIBLY: `⏎ open` would still render, just without the bold key, and
+// nobody photographs a footer. So the two spellings are compared rather than trusted.
+//   THE PREVIOUS VERSION OF THIS COMMENT SAID PORTING THE GRID WOULD DELETE app.js's COPY
+// AND THIS ROW WITH IT. That was wrong, and worth recording rather than quietly correcting:
+// btn()'s callers were never mostly the grid. They are the ~40 sheets, the lock screen, the
+// pane's zoom row, the composer and the session bar — none of which is a card screen, and
+// none of which this port touched. Only header() actually died. A prediction about which
+// code a refactor will delete is worth checking against `grep -c` before it is written
+// down, because the next person reads it as a plan.
+const keyRuleApp = /const m = \/\^\(\\S\+\) \(\.\+\)\$\/\.exec\(label\);[\s\S]{0,160}?m\[1\]\.length <= 2/.test(JS['app.js']);
+const keyRuleJsx = /VERB = \/\^\(\\S\+\) \(\.\+\)\$\//.test(JSX) && /\[\.\.\.m\[1\]\]\.length <= 2/.test(JSX);
+is('the verb-key rule is the same in both renderers', true, keyRuleApp && keyRuleJsx);
 
 // ── 2. installable, and offline-usable ────────────────────────────────────
 const man = JSON.parse(read('manifest.webmanifest'));
@@ -155,10 +231,43 @@ is('the bottom inset can collapse for the keyboard', true,
 // scrollbar. Safari pans to reveal a focused field by itself; a pan that ends is survivable
 // where a layout that never recovers is not.
 //   So these fail if anyone reintroduces it, which is the only reason they exist.
-is('the shell height is dvh, not the visual viewport', true,
-   /#app\.shell \{\s*height: 100vh; height: 100dvh;/.test(CSS));
+//   THIS ROW USED TO PIN THE LITERAL `height: 100vh; height: 100dvh;`, and the premise
+// changed rather than the coverage being dropped. Its own paragraph above says what it is
+// really for: nothing may drive this height from visualViewport. dvh was the answer to that
+// when it was written; the shell is `position: fixed; inset: 0` now, because the device
+// measured dvh resolving 53pt short of the physical screen in standalone (ih759 vs sh812).
+// Both answers satisfy the rule this row exists to enforce, so it asks the rule — and the
+// two --vvh rows below, which are the sharp end of it, are untouched.
+is('the shell height is not driven by the visual viewport', false,
+   /visualViewport[^\n]*height/.test(JS['app.js'].replace(/\/\/[^\n]*/g, '')));
 is('...and nothing drives that height from visualViewport', false, /--vvh/.test(CSS));
 is('...and the client never writes a --vvh at all', false, /--vvh/.test(JS['app.js']));
+
+// ── the bottom inset is owed ONCE ─────────────────────────────────────────
+// Reported as a band of unused space above the bottom of the screen. #app ends in
+// calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px), box-sizing is border-box and
+// the shell is height: 100dvh — so every child's box ALREADY stops that far above the
+// physical bottom. A child that adds the inset again spends it twice; the card list did,
+// which came to 22px + 2 x inset of scrollable nothing after the last card.
+//
+// STRUCTURAL, BECAUSE NO ENGINE HERE CAN SHOW IT. env(safe-area-inset-*) is 0 on every
+// desktop browser and in headless Chrome, so the bug and the fix render pixel-identical to
+// every instrument this suite has — viewport-check included. The only thing that can tell
+// them apart is a device with a home indicator, which CI does not have. So the rule is
+// counted in the stylesheet instead.
+const css = CSS;
+const bottomInsetRules = css.split('\n')
+  .filter(l => /env\(safe-area-inset-bottom\)/.test(l) && !/^\s*\*/.test(l) && !/^\s*\/\*/.test(l));
+is('the bottom inset is declared where it is owed', 2, bottomInsetRules.length);
+// #app is the one that owns it for the whole shell...
+is('...once on #app itself', 1, bottomInsetRules.filter(l => /--kb-inset/.test(l)).length);
+// ...and the only other is the sheet, which is an overlay OUTSIDE #app's padding box and
+// therefore owes its own. A third would be a child paying twice.
+is('...and once on the sheet, which is not inside it', 1,
+   bottomInsetRules.filter(l => !/--kb-inset/.test(l)).length);
+// The row that goes red if a shell CHILD starts re-adding it.
+is('no shell child re-adds the bottom inset', 0,
+   bottomInsetRules.filter(l => /#app\.shell\s*>/.test(l)).length);
 // The keyboard is still DETECTED, because the collapsing bottom inset above needs to know.
 // Detection only — one padding, no height, no scrolling.
 is('the keyboard is still detected for the inset', true,
@@ -184,7 +293,21 @@ is('...measured against the visual viewport, not the URL bar', true, /max-height
 // at 30px, the row needed 406px of which `chat|pane` alone was 231.
 is('the session bar\'s chrome does not scale with the text', true,
    /\.sbar button \{[^}]*font-size: 14px/.test(CSS) && /\.sbar > \.seg button \{ font-size: 13px; \}/.test(CSS));
-is('...and the row wraps rather than pushing a control off', true, /\.sbar \{ flex-wrap: wrap; \}/.test(CSS));
+// ...AND THE ROW NO LONGER WRAPS, WHICH IS THE STRONGER FORM OF THE SAME PROMISE. This
+// asserted `flex-wrap: wrap`, on the reasoning that a row which wraps can never push a
+// control off the screen. True, and it wrapped at EVERY size rather than as a last resort:
+// a flex container that may wrap prefers wrapping to shrinking, so the session header took
+// three rows and 80px with the ⋯ alone on the last one — 60px of an 844px screen for one
+// button. The safety net was load-bearing furniture.
+//   Nowrap plus a single shrinkable child is the promise kept properly: `.who` has
+// `min-width: 0` and gives way, every other child is `flex: 0 0 auto` at a PINNED font size
+// (the row above), so the fixed width is a constant that does not move with Dynamic Type.
+// What used to be argued from a wrap rule is now MEASURED — viewport-check reads the bar's
+// own overflow at 390 and 320, with a short chip and a tailnet hostname, and that is what
+// goes red if a sixth control is ever added back.
+is('...and the row shrinks rather than wrapping', true, /\.sbar \{ flex-wrap: nowrap; \}/.test(CSS));
+is('...with exactly one child able to give way', true,
+   /\.sbar \.who \{[^}]*flex: 1 1 auto/s.test(CSS) && /\.sbar > \.seg \{ flex: 0 0 auto; \}/.test(CSS));
 is('an apple-touch-icon is linked', true, /rel="apple-touch-icon"/.test(HTML));
 is('...and it is 180x180', '180x180', exists('icons/apple-touch-icon.png') ? pngSize('icons/apple-touch-icon.png') : 'missing');
 
@@ -217,18 +340,35 @@ is('the service worker never caches a verb', true, /req\.method !== 'GET'/.test(
 const manifest = JSON.parse(read('manifest.webmanifest'));
 is('rotation is not pinned to portrait', true, manifest.orientation !== 'portrait');
 is('...and the cards lay out in columns', true,
-   /repeat\(auto-fill, *minmax\(min\(33ch, *100%\), *1fr\)\)/.test(CSS));
-// ...AND THE TRACK MINIMUM IS CAPPED AT THE COLUMN. This asserted a bare `minmax(33ch` and
-// the bare form is an overflow on a phone: --fs is chosen so a 32-column card SPANS the
-// viewport, so 33ch is by construction about one character wider than the room there is.
-// Measured at 320px, the track came out 313.5px in a 304px box and the card's right edge
-// landed two pixels past the screen — the body scrolling sideways on every card screen,
-// which is half of what the phone was reporting. viewport-check.mjs measures it; this
-// keeps the shape from coming back.
-is('...without a track that is wider than the screen', false, /minmax\(33ch/.test(CSS));
-// `ch` resolves against the element's own font, and fitCards() sets --fs at runtime: a
-// track minimum measured at body's size is a card wider than its column.
-is('...with ch measured at the card size', true, /\.cards \{[^}]*font-size: var\(--fs\)/s.test(read('app.css')));
+   /repeat\(auto-fill, *minmax\(min\([^)]*, *100%\), *1fr\)\)/.test(CSS));
+// THE `33ch` TRACK AND ITS `--fs` SIZING ARE GONE, AND THEIR PREMISE WENT WITH THEM —
+// this is a deleted assertion whose COVERAGE was not dropped, which is the distinction a
+// reviewer needs. Both existed because a card was 32 monospace columns: `33ch` was "one
+// card wide" only while a card was measured in glyphs, and `.cards { font-size: var(--fs) }`
+// existed so that `ch` resolved at the CARD's size rather than the body's. Measured at
+// 320px, a bare `minmax(33ch` gave a 313.5px track in a 304px box and the body scrolled
+// sideways on every card screen.
+//   The cards are not art any more, so there are no glyphs to line up and no `ch` to
+// resolve. What actually has to stay true is what those rows were protecting: the track is
+// never wider than its column, and the page never scrolls sideways. The first is asserted
+// above (`min(…, 100%)` is kept, and the assertion no longer pins WHICH width), and the
+// second is measured in a real engine by test/helpers/viewport-check.mjs at 390 and 320 —
+// which is a stronger guard than either deleted row, because it measures rather than greps.
+is('...with the track still capped at the column', true, /minmax\(min\(/.test(CSS));
+is('...and no bare ch track that could outgrow it', false, /minmax\(\d+ch/.test(CSS));
+// ── the flick settles on a card ───────────────────────────────────────────
+// PROXIMITY, NOT MANDATORY, and the difference is felt rather than seen. `mandatory` fights
+// a deliberate short drag and makes a long list sticky; worse, on a list whose items are
+// taller than the viewport it can trap an item you cannot scroll past. `proximity` snaps
+// when the reader was nearly there anyway, which is the ask — "if u scroll that gets u to
+// the next one".
+//   Asserted on the SOURCE because the computed value drops it: Chrome normalises
+// `y proximity` to `y`, proximity being the initial strictness. viewport-check measures in
+// a real engine that snapping is on at all; this is the half that says which kind.
+is('the card list snaps by proximity', true, /scroll-snap-type: *y +proximity/.test(CSS));
+is('...and never mandatory, which traps a tall card', false, /scroll-snap-type:[^;]*mandatory/.test(CSS));
+// ...and a pull at the top must not bounce the installed app loose.
+is('the scrollers contain their overscroll', true, /\.cards \{[^}]*overscroll-behavior: contain/s.test(CSS));
 
 // ── the thinking indicator honours prefers-reduced-motion ─────────────────
 // The one requirement on it that the running-client harness cannot reach: pwa-render has
@@ -405,7 +545,7 @@ is('...and activate drops the old ones', true, /if \(k !== VERSION\) await cache
 // ── 3. the fixtures are §4, exactly ───────────────────────────────────────
 const NINE = ['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted'];
 const TOP = ['project', 'profile', 'counts', 'cards', 'free_worktrees'].sort().join(',');
-const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'pr', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead'].sort().join(',');
+const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'pr', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead', 'exited'].sort().join(',');
 const COUNTS = ['need_you', 'working', 'ready', 'parked', 'limit', 'interrupted'].sort().join(',');
 const fixDir = path.join(WEB, 'fixtures');
 const grids = fs.readdirSync(fixDir).filter(f => /^grid-.*\.json$/.test(f)).sort();
@@ -448,14 +588,192 @@ is('there is a session fixture longer than one page', true,
 is('the worker answers which version it is', true,
    /type === 'version'[\s\S]{0,160}postMessage\(\{ version: VERSION \}\)/.test(JS['sw.js']));
 is('...and the client asks it', true, /askShellVersion/.test(JS['app.js']));
+
+// ── the status bar is OPAQUE, because a translucent one costs the bottom of the screen ──
+// Four launches measured it, and the fourth is the one that named the cause:
+//     v40  height: 100dvh                          sl759  cb751   band under the composer
+//     v41  position: fixed; inset: 0               sl759  cb0     same band
+//     v42  height: calc(100dvh + inset-top)        sl812  cb775   band STILL there, composer cut
+// v42 is the datum: the shell measured 812 on an 812 screen and the device still showed the
+// band, with the composer clipped above it. A box that is laid out but not painted is a box
+// outside the web view. In iOS 26 standalone with `black-translucent`, WebKit positions the
+// web view at the top of the screen (under the status bar, hence sat53) but sizes it to the
+// screen minus the status bar (hence ih759 on sh812) — so the bottom 53pt belong to no page
+// and no CSS reaches them. Reported independently at 797/844, 894/956 and 759/812, always
+// short by exactly the top inset: WebKit bug 301108 (rdar://163501215) is the regression's
+// tracker, and Apple's own meta-tag doc says which half of the pair fixes it — "If set to
+// default or black, the web content is displayed below the status bar", i.e. iOS reserves the
+// strip it was already reserving, and hands the page a web view that runs to the real
+// bottom. `black` rather than `default`: the app is #0b0d10 in every theme and a default
+// bar can come back white.
+//   PINNED HERE BECAUSE NO ENGINE IN THIS SUITE CAN SEE IT — every desktop engine reports the
+// insets as 0 and dvh as the window, so translucent and opaque render identically here.
+const sbStyle = (/<meta name="apple-mobile-web-app-status-bar-style" content="([^"]*)"/.exec(HTML) || [, ''])[1];
+is('the status bar is opaque, not translucent', 'black', sbStyle);
+// viewport-fit=cover is NOT the broken half, and it is still what puts the page under the
+// home indicator at the bottom. Dropping it would inset the layout by the bottom safe area
+// and put the band back, one status bar smaller.
+is('...and the page still claims the bottom edge', true, /viewport-fit=cover/.test(HTML));
+// The v42 hack — paying the status bar back into a height — is gone. It extended the LAYOUT
+// past a web view that ends where it ends, which is how the composer came to be cut off.
+// (`100lvh` is the same hack by another name: on the 26.5 simulator it answered 874 — the
+// full screen — while the web view was 812 tall under a translucent bar.)
+is('...and no rule pays the status bar back into a height', 0,
+   (CSS.replace(/\/\*[\s\S]*?\*\//g, '').match(/height:\s*calc\([^;]*env\(safe-area-inset-top\)/g) || []).length);
+// The probe still reports which standalone signal was true; the device's next line is the
+// one that says whether the fix landed (sat0 and no band), so it stays in.
+is('the client still marks standalone from either signal', true, /classList\.toggle\('standalone'/.test(JS['app.js']));
+is('...from navigator.standalone as well', true, /navigator\.standalone/.test(JS['app.js']));
+is('...and again on rotation', true, /orientationchange['"]?,\s*markStandalone/.test(JS['app.js']));
+
+// ── an empty transcript is an empty state, not a CLI hint ──────────────────
+// fleet-read answers a session that has not taken a turn with a note written for a
+// terminal: "…is live but has no transcript yet — Send it work: fleet-send -s … <prompt>".
+// The chat screen printed it verbatim, so a phone user was told to run a shell command they
+// have no shell for. The note is a fact for the API; the screen owes the reader a sentence.
+const chatSrc = (/function chatView\([\s\S]*?\nfunction /.exec(JS['app.js']) || [''])[0];
+is('an empty transcript says so in plain words', true, /No messages yet — send one below/.test(chatSrc));
+is("...and never prints fleet-read's note", false, /text:\s*s\.note/.test(chatSrc));
+
+// The probe has to measure the screen that HAS a composer. Keyed per screen: the grid has
+// none, so the first reading came back cb0/gap0 and said nothing about the band.
+is('the geometry probe measures each screen once', true, /geoSent\.has\(where\)/.test(JS['app.js']));
+is('...naming which screen it measured', true, /api\.diag\('geo', where/.test(JS['app.js']));
+is('...and reports the two standalone signals apart', true, /'mm' \+/.test(JS['app.js']) && /'ns' \+/.test(JS['app.js']));
+
+// ── moving between screens says WHICH WAY ─────────────────────────────────
+// "add cool animations ... like getting out of a session." The screens are a stack, so the
+// one thing motion can say that a static swap cannot is the direction you went. That makes
+// three things load-bearing, and each is a way this goes wrong rather than a style note.
+const nav = (/function markNav\([\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
+is('the transition is directional', true, /SCREEN_DEPTH/.test(nav) && /nav-back/.test(nav) && /nav-fwd/.test(nav));
+// ONLY ON A REAL SCREEN CHANGE. render() runs on the 5s poll and after every verb — animate
+// there and the slide replays every five seconds on a screen nobody moved away from, which
+// is also why the Preact path deliberately never empties #app.
+is('...and only when the screen actually changed', true, /navFrom === screen\) return/.test(nav));
+is('...with the first paint treated as an arrival', true, /from === null\) return/.test(nav));
+// TRANSFORM AND OPACITY ONLY: both composited. Animating width/height/top/left on a client
+// that already polls every five seconds buys a layout per frame on the reader's phone.
+//   EXTRACTED TO THE AT-RULE'S OWN CLOSE, not to the next line that starts with `}`. These
+// keyframes end `} }` on one line, so the lazy `\n}` form ran past them and swallowed the
+// rules below — the row went red on CSS it was never meant to read.
+const keyframes = (CSS.match(/@keyframes gf-nav-[^{]*\{[\s\S]*?\}\s*\}/g) || []).join('\n');
+is('the transition animates composited properties', true, keyframes.length > 0);
+//   `clip-path` and `opacity` only — both composited, neither in the box. A transform
+// would be composited too and is still wrong here: it is part of the element's box, so a
+// translated shell puts every child's rect past the screen for the length of the animation
+// and viewport-check goes red at every width. Measured, not predicted: div.hdr@396 against
+// a 390 viewport.
+is('...and lays nothing out', false, /\b(width|height|top|left|right|bottom|margin|padding)\s*:/.test(keyframes));
+is('...and moves no box', false, /transform\s*:/.test(keyframes));
+// Motion is a preference, and the platform exposes it.
+is('...behind prefers-reduced-motion', true, /@media \(prefers-reduced-motion: no-preference\)[\s\S]*?nav-fwd/.test(CSS));
+// A transformed child must not become page scroll — the rule viewport-check holds.
+//   ASKED OF THE RULE'S OWN DECLARATIONS. `/#app\.shell\{[\s\S]*?overflow:hidden/` searches
+// past the rule's closing brace and finds any `overflow: hidden` later in the file, so it
+// stayed green with the declaration deleted — measured, by deleting it.
+is('...and the shell clips it', true,
+   /overflow:\s*hidden/.test(((/#app\.shell\s*\{[\s\S]*?\n}/.exec(CSS) || [''])[0]).replace(/\/\*[\s\S]*?\*\//g, '')));
+
+// ── waiting looks like the thing being waited for ─────────────────────────
+// A skeleton, not a spinner, so nothing MOVES when the data lands: the placeholder already
+// occupies the final layout and the real cards swap into boxes the eye is resting on.
+// Observed: 4 skeleton cards and 12 bars while a slow backend was held, 0 skeletons and 6
+// real cards after it answered.
+is('a wait is drawn card-shaped', true, /function skeletonCards\(/.test(JS['app.js']));
+// NULL IS NOT EMPTY, and this is the whole correctness of it: an empty list is a real
+// answer and belongs to the first-run path, a null one has not been answered yet. `items()`
+// always carries the `+ new` card, so length alone cannot tell the two apart.
+is('...only while the answer is still missing', 2,
+   (JS['app.js'].match(/S\.(projects|grid) == null \? skeletonCards\(/g) || []).length);
+
+// ── the shell is pinned to the screen, not sized by the viewport ──────────
+// MEASURED ON THE DEVICE, in one line from the installed app:
+//     ih759  sh812  sl759  cb751  gap8  sat53  sab29
+// innerHeight 759 against a physical screen of 812, short by exactly the top inset. With
+// viewport-fit=cover and a black-translucent status bar the page is drawn from y=0 under
+// the status bar and iOS STILL subtracts it from the viewport height — so `height: 100dvh`
+// ends 53pt above the physical bottom. sl759 == ih759 says the shell filled the viewport it
+// was given, exactly; asking the viewport at all was the mistake.
+//
+// PINNED HERE BECAUSE NO ENGINE IN THIS SUITE CAN SEE IT. On a desktop dvh IS the window,
+// so the bug and the fix measure identically — 844 against 844 at 390x844, gap 0. Every
+// instrument here is blind to it, which is exactly why the shape needs an assertion rather
+// than a screenshot.
+//   COMMENTS STRIPPED BEFORE THE TEST, because the rule's own comment explains the bug in
+// the words `100dvh` — and the first cut of this row went red on its own prose. A guard
+// that reads documentation as code fails the moment somebody documents the thing properly.
+const shellRule = (/#app\.shell\s*\{[\s\S]*?\n}/.exec(CSS) || [''])[0];
+const shellDecls = shellRule.replace(/\/\*[\s\S]*?\*\//g, '');
+is('the shell rule exists', true, shellRule.length > 0);
+is('...pinned to the screen', true, /position:\s*fixed/.test(shellDecls) && /inset:\s*0/.test(shellDecls));
+is('...and not sized by the viewport', false, /\b\d+(dvh|vh|svh|lvh)\b/.test(shellDecls));
+
+// ── --kb-inset is REMOVED when the keyboard closes, never zeroed ──────────
+// `padding-bottom: calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px)` reaches its
+// fallback only when the property is ABSENT. setProperty(name, '') does not reliably remove
+// a custom property in WebKit, so the fallback never applied: measured gap8 against sab29,
+// i.e. 0 + 8. Harmless only while the shell stopped short of the bottom — the moment it
+// reaches the real bottom, that puts the composer on the home indicator. The two findings
+// came from one log line and are fixed together.
+const kb = (JS['app.js'].match(/[^\n]*--kb-inset[^\n]*/g) || []).join('\n');
+is('the keyboard inset is removed, not emptied', true, /removeProperty\('--kb-inset'\)/.test(kb));
+is('...and never set to an empty string', false, /setProperty\('--kb-inset',\s*(keyboard[^)]*)?''/.test(kb));
+is('...while the keyboard-open path still writes 0', true, /setProperty\('--kb-inset',\s*'0px'\)/.test(kb));
+
+// ── the geometry probe measures the shell, not the lock screen ────────────
+// "still it doesnt use the full screen", in the installed app. No engine here reproduces
+// it — dvh on a desktop is the window, and the home-screen app cannot be driven from this
+// machine — so the device reports its own numbers and the log is the instrument.
+//
+// THE PROBE HAS ONE WAY TO LIE, and it did on its first run: `#app` only carries `.shell`
+// (and therefore `height: 100dvh`) once a real screen is drawn, so a report sent at load
+// measures the LOCK SCREEN. Measured: sl524 against ih844 — the ship and two buttons, not
+// a viewport. A number that looks like a short shell and is actually a short page would
+// have sent the next change in the wrong direction entirely.
+const geo = (/function reportGeometry\(\)[\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
+is('the geometry probe exists', true, geo.length > 0);
+is('...and waits for the shell', true, /classList\.contains\('shell'\)/.test(geo));
+is('...rather than reporting whatever is drawn', true, /geoTries/.test(geo));
+// Both screen and viewport, or the comparison that decides this cannot be made: the
+// suspicion is that the VIEWPORT is short of the SCREEN, not that the shell is short of
+// the viewport, and only one of those is visible from inside the page without both.
+is('...reporting the viewport', true, /ih.*innerHeight/.test(geo));
+is('...and the physical screen beside it', true, /sh.*screen\.height/.test(geo));
+// Path segments, never a query: fleet-serve logs (req.url).split('?')[0].
+is('...and it beacons through api.diag', true, /api\.diag\('geo'/.test(geo));
+
+// ── the client swap must not spend somebody's passkey ─────────────────────
+// The decision itself is driven in pwa-render (reloadAction). What that cannot see is how
+// takeNewClientIfIdle FEEDS it, and the wiring is where the bug lived: it asked
+// pollPaused(), which counts S.locked as paused, so a pending swap was held back while the
+// app was locked and spent the instant it unlocked — the one transition that costs a Face
+// ID. Structural, because the arming event is `controllerchange` and no fake DOM has one.
+const swap = (/export function takeNewClientIfIdle\(\)[\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
+is('the swap guard exists', true, swap.length > 0);
+is('...and asks whether a session is live', true, /haveToken\(\)/.test(swap));
+// The row that would go red if the locked-conflation came back.
+is('...and not whether the POLL is paused', false, /pollPaused\(\)/.test(swap));
+is('...asking the typing question directly instead', true, /typingNow\(\)/.test(swap));
+// ...and locking spends a swap that was waiting, or deferring under a live session would
+// defer until the next cold open — the poll cannot cover it, because it does not run while
+// locked.
+const lockFn = (/function lock\([^)]*\)[\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
+is('locking spends a pending swap', true, /takeNewClientIfIdle\(\)/.test(lockFn));
 is('...and shows the answer', true, /client \$\{swVersion/.test(JS['app.js']));
 
 is('the worker claims open pages', true, /clients\.claim\(\)/.test(JS['sw.js']));
 is('...and the client reacts to being claimed', true,
    /addEventListener\('controllerchange'/.test(JS['app.js']));
 // ...but never mid-sentence: a reload throws away the draft, which lives in memory.
+//   THIS ROW USED TO PIN pollPaused(), and that premise changed rather than the coverage
+// being dropped. pollPaused() answers "should the 5s poll hold off" and counts S.locked as
+// a reason — which is right for the poll and wrong here, because locked is precisely when
+// a client swap is FREE. Pinning it was pinning the bug: the swap waited for the unlock and
+// spent itself one second after the passkey. The intent is unchanged and is asked of the
+// typing question directly.
 is('...without reloading while you type', true,
-   /function takeNewClientIfIdle[\s\S]{0,300}pollPaused\(\)/.test(JS['app.js']));
+   /function takeNewClientIfIdle[\s\S]{0,300}typingNow\(\)/.test(JS['app.js']));
 
 // ── 4. §7's guardrails, in §7's words ─────────────────────────────────────
 // Extracted from fleet-grid.mjs rather than typed here, so a reworded TUI prompt shows
@@ -568,8 +886,21 @@ const cardRules = [...cssNoComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
   .map(m => [m[1].trim(), m[2]])
   .filter(([sel]) => /\.card/.test(sel));
 is('there are .card rules to check', true, cardRules.length > 0);
-is('no .card rule sets font-weight', '',
-   cardRules.filter(([, body]) => /font-weight/.test(body)).map(([sel]) => sel).join(' | '));
+// ...AND IT IS THE PANE THAT MUST NOT GO BOLD, NOT THE CARD ANY MORE. The rule was about
+// GEOMETRY, never about taste: box-drawing characters have no bold glyphs, so a bold face
+// fell back to a different font for ─ ╭ ╮ ╰ ╯ while │ and the letters kept their advance,
+// and the selected card grew 366px -> 517px and lost its ╮. That is a 32-column
+// arithmetic collapsing, and the cards no longer have any.
+//   The PANE still does. It is real terminal output, its whole layout is one-character-
+// one-cell, and bolding it would walk every border off every box in a permission dialog.
+// So the assertion moves to where the hazard actually lives — which is a better assertion
+// than the one it replaces, because the pane is the surface that cannot survive it.
+const paneWeightRules = [...cssNoComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+  .map(m => [m[1].trim(), m[2]])
+  .filter(([sel]) => /\.pane/.test(sel));
+is('there are .pane rules to check', true, paneWeightRules.length > 0);
+is('no .pane rule sets font-weight', '',
+   paneWeightRules.filter(([, body]) => /font-weight/.test(body)).map(([sel]) => sel).join(' | '));
 // ...and the width probe has to be made of the characters that actually break: a probe
 // of letters would measure a face the card never uses for its border.
 is('the width probe measures a box rule', true, /probe\.textContent = '╭' \+ '─'/.test(APP));
@@ -583,19 +914,29 @@ is('the width probe measures a box rule', true, /probe\.textContent = '╭' \+ '
 //
 // cells() is the split that does it, and these are its invariants: nothing added,
 // nothing dropped, and every non-ASCII code point in a box of its own.
-is('the card renders through cells()', true, /for \(const tok of G\.cells\(line\)\)/.test(APP));
-is('...into a 1ch box', true, /\.card \.c \{[^}]*width: 1ch/.test(CSS));
+// THE CARD NO LONGER RENDERS THROUGH cells(), AND THAT IS THE REDESIGN, not a regression:
+// a surface card is prose in a flex row, so there is no column arithmetic for a 1.27-cell
+// glyph to break. The PANE is where arbitrary terminal output still lands in a grid, and
+// the invariants below are asserted against it — §5e already pins `.pane .c { width: 1ch }`
+// and the wide-glyph box. Kept here as the pointer, so the next reader finds the live copy
+// rather than concluding the guard was dropped.
+is('the pane still renders through cells()', true, /ansi|cells/.test(read('ansi.js')));
 {
   let joined = 0, split = 0, notOne = 0, asciiLeak = 0, lines = 0;
   const nonAscii = s => [...s].filter(c => c.codePointAt(0) >= 0x80).length;
-  for (const f of grids) {
-    const g = JSON.parse(fs.readFileSync(path.join(fixDir, f), 'utf8'));
-    const blocks = [
-      ...(g.cards || []).map((c, i) => G.cardLines(c, false, i)),
-      ...(g.free_worktrees || []).map((w, i) => G.freeCardLines(w, false, i)),
-      G.newCardLines(false),
-    ];
-    for (const b of blocks) for (const line of b.lines) {
+  // THE CORPUS IS REAL PANE OUTPUT NOW, not card art — and it is a better corpus for the
+  // same invariants. The cards were curated: the TUI picked their glyph set and rejected ⏳
+  // from it for measuring two columns. A pane is whatever an agent happened to print — box
+  // drawing, CJK, emoji — so it exercises cells() on exactly the input the function exists
+  // for. The shipped pane fixtures are captured from live sessions.
+  const panes = fs.readdirSync(fixDir).filter(f => /^pane-.*\.json$/.test(f)).sort();
+  is('there are pane fixtures to split', true, panes.length > 0);
+  for (const f of panes) {
+    const j = JSON.parse(fs.readFileSync(path.join(fixDir, f), 'utf8'));
+    // ANSI out first: cells() is handed the characters that reach the screen, which is
+    // what web/ansi.js gives it once it has parsed the escapes.
+    const body = String(j.pane || '').replace(/\x1b\[[0-9;]*m/g, '');
+    for (const line of body.split('\n')) {
       lines++;
       const toks = G.cells(line);
       if (toks.map(t => t.text).join('') !== line) joined++;
@@ -604,7 +945,7 @@ is('...into a 1ch box', true, /\.card \.c \{[^}]*width: 1ch/.test(CSS));
       if (toks.some(t => !t.cell && nonAscii(t.text) > 0)) asciiLeak++;
     }
   }
-  is('there were card lines to split', true, lines > 100);
+  is('there were pane lines to split', true, lines > 100);
   is('cells() loses no character', 0, joined);
   is('cells() boxes every non-ASCII code point', 0, split);
   is('...one code point per box', 0, notOne);
@@ -773,7 +1114,19 @@ is('empty is not a time', null, at(''));
 
 // ── 8. the offline promise ────────────────────────────────────────────────
 is('the last payload is kept for a cold open', true, /localStorage\.setItem\(LS_LAST/.test(APP));
-is('...and a stale screen says how old it is', true, /offline — last fetched/.test(APP));
+// ...AND THIS ROW WENT RED WHEN THE GRID WAS PORTED, WHICH IS THE CHECK WORKING. It used
+// to grep web/app.js for the sentence, because header() drew it there. header() is gone and
+// the sentence moved into screens.jsx — the exact failure the seam comment warns about
+// ("a string retyped here would be a string that check can no longer see"), arriving as a
+// string MOVED rather than retyped. Re-pointed at the file the phone actually fetches, and
+// split, because "the client tells you how stale it is" is two independent things and one
+// row could only ever catch whichever half it happened to be looking at:
+is('...and a stale screen says how old it is', true, /offline — last fetched/.test(JS['screens.js']));
+// the half that stays in app.js — a screen cannot report staleness it was never handed, and
+// a props builder that quietly stopped passing it would leave the sentence above intact and
+// unreachable, which is the silent version of this bug.
+is('...and app.js still hands the staleness over', 2,
+   (APP.match(/^\s*stale: S\.stale,$/gm) || []).length);
 // §5's rule about the token, checked as CODE and not as prose: the first version of
 // this assertion matched api.js's own comment explaining why the token is not stored,
 // and so passed while proving nothing. Only a real write counts.

@@ -4,6 +4,207 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
+## 0.4.0 — 2026-09-24
+
+**This release is about sessions that outlive their process.** A session used to be exactly
+as durable as the process running it: type `exit` and the card went with it, update Claude
+Code and you had no way onto the new binary that did not lose the fleet, rename one and its
+conversation could no longer be found, and forty idle sessions held the memory of forty busy
+ones. Each of those now ends the *process* and keeps the *conversation*, and the card stays
+on screen saying so — asleep, exited, or back. The phone client was rebuilt screen by screen
+alongside it, and a first install on a machine with nothing on it now either works or says
+exactly what is missing.
+
+Nothing in a config file changes shape: the projects file is read exactly as before, and
+every new field has a default that means "what happened before". A handful of commands do
+behave differently by default, and those are listed under **Changed** rather than buried.
+Hibernation, the biggest new thing here, is **off** until you switch it on.
+
+This entry also covers three changes that reached `main` after the 0.3.0 package was
+published and so were in no release until now. They are cited by commit subject, as is
+everything from before the repository was recreated; PR numbers below are the new
+repository's.
+
+### If you install one thing from this release
+
+**`fleet-restart --all`, once, after you upgrade.** Nothing in this release reaches a
+session that was already running: the hooks, the launch contract, the task queue, the
+rename fix and the exit handling are all read when a session starts. This relaunches every fleet session onto
+the current binary, each one resuming **its own** conversation by recorded id — never
+`--continue`, which in a checkout with twelve sessions opens the newest conversation in the
+folder for all twelve. A session that was mid-turn is told to continue; an idle one is not
+prompted, because starting work nobody asked for is worse than a stale binary; one that was
+waiting on you is relaunched, listed by name, and **not** prompted, since the question it
+asked lives in the pane and not in the conversation. It writes a snapshot before the first
+kill, restarts the session you ran it from last, and `--dry-run` prints the plan. It is also
+the answer to every future "I updated Claude Code with the fleet running". ("Twelve sessions
+in one checkout, and --continue could reach one of them")
+
+### Upgrading
+
+- **The phone client goes `ghostfleet-v24` → `ghostfleet-v45`.** (v24 is what the 0.3.0
+  package actually shipped; its notes said v23.) Same caveat as every release: swipe the app
+  away and relaunch, because reopening from the app switcher is a resume, not a navigation.
+  The settings sheet shows which client is running. v25 is the first client with a build
+  step, and a phone that somehow kept a pre-v25 shell does not degrade, it fails to start —
+  relaunching is what fixes it.
+- **An installed home-screen icon must be removed and added again, once.** The status bar
+  is now opaque (`black`) instead of `black-translucent`, and iOS stores that style inside
+  the web clip when you add it, so an existing icon keeps the old bar — and with it the
+  unpainted band under the composer — however many times it relaunches. Re-adding it is a
+  new client as far as the passkey is concerned, so it asks for an enrolment: run
+  `fleet-serve enroll <client> --add` on the desk first. The same applies to a Chrome
+  home-screen shortcut. (#11)
+- **Hibernation is off by default.** `touch ~/.claude/fleet/hibernate.enabled` to switch it
+  on; until then `fleet-hibernate` is a dry run that prints what it *would* sleep and
+  `--apply` refuses.
+- **Restart the fleet.** `fleet-restart --all`, above. Until a session restarts it runs the
+  old hooks and the old contract — so a second task sent to it can still replace the first,
+  which is the bug #15 fixes.
+
+### New
+
+- **A second task sent to a busy agent is queued as its own turn, not folded into the
+  first.** Claude Code merges a message submitted mid-turn *into* the running turn, and the
+  agent reads it as a change of direction — so task A was silently dropped for task B, while
+  `fleet-send` said the prompt "will queue after this turn". It now really queues: traffic for
+  a working Claude session waits in a per-session queue, and the turn-ending hook delivers the
+  next one as its own turn once the composer is empty, carrying any `--reply-to` with it. A
+  prompt you type by hand mid-turn is labelled to the agent as queued work rather than a
+  replacement. The card says `queued: N` on the desk and on the phone. `codex` and `opencode`
+  targets are unchanged, because nothing drains a queue for them. (#15)
+- **Hibernation: give the memory back without losing the conversation.** Parking a session
+  stopped its tokens and left its process exactly where it was — measured at ~350 MB each
+  whether it is thinking or has sat at a prompt for weeks, and 64 of them held 21.75 GB on
+  a machine 39.6 of 40 GB into swap while `fleet-pause` reported "idle, zero consumption".
+  `fleet-hibernate` ends the process of a session idle past a threshold (48h by default) and
+  keeps its conversation; opening its card wakes it by resume-by-id, to a ready prompt in
+  about 0.6s at any transcript size. The governor can do it under memory pressure, oldest
+  idle first. It vetoes anything it cannot prove is safe — unsent text in the composer, a
+  folder with no trust record, a session whose live conversation it cannot establish — and
+  it never sleeps a lead (`master`) on a rule: only `fleet-hibernate --apply master -s
+  <fleet>` does. A slept session is a card that says `☾ asleep` with `⏎ wakes`, on the desk
+  and on the phone, and the new-session screen lists the checkout's asleep and exited
+  sessions so you can reopen one from there. (#2, #3, #5, #8, #10, #14)
+- **Typing `exit` no longer takes the card with it.** The pane is held, the card stays and
+  says `✗ exited` with `⏎ resumes`, and entering the session brings the conversation back.
+  `fleet-restart --reopen <session>` does the same from anywhere. ("Typing exit took the
+  card with it, and the conversation had nowhere to be seen")
+- **`ghostfleet demo` works on a machine that is not the one it was recorded on.**
+  `fleet-demo` builds the profile the README opens with — three throwaway repos under
+  `~/gf-demo`, named `acme-api`, `acme-web` and `toolbox`, so the fleet you get is the one in
+  the pictures. On the phone the demo is hidden as soon as you have real projects, and shown
+  in full while it is all there is. ("A first run that shows the product instead of an empty
+  screen", "Hide the demo fleet from a real phone, and give the phone client a route into
+  it")
+- **One install for everything `^N` needs.** The installer (`npx ghostfleet-cli` and
+  `./install.sh`) offers Claude Code and Neovim + LazyVim beside tmux and jq; both are
+  optional, and `--yes` takes everything. `^N` on a machine with no editor now says so and
+  how to fix it, instead of `returned 1`. And `c` on the `+ add project` card, in the folder
+  browser and on the first-run screen clones a repo (a URL or `owner/repo`) and registers it
+  as a project. (#9)
+- **Workers are disposable.** A new task is a new session: `fleet-inbox` lists finished
+  workers whose sessions are still live, each with the `fleet-stop --reclaim` that retires
+  it, and `--reclaim` now works straight after a squash merge instead of calling the branch
+  unpushed for up to ten minutes. (#16)
+- **The phone's cards stopped being a picture of a card.** They were the TUI's box art at a
+  measured font size — ~210px to state three facts, and the branch lost characters the
+  moment a card had a PR. They are native cards now, the agent's last line is readable, and
+  the grid's footer of key-letter verbs became a `⋯` sheet in the header, so at 390px the
+  grid shows five of nine sessions where it showed three. Verbs that act on one card live in that card's sheet,
+  which names the session before it offers anything destructive. Screen changes slide in the
+  direction you went, behind `prefers-reduced-motion`. ("The card stops being a picture of a
+  card", "The title of a card was the one place a tap did nothing", "The grid spent a third
+  of the screen on controls and showed three of nine cards", #6)
+
+### Changed
+
+- **`fleet-send` to a working Claude session queues instead of pasting.** `--now` keeps the
+  old paste-into-the-running-turn behaviour. The queue moves with `fleet-rename` and is
+  cleared by `fleet-stop`. (#15)
+- **`fleet-send` refuses a worker whose task has shipped**, and points at `fleet-spawn`.
+  Shipped means a linked worktree that finished a turn since it started, with no open PR,
+  and either a merged PR or a clean tree even with `origin/HEAD`. `--anyway` (MCP:
+  `anyway: true`) sends it regardless; a same-PR follow-up, a session that has not finished
+  a turn, a `--reply-to` question and the master always go through. (#16)
+- **`fleet-spawn` refuses to reuse a worktree whose session is busy**, rather than starting
+  `<name>~2` next to it — which is what `--reuse` already did. (#16)
+- **`interrupted` is yellow, not red.** Red is reserved for `need-you`, the one status that
+  means a human must act now. ("interrupted is a warning, not a failure")
+- **A session's state record follows its current name.** The hook reads the pane's session
+  name on every event instead of the name it was launched with, and records gain a `pane`
+  field. Additive; nothing reads it that did not before. (#13)
+- **`--json` gains `asleep` and `exited`** beside the status, and `queued` with the count of
+  waiting prompts. `STATUSES` is still the same nine. (#8, #15)
+- **The installer arms the repo's pre-push hook** when run from a clone, by setting
+  `core.hooksPath`. A `hooksPath` already pointing somewhere else is reported and left
+  alone. ("The guard was one forgotten command away from being decorative")
+- **Building the phone client from a clone needs node 20.19 or newer** (vite's floor), and
+  the installer says so before it starts instead of failing inside vite. The published
+  package ships the built client and still runs on node 18. `cf-sync` prefers pnpm and falls
+  back to npm. (#12, "A rewrite would spend the debugging; one screen at a time does not",
+  "Two scars from the build work, and pnpm without making npm a trap")
+
+### Fixed
+
+- **A first install on a bare machine reported success and installed nothing.** On a fresh
+  Ubuntu 24.04, `./install.sh --yes` exited 0 having linked zero commands, with a false
+  `✓ claude installed` and a list of next steps that did not exist. It now installs node, jq
+  and tmux, stops on the one thing it cannot, and names every missing prerequisite in one
+  block with one command. (#12)
+- **A renamed session lost its conversation.** The name was captured at launch, so after a
+  rename `fleet-read` said "no transcript yet", the phone's chat said "No messages yet", and
+  hibernation vetoed it for having no conversation id. `fleet-rename` now moves everything
+  keyed by the name — the record, the markers, the tabs, pending reply-to markers — from the
+  CLI, MCP and the phone alike, not only from the grid. (#13)
+- **The phone's bottom band.** On iOS 26 an installed web app with a translucent status bar
+  is drawn under the bar but sized to the screen *minus* it, so the bottom strip was outside
+  the web view and no CSS could reach it (WebKit bug 301108). The bar is opaque now; the
+  colours are unchanged. This is the change that needs the icon re-added, above. (#6, #7,
+  #11)
+- **Face ID asked twice.** The prompt is an app switch, so the page came back before the
+  token it produced had arrived and re-locked itself; and separately, a deployed update
+  waited for the app to *unlock* before reloading, which is exactly the transition that
+  costs a passkey. Both are fixed. ("Returning from the Face ID sheet locked the app that was
+  unlocking", "A Face ID that bought one second of app, and an inset paid for twice")
+- **The phone scrolled back to the top every five seconds**, because the grid rebuilt its
+  scrolling container on every poll. It keeps the container now. ("The grid rebuilt its
+  scrolling container, so the reader had to be rescued")
+- **iOS zoomed the page when you tapped the message box**, which read as the chat
+  overflowing sideways; nothing overflowed. ("iOS zoomed the page when you tapped the message
+  box")
+- **The chat had a 1.4px gutter**, and the session header wrapped to three rows at 390px.
+  ("The chat had 1.4 pixels of gutter and a column of nothing opposite", "A row that may wrap
+  will wrap, and this one wrapped three times")
+- **A wake that had worked was about to report failure** and leave the asleep marker over a
+  running session, because readiness was read from a footer phrase that permission bypass
+  changes. It is read from the composer box now. (#5)
+- **`fleet-shots serve` crashed on a stranger's `manifest.json`** in the directory it
+  served, instead of skipping it. ("One stranger's file must not take the whole review server
+  down")
+- **`fleet-send --reply-to` promised a direct reply that could not arrive** across two
+  profiles, so the asker waited instead of draining its inbox. It now says which path the
+  answer will take. ("A reply that cannot arrive must not be promised")
+
+### Safety
+
+- **The name guards read who a commit is from**, not only what it says: author and committer
+  in the pre-push hook, every commit in the suite's sweep, and a CI job that reads a PR's
+  title and body before GitHub composes them into history. ("Check who a commit is from, not
+  only what it says", "The PR body is the one piece of text that reaches history unread")
+- **An image in the docs showed a real fleet**, past every guard, because every guard skipped
+  binaries. ("A figure nobody looked at, showing a real fleet, in the docs the whole time")
+- **A worktree's `node_modules` link could be committed**, because `node_modules/` matches
+  directories and git records a symlink as a file. ("A trailing slash let a worktree's
+  node_modules link into history")
+
+### Known
+
+- **The phone client carries a diagnostic beacon**, on by default: a handful of requests
+  under `/__diag/…` to your own `fleet-serve`, which logs their paths. Nothing leaves your
+  machine. It exists to settle which of two stories the request log tells about a re-lock,
+  and comes out once it has; turn it off with `localStorage['gf.diag'] = '0'`. (#1, #4)
+
 ## 0.3.0 — 2026-09-18
 
 **This release is about proof.** 0.2.0 taught the phone to survive a real device; this one

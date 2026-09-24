@@ -2,6 +2,7 @@
 # fleet-tab term|edit <socket> <cwd> [from-session] [-f <tmux-conf>]
 # fleet-tab back    <socket> <session> [client-tty]     ` from inside a tab
 # fleet-tab name    term|edit <from-session>            what that tab will be called
+# fleet-tab restamp <socket> <tab>                      re-point a tab at its origin's name
 #
 # Open a plain TAB — a terminal, or the editor — on a session's own folder. Bound to
 # C-t / C-n inside a session (tmux/cf.tmux.conf). You are attached to a worker, you
@@ -34,7 +35,7 @@
 set -uo pipefail
 
 KIND="${1:-}"; SOCK="${2:-}"; CWD="${3:-}"; FROM="${4:-}"
-case "$KIND" in term|edit|back|name) ;; *) echo "fleet-tab: usage: fleet-tab term|edit <socket> <cwd> [from] [-f conf]  |  fleet-tab back <socket> <session> <tty>  |  fleet-tab name term|edit <from>" >&2; exit 1 ;; esac
+case "$KIND" in term|edit|back|name|restamp) ;; *) echo "fleet-tab: usage: fleet-tab term|edit <socket> <cwd> [from] [-f conf]  |  fleet-tab back <socket> <session> <tty>  |  fleet-tab name term|edit <from>" >&2; exit 1 ;; esac
 
 # The tab's session name, single-sourced. Callers that have to ATTACH a tab need to know
 # what it will be called before it exists (bin/ghostfleet opens one straight from the
@@ -67,6 +68,38 @@ case "$SOCK" in
   /*) T() { tmux -S "$SOCK" ${CONF:+-f "$CONF"} "$@"; } ;;
   *)  T() { tmux -L "$SOCK" ${CONF:+-f "$CONF"} "$@"; } ;;
 esac
+
+# The four options that make a tab point at its origin, as one step so there is one copy:
+# the tab path below stamps with it on every call, and `restamp` re-points a tab whose
+# origin was just RENAMED (bin/fleet-rename) — the status bar and ` would otherwise go on
+# naming a session that no longer exists, and ` would fall through to detaching.
+stamp() {
+  T set-option -t "$NAME" @cf_tab_from "$FROM" 2>/dev/null
+  T set-option -t "$NAME" @cf_tab_kind "$KIND" 2>/dev/null
+
+  # KEEP THE CONTEXT. Left to the global status-left a tab renders as a bare
+  # `● _term-master`, which is the one thing you already know and none of what you need —
+  # you cannot tell which project's fleet you are in, and there are several. Name the
+  # origin and the project instead, the way master's own bar does (see enter_master).
+  PROJ="${SOCK##*/}"; PROJ="${PROJ#cf-}"
+  [ "$KIND" = term ] && GLYPH="⌨" || GLYPH="✎"
+  T set-option -t "$NAME" status-left \
+    "#[bg=colour148,fg=colour16,bold] ● $GLYPH ${FROM:-tab} · $PROJ #[bg=colour236,fg=colour148,nobold]▏" 2>/dev/null
+  T set-option -t "$NAME" status-right \
+    "#[fg=colour252]#[bold]\`#[fg=colour246]#[nobold] back to #[fg=colour148]#[bold]${FROM:-the session}#[fg=colour246]#[nobold]  ·  #[fg=colour252]#[bold]⇧←→#[fg=colour246]#[nobold] cycle  ·  #[fg=colour252]#[bold]Ctrl-s#[fg=colour246]#[nobold] sessions " 2>/dev/null
+}
+
+# `restamp` — after a rename. NEVER switches a client: the tab is renamed from a script,
+# often from the grid, and a switch-client there would yank whoever is attached.
+if [ "$KIND" = restamp ]; then
+  NAME="${3:-}"
+  [ -n "$NAME" ] || { echo "fleet-tab: restamp needs a tab name" >&2; exit 1; }
+  FROM="$(T show-options -qv -t "$NAME" @cf_tab_from 2>/dev/null)"
+  KIND="$(T show-options -qv -t "$NAME" @cf_tab_kind 2>/dev/null)"
+  [ -n "$FROM" ] && [ -n "$KIND" ] || { echo "fleet-tab: '$NAME' is not a tab" >&2; exit 1; }
+  stamp
+  exit 0
+fi
 
 # `back` — the other half of a tab. Bound to ` (and C-a g) via if-shell, which only
 # routes here when @cf_tab_from is set, i.e. only from inside a tab.
@@ -132,7 +165,8 @@ if ! T has-session -t "=$NAME" 2>/dev/null; then
   if [ "$KIND" = edit ]; then
     ED="${CLAUDE_FLEET_EDITOR:-${EDITOR:-nvim}}"
     command -v "${ED%% *}" >/dev/null 2>&1 || {
-      T display-message "fleet-tab: '${ED%% *}' not found — set CLAUDE_FLEET_EDITOR" 2>/dev/null
+      # -d: tmux's default display-time is under a second, too short to read a fix in.
+      T display-message -d 6000 "fleet-tab: '${ED%% *}' not found — re-run the ghostfleet installer to add Neovim, or set CLAUDE_FLEET_EDITOR" 2>/dev/null
       exit 1; }
     # `.` so it opens ON the folder (a file browser), not an empty buffer that gives no
     # clue which worktree you landed in.
@@ -161,19 +195,7 @@ fi
 # tmux/cf.tmux.conf. Stored rather than derived from the name, because the name was
 # SANITISED — a tab off `api.2` is `_term-api_2`, and stripping the prefix would send you
 # back to a session called `api_2` that does not exist.
-T set-option -t "$NAME" @cf_tab_from "$FROM" 2>/dev/null
-T set-option -t "$NAME" @cf_tab_kind "$KIND" 2>/dev/null
-
-# KEEP THE CONTEXT. Left to the global status-left a tab renders as a bare
-# `● _term-master`, which is the one thing you already know and none of what you need —
-# you cannot tell which project's fleet you are in, and there are several. Name the
-# origin and the project instead, the way master's own bar does (see enter_master).
-PROJ="${SOCK##*/}"; PROJ="${PROJ#cf-}"
-[ "$KIND" = term ] && GLYPH="⌨" || GLYPH="✎"
-T set-option -t "$NAME" status-left \
-  "#[bg=colour148,fg=colour16,bold] ● $GLYPH ${FROM:-tab} · $PROJ #[bg=colour236,fg=colour148,nobold]▏" 2>/dev/null
-T set-option -t "$NAME" status-right \
-  "#[fg=colour252]#[bold]\`#[fg=colour246]#[nobold] back to #[fg=colour148]#[bold]${FROM:-the session}#[fg=colour246]#[nobold]  ·  #[fg=colour252]#[bold]⇧←→#[fg=colour246]#[nobold] cycle  ·  #[fg=colour252]#[bold]Ctrl-s#[fg=colour246]#[nobold] sessions " 2>/dev/null
+stamp
 
 # Same server, so this is a direct switch — instant, no detach, control plane never
 # involved, exactly how fleet-cycle moves between sessions. With no client attached

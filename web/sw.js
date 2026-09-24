@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 4b22d3699dfc
+// CLIENT-HASH: cd2ae724b897
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -101,10 +101,188 @@
 // it is still happening — a rebuilt list measures shorter for a frame, the request clamps
 // to 0, and writing that back destroyed the only record of where the reader was. It read as
 // "sometimes forgets" because one short frame was enough to lose it for good.
-const VERSION = 'ghostfleet-v24';
+// v32 HIDES THE DEMO FLEET. `ghostfleet demo` registers three throwaway projects in a
+// `demo` profile, and the Projects screen is the only surface anywhere that merges
+// profiles — so on a real phone they sat in the same list as real work. They are hidden
+// now once there is real work to hide them from, and shown in full when they are all there
+// is, which is the new user who followed the README. An older client DEGRADES rather than
+// dies: it keeps mixing the demo into the list, which is precisely the complaint this
+// version answers and is invisible from the server log, so the bump is what makes the fix
+// reach a phone that already has the client before it.
+//   THE NUMBER IS ONE ABOVE WHATEVER SHIPPED, and that is the whole rule — not a number
+// chosen on a branch. This change has been rebased past three releases while it waited,
+// and each time the bump it was carrying had already been spent by something else. Two
+// branches that both bump the same number produce one name for two different clients,
+// which is precisely the drift the pin exists to catch: the phone keeps the cache it has,
+// and the only symptom is a fix that never arrives. So on every rebase this is re-derived
+// from the version already on the branch below, never incremented again on top of itself.
+// v28 IS THE SESSION HEADER: six controls that wrapped to three rows and 80px, the ⋯ alone
+// on the last one, become one row of 43px. The fleet chip moved onto the detail line under
+// the name, and the bar shrinks instead of wrapping — so the project is what gives and the
+// name, the chat/pane toggle and the ⋯ keep their size. An older client keeps the three-row
+// bar, which costs 37px of an 844px screen on every session you open.
+// v27 FINISHES THE FOOTER AND ADDS THE GESTURE. The nine key-letter buttons became six
+// named touch targets with icons — the letters were muscle memory borrowed from a keyboard
+// the phone does not have — and the per-card verbs moved behind `more`, into the sheet that
+// names the session before it offers anything destructive. A swipe across the transcript
+// now walks to the previous/next session, which is the phone's j/k.
+// v26 IS THE REDESIGN: the cards stopped being a picture of the TUI's cards. Box drawing
+// out, a surface with a status rail and one chip in, and the agent's last line given two
+// real lines instead of one clipped at 28 columns — which is the line the app is opened to
+// read. The toast also stopped landing on top of the composer. No new FILES, so an older
+// client is stale rather than broken here; what it keeps is the screen this version exists
+// to replace, which is invisible from the server log and is exactly why this bump is not
+// optional.
+// v30 IS THE SCROLL FIX, and it renames a precached file. The sessions list used to jump
+// back to the top every five seconds — the poll interval — because the grid screen rebuilt
+// its scrolling container on every render and a fresh element starts at scrollTop 0. The
+// grid is a Preact screen now, so the container outlives the render and the reader's
+// position is simply never disturbed. That port put both card screens in one bundle, so
+// projects.js became screens.js: A PHONE ON v29 HAS NO screens.js IN ITS CACHE, and the new
+// app.js statically imports it, so this is another bump where the old client does not
+// degrade but dies — same shape as v25 and v10. Reported from a real iPhone, which is where
+// it was always going to be reported from: no headless run scrolls a list and then waits.
+// v29 IS THE FACE ID FIX. Returning from the Face ID sheet locked the app that was
+// unlocking: the prompt is a system sheet, so the page goes hidden when it opens and
+// visible the instant the face matches — before the assertion has crossed the network —
+// and the handler that reacts to the app coming back asked `!haveToken()`, which is
+// unconditionally true for the width of that round trip. It called lock(), which clears
+// the token and redraws the lock screen over an unlock still in flight. A phone on v28
+// keeps that, and it is the bug that stops the app being usable at all, so this bump is
+// the one that matters most since v25.
+// v31 STOPS iOS ZOOMING THE PAGE WHEN YOU TAP THE MESSAGE BOX. Safari scales the VISUAL
+// VIEWPORT when a text control smaller than 16px takes focus. Nothing overflows and no box
+// changes size — the page is simply magnified and pannable — so the right-hand side goes
+// off screen and the send button is cut in half. Reported as "when you send a message the
+// scroll left to rigth is eanbled", then precisely: "the chats still gets overflown when
+// press on the text space", with a photograph of `send` clipped. The composer was 15px and
+// every sheet field inherited body's 14px. A phone on v30 keeps it on every tap into a box.
+// v34 MAKES `interrupted` YELLOW. It is the one status whose glyph and colour disagreed:
+// it already wore ⚠, the warning vocabulary, over a failure colour. Red is reserved for
+// need-you — the single state that means a human must act now — and an interrupted turn is
+// a transient (the machine slept, the API hiccuped, a governor parked something). Worth
+// noticing, not worth alarming, which is what yellow already means here for starting, at
+// limit and unknown.
+//   An older client DEGRADES rather than dies: it keeps painting the old colour, which is
+// invisible from the server log and is the entire content of this change, so the bump is
+// what makes it arrive at all.
+// v33 IS THE CHAT, GIVEN THE ROOM IT WAS MISSING. "ther is alot of empty spaces that is not
+// being used that makes the app feel compacted." Measured at 390x844: the chat's chrome is
+// only 14.6% of the viewport, so it was never short of room — but its side padding was
+// `.1em`, which at body's 14px is 1.4 PIXELS, so every bubble sat against the glass while
+// the column opposite it was 54pt of nothing. 12px of gutter, 16px text (the readable floor,
+// and the size #14 raised the composer to), 1.55 leading, and a speaker change now earns
+// more space than the next message from the same speaker. The toast is clamped to two lines
+// as well: a photo's toast carries a file path, wrapped to four lines, and took that height
+// out of the transcript for 4.2 seconds — "the toast will block the chat".
+// v41 ALSO MOVES BETWEEN SCREENS, AND SHOWS THE WAIT. The screens are a stack, so a transition
+// that slides in from the right going deeper and from the left coming back says which way
+// you went — which a static swap cannot. Directional and nothing else: no fades on cards,
+// no stagger, transform and opacity only so it cannot cost a layout on a phone already
+// polling every five seconds, and behind prefers-reduced-motion.
+//   And a wait is now card-shaped. A skeleton rather than a spinner means nothing MOVES
+// when the data lands: the placeholder already holds the final layout and the real cards
+// swap into boxes the eye is resting on. Keyed on a NULL answer, never an empty one — an
+// empty list is a real answer and belongs to the first-run path.
+//   An older client is stale rather than broken here; no new files.
+// v44 STOPS PAYING THE STATUS BAR BACK, AND MAKES THE BAR OPAQUE. v42 laid the shell out to
+// 812 on an 812 screen and the device still showed the band — with the composer now cut off
+// above it (sl812 cb775, and "there is still space but now it gets cut"). A box laid out and
+// not painted is outside the web view: in iOS 26 standalone a black-translucent bar has the
+// web view positioned at the top of the screen but sized to the screen MINUS the bar, so the
+// bottom 53pt are not paintable by anything — WebKit bug 301108. The fix is the meta tag,
+// not CSS: with an opaque bar iOS keeps its strip and the web view reaches the real bottom.
+// The v42 rule is gone; the shell is still pinned. The device should now read sat0 with
+// nothing under the composer — ONE LAUNCH LATE: iOS lays out from the bar style STORED in the
+// web clip and stores the page's meta for next time (measured: the plist on disk is
+// rewritten during a launch, and the layout follows on the next). So after this version
+// paints, quit the app and open it again; or remove and re-add the icon.
+//   Also: an empty chat printed fleet-read's terminal hint ("Send it work: fleet-send -s …")
+// to a phone. It says "No messages yet — send one below" now.
+// v42 ACTUALLY REACHES THE BOTTOM — IT DID NOT, see v44. v41 pinned the shell with position: fixed; inset: 0 and
+// the device came back sl759 on an 812 screen — the same number dvh gave. Pinning did
+// nothing: a fixed box with inset: 0 resolves against the initial containing block, which
+// in iOS standalone IS the short layout viewport. The shell was never what was wrong; the
+// viewport is short by exactly env(safe-area-inset-top), because the page is drawn from
+// y=0 under a black-translucent bar while iOS still subtracts that bar from the height.
+// So in standalone the box is told to be one status bar TALLER than the viewport.
+//   Keyed on the media query AND on a class the client sets, because the probe's `sa1` is
+// an OR of matchMedia and navigator.standalone and does not say which was true — iOS has
+// honoured the legacy property while the query lagged, and a CSS-only rule would then
+// match nothing and cost another launch to find out.
+//   The composer keeps its inset-bottom + 8, so reaching the real bottom does not put it
+// on the home indicator.
+// v41 REACHES THE BOTTOM OF THE SCREEN, and stops standing on the home indicator. The
+// device measured it: ih759 against a physical sh812, short by exactly the top inset of 53
+// — with viewport-fit=cover and a black-translucent bar the page is drawn from y=0 under
+// the status bar and iOS still subtracts it from the viewport, so 100dvh ended 53pt high.
+// The shell is pinned to the screen now instead of sized by the viewport.
+//   The same line carried the second half: gap8 against sab29, i.e. the composer padded
+// 0 + 8 rather than inset + 8, because setProperty('--kb-inset', '') leaves a property
+// behind instead of removing it and the fallback never applied. Harmless only while the
+// shell stopped short; once it reaches the real bottom that is the composer ON the home
+// indicator. Removed, not emptied, and the keyboard-open path still writes 0.
+// v40 MEASURES THE SCREEN FROM THE DEVICE. "still it doesnt use the full screen", in the
+// installed app. The suspicion is that the shell's `height: 100dvh` resolves shorter than
+// the physical screen in iOS standalone with a black-translucent status bar — but no
+// engine here can reproduce it: dvh on a desktop IS the window, and the home-screen app
+// cannot be driven from this machine. So the phone reports its own numbers — viewport,
+// screen, the shell's resolved bottom, the composer's, the band, and both safe-area
+// insets — and the log settles it before anything is changed.
+//   NO FIX IN THIS VERSION, deliberately. Two shaped-like-this guesses have already been
+// shipped against this app; the number comes first now.
+// v38 IS A PROBE, NOT A FIX. The unlock loop survived v37, and the log admits more than
+// one story: a controlled page still fetches the whole shell (this worker revalidates
+// behind the paint), so the request burst cannot tell a cold start from a swap, and the
+// one number that decides it — whether a controller existed at load — is only knowable on
+// the device. So this version adds a gated beacon that says it out loud: controller at
+// load, registration states, every controllerchange, every lock and why, and the swap
+// decision with its three inputs. It 404s; the log line IS the datum, and no server change
+// is needed for any of it.
+//   IT COMES OUT AGAIN. A probe that ships twice is a feature nobody designed.
+// v37 STOPS A CLIENT SWAP COSTING A FACE ID, and takes back a doubled safe-area inset.
+// The swap: a pending service worker was held back by pollPaused(), which counts S.locked
+// as paused — so it waited for the unlock and spent itself one second after the passkey,
+// reloading the page and dropping the in-memory token. One Face ID to unlock, a second to
+// stay. It waits for a live session to end now, and a lock spends it.
+//   The inset: #app already ends in the bottom inset and box-sizing is border-box, so the
+// card list was adding it a second time — 22px + 2 x inset of scrollable nothing after the
+// last card.
+//   THIS BUMP IS THE FIX FOR ANYBODY ALREADY LOOPING, and also the last loop they are
+// asked to sit through: taking this version is itself one more swap, so it costs the
+// second Face ID one final time and every deploy after it is free.
+// v35 MOVES THE GRID'S FOOTER INTO A ⋯ IN THE HEADER. Six icon+label buttons wrapped to
+// two rows, plus a three-line hint under them, cost 179 of 844 points at 390x844 — 21% of
+// the screen. Measured: chrome was 292pt (34.6%) and the card list got 536, which fits
+// THREE of nine sessions. The verbs are the same verbs with the same words, reached from
+// one control the session screen has had since v27. An older client keeps the footer, and
+// with it six of the nine cards it could have shown.
+// v36 KEEPS THE CARD WHEN A SESSION EXITS. Typing `exit` ended the agent, ended the
+// pane's command, and tmux took the session — and the card — down with it, leaving the
+// conversation on disk with nothing on screen pointing at it: "i use parallel session and
+// if i type exit the session is completely remove it and i cant reopen it easily". The
+// pane is held now, the card stays, and it says so instead of showing whatever the agent
+// happened to be doing when it stopped. An older client shows the card with a stale
+// status and no way back.
+// v25 is the first client with a BUILD STEP in it. The Projects screen is Preact now, which
+// means two files the shell has never had before — projects.js (the screen) and preact.js
+// (its dependency chunk) — and app.js statically imports the first of them. THIS IS A
+// VERSION WHERE THE OLD CLIENT DOES NOT DEGRADE, IT DIES: a phone still holding v24 has
+// neither file in its cache, so the moment it paints the new app.js the import fails and
+// the app does not start at all. Same shape as v10, which added md.js. Nothing else
+// changed on screen — the port is meant to be invisible — so the only thing that says the
+// deploy landed is the client line in the settings sheet.
+// v45 draws `queued: N` on a card: prompts fleet-send is holding until that session's turn
+// ends, instead of pasting them into it.
+const VERSION = 'ghostfleet-v45';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
+  // Built, not written: web/src/screens.jsx through vite — BOTH card screens, which is why
+  // this is screens.js and was projects.js up to v28. Stable filenames, no content hash,
+  // which is what lets them sit in this hand-written list at all — see vite.config.mjs,
+  // where that is the whole reason hashing is switched off.
+  './screens.js', './preact.js',
   './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',

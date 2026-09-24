@@ -15,10 +15,38 @@ name: test
 on:
   push:
     branches: [main, staging]
+  # `edited` IS THE POINT, and it is not in the default set. A title or body can change
+  # after every check has passed, and the body is the one piece of text that reaches
+  # public history without ever having been in the repository — GitHub composes it into
+  # the commit message at squash-merge, after the last run and the last reviewer. Listing
+  # types replaces the default, so the other three are spelled out rather than inherited.
   pull_request:
+    types: [opened, edited, synchronize, reopened]
 
 jobs:
+  # THE TEXT CHECK IS ITS OWN JOB because it is the only one that has anything to say
+  # about an edit. Fixing a typo in a body should not spend twenty-eight runner-minutes
+  # re-proving the suite, so `test` sits out an `edited` and this runs in seconds.
+  pr-text:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # THROUGH THE ENVIRONMENT, NEVER INTERPOLATED INTO THE COMMAND. A title on a public
+      # repository is text a stranger wrote, and `run: node x "${{ …title }}"` is a shell
+      # injection wearing a friendly name: the substitution happens before the shell sees
+      # it, so no amount of quoting downstream can help. env: hands the bytes to the
+      # process without anything parsing them on the way.
+      - name: No withheld name in the PR title or body
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: node test/helpers/pr-text-sweep.mjs
+
   test:
+    # An edit changes no code, so there is nothing here for the suite to say. On a push
+    # `github.event.action` is empty, which is not 'edited', so pushes still run.
+    if: github.event.action != 'edited'
     strategy:
       # Not fail-fast: the two legs are the point. macOS is where this is developed
       # and Linux is where the macOS-only guards (stat -f, date -r, osascript,
@@ -45,6 +73,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # ONE PARENT, NOT A WHOLE HISTORY. A push run compares this commit against the
+          # staging it was merged ONTO, which is its first parent, because origin/staging
+          # moves: protection is deliberately not `strict`, two PRs land a minute apart as
+          # a matter of routine, and a run that fetches the branch after the next merge
+          # reads somebody else's newer client. 8ee5980 was told its v33 was below v34 by
+          # a run testing 8ee5980. Depth 1 has no parent to read, and depth 2 is the
+          # whole of the fix — the ancestry that a full clone would buy is not needed,
+          # only the commit this one sits on.
+          fetch-depth: 2
 
       # THE CLONE ABOVE IS SHALLOW and fetches only the ref under test — no fetch-depth is
       # set, so it is depth 1 and there is no `origin/staging` in it at all. Measured against a

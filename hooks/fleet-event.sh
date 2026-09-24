@@ -40,7 +40,7 @@ IFS=$'\x1f' read -r EVENT SESSION CWD TRANSCRIPT NOTE < <(
 
 # SessionEnd: deregister and stop here.
 if [ "$EVENT" = "SessionEnd" ]; then
-  rm -f "$FLEET_DIR/$SESSION.json" 2>/dev/null
+  rm -f "$FLEET_DIR/$SESSION.json" "$FLEET_DIR/$SESSION.task" 2>/dev/null
   exit 0
 fi
 
@@ -49,7 +49,110 @@ folder="${CWD##*/}"
 branch="$(git -C "${CWD:-.}" --no-optional-locks rev-parse --abbrev-ref HEAD 2>/dev/null)"
 ZELL="${ZELLIJ_SESSION_NAME:-}"
 SLOT="${CLAUDE_FLEET_SLOT:-}"
+SOCK="${CLAUDE_FLEET_SOCK:-}"
+# ── EVERY SESSION ON EVERY FLEET, not only the ones launched through the fleet ──
+# sock and slot came from the launcher's environment alone, so a session started any other
+# way — an agent run by hand in a pane, a fleet whose panes predate the launcher — wrote a
+# record with both fields empty. It still had a session_id, so it looked recorded; it simply
+# could not be found BY FLEET. Measured on a real fleet: 28 of 64 running sessions had no
+# addressable record, 8.57 GB of them, and they were the oldest — exactly the ones anything
+# idle-driven wants to find.
+#   Derived from $TMUX when the environment is silent, the same way fleet-pause derives it
+# and for the same reason: $TMUX names the server this pane is actually on, so it cannot go
+# stale the way an exported variable can behind a long-running --resume.
+if [ -z "$SOCK" ] && [ -n "${TMUX:-}" ]; then
+  _s="${TMUX%%,*}"; _s="${_s##*/}"
+  case "$_s" in cf-*) SOCK="$_s" ;; esac
+fi
+# ── THE SLOT IS THE PANE'S NAME NOW, NOT THE NAME IT WAS BORN WITH ───────────
+# CLAUDE_FLEET_SLOT is exported once, at launch, and a rename cannot reach into a running
+# process to change it. So after `x` was renamed `y`, every event went on writing
+# slot:"x" — overwriting whatever fleet-rename had patched — and every reader that looks a
+# session up by name (fleet-read, the phone's chat, the grid card, hibernate's plan) found
+# nothing under `y`. Measured on a live fleet: the tmux session answered to its new name,
+# its record said the old one on every turn, and the phone said "No messages yet".
+#   $TMUX_PANE is the pane's id (`%12`), which a rename does not change, so asking tmux
+# what session that pane is in answers with the CURRENT name. Targeted with the pane id and
+# nothing else: without -t, display-message answers for whichever session the server
+# considers current, which is somebody else's as often as not.
+#   A tab or a `+` name is never claimed (CLAUDE.md): an agent run by hand inside a tab
+# keeps whatever the environment says, which is what it did before.
+PANE=""
+if [ -n "$SOCK" ] && [ -n "${TMUX_PANE:-}" ]; then
+  case "${TMUX:-}" in *"/$SOCK,"*)
+    # Qualified by the SERVER's pid ($TMUX is "<socket>,<server-pid>,<session>"): pane ids
+    # restart at %0 with every server, so a bare `%3` in a record left from a server that
+    # has since died would claim whichever new session got that id.
+    _r="${TMUX#*,}"; PANE="$TMUX_PANE@${_r%%,*}"
+    _live="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
+    case "$_live" in ''|_*|+*) ;; *) SLOT="$_live" ;; esac
+  ;; esac
+fi
+if [ -z "$SLOT" ] && [ -n "$SOCK" ] && [ -z "$PANE" ]; then
+  SLOT="$(tmux -L "$SOCK" display-message -p '#{session_name}' 2>/dev/null)"
+  # A leading `_` is a tab, not an agent (CLAUDE.md), and a `+` name is a tmux expression
+  # rather than a name — neither is a slot this should claim.
+  case "$SLOT" in _*|+*) SLOT="" ;; esac
+fi
 now="$(date +%s)"
+
+# --- a prompt typed into a RUNNING turn is the next task, not a replacement ----
+# Claude Code folds a message submitted mid-turn into the turn in progress, and the agent
+# reads it as a change of direction: task A is dropped for task B and nothing says so.
+# fleet-send now queues its own traffic (bin/fleet-send, "the queue"), but a prompt a
+# HUMAN types into a busy session goes straight in, and the launch contract alone is one
+# paragraph among many. So the prompt is labelled where the agent reads it.
+#   Measured on 2.1.280 before relying on it: a mid-turn submit DOES fire UserPromptSubmit
+# (two prompts, two events, one Stop), and so does a background task's completion — as a
+# "prompt" of `<task-notification>…`, which is the machine talking and is skipped here.
+#   "MID-TURN" IS THE STATUS THIS HOOK LAST WROTE, read before it is overwritten below:
+# `working` means a turn started and has not Stopped. An Esc interrupt fires NO Stop
+# (measured), so `working` alone would label the first prompt after an interrupt as queued
+# behind the task the human just abandoned — so the turn's transcript is checked for the
+# interrupt record too. What was asked is kept in <session_id>.task: its first line, and
+# the transcript line the turn began at.
+if [ "$EVENT" = "UserPromptSubmit" ]; then
+  _prompt="$(printf '%s' "$input" | jq -r '.prompt // ""' 2>/dev/null)"
+  _taskf="$FLEET_DIR/$SESSION.task"
+  case "$_prompt" in
+    "<task-notification>"*|"<local-command"*|"") ;;
+    *)
+      _prev="$(jq -r '.status // ""' "$FLEET_DIR/$SESSION.json" 2>/dev/null)"
+      _t_at=""; _t_line=""
+      [ -f "$_taskf" ] && IFS=$'\x1f' read -r _t_at _t_line < "$_taskf"
+      case "$_t_at" in ''|*[!0-9]*) _t_at="" ;; esac
+      _mid=0
+      if [ "$_prev" = working ] && [ -n "$_t_line" ]; then
+        _mid=1
+        if [ -n "$_t_at" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] \
+           && tail -n "+$(( _t_at + 1 ))" "$TRANSCRIPT" 2>/dev/null \
+              | grep -F '[Request interrupted by user' >/dev/null 2>&1; then
+          _mid=0
+        fi
+      fi
+      # fleet-send --now: pasted into the turn ON PURPOSE. Say nothing, once.
+      _nowf="$FLEET_DIR/${SOCK:-_}.${SLOT:-_}.now"
+      if [ -n "$SOCK" ] && [ -n "$SLOT" ] && [ -f "$_nowf" ]; then rm -f "$_nowf"; _mid=0; fi
+      if [ "$_mid" = 1 ]; then
+        jq -n --arg t "$_t_line" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit",
+          additionalContext: ("[fleet] This message arrived while you were still working on: \"" + $t + "\". It is QUEUED WORK, not a replacement: add it to your task list, finish the task in hand, then do this one — unless this message itself says to stop or switch (stop, instead, drop that, first do). Your closing report lists every task you received this turn with its state.")}}' 2>/dev/null
+      else
+        # A new turn: this prompt IS the task in hand. A fleet reply preamble is not what
+        # was asked, so the first line after it is.
+        _first="$_prompt"
+        case "$_first" in "[fleet] This request comes from"*)
+          _first="$(printf '%s\n' "$_first" | awk 'f && NF { print; exit } !NF { f = 1 }')" ;;
+        esac
+        _first="$(printf '%s\n' "$_first" | awk 'NF { print; exit }' | tr '\t\037' '  ')"
+        _tl=0
+        [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] \
+          && _tl="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
+        case "$_tl" in ''|*[!0-9]*) _tl=0 ;; esac
+        printf '%s\x1f%s\n' "$_tl" "${_first:0:160}" > "$_taskf" 2>/dev/null
+      fi ;;
+  esac
+fi
+[ "$EVENT" = "Stop" ] && rm -f "$FLEET_DIR/$SESSION.task" 2>/dev/null
 
 case "$EVENT" in
   UserPromptSubmit) status="working"                       # any new prompt un-parks the session
@@ -85,10 +188,10 @@ esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"
 if jq -n \
   --arg id "$SESSION" --arg z "$ZELL" --arg slot "$SLOT" \
-  --arg sock "${CLAUDE_FLEET_SOCK:-}" \
+  --arg sock "$SOCK" --arg pane "$PANE" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
   --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" \
-  '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, cwd:$cwd, folder:$folder,
+  '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, pane:$pane, cwd:$cwd, folder:$folder,
     branch:$branch, status:$status, transcript:$tr, ts:$ts}' \
   >"$tmp" 2>/dev/null
 then
@@ -307,7 +410,7 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     # events within CLAUDE_FLEET_NOTIFY_DEBOUNCE seconds (default 30) are suppressed,
     # so a burst of finishes wakes it ONCE. OFF by default — each wake spends a
     # master turn on the shared account. Never fires for the lead's own turns (this
-    # block is workers-only); fleet-send just queues if the master is mid-turn.
+    # block is workers-only); fleet-send queues it if the master is mid-turn.
     #
     # Precedence (matches the TUI settings page, projects screen → ,):
     #   <sock>.notify-lead-off  is an authoritative KILL SWITCH — if present this
@@ -484,6 +587,45 @@ Full reply: fleet-read -s $CLAUDE_FLEET_SOCK $SLOT 3 — to ask it something els
         >> "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.inbox" 2>/dev/null || true
       rm -f "$rt" "$rt.armed" 2>/dev/null
     fi
+  fi
+fi
+
+# --- deliver the next QUEUED prompt as a turn of its own (bin/fleet-send) -------
+# fleet-send writes a prompt for a working session to <sock>.<slot>.queue instead of
+# pasting it into the turn; this Stop is the moment that turn is over. AFTER the relay
+# above on purpose: that block consumes this turn's reply address, and the queued prompt
+# may carry its own, which `fleet-send --dequeue` writes as it delivers.
+#   DETACHED AND RETRIED, because the hook runs while the turn is still finishing — the
+# pane usually still shows the spinner at this instant, and --dequeue answers "busy" (3)
+# rather than fold the prompt into the very turn it was queued behind. It also waits for an
+# EMPTY composer (_input_state), for the same reason the master nudge does: a human half-way
+# through a sentence must not get a queued prompt glued onto it.
+#   ONE DRAINER PER SESSION, pid in <queue>.drain, so a burst of Stops does not race two
+# deliveries. Bounded: a drainer that gives up leaves the queue intact — the card still
+# says `queued: N`, the next Stop starts another, and the next plain fleet-send to an
+# idle session delivers the head itself.
+if [ "$EVENT" = "Stop" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] \
+   && [ -s "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.queue" ]; then
+  _qd="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.queue.drain"
+  _qp="$(cat "$_qd" 2>/dev/null)"
+  case "$_qp" in ''|*[!0-9]*) _qp="" ;; esac
+  if [ -z "$_qp" ] || ! kill -0 "$_qp" 2>/dev/null; then
+    export -f _input_state
+    FLEET_DIR="$FLEET_DIR" nohup bash -c '
+      sock="$1"; slot="$2"; lock="$3"; every="$4"; tries="$5"
+      echo $$ > "$lock" 2>/dev/null
+      trap "rm -f \"$lock\"" EXIT
+      i=0
+      while [ "$i" -lt "$tries" ]; do
+        sleep "$every"; i=$((i + 1))
+        tmux -L "$sock" has-session -t "=$slot" 2>/dev/null || exit 0
+        [ -s "$FLEET_DIR/$sock.$slot.queue" ] || exit 0
+        _input_state "$sock" "$slot"; [ "$?" = 0 ] || continue
+        fleet-send -s "$sock" --dequeue "$slot" >/dev/null 2>&1
+        [ "$?" = 3 ] || exit 0
+      done
+    ' _ "$CLAUDE_FLEET_SOCK" "$SLOT" "$_qd" "${CLAUDE_FLEET_QUEUE_EVERY:-1}" \
+         "${CLAUDE_FLEET_QUEUE_TRIES:-300}" >/dev/null 2>&1 &
   fi
 fi
 

@@ -596,6 +596,12 @@ if [ -n "$REUSE" ]; then
     echo "fleet-spawn: reusing worktree $WT (branch $BRANCH)" >&2
   fi
 elif [ -e "$WT" ]; then
+  # THE SAME BUSY CHECK --reuse makes. Without it, naming a worker after a worktree that
+  # already exists started a second agent in that checkout, beside the one already there,
+  # as `<name>~2`: two sessions editing one tree with no locking, and a "new" task that
+  # was not actually given a clean place to happen.
+  s="$(sess_for "$WT")"
+  [ -z "$s" ] || { echo "fleet-spawn: worktree '$NAME' is busy (session '$s') — a new task is a new session: fleet-stop --reclaim $s first, or pick another name" >&2; exit 1; }
   echo "fleet-spawn: $WT already exists — reusing it" >&2
   BRANCH="$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "${BRANCH:-$NAME}")"
 else

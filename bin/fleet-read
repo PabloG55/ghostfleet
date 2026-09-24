@@ -61,6 +61,43 @@ if [ -z "$row" ] && [ "$SESSION" != master ]; then          # legacy files (no s
     jq -r --arg s "$SESSION" 'select(.slot==$s and ((.sock // "") == ""))|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' "$f" 2>/dev/null
   done | sort -rn | head -1)"
 fi
+# ── NO RECORD UNDER THIS NAME: ASK THE PANE WHO IS IN IT ─────────────────────
+# A record is written under the name the hook saw, and until the hook learned to ask tmux
+# for the pane's CURRENT name that was the name the agent was LAUNCHED with. So a renamed
+# session kept a record under its old name, and this printed "live but has no transcript
+# yet" — to the CLI, and to the phone, which reads through here — for a session with a
+# whole conversation behind it. Measured live on exactly that shape.
+#   Recognised by evidence only, never by "the newest transcript in its folder" (see
+# below): a record carrying this pane's id, which the hook writes and a rename does not
+# change; or the agent's own <config>/sessions/<pid>.json, for the pane's process or the
+# agent under it. The session heals for good on its next turn, when the hook rewrites the
+# record under the live name; this is what makes it readable until then.
+if [ -z "$row" ] && [ "$SESSION" != master ] && [ -n "$SOCK" ]; then
+  IFS=$'\t' read -r _pane _ppid < <(tmux -L "$SOCK" list-panes -t "$SESSION" \
+      -F '#{pane_id}@#{pid}'$'\t''#{pane_pid}' 2>/dev/null | head -1)
+  if [ -n "${_pane:-}" ]; then
+    row="$(for f in "$FLEET_DIR"/*.json; do
+      jq -r --arg p "$_pane" --arg k "$SOCK" \
+        'select((.pane // "") == $p and ((.sock // "") == $k))|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' "$f" 2>/dev/null
+    done | sort -rn | head -1)"
+  fi
+  if [ -z "$row" ] && [ -n "${_ppid:-}" ]; then
+    for _p in "$_ppid" $(pgrep -P "$_ppid" 2>/dev/null); do
+      _note="$CFG/sessions/$_p.json"; [ -f "$_note" ] || continue
+      _sid="$(jq -r '.sessionId // empty' "$_note" 2>/dev/null)"
+      case "$_sid" in [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]-*) ;; *) continue ;; esac
+      # A record on ANOTHER fleet is not this pane's, whatever id it carries.
+      row="$(jq -r --arg k "$SOCK" 'select((.sock // "") == "" or .sock == $k)|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' \
+        "$FLEET_DIR/$_sid.json" 2>/dev/null)"
+      if [ -z "$row" ]; then
+        _ncwd="$(jq -r '.cwd // empty' "$_note" 2>/dev/null)"
+        _tr=""; [ -n "$_ncwd" ] && _tr="$CFG/projects/$(printf '%s' "$_ncwd" | sed 's/[^A-Za-z0-9]/-/g')/$_sid.jsonl"
+        row="0	$_tr	$_sid"
+      fi
+      break
+    done
+  fi
+fi
 tr="$(printf '%s' "$row" | cut -f2)"
 sid="$(printf '%s' "$row" | cut -f3)"
 

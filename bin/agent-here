@@ -44,6 +44,110 @@ set -uo pipefail
 # claude-here all exec it — so there is no route that can quietly miss it.
 [ "${CLAUDE_FLEET_AUTOUPDATE:-0}" = 1 ] || export DISABLE_AUTOUPDATER=1
 
+# ── THE CARD OUTLIVES THE AGENT ───────────────────────────────────────────────
+# "i use parallel session and if i type exit the session is completely remove it and
+# i cant reopen it easily."
+#
+# Typing `exit` ends the agent. The pane's command ends with it, tmux takes the
+# session down (`remain-on-exit off`, set globally in tmux/cf.tmux.conf), and the
+# CARD goes with the session — so the conversation is still on disk with nothing on
+# screen pointing at it.
+#
+# WHY THIS IS HERE AND NOT AT THE EIGHT `new-session` SITES. Every one of them
+# launches the same string, `exec agent-here "<name>"` — this file is documented
+# above as the one entry point every launch path goes through. Putting the behaviour
+# in the launcher means fleet-spawn, fleet-open, fleet-project, fleet-companion,
+# fleet-tab, fleet-stack and the grid's two all get it without being touched, and a
+# NINTH site added later gets it for free rather than being the one that forgot.
+#
+# WHY NOT `remain-on-exit on`. That is a global `set -g` in both tmux configs, so it
+# would also apply to tab sessions and the stack, which are editor and terminal panes
+# with no conversation behind them — a dead shell would sit there as a pane nobody can
+# act on. Holding the pane HERE applies to exactly the sessions that have something to
+# resume, and it can say so.
+#
+# THE COST, NAMED: the agent is no longer `exec`ed, so there is a shell between tmux
+# and it. Checked before doing it — nothing in bin/, lib/, tmux/ or hooks/ reads
+# `pane_current_command` or `pane_pid`, and every status detector reads the pane's
+# CONTENT via capture-pane, which is unchanged.
+MARK_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+SLOT="${1:-}"; case "$SLOT" in --|"") SLOT="${CLAUDE_FLEET_SLOT:-}" ;; esac
+MARK=""
+[ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] && MARK="$MARK_DIR/$CLAUDE_FLEET_SOCK.$SLOT.exited"
+
+# A LEFTOVER MARKER WOULD MAKE A LIVE SESSION READ AS EXITED, which is the same shape
+# as the stale park marker fleet-spawn and fleet-open both clear on the way in.
+[ -n "$MARK" ] && rm -f "$MARK" 2>/dev/null
+# ...and a leftover ASLEEP marker makes a live session read as asleep, and makes the next tap
+# on its card try to start a second one under the same name. Any start of this session is
+# the end of its sleep — except the wake itself, which keeps the marker until its own poll
+# sees a prompt, so a wake that does not come back can still be retried.
+[ -n "$MARK" ] && [ "${CLAUDE_FLEET_WAKING:-}" != 1 ] && rm -f "${MARK%.exited}.asleep" 2>/dev/null
+
+# THE NAME AT EXIT, NOT THE NAME AT LAUNCH. This shell outlives the agent by design, and
+# the session can be renamed in between (fleet-rename). A marker written under the launch
+# name is a marker for a session that no longer exists, so the renamed card read as live
+# with nothing in it instead of as exited. $TMUX_PANE is stable across a rename; the
+# session it sits in is asked for at the moment the marker is written.
+live_mark() {
+  [ -n "$MARK" ] && [ -n "${TMUX_PANE:-}" ] || return 0
+  local now
+  now="$(tmux -L "$CLAUDE_FLEET_SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
+  case "$now" in ''|_*|+*) return 0 ;; esac
+  SLOT="$now"; MARK="$MARK_DIR/$CLAUDE_FLEET_SOCK.$SLOT.exited"
+}
+
+# A SESSION THAT NEVER STARTED IS NOT A SESSION THAT EXITED, and telling them apart is
+# the whole of this function's care. `exit` typed into a running agent should keep the
+# card; an agent binary that cannot run at all must take the pane down exactly as it did
+# before, because that is the signal bin/fleet-spawn reads to say "its pane ran
+# agent-here and that came straight back — the agent binary could not exec", with the
+# `claude --version` hint beside it.
+#   CAUGHT BY THE SUITE, not by reading: holding the pane on ANY exit made a
+# wrong-platform binary look like a clean start, so fleet-spawn reported success, left a
+# manifest row, and lost its diagnostic — six rows, and every one of them a case where
+# the failure had become invisible rather than louder.
+#   TWO SIGNALS, because neither alone is enough. 126/127 are the shell's own "cannot
+# execute" and "not found", which is the wrong-platform case exactly; and an agent that
+# fell over in the first few seconds never got as far as a prompt, whatever it returned.
+# A person typing `exit` is always on the far side of both.
+AGENT_MIN_RUN="${CLAUDE_FLEET_MIN_RUN:-5}"
+
+run_agent() {
+  local launcher="$1"; shift
+  # No `exec`: this shell has to outlive the agent to write the marker and hold the
+  # pane. A tab or stack session never reaches here, so neither does the holding.
+  while :; do
+    local t0=$SECONDS
+    "$launcher" "$@"
+    local rc=$? ran=$((SECONDS - t0))
+    # NOT HELD WHEN THERE IS NOTHING TO HOLD FOR. Without a socket and a slot there is
+    # no card to keep and no marker to key off, so the old behaviour is exactly right.
+    [ -n "$MARK" ] || return "$rc"
+    # ...and not held when the agent never started. See above.
+    if [ "$rc" = 126 ] || [ "$rc" = 127 ] || [ "$ran" -lt "$AGENT_MIN_RUN" ]; then
+      return "$rc"
+    fi
+    live_mark
+    : > "$MARK" 2>/dev/null
+    printf '
+  this session has exited — its conversation is still on disk.
+' >&2
+    printf '  press Enter to resume it here, or close the pane to leave the card exited.
+' >&2
+    printf '  from anywhere:  fleet-restart --reopen %s
+
+' "$SLOT" >&2
+    # A pane whose command has ended is a pane tmux removes; reading holds it open.
+    # EOF (the pane really is being torn down) leaves the marker in place, which is
+    # what makes the card render as exited rather than vanishing.
+    read -r _ </dev/tty || return "$rc"
+    rm -f "$MARK" 2>/dev/null
+    printf '  resuming…
+' >&2
+  done
+}
+
 AGENT="${CLAUDE_FLEET_AGENT:-}"
 
 # Recover the agent from the marker when the env doesn't carry it. This is what
@@ -57,18 +161,18 @@ fi
 
 case "${AGENT:-claude}" in
   claude|"")
-    exec claude-here "$@" ;;
+    run_agent claude-here "$@"; exit $? ;;
 esac
 
 if ! command -v fleet-agent >/dev/null 2>&1; then
   echo "agent-here: fleet-agent is not installed — cannot resolve agent '$AGENT'; falling back to claude" >&2
-  exec claude-here "$@"
+  run_agent claude-here "$@"; exit $?
 fi
 
 launcher="$(fleet-agent field "$AGENT" launcher 2>/dev/null)"
 if [ -z "$launcher" ] || ! command -v "$launcher" >/dev/null 2>&1; then
   echo "agent-here: no launcher for agent '$AGENT' — falling back to claude" >&2
-  exec claude-here "$@"
+  run_agent claude-here "$@"; exit $?
 fi
 
 bin="$(fleet-agent field "$AGENT" bin 2>/dev/null)"
@@ -82,4 +186,4 @@ if [ -n "$bin" ] && ! command -v "$bin" >/dev/null 2>&1; then
 fi
 
 export CLAUDE_FLEET_AGENT="$AGENT"
-exec "$launcher" "$@"
+run_agent "$launcher" "$@"

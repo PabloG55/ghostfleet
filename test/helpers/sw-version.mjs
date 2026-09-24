@@ -43,6 +43,9 @@ const US = '\x1f';
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
 const skipGroup = (what, why) => rows.push('#SKIP' + US + what + US + why);
+// Its own marker, because run.sh counts the two apart: a skip says the machine could not,
+// an n/a says the question did not arise. Neither is a pass and only one is a capability.
+const naGroup = (what, why) => rows.push('#NA' + US + what + US + why);
 
 // ── the two fields, read out of a sw.js ────────────────────────────────────
 // NUMBER, not string. `Number.parseInt` on 'v9' vs 'v19' is the whole reason this function
@@ -65,9 +68,15 @@ export function hashOf(src) {
 // THE RULE, in the order it is applied:
 //   1. no VERSION at all               -> fail. The file is the pin; an unreadable pin is worse
 //                                         than a wrong one, because nothing downstream notices.
-//   2. already in staging               -> skip. On staging itself, or on a branch that has landed,
-//                                         there is nothing to be ahead of. Not a pass: a pass
-//                                         would claim an ordering nobody checked.
+//   2. already in staging               -> n/a, NOT skip and NOT pass. On staging itself, or on
+//                                         a branch that has landed, there is nothing to be ahead
+//                                         of: the question does not arise. A pass would claim an
+//                                         ordering nobody checked; a skip would claim the machine
+//                                         could not do it. Suppressed on a push run, where the
+//                                         comparison is against the first parent instead.
+//                                         Ordered AFTER rule 1 on purpose: an unreadable VERSION
+//                                         fails first, so a broken subject can never reach here
+//                                         and hide behind "not applicable".
 //   3. no origin/staging to read           -> skip locally, FAIL in CI on a pull request. A guard
 //                                         that quietly no-ops in the one place it matters reads
 //                                         as covered and is not.
@@ -81,11 +90,20 @@ export function hashOf(src) {
 export function verdict(s) {
   const ours = s.ours, theirs = s.theirs;
   if (ours == null) return { kind: 'fail', reason: 'web/sw.js has no `const VERSION = \'ghostfleet-vNN\'` to read' };
-  if (s.headInBase) return { kind: 'skip', reason: 'this commit is already in staging — nothing to be ahead of' };
+  // NOT ON A PUSH RUN. Every push to staging IS staging, so `headInBase` is trivially
+  // true there and short-circuiting on it throws away the one question worth asking:
+  // did this commit land ahead of the staging it was merged ONTO. That base is its first
+  // parent, and pushCI is what selects it (see the runtime half).
+  if (s.headInBase && !s.pushCI) {
+    return { kind: 'na', reason: 'this commit is already in staging — nothing to be ahead of' };
+  }
   if (!s.refPresent) {
     return s.prCI
       ? { kind: 'fail', reason: 'CI has no origin/staging, so the ordering was never checked — the fetch step in .github/workflows/test.yml did not produce it' }
-      : { kind: 'skip', reason: 'no origin/staging in this clone — `git fetch origin staging` to enable the ordering check' };
+      // A MISSING REF IS A MISSING THING, and the word matters: the suite sorts a skip by
+      // whether it names something the machine lacks, and "no origin/staging in this
+      // clone" named a fact without naming a lack.
+      : { kind: 'skip', reason: 'origin/staging is missing from this clone — `git fetch origin staging` to enable the ordering check' };
   }
   if (theirs == null) return { kind: 'fail', reason: 'origin/staging:web/sw.js has no VERSION to compare against' };
   if (ours > theirs) return { kind: 'pass', reason: `v${ours} is above staging's v${theirs}` };
@@ -134,9 +152,29 @@ is('...but not once the bytes differ', 'fail',
 is('...and never excuses a version below staging', 'fail',
    kindOf({ ours: 18, theirs: 19, ourHash: 'cccccccccccc', theirHash: 'cccccccccccc' }));
 
-// The three states that are not a comparison at all.
-is('on staging itself there is nothing to compare', 'skip', kindOf({ ours: 19, theirs: 19, headInBase: true }));
-is('...and a merged branch is the same case', 'skip', kindOf({ ours: 19, theirs: 20, headInBase: true }));
+// The states that are not a comparison at all — and they are not all the same KIND.
+// NOT APPLICABLE IS NOT A SKIP AND NOT A PASS. `skip` claims the machine could not do
+// it, which is false here and was read (correctly, by the suite's own rule) as a group
+// hiding a broken subject behind a capability it never lacked. That is what turned
+// staging red. The question genuinely does not arise, so it gets its own answer.
+is('on staging itself the question does not arise', 'na', kindOf({ ours: 19, theirs: 19, headInBase: true }));
+is('...and a merged branch is the same case', 'na', kindOf({ ours: 19, theirs: 20, headInBase: true }));
+// AND AN N/A MUST NOT BE REACHABLE BY BREAKING THE SUBJECT, or it is the same hole with a
+// friendlier label. The ordering is the guarantee: an unreadable VERSION is decided
+// first, so the one input a person controls cannot buy its way out of the check.
+is('an unreadable VERSION fails even where the question would not arise', 'fail',
+   kindOf({ ours: null, theirs: 19, headInBase: true }));
+// ON A PUSH RUN headInBase IS TRIVIALLY TRUE — every push to staging IS staging — so it
+// must NOT short-circuit, or the check never runs on the one ref it protects.
+is('a push run still compares, against its first parent', 'pass',
+   kindOf({ ours: 20, theirs: 19, headInBase: true, pushCI: true }));
+is('...and still catches a client that went backwards there', 'fail',
+   kindOf({ ours: 18, theirs: 19, headInBase: true, pushCI: true }));
+// THE RACE THIS REPLACED: staging moving on between the merge and the fetch. With the
+// base pinned to the first parent, a newer staging is simply not what is being read, so
+// the shape that failed 8ee5980 cannot arise. Asserted as the pair it actually was.
+is('a commit is judged against what it landed on, not what landed after', 'pass',
+   kindOf({ ours: 33, theirs: 33, ourHash: 'aaaaaaaaaaaa', theirHash: 'aaaaaaaaaaaa', headInBase: true, pushCI: true }));
 // A LOCAL CLONE WITHOUT THE REF SKIPS. A CI RUN WITHOUT IT DOES NOT — that is the
 // no-op-that-reads-as-covered this file's header is about, and it is the one failure mode
 // worth failing the build over even though nothing is wrong with the code.
@@ -175,20 +213,40 @@ const ok = (...args) => {
   return r.status === 0;
 };
 const headInBase = refPresent && ok('merge-base', '--is-ancestor', 'HEAD', REF);
+const pushCI = process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_EVENT_NAME === 'push';
+
+// WHICH STAGING TO COMPARE AGAINST, and on a push run it is not the branch name.
+// origin/staging moves: protection here is deliberately not `strict`, so two PRs land a
+// minute apart routinely, and a push run that fetches the branch AFTER the next merge
+// compares this commit against somebody else's newer client. Measured: 8ee5980 was told
+// its v33 was "BELOW staging's v34" by a run testing 8ee5980, because b5af1ec had landed
+// in between. The ancestry check that should have caught it cannot: the checkout is
+// shallow and origin/staging is fetched shallow too, so the two histories share no
+// commit and `--is-ancestor` answers no for want of objects rather than for want of
+// ancestry.
+//   The staging this commit was merged ONTO is its first parent, it cannot move, and it
+// is the thing the question is actually about. Depth 2 in the workflow is what makes it
+// readable — a whole history is not needed to see one parent.
+const BASE = pushCI ? 'HEAD^1' : REF;
+const basePresent = pushCI
+  ? git('rev-parse', '--verify', '--quiet', `${BASE}^{commit}`) != null
+  : refPresent;
 
 const ourSrc = fs.readFileSync(path.join(ROOT, 'web', 'sw.js'), 'utf8');
-const theirSrc = refPresent ? git('show', `${REF}:web/sw.js`) : null;
+const theirSrc = basePresent ? git('show', `${BASE}:web/sw.js`) : null;
 const state = {
   ours: versionOf(ourSrc),
   theirs: versionOf(theirSrc),
   ourHash: hashOf(ourSrc),
   theirHash: hashOf(theirSrc),
-  refPresent,
+  refPresent: basePresent,
   headInBase,
+  pushCI,
   prCI: process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_EVENT_NAME === 'pull_request',
 };
 const v = verdict(state);
 if (v.kind === 'skip') skipGroup('the client version is above staging\'s', v.reason);
+else if (v.kind === 'na') naGroup('the client version is above staging\'s', v.reason);
 else is(`the client version is above staging's — ${v.reason}`, 'pass', v.kind);
 
 console.log(rows.join('\n'));

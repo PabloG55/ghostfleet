@@ -26,8 +26,111 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIX="$ROOT/test/fixtures"
 FILTER="${1:-}"
-PASS=0; FAIL=0; SKIP=0; GROUP=""
+
+# ── a filter SKIPS the groups it does not name ───────────────────────────────
+# `FILTER` used to gate PRINTING only: every group still ran, so a worker who wanted to
+# watch one new row go red paid for the whole suite — 13 minutes here, 15 in CI. That is
+# the tax on every iteration of every change to this file, and it is paid most often by
+# whoever is changing it most.
+#
+# The file is already segmented: 168 `group "..."` lines at column 0, and nothing between
+# two of them belongs to anybody else. So a filtered run is the preamble, the groups whose
+# names match, and the summary — generated and `exec`ed in place of this one.
+# `./test/run.sh "the agent column"` is 5.4s against a 13 minute full run.
+#
+# A GROUP THAT LOSES ITS SETUP MUST REFUSE TO RUN, NOT RUN BADLY. Twelve `fleet-serve:`
+# groups share one daemon started by `free_port answers in digits, colour or not`; drop
+# that and they do not fail cleanly — they fail the way this repo keeps getting bitten. A
+# pane or a daemon that was never started reads as an EMPTY capture, and a row asserting an
+# absence answers "no" against nothing and goes GREEN: faster, quieter, and proving less
+# than its name claims. `set -u` does not catch it either, because it fires only where a
+# skipped group's variable is actually READ, and the silent cases are the ones that read
+# nothing. So a group declares what it needs with `# needs:`, the need is checked BEFORE a
+# single assertion runs, and an unmet one names both halves and prints the command that
+# would work. Nothing is auto-included: quietly running more than was asked for is how a
+# declaration goes stale without anyone finding out.
+#
+# SEVERAL FILTERS, because one substring cannot name both a group and its provider —
+# "destructive verbs" and "free_port answers" share no text, so a single-argument filter
+# could never satisfy its own requirement.
+cf_only() {                        # $CF_F = filters, one per line;  $1 = source;  $2 = dest
+  # Through the ENVIRONMENT, not `-v`: awk's -v cannot carry a literal newline, and a
+  # group name can hold anything a shell word can, so there is no safe single-character
+  # separator to squeeze them onto one line with.
+  awk -v root="$ROOT" '
+    BEGIN { nf = split(ENVIRON["CF_F"], F, "\n"); for (i = 1; i <= nf; i++) if (F[i] == "") { delete F[i] } }
+    { line[NR] = $0 }
+    /^printf / && index($0, "passed") && index($0, "failed") && !epi { epi = NR }
+    /^group "/ { n++; start[n] = NR; nm = $0; sub(/^group "/, "", nm); sub(/".*$/, "", nm); name[n] = nm }
+    /^# needs: / && n > 0 { r = $0; sub(/^# needs: /, "", r); need[n] = need[n] (need[n] == "" ? "" : "\n") r }
+    END {
+      if (!epi || !n) { print "cannot segment this file" > "/dev/stderr"; exit 4 }
+      for (i = 1; i <= n; i++) {
+        last[i] = (i < n ? start[i+1] - 1 : epi - 1)
+        for (f in F) if (index(name[i], F[f]) > 0) keep[i] = 1
+        if (keep[i]) kept++
+      }
+      if (!kept) { printf("no group matches %s\n", filt) > "/dev/stderr"; exit 2 }
+      for (i = 1; i <= n; i++) {
+        if (!keep[i] || need[i] == "") continue
+        nn = split(need[i], N, "\n")
+        for (q = 1; q <= nn; q++) {
+          met = 0
+          for (j = 1; j <= n; j++) if (keep[j] && index(name[j], N[q]) > 0) met = 1
+          if (met) continue
+          if (!said) { print "refusing to run a filtered suite that would prove nothing:" > "/dev/stderr"; said = 1 }
+          printf("\n  group  %s\n  needs  %s\n         ...which this filter does not keep. A group whose setup\n         never ran does not fail cleanly here: it reads an empty\n         capture and asserts an absence against nothing.\n", name[i], N[q]) > "/dev/stderr"
+          extra[N[q]] = 1; unmet = 1
+        }
+      }
+      if (unmet) {
+        line2 = ""
+        for (f in F) line2 = line2 " \047" F[f] "\047"
+        for (e in extra) line2 = line2 " \047" e "\047"
+        printf("\n  run:  ./test/run.sh%s\n", line2) > "/dev/stderr"
+        exit 3
+      }
+      # ROOT comes from BASH_SOURCE and the generated copy does not live in the repo.
+      for (k = 1; k < start[1]; k++)
+        if (line[k] ~ /^ROOT="\$\(cd /) printf("ROOT=%c%s%c\n", 39, root, 39); else print line[k]
+      for (i = 1; i <= n; i++) if (keep[i]) for (k = start[i]; k <= last[i]; k++) print line[k]
+      for (k = epi; k <= NR; k++) print line[k]
+    }' "$1" > "$2"
+}
+if [ -n "$FILTER" ] && [ -z "${CF_ONLY:-}" ]; then
+  CF_F=""; for cf_a in "$@"; do CF_F="$CF_F$cf_a
+"; done
+  export CF_F
+  # Under the same prefix the dead-run sweep already reaps, and keyed on this pid, so a
+  # filtered run does not leave a copy of the suite in /tmp for every invocation.
+  CF_DIR="$(mktemp -d "/tmp/ghostfleet-test.$$.onlyXXXXXX")"
+  # NOT `if cf_only ...; then exec; fi; exit $?` — after an `if` whose condition FAILED,
+  # `$?` is the status of the `if` statement itself, which is 0. That spelling made a
+  # refusal exit 0: the message printed, and every caller read it as a pass.
+  cf_only "${BASH_SOURCE[0]}" "$CF_DIR/run.sh"; cf_rc=$?
+  # A GENERATED SUITE THAT DOES NOT PARSE MUST NOT RUN. Two groups of 171 sit inside a
+  # block that opens before them and closes after the next one, so lifting either one out
+  # on its own leaves an unbalanced `if` — and bash does not fail at the top, it runs
+  # everything down to the break and then dies on "unexpected end of file", which reads as
+  # a suite that ran and crashed rather than one that was never assembled. Checked here so
+  # the answer is a refusal instead of a partial run with a syntax error at the end of it.
+  if [ "$cf_rc" -eq 0 ] && ! bash -n "$CF_DIR/run.sh" 2>/dev/null; then
+    printf 'this filter cannot be lifted out on its own:\n\n' >&2
+    printf '  the groups it keeps sit inside a block that spans other groups, so the\n' >&2
+    printf '  extract does not parse. Widen the filter, or run the whole suite.\n' >&2
+    cf_rc=5
+  fi
+  [ "$cf_rc" -eq 0 ] && CF_ONLY=1 exec bash "$CF_DIR/run.sh"
+  rm -rf "$CF_DIR"; exit "$cf_rc"
+fi
+PASS=0; FAIL=0; SKIP=0; NA=0; GROUP=""
 R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; D=$'\033[2m'; N=$'\033[0m'
+# OUR OWN wire separator, and it is the file's, not one group's. It was defined inside
+# `wire format (split_choice)` and inherited by eight later groups, which made those groups
+# depend on an earlier one for a constant — the kind of coupling that only shows up when
+# something tries to run them apart. (Seven other groups declare it again locally, which is
+# why nobody noticed.) Tab at the tmux boundary, \x1f on our own wires: see the header.
+US=$'\x1f'
 
 # ── the run's environment: NOTHING may force colour ──────────────────────────
 # Every value this suite compares is captured through a pipe, and node decides whether to
@@ -60,7 +163,52 @@ R=$'\033[31m'; G=$'\033[32m'; Y=$'\033[33m'; D=$'\033[2m'; N=$'\033[0m'
 unset FORCE_COLOR CLICOLOR_FORCE
 
 group() { GROUP="$1"; case "$GROUP" in *"$FILTER"*) printf '\n%s%s%s\n' "$D" "$GROUP" "$N" ;; esac; }
-skip()  { case "$GROUP" in *"$FILTER"*) SKIP=$((SKIP+1)); printf '  %s○%s %s %s(%s)%s\n' "$Y" "$N" "$1" "$D" "$2" "$N" ;; esac; }
+# ── a skip may only blame the ENVIRONMENT ────────────────────────────────────
+# A skip exits 0, so a group that skips has tested nothing and said nothing about it.
+# That is right when the machine genuinely lacks tmux or a browser, and it is a hole
+# when the reason is that the SUBJECT produced nothing — the suite then cannot tell
+# "there is no chrome here" from "the thing I test is broken", and reports the second
+# as the first, in green.
+#
+# Measured with test/helpers/mutation-audit.sh: break bin/fleet-agent and `pane
+# detectors (busy_re)` skipped all three rows with "no detector declared" — blaming a
+# missing declaration for a broken binary — and the run exited 0. Two groups did that.
+#
+# So a reason must name something the MACHINE is missing. Anything else is the subject
+# failing, and that is a red row wherever it happens, including at sites nobody has
+# thought about yet. The list is phrases rather than exact strings because most of these
+# read "git or tmux missing" and the useful half is the last word.
+SKIP_ENV='missing|not available|not installed|no chrome|no claude|no node_modules|no vite.config|no jq|web/ not present|logind refuses|cannot commit|no caffeinate|read a 000 dir|neither pnpm nor npm'
+skip()  { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
+          if grep -qE "$SKIP_ENV" <<< "$2"; then
+            SKIP=$((SKIP+1)); printf '  %s○%s %s %s(%s)%s\n' "$Y" "$N" "$1" "$D" "$2" "$N"
+          else
+            # Not an environment reason, so the subject is what went missing. Named as a
+            # failure rather than counted as a skip, because the whole point of the
+            # distinction is that one of them is allowed to be silent and the other is not.
+            bad "$1" "either a result, or a reason the MACHINE cannot run this" "skipped: $2"
+          fi; }
+# ── not applicable: the question does not arise for this ref ─────────────────
+# A THIRD ANSWER, because two were not enough and staging went red proving it. `skip`
+# says the MACHINE cannot run this. `bad` says the SUBJECT is wrong. sw-version on a push
+# to staging is neither: HEAD is already in staging, so "is this version ahead of
+# staging" has nothing to be right or wrong about. The rule above read a correct
+# not-applicable as a hole, because the reason named no missing capability — and it was
+# right that it is not a missing capability, and wrong that it must therefore be a bug.
+#
+# WHAT STOPS THIS BEING THE OLD HOLE WEARING A NEW LABEL is not the word. It is that an
+# n/a must rest on a fact the SUBJECT CANNOT INFLUENCE, and that the check ordered ahead
+# of it still fires. For sw-version: whether HEAD is an ancestor of origin/staging is a
+# git fact, and nothing anyone writes in web/sw.js can change it — while an unreadable
+# VERSION is decided FIRST and fails, so a broken subject can never reach the n/a. That
+# ordering is the guarantee, so it is asserted in the helper rather than assumed here.
+#
+# It is not a pass: it never counts as one, and a run that is all n/a has proven nothing.
+# It is named at the end of the run, so a group that is not applicable every single time
+# is visible rather than quietly absent for months.
+na()    { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
+          NA=$((NA+1)); printf '%s\n' "$1" >> "${NA_LOG:-/dev/null}"
+          printf '  %s–%s %s %s(n/a: %s)%s\n' "$Y" "$N" "$1" "$D" "$2" "$N"; }
 ok()    { PASS=$((PASS+1)); printf '  %s✔%s %s\n' "$G" "$N" "$1"; }
 # A red line has to be legible, and two values that differ only in bytes a terminal does
 # not draw print as the same value — which is how "expected: 1 / got: 1" happened above.
@@ -74,6 +222,60 @@ is()    { case "$GROUP" in *"$FILTER"*) ;; *) return 0 ;; esac
           if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "$2" "$3"; fi; }
 # grep -c, but never let a non-match kill the run under pipefail
 matches() { grep -cE -- "$1" "$2" 2>/dev/null || true; }
+# A UTILITY, NOT ONE GROUP'S FIXTURE. This lived between two groups further down, which
+# made it part of no group at all: a filtered run that kept the group that calls it lost
+# the definition and reported `free_port: command not found` as two red rows about ports.
+# String(p), NOT a bare number: console.log() runs a non-string through util.inspect,
+# which colourises under FORCE_COLOR, and a port with $'\033[33m' round it poisons
+# everything downstream — $BASE becomes a URL curl cannot reach, `init --port` parses NaN
+# and writes null, the daemon falls back to its built-in 8787 and is abandoned there
+# holding the port, and the next group dies EADDRINUSE. Six groups skipped as "server did
+# not come up" while the daemon was up the whole time on a port nobody asked for.
+free_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(String(p)))})' 2>/dev/null; }
+
+# ── waiting for a condition, instead of sleeping at a guess ──────────────────
+# This file blocked for 334.9s of an 801.6s run inside fixed sleeps — 338 calls across 137
+# sites, measured by shimming `sleep` for a whole run. A fixed sleep is a guess at how long
+# tmux, node or a daemon needs, and it is wrong in both directions at once: too long on
+# every ordinary run, and too short on the loaded runner, which is the only run where being
+# wrong costs anything. A sleep that is USUALLY long enough is the exact shape of a flake.
+#
+# THE DANGER IN THE FIX IS WORSE THAN THE SLEEP, and it is why every conversion in this
+# file was watched failing before it was trusted. A poll whose condition is already true
+# returns instantly, makes the suite quick, asserts nothing, and stays GREEN — so nobody
+# finds out. Ask what the condition would be if the thing under test were broken; if the
+# answer is "still true", it is not a condition, it is a no-op.
+#
+# THE BUDGET IS A BACKSTOP, NOT A SCHEDULE. It is paid only when something is already
+# wrong, so it is generous on purpose. SECONDS is a bash builtin and costs no subprocess —
+# EPOCHREALTIME does not exist on the bash 3.2 macOS still ships — and the +1 is load
+# bearing: SECONDS can tick over the instant after it is read, so `wait_for 1` without it
+# could give up after a single poll, which is a no-op wearing a timeout's clothes.
+# Measured over 25 trials started at random points inside a second: shortest 1.25s.
+#
+# A TIMEOUT THAT SAYS NOTHING IS WORSE THAN A SLEEP, so this names the condition that never
+# came true and the caller turns that into a red row rather than limping on.
+WAITED=""                          # polls spent, or "timeout" — for the row that reports it
+WAIT_UNMET=""                      # what the last timeout was waiting for
+wait_for() {                       # <seconds> <description> <shell condition>
+  local limit="$1" what="$2" cond="$3" deadline polls=0
+  deadline=$(( SECONDS + limit + 1 ))
+  while :; do
+    if eval "$cond" >/dev/null 2>&1; then WAITED="$polls"; return 0; fi
+    [ "$SECONDS" -ge "$deadline" ] && break
+    sleep 0.05; polls=$(( polls + 1 ))
+  done
+  WAITED=timeout; WAIT_UNMET="$what"; return 1
+}
+# The commonest condition in this file: a pane has drawn something. Here-string, never a
+# pipe — under pipefail a `grep -q` that MATCHES can fail the pipeline when the writer
+# takes SIGPIPE, which reads as "not there yet" and spins the whole budget. That trap is
+# swept for elsewhere in this file; this is the shape that avoids it.
+pane_has() {                       # <socket> <pattern> [target]
+  local sock="$1" pat="$2" tgt="${3:-}"
+  if [ -n "$tgt" ]; then grep -qE "$pat" <<< "$(tmux -L "$sock" capture-pane -p -t "$tgt" 2>/dev/null)"
+  else                   grep -qE "$pat" <<< "$(tmux -L "$sock" capture-pane -p 2>/dev/null)"; fi
+}
 
 # ── 0. one tmux socket namespace per RUN ─────────────────────────────────────
 # Every server this file starts used to have a FIXED name — cftabh, cfstka,
@@ -112,6 +314,10 @@ matches() { grep -cE -- "$1" "$2" 2>/dev/null || true; }
 # nothing could find.
 TEST_RUNS=/tmp/ghostfleet-test                    # one <prefix>.<pid>.XXXXXX per run
 TMUX_TMPDIR="$(cd "$(mktemp -d "$TEST_RUNS.$$.XXXXXX")" && pwd -P)"; export TMUX_TMPDIR
+# ...and the pane id this run was started from means nothing on a fixture server. The hook
+# asks tmux which session $TMUX_PANE is in, so an inherited `%20` would name whichever
+# fixture session happened to get that id — a plausible wrong slot, not an error.
+unset TMUX_PANE
 
 # A fixed name is self-limiting: the next run kills the server. A unique one is
 # not, so a run that dies half way leaks its servers for good. Two guards — our
@@ -156,7 +362,12 @@ kill_servers_in() {                # $1 = a run directory
 # reader, so the in-section helper can go on reaping and resetting its own variable without
 # ever hiding a daemon from the teardown that always runs.
 sv_reg() { [ -n "${1:-}" ] && printf '%s\n' "$1" >> "$TMUX_TMPDIR/serve.pids"; return 0; }
-sv_all() { tr '\n' ' ' < "$TMUX_TMPDIR/serve.pids" 2>/dev/null || true; }
+# `2>/dev/null` does NOT cover this: bash opens the input redirection before it applies
+# the error redirection, so a missing file is announced on the way in and the suppression
+# arrives too late. Harmless in a full run, where the fleet-serve group has registered
+# something by the time the trap fires — and one spurious error line at the end of every
+# run that never started a daemon, which is every filtered one.
+sv_all() { [ -f "$TMUX_TMPDIR/serve.pids" ] && tr '\n' ' ' < "$TMUX_TMPDIR/serve.pids"; return 0; }
 reap() {                           # $1.. = pids; returns once none of them exist
   local p i left
   for p in "$@"; do [ -n "$p" ] && kill "$p" 2>/dev/null; done
@@ -192,12 +403,48 @@ sweep_dead_runs() {                # $1 = the <prefix> of <prefix>.<pid>.XXXXXX
   done
   return 0
 }
+# A HAND-STARTED fleet-serve IS NOBODY'S CHILD, and that is the whole difference. The
+# daemons this suite starts live under $TMUX_TMPDIR/serve/bin, are reaped by the EXIT trap,
+# and are found by sweep_dead_runs above when a run dies before reaching it. The ones that
+# actually pile up are started BY HAND — the browser helpers need a live base to talk to —
+# and orphaned the moment the launching shell exits: argv naming this checkout's own bin,
+# ppid 1, and nothing that will ever come back for them. Measured on this machine: 55 of
+# them, going back a week.
+#
+# TWO CONDITIONS, AND THE SECOND IS THE ONE THAT MATTERS. The argv must name THIS
+# checkout's bin directory, and the parent must be init. The live tailnet daemon that
+# serves the owner's phone runs from ~/.local/libexec/ghostfleet/bin and a sibling
+# worktree's runs from its own path, so neither can match the first; a daemon that still
+# has a parent is somebody's running child, including this suite's own, so it cannot match
+# the second. Both are asserted in the group below, in the direction that matters — that a
+# daemon belonging to another directory is still alive afterwards — because a reaper is
+# exactly the kind of code whose happy path proves nothing about its blast radius.
+#
+# The root is an ARGUMENT rather than $ROOT so the test can aim it at a scratch directory
+# and watch it work, instead of the test having to start a real daemon out of the real bin
+# to find out.
+sweep_orphan_serves() {            # $1 = a checkout root; reaps only ITS orphans
+  local p pids="" pp
+  for p in $(pgrep -f "$1/bin/fleet-serve" 2>/dev/null); do
+    [ "$p" = "$$" ] && continue
+    pp="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    [ "$pp" = "1" ] || continue    # still has a parent: not an orphan, not ours to take
+    pids="$pids $p"
+  done
+  # reap, not kill: fleet-serve answers SIGTERM by DRAINING for 15s, and the leaked ones
+  # measured here ignored two of them. Ask, wait a beat, then insist.
+  [ -n "$pids" ] && reap $pids
+  return 0
+}
+
 # fleet-serve is a background node child, not a tmux server, so the sweep above cannot
 # reach it — and a leaked daemon holding a TCP port is the same cross-run interference
 # this section exists to stop. $SERVE_PIDS is set by the fleet-serve group.
 trap 'rc=$?; reap ${SERVE_PIDS:-} $(sv_all); kill_serves_in "$TMUX_TMPDIR"; kill_servers_in "$TMUX_TMPDIR"; rm -rf "$TMUX_TMPDIR"; exit $rc' EXIT
 trap 'exit 130' INT
+NA_LOG="$TMUX_TMPDIR/na.rows"
 sweep_dead_runs "$TEST_RUNS"
+sweep_orphan_serves "$ROOT"
 
 # Proven, not asserted: every other group now rests on this, so it goes first and
 # goes red on its own rather than being taken on trust. Both directions on the
@@ -231,10 +478,76 @@ else
   skip "socket namespace" "tmux not available"
 fi
 
+group "the orphan sweep takes this checkout's leaks and nobody else's"
+# A REAPER'S HAPPY PATH PROVES NOTHING ABOUT ITS BLAST RADIUS. What has to be true here is
+# not that it kills the daemon it is aimed at — it is that it CANNOT reach the one serving
+# the owner's phone from ~/.local/libexec/ghostfleet/bin, or a sibling worktree's from its
+# own checkout. So all three arms run against scratch roots, and the two that matter are
+# the ones where the process is still alive afterwards.
+#   `exec -a "$0"` so the fixture's own path is its argv[0]: that is what pgrep -f reads,
+# and it leaves ONE process rather than a shell holding a sleep that outlives the kill.
+#   `( cmd & )` so the subshell exits immediately and the child is reparented to init —
+# a real orphan, which is what the sweep keys on. Asserted below rather than assumed,
+# because a fixture that is quietly somebody's child would make the first arm pass for
+# entirely the wrong reason.
+OS="$(cd "$(mktemp -d "$TEST_RUNS.$$.orph.XXXXXX")" && pwd -P)"
+mkdir -p "$OS/mine/bin" "$OS/theirs/bin"
+for d in mine theirs; do
+  printf '#!/usr/bin/env bash\nexec -a "$0" sleep 300\n' > "$OS/$d/bin/fleet-serve"
+  chmod +x "$OS/$d/bin/fleet-serve"
+done
+( "$OS/mine/bin/fleet-serve"   & echo $! > "$OS/mine.pid" )
+( "$OS/theirs/bin/fleet-serve" & echo $! > "$OS/theirs.pid" )
+"$OS/mine/bin/fleet-serve" & OWNCHILD=$!     # our path, but it still has a parent: us
+oalive() { kill -0 "${1:-0}" 2>/dev/null && echo 1 || echo 0; }
+oppid()  { ps -o ppid= -p "${1:-0}" 2>/dev/null | tr -d ' '; }
+# Polled, not slept at: the fixtures are up when the kernel says so.
+oi=0; while [ "$oi" -lt 80 ]; do
+  [ -s "$OS/mine.pid" ] && [ -s "$OS/theirs.pid" ] && [ "$(oppid "$(cat "$OS/mine.pid")")" = "1" ] && break
+  oi=$((oi+1)); sleep 0.05
+done
+OMINE="$(cat "$OS/mine.pid" 2>/dev/null)"; OTHEIRS="$(cat "$OS/theirs.pid" 2>/dev/null)"
+is "our leaked daemon is up to begin with"      "1" "$(oalive "$OMINE")"
+is "...and is really an orphan, not our child"  "1" "$(oppid "$OMINE")"
+is "another checkout's daemon is up too"        "1" "$(oalive "$OTHEIRS")"
+is "...and so is a live child of ours"          "1" "$(oalive "$OWNCHILD")"
+sweep_orphan_serves "$OS/mine"
+is "the sweep reaps THIS checkout's orphan"     "0" "$(oalive "$OMINE")"
+# THE TWO THAT MATTER. Same binary name, same argv shape, one directory apart.
+is "...and cannot reach another checkout's"     "1" "$(oalive "$OTHEIRS")"
+is "...nor a daemon that still has a parent"    "1" "$(oalive "$OWNCHILD")"
+# And aimed at the OTHER root it does the job there, so the first arm is not passing
+# because the sweep simply kills nothing.
+sweep_orphan_serves "$OS/theirs"
+is "...but aimed there, it does reap that one"  "0" "$(oalive "$OTHEIRS")"
+kill "$OWNCHILD" 2>/dev/null; wait "$OWNCHILD" 2>/dev/null
+rm -rf "$OS"
+
 # The other precondition every group rests on, proven the same way and for the same
 # reason: a guard that is never exercised looks exactly like one that works. So put the
 # variable BACK and check the probe changes — without that direction this group would pass
 # just as happily on a node that colourises nothing, and the unset would be cargo.
+group "a skip may only blame the environment"
+# THE CLASSIFIER IS LOAD-BEARING NOW, so it is proven in both directions like every
+# other detector in this file. One direction would pass for a pattern that matches
+# everything (no skip is ever allowed, and CI goes red on a runner with no chrome) and
+# equally for one that matches nothing (every skip is allowed, and the hole is back).
+#   The first list is every reason a real run has actually produced — the three CI emits
+# are in it verbatim, because getting those wrong turns a green leg red for no reason.
+#   The second is what a subject failing looks like. Each of these was a silent skip
+# before, and `no detector declared` is the one that cost a group all three of its rows.
+for r in "tmux not available" "git or tmux missing" "node missing" "jq is not installed" \
+         "no chrome to measure in" "no claude binary to drive" "no vite.config.mjs" \
+         "no node_modules — run: npm install" "web/ not present" \
+         "logind refuses to inhibit on this box — no login session"; do
+  is "the machine: $r" "yes" "$(grep -qE "$SKIP_ENV" <<< "$r" && echo yes || echo no)"
+done
+for r in "no detector declared" "server did not come up: nothing in the log" \
+         "the session did not come up" "could not get a port" \
+         "the daemon never got as far as arming one"; do
+  is "the subject: $r" "no" "$(grep -qE "$SKIP_ENV" <<< "$r" && echo yes || echo no)"
+done
+
 group "the harness captures plain bytes"
 if command -v node >/dev/null 2>&1; then
   ESC="$(printf '\033')"
@@ -276,7 +589,15 @@ is "explicit claude beats project's"   "/c/foo|w|claude"   "$(sc "/c/foo${US}w${
 group "pane detectors (busy_re)"
 for a in claude opencode codex; do
   re="$("$ROOT/bin/fleet-agent" field "$a" busy_re 2>/dev/null)"
-  if [ -z "$re" ]; then skip "$a busy_re" "no detector declared"; continue; fi
+  # A DETECTOR THAT IS NOT THERE IS A RED ROW, NOT A SKIP. This read "no detector
+  # declared" and skipped, which is a sentence about the config and was in fact a
+  # sentence about the binary: break bin/fleet-agent and all three rows skipped, the
+  # group reported 0 passed / 0 failed / 3 skipped, and the run exited 0. A detector
+  # this suite exists to prove in both directions was not being proven in either, and
+  # nothing said so. All three agents declare one, so an empty answer is a failure.
+  is "$a declares a busy_re" "yes" \
+     "$([ -n "$re" ] && echo yes || echo "no: fleet-agent printed nothing")"
+  [ -n "$re" ] || continue
   is "$a: matches a real BUSY pane"  "1" "$(matches "$re" "$FIX/$a-busy.txt")"
   idle="$FIX/$a-idle.txt"; [ -f "$idle" ] || idle="$FIX/$a-idle-home.txt"
   is "$a: silent on a real IDLE pane" "0" "$(matches "$re" "$idle")"
@@ -672,6 +993,653 @@ is "...and does not warn for the default"     "0" \
    "$(fp agent already --none 2>&1 | grep -c 'heads up' || true)"
 rm -rf "$T"
 
+# ── the demo profile, built rather than hand-made ────────────────────────────
+# `ghostfleet demo` is the first line of BOTH recordings (worktree.tape:58,
+# stack.tape:44) and of the README's GIFs — and until now the profile behind it existed
+# on exactly one machine, made by hand. Everywhere else bin/ghostfleet resolved the bare
+# argument as a profile, found no projects.demo, and exited 1: the one command a new
+# reader has been shown is the one command that could not work for them.
+group "fleet-demo builds a demo fleet, and twice is the same as once"
+DT="$(mktemp -d)"
+fd() { HOME="$DT" "$ROOT/bin/fleet-demo" "$@"; }
+out1="$(fd 2>&1)"; rc1=$?
+cfg="$DT/.config/ghostfleet/projects.demo"
+is "a clean machine is set up"          "0" "$rc1"
+# THE COUNT IS THE POINT HERE, not presence: two rows means one project silently missing,
+# which on the Projects screen is a card that never appears with nothing to say why. The
+# three names are the ones web/fixtures/ renders and the GIFs show, so a demo that hands
+# over a different fleet than the pictures is a demo that undercuts them.
+is "three projects registered"          "3" "$(awk -F'\t' '$1=="acme-api"||$1=="acme-web"||$1=="toolbox"' "$cfg" 2>/dev/null | wc -l | tr -d ' ')"
+is "...all in the demo profile"         "3" "$(awk -F'\t' '$3=="demo"' "$cfg" 2>/dev/null | wc -l | tr -d ' ')"
+is "...on three columns, like fleet-project writes" "3" "$(awk -F'\t' '$1=="acme-api"{print NF}' "$cfg" 2>/dev/null)"
+for p in acme-api acme-web toolbox; do
+  is "$p is a real checkout"            "yes" "$([ -d "$DT/gf-demo/$p/.git" ] && echo yes || echo no)"
+done
+# A REPO WITH NO COMMIT HAS NO BRANCHES, and looks completely fine until `w` — the flow
+# the demo exists to show, and the one worktree.tape records — dies on it.
+#   THE COMMAND SHAPE IS THE ASSERTION. fleet-spawn:627 runs
+# `git worktree add <path> -b <branch> <base>`, and it is the BASE that does not resolve
+# on a commitless repo (measured, git 2.55: `fatal: invalid reference: main`). A bare
+# `worktree add -b x <path>` with no base SUCCEEDS on that same repo — git infers
+# `--orphan` — so the obvious probe is the one that proves nothing, and an earlier cut of
+# this test used it and stayed green with the commit deliberately removed.
+is "...with a commit in it"             "1"   "$(git -C "$DT/gf-demo/acme-api" rev-list --count HEAD 2>/dev/null || echo 0)"
+is "...and a branch to cut from"        "main" "$(git -C "$DT/gf-demo/acme-api" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+is "...so fleet-spawn's add resolves"   "yes" "$(git -C "$DT/gf-demo/acme-api" worktree add "$DT/gf-demo/probe" -b probe main >/dev/null 2>&1 && echo yes || echo no)"
+# The login wall is the thing that decides whether this is worth shipping: a session in
+# the demo profile sits at "Please run /login" because credentials are per config dir
+# (stack.tape:30 has recorded that since the recordings were shot). Somebody who does not
+# know that reads an empty pane as a broken product. Naming the fix is half of it; naming
+# what does NOT need it is the half that keeps them going.
+is "it names the login command"         "yes" "$(grep -q 'CLAUDE_CONFIG_DIR=~/.claude-demo claude' <<<"$out1" && echo yes || echo no)"
+is "...and what needs no login at all"  "yes" "$(grep -q 'WHAT YOU CAN SEE RIGHT NOW' <<<"$out1" && echo yes || echo no)"
+is "...saying an empty pane is not a bug" "yes" "$(grep -q 'not a broken fleet' <<<"$out1" && echo yes || echo no)"
+# A path printed with a stray backslash is not cosmetic here: this one is a `rm -rf` the
+# reader is invited to paste, and `\~/gf-demo` names a literal directory called ~.
+# bash 3.2 (macOS, one of the two suite legs) keeps the backslash in a replacement.
+is "...and no path carries a stray backslash" "0" "$(grep -c '\\~' <<<"$out1" || true)"
+# IDEMPOTENT, and non-destructive with it.
+before="$(cat "$cfg")"
+out2="$(fd 2>&1)"; rc2=$?
+is "a second run succeeds"              "0" "$rc2"
+is "...changing no rows"                "$before" "$(cat "$cfg")"
+is "...and saying it reused them"       "yes" "$(grep -q 'reused' <<<"$out2" && echo yes || echo no)"
+# --if-needed IS WHAT KEEPS `ghostfleet demo` FREE. It runs on every launch, so a
+# complete profile has to print nothing: the alternative is a wall of setup output in
+# front of a screen the reader has already seen, and six seconds of every recording.
+sil="$(fd --if-needed 2>&1)"; rcs=$?
+is "--if-needed is silent when complete" ""  "$sil"
+is "...and still exits 0"                "0" "$rcs"
+# ...and the other direction, or a silent no-op would be indistinguishable from a
+# seeder that had simply stopped working.
+rm -rf "$DT/gf-demo/toolbox"
+part="$(fd --if-needed 2>&1)"
+is "...but speaks up when a repo is gone" "yes" "$(grep -q 'created' <<<"$part" && echo yes || echo no)"
+is "...and restores only that one"        "yes" "$([ -d "$DT/gf-demo/toolbox/.git" ] && echo yes || echo no)"
+is "...leaving the rows alone"            "$before" "$(cat "$cfg")"
+CT="$(mktemp -d)"
+chk="$(HOME="$CT" "$ROOT/bin/fleet-demo" --check 2>&1)"
+is "--check says what it would do"      "yes" "$(grep -q 'would create' <<<"$chk" && echo yes || echo no)"
+is "...and creates nothing"             "no"  "$([ -e "$CT/gf-demo" ] && echo yes || echo no)"
+is "...and registers nothing"           "no"  "$([ -e "$CT/.config/ghostfleet/projects.demo" ] && echo yes || echo no)"
+rm -rf "$DT" "$CT"
+
+# ── the refusal, which is the whole design ───────────────────────────────────
+# A demo command is run by somebody who has not decided to trust this yet, in a home
+# directory full of real work. REUSE is safe; REPAIR is not. So anything it did not
+# create, it will not touch — and it says what it found instead of guessing at a fix.
+group "fleet-demo stops rather than repairing"
+RT="$(mktemp -d)"; mkdir -p "$RT/gf-demo/acme-web"
+printf 'not ours\n' > "$RT/gf-demo/acme-web/keep.txt"
+ref="$(HOME="$RT" "$ROOT/bin/fleet-demo" 2>&1)"; rcr=$?
+is "a non-git dir in the way is refused"  "1" "$rcr"
+is "...naming what it found"              "yes" "$(grep -q 'is not a git repository' <<<"$ref" && echo yes || echo no)"
+is "...the existing file untouched"       "not ours" "$(cat "$RT/gf-demo/acme-web/keep.txt")"
+# NOTHING was written, not even the two projects it could safely have made. The plan runs
+# in FULL before anything happens, so a refusal is never a half-setup to unpick — and a
+# reader who is told "nothing was created" can believe it.
+is "...and no other repo was created"     "no" "$([ -e "$RT/gf-demo/acme-api" ] && echo yes || echo no)"
+is "...and no projects file"              "no" "$([ -e "$RT/.config/ghostfleet/projects.demo" ] && echo yes || echo no)"
+CR="$(mktemp -d)"; mkdir -p "$CR/.config/ghostfleet" "$CR/mine"
+printf 'acme-api\t%s/mine\tdemo\n' "$CR" > "$CR/.config/ghostfleet/projects.demo"
+keep="$(cat "$CR/.config/ghostfleet/projects.demo")"
+ref2="$(HOME="$CR" "$ROOT/bin/fleet-demo" 2>&1)"; rcc=$?
+is "a row pointing elsewhere is refused"  "1" "$rcc"
+is "...and names the project"             "yes" "$(grep -q "acme-api" <<<"$ref2" && echo yes || echo no)"
+is "...leaving that list byte-identical"  "$keep" "$(cat "$CR/.config/ghostfleet/projects.demo")"
+# ONE RUN REPORTS EVERY CONFLICT. Stopping at the first makes the reader fix them one
+# command at a time, re-running a setup that refuses again for a reason it already knew.
+# 1 here would mean it bailed early; 0 would mean it found neither.
+BT="$(mktemp -d)"; mkdir -p "$BT/.config/ghostfleet" "$BT/gf-demo/toolbox" "$BT/other"
+printf 'acme-web\t%s/other\tdemo\n' "$BT" > "$BT/.config/ghostfleet/projects.demo"
+is "two conflicts are both reported"      "2" "$(HOME="$BT" "$ROOT/bin/fleet-demo" 2>&1 | grep -c '^  · ' || true)"
+rm -rf "$RT" "$CR" "$BT"
+
+group "ghostfleet demo is a profile that can build itself"
+if ! command -v tmux >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "ghostfleet demo wiring" "tmux or node not available"
+else
+  GT="$(mktemp -d)"; mkdir -p "$GT/gf-demo/acme-api"; : > "$GT/gf-demo/acme-api/f"
+  # The REFUSAL must reach the user as itself. Swallowed, it becomes the `no profile
+  # "demo"` message below it in bin/ghostfleet — which reports a machine that stopped on
+  # purpose as one that was never set up, and sends the reader to `--new`, which would
+  # create an empty demo profile and bury the conflict for good.
+  gout="$(HOME="$GT" CLAUDE_FLEET_AWAKE=off "$ROOT/bin/ghostfleet" demo </dev/null 2>&1)"; grc=$?
+  is "a demo refusal exits non-zero"        "1"   "$grc"
+  is "...carrying the real reason"          "yes" "$(grep -q 'not a git repository' <<<"$gout" && echo yes || echo no)"
+  is "...not 'no profile demo'"             "no"  "$(grep -q 'no profile' <<<"$gout" && echo yes || echo no)"
+  rm -rf "$GT"
+fi
+
+
+# ── the phone client had no route into it ────────────────────────────────────
+# "add an step on onborading for users to configure their phone app." The phone client is
+# the largest thing here by setup — a daemon, a transport, a passkey, an install — and
+# nothing in the first-run path said it existed. You found it by reading docs/mobile.md,
+# a 900-line design document, or docs/OPERATIONS.md, which you have to already know to
+# look in.
+group "fleet-phone is the step, and it never runs anything"
+if ! command -v node >/dev/null 2>&1; then
+  skip "fleet-phone" "node is not available"
+else
+PT="$(mktemp -d)"
+fp() { HOME="$PT" "$ROOT/bin/fleet-phone" "$@"; }
+# free_port() is defined much further down this file and a group cannot call a function
+# that has not been sourced yet — so this one asks for its own. Same one-liner, local scope.
+ph_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(String(p)))})' 2>/dev/null; }
+mkdir -p "$PT/.config/ghostfleet"
+
+# ── nothing done yet ────────────────────────────────────────────────────────
+out="$(fp 2>&1)"; rc=$?
+is "a clean machine gets the step"      "0" "$rc"
+is "...counting nothing done"           "1" "$(grep -c '0 of 3 steps done' <<<"$out" || true)"
+is "...and the next command is init"    "yes" "$(grep -q 'fleet-serve init --bind' <<<"$(fp --next 2>&1)" && echo yes || echo no)"
+# IT REPORTS, IT NEVER RUNS. Every step opens a port, writes a config or spends a passkey,
+# and the one thing an onboarding command must not do is perform those because somebody
+# typed a word that sounded informational.
+is "...writing no config"               "no"  "$([ -e "$PT/.config/ghostfleet/serve.json" ] && echo yes || echo no)"
+# The four things the brief asked it to cover, each asserted on the words a reader needs
+# rather than on a heading: a phrase that moves is a doc that changed, and this is the one
+# place a person meets any of it.
+is "it says a phone client exists"      "yes" "$(grep -q 'installable app' <<<"$out" && echo yes || echo no)"
+is "...names the transport"             "yes" "$(grep -q 'Tailscale' <<<"$out" && echo yes || echo no)"
+is "...and that a bind is refused"      "yes" "$(grep -q 'REFUSES a' <<<"$out" && echo yes || echo no)"
+is "...says it installs as a PWA"       "yes" "$(grep -q 'Add to Home' <<<"$out" && echo yes || echo no)"
+is "...and the passkey is server-side"  "yes" "$(grep -q 'ENFORCED SERVER-SIDE' <<<"$out" && echo yes || echo no)"
+# THE ONE THAT COSTS REAL TIME. An installed iOS PWA resumed from the app switcher does
+# NOT pick up a new client: the shell is cache-first, so reopening is a resume and not a
+# navigation. CLAUDE.md records it with a measured case; a command that says how to
+# INSTALL the app and not how to UPDATE it sends people to that exact wall.
+is "...and how to actually update it"   "yes" "$(grep -q 'Swipe the app away and relaunch' <<<"$out" && echo yes || echo no)"
+is "...saying why a resume is not one"  "yes" "$(grep -q 'RESUME, not a navigation' <<<"$out" && echo yes || echo no)"
+# Before `init` there is no origin anywhere, so it must not point at a line that is not on
+# screen — an instruction that names something absent stops being followable.
+is "...and points at no absent origin"  "0"   "$(grep -c 'open the origin$' <<<"$out" || true)"
+
+# ── configured, not enrolled ────────────────────────────────────────────────
+printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[]}\n' \
+  > "$PT/.config/ghostfleet/serve.json"
+out2="$(fp 2>&1)"
+is "a configured fleet says so"         "yes" "$(grep -q 'configured — 127.0.0.1:1' <<<"$out2" && echo yes || echo no)"
+is "...and the next step is enrol"      "fleet-serve enroll phone" "$(fp --next 2>&1)"
+is "...naming the origin to open"       "yes" "$(grep -q 'http://localhost:1' <<<"$out2" && echo yes || echo no)"
+# A CLIENT WITH NO PASSKEYS IS NOT ENROLLED. That is somebody who opened an enrolment and
+# never finished it — exactly the state people get stuck in — so it has to count as not
+# done, or the step that finishes the job is the one it stops offering.
+printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","creds":[]}]}\n' \
+  > "$PT/.config/ghostfleet/serve.json"
+is "an empty client is not enrolled"    "fleet-serve enroll phone" "$(fp --next 2>&1)"
+# ...and a revoked one is not enrolled either.
+printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","revoked":true,"creds":[{"id":"a"}]}]}\n' \
+  > "$PT/.config/ghostfleet/serve.json"
+is "a revoked client is not enrolled"   "fleet-serve enroll phone" "$(fp --next 2>&1)"
+
+# ── enrolled, daemon down ───────────────────────────────────────────────────
+printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' \
+  > "$PT/.config/ghostfleet/serve.json"
+is "enrolled but down asks for the daemon" "fleet-serve" "$(fp --next 2>&1)"
+is "...and --if-needed still speaks"    "yes" "$([ -n "$(fp --if-needed 2>&1)" ] && echo yes || echo no)"
+
+# ── everything done: it goes quiet ──────────────────────────────────────────
+# THE PROBE IS THE BIND ADDRESS AND THE PORT, not the port alone. 8787 is this project's
+# own default, so asking only about the port answers "is ANYTHING listening" — measured
+# while writing this: a sandboxed HOME with the default port reported the daemon up,
+# because the real one on this machine holds it.
+PP="$(ph_port)"
+if [ -z "$PP" ]; then
+  skip "fleet-phone goes quiet when set up" "could not get a port"
+else
+  node -e 'require("net").createServer().listen(Number(process.argv[1]),"127.0.0.1",()=>setTimeout(()=>process.exit(0),8000))' "$PP" &
+  PH_PID=$!
+  # A listener is not up the instant the process starts; wait for the socket rather than
+  # sleeping a guess, or this reads as "not running" on a slow runner and the row goes red
+  # for a reason that is not the code.
+  i=0; while [ "$i" -lt 40 ] && ! node -e 'const n=require("net");const s=n.connect(Number(process.argv[1]),"127.0.0.1");s.on("connect",()=>{s.end();process.exit(0)});s.on("error",()=>process.exit(1))' "$PP" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+  printf '{"bind":"127.0.0.1","port":%s,"rp_id":"localhost","origins":["http://localhost:%s"],"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' "$PP" "$PP" \
+    > "$PT/.config/ghostfleet/serve.json"
+  is "a set-up fleet has no next step"  ""    "$(fp --next 2>&1)"
+  is "...and --if-needed says nothing"  ""    "$(fp --if-needed 2>&1)"
+  is "...while a plain run still reports" "yes" "$(grep -q 'set up and serving' <<<"$(fp 2>&1)" && echo yes || echo no)"
+  # ...and the same config on a DIFFERENT port is not running, or the probe is answering
+  # about the machine rather than about this config.
+  printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' \
+    > "$PT/.config/ghostfleet/serve.json"
+  is "...and a different port is not it" "fleet-serve" "$(fp --next 2>&1)"
+  # AND THE BIND, WHICH IS THE HALF THAT WAS WRONG. Same port, different address: a
+  # port-only probe answers "is ANYTHING listening on this number" and calls somebody
+  # else's daemon yours. Measured before the fix — a sandboxed HOME on the default 8787
+  # reported the daemon up because the real one on this machine holds it, so a fleet that
+  # was not serving at all was told it had nothing left to do.
+  printf '{"bind":"100.64.0.9","port":%s,"rp_id":"box.example.ts.net","origins":["https://box.example.ts.net:%s"],"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' "$PP" "$PP" \
+    > "$PT/.config/ghostfleet/serve.json"
+  is "...nor the same port on another bind" "fleet-serve" "$(fp --next 2>&1)"
+  kill "$PH_PID" 2>/dev/null; wait "$PH_PID" 2>/dev/null
+fi
+
+# A broken config must leave it able to report, not take it down — this is the command you
+# run BECAUSE the phone is not working.
+printf 'not json at all\n' > "$PT/.config/ghostfleet/serve.json"
+is "a corrupt config still reports"     "0"   "$(fp >/dev/null 2>&1; echo $?)"
+is "...as not configured"               "yes" "$(grep -q 'not configured yet' <<<"$(fp 2>&1)" && echo yes || echo no)"
+rm -rf "$PT"
+fi
+
+# ── and the onboarding actually points at it ─────────────────────────────────
+group "the first-run path mentions the phone, once"
+is "the installer's next steps name it" "yes" \
+   "$(grep -q 'fleet-phone           # put the fleet on your phone' "$ROOT/install.sh" && echo yes || echo no)"
+is "the README leads to it too"         "yes" \
+   "$(grep -q '^fleet-phone  ' "$ROOT/README.md" && echo yes || echo no)"
+# THE SCREEN, IN BOTH DIRECTIONS. "shown only when it is useful" is half a rule: the half
+# that rots is the one where it keeps showing to somebody who did it months ago, because
+# nothing fails when a hint is merely redundant.
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "first-run screen offers the phone" "tmux not available"
+else
+  FR="$(mktemp -d)"; mkdir -p "$FR/.config/ghostfleet"; : > "$FR/.config/ghostfleet/projects"
+  frscr() {
+    tmux -L cfphone kill-server 2>/dev/null
+    tmux -L cfphone new-session -d -x 120 -y 34 -e HOME="$FR" \
+      -e CLAUDE_FLEET_PROJECTS="$FR/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 8" 2>/dev/null
+    sleep 2
+    tmux -L cfphone capture-pane -p 2>/dev/null
+    tmux -L cfphone kill-server 2>/dev/null
+  }
+  rm -f "$FR/.config/ghostfleet/serve.json"
+  is "an unset-up phone is offered"     "yes" "$(grep -q 'On your phone too' <<<"$(frscr)" && echo yes || echo no)"
+  printf '{"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' > "$FR/.config/ghostfleet/serve.json"
+  is "...and an enrolled one is not lectured" "no" "$(grep -q 'On your phone too' <<<"$(frscr)" && echo yes || echo no)"
+  # ...and the screen itself is still there, or "no" above would pass on a blank pane.
+  is "...on a screen that still drew"   "yes" "$(grep -q 'No projects yet' <<<"$(frscr)" && echo yes || echo no)"
+  rm -rf "$FR"
+fi
+
+# ── the first screen the product ever shows ──────────────────────────────────
+# An empty projects list drew the picker with exactly one card on it, `+ add project`,
+# and nothing else: no statement of what a project IS here, and no hint that `n` is what
+# starts a session once there is one. Somebody who has just run ./install.sh arrives at
+# precisely that screen — so it is the product's first impression and it explained none
+# of itself. Driven through a real pane, because this is a rendering decision.
+group "an empty projects list guides instead of stalling"
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "first-run screen" "tmux not available"
+else
+  ET="$(mktemp -d)"; mkdir -p "$ET/.config/ghostfleet" "$ET/acme-api"
+  pscr() {   # $1.. = extra fleet-grid args -> what the screen draws
+    tmux -L cffirst kill-server 2>/dev/null
+    tmux -L cffirst new-session -d -x 110 -y 32 -e HOME="$ET" \
+      -e CLAUDE_FLEET_PROJECTS="$ET/.config/ghostfleet/projects" \
+      "node '$ROOT/bin/fleet-grid.mjs' - $* ; sleep 8" 2>/dev/null
+    sleep 2
+    tmux -L cffirst capture-pane -p 2>/dev/null
+    tmux -L cffirst kill-server 2>/dev/null
+  }
+  : > "$ET/.config/ghostfleet/projects"
+  empty="$(pscr --screen projects)"
+  is "an empty list gets the first-run screen" "yes" "$(grep -q 'No projects yet' <<<"$empty" && echo yes || echo no)"
+  # Asserted one at a time, not as a count: at this width the three card titles land on
+  # ONE captured line, so `grep -c` over all three would answer 1 whether three steps
+  # rendered or only the first.
+  is "...step 1 says pick a folder"      "yes" "$(grep -q 'pick a folder' <<<"$empty" && echo yes || echo no)"
+  is "...step 2 says name it"            "yes" "$(grep -q 'name it'       <<<"$empty" && echo yes || echo no)"
+  is "...step 3 names the key"           "yes" "$(grep -q 'press n'       <<<"$empty" && echo yes || echo no)"
+  is "...and offers the demo as a way in" "yes" "$(grep -q 'ghostfleet demo' <<<"$empty" && echo yes || echo no)"
+  # THE DIRECTION THAT WOULD OTHERWISE ROT. A first-run screen that also fired for
+  # existing users would have replaced the product's home screen, and every assertion
+  # above would still be green. `+ add project` is unchanged for them by decision, so the
+  # picker has to come back the moment there is one project to pick.
+  printf 'acme-api\t%s/acme-api\twork\n' "$ET" > "$ET/.config/ghostfleet/projects"
+  full="$(pscr --screen projects)"
+  is "one project brings the picker back"  "no"  "$(grep -q 'No projects yet' <<<"$full" && echo yes || echo no)"
+  is "...with its add card"                "yes" "$(grep -q 'add project'  <<<"$full" && echo yes || echo no)"
+  is "...and the project on it"            "yes" "$(grep -q 'acme-api'     <<<"$full" && echo yes || echo no)"
+  # Step 2's screen. The name is not cosmetic — it becomes the card, `ghostfleet <name>`
+  # and the fleet socket `cf-<name>` every status read is scoped by — so it is offered
+  # rather than derived, pre-filled with the basename so ⏎ alone is the common case.
+  nm="$(pscr --screen nameproject --select "$ET/acme-api")"
+  is "the naming screen names the step"    "yes" "$(grep -q 'step 2 of 3'  <<<"$nm" && echo yes || echo no)"
+  is "...pre-filled with the basename"     "yes" "$(grep -q 'name:  acme-api' <<<"$nm" && echo yes || echo no)"
+  is "...and shows the folder it is for"   "yes" "$(grep -q 'acme-api'     <<<"$nm" && echo yes || echo no)"
+  # Step 3 lands on the session GRID, and the hint lives there because that is where `n`
+  # works. A project with no sessions draws one card, `+ new session`, which says what it
+  # is and not that `n` is how you get one.
+  hint="$(pscr "cfnosuchfleet" "$ROOT/tmux/cf.tmux.conf")"
+  is "an empty grid says which key to press" "yes" "$(grep -q 'press n to start your first session' <<<"$hint" && echo yes || echo no)"
+  # ^N WITH NO EDITOR answered from inside tmux with a bare `returned 1`, on a first install
+  # where nobody knows ^N is ours. The first-run screen says so before it is pressed — and
+  # ONLY then: both directions, because a line that always shows is one people read past.
+  # pscr starts a FRESH tmux server, so the variable reaches the screen through its env.
+  : > "$ET/.config/ghostfleet/projects"
+  noed="$(CLAUDE_FLEET_EDITOR=gf-no-such-editor pscr --screen projects)"
+  is "no editor: the first-run screen says ^N has none" "yes" "$(grep -q "No editor for ^N: 'gf-no-such-editor'" <<<"$noed" && echo yes || echo no)"
+  haved="$(CLAUDE_FLEET_EDITOR=cat pscr --screen projects)"
+  is "...and an editor that exists says nothing"        "no"  "$(grep -q 'No editor for' <<<"$haved" && echo yes || echo no)"
+  is "...and it offers the clone as a way in"            "yes" "$(grep -q 'c clone a repo instead' <<<"$haved" && echo yes || echo no)"
+  rm -rf "$ET"
+fi
+
+# ── cloning a repo from the add-project browser ──────────────────────────────
+# The browser only ever registered a folder that already existed, so a repo you had not
+# cloned yet meant leaving for a shell. `c` asks for a URL or owner/repo; the SCREEN only
+# answers with a record, and bin/ghostfleet's pick_to_dir runs git on the real terminal
+# (a credential prompt under a raw-mode TUI is a prompt nobody sees). Both halves here.
+group "the add-project browser clones a repo"
+CL="$(mktemp -d)"
+mkdir -p "$CL/home/projects" "$CL/into"
+clscreen() {   # $1 = extra args, then keys… -> what the screen answered
+  local extra="$1"; shift
+  tmux -L cfclone kill-server 2>/dev/null
+  tmux -L cfclone new-session -d -x 110 -y 24 -e HOME="$CL/home" \
+    "node '$ROOT/bin/fleet-grid.mjs' - --screen addproject $extra > '$CL/out'; sleep 8" 2>/dev/null
+  sleep 1.5
+  for k in "$@"; do
+    case "$k" in @*) tmux -L cfclone send-keys "${k#@}" ;; *) tmux -L cfclone send-keys -l "$k" ;; esac
+    sleep 0.3
+  done
+  # To a FILE: this runs under $(…), and a variable set in that subshell never reaches
+  # the assertion that reads it.
+  tmux -L cfclone capture-pane -p > "$CL/pane" 2>/dev/null
+  sleep 0.5; tmux -L cfclone kill-server 2>/dev/null
+  tr '\037' '|' < "$CL/out"
+}
+is "--clone opens on the repo box, in ~/projects" "clone|acme/acme-api|$CL/home/projects" \
+   "$(clscreen --clone acme/acme-api @Enter)"
+got="$(clscreen --clone 'not a repo' @Enter)"
+is "...and refuses what is neither URL nor owner/repo" "" "$got"
+is "...saying why, on the screen"                       "yes" "$(grep -q 'is not a URL or owner/repo' "$CL/pane" && echo yes || echo no)"
+is "c in the folder browser opens the same box"          "clone|https://example.invalid/acme-web.git|$CL/home" \
+   "$(clscreen '' c 'https://example.invalid/acme-web.git' @Enter)"
+is "...and esc goes back to the folders, not out"        "yes" \
+   "$(clscreen '' c @Escape >/dev/null; grep -q 'pick a root folder' "$CL/pane" && echo yes || echo no)"
+# The shell half, lifted out of bin/ghostfleet the way the MCP registrars are lifted out of
+# install.sh. It reads /dev/tty, so it runs in a pane rather than under $(…).
+git init -q "$CL/acme-api" && git -C "$CL/acme-api" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+{ printf 'US=$%s\n' "'\\x1f'"
+  sed -n '/^_clear() {/p' "$ROOT/bin/ghostfleet"
+  sed -n '/^_fail() {/,/^}/p' "$ROOT/bin/ghostfleet"
+  sed -n '/^pick_to_dir() {/,/^}/p' "$ROOT/bin/ghostfleet"; } > "$CL/lib.sh"
+cat > "$CL/t.sh" <<EOT
+. "$CL/lib.sh"
+x="\$(pick_to_dir "clone\${US}$CL/acme-api\${US}$CL/into")";    echo "local|\$x|\$?" >> "$CL/res"
+x="\$(pick_to_dir "clone\${US}$CL/acme-api/\${US}$CL/into")";   echo "again|\$x|\$?" >> "$CL/res"
+x="\$(pick_to_dir "newproject\${US}$CL/into")";                  echo "picked|\$x|\$?" >> "$CL/res"
+x="\$(pick_to_dir "")";                                          echo "cancel|\$x|\$?" >> "$CL/res"
+echo done >> "$CL/res"
+EOT
+tmux -L cfclone new-session -d -x 110 -y 24 "bash '$CL/t.sh'" 2>/dev/null
+for _ in $(seq 40); do grep -q '^done' "$CL/res" 2>/dev/null && break; sleep 0.25; done
+tmux -L cfclone kill-server 2>/dev/null
+is "a clone lands in the folder, named after the repo" "local|$CL/into/acme-api|0"  "$(grep '^local|'  "$CL/res" 2>/dev/null)"
+is "...and is a real checkout"                         "yes" "$([ -d "$CL/into/acme-api/.git" ] && echo yes || echo no)"
+is "an existing checkout is reused, not refused"       "again|$CL/into/acme-api|0" "$(grep '^again|'  "$CL/res" 2>/dev/null)"
+is "a picked folder passes straight through"           "picked|$CL/into|0"         "$(grep '^picked|' "$CL/res" 2>/dev/null)"
+is "a cancelled browser answers nothing"               "cancel||1"                 "$(grep '^cancel|' "$CL/res" 2>/dev/null)"
+rm -rf "$CL"
+
+# ── what the installer says before you have seen anything ────────────────────
+# The old ending handed over to an empty screen: it said `ghostfleet`, which on a
+# just-installed machine opens a picker with no projects in it, and then "press 'n' to
+# add a session" — a key that does nothing on that screen, because `n` lives on a
+# project's session GRID and you cannot reach one without registering a project first.
+# Under it sat every step of a wiring run: forty-odd command names on one wrapped line,
+# a line per config dir, a line per agent.
+group "the installer's first screen is short, and lands somewhere"
+if ! command -v jq >/dev/null 2>&1; then
+  skip "installer output" "jq is not installed"
+else
+  IR="$(mktemp -d)"
+  # A COPY, NOT THE REPO. install.sh arms the pre-push guard by writing core.hooksPath
+  # into $REPO's git config, and a suite that mutates the checkout it is testing is a
+  # suite with a side effect nobody asked for. Copying only cf-sync's own dir list makes
+  # $REPO a non-repo, so that branch is skipped entirely — which is also the npx case.
+  mkdir -p "$IR/src"
+  cp -Rp "$ROOT"/bin "$ROOT"/lib "$ROOT"/tmux "$ROOT"/hooks "$ROOT"/mcp "$ROOT"/skill \
+         "$ROOT"/layouts "$ROOT"/web "$ROOT"/install.sh "$IR/src/" 2>/dev/null
+  mkdir -p "$IR/h/.claude"
+  # XDG_CONFIG_HOME TOO, NOT JUST HOME. install.sh reads the editor's config from
+  # ${XDG_CONFIG_HOME:-$HOME/.config}, which is the correct thing for it to do and the
+  # reason faking $HOME alone does not isolate this fixture: GitHub's ubuntu runners
+  # export XDG_CONFIG_HOME=/home/runner/.config, so the "existing nvim config" case looked
+  # at the RUNNER's config dir — where there is no nvim — and the installer offered
+  # LazyVim again. Red on ubuntu, green on macOS, and nothing wrong with the installer:
+  # this is CLAUDE.md's "a test can pass because of where it ran", arriving through an
+  # environment variable instead of a temp directory. Set on every call here, not only the
+  # editor one, because the same expansion picks the opencode config dir two steps later.
+  inst() { env HOME="$IR/h" XDG_CONFIG_HOME="$IR/h/.config" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" \
+               PATH="$IR/h/bin:$PATH" "$IR/src/install.sh" "$@" 2>&1; }
+  first="$(inst)"
+  # The number is the claim, so it is the assertion. Generous by design — this is "a
+  # screen you can read", not a byte count — but it went red at the 20-plus lines the
+  # installer printed before, and it is what stops the narration creeping back one
+  # helpful line at a time.
+  is "a first install fits on a screen"   "yes" "$([ "$(wc -l <<<"$first")" -le 12 ] && echo yes || echo no)"
+  is "...and does not list every command"  "no"  "$(grep -q 'claude-here cf-sync' <<<"$first" && echo yes || echo no)"
+  # It still has to say the main work happened. Quieting the per-profile narration
+  # without replacing it would leave the output claiming only that symlinks were made.
+  is "...but says the hooks + MCP landed"  "yes" "$(grep -q 'wired hooks + MCP into' <<<"$first" && echo yes || echo no)"
+  is "...and how many commands"            "yes" "$(grep -q 'linked .* commands' <<<"$first" && echo yes || echo no)"
+  # THE NEXT STEP IS THE POINT OF THE WHOLE CHANGE.
+  is "...and leads with the demo"          "yes" "$(grep -q 'ghostfleet demo' <<<"$first" && echo yes || echo no)"
+  # THE MCP CAVEAT IS THE MOST CONFUSING FAILURE THIS PROJECT HAS, and it can only happen
+  # to somebody who already had sessions open — which is a RE-install. On a first install
+  # it describes something that cannot have happened yet, to a reader with no way to tell
+  # it apart from the other things they are being told to worry about. Both directions,
+  # because "always" and "never" are the two ways this goes wrong.
+  is "a first install omits the MCP caveat" "0" "$(grep -c 'reach NEW sessions only' <<<"$first" || true)"
+  second="$(inst)"
+  is "...and a RE-install carries it"       "1" "$(grep -c 'reach NEW sessions only' <<<"$second" || true)"
+  # --verbose is where the narration went. If it did not, the flag is a promise the
+  # installer does not keep and the detail is simply gone.
+  verb="$(inst --verbose)"
+  is "--verbose lists every command"        "yes" "$(grep -q 'claude-here cf-sync' <<<"$verb" && echo yes || echo no)"
+  is "...names each config dir wired"       "yes" "$(grep -q 'wired hooks into'    <<<"$verb" && echo yes || echo no)"
+  is "...and carries the MCP caveat too"    "1"   "$(grep -c 'reach NEW sessions only' <<<"$verb" || true)"
+  is "...and is longer than the summary"    "yes" "$([ "$(wc -l <<<"$verb")" -gt "$(wc -l <<<"$first")" ] && echo yes || echo no)"
+  # A WARNING NEVER MOVES BEHIND A FLAG. The whole value of quieting the successes is
+  # that a failure becomes the only thing on the screen; a quiet mode that also ate the
+  # `!` lines would have made the install less legible, not more.
+  # The ambient PATH, NOT a stripped one: emptying PATH takes `node` with it and the
+  # installer exits at its first requirement check, long before the line under test — a
+  # green "no warning" that proves only that the probe broke. All this needs is for
+  # BIN_DIR to be absent from PATH, which it is, because inst() is what puts it there.
+  warn="$(env HOME="$IR/h" XDG_CONFIG_HOME="$IR/h/.config" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" \
+              "$IR/src/install.sh" 2>&1)"
+  is "a PATH warning survives quiet mode"   "yes" "$(grep -q 'is not on your PATH' <<<"$warn" && echo yes || echo no)"
+  # THE EDITOR BEHIND ^N. A fake nvim first on PATH stands in for the real one, so the
+  # answer does not depend on what this machine happens to have installed. Nobody can be
+  # asked here (stdout is captured), so a missing piece is ONE summary line, never a prompt.
+  mkdir -p "$IR/fake"
+  fakenvim() { printf '#!/bin/sh\necho "NVIM v%s"\n' "$1" > "$IR/fake/nvim"; chmod +x "$IR/fake/nvim"; }
+  edinst() { env HOME="$IR/h" XDG_CONFIG_HOME="$IR/h/.config" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" EDITOR= CLAUDE_FLEET_EDITOR= \
+               PATH="$IR/fake:$IR/h/bin:$PATH" "$IR/src/install.sh" 2>&1; }
+  fakenvim 0.9.5; rm -rf "$IR/h/.config/nvim"
+  old="$(edinst)"
+  is "an nvim too old for LazyVim is offered, on one line" "yes" "$(grep -q 'no terminal to ask at:.*Neovim + LazyVim' <<<"$old" && echo yes || echo no)"
+  is "...and nobody is prompted"                            "no"  "$(grep -q 'Y/n' <<<"$old" && echo yes || echo no)"
+  fakenvim 0.11.6
+  cur="$(edinst)"
+  is "a current nvim with no config offers LazyVim only"    "yes" "$(grep -q 'no terminal to ask at:.*LazyVim' <<<"$cur" && ! grep -q 'Neovim +' <<<"$cur" && echo yes || echo no)"
+  mkdir -p "$IR/h/.config/nvim"
+  set="$(edinst)"
+  is "...and an existing config is left alone, silently"    "no"  "$(grep -qi 'lazyvim\|neovim' <<<"$set" && echo yes || echo no)"
+  named="$(env HOME="$IR/h" XDG_CONFIG_HOME="$IR/h/.config" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" CLAUDE_FLEET_EDITOR=gf-no-such-editor \
+               PATH="$IR/h/bin:$PATH" "$IR/src/install.sh" 2>&1)"
+  is "a named editor that is missing is reported, not replaced" "yes" "$(grep -q 'gf-no-such-editor (your editor' <<<"$named" && ! grep -q 'LazyVim' <<<"$named" && echo yes || echo no)"
+  rm -rf "$IR"
+fi
+
+# ── a first install on a machine that is missing things ──────────────────────
+# EVERY ASSERTION HERE IS SOMETHING THAT ACTUALLY WENT WRONG, measured end to end in a
+# throwaway container of a stock LTS image — one that ships none of node, npm, git, tmux, jq
+# or curl, which is the honest starting point and not a corner case. The container is not
+# reachable from the suite, so each failure is reproduced here with the smallest shim that
+# makes the same branch run.
+group "an install that is missing prerequisites says so once, and completely"
+IM="$(mktemp -d)"
+# The helpers, lifted out with the sed shape the MCP registrar group uses. They reach only
+# for shell builtins plus $NODE_PKG / $PKG_PREFIX / $ASSUME_YES, so an EMPTY PATH is a
+# faithful "this machine has nothing": `command -v` is a builtin and simply finds none of
+# them, with no fixture to build and nothing installed to uninstall afterwards.
+{
+  sed -n '/^node_ge() {/,/^}/p'             "$ROOT/install.sh"
+  sed -n '/^report_missing_hard() {/,/^}/p' "$ROOT/install.sh"
+  sed -n '/^pkg_run() {/,/^}/p'             "$ROOT/install.sh"
+} > "$IM/lib.sh"
+is "the three helpers came out" "3" "$(grep -c '^\(node_ge\|report_missing_hard\|pkg_run\)() {' "$IM/lib.sh")"
+is "...and they parse"         "ok" "$(bash -n "$IM/lib.sh" 2>&1 && echo ok)"
+
+# THE PAIR THAT MATTERS IS 20.18 vs 20.19, which is why this is not a major-version compare:
+# the LTS image's 18.19 is too old (right either way) and 20.18 is ALSO too old, and vite
+# fails on exactly that second one. A compare that reads only the major calls 20.18 fine and
+# hands the reader back the `node:util` stack trace this gate exists to replace.
+ge() { bash -c 'set -uo pipefail; . "$1"/lib.sh; node_ge "$2" "$3" && echo yes || echo no' _ "$IM" "$1" "$2"; }
+is "node 18.19 cannot build the client" "no"  "$(ge 18.19.1 20.19)"
+is "node 19.9 cannot either"            "no"  "$(ge 19.9.0  20.19)"
+is "node 20.18 cannot either"           "no"  "$(ge 20.18.0 20.19)"
+is "node 20.19 can"                     "yes" "$(ge 20.19.0 20.19)"
+is "node 22 can"                        "yes" "$(ge 22.23.3 20.19)"
+
+# ONE REPORT, NOT THREE. The old output offered each prerequisite separately and printed the
+# same three-line "or consent up front" footer under each, then exited on a bare
+# `error: jq is required` — four things to read, three commands to run one at a time, and a
+# re-run between each. `env -i PATH=/nonexistent` is the whole fixture.
+# THE ABSOLUTE bash. `env -i PATH=/nonexistent bash` looks bash up in the PATH it was just
+# handed, finds nothing, and runs nothing — and an empty run is indistinguishable here from
+# a report that printed nothing, which is exactly what these rows are about. Watched red:
+# all three of them said "got: " with no output at all.
+BASH_ABS="$(command -v bash)"
+rmh() { env -i PATH="$1" "$BASH_ABS" -c '
+  set -uo pipefail; NODE_PKG=nodejs; PKG_PREFIX="apt-get install -y"; ASSUME_YES=0
+  . "$1"/lib.sh; report_missing_hard || echo "rc=$?"' _ "$IM" 2>&1; }
+none="$(rmh /nonexistent)"
+# 3 is the claim and so it is the assertion: 2 would mean one of the three fell out of the
+# roster, and 0 that the whole block is unreachable, which is how this read before.
+is "all three are named at once"        "3" "$(grep -c '^    \(node\|jq  \|tmux\) —' <<<"$none")"
+is "...in ONE install command"        "yes" "$(grep -q 'apt-get install -y nodejs jq tmux' <<<"$none" && echo yes || echo no)"
+# node is `nodejs` to apt and `node` to brew. Printing the BINARY into an apt command gives
+# a line that looks right, runs, and installs an unrelated package.
+is "...spelling node as its package"    "no" "$(grep -q 'apt-get install -y node ' <<<"$none" && echo yes || echo no)"
+is "...and it reports failure"        "rc=1" "$(grep -o 'rc=[0-9]*' <<<"$none")"
+# THE SILENT DIRECTION. A report that always fires is indistinguishable from one that works,
+# and this one gates the install, so "always" would stop every install on every machine.
+have="$(rmh "$PATH")"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  is "...and says nothing when all three are here" "" "$have"
+else
+  skip "...and says nothing when all three are here" "this machine is missing one of them"
+fi
+
+# APT'S LISTS CAN BE EMPTY, AND THE ERROR NAMES THE PACKAGE RATHER THAN THE CAUSE:
+# "E: Unable to locate package nodejs" reads as "no such package" and means "never ran
+# apt-get update". A fake apt-get with exactly that behaviour — refuses to install until an
+# update has been run once — plus a sudo that is a pass-through, because the real one would
+# ask this suite's reader for a password.
+mkdir -p "$IM/fake"
+cat > "$IM/fake/apt-get" <<'SH'
+#!/bin/sh
+case "$1" in
+  update)  echo done > "$APT_STATE"; exit 0 ;;
+  install) [ -s "$APT_STATE" ] && exit 0
+           echo "E: Unable to locate package $3" >&2; exit 100 ;;
+esac
+exit 0
+SH
+printf '#!/bin/sh\nexec "$@"\n' > "$IM/fake/sudo"
+printf '#!/bin/sh\nexit 1\n'   > "$IM/fake/nope"
+chmod +x "$IM/fake/apt-get" "$IM/fake/sudo" "$IM/fake/nope"
+runpkg() { env PATH="$IM/fake:$PATH" APT_STATE="$1" bash -c '
+  set -uo pipefail; APT_REFRESHED=0; . "$1"/lib.sh; shift; pkg_run "$@"' _ "$IM" "${@:2}" 2>&1; }
+cold="$(runpkg "$IM/cold-lists" jq apt-get install -y jq)"
+is "an apt install that failed on empty lists is retried" "yes" "$(grep -q '✓ jq installed' <<<"$cold" && echo yes || echo no)"
+# `sudo ` OR NOT: pkg_run builds the refresh the same way it builds the install, so the
+# line reads `Running: sudo apt-get update` for anyone who is not root and `Running:
+# apt-get update` in a container that is. Pinning the rootless spelling made this row a
+# statement about who ran the suite.
+is "...after an update it says out loud"                  "yes" "$(grep -qE 'Running: (sudo )?apt-get update' <<<"$cold" && echo yes || echo no)"
+is "...naming the cause, not just the package"            "yes" "$(grep -q 'no package lists yet' <<<"$cold" && echo yes || echo no)"
+# THE OTHER DIRECTION, twice. A refresh that always runs costs every install a network round
+# trip it does not need, and a refresh that fires for a manager that is not apt is a sudo
+# nobody agreed to.
+echo done > "$IM/warm-lists"
+warm="$(runpkg "$IM/warm-lists" jq apt-get install -y jq)"
+is "...and not when the install already worked"            "no" "$(grep -q 'apt-get update' <<<"$warm" && echo yes || echo no)"
+notapt="$(runpkg "$IM/cold-lists2" zz "$IM/fake/nope")"
+is "...and never for a manager that is not apt"            "no" "$(grep -q 'apt-get update' <<<"$notapt" && echo yes || echo no)"
+is "...which still reports its own failure"               "yes" "$(grep -q 'zz install failed' <<<"$notapt" && echo yes || echo no)"
+
+# A PIPELINE'S STATUS IS ITS RIGHT-HAND SIDE'S. `curl … | bash` on a machine with no curl
+# exits 0 — bash ran fine, on empty input — so the installer printed "✓ claude installed" one
+# line under `curl: command not found`, and the first session opened with no agent in it.
+# A PATH holding nothing but bash reproduces it exactly: no curl, no claude, and the `bash`
+# the offer shells out to still resolvable.
+sed -n '/^if ! command -v claude /,/^fi$/p' "$ROOT/install.sh" > "$IM/claude.sh"
+is "the claude offer came out"  "yes" "$(grep -q 'CLAUDE_INSTALL=' "$IM/claude.sh" && echo yes || echo no)"
+mkdir -p "$IM/onlybash"; ln -sf "$(command -v bash)" "$IM/onlybash/bash"
+cl="$(env PATH="$IM/onlybash" HOME="$IM/h" bash -c '
+  set -uo pipefail; ask_optional() { return 0; }; UNASKED=(); . "$1"/claude.sh' _ "$IM" 2>&1)"
+is "a claude install that could not run is not called installed" "no"  "$(grep -q 'claude installed' <<<"$cl" && echo yes || echo no)"
+is "...it says it failed"                                        "yes" "$(grep -q 'claude install failed' <<<"$cl" && echo yes || echo no)"
+is "...and names the curl that was not there"                    "yes" "$(grep -q 'no curl on this machine' <<<"$cl" && echo yes || echo no)"
+
+# ── and the end of the install, which claimed success over an empty runtime ──
+# A COPY, NOT THE REPO, for the reason the group above gives: install.sh writes
+# core.hooksPath into $REPO's git config when $REPO is a repo.
+mkdir -p "$IM/src" "$IM/h/.claude"
+cp -Rp "$ROOT"/bin "$ROOT"/lib "$ROOT"/tmux "$ROOT"/hooks "$ROOT"/mcp "$ROOT"/skill \
+       "$ROOT"/layouts "$ROOT"/web "$ROOT"/install.sh "$IM/src/" 2>/dev/null
+# BIN_DIR deliberately absent from PATH: that is what makes the PATH hint fire, and the hint
+# is what is under test. SHELL is the variable the hint reads.
+im() { env HOME="$IM/h" CLAUDE_FLEET_HOME="$IM/h/rt" CLAUDE_FLEET_BIN="$IM/h/bin" \
+           SHELL="$1" "$IM/src/install.sh" 2>&1; }
+bashrun="$(im /bin/bash)"
+# THE ONE COPY-PASTEABLE LINE IN THE WHOLE INSTALL, and it said ~/.zshrc to everybody. On a
+# Linux box whose login shell is bash that appends to a file the shell never reads, and the
+# next command is still not found — with nothing on screen to suggest why.
+is "the PATH line names the shell's own rc file" "yes" "$(grep -q 'bashrc' <<<"$bashrun" && echo yes || echo no)"
+is "...and not another shell's"                   "no" "$(grep -q 'zshrc'  <<<"$bashrun" && echo yes || echo no)"
+zshrun="$(im /bin/zsh)"
+is "...which is .zshrc under zsh"                "yes" "$(grep -q 'zshrc'  <<<"$zshrun" && echo yes || echo no)"
+fishrun="$(im /opt/homebrew/bin/fish)"
+# fish has no export line to append; the equivalent is a command, so the hint has to change
+# shape and not just filename.
+is "...and fish_add_path under fish"             "yes" "$(grep -q 'fish_add_path' <<<"$fishrun" && echo yes || echo no)"
+is "...with no rc file named there"               "no" "$(grep -q 'export PATH' <<<"$fishrun" && echo yes || echo no)"
+
+# THE RE-RUN LINE HAS TO BE ONE THE READER CAN TYPE. $IM/src is not a git repo and is not the
+# cwd, which is exactly the npx shape: the installer ran out of a cache directory the reader
+# was never shown, and `./install.sh --verbose` names a file their working directory has
+# never had.
+is "an npx-shaped install offers the npx re-run" "yes" "$(grep -q 'npx ghostfleet-cli --verbose' <<<"$bashrun" && echo yes || echo no)"
+is "...and not a script that is not there"        "no" "$(grep -q './install.sh --verbose'       <<<"$bashrun" && echo yes || echo no)"
+fromdir="$(cd "$IM/src" && env HOME="$IM/h" CLAUDE_FLEET_HOME="$IM/h/rt" CLAUDE_FLEET_BIN="$IM/h/bin" \
+           SHELL=/bin/bash ./install.sh 2>&1)"
+is "...and IS ./install.sh when that is the cwd" "yes" "$(grep -q './install.sh --verbose' <<<"$fromdir" && echo yes || echo no)"
+
+# A FAILED STAGE IS THE END OF THE INSTALL. Measured: the build found no npm, cf-sync said
+# NOT SYNCED and copied nothing, and the installer carried on to link symlinks at files that
+# were not there, print `✓ linked 0 commands`, print a "Done. Next:" block naming commands
+# that did not exist, and exit 0 — a green install of nothing, which is the one outcome worse
+# than a red one, because nobody re-runs it.
+printf '#!/bin/sh\necho "cf-sync: NOT SYNCED — nothing was copied." >&2\nexit 1\n' > "$IM/src/bin/cf-sync"
+chmod +x "$IM/src/bin/cf-sync"
+rm -rf "$IM/h/rt" "$IM/h/bin"
+failed="$(im /bin/bash)"; failed_rc=$?
+is "a failed stage never reaches Done. Next:"    "no"  "$(grep -q 'Done. Next:' <<<"$failed" && echo yes || echo no)"
+is "...and says the runtime was not staged"      "yes" "$(grep -q 'runtime was not staged' <<<"$failed" && echo yes || echo no)"
+is "...keeping cf-sync's own reason on screen"   "yes" "$(grep -q 'NOT SYNCED' <<<"$failed" && echo yes || echo no)"
+is "...and exits non-zero"                       "no"  "$([ "$failed_rc" = 0 ] && echo yes || echo no)"
+# THE ARTIFACT, NOT THE EXIT CODE. The gate above should make this unreachable; it stays
+# because it asks what is actually on PATH rather than trusting the step that puts it there.
+printf '#!/bin/sh\nexit 0\n' > "$IM/src/bin/cf-sync"; chmod +x "$IM/src/bin/cf-sync"
+rm -rf "$IM/h/rt" "$IM/h/bin"
+empty="$(im /bin/bash)"; empty_rc=$?
+is "zero linked commands is not a tick"          "no"  "$(grep -q '✓ linked 0 commands' <<<"$empty" && echo yes || echo no)"
+is "...it is a failure that says what to do"     "yes" "$(grep -q 'linked 0 commands' <<<"$empty" && echo yes || echo no)"
+is "...and it too stops before Done. Next:"      "no"  "$(grep -q 'Done. Next:' <<<"$empty" && echo yes || echo no)"
+is "...and exits non-zero"                       "no"  "$([ "$empty_rc" = 0 ] && echo yes || echo no)"
+rm -rf "$IM"
+
 # ── what a non-claude master actually loses ─────────────────────────────────
 # MEASURED, not assumed, and the UI reads these rather than spelling them. The wiring gap
 # #88 recorded is CLOSED as of 2026-08-27: install.sh now registers the ghostfleet MCP for
@@ -749,8 +1717,17 @@ else
   # `local`, and this file is bash already.
   sed -n '/^register_codex_mcp() {/,/^}/p'    "$ROOT/install.sh" >  "$MR/lib.sh"
   sed -n '/^register_opencode_mcp() {/,/^}/p' "$ROOT/install.sh" >> "$MR/lib.sh"
+  # vsay TOO, or the registrars cannot run at all. They narrate their success through it
+  # now that the installer's default output is a summary, and a function this file lifts
+  # out with sed brings none of its callees with it: sourcing them alone gave
+  # "vsay: command not found", every ✓ line vanished, and five assertions here went red
+  # for a reason that had nothing to do with MCP registration. A one-LINE function, so
+  # the range form above would run to the next `^}` in the file and drag half the
+  # installer in with it.
+  sed -n '/^vsay() {/p'                      "$ROOT/install.sh" >> "$MR/lib.sh"
   is "the codex registrar was extracted"    "1" "$(grep -c '^register_codex_mcp() {' "$MR/lib.sh")"
   is "the opencode registrar too"           "1" "$(grep -c '^register_opencode_mcp() {' "$MR/lib.sh")"
+  is "...and the helper they print through" "1" "$(grep -c '^vsay() {' "$MR/lib.sh")"
   is "...and both parse"                    "ok" "$(bash -n "$MR/lib.sh" 2>&1 && echo ok)"
   mkdir -p "$MR/bin" "$MR/rt/mcp"
   printf '#!/bin/sh\nexit 0\n' > "$MR/rt/mcp/fleet-mcp.mjs"
@@ -764,8 +1741,12 @@ exit "${MR_CODEX_RC:-0}"
 STUB
   printf '#!/bin/sh\nexit 0\n' > "$MR/bin/opencode"      # only needs to EXIST
   chmod +x "$MR/bin/codex" "$MR/bin/opencode"
+  # VERBOSE=1, because that is where these lines now live. The registrars' ✓ output is
+  # --verbose detail in the installer's own run (one line per agent, and the default is a
+  # summary), so asserting on it means asking for it. The quiet direction is asserted
+  # below rather than assumed.
   mr() {   # $1=xdg-config-home ... runs one registrar with the stubs in front
-    ( FLEET_HOME="$MR/rt" XDG_CONFIG_HOME="$1" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" \
+    ( FLEET_HOME="$MR/rt" XDG_CONFIG_HOME="$1" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" VERBOSE=1 \
       bash -c 'set -uo pipefail; source "$0"; shift; "$@"' "$MR/lib.sh" x "$2" 2>&1 )
   }
 
@@ -786,7 +1767,7 @@ STUB
   # prints NOTHING — which reads exactly like a function that stayed silent. Same trick the
   # funnel group uses for node.
   BASH_ABS="$(command -v bash)"
-  out="$(FLEET_HOME="$MR/rt" MR_RAN="$MR/ran" PATH="$MR/empty" "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_codex_mcp' "$MR/lib.sh" 2>&1)"
+  out="$(FLEET_HOME="$MR/rt" MR_RAN="$MR/ran" PATH="$MR/empty" VERBOSE=1 "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_codex_mcp' "$MR/lib.sh" 2>&1)"
   is "no codex: it says so"                 "1" "$(printf '%s' "$out" | grep -c 'codex not installed' || true)"
   is "...and runs nothing"                  ""  "$(cat "$MR/ran")"
 
@@ -833,8 +1814,15 @@ STUB
   is "a commented .jsonc is not clobbered"  "$before" "$(cat "$Z/opencode/opencode.jsonc")"
   is "...and it says what to paste"         "1" "$(printf '%s' "$out" | grep -c '"mcp": { "ghostfleet"' || true)"
   is "...without claiming success"          "0" "$(printf '%s' "$out" | grep -c '✓' || true)"
-  out="$(FLEET_HOME="$MR/rt" PATH="$MR/empty" "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_opencode_mcp' "$MR/lib.sh" 2>&1)"
+  out="$(FLEET_HOME="$MR/rt" PATH="$MR/empty" VERBOSE=1 "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_opencode_mcp' "$MR/lib.sh" 2>&1)"
   is "no opencode: it says so"              "1" "$(printf '%s' "$out" | grep -c 'opencode not installed' || true)"
+  # THE QUIET DIRECTION, or "it narrates under --verbose" would be half a claim. vsay
+  # reads ${VERBOSE:-0} so that it survives exactly this extraction: sourced with the
+  # variable unset, under `set -u`, it must print nothing rather than abort.
+  quiet="$(FLEET_HOME="$MR/rt" XDG_CONFIG_HOME="$MR/x5" MR_RAN="$MR/ran" PATH="$MR/bin:$PATH" \
+           "$BASH_ABS" -c 'set -uo pipefail; source "$0"; register_opencode_mcp' "$MR/lib.sh" 2>&1)"
+  is "...and says nothing without VERBOSE"  "0" "$(printf '%s' "$quiet" | grep -c '✓' || true)"
+  is "...while still writing the config"    "node" "$(jq -r '.mcp.ghostfleet.command[0]' "$MR/x5/opencode/opencode.jsonc" 2>/dev/null)"
 
   # ── the installer says the part that makes a correct install look broken ──
   # An MCP server is spawned once per session and lives as long as it, so nothing already
@@ -1125,6 +2113,9 @@ agwait() {           # $1 = text to wait for, up to ~12s
 # ` killed the whole pane and every row after it read as absent. Measured red on
 # ubuntu-latest while green on four local runs, which is exactly what a start-up race looks
 # like. Nothing needs to be re-read if the file was right before the process opened it.
+# Whether agcol() got a live session. Initialised because run.sh is `set -u`:
+# an unset read here would abort the whole suite rather than skip one arm.
+AGUP=0
 AGROW_AGENT=""
 agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = the row's 4th column
   if [ -n "$AGROW_AGENT" ]; then
@@ -1142,18 +2133,38 @@ agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = 
   # the shell tmux runs. Measured by printing $PATH from inside the pane.
   tmux -L cfagcol new-session -d -x 120 -y 24 -e HOME="$T" \
     -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
-    "PATH='$T/bin'; export PATH; '$T/bin/node' '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 20" 2>/dev/null
-  agwait 'acme-api' || true      # the projects screen has painted; keys reach the grid now
+    "PATH='$T/bin'; export PATH; '$T/bin/node' '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 20"
+  agwait 'acme-api' || { AGUP=0; bad "the agent-column session comes up" "the projects screen" "nothing drawn in 12s"; return 1; }
   tmux -L cfagcol send-keys ','
-  agwait 'settings' || true      # ...and the settings page is up
+  agwait 'settings' || { AGUP=0; bad "the agent-column session comes up" "the settings page" "',' did not land in 12s"; return 1; }
+  AGUP=1
 }
 agrow()  { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'acme-api' | head -1; }
 agfoot() { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'esc/. back' | head -1; }
+# DOES THE ROW LACK THIS, AND WAS THERE A ROW AT ALL? The second half is the whole point.
+# `grep -qE <pat> <<< "$(agrow)"` answers "no" when the pattern is absent AND when the
+# capture is EMPTY, and an empty capture is what a dead tmux server produces. So a row
+# asserting "no counter is shown" went green in exactly the case it most needed to fail:
+# the session had gone, the screen it is about did not exist, and the absence of a counter
+# on a screen that was not there read as the feature working.
+#   Seen live on ubuntu-latest: the session for one arm never came up, three rows in this
+# group read an empty pane, two of them went red — and this one went GREEN. The reds were
+# the symptom; this was the defect, and nobody would ever have looked at it.
+#   So the precondition is proved first and the question asked second, which is the same
+# shape as asserting a stylesheet has applied before asserting what it computed. `(no row)`
+# matches neither "yes" nor "no", so a missing pane is a red whichever way the row is
+# written.
+aglacks() {          # $1 = pattern -> no | yes | (no row)
+  local row; row="$(agrow)"
+  [ -n "$row" ] || { printf '(no row)\n'; return; }
+  grep -qE "$1" <<< "$row" && printf 'yes\n' || printf 'no\n'
+}
 # Two column steps, then wait for the AGENT blurb rather than for a duration: the blurb is
 # per column, so its arrival IS the cursor having got there.
 agtoAGENT() { tmux -L cfagcol send-keys 'l'; tmux -L cfagcol send-keys 'l'; agwait 'agent: which CLI' || true; }
 if command -v tmux >/dev/null 2>&1; then
   agcol claude opencode codex
+  if [ "$AGUP" = 1 ]; then
   # Proof the scrub took: on an unscrubbed PATH this says three even with no stubs, so a
   # wrong answer here is what tells you the arm below is testing the wrong ring.
   is "the scrubbed PATH is what sets the ring" "claude opencode codex" \
@@ -1181,27 +2192,32 @@ if command -v tmux >/dev/null 2>&1; then
   is "...and the row is a 3-column row again" "3" \
      "$(awk -F'\t' '/^acme-api/{print NF}' "$T/.config/ghostfleet/projects")"
 
+  else skip "the agent column: a ring of three" "the session did not come up"; fi
   agcol claude codex          # a ring of two: a real toggle, and no counter on it
+  if [ "$AGUP" = 1 ]; then
   is "two installed is a ring of two"  "claude codex" \
      "$(PATH="$T/bin" "$ROOT/bin/fleet-agent" installed 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
   agtoAGENT
   is "two agents show no counter"      "no" \
-     "$(grep -qE 'claude [0-9]/[0-9]' <<< "$(agrow)" && echo yes || echo no)"
+     "$(aglacks 'claude [0-9]/[0-9]')"
   is "...and still name the default"   "yes" \
      "$(grep -q 'claude' <<< "$(agrow)" && echo yes || echo no)"
   is "...and one press still sets it"  "yes" \
      "$(tmux -L cfagcol send-keys Space; sleep 1; grep -q 'codex' <<< "$(agrow)" && echo yes || echo no)"
+  else skip "the agent column: a ring of two" "the session did not come up"; fi
   # AN AGENT THAT IS NOT INSTALLED HERE HAS NO POSITION IN THE RING, and the fudge that
   # placed it at the default's index is what this arm exists to keep out: a project set
   # up on another machine, or whose CLI was uninstalled since, printed `1/3` — the
   # position of claude — beside its own name. The counter is the one number on this
   # screen a reader has no way to check, so a made-up one is worse than none.
   AGROW_AGENT=zed; agcol claude opencode codex; AGROW_AGENT=""
+  if [ "$AGUP" = 1 ]; then
   agtoAGENT
   is "an uninstalled agent is still named" "yes" \
      "$(grep -q 'zed' <<< "$(agrow)" && echo yes || echo no)"
   is "...but gets no invented position"    "no" \
-     "$(grep -qE 'zed [0-9]/[0-9]' <<< "$(agrow)" && echo yes || echo no)"
+     "$(aglacks 'zed [0-9]/[0-9]')"
+  else skip "the agent column: an uninstalled agent" "the session did not come up"; fi
   tmux -L cfagcol kill-server 2>/dev/null
 else
   skip "the agent column says it cycles" "tmux not available"
@@ -1334,6 +2350,132 @@ if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   rm -rf "$RN"
 else
   skip "rename keeps its slot" "tmux/git missing"
+fi
+
+# ── 4a3b. a rename must not lose the session's CONVERSATION ──────────────────
+# Measured on a live fleet: a worker renamed from one name to another answered to the new
+# name in tmux, but its state record still said the old one — and the hook kept writing
+# the old one on every turn, because it took the slot from CLAUDE_FLEET_SLOT, which the
+# agent was launched with and a rename cannot reach. Every reader that looks a session up
+# by name then found nothing: fleet-read said "live but has no transcript yet", the phone's
+# chat said "No messages yet", and hibernate's plan vetoed it as having no conversation id.
+# Two shapes, because both exist: a rename through fleet-rename after a turn, and a
+# session whose record predates the `pane` field and was renamed without fleet-rename,
+# which has to heal from the agent's own note and then from its next turn.
+group "rename carries the conversation"
+if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  RV="$(mktemp -d)"; RV="$(cd "$RV" && pwd -P)"
+  RVC="$RV/cfg"; RVF="$RVC/fleet"; mkdir -p "$RVF" "$RVC/sessions" "$RV/repo"
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  git init -q -b main "$RV/repo" 2>/dev/null
+  git -C "$RV/repo" config user.email t@t; git -C "$RV/repo" config user.name t
+  : > "$RV/repo/f"; git -C "$RV/repo" add -A; git -C "$RV/repo" commit -qm init 2>/dev/null
+  git -C "$RV/repo" worktree add -q "$RV/toolbox" -b toolbox 2>/dev/null
+  git -C "$RV/repo" worktree add -q "$RV/scratch" -b scratch 2>/dev/null
+  # A shell holding the pane with the "agent" under it: the shape agent-here leaves.
+  tmux -L cf-acme-web new-session -d -s toolbox -c "$RV/toolbox" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  tmux -L cf-acme-web new-session -d -s scratch -c "$RV/scratch" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  sleep 0.5
+  enc() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+  convo() {   # sid cwd -> transcript path, with one real turn in it
+    local d="$RVC/projects/$(enc "$2")"; mkdir -p "$d"
+    printf '%s\n' \
+      '{"type":"user","message":{"role":"user","content":"which fields are duplicated?"},"timestamp":"2026-09-24T10:00:00.000Z"}' \
+      '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"billing-svc repeats three fields"}]},"timestamp":"2026-09-24T10:00:05.000Z"}' \
+      > "$d/$1.jsonl"
+    printf '%s' "$d/$1.jsonl"
+  }
+  # A NEIGHBOUR in the same folder, written later. Without it the card rows prove nothing:
+  # the grid's older fallback is "the newest transcript in this cwd", which picks the right
+  # file whenever it is the only one — and a folder shared by several conversations is
+  # exactly where that guess shows somebody else's last message.
+  neighbour() {
+    local d="$RVC/projects/$(enc "$1")"; mkdir -p "$d"
+    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"acme-web shipped a neighbour fix"}]},"timestamp":"2026-09-24T11:00:00.000Z"}' \
+      > "$d/cccccccc-3333-4333-8333-333333333333.jsonl"
+    touch "$d/cccccccc-3333-4333-8333-333333333333.jsonl"
+  }
+  SV_SOCK="$(tmux -L cf-acme-web display-message -p '#{socket_path}' 2>/dev/null)"
+  SV_PID="$(tmux -L cf-acme-web display-message -p '#{pid}' 2>/dev/null)"
+  turn() {    # session-to-take-the-pane-of, env-slot, sid, cwd, transcript, event
+    local pane; pane="$(tmux -L cf-acme-web display-message -p -t "$1" '#{pane_id}' 2>/dev/null)"
+    printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s"}' "$6" "$3" "$4" "$5" \
+    | env TMUX="$SV_SOCK,$SV_PID,0" TMUX_PANE="$pane" CLAUDE_FLEET_SLOT="$2" CLAUDE_FLEET_SOCK=cf-acme-web \
+          CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" CLAUDE_FLEET_NOTIFIER=off \
+          "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  rd()    { env -u TMUX CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" "$ROOT/bin/fleet-read" -s cf-acme-web "$1" 2>&1; }
+  # The phone's chat is fleet_read with json:true, which the dispatch runs as exactly this:
+  # TMUX cleared, the profile's config and fleet dir, -s the project's socket.
+  phone() { env TMUX= CLAUDE_FLEET_SOCK=cf-acme-web CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" \
+              "$ROOT/bin/fleet-read" -s cf-acme-web --json "$1" 2>/dev/null | jq -r '.messages | length' 2>/dev/null; }
+  card()  { env -u TMUX CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --json 2>/dev/null \
+              | jq -r --arg n "$1" '.cards[] | select(.name==$n) | .msg // ""' 2>/dev/null; }
+  plan()  { env -u TMUX CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" "$ROOT/bin/fleet-hibernate" -s cf-acme-web --idle-hours 0 --json 2>/dev/null \
+              | jq -r --arg n "$1" '.[] | select(.slot==$n) | (if .idle_hours == null then "no-transcript" else "found" end) + "|" + .why' 2>/dev/null; }
+  slot_of() { jq -r '.slot' "$RVF/$1.json" 2>/dev/null; }
+
+  # ── shape 1: a turn, then fleet-rename ──
+  S1=aaaaaaaa-1111-4111-8111-111111111111
+  T1="$(convo "$S1" "$RV/toolbox")"
+  turn toolbox toolbox "$S1" "$RV/toolbox" "$T1" Stop
+  is "fixture: the turn is readable by its name"   "1" "$(rd toolbox | grep -c 'repeats three fields' || true)"
+  sleep 1; neighbour "$RV/toolbox"
+  printf 'claude\n' > "$RVF/cf-acme-web.toolbox.agent"
+  printf 'cf-acme-web\x1ftoolbox\x1f%s\n' "$RVF" > "$RVF/cf-acme-web.scratch.reply-to"
+  tmux -L cf-acme-web new-session -d -s _term-toolbox -c "$RV/toolbox" "sleep 600" 2>/dev/null
+  tmux -L cf-acme-web set-option -t _term-toolbox @cf_tab_from toolbox 2>/dev/null
+  tmux -L cf-acme-web set-option -t _term-toolbox @cf_tab_kind term 2>/dev/null
+  env -u TMUX CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" "$ROOT/bin/fleet-rename" -s cf-acme-web toolbox acme-api >/dev/null 2>&1
+  is "the record moves to the new name"            "acme-api" "$(slot_of "$S1")"
+  is "...and its cwd to the moved worktree"        "$RV/acme-api" "$(jq -r .cwd "$RVF/$S1.json" 2>/dev/null)"
+  is "fleet-read finds it by the new name"         "1" "$(rd acme-api | grep -c 'repeats three fields' || true)"
+  is "the phone's session view has its messages"   "2" "$(phone acme-api)"
+  is "the grid card carries its last message"      "1" "$(card acme-api | grep -c 'repeats three fields' || true)"
+  is "hibernate's plan reads its transcript"       "found" "$(plan acme-api | cut -d'|' -f1)"
+  # THE HOOK MUST NOT UNDO IT. The agent still runs with CLAUDE_FLEET_SLOT=toolbox; the
+  # next turn is what used to write the old name straight back.
+  turn acme-api toolbox "$S1" "$RV/acme-api" "$T1" Stop
+  is "a turn after the rename keeps the new name"  "acme-api" "$(slot_of "$S1")"
+  is "...and fleet-read still finds it"            "1" "$(rd acme-api | grep -c 'repeats three fields' || true)"
+  is "the agent marker moved"                      "claude" "$(cat "$RVF/cf-acme-web.acme-api.agent" 2>/dev/null)"
+  is "an answer on its way back is re-addressed"   "acme-api" "$(cut -d$'\x1f' -f2 "$RVF/cf-acme-web.scratch.reply-to" 2>/dev/null)"
+  is "its terminal tab is renamed with it"         "1" "$(tmux -L cf-acme-web has-session -t '=_term-acme-api' 2>/dev/null && echo 1 || echo 0)"
+  is "...and points back at the new name"          "acme-api" "$(tmux -L cf-acme-web show-options -qv -t _term-acme-api @cf_tab_from 2>/dev/null)"
+  is "a resume from the moved worktree finds it"   "1" "$([ -f "$RVC/projects/$(enc "$RV/acme-api")/$S1.jsonl" ] && echo 1 || echo 0)"
+
+  # ── shape 2: the live one — an old record with no pane, renamed without fleet-rename ──
+  S2=bbbbbbbb-2222-4222-8222-222222222222
+  T2="$(convo "$S2" "$RV/scratch")"
+  jq -n --arg id "$S2" --arg cwd "$RV/scratch" --arg tr "$T2" \
+    '{session_id:$id, zellij:"", sock:"cf-acme-web", slot:"scratch", cwd:$cwd, folder:"scratch",
+      branch:"scratch", status:"ready", transcript:$tr, ts:1}' > "$RVF/$S2.json"
+  sleep 1; neighbour "$RV/scratch"
+  PPID2="$(tmux -L cf-acme-web display-message -p -t scratch '#{pane_pid}' 2>/dev/null)"
+  AGENT2="$(pgrep -P "$PPID2" 2>/dev/null | head -1)"
+  # The note as an agent writes it: its own pid and start time beside the id. fleet-hibernate
+  # believes a note only when both match the running process (a pid is reused, and a crashed
+  # agent leaves its file), so a note without them is a note it must refuse.
+  jq -n --arg id "$S2" --arg cwd "$RV/scratch" --argjson pid "${AGENT2:-0}" \
+        --arg st "$(LC_ALL=C TZ=UTC ps -o lstart= -p "${AGENT2:-0}" 2>/dev/null | sed 's/ *$//')" \
+    '{pid:$pid, sessionId:$id, cwd:$cwd, procStart:$st}' > "$RVC/sessions/${AGENT2:-none}.json"
+  tmux -L cf-acme-web rename-session -t scratch billing-svc 2>/dev/null
+  is "fixture: the record still names the old one" "scratch" "$(slot_of "$S2")"
+  is "fleet-read finds it through the pane"        "1" "$(rd billing-svc | grep -c 'repeats three fields' || true)"
+  is "the phone's session view has its messages"   "2" "$(phone billing-svc)"
+  is "the grid card carries its last message"      "1" "$(card billing-svc | grep -c 'repeats three fields' || true)"
+  is "hibernate's plan reads its transcript"       "found" "$(plan billing-svc | cut -d'|' -f1)"
+  turn billing-svc scratch "$S2" "$RV/scratch" "$T2" UserPromptSubmit
+  is "...and its next turn heals the record"       "billing-svc" "$(slot_of "$S2")"
+  # THE OTHER DIRECTION: the fallback must not hand a session somebody else's conversation.
+  # A live session with no record and no note of its own gets nothing, not a neighbour's.
+  tmux -L cf-acme-web new-session -d -s scratch -c "$RV/repo" "sleep 600" 2>/dev/null
+  is "a session with no evidence reads as empty"   "0" "$(phone scratch)"
+  is "...and its card shows no borrowed message"   "0" "$(card scratch | grep -c 'repeats three fields' || true)"
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  rm -rf "$RV"
+else
+  skip "rename carries the conversation" "tmux/git/jq missing"
 fi
 
 # ── 4a4. never hand --order to a grid that predates it ───────────────────────
@@ -1652,6 +2794,7 @@ is "an empty answer text still runs"       "0" "$(agf answer.empty)"
 # THE OTHER DIRECTION. Refusing must not cost the valid calls anything: each of these
 # reached its command, and with its arguments unchanged.
 is "a full send reaches fleet-send"        "1" "$(grep -cF 'fleet-send [w1] [the real work]' "$AG/ran" || true)"
+is "anyway reaches it as --anyway"         "1" "$(grep -cF 'fleet-send [--anyway] [w1] [same PR]' "$AG/ran" || true)"
 is "optional n still defaults"             "1" "$(grep -cF 'fleet-read [w1] [1]' "$AG/ran" || true)"
 is "optional reclaim stays optional"       "1" "$(grep -cF 'fleet-stop [w1]' "$AG/ran" || true)"
 is "optional all stays optional"           "1" "$(grep -cF 'fleet-inbox [--all]' "$AG/ran" || true)"
@@ -1659,7 +2802,7 @@ is "optional prompt stays optional"        "1" "$(grep -cF 'fleet-resume [w1] [g
 is "a tool with no required args runs"     "1" "$(grep -cF 'fleet-list' "$AG/ran" || true)"
 is "empty text reaches fleet-answer"       "1" "$(grep -cF 'fleet-answer [w1] []' "$AG/ran" || true)"
 # and NOTHING else did — a refusal that still shelled out would show up here
-is "exactly the 7 valid calls ran"         "7" "$(grep -c . "$AG/ran" || true)"
+is "exactly the 8 valid calls ran"         "8" "$(grep -c . "$AG/ran" || true)"
 is "no command was handed 'undefined'"     "0" "$(grep -c undefined "$AG/ran" || true)"
 
 # DRIFT: the same check for every required argument the server declares, omitted in turn,
@@ -1675,7 +2818,7 @@ while IFS="$US" read -r c e txt; do
 done < "$AG/out"
 is "every declared required arg is refused by name" "0" "$badreq"
 is "...and the loop covered the 12 known today"     "yes" "$([ "${nreq:-0}" -ge 12 ] && echo yes || echo no)"
-is "...and nothing new ran while doing it"          "7" "$(grep -c . "$AG/ran" || true)"
+is "...and nothing new ran while doing it"          "8" "$(grep -c . "$AG/ran" || true)"
 rm -rf "$AG"
 
 # The empty-text exception above rests on fleet-answer refusing "" itself, by name. If
@@ -1922,6 +3065,14 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "...and it still fails loudly"       "1" "$([ "$SWRC" = 0 ] && echo 0 || echo 1)"
 
   # ── the real one: a wrong-platform agent binary, through the real launcher chain ──
+  # NOT UNDER WSL INTEROP. There an MZ header is not the wrong platform at all: binfmt_misc
+  # hands the file to Windows, which pops an "Unsupported 16-Bit Application" dialog on the
+  # desktop and keeps the process alive while it waits for OK — so the spawn really did
+  # start, the assertions below went red, and every suite run on WSL left a dialog behind.
+  # The case still runs on macOS and plain Linux, which is where it can mean anything.
+  if grep -qs '^enabled' /proc/sys/fs/binfmt_misc/WSLInterop; then
+  skip "a wrong-platform claude" "a wrong-platform binary is not available under WSL interop — an MZ file runs on Windows"
+  else
   spawnsw winbin "$TMUX_TMPDIR"
   is "a wrong-platform claude fails"      "1" "$([ "$SWRC" = 0 ] && echo 0 || echo 1)"
   is "...and does NOT say started"        "0" "$(printf '%s' "$SWOUT" | grep -c "started 'w1'" || true)"
@@ -1930,6 +3081,7 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "...and how to check it"             "1" \
      "$(printf '%s' "$SWOUT" | grep -c -- "claude --version" || true)"
   is "...and leaves NO manifest row"      "0" "$(mfrow)"
+  fi
 
   # THE CHECK IS BY SESSION ID AND WITHOUT -t, because a session NAME can be tmux TARGET
   # SYNTAX (a leading `+` is an expression, and which session it resolves to is
@@ -2683,6 +3835,12 @@ PYX
   # apart again — the clause and the command ship together or the suite says so.
   is "...and names fleet-look"                "1" "$(contracthas 'fleet-look.mjs')"
   is "...and the tree flag beside it"         "1" "$(contracthas 'add --tree')"
+  # QUEUED WORK: a message typed while a turn runs is folded INTO it, and an agent reading
+  # it as a change of direction dropped the task in hand without a word. The half of the
+  # fix that holds for a prompt typed by hand, so each part is its own row.
+  is "...a mid-turn message is queued work"   "1" "$(contracthas 'is QUEUED WORK, not a replacement')"
+  is "...switch only when it says so"         "1" "$(contracthas 'Switch only when the message says so')"
+  is "...and every task gets a state"         "1" "$(contracthas 'lists every task received this turn with its state')"
   # The user's own arguments must survive it — an array spliced into the wrong place
   # would eat them, and nothing else in the session would say so.
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
@@ -2982,6 +4140,71 @@ else
 fi
 rm -rf "$STEPO"
 
+# ── a manifest.json that is not OURS must not take the review server down ──────────────
+# `serve` and `list` find runs by looking for a `manifest.json` in each subdirectory of
+# --dir, and `manifest.json` is one of the most common filenames in computing. --dir is
+# routinely a directory we do not own.
+#
+# SEEN LIVE, AND IT KILLED THE SERVER RATHER THAN SKIPPING A ROW. A browser update unpacked
+# its components into the directory being served — one directory per component, each with a
+# manifest.json of a completely unrelated schema: valid JSON, no `steps`. The only guard was
+# a try/catch around JSON.parse, which asks whether the bytes are JSON — a PROXY for "is this
+# one of ours" that anything well-formed walks straight past. The next request read
+# m.steps.length, threw inside the request handler, and node exited 1. From the client:
+# connection refused. From test/helpers/stepper-check.mjs, which was serving that shared
+# directory: six rows about a stepper that had never loaded, and the server's stack trace
+# discarded with its stderr. Green at 16:43, red at 16:57, nothing in the repo changed, and
+# 6,092 entries in the directory by then.
+#
+# THE FIXTURE IS NAMED FOR THE SHAPE, NOT FOR THE PROGRAM THAT DID IT. This test creates the
+# directory, so nothing has to match a real vendor's path — and the next person to hit this
+# will hit it with some other program's leftovers. What has to be faithful is the CONTENT: a
+# manifest.json that parses cleanly and has no `steps`.
+#
+# Both directions, because "the server stayed up" is what a server with nothing to serve
+# says too: the foreign manifest is ignored AND the real run beside it is still listed.
+group "a foreign manifest.json does not take the review server down"
+FMD="$(mktemp -d "$TEST_RUNS.$$.fm.XXXXXX")"
+mkdir -p "$FMD/run1" "$FMD/some-other-program-unpacker.aA1bB2"
+cat > "$FMD/run1/manifest.json" <<'MANI'
+{"provenance":{"commit":"0000000000000000000000000000000000000000","branch":"b","dirty":false,
+ "base":"http://x","slot":1,"viewport":{"width":800,"height":600},"at":"2026-01-01T00:00:00.000Z"},
+ "steps":[{"n":1,"name":"a clean step","file":null,"url":"http://x/a","title":"A",
+ "expect":null,"notes":[],"requests":[]}],"problems":0}
+MANI
+# Exactly the shape the real one had: parses cleanly, and has no `steps`.
+printf '{"manifest_version":3,"name":"Some Component","version":"1.0.0"}\n' \
+  > "$FMD/some-other-program-unpacker.aA1bB2/manifest.json"
+
+# `list` first: no browser needed, and it had the same bug one exit code quieter.
+FM_LIST="$(node "$ROOT/bin/fleet-shots.mjs" list --dir "$FMD" 2>&1)"; fm_rc=$?
+is "list survives a foreign manifest"   "0"   "$fm_rc"
+is "...and still names the real run"    "1"   "$(printf '%s' "$FM_LIST" | grep -c 'run1' || true)"
+is "...and never mentions the stranger" "0"   "$(printf '%s' "$FM_LIST" | grep -c "some-other-program" || true)"
+
+FMP="$(node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')"
+node "$ROOT/bin/fleet-shots.mjs" serve --dir "$FMD" --port "$FMP" > "$FMD/srv.log" 2>&1 &
+FMPID=$!
+# Poll rather than sleep: the crash is on the FIRST request, so the question is what the
+# first request gets, and a fixed sleep would only choose how long to wait to ask it.
+for _ in $(seq 1 60); do
+  curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$FMP/" 2>/dev/null && break
+  sleep 0.1
+done
+FM_CODE="$(curl -s -o "$FMD/body.html" -w '%{http_code}' --max-time 5 "http://127.0.0.1:$FMP/" 2>/dev/null || echo 000)"
+is "the index answers"                  "200" "$FM_CODE"
+# THE ROW THIS GROUP EXISTS FOR. Before the fix the process was gone by now.
+is "...and the server is still alive"   "yes" "$(kill -0 "$FMPID" 2>/dev/null && echo yes || echo no)"
+is "...and did not throw"               "0"   "$(grep -c 'TypeError' "$FMD/srv.log" || true)"
+# PRESENCE, NOT A COUNT. The run's name legitimately appears twice in the index — once as
+# the link and once in the row beside it — and pinning 1 makes this row fail on a layout
+# change that broke nothing. It is the trap CLAUDE.md records as having bitten four times,
+# and it caught this line on the way in: measured got=2 against a want of 1.
+is "...and the real run is listed"      "yes" \
+   "$([ "$(grep -c 'run1' "$FMD/body.html" 2>/dev/null || echo 0)" -ge 1 ] && echo yes || echo no)"
+{ kill "$FMPID"; wait "$FMPID"; } 2>/dev/null || true
+rm -rf "$FMD"
+
 group "the installer arms the pre-push guard"
 # A COMMITTED HOOK IS NOT AN ARMED HOOK. core.hooksPath is repo-local git config, so it does
 # not survive a clone: .githooks/pre-push ships in the tree and does nothing until somebody
@@ -3018,6 +4241,67 @@ if command -v git >/dev/null 2>&1; then
 else
   skip "installer arms the guard" "git missing"
 fi
+
+group "no withheld name in a PR title or body"
+# THE LAST PIECE OF TEXT NOBODY READ. Every other guard here checks something that exists
+# when it runs: tracked files, the commits in a push, the tip tree, the hook on the way
+# out. A pull request BODY is in none of them — it is not in the repository at all until
+# GitHub composes it into the commit message at squash-merge, which happens after the last
+# check has passed and the last reviewer has looked. So it reached public history read by
+# nothing, and it did: a body carrying a restart snapshot with real session names in it
+# became a commit message on staging.
+#   The gate is a CI job on pull_request, including `edited`, because a body can change
+# after a green run. Proven here rather than only in CI: a check nobody can exercise
+# locally is one that gets debugged by pushing.
+if command -v node >/dev/null 2>&1; then
+  while IFS=$US read -r name want got; do is "$name" "$want" "$got"; done \
+    < <(node "$ROOT/test/helpers/pr-text-sweep.mjs" --selftest 2>/dev/null)
+  # AND THE REAL GATE, not just its pure half — the exit code CI actually reads, with the
+  # name handed over the environment exactly as the workflow hands it. The planted name is
+  # assembled at run time from two halves, so the literal is in no file for the tree sweep
+  # to find; that is the same trick the sweep plays on itself, for the same reason.
+  PRT="$(node -e 'process.stdout.write(["super","key"].join(""))')"
+  is "the gate passes a clean title and body" "0" \
+     "$(PR_TITLE='The card list snaps to a card' PR_BODY='Measured on acme-api/api-fix.' \
+        node "$ROOT/test/helpers/pr-text-sweep.mjs" >/dev/null 2>&1; echo $?)"
+  is "...and refuses one in the body" "1" \
+     "$(PR_TITLE='A tidy title' PR_BODY="seen on $PRT last week" \
+        node "$ROOT/test/helpers/pr-text-sweep.mjs" >/dev/null 2>&1; echo $?)"
+  is "...and one in the title" "1" \
+     "$(PR_TITLE="A fix for $PRT" PR_BODY='nothing here' \
+        node "$ROOT/test/helpers/pr-text-sweep.mjs" >/dev/null 2>&1; echo $?)"
+  # IT MUST SAY WHERE WITHOUT SAYING WHAT. A CI log on a public repository is as public as
+  # the repository, so a guard that prints its find publishes the thing it exists to stop.
+  PROUT="$(PR_TITLE='A tidy title' PR_BODY="seen on $PRT last week" \
+           node "$ROOT/test/helpers/pr-text-sweep.mjs" 2>&1)"
+  is "...naming the place it found it" "yes" \
+     "$(grep -q 'the body, line 1' <<< "$PROUT" && echo yes || echo no)"
+  is "...and never the name itself"    "yes" \
+     "$(grep -q "$PRT" <<< "$PROUT" && echo no || echo yes)"
+else
+  skip "no withheld name in a PR title or body" "node missing"
+fi
+
+group "nothing a checkout makes for itself is tracked"
+# A WORKTREE'S node_modules IS A SYMLINK, and `.gitignore` said `node_modules/`. A trailing
+# slash means "directories only", and git records a symlink as a file, so the pattern never
+# matched it: a worker's `git add -A` committed the link fleet-spawn makes in every worktree,
+# pointing at an absolute path in one person's home. It merged, and a checkout reset onto
+# that commit replaced its real node_modules with a link to itself — `pnpm install` then
+# failed with ELOOP and the phone client could not be built. Asked of the INDEX, not the
+# ignore file, because the ignore file is what was wrong.
+tracked_nm="$(git -C "$ROOT" ls-files -- node_modules 'node_modules/*' | head -1)"
+is "node_modules is not tracked"                "" "$tracked_nm"
+abs_links=""
+while IFS= read -r f; do
+  t="$(readlink "$ROOT/$f" 2>/dev/null || true)"
+  case "$t" in /*) abs_links="$abs_links $f" ;; esac
+done < <(git -C "$ROOT" ls-files -s | awk '$1=="120000"{print $4}')
+is "no tracked symlink points outside the repo" "" "${abs_links# }"
+# ...and the rule can fail: a symlink to an absolute path is exactly what it looks for.
+probe="$(mktemp -d)"; ln -s /tmp "$probe/l"
+t="$(readlink "$probe/l")"; case "$t" in /*) caught=yes ;; *) caught=no ;; esac
+is "...an absolute symlink is what it catches"  "yes" "$caught"; rm -rf "$probe"
 
 group "the pre-push hook refuses to publish a withheld name"
 # WHY A HOOK IS TESTED AT ALL, and why the suite could not have caught what it catches.
@@ -3499,6 +4783,57 @@ fi
 # green by blindness, proving only that the fixture no longer leaks. SIGKILL is the one exit
 # no handler runs on, so it is the only way left to manufacture a real orphan, and it is
 # also the real-world case the handler cannot cover: a crash, an OOM, a Ctrl-C on the runner.
+# ── a page error must say WHAT it was ─────────────────────────────────────────────────
+# CDP's exceptionDetails.text is a fixed prefix, not a message: measured on Chrome 153 by
+# throwing a known error on purpose, it is the literal string "Uncaught" for every error
+# there is, and the thrown value's own message lives in exception.description.
+# lib/browser.mjs read only `.text`, so EVERY page error in this repo arrived as that one
+# word. Seen live: `stepper-check ran  want=yes  got=no: Uncaught` — a row naming a failure
+# and saying nothing about it, for a TypeError that named the exact line when finally read.
+# The word appears in none of our source, so the first move is always to hunt for a string
+# that was never there.
+#   The canary is thrown DELIBERATELY, which is the only way to know the capture works at
+# all — absence of output from a probe nobody has verified is not evidence of absence.
+group "a page error is reported by its message, not by CDP's prefix"
+if [ -n "${CHROME:-}" ] || command -v /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome >/dev/null 2>&1 \
+   || command -v google-chrome >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1; then
+  ERRO="$(mktemp -d "$TEST_RUNS.$$.err.XXXXXX")"
+  # A DYNAMIC import, because an ESM specifier must be a literal — the first version of
+  # this canary wrote `import { launch } from process.argv[2]`, which is a syntax error, so
+  # the probe printed nothing and the rows below would have read as "no chrome". A probe
+  # that fails silently is the exact thing this group exists to stop, and it managed to be
+  # that thing on the way in.
+  cat > "$ERRO/canary.mjs" <<'CANARY'
+const { launch } = await import(process.argv[2]);
+const b = await launch({ width: 300, height: 200 });
+try { await b.evaluate(() => { throw new TypeError('DELIBERATE canary 12345'); }); console.log('NO THROW'); }
+catch (e) { console.log(e.message); }
+finally { await b.close(); }
+CANARY
+  # STDERR IS KEPT, because the row below has to be able to say why. It was discarded,
+  # so the one thing that could explain an empty answer was thrown away at the point of
+  # asking.
+  CANOUT="$(node "$ERRO/canary.mjs" "file://$ROOT/lib/browser.mjs" 2>"$ERRO/why" | head -1)"
+  if [ -z "$CANOUT" ]; then
+    # NOT "no chrome to throw in" — THIS BRANCH HAS ALREADY ESTABLISHED THERE IS ONE.
+    # The enclosing `if` found a browser, so an empty answer here means the canary could
+    # not run it: lib/browser.mjs broken, the import failing, launch refused. Every one
+    # of those was reported as a missing browser and skipped, in green. This file already
+    # warns, eight lines up, that a probe which fails silently is the exact thing the
+    # group exists to stop; it was being that thing in its own else-branch.
+    bad "a page error names itself" "a thrown message" \
+        "the canary printed nothing though a browser is present: $(tr '\n' ' ' < "$ERRO/why" 2>/dev/null | cut -c1-140)"
+  else
+    is "the thrown message survives"      "1" "$(printf '%s' "$CANOUT" | grep -c 'DELIBERATE canary 12345' || true)"
+    is "...and its type"                  "1" "$(printf '%s' "$CANOUT" | grep -c 'TypeError' || true)"
+    # THE REGRESSION, named: a bare "Uncaught" is the old behaviour and tells you nothing.
+    is "...and it is not just \"Uncaught\"" "no" "$([ "$CANOUT" = "Uncaught" ] && echo yes || echo no)"
+  fi
+  rm -rf "$ERRO"
+else
+  skip "a page error names itself" "no chrome to throw in"
+fi
+
 group "fleet-look closes what it opened"
 if command -v node >/dev/null 2>&1 && command -v pgrep >/dev/null 2>&1; then
   LKC="$(mktemp -d)"
@@ -4476,16 +5811,18 @@ if command -v tmux >/dev/null 2>&1; then
   T="$(mktemp -d)"; RF="$T/fleet"; AF="$T/ask/fleet"; mkdir -p "$RF" "$AF"
   US=$'\x1f'
   tmux -L cffsend kill-server 2>/dev/null
-  # The pane prints the busy marker on purpose: fleet-send then takes its "already
-  # mid-turn, the prompt queues" path, which skips the 8s submit-confirm loop. The
-  # queued path must KEEP the address (arming decides which turn answers, not this).
+  # The pane prints the busy marker on purpose: with --now fleet-send then takes its
+  # "already mid-turn, paste into it" path, which skips the 8s submit-confirm loop. That
+  # path must KEEP the address (arming decides which turn answers, not this). --now,
+  # because a plain send to a busy session is QUEUED now and pastes nothing — the queue's
+  # own rows are in "a send to a busy session is queued".
   tmux -L cffsend new-session -d -x 200 -y 40 -s tgt "printf 'esc to interrupt\n'; sleep 30" 2>/dev/null
   sleep 0.4
   FSEND() { env -u TMUX CLAUDE_FLEET_DIR="$RF" "$ROOT/bin/fleet-send" -s cffsend "$@" 2>&1; }
-  FSEND --reply-to "cf-ask/master" --reply-dir "$AF" tgt "what is the schema" >/dev/null 2>&1
+  FSEND --now --reply-to "cf-ask/master" --reply-dir "$AF" tgt "what is the schema" >/dev/null 2>&1
   is "the address is a 3-field record" "cf-ask|master|$AF" \
      "$(tr '\037' '|' < "$RF/cffsend.tgt.reply-to" 2>/dev/null | tr -d '\n')"
-  is "a queued send keeps it"          "1" "$([ -f "$RF/cffsend.tgt.reply-to" ] && echo 1 || echo 0)"
+  is "a pasted-in send keeps it"       "1" "$([ -f "$RF/cffsend.tgt.reply-to" ] && echo 1 || echo 0)"
   is "...and nothing is pre-armed"     "0" "$([ -f "$RF/cffsend.tgt.reply-to.armed" ] && echo 1 || echo 0)"
   # The target has to be TOLD, or it answers as if a human were watching. Read it off the
   # PANE (the tty echoes the paste): fleet-send pastes with -d, which deletes the buffer,
@@ -4537,17 +5874,214 @@ if command -v tmux >/dev/null 2>&1; then
           "$ROOT/bin/fleet-send" -s cffsend --reply-to me tgt hi 2>&1 \
         | grep -c 'needs a live fleet session' || true)"
   rm -f "$RF/cffsend.tgt.reply-to"
-  FSEND tgt "plain dispatch" >/dev/null 2>&1
+  FSEND --now tgt "plain dispatch" >/dev/null 2>&1
   is "a plain send writes no address"  "0" "$(ls "$RF" 2>/dev/null | grep -c 'reply-to' || true)"
   # ...and must not CANCEL one. "Newest send wins" reads tidy and is a trap: the address is
   # keyed by the TARGET, so the master nudge in fleet-event.sh — a plain fleet-send at
   # `master` — would drop a pending question to that master every time a worker finished.
-  FSEND --reply-to "cf-ask/master" --reply-dir "$AF" tgt "q2" >/dev/null 2>&1
-  FSEND tgt "unrelated dispatch" >/dev/null 2>&1
+  FSEND --now --reply-to "cf-ask/master" --reply-dir "$AF" tgt "q2" >/dev/null 2>&1
+  FSEND --now tgt "unrelated dispatch" >/dev/null 2>&1
   is "...and doesn't cancel a pending" "1" "$([ -f "$RF/cffsend.tgt.reply-to" ] && echo 1 || echo 0)"
   tmux -L cffsend kill-server 2>/dev/null; rm -rf "$T"
 else
   skip "reply relay (fleet-send)" "tmux not available"
+fi
+
+# ── 4c1q. a send to a busy session is QUEUED, and runs as its own turn ────────
+# Claude Code folds a message submitted mid-turn INTO the running turn, and the agent reads
+# it as a change of direction — task A was dropped for task B, with nothing saying so.
+# fleet-send used to paste into a busy session and print "your prompt will queue after this
+# turn", which it did not. The fixture below is an agent that behaves the way Claude does:
+# a line that arrives while it is busy is logged FOLD (taken into the running turn), a line
+# that arrives while it is idle starts a TURN, and every turn ends by firing the REAL Stop
+# hook — so the delivery under test is the one the fleet actually runs.
+group "a send to a busy session is queued"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  Q="$(mktemp -d)"; QF="$Q/fleet"; mkdir -p "$QF"
+  cat > "$Q/agent" <<'AGENT'
+#!/usr/bin/env bash
+# $1 = turn log, $2 = seconds a turn lasts. Draws a Claude-shaped composer: two rules with
+# the prompt glyph between them, the spinner line above while busy.
+log="$1"; dur="$2"; rule='────────────────────────────────────────'
+frame() { printf '\033[2J\033[H'
+          if [ "$1" = busy ]; then printf '✻ Working… (3s · esc to interrupt)\n'; else printf '\n'; fi
+          printf '%s\n❯ \n%s\n  status\n' "$rule" "$rule"; }
+while :; do
+  frame idle
+  IFS= read -r line || exit 0
+  printf 'TURN %s\n' "$line" >> "$log"
+  frame busy
+  end=$(( SECONDS + dur ))
+  while [ "$SECONDS" -lt "$end" ]; do
+    # a WHOLE second: macOS /bin/bash is 3.2, which refuses a fractional -t and spins
+    IFS= read -r -t 1 extra && printf 'FOLD %s\n' "$extra" >> "$log"
+  done
+  frame idle
+  printf '{"hook_event_name":"Stop","session_id":"fq-%s","cwd":"%s"}' "$CLAUDE_FLEET_SLOT" "$PWD" \
+    | "$HOOK" >/dev/null 2>&1
+done
+AGENT
+  tmux -L cfq kill-server 2>/dev/null
+  tmux -L cfq new-session -d -x 120 -y 30 -s w1 \
+    "env CLAUDE_FLEET_DIR='$QF' CLAUDE_FLEET_SOCK=cfq CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
+         CLAUDE_FLEET_QUEUE_EVERY=0.3 HOOK='$ROOT/hooks/fleet-event.sh' PATH='$ROOT/bin':\"\$PATH\" \
+         bash '$Q/agent' '$Q/turns' 3" 2>/dev/null
+  QS() { env -u TMUX CLAUDE_FLEET_DIR="$QF" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cfq "$@" 2>&1; }
+  qwait() { local i; for i in $(seq 1 "$2"); do [ "$(grep -c . "$Q/turns" 2>/dev/null)" -ge "$1" ] && return 0; sleep 0.25; done; return 1; }
+  for _ in $(seq 1 20); do grep -q '❯' <<< "$(tmux -L cfq capture-pane -p -t w1 2>/dev/null)" && break; sleep 0.1; done
+  QS w1 "task-alpha" >/dev/null
+  qwait 1 20
+  o2="$(QS w1 "task-bravo")"; o3="$(QS w1 "task-charlie")"
+  is "a send to a working session is queued"  "1" "$(grep -c 'queued #1' <<< "$o2" || true)"
+  is "...and the next goes behind it"         "1" "$(grep -c 'queued #2' <<< "$o3" || true)"
+  is "...two records waiting"                 "2" "$(grep -c . "$QF/cfq.w1.queue" 2>/dev/null || echo 0)"
+  # THE POINT: three prompts, three turns, in the order sent, and nothing folded into the
+  # turn it arrived during. The old paste logs `FOLD task-bravo` here.
+  qwait 3 80
+  is "three prompts ran as three turns, in order" "TURN task-alpha|TURN task-bravo|TURN task-charlie" \
+     "$(tr '\n' '|' < "$Q/turns" 2>/dev/null | sed 's/|$//')"
+  for _ in $(seq 1 20); do [ -s "$QF/cfq.w1.queue" ] || break; sleep 0.25; done
+  is "...and the queue is empty after"        "0" "$([ -s "$QF/cfq.w1.queue" ] && echo 1 || echo 0)"
+  # A duplicate of a prompt already waiting is not a second task (the automated nudges
+  # repeat word for word).
+  sleep 1; : > "$Q/turns"
+  QS w1 "task-delta" >/dev/null; qwait 1 20
+  QS w1 "nudge" >/dev/null; od="$(QS w1 "nudge")"
+  is "the same prompt queued twice is held once" "1" "$(grep -c 'already queued' <<< "$od" || true)"
+  qwait 2 80; sleep 4
+  is "...and runs once"                       "1" "$(grep -c 'TURN nudge' "$Q/turns" || true)"
+  # --now keeps the old behaviour for the send that MEANS to interrupt: into the turn.
+  : > "$Q/turns"
+  QS w1 "task-echo" >/dev/null; qwait 1 20
+  on="$(QS --now w1 "task-foxtrot")"
+  for _ in $(seq 1 40); do grep -q foxtrot "$Q/turns" 2>/dev/null && break; sleep 0.25; done
+  is "--now folds into the running turn"      "FOLD task-foxtrot" "$(grep foxtrot "$Q/turns" 2>/dev/null)"
+  is "...and says so"                         "1" "$(grep -c 'into the running turn' <<< "$on" || true)"
+  is "...and queues nothing"                  "0" "$([ -s "$QF/cfq.w1.queue" ] && echo 1 || echo 0)"
+  tmux -L cfq kill-server 2>/dev/null; rm -rf "$Q"
+else
+  skip "a send to a busy session is queued" "tmux/jq missing"
+fi
+
+# The reply address rides IN the queue record, and becomes a marker only when the prompt
+# is delivered. Written at enqueue time it would be armed by whichever UserPromptSubmit
+# came next — a prompt that is not this one — and answer the asker with a stranger's work.
+group "a queued question carries its reply address"
+if command -v tmux >/dev/null 2>&1; then
+  QR="$(mktemp -d)"; QRF="$QR/fleet"; QRA="$QR/ask"; mkdir -p "$QRF" "$QRA"
+  tmux -L cfqr kill-server 2>/dev/null
+  tmux -L cfqr new-session -d -x 200 -y 40 -s tgt "printf 'esc to interrupt\n'; sleep 60" 2>/dev/null
+  sleep 0.4
+  QRS() { env -u TMUX CLAUDE_FLEET_DIR="$QRF" "$ROOT/bin/fleet-send" -s cfqr "$@" 2>&1; }
+  QRS --reply-to cf-ask/master --reply-dir "$QRA" tgt "what is the schema" >/dev/null
+  is "a queued question writes no marker yet" "0" "$([ -f "$QRF/cfqr.tgt.reply-to" ] && echo 1 || echo 0)"
+  is "...the record holds the address"        "cf-ask|master|$QRA" \
+     "$(cut -d$'\x1f' -f2-4 "$QRF/cfqr.tgt.queue" 2>/dev/null | tr '\037' '|')"
+  is "...and a busy session is not delivered to" "3" "$(QRS --dequeue tgt >/dev/null; echo $?)"
+  # The turn ends: the pane goes quiet and shows an empty composer, and the drain delivers
+  # it. A composer and not a bare `sleep`: a submit fleet-send cannot confirm takes its
+  # reply address back (by design), and this row would then pass or fail on that instead.
+  tmux -L cfqr respawn-pane -k -t tgt \
+    "printf '%s\n❯ \n%s\n' ──────────────────── ────────────────────; cat >/dev/null" 2>/dev/null; sleep 0.4
+  QRS --dequeue tgt >/dev/null
+  is "delivered, the marker is written"       "cf-ask|master|$QRA" \
+     "$(tr '\037' '|' < "$QRF/cfqr.tgt.reply-to" 2>/dev/null | tr -d '\n')"
+  is "...and the question reaches the pane"   "1" \
+     "$(grep -c 'what is the schema' <<< "$(tmux -L cfqr capture-pane -p -t tgt 2>/dev/null)" || true)"
+  is "...and it has left the queue"           "0" "$([ -s "$QRF/cfqr.tgt.queue" ] && echo 1 || echo 0)"
+  tmux -L cfqr kill-server 2>/dev/null; rm -rf "$QR"
+else
+  skip "a queued question carries its reply address" "tmux missing"
+fi
+
+# The queue is keyed by the session NAME, like every other per-session marker, so a rename
+# that left it behind would strand work already sent, and a stop that left it would hand a
+# stranger's backlog to the next session that reuses the name.
+group "the queue moves with a rename and goes with a stop"
+if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  QM="$(mktemp -d)"; QMF="$QM/fleet"; mkdir -p "$QMF" "$QM/repo"
+  tmux -L cfqm kill-server 2>/dev/null
+  git init -q -b main "$QM/repo" 2>/dev/null
+  git -C "$QM/repo" config user.email t@t; git -C "$QM/repo" config user.name t
+  : > "$QM/repo/f"; git -C "$QM/repo" add -A; git -C "$QM/repo" commit -qm init 2>/dev/null
+  git -C "$QM/repo" worktree add -q "$QM/qa" -b qa 2>/dev/null
+  tmux -L cfqm new-session -d -x 200 -y 40 -s qa -c "$QM/qa" "printf 'esc to interrupt\n'; sleep 60" 2>/dev/null
+  sleep 0.4
+  QMS() { env -u TMUX CLAUDE_FLEET_DIR="$QMF" "$ROOT/bin/fleet-send" -s cfqm "$@" 2>&1; }
+  QMS qa "held-one" >/dev/null; QMS qa "held-two" >/dev/null
+  is "fixture: two prompts queued"            "2" "$(grep -c . "$QMF/cfqm.qa.queue" 2>/dev/null || echo 0)"
+  env -u TMUX CLAUDE_FLEET_DIR="$QMF" "$ROOT/bin/fleet-rename" -s cfqm qa qb >/dev/null 2>&1
+  is "the renamed session keeps its queue"    "2" "$(grep -c . "$QMF/cfqm.qb.queue" 2>/dev/null || echo 0)"
+  is "...in order"                            "held-one" \
+     "$(head -1 "$QMF/cfqm.qb.queue" 2>/dev/null | cut -d$'\x1f' -f5 | base64 -d 2>/dev/null || true)"
+  is "...and nothing is left under the old"   "0" "$([ -e "$QMF/cfqm.qa.queue" ] && echo 1 || echo 0)"
+  # The card is the only place a human sees the queue: the grid's --json (which the phone
+  # draws) carries the count, and the desk card prints it where the age would go.
+  qj="$(env -u TMUX CLAUDE_FLEET_DIR="$QMF" node "$ROOT/bin/fleet-grid.mjs" cfqm --json 2>/dev/null)"
+  is "the card carries queued: 2"             "2" "$(jq -r '.cards[] | select(.name=="qb") | .queued' <<< "$qj" 2>/dev/null)"
+  is "...and the lead, with none, carries 0"  "0" "$(jq -r '[.cards[] | select(.name!="qb") | .queued] | add // 0' <<< "$qj" 2>/dev/null)"
+  # AND THE DRAIN FINDS IT UNDER THE NEW NAME. The running agent still carries the name it
+  # was LAUNCHED with (CLAUDE_FLEET_SLOT=qa) — nothing can reach into its environment — so
+  # the Stop hook has to take its slot from the pane's CURRENT session name, or it would
+  # look for a queue under `qa` that the rename just moved away. The turn ends here: the
+  # pane shows an empty composer and fires the real Stop hook from inside itself.
+  tmux -L cfqm respawn-pane -k -t qb \
+    "env CLAUDE_FLEET_DIR='$QMF' CLAUDE_FLEET_SOCK=cfqm CLAUDE_FLEET_SLOT=qa CLAUDE_FLEET_NOTIFIER=off \
+         CLAUDE_FLEET_QUEUE_EVERY=0.3 PATH='$ROOT/bin':\"\$PATH\" bash -c '
+       printf \"%s\\n❯ \\n%s\\n\" ──────────────────── ────────────────────
+       printf \"{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"fq-qb\\\",\\\"cwd\\\":\\\"/\\\"}\" \
+         | \"$ROOT/hooks/fleet-event.sh\" >/dev/null 2>&1
+       cat >/dev/null'" 2>/dev/null
+  # Wait for the TEXT, not for the queue to shrink: --dequeue pops the record before it
+  # pastes, so a loop that stops on the pop reads the pane a moment too early.
+  for _ in $(seq 1 80); do
+    grep -q 'held-one' <<< "$(tmux -L cfqm capture-pane -p -t qb 2>/dev/null)" && break; sleep 0.25
+  done
+  is "after the rename, a Stop delivers the next one" "1" \
+     "$(grep -c 'held-one' <<< "$(tmux -L cfqm capture-pane -p -t qb 2>/dev/null)" || true)"
+  is "...and leaves the other waiting"        "1" "$(grep -c . "$QMF/cfqm.qb.queue" 2>/dev/null || echo 0)"
+  env -u TMUX -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$QMF" "$ROOT/bin/fleet-stop" -s cfqm qb >/dev/null 2>&1
+  is "a stop clears it"                       "0" "$([ -e "$QMF/cfqm.qb.queue" ] && echo 1 || echo 0)"
+  tmux -L cfqm kill-server 2>/dev/null; rm -rf "$QM"
+else
+  skip "the queue moves with a rename" "tmux/git missing"
+fi
+
+# ── a prompt TYPED into a running turn is labelled as queued ──────────────────
+# fleet-send's queue cannot reach a prompt a human types into a busy session, so the
+# UserPromptSubmit hook labels it where the agent reads it. Driven with the payloads Claude
+# Code sends — measured on 2.1.280: a mid-turn submit fires UserPromptSubmit, a background
+# task's completion fires one too (as `<task-notification>…`), and an Esc interrupt fires
+# no Stop, leaving `[Request interrupted by user…` in the transcript instead.
+group "a prompt typed mid-turn is labelled queued"
+if command -v jq >/dev/null 2>&1; then
+  UH="$(mktemp -d)"; UHF="$UH/fleet"; mkdir -p "$UHF"; : > "$UH/t.jsonl"
+  uhook() { local p="$1"; shift
+            printf '%s' "$p" | env -u TMUX -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$UHF" \
+              CLAUDE_FLEET_NOTIFIER=off "$@" "$ROOT/hooks/fleet-event.sh" 2>/dev/null; }
+  ups() { jq -nc --arg p "$1" --arg t "$UH/t.jsonl" \
+            '{hook_event_name:"UserPromptSubmit",session_id:"ups1",cwd:"/",transcript_path:$t,prompt:$p}'; }
+  ev()  { jq -nc --arg e "$1" --arg t "$UH/t.jsonl" '{hook_event_name:$e,session_id:"ups1",cwd:"/",transcript_path:$t}'; }
+  is "a prompt to an idle session gets nothing" "" "$(uhook "$(ups 'fix the login bug')")"
+  uhook "$(ev PreToolUse)" >/dev/null
+  mid="$(uhook "$(ups 'also bump the version')")"
+  is "one sent mid-turn is labelled queued"   "1" "$(grep -c 'QUEUED WORK, not a replacement' <<< "$mid" || true)"
+  is "...naming the task in hand"             "1" "$(grep -c 'fix the login bug' <<< "$mid" || true)"
+  is "...as UserPromptSubmit hook output"     "UserPromptSubmit" "$(jq -r '.hookSpecificOutput.hookEventName' <<< "$mid" 2>/dev/null)"
+  is "a task notification is not a prompt"    "" "$(uhook "$(ups '<task-notification>done</task-notification>')")"
+  is "...and does not replace the task"       "1" "$(uhook "$(ups 'one more')" | grep -c 'fix the login bug' || true)"
+  uhook "$(ev Stop)" >/dev/null
+  is "after the Stop, a prompt is a new turn" "" "$(uhook "$(ups 'next thing')")"
+  # An interrupt leaves `working` behind; the next prompt is what the human wants NOW.
+  printf '%s\n' '{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}' >> "$UH/t.jsonl"
+  is "after an Esc interrupt it is not queued" "" "$(uhook "$(ups 'do this instead')")"
+  # fleet-send --now pastes into the turn ON PURPOSE and leaves a one-shot marker.
+  : > "$UHF/cfu.w1.now"
+  is "a --now paste is not labelled"          "" "$(uhook "$(ups 'deliberate')" CLAUDE_FLEET_SOCK=cfu CLAUDE_FLEET_SLOT=w1)"
+  is "...and the marker is used up"           "0" "$([ -e "$UHF/cfu.w1.now" ] && echo 1 || echo 0)"
+  rm -rf "$UH"
+else
+  skip "a prompt typed mid-turn is labelled queued" "jq missing"
 fi
 
 # ── 4c3. a fleet session is addressable by name ───────────────────────────────
@@ -4957,6 +6491,26 @@ if command -v tmux >/dev/null 2>&1; then
   is "C-n opens an edit tab"     "1" "$(rk C-n | grep -c 'fleet-tab edit' || true)"
   is "C-x opens the stack"       "1" "$(rk C-x | grep -c 'printf stack' || true)"
   tmux -L cftabk kill-server 2>/dev/null
+  # C-n INSIDE THE EDITOR BELONGS TO THE EDITOR (completion-next in Neovim). A binding only
+  # fires on a CLIENT's keystroke — `send-keys` into the pane bypasses the key table — so
+  # this attaches a real client from inside a second server and types into THAT. Both
+  # directions: a guard that swallowed every C-n would pass the editor half alone.
+  KB="$(mktemp -d)"
+  printf '#!/bin/sh\necho "$1 $4" >> "%s/log"\n' "$KB" > "$KB/fleet-tab"; chmod +x "$KB/fleet-tab"
+  tmux -L cftabk -f "$ROOT/tmux/cf.tmux.conf" new-session -d -s api-2 'cat -v' 2>/dev/null
+  tmux -L cftabk set -g @cf_bin "$KB" 2>/dev/null
+  tmux -L cftabk new-session -d -s _edit-api-2 'cat -v' 2>/dev/null
+  tmux -L cftabk set -t _edit-api-2 @cf_tab_kind edit 2>/dev/null
+  tmux -L cftabo kill-server 2>/dev/null
+  tmux -L cftabo new-session -d -x 100 -y 20 "TMUX= tmux -L cftabk attach -t api-2" 2>/dev/null
+  sleep 1; tmux -L cftabo send-keys C-n; sleep 0.7
+  is "C-n in a session runs fleet-tab"        "edit api-2" "$(cat "$KB/log" 2>/dev/null)"
+  : > "$KB/log"; tmux -L cftabk switch-client -t '=_edit-api-2' 2>/dev/null; sleep 0.5
+  tmux -L cftabo send-keys C-n; sleep 0.7
+  is "...but in the editor tab it reaches the editor" "yes" \
+     "$(grep -q '\^N' <<<"$(tmux -L cftabk capture-pane -p -t _edit-api-2 2>/dev/null)" && echo yes || echo no)"
+  is "...and runs nothing"                    "" "$(cat "$KB/log" 2>/dev/null)"
+  tmux -L cftabk kill-server 2>/dev/null; tmux -L cftabo kill-server 2>/dev/null; rm -rf "$KB"
 else
   skip "tab bindings" "tmux not available"
 fi
@@ -5163,8 +6717,22 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     rm -f "$GK/choice"; tmux -L cfgkout kill-server 2>/dev/null
     tmux -L cfgkout new-session -d -x 200 -y 50 \
       "node '$ROOT/bin/fleet-grid.mjs' cfgkin > '$GK/choice' 2>/dev/null" 2>/dev/null
-    sleep 2
-    tmux -L cfgkout send-keys "$1" 2>/dev/null; sleep 2
+    # DRAWN, not slept at: a key sent before the grid is up goes to the SHELL, and the
+    # next one lands on a screen nobody expected. `api-2` is a row only the real grid
+    # draws, so this cannot be satisfied by an empty pane or a dead server.
+    #   THE REASON IS THE RETURN VALUE, not a row of its own. This runs inside $( ), so
+    # anything a `bad` printed here would be captured as the value of the assertion that
+    # called it rather than shown as its own line — a red row whose `got:` holds another
+    # red row, escape codes and all. Saying why in the value keeps one row per question
+    # and still names the condition that never came true.
+    wait_for 8 "the grid to draw its rows" 'pane_has cfgkout "api-2"' \
+      || { tmux -L cfgkout kill-server 2>/dev/null; printf 'the grid drew nothing in 8s\n'; return; }
+    tmux -L cfgkout send-keys "$1" 2>/dev/null
+    # THE CHOICE IS THE EVENT. The grid writes its answer and exits, so a non-empty file
+    # IS the keypress having been handled — there is nothing to estimate. It stays empty
+    # forever if the key does nothing, which is what the budget is there to end.
+    wait_for 8 "the grid to answer $1" '[ -s "$GK/choice" ]' \
+      || { tmux -L cfgkout kill-server 2>/dev/null; printf 'no choice for %s in 8s\n' "$1"; return; }
     tmux -L cfgkout kill-server 2>/dev/null
     tr '\037' '|' < "$GK/choice" 2>/dev/null
   }
@@ -5306,8 +6874,11 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     rm -f "$PK/choice"; tmux -L cfpkout kill-server 2>/dev/null
     tmux -L cfpkout new-session -d -x 200 -y 50 \
       "CLAUDE_FLEET_PROJECTS='$PK/projects' node '$ROOT/bin/fleet-grid.mjs' - --screen projects > '$PK/choice' 2>/dev/null" 2>/dev/null
-    sleep 2
-    tmux -L cfpkout send-keys "$1" 2>/dev/null; sleep 2
+    wait_for 8 "the projects screen to draw" 'pane_has cfpkout "demo"' \
+      || { tmux -L cfpkout kill-server 2>/dev/null; printf 'the projects screen drew nothing in 8s\n'; return; }
+    tmux -L cfpkout send-keys "$1" 2>/dev/null
+    wait_for 8 "the projects screen to answer $1" '[ -s "$PK/choice" ]' \
+      || { tmux -L cfpkout kill-server 2>/dev/null; printf 'no choice for %s in 8s\n' "$1"; return; }
     tmux -L cfpkout kill-server 2>/dev/null
     tr '\037' '|' < "$PK/choice" 2>/dev/null
   }
@@ -5318,6 +6889,80 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
 else
   skip "Projects screen tab keys" "tmux or node missing"
 fi
+
+# THE FIRST PROJECT IS REGISTERED THROUGH THIS SCREEN, and on a fresh account it took 7
+# keystrokes — 5 of them arrowing down a home directory to a folder whose full path the
+# reader could have typed in one go. `/` + the path + ⏎ + s is four, none of them an arrow.
+# HOME is the temp dir here for two reasons: it keeps the browser off the developer's own
+# home, and it makes every path on screen short enough not to wrap the pane, which is what
+# the refusal assertions read.
+group "the folder browser takes a typed path (real TUI)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  FP="$(mktemp -d)"
+  # A SPACE IN THE NAME, deliberately. The clone box one screen over filters its input with
+  # `ch > ' '`, which drops spaces — copy that filter here and a folder with a space in it
+  # can be typed and never reached, which is a bug you only find on somebody else's machine.
+  mkdir -p "$FP/my repos/acme-api"; : > "$FP/notadir"
+  fpstart() {
+    rm -f "$FP/choice"; tmux -L cffp kill-server 2>/dev/null
+    tmux -L cffp new-session -d -x 200 -y 40 \
+      "cd '$FP' && HOME='$FP' node '$ROOT/bin/fleet-grid.mjs' - --screen addproject > '$FP/choice' 2>/dev/null" 2>/dev/null
+    wait_for 8 "the folder browser to draw" 'pane_has cffp "pick a root folder"'
+  }
+  fptype() {   # open the path box and submit $1
+    tmux -L cffp send-keys '/' 2>/dev/null
+    wait_for 5 "the path box to open" 'pane_has cffp "type or paste"' || return 1
+    tmux -L cffp send-keys -l "$1" 2>/dev/null
+    tmux -L cffp send-keys Enter 2>/dev/null
+  }
+  if fpstart; then
+    # THE HINT BAR ONLY. Deleting the binding leaves this row green — measured, by deleting
+    # it — because a key nobody can press is still advertised. The rows below are what pin
+    # the behaviour; this one pins that the reader is told the key exists at all, which is
+    # its own failure: the whole saving is in knowing to type instead of arrow.
+    is "the hint bar advertises the key" "yes" "$(pane_has cffp '/ type a path' && echo yes || echo no)"
+    fptype '~/my repos/acme-api'
+    wait_for 5 "the browser to land on it" 'pane_has cffp "my repos/acme-api"'
+    tmux -L cffp send-keys 's' 2>/dev/null
+    wait_for 5 "the browser to answer" '[ -s "$FP/choice" ]'
+    # THE ARTIFACT, not the screen: what this emits is what bin/ghostfleet registers. A
+    # space that survived the input filter and a ~ that was expanded both show up here or
+    # nowhere.
+    is "a typed ~ path with a space lands, and s picks it" "newproject|$FP/my repos/acme-api" \
+       "$(tr '\037' '|' < "$FP/choice" 2>/dev/null)"
+  else
+    bad "the folder browser draws" "a screen" "nothing in 8s"
+  fi
+  # BOTH WAYS OF BEING WRONG, and they are different places to look: a typo, versus a path
+  # that is right about the repo and one level too deep. One message for both teaches
+  # neither. A fresh screen per case because a refusal leaves the bad text in the box on
+  # purpose — `/` typed into it is a path separator, not the key again.
+  if fpstart; then
+    fptype '~/nope-nothing-here'
+    wait_for 5 "the refusal" 'pane_has cffp "no folder at"'
+    is "a path that is not there is refused"  "yes" "$(pane_has cffp 'no folder at ~/nope-nothing-here' && echo yes || echo no)"
+    is "...and nothing was registered"         "no" "$([ -s "$FP/choice" ] && echo yes || echo no)"
+  fi
+  if fpstart; then
+    fptype '~/notadir'
+    wait_for 5 "the refusal" 'pane_has cffp "not a folder"'
+    is "...and a FILE is refused differently" "yes" "$(pane_has cffp 'is a file, not a folder' && echo yes || echo no)"
+    is "...still registering nothing"          "no" "$([ -s "$FP/choice" ] && echo yes || echo no)"
+  fi
+  # AND THE OLD WAY STILL WORKS. A new key that quietly broke arrowing would trade one
+  # first-run for another, and `s` on the folder you navigated to is the path every reader
+  # who has used this screen before already knows.
+  if fpstart; then
+    tmux -L cffp send-keys Down 2>/dev/null; tmux -L cffp send-keys 's' 2>/dev/null
+    wait_for 5 "the browser to answer" '[ -s "$FP/choice" ]'
+    is "arrowing and s still register the plain way" "yes" \
+       "$(grep -q 'newproject' "$FP/choice" 2>/dev/null && echo yes || echo no)"
+  fi
+  tmux -L cffp kill-server 2>/dev/null; rm -rf "$FP"
+else
+  skip "the folder browser takes a typed path" "tmux or node missing"
+fi
+
 
 # The name the control plane attaches to must be the name fleet-tab really creates. The
 # loop has to know it BEFORE the session exists, so it asks fleet-tab rather than
@@ -5915,14 +7560,18 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   ' "$PJ" "$1"; }
   is "the feature branch gets its number"   '"1184"' "$(PQ feat)"
   is "...and the default branch does NOT"   "null"   "$(PQ master)"
-  # ...and the card DRAWS it, which is a different claim from the wire carrying it.
+  # ...and the card SHOWS it, which is a different claim from the wire carrying it. Asked
+  # of the card MODEL rather than of a drawn line: the phone stopped rendering box art, so
+  # `lines[2].includes('#1184')` had nothing to read. The claim is unchanged — the number
+  # reaches the thing the card is built from — and it is now asked of the one place that
+  # decides it for both renderers.
   is "...and the card shows it"             "1" \
      "$(node -e '
         const fs=require("fs");
         import(process.argv[2]).then(g=>{
           const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
           const c=o.cards.find(c=>c.name==="feat");
-          console.log(g.cardLines(c,false,0).lines[2].includes("#1184")?1:0);
+          console.log(g.cardModel(c,false,0).pr==="#1184"?1:0);
         });
      ' "$PJ" "$ROOT/web/grid.js" 2>/dev/null)"
   # THE FALLBACK, with origin/HEAD deleted: `main` must still be dropped, or a repo that was
@@ -5997,6 +7646,228 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   tmux -L cfrecl kill-server 2>/dev/null; rm -rf "$RC"
 else
   skip "fleet-stop --reclaim" "git or tmux missing"
+fi
+
+# ── a SQUASH-merged worker has to be reclaimable the moment it merges ─────────
+# Refused twice in one day, each time right after the worker's PR was squash-merged:
+# "remove it anyway with: --reclaim --force". Every gate fleet-clean had was blind to it
+# at that moment. The squash lands ONE new commit, so the branch's commits are not
+# reachable from the integration branch; the merge deletes the remote branch, so there is
+# no upstream to be "fully pushed" to; and fleet-merged's cache, filled minutes BEFORE
+# the merge, still said open for the rest of its ten-minute TTL. Asking GitHub about the
+# one branch being reclaimed is the only question that has the answer then.
+#   Then the --force that was suggested lost the worktree: the refused run had already
+# killed the session and dropped its manifest row, so the second run could not find out
+# where it had been — "could not tell which worktree it was in — nothing removed", with
+# the worktree still on disk. The escalation the tool itself recommends has to work.
+#   `gh` is a stub here: `pr view` answers per branch and `pr list` answers NOTHING,
+# which is exactly the stale-cache moment (fleet-merged prints nothing, "I can't tell").
+group "fleet-stop --reclaim after a squash merge"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  SQ="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$SQ/fleet" "$SQ/stub"
+  cat > "$SQ/stub/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"pr view feat/squashed"*|*"pr view feat/messy"*) echo MERGED ;;
+  *"pr view"*) echo OPEN ;;
+esac
+exit 0
+STUB
+  chmod +x "$SQ/stub/gh"
+  git init -q --bare "$SQ/remote.git" 2>/dev/null
+  git init -q -b main "$SQ/repo" 2>/dev/null
+  git -C "$SQ/repo" config user.email t@t; git -C "$SQ/repo" config user.name t
+  : > "$SQ/repo/f"; git -C "$SQ/repo" add -A; git -C "$SQ/repo" commit -qm i 2>/dev/null
+  git -C "$SQ/repo" remote add origin "$SQ/remote.git"
+  git -C "$SQ/repo" push -q origin main 2>/dev/null
+  sq_branch() {                    # <name> <branch>: a worktree whose branch has one commit
+    git -C "$SQ/repo" worktree add -q "$SQ/repo/.worktrees/$1" -b "$2" 2>/dev/null
+    echo "$1" > "$SQ/repo/.worktrees/$1/$1.txt"
+    git -C "$SQ/repo/.worktrees/$1" add "$1.txt"
+    git -C "$SQ/repo/.worktrees/$1" commit -qm "work on $1" 2>/dev/null
+    git -C "$SQ/repo/.worktrees/$1" push -q -u origin "$2" 2>/dev/null
+  }
+  sq_branch squashed feat/squashed
+  sq_branch unmerged feat/unmerged
+  sq_branch messy    feat/messy
+  # an open PR with a commit that exists NOWHERE else — the case the gates exist for
+  echo more >> "$SQ/repo/.worktrees/unmerged/unmerged.txt"
+  git -C "$SQ/repo/.worktrees/unmerged" commit -qam "unpushed" 2>/dev/null
+  # THE SQUASH MERGE, as GitHub does it: the same change, as one NEW commit on main, and
+  # the head branch deleted on the remote — so the local branch's upstream is "gone".
+  cp "$SQ/repo/.worktrees/squashed/squashed.txt" "$SQ/repo/"
+  git -C "$SQ/repo" add squashed.txt; git -C "$SQ/repo" commit -qm "work on squashed (#1)" 2>/dev/null
+  git -C "$SQ/repo" push -q origin main 2>/dev/null
+  git -C "$SQ/repo" push -q origin --delete feat/squashed feat/messy 2>/dev/null
+  git -C "$SQ/repo" fetch -q --prune origin 2>/dev/null
+  echo scratch > "$SQ/repo/.worktrees/messy/dirty.txt"
+  # the fixture has to BE the failure: not reachable from main, and no upstream left
+  is "fixture: the squashed branch is not in main" "1" \
+     "$(git -C "$SQ/repo" rev-list --count main..feat/squashed 2>/dev/null)"
+  is "fixture: ...and its upstream is gone"        "1" \
+     "$(git -C "$SQ/repo" for-each-ref --format='%(upstream:track)' refs/heads/feat/squashed | grep -c gone || true)"
+  tmux -L cfsquash kill-server 2>/dev/null
+  tmux -L cfsquash new-session -d -s master   -c "$SQ/repo" 'sleep 90' 2>/dev/null
+  for w in squashed unmerged messy; do
+    tmux -L cfsquash new-session -d -s "$w" -c "$SQ/repo/.worktrees/$w" 'sleep 90' 2>/dev/null
+  done
+  sleep 0.6
+  sqstop() { env -u TMUX CLAUDE_FLEET_DIR="$SQ/fleet" PATH="$SQ/stub:$PATH" \
+             "$ROOT/bin/fleet-stop" -s cfsquash "$@" 2>&1; }
+
+  out="$(sqstop --reclaim squashed)"
+  is "squash-merged + clean: plain --reclaim removes it" "0" "$([ -d "$SQ/repo/.worktrees/squashed" ] && echo 1 || echo 0)"
+  is "...because its PR merged"                          "1" "$(printf '%s' "$out" | grep -c 'PR merged' || true)"
+  is "...without suggesting --force"                     "0" "$(printf '%s' "$out" | grep -c -- '--force' || true)"
+
+  # MERGED IS NOT ENOUGH ON ITS OWN: an edit made after the merge is still work
+  out="$(sqstop --reclaim messy)"
+  is "merged but DIRTY: kept"                            "1" "$([ -d "$SQ/repo/.worktrees/messy" ] && echo 1 || echo 0)"
+  is "...for uncommitted changes"                        "1" "$(printf '%s' "$out" | grep -c 'uncommitted changes' || true)"
+
+  # and an OPEN PR with commits nowhere else is still refused — the other direction
+  out="$(sqstop --reclaim unmerged)"
+  is "an open PR's worktree: kept"                       "1" "$([ -d "$SQ/repo/.worktrees/unmerged" ] && echo 1 || echo 0)"
+  is "...offering the --force it names"                  "1" "$(printf '%s' "$out" | grep -c -- '--reclaim --force unmerged' || true)"
+  # THE ESCALATION, with the session already gone — the order a lead actually runs it in
+  out="$(sqstop --reclaim --force unmerged)"
+  is "--force after the refusal still finds the tree"    "0" "$(printf '%s' "$out" | grep -c 'could not tell which worktree' || true)"
+  is "...and removes it"                                 "0" "$([ -d "$SQ/repo/.worktrees/unmerged" ] && echo 1 || echo 0)"
+  tmux -L cfsquash kill-server 2>/dev/null; rm -rf "$SQ"
+else
+  skip "fleet-stop after a squash merge" "git or tmux missing"
+fi
+
+# ── a finished worker is not handed the next task ────────────────────────────
+# A worker that finished a task carries all of it into the next one: the files it read,
+# the decisions it made, the dead ends it half-remembers. Reusing the SESSION is what
+# contaminates; reusing the FOLDER is not (fleet-spawn --reuse starts a new conversation
+# there). So fleet-send refuses a brief to a worker whose task has shipped and points at
+# fleet-spawn, with --anyway to insist.
+#   "Shipped" is deliberately narrow, and each exemption below is a send that MUST go:
+# an open PR is the same task still in flight (a red CI row, a review note), a session
+# that has not finished a turn since it started has no task to be contaminated by, a
+# --reply-to question is asking for exactly the context it has, and the master is not a
+# worker at all — the hooks' own nudge is a plain fleet-send at it.
+group "fleet-send refuses a finished worker's next task"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  DS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$DS/fleet" "$DS/stub"
+  printf '#!/bin/sh\nexit 0\n' > "$DS/stub/gh"; chmod +x "$DS/stub/gh"   # never the network
+  git init -q -b main "$DS/repo" 2>/dev/null
+  git -C "$DS/repo" config user.email t@t; git -C "$DS/repo" config user.name t
+  : > "$DS/repo/f"; git -C "$DS/repo" add -A; git -C "$DS/repo" commit -qm i 2>/dev/null
+  git -C "$DS/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null
+  git -C "$DS/repo" update-ref refs/remotes/origin/main main
+  git -C "$DS/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  ds_wt() {                        # <name> <branch> [commit]
+    git -C "$DS/repo" worktree add -q "$DS/repo/.worktrees/$1" -b "$2" main 2>/dev/null
+    [ -n "${3:-}" ] || return 0
+    echo "$1" > "$DS/repo/.worktrees/$1/$1.txt"
+    git -C "$DS/repo/.worktrees/$1" add "$1.txt"; git -C "$DS/repo/.worktrees/$1" commit -qm "$1" 2>/dev/null
+  }
+  ds_wt shipped feat/shipped c     # its PR merged
+  ds_wt inflight feat/inflight c   # its PR is open: follow-ups belong here
+  ds_wt even    feat/even          # clean and even with origin/main after a DONE
+  ds_wt fresh   feat/fresh c       # merged branch, but a NEW session that has done nothing
+  printf 'feat/inflight\x1f12\x1fOPEN\nfeat/shipped\x1f11\x1fMERGED\nfeat/fresh\x1f10\x1fMERGED\n' \
+    > "$DS/fleet/prs.acme_widget"
+  tmux -L cfdisp kill-server 2>/dev/null
+  # The busy marker sends fleet-send down its QUEUE, which skips the 8s confirm loop: a send
+  # to a working session is held for its next turn rather than pasted into this one, so
+  # "dispatched" below means delivered OR queued, and "refused" means neither.
+  pane="printf 'esc to interrupt\n'; sleep 60"
+  tmux -L cfdisp new-session -d -x 200 -y 40 -s master -c "$DS/repo" "$pane" 2>/dev/null
+  for w in shipped inflight even fresh; do
+    tmux -L cfdisp new-session -d -x 200 -y 40 -s "$w" -c "$DS/repo/.worktrees/$w" "$pane" 2>/dev/null
+  done
+  sleep 0.6
+  now="$(date +%s)"
+  # DONE rows as the Stop hook writes them. fresh's is OLDER than its session: a previous
+  # session of that name finished, this one has not — and the name is all a row carries.
+  { for w in shipped inflight even master; do printf '%s\t%s\tdone\t%s\n' "$now" "$w" "$w"; done
+    printf '%s\t%s\tdone\t%s\n' "$((now - 3600))" fresh fresh; } > "$DS/fleet/cfdisp.inbox"
+  dsend() { ( cd "$DS/repo" && env -u TMUX CLAUDE_FLEET_DIR="$DS/fleet" PATH="$DS/stub:$PATH" \
+              "$ROOT/bin/fleet-send" -s cfdisp "$@" 2>&1; echo "rc=$?" ); }
+  queued_to() { local n; n="$(grep -c . "$DS/fleet/cfdisp.$1.queue" 2>/dev/null)"; echo "${n:-0}"; }
+  sent_to() { echo $(( $(awk -F'\t' -v s="$1" '$2==s' "$DS/fleet/cfdisp.sent" 2>/dev/null | grep -c . || true) \
+                       + $(queued_to "$1") )); }
+
+  out="$(dsend shipped "build the next thing")"
+  is "a shipped worker's next task is refused"    "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
+  is "...naming fleet-spawn instead"              "1" "$(printf '%s' "$out" | grep -c 'fleet-spawn' || true)"
+  is "...and the flag that insists"               "1" "$(printf '%s' "$out" | grep -c -- '--anyway' || true)"
+  is "...and nothing was dispatched"              "0" "$(sent_to shipped)"
+  is "...not even into its queue"                 "0" "$(queued_to shipped)"
+  out="$(dsend --anyway shipped "one more thing on it")"
+  is "--anyway sends it"                          "1" "$(sent_to shipped)"
+  # BOTH GATES AT ONCE: past the refusal, a worker that is mid-turn still gets it as its
+  # NEXT turn — --anyway insists on the recipient, not on interrupting it.
+  is "...into its queue, since it is mid-turn"    "1" "$(queued_to shipped)"
+  # ...and when that turn ends the drain DELIVERS it. The refusal already ran when it was
+  # queued; asking again at delivery would pop the prompt and then refuse it — dropped,
+  # for having waited its turn.
+  tmux -L cfdisp respawn-pane -k -t shipped \
+    "printf '%s\n❯ \n%s\n' ──────────────────── ────────────────────; cat >/dev/null" 2>/dev/null; sleep 0.4
+  dq="$(dsend --dequeue shipped)"
+  is "...and the drain delivers it, not refuses it" "1" \
+     "$(awk -F'\t' '$2=="shipped"' "$DS/fleet/cfdisp.sent" 2>/dev/null | grep -c . || true)"
+  is "...leaving the queue empty"                 "0" "$(queued_to shipped)"
+  is "...and exits 0"                             "1" "$(printf '%s' "$out" | grep -c 'rc=0' || true)"
+
+  out="$(dsend inflight "CI is red on your PR")"
+  is "an OPEN PR's follow-up is never refused"    "1" "$(sent_to inflight)"
+  out="$(dsend even "build the next thing")"
+  is "clean + even with main after a DONE: refused" "0" "$(sent_to even)"
+  out="$(dsend fresh "your first task")"
+  is "a fresh session on a merged branch: sent"   "1" "$(sent_to fresh)"
+  out="$(dsend master "[fleet] a worker finished")"
+  is "the master is never refused"                "1" "$(sent_to master)"
+  out="$(dsend --reply-to cfdisp/master --reply-dir "$DS/fleet" even "why did you pick that?")"
+  is "a --reply-to question is exempt"            "1" "$(sent_to even)"
+
+  # THE INBOX says what to do with them: a live, finished worker is a --reclaim away
+  ib="$( cd "$DS/repo" && env -u TMUX CLAUDE_FLEET_DIR="$DS/fleet" PATH="$DS/stub:$PATH" \
+         "$ROOT/bin/fleet-inbox" -s cfdisp 2>/dev/null )"
+  is "inbox: the shipped worker gets a reclaim line"  "1" "$(printf '%s\n' "$ib" | grep -c 'fleet-stop --reclaim shipped' || true)"
+  is "inbox: ...so does the clean+even one"           "1" "$(printf '%s\n' "$ib" | grep -c 'fleet-stop --reclaim even' || true)"
+  is "inbox: an open PR does not"                     "0" "$(printf '%s\n' "$ib" | grep -c 'reclaim inflight' || true)"
+  is "inbox: a fresh session does not"                "0" "$(printf '%s\n' "$ib" | grep -c 'reclaim fresh' || true)"
+  is "inbox: the master never does"                   "0" "$(printf '%s\n' "$ib" | grep -c 'reclaim master' || true)"
+  tmux -L cfdisp kill-server 2>/dev/null; rm -rf "$DS"
+else
+  skip "fleet-send to a finished worker" "git or tmux missing"
+fi
+
+# ── spawning into a worktree somebody is standing in ─────────────────────────
+# `--reuse` refused a worktree with a live session, but the IMPLICIT reuse — naming a
+# worker after a worktree that already exists — did not ask, and started a second agent
+# in the same checkout beside the first (as `<name>~2`). Two agents in one tree with no
+# locking is how work gets lost, and a new task is meant to get a clean session, not a
+# shared one.
+group "fleet-spawn never starts beside a live session"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  LV="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$LV/home" "$LV/fleet" "$LV/ok"
+  printf '#!/usr/bin/env bash\nsleep 60\n' > "$LV/ok/agent-here"; chmod +x "$LV/ok/agent-here"
+  git init -q -b main "$LV/repo" 2>/dev/null
+  git -C "$LV/repo" config user.email t@t; git -C "$LV/repo" config user.name t
+  : > "$LV/repo/f"; git -C "$LV/repo" add -A; git -C "$LV/repo" commit -qm i 2>/dev/null
+  git -C "$LV/repo" worktree add -q "$LV/w1" -b w1 2>/dev/null
+  tmux -L cflive kill-server 2>/dev/null
+  tmux -L cflive new-session -d -s w1 -c "$LV/w1" 'sleep 60' 2>/dev/null; sleep 0.4
+  lvspawn() { ( cd "$LV/repo" && HOME="$LV/home" env -u TMUX CLAUDE_FLEET_SOCK=cflive \
+                CLAUDE_FLEET_DIR="$LV/fleet" CLAUDE_FLEET_SLOTS="$LV/slots" \
+                PATH="$LV/ok:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" "$@" 2>&1; echo "rc=$?" ); }
+  out="$(lvspawn w1)"
+  is "an existing worktree with a live session: refused" "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
+  is "...naming the session standing there"              "1" "$(printf '%s' "$out" | grep -c "session 'w1'" || true)"
+  is "...and no second session was started"              "1" "$(tmux -L cflive list-sessions -F '#{session_name}' 2>/dev/null | grep -c . || true)"
+  # the other direction: the same worktree, once nobody is in it, is reused as before
+  tmux -L cflive kill-server 2>/dev/null; tmux -L cflive new-session -d -s keep 'sleep 60' 2>/dev/null
+  out="$(lvspawn w1)"
+  is "...and once it is free, it is reused"              "1" "$(printf '%s' "$out" | grep -c "started 'w1'" || true)"
+  tmux -L cflive kill-server 2>/dev/null; rm -rf "$LV"
+else
+  skip "fleet-spawn beside a live session" "git or tmux missing"
 fi
 # FLAGS ON EITHER SIDE OF THE SESSION. The first cut broke out of the arg loop at the
 # first non-flag, so `fleet-stop <session> --reclaim` parsed the session and then
@@ -6499,7 +8370,7 @@ if command -v tmux >/dev/null 2>&1; then
   # names, so a rename is a broken client, not a refactor.
   is "top-level keys"    "project profile counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
   is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
-  is "card keys"         "name label status folder branch agent pr msg age attached sched limit_at lead" \
+  is "card keys"         "name label status folder branch agent pr msg age exited asleep queued attached sched limit_at lead" \
                          "$(J 'Object.keys(o.cards[0]).join(" ")')"
   is "project is the fleet's project" "demoproj" "$(J 'o.project')"
   is "profile is the profile"         "work"     "$(J 'o.profile')"
@@ -7170,6 +9041,7 @@ kill $AWLIVE 2>/dev/null; wait $AWLIVE 2>/dev/null
 # anywhere distinguishes "nobody asked" from "the OS said no". Both directions, because
 # a message that is always printed is worth as much as one that never is.
 group "fleet-awake --status: a refusal is not silence"
+# needs: fleet-awake --status: one shape on both platforms
 awtable ""
 cat > "$AWD/bin/systemd-inhibit" <<'STUB'
 #!/bin/sh
@@ -7210,6 +9082,7 @@ rm -f "$AWD/bin/systemd-inhibit"
 # so every Linux box on the default was silently getting macOS's --display behaviour.
 # A recording stub, because the assertion is about the argv and nothing else.
 group "fleet-awake arms the flags its table claims"
+# needs: fleet-awake --status: one shape on both platforms
 mkdir -p "$AWD/arm"
 ln -sf "$(command -v nohup)" "$AWD/bin/nohup" 2>/dev/null
 cat > "$AWD/bin/systemd-inhibit" <<STUB
@@ -7314,6 +9187,7 @@ fi
 # the copy's stubs.
 
 group "fleet-serve refuses a bind that is not the tailnet"
+# needs: free_port answers in digits
 # Pure classification, no listener — which is the point: this half has to work on a
 # machine where Tailscale has never been installed, because that is exactly the machine
 # where somebody reaches for 0.0.0.0 to "just make it work". `--any` drops the
@@ -7374,7 +9248,6 @@ rm -rf "$bindrefuse"
 # there holding the port, and the next group dies EADDRINUSE. Six groups skipped as
 # "server did not come up" while the daemon was up the whole time on a port nobody asked
 # for. See the unset at the top of this file for the general guard; this is the local one.
-free_port() { node -e 'const s=require("net").createServer();s.listen(0,"127.0.0.1",()=>{const p=s.address().port;s.close(()=>console.log(String(p)))})' 2>/dev/null; }
 # Proven at the site, with the variable put BACK: everything below depends on this being a
 # number a URL can hold, and the unset at the top of the file is not allowed to be the
 # only reason it is. Both directions — digits with colour forced, and a port that actually
@@ -7518,6 +9391,7 @@ pb() { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f3; }   # body
 
 # ── auth ─────────────────────────────────────────────────────────────────────
 group "fleet-serve: a token exists only because a passkey signed for it"
+# needs: free_port answers in digits
 if sv_start auth; then
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" auth "$(sv_code phone)" > "$SV/probe.auth" 2>"$SV/probe.auth.err"
   is "a cold read is refused"                "401" "$(pf cold.read auth)"
@@ -7572,6 +9446,7 @@ fi
 
 # ── verbs ────────────────────────────────────────────────────────────────────
 group "fleet-serve: destructive verbs need a fresh passkey, on the tool name"
+# needs: free_port answers in digits
 : > "$SV/ran"
 if sv_start verbs; then
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" verbs "$(sv_code v)" > "$SV/probe.verbs" 2>"$SV/probe.verbs.err"
@@ -7710,6 +9585,7 @@ fi
 
 # ── reads ────────────────────────────────────────────────────────────────────
 group "fleet-serve: the grid is never launched without --json"
+# needs: free_port answers in digits
 : > "$SV/ran"; : > "$SV/gridran"
 # An unknown flag falls through to the interactive TUI, which blocks on the tty forever
 # (CLAUDE.md). So the flag is looked for in the FILE first, exactly as bin/ghostfleet does
@@ -7736,6 +9612,7 @@ else
 fi
 
 group "fleet-serve: reads proxy the grid, per project, and bound the tail"
+# needs: free_port answers in digits
 : > "$SV/ran"
 # The §4 payload, echoing back the four env vars the daemon is supposed to set per
 # project. That is the whole point of this stub: a daemon that let SCOPE and ROOT inherit
@@ -7891,6 +9768,7 @@ fi
 # replayed into a pane that then blocks on a keystroke, which keeps Claude's own escapes
 # while leaving the key handling deterministic enough for a suite.
 group "fleet-serve: /api/pane is the pane, and answer keys clears what it shows"
+# needs: free_port answers in digits
 if [ -z "$SV" ]; then
   skip "/api/pane" "node missing"
 else
@@ -8183,6 +10061,7 @@ else
 fi
 
 group "fleet-serve rate limits a token that leaked"
+# needs: free_port answers in digits
 sv_rate 3 2 200
 if sv_start rate; then
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" rate "$(sv_code rl)" > "$SV/probe.rate" 2>/dev/null
@@ -8455,6 +10334,7 @@ else
 fi
 
 group "fleet-serve asserts Tailscale Funnel is off"
+# needs: free_port answers in digits
 # §11.1: Funnel is the one setting that would undo all of §5, "and it should be asserted,
 # not remembered". Three directions, because two of them look alike from outside: on
 # (refuse), off (start), and no CLI at all (say UNVERIFIED rather than pass).
@@ -8499,6 +10379,7 @@ is "...and never as a pass"            "0" \
    "$(PATH="$SV/noshim" HOME="$SV/home" TMUX= "$(command -v node)" "$SV/bin/fleet-serve.mjs" check 2>&1 | grep -c 'funnel     off' || true)"
 
 group "fleet-serve holds a sleep inhibitor while it runs"
+# needs: free_port answers in digits
 # CAN this box arm one at all? `command -v systemd-inhibit` says the binary exists, which
 # is a different question from whether logind will grant a --mode=block lock, and the
 # gap between the two is where the two assertions below spent two CI runs being red for
@@ -8584,6 +10465,7 @@ else
 fi
 
 group "fleet-serve serves the client, and says when there is none"
+# needs: free_port answers in digits
 # The repo-vs-runtime trap: cf-sync mirrors a hardcoded dir list, and web/ was not on it,
 # so a staged runtime had no client at all while the repo looked perfect. Reported once at
 # boot rather than as a 404 per request, which reads as the client's bug.
@@ -8681,6 +10563,112 @@ else
 fi
 chmod 700 "$CS/rt2/web" 2>/dev/null || true
 rm -rf "$CS"
+
+# ── cf-sync BUILDS the phone client, and a build it cannot do is not a sync ─────────────
+# web/ holds built output now (screens.js, holding both ported screens, plus its preact.js
+# chunk). The output is committed, so a clone serves with no toolchain — but a SYNC is a
+# deploy, and copying the committed bytes after somebody edited web/src/ is the
+# repo-vs-runtime trap in the one disguise it has not worn before: `git status` clean, the
+# repo current, and only the runtime's copy of one screen behind.
+#
+# The rule is cf-sync's existing one, applied to a new way of failing: any non-zero means
+# the runtime must not be trusted, so a build that cannot run copies NOTHING. The tests
+# below are behavioural — they run the real script — because every other cf-sync assertion
+# greps the source, and grepping cannot tell whether an exit status is acted on. That is
+# the same reason the failed-sync group above exists.
+#
+# WATCHED GOING RED, each with its own break: with the `exit 1` after the node_modules
+# branch removed, "nothing was copied" fails with the file present; with the whole build
+# block removed, "a build failure is not a sync" exits 0 and claims it synced.
+group "cf-sync will not deploy a client it could not build"
+CB="$(mktemp -d)"
+# A SOURCE WITH NOTHING TO BUILD STILL SYNCS, and this is the npx case rather than a
+# loophole: package.json's `files` list ships web/ already built and does NOT ship
+# vite.config.mjs, so an unpacked cache legitimately has no build step. Asserted FIRST, so
+# that a later failure is known to be the build gate and not the setup.
+mkdir -p "$CB/plain/bin" "$CB/plain/web"
+printf '#!/bin/sh\necho hi\n' > "$CB/plain/bin/thing"; chmod +x "$CB/plain/bin/thing"
+printf 'export const x=1;\n' > "$CB/plain/web/screens.js"
+out_plain="$(CLAUDE_FLEET_HOME="$CB/rt0" "$ROOT/bin/cf-sync" "$CB/plain" 2>&1)"; rc_plain=$?
+is "a source with no build step still syncs"  "0"   "$rc_plain"
+is "...and never mentions a build"            "0"   "$(printf '%s' "$out_plain" | grep -c 'building the phone client' || true)"
+is "...and the client really landed"          "yes" "$([ -f "$CB/rt0/web/screens.js" ] && echo yes || echo no)"
+
+# Now a source that DOES have a build, with no node_modules to do it with. This is the
+# state of a fresh clone, so the message has to name the directory and the one command —
+# an exit code cannot spell "pnpm install". (The hint below names whichever manager is
+# actually on the machine, because their FLAGS differ — see bin/cf-sync.)
+mkdir -p "$CB/src/bin" "$CB/src/web/src"
+printf '#!/bin/sh\necho hi\n' > "$CB/src/bin/thing"; chmod +x "$CB/src/bin/thing"
+printf 'export default {};\n' > "$CB/src/vite.config.mjs"
+printf 'export const x=1;\n' > "$CB/src/web/src/screens.jsx"
+out_nm="$(CLAUDE_FLEET_HOME="$CB/rt1" "$ROOT/bin/cf-sync" "$CB/src" 2>&1)"; rc_nm=$?
+is "no node_modules is a refusal"        "yes" "$([ "$rc_nm" -ne 0 ] && echo yes || echo no)"
+is "...and NEVER claims it synced"       "0"   "$(printf '%s' "$out_nm" | grep -c 'synced runtime' || true)"
+is "...and says NOT SYNCED"              "1"   "$(printf '%s' "$out_nm" | grep -c 'NOT SYNCED' || true)"
+is "...and names the missing directory"  "1"   "$(printf '%s' "$out_nm" | grep -c 'node_modules' || true)"
+# The hint names the manager that will actually run, and the FLAG differs between them
+# (pnpm --dir, npm --prefix). Printing the other one's flag is worse than printing none: it
+# is a command that looks right and fails. Asserted against whichever is on this machine.
+_pmhint='npm install --prefix'; [ "$("$ROOT/bin/cf-sync" --pm)" = pnpm ] && _pmhint='pnpm install --dir'
+is "...and the command that fixes it"    "1"   "$(printf '%s' "$out_nm" | grep -c "$_pmhint" || true)"
+# THE POINT OF FAILING EARLY. A partial copy is the state that runs half-new code, so a
+# build that cannot run must not get as far as rsync — not even for the dirs it could do.
+is "...and copied NOTHING"               "no"  "$([ -e "$CB/rt1/bin/thing" ] && echo yes || echo no)"
+
+# ...AND THE PATH THAT SUCCEEDS, which had no row at all until a one-character bug proved
+# it needed one. `$PM…` — a bare variable followed by the ellipsis in the progress line — is
+# parsed by bash as a variable NAMED "PM…", so under `set -u` cf-sync aborted before copying
+# anything. Every assertion above stayed green, because they only ever exercise the
+# REFUSALS: no node_modules, no manager, a build that exits non-zero. The branch this script
+# exists to run had nothing asserting it ran at all, so the deploy tool could be broken
+# outright with the suite fully green.
+#   The build is STUBBED (a package.json whose build script exits 0), the same shape as the
+# failure fixture below. This row is about cf-sync reaching and completing its build branch,
+# not about vite — a real build would make it depend on a toolchain and turn a check into a
+# skip on exactly the machines that most need it.
+mkdir -p "$CB/good/node_modules"
+cp -R "$CB/src/bin" "$CB/src/web" "$CB/src/vite.config.mjs" "$CB/good/" 2>/dev/null
+printf '{"name":"x","private":true,"scripts":{"build":"exit 0"}}\n' > "$CB/good/package.json"
+# The committed build output, which a real clone has because this repo commits it — the
+# stub build cannot produce it, and the point of the last row is that cf-sync COPIED it.
+printf 'export const built=1;\n' > "$CB/good/web/screens.js"
+out_ok="$(CLAUDE_FLEET_HOME="$CB/rt3" "$ROOT/bin/cf-sync" "$CB/good" 2>&1)"; rc_ok=$?
+is "a buildable source builds and syncs"  "0"   "$rc_ok"
+is "...and says it is building"           "1"   "$([ "$(printf '%s' "$out_ok" | grep -c 'building the phone client')" -ge 1 ] && echo 1 || echo 0)"
+# THE ROW THAT WOULD HAVE CAUGHT IT. An unbound variable is fatal under `set -u` and prints
+# to stderr; without this the only symptom is a missing file nobody looked for.
+#   MATCHED WITH bash's OWN `case`, NOT grep, and that is not a style preference. The message
+# bash prints names the offending variable, and the variable here is only mis-parsed BECAUSE
+# the source has a multibyte character glued to it — so the error text itself carries an
+# invalid byte. Measured: `grep -c` over that output prints NOTHING and exits 1 (not "0" and
+# not an error anybody reads), in a UTF-8 locale and under LC_ALL=C alike, so the assertion
+# compared "0" against "" and its failure looked like a failure of the thing it was testing.
+# The first version of this row shipped green against the very bug it was written for.
+_unbound=no; case "$out_ok" in *"unbound variable"*) _unbound=yes ;; esac
+is "...with no unbound-variable error"    "no"  "$_unbound"
+is "...and it really claims a sync"       "1"   "$(printf '%s' "$out_ok" | grep -c 'synced runtime' || true)"
+is "...and the client really landed"      "yes" "$([ -f "$CB/rt3/web/screens.js" ] && echo yes || echo no)"
+
+# ...and a build that RUNS and fails. Same refusal, reached down a different branch: this
+# one is npm's exit status rather than a missing directory, and it is the branch a real
+# syntax error in web/src/ arrives through.
+if command -v npm >/dev/null 2>&1; then
+  mkdir -p "$CB/bad/node_modules"
+  cp -R "$CB/src/bin" "$CB/src/web" "$CB/src/vite.config.mjs" "$CB/bad/" 2>/dev/null
+  printf '{"name":"x","private":true,"scripts":{"build":"exit 3"}}\n' > "$CB/bad/package.json"
+  out_bb="$(CLAUDE_FLEET_HOME="$CB/rt2" "$ROOT/bin/cf-sync" "$CB/bad" 2>&1)"; rc_bb=$?
+  is "a build failure is not a sync"       "yes" "$([ "$rc_bb" -ne 0 ] && echo yes || echo no)"
+  is "...and NEVER claims it synced"       "0"   "$(printf '%s' "$out_bb" | grep -c 'synced runtime' || true)"
+  is "...and names the build"              "1"   "$(printf '%s' "$out_bb" | grep -c 'FAILED to build the phone client' || true)"
+  is "...and copied NOTHING"               "no"  "$([ -e "$CB/rt2/bin/thing" ] && echo yes || echo no)"
+  # A stamp is a claim about which commit is in $DEST, and there is no commit in an empty
+  # one. The absence of proof is UNKNOWN, never "in sync" — this file's opening rule.
+  is "...and wrote no stamp"               "no"  "$([ -e "$CB/rt2/.synced" ] && echo yes || echo no)"
+else
+  skip "cf-sync build failure path" "npm is not installed"
+fi
+rm -rf "$CB"
 
 # ── the runtime knows WHICH commit it is, and the control plane says when it is behind ──
 # Seen live: four PRs merged, nobody ran cf-sync, and ~/.local/libexec/ghostfleet served
@@ -8851,6 +10839,7 @@ fi
 # and the whole point is that this is measured and not assumed. It brings its own static
 # servers for the other direction.
 group "phone client: served by the daemon means talking to the daemon"
+# needs: free_port answers in digits
 if sv_start origin; then
   PWO="$(mktemp -d "$TEST_RUNS.$$.pwo.XXXXXX")"
   node "$ROOT/test/helpers/pwa-origin.mjs" "$BASE" > "$PWO/out" 2> "$PWO/err"
@@ -8950,6 +10939,7 @@ done
 # that proves the route works — and the accepted ones are checked on DISK, because a 201
 # with a path in it is not evidence that a file exists.
 group "fleet-serve: a photo becomes a file, and everything else is refused"
+# needs: free_port answers in digits
 if sv_start attach; then
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" attach "$(sv_code att)" > "$SV/probe.att" 2>"$SV/probe.att.err"
   is "attach-probe ran"                    ""    "$(head -2 "$SV/probe.att.err" | tr '\n' ' ' | sed 's/ *$//')"
@@ -9501,10 +11491,41 @@ if [ -d "$ROOT/web" ]; then
       # activated on every platform: the keyboard checks passed on Linux and collapsed on
       # macOS for that reason alone.
       if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+    if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
+      if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
       is "$name" "$want" "$got"
     done < "$VPO/out"
   fi
   rm -rf "$VPO"
+
+  # ── the card's title is a tap target, not a dead zone ─────────────────────
+  # wire() set `dragging` on any press of the grip and pointerup then returned without ever
+  # calling h.tap(), so tapping a card's NAME did nothing while tapping anywhere else on it
+  # opened the session. Pre-existing, and invisible while a card was four identical
+  # monospace lines nobody aimed at one of; the surface-card redesign made the name the
+  # biggest thing on the card and turned the one dead target into the one a thumb goes for.
+  #   ITS OWN HELPER, not a section of viewport-check: written there first, it took that
+  # file from 1m45s to over twenty minutes, because six cases each reloading the app
+  # interacted with the state the sections before it leave behind. Standalone it is ~28s.
+  GRP="$(mktemp -d "$TEST_RUNS.$$.grip.XXXXXX")"
+  node "$ROOT/test/helpers/grip-check.mjs" > "$GRP/out" 2> "$GRP/err"
+  grprc=$?
+  if grep -q 'no chrome' "$GRP/out" 2>/dev/null; then
+    skip "the card grip" "no chrome to tap in"
+  else
+    is "grip-check ran"                 "0" "$grprc"
+    is "...without complaining"         ""  "$(head -2 "$GRP/err" | tr '\n' ' ' | sed 's/ *$//')"
+    # A floor, for the reason pwa-check documents: a browser that fails to start emits a
+    # row or two and a bare "no mismatches" would call that green.
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$GRP/out")" -ge 8 ] && echo yes || echo "no: $(wc -l < "$GRP/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+    if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
+      if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$GRP/out"
+  fi
+  rm -rf "$GRP"
 
   is "cf-sync syncs web/ into the runtime" "yes" \
      "$(grep -qE '^for d in .*\bweb\b' "$ROOT/bin/cf-sync" && echo yes || echo no)"
@@ -9523,6 +11544,118 @@ if [ -d "$ROOT/web" ]; then
     node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$f" 2>/dev/null \
       && ok "$(basename "$f") is valid JSON" || bad "$(basename "$f") is valid JSON" "ok" "parse error"
   done
+
+  # ── the committed build is what the committed source builds to ────────────
+  # web/screens.js and web/preact.js are vite's output and they are TRACKED — because
+  # package.json's `files` ships web/ and `npm pack` reads the working directory, so
+  # gitignoring them would put untracked files on the registry, which is the gap
+  # test/helpers/pack-sweep.mjs exists to close. Committed output buys a clone that serves
+  # with no toolchain and a CLIENT-HASH derivable from bytes in git; what it costs is a new
+  # way to be wrong that no other check here can see — edit web/src/, forget to build, and
+  # every guard in this file stays green over a screen nobody rebuilt. The pin cannot catch
+  # it (the output matches its own bytes), node --check cannot (it parses), and
+  # pwa-render.mjs cannot (it runs the stale file perfectly).
+  #
+  # So this rebuilds and compares bytes. Out of tree, into the run's own temp dir: building
+  # over web/ mid-suite would change files the groups above and below are reading.
+  #
+  # SKIPPED, NOT PASSED, WITHOUT THE TOOLCHAIN — and that is the honest half. CI installs
+  # no npm packages (the suite's promise is no dependencies and a couple of seconds), so in
+  # CI this says so out loud rather than reporting a check it did not make. The place it
+  # actually bites is a dev machine and .githooks/pre-push, which is where the source gets
+  # edited. Watched going red by editing one character of web/src/screens.jsx without
+  # rebuilding: "the committed build matches its source  want=identical  got=screens.js
+  # differs".
+  # THE MANAGER THIS REPO ACTUALLY USES, and the one the reader actually has. #4 moved the
+  # repo to pnpm and deleted package-lock.json, and three lines here did not follow:
+  #   - the gate asked for `npm`, so a machine with only pnpm skipped a check it could run
+  #     perfectly well, and said "npm is not installed" as though that were the reason
+  #   - the hint said `npm install`, which on a repo with a pnpm-lock.yaml and no
+  #     package-lock.json is an instruction that sends someone to the wrong tool
+  #   - the runner was `npx`, which only exists because npm does
+  # A skip reason is guidance somebody follows, and nobody reads one twice — so a wrong one
+  # stays wrong for months. Same shape as bin/cf-sync's own hint, which already picks the
+  # manager that will really run and prints ITS flag, because printing the other one's is a
+  # command that looks right and fails.
+  # Asked of cf-sync, the one place that decides it — including passing over a Windows
+  # pnpm that WSL puts on PATH, which cannot build here.
+  PMB="$("$ROOT/bin/cf-sync" --pm)"
+  if [ ! -f "$ROOT/vite.config.mjs" ]; then
+    skip "the committed build matches its source" "no vite.config.mjs"
+  elif [ -z "$PMB" ]; then
+    skip "the committed build matches its source" "neither pnpm nor npm is installed"
+  elif [ ! -d "$ROOT/node_modules" ]; then
+    skip "the committed build matches its source" "no node_modules — run: $PMB install"
+  else
+    BOUT="$(mktemp -d "$TEST_RUNS.$$.build.XXXXXX")"
+    if ( cd "$ROOT" && "$PMB" exec vite build --outDir "$BOUT" ) > "$BOUT.log" 2>&1; then
+      drift=""
+      for f in screens.js preact.js; do
+        cmp -s "$BOUT/$f" "$ROOT/web/$f" || drift="$drift $f differs"
+      done
+      # Named the other way round too: a build that emitted a file web/ has never heard of
+      # is a config change nobody re-pinned, and it would otherwise read as "identical".
+      for f in "$BOUT"/*.js; do
+        [ -e "$f" ] || continue
+        [ -f "$ROOT/web/$(basename "$f")" ] || drift="$drift $(basename "$f") is not committed"
+      done
+      is "the committed build matches its source" "identical" "${drift:-identical}"
+    else
+      bad "the committed build matches its source" "a build" "vite failed: $(tail -1 "$BOUT.log" 2>/dev/null)"
+    fi
+
+    # ── grid.js is imported, never copied — asked of an entry that would COPY it ────
+    # vite.config.mjs marks the client's own modules external so the bundler cannot inline
+    # a second copy of grid.js; two copies is two answers to "how many cells is this
+    # glyph", which cells() and the pane view exist to prevent.
+    #
+    # THE OBVIOUS PLACE TO ASSERT THAT IS AGAINST web/screens.js, AND IT PROVES NOTHING
+    # THERE. The ported screens import only clockLabel, so the tree-shaker drops the card
+    # functions whether the plugin works or not: that row was green against every break
+    # available, including deleting the plugin outright. Measured — with the plugin gone
+    # the bundle DOES inline grid.js, and a check looking for `function projectCard(` in it
+    # still passed, because nothing had asked for projectCard.
+    #
+    # So this builds an entry that asks. A probe module importing projectCard is exactly
+    # the shape of the next screen to be ported, and with the plugin working it must come
+    # out as an `import` of ./grid.js with no definition inlined. Watched going red by
+    # emptying `plugins` in the real config: "got=inlined projectCard".
+    #
+    # It reuses the REAL config (spread, then input and outDir overridden) rather than a
+    # hand-written one, or it would be testing a second configuration nobody ships.
+    #
+    # THE PROBE MIRRORS web/'s LAYOUT — src/probe.jsx beside a copy of grid.js — so the
+    # specifier is '../grid.js', the same one the real source uses and the one the plugin's
+    # pattern matches. With a copy of grid.js actually on disk, the broken case INLINES it
+    # (the informative red) instead of merely failing to resolve (a red that says nothing
+    # about what went wrong). Measured both ways: plugin on → imports=yes inlines=no; a
+    # `plugins: []` config → imports=no inlines=yes.
+    PRB="$(mktemp -d "$TEST_RUNS.$$.probe.XXXXXX")"
+    mkdir -p "$PRB/web/src"
+    cp "$ROOT/web/grid.js" "$PRB/web/grid.js"
+    cat > "$PRB/web/src/probe.jsx" <<'PROBE'
+import { projectCard } from '../grid.js';
+export const lines = (p) => projectCard(p, 0, false).lines;
+PROBE
+    cat > "$PRB/probe.config.mjs" <<CFG
+import base from '$ROOT/vite.config.mjs';
+export default { ...base, build: { ...base.build, outDir: '$PRB/out',
+  rollupOptions: { ...base.build.rollupOptions, input: { probe: '$PRB/web/src/probe.jsx' } } } };
+CFG
+    if ( cd "$ROOT" && npx --no-install vite build --config "$PRB/probe.config.mjs" ) > "$PRB/log" 2>&1; then
+      # Both halves, because either alone is passable by a broken build: a bundle that
+      # inlined grid.js has no import, and one that somehow kept both would still be wrong.
+      pimp="no"; pdef="no"
+      grep -qE "from *['\"]\./grid\.js['\"]" "$PRB/out/probe.js" && pimp="yes"
+      grep -q "function projectCard" "$PRB/out/probe.js" && pdef="yes"
+      is "an entry that uses grid.js imports it"   "yes" "$pimp"
+      is "...and does not get a copy inlined"      "no"  "$pdef"
+    else
+      bad "an entry that uses grid.js imports it" "a build" "vite failed: $(tail -1 "$PRB/log" 2>/dev/null)"
+    fi
+    rm -rf "$PRB"
+    rm -rf "$BOUT" "$BOUT.log"
+  fi
   # ── the version has to be ABOVE main's, not merely different ──────────────
   # The pin above catches "changed the client, forgot to bump". It has no notion of ORDER,
   # and order is what has bitten: #83 took v17, #81 was numbered v16 before it and merged
@@ -9550,6 +11683,7 @@ if [ -d "$ROOT/web" ]; then
   is "...and produced its checks"     "yes" "$([ "$(wc -l < "$SWV/out")" -ge 20 ] && echo yes || echo "no: $(wc -l < "$SWV/out") rows")"
   while IFS=$'\x1f' read -r name want got; do
     if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+    if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
     is "$name" "$want" "$got"
   done < "$SWV/out"
   rm -rf "$SWV"
@@ -10083,6 +12217,868 @@ else
   skip "recognising an ambiguity is not asking about one" "node missing"
 fi
 
+# ── 4a10c9. hibernation refuses before it acts ───────────────────────────────
+# Hibernation ends processes. Every row here is a way for it to end the wrong one, and the
+# defaults are arranged so that the thing you get by typing the command is a LIST.
+#
+# THE FIRST ROW IS THE ONE THAT MATTERS TO THIS SUITE. fleet-hibernate finds fleets by
+# scanning $TMUX_TMPDIR, so under the suite's own per-run TMUX_TMPDIR (§0) it can only see
+# sessions this run created — and the live fleet on the same machine is invisible to it.
+# That is what makes it safe to test a command whose job is killing sessions at all. If that
+# scoping ever breaks, a suite run becomes a fleet-wide outage, so it is asserted first and
+# in both directions: the run's own socket IS found, and a socket outside the run is NOT.
+group "hibernation refuses before it acts"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  HIB="$(mktemp -d "$TEST_RUNS.$$.hib.XXXXXX")"
+  export CLAUDE_FLEET_DIR="$HIB/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  HIBOUT="$HIB/out"
+  # `case` patterns contain a close-paren, and a close-paren inside $( ) ends the
+  # substitution — so the assertion reads back a fragment of its own shell instead of a
+  # value. Wrapped in a function, the parens are the function body's and never the caller's.
+  has() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  yn()  { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+
+  # A fleet of this run's own: a socket under the run's TMUX_TMPDIR, holding one pane that
+  # is not an agent at all — nothing here needs a real one, and a real one could not be
+  # safely killed by a test.
+  tmux -L cf-acme-api new-session -d -s toolbox -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.5
+  is "hib: the run's own fleet exists" "1" \
+     "$(tmux -L cf-acme-api has-session -t '=toolbox' 2>/dev/null && echo 1 || echo 0)"
+
+  # ── the FLEET_DIR guard ──
+  # Every marker this writes and removes lives under $FLEET_DIR. Empty, it does not fail —
+  # it resolves, and "$FLEET_DIR/x.asleep" becomes a path at the root.
+  CLAUDE_FLEET_DIR= "$ROOT/bin/fleet-hibernate" > "$HIBOUT" 2>&1
+  is "hib: empty FLEET_DIR refuses"    "2"   "$?"
+  is "hib: ...and says why"            "yes" "$(yn grep -q 'refusing to run with FLEET_DIR' "$HIBOUT")"
+
+  # ── off until somebody turns it on ──
+  "$ROOT/bin/fleet-hibernate" --apply --idle-hours 0 > "$HIBOUT" 2>&1
+  is "hib: --apply refuses while off" "1"   "$?"
+  is "hib: ...and names the switch"   "yes" "$(yn grep -q 'hibernate.enabled' "$HIBOUT")"
+  is "hib: ...and killed nothing"     "1"   "$(tmux -L cf-acme-api has-session -t '=toolbox' 2>/dev/null && echo 1 || echo 0)"
+
+  # ── the default is a list, not an action ──
+  "$ROOT/bin/fleet-hibernate" --idle-hours 0 > "$HIBOUT" 2>&1
+  is "hib: the bare command exits 0"  "0"   "$?"
+  is "hib: ...prints a plan"          "yes" "$(yn grep -qE 'WOULD SLEEP|stays up' "$HIBOUT")"
+  is "hib: ...and still killed nothing" "1" "$(tmux -L cf-acme-api has-session -t '=toolbox' 2>/dev/null && echo 1 || echo 0)"
+  is "hib: ...and says it is off"     "yes" "$(yn grep -q 'hibernation is OFF' "$HIBOUT")"
+
+  # ── the scoping that makes this testable at all ──
+  is "hib: sees only this run's fleets" "cf-acme-api" \
+     "$("$ROOT/bin/fleet-hibernate" --idle-hours 0 --json 2>/dev/null | jq -r '[.[].sock] | unique | join(",")')"
+
+  # ── the veto list, one row per way to destroy something ──
+  # A record with no conversation id cannot be woken, so it must never be slept.
+  mk_state() {   # slot status ts_age_s session_id transcript_age_h
+    local slot="$1" st="$2" ts_age="$3" sid="$4" tr_age="$5"
+    local tr="$HIB/tr-$slot.jsonl"
+    : > "$tr"
+    [ -n "$tr_age" ] && touch -t "$(date -v-"${tr_age}"H +%Y%m%d%H%M 2>/dev/null || date -d "-${tr_age} hours" +%Y%m%d%H%M)" "$tr" 2>/dev/null
+    jq -n --arg id "$sid" --arg slot "$slot" --arg st "$st" --arg tr "$tr" \
+          --arg cwd "$HIB" --argjson ts "$(( $(date +%s) - ts_age ))" \
+      '{session_id:$id, sock:"cf-acme-api", slot:$slot, cwd:$cwd, folder:"toolbox",
+        branch:"main", status:$st, transcript:$tr, ts:$ts}' > "$CLAUDE_FLEET_DIR/$sid.json"
+  }
+  why_for() { "$ROOT/bin/fleet-hibernate" --idle-hours 48 --json 2>/dev/null | jq -r --arg s "$1" '.[] | select(.slot==$s) | .why'; }
+
+  tmux -L cf-acme-api new-session -d -s billing-svc -x 80 -y 24 "sleep 600" 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s scratch     -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.5
+  # no id at all
+  jq -n '{session_id:"", sock:"cf-acme-api", slot:"billing-svc", cwd:"/nope", status:"ready", transcript:"", ts:0}' \
+     > "$CLAUDE_FLEET_DIR/noid.json"
+  is "hib: no conversation id -> never" "yes" \
+     "$(yn has 'no recorded conversation id' "$(why_for billing-svc)")"
+
+  # busy AND recent -> vetoed; busy and STALE -> not vetoed for being busy.
+  # Measured on a real fleet: a session marked `working` whose transcript had not moved in
+  # 26.8 days. Vetoing on the word alone pins that memory forever.
+  mk_state scratch working 60 sid-busy-fresh 100
+  is "hib: working within the hour -> never" "yes" \
+     "$(yn has 'and said so within the hour' "$(why_for scratch)")"
+  mk_state scratch working 7200 sid-busy-fresh 100
+  is "hib: ...but a stale 'working' does not veto" "no" \
+     "$(yn has 'said so within the hour' "$(why_for scratch)")"
+
+  # ── the folder must be trustable, or waking it is a dialog nobody sees ──
+  # Observed on a throwaway: a session resumed in an untrusted folder stops at "Is this a
+  # project you created or one you trust?" and never reaches a prompt.
+  # From here the id is one the PANE can be established by: without the agent's own note
+  # about its conversation, the session is vetoed before the clock is read at all.
+  HLIVE=bbbbbbbb-0000-0000-0000-000000000001
+  mk_state scratch ready 0 "$HLIVE" 1
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api scratch "$HLIVE" "$HIB" "$HIB/tr-scratch.jsonl" >/dev/null
+  is "hib: an untrusted folder is never slept" "yes" \
+     "$(yn has 'no trust record' "$(why_for scratch)")"
+  # ...and with the folder trusted, the idle clock is the TRANSCRIPT. Trust is read from
+  # $CLAUDE_CONFIG_DIR, which is where a profile keeps it, so this needs no test-only seam.
+  export CLAUDE_CONFIG_DIR="$HIB/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  jq -n --arg d "$HIB" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api scratch "$HLIVE" "$HIB" "$HIB/tr-scratch.jsonl" >/dev/null
+  is "hib: a fresh transcript is under threshold" "yes" \
+     "$(yn has 'h threshold' "$(why_for scratch)")"
+  # ── AND THE SAME ANSWER UNDER A GNU-SHAPED stat ─────────────────────────────
+  # The one failure a macOS developer cannot see. `stat -f %m FILE` is correct here and wrong
+  # on Linux, where -f is --file-system and takes no format: %m is read as a second FILE, that
+  # one fails, the real one SUCCEEDS and prints a filesystem line to stdout, and the command
+  # exits non-zero — so an `A || B` fallback hands back garbage with the right number stuck on
+  # the end. Fed to awk as the idle clock, a transcript touched one second earlier compared as
+  # "would be slept": a Linux fleet ending the session somebody was using.
+  #   Asserted HERE, against a fixture that is both fresh and trusted, because this is the one
+  # point where the idle clock is the only thing left to decide the answer — anywhere earlier
+  # a cheaper veto fires first and the row passes without reading the clock at all.
+  #   test/helpers/shims/stat gives stat GNU's argument shape on any host, the way
+  # tmux-vis35.mjs gives tmux an old one. The ubuntu leg found this; the shim is what stops it
+  # coming back on the platform that cannot see it.
+  is "hib: ...and still under it with a GNU-shaped stat" "yes" \
+     "$(PATH="$ROOT/test/helpers/shims:$PATH" yn has 'h threshold' \
+        "$(PATH="$ROOT/test/helpers/shims:$PATH" why_for scratch)")"
+  # ...and an old one is not. 100h against a 48h threshold: nothing vetoes it.
+  mk_state scratch ready 7200 "$HLIVE" 100
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api scratch "$HLIVE" "$HIB" "$HIB/tr-scratch.jsonl" >/dev/null
+  is "hib: a 100h-idle session would sleep" "" "$(why_for scratch)"
+  unset CLAUDE_CONFIG_DIR
+
+  # a tab is not an agent
+  tmux -L cf-acme-api new-session -d -s _term-toolbox -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.3
+  is "hib: a _ tab is never slept" "yes" \
+     "$(yn has 'a tab, not an agent' "$(why_for _term-toolbox)")"
+
+  # ── the governor points at the verb that can relieve what it measured ──────
+  # It already read kern.memorystatus_vm_pressure_level and already acted; the action was
+  # fleet-pause, which interrupts a turn and frees nothing. Asserted through the governor's
+  # own --dry-run rather than by grepping the source, so a rename of the helper cannot keep
+  # this green while the behaviour moves.
+  # THE INVOCATION, NOT A MENTION. The first version of this row grepped the block for the
+  # string and stayed green when the real call was swapped back to fleet-pause — because the
+  # dry-run line beside it still PRINTS the word. Only the line that actually runs something
+  # ($BIN_DIR/...) is evidence of what it runs.
+  govcall() { sed -n "$1"',/^      fi$/p' "$ROOT/bin/fleet-governor" \
+              | sed -n 's|.*"\$BIN_DIR/\([a-z-]*\)".*|\1|p' | head -1; }
+  is "hib: the governor's memory path hibernates" "fleet-hibernate" "$(govcall '/resources: .* -> hibernating/')"
+  is "hib: ...and the BUDGET path still parks"    "fleet-pause"     "$(govcall '/budget .* -> parking ALL/')"
+  is "hib: ...and it has a swap trigger"          "yes" \
+     "$(yn grep -q 'swap-pct' "$ROOT/bin/fleet-governor")"
+
+  # ── a state file for EVERY session, not only launcher-started ones ──────────
+  # sock and slot came from the launcher's environment alone, so a session started any other
+  # way wrote a record with both empty: it had an id, so it looked recorded, and could not be
+  # found by fleet. Measured on a real fleet: 28 of 64 running sessions, and they were the
+  # oldest. Driven here by calling the hook the way the harness does, with the environment
+  # silent and only $TMUX to go on.
+  if command -v jq >/dev/null 2>&1; then
+    tmux -L cf-acme-web new-session -d -s scratch -x 80 -y 24 "sleep 600" 2>/dev/null
+    sleep 0.4
+    HKID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    TM="$(tmux -L cf-acme-web display-message -p '#{socket_path},0,0' 2>/dev/null)"
+    printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s","transcript_path":"%s"}' \
+      "$HKID" "$HIB" "$HIB/tr.jsonl" \
+      | env -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK TMUX="$TM" \
+            CLAUDE_FLEET_DIR="$CLAUDE_FLEET_DIR" bash "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+    is "hib: a hook with no env still records the fleet" "cf-acme-web" \
+       "$(jq -r '.sock // ""' "$CLAUDE_FLEET_DIR/$HKID.json" 2>/dev/null)"
+    is "hib: ...and the session name"                    "scratch" \
+       "$(jq -r '.slot // ""' "$CLAUDE_FLEET_DIR/$HKID.json" 2>/dev/null)"
+    tmux -L cf-acme-web kill-server 2>/dev/null
+  fi
+
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  unset CLAUDE_FLEET_DIR
+  rm -rf "$HIB"
+else
+  skip "hibernation refuses before it acts" "tmux or jq missing"
+fi
+
+# ── 4a10c10. a session sleeps, and comes back ────────────────────────────────
+# The round trip, and the reason it can run in a suite at all: everything here happens on a
+# socket under this run's own $TMUX_TMPDIR, against a STUB agent this group puts on PATH.
+# No real agent is started and no real session is reachable — fleet-hibernate finds fleets by
+# scanning $TMUX_TMPDIR, which the group above asserts in both directions.
+#
+# THE STUB IS NOT A SHORTCUT, IT IS THE ONLY HONEST FIXTURE. A real agent cannot be killed by
+# a test, and a test that avoided killing anything would not be testing hibernation. The stub
+# prints the agent's own ready marker and then waits, so the wake path's poll — the thing that
+# decides whether a wake worked — is exercised for real.
+group "a session sleeps and comes back"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  HW="$(mktemp -d "$TEST_RUNS.$$.hibw.XXXXXX")"
+  export CLAUDE_FLEET_DIR="$HW/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$HW/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  mkdir -p "$HW/bin" "$HW/wt"
+  # Its own copy rather than the previous group's: a function defined inside an `if` that
+  # skipped does not exist, and a row asserting against a missing helper fails for a reason
+  # that has nothing to do with what it is testing.
+  wyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  jq -n --arg d "$HW/wt" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  touch "$CLAUDE_FLEET_DIR/hibernate.enabled"
+
+  # the stub agent: prints what a ready agent prints, then holds the pane
+  printf '#!/bin/sh\necho "  ctx:3%%%%  auto mode on"\nexec sleep 600\n' > "$HW/bin/agent-here"
+  chmod +x "$HW/bin/agent-here"
+  OLDPATH="$PATH"; export PATH="$HW/bin:$PATH"
+
+  # a transcript dated well past the threshold, and a record that points at it
+  TR="$HW/old.jsonl"; : > "$TR"
+  touch -t "$(date -v-100H +%Y%m%d%H%M 2>/dev/null || date -d '-100 hours' +%Y%m%d%H%M)" "$TR" 2>/dev/null
+  jq -n --arg tr "$TR" --arg cwd "$HW/wt" \
+    '{session_id:"11111111-2222-3333-4444-555555555555", sock:"cf-acme-web", slot:"billing-svc",
+      cwd:$cwd, folder:"billing-svc", branch:"main", status:"ready", transcript:$tr, ts:0}' \
+    > "$CLAUDE_FLEET_DIR/sleeper.json"
+  tmux -L cf-acme-web new-session -d -s billing-svc -c "$HW/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.5
+  # The pane's own note about the conversation it is in: without it the session is vetoed.
+  "$ROOT/test/helpers/live-session.sh" cf-acme-web billing-svc 11111111-2222-3333-4444-555555555555 "$HW/wt" "$TR" >/dev/null
+  is "wake: the session starts up"     "1" "$(tmux -L cf-acme-web has-session -t '=billing-svc' 2>/dev/null && echo 1 || echo 0)"
+
+  "$ROOT/bin/fleet-hibernate" --apply > "$HW/apply" 2>&1
+  is "wake: --apply exits 0"           "0" "$?"
+  sleep 0.5
+  is "wake: the pane is gone"          "0" "$(tmux -L cf-acme-web has-session -t '=billing-svc' 2>/dev/null && echo 1 || echo 0)"
+  is "wake: a marker was written"      "1" "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep" ] && echo 1 || echo 0)"
+  # THE MARKER CARRIES THE WAY HOME. Without the conversation id it is a tombstone, not a
+  # sleeping session — and it is written BEFORE the kill for exactly that reason.
+  is "wake: ...holding the conversation id" "11111111-2222-3333-4444-555555555555" \
+     "$(cut -f2 "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep")"
+
+  # the card the phone and the TUI draw
+  is "wake: the card says asleep" "true" \
+     "$(node -e 'import("'"$ROOT"'/web/grid.js").then(G=>process.stdout.write(String(G.cardModel({name:"billing-svc",asleep:true}).asleep)))')"
+  is "wake: ...and an ordinary card does not" "false" \
+     "$(node -e 'import("'"$ROOT"'/web/grid.js").then(G=>process.stdout.write(String(G.cardModel({name:"billing-svc"}).asleep)))')"
+
+  "$ROOT/bin/fleet-hibernate" --wake billing-svc --timeout 25 > "$HW/wake" 2>&1
+  is "wake: --wake exits 0"            "0" "$?"
+  is "wake: the pane is back"          "1" "$(tmux -L cf-acme-web has-session -t '=billing-svc' 2>/dev/null && echo 1 || echo 0)"
+  is "wake: the marker is consumed"    "0" "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep" ] && echo 1 || echo 0)"
+
+  # ── A WAKE THAT STALLS MUST SAY SO ───────────────────────────────────────────
+  # Observed on a throwaway: a session resumed in an untrusted folder sits on the trust
+  # dialog forever. Returning 0 there would paint a live card over a session that never came
+  # back — the failure wearing success, which is what this repo keeps paying for.
+  tmux -L cf-acme-web kill-server 2>/dev/null; sleep 0.3
+  printf '#!/bin/sh\necho "Do you trust the files in this folder?"\nexec sleep 600\n' > "$HW/bin/agent-here"
+  printf '%s\t%s\t%s\t%s\n' 0 "11111111-2222-3333-4444-555555555555" "$HW/wt" 100 \
+    > "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep"
+  "$ROOT/bin/fleet-hibernate" --wake billing-svc --timeout 10 > "$HW/stall" 2>&1
+  is "wake: a trust dialog fails loudly" "1" "$?"
+  is "wake: ...and names the dialog"     "yes" "$(wyn grep -q 'folder-trust dialog' "$HW/stall")"
+  is "wake: ...and the marker is KEPT"   "1" "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep" ] && echo 1 || echo 0)"
+
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  export PATH="$OLDPATH"
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$HW"
+else
+  skip "a session sleeps and comes back" "tmux or jq missing"
+fi
+
+# ── 4a10c11. how long a wake actually takes ──────────────────────────────────
+# The one number the design rests on, and the one most likely to be wrong. Hibernation is
+# only worth having if a slept session comes back fast enough that a tap feels like opening
+# a card rather than starting a machine.
+#   MEASURED, AND FLAT: 0.6s to a prompt at 800 records, 0.6s at 5,000, 0.6s at 20,000 — a
+# 9.2 MB transcript. The agent draws its prompt and loads the history behind it, so the size
+# of the conversation does not decide how long it takes to come back. That was the open
+# question the design rested on and it is answered.
+#   THE FIRST ATTEMPT SAID 26s AND WAS TIMING A DIALOG, which is why this group builds its
+# fixture rather than pointing at a directory. A fresh config directory sends the agent into
+# first-run onboarding, and it stops on a theme picker; past that it stops on folder trust,
+# because the trust key was recorded for the path as typed while the agent looks up the
+# resolved one (/tmp is a symlink to /private/tmp — CLAUDE.md's own entry). From outside,
+# both are indistinguishable from a slow resume. test/helpers/synth-transcript.mjs
+# pre-answers both, so what is timed is the resume.
+#   IT ASSERTS ARRIVAL, NOT A DURATION. A wall-clock threshold on a loaded laptop is a
+# flake; the thing worth catching is "it stopped arriving at all". The number is printed
+# beside the row so a change in it is visible without being a red.
+#   It needs a real agent binary, so it skips where there is none. A green CI leg is not
+# evidence this ran.
+group "how long a wake actually takes"
+if command -v claude >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  BN="$(mktemp -d "$TEST_RUNS.$$.bench.XXXXXX")"
+  mkdir -p "$BN/cfg" "$BN/wt"
+  BSID="$(node -e 'process.stdout.write(require("crypto").randomUUID())')"
+  node "$ROOT/test/helpers/synth-transcript.mjs" "$BSID" "$BN/wt" "$BN/cfg" 800 > "$BN/gen" 2>&1
+  is "bench: a synthetic transcript was built" "0" "$?"
+  # The generator PRINTS the path it wrote, and this reads it back rather than rebuilding it.
+  # Rebuilding meant mangling the path as typed while the generator mangles the resolved one,
+  # so the row looked for a file under /tmp/... that had been written under /private/tmp/...
+  # — the same symlink trap the generator itself documents, one level up.
+  is "bench: ...of the size asked for"  "800" \
+     "$(wc -l < "$(sed -n 's/^[0-9]* records -> //p' "$BN/gen")" | tr -d ' ')"
+
+  tmux -L cf-toolbox kill-server 2>/dev/null
+  BT0="$(node -e 'process.stdout.write(String(Date.now()))')"
+  tmux -L cf-toolbox new-session -d -s toolbox -x 200 -y 50 -c "$BN/wt" \
+    "CLAUDE_CONFIG_DIR=$BN/cfg claude --resume $BSID" 2>/dev/null
+  BREADY=no
+  for _ in $(seq 1 120); do
+    if tmux -L cf-toolbox capture-pane -p -t toolbox 2>/dev/null > "$BN/pane"; then
+      if grep -qE 'mode on|ctx:[0-9]|for shortcuts' "$BN/pane"; then BREADY=yes; break; fi
+    fi
+    sleep 0.5
+  done
+  BT1="$(node -e 'process.stdout.write(String(Date.now()))')"
+  is "bench: an 800-record conversation resumes to a prompt" "yes" "$BREADY"
+  printf '  %s· resume-to-ready, 800 records: %ss%s\n' "$D" \
+    "$(node -e 'process.stdout.write(((Number(process.argv[2])-Number(process.argv[1]))/1000).toFixed(1))' "$BT0" "$BT1")" "$N"
+  tmux -L cf-toolbox kill-server 2>/dev/null
+  rm -rf "$BN"
+else
+  skip "how long a wake actually takes" "no claude/tmux/node on this host — the benchmark needs a real agent"
+fi
+
+# ── 4a10c12. the vetoes that made hibernation do nothing ─────────────────────
+# Shipped, switched on, and the first real dry run over 120 sessions offered ONE. Three
+# vetoes were firing on sessions they had no business protecting — all of them failing SAFE,
+# which is why nothing looked broken and the feature simply did not work. A veto that is
+# wrong in the safe direction is the hardest kind to notice: the tally is the only symptom.
+group "the vetoes that made hibernation do nothing"
+if command -v jq >/dev/null 2>&1; then
+  VT="$(mktemp -d "$TEST_RUNS.$$.veto.XXXXXX")"
+  vyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+
+  # ── 1. the draft veto read the whole pane ──
+  # Every prompt ever sent is still in the scrollback, drawn with the glyph the composer
+  # uses, so any session that had been talked to looked like it had something typed.
+  # Measured live: 20 flagged, 12 of them with an empty composer.
+  #   The composer is the box between the LAST two rules; everything above has been sent and
+  # cannot be lost. Driven through the real command by capturing a fixture into a pane, so
+  # what is tested is has_draft and not a copy of it.
+  draft_says() {
+    tmux -L cf-acme-web kill-session -t "=toolbox" 2>/dev/null
+    tmux -L cf-acme-web new-session -d -s toolbox -x 300 -y 70 "cat '$1'; sleep 600" 2>/dev/null
+    sleep 0.5
+    jq -n --arg tr "$VT/tr.jsonl" --arg cwd "$VT" \
+      '{session_id:"11111111-2222-3333-4444-555555555555",sock:"cf-acme-web",slot:"toolbox",
+        cwd:$cwd,status:"ready",transcript:$tr,ts:0}' > "$CLAUDE_FLEET_DIR/d.json"
+    "$ROOT/bin/fleet-hibernate" -s cf-acme-web --idle-hours 0 --json 2>/dev/null \
+      | jq -r '.[] | select(.slot=="toolbox") | .why'
+  }
+  export CLAUDE_FLEET_DIR="$VT/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$VT/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  jq -n --arg d "$VT" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  : > "$VT/tr.jsonl"
+
+  # THE ROW THE LIVE FLEET WAS FAILING: past prompts above, nothing typed below.
+  is "veto: past prompts are not a draft" "no" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/pane-scrollback-empty-composer.txt")")"
+  # ...and a real draft is still caught, or the veto has been deleted rather than fixed.
+  is "veto: a typed composer still is"    "yes" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/claude-composer-typed.txt")")"
+  is "veto: an empty composer is not"     "no" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/claude-composer-empty.txt")")"
+  # A wrapped or newline-continued draft has no glyph on its later lines.
+  is "veto: a multi-line draft counts"    "yes" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/pane-draft-multiline.txt")")"
+  # No box drawn means no answer, and no answer must not read as "something is typed" —
+  # that is the direction that pins memory forever.
+  is "veto: no composer box is not a draft" "no" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/pane-no-composer-box.txt")")"
+  # THE ROW THE LINUX LEG WENT RED ON — AND IT CANNOT FAIL ON THIS ONE.
+  # Restoring the old rule leaves this green on macOS, because there the sed strips the glyph
+  # and the space class covers the padding; the bug needs GNU sed, mawk, or a non-UTF-8
+  # locale to appear. So this row pins the BEHAVIOUR and the ubuntu leg is what tests it,
+  # the same division as the stat shim. What makes the fix trustworthy is not this row but
+  # that nothing in the rule depends on the toolchain any more: no interval expression, no
+  # glyph named in a pattern, no character class deciding what counts as blank. The old rule stripped the prompt glyph by name and then
+  # asked whether anything was left, which is three bets on the toolchain at once: an interval
+  # expression mawk does not take, a multibyte literal whose match depends on the locale, and a
+  # space class that leaves whatever the locale does not call space. An empty composer carrying
+  # padding came back looking typed. Nothing is stripped by name now — the first non-blank run
+  # goes, whatever it renders as.
+  is "veto: a padded empty composer is not a draft" "no" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/pane-empty-composer-padded.txt")")"
+  # ── THE SUGGESTED PROMPT, AND THE FOURTH FALSE POSITIVE ──
+  # An empty composer carries a suggested next prompt, drawn dim. A plain capture drops the
+  # attribute, so it read as unsent work and vetoed the session for exactly as long as it sat
+  # idle. The fixture's composer line is the live capture's bytes: the glyph, a NO-BREAK
+  # space, then ESC[2m…ESC[0m. `cat` into a pane replays the SGR, so capture -e sees it.
+  is "veto: a dim suggested prompt is not a draft"  "no" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/claude-composer-suggestion-sgr.txt")")"
+  # ...and the same words NOT dim are typing, or the fix is "ignore the composer".
+  is "veto: ...the same words typed still are"      "yes" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/claude-composer-typed-sgr.txt")")"
+  # The no-break space is not blank to the "strip the first run" rule, so the glyph and a
+  # one-word draft came off together — a draft read as empty, the direction that loses work.
+  is "veto: a one-word draft after the no-break space counts" "yes" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/claude-composer-oneword-sgr.txt")")"
+  tmux -L cf-acme-web kill-server 2>/dev/null
+
+  # ── 2. the idle clock read mtime, which moves without anybody typing ──
+  # A transcript is appended to by hook records, tool results and compactions. Measured:
+  # fifteen sessions across unrelated projects all reporting the same idle in one pass.
+  # The clock is the last record that is a PERSON TYPING — type "user" with a STRING content.
+  # A tool result is also type "user" and its content is an array of blocks.
+  mkjsonl() {   # file  prompt_age_h  toolresult_age_h
+    : > "$1"
+    node -e '
+      const fs=require("fs");const [f,ph,th]=process.argv.slice(1);
+      const at=(h)=>new Date(Date.now()-h*3600000).toISOString();
+      const L=[];
+      L.push(JSON.stringify({type:"user",message:{role:"user",content:"the last thing a person typed"},timestamp:at(+ph)}));
+      L.push(JSON.stringify({type:"assistant",message:{role:"assistant",content:[{type:"text",text:"ok"}]},timestamp:at(+ph)}));
+      // a tool result AFTER it: same type "user", array content, and not a person
+      L.push(JSON.stringify({type:"user",message:{role:"user",content:[{type:"tool_result",content:"622 passed"}]},timestamp:at(+th)}));
+      fs.writeFileSync(f,L.join("\n")+"\n");
+    ' "$1" "$2" "$3"
+  }
+  idle_of() {
+    jq -n --arg tr "$1" --arg cwd "$VT" \
+      '{session_id:"11111111-2222-3333-4444-555555555555",sock:"cf-acme-api",slot:"billing-svc",
+        cwd:$cwd,status:"ready",transcript:$tr,ts:0}' > "$CLAUDE_FLEET_DIR/i.json"
+    "$ROOT/bin/fleet-hibernate" -s cf-acme-api --idle-hours 48 --json 2>/dev/null \
+      | jq -r '.[] | select(.slot=="billing-svc") | .idle_hours'
+  }
+  rm -f "$CLAUDE_FLEET_DIR/d.json"
+  tmux -L cf-acme-api new-session -d -s billing-svc -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  # prompt 100h ago, a tool result one minute ago: mtime says fresh, the person says 100h.
+  mkjsonl "$VT/old.jsonl" 100 0.016
+  is "veto: the clock is the last PROMPT, not the last write" "100" \
+     "$(idle_of "$VT/old.jsonl" | cut -d. -f1)"
+  # ...and a session somebody typed into an hour ago is not ancient.
+  mkjsonl "$VT/new.jsonl" 1 0.016
+  is "veto: ...so a recent prompt reads as recent" "1" \
+     "$(idle_of "$VT/new.jsonl" | cut -d. -f1)"
+  # A transcript with no human turn at all falls back to mtime rather than reading as ancient.
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[]},"timestamp":"2020-01-01T00:00:00.000Z"}' > "$VT/none.jsonl"
+  is "veto: no prompt at all falls back to mtime" "0" "$(idle_of "$VT/none.jsonl" | cut -d. -f1)"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+
+  # ── 3. an id is recovered from evidence, or not at all ──
+  # A wrong id does not fail loudly: it resumes somebody else's conversation into a card
+  # wearing the right name. So every branch either returns an id it was TOLD, or nothing.
+  # `sleep 600 --resume X` makes sleep reject the argument and exit, taking the session with
+  # it — the fixture has to both CARRY the argument and stay alive to be read.
+  # tmux runs the command through `sh -c`, which execs a simple command directly — so the
+  # arguments have to belong to a process that STAYS, not to a shell that hands over.
+  # No `exec`: exec REPLACES the shell, and with it the argv that carries --resume. The
+  # script has to stay the process whose arguments are being read.
+  printf '#!/bin/sh\nsleep 600\n' > "$VT/fakeagent"; chmod +x "$VT/fakeagent"
+  tmux -L cf-toolbox new-session -d -s scratch -c "$VT" -x 80 -y 24 \
+    "'$VT/fakeagent' --resume 22222222-3333-4444-5555-666666666666" 2>/dev/null
+  sleep 0.4
+  rm -f "$CLAUDE_FLEET_DIR"/*.json
+  is "veto: an id on the command line is recovered" "22222222-3333-4444-5555-666666666666" \
+     "$("$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 48 --json 2>/dev/null \
+        | jq -r '.[] | select(.slot=="scratch") | .why' >/dev/null 2>&1; \
+        jq -r '.session_id // empty' "$CLAUDE_FLEET_DIR"/22222222-3333-4444-5555-666666666666.json 2>/dev/null)"
+  tmux -L cf-toolbox kill-session -t "=scratch" 2>/dev/null
+  # ...and a session that never had one keeps the veto rather than being given a guess.
+  tmux -L cf-toolbox new-session -d -s billing-svc -c "$VT" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  is "veto: no evidence means the veto stands" "yes" \
+     "$(vyn grep -q 'no recorded conversation id' <<< "$("$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 48 --json 2>/dev/null | jq -r '.[] | select(.slot=="billing-svc") | .why')")"
+  tmux -L cf-toolbox kill-server 2>/dev/null
+
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$VT"
+else
+  skip "the vetoes that made hibernation do nothing" "jq missing"
+fi
+
+# ── 4a10c12b. the id and the idle clock come from the LIVE process ───────────
+# Measured before this: a fleet's lead in active use was slept, because its recorded id
+# named a conversation last used days earlier. The agent rotates its conversation (/clear
+# starts a new one) and the record keeps the old id — so the idle clock dated the wrong
+# transcript and a wake would have restored the wrong conversation.
+#   The fixture pane is `sleep`, and what makes it "an agent in conversation X" is the note
+# test/helpers/live-session.sh writes for its pid — the same file, same fields, that a real
+# agent writes about itself. Everything is on this run's own sockets and config dir.
+group "hibernation reads the live conversation"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  # RESOLVED, because /tmp is a symlink to /private/tmp and a pane reports the resolved path:
+  # a trust record or a project directory keyed by the typed one is never found.
+  LV="$(cd "$(mktemp -d "$TEST_RUNS.$$.live.XXXXXX")" && pwd -P)"
+  has_t() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  lyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  export CLAUDE_FLEET_DIR="$LV/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$LV/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR" "$LV/wt"
+  jq -n --arg d "$LV/wt" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  OLD=aaaaaaaa-1111-1111-1111-000000000001; NEW=aaaaaaaa-2222-2222-2222-000000000002
+  # A transcript whose last human turn is $2 hours old.
+  prompt_at() {
+    node -e 'const [f,h]=process.argv.slice(1);require("fs").writeFileSync(f,JSON.stringify({type:"user",
+      message:{role:"user",content:"the last thing a person typed"},
+      timestamp:new Date(Date.now()-h*3600000).toISOString()})+"\n")' "$1" "$2"
+  }
+  prompt_at "$LV/old.jsonl" 100      # the conversation the RECORD names: untouched for days
+  prompt_at "$LV/new.jsonl" 1        # the one the process is actually in: an hour ago
+  lwhy()  { "$ROOT/bin/fleet-hibernate" -s "$1" --idle-hours 48 --json 2>/dev/null | jq -r --arg s "$2" '.[] | select(.slot==$s) | .why'; }
+  lidle() { "$ROOT/bin/fleet-hibernate" -s "$1" --idle-hours 48 --json 2>/dev/null | jq -r --arg s "$2" '.[] | select(.slot==$s) | .idle_hours'; }
+  record() {   # sock slot id transcript
+    jq -n --arg id "$3" --arg sock "$1" --arg slot "$2" --arg tr "$4" --arg cwd "$LV/wt" \
+      '{session_id:$id, sock:$sock, slot:$slot, cwd:$cwd, folder:"wt", branch:"main",
+        status:"ready", transcript:$tr, ts:0}' > "$CLAUDE_FLEET_DIR/$3.json"
+  }
+
+  tmux -L cf-acme-api new-session -d -s billing-svc -c "$LV/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  record cf-acme-api billing-svc "$OLD" "$LV/old.jsonl"
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api billing-svc "$NEW" "$LV/wt" "$LV/new.jsonl" >/dev/null
+
+  # THE ROW THE LEAD WAS SLEPT ON. By the record it is 100h idle; by the process, 1h.
+  is "live: a stale recorded id does not make a session look idle" "yes" \
+     "$(lyn has_t 'h threshold' "$(lwhy cf-acme-api billing-svc)")"
+  is "live: ...the idle clock is the LIVE conversation's"           "1" \
+     "$(lidle cf-acme-api billing-svc | cut -d. -f1)"
+  # CORRECTED, not just read around: the grid and the next plan read the record.
+  is "live: the record now names the live conversation"             "$NEW" \
+     "$(jq -r '.session_id // ""' "$CLAUDE_FLEET_DIR/$NEW.json" 2>/dev/null)"
+  is "live: ...and the stale one no longer claims the session"      "no" \
+     "$([ -f "$CLAUDE_FLEET_DIR/$OLD.json" ] && echo yes || echo no)"
+
+  # A NOTE UNDER THE RIGHT PID IS NOT ENOUGH. A pid is reused and a crashed agent leaves its
+  # file, so a note whose start time is not this process's is somebody else's conversation.
+  PID="$("$ROOT/test/helpers/live-session.sh" cf-acme-api billing-svc "$NEW" "$LV/wt" "$LV/new.jsonl")"
+  jq '.procStart = "Mon Jan  1 00:00:00 2024"' "$CLAUDE_CONFIG_DIR/sessions/$PID.json" > "$LV/s" \
+    && mv "$LV/s" "$CLAUDE_CONFIG_DIR/sessions/$PID.json"
+  is "live: a leftover note from a reused pid is not believed"      "yes" \
+     "$(lyn has_t 'could not be established' "$(lwhy cf-acme-api billing-svc)")"
+  rm -f "$CLAUDE_CONFIG_DIR/sessions/$PID.json"
+  # ...and with no evidence at all the session stays up, recorded id or not: the recorded
+  # id is exactly the thing that was wrong.
+  prompt_at "$LV/old.jsonl" 100; record cf-acme-api billing-svc "$OLD" "$LV/old.jsonl"
+  is "live: no live evidence means it stays up"                     "yes" \
+     "$(lyn has_t 'could not be established' "$(lwhy cf-acme-api billing-svc)")"
+
+  # ── THE COMMAND LINE IS WHAT IT WAS TOLD AT LAUNCH ──
+  # /clear is how --resume X and the live conversation part company, so X is believed only
+  # when no OTHER conversation in that folder has been written since the process started.
+  printf '#!/bin/sh\nsleep 600\n' > "$LV/fakeagent"; chmod +x "$LV/fakeagent"
+  ARG=aaaaaaaa-3333-3333-3333-000000000003
+  PD="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$LV/wt" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$PD"
+  prompt_at "$PD/$ARG.jsonl" 100
+  touch -t "$(date -v-100H +%Y%m%d%H%M 2>/dev/null || date -d '-100 hours' +%Y%m%d%H%M)" "$PD/$ARG.jsonl"
+  tmux -L cf-acme-api new-session -d -s scratch -c "$LV/wt" -x 80 -y 24 "'$LV/fakeagent' --resume $ARG" 2>/dev/null
+  sleep 1.2
+  is "live: --resume alone, nothing newer in the folder -> believed" "" "$(lwhy cf-acme-api scratch)"
+  prompt_at "$PD/aaaaaaaa-4444-4444-4444-000000000004.jsonl" 0     # written after it started
+  is "live: ...but a conversation written since then vetoes it"     "yes" \
+     "$(lyn has_t 'could not be established' "$(lwhy cf-acme-api scratch)")"
+  rm -f "$PD/aaaaaaaa-4444-4444-4444-000000000004.jsonl"
+  tmux -L cf-acme-api kill-session -t '=scratch' 2>/dev/null
+
+  # ── B. A LEAD IS NEVER SLEPT BY A RULE ──
+  # Everything else about this master says sleep: established, trusted, 100h idle. Only
+  # naming it may, and a name that is in more than one fleet refuses rather than sleeping
+  # every lead on the machine.
+  touch "$CLAUDE_FLEET_DIR/hibernate.enabled"
+  MSID=aaaaaaaa-5555-5555-5555-000000000005
+  prompt_at "$LV/lead.jsonl" 100
+  tmux -L cf-acme-api new-session -d -s master -c "$LV/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  tmux -L cf-acme-web new-session -d -s master -c "$LV/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  record cf-acme-api master "$MSID" "$LV/lead.jsonl"
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api master "$MSID" "$LV/wt" "$LV/lead.jsonl" >/dev/null
+  is "lead: the threshold never takes a fleet's master"             "yes" \
+     "$(lyn has_t 'never slept automatically' "$(lwhy cf-acme-api master)")"
+  "$ROOT/bin/fleet-hibernate" -s cf-acme-api --apply > "$LV/apply" 2>&1
+  is "lead: ...and --apply leaves it running"                       "yes" \
+     "$(tmux -L cf-acme-api has-session -t '=master' 2>/dev/null && echo yes || echo no)"
+  "$ROOT/bin/fleet-hibernate" -s cf-acme-api --pressure > "$LV/apply" 2>&1
+  is "lead: ...and so does --pressure"                              "yes" \
+     "$(tmux -L cf-acme-api has-session -t '=master' 2>/dev/null && echo yes || echo no)"
+  "$ROOT/bin/fleet-hibernate" --apply master > "$LV/apply" 2>&1; lrc=$?
+  is "lead: a name in two fleets refuses"                           "1:yes:yes" \
+     "$lrc:$(lyn grep -q 'say which with -s' "$LV/apply"):$(tmux -L cf-acme-api has-session -t '=master' 2>/dev/null && echo yes || echo no)"
+  "$ROOT/bin/fleet-hibernate" -s cf-acme-api --apply master > "$LV/apply" 2>&1
+  is "lead: --apply master -s <fleet> sleeps it"                    "no:yes" \
+     "$(tmux -L cf-acme-api has-session -t '=master' 2>/dev/null && echo yes || echo no):$([ -f "$CLAUDE_FLEET_DIR/cf-acme-api.master.asleep" ] && echo yes || echo no)"
+  is "lead: ...and only that fleet's"                               "yes" \
+     "$(tmux -L cf-acme-web has-session -t '=master' 2>/dev/null && echo yes || echo no)"
+
+  tmux -L cf-acme-api kill-server 2>/dev/null; tmux -L cf-acme-web kill-server 2>/dev/null
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$LV"
+else
+  skip "hibernation reads the live conversation" "tmux or jq missing"
+fi
+
+# ── 4a10c12c. a stale marker beside a live session, and a stop that leaves a card ──
+# C. "could not start a pane" on a wake. new-session refuses a name that exists, and a
+# marker outlives its sleep whenever the session comes back some other way — reopened by
+# hand, restarted, a timed-out wake retried. The card reads asleep over a live session and
+# its tap tries to start a second one.
+# F. The owner stopped every session in a fleet and three asleep cards stayed: an asleep
+# session has no tmux session to kill, and the marker alone is what draws the card.
+group "a stale asleep marker does not outlive its session"
+if command -v tmux >/dev/null 2>&1; then
+  SM="$(cd "$(mktemp -d "$TEST_RUNS.$$.stale.XXXXXX")" && pwd -P)"
+  has_t() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  mkdir -p "$SM/fleet" "$SM/wt"
+  smyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  mark() { printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "aaaaaaaa-6666-6666-6666-000000000006" "$SM/wt" 100 > "$SM/fleet/$1.$2.asleep"; }
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  tmux -L cf-acme-web new-session -d -s billing-svc -c "$SM/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  P0="$(tmux -L cf-acme-web list-panes -t billing-svc -F '#{pane_pid}' 2>/dev/null)"
+  mark cf-acme-web billing-svc
+  out="$(CLAUDE_FLEET_DIR="$SM/fleet" "$ROOT/bin/fleet-hibernate" -s cf-acme-web --wake billing-svc --timeout 5 2>&1)"; src=$?
+  is "wake: a session already running under that name is a success" "0"   "$src"
+  is "wake: ...says so"                                             "yes" "$(smyn has_t 'already running' "$out")"
+  is "wake: ...clears the stale marker"                             "no"  \
+     "$([ -f "$SM/fleet/cf-acme-web.billing-svc.asleep" ] && echo yes || echo no)"
+  is "wake: ...and left the running session alone"                  "$P0" \
+     "$(tmux -L cf-acme-web list-panes -t billing-svc -F '#{pane_pid}' 2>/dev/null)"
+
+  # WHICH FLEET, WHEN NONE IS NAMED: every project has a master, and the first marker the
+  # glob found used to win.
+  mark cf-acme-api master; mark cf-acme-web master
+  out="$(CLAUDE_FLEET_DIR="$SM/fleet" TMUX= CLAUDE_FLEET_SOCK= "$ROOT/bin/fleet-hibernate" --wake master --timeout 5 2>&1)"; src=$?
+  is "wake: a name asleep in two fleets refuses without -s"         "1:yes" "$src:$(smyn has_t 'say which with -s' "$out")"
+  rm -f "$SM/fleet/"*.master.asleep
+
+  # THE ROOT OF IT: any start of the session ends its sleep — except the wake's own start,
+  # whose poll keeps the marker when the wake does not come back. Driven through the real
+  # launcher with a stub behind it, the way "fleet sessions don't auto-update" does.
+  mkdir -p "$SM/bin"; printf '#!/bin/sh\nexit 0\n' > "$SM/bin/claude-here"; chmod +x "$SM/bin/claude-here"
+  ahs() { env "$@" CLAUDE_FLEET_DIR="$SM/fleet" CLAUDE_FLEET_SOCK=cf-acme-web CLAUDE_FLEET_AGENT=claude \
+          PATH="$SM/bin:$PATH" /bin/bash "$ROOT/bin/agent-here" docs-pass >/dev/null 2>&1; }
+  mark cf-acme-web docs-pass; ahs CLAUDE_FLEET_WAKING=
+  is "agent-here: a start clears the session's asleep marker"       "no" \
+     "$([ -f "$SM/fleet/cf-acme-web.docs-pass.asleep" ] && echo yes || echo no)"
+  mark cf-acme-web docs-pass; ahs CLAUDE_FLEET_WAKING=1
+  is "agent-here: ...but not the wake's own start"                  "yes" \
+     "$([ -f "$SM/fleet/cf-acme-web.docs-pass.asleep" ] && echo yes || echo no)"
+  rm -f "$SM/fleet/cf-acme-web.docs-pass.asleep"
+
+  # ── F. a stop leaves no card ──
+  mark cf-acme-web scratch
+  CLAUDE_FLEET_DIR="$SM/fleet" CLAUDE_FLEET_SLOT= TMUX= "$ROOT/bin/fleet-stop" -s cf-acme-web scratch >/dev/null 2>&1
+  is "stop: fleet-stop clears an asleep session's marker"           "no" \
+     "$([ -f "$SM/fleet/cf-acme-web.scratch.asleep" ] && echo yes || echo no)"
+  # ...and the card is gone from the builder both screens read, not only the file.
+  mark cf-acme-web scratch
+  is "stop: the asleep card is on the grid before"                  "yes" \
+     "$(CLAUDE_FLEET_DIR="$SM/fleet" node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --json 2>/dev/null \
+        | jq -r '[.cards[] | select(.name=="scratch")] | length > 0' 2>/dev/null | sed 's/true/yes/; s/false/no/')"
+  CLAUDE_FLEET_DIR="$SM/fleet" CLAUDE_FLEET_SLOT= TMUX= "$ROOT/bin/fleet-stop" -s cf-acme-web scratch >/dev/null 2>&1
+  is "stop: ...and not after"                                       "no" \
+     "$(CLAUDE_FLEET_DIR="$SM/fleet" node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --json 2>/dev/null \
+        | jq -r '[.cards[] | select(.name=="scratch")] | length > 0' 2>/dev/null | sed 's/true/yes/; s/false/no/')"
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  rm -rf "$SM"
+else
+  skip "a stale asleep marker does not outlive its session" "tmux not available"
+fi
+
+# ── 4a10c12d. the new-session screen lists what is parked in that checkout ──
+# E. The owner's words: "could you add a list of parked parallel sessions pls". The name
+# screen is where a person says "a session in THIS checkout", and it offered only a new
+# one while the checkout's hibernated and exited sessions sat elsewhere. Driven through a
+# real pane with real keys — a rendering decision and a key binding, which `node --check`
+# proves neither of. HOME and CLAUDE_FLEET_ROOT point at a fixture root, so the checkout
+# picker lists fixture checkouts and never reads the real ~/.config/ghostfleet/checkouts.
+group "the new-session screen lists parked sessions"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  NP="$(cd "$(mktemp -d "$TEST_RUNS.$$.park.XXXXXX")" && pwd -P)"
+  mkdir -p "$NP/fleet" "$NP/home" "$NP/root/acme-api/.git" "$NP/root/acme-web/.git" "$NP/root/acme-api-2/.git" "$NP/root/billing-svc/.git"
+  tmux -L cfpark kill-server 2>/dev/null
+  pmark() {   # name cwd ts
+    printf '%s\t%s\t%s\t%s\n' "$3" "aaaaaaaa-7777-7777-7777-000000000007" "$2" 100 > "$NP/fleet/cfpark.$1.asleep"; }
+  # IN THIS CHECKOUT: one asleep (newest), one exited (a live pane with its marker).
+  pmark billing-svc "$NP/root/acme-api" "$(date +%s)"
+  tmux -L cfpark new-session -d -s toolbox -c "$NP/root/acme-api" -x 80 -y 24 "sleep 600" 2>/dev/null
+  : > "$NP/fleet/cfpark.toolbox.exited"
+  touch -t "$(date -v-2H +%Y%m%d%H%M 2>/dev/null || date -d '-2 hours' +%Y%m%d%H%M)" "$NP/fleet/cfpark.toolbox.exited"
+  # NOT IN IT: another checkout, and a sibling whose name has this one's as a PREFIX —
+  # worktrees are exactly that shape, and a string prefix would claim it.
+  pmark scratch   "$NP/root/acme-web"   "$(date +%s)"
+  pmark docs-pass "$NP/root/acme-api-2" "$(date +%s)"
+  sleep 0.4
+  pgrid() {
+    tmux -L cfpark kill-session -t _grid 2>/dev/null; rm -f "$NP/choice"
+    tmux -L cfpark new-session -d -s _grid -x 120 -y 40 -c "$NP/root" \
+      -e CLAUDE_FLEET_DIR="$NP/fleet" -e HOME="$NP/home" -e CLAUDE_FLEET_ROOT="$NP/root" \
+      "node '$ROOT/bin/fleet-grid.mjs' cfpark > '$NP/choice' 2>/dev/null ; sleep 20" 2>/dev/null
+    sleep 3
+  }
+  pkeys() { for k in "$@"; do tmux -L cfpark send-keys -t _grid "$k" 2>/dev/null; sleep 0.6; done; }
+  pscreen() { tmux -L cfpark capture-pane -p -t _grid 2>/dev/null; }
+  # n -> the checkout picker (acme-api is first, sorted) -> Enter -> the name screen
+  pgrid; pkeys n Enter
+  scr="$(pscreen)"
+  is "park: the name screen is the one reached"            "yes" "$(grep -q 'session name' <<<"$scr" && echo yes || echo no)"
+  is "park: it lists the checkout's asleep session"        "yes" "$(grep -qE '1 +billing-svc +☾ asleep' <<<"$scr" && echo yes || echo no)"
+  is "park: ...and its exited one"                         "yes" "$(grep -qE '2 +toolbox +⏹ exited' <<<"$scr" && echo yes || echo no)"
+  is "park: ...and nothing from another checkout"          "no"  "$(grep -q 'scratch' <<<"$scr" && echo yes || echo no)"
+  is "park: ...nor from one whose name has it as a prefix" "no"  "$(grep -q 'docs-pass' <<<"$scr" && echo yes || echo no)"
+  # A DIGIT ON THE NAME FIELD IS TYPING: `api-2` is a legal name.
+  pkeys 2
+  is "park: a digit typed in the name field is the name"   "yes:no" \
+     "$(grep -q 'name: *acme-api2' <<<"$(pscreen)" && echo yes || echo no):$(grep -q 'attach' "$NP/choice" 2>/dev/null && echo yes || echo no)"
+  # ↓ moves onto the list; Enter reopens the row under it. The consumer wakes an asleep one.
+  pkeys BSpace Down Enter; sleep 1
+  is "park: down + Enter reopens the first parked session" "yes" \
+     "$(grep -q "attach.billing-svc" "$NP/choice" 2>/dev/null && echo yes || echo no)"
+  # ...and on the list a digit picks that row.
+  pgrid; pkeys n Enter Down 2; sleep 1
+  is "park: on the list, 2 reopens the second"             "yes" \
+     "$(grep -q "attach.toolbox" "$NP/choice" 2>/dev/null && echo yes || echo no)"
+  # A checkout with nothing parked draws no list at all. Sorted: acme-api, acme-api-2,
+  # acme-web, billing-svc — the fourth has nothing.
+  pgrid; pkeys n Down Down Down Enter
+  is "park: a checkout with nothing parked shows no list"  "no" \
+     "$(grep -q 'reopen one parked here' <<<"$(pscreen)" && echo yes || echo no)"
+
+  # ── F, at the desk: x on an asleep card leaves no card ──
+  # Cards: 1 is _grid itself (the pane this runs in), 2 is toolbox, then the slept ones in
+  # directory order — so only one is left, and Right Right lands on it rather than a guess.
+  rm -f "$NP/fleet/cfpark.scratch.asleep" "$NP/fleet/cfpark.docs-pass.asleep"
+  pgrid
+  scr="$(pscreen)"
+  is "stop: the asleep card is on the grid"                "yes" "$(grep -q 'billing-svc' <<<"$scr" && echo yes || echo no)"
+  pkeys Right Right x y; sleep 1.5
+  is "stop: x on it clears its marker"                     "no" \
+     "$([ -f "$NP/fleet/cfpark.billing-svc.asleep" ] && echo yes || echo no)"
+  is "stop: ...and the card is gone"                       "no" "$(grep -q 'billing-svc' <<<"$(pscreen)" && echo yes || echo no)"
+  tmux -L cfpark kill-server 2>/dev/null
+  rm -rf "$NP"
+else
+  skip "the new-session screen lists parked sessions" "tmux or node missing"
+fi
+
+# ── 4a10c13. a wake that worked must not report failure ──────────────────────
+# Deployed, and the first real wake resumed in seconds — conversation drawn, prompt waiting —
+# then sat in its poll for the full five minutes and was about to be reported as failed, with
+# the asleep marker left behind. The card would have said "asleep — tap to wake" over a
+# session that was running.
+#
+# THE DETECTOR READ THE FOOTER, AND THE FOOTER IS THE ONE THING THAT MOVES. Every fleet
+# session runs with permissions bypassed, whose footer says "bypass permissions on" — not
+# "mode on", which is what the pattern looked for; measured, seven of eight live sessions. And
+# a narrow pane truncates the statusline before ctx:, so the remaining signals disappear
+# exactly where the pane is smallest. CLAUDE.md already has the entry: a detector measured at
+# full width goes blind in a narrow one.
+#   Readiness is the COMPOSER BOX now — the same region the draft veto reads. The agent draws
+# it when it is ready for input, it does not depend on the permission mode, and the rules span
+# whatever width there is so it cannot be truncated away.
+group "a wake that worked must not report failure"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  WK="$(mktemp -d "$TEST_RUNS.$$.wake.XXXXXX")"
+  export CLAUDE_FLEET_DIR="$WK/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  mkdir -p "$WK/bin" "$WK/wt"
+  wkyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+
+  # The stub prints a captured pane and then holds. What is exercised is the real wake poll
+  # against real rendered output, not a copy of the rule.
+  wake_with() {
+    printf '#!/bin/sh\ncat %s\nexec sleep 600\n' "$1" > "$WK/bin/agent-here"
+    chmod +x "$WK/bin/agent-here"
+    tmux -L cf-acme-web kill-session -t "=toolbox" 2>/dev/null
+    printf '%s\t%s\t%s\t%s\n' 0 "11111111-2222-3333-4444-555555555555" "$WK/wt" 100 \
+      > "$CLAUDE_FLEET_DIR/cf-acme-web.toolbox.asleep"
+    PATH="$WK/bin:$PATH" "$ROOT/bin/fleet-hibernate" -s cf-acme-web --wake toolbox --timeout "$2" >"$WK/out" 2>&1
+    echo $?
+  }
+
+  # ── every mode, at both widths. The 56-column bypass pane is the live failure. ──
+  for m in bypass auto manual; do
+    for w in 200 56; do
+      is "wake: ready in $m mode at ${w} columns" "0" "$(wake_with "$FIX/pane-ready-$m-${w}col.txt" 20)"
+    done
+  done
+  # ...and the marker is consumed, or the card stays asleep over a live session.
+  is "wake: ...and the marker is consumed" "0" \
+     "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.toolbox.asleep" ] && echo 1 || echo 0)"
+
+  # ── the old rule went blind on exactly one of those six ──
+  # Kept as a row so the regression has a name: if somebody reinstates a footer-only detector,
+  # this says which pane it stops seeing.
+  is "wake: the old footer-only rule missed bypass-at-56" "no" \
+     "$(wkyn grep -qE 'mode on|ctx:[0-9]|esc to interrupt|for shortcuts' "$FIX/pane-ready-bypass-56col.txt")"
+  is "wake: ...while the composer box is there" "yes" \
+     "$(wkyn grep -qE '^[[:space:]]*──────────' "$FIX/pane-ready-bypass-56col.txt")"
+
+  # ── A LIVE SESSION UNDER AN ASLEEP CARD IS THE WORSE ERROR ──
+  # A pane that never draws a box times out. The wake still failed — but the session is
+  # THERE, so the marker must go: the alternative is a card advertising "tap to wake" over
+  # something already running, and a second one started under the same name on the next tap.
+  rc="$(wake_with "$FIX/pane-not-ready-loading.txt" 4)"
+  is "wake: a pane that never shows a prompt fails"  "1" "$rc"
+  is "wake: ...but the marker is cleared anyway"     "0" \
+     "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-web.toolbox.asleep" ] && echo 1 || echo 0)"
+  is "wake: ...and it says why"                      "yes" \
+     "$(wkyn grep -q 'live session behind an asleep card' "$WK/out")"
+  is "wake: ...and the session really is still up"   "1" \
+     "$(tmux -L cf-acme-web has-session -t '=toolbox' 2>/dev/null && echo 1 || echo 0)"
+
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  unset CLAUDE_FLEET_DIR
+  rm -rf "$WK"
+else
+  skip "a wake that worked must not report failure" "tmux or jq missing"
+fi
+
+# ── 4a10c14. a hibernated session has to show somewhere ──────────────────────
+# Hibernation shipped, twelve sessions were slept, and every one of them DISAPPEARED from the
+# grid and from the phone. Not "shown asleep" — gone. The owner's words for it were that they
+# need to show somewhere, which is the whole of the requirement.
+#   Cards were built from the live tmux list alone, so a session whose process has ended has
+# nothing to hang a card on, and the `asleep` field added for exactly this case could never be
+# reached: the row it belonged to was deleted before anything asked. The marker is a source of
+# sessions now — it holds the cwd and the conversation id written at the moment of sleeping,
+# which is everything a card needs to say what it is and a wake needs to bring it back.
+group "a hibernated session shows on the grid"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  GD="$(mktemp -d "$TEST_RUNS.$$.asleepcard.XXXXXX")"
+  export CLAUDE_FLEET_DIR="$GD/fleet"; export CLAUDE_CONFIG_DIR="$GD/cfg"
+  mkdir -p "$CLAUDE_FLEET_DIR" "$CLAUDE_CONFIG_DIR" "$GD/wt"
+  SID_A=11111111-1111-1111-1111-111111111111
+  SID_B=22222222-2222-2222-2222-222222222222
+  PDIR="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$GD/wt" | sed 's/[^A-Za-z0-9]/-/g')"
+  mkdir -p "$PDIR"
+  # TWO conversations in ONE checkout — the shape every fleet has, and the reason a slept card
+  # cannot be dated or quoted from "the newest transcript in the folder".
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"the sleeping one said this"}]},"timestamp":"2026-01-01T00:00:00.000Z"}' > "$PDIR/$SID_A.jsonl"
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"a neighbour said this later"}]},"timestamp":"2026-01-02T00:00:00.000Z"}' > "$PDIR/$SID_B.jsonl"
+  touch "$PDIR/$SID_B.jsonl"                      # the neighbour is the newest
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$SID_A" "$GD/wt" 120 \
+    > "$CLAUDE_FLEET_DIR/cf-acme-web.billing-svc.asleep"
+
+  gj() { node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --json 2>/dev/null \
+         | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+             const j=JSON.parse(s); const c=(j.cards||[]).find(x=>x.name==="billing-svc");
+             let v=c; for(const k of process.argv[1].split(".")) v=(v==null)?v:v[k];
+             process.stdout.write(v===undefined?"(missing)":String(v));})' "$1"; }
+
+  # THE ROW THE FLEET WAS FAILING: no tmux session, and the card must still exist.
+  is "asleep card: it exists with no tmux session" "billing-svc" "$(gj name)"
+  is "asleep card: ...and says it is asleep"       "true"        "$(gj asleep)"
+  # `asleep` is computed on the card and --json copies a SUBSET of fields; it was not among
+  # them, so the phone — which only ever sees --json — got an ordinary card with a stale
+  # status. The field existed at both ends with nothing carrying it between.
+  is "asleep card: ...on the wire the phone reads"  "true"       "$(gj asleep)"
+  is "asleep card: ...and exited rides with it"     "false"      "$(gj exited)"
+  # Every session in a checkout shares a project directory, so "the newest transcript" is a
+  # neighbour's conversation. Seen live: seven slept cards all quoting the same message.
+  is "asleep card: it quotes its OWN conversation"  "the sleeping one said this" "$(gj msg)"
+  # The desk table prints asleep in place of the status, for the reason it rides beside it on
+  # a card: the statuses say what a RUNNING agent is doing.
+  is "asleep card: the desk table says asleep"      "yes" \
+     "$(grep -q 'billing-svc.*asleep' <<< "$(node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --plain 2>/dev/null)" && echo yes || echo no)"
+  # ...and the phone's own builder agrees, from the same field.
+  is "asleep card: the phone model agrees"          "true" \
+     "$(node -e 'import("'"$ROOT"'/web/grid.js").then(G=>process.stdout.write(String(G.cardModel({name:"billing-svc",asleep:true}).asleep)))')"
+  # A LIVE SESSION IS NOT ASLEEP even if a stale marker sits beside it — that is the shape a
+  # timed-out wake leaves, and the card must follow the process, not the file.
+  tmux -L cf-acme-web new-session -d -s billing-svc -c "$GD/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  is "asleep card: a live session is listed once"   "1" \
+     "$(node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String((JSON.parse(s).cards||[]).filter(c=>c.name==="billing-svc").length)))')"
+  tmux -L cf-acme-web kill-server 2>/dev/null
+
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$GD"
+else
+  skip "a hibernated session shows on the grid" "node or tmux missing"
+fi
+
 # ── 6b. every command is actually installed ──────────────────────────────────
 # A new command that never reaches the install list is invisible until someone hits
 # "command not found" — and worse, the SUMMARY line was hand-maintained separately from
@@ -10335,13 +13331,296 @@ for f in "$ROOT"/bin/*; do
                    *) bash -n "$f"      >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error" ;;
   esac
 done
-for f in "$ROOT"/hooks/*.sh; do
+for f in "$ROOT"/hooks/*.sh "$ROOT"/test/helpers/*.sh; do
   bash -n "$f" >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error"
 done
 for f in "$ROOT"/mcp/*.mjs "$ROOT"/test/helpers/*.mjs; do
   node --check "$f" >/dev/null 2>&1 && ok "$(basename "$f") parses" || bad "$(basename "$f") parses" "ok" "syntax error"
 done
+# ── fleet-restart: every session comes back to ITS OWN conversation ──────────
+# THE BUG THIS EXISTS FOR, measured on a real machine rather than imagined: one
+# checkout held TWELVE live sessions, all reading "scratch · main", each with its
+# own conversation id. The only resume path in the code was `--continue`, which
+# reopens the most recent conversation IN THAT FOLDER — so it can reach exactly one
+# of the twelve and the other eleven are unreachable. Reported as "i use parallel
+# session and if i type exit the session is completely remove it and i cant reopen
+# it easily", and it is also why a fleet could not be moved onto a new Claude Code
+# version without losing work.
+#
+# THE CHECKS LIVE IN THE SCRIPT, not here, and this runs them. They need no tmux
+# and no live fleet — what is being proved is the LOOKUP and the DECISION, and both
+# are pure functions of the records on disk, so a test that had to stand up twelve
+# real sessions would be a test nobody runs. `--self-test` prints the same
+# "name <US> want <US> got" rows every other helper here prints.
+#
+# WATCHED GOING RED by making sid_for resolve the way --continue does (newest in
+# the folder, ignoring which session asked): "each resolves to ITS OWN conversation
+# id" went to got=13 of 14 wrong, and "a slot with no record resolves to nothing"
+# started returning somebody else's id — which is the silent half of the bug.
+group "fleet-restart resumes by recorded id, never by --continue"
+if [ -x "$ROOT/bin/fleet-restart" ]; then
+  FRO="$(mktemp -d "$TEST_RUNS.$$.frst.XXXXXX")"
+  PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" --self-test > "$FRO/out" 2> "$FRO/err"
+  is "fleet-restart --self-test ran"    "0"   "$?"
+  is "...without complaining"           ""    "$(head -2 "$FRO/err" | tr '\n' ' ' | sed 's/ *$//')"
+  # A FLOOR, for the same reason every driven helper here has one: a script that
+  # dies emits nothing, and in a 4000-assertion run that is indistinguishable from
+  # a group that passed.
+  is "...and produced its checks"       "yes" "$([ "$(wc -l < "$FRO/out")" -ge 18 ] && echo yes || echo "no: $(wc -l < "$FRO/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$FRO/out"
+  rm -rf "$FRO"
+else
+  skip "fleet-restart resumes by recorded id" "bin/fleet-restart is not executable"
+fi
+
+# ── ...and it refuses rather than guessing ───────────────────────────────────
+# The two refusals are the whole safety property: a session with no recorded id is
+# REPORTED, never opened with --continue in a folder that holds somebody else's
+# conversation. Asserted against the real script with an empty fleet directory, so
+# there is nothing for it to find and it still must not fall back.
+group "fleet-restart refuses rather than guessing"
+if [ -x "$ROOT/bin/fleet-restart" ]; then
+  FRD="$(mktemp -d "$TEST_RUNS.$$.frd.XXXXXX")"
+  mkdir -p "$FRD/fleet"
+  out="$(CLAUDE_FLEET_DIR="$FRD/fleet" PATH="$ROOT/bin:$PATH" \
+         "$ROOT/bin/fleet-restart" -s cf-nope --reopen anything 2>&1)"
+  is "reopening with no record is refused"     "1" "$(printf '%s' "$out" | grep -c 'no recorded conversation' || true)"
+  is "...and it says it will not use --continue" "1" "$(printf '%s' "$out" | grep -c -- '--continue' || true)"
+  is "...and a bare --reopen with no name is an argument error" "2" \
+     "$(CLAUDE_FLEET_DIR="$FRD/fleet" "$ROOT/bin/fleet-restart" --reopen >/dev/null 2>&1; echo $?)"
+  # A ROW THAT ASSERTED "--dry-run WRITES NO SNAPSHOT" USED TO BE HERE AND IS GONE.
+  # It could not fail. This suite exports its own TMUX_TMPDIR (line ~271) so its tmux
+  # servers are reachable from this run and nowhere else — which also means there are
+  # no cf-* sockets under it, so `fleet-restart --all` finds nothing to plan, exits at
+  # "no sessions found", and never reaches write_snapshot at all. The row was green
+  # for the same reason with the guard deliberately removed: watched, and it stayed
+  # green, which is the only reason it was caught.
+  #   CLAUDE.md already names this shape — "a test can pass because of where it ran" —
+  # and the honest replacement is in the script's own --self-test, where write_snapshot
+  # is called against a plan the test constructs, so there is something to write.
+  rm -rf "$FRD"
+else
+  skip "fleet-restart refuses rather than guessing" "bin/fleet-restart is not executable"
+fi
+
+# ── `exit` keeps the card ────────────────────────────────────────────────────
+# "i use parallel session and if i type exit the session is completely remove it and i
+# cant reopen it easily." Typing `exit` ended the agent, which ended the pane's command,
+# which let tmux take the session — and the card — down with it. The conversation stayed
+# on disk with nothing on screen pointing at it.
+#
+# bin/agent-here holds the pane instead of exec'ing the agent, and writes a marker. The
+# two halves are tested separately because they fail separately:
+#
+#   THE LAUNCHER no longer hands its process to the agent, so there is something left to
+#   write the marker and hold the pane. `exec` here would take the session down exactly
+#   as before, and nothing downstream would notice — the marker would simply never be
+#   written, and the card would vanish with no error anywhere.
+#
+#   THE MARKER reaches the card through bin/fleet-grid.mjs, which is the ONE builder both
+#   screens read (fleet-serve shells out to its --json), so the desk and the phone cannot
+#   disagree about whether a session has exited.
+group "exit keeps the card"
+if [ -x "$ROOT/bin/agent-here" ]; then
+  # THE LAUNCHER MUST NOT exec THE AGENT. Asserted on the source, which is the honest
+  # level for it: the behavioural version needs a real tmux pane running a real agent
+  # that is then exited, and what actually decides the outcome is whether this process
+  # survives the agent. Watched going red by putting one `exec` back.
+  is "agent-here does not hand its process to the agent" "0" \
+     "$(grep -cE '^\s*exec (claude-here|"\$launcher")' "$ROOT/bin/agent-here" || true)"
+  is "...it runs it and outlives it"                     "1" \
+     "$(grep -c 'run_agent()' "$ROOT/bin/agent-here" || true)"
+  # A LEFTOVER MARKER WOULD MAKE A LIVE SESSION READ AS EXITED — the same shape as the
+  # stale park marker fleet-spawn and fleet-open both clear on the way in.
+  # PRESENCE, NOT A COUNT. CLAUDE.md: `grep -c` counts LINES, and "is it there" is not a
+  # count — this legitimately appears twice (once on the way in, once after a resume) and
+  # pinning 1 made the row fail over a second correct occurrence.
+  is "...and clears a stale marker on the way in"        "yes" \
+     "$([ "$(grep -c 'rm -f "\$MARK"' "$ROOT/bin/agent-here" || true)" -ge 1 ] && echo yes || echo no)"
+  # ── A FAILED START IS NOT AN EXIT, AND THE SUITE IS WHY THIS ROW EXISTS ────
+  # Holding the pane on ANY exit made a wrong-platform agent binary look like a clean
+  # start: fleet-spawn saw a live session, reported success, left a manifest row, and
+  # lost its "the agent binary could not exec" diagnostic. Six rows went red at once,
+  # every one of them a case where the failure had become INVISIBLE rather than louder.
+  # 126/127 are the shell's own cannot-execute and not-found; the elapsed floor catches
+  # an agent that fell over before it reached a prompt whatever it returned.
+  is "...and a failed start is not mistaken for an exit" "yes" \
+     "$(grep -qE '"\$rc" = 126 .*"\$rc" = 127' "$ROOT/bin/agent-here" && echo yes || echo no)"
+  is "...including one that never reached a prompt"      "yes" \
+     "$(grep -q 'AGENT_MIN_RUN' "$ROOT/bin/agent-here" && echo yes || echo no)"
+else
+  skip "exit keeps the card" "bin/agent-here is not executable"
+fi
+
+# ── the marker becomes a card field, and one builder feeds both screens ──────
+# Driven, not grepped: a temp fleet dir, a marker in it, and fleet-grid.mjs asked for the
+# card it builds. That is the path the desk reads and the path fleet-serve shells out to,
+# so proving it once proves it for both.
+group "an exited session is still a card"
+if command -v node >/dev/null 2>&1; then
+  EXD="$(mktemp -d "$TEST_RUNS.$$.exit.XXXXXX")"
+  mkdir -p "$EXD/fleet"
+  # The reader, in isolation: the same two lines fleet-grid.mjs uses, asked of a marker
+  # that is there and one that is not. Namespaced by socket, because every fleet has a
+  # `master` and a bare marker would report another project's card as exited.
+  : > "$EXD/fleet/cf-acme-api.api-fix.exited"
+  is "a marker makes THAT session exited" "true" \
+     "$(node -e 'const fs=require("fs"),p=require("path");const d=process.argv[1];
+        console.log(fs.existsSync(p.join(d,"cf-acme-api.api-fix.exited")))' "$EXD/fleet")"
+  is "...and not its namesake in another fleet" "false" \
+     "$(node -e 'const fs=require("fs"),p=require("path");const d=process.argv[1];
+        console.log(fs.existsSync(p.join(d,"cf-acme-web.api-fix.exited")))' "$EXD/fleet")"
+  is "...and not a session with no marker" "false" \
+     "$(node -e 'const fs=require("fs"),p=require("path");const d=process.argv[1];
+        console.log(fs.existsSync(p.join(d,"cf-acme-api.docs-pass.exited")))' "$EXD/fleet")"
+  # THE FIELD IS ON THE CARD THE GRID BUILDS, which is what fleet-serve serves.
+  is "the card builder carries the field"  "1" "$(grep -c 'exited: isExited(s.name)' "$ROOT/bin/fleet-grid.mjs" || true)"
+  is "...and the phone's model reads it"   "1" "$(grep -c 'exited: !!card.exited' "$ROOT/web/grid.js" || true)"
+  # IT IS NOT A TENTH STATUS. The nine describe a RUNNING agent; folding this in would
+  # make every consumer's status switch answer a different question in one branch.
+  is "...without becoming a tenth status"  "9" \
+     "$(node -e 'import("file://"+process.argv[1]).then(m=>console.log(m.STATUSES.length))' "$ROOT/web/grid.js")"
+  rm -rf "$EXD"
+else
+  skip "an exited session is still a card" "node is not installed"
+fi
+
+# ── a hibernated card says asleep, and Enter on it does something ────────────
+# REPORTED FROM THE DESK, looking at it: a hibernated session drew as `? unknown` with
+# an age, and pressing Enter did nothing at all.
+#
+# TWO BUGS WITH ONE SYMPTOM, and they lived in different files:
+#
+#   THE WORD. `--plain` and `--json` had said `asleep` since the markers were added; the
+#   INTERACTIVE card was the one reader that never asked. An asleep session has no pane
+#   to read and usually no status file left, so it landed on `unknown` — the fleet saying
+#   "I cannot tell" about the one case it can tell exactly.
+#
+#   THE KEY. The grid emits the same `attach<US><name>` for Enter, the 1-9 digits and a
+#   click, and bin/ghostfleet's attach is `|| true` — so on a session that is not there it
+#   succeeded at nothing, silently, three ways at once.
+#
+# DRIVEN THROUGH A REAL PANE WITH REAL KEYS, because this is a rendering decision and a
+# key binding, and CLAUDE.md is explicit that `node --check` proves neither.
+group "a hibernated card says asleep"
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "a hibernated card says asleep" "tmux not available"
+else
+  AS="$(mktemp -d "$TEST_RUNS.$$.asleep.XXXXXX")"
+  mkdir -p "$AS/fleet" "$AS/wt"
+  # A SESSION THAT IS NOT THERE, PLUS ONE THAT IS. The live one is what gives the grid a
+  # socket to list; the marker is what should become a card beside it. Fixture names.
+  tmux -L cfasleep kill-server 2>/dev/null
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "aaaaaaaa-0000-0000-0000-000000000001" "$AS/wt" "" \
+    > "$AS/fleet/cfasleep.api-fix.asleep"
+
+  # THE HELPER PANE IS CARD 1 AND THE SLEEPING SESSION IS CARD 2. The grid draws a card
+  # for every session on the socket, including the one this test runs the grid in, so the
+  # ordering is fixed and the digit below is deterministic rather than lucky.
+  ascr() {   # run the grid in a pane; $AS/choice gets whatever it finishes with
+    tmux -L cfasleep kill-session -t _grid 2>/dev/null
+    rm -f "$AS/choice"
+    tmux -L cfasleep new-session -d -s _grid -x 120 -y 36 \
+      -e CLAUDE_FLEET_DIR="$AS/fleet" \
+      "node '$ROOT/bin/fleet-grid.mjs' cfasleep > '$AS/choice' 2>/dev/null ; sleep 20" 2>/dev/null
+    sleep 3
+    tmux -L cfasleep capture-pane -p -t _grid 2>/dev/null
+  }
+  drew="$(ascr)"
+  is "the grid drew a card for the sleeping session" "yes" \
+     "$(grep -q 'api-fix' <<<"$drew" && echo yes || echo no)"
+  # THE ROW THE OWNER WAS LOOKING AT.
+  # ANCHORED ON THE CHIP, NOT THE WORD. Watched going red: with the fix removed this row
+  # stayed GREEN, because the helper pane's own card shows the checkout's branch and this
+  # work happens on a branch with "asleep" in its name. A bare word match on a screen that
+  # renders arbitrary branch names is not a test of anything.
+  is "...and it says asleep"                         "yes" \
+     "$(grep -q '☾ asleep' <<<"$drew" && echo yes || echo no)"
+  is "...and NOT unknown"                            "no"  \
+     "$(grep -q 'unknown' <<<"$drew" && echo yes || echo no)"
+  # ...and it says how to get back in, the way the exited card does.
+  is "...and how to wake it"                         "yes" \
+     "$(grep -q 'wakes' <<<"$drew" && echo yes || echo no)"
+
+  # ── THE KEY IS LIVE AT THE SOURCE ────────────────────────────────────────
+  # Enter on the asleep card must produce the choice its consumer acts on. This is the
+  # half that lives in the grid; the wake itself is bin/ghostfleet's and is driven below.
+  # THE DIGIT. `2` is the jump key printed on the card itself.
+  tmux -L cfasleep send-keys -t _grid '2' 2>/dev/null; sleep 2
+  is "the digit on an asleep card emits its attach"  "yes" \
+     "$(grep -q "attach.*api-fix" "$AS/choice" 2>/dev/null && echo yes || echo no)"
+  # ...AND ENTER, which is the key the report was about. Right moves onto the card first.
+  drew2="$(ascr)"
+  tmux -L cfasleep send-keys -t _grid Right 2>/dev/null; sleep 1
+  tmux -L cfasleep send-keys -t _grid Enter 2>/dev/null; sleep 2
+  is "Enter on an asleep card emits its attach"      "yes" \
+     "$(grep -q "attach.*api-fix" "$AS/choice" 2>/dev/null && echo yes || echo no)"
+  is "...and the card it drew was still the asleep one" "yes" \
+     "$(grep -q '☾ asleep' <<<"$drew2" && echo yes || echo no)"
+  tmux -L cfasleep kill-server 2>/dev/null
+  rm -rf "$AS"
+fi
+
+# ── ...and the wake really wakes it ──────────────────────────────────────────
+# The real bin/fleet-hibernate, against a fixture session, with a STUB agent on PATH so
+# the readiness poll has something to see — a real agent is not needed to prove the wake
+# path, and standing one up would make this a test nobody runs.
+#   IT NEVER TOUCHES A REAL SLEEPING SESSION: its own socket, its own CLAUDE_FLEET_DIR,
+# its own PATH, all under the run's TMUX_TMPDIR.
+group "waking a hibernated session brings it back"
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "waking a hibernated session" "tmux not available"
+else
+  WK="$(mktemp -d "$TEST_RUNS.$$.wake.XXXXXX")"
+  mkdir -p "$WK/fleet" "$WK/bin" "$WK/wt"
+  # `for shortcuts` is one of the strings fleet-hibernate's is_ready looks for.
+  printf '#!/bin/sh\necho "? for shortcuts"\nsleep 60\n' > "$WK/bin/agent-here"
+  chmod +x "$WK/bin/agent-here"
+  tmux -L cfwake kill-server 2>/dev/null
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "aaaaaaaa-0000-0000-0000-000000000002" "$WK/wt" "" \
+    > "$WK/fleet/cfwake.docs-pass.asleep"
+
+  wout="$(PATH="$WK/bin:$PATH" CLAUDE_FLEET_DIR="$WK/fleet" \
+          "$ROOT/bin/fleet-hibernate" -s cfwake --wake docs-pass --timeout 20 2>&1)"; wrc=$?
+  is "the wake succeeds"                    "0"   "$wrc"
+  is "...and says so"                       "yes" "$(grep -q 'awake' <<<"$wout" && echo yes || echo no)"
+  is "...the session is really there now"   "yes" \
+     "$(tmux -L cfwake has-session -t '=docs-pass' 2>/dev/null && echo yes || echo no)"
+  # A MARKER LEFT BEHIND WOULD MAKE A LIVE SESSION READ AS ASLEEP for ever — the same
+  # stale-marker shape fleet-spawn and fleet-open both clear on the way in.
+  is "...and it is no longer marked asleep" "no"  \
+     "$([ -f "$WK/fleet/cfwake.docs-pass.asleep" ] && echo yes || echo no)"
+  # THE OTHER DIRECTION: waking something that is not asleep must refuse, not invent a
+  # conversation. A missing session looks exactly like a crashed one.
+  nout="$(PATH="$WK/bin:$PATH" CLAUDE_FLEET_DIR="$WK/fleet" \
+          "$ROOT/bin/fleet-hibernate" -s cfwake --wake list-pages --timeout 5 2>&1)"; nrc=$?
+  is "waking one that is not asleep refuses" "yes" "$([ "$nrc" = 0 ] && echo no || echo yes)"
+  is "...and says which"                     "yes" "$(grep -q 'list-pages' <<<"$nout" && echo yes || echo no)"
+  tmux -L cfwake kill-server 2>/dev/null
+  rm -rf "$WK"
+fi
+
+# ── the consumer wakes before it opens ───────────────────────────────────────
+# Source-level, and said so rather than dressed up: the behavioural version means driving
+# bin/ghostfleet's grid_loop, which attaches to a real fleet. What it pins is the shape
+# that was wrong — an attach with no wake in front of it, and a failure that says nothing.
+group "an asleep card wakes before it opens"
+is "the attach path checks the asleep marker" "yes" \
+   "$(grep -q 'asleep' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
+is "...and runs the wake"                     "yes" \
+   "$(grep -q 'fleet-hibernate\" -s \"\$SOCK\" --wake' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
+is "...and a failed wake is reported, not swallowed" "yes" \
+   "$(grep -q 'could not wake' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
+
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
 
-printf '\n%s passed  %s%s failed%s  %s skipped\n' "$PASS" "$([ "$FAIL" -gt 0 ] && printf '%s' "$R")" "$FAIL" "$N" "$SKIP"
+# NAMED, NOT JUST COUNTED. A group that is not applicable on every run is indistinguishable
+# from one nobody wrote, unless the run says which rows they were.
+if [ "$NA" -gt 0 ] && [ -s "${NA_LOG:-/dev/null}" ]; then
+  printf '\n%snot applicable here:%s\n' "$D" "$N"
+  while IFS= read -r nrow; do printf '  %s–%s %s\n' "$Y" "$N" "$nrow"; done < "$NA_LOG"
+fi
+printf '\n%s passed  %s%s failed%s  %s skipped  %s n/a\n' "$PASS" "$([ "$FAIL" -gt 0 ] && printf '%s' "$R")" "$FAIL" "$N" "$SKIP" "$NA"
 [ "$FAIL" -eq 0 ]

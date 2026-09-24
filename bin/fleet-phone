@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# fleet-phone — the onboarding step for the phone client: what it is, how to reach it,
+# and which of those you have already done.
+#
+#     fleet-phone                where phone setup stands, and the one command to run next
+#     fleet-phone --if-needed    silent when it is already set up (what the first-run
+#                                screen and the installer point at — see bin/ghostfleet)
+#     fleet-phone --next         print only the next command, for scripting
+#
+# WHY THIS EXISTS. Nothing in the first-run flow said the phone client was there at all.
+# The whole of it — an installable app that shows every session, answers a permission
+# prompt from your pocket and notifies when a worker is blocked — was reachable only by
+# reading docs/mobile.md, which is a 900-line design document, or docs/OPERATIONS.md, which
+# you have to already know to look in. So the feature with the most setup was the one with
+# no route into it.
+#
+# IT REPORTS, IT NEVER RUNS ANYTHING. Every step here opens a port, writes a config or
+# spends a passkey, and the one thing an onboarding command must not do is perform those on
+# somebody's behalf because they typed a word that sounded informational. fleet-serve owns
+# all of it and says no better than a wrapper could; this decides WHICH of its commands you
+# need next and gets out of the way.
+#
+# IT DOES NOT RE-IMPLEMENT `fleet-serve check` either. That is the preflight — it probes
+# the bind, verifies the audit chain and classifies the address — and a second copy of that
+# knowledge here is a second thing to be wrong. This reads the config for the one question
+# check does not answer: which STEP you are on.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac; done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+
+CFG_HOME="$HOME/.config/ghostfleet"
+CONFIG="${GHOSTFLEET_SERVE_CONFIG:-$CFG_HOME/serve.json}"
+
+MODE=run          # run | if-needed | next
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --if-needed) MODE=if-needed; shift ;;
+    --next)      MODE=next;      shift ;;
+    -h|--help)   sed -n '2,12p' "$src" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "fleet-phone: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+
+# ── what is already done ────────────────────────────────────────────────────
+# node, not jq: fleet-serve writes this file and fleet-serve is node, so the parser is
+# already a hard requirement here and jq is not one for this path. Every read is guarded —
+# a half-written or hand-edited config must leave this command able to say "not configured
+# yet" rather than die on the file it exists to report on.
+cfg_get() {                        # $1 = a JS expression over the parsed config
+  node -e '
+    const fs = require("fs");
+    let c = {};
+    try { c = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { c = {}; }
+    let v = "";
+    try { v = (function (c) { return eval(process.argv[2]); })(c); } catch { v = ""; }
+    process.stdout.write(v == null ? "" : String(v));
+  ' "$CONFIG" "$1" 2>/dev/null
+}
+
+CONFIGURED=0; ENROLLED=0; RUNNING=0; TAILNET=""
+[ -f "$CONFIG" ] && [ -n "$(cfg_get 'c.bind || ""')" ] && [ -n "$(cfg_get 'c.rp_id || ""')" ] && CONFIGURED=1
+# A client with no passkeys is an enrolment that was opened and never completed, which is
+# exactly the state somebody gets stuck in — so it counts as NOT enrolled, and the next
+# step it prints is the one that finishes the job.
+[ "$(cfg_get '(c.clients||[]).filter(x => !x.revoked && (x.creds||[]).length).length')" != "0" ] \
+  && [ -n "$(cfg_get '(c.clients||[]).filter(x => !x.revoked && (x.creds||[]).length).length')" ] && ENROLLED=1
+ORIGIN="$(cfg_get '(c.origins||[])[0] || ""')"
+BINDPORT="$(cfg_get '(c.bind||"") + ":" + (c.port||"")')"
+
+# Is a daemon actually listening? Asked of the PORT rather than of a process name, because
+# a pid file is a claim and a socket is a measurement — and `pgrep -f fleet-serve` would
+# also match this very command's own argv on some shells.
+#   Both probes are guarded: `lsof` is not on every Linux, `ss` is not on macOS, and a
+# missing tool must read as "cannot tell" rather than as "not running".
+#   AND THE ADDRESS, NOT ONLY THE PORT. Asking about the port alone answers "is ANYTHING
+# listening on 8787", and 8787 is this project's own default — so a second, unrelated fleet
+# on the same machine, or a config under a different HOME, reads as "your daemon is up".
+# Measured while writing this: a sandboxed HOME with the default port reported the daemon
+# listening, because the real one on this machine holds it. The bind address is the half
+# that makes the answer about THIS config.
+PORT="$(cfg_get 'c.port || ""')"
+BIND="$(cfg_get 'c.bind || ""')"
+if [ -n "$PORT" ] && [ -n "$BIND" ]; then
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP@"$BIND":"$PORT" -sTCP:LISTEN >/dev/null 2>&1 && RUNNING=1
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltn 2>/dev/null | grep -q "$BIND:$PORT " && RUNNING=1
+  fi
+fi
+
+# The tailnet address, only if tailscale is actually up. This is the value `fleet-serve
+# init --bind` wants, and printing it is the difference between an instruction and a
+# command somebody can paste.
+if command -v tailscale >/dev/null 2>&1; then
+  TAILNET="$(tailscale ip -4 2>/dev/null | head -1)"
+  case "$TAILNET" in *[!0-9.]*) TAILNET="" ;; esac
+fi
+
+DONE=0
+[ "$CONFIGURED" = 1 ] && DONE=$((DONE + 1))
+[ "$ENROLLED" = 1 ]   && DONE=$((DONE + 1))
+[ "$RUNNING" = 1 ]    && DONE=$((DONE + 1))
+
+# ── the one command to run next ─────────────────────────────────────────────
+next_cmd() {
+  if [ "$CONFIGURED" = 0 ]; then
+    if [ -n "$TAILNET" ]; then printf 'fleet-serve init --bind %s --rp-id <your-machine>.ts.net\n' "$TAILNET"
+    elif command -v tailscale >/dev/null 2>&1; then printf 'tailscale up          # then: fleet-serve init --bind $(tailscale ip -4) --rp-id <your-machine>.ts.net\n'
+    else printf 'fleet-serve init --bind 127.0.0.1    # this machine only; see docs/mobile.md §5 for the tailnet\n'; fi
+  elif [ "$ENROLLED" = 0 ]; then printf 'fleet-serve enroll phone\n'
+  elif [ "$RUNNING" = 0 ];  then printf 'fleet-serve\n'
+  else printf '' ; fi
+}
+NEXT="$(next_cmd)"
+
+if [ "$MODE" = next ]; then printf '%s\n' "$NEXT"; exit 0; fi
+# Already serving, already enrolled: say nothing to the surfaces that ask before they
+# mention it. This is what keeps the first-run screen and the installer from lecturing
+# somebody who set the phone up months ago.
+if [ "$MODE" = if-needed ] && [ -z "$NEXT" ]; then exit 0; fi
+
+# ── the report ──────────────────────────────────────────────────────────────
+mark() { [ "$1" = 1 ] && printf '  ✓ %s\n' "$2" || printf '  · %s\n' "$2"; }
+{
+  if [ -z "$NEXT" ]; then echo "ghostfleet on your phone — set up and serving"
+  else                    echo "ghostfleet on your phone — $DONE of 3 steps done"; fi
+  echo
+  echo "  The same fleet as an installable app: every session as a chat, the real pane one"
+  echo "  tap away, and a notification when a worker is blocked or has an answer — so a"
+  echo "  permission prompt gets answered from your pocket instead of waiting for you."
+  echo
+  mark "$CONFIGURED" "$([ "$CONFIGURED" = 1 ] && echo "configured — ${BINDPORT}${ORIGIN:+ · $ORIGIN}" || echo "not configured yet")"
+  mark "$ENROLLED"   "$([ "$ENROLLED" = 1 ] && echo "a phone is enrolled" || echo "no passkey enrolled yet")"
+  mark "$RUNNING"    "$([ "$RUNNING" = 1 ] && echo "the daemon is listening" || echo "the daemon is not running")"
+  if [ -n "$NEXT" ]; then
+    echo
+    echo "  Next:"
+    echo "      $NEXT"
+  fi
+  echo
+  # THE TRANSPORT IS THE PART PEOPLE GET WRONG, and getting it wrong is not a broken
+  # feature, it is an exposed one. The endpoint spawns processes and injects prompts into
+  # agents running --dangerously-skip-permissions, so the bind is refused unless it is
+  # loopback or the tailnet — said here rather than discovered at the refusal.
+  echo "  REACHING IT. Tailscale is the one to use: it works from cellular and a hotel"
+  echo "  with zero inbound ports open, and it fails closed. fleet-serve REFUSES a"
+  echo "  wildcard, a LAN address or a public one before the socket opens — this endpoint"
+  echo "  runs commands, so it is never publicly routable. docs/mobile.md §5 has the"
+  echo "  alternatives and why Funnel and quick tunnels are not among them."
+  echo
+  if [ "$ENROLLED" = 0 ]; then
+    echo "  THE PASSKEY IS ENFORCED SERVER-SIDE, so this is not a step you can skip and come"
+    echo "  back to: until a phone is enrolled the API answers 401 and the app sits on its"
+    # "the origin above" is only true once there IS one on screen. Before `init` has run
+    # there is no origin anywhere, and pointing at a line that is not there is how an
+    # instruction stops being followable.
+    if [ -n "$ORIGIN" ]; then
+      echo "  lock screen. \`fleet-serve enroll phone\` prints a one-time code — open"
+      echo "  $ORIGIN on the phone, type the code, approve the passkey."
+      echo "  It expires, and it is one use."
+    else
+      echo "  lock screen. Once configured, \`fleet-serve enroll phone\` prints a one-time"
+      echo "  code — open the origin it names on the phone, type the code, approve the"
+      echo "  passkey. It expires, and it is one use."
+    fi
+    echo
+  fi
+  echo "  INSTALL IT: open the origin in Safari or Chrome on the phone and Add to Home"
+  echo "  Screen. It is a PWA, so that is the whole install — no store, no account."
+  echo
+  # THE ONE THAT COSTS REAL TIME, and it is indistinguishable from a broken deploy. Kept
+  # here rather than only in CLAUDE.md's deploy section, because the person who needs it is
+  # holding the phone that is lying to them.
+  echo "  UPDATING IT IS NOT WHAT YOU THINK. The shell is served cache-first, so reopening"
+  echo "  an installed iOS PWA from the app switcher is a RESUME, not a navigation: the"
+  echo "  phone paints the client it already cached and only revalidates behind the paint."
+  echo "  Measured here: a new shell was fetched and fully precached one second AFTER the"
+  echo "  page loaded, and the phone went on running the old client for two more minutes"
+  echo "  with the new bytes already sitting in its cache. Nothing on the device shows the"
+  echo "  difference. Swipe the app away and relaunch — that is a navigation."
+  echo
+  echo "  Preflight any time:  fleet-serve check        Who is enrolled:  fleet-serve clients"
+  echo "  The design and the threat model:  docs/mobile.md · setup: docs/OPERATIONS.md"
+}
+exit 0

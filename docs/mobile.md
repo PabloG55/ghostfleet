@@ -526,6 +526,30 @@ the array and number the result, and `scratch` would be card 1 in the personal t
 `Ctrl-f 1` opens `acme-api`. **The tab decides what is drawn, never what a card is
 called** — a digit that sends someone to the wrong project is worse than no digit.
 
+**The demo fleet is the second thing this screen hides, and for a different reason.**
+*"hide the demo account from the real phone."* `ghostfleet demo` registers three throwaway
+projects under `~/gf-demo` in a `demo` profile, and this is the only merged **screen** —
+every screen you browse, at the desk or here, is scoped to one profile, so the demo is
+invisible unless you type `ghostfleet demo`, and it sat in the same list as real work only
+here. So this is not a phone-specific carve-out: it is the one screen the merge reaches.
+`fleet-project list` and the MCP's project list *do* merge, and they stay complete on
+purpose — those are explicit enumerations, and a demo row you cannot see is one you cannot
+remove.
+
+The rule is **derived, never configured: hidden once there is real work to hide it from,
+shown in full when it is all there is.** The second half is the one that matters. Somebody
+who followed the README ran `ghostfleet demo` and has nothing else yet — hiding it from
+*them* opens the app on an empty screen and undoes the first-run flow that sent them
+there, which is a worse bug than the one being fixed. A setting was the alternative and
+was rejected for the reason the tab strip is also derived: it would be a second thing to
+keep in step with a file anyone can edit by hand. The tab goes with it, or *hide the demo*
+leaves the word `demo` on screen one tap from the thing that was meant to be gone.
+
+It is a **drawing** decision, like the tabs: the rows keep the index they had, so the two
+hidden cards above `billing-svc` do not renumber it. The cost is a false positive worth
+naming — somebody whose *own* profile is called `demo` sees it hidden here once they have
+other projects, and the recovery is to call the profile something else.
+
 Two consequences worth stating, because both look like bugs until you know: a digit key
 still opens the project with that number even when the tab is not showing it (it is an
 address, not a position on screen), and a drag inside a tab moves a project past the

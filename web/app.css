@@ -103,9 +103,85 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  * ends is survivable where a layout that never recovers is not. NOT `position: fixed`
  * either, which is the thing that fights iOS keyboards hardest. */
 #app.shell {
-  height: 100vh; height: 100dvh;
+  /* Measured in the installed app four launches running, and the fourth named the cause:
+   *
+   *     v40  ih759 sh812 sl759 cb751          height: 100dvh
+   *     v41  ih759 sh812 sl759 cb0            position: fixed; inset: 0
+   *     v42  ih759 sh812 sl812 cb775          height: calc(100dvh + env(safe-area-inset-top))
+   *
+   * v42 laid the shell out to 812 on an 812 screen and the device STILL showed the band, with
+   * the composer now cut off above it. That is the datum: a box that is laid out and not
+   * painted is a box outside the web view. The web view itself was 759 tall — iOS 26
+   * standalone with a black-translucent bar positions it at the top of the screen (under the
+   * bar, hence sat53) and sizes it to the screen minus the bar (hence ih759), so the bottom
+   * 53pt are outside the paintable surface, and no height, inset or dvh gets there. The fix
+   * is the status-bar style in index.html, not a rule in this file: with an opaque bar iOS
+   * keeps its strip at the top and the web view runs to the real bottom. Measured on an iOS
+   * 26.5 simulator (402x874, bar 62) from one clip and one page, only the stored bar style
+   * differing: translucent gave ih812 sat62 with 62pt unpainted under the composer; opaque
+   * gave ih812 sat0 sab34 with the composer 8px above the home indicator and nothing under
+   * it. Same ih both times — the web view is always screen minus bar; the bar decides WHERE
+   * it sits. (100lvh and 100vh answered 874 in both, so a shell sized by lvh is laid out
+   * past the web view exactly as v42 was.) Expected from the device after it: ih759 sh812
+   * sl759 sat0 sab29, composer bottom at 722 — 8px above the home-indicator inset — and
+   * nothing under it.
+   *   THE SHELL IS STILL PINNED, not sized: inset: 0 fills whatever web view iOS hands the
+   * page, which is the right thing to fill. Nothing here adds an inset to a height again. */
+  position: fixed; inset: 0;
   display: flex; flex-direction: column; gap: 0;
+  /* A transformed child during a screen transition must not become page scroll. The bands
+   * inside have their own scrollers; this box has never needed one, and clipping here is
+   * what keeps `documentElement.scrollWidth <= clientWidth` true mid-animation — the rule
+   * viewport-check exists to hold. */
+  overflow: hidden;
 }
+
+/* ── moving between screens ──────────────────────────────────────────────────
+ * "add cool animations ... like getting out of a session." The screens are a stack —
+ * Projects, a project's grid, a session — and the one thing motion can say here that a
+ * static swap cannot is WHICH WAY you went. So it is directional and nothing else: in
+ * from the right going deeper, in from the left coming back, matching the swipe that
+ * already walks between sessions. No fades on cards, no springs, no stagger.
+ *   160ms because it has to finish before the thumb expects the screen: long enough to
+ * read as motion, short enough that the back gesture never feels held up.
+ *   TRANSFORM AND OPACITY ONLY — both composited, so this cannot cost a layout on a phone
+ * that is already polling every five seconds. */
+@media (prefers-reduced-motion: no-preference) {
+  #app.shell.nav-fwd  { animation: gf-nav-fwd 160ms cubic-bezier(.22,.61,.36,1) both; }
+  #app.shell.nav-back { animation: gf-nav-back 160ms cubic-bezier(.22,.61,.36,1) both; }
+}
+/* A WIPE, NOT A SLIDE, AND THE REASON IS MEASURED. The first cut translated the shell 5%
+ * and viewport-check went red at every width: `div.hdr@396` against a 390 viewport. It was
+ * right to. A transform is part of an element's box, so every child's rect hangs past the
+ * screen for the 160ms the animation runs — `overflow: hidden` clips the PAINT and changes
+ * no rect, and the rule that nothing may sit past the right edge is checked continuously,
+ * not at rest. (The page still could not scroll: documentElement.scrollWidth stayed within
+ * clientWidth. The rect is the stricter question and the one being asked.)
+ *   clip-path moves nothing. The screen is revealed FROM the side it arrived from, which
+ * says the same thing about direction, and no box anywhere leaves the viewport — so the
+ * assertion keeps its teeth instead of being taught to wait for animations. */
+@keyframes gf-nav-fwd  { from { clip-path: inset(0 0 0 92%); opacity: .35 }
+                         to   { clip-path: inset(0);         opacity: 1 } }
+@keyframes gf-nav-back { from { clip-path: inset(0 92% 0 0); opacity: .35 }
+                         to   { clip-path: inset(0);         opacity: 1 } }
+
+/* ── waiting, in the shape of the thing being waited for ─────────────────────
+ * A skeleton rather than a spinner, because the screen then does not JUMP when the data
+ * lands: the placeholder already occupies the final layout, so the real cards swap into
+ * the boxes the eye is already looking at. A spinner in the middle of an empty screen
+ * moves everything twice.
+ *   BUILT FROM THE GROUND, NOT A NEW HEX — white at 3% is the card's own background, and
+ * the bar is white at 7% over it. The palette does not gain colours (see .card above). */
+.card.skel { pointer-events: none; }
+.skel-bar {
+  height: .85em; border-radius: 3px; margin: .35em 0;
+  background: rgba(255, 255, 255, .07);
+}
+.skel-bar.w1 { width: 45% } .skel-bar.w2 { width: 72% } .skel-bar.w3 { width: 58% }
+@media (prefers-reduced-motion: no-preference) {
+  .card.skel .skel-bar { animation: gf-skel 1.1s ease-in-out infinite; }
+}
+@keyframes gf-skel { 0%, 100% { opacity: .55 } 50% { opacity: 1 } }
 /* The scrolling region. `min-height: 0` is the whole trick — a flex child's default
  * min-height is its content, so without it the column grows past the viewport and the
  * page scrolls again, which is exactly the bug. */
@@ -116,6 +192,18 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
   flex: 1 1 auto; min-height: 0; overflow-y: auto;
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
+/* THE FOOTER USED TO CARRY env(safe-area-inset-bottom) AND IT IS GONE, so the card list
+ * needs the last card clear of the home indicator rather than half under it.
+ *   THE INSET IS THE PARENT'S, AND IT IS ONLY OWED ONCE. #app already ends in
+ * calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px), and box-sizing is border-box
+ * with height: 100dvh — so this list's box already STOPS that far above the physical
+ * bottom. Adding the inset again here spent it twice: 22px + 2 × inset of scrollable
+ * nothing after the last card, which is ~90pt on a phone whose inset is 34. Reported as a
+ * band of unused space above the bottom of the screen.
+ *   Nothing on a desktop engine shows it, which is why it survived review and why the
+ * suite now asks the question structurally instead: every inset on this path is 0 on
+ * every desktop engine, so both the bug and the fix render identically there. */
+#app.shell > .cards { padding-bottom: 14px; }
 #app.shell > .paneview {
   flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0;
 }
@@ -126,11 +214,26 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
 /* Everything that is not the scroller is a fixed band: the header and the confirm bar
  * above, the verbs or the composer below. That is what makes the card list scroll under a
  * header that stays put, instead of the whole page moving. */
-#app.shell > .sbar, #app.shell > .composer, #app.shell > .verbs,
+#app.shell > .sbar, #app.shell > .composer, #app.shell > .toast,
+#app.shell > .strip,
 #app.shell > .hdr, #app.shell > .confirm, #app.shell > .hint, #app.shell > .stale { flex: 0 0 auto; }
 
 /* ── header ─────────────────────────────────────────────────────────────── */
-.hdr { display: flex; flex-wrap: wrap; gap: .3em .9em; align-items: baseline; padding: .2em .2em .6em; font-size: 13px; }
+/* ABSOLUTE, NOT A FLEX CHILD, AND THAT IS THE POINT. `.hdr` wraps on purpose — the counts
+ * line drops to a second row on a narrow screen — and a `margin-left: auto` control inside a
+ * wrapping row goes wherever the wrap leaves it, which on a narrow screen is the end of the
+ * COUNTS line rather than the top right. Taking it out of flow pins it to the corner at
+ * every width and every text size, and the reserved padding on the right is what keeps the
+ * text from running under it. */
+.hdr { position: relative; display: flex; flex-wrap: wrap; gap: .3em .9em; align-items: baseline;
+       padding: .2em 46px .6em .2em; font-size: 13px; }
+/* 44px, the same floor the footer's buttons were held to and for the same reason: it is the
+ * size a finger needs, not the size the glyph needs. It is the ONLY control on this screen
+ * now, so it is the one that must not be fiddly. */
+.hdr .more { position: absolute; top: -4px; right: -4px; width: 44px; height: 44px;
+             display: inline-flex; align-items: center; justify-content: center;
+             padding: 0; border-radius: 10px; }
+.hdr .more svg { width: 20px; height: 20px; display: block; }
 .hdr .name { font-weight: 700; color: var(--white); }
 .hdr .scope { color: var(--dim); }
 /* The counts line WRAPS. It was nowrap, and on a 390pt screen "· 2 at limit · 2 parked"
@@ -178,66 +281,143 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  * `min(…, 100%)` says what was meant — at least one card wide, but never wider than the
  * column it is in — and a tablet still gets its three or four tracks, because there 33ch
  * is the smaller of the two. */
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(33ch, 100%), 1fr));
-         gap: 0; align-content: start; font-size: var(--fs); }
-.card { color: var(--c); cursor: pointer; -webkit-tap-highlight-color: transparent; }
-/* line-height 1: a terminal's cell height IS its line height, so anything looser
- * leaves leading between the rows and the card's │ and ╰ stop touching — the box comes
- * apart into a stack of dashes. */
-.card pre { margin: 0 0 .55em; font: inherit; font-size: var(--fs); line-height: 1; white-space: pre; }
-/* max-content, not the default full width: the selected card's title line is drawn in
- * reverse video, and a block span would paint its background across the whole column —
- * a few pixels of colour past the ╮, which reads as the card running off the screen. The
- * TUI reverses exactly the characters of that line, so this does too. */
-.card .l { display: block; width: max-content; }
-/* One cell per non-ASCII character, because the font does not guarantee it: ⧗ is 1.27
- * cells wide and ⏸ 1.05 in every monospace face on this machine, and a card built on
- * "one character = one column" comes apart at the seams. The box is exactly 1ch (the
- * advance of '0', i.e. the cell) and the glyph is centred in it — a glyph slightly wider
- * than its cell overhangs by a pixel or two, which is what a terminal does too, and the
- * GEOMETRY stays exact. Not font-style: italic — <i> is just the shortest tag name for
- * something this repetitive. */
-.card .c { display: inline-block; width: 1ch; text-align: center; font-style: normal; }
-/* Two cells for a character tmux laid into two columns — cells() decides, and it decides
- * for the pane and the card alike. No card glyph is wide today; the rule is here so that
- * if one ever is, the card does not silently lose a column. */
-.card .c.w { width: 2ch; }
+/* ── the card ──────────────────────────────────────────────────────────────
+ * A SURFACE CARD, NOT THE TUI'S BOX ART. The cards were the same ╭─╮ characters
+ * fleet-grid.mjs emits, at a font size fitCards() measured so the art would line up. On a
+ * phone that spent ~210px per card to state three short facts, encoded status three times
+ * over (border colour AND glyph AND word), and clipped the agent's last line mid-word at
+ * 28 columns — the one line the app is opened to read.
+ *   The box is gone. What replaced it keeps every fact (web/grid.js's card models decide
+ * those, once, for the phone and the desk alike) and spends the room on the message.
+ *   THE PANE IS UNTOUCHED. It is real terminal output, it is still measured in cells, and
+ * --fs is still its size. Only the CARDS stopped being art. */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(21em, 100%), 1fr));
+  gap: 10px; align-content: start;
+  padding: 10px 2px 14px;
+  /* A FLICK SETTLES ON A CARD, not halfway through one. `proximity`, not `mandatory`:
+   * mandatory fights a deliberate short drag and makes a long list feel sticky, and on a
+   * list whose items are taller than the viewport it can trap a card you cannot scroll
+   * past. Proximity snaps when you were nearly there anyway, which is the ask —
+   * "if u scroll that gets u to the next one". */
+  scroll-snap-type: y proximity;
+  /* A pull at the top of the list must not bounce the whole PWA, which on an installed
+   * app reads as the page coming loose. */
+  overscroll-behavior: contain;
+}
+/* SIZED FOR READING, NOT FOR THE GLYPH GRID. --fs exists so a 32-column card spans the
+ * viewport; with no columns to line up, the card takes the body's size instead and the
+ * message is legible at whatever the reader has chosen. */
+.card {
+  scroll-snap-align: start;
+  /* DERIVED FROM THE GROUND, NOT A NEW HEX. The palette is the TUI's and does not gain
+   * colours: this is white at 3% over --bg, so it is provably a shade of the same ground
+   * and it stays correct if --bg is ever retuned. A literal #12161b would be a fourth
+   * neutral nobody could check against the terminal. */
+  background: rgba(255, 255, 255, .03);
+  border: 1px solid var(--hair);
+  /* The status hue, as a rail rather than a box. --c is set per card by cardEl(). */
+  border-left: 3px solid var(--c);
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  color: var(--fg);
+}
 .card.dim { opacity: .65; }
-/* NO font-weight ON A CARD, EVER — and this is the one rule in the file that is not
- * cosmetic. The TUI draws the selected card bold (C.bold on all five lines), and in a
- * terminal bold cannot change the geometry: a cell is a cell. In CSS it can, and here it
- * did. Measured in Chrome at font-size 19px, the same title line:
- *
- *     ╭─ 1 acme-api ─────────────────╮   weight 400 → 366px
- *     ╭─ 1 acme-api ─────────────────╮   weight 700 → 517px
- *
- * The bold face has no box-drawing glyphs, so ─ ╭ ╮ ╰ ╯ fall back to a font with a
- * different advance while │ and the letters stay put. The selected card — only ever the
- * one you just touched — grew past the right edge and lost its ╮, which is the whole
- * 32-column arithmetic collapsing for exactly one card at a time.
- *
- * So the selection is marked the way the TUI marks it, with reverse video on the title
- * line, plus brightness for the "heavier" half of what bold means on a terminal. Same
- * characters, same widths, same face. pwa-check.mjs asserts no .card rule sets
- * font-weight, because this is invisible until someone taps the wrong card. */
-.card.sel { filter: brightness(1.18); }
-.card.sel .l.t { background: var(--c); color: var(--bg); }
-/* The title line is also the drag grip (⇧hjkl → drag to reorder), so it — and only it
- * — swallows the vertical pan that would otherwise scroll the page. */
-.card .l.t { touch-action: none; }
+.card .c-top { display: flex; align-items: baseline; gap: .5em; min-width: 0;
+               /* The title row is the drag grip, and it is still exactly ONE line: it
+                * alone swallows the vertical pan, so a drag anywhere else on the card
+                * still scrolls the list. Widening this is how reorder starts fighting
+                * the scroll. */
+               touch-action: none; }
+.card .c-num { color: var(--dim); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.card .c-name { font-weight: 600; font-size: 16px; color: var(--white);
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .c-when { margin-left: auto; color: var(--dim); font-size: 12px;
+                font-variant-numeric: tabular-nums; white-space: nowrap; flex: 0 0 auto; }
+.card .c-meta { display: flex; align-items: center; gap: .45em; flex-wrap: wrap; margin-top: 7px; }
+.card .c-where { color: var(--dim); font-size: 12px; min-width: 0;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ONE CHIP, NOT BORDER + GLYPH + WORD. The word is the TUI's own (§7: the vocabulary is
+ * the desk's), and the hue is the card's rail hue, so the two agree by construction. */
+.card .chip { font-size: 11.5px; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+              flex: 0 0 auto; }
+.card .chip.st { color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); }
+.card .chip.tag { color: var(--dim); background: rgba(255, 255, 255, .06); }
+.card .chip.lead { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
+/* THE POINT OF THE REDESIGN: the agent's last line gets TWO real lines instead of one cut
+ * mid-word. The clamp is the browser's, so it lands at whatever text size the reader has
+ * chosen rather than at a column count the client guessed. */
+.card .c-msg {
+  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hair);
+  font-size: 13.5px; line-height: 1.45; color: var(--fg);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.card .c-msg.none { color: var(--dim); }
+/* The selection is still marked the way the TUI marks it — reverse video on the title
+ * line plus brightness — because that is what `sel` means at the desk. NO font-weight on
+ * a card rule: the reason is historical box-art geometry, but the assertion that forbids
+ * it is still live and the rule is still right for a different reason (a bolder title on
+ * tap is a layout shift under the finger). */
+.card.sel { filter: brightness(1.14); border-color: var(--c); }
+.card.sel .c-name { color: var(--c); }
 .card.lift { opacity: .8; }
 .card.drop-above { box-shadow: 0 -2px 0 0 var(--white); }
 .card.drop-below { box-shadow: 0 2px 0 0 var(--white); }
 
 /* ── the footer verb bar: the TUI's key hints, as buttons ───────────────── */
-.verbs { display: flex; flex-wrap: wrap; gap: .4em; padding: .6em .2em; border-top: 1px solid var(--hair); }
+/* ── the footer: touch targets, not keyboard hints ─────────────────────────
+ * The TUI's footer is muscle memory and the repo keeps the key letter in the label so it
+ * transfers — `x remove`, `P resume`. There is no keyboard on a phone to transfer TO, and
+ * eight of them wrapped to ~190px and overlaid the last card. So the phone gets icon+label
+ * touch buttons at 44px, the size a finger actually needs, and the letters stay at the desk.
+ *   `gap: 8px` is the minimum separation between adjacent targets; 44px is the minimum
+ * size. Both are floors, not suggestions — a row that merely fits is a row that mis-taps. */
+/* ── THE FOOTER IS GONE; ITS VERBS ARE BEHIND THE ⋯ IN THE HEADER ──────────
+ * Six icon+label buttons at 44px wrapped to two rows, plus a three-line hint under them,
+ * cost 179 of 844 points at 390x844 — 21% of the screen. Measured: chrome was 292pt (34.6%)
+ * and the card list got 536, which fits THREE of nine sessions. The owner, on a photograph
+ * of it: "i think we can simply this with a 3 dots on the header i beleive".
+ *   The 44px floor and the 8px separation those buttons were built to honour did not go
+ * away with them — they moved to `.hdr .more` below, which is the one control that replaced
+ * the six, and to the sheet rows, which were already built to the same floor. */
+
+/* ── AN EXITED CARD: STILL THERE, VISIBLY NOT RUNNING ──────────────────────
+ * `exit` used to take the tmux session and the card with it. bin/agent-here holds the
+ * pane now, so the card survives its agent — and a card that looks identical to a live
+ * one would be worse than the old behaviour, because it would claim a session that is
+ * not there. Dimmed, and its rail goes grey: the status hue said what the agent was
+ * DOING, and it is not doing it.
+ *   No new colour — `--dim` and `--hair` are the palette's own, and the rail is simply
+ * the same grey the parked status already uses. */
+.card.exited { opacity: .62; }
+.card.exited { --c: var(--hair); }
+.card.exited .chip.st.exited { color: var(--dim); border-color: var(--hair); background: transparent; }
+
+/* ── the count strip: the summary as numbers, not as a sentence ────────────
+ * `0 need you · 2 working · 5 ready` is a sentence you have to read. The same counts as
+ * four tiles are a thing you glance at, and the one that matters — need-you — is the one
+ * that changes colour when it is not zero. The WORDS are unchanged: they are the TUI's own
+ * vocabulary and grid.js still decides them. */
+.strip { display: flex; gap: 6px; padding: 8px 2px; }
+.strip .stat { flex: 1 1 0; min-width: 0; background: rgba(255, 255, 255, .03);
+               border: 1px solid var(--hair); border-radius: 9px; padding: 6px 8px; }
+.strip .stat .n { font-size: 18px; font-weight: 600; line-height: 1.1;
+                  font-variant-numeric: tabular-nums; color: var(--dim); }
+.strip .stat .l { font-size: 10.5px; color: var(--dim); margin-top: 2px;
+                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Only a NON-ZERO count earns its colour. A strip where every tile is lit is a strip that
+ * says nothing, and the question this app exists to answer is which one is not zero. */
+.strip .stat.on .n { color: var(--c); }
+.strip .stat.on { border-color: color-mix(in srgb, var(--c) 40%, var(--hair)); }
 /* A BUTTON NEVER LEAVES THE SCREEN, IT TRUNCATES. The bar already wrapped, which handles
  * "too many buttons" and does nothing at all for "one button wider than the phone" — at
  * iOS's largest accessibility text `x remove` on its own is 342px against a 304px column,
  * so it wrapped onto a line of its own and hung off the end of it. Truncating keeps it
  * tappable, which is the property that matters; capping the font instead would keep the
  * label whole and unreadable to the person who asked for big text. */
-.verbs button, .seg button, .srow button, .sheet .row button {
+.seg button, .srow button, .sheet .row button, .hdr .more {
   max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /* ...and the general form, because the three selectors above were each added after a
@@ -280,11 +460,34 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * 480px inside a 329px sheet. */
 .sheet p { margin: .35em 0; color: var(--dim); overflow-wrap: anywhere; }
 .sheet .field { display: block; margin: .8em 0 .2em; color: var(--dim); }
+/* ── 16px, AND IT IS NOT A TYPOGRAPHY CHOICE ──────────────────────────────────────────
+ * iOS Safari ZOOMS THE PAGE when a text control smaller than 16px takes focus. It is not
+ * a scroll and nothing overflows — the layout is untouched and every element still fits
+ * its box — the VISUAL VIEWPORT is scaled up and panned, so the right-hand side of every
+ * row goes off screen and the page can suddenly be dragged sideways. Reported from a real
+ * iPhone twice: "when you send a message the scroll left to rigth is eanbled", then more
+ * precisely "the chats still gets overflown when press on the text space" — pressing, not
+ * sending, which is the tap that moves focus.
+ *   IT IS INVISIBLE IN CHROME, headless or not, which is why it survived a deliberate
+ * hunt: no engine but WebKit does this, and an element-by-element sweep for
+ * scrollWidth > clientWidth finds nothing on a zoomed page because nothing IS overflowing.
+ *   `font: inherit` was the trap here. It takes body's 14px, so there is no font-size in
+ * this rule to notice and no grep of the stylesheet can see the number — which is why the
+ * guard for it measures COMPUTED style in a real engine rather than reading this file.
+ *   Do NOT "fix" this with `maximum-scale=1` or `user-scalable=no` on the viewport meta:
+ * that disables pinch-zoom for everyone, which is a real accessibility loss, and iOS has
+ * ignored it in some versions anyway. 16px is the actual threshold and the actual fix. */
 .sheet input[type=text], .sheet textarea, .sheet select {
-  font: inherit; width: 100%; color: var(--white); background: #101418;
+  font: inherit; font-size: 16px; width: 100%; color: var(--white); background: #101418;
   border: 1px solid var(--hair); padding: .5em; border-radius: 2px;
 }
 .sheet textarea { min-height: 5.5em; resize: vertical; }
+/* THE GESTURES, WHERE THEY ARE WORTH READING. They were a permanent three-line band on the
+ * grid — 66 of 844 points, every second the screen was open, saying what a swipe does. Here
+ * they sit under the actions, in the sheet you open when you want to know what you can do.
+ * Dim and small on purpose: this is reference, not a control. */
+.sheet .gest { margin: .9em 0 0; padding-top: .7em; border-top: 1px solid var(--hair);
+               color: var(--dim); font-size: 12px; line-height: 1.5; }
 .sheet .row { display: flex; flex-wrap: wrap; gap: .5em; margin-top: 1em; }
 .sheet .err { color: var(--red); }
 .sheet .ok { color: var(--green); }
@@ -295,6 +498,19 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 /* Wraps, because this row is a project name and two toggles and at large text the three
  * of them do not fit beside each other. */
 .srow { display: flex; flex-wrap: wrap; align-items: center; gap: .6em; padding: .45em .2em; border-bottom: 1px solid var(--hair); }
+/* ── THE 44px FLOOR FOLLOWED THE VERBS IN HERE ─────────────────────────────
+ * The footer held its buttons to 44px tall and 8px apart, because that is the size a
+ * finger needs and the separation that stops a mis-tap. Moving the verbs into this sheet
+ * moved the targets, and the floor did not come with them — measured in a real engine at
+ * 390x844, all six rows were UNDER 44px. A control does not become easier to hit by
+ * changing which container it is in, and the sheet is now where the destructive ones live
+ * (`x kill`, `stop + reclaim worktree`), which is an argument for more room rather than
+ * less.
+ *   On the ROW rather than the button, so the whole line is the target and a name that
+ * wraps grows the row instead of leaving a 44px button beside a taller label. */
+.srow { min-height: 44px; }
+.srow button { min-height: 44px; }
+.rows .srow + .srow { margin-top: 8px; }
 .srow .nm { flex: 1; color: var(--white); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* `min(8.5em, 45%)`, not a bare 8.5em: the em keeps the toggles aligned in a column at
  * ordinary sizes, and at 38px text 8.5em is 323px — a minimum wider than the sheet it is
@@ -378,7 +594,18 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * `overflow: visible` paints past it whatever its parent's width says — and this line is
  * "◆ working" plus the project and the folder, which on a real fleet is longer than the
  * name above it. Only `.nm` had the rule; the line under it was the one running out. */
-.sbar .who .st { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* THE DETAIL LINE, AND WHAT GIVES WAY ON IT. Status, project and the fleet chip share one
+ * line under the name. Laid out as a flex row rather than as one ellipsised string so the
+ * PROJECT is what shrinks: as plain text the line clipped from the right, which ate the
+ * chip and left "acme-api ⚠ fixtu…" — the fleet you are looking at being the thing cut, and
+ * the chip exists precisely so two fleets cannot be confused for one another.
+ *   So `.scope` is the only shrinkable child; the status word and the chip keep their size,
+ * and the chip keeps its own 7em clamp below for the case where the hostname is the long
+ * thing. `min-width: 0` on the row is what lets a flex child ellipsise at all. */
+.sbar .who .st { display: flex; align-items: baseline; gap: .35em; min-width: 0;
+                 font-size: 12px; overflow: hidden; white-space: nowrap; }
+.sbar .who .st > .scope { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sbar .who .st > .mode { flex: 0 0 auto; }
 /* THE CHROME DOES NOT SCALE WITH THE TEXT, AND THIS IS THE FIX FOR THE ⋯ HALF OFF THE
  * EDGE. Measured at 320px with the body text at 30px — an iPhone with Dynamic Type turned
  * up, which is what the reporter's screenshots are of: `.who` and the mode chip had both
@@ -390,13 +617,28 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * proportional to somebody's reading preference. Fixed px here caps the row at about
  * 190px whatever the text does. */
 .sbar button { padding: .35em .6em; flex: 0 0 auto; font-size: 14px; }
-.sbar > .seg { flex: 0 1 auto; min-width: 0; }
+/* THE VIEW TOGGLE DOES NOT SHRINK. It was `flex: 0 1 auto`, so once the bar stopped
+ * wrapping the toggle became a thing that could give way — measured at 320 with a tailnet
+ * hostname in the chip it was squeezed from 101px to 46px, which clips `chat`/`pane` to
+ * nothing legible. It is a MODE SWITCH: a mode switch you cannot read is worse than a
+ * truncated name, because the name is on screen twice and the current mode is not. So
+ * `.who` is the only thing here that gives. */
+.sbar > .seg { flex: 0 0 auto; }
 .sbar > .seg button { font-size: 13px; }
-/* ...and the last resort, so that no text size anybody chooses can push a control off the
- * screen: the row wraps instead. `.who` shrinks first (it is the only `flex: 1 1 auto`
- * here), so this costs nothing until the fixed controls genuinely do not fit, and then it
- * costs one extra row instead of a button you cannot reach. */
-.sbar { flex-wrap: wrap; }
+/* ONE ROW, AND IT SHRINKS RATHER THAN WRAPS. This was `flex-wrap: wrap`, as a last resort
+ * so that no text size could push a control off the screen — and wrapping is exactly what
+ * it did, at every size: measured at 390px, back 27 + name 150 + chip 72 + toggle 101 + ⋯
+ * 27 plus four gaps is 409px in a 374px box, so the bar took THREE rows and 80px with the
+ * ⋯ alone on the last one. A flex container that may wrap prefers wrapping to shrinking,
+ * so `.who` never gave up the width it had.
+ *   Nowrap makes `.who` the thing that gives, which is the right thing to lose: the session
+ * NAME ellipsises and stays legible, while the back chevron, the chat/pane toggle and the ⋯
+ * keep their full size. Nothing can be pushed off, because every other child is
+ * `flex: 0 0 auto` at a PINNED font size (see the rule above — 14px and 13px, deliberately
+ * not scaling with the body) and `.who` has `min-width: 0`, so the row's fixed width is a
+ * constant 179px at any Dynamic Type setting against 304px of content box at 320. That is
+ * a stronger promise than wrapping ever made, and viewport-check measures it. */
+.sbar { flex-wrap: nowrap; }
 /* The view switch, as a segmented control rather than two loose buttons. */
 /* ...and the segmented controls wrap for the same reason. The chat/pane switch in the
  * session bar is pinned to 13px and never reaches this; the profile tabs scale with the
@@ -420,7 +662,18 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  *
  * Prose, not code: the chat is the one place a proportional face is right. Everything
  * else in this file is monospace because it is a terminal; a paragraph is not. */
-.chat { padding: 0 .1em; display: flex; flex-direction: column; gap: .55em; }
+/* ── THE CHAT HAD NO GUTTER AND TOO LITTLE LEADING ─────────────────────────
+ * "ther is alot of empty spaces that is not being used that makes the app feel compacted
+ * on the sessions and on the chat". Those two halves are consistent, and measuring says
+ * where: at 390x844 the chat's own chrome is only 123pt (14.6%) — it is not short of
+ * vertical room — while `padding: 0 .1em` at body's 14px is **1.4px**, so every bubble is
+ * jammed against the glass, and the column opposite it sits 54pt empty. Space in the wrong
+ * place, which is exactly what he described.
+ *   12px is a real gutter, and it is the same edge distance the cards keep. The bubble
+ * keeps its 88% so the empty column still reads as "who is speaking" at a glance, which is
+ * what an asymmetric bubble is FOR — it is only wasted when the other side is touching the
+ * edge, because then it looks like a mistake rather than a margin. */
+.chat { padding: 0 12px; display: flex; flex-direction: column; gap: .5em; }
 /* A SHORT conversation sits on the composer, not at the top of an empty column — which is
  * where every chat on the phone puts it. `margin-top: auto` on the first child rather than
  * `justify-content: flex-end`, because that one clips the top of a LONG conversation out of
@@ -430,10 +683,18 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * the view switch off the end of it. */
 .sbar .mode { max-width: 7em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .hint.lead1 { padding: .15em .2em .3em; font-size: 12px; }
+/* 16px AND 1.55, BOTH FROM THE SAME PLACE. 16px is the readable-body floor on a phone, and
+ * this app has just paid for learning it from the other direction: #14 raised the composer
+ * to 16px because below it iOS ZOOMS the page on focus. The message you read should not be
+ * smaller than the message you type. 1.45 was under the 1.5-1.75 band for body text, which
+ * on a narrow column is where leading matters most — a phone bubble wraps every two or
+ * three words, so the lines are what you are reading, not the sentence.
+ *   The family is unchanged and deliberately not the body font: this is prose, and the rest
+ * of the client is a terminal. */
 .chat .bub, .chat .thinking .dots {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  font-size: 15px; line-height: 1.45;
-  padding: .55em .7em; border-radius: 14px; max-width: 88%;
+  font-size: 16px; line-height: 1.55;
+  padding: .6em .8em; border-radius: 16px; max-width: 88%;
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .chat .bub.user { align-self: flex-end; background: #1d3a5c; color: #eaf2ff; border-bottom-right-radius: 4px; }
@@ -499,7 +760,20 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .composer button.cam svg { width: 1.25em; height: 1.25em; display: block; }
 .composer button.cam.busy { opacity: .55; }
 .composer textarea {
-  flex: 1 1 auto; min-width: 0; resize: none; font: inherit; font-size: 15px;
+  /* 16px, for the reason spelled out on `.sheet input` above: below it, focusing this box
+   * makes iOS Safari zoom the whole page and the chat goes off the right edge. This is the
+   * control the owner was actually pressing when he reported it. */
+  /* flex-basis 0, NOT auto, AND THAT IS WHAT KEEPS THE ROW ONE LINE. A container that may
+   * wrap prefers WRAPPING to SHRINKING: the browser lays items out at their hypothetical
+   * size (the basis) and only shrinks what already shares a line, so an `auto` basis here
+   * is the textarea's intrinsic width — 20 default cols of its own font — and that is what
+   * decides whether `send` fits beside it. Raising this box from 15px to 16px widened that
+   * intrinsic size by about 7% and tipped 320px over: measured, the composer went to two
+   * lines at every text rung, with send stacked under the box, which is the exact shape of
+   * the "senc" report this row already carries a comment about. A basis of 0 makes the box
+   * purely the leftover, so the row wraps when the BUTTONS genuinely do not fit and never
+   * because of the text inside it. */
+  flex: 1 1 0; min-width: 0; resize: none; font: inherit; font-size: 16px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   background: #14181d; color: var(--fg); border: 1px solid var(--hair); border-radius: 12px;
   /* THE SAME NUMBER AS COMPOSER_MAX_PX IN app.js, and it has to be: growComposer() caps
@@ -521,7 +795,13 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 /* One message: the bubble and its timestamp, aligned as a pair. Grouped so the gap
  * between TURNS is bigger than the gap inside one, which is what makes a column of
  * bubbles read as a conversation rather than as a list. */
+/* A RUN OF ONE SPEAKER IS ONE THING; A REPLY IS A NEW ONE. Every turn was the same .55em
+ * from the last, so a worker's four-message run and the answer to your question were
+ * equally far apart, and the eye got no help finding where the reply starts. The gap
+ * between turns is smaller now and a speaker CHANGE earns the difference back — grouping
+ * by proximity, which costs no colour, no rule and no extra element. */
 .chat .turn { display: flex; flex-direction: column; gap: .15em; max-width: 88%; }
+.chat .turn.me + .turn.them, .chat .turn.them + .turn.me { margin-top: .45em; }
 .chat .turn.me { align-self: flex-end; align-items: flex-end; }
 .chat .turn.them { align-self: flex-start; align-items: flex-start; }
 .chat .turn .bub, .chat .turn .thinking .dots { max-width: 100%; }
@@ -572,9 +852,33 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 }
 .chat .bub .md-code code { background: none; border: 0; padding: 0; font-size: .88em; }
 .chat .bub a { color: var(--cyan); }
+/* A TOAST CANNOT OVERLAP THE CHAT, BY CONSTRUCTION. It used to be
+ * `position: fixed; bottom: …; z-index: 20` — and on the session screen the composer is
+ * also at the bottom, so the toast landed on top of the input and the newest message.
+ * Reported as "dont blok the chat with toasts".
+ *   The fix is structural rather than a bigger offset or a higher z-index: the toast is a
+ * FLEX BAND in the shell column (see `#app.shell > .toast` above), so it participates in
+ * layout, takes its own height, and the scroller above it shrinks by exactly that much.
+ * Overlap stops being something to tune and becomes something that cannot happen. On the
+ * chat screen it sits directly above the composer and pushes nothing over anything.
+ *   The non-shell case (the lock screen) has no flex column to join, so it keeps a
+ * static band at the end of the document — still in flow, still not over anything. */
+/* ── A TOAST IS A NOTICE, NOT A DOCUMENT ───────────────────────────────────
+ * "also change the intrusive toasts like when u added a picture the toast will block the
+ * chat". #6 already stopped it landing ON the composer by making it a band of the column
+ * rather than a fixed overlay — but a band takes its height from its text, and attachPhoto
+ * ends in a toast carrying a FILE PATH, which wraps to three or four lines. On the session
+ * screen the transcript is what gives that height back, so a quarter of the conversation
+ * disappears for the 4.2 seconds the toast is up.
+ *   Clamped to two lines, which is the same idiom the cards use for an agent's last line
+ * (-webkit-line-clamp). Two lines is enough for every message this app actually raises, and
+ * a path that does not fit is one you can already see in the composer, where attachPhoto
+ * just put it. Bounded rather than truncated: a short toast is unchanged. */
 .toast {
-  position: fixed; left: 8px; right: 8px; bottom: calc(env(safe-area-inset-bottom) + 8px);
-  background: #14181d; border: 1px solid var(--hair); padding: .6em .7em; z-index: 20;
+  background: #14181d; border: 1px solid var(--hair); padding: .55em .7em;
+  margin: 6px 0 0; border-radius: 8px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  overflow-wrap: anywhere;
 }
 .toast.bad { color: var(--red); border-color: #40202a; }
 .toast.good { color: var(--green); }
@@ -603,3 +907,16 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
    so swapping the emoji for this moves nothing else in the meta row. */
 .chat .meta .speak.tiny svg { width: 1.15em; height: 1.15em; vertical-align: -.22em; }
 .chat .bub.tappable { cursor: pointer; }
+
+/* ── motion is optional, always ────────────────────────────────────────────
+ * Everything this redesign added that moves is gated here, in one place, rather than each
+ * rule remembering. `prefers-reduced-motion: reduce` is a real accessibility setting and a
+ * pulsing dot on a status you are trying to read is exactly what it is for. Scroll
+ * snapping is motion too: `scroll-behavior` and the snap easing both go, and the list
+ * keeps working — proximity snapping degrades to ordinary scrolling, which is the point of
+ * choosing proximity over mandatory. */
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .001ms !important; animation-iteration-count: 1 !important;
+      transition-duration: .001ms !important; scroll-behavior: auto !important; }
+  .cards { scroll-snap-type: none; }
+}

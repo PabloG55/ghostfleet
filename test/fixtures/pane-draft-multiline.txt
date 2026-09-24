@@ -1,0 +1,7 @@
+❯ an earlier prompt that was sent
+
+────────────────────────────────────────────────────────────────
+❯ rebase onto staging and
+  then re-run the suite
+────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on · ctx:3%

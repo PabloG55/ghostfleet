@@ -2,15 +2,33 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<!-- viewport-fit=cover + the safe-area insets in app.css: an installed PWA owns the
-     whole screen, notch and home indicator included. -->
+<!-- viewport-fit=cover + the safe-area insets in app.css: the page runs under the home
+     indicator at the bottom, and env(safe-area-inset-bottom) keeps the composer off it. -->
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ghostfleet</title>
 <meta name="theme-color" content="#0b0d10">
 <!-- iOS installs from these two, not from the manifest (16.4+ reads the manifest for
      display/scope but still wants the apple-touch-icon). -->
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<!-- `black`, NOT `black-translucent`, and the difference is the bottom of the screen. With a
+     translucent bar, iOS 26 standalone puts the web view at the top of the screen (under the
+     bar, so env(safe-area-inset-top) reads 53) but sizes it to the screen MINUS the bar
+     (innerHeight 759 on an 812 screen) — the bottom 53pt belong to no page and no CSS reaches
+     them. Measured four launches running: sized by dvh, pinned with inset: 0, then laid out
+     to 812 — the band stayed and the composer was cut off above it, because a box laid out
+     past the web view is not painted. WebKit bug 301108 (rdar://163501215). Apple's meta-tag
+     reference says which half fixes it: "If set to default or black, the web content is
+     displayed below the status bar" — iOS keeps the strip it was already keeping, and the
+     web view runs to the real bottom edge. `black` over `default` because this app is
+     #0b0d10 in every theme and a default bar can come back white.
+       iOS STORES this value in the web clip and lays out from the STORED one: measured on an
+     iOS 26.5 simulator, one clip, one page, only the meta changed between launches — the
+     launch that served `black-translucent` still laid out opaque (sat0), the next launch laid
+     out translucent (sat62, band), and the clip's Info.plist on disk had been rewritten to
+     the value the page carried. So a change here lands one launch LATE: the first open after
+     the update reads it, the next open (quit the app first — a resume is not a launch) uses
+     it. Removing and re-adding the icon does the same in one step. -->
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="ghostfleet">
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <link rel="icon" href="./icons/icon-192.png" sizes="192x192">

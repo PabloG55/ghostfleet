@@ -3,7 +3,8 @@
 </p>
 
 **Run a fleet of Claude Code agents in parallel, from one terminal.** Each agent gets its
-own git worktree; you get one screen that shows what every one of them is doing.
+own git worktree — cut, branched, dependency-linked and booted in one keystroke — and you
+get one screen that shows what every one of them is doing.
 
 > A *ghost fleet* is a fleet of autonomous, unmanned vessels under one command — agents
 > working with nobody in the seat, and one control plane steering them.
@@ -32,9 +33,10 @@ own git worktree; you get one screen that shows what every one of them is doing.
 
 <p align="center">
   <img src="docs/mobile/phone-demo.gif" width="260"
-       alt="On a phone: the projects list, one project's grid of session cards, a session as a
-            chat with bubbles and a composer, the actions sheet, and the live pane showing a
-            permission prompt waiting on an answer.">
+       alt="On a phone: the projects list and its profile tabs, one project's grid of session
+            cards, the actions sheet behind the header's dots, a session as a chat with
+            bubbles and a composer being typed into, a swipe to the next session, and the
+            live pane showing a permission prompt waiting on an answer.">
 </p>
 <p align="center">
   <b>Unblock one from anywhere.</b> <sub>The same grid as an installable web app. A session is
@@ -66,6 +68,32 @@ debugging — and that most wrappers get wrong:
 | one laptop: 5 agents running tests can fill the process table and wedge the machine | the same governor watches the kernel's own memory-pressure level and the process table, and parks workers before the OOM killer does |
 | you already run agents by hand in a dozen panes | `fleet-adopt` finds those conversations and rebuilds them as one fleet |
 
+## A worktree you can actually work in
+
+`git worktree add` gives you a directory. An agent needs more than that before it can do
+anything, and the gap is where the fiddly parts live — so `fleet-spawn` closes it:
+
+| | why it matters |
+| --- | --- |
+| **`node_modules` symlinked** from the main checkout | the worker can run lint, typecheck and tests on its first turn instead of waiting out an install |
+| **a dev-stack slot allocated** | two workers don't both try to bind port 3000 and one of them silently lose |
+| **the task recorded in a manifest** | `fleet-worktrees` shows what each tree is *for*, which is how a lead rebuilds its map after a restart instead of guessing |
+| **reuse before create** | it refuses to cut a new tree while a free one is sitting there, and lists them — so the disk doesn't fill with abandoned checkouts |
+| **a session started in it**, on the agent you picked | a worktree with nobody in it isn't a worker |
+
+The branch is cut from your **local** ref, not the remote tip, so a worker never misses
+work you committed but haven't pushed. And `fleet-spawn` refuses to run from inside a
+worktree: a session already in one is a leaf, and spawning there would put a second tree
+beside the one you're standing in rather than starting a worker.
+
+Recycling an existing tree onto fresh work is one command — `fleet-spawn <name> --reuse
+<worktree> --branch <new> --from <base>` cleans it and checks out the new branch — which is
+the usual case once a fleet has been running for a while. What gets recycled is the
+**folder, never the session**: a worker that finished a task has that task all through its
+context, so it is retired with `fleet-stop --reclaim` and the next task starts a new
+conversation. `fleet-send` refuses to hand a finished, shipped worker a new brief, and says
+to spawn instead.
+
 ## Documentation
 
 The README is the pitch, the install and the shape of the thing. Everything you look up
@@ -91,34 +119,90 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | requirement | why |
 | --- | --- |
 | `git` | worktrees **are** the isolation model — a worker is a checkout on its own branch. `fleet-spawn` refuses to run without it |
-| `claude` ([Claude Code](https://github.com/anthropics/claude-code)) | what a session runs by default, and what the pane detectors are written against |
-| `node` (v18+) | the grid is a zero-npm-dependency Node TUI |
+| `claude` ([Claude Code](https://github.com/anthropics/claude-code)) | what a session runs by default, and what the pane detectors are written against — missing? the installer offers Claude Code's native installer (into `~/.local/bin`, no `sudo`) |
+| `node` (v18+ to run, **v20.19+ to build from a clone**) | the grid is a zero-npm-dependency Node TUI, and v18 runs it. The phone client is built from `web/src` with vite, which needs 20.19 — that applies only to a clone, because the published package ships `web/` already built. Debian and Ubuntu package 18.x, so a clone there needs a newer node first; the installer checks the version up front and says which |
 | `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below). With no terminal attached it has nobody to ask, so a piped or CI install prints the command instead — pass `--yes` there and it installs without prompting |
 | `jq` | the installer wires the hooks and MCP entries with it, and the status hook parses its payload with it. **macOS 26 already ships it** (`/usr/bin/jq`); anywhere it is missing the installer offers to install it |
 | macOS, Linux, or **Windows via WSL2** | sessions are tmux servers, and tmux is POSIX-only — see the native-Windows note below |
 | `codex` / `opencode` (optional) | alternative agents, chosen per worktree on the `w` form. Their pane signals are detected separately — see [docs/multi-agent-sessions.md](docs/multi-agent-sessions.md) |
-| `$EDITOR` (optional, default `nvim .`) | what `Ctrl-n`'s editor tab opens. Any editor works — override with `CLAUDE_FLEET_EDITOR`. No particular Neovim distribution is involved; if `nvim` isn't installed, set the variable to what you use |
+| `$EDITOR` (optional, default `nvim .`) | what `Ctrl-n`'s editor tab opens. Any editor works — override with `CLAUDE_FLEET_EDITOR`. With neither set and no Neovim new enough for LazyVim (0.11.2+), the installer offers the official Neovim release (under `~/.local`) and, only where there is no `~/.config/nvim` yet, the LazyVim starter |
 | `tailscale` (optional) | **only** for the phone client, and only off-LAN: it is how `fleet-serve` is reachable without exposing a port — see [docs/mobile.md](docs/mobile.md) |
 | `zellij` (optional) | not required, but the included layout gives you one pane that frees `Ctrl-s`/arrows from its own bindings |
 | `terminal-notifier` + [AeroSpace](https://github.com/nikitabobko/AeroSpace) (optional, macOS) | for **clickable** notifications that jump straight to the fleet — see [Notifications](docs/OPERATIONS.md#notifications) |
 
 *(Native Windows isn't supported and won't be: sessions are tmux servers, and tmux is
-POSIX-only. Under WSL2 it's just Linux and works the same — that path is untested by
-me, so file an issue if something bites.)*
+POSIX-only. Under WSL2 it's just Linux and works the same — [docs/windows.md](docs/windows.md)
+is the whole path, from a bare Windows machine to an open fleet.)*
 
 ## Install
 
 ```bash
 npx ghostfleet-cli          # installs, no clone needed
-ghostfleet
+ghostfleet demo             # see it working, on three throwaway projects
 ```
+
+**On a fresh Linux box there is no `npx` to run that with.** A stock Ubuntu 24.04 image
+ships none of node, npm, git, tmux, jq or curl — measured, not assumed — so the line above
+is `command not found` and nothing tells you which of the six is the one you need. Install
+them first, and the rest of this page applies unchanged:
+
+```bash
+sudo apt-get update && sudo apt-get install -y nodejs npm git tmux jq curl
+```
+
+(That `nodejs` is 18.x, which runs the fleet perfectly well. It cannot *build* the phone
+client, which matters only if you clone — see the `node` row above.)
+
+`ghostfleet demo` is the fastest way to find out whether you want this. It creates three
+scratch git repos under `~/gf-demo`, registers them in a separate `demo` profile, and
+opens the real control plane on them — the same screens the GIFs above were recorded
+against. It is additive and it never repairs: anything already there is reused and said
+so, and if it finds something it cannot safely reuse it stops and tells you what it found
+rather than guessing. Your own profiles are untouched; `rm -rf ~/gf-demo
+~/.config/ghostfleet/projects.demo ~/.claude-demo` removes every trace.
+
+**Every screen works before you log anything in** — the Projects picker, a project's
+session grid, the new-worktree form, the stack. What needs a login is an *agent taking a
+turn*: Claude Code keeps credentials per config dir, so the demo profile has its own, and
+a session you open will sit at its login prompt until you do this once:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-demo claude     # then /login
+```
+
+An empty pane before that is the login prompt, not a broken fleet.
+
+Ready to point it at your own work? `ghostfleet` opens your projects — and with none
+registered yet it walks you through picking a folder, naming it, and starting the first
+session, rather than showing you an empty screen.
+
+**And put it on your phone:**
+
+```bash
+fleet-phone                 # what is left to do, and the one command that does it
+```
+
+The same fleet as an installable app — every session as a chat, the real pane one tap
+away, and a notification when a worker is blocked, so a permission prompt gets answered
+from your pocket. `fleet-phone` reports which of the three steps you have done (configure,
+enrol a passkey, run the daemon) and prints the next one; it never runs any of them for
+you, because each opens a port, writes a config or spends a passkey. It reaches the phone
+over **Tailscale** — `fleet-serve` refuses a wildcard, a LAN address or a public one before
+the socket opens, because this endpoint runs commands. See [docs/mobile.md](docs/mobile.md)
+for the design and the threat model.
+
+Two things that cost people time, so they are in that command's output too: the passkey is
+enforced server-side, so until a phone is enrolled the app sits on its lock screen and the
+API answers 401 — and **an installed iOS PWA resumed from the app switcher does not pick up
+a new client version.** The shell is served cache-first, so reopening is a resume, not a
+navigation; swipe the app away and relaunch.
 
 Prefer to clone the repo (e.g. to develop against it)?
 
 ```bash
 git clone https://github.com/PabloG55/ghostfleet.git
 cd ghostfleet
-./install.sh
+./install.sh                # add --verbose to watch every step
 ```
 
 Both run the same `install.sh` — `npx ghostfleet-cli` just fetches the package and runs it

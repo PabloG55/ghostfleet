@@ -100,7 +100,7 @@ const STATUS = {
   limit:      { label: '⧗ limit',     color: C.yellow },
   // Turn cut short, waiting on a human — a park does this, so a governor episode makes
   // them in bulk. Also NOT ready, and for the same reason: the input box looks normal.
-  interrupted:{ label: '⚠ interrupted', color: C.red },
+  interrupted:{ label: '⚠ interrupted', color: C.yellow },
   unknown:    { label: '? unknown',   color: C.yellow },
 };
 
@@ -590,6 +590,46 @@ function isParked(name) {
   try { return fs.existsSync(parkedFile(name)); } catch { return false; }
 }
 
+// ── A SESSION WHOSE AGENT HAS EXITED, BUT WHOSE CARD IS STILL HERE ───────────
+// "i use parallel session and if i type exit the session is completely remove it and
+// i cant reopen it easily." Typing `exit` used to end the agent, end the pane's
+// command, and take the tmux session — and the card — down with it, leaving the
+// conversation on disk with nothing on screen pointing at it.
+//   bin/agent-here holds the pane now and writes this marker, so the session survives
+// its agent. Namespaced by socket for the same reason .parked is: every project has a
+// `master`, and a bare marker would report another fleet's card as exited.
+//   IT IS NOT A TENTH STATUS. The nine are what a RUNNING agent is doing, and an
+// exited one is not doing any of them; folding it in would make every consumer's
+// status switch answer a different question in one branch. It rides beside the status
+// the way `lead` and `parked`'s marker do.
+function exitedFile(name) { return path.join(FLEET_DIR, SOCK + '.' + name + '.exited'); }
+function isExited(name) {
+  try { return fs.existsSync(exitedFile(name)); } catch { return false; }
+}
+
+// ── ASLEEP: hibernated by the fleet, not exited by a person ──────────────────
+// Same marker shape and the same socket namespacing as `.exited`, and beside the status for
+// the same reason. bin/fleet-hibernate writes it before it kills the pane, holding the
+// conversation id that brings the session back, so a card can advertise its own way home
+// rather than leaving a name with nothing behind it.
+// ── QUEUED: prompts fleet-send is holding until this session's turn ends ────
+// bin/fleet-send writes one record per line to <sock>.<name>.queue instead of pasting
+// into a running turn (which folds the prompt INTO it), and the Stop hook delivers them
+// one turn each. The count rides beside the status, like parked's marker: `working` with
+// three behind it is a different card from `working` alone, and it is the only place a
+// human can see that the queue exists.
+function queuedCount(name) {
+  try {
+    const t = fs.readFileSync(path.join(FLEET_DIR, SOCK + '.' + name + '.queue'), 'utf8');
+    return t.split('\n').filter(Boolean).length;
+  } catch { return 0; }
+}
+
+function asleepFile(name) { return path.join(FLEET_DIR, SOCK + '.' + name + '.asleep'); }
+function isAsleep(name) {
+  try { return fs.existsSync(asleepFile(name)); } catch { return false; }
+}
+
 function gitBranch(cwd) {
   try {
     return execFileSync('git', ['-C', cwd, '--no-optional-locks', 'rev-parse', '--abbrev-ref', 'HEAD'],
@@ -598,6 +638,64 @@ function gitBranch(cwd) {
 }
 
 function encCwd(cwd) { return cwd.replace(/[/.]/g, '-'); }
+// ── a record the NAME cannot find, found by the PANE ──────────────────────────
+// fleetBySlot() is keyed by the name the hook last wrote. A session renamed by anything
+// that did not also rewrite its record (a raw tmux rename, or a fleet-rename from before
+// it learned to) has a record under the OLD name, so its card fell back to the folder's
+// newest transcript — which after a worktree move is a directory that does not exist, and
+// the card read as empty. Measured live: a renamed session with a whole conversation
+// behind it, shown with no last message and "No messages yet" on the phone.
+//   Two ways to recognise it, both EVIDENCE and neither a guess (fleet-hibernate's
+// recover_sid says why a guess here is worse than nothing):
+//   1. a record that carries this pane's id — the hook writes `pane` (as <pane_id>@<server
+//      pid>, since ids restart with the server), and a rename does not change it;
+//   2. the agent's own note about itself, <config>/sessions/<pid>.json, for the pane's
+//      process or its child (agent-here holds the pane, the agent runs under it).
+// Only for a live session with no record, and cached briefly: most cards never get here,
+// and the ones that do must not cost a tmux call and a pgrep on every 1.2s poll.
+const paneRecCache = new Map();   // name -> { at, rec }
+function recordOfPane(name) {
+  const hit = paneRecCache.get(name);
+  if (hit && Date.now() - hit.at < 10000) return hit.rec;
+  let rec = null;
+  try {
+    const out = execFileSync('tmux', ['-L', SOCK, 'list-panes', '-t', name, '-F', `#{pane_id}@#{pid}${TF}#{pane_pid}`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const f = tmuxRecord(out.split('\n')[0] || '', 2);
+    if (f) rec = recordFor(f[0], f[1]);
+  } catch {}
+  paneRecCache.set(name, { at: Date.now(), rec });
+  return rec;
+}
+function recordFor(pane, pid) {
+  const read = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
+  let best = null;
+  try {
+    for (const f of fs.readdirSync(FLEET_DIR)) {
+      if (!f.endsWith('.json')) continue;
+      const o = read(path.join(FLEET_DIR, f));
+      if (o && o.pane === pane && o.sock === SOCK && (!best || (o.ts || 0) > (best.ts || 0))) best = o;
+    }
+  } catch {}
+  if (best) return best;
+  let pids = [pid];
+  try {
+    pids = pids.concat(execFileSync('pgrep', ['-P', pid], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .split('\n').filter(Boolean));
+  } catch {}
+  for (const p of pids) {
+    const note = read(path.join(CFG, 'sessions', `${p}.json`));
+    const sid = note && /^[0-9a-f-]{36}$/i.test(note.sessionId || '') ? note.sessionId : '';
+    if (!sid) continue;
+    const o = read(path.join(FLEET_DIR, `${sid}.json`));
+    // A record on ANOTHER fleet is not this pane's, whatever id it carries.
+    if (o && (!o.sock || o.sock === SOCK)) return o;
+    return { session_id: sid, cwd: note.cwd || '',
+             transcript: note.cwd ? path.join(PROJECTS, encCwd(note.cwd), `${sid}.jsonl`) : '' };
+  }
+  return null;
+}
+
 function newestTranscript(cwd) {
   try {
     const dir = path.join(PROJECTS, encCwd(cwd));
@@ -694,11 +792,43 @@ function codexTranscript(cwd) {
 // is also just true: the lead is the card you are looking for.
 //   The card ORDER the fleet numbers by is untouched — --order still excludes the lead,
 // so `Ctrl-f <p> <s>` and ⇧←→ at the desk count the same sessions they always did.
+// ── A SLEPT SESSION HAS NO TMUX SESSION, AND HAD NO CARD ────────────────────
+// Cards were built from the live tmux list alone, so hibernating one did not mark it asleep
+// — it DELETED it from the grid and from the phone. Twelve sessions vanished on the fleet
+// this shipped to, and the owner's words for it were "they need to show somewhere". The
+// `asleep` field added for the card could never be reached, because the row it belonged to
+// was gone before anything asked.
+//   So the marker is a source of sessions too. It holds the cwd and the conversation id
+// written at the moment of sleeping, which is everything a card needs to say what it is and
+// everything a wake needs to bring it back. Synthesised here rather than in each renderer:
+// one builder still feeds the desk and the phone.
+function asleepSessions(liveNames) {
+  const out = [];
+  let files = [];
+  try { files = fs.readdirSync(FLEET_DIR); } catch { return out; }
+  const pre = SOCK + '.';
+  for (const f of files) {
+    if (!f.startsWith(pre) || !f.endsWith('.asleep')) continue;
+    const name = f.slice(pre.length, -'.asleep'.length);
+    if (!name || liveNames.has(name)) continue;      // a live session is not asleep
+    let cwd = '', at = 0, id = '';
+    try {
+      const [ts, sid, dir] = fs.readFileSync(path.join(FLEET_DIR, f), 'utf8').trim().split('\t');
+      at = Number(ts) || 0; id = sid || ''; cwd = dir || '';
+    } catch {}
+    out.push({ name, cwd, attached: false, asleepAt: at, asleepId: id });
+  }
+  return out;
+}
+
 function gather({ lead = false } = {}) {
   const live = tmuxList();
+  const liveNames = new Set(live.map(s => s.name));
+  const slept = asleepSessions(liveNames);
   const sessions = [
     ...(lead ? live.filter(s => isLead(s.name)) : []),
     ...applyOrder(live.filter(s => !isLead(s.name))),
+    ...slept,
   ];
   const fleet = fleetBySlot();
   const nowS = Math.floor(Date.now() / 1000);
@@ -706,7 +836,7 @@ function gather({ lead = false } = {}) {
   // shape and for why this one cannot reach the network.
   const prs = prNumbers();
   return sessions.map(s => {
-    const st = fleet.get(s.name);
+    const st = fleet.get(s.name) || (s.asleepAt ? undefined : recordOfPane(s.name) || undefined);
     const agent = agentOf(s.name);
     const folder = st?.folder || (s.cwd ? path.basename(s.cwd) : s.name);
     const branch = st?.branch || (s.cwd ? gitBranch(s.cwd) : '');
@@ -714,11 +844,23 @@ function gather({ lead = false } = {}) {
     // cwd, so on a worktree that USED to run claude it happily returns that old transcript
     // for the codex session standing there now — a wrong answer that looks like a right
     // one, since the card would show a real message with a real timestamp.
-    const transcript = st?.transcript ||
-      (agent === 'codex' ? codexTranscript(s.cwd || '') : newestTranscript(s.cwd || ''));
+    // A SLEPT CARD READS ITS OWN CONVERSATION, NOT THE FOLDER'S NEWEST. Every session in a
+    // checkout shares a project directory, so newestTranscript() answers with whichever
+    // conversation was written last — which for a sleeping session is somebody else's. Seen
+    // immediately: seven slept cards in one fleet all showing the same last message, each of
+    // them a neighbour's. The marker records the conversation id that was live at the moment
+    // of sleeping, which is exactly the one the card is about.
+    const transcript = (s.asleepId && s.cwd)
+      ? path.join(CFG, 'projects', s.cwd.replace(/[^A-Za-z0-9]/g, '-'), s.asleepId + '.jsonl')
+      : (st?.transcript ||
+         (agent === 'codex' ? codexTranscript(s.cwd || '') : newestTranscript(s.cwd || '')));
     const tmt = transcript ? mtimeSec(transcript) : 0;    // last transcript write = age display only
-    const busy = paneBusy(SOCK, s.name);
-    let status = deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
+    // A slept session has no pane to read, so it is never asked. Probing one costs a tmux
+    // round trip that answers "not found" and would land as "not busy", which reads as
+    // ready — a card claiming a session is waiting for input when its process is gone.
+    const busy = s.asleepAt ? false : paneBusy(SOCK, s.name);
+    let status = s.asleepAt ? (st?.status || 'unknown')
+                            : deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
     if (!busy && isParked(s.name)) status = 'parked';     // intentionally off (fleet-pause)
     // Checked last and only on a session that is neither generating nor deliberately
     // off: those two already describe it better. A limited session looks exactly like a
@@ -737,6 +879,16 @@ function gather({ lead = false } = {}) {
     const sched = (mk && mk.at > nowS) ? mk : null;
     return { name: s.name, cwd: s.cwd || '', folder, branch, status, age, msg: lastAssistant(transcript),
              attached: s.attached, sched, agent, label: labelOf(s.name), limitAt, lead: isLead(s.name),
+             // ONE BUILDER FEEDS BOTH SCREENS: bin/fleet-serve.mjs shells out to this
+             // file's --json, so the phone gets this field without a second producer —
+             // which is docs/mobile.md §3's rule, one producer of "what is this session
+             // doing".
+             exited: isExited(s.name),
+             // Either the marker put it here, or one exists beside a live session (a wake
+             // that timed out leaves that shape). Both are asleep as far as a card is
+             // concerned, and the second is how a live session ends up under an asleep card.
+             asleep: !!s.asleepAt || isAsleep(s.name),
+             queued: queuedCount(s.name),
              // null, never 0 or '': the card tests it for truth, and a PR numbered 0 does
              // not exist while an empty string would read as "no PR" in one place and as a
              // present-but-blank field in another.
@@ -805,6 +957,10 @@ function killSession(name) {
   // Drop the agent marker too, or a later session that reuses this name inherits a
   // dead one's agent and launches the wrong CLI.
   try { fs.unlinkSync(path.join(FLEET_DIR, `${SOCK}.${name}.agent`)); } catch {}
+  // An asleep card has no tmux session — the kill above does nothing for it and the marker
+  // IS the card, so leaving it kept a stopped session on the grid. Same list as fleet-stop.
+  try { fs.unlinkSync(asleepFile(name)); } catch {}
+  try { fs.unlinkSync(exitedFile(name)); } catch {}
   // drop its status file(s) so the card disappears (the conversation history in
   // ~/.claude/projects is untouched — you can re-open it later from `new`).
   let files = [];
@@ -940,7 +1096,10 @@ function humanAge(a) {
 const CW = 30; // inner content width
 function cardLines(card, selected, idx) {
   const meta = STATUS[card.status] || STATUS.starting;
-  const color = meta.color;
+  // A SLEEPING CARD IS DRAWN IN THE GREY `parked` AND `idle` ALREADY USE. It is not
+  // running, and a card lit in its last status' colour claims otherwise. No new colour:
+  // this is the palette's own grey, the same one the two other not-working states take.
+  const color = card.asleep ? C.grey : meta.color;
   // 1-9 prefix = the digit that jumps straight to this card (see onKey)
   const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
   // A labelled card is titled by the label; an unlabelled one is unchanged.
@@ -949,10 +1108,39 @@ function cardLines(card, selected, idx) {
   const idle = card.age == null ? '' : (card.status === 'working' ? `busy ${humanAge(card.age)}` : `${humanAge(card.age)} ago`);
   // For a limited session the reset time is the only number that matters — "55m ago"
   // says when it last spoke, which is not the question you are asking of that card.
+  // A backlog outranks the age: `● working  queued: 2` is the fact that changes what
+  // you do next (the next send waits behind those two), and it fits beside the longest
+  // status label in the 28 columns this line has.
   const right = card.sched ? `@${clockLabel(card.sched.at)}`
               : card.status === 'limit' && card.limitAt ? `↻ ${card.limitAt}`
+              : card.queued ? `queued: ${card.queued}`
               : idle;   // @ = scheduled send
-  const l1 = `│ ${padEndV(twoCol(meta.label, right, CW - 2), CW - 2)} │`;
+  // ── AN EXITED SESSION SAYS SO WHERE ITS STATUS WOULD BE ───────────────────
+  // The agent is gone; the pane and the card are not (bin/agent-here holds them). None
+  // of the nine statuses describes that — they are what a RUNNING agent is doing — and
+  // the one it would otherwise show is whatever it was doing when it stopped, which is
+  // the most misleading thing the card could say. The status slot is where the eye
+  // already goes, so it is where this belongs.
+  //   `⏎ resumes` because the way back is the way in: entering the session lands on the
+  // held pane, which is already asking for Enter. No new verb, no new key.
+  // ── AND AN ASLEEP ONE SAYS SO IN THE SAME SLOT, FOR THE SAME REASON ───────
+  // Reported from the desk: a hibernated session drew as `? unknown  5h17m ago`.
+  // `--plain` and `--json` had said `asleep` since the markers were added; the
+  // INTERACTIVE card was the one reader that never asked. It falls out of how the status
+  // is derived — an asleep session has no pane to read and usually no status file left,
+  // so it lands on `unknown`, which is the fleet saying "I cannot tell" about the one
+  // case it can tell exactly.
+  //   THE AGE STAYS ON THIS LINE, unlike the exited card, and that is deliberate rather
+  // than inconsistent: "how long has it been out" is the question you ask of a sleeping
+  // session and not of an exited one. `☾ asleep 5h17m` is 14 columns and `⏎ wakes` is 7,
+  // which fits the 28 this line has with room to spare — measured, because a label that
+  // fits at one width and not another is this file's most repeated bug.
+  const asleepAge = card.age == null ? '' : ` ${humanAge(card.age)}`;
+  const l1 = card.asleep
+    ? `│ ${padEndV(twoCol(`☾ asleep${asleepAge}`, '⏎ wakes', CW - 2), CW - 2)} │`
+    : card.exited
+    ? `│ ${padEndV(twoCol('✗ exited', '⏎ resumes', CW - 2), CW - 2)} │`
+    : `│ ${padEndV(twoCol(meta.label, right, CW - 2), CW - 2)} │`;
   // Name the agent on the card whenever it isn't the default. Without this an
   // "unknown" or a differently-behaving status is unreadable — you can't tell whether
   // the fleet is confused or the session simply isn't Claude. Claude cards are left
@@ -1498,6 +1686,8 @@ let pickSel = 0;
 let pickFresh = false;       // picker opened via N (fresh parallel) vs n (resume)
 let nameCwd = '';            // checkout chosen in the picker, awaiting a session name
 let nameInput = '';          // editable, pre-filled with the checkout's basename
+let parked = [];             // that checkout's asleep + exited sessions, offered on the name screen
+let parkSel = -1;            // -1 = the name field has focus; 0.. = a row of `parked`
 let agentSel = 0;            // selection on the agent screen (only shown if >1 installed)
 // Resuming an already-known worktree needs no naming step — that's only for the
 // explicit "+ new session" flow. Attach straight in with the worktree's own name.
@@ -1532,7 +1722,9 @@ let labelInput = '';         // editable, pre-filled with the current label
 // two never drift apart — a session named "x" always sitting in a folder named "x"
 // is the invariant the rest of the grid (and fleet-spawn) relies on. Shells out to
 // bin/fleet-rename (same pattern as pauseSession -> bin/fleet-pause below) rather
-// than duplicating the git/tmux/marker-migration logic here.
+// than duplicating the git/tmux/marker-migration logic here. That includes the state
+// record: this file used to patch it itself, which is why a rename from the grid kept
+// its transcript and the same rename from the CLI, MCP or phone did not.
 function doRename(oldName, newName) {
   newName = newName.trim();
   if (!newName || newName === oldName) return { ok: false, msg: 'unchanged' };
@@ -1543,26 +1735,8 @@ function doRename(oldName, newName) {
     const msg = (e.stderr || e.stdout || e.message || '').toString().trim().split('\n').pop();
     return { ok: false, msg: (msg || 'rename failed').replace(/^fleet-rename: /, '').slice(0, 100) };
   }
-  patchStatusFile(oldName, newName);
   return { ok: true };
 }
-// status file(s): patch slot/cwd/folder now instead of waiting for the next hook
-// event to overwrite them (Stop/UserPromptSubmit would anyway, but not right away)
-function patchStatusFile(oldName, newName) {
-  try {
-    for (const f of fs.readdirSync(FLEET_DIR)) {
-      if (!f.endsWith('.json')) continue;
-      const p = path.join(FLEET_DIR, f);
-      let o; try { o = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { continue; }
-      if (o.slot === oldName && ownedBy(o, SOCK, Z)) {
-        const newPath = path.join(path.dirname(o.cwd || ''), newName);
-        o.slot = newName; o.cwd = newPath; o.folder = newName;
-        try { fs.writeFileSync(p, JSON.stringify(o)); } catch {}
-      }
-    }
-  } catch {}
-}
-
 function buildItems() {
   cards = gather();
   const free = freeWorktrees();
@@ -1585,7 +1759,7 @@ function renderGrid() {
   let buf = '\x1b[H';
   const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
-    (cut ? ` · ${C.red}${cut} interrupted${C.reset}` : '') +
+    (cut ? ` · ${C.yellow}${cut} interrupted${C.reset}` : '') +
     (limited ? ` · ${C.yellow}${limited} at limit${C.reset}` : '') +
     (parked ? ` · ${C.grey}${parked} parked${C.reset}` : '');
   // Same banner as the Projects screen, with the live counts beside the ship. Falls
@@ -1610,6 +1784,14 @@ function renderGrid() {
         `${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
   else if (wtRmMsg)
     buf += `${C.yellow}${C.bold} ${clip(wtRmMsg, Math.max(20, W() - 2))}${C.reset}\x1b[K\n`;
+  else if (!cards.length && !jumpStage)
+    // STEP 3 OF THE FIRST-RUN PATH, and it lands here rather than on the Projects screen
+    // because this is where the key works. A project with no sessions draws exactly one
+    // card, `+ new session`, which says what it is and not that `n` is how you get one —
+    // and `n` is the whole point of the screen. The line costs a row that was already
+    // blank (it is the slot the confirm prompts use), and only on a fleet with nothing
+    // running, so it cannot crowd a screen anyone is actually working on.
+    buf += ` ${C.green}nothing running yet${C.reset} ${C.dim}— press ${C.reset}n${C.dim} to start your first session, or ${C.reset}w${C.dim} to cut a worktree for one${C.reset}\x1b[K\n`;
   else
     buf += (jumpStage ? jumpHint() : '') + '\x1b[K\n';
   const nc = cols();
@@ -1671,13 +1853,56 @@ function renderPicker() {
   out(buf);
 }
 
+// ── THE SESSIONS ALREADY PARKED IN A CHECKOUT ────────────────────────────────
+// Asked for in the owner's words — "could you add a list of parked parallel sessions pls".
+// The name screen was the one place a person states "I want a session in THIS checkout",
+// and it offered only a new one, while the checkout's hibernated and exited sessions sat
+// elsewhere on the grid, or (for a hibernated one, before its card existed) nowhere. So the
+// screen lists them, and picking one reopens it instead of starting a stranger beside it.
+//   REOPENING IS AN ATTACH, NOT A THIRD VERB. bin/ghostfleet's attach path already wakes a
+// session with an asleep marker, and an exited session's pane is held open offering to
+// resume — so `attach<US><name>` is exactly what its card's Enter emits, and one consumer
+// behind every way in stays one consumer.
+//   A CHECKOUT IS ITS PATH OR BELOW IT, never a prefix of the string: `acme-api` is not
+// inside `acme-api-2`, and worktrees are siblings with exactly that shape of name.
+function parkedIn(dir) {
+  const inside = p => !!p && (p === dir || p.startsWith(dir + path.sep));
+  const live = tmuxList();
+  const rows = [];
+  for (const s of asleepSessions(new Set(live.map(l => l.name))))
+    if (inside(s.cwd)) rows.push({ name: s.name, kind: 'asleep', at: s.asleepAt || 0 });
+  for (const s of live) {
+    if (isLead(s.name) || !isExited(s.name) || !inside(s.cwd)) continue;
+    rows.push({ name: s.name, kind: 'exited', at: mtimeSec(exitedFile(s.name)) || 0 });
+  }
+  return rows.sort((a, b) => b.at - a.at || a.name.localeCompare(b.name));
+}
+function enterNamePrompt() {
+  nameInput = path.basename(nameCwd); parked = parkedIn(nameCwd); parkSel = -1; mode = 'nameprompt';
+}
+
 function renderNamePrompt() {
   let buf = '\x1b[H';
+  const onName = parkSel < 0;
   buf += ` ${C.bold}session name${C.reset} ${C.dim}— ${nameCwd.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
-  buf += ` name:  ${C.bold}${nameInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += ` name:  ${C.bold}${nameInput}${C.reset}${onName ? '▏' : ''}\x1b[K\n\x1b[K\n`;
   buf += `${C.dim} a live session with the same name gets -2/-3 appended automatically${C.reset}\x1b[K\n\x1b[K\n`;
+  if (parked.length) {
+    const nowS = Math.floor(Date.now() / 1000);
+    buf += ` ${C.bold}or reopen one parked here${C.reset}\x1b[K\n`;
+    parked.slice(0, 9).forEach((r, i) => {
+      const on = i === parkSel;
+      const what = r.kind === 'asleep'
+        ? `☾ asleep${r.at ? ' ' + humanAge(Math.max(0, nowS - r.at)) : ''}`
+        : '⏹ exited';
+      buf += `${on ? `${C.bold}${C.green} ▸ ` : '   '}${i + 1}  ${padEndV(clip(r.name, 28), 28)}${C.reset} ${C.dim}${what}${C.reset}\x1b[K\n`;
+    });
+    buf += '\x1b[K\n';
+  }
   const next = installedAgents().length > 1 ? 'pick an agent' : 'create';
-  buf += `${C.dim} ⏎ ${next} · esc/\` back to the checkout list${C.reset}\x1b[K\n\x1b[J`;
+  buf += onName
+    ? `${C.dim} ⏎ ${next}${parked.length ? ' · ↓ the parked list' : ''} · esc/\` back to the checkout list${C.reset}\x1b[K\n\x1b[J`
+    : `${C.dim} ⏎ reopen · 1-${Math.min(9, parked.length)} reopen that one · ↑ back to the name · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 
@@ -2134,11 +2359,21 @@ function onKey(key) {
     if (key === '\x1b[A' || key === 'k') pickSel = Math.max(0, pickSel - 1);
     else if (key === '\x1b[B' || key === 'j') pickSel = Math.min(checkouts.length - 1, pickSel + 1);
     else if ((key === '\r' || key === '\n') && checkouts.length) {
-      nameCwd = checkouts[pickSel]; nameInput = path.basename(nameCwd); mode = 'nameprompt';
+      nameCwd = checkouts[pickSel]; enterNamePrompt();
     }
     render();
   } else if (mode === 'nameprompt') {
     if (key === '\x1b' || key === '\x03' || key === '\x60') { mode = 'picker'; render(); return; }
+    // THE LIST HAS FOCUS OR THE NAME DOES, never both: a digit is a legal character in a
+    // session name (`api-2`), so digits pick a row only once ↓ has moved onto the list.
+    const shown = Math.min(9, parked.length);
+    if (key === '\x1b[B' && shown) { parkSel = Math.min(shown - 1, parkSel + 1); render(); return; }
+    if (key === '\x1b[A' && parkSel >= 0) { parkSel -= 1; render(); return; }
+    if (parkSel >= 0) {
+      if (key === '\r' || key === '\n') return finish(`attach${US}${parked[parkSel].name}`);
+      if (key >= '1' && key <= '9' && +key <= shown) return finish(`attach${US}${parked[+key - 1].name}`);
+      render(); return;
+    }
     if (key === '\r' || key === '\n') {
       // Only detour through the agent screen when there is actually a choice.
       if (installedAgents().length > 1) {
@@ -2347,6 +2582,17 @@ if (JSON_OUT) {
       pr:       c.pr || null,
       msg:      c.msg,
       age:      c.age,            // seconds since the last transcript write; null = unknown
+      // ── THE TWO STATES THAT ARE NOT STATUSES, AND WERE NOT ON THE WIRE ──────
+      // `exited` and `asleep` ride beside the status because the nine statuses describe
+      // what a RUNNING agent is doing. Both were computed on the card and neither was
+      // copied into --json, which is the only thing the phone ever sees — so a hibernated
+      // session reached the client as an ordinary card with a stale status, and the
+      // "asleep — tap to wake" line the client already knows how to draw had nothing to
+      // trigger it. The field existed at both ends and nothing carried it between them.
+      exited:   !!c.exited,
+      asleep:   !!c.asleep,
+      // Prompts waiting for this session's turn to end (fleet-send's queue); 0 = none.
+      queued:   c.queued || 0,
       attached: c.attached,
       // The epoch AND the prompt, but not the pid. `@10:30pm` with no way to say WHAT
       // will be sent is half a fact: in the TUI you are one keystroke from the session
@@ -2418,7 +2664,10 @@ if (PLAIN) {
     console.log([
       clip(c.name, 12).padEnd(12), clip(c.folder, 14).padEnd(14), clip(c.branch, 26).padEnd(26),
       clip(c.agent, 9).padEnd(9),
-      clip(c.status, 11).padEnd(11), clip(c.msg, 44).padEnd(46), idle,
+      // asleep and exited REPLACE the status here, for the reason they ride beside it on a
+      // card: the nine statuses say what a RUNNING agent is doing, and neither of these is
+      // running. Printing the last status it happened to hold reads as a live session.
+      clip(c.asleep ? 'asleep' : c.exited ? 'exited' : c.status, 11).padEnd(11), clip(c.msg, 44).padEnd(46), idle,
     ].join(''));
   }
   if (!rows.length) console.log('(no sessions)');
@@ -2727,8 +2976,17 @@ function agentCaveats() {
   }
   return bits.length ? bits.join(' · ') : '';
 }
+// FIRST RUN IS "THE LIST IS EMPTY", measured here and nowhere else. The projects file
+// is the only thing that decides it, so a reader who removes their last project gets the
+// guided screen back rather than the bare `+ add project` card they started from — which
+// is right: at zero projects there is nothing to pick and nothing on screen says what to
+// do about it. It is NOT a once-ever flag on disk; a flag would have to be kept in step
+// with a file that can be edited by hand, and this cannot go stale.
+let pFirstRun = false;
 function pBuild() {
-  pItems = [...readProjects().map(p => ({ project: p })), { add: true }];
+  const projs = readProjects();
+  pFirstRun = projs.length === 0;
+  pItems = [...projs.map(p => ({ project: p })), { add: true }];
   if (!pSelInit) {           // first build: land on the just-exited project, if any
     pSelInit = true;
     if (SELECT) { const i = pItems.findIndex(it => it.project && it.project.name === SELECT); if (i >= 0) pSel = i; }
@@ -2765,9 +3023,87 @@ function reorderProject(name, delta) {
   try { fs.writeFileSync(PROJECTS_CFG, [...comments, ...projs].join('\n') + '\n'); } catch {}
   return ni;
 }
+// ── the first-run screen ────────────────────────────────────────────────────
+// WHAT THIS REPLACES. An empty projects list drew the picker with exactly one card on it,
+// `+ add project`, and nothing else: no statement of what a project IS here, no route to
+// a session, and — the part that actually stalls people — no hint that `n` is what starts
+// one once a project exists. Somebody who has just run ./install.sh arrives at precisely
+// this screen, so it is the first thing the product ever shows and it explained none of
+// itself.
+//
+// IT IS THE SAME SCREEN, NOT A NEW ONE. Same banner, same boxCard, same footer grammar as
+// the picker it stands in for — the three steps are drawn as cards because cards are what
+// this screen is made of, and a reader who has seen one screenshot of ghostfleet should
+// not have to learn a second visual language to get past the first one.
+//
+// The demo line is last and deliberately quiet: somebody who wants to look before they
+// register a real folder has a way through that does not touch anything of theirs, and
+// somebody who came here to add their own repo does not have to read past it to do that.
+// IS THE PHONE ALREADY SET UP? Read once and remembered, not per frame: this screen
+// redraws on a 2.5s timer, and a file read per redraw to decide whether to print one line
+// is a cost with no reader. The question only changes when somebody runs `fleet-serve
+// enroll`, which is not something that happens while they are looking at this screen.
+//   ENROLMENT is the signal, not the config file: a config with no passkey is somebody who
+// ran `init` and stopped, which is the state this line most needs to reach. Guarded at
+// every step — a hand-edited or half-written serve.json must leave this saying "not set up"
+// rather than taking the screen down with it (CLAUDE.md: a ReferenceError here kills the
+// whole pane).
+// THE SAME EDITOR fleet-tab will run: $CLAUDE_FLEET_EDITOR, then $EDITOR, then nvim, first
+// word only (an EDITOR of `code -w` is `code`). Memoised like phoneReady — a PATH walk per
+// 2.5s redraw buys nothing.
+function editorName() { return (process.env.CLAUDE_FLEET_EDITOR || process.env.EDITOR || 'nvim').trim().split(/\s+/)[0]; }
+let _editorFound = null;
+function editorFound() {
+  if (_editorFound !== null) return _editorFound;
+  const ed = editorName();
+  const dirs = ed.includes('/') ? [''] : (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  _editorFound = dirs.some(d => { try { fs.accessSync(d ? path.join(d, ed) : ed, fs.constants.X_OK); return true; } catch { return false; } });
+  return _editorFound;
+}
+let _phoneReady = null;
+function phoneReady() {
+  if (_phoneReady !== null) return _phoneReady;
+  _phoneReady = false;
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(HOME, '.config', 'ghostfleet', 'serve.json'), 'utf8'));
+    _phoneReady = (c.clients || []).some(x => x && !x.revoked && (x.creds || []).length);
+  } catch {}
+  return _phoneReady;
+}
+function pRenderFirstRun() {
+  let buf = '\x1b[H';
+  const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
+  buf += banner([`${C.bold}ghostfleet${C.reset}${profTag}`, `${C.dim}— first run${C.reset}`])
+      ?? ` ${C.bold}ghostfleet${C.reset}${profTag} ${C.dim}— first run${C.reset}\x1b[K\n`;
+  buf += `\x1b[K\n`;
+  buf += ` ${C.bold}No projects yet.${C.reset} ${C.dim}A project is a folder this watches — a git repo, or one folder holding several checkouts of it.${C.reset}\x1b[K\n\x1b[K\n`;
+  const steps = [
+    boxCard('1 · pick a folder', ['your repo, or the', 'folder its checkouts', 'live in'], C.green, true),
+    boxCard('2 · name it', ['what the fleet calls', 'it — defaults to the', "folder's own name"], C.cyan, false),
+    boxCard('3 · press n', ['starts your first', 'session in that', 'checkout'], C.grey, false),
+  ];
+  for (let li = 0; li < 5; li++) buf += ' ' + steps.map(l => l[li]).join(' ') + '\x1b[K\n';
+  buf += '\x1b[K\n';
+  const armed = pQuitArmed && Date.now() - pQuitArmed < QUIT_WINDOW;
+  const quit = armed ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}` : '⌃C ⌃C quit';
+  buf += `${C.dim} ⏎ start · c clone a repo instead · ${quit}${C.reset}\x1b[K\n\x1b[K\n`;
+  // ^N opens the editor on a session's folder, and without one it fails from inside tmux
+  // with nothing but `returned 1` — on a first install, where nobody knows ^N is ours.
+  // Said here once, before it is pressed, rather than after.
+  if (!editorFound()) buf += ` ${C.yellow}No editor for ^N:${C.reset}${C.dim} '${editorName()}' is not installed — re-run the installer to add Neovim, or set CLAUDE_FLEET_EDITOR.${C.reset}\x1b[K\n`;
+  buf += ` ${C.dim}Just looking? ${C.reset}ghostfleet demo${C.dim} builds three throwaway projects to explore — it touches nothing of yours.${C.reset}\x1b[K\n`;
+  // ONLY WHEN IT IS USEFUL. Somebody who enrolled a phone months ago does not need to be
+  // told this every time they empty their projects list, and a first-run screen that
+  // lectures is one people learn to read past. Same rule as the demo line above it: it is
+  // an offer, not an instruction, so it sits under the steps rather than becoming one.
+  buf += phoneReady() ? '\x1b[K\n\x1b[J'
+    : ` ${C.dim}On your phone too? ${C.reset}fleet-phone${C.dim} — serve it over your tailnet, install it, answer a prompt from your pocket.${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
 function pRender() {
   if (pSettings) return pRenderSettings();
   if (pSchedFor) return pRenderSchedule();
+  if (pFirstRun && !pConfirmRemove) return pRenderFirstRun();
   let buf = '\x1b[H';
   const profTag = (PROFILE && PROFILE !== 'work') ? ` ${C.yellow}${PROFILE}${C.reset}` : '';
   buf += banner([`${C.bold}ghostfleet${C.reset}${profTag}`, `${C.dim}— projects${C.reset}`])
@@ -2780,7 +3116,7 @@ function pRender() {
     const row = pItems.slice(i, i + nc);
     const lines = row.map((it, j) => {
       const sel = i + j === pSel;
-      if (it.add) return boxCard('+ add project', ['choose a root', 'folder…', ''], C.yellow, sel);
+      if (it.add) return boxCard('+ add project', ['choose a root', 'folder…', 'c clone a repo'], C.yellow, sel);
       const st = projectStatus(it.project);
       let line, color;
       if (st.need > 0) { line = `● ${st.need} need you`; color = C.red; }
@@ -2880,6 +3216,10 @@ function pMove(d) { const nc = cols(); let n = pSel; if (d === 'left') n--; else
 function onKeyProjects(key) {
   const mev = parseMouse(key);
   if (mev) {
+    // On the first-run screen the three boxes are STEPS, not projects, so cardAt would
+    // resolve a click to a project index that does not exist. Any click there means the
+    // one thing the screen offers.
+    if (mev.press && mev.button === 0 && pFirstRun && !pSettings && !pSchedFor && !pConfirmRemove) return finish('firstproject');
     if (mev.press && mev.button === 0 && !pConfirmRemove && !pSchedFor && !pSettings) {
       const idx = cardAt(mev.x, mev.y, cols());
       if (idx >= 0 && idx < pItems.length) {
@@ -2935,6 +3275,16 @@ function onKeyProjects(key) {
     pQuitArmed = Date.now(); pRender(); return;
   }
   if (pQuitArmed) pQuitArmed = 0;                    // any other key disarms a pending quit
+  // FIRST RUN HAS ONE ACTION, so it consumes every other key rather than falling through.
+  // The picker's keys below all act on `pItems[pSel]` — a project — and there is no
+  // project; `x`, `s`, ⇧hjkl and the digits would each find `undefined` and do nothing,
+  // which from the reader's side is a screen that ignores the keyboard. Placed AFTER the
+  // ⌃C handling above on purpose: quitting must work from here too.
+  if (pFirstRun) {
+    if (key === '\r' || key === '\n' || key === ' ') return finish('firstproject');
+    if (key === 'c' || key === 'C') return finish('firstclone');
+    pRender(); return;
+  }
   if (key === '\x1b[A' || key === 'k') pMove('up');
   else if (key === '\x1b[B' || key === 'j') pMove('down');
   else if (key === '\x1b[C' || key === 'l') pMove('right');
@@ -2950,6 +3300,7 @@ function onKeyProjects(key) {
     }
   }
   else if (key === 'x') { const it = pItems[pSel]; if (it?.project) pConfirmRemove = it.project.name; }
+  else if (key === 'c' || key === 'C') { if (pItems[pSel]?.add) return finish('clonerepo'); }
   else if (key === 's' || key === 'S') {
     const it = pItems[pSel];
     if (it?.project) { pSchedFor = { proj: it.project, sock: sockOf(it.project), dir: path.join(profileDir(it.project.profile), 'fleet') }; pSchedInput = ''; }
@@ -2997,7 +3348,51 @@ function dBuild() {
   dirEntries = ['..', ...subs];
   dSel = Math.max(0, Math.min(dSel, dirEntries.length - 1));
 }
+// CLONE FROM HERE. The browser only ever registered a folder that already existed, so a
+// repo you had not cloned yet meant leaving ghostfleet for a shell, cloning, and coming
+// back to find it — on a fresh machine, which is exactly when there is nothing to pick.
+// `c` asks for a URL or owner/repo and clones it INTO the folder on screen, so choosing
+// where it lands is the navigation you were already doing.
+//   The clone itself is NOT run here. This screen is on the alternate buffer in raw mode,
+// and git can ask for a username, a password or a host key: a prompt drawn under a TUI
+// is a prompt nobody sees, and a clone that hangs on it looks like a frozen screen. The
+// answer goes back to bin/ghostfleet, which runs git on the ordinary terminal.
+let dCloning = false, dCloneInput = '', dMsg = '';
+const CLONE_OK = /^(https?:\/\/|ssh:\/\/|git@|file:\/\/|\/|~)|^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+function dRenderClone() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}clone a repo${C.reset} ${C.dim}— it becomes the project${C.reset}\x1b[K\n`;
+  buf += ` ${C.dim}into${C.reset} ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` repo:  ${C.bold}${dCloneInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += (dMsg ? ` ${C.red}${dMsg}${C.reset}` : '') + '\x1b[K\n';
+  buf += ` ${C.dim}a URL (https://… or git@…), or ${C.reset}owner/repo${C.dim} for GitHub${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ clone it · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+// TYPE OR PASTE THE PATH. Measured on a first run from a fresh account: registering the
+// first project took 7 keystrokes and 5 of them were arrowing down a home directory to a
+// folder whose full path the reader could have typed in one go — and on a real home, with
+// a few dozen entries, the arrowing is the whole of the interaction. `/` is the jump key
+// everywhere else a list is scrollable, and it is the only printable key this screen had
+// left: c clones, s selects, hjkl move.
+//   IT NAVIGATES, IT DOES NOT SELECT. The keys that move you and the key that registers a
+// project stay separate — ⏎ in a text box is also how a typo gets dismissed, and that is
+// not a key that should be able to register the wrong folder. So this lands you there and
+// `s` still does the selecting, one line below on the same hint bar.
+let dTyping = false, dPathInput = '';
+function dRenderPath() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}go to a folder${C.reset} ${C.dim}— type or paste its path${C.reset}\x1b[K\n`;
+  buf += ` ${C.dim}from${C.reset} ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` path:  ${C.bold}${dPathInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += (dMsg ? ` ${C.red}${dMsg}${C.reset}` : '') + '\x1b[K\n';
+  buf += ` ${C.dim}absolute, ${C.reset}~/…${C.dim}, or relative to the folder above${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ go there (then ${C.reset}s${C.dim} to pick it) · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
 function dRender() {
+  if (dCloning) return dRenderClone();
+  if (dTyping) return dRenderPath();
   let buf = '\x1b[H';
   buf += ` ${C.bold}add project${C.reset} ${C.dim}— pick a root folder (holds your checkouts/worktrees)${C.reset}\x1b[K\n`;
   buf += ` ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
@@ -3009,10 +3404,59 @@ function dRender() {
     const e = dirEntries[i], sel = i === dSel;
     buf += `${sel ? `${C.bold}${C.green}▸ ` : '  '}${e === '..' ? '../' : e + '/'}${sel ? C.reset : ''}\x1b[K\n`;
   }
-  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · s select THIS folder · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · / type a path · s select THIS folder · c clone a repo here · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
+function onKeyClone(key) {
+  if (key === '\x03') return finish('');
+  if (key === '\x1b' || key === '\x60') { dCloning = false; dMsg = ''; return dRender(); }
+  if (key === '\r' || key === '\n') {
+    const v = dCloneInput.trim();
+    if (!v) { dMsg = 'type a URL or owner/repo'; return dRender(); }
+    if (!CLONE_OK.test(v)) { dMsg = `'${v}' is not a URL or owner/repo`; return dRender(); }
+    return finish(`clone${US}${v}${US}${curDir}`);
+  }
+  if (key === '\x7f' || key === '\b') { dCloneInput = dCloneInput.slice(0, -1); dMsg = ''; }
+  else {
+    // A URL is the thing people paste, and a paste is one multi-character read — the
+    // same reason onKeyName filters instead of testing key.length.
+    const t = (!key || key.startsWith('\x1b')) ? '' : [...key].filter(ch => ch > ' ' && ch !== '\x7f').join('');
+    if (t) { dCloneInput += t; dMsg = ''; }
+  }
+  dRender();
+}
+function onKeyPath(key) {
+  if (key === '\x03') return finish('');
+  if (key === '\x1b' || key === '\x60') { dTyping = false; dMsg = ''; return dRender(); }
+  if (key === '\r' || key === '\n') {
+    const v = dPathInput.trim();
+    if (!v) { dMsg = 'type a path, or esc to go back'; return dRender(); }
+    // ~ IS THE SHELL'S, NOT THE KERNEL'S. Nothing has expanded it by the time a keystroke
+    // reaches here, so `~/code` would be looked up as a folder literally called `~`.
+    const abs = path.resolve(curDir, v === '~' ? HOME : v.startsWith('~/') ? path.join(HOME, v.slice(2)) : v);
+    let ok = false;
+    try { ok = fs.statSync(abs).isDirectory(); } catch {}
+    // WHICH OF THE TWO WAYS IT IS WRONG. "no such folder" and "that is a file" send the
+    // reader to different places — one is a typo, the other is a path that is right about
+    // the repo and one level too deep.
+    if (!ok) { dMsg = fs.existsSync(abs) ? `${abs.replace(HOME, '~')} is a file, not a folder` : `no folder at ${abs.replace(HOME, '~')}`; return dRender(); }
+    dTyping = false; dMsg = ''; curDir = abs; dSel = 0; dBuild(); return dRender();
+  }
+  if (key === '\x7f' || key === '\b') { dPathInput = dPathInput.slice(0, -1); dMsg = ''; }
+  else {
+    // SPACES ARE LEGAL IN A PATH, which is the one way this filter differs from the clone
+    // box's: `ch > ' '` there drops the space, and a folder with one in its name could
+    // then be typed but never reached. Escape sequences and DEL still go.
+    const t = (!key || key.startsWith('\x1b')) ? '' : [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
+    if (t) { dPathInput += t; dMsg = ''; }
+  }
+  dRender();
+}
 function onKeyAdd(key) {
+  if (dCloning) return onKeyClone(key);
+  if (dTyping) return onKeyPath(key);
+  if (key === '/') { dTyping = true; dPathInput = ''; dMsg = ''; return dRender(); }
+  if (key === 'c' || key === 'C') { dCloning = true; dCloneInput = ''; dMsg = ''; return dRender(); }
   if (key === '\x1b' || key === '\x03' || key === '\x60') return finish('');
   if (key === '\x1b[A' || key === 'k') dSel = Math.max(0, dSel - 1);
   else if (key === '\x1b[B' || key === 'j') dSel = Math.min(dirEntries.length - 1, dSel + 1);
@@ -3023,6 +3467,64 @@ function onKeyAdd(key) {
     dSel = 0; dBuild();
   } else if (key === 's' || key === 'S') return finish(`newproject${US}${curDir}`);
   dRender();
+}
+
+// ── name-the-project (first run only) ───────────────────────────────────────
+// Step 2 of the guided path, and it exists because the name is not cosmetic: it is the
+// project's identity everywhere — the card, `ghostfleet <name>`, and the tmux fleet
+// socket `cf-<name>` that every status read is scoped by. The folder browser derives it
+// from the basename, which is usually right and is silently wrong for a checkout called
+// `src`, `repo`, or `main`.
+//
+// SAME CHARSET AS fleet-project, and refused HERE rather than there. The add is run by
+// bin/fleet-project (one writer for this file, see bin/ghostfleet), which exits non-zero
+// on a bad name — but that happens after this screen has closed, so the refusal would
+// arrive as a flash on a screen the reader has already left. The rule is duplicated on
+// purpose and the two are pinned together by the suite.
+//
+// Deliberately NOT wired into `+ add project`: that path is unchanged for people who
+// already have projects, and a naming step appearing in a flow they know is a regression
+// dressed as a feature.
+// pn* and not name*: `pnInput` is already the NEW-SESSION naming box further up this
+// file (mode 'nameprompt'). Every screen here shares one module scope, so a second `let
+// pnInput` is a SyntaxError that takes the whole grid pane down — the file is one
+// program, not one screen.
+let pnInput = '', pnPath = '', pnMsg = '';
+const NAME_OK = /^[A-Za-z0-9._-]+$/;
+function nRender() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}name this project${C.reset} ${C.dim}— step 2 of 3${C.reset}\x1b[K\n`;
+  buf += ` ${C.cyan}${pnPath.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` name:  ${C.bold}${pnInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += (pnMsg ? ` ${C.red}${pnMsg}${C.reset}` : '') + '\x1b[K\n';
+  buf += ` ${C.dim}letters, digits, . _ - — it names the card, ${C.reset}ghostfleet ${pnInput || '<name>'}${C.dim}, and the fleet socket${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ add it · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+function onKeyName(key) {
+  if (key === '\x1b' || key === '\x03' || key === '\x60') return finish('');
+  if (key === '\r' || key === '\n') {
+    const v = pnInput.trim();
+    if (!v) { pnMsg = 'a name is required'; nRender(); return; }
+    if (!NAME_OK.test(v)) { pnMsg = `'${v}' cannot be a project name — use letters, digits, . _ or -`; nRender(); return; }
+    return finish(`projectname${US}${v}`);
+  }
+  if (key === '\x7f' || key === '\b') { pnInput = pnInput.slice(0, -1); pnMsg = ''; }
+  else {
+    // A PASTE arrives as one multi-character read, so `key.length === 1` would drop it
+    // silently — and a path is exactly the kind of thing that gets pasted here.
+    //
+    //   typedText() is the file's existing helper for this and is NOT reusable here: it
+    // strips '.' and ':' because it feeds a tmux SESSION name, which cannot contain them.
+    // A PROJECT name can — fleet-project's charset allows a dot — so borrowing it would
+    // quietly turn `acme.api` into `acmeapi` and register a project under a name the
+    // reader never typed. Whatever else arrives is shown as typed and refused, loudly, by
+    // the ⏎ check above; a character removed without a word is the one outcome that
+    // leaves nothing to correct.
+    const t = (!key || key.startsWith('\x1b')) ? '' : [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
+    if (t) { pnInput += t; pnMsg = ''; }
+  }
+  nRender();
 }
 
 // ── the stack screen ────────────────────────────────────────────────────────
@@ -3198,7 +3700,20 @@ if (SCREEN === 'projects') {
   pBuild(); pRender(); process.stdin.on('data', onKeyProjects);
   timer = setInterval(() => { pBuild(); pRender(); }, 2500);
 } else if (SCREEN === 'addproject') {
+  // --clone opens straight on the clone box (the `c` key on the add card). It starts in
+  // ~/projects when there is one, since that is where a clone usually goes and HOME
+  // almost never is; esc still drops you into the browser to pick somewhere else.
+  if (process.argv.includes('--clone')) {
+    dCloning = true;
+    try { if (fs.statSync(path.join(HOME, 'projects')).isDirectory()) curDir = path.join(HOME, 'projects'); } catch {}
+  }
   dBuild(); dRender(); process.stdin.on('data', onKeyAdd);
+} else if (SCREEN === 'nameproject') {
+  // --select carries the folder the browser landed on; the basename pre-fills the box so
+  // ⏎ alone is the whole of the common case.
+  pnPath = SELECT || HOME;
+  pnInput = path.basename(pnPath);
+  nRender(); process.stdin.on('data', onKeyName);
 } else if (SCREEN === 'stack') {
   sBuild(); sRender(); process.stdin.on('data', onKeyStack);
   timer = setInterval(() => { sBuild(); sRender(); }, 2500);

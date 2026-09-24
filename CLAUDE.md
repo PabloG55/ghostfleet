@@ -17,6 +17,13 @@
     run on `staging` is what catches that, so **a red `staging` is everyone's, not the
     last merger's alone.**
   - Admin bypass is on. It exists for a runner outage, not for a hurry.
+- **Commit with the identity git is already configured with — never set one per command.**
+  No `-c user.email=…`, no `--author`, no `GIT_AUTHOR_*`. An agent's session context supplies
+  the account's address "for authorship", and taking that literally published a work address
+  as the author of five commits, which GitHub's squash merge then promoted into a
+  `Co-authored-by` trailer on a public branch. The pre-push hook and the suite's name sweep
+  now refuse a listed name in author, committer and message alike; merge with an explicit
+  `--subject`/`--body` so GitHub composes nothing of its own.
 - **Never add a `Co-Authored-By:` trailer**, and don't add any other AI attribution
   (no "generated with", no tool footer). Commits are authored by the repo owner, full
   stop.
@@ -236,5 +243,26 @@ prefer proof over assertion:
   yet", spins its whole count, and fails a LATER assertion about something else. Use a
   here-string — `grep -q <pat> <<< "$out"` — whose status is the reader's alone. `test/run.sh`
   sweeps itself for the pipe form, so the next one is caught rather than this one.
+- **A build can succeed loudly and emit nothing.** vite's default for an app build is
+  `preserveEntrySignatures: false` — an entry is assumed to be run for its side effects, so
+  its exports are dropped, and the tree-shaker then removes everything that was only
+  reachable through them. A module whose whole purpose is its exports compiles to nothing.
+  Measured on the first build of the phone client's one bundled screen: 14.8 kB of the
+  dependency and **not one line of the screen**, exit 0, `✓ built in 13ms`, no warning
+  anywhere. Every check downstream then passes on the wrong thing — the output parses, it
+  is served, it precaches, and it hashes perfectly. Nothing but reading the emitted file
+  says so, which is why the suite now greps the built output for names the SOURCE defines
+  rather than only asking whether a file appeared. A build that reports success is not
+  evidence that it built what you asked for; the byte count is the cheapest thing that is.
+- **A plugin in the wrong half of a bundler config is ignored in silence.** vite's
+  `build.rollupOptions.plugins` are appended AFTER vite's own resolver, so `enforce: 'pre'`
+  is not honoured there and a `resolveId` hook never sees a specifier vite has already
+  turned into an absolute path. Top-level `plugins` is the half that runs first. The
+  failure is not an error: the hook simply never fires, and the build exits 0. Here that
+  meant a module marked external was quietly INLINED — a second copy of `web/grid.js`
+  inside the bundle, which is two answers to "how many cells is this glyph" and exactly the
+  split `cells()` and the pane view exist to prevent. Symptom: a bundle a few kB bigger
+  than it should be, which nobody reads. Assert the *effect* — that the output still
+  carries the `import` — never that the plugin is present in the config.
 - **macOS-only calls need a guard**: `stat -f`, `date -r`, `osascript`, `caffeinate`. Linux
   and WSL are supported.

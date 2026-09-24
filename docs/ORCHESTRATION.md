@@ -17,25 +17,33 @@ what each was spun up for), not in the lead's head, so it *reads* the state inst
 which is what keeps a long-running or restarted lead from getting lost:
 
 1. **`fleet-worktrees`** + **`fleet-inbox`** — what exists / what's free, and who needs you.
-2. **Reuse a free worktree** before creating one — `fleet-spawn` refuses to proliferate (it lists
-   the free ones) unless you `--reuse <wt>` or `--new`.
-3. **`fleet-answer`** to unblock a stuck worker; **`fleet-pause`** to shed cost.
+2. **A new task is a new session.** A worker that finished a task is retired —
+   `fleet-stop --reclaim <session>` — and never handed the next one: its context is full of the
+   last task, and an unrelated brief gets worked through all of it. `fleet-send` refuses a brief
+   to a worker whose task shipped (PR merged, or clean and even with the integration branch after
+   a `DONE`) unless you pass `--anyway`; a follow-up on the same, still-OPEN PR is never refused.
+3. **Reuse a free worktree's folder** before creating one — `fleet-spawn` refuses to proliferate
+   (it lists the free ones) unless you `--reuse <wt>` or `--new`. `--reuse` always starts a NEW
+   conversation there, and refuses a worktree a session is still standing in.
+4. **`fleet-answer`** to unblock a stuck worker; **`fleet-pause`** to shed cost.
 
 | goal | command |
 |------|---------|
 | every worktree + which are **FREE** | `fleet-worktrees` — ASKED beside UNDERSTOOD |
 | record what you heard (as a worker) | `fleet-ack "<one line>" --from "<decisions>"` |
 | live sessions + status | `fleet-list` |
-| who needs you / what **finished** (drains since last look) | `fleet-inbox` |
-| dispatch a self-contained brief | `fleet-send <session> "…"` |
+| who needs you / what **finished** (drains since last look) | `fleet-inbox` — also names finished workers to `fleet-stop --reclaim` |
+| a **new task** — always a new session | `fleet-spawn <name> [--reuse <wt>] --prompt "…"` |
+| a follow-up on the **same PR** (red CI, a review note) | `fleet-send <session> "…"` — refused for a worker whose task shipped; `--anyway` for same-work follow-ups only |
 | **ask** one and get the answer back | `fleet-send --reply-to me <session> "…"` |
 | read a worker's last N messages | `fleet-read <session> [n]` |
-| **reuse** a free worktree for a worker | `fleet-spawn <name> --reuse <wt> --prompt "…"` |
+| a new session in a free worktree's folder | `fleet-spawn <name> --reuse <wt> --prompt "…"` |
 | **recycle** a worktree onto a fresh branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from main` |
 | new worktree (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] --new --prompt "…"` |
 | unblock a worker stuck on a dialog | `fleet-answer <session> "2"` |
 | park / resume a worker (cost) | `fleet-pause <session>` · `fleet-resume <session>` |
 | **rename** a worker + move its worktree | `fleet-rename <session> <new-name>` |
+| **retire** a finished worker and its worktree | `fleet-stop --reclaim <session>` — removes the tree when safe (a squash-merged PR on a clean tree is), else keeps it and says why |
 | **stop** a worker for good (or a dead orphan) | `fleet-stop <session>` |
 | the checkout's **dev-stack slot** | `fleet-slot of <path>` · `fleet-slot list` |
 
@@ -113,6 +121,7 @@ racer, and the directory listing is the free list.
 fleet-worktrees                 # → "Free to reuse: api-3"
 fleet-inbox                     # → api-1 DONE (feat/x) · api-2 NEEDS YOU: run tests?
 fleet-answer api-2 "2"          # unblock the one waiting on a dialog
+fleet-stop --reclaim api-1      # api-1's PR merged: retire it, never send it the next task
 fleet-spawn fix-auth --reuse api-3 --branch feat/auth --from main \
   --prompt "Fix token refresh in src/auth/*. Done when auth tests pass."
 fleet-read fix-auth 3           # check progress
@@ -157,8 +166,8 @@ you never read the same answer twice.
 These are also exposed as **MCP tools** (`fleet_list` / `_send` / `_read` / `_spawn` /
 `_worktrees` / `_inbox` / `_answer` / `_pause` / `_resume` / `_rename` / `_stop`) via a
 dependency-free stdio server (`mcp/fleet-mcp.mjs`) that `install.sh` registers in each config dir.
-The installed **`ghostfleet-orchestrate` skill** teaches a lead the loop above — reuse before
-spawn, pull the inbox instead of polling every sibling, unblock with `fleet-answer`, mind the
+The installed **`ghostfleet-orchestrate` skill** teaches a lead the loop above — a new task is a new
+session, reuse a folder before spawning, pull the inbox instead of polling every sibling, unblock with `fleet-answer`, mind the
 shared budget — so you can just say *"work on a worktree to fix X"* and it reuses a free one. Each
 session knows its fleet via `CLAUDE_FLEET_SOCK`; prompts must be self-contained (siblings don't
 share your context). Another **project's** fleet is reachable too — `-s <socket>` from a shell, or

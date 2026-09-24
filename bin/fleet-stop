@@ -64,7 +64,12 @@ done
 [ -n "$SOCK" ]    || { echo "fleet-stop: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 [ -n "$SESSION" ] || { echo "fleet-stop: usage: fleet-stop [-s socket] <session>" >&2; exit 1; }
 [ "$SESSION" = master ] && { echo "fleet-stop: refusing to stop 'master' (the lead)" >&2; exit 1; }
-[ -n "${CLAUDE_FLEET_SLOT:-}" ] && [ "$SESSION" = "$CLAUDE_FLEET_SLOT" ] \
+# The caller's name is asked of its PANE as well as read from the environment: the
+# environment holds the name it was LAUNCHED with, so after a rename the old guard compared
+# against a name nobody has and let a session stop itself. Either one matching refuses.
+_me=""; [ -n "${TMUX_PANE:-}" ] && case "${TMUX:-}" in *"/$SOCK,"*)
+  _me="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+{ [ -n "${CLAUDE_FLEET_SLOT:-}" ] && [ "$SESSION" = "$CLAUDE_FLEET_SLOT" ]; } || { [ -n "$_me" ] && [ "$SESSION" = "$_me" ]; } \
   && { echo "fleet-stop: refusing to stop the calling session ('$SESSION')" >&2; exit 1; }
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
@@ -72,9 +77,18 @@ FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 # WHERE THIS WORKER LIVES, asked while it is still alive. Once the session is killed
 # tmux cannot answer, and the manifest can be stale for a session that was renamed or
 # rebuilt — so read the pane's cwd first and keep it.
+#   AND WHEN IT IS NOT ALIVE, ASK WHAT A PREVIOUS RUN LEFT. The usual escalation is a plain
+# --reclaim that KEPT the tree, then the --force it suggested — by which time the first run
+# had killed the session and dropped the manifest row, so the second could not find the
+# tree at all: "could not tell which worktree it was in — nothing removed", with the tree
+# still on disk. A kept reclaim now leaves the path behind (KEPT below), and the manifest
+# row is read here, before step 3 deletes it, rather than never.
+KEPT="$FLEET_DIR/$SOCK.$SESSION.reclaim-kept"
 WT=""
 if [ "$RECLAIM" = 1 ]; then
   WT="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+  [ -n "$WT" ] || WT="$(head -1 "$KEPT" 2>/dev/null)"
+  [ -n "$WT" ] || WT="$(awk -F'\t' -v s="$SESSION" '$2==s{print $1; exit}' "$FLEET_DIR/$SOCK.manifest.tsv" 2>/dev/null)"
   # the pane may be deeper in the tree than the checkout root; resolve to the worktree
   [ -n "$WT" ] && WT="$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)"
 fi
@@ -106,6 +120,17 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.notify-lead" "$FLEET_DIR/$SOCK.$SESSION.notify-
 rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to" "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
 # the display label too, or a session that reuses this name inherits a stranger's title
 rm -f "$FLEET_DIR/$SOCK.$SESSION.label" 2>/dev/null
+# THE ASLEEP MARKER IS A CARD. A hibernated session has no tmux session to kill, so the
+# kill above is a no-op for it — and the marker alone is what draws it on the grid and the
+# phone. Seen: a fleet "cleaned" session by session, and three asleep cards stayed behind.
+# .exited goes with it, for the name-reuser reason above.
+rm -f "$FLEET_DIR/$SOCK.$SESSION.asleep" "$FLEET_DIR/$SOCK.$SESSION.exited" 2>/dev/null
+# prompts queued behind its last turn (fleet-send): nothing is left to run them, and a
+# session that reuses this name must not start by working through a stranger's backlog.
+_qd="$FLEET_DIR/$SOCK.$SESSION.queue.drain"; _qp="$(cat "$_qd" 2>/dev/null)"
+case "$_qp" in ''|*[!0-9]*) ;; *) kill "$_qp" 2>/dev/null ;; esac
+rm -rf "$FLEET_DIR/$SOCK.$SESSION.queue" "$FLEET_DIR/$SOCK.$SESSION.queue.lock" \
+       "$_qd" "$FLEET_DIR/$SOCK.$SESSION.now" 2>/dev/null
 
 # The dev-stack slot is keyed by WORKTREE PATH, so release it before the manifest row
 # (the only thing that still knows which path this session held) is dropped. A slot left
@@ -154,8 +179,9 @@ CLEAN="$(dirname "$0")/fleet-clean"
 # Runs FROM the main checkout: fleet-clean resolves its repo from $PWD, and the
 # directory it is about to remove is a poor place to be standing.
 ( cd "$MAIN_CO" 2>/dev/null && "$CLEAN" -s "$SOCK" --only "$WT" --go ) | sed 's/^/  /'
-if [ ! -d "$WT" ]; then echo "fleet-stop: reclaimed $WT"; exit 0; fi
+if [ ! -d "$WT" ]; then rm -f "$KEPT" 2>/dev/null; echo "fleet-stop: reclaimed $WT"; exit 0; fi
 if [ "$FORCE" != 1 ]; then
+  printf '%s\n' "$WT" > "$KEPT" 2>/dev/null
   echo "fleet-stop: kept $WT (see the reason above)"
   echo "fleet-stop: remove it anyway with: fleet-stop -s $SOCK --reclaim --force $SESSION"
   exit 0
@@ -168,5 +194,6 @@ fi
 # own trees). Reported honestly either way, because a force that silently left the
 # directory behind is the worst of the three outcomes.
 ( cd "$MAIN_CO" 2>/dev/null && "$CLEAN" -s "$SOCK" --only "$WT" --go --force ) | sed 's/^/  /'
-[ -d "$WT" ] && { echo "fleet-stop: could not remove $WT even with --force (see above)" >&2; exit 1; } \
-             || echo "fleet-stop: force-removed $WT (past fleet-clean's gates, on request)"
+[ -d "$WT" ] && { echo "fleet-stop: could not remove $WT even with --force (see above)" >&2; exit 1; }
+rm -f "$KEPT" 2>/dev/null
+echo "fleet-stop: force-removed $WT (past fleet-clean's gates, on request)"

@@ -13,6 +13,17 @@
 #
 # Un-park by giving it work again (fleet-send) — the UserPromptSubmit hook clears
 # the park marker — or with `fleet-resume`.
+#
+# PARKING DOES NOT FREE MEMORY, and this file used to say it did. The success line read
+# "idle, zero consumption", which is true of tokens and false of everything else: parking
+# interrupts the turn and writes a marker, and the process stays exactly where it was.
+# Measured on a real fleet: a session holds ~350 MB of physical footprint whether it is
+# thinking or has been sitting at a prompt for twenty-six days, and 64 of them held 21.75 GB
+# on a machine that was 39.6/40.0 GB into swap. Somebody reading that line while the laptop
+# swapped would have had no reason to look any further, which is the whole cost of a message
+# that reports a state other than the one it is in.
+#   `--hibernate` is the one that gives the memory back: it ends the process and keeps the
+# conversation, so the card can be woken by resume-by-id. See bin/fleet-hibernate.
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
@@ -20,7 +31,10 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
+HIBERNATE=no
+if [ "${1:-}" = "--hibernate" ]; then HIBERNATE=yes; shift; fi
 if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
+if [ "${1:-}" = "--hibernate" ]; then HIBERNATE=yes; shift; fi
 SESSION="${1:-}"
 
 [ -n "$SOCK" ]    || { echo "fleet-pause: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
@@ -53,4 +67,15 @@ fi
 # fleet can't collide, and cross-fleet cleanup can't clobber the wrong marker.
 mkdir -p "$FLEET_DIR" 2>/dev/null
 printf '%s\n' "$(date +%s)" > "$FLEET_DIR/$SOCK.$SESSION.parked"
-echo "fleet-pause: parked '$SESSION' — idle, zero consumption. Resume: fleet-send $SESSION \"<task>\"  (or fleet-resume $SESSION)"
+
+# Hand the whole decision to fleet-hibernate rather than killing the pane here: the veto
+# list, the switch and the marker format live in one place, and a second implementation of
+# "is this safe to end" is how the two drift into disagreeing.
+if [ "$HIBERNATE" = yes ]; then
+  exec "$(dirname "$0")/fleet-hibernate" -s "$SOCK" --apply --idle-hours 0
+fi
+
+echo "fleet-pause: parked '$SESSION' — it will not take work, and it is still running."
+echo "             Parking stops the turn; it does not free the session's memory (~350 MB measured)."
+echo "             Resume: fleet-send $SESSION \"<task>\"  (or fleet-resume $SESSION)"
+echo "             To give the memory back instead: fleet-pause --hibernate $SESSION"

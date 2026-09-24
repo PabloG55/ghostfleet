@@ -103,6 +103,13 @@ for (const line of stdin.split('\n')) {
   let revs = [];
   try { revs = txt('rev-list', ...range).trim().split('\n').filter(Boolean); } catch {}
   for (const c of revs) {
+    // THE WHOLE COMMIT, NOT JUST ITS MESSAGE. Author and committer are published with every
+    // commit exactly as the body is, and a trailer is part of the body only after something
+    // composed it — a server-side squash merge writes its own Co-authored-by lines, from the
+    // account's linked addresses, and never passes through this hook. Reading %B alone let
+    // two work addresses reach a public branch as author fields and two more as trailers.
+    const meta = hits(txt('log', '-1', '--format=%an%n%ae%n%cn%n%ce', c));
+    if (meta.size) bad.push({ where: `the author/committer of ${c.slice(0, 12)}`, what: meta });
     const h = hits(txt('log', '-1', '--format=%B', c));
     if (h.size) bad.push({ where: `the commit message of ${c.slice(0, 12)}`, what: h });
     let objs = '';

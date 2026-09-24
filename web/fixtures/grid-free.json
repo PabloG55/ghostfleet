@@ -23,7 +23,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "cli-flags",
@@ -38,7 +39,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     }
   ],
   "free_worktrees": [

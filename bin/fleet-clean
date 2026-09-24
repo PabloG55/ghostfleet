@@ -178,6 +178,18 @@ while IFS=$'\t' read -r wt br; do
   #   fleet-merged prints nothing when it cannot know (no gh, no network, no PR), so the
   # conservative git checks below still decide in that case.
   if [ "$safe" = 0 ] && is_merged "$br"; then safe=1; why="PR merged"; fi
+  # ...AND THE CACHE IS WRONG FOR TEN MINUTES AFTER EVERY MERGE. fleet-merged's answer was
+  # fetched before the PR merged, so the moment a lead is most likely to reclaim a worker —
+  # right after merging it — is the moment it says "not merged", and every git test below
+  # agrees, because the squash put the work in a NEW commit and deleted the remote branch.
+  # Refused twice in one day that way, each time with "remove it anyway: --force" as the
+  # only advice. So for ONE named worktree (--only, which is what fleet-stop --reclaim
+  # sends), ask GitHub about that branch directly: one call, and the gate it opens is still
+  # "clean tree" above. Silence or an error is "I don't know" and falls through, as ever.
+  if [ "$safe" = 0 ] && [ -n "$ONLY" ] && [ "$br" != "(detached)" ] && command -v gh >/dev/null 2>&1; then
+    st="$( cd "$wt" 2>/dev/null && gh pr view "$br" --json state -q .state 2>/dev/null )" || st=""
+    [ "$st" = MERGED ] && { safe=1; why="PR merged"; }
+  fi
   if [ "$safe" = 0 ]; then
     up="$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
     if [ -n "$up" ] && [ "$(git -C "$wt" rev-list --count "$up..HEAD" 2>/dev/null || echo 1)" = 0 ]; then

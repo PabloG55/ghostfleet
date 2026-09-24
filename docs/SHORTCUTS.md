@@ -51,6 +51,7 @@ control plane).
 | `Ctrl-t` / `Ctrl-n` | a **terminal / editor** at that project's root, without booting its master first |
 | `Ctrl-x` | that project's **stack** screen |
 | `+ add project` → `⏎` | browse to a root folder that holds your checkouts/worktrees |
+| `+ add project` → `c` | **clone a repo** (URL, or `owner/repo` for GitHub) into `~/projects` and add it as the project |
 | `x` | remove a project from the list (sessions + history untouched) |
 | digit `1`-`9` | jump straight to the project at that position |
 
@@ -288,6 +289,7 @@ created, so this takes effect on the next one.
 | `→` / `l` / `⏎` | enter the selected folder |
 | `←` / `h` | go up one level (parent folder) |
 | `s` / `S` | **select THIS folder** as the project root (not a subfolder — the one you're looking at) |
+| `c` / `C` | **clone a repo here** — type a URL or `owner/repo`, `⏎` clones it into the folder on screen (on the real terminal, so git can ask for credentials) and adds the clone as the project. `Esc` goes back to the folders |
 | `Esc` / `` ` `` / `Ctrl-C` | cancel |
 
 [CODE] — the README only says "`+ add project` browses to a root folder", without
@@ -479,7 +481,7 @@ work at stack width, and the governor's 5h usage scrape cannot read a pane narro
 | `fleet-answer <s> "2"` | unblock a dialog — don't use `fleet-send` for this |
 | `fleet-pause <s>` / `fleet-resume <s>` | CLI equivalents of `p`/`P` on the grid |
 | `fleet-stop <s>` | shut down for good + clear its state |
-| `fleet-rename <s> <new-name>` | CLI equivalent of the grid's `r` — renames the session AND moves its worktree folder, migrating pause/notify-lead/schedule/manifest state | [Not upstream yet — added locally, see the fork's PR.] |
+| `fleet-rename <s> <new-name>` | CLI equivalent of the grid's `r` — renames the session AND moves its worktree folder, migrating its state record, markers (pause/notify-lead/schedule/agent/exited/asleep/reply-to), manifest row, tabs and conversation directory | [Not upstream yet — added locally, see the fork's PR.] |
 | `fleet-stack members\|add\|remove\|toggle\|clear` | the stack screen's membership, from a shell (`sock<TAB>session` in `$CLAUDE_FLEET_DIR/stack.tsv`) | [not upstream yet — `feat/stack-view`] |
 | `fleet-stack move left\|right <tty> [<stack-socket>]` | move the stack pane that owns `<tty>` one slot along — the live panes **and** the row order in `stack.tsv`, which is where the layout actually comes from. What the keys above are bound to; `<tty>` is how a binding on either side of the nest names the same pane | [not upstream yet] |
 | `fleet-stack open [--dry-run]` | build the stack window and attach. `--dry-run` prints the panes it would create and the nested attach for each, and needs no tty | [not upstream yet] |

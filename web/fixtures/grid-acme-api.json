@@ -23,7 +23,8 @@
       "attached": true,
       "sched": null,
       "limit_at": null,
-      "lead": true
+      "lead": true,
+      "exited": false
     },
     {
       "name": "api-fix",
@@ -38,7 +39,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "docs-pass",
@@ -48,12 +50,13 @@
       "branch": "docs/openapi-examples",
       "agent": "opencode",
       "pr": "1170",
-      "msg": "Done. Draft PR #212 — the drift was two schemas sharing one $ref.",
+      "msg": "Done. Draft PR #212 \u2014 the drift was two schemas sharing one $ref.",
       "age": 3000,
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "types",
@@ -70,7 +73,8 @@
         "at": 1787356800
       },
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "list-pages",
@@ -85,7 +89,8 @@
       "attached": true,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "cache-keys",
@@ -100,7 +105,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "rate-limit",
@@ -115,7 +121,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "csv-export",
@@ -130,7 +137,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     }
   ],
   "free_worktrees": []

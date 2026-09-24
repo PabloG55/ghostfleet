@@ -3,19 +3,29 @@
 //
 //     node test/helpers/grid-parity.mjs      # one "name <US> want <US> got" row per check
 //
-// The PWA (web/grid.js) is a transcription of bin/fleet-grid.mjs's cardLines(),
-// newCardLines(), freeCardLines(), boxCard() and the counts header. A transcription
-// drifts, and this particular drift is silent: a card that still renders is a card that
-// still looks right, and nobody diffs 32 columns of box-drawing by eye.
+// The phone used to be a TRANSCRIPTION of bin/fleet-grid.mjs — the same box-drawing
+// characters, compared here line for line, because a transcription drifts silently and
+// nobody diffs 32 columns of ╭─╮ by eye.
 //
-// So nothing here is TABULATED. The real functions are LIFTED out of fleet-grid.mjs by
-// source range, evaluated, and their output — ANSI stripped — is compared line for line
-// against the PWA's for the same card. Change either side and this goes red; change
-// both the same way and it stays green, which is the point.
+// IT IS NOT A TRANSCRIPTION ANY MORE, ON PURPOSE. The phone draws a surface card with a
+// status chip and two real lines of the agent's message; the desk still draws the box.
+// "They look the same" is a claim this repo has deliberately given up, so asserting it
+// would be asserting a decision that was reversed.
 //
-// The same lifting trick the suite already uses for orderFile/writeOrder (test/run.sh
-// §"card order"), for the same reason: a second copy of the code under test proves
-// nothing about the first.
+// WHAT IS NOT GIVEN UP is that they SAY the same thing. Dropping this file along with the
+// box art would leave the phone free to quietly stop showing the branch, the PR number or
+// which agent is running — each a fact the desk shows, none of them missed until needed.
+//
+// SO THE CONTRACT IS DERIVED FROM THE TUI RATHER THAN LISTED BY HAND. For every field of
+// a card: poke it, and see whether the TUI's rendered card changes. If it does, the desk
+// SHOWS that field, and the phone's model must change too. A hand-written list of fields
+// is a list somebody must remember to extend; this one extends itself the day fleet-grid
+// starts printing something new. The TUI's functions are still LIFTED out by source range
+// and evaluated, so it is the real renderer being asked and not a copy of it.
+//
+// It needs no parser for the TUI's output and knows neither layout, so it cannot go red
+// for a cosmetic change on either side — which is exactly what the old assertion did, and
+// why it had to be replaced rather than loosened.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -101,34 +111,75 @@ for (const k of tuiKeys) {
 }
 is('CW is the same 30', TUI.CW, PWA.CW);
 
-// ── 2. every card of every fixture, line for line ──────────────────────────
+// ── 2. every FACT of every fixture card ────────────────────────────────────
+// THIS USED TO COMPARE THE TWO CARDS LINE FOR LINE, and that contract is deliberately
+// over. The phone no longer draws box art: it draws a surface card with a status chip and
+// two real lines of the agent's message, because 32 columns of ╭─╮ spent ~210px to state
+// three short facts and clipped the one line the app is opened to read. So "they look the
+// same" is a claim we have chosen to abandon.
+//
+// WHAT MUST NOT BE ABANDONED is that they SAY the same thing. Dropping this file with the
+// box art would leave the phone free to quietly stop showing the branch, or the PR number,
+// or which agent is running — each of them a fact the desk shows and nobody would miss
+// until they needed it.
+//
+// SO THE CONTRACT IS DERIVED RATHER THAN LISTED, and that is the point. A hand-written list
+// of fields is a list somebody must remember to extend; this asks the TUI itself. For every
+// field of a card: change it, and see whether the TUI's rendered card changes. If it does,
+// the desk SHOWS that field — and then the phone's model must change too. A phone that
+// drops a fact the desk shows is red; a phone that shows MORE is fine, which is the whole
+// licence this redesign was given.
+//
+// It needs no parser for the TUI's output and no knowledge of either layout, so it cannot
+// go red for a cosmetic change on either side — which is exactly what the old assertion
+// did, and why it had to go rather than be loosened.
 const fixDir = path.join(ROOT, 'web', 'fixtures');
 const grids = fs.readdirSync(fixDir).filter(f => /^grid-.*\.json$/.test(f)).sort();
 is('there are grid fixtures to render', true, grids.length > 0);
-let cardsSeen = 0, freeSeen = 0;
+
+// A distinctive replacement per field, so a change cannot coincide with the old value.
+// `null` entries are for fields whose ABSENCE is the interesting state.
+const POKE = {
+  name: 'zzz-probe-name', label: 'zzz-probe-label', folder: 'zzz-probe-folder',
+  branch: 'zzz-probe-branch', agent: 'opencode', pr: '98765', msg: 'zzz probe message',
+  age: 4321, status: 'interrupted', lead: true, attached: true,
+  sched: { at: 1700000000 }, limit_at: '11:11pm',
+};
+const modelText = (m) => JSON.stringify(m);
+
+let cardsSeen = 0, freeSeen = 0, shownSeen = 0;
 const statusesSeen = new Set();
 for (const f of grids) {
   const g = JSON.parse(fs.readFileSync(path.join(fixDir, f), 'utf8'));
   (g.cards || []).forEach((c, i) => {
     cardsSeen++; statusesSeen.add(c.status);
-    for (const sel of [false, true]) {
-      const t = TUI.cardLines(toTui(c), sel, i).map(strip);
-      const p = PWA.cardLines(c, sel, i).lines;
-      is(`${f}#${i} ${c.name}${sel ? ' (selected)' : ''}`, t.join('\n'), p.join('\n'));
+    // The phone's model must carry the TUI's own status word, verbatim. The chip prints
+    // it, and §7 is emphatic that the vocabulary is the desk's rather than a synonym
+    // chosen to read better on a phone.
+    is(`${f}#${i} ${c.name} status word`, TUI.STATUS[c.status].label, PWA.cardModel(c, false, i).statusLabel);
+    for (const [field, poked] of Object.entries(POKE)) {
+      const before = TUI.cardLines(toTui(c), false, i).map(strip).join('\n');
+      const after  = TUI.cardLines(toTui({ ...c, [field]: poked }), false, i).map(strip).join('\n');
+      if (before === after) continue;          // the desk does not show this field here
+      shownSeen++;
+      const mBefore = modelText(PWA.cardModel(c, false, i));
+      const mAfter  = modelText(PWA.cardModel({ ...c, [field]: poked }, false, i));
+      is(`${f}#${i} ${c.name}: the phone shows '${field}' too`, true, mBefore !== mAfter);
     }
-    // the arithmetic the glyph width exists to protect: every line is CW+2 columns
-    const widths = new Set(PWA.cardLines(c, false, i).lines.map(l => PWA.vis(l)));
-    is(`${f}#${i} ${c.name} is ${PWA.CARD_COLS} columns`, `${PWA.CARD_COLS}`, [...widths].join(','));
   });
   (g.free_worktrees || []).forEach((w, i) => {
     freeSeen++;
-    const idx = (g.cards || []).length + i;
-    const t = TUI.freeCardLines(w, false, idx).map(strip);
-    is(`${f} free#${i} ${w.branch}`, t.join('\n'), PWA.freeCardLines(w, false, idx).lines.join('\n'));
+    const m = PWA.freeModel(w, false, (g.cards || []).length + i);
+    // The two facts a free worktree HAS. Asserted by value rather than by diffing, because
+    // the TUI's free card is three fixed rows and there is nothing to poke.
+    is(`${f} free#${i} branch`, w.branch || '', m.where);
+    is(`${f} free#${i} folder`, TUI.freeCardLines(w, false, 0).map(strip).join('\n').includes(m.title), true);
   });
 }
-is('the + new session card', TUI.newCardLines(false).map(strip).join('\n'), PWA.newCardLines(false).lines.join('\n'));
-is('...and selected', TUI.newCardLines(true).map(strip).join('\n'), PWA.newCardLines(true).lines.join('\n'));
+// A FLOOR UNDER THE DERIVATION, because "no field changed the TUI's output" would make
+// every row above vanish and the file would print a confident nothing. Measured: 44 on
+// the shipped fixtures.
+is('the derivation found fields the desk shows', true, shownSeen >= 20);
 is('the fixtures cover all nine statuses', tuiKeys.join(','), [...statusesSeen].sort().join(','));
 is('the fixtures include free worktrees', true, freeSeen > 0);
 
@@ -165,6 +216,36 @@ for (const [name, n, w, r, cut, lim, park] of CASES) {
   is(`counts: ${name}`, tuiCounts(n, w, r, cut, lim, park),
      PWA.countsLine({ need_you: n, working: w, ready: r, interrupted: cut, limit: lim, parked: park }));
 }
+// ── 3b. the counts COLOURS, which the comparison above deliberately strips ──
+// hdrExpr removes every ${C.x} so the words and the numbers can be compared as one string.
+// That is right for the text, and it leaves the COLOUR of each clause compared by nobody.
+// MEASURED, not assumed: changing the TUI's `interrupted` clause from red to yellow and
+// leaving the phone's alone keeps every row in §3 green, and nothing else in the suite
+// noticed either.
+//   The colour is half of what the status vocabulary means here — red is need-you's alone,
+// and yellow is the warning family — so two copies that agree on the words and disagree on
+// the colour are still saying different things to a reader glancing at one screen. Pinned
+// per clause rather than as a whole line, so a failure names WHICH one drifted.
+const tuiClauseColour = (word) => {
+  const m = new RegExp('\\$\\{C\\.(\\w+)\\}\\$\\{\\w+\\} ' + word).exec(hdrStmt);
+  return m ? m[1] : `(no '${word}' clause in the TUI header)`;
+};
+const ALL_ON = { need_you: 1, working: 1, ready: 1, interrupted: 1, limit: 1, parked: 1 };
+const pwaClauseColour = (word) => {
+  const seg = PWA.countsSegments(ALL_ON).find(x => new RegExp(`^\\d+ ${word}$`).test(x.text || ''));
+  return seg ? (seg.color || '(no colour)') : `(no '${word}' segment on the phone)`;
+};
+for (const word of ['need you', 'working', 'ready', 'interrupted', 'at limit', 'parked']) {
+  is(`counts colour: ${word}`, tuiClauseColour(word), pwaClauseColour(word));
+}
+// ...and the one the change above is about, stated as a VALUE rather than only as parity:
+// both could drift together and stay equal. Red is reserved for need-you; interrupted
+// wears ⚠ and belongs with the warnings.
+is('need-you is the only red clause', 'red', tuiClauseColour('need you'));
+is('...and interrupted is a warning, not a failure', 'yellow', tuiClauseColour('interrupted'));
+is('...on the phone too', 'yellow', pwaClauseColour('interrupted'));
+is('...while need-you stays red there', 'red', pwaClauseColour('need you'));
+
 // ...and the same line built from the CARDS, which is what the phone actually renders
 for (const f of grids) {
   const g = JSON.parse(fs.readFileSync(path.join(fixDir, f), 'utf8'));
@@ -195,26 +276,33 @@ PROJ.projects.forEach((p, i) => {
   else { line = 'no sessions yet'; color = TUI.C.grey; }
   if (p.sched && p.sched.at) line += `  @${TUI.clockLabel(p.sched.at)}`;
   const who = p.agent ? `${p.profile} · ${p.agent}` : p.profile;
-  const t = TUI.boxCard(`${i < 9 ? `${i + 1} ` : ''}${p.name}`, [who, tildify(p.path), line], color, false).map(strip);
-  is(`project card ${p.name}`, t.join('\n'), PWA.projectCard(p, i, false).lines.join('\n'));
+  // The rollup is the CONTENT of a project card — need beats working beats all-parked
+  // beats any-sessions beats none — and the phone must reach the same verdict from the
+  // same numbers. Compared as the derived line rather than as the drawn box, for the
+  // reason §2 gives: the picture is intentionally different now, the verdict is not.
+  is(`project card ${p.name} rollup`, line, PWA.projectModel(p, i, false).statusLabel +
+     (p.sched && p.sched.at ? `  @${TUI.clockLabel(p.sched.at)}` : ''));
+  is(`...${p.name} profile and agent`, who, PWA.projectModel(p, i, false).where);
+  is(`...${p.name} path, shortened the same way`, tildify(p.path), PWA.projectModel(p, i, false).path);
 });
-is('the + add project card',
-   TUI.boxCard('+ add project', ['choose a root', 'folder…', ''], TUI.C.yellow, false).map(strip).join('\n'),
-   PWA.addProjectCard(false).lines.join('\n'));
+is('the + add project card names itself',
+   true, /add project/.test(PWA.addProjectModel(false).title));
 
 // ── 5. the three ways the right-hand slot can lie ──────────────────────────
 // sched beats limit beats age, and a limited card shows its RESET time and not how
 // long ago it last spoke. Asserted against the lifted cardLines, so it is the TUI's
 // precedence being checked and not a restatement of it.
 const base = { name: 'x', folder: 'x', branch: 'x', agent: 'claude', msg: 'm', attached: false, sched: null, limit_at: null };
-const rightOf = c => PWA.cardLines(c, false, 0).lines[1].slice(2, -2).trimEnd().split(/\s{2,}/).pop();
+const rightOf = c => PWA.cardModel(c, false, 0).when;
 is('working shows busy <age>', 'busy 41s', rightOf({ ...base, status: 'working', age: 41 }));
 is('anything else shows <age> ago', '55m ago', rightOf({ ...base, status: 'ready', age: 3300 }));
 is('a limited card shows its reset time', '↻ 10:20pm', rightOf({ ...base, status: 'limit', age: 3300, limit_at: '10:20pm' }));
 is('...and camelCase reaches it too', '↻ 10:20pm', rightOf({ ...base, status: 'limit', age: 3300, limitAt: '10:20pm' }));
 is('a schedule outranks both', `@${PWA.clockLabel(1700000000)}`,
    rightOf({ ...base, status: 'limit', age: 3300, limit_at: '10:20pm', sched: { at: 1700000000 } }));
-is('no age, nothing on the right', '◆ working', rightOf({ ...base, status: 'working', age: null }));
+// Nothing at all, rather than the status word bleeding into the slot: the old form read
+// the LAST field of a padded line, so "empty" and "the label" were the same answer there.
+is('no age, nothing on the right', '', rightOf({ ...base, status: 'working', age: null }));
 
 // ── 6. the PR number, and the width it must not cost ──────────────────────
 // A working session's most useful single fact was only ever visible inside `msg` — the
@@ -224,27 +312,37 @@ is('no age, nothing on the right', '◆ working', rightOf({ ...base, status: 'wo
 // EXACTLY as it did before this field existed, byte for byte, on both renderers. `pr:
 // null` and no `pr` key at all are both that case — the wire sends null, and an older
 // daemon sends neither.
-const l2of = c => PWA.cardLines(c, false, 0).lines[2];
+// The same two facts, off the model. What mattered was never the byte-for-byte line — it
+// was that a card with no PR loses nothing and gains nothing.
+const l2of = c => JSON.stringify([PWA.cardModel(c, false, 0).where, PWA.cardModel(c, false, 0).agent, PWA.cardModel(c, false, 0).pr]);
 const wide = { ...base, status: 'working', age: 41, folder: 'api-fix', branch: 'feat/rate-limit' };
 is('a card with no PR is unchanged by the field', l2of(wide), l2of({ ...wide, pr: null }));
 is('...and an absent key is the same case', l2of(wide), l2of({ ...wide, pr: undefined }));
-is('...and it still shows worktree · branch', '│ api-fix · feat/rate-limit    │', l2of(wide));
-// ...and the direction that must FAIL if the feature is gone. Asserted as the WHOLE line,
-// so the row reads as a picture of the card rather than as a claim about a substring — and
-// so a number that appeared in the right slot but ate the wrong characters is still red.
-is('a card with a PR shows it',
-   '│ api-fix · feat/rate-l… #1184 │', l2of({ ...wide, pr: '1184' }));
-is('...five digits too, because #1184 is four',
-   '│ api-fix · feat/rate-… #12345 │', l2of({ ...wide, pr: '12345' }));
-// A non-claude agent already owns this slot. Both are shown, and the NUMBER IS RIGHTMOST
-// so it sits in the same column on every card — scanning nine of them for a number is the
-// whole point, and one that shifts left on the single codex card is one you hunt for.
-is('the agent keeps its place beside it',
-   '│ api-fix · feat/… codex #1184 │', l2of({ ...wide, pr: '1184', agent: 'codex' }));
-is('...with the number last, always', true,
-   l2of({ ...wide, pr: '1184', agent: 'opencode' }).trimEnd().endsWith('#1184 │'));
-is('...and an agent with no PR is untouched',
-   '│ api-fix · feat/rate-l… codex │', l2of({ ...wide, agent: 'codex' }));
+is('...and it still shows worktree · branch', 'api-fix · feat/rate-limit', PWA.cardModel(wide, false, 0).where);
+// ...and the direction that must FAIL if the feature is gone. Asserted on the MODEL now:
+// the old rows pinned the whole drawn line, which read as a picture of the card and was
+// the right shape while the card WAS a picture. What it was protecting is that the number
+// arrives, is not truncated, and does not evict the agent — three claims the model states
+// directly, and none of which a CSS change can now break.
+is('a card with a PR shows it', '#1184', PWA.cardModel({ ...wide, pr: '1184' }, false, 0).pr);
+is('...five digits too, because #1184 is four', '#12345', PWA.cardModel({ ...wide, pr: '12345' }, false, 0).pr);
+// A non-claude agent shares that slot, and BOTH are kept: neither is derivable from
+// anything else on the grid, so dropping either loses a whole fact. On the phone they are
+// two chips and nothing has to give way — which is the one place the redesign genuinely
+// bought something the 28-column line could not.
+{
+  const m = PWA.cardModel({ ...wide, pr: '1184', agent: 'codex' }, false, 0);
+  is('the agent keeps its place beside it', 'codex,#1184', `${m.agent},${m.pr}`);
+}
+is('...and a long agent name costs the number nothing', '#1184',
+   PWA.cardModel({ ...wide, pr: '1184', agent: 'opencode' }, false, 0).pr);
+is('...and an agent with no PR is untouched', 'codex,',
+   (m => `${m.agent},${m.pr}`)(PWA.cardModel({ ...wide, agent: 'codex' }, false, 0)));
+// THE FULL BRANCH SURVIVES, which the 28-column line could not promise: it clipped
+// `feat/rate-limit` to `feat/rate-l…` the moment a PR number shared the row. The phone
+// hands CSS the whole string and lets the browser decide where it ends.
+is('...and the branch is never pre-truncated', true,
+   !PWA.cardModel({ ...wide, pr: '12345', agent: 'opencode' }, false, 0).where.includes('…'));
 
 // THE GEOMETRY, AT THE WIDTH THAT ACTUALLY SHIPS AND WITH THE WORST STRINGS THERE ARE.
 // A detector or a label measured at full width that goes blind in a narrow one is the most
@@ -261,19 +359,16 @@ for (const [what, c] of [
   ['a 5-digit PR + opencode',  { ...LONGEST, pr: '12345', agent: 'opencode' }],
   ['a label as well',          { ...LONGEST, pr: '12345', agent: 'opencode', label: 'ship the retry work end to end' }],
 ]) {
-  const lines = PWA.cardLines(c, false, 0).lines;
-  is(`every line is CW+2 with ${what}`, String(PWA.CW + 2), [...new Set(lines.map(PWA.vis))].join(','));
-  if (c.pr) is(`...and the PR survives ${what}`, true, lines[2].includes('#' + c.pr));
-  // ...and the TUI agrees, which is what keeps the two renderers one design.
-  is(`...TUI and phone agree with ${what}`,
-     TUI.cardLines(toTui(c), false, 0).map(strip).join('\n'), lines.join('\n'));
+  // THE QUESTION SURVIVED THE REDESIGN; THE ARITHMETIC DID NOT. It used to be "every line
+  // is still CW+2 columns", which is a box-art question. What it was PROTECTING is that a
+  // long branch does not push the PR number or the agent off the card — and on the phone
+  // that is answered by the model carrying them at all, since CSS does the fitting and the
+  // browser does the truncating.
+  const m = PWA.cardModel(c, false, 0);
+  if (c.pr)    is(`the PR survives ${what}`,    '#' + c.pr, m.pr);
+  if (c.agent && c.agent !== 'claude') is(`...and the agent ${what}`, c.agent, m.agent);
+  // ...and the branch is never silently emptied by a long anything.
+  is(`...and the card still says where it is, with ${what}`, true, !!m.where);
 }
-
-// twoCol's OWN floor, well below anything the card can reach, recorded so a future width
-// change has a number to check against rather than a habit. 28 is what l2 passes.
-const floorFor = r => { for (let w = 40; w >= 2; w--) if (PWA.vis(PWA.twoCol(LONGEST.branch, r, w)) > w) return w; return 0; };
-is('#12345 holds down to a 8-column slot', 7, floorFor('#12345'));
-is('...and `opencode #12345` down to 17', 16, floorFor('opencode #12345'));
-is('...against the 28 the card gives it', 28, PWA.CW - 2);
 
 console.log(rows.join('\n'));

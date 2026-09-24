@@ -29,6 +29,9 @@ function plan(tools) {
   // ...and the same call with it, which must still RUN and carry it through untouched.
   // Without this direction a guard that refused everything would look identical.
   call('send.ok',          'fleet_send',   { session: 'w1', prompt: 'the real work' });
+  // anyway is optional and boolean: it must reach fleet-send as its flag, BEFORE the
+  // session, or a refused send has no way through from a caller restricted to MCP.
+  call('send.anyway',      'fleet_send',   { session: 'w1', prompt: 'same PR', anyway: true });
   call('send.empty',       'fleet_send',   { session: 'w1', prompt: '' });
   call('send.no-session',  'fleet_send',   { prompt: 'x' });
   call('send.obj-prompt',  'fleet_send',   { session: 'w1', prompt: { a: 1 } });

@@ -23,7 +23,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": true
+      "lead": true,
+      "exited": false
     },
     {
       "name": "api-fix",
@@ -38,7 +39,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "docs-pass",
@@ -53,7 +55,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "cache-keys",
@@ -68,7 +71,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "csv-export",
@@ -78,12 +82,13 @@
       "branch": "csv-export",
       "agent": "claude",
       "pr": null,
-      "msg": "Interrupted mid-edit — the file is half-written.",
+      "msg": "Interrupted mid-edit \u2014 the file is half-written.",
       "age": 300,
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "rate-limit",
@@ -98,7 +103,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "list-pages",
@@ -113,7 +119,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "adapter-probe",
@@ -128,7 +135,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "docs-sweep",
@@ -138,12 +146,13 @@
       "branch": "docs-sweep",
       "agent": "claude",
       "pr": null,
-      "msg": "Nothing to do — the sweep found no stale pages.",
+      "msg": "Nothing to do \u2014 the sweep found no stale pages.",
       "age": 5400,
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     },
     {
       "name": "types",
@@ -158,7 +167,8 @@
       "attached": false,
       "sched": null,
       "limit_at": null,
-      "lead": false
+      "lead": false,
+      "exited": false
     }
   ],
   "free_worktrees": []

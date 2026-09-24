@@ -19,6 +19,12 @@ import * as api from './api.js';
 import * as pk from './passkey.js';
 import * as ansi from './ansi.js';
 import * as md from './md.js';
+// THE ONE BUILT FILE IN web/. Everything above is served exactly as written; this one is
+// vite's output from web/src/screens.jsx, committed beside its source. It holds BOTH card
+// screens — Projects and the grid — which is why it is no longer called projects.js. The
+// seam between what it draws and what this file still draws is documented at the top of
+// that source; read it before porting a third.
+import * as screensUI from './screens.js';
 
 // ── state ─────────────────────────────────────────────────────────────────
 const S = {
@@ -168,7 +174,7 @@ async function refresh() {
     S.stale = 0;
     save();
   } catch (e) {
-    if (e instanceof api.AuthError) return lock();
+    if (e instanceof api.AuthError) return lock('refresh');
     // Offline: keep the cards that are on screen and say how old they are. A blank
     // screen with an error on it is strictly less useful than a stale fleet with a
     // date on it — the question this app answers is "is anything blocked on me", and
@@ -192,7 +198,86 @@ function lastFetchedAt() {
   catch { return Math.floor(Date.now() / 1000); }
 }
 
-function lock() { S.locked = true; api.clearToken(); render(); }
+// Installed, by either signal. iOS has honoured navigator.standalone since before the
+// media query existed and the two have not always agreed, so anything that depends on
+// being installed asks both — and the probe reports them SEPARATELY, so one launch says
+// which is true here instead of leaving an OR nobody can attribute.
+const mmStandalone = () => { try { return !!matchMedia('(display-mode: standalone)').matches; } catch { return false; } };
+const navStandalone = () => { try { return !!navigator.standalone; } catch { return false; } };
+function markStandalone() {
+  try { document.documentElement.classList.toggle('standalone', mmStandalone() || navStandalone()); } catch {}
+}
+
+// ── what the screen ACTUALLY measures, from the device ────────────────────
+// "still it doesnt use the full screen", in the installed app. The suspicion is that the
+// shell's `height: 100dvh` resolves SHORTER than the physical screen in iOS standalone
+// with a black-translucent status bar — but that is a suspicion, and the only engine that
+// can settle it is the one on the phone. No desktop viewport reproduces it (dvh there is
+// the window), and the home-screen app cannot be driven from here.
+//
+// So the device reports its own geometry, once, after the first layout has settled.
+// Everything is an integer in the PATH, because fleet-serve drops query strings.
+//
+//   ih  innerHeight            sh  screen.height        (CSS px)
+//   sl  the shell's bottom edge                          <- 100dvh, resolved
+//   cb  the composer's bottom edge, when one is drawn
+//   gap innerHeight - the lowest painted edge            <- the band, measured
+//   sat/sab  the safe-area insets this page actually resolves
+//
+// If `sl` comes back short of `sh` by about a status bar, the suspicion is the cause and
+// the shape has to stop being sized by dvh. If they match, it is something else and this
+// says so before anything is changed.
+//   IT WAITS FOR THE SHELL. `#app` only carries `.shell` — and therefore `height: 100dvh`
+// — once a real screen is drawn; on the lock screen it is content-height, so a report sent
+// at load measures the lock screen and says nothing about the thing under suspicion.
+// Measured locally: it came back sl524 against ih844, which is the ship and two buttons,
+// not a viewport. So it retries until the shell exists and gives up rather than lying.
+//   ONCE PER SCREEN, NOT ONCE PER LAUNCH. The first version reported whichever shell
+// appeared first, which is the grid — and the grid has no composer, so it came back cb0
+// gap0 and said nothing about the thing the band is under. The composer only exists on the
+// chat screen, so the measurement has to be taken there too. Keyed by screen so a launch
+// that visits both sends both, and neither repeats on the 5s poll.
+const geoSent = new Set();
+let geoTries = 0;
+function reportGeometry() {
+  const el = document.getElementById('app');
+  const where = S.screen;
+  if (!el || !el.classList.contains('shell')) {
+    if (++geoTries < 40) setTimeout(reportGeometry, 1500);
+    return;
+  }
+  if (geoSent.has(where)) return;
+  geoSent.add(where);
+  try {
+    const shell = el;
+    const comp = document.querySelector('.composer');
+    // env() cannot be read directly; a throwaway element resolves it for us.
+    const probe = document.createElement('div');
+    probe.style.cssText = 'position:fixed;left:-9999px;top:0;'
+      + 'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
+    document.body.appendChild(probe);
+    const ps = getComputedStyle(probe);
+    const sat = Math.round(parseFloat(ps.paddingTop) || 0);
+    const sab = Math.round(parseFloat(ps.paddingBottom) || 0);
+    probe.remove();
+    const r = shell.getBoundingClientRect();
+    const c = comp ? comp.getBoundingClientRect() : null;
+    const low = c ? c.bottom : (r ? r.bottom : 0);
+    const sa = (mmStandalone() || navStandalone()) ? 1 : 0;
+    api.diag('geo', where, 'sa' + sa, 'mm' + (mmStandalone() ? 1 : 0), 'ns' + (navStandalone() ? 1 : 0), 'ih' + Math.round(innerHeight), 'sh' + Math.round(screen.height),
+             'sl' + Math.round(r ? r.bottom : 0), 'cb' + Math.round(c ? c.bottom : 0),
+             'gap' + Math.round(innerHeight - low), 'sat' + sat, 'sab' + sab);
+  } catch {}
+}
+
+function lock(why = 'x') {
+  api.diag('lock', why, 'tok' + (api.haveToken() ? 1 : 0), 'pend' + (swReloadPending ? 1 : 0));
+  S.locked = true; api.clearToken(); render();
+  // The session just ended, so a swap that was waiting for it is free now — and this is
+  // the moment the poll cannot cover, because the poll does not run while locked. Without
+  // this, deferring under a live session would defer until the next cold open.
+  takeNewClientIfIdle();
+}
 
 // ── tiny DOM ──────────────────────────────────────────────────────────────
 function el(tag, attrs = {}, kids = []) {
@@ -235,6 +320,35 @@ function toast(text, kind = '') {
 // bars, and the grid has a card list under a header — both are columns of a known height,
 // which is what stops the layout moving on a poll.
 const SHELL_SCREENS = new Set(['session', 'grid', 'projects']);
+// The screens are a STACK, and the depth is what makes a transition directional: the only
+// thing motion can say here that a static swap cannot is which way you went.
+const SCREEN_DEPTH = { projects: 0, grid: 1, session: 2 };
+// ONLY ON A REAL SCREEN CHANGE. render() runs on the 5s poll and after every verb, so
+// animating on render would re-run the slide every five seconds on a screen nobody moved
+// away from — the Preact path deliberately does not even empty #app, for the same reason.
+let navFrom = null, navTimer = null;
+function markNav(app, screen) {
+  if (navFrom === screen) return;
+  const from = navFrom; navFrom = screen;
+  if (from === null) return;                       // the first paint is an arrival, not a move
+  const d = (SCREEN_DEPTH[screen] ?? 0) - (SCREEN_DEPTH[from] ?? 0);
+  if (!d) return;
+  try {
+    app.classList.remove('nav-fwd', 'nav-back');
+    // Reading offsetWidth restarts a CSS animation that is already on the element —
+    // without it, walking two screens in under 160ms plays the second one not at all.
+    void app.offsetWidth;
+    app.classList.add(d > 0 ? 'nav-fwd' : 'nav-back');
+    clearTimeout(navTimer);
+    navTimer = setTimeout(() => { try { app.classList.remove('nav-fwd', 'nav-back'); } catch {} }, 260);
+  } catch {}
+}
+// THE TWO SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
+const PREACT_SCREENS = new Set(['projects', 'grid']);
+// Whether Preact currently owns #app. Not derivable from S.screen: the screen can change
+// in the same breath as the lock, and what has to be known here is who put the nodes on
+// screen, not who would put them there now.
+let preactUp = false;
 function render() {
   const app = document.getElementById('app');
   // Toggled on <html> as well: the page must not scroll behind a screen that owns the
@@ -246,16 +360,63 @@ function render() {
     app.classList.toggle('shell', shell);
     document.documentElement.classList.toggle('shell', shell);
   } catch {}
+  if (shell) {
+    markNav(app, S.screen);
+    // A screen this launch has not measured yet gets measured, once it has settled.
+    if (!geoSent.has(S.screen)) { geoTries = 0; setTimeout(reportGeometry, 900); }
+  } else navFrom = null;
+  // ── the Preact screens ─────────────────────────────────────────────────────────────
+  // They DIFF, so this path must not empty #app first: the whole gain is that the .cards
+  // node survives the 5s poll and keeps the reader's scroll position instead of being
+  // rebuilt at scrollTop 0. Emptying happens exactly once, on the way IN from a screen this
+  // file draws, and then never again while a card screen is up — INCLUDING across the walk
+  // from Projects into a project, which is a screen change Preact handles by keying the two
+  // apart (see screens.jsx) rather than by wiping the container out from under it.
+  //   Preact renders a fragment straight into #app rather than into a host div, and that is
+  // not a style choice: app.css reaches the bands with CHILD selectors
+  // (`#app.shell > .cards`, `> .hdr`, `> .verbs`), so one div of nesting would stop the
+  // card list being the screen's scrolling region and let the whole page scroll.
+  if (!S.locked && PREACT_SCREENS.has(S.screen)) {
+    if (!preactUp) {
+      app.textContent = '';
+      paneBoxNode = paneNode = paneGeomNode = null;
+      composerNode = null;
+      preactUp = true;
+    }
+    screensUI.mount(app, S.screen, S.screen === 'grid' ? gridProps() : projectsProps());
+    renderSheet();
+    syncPanePoll();
+    return;
+  }
+  // LEAVING IT IS AN UNMOUNT, NOT A `textContent = ''`. Clearing the container behind
+  // Preact's back leaves it holding a vnode tree whose DOM is gone, and the next time this
+  // screen opens it diffs against nodes that no longer exist. Rendering null is what tears
+  // the tree down — and it has to happen BEFORE the wipe below, while the nodes are still
+  // there to be removed.
+  if (preactUp) { screensUI.unmount(app); preactUp = false; }
   app.textContent = '';
   // The pane's nodes are about to be thrown away; drop the references with them, so a
   // poll that lands mid-render patches nothing rather than a detached <pre>.
   paneBoxNode = paneNode = paneGeomNode = null;
   composerNode = null;                      // re-set by composer() if this render draws one
   if (S.locked) { app.append(lockScreen()); renderSheet(); syncPanePoll(); return; }
-  if (S.screen === 'projects') app.append(...projectsScreen());
-  else if (S.screen === 'grid') app.append(...gridScreen());
-  else app.append(...sessionScreen());
-  if (S.toast) app.append(el('div', { class: 'toast ' + S.toast.kind, text: S.toast.text }));
+  // Only the session screen reaches here now: `projects` and `grid` returned above, and
+  // the lock screen returned above that. Left as a bare call rather than a ternary with one
+  // live arm, which would read as a choice that no longer exists.
+  const screen = sessionScreen();
+  // THE TOAST GOES ABOVE THE COMPOSER, IN FLOW — it is a band of the shell column now, not
+  // a fixed overlay, so where it sits in this array is where it sits on screen. Appending
+  // it last put it BELOW the input on the session screen, which with the old
+  // `position: fixed` meant it landed on top of the input and the newest message:
+  // "dont blok the chat with toasts". Splicing it in front of the composer is what makes
+  // overlap impossible rather than merely unlikely — the scroller above simply gets shorter
+  // by the toast's height for as long as it is up.
+  if (S.toast) {
+    const t = el('div', { class: ('toast ' + (S.toast.kind || '')).trim(), text: S.toast.text });
+    const ci = screen.findIndex(n => n && n.classList && n.classList.contains('composer'));
+    if (ci >= 0) screen.splice(ci, 0, t); else screen.push(t);
+  }
+  app.append(...screen);
   renderSheet();
   // Every state change that matters to the pane's timer — the screen, the view, a sheet,
   // a confirmation, the lock — has already been applied by the time we get here, which is
@@ -263,39 +424,36 @@ function render() {
   syncPanePoll();
 }
 
-// The banner does not fit a phone — bannerFits() wants 76 columns and 26 rows — so the
-// phone gets exactly what a narrow terminal gets: the one-line header. Split over two
-// rows only because 60 columns of it will not fit in 32, which is the same split the
-// TUI itself makes when it draws the ship beside the counts.
-function header(counts) {
-  const scope = S.screen === 'projects'
-    ? el('span', { class: 'scope', text: '— projects' })
-    : el('span', { class: 'scope', text: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]` });
-  const kids = [el('span', { class: 'name', text: 'ghostfleet' }), scope, modeChip()];
-  if (counts) {
-    const c = el('span', { class: 'counts' });
-    for (const seg of G.countsSegments(counts)) {
-      c.append(el('span', { style: seg.color ? `color:${G.COLORS[seg.color]}` : null, text: seg.text }));
-    }
-    kids.push(c);
-  }
-  const rows = [el('div', { class: 'hdr' }, kids)];
-  if (S.stale) rows.push(el('div', { class: 'stale', text: `⚠ offline — last fetched ${G.clockLabel(S.stale)}` }));
-  return rows;
-}
-
+// header() USED TO LIVE HERE AND IS GONE. It drew the one-line header for the two screens
+// that were not ported; gridScreen() was its last caller, and porting the grid took that
+// caller with it. The header is now drawn once, by screens.jsx's Header, from the same data
+// — which is the point of the port and not a side effect of it: two renderers each holding
+// their own copy of `[profile:project] ⚠ offline …` is how a header comes to say different
+// things on two screens without anybody being able to see it happen.
 // WHICH FLEET AM I LOOKING AT — on every screen, without opening settings. The lock
 // screen has always said it, and the lock screen is the one thing you dismiss: the phone
 // that was shown four fictional projects had gone past it, and the only clue left was
 // recognising the project names. So the answer lives in the header, which every screen
 // draws, and it names the ORIGIN rather than saying "server" — two fleets are two
 // origins, and "server" would not tell them apart.
-function modeChip() {
+// SPLIT INTO THE ANSWER AND THE DRAWING OF IT, because two screens now draw it with two
+// renderers. The ported Projects screen builds this span in Preact and the grid and session
+// screens build it with el(); if each decided for itself what "server" is called, the
+// header would name the fleet differently depending on which screen you were looking at.
+// The words are decided once, here.
+function modeSpec() {
   const r = api.resolution();
-  const text = r.mode === 'server' ? '\u25cf ' + api.modeLabel()
-             : r.mode === 'probing' ? '\u2026 looking for a fleet'
-             : '\u26a0 fixtures';
-  return el('span', { class: 'mode ' + r.mode, text, title: r.detail });
+  return {
+    kind: r.mode,
+    detail: r.detail,
+    text: r.mode === 'server' ? '\u25cf ' + api.modeLabel()
+        : r.mode === 'probing' ? '\u2026 looking for a fleet'
+        : '\u26a0 fixtures',
+  };
+}
+function modeChip() {
+  const m = modeSpec();
+  return el('span', { class: 'mode ' + m.kind, text: m.text, title: m.detail });
 }
 
 // ── the projects screen, and its tabs ─────────────────────────────────────
@@ -319,9 +477,69 @@ const PROFILE_ALL = 'all';
 // text — `ghostfleet <profile>` takes any name — so the tabs are DERIVED and a profile
 // nobody anticipated gets its own tab rather than disappearing.
 const profileOf = (p) => (p && p.profile) || 'work';
-function profileTabs(projects) {
+
+// ── the demo fleet, and when it is in the way ─────────────────────────────
+// "hide the demo account from the real phone."
+//
+// THIS IS THE ONLY MERGED SCREEN, which is why the demo shows up here and on no other
+// screen. Every screen a person browses is scoped to ONE profile — bin/ghostfleet sets
+// PROJECTS_CFG per profile, fleet-grid's pBuild() reads that one file, and the stack
+// screen reads it too — so a `demo` profile is invisible at the desk unless you type
+// `ghostfleet demo`. /api/projects merges every projects.* file (mcp/fleet-dispatch.mjs),
+// and this list is what that returns. So this is not a phone-specific carve-out: it is
+// the one SCREEN the merge reaches.
+//   OTHER MERGED READERS EXIST AND MUST STAY COMPLETE. `fleet-project list`, `rm` and
+// `agent` walk every profile on purpose, bin/ghostfleet walks them to explain an unknown
+// profile, and the MCP's projects() does too. Those are explicit enumerations — you asked
+// for every project — and a demo row hidden from them is one you can no longer see or
+// remove. Hiding belongs in the surface somebody BROWSES, never in the data underneath.
+//
+// THE RULE IS DERIVED, NOT CONFIGURED: the demo is hidden once there is real work to hide
+// it from, and shown IN FULL when it is all there is. A setting would be a second thing to
+// keep in step with a file anyone can edit by hand, and this cannot go stale — it is the
+// same shape as the tab strip below, which does not draw itself when there is only one
+// profile to choose.
+//   THE CASE THIS IS OPTIMISED FOR IS THE NEW USER. Somebody who followed the README ran
+// `ghostfleet demo` and has nothing else; hiding it from THEM would open the app on an
+// empty screen and undo the first-run flow that put them there. A rule that makes the demo
+// invisible to the person it was built for is worse than the bug it fixes, so the "all
+// there is" branch is the one that comes first here.
+//
+// It costs a false positive: somebody whose OWN profile is called `demo` sees it hidden on
+// the phone once they have other projects. `demo` is the name bin/fleet-demo writes and
+// bin/ghostfleet documents as the profile that builds itself, so it is ours by convention
+// — and the recovery is to call the profile something else. Recorded because it is a real
+// case, not because it is a likely one.
+const DEMO_PROFILE = 'demo';
+const isDemo = (p) => profileOf(p) === DEMO_PROFILE;
+export function demoHidden(projects) {
+  const all = projects || [];
+  return all.some(isDemo) && all.some(p => !isDemo(p));
+}
+// Every row keeps the index it has in the WHOLE list. Hiding is a DRAWING decision, the
+// same as a tab — see the address note above: the digit on a card is what `Ctrl-f <p>`
+// counts at the desk and what the number key opens here, and `list` in the key handler is
+// deliberately the unfiltered one. Filter the array the index counts and every card after
+// the demo block is renamed, which is the one thing this screen must never do.
+// The need count behind a tab's ● badge. Over the SHOWN rows, for the same reason the
+// tabs are built from them: an `all` badge that includes a hidden demo advertises a
+// blocked project with no card anywhere to open — the "a tab can hide the answer" failure
+// this count exists to prevent, arriving from the other side.
+export function tabNeed(projects, name) {
+  return shownProjects(projects)
+    .filter(({ p }) => name === PROFILE_ALL || profileOf(p) === name)
+    .reduce((n, { p }) => n + (((p.sessions || {}).need) || 0), 0);
+}
+export function shownProjects(projects) {
+  const rows = (projects || []).map((p, i) => ({ p, i }));
+  return demoHidden(projects) ? rows.filter(({ p }) => !isDemo(p)) : rows;
+}
+export function profileTabs(projects) {
   const seen = [];
-  for (const p of projects || []) { const k = profileOf(p); if (!seen.includes(k)) seen.push(k); }
+  // Built from what is DRAWN, so a hidden demo takes its tab with it. Leaving the tab
+  // would answer "hide the demo" with the word `demo` still on screen, one tap from the
+  // thing that was meant to be gone.
+  for (const { p } of shownProjects(projects)) { const k = profileOf(p); if (!seen.includes(k)) seen.push(k); }
   return seen;                     // in the projects file's own order, which is the address order
 }
 // Every entry carries the index it has in the WHOLE list, because that index is the name.
@@ -329,10 +547,13 @@ function profileTabs(projects) {
 // restore (below), and this is the second line of defence, because the one thing this
 // must never do is draw an empty screen over a fleet that has projects in it.
 function visibleProjects() {
-  const all = S.projects || [];
-  const rows = all.map((p, i) => ({ p, i }));
+  const rows = shownProjects(S.projects || []);
   if (S.profile === PROFILE_ALL) return rows;
   const mine = rows.filter(({ p }) => profileOf(p) === S.profile);
+  // The fallback is why this cannot leak the demo back: a stored `demo` tab survives in
+  // S.profile until the next load clamps it (see restore), and while it does, `mine` is
+  // empty — so this returns the SHOWN rows rather than the raw list. Returning `all` here
+  // would put the demo back on screen at the one moment the user is on its tab.
   return mine.length ? mine : rows;
 }
 function setProfile(name) {
@@ -344,48 +565,82 @@ function setProfile(name) {
   save();
   render();
 }
-function projectsScreen() {
-  const out = header(null);
-  const list = el('div', { class: 'cards' });
+// THIS SCREEN IS DRAWN BY PREACT, and this function is everything the components need to
+// know. It builds no boxes: web/src/screens.jsx owns the header, the tab strip, the
+// .cards container, the verbs and the hint, and the seam between the two is written out at
+// the top of that file. What stays here is the part that is SHARED with the grid screen —
+// the card and its four gestures — plus every string, because §7's guardrails are the
+// TUI's own words and pwa-check reads them out of this file.
+function projectsProps() {
   const projects = S.projects || [];
-  const tabs = profileTabs(projects);
-  // NO STRIP WHEN THERE IS NO CHOICE. One profile is the common case — everything is
-  // 'work' — and a control whose only option is the one you are already on is furniture.
-  if (tabs.length > 1) {
-    out.push(el('div', { class: 'seg tabs' }, [PROFILE_ALL, ...tabs].map(t => {
+  const names = profileTabs(projects);
+  // THE CURSOR CANNOT SIT ON A CARD NOBODY DRAWS. S.sel is a global index and starts at 0,
+  // which is normally the first work project — but the merged order is the work file and
+  // then projects.* alphabetically, so an empty work file puts a `demo` row at index 0
+  // while personal projects exist further down. The cursor would then be on a hidden card:
+  // no ring anywhere, and `⏎ open` acting on a project that is not on screen. Same clamp
+  // the file already applies on the grid screen, for the same reason.
+  const shown = shownProjects(projects);
+  if (shown.length && !shown.some(v => v.i === S.sel) && S.sel !== projects.length) S.sel = shown[0].i;
+  return {
+    scope: '— projects',
+    mode: modeSpec(),
+    stale: S.stale,
+    // NO STRIP WHEN THERE IS NO CHOICE. One profile is the common case — everything is
+    // 'work' — and a control whose only option is the one you are already on is furniture.
+    // The component redraws nothing when this is null.
+    tabs: names.length > 1 ? [PROFILE_ALL, ...names].map(name => ({
+      name,
+      on: S.profile === name,
       // THE NEED-YOU COUNT RIDES ON THE TAB, and only when it is not zero. §1 says this
       // app exists to answer "is anything blocked on me", and a tab is the one control
       // here that can HIDE the answer — a blocked project in the other profile would be
       // off screen with nothing anywhere to say so, which is the same failure as the
       // summary reading "0 need you" over a blocked lead. Silent when there is nothing
       // to report, so the strip stays a chooser rather than a dashboard.
-      const need = projects.filter(p => t === PROFILE_ALL || profileOf(p) === t)
-                           .reduce((n, p) => n + (((p.sessions || {}).need) || 0), 0);
-      return btn(need ? `${t} ●${need}` : t, () => setProfile(t), S.profile === t ? 'on' : '');
-    })));
-  }
-  for (const { p, i } of visibleProjects()) {
-    const block = G.projectCard(p, i, i === S.sel);   // i is the GLOBAL index, on purpose
-    list.append(cardEl(block, {
-      tap: () => openProject(p.name),
-      longPress: () => { S.confirm = { kind: 'project', name: p.name }; render(); },
-      reorder: d => reorderProject(p.name, d),
-    }, i));
-  }
-  list.append(cardEl(G.addProjectCard(S.sel === projects.length), {
-    tap: () => sheetAddProject(),
-  }, projects.length));
-  out.push(confirmBar(), watchScroll('projects', list));
-  out.push(el('div', { class: 'verbs' }, [
-    btn('⏎ open', () => openProject((projects[S.sel] || {}).name)),
-    // the projects screen schedules a message to THAT project's master
-    btn('s schedule', () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); }),
-    btn(', settings', () => sheetSettings()),
-    btn('x remove', () => { const p = projects[S.sel]; if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } }, 'danger'),
-  ]));
-  out.push(el('div', { class: 'hint', text: 'tap a project · long-press to remove it from the list · drag its title to reorder' }));
-  return out.filter(Boolean);
+      need: tabNeed(projects, name),
+    })) : null,
+    onTab: setProfile,
+    confirm: confirmSpec(),
+    // ── the seam ────────────────────────────────────────────────────────────────────
+    // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
+    // the list and is told nothing else about them; see web/src/screens.jsx.
+    // NULL, NOT EMPTY, is the difference between "still asking" and "you have no projects".
+    // An empty list is a real answer and gets the first-run path; a null one has not been
+    // answered yet and gets the wait.
+    cards: S.projects == null ? skeletonCards(4) : [
+      ...visibleProjects().map(({ p, i }) =>
+        // i is the GLOBAL index, on purpose
+        cardEl(G.projectModel(p, i, i === S.sel), {
+          tap: () => openProject(p.name),
+          longPress: () => { S.confirm = { kind: 'project', name: p.name }; render(); },
+          reorder: d => reorderProject(p.name, d),
+        }, i)),
+      cardEl(G.addProjectModel(S.sel === projects.length), {
+        tap: () => sheetAddProject(),
+      }, projects.length),
+    ],
+    // THE SCROLL MEMORY STAYS HERE, and it is still the same one call that does both
+    // halves. It fires once, when Preact creates the list, rather than on every render —
+    // because the list is no longer rebuilt on every render, which is the thing this whole
+    // port is meant to demonstrate. What it still has to do is restore a position after
+    // the screen has been LEFT and come back to.
+    listRef: (list) => { if (list) watchScroll('projects', list); },
+    // BEHIND THE `⋯`, NOT A FOOTER. Same verbs, same words — this is still screen verbs
+    // only, and `remove` is still here rather than in a per-card sheet because a project
+    // has no such sheet, and it is still gated by the confirm bar carrying the TUI's own
+    // question. What changed is where you reach them from.
+    onMore: () => sheetMore('actions', '— projects', [
+      { label: 'open', cls: 'go', onClick: () => openProject((projects[S.sel] || {}).name) },
+      // the projects screen schedules a message to THAT project's master
+      { label: 'schedule', onClick: () => { const p = projects[S.sel]; if (p) sheetSchedule('master', p.name); } },
+      { label: 'settings', onClick: () => sheetSettings() },
+      { label: 'remove', cls: 'danger', onClick: () => { const p = projects[S.sel]; if (p) { S.confirm = { kind: 'project', name: p.name }; render(); } } },
+    ], PROJECTS_HINT),
+    toast: S.toast,
+  };
 }
+const PROJECTS_HINT = 'tap a project · long-press to remove it from the list · drag its title to reorder';
 // `Q` / Ctrl-p jumps straight to Projects from anywhere, which is neither forward nor
 // back. Unwinding our own entries keeps the stack honest: pushing here would leave the
 // gesture retracing grid → session screens you have already left, and leaving the stack
@@ -445,59 +700,126 @@ function items() {
     { newCard: true },
   ];
 }
-function gridScreen() {
+// The four counts that fit a phone row, each a tile. ONLY A NON-ZERO COUNT IS COLOURED:
+// a strip where every tile is lit says nothing, and the question this app exists to answer
+// is which one is not zero. The hue is the status's own — the same one the card's rail and
+// chip use — so the strip and the cards teach one colour vocabulary.
+const STRIP = [
+  ['need you', 'need_you', 'red'],
+  ['working', 'working', 'cyan'],
+  ['ready', 'ready', 'green'],
+  ['parked', 'parked', 'grey'],
+];
+// THE FOUR WORDS STAY IN THIS FILE, and the tiles cross the seam as data. §7 is that the
+// guardrails ARE the TUI's own prompts, and what enforces it is pwa-check grepping
+// web/app.js for that wording — so a label moved into screens.jsx is a label that check can
+// no longer see. screens.jsx's CountStrip draws boxes and is handed the words, the numbers
+// and the resolved hue; it writes none of the three.
+function stripTiles(counts) {
+  const c = counts || {};
+  return STRIP.map(([label, key, color]) => ({ label, n: c[key] || 0, color: G.COLORS[color] }));
+}
+
+// ── the grid screen, as props ─────────────────────────────────────────────
+// PROPS, NOT NODES, AND THAT IS THE WHOLE FIX. This used to be gridScreen(), which built a
+// fresh div.cards on every call — and render() is called by the 5s poll. A fresh element
+// starts at scrollTop 0, so the scroll memory had to RESCUE the reader's position after
+// every poll, racing layout to do it before the eye caught up. Reported from a real iPhone:
+// "i scroll the sessions and after some seconds it goes all the way up again". Now the
+// container is Preact's and outlives the render, so there is no position to rescue.
+function gridProps() {
   const g = S.grid || { cards: [], free_worktrees: [] };
+  const its = items();
   // buildItems() clamps `sel` after every rebuild, and so does this: a session that was
   // stopped while you were on another screen leaves the selection past the end, and every
   // verb in the footer then acts on `undefined` — silently, since each one guards.
-  S.sel = Math.max(0, Math.min(S.sel, items().length - 1));
+  S.sel = Math.max(0, Math.min(S.sel, its.length - 1));
   // From the CARDS, as renderGrid does, so the summary cannot disagree with what is
   // under it. §4 ships `counts` as well; if the two ever differ, the cards win —
   // they are what you can see.
-  const out = header(G.countsFrom(g.cards || []));
-  out.push(confirmBar());
-  const list = el('div', { class: 'cards' });
-  const its = items();
-  its.forEach((it, idx) => {
-    const sel = idx === S.sel;
-    if (it.newCard) {
-      list.append(cardEl(G.newCardLines(sel), { tap: () => sheetPicker() }, idx));
-    } else if (it.freeWt) {
-      list.append(cardEl(G.freeCardLines(it.freeWt, sel, idx), {
-        tap: () => sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path }),
-        longPress: () => askRemoveWorktree(it.freeWt),
-      }, idx));
-    } else {
+  // THE SUMMARY AS NUMBERS, NOT AS A SENTENCE. `0 need you · 2 working · 5 ready` is a
+  // clause you have to read to the end before you know whether it concerns you; four tiles
+  // are a thing you glance at, and the one that matters is the one that is not zero.
+  //   The WORDS and the ARITHMETIC are unchanged — countsFrom() over the cards, and the
+  // TUI's own vocabulary — so the strip and the desk's header cannot disagree. The header
+  // still gets the same counts and still draws them, because on a narrow screen the strip
+  // is the glance and the header line is the detail (interrupted, at limit, parked, which
+  // are appended only when non-zero and would make four tiles into eight).
+  const counts = G.countsFrom(g.cards || []);
+  const sel = its[S.sel] || {};
+  return {
+    scope: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]`,
+    mode: modeSpec(),
+    stale: S.stale,
+    // WORDED AND COLOURED HERE, drawn there. countsSegments() is grid.js's, so the phone's
+    // header and the desk's are the same sentence; the palette lookup happens on this side
+    // of the seam so that screens.jsx contains no hex at all.
+    counts: G.countsSegments(counts).map(seg => ({ text: seg.text, color: seg.color ? G.COLORS[seg.color] : null })),
+    strip: stripTiles(counts),
+    confirm: confirmSpec(),
+    // ── the seam ────────────────────────────────────────────────────────────────────
+    // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
+    // the list and is told nothing else about them; see web/src/screens.jsx.
+    // Same rule as the projects screen: a null grid has not been answered yet, an empty one
+    // has. `its` always carries the `+ new session` card, so length alone cannot tell them
+    // apart — ask S.grid itself.
+    cards: S.grid == null ? skeletonCards(6) : its.map((it, idx) => {
+      const isSel = idx === S.sel;
+      if (it.newCard) return cardEl(G.newModel(isSel), { tap: () => sheetPicker() }, idx);
+      if (it.freeWt) {
+        return cardEl(G.freeModel(it.freeWt, isSel, idx), {
+          tap: () => sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path }),
+          longPress: () => askRemoveWorktree(it.freeWt),
+        }, idx);
+      }
       const c = it.card;
-      list.append(cardEl(G.cardLines(c, sel, idx), {
-        tap: () => openSession(c.name),
+      return cardEl(G.cardModel(c, isSel, idx), {
+        tap: () => (c.asleep ? wakeSession(c.name) : openSession(c.name)),
         longPress: () => askKill(c.name),
         swipeLeft: () => pauseSession(c.name),
         swipeRight: () => resumeSession(c.name),
         reorder: d => reorder(c.name, d),
-      }, idx));
-    }
-  });
-  out.push(watchScroll('grid', list));
-  const it = its[S.sel] || {};
-  out.push(el('div', { class: 'verbs' }, [
-    btn('⏎ enter', () => { if (it.card) openSession(it.card.name); else if (it.freeWt) sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path }); else sheetPicker(); }),
-    btn('n new', () => sheetPicker()),
-    btn('w worktree', () => sheetWorktree()),
-    btn('s sched', () => { if (it.card) sheetSchedule(it.card.name); }),
-    btn('p pause', () => { if (it.card) pauseSession(it.card.name); }),
-    btn('P resume', () => { if (it.card) resumeSession(it.card.name); }),
-    // The footer says which `x` means right now, exactly as the TUI's does, because
-    // finding out by pressing it costs a worktree — and on the lead it means nothing at
-    // all, which is worth saying before the tap rather than in the toast after it.
-    btn(it.freeWt ? 'x remove wt' : it.card?.lead ? 'x — not the lead' : 'x kill',
-        () => { if (it.card) askKill(it.card.name); else if (it.freeWt) askRemoveWorktree(it.freeWt); }, 'danger'),
-    btn(', settings', () => sheetSettings()),
-    btn('Q projects', () => toProjects()),
-  ]));
-  out.push(el('div', { class: 'hint', text: 'tap a card · swipe ← pause · swipe → resume · long-press = x · drag a card\'s title to reorder' }));
-  return out.filter(Boolean);
+      }, idx);
+    }),
+    // ONCE, WHEN PREACT BUILDS THE LIST — not on every render, which is what the old
+    // `out.push(watchScroll('grid', list))` amounted to. What it still has to do is restore
+    // a position after the screen has been LEFT and come back to; what it no longer has to
+    // do is rescue one from a rebuild that no longer happens.
+    listRef: (list) => { if (list) watchScroll('grid', list); },
+    // ── the footer: touch targets, and only the SCREEN's verbs ────────────────
+    // Nine key-letter buttons wrapped to three rows, ate ~190px and overlaid the last card.
+    // The letters were muscle memory borrowed from the TUI, and there is no keyboard on a
+    // phone for them to transfer to.
+    //   WHAT SPLIT THEM: a verb that acts on the SCREEN stays in the footer; a verb that
+    // acts on the SELECTED CARD moves into that card's actions sheet, behind `more`. That is
+    // not just tidying — a footer button that acts on whatever happens to be selected is the
+    // control most likely to be pressed against the wrong thing, and the sheet names the
+    // session in its title before it offers anything destructive.
+    //   The gestures that already existed cover the common two without either: swipe ←
+    // pause, swipe → resume, long-press = x. The sheet's last line says so.
+    //   AND THE FOOTER ITSELF IS GONE. Two rows of 44px plus a three-line hint was 179 of
+    // 844 points, 21% of the screen, and the card list got 536 — three of nine sessions.
+    // The verbs are the same verbs with the same words, reached from the `⋯` in the header,
+    // which is the control the session screen has had since #7.
+    onMore: () => sheetMore('actions', `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]`, [
+      { label: 'open', cls: 'go',
+        onClick: () => { if (sel.card) openSession(sel.card.name); else if (sel.freeWt) sheetName({ cwd: sel.freeWt.path, name: G.basename(sel.freeWt.path), reuse: sel.freeWt.path }); else sheetPicker(); } },
+      { label: 'new', onClick: () => sheetPicker() },
+      { label: 'worktrees', onClick: () => sheetWorktree() },
+      // Only when there is something for it to act on — see sheetMore on why a disabled
+      // row earns a line in a footer and not in a sheet.
+      sel.card ? { label: 'more', onClick: () => sheetActions(sel.card.name) }
+               : { label: 'more', cls: 'off', onClick: () => {} },
+      { label: 'settings', onClick: () => sheetSettings() },
+      { label: 'projects', onClick: () => toProjects() },
+    ], GRID_HINT),
+    toast: S.toast,
+  };
 }
+// THE GRID'S HINT, STILL THIS FILE'S STRING. It is the TUI's own wording (§7) and pwa-check
+// greps web/app.js for it; it moved out of a permanent band and into the sheet, not out of
+// this file.
+const GRID_HINT = 'tap a card · swipe ← pause · swipe → resume · long-press = x · drag a card\'s title to reorder';
 
 // ⇧hjkl → drag. reorderSession(name, delta) is the TUI's own move, and at nc = 1 all
 // four of its keys collapse to ±1 — H/L move one card, K/J move one row, and one row
@@ -755,9 +1077,17 @@ function sessionScreen() {
         // of it do not. A lead sits in the main checkout, which is usually named after the
         // project — printing both gave "acme-api · acme-api".
         el('span', { class: 'scope', text: ` ${S.project || ''}${c && c.folder && c.folder !== S.session && c.folder !== S.project ? ' · ' + c.folder : ''}` }),
+        // WHICH FLEET, ON THE DETAIL LINE RATHER THAN AS ITS OWN CONTROL. It was a
+        // top-row flex item and the row could not hold five of them: measured at 390px,
+        // back 27 + name 150 + chip 72 + toggle 101 + ⋯ 27 plus four gaps is 409px in a
+        // 374px box, so it wrapped to THREE rows and 80px — the ⋯ alone on the last one.
+        //   Here it costs the bar no width at all. It sits inside `.st`, which already
+        // ellipsises, so a long tailnet hostname can no longer push the view toggle off
+        // the end; it shortens the line it is on instead. Its own 7em clamp stays, because
+        // the chip must not eat the status and the project either.
+        modeChip(),
       ]),
     ]),
-    modeChip(),
     el('div', { class: 'seg' }, [
       btn('chat', () => setView('chat'), S.view === 'chat' ? 'on' : ''),
       btn('pane', () => setView('pane'), S.view === 'pane' ? 'on' : ''),
@@ -796,8 +1126,53 @@ function setView(v) {
 // with the one button that goes where the answer has to be typed — the pane. The chat is
 // the better place to read a conversation; the pane is the only place to unblock one, and
 // this is the seam between them rather than a thing to discover.
+// ── swipe the transcript to the previous / next session ───────────────────
+// "like the pc app, if u scroll that gets u to the next one" — the phone's j/k.
+//
+// WHY IT IS BOUND TO THE CHAT AND NOT THE SCREEN. The PANE scrolls sideways ON PURPOSE: it
+// is real terminal output, often much wider than a phone, and a horizontal drag there is
+// the reader moving along a line. Binding this to the whole session screen would make one
+// gesture mean two things depending on a view toggle, which is the exact trap the grid's
+// cards already avoid (← / → are pause/resume there, so this could not live on a card
+// either).
+//
+// AND IT IGNORES THE LEFT EDGE. iOS's own back gesture starts there; a swipe that begins
+// within EDGE px is the system's, not ours, and stealing it would break the way out of the
+// screen. Vertical intent wins outright — the transcript scrolls, and a drag that is more
+// down than across is never a session change.
+const SWIPE_NEXT = 60, EDGE = 24;
+function wireSessionSwipe(node) {
+  let x0 = 0, y0 = 0, live = false;
+  node.addEventListener('pointerdown', ev => {
+    live = ev.clientX > EDGE;             // the left edge belongs to the system
+    x0 = ev.clientX; y0 = ev.clientY;
+  });
+  node.addEventListener('pointerup', ev => {
+    if (!live) return;
+    live = false;
+    const dx = ev.clientX - x0, dy = ev.clientY - y0;
+    // Mostly horizontal, and far enough to be deliberate — the same two tests wire() makes
+    // for a card swipe, with the same constants, so the two gestures feel like one gesture.
+    if (Math.abs(dx) < SWIPE_NEXT || Math.abs(dx) <= Math.abs(dy) * 2) return;
+    stepSession(dx < 0 ? 1 : -1);
+  });
+  return node;
+}
+// STOPS AT THE ENDS RATHER THAN WRAPPING. A wrap on a list with no visible edge means a
+// flick at the last session silently shows the first, and the reader has no way to tell
+// that from "it did not move". It also walks the SAME order the grid draws, so the phone's
+// next-session and the desk's j are the same next.
+function stepSession(delta) {
+  const names = items().filter(i => i.card).map(i => i.card.name);
+  const at = names.indexOf(S.session);
+  if (at < 0) return;
+  const to = at + delta;
+  if (to < 0 || to >= names.length) return;
+  openSession(names[to]);
+}
+
 function chatView(card) {
-  const wrap = el('div', { class: 'chat' });
+  const wrap = wireSessionSwipe(el('div', { class: 'chat' }));
   const s = S.sess;
   if (card && card.status === 'need-you') {
     wrap.append(el('div', { class: 'blocked' }, [
@@ -806,7 +1181,15 @@ function chatView(card) {
     ]));
   }
   if (!s) { wrap.append(el('div', { class: 'hint', text: 'reading the transcript…' })); return wrap; }
-  if (s.note) { wrap.append(el('div', { class: 'hint', text: s.note })); return wrap; }
+  // A session that has not taken a turn comes back with total 0 and a `note` — fleet-read's
+  // own words for a terminal: "…is live but has no transcript yet — Send it work: fleet-send
+  // -s … <prompt>". The API keeps the note, because "no messages" and "no transcript yet" are
+  // different facts and a JSON caller may care; the SCREEN does not print it, because it told
+  // a phone user to run a shell command. The composer is right below; say that instead.
+  if (s.note || !(s.messages && s.messages.length)) {
+    wrap.append(el('div', { class: 'hint empty', text: 'No messages yet — send one below' }));
+    return wrap;
+  }
   // Older messages load at the TOP, where they belong in this order — the button is the
   // ceiling of the conversation, not a footer.
   if (s.next_before) {
@@ -942,6 +1325,20 @@ function speakIcon(on) { return iconSvg(ICON_HORN, on ? ICON_STOP : ICON_WAVE); 
 // A DRAWN CAMERA, for the reason #82 drew the speaker: an emoji next to an SVG is two
 // different weights, two colour models and two metrics in one row, and that read as a
 // different control appearing rather than as this one being pressed.
+// ── the footer's icons ARE NOT HERE ANY MORE ──────────────────────────────
+// Eight stroked paths (enter, plus, worktree, more, gear, folder) and vbtn() used to sit
+// here to draw the grid's footer. Porting the grid screen took their only caller, so they
+// are gone and web/src/screens.jsx's ICONS table is now the ONE place a verb's picture is
+// written — which the comment beside that table already claimed while there were plainly
+// two copies of every path in the client. One caller, one table, and `settings` can no
+// longer be two different pictures on two screens.
+//   A CLOCK WAS ALREADY DEAD BEFORE THIS PASS: ICON_CLOCK_C/ICON_CLOCK were declared here
+// and referenced nowhere, left behind when the schedule verb moved to the ported screen.
+// Nothing said so — an unused const is not a warning in a file nobody bundles — which is
+// the small argument for a build step reading this directory one day.
+//   What stays: iconSvg() itself, and the speaker and camera paths below, because turn()
+// and the composer still draw those with el() on screens that are not ported.
+
 const ICON_CAM_BODY = 'M3 8h3.2l1.6-2h8.4l1.6 2H21v11H3z';
 const ICON_CAM_LENS = 'M12 13.4m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0';
 function cameraIcon() { return iconSvg(ICON_CAM_BODY, ICON_CAM_LENS); }
@@ -1090,7 +1487,18 @@ function syncViewport() {
     // layout is dvh now and Safari is allowed to pan. An inset that is briefly wrong is a
     // cosmetic 34px; a height driven by a number that does not reliably revert is a dead
     // screen.
-    document.documentElement.style.setProperty('--kb-inset', keyboard ? '0px' : '');
+    // REMOVED, NOT SET TO EMPTY, and that distinction was costing the home indicator.
+    // `padding-bottom: calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px)` only
+    // reaches its fallback when --kb-inset is ABSENT. setProperty(name, '') does not
+    // reliably remove a custom property in WebKit — it leaves one whose value substitutes
+    // as nothing or as zero — so the fallback never applied and the composer's padding
+    // resolved to 0 + 8.
+    //   MEASURED on the device: gap8 against sab29. Harmless only while the shell stopped
+    // 53pt short of the bottom; the moment it reaches the real bottom, 8px of padding puts
+    // the composer ON the home indicator. The two findings arrived in one log line and had
+    // to be fixed in one change.
+    if (keyboard) document.documentElement.style.setProperty('--kb-inset', '0px');
+    else          document.documentElement.style.removeProperty('--kb-inset');
   } catch {}
 }
 
@@ -1227,8 +1635,38 @@ function reconcilePending() {
 // The ten buttons that used to sit between the card and the conversation. Nothing here is
 // new and nothing was dropped — the lead's three refusals are still absent for the reasons
 // leadGuard documents, and `stop + reclaim` still takes both of the TUI's confirmations.
-function sheetActions() {
-  const c = cardOf(S.session);
+// TAKES THE SESSION IT ACTS ON, rather than reading S.session. The grid's `more` button
+// opens this for the SELECTED card while S.session is still null (nothing is open yet), and
+// a sheet that silently acted on whatever was last opened is the shape that kills the wrong
+// worker. Defaults to S.session so the session screen's own ⋯ is unchanged.
+// ── THE SCREEN'S OWN ACTIONS, WHICH USED TO BE A FOOTER ───────────────────
+// Six buttons in two rows of 44px plus a three-line hint cost 179 of 844 points on the grid
+// — 21% of the screen — and the card list got 536, which fits THREE of nine sessions. They
+// are in here now, behind the `⋯` in the header, and the list is the same list: this takes
+// the `verbs` array the screen was already being handed, so not one label is retyped and
+// every string §7 cares about is still in this file where pwa-check greps for it.
+//   A DISABLED ROW IS NOT WORTH A LINE IN A SHEET. `more` is drawn inert in a footer on
+// purpose — a control that appears and disappears as the selection moves is one you cannot
+// learn the position of — but a sheet is a list you read top to bottom, and an entry that
+// does nothing is just a thing to skip. The footer's reason does not transfer, so the
+// disabled verb is filtered out rather than carried across.
+//   THE GESTURES COME WITH IT. They were a permanent three-line band saying what a swipe
+// and a long-press do; here they are one line at the bottom of the sheet you open when you
+// want to know what you can do, which is the moment they are worth reading.
+function sheetMore(title, sub, verbs, hint) {
+  const go = (fn) => () => { closeSheet(); fn(); };
+  const rows = (verbs || [])
+    .filter(v => v.cls !== 'off')
+    .map(v => btn(v.label, go(v.onClick), v.cls || ''));
+  openSheet(sheet(title, sub, [
+    el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
+    hint ? el('p', { class: 'gest', text: hint }) : null,
+    el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+  ].filter(Boolean)), false);
+}
+
+function sheetActions(name = S.session) {
+  const c = cardOf(name);
   const lead = !!(c && c.lead);
   const parked = c && c.status === 'parked';
   const go = (fn) => () => { closeSheet(); fn(); };
@@ -1236,25 +1674,47 @@ function sheetActions() {
     // The motivating case (§1): a worker blocked on "Allow pnpm test?" since 9pm. That is
     // fleet_answer — keystrokes into a dialog — not a prompt, which would queue behind the
     // block instead of clearing it. It is the first row for that reason.
-    btn('answer keys', go(() => sheetAnswer(S.session))),
+    btn('answer keys', go(() => sheetAnswer(name))),
     lead && !parked ? null
-      : btn(parked ? 'P resume' : 'p pause', go(() => (parked ? resumeSession(S.session) : pauseSession(S.session)))),
-    btn('s sched', go(() => sheetSchedule(S.session))),
-    btn('l label', go(() => sheetLabel(S.session))),
-    lead ? null : btn('r rename', go(() => sheetRename(S.session)), 'danger'),
-    lead ? null : btn('x kill', go(() => askKill(S.session)), 'danger'),
+      : btn(parked ? 'P resume' : 'p pause', go(() => (parked ? resumeSession(name) : pauseSession(name)))),
+    btn('s sched', go(() => sheetSchedule(name))),
+    btn('l label', go(() => sheetLabel(name))),
+    lead ? null : btn('r rename', go(() => sheetRename(name)), 'danger'),
+    lead ? null : btn('x kill', go(() => askKill(name)), 'danger'),
     // §7 puts stop --reclaim on the phone on purpose, and §12 is why it takes two
     // confirmations: fleet-clean's gates decide whether removal is SAFE, never whether
     // it was intended.
-    lead ? null : btn('stop + reclaim worktree', go(() => askReclaim(S.session)), 'danger'),
+    lead ? null : btn('stop + reclaim worktree', go(() => askReclaim(name)), 'danger'),
   ].filter(Boolean);
-  openSheet(sheet('actions', S.session, [
+  openSheet(sheet('actions', name, [
     el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
     lead ? el('p', { text: "the lead cannot be stopped, reclaimed, renamed or paused — every project needs one, and its checkout is the repo itself" }) : null,
     el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
   ].filter(Boolean)), false);
 }
 
+// ── WHAT COMING BACK MEANS, AS A VALUE RATHER THAN AS THREE BRANCHES ──────
+// NAMED AND EXPORTED BECAUSE THE LISTENER BELOW WAS UNREACHABLE FROM THE SUITE. The fake
+// DOM's `document.addEventListener` was a no-op, so this — the one handler in the client
+// that can throw a live session away — had never been executed by a single test, in a repo
+// whose rule is that an assertion is only trusted after it has been watched going red.
+// That is the durable half of this fix: the decision is now a function the suite can ask.
+//
+// 'wait' IS THE CASE THAT WAS MISSING, and it is what the bug was. Face ID is a system
+// sheet: the page goes hidden when it opens and visible again the moment the face matches,
+// which is BEFORE the assertion has crossed the network — so this ran mid-unlock, with no
+// token, and locked the app the user was in the middle of unlocking. lock() also clears the
+// token, so the assertion that landed a second later was minting a session into a client
+// that had just thrown one away. On a fast link it is a flash; over a tailnet the lock
+// screen is up long enough to tap, and tapping it starts the same race again — "i put my
+// face and then it asked me again". A three-state answer is the point: "no token" and "no
+// token YET" are different facts and a two-way test cannot hold both.
+export function onVisibleAction(now = Date.now()) {
+  if (pk.busy()) return 'wait';          // an unlock is in progress; it IS the answer
+  if (S.hiddenAt && now - S.hiddenAt > pk.RELOCK_AFTER_HIDDEN) return 'lock';
+  if (!api.haveToken() && !pk.bypassAllowed()) return 'lock';
+  return 'refresh';
+}
 // ── the pane ──────────────────────────────────────────────────────────────
 // NEVER WRAPPED, NEVER REFLOWED. The pane was captured at the width the desktop layout
 // gave it — 269 columns on this machine's fleets, measured, against a phone's ~40 — and
@@ -1751,9 +2211,30 @@ async function shellVersionOrGuess() {
 
 // Set when a newer service worker has taken control and this page is now the stale one.
 let swReloadPending = false;
+// WHEN IT IS FREE TO SWAP CLIENTS, as a value rather than as a condition inside the
+// caller — the same reason onVisibleAction above is named and exported: the listener that
+// arms this is `controllerchange`, which the suite's DOM does not have, so the decision
+// had never been executed by a single assertion.
+export function reloadAction(pending, typing, authed) {
+  if (!pending) return 'none';
+  if (typing) return 'wait';               // never mid-sentence: a reload eats S.draft
+  // NEVER UNDER A LIVE SESSION, and this is the whole fix. The token is in memory by
+  // design, so a reload ENDS the session — do it while somebody is holding one and they
+  // land on the lock screen they just cleared, and the passkey they just spent bought
+  // them one second of app.
+  //   It used to be guarded on pollPaused(), which counts S.locked as paused. That
+  // deferred the swap while locked and spent it the instant the app unlocked — waiting
+  // for precisely the transition that costs a Face ID. Locked is the FREE moment: there is
+  // no session to lose and the reader is about to authenticate anyway, so the new client
+  // is what they authenticate into.
+  if (authed) return 'wait';
+  return 'reload';
+}
 export function takeNewClientIfIdle() {
-  if (!swReloadPending) return false;
-  if (pollPaused()) return false;          // not while you are typing into it
+  const typing = typingNow(), authed = api.haveToken();
+  const act = reloadAction(swReloadPending, typing, authed);
+  if (swReloadPending) api.diag('swap', act, 'typ' + (typing ? 1 : 0), 'auth' + (authed ? 1 : 0));
+  if (act !== 'reload') return false;
   try { location.reload(); } catch { return false; }
   return true;
 }
@@ -1774,6 +2255,15 @@ export function renderWasDeferred() { return renderDeferred; }
 
 export function pollPaused() {
   if (document.hidden || S.locked || S.sheet || S.confirm) return true;
+  return typingNow();
+}
+// THE TYPING HALF ON ITS OWN. pollPaused() answers "should the 5s poll hold off", and
+// S.locked is a perfectly good reason for that — but it is the WRONG question for the
+// client swap below, which is free precisely when the app is locked. Sharing one
+// implementation of the sentence test keeps the two from drifting; the difference between
+// them is which other states they add to it, and that difference is the bug this split
+// exists to fix.
+export function typingNow() {
   // Typing counts. refresh() ends in a render, render() empties #app and rebuilds it, so
   // a poll that lands while the composer has focus destroys the element the keyboard is
   // attached to. Reported as "it hides the keyboard every time, I cannot type for more
@@ -1847,7 +2337,7 @@ async function readPane() {
     S.pane = j;
     if (S.paneErr) { S.paneErr = ''; renderUnlessTyping(); }
   } catch (e) {
-    if (e instanceof api.AuthError) return lock();
+    if (e instanceof api.AuthError) return lock('poll');
     const msg = e instanceof api.OfflineError
       ? 'offline — this is the last pane captured' : String(e.message || e);
     // Rendered only when it CHANGES. The poll is every two seconds; re-rendering the
@@ -1913,31 +2403,102 @@ function back() {
 }
 
 // ── cards, and the four gestures ──────────────────────────────────────────
-function cardEl(block, h, idx) {
-  const d = el('div', { class: 'card' + (block.selected ? ' sel' : '') + (block.dim ? ' dim' : ''), role: 'button', tabindex: '0' });
-  d.style.setProperty('--c', G.COLORS[block.color] || G.COLORS.grey);
-  // One block span per line and NO newline between them. The spans are display:block, so
-  // they already stack; a literal "\n" inside a <pre> then adds a line box of its own and
-  // the card renders double-spaced — the │ and ╰ stop touching and the box comes apart
-  // into a column of dashes. It looked like a line-height problem and was not.
-  //
-  // Inside a line, every non-ASCII code point goes in its own 1ch box (see cells() in
-  // grid.js): ⧗ measures 1.27 cells and ⏸ 1.05 in every monospace font on this machine,
-  // which is enough to walk a card's right border off the end of its own box.
-  const pre = el('pre');
-  block.lines.forEach((line, i) => {
-    const span = el('span', { class: 'l' + (i === 0 ? ' t' : '') });
-    for (const tok of G.cells(line)) {
-      // `wide` came in with the pane view: cells() now says when tmux gave a character
-      // TWO columns, and the card honours it for the same reason the pane does — one
-      // answer to "how many cells is this", not two that can disagree. No card glyph is
-      // wide today, so this changes nothing on screen and everything about which of the
-      // two files has to be right.
-      span.append(tok.cell ? el('i', { class: tok.wide ? 'c w' : 'c', text: tok.text }) : document.createTextNode(tok.text));
-    }
-    pre.append(span);
+// A SURFACE CARD, NOT BOX ART — and rewritten IN PLACE rather than ported into Preact,
+// which is the seam web/src/screens.jsx documents: Preact owns every box on the screen,
+// this owns what goes inside .cards, and wire() below stays the one gesture machine for
+// both card lists. A redesign lands squarely on that seam, and the cheap half is this one.
+//
+// WHAT WENT AND WHY. The card was a faithful transcription of the TUI: five lines of
+// ╭─╮ in monospace, at a font size fitCards() measured so the art would line up. It cost
+// ~210px to state three short facts, triple-encoded status as border-colour AND glyph AND
+// word, and clipped the agent's last line mid-word at 28 columns — the one line you opened
+// the app to read. The box is gone, the status is one chip, and the message gets two real
+// lines (-webkit-line-clamp: 2 in app.css).
+//
+// WHAT STAYED. Every string still comes from web/grid.js's models, so the phone and the
+// desk cannot disagree about what a card SAYS — only about how it looks, which is the
+// intended difference and what test/helpers/grid-parity.mjs now asserts. The status word
+// is the TUI's own (§7), the 1-9 digit is still the card's address, and `--c` still carries
+// the status hue so one declaration colours the rail, the chip and the selection.
+// ── a card-shaped wait ────────────────────────────────────────────────────
+// Three bars in a card, so the placeholder occupies the layout the real card will. The
+// point is that nothing MOVES when the data lands — the cards swap into boxes the eye is
+// already resting on, instead of appearing under a spinner that was in the middle of an
+// empty screen and pushing everything down.
+//   Built here rather than in the ported screen, and that is a constraint rather than a
+// preference: web/screens.js is vite output and this checkout has no node_modules, so the
+// JSX cannot be rebuilt. The card screens take REAL DOM for their cards (see the seam in
+// projectsProps), which is the one door open from this file.
+function skeletonCards(n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push(el('div', { class: 'card skel', 'aria-hidden': 'true' }, [
+      el('div', { class: 'skel-bar w1' }), el('div', { class: 'skel-bar w2' }), el('div', { class: 'skel-bar w3' }),
+    ]));
+  }
+  return out;
+}
+
+function cardEl(m, h, idx) {
+  const d = el('div', {
+    // `exited` is a CLASS, not a status: the nine statuses say what a running agent is
+    // doing and this one is not running, so it rides beside the status rather than
+    // replacing the vocabulary. app.css dims the card and recolours the chip from it.
+    class: 'card' + (m.selected ? ' sel' : '') + (m.dim ? ' dim' : '') + ` k-${m.kind}`
+           + (m.status ? ` s-${m.status}` : '') + (m.exited ? ' exited' : ''),
+    role: 'button', tabindex: '0',
   });
-  d.append(pre);
+  d.style.setProperty('--c', G.COLORS[m.color] || G.COLORS.grey);
+  // ── the title row: number, name, lead, and when ────────────────────────
+  const top = el('div', { class: 'c-top' });
+  if (m.num != null) top.append(el('span', { class: 'c-num', text: String(m.num) }));
+  top.append(el('span', { class: 'c-name', text: m.title }));
+  if (m.lead) top.append(el('span', { class: 'chip lead', text: 'lead' }));
+  if (m.when) top.append(el('span', { class: 'c-when', text: m.when }));
+  d.append(top);
+  // ── the meta row: the status chip, then where it is, then agent and PR ──
+  const meta = el('div', { class: 'c-meta' });
+  // AN EXITED SESSION'S OLD STATUS IS THE MOST MISLEADING THING THE CARD COULD SAY —
+  // it is whatever the agent was doing at the moment it stopped. The chip is where the
+  // eye already goes for "what is this doing", so it is where "it is not" belongs, and
+  // the status it replaces is gone rather than shown beside it.
+  //   `⏎ resumes` on the desk and `open it and press enter` here are the same route: the
+  // pane is held by bin/agent-here and is already asking for Enter, so the way back in is
+  // the way in. No new verb, no new gesture.
+  // ASLEEP OUTRANKS THE STATUS for the same reason `exited` does: both mean no agent is
+  // running, so the status underneath is the last thing it was doing rather than what it is
+  // doing, and showing it beside "asleep" would read as a live session.
+  //   No new chip colour — the palette is fixed, and a state that needs its own colour to be
+  // understood is a state whose WORDS are wrong. The plain chip plus the line below carries it.
+  if (m.asleep) meta.append(el('span', { class: 'chip st', text: 'asleep' }));
+  else if (m.exited) meta.append(el('span', { class: 'chip st exited', text: 'exited' }));
+  else if (m.statusLabel) meta.append(el('span', { class: 'chip st', text: m.statusLabel }));
+  if (m.where) meta.append(el('span', { class: 'c-where', text: m.where }));
+  if (m.path) meta.append(el('span', { class: 'c-where', text: m.path }));
+  if (m.agent) meta.append(el('span', { class: 'chip tag', text: m.agent }));
+  if (m.pr) meta.append(el('span', { class: 'chip tag', text: m.pr }));
+  if (m.queued) meta.append(el('span', { class: 'chip tag', text: `queued: ${m.queued}` }));
+  if (meta.childNodes.length) d.append(meta);
+  // ── the agent's last line, two real lines of it ─────────────────────────
+  // THE POINT OF THE REDESIGN. Rendered as text, never as markup: this is whatever the
+  // agent last said, and app.css clamps it rather than the client truncating it — so the
+  // browser decides where two lines end, at whatever size the reader has chosen.
+  if (m.asleep) {
+    // The card says what to DO, not what happened to it. An exited card waits for a person
+    // to press enter because a person ended it; this one was ended by the fleet to give the
+    // memory back, so the way home is a tap and the card is the thing that knows it.
+    d.append(el('div', { class: 'c-msg none', text: 'asleep — tap to wake' }));
+  } else if (m.exited) {
+    d.append(el('div', { class: 'c-msg none', text: 'the agent exited — open it and press enter to resume this conversation' }));
+  } else if (m.msg || m.placeholder) {
+    d.append(el('div', { class: 'c-msg' + (m.msg ? '' : ' none'), text: m.msg || m.placeholder }));
+  }
+  // THE GRIP IS STILL EXACTLY ONE LINE, and it is now the title row rather than the top
+  // border. `.c-top` carries `touch-action: none` in app.css so a drag that starts there
+  // reorders, and a vertical drag anywhere else on the card still scrolls the list. That
+  // one-line grip is the reason reorder does not fight the page scroll, so it did not get
+  // wider just because the card got a nicer surface.
+  top.classList.add('t');
   if (idx >= 0) d.dataset.idx = String(idx);
   wire(d, h, idx);
   return d;
@@ -1953,11 +2514,16 @@ function cardEl(block, h, idx) {
 // touch-action:none, so a vertical drag anywhere else on the card still scrolls.
 const LONG_PRESS = 600, MOVE_SLOP = 10, SWIPE = 60;
 function wire(node, h, idx) {
-  let x0 = 0, y0 = 0, t0 = 0, held = false, dragging = false, timer = 0, rowH = 0;
+  // `travelled` is NOT derivable from the pointerup position, and that is the whole reason
+  // this variable exists: a finger that went down, moved 40px and came back to where it
+  // started reports dx = dy = 0 at the end, exactly like one that never moved. They are
+  // different gestures — the second is a tap, the first is a drag the reader thought
+  // better of — and only a flag set DURING the move can tell them apart.
+  let x0 = 0, y0 = 0, t0 = 0, held = false, dragging = false, timer = 0, rowH = 0, travelled = false;
   const clear = () => { clearTimeout(timer); timer = 0; };
   node.addEventListener('pointerdown', ev => {
     if (idx >= 0) { S.sel = idx; markSel(); }
-    x0 = ev.clientX; y0 = ev.clientY; t0 = Date.now(); held = false;
+    x0 = ev.clientX; y0 = ev.clientY; t0 = Date.now(); held = false; travelled = false;
     dragging = !!h.reorder && ev.target.classList.contains('t');
     if (dragging) {
       rowH = node.getBoundingClientRect().height;
@@ -1969,7 +2535,7 @@ function wire(node, h, idx) {
   });
   node.addEventListener('pointermove', ev => {
     const dx = ev.clientX - x0, dy = ev.clientY - y0;
-    if (Math.hypot(dx, dy) > MOVE_SLOP) clear();
+    if (Math.hypot(dx, dy) > MOVE_SLOP) { clear(); travelled = true; }
     if (!dragging) return;
     ev.preventDefault();
     const steps = rowH ? Math.round(dy / rowH) : 0;
@@ -1983,7 +2549,23 @@ function wire(node, h, idx) {
     if (dragging) {
       dragging = false;
       const steps = rowH ? Math.round(dy / rowH) : 0;
-      if (steps) h.reorder(steps);
+      if (steps) { h.reorder(steps); return; }
+      // A PRESS ON THE GRIP THAT NEVER MOVED IS A TAP, NOT A CANCELLED DRAG. This branch
+      // used to `return` on any press of the title line, so the title was a DEAD ZONE: tap
+      // anywhere else on the card and it opens, tap the name and nothing happens at all.
+      // It hid for as long as the card was four identical monospace lines and nobody aimed
+      // at one of them; the redesign made the name the biggest, boldest thing on the card,
+      // which turned the one dead target into the one a thumb goes for.
+      //   TWO CONDITIONS, and the second is the one a naive `steps === 0` check gets wrong.
+      // `steps` is zero both for a finger that never left the grip AND for one that moved
+      // half a row and came back, because both end where they started. Only `travelled`
+      // separates them, and a drag the reader abandoned must do nothing rather than open
+      // the thing they were dragging.
+      //   NO TIME BOUND HERE, unlike the tap below. The grip arms no long-press timer (see
+      // pointerdown), so there is no second meaning for a slow press to collide with — and
+      // a bound would leave a deliberate, slow press on the title still dead, which is the
+      // complaint rather than half of it.
+      if (!travelled && h.tap) { h.tap(); return; }
       return;
     }
     if (held) return;                                        // long-press already fired
@@ -2012,45 +2594,56 @@ function markSel() {
 // Reproduced, not reinvented (§7). "A phone confirmation is a second deliberate tap,
 // and --force needs its own" — so the force step is a DIFFERENT button with a
 // different letter, never a second press of the one that just refused.
-function confirmBar() {
+// THE QUESTION IS DATA, AND THE DRAWING OF IT IS NOT — same split as modeSpec() above, for
+// a sharper reason. §7 says the guardrails ARE the TUI's own prompts, so these strings are
+// the thing pwa-check greps this file for; the Projects screen draws its confirmation in
+// Preact now, and a second copy of `remove 'x' from projects?` over there would be a string
+// that check can no longer see. One spelling, two renderers.
+function confirmSpec() {
   const c = S.confirm;
   if (!c) return null;
+  const yn = 'y = yes · any other key = cancel';
+  const cancelBtn = { label: 'cancel', onClick: cancel };
   if (c.kind === 'kill' || c.kind === 'reclaim-kill') {
-    return bar('red', `kill session '${c.name}'?`, 'y = yes · any other key = cancel', [
-      btn('y = yes', () => c.kind === 'kill' ? confirmedKill(c.name) : askReclaimWorktree(c.name), 'danger'),
-      btn('cancel', cancel),
-    ]);
+    return { cls: 'red', q: `kill session '${c.name}'?`, keys: yn, buttons: [
+      { label: 'y = yes', cls: 'danger', onClick: () => c.kind === 'kill' ? confirmedKill(c.name) : askReclaimWorktree(c.name) },
+      cancelBtn,
+    ] };
   }
   if (c.kind === 'wt') {
-    if (c.busy) return bar('busy', `removing worktree '${G.basename(c.path)}'…`, 'deleting the checkout — this can take a minute on a big one', []);
-    if (c.force) return bar('red', c.msg, 'f = remove anyway · any key = cancel', [
-      btn('f = remove anyway', () => removeWorktree(c, true), 'danger'),
-      btn('cancel', cancel),
-    ]);
-    return bar('red', `remove worktree '${G.basename(c.path)}' (${c.branch})?`, 'y = yes · any other key = cancel', [
-      btn('y = yes', () => removeWorktree(c, false), 'danger'),
-      btn('cancel', cancel),
-    ]);
+    if (c.busy) return { cls: 'busy', q: `removing worktree '${G.basename(c.path)}'…`, keys: 'deleting the checkout — this can take a minute on a big one', buttons: [] };
+    if (c.force) return { cls: 'red', q: c.msg, keys: 'f = remove anyway · any key = cancel', buttons: [
+      { label: 'f = remove anyway', cls: 'danger', onClick: () => removeWorktree(c, true) },
+      cancelBtn,
+    ] };
+    return { cls: 'red', q: `remove worktree '${G.basename(c.path)}' (${c.branch})?`, keys: yn, buttons: [
+      { label: 'y = yes', cls: 'danger', onClick: () => removeWorktree(c, false) },
+      cancelBtn,
+    ] };
   }
   if (c.kind === 'reclaim-wt') {
-    return bar('red', `remove worktree '${c.folder}' (${c.branch})?`, 'y = yes · any other key = cancel', [
-      btn('y = yes', () => confirmedReclaim(c.name), 'danger'),
-      btn('cancel', cancel),
-    ]);
+    return { cls: 'red', q: `remove worktree '${c.folder}' (${c.branch})?`, keys: yn, buttons: [
+      { label: 'y = yes', cls: 'danger', onClick: () => confirmedReclaim(c.name) },
+      cancelBtn,
+    ] };
   }
   if (c.kind === 'project') {
-    return bar('red', `remove '${c.name}' from projects?`, 'y = yes · any other key = cancel', [
-      btn('y = yes', () => doVerb('fleet_project_remove', { name: c.name }).then(cancel), 'danger'),
-      btn('cancel', cancel),
-    ]);
+    return { cls: 'red', q: `remove '${c.name}' from projects?`, keys: yn, buttons: [
+      { label: 'y = yes', cls: 'danger', onClick: () => doVerb('fleet_project_remove', { name: c.name }).then(cancel) },
+      cancelBtn,
+    ] };
   }
   return null;
 }
-function bar(cls, q, keys, buttons) {
-  return el('div', { class: 'confirm ' + cls }, [
-    el('span', { class: 'q', text: ' ' + q }),
-    el('span', { class: 'keys', text: '  ' + keys }),
-    buttons.length ? el('div', { class: 'row' }, buttons) : null,
+function confirmBar() {
+  const s = confirmSpec();
+  return s ? bar(s) : null;
+}
+function bar(s) {
+  return el('div', { class: 'confirm ' + s.cls }, [
+    el('span', { class: 'q', text: ' ' + s.q }),
+    el('span', { class: 'keys', text: '  ' + s.keys }),
+    s.buttons.length ? el('div', { class: 'row' }, s.buttons.map(b => btn(b.label, b.onClick, b.cls || ''))) : null,
   ]);
 }
 function cancel() { S.confirm = null; render(); }
@@ -2087,6 +2680,20 @@ function pauseSession(name) {
 }
 function resumeSession(name) {
   if (name) doVerb('fleet_resume', { project: S.project, session: name });
+}
+// ── waking is NOT resuming, and the two are one letter apart in the UI ────────
+// fleet_resume un-parks a session that is still running. fleet_wake starts a process that
+// is gone and replays its conversation into it, which takes seconds rather than
+// milliseconds and can fail in ways un-parking cannot — a folder that was never trusted, a
+// transcript too large to replay inside the timeout. So the tap goes through the verb and
+// waits for its answer instead of opening optimistically: opening first would show an empty
+// pane for a session that never came back, which is the failure looking exactly like
+// success that this repo keeps paying for.
+async function wakeSession(name) {
+  if (!name) return;
+  const r = await doVerb('fleet_wake', { project: S.project, session: name });
+  if (r && r.ok === false) return;          // doVerb has already surfaced the reason
+  openSession(name);
 }
 
 function askKill(name) { if (name && !leadGuard(name, 'stopped')) { S.confirm = { kind: 'kill', name }; render(); } }
@@ -2146,7 +2753,7 @@ async function doVerb(tool, args, opts = {}) {
     await refresh();
     return r;
   } catch (e) {
-    if (e instanceof api.AuthError) { lock(); return null; }
+    if (e instanceof api.AuthError) { lock('pane'); return null; }
     toast(String(e.message || e), 'bad');
     render();
     return null;
@@ -2202,7 +2809,8 @@ function lockScreen() {
       }, 'go'));
     } else if (pk.available()) {
       row.append(btn('unlock with Face ID', async () => {
-        try { await pk.open(); S.locked = false; render(); refresh(); }
+        try { api.diag('auth', 'start'); await pk.open(); api.diag('auth', 'ok');
+              S.locked = false; render(); refresh(); }
         catch (e) { toast(String(e.message || e), 'bad'); }
       }, 'go'));
     }
@@ -2833,7 +3441,12 @@ function onKey(e) {
   // `+ new project` card, which is always drawn).
   const move = d => {
     let n = S.sel + d;
-    if (S.screen === 'projects' && S.profile !== PROFILE_ALL) {
+    // WAS `S.profile !== PROFILE_ALL`, and a hidden demo is exactly the case that breaks:
+    // on the `all` tab the visible set is now smaller than the list, so the old condition
+    // walked j/k straight onto demo cards that are not drawn — a cursor that disappears,
+    // which is the failure this branch already existed to prevent. Ask whether anything is
+    // hidden, not which tab is on.
+    if (S.screen === 'projects' && visibleProjects().length !== (S.projects || []).length) {
       const stops = [...visibleProjects().map(v => v.i), (S.projects || []).length];
       const at = stops.indexOf(S.sel);
       n = at >= 0 ? stops[at + (d > 0 ? 1 : -1)] : stops[0];
@@ -2939,9 +3552,9 @@ document.addEventListener('visibilitychange', () => {
   // difference between an app that stops polling in a pocket and one that keeps waking
   // the radio every two seconds to decide it should not have.
   if (document.hidden) { S.hiddenAt = Date.now(); stopPanePoll(); return; }
-  if (S.hiddenAt && Date.now() - S.hiddenAt > pk.RELOCK_AFTER_HIDDEN) lock();
-  else if (!api.haveToken() && !pk.bypassAllowed()) lock();
-  else refresh();
+  const act = onVisibleAction();
+  if (act === 'lock') lock('visible');
+  else if (act === 'refresh') refresh();
   syncPanePoll();
 });
 // THE SHELL IS CACHE-FIRST, so a deploy does not reach a phone that already has the app
@@ -2956,16 +3569,59 @@ document.addEventListener('visibilitychange', () => {
 //   Never mid-sentence. A reload throws away S.draft, which lives in memory — so if you
 // are typing, it waits, and the poll spends it when you are not.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('./sw.js').catch(() => {});
-  askShellVersion();
+  // WHAT THE PAGE WOKE UP AS. `hadController` is the guard that decides whether a
+  // controllerchange is a first install (ignore) or a swap (reload), and it is read once,
+  // here, at module evaluation. If it reads wrong, every conclusion after it is wrong —
+  // and the log cannot show it, because a controlled page still hits the network for the
+  // whole shell (sw.js revalidates behind the paint). So the page says it out loud.
   let hadController = !!navigator.serviceWorker.controller;
+  api.diag('load', 'ctl' + (hadController ? 1 : 0),
+       'sa' + ((() => { try { return matchMedia('(display-mode: standalone)').matches || navigator.standalone ? 1 : 0; } catch { return 0; } })()),
+       'lock' + (S.locked ? 1 : 0));
+  navigator.serviceWorker.register('./sw.js').then(reg => {
+    // WHICH STATES EXIST AT REGISTRATION. A worker that installs on every launch is the
+    // whole puzzle: this says whether one was already active, whether a new one is
+    // installing, and whether one is stuck waiting.
+    if (!reg) return;
+    const st = r => (r ? r.state : 'none');
+    api.diag('reg', 'i-' + st(reg.installing), 'w-' + st(reg.waiting), 'a-' + st(reg.active));
+    reg.addEventListener('updatefound', () => api.diag('updatefound', 'a-' + st(reg.active)));
+  }).catch(() => api.diag('reg', 'failed'));
+  askShellVersion();
   navigator.serviceWorker.addEventListener('controllerchange', () => {
+    api.diag('cc', 'had' + (hadController ? 1 : 0), 'tok' + (api.haveToken() ? 1 : 0),
+         'lock' + (S.locked ? 1 : 0));
     if (!hadController) { hadController = true; return; }
     swReloadPending = true;
     takeNewClientIfIdle();
   });
 }
+// ── the navigation nothing of ours admits to ──────────────────────────────
+// A launch logged `load`, then a second `load` seven seconds later with no cc, no swap and
+// no lock line before it — so something navigated that none of our reload paths issued,
+// and it landed while the first Face ID sheet was open. Guessing at it is what the last two
+// rounds cost, so the page reports its own lifecycle instead:
+//
+//   pagehide p1  the page went into the back/forward cache (a restore is coming)
+//   pagehide p0  the page is being torn down — a REAL navigation
+//   pageshow p1  restored from bfcache, which fetches no shell and would explain a
+//                `load` with no requests behind it
+//   pageshow p0  a fresh document
+//   unload       the last thing a document ever does
+//
+// Paired with auth/start above, the order settles it: a pagehide between `auth/start` and
+// the assert means the WebAuthn sheet is what tore the document down.
+addEventListener('pageshow', e => api.diag('pageshow', 'p' + (e && e.persisted ? 1 : 0)));
+addEventListener('pagehide', e => api.diag('pagehide', 'p' + (e && e.persisted ? 1 : 0)));
+addEventListener('unload', () => api.diag('unload'));
+
+markStandalone();
+addEventListener('orientationchange', markStandalone);
+addEventListener('resize', markStandalone);
 render();
+// One measurement, after layout has settled — early enough to be in the same log burst as
+// the launch, late enough that the shell has been sized.
+setTimeout(reportGeometry, 1200);
 // Paint first, ask second. The lock screen above is drawn against the 'probing' mode —
 // the ship, and one line saying which origin is being asked — so this only ever fills in
 // the answer. Waiting for the probe before the first paint would put a blank page in

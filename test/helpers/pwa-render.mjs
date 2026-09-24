@@ -29,6 +29,27 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 const US = '\x1f';
 const rows = [];
 const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US + JSON.stringify(got));
+// THE ROWS IT ALREADY HAS SURVIVE A CRASH, and this is registered HERE rather than beside
+// the print at the bottom — the bottom is a line this file never reaches when it matters.
+//
+// Everything is emitted at the end, so a throw anywhere above used to discard every row
+// already collected: what reached test/run.sh was "pwa-render ran: got 1", a stack trace,
+// and a zero-row floor, while the assertion that NAMED the cause sat in a variable nobody
+// printed. Measured: a Preact listener registered as `Click` instead of `click` left every
+// Preact-built button dead, which killed navigation twelve sections later at a
+// `boxNode.focus()` on a screen the run never reached. The row saying which event was
+// miscased had already been computed and was thrown away with the rest.
+//
+// The exit status is unchanged, so `pwa-render ran` is still the failure signal and the row
+// floor still catches a helper that stopped early. This only means the rows it did produce
+// arrive alongside them, pointing at the cause instead of at the wreckage.
+const flushOnCrash = (e) => {
+  try { console.log(rows.join('\n')); } catch {}
+  console.error(String((e && e.stack) || e));
+  process.exit(1);
+};
+process.on('uncaughtException', flushOnCrash);
+process.on('unhandledRejection', flushOnCrash);
 const BASE = (process.argv[2] || '').replace(/\/+$/, '');
 
 // ── a DOM, as small as app.js allows ──────────────────────────────────────
@@ -82,10 +103,42 @@ class Node_ {
     return (this._text || '') + this.kids.map(k => k.textContent).join(' ');
   }
   set innerHTML(v) { this._text = String(v); }
-  setAttribute(k, v) { this.attrs[k] = String(v); }
+  // `class` REFLECTS INTO className, because the DOM does and Preact depends on it.
+  // Preact sets a class by attribute (`'class' in dom` is false on a real element, so its
+  // property fast-path declines and it falls through to setAttribute) while every
+  // assertion in this file — and app.js's own markSel() and classList — reads className.
+  // Without the reflection each of those sees an empty string on a Preact-built node, and
+  // "the tab strip is not on screen" is the shape that takes.
+  setAttribute(k, v) {
+    this.attrs[k] = String(v);
+    if (k === 'class') this.className = String(v);
+    // `data-verb` REFLECTS INTO dataset.verb, because a real element does and because the
+    // two halves of this app set it differently: app.js writes `node.dataset.verb` and
+    // Preact writes the ATTRIBUTE (it has no dataset fast-path). Without the reflection a
+    // footer button built by Preact would be invisible to a lookup by verb while the
+    // identical button built by app.js was found — the two screens disagreeing for a
+    // reason that exists only in this stub.
+    if (k.startsWith('data-')) {
+      const camel = k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      this.dataset[camel] = String(v);
+    }
+  }
+  removeAttribute(k) { delete this.attrs[k]; if (k === 'class') this.className = ''; }
   getAttribute(k) { return this.attrs[k]; }
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); }
+  removeEventListener(ev, fn) {
+    if (this.listeners[ev]) this.listeners[ev] = this.listeners[ev].filter(f => f !== fn);
+  }
   append(...ks) { for (const k of ks) if (k != null) this.appendChild(k); }
+  // The seam in web/src/screens.jsx uses this to put app.js's card nodes into the Preact-
+  // owned .cards container. It DETACHES what it replaces, like textContent above and for
+  // the same reason: a card left holding a parent pointer would report itself connected
+  // after the list it was in had been thrown away.
+  replaceChildren(...ks) {
+    for (const k of this.kids) k.parent = null;
+    this.kids.length = 0; this._text = null;
+    this.append(...ks);
+  }
   // A fragment SPLICES, it does not nest — web/md.js builds a bubble's blocks into one and
   // appends it, and a model that kept the fragment as a child would put every rendered
   // message one level deeper than the browser does, which is the level the assertions
@@ -95,6 +148,39 @@ class Node_ {
     k.parent = this; this.kids.push(k); return k;
   }
   remove() { if (this.parent) { this.parent.kids = this.parent.kids.filter(k => k !== this); this.parent = null; } }
+  // ── the four calls a RECONCILER makes and an append-only app never did ──────────────
+  // app.js builds a screen by appending to an empty parent, so appendChild and
+  // textContent were the whole of it. Preact draws the Projects screen now, and a
+  // reconciler does not build — it MOVES a node that is already somewhere, inserts before
+  // a sibling it found, and removes one by name. Modelled rather than stubbed for the
+  // reason scrollTop is: ordering IS the thing that can go wrong, and a stub that appended
+  // everything would put the confirm bar under the verbs and still report a screen.
+  //   This does widen what a file in web/ is allowed to reach for, and that is a real cost
+  // of the build: the note at the top of this section — "anything it does not implement,
+  // app.js is not allowed to reach for" — now holds for app.js and not for Preact.
+  insertBefore(node, ref) {
+    if (node && node.tag === '#fragment') { for (const c of [...node.kids]) this.insertBefore(c, ref); node.kids.length = 0; return node; }
+    if (node.parent) node.remove();                 // a move, not a second copy
+    node.parent = this;
+    const i = ref ? this.kids.indexOf(ref) : -1;
+    if (i < 0) this.kids.push(node); else this.kids.splice(i, 0, node);
+    return node;
+  }
+  removeChild(k) { if (k && k.parent === this) k.remove(); return k; }
+  get childNodes() { return this.kids; }
+  get nextSibling() {
+    const sibs = this.parent && this.parent.kids;
+    if (!sibs) return null;
+    const i = sibs.indexOf(this);
+    return i < 0 ? null : (sibs[i + 1] || null);
+  }
+  // 3 is a text node and 1 is an element; Preact branches on exactly that to decide
+  // whether to patch `.data` or diff attributes. A model answering 1 for both would send
+  // every text update down the element path.
+  get nodeType() { return this.tag === '#text' ? 3 : this.tag === '#fragment' ? 11 : 1; }
+  get localName() { return this.tag; }
+  get data() { return this._text == null ? '' : this._text; }
+  set data(v) { this._text = String(v); }
   setPointerCapture() {} releasePointerCapture() {}   // the drag calls these; nothing to capture here
   // Records the focused node on the document too, not just a flag on itself: the poll
   // guard asks `document.activeElement === composerNode`, which is the only way to
@@ -137,7 +223,31 @@ class Node_ {
   }
   all(pred, out = []) { for (const k of this.kids) { if (pred(k)) out.push(k); k.all(pred, out); } return out; }
 }
+// ── a real element HAS an `onclick` property, and Preact reads it to pick the case ─────
+// Preact decides what to call an event by asking the element: for a prop named `onClick`
+// it tests `'onclick' in dom`, and uses the lowercase name when the element admits to
+// having one — which every real element does, for every standard event. This stub did not,
+// so Preact fell back to the JSX spelling and registered **`Click`**. Nothing threw,
+// nothing was logged: `addEventListener('Click', …)` is perfectly legal, and every tap on
+// a Preact-built control simply did nothing. Measured as fourteen red rows about profile
+// tabs that "did not filter", which is what a dead listener looks like from the outside.
+//
+// Declared on the PROTOTYPE, because `in` walks it and a real element's handler properties
+// live there too. The guard below is the other half — a list can be missed, and the way it
+// is missed is silent.
+const DOM_EVENTS = ['click', 'input', 'change', 'submit', 'keydown', 'keyup', 'keypress',
+  'focus', 'blur', 'focusin', 'focusout', 'scroll', 'load', 'error', 'contextmenu',
+  'pointerdown', 'pointermove', 'pointerup', 'pointercancel',
+  'touchstart', 'touchmove', 'touchend', 'touchcancel'];
+for (const e of DOM_EVENTS) Node_.prototype['on' + e] = null;
+
 const app = new Node_('div'), sheetHost = new Node_('div');
+const docListeners = {};
+// The two halves of an app switch, in the order the platform delivers them. `hidden` is set
+// BEFORE the event, because that is what the handler reads.
+const fireDoc = (ev) => { for (const f of docListeners[ev] || []) f({ type: ev }); };
+const goHidden = () => { documentStub.hidden = true; fireDoc('visibilitychange'); };
+const goVisible = () => { documentStub.hidden = false; fireDoc('visibilitychange'); };
 const documentStub = {
   hidden: false,
   documentElement: new Node_('html'),
@@ -159,7 +269,15 @@ const documentStub = {
   querySelectorAll: (sel) => (sel === '#app .card'
     ? app.all(n => n.className.split(/\s+/).includes('card'))
     : []),
-  addEventListener() {},
+  // A REAL REGISTRY, NOT A NO-OP, AND THIS WAS A HOLE RATHER THAN A SIMPLIFICATION. The
+  // client registers exactly one listener on `document` — visibilitychange — and it is the
+  // only code in the app that can throw a LIVE SESSION away: it calls lock(), which clears
+  // the token. Swallowed here, that handler had never been executed by a single test, in a
+  // repo whose rule is that an assertion is trusted only after it has been watched going
+  // red. The bug it was hiding is the one below (returning from the Face ID sheet locked
+  // the app the user was unlocking). `window.addEventListener` next to it has been a real
+  // registry all along, which is what made the gap look deliberate.
+  addEventListener: (ev, fn) => { (docListeners[ev] = docListeners[ev] || []).push(fn); },
 };
 // ...AND THE TWO HOSTS ARE IN THE DOCUMENT. `#app` and `#sheet` are elements a real page
 // serves inside <body>; here they were free-floating, which made every node in the app
@@ -171,6 +289,10 @@ documentStub.body.appendChild(sheetHost);
 
 const winListeners = {};
 const fireWindow = (ev) => { for (const f of winListeners[ev] || []) f({ type: ev }); };
+// app.js binds its key handler with a bare `addEventListener('keydown', onKey)` — the
+// global one, captured just below — so this is the only way to drive the keyboard here.
+// `target` is an object because onKey's first guard reads target.tagName.
+const pressKey = (key) => { for (const f of winListeners.keydown || []) f({ type: 'keydown', key, target: {}, preventDefault() {} }); };
 // THE GESTURE, both halves. A swipe pops the entry and then fires popstate; firing alone
 // would model half of it and leave the depth assertions passing for the wrong reason.
 const swipeBack = () => { if (histDepth > 0) histDepth--; fireWindow('popstate'); };
@@ -236,7 +358,16 @@ let fixtureOverride = null;    // { 'projects.json': <object> } | null
 //   Inert when unset, so a normal run is untouched.
 const SLOW_MS = Number(process.env.GF_SLOW_MS || 0);
 const slow = (p) => SLOW_MS ? p.then(v => new Promise(r => setTimeout(() => r(v), SLOW_MS))) : p;
+// ── A REQUEST THIS TEST CAN HOLD OPEN ─────────────────────────────────────
+// The bug below lives in a WINDOW — between the Face ID sheet closing and the token
+// arriving — and a window cannot be aimed at, only widened until it is certain. GF_SLOW_MS
+// widens every request by a fixed amount, which is the right tool for a race that is merely
+// likely; this one has to be CERTAIN, because the assertion is "the app did not lock during
+// the window" and a window that closed early would make that pass for the wrong reason.
+// So the challenge request is held open explicitly and released by hand.
+let stallAuth = null;                  // set to a promise to hold /api/auth/* open
 globalThis.fetch = (url, opts) => slow((() => {
+  if (stallAuth && /\/api\/auth\//.test(String(url))) return stallAuth.then(() => realFetch(url, opts));
   const m = /^\.\/fixtures\/([A-Za-z0-9._-]+)$/.exec(String(url));
   if (m && fixtureOverride && fixtureOverride[m[1]]) {
     const body = fixtureOverride[m[1]];
@@ -278,6 +409,39 @@ async function until(pred, ms = 4000) {
   return pred();
 }
 const btnWith = (re) => app.find(n => n.tag === 'button' && re.test(n.textContent));
+// FOUND BY WHAT THE BUTTON IS, NOT BY WHAT IT SAYS. The footer's key letters are gone, so
+// `btnWith(/⏎ open/)` matches nothing — and a regex relaxed to /open/ would also match
+// "continue without a passkey" on the lock screen and "open the pane" in the chat. The verb
+// name is the stable hook; the label is free to change with the design.
+// ── THE FOOTER IS GONE; THESE ARE WHAT REPLACED IT ──────────────────────────
+// Six verb buttons cost 179 of 844 points at 390x844 — the grid's chrome was 34.6% of
+// the screen and the card list got three of nine sessions — so the verbs are rows in a
+// sheet behind one `⋯` in the header.
+//
+// TWO DIFFERENT JOBS WERE BEING DONE BY `verbBtn`, and separating them is most of this
+// change. Some call sites CLICKED a verb; most used it as a WAYPOINT — "is a card
+// screen up", "am I back on the grid" — because the footer happened to be the thing
+// that only existed there. A waypoint has to name the screen, not a control that used
+// to sit on it:
+//
+//   moreBtn()   a card screen is up at all (both Projects and the grid draw the ⋯)
+//   onGrid()    the GRID specifically. The count strip is the grid's own band — the
+//               Projects screen draws profile tabs in that slot — so it is the thing
+//               that distinguishes them, which `verbBtn('new')` was only ever doing by
+//               accident.
+const moreBtn = () => app.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('more'));
+const onGrid = () => !!app.find(n => n.className.split(/\s+/).includes('strip'));
+// Open the ⋯ and click a row by its label — the word a person reads, since a sheet row
+// has no key letter and needs no hook.
+const clickVerb = (label) => {
+  const m = moreBtn();
+  if (!m) return false;
+  click(m);
+  const row = sheetHost.find(n => n.tag === 'button' && (n.textContent || '').trim() === label);
+  if (!row) return false;
+  click(row);
+  return true;
+};
 // The sheet's own "esc back", so a test closes it the way a finger does.
 const closeSheetFromTest = () => {
   const host = sheetHost.firstChild;
@@ -290,8 +454,16 @@ const closeSheetFromTest = () => {
 // browser ever delivers — and the first handler to read the event (the speaker's
 // stopPropagation, which is what keeps a tap on the control off the bubble underneath it)
 // died on `undefined` inside the helper, taking every remaining row with it.
-const clickEv = (n) => ({ stopPropagation() {}, preventDefault() {}, target: n });
-const click = (n) => (n && (n.listeners.click || []).map(f => f(clickEv(n)))[0]);
+const clickEv = (n) => ({ type: 'click', stopPropagation() {}, preventDefault() {}, target: n, currentTarget: n });
+// CALLED WITH `this` BOUND TO THE NODE, AND CARRYING A `type`, because that is what
+// addEventListener does and Preact is the first thing here to need it. It does not attach
+// your handler: it attaches one shared proxy per node and dispatches through
+// `this._listeners[e.type]`, so an unbound call lands on `undefined` and a click on a
+// Preact-built button — every tab, every verb, both confirm buttons — throws instead of
+// firing. app.js's own handlers are closures that never look at either, which is why this
+// was invisible until now.
+const dispatch = (n, ev, e) => (n.listeners[ev] || []).map(f => f.call(n, e));
+const click = (n) => (n && dispatch(n, 'click', clickEv(n))[0]);
 
 // ── served by the daemon: it says so, and offers ENROLMENT ────────────────
 await api.ready();
@@ -328,6 +500,76 @@ if (BASE) {
   is('...and stops saying it is asking', false, !!sheet && /whether an enrolment window is open/.test(sheet.textContent));
 }
 
+// ── COMING BACK FROM FACE ID MUST NOT LOCK THE APP ────────────────────────
+// Reported from a real iPhone: "it ask me to authencitcate i put my face and then it asked
+// me again". The Face ID prompt is a SYSTEM SHEET — it takes the foreground, so the page
+// goes hidden when it opens and visible again the instant the face matches. That is an app
+// switch, and app.js reacts to one by asking whether it should re-lock. It asked
+// `!haveToken()`, which is unconditionally true for the whole width of the round trip that
+// is fetching the token, so it locked the app mid-unlock and CLEARED the session the
+// assertion was about to fill in.
+//
+// DRIVEN THROUGH THE REAL HANDLER, on the real document, with a real ceremony in flight.
+// Every piece of that is load-bearing: the handler was unreachable until the stub above
+// started keeping listeners, and a ceremony that had already finished would make the
+// interesting row pass for the boring reason.
+//
+// WHAT THIS PINS AND WHAT IT DOES NOT. It pins the DECISION — that returning to a visible
+// page mid-ceremony is not a re-lock — in all four states, including the release of the
+// guard afterwards, which is the direction a counter fails in. It does NOT prove the owner's
+// screen: whether he saw the lock screen return or the Face ID sheet a second time is not
+// answerable from this process, and the two are different bugs. That question is asked of
+// him rather than guessed at here.
+if (BASE) {
+  const pk = await import(new URL('../../web/passkey.js', import.meta.url).href);
+  is('the client registers exactly one document listener', 1, (docListeners.visibilitychange || []).length);
+
+  // Stand the client where the phone was: server mode, a credential on the device, locked.
+  stored.set(pk.credKey(), 'ZmFrZS1zZXJ2ZXItY3JlZA');
+  is('...and the device looks enrolled, as the phone did', true, pk.registered());
+  api.clearToken();
+  is('...with no token yet, which is a cold open', false, api.haveToken());
+
+  // No ceremony: coming back with no token IS a lock, and that behaviour is kept.
+  is('coming back with no token locks', 'lock', appmod.onVisibleAction());
+
+  // Now the ceremony. The challenge request is held open, so open() is parked INSIDE the
+  // window this bug lives in for as long as the assertions below need.
+  let release;
+  stallAuth = new Promise(r => { release = r; });
+  const ceremony = pk.open().catch(() => 'rejected');   // never awaited while it matters
+  await tick(5);
+  is('a ceremony in flight is visible to the app', true, pk.busy());
+  // THE ROW THIS PR EXISTS FOR.
+  is('...and coming back mid-ceremony does NOT lock', 'wait', appmod.onVisibleAction());
+  // ...and through the LISTENER, because the fix has to be WIRED as well as correct.
+  //   BE CLEAR ABOUT WHICH ROW CATCHES WHAT, because these two are weaker than they read
+  // and a row whose strength is overstated is the thing this repo keeps writing down.
+  // Measured by putting the no-op stub back: only `exactly one document listener` above
+  // goes red. These two pass with the listener swallowed, because `hidden` is set by the
+  // driver and `busy()` is true either way. What they prove is that the real handler can be
+  // driven end to end without throwing — worth having, and NOT proof that it ran.
+  goHidden();
+  is('the sheet opening backgrounds the app', true, documentStub.hidden);
+  goVisible();
+  await tick(5);
+  is('...and the ceremony survived the round trip', true, pk.busy());
+
+  release(); stallAuth = null;
+  await ceremony;
+  await tick(20);
+  is('the ceremony completed rather than being abandoned', false, pk.busy());
+  // ...and the guard RELEASES. A counter that leaked would leave the app permanently
+  // un-lockable, which is a worse bug than the one being fixed — so the other direction is
+  // asserted in the same breath rather than assumed from the `finally`.
+  api.clearToken();
+  is('...so a later return with no token locks again', 'lock', appmod.onVisibleAction());
+  api.setToken('a-real-one', Date.now() / 1000 + 600);
+  is('...and with a token it refreshes instead', 'refresh', appmod.onVisibleAction());
+  api.clearToken();
+  stored.delete(pk.credKey());
+}
+
 // ── re-pointed at an origin with no fleet: fixtures, said out loud ────────
 // Through the SETTINGS SHEET, because that is the path a person takes and because its
 // save button is the one thing that has to re-resolve and re-lock. Port 1 has nothing on
@@ -350,7 +592,7 @@ await until(() => api.mode() === 'fixtures');
 is('an origin with no fleet resolves to fixtures', 'fixtures', api.mode());
 await until(() => /fixtures — nothing answered/.test(app.textContent));
 is('the lock screen now says fixtures', true, /fixtures — nothing answered/.test(app.textContent));
-is('...and re-locked, because the backend changed', true, !btnWith(/⏎ open/));
+is('...and re-locked, because the backend changed', true, !moreBtn());
 is('...and offers the way past the gate', true, !!btnWith(/continue without a passkey/));
 is('...and offers to look again', true, !!btnWith(/look again/));
 is('...and does not offer to enrol', false, !!btnWith(/enrol this phone/));
@@ -369,15 +611,29 @@ is('...on the projects screen', true, /ghostfleet/.test(app.textContent) && /pro
 const tabStrip = () => app.find(n => n.className.split(/\s+/).join(' ').includes('seg tabs'));
 const tabBtn = (label) => { const t = tabStrip(); return t && t.all(n => n.tag === 'button')
   .find(b => b.textContent.replace(/\s+/g, ' ').trim().startsWith(label)); };
-const projectCards = () => app.all(n => n.className.split(/\s+/).includes('card'))
-  .map(n => n.textContent.replace(/\s+/g, ' '));
-// "╭ ─ 5 scratch ─ …" — one span per cell, so whitespace-collapsed. The DIGIT is the point.
-const numberOf = (name) => {
-  const c = projectCards().find(t => new RegExp('\\u2500 (?:\\d+ )?' + name + ' ').test(t));
-  const m = c && /─ (\d+) /.exec(c);
-  return m ? Number(m[1]) : null;
+// ── READING A CARD, BY ITS PARTS RATHER THAN BY ITS PICTURE ────────────────
+// These used to parse the drawn title — `╭ ─ 5 scratch ─ …`, whitespace-collapsed, with
+// the digit picked out of the box rule. The cards are not box art any more, so that regex
+// matched nothing and 147 rows went red at once, every one of them describing a screen
+// that was rendering perfectly.
+//   The replacement reads the ELEMENTS the card is built from: `.c-name` is the name and
+// `.c-num` is the 1-9 address. That is a stable hook rather than a looser pattern — a
+// regex relaxed enough to match both spellings would have proved neither, and the digit
+// is the whole point of numberOf(): it is what `Ctrl-f <n>` counts at the desk, so a card
+// renamed by its own index is the bug these rows exist to catch.
+const cardEls = () => app.all(n => n.className.split(/\s+/).includes('card'));
+const partOf = (card, cls) => {
+  const n = card.find(x => x.className.split(/\s+/).includes(cls));
+  return n ? n.textContent.trim() : '';
 };
-const shows = (name) => projectCards().some(t => new RegExp('\\u2500 (?:\\d+ )?' + name + ' ').test(t));
+const cardNamed = (name) => cardEls().find(c => partOf(c, 'c-name') === name);
+const projectCards = () => cardEls().map(n => n.textContent.replace(/\s+/g, ' '));
+const numberOf = (name) => {
+  const c = cardNamed(name);
+  const d = c && partOf(c, 'c-num');
+  return d ? Number(d) : null;
+};
+const shows = (name) => !!cardNamed(name);
 
 await until(() => !!tabStrip(), 4000);
 is('two profiles in the fleet draw a tab strip', true, !!tabStrip());
@@ -385,6 +641,18 @@ is('...offering all, then each profile', 'all,work,personal',
    (tabStrip() ? tabStrip().all(n => n.tag === 'button')
       .map(b => b.textContent.replace(/\s+/g, ' ').trim().replace(/ ●\d+$/, '')).join(',') : ''));
 is('...with all selected on a first run', true, !!(tabBtn('all') || {}).className && /\bon\b/.test(tabBtn('all').className));
+
+// ...AND EVERY LISTENER ON THE SCREEN IS NAMED THE WAY A BROWSER NAMES ONE. The other half
+// of DOM_EVENTS above, and the reason it is an assertion rather than a careful list: a name
+// missing from that list makes Preact register `Click` instead of `click`, which throws
+// nothing, logs nothing, and just never fires. It cost fourteen rows that all read as "the
+// tab did not filter" and none of which pointed here. Asked of the WHOLE tree, so the next
+// event this screen starts using is covered without anybody remembering to add a row.
+{
+  const named = [...new Set([app, ...app.all(() => true)].flatMap(n => Object.keys(n.listeners)))];
+  is('preact attached its events by their browser names', '',
+     named.filter(k => k !== k.toLowerCase()).join(','));
+}
 
 // The numbers every card has while nothing is filtered — the addresses `Ctrl-f` uses.
 const GLOBAL = { 'acme-api': numberOf('acme-api'), 'acme-web': numberOf('acme-web'),
@@ -422,8 +690,7 @@ is('...with the numbers it started with', '1,2,3,4,5', Object.values(GLOBAL).joi
 // /api/projects: the count is computed from the rollup, and a re-render alone would only
 // redraw the numbers the screen already had.
 const tapHere = (name) => {
-  const c = app.all(n => n.className.split(/\s+/).includes('card'))
-    .find(t => new RegExp('\u2500 (?:\\d+ )?' + name + ' ').test(t.textContent.replace(/\s+/g, ' ')));
+  const c = cardNamed(name);
   if (!c) return false;
   (c.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: c, pointerId: 1 }));
   (c.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: c, pointerId: 1 }));
@@ -439,9 +706,13 @@ is('a tab says how many need you', true, await until(() => /●\d/.test((tabStri
 api.setFixtureName('grid-acme-api.json');
 
 // ── the fleets the shipped fixture is not ─────────────────────────────────
-const fleetOf = (...rows) => ({ home: '/Users/pgarces', projects: rows.map(([name, profile]) => ({
+const fleetOf = (...rows) => ({ home: '/Users/pgarces', projects: rows.map(([name, profile, need]) => ({
   name, profile, path: `/Users/pgarces/gf-demo/${name}`, agent: null, socket: `cf-${name}`,
-  sessions: { need: 0, working: 0, parked: 0, total: 0 }, sched: null, nudge: true, budget: 'enforced' })) });
+  // The third element is OPTIONAL and every existing caller omits it, so they all keep
+  // need: 0. It exists because a tab badge can only be tested by a fleet that has
+  // something blocked in it.
+  sessions: { need: need || 0, working: 0, parked: 0, total: need ? 1 : 0 },
+  sched: null, nudge: true, budget: 'enforced' })) });
 // Leaving and returning is what re-reads /api/projects, which is where the tabs and the
 // cards come from. Whatever card is FIRST, by name — the fleet changes under this helper,
 // and a hard-coded project is one that has already gone by the time it is tapped.
@@ -483,15 +754,20 @@ is('...and still draws its projects', true, shows('one') && shows('two'));
 // A PROFILE NOBODY ANTICIPATED. `ghostfleet <profile>` takes any name, and readProjects()
 // defaults a blank column to 'work' — so a free-text profile must get its own tab rather
 // than vanish, and a blank one must land where the desk puts it.
-fixtureOverride = { 'projects.json': fleetOf(['alpha', 'work'], ['beta', 'demo'], ['gamma', '']) };
+//   THE NAME HERE USED TO BE `demo`, chosen precisely because it was arbitrary. It is not
+// arbitrary any more: `demo` is what bin/fleet-demo writes and what the block at the end
+// of this file hides once there is real work beside it, so this row would now be asserting
+// the opposite rule with the same words. Any other free-text name tests what this always
+// meant to test.
+fixtureOverride = { 'projects.json': fleetOf(['alpha', 'work'], ['beta', 'scratch'], ['gamma', '']) };
 await reopenProjects();
-is('an unanticipated profile gets its own tab', 'all,work,demo',
+is('an unanticipated profile gets its own tab', 'all,work,scratch',
    (tabStrip() ? tabStrip().all(n => n.tag === 'button')
       .map(b => b.textContent.replace(/\s+/g, ' ').trim().replace(/ ●\d+$/, '')).join(',') : ''));
 is('...and nothing has vanished from all', true, shows('alpha') && shows('beta') && shows('gamma'));
-click(tabBtn('demo'));
+click(tabBtn('scratch'));
 await tick(5);
-is('the demo tab shows its own project', true, shows('beta'));
+is('that profile\'s tab shows its own project', true, shows('beta'));
 is('...and hides the others', false, shows('alpha') || shows('gamma'));
 is('...keeping beta\'s number', 2, numberOf('beta'));
 click(tabBtn('work'));
@@ -504,11 +780,16 @@ is('...numbered where it really is', 3, numberOf('gamma'));
 // cannot see: from the reader's side, nothing happened. The discriminator is the CURSOR —
 // moving `gamma` up lands it beside `alpha` at index 0 and selects a card that is on
 // screen, where a single step would select the hidden `beta` and leave nothing selected.
-const selectedCard = () => app.all(n => n.className.split(/\s+/).includes('sel'))
-  .map(n => n.textContent.replace(/\s+/g, ' '))[0] || '';
+const selectedCard = () => {
+  const c = app.all(n => n.className.split(/\s+/).includes('sel'))[0];
+  return c ? partOf(c, 'c-name') : '';
+};
 {
-  const card = app.all(n => n.className.split(/\s+/).includes('card'))
-    .find(t => /─ (?:\d+ )?gamma /.test(t.textContent.replace(/\s+/g, ' ')));
+  // By its name element, like every other card lookup here — and the grip is still the
+  // TITLE ROW, which is what carries `t`. It moved from the drawn top border to `.c-top`
+  // when the cards stopped being art, and it is still exactly one line, which is the
+  // property that keeps a reorder drag from fighting the list's own scroll.
+  const card = cardNamed('gamma');
   const grip = card && card.find(n => n.className.split(/\s+/).includes('t'));
   is('the hidden-neighbour case is set up', true, !!grip);
   if (grip) {
@@ -527,13 +808,87 @@ const selectedCard = () => app.all(n => n.className.split(/\s+/).includes('sel')
 // more — and the one thing this must never do is draw an empty screen over a fleet that
 // has projects in it. Asserted as the OUTCOME rather than as the clamp, because the clamp
 // on restore and the fallback in the filter are two defences for one promise.
-click(tabBtn('demo'));
+click(tabBtn('scratch'));
 await tick(5);
 is('parked on a tab that is about to disappear', true, shows('beta'));
 fixtureOverride = { 'projects.json': fleetOf(['alpha', 'work'], ['gamma', 'work']) };
 await reopenProjects(() => shows('alpha') && shows('gamma'));
 is('a tab that matches nothing shows everything', true, shows('alpha') && shows('gamma'));
 is('...rather than an empty screen', true, projectCards().length > 1);
+
+// ── the demo fleet, painted ───────────────────────────────────────────────
+// "hide the demo account from the real phone." The pure rule is driven through the exports
+// at the end of this file; this is the screen actually painting it, which is the only thing
+// that answers the complaint as it was made.
+fixtureOverride = { 'projects.json': fleetOf(
+  ['acme-api', 'work'], ['acme-web', 'demo'], ['toolbox', 'demo'], ['billing-svc', 'personal']) };
+await reopenProjects(() => shows('acme-api'));
+is('a demo beside real work is not painted', false, shows('acme-web') || shows('toolbox'));
+is('...while the real projects still are', true, shows('acme-api') && shows('billing-svc'));
+is('...and no demo tab is offered either', false, !!tabBtn('demo'));
+// THE INVARIANT, END TO END. billing-svc is the 4th row of the projects file, with two
+// hidden cards above it, and its card still says 4 — because hiding is a drawing decision
+// and the number is an address. A filter on the list would paint it as 2, and the digit
+// would open acme-web.
+is('...and a hidden card does not renumber the next one', 4, numberOf('billing-svc'));
+// j/k WALK WHAT IS DRAWN. The step already had a branch for this, but it asked whether a
+// TAB was on — and a hidden demo narrows the list while the tab is still `all`, so the old
+// condition stepped straight onto cards nobody draws: a cursor that disappears, which is
+// the failure that branch exists to prevent. From acme-api the next stop is billing-svc,
+// two hidden cards further down.
+//   ON THE `all` TAB EXPLICITLY, and that is the whole point: the old condition asked
+// whether a TAB was on, so any other tab takes the same branch as the fix and the test
+// goes green either way. S.profile survives across these fixtures, and an earlier block
+// left it on a real tab — measured, by reverting the fix and watching this stay green.
+click(tabBtn('all'));
+await tick(5);
+is('...on the all tab, where nothing is filtered by a tab', 'acme-api', selectedCard());
+//   `l`/`h`, NOT `j`/`k`: up and down cross a ROW, which is nc cards, and nc here is
+// whatever this DOM shim reports for the resolved grid — measured at 3, so `j` from card 0
+// lands on index 3 by arithmetic and passes even with the fix reverted. Left and right are
+// always ONE card, so they are the step that actually has to skip something. That is
+// CLAUDE.md's "a test can pass because of where it ran", found by reverting this and
+// watching `j` stay green.
+is('a step skips the hidden cards', 'billing-svc', (pressKey('l'), selectedCard()));
+is('...and steps back the same way', 'acme-api', (pressKey('h'), selectedCard()));
+
+// A BLOCKED DEMO MUST NOT ADVERTISE ITSELF ON A TAB WHOSE CARDS EXCLUDE IT. §1 says this
+// app exists to answer "is anything blocked on me", and the need badge is the answer — so
+// an `all` badge counting a project with no card anywhere to open is the same failure as
+// the summary reading 0 over a blocked lead, arriving from the other side. Three profiles,
+// because two shown ones are what make the strip draw at all.
+fixtureOverride = { 'projects.json': fleetOf(
+  ['acme-api', 'work'], ['acme-web', 'demo', 3], ['billing-svc', 'personal']) };
+await reopenProjects(() => shows('acme-api'));
+const badges = () => (tabStrip() ? tabStrip().all(n => n.tag === 'button')
+  .map(b => b.textContent.replace(/\s+/g, ' ').trim()).join(',') : '');
+is('...and the strip is still the two shown profiles', 'all,work,personal',
+   badges().replace(/ ●\d+/g, ''));
+// THE BADGE ITSELF IS DRIVEN THROUGH THE EXPORT, not the paint, and the reason is worth
+// writing down: in this harness a project's rollup comes from its own GRID fixture, never
+// from projects.json, so `sessions.need` set in a projects fixture reaches nothing. An
+// assertion on the painted ● here reads like a test and cannot fail — measured, by
+// reverting the count to the unfiltered list and watching it stay green.
+
+// THE CURSOR CANNOT SIT ON A CARD NOBODY DRAWS. S.sel is a global index starting at 0,
+// normally the first work project — but /api/projects merges the work file first and then
+// projects.* alphabetically, so an EMPTY work file puts a demo row at index 0 while real
+// projects sit below it. Without the clamp the ring is on a hidden card: nothing selected
+// anywhere on screen, and `⏎ open` acting on a project that is not there.
+fixtureOverride = { 'projects.json': fleetOf(
+  ['acme-api', 'demo'], ['acme-web', 'demo'], ['billing-svc', 'personal']) };
+await reopenProjects(() => shows('billing-svc'));
+is('the cursor never lands on a hidden card', 'billing-svc', selectedCard());
+
+// THE CASE THIS RULE IS OPTIMISED FOR: somebody who followed the README ran `ghostfleet
+// demo` and has nothing else yet. Hiding it from THEM would open the app on an empty
+// screen and undo the first-run flow that sent them here — a rule that makes the demo
+// invisible to the person it was built for is worse than the bug it fixes.
+fixtureOverride = { 'projects.json': fleetOf(['acme-api', 'demo'], ['acme-web', 'demo']) };
+await reopenProjects(() => shows('acme-api'));
+is('a demo that is all there is IS painted', true, shows('acme-api') && shows('acme-web'));
+is('...rather than an empty screen', true, projectCards().length > 1);
+is('...and draws no strip, being one profile', false, !!tabStrip());
 
 // ...and hand the rest of this file back the fleet it was written against.
 fixtureOverride = null;
@@ -594,7 +949,10 @@ closeSheetFromTest();
 // already exists, so a picker that only worked at creation time would not have helped.
 // It lives with the other two per-project settings, which is where the TUI's `,` page
 // keeps them.
-const openProjSettings = () => click(btnWith(/,\s+settings/));
+// By verb, not by label: the footer's key letters are gone, so `/,\s+settings/` matches
+// nothing — and a bare /settings/ would also hit the settings SHEET's own rows once it is
+// open, which is how a helper starts clicking the thing it just opened.
+const openProjSettings = () => clickVerb('settings');
 openProjSettings();
 await tick(20);
 is('project settings lists the agent', true, sheetHas(/which coding CLI/));
@@ -705,7 +1063,7 @@ is('...and armed no confirmation on the way out', false,
    !!app.find(n => n.className.split(/\s+/).includes('confirm')));
 // The save above fires a refresh() this test does not await; let it land before the next
 // section navigates, or its render arrives on top of a screen that has already moved on.
-await until(() => !!btnWith(/⏎\s+open/), 4000);
+await until(() => !!moreBtn(), 4000);
 await tick(50);
 
 // ── the LEAD's card, and the three buttons that must not be on it ─────────
@@ -725,18 +1083,26 @@ is('the projects list arrives', true, await until(() => /acme-api/.test(app.text
 // with a space — so a footer button reads "⏎  open", with two. Every match below is
 // whitespace-loose for that reason; a single-space regex silently matches nothing, and
 // click(null) is a no-op that looks like a screen that did not change.
-click(btnWith(/⏎\s+open/));                            // the first project — acme-api
+clickVerb('open');                                     // the first project — acme-api
 await until(() => /master/.test(app.textContent), 4000);
 is('the grid draws the lead as a card', true, /master/.test(app.textContent));
 // The lead is card 1, so it is what the footer is aimed at on arrival — and that footer
 // names which `x` means right now, exactly as the TUI's does, because finding out by
 // pressing it costs a worktree. Over the lead it means nothing, and says so.
-is('...selected first, with x disclaimed', true, !!btnWith(/not the lead/));
-// Press it anyway: the confirmation must not open, and the refusal has to be VISIBLE.
-// A guard that silently does nothing is a button that looks broken.
-click(btnWith(/^x/));
-is('...pressing x opens no kill prompt', false, /kill session 'master'/.test(app.textContent));
-is('...and says why instead', true, /this fleet's lead/.test(app.textContent));
+// THE DISCLAIMER MOVED WITH THE VERB. `x` is no longer a footer button — the per-card
+// verbs live in the card's actions sheet now, behind `more`, so the sheet is where the
+// lead's refusal has to be visible. The CLAIM is unchanged and is the one that matters:
+// the lead cannot be killed, and the app says so BEFORE the tap rather than in a toast
+// after it. A guard that silently does nothing is a button that looks broken.
+clickVerb('more');
+await tick(50);
+const leadSheet = sheetHost.firstChild;
+is('...the lead\'s sheet offers no kill', false,
+   !!leadSheet && !!leadSheet.find(n => n.tag === 'button' && /^x kill/.test(n.textContent)));
+is('...and says why instead', true,
+   !!leadSheet && /cannot be stopped, reclaimed, renamed or paused/.test(leadSheet.textContent));
+closeSheetFromTest();
+await tick(20);
 // ...and the summary above it counts the lead, which on the degraded fixture is the whole
 // point: `counts` is a fold over the cards, and the lead is one of them.
 // Open the lead by tapping its card. The card is a <div>, not a button, so this goes
@@ -747,13 +1113,17 @@ is('...and says why instead', true, /this fleet's lead/.test(app.textContent));
 // believed it had opened the worker was quietly reading the lead's screen. It passed,
 // because master has a transcript and a pane too. Anchored on the box-drawing title now,
 // which is the only place a card's own name appears.
+// ANCHORED ON THE CARD'S NAME ELEMENT, which is the only place a card's own name appears
+// — and which survived the cards ceasing to be box art. It used to anchor on the drawn
+// `╭ ─ 2 api-fix ─ ─ ─` title for exactly the same reason: master's card mentions
+// `api-fix` in its message line, so a bare /api-fix/ matched MASTER and every assertion
+// below believed it had opened the worker while quietly reading the lead's screen. It
+// passed, because master has a transcript and a pane too.
+//   Matched WHOLE, not as a substring, so `api-fix` cannot match `api-fix-2`.
 const cardTitled = (re) => app.find(n => {
   if (!n.className.split(/\s+/).includes('card')) return false;
-  // Whitespace-collapsed, because a card is drawn one span per cell (ansi.js's rule, and
-  // grid.js's `cells()`) and this DOM joins children with a space — so the title line
-  // arrives here as "\u256d \u2500 2 api-fix \u2500 \u2500 \u2500".
-  const t = n.textContent.replace(/\s+/g, ' ');
-  return new RegExp('\u256d ?\u2500 (?:\\d+ )?' + re.source + ' ').test(t);
+  const nm = n.find(x => x.className.split(/\s+/).includes('c-name'));
+  return !!nm && new RegExp('^(?:' + re.source + ')$').test(nm.textContent.trim());
 });
 
 // ── where the reader was, across the 5s poll ──────────────────────────────
@@ -774,7 +1144,7 @@ const scroller = () => app.kids.find(n => n.className.split(/\s+/).includes('car
   appmod.renderUnlessTyping();
   await tick(5);
   is('...and a poll leaves it there', 0, (scroller() || {}).scrollTop);
-  // Now the reader scrolls, and the poll rebuilds the node under them.
+  // Now the reader scrolls, and the poll comes round.
   const box = scroller();
   box.scrollTop = 200;
   await tick(5);
@@ -782,8 +1152,26 @@ const scroller = () => app.kids.find(n => n.className.split(/\s+/).includes('car
   appmod.renderUnlessTyping();
   await tick(5);
   const after = scroller();
-  is('...the poll really did rebuild it', false, after === box);
+  // ── THE PREMISE OF THIS ROW DIED; IT IS NOT AN EXPECTATION BEING RETUNED ──
+  // It read `is('...the poll really did rebuild it', false, after === box)` — asserting
+  // that the poll REBUILDS the card list node. That was true when it was written, because
+  // rebuilding is simply what gridScreen() did, so the row recorded a MECHANISM as an
+  // invariant. The mechanism was the bug: a fresh element starts at scrollTop 0, which is
+  // why the scroll memory had to RESCUE a position every five seconds and why it sometimes
+  // lost the race. Reported from a real iPhone: "i scroll the sessions and after some
+  // seconds it goes all the way up again" — "some seconds" being the poll interval.
+  //   The grid is a Preact screen now and the container outlives the render, so there is no
+  // position to rescue. Same shape as #6's 33ch track and its ch-at-card-size rows: the
+  // thing the row was about stopped existing, rather than the answer changing.
+  is('...and the poll did NOT rebuild the node', true, after === box);
   is('...and the reader is still at 200', 200, after ? after.scrollTop : -1);
+  // SEVERAL POLLS, AND BOTH HALVES, because either alone is passable for the wrong reason:
+  // sameness alone passes on a screen that never polls at all, and an offset alone passes
+  // on a lucky rescue — which is precisely what the old code did on the runs where it
+  // happened to win. The pair, held across four polls, is the claim.
+  for (let i = 0; i < 4; i++) { appmod.renderUnlessTyping(); await tick(5); }
+  is('...and it is STILL the same node four polls later', true, scroller() === box);
+  is('...with the reader still at 200', 200, (scroller() || {}).scrollTop);
   // A card vanishing under them must not throw them somewhere arbitrary. The cards are a
   // uniform five lines each, so a pixel offset IS a position in the list; when the list
   // gets SHORTER than the offset the browser clamps, and the reader lands at the end of
@@ -1109,7 +1497,7 @@ is('...and none of them set a url', true, histPushedUrls.every(u => u === locati
 // The gesture itself. popstate is the ONLY path backwards, so this is exactly what a swipe
 // does — not a second code path that happens to agree.
 swipeBack();
-is('the gesture goes back to the grid', true, await until(() => !!btnWith(/n\s+new/), 4000));
+is('the gesture goes back to the grid', true, await until(onGrid, 4000));
 is('...and not out of the app', true, /master/.test(app.textContent));
 swipeBack();
 is('...then to projects', true, await until(() => /— projects/.test(app.textContent), 4000));
@@ -1118,7 +1506,7 @@ is('...then to projects', true, await until(() => /— projects/.test(app.textCo
 is('...and the stack is unwound', 0, histDepth);
 
 // ── THE OTHER DIRECTION: a worker keeps all of it ───────────────────────
-click(btnWith(/⏎\s+open/));
+clickVerb('open');
 is('a project opens again', true, await until(() => !!cardTitled(/api-fix/), 4000));
 tap(cardTitled(/api-fix/));
 await until(() => !!app.find(n => n.tag === 'textarea'), 4000);
@@ -1143,7 +1531,7 @@ is('a ready session has no banner', false, !!app.find(n => n.className.split(/\s
 api.resetOverlay();
 api.setFixtureName('grid-degraded.json');
 click(btnWith(/‹/));
-is('back to the grid', true, await until(() => !!btnWith(/n\s+new/), 4000));
+is('back to the grid', true, await until(onGrid, 4000));
 await until(() => {
   const c = cardTitled(/master/);
   return c && /NEEDS YOU/.test(c.textContent);
@@ -1173,7 +1561,7 @@ const chatBox = () => app.kids.find(n => n.className.split(/\s+/).includes('chat
 // api-fix, not the lead: master's transcript is five messages and fits on one screen, so
 // there is no page above it and nothing for this to press.
 click(btnWith(/‹/));
-is('back on the grid for the scroll checks', true, await until(() => !!btnWith(/n\s+new/), 4000));
+is('back on the grid for the scroll checks', true, await until(onGrid, 4000));
 tap(cardTitled(/api-fix/));
 is('...and api-fix opens', true, await until(() => !!chatBox(), 4000));
 await until(() => { const b = chatBox(); return !!b && b.scrollHeight > b.clientHeight; }, 4000);
@@ -1369,7 +1757,7 @@ is('...and the indicator is still the last thing in the list', true, (() => {
 // runner while ubuntu passed the same commit. The `got` names the screen it is really on,
 // so the next failure does not need a second CI run to explain itself.
 click(btnWith(/‹/));
-is('back on the grid for the voice checks', 'grid', await until(() => !!btnWith(/n\s+new/), 8000)
+is('back on the grid for the voice checks', 'grid', await until(onGrid, 8000)
    ? 'grid' : String(app.textContent).replace(/\s+/g, ' ').slice(0, 60));
 // "I only see the default voice" and "the list never populated" are the same screen from
 // the outside and have different causes, so the count is on it. Asserted through the real
@@ -1386,7 +1774,9 @@ is('back on the grid for the voice checks', 'grid', await until(() => !!btnWith(
 // is on its way, not a precondition — a version that skipped the assertions when it timed
 // out would turn "this build has no voice picker" into a green run.
 const openVoiceSheet = async () => {
-  click(btnWith(/settings/));
+  // Through the header's ⋯, like every screen verb now — there is no settings button on
+  // the grid itself any more.
+  clickVerb('settings');
   await until(() => { const v = sheetHost.firstChild;
                       return !!v && v.find(n => n.tag === 'select' && /vpick/.test(n.className)); }, 8000);
   return sheetHost.firstChild;
@@ -1415,4 +1805,82 @@ is('...and the iOS path is offered', true, !!vone && /Settings → Accessibility
 is('...as a guess and not a promise', true, !!vone && /That is a guess, not a fix/.test(vone.textContent));
 closeSheetFromTest();
 
+// ── the demo fleet is hidden once there is real work ──────────────────────
+// "hide the demo account from the real phone." The projects screen is the ONLY merged
+// surface anywhere — every desk screen is scoped to one profile — so a `demo` profile
+// sits in the same list as real work here and nowhere else.
+//
+// DRIVEN THROUGH THE EXPORTS, not the paint, and that is deliberate: this harness runs
+// against a live daemon serving whatever projects THIS machine happens to have, and the
+// rule is about what happens when there is, and is not, other work. Both sides have to be
+// supplied, so the list is handed in.
+const P = (name, profile, need) => ({ name, profile, path: `/home/u/${name}`, sessions: { need: need || 0 } });
+const namesOf = (rows) => rows.map(({ p }) => p.name).join(',');
+const idxOf   = (rows) => rows.map(({ i }) => i).join(',');
+
+// The reported case: demo projects mixed into real ones on a real phone.
+const mixed = [P('acme-api', 'work'), P('acme-web', 'demo'), P('toolbox', 'demo'), P('billing-svc', 'personal')];
+is('a demo beside real work is hidden', true, appmod.demoHidden(mixed));
+// The tab badge, over hand-made rows so a blocked demo actually exists to be counted.
+const blocked = [P('acme-api', 'work'), P('acme-web', 'demo', 3), P('billing-svc', 'personal')];
+is('a hidden demo adds nothing to the all badge', 0, appmod.tabNeed(blocked, 'all'));
+is('...and nothing to its own, which is not drawn', 0, appmod.tabNeed(blocked, 'demo'));
+// ...and the count is not simply dead: a blocked project that IS shown still counts.
+const blockedReal = [P('acme-api', 'work', 2), P('acme-web', 'demo', 3)];
+is('a blocked demo counts when it is all there is', 3, appmod.tabNeed([P('acme-web', 'demo', 3)], 'all'));
+is('...and a blocked real project always counts', 2, appmod.tabNeed(blockedReal, 'work'));
+is('...so it is not drawn', 'acme-api,billing-svc', namesOf(appmod.shownProjects(mixed)));
+
+// THE INVARIANT, and the reason this is a drawing decision and not a filter on the list.
+// The number on a card is what `Ctrl-f <p>` counts at the desk and what a number key opens
+// here — app.js's key handler indexes the UNFILTERED list on purpose. Shortening the array
+// would rename every card after the demo block: billing-svc would become 2 and the digit
+// would open acme-web. The indices that come back must be the ones it had.
+is('...keeping the index each card had', '0,3', idxOf(appmod.shownProjects(mixed)));
+
+// THE CASE MOST LIKELY TO BREAK, and the one this rule is optimised for: somebody who
+// followed the README ran `ghostfleet demo` and has nothing else. Hiding it from them
+// opens the app on an empty screen and undoes the first-run flow that sent them here.
+const demoOnly = [P('acme-api', 'demo'), P('acme-web', 'demo'), P('toolbox', 'demo')];
+is('a demo that is ALL there is stays visible', false, appmod.demoHidden(demoOnly));
+is('...with every project on screen', 'acme-api,acme-web,toolbox', namesOf(appmod.shownProjects(demoOnly)));
+
+// And a fleet with no demo at all is untouched — the rule must not be a no-op that only
+// looks right because it never fires, nor one that fires on everybody.
+const noDemo = [P('acme-api', 'work'), P('billing-svc', 'personal')];
+is('a fleet with no demo is unchanged', false, appmod.demoHidden(noDemo));
+is('...and draws everything', 'acme-api,billing-svc', namesOf(appmod.shownProjects(noDemo)));
+is('an empty fleet hides nothing', false, appmod.demoHidden([]));
+
+// THE TAB GOES WITH IT, or "hide the demo" leaves the word `demo` on screen, one tap from
+// the thing that was meant to be gone. The strip is built from this same list.
+is('the demo tab goes with it', 'work,personal', appmod.profileTabs(mixed).join(','));
+is('...but is the only tab when demo is all there is', 'demo', appmod.profileTabs(demoOnly).join(','));
+// One profile draws no strip at all (the screen treats a single name as furniture), so
+// the new user gets cards and nothing else — which is the point of showing it to them.
+is('...which is a single name, so no strip', 1, appmod.profileTabs(demoOnly).length);
+// ── a client swap must not cost a Face ID ─────────────────────────────────
+// REPORTED: "unlocks with Face ID, it succeeds, and it throws him back to the lock screen
+// and asks again." It is not the assertion racing a re-lock — that was fixed, and the log
+// shows it working: the assert returns 200 and /api/grid and /api/session both answer
+// [homescreen] a second later. What follows is a full page NAVIGATION — `GET /` and the
+// whole shell re-fetched — and then a fresh load with no token, a 401 probe, and a second
+// challenge.
+//
+// The navigation is this app reloading itself to pick up a deployed client. The session
+// token is deliberately in memory only (api.js: "a token that outlives the tab outlives
+// the lock"), so a reload always ends the session — and the pending swap used to be
+// deferred by pollPaused(), which is TRUE while S.locked. So it waited for exactly the
+// moment that costs a passkey: the unlock. One Face ID to unlock, the swap spends itself,
+// and the second Face ID is the one that sticks. Once per deploy, which is why it reads as
+// an intermittent loop rather than an update.
+is('no pending swap is not a reload', 'none', appmod.reloadAction(false, false));
+is('...and still not one while typing', 'none', appmod.reloadAction(false, true));
+is('a pending swap waits for the keyboard', 'wait', appmod.reloadAction(true, true));
+// THE ROW THAT FAILS BEFORE THE FIX. A live session must hold the swap off: reloading
+// under it drops the token and sends the reader back to the lock screen they just cleared.
+is('a pending swap waits for a live session', 'wait', appmod.reloadAction(true, false, true));
+// ...and the moment it IS free: locked, nothing typed, no session to lose. This is the
+// case the old guard refused, because pollPaused() counts S.locked as "paused".
+is('a locked app is when it is free to swap', 'reload', appmod.reloadAction(true, false, false));
 console.log(rows.join('\n'));

@@ -254,7 +254,133 @@ const evaluate = async (fn, ...args) => {
 };
 const viewport = (w, h) => call('Emulation.setDeviceMetricsOverride',
   { width: w, height: h, deviceScaleFactor: 2, mobile: true });
-const goto = async (u) => { await call('Page.navigate', { url: u }); await sleep(900); };
+
+// ── waiting for the page, instead of sleeping at it ───────────────────────
+// This file used to be 99% sleep: 120.3s of a 121.6s run, over 355 fixed waits. A fixed
+// wait is a guess at how long a browser needs, and it is wrong in both directions at once
+// — too long on every ordinary run, and too short on the loaded runner where it matters.
+//
+// THE DANGER IN THE FIX IS WORSE THAN THE SLEEP. A poll whose predicate is already true
+// returns instantly, makes the file fast, asserts nothing, and stays GREEN — so nobody
+// ever learns. That is not hypothetical here: `#app` is in index.html as an empty div, so
+// "wait until #app exists" is true before app.js has run at all, and every screen
+// assertion downstream of it would then be measuring the static shell. Every predicate
+// below therefore names something only a RENDERED PAYLOAD can produce — cards exist
+// because /api/projects came back and was diffed in, the composer exists because the
+// session screen drew itself — and every one was watched timing out with the thing it
+// waits for taken away (SELFTEST at the foot of this file).
+// WHAT WAS ACTUALLY THERE, because "the grid never came up" and "it came up and its
+// cards are called something else" are different bugs and a row that cannot tell them
+// apart costs a CI run each time. The lock screen's own sentences are included: api.js
+// writes one naming the mode it resolved to, and `looking for a fleet…` is the difference
+// between a broken page and a page that has not finished deciding.
+const onScreen = async () => {
+  try {
+    return await evaluate(() => {
+      const app = document.getElementById('app'), sheet = document.getElementById('sheet');
+      return JSON.stringify({
+        url: location.pathname,
+        app: app ? (app.className || '-') : '(no #app on this page)',
+        kids: app ? app.children.length : 0,
+        cards: document.querySelectorAll('#app .card').length,
+        names: [...document.querySelectorAll('#app .card .c-name')].map(n => n.textContent.trim()).slice(0, 6),
+        lock: [...document.querySelectorAll('#app .lock p')].map(n => n.textContent.trim()).slice(0, 3),
+        buttons: [...document.querySelectorAll('#app button')].map(b => b.textContent.trim()).slice(0, 6),
+        sheet: !!document.querySelector('#sheet .sheet'),
+        sheetKids: sheet ? sheet.children.length : 0,
+        composer: !!document.querySelector('.composer textarea'),
+        paneview: !!document.querySelector('.paneview'),
+      });
+    });
+  } catch (e) { return 'could not read the page: ' + String((e && e.message) || e); }
+};
+const WAIT_MS = 8000;
+const waitFor = async (what, fn, budget = WAIT_MS, ...args) => {
+  const t0 = Date.now();
+  for (;;) {
+    let ok = false;
+    try { ok = await evaluate(fn, ...args); } catch { ok = false; }
+    if (ok) return true;
+    if (Date.now() - t0 >= budget) {
+      // A TIMEOUT THAT SAYS NOTHING IS WORSE THAN A SLEEP. This is a real row, so the
+      // group goes red naming the condition rather than the assertion it starved — and it
+      // carries what WAS on the screen, because "the grid never came up" and "the grid
+      // came up and its cards are called something else" are different bugs and the row
+      // that cannot tell them apart costs a run each time.
+      is(`waiting for ${what}`, 'it happens', `it never did, in ${budget}ms — on screen: ${await onScreen()}`);
+      return false;
+    }
+    await sleep(25);
+  }
+};
+// A LAYOUT THAT IS STILL MOVING IS NOT A LAYOUT. Setting body.fontSize reflows, and the
+// old code slept a flat 90ms at it, 180 times. Two consecutive animation frames measuring
+// the same geometry is the condition that was meant — typically ~32ms, and STRICTER than
+// the sleep it replaces: anything that takes longer than 90ms to settle used to be
+// measured mid-flight and called a result.
+const settle = (what) => waitFor(`${what} to stop moving`, () => new Promise(res => {
+  const d = document.documentElement;
+  const read = () => [d.scrollWidth, d.clientWidth, document.body.scrollHeight].join('x');
+  const a = read();
+  requestAnimationFrame(() => requestAnimationFrame(() => res(a === read())));
+}), 4000);
+// The screens, by something only their payload can produce. `#sheet` is a static empty
+// div like `#app`, so a sheet is `#sheet .sheet` — the child the renderer appends — and
+// never the host.
+const SEEN = {
+  booted:  () => document.readyState === 'complete' && document.getElementById('app').children.length > 0,
+  lock:    () => /continue without a passkey/i.test(document.body.textContent || ''),
+  // NOT `.card` — the projects screen paints its "+ add project" tile before the payload
+  // lands, so "a card exists" is true 100ms in, against a screen with no projects on it.
+  // Measured: one card at 99ms, six at 201ms. A wait that returns on the skeleton is how
+  // the tap for `acme-api` found nothing and every assertion after it described a screen
+  // the run never reached. The condition is a card the PAYLOAD produced.
+  cards:   () => [...document.querySelectorAll('#app .card .c-name')]
+                   .some(n => !/^\+/.test(n.textContent.trim())),
+  // NOT just the composer. The session screen draws its shell immediately and fills the
+  // chat with `reading the transcript…` until S.sess arrives, so "the composer exists" is
+  // true against a screen with no conversation in it — and the rows below it park the
+  // reader at scrollTop 3000, which a chat holding one hint line cannot reach. That read
+  // as a 3000-vs-0 failure on some runs and passed on others: a FLAKE I introduced and
+  // then measured, which is the same half-built screen twice. `.turn` is a rendered
+  // message, so it exists only once the transcript came back and was drawn.
+  session: () => !!document.querySelector('.composer textarea')
+                 && document.querySelectorAll('#app > .chat .turn').length > 0,
+  // Same shape: .pane-box holds `capturing the pane…` until S.pane lands, and the <pre>
+  // with the rendered terminal in it is what says the payload arrived.
+  pane:    () => { const p = document.querySelector('.paneview .pane-box pre.pane');
+                   return !!p && (p.textContent || '').trim().length > 0; },
+  sheet:   () => !!document.querySelector('#sheet .sheet'),
+  noSheet: () => !document.querySelector('#sheet .sheet'),
+};
+const seeing = (k, label, budget) => waitFor(label || k, SEEN[k], budget);
+// TAPPING A CARD LANDS ON A SCREEN THAT ALSO HAS CARDS, so `cards` cannot tell the two
+// apart and waiting for it after a tap is a no-op that returns on the screen you just
+// left. Wait for the card the NEXT step is going to tap instead: it exists only once the
+// screen underneath it has been fetched and drawn.
+const seeingCard = (re) => waitFor(`a card named ${re}`, (re) =>
+  [...document.querySelectorAll('#app .card .c-name')]
+    .some(n => new RegExp('^(?:' + re + ')$').test(n.textContent.trim())), WAIT_MS, re);
+const goto = async (u, ready) => {
+  await call('Page.navigate', { url: u });
+  // Not `readyState === 'complete'` alone: that is true of the static shell, which is an
+  // empty #app and a <script type=module> the browser has not run yet. The self-test page
+  // at the foot of this file is a plain document with no #app at all, so it passes its
+  // own predicate rather than waiting forever for a client that is not there.
+  await waitFor(`${u} to be ready`, ready || SEEN.booted);
+};
+// A FLOW THAT MUST START LOCKED HAS TO SAY SO. restore() brings back the screen the client
+// was last on, so a bare goto after an earlier flow left the session screen up returns to
+// the SESSION screen — already unlocked, no projects on it. Two flows at the foot of this
+// file did exactly that: the unlock click missed, the `+ add project` tap missed, and
+// `the add-project sheet has fields to measure` then measured the composer textarea of the
+// chat screen and went green. Clearing first is what makes "the lock screen" true.
+const fresh = async () => {
+  await goto(BASE);
+  await evaluate(() => { try { localStorage.clear(); } catch {} return null; });
+  await goto(BASE);
+  await seeing('lock', 'the lock screen');
+};
 
 // ── the measurement, and it is the only one ───────────────────────────────
 const OVERFLOW = () => {
@@ -286,7 +412,7 @@ const OVERFLOW = () => {
   // NOT `.sheet`: it is `overflow: auto`, so content wider than it scrolls INSIDE it,
   // which is the rule rather than a breach of it. Everything below lays out horizontally
   // and has nowhere to put the excess.
-  const boxes = ['.cards', '.chat', '.composer', '.sbar', '.verbs', '.seg', '.srow', '.sheet .row']
+  const boxes = ['.cards', '.chat', '.composer', '.sbar', '.seg', '.srow', '.sheet .row']
     .flatMap(sel => [...document.querySelectorAll(sel)]
       .filter(n => n.clientWidth > 0 && n.scrollWidth > n.clientWidth + 1)
       .map(n => `${sel} needs ${Math.round(n.scrollWidth)} in ${Math.round(n.clientWidth)}`))
@@ -337,7 +463,75 @@ const COMPOSER = () => {
   };
 };
 
-const clickText = (t) => evaluate((t) => {
+// CLICKS A FOOTER VERB BY NAME. The labels lost their key letters, so clicking `', settings'`
+// matches nothing — and loosening it to /settings/ would also hit the settings sheet's own
+// rows. `data-verb` is what the button IS.
+// A CLICK THAT MISSED WAS SILENT, AND THAT COST THIS FILE A WHOLE GROUP. Each of these
+// returns false when the control is not on the screen, and every call site dropped it on
+// the floor and slept instead — so `clickVerb('sched')` on the GRID, which has no such
+// verb (its verbs are enter/new/worktree/more/settings/projects; `sched` belongs to the
+// projects screen), did nothing, and the walk then measured the plain grid under the name
+// `grid/schedule sheet`. A group named for a sheet that was never opened, green for as
+// long as it has existed. Measured directly: clickVerb('sched') returns true on projects
+// and leaves #sheet holding one child, returns false on the grid and leaves it holding
+// none. So a miss is a row now, and the next one cannot hide.
+// A CLICK WAITS FOR ITS OWN CONTROL. Not a wait followed by a click, which is what the
+// first version of this file did and what cost it a red CI leg: a control that is not
+// there YET and one that will never be there look identical at the instant you ask, and
+// the `keyboard` flow asked at the instant the client had booted but not yet decided.
+//
+// #app HAVING CHILDREN IS NOT THE APP BEING READY. The lock screen draws immediately and
+// its action row is empty until the backend probe RESOLVES — app.js only fills it inside
+// `if (r.mode !== 'probing')`, and the bypass button additionally needs
+// pk.bypassAllowed(), which is api.mode() === 'fixtures'. That window is real and it is
+// not the page being broken: ubuntu failed 39 rows on it while macOS passed, and ubuntu
+// finished its whole leg 171s FASTER, so it was never about one runner being slow.
+//
+// Folding the wait into the action is what makes that unmissable rather than something
+// every call site has to remember — the one that forgot is exactly the one that broke.
+// The predicate and the thing clicked are now the same expression, so they cannot drift,
+// and the bypass button's existence IS the resolved-to-fixtures state rather than a proxy
+// for it. A budget is still a backstop: if the control genuinely never arrives this says
+// so, once, naming it and what the screen held instead.
+const act = async (what, fn, ...args) => {
+  const t0 = Date.now();
+  for (;;) {
+    let hit = false;
+    try { hit = await evaluate(fn, ...args); } catch { hit = false; }
+    if (hit) return true;
+    if (Date.now() - t0 >= WAIT_MS) {
+      is(`clicking ${what}`, 'the control is on this screen',
+         `it never appeared in ${WAIT_MS}ms — on screen: ${await onScreen()}`);
+      return false;
+    }
+    await sleep(25);
+  }
+};
+// ── THE VERBS MOVED BEHIND THE HEADER'S ⋯, SO THIS GOES THROUGH IT ───────────
+// They were a six-button footer selected by `data-verb`. The footer cost 179 of 844
+// points at 390x844 — the whole chrome was 34.6% and the card list got three of nine
+// sessions — so it is one control in the header now and the verbs are rows in the
+// sheet it opens.
+//   BY LABEL, NOT BY A `data-verb` HOOK, and that is a deliberate downgrade. The hook
+// existed because the footer's labels lost their key letters and a driver had nothing
+// stable to match; a sheet row is a full word in a list, which is what a person reads
+// too, so matching what is written is matching what is there. The verb NAMES are kept
+// as the argument so every call site below reads unchanged.
+const VERB_LABEL = {
+  enter: 'open', new: 'new', worktree: 'worktrees', more: 'more',
+  settings: 'settings', projects: 'projects', sched: 'schedule', remove: 'remove',
+};
+const clickVerb = (v) => act(`the ${v} verb`, (label) => {
+  // already open? click the row. otherwise open the ⋯ first and let the retry land it.
+  const row = [...document.querySelectorAll('#sheet .srow button')]
+    .find(b => b.textContent.trim() === label);
+  if (row) { row.click(); return true; }
+  const more = document.querySelector('#app .hdr button.more');
+  if (!more) return false;
+  more.click();
+  return false;                       // act() retries; the sheet is up on the next pass
+}, VERB_LABEL[v] || v);
+const clickText = (t) => act(`the "${t}" button`, (t) => {
   const b = [...document.querySelectorAll('button')].find(x => x.textContent.trim().startsWith(t));
   if (!b) return false; b.click(); return true;
 }, t);
@@ -345,9 +539,18 @@ const escSheet = () => evaluate(() => {
   const b = [...document.querySelectorAll('button')].find(x => /esc\s+back/.test(x.textContent));
   if (b) b.click(); return null;
 });
-const tapCard = (re) => evaluate((re) => {
-  const c = [...document.querySelectorAll('#app .card')]
-    .find(n => new RegExp(re).test(n.textContent.replace(/\s+/g, ' ')));
+// TAPS A CARD BY ITS NAME ELEMENT. The arguments used to be drawn titles — `'─ 1 acme-api '`
+// — because a card was box art and that string was the only place its own name appeared
+// unambiguously (master's card mentions api-fix in its message line). The cards are not
+// art any more, so those matched nothing and every assertion about the SESSION screen went
+// red while describing a screen the run had never reached.
+//   `.c-name` is the stable hook that replaced it, matched whole so `api-fix` cannot also
+// match `api-fix-2`.
+const tapCard = (re) => act(`a card named ${re}`, (re) => {
+  const c = [...document.querySelectorAll('#app .card')].find(n => {
+    const nm = n.querySelector('.c-name');
+    return !!nm && new RegExp('^(?:' + re + ')$').test(nm.textContent.trim());
+  });
   if (!c) return false;
   for (const t of ['pointerdown', 'pointerup']) c.dispatchEvent(new PointerEvent(t, { bubbles: true, clientX: 5, clientY: 5 }));
   return true;
@@ -355,10 +558,7 @@ const tapCard = (re) => evaluate((re) => {
 
 async function walk(w, h) {
   await viewport(w, h);
-  await goto(BASE);
-  await evaluate(() => { try { localStorage.clear(); } catch {} return null; });
-  await goto(BASE);
-  await sleep(700);
+  await fresh();
   // THE TEXT LADDER, because one size is not a sweep. iOS Dynamic Type does not stop at
   // the ordinary sizes: the accessibility ones take body text to about 53px, which is where
   // the reporter has it, and it is why the original screenshots looked like arbitrary
@@ -368,7 +568,7 @@ async function walk(w, h) {
   const at = async (label) => {
     for (const fs of LADDER) {
       await evaluate((fs) => { document.body.style.fontSize = fs + 'px'; return null; }, fs);
-      await sleep(90);
+      await settle(`the ladder at ${fs}px`);
       const m = await evaluate(OVERFLOW);
       is(`${w}px/${fs} ${label}: the page does not scroll sideways`, 0, m.over);
       is(`${w}px/${fs} ${label}: ...and every row fits its own box`, '', m.boxes.join(','));
@@ -382,7 +582,7 @@ async function walk(w, h) {
       is(`${w}px/${fs} ${label}: ...and nothing sits past the right edge`, '', m.past.join(','));
     }
     await evaluate(() => { document.body.style.fontSize = ''; return null; });
-    await sleep(60);
+    await settle('the text size going back to default');
     const { over, past, boxes } = await evaluate(OVERFLOW);
     is(`${w}px ${label}: the page does not scroll sideways`, 0, over);
     is(`${w}px ${label}: ...and nothing sits past the right edge`, '', past.join(','));
@@ -393,23 +593,35 @@ async function walk(w, h) {
     is(`${w}px ${label}: ...and the card list fits its own box`, '', boxes.join(','));
   };
   await at('lock');
-  await clickText('continue without a passkey'); await sleep(800);
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
   await at('projects');
   // THE SHEETS, none of which the first version of this file ever opened — and the
   // settings one is where the worst of it was: #78's voice <select>, the per-project rows
   // and a resolved origin printed as prose, which is one unbreakable 480px word.
-  await clickText(', settings'); await sleep(500);
+  await clickVerb('settings'); await seeing('sheet', 'the settings sheet');
   await at('projects/settings sheet');
-  await escSheet(); await sleep(250);
-  await tapCard('add project'); await sleep(500);
+  await escSheet(); await seeing('noSheet', 'the sheet to close');
+  // THE SCHEDULE SHEET, WHICH THIS FILE HAS NEVER ACTUALLY MEASURED, and two separate
+  // things were hiding that. It was asked of the GRID, whose verbs are
+  // enter/new/worktree/more/settings/projects and do not include `sched` at all — so the
+  // click found no button, returned false into a value nobody read, and the sleep after it
+  // made the miss look like a wait. The rungs then ran against the plain grid under the
+  // name `grid/schedule sheet`: a group named for a sheet that was not on the screen.
+  //   And it has to come BEFORE the add-project sheet, which is the second half. `sched`
+  // acts on projects[S.sel], and tapping the `+ add project` tile moves the selection ONTO
+  // that tile — so projects[S.sel] is undefined, the verb's own `if (p)` guard swallows
+  // the click, and the button reports success while opening nothing. Measured both ways in
+  // one run: selection on acme-api leaves #sheet holding one child, selection on the add
+  // tile leaves it holding none, with the same click returning true each time.
+  await clickVerb('sched'); await seeing('sheet', 'the schedule sheet');
+  await at('projects/schedule sheet');
+  await escSheet(); await seeing('noSheet', 'the sheet to close');
+  await tapCard('\\+ add project'); await seeing('sheet', 'the add-project sheet');
   await at('projects/add sheet');
-  await escSheet(); await sleep(250);
-  await tapCard('─ 1 acme-api '); await sleep(1100);
+  await escSheet(); await seeing('noSheet', 'the sheet to close');
+  await tapCard('acme-api'); await seeingCard('api-fix');
   await at('grid');
-  await clickText('s schedule'); await sleep(500);
-  await at('grid/schedule sheet');
-  await escSheet(); await sleep(250);
-  await tapCard('─ 2 api-fix '); await sleep(1500);
+  await tapCard('api-fix'); await seeing('session', 'the session screen');
   await at('session/chat');
   // The two controls the photographs showed cut in half — AT EVERY TEXT SIZE, not only at
   // this browser's default. Walking the ladder here rather than once at the end is the
@@ -417,7 +629,7 @@ async function walk(w, h) {
   // being measured at the one size nobody reported a problem at.
   for (const fs of LADDER) {
     await evaluate((fs) => { document.body.style.fontSize = fs + 'px'; return null; }, fs);
-    await sleep(120);
+    await settle(`the session bar at ${fs}px`);
     const edges = await evaluate(() => {
       const d = document.documentElement;
       const dots = [...document.querySelectorAll('.sbar button')].find(b => b.textContent.trim() === '⋯');
@@ -439,7 +651,7 @@ async function walk(w, h) {
     is(`${w}px/${fs} ...and nothing is stacked under the text box`, true, !!c && c.under <= 8);
   }
   await evaluate(() => { document.body.style.fontSize = ''; return null; });
-  await sleep(90);
+  await settle('the text size going back to default');
   // A DRAFT THE HEIGHT OF A PARAGRAPH. render() rebuilds this box on every poll, so the
   // height has to be re-applied on render and not only on a keystroke.
   const grew = await evaluate(() => {
@@ -452,7 +664,7 @@ async function walk(w, h) {
   });
   is(`${w}px the composer grows with the text`, true, !!grew && grew.many > grew.one + 8);
   await at('session/chat with a draft');
-  await clickText('⋯'); await sleep(500);
+  await clickText('⋯'); await seeing('sheet', 'the session actions sheet');
   await at('session/actions sheet');
   await evaluate(() => { const b = [...document.querySelectorAll('button')].find(x => /esc\s+back/.test(x.textContent)); if (b) b.click(); return null; });
   await sleep(400);
@@ -467,7 +679,7 @@ async function walk(w, h) {
   });
   is(`${w}px ...and is still that tall after a re-render`, true,
      !!kept && kept.lines === 3 && !!grew && kept.h >= grew.many - 2);
-  await clickText('pane'); await sleep(1200);
+  await clickText('pane'); await seeing('pane', 'the pane view');
   await at('session/pane');
 }
 
@@ -480,12 +692,10 @@ async function walk(w, h) {
 // This is the row that was red before the fix, and the reason the chrome is sized in px.
 async function bigText() {
   await viewport(320, 568);
-  await goto(BASE);
-  await evaluate(() => { try { localStorage.clear(); } catch {} return null; });
-  await goto(BASE); await sleep(700);
-  await clickText('continue without a passkey'); await sleep(800);
-  await tapCard('─ 1 acme-api '); await sleep(1100);
-  await tapCard('─ 2 api-fix '); await sleep(1500);
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+  await tapCard('acme-api'); await seeingCard('api-fix');
+  await tapCard('api-fix'); await seeing('session', 'the session screen');
   await evaluate(() => { document.body.style.fontSize = '30px'; return null; });
   await sleep(400);
   const m = await evaluate(() => {
@@ -539,14 +749,12 @@ async function bigText() {
 // delete the row to make it quiet.
 async function sheetCeiling() {
   await viewport(320, 568);
-  await goto(BASE);
-  await evaluate(() => { try { localStorage.clear(); } catch {} return null; });
-  await goto(BASE); await sleep(700);
-  await clickText('continue without a passkey'); await sleep(800);
-  await clickText(', settings'); await sleep(600);
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+  await clickVerb('settings'); await seeing('sheet', 'the settings sheet');
   const at = async (fs) => {
     await evaluate((fs) => { document.body.style.fontSize = fs + 'px'; return null; }, fs);
-    await sleep(120);
+    await settle(`the session bar at ${fs}px`);
     return evaluate(() => {
       const sh = document.querySelector('.sheet');
       const d = document.documentElement;
@@ -568,12 +776,10 @@ async function sheetCeiling() {
 
 async function keyboard(w, h, { indicator = true } = {}) {
   await viewport(w, h);
-  await goto(BASE);
-  await evaluate(() => { try { localStorage.clear(); } catch {} return null; });
-  await goto(BASE); await sleep(700);
-  await clickText('continue without a passkey'); await sleep(800);
-  await tapCard('─ 1 acme-api '); await sleep(1100);
-  await tapCard('─ 2 api-fix '); await sleep(1500);
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+  await tapCard('acme-api'); await seeingCard('api-fix');
+  await tapCard('api-fix'); await seeing('session', 'the session screen');
   const before = await evaluate(() => {
     const app = document.getElementById('app');
     return { appH: Math.round(app.getBoundingClientRect().height), innerH: innerHeight };
@@ -613,8 +819,14 @@ async function keyboard(w, h, { indicator = true } = {}) {
   // diagnosis. If the browser genuinely will not give the page focus, the whole group skips
   // with that reason rather than asserting anything weaker.
   if (!open.focused) {
+    // "FOCUS DOES NOT STICK" NAMED NO MISSING THING, and the suite now sorts a skip by
+    // whether it does: a reason that does not name a capability the machine lacks reads
+    // as a group hiding a broken subject. This one is a real capability gap — a headless
+    // window that is never activated cannot hold focus, which is why the emulation switch
+    // exists — so it says so in those terms. Latent until it fires, and it has fired, on
+    // macOS in CI and not locally.
     skipGroup(`${w}px the keyboard group`,
-      'focus does not stick in this browser; Emulation.setFocusEmulationEnabled: ' +
+      'focus emulation is not available in this browser; Emulation.setFocusEmulationEnabled: ' +
       (focusEmulated === true ? 'accepted but ineffective' : String(focusEmulated)));
     return;
   }
@@ -739,14 +951,333 @@ try {
   await keyboard(390, 844);
   await keyboard(320, 568, { indicator: false });
 
+  // ── the touch targets, measured ─────────────────────────────────────────
+  // THE PREMISE OF THE OLD VERSION OF THIS GROUP DIED, and that is why it reads
+  // differently rather than being retuned. It measured a six-button FOOTER — its verb
+  // names, its icons, the gaps between the pairs that shared a row. There is no footer:
+  // it cost 179 of 844 points at 390x844 (chrome was 34.6% of the screen and the card
+  // list got three of nine sessions), so the verbs are rows in the sheet behind the
+  // header's ⋯.
+  //   THE SIZE CLAIM IS UNCHANGED AND STILL MEASURED, because it was never about the
+  // footer: 44px is the floor a finger needs and 8px is the floor between adjacent
+  // targets, and a min-height in CSS is not a guarantee the control got it — a flex row
+  // can compress a child below its minimum. Same two numbers, asked of the one control
+  // that replaced the six and of the rows it opens.
+  await viewport(390, 844);
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+  await tapCard('acme-api'); await seeingCard('api-fix');
+  const hdrBtn = await evaluate(() => {
+    const b = document.querySelector('#app .hdr button.more');
+    if (!b) return null;
+    const r = b.getBoundingClientRect();
+    const d = document.documentElement;
+    return {
+      w: Math.round(r.width), h: Math.round(r.height),
+      icon: !!b.querySelector('svg'),
+      named: (b.getAttribute('aria-label') || '').trim(),
+      // it must be ON the screen, not merely sized — an absolutely positioned control
+      // is exactly the kind that can be pinned off the right edge.
+      past: Math.round(Math.max(0, r.right - d.clientWidth)),
+    };
+  });
+  is('the header carries the actions control', true, !!hdrBtn);
+  is('...at least 44px tall', true, !!hdrBtn && hdrBtn.h >= 44);
+  is('...and at least 44px wide', true, !!hdrBtn && hdrBtn.w >= 44);
+  is('...drawn, not an emoji', true, !!hdrBtn && hdrBtn.icon);
+  // An icon contributes no text, so without this a screen reader announces "button".
+  is('...and named for a screen reader', 'actions', hdrBtn ? hdrBtn.named : '');
+  is('...and not past the right edge', 0, hdrBtn ? hdrBtn.past : -1);
+
+  // OPEN THE SHEET WITHOUT CHOOSING ANYTHING. An earlier version of this clicked the
+  // `more` ROW, which is the per-card actions sheet — so it measured "answer keys, s
+  // sched, l label" and reported the screen verbs missing. The ⋯ alone is the screen's
+  // own sheet.
+  await act('the header actions control', () => {
+    const b = document.querySelector('#app .hdr button.more');
+    if (!b) return false; b.click(); return true;
+  });
+  await seeing('sheet', 'the actions sheet');
+  // NOT `rows`: that is this file's own results array, and shadowing it made every
+  // assertion after this point vanish into "rows.splice is not a function".
+  const sheetRows = await evaluate(() => {
+    const bs = [...document.querySelectorAll('#sheet .srow button')];
+    const r = bs.map(b => b.getBoundingClientRect());
+    let minGap = Infinity;
+    for (let i = 1; i < r.length; i++) {
+      const g = r[i].top - r[i - 1].bottom;
+      if (g >= 0) minGap = Math.min(minGap, g);
+    }
+    return {
+      labels: bs.map(b => b.textContent.trim()),
+      short: r.filter(x => x.height < 44).length,
+      minGap: minGap === Infinity ? null : Math.round(minGap),
+      keyLetters: bs.filter(b => /^[⏎a-zA-Z,] /.test(b.textContent.trim())).length,
+    };
+  });
+  is('the sheet carries the screen verbs, in the TUI words', 'open,new,worktrees,more,settings,projects',
+     (sheetRows.labels || []).join(','));
+  is('...every row at least 44px tall', 0, sheetRows.short);
+  is('...with at least 8px between them', true, sheetRows.minGap === null || sheetRows.minGap >= 8);
+  is('...and no key letter survives', 0, sheetRows.keyLetters);
+  await escSheet();
+  // ── the card list snaps, and stops snapping when motion is not wanted ───
+  // MEASURED UNDER AN EXPLICIT MOTION PREFERENCE, in both directions, because the honest
+  // answer depends on one and the runners disagree about it.
+  //
+  // THIS ROW WAS RED ON macOS AND GREEN ON UBUNTU, same commit. Not a race and not the
+  // wrong node — the diagnosis is below, and it was MY OWN CSS: app.css gates every
+  // animation behind `prefers-reduced-motion: reduce`, and that block also turns snapping
+  // off, because a list that jumps under the finger is motion too. The macOS runner's
+  // headless Chrome reports `reduce`; Ubuntu's reports `no-preference`. So the property
+  // genuinely WAS `none` there, correctly, and the test was asking a question whose answer
+  // depended on the machine. CLAUDE.md: a test can pass because of where it ran.
+  //
+  // Emulating the preference removes the environment from the question and turns one flaky
+  // row into two that say more: snapping is ON when motion is wanted, and OFF when it is
+  // not — which is the reduced-motion gate itself, and it had no test before this.
+  //   NOTHING HERE TOLERATES `none` AS A PASS. `none` is the property's initial value, so a
+  // row that accepted it could never fail; it is asserted only where it is the REQUIRED
+  // answer, under an emulated `reduce`, and the opposite row demands `y`.
+  //
+  // GUARDED FIRST, so neither answer can be produced by a race or by reading the wrong
+  // element: the stylesheet has to have landed (a non-initial property on the same node)
+  // and the node has to be the direct child of #app that app.css targets.
+  const cardsProbe = () => evaluate(() => {
+    const c = document.querySelector('#app > .cards');
+    if (!c) return { found: false };
+    const cs = getComputedStyle(c);
+    return { found: true, direct: c.parentElement.id === 'app', cards: c.querySelectorAll('.card').length,
+             landed: cs.overflowY, snap: cs.scrollSnapType };
+  });
+  const setMotion = (v) => call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: v }] });
+
+  await setMotion('no-preference');
+  await sleep(250);
+  const snapOn = await cardsProbe();
+  is('the card list is there to snap', true, snapOn.found && snapOn.direct);
+  is('...with cards in it', true, snapOn.cards > 0);
+  // The stylesheet landed at all — `auto` is not the initial value, so this cannot be the
+  // "read before the CSS applied" case masquerading as an answer about snapping.
+  is('...and app.css has applied to it', 'auto', snapOn.landed);
+  is('the card list snaps to a card', 'y', snapOn.snap);
+
+  await setMotion('reduce');
+  await sleep(250);
+  const snapOff = await cardsProbe();
+  is('...and stops snapping when motion is not wanted', 'none', snapOff.snap);
+  // ...while the list itself still works, which is the point of gating only the motion.
+  is('...while the list still scrolls', 'auto', snapOff.landed);
+  await setMotion('no-preference');
+  await sleep(200);
+
+  // ── swipe the transcript to the next session, and NOT otherwise ─────────
+  // BOTH DIRECTIONS, and the silences are the half that matters: a gesture that fires on
+  // everything is worse than one that never fires, because it moves you off the screen you
+  // were reading. The pane is deliberately not covered — it scrolls sideways on purpose.
+  await tapCard('api-fix'); await seeing('session', 'the session screen');
+  const swipeChat = (x0, y0, x1, y1) => evaluate((a) => {
+    const c = document.querySelector('#app .chat'); if (!c) return false;
+    c.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: a[0], clientY: a[1], pointerId: 1 }));
+    c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: a[2], clientY: a[3], pointerId: 1 }));
+    return true;
+  }, [x0, y0, x1, y1]);
+  const openName = () => evaluate(() => {
+    const t = document.querySelector('#app > .sbar');
+    return t ? (t.textContent.match(/[a-z][a-z0-9-]{2,}/) || [''])[0] : '';
+  });
+  const first = await openName();
+  await swipeChat(300, 400, 100, 405); await sleep(1300);
+  const afterNext = await openName();
+  is('a swipe left opens the next session', true, !!afterNext && afterNext !== first);
+  await swipeChat(100, 400, 300, 405); await sleep(1300);
+  is('...and a swipe right comes back', first, await openName());
+  // A vertical drag is the transcript scrolling and must never change session.
+  await swipeChat(200, 600, 205, 200); await sleep(700);
+  is('...a vertical drag changes nothing', first, await openName());
+  // The left edge belongs to iOS's own back gesture.
+  await swipeChat(10, 400, 250, 405); await sleep(700);
+  is('...and a swipe from the left edge changes nothing', first, await openName());
+
+  // ── the session header is ONE row, at both widths and both chip lengths ──
+  // It packed six controls and wrapped to THREE rows and 80px, the ⋯ alone on the last —
+  // 60px of an 844px screen spent on one button. Measured at 390: back 27 + name 150 +
+  // chip 72 + toggle 101 + ⋯ 27 plus four gaps is 409px in a 374px box.
+  //
+  // `rows === 1` IS NOT THE ASSERTION THAT CATCHES A SIXTH CONTROL, and that matters more
+  // than it looks. The bar is `flex-wrap: nowrap` now, so it CANNOT wrap — a row count of
+  // one is true no matter what is added, which would make it exactly the permanently-green
+  // row this repo keeps warning about. It is kept only because it would go red if someone
+  // restored `flex-wrap: wrap` and the bar then overflowed.
+  //   The detector is HORIZONTAL OVERFLOW: under nowrap, one control too many makes the
+  // bar's content wider than its box, and that is measurable. Watched going red by adding
+  // a sixth control.
+  //
+  // BOTH CHIP LENGTHS, because 'fixtures' is short enough to hide the bug the 7em clamp
+  // exists for: a tailnet hostname is what pushed the view toggle off the end. The text is
+  // set directly on the chip — reaching real server mode needs a passkey this helper
+  // cannot mint, and it is the WIDTH that drives the layout, which CSS computes the same
+  // way however the characters arrived.
+  const header = () => evaluate(() => {
+    const s = document.querySelector('#app > .sbar');
+    if (!s) return { found: false };
+    const kids = [...s.children].filter(n => getComputedStyle(n).display !== 'none');
+    // A wrapped row is one whose children do not overlap vertically. Counting distinct
+    // `top` values is wrong here: `.who` is a two-line column and the buttons are centred
+    // against it, so their tops differ by design and every bar would look wrapped.
+    const boxes = kids.map(n => n.getBoundingClientRect()).sort((a, b) => a.top - b.top);
+    let rows = 0, bottom = -Infinity;
+    for (const r of boxes) { if (r.top >= bottom - 1) { rows++; bottom = r.bottom; } else { bottom = Math.max(bottom, r.bottom); } }
+    const w = (sel) => { const n = s.querySelector(sel); return n ? Math.round(n.getBoundingClientRect().width) : -1; };
+    return {
+      found: true, rows,
+      overflow: Math.max(0, s.scrollWidth - s.clientWidth),
+      name: w('.nm'), seg: w('.seg'), mode: w('.mode'), back: w('button'),
+      // The chip's own clamp is 7em at 12px = 84px. Anything wider means the clamp is gone.
+      modeClamped: w('.mode') <= 85,
+      page: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    };
+  });
+  const setChip = (t) => evaluate((t) => {
+    const m = document.querySelector('#app > .sbar .mode');
+    if (m) m.textContent = t; return !!m;
+  }, t);
+
+  for (const [w, h] of [[390, 844], [320, 568]]) {
+    await viewport(w, h); await sleep(400);
+    for (const [label, chip] of [
+      ['fixtures', '\u26a0 fixtures'],
+      ['a tailnet hostname', '\u25cf mac-studio.tail9f2c3b.ts.net'],
+    ]) {
+      await setChip(chip); await sleep(250);
+      const hd = await header();
+      is(`${w}px/${label}: the session header is one row`, 1, hd.rows);
+      // THE ROW THAT CATCHES A SIXTH CONTROL.
+      is(`${w}px/${label}: ...and nothing is pushed off it`, 0, hd.overflow);
+      // The name is what tells you which worker you are talking to; it must stay legible
+      // even as the project beside it gives way.
+      is(`${w}px/${label}: ...the session name is still legible`, true, hd.name >= 40);
+      // A mode switch you cannot read makes the current mode unreadable, so the toggle
+      // does not shrink — it was squeezed from 101px to 46px before it was pinned.
+      is(`${w}px/${label}: ...the chat/pane toggle keeps its size`, true, hd.seg >= 95);
+      is(`${w}px/${label}: ...the fleet chip is clamped, not unbounded`, true, hd.modeClamped);
+      is(`${w}px/${label}: ...and the page does not scroll sideways`, 0, hd.page);
+    }
+    await setChip('\u26a0 fixtures');
+  }
+  await viewport(390, 844); await sleep(300);
+
+  // ── EVERY TEXT CONTROL IS AT LEAST 16px, OR iOS ZOOMS THE PAGE ──────────
+  // iOS Safari zooms the visual viewport when a text control smaller than 16px takes
+  // focus. Nothing overflows and no box changes size — the page is SCALED — so every other
+  // row in this file goes quiet on it, and so did a deliberate hunt through headless
+  // Chrome. Reported twice from a real iPhone, the second time precisely: "the chats still
+  // gets overflown when press on the text space".
+  //
+  // MEASURED AS COMPUTED STYLE, NOT GREPPED. The composer carried a literal `font-size:
+  // 15px`, which a stylesheet grep would have caught — but every control in a sheet said
+  // `font: inherit` and took body's 14px, so there was no number in the rule to find. A
+  // source check would have reported the stylesheet clean while six sheets zoomed. Asking
+  // the engine is what makes the rule about the CONTROL rather than about the declaration.
+  //
+  // Chrome does not zoom, which is the point: it can still report the size that would make
+  // WebKit do it, so the guard runs everywhere rather than only where the bug appears.
+  const FOCUSABLES = () => [...document.querySelectorAll(
+      '#app input, #app textarea, #app select, #sheet input, #sheet textarea, #sheet select')]
+    .filter(n => n.type !== 'file' && n.type !== 'checkbox' && n.type !== 'radio'
+                 && n.getBoundingClientRect().width > 0)
+    .map(n => ({ where: (n.closest('#sheet') ? 'sheet' : 'app') + ' ' + n.tagName.toLowerCase()
+                        + (n.className ? '.' + String(n.className).split(' ')[0] : ''),
+                 px: Math.round(parseFloat(getComputedStyle(n).fontSize) * 10) / 10 }));
+  const tooSmall = (list) => list.filter(f => f.px < 16).map(f => `${f.where}=${f.px}px`).join(',');
+
+  await viewport(390, 844);
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+
+  // the composer, which is the control he was pressing
+  await tapCard('acme-api'); await seeingCard('api-fix');
+  await tapCard('api-fix'); await seeing('session', 'the session screen');
+  const chatCtl = await evaluate(FOCUSABLES);
+  is('the chat has a text control to measure', true, chatCtl.length > 0);
+  is('...and nothing in the chat is under 16px', '', tooSmall(chatCtl));
+  // ...AND THE PROBE CAN SEE A SMALL ONE. Every row in this group reports an ABSENCE, and
+  // an absence is what a blind probe reports forever — so one control is shrunk on purpose
+  // and the same expression must name it. Done HERE, on the composer, rather than on a
+  // sheet: the composer is on screen for as long as the chat is, where a sheet is a thing
+  // a later render could close, and a canary that depends on a sheet still being open is a
+  // canary that reports "fine" when it simply found nothing. (It did: two earlier versions
+  // of this row were false, once because the walk never got past the lock screen and once
+  // because it shrank a checkbox, which this probe skips on purpose.)
+  const shrunk = await evaluate(() => {
+    const n = [...document.querySelectorAll('#app input, #app textarea, #app select')]
+      .find(x => x.type !== 'file' && x.type !== 'checkbox' && x.type !== 'radio'
+                 && x.getBoundingClientRect().width > 0);
+    if (!n) return null;
+    n.style.fontSize = '12px';
+    return Math.round(parseFloat(getComputedStyle(n).fontSize));
+  });
+  is('a control that IS too small is named', 12, shrunk);
+
+  // ...and the sheets, which is where `font: inherit` hid it
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+  await tapCard('\\+ add project'); await seeing('sheet', 'the add-project sheet');
+  const addCtl = await evaluate(FOCUSABLES);
+  is('the add-project sheet has fields to measure', true, addCtl.length > 0);
+  is('...and none of them is under 16px', '', tooSmall(addCtl));
+
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+  await clickVerb('settings'); await seeing('sheet', 'the settings sheet');
+  const setCtl = await evaluate(FOCUSABLES);
+  is('the settings sheet has fields to measure', true, setCtl.length > 0);
+  is('...and none of them is under 16px', '', tooSmall(setCtl));
+
+  // ...AND THE PROBE CAN SEE A SMALL ONE. Every row above reports the absence of something,
+  // and an absence is exactly what a blind probe reports forever. Shrink a real control and
+  // the same expression must name it.
+  // A reset before the self-test below; goto() already waits for the client to boot and
+  // the next statement navigates away again, so there is nothing left here to wait for.
+  await goto(BASE);
+
   // ── and the probe can see an overflow when there IS one ─────────────────
   // 900px of content in a 390px viewport. If this row is ever green, every row above it
   // means nothing: they are all this same measurement, and a blind one reports 0 forever.
   await viewport(390, 844);
-  await goto(BASE + '/__overflowing');
+  await goto(BASE + '/__overflowing', () => document.readyState === 'complete' && document.body.scrollWidth > 0);
   const control = await evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   is('a page that IS too wide is reported as too wide', true, control > 400);
   is('...by the same number the checks above read', 510, control);
+
+  // ── and the WAITS can fail, which is the other blind probe ─────────────
+  // Every sleep in this file became a poll, and a poll whose predicate is already true is
+  // a sleep removed with nothing put back: faster, green, and measuring whatever happened
+  // to be on the screen. That is not theoretical here — it is what `#app` being an empty
+  // div in index.html did to the first version of these predicates, and what `.card`
+  // matching the "+ add project" skeleton did to the second.
+  //   So: on a blank page NONE of them may hold. A predicate that answers yes here is one
+  // that would answer yes anywhere, and the row it guards proves nothing.
+  await goto('about:blank', () => document.readyState === 'complete');
+  const alwaysTrue = [];
+  for (const k of Object.keys(SEEN)) {
+    let v; try { v = await evaluate(SEEN[k]); } catch { v = 'threw'; }
+    if (v === true && k !== 'noSheet') alwaysTrue.push(k);
+  }
+  // `noSheet` is an ABSENCE and is legitimately true on a blank page; it is excluded by
+  // name rather than by being quietly dropped from the loop, so removing it is a diff.
+  is('no wait passes against a blank page', '', alwaysTrue.join(','));
+  // ...AND THE BACKSTOP REALLY FIRES. Short budget so proving it costs a third of a second
+  // rather than eight. Both halves are checked: it must answer false, and it must leave a
+  // row behind naming what it waited for — a timeout nobody can see is the same as none.
+  const before = rows.length;
+  const rc = await waitFor('a condition that cannot hold', () => false, 300);
+  // The proof row is read and then TAKEN BACK OUT. It did its job by existing; leaving a
+  // deliberate red in the output would make this file fail for working correctly, and a
+  // suite that must be read past to be believed is one nobody reads.
+  const proof = rows.splice(before).join(' ');
+  is('a wait that never holds returns false', false, rc);
+  is('...and leaves a row naming what it waited for', true, proof.includes('a condition that cannot hold'));
 } catch (e) {
   is('the walk completed', '', String((e && e.message) || e));
 }

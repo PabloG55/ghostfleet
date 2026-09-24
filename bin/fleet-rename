@@ -13,9 +13,19 @@
 #   - a pending scheduled send (fleet-schedule)
 #   - a pending reply address (fleet-send --reply-to), so a question already asked of
 #     this session still gets its answer relayed after the rename
+#   - its queue of prompts waiting for the running turn to end (fleet-send), so work
+#     already sent to this session is still delivered to it under the new name
 #   - the fleet-spawn manifest row (what fleet-worktrees shows as the task)
 #   - its slot in the grid's card order (⇧hjkl), which is stored by NAME
 #   - its display label (the grid's `,` then `l`)
+#   - its agent, exited and asleep markers, and its relay stamp
+#   - its phone attachments directory (attach/<sock>.<session>/)
+#   - every reply-to marker in this fleet that names it as the ASKER, so an answer on its
+#     way back to it still finds it
+#   - its state record(s): slot, cwd and folder, so every by-name reader finds it at once
+#   - its tabs (`_term-<old>` / `_edit-<old>`), renamed and re-pointed at the new name
+#   - its conversation directory, linked under the new path so a resume from the moved
+#     worktree finds the conversation it had
 #
 # Refuses on a live-session collision, an existing path collision, or a dirty/locked
 # worktree `git worktree move` won't touch (deliberately no --force here).
@@ -46,6 +56,12 @@ OLD_PATH="$(tmux -L "$SOCK" display-message -p -t "$OLD" '#{pane_current_path}' 
 NEW_PATH="$(dirname "$OLD_PATH")/$NEW"
 [ -e "$NEW_PATH" ] && { echo "fleet-rename: $NEW_PATH already exists" >&2; exit 1; }
 
+# Asked BEFORE the rename, while `$OLD` still resolves: the pane id is what a rename does
+# not change, and it is how a state record written by a hook that raced this script (or
+# one written before the hook learned to record `pane`) is still recognised as this one.
+# Same shape the hook records: `<pane_id>@<server_pid>`.
+OLD_PANE="$(tmux -L "$SOCK" display-message -p -t "$OLD" '#{pane_id}@#{pid}' 2>/dev/null)"
+
 GITROOT="$(git -C "$OLD_PATH" rev-parse --show-toplevel 2>/dev/null)"
 [ -n "$GITROOT" ] || { echo "fleet-rename: '$OLD_PATH' isn't a git checkout" >&2; exit 1; }
 
@@ -64,6 +80,98 @@ mv -f "$FLEET_DIR/$SOCK.$OLD.sched"           "$FLEET_DIR/$SOCK.$NEW.sched"     
 mv -f "$FLEET_DIR/$SOCK.$OLD.reply-to"        "$FLEET_DIR/$SOCK.$NEW.reply-to"        2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.reply-to.armed"  "$FLEET_DIR/$SOCK.$NEW.reply-to.armed"  2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.label"           "$FLEET_DIR/$SOCK.$NEW.label"           2>/dev/null || true
+# The list above stopped growing while the markers did. Each of these was keyed by the old
+# name and left behind by every rename: the agent marker (a rebuilt session quietly came
+# back as claude), the exited/asleep markers (a card that should say exited or asleep
+# said nothing), and the relay stamp.
+mv -f "$FLEET_DIR/$SOCK.$OLD.agent"           "$FLEET_DIR/$SOCK.$NEW.agent"           2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.exited"          "$FLEET_DIR/$SOCK.$NEW.exited"          2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.asleep"          "$FLEET_DIR/$SOCK.$NEW.asleep"          2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.relay.stamp"     "$FLEET_DIR/$SOCK.$NEW.relay.stamp"     2>/dev/null || true
+# Prompts queued behind its running turn (fleet-send): work already sent to this session
+# must still reach it under the new name. The Stop hook resolves its slot from the pane's
+# CURRENT session name, so its next drain reads <sock>.<new>.queue — exactly where this
+# puts it. A drainer already waiting on the OLD name polls a session that no longer exists
+# and exits; the renamed session's next Stop starts one for the queue that moved.
+mv -f "$FLEET_DIR/$SOCK.$OLD.queue"           "$FLEET_DIR/$SOCK.$NEW.queue"           2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.now"             "$FLEET_DIR/$SOCK.$NEW.now"             2>/dev/null || true
+[ -d "$FLEET_DIR/attach/$SOCK.$OLD" ] && [ ! -e "$FLEET_DIR/attach/$SOCK.$NEW" ] \
+  && mv "$FLEET_DIR/attach/$SOCK.$OLD" "$FLEET_DIR/attach/$SOCK.$NEW" 2>/dev/null
+
+# A REPLY ADDRESS NAMES ITS ASKER INSIDE THE FILE. When this session asked another one a
+# question (fleet-send --reply-to me), the answer's address sits in THAT session's marker,
+# as "<sock>\x1f<old-name>\x1f<dir>". Left alone, the answer is relayed to a name nobody
+# answers to and dropped as unroutable. Only this fleet dir: an asker in another profile
+# is addressed from that profile's own dir, which this script has no business editing.
+for rt in "$FLEET_DIR"/*.reply-to; do
+  [ -f "$rt" ] || continue
+  IFS=$'\x1f' read -r r_sock r_sess r_dir r_extra < "$rt" 2>/dev/null || continue
+  [ "${r_sock:-}" = "$SOCK" ] && [ "${r_sess:-}" = "$OLD" ] && [ -z "${r_extra:-}" ] || continue
+  printf '%s\x1f%s\x1f%s\n' "$r_sock" "$NEW" "$r_dir" > "$rt.$$.tmp" 2>/dev/null \
+    && mv -f "$rt.$$.tmp" "$rt" 2>/dev/null || rm -f "$rt.$$.tmp" 2>/dev/null
+done
+
+# ── THE STATE RECORD ─────────────────────────────────────────────────────────
+# <session_id>.json is what every by-name reader looks a session up by (fleet-read, and so
+# the phone's chat; the grid card; hibernate's plan). Only the grid used to patch it, so a
+# rename from the CLI, the MCP tool or the phone left slot:"<old>" behind and every one of
+# those readers answered "no transcript yet" for a session with a whole conversation.
+# Matched by name OR by pane: a record whose slot is already something else but whose pane
+# is this one is the same session, and it is renamed with it.
+#   cwd moves by PREFIX, not by basename — a session sitting in a subdirectory of its
+# worktree keeps sitting in it — and the conversation directory is linked under the new
+# path, because Claude keys it by cwd: a resume from the moved worktree (hibernate's wake,
+# fleet-restart) would otherwise look in a directory that does not exist, and start over.
+CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+enc() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+if command -v jq >/dev/null 2>&1; then
+  for f in "$FLEET_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    jq -e --arg k "$SOCK" --arg o "$OLD" --arg p "$OLD_PANE" \
+      '(.sock // "") == $k and ((.slot // "") == $o or ($p != "" and (.pane // "") == $p))' \
+      "$f" >/dev/null 2>&1 || continue
+    jq --arg n "$NEW" --arg op "$OLD_PATH" --arg np "$NEW_PATH" --arg ob "${OLD_PATH##*/}" \
+      '.slot = $n
+       | if (.cwd // "") == $op then .cwd = $np
+         elif ((.cwd // "") | startswith($op + "/")) then .cwd = $np + (.cwd | ltrimstr($op))
+         else . end
+       | if (.folder // "") == $ob then .folder = $n else . end' \
+      "$f" > "$f.$$.tmp" 2>/dev/null && mv -f "$f.$$.tmp" "$f" 2>/dev/null || rm -f "$f.$$.tmp" 2>/dev/null
+  done
+fi
+if [ -d "$CFG/projects/$(enc "$OLD_PATH")" ] && [ ! -e "$CFG/projects/$(enc "$NEW_PATH")" ]; then
+  # `./`: an encoded path starts with `-`, and ln reads a bare one as a flag.
+  ln -s "./$(enc "$OLD_PATH")" "$CFG/projects/$(enc "$NEW_PATH")" 2>/dev/null || true
+fi
+
+# The session's own environment, for whatever is started in it NEXT (a respawned pane, a
+# rebuilt grid). The running agent keeps the name it was launched with — nothing can reach
+# into a process's environment — which is why the hook no longer trusts it.
+tmux -L "$SOCK" set-environment -t "$NEW" CLAUDE_FLEET_SLOT "$NEW" 2>/dev/null || true
+
+# ── ITS TABS ─────────────────────────────────────────────────────────────────
+# A tab is its own session, named after its origin and pointing back at it by
+# @cf_tab_from. Left alone after a rename, ` falls through to detaching (its origin is
+# gone), the status bar names a session that does not exist, and the next C-t — which
+# looks the tab up by `_term-<new>` — deals a SECOND terminal instead of reusing this one.
+# Renamed only when the new tab name is free: a tab already called that belongs to
+# somebody, and two sessions cannot share a name.
+TAB_BIN="$(dirname "$0")/fleet-tab"; [ -x "$TAB_BIN" ] || TAB_BIN="fleet-tab"
+tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null | while IFS= read -r tab; do
+  case "$tab" in _*) ;; *) continue ;; esac
+  # Bare -t, never `=`: show-options answers EMPTY for an `=` target (CLAUDE.md). Safe
+  # because a tab name starts with `_`.
+  [ "$(tmux -L "$SOCK" show-options -qv -t "$tab" @cf_tab_from 2>/dev/null)" = "$OLD" ] || continue
+  kind="$(tmux -L "$SOCK" show-options -qv -t "$tab" @cf_tab_kind 2>/dev/null)"
+  case "$kind" in term|edit) ;; *) continue ;; esac
+  newtab="$("$TAB_BIN" name "$kind" "$NEW" 2>/dev/null)"
+  [ -n "$newtab" ] || continue
+  tmux -L "$SOCK" set-option -t "$tab" @cf_tab_from "$NEW" 2>/dev/null
+  if [ "$newtab" != "$tab" ] && ! tmux -L "$SOCK" has-session -t "=$newtab" 2>/dev/null; then
+    tmux -L "$SOCK" rename-session -t "=$tab" "$newtab" 2>/dev/null && tab="$newtab"
+  fi
+  "$TAB_BIN" restamp "$SOCK" "$tab" >/dev/null 2>&1 || true
+done
 
 # The card order stores session names INSIDE the file, one per line, so unlike every
 # marker above it can't be migrated by renaming the file — the line has to be rewritten.
