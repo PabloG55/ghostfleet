@@ -3248,8 +3248,30 @@ function dRenderClone() {
   buf += `${C.dim} ⏎ clone it · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
+// TYPE OR PASTE THE PATH. Measured on a first run from a fresh account: registering the
+// first project took 7 keystrokes and 5 of them were arrowing down a home directory to a
+// folder whose full path the reader could have typed in one go — and on a real home, with
+// a few dozen entries, the arrowing is the whole of the interaction. `/` is the jump key
+// everywhere else a list is scrollable, and it is the only printable key this screen had
+// left: c clones, s selects, hjkl move.
+//   IT NAVIGATES, IT DOES NOT SELECT. The keys that move you and the key that registers a
+// project stay separate — ⏎ in a text box is also how a typo gets dismissed, and that is
+// not a key that should be able to register the wrong folder. So this lands you there and
+// `s` still does the selecting, one line below on the same hint bar.
+let dTyping = false, dPathInput = '';
+function dRenderPath() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}go to a folder${C.reset} ${C.dim}— type or paste its path${C.reset}\x1b[K\n`;
+  buf += ` ${C.dim}from${C.reset} ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` path:  ${C.bold}${dPathInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += (dMsg ? ` ${C.red}${dMsg}${C.reset}` : '') + '\x1b[K\n';
+  buf += ` ${C.dim}absolute, ${C.reset}~/…${C.dim}, or relative to the folder above${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ go there (then ${C.reset}s${C.dim} to pick it) · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
 function dRender() {
   if (dCloning) return dRenderClone();
+  if (dTyping) return dRenderPath();
   let buf = '\x1b[H';
   buf += ` ${C.bold}add project${C.reset} ${C.dim}— pick a root folder (holds your checkouts/worktrees)${C.reset}\x1b[K\n`;
   buf += ` ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
@@ -3261,7 +3283,7 @@ function dRender() {
     const e = dirEntries[i], sel = i === dSel;
     buf += `${sel ? `${C.bold}${C.green}▸ ` : '  '}${e === '..' ? '../' : e + '/'}${sel ? C.reset : ''}\x1b[K\n`;
   }
-  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · s select THIS folder · c clone a repo here · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · / type a path · s select THIS folder · c clone a repo here · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function onKeyClone(key) {
@@ -3282,8 +3304,37 @@ function onKeyClone(key) {
   }
   dRender();
 }
+function onKeyPath(key) {
+  if (key === '\x03') return finish('');
+  if (key === '\x1b' || key === '\x60') { dTyping = false; dMsg = ''; return dRender(); }
+  if (key === '\r' || key === '\n') {
+    const v = dPathInput.trim();
+    if (!v) { dMsg = 'type a path, or esc to go back'; return dRender(); }
+    // ~ IS THE SHELL'S, NOT THE KERNEL'S. Nothing has expanded it by the time a keystroke
+    // reaches here, so `~/code` would be looked up as a folder literally called `~`.
+    const abs = path.resolve(curDir, v === '~' ? HOME : v.startsWith('~/') ? path.join(HOME, v.slice(2)) : v);
+    let ok = false;
+    try { ok = fs.statSync(abs).isDirectory(); } catch {}
+    // WHICH OF THE TWO WAYS IT IS WRONG. "no such folder" and "that is a file" send the
+    // reader to different places — one is a typo, the other is a path that is right about
+    // the repo and one level too deep.
+    if (!ok) { dMsg = fs.existsSync(abs) ? `${abs.replace(HOME, '~')} is a file, not a folder` : `no folder at ${abs.replace(HOME, '~')}`; return dRender(); }
+    dTyping = false; dMsg = ''; curDir = abs; dSel = 0; dBuild(); return dRender();
+  }
+  if (key === '\x7f' || key === '\b') { dPathInput = dPathInput.slice(0, -1); dMsg = ''; }
+  else {
+    // SPACES ARE LEGAL IN A PATH, which is the one way this filter differs from the clone
+    // box's: `ch > ' '` there drops the space, and a folder with one in its name could
+    // then be typed but never reached. Escape sequences and DEL still go.
+    const t = (!key || key.startsWith('\x1b')) ? '' : [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
+    if (t) { dPathInput += t; dMsg = ''; }
+  }
+  dRender();
+}
 function onKeyAdd(key) {
   if (dCloning) return onKeyClone(key);
+  if (dTyping) return onKeyPath(key);
+  if (key === '/') { dTyping = true; dPathInput = ''; dMsg = ''; return dRender(); }
   if (key === 'c' || key === 'C') { dCloning = true; dCloneInput = ''; dMsg = ''; return dRender(); }
   if (key === '\x1b' || key === '\x03' || key === '\x60') return finish('');
   if (key === '\x1b[A' || key === 'k') dSel = Math.max(0, dSel - 1);

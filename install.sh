@@ -24,6 +24,12 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${CLAUDE_FLEET_BIN:-$HOME/.local/bin}"
 FLEET_HOME="${CLAUDE_FLEET_HOME:-$HOME/.local/libexec/ghostfleet}"
+# ~ FOR $HOME, AND THE TILDE COMES FROM A VARIABLE — the same shape bin/fleet-demo uses and
+# for the same reason: on bash 3.2 (the bash macOS ships) `${x/#$HOME/\~}` keeps the
+# backslash, so a line written to be copy-pasted comes out with a `\~` in it. A parameter
+# expansion is never re-parsed, so the variable is right on every version.
+TILDE='~'
+short() { printf '%s' "${1/#$HOME/$TILDE}"; }
 
 usage() {
   cat <<'EOF'
@@ -116,14 +122,31 @@ vsay "  bin dir:  $BIN_DIR"
 REINSTALL=0; [ -d "$FLEET_HOME/bin" ] && REINSTALL=1
 echo
 
-command -v node >/dev/null 2>&1 || { echo "error: node is required (the v2 grid is a Node TUI)"; exit 1; }
 
 # Both consent paths — a yes typed at the tty, and --yes given in advance — install
 # through this one place, so they cannot drift into installing differently.
+# APT'S PACKAGE LISTS CAN BE EMPTY, AND THE ERROR NAMES THE PACKAGE, NOT THE CAUSE.
+# `apt-get install -y nodejs` on a machine that has never run `apt-get update` answers
+# "E: Unable to locate package nodejs" — which reads as "that package does not exist" and
+# is nothing of the kind. Measured on a stock ubuntu:24.04, where all three prerequisites
+# failed that way in a row; a just-installed WSL Ubuntu starts out the same. Refresh once,
+# on the FIRST failure rather than up front, so only the machines that need it pay a network
+# round trip — and say it out loud, because it is a second privileged command and the
+# consent that was given was for the first.
+APT_REFRESHED=0
 pkg_run() {
   local pkg="$1"; shift
   echo "  Running: $*"
   if "$@"; then echo "✓ $pkg installed"; return 0; fi
+  case " $* " in
+    *" apt-get "*)
+      if [ "$APT_REFRESHED" = 0 ]; then
+        APT_REFRESHED=1
+        local upd=(apt-get update); [ "$(id -u)" = 0 ] || upd=(sudo apt-get update)
+        echo "  apt has no package lists yet, which is what that error means. Running: ${upd[*]}"
+        if "${upd[@]}" >/dev/null 2>&1 && "$@"; then echo "✓ $pkg installed"; return 0; fi
+      fi ;;
+  esac
   echo "! $pkg install failed — install it yourself: $*"
   return 1
 }
@@ -143,9 +166,21 @@ pkg_run() {
 # `brew install jq` the README used to open with was telling most readers to install
 # something they already had, while the people who genuinely lacked it (older macOS,
 # a minimal Linux image, a container) got an error and no help.
-ensure_pkg() {
-  local pkg="$1" why="$2"
-  command -v "$pkg" >/dev/null 2>&1 && return 0
+# THE BINARY AND THE PACKAGE ARE NOT ALWAYS THE SAME WORD. `node` is `nodejs` on apt, and
+# asking apt for `node` installs an unrelated package (a tiny HTTP server, historically) —
+# so the thing being LOOKED FOR and the thing being INSTALLED are separate arguments now.
+# ensure_pkg keeps its one-argument form for the cases where they agree.
+# WHEN THERE IS NOBODY TO SAY YES, SAY IT ONCE. Each offer used to print the same
+# three-line "or consent up front" footer, so a machine missing all three prerequisites
+# spent 9 of the installer's 16 lines repeating itself — and still left three separate
+# install commands to run one at a time. Collect the packages instead and let
+# report_missing_hard say it once, as a single install.
+PKG_PENDING=()
+PKG_PREFIX=""
+ensure_pkg() { ensure_pkg_named "$1" "$1" "$2"; }
+ensure_pkg_named() {
+  local bin="$1" pkg="$2" why="$3"
+  command -v "$bin" >/dev/null 2>&1 && return 0
   local sudo_prefix=() cmd=()
   [ "$(id -u)" = 0 ] || sudo_prefix=(sudo)
   case "$(uname -s)" in
@@ -162,12 +197,23 @@ ensure_pkg() {
   esac
 
   if [ "${#cmd[@]}" -eq 0 ]; then
-    echo "! $pkg not found — $why, and I don't recognize a package manager to install it with."
+    PKG_PENDING+=("$pkg")
+    echo "! $bin not found — $why, and I don't recognize a package manager to install it with."
     echo "  Install it yourself, e.g.: brew install $pkg (macOS) / apt-get, dnf, yum, pacman, zypper, or apk install $pkg (Linux)"
     return 0
   fi
 
-  echo "! $pkg not found — $why."
+  # The BINARY is what the reader just failed to run, so it is what the line must name.
+  # With the two words split apart this printed "! nodejs not found" at somebody who had
+  # typed `node` — naming a package they had never heard of as the thing that was missing.
+  echo "! $bin not found — $why."
+
+  # All but the last element: the package name is always last, so what is left is the
+  # manager's invocation, which is the same for every package and is what lets the final
+  # report offer one command instead of one per prerequisite. AFTER the no-manager return
+  # above — an empty cmd makes this a negative-length slice, which is a bash syntax error
+  # at runtime, in a branch that only fires on a distro nobody here tests on.
+  PKG_PREFIX="${cmd[*]:0:$(( ${#cmd[@]} - 1 ))}"
 
   # Consent given up front: install, no prompt. This is the only path that runs a
   # package manager with nobody watching, which is exactly why it is opt-in.
@@ -190,33 +236,137 @@ ensure_pkg() {
     read -r ans <&9 || ans=""
     exec 9>&- 9<&-
   else
-    # Don't stop at "not auto-installing". That line is true, actionable only by a
-    # human, and printed precisely where no human is — so name the flag that makes an
-    # unattended install actually work, which is what the reader of this line wants.
-    echo "  Non-interactive (no controlling terminal) — not auto-installing. Run: ${cmd[*]}"
-    echo "  Or consent up front and let the installer run that for you:"
-    echo "      npx ghostfleet-cli --yes   |   ./install.sh --yes   |   CLAUDE_FLEET_YES=1"
-    # WHERE the flag goes decides whether we ever see it. `--yes`/`-y` is also npx's own
+    # Don't stop at "not auto-installing" — that line is true, actionable only by a human,
+    # and printed precisely where no human is. But don't print the way out once per package
+    # either: record it, and let the single report at the end name the flag AND every
+    # package in one command.
+    PKG_PENDING+=("$pkg")
+    echo "  Non-interactive (no controlling terminal) — not auto-installing."
+    return 0
+  fi
+  case "$ans" in
+    ""|y|Y|yes|YES|Yes) pkg_run "$pkg" "${cmd[@]}" || true ;;
+    *) PKG_PENDING+=("$pkg"); echo "  Skipped. Install it yourself: ${cmd[*]}" ;;
+  esac
+}
+# NODE IS OFFERED, NOT DEMANDED. It was the one prerequisite of three with no way out: jq
+# and tmux are offered right here, and node — which strictly more of this depends on —
+# printed one line and exited 1. Measured on a fresh ubuntu:24.04, which ships none of
+# node, npm, git, tmux, jq or curl: the clone path died on the word "error", having
+# installed nothing and suggested nothing.
+#   The package is `node` on brew and `nodejs` on every Linux manager here (apt, dnf, yum,
+# pacman, apk), which is why the binary and the package are separate arguments — asking apt
+# for `node` installs an unrelated package. Same consent rule as the other two: nothing is
+# installed, and nothing is sudo'd, without a yes at the terminal or an explicit --yes.
+NODE_PKG=node; [ "$(uname -s)" = Linux ] && NODE_PKG=nodejs
+ensure_pkg_named node "$NODE_PKG" \
+  "every screen here is a Node program — the grid, the phone server and the MCP server"
+ensure_pkg jq   "this installer edits settings.json and .claude.json with it, and the status hook parses its payload with it"
+ensure_pkg tmux "the grid needs it"
+
+# THE nodejs APT INSTALLS IS TOO OLD TO RUN A CLONE'S BUILD. Ubuntu 24.04 ships 18.19;
+# vite 8 needs 20.19. Measured end to end on a fresh one: the install accepted every offer,
+# ran ~3,900 lines of apt and npm, and died in the build on `SyntaxError: The requested
+# module 'node:util' does not provide an export named 'styleText'` — a stack trace about a
+# Node internal, half a minute after the last thing the reader typed, naming neither node
+# nor a version nor anything to do about it. Ask the version question up here, where the
+# answer is one line.
+#   ONLY FOR A TREE THAT BUILDS. The fleet itself runs on the older node perfectly well, and
+# an unpacked npx cache ships web/ already built — stopping those installs over a build they
+# will never run would be inventing a prerequisite.
+NODE_BUILD_MIN=20.19
+node_ge() {   # $1 have, $2 want — major.minor, numeric, no sort -V (BSD sort lacks it)
+  local hM hm wM wm
+  IFS=. read -r hM hm _ <<< "$1"
+  IFS=. read -r wM wm _ <<< "$2"
+  [ "${hM:-0}" -gt "${wM:-0}" ] && return 0
+  [ "${hM:-0}" -lt "${wM:-0}" ] && return 1
+  [ "${hm:-0}" -ge "${wm:-0}" ]
+}
+if [ -f "$REPO/vite.config.mjs" ] && [ -d "$REPO/web/src" ] && command -v node >/dev/null 2>&1; then
+  NODE_HAVE="$(node -p 'process.versions.node' 2>/dev/null || echo 0)"
+  if ! node_ge "$NODE_HAVE" "$NODE_BUILD_MIN"; then
+    echo
+    echo "! node $NODE_HAVE cannot build the phone client — vite needs $NODE_BUILD_MIN or newer."
+    echo "  This is a CLONE, and a clone builds web/src before anything is staged, so the"
+    echo "  install stops here rather than 3,000 lines further on inside the build."
+    echo "  Debian/Ubuntu ship 18.x, which is why you are reading this. Either:"
+    echo "      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs"
+    echo "      nvm install 22    # https://github.com/nvm-sh/nvm"
+    echo "  Then re-run this installer. Or skip the build entirely and install the published"
+    echo "  package instead, which ships web/ already built:  npx ghostfleet-cli"
+    exit 1
+  fi
+fi
+
+# …AND APT'S `nodejs` DOES NOT CARRY npm EITHER, WHICH A CLONE'S BUILD NEEDS. brew's node
+# does carry it, so this only ever fires on Linux — and it fired on a fresh ubuntu:24.04,
+# where the install ran all the way to "Done. Next:" having staged nothing at all: cf-sync
+# builds web/ from web/src before it copies a single file, found neither pnpm nor npm, and
+# stopped. Asked only of a source tree that can actually build, which is cf-sync's own gate
+# — an unpacked npx cache ships web/ already built and has no business being asked for a
+# toolchain it will never run. AFTER the version gate above, because installing a build
+# tool for a node that cannot run the build is 300 lines of apt spent on the way to an error.
+if [ -f "$REPO/vite.config.mjs" ] && [ -d "$REPO/web/src" ] && ! command -v pnpm >/dev/null 2>&1; then
+  ensure_pkg npm "the phone client is built from web/src before anything is staged"
+fi
+
+# EVERY PREREQUISITE THAT IS STILL MISSING, IN ONE PLACE, WITH ONE COMMAND TO FIX THEM ALL.
+# Reporting one and stopping sends somebody to install it and re-run straight into the next
+# one — and a stock Ubuntu container has none of node, jq or tmux, so that is three round
+# trips through a script whose whole job is to be run once. Measured there: the old output
+# named three separate install commands and then exited on a bare `error: jq is required`,
+# which is the fourth thing to read and the first one that stops you.
+#   It reports rather than decides. The jq gate below stops because jq is what the wiring is
+# WRITTEN with; node and tmux are only needed later, by the fleet, so they warn and the
+# install still finishes. Both callers print the same block, so the reader sees one shape.
+report_missing_hard() {
+  local miss=() pkgs=() m
+  command -v node >/dev/null 2>&1 || miss+=(node)
+  command -v jq   >/dev/null 2>&1 || miss+=(jq)
+  command -v tmux >/dev/null 2>&1 || miss+=(tmux)
+  [ "${#miss[@]}" -eq 0 ] && return 0
+
+  echo
+  echo "! still missing, and the fleet needs all of these:"
+  for m in "${miss[@]}"; do
+    case "$m" in
+      node) echo "    node — every screen is a Node program: the grid, the phone server, the MCP server" ;;
+      jq)   echo "    jq   — the hooks and the MCP registration are written with it" ;;
+      tmux) echo "    tmux — a fleet session IS a tmux server, so the grid cannot open one" ;;
+    esac
+    # node is `nodejs` to every Linux manager here and `node` only to brew, which is why
+    # the loop translates rather than printing the binary name into an install command.
+    if [ "$m" = node ]; then pkgs+=("$NODE_PKG"); else pkgs+=("$m"); fi
+  done
+
+  if [ -n "$PKG_PREFIX" ]; then
+    echo "  One command installs the lot:"
+    echo "      $PKG_PREFIX ${pkgs[*]}"
+  else
+    # No package manager was recognised, so there is no ONE command — say which line is
+    # for which machine rather than printing two under a heading that promises one.
+    echo "  Whichever of these your machine is:"
+    echo "      brew install ${miss[*]}"
+    echo "      sudo apt-get install -y ${miss[*]/node/nodejs}"
+  fi
+  if [ "$ASSUME_YES" != 1 ]; then
+    # WHERE THE FLAG GOES decides whether we ever see it. `--yes`/`-y` is also npx's own
     # flag, so BEFORE the package name npm consumes it and this script is invoked with no
     # arguments at all — landing here, printing "pass --yes", at somebody who is certain
     # they did. Measured on npm 11.18: after the package name it reaches us (and we never
-    # reach this branch); before it, argv is empty and npm leaves its own parse behind in
+    # get here); before it, argv is empty and npm leaves its own parse behind in
     # npm_config_yes ("true"), which is the only way to tell the two apart. A plain
     # `npx ghostfleet-cli` leaves that variable set but EMPTY, so it must not count.
+    echo "  Or let the installer do it: ./install.sh --yes  (or npx ghostfleet-cli --yes, or CLAUDE_FLEET_YES=1)"
     case "${npm_config_yes:-}" in
       ""|false|0) ;;
       *) echo "  (npm swallowed a --yes of its own: it only reaches this installer AFTER the"
          echo "   package name — 'npx ghostfleet-cli --yes', not 'npx --yes ghostfleet-cli'.)" ;;
     esac
-    return 0
   fi
-  case "$ans" in
-    ""|y|Y|yes|YES|Yes) pkg_run "$pkg" "${cmd[@]}" || true ;;
-    *) echo "  Skipped. Install it yourself: ${cmd[*]}" ;;
-  esac
+  return 1
 }
-ensure_pkg jq   "this installer edits settings.json and .claude.json with it, and the status hook parses its payload with it"
-ensure_pkg tmux "the grid needs it"
 
 # --- optional: the agent, and the editor behind ^N ---------------------------
 # WHY THE INSTALLER AND NOT THE README. `npx ghostfleet-cli` is the one command people
@@ -255,10 +405,20 @@ if ! command -v claude >/dev/null 2>&1; then
   CLAUDE_INSTALL='curl -fsSL https://claude.ai/install.sh | bash'
   rc=0; ask_optional "! claude (Claude Code, the default agent) not found. Install it with: $CLAUDE_INSTALL ?" || rc=$?
   case $rc in
-    0) if bash -c "$CLAUDE_INSTALL"; then
-         export PATH="$HOME/.local/bin:$PATH"; hash -r
+    0) # A PIPELINE'S STATUS IS ITS RIGHT-HAND SIDE'S. `curl … | bash` on a machine with no
+       # curl exits 0 — bash ran fine, on empty input — so this printed "✓ claude installed"
+       # one line under `curl: command not found`. Measured on a stock ubuntu:24.04, which
+       # ships no curl: the installer claimed the agent was there and the first session
+       # opened empty. pipefail makes curl's failure the pipeline's, and the `command -v`
+       # after it checks the artifact rather than a proxy for it, so a download that exits 0
+       # without writing the binary is caught too.
+       if bash -o pipefail -c "$CLAUDE_INSTALL" \
+          && { export PATH="$HOME/.local/bin:$PATH"; hash -r; command -v claude >/dev/null 2>&1; }; then
          echo "✓ claude installed — run \`claude\` once to sign in before starting a session"
-       else echo "! claude install failed — install it yourself: $CLAUDE_INSTALL"; fi ;;
+       else
+         echo "! claude install failed — install it yourself: $CLAUDE_INSTALL"
+         command -v curl >/dev/null 2>&1 || echo "  (there is no curl on this machine either, and that command needs one.)"
+       fi ;;
     1) echo "  Skipped. Install it yourself: $CLAUDE_INSTALL" ;;
     2) UNASKED+=("Claude Code") ;;
   esac
@@ -324,13 +484,26 @@ elif ! nvim_ok || [ ! -e "$NVIM_CFG" ]; then
 fi
 if [ "${#UNASKED[@]}" -gt 0 ]; then
   _u="$(printf '%s, ' "${UNASKED[@]}")"
-  echo "· not installed (nobody to ask): ${_u%, } — re-run in a terminal, or with --yes"
+  # "NOBODY TO ASK" IS THIS SCRIPT'S OWN VOCABULARY. It means "stdout is not a terminal, so
+  # a [Y/n] would have gone to a pipe" — obvious from in here, and from out there it is a
+  # riddle attached to the two optional things a first install skips. Say the condition, not
+  # the internal name for it, and put the two ways out on their own line where they read as
+  # instructions rather than as a trailing clause.
+  echo "· skipped, because this install had no terminal to ask at: ${_u%, }"
+  echo "  Run the installer again in a terminal to be asked, or pass --yes to accept up front."
 fi
 
 # jq is the one that cannot be deferred: the wiring below is written WITH jq, so a
 # declined or failed install has to stop here rather than half-configure a config dir.
 # tmux can wait — nothing in this script needs it, only the fleet does, later.
-command -v jq >/dev/null 2>&1 || { echo "error: jq is required to wire the hooks and MCP server — install it and re-run"; exit 1; }
+if ! command -v jq >/dev/null 2>&1; then
+  report_missing_hard || true
+  echo
+  echo "error: jq is required to wire the hooks and MCP server, so this stops here rather than"
+  echo "       half-configure a config dir. Install the above and re-run — nothing it already"
+  echo "       did needs undoing."
+  exit 1
+fi
 
 chmod +x "$REPO"/hooks/*.sh "$REPO"/bin/*
 
@@ -361,11 +534,32 @@ fi
 # cf-sync narrates its own success in two lines. Keep them for --verbose, and on a
 # FAILURE keep them unconditionally: it prints "the runtime is now a MIX of old and new
 # code, do not trust it" to stderr, and that must never be something a quiet mode ate.
+#   SO CAPTURE BOTH STREAMS, not just stdout. cf-sync's advice on stderr is written for
+# somebody typing `cf-sync` by hand — "this source is not a git repo; if the code you edit
+# lives in a clone, point this at it once" is true and useful there, and on a first install
+# it is the first thing the reader sees, phrased as a caveat, about a clone they do not
+# have. Quiet means quiet on success; the failure path below prints every line of it.
+_sync_rc=0
 if [ "$VERBOSE" = 1 ]; then
-  CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO"
+  # `|| _sync_rc=$?` and not a bare call: under `set -e` a failing cf-sync would take the
+  # whole script out here with its own status and none of the explanation below.
+  CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO" || _sync_rc=$?
 else
-  _sync_out="$(CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO")" \
-    || printf '%s\n' "$_sync_out"
+  _sync_out="$(CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO" 2>&1)" \
+    || { _sync_rc=$?; printf '%s\n' "$_sync_out"; }
+fi
+# A FAILED STAGE IS THE END OF THE INSTALL, NOT A LINE IN IT. cf-sync copies nothing when it
+# fails, so every step below links symlinks at files that are not there and then prints a
+# "Done. Next:" block naming commands that do not exist. Measured on a fresh ubuntu:24.04:
+# the build found no npm, cf-sync said NOT SYNCED, and the installer went on to report
+# `✓ linked 0 commands` and exit 0 — a green install of nothing, which is the one outcome
+# worse than a red one, because nobody re-runs it.
+if [ "${_sync_rc:-0}" != 0 ]; then
+  echo
+  echo "error: the runtime was not staged, so nothing was installed. The lines above from"
+  echo "       cf-sync say why. Nothing on this machine changed$([ -d "$FLEET_HOME/bin" ] && echo " — a runtime from an earlier install is still there, untouched")."
+  echo "       Fix what it names and re-run this installer."
+  exit 1
 fi
 if [ -n "$KEEP_SOURCE" ]; then
   printf '%s\n' "$KEEP_SOURCE" > "$FLEET_HOME/.source"
@@ -400,8 +594,16 @@ ln -sf "$FLEET_HOME/bin/ghostfleet" "$BIN_DIR/claude-fleet"   # back-compat: the
 # The COUNT by default, the roster under --verbose. The roster is forty-odd names on one
 # wrapped line and is the single biggest block of output here; it is also the thing you
 # want when a command is missing, which is a --verbose question.
-if [ "$VERBOSE" = 1 ]; then echo "✓ linked ${#linked[@]} commands (${linked[*]}) -> $BIN_DIR"
-else                        echo "✓ linked ${#linked[@]} commands -> $BIN_DIR"; fi
+# ZERO IS NEVER A SUCCESS, and it printed as one: `✓ linked 0 commands` under forty lines
+# of "not in the runtime — skipped". The stage gate above should make this unreachable; it
+# stays because it checks the artifact — what is actually on PATH — rather than the exit
+# code of the step that was supposed to put it there.
+if [ "${#linked[@]}" -eq 0 ]; then
+  echo "! linked 0 commands — the runtime at $FLEET_HOME has no bin/ to link from."
+  echo "  Nothing is on your PATH, so nothing below will run. Re-run this installer."
+  exit 1
+elif [ "$VERBOSE" = 1 ]; then echo "✓ linked ${#linked[@]} commands (${linked[*]}) -> $BIN_DIR"
+else                          echo "✓ linked ${#linked[@]} commands -> $BIN_DIR"; fi
 
 # --- OpenCode event bridge (optional, only if opencode is installed) --------
 # The counterpart of wire_hooks below: Claude Code learns about the fleet through
@@ -619,8 +821,24 @@ register_opencode_mcp
 # --- PATH hint ---------------------------------------------------------------
 case ":$PATH:" in
   *":$BIN_DIR:"*) : ;;
-  *) echo "! $BIN_DIR is not on your PATH. Add it:"
-     echo "    echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> ~/.zshrc && source ~/.zshrc" ;;
+  *) # NAME THE READER'S OWN RC FILE. This said ~/.zshrc unconditionally, so on Linux —
+     # where the login shell is bash far more often than not — the one copy-pasteable line
+     # in the whole install appended to a file that shell never reads, and the next command
+     # was still not found. $SHELL is the login shell, which is the one whose rc file a new
+     # terminal will source; $0 is whatever is running this script and can be the `bash` of
+     # a `curl | bash`, so it is not the question being asked.
+     case "${SHELL##*/}" in
+       zsh)  _rc="$HOME/.zshrc" ;;
+       bash) _rc="$HOME/.bashrc" ;;
+       fish) _rc="" ;;
+       *)    _rc="$HOME/.profile" ;;
+     esac
+     echo "! $BIN_DIR is not on your PATH. Add it:"
+     if [ -n "$_rc" ]; then
+       echo "    echo 'export PATH=\"$BIN_DIR:\$PATH\"' >> $(short "$_rc") && . $(short "$_rc")"
+     else
+       echo "    fish_add_path $BIN_DIR"
+     fi ;;
 esac
 
 # --- optional: example zellij layout ----------------------------------------
@@ -631,23 +849,19 @@ if [ -d "$HOME/.config/zellij" ]; then
   vsay "✓ linked layout -> $ZL/fleet.kdl  (launch: zellij --layout fleet attach -c fleet)"
 fi
 
-# --- did tmux actually land? -------------------------------------------------
-# Last, because first is where it gets scrolled past: the tmux offer happens a few
-# hundred lines of output earlier, and every shape of "no" ends up here — declined at
-# the prompt, install failed, no package manager recognised, or no terminal to ask at.
-# `npx ghostfleet-cli` in CI hit that last one and exited 0 having installed a fleet
-# that cannot open a single session, because a session IS a tmux server. Say so where
-# it will still be on screen.
-if ! command -v tmux >/dev/null 2>&1; then
-  echo
-  echo "! tmux is STILL missing. Everything above is installed and wired, but the grid cannot"
-  echo "  start a session without it — a fleet session IS a tmux server. Install tmux and you"
-  echo "  are done; nothing here needs re-running."
+# --- did they actually land? -------------------------------------------------
+# Last, because first is where it gets scrolled past: the offers happen a few hundred lines
+# of output earlier, and every shape of "no" ends up here — declined at the prompt, install
+# failed, no package manager recognised, or no terminal to ask at. `npx ghostfleet-cli` in
+# CI hit that last one and exited 0 having installed a fleet that cannot open a single
+# session, because a session IS a tmux server. Say so where it will still be on screen.
+if ! report_missing_hard; then
   if [ "$ASSUME_YES" = 1 ]; then
     # $YES_VIA delegated the install to us and we did not manage it. Exit non-zero so an
     # unattended install FAILS here, instead of a CI job going green around a fleet that
     # cannot spawn anything.
-    echo "  $YES_VIA was given, so this is an error, not a warning."
+    echo
+    echo "  $YES_VIA was given, so the above is an error, not a warning."
     exit 1
   fi
 fi
@@ -731,4 +945,13 @@ echo "    ghostfleet            # your own projects (the empty screen walks you 
 # here, because this list is where a new install looks for what to do next, and
 # `fleet-phone` is the step rather than a pointer at a document.
 echo "    fleet-phone           # put the fleet on your phone — it reports what is left to do"
-[ "$VERBOSE" = 1 ] || echo "    ./install.sh --verbose   # everything this just did, step by step"
+# THE RE-RUN COMMAND HAS TO BE ONE THE READER CAN ACTUALLY TYPE. This printed
+# `./install.sh --verbose` at everyone, including the npx reader, whose working directory
+# has no install.sh in it and never did — the installer ran out of a cache directory they
+# were never shown. Name whichever of the two actually reaches this script.
+if [ "$VERBOSE" != 1 ]; then
+  if [ -f "$REPO/install.sh" ] && [ "$REPO" = "$PWD" ]; then _again="./install.sh --verbose"
+  elif is_repo "$REPO";                                 then _again="$(short "$REPO")/install.sh --verbose"
+  else                                                       _again="npx ghostfleet-cli --verbose"; fi
+  echo "    $_again   # everything this just did, step by step"
+fi

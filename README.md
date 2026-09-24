@@ -116,7 +116,7 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | --- | --- |
 | `git` | worktrees **are** the isolation model — a worker is a checkout on its own branch. `fleet-spawn` refuses to run without it |
 | `claude` ([Claude Code](https://github.com/anthropics/claude-code)) | what a session runs by default, and what the pane detectors are written against — missing? the installer offers Claude Code's native installer (into `~/.local/bin`, no `sudo`) |
-| `node` (v18+) | the grid is a zero-npm-dependency Node TUI |
+| `node` (v18+ to run, **v20.19+ to build from a clone**) | the grid is a zero-npm-dependency Node TUI, and v18 runs it. The phone client is built from `web/src` with vite, which needs 20.19 — that applies only to a clone, because the published package ships `web/` already built. Debian and Ubuntu package 18.x, so a clone there needs a newer node first; the installer checks the version up front and says which |
 | `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below). With no terminal attached it has nobody to ask, so a piped or CI install prints the command instead — pass `--yes` there and it installs without prompting |
 | `jq` | the installer wires the hooks and MCP entries with it, and the status hook parses its payload with it. **macOS 26 already ships it** (`/usr/bin/jq`); anywhere it is missing the installer offers to install it |
 | macOS, Linux, or **Windows via WSL2** | sessions are tmux servers, and tmux is POSIX-only — see the native-Windows note below |
@@ -136,6 +136,18 @@ is the whole path, from a bare Windows machine to an open fleet.)*
 npx ghostfleet-cli          # installs, no clone needed
 ghostfleet demo             # see it working, on three throwaway projects
 ```
+
+**On a fresh Linux box there is no `npx` to run that with.** A stock Ubuntu 24.04 image
+ships none of node, npm, git, tmux, jq or curl — measured, not assumed — so the line above
+is `command not found` and nothing tells you which of the six is the one you need. Install
+them first, and the rest of this page applies unchanged:
+
+```bash
+sudo apt-get update && sudo apt-get install -y nodejs npm git tmux jq curl
+```
+
+(That `nodejs` is 18.x, which runs the fleet perfectly well. It cannot *build* the phone
+client, which matters only if you clone — see the `node` row above.)
 
 `ghostfleet demo` is the fastest way to find out whether you want this. It creates three
 scratch git repos under `~/gf-demo`, registers them in a separate `demo` profile, and

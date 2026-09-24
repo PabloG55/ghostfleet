@@ -1451,11 +1451,11 @@ else
                PATH="$IR/fake:$IR/h/bin:$PATH" "$IR/src/install.sh" 2>&1; }
   fakenvim 0.9.5; rm -rf "$IR/h/.config/nvim"
   old="$(edinst)"
-  is "an nvim too old for LazyVim is offered, on one line" "yes" "$(grep -q 'not installed (nobody to ask):.*Neovim + LazyVim' <<<"$old" && echo yes || echo no)"
+  is "an nvim too old for LazyVim is offered, on one line" "yes" "$(grep -q 'no terminal to ask at:.*Neovim + LazyVim' <<<"$old" && echo yes || echo no)"
   is "...and nobody is prompted"                            "no"  "$(grep -q 'Y/n' <<<"$old" && echo yes || echo no)"
   fakenvim 0.11.6
   cur="$(edinst)"
-  is "a current nvim with no config offers LazyVim only"    "yes" "$(grep -q 'nobody to ask):.*LazyVim' <<<"$cur" && ! grep -q 'Neovim +' <<<"$cur" && echo yes || echo no)"
+  is "a current nvim with no config offers LazyVim only"    "yes" "$(grep -q 'no terminal to ask at:.*LazyVim' <<<"$cur" && ! grep -q 'Neovim +' <<<"$cur" && echo yes || echo no)"
   mkdir -p "$IR/h/.config/nvim"
   set="$(edinst)"
   is "...and an existing config is left alone, silently"    "no"  "$(grep -qi 'lazyvim\|neovim' <<<"$set" && echo yes || echo no)"
@@ -1464,6 +1464,177 @@ else
   is "a named editor that is missing is reported, not replaced" "yes" "$(grep -q 'gf-no-such-editor (your editor' <<<"$named" && ! grep -q 'LazyVim' <<<"$named" && echo yes || echo no)"
   rm -rf "$IR"
 fi
+
+# ── a first install on a machine that is missing things ──────────────────────
+# EVERY ASSERTION HERE IS SOMETHING THAT ACTUALLY WENT WRONG, measured end to end in a
+# throwaway container of a stock LTS image — one that ships none of node, npm, git, tmux, jq
+# or curl, which is the honest starting point and not a corner case. The container is not
+# reachable from the suite, so each failure is reproduced here with the smallest shim that
+# makes the same branch run.
+group "an install that is missing prerequisites says so once, and completely"
+IM="$(mktemp -d)"
+# The helpers, lifted out with the sed shape the MCP registrar group uses. They reach only
+# for shell builtins plus $NODE_PKG / $PKG_PREFIX / $ASSUME_YES, so an EMPTY PATH is a
+# faithful "this machine has nothing": `command -v` is a builtin and simply finds none of
+# them, with no fixture to build and nothing installed to uninstall afterwards.
+{
+  sed -n '/^node_ge() {/,/^}/p'             "$ROOT/install.sh"
+  sed -n '/^report_missing_hard() {/,/^}/p' "$ROOT/install.sh"
+  sed -n '/^pkg_run() {/,/^}/p'             "$ROOT/install.sh"
+} > "$IM/lib.sh"
+is "the three helpers came out" "3" "$(grep -c '^\(node_ge\|report_missing_hard\|pkg_run\)() {' "$IM/lib.sh")"
+is "...and they parse"         "ok" "$(bash -n "$IM/lib.sh" 2>&1 && echo ok)"
+
+# THE PAIR THAT MATTERS IS 20.18 vs 20.19, which is why this is not a major-version compare:
+# the LTS image's 18.19 is too old (right either way) and 20.18 is ALSO too old, and vite
+# fails on exactly that second one. A compare that reads only the major calls 20.18 fine and
+# hands the reader back the `node:util` stack trace this gate exists to replace.
+ge() { bash -c 'set -uo pipefail; . "$1"/lib.sh; node_ge "$2" "$3" && echo yes || echo no' _ "$IM" "$1" "$2"; }
+is "node 18.19 cannot build the client" "no"  "$(ge 18.19.1 20.19)"
+is "node 19.9 cannot either"            "no"  "$(ge 19.9.0  20.19)"
+is "node 20.18 cannot either"           "no"  "$(ge 20.18.0 20.19)"
+is "node 20.19 can"                     "yes" "$(ge 20.19.0 20.19)"
+is "node 22 can"                        "yes" "$(ge 22.23.3 20.19)"
+
+# ONE REPORT, NOT THREE. The old output offered each prerequisite separately and printed the
+# same three-line "or consent up front" footer under each, then exited on a bare
+# `error: jq is required` — four things to read, three commands to run one at a time, and a
+# re-run between each. `env -i PATH=/nonexistent` is the whole fixture.
+# THE ABSOLUTE bash. `env -i PATH=/nonexistent bash` looks bash up in the PATH it was just
+# handed, finds nothing, and runs nothing — and an empty run is indistinguishable here from
+# a report that printed nothing, which is exactly what these rows are about. Watched red:
+# all three of them said "got: " with no output at all.
+BASH_ABS="$(command -v bash)"
+rmh() { env -i PATH="$1" "$BASH_ABS" -c '
+  set -uo pipefail; NODE_PKG=nodejs; PKG_PREFIX="apt-get install -y"; ASSUME_YES=0
+  . "$1"/lib.sh; report_missing_hard || echo "rc=$?"' _ "$IM" 2>&1; }
+none="$(rmh /nonexistent)"
+# 3 is the claim and so it is the assertion: 2 would mean one of the three fell out of the
+# roster, and 0 that the whole block is unreachable, which is how this read before.
+is "all three are named at once"        "3" "$(grep -c '^    \(node\|jq  \|tmux\) —' <<<"$none")"
+is "...in ONE install command"        "yes" "$(grep -q 'apt-get install -y nodejs jq tmux' <<<"$none" && echo yes || echo no)"
+# node is `nodejs` to apt and `node` to brew. Printing the BINARY into an apt command gives
+# a line that looks right, runs, and installs an unrelated package.
+is "...spelling node as its package"    "no" "$(grep -q 'apt-get install -y node ' <<<"$none" && echo yes || echo no)"
+is "...and it reports failure"        "rc=1" "$(grep -o 'rc=[0-9]*' <<<"$none")"
+# THE SILENT DIRECTION. A report that always fires is indistinguishable from one that works,
+# and this one gates the install, so "always" would stop every install on every machine.
+have="$(rmh "$PATH")"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  is "...and says nothing when all three are here" "" "$have"
+else
+  skip "...and says nothing when all three are here" "this machine is missing one of them"
+fi
+
+# APT'S LISTS CAN BE EMPTY, AND THE ERROR NAMES THE PACKAGE RATHER THAN THE CAUSE:
+# "E: Unable to locate package nodejs" reads as "no such package" and means "never ran
+# apt-get update". A fake apt-get with exactly that behaviour — refuses to install until an
+# update has been run once — plus a sudo that is a pass-through, because the real one would
+# ask this suite's reader for a password.
+mkdir -p "$IM/fake"
+cat > "$IM/fake/apt-get" <<'SH'
+#!/bin/sh
+case "$1" in
+  update)  echo done > "$APT_STATE"; exit 0 ;;
+  install) [ -s "$APT_STATE" ] && exit 0
+           echo "E: Unable to locate package $3" >&2; exit 100 ;;
+esac
+exit 0
+SH
+printf '#!/bin/sh\nexec "$@"\n' > "$IM/fake/sudo"
+printf '#!/bin/sh\nexit 1\n'   > "$IM/fake/nope"
+chmod +x "$IM/fake/apt-get" "$IM/fake/sudo" "$IM/fake/nope"
+runpkg() { env PATH="$IM/fake:$PATH" APT_STATE="$1" bash -c '
+  set -uo pipefail; APT_REFRESHED=0; . "$1"/lib.sh; shift; pkg_run "$@"' _ "$IM" "${@:2}" 2>&1; }
+cold="$(runpkg "$IM/cold-lists" jq apt-get install -y jq)"
+is "an apt install that failed on empty lists is retried" "yes" "$(grep -q '✓ jq installed' <<<"$cold" && echo yes || echo no)"
+# `sudo ` OR NOT: pkg_run builds the refresh the same way it builds the install, so the
+# line reads `Running: sudo apt-get update` for anyone who is not root and `Running:
+# apt-get update` in a container that is. Pinning the rootless spelling made this row a
+# statement about who ran the suite.
+is "...after an update it says out loud"                  "yes" "$(grep -qE 'Running: (sudo )?apt-get update' <<<"$cold" && echo yes || echo no)"
+is "...naming the cause, not just the package"            "yes" "$(grep -q 'no package lists yet' <<<"$cold" && echo yes || echo no)"
+# THE OTHER DIRECTION, twice. A refresh that always runs costs every install a network round
+# trip it does not need, and a refresh that fires for a manager that is not apt is a sudo
+# nobody agreed to.
+echo done > "$IM/warm-lists"
+warm="$(runpkg "$IM/warm-lists" jq apt-get install -y jq)"
+is "...and not when the install already worked"            "no" "$(grep -q 'apt-get update' <<<"$warm" && echo yes || echo no)"
+notapt="$(runpkg "$IM/cold-lists2" zz "$IM/fake/nope")"
+is "...and never for a manager that is not apt"            "no" "$(grep -q 'apt-get update' <<<"$notapt" && echo yes || echo no)"
+is "...which still reports its own failure"               "yes" "$(grep -q 'zz install failed' <<<"$notapt" && echo yes || echo no)"
+
+# A PIPELINE'S STATUS IS ITS RIGHT-HAND SIDE'S. `curl … | bash` on a machine with no curl
+# exits 0 — bash ran fine, on empty input — so the installer printed "✓ claude installed" one
+# line under `curl: command not found`, and the first session opened with no agent in it.
+# A PATH holding nothing but bash reproduces it exactly: no curl, no claude, and the `bash`
+# the offer shells out to still resolvable.
+sed -n '/^if ! command -v claude /,/^fi$/p' "$ROOT/install.sh" > "$IM/claude.sh"
+is "the claude offer came out"  "yes" "$(grep -q 'CLAUDE_INSTALL=' "$IM/claude.sh" && echo yes || echo no)"
+mkdir -p "$IM/onlybash"; ln -sf "$(command -v bash)" "$IM/onlybash/bash"
+cl="$(env PATH="$IM/onlybash" HOME="$IM/h" bash -c '
+  set -uo pipefail; ask_optional() { return 0; }; UNASKED=(); . "$1"/claude.sh' _ "$IM" 2>&1)"
+is "a claude install that could not run is not called installed" "no"  "$(grep -q 'claude installed' <<<"$cl" && echo yes || echo no)"
+is "...it says it failed"                                        "yes" "$(grep -q 'claude install failed' <<<"$cl" && echo yes || echo no)"
+is "...and names the curl that was not there"                    "yes" "$(grep -q 'no curl on this machine' <<<"$cl" && echo yes || echo no)"
+
+# ── and the end of the install, which claimed success over an empty runtime ──
+# A COPY, NOT THE REPO, for the reason the group above gives: install.sh writes
+# core.hooksPath into $REPO's git config when $REPO is a repo.
+mkdir -p "$IM/src" "$IM/h/.claude"
+cp -Rp "$ROOT"/bin "$ROOT"/lib "$ROOT"/tmux "$ROOT"/hooks "$ROOT"/mcp "$ROOT"/skill \
+       "$ROOT"/layouts "$ROOT"/web "$ROOT"/install.sh "$IM/src/" 2>/dev/null
+# BIN_DIR deliberately absent from PATH: that is what makes the PATH hint fire, and the hint
+# is what is under test. SHELL is the variable the hint reads.
+im() { env HOME="$IM/h" CLAUDE_FLEET_HOME="$IM/h/rt" CLAUDE_FLEET_BIN="$IM/h/bin" \
+           SHELL="$1" "$IM/src/install.sh" 2>&1; }
+bashrun="$(im /bin/bash)"
+# THE ONE COPY-PASTEABLE LINE IN THE WHOLE INSTALL, and it said ~/.zshrc to everybody. On a
+# Linux box whose login shell is bash that appends to a file the shell never reads, and the
+# next command is still not found — with nothing on screen to suggest why.
+is "the PATH line names the shell's own rc file" "yes" "$(grep -q 'bashrc' <<<"$bashrun" && echo yes || echo no)"
+is "...and not another shell's"                   "no" "$(grep -q 'zshrc'  <<<"$bashrun" && echo yes || echo no)"
+zshrun="$(im /bin/zsh)"
+is "...which is .zshrc under zsh"                "yes" "$(grep -q 'zshrc'  <<<"$zshrun" && echo yes || echo no)"
+fishrun="$(im /opt/homebrew/bin/fish)"
+# fish has no export line to append; the equivalent is a command, so the hint has to change
+# shape and not just filename.
+is "...and fish_add_path under fish"             "yes" "$(grep -q 'fish_add_path' <<<"$fishrun" && echo yes || echo no)"
+is "...with no rc file named there"               "no" "$(grep -q 'export PATH' <<<"$fishrun" && echo yes || echo no)"
+
+# THE RE-RUN LINE HAS TO BE ONE THE READER CAN TYPE. $IM/src is not a git repo and is not the
+# cwd, which is exactly the npx shape: the installer ran out of a cache directory the reader
+# was never shown, and `./install.sh --verbose` names a file their working directory has
+# never had.
+is "an npx-shaped install offers the npx re-run" "yes" "$(grep -q 'npx ghostfleet-cli --verbose' <<<"$bashrun" && echo yes || echo no)"
+is "...and not a script that is not there"        "no" "$(grep -q './install.sh --verbose'       <<<"$bashrun" && echo yes || echo no)"
+fromdir="$(cd "$IM/src" && env HOME="$IM/h" CLAUDE_FLEET_HOME="$IM/h/rt" CLAUDE_FLEET_BIN="$IM/h/bin" \
+           SHELL=/bin/bash ./install.sh 2>&1)"
+is "...and IS ./install.sh when that is the cwd" "yes" "$(grep -q './install.sh --verbose' <<<"$fromdir" && echo yes || echo no)"
+
+# A FAILED STAGE IS THE END OF THE INSTALL. Measured: the build found no npm, cf-sync said
+# NOT SYNCED and copied nothing, and the installer carried on to link symlinks at files that
+# were not there, print `✓ linked 0 commands`, print a "Done. Next:" block naming commands
+# that did not exist, and exit 0 — a green install of nothing, which is the one outcome worse
+# than a red one, because nobody re-runs it.
+printf '#!/bin/sh\necho "cf-sync: NOT SYNCED — nothing was copied." >&2\nexit 1\n' > "$IM/src/bin/cf-sync"
+chmod +x "$IM/src/bin/cf-sync"
+rm -rf "$IM/h/rt" "$IM/h/bin"
+failed="$(im /bin/bash)"; failed_rc=$?
+is "a failed stage never reaches Done. Next:"    "no"  "$(grep -q 'Done. Next:' <<<"$failed" && echo yes || echo no)"
+is "...and says the runtime was not staged"      "yes" "$(grep -q 'runtime was not staged' <<<"$failed" && echo yes || echo no)"
+is "...keeping cf-sync's own reason on screen"   "yes" "$(grep -q 'NOT SYNCED' <<<"$failed" && echo yes || echo no)"
+is "...and exits non-zero"                       "no"  "$([ "$failed_rc" = 0 ] && echo yes || echo no)"
+# THE ARTIFACT, NOT THE EXIT CODE. The gate above should make this unreachable; it stays
+# because it asks what is actually on PATH rather than trusting the step that puts it there.
+printf '#!/bin/sh\nexit 0\n' > "$IM/src/bin/cf-sync"; chmod +x "$IM/src/bin/cf-sync"
+rm -rf "$IM/h/rt" "$IM/h/bin"
+empty="$(im /bin/bash)"; empty_rc=$?
+is "zero linked commands is not a tick"          "no"  "$(grep -q '✓ linked 0 commands' <<<"$empty" && echo yes || echo no)"
+is "...it is a failure that says what to do"     "yes" "$(grep -q 'linked 0 commands' <<<"$empty" && echo yes || echo no)"
+is "...and it too stops before Done. Next:"      "no"  "$(grep -q 'Done. Next:' <<<"$empty" && echo yes || echo no)"
+is "...and exits non-zero"                       "no"  "$([ "$empty_rc" = 0 ] && echo yes || echo no)"
+rm -rf "$IM"
 
 # ── what a non-claude master actually loses ─────────────────────────────────
 # MEASURED, not assumed, and the UI reads these rather than spelling them. The wiring gap
@@ -6382,6 +6553,80 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
 else
   skip "Projects screen tab keys" "tmux or node missing"
 fi
+
+# THE FIRST PROJECT IS REGISTERED THROUGH THIS SCREEN, and on a fresh account it took 7
+# keystrokes — 5 of them arrowing down a home directory to a folder whose full path the
+# reader could have typed in one go. `/` + the path + ⏎ + s is four, none of them an arrow.
+# HOME is the temp dir here for two reasons: it keeps the browser off the developer's own
+# home, and it makes every path on screen short enough not to wrap the pane, which is what
+# the refusal assertions read.
+group "the folder browser takes a typed path (real TUI)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  FP="$(mktemp -d)"
+  # A SPACE IN THE NAME, deliberately. The clone box one screen over filters its input with
+  # `ch > ' '`, which drops spaces — copy that filter here and a folder with a space in it
+  # can be typed and never reached, which is a bug you only find on somebody else's machine.
+  mkdir -p "$FP/my repos/acme-api"; : > "$FP/notadir"
+  fpstart() {
+    rm -f "$FP/choice"; tmux -L cffp kill-server 2>/dev/null
+    tmux -L cffp new-session -d -x 200 -y 40 \
+      "cd '$FP' && HOME='$FP' node '$ROOT/bin/fleet-grid.mjs' - --screen addproject > '$FP/choice' 2>/dev/null" 2>/dev/null
+    wait_for 8 "the folder browser to draw" 'pane_has cffp "pick a root folder"'
+  }
+  fptype() {   # open the path box and submit $1
+    tmux -L cffp send-keys '/' 2>/dev/null
+    wait_for 5 "the path box to open" 'pane_has cffp "type or paste"' || return 1
+    tmux -L cffp send-keys -l "$1" 2>/dev/null
+    tmux -L cffp send-keys Enter 2>/dev/null
+  }
+  if fpstart; then
+    # THE HINT BAR ONLY. Deleting the binding leaves this row green — measured, by deleting
+    # it — because a key nobody can press is still advertised. The rows below are what pin
+    # the behaviour; this one pins that the reader is told the key exists at all, which is
+    # its own failure: the whole saving is in knowing to type instead of arrow.
+    is "the hint bar advertises the key" "yes" "$(pane_has cffp '/ type a path' && echo yes || echo no)"
+    fptype '~/my repos/acme-api'
+    wait_for 5 "the browser to land on it" 'pane_has cffp "my repos/acme-api"'
+    tmux -L cffp send-keys 's' 2>/dev/null
+    wait_for 5 "the browser to answer" '[ -s "$FP/choice" ]'
+    # THE ARTIFACT, not the screen: what this emits is what bin/ghostfleet registers. A
+    # space that survived the input filter and a ~ that was expanded both show up here or
+    # nowhere.
+    is "a typed ~ path with a space lands, and s picks it" "newproject|$FP/my repos/acme-api" \
+       "$(tr '\037' '|' < "$FP/choice" 2>/dev/null)"
+  else
+    bad "the folder browser draws" "a screen" "nothing in 8s"
+  fi
+  # BOTH WAYS OF BEING WRONG, and they are different places to look: a typo, versus a path
+  # that is right about the repo and one level too deep. One message for both teaches
+  # neither. A fresh screen per case because a refusal leaves the bad text in the box on
+  # purpose — `/` typed into it is a path separator, not the key again.
+  if fpstart; then
+    fptype '~/nope-nothing-here'
+    wait_for 5 "the refusal" 'pane_has cffp "no folder at"'
+    is "a path that is not there is refused"  "yes" "$(pane_has cffp 'no folder at ~/nope-nothing-here' && echo yes || echo no)"
+    is "...and nothing was registered"         "no" "$([ -s "$FP/choice" ] && echo yes || echo no)"
+  fi
+  if fpstart; then
+    fptype '~/notadir'
+    wait_for 5 "the refusal" 'pane_has cffp "not a folder"'
+    is "...and a FILE is refused differently" "yes" "$(pane_has cffp 'is a file, not a folder' && echo yes || echo no)"
+    is "...still registering nothing"          "no" "$([ -s "$FP/choice" ] && echo yes || echo no)"
+  fi
+  # AND THE OLD WAY STILL WORKS. A new key that quietly broke arrowing would trade one
+  # first-run for another, and `s` on the folder you navigated to is the path every reader
+  # who has used this screen before already knows.
+  if fpstart; then
+    tmux -L cffp send-keys Down 2>/dev/null; tmux -L cffp send-keys 's' 2>/dev/null
+    wait_for 5 "the browser to answer" '[ -s "$FP/choice" ]'
+    is "arrowing and s still register the plain way" "yes" \
+       "$(grep -q 'newproject' "$FP/choice" 2>/dev/null && echo yes || echo no)"
+  fi
+  tmux -L cffp kill-server 2>/dev/null; rm -rf "$FP"
+else
+  skip "the folder browser takes a typed path" "tmux or node missing"
+fi
+
 
 # The name the control plane attaches to must be the name fleet-tab really creates. The
 # loop has to know it BEFORE the session exists, so it asks fleet-tab rather than
