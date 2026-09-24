@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: cf60ecbb7494
+// CLIENT-HASH: 1795b469d6f3
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -185,7 +185,21 @@
 // swap into boxes the eye is resting on. Keyed on a NULL answer, never an empty one — an
 // empty list is a real answer and belongs to the first-run path.
 //   An older client is stale rather than broken here; no new files.
-// v42 ACTUALLY REACHES THE BOTTOM. v41 pinned the shell with position: fixed; inset: 0 and
+// v44 STOPS PAYING THE STATUS BAR BACK, AND MAKES THE BAR OPAQUE. v42 laid the shell out to
+// 812 on an 812 screen and the device still showed the band — with the composer now cut off
+// above it (sl812 cb775, and "there is still space but now it gets cut"). A box laid out and
+// not painted is outside the web view: in iOS 26 standalone a black-translucent bar has the
+// web view positioned at the top of the screen but sized to the screen MINUS the bar, so the
+// bottom 53pt are not paintable by anything — WebKit bug 301108. The fix is the meta tag,
+// not CSS: with an opaque bar iOS keeps its strip and the web view reaches the real bottom.
+// The v42 rule is gone; the shell is still pinned. The device should now read sat0 with
+// nothing under the composer — ONE LAUNCH LATE: iOS lays out from the bar style STORED in the
+// web clip and stores the page's meta for next time (measured: the plist on disk is
+// rewritten during a launch, and the layout follows on the next). So after this version
+// paints, quit the app and open it again; or remove and re-add the icon.
+//   Also: an empty chat printed fleet-read's terminal hint ("Send it work: fleet-send -s …")
+// to a phone. It says "No messages yet — send one below" now.
+// v42 ACTUALLY REACHES THE BOTTOM — IT DID NOT, see v44. v41 pinned the shell with position: fixed; inset: 0 and
 // the device came back sl759 on an 812 screen — the same number dvh gave. Pinning did
 // nothing: a fixed box with inset: 0 resolves against the initial containing block, which
 // in iOS standalone IS the short layout viewport. The shell was never what was wrong; the
@@ -258,7 +272,7 @@
 // the app does not start at all. Same shape as v10, which added md.js. Nothing else
 // changed on screen — the port is meant to be invisible — so the only thing that says the
 // deploy landed is the client line in the settings sheet.
-const VERSION = 'ghostfleet-v43';
+const VERSION = 'ghostfleet-v44';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

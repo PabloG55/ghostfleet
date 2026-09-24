@@ -589,29 +589,51 @@ is('the worker answers which version it is', true,
    /type === 'version'[\s\S]{0,160}postMessage\(\{ version: VERSION \}\)/.test(JS['sw.js']));
 is('...and the client asks it', true, /askShellVersion/.test(JS['app.js']));
 
-// ── in standalone the shell is one status bar TALLER than the viewport ────
-// Measured on the device twice, and the second reading corrected the first:
-//     v40  sl759 (height: 100dvh)        v41  sl759 (position: fixed; inset: 0)
-// sl759 both times against sh812. PINNING DID NOTHING: a fixed box with inset: 0 resolves
-// against the initial containing block, which in iOS standalone IS the short layout
-// viewport. sl == ih every time — the shell filled what it was given; the viewport is what
-// is short, by exactly env(safe-area-inset-top) = 53, because the page is drawn from y=0
-// under a black-translucent bar while iOS still subtracts that bar from the height. So the
-// box is told to be taller than the viewport by that inset.
-const standaloneRules = (CSS.match(/[^\n]*height:\s*calc\(100dvh \+ env\(safe-area-inset-top\)\)[^\n]*/g) || []);
-is('standalone extends the shell by the top inset', true, standaloneRules.length >= 1);
-// BOTH SIGNALS, and this is the part a CSS-only fix gets wrong. The probe reports
-// standalone as `matchMedia(...) || navigator.standalone`, so `sa1` from the device does
-// not say WHICH was true — and iOS has honoured the legacy property while the media query
-// lagged. A media query alone would then match nothing and cost another launch to discover.
-// Verified locally with navigator.standalone forced true and the query false: the class
-// still lands and the rule still applies.
-is('...keyed on the media query', true, /@media \(display-mode: standalone\)/.test(CSS));
-is('...and on a class the client can set from either signal', true, /html\.standalone #app\.shell/.test(CSS));
-is('...which the client actually sets', true, /classList\.toggle\('standalone'/.test(JS['app.js']));
+// ── the status bar is OPAQUE, because a translucent one costs the bottom of the screen ──
+// Four launches measured it, and the fourth is the one that named the cause:
+//     v40  height: 100dvh                          sl759  cb751   band under the composer
+//     v41  position: fixed; inset: 0               sl759  cb0     same band
+//     v42  height: calc(100dvh + inset-top)        sl812  cb775   band STILL there, composer cut
+// v42 is the datum: the shell measured 812 on an 812 screen and the device still showed the
+// band, with the composer clipped above it. A box that is laid out but not painted is a box
+// outside the web view. In iOS 26 standalone with `black-translucent`, WebKit positions the
+// web view at the top of the screen (under the status bar, hence sat53) but sizes it to the
+// screen minus the status bar (hence ih759 on sh812) — so the bottom 53pt belong to no page
+// and no CSS reaches them. Reported independently at 797/844, 894/956 and 759/812, always
+// short by exactly the top inset: WebKit bug 301108 (rdar://163501215) is the regression's
+// tracker, and Apple's own meta-tag doc says which half of the pair fixes it — "If set to
+// default or black, the web content is displayed below the status bar", i.e. iOS reserves the
+// strip it was already reserving, and hands the page a web view that runs to the real
+// bottom. `black` rather than `default`: the app is #0b0d10 in every theme and a default
+// bar can come back white.
+//   PINNED HERE BECAUSE NO ENGINE IN THIS SUITE CAN SEE IT — every desktop engine reports the
+// insets as 0 and dvh as the window, so translucent and opaque render identically here.
+const sbStyle = (/<meta name="apple-mobile-web-app-status-bar-style" content="([^"]*)"/.exec(HTML) || [, ''])[1];
+is('the status bar is opaque, not translucent', 'black', sbStyle);
+// viewport-fit=cover is NOT the broken half, and it is still what puts the page under the
+// home indicator at the bottom. Dropping it would inset the layout by the bottom safe area
+// and put the band back, one status bar smaller.
+is('...and the page still claims the bottom edge', true, /viewport-fit=cover/.test(HTML));
+// The v42 hack — paying the status bar back into a height — is gone. It extended the LAYOUT
+// past a web view that ends where it ends, which is how the composer came to be cut off.
+// (`100lvh` is the same hack by another name: on the 26.5 simulator it answered 874 — the
+// full screen — while the web view was 812 tall under a translucent bar.)
+is('...and no rule pays the status bar back into a height', 0,
+   (CSS.replace(/\/\*[\s\S]*?\*\//g, '').match(/height:\s*calc\([^;]*env\(safe-area-inset-top\)/g) || []).length);
+// The probe still reports which standalone signal was true; the device's next line is the
+// one that says whether the fix landed (sat0 and no band), so it stays in.
+is('the client still marks standalone from either signal', true, /classList\.toggle\('standalone'/.test(JS['app.js']));
 is('...from navigator.standalone as well', true, /navigator\.standalone/.test(JS['app.js']));
-// ...and re-asked when the window changes shape, or a rotation leaves it wrong.
 is('...and again on rotation', true, /orientationchange['"]?,\s*markStandalone/.test(JS['app.js']));
+
+// ── an empty transcript is an empty state, not a CLI hint ──────────────────
+// fleet-read answers a session that has not taken a turn with a note written for a
+// terminal: "…is live but has no transcript yet — Send it work: fleet-send -s … <prompt>".
+// The chat screen printed it verbatim, so a phone user was told to run a shell command they
+// have no shell for. The note is a fact for the API; the screen owes the reader a sentence.
+const chatSrc = (/function chatView\([\s\S]*?\nfunction /.exec(JS['app.js']) || [''])[0];
+is('an empty transcript says so in plain words', true, /No messages yet — send one below/.test(chatSrc));
+is("...and never prints fleet-read's note", false, /text:\s*s\.note/.test(chatSrc));
 
 // The probe has to measure the screen that HAS a composer. Keyed per screen: the grid has
 // none, so the first reading came back cb0/gap0 and said nothing about the band.

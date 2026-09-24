@@ -1181,7 +1181,15 @@ function chatView(card) {
     ]));
   }
   if (!s) { wrap.append(el('div', { class: 'hint', text: 'reading the transcript…' })); return wrap; }
-  if (s.note) { wrap.append(el('div', { class: 'hint', text: s.note })); return wrap; }
+  // A session that has not taken a turn comes back with total 0 and a `note` — fleet-read's
+  // own words for a terminal: "…is live but has no transcript yet — Send it work: fleet-send
+  // -s … <prompt>". The API keeps the note, because "no messages" and "no transcript yet" are
+  // different facts and a JSON caller may care; the SCREEN does not print it, because it told
+  // a phone user to run a shell command. The composer is right below; say that instead.
+  if (s.note || !(s.messages && s.messages.length)) {
+    wrap.append(el('div', { class: 'hint empty', text: 'No messages yet — send one below' }));
+    return wrap;
+  }
   // Older messages load at the TOP, where they belong in this order — the button is the
   // ceiling of the conversation, not a footer.
   if (s.next_before) {

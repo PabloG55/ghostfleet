@@ -103,20 +103,30 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
  * ends is survivable where a layout that never recovers is not. NOT `position: fixed`
  * either, which is the thing that fights iOS keyboards hardest. */
 #app.shell {
-  /* Measured in the installed app, twice, and the second measurement corrected the first:
+  /* Measured in the installed app four launches running, and the fourth named the cause:
    *
-   *     v40  ih759 sh812 sl759 cb751 gap8   (sized by dvh)
-   *     v41  ih759 sh812 sl759 cb0   gap0   (position: fixed; inset: 0)
+   *     v40  ih759 sh812 sl759 cb751          height: 100dvh
+   *     v41  ih759 sh812 sl759 cb0            position: fixed; inset: 0
+   *     v42  ih759 sh812 sl812 cb775          height: calc(100dvh + env(safe-area-inset-top))
    *
-   * sl759 both times. PINNING DID NOTHING, and that is the finding: a fixed element with
-   * inset: 0 resolves against the INITIAL CONTAINING BLOCK, which in iOS standalone is the
-   * same short layout viewport dvh reports — 759 on an 812 screen. Fixed positioning is not
-   * a way out of a viewport that is itself wrong.
-   *   The shell was never what was wrong. sl == ih every time: it filled the viewport it
-   * was given, exactly. The viewport is short by precisely env(safe-area-inset-top) = 53,
-   * because with viewport-fit=cover and a black-translucent bar the page is drawn from y=0
-   * UNDER the status bar while iOS still subtracts the status bar from the height. So the
-   * box has to be told to be taller than the viewport by that inset. */
+   * v42 laid the shell out to 812 on an 812 screen and the device STILL showed the band, with
+   * the composer now cut off above it. That is the datum: a box that is laid out and not
+   * painted is a box outside the web view. The web view itself was 759 tall — iOS 26
+   * standalone with a black-translucent bar positions it at the top of the screen (under the
+   * bar, hence sat53) and sizes it to the screen minus the bar (hence ih759), so the bottom
+   * 53pt are outside the paintable surface, and no height, inset or dvh gets there. The fix
+   * is the status-bar style in index.html, not a rule in this file: with an opaque bar iOS
+   * keeps its strip at the top and the web view runs to the real bottom. Measured on an iOS
+   * 26.5 simulator (402x874, bar 62) from one clip and one page, only the stored bar style
+   * differing: translucent gave ih812 sat62 with 62pt unpainted under the composer; opaque
+   * gave ih812 sat0 sab34 with the composer 8px above the home indicator and nothing under
+   * it. Same ih both times — the web view is always screen minus bar; the bar decides WHERE
+   * it sits. (100lvh and 100vh answered 874 in both, so a shell sized by lvh is laid out
+   * past the web view exactly as v42 was.) Expected from the device after it: ih759 sh812
+   * sl759 sat0 sab29, composer bottom at 722 — 8px above the home-indicator inset — and
+   * nothing under it.
+   *   THE SHELL IS STILL PINNED, not sized: inset: 0 fills whatever web view iOS hands the
+   * page, which is the right thing to fill. Nothing here adds an inset to a height again. */
   position: fixed; inset: 0;
   display: flex; flex-direction: column; gap: 0;
   /* A transformed child during a screen transition must not become page scroll. The bands
@@ -125,25 +135,6 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
    * viewport-check exists to hold. */
   overflow: hidden;
 }
-/* ONLY IN STANDALONE, and the probe is why that is safe to key on: it reports `sa1` from
- * this same media query on the device, so the condition is measured rather than assumed.
- * In Safari the layout viewport already reaches the bottom and adding the inset would make
- * the shell taller than the screen, so the browser case is left exactly as it was.
- *   `height` beside `top: 0; bottom: 0` is over-constrained and height wins, which is the
- * intent: the box starts at the top of the screen and is one status bar taller than the
- * viewport, so its bottom edge lands on the physical bottom at 812. The padding underneath
- * is unchanged, so the composer still sits env(safe-area-inset-bottom) + 8 above the home
- * indicator rather than on it. */
-/*   TWO SELECTORS FOR ONE CONDITION, and that is not belt-and-braces for its own sake.
- * The probe reports standalone as `matchMedia('(display-mode: standalone)') ||
- * navigator.standalone` — an OR, so `sa1` from the device does NOT say which of the two
- * was true, and iOS has historically honoured the legacy property while the media query
- * lagged. A CSS-only rule would then match nothing and this fix would need another launch
- * to find that out. The class is set from the same JS that can read both. */
-@media (display-mode: standalone) {
-  #app.shell { height: calc(100dvh + env(safe-area-inset-top)); }
-}
-html.standalone #app.shell { height: calc(100dvh + env(safe-area-inset-top)); }
 
 /* ── moving between screens ──────────────────────────────────────────────────
  * "add cool animations ... like getting out of a session." The screens are a stack —
