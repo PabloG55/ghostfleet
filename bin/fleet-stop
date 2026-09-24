@@ -111,6 +111,11 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.notify-lead" "$FLEET_DIR/$SOCK.$SESSION.notify-
 rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to" "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
 # the display label too, or a session that reuses this name inherits a stranger's title
 rm -f "$FLEET_DIR/$SOCK.$SESSION.label" 2>/dev/null
+# THE ASLEEP MARKER IS A CARD. A hibernated session has no tmux session to kill, so the
+# kill above is a no-op for it — and the marker alone is what draws it on the grid and the
+# phone. Seen: a fleet "cleaned" session by session, and three asleep cards stayed behind.
+# .exited goes with it, for the name-reuser reason above.
+rm -f "$FLEET_DIR/$SOCK.$SESSION.asleep" "$FLEET_DIR/$SOCK.$SESSION.exited" 2>/dev/null
 
 # The dev-stack slot is keyed by WORKTREE PATH, so release it before the manifest row
 # (the only thing that still knows which path this session held) is dropped. A slot left

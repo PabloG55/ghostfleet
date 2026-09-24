@@ -78,6 +78,11 @@ MARK=""
 # A LEFTOVER MARKER WOULD MAKE A LIVE SESSION READ AS EXITED, which is the same shape
 # as the stale park marker fleet-spawn and fleet-open both clear on the way in.
 [ -n "$MARK" ] && rm -f "$MARK" 2>/dev/null
+# ...and a leftover ASLEEP marker makes a live session read as asleep, and makes the next tap
+# on its card try to start a second one under the same name. Any start of this session is
+# the end of its sleep — except the wake itself, which keeps the marker until its own poll
+# sees a prompt, so a wake that does not come back can still be retried.
+[ -n "$MARK" ] && [ "${CLAUDE_FLEET_WAKING:-}" != 1 ] && rm -f "${MARK%.exited}.asleep" 2>/dev/null
 
 # THE NAME AT EXIT, NOT THE NAME AT LAUNCH. This shell outlives the agent by design, and
 # the session can be renamed in between (fleet-rename). A marker written under the launch

@@ -943,6 +943,10 @@ function killSession(name) {
   // Drop the agent marker too, or a later session that reuses this name inherits a
   // dead one's agent and launches the wrong CLI.
   try { fs.unlinkSync(path.join(FLEET_DIR, `${SOCK}.${name}.agent`)); } catch {}
+  // An asleep card has no tmux session — the kill above does nothing for it and the marker
+  // IS the card, so leaving it kept a stopped session on the grid. Same list as fleet-stop.
+  try { fs.unlinkSync(asleepFile(name)); } catch {}
+  try { fs.unlinkSync(exitedFile(name)); } catch {}
   // drop its status file(s) so the card disappears (the conversation history in
   // ~/.claude/projects is untouched — you can re-open it later from `new`).
   let files = [];
@@ -1664,6 +1668,8 @@ let pickSel = 0;
 let pickFresh = false;       // picker opened via N (fresh parallel) vs n (resume)
 let nameCwd = '';            // checkout chosen in the picker, awaiting a session name
 let nameInput = '';          // editable, pre-filled with the checkout's basename
+let parked = [];             // that checkout's asleep + exited sessions, offered on the name screen
+let parkSel = -1;            // -1 = the name field has focus; 0.. = a row of `parked`
 let agentSel = 0;            // selection on the agent screen (only shown if >1 installed)
 // Resuming an already-known worktree needs no naming step — that's only for the
 // explicit "+ new session" flow. Attach straight in with the worktree's own name.
@@ -1829,13 +1835,56 @@ function renderPicker() {
   out(buf);
 }
 
+// ── THE SESSIONS ALREADY PARKED IN A CHECKOUT ────────────────────────────────
+// Asked for in the owner's words — "could you add a list of parked parallel sessions pls".
+// The name screen was the one place a person states "I want a session in THIS checkout",
+// and it offered only a new one, while the checkout's hibernated and exited sessions sat
+// elsewhere on the grid, or (for a hibernated one, before its card existed) nowhere. So the
+// screen lists them, and picking one reopens it instead of starting a stranger beside it.
+//   REOPENING IS AN ATTACH, NOT A THIRD VERB. bin/ghostfleet's attach path already wakes a
+// session with an asleep marker, and an exited session's pane is held open offering to
+// resume — so `attach<US><name>` is exactly what its card's Enter emits, and one consumer
+// behind every way in stays one consumer.
+//   A CHECKOUT IS ITS PATH OR BELOW IT, never a prefix of the string: `acme-api` is not
+// inside `acme-api-2`, and worktrees are siblings with exactly that shape of name.
+function parkedIn(dir) {
+  const inside = p => !!p && (p === dir || p.startsWith(dir + path.sep));
+  const live = tmuxList();
+  const rows = [];
+  for (const s of asleepSessions(new Set(live.map(l => l.name))))
+    if (inside(s.cwd)) rows.push({ name: s.name, kind: 'asleep', at: s.asleepAt || 0 });
+  for (const s of live) {
+    if (isLead(s.name) || !isExited(s.name) || !inside(s.cwd)) continue;
+    rows.push({ name: s.name, kind: 'exited', at: mtimeSec(exitedFile(s.name)) || 0 });
+  }
+  return rows.sort((a, b) => b.at - a.at || a.name.localeCompare(b.name));
+}
+function enterNamePrompt() {
+  nameInput = path.basename(nameCwd); parked = parkedIn(nameCwd); parkSel = -1; mode = 'nameprompt';
+}
+
 function renderNamePrompt() {
   let buf = '\x1b[H';
+  const onName = parkSel < 0;
   buf += ` ${C.bold}session name${C.reset} ${C.dim}— ${nameCwd.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
-  buf += ` name:  ${C.bold}${nameInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += ` name:  ${C.bold}${nameInput}${C.reset}${onName ? '▏' : ''}\x1b[K\n\x1b[K\n`;
   buf += `${C.dim} a live session with the same name gets -2/-3 appended automatically${C.reset}\x1b[K\n\x1b[K\n`;
+  if (parked.length) {
+    const nowS = Math.floor(Date.now() / 1000);
+    buf += ` ${C.bold}or reopen one parked here${C.reset}\x1b[K\n`;
+    parked.slice(0, 9).forEach((r, i) => {
+      const on = i === parkSel;
+      const what = r.kind === 'asleep'
+        ? `☾ asleep${r.at ? ' ' + humanAge(Math.max(0, nowS - r.at)) : ''}`
+        : '⏹ exited';
+      buf += `${on ? `${C.bold}${C.green} ▸ ` : '   '}${i + 1}  ${padEndV(clip(r.name, 28), 28)}${C.reset} ${C.dim}${what}${C.reset}\x1b[K\n`;
+    });
+    buf += '\x1b[K\n';
+  }
   const next = installedAgents().length > 1 ? 'pick an agent' : 'create';
-  buf += `${C.dim} ⏎ ${next} · esc/\` back to the checkout list${C.reset}\x1b[K\n\x1b[J`;
+  buf += onName
+    ? `${C.dim} ⏎ ${next}${parked.length ? ' · ↓ the parked list' : ''} · esc/\` back to the checkout list${C.reset}\x1b[K\n\x1b[J`
+    : `${C.dim} ⏎ reopen · 1-${Math.min(9, parked.length)} reopen that one · ↑ back to the name · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 
@@ -2292,11 +2341,21 @@ function onKey(key) {
     if (key === '\x1b[A' || key === 'k') pickSel = Math.max(0, pickSel - 1);
     else if (key === '\x1b[B' || key === 'j') pickSel = Math.min(checkouts.length - 1, pickSel + 1);
     else if ((key === '\r' || key === '\n') && checkouts.length) {
-      nameCwd = checkouts[pickSel]; nameInput = path.basename(nameCwd); mode = 'nameprompt';
+      nameCwd = checkouts[pickSel]; enterNamePrompt();
     }
     render();
   } else if (mode === 'nameprompt') {
     if (key === '\x1b' || key === '\x03' || key === '\x60') { mode = 'picker'; render(); return; }
+    // THE LIST HAS FOCUS OR THE NAME DOES, never both: a digit is a legal character in a
+    // session name (`api-2`), so digits pick a row only once ↓ has moved onto the list.
+    const shown = Math.min(9, parked.length);
+    if (key === '\x1b[B' && shown) { parkSel = Math.min(shown - 1, parkSel + 1); render(); return; }
+    if (key === '\x1b[A' && parkSel >= 0) { parkSel -= 1; render(); return; }
+    if (parkSel >= 0) {
+      if (key === '\r' || key === '\n') return finish(`attach${US}${parked[parkSel].name}`);
+      if (key >= '1' && key <= '9' && +key <= shown) return finish(`attach${US}${parked[+key - 1].name}`);
+      render(); return;
+    }
     if (key === '\r' || key === '\n') {
       // Only detour through the agent screen when there is actually a choice.
       if (installedAgents().length > 1) {

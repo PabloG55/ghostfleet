@@ -397,8 +397,10 @@ export function plan(name, a = {}) {
       return run('fleet-answer', args, t);
     }
     case 'fleet_wake': {
-      // No lead guard: a lead can be hibernated (its fleet is idle too), and waking one is
-      // the opposite of the thing notTheLead exists to prevent.
+      // No lead guard: a lead can be hibernated (only by name — never by the threshold or
+      // --pressure), and waking one is the opposite of the thing notTheLead exists to
+      // prevent. No -s without a target either: fleet-hibernate resolves the caller's own
+      // fleet from $TMUX, and refuses a name asleep in several rather than picking one.
       return run('fleet-hibernate', ['--wake', String(a.session)], t);
     }
     case 'fleet_pause': {

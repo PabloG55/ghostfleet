@@ -2453,7 +2453,12 @@ if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command 
   sleep 1; neighbour "$RV/scratch"
   PPID2="$(tmux -L cf-acme-web display-message -p -t scratch '#{pane_pid}' 2>/dev/null)"
   AGENT2="$(pgrep -P "$PPID2" 2>/dev/null | head -1)"
-  jq -n --arg id "$S2" --arg cwd "$RV/scratch" '{sessionId:$id, cwd:$cwd}' > "$RVC/sessions/${AGENT2:-none}.json"
+  # The note as an agent writes it: its own pid and start time beside the id. fleet-hibernate
+  # believes a note only when both match the running process (a pid is reused, and a crashed
+  # agent leaves its file), so a note without them is a note it must refuse.
+  jq -n --arg id "$S2" --arg cwd "$RV/scratch" --argjson pid "${AGENT2:-0}" \
+        --arg st "$(LC_ALL=C TZ=UTC ps -o lstart= -p "${AGENT2:-0}" 2>/dev/null | sed 's/ *$//')" \
+    '{pid:$pid, sessionId:$id, cwd:$cwd, procStart:$st}' > "$RVC/sessions/${AGENT2:-none}.json"
   tmux -L cf-acme-web rename-session -t scratch billing-svc 2>/dev/null
   is "fixture: the record still names the old one" "scratch" "$(slot_of "$S2")"
   is "fleet-read finds it through the pane"        "1" "$(rd billing-svc | grep -c 'repeats three fields' || true)"
@@ -11873,13 +11878,18 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # ── the folder must be trustable, or waking it is a dialog nobody sees ──
   # Observed on a throwaway: a session resumed in an untrusted folder stops at "Is this a
   # project you created or one you trust?" and never reaches a prompt.
-  mk_state scratch ready 0 sid-busy-fresh 1
+  # From here the id is one the PANE can be established by: without the agent's own note
+  # about its conversation, the session is vetoed before the clock is read at all.
+  HLIVE=bbbbbbbb-0000-0000-0000-000000000001
+  mk_state scratch ready 0 "$HLIVE" 1
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api scratch "$HLIVE" "$HIB" "$HIB/tr-scratch.jsonl" >/dev/null
   is "hib: an untrusted folder is never slept" "yes" \
      "$(yn has 'no trust record' "$(why_for scratch)")"
   # ...and with the folder trusted, the idle clock is the TRANSCRIPT. Trust is read from
   # $CLAUDE_CONFIG_DIR, which is where a profile keeps it, so this needs no test-only seam.
   export CLAUDE_CONFIG_DIR="$HIB/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
   jq -n --arg d "$HIB" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api scratch "$HLIVE" "$HIB" "$HIB/tr-scratch.jsonl" >/dev/null
   is "hib: a fresh transcript is under threshold" "yes" \
      "$(yn has 'h threshold' "$(why_for scratch)")"
   # ── AND THE SAME ANSWER UNDER A GNU-SHAPED stat ─────────────────────────────
@@ -11899,7 +11909,8 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
      "$(PATH="$ROOT/test/helpers/shims:$PATH" yn has 'h threshold' \
         "$(PATH="$ROOT/test/helpers/shims:$PATH" why_for scratch)")"
   # ...and an old one is not. 100h against a 48h threshold: nothing vetoes it.
-  mk_state scratch ready 7200 sid-busy-fresh 100
+  mk_state scratch ready 7200 "$HLIVE" 100
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api scratch "$HLIVE" "$HIB" "$HIB/tr-scratch.jsonl" >/dev/null
   is "hib: a 100h-idle session would sleep" "" "$(why_for scratch)"
   unset CLAUDE_CONFIG_DIR
 
@@ -11991,6 +12002,8 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     > "$CLAUDE_FLEET_DIR/sleeper.json"
   tmux -L cf-acme-web new-session -d -s billing-svc -c "$HW/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
   sleep 0.5
+  # The pane's own note about the conversation it is in: without it the session is vetoed.
+  "$ROOT/test/helpers/live-session.sh" cf-acme-web billing-svc 11111111-2222-3333-4444-555555555555 "$HW/wt" "$TR" >/dev/null
   is "wake: the session starts up"     "1" "$(tmux -L cf-acme-web has-session -t '=billing-svc' 2>/dev/null && echo 1 || echo 0)"
 
   "$ROOT/bin/fleet-hibernate" --apply > "$HW/apply" 2>&1
@@ -12151,6 +12164,20 @@ if command -v jq >/dev/null 2>&1; then
   # goes, whatever it renders as.
   is "veto: a padded empty composer is not a draft" "no" \
      "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/pane-empty-composer-padded.txt")")"
+  # ── THE SUGGESTED PROMPT, AND THE FOURTH FALSE POSITIVE ──
+  # An empty composer carries a suggested next prompt, drawn dim. A plain capture drops the
+  # attribute, so it read as unsent work and vetoed the session for exactly as long as it sat
+  # idle. The fixture's composer line is the live capture's bytes: the glyph, a NO-BREAK
+  # space, then ESC[2m…ESC[0m. `cat` into a pane replays the SGR, so capture -e sees it.
+  is "veto: a dim suggested prompt is not a draft"  "no" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/claude-composer-suggestion-sgr.txt")")"
+  # ...and the same words NOT dim are typing, or the fix is "ignore the composer".
+  is "veto: ...the same words typed still are"      "yes" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/claude-composer-typed-sgr.txt")")"
+  # The no-break space is not blank to the "strip the first run" rule, so the glyph and a
+  # one-word draft came off together — a draft read as empty, the direction that loses work.
+  is "veto: a one-word draft after the no-break space counts" "yes" \
+     "$(vyn grep -q 'typed and unsent' <<< "$(draft_says "$FIX/claude-composer-oneword-sgr.txt")")"
   tmux -L cf-acme-web kill-server 2>/dev/null
 
   # ── 2. the idle clock read mtime, which moves without anybody typing ──
@@ -12224,6 +12251,268 @@ if command -v jq >/dev/null 2>&1; then
   rm -rf "$VT"
 else
   skip "the vetoes that made hibernation do nothing" "jq missing"
+fi
+
+# ── 4a10c12b. the id and the idle clock come from the LIVE process ───────────
+# Measured before this: a fleet's lead in active use was slept, because its recorded id
+# named a conversation last used days earlier. The agent rotates its conversation (/clear
+# starts a new one) and the record keeps the old id — so the idle clock dated the wrong
+# transcript and a wake would have restored the wrong conversation.
+#   The fixture pane is `sleep`, and what makes it "an agent in conversation X" is the note
+# test/helpers/live-session.sh writes for its pid — the same file, same fields, that a real
+# agent writes about itself. Everything is on this run's own sockets and config dir.
+group "hibernation reads the live conversation"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  # RESOLVED, because /tmp is a symlink to /private/tmp and a pane reports the resolved path:
+  # a trust record or a project directory keyed by the typed one is never found.
+  LV="$(cd "$(mktemp -d "$TEST_RUNS.$$.live.XXXXXX")" && pwd -P)"
+  has_t() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  lyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  export CLAUDE_FLEET_DIR="$LV/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$LV/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR" "$LV/wt"
+  jq -n --arg d "$LV/wt" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  OLD=aaaaaaaa-1111-1111-1111-000000000001; NEW=aaaaaaaa-2222-2222-2222-000000000002
+  # A transcript whose last human turn is $2 hours old.
+  prompt_at() {
+    node -e 'const [f,h]=process.argv.slice(1);require("fs").writeFileSync(f,JSON.stringify({type:"user",
+      message:{role:"user",content:"the last thing a person typed"},
+      timestamp:new Date(Date.now()-h*3600000).toISOString()})+"\n")' "$1" "$2"
+  }
+  prompt_at "$LV/old.jsonl" 100      # the conversation the RECORD names: untouched for days
+  prompt_at "$LV/new.jsonl" 1        # the one the process is actually in: an hour ago
+  lwhy()  { "$ROOT/bin/fleet-hibernate" -s "$1" --idle-hours 48 --json 2>/dev/null | jq -r --arg s "$2" '.[] | select(.slot==$s) | .why'; }
+  lidle() { "$ROOT/bin/fleet-hibernate" -s "$1" --idle-hours 48 --json 2>/dev/null | jq -r --arg s "$2" '.[] | select(.slot==$s) | .idle_hours'; }
+  record() {   # sock slot id transcript
+    jq -n --arg id "$3" --arg sock "$1" --arg slot "$2" --arg tr "$4" --arg cwd "$LV/wt" \
+      '{session_id:$id, sock:$sock, slot:$slot, cwd:$cwd, folder:"wt", branch:"main",
+        status:"ready", transcript:$tr, ts:0}' > "$CLAUDE_FLEET_DIR/$3.json"
+  }
+
+  tmux -L cf-acme-api new-session -d -s billing-svc -c "$LV/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  record cf-acme-api billing-svc "$OLD" "$LV/old.jsonl"
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api billing-svc "$NEW" "$LV/wt" "$LV/new.jsonl" >/dev/null
+
+  # THE ROW THE LEAD WAS SLEPT ON. By the record it is 100h idle; by the process, 1h.
+  is "live: a stale recorded id does not make a session look idle" "yes" \
+     "$(lyn has_t 'h threshold' "$(lwhy cf-acme-api billing-svc)")"
+  is "live: ...the idle clock is the LIVE conversation's"           "1" \
+     "$(lidle cf-acme-api billing-svc | cut -d. -f1)"
+  # CORRECTED, not just read around: the grid and the next plan read the record.
+  is "live: the record now names the live conversation"             "$NEW" \
+     "$(jq -r '.session_id // ""' "$CLAUDE_FLEET_DIR/$NEW.json" 2>/dev/null)"
+  is "live: ...and the stale one no longer claims the session"      "no" \
+     "$([ -f "$CLAUDE_FLEET_DIR/$OLD.json" ] && echo yes || echo no)"
+
+  # A NOTE UNDER THE RIGHT PID IS NOT ENOUGH. A pid is reused and a crashed agent leaves its
+  # file, so a note whose start time is not this process's is somebody else's conversation.
+  PID="$("$ROOT/test/helpers/live-session.sh" cf-acme-api billing-svc "$NEW" "$LV/wt" "$LV/new.jsonl")"
+  jq '.procStart = "Mon Jan  1 00:00:00 2024"' "$CLAUDE_CONFIG_DIR/sessions/$PID.json" > "$LV/s" \
+    && mv "$LV/s" "$CLAUDE_CONFIG_DIR/sessions/$PID.json"
+  is "live: a leftover note from a reused pid is not believed"      "yes" \
+     "$(lyn has_t 'could not be established' "$(lwhy cf-acme-api billing-svc)")"
+  rm -f "$CLAUDE_CONFIG_DIR/sessions/$PID.json"
+  # ...and with no evidence at all the session stays up, recorded id or not: the recorded
+  # id is exactly the thing that was wrong.
+  prompt_at "$LV/old.jsonl" 100; record cf-acme-api billing-svc "$OLD" "$LV/old.jsonl"
+  is "live: no live evidence means it stays up"                     "yes" \
+     "$(lyn has_t 'could not be established' "$(lwhy cf-acme-api billing-svc)")"
+
+  # ── THE COMMAND LINE IS WHAT IT WAS TOLD AT LAUNCH ──
+  # /clear is how --resume X and the live conversation part company, so X is believed only
+  # when no OTHER conversation in that folder has been written since the process started.
+  printf '#!/bin/sh\nsleep 600\n' > "$LV/fakeagent"; chmod +x "$LV/fakeagent"
+  ARG=aaaaaaaa-3333-3333-3333-000000000003
+  PD="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$LV/wt" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$PD"
+  prompt_at "$PD/$ARG.jsonl" 100
+  touch -t "$(date -v-100H +%Y%m%d%H%M 2>/dev/null || date -d '-100 hours' +%Y%m%d%H%M)" "$PD/$ARG.jsonl"
+  tmux -L cf-acme-api new-session -d -s scratch -c "$LV/wt" -x 80 -y 24 "'$LV/fakeagent' --resume $ARG" 2>/dev/null
+  sleep 1.2
+  is "live: --resume alone, nothing newer in the folder -> believed" "" "$(lwhy cf-acme-api scratch)"
+  prompt_at "$PD/aaaaaaaa-4444-4444-4444-000000000004.jsonl" 0     # written after it started
+  is "live: ...but a conversation written since then vetoes it"     "yes" \
+     "$(lyn has_t 'could not be established' "$(lwhy cf-acme-api scratch)")"
+  rm -f "$PD/aaaaaaaa-4444-4444-4444-000000000004.jsonl"
+  tmux -L cf-acme-api kill-session -t '=scratch' 2>/dev/null
+
+  # ── B. A LEAD IS NEVER SLEPT BY A RULE ──
+  # Everything else about this master says sleep: established, trusted, 100h idle. Only
+  # naming it may, and a name that is in more than one fleet refuses rather than sleeping
+  # every lead on the machine.
+  touch "$CLAUDE_FLEET_DIR/hibernate.enabled"
+  MSID=aaaaaaaa-5555-5555-5555-000000000005
+  prompt_at "$LV/lead.jsonl" 100
+  tmux -L cf-acme-api new-session -d -s master -c "$LV/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  tmux -L cf-acme-web new-session -d -s master -c "$LV/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  record cf-acme-api master "$MSID" "$LV/lead.jsonl"
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api master "$MSID" "$LV/wt" "$LV/lead.jsonl" >/dev/null
+  is "lead: the threshold never takes a fleet's master"             "yes" \
+     "$(lyn has_t 'never slept automatically' "$(lwhy cf-acme-api master)")"
+  "$ROOT/bin/fleet-hibernate" -s cf-acme-api --apply > "$LV/apply" 2>&1
+  is "lead: ...and --apply leaves it running"                       "yes" \
+     "$(tmux -L cf-acme-api has-session -t '=master' 2>/dev/null && echo yes || echo no)"
+  "$ROOT/bin/fleet-hibernate" -s cf-acme-api --pressure > "$LV/apply" 2>&1
+  is "lead: ...and so does --pressure"                              "yes" \
+     "$(tmux -L cf-acme-api has-session -t '=master' 2>/dev/null && echo yes || echo no)"
+  "$ROOT/bin/fleet-hibernate" --apply master > "$LV/apply" 2>&1; lrc=$?
+  is "lead: a name in two fleets refuses"                           "1:yes:yes" \
+     "$lrc:$(lyn grep -q 'say which with -s' "$LV/apply"):$(tmux -L cf-acme-api has-session -t '=master' 2>/dev/null && echo yes || echo no)"
+  "$ROOT/bin/fleet-hibernate" -s cf-acme-api --apply master > "$LV/apply" 2>&1
+  is "lead: --apply master -s <fleet> sleeps it"                    "no:yes" \
+     "$(tmux -L cf-acme-api has-session -t '=master' 2>/dev/null && echo yes || echo no):$([ -f "$CLAUDE_FLEET_DIR/cf-acme-api.master.asleep" ] && echo yes || echo no)"
+  is "lead: ...and only that fleet's"                               "yes" \
+     "$(tmux -L cf-acme-web has-session -t '=master' 2>/dev/null && echo yes || echo no)"
+
+  tmux -L cf-acme-api kill-server 2>/dev/null; tmux -L cf-acme-web kill-server 2>/dev/null
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$LV"
+else
+  skip "hibernation reads the live conversation" "tmux or jq missing"
+fi
+
+# ── 4a10c12c. a stale marker beside a live session, and a stop that leaves a card ──
+# C. "could not start a pane" on a wake. new-session refuses a name that exists, and a
+# marker outlives its sleep whenever the session comes back some other way — reopened by
+# hand, restarted, a timed-out wake retried. The card reads asleep over a live session and
+# its tap tries to start a second one.
+# F. The owner stopped every session in a fleet and three asleep cards stayed: an asleep
+# session has no tmux session to kill, and the marker alone is what draws the card.
+group "a stale asleep marker does not outlive its session"
+if command -v tmux >/dev/null 2>&1; then
+  SM="$(cd "$(mktemp -d "$TEST_RUNS.$$.stale.XXXXXX")" && pwd -P)"
+  has_t() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  mkdir -p "$SM/fleet" "$SM/wt"
+  smyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  mark() { printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "aaaaaaaa-6666-6666-6666-000000000006" "$SM/wt" 100 > "$SM/fleet/$1.$2.asleep"; }
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  tmux -L cf-acme-web new-session -d -s billing-svc -c "$SM/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.4
+  P0="$(tmux -L cf-acme-web list-panes -t billing-svc -F '#{pane_pid}' 2>/dev/null)"
+  mark cf-acme-web billing-svc
+  out="$(CLAUDE_FLEET_DIR="$SM/fleet" "$ROOT/bin/fleet-hibernate" -s cf-acme-web --wake billing-svc --timeout 5 2>&1)"; src=$?
+  is "wake: a session already running under that name is a success" "0"   "$src"
+  is "wake: ...says so"                                             "yes" "$(smyn has_t 'already running' "$out")"
+  is "wake: ...clears the stale marker"                             "no"  \
+     "$([ -f "$SM/fleet/cf-acme-web.billing-svc.asleep" ] && echo yes || echo no)"
+  is "wake: ...and left the running session alone"                  "$P0" \
+     "$(tmux -L cf-acme-web list-panes -t billing-svc -F '#{pane_pid}' 2>/dev/null)"
+
+  # WHICH FLEET, WHEN NONE IS NAMED: every project has a master, and the first marker the
+  # glob found used to win.
+  mark cf-acme-api master; mark cf-acme-web master
+  out="$(CLAUDE_FLEET_DIR="$SM/fleet" TMUX= CLAUDE_FLEET_SOCK= "$ROOT/bin/fleet-hibernate" --wake master --timeout 5 2>&1)"; src=$?
+  is "wake: a name asleep in two fleets refuses without -s"         "1:yes" "$src:$(smyn has_t 'say which with -s' "$out")"
+  rm -f "$SM/fleet/"*.master.asleep
+
+  # THE ROOT OF IT: any start of the session ends its sleep — except the wake's own start,
+  # whose poll keeps the marker when the wake does not come back. Driven through the real
+  # launcher with a stub behind it, the way "fleet sessions don't auto-update" does.
+  mkdir -p "$SM/bin"; printf '#!/bin/sh\nexit 0\n' > "$SM/bin/claude-here"; chmod +x "$SM/bin/claude-here"
+  ahs() { env "$@" CLAUDE_FLEET_DIR="$SM/fleet" CLAUDE_FLEET_SOCK=cf-acme-web CLAUDE_FLEET_AGENT=claude \
+          PATH="$SM/bin:$PATH" /bin/bash "$ROOT/bin/agent-here" docs-pass >/dev/null 2>&1; }
+  mark cf-acme-web docs-pass; ahs CLAUDE_FLEET_WAKING=
+  is "agent-here: a start clears the session's asleep marker"       "no" \
+     "$([ -f "$SM/fleet/cf-acme-web.docs-pass.asleep" ] && echo yes || echo no)"
+  mark cf-acme-web docs-pass; ahs CLAUDE_FLEET_WAKING=1
+  is "agent-here: ...but not the wake's own start"                  "yes" \
+     "$([ -f "$SM/fleet/cf-acme-web.docs-pass.asleep" ] && echo yes || echo no)"
+  rm -f "$SM/fleet/cf-acme-web.docs-pass.asleep"
+
+  # ── F. a stop leaves no card ──
+  mark cf-acme-web scratch
+  CLAUDE_FLEET_DIR="$SM/fleet" CLAUDE_FLEET_SLOT= TMUX= "$ROOT/bin/fleet-stop" -s cf-acme-web scratch >/dev/null 2>&1
+  is "stop: fleet-stop clears an asleep session's marker"           "no" \
+     "$([ -f "$SM/fleet/cf-acme-web.scratch.asleep" ] && echo yes || echo no)"
+  # ...and the card is gone from the builder both screens read, not only the file.
+  mark cf-acme-web scratch
+  is "stop: the asleep card is on the grid before"                  "yes" \
+     "$(CLAUDE_FLEET_DIR="$SM/fleet" node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --json 2>/dev/null \
+        | jq -r '[.cards[] | select(.name=="scratch")] | length > 0' 2>/dev/null | sed 's/true/yes/; s/false/no/')"
+  CLAUDE_FLEET_DIR="$SM/fleet" CLAUDE_FLEET_SLOT= TMUX= "$ROOT/bin/fleet-stop" -s cf-acme-web scratch >/dev/null 2>&1
+  is "stop: ...and not after"                                       "no" \
+     "$(CLAUDE_FLEET_DIR="$SM/fleet" node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --json 2>/dev/null \
+        | jq -r '[.cards[] | select(.name=="scratch")] | length > 0' 2>/dev/null | sed 's/true/yes/; s/false/no/')"
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  rm -rf "$SM"
+else
+  skip "a stale asleep marker does not outlive its session" "tmux not available"
+fi
+
+# ── 4a10c12d. the new-session screen lists what is parked in that checkout ──
+# E. The owner's words: "could you add a list of parked parallel sessions pls". The name
+# screen is where a person says "a session in THIS checkout", and it offered only a new
+# one while the checkout's hibernated and exited sessions sat elsewhere. Driven through a
+# real pane with real keys — a rendering decision and a key binding, which `node --check`
+# proves neither of. HOME and CLAUDE_FLEET_ROOT point at a fixture root, so the checkout
+# picker lists fixture checkouts and never reads the real ~/.config/ghostfleet/checkouts.
+group "the new-session screen lists parked sessions"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  NP="$(cd "$(mktemp -d "$TEST_RUNS.$$.park.XXXXXX")" && pwd -P)"
+  mkdir -p "$NP/fleet" "$NP/home" "$NP/root/acme-api/.git" "$NP/root/acme-web/.git" "$NP/root/acme-api-2/.git" "$NP/root/billing-svc/.git"
+  tmux -L cfpark kill-server 2>/dev/null
+  pmark() {   # name cwd ts
+    printf '%s\t%s\t%s\t%s\n' "$3" "aaaaaaaa-7777-7777-7777-000000000007" "$2" 100 > "$NP/fleet/cfpark.$1.asleep"; }
+  # IN THIS CHECKOUT: one asleep (newest), one exited (a live pane with its marker).
+  pmark billing-svc "$NP/root/acme-api" "$(date +%s)"
+  tmux -L cfpark new-session -d -s toolbox -c "$NP/root/acme-api" -x 80 -y 24 "sleep 600" 2>/dev/null
+  : > "$NP/fleet/cfpark.toolbox.exited"
+  touch -t "$(date -v-2H +%Y%m%d%H%M 2>/dev/null || date -d '-2 hours' +%Y%m%d%H%M)" "$NP/fleet/cfpark.toolbox.exited"
+  # NOT IN IT: another checkout, and a sibling whose name has this one's as a PREFIX —
+  # worktrees are exactly that shape, and a string prefix would claim it.
+  pmark scratch   "$NP/root/acme-web"   "$(date +%s)"
+  pmark docs-pass "$NP/root/acme-api-2" "$(date +%s)"
+  sleep 0.4
+  pgrid() {
+    tmux -L cfpark kill-session -t _grid 2>/dev/null; rm -f "$NP/choice"
+    tmux -L cfpark new-session -d -s _grid -x 120 -y 40 -c "$NP/root" \
+      -e CLAUDE_FLEET_DIR="$NP/fleet" -e HOME="$NP/home" -e CLAUDE_FLEET_ROOT="$NP/root" \
+      "node '$ROOT/bin/fleet-grid.mjs' cfpark > '$NP/choice' 2>/dev/null ; sleep 20" 2>/dev/null
+    sleep 3
+  }
+  pkeys() { for k in "$@"; do tmux -L cfpark send-keys -t _grid "$k" 2>/dev/null; sleep 0.6; done; }
+  pscreen() { tmux -L cfpark capture-pane -p -t _grid 2>/dev/null; }
+  # n -> the checkout picker (acme-api is first, sorted) -> Enter -> the name screen
+  pgrid; pkeys n Enter
+  scr="$(pscreen)"
+  is "park: the name screen is the one reached"            "yes" "$(grep -q 'session name' <<<"$scr" && echo yes || echo no)"
+  is "park: it lists the checkout's asleep session"        "yes" "$(grep -qE '1 +billing-svc +☾ asleep' <<<"$scr" && echo yes || echo no)"
+  is "park: ...and its exited one"                         "yes" "$(grep -qE '2 +toolbox +⏹ exited' <<<"$scr" && echo yes || echo no)"
+  is "park: ...and nothing from another checkout"          "no"  "$(grep -q 'scratch' <<<"$scr" && echo yes || echo no)"
+  is "park: ...nor from one whose name has it as a prefix" "no"  "$(grep -q 'docs-pass' <<<"$scr" && echo yes || echo no)"
+  # A DIGIT ON THE NAME FIELD IS TYPING: `api-2` is a legal name.
+  pkeys 2
+  is "park: a digit typed in the name field is the name"   "yes:no" \
+     "$(grep -q 'name: *acme-api2' <<<"$(pscreen)" && echo yes || echo no):$(grep -q 'attach' "$NP/choice" 2>/dev/null && echo yes || echo no)"
+  # ↓ moves onto the list; Enter reopens the row under it. The consumer wakes an asleep one.
+  pkeys BSpace Down Enter; sleep 1
+  is "park: down + Enter reopens the first parked session" "yes" \
+     "$(grep -q "attach.billing-svc" "$NP/choice" 2>/dev/null && echo yes || echo no)"
+  # ...and on the list a digit picks that row.
+  pgrid; pkeys n Enter Down 2; sleep 1
+  is "park: on the list, 2 reopens the second"             "yes" \
+     "$(grep -q "attach.toolbox" "$NP/choice" 2>/dev/null && echo yes || echo no)"
+  # A checkout with nothing parked draws no list at all. Sorted: acme-api, acme-api-2,
+  # acme-web, billing-svc — the fourth has nothing.
+  pgrid; pkeys n Down Down Down Enter
+  is "park: a checkout with nothing parked shows no list"  "no" \
+     "$(grep -q 'reopen one parked here' <<<"$(pscreen)" && echo yes || echo no)"
+
+  # ── F, at the desk: x on an asleep card leaves no card ──
+  # Cards: 1 is _grid itself (the pane this runs in), 2 is toolbox, then the slept ones in
+  # directory order — so only one is left, and Right Right lands on it rather than a guess.
+  rm -f "$NP/fleet/cfpark.scratch.asleep" "$NP/fleet/cfpark.docs-pass.asleep"
+  pgrid
+  scr="$(pscreen)"
+  is "stop: the asleep card is on the grid"                "yes" "$(grep -q 'billing-svc' <<<"$scr" && echo yes || echo no)"
+  pkeys Right Right x y; sleep 1.5
+  is "stop: x on it clears its marker"                     "no" \
+     "$([ -f "$NP/fleet/cfpark.billing-svc.asleep" ] && echo yes || echo no)"
+  is "stop: ...and the card is gone"                       "no" "$(grep -q 'billing-svc' <<<"$(pscreen)" && echo yes || echo no)"
+  tmux -L cfpark kill-server 2>/dev/null
+  rm -rf "$NP"
+else
+  skip "the new-session screen lists parked sessions" "tmux or node missing"
 fi
 
 # ── 4a10c13. a wake that worked must not report failure ──────────────────────

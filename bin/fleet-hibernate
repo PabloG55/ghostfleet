@@ -3,6 +3,7 @@
 #
 #     fleet-hibernate                 what WOULD sleep. A dry run, and the default on purpose
 #     fleet-hibernate --apply         actually sleep them (refuses unless switched on)
+#     fleet-hibernate --apply NAME    sleep that one session — the only way a lead is slept
 #     fleet-hibernate --wake <slot>   wake one back up, by resume-by-id
 #     fleet-hibernate --pressure      governor mode: oldest-idle first until pressure clears
 #     fleet-hibernate --idle-hours N  the threshold (default 48)
@@ -56,11 +57,14 @@ case "${FLEET_DIR:-}" in
     exit 2 ;;
 esac
 IDLE_HOURS="${CLAUDE_FLEET_HIBERNATE_HOURS:-48}"
-MODE=plan; ONLY_SOCK=""; WAKE_SLOT=""; JSON=no; WAKE_TIMEOUT="${CLAUDE_FLEET_WAKE_TIMEOUT:-300}"
+MODE=plan; ONLY_SOCK=""; WAKE_SLOT=""; NAMED=""; JSON=no; WAKE_TIMEOUT="${CLAUDE_FLEET_WAKE_TIMEOUT:-300}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --apply)      MODE=apply; shift ;;
+    # An optional NAME after --apply, taken only when it is not another flag, so
+    # `--apply --idle-hours 0` still parses the way it always did.
+    --apply)      MODE=apply
+                  case "${2:-}" in ""|-*) shift ;; *) NAMED="$2"; shift 2 ;; esac ;;
     --dry-run)    MODE=plan; shift ;;
     --pressure)   MODE=pressure; shift ;;
     --wake)       MODE=wake; WAKE_SLOT="${2:?--wake needs a session name}"; shift 2 ;;
@@ -68,7 +72,7 @@ while [ $# -gt 0 ]; do
     --timeout)    WAKE_TIMEOUT="${2:?}"; shift 2 ;;
     --json)       JSON=yes; shift ;;
     -s)           ONLY_SOCK="${2:?}"; shift 2 ;;
-    -h|--help)    sed -n '2,12p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
+    -h|--help)    sed -n '2,13p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
     *)            echo "fleet-hibernate: unknown option '$1'" >&2; exit 2 ;;
   esac
 done
@@ -288,10 +292,52 @@ composer_lines() {
     END { if (!a || !b) exit 1; for (i = a + 1; i < b; i++) print L[i] }'
 }
 
+# ── A SUGGESTION IS NOT A DRAFT ──────────────────────────────────────────────
+# The agent puts a suggested next prompt in an EMPTY composer, drawn dim — captured from a
+# live pane it is the glyph, a no-break space, then `ESC[2m merge the pr ESC[0m`. A plain
+# capture drops the attribute, so the suggestion reads as typed text and the session is
+# vetoed as holding unsent work, forever, for exactly as long as it sits idle — which is
+# the whole population hibernation is for. So the pane is captured WITH its attributes and
+# every dim run is removed before the composer is read; a person's typing is never dim.
+#   The SGR parameters are walked rather than grepped for a 2: `38;5;2` is a colour index,
+#   not dim, and a pattern would read one as the other. Everything else is then stripped, so
+#   composer_lines sees the same plain text it always did.
+undim() {
+  awk '
+    function sgr(params,   n, P, i) {
+      n = split(params, P, ";"); if (n == 0) { dim = 0; return }
+      for (i = 1; i <= n; i++) {
+        if (P[i] == "38" || P[i] == "48" || P[i] == "58") { i += (P[i+1] == "2") ? 4 : 2; continue }
+        if (P[i] == "" || P[i] == "0" || P[i] == "22") dim = 0
+        else if (P[i] == "2") dim = 1
+      }
+    }
+    { line = $0; out = ""
+      while ((k = index(line, "\033")) > 0) {
+        if (!dim) out = out substr(line, 1, k - 1)
+        line = substr(line, k)
+        if (match(line, /^\033\[[0-9;?]*[ -\/]*[@-~]/)) {
+          seq = substr(line, 1, RLENGTH); line = substr(line, RLENGTH + 1)
+          if (substr(seq, length(seq)) == "m") sgr(substr(seq, 3, length(seq) - 3))
+        } else if (match(line, /^\033\][^\007\033]*(\007|\033\\)/)) {   # OSC, a hyperlink
+          line = substr(line, RLENGTH + 1)
+        } else line = substr(line, 2)
+      }
+      if (!dim) out = out line
+      print out }'
+}
+
 has_draft() {
   local sock="$1" slot="$2" pane composer
-  pane="$(tmux -L "$sock" capture-pane -p -t "$slot" 2>/dev/null)" || return 1
+  pane="$(tmux -L "$sock" capture-pane -e -p -t "$slot" 2>/dev/null)" || return 1
   [ -n "$pane" ] || return 1
+  pane="$(printf '%s\n' "$pane" | undim)"
+  # THE GLYPH IS FOLLOWED BY A NO-BREAK SPACE, not a space — measured on live panes — and the
+  # rule below strips the first non-blank RUN. A no-break space is not blank to it, so the
+  # glyph and a ONE-WORD draft came off together and `fix` read as an empty composer: the
+  # expensive direction, a draft slept away. Normalised here, where the glyph is still first.
+  local nbsp; nbsp="$(printf '\302\240')"
+  pane="${pane//$nbsp/ }"
   composer="$(composer_lines "$pane")" || return 1
   # A composer is empty when its first line is nothing but the glyph, whatever the glyph
   # renders as — so the first non-blank RUN goes, rather than a character named in a pattern.
@@ -338,36 +384,6 @@ master_with_live_workers() {
   return 1
 }
 
-# ── RECOVERING A CONVERSATION ID THE STATE FILE NEVER GOT ────────────────────
-# A session started before the hook learned to record sock and slot has an id on disk that
-# nothing can address by fleet, so it reads as "no recorded conversation id" and can never be
-# eligible. Three places may still know it, tried in the order of how much each one is
-# EVIDENCE rather than inference:
-#
-#   1. the process's own arguments — `--resume <id>` or `--session-id <id>`. The agent was
-#      told the id; there is nothing to infer.
-#   2. ~/.claude/sessions/<pid>.json, which the agent writes for itself and which carries
-#      sessionId and cwd. Also not an inference: the file is keyed by the pid it belongs to.
-#
-# THERE WAS A THIRD SOURCE AND IT HAD TO GO. "The project directory for that cwd, when it
-# holds exactly one transcript" reads like evidence and is inference: one transcript in a
-# folder does not mean it belongs to THIS pane. Caught by this repo's own suite — a fixture
-# pane started in this checkout was handed the session id of the LIVE session running the
-# tests, and a state file was written claiming that conversation belonged to a worker called
-# scratch. Waking it would have resumed somebody else's conversation into a card wearing the
-# right name, which is the exact failure the "never guess" rule exists to prevent. A source
-# that is right most of the time is the worst kind here, because the times it is wrong are
-# silent.
-#
-# NEVER GUESS. Every branch either returns an id it was told, or returns nothing and leaves
-# the veto in place. A wrong id does not fail loudly — it resumes the wrong conversation into
-# a card wearing the right name, which is worse than a session that stays awake.
-#
-# MEASURED, AND THE ANSWER FOR THE FLEET THAT PROMPTED THIS IS "NOTHING TO RECOVER": of 40
-# sessions reading no-id, 37 have no project directory at all and 2 have an empty one — they
-# were started and never used, so there is no conversation to resume and the veto is right.
-# One had a transcript. The recovery is still here because it is correct for the sessions
-# that DO have one, and because the alternative is a veto nobody can ever clear.
 # Does this session's agent run with permissions bypassed? If so no trust dialog is drawn on
 # a resume, because the flag is passed again by the same launcher.
 skips_trust_dialog() {
@@ -387,62 +403,172 @@ is_uuid() {
     *) return 1 ;;
   esac
 }
-recover_sid() {
-  local sock="$1" slot="$2" pid args id
-  pid="$(pane_pid_of "$sock" "$slot")"
-  [ -n "$pid" ] || return 1
 
-  # 1. told to the process
-  args="$(ps -o command= -p "$pid" 2>/dev/null)"
+# ── WHAT CONVERSATION IS THIS PROCESS ACTUALLY WRITING? ──────────────────────
+# The recorded id goes stale. The agent rotates its conversation — /clear starts a new one —
+# and the state file keeps whatever it last wrote, so the id on disk can name a conversation
+# the live process abandoned days ago. That is not a cosmetic drift. Measured: a fleet's
+# lead in active use was slept, because its recorded id pointed at a conversation last
+# touched days earlier — the idle clock dated the WRONG transcript, and a wake by that id
+# would have restored the days-old conversation into the card, which looks like it worked.
+#   So the id, and the transcript the idle clock reads, are taken from the LIVE PROCESS, and
+# the record is corrected when it disagrees. IF THE LIVE PROCESS CANNOT ANSWER, THE SESSION
+# IS VETOED: 44 of 63 sessions on the machine that asked for this cannot be established,
+# and sleeping them would be sleeping on the recorded id — which is exactly what went wrong.
+#
+# THE AGENT IS NOT ALWAYS THE PANE'S PROCESS. agent-here stopped `exec`ing the agent so it
+# can hold the pane after an exit, which puts a shell between tmux and it — so the pane's
+# pid is the shell, and every source keyed by pid has to be asked of its descendants too.
+#
+# Two sources, and the order is how much each is evidence of what is being written NOW:
+#   1. <config>/sessions/<pid>.json, which the agent writes about itself and updates as its
+#      conversation changes. BELIEVED ONLY IF IT IS ABOUT THIS PROCESS: its own pid field
+#      matches, and its procStart matches the process's start time. A pid is reused and a
+#      crashed agent leaves its file behind, so a file under the right number can belong to
+#      a process that died last week — the same "right name, wrong conversation" failure
+#      the rest of this section exists to prevent. procStart is printed the way `ps -o
+#      lstart` prints it in UTC, so that is what it is compared against; a platform that
+#      prints it differently fails the match and is vetoed, which is the safe direction.
+#   2. --resume / --session-id on the process's own command line. That is what it was TOLD
+#      AT LAUNCH, and /clear is precisely how the two part company, so it is believed only
+#      when nothing else could be the conversation: no other transcript in that folder has
+#      been written since the process started. Worktrees are one session each, which is the
+#      common case this keeps; a checkout shared by parallel sessions is vetoed, because
+#      there "which of these is mine" has no evidence to answer it.
+#
+# NEVER GUESS. Every branch either returns an id it was told, or nothing. There was once a
+# third source — "the project directory for that cwd, when it holds exactly one transcript"
+# — and the suite caught it handing a fixture pane the id of the LIVE session running the
+# tests: a card called scratch that would have woken somebody else's conversation.
+LIVE_ID=""; LIVE_TR=""; LIVE_HOW=""
+PSTAB=""
+load_ps() { PSTAB="$(ps -axo pid=,ppid= 2>/dev/null)"; }
+descendants() {   # pid -> itself and its descendants, nearest first, four levels deep
+  printf '%s\n' "$PSTAB" | awk -v root="$1" '
+    { kids[$2] = kids[$2] " " $1 }
+    END { q[1] = root; n = 1; d[root] = 0
+          for (i = 1; i <= n; i++) { p = q[i]; print p; if (d[p] >= 4) continue
+            m = split(kids[p], K, " "); for (j = 1; j <= m; j++) { q[++n] = K[j]; d[K[j]] = d[p] + 1 } } }'
+}
+# Where a profile keeps its sessions and projects: the one this runs under, the default, and
+# every ~/.claude-* profile — a fleet under another profile writes there, not here.
+cfg_dirs() { printf '%s\n' "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude" "$HOME"/.claude-*; }
+proj_dir() { printf '%s/projects/%s' "$1" "$(printf '%s' "$2" | sed 's/[^A-Za-z0-9]/-/g')"; }
+# Seconds since a process started, from etime ([[dd-]hh:]mm:ss) — etimes is not on macOS.
+proc_age() {
+  ps -o etime= -p "$1" 2>/dev/null | awk '{ s = $1; d = 0
+    if (index(s, "-")) { split(s, a, "-"); d = a[1]; s = a[2] }
+    n = split(s, t, ":"); x = 0; for (i = 1; i <= n; i++) x = x * 60 + t[i]; print d * 86400 + x }'
+}
+
+live_sid() {
+  local sock="$1" slot="$2" top p cfg f row fpid fid fcwd fstart pstart id cwd age since m d pids
+  LIVE_ID=""; LIVE_TR=""; LIVE_HOW=""
+  command -v jq >/dev/null 2>&1 || return 1
+  top="$(pane_pid_of "$sock" "$slot")"
+  [ -n "$top" ] || return 1
+  pids="$(descendants "$top")"
+
+  # 1. the agent's note about itself, when it is provably about this process
+  for p in $pids; do
+    while IFS= read -r cfg; do
+      [ -n "$cfg" ] || continue
+      f="$cfg/sessions/$p.json"; [ -f "$f" ] || continue
+      row="$(jq -r '[(.pid // "" | tostring), (.sessionId // ""), (.cwd // ""), (.procStart // "")]
+                    | join("\u001f")' "$f" 2>/dev/null)"
+      IFS=$'\x1f' read -r fpid fid fcwd fstart <<< "$row"
+      [ "$fpid" = "$p" ] && is_uuid "$fid" && [ -n "$fstart" ] || continue
+      pstart="$(LC_ALL=C TZ=UTC ps -o lstart= -p "$p" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//')"
+      [ "$(printf '%s' "$fstart" | tr -s ' ')" = "$pstart" ] || continue
+      LIVE_ID="$fid"; LIVE_HOW=self
+      d="$(proj_dir "$cfg" "$fcwd")"
+      [ -f "$d/$fid.jsonl" ] && LIVE_TR="$d/$fid.jsonl"
+      return 0
+    done < <(cfg_dirs)
+  done
+
+  # 2. what it was told at launch, when nothing since could have replaced it
   # -E, not a BRE with \|: alternation inside \( \) is a GNU extension that BSD sed does not
-  # take, so the basic form matches nothing here and everything there — a recovery that
-  # silently finds no id on one platform and works on the other.
-  id="$(printf '%s\n' "$args" | sed -nE 's/.*--(resume|session-id)[= ]+([^ ]+).*/\2/p' | head -1)"
-  id="${id##*/}"; id="${id%.jsonl}"
-  if is_uuid "$id"; then printf '%s' "$id"; return 0; fi
-
-  # 2. the agent's own note about itself — for the pane's process AND the one under it.
-  # agent-here holds the pane (it outlives the agent to mark an exit), so the pane's pid is
-  # a shell and the agent is its child: asking only the pane's pid asked the wrong process
-  # for every session started through the launcher. Still evidence, not inference — the
-  # note is keyed by the pid it belongs to, and the child is the pane's own.
-  # Under the ACTIVE config dir: a profile's agent writes its note beside its own config.
-  local cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" p
-  if command -v jq >/dev/null 2>&1; then
-    for p in "$pid" $(pgrep -P "$pid" 2>/dev/null); do
-      [ -f "$cfg/sessions/$p.json" ] || continue
-      id="$(jq -r '.sessionId // empty' "$cfg/sessions/$p.json" 2>/dev/null)"
-      if is_uuid "$id"; then printf '%s' "$id"; return 0; fi
-    done
-  fi
-
-  # No third guess. If neither the process nor its own note knows the id, nothing here does.
+  # take, so the basic form matches nothing here and everything there.
+  for p in $pids; do
+    id="$(ps -o command= -p "$p" 2>/dev/null | sed -nE 's/.*--(resume|session-id)[= ]+([^ ]+).*/\2/p' | head -1)"
+    id="${id##*/}"; id="${id%.jsonl}"
+    is_uuid "$id" || continue
+    age="$(proc_age "$p")"
+    case "$age" in ''|*[!0-9]*) return 1 ;; esac
+    since=$(( $(now) - age ))
+    cwd="$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
+    LIVE_TR=""
+    while IFS= read -r cfg; do
+      [ -n "$cfg" ] || continue
+      d="$(proj_dir "$cfg" "$cwd")"; [ -d "$d" ] || continue
+      for f in "$d"/*.jsonl; do
+        [ -f "$f" ] || continue
+        if [ "${f##*/}" = "$id.jsonl" ]; then LIVE_TR="$f"; continue; fi
+        m="$(mtime "$f")" || continue
+        [ "$m" -ge "$since" ] && { LIVE_TR=""; return 1; }
+      done
+    done < <(cfg_dirs)
+    LIVE_ID="$id"; LIVE_HOW=argv
+    return 0
+  done
   return 1
 }
 
-# Written where the hook would have written it, so the NEXT read finds it without this walk
-# and the grid sees the same session the plan does. Never over a record that already has an
-# id: this fills a hole, it does not correct anybody.
-backfill_sid() {
-  local sock="$1" slot="$2" id="$3" cwd="$4" f="${FLEET_DIR:?}/$3.json"
+# ── CORRECTING THE RECORD ────────────────────────────────────────────────────
+# Written where the hook would have written it — <id>.json, keyed by conversation — so the
+# NEXT read, and the grid, see the conversation the process is actually in. The stale record
+# is moved rather than copied: two records claiming one slot are settled by whichever has
+# the newer ts, and the stale one can be the newer, which would bring the wrong id straight
+# back. If the live conversation already has a record of its own, the hook got there first
+# and only the stale claim has to go.
+correct_record() {
+  local sock="$1" slot="$2" old="$3" new="$4" tr="$5" cwd="$6" was="${7:-$2}"
+  local dst="${FLEET_DIR:?}/$4.json" src=""
   command -v jq >/dev/null 2>&1 || return 0
-  [ -f "$f" ] && [ -n "$(jq -r '.sock // empty' "$f" 2>/dev/null)" ] && return 0
-  jq -n --arg id "$id" --arg sock "$sock" --arg slot "$slot" --arg cwd "$cwd" \
-        --argjson ts "$(now)" \
-    '{session_id:$id, zellij:"", sock:$sock, slot:$slot, cwd:$cwd,
-      folder:($cwd|split("/")|last), branch:"", status:"unknown", transcript:"", ts:$ts}' \
-    > "$f.tmp.$$" 2>/dev/null && mv -f "$f.tmp.$$" "$f" 2>/dev/null || rm -f "$f.tmp.$$" 2>/dev/null
+  [ "$old" != "$new" ] || return 0
+  [ -n "$old" ] && src="${FLEET_DIR:?}/$old.json"
+  if [ -f "$dst" ] && [ -n "$(jq -r '.sock // empty' "$dst" 2>/dev/null)" ]; then
+    :
+  elif [ -n "$src" ] && [ -f "$src" ]; then
+    # .slot too: a renamed session's stale record is filed under its old name, and moving
+    # it without re-filing it would leave the live conversation under a name nothing reads.
+    jq --arg id "$new" --arg tr "$tr" --arg slot "$slot" \
+       '.session_id = $id | .transcript = $tr | .slot = $slot' "$src" \
+      > "$dst.tmp.$$" 2>/dev/null && mv -f "$dst.tmp.$$" "$dst" 2>/dev/null || rm -f "$dst.tmp.$$" 2>/dev/null
+  else
+    jq -n --arg id "$new" --arg sock "$sock" --arg slot "$slot" --arg cwd "$cwd" --arg tr "$tr" \
+          --argjson ts "$(now)" \
+      '{session_id:$id, zellij:"", sock:$sock, slot:$slot, cwd:$cwd,
+        folder:($cwd|split("/")|last), branch:"", status:"unknown", transcript:$tr, ts:$ts}' \
+      > "$dst.tmp.$$" 2>/dev/null && mv -f "$dst.tmp.$$" "$dst" 2>/dev/null || rm -f "$dst.tmp.$$" 2>/dev/null
+  fi
+  # Only a record that claims THIS slot on THIS fleet is removed: an id is a conversation,
+  # and another fleet's session may have resumed it.
+  if [ -n "$src" ] && [ -f "$src" ] && [ -f "$dst" ] \
+     && jq -e --arg s "$sock" --arg l "$was" '.sock == $s and .slot == $l' "$src" >/dev/null 2>&1; then
+    rm -f "$src" 2>/dev/null
+  fi
+  return 0
 }
 
 # ── the veto list ─────────────────────────────────────────────────────────────
 # Returns a reason, or nothing when the session may sleep. Every entry is a way for
 # hibernation to destroy something rather than defer it.
 veto_for() {
-  local sock="$1" slot="$2" st="$3" ts="$4" cwd="$5" id="$6" idle="$7" age_h
+  local sock="$1" slot="$2" st="$3" ts="$4" cwd="$5" id="$6" idle="$7" live="$8" age_h
   # The tab check leads: a `_`-prefixed session is an editor or terminal pane, it never had
   # a conversation, and reporting it as "no recorded conversation id" is true but useless —
   # on a real fleet that was two thirds of the list, every row saying the same wrong thing.
   case "$slot" in _*) printf 'a tab, not an agent'; return ;; esac
+  # ── A FLEET'S LEAD IS NEVER SLEPT BY A RULE ─────────────────────────────────
+  # Neither the threshold nor --pressure may take it; only `--apply master` naming it. The
+  # lead is the session a person comes back to, and the one measured case of hibernation
+  # getting it wrong was a lead in active use. Fixing the stale id alone would still leave
+  # the lead to a clock, and a clock is exactly what was wrong about it.
+  if [ "$slot" = master ] && [ "$NAMED" != master ]; then
+    printf "a fleet's lead is never slept automatically — fleet-hibernate --apply master -s %s" "$sock"; return
+  fi
   [ -n "$id" ] || { printf 'no recorded conversation id — it could not be woken'; return; }
   [ -f "${FLEET_DIR:?}/$sock.$slot.asleep" ] && { printf 'already asleep'; return; }
   # A STALE STATUS IS NOT A LIVE ONE. Measured: a session marked `working` whose transcript
@@ -472,6 +598,9 @@ veto_for() {
   if ! skips_trust_dialog "$sock" "$slot"; then
     is_trusted "$cwd" || { printf 'its folder has no trust record and its agent would be asked'; return; }
   fi
+  # Late in the list on purpose: the vetoes above are about the pane and the folder and
+  # answer the same whichever conversation is live, so they report the more useful reason.
+  [ "$live" = yes ] || { printf "its live conversation could not be established — the recorded id may be stale"; return; }
   [ -n "$idle" ] || { printf 'no transcript to date it by'; return; }
   awk -v i="$idle" -v t="$IDLE_HOURS" 'BEGIN{exit !(i < t)}' \
     && { printf 'idle %.1fh, under the %sh threshold' "$idle" "$IDLE_HOURS"; return; }
@@ -481,45 +610,48 @@ veto_for() {
 # ── the plan ──────────────────────────────────────────────────────────────────
 PLAN=""
 build_plan() {
-  local sock slot st ts id cwd tr idle why
+  local sock slot st ts id cwd tr idle why live _rs
   while IFS= read -r sock; do
     [ -n "$sock" ] || continue
     while IFS= read -r slot; do
       [ -n "$slot" ] || continue
+      [ -z "$NAMED" ] || [ "$slot" = "$NAMED" ] || continue
       st="$(field_for "$sock" "$slot" 5)"; ts="$(field_for "$sock" "$slot" 3)"
       id="$(field_for "$sock" "$slot" 4)"; tr="$(field_for "$sock" "$slot" 6)"
       cwd="$(field_for "$sock" "$slot" 7)"
-      # A missing id is a hole in the RECORD, not necessarily in the world. Ask the running
-      # process before writing the session off as unwakeable.
-      # A RENAMED SESSION'S RECORD IS FILED UNDER ITS OLD NAME. Until the hook learned to
-      # ask tmux for the pane's current name, it wrote the name the agent was launched with,
-      # so after a rename this found no record, no id and no transcript — and vetoed a
-      # session with a whole conversation behind it as "no recorded conversation id". Find
-      # the record by the pane, then by the id the process itself knows, and read it whole.
-      if [ -z "$id" ]; then
-        case "$slot" in _*) ;; *)
+      # The record is a claim; the process is the evidence. Asked of every agent session,
+      # not only the ones with a hole in the record — a present id is how the stale one hid.
+      # When the process answers, its conversation replaces the recorded one for the id AND
+      # the idle clock, and the record is corrected so the grid and the next plan agree.
+      # When it cannot, the recorded values stay for display and the veto list refuses.
+      live=no; _rs=""
+      case "$slot" in _*) ;; *)
+        live_sid "$sock" "$slot" && live=yes
+        # A RENAMED SESSION'S RECORD IS FILED UNDER ITS OLD NAME. Until the hook learned to
+        # ask tmux for the pane's current name, it wrote the name the agent was launched
+        # with, so after a rename this found no record, no id and no transcript — and vetoed
+        # a session with a whole conversation behind it as "no recorded conversation id".
+        # Find the record by the pane, then by the id the process itself knows, and read it
+        # whole. It is the record's status and ts that matter here: the id and transcript
+        # are replaced by the live ones below either way.
+        if [ -z "$id" ]; then
           _rs="$(slot_by_pane "$sock" "$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_id}@#{pid}' 2>/dev/null)")"
-          if [ -z "$_rs" ]; then
-            _rid="$(recover_sid "$sock" "$slot")" && _rs="$(slot_by_sid "$sock" "$_rid")"
-          fi
+          [ -z "$_rs" ] && [ "$live" = yes ] && _rs="$(slot_by_sid "$sock" "$LIVE_ID")"
           if [ -n "$_rs" ] && [ "$_rs" != "$slot" ]; then
             st="$(field_for "$sock" "$_rs" 5)"; ts="$(field_for "$sock" "$_rs" 3)"
             id="$(field_for "$sock" "$_rs" 4)"; tr="$(field_for "$sock" "$_rs" 6)"
             cwd="$(field_for "$sock" "$_rs" 7)"
-          fi ;;
-        esac
-      fi
-      if [ -z "$id" ]; then
-        case "$slot" in _*) ;; *)
-          id="$(recover_sid "$sock" "$slot")" || id=""
-          if [ -n "$id" ]; then
-            [ -n "$cwd" ] || cwd="$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
-            backfill_sid "$sock" "$slot" "$id" "$cwd"
-          fi ;;
-        esac
-      fi
+          else _rs=""; fi
+        fi
+        if [ "$live" = yes ]; then
+          [ -n "$cwd" ] || cwd="$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
+          [ "$LIVE_ID" = "$id" ] || correct_record "$sock" "$slot" "$id" "$LIVE_ID" "$LIVE_TR" "$cwd" "${_rs:-$slot}"
+          # the live transcript or none: falling back to the recorded one is the bug itself
+          id="$LIVE_ID"; tr="$LIVE_TR"
+        fi ;;
+      esac
       idle="$(idle_hours "$tr")"
-      why="$(veto_for "$sock" "$slot" "$st" "$ts" "$cwd" "$id" "$idle")"
+      why="$(veto_for "$sock" "$slot" "$st" "$ts" "$cwd" "$id" "$idle" "$live")"
       # ── \x1f, NOT A TAB, and this row is exactly why CLAUDE.md says so ──────
       # Three of these seven columns are optional: a session with no transcript has no idle,
       # one that never registered has no id and no cwd. Tab is IFS-whitespace, so three
@@ -560,11 +692,27 @@ wake_one() {
   [ -f "$marker" ] || { echo "fleet-hibernate: '$slot' is not asleep on $sock" >&2; return 1; }
   IFS=$'\t' read -r _ id cwd _ < "$marker"
   [ -n "$cwd" ] || cwd="$HOME"
+  # ── A SESSION OF THAT NAME IS ALREADY THERE ─────────────────────────────────
+  # "could not start a pane" was this: new-session refuses a name that exists. A marker
+  # outlives the sleep whenever the session comes back some other way — reopened by hand
+  # from the grid's new-session screen (a name with no live session gets no -2), a
+  # `fleet-restart --reopen`, a wake that timed out with its pane gone and was retried by
+  # hand. The card then reads asleep over a live session, and the tap that should open it
+  # tries to start a second one and fails. The session is up, which is what a wake is for:
+  # clear the marker and succeed, so the caller goes on to open it.
+  if tmux -L "$sock" has-session -t "=$slot" 2>/dev/null; then
+    rm -f "$marker" 2>/dev/null
+    echo "fleet-hibernate: '$slot' is already running on $sock — its asleep marker was stale, cleared"
+    return 0
+  fi
   rm -f "${FLEET_DIR:?}/$sock.$slot.parked" 2>/dev/null
-  tmux -L "$sock" new-session -d -s "$slot" -c "$cwd" \
-    -e "CLAUDE_FLEET_SOCK=$sock" -e "CLAUDE_FLEET_RESUME=$id" \
-    "exec agent-here \"$slot\"" 2>/dev/null \
-    || { echo "fleet-hibernate: could not start a pane for '$slot'" >&2; return 1; }
+  # CLAUDE_FLEET_WAKING tells agent-here that THIS start is the wake, so it leaves the marker
+  # to the poll below — which keeps it when the wake does not come back.
+  local err
+  err="$(tmux -L "$sock" new-session -d -s "$slot" -c "$cwd" \
+    -e "CLAUDE_FLEET_SOCK=$sock" -e "CLAUDE_FLEET_RESUME=$id" -e "CLAUDE_FLEET_WAKING=1" \
+    "exec agent-here \"$slot\"" 2>&1)" \
+    || { echo "fleet-hibernate: could not start a pane for '$slot': $err" >&2; return 1; }
   local waited=0 pane=""
   while [ "$waited" -lt "$WAKE_TIMEOUT" ]; do
     # A BARE TARGET for the capture, an `=` target for the kill. `=name` is exact-match
@@ -634,14 +782,29 @@ print_plan() {
 }
 
 command -v tmux >/dev/null 2>&1 || { echo "fleet-hibernate: tmux required" >&2; exit 1; }
-load_records; load_trusted
+load_records; load_trusted; load_ps
 
 case "$MODE" in
   wake)
     SOCK="${ONLY_SOCK:-}"
+    # ── WHICH FLEET, WHEN NONE WAS NAMED ──────────────────────────────────────
+    # The first marker the glob found used to win, and every project has a `master`: a wake
+    # asked for from one fleet woke another fleet's lead, or collided with that fleet's live
+    # session of the same name. The caller's own fleet first — $TMUX names the server it is
+    # in, the way fleet-stop reads it — and a name asleep in several fleets otherwise refuses
+    # and lists them, rather than choosing one.
     if [ -z "$SOCK" ]; then
+      _t="${TMUX:-}"; _t="${_t%%,*}"; _t="${_t##*/}"
+      case "$_t" in cf-*) ;; *) _t="${CLAUDE_FLEET_SOCK:-}" ;; esac
+      [ -n "$_t" ] && [ -f "${FLEET_DIR:?}/$_t.$WAKE_SLOT.asleep" ] && SOCK="$_t"
+    fi
+    if [ -z "$SOCK" ]; then
+      found=""
       for f in "${FLEET_DIR:?}"/*."$WAKE_SLOT".asleep; do [ -f "$f" ] || continue
-        SOCK="$(basename "$f")"; SOCK="${SOCK%%.$WAKE_SLOT.asleep}"; break; done
+        s="$(basename "$f")"; found="$found ${s%%.$WAKE_SLOT.asleep}"; done
+      set -- $found
+      [ $# -gt 1 ] && { echo "fleet-hibernate: '$WAKE_SLOT' is asleep in $# fleets ($*) — say which with -s" >&2; exit 1; }
+      SOCK="${1:-}"
     fi
     [ -n "$SOCK" ] || { echo "fleet-hibernate: no sleeping session called '$WAKE_SLOT'" >&2; exit 1; }
     wake_one "$SOCK" "$WAKE_SLOT"; exit $? ;;
@@ -649,7 +812,15 @@ case "$MODE" in
     build_plan; print_plan ;;
   apply|pressure)
     enabled || { echo "fleet-hibernate: hibernation is off. Turn it on with: touch ${FLEET_DIR:?}/hibernate.enabled" >&2; exit 1; }
+    [ -z "$NAMED" ] || [ "$MODE" = apply ] || { echo "fleet-hibernate: --pressure does not take a name" >&2; exit 2; }
     build_plan
+    # A NAME IS ONE SESSION, NOT ONE PER FLEET. Every project has a `master`, so a bare
+    # `--apply master` would otherwise put every lead on the machine to sleep at once.
+    if [ -n "$NAMED" ]; then
+      n_named="$(printf '%s' "$PLAN" | cut -d$'\x1f' -f1 | sort -u | grep -c .)"
+      [ "$n_named" -gt 0 ] || { echo "fleet-hibernate: no live session called '$NAMED'" >&2; exit 1; }
+      [ "$n_named" -eq 1 ] || { echo "fleet-hibernate: '$NAMED' is in $n_named fleets — say which with -s" >&2; exit 1; }
+    fi
     # OLDEST IDLE FIRST. Under pressure the useful order is the one least likely to be
     # wanted next, and that is the session nobody has touched for longest.
     slept=0
@@ -664,5 +835,10 @@ case "$MODE" in
         echo "fleet-hibernate: pressure cleared after $slept"; break
       fi
     done < <(printf '%s' "$PLAN" | sort -t$'\x1f' -k4,4gr)
+    # A named session that a veto kept up says which veto, or the command reads as a no-op.
+    if [ -n "$NAMED" ] && [ "$slept" = 0 ]; then
+      echo "fleet-hibernate: '$NAMED' stays up — $(printf '%s' "$PLAN" | cut -d$'\x1f' -f7 | head -1)" >&2
+      exit 1
+    fi
     echo "fleet-hibernate: slept $slept session(s)" ;;
 esac
