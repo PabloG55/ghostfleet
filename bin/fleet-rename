@@ -13,6 +13,8 @@
 #   - a pending scheduled send (fleet-schedule)
 #   - a pending reply address (fleet-send --reply-to), so a question already asked of
 #     this session still gets its answer relayed after the rename
+#   - its queue of prompts waiting for the running turn to end (fleet-send), so work
+#     already sent to this session is still delivered to it under the new name
 #   - the fleet-spawn manifest row (what fleet-worktrees shows as the task)
 #   - its slot in the grid's card order (⇧hjkl), which is stored by NAME
 #   - its display label (the grid's `,` then `l`)
@@ -86,6 +88,13 @@ mv -f "$FLEET_DIR/$SOCK.$OLD.agent"           "$FLEET_DIR/$SOCK.$NEW.agent"     
 mv -f "$FLEET_DIR/$SOCK.$OLD.exited"          "$FLEET_DIR/$SOCK.$NEW.exited"          2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.asleep"          "$FLEET_DIR/$SOCK.$NEW.asleep"          2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.relay.stamp"     "$FLEET_DIR/$SOCK.$NEW.relay.stamp"     2>/dev/null || true
+# Prompts queued behind its running turn (fleet-send): work already sent to this session
+# must still reach it under the new name. The Stop hook resolves its slot from the pane's
+# CURRENT session name, so its next drain reads <sock>.<new>.queue — exactly where this
+# puts it. A drainer already waiting on the OLD name polls a session that no longer exists
+# and exits; the renamed session's next Stop starts one for the queue that moved.
+mv -f "$FLEET_DIR/$SOCK.$OLD.queue"           "$FLEET_DIR/$SOCK.$NEW.queue"           2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.now"             "$FLEET_DIR/$SOCK.$NEW.now"             2>/dev/null || true
 [ -d "$FLEET_DIR/attach/$SOCK.$OLD" ] && [ ! -e "$FLEET_DIR/attach/$SOCK.$NEW" ] \
   && mv "$FLEET_DIR/attach/$SOCK.$OLD" "$FLEET_DIR/attach/$SOCK.$NEW" 2>/dev/null
 

@@ -3835,6 +3835,12 @@ PYX
   # apart again — the clause and the command ship together or the suite says so.
   is "...and names fleet-look"                "1" "$(contracthas 'fleet-look.mjs')"
   is "...and the tree flag beside it"         "1" "$(contracthas 'add --tree')"
+  # QUEUED WORK: a message typed while a turn runs is folded INTO it, and an agent reading
+  # it as a change of direction dropped the task in hand without a word. The half of the
+  # fix that holds for a prompt typed by hand, so each part is its own row.
+  is "...a mid-turn message is queued work"   "1" "$(contracthas 'is QUEUED WORK, not a replacement')"
+  is "...switch only when it says so"         "1" "$(contracthas 'Switch only when the message says so')"
+  is "...and every task gets a state"         "1" "$(contracthas 'lists every task received this turn with its state')"
   # The user's own arguments must survive it — an array spliced into the wrong place
   # would eat them, and nothing else in the session would say so.
   is "...and the caller's args still pass"    "1" "$(argvhas '^--some-user-arg$')"
@@ -5805,16 +5811,18 @@ if command -v tmux >/dev/null 2>&1; then
   T="$(mktemp -d)"; RF="$T/fleet"; AF="$T/ask/fleet"; mkdir -p "$RF" "$AF"
   US=$'\x1f'
   tmux -L cffsend kill-server 2>/dev/null
-  # The pane prints the busy marker on purpose: fleet-send then takes its "already
-  # mid-turn, the prompt queues" path, which skips the 8s submit-confirm loop. The
-  # queued path must KEEP the address (arming decides which turn answers, not this).
+  # The pane prints the busy marker on purpose: with --now fleet-send then takes its
+  # "already mid-turn, paste into it" path, which skips the 8s submit-confirm loop. That
+  # path must KEEP the address (arming decides which turn answers, not this). --now,
+  # because a plain send to a busy session is QUEUED now and pastes nothing — the queue's
+  # own rows are in "a send to a busy session is queued".
   tmux -L cffsend new-session -d -x 200 -y 40 -s tgt "printf 'esc to interrupt\n'; sleep 30" 2>/dev/null
   sleep 0.4
   FSEND() { env -u TMUX CLAUDE_FLEET_DIR="$RF" "$ROOT/bin/fleet-send" -s cffsend "$@" 2>&1; }
-  FSEND --reply-to "cf-ask/master" --reply-dir "$AF" tgt "what is the schema" >/dev/null 2>&1
+  FSEND --now --reply-to "cf-ask/master" --reply-dir "$AF" tgt "what is the schema" >/dev/null 2>&1
   is "the address is a 3-field record" "cf-ask|master|$AF" \
      "$(tr '\037' '|' < "$RF/cffsend.tgt.reply-to" 2>/dev/null | tr -d '\n')"
-  is "a queued send keeps it"          "1" "$([ -f "$RF/cffsend.tgt.reply-to" ] && echo 1 || echo 0)"
+  is "a pasted-in send keeps it"       "1" "$([ -f "$RF/cffsend.tgt.reply-to" ] && echo 1 || echo 0)"
   is "...and nothing is pre-armed"     "0" "$([ -f "$RF/cffsend.tgt.reply-to.armed" ] && echo 1 || echo 0)"
   # The target has to be TOLD, or it answers as if a human were watching. Read it off the
   # PANE (the tty echoes the paste): fleet-send pastes with -d, which deletes the buffer,
@@ -5866,17 +5874,214 @@ if command -v tmux >/dev/null 2>&1; then
           "$ROOT/bin/fleet-send" -s cffsend --reply-to me tgt hi 2>&1 \
         | grep -c 'needs a live fleet session' || true)"
   rm -f "$RF/cffsend.tgt.reply-to"
-  FSEND tgt "plain dispatch" >/dev/null 2>&1
+  FSEND --now tgt "plain dispatch" >/dev/null 2>&1
   is "a plain send writes no address"  "0" "$(ls "$RF" 2>/dev/null | grep -c 'reply-to' || true)"
   # ...and must not CANCEL one. "Newest send wins" reads tidy and is a trap: the address is
   # keyed by the TARGET, so the master nudge in fleet-event.sh — a plain fleet-send at
   # `master` — would drop a pending question to that master every time a worker finished.
-  FSEND --reply-to "cf-ask/master" --reply-dir "$AF" tgt "q2" >/dev/null 2>&1
-  FSEND tgt "unrelated dispatch" >/dev/null 2>&1
+  FSEND --now --reply-to "cf-ask/master" --reply-dir "$AF" tgt "q2" >/dev/null 2>&1
+  FSEND --now tgt "unrelated dispatch" >/dev/null 2>&1
   is "...and doesn't cancel a pending" "1" "$([ -f "$RF/cffsend.tgt.reply-to" ] && echo 1 || echo 0)"
   tmux -L cffsend kill-server 2>/dev/null; rm -rf "$T"
 else
   skip "reply relay (fleet-send)" "tmux not available"
+fi
+
+# ── 4c1q. a send to a busy session is QUEUED, and runs as its own turn ────────
+# Claude Code folds a message submitted mid-turn INTO the running turn, and the agent reads
+# it as a change of direction — task A was dropped for task B, with nothing saying so.
+# fleet-send used to paste into a busy session and print "your prompt will queue after this
+# turn", which it did not. The fixture below is an agent that behaves the way Claude does:
+# a line that arrives while it is busy is logged FOLD (taken into the running turn), a line
+# that arrives while it is idle starts a TURN, and every turn ends by firing the REAL Stop
+# hook — so the delivery under test is the one the fleet actually runs.
+group "a send to a busy session is queued"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  Q="$(mktemp -d)"; QF="$Q/fleet"; mkdir -p "$QF"
+  cat > "$Q/agent" <<'AGENT'
+#!/usr/bin/env bash
+# $1 = turn log, $2 = seconds a turn lasts. Draws a Claude-shaped composer: two rules with
+# the prompt glyph between them, the spinner line above while busy.
+log="$1"; dur="$2"; rule='────────────────────────────────────────'
+frame() { printf '\033[2J\033[H'
+          if [ "$1" = busy ]; then printf '✻ Working… (3s · esc to interrupt)\n'; else printf '\n'; fi
+          printf '%s\n❯ \n%s\n  status\n' "$rule" "$rule"; }
+while :; do
+  frame idle
+  IFS= read -r line || exit 0
+  printf 'TURN %s\n' "$line" >> "$log"
+  frame busy
+  end=$(( SECONDS + dur ))
+  while [ "$SECONDS" -lt "$end" ]; do
+    # a WHOLE second: macOS /bin/bash is 3.2, which refuses a fractional -t and spins
+    IFS= read -r -t 1 extra && printf 'FOLD %s\n' "$extra" >> "$log"
+  done
+  frame idle
+  printf '{"hook_event_name":"Stop","session_id":"fq-%s","cwd":"%s"}' "$CLAUDE_FLEET_SLOT" "$PWD" \
+    | "$HOOK" >/dev/null 2>&1
+done
+AGENT
+  tmux -L cfq kill-server 2>/dev/null
+  tmux -L cfq new-session -d -x 120 -y 30 -s w1 \
+    "env CLAUDE_FLEET_DIR='$QF' CLAUDE_FLEET_SOCK=cfq CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
+         CLAUDE_FLEET_QUEUE_EVERY=0.3 HOOK='$ROOT/hooks/fleet-event.sh' PATH='$ROOT/bin':\"\$PATH\" \
+         bash '$Q/agent' '$Q/turns' 3" 2>/dev/null
+  QS() { env -u TMUX CLAUDE_FLEET_DIR="$QF" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cfq "$@" 2>&1; }
+  qwait() { local i; for i in $(seq 1 "$2"); do [ "$(grep -c . "$Q/turns" 2>/dev/null)" -ge "$1" ] && return 0; sleep 0.25; done; return 1; }
+  for _ in $(seq 1 20); do grep -q '❯' <<< "$(tmux -L cfq capture-pane -p -t w1 2>/dev/null)" && break; sleep 0.1; done
+  QS w1 "task-alpha" >/dev/null
+  qwait 1 20
+  o2="$(QS w1 "task-bravo")"; o3="$(QS w1 "task-charlie")"
+  is "a send to a working session is queued"  "1" "$(grep -c 'queued #1' <<< "$o2" || true)"
+  is "...and the next goes behind it"         "1" "$(grep -c 'queued #2' <<< "$o3" || true)"
+  is "...two records waiting"                 "2" "$(grep -c . "$QF/cfq.w1.queue" 2>/dev/null || echo 0)"
+  # THE POINT: three prompts, three turns, in the order sent, and nothing folded into the
+  # turn it arrived during. The old paste logs `FOLD task-bravo` here.
+  qwait 3 80
+  is "three prompts ran as three turns, in order" "TURN task-alpha|TURN task-bravo|TURN task-charlie" \
+     "$(tr '\n' '|' < "$Q/turns" 2>/dev/null | sed 's/|$//')"
+  for _ in $(seq 1 20); do [ -s "$QF/cfq.w1.queue" ] || break; sleep 0.25; done
+  is "...and the queue is empty after"        "0" "$([ -s "$QF/cfq.w1.queue" ] && echo 1 || echo 0)"
+  # A duplicate of a prompt already waiting is not a second task (the automated nudges
+  # repeat word for word).
+  sleep 1; : > "$Q/turns"
+  QS w1 "task-delta" >/dev/null; qwait 1 20
+  QS w1 "nudge" >/dev/null; od="$(QS w1 "nudge")"
+  is "the same prompt queued twice is held once" "1" "$(grep -c 'already queued' <<< "$od" || true)"
+  qwait 2 80; sleep 4
+  is "...and runs once"                       "1" "$(grep -c 'TURN nudge' "$Q/turns" || true)"
+  # --now keeps the old behaviour for the send that MEANS to interrupt: into the turn.
+  : > "$Q/turns"
+  QS w1 "task-echo" >/dev/null; qwait 1 20
+  on="$(QS --now w1 "task-foxtrot")"
+  for _ in $(seq 1 40); do grep -q foxtrot "$Q/turns" 2>/dev/null && break; sleep 0.25; done
+  is "--now folds into the running turn"      "FOLD task-foxtrot" "$(grep foxtrot "$Q/turns" 2>/dev/null)"
+  is "...and says so"                         "1" "$(grep -c 'into the running turn' <<< "$on" || true)"
+  is "...and queues nothing"                  "0" "$([ -s "$QF/cfq.w1.queue" ] && echo 1 || echo 0)"
+  tmux -L cfq kill-server 2>/dev/null; rm -rf "$Q"
+else
+  skip "a send to a busy session is queued" "tmux/jq missing"
+fi
+
+# The reply address rides IN the queue record, and becomes a marker only when the prompt
+# is delivered. Written at enqueue time it would be armed by whichever UserPromptSubmit
+# came next — a prompt that is not this one — and answer the asker with a stranger's work.
+group "a queued question carries its reply address"
+if command -v tmux >/dev/null 2>&1; then
+  QR="$(mktemp -d)"; QRF="$QR/fleet"; QRA="$QR/ask"; mkdir -p "$QRF" "$QRA"
+  tmux -L cfqr kill-server 2>/dev/null
+  tmux -L cfqr new-session -d -x 200 -y 40 -s tgt "printf 'esc to interrupt\n'; sleep 60" 2>/dev/null
+  sleep 0.4
+  QRS() { env -u TMUX CLAUDE_FLEET_DIR="$QRF" "$ROOT/bin/fleet-send" -s cfqr "$@" 2>&1; }
+  QRS --reply-to cf-ask/master --reply-dir "$QRA" tgt "what is the schema" >/dev/null
+  is "a queued question writes no marker yet" "0" "$([ -f "$QRF/cfqr.tgt.reply-to" ] && echo 1 || echo 0)"
+  is "...the record holds the address"        "cf-ask|master|$QRA" \
+     "$(cut -d$'\x1f' -f2-4 "$QRF/cfqr.tgt.queue" 2>/dev/null | tr '\037' '|')"
+  is "...and a busy session is not delivered to" "3" "$(QRS --dequeue tgt >/dev/null; echo $?)"
+  # The turn ends: the pane goes quiet and shows an empty composer, and the drain delivers
+  # it. A composer and not a bare `sleep`: a submit fleet-send cannot confirm takes its
+  # reply address back (by design), and this row would then pass or fail on that instead.
+  tmux -L cfqr respawn-pane -k -t tgt \
+    "printf '%s\n❯ \n%s\n' ──────────────────── ────────────────────; cat >/dev/null" 2>/dev/null; sleep 0.4
+  QRS --dequeue tgt >/dev/null
+  is "delivered, the marker is written"       "cf-ask|master|$QRA" \
+     "$(tr '\037' '|' < "$QRF/cfqr.tgt.reply-to" 2>/dev/null | tr -d '\n')"
+  is "...and the question reaches the pane"   "1" \
+     "$(grep -c 'what is the schema' <<< "$(tmux -L cfqr capture-pane -p -t tgt 2>/dev/null)" || true)"
+  is "...and it has left the queue"           "0" "$([ -s "$QRF/cfqr.tgt.queue" ] && echo 1 || echo 0)"
+  tmux -L cfqr kill-server 2>/dev/null; rm -rf "$QR"
+else
+  skip "a queued question carries its reply address" "tmux missing"
+fi
+
+# The queue is keyed by the session NAME, like every other per-session marker, so a rename
+# that left it behind would strand work already sent, and a stop that left it would hand a
+# stranger's backlog to the next session that reuses the name.
+group "the queue moves with a rename and goes with a stop"
+if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  QM="$(mktemp -d)"; QMF="$QM/fleet"; mkdir -p "$QMF" "$QM/repo"
+  tmux -L cfqm kill-server 2>/dev/null
+  git init -q -b main "$QM/repo" 2>/dev/null
+  git -C "$QM/repo" config user.email t@t; git -C "$QM/repo" config user.name t
+  : > "$QM/repo/f"; git -C "$QM/repo" add -A; git -C "$QM/repo" commit -qm init 2>/dev/null
+  git -C "$QM/repo" worktree add -q "$QM/qa" -b qa 2>/dev/null
+  tmux -L cfqm new-session -d -x 200 -y 40 -s qa -c "$QM/qa" "printf 'esc to interrupt\n'; sleep 60" 2>/dev/null
+  sleep 0.4
+  QMS() { env -u TMUX CLAUDE_FLEET_DIR="$QMF" "$ROOT/bin/fleet-send" -s cfqm "$@" 2>&1; }
+  QMS qa "held-one" >/dev/null; QMS qa "held-two" >/dev/null
+  is "fixture: two prompts queued"            "2" "$(grep -c . "$QMF/cfqm.qa.queue" 2>/dev/null || echo 0)"
+  env -u TMUX CLAUDE_FLEET_DIR="$QMF" "$ROOT/bin/fleet-rename" -s cfqm qa qb >/dev/null 2>&1
+  is "the renamed session keeps its queue"    "2" "$(grep -c . "$QMF/cfqm.qb.queue" 2>/dev/null || echo 0)"
+  is "...in order"                            "held-one" \
+     "$(head -1 "$QMF/cfqm.qb.queue" 2>/dev/null | cut -d$'\x1f' -f5 | base64 -d 2>/dev/null || true)"
+  is "...and nothing is left under the old"   "0" "$([ -e "$QMF/cfqm.qa.queue" ] && echo 1 || echo 0)"
+  # The card is the only place a human sees the queue: the grid's --json (which the phone
+  # draws) carries the count, and the desk card prints it where the age would go.
+  qj="$(env -u TMUX CLAUDE_FLEET_DIR="$QMF" node "$ROOT/bin/fleet-grid.mjs" cfqm --json 2>/dev/null)"
+  is "the card carries queued: 2"             "2" "$(jq -r '.cards[] | select(.name=="qb") | .queued' <<< "$qj" 2>/dev/null)"
+  is "...and the lead, with none, carries 0"  "0" "$(jq -r '[.cards[] | select(.name!="qb") | .queued] | add // 0' <<< "$qj" 2>/dev/null)"
+  # AND THE DRAIN FINDS IT UNDER THE NEW NAME. The running agent still carries the name it
+  # was LAUNCHED with (CLAUDE_FLEET_SLOT=qa) — nothing can reach into its environment — so
+  # the Stop hook has to take its slot from the pane's CURRENT session name, or it would
+  # look for a queue under `qa` that the rename just moved away. The turn ends here: the
+  # pane shows an empty composer and fires the real Stop hook from inside itself.
+  tmux -L cfqm respawn-pane -k -t qb \
+    "env CLAUDE_FLEET_DIR='$QMF' CLAUDE_FLEET_SOCK=cfqm CLAUDE_FLEET_SLOT=qa CLAUDE_FLEET_NOTIFIER=off \
+         CLAUDE_FLEET_QUEUE_EVERY=0.3 PATH='$ROOT/bin':\"\$PATH\" bash -c '
+       printf \"%s\\n❯ \\n%s\\n\" ──────────────────── ────────────────────
+       printf \"{\\\"hook_event_name\\\":\\\"Stop\\\",\\\"session_id\\\":\\\"fq-qb\\\",\\\"cwd\\\":\\\"/\\\"}\" \
+         | \"$ROOT/hooks/fleet-event.sh\" >/dev/null 2>&1
+       cat >/dev/null'" 2>/dev/null
+  # Wait for the TEXT, not for the queue to shrink: --dequeue pops the record before it
+  # pastes, so a loop that stops on the pop reads the pane a moment too early.
+  for _ in $(seq 1 80); do
+    grep -q 'held-one' <<< "$(tmux -L cfqm capture-pane -p -t qb 2>/dev/null)" && break; sleep 0.25
+  done
+  is "after the rename, a Stop delivers the next one" "1" \
+     "$(grep -c 'held-one' <<< "$(tmux -L cfqm capture-pane -p -t qb 2>/dev/null)" || true)"
+  is "...and leaves the other waiting"        "1" "$(grep -c . "$QMF/cfqm.qb.queue" 2>/dev/null || echo 0)"
+  env -u TMUX -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$QMF" "$ROOT/bin/fleet-stop" -s cfqm qb >/dev/null 2>&1
+  is "a stop clears it"                       "0" "$([ -e "$QMF/cfqm.qb.queue" ] && echo 1 || echo 0)"
+  tmux -L cfqm kill-server 2>/dev/null; rm -rf "$QM"
+else
+  skip "the queue moves with a rename" "tmux/git missing"
+fi
+
+# ── a prompt TYPED into a running turn is labelled as queued ──────────────────
+# fleet-send's queue cannot reach a prompt a human types into a busy session, so the
+# UserPromptSubmit hook labels it where the agent reads it. Driven with the payloads Claude
+# Code sends — measured on 2.1.280: a mid-turn submit fires UserPromptSubmit, a background
+# task's completion fires one too (as `<task-notification>…`), and an Esc interrupt fires
+# no Stop, leaving `[Request interrupted by user…` in the transcript instead.
+group "a prompt typed mid-turn is labelled queued"
+if command -v jq >/dev/null 2>&1; then
+  UH="$(mktemp -d)"; UHF="$UH/fleet"; mkdir -p "$UHF"; : > "$UH/t.jsonl"
+  uhook() { local p="$1"; shift
+            printf '%s' "$p" | env -u TMUX -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$UHF" \
+              CLAUDE_FLEET_NOTIFIER=off "$@" "$ROOT/hooks/fleet-event.sh" 2>/dev/null; }
+  ups() { jq -nc --arg p "$1" --arg t "$UH/t.jsonl" \
+            '{hook_event_name:"UserPromptSubmit",session_id:"ups1",cwd:"/",transcript_path:$t,prompt:$p}'; }
+  ev()  { jq -nc --arg e "$1" --arg t "$UH/t.jsonl" '{hook_event_name:$e,session_id:"ups1",cwd:"/",transcript_path:$t}'; }
+  is "a prompt to an idle session gets nothing" "" "$(uhook "$(ups 'fix the login bug')")"
+  uhook "$(ev PreToolUse)" >/dev/null
+  mid="$(uhook "$(ups 'also bump the version')")"
+  is "one sent mid-turn is labelled queued"   "1" "$(grep -c 'QUEUED WORK, not a replacement' <<< "$mid" || true)"
+  is "...naming the task in hand"             "1" "$(grep -c 'fix the login bug' <<< "$mid" || true)"
+  is "...as UserPromptSubmit hook output"     "UserPromptSubmit" "$(jq -r '.hookSpecificOutput.hookEventName' <<< "$mid" 2>/dev/null)"
+  is "a task notification is not a prompt"    "" "$(uhook "$(ups '<task-notification>done</task-notification>')")"
+  is "...and does not replace the task"       "1" "$(uhook "$(ups 'one more')" | grep -c 'fix the login bug' || true)"
+  uhook "$(ev Stop)" >/dev/null
+  is "after the Stop, a prompt is a new turn" "" "$(uhook "$(ups 'next thing')")"
+  # An interrupt leaves `working` behind; the next prompt is what the human wants NOW.
+  printf '%s\n' '{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}' >> "$UH/t.jsonl"
+  is "after an Esc interrupt it is not queued" "" "$(uhook "$(ups 'do this instead')")"
+  # fleet-send --now pastes into the turn ON PURPOSE and leaves a one-shot marker.
+  : > "$UHF/cfu.w1.now"
+  is "a --now paste is not labelled"          "" "$(uhook "$(ups 'deliberate')" CLAUDE_FLEET_SOCK=cfu CLAUDE_FLEET_SLOT=w1)"
+  is "...and the marker is used up"           "0" "$([ -e "$UHF/cfu.w1.now" ] && echo 1 || echo 0)"
+  rm -rf "$UH"
+else
+  skip "a prompt typed mid-turn is labelled queued" "jq missing"
 fi
 
 # ── 4c3. a fleet session is addressable by name ───────────────────────────────
@@ -7567,7 +7772,9 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   printf 'feat/inflight\x1f12\x1fOPEN\nfeat/shipped\x1f11\x1fMERGED\nfeat/fresh\x1f10\x1fMERGED\n' \
     > "$DS/fleet/prs.acme_widget"
   tmux -L cfdisp kill-server 2>/dev/null
-  # the busy marker sends fleet-send down its queued path, which skips the 8s confirm loop
+  # The busy marker sends fleet-send down its QUEUE, which skips the 8s confirm loop: a send
+  # to a working session is held for its next turn rather than pasted into this one, so
+  # "dispatched" below means delivered OR queued, and "refused" means neither.
   pane="printf 'esc to interrupt\n'; sleep 60"
   tmux -L cfdisp new-session -d -x 200 -y 40 -s master -c "$DS/repo" "$pane" 2>/dev/null
   for w in shipped inflight even fresh; do
@@ -7581,15 +7788,30 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
     printf '%s\t%s\tdone\t%s\n' "$((now - 3600))" fresh fresh; } > "$DS/fleet/cfdisp.inbox"
   dsend() { ( cd "$DS/repo" && env -u TMUX CLAUDE_FLEET_DIR="$DS/fleet" PATH="$DS/stub:$PATH" \
               "$ROOT/bin/fleet-send" -s cfdisp "$@" 2>&1; echo "rc=$?" ); }
-  sent_to() { awk -F'\t' -v s="$1" '$2==s' "$DS/fleet/cfdisp.sent" 2>/dev/null | grep -c . || true; }
+  queued_to() { local n; n="$(grep -c . "$DS/fleet/cfdisp.$1.queue" 2>/dev/null)"; echo "${n:-0}"; }
+  sent_to() { echo $(( $(awk -F'\t' -v s="$1" '$2==s' "$DS/fleet/cfdisp.sent" 2>/dev/null | grep -c . || true) \
+                       + $(queued_to "$1") )); }
 
   out="$(dsend shipped "build the next thing")"
   is "a shipped worker's next task is refused"    "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
   is "...naming fleet-spawn instead"              "1" "$(printf '%s' "$out" | grep -c 'fleet-spawn' || true)"
   is "...and the flag that insists"               "1" "$(printf '%s' "$out" | grep -c -- '--anyway' || true)"
   is "...and nothing was dispatched"              "0" "$(sent_to shipped)"
+  is "...not even into its queue"                 "0" "$(queued_to shipped)"
   out="$(dsend --anyway shipped "one more thing on it")"
   is "--anyway sends it"                          "1" "$(sent_to shipped)"
+  # BOTH GATES AT ONCE: past the refusal, a worker that is mid-turn still gets it as its
+  # NEXT turn — --anyway insists on the recipient, not on interrupting it.
+  is "...into its queue, since it is mid-turn"    "1" "$(queued_to shipped)"
+  # ...and when that turn ends the drain DELIVERS it. The refusal already ran when it was
+  # queued; asking again at delivery would pop the prompt and then refuse it — dropped,
+  # for having waited its turn.
+  tmux -L cfdisp respawn-pane -k -t shipped \
+    "printf '%s\n❯ \n%s\n' ──────────────────── ────────────────────; cat >/dev/null" 2>/dev/null; sleep 0.4
+  dq="$(dsend --dequeue shipped)"
+  is "...and the drain delivers it, not refuses it" "1" \
+     "$(awk -F'\t' '$2=="shipped"' "$DS/fleet/cfdisp.sent" 2>/dev/null | grep -c . || true)"
+  is "...leaving the queue empty"                 "0" "$(queued_to shipped)"
   is "...and exits 0"                             "1" "$(printf '%s' "$out" | grep -c 'rc=0' || true)"
 
   out="$(dsend inflight "CI is red on your PR")"
@@ -8148,7 +8370,7 @@ if command -v tmux >/dev/null 2>&1; then
   # names, so a rename is a broken client, not a refactor.
   is "top-level keys"    "project profile counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
   is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
-  is "card keys"         "name label status folder branch agent pr msg age exited asleep attached sched limit_at lead" \
+  is "card keys"         "name label status folder branch agent pr msg age exited asleep queued attached sched limit_at lead" \
                          "$(J 'Object.keys(o.cards[0]).join(" ")')"
   is "project is the fleet's project" "demoproj" "$(J 'o.project')"
   is "profile is the profile"         "work"     "$(J 'o.profile')"

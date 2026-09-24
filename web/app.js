@@ -2477,6 +2477,7 @@ function cardEl(m, h, idx) {
   if (m.path) meta.append(el('span', { class: 'c-where', text: m.path }));
   if (m.agent) meta.append(el('span', { class: 'chip tag', text: m.agent }));
   if (m.pr) meta.append(el('span', { class: 'chip tag', text: m.pr }));
+  if (m.queued) meta.append(el('span', { class: 'chip tag', text: `queued: ${m.queued}` }));
   if (meta.childNodes.length) d.append(meta);
   // ── the agent's last line, two real lines of it ─────────────────────────
   // THE POINT OF THE REDESIGN. Rendered as text, never as markup: this is whatever the

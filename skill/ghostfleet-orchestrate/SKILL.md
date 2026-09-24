@@ -267,9 +267,12 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
   `fleet-answer <session> "2"`. (`fleet-inbox` flags these as `need-you`.) This is
   the single most common mis-step; when in doubt, `fleet-read`/`fleet-answer` to
   see and clear the dialog before sending more work.
-- **Don't spam a busy worker.** If it's `working`, one `fleet-send` queues after the
-  current turn — fine for a follow-up on its own PR; don't fire several at a working
-  session, and never queue it an unrelated task.
+- **A send to a busy worker is queued, not pasted in.** If it's `working`, `fleet-send`
+  holds the prompt and the worker gets it as its own turn when the current one ends
+  (the card shows `queued: N`); several queue in order — fine for a follow-up on its
+  own PR, never for an unrelated task. `fleet-send --now` pastes it INTO the running
+  turn instead — only for a deliberate interrupt ("stop", "instead"), because a prompt
+  folded into a turn is read as a change of direction.
 - **Prompts must be self-contained.** A sibling has its own context — paste the full
   brief (task, files/paths, done-criteria), not "the thing we discussed".
 - **Resolve the ambiguity BEFORE you dispatch, not after.** Run the ask against the eight

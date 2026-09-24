@@ -125,6 +125,12 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.label" 2>/dev/null
 # phone. Seen: a fleet "cleaned" session by session, and three asleep cards stayed behind.
 # .exited goes with it, for the name-reuser reason above.
 rm -f "$FLEET_DIR/$SOCK.$SESSION.asleep" "$FLEET_DIR/$SOCK.$SESSION.exited" 2>/dev/null
+# prompts queued behind its last turn (fleet-send): nothing is left to run them, and a
+# session that reuses this name must not start by working through a stranger's backlog.
+_qd="$FLEET_DIR/$SOCK.$SESSION.queue.drain"; _qp="$(cat "$_qd" 2>/dev/null)"
+case "$_qp" in ''|*[!0-9]*) ;; *) kill "$_qp" 2>/dev/null ;; esac
+rm -rf "$FLEET_DIR/$SOCK.$SESSION.queue" "$FLEET_DIR/$SOCK.$SESSION.queue.lock" \
+       "$_qd" "$FLEET_DIR/$SOCK.$SESSION.now" 2>/dev/null
 
 # The dev-stack slot is keyed by WORKTREE PATH, so release it before the manifest row
 # (the only thing that still knows which path this session held) is dropped. A slot left

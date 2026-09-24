@@ -612,6 +612,19 @@ function isExited(name) {
 // the same reason. bin/fleet-hibernate writes it before it kills the pane, holding the
 // conversation id that brings the session back, so a card can advertise its own way home
 // rather than leaving a name with nothing behind it.
+// ── QUEUED: prompts fleet-send is holding until this session's turn ends ────
+// bin/fleet-send writes one record per line to <sock>.<name>.queue instead of pasting
+// into a running turn (which folds the prompt INTO it), and the Stop hook delivers them
+// one turn each. The count rides beside the status, like parked's marker: `working` with
+// three behind it is a different card from `working` alone, and it is the only place a
+// human can see that the queue exists.
+function queuedCount(name) {
+  try {
+    const t = fs.readFileSync(path.join(FLEET_DIR, SOCK + '.' + name + '.queue'), 'utf8');
+    return t.split('\n').filter(Boolean).length;
+  } catch { return 0; }
+}
+
 function asleepFile(name) { return path.join(FLEET_DIR, SOCK + '.' + name + '.asleep'); }
 function isAsleep(name) {
   try { return fs.existsSync(asleepFile(name)); } catch { return false; }
@@ -875,6 +888,7 @@ function gather({ lead = false } = {}) {
              // that timed out leaves that shape). Both are asleep as far as a card is
              // concerned, and the second is how a live session ends up under an asleep card.
              asleep: !!s.asleepAt || isAsleep(s.name),
+             queued: queuedCount(s.name),
              // null, never 0 or '': the card tests it for truth, and a PR numbered 0 does
              // not exist while an empty string would read as "no PR" in one place and as a
              // present-but-blank field in another.
@@ -1094,8 +1108,12 @@ function cardLines(card, selected, idx) {
   const idle = card.age == null ? '' : (card.status === 'working' ? `busy ${humanAge(card.age)}` : `${humanAge(card.age)} ago`);
   // For a limited session the reset time is the only number that matters — "55m ago"
   // says when it last spoke, which is not the question you are asking of that card.
+  // A backlog outranks the age: `● working  queued: 2` is the fact that changes what
+  // you do next (the next send waits behind those two), and it fits beside the longest
+  // status label in the 28 columns this line has.
   const right = card.sched ? `@${clockLabel(card.sched.at)}`
               : card.status === 'limit' && card.limitAt ? `↻ ${card.limitAt}`
+              : card.queued ? `queued: ${card.queued}`
               : idle;   // @ = scheduled send
   // ── AN EXITED SESSION SAYS SO WHERE ITS STATUS WOULD BE ───────────────────
   // The agent is gone; the pane and the card are not (bin/agent-here holds them). None
@@ -2573,6 +2591,8 @@ if (JSON_OUT) {
       // trigger it. The field existed at both ends and nothing carried it between them.
       exited:   !!c.exited,
       asleep:   !!c.asleep,
+      // Prompts waiting for this session's turn to end (fleet-send's queue); 0 = none.
+      queued:   c.queued || 0,
       attached: c.attached,
       // The epoch AND the prompt, but not the pid. `@10:30pm` with no way to say WHAT
       // will be sent is half a fact: in the TUI you are one keystroke from the session

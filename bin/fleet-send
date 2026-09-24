@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# fleet-send [-s SOCKET] [--reply-to me|<session>|<socket>/<session>] [--reply-dir DIR]
+# fleet-send [-s SOCKET] [--now] [--reply-to me|<session>|<socket>/<session>] [--reply-dir DIR]
 #            [--anyway] <session> <prompt...>
+# fleet-send [-s SOCKET] --dequeue <session>        (what the Stop hook runs)
+#
+# To a session that is mid-turn the prompt is QUEUED and runs as its own turn after that
+# one ends (see "the queue" below); --now pastes it into the running turn instead.
 #
 # Type <prompt> into another fleet session's Claude input and submit it. Meant
 # to be called by a "lead" Claude session (via its Bash tool) to dispatch work
@@ -50,12 +54,17 @@ REPLY_TO=""; REPLY_DIR=""; ANYWAY=0
 # Set for real beside the asker's fleet dir; declared here so `set -u` cannot trip on a
 # send that has no --reply-to at all.
 XPROF=0
+# send (the default) queues behind a running turn; --now pastes into it; --dequeue delivers
+# the next queued prompt, and is what the Stop hook runs (see "the queue" below).
+MODE=send
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)          SOCK="${2:-}";      shift 2 ;;
     --reply-to)  REPLY_TO="${2:-}";  shift 2 ;;
     --reply-dir) REPLY_DIR="${2:-}"; shift 2 ;;
     --anyway)    ANYWAY=1;           shift ;;
+    --now)       MODE=now;           shift ;;
+    --dequeue)   MODE=dequeue;       shift ;;
     *) break ;;
   esac
 done
@@ -63,8 +72,8 @@ SESSION="${1:-}"; shift || true
 MSG="$*"
 
 [ -n "$SOCK" ]    || { echo "fleet-send: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
-[ -n "$SESSION" ] || { echo "fleet-send: usage: fleet-send [-s socket] [--reply-to me|<session>|<socket>/<session>] [--anyway] <session> <prompt>" >&2; exit 1; }
-[ -n "$MSG" ]     || { echo "fleet-send: empty prompt" >&2; exit 1; }
+[ -n "$SESSION" ] || { echo "fleet-send: usage: fleet-send [-s socket] [--now] [--reply-to me|<session>|<socket>/<session>] [--anyway] <session> <prompt>" >&2; exit 1; }
+[ -n "$MSG" ] || [ "$MODE" = dequeue ] || { echo "fleet-send: empty prompt" >&2; exit 1; }
 tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
 # A TAB IS NOT AN AGENT. fleet-tab's _term-*/_edit-* sessions live on this same socket
@@ -85,7 +94,11 @@ esac
 # the same PR always goes through, and so does a session that has not finished a turn.
 #   A --reply-to QUESTION is exempt: asking a finished worker why it did something wants
 # exactly the context it has. --anyway is for the follow-up this cannot recognise.
-if [ "$ANYWAY" != 1 ] && [ -z "$REPLY_TO" ] \
+#   So is the queue's DRAIN (--dequeue, and the --anyway delivery it runs): this check
+# already ran when the prompt was queued, against a worker that was mid-turn on the task
+# the prompt was sent about. That turn may well ship before it ends — refusing the queued
+# follow-up then would drop it, popped and undelivered, for having waited its turn.
+if [ "$ANYWAY" != 1 ] && [ "$MODE" != dequeue ] && [ -z "$REPLY_TO" ] \
    && why="$("$(dirname "$0")/fleet-shipped" -s "$SOCK" "$SESSION" 2>/dev/null)"; then
   echo "fleet-send: '$SESSION' already finished a task that shipped ($why) — a new task is a new session: fleet-stop --reclaim $SESSION, then fleet-spawn <name> --prompt … (--reuse <worktree> keeps the folder). A follow-up on that same work: add --anyway" >&2
   exit 1
@@ -99,6 +112,94 @@ fi
 _a=""
 if command -v fleet-agent >/dev/null 2>&1; then
   _a="$(fleet-agent of "$SESSION" -s "$SOCK" 2>/dev/null)"
+fi
+
+# Is the target mid-turn right now? Read the LIVE pane (the agent's working spinner),
+# not the status file — the file can be stale, and a wrong guess here is harmless
+# but a wrong "queued" note is confusing.
+#
+# The pattern comes from the target's AGENT: claude says "esc to interrupt", opencode
+# says "esc interrupt", and one regex cannot serve both. Resolved once here rather
+# than per call, because submitted() polls this in a loop. Falls back to claude's
+# literal pattern — byte-identical to what this script used before the adapter — so a
+# missing/renamed fleet-agent degrades to today's behaviour instead of breaking send.
+BUSY_RE='(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt'
+if [ -n "$_a" ] && [ "$_a" != claude ]; then
+  BUSY_RE="$(fleet-agent field "$_a" busy_re 2>/dev/null)"
+fi
+# An EMPTY pattern means the agent has no validated detector. It must never reach
+# grep: `grep -qE ""` matches every line, which would report the session as
+# permanently busy and make fleet-send queue every prompt behind a phantom turn.
+busy() {
+  [ -n "$BUSY_RE" ] || return 1
+  # A here-string, not a pipe: under pipefail a `grep -q` that MATCHES can hand its
+  # writer a SIGPIPE and read as a miss (CLAUDE.md) — and the queue below now decides
+  # where a prompt goes on this answer.
+  grep -qE "$BUSY_RE" <<< "$(tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null)"
+}
+
+# --- the queue -----------------------------------------------------------------
+# A PROMPT SENT TO A BUSY SESSION IS FOLDED INTO THE TURN THAT IS RUNNING, NOT QUEUED
+# AFTER IT. This script used to paste into the input box of a working session and say
+# "your prompt will queue after this turn"; Claude Code instead hands a message submitted
+# mid-turn to the turn in progress, and the agent reads it as a change of direction. Task
+# A was dropped for task B with nothing anywhere saying so — reported as "I'm treating it
+# as a queue and the agents are not finishing both". Measured on 2.1.280: two prompts, one
+# UserPromptSubmit each, ONE Stop between them.
+#   So a send to a working Claude session is written here instead, and hooks/fleet-event.sh
+# delivers the head of it (`fleet-send --dequeue`) after that session's Stop, as a turn of
+# its own. --now keeps the old paste for the send that MEANS to interrupt.
+#   ONE RECORD PER LINE, \x1f between fields (an empty reply field must not collapse):
+# queued-at, reply socket, reply session, reply dir, and the prompt BASE64'D, because a
+# prompt is multi-line and a line is the record. The reply address is stored RESOLVED and
+# NOT written as a marker yet: a marker written now would be armed by whichever
+# UserPromptSubmit comes next, which is not necessarily this prompt's.
+#   Claude only. The drain is the Claude Stop hook; a codex/opencode target has nothing
+# that would ever deliver a queued prompt, so it keeps the paste.
+QUEUE="$FLEET_DIR/$SOCK.$SESSION.queue"
+QUEUEABLE=0; { [ -z "$_a" ] || [ "$_a" = claude ]; } && QUEUEABLE=1
+SELF="${BASH_SOURCE[0]}"
+
+# mkdir is the lock because it is atomic everywhere this runs (flock is not on macOS).
+# The holder's pid goes inside, so one that died holding it is taken over rather than
+# waited on forever; a lock with no pid yet is only a race lost to a live holder.
+_qlock() {
+  local i=0 p
+  mkdir -p "$FLEET_DIR" 2>/dev/null
+  while ! mkdir "$QUEUE.lock" 2>/dev/null; do
+    p="$(cat "$QUEUE.lock/pid" 2>/dev/null)"
+    if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; then rm -rf "$QUEUE.lock"; continue; fi
+    i=$((i + 1)); [ "$i" -ge 200 ] && return 1          # ~20s: a delivery holds it ~8s
+    sleep 0.1
+  done
+  echo $$ > "$QUEUE.lock/pid"
+  trap 'rm -rf "$QUEUE.lock" 2>/dev/null' EXIT
+}
+_qunlock() { rm -rf "$QUEUE.lock" 2>/dev/null; trap - EXIT; }
+_b64()   { printf '%s' "$1" | base64 | tr -d '\n'; }
+_unb64() { printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 -D 2>/dev/null; }
+
+# --dequeue: deliver the NEXT queued prompt, if the session can take it. Exit 3 means
+# "still busy, try again" — the Stop hook runs while the turn is technically still
+# finishing, so its first look often lands on the spinner.
+if [ "$MODE" = dequeue ]; then
+  _qlock || { echo "fleet-send: queue for '$SESSION' is locked" >&2; exit 1; }
+  [ -s "$QUEUE" ] || { rm -f "$QUEUE"; exit 0; }
+  busy && exit 3
+  IFS= read -r _line < "$QUEUE"
+  _qt="$QUEUE.$$.tmp"
+  tail -n +2 "$QUEUE" > "$_qt" 2>/dev/null && mv -f "$_qt" "$QUEUE"
+  [ -s "$QUEUE" ] || rm -f "$QUEUE"
+  IFS=$'\x1f' read -r _q_at _q_rs _q_rss _q_rd _q_msg _q_extra <<< "$_line"
+  _body="$(_unb64 "${_q_msg:-}")"
+  [ -n "$_body" ] && [ -z "${_q_extra:-}" ] \
+    || { echo "fleet-send: dropped an unreadable queue record for '$SESSION'" >&2; exit 1; }
+  _args=(--now --anyway -s "$SOCK")
+  [ -n "$_q_rs" ] && [ -n "$_q_rss" ] && _args+=(--reply-to "$_q_rs/$_q_rss" ${_q_rd:+--reply-dir "$_q_rd"})
+  # Delivered UNDER the lock: a second drainer must not see the box empty in the gap
+  # between this paste and the spinner, and fold the next prompt into this one.
+  "$SELF" "${_args[@]}" "$SESSION" "$_body"
+  exit $?
 fi
 
 # --- the reply address ---------------------------------------------------------
@@ -146,6 +247,37 @@ if [ -n "$REPLY_TO" ]; then
     _c="${_c#CLAUDE_CONFIG_DIR=}"; case "$_c" in /*) rdir="$_c/fleet" ;; esac
   fi
   [ -n "$rdir" ] || rdir="$FLEET_DIR"           # ...then same-profile, which it usually is
+fi
+
+# The gate. Decided UNDER the lock, so a drain delivering the head right now either
+# finishes first (and this sees its turn running) or has not started (and this sees the
+# queue non-empty). Either way it goes behind, and order holds.
+if [ "$MODE" = send ] && [ "$QUEUEABLE" = 1 ]; then
+  _qlock || { echo "fleet-send: queue for '$SESSION' is locked — not sent (retry, or --now)" >&2; exit 1; }
+  if busy || [ -s "$QUEUE" ]; then
+    _rec="$(printf '%s\x1f%s\x1f%s\x1f%s' "${RSOCK:-}" "${RSESS:-}" "${rdir:-}" "$(_b64 "$MSG")")"
+    # The same prompt already waiting is not a second task: the automated nudges (a
+    # worker finished, an answer relayed) repeat word for word and would stack one turn
+    # each behind a long lead turn.
+    if grep -qxF -- "$_rec" <<< "$(cut -d$'\x1f' -f2- "$QUEUE" 2>/dev/null)"; then
+      echo "fleet-send: → $SESSION (already queued; not added twice)"; exit 0
+    fi
+    printf '%s\x1f%s\n' "$(date +%s)" "$_rec" >> "$QUEUE"
+    _n="$(wc -l < "$QUEUE" | tr -d ' ')"
+    if busy; then
+      echo "fleet-send: → $SESSION (queued #$_n — it is mid-turn; this runs as its own turn after that one ends. --now folds it in instead)"
+      [ -n "${RSESS:-}" ] && echo "fleet-send: the answer to it comes back to $RSOCK/$RSESS when that queued turn ends"
+      exit 0
+    fi
+    # Idle with a backlog (a drain that gave up, a human who was typing): deliver the
+    # head now — which is not necessarily this prompt, and that is the point.
+    _qunlock
+    exec "$SELF" --dequeue -s "$SOCK" "$SESSION"
+  fi
+  _qunlock
+fi
+
+if [ -n "$RSESS" ]; then
 
   # CAN THE DIRECT REPLY EVEN ARRIVE? Claude Code's peer registry lives under the CONFIG
   # dir (<config>/sessions), so two profiles are two registries and neither can see the
@@ -250,28 +382,12 @@ fi
 # Staleness is bounded from the other end instead: the hook only relays an ARMED address,
 # and an unconfirmed submit below takes its own marker back.
 
-# Is the target mid-turn right now? Read the LIVE pane (the agent's working spinner),
-# not the status file — the file can be stale, and a wrong guess here is harmless
-# but a wrong "queued" note is confusing.
-#
-# The pattern comes from the target's AGENT: claude says "esc to interrupt", opencode
-# says "esc interrupt", and one regex cannot serve both. Resolved once here rather
-# than per call, because submitted() polls this in a loop. Falls back to claude's
-# literal pattern — byte-identical to what this script used before the adapter — so a
-# missing/renamed fleet-agent degrades to today's behaviour instead of breaking send.
-BUSY_RE='(…|\.\.\.) ?\([0-9]+[ms]|↓ ?[0-9.,]+ ?[km]? ?tokens|esc to interrupt'
-if [ -n "$_a" ] && [ "$_a" != claude ]; then
-  BUSY_RE="$(fleet-agent field "$_a" busy_re 2>/dev/null)"
-fi
-# An EMPTY pattern means the agent has no validated detector. It must never reach
-# grep: `grep -qE ""` matches every line, which would report the session as
-# permanently busy and make fleet-send queue every prompt behind a phantom turn.
-busy() {
-  [ -n "$BUSY_RE" ] || return 1
-  tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null | grep -qE "$BUSY_RE"
-}
 pre_busy=no; busy && pre_busy=yes
-[ "$pre_busy" = yes ] && echo "fleet-send: note — '$SESSION' is working; your prompt will queue after this turn." >&2
+# Only --now (or a non-Claude target, which has no queue) gets here while a turn runs.
+# The one-shot marker tells the UserPromptSubmit hook this interruption was deliberate,
+# so it does not label the prompt "queued behind the task in hand" (hooks/fleet-event.sh).
+[ "$pre_busy" = yes ] && [ "$MODE" = now ] && : > "$FLEET_DIR/$SOCK.$SESSION.now" 2>/dev/null
+[ "$pre_busy" = yes ] && echo "fleet-send: note — '$SESSION' is working; this is pasted INTO the running turn, not after it." >&2
 
 # The relay lives in the CLAUDE event hook (hooks/fleet-event.sh), so a target running a
 # different agent will never answer. Say that HERE: the whole point of --reply-to is not
@@ -370,10 +486,10 @@ in_input() {
 submitted() { busy && return 0; in_input; [ "$?" = 1 ]; }
 
 if [ "$pre_busy" = yes ]; then
-  # already mid-turn: the prompt just queues into the box; one submit is enough
+  # already mid-turn: the submit hands it to the running turn; one Enter is enough
   sleep "${CLAUDE_FLEET_SUBMIT_DELAY:-0.4}"
   tmux -L "$SOCK" send-keys -t "$SESSION" Enter
-  echo "fleet-send: → $SESSION (queued)"
+  echo "fleet-send: → $SESSION (into the running turn)"
 else
   tmux -L "$SOCK" send-keys -t "$SESSION" Enter
   ok=no; renudged=no

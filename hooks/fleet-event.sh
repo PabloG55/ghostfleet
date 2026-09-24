@@ -40,7 +40,7 @@ IFS=$'\x1f' read -r EVENT SESSION CWD TRANSCRIPT NOTE < <(
 
 # SessionEnd: deregister and stop here.
 if [ "$EVENT" = "SessionEnd" ]; then
-  rm -f "$FLEET_DIR/$SESSION.json" 2>/dev/null
+  rm -f "$FLEET_DIR/$SESSION.json" "$FLEET_DIR/$SESSION.task" 2>/dev/null
   exit 0
 fi
 
@@ -95,6 +95,64 @@ if [ -z "$SLOT" ] && [ -n "$SOCK" ] && [ -z "$PANE" ]; then
   case "$SLOT" in _*|+*) SLOT="" ;; esac
 fi
 now="$(date +%s)"
+
+# --- a prompt typed into a RUNNING turn is the next task, not a replacement ----
+# Claude Code folds a message submitted mid-turn into the turn in progress, and the agent
+# reads it as a change of direction: task A is dropped for task B and nothing says so.
+# fleet-send now queues its own traffic (bin/fleet-send, "the queue"), but a prompt a
+# HUMAN types into a busy session goes straight in, and the launch contract alone is one
+# paragraph among many. So the prompt is labelled where the agent reads it.
+#   Measured on 2.1.280 before relying on it: a mid-turn submit DOES fire UserPromptSubmit
+# (two prompts, two events, one Stop), and so does a background task's completion — as a
+# "prompt" of `<task-notification>…`, which is the machine talking and is skipped here.
+#   "MID-TURN" IS THE STATUS THIS HOOK LAST WROTE, read before it is overwritten below:
+# `working` means a turn started and has not Stopped. An Esc interrupt fires NO Stop
+# (measured), so `working` alone would label the first prompt after an interrupt as queued
+# behind the task the human just abandoned — so the turn's transcript is checked for the
+# interrupt record too. What was asked is kept in <session_id>.task: its first line, and
+# the transcript line the turn began at.
+if [ "$EVENT" = "UserPromptSubmit" ]; then
+  _prompt="$(printf '%s' "$input" | jq -r '.prompt // ""' 2>/dev/null)"
+  _taskf="$FLEET_DIR/$SESSION.task"
+  case "$_prompt" in
+    "<task-notification>"*|"<local-command"*|"") ;;
+    *)
+      _prev="$(jq -r '.status // ""' "$FLEET_DIR/$SESSION.json" 2>/dev/null)"
+      _t_at=""; _t_line=""
+      [ -f "$_taskf" ] && IFS=$'\x1f' read -r _t_at _t_line < "$_taskf"
+      case "$_t_at" in ''|*[!0-9]*) _t_at="" ;; esac
+      _mid=0
+      if [ "$_prev" = working ] && [ -n "$_t_line" ]; then
+        _mid=1
+        if [ -n "$_t_at" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] \
+           && tail -n "+$(( _t_at + 1 ))" "$TRANSCRIPT" 2>/dev/null \
+              | grep -F '[Request interrupted by user' >/dev/null 2>&1; then
+          _mid=0
+        fi
+      fi
+      # fleet-send --now: pasted into the turn ON PURPOSE. Say nothing, once.
+      _nowf="$FLEET_DIR/${SOCK:-_}.${SLOT:-_}.now"
+      if [ -n "$SOCK" ] && [ -n "$SLOT" ] && [ -f "$_nowf" ]; then rm -f "$_nowf"; _mid=0; fi
+      if [ "$_mid" = 1 ]; then
+        jq -n --arg t "$_t_line" '{hookSpecificOutput: {hookEventName: "UserPromptSubmit",
+          additionalContext: ("[fleet] This message arrived while you were still working on: \"" + $t + "\". It is QUEUED WORK, not a replacement: add it to your task list, finish the task in hand, then do this one — unless this message itself says to stop or switch (stop, instead, drop that, first do). Your closing report lists every task you received this turn with its state.")}}' 2>/dev/null
+      else
+        # A new turn: this prompt IS the task in hand. A fleet reply preamble is not what
+        # was asked, so the first line after it is.
+        _first="$_prompt"
+        case "$_first" in "[fleet] This request comes from"*)
+          _first="$(printf '%s\n' "$_first" | awk 'f && NF { print; exit } !NF { f = 1 }')" ;;
+        esac
+        _first="$(printf '%s\n' "$_first" | awk 'NF { print; exit }' | tr '\t\037' '  ')"
+        _tl=0
+        [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] \
+          && _tl="$(wc -l < "$TRANSCRIPT" 2>/dev/null | tr -d '[:space:]')"
+        case "$_tl" in ''|*[!0-9]*) _tl=0 ;; esac
+        printf '%s\x1f%s\n' "$_tl" "${_first:0:160}" > "$_taskf" 2>/dev/null
+      fi ;;
+  esac
+fi
+[ "$EVENT" = "Stop" ] && rm -f "$FLEET_DIR/$SESSION.task" 2>/dev/null
 
 case "$EVENT" in
   UserPromptSubmit) status="working"                       # any new prompt un-parks the session
@@ -352,7 +410,7 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     # events within CLAUDE_FLEET_NOTIFY_DEBOUNCE seconds (default 30) are suppressed,
     # so a burst of finishes wakes it ONCE. OFF by default — each wake spends a
     # master turn on the shared account. Never fires for the lead's own turns (this
-    # block is workers-only); fleet-send just queues if the master is mid-turn.
+    # block is workers-only); fleet-send queues it if the master is mid-turn.
     #
     # Precedence (matches the TUI settings page, projects screen → ,):
     #   <sock>.notify-lead-off  is an authoritative KILL SWITCH — if present this
@@ -529,6 +587,45 @@ Full reply: fleet-read -s $CLAUDE_FLEET_SOCK $SLOT 3 — to ask it something els
         >> "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.inbox" 2>/dev/null || true
       rm -f "$rt" "$rt.armed" 2>/dev/null
     fi
+  fi
+fi
+
+# --- deliver the next QUEUED prompt as a turn of its own (bin/fleet-send) -------
+# fleet-send writes a prompt for a working session to <sock>.<slot>.queue instead of
+# pasting it into the turn; this Stop is the moment that turn is over. AFTER the relay
+# above on purpose: that block consumes this turn's reply address, and the queued prompt
+# may carry its own, which `fleet-send --dequeue` writes as it delivers.
+#   DETACHED AND RETRIED, because the hook runs while the turn is still finishing — the
+# pane usually still shows the spinner at this instant, and --dequeue answers "busy" (3)
+# rather than fold the prompt into the very turn it was queued behind. It also waits for an
+# EMPTY composer (_input_state), for the same reason the master nudge does: a human half-way
+# through a sentence must not get a queued prompt glued onto it.
+#   ONE DRAINER PER SESSION, pid in <queue>.drain, so a burst of Stops does not race two
+# deliveries. Bounded: a drainer that gives up leaves the queue intact — the card still
+# says `queued: N`, the next Stop starts another, and the next plain fleet-send to an
+# idle session delivers the head itself.
+if [ "$EVENT" = "Stop" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] \
+   && [ -s "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.queue" ]; then
+  _qd="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.queue.drain"
+  _qp="$(cat "$_qd" 2>/dev/null)"
+  case "$_qp" in ''|*[!0-9]*) _qp="" ;; esac
+  if [ -z "$_qp" ] || ! kill -0 "$_qp" 2>/dev/null; then
+    export -f _input_state
+    FLEET_DIR="$FLEET_DIR" nohup bash -c '
+      sock="$1"; slot="$2"; lock="$3"; every="$4"; tries="$5"
+      echo $$ > "$lock" 2>/dev/null
+      trap "rm -f \"$lock\"" EXIT
+      i=0
+      while [ "$i" -lt "$tries" ]; do
+        sleep "$every"; i=$((i + 1))
+        tmux -L "$sock" has-session -t "=$slot" 2>/dev/null || exit 0
+        [ -s "$FLEET_DIR/$sock.$slot.queue" ] || exit 0
+        _input_state "$sock" "$slot"; [ "$?" = 0 ] || continue
+        fleet-send -s "$sock" --dequeue "$slot" >/dev/null 2>&1
+        [ "$?" = 3 ] || exit 0
+      done
+    ' _ "$CLAUDE_FLEET_SOCK" "$SLOT" "$_qd" "${CLAUDE_FLEET_QUEUE_EVERY:-1}" \
+         "${CLAUDE_FLEET_QUEUE_TRIES:-300}" >/dev/null 2>&1 &
   fi
 fi
 
