@@ -554,6 +554,29 @@ grid_loop() {
       jump*) if take_jump "$choice"; then GRID_EXIT=jump; return; fi ;;   # ^F chord in the grid
       attach${US}*)
         name="${choice#attach${US}}"; last="$name"; _loading "opening $name"
+
+        # ── A SLEEPING SESSION HAS NO PANE TO OPEN, SO OPEN IT MEANT NOTHING ──────
+        # Reported from the desk: pressing Enter on a hibernated card did nothing at all.
+        # The grid emits the same `attach<US><name>` for Enter, for the 1-9 jump digits and
+        # for a click, and the attach below is `|| true` — so on a session that is not there
+        # it succeeded at nothing, silently, three different ways.
+        #   THE WAKE GOES HERE AND NOT IN THE GRID for exactly that reason: one consumer
+        # behind all three inputs. Putting it in the grid would mean three emitters to keep
+        # in step, and the fourth one added later would be the one that forgot.
+        #   Checked by MARKER, not by "attach failed": a missing session is also what a
+        # crashed one looks like, and waking that would be inventing a conversation.
+        if ! TM has-session -t "=$name" 2>/dev/null \
+           && [ -f "$CFG_DIR/fleet/$SOCK.$name.asleep" ]; then
+          _loading "waking $name"
+          # NEVER SILENTLY. A wake can fail for reasons worth reading — the checkout is
+          # gone, the agent has no resume path — and the whole complaint here was a key
+          # that did nothing. _fail outlives the next render on purpose.
+          if ! wake_out="$(CLAUDE_FLEET_DIR="$CFG_DIR/fleet" \
+                "$BIN_DIR/fleet-hibernate" -s "$SOCK" --wake "$name" 2>&1)"; then
+            _fail "could not wake '$name'" "$(printf '%s' "$wake_out" | tail -2 | tr '\n' ' ')"
+            continue
+          fi
+        fi
         # C-p inside a session drops a "projects" marker then detaches (see
         # tmux/cf.tmux.conf), so leaving a chat can jump straight up to Projects.
         gsp="$(TM display-message -p '#{socket_path}' 2>/dev/null)"

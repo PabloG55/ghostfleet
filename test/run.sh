@@ -12274,6 +12274,133 @@ else
   skip "an exited session is still a card" "node is not installed"
 fi
 
+# ── a hibernated card says asleep, and Enter on it does something ────────────
+# REPORTED FROM THE DESK, looking at it: a hibernated session drew as `? unknown` with
+# an age, and pressing Enter did nothing at all.
+#
+# TWO BUGS WITH ONE SYMPTOM, and they lived in different files:
+#
+#   THE WORD. `--plain` and `--json` had said `asleep` since the markers were added; the
+#   INTERACTIVE card was the one reader that never asked. An asleep session has no pane
+#   to read and usually no status file left, so it landed on `unknown` — the fleet saying
+#   "I cannot tell" about the one case it can tell exactly.
+#
+#   THE KEY. The grid emits the same `attach<US><name>` for Enter, the 1-9 digits and a
+#   click, and bin/ghostfleet's attach is `|| true` — so on a session that is not there it
+#   succeeded at nothing, silently, three ways at once.
+#
+# DRIVEN THROUGH A REAL PANE WITH REAL KEYS, because this is a rendering decision and a
+# key binding, and CLAUDE.md is explicit that `node --check` proves neither.
+group "a hibernated card says asleep"
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "a hibernated card says asleep" "tmux not available"
+else
+  AS="$(mktemp -d "$TEST_RUNS.$$.asleep.XXXXXX")"
+  mkdir -p "$AS/fleet" "$AS/wt"
+  # A SESSION THAT IS NOT THERE, PLUS ONE THAT IS. The live one is what gives the grid a
+  # socket to list; the marker is what should become a card beside it. Fixture names.
+  tmux -L cfasleep kill-server 2>/dev/null
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "aaaaaaaa-0000-0000-0000-000000000001" "$AS/wt" "" \
+    > "$AS/fleet/cfasleep.api-fix.asleep"
+
+  # THE HELPER PANE IS CARD 1 AND THE SLEEPING SESSION IS CARD 2. The grid draws a card
+  # for every session on the socket, including the one this test runs the grid in, so the
+  # ordering is fixed and the digit below is deterministic rather than lucky.
+  ascr() {   # run the grid in a pane; $AS/choice gets whatever it finishes with
+    tmux -L cfasleep kill-session -t _grid 2>/dev/null
+    rm -f "$AS/choice"
+    tmux -L cfasleep new-session -d -s _grid -x 120 -y 36 \
+      -e CLAUDE_FLEET_DIR="$AS/fleet" \
+      "node '$ROOT/bin/fleet-grid.mjs' cfasleep > '$AS/choice' 2>/dev/null ; sleep 20" 2>/dev/null
+    sleep 3
+    tmux -L cfasleep capture-pane -p -t _grid 2>/dev/null
+  }
+  drew="$(ascr)"
+  is "the grid drew a card for the sleeping session" "yes" \
+     "$(grep -q 'api-fix' <<<"$drew" && echo yes || echo no)"
+  # THE ROW THE OWNER WAS LOOKING AT.
+  # ANCHORED ON THE CHIP, NOT THE WORD. Watched going red: with the fix removed this row
+  # stayed GREEN, because the helper pane's own card shows the checkout's branch and this
+  # work happens on a branch with "asleep" in its name. A bare word match on a screen that
+  # renders arbitrary branch names is not a test of anything.
+  is "...and it says asleep"                         "yes" \
+     "$(grep -q '☾ asleep' <<<"$drew" && echo yes || echo no)"
+  is "...and NOT unknown"                            "no"  \
+     "$(grep -q 'unknown' <<<"$drew" && echo yes || echo no)"
+  # ...and it says how to get back in, the way the exited card does.
+  is "...and how to wake it"                         "yes" \
+     "$(grep -q 'wakes' <<<"$drew" && echo yes || echo no)"
+
+  # ── THE KEY IS LIVE AT THE SOURCE ────────────────────────────────────────
+  # Enter on the asleep card must produce the choice its consumer acts on. This is the
+  # half that lives in the grid; the wake itself is bin/ghostfleet's and is driven below.
+  # THE DIGIT. `2` is the jump key printed on the card itself.
+  tmux -L cfasleep send-keys -t _grid '2' 2>/dev/null; sleep 2
+  is "the digit on an asleep card emits its attach"  "yes" \
+     "$(grep -q "attach.*api-fix" "$AS/choice" 2>/dev/null && echo yes || echo no)"
+  # ...AND ENTER, which is the key the report was about. Right moves onto the card first.
+  drew2="$(ascr)"
+  tmux -L cfasleep send-keys -t _grid Right 2>/dev/null; sleep 1
+  tmux -L cfasleep send-keys -t _grid Enter 2>/dev/null; sleep 2
+  is "Enter on an asleep card emits its attach"      "yes" \
+     "$(grep -q "attach.*api-fix" "$AS/choice" 2>/dev/null && echo yes || echo no)"
+  is "...and the card it drew was still the asleep one" "yes" \
+     "$(grep -q '☾ asleep' <<<"$drew2" && echo yes || echo no)"
+  tmux -L cfasleep kill-server 2>/dev/null
+  rm -rf "$AS"
+fi
+
+# ── ...and the wake really wakes it ──────────────────────────────────────────
+# The real bin/fleet-hibernate, against a fixture session, with a STUB agent on PATH so
+# the readiness poll has something to see — a real agent is not needed to prove the wake
+# path, and standing one up would make this a test nobody runs.
+#   IT NEVER TOUCHES A REAL SLEEPING SESSION: its own socket, its own CLAUDE_FLEET_DIR,
+# its own PATH, all under the run's TMUX_TMPDIR.
+group "waking a hibernated session brings it back"
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "waking a hibernated session" "tmux not available"
+else
+  WK="$(mktemp -d "$TEST_RUNS.$$.wake.XXXXXX")"
+  mkdir -p "$WK/fleet" "$WK/bin" "$WK/wt"
+  # `for shortcuts` is one of the strings fleet-hibernate's is_ready looks for.
+  printf '#!/bin/sh\necho "? for shortcuts"\nsleep 60\n' > "$WK/bin/agent-here"
+  chmod +x "$WK/bin/agent-here"
+  tmux -L cfwake kill-server 2>/dev/null
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "aaaaaaaa-0000-0000-0000-000000000002" "$WK/wt" "" \
+    > "$WK/fleet/cfwake.docs-pass.asleep"
+
+  wout="$(PATH="$WK/bin:$PATH" CLAUDE_FLEET_DIR="$WK/fleet" \
+          "$ROOT/bin/fleet-hibernate" -s cfwake --wake docs-pass --timeout 20 2>&1)"; wrc=$?
+  is "the wake succeeds"                    "0"   "$wrc"
+  is "...and says so"                       "yes" "$(grep -q 'awake' <<<"$wout" && echo yes || echo no)"
+  is "...the session is really there now"   "yes" \
+     "$(tmux -L cfwake has-session -t '=docs-pass' 2>/dev/null && echo yes || echo no)"
+  # A MARKER LEFT BEHIND WOULD MAKE A LIVE SESSION READ AS ASLEEP for ever — the same
+  # stale-marker shape fleet-spawn and fleet-open both clear on the way in.
+  is "...and it is no longer marked asleep" "no"  \
+     "$([ -f "$WK/fleet/cfwake.docs-pass.asleep" ] && echo yes || echo no)"
+  # THE OTHER DIRECTION: waking something that is not asleep must refuse, not invent a
+  # conversation. A missing session looks exactly like a crashed one.
+  nout="$(PATH="$WK/bin:$PATH" CLAUDE_FLEET_DIR="$WK/fleet" \
+          "$ROOT/bin/fleet-hibernate" -s cfwake --wake list-pages --timeout 5 2>&1)"; nrc=$?
+  is "waking one that is not asleep refuses" "yes" "$([ "$nrc" = 0 ] && echo no || echo yes)"
+  is "...and says which"                     "yes" "$(grep -q 'list-pages' <<<"$nout" && echo yes || echo no)"
+  tmux -L cfwake kill-server 2>/dev/null
+  rm -rf "$WK"
+fi
+
+# ── the consumer wakes before it opens ───────────────────────────────────────
+# Source-level, and said so rather than dressed up: the behavioural version means driving
+# bin/ghostfleet's grid_loop, which attaches to a real fleet. What it pins is the shape
+# that was wrong — an attach with no wake in front of it, and a failure that says nothing.
+group "an asleep card wakes before it opens"
+is "the attach path checks the asleep marker" "yes" \
+   "$(grep -q 'asleep' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
+is "...and runs the wake"                     "yes" \
+   "$(grep -q 'fleet-hibernate\" -s \"\$SOCK\" --wake' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
+is "...and a failed wake is reported, not swallowed" "yes" \
+   "$(grep -q 'could not wake' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
+
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
 
 # NAMED, NOT JUST COUNTED. A group that is not applicable on every run is indistinguishable

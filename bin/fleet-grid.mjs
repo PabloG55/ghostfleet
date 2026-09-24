@@ -1020,7 +1020,10 @@ function humanAge(a) {
 const CW = 30; // inner content width
 function cardLines(card, selected, idx) {
   const meta = STATUS[card.status] || STATUS.starting;
-  const color = meta.color;
+  // A SLEEPING CARD IS DRAWN IN THE GREY `parked` AND `idle` ALREADY USE. It is not
+  // running, and a card lit in its last status' colour claims otherwise. No new colour:
+  // this is the palette's own grey, the same one the two other not-working states take.
+  const color = card.asleep ? C.grey : meta.color;
   // 1-9 prefix = the digit that jumps straight to this card (see onKey)
   const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
   // A labelled card is titled by the label; an unlabelled one is unchanged.
@@ -1040,7 +1043,22 @@ function cardLines(card, selected, idx) {
   // already goes, so it is where this belongs.
   //   `⏎ resumes` because the way back is the way in: entering the session lands on the
   // held pane, which is already asking for Enter. No new verb, no new key.
-  const l1 = card.exited
+  // ── AND AN ASLEEP ONE SAYS SO IN THE SAME SLOT, FOR THE SAME REASON ───────
+  // Reported from the desk: a hibernated session drew as `? unknown  5h17m ago`.
+  // `--plain` and `--json` had said `asleep` since the markers were added; the
+  // INTERACTIVE card was the one reader that never asked. It falls out of how the status
+  // is derived — an asleep session has no pane to read and usually no status file left,
+  // so it lands on `unknown`, which is the fleet saying "I cannot tell" about the one
+  // case it can tell exactly.
+  //   THE AGE STAYS ON THIS LINE, unlike the exited card, and that is deliberate rather
+  // than inconsistent: "how long has it been out" is the question you ask of a sleeping
+  // session and not of an exited one. `☾ asleep 5h17m` is 14 columns and `⏎ wakes` is 7,
+  // which fits the 28 this line has with room to spare — measured, because a label that
+  // fits at one width and not another is this file's most repeated bug.
+  const asleepAge = card.age == null ? '' : ` ${humanAge(card.age)}`;
+  const l1 = card.asleep
+    ? `│ ${padEndV(twoCol(`☾ asleep${asleepAge}`, '⏎ wakes', CW - 2), CW - 2)} │`
+    : card.exited
     ? `│ ${padEndV(twoCol('✗ exited', '⏎ resumes', CW - 2), CW - 2)} │`
     : `│ ${padEndV(twoCol(meta.label, right, CW - 2), CW - 2)} │`;
   // Name the agent on the card whenever it isn't the default. Without this an
