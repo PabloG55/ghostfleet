@@ -39,6 +39,34 @@ if [ -z "${CLAUDE_FLEET_HOME:-}" ] && [ -d "$DEST/.git" ]; then
   [ -d "$_rt" ] && [ "$_rt" != "$DEST" ] && DEST="$_rt"
 fi
 
+# WHICH PACKAGE MANAGER builds the phone client: pnpm if present (its lockfile is the one
+# committed), npm otherwise — decided by what is on the machine, not hardcoded.
+#   NEVER A WINDOWS ONE. WSL appends the Windows PATH by default, so a machine with Node
+# installed on the Windows side has /mnt/c/…/npm/pnpm on PATH, and on the one this was
+# measured on it was the ONLY pnpm — `command -v pnpm` found it and preferred it over the
+# Linux npm that could actually build here. Every /mnt/<drive>/ candidate is passed over;
+# `type -aP` lists all of them, so a Linux one later on PATH still wins.
+#   Sets PM (the name, which decides the flags) and PM_BIN (what to run).
+pick_pm() {
+  local n p
+  for n in pnpm npm; do
+    while IFS= read -r p; do
+      case "$p" in /mnt/[a-z]/*) continue ;; esac
+      PM="$n"; PM_BIN="$p"; return 0
+    done < <(type -aP "$n" 2>/dev/null)
+  done
+  return 1
+}
+# `cf-sync --pm` prints that choice and exits, so the suite asks this rule instead of
+# keeping a copy of it that would drift.
+if [ "${1:-}" = --pm ]; then pick_pm && printf '%s\n' "$PM"; exit 0; fi
+# `--deps`: install the build's dependencies when node_modules is missing, instead of
+# refusing. install.sh passes it — somebody who ran the installer from a fresh clone asked
+# for a working install, and "run pnpm install, then re-run" is a step it can take itself.
+# A bare `cf-sync` keeps refusing: there it is a developer's checkout, and a sync that
+# quietly reaches the network is not what that command is for.
+DEPS=0; [ "${1:-}" = --deps ] && { DEPS=1; shift; }
+
 # figure out the SOURCE repo: arg > recorded .source > give up with guidance
 REPO="${1:-}"
 [ -n "$REPO" ] || REPO="$(cat "$DEST/.source" 2>/dev/null || true)"
@@ -145,13 +173,19 @@ if [ -f "$REPO/vite.config.mjs" ] && [ -d "$REPO/web/src" ]; then
   # NOT SYNCED for no reason, and the build itself does not care which one ran it. So:
   # pnpm if present, npm otherwise, and the error names pnpm because that is the one whose
   # lockfile is committed.
-  PM=""
-  command -v pnpm >/dev/null 2>&1 && PM=pnpm
-  [ -z "$PM" ] && command -v npm >/dev/null 2>&1 && PM=npm
+  PM=""; PM_BIN=""
+  pick_pm || true
   if [ -z "$PM" ]; then
     echo "cf-sync: NOT SYNCED — the phone client needs a build and neither pnpm nor npm is on PATH." >&2
     echo "cf-sync: install pnpm (https://pnpm.io/installation), then re-run. Nothing was copied." >&2
     exit 1
+  fi
+  if [ ! -d "$REPO/node_modules" ] && [ "$DEPS" = 1 ]; then
+    echo "cf-sync: installing the phone client's build dependencies with ${PM}…"
+    if [ "$PM" = pnpm ]; then ( cd "$REPO" && "$PM_BIN" install --silent ) || true
+    # --no-package-lock: pnpm-lock.yaml is the committed lock; an npm one would be a stray
+    # untracked file in somebody's clone.
+    else                      ( cd "$REPO" && "$PM_BIN" install --silent --no-audit --no-fund --no-package-lock ) || true; fi
   fi
   if [ ! -d "$REPO/node_modules" ]; then
     # The single likeliest failure, and the one an exit code cannot spell. Name the
@@ -167,7 +201,7 @@ if [ -f "$REPO/vite.config.mjs" ] && [ -d "$REPO/web/src" ]; then
   echo "cf-sync: building the phone client (web/src -> web/) with ${PM}…"
   # A subshell `cd`, not a --prefix/--dir flag: the build writes RELATIVE to the working
   # directory, and this script is run from wherever you happen to be standing.
-  if ! ( cd "$REPO" && "$PM" run --silent build ); then
+  if ! ( cd "$REPO" && "$PM_BIN" run --silent build ); then
     echo "cf-sync: FAILED to build the phone client" >&2
     echo "cf-sync: NOT SYNCED — nothing was copied; the runtime at $DEST is untouched." >&2
     exit 1

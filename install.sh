@@ -36,7 +36,8 @@ ghostfleet installer
                  config dir wired, each MCP registration. Same as CLAUDE_FLEET_VERBOSE=1.
                  The default prints a summary and what to run next; warnings and errors
                  print either way.
-  -y, --yes    Install missing dependencies (tmux, jq) WITHOUT prompting, using the
+  -y, --yes    Install missing dependencies (tmux, jq — and the optional Claude Code,
+               Neovim and LazyVim) WITHOUT prompting, using the
                OS package manager — with sudo on Linux where that needs it. For
                unattended installs (CI, a Dockerfile, `curl | bash`) where there is
                no terminal to ask at. Same as CLAUDE_FLEET_YES=1.
@@ -217,6 +218,115 @@ ensure_pkg() {
 ensure_pkg jq   "this installer edits settings.json and .claude.json with it, and the status hook parses its payload with it"
 ensure_pkg tmux "the grid needs it"
 
+# --- optional: the agent, and the editor behind ^N ---------------------------
+# WHY THE INSTALLER AND NOT THE README. `npx ghostfleet-cli` is the one command people
+# run, and everything it did not install was found later, one failure at a time: no
+# `claude` meant a fleet that opened sessions with nothing in them, and no editor meant
+# ^N — a key the fleet takes over inside every session — answered from inside tmux with
+# `'fleet-tab edit …' returned 1` and nothing else. Measured on a fresh WSL Ubuntu: both
+# missing, both discovered only by pressing things.
+#   OPTIONAL, unlike jq and tmux: a fleet runs without an editor, and without claude when
+# every project uses another agent. So a "no" is final and never an error, and neither
+# offer can fail the install.
+#   ASKED ONLY WHEN SOMEBODY IS WATCHING — stdout a terminal, not just /dev/tty openable.
+# A required dependency has to ask wherever it can (see ensure_pkg), but an optional one
+# asked of a /dev/tty whose output is going to a pipe is a prompt nobody reads: the suite
+# captures this installer with $(…) from a real terminal, and a question there would hang
+# the run. With nobody watching, everything skipped goes on ONE line — the first-install
+# output is held to a screen, and a line per optional item is how that budget goes.
+# 0 = yes, 1 = no, 2 = nobody to ask.
+ask_optional() {
+  [ "$ASSUME_YES" = 1 ] && return 0
+  [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null || return 2
+  local ans=""
+  exec 9<>/dev/tty
+  printf '%s [Y/n] ' "$1" >&9
+  read -r ans <&9 || ans=""
+  exec 9>&- 9<&-
+  case "$ans" in ""|y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
+}
+UNASKED=()   # optional items skipped because nobody could be asked
+
+# Claude Code: the native installer, not `npm install -g`. On a stock Linux node the
+# global prefix is /usr/lib or /usr/local and not writable, so the npm route needs sudo
+# for a tool that has no business being root-owned; the native one lands in ~/.local/bin
+# with no privilege at all.
+if ! command -v claude >/dev/null 2>&1; then
+  CLAUDE_INSTALL='curl -fsSL https://claude.ai/install.sh | bash'
+  rc=0; ask_optional "! claude (Claude Code, the default agent) not found. Install it with: $CLAUDE_INSTALL ?" || rc=$?
+  case $rc in
+    0) if bash -c "$CLAUDE_INSTALL"; then
+         export PATH="$HOME/.local/bin:$PATH"; hash -r
+         echo "✓ claude installed — run \`claude\` once to sign in before starting a session"
+       else echo "! claude install failed — install it yourself: $CLAUDE_INSTALL"; fi ;;
+    1) echo "  Skipped. Install it yourself: $CLAUDE_INSTALL" ;;
+    2) UNASKED+=("Claude Code") ;;
+  esac
+fi
+
+# THE EDITOR ^N OPENS: $CLAUDE_FLEET_EDITOR, then $EDITOR, then nvim — the order
+# bin/fleet-tab resolves it in. Only nvim is ours to install; somebody who named another
+# editor is told it is missing and left to it.
+#   LAZYVIM WANTS NEOVIM >= 0.11.2, and the distro package is not that everywhere:
+# Ubuntu 24.04's apt neovim is 0.9.5 (26.04's is 0.11.6). So on Linux this is the
+# official release tarball, unpacked under ~/.local — current on every distro, no sudo,
+# and nothing for the package manager to fight over. macOS takes brew's, which is current.
+#   The LazyVim starter goes in only where there is NO nvim config at all: an existing
+# ~/.config/nvim is somebody's editor, and replacing it is not an install step.
+NVIM_MIN=0.11.2
+nvim_ok() {
+  local v; v="$(nvim --version 2>/dev/null | head -1 | sed -n 's/^NVIM v\([0-9.]*\).*/\1/p')"
+  [ -n "$v" ] && [ "$(printf '%s\n%s\n' "$NVIM_MIN" "$v" | sort -V | head -1)" = "$NVIM_MIN" ]
+}
+install_nvim() {
+  case "$(uname -s)" in
+    Darwin) command -v brew >/dev/null 2>&1 && brew install neovim && return 0 ;;
+    Linux)
+      local arch; case "$(uname -m)" in x86_64|amd64) arch=x86_64 ;; aarch64|arm64) arch=arm64 ;; *) arch="" ;; esac
+      if [ -n "$arch" ] && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+        local dir="$HOME/.local/nvim-linux-$arch"
+        mkdir -p "$HOME/.local" "$BIN_DIR" \
+          && curl -fsSL "https://github.com/neovim/neovim/releases/latest/download/nvim-linux-$arch.tar.gz" \
+               | tar xz -C "$HOME/.local" \
+          && ln -sf "$dir/bin/nvim" "$BIN_DIR/nvim" && export PATH="$BIN_DIR:$PATH" && hash -r && return 0
+      fi ;;
+  esac
+  return 1
+}
+NVIM_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/nvim"
+ED="${CLAUDE_FLEET_EDITOR:-${EDITOR:-nvim}}"; ED="${ED%% *}"
+if [ "$ED" != nvim ] && [ "${ED##*/}" != nvim ]; then
+  command -v "$ED" >/dev/null 2>&1 \
+    || echo "! $ED (your editor, which ^N opens) is not installed — ^N will say so until it is"
+elif ! nvim_ok || [ ! -e "$NVIM_CFG" ]; then
+  want=()
+  nvim_ok || want+=("Neovim")
+  [ -e "$NVIM_CFG" ] || want+=("LazyVim")
+  what="$(printf '%s + ' "${want[@]}")"; what="${what% + }"
+  rc=0; ask_optional "! ^N opens an editor on a session's folder, and $what is not set up. Install $what now?" || rc=$?
+  case $rc in
+    0)
+      if nvim_ok || install_nvim; then
+        nvim_ok && vsay "✓ neovim $(nvim --version | head -1)"
+        if [ ! -e "$NVIM_CFG" ]; then
+          if git clone -q --depth 1 https://github.com/LazyVim/starter "$NVIM_CFG" 2>/dev/null; then
+            rm -rf "$NVIM_CFG/.git"
+            echo "✓ $what ready for ^N — the first launch downloads LazyVim's plugins, give it a minute"
+          else echo "! could not fetch the LazyVim starter — git clone https://github.com/LazyVim/starter $NVIM_CFG"; fi
+        else echo "✓ neovim ready for ^N (your $NVIM_CFG is untouched)"; fi
+      else
+        echo "! could not install Neovim here — install $NVIM_MIN or newer yourself, or set CLAUDE_FLEET_EDITOR"
+      fi ;;
+    1) if nvim_ok; then echo "  Skipped. ^N will open plain Neovim."
+       else echo "  Skipped. ^N needs an editor: install Neovim $NVIM_MIN+, or set CLAUDE_FLEET_EDITOR."; fi ;;
+    2) UNASKED+=("$what (the editor ^N opens)") ;;
+  esac
+fi
+if [ "${#UNASKED[@]}" -gt 0 ]; then
+  _u="$(printf '%s, ' "${UNASKED[@]}")"
+  echo "· not installed (nobody to ask): ${_u%, } — re-run in a terminal, or with --yes"
+fi
+
 # jq is the one that cannot be deferred: the wiring below is written WITH jq, so a
 # declined or failed install has to stop here rather than half-configure a config dir.
 # tmux can wait — nothing in this script needs it, only the fleet does, later.
@@ -252,9 +362,9 @@ fi
 # FAILURE keep them unconditionally: it prints "the runtime is now a MIX of old and new
 # code, do not trust it" to stderr, and that must never be something a quiet mode ate.
 if [ "$VERBOSE" = 1 ]; then
-  CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" "$REPO"
+  CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO"
 else
-  _sync_out="$(CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" "$REPO")" \
+  _sync_out="$(CLAUDE_FLEET_HOME="$FLEET_HOME" "$REPO/bin/cf-sync" --deps "$REPO")" \
     || printf '%s\n' "$_sync_out"
 fi
 if [ -n "$KEEP_SOURCE" ]; then

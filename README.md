@@ -115,20 +115,20 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | requirement | why |
 | --- | --- |
 | `git` | worktrees **are** the isolation model — a worker is a checkout on its own branch. `fleet-spawn` refuses to run without it |
-| `claude` ([Claude Code](https://github.com/anthropics/claude-code)) | what a session runs by default, and what the pane detectors are written against |
+| `claude` ([Claude Code](https://github.com/anthropics/claude-code)) | what a session runs by default, and what the pane detectors are written against — missing? the installer offers Claude Code's native installer (into `~/.local/bin`, no `sudo`) |
 | `node` (v18+) | the grid is a zero-npm-dependency Node TUI |
 | `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below). With no terminal attached it has nobody to ask, so a piped or CI install prints the command instead — pass `--yes` there and it installs without prompting |
 | `jq` | the installer wires the hooks and MCP entries with it, and the status hook parses its payload with it. **macOS 26 already ships it** (`/usr/bin/jq`); anywhere it is missing the installer offers to install it |
 | macOS, Linux, or **Windows via WSL2** | sessions are tmux servers, and tmux is POSIX-only — see the native-Windows note below |
 | `codex` / `opencode` (optional) | alternative agents, chosen per worktree on the `w` form. Their pane signals are detected separately — see [docs/multi-agent-sessions.md](docs/multi-agent-sessions.md) |
-| `$EDITOR` (optional, default `nvim .`) | what `Ctrl-n`'s editor tab opens. Any editor works — override with `CLAUDE_FLEET_EDITOR`. No particular Neovim distribution is involved; if `nvim` isn't installed, set the variable to what you use |
+| `$EDITOR` (optional, default `nvim .`) | what `Ctrl-n`'s editor tab opens. Any editor works — override with `CLAUDE_FLEET_EDITOR`. With neither set and no Neovim new enough for LazyVim (0.11.2+), the installer offers the official Neovim release (under `~/.local`) and, only where there is no `~/.config/nvim` yet, the LazyVim starter |
 | `tailscale` (optional) | **only** for the phone client, and only off-LAN: it is how `fleet-serve` is reachable without exposing a port — see [docs/mobile.md](docs/mobile.md) |
 | `zellij` (optional) | not required, but the included layout gives you one pane that frees `Ctrl-s`/arrows from its own bindings |
 | `terminal-notifier` + [AeroSpace](https://github.com/nikitabobko/AeroSpace) (optional, macOS) | for **clickable** notifications that jump straight to the fleet — see [Notifications](docs/OPERATIONS.md#notifications) |
 
 *(Native Windows isn't supported and won't be: sessions are tmux servers, and tmux is
-POSIX-only. Under WSL2 it's just Linux and works the same — that path is untested by
-me, so file an issue if something bites.)*
+POSIX-only. Under WSL2 it's just Linux and works the same — [docs/windows.md](docs/windows.md)
+is the whole path, from a bare Windows machine to an open fleet.)*
 
 ## Install
 

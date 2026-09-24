@@ -335,6 +335,47 @@ add_project() {                    # <path> <name> -> 0 if the list now has it
   return 1
 }
 
+# THE FOLDER BROWSER'S ANSWER, as a directory. It answers `newproject<US><dir>` for a folder
+# you picked, or `clone<US><repo><US><into>` for one it should clone first (the `c` key).
+# The clone runs HERE, not in the browser: that screen is a raw-mode TUI, and git can stop
+# to ask for a password or accept a host key — a prompt under the alternate buffer is one
+# nobody sees, and the clone would sit there looking like a frozen screen.
+#   owner/repo goes through `gh repo clone` when gh is signed in, so a PRIVATE repo works
+# with the credentials already set up for it; otherwise it is an https GitHub URL, which
+# is what a public repo needs and what a private one will ask a password for, visibly.
+#   A destination that already holds a git checkout is used as it is rather than refused:
+# somebody who cloned it last week and forgot is asking for that project, and "fatal:
+# destination path already exists" would be an error about having done it right.
+# Prints the directory on stdout; returns 1 (having said why) when there is none.
+pick_to_dir() {                    # <browser output> -> dir
+  local r="$1" repo into dest name
+  case "$r" in
+    newproject${US}*) r="${r#newproject${US}}"; [ -d "$r" ] && printf '%s' "$r"; return ;;
+    clone${US}*${US}*) ;;
+    *) return 1 ;;
+  esac
+  r="${r#clone${US}}"; repo="${r%%${US}*}"; into="${r#*${US}}"
+  name="${repo%/}"; name="${name##*/}"; name="${name##*:}"; name="${name%.git}"
+  [ -n "$name" ] && [ -d "$into" ] || { _fail "could not clone '$repo'" "no folder to clone it into"; return 1; }
+  dest="$into/$name"
+  if [ -e "$dest/.git" ]; then printf '%s' "$dest"; return 0; fi
+  _clear
+  printf '\033[1m  cloning %s\033[0m  \033[38;5;245m-> %s\033[0m\n\n' "$repo" "${dest/#$HOME/\~}" >/dev/tty 2>/dev/null
+  local ok=1
+  case "$repo" in
+    *://*|git@*|/*|\~*) git clone -- "${repo/#\~/$HOME}" "$dest" </dev/tty >/dev/tty 2>&1 && ok=0 ;;
+    */*)
+      if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+        gh repo clone "$repo" "$dest" </dev/tty >/dev/tty 2>&1 && ok=0
+      else
+        git clone -- "https://github.com/$repo.git" "$dest" </dev/tty >/dev/tty 2>&1 && ok=0
+      fi ;;
+  esac
+  [ "$ok" = 0 ] && [ -d "$dest" ] && { _clear; printf '%s' "$dest"; return 0; }
+  _fail "could not clone '$repo'" "git's own message is above — press a key to go back"
+  return 1
+}
+
 # select a project: export everything the grid/hooks/sessions key off
 set_project() {
   PROJECT="$1"
@@ -802,10 +843,11 @@ while true; do
     sel="$(node "$GRID" - --screen projects --select "$LAST_PROJECT" </dev/tty)" || true; _clear
     case "$sel" in
       "") break ;;                                   # quit
-      addproject)
-        p="$(node "$GRID" - --screen addproject </dev/tty)" || true; _clear
-        p="${p#newproject${US}}"
-        if [ -n "$p" ] && [ "$p" != "newproject" ] && [ -d "$p" ]; then
+      addproject|clonerepo)
+        # clonerepo is `c` on the add card: the same browser, opened on its clone box.
+        p="$(node "$GRID" - --screen addproject $([ "$sel" = clonerepo ] && echo --clone) </dev/tty)" || true; _clear
+        p="$(pick_to_dir "$p")" || p=""
+        if [ -n "$p" ] && [ -d "$p" ]; then
           nm="$(basename "$p")"
           add_project "$p" "$nm" && set_project "$nm"
         fi ;;
@@ -817,10 +859,10 @@ while true; do
       # a Claude session that has to boot before it shows anything, whereas the grid is
       # where `n` lives — the key step 3 just promised. Landing on master would answer a
       # screen that says "press n" with a screen that has no n.
-      firstproject)
-        p="$(node "$GRID" - --screen addproject </dev/tty)" || true; _clear
-        p="${p#newproject${US}}"
-        if [ -n "$p" ] && [ "$p" != "newproject" ] && [ -d "$p" ]; then
+      firstproject|firstclone)
+        p="$(node "$GRID" - --screen addproject $([ "$sel" = firstclone ] && echo --clone) </dev/tty)" || true; _clear
+        p="$(pick_to_dir "$p")" || p=""
+        if [ -n "$p" ] && [ -d "$p" ]; then
           nm="$(node "$GRID" - --screen nameproject --select "$p" </dev/tty)" || true; _clear
           # Test for the SEPARATOR, never for emptiness: `${x#*$US}` on a string WITHOUT
           # one returns it unchanged, so a cancelled screen (empty output) would otherwise

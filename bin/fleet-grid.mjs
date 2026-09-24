@@ -2927,6 +2927,18 @@ function reorderProject(name, delta) {
 // every step — a hand-edited or half-written serve.json must leave this saying "not set up"
 // rather than taking the screen down with it (CLAUDE.md: a ReferenceError here kills the
 // whole pane).
+// THE SAME EDITOR fleet-tab will run: $CLAUDE_FLEET_EDITOR, then $EDITOR, then nvim, first
+// word only (an EDITOR of `code -w` is `code`). Memoised like phoneReady — a PATH walk per
+// 2.5s redraw buys nothing.
+function editorName() { return (process.env.CLAUDE_FLEET_EDITOR || process.env.EDITOR || 'nvim').trim().split(/\s+/)[0]; }
+let _editorFound = null;
+function editorFound() {
+  if (_editorFound !== null) return _editorFound;
+  const ed = editorName();
+  const dirs = ed.includes('/') ? [''] : (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  _editorFound = dirs.some(d => { try { fs.accessSync(d ? path.join(d, ed) : ed, fs.constants.X_OK); return true; } catch { return false; } });
+  return _editorFound;
+}
 let _phoneReady = null;
 function phoneReady() {
   if (_phoneReady !== null) return _phoneReady;
@@ -2953,7 +2965,11 @@ function pRenderFirstRun() {
   buf += '\x1b[K\n';
   const armed = pQuitArmed && Date.now() - pQuitArmed < QUIT_WINDOW;
   const quit = armed ? `${C.yellow}${C.bold}press ⌃C again to quit${C.reset}${C.dim}` : '⌃C ⌃C quit';
-  buf += `${C.dim} ⏎ start · ${quit}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ start · c clone a repo instead · ${quit}${C.reset}\x1b[K\n\x1b[K\n`;
+  // ^N opens the editor on a session's folder, and without one it fails from inside tmux
+  // with nothing but `returned 1` — on a first install, where nobody knows ^N is ours.
+  // Said here once, before it is pressed, rather than after.
+  if (!editorFound()) buf += ` ${C.yellow}No editor for ^N:${C.reset}${C.dim} '${editorName()}' is not installed — re-run the installer to add Neovim, or set CLAUDE_FLEET_EDITOR.${C.reset}\x1b[K\n`;
   buf += ` ${C.dim}Just looking? ${C.reset}ghostfleet demo${C.dim} builds three throwaway projects to explore — it touches nothing of yours.${C.reset}\x1b[K\n`;
   // ONLY WHEN IT IS USEFUL. Somebody who enrolled a phone months ago does not need to be
   // told this every time they empty their projects list, and a first-run screen that
@@ -2979,7 +2995,7 @@ function pRender() {
     const row = pItems.slice(i, i + nc);
     const lines = row.map((it, j) => {
       const sel = i + j === pSel;
-      if (it.add) return boxCard('+ add project', ['choose a root', 'folder…', ''], C.yellow, sel);
+      if (it.add) return boxCard('+ add project', ['choose a root', 'folder…', 'c clone a repo'], C.yellow, sel);
       const st = projectStatus(it.project);
       let line, color;
       if (st.need > 0) { line = `● ${st.need} need you`; color = C.red; }
@@ -3145,6 +3161,7 @@ function onKeyProjects(key) {
   // ⌃C handling above on purpose: quitting must work from here too.
   if (pFirstRun) {
     if (key === '\r' || key === '\n' || key === ' ') return finish('firstproject');
+    if (key === 'c' || key === 'C') return finish('firstclone');
     pRender(); return;
   }
   if (key === '\x1b[A' || key === 'k') pMove('up');
@@ -3162,6 +3179,7 @@ function onKeyProjects(key) {
     }
   }
   else if (key === 'x') { const it = pItems[pSel]; if (it?.project) pConfirmRemove = it.project.name; }
+  else if (key === 'c' || key === 'C') { if (pItems[pSel]?.add) return finish('clonerepo'); }
   else if (key === 's' || key === 'S') {
     const it = pItems[pSel];
     if (it?.project) { pSchedFor = { proj: it.project, sock: sockOf(it.project), dir: path.join(profileDir(it.project.profile), 'fleet') }; pSchedInput = ''; }
@@ -3209,7 +3227,29 @@ function dBuild() {
   dirEntries = ['..', ...subs];
   dSel = Math.max(0, Math.min(dSel, dirEntries.length - 1));
 }
+// CLONE FROM HERE. The browser only ever registered a folder that already existed, so a
+// repo you had not cloned yet meant leaving ghostfleet for a shell, cloning, and coming
+// back to find it — on a fresh machine, which is exactly when there is nothing to pick.
+// `c` asks for a URL or owner/repo and clones it INTO the folder on screen, so choosing
+// where it lands is the navigation you were already doing.
+//   The clone itself is NOT run here. This screen is on the alternate buffer in raw mode,
+// and git can ask for a username, a password or a host key: a prompt drawn under a TUI
+// is a prompt nobody sees, and a clone that hangs on it looks like a frozen screen. The
+// answer goes back to bin/ghostfleet, which runs git on the ordinary terminal.
+let dCloning = false, dCloneInput = '', dMsg = '';
+const CLONE_OK = /^(https?:\/\/|ssh:\/\/|git@|file:\/\/|\/|~)|^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+function dRenderClone() {
+  let buf = '\x1b[H';
+  buf += ` ${C.bold}clone a repo${C.reset} ${C.dim}— it becomes the project${C.reset}\x1b[K\n`;
+  buf += ` ${C.dim}into${C.reset} ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` repo:  ${C.bold}${dCloneInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += (dMsg ? ` ${C.red}${dMsg}${C.reset}` : '') + '\x1b[K\n';
+  buf += ` ${C.dim}a URL (https://… or git@…), or ${C.reset}owner/repo${C.dim} for GitHub${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += `${C.dim} ⏎ clone it · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
 function dRender() {
+  if (dCloning) return dRenderClone();
   let buf = '\x1b[H';
   buf += ` ${C.bold}add project${C.reset} ${C.dim}— pick a root folder (holds your checkouts/worktrees)${C.reset}\x1b[K\n`;
   buf += ` ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
@@ -3221,10 +3261,30 @@ function dRender() {
     const e = dirEntries[i], sel = i === dSel;
     buf += `${sel ? `${C.bold}${C.green}▸ ` : '  '}${e === '..' ? '../' : e + '/'}${sel ? C.reset : ''}\x1b[K\n`;
   }
-  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · s select THIS folder · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
+  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · s select THIS folder · c clone a repo here · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
+function onKeyClone(key) {
+  if (key === '\x03') return finish('');
+  if (key === '\x1b' || key === '\x60') { dCloning = false; dMsg = ''; return dRender(); }
+  if (key === '\r' || key === '\n') {
+    const v = dCloneInput.trim();
+    if (!v) { dMsg = 'type a URL or owner/repo'; return dRender(); }
+    if (!CLONE_OK.test(v)) { dMsg = `'${v}' is not a URL or owner/repo`; return dRender(); }
+    return finish(`clone${US}${v}${US}${curDir}`);
+  }
+  if (key === '\x7f' || key === '\b') { dCloneInput = dCloneInput.slice(0, -1); dMsg = ''; }
+  else {
+    // A URL is the thing people paste, and a paste is one multi-character read — the
+    // same reason onKeyName filters instead of testing key.length.
+    const t = (!key || key.startsWith('\x1b')) ? '' : [...key].filter(ch => ch > ' ' && ch !== '\x7f').join('');
+    if (t) { dCloneInput += t; dMsg = ''; }
+  }
+  dRender();
+}
 function onKeyAdd(key) {
+  if (dCloning) return onKeyClone(key);
+  if (key === 'c' || key === 'C') { dCloning = true; dCloneInput = ''; dMsg = ''; return dRender(); }
   if (key === '\x1b' || key === '\x03' || key === '\x60') return finish('');
   if (key === '\x1b[A' || key === 'k') dSel = Math.max(0, dSel - 1);
   else if (key === '\x1b[B' || key === 'j') dSel = Math.min(dirEntries.length - 1, dSel + 1);
@@ -3468,6 +3528,13 @@ if (SCREEN === 'projects') {
   pBuild(); pRender(); process.stdin.on('data', onKeyProjects);
   timer = setInterval(() => { pBuild(); pRender(); }, 2500);
 } else if (SCREEN === 'addproject') {
+  // --clone opens straight on the clone box (the `c` key on the add card). It starts in
+  // ~/projects when there is one, since that is where a clone usually goes and HOME
+  // almost never is; esc still drops you into the browser to pick somewhere else.
+  if (process.argv.includes('--clone')) {
+    dCloning = true;
+    try { if (fs.statSync(path.join(HOME, 'projects')).isDirectory()) curDir = path.join(HOME, 'projects'); } catch {}
+  }
   dBuild(); dRender(); process.stdin.on('data', onKeyAdd);
 } else if (SCREEN === 'nameproject') {
   // --select carries the folder the browser landed on; the basename pre-fills the box so

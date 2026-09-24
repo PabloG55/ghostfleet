@@ -132,7 +132,8 @@ if ! T has-session -t "=$NAME" 2>/dev/null; then
   if [ "$KIND" = edit ]; then
     ED="${CLAUDE_FLEET_EDITOR:-${EDITOR:-nvim}}"
     command -v "${ED%% *}" >/dev/null 2>&1 || {
-      T display-message "fleet-tab: '${ED%% *}' not found — set CLAUDE_FLEET_EDITOR" 2>/dev/null
+      # -d: tmux's default display-time is under a second, too short to read a fix in.
+      T display-message -d 6000 "fleet-tab: '${ED%% *}' not found — re-run the ghostfleet installer to add Neovim, or set CLAUDE_FLEET_EDITOR" 2>/dev/null
       exit 1; }
     # `.` so it opens ON the folder (a file browser), not an empty buffer that gives no
     # clue which worktree you landed in.

@@ -1302,8 +1302,76 @@ else
   # is and not that `n` is how you get one.
   hint="$(pscr "cfnosuchfleet" "$ROOT/tmux/cf.tmux.conf")"
   is "an empty grid says which key to press" "yes" "$(grep -q 'press n to start your first session' <<<"$hint" && echo yes || echo no)"
+  # ^N WITH NO EDITOR answered from inside tmux with a bare `returned 1`, on a first install
+  # where nobody knows ^N is ours. The first-run screen says so before it is pressed — and
+  # ONLY then: both directions, because a line that always shows is one people read past.
+  # pscr starts a FRESH tmux server, so the variable reaches the screen through its env.
+  : > "$ET/.config/ghostfleet/projects"
+  noed="$(CLAUDE_FLEET_EDITOR=gf-no-such-editor pscr --screen projects)"
+  is "no editor: the first-run screen says ^N has none" "yes" "$(grep -q "No editor for ^N: 'gf-no-such-editor'" <<<"$noed" && echo yes || echo no)"
+  haved="$(CLAUDE_FLEET_EDITOR=cat pscr --screen projects)"
+  is "...and an editor that exists says nothing"        "no"  "$(grep -q 'No editor for' <<<"$haved" && echo yes || echo no)"
+  is "...and it offers the clone as a way in"            "yes" "$(grep -q 'c clone a repo instead' <<<"$haved" && echo yes || echo no)"
   rm -rf "$ET"
 fi
+
+# ── cloning a repo from the add-project browser ──────────────────────────────
+# The browser only ever registered a folder that already existed, so a repo you had not
+# cloned yet meant leaving for a shell. `c` asks for a URL or owner/repo; the SCREEN only
+# answers with a record, and bin/ghostfleet's pick_to_dir runs git on the real terminal
+# (a credential prompt under a raw-mode TUI is a prompt nobody sees). Both halves here.
+group "the add-project browser clones a repo"
+CL="$(mktemp -d)"
+mkdir -p "$CL/home/projects" "$CL/into"
+clscreen() {   # $1 = extra args, then keys… -> what the screen answered
+  local extra="$1"; shift
+  tmux -L cfclone kill-server 2>/dev/null
+  tmux -L cfclone new-session -d -x 110 -y 24 -e HOME="$CL/home" \
+    "node '$ROOT/bin/fleet-grid.mjs' - --screen addproject $extra > '$CL/out'; sleep 8" 2>/dev/null
+  sleep 1.5
+  for k in "$@"; do
+    case "$k" in @*) tmux -L cfclone send-keys "${k#@}" ;; *) tmux -L cfclone send-keys -l "$k" ;; esac
+    sleep 0.3
+  done
+  # To a FILE: this runs under $(…), and a variable set in that subshell never reaches
+  # the assertion that reads it.
+  tmux -L cfclone capture-pane -p > "$CL/pane" 2>/dev/null
+  sleep 0.5; tmux -L cfclone kill-server 2>/dev/null
+  tr '\037' '|' < "$CL/out"
+}
+is "--clone opens on the repo box, in ~/projects" "clone|acme/acme-api|$CL/home/projects" \
+   "$(clscreen --clone acme/acme-api @Enter)"
+got="$(clscreen --clone 'not a repo' @Enter)"
+is "...and refuses what is neither URL nor owner/repo" "" "$got"
+is "...saying why, on the screen"                       "yes" "$(grep -q 'is not a URL or owner/repo' "$CL/pane" && echo yes || echo no)"
+is "c in the folder browser opens the same box"          "clone|https://example.invalid/acme-web.git|$CL/home" \
+   "$(clscreen '' c 'https://example.invalid/acme-web.git' @Enter)"
+is "...and esc goes back to the folders, not out"        "yes" \
+   "$(clscreen '' c @Escape >/dev/null; grep -q 'pick a root folder' "$CL/pane" && echo yes || echo no)"
+# The shell half, lifted out of bin/ghostfleet the way the MCP registrars are lifted out of
+# install.sh. It reads /dev/tty, so it runs in a pane rather than under $(…).
+git init -q "$CL/acme-api" && git -C "$CL/acme-api" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+{ printf 'US=$%s\n' "'\\x1f'"
+  sed -n '/^_clear() {/p' "$ROOT/bin/ghostfleet"
+  sed -n '/^_fail() {/,/^}/p' "$ROOT/bin/ghostfleet"
+  sed -n '/^pick_to_dir() {/,/^}/p' "$ROOT/bin/ghostfleet"; } > "$CL/lib.sh"
+cat > "$CL/t.sh" <<EOT
+. "$CL/lib.sh"
+x="\$(pick_to_dir "clone\${US}$CL/acme-api\${US}$CL/into")";    echo "local|\$x|\$?" >> "$CL/res"
+x="\$(pick_to_dir "clone\${US}$CL/acme-api/\${US}$CL/into")";   echo "again|\$x|\$?" >> "$CL/res"
+x="\$(pick_to_dir "newproject\${US}$CL/into")";                  echo "picked|\$x|\$?" >> "$CL/res"
+x="\$(pick_to_dir "")";                                          echo "cancel|\$x|\$?" >> "$CL/res"
+echo done >> "$CL/res"
+EOT
+tmux -L cfclone new-session -d -x 110 -y 24 "bash '$CL/t.sh'" 2>/dev/null
+for _ in $(seq 40); do grep -q '^done' "$CL/res" 2>/dev/null && break; sleep 0.25; done
+tmux -L cfclone kill-server 2>/dev/null
+is "a clone lands in the folder, named after the repo" "local|$CL/into/acme-api|0"  "$(grep '^local|'  "$CL/res" 2>/dev/null)"
+is "...and is a real checkout"                         "yes" "$([ -d "$CL/into/acme-api/.git" ] && echo yes || echo no)"
+is "an existing checkout is reused, not refused"       "again|$CL/into/acme-api|0" "$(grep '^again|'  "$CL/res" 2>/dev/null)"
+is "a picked folder passes straight through"           "picked|$CL/into|0"         "$(grep '^picked|' "$CL/res" 2>/dev/null)"
+is "a cancelled browser answers nothing"               "cancel||1"                 "$(grep '^cancel|' "$CL/res" 2>/dev/null)"
+rm -rf "$CL"
 
 # ── what the installer says before you have seen anything ────────────────────
 # The old ending handed over to an empty screen: it said `ghostfleet`, which on a
@@ -1325,7 +1393,16 @@ else
   cp -Rp "$ROOT"/bin "$ROOT"/lib "$ROOT"/tmux "$ROOT"/hooks "$ROOT"/mcp "$ROOT"/skill \
          "$ROOT"/layouts "$ROOT"/web "$ROOT"/install.sh "$IR/src/" 2>/dev/null
   mkdir -p "$IR/h/.claude"
-  inst() { env HOME="$IR/h" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" \
+  # XDG_CONFIG_HOME TOO, NOT JUST HOME. install.sh reads the editor's config from
+  # ${XDG_CONFIG_HOME:-$HOME/.config}, which is the correct thing for it to do and the
+  # reason faking $HOME alone does not isolate this fixture: GitHub's ubuntu runners
+  # export XDG_CONFIG_HOME=/home/runner/.config, so the "existing nvim config" case looked
+  # at the RUNNER's config dir — where there is no nvim — and the installer offered
+  # LazyVim again. Red on ubuntu, green on macOS, and nothing wrong with the installer:
+  # this is CLAUDE.md's "a test can pass because of where it ran", arriving through an
+  # environment variable instead of a temp directory. Set on every call here, not only the
+  # editor one, because the same expansion picks the opencode config dir two steps later.
+  inst() { env HOME="$IR/h" XDG_CONFIG_HOME="$IR/h/.config" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" \
                PATH="$IR/h/bin:$PATH" "$IR/src/install.sh" "$@" 2>&1; }
   first="$(inst)"
   # The number is the claim, so it is the assertion. Generous by design — this is "a
@@ -1362,9 +1439,29 @@ else
   # installer exits at its first requirement check, long before the line under test — a
   # green "no warning" that proves only that the probe broke. All this needs is for
   # BIN_DIR to be absent from PATH, which it is, because inst() is what puts it there.
-  warn="$(env HOME="$IR/h" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" \
+  warn="$(env HOME="$IR/h" XDG_CONFIG_HOME="$IR/h/.config" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" \
               "$IR/src/install.sh" 2>&1)"
   is "a PATH warning survives quiet mode"   "yes" "$(grep -q 'is not on your PATH' <<<"$warn" && echo yes || echo no)"
+  # THE EDITOR BEHIND ^N. A fake nvim first on PATH stands in for the real one, so the
+  # answer does not depend on what this machine happens to have installed. Nobody can be
+  # asked here (stdout is captured), so a missing piece is ONE summary line, never a prompt.
+  mkdir -p "$IR/fake"
+  fakenvim() { printf '#!/bin/sh\necho "NVIM v%s"\n' "$1" > "$IR/fake/nvim"; chmod +x "$IR/fake/nvim"; }
+  edinst() { env HOME="$IR/h" XDG_CONFIG_HOME="$IR/h/.config" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" EDITOR= CLAUDE_FLEET_EDITOR= \
+               PATH="$IR/fake:$IR/h/bin:$PATH" "$IR/src/install.sh" 2>&1; }
+  fakenvim 0.9.5; rm -rf "$IR/h/.config/nvim"
+  old="$(edinst)"
+  is "an nvim too old for LazyVim is offered, on one line" "yes" "$(grep -q 'not installed (nobody to ask):.*Neovim + LazyVim' <<<"$old" && echo yes || echo no)"
+  is "...and nobody is prompted"                            "no"  "$(grep -q 'Y/n' <<<"$old" && echo yes || echo no)"
+  fakenvim 0.11.6
+  cur="$(edinst)"
+  is "a current nvim with no config offers LazyVim only"    "yes" "$(grep -q 'nobody to ask):.*LazyVim' <<<"$cur" && ! grep -q 'Neovim +' <<<"$cur" && echo yes || echo no)"
+  mkdir -p "$IR/h/.config/nvim"
+  set="$(edinst)"
+  is "...and an existing config is left alone, silently"    "no"  "$(grep -qi 'lazyvim\|neovim' <<<"$set" && echo yes || echo no)"
+  named="$(env HOME="$IR/h" XDG_CONFIG_HOME="$IR/h/.config" CLAUDE_FLEET_HOME="$IR/h/rt" CLAUDE_FLEET_BIN="$IR/h/bin" CLAUDE_FLEET_EDITOR=gf-no-such-editor \
+               PATH="$IR/h/bin:$PATH" "$IR/src/install.sh" 2>&1)"
+  is "a named editor that is missing is reported, not replaced" "yes" "$(grep -q 'gf-no-such-editor (your editor' <<<"$named" && ! grep -q 'LazyVim' <<<"$named" && echo yes || echo no)"
   rm -rf "$IR"
 fi
 
@@ -2666,6 +2763,14 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "...and it still fails loudly"       "1" "$([ "$SWRC" = 0 ] && echo 0 || echo 1)"
 
   # ── the real one: a wrong-platform agent binary, through the real launcher chain ──
+  # NOT UNDER WSL INTEROP. There an MZ header is not the wrong platform at all: binfmt_misc
+  # hands the file to Windows, which pops an "Unsupported 16-Bit Application" dialog on the
+  # desktop and keeps the process alive while it waits for OK — so the spawn really did
+  # start, the assertions below went red, and every suite run on WSL left a dialog behind.
+  # The case still runs on macOS and plain Linux, which is where it can mean anything.
+  if grep -qs '^enabled' /proc/sys/fs/binfmt_misc/WSLInterop; then
+  skip "a wrong-platform claude" "a wrong-platform binary is not available under WSL interop — an MZ file runs on Windows"
+  else
   spawnsw winbin "$TMUX_TMPDIR"
   is "a wrong-platform claude fails"      "1" "$([ "$SWRC" = 0 ] && echo 0 || echo 1)"
   is "...and does NOT say started"        "0" "$(printf '%s' "$SWOUT" | grep -c "started 'w1'" || true)"
@@ -2674,6 +2779,7 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "...and how to check it"             "1" \
      "$(printf '%s' "$SWOUT" | grep -c -- "claude --version" || true)"
   is "...and leaves NO manifest row"      "0" "$(mfrow)"
+  fi
 
   # THE CHECK IS BY SESSION ID AND WITHOUT -t, because a session NAME can be tmux TARGET
   # SYNTAX (a leading `+` is an expression, and which session it resolves to is
@@ -5878,6 +5984,26 @@ if command -v tmux >/dev/null 2>&1; then
   is "C-n opens an edit tab"     "1" "$(rk C-n | grep -c 'fleet-tab edit' || true)"
   is "C-x opens the stack"       "1" "$(rk C-x | grep -c 'printf stack' || true)"
   tmux -L cftabk kill-server 2>/dev/null
+  # C-n INSIDE THE EDITOR BELONGS TO THE EDITOR (completion-next in Neovim). A binding only
+  # fires on a CLIENT's keystroke — `send-keys` into the pane bypasses the key table — so
+  # this attaches a real client from inside a second server and types into THAT. Both
+  # directions: a guard that swallowed every C-n would pass the editor half alone.
+  KB="$(mktemp -d)"
+  printf '#!/bin/sh\necho "$1 $4" >> "%s/log"\n' "$KB" > "$KB/fleet-tab"; chmod +x "$KB/fleet-tab"
+  tmux -L cftabk -f "$ROOT/tmux/cf.tmux.conf" new-session -d -s api-2 'cat -v' 2>/dev/null
+  tmux -L cftabk set -g @cf_bin "$KB" 2>/dev/null
+  tmux -L cftabk new-session -d -s _edit-api-2 'cat -v' 2>/dev/null
+  tmux -L cftabk set -t _edit-api-2 @cf_tab_kind edit 2>/dev/null
+  tmux -L cftabo kill-server 2>/dev/null
+  tmux -L cftabo new-session -d -x 100 -y 20 "TMUX= tmux -L cftabk attach -t api-2" 2>/dev/null
+  sleep 1; tmux -L cftabo send-keys C-n; sleep 0.7
+  is "C-n in a session runs fleet-tab"        "edit api-2" "$(cat "$KB/log" 2>/dev/null)"
+  : > "$KB/log"; tmux -L cftabk switch-client -t '=_edit-api-2' 2>/dev/null; sleep 0.5
+  tmux -L cftabo send-keys C-n; sleep 0.7
+  is "...but in the editor tab it reaches the editor" "yes" \
+     "$(grep -q '\^N' <<<"$(tmux -L cftabk capture-pane -p -t _edit-api-2 2>/dev/null)" && echo yes || echo no)"
+  is "...and runs nothing"                    "" "$(cat "$KB/log" 2>/dev/null)"
+  tmux -L cftabk kill-server 2>/dev/null; tmux -L cftabo kill-server 2>/dev/null; rm -rf "$KB"
 else
   skip "tab bindings" "tmux not available"
 fi
@@ -9681,7 +9807,7 @@ is "...and names the missing directory"  "1"   "$(printf '%s' "$out_nm" | grep -
 # The hint names the manager that will actually run, and the FLAG differs between them
 # (pnpm --dir, npm --prefix). Printing the other one's flag is worse than printing none: it
 # is a command that looks right and fails. Asserted against whichever is on this machine.
-_pmhint='npm install --prefix'; command -v pnpm >/dev/null 2>&1 && _pmhint='pnpm install --dir'
+_pmhint='npm install --prefix'; [ "$("$ROOT/bin/cf-sync" --pm)" = pnpm ] && _pmhint='pnpm install --dir'
 is "...and the command that fixes it"    "1"   "$(printf '%s' "$out_nm" | grep -c "$_pmhint" || true)"
 # THE POINT OF FAILING EARLY. A partial copy is the state that runs half-new code, so a
 # build that cannot run must not get as far as rsync — not even for the dirs it could do.
@@ -10648,9 +10774,9 @@ if [ -d "$ROOT/web" ]; then
   # stays wrong for months. Same shape as bin/cf-sync's own hint, which already picks the
   # manager that will really run and prints ITS flag, because printing the other one's is a
   # command that looks right and fails.
-  PMB=""
-  command -v pnpm >/dev/null 2>&1 && PMB=pnpm
-  [ -z "$PMB" ] && command -v npm >/dev/null 2>&1 && PMB=npm
+  # Asked of cf-sync, the one place that decides it — including passing over a Windows
+  # pnpm that WSL puts on PATH, which cannot build here.
+  PMB="$("$ROOT/bin/cf-sync" --pm)"
   if [ ! -f "$ROOT/vite.config.mjs" ]; then
     skip "the committed build matches its source" "no vite.config.mjs"
   elif [ -z "$PMB" ]; then

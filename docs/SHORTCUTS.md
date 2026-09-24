@@ -51,6 +51,7 @@ control plane).
 | `Ctrl-t` / `Ctrl-n` | a **terminal / editor** at that project's root, without booting its master first |
 | `Ctrl-x` | that project's **stack** screen |
 | `+ add project` → `⏎` | browse to a root folder that holds your checkouts/worktrees |
+| `+ add project` → `c` | **clone a repo** (URL, or `owner/repo` for GitHub) into `~/projects` and add it as the project |
 | `x` | remove a project from the list (sessions + history untouched) |
 | digit `1`-`9` | jump straight to the project at that position |
 
@@ -288,6 +289,7 @@ created, so this takes effect on the next one.
 | `→` / `l` / `⏎` | enter the selected folder |
 | `←` / `h` | go up one level (parent folder) |
 | `s` / `S` | **select THIS folder** as the project root (not a subfolder — the one you're looking at) |
+| `c` / `C` | **clone a repo here** — type a URL or `owner/repo`, `⏎` clones it into the folder on screen (on the real terminal, so git can ask for credentials) and adds the clone as the project. `Esc` goes back to the folders |
 | `Esc` / `` ` `` / `Ctrl-C` | cancel |
 
 [CODE] — the README only says "`+ add project` browses to a root folder", without
