@@ -1,6 +1,6 @@
 ---
 name: ghostfleet-orchestrate
-description: Coordinate, spawn, observe, unblock, and budget sibling Claude Code sessions in the same ghostfleet (parallel git worktrees). Use when you are a "lead"/master session dividing work across siblings — see which worktrees are free and REUSE one before creating another, dispatch a prompt to a worker, list the fleet, read a worker's output, check who needs you, unblock a worker stuck on a prompt, or park/resume workers to control cost. USE THIS FOR ANY MENTION OF A WORKTREE IN A FLEET SESSION — "start a worktree", "make/create a worktree", "spin up a worktree", "worktree this", "start a wrotree" and every other typo of it. In a ghostfleet session that ALWAYS means a ghostfleet worktree (a sibling of the repo, run by a NEW session), never Claude Code's built-in EnterWorktree tool, which would move THIS session into <repo>/.claude/worktrees/ and abandon the thread the user is talking to. Other triggers: "spin up a worker for X", "work on a worktree to fix Y", "which worktrees are free / reuse a worktree", "create a new session/worktree on branch Z", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "who needs me / check the inbox", "unblock/answer <session>", "pause/park <session>", "resume <session>". Runs the fleet-* commands (or the fleet_* MCP tools).
+description: Coordinate, spawn, observe, unblock, and budget sibling Claude Code sessions in the same ghostfleet (parallel git worktrees). Use when you are a "lead"/master session dividing work across siblings — see which worktrees are free and reuse the FOLDER (never a finished worker's session) before creating another, give every new task a NEW session, retire finished workers, dispatch a prompt to a worker, list the fleet, read a worker's output, check who needs you, unblock a worker stuck on a prompt, or park/resume workers to control cost. USE THIS FOR ANY MENTION OF A WORKTREE IN A FLEET SESSION — "start a worktree", "make/create a worktree", "spin up a worktree", "worktree this", "start a wrotree" and every other typo of it. In a ghostfleet session that ALWAYS means a ghostfleet worktree (a sibling of the repo, run by a NEW session), never Claude Code's built-in EnterWorktree tool, which would move THIS session into <repo>/.claude/worktrees/ and abandon the thread the user is talking to. Other triggers: "spin up a worker for X", "work on a worktree to fix Y", "which worktrees are free / reuse a worktree", "create a new session/worktree on branch Z", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "who needs me / check the inbox", "unblock/answer <session>", "pause/park <session>", "resume <session>". Runs the fleet-* commands (or the fleet_* MCP tools).
 ---
 
 # Orchestrating sibling fleet sessions
@@ -62,23 +62,40 @@ dependencies you already installed. `fleet-spawn` refuses from a linked worktree
 says this, so if you see that refusal it is not an obstacle to work around — it means
 the request was "start new work", not "start a new worker".
 
+That re-branch is for the human in THIS pane who asked for it. It is not how a lead hands a
+worker its next task — a lead gives a new task a new session (below), and when you finish
+one, say so and end your turn rather than asking for more.
+
 Everything below is for a **lead** in the project's main checkout.
 
-## Reuse a worktree before you spawn a new one
+## A new task is a new SESSION — reuse the folder, never the worker
 
-Worktrees are a **reusable resource, not disposable.** Creating a fresh one when
-idle ones already exist wastes disk, branches, and your attention — and it's the
-classic way a lead "gets lost." So:
+**A worker is disposable.** When it finishes a task its context is full of that task —
+the files it read, the approach it settled on, the dead ends it half-remembers — and a
+second, unrelated brief gets worked *through* all of it. So a finished worker is retired,
+and the next task goes to a fresh session. What you may reuse is the **folder**:
 
-1. Run **`fleet-worktrees`**. If it lists a **FREE** worktree that fits, reuse it.
-2. Reuse with **`fleet-spawn <name> --reuse <worktree>`** — starts a worker in that
-   existing worktree on its current branch. To **recycle** it onto a fresh branch in
-   one step, add `--branch <new> --from <base>`: e.g.
-   `fleet-spawn fix --reuse api-3 --branch feat/x --from main` cleans it
+1. A worker finished and its PR merged → **`fleet-stop --reclaim <session>`**. It stops
+   the session and removes the worktree when that is safe (a squash-merged PR on a clean
+   tree is), or keeps it and says why. `fleet-inbox` lists these for you, with the command.
+2. New task → run **`fleet-worktrees`**. If a **FREE** worktree fits, start a NEW session
+   in it: **`fleet-spawn <name> --reuse <worktree>`** — `--reuse` always opens a new
+   conversation there (it never resumes the old one), and it refuses a worktree somebody
+   is still standing in. To **recycle** it onto a fresh branch in one step, add
+   `--branch <new> --from <base>`: e.g.
+   `fleet-spawn fix --reuse api-3 --branch feat/x --from origin/staging` cleans it
    (`reset --hard`) and checks out the new branch off the base.
 3. Only create a new worktree when none are free — and `fleet-spawn` enforces this:
    **if free worktrees exist it will refuse and list them** rather than silently
    make another. Add **`--new`** only when you genuinely want a fresh worktree.
+
+**Never `fleet-send` a new brief to a worker that already finished one.** `fleet-send`
+refuses it when that task has shipped (its PR merged, or it is clean and even with the
+integration branch after a `done`) and points you at `fleet-spawn`. The one exception is a
+**follow-up on the SAME PR** — a red CI row, a review note — and that is never refused: a
+worker with an OPEN PR is still on its task. `--anyway` (MCP: `anyway: true`) is for the
+same-work follow-up the check cannot recognise, not for a new task. A `--reply-to`
+question is exempt too: asking a finished worker *why* wants exactly the context it has.
 
 ## Attention & completion: pull the inbox, don't poll
 
@@ -87,14 +104,17 @@ A worker can't interrupt you, and polling each one with `fleet-read` burns the
 passively into an inbox you drain in one call:
 
 - a worker **`done`** — its turn finished (idle). This is your **completion
-  signal**: when a dispatched brief is ready to review/merge, or the worker is free
-  for the next task. (A worker's autonomous turn ends once, so one `done` per brief.)
+  signal**: a dispatched brief is ready to review/merge. It is NOT "free for the
+  next task" — once its PR merges, that worker is retired with `fleet-stop --reclaim`
+  and the next task gets a new session. (A worker's autonomous turn ends once, so one
+  `done` per brief.)
 - a worker **`need-you`** — permission / usage-limit / a real question.
 - governor **`parked`/`resumed`** — budget shedding.
 
 - **`fleet-inbox`** — shows what's new since you last looked, then marks it seen.
   Check it at the top of an orchestration turn; `fleet-read <worker> 3` only on the
-  ones it flags. A `done` → dispatch the next step or merge; a `need-you` →
+  ones it flags. A `done` → review and merge, or a same-PR follow-up; merged →
+  `fleet-stop --reclaim`, and the next task to a new session; a `need-you` →
   `fleet-answer`. If the **push** is enabled for this fleet, you'll instead be
   *woken* by a nudge — *"[fleet] a worker finished or needs you…"*. When you get it,
   just drain `fleet-inbox` and act; it's an automated note, don't reply to it. (The
@@ -148,8 +168,9 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 - **`fleet-resume <session> ["<task>"]`** — un-park it; with a task it wakes right
   away. (Sending any new prompt also un-parks a worker.)
 - **`fleet-stop <session>`** — done *for good*: kills the session and clears its
-  state. Pause is temporary; **stop is gone.** Use it when a worker is finished, or
-  when you removed its git worktree and the session now lingers as `dead` in
+  state. Pause is temporary; **stop is gone.** A finished worker gets
+  `fleet-stop --reclaim <session>`, which also removes its worktree when safe. Use plain
+  stop when you removed its git worktree and the session now lingers as `dead` in
   `fleet-list` (the fleet's only clean "stop"). It doesn't touch git — run
   `git worktree prune` if the dir is stale.
 
@@ -161,7 +182,8 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | see live sessions + status | `fleet-list` |
 | check who needs you / what finished | `fleet-inbox` — its footer also names worktrees whose PR merged and are safe to reclaim |
 | a worker is done for good | `fleet-stop --reclaim <session>` — stops it AND removes its worktree when safe, or keeps it and says why. One call, not stop-then-remove: the worktree path is read from the live session, and a two-step teardown leaves a window for the session to come back |
-| dispatch a task | `fleet-send <session> "<self-contained brief>"` |
+| a NEW task | `fleet-spawn <name> [--reuse <free worktree>] --prompt "<self-contained brief>"` — always a new session |
+| a follow-up on the SAME PR (red CI, a review note) | `fleet-send <session> "<follow-up>"` — refused for a worker whose task already shipped; `--anyway` only for same-work follow-ups |
 | **record what you heard** (you are the worker) | `fleet-ack "<one line of what you understood>" --from "<the decisions you are working from>"` |
 | **ask** a session something (answer comes back) | `fleet-send --reply-to me <session> "<question>"` |
 | read a worker's output | `fleet-read <session> [n]` |
@@ -234,7 +256,9 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
 
 ## Rules
 
-- **Look before you spawn.** `fleet-worktrees` first; reuse a FREE worktree; only
+- **A new task is a new session.** Never hand a finished worker a second task; retire it
+  with `fleet-stop --reclaim` and `fleet-spawn` the next one.
+- **Look before you spawn.** `fleet-worktrees` first; reuse a FREE worktree's folder; only
   `--new` when none fit.
 - **Stuck ≠ busy — reach for `fleet-answer`, not another `fleet-send`.** A worker
   that ignores a `fleet-send`, or shows `working` with no progress, is usually
@@ -244,7 +268,8 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
   the single most common mis-step; when in doubt, `fleet-read`/`fleet-answer` to
   see and clear the dialog before sending more work.
 - **Don't spam a busy worker.** If it's `working`, one `fleet-send` queues after the
-  current turn — fine for the *next* task; don't fire several at a working session.
+  current turn — fine for a follow-up on its own PR; don't fire several at a working
+  session, and never queue it an unrelated task.
 - **Prompts must be self-contained.** A sibling has its own context — paste the full
   brief (task, files/paths, done-criteria), not "the thing we discussed".
 - **Resolve the ambiguity BEFORE you dispatch, not after.** Run the ask against the eight
@@ -267,11 +292,15 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
 ```bash
 fleet-worktrees          # → "Free to reuse: api-3"
 fleet-inbox              # → api-1 NEEDS YOU: permission to run tests
+                         # → finished workers: api-2 (its PR #41 merged) → fleet-stop --reclaim api-2
+
+# retire the finished worker; its next task goes to a NEW session, not to it
+fleet-stop --reclaim api-2
 
 # unblock the one that needs me
 fleet-answer api-1 "2"
 
-# reuse the free worktree instead of making a new one
+# a new session in the free worktree's folder, instead of making a new worktree
 fleet-spawn fix-auth --reuse api-3 \
   --prompt "Fix the token refresh bug in src/auth/*. Brief: … Done when: auth tests pass."
 

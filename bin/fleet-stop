@@ -77,9 +77,18 @@ FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 # WHERE THIS WORKER LIVES, asked while it is still alive. Once the session is killed
 # tmux cannot answer, and the manifest can be stale for a session that was renamed or
 # rebuilt — so read the pane's cwd first and keep it.
+#   AND WHEN IT IS NOT ALIVE, ASK WHAT A PREVIOUS RUN LEFT. The usual escalation is a plain
+# --reclaim that KEPT the tree, then the --force it suggested — by which time the first run
+# had killed the session and dropped the manifest row, so the second could not find the
+# tree at all: "could not tell which worktree it was in — nothing removed", with the tree
+# still on disk. A kept reclaim now leaves the path behind (KEPT below), and the manifest
+# row is read here, before step 3 deletes it, rather than never.
+KEPT="$FLEET_DIR/$SOCK.$SESSION.reclaim-kept"
 WT=""
 if [ "$RECLAIM" = 1 ]; then
   WT="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pane_current_path}' 2>/dev/null)"
+  [ -n "$WT" ] || WT="$(head -1 "$KEPT" 2>/dev/null)"
+  [ -n "$WT" ] || WT="$(awk -F'\t' -v s="$SESSION" '$2==s{print $1; exit}' "$FLEET_DIR/$SOCK.manifest.tsv" 2>/dev/null)"
   # the pane may be deeper in the tree than the checkout root; resolve to the worktree
   [ -n "$WT" ] && WT="$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null || true)"
 fi
@@ -164,8 +173,9 @@ CLEAN="$(dirname "$0")/fleet-clean"
 # Runs FROM the main checkout: fleet-clean resolves its repo from $PWD, and the
 # directory it is about to remove is a poor place to be standing.
 ( cd "$MAIN_CO" 2>/dev/null && "$CLEAN" -s "$SOCK" --only "$WT" --go ) | sed 's/^/  /'
-if [ ! -d "$WT" ]; then echo "fleet-stop: reclaimed $WT"; exit 0; fi
+if [ ! -d "$WT" ]; then rm -f "$KEPT" 2>/dev/null; echo "fleet-stop: reclaimed $WT"; exit 0; fi
 if [ "$FORCE" != 1 ]; then
+  printf '%s\n' "$WT" > "$KEPT" 2>/dev/null
   echo "fleet-stop: kept $WT (see the reason above)"
   echo "fleet-stop: remove it anyway with: fleet-stop -s $SOCK --reclaim --force $SESSION"
   exit 0
@@ -178,5 +188,6 @@ fi
 # own trees). Reported honestly either way, because a force that silently left the
 # directory behind is the worst of the three outcomes.
 ( cd "$MAIN_CO" 2>/dev/null && "$CLEAN" -s "$SOCK" --only "$WT" --go --force ) | sed 's/^/  /'
-[ -d "$WT" ] && { echo "fleet-stop: could not remove $WT even with --force (see above)" >&2; exit 1; } \
-             || echo "fleet-stop: force-removed $WT (past fleet-clean's gates, on request)"
+[ -d "$WT" ] && { echo "fleet-stop: could not remove $WT even with --force (see above)" >&2; exit 1; }
+rm -f "$KEPT" 2>/dev/null
+echo "fleet-stop: force-removed $WT (past fleet-clean's gates, on request)"

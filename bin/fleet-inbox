@@ -81,13 +81,37 @@ reclaimable() {
   echo "  reclaim: fleet-clean --go"
 }
 
-[ -f "$INBOX" ] && [ -s "$INBOX" ] || { echo "inbox: (empty)"; reclaimable; exit 0; }
+# ...AND A FINISHED WORKER THAT IS STILL RUNNING is the case above one step earlier: its
+# task shipped, but its session is live, so the worktree reads as occupied and never
+# reaches that list. Leaving it up invites the habit this repo no longer wants — handing
+# it the next task, which then gets worked through everything the last one left in its
+# context. A new task is a new session, so name the command that retires this one.
+#   bin/fleet-shipped decides (the same answer fleet-send refuses on), and an open PR is
+# never listed: a worker with a live PR still has follow-ups coming.
+finished_live() {
+  local sh s why out=""
+  sh="$(dirname "$0")/fleet-shipped"
+  [ -x "$sh" ] || return 0
+  while IFS= read -r s; do
+    case "$s" in ''|master|_term-*|_edit-*) continue ;; esac
+    why="$("$sh" -s "$SOCK" "$s" 2>/dev/null)" || continue
+    out="$out  $s  ($why)  →  fleet-stop --reclaim $s
+"
+  done < <(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null)
+  [ -n "$out" ] || return 0
+  echo
+  echo "finished workers — task shipped, session still up (a new task is a new session):"
+  printf '%s' "$out"
+}
+reclaim_hints() { finished_live; reclaimable; }
+
+[ -f "$INBOX" ] && [ -s "$INBOX" ] || { echo "inbox: (empty)"; reclaim_hints; exit 0; }
 
 if [ "$MODE" = all ]; then
   n="$(wc -l < "$INBOX" | tr -d ' ')"
   echo "inbox — all ($n):"
   fmt < "$INBOX"
-  reclaimable
+  reclaim_hints
   exit 0
 fi
 
@@ -97,10 +121,10 @@ seen="$(cat "$SEEN" 2>/dev/null || echo 0)"; case "$seen" in ''|*[!0-9]*) seen=0
 if [ "$total" -le "$seen" ]; then
   [ "$seen" -gt "$total" ] && printf '%s\n' "$total" > "$SEEN" 2>/dev/null   # inbox was cleared/rotated
   echo "inbox: nothing new"
-  reclaimable
+  reclaim_hints
   exit 0
 fi
 echo "inbox — $((total - seen)) new:"
 tail -n +"$((seen + 1))" "$INBOX" | fmt
 printf '%s\n' "$total" > "$SEEN" 2>/dev/null || true
-reclaimable
+reclaim_hints

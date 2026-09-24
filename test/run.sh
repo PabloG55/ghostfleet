@@ -2794,6 +2794,7 @@ is "an empty answer text still runs"       "0" "$(agf answer.empty)"
 # THE OTHER DIRECTION. Refusing must not cost the valid calls anything: each of these
 # reached its command, and with its arguments unchanged.
 is "a full send reaches fleet-send"        "1" "$(grep -cF 'fleet-send [w1] [the real work]' "$AG/ran" || true)"
+is "anyway reaches it as --anyway"         "1" "$(grep -cF 'fleet-send [--anyway] [w1] [same PR]' "$AG/ran" || true)"
 is "optional n still defaults"             "1" "$(grep -cF 'fleet-read [w1] [1]' "$AG/ran" || true)"
 is "optional reclaim stays optional"       "1" "$(grep -cF 'fleet-stop [w1]' "$AG/ran" || true)"
 is "optional all stays optional"           "1" "$(grep -cF 'fleet-inbox [--all]' "$AG/ran" || true)"
@@ -2801,7 +2802,7 @@ is "optional prompt stays optional"        "1" "$(grep -cF 'fleet-resume [w1] [g
 is "a tool with no required args runs"     "1" "$(grep -cF 'fleet-list' "$AG/ran" || true)"
 is "empty text reaches fleet-answer"       "1" "$(grep -cF 'fleet-answer [w1] []' "$AG/ran" || true)"
 # and NOTHING else did — a refusal that still shelled out would show up here
-is "exactly the 7 valid calls ran"         "7" "$(grep -c . "$AG/ran" || true)"
+is "exactly the 8 valid calls ran"         "8" "$(grep -c . "$AG/ran" || true)"
 is "no command was handed 'undefined'"     "0" "$(grep -c undefined "$AG/ran" || true)"
 
 # DRIFT: the same check for every required argument the server declares, omitted in turn,
@@ -2817,7 +2818,7 @@ while IFS="$US" read -r c e txt; do
 done < "$AG/out"
 is "every declared required arg is refused by name" "0" "$badreq"
 is "...and the loop covered the 12 known today"     "yes" "$([ "${nreq:-0}" -ge 12 ] && echo yes || echo no)"
-is "...and nothing new ran while doing it"          "7" "$(grep -c . "$AG/ran" || true)"
+is "...and nothing new ran while doing it"          "8" "$(grep -c . "$AG/ran" || true)"
 rm -rf "$AG"
 
 # The empty-text exception above rests on fleet-answer refusing "" itself, by name. If
@@ -7440,6 +7441,211 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   tmux -L cfrecl kill-server 2>/dev/null; rm -rf "$RC"
 else
   skip "fleet-stop --reclaim" "git or tmux missing"
+fi
+
+# ── a SQUASH-merged worker has to be reclaimable the moment it merges ─────────
+# Refused twice in one day, each time right after the worker's PR was squash-merged:
+# "remove it anyway with: --reclaim --force". Every gate fleet-clean had was blind to it
+# at that moment. The squash lands ONE new commit, so the branch's commits are not
+# reachable from the integration branch; the merge deletes the remote branch, so there is
+# no upstream to be "fully pushed" to; and fleet-merged's cache, filled minutes BEFORE
+# the merge, still said open for the rest of its ten-minute TTL. Asking GitHub about the
+# one branch being reclaimed is the only question that has the answer then.
+#   Then the --force that was suggested lost the worktree: the refused run had already
+# killed the session and dropped its manifest row, so the second run could not find out
+# where it had been — "could not tell which worktree it was in — nothing removed", with
+# the worktree still on disk. The escalation the tool itself recommends has to work.
+#   `gh` is a stub here: `pr view` answers per branch and `pr list` answers NOTHING,
+# which is exactly the stale-cache moment (fleet-merged prints nothing, "I can't tell").
+group "fleet-stop --reclaim after a squash merge"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  SQ="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$SQ/fleet" "$SQ/stub"
+  cat > "$SQ/stub/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"pr view feat/squashed"*|*"pr view feat/messy"*) echo MERGED ;;
+  *"pr view"*) echo OPEN ;;
+esac
+exit 0
+STUB
+  chmod +x "$SQ/stub/gh"
+  git init -q --bare "$SQ/remote.git" 2>/dev/null
+  git init -q -b main "$SQ/repo" 2>/dev/null
+  git -C "$SQ/repo" config user.email t@t; git -C "$SQ/repo" config user.name t
+  : > "$SQ/repo/f"; git -C "$SQ/repo" add -A; git -C "$SQ/repo" commit -qm i 2>/dev/null
+  git -C "$SQ/repo" remote add origin "$SQ/remote.git"
+  git -C "$SQ/repo" push -q origin main 2>/dev/null
+  sq_branch() {                    # <name> <branch>: a worktree whose branch has one commit
+    git -C "$SQ/repo" worktree add -q "$SQ/repo/.worktrees/$1" -b "$2" 2>/dev/null
+    echo "$1" > "$SQ/repo/.worktrees/$1/$1.txt"
+    git -C "$SQ/repo/.worktrees/$1" add "$1.txt"
+    git -C "$SQ/repo/.worktrees/$1" commit -qm "work on $1" 2>/dev/null
+    git -C "$SQ/repo/.worktrees/$1" push -q -u origin "$2" 2>/dev/null
+  }
+  sq_branch squashed feat/squashed
+  sq_branch unmerged feat/unmerged
+  sq_branch messy    feat/messy
+  # an open PR with a commit that exists NOWHERE else — the case the gates exist for
+  echo more >> "$SQ/repo/.worktrees/unmerged/unmerged.txt"
+  git -C "$SQ/repo/.worktrees/unmerged" commit -qam "unpushed" 2>/dev/null
+  # THE SQUASH MERGE, as GitHub does it: the same change, as one NEW commit on main, and
+  # the head branch deleted on the remote — so the local branch's upstream is "gone".
+  cp "$SQ/repo/.worktrees/squashed/squashed.txt" "$SQ/repo/"
+  git -C "$SQ/repo" add squashed.txt; git -C "$SQ/repo" commit -qm "work on squashed (#1)" 2>/dev/null
+  git -C "$SQ/repo" push -q origin main 2>/dev/null
+  git -C "$SQ/repo" push -q origin --delete feat/squashed feat/messy 2>/dev/null
+  git -C "$SQ/repo" fetch -q --prune origin 2>/dev/null
+  echo scratch > "$SQ/repo/.worktrees/messy/dirty.txt"
+  # the fixture has to BE the failure: not reachable from main, and no upstream left
+  is "fixture: the squashed branch is not in main" "1" \
+     "$(git -C "$SQ/repo" rev-list --count main..feat/squashed 2>/dev/null)"
+  is "fixture: ...and its upstream is gone"        "1" \
+     "$(git -C "$SQ/repo" for-each-ref --format='%(upstream:track)' refs/heads/feat/squashed | grep -c gone || true)"
+  tmux -L cfsquash kill-server 2>/dev/null
+  tmux -L cfsquash new-session -d -s master   -c "$SQ/repo" 'sleep 90' 2>/dev/null
+  for w in squashed unmerged messy; do
+    tmux -L cfsquash new-session -d -s "$w" -c "$SQ/repo/.worktrees/$w" 'sleep 90' 2>/dev/null
+  done
+  sleep 0.6
+  sqstop() { env -u TMUX CLAUDE_FLEET_DIR="$SQ/fleet" PATH="$SQ/stub:$PATH" \
+             "$ROOT/bin/fleet-stop" -s cfsquash "$@" 2>&1; }
+
+  out="$(sqstop --reclaim squashed)"
+  is "squash-merged + clean: plain --reclaim removes it" "0" "$([ -d "$SQ/repo/.worktrees/squashed" ] && echo 1 || echo 0)"
+  is "...because its PR merged"                          "1" "$(printf '%s' "$out" | grep -c 'PR merged' || true)"
+  is "...without suggesting --force"                     "0" "$(printf '%s' "$out" | grep -c -- '--force' || true)"
+
+  # MERGED IS NOT ENOUGH ON ITS OWN: an edit made after the merge is still work
+  out="$(sqstop --reclaim messy)"
+  is "merged but DIRTY: kept"                            "1" "$([ -d "$SQ/repo/.worktrees/messy" ] && echo 1 || echo 0)"
+  is "...for uncommitted changes"                        "1" "$(printf '%s' "$out" | grep -c 'uncommitted changes' || true)"
+
+  # and an OPEN PR with commits nowhere else is still refused — the other direction
+  out="$(sqstop --reclaim unmerged)"
+  is "an open PR's worktree: kept"                       "1" "$([ -d "$SQ/repo/.worktrees/unmerged" ] && echo 1 || echo 0)"
+  is "...offering the --force it names"                  "1" "$(printf '%s' "$out" | grep -c -- '--reclaim --force unmerged' || true)"
+  # THE ESCALATION, with the session already gone — the order a lead actually runs it in
+  out="$(sqstop --reclaim --force unmerged)"
+  is "--force after the refusal still finds the tree"    "0" "$(printf '%s' "$out" | grep -c 'could not tell which worktree' || true)"
+  is "...and removes it"                                 "0" "$([ -d "$SQ/repo/.worktrees/unmerged" ] && echo 1 || echo 0)"
+  tmux -L cfsquash kill-server 2>/dev/null; rm -rf "$SQ"
+else
+  skip "fleet-stop after a squash merge" "git or tmux missing"
+fi
+
+# ── a finished worker is not handed the next task ────────────────────────────
+# A worker that finished a task carries all of it into the next one: the files it read,
+# the decisions it made, the dead ends it half-remembers. Reusing the SESSION is what
+# contaminates; reusing the FOLDER is not (fleet-spawn --reuse starts a new conversation
+# there). So fleet-send refuses a brief to a worker whose task has shipped and points at
+# fleet-spawn, with --anyway to insist.
+#   "Shipped" is deliberately narrow, and each exemption below is a send that MUST go:
+# an open PR is the same task still in flight (a red CI row, a review note), a session
+# that has not finished a turn since it started has no task to be contaminated by, a
+# --reply-to question is asking for exactly the context it has, and the master is not a
+# worker at all — the hooks' own nudge is a plain fleet-send at it.
+group "fleet-send refuses a finished worker's next task"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  DS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$DS/fleet" "$DS/stub"
+  printf '#!/bin/sh\nexit 0\n' > "$DS/stub/gh"; chmod +x "$DS/stub/gh"   # never the network
+  git init -q -b main "$DS/repo" 2>/dev/null
+  git -C "$DS/repo" config user.email t@t; git -C "$DS/repo" config user.name t
+  : > "$DS/repo/f"; git -C "$DS/repo" add -A; git -C "$DS/repo" commit -qm i 2>/dev/null
+  git -C "$DS/repo" remote add origin git@github.com:acme/widget.git 2>/dev/null
+  git -C "$DS/repo" update-ref refs/remotes/origin/main main
+  git -C "$DS/repo" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+  ds_wt() {                        # <name> <branch> [commit]
+    git -C "$DS/repo" worktree add -q "$DS/repo/.worktrees/$1" -b "$2" main 2>/dev/null
+    [ -n "${3:-}" ] || return 0
+    echo "$1" > "$DS/repo/.worktrees/$1/$1.txt"
+    git -C "$DS/repo/.worktrees/$1" add "$1.txt"; git -C "$DS/repo/.worktrees/$1" commit -qm "$1" 2>/dev/null
+  }
+  ds_wt shipped feat/shipped c     # its PR merged
+  ds_wt inflight feat/inflight c   # its PR is open: follow-ups belong here
+  ds_wt even    feat/even          # clean and even with origin/main after a DONE
+  ds_wt fresh   feat/fresh c       # merged branch, but a NEW session that has done nothing
+  printf 'feat/inflight\x1f12\x1fOPEN\nfeat/shipped\x1f11\x1fMERGED\nfeat/fresh\x1f10\x1fMERGED\n' \
+    > "$DS/fleet/prs.acme_widget"
+  tmux -L cfdisp kill-server 2>/dev/null
+  # the busy marker sends fleet-send down its queued path, which skips the 8s confirm loop
+  pane="printf 'esc to interrupt\n'; sleep 60"
+  tmux -L cfdisp new-session -d -x 200 -y 40 -s master -c "$DS/repo" "$pane" 2>/dev/null
+  for w in shipped inflight even fresh; do
+    tmux -L cfdisp new-session -d -x 200 -y 40 -s "$w" -c "$DS/repo/.worktrees/$w" "$pane" 2>/dev/null
+  done
+  sleep 0.6
+  now="$(date +%s)"
+  # DONE rows as the Stop hook writes them. fresh's is OLDER than its session: a previous
+  # session of that name finished, this one has not — and the name is all a row carries.
+  { for w in shipped inflight even master; do printf '%s\t%s\tdone\t%s\n' "$now" "$w" "$w"; done
+    printf '%s\t%s\tdone\t%s\n' "$((now - 3600))" fresh fresh; } > "$DS/fleet/cfdisp.inbox"
+  dsend() { ( cd "$DS/repo" && env -u TMUX CLAUDE_FLEET_DIR="$DS/fleet" PATH="$DS/stub:$PATH" \
+              "$ROOT/bin/fleet-send" -s cfdisp "$@" 2>&1; echo "rc=$?" ); }
+  sent_to() { awk -F'\t' -v s="$1" '$2==s' "$DS/fleet/cfdisp.sent" 2>/dev/null | grep -c . || true; }
+
+  out="$(dsend shipped "build the next thing")"
+  is "a shipped worker's next task is refused"    "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
+  is "...naming fleet-spawn instead"              "1" "$(printf '%s' "$out" | grep -c 'fleet-spawn' || true)"
+  is "...and the flag that insists"               "1" "$(printf '%s' "$out" | grep -c -- '--anyway' || true)"
+  is "...and nothing was dispatched"              "0" "$(sent_to shipped)"
+  out="$(dsend --anyway shipped "one more thing on it")"
+  is "--anyway sends it"                          "1" "$(sent_to shipped)"
+  is "...and exits 0"                             "1" "$(printf '%s' "$out" | grep -c 'rc=0' || true)"
+
+  out="$(dsend inflight "CI is red on your PR")"
+  is "an OPEN PR's follow-up is never refused"    "1" "$(sent_to inflight)"
+  out="$(dsend even "build the next thing")"
+  is "clean + even with main after a DONE: refused" "0" "$(sent_to even)"
+  out="$(dsend fresh "your first task")"
+  is "a fresh session on a merged branch: sent"   "1" "$(sent_to fresh)"
+  out="$(dsend master "[fleet] a worker finished")"
+  is "the master is never refused"                "1" "$(sent_to master)"
+  out="$(dsend --reply-to cfdisp/master --reply-dir "$DS/fleet" even "why did you pick that?")"
+  is "a --reply-to question is exempt"            "1" "$(sent_to even)"
+
+  # THE INBOX says what to do with them: a live, finished worker is a --reclaim away
+  ib="$( cd "$DS/repo" && env -u TMUX CLAUDE_FLEET_DIR="$DS/fleet" PATH="$DS/stub:$PATH" \
+         "$ROOT/bin/fleet-inbox" -s cfdisp 2>/dev/null )"
+  is "inbox: the shipped worker gets a reclaim line"  "1" "$(printf '%s\n' "$ib" | grep -c 'fleet-stop --reclaim shipped' || true)"
+  is "inbox: ...so does the clean+even one"           "1" "$(printf '%s\n' "$ib" | grep -c 'fleet-stop --reclaim even' || true)"
+  is "inbox: an open PR does not"                     "0" "$(printf '%s\n' "$ib" | grep -c 'reclaim inflight' || true)"
+  is "inbox: a fresh session does not"                "0" "$(printf '%s\n' "$ib" | grep -c 'reclaim fresh' || true)"
+  is "inbox: the master never does"                   "0" "$(printf '%s\n' "$ib" | grep -c 'reclaim master' || true)"
+  tmux -L cfdisp kill-server 2>/dev/null; rm -rf "$DS"
+else
+  skip "fleet-send to a finished worker" "git or tmux missing"
+fi
+
+# ── spawning into a worktree somebody is standing in ─────────────────────────
+# `--reuse` refused a worktree with a live session, but the IMPLICIT reuse — naming a
+# worker after a worktree that already exists — did not ask, and started a second agent
+# in the same checkout beside the first (as `<name>~2`). Two agents in one tree with no
+# locking is how work gets lost, and a new task is meant to get a clean session, not a
+# shared one.
+group "fleet-spawn never starts beside a live session"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  LV="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$LV/home" "$LV/fleet" "$LV/ok"
+  printf '#!/usr/bin/env bash\nsleep 60\n' > "$LV/ok/agent-here"; chmod +x "$LV/ok/agent-here"
+  git init -q -b main "$LV/repo" 2>/dev/null
+  git -C "$LV/repo" config user.email t@t; git -C "$LV/repo" config user.name t
+  : > "$LV/repo/f"; git -C "$LV/repo" add -A; git -C "$LV/repo" commit -qm i 2>/dev/null
+  git -C "$LV/repo" worktree add -q "$LV/w1" -b w1 2>/dev/null
+  tmux -L cflive kill-server 2>/dev/null
+  tmux -L cflive new-session -d -s w1 -c "$LV/w1" 'sleep 60' 2>/dev/null; sleep 0.4
+  lvspawn() { ( cd "$LV/repo" && HOME="$LV/home" env -u TMUX CLAUDE_FLEET_SOCK=cflive \
+                CLAUDE_FLEET_DIR="$LV/fleet" CLAUDE_FLEET_SLOTS="$LV/slots" \
+                PATH="$LV/ok:$ROOT/bin:$PATH" "$ROOT/bin/fleet-spawn" "$@" 2>&1; echo "rc=$?" ); }
+  out="$(lvspawn w1)"
+  is "an existing worktree with a live session: refused" "1" "$(printf '%s' "$out" | grep -c 'rc=1' || true)"
+  is "...naming the session standing there"              "1" "$(printf '%s' "$out" | grep -c "session 'w1'" || true)"
+  is "...and no second session was started"              "1" "$(tmux -L cflive list-sessions -F '#{session_name}' 2>/dev/null | grep -c . || true)"
+  # the other direction: the same worktree, once nobody is in it, is reused as before
+  tmux -L cflive kill-server 2>/dev/null; tmux -L cflive new-session -d -s keep 'sleep 60' 2>/dev/null
+  out="$(lvspawn w1)"
+  is "...and once it is free, it is reused"              "1" "$(printf '%s' "$out" | grep -c "started 'w1'" || true)"
+  tmux -L cflive kill-server 2>/dev/null; rm -rf "$LV"
+else
+  skip "fleet-spawn beside a live session" "git or tmux missing"
 fi
 # FLAGS ON EITHER SIDE OF THE SESSION. The first cut broke out of the arg loop at the
 # first non-flag, so `fleet-stop <session> --reclaim` parsed the session and then

@@ -88,7 +88,11 @@ beside the one you're standing in rather than starting a worker.
 
 Recycling an existing tree onto fresh work is one command — `fleet-spawn <name> --reuse
 <worktree> --branch <new> --from <base>` cleans it and checks out the new branch — which is
-the usual case once a fleet has been running for a while.
+the usual case once a fleet has been running for a while. What gets recycled is the
+**folder, never the session**: a worker that finished a task has that task all through its
+context, so it is retired with `fleet-stop --reclaim` and the next task starts a new
+conversation. `fleet-send` refuses to hand a finished, shipped worker a new brief, and says
+to spawn instead.
 
 ## Documentation
 

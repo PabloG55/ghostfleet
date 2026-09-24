@@ -430,6 +430,34 @@ creates anything, names the file, and offers `--branch <other>` or moving the fi
 Only content git can *parse* as a ref counts, so a branch called `config` is still fine
 — `[core]` is not a ref. **Don't name a worker after its own agent.**
 
+## Retiring a finished worker
+
+**A worker is disposable: one task, one session.** When its PR merges it is retired, and the
+next task goes to a new session — `fleet-spawn`, with `--reuse` if you want the folder back.
+Handing a finished worker the next brief is the habit this replaces: its context still holds
+the last task, and the new one gets worked through the files it already read and the
+approach it already chose. `fleet-send` now refuses that send when the worker's task has
+shipped — its branch's PR merged, or its tree is clean and even with the integration branch
+after a `DONE` — and names `fleet-spawn` instead. It never refuses a follow-up while the PR
+is still OPEN (a red CI row, a review note), a session that has not finished a turn yet, a
+`--reply-to` question, or the master. `--anyway` sends regardless. `fleet-inbox` lists
+finished workers whose sessions are still up, each with its `fleet-stop --reclaim <name>`.
+
+**`--reclaim` works the moment the PR squash-merges.** It used to refuse exactly then, twice
+in one day: the squash lands one new commit, so the branch's commits are not in the
+integration branch; the merge deletes the remote branch, so there is nothing to be "fully
+pushed" to; and the cached PR list, fetched before the merge, still said open for ten
+minutes. So for the one worktree being reclaimed, `fleet-clean --only` asks GitHub about that
+branch directly (`gh pr view --json state`), and MERGED on a clean tree is enough. A dirty
+tree is still kept — an edit after the merge is still work.
+
+**And `--reclaim --force` no longer loses the tree.** The refused run had already killed the
+session and dropped its manifest row, so the escalation it suggested could not find out where
+the session had been: "could not tell which worktree it was in — nothing removed", with the
+worktree still on disk. A kept reclaim now leaves the path in
+`<fleet dir>/<socket>.<session>.reclaim-kept`, and the manifest row is read before it is
+deleted.
+
 ## Two ways to register a project, and what each one costs
 
 A project's `path` (2nd column of the projects file) is read as **either** the repo

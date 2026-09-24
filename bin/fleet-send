@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fleet-send [-s SOCKET] [--reply-to me|<session>|<socket>/<session>] [--reply-dir DIR]
-#            <session> <prompt...>
+#            [--anyway] <session> <prompt...>
 #
 # Type <prompt> into another fleet session's Claude input and submit it. Meant
 # to be called by a "lead" Claude session (via its Bash tool) to dispatch work
@@ -46,7 +46,7 @@ case "${_t##*/}" in cf-*)
   [ -n "$SELF_SESS" ] || SELF_SESS="${CLAUDE_FLEET_SLOT:-}"
 ;; esac
 
-REPLY_TO=""; REPLY_DIR=""
+REPLY_TO=""; REPLY_DIR=""; ANYWAY=0
 # Set for real beside the asker's fleet dir; declared here so `set -u` cannot trip on a
 # send that has no --reply-to at all.
 XPROF=0
@@ -55,6 +55,7 @@ while [ $# -gt 0 ]; do
     -s)          SOCK="${2:-}";      shift 2 ;;
     --reply-to)  REPLY_TO="${2:-}";  shift 2 ;;
     --reply-dir) REPLY_DIR="${2:-}"; shift 2 ;;
+    --anyway)    ANYWAY=1;           shift ;;
     *) break ;;
   esac
 done
@@ -62,7 +63,7 @@ SESSION="${1:-}"; shift || true
 MSG="$*"
 
 [ -n "$SOCK" ]    || { echo "fleet-send: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
-[ -n "$SESSION" ] || { echo "fleet-send: usage: fleet-send [-s socket] [--reply-to me|<session>|<socket>/<session>] <session> <prompt>" >&2; exit 1; }
+[ -n "$SESSION" ] || { echo "fleet-send: usage: fleet-send [-s socket] [--reply-to me|<session>|<socket>/<session>] [--anyway] <session> <prompt>" >&2; exit 1; }
 [ -n "$MSG" ]     || { echo "fleet-send: empty prompt" >&2; exit 1; }
 tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
@@ -74,6 +75,21 @@ tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
 case "$SESSION" in
   _term-*|_edit-*) echo "fleet-send: '$SESSION' is a tab (a shell), not an agent — it cannot be prompted" >&2; exit 1 ;;
 esac
+
+# A NEW TASK IS A NEW SESSION. A worker whose task has shipped still holds all of that
+# task in its context, and the next brief gets worked through it — the files it already
+# read, the approach it settled on, the half-remembered dead end. So a send to a worker
+# that finished and shipped is refused, pointing at fleet-spawn (which may reuse the
+# FOLDER: --reuse starts a new conversation there). bin/fleet-shipped owns the definition
+# and keeps it narrow: an open PR is never "shipped", so a red CI row or a review note on
+# the same PR always goes through, and so does a session that has not finished a turn.
+#   A --reply-to QUESTION is exempt: asking a finished worker why it did something wants
+# exactly the context it has. --anyway is for the follow-up this cannot recognise.
+if [ "$ANYWAY" != 1 ] && [ -z "$REPLY_TO" ] \
+   && why="$("$(dirname "$0")/fleet-shipped" -s "$SOCK" "$SESSION" 2>/dev/null)"; then
+  echo "fleet-send: '$SESSION' already finished a task that shipped ($why) — a new task is a new session: fleet-stop --reclaim $SESSION, then fleet-spawn <name> --prompt … (--reuse <worktree> keeps the folder). A follow-up on that same work: add --anyway" >&2
+  exit 1
+fi
 
 # WHICH AGENT runs the target, resolved BEFORE the reply preamble is built and reused by
 # the busy detector further down. It decides what the target can be TOLD to do: SendMessage
