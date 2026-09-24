@@ -124,12 +124,24 @@ RECORDS=""
 load_records() {
   command -v jq >/dev/null 2>&1 || return 0
   RECORDS="$(jq -r '[(.sock // ""), (.slot // ""), (.ts // 0), (.session_id // ""),
-                     (.status // ""), (.transcript // ""), (.cwd // "")] | @tsv' \
+                     (.status // ""), (.transcript // ""), (.cwd // ""), (.pane // "")] | @tsv' \
     "${FLEET_DIR:?}"/*.json 2>/dev/null)"
 }
 field_for() {   # sock slot column -> newest record's value
   printf '%s\n' "$RECORDS" | awk -F'\t' -v s="$2" -v k="$1" -v c="$3" \
     '$2==s && $1==k {print $3"\t"$c}' | sort -rn | head -1 | cut -f2
+}
+# The slot a renamed session's record is filed under, found by what a rename does not
+# change: the pane (the hook records `<pane_id>@<server_pid>`), or the conversation id.
+# Answers with that record's SLOT so field_for can read the rest of it unchanged.
+slot_by_pane() {   # sock pane -> slot
+  [ -n "$2" ] || return 0
+  printf '%s\n' "$RECORDS" | awk -F'\t' -v k="$1" -v p="$2" \
+    '$1==k && $8==p {print $3"\t"$2}' | sort -rn | head -1 | cut -f2
+}
+slot_by_sid() {    # sock sid -> slot
+  printf '%s\n' "$RECORDS" | awk -F'\t' -v k="$1" -v i="$2" \
+    '$1==k && $4==i {print $3"\t"$2}' | sort -rn | head -1 | cut -f2
 }
 
 # ── THE IDLE CLOCK IS THE TRANSCRIPT, and the two obvious alternatives are both wrong ──
@@ -389,10 +401,19 @@ recover_sid() {
   id="${id##*/}"; id="${id%.jsonl}"
   if is_uuid "$id"; then printf '%s' "$id"; return 0; fi
 
-  # 2. the agent's own note about itself
-  if [ -f "$HOME/.claude/sessions/$pid.json" ] && command -v jq >/dev/null 2>&1; then
-    id="$(jq -r '.sessionId // empty' "$HOME/.claude/sessions/$pid.json" 2>/dev/null)"
-    if is_uuid "$id"; then printf '%s' "$id"; return 0; fi
+  # 2. the agent's own note about itself — for the pane's process AND the one under it.
+  # agent-here holds the pane (it outlives the agent to mark an exit), so the pane's pid is
+  # a shell and the agent is its child: asking only the pane's pid asked the wrong process
+  # for every session started through the launcher. Still evidence, not inference — the
+  # note is keyed by the pid it belongs to, and the child is the pane's own.
+  # Under the ACTIVE config dir: a profile's agent writes its note beside its own config.
+  local cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" p
+  if command -v jq >/dev/null 2>&1; then
+    for p in "$pid" $(pgrep -P "$pid" 2>/dev/null); do
+      [ -f "$cfg/sessions/$p.json" ] || continue
+      id="$(jq -r '.sessionId // empty' "$cfg/sessions/$p.json" 2>/dev/null)"
+      if is_uuid "$id"; then printf '%s' "$id"; return 0; fi
+    done
   fi
 
   # No third guess. If neither the process nor its own note knows the id, nothing here does.
@@ -470,6 +491,24 @@ build_plan() {
       cwd="$(field_for "$sock" "$slot" 7)"
       # A missing id is a hole in the RECORD, not necessarily in the world. Ask the running
       # process before writing the session off as unwakeable.
+      # A RENAMED SESSION'S RECORD IS FILED UNDER ITS OLD NAME. Until the hook learned to
+      # ask tmux for the pane's current name, it wrote the name the agent was launched with,
+      # so after a rename this found no record, no id and no transcript — and vetoed a
+      # session with a whole conversation behind it as "no recorded conversation id". Find
+      # the record by the pane, then by the id the process itself knows, and read it whole.
+      if [ -z "$id" ]; then
+        case "$slot" in _*) ;; *)
+          _rs="$(slot_by_pane "$sock" "$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_id}@#{pid}' 2>/dev/null)")"
+          if [ -z "$_rs" ]; then
+            _rid="$(recover_sid "$sock" "$slot")" && _rs="$(slot_by_sid "$sock" "$_rid")"
+          fi
+          if [ -n "$_rs" ] && [ "$_rs" != "$slot" ]; then
+            st="$(field_for "$sock" "$_rs" 5)"; ts="$(field_for "$sock" "$_rs" 3)"
+            id="$(field_for "$sock" "$_rs" 4)"; tr="$(field_for "$sock" "$_rs" 6)"
+            cwd="$(field_for "$sock" "$_rs" 7)"
+          fi ;;
+        esac
+      fi
       if [ -z "$id" ]; then
         case "$slot" in _*) ;; *)
           id="$(recover_sid "$sock" "$slot")" || id=""

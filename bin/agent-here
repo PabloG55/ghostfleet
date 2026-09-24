@@ -79,6 +79,19 @@ MARK=""
 # as the stale park marker fleet-spawn and fleet-open both clear on the way in.
 [ -n "$MARK" ] && rm -f "$MARK" 2>/dev/null
 
+# THE NAME AT EXIT, NOT THE NAME AT LAUNCH. This shell outlives the agent by design, and
+# the session can be renamed in between (fleet-rename). A marker written under the launch
+# name is a marker for a session that no longer exists, so the renamed card read as live
+# with nothing in it instead of as exited. $TMUX_PANE is stable across a rename; the
+# session it sits in is asked for at the moment the marker is written.
+live_mark() {
+  [ -n "$MARK" ] && [ -n "${TMUX_PANE:-}" ] || return 0
+  local now
+  now="$(tmux -L "$CLAUDE_FLEET_SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
+  case "$now" in ''|_*|+*) return 0 ;; esac
+  SLOT="$now"; MARK="$MARK_DIR/$CLAUDE_FLEET_SOCK.$SLOT.exited"
+}
+
 # A SESSION THAT NEVER STARTED IS NOT A SESSION THAT EXITED, and telling them apart is
 # the whole of this function's care. `exit` typed into a running agent should keep the
 # card; an agent binary that cannot run at all must take the pane down exactly as it did
@@ -110,6 +123,7 @@ run_agent() {
     if [ "$rc" = 126 ] || [ "$rc" = 127 ] || [ "$ran" -lt "$AGENT_MIN_RUN" ]; then
       return "$rc"
     fi
+    live_mark
     : > "$MARK" 2>/dev/null
     printf '
   this session has exited — its conversation is still on disk.

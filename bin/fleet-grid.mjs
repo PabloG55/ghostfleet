@@ -625,6 +625,64 @@ function gitBranch(cwd) {
 }
 
 function encCwd(cwd) { return cwd.replace(/[/.]/g, '-'); }
+// ── a record the NAME cannot find, found by the PANE ──────────────────────────
+// fleetBySlot() is keyed by the name the hook last wrote. A session renamed by anything
+// that did not also rewrite its record (a raw tmux rename, or a fleet-rename from before
+// it learned to) has a record under the OLD name, so its card fell back to the folder's
+// newest transcript — which after a worktree move is a directory that does not exist, and
+// the card read as empty. Measured live: a renamed session with a whole conversation
+// behind it, shown with no last message and "No messages yet" on the phone.
+//   Two ways to recognise it, both EVIDENCE and neither a guess (fleet-hibernate's
+// recover_sid says why a guess here is worse than nothing):
+//   1. a record that carries this pane's id — the hook writes `pane` (as <pane_id>@<server
+//      pid>, since ids restart with the server), and a rename does not change it;
+//   2. the agent's own note about itself, <config>/sessions/<pid>.json, for the pane's
+//      process or its child (agent-here holds the pane, the agent runs under it).
+// Only for a live session with no record, and cached briefly: most cards never get here,
+// and the ones that do must not cost a tmux call and a pgrep on every 1.2s poll.
+const paneRecCache = new Map();   // name -> { at, rec }
+function recordOfPane(name) {
+  const hit = paneRecCache.get(name);
+  if (hit && Date.now() - hit.at < 10000) return hit.rec;
+  let rec = null;
+  try {
+    const out = execFileSync('tmux', ['-L', SOCK, 'list-panes', '-t', name, '-F', `#{pane_id}@#{pid}${TF}#{pane_pid}`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const f = tmuxRecord(out.split('\n')[0] || '', 2);
+    if (f) rec = recordFor(f[0], f[1]);
+  } catch {}
+  paneRecCache.set(name, { at: Date.now(), rec });
+  return rec;
+}
+function recordFor(pane, pid) {
+  const read = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
+  let best = null;
+  try {
+    for (const f of fs.readdirSync(FLEET_DIR)) {
+      if (!f.endsWith('.json')) continue;
+      const o = read(path.join(FLEET_DIR, f));
+      if (o && o.pane === pane && o.sock === SOCK && (!best || (o.ts || 0) > (best.ts || 0))) best = o;
+    }
+  } catch {}
+  if (best) return best;
+  let pids = [pid];
+  try {
+    pids = pids.concat(execFileSync('pgrep', ['-P', pid], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .split('\n').filter(Boolean));
+  } catch {}
+  for (const p of pids) {
+    const note = read(path.join(CFG, 'sessions', `${p}.json`));
+    const sid = note && /^[0-9a-f-]{36}$/i.test(note.sessionId || '') ? note.sessionId : '';
+    if (!sid) continue;
+    const o = read(path.join(FLEET_DIR, `${sid}.json`));
+    // A record on ANOTHER fleet is not this pane's, whatever id it carries.
+    if (o && (!o.sock || o.sock === SOCK)) return o;
+    return { session_id: sid, cwd: note.cwd || '',
+             transcript: note.cwd ? path.join(PROJECTS, encCwd(note.cwd), `${sid}.jsonl`) : '' };
+  }
+  return null;
+}
+
 function newestTranscript(cwd) {
   try {
     const dir = path.join(PROJECTS, encCwd(cwd));
@@ -765,7 +823,7 @@ function gather({ lead = false } = {}) {
   // shape and for why this one cannot reach the network.
   const prs = prNumbers();
   return sessions.map(s => {
-    const st = fleet.get(s.name);
+    const st = fleet.get(s.name) || (s.asleepAt ? undefined : recordOfPane(s.name) || undefined);
     const agent = agentOf(s.name);
     const folder = st?.folder || (s.cwd ? path.basename(s.cwd) : s.name);
     const branch = st?.branch || (s.cwd ? gitBranch(s.cwd) : '');
@@ -1640,7 +1698,9 @@ let labelInput = '';         // editable, pre-filled with the current label
 // two never drift apart — a session named "x" always sitting in a folder named "x"
 // is the invariant the rest of the grid (and fleet-spawn) relies on. Shells out to
 // bin/fleet-rename (same pattern as pauseSession -> bin/fleet-pause below) rather
-// than duplicating the git/tmux/marker-migration logic here.
+// than duplicating the git/tmux/marker-migration logic here. That includes the state
+// record: this file used to patch it itself, which is why a rename from the grid kept
+// its transcript and the same rename from the CLI, MCP or phone did not.
 function doRename(oldName, newName) {
   newName = newName.trim();
   if (!newName || newName === oldName) return { ok: false, msg: 'unchanged' };
@@ -1651,26 +1711,8 @@ function doRename(oldName, newName) {
     const msg = (e.stderr || e.stdout || e.message || '').toString().trim().split('\n').pop();
     return { ok: false, msg: (msg || 'rename failed').replace(/^fleet-rename: /, '').slice(0, 100) };
   }
-  patchStatusFile(oldName, newName);
   return { ok: true };
 }
-// status file(s): patch slot/cwd/folder now instead of waiting for the next hook
-// event to overwrite them (Stop/UserPromptSubmit would anyway, but not right away)
-function patchStatusFile(oldName, newName) {
-  try {
-    for (const f of fs.readdirSync(FLEET_DIR)) {
-      if (!f.endsWith('.json')) continue;
-      const p = path.join(FLEET_DIR, f);
-      let o; try { o = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { continue; }
-      if (o.slot === oldName && ownedBy(o, SOCK, Z)) {
-        const newPath = path.join(path.dirname(o.cwd || ''), newName);
-        o.slot = newName; o.cwd = newPath; o.folder = newName;
-        try { fs.writeFileSync(p, JSON.stringify(o)); } catch {}
-      }
-    }
-  } catch {}
-}
-
 function buildItems() {
   cards = gather();
   const free = freeWorktrees();

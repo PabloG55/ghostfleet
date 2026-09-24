@@ -314,6 +314,10 @@ pane_has() {                       # <socket> <pattern> [target]
 # nothing could find.
 TEST_RUNS=/tmp/ghostfleet-test                    # one <prefix>.<pid>.XXXXXX per run
 TMUX_TMPDIR="$(cd "$(mktemp -d "$TEST_RUNS.$$.XXXXXX")" && pwd -P)"; export TMUX_TMPDIR
+# ...and the pane id this run was started from means nothing on a fixture server. The hook
+# asks tmux which session $TMUX_PANE is in, so an inherited `%20` would name whichever
+# fixture session happened to get that id — a plausible wrong slot, not an error.
+unset TMUX_PANE
 
 # A fixed name is self-limiting: the next run kills the server. A unique one is
 # not, so a run that dies half way leaks its servers for good. Two guards — our
@@ -2346,6 +2350,127 @@ if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   rm -rf "$RN"
 else
   skip "rename keeps its slot" "tmux/git missing"
+fi
+
+# ── 4a3b. a rename must not lose the session's CONVERSATION ──────────────────
+# Measured on a live fleet: a worker renamed from one name to another answered to the new
+# name in tmux, but its state record still said the old one — and the hook kept writing
+# the old one on every turn, because it took the slot from CLAUDE_FLEET_SLOT, which the
+# agent was launched with and a rename cannot reach. Every reader that looks a session up
+# by name then found nothing: fleet-read said "live but has no transcript yet", the phone's
+# chat said "No messages yet", and hibernate's plan vetoed it as having no conversation id.
+# Two shapes, because both exist: a rename through fleet-rename after a turn, and a
+# session whose record predates the `pane` field and was renamed without fleet-rename,
+# which has to heal from the agent's own note and then from its next turn.
+group "rename carries the conversation"
+if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  RV="$(mktemp -d)"; RV="$(cd "$RV" && pwd -P)"
+  RVC="$RV/cfg"; RVF="$RVC/fleet"; mkdir -p "$RVF" "$RVC/sessions" "$RV/repo"
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  git init -q -b main "$RV/repo" 2>/dev/null
+  git -C "$RV/repo" config user.email t@t; git -C "$RV/repo" config user.name t
+  : > "$RV/repo/f"; git -C "$RV/repo" add -A; git -C "$RV/repo" commit -qm init 2>/dev/null
+  git -C "$RV/repo" worktree add -q "$RV/toolbox" -b toolbox 2>/dev/null
+  git -C "$RV/repo" worktree add -q "$RV/scratch" -b scratch 2>/dev/null
+  # A shell holding the pane with the "agent" under it: the shape agent-here leaves.
+  tmux -L cf-acme-web new-session -d -s toolbox -c "$RV/toolbox" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  tmux -L cf-acme-web new-session -d -s scratch -c "$RV/scratch" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  sleep 0.5
+  enc() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+  convo() {   # sid cwd -> transcript path, with one real turn in it
+    local d="$RVC/projects/$(enc "$2")"; mkdir -p "$d"
+    printf '%s\n' \
+      '{"type":"user","message":{"role":"user","content":"which fields are duplicated?"},"timestamp":"2026-09-24T10:00:00.000Z"}' \
+      '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"billing-svc repeats three fields"}]},"timestamp":"2026-09-24T10:00:05.000Z"}' \
+      > "$d/$1.jsonl"
+    printf '%s' "$d/$1.jsonl"
+  }
+  # A NEIGHBOUR in the same folder, written later. Without it the card rows prove nothing:
+  # the grid's older fallback is "the newest transcript in this cwd", which picks the right
+  # file whenever it is the only one — and a folder shared by several conversations is
+  # exactly where that guess shows somebody else's last message.
+  neighbour() {
+    local d="$RVC/projects/$(enc "$1")"; mkdir -p "$d"
+    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"acme-web shipped a neighbour fix"}]},"timestamp":"2026-09-24T11:00:00.000Z"}' \
+      > "$d/cccccccc-3333-4333-8333-333333333333.jsonl"
+    touch "$d/cccccccc-3333-4333-8333-333333333333.jsonl"
+  }
+  SV_SOCK="$(tmux -L cf-acme-web display-message -p '#{socket_path}' 2>/dev/null)"
+  SV_PID="$(tmux -L cf-acme-web display-message -p '#{pid}' 2>/dev/null)"
+  turn() {    # session-to-take-the-pane-of, env-slot, sid, cwd, transcript, event
+    local pane; pane="$(tmux -L cf-acme-web display-message -p -t "$1" '#{pane_id}' 2>/dev/null)"
+    printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s"}' "$6" "$3" "$4" "$5" \
+    | env TMUX="$SV_SOCK,$SV_PID,0" TMUX_PANE="$pane" CLAUDE_FLEET_SLOT="$2" CLAUDE_FLEET_SOCK=cf-acme-web \
+          CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" CLAUDE_FLEET_NOTIFIER=off \
+          "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  rd()    { env -u TMUX CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" "$ROOT/bin/fleet-read" -s cf-acme-web "$1" 2>&1; }
+  # The phone's chat is fleet_read with json:true, which the dispatch runs as exactly this:
+  # TMUX cleared, the profile's config and fleet dir, -s the project's socket.
+  phone() { env TMUX= CLAUDE_FLEET_SOCK=cf-acme-web CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" \
+              "$ROOT/bin/fleet-read" -s cf-acme-web --json "$1" 2>/dev/null | jq -r '.messages | length' 2>/dev/null; }
+  card()  { env -u TMUX CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" node "$ROOT/bin/fleet-grid.mjs" cf-acme-web --json 2>/dev/null \
+              | jq -r --arg n "$1" '.cards[] | select(.name==$n) | .msg // ""' 2>/dev/null; }
+  plan()  { env -u TMUX CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" "$ROOT/bin/fleet-hibernate" -s cf-acme-web --idle-hours 0 --json 2>/dev/null \
+              | jq -r --arg n "$1" '.[] | select(.slot==$n) | (if .idle_hours == null then "no-transcript" else "found" end) + "|" + .why' 2>/dev/null; }
+  slot_of() { jq -r '.slot' "$RVF/$1.json" 2>/dev/null; }
+
+  # ── shape 1: a turn, then fleet-rename ──
+  S1=aaaaaaaa-1111-4111-8111-111111111111
+  T1="$(convo "$S1" "$RV/toolbox")"
+  turn toolbox toolbox "$S1" "$RV/toolbox" "$T1" Stop
+  is "fixture: the turn is readable by its name"   "1" "$(rd toolbox | grep -c 'repeats three fields' || true)"
+  sleep 1; neighbour "$RV/toolbox"
+  printf 'claude\n' > "$RVF/cf-acme-web.toolbox.agent"
+  printf 'cf-acme-web\x1ftoolbox\x1f%s\n' "$RVF" > "$RVF/cf-acme-web.scratch.reply-to"
+  tmux -L cf-acme-web new-session -d -s _term-toolbox -c "$RV/toolbox" "sleep 600" 2>/dev/null
+  tmux -L cf-acme-web set-option -t _term-toolbox @cf_tab_from toolbox 2>/dev/null
+  tmux -L cf-acme-web set-option -t _term-toolbox @cf_tab_kind term 2>/dev/null
+  env -u TMUX CLAUDE_FLEET_DIR="$RVF" CLAUDE_CONFIG_DIR="$RVC" "$ROOT/bin/fleet-rename" -s cf-acme-web toolbox acme-api >/dev/null 2>&1
+  is "the record moves to the new name"            "acme-api" "$(slot_of "$S1")"
+  is "...and its cwd to the moved worktree"        "$RV/acme-api" "$(jq -r .cwd "$RVF/$S1.json" 2>/dev/null)"
+  is "fleet-read finds it by the new name"         "1" "$(rd acme-api | grep -c 'repeats three fields' || true)"
+  is "the phone's session view has its messages"   "2" "$(phone acme-api)"
+  is "the grid card carries its last message"      "1" "$(card acme-api | grep -c 'repeats three fields' || true)"
+  is "hibernate's plan reads its transcript"       "found" "$(plan acme-api | cut -d'|' -f1)"
+  # THE HOOK MUST NOT UNDO IT. The agent still runs with CLAUDE_FLEET_SLOT=toolbox; the
+  # next turn is what used to write the old name straight back.
+  turn acme-api toolbox "$S1" "$RV/acme-api" "$T1" Stop
+  is "a turn after the rename keeps the new name"  "acme-api" "$(slot_of "$S1")"
+  is "...and fleet-read still finds it"            "1" "$(rd acme-api | grep -c 'repeats three fields' || true)"
+  is "the agent marker moved"                      "claude" "$(cat "$RVF/cf-acme-web.acme-api.agent" 2>/dev/null)"
+  is "an answer on its way back is re-addressed"   "acme-api" "$(cut -d$'\x1f' -f2 "$RVF/cf-acme-web.scratch.reply-to" 2>/dev/null)"
+  is "its terminal tab is renamed with it"         "1" "$(tmux -L cf-acme-web has-session -t '=_term-acme-api' 2>/dev/null && echo 1 || echo 0)"
+  is "...and points back at the new name"          "acme-api" "$(tmux -L cf-acme-web show-options -qv -t _term-acme-api @cf_tab_from 2>/dev/null)"
+  is "a resume from the moved worktree finds it"   "1" "$([ -f "$RVC/projects/$(enc "$RV/acme-api")/$S1.jsonl" ] && echo 1 || echo 0)"
+
+  # ── shape 2: the live one — an old record with no pane, renamed without fleet-rename ──
+  S2=bbbbbbbb-2222-4222-8222-222222222222
+  T2="$(convo "$S2" "$RV/scratch")"
+  jq -n --arg id "$S2" --arg cwd "$RV/scratch" --arg tr "$T2" \
+    '{session_id:$id, zellij:"", sock:"cf-acme-web", slot:"scratch", cwd:$cwd, folder:"scratch",
+      branch:"scratch", status:"ready", transcript:$tr, ts:1}' > "$RVF/$S2.json"
+  sleep 1; neighbour "$RV/scratch"
+  PPID2="$(tmux -L cf-acme-web display-message -p -t scratch '#{pane_pid}' 2>/dev/null)"
+  AGENT2="$(pgrep -P "$PPID2" 2>/dev/null | head -1)"
+  jq -n --arg id "$S2" --arg cwd "$RV/scratch" '{sessionId:$id, cwd:$cwd}' > "$RVC/sessions/${AGENT2:-none}.json"
+  tmux -L cf-acme-web rename-session -t scratch billing-svc 2>/dev/null
+  is "fixture: the record still names the old one" "scratch" "$(slot_of "$S2")"
+  is "fleet-read finds it through the pane"        "1" "$(rd billing-svc | grep -c 'repeats three fields' || true)"
+  is "the phone's session view has its messages"   "2" "$(phone billing-svc)"
+  is "the grid card carries its last message"      "1" "$(card billing-svc | grep -c 'repeats three fields' || true)"
+  is "hibernate's plan reads its transcript"       "found" "$(plan billing-svc | cut -d'|' -f1)"
+  turn billing-svc scratch "$S2" "$RV/scratch" "$T2" UserPromptSubmit
+  is "...and its next turn heals the record"       "billing-svc" "$(slot_of "$S2")"
+  # THE OTHER DIRECTION: the fallback must not hand a session somebody else's conversation.
+  # A live session with no record and no note of its own gets nothing, not a neighbour's.
+  tmux -L cf-acme-web new-session -d -s scratch -c "$RV/repo" "sleep 600" 2>/dev/null
+  is "a session with no evidence reads as empty"   "0" "$(phone scratch)"
+  is "...and its card shows no borrowed message"   "0" "$(card scratch | grep -c 'repeats three fields' || true)"
+  tmux -L cf-acme-web kill-server 2>/dev/null
+  rm -rf "$RV"
+else
+  skip "rename carries the conversation" "tmux/git/jq missing"
 fi
 
 # ── 4a4. never hand --order to a grid that predates it ───────────────────────

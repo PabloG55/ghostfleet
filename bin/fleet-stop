@@ -64,7 +64,12 @@ done
 [ -n "$SOCK" ]    || { echo "fleet-stop: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 [ -n "$SESSION" ] || { echo "fleet-stop: usage: fleet-stop [-s socket] <session>" >&2; exit 1; }
 [ "$SESSION" = master ] && { echo "fleet-stop: refusing to stop 'master' (the lead)" >&2; exit 1; }
-[ -n "${CLAUDE_FLEET_SLOT:-}" ] && [ "$SESSION" = "$CLAUDE_FLEET_SLOT" ] \
+# The caller's name is asked of its PANE as well as read from the environment: the
+# environment holds the name it was LAUNCHED with, so after a rename the old guard compared
+# against a name nobody has and let a session stop itself. Either one matching refuses.
+_me=""; [ -n "${TMUX_PANE:-}" ] && case "${TMUX:-}" in *"/$SOCK,"*)
+  _me="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+{ [ -n "${CLAUDE_FLEET_SLOT:-}" ] && [ "$SESSION" = "$CLAUDE_FLEET_SLOT" ]; } || { [ -n "$_me" ] && [ "$SESSION" = "$_me" ]; } \
   && { echo "fleet-stop: refusing to stop the calling session ('$SESSION')" >&2; exit 1; }
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"

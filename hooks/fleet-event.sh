@@ -64,7 +64,31 @@ if [ -z "$SOCK" ] && [ -n "${TMUX:-}" ]; then
   _s="${TMUX%%,*}"; _s="${_s##*/}"
   case "$_s" in cf-*) SOCK="$_s" ;; esac
 fi
-if [ -z "$SLOT" ] && [ -n "$SOCK" ]; then
+# ── THE SLOT IS THE PANE'S NAME NOW, NOT THE NAME IT WAS BORN WITH ───────────
+# CLAUDE_FLEET_SLOT is exported once, at launch, and a rename cannot reach into a running
+# process to change it. So after `x` was renamed `y`, every event went on writing
+# slot:"x" — overwriting whatever fleet-rename had patched — and every reader that looks a
+# session up by name (fleet-read, the phone's chat, the grid card, hibernate's plan) found
+# nothing under `y`. Measured on a live fleet: the tmux session answered to its new name,
+# its record said the old one on every turn, and the phone said "No messages yet".
+#   $TMUX_PANE is the pane's id (`%12`), which a rename does not change, so asking tmux
+# what session that pane is in answers with the CURRENT name. Targeted with the pane id and
+# nothing else: without -t, display-message answers for whichever session the server
+# considers current, which is somebody else's as often as not.
+#   A tab or a `+` name is never claimed (CLAUDE.md): an agent run by hand inside a tab
+# keeps whatever the environment says, which is what it did before.
+PANE=""
+if [ -n "$SOCK" ] && [ -n "${TMUX_PANE:-}" ]; then
+  case "${TMUX:-}" in *"/$SOCK,"*)
+    # Qualified by the SERVER's pid ($TMUX is "<socket>,<server-pid>,<session>"): pane ids
+    # restart at %0 with every server, so a bare `%3` in a record left from a server that
+    # has since died would claim whichever new session got that id.
+    _r="${TMUX#*,}"; PANE="$TMUX_PANE@${_r%%,*}"
+    _live="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)"
+    case "$_live" in ''|_*|+*) ;; *) SLOT="$_live" ;; esac
+  ;; esac
+fi
+if [ -z "$SLOT" ] && [ -n "$SOCK" ] && [ -z "$PANE" ]; then
   SLOT="$(tmux -L "$SOCK" display-message -p '#{session_name}' 2>/dev/null)"
   # A leading `_` is a tab, not an agent (CLAUDE.md), and a `+` name is a tmux expression
   # rather than a name — neither is a slot this should claim.
@@ -106,10 +130,10 @@ esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"
 if jq -n \
   --arg id "$SESSION" --arg z "$ZELL" --arg slot "$SLOT" \
-  --arg sock "$SOCK" \
+  --arg sock "$SOCK" --arg pane "$PANE" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
   --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" \
-  '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, cwd:$cwd, folder:$folder,
+  '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, pane:$pane, cwd:$cwd, folder:$folder,
     branch:$branch, status:$status, transcript:$tr, ts:$ts}' \
   >"$tmp" 2>/dev/null
 then
