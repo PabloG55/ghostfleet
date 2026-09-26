@@ -23,6 +23,12 @@
 //   - the COMMIT MESSAGES in the range  (30 of 371 messages)
 //   - the REF NAME itself               (a branch can be named after a project)
 //
+// AND A TAILNET ADDRESS, in every one of those places. A real one sat in a test fixture for
+// sixty-odd PRs because nothing here asked about addresses at all. Any 100.64.0.0/10 address,
+// fd7a:115c:a1e0::/48 node or *.ts.net host is refused unless it is one of the documented
+// examples — the allowlist lives beside the matcher in name-sweep.mjs, in one place, so the
+// hook and the suite cannot disagree about what an example is.
+//
 // IT PRINTS THE MATCH. Locally, to your own terminal, because "something is wrong
 // somewhere" is not actionable and the whole point is to show you what you nearly pushed.
 // Nothing is written to a file.
@@ -46,7 +52,7 @@ if (!fs.existsSync(sweep)) {
   console.error('pre-push: if that file really is gone, push with --no-verify and fix the hook.');
   process.exit(1);
 }
-const { digest, candidates, DENY } = await import(pathToFileURL(sweep).href);
+const { digest, candidates, DENY, tailnetHits } = await import(pathToFileURL(sweep).href);
 
 const git = (...a) => execFileSync('git', ['-C', root, ...a], { maxBuffer: 1 << 28 });
 const txt = (...a) => git(...a).toString();
@@ -54,6 +60,7 @@ const hits = (s) => {
   const out = new Set();
   for (const line of String(s).split('\n'))
     for (const c of candidates(line)) if (DENY.has(digest(c))) out.add(c);
+  for (const t of tailnetHits(s)) out.add(t);
   return out;
 };
 
@@ -126,13 +133,14 @@ if (!bad.length) process.exit(0);
 
 const names = new Set(bad.flatMap(b => [...b.what]));
 console.error('');
-console.error(`pre-push: REFUSED — ${names.size} withheld name(s) in ${bad.length} place(s).`);
+console.error(`pre-push: REFUSED — ${names.size} withheld name(s) or tailnet address(es) in ${bad.length} place(s).`);
 console.error(`pre-push: this remote is PUBLIC; a push is the moment it stops being private.`);
 console.error('');
 for (const b of bad.slice(0, 40)) console.error(`  ${b.where}\n      ${[...b.what].join(', ')}`);
 if (bad.length > 40) console.error(`  … and ${bad.length - 40} more`);
 console.error('');
-console.error('  fix the tree, or drop the branch. If this is a false positive, the list is');
-console.error('  in test/helpers/name-sweep.mjs. To override once: git push --no-verify');
+console.error('  fix the tree, or drop the branch. If this is a false positive, the list');
+console.error('  and the tailnet examples are in test/helpers/name-sweep.mjs. To override');
+console.error('  once: git push --no-verify');
 console.error('');
 process.exit(1);
