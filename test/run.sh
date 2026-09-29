@@ -362,6 +362,19 @@ kill_servers_in() {                # $1 = a run directory
 # reader, so the in-section helper can go on reaping and resetting its own variable without
 # ever hiding a daemon from the teardown that always runs.
 sv_reg() { [ -n "${1:-}" ] && printf '%s\n' "$1" >> "$TMUX_TMPDIR/serve.pids"; return 0; }
+# EVERY DAEMON CARRIES THIS RUN'S DIRECTORY IN ITS ARGV, because that is the only thing a
+# LATER run can find it by. Three groups (/api/pane, the REAL grid, push) started theirs
+# from "$ROOT/bin", so a run that was SIGKILLed — no trap — left a daemon whose argv named
+# the CHECKOUT and not the run: sweep_dead_runs looks for the run directory and could not
+# see it, and sweep_orphan_serves only ever looks for its own checkout, so once that
+# worktree was removed nothing would ever look again. Measured: eight alive on loopback
+# ports, the oldest two days old, every one from a worktree that no longer existed.
+#   `--title` because it is a node option, not the script's: fleet-serve never sees it, and
+# it survives on both platforms — macOS replaces the whole visible argv with the title,
+# Linux keeps it as an argument — so either way `pgrep -f "$run/.*fleet-serve.mjs"` finds
+# it. The sweep in "every backgrounded daemon is registered for teardown" checks that every
+# backgrounded start carries it.
+SV_TAG="--title=ghostfleet-test:$TMUX_TMPDIR/fleet-serve.mjs"
 # `2>/dev/null` does NOT cover this: bash opens the input redirection before it applies
 # the error redirection, so a missing file is announced on the way in and the suppression
 # arrives too late. Harmless in a full run, where the fleet-serve group has registered
@@ -445,6 +458,9 @@ trap 'exit 130' INT
 NA_LOG="$TMUX_TMPDIR/na.rows"
 sweep_dead_runs "$TEST_RUNS"
 sweep_orphan_serves "$ROOT"
+# What was already running before this run touched anything: the baseline the last group
+# measures against, so it can say "this run left nothing" without claiming anybody else's.
+SV_BEFORE=" $(pgrep -f 'fleet-serve' 2>/dev/null | tr '\n' ' ')"
 
 # Proven, not asserted: every other group now rests on this, so it goes first and
 # goes red on its own rather than being taken on trust. Both directions on the
@@ -1987,6 +2003,12 @@ SVSWEEP="$(awk '
   { for (n in start) if (NR > n && NR <= n+3 && /SERVE_PIDS/) delete start[n] }
   END { for (n in start) printf "%s ", n }' "$0" | tr -s ' ')"
 is "no unregistered daemon start" "" "$(printf '%s' "${SVSWEEP% }")"
+# ...and every one of them names this run, or a killed run leaves it where no sweep looks.
+# The FILE, not "$0": a filtered run executes a generated copy holding only the groups it
+# kept, so a sweep of "$0" reads none of the lines it is about and passes on nothing.
+SVTAGSWEEP="$(awk '
+  /node .*fleet-serve\.mjs/ && /&[[:space:]]*$/ && !/^[[:space:]]*#/ && !/SV_TAG/ { printf "%s ", NR }' "$ROOT/test/run.sh")"
+is "no daemon start without this run's tag" "" "$(printf '%s' "${SVTAGSWEEP% }")"
 
 group "a daemon that ignores SIGTERM is still reaped"
 # WHY `reap` ESCALATES, and the first version of this comment got the reason wrong, so it
@@ -9819,7 +9841,7 @@ sv_code() { sv_cli enroll "$1" | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}'; }
 # CLAUDE.md's rule for the whole file applies — silence is the symptom.
 SV_WHY=""
 sv_start() {
-  HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.$1" 2>&1 &
+  HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV_TAG" "$SV/bin/fleet-serve.mjs" > "$SV/log.$1" 2>&1 &
   svp=$!
   SERVE_PIDS="$SERVE_PIDS $svp"
   sv_reg "${svp}"
@@ -10282,7 +10304,7 @@ PNBASE="http://localhost:$PNPORT"
 # the three assertions this group exists for had not run in any green suite since.
 pn_cli() { [ $# -gt 0 ] || { echo "fleet-serve helper called with NO VERB — that starts the DAEMON, in the foreground, unregistered and unkillable by the trap" >&2; return 2; }
            GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
-           HOME="$PN/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" "$@"; }
+           HOME="$PN/home" TMUX= node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" "$@"; }
 pn_cli init --bind 127.0.0.1 --port "$PNPORT" >/dev/null 2>&1
 # A HELPER WRITES WHERE IT CLAIMS TO, asserted rather than read. Both directions, because
 # each one alone passes under the bug that made this necessary: the first says this group's
@@ -10295,7 +10317,7 @@ is "pn_cli wrote ITS OWN config"           "$PNPORT" "$(cfgport "$PN/serve.json"
 is "...and left the shared one alone"      "$PORT"   "$(cfgport "$SV/serve.json")"
 node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$PN/serve.json"
 GHOSTFLEET_SERVE_CONFIG="$PN/serve.json" GHOSTFLEET_SERVE_AUDIT="$PN/audit.jsonl" \
-  HOME="$PN/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$ROOT/bin/fleet-serve.mjs" > "$PN/log" 2>&1 &
+  HOME="$PN/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" > "$PN/log" 2>&1 &
 PN_PID=$!
 SERVE_PIDS="$SERVE_PIDS $PN_PID"   # registered as well as killed locally: the local kill
 sv_reg "${PN_PID}"
@@ -10447,7 +10469,7 @@ GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl
 rcode="$(GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl" \
   HOME="$RG/home" TMUX= node "$ROOT/bin/fleet-serve.mjs" enroll phone | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')"
 GHOSTFLEET_SERVE_CONFIG="$RG/serve.json" GHOSTFLEET_SERVE_AUDIT="$RG/audit.jsonl" \
-  HOME="$RG/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$ROOT/bin/fleet-serve.mjs" > "$RG/log" 2>&1 &
+  HOME="$RG/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" > "$RG/log" 2>&1 &
 rgp=$!
 SERVE_PIDS="$SERVE_PIDS $rgp"
 sv_reg "${rgp}"
@@ -10585,7 +10607,7 @@ else
   # config, and this group changes both.
   pu() { GHOSTFLEET_SERVE_CONFIG="$PU/serve.json" GHOSTFLEET_SERVE_AUDIT="$PU/audit.jsonl" \
          GHOSTFLEET_PUSH_ALLOW_HTTP=1 HOME="$PU/home" TMUX= CLAUDE_FLEET_AWAKE=off \
-         node "$ROOT/bin/fleet-serve.mjs" "$@"; }
+         node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" "$@"; }
   # A status file, exactly as hooks/fleet-event.sh writes one — INCLUDING the fields that
   # must never reach a lock screen. The transcript path and the note are planted secrets:
   # they are what the payload assertions below are looking for and must not find.
@@ -10834,7 +10856,7 @@ chmod +x "$SV/shim/tailscale"
 #   rc is taken from `wait` instead of from an echo inside the subshell: if node refused on
 # its own the kill is a no-op and wait yields its real status, and if node had to be killed
 # wait yields 143 — which fails the rc=1 row, correctly, because the guard did not work.
-PATH="$SV/shim:$PATH" HOME="$SV/home" TMUX= node "$SV/bin/fleet-serve.mjs" >"$SV/funnel.out" 2>&1 &
+PATH="$SV/shim:$PATH" HOME="$SV/home" TMUX= node "$SV_TAG" "$SV/bin/fleet-serve.mjs" >"$SV/funnel.out" 2>&1 &
 fpid=$!
 SERVE_PIDS="$SERVE_PIDS $fpid"   # registered as well as killed locally: the local kill
 sv_reg "${fpid}"
@@ -10878,7 +10900,7 @@ can_arm_here() {
 # pid: this machine had an unrelated inhibitor running the whole time, and the first cut
 # of the check reported that one and read as a pass no matter what it did.
 if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/null 2>&1; then
-  HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=on node "$SV/bin/fleet-serve.mjs" > "$SV/log.awake" 2>&1 &
+  HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=on node "$SV_TAG" "$SV/bin/fleet-serve.mjs" > "$SV/log.awake" 2>&1 &
   apid=$!
   SERVE_PIDS="$SERVE_PIDS $apid"   # registered as well as killed locally: the local kill
   sv_reg "${apid}"
@@ -10929,7 +10951,7 @@ if command -v caffeinate >/dev/null 2>&1 || command -v systemd-inhibit >/dev/nul
    kill $apid 2>/dev/null; sleep 1
   fi
   # off must mean off, or "on" proves nothing
-  HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV/bin/fleet-serve.mjs" > "$SV/log.awakeoff" 2>&1 &
+  HOME="$SV/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV_TAG" "$SV/bin/fleet-serve.mjs" > "$SV/log.awakeoff" 2>&1 &
   bpid=$!
   SERVE_PIDS="$SERVE_PIDS $bpid"   # registered as well as killed locally: the local kill
   sv_reg "${bpid}"
@@ -14890,6 +14912,50 @@ is "...and a failed wake is reported, not swallowed" "yes" \
    "$(grep -q 'could not wake' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
 
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
+
+# ── a run leaves no fleet-serve it did not find ──────────────────────────────
+# Eight leaked daemons were found on loopback ports, from suite runs in worktrees that had
+# since been removed. Two halves: a run that was KILLED must be reapable by the next one
+# (the tag), and a run that finishes must leave nothing — measured against the baseline
+# taken at startup, so a daemon somebody else started is never this run's business.
+#   WATCHED GOING RED: without --title the dead run's daemon survives the sweep below, and
+# with the three "$ROOT/bin" starts reverted the tag sweep above names their lines.
+group "a run leaves no fleet-serve it did not find"
+if command -v node >/dev/null 2>&1; then
+  LK="$(cd "$(mktemp -d "$TEST_RUNS.$$.leak.XXXXXX")" && pwd -P)"
+  mkdir -p "$LK/checkout/bin"
+  printf 'setInterval(() => {}, 1000);\n' > "$LK/checkout/bin/fleet-serve.mjs"
+  sleep 0 & LKDEAD=$!; wait "$LKDEAD" 2>/dev/null
+  LKD="$LK/run.$LKDEAD.cccccc"; mkdir -p "$LKD"
+  # Started the way the three groups start theirs — from a CHECKOUT's bin, not the run's —
+  # and orphaned, which is what a SIGKILLed run leaves. One tagged, one not.
+  ( node "--title=ghostfleet-test:$LKD/fleet-serve.mjs" "$LK/checkout/bin/fleet-serve.mjs" & echo $! > "$LK/tagged.pid" )
+  ( node "$LK/checkout/bin/fleet-serve.mjs" & echo $! > "$LK/bare.pid" )
+  li=0; while [ "$li" -lt 50 ] && ! { [ -s "$LK/tagged.pid" ] && [ -s "$LK/bare.pid" ]; }; do li=$((li+1)); sleep 0.1; done
+  LKT="$(cat "$LK/tagged.pid" 2>/dev/null)"; LKB="$(cat "$LK/bare.pid" 2>/dev/null)"
+  li=0; while [ "$li" -lt 50 ] && ! pgrep -f "$LKD/.*fleet-serve.mjs" >/dev/null 2>&1; do li=$((li+1)); sleep 0.1; done
+  lkalive() { kill -0 "${1:-0}" 2>/dev/null && echo 1 || echo 0; }
+  is "leak: a killed run's daemon is up to begin with"     "1 1" "$(lkalive "$LKT") $(lkalive "$LKB")"
+  sweep_dead_runs "$LK/run"
+  is "leak: the next run's sweep reaps the tagged one"     "0"   "$(lkalive "$LKT")"
+  is "leak: ...and the untagged one is exactly what leaked" "1"  "$(lkalive "$LKB")"
+  reap "$LKB"
+  rm -rf "$LK"
+
+  # THE WHOLE RUN: everything registered is reaped, and nothing new that names this run or
+  # this checkout's bin is still alive.
+  reap ${SERVE_PIDS:-} $(sv_all); kill_serves_in "$TMUX_TMPDIR"
+  lkleft=""
+  for lp in $(pgrep -f 'fleet-serve' 2>/dev/null); do
+    case "$SV_BEFORE " in *" $lp "*) continue ;; esac
+    case "$(ps -o command= -p "$lp" 2>/dev/null)" in
+      *"$TMUX_TMPDIR"*|*"$ROOT/bin/fleet-serve"*) lkleft="$lkleft $lp" ;;
+    esac
+  done
+  is "leak: this run leaves no fleet-serve it did not find" "" "${lkleft# }"
+else
+  skip "a run leaves no fleet-serve" "node missing"
+fi
 
 # NAMED, NOT JUST COUNTED. A group that is not applicable on every run is indistinguishable
 # from one nobody wrote, unless the run says which rows they were.
