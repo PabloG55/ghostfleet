@@ -4455,9 +4455,37 @@ FSOUT="$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/ru
 if grep -q 'no chrome' <<< "$FSOUT"; then
   skip "fleet-shots against a real page" "no chrome to photograph in"
 else
-  is "it writes a page, a manifest and shots" "yes" \
-     "$([ -f "$FSH/run/index.html" ] && [ -f "$FSH/run/manifest.json" ] && \
-        [ "$(ls "$FSH/run"/*.png 2>/dev/null | grep -c .)" = 4 ] && echo yes || echo no)"
+  # ONE VIDEO OF THE FLOW WHERE THERE IS AN ENCODER, a still per step where there is not.
+  # Which one this machine gets is decided by fleet-shots and read back from the manifest,
+  # so both halves are asserted wherever they can be, and the --stills run below makes the
+  # fallback run here too rather than only on a machine without ffmpeg.
+  fsvid="$(node -e 'const m=require(process.argv[1]);console.log(m.video||"")' "$FSH/run/manifest.json" 2>/dev/null)"
+  if [ -n "$fsvid" ]; then
+    is "it writes a page, a manifest and ONE video" "yes" \
+       "$([ -f "$FSH/run/index.html" ] && [ -s "$FSH/run/$fsvid" ] && echo yes || echo no)"
+    # STILLS ONLY WHERE A STEP FAILED: step 2's POST 404s, nothing else is flagged.
+    is "...and a still only for the step that failed" "02-after-signing.png" \
+       "$(cd "$FSH/run" && ls *.png 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+    # CHAPTERS IN ORDER, covering the recording end to end — a chapter that starts after the
+    # video ends is a click that lands nowhere.
+    is "...one chapter per step, in order, ending where the video does" "yes" \
+       "$(node -e 'const m=require(process.argv[1]),s=m.steps;
+          const ok=s.length===4&&s[0].start<0.5&&s.every((x,i)=>x.end>x.start&&(i===0||x.start>=s[i-1].end-0.001))&&Math.abs(s[3].end-m.duration)<0.01;
+          console.log(ok?"yes":"no: "+JSON.stringify(s.map(x=>[x.start,x.end]))+" / "+m.duration)' "$FSH/run/manifest.json" 2>/dev/null)"
+    if command -v ffprobe >/dev/null 2>&1; then
+      is "...and the video is as long as the chapters say" "yes" \
+         "$(d="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$FSH/run/$fsvid" 2>/dev/null)"; \
+            node -e 'const m=require(process.argv[1]);const d=Number(process.argv[2]);console.log(Math.abs(d-m.duration)<0.6?"yes":"no: file "+d+"s, manifest "+m.duration+"s")' "$FSH/run/manifest.json" "$d")"
+    fi
+    is "...and the page is the recorded-run page"  "yes" "$(grep -q '<video id="v"' "$FSH/run/index.html" && echo yes || echo no)"
+    node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/stills" --stills >/dev/null 2>&1
+    is "--stills: a still per step and no video"   "4:no" \
+       "$(ls "$FSH/stills"/*.png 2>/dev/null | grep -c .):$(ls "$FSH/stills"/flow.* >/dev/null 2>&1 && echo yes || echo no)"
+  else
+    is "it writes a page, a manifest and shots" "yes" \
+       "$([ -f "$FSH/run/index.html" ] && [ -f "$FSH/run/manifest.json" ] && \
+          [ "$(ls "$FSH/run"/*.png 2>/dev/null | grep -c .)" = 4 ] && echo yes || echo no)"
+  fi
   # A STEP THAT THREW STILL GETS A ROW, so the count is asserted rather than the presence:
   # a flow of four rendering as three looks complete.
   is "...one row per step"                "4" \
@@ -4634,6 +4662,80 @@ else
   done < "$STEPO/out"
 fi
 rm -rf "$STEPO"
+
+
+# ── a recorded flow is reviewed as one thing ─────────────────────────────────
+# A folder of stills showed where each step ENDED, and asked for a verdict on each one. A
+# recording is one continuous flow with a chapter per step, so the verdict is on the FLOW:
+# approve or reject, with an optional note per chapter — and the flag rule survives whole:
+# a chapter the run flagged is not approved by silence, and a note on it is the reason
+# that clears it. No browser needed for any of this: the manifest is written by hand, the
+# same shape the recorder writes, and the verbs are the real ones.
+group "fleet-shots: a recorded flow has one verdict"
+RV="$(cd "$(mktemp -d "$TEST_RUNS.$$.recv.XXXXXX")" && pwd -P)"
+mkdir -p "$RV/shots/run1" "$RV/shots/old1"
+cat > "$RV/shots/run1/manifest.json" <<'MF'
+{ "provenance": { "commit": "0000000000000000000000000000000000000000", "branch": "api-fix", "dirty": false,
+    "base": "http://127.0.0.1:1", "viewport": { "width": 390, "height": 844 }, "at": "2026-01-01T00:00:00.000Z" },
+  "video": "flow.mp4", "duration": 9.5, "problems": 1,
+  "steps": [
+    { "n": 1, "name": "the sign-in screen", "start": 0,   "end": 3.2, "file": null, "notes": [], "requests": [] },
+    { "n": 2, "name": "after signing in",   "start": 3.2, "end": 6.1, "file": "02-after-signing.png",
+      "notes": ["POST http://127.0.0.1:1/api/v1/signin answered 404"], "requests": [] },
+    { "n": 3, "name": "a clean screen",     "start": 6.1, "end": 9.5, "file": null, "notes": [], "requests": [] } ] }
+MF
+printf '{"steps":[{"n":1,"name":"old","file":"01-old.png","notes":[],"requests":[]}]}' > "$RV/shots/old1/manifest.json"
+fs() { node "$ROOT/bin/fleet-shots.mjs" "$@" 2>&1; }
+out="$(fs --check "$RV/shots/run1")"; rc=$?
+is "check: an unreviewed flow is not approved"        "1:yes" "$rc:$(grep -q 'not been reviewed' <<< "$out" && echo yes || echo no)"
+out="$(printf -- '- [approve] flow — looks right\n' | fs verdict "$RV/shots/run1")"
+is "verdict: the page's approve line is recorded"    "approve" "$(node -e 'console.log(require(process.argv[1]).flow.v)' "$RV/shots/run1/verdict.json" 2>/dev/null)"
+out="$(fs --check "$RV/shots/run1")"; rc=$?
+is "check: approved over a flagged chapter with no reason still fails" "1:yes" \
+   "$rc:$(grep -q '^flagged  2\. after signing in' <<< "$out" && echo yes || echo no)"
+printf -- '- [approve] flow — looks right\n- [note] 2. after signing in — the 404 is the fixture, the real endpoint is stubbed\n- [note] 3. a clean screen — fine\n' \
+  | fs verdict "$RV/shots/run1" >/dev/null
+out="$(fs --check "$RV/shots/run1")"; rc=$?
+is "check: a note on the flagged chapter clears it"   "0" "$rc"
+is "check: ...and the reason is on the record"        "yes" "$(grep -q '^accepted  2\..*fixture' <<< "$out" && echo yes || echo no)"
+is "check: ...and an unflagged chapter's note is printed too" "yes" "$(grep -q '^note  3\. a clean screen — fine' <<< "$out" && echo yes || echo no)"
+printf -- '- [reject] flow — the button does nothing\n' | fs verdict "$RV/shots/run1" >/dev/null
+out="$(fs --check "$RV/shots/run1")"; rc=$?
+is "check: a rejected flow fails, with its note"      "1:yes" "$rc:$(grep -q 'rejected — the button does nothing' <<< "$out" && echo yes || echo no)"
+is "verdict: text with no flow line is refused"       "1" "$(printf -- '- [note] 1. x — y\n' | fs verdict "$RV/shots/run1" >/dev/null; echo $?)"
+out="$(fs list --dir "$RV/shots")"
+is "list: a rejected recorded run reads as rejected"  "yes" "$(grep -qE '^rejected +run1' <<< "$out" && echo yes || echo no)"
+is "list: ...beside an old per-step run, still read"  "yes" "$(grep -qE 'unreviewed +old1' <<< "$out" && echo yes || echo no)"
+# THE PALETTE IS THE PHONE CLIENT'S. The review page inlines its tokens (it must open over
+# file://), so the copy is compared against web/app.css rather than trusted to stay in step.
+pal() { node -e '
+  const fs=require("fs"), src=fs.readFileSync(process.argv[1],"utf8");
+  const root=(process.argv[2]==="css" ? src : src.slice(src.indexOf("const FLOWSKIN"))).match(/:root\s*\{([^}]*)\}/)[1];
+  const o={}; for (const m of root.matchAll(/--(bg|fg|dim|hair|red|green|cyan|yellow|grey|white)\s*:\s*(#[0-9a-fA-F]{3,8})/g)) o[m[1]]=m[2].toLowerCase();
+  console.log(Object.keys(o).sort().map(k=>k+"="+o[k]).join(" "));' "$1" "$2" 2>/dev/null; }
+is "the review page's colours are web/app.css's"      "$(pal "$ROOT/web/app.css" css)" "$(pal "$ROOT/bin/fleet-shots.mjs" js)"
+is "...all ten of them"                               "10" "$(pal "$ROOT/web/app.css" css | wc -w | tr -d ' ')"
+rm -rf "$RV"
+
+# ── the recorded-run page, driven ────────────────────────────────────────────
+# Behaviour, so it is clicked rather than read: the keys, the chapter seeks (which need the
+# server's byte ranges — without them every chapter lands at 0:00), the verdict landing in
+# verdict.json, and the layout at a desk width and a phone width. The helper encodes a
+# synthetic video with ffmpeg, so it needs Chrome AND ffmpeg, and says which is missing.
+group "fleet-shots: the review page plays, seeks and decides"
+FRC="$(mktemp -d "$TEST_RUNS.$$.frc.XXXXXX")"
+node "$ROOT/test/helpers/flow-review-check.mjs" > "$FRC/out" 2> "$FRC/err"
+if grep -q '^#SKIP' "$FRC/out" 2>/dev/null; then
+  skip "the recorded-run review page" "$(head -1 "$FRC/out" | cut -d "$US" -f3)"
+else
+  is "flow-review-check produced its rows" "yes" \
+     "$([ "$(grep -c . "$FRC/out")" -ge 14 ] && echo yes || echo "no: $(grep -c . "$FRC/out") rows; $(head -c 300 "$FRC/err")")"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    is "$name" "$want" "$got"
+  done < "$FRC/out"
+fi
+rm -rf "$FRC"
 
 # ── a manifest.json that is not OURS must not take the review server down ──────────────
 # `serve` and `list` find runs by looking for a `manifest.json` in each subdirectory of

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// fleet-shots — walk a flow, photograph every step, and record what it ASKED FOR.
+// fleet-shots — walk a flow, record it as one video with a chapter per step, and record
+// what each step ASKED FOR.
 //
-//     fleet-shots --flow <file.json> [--out DIR] [--base URL] [--dry-run]
+//     fleet-shots --flow <file.json> [--out DIR] [--base URL] [--dry-run] [--stills]
 //     fleet-shots <url> [<url> ...]              one step per url, no flow file
 //     fleet-shots verdict <dir>                  record the page's copied verdict (stdin)
 //     fleet-shots --check <dir>                  exit non-zero unless every step is ok
@@ -34,7 +35,9 @@
 //
 //     <out>/index.html      the review page, self-contained, works over file://
 //     <out>/manifest.json   the same data, for anything that wants to read it
-//     <out>/01-<step>.png   one per step
+//     <out>/flow.mp4        the whole flow, one chapter per step (flow.webm without h264;
+//                           a still per step instead, with --stills or without ffmpeg)
+//     <out>/03-<step>.png   a still only where a step failed
 //
 // The page is a review surface, not a gallery: every step gets ok / problem / skip and a
 // note, and one button copies the verdict as text to paste back to whoever did the work.
@@ -304,6 +307,116 @@ tr.bad td.s{color:var(--bad);font-weight:700} tr.bad td.u{color:var(--bad)}
 #out textarea{width:100%;min-height:80px;font-family:ui-monospace,Menlo,monospace;font-size:11.5px;
   padding:7px;border:1px solid var(--line);background:var(--paper);color:var(--ink);border-radius:2px}`;
 
+// THE RECORDED-RUN PAGE WEARS THE PHONE CLIENT'S CLOTHES. Its tokens are web/app.css's own
+// — the terminal palette and the monospace face — copied by value, because this page must
+// open over file:// from a copied folder, where a <link> to the client's stylesheet is a
+// page with no styles. The colours are locked there, so they are locked here: change them
+// in app.css first, then here, and test/run.sh compares the two.
+const FLOWSKIN = `
+:root{
+  --bg:#0b0d10; --fg:#c9d1d9; --dim:#8a8a8a; --hair:#1c2128;
+  --red:#ff5f5f; --green:#87d787; --cyan:#5fd7d7; --yellow:#ffd75f; --grey:#8a8a8a; --white:#ffffff;
+  --btn:#14181d;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);overflow-x:clip}
+body{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  font-size:14px;line-height:1.35;-webkit-text-size-adjust:100%}
+button{font:inherit;color:var(--fg);background:var(--btn);border:1px solid var(--hair);
+  padding:.45em .7em;border-radius:2px;cursor:pointer;max-width:100%}
+button:disabled{opacity:.4;cursor:default}
+button.go{color:var(--bg);background:var(--cyan);border-color:var(--cyan);font-weight:700}
+button.danger{color:var(--red);border-color:#40202a}
+button.on.go{box-shadow:0 0 0 2px var(--bg),0 0 0 3px var(--cyan)}
+button.on.danger{color:var(--bg);background:var(--red);border-color:var(--red);font-weight:700}
+kbd{font:inherit;font-size:11px;color:var(--dim);margin-left:.5em}
+button.go kbd,button.on.danger kbd{color:inherit;opacity:.7}
+textarea,input{font:inherit;font-size:13px;color:var(--fg);background:#0f1216;border:1px solid var(--hair);
+  border-radius:2px;padding:.45em .55em;width:100%}
+textarea:focus,input:focus{outline:none;border-color:var(--cyan)}
+a{color:var(--cyan)}
+
+/* the bar: one line, it never wraps; the facts ellipsise */
+.bar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;min-width:0;
+  padding:calc(env(safe-area-inset-top) + 8px) 12px 8px;background:var(--bg);border-bottom:1px solid var(--hair)}
+.bar .who{color:var(--white);font-weight:700;flex:none}
+.bar .facts{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim);font-size:12px}
+.bar .facts b{color:var(--fg);font-weight:600}
+.bar .facts .flag{color:var(--yellow)}
+.bar a.up{flex:none;font-size:12px;color:var(--dim)}
+.chip{font-size:11.5px;padding:1px 7px;border-radius:999px;white-space:nowrap;flex:none;
+  color:var(--c);background:color-mix(in srgb,var(--c) 14%,transparent)}
+.chip.ok{--c:var(--green)} .chip.bad{--c:var(--red)} .chip.warn{--c:var(--yellow)} .chip.none{--c:var(--grey)}
+
+/* the layout: video beside the chapters on a desk, stacked on a phone */
+main{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;padding:12px;max-width:1500px;margin:0 auto}
+@media (min-width:900px){ main{grid-template-columns:minmax(0,1fr) minmax(320px,400px);align-items:start} }
+.player{min-width:0}
+@media (min-width:900px){ .player{position:sticky;top:52px} }
+.screen{background:#000;border:1px solid var(--hair);border-radius:10px;overflow:hidden;display:flex;justify-content:center}
+.screen video{display:block;width:100%;max-height:calc(100dvh - 250px);object-fit:contain;background:#000}
+@media (max-width:899px){ .screen video{max-height:70dvh} }
+.transport{display:flex;align-items:center;gap:10px;margin-top:8px;min-width:0}
+.transport button{flex:none;white-space:nowrap}
+.transport .t{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.transport .now{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--white)}
+/* the chapter strip: one segment per chapter, as long as it plays, coloured by what the
+   run found — the whole flow at a glance, and a click is a jump */
+.strip{display:flex;gap:2px;height:10px;margin-top:8px;position:relative}
+.strip button{padding:0;border:0;border-radius:1px;height:100%;min-width:4px;background:var(--hair)}
+.strip button.flag{background:color-mix(in srgb,var(--red) 55%,var(--hair))}
+.strip button.here{outline:1px solid var(--cyan);outline-offset:1px}
+.strip .head{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--white);pointer-events:none;left:0}
+.keys{color:var(--dim);font-size:12px;margin-top:8px}
+.keys b{color:var(--fg);font-weight:600}
+
+/* the chapters: cards, with the phone's status rail */
+.chapters{display:flex;flex-direction:column;gap:8px;min-width:0}
+.chapters h2{font-size:12px;color:var(--dim);font-weight:400;margin:0 2px 2px;text-transform:none}
+.ch{--c:var(--green);background:rgba(255,255,255,.03);border:1px solid var(--hair);border-left:3px solid var(--c);
+  border-radius:10px;padding:9px 11px;min-width:0}
+.ch.flag{--c:var(--red)}
+.ch.here{border-color:color-mix(in srgb,var(--cyan) 55%,var(--hair));border-left-color:var(--c);background:rgba(95,215,215,.05)}
+.ch .top{display:flex;align-items:baseline;gap:.5em;min-width:0;cursor:pointer}
+.ch .n{color:var(--dim);flex:none;font-variant-numeric:tabular-nums}
+.ch .name{color:var(--white);font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ch .at{margin-left:auto;color:var(--dim);font-size:12px;flex:none;font-variant-numeric:tabular-nums}
+.ch .where{color:var(--dim);font-size:12px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ch .found{font-size:12px;margin-top:5px;color:var(--green)}
+.ch .found.miss{color:var(--red)}
+.ch .note{font-size:12px;margin-top:5px;color:var(--red);overflow-wrap:anywhere}
+.ch .still{display:block;margin-top:8px;border:1px solid var(--hair);border-radius:6px;overflow:hidden}
+.ch .still{width:max-content;max-width:100%}
+.ch .still img{display:block;max-width:100%;max-height:260px;width:auto;height:auto}
+.ch details{margin-top:6px;font-size:12px;color:var(--dim)}
+.ch details summary{cursor:pointer}
+.ch .reqs{overflow-x:auto;margin-top:4px}
+.ch .reqs table{border-collapse:collapse;font-size:11.5px;white-space:nowrap}
+.ch .reqs td{padding:1px 8px 1px 0;color:var(--fg)}
+.ch .reqs tr.bad td{color:var(--red)} .ch .reqs tr.warn td{color:var(--yellow)}
+.ch textarea{margin-top:8px;min-height:2.6em;resize:vertical;display:none}
+.ch.here textarea,.ch.has textarea,.ch.flag textarea{display:block}
+.ch textarea.wants{border-color:var(--yellow)}
+.ch .needs{font-size:12px;color:var(--yellow);margin-top:4px}
+
+/* the verdict: pinned to the bottom, because it is the one thing every visit ends with */
+.verdict{position:sticky;bottom:0;z-index:5;background:var(--bg);border-top:1px solid var(--hair);
+  padding:10px 12px calc(env(safe-area-inset-bottom) + 10px)}
+.verdict .row{display:flex;gap:8px;align-items:center;max-width:1500px;margin:0 auto;min-width:0}
+.verdict input{flex:1 1 auto;min-width:0}
+.verdict .gate{max-width:1500px;margin:6px auto 0;font-size:12px;color:var(--dim)}
+.verdict .gate.pass{color:var(--green)} .verdict .gate.fail{color:var(--yellow)} .verdict .gate.rej{color:var(--red)}
+.verdict .saved{font-size:12px;color:var(--dim);white-space:nowrap}
+.verdict .saved.bad{color:var(--red)}
+.paste{max-width:1500px;margin:8px auto 0;font-size:12px;color:var(--dim)}
+.paste textarea{display:block;margin-top:4px;min-height:4.5em;font-size:11.5px}
+@media (max-width:560px){
+  .verdict .row{flex-wrap:wrap}
+  .verdict input{flex-basis:100%}
+  .verdict .row button{flex:1 1 0}
+  kbd{display:none}
+}`;
+
 // ── the verdict, and the gate ────────────────────────────────────────────────
 // A REVIEW THAT CANNOT SAY NO IS A CEREMONY. Marking steps in the page and copying the
 // text is where this started, and it is genuinely useful — but nothing stopped a worker
@@ -330,10 +443,64 @@ const readVerdict = (dir) => {
   try { return JSON.parse(fs.readFileSync(path.join(dir, VERDICT), 'utf8')); } catch { return {}; }
 };
 
+// ── two kinds of run, one answer ────────────────────────────────────────────
+// A RECORDED run (manifest.video) is reviewed as ONE thing: the flow is approved or
+// rejected, and each chapter may carry a note. A run from before the recording has a still
+// per step and a verdict per step. Both are on disk and both stay readable, so every
+// reader of "what state is this run in" — list, the index, --check — asks this one
+// function rather than growing a second copy of the rule per kind.
+//   THE FLAG RULE IS THE SAME FOR BOTH: a step the run itself flagged (a 404, a missed
+// expect) is not approved by silence. A note on that chapter is the reason, and the reason
+// is what clears it; approving the flow without one leaves it flagged.
+const isRecorded = (m) => !!(m && m.video);
+const chapterNote = (v, n) => String(((v.chapters || {})[String(n)]) || '').trim();
+function runState(m, v) {
+  if (isRecorded(m)) {
+    const fv = (v.flow || {}).v || '';
+    const flagged = m.steps.filter(st => st.notes && st.notes.length && !chapterNote(v, st.n)).length;
+    const label = fv === 'reject' ? 'rejected' : !fv ? 'unreviewed' : flagged ? `${flagged} flagged` : 'approved';
+    return { total: 1, marked: fv ? 1 : 0, problem: fv === 'reject' ? 1 : 0, flagged, label,
+             cls: fv === 'reject' ? 'bad' : (!fv || flagged) ? 'warn' : 'ok',
+             text: fv === 'reject' ? 'rejected' : !fv ? 'not reviewed' : flagged ? `${flagged} need a reason` : 'approved' };
+  }
+  const total = m.steps.length;
+  const marked = m.steps.filter(st => (v[String(st.n)] || {}).v).length;
+  const problem = m.steps.filter(st => (v[String(st.n)] || {}).v === 'problem').length;
+  const flagged = m.steps.filter(st => st.notes && st.notes.length &&
+    !(['ok', 'skip'].includes((v[String(st.n)] || {}).v) && ((v[String(st.n)] || {}).note || '').trim())).length;
+  const label = problem ? `${problem} problem` : flagged ? `${flagged} flagged`
+    : marked < total ? `${total - marked} unreviewed` : 'approved';
+  // ACTIONABLE, NOT MERELY RED. "2 flagged" on a run where every step was marked reads
+  // as a broken screen: the reviewer did everything offered and it stayed red. When the
+  // only thing left is a missing reason, say THAT — it is a different job from reviewing.
+  const text = problem ? `${problem} needs changes` : marked < total ? `${total - marked} unreviewed`
+    : flagged ? `${flagged} need a reason` : 'approved';
+  return { total, marked, problem, flagged, label, text,
+           cls: problem ? 'bad' : (marked < total || flagged) ? 'warn' : 'ok' };
+}
+
 if (ARGV[0] === 'verdict') {
   const dir = path.resolve(ARGV[1] || die('usage: fleet-shots verdict <dir>   (text on stdin)'));
   const m = readManifest(dir);
   const text = fs.readFileSync(0, 'utf8');
+  if (isRecorded(m)) {
+    // A RECORDED RUN'S TEXT: `- [approve] flow — note` (or reject), then one
+    // `- [note] 3. the chapter — text` per chapter with something to say. Same tolerance as
+    // below: unknown lines are ignored, and a chapter this run does not have is skipped.
+    const out = { flow: null, chapters: {} };
+    for (const line of text.split('\n')) {
+      const f = line.match(/^\s*-\s*\[(approve|reject)\]\s*flow\b\s*(?:—\s*(.*))?$/i);
+      if (f) { out.flow = { v: f[1].toLowerCase(), note: (f[2] || '').trim() }; continue; }
+      const c = line.match(/^\s*-\s*\[note\]\s*(\d+)\.\s*[^—]*—\s*(.+)$/i);
+      if (c && m.steps.some(x => x.n === Number(c[1]))) out.chapters[c[1]] = c[2].trim();
+    }
+    if (!out.flow) die('no `- [approve] flow` or `- [reject] flow` line on stdin — copy the verdict from the page first');
+    fs.writeFileSync(path.join(dir, VERDICT), JSON.stringify(out, null, 2));
+    const nn = Object.keys(out.chapters).length;
+    console.log(`fleet-shots: recorded the flow as ${out.flow.v}d` +
+                (nn ? `, with ${nn} chapter note${nn === 1 ? '' : 's'}` : '') + ` in ${path.join(dir, VERDICT)}`);
+    process.exit(0);
+  }
   // The page emits `- [ok] 3. the dashboard` and `- [problem] 2. after signing in — note`.
   // Parsed rather than eval'd, and unknown lines are IGNORED rather than rejected: the
   // clipboard will contain the header line, and one day a line this does not know about.
@@ -364,6 +531,34 @@ if (has('--check')) {
   const dir = path.resolve(ARGV[i + 1] || die('usage: fleet-shots --check <dir>'));
   const m = readManifest(dir);
   const v = readVerdict(dir);
+  if (isRecorded(m)) {
+    // ONE VERDICT, FOR THE FLOW. Silence is still not approval: no verdict fails exactly as
+    // a rejection does. And a chapter the run flagged needs its reason even under an
+    // approve — the flag rule the per-step review had, carried over whole.
+    const fv = v.flow || {};
+    const accepted = [], flagged = [];
+    for (const st of m.steps.filter(x => x.notes && x.notes.length)) {
+      const why = chapterNote(v, st.n);
+      if (why) accepted.push({ st, why }); else for (const nt of st.notes) flagged.push({ st, nt });
+    }
+    for (const [n, note] of Object.entries(v.chapters || {})) {
+      const st = m.steps.find(x => String(x.n) === n);
+      if (st && !(st.notes || []).length && String(note).trim()) console.log(`note  ${st.n}. ${st.name} — ${note}`);
+    }
+    for (const { st, nt } of flagged) console.log(`flagged  ${st.n}. ${st.name} — ${nt}` +
+      (fv.v === 'approve' ? '   (approved with no reason on this chapter — a note is what clears a flag)' : ''));
+    for (const { st, why } of accepted) console.log(`accepted  ${st.n}. ${st.name} — ${why}`);
+    if (fv.v === 'approve' && !flagged.length) {
+      console.log(`fleet-shots: the flow (${m.steps.length} chapter${m.steps.length === 1 ? '' : 's'}) is approved` +
+        (fv.note ? ` — ${fv.note}` : '') +
+        (accepted.length ? `, ${accepted.length} flag${accepted.length === 1 ? '' : 's'} accepted with a reason` : ''));
+      process.exit(0);
+    }
+    console.log(fv.v === 'reject' ? `fleet-shots: NOT approved — the flow was rejected${fv.note ? ` — ${fv.note}` : ''}`
+      : !fv.v ? 'fleet-shots: NOT approved — the flow has not been reviewed'
+      : `fleet-shots: NOT approved — ${flagged.length} flagged by the run itself, with no reason given`);
+    process.exit(1);
+  }
   const problems = [], unreviewed = [];
   for (const st of m.steps) {
     const got = v[String(st.n)];
@@ -424,14 +619,7 @@ if (ARGV[0] === 'list') {
     // Here the consequence is quieter and exactly as wrong — it aborts the whole listing
     // on the first foreign file instead of taking a server down.
     if (!m || !Array.isArray(m.steps)) continue;
-    const v = readVerdict(dir);
-    const total = m.steps.length;
-    const marked = m.steps.filter(st => (v[String(st.n)] || {}).v).length;
-    const problem = m.steps.filter(st => (v[String(st.n)] || {}).v === 'problem').length;
-    const flagged = m.steps.filter(st => st.notes && st.notes.length &&
-      !(['ok', 'skip'].includes((v[String(st.n)] || {}).v) && ((v[String(st.n)] || {}).note || '').trim())).length;
-    const state = problem ? `${problem} problem` : flagged ? `${flagged} flagged`
-      : marked < total ? `${total - marked} unreviewed` : 'approved';
+    const state = runState(m, readVerdict(dir)).label;
     if (state !== 'approved') waiting++;
     const p = m.provenance || {};
     console.log(`${state.padEnd(14)} ${d}  ${p.branch || ''}${p.commit ? ' ' + p.commit.slice(0, 8) : ''}${p.dirty ? '+dirty' : ''}`);
@@ -489,13 +677,7 @@ if (ARGV[0] === 'serve') {
       //   The general shape: any long-lived scan of a directory you do not own must decide
       // whether each hit is yours by its CONTENT, and must survive the answer being no.
       if (!m || !Array.isArray(m.steps)) return null;
-      const v = readVerdict(dir);
-      const total = m.steps.length;
-      const marked = m.steps.filter(st => (v[String(st.n)] || {}).v).length;
-      const problem = m.steps.filter(st => (v[String(st.n)] || {}).v === 'problem').length;
-      const flagged = m.steps.filter(st => st.notes && st.notes.length &&
-        !(['ok', 'skip'].includes((v[String(st.n)] || {}).v) && ((v[String(st.n)] || {}).note || '').trim())).length;
-      return { d, m, total, marked, problem, flagged };
+      return { d, m, st: runState(m, readVerdict(dir)) };
     }).filter(Boolean);
   };
 
@@ -538,6 +720,24 @@ if (ARGV[0] === 'serve') {
         const dir = path.resolve(root, String(j.dir || ''));
         if (dir !== root && !dir.startsWith(root + path.sep)) return send(res, 403, 'text/plain', 'outside the shots dir');
         if (!fs.existsSync(path.join(dir, 'manifest.json'))) return send(res, 404, 'text/plain', 'no such run');
+        let rm = null; try { rm = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); } catch {}
+        if (isRecorded(rm)) {
+          // THE FLOW'S VERDICT: approve / reject / none, and a note per chapter. Chapters
+          // are checked against the manifest so a stale page cannot write numbers this run
+          // does not have; an empty flow verdict is allowed — un-choosing is a real thing.
+          const fv = String((j.flow || {}).v || '');
+          if (fv && !['approve', 'reject'].includes(fv)) return send(res, 400, 'application/json', '{"ok":false,"error":"flow verdict is approve or reject"}');
+          const chapters = {};
+          for (const [k, val] of Object.entries(j.chapters || {})) {
+            if (!/^[0-9]+$/.test(k) || !rm.steps.some(x => String(x.n) === k)) continue;
+            const t = String(val || '').slice(0, 2000);
+            if (t.trim()) chapters[k] = t;
+          }
+          const out = { flow: fv ? { v: fv, note: String((j.flow || {}).note || '').slice(0, 2000) } : null, chapters };
+          try { fs.writeFileSync(path.join(dir, VERDICT), JSON.stringify(out, null, 2)); }
+          catch (e) { return send(res, 500, 'text/plain', String(e.message || e)); }
+          return send(res, 200, 'application/json', JSON.stringify({ ok: true, flow: fv || null, notes: Object.keys(chapters).length }));
+        }
         const clean = {};
         for (const [k, val] of Object.entries(j.state || {})) {
           if (!/^[0-9]+$/.test(k)) continue;
@@ -570,16 +770,30 @@ if (ARGV[0] === 'serve') {
         let m; try { m = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')); }
         catch { return send(res, 404, 'text/plain', 'no such run'); }
         m.dir = decodeURIComponent(mm[1]);
+        m.verdict = readVerdict(dir);
         return send(res, 200, 'text/html', page(m, true));
       }
       // Only the files this page references, by extension: the folder is ours, but a path
       // handed over by a browser is not, and "serve whatever is under here" is how a
       // review surface becomes a file browser for the home directory.
-      if (!/^[A-Za-z0-9._-]+\.(png|json)$/.test(rest)) return send(res, 403, 'text/plain', 'not a shot');
-      try {
-        const b = fs.readFileSync(path.join(dir, rest));
-        return send(res, 200, rest.endsWith('.png') ? 'image/png' : 'application/json', b);
-      } catch { return send(res, 404, 'text/plain', 'not found'); }
+      if (!/^[A-Za-z0-9._-]+\.(png|jpg|json|mp4|webm)$/.test(rest)) return send(res, 403, 'text/plain', 'not a shot');
+      const type = { png: 'image/png', jpg: 'image/jpeg', json: 'application/json', mp4: 'video/mp4', webm: 'video/webm' }[rest.split('.').pop()];
+      let size = 0; try { size = fs.statSync(path.join(dir, rest)).size; } catch { return send(res, 404, 'text/plain', 'not found'); }
+      // RANGES, OR THE CHAPTERS DO NOT WORK. A <video> seeks by asking for a byte range.
+      // Measured: served whole, with a 200 and no Accept-Ranges, every seek was refused, so
+      // → and a chapter click both left the video at 0:00 — a chapter list that looks
+      // right and does nothing.
+      const rg = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+      if (rg && (rg[1] || rg[2])) {
+        let a = rg[1] ? Number(rg[1]) : Math.max(0, size - Number(rg[2]));
+        let z = rg[1] && rg[2] ? Math.min(Number(rg[2]), size - 1) : size - 1;
+        if (a >= size || a > z) { res.writeHead(416, { 'content-range': `bytes */${size}` }); return res.end(); }
+        res.writeHead(206, { 'content-type': type, 'content-length': z - a + 1, 'accept-ranges': 'bytes',
+                             'content-range': `bytes ${a}-${z}/${size}`, 'cache-control': 'no-store' });
+        return fs.createReadStream(path.join(dir, rest), { start: a, end: z }).pipe(res);
+      }
+      res.writeHead(200, { 'content-type': type, 'content-length': size, 'accept-ranges': 'bytes', 'cache-control': 'no-store' });
+      return fs.createReadStream(path.join(dir, rest)).pipe(res);
     }
     send(res, 404, 'text/plain', 'not found');
   });
@@ -687,6 +901,31 @@ const slug = (s, i) => `${String(i + 1).padStart(2, '0')}-` +
     .slice(0, 40).replace(/-[a-z0-9]{1,3}$/, '').replace(/-$/, '') || 'step');
 const abs = (u) => (/^https?:\/\//.test(u) ? u : (BASE ? BASE.replace(/\/$/, '') + (u.startsWith('/') ? u : '/' + u) : u));
 
+// ── the recording ────────────────────────────────────────────────────────────
+// ONE VIDEO OF THE WHOLE FLOW, with each step as a chapter, instead of a still per step. A
+// folder of stills shows where each step ENDED; it cannot show a spinner that never
+// stopped, a flash of the wrong screen between two right ones, or a button that took three
+// seconds to answer — and those are what a reviewer clicking through by hand would have
+// seen. Chrome's screencast gives the frames; ffmpeg turns them into a file every browser
+// (and a phone) plays.
+//   WITHOUT FFMPEG THIS SAYS SO AND FALLS BACK to the stills it always took, rather than
+// failing a review for a missing encoder or writing frames nobody can play. --stills asks
+// for that fallback on purpose.
+//   STILLS ONLY WHERE A STEP FAILED, when there is a video: the video already shows every
+// screen, and a still beside the failure is what a note quoting it needs to point at.
+function encoder() {
+  if (has('--stills')) return null;
+  const ff = process.env.FFMPEG || 'ffmpeg';
+  let list = '';
+  try { list = execFileSync(ff, ['-hide_banner', '-encoders'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
+  catch { return null; }
+  // H.264 in mp4 first: it is the one every browser AND iOS plays. VP9/webm otherwise.
+  if (/\blibx264\b/.test(list)) return { ff, file: 'flow.mp4', args: ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26', '-movflags', '+faststart'] };
+  if (/\blibvpx-vp9\b/.test(list)) return { ff, file: 'flow.webm', args: ['-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', '36', '-deadline', 'realtime'] };
+  return null;
+}
+const ENC = encoder();
+
 // A DRY RUN, SO THE ARGUMENT SURFACE IS TESTABLE WITHOUT A BROWSER. Everything above this
 // line is parsing and resolution — the flow, the base, the viewport, where it lands — and
 // all of it can be wrong in ways that produce a confident run against nothing. Chrome is
@@ -695,6 +934,8 @@ const abs = (u) => (/^https?:\/\//.test(u) ? u : (BASE ? BASE.replace(/\/$/, '')
 if (has('--dry-run') || has('-n')) {
   console.log(`fleet-shots: dry run — ${flow.steps.length} step(s), ${VW}x${VH}` + (BASE ? `, base ${BASE}` : ', no base'));
   console.log(`fleet-shots: would write ${OUT}`);
+  console.log(ENC ? `fleet-shots: records ${ENC.file}, one chapter per step; a still only where a step fails`
+                  : `fleet-shots: ${has('--stills') ? '--stills' : 'no ffmpeg with an h264 or vp9 encoder'} — a still per step, no video`);
   for (let i = 0; i < flow.steps.length; i++) {
     const st = flow.steps[i];
     // EVERY VERB THE STEP CARRIES, INCLUDING THE TIMING ONES. The first version listed
@@ -712,7 +953,7 @@ if (has('--dry-run') || has('-n')) {
                   st.settle !== undefined ? `settle ${Number(st.settle)}ms` : null,
                   st.full ? 'full page' : null,
                   st.expect ? `expect ${JSON.stringify(st.expect)}` : null].filter(Boolean);
-    console.log(`  ${slug(st.name, i)}.png  ${acts.join(' · ') || '(shot only)'}`);
+    console.log(`  ${slug(st.name, i)}.png${ENC ? ' (if it fails)' : ''}  ${acts.join(' · ') || '(shot only)'}`);
   }
   process.exit(0);
 }
@@ -730,6 +971,8 @@ fs.mkdirSync(OUT, { recursive: true });
 let b = null;
 const results = [];
 let failed = 0;
+const frames = [];
+let rec0 = 0, recEnd = 0;
 try {
   try { b = await launch({ width: VW, height: VH, scale: 1 }); }
   catch (e) { die(String(e.message || e)); }
@@ -754,10 +997,35 @@ try {
   });
   await b.call('Network.enable');
 
+  // THE FRAMES, each with the wall-clock second Chrome swapped it in. The screencast only
+  // sends a frame when the screen CHANGES, so a still screen is one frame held — which is
+  // why every frame keeps its timestamp: a frame's duration is the gap to the next one, and
+  // a video built at a fixed rate from these would play a ten-second wait in a blink.
+  //   Every frame is ACKED, or Chrome stops sending after the first few.
+  if (ENC) {
+    b.onEvent((method, p) => {
+      if (method !== 'Page.screencastFrame') return;
+      frames.push({ data: p.data, ts: p.metadata?.timestamp || Date.now() / 1000 });
+      b.call('Page.screencastFrameAck', { sessionId: p.sessionId }).catch(() => {});
+    });
+  }
+  // STARTED ONCE THE FIRST PAGE HAS LOADED, not before it: the tab opens on about:blank, and
+  // a recording started there opened every review on a dark frame — measured at 0:00 of a
+  // real run, luminance 18 of 255, with the sign-in page arriving half a second later.
+  const startRec = async () => {
+    if (!ENC || rec0) return;
+    await b.call('Page.startScreencast', { format: 'jpeg', quality: 82, maxWidth: VW, maxHeight: VH, everyNthFrame: 1 });
+    rec0 = Date.now() / 1000;
+  };
+
   for (let i = 0; i < flow.steps.length; i++) {
     const st = flow.steps[i];
     bucket = [];
     const note = [];
+    // THE CHAPTER STARTS BEFORE THE STEP ACTS, with a beat of the screen as it was, so a
+    // jump to "after signing in" shows the click land rather than opening on its result.
+    const start = ENC ? (rec0 ? Date.now() / 1000 - rec0 : 0) : null;
+    if (ENC && rec0) await sleep(400);
     try {
       if (st.goto) {
         await b.call('Page.navigate', { url: abs(st.goto) });
@@ -769,6 +1037,7 @@ try {
           await sleep(100);
         }
       }
+      await startRec();
       if (st.fill) for (const [sel, val] of Object.entries(st.fill)) {
         // THE NATIVE SETTER, NOT `el.value = v`, AND THIS WAS A REAL BUG WITH TEETH.
         // React puts a `_valueTracker` on the node. Assigning `.value` updates that tracker
@@ -886,9 +1155,12 @@ try {
         if (r.failed) note.push(`${r.method} ${r.url} — ${r.failed}`);
         else if (r.status >= 400) note.push(`${r.method} ${r.url} answered ${r.status}`);
       }
-      const shot = await b.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: !!st.full });
-      const file = slug(st.name, i) + '.png';
-      fs.writeFileSync(path.join(OUT, file), Buffer.from(shot.data, 'base64'));
+      let file = null;
+      if (!ENC || note.length) {
+        const shot = await b.call('Page.captureScreenshot', { format: 'png', captureBeyondViewport: !!st.full });
+        file = slug(st.name, i) + '.png';
+        fs.writeFileSync(path.join(OUT, file), Buffer.from(shot.data, 'base64'));
+      }
       if (note.length) failed++;
       // `url`, NOT `at`. The field held the page's final URL and was named the same thing
       // as `provenance.at`, which is a TIMESTAMP — one key, two meanings, in one document.
@@ -896,20 +1168,80 @@ try {
       // and reconstructed the landing pages from the page titles instead. The data was
       // always there; the name was the defect.
       results.push({ n: i + 1, name: st.name || `step ${i + 1}`, file, url: at, title, expect,
-                     notes: note, requests: bucket.slice(0, 200) });
+                     notes: note, requests: bucket.slice(0, 200), ...(ENC ? { start } : {}) });
     } catch (e) {
       // A STEP THAT THREW STILL GETS A ROW. Dropping it would make a flow of five steps
       // render as four and look complete.
       failed++;
       results.push({ n: i + 1, name: st.name || `step ${i + 1}`, file: null, url: null, title: null,
-                     expect: null, notes: [`step threw: ${String(e.message || e)}`], requests: bucket.slice(0, 200) });
+                     expect: null, notes: [`step threw: ${String(e.message || e)}`], requests: bucket.slice(0, 200),
+                     ...(ENC ? { start } : {}) });
     }
+  }
+  if (ENC && rec0) {
+    await sleep(700);                               // the last chapter's end, held
+    recEnd = Date.now() / 1000 - rec0;
+    try { await b.call('Page.stopScreencast'); } catch {}
   }
 } finally {
   if (b) { try { await b.close(); } catch {} }
 }
 
-const manifest = { provenance: prov, steps: results, problems: failed };
+// ── the video ────────────────────────────────────────────────────────────────
+// A CONSTANT 25fps SEQUENCE BUILT HERE, not ffmpeg's concat demuxer with a duration per
+// frame. The demuxer was the first version, and it is inconsistent about the LAST entry:
+// measured on ffmpeg 8, listing the last frame once dropped its 2s hold (a 4.7s flow came
+// out 2.8s) and listing it twice — the documented workaround — added the hold AGAIN (6.8s),
+// whatever duration the repeat was given. Either way every chapter after the first pointed
+// at the wrong moment. Here each output frame is a hard link to the source frame that was on
+// screen at that instant, so the file is exactly N/25 seconds and chapter times measured
+// from rec0 are the video's own clock.
+//   A FAILED ENCODE IS REPORTED AND THE RUN STILL STANDS: the manifest, the notes and the
+// requests are the evidence too, and the frames are kept so the encode can be retried.
+let video = null, videoNote = null;
+if (ENC && frames.length) {
+  const fdir = path.join(OUT, '.frames');
+  fs.mkdirSync(fdir, { recursive: true });
+  frames.forEach((f, k) => fs.writeFileSync(path.join(fdir, `src-${String(k).padStart(6, '0')}.jpg`), Buffer.from(f.data, 'base64')));
+  const N = Math.max(1, Math.round(recEnd * 25));
+  let j = 0;
+  for (let k = 0; k < N; k++) {
+    const t = rec0 + k / 25;
+    while (j + 1 < frames.length && frames[j + 1].ts <= t) j++;
+    const src = path.join(fdir, `src-${String(j).padStart(6, '0')}.jpg`), dst = path.join(fdir, `${String(k).padStart(6, '0')}.jpg`);
+    try { fs.linkSync(src, dst); } catch { fs.copyFileSync(src, dst); }
+  }
+  try {
+    execFileSync(ENC.ff, ['-hide_banner', '-loglevel', 'error', '-y', '-framerate', '25',
+      '-i', path.join(fdir, '%06d.jpg'), '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-pix_fmt', 'yuv420p',
+      ...ENC.args, path.join(OUT, ENC.file)], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 180000 });
+    video = ENC.file;
+    fs.rmSync(fdir, { recursive: true, force: true });
+  } catch (e) {
+    videoNote = `the video did not encode (${String(e.stderr || e.message || e).split('\n')[0].slice(0, 160)}) — frames kept in ${fdir}`;
+  }
+  // each chapter ends where the next begins; the last where the recording did
+  results.forEach((r, k) => { r.end = k + 1 < results.length ? results[k + 1].start : recEnd; });
+}
+if (ENC && !video) {
+  // No video after all: the chapters have nothing to point into, and a recorded-run page
+  // over a missing file is a player that never starts. Say why, and keep the run — as the
+  // per-step review, with each step's LAST FRAME as its picture, so no step is left with
+  // nothing to look at because only the failures took a still.
+  console.log(`fleet-shots: ${videoNote || 'no frames were recorded'}`);
+  results.forEach((r, k) => {
+    delete r.start; delete r.end;
+    if (r.file) return;
+    const until = rec0 + (k + 1 < results.length ? (results[k + 1].start ?? recEnd) : recEnd);
+    const f = [...frames].reverse().find(x => x.ts <= until);
+    if (!f) return;
+    r.file = slug(r.name, k) + '.jpg';
+    fs.writeFileSync(path.join(OUT, r.file), Buffer.from(f.data, 'base64'));
+  });
+}
+
+const manifest = { provenance: prov, steps: results, problems: failed,
+                   ...(video ? { video, duration: recEnd } : {}) };
 fs.writeFileSync(path.join(OUT, 'manifest.json'), JSON.stringify(manifest, null, 2));
 fs.writeFileSync(path.join(OUT, 'index.html'), page(manifest));
 
@@ -917,6 +1249,7 @@ fs.writeFileSync(path.join(OUT, 'index.html'), page(manifest));
 // reason: the path is what the next action needs.
 console.log(path.join(OUT, 'index.html'));
 console.log(`fleet-shots: ${results.length} step${results.length === 1 ? '' : 's'}` +
+  (video ? `, one video (${recEnd.toFixed(1)}s, ${results.length} chapters)` : '') +
   `, ${results.reduce((a, r) => a + r.requests.length, 0)} requests` +
   (failed ? `, ${failed} STEP${failed === 1 ? '' : 'S'} WITH SOMETHING TO LOOK AT` : '') +
   (prov.commit ? ` · ${prov.commit.slice(0, 8)}${prov.dirty ? '+dirty' : ''}` : ''));
@@ -930,18 +1263,12 @@ if (failed) console.log('fleet-shots: a step with a note is NOT a pass — open 
 function index(runs, sess, root) {
   const rows = runs.map(r => {
     const p = r.m.provenance || {};
-    // ACTIONABLE, NOT MERELY RED. "2 flagged" on a run where every step was marked reads
-    // as a broken screen: the reviewer did everything offered and it stayed red. When the
-    // only thing left is a missing reason, say THAT — it is a different job from reviewing.
-    const st = r.problem ? { c: 'bad', t: `${r.problem} needs changes` }
-      : r.marked < r.total ? { c: 'warn', t: `${r.total - r.marked} unreviewed` }
-      : r.flagged ? { c: 'warn', t: `${r.flagged} need a reason` }
-      : { c: 'ok', t: 'approved' };
+    const st = { c: r.st.cls, t: r.st.text };
     return `<tr>
       <td class="st ${st.c}">${esc(st.t)}</td>
       <td><a href="/r/${encodeURIComponent(r.d)}/">${esc(p.branch || r.d)}</a></td>
       <td class="b mono">${p.commit ? esc(p.commit.slice(0, 8)) : ''}${p.dirty === true ? '+' : ''}</td>
-      <td class="n mono">${r.total}</td>
+      <td class="n mono">${isRecorded(r.m) ? `▶ ${r.m.steps.length}` : r.m.steps.length}</td>
       <td class="b mono">${esc(p.base || '')}</td>
       <td class="w mono">${esc(String(r.d).replace('_', ' ').replace(/-(\d\d)-(\d\d)$/, ':$1:$2'))}</td>
     </tr>`;
@@ -975,7 +1302,219 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;
 //   What differs is only the CHANNEL. Over file:// there is nowhere to POST, so verdicts go
 // to localStorage and a button builds text to paste. Served, a click writes verdict.json
 // directly and the gate sees it with no clipboard in the middle.
+// ── the recorded-run page ────────────────────────────────────────────────────
+// ONE FLOW, ONE VERDICT. The per-step page asked for a verdict on every still, which on a
+// recording would be asking the reviewer to approve each chapter of one continuous thing —
+// and the question they actually answer is "did the feature work, pressed end to end".
+// So: the video, its chapters named by what each step asked for, a note per chapter where
+// there is something to say, and approve or reject for the whole.
+//   KEYS: space plays, ← → step chapters, a approves, r rejects — never while typing a note.
+//   Same channels as the per-step page: served, a verdict writes verdict.json directly;
+// over file:// it goes to localStorage and the text to paste is built below the bar.
+// A DECLARATION, NOT A `const`: `serve` parks the module above this line, and a const down
+// here would be in its dead zone for every page the server renders.
+function fmtT(t) { t = Math.max(0, Math.floor(Number(t) || 0)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; }
+function flowPage(m, served) {
+  const p = m.provenance || {};
+  const facts = [
+    p.branch ? `<b>${esc(p.branch)}</b>` : null,
+    p.commit ? esc(p.commit.slice(0, 8)) : null,
+    p.dirty === true ? '<span class="flag">uncommitted</span>' : null,
+    p.base ? esc(p.base) : null,
+    `${p.viewport?.width}×${p.viewport?.height}`,
+    p.at ? esc(p.at.replace('T', ' ').slice(0, 16)) : null,
+  ].filter(Boolean).join(' · ');
+  const MEANT = /^(Document|XHR|Fetch)$/i;
+  const chapters = m.steps.map(s => {
+    const calls = (s.requests || []).filter(r => MEANT.test(r.type || ''));
+    const reqRows = calls.map(r => {
+      const cls = r.failed || r.status >= 400 ? 'bad' : r.status >= 300 ? 'warn' : '';
+      return `<tr class="${cls}"><td>${esc(r.method)}</td><td>${esc(r.failed || (r.status ?? '—'))}</td><td>${esc(r.url)}</td></tr>`;
+    }).join('');
+    const flagged = (s.notes || []).length > 0;
+    return `<section class="ch${flagged ? ' flag' : ''}" data-n="${s.n}" data-start="${Number(s.start) || 0}" data-end="${Number(s.end) || 0}">
+  <div class="top"><span class="n">${String(s.n).padStart(2, '0')}</span><span class="name">${esc(s.name)}</span><span class="at">${fmtT(s.start)}</span></div>
+  <div class="where">${stepUrl(s) ? esc(stepUrl(s)) : 'no page'}${s.title ? ' · ' + esc(s.title) : ''}</div>
+  ${s.expect ? `<div class="found${s.expect.found ? '' : ' miss'}">${s.expect.found ? 'found' : 'not found'} “${esc(s.expect.text)}”</div>` : ''}
+  ${(s.notes || []).map(n => `<div class="note">${esc(n)}</div>`).join('')}
+  ${s.file ? `<a class="still" href="${esc(s.file)}" target="_blank"><img src="${esc(s.file)}" alt="${esc(s.name)} — the screen when it failed" loading="lazy"></a>` : ''}
+  ${calls.length ? `<details${calls.some(r => r.failed || r.status >= 400) ? ' open' : ''}><summary>${calls.length} call${calls.length === 1 ? '' : 's'} of its own</summary><div class="reqs"><table>${reqRows}</table></div></details>` : ''}
+  <textarea aria-label="note on chapter ${s.n}" placeholder="${flagged ? 'why is this acceptable? a note is what clears the flag' : 'note on this chapter (optional)'}"></textarea>
+  ${flagged ? '<div class="needs" hidden>Approving does not clear this flag — one line saying why it is acceptable does.</div>' : ''}
+</section>`;
+  }).join('\n');
+  const vtype = /\.webm$/.test(m.video) ? 'video/webm' : 'video/mp4';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>${esc(p.branch || 'review')}</title><style>${FLOWSKIN}</style></head><body>
+<div class="bar">
+  <span class="who">review</span>
+  <div class="facts">${facts}</div>
+  <span class="chip none" id="state">not reviewed</span>
+  ${served ? '<a class="up" href="/">all runs</a>' : ''}
+</div>
+<main>
+  <div class="player">
+    <div class="screen"><video id="v" preload="auto" playsinline muted><source src="${esc(m.video)}" type="${vtype}"></video></div>
+    <div class="strip" id="strip"><span class="head" id="head"></span></div>
+    <div class="transport">
+      <button id="play" aria-label="play">▶ play</button>
+      <span class="now" id="now"></span>
+      <span class="t" id="time">0:00 / ${fmtT(m.duration)}</span>
+    </div>
+    <div class="keys"><b>space</b> play · <b>←</b> <b>→</b> chapters · <b>a</b> approve · <b>r</b> reject</div>
+  </div>
+  <div class="chapters" id="chapters">
+    <h2>${m.steps.length} chapter${m.steps.length === 1 ? '' : 's'}${m.problems ? ` · <span style="color:var(--red)">${m.problems} to look at</span>` : ''}</h2>
+    ${chapters}
+  </div>
+</main>
+<div class="verdict">
+  <div class="row">
+    <input id="fnote" placeholder="a note on the whole flow (optional)" aria-label="note on the flow">
+    <button class="danger" id="reject" data-v="reject">reject<kbd>r</kbd></button>
+    <button class="go" id="approve" data-v="approve">approve<kbd>a</kbd></button>
+    ${served ? '<span class="saved" id="saved"></span>' : ''}
+  </div>
+  <div class="gate" id="gate"></div>
+  ${served ? '' : `<div class="paste">Paste it back so it counts: <code>pbpaste | fleet-shots verdict .</code> — then <code>fleet-shots --check .</code><textarea id="verdicttext" readonly></textarea></div>`}
+</div>
+<script>
+var CH = ${JSON.stringify(m.steps.map(x => ({ n: x.n, name: x.name, start: Number(x.start) || 0, end: Number(x.end) || 0, flagged: (x.notes || []).length > 0 })))};
+var DUR = ${JSON.stringify(Number(m.duration) || 0)};
+var SERVED = ${served ? 'true' : 'false'};
+var DIR = ${JSON.stringify(m.dir || '')};
+var KEY = 'gf.flow.' + location.pathname;
+var st = { flow: null, chapters: {} };
+try { st = JSON.parse(localStorage.getItem(KEY) || 'null') || st; } catch (e) {}
+// SERVED, THE FILE IS THE TRUTH: the page opens on what verdict.json holds, so a review
+// started on the phone and finished at the desk is one review, not two browsers' guesses.
+var INIT = ${JSON.stringify(m.verdict || null)};
+if (SERVED && INIT) st = { flow: INIT.flow || null, chapters: INIT.chapters || {} };
+st.chapters = st.chapters || {};
+var v = document.getElementById('v');
+var cards = document.querySelectorAll('.ch');
+var cur = 0;
+
+function dur(){ return (isFinite(v.duration) && v.duration > 0) ? v.duration : DUR; }
+function save(){
+  try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) {}
+  if (!SERVED) return;
+  fetch('/api/verdict', { method:'POST', headers:{'content-type':'application/json'},
+    body: JSON.stringify({ dir: DIR, flow: st.flow, chapters: st.chapters }) })
+    .then(function(r){ mark(r.ok); }).catch(function(){ mark(false); });
+}
+function mark(ok){ var e=document.getElementById('saved'); if(!e) return;
+  e.textContent = ok ? 'saved' : 'NOT saved — the gate will not see this'; e.className = ok ? 'saved' : 'saved bad'; }
+function noteOf(n){ return String(st.chapters[String(n)] || '').trim(); }
+function chapterAt(t){ var k=0; for (var i=0;i<CH.length;i++) if (t + 0.05 >= CH[i].start) k=i; return k; }
+
+// SEEK, THEN PAINT FROM WHAT THE VIDEO SAYS. A chapter click sets currentTime; the
+// highlight follows timeupdate, so the list can never claim a chapter the picture is not on.
+function go(i){
+  i = Math.max(0, Math.min(CH.length-1, i));
+  cur = i;
+  try { v.currentTime = CH[i].start + 0.01; } catch (e) {}
+  paint();
+}
+function paint(){
+  cards.forEach(function(el,i){
+    el.classList.toggle('here', i===cur);
+    el.classList.toggle('has', !!noteOf(CH[i].n));
+    var needs = el.querySelector('.needs'), ta = el.querySelector('textarea');
+    var wants = CH[i].flagged && st.flow && st.flow.v==='approve' && !noteOf(CH[i].n);
+    if (needs) needs.hidden = !wants;
+    if (ta) ta.classList.toggle('wants', wants);
+  });
+  document.querySelectorAll('#strip button').forEach(function(b,i){ b.classList.toggle('here', i===cur); });
+  document.getElementById('now').textContent = CH.length ? (CH[cur].n + '. ' + CH[cur].name) : '';
+  document.getElementById('time').textContent = fmt(v.currentTime) + ' / ' + fmt(dur());
+  document.getElementById('head').style.left = (dur() ? Math.min(100, 100 * v.currentTime / dur()) : 0) + '%';
+  document.getElementById('play').textContent = v.paused ? '▶ play' : '❚❚ pause';
+  var fv = st.flow && st.flow.v;
+  document.getElementById('approve').classList.toggle('on', fv==='approve');
+  document.getElementById('reject').classList.toggle('on', fv==='reject');
+  gate();
+}
+function fmt(t){ t=Math.max(0,Math.floor(t||0)); return Math.floor(t/60)+':'+String(t%60).padStart(2,'0'); }
+function gate(){
+  var fv = st.flow && st.flow.v, missing = CH.filter(function(c){ return c.flagged && !noteOf(c.n); });
+  var g = document.getElementById('gate'), s = document.getElementById('state');
+  if (fv==='reject') { g.className='gate rej'; g.textContent='rejected — fleet-shots --check refuses this run'; s.className='chip bad'; s.textContent='rejected'; }
+  else if (!fv) { g.className='gate'; g.textContent='not reviewed yet — watch it, then approve or reject the flow'
+      + (missing.length ? ' · ' + missing.length + ' chapter' + (missing.length===1?'':'s') + ' flagged by the run' : ''); s.className='chip none'; s.textContent='not reviewed'; }
+  else if (missing.length) { g.className='gate fail'; g.textContent='approved, but --check still refuses: chapter '
+      + missing.map(function(c){ return c.n; }).join(', ') + ' was flagged by the run and has no reason'; s.className='chip warn'; s.textContent='needs a reason'; }
+  else { g.className='gate pass'; g.textContent='approved — fleet-shots --check passes this run'; s.className='chip ok'; s.textContent='approved'; }
+  var t = document.getElementById('verdicttext');
+  if (t) {
+    var lines = [];
+    lines.push(fv ? '- [' + fv + '] flow' + (st.flow.note ? ' — ' + st.flow.note : '') : '(the flow is not approved or rejected yet)');
+    CH.forEach(function(c){ var n = noteOf(c.n); if (n) lines.push('- [note] ' + c.n + '. ' + c.name + ' — ' + n.replace(/\\n/g, ' ')); });
+    t.value = lines.join('\\n');
+  }
+}
+function choose(which){
+  var note = document.getElementById('fnote').value;
+  st.flow = { v: which, note: note };
+  save(); paint();
+  // approving over a flag with no reason: take the reader to where the reason goes
+  if (which==='approve') {
+    var i = CH.findIndex(function(c){ return c.flagged && !noteOf(c.n); });
+    if (i >= 0) { go(i); var ta = cards[i].querySelector('textarea'); if (ta) ta.focus(); }
+  }
+}
+
+// the strip: one segment per chapter, as wide as it plays
+(function(){
+  var strip = document.getElementById('strip'), total = dur() || 1;
+  CH.forEach(function(c,i){
+    var b = document.createElement('button');
+    b.style.flex = String(Math.max(0.02, (c.end - c.start) / total));
+    b.title = c.n + '. ' + c.name; b.setAttribute('aria-label', 'chapter ' + c.n + ': ' + c.name);
+    if (c.flagged) b.classList.add('flag');
+    b.addEventListener('click', function(){ go(i); });
+    strip.insertBefore(b, document.getElementById('head'));
+  });
+})();
+cards.forEach(function(el,i){
+  el.querySelector('.top').addEventListener('click', function(){ go(i); });
+  var ta = el.querySelector('textarea');
+  ta.value = st.chapters[String(CH[i].n)] || '';
+  ta.addEventListener('focus', function(){ if (cur !== i) { cur = i; paint(); } });
+  ta.addEventListener('input', function(){
+    if (ta.value.trim()) st.chapters[String(CH[i].n)] = ta.value; else delete st.chapters[String(CH[i].n)];
+    save(); paint();
+  });
+});
+document.getElementById('fnote').value = (st.flow && st.flow.note) || '';
+document.getElementById('fnote').addEventListener('input', function(e){
+  if (st.flow) { st.flow.note = e.target.value; save(); gate(); }
+});
+document.getElementById('approve').addEventListener('click', function(){ choose('approve'); });
+document.getElementById('reject').addEventListener('click', function(){ choose('reject'); });
+document.getElementById('play').addEventListener('click', function(){ v.paused ? v.play() : v.pause(); });
+v.addEventListener('timeupdate', function(){ var k = chapterAt(v.currentTime); if (k !== cur) cur = k; paint(); });
+v.addEventListener('play', paint); v.addEventListener('pause', paint); v.addEventListener('loadedmetadata', paint);
+v.addEventListener('click', function(){ v.paused ? v.play() : v.pause(); });
+// KEYS, and never while writing a note — a reviewer typing "a redirect" would otherwise
+// approve the flow on the first letter.
+document.addEventListener('keydown', function(e){
+  var t = e.target.tagName;
+  if (t==='TEXTAREA'||t==='INPUT'||e.metaKey||e.ctrlKey||e.altKey) return;
+  if (e.key===' ') { v.paused ? v.play() : v.pause(); e.preventDefault(); }
+  else if (e.key==='ArrowRight') { go(cur+1); e.preventDefault(); }
+  else if (e.key==='ArrowLeft') { go(cur-1); e.preventDefault(); }
+  else if (e.key==='a') { choose('approve'); e.preventDefault(); }
+  else if (e.key==='r') { choose('reject'); e.preventDefault(); }
+});
+paint();
+</script></body></html>`;
+}
+
 function page(m, served = false) {
+  if (isRecorded(m)) return flowPage(m, served);
   const p = m.provenance || {};
   const facts = [
     p.branch ? `<b>${esc(p.branch)}</b>` : null,
