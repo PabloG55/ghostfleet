@@ -14598,6 +14598,88 @@ else
   skip "fleet-restart refuses rather than guessing" "bin/fleet-restart is not executable"
 fi
 
+# ── fleet-restart takes the id from the LIVE process, and refuses when it can't ──
+# Measured on a live fleet: a lead's recorded id had NO transcript anywhere — it had been
+# reopened into a fresh conversation that never took a turn — so `--resume` of it failed and
+# the pane closed, taking the card with it. Three fixture panes on this run's own socket,
+# each a `sleep` made "an agent in conversation X" by the note test/helpers/live-session.sh
+# writes for its pid (the file fleet-hibernate --resolve reads), and a stub agent-here that
+# writes down the id it was relaunched onto:
+#   api-fix   record names OLD, the process is in NEW (with a transcript) -> resumes NEW
+#   master    the process is in a conversation with no transcript          -> refused, alive
+#   scratch   no note at all, only a record with a transcript              -> refused, alive
+# WATCHED GOING RED against the previous bin/fleet-restart: api-fix came back on OLD, and
+# master and scratch were killed and relaunched onto ids nothing could resume.
+group "fleet-restart resumes the live conversation, or refuses"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  RL="$(cd "$(mktemp -d "$TEST_RUNS.$$.rlive.XXXXXX")" && pwd -P)"
+  mkdir -p "$RL/fleet" "$RL/cfg" "$RL/wt" "$RL/stub"
+  printf '#!/bin/sh\necho "$1 ${CLAUDE_FLEET_RESUME:-}" >> "%s/relaunched"\nexec sleep 600\n' "$RL" > "$RL/stub/agent-here"
+  chmod +x "$RL/stub/agent-here"
+  R_OLD=aaaaaaaa-6666-6666-6666-000000000001; R_NEW=aaaaaaaa-7777-7777-7777-000000000002
+  R_EMPTY=aaaaaaaa-8888-8888-8888-000000000003; R_REC=aaaaaaaa-9999-9999-9999-000000000004
+  printf '{"type":"user","message":{"role":"user","content":"hi"}}\n' > "$RL/t.jsonl"
+  rrec() {   # slot id transcript
+    jq -n --arg id "$2" --arg slot "$1" --arg tr "$3" --arg cwd "$RL/wt" \
+      '{session_id:$id, sock:"cf-acme-api", slot:$slot, cwd:$cwd, status:"ready", transcript:$tr, ts:1}' \
+      > "$RL/fleet/$2.json"
+  }
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  # A tab keeps the server alive across the kill/new of every agent session, so the PATH
+  # set on it (the stub first) is the one the relaunch runs under.
+  tmux -L cf-acme-api new-session -d -s _term -c "$RL/wt" "sleep 600" 2>/dev/null
+  tmux -L cf-acme-api set-environment -g PATH "$RL/stub:$ROOT/bin:$PATH"
+  for s in api-fix master scratch; do
+    tmux -L cf-acme-api new-session -d -s "$s" -c "$RL/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  done
+  sleep 0.4
+  export CLAUDE_FLEET_DIR="$RL/fleet" CLAUDE_CONFIG_DIR="$RL/cfg"
+  rrec api-fix "$R_OLD" "$RL/t.jsonl"
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api api-fix "$R_NEW" "$RL/wt" "$RL/t.jsonl" >/dev/null
+  rrec master "$R_EMPTY" ""
+  "$ROOT/test/helpers/live-session.sh" cf-acme-api master "$R_EMPTY" "$RL/wt" >/dev/null
+  rrec scratch "$R_REC" "$RL/t.jsonl"
+  pidof_s() { tmux -L cf-acme-api list-panes -t "$1" -F '#{pane_pid}' 2>/dev/null | head -1; }
+  M_PID="$(pidof_s master)"; S_PID="$(pidof_s scratch)"
+
+  # ── NO TERMINAL: the confirmation cannot be asked, so it says so and fails ──
+  # perl's setsid, because it is on both runners and it is the one way to be a process
+  # with no controlling terminal no matter where this suite was started from.
+  if command -v perl >/dev/null 2>&1; then
+    out="$(PATH="$ROOT/bin:$PATH" perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' \
+           "$ROOT/bin/fleet-restart" -s cf-acme-api </dev/null 2>&1)"; rrc=$?
+    is "restart: with no tty it says to re-run with --yes" "yes" \
+       "$(grep -q 'no terminal to confirm on — re-run with --yes' <<< "$out" && echo yes || echo no)"
+    is "restart: ...and exits non-zero"                    "1"  "$rrc"
+    is "restart: ...without the shell's own error"         "no" \
+       "$(grep -qi 'not configured\|No such device' <<< "$out" && echo yes || echo no)"
+    is "restart: ...and touched nothing"                   "$M_PID $S_PID" "$(pidof_s master) $(pidof_s scratch)"
+  else
+    skip "restart: no tty" "perl is not installed"
+  fi
+
+  out="$(PATH="$RL/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --yes 2>&1)"
+  # The relaunch returns before the pane's shell has run the stub: wait for its line, with
+  # a ceiling, rather than for a clock.
+  for _ in $(seq 1 50); do grep -q '^api-fix ' "$RL/relaunched" 2>/dev/null && break; sleep 0.1; done
+  is "restart: api-fix came back on the LIVE conversation"  "api-fix $R_NEW" \
+     "$(grep '^api-fix ' "$RL/relaunched" 2>/dev/null)"
+  is "restart: ...and the record now names it"              "$R_NEW" \
+     "$(jq -r '.session_id // ""' "$RL/fleet/$R_NEW.json" 2>/dev/null)"
+  is "restart: a conversation with no transcript is refused" "yes" \
+     "$(grep -q 'master.*never took a turn' <<< "$out" && echo yes || echo no)"
+  is "restart: ...and one the process cannot name is refused" "yes" \
+     "$(grep -q 'scratch.*could not be established' <<< "$out" && echo yes || echo no)"
+  is "restart: ...and neither was killed"                   "$M_PID $S_PID" "$(pidof_s master) $(pidof_s scratch)"
+  is "restart: ...nor relaunched"                           "" \
+     "$(grep -E '^(master|scratch) ' "$RL/relaunched" 2>/dev/null)"
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  rm -rf "$RL"
+else
+  skip "fleet-restart resumes the live conversation" "tmux or jq is not installed"
+fi
+
 # ── `exit` keeps the card ────────────────────────────────────────────────────
 # "i use parallel session and if i type exit the session is completely remove it and i
 # cant reopen it easily." Typing `exit` ended the agent, which ended the pane's command,
