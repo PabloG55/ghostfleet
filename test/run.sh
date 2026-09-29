@@ -2126,13 +2126,30 @@ agent_stub() { printf '#!/bin/sh\nexit 0\n' > "$T/bin/$1"; chmod +x "$T/bin/$1";
 #   Here-string, not a pipe: under `pipefail` a `grep -q` that MATCHES can fail the
 # pipeline when the writer takes SIGPIPE, which reads as "not there yet" and spins the
 # whole count. That is swept for elsewhere in this file; do not reintroduce it here.
-agwait() {           # $1 = text to wait for, up to ~12s
+#   THE CEILING IS NOT THE WAIT. It was 12s, and a cold node on a loaded ubuntu runner
+# took longer than that to draw the screen: red on branches that did not touch it, green
+# on a re-run. A poll returns the moment the text is there, so a generous ceiling costs a
+# passing run nothing and only bounds a failing one.
+AG_CEIL=150          # x 0.2s = 30s
+agwait() {           # $1 = text to wait for, up to AG_CEIL polls
   local i=0
-  while [ "$i" -lt 60 ]; do
+  while [ "$i" -lt "$AG_CEIL" ]; do
     grep -q "$1" <<< "$(tmux -L cfagcol capture-pane -p 2>/dev/null)" && return 0
     sleep 0.2; i=$((i+1))
   done
   return 1
+}
+# A KEY, THEN THE ROW IT SHOULD PRODUCE — never a key and a second's sleep. `Space; sleep 1`
+# asserted whatever the row happened to say a second later, which on a slow runner was the
+# row BEFORE the press. Prints yes/no for the `is` beside it.
+agpress() {          # $1 = the pattern the agent row must reach after one Space
+  local i=0
+  tmux -L cfagcol send-keys Space
+  while [ "$i" -lt "$AG_CEIL" ]; do
+    grep -q "$1" <<< "$(agrow)" && { echo yes; return 0; }
+    sleep 0.2; i=$((i+1))
+  done
+  echo no
 }
 # THE ROW'S AGENT IS SEEDED BEFORE THE GRID STARTS, which is what killed the flake. The
 # uninstalled-agent arm used to rewrite the file under a RUNNING grid and then press ` to
@@ -2162,9 +2179,9 @@ agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = 
   tmux -L cfagcol new-session -d -x 120 -y 24 -e HOME="$T" \
     -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
     "PATH='$T/bin'; export PATH; '$T/bin/node' '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 20"
-  agwait 'acme-api' || { AGUP=0; bad "the agent-column session comes up" "the projects screen" "nothing drawn in 12s"; return 1; }
+  agwait 'acme-api' || { AGUP=0; bad "the agent-column session comes up" "the projects screen" "nothing drawn in 30s"; return 1; }
   tmux -L cfagcol send-keys ','
-  agwait 'settings' || { AGUP=0; bad "the agent-column session comes up" "the settings page" "',' did not land in 12s"; return 1; }
+  agwait 'settings' || { AGUP=0; bad "the agent-column session comes up" "the settings page" "',' did not land in 30s"; return 1; }
   AGUP=1
 }
 agrow()  { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'acme-api' | head -1; }
@@ -2206,17 +2223,11 @@ if command -v tmux >/dev/null 2>&1; then
      "$(grep -q 'space/⏎ cycle' <<< "$(agfoot)" && echo yes || echo no)"
   is "ring starts at 1 of 3"           "yes" \
      "$(grep -q 'claude 1/3' <<< "$(agrow)" && echo yes || echo no)"
-  tmux -L cfagcol send-keys Space; sleep 1
-  is "one press advances the position"  "yes" \
-     "$(grep -q 'opencode 2/3' <<< "$(agrow)" && echo yes || echo no)"
-  tmux -L cfagcol send-keys Space; sleep 1
-  is "two presses reach the last"       "yes" \
-     "$(grep -q 'codex 3/3' <<< "$(agrow)" && echo yes || echo no)"
-  tmux -L cfagcol send-keys Space; sleep 1
+  is "one press advances the position"  "yes" "$(agpress 'opencode 2/3')"
+  is "two presses reach the last"       "yes" "$(agpress 'codex 3/3')"
   # THE LAP IS THE BUG. Landing back on claude is correct; landing there with no way to
   # see it happened is what read as a dead key.
-  is "the lap wraps, visibly"           "yes" \
-     "$(grep -q 'claude 1/3' <<< "$(agrow)" && echo yes || echo no)"
+  is "the lap wraps, visibly"           "yes" "$(agpress 'claude 1/3')"
   is "...and the row is a 3-column row again" "3" \
      "$(awk -F'\t' '/^acme-api/{print NF}' "$T/.config/ghostfleet/projects")"
 
@@ -2230,8 +2241,7 @@ if command -v tmux >/dev/null 2>&1; then
      "$(aglacks 'claude [0-9]/[0-9]')"
   is "...and still name the default"   "yes" \
      "$(grep -q 'claude' <<< "$(agrow)" && echo yes || echo no)"
-  is "...and one press still sets it"  "yes" \
-     "$(tmux -L cfagcol send-keys Space; sleep 1; grep -q 'codex' <<< "$(agrow)" && echo yes || echo no)"
+  is "...and one press still sets it"  "yes" "$(agpress 'codex')"
   else skip "the agent column: a ring of two" "the session did not come up"; fi
   # AN AGENT THAT IS NOT INSTALLED HERE HAS NO POSITION IN THE RING, and the fudge that
   # placed it at the default's index is what this arm exists to keep out: a project set
