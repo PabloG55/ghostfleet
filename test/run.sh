@@ -7689,11 +7689,11 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command
     tmux -L cffb send-keys -l 'docs-pass' 2>/dev/null; tmux -L cffb send-keys Enter 2>/dev/null
     wait_for 5 "the git init question" 'pane_has cffb "git init"'
     is "new: the folder is made"                            "yes" "$([ -d "$FB/docs-pass" ] && echo yes || echo no)"
-    is "new: ...and git init is offered, Y by default"      "yes" "$(fbscreen | grep -qF '[Y/n]' && echo yes || echo no)"
+    is "new: ...and git init is offered, Y by default"      "yes" "$(grep -qF '[Y/n]' <<< "$(fbscreen)" && echo yes || echo no)"
     tmux -L cffb send-keys Enter 2>/dev/null
     wait_for 5 "the listing to come back" 'pane_has cffb "pick a root folder"'
     is "new: ⏎ at the question runs git init"               "yes" "$([ -d "$FB/docs-pass/.git" ] && echo yes || echo no)"
-    is "new: ...and the cursor lands on the new folder"     "yes" "$(fbscreen | grep -q '▸ docs-pass/' && echo yes || echo no)"
+    is "new: ...and the cursor lands on the new folder"     "yes" "$(grep -q '▸ docs-pass/' <<< "$(fbscreen)" && echo yes || echo no)"
     tmux -L cffb send-keys Enter 2>/dev/null
     wait_for 5 "the browser to open it" 'pane_has cffb "~/docs-pass"'
     tmux -L cffb send-keys 's' 2>/dev/null
@@ -14367,9 +14367,9 @@ if command -v tmux >/dev/null 2>&1; then
   out="$(fl)"
   is "fleet-list: the live session is listed"                 "yes" "$(grep -qE '^api-fix ' <<< "$out" && echo yes || echo no)"
   is "fleet-list: an asleep session is listed as asleep"      "yes" "$(grep -qE '^docs-pass +asleep ' <<< "$out" && echo yes || echo no)"
-  is "fleet-list: ...with its age"                            "yes" "$(grep -E '^docs-pass ' <<< "$out" | grep -qE '\b3h\b' && echo yes || echo no)"
-  is "fleet-list: ...and how to clear it"                     "yes" "$(grep -E '^docs-pass ' <<< "$out" | grep -qF 'fleet-stop docs-pass' && echo yes || echo no)"
-  is "fleet-list: a younger one reads in minutes"             "yes" "$(grep -E '^scratch ' <<< "$out" | grep -qE '\b2m\b' && echo yes || echo no)"
+  is "fleet-list: ...with its age"                            "yes" "$(grep -qE '^docs-pass .*\b3h\b' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: ...and how to clear it"                     "yes" "$(grep -qE '^docs-pass .*fleet-stop docs-pass' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: a younger one reads in minutes"             "yes" "$(grep -qE '^scratch .*\b2m\b' <<< "$out" && echo yes || echo no)"
   is "fleet-list: another fleet's asleep session is not ours" "no"  "$(grep -q 'billing-svc' <<< "$out" && echo yes || echo no)"
   # A FLEET WHOSE EVERY SESSION IS ASLEEP has no tmux server at all — the case where the
   # old early exit said "(no sessions)" over a fleet with cards on the grid.
@@ -14384,8 +14384,8 @@ if command -v tmux >/dev/null 2>&1; then
   # THE DESCRIPTIONS ARE WHAT AN AGENT READS to choose a tool, so the case has to be named
   # there, not only handled. Read from the served tool list, not the source text.
   desc="$(cd "$ROOT" && node -e 'import("./mcp/fleet-dispatch.mjs").then(m=>{const t=Object.fromEntries(m.TOOLS.map(x=>[x.name,x.description]));console.log("LIST:"+t.fleet_list);console.log("STOP:"+t.fleet_stop)})' 2>/dev/null)"
-  is "fleet_list's description says it lists asleep sessions" "yes" "$(grep '^LIST:' <<< "$desc" | grep -qi 'asleep' && echo yes || echo no)"
-  is "fleet_stop's description names clearing an asleep one"  "yes" "$(grep '^STOP:' <<< "$desc" | grep -qi 'asleep' && echo yes || echo no)"
+  is "fleet_list's description says it lists asleep sessions" "yes" "$(grep -qiE '^LIST:.*asleep' <<< "$desc" && echo yes || echo no)"
+  is "fleet_stop's description names clearing an asleep one"  "yes" "$(grep -qiE '^STOP:.*asleep' <<< "$desc" && echo yes || echo no)"
   rm -rf "$FL"
 else
   skip "fleet_list shows asleep sessions with their age" "tmux not available"
