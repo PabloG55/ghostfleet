@@ -11040,7 +11040,7 @@ VAD
     heard="$(HOME="$CV/home" CLAUDE_FLEET_WHISPER_MODEL="$WM" "$ROOT/bin/fleet-jarvis" hear "$CV/enc.wav" 2>&1)"
     is "...and whisper.cpp hears the words in it"   "1" "$(grep -ci 'acme' <<< "$heard" || true)"
   else
-    skip "encoder through whisper.cpp" "needs macOS say + afconvert, whisper-cli and a model in ~/.local/share/whisper"
+    skip "encoder through whisper.cpp" "say, afconvert, whisper-cli or a whisper model not installed (macOS, ~/.local/share/whisper)"
   fi
   rm -rf "$CV"
 else
