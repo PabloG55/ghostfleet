@@ -11879,10 +11879,16 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command
   # ── the Bash door: merge and push are shell commands ────────────────────────
   JPANE="$(tmux -L cf-jarvis display-message -p -t master '#{pane_id}')"
   HPANE="$(tmux -L cf-jarvis display-message -p -t helper '#{pane_id}')"
+  # A HERE-STRING, NOT A PIPE. With no Jarvis marker the guard exits BEFORE it reads stdin,
+  # so a `jq | guard` writer can hit a closed pipe: jq exits 2 on the EPIPE (141 if the
+  # signal gets it first), and pipefail makes that the pipeline's status — the guard's
+  # clean 0 read as a refusal. Which one wins is a race with the pipe buffer, so it went red
+  # on one macOS runner and green everywhere else; a 240KB command reproduces it every time.
+  # CLAUDE.md's pipefail entry, arriving through a hook instead of a grep.
   guard() {            # $1 = pane to run as, $2 = the command -> "rc|first line of stderr"
     local e rc
-    e="$(jq -n --arg c "$2" '{hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c}}' \
-      | HOME="$JC/home" TMUX="$JSP,1,0" TMUX_PANE="$1" "$ROOT/hooks/jarvis-guard.sh" 2>&1 >/dev/null)"; rc=$?
+    e="$(HOME="$JC/home" TMUX="$JSP,1,0" TMUX_PANE="$1" "$ROOT/hooks/jarvis-guard.sh" 2>&1 >/dev/null \
+      <<< "$(jq -n --arg c "$2" '{hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c}}')")"; rc=$?
     printf '%s|%s' "$rc" "$(head -1 <<< "$e")"
   }
   is "gh pr merge is held for a yes"               "2" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
@@ -11911,6 +11917,11 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command
   rm -f "$JC/home/.claude/fleet"/cf-jarvis.*workers-merge "$JC/home/.claude/fleet"/cf-jarvis.*agents-approve
   rm -f "$JC/home/.config/ghostfleet/jarvis"
   is "with no Jarvis marker nothing is guarded"    "0" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  # ...and deterministically: a command no pipe buffer holds, which is what turned the row
+  # above red on a runner with a small one. The guard's answer, not the writer's, is what
+  # this reads.
+  is "...even for a command bigger than any pipe buffer" "0" \
+     "$(guard "$JPANE" "gh pr merge 12 $(head -c 240000 /dev/zero | tr '\0' x)" | cut -d'|' -f1)"
   tmux -L cf-jarvis kill-server 2>/dev/null
   rm -rf "$JC"
 else
