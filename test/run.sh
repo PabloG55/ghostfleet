@@ -4777,6 +4777,22 @@ else
   skip "no withheld name in a PR title or body" "node missing"
 fi
 
+# ── no tracked file carries the home directory of whoever runs this ──────────
+# Three fixture files, two test helpers, two captured transcripts and a comment carried the
+# author's real home path. Harmless — but a path is a name, and the placeholder vocabulary
+# (`/Users/you`, beside acme-api and the rest in web/fixtures/) exists so that a path in
+# an example reads as an example. Asked of the RUNNING user's $HOME rather than of a stored
+# name, so the check itself publishes nothing and catches the next contributor's path as
+# readily as this one. On a CI runner $HOME is /home/runner and this proves nothing; on a
+# contributor's machine it is the whole check.
+#   WATCHED GOING RED before the placeholders went in: it named all nine files.
+group "no tracked file carries this machine's home path"
+case "$HOME" in
+  /|/root|/home/runner|"") na "the home-path sweep" "HOME=$HOME is not a contributor's home" ;;
+  *) is "no tracked file names \$HOME" "" \
+        "$(git -C "$ROOT" grep -lF "$HOME/" -- . ':!node_modules' 2>/dev/null | tr '\n' ' ' | sed 's/ $//')" ;;
+esac
+
 # ── an edited PR body never reaches the test matrix ──────────────────────────
 # Editing a body fired a second `pull_request` run of the workflow holding the matrix, with
 # the matrix skipped; a skipped matrix job reports one check named plain `test`, and GitHub

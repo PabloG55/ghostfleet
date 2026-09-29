@@ -1,13 +1,13 @@
 {
   "roots": [
-    "/Users/pgarces/gf-demo",
-    "/Users/pgarces"
+    "/Users/you/gf-demo",
+    "/Users/you"
   ],
   "checkouts": [
-    "/Users/pgarces/gf-demo/acme-api",
-    "/Users/pgarces/gf-demo/acme-api-1",
-    "/Users/pgarces/gf-demo/acme-api-2",
-    "/Users/pgarces/gf-demo/api-fix",
-    "/Users/pgarces/gf-demo/docs-pass"
+    "/Users/you/gf-demo/acme-api",
+    "/Users/you/gf-demo/acme-api-1",
+    "/Users/you/gf-demo/acme-api-2",
+    "/Users/you/gf-demo/api-fix",
+    "/Users/you/gf-demo/docs-pass"
   ]
 }
