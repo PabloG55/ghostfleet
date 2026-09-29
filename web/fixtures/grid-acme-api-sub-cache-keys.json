@@ -1,0 +1,77 @@
+{
+  "project": "acme-api",
+  "profile": "work",
+  "sub": "cache-keys",
+  "counts": {
+    "need_you": 1,
+    "working": 1,
+    "ready": 1,
+    "parked": 0,
+    "limit": 0,
+    "interrupted": 0
+  },
+  "cards": [
+    {
+      "name": "cache-keys",
+      "label": null,
+      "status": "ready",
+      "folder": "cache-keys",
+      "branch": "feat/cache-key-scope",
+      "agent": "claude",
+      "pr": null,
+      "msg": "Both paths land cached. 622 passed / 0 failed.",
+      "age": 480,
+      "attached": false,
+      "sched": null,
+      "limit_at": null,
+      "lead": false,
+      "exited": false,
+      "parent": null,
+      "workers": {
+        "total": 2,
+        "need_you": 1,
+        "working": 1
+      },
+      "sub_head": true
+    },
+    {
+      "name": "cache-keys-ttl",
+      "label": null,
+      "status": "need-you",
+      "folder": "cache-keys-ttl",
+      "branch": "cache-keys-ttl",
+      "agent": "claude",
+      "pr": null,
+      "msg": "Claude needs your permission to use Bash",
+      "age": 12,
+      "attached": false,
+      "sched": null,
+      "limit_at": null,
+      "lead": false,
+      "exited": false,
+      "parent": "cache-keys",
+      "workers": null,
+      "sub_head": false
+    },
+    {
+      "name": "cache-keys-docs",
+      "label": null,
+      "status": "working",
+      "folder": "cache-keys-docs",
+      "branch": "cache-keys-docs",
+      "agent": "claude",
+      "pr": "1187",
+      "msg": "Documenting the scoped key format in the cache README.",
+      "age": 95,
+      "attached": false,
+      "sched": null,
+      "limit_at": null,
+      "lead": false,
+      "exited": false,
+      "parent": "cache-keys",
+      "workers": null,
+      "sub_head": false
+    }
+  ],
+  "free_worktrees": []
+}

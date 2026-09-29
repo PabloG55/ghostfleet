@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-inbox [-s SOCKET] [--all] [--clear]
+# fleet-inbox [-s SOCKET] [--session NAME] [--all] [--clear]
 #
 # The lead's ATTENTION feed. Workers can't push into a busy lead, and having the
 # lead poll every sibling (fleet-read × N) burns the shared budget. So instead,
@@ -12,6 +12,7 @@
 #   (default)  show entries you haven't seen yet, then mark them seen
 #   --all      show the whole inbox (doesn't change what's "seen")
 #   --clear    empty the inbox
+#   --session  read NAME's inbox instead of the caller's (see "WHOSE INBOX" below)
 #
 # Socket defaults to $CLAUDE_FLEET_SOCK.
 set -uo pipefail
@@ -21,10 +22,11 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-MODE=new
+MODE=new; READER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)      SOCK="${2:-}"; shift 2 ;;
+    --session) READER="${2:-}"; shift 2 ;;
     --all)   MODE=all;   shift ;;
     --clear) MODE=clear; shift ;;
     *) echo "fleet-inbox: unknown arg $1" >&2; exit 1 ;;
@@ -33,8 +35,30 @@ done
 [ -n "$SOCK" ] || { echo "fleet-inbox: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
-INBOX="$FLEET_DIR/$SOCK.inbox"
-SEEN="$FLEET_DIR/$SOCK.inbox.seen"
+# WHOSE INBOX. The fleet's inbox is master's: every top-level worker's done and need-you.
+# A SUB-LEAD has its own, <sock>.<name>.inbox, because its children report to it and not
+# to master (hooks/fleet-event.sh, bin/fleet-spawn) — so the caller is asked who it is,
+# the same way fleet-stop asks: its pane first, then the name it was launched with. Only
+# a session that HAS children, or has been written to as a parent, reads its own; every
+# other caller — master, a plain worker, the phone's server with no session at all — reads
+# the fleet's inbox exactly as before.
+if [ -z "$READER" ]; then
+  case "${TMUX:-}" in *"/$SOCK,"*)
+    [ -n "${TMUX_PANE:-}" ] && READER="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+  [ -n "$READER" ] || READER="${CLAUDE_FLEET_SLOT:-}"
+  if [ -n "$READER" ] && [ "$READER" != master ] && [ ! -e "$FLEET_DIR/$SOCK.$READER.inbox" ] \
+     && ! grep -qxF -- "$READER" "$FLEET_DIR/$SOCK".*.parent 2>/dev/null; then
+    READER=""
+  fi
+fi
+case "$READER" in *[!A-Za-z0-9._~-]*) echo "fleet-inbox: '$READER' is not a session name" >&2; exit 1 ;; esac
+if [ -n "$READER" ] && [ "$READER" != master ]; then
+  INBOX="$FLEET_DIR/$SOCK.$READER.inbox"
+  SEEN="$FLEET_DIR/$SOCK.$READER.inbox.seen"
+else
+  INBOX="$FLEET_DIR/$SOCK.inbox"
+  SEEN="$FLEET_DIR/$SOCK.inbox.seen"
+fi
 
 # TSV in ("<ts>\t<session>\t<event>\t<detail>") -> human-readable out
 fmt() {

@@ -39,18 +39,6 @@ failed. Approve or reject the **flow**, with an optional note per chapter. The r
 rebuilt in the phone client's palette and type: video beside the chapter list on desktop,
 stacked on a phone; space plays, ←/→ step chapters, `a` approves, `r` rejects.
 
-### 10. Nested leads: a worker can run its own workers
-Today `fleet-spawn` refuses from a linked worktree, so a worker that wants a team spawns
-from the main checkout and its workers become flat siblings of the lead's — the lead gets
-their events and nothing ties them together. Seen with one worker running four children as
-siblings. Proposed (awaiting decisions):
-- children branch from the **sub-lead's** branch and PR into it; the sub-lead opens one PR
-- same fleet, each child tagged with its parent
-- the sub-lead's card reads `◆ working · 4 workers · 0 need you`; ⏎ opens its sub-grid
-- children's done / need-you go to the **sub-lead's** inbox; the lead sees the rollup
-- exactly two levels (a sub-worker cannot spawn)
-- stopping a sub-lead asks, then stops and reclaims its children
-
 ### 11. Make a folder from the add-project browser
 `n` = new folder here: asks a name, creates it, offers `git init` (a root with no git has
 nothing to branch worktrees from), lands the cursor on it; `s` selects it as before. And a

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 74a1d935d123
+// CLIENT-HASH: 07cad89e23c2
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -284,7 +284,10 @@
 // CLIENT SENDS NO FINGERPRINT, SO ITS ANSWERS ARE REFUSED — with a message saying to reload.
 // v48 drops the __diag probes: the client no longer beacons its load, lifecycle or
 // geometry to the daemon's log. Nothing else changes for an older client.
-const VERSION = 'ghostfleet-v48';
+// v49 is nested leads: a sub-lead's card carries `N workers · M need you` and a tap opens
+// its sub-grid (itself, then only its workers); back comes up to the top grid. An older
+// client shows the sub-lead as an ordinary card and cannot see its workers at all.
+const VERSION = 'ghostfleet-v49';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
@@ -296,7 +299,7 @@ const SHELL = [
   './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',
-  './fixtures/grid-acme-api.json', './fixtures/grid-degraded.json',
+  './fixtures/grid-acme-api.json', './fixtures/grid-acme-api-sub-cache-keys.json', './fixtures/grid-degraded.json',
   './fixtures/grid-free.json', './fixtures/grid-empty.json',
   './fixtures/settings-acme-api.json',
   './fixtures/session-acme-api-api-fix.json', './fixtures/session-acme-api-docs-pass.json',

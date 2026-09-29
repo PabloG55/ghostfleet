@@ -49,7 +49,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { projects, checkoutOf, BIN, self } from '../mcp/fleet-dispatch.mjs';
-import { fleetDirs, scanStatus, markersFor, inboxSince } from '../lib/fleet-scan.mjs';
+import { fleetDirs, scanStatus, markersFor, inboxSince, parentsFor } from '../lib/fleet-scan.mjs';
 
 const HOME = os.homedir();
 // ONE STAMP PER READER. "Since last look" is a question about a particular looker: a lead
@@ -135,11 +135,30 @@ export function buildDigest({ since, tmuxOk }) {
       else status = rec && KINDS.includes(rec.status) ? rec.status : (rec && rec.status ? rec.status : 'unknown');
       sessions.push({ name, status, ts: rec ? rec.ts : 0, lead: name === 'master' });
     }
-    const events = inboxSince(dir, t.sock, since);
+    // ── NESTED LEADS: a sub-worker is shown UNDER its sub-lead ──
+    // `parent` is set only when that parent is itself one of these sessions: a tag naming a
+    // session that is gone makes the child a top-level worker again, as the grid draws it.
+    const parents = parentsFor(dir, t.sock);
+    for (const s of sessions) {
+      const p = parents.get(s.name);
+      s.parent = (p && !s.lead && names.has(p)) ? p : null;
+    }
+    const subLeads = [...new Set(sessions.map(s => s.parent).filter(Boolean))];
+    for (const s of sessions) {
+      const kids = sessions.filter(k => k.parent === s.name);
+      s.workers = kids.length ? { total: kids.length, need_you: kids.filter(k => k.status === 'need-you').length } : null;
+    }
+    // A child's rows are in its sub-lead's inbox, not the fleet's; named <sub-lead>/<child>
+    // here so a reader sees whose team it is without a second lookup.
+    const fromSub = (since0) => subLeads.flatMap(sl =>
+      inboxSince(dir, t.sock, since0, sl).map(e => ({ ...e, session: e.session.includes('/') ? e.session : `${sl}/${e.session}`, via: sl })));
+    const events = [...inboxSince(dir, t.sock, since), ...fromSub(since)].sort((a, b) => a.ts - b.ts);
     // The detail on a need-you is the note the hook wrote to the inbox, newest first.
+    const every = [...inboxSince(dir, t.sock, 0), ...fromSub(0)];
     for (const s of sessions) {
       if (s.status !== 'need-you') continue;
-      const last = [...inboxSince(dir, t.sock, 0)].reverse().find(e => e.event === 'need-you' && e.session === s.name);
+      const want = s.parent ? `${s.parent}/${s.name}` : s.name;
+      const last = [...every].reverse().find(e => e.event === 'need-you' && e.session === want);
       if (last) s.detail = last.detail;
     }
     out.push({ name: t.name, profile: t.profile, sock: t.sock, path: t.path, sessions, events, prs: openPrs(t) });
@@ -168,7 +187,8 @@ function renderText(d) {
   L.push(`digest — ${d.projects.length} project${d.projects.length === 1 ? '' : 's'} on ${profs.length} profile${profs.length === 1 ? '' : 's'} (${profs.join(', ')}), since ${d.since ? `${hhmm(d.since)} (${ago(d.since)} ago)` : 'the last day'}`);
   if (!/^tmux$/.test(d.liveness)) L.push(`  liveness: ${d.liveness}`);
   const rowsOf = (status) => d.projects.flatMap(p => p.sessions.filter(s => s.status === status).map(s => ({ p, s })));
-  const line = ({ p, s }) => `  ${pad(`${p.name}/${s.name}`, 30)} ${pad(s.status, 9)} ${s.detail ? s.detail : ''}${s.ts ? `  (${ago(s.ts)})` : ''}`.replace(/\s+$/, '');
+  // a sub-worker reads as project/sub-lead/worker: the tree, in the one column it needs
+  const line = ({ p, s }) => `  ${pad(`${p.name}/${s.parent ? `${s.parent}/` : ''}${s.name}`, 30)} ${pad(s.status, 9)} ${s.detail ? s.detail : ''}${s.workers ? `[${s.workers.total} worker${s.workers.total === 1 ? '' : 's'} · ${s.workers.need_you} ${s.workers.need_you === 1 ? 'needs' : 'need'} you]` : ''}${s.ts ? `  (${ago(s.ts)})` : ''}`.replace(/\s+$/, '');
   const need = rowsOf('need-you');
   L.push('');
   L.push(`NEED YOU (${need.length})${need.length ? '' : ' — nobody is blocked on you'}`);

@@ -24,7 +24,10 @@
       "sched": null,
       "limit_at": null,
       "lead": true,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "api-fix",
@@ -40,7 +43,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "docs-pass",
@@ -50,13 +56,16 @@
       "branch": "docs/openapi-examples",
       "agent": "opencode",
       "pr": "1170",
-      "msg": "Done. Draft PR #212 \u2014 the drift was two schemas sharing one $ref.",
+      "msg": "Done. Draft PR #212 — the drift was two schemas sharing one $ref.",
       "age": 3000,
       "attached": false,
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "types",
@@ -74,7 +83,10 @@
       },
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "list-pages",
@@ -90,7 +102,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "cache-keys",
@@ -106,7 +121,14 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": {
+        "total": 2,
+        "need_you": 1,
+        "working": 1
+      },
+      "sub_head": false
     },
     {
       "name": "rate-limit",
@@ -122,7 +144,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "csv-export",
@@ -138,8 +163,12 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     }
   ],
-  "free_worktrees": []
+  "free_worktrees": [],
+  "sub": null
 }

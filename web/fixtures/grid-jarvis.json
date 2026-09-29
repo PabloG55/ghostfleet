@@ -1,11 +1,35 @@
 {
   "project": "jarvis",
   "profile": "work",
-  "counts": { "need_you": 0, "working": 0, "ready": 1, "parked": 0, "limit": 0, "interrupted": 0 },
+  "sub": null,
+  "counts": {
+    "need_you": 0,
+    "working": 0,
+    "ready": 1,
+    "parked": 0,
+    "limit": 0,
+    "interrupted": 0
+  },
   "cards": [
-    { "name": "master", "label": null, "status": "ready", "folder": "jarvis", "branch": "main", "agent": "claude", "pr": null,
-      "msg": "acme-web's list-pages is asking to run pnpm test. Allow it?", "age": 40, "attached": false, "sched": null,
-      "limit_at": null, "lead": true, "exited": false }
+    {
+      "name": "master",
+      "label": null,
+      "status": "ready",
+      "folder": "jarvis",
+      "branch": "main",
+      "agent": "claude",
+      "pr": null,
+      "msg": "acme-web's list-pages is asking to run pnpm test. Allow it?",
+      "age": 40,
+      "attached": false,
+      "sched": null,
+      "limit_at": null,
+      "lead": true,
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
+    }
   ],
   "free_worktrees": []
 }

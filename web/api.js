@@ -7,7 +7,7 @@
 //
 // ── the contract fleet-serve has to meet ──────────────────────────────────
 //   GET  /api/projects                          -> { home, projects: [ … ] }
-//   GET  /api/grid?project=<name>               -> docs/mobile.md §4, verbatim
+//   GET  /api/grid?project=<name>[&sub=<session>] -> docs/mobile.md §4, verbatim (sub = that sub-lead's grid)
 //   GET  /api/session?project=&session=&limit=20[&before=<ts>]
 //                                               -> { session, total, messages: [ {ts,role,text} ], note? }
 //   GET  /api/pane?project=&session=[&scrollback=N]
@@ -285,8 +285,15 @@ async function rollup(project) {
 // §4's payload, whichever end it came from. `overlay` replays the verbs performed in
 // fixture mode so a pause you just asked for is visible on the card — on a server the
 // fleet itself is the one that changes and there is nothing to replay.
-export async function getGrid(project) {
-  if ((await ready()).mode === 'server') return get(`/api/grid?project=${encodeURIComponent(project || '')}`);
+export async function getGrid(project, sub = '') {
+  if ((await ready()).mode === 'server')
+    return get(`/api/grid?project=${encodeURIComponent(project || '')}` + (sub ? `&sub=${encodeURIComponent(sub)}` : ''));
+  // A sub-grid is its own fixture, named for the project and the sub-lead — the server
+  // answers it from `fleet-grid.mjs --json --sub`, which draws only that team.
+  if (sub) {
+    try { return applyOverlay(await fixture(`grid-${project}-sub-${sub}.json`)); }
+    catch { return applyOverlay({ project, sub: null, counts: {}, cards: [], free_worktrees: [] }); }
+  }
   const chosen = FIXTURES.find(f => f.file === fixtureName());
   // The fixture picked in settings wins when it belongs to the project you opened;
   // otherwise the first fixture for that project. A project with no fixture gets the

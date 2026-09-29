@@ -3533,6 +3533,157 @@ else
   skip "worker nesting guard" "git missing"
 fi
 
+# ── 4a10b. nested leads: a worker can run its own workers ────────────────────
+# A worker acting as the master of its own task could not dispatch through the fleet:
+# fleet-spawn refused from a linked worktree, and the guard let its subagents through
+# instead. So it either spawned subagents the fleet cannot see, or ran fleet-spawn from
+# the main checkout — which made its four children flat siblings of the top lead, their
+# done/need-you landing on a master that had not asked for them. Now a spawn from a
+# linked worktree makes a CHILD of the session standing in it: branched off that
+# session's branch, tagged with its parent, reporting to it. Exactly two levels.
+#
+# Every assertion here reads the thing the feature is about — the marker on disk, the
+# commit the child's branch sits on, the inbox a row landed in, the cards --json emits —
+# and each comes with the other direction, because a child that is never tagged and a
+# sibling that is wrongly tagged both "pass" a one-sided check.
+group "nested leads"
+if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  NL="$(cd "$(mktemp -d)" && pwd -P)"; NLF="$NL/fleet"
+  mkdir -p "$NL/home/.config/ghostfleet" "$NL/stub" "$NLF"
+  # The stub agent draws a composer, so the push-wake's "is the box empty" check has a box
+  # to find; it never exits, so the session stays for fleet-spawn's liveness settle.
+  RULE='────────────────────────────────'
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n❯ \\n%%s\\n" "%s" "%s"; sleep 300\n' "$RULE" "$RULE" > "$NL/stub/agent-here"
+  # fleet-send is what the prompt dispatch and the push-wake both call: record, never paste.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent"\n' "$NL" > "$NL/stub/fleet-send"
+  chmod +x "$NL/stub/agent-here" "$NL/stub/fleet-send"
+  git init -q -b main "$NL/acme-api" 2>/dev/null
+  git -C "$NL/acme-api" config user.email t@t; git -C "$NL/acme-api" config user.name t
+  : > "$NL/acme-api/f"; git -C "$NL/acme-api" add -A; git -C "$NL/acme-api" commit -qm init 2>/dev/null
+  # the sub-lead: a worker in its own worktree, with a commit main does not have
+  git -C "$NL/acme-api" worktree add -q "$NL/api-fix" -b feat/api-fix 2>/dev/null
+  git -C "$NL/api-fix" config user.email t@t; git -C "$NL/api-fix" config user.name t
+  echo sub > "$NL/api-fix/sub"; git -C "$NL/api-fix" add sub; git -C "$NL/api-fix" commit -qm sub 2>/dev/null
+  SUBHEAD="$(git -C "$NL/api-fix" rev-parse HEAD)"
+  # and an ordinary top-level worker beside it, for sibling isolation
+  git -C "$NL/acme-api" worktree add -q "$NL/docs-pass" -b docs-pass 2>/dev/null
+  tmux -L cfnl kill-server 2>/dev/null
+  tmux -L cfnl new-session -d -s master  -c "$NL/acme-api" "$NL/stub/agent-here"
+  tmux -L cfnl new-session -d -s api-fix -c "$NL/api-fix"  "$NL/stub/agent-here"
+  tmux -L cfnl new-session -d -s docs-pass -c "$NL/docs-pass" "$NL/stub/agent-here"
+  nlenv() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK_FORCE HOME="$NL/home" \
+              CLAUDE_FLEET_SOCK=cfnl CLAUDE_FLEET_DIR="$NLF" CLAUDE_FLEET_SLOTS="$NL/slots" \
+              CLAUDE_FLEET_NOTIFIER=off PATH="$NL/stub:$ROOT/bin:$PATH" "$@"; }
+  nlspawn() { local d="$1"; shift; ( cd "$d" && nlenv "$ROOT/bin/fleet-spawn" "$@" 2>&1 ); }
+  # a count that is 0 for a file that does not exist: "no inbox yet" IS the answer zero
+  nlc() { [ -f "$2" ] || { echo 0; return 0; }; grep -c -- "$1" "$2" || true; }
+
+  # ── spawn from the sub-lead's worktree makes a tagged child on its branch ──
+  out="$(nlspawn "$NL/api-fix" api-fix-tests --prompt 'Done when: the parser test is red then green. Fix the parser.')"
+  is "a spawn from a worker's worktree starts"   "1" "$(grep -c "started 'api-fix-tests'" <<< "$out" || true)"
+  is "...and says whose child it is"             "1" "$([ "$(grep -c "child of 'api-fix'" <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+  is "...tagged with its parent"                 "api-fix" "$(cat "$NLF/cfnl.api-fix-tests.parent" 2>/dev/null)"
+  is "...on the SUB-LEAD's commit, not main's"   "$SUBHEAD" "$(git -C "$NL/api-fix-tests" rev-parse HEAD 2>/dev/null)"
+  is "...beside the checkouts, not inside one"   "1" "$([ -d "$NL/api-fix-tests" ] && [ ! -e "$NL/api-fix/api-fix-tests" ] && echo 1 || echo 0)"
+  is "...on the same fleet"                      "1" "$(tmux -L cfnl has-session -t api-fix-tests 2>/dev/null && echo 1 || echo 0)"
+  wait_for 20 "the child's brief to be dispatched" '[ -s "$NL/sent" ]' || true
+  is "...and its brief names the PR base"        "1" "$([ "$(grep -c 'against feat/api-fix' "$NL/sent" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
+  # the other direction: a spawn from the MAIN checkout is still a top-level worker
+  out="$(nlspawn "$NL/acme-api" billing-svc --new)"
+  is "a spawn from the main checkout still starts" "1" "$(grep -c "started 'billing-svc'" <<< "$out" || true)"
+  is "...and is nobody's child"                    "0" "$([ -e "$NLF/cfnl.billing-svc.parent" ] && echo 1 || echo 0)"
+
+  # ── exactly two levels: a sub-worker cannot spawn ──
+  out="$(nlspawn "$NL/api-fix-tests" grandkid --new)"
+  is "a sub-worker's spawn is refused"          "1" "$([ "$(grep -c 'sub-worker' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and creates nothing"                   "0" "$([ -e "$NL/grandkid" ] && echo 1 || echo 0)"
+  is "...and starts no session"                 "0" "$(tmux -L cfnl has-session -t grandkid 2>/dev/null && echo 1 || echo 0)"
+
+  # ── sibling isolation of events ──
+  nlfire() {                                    # $1 = slot, $2 = event, $3 = message
+    printf '{"hook_event_name":"%s","session_id":"nl-%s","cwd":"%s","transcript_path":"","message":"%s"}' \
+      "$2" "$1" "$NL" "${3:-}" | nlenv CLAUDE_FLEET_SLOT="$1" "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  : > "$NL/sent"
+  nlfire api-fix-tests Stop
+  is "a child's done lands in its sub-lead's inbox" "1" "$(nlc 'api-fix-tests	done' "$NLF/cfnl.api-fix.inbox")"
+  is "...and NOT in the top master's"               "0" "$(nlc 'api-fix-tests' "$NLF/cfnl.inbox")"
+  wait_for 5 "the sub-lead's wake" '[ -s "$NL/sent" ]' || true
+  is "...and push-wakes the sub-lead"               "1" "$([ "$(grep -c '^-s cfnl api-fix ' "$NL/sent" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
+  is "...and not the master"                        "0" "$(grep -c '^-s cfnl master ' "$NL/sent" 2>/dev/null || true)"
+  nlfire api-fix-tests Notification 'Claude needs your permission to use Bash'
+  is "a child's need-you goes to the sub-lead too"  "1" "$(nlc 'api-fix-tests	need-you' "$NLF/cfnl.api-fix.inbox")"
+  nlfire docs-pass Stop
+  is "a top-level worker's done still goes to master" "1" "$(nlc 'docs-pass	done' "$NLF/cfnl.inbox")"
+  is "...and never to a sub-lead"                   "0" "$(nlc 'docs-pass' "$NLF/cfnl.api-fix.inbox")"
+  # fleet-inbox, run AS the sub-lead, reads the sub-lead's inbox; run as master, master's
+  sub_in="$(nlenv CLAUDE_FLEET_SLOT=api-fix "$ROOT/bin/fleet-inbox" -s cfnl --all 2>&1)"
+  top_in="$(nlenv CLAUDE_FLEET_SLOT=master  "$ROOT/bin/fleet-inbox" -s cfnl --all 2>&1)"
+  is "the sub-lead's fleet-inbox shows its child"   "1" "$([ "$(grep -c 'api-fix-tests' <<< "$sub_in")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and not its sibling"                       "0" "$(grep -c 'docs-pass' <<< "$sub_in" || true)"
+  is "master's fleet-inbox does not show the child" "0" "$(grep -c 'api-fix-tests' <<< "$top_in" || true)"
+
+  # ── the card rollup, and the sub-grid ──
+  nlgrid() { nlenv node "$ROOT/bin/fleet-grid.mjs" cfnl "$@" 2>/dev/null; }
+  top="$(nlgrid --json)"
+  is "the top grid lists no child"                "0" "$(jq -r '.cards[].name' <<< "$top" | grep -c '^api-fix-tests$' || true)"
+  is "...but still lists the sub-lead"            "1" "$(jq -r '.cards[].name' <<< "$top" | grep -c '^api-fix$' || true)"
+  is "...whose card counts its workers"           "1|1" "$(jq -r '.cards[] | select(.name=="api-fix") | "\(.workers.total)|\(.workers.need_you)"' <<< "$top")"
+  is "...and a plain worker's card counts none"   "null" "$(jq -r '.cards[] | select(.name=="docs-pass") | .workers' <<< "$top")"
+  sub="$(nlgrid --json --sub api-fix)"
+  is "the sub-grid is the sub-lead, then its children" "api-fix api-fix-tests" "$(jq -r '[.cards[].name] | join(" ")' <<< "$sub")"
+  is "...and names whose grid it is"              "api-fix" "$(jq -r '.sub' <<< "$sub")"
+  is "the rollup reads as the owner wrote it"     "1 worker · 1 needs you" \
+     "$(node -e 'import(process.argv[1]).then(G=>console.log(G.cardModel(JSON.parse(process.argv[2])).rollup))' \
+        "$ROOT/web/grid.js" "$(jq -c '.cards[] | select(.name=="api-fix")' <<< "$top")" 2>/dev/null)"
+
+  # ── rename carries the tag, in both directions ──
+  nlenv "$ROOT/bin/fleet-rename" -s cfnl api-fix-tests api-fix-parser >/dev/null 2>&1
+  is "renaming a child moves its tag"             "api-fix" "$(cat "$NLF/cfnl.api-fix-parser.parent" 2>/dev/null)"
+  is "...and leaves none under the old name"      "0" "$([ -e "$NLF/cfnl.api-fix-tests.parent" ] && echo 1 || echo 0)"
+  nlenv "$ROOT/bin/fleet-rename" -s cfnl api-fix api-fix-2 >/dev/null 2>&1
+  is "renaming a sub-lead re-points its children" "api-fix-2" "$(cat "$NLF/cfnl.api-fix-parser.parent" 2>/dev/null)"
+
+  # ── stopping a sub-lead asks, then stops and reclaims its children ──
+  out="$(nlenv "$ROOT/bin/fleet-stop" -s cfnl api-fix-2 2>&1)"
+  is "stopping a sub-lead with workers is refused" "1" "$([ "$(grep -c 'api-fix-parser' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and stops nothing yet"                    "11" "$(tmux -L cfnl has-session -t api-fix-2 2>/dev/null && echo 1 || echo 0)$(tmux -L cfnl has-session -t api-fix-parser 2>/dev/null && echo 1 || echo 0)"
+  out="$(nlenv "$ROOT/bin/fleet-stop" -s cfnl --children --reclaim api-fix-2 2>&1)"
+  is "with --children the child is stopped"        "0" "$(tmux -L cfnl has-session -t api-fix-parser 2>/dev/null && echo 1 || echo 0)"
+  is "...its tag cleared"                          "0" "$([ -e "$NLF/cfnl.api-fix-parser.parent" ] && echo 1 || echo 0)"
+  is "...its reclaim attempted"                    "1" "$([ "$(grep -cE 'reclaimed|kept' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and then the sub-lead itself"             "0" "$(tmux -L cfnl has-session -t api-fix-2 2>/dev/null && echo 1 || echo 0)"
+  is "...leaving its sibling alone"                "1" "$(tmux -L cfnl has-session -t docs-pass 2>/dev/null && echo 1 || echo 0)"
+  tmux -L cfnl kill-server 2>/dev/null
+
+  # ── Jarvis's digest shows the tree ──
+  # fleet-digest derives the socket from the project's name (cf-<name>), so this is its own
+  # small fleet: a sub-lead and one child, a status file each, the child's need-you in the
+  # SUB-LEAD's inbox — which is the file the digest used never to read.
+  DG="$NL/dg"; DGF="$DG/.claude/fleet"; mkdir -p "$DGF" "$DG/.config/ghostfleet" "$DG/acme-api"
+  printf 'acme-api\t%s\twork\n' "$DG/acme-api" > "$DG/.config/ghostfleet/projects"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s api-fix -c "$DG" "sleep 300"
+  tmux -L cf-acme-api new-session -d -s api-fix-tests -c "$DG" "sleep 300"
+  printf 'api-fix\n' > "$DGF/cf-acme-api.api-fix-tests.parent"
+  nowts="$(date +%s)"
+  printf '{"sock":"cf-acme-api","slot":"api-fix","status":"working","ts":%s}' "$nowts" > "$DGF/a.json"
+  printf '{"sock":"cf-acme-api","slot":"api-fix-tests","status":"need-you","ts":%s}' "$nowts" > "$DGF/b.json"
+  printf '%s\tapi-fix-tests\tneed-you\tClaude needs your permission to use Bash\n' "$nowts" > "$DGF/cf-acme-api.api-fix.inbox"
+  dg="$(env -u TMUX HOME="$DG" node "$ROOT/bin/fleet-digest.mjs" --peek --since 0 2>/dev/null)"
+  dgj="$(env -u TMUX HOME="$DG" node "$ROOT/bin/fleet-digest.mjs" --peek --json --since 0 2>/dev/null)"
+  is "the digest tags the child with its sub-lead" "api-fix" \
+     "$(jq -r '.projects[] | select(.name=="acme-api") | .sessions[] | select(.name=="api-fix-tests") | .parent' <<< "$dgj")"
+  is "...lists it under the sub-lead"              "1" "$([ "$(grep -c 'acme-api/api-fix/api-fix-tests' <<< "$dg")" -ge 1 ] && echo 1 || echo 0)"
+  is "...rolls it up on the sub-lead's row"        "1" "$([ "$(grep -c '1 worker · 1 needs you' <<< "$dg")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and reads its need-you from the sub-lead's inbox" "1" \
+     "$(jq -r '[.projects[] | select(.name=="acme-api") | .events[] | select(.session=="api-fix/api-fix-tests")] | length' <<< "$dgj")"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  rm -rf "$NL"
+else
+  skip "nested leads" "git/tmux/jq missing"
+fi
+
 # ── 4a10a1. an explicit socket has to be able to win ─────────────────────────
 # fleet-spawn prefers $TMUX over $CLAUDE_FLEET_SOCK on purpose (a long-running --resume
 # Claude holds a stale env var; the live server it sits in cannot go stale). But that
@@ -3864,11 +4015,17 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   is "...and hands over fleet-spawn"        "1" "$(has 'fleet-spawn <name>')"
   is "...and says it would MOVE this one"   "1" "$(has 'MOVE THIS SESSION')"
 
-  # A worker is a leaf: the answer there is re-branch in place, not spawn a worker.
+  # A worker's first answer is re-branch in place. A top-level worker may ALSO run workers
+  # of its own (a spawn from its worktree makes a child), so it is told that second; a
+  # SUB-WORKER cannot spawn — exactly two levels — and must not be offered it.
   guard "$(j PreToolUse EnterWorktree "$GW/wt-a")" CLAUDE_FLEET_SOCK=cf-x
   is "blocked inside a linked worktree too" "2" "$GRC"
   is "...and says re-branch where you are"  "1" "$(has 'checkout -B')"
-  is "...and does NOT offer fleet-spawn"    "0" "$(has 'fleet-spawn <name>')"
+  is "...and a child spawn only as a second option" "1" \
+     "$(awk '/checkout -B/{r=NR} /makes a child/{c=NR} END{print (r && c > r) ? 1 : 0}' <<< "$GOUT")"
+  mkdir -p "$GW/fleet"; printf 'acme-lead\n' > "$GW/fleet/cf-x.wt-a.parent"
+  guard "$(j PreToolUse EnterWorktree "$GW/wt-a")" CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_SLOT=wt-a CLAUDE_FLEET_DIR="$GW/fleet"
+  is "a sub-worker is NOT offered fleet-spawn" "0" "$(has 'fleet-spawn <name>')"
 
   # ── the directions that prove the guard isn't just "deny everything" ──
   guard "$(j PreToolUse EnterWorktree "$GW/repo")"
@@ -3989,6 +4146,35 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   is "...nor write the marker by hand"          "2" "$MRC"
   mg "$WM/repo" 'fleet-project set -s cf-x workers-merge on --session w1' CLAUDE_FLEET_SOCK=cf-x
   is "the lead in the main checkout may set it" "0" "$MRC"
+
+  # ── NESTED LEADS: a sub-lead merges its CHILDREN's PRs into its OWN branch ──
+  # With "workers can merge" off. That merge is the sub-lead's job (its children PR into its
+  # branch and nobody else integrates them), and it never touches the integration branch.
+  # Exactly that shape and nothing wider: the sub-lead's own PR upward, a stranger's PR into
+  # its branch, a child merging, and a plain worker all stay refused. The PR's base and head
+  # come from `gh pr view`, stubbed here so the answer is the one under test.
+  mkdir -p "$WM/stub"
+  printf '#!/usr/bin/env bash\ncase "$*" in *"pr view"*) printf "%%s\\t%%s\\n" "$STUB_BASE" "$STUB_HEAD" ;; esac\n' > "$WM/stub/gh"
+  chmod +x "$WM/stub/gh"
+  printf 'w1\n' > "$WF/cf-x.kid.parent"                     # w1 (in wt-a) is a sub-lead
+  printf '%s\tkid\tkid-branch\t-\n' "$WM/kid" > "$WF/cf-x.manifest.tsv"
+  sub() { local sess="$1" base="$2" head="$3" cmd="${4:-gh pr merge 12 --squash}"
+          mgs "$sess" "$cmd" STUB_BASE="$base" STUB_HEAD="$head" PATH="$WM/stub:$PATH"; }
+  sub w1 wt-a kid-branch;     is "a sub-lead merges its child's PR into its branch" "0" "$MRC"
+  mt "$WM/wt-a" mcp__github__merge_pull_request CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_DIR="$WF" CLAUDE_FLEET_SLOT=w1 \
+     STUB_BASE=wt-a STUB_HEAD=kid-branch PATH="$WM/stub:$PATH"
+  is "...with the MCP merge tool too"                       "0" "$MRC"
+  sub w1 staging wt-a;        is "...but not its own PR upward"            "2" "$MRC"
+  is "...and says who merges that one"                      "1" "$([ "$(grep -c 'the LEAD merges' <<< "$MOUT")" -ge 1 ] && echo 1 || echo 0)"
+  sub w1 staging wt-a 'gh pr merge --squash'
+  is "...not even with no PR named (its current branch's)"  "2" "$MRC"
+  sub w1 wt-a docs-pass;      is "...nor a PR that is not its child's"     "2" "$MRC"
+  : > "$WF/cf-x.w1.workers-merge-off"
+  sub w1 wt-a kid-branch;     is "...and its session's -off still vetoes"  "2" "$MRC"
+  rm -f "$WF/cf-x.w1.workers-merge-off"
+  sub w2 wt-a kid-branch;     is "a worker with no children stays refused" "2" "$MRC"
+  printf 'w1\n' > "$WF/cf-x.w1.parent"                      # now w1 is somebody's child
+  sub w1 wt-a kid-branch;     is "a sub-WORKER stays refused, children or not" "2" "$MRC"
   rm -rf "$WM"
 else
   skip "worker merge guard" "git or jq missing"
@@ -4049,10 +4235,17 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   sag "$(sj PreToolUse Agent "$SA/repo" general-purpose)" CLAUDE_FLEET_SOCK=cf-x
   is "a type that BUILDS is still blocked"    "2" "$SRC"
 
-  # A WORKER may fan out. fleet-spawn refuses from a linked worktree, so refusing here
-  # too would leave a leaf with no way to delegate anything.
-  sag "$(sj PreToolUse Agent "$SA/wt-a")" CLAUDE_FLEET_SOCK=cf-x
-  is "a leaf's own subagents are allowed"     "0" "$SRC"
+  # A SUB-WORKER may fan out: it cannot spawn (two levels), so refusing here too would
+  # leave a leaf with no way to delegate anything. A worker that is nobody's child CAN
+  # spawn — its children land under it — so it is redirected like a lead. Both, because
+  # "every worktree passes" and "every worktree is refused" are each one line away.
+  mkdir -p "$SA/fleet"; printf 'acme-lead\n' > "$SA/fleet/cf-x.wt-a.parent"
+  sag "$(sj PreToolUse Agent "$SA/wt-a")" CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_SLOT=wt-a CLAUDE_FLEET_DIR="$SA/fleet"
+  is "a sub-worker's own subagents are allowed"  "0" "$SRC"
+  rm -f "$SA/fleet/cf-x.wt-a.parent"
+  sag "$(sj PreToolUse Agent "$SA/wt-a")" CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_SLOT=wt-a CLAUDE_FLEET_DIR="$SA/fleet"
+  is "a top-level worker is redirected to spawn" "2" "$SRC"
+  is "...told its children land under it"        "1" "$([ "$(shas 'makes a')" -ge 1 ] && [ "$(shas 'CHILD of this session')" -ge 1 ] && echo 1 || echo 0)"
 
   sag "$(sj PreToolUse Agent "$SA/repo")"
   is "allowed outside a fleet"                "0" "$SRC"
@@ -9118,9 +9311,9 @@ if command -v tmux >/dev/null 2>&1; then
   # ── the §4 shape, key for key ─────────────────────────────────────────────
   # Two sibling workers (fleet-serve, fleet-pwa) are written against exactly these
   # names, so a rename is a broken client, not a refactor.
-  is "top-level keys"    "project profile counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
+  is "top-level keys"    "project profile sub counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
   is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
-  is "card keys"         "name label status folder branch agent pr msg age exited asleep queued attached sched limit_at lead" \
+  is "card keys"         "name label status folder branch agent pr msg age exited asleep queued attached sched limit_at lead parent workers sub_head" \
                          "$(J 'Object.keys(o.cards[0]).join(" ")')"
   is "project is the fleet's project" "demoproj" "$(J 'o.project')"
   is "profile is the profile"         "work"     "$(J 'o.profile')"

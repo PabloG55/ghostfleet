@@ -70,6 +70,7 @@ const lifted = [
   lift(/^function humanAge\(/),
   lift(/^function clockLabel\(/),
   SRC.split('\n').find(l => /^const CW = /.test(l)),
+  lift(/^function rollupText\(/),
   lift(/^function cardLines\(/),
   lift(/^function newCardLines\(/),
   lift(/^function freeCardLines\(/),
@@ -86,7 +87,7 @@ const strip = s => s.replace(/\x1b\[[0-9;]*m/g, '');
 // The TUI's card object is camelCase; §4's JSON is snake_case. Feeding the TUI the
 // same card the phone gets is the whole comparison, so the adapter is HERE and named
 // — inlining it would let a typo read as agreement.
-function toTui(c) { return { ...c, limitAt: c.limit_at ?? c.limitAt ?? null }; }
+function toTui(c) { return { ...c, limitAt: c.limit_at ?? c.limitAt ?? null, subHead: c.sub_head ?? c.subHead ?? false }; }
 
 // ── 1. the STATUS table, both directions ───────────────────────────────────
 // Nine statuses, the same labels, the same colours. Both directions: a status the PWA
@@ -144,6 +145,8 @@ const POKE = {
   branch: 'zzz-probe-branch', agent: 'opencode', pr: '98765', msg: 'zzz probe message',
   age: 4321, status: 'interrupted', lead: true, attached: true,
   sched: { at: 1700000000 }, limit_at: '11:11pm',
+  // a sub-lead's rollup, and the flag that says the card heads its own sub-grid
+  workers: { total: 7, need_you: 3, working: 2 }, sub_head: true,
 };
 const modelText = (m) => JSON.stringify(m);
 
@@ -198,12 +201,14 @@ const hdrExpr = hdrStmt
   .replace(/^\s*const header = /, '')
   .replace(/;\s*$/, '')
   .replace(/\$\{C\.\w+\}/g, '');
-const tuiHeader = new Function('need', 'work', 'ready', 'cut', 'limited', 'parked', 'PROFILE', 'Z',
+// `crumb` is the sub-grid's `› <sub-lead>` after the scope — empty on the top grid, which
+// is the header the phone's count strip is compared against.
+const tuiHeader = new Function('need', 'work', 'ready', 'cut', 'limited', 'parked', 'PROFILE', 'Z', 'crumb',
   `return (${hdrExpr});`);
 // strip the ` ghostfleet [profile:project]   ` prefix — the phone's header carries the
 // project name elsewhere; the COUNTS are what has to match.
 const tuiCounts = (n, w, r, cut, lim, park) =>
-  tuiHeader(n, w, r, cut, lim, park, 'work', 'acme-api').replace(/^.*?\]\s{2,}/, '');
+  tuiHeader(n, w, r, cut, lim, park, 'work', 'acme-api', '').replace(/^.*?\]\s{2,}/, '');
 const CASES = [
   ['a quiet fleet', 0, 0, 0, 0, 0, 0],
   ['the doc\'s example', 0, 2, 4, 0, 0, 0],

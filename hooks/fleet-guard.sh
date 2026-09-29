@@ -46,8 +46,13 @@
 # So the Agent branch below refuses DISPATCH from a lead and nothing else:
 #   - read-only research types (Explore, Plan) pass — they gather, they do not build,
 #     and there is no fleet-spawn shaped like them
-#   - a LEAF passes: a worker already in its worktree has no fleet-spawn alternative
-#     (fleet-spawn refuses from a linked worktree) and its subagents are its own business
+#   - a LEAF passes, and a leaf is now a SUB-WORKER: a session that is itself somebody's
+#     child (<sock>.<name>.parent). It cannot spawn — exactly two levels — so it has no
+#     fleet-spawn alternative and its subagents are its own business. A worker that is NOT
+#     a child is a potential sub-lead: fleet-spawn from its worktree makes a child of it,
+#     so it is redirected there exactly like a top lead. That exemption used to cover
+#     every linked worktree, and it is what let a worker running a team of its own do it
+#     with subagents the fleet could not see.
 #   - CLAUDE_FLEET_ALLOW_SUBAGENTS=1 overrides
 #
 # THE THIRD: a worker merging its own PR.
@@ -198,6 +203,52 @@ if [ "$MERGE" = 1 ]; then
   [ -n "$_bsess" ] || _bsess="${CLAUDE_FLEET_SLOT:-}"
   . "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../lib/boundary.sh" 2>/dev/null \
     && boundary_on workers-merge "$_bdir" "$_bsock" "$_bsess" && exit 0
+  # ── A SUB-LEAD MERGES ITS CHILDREN'S PRs INTO ITS OWN BRANCH ────────────────
+  # Nested leads (bin/fleet-spawn): a worker's children branch from its branch and PR into
+  # it, and nobody but the sub-lead integrates them — so with "workers can merge" off, that
+  # one merge is still allowed. Exactly that shape: the PR's BASE is this session's own
+  # branch AND its HEAD is one of this session's children's branches. Its own PR upward (base
+  # = the integration branch), a stranger's PR into its branch, a sub-worker (which has a
+  # parent) and a worker with no children all fall through to the refusal below. A
+  # per-session "-off" still vetoes, as it does the setting. The base and head are asked of
+  # GitHub (`gh pr view`), bounded, and any failure to learn them refuses.
+  if [ -n "$_bsess" ] && [ -n "$_wb" ] && [ ! -f "$_bdir/$_bsock.$_bsess.parent" ] \
+     && [ ! -f "$_bdir/$_bsock.$_bsess.workers-merge-off" ]; then
+    _kids=""
+    for _pt in "$_bdir/$_bsock".*.parent; do
+      [ -f "$_pt" ] && [ "$(head -1 "$_pt" 2>/dev/null)" = "$_bsess" ] || continue
+      _k="${_pt#"$_bdir/$_bsock."}"; _kids="$_kids ${_k%.parent}"
+    done
+    if [ -n "$_kids" ]; then
+      _kbr=""                                  # the children's branches: manifest, then pane
+      for _k in $_kids; do
+        _b="$(awk -F'\t' -v s="$_k" '$2==s{print $3; exit}' "$_bdir/$_bsock.manifest.tsv" 2>/dev/null)"
+        [ -n "$_b" ] || _b="$(git -C "$(tmux -L "$_bsock" display-message -p -t "$_k" '#{pane_current_path}' 2>/dev/null)" \
+                               rev-parse --abbrev-ref HEAD 2>/dev/null)"
+        [ -n "$_b" ] && _kbr="$_kbr $_b"
+      done
+      # WHICH PR. The MCP tool names it; a REST call carries it in the path; `gh pr merge`
+      # takes it as the first bare word after `merge` — and with none, the current branch's
+      # PR, which is this sub-lead's own one upward and resolves to a base that is refused.
+      _sel=""; _repo=""
+      if [ "$TOOL" != Bash ]; then
+        _sel="$(printf '%s' "$input" | jq -r '.tool_input.pullNumber // .tool_input.pull_number // ""' 2>/dev/null)"
+      else
+        _flat="$(printf '%s' "$_cmd" | tr '\n\t' '  ')"
+        _sel="$(sed -nE 's#.*pulls/([0-9]+)/merge.*#\1#p' <<< "$_flat")"
+        [ -n "$_sel" ] || _sel="$(awk '{ for (i=1;i<NF;i++) if ($i=="merge" && $(i-1)=="pr") { for (j=i+1;j<=NF;j++) { if ($j ~ /^[;&|]/) exit; if ($j !~ /^-/) { print $j; exit } } exit } }' <<< "$_flat")"
+        _repo="$(sed -nE 's#.*(-R|--repo)[ =]([^ ]+).*#\2#p' <<< "$_flat")"
+      fi
+      _to=(); command -v timeout >/dev/null 2>&1 && _to=(timeout 15)   # GNU; not on every Mac
+      _bh="$( cd "$_where" 2>/dev/null && ${_to[@]+"${_to[@]}"} gh pr view ${_sel:+"$_sel"} ${_repo:+-R "$_repo"} \
+                --json baseRefName,headRefName -q '.baseRefName + "\t" + .headRefName' 2>/dev/null )"
+      _base="${_bh%%$'\t'*}"; _head="${_bh#*$'\t'}"
+      if [ -n "$_bh" ] && [ "$_base" = "$_wb" ] && [ "$_head" != "$_bh" ] \
+         && case " $_kbr " in *" $_head "*) true ;; *) false ;; esac; then
+        exit 0
+      fi
+    fi
+  fi
   { echo "ghostfleet: a worker does not merge its own PR — the LEAD merges."
     echo "  This session runs in a linked worktree ($_where${_wb:+, branch $_wb}), which makes"
     echo "  it a worker. The lead scans what you opened and merges it from the main checkout;"
@@ -218,6 +269,15 @@ fi
 _gd="$(git -C "$CWD" rev-parse --git-dir 2>/dev/null)"
 _gcd="$(git -C "$CWD" rev-parse --git-common-dir 2>/dev/null)"
 _br="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+# Is this session a SUB-WORKER — somebody's child? Its name is asked the way fleet-stop
+# asks: the pane first (a renamed session keeps its launch-time env), then the env.
+_me=""
+case "${TMUX:-}" in *"/${CLAUDE_FLEET_SOCK:-/},"*)
+  [ -n "${TMUX_PANE:-}" ] && _me="$(tmux -L "$CLAUDE_FLEET_SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+[ -n "$_me" ] || _me="${CLAUDE_FLEET_SLOT:-}"
+_fdir="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+SUBWORKER=0
+[ -n "$_me" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -f "$_fdir/$CLAUDE_FLEET_SOCK.$_me.parent" ] && SUBWORKER=1
 
 # ── the Agent tool: dispatch belongs to the fleet ─────────────────────────────
 # Placed before the EnterWorktree message rather than beside it: the two share the
@@ -225,10 +285,14 @@ _br="$(git -C "$CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
 # escape hatch in the other's path.
 if [ "$TOOL" != "EnterWorktree" ]; then
   [ "${CLAUDE_FLEET_ALLOW_SUBAGENTS:-0}" != 1 ] || exit 0
-  # A LEAF's subagents are its own business: fleet-spawn refuses from a linked worktree,
-  # so there is nothing to redirect it to. Refusing here would leave a worker with no
-  # way to fan out at all, which is a worse fleet than the one this guard is protecting.
-  [ "$_gd" = "$_gcd" ] || exit 0
+  # A LEAF's subagents are its own business — and the leaf is a SUB-WORKER, which cannot
+  # spawn, so there is nothing to redirect it to. Refusing it would leave it no way to fan
+  # out at all, which is a worse fleet than the one this guard is protecting. Outside the
+  # fleet a linked worktree has no session for fleet-spawn to make a child OF, so the same.
+  if [ "$_gd" != "$_gcd" ]; then
+    [ "$SUBWORKER" = 1 ] && exit 0
+    [ "$OUTSIDE" = 1 ] && exit 0
+  fi
   # Read-only research passes. These gather and return; they do not build, they leave
   # no branch and no worktree, and no fleet-spawn is shaped like them. Anything else —
   # including the default, unnamed type — is dispatch.
@@ -247,6 +311,21 @@ if [ "$TOOL" != "EnterWorktree" ]; then
       echo
       echo "  Or work in the fleet instead of beside it:  ghostfleet $PROJ"
       echo
+      echo "  Small enough to just do? Do it here — that needs no worker at all."
+      echo "  Read-only research is NOT blocked: subagent_type Explore or Plan."
+      echo "  Deliberate override: CLAUDE_FLEET_ALLOW_SUBAGENTS=1"; } >&2
+    exit 2
+  fi
+  if [ "$_gd" != "$_gcd" ]; then
+    { echo "ghostfleet: dispatch through the fleet, not a Claude subagent — you can run workers too."
+      echo "  You are a worker in a worktree ($GITROOT, branch $_br). A fleet-spawn from HERE makes a"
+      echo "  CHILD of this session: branched from $_br, its PR into $_br, its done and need-you"
+      echo "  in YOUR inbox. A subagent gives you none of that, and the fleet cannot see it."
+      echo
+      echo "      fleet-spawn <name> --prompt \"…\"          # or the MCP tool fleet_spawn"
+      echo "      fleet-inbox                                # your workers' events"
+      echo
+      echo "  Merge each child's PR into $_br, then open ONE PR from $_br to the integration branch."
       echo "  Small enough to just do? Do it here — that needs no worker at all."
       echo "  Read-only research is NOT blocked: subagent_type Explore or Plan."
       echo "  Deliberate override: CLAUDE_FLEET_ALLOW_SUBAGENTS=1"; } >&2
@@ -296,9 +375,13 @@ fi
   echo "  siblings of the repo, and a worker is a NEW session; you keep yours."
   echo
   if [ "$_gd" != "$_gcd" ]; then
-    echo "  You are already IN a worktree ($GITROOT, branch $_br) — you are a worker, a leaf."
+    echo "  You are already IN a worktree ($GITROOT, branch $_br) — you are a worker."
     echo "  Start fresh work where you stand; no new worktree, no new session:"
     echo "      git fetch origin && git checkout -B <new-branch> origin/staging"
+    if [ "$SUBWORKER" != 1 ]; then
+      echo "  Parallel work under you? fleet-spawn <name> --prompt \"…\" from here makes a child"
+      echo "  of this session, on $_br."
+    fi
   else
     echo "  Hand the work to a worker instead (you keep this thread and can keep working):"
     echo "      fleet-spawn <name> --branch <branch> --from origin/staging --prompt \"…\""

@@ -1,6 +1,7 @@
 {
   "project": "toolbox",
   "profile": "work",
+  "sub": null,
   "counts": {
     "need_you": 0,
     "working": 1,
@@ -24,7 +25,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "cli-flags",
@@ -40,7 +44,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     }
   ],
   "free_worktrees": [
