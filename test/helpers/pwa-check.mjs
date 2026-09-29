@@ -620,8 +620,7 @@ is('...and the page still claims the bottom edge', true, /viewport-fit=cover/.te
 // full screen — while the web view was 812 tall under a translucent bar.)
 is('...and no rule pays the status bar back into a height', 0,
    (CSS.replace(/\/\*[\s\S]*?\*\//g, '').match(/height:\s*calc\([^;]*env\(safe-area-inset-top\)/g) || []).length);
-// The probe still reports which standalone signal was true; the device's next line is the
-// one that says whether the fix landed (sat0 and no band), so it stays in.
+// Standalone is still marked from either signal: the fix for the band depends on it.
 is('the client still marks standalone from either signal', true, /classList\.toggle\('standalone'/.test(JS['app.js']));
 is('...from navigator.standalone as well', true, /navigator\.standalone/.test(JS['app.js']));
 is('...and again on rotation', true, /orientationchange['"]?,\s*markStandalone/.test(JS['app.js']));
@@ -634,12 +633,6 @@ is('...and again on rotation', true, /orientationchange['"]?,\s*markStandalone/.
 const chatSrc = (/function chatView\([\s\S]*?\nfunction /.exec(JS['app.js']) || [''])[0];
 is('an empty transcript says so in plain words', true, /No messages yet — send one below/.test(chatSrc));
 is("...and never prints fleet-read's note", false, /text:\s*s\.note/.test(chatSrc));
-
-// The probe has to measure the screen that HAS a composer. Keyed per screen: the grid has
-// none, so the first reading came back cb0/gap0 and said nothing about the band.
-is('the geometry probe measures each screen once', true, /geoSent\.has\(where\)/.test(JS['app.js']));
-is('...naming which screen it measured', true, /api\.diag\('geo', where/.test(JS['app.js']));
-is('...and reports the two standalone signals apart', true, /'mm' \+/.test(JS['app.js']) && /'ns' \+/.test(JS['app.js']));
 
 // ── moving between screens says WHICH WAY ─────────────────────────────────
 // "add cool animations ... like getting out of a session." The screens are a stack, so the
@@ -721,27 +714,14 @@ is('the keyboard inset is removed, not emptied', true, /removeProperty\('--kb-in
 is('...and never set to an empty string', false, /setProperty\('--kb-inset',\s*(keyboard[^)]*)?''/.test(kb));
 is('...while the keyboard-open path still writes 0', true, /setProperty\('--kb-inset',\s*'0px'\)/.test(kb));
 
-// ── the geometry probe measures the shell, not the lock screen ────────────
-// "still it doesnt use the full screen", in the installed app. No engine here reproduces
-// it — dvh on a desktop is the window, and the home-screen app cannot be driven from this
-// machine — so the device reports its own numbers and the log is the instrument.
-//
-// THE PROBE HAS ONE WAY TO LIE, and it did on its first run: `#app` only carries `.shell`
-// (and therefore `height: 100dvh`) once a real screen is drawn, so a report sent at load
-// measures the LOCK SCREEN. Measured: sl524 against ih844 — the ship and two buttons, not
-// a viewport. A number that looks like a short shell and is actually a short page would
-// have sent the next change in the wrong direction entirely.
-const geo = (/function reportGeometry\(\)[\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
-is('the geometry probe exists', true, geo.length > 0);
-is('...and waits for the shell', true, /classList\.contains\('shell'\)/.test(geo));
-is('...rather than reporting whatever is drawn', true, /geoTries/.test(geo));
-// Both screen and viewport, or the comparison that decides this cannot be made: the
-// suspicion is that the VIEWPORT is short of the SCREEN, not that the shell is short of
-// the viewport, and only one of those is visible from inside the page without both.
-is('...reporting the viewport', true, /ih.*innerHeight/.test(geo));
-is('...and the physical screen beside it', true, /sh.*screen\.height/.test(geo));
-// Path segments, never a query: fleet-serve logs (req.url).split('?')[0].
-is('...and it beacons through api.diag', true, /api\.diag\('geo'/.test(geo));
+// ── the phone probes are gone, and stay gone ──────────────────────────────
+// The __diag beacons (load / lifecycle / geo) were shipped to find two bugs that no engine
+// here reproduces — the Face-ID reload and the iOS 26 standalone viewport — and to come out
+// once both fixes held on the device. They have. A beacon left in fires a request per launch
+// per screen into a log nobody is reading any more, so the absence is asserted: the next
+// probe is written on purpose, not inherited.
+is('the client sends no __diag beacon', false, /__diag/.test(JS['api.js'] + JS['app.js']));
+is('...and has no diag() to call', false, /\bdiag\(/.test(JS['api.js'] + JS['app.js']));
 
 // ── the client swap must not spend somebody's passkey ─────────────────────
 // The decision itself is driven in pwa-render (reloadAction). What that cannot see is how
