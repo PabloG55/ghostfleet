@@ -4767,6 +4767,26 @@ else
   skip "no withheld name in a PR title or body" "node missing"
 fi
 
+# ── an edited PR body never reaches the test matrix ──────────────────────────
+# Editing a body fired a second `pull_request` run of the workflow holding the matrix, with
+# the matrix skipped; a skipped matrix job reports one check named plain `test`, and GitHub
+# read the required per-leg checks from that newest suite and held the PR BLOCKED with
+# everything green. The fix is structural — `edited` lives only in the workflow that has
+# something to say about it — so the assertion is about the files: whichever workflow
+# declares the matrix does not list `edited`, and the one that runs pr-text does.
+#   WATCHED GOING RED against the previous test.yml: "the matrix workflow is not re-run by
+# an edit" named test.yml.
+group "an edited PR body re-runs pr-text and never the matrix"
+wfm=""; wfe=""
+for wf in "$ROOT"/.github/workflows/*.yml; do
+  grep -qE '^[[:space:]]+matrix:' "$wf" && grep -qE '^[[:space:]]+types:.*\bedited\b' "$wf" && wfm="$wfm ${wf##*/}"
+  grep -qE '^  pr-text:' "$wf" && grep -qE '^[[:space:]]+types:.*\bedited\b' "$wf" && wfe="$wfe ${wf##*/}"
+done
+is "the matrix workflow is not re-run by an edit" "" "${wfm# }"
+is "...and pr-text still is"                      "pr-text.yml" "${wfe# }"
+is "...and the matrix is not skipped by an if on the event" "no" \
+   "$(grep -qE "if:.*(action|event).*edited" "$ROOT/.github/workflows/test.yml" && echo yes || echo no)"
+
 group "nothing a checkout makes for itself is tracked"
 # A WORKTREE'S node_modules IS A SYMLINK, and `.gitignore` said `node_modules/`. A trailing
 # slash means "directories only", and git records a symlink as a file, so the pattern never

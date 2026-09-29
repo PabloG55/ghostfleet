@@ -1,0 +1,30 @@
+name: pr-text
+
+# ITS OWN WORKFLOW, not a job in test.yml, and that is the whole fix. `edited` is the
+# point here: a title or body can change after every check has passed, and the body is the
+# one piece of text that reaches public history without ever having been in the
+# repository — GitHub composes it into the commit message at squash-merge, after the last
+# run and the last reviewer. But a workflow that runs on `edited` gets a NEW check suite for
+# the same commit, and when that workflow also held the test matrix, the edit's suite
+# reported a single skipped `test` and GitHub read the required per-leg checks from it —
+# BLOCKED, with everything green. Here an edit re-runs only this, and test.yml never sees
+# it. Listing types replaces the default, so the other three are spelled out.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  pr-text:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # THROUGH THE ENVIRONMENT, NEVER INTERPOLATED INTO THE COMMAND. A title on a public
+      # repository is text a stranger wrote, and `run: node x "${{ …title }}"` is a shell
+      # injection wearing a friendly name: the substitution happens before the shell sees
+      # it, so no amount of quoting downstream can help. env: hands the bytes to the
+      # process without anything parsing them on the way.
+      - name: No withheld name in the PR title or body
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: node test/helpers/pr-text-sweep.mjs
