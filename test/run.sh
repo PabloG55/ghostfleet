@@ -6570,23 +6570,34 @@ fi
 # no Stop, leaving `[Request interrupted by user…` in the transcript instead.
 group "a prompt typed mid-turn is labelled queued"
 if command -v jq >/dev/null 2>&1; then
-  UH="$(mktemp -d)"; UHF="$UH/fleet"; mkdir -p "$UHF"; : > "$UH/t.jsonl"
+  UH="$(mktemp -d)"; UHF="$UH/fleet"; mkdir -p "$UHF" "$UH/cfg/sessions"; : > "$UH/t.jsonl"
   uhook() { local p="$1"; shift
             printf '%s' "$p" | env -u TMUX -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$UHF" \
-              CLAUDE_FLEET_NOTIFIER=off "$@" "$ROOT/hooks/fleet-event.sh" 2>/dev/null; }
+              CLAUDE_CONFIG_DIR="$UH/cfg" CLAUDE_FLEET_NOTIFIER=off "$@" "$ROOT/hooks/fleet-event.sh" 2>/dev/null; }
+  # THE AGENT'S OWN NOTE, which is what the hook now measures "a turn is running" by: the
+  # file claude writes about itself, under this suite's pid — an ancestor of every hook this
+  # group runs, which is how the hook finds the note of the process that spawned it.
+  #   $1 = status, $2 = how many ms ago it became that. Measured on 2.1.284: an idle submit
+  # reads busy-for-~100ms (the prompt flipped it), a mid-turn one busy-since-the-turn-began.
+  unote() { jq -nc --argjson pid "$$" --arg st "$1" --argjson ago "$2" \
+              '{pid:$pid, sessionId:"ups1", status:$st, statusUpdatedAt:((now*1000 - $ago)|floor)}' \
+              > "$UH/cfg/sessions/$$.json"; }
+  unote idle 60000
   ups() { jq -nc --arg p "$1" --arg t "$UH/t.jsonl" \
             '{hook_event_name:"UserPromptSubmit",session_id:"ups1",cwd:"/",transcript_path:$t,prompt:$p}'; }
   ev()  { jq -nc --arg e "$1" --arg t "$UH/t.jsonl" '{hook_event_name:$e,session_id:"ups1",cwd:"/",transcript_path:$t}'; }
   is "a prompt to an idle session gets nothing" "" "$(uhook "$(ups 'fix the login bug')")"
   uhook "$(ev PreToolUse)" >/dev/null
+  unote busy 10000
   mid="$(uhook "$(ups 'also bump the version')")"
   is "one sent mid-turn is labelled queued"   "1" "$(grep -c 'QUEUED WORK, not a replacement' <<< "$mid" || true)"
   is "...naming the task in hand"             "1" "$(grep -c 'fix the login bug' <<< "$mid" || true)"
   is "...as UserPromptSubmit hook output"     "UserPromptSubmit" "$(jq -r '.hookSpecificOutput.hookEventName' <<< "$mid" 2>/dev/null)"
   is "a task notification is not a prompt"    "" "$(uhook "$(ups '<task-notification>done</task-notification>')")"
   is "...and does not replace the task"       "1" "$(uhook "$(ups 'one more')" | grep -c 'fix the login bug' || true)"
-  uhook "$(ev Stop)" >/dev/null
+  uhook "$(ev Stop)" >/dev/null; unote idle 1000
   is "after the Stop, a prompt is a new turn" "" "$(uhook "$(ups 'next thing')")"
+  unote busy 10000
   # An interrupt leaves `working` behind; the next prompt is what the human wants NOW.
   printf '%s\n' '{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}' >> "$UH/t.jsonl"
   is "after an Esc interrupt it is not queued" "" "$(uhook "$(ups 'do this instead')")"
@@ -6594,6 +6605,28 @@ if command -v jq >/dev/null 2>&1; then
   : > "$UHF/cfu.w1.now"
   is "a --now paste is not labelled"          "" "$(uhook "$(ups 'deliberate')" CLAUDE_FLEET_SOCK=cfu CLAUDE_FLEET_SLOT=w1)"
   is "...and the marker is used up"           "0" "$([ -e "$UHF/cfu.w1.now" ] && echo 1 || echo 0)"
+
+  # ── THE STALE STATUS: `working` and a .task left by a prompt that started no turn ──
+  # Seen twice in one day on the owner's own prompts into an idle lead: labelled "arrived
+  # while you were still working on", quoting the prompt itself. Each row below leaves the
+  # hook's own state saying mid-turn — a .task and `working`, no Stop — and changes only
+  # what the agent says about itself.
+  #   WATCHED GOING RED against the previous hook: all four were labelled queued.
+  ustale() { rm -f "$UHF/ups1.task"; uhook "$(ups "$1")" >/dev/null; uhook "$(ev PreToolUse)" >/dev/null; }
+  ustale 'fix the login bug'; unote idle 30000
+  is "stale working, agent says idle: not queued"          "" "$(uhook "$(ups 'rename the flag')")"
+  ustale 'fix the login bug'; unote busy 100
+  is "...busy only since THIS prompt: not queued"           "" "$(uhook "$(ups 'rename the flag')")"
+  ustale 'fix the login bug'; rm -f "$UH/cfg/sessions/$$.json"
+  is "...no note to measure by: not queued"                 "" "$(uhook "$(ups 'rename the flag')")"
+  # The same prompt re-sent, into a turn that IS running: never quoted back as its own task.
+  ustale 'fix the login bug'; unote busy 10000
+  is "the prompt in hand is never quoted as its own task"  "0" \
+     "$(uhook "$(ups 'fix the login bug')" | grep -c 'QUEUED WORK' || true)"
+  # ...and the direction that must still work, measured the same way: busy since before.
+  ustale 'fix the login bug'; unote busy 10000
+  is "...while a genuinely running turn still labels"      "1" \
+     "$(uhook "$(ups 'rename the flag')" | jq -r '.hookSpecificOutput.additionalContext' 2>/dev/null | grep -c 'working on: "fix the login bug"' || true)"
   rm -rf "$UH"
 else
   skip "a prompt typed mid-turn is labelled queued" "jq missing"

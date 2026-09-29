@@ -122,7 +122,38 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
       [ -f "$_taskf" ] && IFS=$'\x1f' read -r _t_at _t_line < "$_taskf"
       case "$_t_at" in ''|*[!0-9]*) _t_at="" ;; esac
       _mid=0
-      if [ "$_prev" = working ] && [ -n "$_t_line" ]; then
+      # ── AND THE AGENT HAS TO SAY SO ITSELF, because the status above is only what this hook
+      # last WROTE. A prompt that started no turn (a hook refused it, the API failed before the
+      # first token) leaves `working` and its own .task behind with no Stop to clear them, and
+      # the NEXT prompt into that idle session was labelled as arriving mid-task — quoting the
+      # same prompt as the task in hand when it was the one re-sent. Seen twice in one day on
+      # the owner's own prompts into an idle lead.
+      #   The measurement is the agent's note about itself, <config>/sessions/<pid>.json, found
+      # by walking up from this hook to the process whose note names this session. Measured on
+      # 2.1.284 at the moment this hook runs: an idle submit already reads `busy`, with
+      # statusUpdatedAt 60–230ms old — the prompt itself flipped it; a mid-turn submit reads
+      # `busy` since the turn began, 5.4s earlier in the measured case. So "a turn is running"
+      # is busy AND busy since before this prompt. 2s of margin: a prompt sent in a turn's
+      # first two seconds goes unlabelled, which is the harmless direction. No note, no
+      # measurement, no label.
+      _busy_ms=""
+      _p="$PPID"; _cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+      for _ in 1 2 3 4 5 6; do
+        case "$_p" in ''|0|1|*[!0-9]*) break ;; esac
+        if [ -f "$_cfg/sessions/$_p.json" ]; then
+          _busy_ms="$(jq -r --arg s "$SESSION" --arg p "$_p" \
+            'select(.sessionId == $s and (.pid|tostring) == $p and .status == "busy")
+             | (now * 1000 - (.statusUpdatedAt // 0)) | floor' "$_cfg/sessions/$_p.json" 2>/dev/null)"
+          break
+        fi
+        _p="$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ')"
+      done
+      case "$_busy_ms" in ''|*[!0-9]*) _busy_ms=0 ;; esac
+      # ...and never the prompt being annotated: if the task in hand IS this prompt, it was
+      # re-sent, not queued behind anything.
+      _this="$(printf '%s\n' "$_prompt" | awk 'NF { print; exit }' | tr '\t\037' '  ')"
+      if [ "$_prev" = working ] && [ -n "$_t_line" ] && [ "$_busy_ms" -ge 2000 ] \
+         && [ "$_t_line" != "${_this:0:160}" ]; then
         _mid=1
         if [ -n "$_t_at" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] \
            && tail -n "+$(( _t_at + 1 ))" "$TRANSCRIPT" 2>/dev/null \
