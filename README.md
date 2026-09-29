@@ -377,6 +377,38 @@ and `fleet-*` tools):
 
 ---
 
+## Updating
+
+```bash
+ghostfleet update                    # releases: follows the branch your clone is on
+ghostfleet update --branch staging   # follow development instead (--branch main to go back)
+ghostfleet update --yes              # ...and restart every session without asking
+```
+
+One command, because the code is not the only thing that is old. In order, it:
+
+1. **brings the code up** — in a clone, fetches and *fast-forwards* the tracked branch
+   (`main` for releases, `staging` for development); from npm, runs
+   `npx ghostfleet-cli@latest`. It never merges and never stashes: uncommitted edits or
+   local commits that origin lacks are yours, so it stops and says which it found.
+2. **runs the install**, so new commands, hooks and the MCP registration land too.
+3. **restarts the phone daemon** — a launchd job whose label ends in
+   `ghostfleet.fleet-serve` is kickstarted. Run by hand instead? Restart it by hand.
+4. **offers `fleet-restart --all`** — every session's MCP server is the one it started
+   with, for as long as it lives. This relaunches every session on the machine onto its
+   own conversation, so it asks (or takes `--yes`).
+5. **tells you to relaunch the phone app** — swipe it away and open it again. Reopening it
+   from the app switcher is a resume, and a resume keeps the client it already had.
+
+**A clone from before the repository was recreated cannot be updated.** Its history shares
+no commit with origin's, so there is nothing to fast-forward from — `ghostfleet update`
+says so and prints the `git clone` to run, and changes nothing. Keep the old clone until
+anything only it holds has been copied out.
+
+An npm install is told when a newer version is out: the Projects screen prints one line.
+The check reads a cache (`~/.config/ghostfleet/npm-latest`, refreshed in the background at
+most daily), so startup never waits on the network.
+
 ## Uninstall
 
 **Claude** — in each config dir (`~/.claude`, `~/.claude-*`): remove the fleet `hooks` blocks

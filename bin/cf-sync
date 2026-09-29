@@ -262,5 +262,12 @@ else
   rm -f "$STAMP"
 fi
 
+# THE RELEASE, beside the commit. An npm install has no commit to stamp above, so this is
+# the only thing that says which version the runtime holds — what `ghostfleet` compares
+# with npm's latest. Removed when unreadable, for the stamp's reason: a stale claim is
+# worse than none.
+ver="$(sed -n 's/^  "version": *"\([^"]*\)".*/\1/p' "$REPO/package.json" 2>/dev/null | head -1)"
+if [ -n "$ver" ]; then printf '%s\n' "$ver" > "$DEST/.version"; else rm -f "$DEST/.version"; fi
+
 echo "cf-sync: synced runtime  $REPO  ->  $DEST"
 echo "  (the ~/.local/bin symlinks + settings hook + MCP already point here; no relink needed)"

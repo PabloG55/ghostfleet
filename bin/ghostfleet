@@ -116,6 +116,46 @@ _synced_tail() { printf ' (synced %s%s)' "${1:0:7}" "${2:+, ${2%%T*}}"; }
 # a status question must not need tmux and must not arm caffeinate.
 if [ "${1:-}" = "--sync-check" ]; then sync_status; exit 0; fi
 
+# --- is there a newer release on npm? ----------------------------------------
+# For an NPM install only — a clone updates from git, and sync_status above already speaks
+# for it. "npm install" means the recorded source is not a checkout: an npx cache, or an
+# unpacked package. The installed version is the one cf-sync stamped into .version.
+#   NEVER BLOCKING, because this runs on the way to drawing a screen: the answer is read
+# from ~/.config/ghostfleet/npm-latest, and when that is missing or a day old a refresh is
+# started in the BACKGROUND (fleet-update --npm-refresh) for the next visit to find. No
+# network is ever waited on here, so a machine offline, or a registry that hangs, costs
+# nothing. Silent in every case it cannot measure, for sync_status's reason.
+_ver_gt() {                        # is $1 a higher x.y.z than $2? numerically, per part
+  local IFS=. a b i; read -r -a a <<< "${1%%-*}"; read -r -a b <<< "${2%%-*}"
+  for i in 0 1 2; do
+    case "${a[i]:-0}${b[i]:-0}" in *[!0-9]*) return 1 ;; esac
+    [ "${a[i]:-0}" -gt "${b[i]:-0}" ] && return 0
+    [ "${a[i]:-0}" -lt "${b[i]:-0}" ] && return 1
+  done
+  return 1
+}
+npm_status() {                     # prints ONE line if npm has a newer version; else nothing
+  local srcdir="" have="" line="" ts="" latest="" cache="$HOME/.config/ghostfleet/npm-latest"
+  IFS= read -r srcdir 2>/dev/null < "$REPO/.source" || return 0
+  [ -n "$srcdir" ] && [ ! -e "$srcdir/.git" ] || return 0
+  IFS= read -r have 2>/dev/null < "$REPO/.version" || return 0
+  [ -n "$have" ] || return 0
+  IFS= read -r line 2>/dev/null < "$cache" || line=""
+  ts="${line%%$'\t'*}"; latest="${line#*$'\t'}"
+  case "$ts" in ''|*[!0-9]*) ts=0 ;; esac
+  if [ $(( $(date +%s) - ts )) -gt 86400 ] && [ -x "$BIN_DIR/fleet-update" ]; then
+    ( "$BIN_DIR/fleet-update" --npm-refresh >/dev/null 2>&1 & ) 2>/dev/null
+  fi
+  [ "$latest" != "$line" ] && _ver_gt "$latest" "$have" || return 0
+  printf 'ghostfleet: %s is on npm (you have %s) — run: ghostfleet update\n' "$latest" "$have"
+}
+if [ "${1:-}" = "--update-check" ]; then npm_status; exit 0; fi
+
+# `ghostfleet update`: fetch + fast-forward (or the latest npm package), install, restart the
+# phone daemon, offer to restart the sessions. Its own file, so it can be run and tested
+# without the control plane's requirements (tmux, the awake inhibitor) in front of it.
+if [ "${1:-}" = update ]; then shift; exec "$BIN_DIR/fleet-update" "$@"; fi
+
 command -v node  >/dev/null 2>&1 || { echo "ghostfleet: node is required"; exit 1; }
 command -v tmux  >/dev/null 2>&1 || { echo "ghostfleet: tmux is required (brew install tmux)"; exit 1; }
 
@@ -849,7 +889,7 @@ while true; do
     # sync, and nothing about this process changes, so a startup-only check would never
     # fire for the hour that actually went wrong. Deduped on the message, so a stale
     # runtime says it once and a new merge (a different count) says it again.
-    _sync_line="$(sync_status)"
+    _sync_line="$(sync_status; npm_status)"
     if [ -n "$_sync_line" ] && [ "$_sync_line" != "$SYNC_SAID" ]; then
       SYNC_SAID="$_sync_line"
       # The Projects screen is a node TUI on the ALTERNATE screen buffer, so this line is

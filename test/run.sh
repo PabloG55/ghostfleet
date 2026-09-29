@@ -15034,6 +15034,147 @@ is "...and runs the wake"                     "yes" \
 is "...and a failed wake is reported, not swallowed" "yes" \
    "$(grep -q 'could not wake' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
 
+
+# ── ghostfleet update ────────────────────────────────────────────────────────
+# Nothing told a clone or an npm install how to update, and every long-lived piece keeps
+# old code until it restarts — so an update was five steps nobody had written down, and
+# the one that fails worst is the first: the repository was recreated three times, and a
+# clone from before a recreate shares NO history with origin. `git pull` on it either
+# refuses ("refusing to merge unrelated histories") or, with the wrong flag, welds two
+# unrelated trees together. Every row here runs the real bin/fleet-update against fixture
+# repos, with launchctl, fleet-restart and npx as stubs on PATH that only record what they
+# were asked — nothing here can reach the owner's real daemon or fleets.
+group "ghostfleet update"
+if command -v git >/dev/null 2>&1; then
+  UP="$(cd "$(mktemp -d "$TEST_RUNS.$$.update.XXXXXX")" && pwd -P)"
+  mkdir -p "$UP/stub" "$UP/agents" "$UP/home"
+  for s in launchctl fleet-restart npx; do
+    printf '#!/bin/sh\necho "%s $*" >> "%s/calls"\n' "$s" "$UP" > "$UP/stub/$s"; chmod +x "$UP/stub/$s"
+  done
+  # the phone daemon's job, named the way a hand-written plist names it
+  cat > "$UP/agents/com.acme.ghostfleet.fleet-serve.plist" <<'PL'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>Label</key>
+  <string>com.acme.ghostfleet.fleet-serve</string>
+</dict></plist>
+PL
+  ug() { git -C "$1" -c user.name=fixture -c user.email=fixture@example.invalid "${@:2}" >/dev/null 2>&1; }
+  # ORIGIN: main + staging, and an install.sh that records it ran
+  git init -q -b main "$UP/origin" 2>/dev/null || { git init -q "$UP/origin"; git -C "$UP/origin" checkout -q -b main; }
+  printf '#!/bin/sh\necho "install $(git rev-parse --short HEAD)" >> "%s/calls"\n' "$UP" > "$UP/origin/install.sh"
+  chmod +x "$UP/origin/install.sh"; ug "$UP/origin" add install.sh; ug "$UP/origin" commit -m one
+  ug "$UP/origin" branch staging
+  git clone -q "$UP/origin" "$UP/clone" 2>/dev/null
+  git -C "$UP/clone" checkout -q -b staging --track origin/staging 2>/dev/null; git -C "$UP/clone" checkout -q main 2>/dev/null
+  echo a > "$UP/origin/a"; ug "$UP/origin" add a; ug "$UP/origin" commit -m two
+  echo b > "$UP/origin/b"; ug "$UP/origin" add b; ug "$UP/origin" commit -m three
+  fu() { rm -f "$UP/calls"; ( cd "$UP" && env HOME="$UP/home" PATH="$UP/stub:$PATH" GHOSTFLEET_LAUNCH_AGENTS="$UP/agents" GHOSTFLEET_NPM_REGISTRY=http://127.0.0.1:9 \
+         "$ROOT/bin/fleet-update" --repo "$@" </dev/null 2>&1 ); }
+  calls() { cat "$UP/calls" 2>/dev/null; }
+
+  out="$(fu "$UP/clone" --yes)"; rc=$?
+  is "update: a clone behind origin fast-forwards"            "0:yes" \
+     "$rc:$([ "$(git -C "$UP/clone" rev-parse HEAD)" = "$(git -C "$UP/origin" rev-parse main)" ] && echo yes || echo no)"
+  is "update: ...says how far it moved"                       "yes" "$(grep -q '2 commits' <<< "$out" && echo yes || echo no)"
+  is "update: ...runs the install from the NEW tree"          "yes" \
+     "$(grep -qx "install $(git -C "$UP/origin" rev-parse --short main)" <<< "$(calls)" && echo yes || echo no)"
+  is "update: ...restarts the phone daemon's launchd job"     "yes" \
+     "$(grep -q '^launchctl kickstart -k gui/[0-9]*/com.acme.ghostfleet.fleet-serve$' <<< "$(calls)" && echo yes || echo no)"
+  is "update: ...with --yes restarts every fleet"             "yes" "$(grep -qx 'fleet-restart --all --yes' <<< "$(calls)" && echo yes || echo no)"
+  is "update: ...and says to relaunch the phone app"          "yes" "$(grep -qi 'phone app' <<< "$out" && echo yes || echo no)"
+
+  # WITHOUT A TERMINAL AND WITHOUT --yes the restart is OFFERED, never taken: it relaunches
+  # every session on the machine, and nobody said yes.
+  echo c > "$UP/origin/c"; ug "$UP/origin" add c; ug "$UP/origin" commit -m four
+  out="$(fu "$UP/clone")"
+  is "update: no tty, no --yes: fleet-restart is not run"     "no"  "$(grep -q '^fleet-restart' <<< "$(calls)" && echo yes || echo no)"
+  is "update: ...but the command is printed"                  "yes" "$(grep -qF 'fleet-restart --all --yes' <<< "$out" && echo yes || echo no)"
+  out="$(fu "$UP/clone")"; rc=$?
+  is "update: already current is a success that says so"      "0:yes" "$rc:$(grep -qi 'up to date' <<< "$out" && echo yes || echo no)"
+
+  # STAGING, for following development: --branch switches the tracked branch.
+  echo s > "$UP/origin/s"; ug "$UP/origin" checkout -q staging; ug "$UP/origin" add s; ug "$UP/origin" commit -m st; ug "$UP/origin" checkout -q main
+  out="$(fu "$UP/clone" --branch staging --yes)"; rc=$?
+  is "update: --branch staging follows staging"               "0:staging:yes" \
+     "$rc:$(git -C "$UP/clone" rev-parse --abbrev-ref HEAD):$([ "$(git -C "$UP/clone" rev-parse HEAD)" = "$(git -C "$UP/origin" rev-parse staging)" ] && echo yes || echo no)"
+
+  # REFUSALS, each one naming its way out.
+  git -C "$UP/clone" checkout -q -b api-fix 2>/dev/null
+  out="$(fu "$UP/clone")"; rc=$?
+  is "update: a feature branch refuses"                       "1:yes" "$rc:$(grep -qF -- '--branch' <<< "$out" && echo yes || echo no)"
+  git -C "$UP/clone" checkout -q staging 2>/dev/null
+  echo dirty >> "$UP/clone/install.sh"
+  out="$(fu "$UP/clone")"; rc=$?
+  is "update: uncommitted changes refuse"                     "1:yes" "$rc:$(grep -qi 'uncommitted' <<< "$out" && echo yes || echo no)"
+  is "update: ...and install nothing"                         "no"  "$(grep -q '^install' <<< "$(calls)" && echo yes || echo no)"
+  git -C "$UP/clone" checkout -q -- install.sh
+  ug "$UP/clone" commit --allow-empty -m local-only
+  echo d > "$UP/origin/d"; ug "$UP/origin" checkout -q staging; ug "$UP/origin" add d; ug "$UP/origin" commit -m st2; ug "$UP/origin" checkout -q main
+  out="$(fu "$UP/clone")"; rc=$?
+  is "update: local commits origin lacks refuse (no merge)"   "1:yes" "$rc:$(grep -qi 'diverged\|not on origin' <<< "$out" && echo yes || echo no)"
+
+  # THE RECREATED REPOSITORY. Same URL, a new root commit: the clone's history and origin's
+  # share nothing. The update must say re-clone, and must not have touched the clone.
+  rm -rf "$UP/origin"; git init -q -b main "$UP/origin" 2>/dev/null || { git init -q "$UP/origin"; git -C "$UP/origin" checkout -q -b main; }
+  cp "$UP/clone/install.sh" "$UP/origin/"; ug "$UP/origin" add install.sh; ug "$UP/origin" commit -m reborn; ug "$UP/origin" branch staging
+  git -C "$UP/clone" reset -q --hard HEAD~1 2>/dev/null
+  before="$(git -C "$UP/clone" rev-parse HEAD)"
+  out="$(fu "$UP/clone" --yes)"; rc=$?
+  is "update: a clone from before a recreate refuses"         "1" "$rc"
+  is "update: ...says to re-clone"                            "yes" "$(grep -qi 're-clone' <<< "$out" && echo yes || echo no)"
+  is "update: ...names the history as unrelated"              "yes" "$(grep -qi 'unrelated' <<< "$out" && echo yes || echo no)"
+  is "update: ...and leaves the clone where it was"           "$before" "$(git -C "$UP/clone" rev-parse HEAD)"
+  is "update: ...with nothing installed or restarted"         "" "$(calls)"
+
+  # AN NPM INSTALL has no history to fast-forward: the package is the release, so update
+  # is `npx ghostfleet-cli@latest` (which runs install.sh), then the same restarts.
+  mkdir -p "$UP/pkg"; printf '{"name":"ghostfleet-cli","version":"0.4.0"}\n' > "$UP/pkg/package.json"
+  out="$(fu "$UP/pkg" --yes)"; rc=$?
+  is "update: an npm install runs the latest package"         "0:yes" "$rc:$(grep -qx 'npx -y ghostfleet-cli@latest' <<< "$(calls)" && echo yes || echo no)"
+  is "update: ...and restarts the daemon too"                 "yes" "$(grep -q '^launchctl kickstart' <<< "$(calls)" && echo yes || echo no)"
+
+  # THE NOTICE. `ghostfleet` says when npm has a newer version — from a CACHE, so startup
+  # never waits on the network. The cache is filled by `fleet-update --npm-refresh`, which
+  # is what ghostfleet runs in the background; here it is pointed at a loopback registry.
+  RT="$UP/runtime"; mkdir -p "$RT/bin"; cp "$ROOT/bin/ghostfleet" "$RT/bin/"; echo "$UP/pkg" > "$RT/.source"
+  printf '0.4.0\n' > "$RT/.version"
+  nt() { env HOME="$UP/home" GHOSTFLEET_NPM_REGISTRY="${REG:-http://127.0.0.1:9}" "$RT/bin/ghostfleet" --update-check 2>&1; }
+  mkdir -p "$UP/home/.config/ghostfleet"
+  printf '%s\t0.5.0\n' "$(date +%s)" > "$UP/home/.config/ghostfleet/npm-latest"
+  is "notice: a newer npm version is announced"               "yes" "$(grep -q '0.5.0' <<< "$(nt)" && grep -q 'ghostfleet update' <<< "$(nt)" && echo yes || echo no)"
+  printf '%s\t0.4.0\n' "$(date +%s)" > "$UP/home/.config/ghostfleet/npm-latest"
+  is "notice: the same version is silent"                     ""    "$(nt)"
+  printf '%s\t0.3.9\n' "$(date +%s)" > "$UP/home/.config/ghostfleet/npm-latest"
+  is "notice: an older one is silent"                         ""    "$(nt)"
+  printf '%s\t0.10.0\n' "$(date +%s)" > "$UP/home/.config/ghostfleet/npm-latest"
+  is "notice: versions compare as numbers, not strings"       "yes" "$(grep -q '0.10.0' <<< "$(nt)" && echo yes || echo no)"
+  # A CLONE never gets the npm notice: it updates from git, and sync-check covers it.
+  echo "$UP/clone" > "$RT/.source"
+  is "notice: a clone is not told about npm"                  ""    "$(nt)"
+  echo "$UP/pkg" > "$RT/.source"
+  # NEVER BLOCKING: a registry that does not answer must not hold the startup check.
+  printf '1\t0.4.0\n' > "$UP/home/.config/ghostfleet/npm-latest"
+  t0=$(date +%s); nt >/dev/null; t1=$(date +%s)
+  is "notice: a stale cache with a dead registry returns at once" "yes" "$([ $((t1 - t0)) -le 1 ] && echo yes || echo "no: $((t1 - t0))s")"
+  # THE REFRESH, against a loopback registry that answers what npm's /latest answers.
+  REGPORT_FILE="$UP/regport"
+  node -e 'const s=require("http").createServer((q,r)=>{r.setHeader("content-type","application/json");r.end(JSON.stringify({name:"ghostfleet-cli",version:"0.6.1"}))});s.listen(0,"127.0.0.1",()=>{require("fs").writeFileSync(process.argv[1],String(s.address().port))});setTimeout(()=>process.exit(0),15000)' "$REGPORT_FILE" &
+  REGPID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$REGPORT_FILE" ] && break; sleep 0.2; done
+  REG="http://127.0.0.1:$(cat "$REGPORT_FILE" 2>/dev/null)"
+  env HOME="$UP/home" GHOSTFLEET_NPM_REGISTRY="$REG" "$ROOT/bin/fleet-update" --npm-refresh >/dev/null 2>&1
+  is "refresh: the registry's latest lands in the cache"      "0.6.1" "$(cut -f2 "$UP/home/.config/ghostfleet/npm-latest" 2>/dev/null)"
+  is "refresh: ...and the notice reads it"                    "yes" "$(grep -q '0.6.1' <<< "$(nt)" && echo yes || echo no)"
+  kill "$REGPID" 2>/dev/null; wait "$REGPID" 2>/dev/null
+  # ...and `ghostfleet update` reaches it at all.
+  is "ghostfleet routes 'update' to fleet-update"             "yes" \
+     "$(grep -qE '^if \[ "\$\{1:-\}" = update \]' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
+  rm -rf "$UP"
+else
+  skip "ghostfleet update" "git not available"
+fi
+
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
 
 # ── a run leaves no fleet-serve it did not find ──────────────────────────────
