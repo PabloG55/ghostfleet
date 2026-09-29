@@ -1132,7 +1132,7 @@ mkdir -p "$PT/.config/ghostfleet"
 # ── nothing done yet ────────────────────────────────────────────────────────
 out="$(fp 2>&1)"; rc=$?
 is "a clean machine gets the step"      "0" "$rc"
-is "...counting nothing done"           "1" "$(grep -c '0 of 3 steps done' <<<"$out" || true)"
+is "...counting nothing done"           "1" "$(grep -c '0 of 4 steps done' <<<"$out" || true)"
 is "...and the next command is init"    "yes" "$(grep -q 'fleet-serve init --bind' <<<"$(fp --next 2>&1)" && echo yes || echo no)"
 # IT REPORTS, IT NEVER RUNS. Every step opens a port, writes a config or spends a passkey,
 # and the one thing an onboarding command must not do is perform those because somebody
@@ -1195,7 +1195,13 @@ else
   # sleeping a guess, or this reads as "not running" on a slow runner and the row goes red
   # for a reason that is not the code.
   i=0; while [ "$i" -lt 40 ] && ! node -e 'const n=require("net");const s=n.connect(Number(process.argv[1]),"127.0.0.1");s.on("connect",()=>{s.end();process.exit(0)});s.on("error",()=>process.exit(1))' "$PP" 2>/dev/null; do sleep 0.1; i=$((i+1)); done
+  # SET UP NOW INCLUDES A SUBSCRIPTION. The same config without one is one tap short, and
+  # the next step says which tap — a phone that is enrolled and serving but can never be
+  # notified is exactly the state this command used to call finished.
   printf '{"bind":"127.0.0.1","port":%s,"rp_id":"localhost","origins":["http://localhost:%s"],"clients":[{"id":"phone","creds":[{"id":"a"}]}]}\n' "$PP" "$PP" \
+    > "$PT/.config/ghostfleet/serve.json"
+  is "serving with no subscription is one tap short" "1" "$(fp --next 2>&1 | grep -c 'Turn on notifications' || true)"
+  printf '{"bind":"127.0.0.1","port":%s,"rp_id":"localhost","origins":["http://localhost:%s"],"clients":[{"id":"phone","creds":[{"id":"a"}],"push":[{"endpoint":"https://push.example/x","p256dh":"k","auth":"a"}]}]}\n' "$PP" "$PP" \
     > "$PT/.config/ghostfleet/serve.json"
   is "a set-up fleet has no next step"  ""    "$(fp --next 2>&1)"
   is "...and --if-needed says nothing"  ""    "$(fp --if-needed 2>&1)"
@@ -2756,6 +2762,7 @@ fi
 group "MCP refuses a missing required argument"
 AG="$(cd "$(mktemp -d)" && pwd -P)"
 mkdir -p "$AG/mcp" "$AG/bin" "$AG/home"
+mkdir -p "$AG/lib"; cp "$ROOT"/lib/*.mjs "$AG/lib/"   # the dispatch imports ../lib/jarvis.mjs
 cp "$ROOT"/mcp/*.mjs "$AG/mcp/"             # BIN is <this file>/../bin, so the copy's
 : > "$AG/ran"                               # stubs are what a passing call reaches
 for c in fleet-project fleet-list fleet-send fleet-read fleet-spawn fleet-worktrees \
@@ -9280,7 +9287,7 @@ else
 # run can attribute to a dead one.
 SV="$TMUX_TMPDIR/serve"; mkdir -p "$SV"
 mkdir -p "$SV/home/.config/ghostfleet" "$SV/home/.claude/fleet" "$SV/repo" "$SV/other"
-cp -R "$ROOT/bin" "$ROOT/mcp" "$SV/"
+cp -R "$ROOT/bin" "$ROOT/mcp" "$ROOT/lib" "$SV/"
 : > "$SV/ran"
 for c in fleet-list fleet-send fleet-spawn fleet-worktrees fleet-inbox fleet-answer \
          fleet-pause fleet-resume fleet-rename fleet-project; do
@@ -10898,6 +10905,148 @@ else
   skip "phone client origin" "server did not come up: $SV_WHY"
 fi
 
+# ── the phone's half of Jarvis: the digest, the marker, a yes, and a voice ─────
+# Every route behind the same token as everything else, and each with a direction that must
+# FAIL: the digest must not spend the stamp, a yes must need a token AND a fresh passkey, a
+# no must not, and audio that is not audio is refused by its bytes. The transcriber is a
+# STUB whisper on a stub model — what is proved here is the route (bytes in, one line out,
+# nothing kept), not the model; the model is the next group's, where one exists.
+group "fleet-serve: Jarvis's digest, its yes, and its ears"
+# needs: free_port answers in digits
+JW="$(mktemp -d "$TEST_RUNS.$$.jarv.XXXXXX")"
+printf '#!/bin/sh\nfor a in "$@"; do case "$p" in -of) printf "hello fleet\\n" > "$a.txt" ;; esac; p="$a"; done\n' > "$JW/whisper-cli"
+chmod +x "$JW/whisper-cli"; : > "$JW/ggml-stub.bin"
+# A real 16 kHz mono WAV header over a quarter second of silence.
+node -e 'const fs=require("fs");const n=8000;const h=Buffer.alloc(44);h.write("RIFF",0);h.writeUInt32LE(36+n,4);h.write("WAVE",8);h.write("fmt ",12);h.writeUInt32LE(16,16);h.writeUInt16LE(1,20);h.writeUInt16LE(1,22);h.writeUInt32LE(16000,24);h.writeUInt32LE(32000,28);h.writeUInt16LE(2,32);h.writeUInt16LE(16,34);h.write("data",36);h.writeUInt32LE(n,40);fs.writeFileSync(process.argv[1],Buffer.concat([h,Buffer.alloc(n)]))' "$JW/quiet.wav"
+if CLAUDE_FLEET_WHISPER_BIN="$JW/whisper-cli" CLAUDE_FLEET_WHISPER_MODEL="$JW/ggml-stub.bin" TMPDIR="$JW" sv_start jarvis; then
+  jpf() { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f2; }
+  jj()  { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f3 | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);const v=process.argv[1].split(".").reduce((o,k)=>o==null?o:o[k],j);console.log(typeof v==="object"?JSON.stringify(v):String(v))}catch{console.log("")}})' "$3"; }
+  JCF="$SV/home/.config/ghostfleet"
+  # BEFORE ANY MARKER: no Jarvis, said plainly — and the digest still answers, because it
+  # is every fleet's state and does not need Jarvis to exist.
+  printf '1700000000\n' > "$JCF/digest.last"
+  rm -f "$JCF/jarvis" "$JCF/jarvis.confirm.json" "$JCF/jarvis.said"
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" jarvis "$(sv_code jarvisa)" "$JW/quiet.wav" > "$SV/probe.jarvisa" 2>"$SV/probe.jarvisa.err"
+  is "the digest needs a token"                 "401" "$(jpf digest.noToken jarvisa)"
+  is "...and answers one"                       "200" "$(jpf digest jarvisa)"
+  is "...with every project in it"              "2"   "$(jj digest jarvisa projects.length)"
+  is "the same digest is a verb"                "200" "$(jpf digest.verb jarvisa)"
+  is "...answering as text"                     "1"   "$(jj digest.verb jarvisa text | grep -c 'digest — ' || true)"
+  is "a poll does not spend the stamp"          "1700000000" "$(tr -d '\n' < "$JCF/digest.last")"
+  is "/api/jarvis needs a token"                "401" "$(jpf jarvis.noToken jarvisa)"
+  is "...and says there is no Jarvis yet"       "false" "$(jj jarvis jarvisa present)"
+  is "...naming the command that makes one"     "1"   "$(jj jarvis jarvisa why | grep -c 'ghostfleet jarvis' || true)"
+  is "a yes with no Jarvis is refused"          "409" "$(jpf confirm.unknown jarvisa)"
+  # WITH A MARKER, pointing at this daemon's own demo project, and two questions Jarvis
+  # asked — made by the same gate() Jarvis's tools call.
+  printf 'name=demo\nprofile=work\nsock=cf-demo\ncfg=%s\npath=%s\n' "$SV/home/.claude" "$SV/repo" > "$JCF/jarvis"
+  HOME="$SV/home" node --input-type=module -e "import * as J from '$ROOT/lib/jarvis.mjs';
+    J.gate({key:'a',tool:'fleet_stop',summary:'stop demo/w1'}); J.gate({key:'b',tool:'fleet_answer',summary:'answer demo/w2 with 2'})"
+  : > "$SV/ran"
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" jarvis "$(sv_code jarvisb)" "$JW/quiet.wav" > "$SV/probe.jarvisb" 2>"$SV/probe.jarvisb.err"
+  is "with a marker, Jarvis is present"         "true"   "$(jj jarvis jarvisb present)"
+  is "...as a project the phone can open"       "demo"   "$(jj jarvis jarvisb project)"
+  is "...whose session is its master"           "master" "$(jj jarvis jarvisb session)"
+  is "...not running (no tmux session)"         "false"  "$(jj jarvis jarvisb running)"
+  is "...able to hear (a transcriber exists)"   "true"   "$(jj jarvis jarvisb voice.ready)"
+  is "...with both questions pending"           "2"      "$(jj jarvis jarvisb pending.length)"
+  is "a yes or no needs a token"                "401" "$(jpf confirm.noToken jarvisb)"
+  is "...and an answer"                         "400" "$(jpf confirm.noAction jarvisb)"
+  is "...for a proposal that is open"           "404" "$(jpf confirm.unknown jarvisb)"
+  is "a YES without a fresh passkey is refused" "401" "$(jpf confirm.yesNoPasskey jarvisb)"
+  is "...with one, it is taken"                 "200" "$(jpf confirm.yes jarvisb)"
+  is "...and Jarvis is told to act"             "true" "$(jj confirm.yes jarvisb told)"
+  is "a NO needs no passkey"                    "200" "$(jpf confirm.no jarvisb)"
+  is "afterwards one is left: the yes, granted" "phone" "$(jj jarvis.after jarvisb pending.0.granted)"
+  is "...and the no is gone"                    "1"   "$(jj jarvis.after jarvisb pending.length)"
+  is "Jarvis heard the tapped yes"              "1"   "$(grep -c 'tapped YES' "$SV/ran" || true)"
+  is "...and the tapped no"                     "1"   "$(grep -c 'tapped NO' "$SV/ran" || true)"
+  is "both are audited"                         "2"   "$(grep -c '"verb":"jarvis_confirm"' "$SV/audit.jsonl" || true)"
+  is "...the yes as a passkey confirmation"     "1"   "$(grep '"verb":"jarvis_confirm"' "$SV/audit.jsonl" | grep -c 'passkey:jarvis-yes' || true)"
+  # THE GRANT IS WHAT THE GATE READS: Jarvis's retry of that exact call goes through.
+  # The spec lives in a single-quoted variable: written inline inside "$(…)", the braces of
+  # the object literal did not survive and node was handed `J.gate(key:'a')`.
+  JRETRY='import * as J from "'"$ROOT"'/lib/jarvis.mjs"; console.log(J.gate({key: "a", tool: "fleet_stop", summary: "stop demo/w1"}).ok ? "ok" : "no")'
+  is "the tapped yes lets Jarvis's retry through" "ok" "$(HOME="$SV/home" node --input-type=module -e "$JRETRY" 2>&1)"
+  # WHAT THE PHONE SAYS TO JARVIS is the owner speaking, and fleet-serve is what knows it.
+  is "the phone's words to Jarvis are delivered"  "200" "$(jpf said.phone jarvisb)"
+  is "...and recorded as his, from the phone"     "1"   "$(grep -c '"src":"phone","text":"yes please"' "$JCF/jarvis.said" 2>/dev/null || true)"
+  is "hearing needs a token"                    "401" "$(jpf hear.noToken jarvisb)"
+  is "an empty body is refused by name"         "400" "$(jpf hear.empty jarvisb)"
+  is "text wearing an audio header is refused"  "415" "$(jpf hear.text jarvisb)"
+  is "a wav is transcribed"                     "200" "$(jpf hear.wav jarvisb)"
+  is "...to the words the transcriber said"     "hello fleet" "$(jj hear.wav jarvisb text)"
+  is "...and no audio is kept on disk"          "0"   "$(ls "$JW" | grep -c '^gf-hear-' || true)"
+  is "...nor is a word of it in the log"        "0"   "$(grep -c 'hello fleet' "$SV/log.jarvis" || true)"
+  rm -f "$JCF/jarvis" "$JCF/jarvis.confirm.json" "$JCF/jarvis.said" "$JCF/digest.last"
+  serve_stop
+else
+  skip "fleet-serve jarvis routes" "server did not come up: $SV_WHY"
+fi
+rm -rf "$JW"
+
+# THE CLIENT'S EARS, WITHOUT A PHONE. Two pieces of web/app.js decide what reaches the Mac:
+# the voice-activity detector (when an utterance ENDS) and the WAV encoder (what it sounds
+# like). Both are lifted out of the client exactly as written, the way this file lifts
+# _defer_nudge out of the hook, and driven here. The detector is fed synthetic frames on a
+# fake clock — speech with a pause inside it that must NOT end the utterance, then silence
+# that must, a second later. The encoder is fed real speech at the 48 kHz a phone's mic
+# runs at, and its output goes through the real whisper.cpp when this machine has one.
+group "conversation mode: a second of quiet ends an utterance, and the WAV is heard"
+if command -v node >/dev/null 2>&1; then
+  CV="$(cd "$(mktemp -d)" && pwd -P)"
+  { grep '^const TALK = {.*};$' "$ROOT/web/app.js"
+    sed -n '/^const T = {/,/};$/p' "$ROOT/web/app.js"
+    sed -n '/^function onTalkFrame(e) {/,/^}/p' "$ROOT/web/app.js"
+    sed -n '/^export function encodeWav(frames, rate) {/,/^}/p' "$ROOT/web/app.js" | sed 's/^export //'
+  } > "$CV/talk.js"
+  cat > "$CV/vad.cjs" <<'VAD'
+const fs = require('fs'), vm = require('vm');
+let clock = 0; const events = [];
+const ctx = { S: { talk: { phase: 'listening' } }, Date: { now: () => clock }, Math, Float32Array, ArrayBuffer, DataView,
+  talkStop: (r) => { events.push('stop'); ctx.S.talk.phase = 'off'; }, endUtterance: () => { events.push('end@' + clock); ctx.T.inSpeech = false; ctx.T.frames = []; ctx.T.hot = 0; ctx.T.listenAt = clock; } };
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8') + ';this.onTalkFrame=onTalkFrame;this.T=T;this.encodeWav=encodeWav;', ctx);
+const RATE = 48000, N = 4096, MS = N / RATE * 1000;
+const frame = (amp) => { const d = new Float32Array(N); for (let i = 0; i < N; i++) d[i] = amp ? amp * Math.sin(i / 8) : (Math.random() - 0.5) * 0.002; return d; };
+const feed = (ms, amp) => { for (let t = 0; t < ms; t += MS) { if (ctx.S.talk.phase !== 'listening') return; ctx.onTalkFrame({ inputBuffer: { getChannelData: () => frame(amp) } }); clock += MS; } };
+const mode = process.argv[3];
+ctx.T.listenAt = 0;
+if (mode === 'utterance') { feed(1000, 0); feed(700, 0.1); feed(450, 0); feed(700, 0.1); const endAt = clock; feed(2500, 0);
+  console.log(JSON.stringify({ events, endAt: Math.round(endAt) })); }
+if (mode === 'silence') { feed(25000, 0); console.log(JSON.stringify({ events })); }
+if (mode === 'wav') {                 // argv[4] = raw 48 kHz s16le mono, argv[5] = out .wav
+  const raw = fs.readFileSync(process.argv[4]); const all = new Float32Array(raw.length / 2);
+  for (let i = 0; i < all.length; i++) all[i] = raw.readInt16LE(i * 2) / 32768;
+  const frames = []; for (let o = 0; o < all.length; o += N) frames.push(all.slice(o, o + N));
+  fs.writeFileSync(process.argv[5], Buffer.from(ctx.encodeWav(frames, RATE))); console.log('wrote');
+}
+VAD
+  u="$(node "$CV/vad.cjs" "$CV/talk.js" utterance 2>&1)"
+  ends="$(node -e 'const j=JSON.parse(process.argv[1]);console.log(j.events.filter(e=>e.startsWith("end")).length)' "$u" 2>/dev/null)"
+  is "one utterance with a pause inside it ends ONCE" "1" "$ends"
+  is "...about a second after the speech stopped" "1" \
+     "$(node -e 'const j=JSON.parse(process.argv[1]);const at=Number((j.events.find(e=>e.startsWith("end"))||"end@0").slice(4));const d=at-j.endAt;console.log(d>=900&&d<=1300?1:0)' "$u" 2>/dev/null)"
+  s="$(node "$CV/vad.cjs" "$CV/talk.js" silence 2>&1)"
+  is "twenty seconds of nothing ends conversation mode" '{"events":["stop"]}' "$(head -1 <<< "$s")"
+  # The encoder, through the real transcriber when there is one (macOS `say` + whisper.cpp).
+  WM="$(ls "${CLAUDE_FLEET_WHISPER_MODEL:-/nonexistent}" "$HOME"/.local/share/whisper/ggml-*.bin 2>/dev/null | head -1)"
+  if command -v say >/dev/null 2>&1 && command -v afconvert >/dev/null 2>&1 && command -v whisper-cli >/dev/null 2>&1 && [ -n "$WM" ]; then
+    say -o "$CV/s.aiff" "how is acme api doing" && afconvert -f WAVE -d LEI16@48000 -c 1 "$CV/s.aiff" "$CV/s48.wav" >/dev/null 2>&1
+    tail -c +45 "$CV/s48.wav" > "$CV/s48.raw"          # the PCM, as a phone's mic hands it over
+    node "$CV/vad.cjs" "$CV/talk.js" wav "$CV/s48.raw" "$CV/enc.wav" >/dev/null 2>&1
+    is "the encoder writes 16 kHz mono"             "16000" "$(node -e 'const b=require("fs").readFileSync(process.argv[1]);console.log(b.toString("latin1",0,4)==="RIFF"&&b.readUInt16LE(22)===1?b.readUInt32LE(24):0)' "$CV/enc.wav")"
+    mkdir -p "$CV/home/.config/ghostfleet"; printf 'acme-api\t%s\twork\n' "$CV" > "$CV/home/.config/ghostfleet/projects"
+    heard="$(HOME="$CV/home" CLAUDE_FLEET_WHISPER_MODEL="$WM" "$ROOT/bin/fleet-jarvis" hear "$CV/enc.wav" 2>&1)"
+    is "...and whisper.cpp hears the words in it"   "1" "$(grep -ci 'acme' <<< "$heard" || true)"
+  else
+    skip "encoder through whisper.cpp" "needs macOS say + afconvert, whisper-cli and a model in ~/.local/share/whisper"
+  fi
+  rm -rf "$CV"
+else
+  skip "conversation mode" "node missing"
+fi
+
 group "fleet-serve does not fork the dispatch"
 # The whole point of mcp/fleet-dispatch.mjs: two callers of the fleet verbs, ONE copy of
 # the argument validation that keeps a dropped key from reaching a worker as the word
@@ -11001,6 +11150,561 @@ fi
 rm -rf "$SV"
 fi
 serve_stop
+
+# ── the digest is a tool, so Jarvis reaches it the way it reaches everything ──
+# A command that only exists on PATH is invisible to a session restricted to MCP, and
+# the whole point of the digest is to be the FIRST call a master of masters makes. So it
+# is a tool, listed, dispatched through the same plan() every other verb goes through,
+# and it answers for every profile with no project argument at all.
+group "MCP: fleet_digest is a tool, and it reads every profile"
+if command -v node >/dev/null 2>&1; then
+  MD="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$MD/home/.config/ghostfleet" "$MD/home/.claude/fleet" "$MD/home/.claude-personal/fleet" "$MD/api" "$MD/side"
+  printf 'acme-api\t%s\twork\n' "$MD/api" > "$MD/home/.config/ghostfleet/projects"
+  printf 'scratch\t%s\tpersonal\n' "$MD/side" > "$MD/home/.config/ghostfleet/projects.personal"
+  printf '%s\tapi-fix\tneed-you\tAllow pnpm test?\n' "$(date +%s)" > "$MD/home/.claude/fleet/cf-acme-api.inbox"
+  mcpdg() {            # $1 = method $2 = params JSON -> the result, one line
+    { printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
+      printf '{"jsonrpc":"2.0","id":2,"method":"%s","params":%s}\n' "$1" "$2"
+      sleep 2
+    } | ( HOME="$MD/home" TMUX= CLAUDE_FLEET_SOCK=cfmcpdg node "$ROOT/mcp/fleet-mcp.mjs" 2>/dev/null ) \
+      | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{d.split("\n").filter(Boolean).forEach(l=>{try{const o=JSON.parse(l);if(o.id===2)process.stdout.write(JSON.stringify(o.result))}catch{}})})'
+  }
+  is "fleet_digest is listed"                  "1" "$(mcpdg tools/list '{}' | grep -c '"name":"fleet_digest"' || true)"
+  is "...and needs no argument"                "1" "$(mcpdg tools/list '{}' | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const t=JSON.parse(d).tools.find(x=>x.name==="fleet_digest");console.log(t&&!(t.inputSchema.required||[]).length?1:0)})')"
+  out="$(mcpdg tools/call '{"name":"fleet_digest","arguments":{"peek":true}}')"
+  is "a call answers with the digest"          "1" "$(grep -c 'digest — 2 projects on 2 profiles' <<<"$out" || true)"
+  is "...naming the event from the inbox"      "1" "$(grep -c 'Allow pnpm test' <<<"$out" || true)"
+  is "...and is not flagged as an error"       "0" "$(grep -c '"isError":true' <<<"$out" || true)"
+  outj="$(mcpdg tools/call '{"name":"fleet_digest","arguments":{"json":true,"peek":true}}')"
+  is "json:true answers with data"             "2" "$(printf '%s' "$outj" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const r=JSON.parse(d);const j=JSON.parse(r.content[0].text);console.log(j.projects.length)}catch(e){console.log("not json: "+e.message)}})')"
+  # The stamp is the reader's to spend: peek left it alone, so a plain call is the first look.
+  is "peek left no stamp behind"               "no" "$([ -f "$MD/home/.config/ghostfleet/digest.last" ] && echo yes || echo no)"
+  rm -rf "$MD"
+else
+  skip "MCP fleet_digest" "node missing"
+fi
+
+# ── Jarvis, and the digest it reads instead of polling ──────────────────────
+# ONE ROLLUP OVER EVERY PROFILE, FROM FILES. A lead can see its own fleet and nothing
+# else, so a master of masters that asked every fleet with fleet-list would spend a Claude
+# turn per project to learn that nothing happened. fleet-digest reads what the hooks
+# already wrote — the status files, the inboxes, the asleep/parked/exited markers — across
+# every profile's fleet dir, and prints one summary. Both directions on the
+# classification, because the failure that matters is the phantom: a need-you has to be
+# reported as one, AND a status file left behind by a session that is gone has to be
+# reported as nothing, or the digest wakes Jarvis for a ghost and a nudge that fires for
+# nothing is a nudge that gets ignored.
+group "fleet-digest rolls every profile up, from files"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  DG="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$DG/home/.config/ghostfleet" "$DG/home/.claude/fleet" "$DG/home/.claude-personal/fleet" "$DG/api" "$DG/side"
+  # TWO PROFILES, because a digest scoped to one fleet dir is the failure CLAUDE.md names
+  # for every push channel: work reports and personal is silent, with no error to find.
+  printf 'acme-api\t%s\twork\n' "$DG/api" > "$DG/home/.config/ghostfleet/projects"
+  printf 'scratch\t%s\tpersonal\n' "$DG/side" > "$DG/home/.config/ghostfleet/projects.personal"
+  dg() { HOME="$DG/home" TMUX= "$ROOT/bin/fleet-digest" "$@"; }
+  dg_status() {   # $1=dir $2=id $3=sock $4=slot $5=status $6=ts — the hook's own shape
+    printf '{"session_id":"%s","zellij":"","sock":"%s","slot":"%s","pane":"","cwd":"/x/%s","folder":"%s","branch":"main","status":"%s","transcript":"","ts":%s}\n' \
+      "$2" "$3" "$4" "$4" "$4" "$5" "$6" > "$1/$2.json"
+  }
+  NOW="$(date +%s)"
+  # Live sessions on both sockets — inside this run's own namespace, like every server
+  # this file starts, so a real cf-acme-api elsewhere is neither read nor touched.
+  tmux -L cf-acme-api kill-server 2>/dev/null; tmux -L cf-personal-scratch kill-server 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s master 'sleep 120'
+  tmux -L cf-acme-api new-session -d -s api-fix 'sleep 120'
+  tmux -L cf-acme-api new-session -d -s docs-pass 'sleep 120'
+  tmux -L cf-acme-api new-session -d -s lint-fix 'sleep 120'
+  tmux -L cf-personal-scratch new-session -d -s master 'sleep 120'
+  dg_status "$DG/home/.claude/fleet" a1 cf-acme-api master working "$((NOW-30))"
+  dg_status "$DG/home/.claude/fleet" a2 cf-acme-api api-fix need-you "$((NOW-120))"
+  # TWO RECORDS FOR ONE SLOT: the older says need-you, the newer says ready. Newest wins,
+  # or a worker unblocked an hour ago is reported blocked forever — fleet-serve's push
+  # watcher learned this one the expensive way (one push per scan, naming nobody).
+  dg_status "$DG/home/.claude/fleet" z3 cf-acme-api docs-pass need-you "$((NOW-3600))"   # older, sorts LAST
+  # ...and the same shape on a slot with NO marker, because a park marker outranks any
+  # status and would hide a stale record winning on the slot above.
+  dg_status "$DG/home/.claude/fleet" a7 cf-acme-api lint-fix ready "$((NOW-60))"
+  dg_status "$DG/home/.claude/fleet" z7 cf-acme-api lint-fix need-you "$((NOW-7200))"   # older, sorts LAST
+  dg_status "$DG/home/.claude/fleet" a4 cf-acme-api docs-pass ready "$((NOW-600))"
+  # A GHOST: a status file for a session that is no longer on the socket.
+  dg_status "$DG/home/.claude/fleet" a5 cf-acme-api gone-worker need-you "$((NOW-60))"
+  dg_status "$DG/home/.claude-personal/fleet" p1 cf-personal-scratch master ready "$((NOW-5))"
+  # asleep and parked are MARKERS beside the status, and the marker is the truth.
+  : > "$DG/home/.claude-personal/fleet/cf-personal-scratch.old-task.asleep"
+  : > "$DG/home/.claude/fleet/cf-acme-api.docs-pass.parked"
+  # The inboxes: what happened, and when. A relayed answer names its sender as
+  # <project>/<session>, exactly as hooks/fleet-event.sh writes it.
+  printf '%s\tapi-fix\tneed-you\tAllow pnpm test?\n%s\tdocs-pass\tdone\tdocs-pass · main\n' \
+    "$((NOW-120))" "$((NOW-500))" > "$DG/home/.claude/fleet/cf-acme-api.inbox"
+  printf '%s\tscratch/master\tanswered\t7 plus 5 is 12\n' "$((NOW-50))" > "$DG/home/.claude-personal/fleet/cf-personal-scratch.inbox"
+
+  out="$(dg --peek 2>&1)"; rc=$?
+  is "fleet-digest runs"                        "0"   "$rc"
+  is "...over both profiles"                    "yes" "$(grep -q 'acme-api' <<<"$out" && grep -q 'scratch' <<<"$out" && echo yes || echo no)"
+  # IN ITS OWN SECTION. The same block also appears under SINCE LAST LOOK, as the event it
+  # was, so a count over the whole output would be two for one correct report.
+  dg_need() { awk '/^NEED YOU/{f=1;next} /^$/{f=0} f' <<<"$1"; }
+  is "a need-you is reported, with its detail"  "1"   "$(dg_need "$out" | grep -c 'acme-api/api-fix.*Allow pnpm test' || true)"
+  is "the newest record wins for a slot"        "0"   "$(dg_need "$out" | grep -c 'lint-fix' || true)"
+  is "...even when it is read first"             "1"   "$(grep -c 'acme-api/lint-fix *ready' <<<"$out" || true)"
+  is "...and its park marker is the truth"      "1"   "$(grep -c 'docs-pass.*parked' <<<"$out" || true)"
+  is "a ghost record is not reported"           "0"   "$(grep -c 'gone-worker' <<<"$out" || true)"
+  is "an asleep marker is a session"            "1"   "$(grep -c 'old-task.*asleep' <<<"$out" || true)"
+  is "the personal master is listed"            "1"   "$(grep -c 'scratch/master.*ready' <<<"$out" || true)"
+  is "since-last lists the done"                "1"   "$(grep -c 'docs-pass.*done' <<<"$out" || true)"
+  is "...and the relayed answer, once"          "1"   "$(grep -c 'answered.*7 plus 5' <<<"$out" || true)"
+  # JSON, the shape the phone and the MCP tool read.
+  j="$(dg --json --peek 2>/dev/null)"
+  jf() { printf '%s' "$j" | node -e 'let d="";process.stdin.on("data",c=>c&&(d+=c)).on("end",()=>{let j;try{j=JSON.parse(d)}catch{console.log("(not json)");return}const v=process.argv[1].split(".").reduce((o,k)=>o==null?o:o[k],j);console.log(typeof v==="object"?JSON.stringify(v):String(v))})' "$1"; }
+  is "--json parses"                            "2"   "$(jf projects.length)"
+  is "...counts need-you across profiles"       "1"   "$(jf totals.need_you)"
+  is "...and working"                           "1"   "$(jf totals.working)"
+  is "...and asleep"                            "1"   "$(jf totals.asleep)"
+  is "...and parked"                            "1"   "$(jf totals.parked)"
+  is "...and the events since last look"        "3"   "$(jf totals.since)"
+  is "...naming the profile per project"        "personal" "$(jf projects.1.profile)"
+  # THE STAMP. A plain run is Jarvis looking, and advances it; --peek is the phone
+  # polling, and must not — the same reason /api/inbox reads with --all: a glance from a
+  # pocket must not consume what the reader at the desk has not seen.
+  is "--peek leaves no stamp"                   "no"  "$([ -f "$DG/home/.config/ghostfleet/digest.last" ] && echo yes || echo no)"
+  dg >/dev/null 2>&1
+  is "a plain run stamps"                       "yes" "$([ -f "$DG/home/.config/ghostfleet/digest.last" ] && echo yes || echo no)"
+  j="$(dg --json 2>/dev/null)"
+  is "...and the next look sees nothing new"    "0"   "$(jf totals.since)"
+  # ONE STAMP PER READER: a lead looking must not spend what Jarvis has not seen.
+  DG_SP="$(tmux -L cf-acme-api display-message -p -t master '#{socket_path}')"
+  DG_ID="$(tmux -L cf-acme-api display-message -p -t master '#{session_id}' | tr -d '$')"
+  printf '%s\n' 1700000000 > "$DG/home/.config/ghostfleet/digest.last"
+  HOME="$DG/home" TMUX="$DG_SP,1,$DG_ID" "$ROOT/bin/fleet-digest" >/dev/null 2>&1
+  is "a fleet session's look has its own stamp"  "yes" "$([ -f "$DG/home/.config/ghostfleet/digest.last.cf-acme-api.master" ] && echo yes || echo no)"
+  is "...and leaves everyone else's alone"       "1700000000" "$(tr -d '\n' < "$DG/home/.config/ghostfleet/digest.last")"
+  is "...while the states are still there"      "1"   "$(jf totals.need_you)"
+  # NO TMUX AT ALL is a machine that cannot answer liveness; the files are trusted then,
+  # said out loud, rather than every session reading as gone.
+  # A PATH HOLDING NODE AND NOTHING ELSE. /usr/bin:/bin would hide Homebrew's tmux on a Mac
+  # and hide node with it, and on Linux it would not hide tmux at all.
+  mkdir -p "$DG/nobin"; ln -sf "$(command -v node)" "$DG/nobin/node"
+  out2="$(PATH="$DG/nobin" HOME="$DG/home" TMUX= "$DG/nobin/node" "$ROOT/bin/fleet-digest.mjs" --peek 2>&1)"
+  is "without tmux the files are trusted"       "1"   "$(dg_need "$out2" | grep -c 'api-fix.*need-you' || true)"
+  is "...and it says liveness was not checked"  "1"   "$(grep -ci 'liveness' <<<"$out2" || true)"
+  tmux -L cf-acme-api kill-server 2>/dev/null; tmux -L cf-personal-scratch kill-server 2>/dev/null
+  rm -rf "$DG"
+else
+  skip "fleet-digest" "node or tmux missing"
+fi
+
+# ── Jarvis: the master of masters (docs/jarvis.md) ──────────────────────────
+# THE CONFIRM-LIST IS ENFORCED IN CODE, so it is tested as code: every rule in both
+# directions, with explicit clocks. The failure that matters is not a refusal too many — it
+# is a yes the owner never gave being read as one: a worker's "[fleet] … yes", a yes said
+# BEFORE the question, one yes spent twice, or a yes to one question answering another.
+group "Jarvis's confirm-list waits for a yes the model did not write"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  JC="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$JC/home/.config/ghostfleet" "$JC/home/.claude/fleet" "$JC/jv" "$JC/api"
+  printf 'jarvis\t%s\twork\nacme-api\t%s\twork\n' "$JC/jv" "$JC/api" > "$JC/home/.config/ghostfleet/projects"
+  printf 'name=jarvis\nprofile=work\nsock=cf-jarvis\ncfg=%s\npath=%s\n' "$JC/home/.claude" "$JC/jv" > "$JC/home/.config/ghostfleet/jarvis"
+  jl() { HOME="$JC/home" node --input-type=module -e "import * as J from '$ROOT/lib/jarvis.mjs'; $1" 2>&1; }
+  STOP='{key:"fleet_stop:w1",tool:"fleet_stop",summary:"stop acme-api/api-fix"}'
+  g()   { jl "const r=J.gate($1, $2); console.log(r.ok ? 'ok' : 'no', r.id || '-', r.by || '-')"; }
+  said(){ jl "J.recordSaid($(node -e 'console.log(JSON.stringify(process.argv[1]))' "$1"), 'owner', $2)"; }
+
+  is "a listed call is refused, and proposed"      "no"  "$(g "$STOP" 1000 | cut -d' ' -f1)"
+  P1="$(g "$STOP" 1500 | cut -d' ' -f2)"
+  is "...asking again keeps the SAME proposal"     "$P1" "$(g "$STOP" 1600 | cut -d' ' -f2)"
+  said "[fleet] acme-api/api-fix answered your request: yes" 2000
+  is "a [fleet] line saying yes is not the owner"  "no"  "$(g "$STOP" 2100 | cut -d' ' -f1)"
+  said "yes but not the second one" 3000
+  is "a yes with a negation is not a yes"          "no"  "$(g "$STOP" 3100 | cut -d' ' -f1)"
+  said "yes" 4000
+  is "the owner's yes, after the question, lets it through" "ok $P1 owner" "$(g "$STOP" 4100)"
+  is "...ONCE: the same call is a new question"    "no"  "$(g "$STOP" 4200 | cut -d' ' -f1)"
+  is "...under a new proposal id"                  "1"   "$([ "$(g "$STOP" 4300 | cut -d' ' -f2)" != "$P1" ] && echo 1 || echo 0)"
+  # A YES THAT PREDATES THE QUESTION IS AN INSTRUCTION, and instructions are what get
+  # misread — which is the reason the list exists.
+  MERGE='{key:"bash:gh pr merge 12",tool:"Bash",summary:"merge a pull request: gh pr merge 12"}'
+  said "yes" 5000
+  g "$MERGE" 6000 >/dev/null
+  is "a yes said before the question does not answer it" "no" "$(g "$MERGE" 6100 | cut -d' ' -f1)"
+  said "(spoken) Okay." 6150
+  is "a ONE-word spoken yes is not a yes (noise transcribes as Okay.)" "no" "$(g "$MERGE" 6160 | cut -d' ' -f1)"
+  said "(spoken) yeah, do it" 6200
+  is "a spoken yes counts like a typed one"        "ok"  "$(g "$MERGE" 6300 | cut -d' ' -f1)"
+  # TWO OPEN QUESTIONS, ONE YES: it answers the one asked LAST, and only that one.
+  A='{key:"fleet_answer:a",tool:"fleet_answer",summary:"answer acme-api/api-fix with 2"}'
+  B='{key:"fleet_stop:b",tool:"fleet_stop",summary:"stop acme-api/docs-pass"}'
+  g "$A" 7000 >/dev/null; g "$B" 7100 >/dev/null; said "yes" 7200
+  is "one yes does not answer an earlier question" "no"  "$(g "$A" 7300 | cut -d' ' -f1)"
+  is "...it answers the last one asked"            "ok"  "$(g "$B" 7400 | cut -d' ' -f1)"
+  # EXPIRY: a question left for longer than the window is not answerable any more.
+  X='{key:"fleet_project_remove:x",tool:"fleet_project_remove",summary:"unregister the project scratch"}'
+  g "$X" 10000 >/dev/null; said "yes" $((10000 + 11 * 60 * 1000))
+  is "a yes eleven minutes later answers nothing"  "no"  "$(g "$X" $((10000 + 11 * 60 * 1000 + 100)) | cut -d' ' -f1)"
+  # THE PHONE'S TAP, and its no.
+  TP='{key:"fleet_worktree_remove:t",tool:"fleet_worktree_remove",summary:"remove the worktree acme-api-3"}'
+  NOW=$((20 * 60 * 1000 * 1000))
+  TID="$(g "$TP" "$NOW" | cut -d' ' -f2)"
+  jl "console.log(JSON.stringify(J.answer('$TID', true, 'phone', $NOW + 100)))" >/dev/null
+  is "a tapped yes lets exactly that call through" "ok $TID phone" "$(g "$TP" $((NOW + 200)))"
+  NID="$(g "$TP" $((NOW + 300)) | cut -d' ' -f2)"
+  jl "J.answer('$NID', false, 'phone', $NOW + 400)" >/dev/null
+  is "a tapped no leaves it refused"               "no"  "$(g "$TP" $((NOW + 500)) | cut -d' ' -f1)"
+  is "...as a question asked afresh"               "1"   "$([ "$(g "$TP" $((NOW + 600)) | cut -d' ' -f2)" != "$NID" ] && echo 1 || echo 0)"
+  # SPAWN: one worker per request is ordinary work, the second is a question.
+  S1='{key:"fleet_spawn:a",tool:"fleet_spawn",spawnLike:true,summary:"start another worker, api-a"}'
+  S2='{key:"fleet_spawn:b",tool:"fleet_spawn",spawnLike:true,summary:"start another worker, api-b"}'
+  S3='{key:"fleet_spawn:c",tool:"fleet_spawn",spawnLike:true,summary:"start another worker, api-c"}'
+  SP=$((NOW + 10000))
+  said "put the retry work on two workers" "$SP"
+  is "the first worker of a request needs no yes"  "ok"  "$(g "$S1" $((SP + 100)) | cut -d' ' -f1)"
+  # A [fleet] wake arriving in between is the machine talking, not a second request — if the
+  # ledger took it, every nudge would hand Jarvis another free worker.
+  said "[fleet] need-you: acme-api/api-fix — Claude needs your permission" $((SP + 150))
+  is "...the second one does"                      "no"  "$(g "$S2" $((SP + 200)) | cut -d' ' -f1)"
+  said "yes" $((SP + 300))
+  is "...until he says yes"                        "ok"  "$(g "$S2" $((SP + 400)) | cut -d' ' -f1)"
+  is "...which answers the question, not a new request" "0" "$(jl "console.log(J.pending($((SP + 450))).filter(p => p.tool === 'fleet_spawn').length)")"
+  said "and one for the docs" $((SP + 500))
+  is "a NEW request gets its free one again"       "ok"  "$(g "$S3" $((SP + 600)) | cut -d' ' -f1)"
+  # THE LEDGER'S OWN FILTER, which the hook relies on.
+  is "the recorder drops the machine's own lines"  "false" "$(jl "console.log(J.recordSaid('[fleet] need-you: acme-api/api-fix', 'owner', 1))")"
+  is "...and Claude Code's injected turns"         "false" "$(jl "console.log(J.recordSaid('<task-notification>done</task-notification>', 'owner', 1))")"
+  # WITHOUT a transcriber, voice says how to get one rather than failing silently.
+  is "no whisper: voice says how to enable it"     "1" \
+     "$(CLAUDE_FLEET_WHISPER_BIN="$JC/nope" jl "console.log(JSON.stringify(J.voiceStatus()))" | grep -c 'fleet-jarvis voice --install' || true)"
+
+  # ── the MCP door: only Jarvis's master, only the listed tools ────────────────
+  rm -f "$JC/home/.config/ghostfleet/jarvis.confirm.json" "$JC/home/.config/ghostfleet/jarvis.said"
+  tmux -L cf-jarvis kill-server 2>/dev/null
+  tmux -L cf-jarvis new-session -d -s master 'sleep 120'
+  tmux -L cf-jarvis new-session -d -s helper 'sleep 120'
+  JSP="$(tmux -L cf-jarvis display-message -p -t master '#{socket_path}')"
+  jtmux() { printf '%s,1,%s' "$JSP" "$(tmux -L cf-jarvis display-message -p -t "$1" '#{session_id}' | tr -d '$')"; }
+  mcpj() {             # $1 = session to call AS, $2 = tool, $3 = args JSON
+    { printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n'
+      printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"%s","arguments":%s}}\n' "$2" "$3"
+      sleep 2
+    } | ( HOME="$JC/home" TMUX="$(jtmux "$1")" CLAUDE_FLEET_NOTIFIER=off node "$ROOT/mcp/fleet-mcp.mjs" 2>/dev/null ) \
+      | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{d.split("\n").filter(Boolean).forEach(l=>{try{const o=JSON.parse(l);if(o.id===2)process.stdout.write(JSON.stringify(o.result))}catch{}})})'
+  }
+  out="$(mcpj master fleet_stop '{"project":"acme-api","session":"api-fix"}')"
+  is "Jarvis's fleet_stop is refused at the tool"  "1" "$(grep -c '"isError":true' <<< "$out" || true)"
+  is "...naming the confirm-list and a proposal"   "1" "$(grep -c 'confirm-list.*proposal' <<< "$out" || true)"
+  out="$(mcpj master fleet_answer '{"project":"acme-api","session":"api-fix","text":"2"}')"
+  is "...and so is answering a prompt for him"     "1" "$(grep -c 'confirm-list' <<< "$out" || true)"
+  out="$(mcpj master fleet_send '{"session":"master","prompt":"yes"}')"
+  is "Jarvis cannot fleet_send into its own session" "1" "$(grep -c 'your own session' <<< "$out" || true)"
+  is "...and that is not a question for him either" "0" "$(grep -c 'proposal' <<< "$out" || true)"
+  out="$(mcpj master fleet_digest '{"peek":true}')"
+  is "a read is not on the list"                   "0" "$(grep -c 'confirm-list' <<< "$out" || true)"
+  # Another session on the SAME socket is not Jarvis, and a lead's stop must not start
+  # asking the owner: the gate is about who calls, not what is called.
+  out="$(mcpj helper fleet_stop '{"project":"acme-api","session":"api-fix"}')"
+  is "a session that is not Jarvis's master is not gated" "0" "$(grep -c 'confirm-list' <<< "$out" || true)"
+
+  # ── the Bash door: merge and push are shell commands ────────────────────────
+  JPANE="$(tmux -L cf-jarvis display-message -p -t master '#{pane_id}')"
+  HPANE="$(tmux -L cf-jarvis display-message -p -t helper '#{pane_id}')"
+  guard() {            # $1 = pane to run as, $2 = the command -> "rc|first line of stderr"
+    local e rc
+    e="$(jq -n --arg c "$2" '{hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c}}' \
+      | HOME="$JC/home" TMUX="$JSP,1,0" TMUX_PANE="$1" "$ROOT/hooks/jarvis-guard.sh" 2>&1 >/dev/null)"; rc=$?
+    printf '%s|%s' "$rc" "$(head -1 <<< "$e")"
+  }
+  is "gh pr merge is held for a yes"               "2" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  is "...with the proposal in the reason"          "1" "$(guard "$JPANE" 'gh pr merge 12 --squash' | grep -c 'confirm-list.*proposal' || true)"
+  is "git push is held"                            "2" "$(guard "$JPANE" 'git push origin feat/retry' | cut -d'|' -f1)"
+  is "a read passes"                               "0" "$(guard "$JPANE" 'git log --oneline --grep push' | cut -d'|' -f1)"
+  is "asking a lead a question passes"             "0" "$(guard "$JPANE" 'fleet-send -s cf-acme-api --reply-to me master "how is the retry work?"' | cut -d'|' -f1)"
+  # THE FORGERIES are refused outright — no yes makes them acceptable.
+  is "typing yes into its own session is refused"  "2" "$(guard "$JPANE" 'fleet-send master yes' | cut -d'|' -f1)"
+  is "...as is writing the ledger"                 "2" "$(guard "$JPANE" 'echo yes >> ~/.config/ghostfleet/jarvis.said' | cut -d'|' -f1)"
+  is "...and granting its own proposal"            "2" "$(guard "$JPANE" 'fleet-jarvis grant K7Q2' | cut -d'|' -f1)"
+  is "...saying why"                               "1" "$(guard "$JPANE" 'fleet-send master yes' | grep -c 'refused' || true)"
+  # EVERY COMMAND OF THE LINE, and tmux's own aliases — each of these got through the first cut.
+  is "a forgery after && is refused"               "2" "$(guard "$JPANE" 'cd ~ && tmux send-keys -t master yes Enter' | cut -d'|' -f1)"
+  is "...and tmux's short alias"                   "2" "$(guard "$JPANE" 'tmux send -t master yes Enter' | cut -d'|' -f1)"
+  is "...and a paste after a pipe"                 "2" "$(guard "$JPANE" 'echo yes | tmux load-buffer - ; tmux pasteb -t master' | cut -d'|' -f1)"
+  is "...and deleting the marker"                  "2" "$(guard "$JPANE" 'rm ~/.config/ghostfleet/jarvis' | cut -d'|' -f1)"
+  is "a merge through gh api is held"              "1" "$(guard "$JPANE" 'gh api -X PUT repos/o/r/pulls/1/merge' | grep -c 'confirm-list' || true)"
+  is "keys into ANOTHER fleet's pane are held"     "1" "$(guard "$JPANE" 'tmux -L cf-acme-api send -t api-fix 2 Enter' | grep -c 'confirm-list' || true)"
+  is "the same merge from another session passes"  "0" "$(guard "$HPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  rm -f "$JC/home/.config/ghostfleet/jarvis"
+  is "with no Jarvis marker nothing is guarded"    "0" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  tmux -L cf-jarvis kill-server 2>/dev/null
+  rm -rf "$JC"
+else
+  skip "Jarvis confirm-list" "node, tmux or jq missing"
+fi
+
+# THE WAKE, IN BOTH DIRECTIONS, ACROSS PROFILES. The claim is "an idle Jarvis costs zero
+# turns", and the only honest measurement of that is to fire every event that is NOT a
+# need-you — finishes, starts, idles — and count the prompts that reach Jarvis's pane: zero.
+# Then one need-you, from a DIFFERENT profile than Jarvis's, and count again: one, landing
+# in Jarvis's fleet dir. A detector that never fires looks identical to one that works, so
+# the zero is only worth something next to the one.
+group "a need-you anywhere wakes Jarvis at once; finished work never does"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  JW="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$JW/home/.config/ghostfleet" "$JW/home/.claude/fleet" "$JW/home/.claude-personal/fleet" "$JW/bin" "$JW/jv"
+  printf 'name=jarvis\nprofile=work\nsock=cf-jarvis\ncfg=%s\npath=%s\n' "$JW/home/.claude" "$JW/jv" > "$JW/home/.config/ghostfleet/jarvis"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent.log"\nprintf "%%s\\n" "${CLAUDE_FLEET_DIR:-}" >> "%s/sent.dir"\n' "$JW" "$JW" > "$JW/bin/fleet-send"; chmod +x "$JW/bin/fleet-send"
+  # A pane that draws an EMPTY composer — the frame _input_state looks for, rule lines
+  # either side of the prompt glyph — so the immediate path is the one exercised.
+  jv_pane() { tmux -L cf-jarvis kill-server 2>/dev/null
+              tmux -L cf-jarvis new-session -d -x 100 -y 20 -s master \
+                "printf '────────────────────────────\n❯ %s\n────────────────────────────\n' '$1'; sleep 300"; sleep 0.5; }
+  jfire() {            # $1=event $2=sock $3=slot $4=profile config dir $5=note
+    printf '{"hook_event_name":"%s","session_id":"s-%s-%s","cwd":"%s","message":"%s","prompt":"%s"}' \
+      "$1" "$2" "$3" "$JW" "${5:-}" "${5:-}" \
+    | env -u TMUX -u TMUX_PANE HOME="$JW/home" PATH="$JW/bin:$PATH" CLAUDE_CONFIG_DIR="$4" CLAUDE_FLEET_DIR="$4/fleet" \
+          CLAUDE_FLEET_SOCK="$2" CLAUDE_FLEET_SLOT="$3" CLAUDE_FLEET_NOTIFIER=off \
+          CLAUDE_FLEET_JARVIS_DEBOUNCE="${JDEB:-0}" "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  # A file that does not exist yet is ZERO, not empty: grep -c prints nothing at all for a
+  # missing file, and "" would pass no assertion while meaning exactly the right thing.
+  cnt()  { local n; n="$(grep -c -- "$1" "$2" 2>/dev/null)"; printf '%s' "${n:-0}"; }
+  sent() { cnt '-s cf-jarvis master' "$JW/sent.log"; }
+  waitsent() { i=0; while [ "$i" -lt 30 ] && [ "$(sent)" -lt "$1" ]; do i=$((i+1)); sleep 0.1; done; }
+  PC="$JW/home/.claude-personal"; WC="$JW/home/.claude"
+  jv_pane ""
+  # THE IDLE DAY: work finishing and starting across both profiles, and a lead's turn.
+  for n in 1 2 3; do
+    jfire UserPromptSubmit cf-personal-scratch "w$n" "$PC" "run the suite"
+    jfire Stop cf-personal-scratch "w$n" "$PC"
+  done
+  jfire Stop cf-acme-api master "$WC"
+  jfire Notification cf-acme-api api-fix "$WC" "Claude is waiting for your input"
+  sleep 1
+  is "finished and started work sends Jarvis nothing" "0" "$(sent)"
+  is "...and leaves nothing in its inbox"             "0" "$(cnt . "$WC/fleet/cf-jarvis.inbox")"
+  is "...and arms no retry either"                    "0" "$(ls "$WC/fleet" | grep -c 'jarvis.retry' || true)"
+  # ONE NEED-YOU, ON ANOTHER PROFILE.
+  jfire Notification cf-personal-scratch w2 "$PC" "Claude needs your permission to use Bash"
+  waitsent 1
+  is "a need-you on another profile wakes Jarvis"     "1" "$(sent)"
+  is "...naming who and what"                         "1" "$(cnt 'need-you: personal-scratch/w2 — Claude needs your permission to use Bash' "$JW/sent.log")"
+  is "...as a [fleet] line, which the ledger drops"   "1" "$(cnt 'master \[fleet\] need-you' "$JW/sent.log")"
+  is "...and the row lands in JARVIS's fleet dir"     "1" "$(cnt 'personal-scratch/w2	need-you' "$WC/fleet/cf-jarvis.inbox")"
+  is "...not in the personal one"                     "0" "$(cnt 'need-you' "$PC/fleet/cf-jarvis.inbox")"
+  # THE QUEUE FOLLOWS THE DIR: a busy Jarvis queues the wake under CLAUDE_FLEET_DIR, and only
+  # Jarvis's own dir is drained by Jarvis's Stop.
+  is "...and fleet-send is pointed at Jarvis's dir"   "$WC/fleet" "$(tail -1 "$JW/sent.dir" 2>/dev/null)"
+  # A LEAD blocked on a prompt is exactly what he wants to hear about.
+  jfire Notification cf-acme-api master "$WC" "Claude needs your permission to use Edit"
+  waitsent 2
+  is "a lead's need-you wakes it too"                 "2" "$(sent)"
+  # JARVIS'S OWN need-you reaches the phone through fleet-serve, never its own input box.
+  jfire Notification cf-jarvis master "$WC" "Claude needs your permission to use Bash"
+  sleep 1
+  is "Jarvis's own need-you does not wake itself"     "2" "$(sent)"
+  # JARVIS'S OWN WORKER: one row and one wake, not the worker path's AND this one's.
+  : > "$JW/sent.log"; rm -f "$WC/fleet/cf-jarvis.jarvis.stamp" "$WC/fleet/cf-jarvis.notify.stamp"; : > "$WC/fleet/cf-jarvis.inbox"
+  : > "$WC/fleet/cf-jarvis.notify-lead"
+  jfire Notification cf-jarvis helper "$WC" "Claude needs your permission to use Bash"
+  waitsent 1; sleep 0.5
+  is "Jarvis's own worker is ONE wake"                "1" "$(sent)"
+  is "...and ONE inbox row"                           "1" "$(cnt 'need-you' "$WC/fleet/cf-jarvis.inbox")"
+  rm -f "$WC/fleet/cf-jarvis.notify-lead"
+  # A BURST is one look: the digest the look starts with names all of them.
+  : > "$JW/sent.log"; rm -f "$WC/fleet/cf-jarvis.jarvis.stamp"
+  JDEB=30 jfire Notification cf-acme-api api-fix "$WC" "Claude needs your permission to use Bash"
+  JDEB=30 jfire Notification cf-acme-api docs-pass "$WC" "Claude needs your permission to use Bash"
+  waitsent 1; sleep 0.5
+  is "a burst of blocks is one wake"                  "1" "$(sent)"
+  # A HALF-TYPED BOX is never pasted into: the wake is deferred, not dropped.
+  jv_pane "merge the"
+  : > "$JW/sent.log"; rm -f "$WC/fleet/cf-jarvis.jarvis.stamp"
+  CLAUDE_FLEET_NOTIFY_RETRY_EVERY=30 jfire Notification cf-acme-api api-fix "$WC" "Claude needs your permission to use Bash"
+  sleep 1
+  is "a half-typed box gets no paste"                 "0" "$(sent)"
+  jr="$(cat "$WC/fleet/cf-jarvis.jarvis.retry" 2>/dev/null)"
+  jr_live() { case "$jr" in ''|*[!0-9]*) echo 0 ;; *) kill -0 "$jr" 2>/dev/null && echo 1 || echo 0 ;; esac; }
+  is "...a re-check is armed instead"                 "1" "$(jr_live)"
+  case "$jr" in ''|*[!0-9]*) ;; *) kill "$jr" 2>/dev/null ;; esac
+  # OPT-IN BATCHING: with batch= set, finished work is ONE nudge after the window.
+  jv_pane ""
+  : > "$JW/sent.log"; rm -f "$WC/fleet/cf-jarvis.jarvis.stamp"
+  printf 'batch=2\n' >> "$JW/home/.config/ghostfleet/jarvis"
+  jfire Stop cf-personal-scratch w1 "$PC"; jfire Stop cf-personal-scratch w3 "$PC"
+  i=0; while [ "$i" -lt 50 ] && [ "$(sent)" -lt 1 ]; do i=$((i+1)); sleep 0.1; done
+  is "batch=2 turns finished work into one nudge"     "1" "$(sent)"
+  is "...that says it is a batch"                     "1" "$(cnt '\[fleet\] batch' "$JW/sent.log")"
+  # THE LEDGER: what the owner typed into Jarvis is recorded; the machine's lines are not.
+  # A PROMPT THE FLEET DELIVERED is not him, whatever it says: bin/fleet-send leaves a line for
+  # every paste into Jarvis's master, and the ledger skips a prompt one accounts for.
+  printf '%s\t%s\n' "$(date +%s)" "$(printf '%s' ok | shasum -a 256 2>/dev/null | cut -c1-12)" >> "$JW/home/.config/ghostfleet/jarvis.delivered"
+  jfire UserPromptSubmit cf-jarvis master "$WC" "ok"
+  is "a delivered ok is not recorded as the owner"    "0" "$(cnt '"text":"ok"' "$JW/home/.config/ghostfleet/jarvis.said")"
+  jfire UserPromptSubmit cf-jarvis master "$WC" "yes"
+  jfire UserPromptSubmit cf-jarvis master "$WC" "[fleet] need-you: acme-api/api-fix"
+  jfire UserPromptSubmit cf-acme-api master "$WC" "yes"
+  is "the owner's words in Jarvis are recorded"       "1" "$(cnt '"text":"yes"' "$JW/home/.config/ghostfleet/jarvis.said")"
+  is "...a [fleet] line is not"                       "0" "$(cnt 'need-you' "$JW/home/.config/ghostfleet/jarvis.said")"
+  # AND THE REAL fleet-send WRITES THAT LINE — the stub above does not, so without this the
+  # skip would be tested against a record nothing in the product produces.
+  : > "$JW/home/.config/ghostfleet/jarvis.delivered"
+  HOME="$JW/home" TMUX= CLAUDE_FLEET_NOTIFIER=off "$ROOT/bin/fleet-send" -s cf-jarvis --anyway master "ok" >/dev/null 2>&1
+  is "the real fleet-send records a delivery into Jarvis" "1" "$(cnt "$(printf '%s' ok | shasum -a 256 2>/dev/null | cut -c1-12)" "$JW/home/.config/ghostfleet/jarvis.delivered")"
+  HOME="$JW/home" TMUX= CLAUDE_FLEET_NOTIFIER=off "$ROOT/bin/fleet-send" -s cf-jarvis --anyway helper "ok" >/dev/null 2>&1
+  is "...and only into Jarvis's master"             "1" "$(cnt . "$JW/home/.config/ghostfleet/jarvis.delivered")"
+  # NO MARKER, NO JARVIS: a machine without one behaves exactly as before.
+  rm -f "$JW/home/.config/ghostfleet/jarvis"; : > "$JW/sent.log"
+  jfire Notification cf-acme-api api-fix "$WC" "Claude needs your permission to use Bash"
+  sleep 1
+  is "without a marker a need-you wakes nobody new"   "0" "$(sent)"
+  tmux -L cf-jarvis kill-server 2>/dev/null
+  rm -rf "$JW"
+else
+  skip "Jarvis wake" "tmux, jq or node missing"
+fi
+
+group "fleet-jarvis init makes a home outside every repo, and registers it"
+if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  JI="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$JI/home"
+  ji() { HOME="$JI/home" TMUX= "$ROOT/bin/fleet-jarvis" "$@" 2>&1; }
+  out="$(ji init)"; rc=$?
+  JH="$JI/home/.local/share/ghostfleet/jarvis"
+  is "init runs"                                  "0"   "$rc"
+  is "...making its home under ~/.local/share"    "yes" "$([ -d "$JH/.git" ] && echo yes || echo no)"
+  is "...with the contract as its CLAUDE.md"      "1"   "$(head -1 "$JH/CLAUDE.md" 2>/dev/null | grep -c 'ghostfleet:jarvis-contract' || true)"
+  is "...which carries the confirm-list"          "1"   "$([ "$(grep -c 'confirm-list' "$JH/CLAUDE.md" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
+  is "...the guard wired in ITS OWN settings"     "$ROOT/hooks/jarvis-guard.sh" \
+     "$(jq -r '.hooks.PreToolUse[] | select(.matcher=="Bash") | .hooks[0].command' "$JH/.claude/settings.json" 2>/dev/null)"
+  is "...registered as a work project"            "jarvis	$JH	work" "$(grep '^jarvis	' "$JI/home/.config/ghostfleet/projects" 2>/dev/null)"
+  is "...with a marker naming its socket"         "cf-jarvis" "$(grep '^sock=' "$JI/home/.config/ghostfleet/jarvis" | cut -d= -f2-)"
+  is "...and its config dir"                      "$JI/home/.claude" "$(grep '^cfg=' "$JI/home/.config/ghostfleet/jarvis" | cut -d= -f2-)"
+  is "a second init with --if-needed is silent"   ""    "$(ji init --if-needed)"
+  is "...and registers nothing twice"             "1"   "$(grep -c '^jarvis	' "$JI/home/.config/ghostfleet/projects")"
+  # The contract is refreshed while it is ours, and left alone once the owner takes it.
+  printf '# my own Jarvis\n' > "$JH/CLAUDE.md"
+  ji init --if-needed >/dev/null
+  is "a contract the owner took over is kept"     "# my own Jarvis" "$(cat "$JH/CLAUDE.md")"
+  is "status knows where it is"                   "1"   "$(ji status | grep -c "at $JH" || true)"
+  is "...and that it is not running"              "1"   "$(ji status | grep -c 'not running' || true)"
+  # A PROJECT ALREADY CALLED jarvis, somewhere else, is not taken over.
+  mkdir -p "$JI/h2/.config/ghostfleet" "$JI/other"
+  printf 'jarvis\t%s\twork\n' "$JI/other" > "$JI/h2/.config/ghostfleet/projects"
+  out="$(HOME="$JI/h2" "$ROOT/bin/fleet-jarvis" init 2>&1)"; rc=$?
+  is "an existing project called jarvis stops it" "1"   "$rc"
+  is "...saying so"                               "1"   "$(grep -c 'already exists' <<< "$out" || true)"
+  is "...and writes no marker"                    "no"  "$([ -f "$JI/h2/.config/ghostfleet/jarvis" ] && echo yes || echo no)"
+  rm -rf "$JI"
+else
+  skip "fleet-jarvis init" "node or git missing"
+fi
+
+# THE DAILY FRESH START. A copy of the runtime whose agent-here is a stub, so "a fresh
+# master" is a process this suite started and can see, never a real agent. Three things
+# must hold: it does not fire on first sight or twice a day, it never replaces a Jarvis that
+# is mid-turn, and when it does fire the replacement is FRESH and the handoff exists.
+group "the daily restart is fresh, idle-only, and carries a handoff"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  JR="$(cd "$(mktemp -d)" && pwd -P)"
+  mkdir -p "$JR/home/.config/ghostfleet" "$JR/home/.claude/fleet" "$JR/jv"
+  cp -R "$ROOT/bin" "$ROOT/lib" "$ROOT/mcp" "$ROOT/tmux" "$ROOT/hooks" "$JR/"
+  printf '#!/bin/sh\nprintf "fresh=%%s\\n" "${CLAUDE_FLEET_FRESH:-}" >> "%s/started"\nexec sleep 300\n' "$JR" > "$JR/bin/agent-here"
+  chmod +x "$JR/bin/agent-here"
+  printf 'jarvis\t%s\twork\n' "$JR/jv" > "$JR/home/.config/ghostfleet/projects"
+  printf 'name=jarvis\nprofile=work\nsock=cf-jarvis\ncfg=%s\npath=%s\nrestart_hour=0\n' "$JR/home/.claude" "$JR/jv" > "$JR/home/.config/ghostfleet/jarvis"
+  jr() { HOME="$JR/home" TMUX= "$JR/bin/fleet-jarvis" "$@" 2>&1; }
+  jst() { printf '{"session_id":"j1","sock":"cf-jarvis","slot":"master","status":"%s","ts":%s}\n' "$1" "$2" > "$JR/home/.claude/fleet/j1.json"; }
+  ppid_of() { tmux -L cf-jarvis display-message -p -t master '#{pane_pid}' 2>/dev/null; }
+  tmux -L cf-jarvis kill-server 2>/dev/null
+  # WITHOUT the caller's CLAUDE_FLEET_FRESH: a session started by fleet-spawn carries it, a
+  # server started from there inherits it, and then "the restart asked for a fresh one" is
+  # true of every pane on that server whether the restart asked or not.
+  env -u CLAUDE_FLEET_FRESH tmux -L cf-jarvis new-session -d -s master 'sleep 300'
+  P0="$(ppid_of)"; NOW="$(date +%s)"
+  jst ready $((NOW - 3600))
+  HOME="$JR/home" node --input-type=module -e "import * as J from '$JR/lib/jarvis.mjs'; J.recordSaid('clean up docs-pass', 'owner'); J.gate({key:'k',tool:'fleet_stop',summary:'stop acme-api/docs-pass'})"
+  jr restart --if-due >/dev/null
+  is "first sight is a baseline, not a restart"   "$P0" "$(ppid_of)"
+  printf '%s\n' $((NOW - 2 * 86400)) > "$JR/home/.config/ghostfleet/jarvis.restarted"
+  jst working $((NOW - 3600))
+  out="$(jr restart --if-due)"; rc=$?
+  is "a Jarvis mid-turn is not restarted"          "3"   "$rc"
+  is "...it is deferred, saying why"               "1"   "$(grep -c 'deferred' <<< "$out" || true)"
+  is "...and its pane is the same one"             "$P0" "$(ppid_of)"
+  jst ready $((NOW - 3600))
+  jr restart --if-due >/dev/null
+  P1="$(ppid_of)"
+  i=0; while [ "$i" -lt 30 ] && [ ! -s "$JR/started" ]; do i=$((i+1)); sleep 0.1; done
+  is "an idle Jarvis, due, is restarted"           "1"   "$([ -n "$P1" ] && [ "$P1" != "$P0" ] && echo 1 || echo 0)"
+  is "...as a FRESH conversation"                  "fresh=1" "$(tail -1 "$JR/started" 2>/dev/null)"
+  is "...the server kept, one session: master"     "master" "$(tmux -L cf-jarvis list-sessions -F '#{session_name}' 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+  is "...with a handoff in its home"               "yes" "$([ -f "$JR/jv/HANDOFF.md" ] && echo yes || echo no)"
+  is "...naming what waits on his yes"             "1"   "$(grep -c 'stop acme-api/docs-pass' "$JR/jv/HANDOFF.md" 2>/dev/null || true)"
+  is "...and what he last said"                    "1"   "$(grep -c 'clean up docs-pass' "$JR/jv/HANDOFF.md" 2>/dev/null || true)"
+  is "...and it says so in Jarvis's inbox"         "1"   "$(grep -c 'restarted' "$JR/home/.claude/fleet/cf-jarvis.inbox" 2>/dev/null || true)"
+  jr restart --if-due >/dev/null
+  is "once a day: a second tick changes nothing"   "$P1" "$(ppid_of)"
+  tmux -L cf-jarvis kill-server 2>/dev/null
+  rm -rf "$JR"
+else
+  skip "Jarvis daily restart" "tmux or node missing"
+fi
+
+# THE STEP NOTHING SAID WAS MISSING. fleet-phone reported a phone as fully set up while no
+# notification could ever reach it; a subscription is now one of the steps, both ways.
+group "fleet-phone says notifications: not set up, until a subscription exists"
+if command -v node >/dev/null 2>&1; then
+  NP="$(cd "$(mktemp -d)" && pwd -P)"
+  printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","creds":[{"id":"c1"}]}]}\n' > "$NP/none.json"
+  printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","creds":[{"id":"c1"}],"push":[{"endpoint":"https://push.example/x","p256dh":"k","auth":"a"}]}]}\n' > "$NP/on.json"
+  printf '{"bind":"127.0.0.1","port":1,"rp_id":"localhost","origins":["http://localhost:1"],"clients":[{"id":"phone","creds":[{"id":"c1"}]},{"id":"old","revoked":true,"push":[{"endpoint":"https://push.example/y","p256dh":"k","auth":"a"}]}]}\n' > "$NP/revoked.json"
+  fp() { GHOSTFLEET_SERVE_CONFIG="$NP/$1.json" HOME="$NP" "$ROOT/bin/fleet-phone" 2>&1; }
+  is "no subscription: notifications: not set up"   "1" "$(fp none | grep -c 'notifications: not set up' || true)"
+  is "...counted as a step still to do"             "1" "$(fp none | grep -c 'of 4 steps done' || true)"
+  is "a subscription: notifications are on"         "1" "$(fp on | grep -c 'notifications: on (1 device)' || true)"
+  is "...and it no longer says not set up"          "0" "$(fp on | grep -c 'not set up' || true)"
+  is "a REVOKED client's subscription does not count" "1" "$(fp revoked | grep -c 'notifications: not set up' || true)"
+  rm -rf "$NP"
+else
+  skip "fleet-phone notifications" "node missing"
+fi
+
+# APPLE REFUSED THE FIRST REAL PUSH with HTTP 403, and the daemon threw away the body that
+# said why. Two fixes, each asserted where it can be: the subject is now an address a push
+# service accepts (an https origin this server really has, never a .local hostname), and a
+# refusal's reason is logged.
+group "push: a subject Apple accepts, and a refusal that says why"
+if command -v node >/dev/null 2>&1; then
+  PS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$PS/home"
+  subj() { HOME="$PS/home" node --input-type=module -e "import { vapidSubject } from '$ROOT/bin/fleet-serve.mjs'; console.log(vapidSubject($1))" 2>&1; }
+  is "a configured subject wins"                    "mailto:ops@example.com" "$(subj '{push:{subject:"mailto:ops@example.com"},origins:["https://mac.example.ts.net:8787"]}')"
+  is "otherwise the https origin, without its port" "https://mac.example.ts.net" "$(subj '{push:{},origins:["https://mac.example.ts.net:8787"]}')"
+  s="$(subj '{push:{},origins:["http://localhost:8787"]}')"
+  is "with no https origin, a mailto"               "1" "$(grep -cE '^mailto:ghostfleet@[^@]+\.invalid$' <<< "$s" || true)"
+  is "...and never a .local host"                   "0" "$(grep -c '\.local' <<< "$s" || true)"
+  # WHERE A TAP LANDS: an answer from Jarvis opens Jarvis; nothing else carries the key.
+  printf 'name=jarvis\nsock=cf-jarvis\ncfg=%s\npath=%s\n' "$PS/home/.claude" "$PS" > "$PS/home/.config-jarvis" 2>/dev/null
+  mkdir -p "$PS/home/.config/ghostfleet"; mv "$PS/home/.config-jarvis" "$PS/home/.config/ghostfleet/jarvis"
+  pay() { HOME="$PS/home" node --input-type=module -e "import { pushPayload } from '$ROOT/bin/fleet-serve.mjs'; console.log(JSON.stringify(pushPayload($1, 'named')))" 2>&1; }
+  is "Jarvis's answer opens the Jarvis screen"      "jarvis" "$(pay '[{kind:"answer",project:"jarvis",session:"master",sock:"cf-jarvis"}]' | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).open||""))')"
+  is "...a worker's does not"                        ""       "$(pay '[{kind:"needs-you",project:"acme-api",session:"api-fix",sock:"cf-acme-api"}]' | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).open||""))')"
+  if command -v curl >/dev/null 2>&1; then
+    RP="$(free_port)"; RP="${RP:-18911}"
+    node "$ROOT/test/helpers/push-probe.mjs" --port "$RP" --status 403 --body '{"reason":"BadJwtToken"}' \
+      --sub "$PS/sub.json" --out "$PS/out.jsonl" > "$PS/probe.log" 2>&1 &
+    PSP=$!; sv_reg "$PSP"
+    i=0; while [ "$i" -lt 50 ] && [ ! -s "$PS/sub.json" ]; do i=$((i+1)); sleep 0.1; done
+    node -e 'const fs=require("fs");const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+      fs.writeFileSync(process.argv[2],JSON.stringify({bind:"127.0.0.1",port:1,rp_id:"localhost",origins:["http://localhost:1"],
+      clients:[{id:"phone",creds:[{id:"c"}],push:[{endpoint:s.endpoint,p256dh:s.keys.p256dh,auth:s.keys.auth}]}]}))' "$PS/sub.json" "$PS/serve.json"
+    out="$(GHOSTFLEET_SERVE_CONFIG="$PS/serve.json" GHOSTFLEET_SERVE_AUDIT="$PS/audit.jsonl" HOME="$PS/home" node "$ROOT/bin/fleet-serve.mjs" push --test 2>&1)"
+    is "a refused push is reported as refused"      "1" "$([ "$(grep -c 'HTTP 403' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+    is "...WITH the service's reason"               "1" "$([ "$(grep -c 'BadJwtToken' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+    reap "$PSP"
+  else
+    skip "push refusal reason" "curl missing"
+  fi
+  rm -rf "$PS"
+else
+  skip "push subject" "node missing"
+fi
 
 group "fleet-stop and fleet-clean agree on 'remove anyway'"
 # The phone's `f = remove anyway` (§7) and the grid's are the same operation, so it lives
@@ -13087,7 +13791,7 @@ fi
 # The summary is derived now; this keeps the LIST honest.
 group "install list covers every command"
 # deliberately not linked: invoked by their parent, not by a user on PATH
-NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs"
+NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs fleet-digest.mjs fleet-jarvis.mjs"
 for f in "$ROOT"/bin/*; do
   b="$(basename "$f")"
   case " $NOT_LINKED " in *" $b "*) continue ;; esac

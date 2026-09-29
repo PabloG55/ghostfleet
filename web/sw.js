@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: cd2ae724b897
+// CLIENT-HASH: c42d39a68038
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -274,7 +274,11 @@
 // deploy landed is the client line in the settings sheet.
 // v45 draws `queued: N` on a card: prompts fleet-send is holding until that session's turn
 // ends, instead of pasting them into it.
-const VERSION = 'ghostfleet-v45';
+// v46 is Jarvis: a band at the top of Projects, the Jarvis screen with its proposals and
+// conversation mode, and the one-tap "Turn on notifications" after an unlock — the offer
+// push never had, which is why it had never been turned on. A tap on a notification from
+// Jarvis opens Jarvis. An older client shows none of it and keeps working.
+const VERSION = 'ghostfleet-v46';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
@@ -293,6 +297,7 @@ const SHELL = [
   './fixtures/session-acme-api-master.json',
   './fixtures/pane-acme-api-api-fix.json', './fixtures/pane-acme-api-docs-pass.json',
   './fixtures/pane-acme-api-master.json',
+  './fixtures/jarvis.json', './fixtures/grid-jarvis.json', './fixtures/session-jarvis-master.json',
 ];
 
 self.addEventListener('install', e => {
@@ -373,19 +378,27 @@ self.addEventListener('push', e => {
     renotify: true,
     icon: './icons/icon-192.png',
     badge: './icons/icon-192.png',
-    data: { at: (d && d.at) || 0 },
+    // WHICH SCREEN A TAP OPENS, from the payload's one-word enum (fleet-serve pushPayload).
+    data: { at: (d && d.at) || 0, open: d && d.open === 'jarvis' ? 'jarvis' : '' },
   }));
 });
 
 // Tapping it opens the app — the grid, not a deep link. The card list is one tap from
 // everywhere and a URL that named a session would be a second route to keep in step with
 // app.js's own navigation for no gain.
+//   ONE EXCEPTION, AND IT IS A SCREEN, NOT A SESSION: an answer from Jarvis opens Jarvis,
+// because that is where the answer is. An open window is told by message; a cold start
+// gets '#jarvis', which app.js reads once and clears. Both land AFTER the unlock.
 self.addEventListener('notificationclick', e => {
   e.notification.close();
+  const jarvis = !!(e.notification.data && e.notification.data.open === 'jarvis');
   e.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const c of all) if ('focus' in c) return c.focus();
-    return self.clients.openWindow('./');
+    for (const c of all) if ('focus' in c) {
+      if (jarvis) { try { c.postMessage({ open: 'jarvis' }); } catch {} }
+      return c.focus();
+    }
+    return self.clients.openWindow(jarvis ? './#jarvis' : './');
   })());
 });
 

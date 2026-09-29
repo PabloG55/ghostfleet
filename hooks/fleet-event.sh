@@ -151,6 +151,18 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
         printf '%s\x1f%s\n' "$_tl" "${_first:0:160}" > "$_taskf" 2>/dev/null
       fi ;;
   esac
+  # ── JARVIS'S LEDGER: what the OWNER said, which is how a yes is proven ────────
+  # Jarvis's confirm-list (lib/jarvis.mjs) lets a listed action through only after a yes that
+  # the model did not write. This is where that yes is recorded: a prompt SUBMITTED into
+  # Jarvis's own master, which is him at the desk, the phone's composer, or a transcript of
+  # his voice. The machine's own traffic — every nudge, relay and reply-to preamble starts
+  # with [fleet], Claude Code's injected turns with < — is dropped by the recorder, so a
+  # worker answering "yes" can never be read as him saying it. Jarvis's master only: the
+  # marker names its socket, and the name is read from tmux, not from the environment.
+  if [ -n "$SOCK" ] && [ "$SLOT" = master ] && [ -f "$HOME/.config/ghostfleet/jarvis" ] \
+     && [ "$SOCK" = "$(grep -m1 '^sock=' "$HOME/.config/ghostfleet/jarvis" 2>/dev/null | cut -d= -f2-)" ]; then
+    printf '%s' "$_prompt" | "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../bin/fleet-jarvis" said --from owner >/dev/null 2>&1
+  fi
 fi
 [ "$EVENT" = "Stop" ] && rm -f "$FLEET_DIR/$SESSION.task" 2>/dev/null
 
@@ -304,42 +316,51 @@ _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
 # end state is still greppable rather than silent — the whole complaint about the old
 # behaviour was the absence of a trace, and a retry that expires quietly would recreate it
 # at a longer timescale.
-_defer_nudge() {                      # $1=socket — re-check until the box is clear
+#   IT TAKES A DIRECTORY, A KIND AND A MESSAGE, so the same machinery wakes Jarvis: another
+# profile's fleet is another directory, and Jarvis's stamp must not be the master nudge's —
+# either would swallow the other's wake. Called with the socket alone it is what it always
+# was: this fleet's dir, the notify stamp, the worker nudge — whose words live HERE, inside
+# the function, so it still works when lifted out and run on its own (the suite does).
+_defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=message]
   # declared separately, not `local a=$1 b=…$a…`: bash expands every assignment word in a
   # single `local` before binding any of them, so the second would read an unset $sock and
   # abort the hook under `set -u`
-  local sock lock p
-  sock="$1"; lock="$FLEET_DIR/$sock.notify.retry"
+  local sock dir kind msg lock p
+  sock="$1"; dir="${2:-$FLEET_DIR}"; kind="${3:-notify}"; msg="${4:-[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it.}"
+  lock="$dir/$sock.$kind.retry"
   p="$(cat "$lock" 2>/dev/null)"
   case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
   export -f _input_state _input_empty
-  FLEET_DIR="$FLEET_DIR" nohup bash -c '
-    sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"
+  FLEET_DIR="$dir" nohup bash -c '
+    sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"; kind="${5:-notify}"; msg="$6"
     echo $$ > "$lock" 2>/dev/null
     trap "rm -f \"$lock\"" EXIT
     i=0
     while [ "$i" -lt "$tries" ]; do
       sleep "$every"; i=$((i + 1))
       tmux -L "$sock" has-session -t master 2>/dev/null || continue
-      stamp="$FLEET_DIR/$sock.notify.stamp"
+      stamp="$FLEET_DIR/$sock.$kind.stamp"
       last="$(cat "$stamp" 2>/dev/null || echo 0)"
       case "$last" in ""|*[!0-9]*) last=0 ;; esac
-      win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"
+      case "$kind" in jarvis) win="${CLAUDE_FLEET_JARVIS_DEBOUNCE:-30}" ;; *) win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}" ;; esac
       case "$win" in ""|*[!0-9]*) win=30 ;; esac
       now="$(date +%s)"
       # a fresh event already woke it: nothing left to deliver
       [ "$(( now - last ))" -ge "$win" ] || exit 0
       if _input_empty "$sock" master; then
         printf "%s\n" "$now" > "$stamp" 2>/dev/null
-        fleet-send -s "$sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1
+        # CLAUDE_FLEET_DIR is where fleet-send QUEUES a prompt for a busy target, so it is
+        # the target fleet dir: the one its own Stop drains. (No apostrophes in here: this
+        # whole body is one single-quoted argument.)
+        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send -s "$sock" master "$msg" >/dev/null 2>&1
         exit 0
       fi
     done
     printf "%s deferred wake expired after %ss with the input box never clear\n" \
       "$(date +%Y-%m-%dT%H:%M:%S)" "$(( every * tries ))" \
-      >> "$FLEET_DIR/$sock.notify.undelivered" 2>/dev/null
+      >> "$FLEET_DIR/$sock.$kind.undelivered" 2>/dev/null
   ' _ "$sock" "$lock" "${CLAUDE_FLEET_NOTIFY_RETRY_EVERY:-20}" \
-       "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" >/dev/null 2>&1 &
+       "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" "$kind" "$msg" >/dev/null 2>&1 &
 }
 
 # Did this turn already hand the answer to the asker DIRECTLY? fleet-send --reply-to now
@@ -449,6 +470,84 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
         else
           _defer_nudge "$CLAUDE_FLEET_SOCK"
         fi
+      fi
+    fi
+  fi
+fi
+
+# --- wake JARVIS, the master of masters, for a need-you ANYWHERE ---------------
+# Every fleet's own master is woken by the block above, on ITS socket and in ITS fleet dir.
+# Jarvis is above all of them, on whichever profile it was put on, so this is the one path
+# that crosses profiles on purpose — which is why it reads the marker for Jarvis's socket AND
+# its config dir, and writes into THAT fleet dir rather than this one. A row written to the
+# wrong profile's dir is invisible with nothing to grep (CLAUDE.md, "every push channel is
+# scoped to ONE fleet socket").
+#
+# ONLY A NEED-YOU WAKES IT, AND ONLY FOR SOMEBODY ELSE. A finished turn does not: Jarvis
+# reads finished work from the digest when the owner asks, so a day of workers finishing
+# costs it nothing — an idle Jarvis spends zero turns. The one opt-in exception is `batch=`
+# in the marker, a minutes-scale window after which ONE nudge covers everything that
+# finished (off by default, because every Jarvis turn that ends is a push to his phone).
+# Jarvis's own need-you reaches the phone through fleet-serve's watcher like any lead's; it
+# never wakes itself.
+#
+# Masters included: a lead blocked on a permission prompt is exactly what he wants to hear
+# about, and the workers-only gate above exists for a different inbox.
+JMARK="$HOME/.config/ghostfleet/jarvis"
+if [ -f "$JMARK" ] && [ -n "$SOCK" ] && [ -n "$SLOT" ] \
+   && { [ "$status" = need-you ] || [ "$EVENT" = Stop ]; }; then
+  j_sock="$(grep -m1 '^sock=' "$JMARK" 2>/dev/null | cut -d= -f2-)"
+  j_cfg="$(grep -m1 '^cfg=' "$JMARK" 2>/dev/null | cut -d= -f2-)"
+  j_batch="$(grep -m1 '^batch=' "$JMARK" 2>/dev/null | cut -d= -f2-)"
+  case "$j_batch" in ''|*[!0-9]*) j_batch=0 ;; esac
+  case "$j_cfg" in /*) ;; *) j_sock="" ;; esac           # a relative dir is not a place to write
+  # JARVIS'S OWN WORKERS already reach it: the worker block above wrote their row into this
+  # same inbox and, when notify-lead is on, nudged this same master. Doing it again here
+  # would be a second row for one event and a second wake a stamp apart.
+  j_own=0; [ "$SOCK" = "$j_sock" ] && j_own=1
+  if [ -n "$j_sock" ] && ! { [ "$SOCK" = "$j_sock" ] && [ "$SLOT" = master ]; } \
+     && ! { [ "$j_own" = 1 ] && [ "${_push:-0}" = 1 ]; }; then
+    j_dir="$j_cfg/fleet"; mkdir -p "$j_dir" 2>/dev/null
+    j_who="${SOCK#cf-}/$SLOT"
+    j_stamp="$j_dir/$j_sock.jarvis.stamp"
+    j_last="$(cat "$j_stamp" 2>/dev/null || echo 0)"; case "$j_last" in ''|*[!0-9]*) j_last=0 ;; esac
+    j_win="${CLAUDE_FLEET_JARVIS_DEBOUNCE:-30}"; case "$j_win" in ''|*[!0-9]*) j_win=30 ;; esac
+    if [ "$status" = need-you ]; then
+      [ "$j_own" = 1 ] || printf '%s\t%s\t%s\t%s\n' "$now" "$j_who" "need-you" "${NOTE:0:160}" >> "$j_dir/$j_sock.inbox" 2>/dev/null
+      j_msg="[fleet] need-you: $j_who — ${NOTE:0:120}. Run fleet_digest, then tell the owner in one line what is blocked and what you propose. Answering it for him is on the confirm-list. Automated wake."
+      # Leading-edge, like every other wake here: a burst of blocks is one look, and the digest
+      # the look starts with names all of them. Not running: the row waits in its inbox.
+      if tmux -L "$j_sock" has-session -t master 2>/dev/null && [ "$(( now - j_last ))" -ge "$j_win" ]; then
+        if _input_empty "$j_sock" master; then
+          printf '%s\n' "$now" > "$j_stamp" 2>/dev/null
+          # Jarvis's dirs, not this session's: another profile's hook is running this, and
+          # a busy Jarvis QUEUES the prompt under CLAUDE_FLEET_DIR — which must be the dir
+          # Jarvis's own Stop drains, or the wake waits in a file nothing reads.
+          ( CLAUDE_FLEET_DIR="$j_dir" CLAUDE_CONFIG_DIR="$j_cfg" fleet-send -s "$j_sock" master "$j_msg" >/dev/null 2>&1 & )
+        else
+          _defer_nudge "$j_sock" "$j_dir" jarvis "$j_msg"
+        fi
+      fi
+    elif [ "$j_batch" -gt 0 ]; then
+      # ONE SLEEPER PER JARVIS, armed by the first finish after a quiet spell. When it wakes it
+      # nudges only if nothing else woke Jarvis in the meantime — a need-you already made it
+      # look, and that look read the whole digest.
+      j_lock="$j_dir/$j_sock.jarvis.batch"
+      j_p="$(cat "$j_lock" 2>/dev/null)"
+      case "$j_p" in ''|*[!0-9]*) j_p="" ;; esac
+      if [ -z "$j_p" ] || ! kill -0 "$j_p" 2>/dev/null; then
+        export -f _input_state _input_empty
+        nohup bash -c '
+          sock="$1"; lock="$2"; stamp="$3"; after="$4"; armed="$5"; dir="$6"
+          echo $$ > "$lock" 2>/dev/null; trap "rm -f \"$lock\"" EXIT
+          sleep "$after"
+          last="$(cat "$stamp" 2>/dev/null || echo 0)"; case "$last" in ""|*[!0-9]*) last=0 ;; esac
+          [ "$last" -ge "$armed" ] && exit 0
+          tmux -L "$sock" has-session -t master 2>/dev/null || exit 0
+          _input_empty "$sock" master || exit 0
+          date +%s > "$stamp" 2>/dev/null
+          CLAUDE_FLEET_DIR="$dir" fleet-send -s "$sock" master "[fleet] batch: work finished across the fleets in the last $(( after / 60 )) minutes. Run fleet_digest and tell the owner only what he would want to know unprompted, in one line. Automated wake." >/dev/null 2>&1
+        ' _ "$j_sock" "$j_lock" "$j_stamp" "$j_batch" "$now" "$j_dir" >/dev/null 2>&1 &
       fi
     fi
   fi

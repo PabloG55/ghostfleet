@@ -13,6 +13,7 @@
   },
   "files": [
     "bin/",
+    "lib/",
     "tmux/",
     "hooks/",
     "mcp/",

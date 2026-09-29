@@ -200,6 +200,7 @@ export const FIXTURES = [
   { file: 'grid-degraded.json', project: 'acme-api', title: 'acme-api — unknown · limit · interrupted · parked' },
   { file: 'grid-free.json',     project: 'toolbox',  title: 'toolbox — free worktrees' },
   { file: 'grid-empty.json',    project: 'scratch',  title: 'scratch — nothing running' },
+  { file: 'grid-jarvis.json',   project: 'jarvis',   title: 'jarvis — the master of masters' },
 ];
 export function fixtureName() {
   try { return localStorage.getItem(LS.fixture) || FIXTURES[0].file; } catch { return FIXTURES[0].file; }
@@ -489,6 +490,48 @@ export async function pushUnsubscribe(endpoint) {
 // The same number bin/fleet-serve.mjs enforces. Stated twice on purpose — the server's
 // copy is the control and this one is the courtesy — and asserted equal in the suite so
 // they cannot drift into a client that refuses what the server would have taken.
+// ── Jarvis (docs/jarvis.md) ───────────────────────────────────────────────
+// What Jarvis is on this machine — its project, whether it can hear, what waits on the
+// owner's yes. The fixture answers with a Jarvis that cannot hear, because it cannot: there
+// is no microphone path without a daemon to transcribe on, and a talk button that seemed to
+// work against fixtures would be the toggle-that-pretends §9 warns about.
+export async function getJarvis() {
+  if ((await ready()).mode === 'server') return get('/api/jarvis');
+  const j = await fixture('jarvis.json');
+  return { ...j, pending: (j.pending || []).filter(p => !overlay.answered.has(p.id)) };
+}
+// A yes carries a fresh assertion (the daemon refuses one without); a no does not need one.
+export async function jarvisConfirm(id, answer, assertion = null) {
+  if ((await ready()).mode !== 'server') {
+    overlay.answered.add(id);
+    record('jarvis_confirm', { id, answer }, 'ok (fixture — recorded, not executed)');
+    return { ok: true, id, answer, told: false, text: `fixture: ${answer} recorded for ${id}, nothing ran` };
+  }
+  if (!haveToken()) throw new AuthError('no live session token');
+  const j = await authFetch('confirm', '/api/jarvis/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`,
+               ...(assertion ? { 'X-Fleet-Assertion': JSON.stringify(assertion) } : {}) },
+    body: JSON.stringify({ id, answer }),
+  });
+  record('jarvis_confirm', { id, answer }, 'ok');
+  return j;
+}
+// One utterance, as WAV bytes, to the Mac's own whisper.cpp. Nothing else hears it.
+export async function jarvisHear(wav) {
+  if ((await ready()).mode !== 'server') throw new Error('voice needs a real fleet-serve — fixtures have nothing to transcribe with');
+  if (!haveToken()) throw new AuthError('no live session token');
+  let r;
+  try {
+    r = await fetch(baseUrl() + '/api/jarvis/hear', { method: 'POST',
+      headers: { 'Content-Type': 'audio/wav', Authorization: `Bearer ${token}` }, body: wav });
+  } catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+  if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
+  const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+  if (!j.ok) throw new Error(j.text || `hearing failed (HTTP ${r.status})`);
+  return j;
+}
+
 export const ATTACH_MAX_BYTES = 6 * 1024 * 1024;
 export async function attach(project, session, file) {
   if ((await ready()).mode !== 'server') {
@@ -559,7 +602,7 @@ export async function verb(tool, args, assertion = null) {
 // Kept as an OVERLAY rather than by editing the fixture in memory, so reloading always
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
-const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map() };
+const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set() };
 function applyOverlay(g) {
   let cards = (g.cards || [])
     .filter(c => !overlay.gone.has(c.name))
@@ -678,5 +721,5 @@ function fixtureVerb(tool, a) {
 export function resetOverlay() {
   overlay.status.clear(); overlay.gone.clear(); overlay.sched.clear();
   overlay.label.clear(); overlay.freeGone.clear(); overlay.added.length = 0; overlay.order.length = 0;
-  overlay.sent.clear();
+  overlay.sent.clear(); overlay.answered.clear();
 }

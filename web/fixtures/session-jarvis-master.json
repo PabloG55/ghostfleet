@@ -1,0 +1,15 @@
+{
+  "project": "jarvis",
+  "session": "master",
+  "agent": "claude",
+  "status": "ready",
+  "total": 6,
+  "messages": [
+    { "ts": 1787354900, "role": "user", "text": "(spoken) how is everything doing" },
+    { "ts": 1787354912, "role": "assistant", "text": "Four projects are busy and nothing is blocked. acme-api has two workers running, billing-svc finished its migration an hour ago, and toolbox is idle. acme-api #12 is open and green." },
+    { "ts": 1787355060, "role": "user", "text": "docs-pass is done, clean it up" },
+    { "ts": 1787355071, "role": "assistant", "text": "docs-pass shipped in acme-api #11, so its worktree can go. Stop acme-api/docs-pass and remove its worktree?" },
+    { "ts": 1787355300, "role": "user", "text": "[fleet] need-you: acme-web/list-pages — Claude needs your permission to use Bash. Run fleet_digest, then tell the owner in one line what is blocked and what you propose. Answering it for him is on the confirm-list. Automated wake." },
+    { "ts": 1787355309, "role": "assistant", "text": "acme-web's list-pages is asking to run pnpm test. Allow it?" }
+  ]
+}

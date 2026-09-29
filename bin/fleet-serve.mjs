@@ -43,6 +43,9 @@ import path from 'node:path';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { callToolAsync, projects, BIN, TOOLS } from '../mcp/fleet-dispatch.mjs';
+import { fleetDirs as scanDirs, scanStatus } from '../lib/fleet-scan.mjs';
+import * as jarvis from '../lib/jarvis.mjs';
+import { jarvisState, vocabulary } from './fleet-jarvis.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -555,6 +558,10 @@ const TOOLS_ALLOWED = {
   fleet_worktrees:       { fields: ['project'] },
   fleet_inbox:           { fields: ['project', 'all'] },
   fleet_projects:        { fields: [], noProject: true },
+  // Every fleet at once, from files. A read, and one the Jarvis screen polls — so the
+  // client always asks with peek:true (see /api/digest), and only Jarvis's own reads move
+  // the 'since last look' stamp.
+  fleet_digest:          { fields: ['json', 'peek'], noProject: true },
   fleet_send:            { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter'], write: true, subject: 'session' },
   fleet_pause:           { fields: ['project', 'session'],                     write: true, subject: 'session' },
@@ -615,7 +622,7 @@ const NOT_YET = {
   fleet_project_order: 'the projects order is written by the Projects screen',
 };
 
-const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start']);
+const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start', 'json', 'peek']);
 
 // Turn a request body into the arguments the shared planner takes, refusing anything the
 // tool does not declare. Returns {args, t, v} or {error}.
@@ -711,6 +718,20 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000 });
   const text = typeof out === 'string' ? out : String(out.text);
   const refused = typeof out !== 'string' && out.isError === true;
+  // WHAT THE PHONE SAYS TO JARVIS IS THE OWNER SPEAKING, and this is the one component that
+  // knows it: the request carries a token a passkey minted. Recorded here, into the ledger
+  // Jarvis's confirm-list reads (lib/jarvis.mjs). The prompt is delivered by fleet-send,
+  // which marks it as a delivery, so the event hook does not count it a second time.
+  //   ITS AUTHORITY IS THE UNLOCK. A typed or spoken yes from the phone is as strong as the
+  // session it came through — Face ID within the last fifteen minutes — while a TAPPED yes
+  // on a proposal asks for a fresh one (/api/jarvis/confirm). A spoken yes must also be two
+  // words, because one word is what an open microphone hears in noise.
+  if (!refused && tool === 'fleet_send' && args.session === 'master') {
+    try {
+      const jm = jarvis.readMarker();
+      if (jm && (args.project === jm.name || args.project === jm.sock)) jarvis.recordSaid(String(args.prompt || ''), 'phone');
+    } catch {}
+  }
 
   if (v.write) {
     auditAppend({ ts: now(), client: client.id, ip, verb: tool, project: args.project || null, subject,
@@ -928,7 +949,7 @@ function send(res, status, obj, extra = {}) {
     'content-length': body.length, 'cache-control': 'no-store', ...extra });
   res.end(body);
 }
-async function readBody(req, cap = 1024 * 1024) {
+async function readBody(req, cap = 1024 * 1024, { raw = false } = {}) {
   return new Promise((resolve, reject) => {
     let n = 0; const parts = [];
     req.on('data', (d) => {
@@ -941,6 +962,7 @@ async function readBody(req, cap = 1024 * 1024) {
       parts.push(d);
     });
     req.on('end', () => {
+      if (raw) return resolve(Buffer.concat(parts));
       if (!parts.length) return resolve({});
       try { resolve(JSON.parse(Buffer.concat(parts).toString('utf8'))); }
       catch (e) { reject(new Error('body is not JSON')); }
@@ -1014,13 +1036,28 @@ function ensureVapid() {
   log('push: generated a VAPID key pair');
   return c.push.vapid;
 }
+// THE SUBJECT APPLE ACCEPTS. The JWT's `sub` defaulted to mailto:ghostfleet@<hostname>, and
+// on a Mac the hostname is `<name>.local` — an address on a domain that cannot receive mail.
+// Measured on the owner's machine: the first push after a real subscription came back
+// HTTP 403 from web.push.apple.com, which is the status Apple's service gives a JWT it will
+// not accept (its body says BadJwtToken; this daemon was throwing the body away, so the log
+// said only "refused with HTTP 403"). RFC 8292 allows an https: URL as the contact, and this
+// server always has one that is really its own — the origin the phone was enrolled on. A
+// configured `push.subject` still wins; the mailto is the last resort for a config with no
+// https origin, and it names this machine's short name rather than a .local one.
+export function vapidSubject(c = loadConfig()) {
+  if (c.push && c.push.subject) return c.push.subject;
+  const https = (c.origins || []).find(o => /^https:\/\//.test(o));
+  if (https) { try { return `https://${new URL(https).hostname}`; } catch {} }
+  return `mailto:ghostfleet@${os.hostname().replace(/\.local$/i, '') || 'localhost'}.invalid`;
+}
 function vapidAuth(endpoint) {
   const v = ensureVapid(), c = loadConfig();
   const head = b64u(JSON.stringify({ typ: 'JWT', alg: 'ES256' }));
   const body = b64u(JSON.stringify({
     aud: new URL(endpoint).origin,                // the push SERVICE's origin, not ours
     exp: now() + 12 * 3600,
-    sub: c.push.subject || `mailto:ghostfleet@${os.hostname()}`,
+    sub: vapidSubject(c),
   }));
   const sig = crypto.sign('sha256', Buffer.from(`${head}.${body}`), {
     key: crypto.createPrivateKey({ key: v.jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363',
@@ -1122,7 +1159,19 @@ function pushPost(sub, body) {
         authorization: auth,
       },
       timeout: 10000,
-    }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode || 0)); });
+    }, (r) => {
+      // THE BODY IS THE REASON, and it used to be discarded: Apple answers a refused push
+      // with {"reason":"BadJwtToken"} or similar, and "refused with HTTP 403" alone left
+      // nothing to act on. Logged for a refusal only, and short — it is the service's own
+      // words about our request, never anything of ours.
+      let b = '';
+      r.on('data', (d) => { if (b.length < 300) b += d; });
+      r.on('end', () => {
+        const st = r.statusCode || 0;
+        if (st >= 400) log(`push: ${u.host} said HTTP ${st}${b.trim() ? `: ${b.trim().replace(/\s+/g, ' ').slice(0, 200)}` : ''}`);
+        resolve(st);
+      });
+    });
     req.on('timeout', () => { req.destroy(new Error('timeout')); });
     req.on('error', (e) => resolve({ err: e.message }));
     req.end(body);
@@ -1133,9 +1182,14 @@ function pushPost(sub, body) {
 // that appears in a status file — a note, a message, a transcript path — has no route
 // into this object even if someone adds one to the hook tomorrow. That is Pablo's stated
 // requirement made structural rather than reviewed.
-function pushPayload(events, detail) {
+export function pushPayload(events, detail) {
   const kinds = new Set(events.map(e => (PUSH_KINDS.has(e.kind) ? e.kind : 'answer')));
   const out = { v: 1, kind: kinds.size === 1 ? [...kinds][0] : 'mixed', n: events.length, at: now() };
+  // WHERE A TAP SHOULD LAND, as one word from an enum rather than a name: an answer from
+  // Jarvis opens the Jarvis screen, anything else opens the app where it was. Present in
+  // anonymous mode too — it says which screen, not which project.
+  let jm = null; try { jm = jarvis.readMarker(); } catch {}
+  if (jm && events.some(e => e.sock === jm.sock)) out.open = 'jarvis';
   if (detail !== 'anonymous') {
     const sessions = [];
     for (const e of events.slice(0, 4)) {
@@ -1153,13 +1207,7 @@ function pushPayload(events, detail) {
 // and nothing to grep. The dirs come from projects(), the same list the rest of this
 // server resolves against, so a new profile cannot be missing from one and present in
 // the other.
-function fleetDirs() {
-  const seen = new Map();
-  for (const t of projects()) {
-    seen.set(path.join(t.cfg, 'fleet'), true);
-  }
-  return [...seen.keys()];
-}
+function fleetDirs() { return scanDirs(projects()); }
 function sockProjects() {
   const m = new Map();
   for (const t of projects()) m.set(t.sock, t.name);
@@ -1178,24 +1226,10 @@ function sockProjects() {
 // fleet-grid.mjs's fleetBySlot() has had this fix for a while — "keeping the newest entry
 // per slot (avoids a stale/duplicate file shadowing the live one)" — and a second reader
 // of the same files needs the same rule, or the two disagree about what the fleet is.
-function scanFleet() {
-  const newest = new Map();
-  for (const dir of fleetDirs()) {
-    let names = [];
-    try { names = fs.readdirSync(dir); } catch { continue; }
-    for (const n of names) {
-      if (!n.endsWith('.json') || n.startsWith('.')) continue;
-      let j;
-      try { j = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8')); } catch { continue; }
-      if (!j || typeof j !== 'object' || !j.sock || !j.slot) continue;   // not a fleet session
-      const row = { sock: String(j.sock), slot: String(j.slot), status: String(j.status || ''), ts: Number(j.ts) || 0 };
-      const key = `${row.sock}/${row.slot}`;
-      const prev = newest.get(key);
-      if (!prev || row.ts > prev.ts) newest.set(key, row);
-    }
-  }
-  return [...newest.values()];
-}
+//   THE READER NOW LIVES IN lib/fleet-scan.mjs, because fleet-digest is that second
+// reader: it wants exactly this scan, and a copy of it would be the drift described above
+// with a third participant. The four-field rule is kept there, with the reason.
+function scanFleet() { return scanStatus(fleetDirs()); }
 
 const pushState = new Map();      // "<sock>/<slot>" -> the status we last saw
 const lastRead = new Map();       // client id -> when it last polled anything
@@ -1232,10 +1266,10 @@ function pushEvents(rows) {
     pushState.set(key, r.status);
     if (!known || prev === r.status) continue;
     const project = names.get(r.sock) || r.sock.replace(/^cf-/, '');
-    if (r.status === 'need-you') events.push({ kind: 'needs-you', project, session: r.slot });
+    if (r.status === 'need-you') events.push({ kind: 'needs-you', project, session: r.slot, sock: r.sock });
     // working -> ready is a turn that ENDED. `idle` (SessionStart) is not an answer, and
     // ready -> ready is the same session sitting where it was.
-    else if (r.status === 'ready' && prev === 'working') events.push({ kind: 'answer', project, session: r.slot });
+    else if (r.status === 'ready' && prev === 'working') events.push({ kind: 'answer', project, session: r.slot, sock: r.sock });
   }
   for (const k of [...pushState.keys()]) if (!seen.has(k)) pushState.delete(k);
   return events;
@@ -1413,6 +1447,10 @@ const ATTACH_MAX_BYTES = 6 * 1024 * 1024;  // ...and the decoded length is check
 const ATTACH_QUOTA = 24 * 1024 * 1024;     // per session, oldest deleted first
 const ATTACH_MAX_PX = 1600;                // what a converter downscales to, when there is one
 const ATTACH_RESIZE_OVER = 512 * 1024;     // below this an already-readable image is kept as it is
+// Two minutes of 16 kHz 16-bit mono is 3.8 MB; the client stops an utterance at 30 s, so
+// this is headroom for a slow device rather than a length anybody talks for.
+const HEAR_BODY_CAP = 4 * 1024 * 1024;
+let hearChain = Promise.resolve();
 
 // SNIFFED, NEVER DECLARED. The client's content-type is a hint from a phone; the magic
 // bytes are what the file is. SVG is refused loudly and specifically further down: it is an
@@ -1534,7 +1572,8 @@ async function api(req, res, url, ip) {
   let body;
   try {
     body = req.method === 'POST'
-      ? await readBody(req, p === '/api/attach' ? ATTACH_BODY_CAP : undefined) : {};
+      ? await readBody(req, p === '/api/attach' ? ATTACH_BODY_CAP : p === '/api/jarvis/hear' ? HEAR_BODY_CAP : undefined,
+                       { raw: p === '/api/jarvis/hear' }) : {};
   } catch (e) {
     // ...and the refusal says the NUMBER. "body larger than 8388608 bytes" is actionable;
     // a dropped connection is what this used to do.
@@ -1767,6 +1806,20 @@ function agentCatalogue() {
     return send(res, 200, { ok: true, project: t.name, text: typeof out === 'string' ? out : String(out.text) });
   }
 
+  // ── the digest: every fleet, every profile, from files ───────────────────
+  // PEEKED, ALWAYS. This is the Jarvis screen's poll, and a poll must not advance the
+  // "since last look" stamp — that is Jarvis's own read to spend, the same reason
+  // /api/inbox reads with --all. Through the dispatch, so the same fleet-digest the MCP
+  // tool runs is the one the phone reads; a second implementation of "what is the fleet"
+  // is the drift docs/mobile.md §3 forbids.
+  if (p === '/api/digest' && req.method === 'GET') {
+    const out = await callToolAsync('fleet_digest', { json: true, peek: true }, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+    const text = typeof out === 'string' ? out : String(out.text);
+    let j;
+    try { j = JSON.parse(text); } catch { return send(res, 502, { ok: false, text: `fleet-digest did not return JSON: ${text.trim().slice(0, 200)}` }); }
+    return send(res, 200, { ok: true, ...j });
+  }
+
   if (p === '/api/worktrees' && req.method === 'GET') {
     const rp = resolveProject(url.searchParams.get('project') || '');
     if (rp.error) return send(res, 400, { ok: false, text: rp.error });
@@ -1938,6 +1991,74 @@ function agentCatalogue() {
       converted: path.extname(out) === '.jpg' && kind !== 'jpg', dropped });
   }
 
+  // ── Jarvis: the master of masters (docs/jarvis.md) ──────────────────────────
+  // Three routes, all behind the same token as everything else. What Jarvis IS — its
+  // project, its session, whether it can hear, what waits on a yes — comes from the one
+  // place bin/fleet-jarvis reads it, so the phone and `fleet-jarvis status` cannot disagree.
+  if (p === '/api/jarvis' && req.method === 'GET') {
+    const st = jarvisState();
+    if (st.present && !resolveProject(st.project).t)
+      return send(res, 200, { ok: true, ...st, present: false, why: `the marker names project '${st.project}', which is not registered — run: fleet-jarvis init` });
+    return send(res, 200, { ok: true, ...st });
+  }
+
+  // A TAPPED YES IS A DESTRUCTIVE TAP, so it carries a fresh passkey exactly as a tapped
+  // stop does (§7): the yes is what lets Jarvis merge, push or delete. A NO needs nothing —
+  // declining can only stop an action. Either way Jarvis is told, since it is waiting to be.
+  //   What this does NOT make true: that every yes from the phone costs a Face ID. A yes
+  // typed or spoken to Jarvis rides on the session's own unlock (see runVerb), which is the
+  // owner's stated design — "spoken or tapped" — and is written down there rather than
+  // implied here.
+  if (p === '/api/jarvis/confirm') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    const m = jarvis.readMarker();
+    if (!m) return send(res, 409, { ok: false, text: 'there is no Jarvis on this machine — run: ghostfleet jarvis' });
+    const id = typeof body.id === 'string' ? body.id : '';
+    const ans = body.answer;
+    if (!id || (ans !== 'yes' && ans !== 'no')) return send(res, 400, { ok: false, text: "send {id, answer: 'yes'|'no'} — the id is a proposal from GET /api/jarvis" });
+    if (ans === 'yes') {
+      const a = headerAssertion(req, c);
+      if (!a) return send(res, 401, { ok: false, text: 'a yes needs a fresh passkey assertion in X-Fleet-Assertion — it authorises Jarvis to do something on the confirm-list', needs: 'passkey' });
+      if (a.error) return send(res, 401, { ok: false, text: a.error, needs: 'passkey' });
+    }
+    const r = jarvis.answer(id, ans === 'yes', 'phone');
+    if (!r.ok) return send(res, 404, { ok: false, text: r.text });
+    try { auditAppend({ ts: now(), client: req.client.id, ip, verb: 'jarvis_confirm', project: m.name, subject: id, result: 'ran',
+                        confirmed: ans === 'yes' ? 'passkey:jarvis-yes' : null, output: `${ans} — ${r.summary}`.slice(0, 300) }); } catch {}
+    inboxRow(proj(m.name), 'master', `${ans} to ${id} (${r.summary}) · from ${req.client.id}@${ip}`);
+    const tell = ans === 'yes'
+      ? `[fleet] The owner tapped YES on the phone for proposal ${id} (${r.summary}). Make that exact call now, then tell him in one line that it is done.`
+      : `[fleet] The owner tapped NO on the phone for proposal ${id} (${r.summary}). Do not do it; acknowledge in one short line.`;
+    let told = false;
+    if (proj(m.name)) {
+      const out = await serialize(() => callToolAsync('fleet_send', { project: m.name, session: 'master', prompt: tell }, { timeout: 30000 }));
+      told = !(out && typeof out === 'object' && out.isError);
+    }
+    return send(res, 200, { ok: true, id, answer: ans, summary: r.summary, told });
+  }
+
+  // HEARING: one utterance in, its words out. The bytes are the WAV the client encoded (16
+  // kHz mono PCM) and the transcriber is whisper.cpp ON THIS MACHINE — the audio goes no
+  // further than this process and a private temp dir that is gone before the reply is. The
+  // words go back to the phone, which shows them and sends them itself, so what Jarvis is
+  // told is exactly what the owner saw he said.
+  if (p === '/api/jarvis/hear') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    if (!Buffer.isBuffer(body) || !body.length) return send(res, 400, { ok: false, text: 'no audio in the body — POST the WAV bytes themselves (audio/wav)' });
+    if (!jarvis.isWav(body)) return send(res, 415, { ok: false, text: 'that is not a WAV file — the body is read for RIFF/WAVE, not trusted from its content-type' });
+    const v = jarvis.voiceStatus();
+    if (!v.ready) return send(res, 503, { ok: false, text: v.why, needs: 'voice' });
+    const t0 = Date.now();
+    // One at a time: whisper uses every core it is given, and two at once would each take
+    // twice as long while he waits on both.
+    const r = await (hearChain = hearChain.then(() => jarvis.transcribeAsync(body, { prompt: vocabulary() }), () => jarvis.transcribeAsync(body, { prompt: vocabulary() })));
+    const ms = Date.now() - t0;
+    if (r.error) return send(res, 502, { ok: false, text: r.error });
+    // The size and the time, never the words: a log file is a surface too.
+    log(`jarvis: heard ${Math.round(body.length / 1024)} KB in ${ms}ms -> ${r.text.length} chars`);
+    return send(res, 200, { ok: true, text: r.text, ms });
+  }
+
   // ── writes ────────────────────────────────────────────────────────────────
   if (p === '/api/verb') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
@@ -1949,27 +2070,30 @@ function agentCatalogue() {
     }
     // The destructive verbs' fresh assertion travels in a header (web/api.js), verified
     // here against a challenge we issued and have not seen before.
-    let assertion = null;
-    const hdr = req.headers['x-fleet-assertion'];
-    if (hdr) {
-      let parsed;
-      try { parsed = JSON.parse(Array.isArray(hdr) ? hdr[0] : hdr); }
-      catch { assertion = { error: 'X-Fleet-Assertion is not JSON' }; }
-      if (parsed) {
-        const r = verifyAssertion(parsed, c);
-        // An assertion signed by a DIFFERENT enrolled client is not this session's
-        // confirmation: the token and the fingerprint have to be the same person.
-        assertion = r.error ? { error: r.error }
-                  : r.client.id !== req.client.id ? { error: 'that assertion belongs to another enrolled client' }
-                  : { purpose: r.purpose };
-      }
-    }
+    const assertion = headerAssertion(req, c);
     const go = () => runVerb({ tool, rawArgs: body.args, client: req.client, ip, session: req.session, assertion });
     const r = v.write ? await serialize(go) : await go();
     return send(res, r.status, r.json);
   }
 
   return send(res, 404, { ok: false, text: `no such endpoint: ${p}` });
+}
+
+// The X-Fleet-Assertion header, verified. Shared by /api/verb and Jarvis's yes: one
+// implementation, so the second factor on a tapped yes cannot end up weaker than the one on
+// a tapped stop. null = no header at all.
+function headerAssertion(req, c) {
+  const hdr = req.headers['x-fleet-assertion'];
+  if (!hdr) return null;
+  let parsed;
+  try { parsed = JSON.parse(Array.isArray(hdr) ? hdr[0] : hdr); }
+  catch { return { error: 'X-Fleet-Assertion is not JSON' }; }
+  const r = verifyAssertion(parsed, c);
+  // An assertion signed by a DIFFERENT enrolled client is not this session's
+  // confirmation: the token and the fingerprint have to be the same person.
+  return r.error ? { error: r.error }
+       : r.client.id !== req.client.id ? { error: 'that assertion belongs to another enrolled client' }
+       : { purpose: r.purpose };
 }
 
 let awakeHeld = false;
@@ -2359,6 +2483,7 @@ async function main() {
     const v = c.push.vapid;
     console.log(`detail     ${c.push.detail}${c.push.detail === 'anonymous' ? '  (a count only — no project or session names leave this machine)' : '  (project/session travel to the lock screen)'}`);
     console.log(`vapid      ${v && v.public ? v.public.slice(0, 24) + '…  (private key in ' + CONFIG + ', 0600)' : 'not generated yet — the first subscription makes one'}`);
+    console.log(`subject    ${vapidSubject(c)}${c.push.subject ? '' : '  (default — push.subject in the config overrides it)'}`);
     console.log(`debounce   one push per ${c.push.debounce}s, leading edge`);
     console.log(`quiet      nothing sent while a client has polled within ${c.push.quiet_after_poll}s`);
     console.log(`scan       every ${c.push.scan}s, over ${fleetDirs().length} fleet dir(s): ${fleetDirs().join(' ') || '(none — no projects registered)'}`);

@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "present": true,
+  "project": "jarvis",
+  "profile": "work",
+  "session": "master",
+  "running": true,
+  "status": "ready",
+  "voice": { "ready": false, "why": "voice needs a real fleet-serve — fixtures cannot hear" },
+  "pending": [
+    { "id": "K7Q2", "tool": "fleet_stop", "summary": "stop acme-api/docs-pass and remove its worktree", "ts": 1787355120000, "granted": null }
+  ],
+  "restart": { "hour": 4, "last": 1787310000 },
+  "batch": 0
+}

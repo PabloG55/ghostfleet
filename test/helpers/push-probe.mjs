@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // test/helpers/push-probe.mjs — a fake push service, so the suite can prove a real push.
 //
-//     node push-probe.mjs --port N --sub FILE --out FILE [--status 201]
+//     node push-probe.mjs --port N --sub FILE --out FILE [--status 201] [--body TEXT]
 //
 // It stands in for web.push.apple.com: it mints a subscription (P-256 key pair + a
 // 16-byte auth secret), writes it to --sub for the test to POST at fleet-serve, answers
@@ -31,6 +31,9 @@ const PORT = Number(flag('--port', 0));
 const SUB_FILE = flag('--sub');
 const OUT = flag('--out');
 const STATUS = Number(flag('--status', 201));
+// What a real service says when it refuses — Apple's is {"reason":"BadJwtToken"} for a
+// VAPID token it will not accept — so a test can ask whether the sender kept the reason.
+const BODY = flag('--body', '');
 if (!PORT || !SUB_FILE || !OUT) {
   console.error('usage: push-probe.mjs --port N --sub FILE --out FILE [--status 201]');
   process.exit(2);
@@ -118,7 +121,7 @@ const server = http.createServer((req, res) => {
       row.payload_text = d.text;
     } catch (e) { row.decrypt_error = e.message; }
     try { fs.appendFileSync(OUT, JSON.stringify(row) + '\n'); } catch {}
-    res.writeHead(STATUS, { 'content-type': 'text/plain' }).end('');
+    res.writeHead(STATUS, { 'content-type': BODY ? 'application/json' : 'text/plain' }).end(BODY);
   });
 });
 server.listen(PORT, '127.0.0.1', () => {

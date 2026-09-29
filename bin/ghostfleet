@@ -723,6 +723,26 @@ if [ -n "${1:-}" ] && [ "${1#--}" = "$1" ]; then
     PROFILE="$1"                       # otherwise the arg selects a profile
   fi
 fi
+# `ghostfleet jarvis` — the master of masters (docs/jarvis.md). Not a profile and not quite a
+# project name: the FIRST run has to make the project before there is anything to jump into,
+# and Jarvis may live on any profile. So it is set up if needed (silent once it exists), and
+# from then on it is an ordinary jump into that project's master — the same screens, the same
+# keys, the same way back out.
+#   A work project that is literally called "jarvis" and is NOT Jarvis keeps its old meaning:
+# the jump test above already claimed the word, and there is no marker to say otherwise.
+if [ "${1:-}" = jarvis ] && { [ -z "$JUMP" ] || [ -f "$CFG_HOME/jarvis" ]; } \
+   && [ "${CLAUDE_FLEET_REEXEC:-0}" != 1 ] && [ -x "$BIN_DIR/fleet-jarvis" ]; then
+  if ! _jv_out="$("$BIN_DIR/fleet-jarvis" init --if-needed 2>&1)"; then printf '%s\n' "$_jv_out" >&2; exit 1; fi
+  if [ -n "$_jv_out" ]; then
+    printf '%s\n\n' "$_jv_out" >/dev/tty 2>/dev/null || printf '%s\n\n' "$_jv_out"
+    printf '\033[38;5;245m  press any key to open Jarvis\033[0m' >/dev/tty 2>/dev/null || true
+    read -rsn1 _k </dev/tty 2>/dev/null || true
+    _clear
+  fi
+  JUMP="$(grep -m1 '^name=' "$CFG_HOME/jarvis" 2>/dev/null | cut -d= -f2-)"
+  PROFILE="$(grep -m1 '^profile=' "$CFG_HOME/jarvis" 2>/dev/null | cut -d= -f2-)"
+  PROFILE="${PROFILE:-work}"
+fi
 case "$PROFILE" in
   work|default) PROJECTS_CFG="$WORK_CFG" ;;
   *)            PROJECTS_CFG="$CFG_HOME/projects.$PROFILE" ;;

@@ -24,6 +24,9 @@ lead starts blank, so **do not act from memory — read the real state first:**
   it acknowledged while naming none — worth a `fleet-read` before it gets far.
 - **`fleet-inbox`** — what has needed you since you last looked (see below).
 - **`fleet-list`** — the live sessions and their status.
+- **`fleet-digest`** (MCP `fleet_digest`) — every fleet on every profile at once, read
+  from files: who needs the owner, what is working, what finished since the last look.
+  For a question about *everything*; `--peek` looks without moving the "since" stamp.
 
 ## "Start a worktree" means fleet-spawn — never EnterWorktree
 
