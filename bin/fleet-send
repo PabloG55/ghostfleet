@@ -439,6 +439,18 @@ _sent_digest() {                   # shasum on macOS, sha256sum on most Linux, e
     "$(printf '%s' "$MSG" | wc -c | tr -d ' ')" "$(_sent_digest "$MSG")"
 } >> "$_sent_log" 2>/dev/null || true
 
+# INTO JARVIS'S MASTER, SAY SO FIRST. Jarvis's confirm-list counts a yes only from the owner,
+# and the hook that records what was submitted cannot tell a paste from typing — so every
+# prompt this command delivers there leaves a line (time + digest, never the text) where the
+# ledger checks (lib/jarvis.mjs consumeDelivery). Profile-independent on purpose: a worker
+# on another profile sends from another fleet dir, and Jarvis's marker is the one place both
+# can see. Written HERE, at the paste, because a queued prompt is delivered later by --dequeue.
+_jm="$HOME/.config/ghostfleet/jarvis"
+if [ "$SESSION" = master ] && [ -f "$_jm" ] \
+   && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
+  _jd="$(printf '%s' "$MSG" | shasum -a 256 2>/dev/null || printf '%s' "$MSG" | sha256sum 2>/dev/null)"
+  printf '%s\t%s\n' "$(date +%s)" "${_jd:0:12}" >> "$HOME/.config/ghostfleet/jarvis.delivered" 2>/dev/null || true
+fi
 tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
 tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
 

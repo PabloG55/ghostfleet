@@ -915,6 +915,44 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * snapping is motion too: `scroll-behavior` and the snap easing both go, and the list
  * keeps working — proximity snapping degrades to ordinary scrolling, which is the point of
  * choosing proximity over mandatory. */
+/* ── Jarvis (docs/jarvis.md) ────────────────────────────────────────────────
+ * NO NEW COLOURS: every rule below is one of the tokens at the top of this file, which
+ * are the TUI's own and locked. Cyan is the fleet's "go" colour and marks the way in;
+ * yellow is the colour this client already uses for "wants you"; green for a live mic.
+ *   Bands of the shell column, so they are sized to their content and never scroll —
+ * the card list and the chat under them are what scrolls. */
+#app.shell > .jarvis-bar, #app.shell > .notify-bar,
+#app.shell > .ask, #app.shell > .talkband { flex: 0 0 auto; }
+.jarvis-bar { display: flex; align-items: baseline; gap: .6em; width: 100%; text-align: left;
+  margin: 4px 0 6px; padding: .55em .7em; background: transparent; border: 1px solid var(--cyan);
+  border-radius: 6px; font-size: 14px; }
+.jarvis-bar .jt { color: var(--cyan); font-weight: 700; flex: 0 0 auto; }
+.jarvis-bar .js { color: var(--dim); flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.jarvis-bar .jgo { color: var(--cyan); flex: 0 0 auto; }
+.jarvis-bar.hot { border-color: var(--yellow); }
+.jarvis-bar.hot .js { color: var(--yellow); }
+.jarvis-bar.dim { border-color: var(--hair); }
+.jarvis-bar.dim .jt, .jarvis-bar.dim .jgo { color: var(--dim); }
+/* The push offer and a proposal are the same shape: a sentence and one or two answers. The
+ * buttons are pinned to 14px like the composer's, for the composer's reason. */
+.notify-bar, .ask { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 4px 0; padding: .5em .6em; border: 1px solid var(--yellow); border-radius: 6px; font-size: 14px; }
+.notify-bar .nt, .ask .t { flex: 1 1 12em; min-width: 0; color: var(--fg); }
+.notify-bar button, .ask button { font-size: 14px; flex: 0 0 auto; }
+.ask .id { color: var(--dim); font-size: 12px; flex: 0 0 auto; }
+.talkband { display: flex; flex-direction: column; gap: 2px; padding: .35em .2em; font-size: 13px; }
+.talkband .ph { color: var(--fg); }
+.talkband .ph.listening { color: var(--green); }
+.talkband .note { color: var(--dim); font-size: 12px; }
+.composer button.talk.on { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: 700; }
+.hint.jarvis-none p { margin: .4em 0; }
+/* A [fleet] wake in Jarvis's transcript: the fleet talking, not the owner, so not a bubble. */
+.chat .sysline { display: flex; gap: .5em; align-items: baseline; margin: .5em .2em; font-size: 12px; color: var(--dim); }
+.chat .sysline .who { color: var(--yellow); flex: 0 0 auto; }
+.chat .sysline .t { flex: 1 1 auto; min-width: 0; }
+.chat .sysline .at { flex: 0 0 auto; }
+
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .001ms !important; animation-iteration-count: 1 !important;
       transition-duration: .001ms !important; scroll-behavior: auto !important; }

@@ -55,6 +55,11 @@ const S = {
   attaching: false,     // a photo is on its way up; the camera button says so and refuses a second
   pending: null,        // { text, at } — sent, not yet back in the transcript
   speaking: '',         // the text currently being read aloud, '' when silent
+  jarvis: null,         // last /api/jarvis payload — null until asked, {present:false} when absent
+  jarvisMode: false,    // the session screen is showing JARVIS (see openJarvis): back goes to Projects
+  wantJarvis: false,    // a notification from Jarvis was tapped; open it once unlocked
+  pushOffer: false,     // show the one-tap "Turn on notifications" band (see maybePushOffer)
+  talk: null,           // conversation mode: { phase, sent, seen, since } — null when off
 };
 // WHICH VIEW A TAP ON A CARD LANDS ON, and it moved. #45 made it the pane, because a
 // message list could not show a command and the first person to use the app said so. It is
@@ -81,7 +86,7 @@ function save() {
       // session and reopening restored the session SCREEN with nothing on it: "'null' is
       // not on this fleet's grid any more". It was always broken and was easy to miss
       // while that screen was a card and a row of buttons; it is the whole viewport now.
-      session: S.session, view: S.view, profile: S.profile,
+      session: S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode,
       projects: S.projects, grid: S.grid,
     }));
   } catch {}
@@ -92,6 +97,7 @@ function restore() {
   S.projects = j.projects || null; S.grid = j.grid || null;
   S.project = j.project || null; S.screen = j.screen || 'projects';
   S.session = j.session || null;
+  S.jarvisMode = !!j.jarvisMode && S.screen === 'session';
   // 'msgs' was the old list view's name and is not a view any more; anything unrecognised
   // falls to the default rather than rendering neither.
   S.view = j.view === 'pane' ? 'pane' : DEFAULT_VIEW;
@@ -110,7 +116,7 @@ function restore() {
   // ...and give the back gesture the trail it would have had if you had walked here. A
   // cold open is at the root of its own history, so without this the first swipe out of a
   // restored session screen leaves the app — the exact complaint, one reopen later.
-  seedNav(S.screen === 'session' ? 2 : S.screen === 'grid' ? 1 : 0);
+  seedNav(S.screen === 'session' ? (S.jarvisMode ? 1 : 2) : S.screen === 'grid' ? 1 : 0);
 }
 function seedNav(depth) { for (let i = 0; i < depth; i++) pushNav(); }
 
@@ -139,6 +145,9 @@ async function refresh() {
   // invisible from the phone (push simply stops), so the check rides along with the poll
   // that is already running rather than waiting for someone to open the settings sheet.
   maybeSyncPush();
+  maybePushOffer();
+  // A tapped notification from Jarvis, once there is a session to open it with.
+  if (S.wantJarvis && !S.locked) { S.wantJarvis = false; openJarvis(); return; }
   try {
     if (S.screen === 'projects') {
       // The payload carries the agent CATALOGUE beside the projects, and both are needed:
@@ -147,9 +156,19 @@ async function refresh() {
       // tell that apart from a machine with one agent installed.
       const j = await api.getProjects();
       S.projects = j.projects; S.agents = j.agents || [];
+      // The Jarvis band. Its own request, and allowed to fail on its own: a daemon older
+      // than Jarvis answers 404, which means "no band", not "the Projects screen is broken".
+      try { S.jarvis = await api.getJarvis(); } catch (e) { if (e instanceof api.AuthError) throw e; }
     }
     else if (S.screen === 'grid') S.grid = await api.getGrid(S.project);
     else if (S.screen === 'session') {
+      // JARVIS IS A PROJECT like any other, so once it is known the rest of this branch is
+      // the ordinary session read — the same grid card, the same transcript, the same pane.
+      if (S.jarvisMode) {
+        S.jarvis = await api.getJarvis();
+        if (!S.jarvis || !S.jarvis.present) { S.stale = 0; renderUnlessTyping(); return; }
+        S.project = S.jarvis.project; S.session = 'master';
+      }
       S.grid = await api.getGrid(S.project);
       // The pane has its OWN faster timer (panePoll below), so this loop only has to
       // fetch it once, to fill the box on the way in rather than up to a poll later.
@@ -170,6 +189,7 @@ async function refresh() {
       // Whatever the transcript now says decides whether the optimistic bubble is still
       // telling the truth.
       reconcilePending();
+      if (S.jarvisMode) talkAfterRefresh();
     }
     S.stale = 0;
     save();
@@ -272,6 +292,8 @@ function reportGeometry() {
 
 function lock(why = 'x') {
   api.diag('lock', why, 'tok' + (api.haveToken() ? 1 : 0), 'pend' + (swReloadPending ? 1 : 0));
+  // A LOCKED SCREEN HAS NO MICROPHONE: conversation mode ends with the session it ran on.
+  if (S.talk) talkStop('');
   S.locked = true; api.clearToken(); render();
   // The session just ended, so a swap that was waiting for it is free now — and this is
   // the moment the poll cannot cover, because the poll does not run while locked. Without
@@ -403,7 +425,7 @@ function render() {
   // Only the session screen reaches here now: `projects` and `grid` returned above, and
   // the lock screen returned above that. Left as a bare call rather than a ternary with one
   // live arm, which would read as a choice that no longer exists.
-  const screen = sessionScreen();
+  const screen = S.jarvisMode ? jarvisScreen() : sessionScreen();
   // THE TOAST GOES ABOVE THE COMPOSER, IN FLOW — it is a band of the shell column now, not
   // a fixed overlay, so where it sits in this array is where it sits on screen. Appending
   // it last put it BELOW the input on the session screen, which with the old
@@ -601,6 +623,8 @@ function projectsProps() {
       need: tabNeed(projects, name),
     })) : null,
     onTab: setProfile,
+    jarvis: jarvisBarSpec(),
+    notify: notifySpec(),
     confirm: confirmSpec(),
     // ── the seam ────────────────────────────────────────────────────────────────────
     // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
@@ -648,7 +672,7 @@ const PROJECTS_HINT = 'tap a project · long-press to remove it from the list ·
 function toProjects() {
   const n = navDepth;
   S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null;
-  S.pending = null; S.speakSel = ''; stopSpeaking();
+  S.pending = null; S.speakSel = ''; stopSpeaking(); S.jarvisMode = false; talkStop('');
   navDepth = 0;
   if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
     try { history.go(-n); } catch {}    // popstate fires; popTo() sees screen==='projects'
@@ -1019,6 +1043,413 @@ export function toggleSpeak(text) {
   render();
 }
 
+// ── Jarvis: the master of masters (docs/jarvis.md) ────────────────────────
+// A PROJECT, SHOWN AS ITS OWN SCREEN. Jarvis is an ordinary fleet — its master is a Claude
+// session like any lead's — so the screen for it is the session screen pointed at that
+// master, with three things only Jarvis has: the proposals waiting on the owner's yes, the
+// talk control, and a way in from the top of Projects. It is a MODE of the session screen
+// rather than a copy of it because everything underneath — the transcript, the pending
+// bubble, the pane for a permission prompt, the working indicator — is exactly what a chat
+// with Jarvis needs, and two copies of that machinery is two places for a scroll or a
+// keyboard fix to land in only one of.
+function openJarvis() {
+  // ALREADY HERE (a notification tapped while reading Jarvis): refresh, and keep the half-typed
+  // draft and the history — pushing another entry would make the next back land on Jarvis.
+  if (S.jarvisMode && S.screen === 'session') { refresh(); return; }
+  const j = S.jarvis;
+  S.jarvisMode = true; S.screen = 'session'; S.session = 'master';
+  if (j && j.present) S.project = j.project;
+  S.sess = null; S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
+  S.draft = ''; S.pending = null; S.speakSel = ''; stopSpeaking();
+  scrollMem.delete('pane'); scrollMem.delete('chat');
+  pushNav();
+  render(); refresh();
+}
+// The band at the top of Projects. Every word is decided here (screens.jsx's rule: the
+// strings cross the seam as data), and it is drawn only once /api/jarvis has answered — an
+// old daemon without the route leaves S.jarvis null, which is no band rather than a wrong one.
+function jarvisBarSpec() {
+  const j = S.jarvis;
+  if (!j) return null;
+  if (!j.present) return { title: 'Jarvis', sub: 'not set up — at the Mac: ghostfleet jarvis', tone: 'dim', onOpen: openJarvis };
+  const need = (S.projects || []).reduce((n, p) => n + ((p.sessions && p.sessions.need) || 0), 0);
+  const ask = (j.pending || []).length;
+  const bits = [];
+  bits.push(need ? `${need} need${need === 1 ? 's' : ''} you` : 'nothing blocked');
+  if (ask) bits.push(`${ask} waiting on your yes`);
+  bits.push(!j.running ? 'not running' : j.voice && j.voice.ready ? 'talk or type' : 'type to it');
+  return { title: 'Jarvis', sub: bits.join(' · '), tone: need || ask ? 'hot' : '', onOpen: openJarvis };
+}
+
+// ── "Turn on notifications", offered once, after the unlock ───────────────
+// PUSH HAD NEVER BEEN TURNED ON, and nothing said so. The switch lived in the settings sheet,
+// so a phone could be enrolled, installed and used every day while no notification ever
+// left the Mac — the daemon's log showed no /api/push/key request at all. So the app asks,
+// once, in the only moment iOS allows asking: right after an unlock, with a button, because
+// the permission prompt appears only in answer to a TAP (a prompt raised from a timer or on
+// load is silently refused). "Not now" is honoured for three days, then it asks again.
+const LS_PUSH_LATER = 'gf.push.later';
+let pushOfferChecked = false;
+async function maybePushOffer() {
+  if (pushOfferChecked || !api.haveToken() || api.mode() !== 'server') return;
+  pushOfferChecked = true;
+  // Where it CANNOT be turned on (an iOS tab, a denied permission, no Push API) there is
+  // nothing to offer; the settings sheet says why, in those same words.
+  if (pushBlockedReason()) return;
+  let later = 0;
+  try { later = Number(localStorage.getItem(LS_PUSH_LATER)) || 0; } catch {}
+  if (Date.now() - later < 3 * 86400 * 1000) return;
+  // Already on HERE and known THERE: nothing to ask. Either half missing is worth one tap.
+  try {
+    if (pushPermission() === 'granted' && await pushCurrent()) {
+      const k = await api.pushKey();
+      if (k && k.subscribed) return;
+    }
+  } catch { return; }
+  S.pushOffer = true;
+  render();
+}
+function notifySpec() {
+  if (!S.pushOffer) return null;
+  return {
+    text: "Turn on notifications — so a blocked session, or Jarvis's answer, reaches this phone when the app is closed.",
+    enable: 'Turn on notifications', later: 'not now',
+    onEnable: () => enablePushFromOffer(),
+    onLater: () => { try { localStorage.setItem(LS_PUSH_LATER, String(Date.now())); } catch {} S.pushOffer = false; render(); },
+  };
+}
+// CALLED FROM THE TAP, and pushEnable()'s first await is the permission request itself, so
+// the gesture is still live when iOS asks whether it counts as one.
+async function enablePushFromOffer() {
+  try {
+    await pushEnable();
+    S.pushOffer = false;
+    toast('notifications are on for this phone', 'good');
+  } catch (e) {
+    if (pushPermission() === 'denied') S.pushOffer = false;
+    toast(String((e && e.message) || e), 'bad');
+  }
+  render();
+}
+function notifyBandEl() {
+  const n = notifySpec();
+  if (!n) return null;
+  return el('div', { class: 'notify-bar' }, [
+    el('span', { class: 'nt', text: n.text }),
+    btn(n.enable, n.onEnable, 'go'),
+    btn(n.later, n.onLater),
+  ]);
+}
+
+// ── the screen ────────────────────────────────────────────────────────────
+function jarvisScreen() {
+  const j = S.jarvis;
+  const c = cardOf('master');
+  const meta = (c && G.STATUS[c.status]) || null;
+  const out = [el('div', { class: 'sbar' }, [
+    btn('‹', () => back()),
+    el('div', { class: 'who' }, [
+      el('span', { class: 'nm', text: 'Jarvis' }),
+      el('span', { class: 'st' }, [
+        meta ? el('span', { style: `color:${G.COLORS[meta.color]}`, text: meta.label }) : null,
+        el('span', { class: 'scope', text: ' every fleet, every profile' }),
+        modeChip(),
+      ]),
+    ]),
+    el('div', { class: 'seg' }, [
+      btn('chat', () => setView('chat'), S.view === 'chat' ? 'on' : ''),
+      btn('pane', () => setView('pane'), S.view === 'pane' ? 'on' : ''),
+    ]),
+  ])];
+  const nb = notifyBandEl();
+  if (nb) out.push(nb);
+  if (!j) { out.push(el('div', { class: 'hint', text: 'asking the Mac about Jarvis…' })); return out; }
+  if (!j.present) {
+    out.push(el('div', { class: 'hint jarvis-none' }, [
+      el('p', { text: 'There is no Jarvis on this Mac yet.' }),
+      el('p', { text: 'At the desk, run  ghostfleet jarvis  once. It makes a small project outside your repos, starts its session, and from then on this screen talks to it.' }),
+    ]));
+    return out;
+  }
+  if (!j.running) out.push(el('div', { class: 'hint', text: "Jarvis's session is not running — ghostfleet jarvis at the desk starts it. Messages sent now wait for it." }));
+  // THE CONFIRM-LIST, WHERE HE CAN ANSWER IT. Each is a call Jarvis tried and the tool
+  // refused until he says yes — spoken, typed, or here. Yes costs a Face ID, like any tap
+  // that lets something be deleted or merged; no costs nothing.
+  for (const p of (j.pending || [])) {
+    out.push(el('div', { class: 'ask' }, [
+      el('span', { class: 't', text: `${p.granted ? 'yes given — ' : 'Jarvis asks: '}${p.summary}?` }),
+      el('span', { class: 'id', text: p.id }),
+      p.granted ? null : btn('yes', () => answerProposal(p, true), 'go'),
+      p.granted ? null : btn('no', () => answerProposal(p, false)),
+    ]));
+  }
+  if (S.talk) out.push(talkBand());
+  out.push(S.view === 'pane' ? paneView() : chatView(c));
+  out.push(composer(c, { talk: true }));
+  return out.filter(Boolean);
+}
+async function answerProposal(p, yes) {
+  try {
+    const assertion = yes ? await assertFor(`jarvis yes ${p.id}`) : null;
+    await api.jarvisConfirm(p.id, yes ? 'yes' : 'no', assertion);
+    toast(yes ? `yes — Jarvis will ${p.summary}` : `no — Jarvis will not ${p.summary}`, 'good');
+    await refresh();
+  } catch (e) {
+    if (e instanceof api.AuthError) { lock('jarvis'); return; }
+    toast(String((e && e.message) || e), 'bad');
+    render();
+  }
+}
+
+// ── conversation mode ─────────────────────────────────────────────────────
+// Tap `talk` ONCE and the conversation runs itself: the mic opens, a second of quiet ends
+// what you said, the Mac transcribes it, Jarvis answers, the answer is read aloud, and the
+// mic opens again. No button per sentence — that is push-to-talk, and a hand on a phone is
+// exactly what somebody talking to Jarvis does not have free.
+//
+// WHERE THE AUDIO GOES: from this page to fleet-serve as WAV, into whisper.cpp on the Mac,
+// and nowhere else. Web Speech recognition is not used on purpose — it does not work in an
+// installed iOS app, and where it does work it sends the audio to Apple.
+//
+// THE MIC IS CLOSED WHILE ANYTHING ELSE HAPPENS. From the end of an utterance until the
+// answer has been spoken, the tracks are STOPPED, not muted: Jarvis's own voice through the
+// speaker is the loudest thing in the room, and a mic that could hear it would answer
+// itself. Stopping (rather than a gain of zero) also hands iOS its speaker back — a live
+// capture session routes speech to the quiet earpiece.
+//
+// IT ENDS: on a tap, on twenty seconds of nothing, when the app leaves the screen (an
+// installed web app gets no microphone in the background — the band says so), and when
+// something fails, saying what.
+const TALK = { END_QUIET_MS: 1000, MIN_SPEECH_MS: 350, MAX_UTTER_MS: 30000, GIVE_UP_MS: 20000, WAIT_MAX_MS: 5 * 60 * 1000 };
+const T = { ctx: null, stream: null, src: null, proc: null, frames: [], pre: [], inSpeech: false,
+            voiceAt: 0, speechAt: 0, listenAt: 0, noise: 0.004, hot: 0, rate: 48000, poll: null, gen: 0 };
+// EVERY AWAIT IN THE LOOP IS A PLACE THE WORLD CAN CHANGE: stop, then talk again, while an
+// old utterance is still being heard, and that old continuation would find a live S.talk —
+// a NEW one — and send its words, or open a second microphone beside the first. Each talk
+// session carries a generation; a continuation that wakes to a different one does nothing.
+const talkLive = (g) => !!S.talk && S.talk.gen === g;
+function talkWhyNot() {
+  const j = S.jarvis;
+  if (!j || !j.present) return 'there is no Jarvis to talk to yet';
+  if (!j.voice || !j.voice.ready) return `voice is off — ${(j.voice && j.voice.why) || 'the Mac has no transcriber'}`;
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) return 'this browser gives web apps no microphone';
+  if (!(window.AudioContext || window.webkitAudioContext)) return 'this browser has no Web Audio to listen with';
+  return '';
+}
+function talkToggle() { if (S.talk) talkStop('conversation mode off'); else talkStart(); }
+function talkStart() {
+  const why = talkWhyNot();
+  // toast() only sets state; a refusal nobody renders is a button that does nothing.
+  if (why) { toast(why, 'bad'); render(); return; }
+  // BOTH OF THESE MUST HAPPEN INSIDE THE TAP. iOS lets an AudioContext run, and
+  // speechSynthesis speak, only once a gesture has unlocked them; everything after this
+  // point (the answer, the reopened mic) happens from timers and network callbacks.
+  try { T.ctx = T.ctx || new (window.AudioContext || window.webkitAudioContext)(); T.ctx.resume(); }
+  catch (e) { toast(`no audio on this device: ${(e && e.message) || e}`, 'bad'); return; }
+  if (canSpeak()) { try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch {} }
+  S.talk = { phase: 'opening', sent: '', seen: 0, since: 0, gen: ++T.gen };
+  render();
+  openMic();
+}
+async function openMic() {
+  if (!S.talk) return;
+  const g = S.talk.gen;
+  closeMic();                                     // never two streams: the old one goes first
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  } catch (e) {
+    if (talkLive(g)) talkStop(e && e.name === 'NotAllowedError'
+      ? 'the microphone is not allowed for this app — iOS Settings → ghostfleet → Microphone'
+      : `no microphone: ${(e && e.message) || e}`);
+    return;
+  }
+  // Stopped (or stopped and restarted) while the permission sheet was up: this stream is
+  // nobody's, so it is closed rather than wired.
+  if (!talkLive(g) || T.stream) { try { stream.getTracks().forEach(t => t.stop()); } catch {} return; }
+  T.stream = stream;
+  try { await T.ctx.resume(); } catch {}
+  if (!talkLive(g) || T.stream !== stream) { if (T.stream === stream) closeMic(); return; }
+  T.rate = T.ctx.sampleRate;
+  T.src = T.ctx.createMediaStreamSource(T.stream);
+  // ScriptProcessor rather than an AudioWorklet: it is deprecated and still everywhere,
+  // and a worklet is a second module file the service worker would have to precache for a
+  // loop that does one sum per 85 ms.
+  T.proc = T.ctx.createScriptProcessor(4096, 1, 1);
+  T.proc.onaudioprocess = onTalkFrame;
+  T.src.connect(T.proc); T.proc.connect(T.ctx.destination);   // Safari only pulls a connected node
+  T.frames = []; T.pre = []; T.inSpeech = false; T.hot = 0; T.listenAt = Date.now();
+  S.talk.phase = 'listening';
+  render();
+}
+function closeMic() {
+  try { if (T.proc) { T.proc.onaudioprocess = null; T.proc.disconnect(); } } catch {}
+  try { if (T.src) T.src.disconnect(); } catch {}
+  try { if (T.stream) T.stream.getTracks().forEach(t => t.stop()); } catch {}
+  T.proc = T.src = T.stream = null;
+}
+// VOICE ACTIVITY, ON THE DEVICE, from loudness against a floor it keeps learning. Two
+// loud frames start speech (one is a click); a second under 60% of the threshold ends it.
+// The ~0.4 s of audio before the start is kept, or the first syllable is always cut.
+function onTalkFrame(e) {
+  if (!S.talk || S.talk.phase !== 'listening') return;
+  const d = new Float32Array(e.inputBuffer.getChannelData(0));
+  let sum = 0;
+  for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
+  const rms = Math.sqrt(sum / d.length), now = Date.now();
+  const thr = Math.max(0.012, T.noise * 3.5);
+  if (!T.inSpeech) {
+    if (rms <= thr) T.noise = T.noise * 0.95 + rms * 0.05;
+    T.pre.push(d); if (T.pre.length > 5) T.pre.shift();
+    if (rms > thr) {
+      if (++T.hot >= 2) { T.inSpeech = true; T.speechAt = now; T.voiceAt = now; T.frames = T.pre.slice(); T.pre = []; }
+    } else {
+      T.hot = 0;
+      if (now - T.listenAt > TALK.GIVE_UP_MS) talkStop('nothing heard for 20 seconds — conversation mode is off');
+    }
+    return;
+  }
+  T.frames.push(d);
+  if (rms > thr * 0.6) T.voiceAt = now;
+  if (now - T.voiceAt > TALK.END_QUIET_MS || now - T.speechAt > TALK.MAX_UTTER_MS) endUtterance();
+}
+async function endUtterance() {
+  const frames = T.frames, spoke = T.voiceAt - T.speechAt;
+  T.frames = []; T.inSpeech = false;
+  closeMic();                          // closed from here until the answer has been spoken
+  if (!S.talk) return;
+  const g = S.talk.gen;
+  if (spoke < TALK.MIN_SPEECH_MS) { talkReopen(); return; }     // a cough, a door, a chair
+  S.talk.phase = 'hearing'; render();
+  let text = '';
+  try { text = String((await api.jarvisHear(encodeWav(frames, T.rate))).text || '').trim(); }
+  catch (e) {
+    if (!talkLive(g)) return;
+    if (e instanceof api.AuthError) { talkStop(''); lock('talk'); return; }
+    talkStop(`could not hear that: ${(e && e.message) || e}`); return;
+  }
+  if (!talkLive(g)) return;
+  if (!text) { talkReopen(); return; }
+  // "(spoken)" TELLS JARVIS HOW TO ANSWER: its contract says a spoken turn gets an answer
+  // that sounds right read aloud. It is also ignored by the yes-detector, so "(spoken) yes"
+  // confirms exactly as a typed "yes" does.
+  const prompt = `(spoken) ${text}`;
+  S.talk = { phase: 'waiting', sent: prompt, seen: countSaid(prompt), since: Date.now(), gen: g };
+  S.pending = { text: prompt, at: Math.floor(Date.now() / 1000), seen: countSaid(prompt) };
+  scrollMem.delete('chat');
+  render();
+  say('checking');
+  const r = await doVerb('fleet_send', { project: S.project, session: 'master', prompt }, { quiet: true });
+  if (!talkLive(g)) return;
+  if (!r) { S.pending = null; talkStop('that did not reach Jarvis'); return; }
+  startTalkPoll();
+}
+function talkReopen() { if (!S.talk) return; S.talk.phase = 'opening'; render(); openMic(); }
+// THE ANSWER IS THE LAST THING JARVIS SAID AFTER WHAT YOU SAID, once its turn is over. The
+// match counts occurrences rather than looking for the text, for the reason sendDraft gives:
+// saying "yes" twice must wait for the second one, not read out the answer to the first.
+function talkAfterRefresh() {
+  const t = S.talk;
+  if (!t || t.phase !== 'waiting') return;
+  if (Date.now() - t.since > TALK.WAIT_MAX_MS) { talkStop('no answer after five minutes — conversation mode is off'); return; }
+  // The baseline FOLLOWS THE PAGE DOWN, as reconcilePending's does: /api/session serves a
+  // window that rolls, and an earlier identical turn scrolling out of it must not make the
+  // new one look like no change at all.
+  const said = countSaid(t.sent);
+  if (said < t.seen) t.seen = said;
+  if (said <= t.seen) return;                              // not in the transcript yet
+  const ms = (S.sess && S.sess.messages) || [];
+  let i = -1;
+  for (let k = ms.length - 1; k >= 0; k--) if (ms[k].role === 'user' && String(ms[k].text || '').trim() === t.sent) { i = k; break; }
+  if (i < 0) return;                                       // never "everything after nothing"
+  const c = cardOf('master');
+  if (c && c.status === 'need-you') {
+    t.phase = 'speaking'; stopTalkPoll(); render();
+    const g0 = t.gen;
+    say('Jarvis is stopped on a permission prompt. Open the pane to answer it.', () => { if (talkLive(g0)) talkStop(''); });
+    return;
+  }
+  const after = ms.slice(i + 1).filter(m => m.role === 'assistant' && String(m.text || '').trim());
+  if (!after.length || (c && c.status === 'working')) return;
+  t.phase = 'speaking'; stopTalkPoll(); render();
+  const g = t.gen;
+  say(after[after.length - 1].text, () => { if (talkLive(g) && S.talk.phase === 'speaking') talkReopen(); });
+}
+// Faster than the 5s poll while an answer is owed, because in a conversation five seconds
+// of silence after the answer has landed is a long time.
+function startTalkPoll() {
+  stopTalkPoll();
+  T.poll = setInterval(() => { if (S.talk && S.talk.phase === 'waiting' && !pollPaused()) refresh(); }, 1500);
+}
+function stopTalkPoll() { if (T.poll) { clearInterval(T.poll); T.poll = null; } }
+function talkStop(reason) {
+  const was = !!S.talk;
+  S.talk = null;
+  closeMic(); stopTalkPoll();
+  try { if (canSpeak()) speechSynthesis.cancel(); } catch {}
+  S.speaking = '';
+  try { if (T.ctx) T.ctx.suspend(); } catch {}
+  if (reason) toast(reason, /off$/.test(reason) ? '' : 'bad');
+  if (reason || was) render();
+}
+// Spoken with the same voice, rate and normaliser as the play button on a bubble — the
+// settings sheet's choice holds here too.
+function say(text, onend) {
+  const words = speakable(text);
+  if (!canSpeak() || !words) { if (onend) onend(); return; }
+  let done = false;
+  const fin = () => { if (done) return; done = true; S.speaking = ''; if (onend) onend(); };
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(words);
+    u.rate = savedRate();
+    const v = pickVoice(); if (v) { u.voice = v; if (v.lang) u.lang = v.lang; }
+    u.onend = fin; u.onerror = fin;
+    S.speaking = words;
+    speechSynthesis.speak(u);
+    // WebKit can drop `onend` for an utterance it cut short, which would leave the mic
+    // closed forever. A ceiling from the length, generous enough never to reopen the mic
+    // over a voice that is still talking.
+    setTimeout(fin, 3000 + words.length * 150);
+  } catch { fin(); }
+}
+function talkBand() {
+  const ph = S.talk.phase;
+  const now = ph === 'listening' ? '● listening — just talk; a second of quiet sends it'
+            : ph === 'hearing' ? '… hearing you (on the Mac)'
+            : ph === 'waiting' ? '… checking — Jarvis is on it'
+            : ph === 'speaking' ? '▶ answering — the mic is off while it speaks'
+            : '… opening the microphone';
+  return el('div', { class: 'talkband' }, [
+    el('span', { class: 'ph ' + ph, text: now }),
+    el('span', { class: 'note', text: 'conversation mode only works with the screen on and this app open' }),
+  ]);
+}
+// 16 kHz mono 16-bit PCM, which is what whisper.cpp reads without converting anything.
+// Downsampled by linear interpolation: speech has nothing above 8 kHz that a transcriber
+// wants, and a filter would be a lot of code to remove what the mic's own processing
+// mostly already has.
+export function encodeWav(frames, rate) {
+  let n = 0;
+  for (const f of frames) n += f.length;
+  const pcm = new Float32Array(n);
+  let o = 0;
+  for (const f of frames) { pcm.set(f, o); o += f.length; }
+  const OUT = 16000, ratio = rate / OUT, len = Math.max(0, Math.floor(pcm.length / ratio));
+  const buf = new ArrayBuffer(44 + len * 2), v = new DataView(buf);
+  const str = (at, s) => { for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + len * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, OUT, true); v.setUint32(28, OUT * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, len * 2, true);
+  for (let i = 0; i < len; i++) {
+    const x = i * ratio, a = Math.floor(x), b = Math.min(a + 1, pcm.length - 1), fr = x - a;
+    const s = Math.max(-1, Math.min(1, pcm[a] * (1 - fr) + pcm[b] * fr));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buf;
+}
+
 // ── the session screen ────────────────────────────────────────────────────
 // WHAT A TAP ON A CARD LANDS ON IS THE PANE, and that is the whole of this change.
 //
@@ -1039,7 +1470,7 @@ export function toggleSpeak(text) {
 // different things, not two attempts at one.
 function openSession(name) {
   if (!name) return;
-  S.session = name; S.screen = 'session'; S.sess = null;
+  S.session = name; S.screen = 'session'; S.sess = null; S.jarvisMode = false; talkStop('');
   // Reset to the pane on every open rather than remembering the last choice. The card is
   // tapped to answer "what is this worker doing right now", and the pane is the answer to
   // that question; a sticky preference would sometimes answer a different one.
@@ -1214,7 +1645,24 @@ function chatView(card) {
   } else if (s.total) {
     wrap.append(el('div', { class: 'meta l', text: '— the beginning of the transcript —' }));
   }
-  for (const m of (s.messages || [])) wrap.append(turn(m.role === 'user', m.text, G.clockLabel(m.ts), false, msgKey(m)));
+  for (const m of (s.messages || [])) {
+    // ON JARVIS'S SCREEN, THE MACHINE IS NOT THE OWNER. Its wakes arrive as prompts, so the
+    // transcript files them as user turns — and a big right-hand bubble reading "[fleet]
+    // need-you: …" says HE wrote it, on the one screen where who said what is the whole
+    // confirm-list. One dim line, its first sentence, marked as the fleet's.
+    if (S.jarvisMode && m.role === 'user' && /^\[fleet\]/.test(String(m.text || ''))) {
+      // No lookbehind: before Safari 16.4 it is a PARSE error, and the whole client blanks.
+      const body = String(m.text).replace(/^\[fleet\]\s*/, ''), cut = body.search(/\.\s/);
+      const first = cut >= 0 ? body.slice(0, cut + 1) : body;
+      wrap.append(el('div', { class: 'sysline' }, [
+        el('span', { class: 'who', text: 'fleet' }),
+        el('span', { class: 't', text: first.length > 140 ? first.slice(0, 139) + '…' : first }),
+        el('span', { class: 'at', text: G.clockLabel(m.ts) }),
+      ]));
+      continue;
+    }
+    wrap.append(turn(m.role === 'user', m.text, G.clockLabel(m.ts), false, msgKey(m)));
+  }
   // Sent, not yet echoed by the transcript. Dimmed rather than absent: a chat where your
   // own message disappears for five seconds reads as a send that failed, and this app's
   // whole job is telling you what is actually happening.
@@ -1527,7 +1975,7 @@ function growComposer(box) {
 // and the smaller of the two wins. They disagreed (160 here, 120 there), so this constant
 // had no effect above 120px and the box stopped growing for a reason not written anywhere.
 const COMPOSER_MAX_PX = 120;
-function composer(card) {
+function composer(card, opts = {}) {
   const box = el('textarea', { rows: '1', placeholder: 'message this session…',
                                autocapitalize: 'sentences', spellcheck: 'false' });
   box.value = S.draft || '';
@@ -1580,7 +2028,16 @@ function composer(card) {
   cam.setAttribute('aria-label', S.attaching ? 'sending a photo' : 'attach a photo');
   cam.setAttribute('title', 'attach a photo');
   if (S.attaching) cam.setAttribute('disabled', 'disabled');
-  const kids = [pick, cam, box, btn('send', () => sendDraft(), 'go')];
+  const kids = [pick, cam, box];
+  // JARVIS'S COMPOSER ALSO TALKS. One more control, the same size as the two beside it, and
+  // it is the whole of conversation mode's UI besides the band above: tap once and the
+  // conversation runs itself until you tap it again (see talkStart).
+  if (opts.talk) {
+    const t = btn(S.talk ? 'stop' : 'talk', () => talkToggle(), 'talk' + (S.talk ? ' on' : ''));
+    t.setAttribute('aria-label', S.talk ? 'stop conversation mode' : 'talk to Jarvis');
+    kids.push(t);
+  }
+  kids.push(btn('send', () => sendDraft(), 'go'));
   return el('div', { class: 'composer' }, kids);
 }
 async function sendDraft() {
@@ -2388,7 +2845,9 @@ function pushNav() {
 function popTo() {
   if (S.sheet) { closeSheet(); return; }
   if (S.confirm) { cancel(); return; }
-  if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; S.speakSel = ''; stopSpeaking(); }
+  // Jarvis was opened from Projects and sits one level under it, whatever its session is.
+  if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; S.speakSel = ''; stopSpeaking(); }
+  else if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; S.speakSel = ''; stopSpeaking(); }
   else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; }
   else return;                                  // at the root: let the platform have it
   navDepth = Math.max(0, navDepth - 1);
@@ -3551,7 +4010,13 @@ document.addEventListener('visibilitychange', () => {
   // Hidden: the pane's timer is TORN DOWN, not left to skip its turns. That is the
   // difference between an app that stops polling in a pocket and one that keeps waking
   // the radio every two seconds to decide it should not have.
-  if (document.hidden) { S.hiddenAt = Date.now(); stopPanePoll(); return; }
+  if (document.hidden) {
+    S.hiddenAt = Date.now(); stopPanePoll();
+    // THE LIMIT, SAID WHEN IT BITES. An installed web app gets no microphone and no speech
+    // once it is off screen, so conversation mode ends here rather than pretending to run.
+    if (S.talk) talkStop('conversation mode stopped — it only works with the screen on and the app open');
+    return;
+  }
   const act = onVisibleAction();
   if (act === 'lock') lock('visible');
   else if (act === 'refresh') refresh();
@@ -3588,6 +4053,11 @@ if ('serviceWorker' in navigator) {
     reg.addEventListener('updatefound', () => api.diag('updatefound', 'a-' + st(reg.active)));
   }).catch(() => api.diag('reg', 'failed'));
   askShellVersion();
+  // A TAPPED NOTIFICATION FROM JARVIS lands on Jarvis (sw.js posts this to an open window,
+  // or opens one on #jarvis). Opened after the unlock, never instead of it.
+  navigator.serviceWorker.addEventListener('message', (ev) => {
+    if (ev && ev.data && ev.data.open === 'jarvis') { S.wantJarvis = true; if (!S.locked) refresh(); }
+  });
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     api.diag('cc', 'had' + (hadController ? 1 : 0), 'tok' + (api.haveToken() ? 1 : 0),
          'lock' + (S.locked ? 1 : 0));
@@ -3615,6 +4085,10 @@ addEventListener('pageshow', e => api.diag('pageshow', 'p' + (e && e.persisted ?
 addEventListener('pagehide', e => api.diag('pagehide', 'p' + (e && e.persisted ? 1 : 0)));
 addEventListener('unload', () => api.diag('unload'));
 
+if (location.hash === '#jarvis') {
+  S.wantJarvis = true;
+  try { history.replaceState(history.state, '', location.pathname + location.search); } catch {}
+}
 markStandalone();
 addEventListener('orientationchange', markStandalone);
 addEventListener('resize', markStandalone);

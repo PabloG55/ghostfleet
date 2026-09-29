@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readMarker, isJarvisSelf, mcpConfirmSpec, gate } from '../lib/jarvis.mjs';
 
 export const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin');
 export const HOME = os.homedir();
@@ -240,6 +241,13 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'project name (from fleet_projects)' } }, required: ['name'], additionalProperties: false } },
   { name: 'fleet_projects', description: "List every ghostfleet project: name, profile, path, fleet socket and how many sessions are live. These names are what the `project` argument accepts, so a lead in one repo can list/send/read/answer/pause/stop a session in ANOTHER project's fleet.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  // ONE LOOK AT EVERYTHING, FROM FILES. fleet_list is one fleet and fleet_inbox is one
+  // fleet's feed; a master of masters that called them per project would spend a turn per
+  // project to learn that nothing happened, which is the polling the inbox exists to
+  // remove. This reads what the hooks already wrote across every profile — status files,
+  // inboxes, the asleep/parked/exited markers — and costs no agent anything.
+  { name: 'fleet_digest', description: "One rollup across EVERY fleet on EVERY profile, read from files: who needs you (with the note), what is working, what is ready, asleep, parked or exited, what finished or was answered since your last look, and the open PRs already known. Cheap — no session is asked anything. Call this FIRST when asked how everything is doing, or when woken; then act on ONE project with the per-fleet tools. A plain call advances the 'since last look' stamp; peek:true does not.",
+    inputSchema: { type: 'object', properties: { json: { type: 'boolean', description: 'return the digest as data rather than as text' }, peek: { type: 'boolean', description: "look without advancing the 'since last look' stamp (for a poll, not for a read)" } }, additionalProperties: false } },
 ];
 
 // REFUSING A CALL, so the caller can see it was refused. MCP's error channel for a tool
@@ -344,6 +352,14 @@ export function plan(name, a = {}) {
     case 'fleet_project_agent':
       return run('fleet-project', ['agent', String(a.name), String(a.agent || '').trim() || '--none']);
     case 'fleet_projects': return { kind: 'text', text: projectTable() };
+    // No target and no -s: the digest is every fleet at once, and it resolves the
+    // profiles itself from the same projects files target() reads.
+    case 'fleet_digest': {
+      const args = [];
+      if (a.json) args.push('--json');
+      if (a.peek) args.push('--peek');
+      return run('fleet-digest', args);
+    }
     case 'fleet_list': return run('fleet-list', [], t);
     case 'fleet_send': {
       const args = [];
@@ -458,12 +474,34 @@ export function plan(name, a = {}) {
   }
 }
 
+// JARVIS'S CONFIRM-LIST, at the one layer every MCP call goes through. Only when the caller
+// is Jarvis's own master — resolved from the live $TMUX by self(), never from an argument —
+// and only for the tools on the list (lib/jarvis.mjs mcpConfirmSpec). Everyone else, the
+// phone's daemon included (it is not inside a fleet, so self() is null and its destructive
+// taps already carry a passkey), is untouched. The spec is checked BEFORE self(), so a call
+// that is not on the list costs nothing extra even from inside Jarvis.
+//   A refusal is fail()'s, so the agent sees a failed call and not a quiet success — and its
+// text is the whole instruction: which proposal, what to ask him, and to try again after.
+function jarvisRefusal(name, a) {
+  let m = null;
+  try { m = readMarker(); } catch {}
+  if (!m) return null;
+  const spec = mcpConfirmSpec(name, a, m);
+  if (!spec) return null;
+  if (!isJarvisSelf(self(), m)) return null;
+  if (spec.refuse) return fail(spec.text);
+  const g = gate(spec);
+  return g.ok ? null : fail(g.text);
+}
+
 // The MCP server's entry point. Same signature and same return shape it always had: a
 // string for a call that RAN, fail()'s {isError,text} for one we refused to run.
 export function callTool(name, a = {}) {
   const p = plan(name, a);
   if (p.kind === 'fail') return { isError: true, text: p.text };
   if (p.kind === 'text') return p.text;
+  const j = jarvisRefusal(name, a);
+  if (j) return j;
   return execPlan(p);
 }
 
@@ -473,5 +511,7 @@ export async function callToolAsync(name, a = {}, opts = {}) {
   const p = plan(name, a);
   if (p.kind === 'fail') return { isError: true, text: p.text };
   if (p.kind === 'text') return p.text;
+  const j = jarvisRefusal(name, a);
+  if (j) return j;
   return execPlanAsync(p, opts);
 }

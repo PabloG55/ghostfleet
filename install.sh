@@ -482,6 +482,24 @@ elif ! nvim_ok || [ ! -e "$NVIM_CFG" ]; then
     2) UNASKED+=("$what (the editor ^N opens)") ;;
   esac
 fi
+# JARVIS'S VOICE: whisper.cpp and one model, so the phone's conversation mode can be
+# transcribed on this machine (docs/jarvis.md). The most optional thing here, and held to a
+# stricter rule than the two above: NOT implied by --yes, because it is a ~550 MB download
+# that nobody accepted by agreeing to "install missing dependencies" — only a person at a
+# terminal saying yes to this question gets it. Already working is silent. And it can never
+# fail the install: text to Jarvis works without it, and the command says how to add it later.
+if "$REPO/bin/fleet-jarvis" voice >/dev/null 2>&1; then :
+elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
+  _save_yes="$ASSUME_YES"; ASSUME_YES=0
+  rc=0; ask_optional "· Jarvis can listen: install whisper.cpp + a speech model (~550 MB, transcribed on this machine only)?" || rc=$?
+  ASSUME_YES="$_save_yes"
+  case $rc in
+    0) "$REPO/bin/fleet-jarvis" voice --install || echo "! voice was not set up — text to Jarvis still works; retry with: fleet-jarvis voice --install" ;;
+    *) echo "  Skipped. Voice for Jarvis later: fleet-jarvis voice --install" ;;
+  esac
+else
+  vsay "· voice for Jarvis (optional, ~550 MB): fleet-jarvis voice --install"
+fi
 if [ "${#UNASKED[@]}" -gt 0 ]; then
   _u="$(printf '%s, ' "${UNASKED[@]}")"
   # "NOBODY TO ASK" IS THIS SCRIPT'S OWN VOCABULARY. It means "stdout is not a terminal, so
@@ -580,6 +598,7 @@ CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fle
          fleet-worktrees fleet-ack fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy fleet-merged fleet-shipped fleet-look.mjs fleet-shots.mjs
          fleet-clean fleet-open fleet-restart fleet-project fleet-demo fleet-phone fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-hibernate fleet-meter.mjs fleet-review
+         fleet-digest fleet-jarvis
          agent-here opencode-here codex-here)
 linked=()
 for b in "${CF_BINS[@]}"; do

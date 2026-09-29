@@ -155,13 +155,61 @@ function CardScreen({ scope, mode, stale, counts, onMore, band, confirm, cards, 
 		}) : null
 	] });
 }
+function JarvisBar({ jarvis }) {
+	if (!jarvis) return null;
+	return /* @__PURE__ */ u("button", {
+		class: ("jarvis-bar " + (jarvis.tone || "")).trim(),
+		onClick: jarvis.onOpen,
+		"aria-label": `${jarvis.title} — ${jarvis.sub}`,
+		children: [
+			/* @__PURE__ */ u("span", {
+				class: "jt",
+				children: jarvis.title
+			}),
+			/* @__PURE__ */ u("span", {
+				class: "js",
+				children: jarvis.sub
+			}),
+			/* @__PURE__ */ u("span", {
+				class: "jgo",
+				"aria-hidden": "true",
+				children: "›"
+			})
+		]
+	});
+}
+function NotifyBar({ notify }) {
+	if (!notify) return null;
+	return /* @__PURE__ */ u("div", {
+		class: "notify-bar",
+		children: [
+			/* @__PURE__ */ u("span", {
+				class: "nt",
+				children: notify.text
+			}),
+			/* @__PURE__ */ u(Btn, {
+				label: notify.enable,
+				onClick: notify.onEnable,
+				cls: "go"
+			}),
+			/* @__PURE__ */ u(Btn, {
+				label: notify.later,
+				onClick: notify.onLater
+			})
+		]
+	});
+}
 function ProjectsScreen(p) {
 	return /* @__PURE__ */ u(CardScreen, {
 		...p,
-		band: /* @__PURE__ */ u(ProfileTabs, {
-			tabs: p.tabs,
-			onTab: p.onTab
-		})
+		band: /* @__PURE__ */ u(S, { children: [
+			/* @__PURE__ */ u(NotifyBar, { notify: p.notify }),
+			/* @__PURE__ */ u(JarvisBar, { jarvis: p.jarvis }),
+			/* @__PURE__ */ u(ProfileTabs, {
+				tabs: p.tabs,
+				onTab: p.onTab
+			})
+		] })
 	});
 }
 function GridScreen(p) {

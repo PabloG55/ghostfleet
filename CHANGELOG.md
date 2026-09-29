@@ -4,6 +4,33 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
+## Unreleased
+
+### Added
+
+- **Jarvis** — one conversational session above every project's lead, on every profile
+  (docs/jarvis.md). `ghostfleet jarvis` creates it the first time (a small repo outside your
+  checkouts, registered like any project) and opens it every time after. It reads
+  **`fleet-digest`** / **`fleet_digest`** — one pass over every profile's status files,
+  inboxes and markers, no agent asked anything — and is woken **only** by a need-you
+  anywhere, so an idle Jarvis costs zero turns. Merging, pushing, stopping, removing,
+  answering a worker's prompt and a second worker per request are **refused by the tools**
+  until the owner says or taps yes. It restarts fresh once a day while idle, carrying a
+  `HANDOFF.md` forward.
+- **Conversation mode on the phone**: a Jarvis screen (from the top of Projects) where one tap
+  on *talk* runs a spoken conversation — on-device voice detection, transcription by
+  whisper.cpp on the Mac (audio never leaves it), answers read aloud. Optional:
+  `fleet-jarvis voice --install`, or the installer's new question. Screen on, app open only.
+
+### Fixed
+
+- **Notifications had never been turned on**, because nothing asked. After an unlock the
+  installed app now offers *Turn on notifications* with one tap, and `fleet-phone` reports
+  `notifications: not set up` until a subscription exists.
+- **Apple refused real pushes with HTTP 403.** The VAPID subject defaulted to
+  `mailto:ghostfleet@<host>.local`; it is now the server's https origin, and a push service's
+  refusal reason is logged instead of discarded. Restart `fleet-serve` to pick it up.
+
 ## 0.4.0 — 2026-09-24
 
 **This release is about sessions that outlive their process.** A session used to be exactly

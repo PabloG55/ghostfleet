@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# fleet-digest — one rollup across every fleet on every profile, from files (docs/jarvis.md).
+#
+#   fleet-digest                what needs you, what is working, what changed since you last looked
+#   fleet-digest --json         the same, as data (the phone's /api/digest and the fleet_digest tool)
+#   fleet-digest --peek         look without advancing the "since last look" stamp
+#   fleet-digest --since EPOCH  events after this time instead of the stamp
+#
+# A launcher, exactly like bin/fleet-serve is for fleet-serve.mjs: the digest is node, and
+# this is what puts `fleet-digest` on PATH with a readable error when node is missing.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"
+  case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+
+command -v node >/dev/null 2>&1 || { echo "fleet-digest: node is required (>=18)" >&2; exit 1; }
+exec node "$BIN_DIR/fleet-digest.mjs" "$@"

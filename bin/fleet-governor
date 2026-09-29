@@ -533,6 +533,17 @@ else
   while true; do
     tmux -L "$SOCK" list-sessions >/dev/null 2>&1 || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
     resource_tick || tick
+    # JARVIS'S DAILY FRESH START rides on ITS OWN fleet's governor — the one long-lived
+    # process that is already alive exactly as long as Jarvis is, so the restart needs no
+    # daemon, cron entry or launchd job of its own. Every other fleet's governor sees a socket
+    # that is not the marker's and does nothing. --if-due makes the tick cheap and idempotent:
+    # once per day at the marker's restart_hour, only when Jarvis is idle, and never on the
+    # first sight of a new Jarvis (bin/fleet-jarvis.mjs restart).
+    if [ -f "$HOME/.config/ghostfleet/jarvis" ] \
+       && [ "$SOCK" = "$(grep -m1 '^sock=' "$HOME/.config/ghostfleet/jarvis" 2>/dev/null | cut -d= -f2-)" ]; then
+      _jr="$("$BIN_DIR/fleet-jarvis" restart --if-due 2>&1)"
+      [ -n "$_jr" ] && log "jarvis: $_jr"
+    fi
     sleep "$INTERVAL"
   done
 fi

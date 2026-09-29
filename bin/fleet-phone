@@ -66,6 +66,17 @@ CONFIGURED=0; ENROLLED=0; RUNNING=0; TAILNET=""
 # step it prints is the one that finishes the job.
 [ "$(cfg_get '(c.clients||[]).filter(x => !x.revoked && (x.creds||[]).length).length')" != "0" ] \
   && [ -n "$(cfg_get '(c.clients||[]).filter(x => !x.revoked && (x.creds||[]).length).length')" ] && ENROLLED=1
+# NOTIFICATIONS ARE A STEP, and the one nobody could see was missing. Push was built and
+# the daemon scanned every fleet for it, but for weeks of use the log held no
+# /api/push/key request at all: nothing on the phone asked for it — the switch lived in a
+# settings sheet — and this command, the one place that lists what is left to do, reported
+# the phone as fully set up the whole time. A phone that is set up but silent is
+# the failure this whole feature exists to prevent, so "set up" now includes a subscription,
+# counted from the config the daemon itself keeps them in (revoked clients do not count;
+# their rows are dropped with them).
+SUBS="$(cfg_get '(c.clients||[]).filter(x => !x.revoked).reduce((n, x) => n + ((x.push||[]).length), 0)')"
+case "$SUBS" in ''|*[!0-9]*) SUBS=0 ;; esac
+NOTIFY=0; [ "$SUBS" -gt 0 ] && NOTIFY=1
 ORIGIN="$(cfg_get '(c.origins||[])[0] || ""')"
 BINDPORT="$(cfg_get '(c.bind||"") + ":" + (c.port||"")')"
 
@@ -102,6 +113,7 @@ DONE=0
 [ "$CONFIGURED" = 1 ] && DONE=$((DONE + 1))
 [ "$ENROLLED" = 1 ]   && DONE=$((DONE + 1))
 [ "$RUNNING" = 1 ]    && DONE=$((DONE + 1))
+[ "$NOTIFY" = 1 ]     && DONE=$((DONE + 1))
 
 # ── the one command to run next ─────────────────────────────────────────────
 next_cmd() {
@@ -111,6 +123,9 @@ next_cmd() {
     else printf 'fleet-serve init --bind 127.0.0.1    # this machine only; see docs/mobile.md §5 for the tailnet\n'; fi
   elif [ "$ENROLLED" = 0 ]; then printf 'fleet-serve enroll phone\n'
   elif [ "$RUNNING" = 0 ];  then printf 'fleet-serve\n'
+  # Not a command: it is a tap, and it has to be — iOS only shows the permission prompt in
+  # answer to a gesture inside the installed app. The app offers it right after the unlock.
+  elif [ "$NOTIFY" = 0 ];   then printf 'open the installed app, unlock it, and tap "Turn on notifications"\n'
   else printf '' ; fi
 }
 NEXT="$(next_cmd)"
@@ -125,7 +140,7 @@ if [ "$MODE" = if-needed ] && [ -z "$NEXT" ]; then exit 0; fi
 mark() { [ "$1" = 1 ] && printf '  ✓ %s\n' "$2" || printf '  · %s\n' "$2"; }
 {
   if [ -z "$NEXT" ]; then echo "ghostfleet on your phone — set up and serving"
-  else                    echo "ghostfleet on your phone — $DONE of 3 steps done"; fi
+  else                    echo "ghostfleet on your phone — $DONE of 4 steps done"; fi
   echo
   echo "  The same fleet as an installable app: every session as a chat, the real pane one"
   echo "  tap away, and a notification when a worker is blocked or has an answer — so a"
@@ -134,6 +149,7 @@ mark() { [ "$1" = 1 ] && printf '  ✓ %s\n' "$2" || printf '  · %s\n' "$2"; }
   mark "$CONFIGURED" "$([ "$CONFIGURED" = 1 ] && echo "configured — ${BINDPORT}${ORIGIN:+ · $ORIGIN}" || echo "not configured yet")"
   mark "$ENROLLED"   "$([ "$ENROLLED" = 1 ] && echo "a phone is enrolled" || echo "no passkey enrolled yet")"
   mark "$RUNNING"    "$([ "$RUNNING" = 1 ] && echo "the daemon is listening" || echo "the daemon is not running")"
+  mark "$NOTIFY"     "$([ "$NOTIFY" = 1 ] && echo "notifications: on ($SUBS device$([ "$SUBS" = 1 ] || echo s))" || echo "notifications: not set up")"
   if [ -n "$NEXT" ]; then
     echo
     echo "  Next:"

@@ -223,6 +223,41 @@ if (phase === 'reads') {
   row('health', await a.api(base, 'GET', '/api/health'));
 }
 
+// ── Jarvis: the digest, the marker, a yes, and a voice ─────────────────────
+//     node serve-probe.mjs <base> jarvis <enrol-code> <wav-file>
+// Everything that must FAIL is asked as well as everything that must work: the digest
+// must not spend the stamp, a yes must need a token AND a fresh passkey, a no must not, and
+// audio that is not audio is refused by its bytes. Proposals are made by the SHELL before
+// this runs (lib/jarvis.mjs gate(), exactly as Jarvis would make one), so this phase reads
+// their ids back from /api/jarvis rather than inventing any.
+if (phase === 'jarvis') {
+  const wav = fs.readFileSync(process.argv[5]);
+  row('digest.noToken', await request(base, 'GET', '/api/digest'));
+  row('jarvis.noToken', await request(base, 'GET', '/api/jarvis'));
+  row('confirm.noToken', await request(base, 'POST', '/api/jarvis/confirm', { body: { id: 'X', answer: 'no' } }));
+  row('hear.noToken', await request(base, 'POST', '/api/jarvis/hear', { body: wav, contentType: 'audio/wav' }));
+  await a.enroll(base, arg);
+  row('digest', await a.api(base, 'GET', '/api/digest'));
+  row('digest.verb', await a.verb(base, 'fleet_digest', { peek: true }));
+  const j = await a.api(base, 'GET', '/api/jarvis');
+  row('jarvis', j);
+  const ids = ((j.json && j.json.pending) || []).map(p => p.id);
+  row('confirm.noAction', await a.api(base, 'POST', '/api/jarvis/confirm', { id: ids[0] || 'X' }));
+  row('confirm.unknown', await a.api(base, 'POST', '/api/jarvis/confirm', { id: 'NOPE', answer: 'no' }));
+  // A YES WITHOUT A FINGERPRINT is the case the passkey is for: a phone in someone else's
+  // hand with a live token must not be able to let Jarvis merge.
+  row('confirm.yesNoPasskey', await a.api(base, 'POST', '/api/jarvis/confirm', { id: ids[0] || 'X', answer: 'yes' }));
+  const fresh = await a.fresh(base, 'jarvis-yes');
+  row('confirm.yes', await a.api(base, 'POST', '/api/jarvis/confirm', { id: ids[0] || 'X', answer: 'yes' },
+                                  { headers: { 'x-fleet-assertion': JSON.stringify(fresh) } }));
+  row('confirm.no', await a.api(base, 'POST', '/api/jarvis/confirm', { id: ids[1] || 'X', answer: 'no' }));
+  row('jarvis.after', await a.api(base, 'GET', '/api/jarvis'));
+  row('said.phone', await a.verb(base, 'fleet_send', { project: 'demo', session: 'master', prompt: 'yes please' }));
+  row('hear.empty', await a.api(base, 'POST', '/api/jarvis/hear', Buffer.alloc(0), { contentType: 'audio/wav' }));
+  row('hear.text', await a.api(base, 'POST', '/api/jarvis/hear', Buffer.from('this is not audio at all, only text wearing a header'), { contentType: 'audio/wav' }));
+  row('hear.wav', await a.api(base, 'POST', '/api/jarvis/hear', wav, { contentType: 'audio/wav' }));
+}
+
 // THE PAYOFF PATH, in one phase because the whole value is the CHAIN. docs/mobile.md §7
 // put `answer keys` on the session screen from the start, and it was close to useless: a
 // worker blocked on "Allow pnpm test?" since 9pm is exactly the case the app exists for,

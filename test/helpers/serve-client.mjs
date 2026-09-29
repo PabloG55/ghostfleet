@@ -37,12 +37,16 @@ function cbor(v) {
   throw new Error(`cbor writer: unsupported ${typeof v}`);
 }
 
-export function request(base, method, path, { body, headers = {} } = {}) {
+// A Buffer body goes up AS BYTES under the given content type — /api/jarvis/hear takes
+// audio, which no JSON envelope can carry — and everything else is JSON, as before.
+export function request(base, method, path, { body, headers = {}, contentType } = {}) {
   const u = new URL(path, base);
   return new Promise((resolve, reject) => {
-    const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
+    const bytes = Buffer.isBuffer(body) ? body : null;
+    const data = bytes || (body === undefined ? null : Buffer.from(JSON.stringify(body)));
+    const ctype = bytes ? (contentType || 'application/octet-stream') : 'application/json';
     const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method,
-      headers: { ...(data ? { 'content-type': 'application/json', 'content-length': data.length } : {}), ...headers } },
+      headers: { ...(data ? { 'content-type': ctype, 'content-length': data.length } : {}), ...headers } },
       (res) => {
         const parts = [];
         res.on('data', d => parts.push(d));
@@ -144,7 +148,7 @@ export class Authenticator {
   async fresh(base, purpose) { this._base = base; return this.signChallenge({ purpose }); }
 
   headers({ auth = true } = {}) { return auth && this.token ? { authorization: `Bearer ${this.token}` } : {}; }
-  api(base, method, path, body) { this._base = base; return request(base, method, path, { body, headers: this.headers() }); }
+  api(base, method, path, body, opts = {}) { this._base = base; return request(base, method, path, { body, ...opts, headers: { ...this.headers(), ...(opts.headers || {}) } }); }
   // POST /api/verb, with the fresh assertion in the header for a destructive tool.
   async verb(base, tool, args, assertion = null) {
     this._base = base;

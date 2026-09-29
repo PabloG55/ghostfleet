@@ -311,6 +311,12 @@ GET  /api/health                            -> { ok, version, … }    the probe
 GET  /api/push/key                          -> { key, detail, subscribed, endpoints }
 POST /api/push/subscribe { endpoint, keys } -> { ok, subscribed, detail }   201
 POST /api/push/unsubscribe { endpoint }     -> { ok, removed }
+GET  /api/digest                            -> { ok, at, since, liveness, projects, totals }   always peeked
+GET  /api/jarvis                            -> { ok, present, project, profile, session, running,
+                                                 status, voice: { ready, why? }, pending: [{id,tool,summary,ts,granted}] }
+POST /api/jarvis/confirm { id, answer }     -> { ok, id, answer, summary, told }
+                                            'yes' needs X-Fleet-Assertion; 'no' does not
+POST /api/jarvis/hear   <audio/wav bytes>   -> { ok, text, ms }   4 MB cap; 415 if not RIFF/WAVE
 ```
 
 ### Notifications
@@ -329,7 +335,21 @@ screen is written by `sw.js` from those. `fleet-serve push --detail anonymous` d
 `sessions` array so the count is all that travels.
 
 Only a **home-screen install** can subscribe: on iOS a Safari tab has no Push API at all,
-so the settings sheet says so instead of offering a button that opens no prompt.
+so the settings sheet says so instead of offering a button that opens no prompt. In an
+install, the first unlock offers it too — a **Turn on notifications** band on Projects and
+on the Jarvis screen, one tap, because iOS only shows the permission prompt in answer to a
+gesture. "not now" is honoured for three days. A payload from Jarvis carries
+`open: "jarvis"`, and tapping it opens the Jarvis screen.
+
+### Jarvis
+
+The master of masters (docs/jarvis.md) is the `jarvis` project's `master`, so its screen
+is the session screen pointed at it, plus three things: the proposals waiting on a yes
+(yes / no, the yes behind a fresh passkey), the `talk` control for conversation mode, and
+a band at the top of Projects. Audio goes up as 16 kHz mono WAV and is transcribed by the
+Mac's whisper.cpp; nothing is kept. The fixtures (`jarvis.json`, `grid-jarvis.json`,
+`session-jarvis-master.json`) have one pending proposal and no voice, because there is
+nothing to transcribe with.
 
 ### Enrolling the phone
 
