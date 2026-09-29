@@ -13,6 +13,12 @@
 #   --key <Name> a tmux key name (Enter, Escape, Up, Down, Left, Right, Space,
 #                Tab, BSpace, …); repeat to send a sequence. Overrides <text>.
 #
+#   --expect <fingerprint>
+#                send ONLY if the pane is still showing that prompt (lib/permission-dialog.mjs
+#                fingerprint: kind, tool, command, options). Re-captured immediately before
+#                the keys go; a prompt that was answered, replaced or timed out since — or
+#                no prompt at all — is refused with "the prompt changed" and exit 4, so the
+#                keys never land in the composer as a message. The phone always sends it.
 #   --human-approved
 #                a HUMAN has read the permission dialog on that pane and says yes.
 #                Required to send an approving key to one; see below.
@@ -45,13 +51,14 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-SESSION=""; TEXT=""; NOENTER=0; KEYS=(); HUMAN=0
+SESSION=""; TEXT=""; NOENTER=0; KEYS=(); HUMAN=0; EXPECT=""; EXPECT_SET=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)         SOCK="${2:-}"; shift 2 ;;
     --key)      KEYS+=("${2:?}"); shift 2 ;;
     --no-enter) NOENTER=1; shift ;;
     --human-approved) HUMAN=1; shift ;;
+    --expect)   EXPECT="${2-}"; EXPECT_SET=1; shift 2 ;;
     --)         shift; break ;;
     -*) echo "fleet-answer: unknown option $1" >&2; exit 1 ;;
     *)  if [ -z "$SESSION" ]; then SESSION="$1"; else TEXT="${TEXT:+$TEXT }$1"; fi; shift ;;
@@ -85,7 +92,17 @@ done
 DETECT="$(cd "$(dirname "$src")" 2>/dev/null && pwd)/../lib/permission-dialog.mjs"
 dargs=()
 if [ "${#KEYS[@]}" -gt 0 ]; then for k in "${KEYS[@]}"; do dargs+=(--key "$k"); done; else dargs+=(--text "$TEXT"); fi
+[ "$EXPECT_SET" = 1 ] && dargs+=(--expect "$EXPECT")
 dialog="$(tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null | node "$DETECT" "${dargs[@]}" 2>/dev/null)"; drc=$?
+# 12: --expect named a prompt that is not on the pane any more. Refused before anything
+# else, and never "could not tell": without node there is no fingerprint to compare, and
+# a key that cannot be shown to be meant for what is on screen does not go.
+if [ "$EXPECT_SET" = 1 ] && { [ "$drc" = 12 ] || ! command -v node >/dev/null 2>&1; }; then
+  { echo "fleet-answer: the prompt changed on '$SESSION' — nothing was sent."
+    echo "  ${dialog:-could not re-read the pane to compare}"
+    echo "  It was answered or replaced since the pane you answered was captured; look again."; } >&2
+  exit 4
+fi
 case "$drc" in
   0|10|11) ;;
   *)  drc=11; dialog="(could not check this pane for a permission dialog — node or lib/permission-dialog.mjs is missing, so it is treated as one)" ;;

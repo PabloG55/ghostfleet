@@ -2960,6 +2960,90 @@ else
   skip "fleet-answer permission refusal" "tmux or node missing"
 fi
 
+# THE PHONE ANSWERS WHAT IT DREW, which may be gone. It polls the pane every couple of
+# seconds; the prompt on it can be answered at the desk or time out in between, and then
+# "1" and Enter land in the composer as a MESSAGE. So an answer carries the prompt's
+# fingerprint and fleet-answer --expect re-captures and compares just before send-keys.
+# The fingerprint is the detector's: kind, tool, command and options, whitespace dropped.
+group "prompt fingerprints: every kind, stable across a resize, distinct across prompts"
+if command -v node >/dev/null 2>&1; then
+  PD="$ROOT/lib/permission-dialog.mjs"
+  fpj() { node "$PD" --fingerprint < "$ROOT/test/fixtures/$1" 2>/dev/null; }
+  fpk() { fpj "$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);process.stdout.write(j?j[process.argv[1]]:"null")})' "$2"; }
+  for f in claude-permission-bash.txt codex-approval.txt opencode-permission.txt claude-permission-dialog-sgr.txt; do
+    is "$f: a permission prompt"              "permission" "$(fpk "$f" kind)"
+  done
+  for f in claude-trust.txt codex-trust.txt codex-trust-folder.txt; do
+    is "$f: a trust prompt"                   "trust" "$(fpk "$f" kind)"
+  done
+  is "codex-update.txt: a menu"               "menu"  "$(fpk codex-update.txt kind)"
+  for f in claude-idle.txt claude-busy.txt claude-limit-hit.txt claude-idle-quoting-limit.txt codex-idle-home.txt \
+           opencode-idle.txt opencode-busy.txt claude-composer-typed.txt pane-draft-multiline.txt; do
+    is "$f: no prompt at all"                 "null" "$(fpj "$f" | tr -d '\n')"
+  done
+  # A RESIZE IS NOT A CHANGE: the same dialog at 100 and 56 columns re-wraps (codex breaks a
+  # path mid-word), and the phone's poll and the answer can straddle one.
+  for a in claude-permission-bash codex-approval opencode-permission; do
+    is "$a: same fingerprint at 56 columns"   "$(fpk "$a.txt" fingerprint)" "$(fpk "$a-56col.txt" fingerprint)"
+  done
+  # ...and different prompts are different.
+  is "two permission dialogs differ"          "no" "$([ "$(fpk claude-permission-bash.txt fingerprint)" = "$(fpk claude-permission-dialog-sgr.txt fingerprint)" ] && echo yes || echo no)"
+  is "trust and update prompts differ"        "no" "$([ "$(fpk codex-trust-folder.txt fingerprint)" = "$(fpk codex-update.txt fingerprint)" ] && echo yes || echo no)"
+  is "the fingerprint carries the command"    "touch /private/tmp/gf-cap/notes.txt" "$(fpk codex-approval.txt command)"
+else
+  skip "prompt fingerprints" "node missing"
+fi
+
+group "fleet-answer --expect sends only to the prompt that was showing"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  EX="$(mktemp -d)"
+  cat > "$EX/replay.sh" <<'SH'
+#!/bin/sh
+clear; cat "$1"; read -r answer; clear; printf 'ANSWERED [%s]\n' "$answer"; sleep 600
+SH
+  chmod +x "$EX/replay.sh"
+  tmux -L cfansexp kill-server 2>/dev/null
+  ex_pane() { tmux -L cfansexp kill-session -t "$1" 2>/dev/null
+    tmux -L cfansexp new-session -d -s "$1" -x "${3:-100}" -y 30 "$EX/replay.sh $ROOT/test/fixtures/$2" 2>/dev/null
+    local i=0; while [ "$i" -lt 60 ] && [ -z "$(tmux -L cfansexp capture-pane -p -t "$1" 2>/dev/null | tr -d '[:space:]')" ]; do i=$((i+1)); sleep 0.1; done; sleep 0.2; }
+  ex_pane_has() { sleep 0.3; tmux -L cfansexp capture-pane -p -t "$1" 2>/dev/null | grep -c -- "$2" || true; }
+  exa() { TMUX= "$ROOT/bin/fleet-answer" -s cfansexp "$@" 2>&1; echo "rc=$?"; }
+  fpf() { node "$ROOT/lib/permission-dialog.mjs" --fingerprint < "$ROOT/test/fixtures/$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>process.stdout.write(JSON.parse(d)?.fingerprint||""))'; }
+  FP_TRUST="$(fpf codex-trust-folder.txt)"; FP_UPD="$(fpf codex-update.txt)"; FP_DLG="$(fpf claude-permission-bash.txt)"
+  # the same prompt: sent
+  ex_pane e1 codex-trust-folder.txt
+  is "the prompt that was showing is answered" "1" "$(exa --expect "$FP_TRUST" e1 1 | grep -c 'rc=0' || true)"
+  is "...and the keys reach it"               "1" "$(ex_pane_has e1 'ANSWERED \[1\]')"
+  # a different prompt took its place: refused, untouched
+  ex_pane e2 codex-update.txt
+  out="$(exa --expect "$FP_TRUST" e2 1)"
+  is "a different prompt is refused (rc 4)"   "1" "$(grep -c 'rc=4' <<< "$out" || true)"
+  is "...as 'the prompt changed'"             "1" "$(grep -c 'the prompt changed' <<< "$out" || true)"
+  is "...naming what is there now"            "1" "$(grep -c 'different prompt (menu' <<< "$out" || true)"
+  is "...and nothing reached the pane"        "0" "$(ex_pane_has e2 'ANSWERED')"
+  # NO PROMPT AT ALL — the desk answered it, and the composer is back. The keys must not
+  # become a message there. The pane is an idle session, whose composer would take them.
+  ex_pane e3 claude-idle.txt
+  out="$(exa --expect "$FP_DLG" --human-approved e3 1)"
+  is "no prompt on screen is refused"         "1" "$(grep -c 'rc=4' <<< "$out" || true)"
+  is "...saying it is not there any more"     "1" "$(grep -c 'not showing a prompt any more' <<< "$out" || true)"
+  is "...even with --human-approved"          "0" "$(ex_pane_has e3 'ANSWERED')"
+  is "an EMPTY expect is refused too"         "1" "$(exa --expect '' e3 1 | grep -c 'rc=4' || true)"
+  # the same dialog after a resize: still the same prompt
+  ex_pane e4 claude-permission-bash-56col.txt 56
+  is "a resized dialog still matches"         "1" "$(exa --expect "$FP_DLG" e4 3 | grep -c 'rc=0' || true)"
+  # --expect does not bypass the approval boundary: a matching fingerprint is not a yes
+  ex_pane e5 claude-permission-bash.txt
+  is "a matching fingerprint is still not a yes" "1" "$(exa --expect "$FP_DLG" e5 1 | grep -c 'rc=3' || true)"
+  # without --expect, the CLI answers as it always has
+  ex_pane e6 codex-update.txt
+  is "no --expect: the CLI is unchanged"      "1" "$(exa e6 2 | grep -c 'rc=0' || true)"
+  tmux -L cfansexp kill-server 2>/dev/null
+  rm -rf "$EX"
+else
+  skip "fleet-answer --expect" "tmux or node missing"
+fi
+
 # THE MCP CANNOT SET THE FLAG. fleet_answer's arguments go after `--`, so no text or
 # session it is handed can be --human-approved; and the only ways the flag is added are a
 # Jarvis owner-grant and the phone daemon's opts.human — neither of which is an argument.
@@ -9845,6 +9929,7 @@ if sv_start verbs; then
   is "send needs no passkey"                 "200" "$(pf send.ok verbs)"
   is "...and reaches another project too"    "200" "$(pf send.other verbs)"
   is "answer needs no passkey"               "200" "$(pf answer.ok verbs)"
+  is "an answer that names no prompt is refused" "409" "$(pf answer.noExpect verbs)"
   is "spawn with no assertion is refused"    "401" "$(pf spawn.noAssertion verbs)"
   is "...asking for one at the action"       "1"   "$(pb spawn.noAssertion verbs | grep -c 'X-Fleet-Assertion' || true)"
   is "spawn with a forged assertion"         "401" "$(pf spawn.badAssertion verbs)"
@@ -10271,11 +10356,26 @@ else
   is "the other fleet's 'dlg' is its own"    "1"   "$(pnb pane.otherFleet | grep -c 'WRONG-FLEET-PANE' || true)"
   is "...and not this fleet's dialog"        "0"   "$(pnb pane.otherFleet | grep -c 'Do you want to create' || true)"
 
+  # ── 1b. what the pane is waiting on, and the fingerprint an answer must echo ─
+  is "the pane names its prompt"             "1"   "$(pnb pane.dialog | grep -c '"prompt":{"kind":"permission"' || true)"
+  is "...with a fingerprint"                 "1"   "$(pnb pane.dialog | grep -cE '"fingerprint":"[0-9a-f]{16}"' || true)"
   # ── 2. answer keys ─────────────────────────────────────────────────────────
+  # A STALE FINGERPRINT — the phone drew a prompt that is not the one on screen — is
+  # refused as "the prompt changed", and the pane is exactly as it was: still the dialog,
+  # and no stray keys typed into it.
+  is "a stale fingerprint is refused"        "409" "$(pnf pane.stale)"
+  is "...as 'the prompt changed'"            "1"   "$(pnb pane.stale | grep -c 'the prompt changed' || true)"
+  is "...flagged for the phone to re-poll"   "1"   "$(pnb pane.stale | grep -c '"changed":true' || true)"
+  is "...and the dialog is untouched"        "1"   "$(pnb pane.afterStale | grep -c 'Do you want to create' || true)"
+  is "...with nothing typed into it"         "0"   "$(pnb pane.afterStale | grep -c 'Z8' || true)"
   is "answer keys is accepted"               "200" "$(pnf pane.answer)"
   # ── 3. ...and the pane it showed has changed ───────────────────────────────
   is "the dialog is gone from the pane"      "0"   "$(pnb pane.after | grep -c 'Do you want to create' || true)"
   is "...and the answer landed as sent"      "1"   "$(pnb pane.after | grep -c 'ANSWERED \[1\]' || true)"
+  # THE RACE ITSELF: the same answer again once the prompt is gone — keys for a dialog must
+  # never become a message in whatever replaced it.
+  is "an answer to a prompt that has gone is refused" "409" "$(pnf pane.answerGone)"
+  is "...and nothing reached the pane"       "0"   "$(pnb pane.afterGone | grep -c 'Z9' || true)"
 
   # ── the endpoint's edges, each refused by name ─────────────────────────────
   is "no session is refused"                 "400" "$(pnf pane.noSession)"

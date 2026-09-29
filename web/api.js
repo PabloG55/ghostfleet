@@ -654,7 +654,10 @@ function fixtureVerb(tool, a) {
       overlay.sent.set(a.session, list);
       return ok(`sent to '${a.session}'`);
     }
-    case 'fleet_answer': overlay.status.set(a.session, 'working'); return ok(`answered '${a.session}'`);
+    // Same rule as the daemon: an answer names the prompt it answers, or nothing is sent.
+    case 'fleet_answer':
+      if (!a.expect) return { ok: false, text: 'the prompt changed: the pane you answered was not showing a prompt. Nothing was sent.' };
+      overlay.status.set(a.session, 'working'); return ok(`answered '${a.session}'`);
     case 'fleet_stop':
       // The planner refuses the lead before it reaches a command (mcp/fleet-dispatch.mjs),
       // so fixture mode has to refuse it too — this backend stands in for the SERVER, and

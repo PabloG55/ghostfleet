@@ -47,6 +47,14 @@ the detail, and every entry here names the PR that carries the argument.
   its task (`--session <worker>`); its siblings stay blocked, `fleet-rename` carries the
   override and `fleet-stop` clears it. A worker cannot turn them on for itself, and Jarvis
   ignores both. Every refusal names the setting that would allow it.
+- **A phone answer could land as a chat message.** The phone answered the prompt it had
+  drawn from its last pane poll; if that prompt was answered at the desk or timed out in
+  between, "1" and Enter went into the composer as a turn. The answer now carries the
+  prompt's fingerprint (kind, tool, command, options, from `/api/pane`), and
+  `fleet-answer --expect` re-captures just before sending and refuses "the prompt changed"
+  otherwise. An answer with no prompt on screen is refused. The phone's answer sheet shows
+  the prompt it is answering. **Relaunch the installed app** (client v47): an older one
+  sends no fingerprint, and its answers are refused with a message saying to reload.
 
 ## 0.4.0 — 2026-09-24
 

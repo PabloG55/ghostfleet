@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: c42d39a68038
+// CLIENT-HASH: 9b25680652d7
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -278,7 +278,11 @@
 // conversation mode, and the one-tap "Turn on notifications" after an unlock — the offer
 // push never had, which is why it had never been turned on. A tap on a notification from
 // Jarvis opens Jarvis. An older client shows none of it and keeps working.
-const VERSION = 'ghostfleet-v46';
+// v47 answers only the prompt it drew: the answer sheet reads the pane first, shows the
+// prompt it is answering, and sends its fingerprint; the daemon refuses if that prompt is
+// no longer on screen ("the prompt changed") and the sheet re-reads the pane. AN OLDER
+// CLIENT SENDS NO FINGERPRINT, SO ITS ANSWERS ARE REFUSED — with a message saying to reload.
+const VERSION = 'ghostfleet-v47';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
