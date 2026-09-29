@@ -1,58 +1,19 @@
 # Backlog
 
 The next concrete pieces of work, each sized to one PR. `ROADMAP.md` holds the ideas and the
-evidence behind them; this is the queue those ideas turned into, plus the bugs the 0.4.0
-cycle found and left open. Every entry says what went wrong, how it was seen, and what
+evidence behind them; this is the queue those ideas turned into. Every entry says what went wrong, how it was seen, and what
 "done" means — a line nobody can check is not a backlog item.
 
 Example names below are the demo data in `web/fixtures/` (`acme-api`, `api-fix`, `master`…).
 
-## Bugs
+## Shipped since this list was written
 
-### 1. `fleet-restart` resumes a conversation id that is stale or empty
-A lead was relaunched by `fleet-restart --all` onto an id with **no transcript anywhere** —
-recorded when the session had been reopened into a fresh conversation that never took a
-turn — so the resume failed and the pane closed, taking the card with it. The real
-conversation was the newest transcript in that checkout not held by another live session.
-Hibernation fixed the same shape in #14 by reading the id the live process is writing;
-restart still trusts the recorded one.
-**Done when:** restart takes the id from the live process (and corrects the record), and
-when no conversation can be established it **refuses that session with the reason** instead
-of killing it.
-
-### 2. `fleet-restart` without a terminal says "Device not configured"
-Run from a prompt with no tty, the `[y/N]` read fails on `/dev/tty` and prints a shell
-error, then "nothing done". Correct outcome, useless message.
-**Done when:** with no tty it says `no terminal to confirm on — re-run with --yes` and
-exits non-zero. Ship with 1.
-
-### 3. The suite leaks `fleet-serve` daemons
-Eight were found alive on loopback ports, started from test runs in worktrees that had
-since been removed — the oldest two days old. The startup sweep does not catch them.
-**Done when:** the group that starts them is named, it reaps what it starts on every exit
-path (including a killed run), and a suite assertion proves a run leaves no `fleet-serve`
-it did not find.
-
-### 4. Editing a PR's description can block its merge
-Editing the body fires a second `pull_request` run on the same commit that skips the test
-job, which reports a single skipped `test`. GitHub then reads the required
-`test (ubuntu-latest)` / `test (macos-latest)` from that newest suite, finds neither, and
-reports the PR `BLOCKED` with every required check green. Re-running the real run did not
-clear it; a new commit did.
-**Done when:** a body edit either re-runs nothing or re-runs the matrix, and a PR edited
-after its checks passed stays mergeable.
-
-### 5. Fixed sleeps make two groups flaky on slow runners
-The phone gesture helper waits 1s for a card; the agent-column row waits 12s for the
-screen. Both went red on the ubuntu leg on branches that did not touch them, and green
-on a re-run.
-**Done when:** both wait for the thing to appear (with a ceiling), not for a clock.
-
-### 6. The queued-work hook fires when the session is idle
-The `UserPromptSubmit` hook from #15 labelled a prompt as "arrived while you were still
-working on: …" when no turn was running, and quoted the prompt itself as the task in hand.
-**Done when:** the hook adds context only while a turn is genuinely running (measured,
-not inferred from a stale status), and never quotes the prompt it is annotating.
+- **Jarvis**, the queued "master of masters" — one session above every fleet — shipped in #1.
+- The six 0.4.0 bugs that were listed here — `fleet-restart` resuming a stale or empty id
+  and failing without a terminal, the suite leaking `fleet-serve` daemons, an edited PR
+  body blocking its merge, fixed sleeps in two flaky groups, and the queued-work hook
+  firing into idle sessions — and the two cleanups (the phone's `__diag` probes, the
+  author's home path in fixtures) are fixed in #3.
 
 ## Features
 
@@ -94,13 +55,3 @@ siblings. Proposed (awaiting decisions):
 `n` = new folder here: asks a name, creates it, offers `git init` (a root with no git has
 nothing to branch worktrees from), lands the cursor on it; `s` selects it as before. And a
 type-to-filter, so a home directory with dozens of sibling checkouts narrows as you type.
-
-## Cleanup
-
-### 12. Remove the phone probes
-The `__diag` beacons (load / lifecycle / geo) found the Face-ID reload and the iOS 26
-viewport bug. Both are fixed on the device. They were shipped to be removed once the fix held.
-
-### 13. A placeholder for the author's home path
-Three fixture files and two comments carry a real home path. Harmless, but the placeholder
-vocabulary exists for exactly this.
