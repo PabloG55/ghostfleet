@@ -3001,6 +3001,10 @@ const { execFileSync } = await import('node:child_process');
 const cap = () => execFileSync('tmux', ['-L', 'cf-jaans', 'capture-pane', '-p', '-t', 'r'], { encoding: 'utf8' });
 const r1 = m.callTool('fleet_answer', { session: 'r', text: '1' });
 fs.writeFileSync('$JA/asked.txt', String(r1.text ?? r1));
+// Jarvis's own Bash door, with every setting on: fleet-answer must still refuse it.
+const { spawnSync } = await import('node:child_process');
+const b = spawnSync('$ROOT/bin/fleet-answer', ['r', '1'], { encoding: 'utf8' });
+fs.writeFileSync('$JA/bash.txt', 'rc=' + b.status + '\n' + b.stderr);
 await new Promise(r => setTimeout(r, 400));
 fs.writeFileSync('$JA/before.txt', cap());
 const id = (String(r1.text).match(/proposal (\S+?)[ .]/) || [])[1];
@@ -3009,6 +3013,9 @@ m.callTool('fleet_answer', { session: 'r', text: '1' });
 await new Promise(r => setTimeout(r, 400));
 fs.writeFileSync('$JA/after.txt', cap());
 EOF
+  # JARVIS IGNORES BOTH SETTINGS: turned on for its project AND its master, and nothing
+  # below may change because of it — its confirm-list stays on.
+  for b in agents-approve workers-merge; do : > "$JA/.claude/fleet/cf-jaans.$b"; : > "$JA/.claude/fleet/cf-jaans.master.$b"; done
   tmux -L cf-jaans kill-server 2>/dev/null
   tmux -L cf-jaans new-session -d -s r -x 100 -y 30 "sh -c 'clear; cat $ROOT/test/fixtures/claude-permission-bash.txt; read a; clear; echo ANSWERED \$a; sleep 600'" 2>/dev/null
   i=0; while [ "$i" -lt 60 ] && ! grep -q 'Do you want to proceed' <<< "$(tmux -L cf-jaans capture-pane -p -t r 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
@@ -3017,11 +3024,101 @@ EOF
   is "the question quotes the worker's command" "1" "$([ "$(grep -cF 'git log --oneline -1 && touch notes.txt' "$JA/asked.txt" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
   is "...and calls it a permission dialog"      "1" "$(grep -c "approve r's permission dialog" "$JA/asked.txt" 2>/dev/null || true)"
   is "before his yes nothing reached the pane"  "0" "$(grep -c 'ANSWERED' "$JA/before.txt" 2>/dev/null || true)"
+  is "...with every setting on, Jarvis's Bash fleet-answer is refused" "1" "$(grep -c '^rc=3' "$JA/bash.txt" 2>/dev/null || true)"
+  is "...and told the setting is not its to use"   "1" "$(grep -c 'never applies to you' "$JA/bash.txt" 2>/dev/null || true)"
   is "after it, the yes did"                    "1" "$(grep -c 'ANSWERED 1' "$JA/after.txt" 2>/dev/null || true)"
   tmux -L cf-jaans kill-server 2>/dev/null
   rm -rf "$JA"
 else
   skip "Jarvis permission answer" "tmux or node missing"
+fi
+
+# "AGENTS CAN APPROVE TOOL CALLS" IS A SETTING: off by default (the group above), on for a
+# project, or on for ONE calling session — the sub-master of its task — while a sibling in
+# the same fleet stays blocked. The caller is whoever runs fleet-answer, read from its live
+# $TMUX, so the session cases run fleet-answer from INSIDE a real pane on the same socket.
+group "agents can approve: project-on and session-on, and only that session"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  AS="$(cd "$(mktemp -d)" && pwd -P)"; ASF="$AS/fleet"; mkdir -p "$ASF"
+  cat > "$AS/replay.sh" <<'SH'
+#!/bin/sh
+clear; cat "$1"; read -r answer; clear; printf 'ANSWERED [%s]\n' "$answer"; sleep 600
+SH
+  chmod +x "$AS/replay.sh"
+  tmux -L cf-ansset kill-server 2>/dev/null
+  as_pane() { tmux -L cf-ansset kill-session -t "$1" 2>/dev/null
+    tmux -L cf-ansset new-session -d -s "$1" -x 100 -y 30 "$AS/replay.sh $ROOT/test/fixtures/claude-permission-bash.txt" 2>/dev/null
+    local i=0; while [ "$i" -lt 60 ] && ! grep -q 'Do you want to proceed' <<< "$(tmux -L cf-ansset capture-pane -p -t "$1" 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done; }
+  as_answered() { sleep 0.3; tmux -L cf-ansset capture-pane -p -t "$1" 2>/dev/null | grep -c "ANSWERED \[1\]" || true; }
+  # Run fleet-answer AS session $1 (a real pane on cf-ansset), answering $2 with "1".
+  as_from() { local me="$1" tgt="$2"; rm -f "$AS/$me.done"
+    tmux -L cf-ansset kill-session -t "$me" 2>/dev/null
+    tmux -L cf-ansset new-session -d -s "$me" "env CLAUDE_FLEET_DIR=$ASF HOME=$AS $ROOT/bin/fleet-answer $tgt 1 > $AS/$me.out 2>&1; echo rc=\$? >> $AS/$me.out; touch $AS/$me.done; sleep 60" 2>/dev/null
+    local i=0; while [ "$i" -lt 100 ] && [ ! -f "$AS/$me.done" ]; do i=$((i+1)); sleep 0.1; done; }
+  # project on — from a plain terminal, so only the target project's setting can apply
+  : > "$ASF/cf-ansset.agents-approve"
+  as_pane t1
+  out="$(env -u TMUX CLAUDE_FLEET_DIR="$ASF" HOME="$AS" "$ROOT/bin/fleet-answer" -s cf-ansset t1 1 2>&1; echo "rc=$?")"
+  is "project on: an approving key is sent"      "1" "$(grep -c 'agents can approve tool calls" is on' <<< "$out" || true)"
+  is "...and reaches the pane"                   "1" "$(as_answered t1)"
+  rm -f "$ASF/cf-ansset.agents-approve"
+  # session on — the sub-master may, its sibling may not
+  : > "$ASF/cf-ansset.sub.agents-approve"
+  as_pane t2; as_from sub t2
+  is "session on: the sub-master's yes is sent"  "1" "$(grep -c 'rc=0' "$AS/sub.out" || true)"
+  is "...and reaches the pane"                   "1" "$(as_answered t2)"
+  as_pane t3; as_from sib t3
+  is "...its sibling is still refused"           "1" "$(grep -c 'rc=3' "$AS/sib.out" || true)"
+  is "...and nothing reached that pane"          "0" "$(as_answered t3)"
+  is "...and is told the setting that would allow it" "1" "$(grep -c '"agents can approve tool calls" is off' "$AS/sib.out" || true)"
+  is "...for itself, by session"                 "1" "$(grep -cF 'fleet-project set -s cf-ansset agents-approve on --session sib' "$AS/sib.out" || true)"
+  # a session override of OFF beats a project that is on
+  : > "$ASF/cf-ansset.agents-approve"; : > "$ASF/cf-ansset.sib.agents-approve-off"
+  as_pane t4; as_from sib t4
+  is "a session's off beats the project's on"    "1" "$(grep -c 'rc=3' "$AS/sib.out" || true)"
+  tmux -L cf-ansset kill-server 2>/dev/null
+  rm -rf "$AS"
+else
+  skip "agents-approve setting" "tmux or node missing"
+fi
+
+# THE SETTINGS HAVE ONE WRITER AND FOLLOW THE SESSION: fleet-project writes them (the grid
+# calls it), fleet-rename carries a session's override to its new name, and fleet-stop
+# clears it, so a name reused later starts blocked rather than inheriting a sub-master's.
+group "boundary settings: set, carried by rename, cleared by stop"
+if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  BS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$BS/home/.config/ghostfleet" "$BS/repo"
+  printf 'acme-api\t%s\n' "$BS" > "$BS/home/.config/ghostfleet/projects"
+  BSF="$BS/home/.claude/fleet"
+  fp() { HOME="$BS/home" "$ROOT/bin/fleet-project" "$@" 2>&1; }
+  fp set acme-api workers-merge on >/dev/null
+  is "project on writes <sock>.<setting>"         "1" "$([ -f "$BSF/cf-acme-api.workers-merge" ] && echo 1 || echo 0)"
+  is "get reads it back"                          "1" "$(fp get acme-api | grep -cE '^workers-merge +on' || true)"
+  is "...and the other stays off by default"      "1" "$(fp get acme-api | grep -cE '^agents-approve +off' || true)"
+  fp set acme-api workers-merge off >/dev/null
+  is "project off removes it"                     "0" "$([ -f "$BSF/cf-acme-api.workers-merge" ] && echo 1 || echo 0)"
+  fp set -s cf-acme-api agents-approve on --session api-fix >/dev/null
+  is "by socket, for one session"                 "1" "$([ -f "$BSF/cf-acme-api.api-fix.agents-approve" ] && echo 1 || echo 0)"
+  is "...which only that session resolves to"     "1" "$(fp get acme-api --session api-fix | grep -cE '^agents-approve +on' || true)"
+  is "...and a sibling does not"                  "1" "$(fp get acme-api --session docs-pass | grep -cE '^agents-approve +off' || true)"
+  is "a bad setting name is refused"              "1" "$(fp set acme-api merge-anything on | grep -c usage || true)"
+  git init -q -b main "$BS/repo" 2>/dev/null
+  git -C "$BS/repo" config user.email t@t; git -C "$BS/repo" config user.name t
+  : > "$BS/repo/f"; git -C "$BS/repo" add f; git -C "$BS/repo" commit -qm init 2>/dev/null
+  git -C "$BS/repo" worktree add -q "$BS/api-fix" -b api-fix 2>/dev/null
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s api-fix -c "$BS/api-fix" "sleep 120" 2>/dev/null
+  : > "$BSF/cf-acme-api.api-fix.workers-merge"
+  env -u TMUX CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-rename" -s cf-acme-api api-fix api-retry >/dev/null 2>&1
+  is "rename carries the approve override"        "1" "$([ -f "$BSF/cf-acme-api.api-retry.agents-approve" ] && echo 1 || echo 0)"
+  is "...and the merge override"                  "1" "$([ -f "$BSF/cf-acme-api.api-retry.workers-merge" ] && echo 1 || echo 0)"
+  is "...leaving nothing under the old name"      "0" "$(ls "$BSF" | grep -c '^cf-acme-api\.api-fix\.' || true)"
+  env -u TMUX -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-stop" -s cf-acme-api api-retry >/dev/null 2>&1
+  is "stop clears the session's overrides"        "0" "$(ls "$BSF" | grep -cE '^cf-acme-api\.api-retry\.(workers-merge|agents-approve)' || true)"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  rm -rf "$BS"
+else
+  skip "boundary settings lifecycle" "tmux or git missing"
 fi
 
 # ── 4a8. dev-stack slots ─────────────────────────────────────────────────────
@@ -3745,6 +3842,37 @@ if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     is "the installed matcher sends $t here"    "1" "$(grep -cxE "$MM" <<< "$t" || true)"
   done
   is "...and not Read"                          "0" "$(grep -cxE "$MM" <<< "Read" || true)"
+
+  # ── "workers can merge" is a SETTING: default blocks (above), project-on allows,
+  # session-on allows only that session, and a worker cannot flip it. The session name is
+  # CLAUDE_FLEET_SLOT here because there is no tmux server behind cf-x to ask.
+  WF="$WM/fleet"; mkdir -p "$WF"
+  mgs() { local sess="$1" cmd="$2"; shift 2; mg "$WM/wt-a" "$cmd" CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_DIR="$WF" CLAUDE_FLEET_SLOT="$sess" "$@"; }
+  mgs w1 'gh pr merge 12'
+  is "default: off, the worker is refused"      "2" "$MRC"
+  is "...and the refusal names the setting"     "1" "$(grep -c '"workers can merge" is off' <<< "$MOUT" || true)"
+  is "...and how to turn it on, project-wide"   "1" "$([ "$(grep -cE 'fleet-project set -s cf-x workers-merge on +# the whole project' <<< "$MOUT")" -ge 1 ] && echo 1 || echo 0)"
+  is "...or for this session"                   "1" "$(grep -cF 'fleet-project set -s cf-x workers-merge on --session w1' <<< "$MOUT" || true)"
+  : > "$WF/cf-x.workers-merge"
+  mgs w1 'gh pr merge 12';  is "project on: a worker may merge"          "0" "$MRC"
+  mgs w2 'gh pr merge 12';  is "...any worker in it"                     "0" "$MRC"
+  : > "$WF/cf-x.w2.workers-merge-off"
+  mgs w2 'gh pr merge 12';  is "...except one whose session says off"    "2" "$MRC"
+  rm -f "$WF/cf-x.workers-merge" "$WF/cf-x.w2.workers-merge-off"
+  : > "$WF/cf-x.w1.workers-merge"
+  mgs w1 'gh pr merge 12';  is "session on: the sub-master may merge"    "0" "$MRC"
+  mgs w2 'gh pr merge 12';  is "...its sibling stays blocked"            "2" "$MRC"
+  mt "$WM/wt-a" mcp__github__merge_pull_request CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_DIR="$WF" CLAUDE_FLEET_SLOT=w1
+  is "...the MCP merge tool follows the same setting" "0" "$MRC"
+  rm -f "$WF/cf-x.w1.workers-merge"
+  # A WORKER DOES NOT GRANT ITSELF, by command or by marker — and the lead may.
+  mgs w1 'fleet-project set -s cf-x workers-merge on --session w1'
+  is "a worker cannot turn the setting on"      "2" "$MRC"
+  is "...and is told who can"                   "1" "$(grep -c 'does not change its own boundaries' <<< "$MOUT" || true)"
+  mgs w1 "touch $WF/cf-x.w1.agents-approve"
+  is "...nor write the marker by hand"          "2" "$MRC"
+  mg "$WM/repo" 'fleet-project set -s cf-x workers-merge on --session w1' CLAUDE_FLEET_SOCK=cf-x
+  is "the lead in the main checkout may set it" "0" "$MRC"
   rm -rf "$WM"
 else
   skip "worker merge guard" "git or jq missing"
@@ -11675,6 +11803,12 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command
   is "a merge through gh api is held"              "1" "$(guard "$JPANE" 'gh api -X PUT repos/o/r/pulls/1/merge' | grep -c 'confirm-list' || true)"
   is "keys into ANOTHER fleet's pane are held"     "1" "$(guard "$JPANE" 'tmux -L cf-acme-api send -t api-fix 2 Enter' | grep -c 'confirm-list' || true)"
   is "the same merge from another session passes"  "0" "$(guard "$HPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  # JARVIS IGNORES THE BOUNDARY SETTINGS: both on, for its project and its master, and its
+  # confirm-list still holds the merge.
+  mkdir -p "$JC/home/.claude/fleet"
+  for b in workers-merge agents-approve; do : > "$JC/home/.claude/fleet/cf-jarvis.$b"; : > "$JC/home/.claude/fleet/cf-jarvis.master.$b"; done
+  is "with both settings on, Jarvis's merge is still held" "2" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  rm -f "$JC/home/.claude/fleet"/cf-jarvis.*workers-merge "$JC/home/.claude/fleet"/cf-jarvis.*agents-approve
   rm -f "$JC/home/.config/ghostfleet/jarvis"
   is "with no Jarvis marker nothing is guarded"    "0" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
   tmux -L cf-jarvis kill-server 2>/dev/null

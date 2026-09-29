@@ -20,7 +20,7 @@
 # After sending it prints the tail of the pane so you can see what happened.
 # Socket defaults to $CLAUDE_FLEET_SOCK.
 #
-# AN AGENT DOES NOT APPROVE ANOTHER AGENT'S TOOL CALL. When the pane is showing a
+# AN AGENT DOES NOT APPROVE ANOTHER AGENT'S TOOL CALL — by default. When the pane is showing a
 # permission dialog — claude's "Do you want to proceed? 1. Yes …", codex's "Would you like
 # to run the following command?", opencode's "Permission required" — any key that is not a
 # decline is REFUSED unless --human-approved is passed, and the refusal prints the dialog:
@@ -29,6 +29,9 @@
 # or --key Escape) is always allowed. A usage-limit notice, a folder-trust prompt and every
 # other menu are not permission dialogs and answer exactly as before. The detector is
 # lib/permission-dialog.mjs, the same one the MCP dispatch shows Jarvis's owner.
+#   The setting "agents can approve tool calls" (lib/boundary.sh; `fleet-project set …
+# agents-approve on`, per project or per session) lifts this for fleets whose workers own
+# their task. Never for Jarvis — see below.
 #   The fleet_answer MCP tool cannot set the flag: it passes its arguments after `--`, so
 # no text it is handed can parse as one. The one MCP path that does pass it is Jarvis's,
 # and only after its owner said yes to that exact call (mcp/fleet-dispatch.mjs).
@@ -90,7 +93,35 @@ esac
 what="${KEYS[*]:-$TEXT}"
 if [ "${#KEYS[@]}" -gt 0 ]; then again="$(printf ' --key %q' "${KEYS[@]}")"; else again=" $(printf '%q' "$TEXT")"; fi
 [ "$NOENTER" = 1 ] && again="$again --no-enter"
-if [ "$drc" = 11 ] && [ "$HUMAN" != 1 ]; then
+# "AGENTS CAN APPROVE TOOL CALLS" (lib/boundary.sh), off by default. Some fleets run a
+# worker that is the master of its own task and approves for it, so this is a setting:
+#   - on for the TARGET's project: any session may approve that project's dialogs
+#   - on for the CALLING session: it may approve dialogs in its own fleet, and its
+#     siblings, which do not carry the override, stay blocked
+# The caller is read from the live $TMUX, the same drift-proof source every command here
+# uses; with none (a plain terminal, or the MCP aimed at another project) only the target
+# project's setting can apply. JARVIS IS NEVER GRANTED BY IT: its confirm-list stays on
+# whatever a project says, so for Jarvis's master only --human-approved (the owner's yes)
+# lets an approval through.
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+CSOCK=""; CSESS=""
+_t="${TMUX:-}"; if [ -n "$_t" ]; then CSOCK="${_t%%,*}"; CSOCK="${CSOCK##*/}"
+  CSESS="$(tmux -L "$CSOCK" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"; fi
+JMARK="$HOME/.config/ghostfleet/jarvis"
+IS_JARVIS=0
+[ -n "$CSOCK" ] && [ "$CSESS" = master ] && [ -f "$JMARK" ] \
+  && [ "$CSOCK" = "$(grep -m1 '^sock=' "$JMARK" 2>/dev/null | cut -d= -f2-)" ] && IS_JARVIS=1
+BOUNDARY="$(dirname "$DETECT")/boundary.sh"
+SETTING_OK=0
+if [ "$drc" = 11 ] && [ "$HUMAN" != 1 ] && [ "$IS_JARVIS" = 0 ] && . "$BOUNDARY" 2>/dev/null; then
+  if [ "$CSOCK" = "$SOCK" ] && [ -n "$CSESS" ]; then
+    boundary_on agents-approve "$FLEET_DIR" "$SOCK" "$CSESS" && SETTING_OK=1
+  else
+    boundary_on agents-approve "$FLEET_DIR" "$SOCK" && SETTING_OK=1
+  fi
+fi
+
+if [ "$drc" = 11 ] && [ "$HUMAN" != 1 ] && [ "$SETTING_OK" != 1 ]; then
   { echo "fleet-answer: REFUSED — '$SESSION' is showing a PERMISSION dialog, and '$what' would approve it."
     echo "  An agent does not approve another agent's tool call. What it is asking to run:"
     echo
@@ -99,10 +130,20 @@ if [ "$drc" = 11 ] && [ "$HUMAN" != 1 ]; then
     echo "  To DECLINE, use the option shown above — that is always allowed."
     echo "  To APPROVE, a human who has read the dialog above runs it themselves:"
     echo "      fleet-answer -s $SOCK --human-approved $SESSION$again"
-    echo "  If you are an agent: show the human the dialog and ask. Do not add the flag yourself."; } >&2
+    echo "  If you are an agent: show the human the dialog and ask. Do not add the flag yourself."
+    echo
+    if [ "$IS_JARVIS" = 1 ]; then
+      echo "  (Jarvis: the \"agents can approve tool calls\" setting never applies to you — your"
+      echo "  confirm-list does. Ask the owner.)"
+    elif command -v boundary_how >/dev/null 2>&1 || . "$BOUNDARY" 2>/dev/null; then
+      if [ "$CSOCK" = "$SOCK" ]; then boundary_how agents-approve "$SOCK" "$CSESS"; else boundary_how agents-approve "$SOCK"; fi | sed 's/^/  /'
+    fi; } >&2
   exit 3
 fi
-if [ "$drc" = 11 ]; then
+if [ "$SETTING_OK" = 1 ]; then
+  { echo "fleet-answer: approving a permission dialog on '$SESSION' (\"agents can approve tool calls\" is on):"
+    printf '%s\n' "$dialog" | sed 's/^/    | /'; } >&2
+elif [ "$drc" = 11 ]; then
   { echo "fleet-answer: approving a permission dialog on '$SESSION' (--human-approved):"
     printf '%s\n' "$dialog" | sed 's/^/    | /'; } >&2
 elif [ "$drc" = 10 ]; then

@@ -10,6 +10,7 @@
 # Migrates everything keyed by the OLD name so state isn't silently dropped:
 #   - the pause marker (fleet-pause)
 #   - the notify-lead / notify-lead-off per-session override
+#   - the workers-merge / agents-approve per-session boundary overrides
 #   - a pending scheduled send (fleet-schedule)
 #   - a pending reply address (fleet-send --reply-to), so a question already asked of
 #     this session still gets its answer relayed after the rename
@@ -76,6 +77,11 @@ tmux -L "$SOCK" rename-session -t "$OLD" "$NEW" \
 mv -f "$FLEET_DIR/$SOCK.$OLD.parked"          "$FLEET_DIR/$SOCK.$NEW.parked"          2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.notify-lead"     "$FLEET_DIR/$SOCK.$NEW.notify-lead"     2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.notify-lead-off" "$FLEET_DIR/$SOCK.$NEW.notify-lead-off" 2>/dev/null || true
+# the boundary overrides travel with the worker they were granted to (lib/boundary.sh)
+for _b in workers-merge agents-approve; do
+  mv -f "$FLEET_DIR/$SOCK.$OLD.$_b"     "$FLEET_DIR/$SOCK.$NEW.$_b"     2>/dev/null || true
+  mv -f "$FLEET_DIR/$SOCK.$OLD.$_b-off" "$FLEET_DIR/$SOCK.$NEW.$_b-off" 2>/dev/null || true
+done
 mv -f "$FLEET_DIR/$SOCK.$OLD.sched"           "$FLEET_DIR/$SOCK.$NEW.sched"           2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.reply-to"        "$FLEET_DIR/$SOCK.$NEW.reply-to"        2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.reply-to.armed"  "$FLEET_DIR/$SOCK.$NEW.reply-to.armed"  2>/dev/null || true

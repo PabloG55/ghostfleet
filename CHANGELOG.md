@@ -41,6 +41,12 @@ the detail, and every entry here names the PR that carries the argument.
 - **A worker could merge its own PR.** `gh pr merge` (and the GitHub MCP merge tool) from a
   session in a linked worktree is now refused by the PreToolUse guard; the lead merges.
   Re-run `./install.sh` to widen the guard's matcher to Bash.
+- Both of the above are **settings**, off by default: *workers can merge* and *agents can
+  approve tool calls*. Turn either on for a project (`fleet-project set <project>
+  workers-merge on`, or the grid's `,` page) or for one worker that is the sub-master of
+  its task (`--session <worker>`); its siblings stay blocked, `fleet-rename` carries the
+  override and `fleet-stop` clears it. A worker cannot turn them on for itself, and Jarvis
+  ignores both. Every refusal names the setting that would allow it.
 
 ## 0.4.0 — 2026-09-24
 

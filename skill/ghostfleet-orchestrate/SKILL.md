@@ -169,6 +169,12 @@ retry?", or a trust prompt, use:
 - **You merge; your workers do not.** A worker opens its PR and reports the number; the
   lead reviews and merges it from the main checkout. `gh pr merge` from a linked worktree
   is refused by the fleet's PreToolUse guard.
+- **Both are settings, OFF by default** — for a fleet whose workers own their task:
+  `fleet-project set <project> workers-merge on` / `agents-approve on` for the whole
+  project (or the grid's `,` page), or add `--session <worker>` to make ONE worker the
+  sub-master of its task while its siblings stay blocked. `fleet-project get <project>`
+  shows them. Only you or the human set these — a worker's own attempt is refused. Jarvis
+  ignores both: its confirm-list always asks the owner.
 
 ## Budget: one shared account
 
