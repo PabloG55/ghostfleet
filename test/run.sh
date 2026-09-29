@@ -7630,6 +7630,90 @@ else
 fi
 
 
+
+# ── the folder browser narrows as you type, and can make the folder ──────────
+# Two gaps on the same screen. A home directory with dozens of sibling checkouts is a long
+# arrow down, and `/` only helped if you knew the whole path. And a project whose root did
+# not exist yet meant leaving for a shell to mkdir (and git init: a root with no git has
+# nothing to branch worktrees from). Real TUI, real keys, a fixture HOME with the demo
+# names — nothing here reads the owner's home.
+group "the folder browser filters and makes a folder (real TUI)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  FB="$(cd "$(mktemp -d "$TEST_RUNS.$$.fb.XXXXXX")" && pwd -P)"
+  mkdir -p "$FB/acme-api" "$FB/acme-web" "$FB/billing-svc" "$FB/toolbox" "$FB/scratch"
+  fbstart() {
+    rm -f "$FB/choice"; tmux -L cffb kill-server 2>/dev/null
+    tmux -L cffb new-session -d -x 160 -y 40 \
+      "cd '$FB' && HOME='$FB' GIT_CONFIG_GLOBAL=/dev/null node '$ROOT/bin/fleet-grid.mjs' - --screen addproject > '$FB/choice' 2>/dev/null" 2>/dev/null
+    wait_for 8 "the folder browser to draw" 'pane_has cffb "pick a root folder"'
+  }
+  fbscreen() { tmux -L cffb capture-pane -p 2>/dev/null; }
+  if fbstart; then
+    tmux -L cffb send-keys '/' 2>/dev/null
+    wait_for 5 "the filter box to open" 'pane_has cffb "type or paste"'
+    tmux -L cffb send-keys -l 'acme' 2>/dev/null; sleep 0.5
+    scr="$(fbscreen)"
+    is "filter: typing narrows the listing to matches"      "yes:yes:no" \
+       "$(grep -q 'acme-api/' <<< "$scr" && echo yes || echo no):$(grep -q 'acme-web/' <<< "$scr" && echo yes || echo no):$(grep -q 'billing-svc/' <<< "$scr" && echo yes || echo no)"
+    is "filter: ...and says how many of how many"           "yes" "$(grep -q '2 of 5' <<< "$scr" && echo yes || echo no)"
+    tmux -L cffb send-keys Down Enter 2>/dev/null
+    wait_for 5 "the browser to open the match" 'pane_has cffb "~/acme-web"'
+    tmux -L cffb send-keys 's' 2>/dev/null
+    wait_for 5 "the browser to answer" '[ -s "$FB/choice" ]'
+    is "filter: ↓ ⏎ opens the second match, s picks it"     "newproject|$FB/acme-web" "$(tr '\037' '|' < "$FB/choice" 2>/dev/null)"
+  else
+    bad "the folder browser draws" "a screen" "nothing in 8s"
+  fi
+  if fbstart; then
+    tmux -L cffb send-keys '/' 2>/dev/null; wait_for 5 "the filter box" 'pane_has cffb "type or paste"'
+    tmux -L cffb send-keys -l 'zzq' 2>/dev/null; sleep 0.5
+    is "filter: no match says so"                           "yes" "$(pane_has cffb 'no folder here matches' && echo yes || echo no)"
+    # CASE-INSENSITIVE, and an exact name still goes where the typed path always went
+    tmux -L cffb send-keys BSpace BSpace BSpace 2>/dev/null; tmux -L cffb send-keys -l 'TOOLBOX' 2>/dev/null; sleep 0.3
+    tmux -L cffb send-keys Enter 2>/dev/null
+    is "filter: case-insensitive, ⏎ lands on the match"     "yes" "$(wait_for 5 'the browser to land' 'pane_has cffb "~/toolbox"' && echo yes || echo no)"
+  fi
+
+  # ── n = new folder ──
+  if fbstart; then
+    is "new: the hint bar advertises n"                     "yes" "$(pane_has cffb 'n new folder' && echo yes || echo no)"
+    tmux -L cffb send-keys 'n' 2>/dev/null
+    wait_for 5 "the name box" 'pane_has cffb "new folder"'
+    tmux -L cffb send-keys -l 'acme-api' 2>/dev/null; tmux -L cffb send-keys Enter 2>/dev/null; sleep 0.5
+    is "new: an existing name is refused"                   "yes" "$(pane_has cffb 'already exists' && echo yes || echo no)"
+    tmux -L cffb send-keys BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace 2>/dev/null
+    tmux -L cffb send-keys -l 'a/b' 2>/dev/null; tmux -L cffb send-keys Enter 2>/dev/null; sleep 0.5
+    is "new: a name with / is refused"                      "yes:no" \
+       "$(pane_has cffb 'one folder' && echo yes || echo no):$([ -e "$FB/a" ] && echo yes || echo no)"
+    tmux -L cffb send-keys BSpace BSpace BSpace 2>/dev/null
+    tmux -L cffb send-keys -l 'docs-pass' 2>/dev/null; tmux -L cffb send-keys Enter 2>/dev/null
+    wait_for 5 "the git init question" 'pane_has cffb "git init"'
+    is "new: the folder is made"                            "yes" "$([ -d "$FB/docs-pass" ] && echo yes || echo no)"
+    is "new: ...and git init is offered, Y by default"      "yes" "$(fbscreen | grep -qF '[Y/n]' && echo yes || echo no)"
+    tmux -L cffb send-keys Enter 2>/dev/null
+    wait_for 5 "the listing to come back" 'pane_has cffb "pick a root folder"'
+    is "new: ⏎ at the question runs git init"               "yes" "$([ -d "$FB/docs-pass/.git" ] && echo yes || echo no)"
+    is "new: ...and the cursor lands on the new folder"     "yes" "$(fbscreen | grep -q '▸ docs-pass/' && echo yes || echo no)"
+    tmux -L cffb send-keys Enter 2>/dev/null
+    wait_for 5 "the browser to open it" 'pane_has cffb "~/docs-pass"'
+    tmux -L cffb send-keys 's' 2>/dev/null
+    wait_for 5 "the browser to answer" '[ -s "$FB/choice" ]'
+    is "new: ⏎ then s picks it"                             "newproject|$FB/docs-pass" "$(tr '\037' '|' < "$FB/choice" 2>/dev/null)"
+  fi
+  if fbstart; then
+    tmux -L cffb send-keys 'n' 2>/dev/null; wait_for 5 "the name box" 'pane_has cffb "new folder"'
+    tmux -L cffb send-keys -l 'scratch-2' 2>/dev/null; tmux -L cffb send-keys Enter 2>/dev/null
+    wait_for 5 "the git init question" 'pane_has cffb "git init"'
+    tmux -L cffb send-keys 'n' 2>/dev/null
+    wait_for 5 "the listing to come back" 'pane_has cffb "pick a root folder"'
+    is "new: n at the question makes the folder without git" "yes:no" \
+       "$([ -d "$FB/scratch-2" ] && echo yes || echo no):$([ -e "$FB/scratch-2/.git" ] && echo yes || echo no)"
+  fi
+  tmux -L cffb kill-server 2>/dev/null; rm -rf "$FB"
+else
+  skip "the folder browser filters and makes a folder" "tmux, node or git missing"
+fi
+
 # The name the control plane attaches to must be the name fleet-tab really creates. The
 # loop has to know it BEFORE the session exists, so it asks fleet-tab rather than
 # rebuilding the rule — a second copy drifts, and the failure is an attach to nothing.

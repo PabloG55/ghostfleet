@@ -3399,20 +3399,60 @@ function dRenderClone() {
 // project stay separate — ⏎ in a text box is also how a typo gets dismissed, and that is
 // not a key that should be able to register the wrong folder. So this lands you there and
 // `s` still does the selecting, one line below on the same hint bar.
-let dTyping = false, dPathInput = '';
+let dTyping = false, dPathInput = '', dFSel = 0;
+// TYPE TO FILTER, IN THE SAME BOX. A home directory with dozens of sibling checkouts is a
+// long arrow down, and the path box only helped a reader who already knew the whole path.
+// So what is typed here is BOTH: while it has no `/` and no leading `~` it is part of a
+// name, and the folders on screen narrow to the ones containing it (case-insensitive) with
+// ↑↓ to pick among them; the moment it reads as a path, it is the path box it always was.
+// Every letter on the listing screen is already a command (hjkl move, s select, c clone,
+// n new), so the filter lives behind `/`, which is where anyone who wants to type goes.
+//   ⏎ on an EXACT name goes there, as the relative path always did — so `toolbox` lands in
+// toolbox even when `toolbox-old` sorts first among the matches.
+const dIsPath = (v) => v.includes('/') || v.startsWith('~');
+// ONE READ IS NOT ONE KEY. Keys typed fast, or sent by tmux in one go, arrive as a single
+// chunk: `↓⏎` as "\x1b[B\r", three backspaces as "\x7f\x7f\x7f". Handled whole, the first
+// was an escape sequence and dropped (⏎ with it), the second took off one character. Split
+// into arrows, ⏎, DEL and runs of text — a paste stays ONE run, which is what the clone and
+// path boxes rely on.
+function dKeys(key) {
+  return String(key || '').match(/\x1b\[[0-9;]*[A-Za-z~]|\x1b.?|[\r\n]|[\x7f\b]|[^\x1b\r\n\x7f\b]+/g) || [];
+}
+function dMatches() {
+  const q = dPathInput.trim().toLowerCase();
+  const subs = dirEntries.filter(e => e !== '..');
+  return q && !dIsPath(q) ? subs.filter(e => e.toLowerCase().includes(q)) : subs;
+}
 function dRenderPath() {
   let buf = '\x1b[H';
-  buf += ` ${C.bold}go to a folder${C.reset} ${C.dim}— type or paste its path${C.reset}\x1b[K\n`;
+  buf += ` ${C.bold}go to a folder${C.reset} ${C.dim}— type or paste its path, or part of a name to filter${C.reset}\x1b[K\n`;
   buf += ` ${C.dim}from${C.reset} ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
   buf += ` path:  ${C.bold}${dPathInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
   buf += (dMsg ? ` ${C.red}${dMsg}${C.reset}` : '') + '\x1b[K\n';
-  buf += ` ${C.dim}absolute, ${C.reset}~/…${C.dim}, or relative to the folder above${C.reset}\x1b[K\n\x1b[K\n`;
-  buf += `${C.dim} ⏎ go there (then ${C.reset}s${C.dim} to pick it) · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
+  if (dIsPath(dPathInput.trim())) {
+    buf += ` ${C.dim}absolute, ${C.reset}~/…${C.dim}, or relative to the folder above${C.reset}\x1b[K\n\x1b[K\n`;
+    buf += `${C.dim} ⏎ go there (then ${C.reset}s${C.dim} to pick it) · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
+    return out(buf);
+  }
+  const all = dirEntries.filter(e => e !== '..').length, ms = dMatches();
+  dFSel = Math.max(0, Math.min(dFSel, ms.length - 1));
+  buf += ` ${C.dim}${ms.length} of ${all} folder${all === 1 ? '' : 's'}${C.reset}\x1b[K\n`;
+  const maxShow = Math.max(4, (process.stderr.rows || 24) - 12);
+  let start = Math.max(0, dFSel - Math.floor(maxShow / 2));
+  const end = Math.min(ms.length, start + maxShow);
+  start = Math.max(0, end - maxShow);
+  if (!ms.length) buf += `  ${C.dim}no folder here matches '${dPathInput.trim()}'${C.reset}\x1b[K\n`;
+  for (let i = start; i < end; i++) {
+    const sel = i === dFSel;
+    buf += `${sel ? `${C.bold}${C.green}▸ ` : '  '}${ms[i]}/${sel ? C.reset : ''}\x1b[K\n`;
+  }
+  buf += `\x1b[K\n${C.dim} ↑↓ pick · ⏎ open it (then ${C.reset}s${C.dim} to pick it) · a / or ~ makes it a path · esc back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function dRender() {
   if (dCloning) return dRenderClone();
   if (dTyping) return dRenderPath();
+  if (dNewing) return dRenderNew();
   let buf = '\x1b[H';
   buf += ` ${C.bold}add project${C.reset} ${C.dim}— pick a root folder (holds your checkouts/worktrees)${C.reset}\x1b[K\n`;
   buf += ` ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
@@ -3424,7 +3464,8 @@ function dRender() {
     const e = dirEntries[i], sel = i === dSel;
     buf += `${sel ? `${C.bold}${C.green}▸ ` : '  '}${e === '..' ? '../' : e + '/'}${sel ? C.reset : ''}\x1b[K\n`;
   }
-  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · / type a path · s select THIS folder · c clone a repo here · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
+  buf += (dMsg ? ` ${C.green}${dMsg}${C.reset}` : '') + '\x1b[K\n';
+  buf += `${C.dim} ↑↓ move · ⏎/→ open · ← up · / type a path or filter · s select THIS folder · n new folder · c clone here · esc cancel${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function onKeyClone(key) {
@@ -3446,11 +3487,19 @@ function onKeyClone(key) {
   dRender();
 }
 function onKeyPath(key) {
+  const ks = dKeys(key);
+  if (ks.length > 1) { for (const k of ks) onKeyAdd(k); return; }   // each key where it now lands
   if (key === '\x03') return finish('');
   if (key === '\x1b' || key === '\x60') { dTyping = false; dMsg = ''; return dRender(); }
   if (key === '\r' || key === '\n') {
     const v = dPathInput.trim();
     if (!v) { dMsg = 'type a path, or esc to go back'; return dRender(); }
+    if (!dIsPath(v)) {
+      const ms = dMatches();
+      const pick = ms.find(e => e.toLowerCase() === v.toLowerCase()) ?? ms[dFSel];
+      if (pick) { dTyping = false; dMsg = ''; curDir = path.join(curDir, pick); dSel = 0; dBuild(); return dRender(); }
+      // no match: `.` and `..` are still paths, and anything else gets the path box's answer
+    }
     // ~ IS THE SHELL'S, NOT THE KERNEL'S. Nothing has expanded it by the time a keystroke
     // reaches here, so `~/code` would be looked up as a folder literally called `~`.
     const abs = path.resolve(curDir, v === '~' ? HOME : v.startsWith('~/') ? path.join(HOME, v.slice(2)) : v);
@@ -3462,20 +3511,87 @@ function onKeyPath(key) {
     if (!ok) { dMsg = fs.existsSync(abs) ? `${abs.replace(HOME, '~')} is a file, not a folder` : `no folder at ${abs.replace(HOME, '~')}`; return dRender(); }
     dTyping = false; dMsg = ''; curDir = abs; dSel = 0; dBuild(); return dRender();
   }
-  if (key === '\x7f' || key === '\b') { dPathInput = dPathInput.slice(0, -1); dMsg = ''; }
+  if (key === '\x1b[A') { dFSel = Math.max(0, dFSel - 1); return dRender(); }
+  if (key === '\x1b[B') { dFSel++; return dRender(); }
+  if (key === '\x7f' || key === '\b') { dPathInput = dPathInput.slice(0, -1); dMsg = ''; dFSel = 0; }
   else {
     // SPACES ARE LEGAL IN A PATH, which is the one way this filter differs from the clone
     // box's: `ch > ' '` there drops the space, and a folder with one in its name could
     // then be typed but never reached. Escape sequences and DEL still go.
     const t = (!key || key.startsWith('\x1b')) ? '' : [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
-    if (t) { dPathInput += t; dMsg = ''; }
+    if (t) { dPathInput += t; dMsg = ''; dFSel = 0; }
+  }
+  dRender();
+}
+
+// N = NEW FOLDER HERE. A project whose root did not exist yet meant leaving for a shell to
+// mkdir — and to git init, because a root with no git has nothing to branch worktrees
+// from, so the first spawn in it fails for a reason the reader never chose. The name is
+// ONE folder: a `/` would make parents nobody asked for, and an existing name is refused
+// rather than "reused", since a folder that was already there is not the empty one the
+// reader thinks they just made. git init is a question with Y as the default, because a
+// fleet root is almost always a repo — and n is there for a container that will hold
+// clones instead. Cursor lands on the new folder; ⏎ opens it and s picks it, as ever.
+let dNewing = false, dNewInput = '', dInitFor = '';
+function dRenderNew() {
+  let buf = '\x1b[H';
+  if (dInitFor) {
+    buf += ` ${C.bold}made${C.reset} ${C.cyan}${path.join(curDir, dInitFor).replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+    buf += ` git init it? ${C.dim}a root with no git has nothing to branch worktrees from${C.reset}  ${C.bold}[Y/n]${C.reset}\x1b[K\n\x1b[K\n`;
+    buf += (dMsg ? ` ${C.red}${dMsg}${C.reset}` : '') + '\x1b[K\n\x1b[J';
+    return out(buf);
+  }
+  buf += ` ${C.bold}new folder${C.reset} ${C.dim}— made here, empty${C.reset}\x1b[K\n`;
+  buf += ` ${C.dim}in${C.reset} ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` name:  ${C.bold}${dNewInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += (dMsg ? ` ${C.red}${dMsg}${C.reset}` : '') + '\x1b[K\n';
+  buf += `${C.dim} ⏎ make it · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+function dLandOn(name) {
+  dNewing = false; dInitFor = ''; dBuild();
+  const i = dirEntries.indexOf(name); if (i >= 0) dSel = i;
+  dRender();
+}
+function onKeyNew(key) {
+  const ks = dKeys(key);
+  if (ks.length > 1) { for (const k of ks) onKeyAdd(k); return; }
+  if (key === '\x03') return finish('');
+  if (dInitFor) {
+    const name = dInitFor;
+    if (key === '\r' || key === '\n' || key === 'y' || key === 'Y') {
+      try { execFileSync('git', ['init', '-q'], { cwd: path.join(curDir, name), stdio: 'ignore' }); dMsg = `git init — ${name} is a repo`; }
+      catch (e) { dMsg = `made ${name}, but git init failed: ${String(e.message || e).split('\n')[0]}`; }
+      return dLandOn(name);
+    }
+    if (key === 'n' || key === 'N' || key === '\x1b' || key === '\x60') { dMsg = `made ${name} (no git)`; return dLandOn(name); }
+    return;
+  }
+  if (key === '\x1b' || key === '\x60') { dNewing = false; dMsg = ''; return dRender(); }
+  if (key === '\r' || key === '\n') {
+    const v = dNewInput.trim();
+    if (!v) { dMsg = 'type a name, or esc to go back'; return dRender(); }
+    if (v.includes('/')) { dMsg = `a name is one folder — no '/' (go there first, then n)`; return dRender(); }
+    if (v === '.' || v === '..') { dMsg = `'${v}' is not a name`; return dRender(); }
+    if (fs.existsSync(path.join(curDir, v))) { dMsg = `${v} already exists here`; return dRender(); }
+    try { fs.mkdirSync(path.join(curDir, v)); }
+    catch (e) { dMsg = `could not make ${v}: ${e.code || e.message}`; return dRender(); }
+    dInitFor = v; dMsg = ''; return dRender();
+  }
+  if (key === '\x7f' || key === '\b') { dNewInput = dNewInput.slice(0, -1); dMsg = ''; }
+  else {
+    // the path box's filter: spaces are legal in a name, escape sequences and DEL are not
+    const t = (!key || key.startsWith('\x1b')) ? '' : [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
+    if (t) { dNewInput += t; dMsg = ''; }
   }
   dRender();
 }
 function onKeyAdd(key) {
   if (dCloning) return onKeyClone(key);
   if (dTyping) return onKeyPath(key);
-  if (key === '/') { dTyping = true; dPathInput = ''; dMsg = ''; return dRender(); }
+  if (dNewing) return onKeyNew(key);
+  if (key === '/') { dTyping = true; dPathInput = ''; dFSel = 0; dMsg = ''; return dRender(); }
+  if (key === 'n' || key === 'N') { dNewing = true; dNewInput = ''; dInitFor = ''; dMsg = ''; return dRender(); }
   if (key === 'c' || key === 'C') { dCloning = true; dCloneInput = ''; dMsg = ''; return dRender(); }
   if (key === '\x1b' || key === '\x03' || key === '\x60') return finish('');
   if (key === '\x1b[A' || key === 'k') dSel = Math.max(0, dSel - 1);
