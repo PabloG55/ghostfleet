@@ -14161,6 +14161,50 @@ else
   skip "a stale asleep marker does not outlive its session" "tmux not available"
 fi
 
+# ── an agent can find the asleep ones ────────────────────────────────────────
+# Asked to "clean up the asleep ones", an agent had nothing to find them with: fleet_list
+# walked tmux's sessions, and a hibernated session has none — its marker is the whole of
+# it. fleet_stop already cleared the marker; the list is what could not see it. One live
+# session and two asleep ones, one of them three hours old; plus a marker from ANOTHER
+# fleet, which must not appear here (every fleet has a master, and names repeat).
+group "fleet_list shows asleep sessions with their age"
+if command -v tmux >/dev/null 2>&1; then
+  FL="$(cd "$(mktemp -d "$TEST_RUNS.$$.flasleep.XXXXXX")" && pwd -P)"
+  mkdir -p "$FL/fleet" "$FL/wt"
+  flmark() { printf '%s\t%s\t%s\t%s\n' "$(( $(date +%s) - $3 ))" "aaaaaaaa-7777-7777-7777-000000000007" "$FL/wt" 100 > "$FL/fleet/$1.$2.asleep"; }
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s api-fix -c "$FL/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  flmark cf-acme-api docs-pass 10800
+  flmark cf-acme-api scratch   120
+  flmark cf-acme-web billing-svc 60
+  fl() { CLAUDE_FLEET_DIR="$FL/fleet" CLAUDE_FLEET_SLOT= TMUX= "$ROOT/bin/fleet-list" -s cf-acme-api 2>&1; }
+  out="$(fl)"
+  is "fleet-list: the live session is listed"                 "yes" "$(grep -qE '^api-fix ' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: an asleep session is listed as asleep"      "yes" "$(grep -qE '^docs-pass +asleep ' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: ...with its age"                            "yes" "$(grep -E '^docs-pass ' <<< "$out" | grep -qE '\b3h\b' && echo yes || echo no)"
+  is "fleet-list: ...and how to clear it"                     "yes" "$(grep -E '^docs-pass ' <<< "$out" | grep -qF 'fleet-stop docs-pass' && echo yes || echo no)"
+  is "fleet-list: a younger one reads in minutes"             "yes" "$(grep -E '^scratch ' <<< "$out" | grep -qE '\b2m\b' && echo yes || echo no)"
+  is "fleet-list: another fleet's asleep session is not ours" "no"  "$(grep -q 'billing-svc' <<< "$out" && echo yes || echo no)"
+  # A FLEET WHOSE EVERY SESSION IS ASLEEP has no tmux server at all — the case where the
+  # old early exit said "(no sessions)" over a fleet with cards on the grid.
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  out="$(fl)"
+  is "fleet-list: with no live server the asleep ones still list" "yes" "$(grep -qE '^docs-pass +asleep ' <<< "$out" && echo yes || echo no)"
+  # ...and the clear it names is the clear that works: after fleet-stop the row is gone.
+  CLAUDE_FLEET_DIR="$FL/fleet" CLAUDE_FLEET_SLOT= TMUX= "$ROOT/bin/fleet-stop" -s cf-acme-api docs-pass >/dev/null 2>&1
+  out="$(fl)"
+  is "fleet-list: fleet-stop clears the asleep row"           "no"  "$(grep -q '^docs-pass ' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: ...and leaves the other asleep one"         "yes" "$(grep -q '^scratch ' <<< "$out" && echo yes || echo no)"
+  # THE DESCRIPTIONS ARE WHAT AN AGENT READS to choose a tool, so the case has to be named
+  # there, not only handled. Read from the served tool list, not the source text.
+  desc="$(cd "$ROOT" && node -e 'import("./mcp/fleet-dispatch.mjs").then(m=>{const t=Object.fromEntries(m.TOOLS.map(x=>[x.name,x.description]));console.log("LIST:"+t.fleet_list);console.log("STOP:"+t.fleet_stop)})' 2>/dev/null)"
+  is "fleet_list's description says it lists asleep sessions" "yes" "$(grep '^LIST:' <<< "$desc" | grep -qi 'asleep' && echo yes || echo no)"
+  is "fleet_stop's description names clearing an asleep one"  "yes" "$(grep '^STOP:' <<< "$desc" | grep -qi 'asleep' && echo yes || echo no)"
+  rm -rf "$FL"
+else
+  skip "fleet_list shows asleep sessions with their age" "tmux not available"
+fi
+
 # ── 4a10c12d. the new-session screen lists what is parked in that checkout ──
 # E. The owner's words: "could you add a list of parked parallel sessions pls". The name
 # screen is where a person says "a session in THIS checkout", and it offered only a new

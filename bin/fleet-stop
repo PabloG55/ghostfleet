@@ -105,6 +105,10 @@ fi
 if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
   tmux -L "$SOCK" kill-session -t "$SESSION" 2>/dev/null \
     && echo "fleet-stop: killed session '$SESSION'"
+elif [ -f "$FLEET_DIR/$SOCK.$SESSION.asleep" ]; then
+  # not a leftover: an asleep session has no process by design, and the marker cleared
+  # below IS the session as far as the grid and the phone are concerned
+  echo "fleet-stop: '$SESSION' was asleep (no process to kill) — clearing its card"
 else
   echo "fleet-stop: no live session '$SESSION' on $SOCK — clearing any leftover state" >&2
 fi
