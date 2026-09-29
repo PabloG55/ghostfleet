@@ -120,7 +120,8 @@ racer, and the directory listing is the free list.
 ```bash
 fleet-worktrees                 # → "Free to reuse: api-3"
 fleet-inbox                     # → api-1 DONE (feat/x) · api-2 NEEDS YOU: run tests?
-fleet-answer api-2 "2"          # unblock the one waiting on a dialog
+fleet-answer api-2 "2"          # unblock the one waiting on a dialog — not a permission dialog:
+                                # that one is refused and printed, for the human to approve
 fleet-stop --reclaim api-1      # api-1's PR merged: retire it, never send it the next task
 fleet-spawn fix-auth --reuse api-3 --branch feat/auth --from main \
   --prompt "Fix token refresh in src/auth/*. Done when auth tests pass."

@@ -49,6 +49,25 @@
 #   - a LEAF passes: a worker already in its worktree has no fleet-spawn alternative
 #     (fleet-spawn refuses from a linked worktree) and its subagents are its own business
 #   - CLAUDE_FLEET_ALLOW_SUBAGENTS=1 overrides
+#
+# THE THIRD: a worker merging its own PR.
+#
+# The lead scans a worker's PR and merges it; the worker opens it and ends its turn. That
+# lived in the brief and nowhere else, and a brief is a thing a worker can talk itself
+# past: one finished, saw a green check, and ran `gh pr merge` on its own PR. So the
+# refusal sits in front of the tool, like the two above:
+#   - a Bash command that merges a PR — `gh pr merge` (with --auto too: that is a merge
+#     scheduled for later), `gh api …/pulls/N/merge`, a GraphQL mergePullRequest — and the
+#     GitHub MCP server's merge_pull_request tool
+#   - ONLY from a session in a LINKED worktree, judged from the directory it was started in
+#     ($CLAUDE_PROJECT_DIR) as well as the one it is in now, so a `cd` into the main
+#     checkout is not a way round it. The lead in the main checkout is untouched.
+#   - no override. A worker can not set this hook's environment, but it can be told to, and
+#     an escape hatch a worker can be talked into is the brief again. A human merges from
+#     the main checkout, or on GitHub.
+# Not a sandbox: a worker that writes the merge into a script and runs the script is not
+# caught here. It is the line that makes "I will just merge it" a refused tool call with
+# the rule in the reason, rather than a habit.
 
 # Route by the LIVE tmux server, not a possibly-stale CLAUDE_FLEET_SOCK — same
 # reasoning as fleet-event.sh: a --resume/--fork Claude can carry an old env var.
@@ -58,6 +77,11 @@ _t="${TMUX:-}"; case "${_t##*/}" in cf-*) CLAUDE_FLEET_SOCK="${_t%%,*}"; CLAUDE_
 command -v jq >/dev/null 2>&1 || exit 0
 
 input="$(cat)"
+# EVERY Bash call in every session comes through here now, and almost none is a merge:
+# leave before jq when the payload cannot be one. A payload this glob misses (other JSON
+# spacing) just takes the slow path below; it cannot be let through by it.
+case "$input" in *'"tool_name":"Bash"'*) case "$input" in *[Mm]erge*) ;; *) exit 0 ;; esac ;; esac
+MERGE=0
 # \x1f and not tab, because SUBAGENT is OPTIONAL and tab is IFS-whitespace: an absent
 # subagent_type would collapse and shift the field order. Our own wire, so \x1f is the
 # right choice here — the rule about tmux's formatter rewriting it does not reach a hook.
@@ -70,7 +94,7 @@ IFS=$'\x1f' read -r EVENT TOOL CWD SUBAGENT < <(
 )
 
 [ "$EVENT" = "PreToolUse" ] || exit 0
-case "$TOOL" in EnterWorktree|Agent|Task) ;; *) exit 0 ;; esac
+case "$TOOL" in EnterWorktree|Agent|Task) ;; Bash|mcp__*__merge_pull_request) MERGE=1 ;; *) exit 0 ;; esac
 
 CWD="${CWD:-$PWD}"
 GITROOT="$(git -C "$CWD" rev-parse --show-toplevel 2>/dev/null)"
@@ -121,6 +145,40 @@ if [ -z "${CLAUDE_FLEET_SOCK:-}" ]; then
   [ -n "$PROJ" ] || exit 0
   tmux -L "cf-$PROJ" list-sessions >/dev/null 2>&1 || exit 0
   OUTSIDE=1
+fi
+
+# ── a worker does not merge its own PR ──────────────────────────────────────
+is_linked() {                          # $1 = a directory -> 0 when it is a LINKED worktree
+  [ -n "$1" ] && [ -d "$1" ] || return 1
+  local gd gcd
+  gd="$(git -C "$1" rev-parse --path-format=absolute --git-dir 2>/dev/null)" || return 1
+  gcd="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  [ -n "$gd" ] && [ "$gd" != "$gcd" ]
+}
+merges_a_pr() {                        # the Bash command on stdin merges a pull request
+  # Whitespace folded first, so a merge split across lines is still one.
+  tr '\n\t' '  ' | grep -Eq \
+    -e '(^|[^[:alnum:]_.-])gh[[:space:]]([^|;&]*[[:space:]])?pr[[:space:]]+merge([[:space:]]|$)' \
+    -e '(^|[^[:alnum:]_.-])gh[[:space:]]([^|;&]*[[:space:]])?api[[:space:]][^|;&]*pulls/[^[:space:]/]+/merge' \
+    -e 'mergePullRequest|enablePullRequestAutoMerge'
+}
+if [ "$MERGE" = 1 ]; then
+  if [ "$TOOL" = Bash ]; then
+    printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null | merges_a_pr || exit 0
+  fi
+  _where=""
+  is_linked "$CWD" && _where="$CWD"
+  [ -z "$_where" ] && is_linked "${CLAUDE_PROJECT_DIR:-}" && _where="$CLAUDE_PROJECT_DIR"
+  [ -n "$_where" ] || exit 0                   # the main checkout: the lead merges, so it may
+  _wb="$(git -C "$_where" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  { echo "ghostfleet: a worker does not merge its own PR — the LEAD merges."
+    echo "  This session runs in a linked worktree ($_where${_wb:+, branch $_wb}), which makes"
+    echo "  it a worker. The lead scans what you opened and merges it from the main checkout;"
+    echo "  a green check is its signal to look, not yours to merge."
+    echo
+    echo "  What to do instead: push, make sure the PR is open against the integration branch,"
+    echo "  report the PR number, and end your turn."; } >&2
+  exit 2
 fi
 
 # Which advice applies turns on whether this session is a lead or already a leaf.

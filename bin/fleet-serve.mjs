@@ -715,7 +715,12 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   const summary = `${tool.replace(/^fleet_/, '')} ${Object.entries(args).filter(([k]) => k !== 'project')
     .map(([k, val]) => k === 'prompt' || k === 'text' ? `${k}=${String(val).slice(0, 60)}` : `${k}=${val}`).join(' ')}`.trim();
 
-  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000 });
+  // human: THIS REQUEST IS THE OWNER, and fleet_answer is the one verb that asks. A key
+  // pressed on a worker's permission dialog approves that worker's tool call, which
+  // fleet-answer refuses from any agent; the phone is where he reads the dialog on the pane
+  // view and taps the answer himself. The MCP server has no way to pass this — only a
+  // request that reached runVerb with a passkey-minted session does.
+  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true });
   const text = typeof out === 'string' ? out : String(out.text);
   const refused = typeof out !== 'string' && out.isError === true;
   // WHAT THE PHONE SAYS TO JARVIS IS THE OWNER SPEAKING, and this is the one component that

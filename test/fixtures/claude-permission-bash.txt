@@ -1,0 +1,30 @@
+
+  If you're trying to:
+  - Update main with local changes: Use a regular push (git push origin main) — if there are
+    conflicts, pull first and resolve them
+  - Deploy a hotfix: Create a PR for review instead
+  - Fix a mistake: Consider using git revert to undo changes while preserving history
+  - Reset to a previous state: Discuss with your team first
+
+  What are you trying to accomplish? I can help you find a safer approach.
+
+✻ Sautéed for 6s · done 8:37 AM
+
+❯ I am testing permission dialogs in this scratch repo. Please run: git log --oneline -1 && touch
+  notes.txt
+
+⏺ Showing the latest commit and creating a notes file
+  ⎿  $ git log --oneline -1 && touch notes.txt
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   git log --oneline -1 && touch notes.txt
+   Show the latest commit and create a notes file
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to /private/tmp/gf-cap/acme-api from this project
+   3. No
+
+ Esc to cancel · Tab to amend
