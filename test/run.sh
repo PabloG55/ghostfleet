@@ -14149,6 +14149,136 @@ else
   skip "a session sleeps and comes back" "tmux or jq missing"
 fi
 
+# ── 4a10c10b. Jarvis never sleeps ────────────────────────────────────────────
+# The owner's rule, a rule and not a setting: Jarvis's master is never hibernated, parked
+# or paused — not by a clock, not by the governor, and not by an explicit command naming
+# it. The one way to take it offline is a deliberate `fleet-stop -s <its sock> master`,
+# which every refusal names. Its daily fresh restart is not sleep and is not touched here.
+#
+# "Is this Jarvis" is the marker's sock, never a socket spelled in code, so the fixture
+# marker below points at cf-toolbox and the same fixture on cf-acme-api is the control: an
+# ordinary fleet's master must go on behaving exactly as before. Both masters are made
+# fully sleepable — trusted folder, a conversation the pane proves, a transcript 100h old —
+# so the only difference between the two fleets is the marker, and a Jarvis row that holds
+# is holding because of the rule and not because some other veto happened to fire first.
+group "Jarvis never sleeps"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  # RESOLVED, because the trust record is keyed by the path an agent resolves and $TEST_RUNS
+  # is under /tmp, a symlink to /private/tmp: unresolved, the control master below is vetoed
+  # for "no trust record" and the control row fails for a reason that is not the rule.
+  JN="$(cd "$(mktemp -d "$TEST_RUNS.$$.jns.XXXXXX")" && pwd -P)"
+  tmux -L cf-toolbox kill-server 2>/dev/null; tmux -L cf-acme-api kill-server 2>/dev/null
+  export CLAUDE_FLEET_DIR="$JN/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$JN/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR"
+  mkdir -p "$JN/home/.config/ghostfleet" "$JN/bin"
+  printf 'name=toolbox\nprofile=work\nsock=cf-toolbox\ncfg=%s\npath=%s/wt-cf-toolbox\n' \
+    "$JN/home/.claude" "$JN" > "$JN/home/.config/ghostfleet/jarvis"
+  touch "$CLAUDE_FLEET_DIR/hibernate.enabled"
+  # The governor notifies before it acts; a suite must not put a banner on the desktop.
+  printf '#!/bin/sh\nexit 0\n' > "$JN/bin/osascript"; printf '#!/bin/sh\nexit 0\n' > "$JN/bin/notify-send"
+  chmod +x "$JN/bin/osascript" "$JN/bin/notify-send"
+  # Every call runs as if from outside any fleet, with the fixture HOME that holds the
+  # marker: the suite itself may be running inside a live fleet session, and $TMUX there
+  # would point fleet-pause at THAT fleet.
+  jn() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK \
+             HOME="$JN/home" PATH="$JN/bin:$PATH" "$@"; }
+  up() { tmux -L "$1" has-session -t "=$2" 2>/dev/null && echo 1 || echo 0; }
+  jhas() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
+  jyn() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
+  trust='{projects:{}}'
+  for s in cf-toolbox cf-acme-api; do
+    mkdir -p "$JN/wt-$s"
+    trust="$trust | .projects[\"$JN/wt-$s\"] = {hasTrustDialogAccepted:true}"
+  done
+  jq -n "$trust" > "$CLAUDE_CONFIG_DIR/.claude.json"
+  mk_master() {   # sock id
+    local s="$1" id="$2" tr="$JN/tr-$1.jsonl"
+    : > "$tr"
+    touch -t "$(date -v-100H +%Y%m%d%H%M 2>/dev/null || date -d '-100 hours' +%Y%m%d%H%M)" "$tr" 2>/dev/null
+    jq -n --arg id "$id" --arg s "$s" --arg tr "$tr" --arg cwd "$JN/wt-$s" \
+      '{session_id:$id, sock:$s, slot:"master", cwd:$cwd, folder:"master", branch:"main",
+        status:"ready", transcript:$tr, ts:0}' > "$CLAUDE_FLEET_DIR/$id.json"
+    tmux -L "$s" new-session -d -s master -c "$JN/wt-$s" -x 80 -y 24 "sleep 600" 2>/dev/null
+    sleep 0.4
+    jn "$ROOT/test/helpers/live-session.sh" "$s" master "$id" "$JN/wt-$s" "$tr" >/dev/null
+  }
+  mk_master cf-toolbox  cccccccc-0000-0000-0000-000000000001
+  mk_master cf-acme-api cccccccc-0000-0000-0000-000000000002
+  is "jarvis: both fixture masters are up" "11" "$(up cf-toolbox master)$(up cf-acme-api master)"
+
+  # ── an explicit hibernate naming it ──
+  jn "$ROOT/bin/fleet-hibernate" --apply master -s cf-toolbox > "$JN/hib" 2>&1
+  is "jarvis: --apply master on Jarvis is refused"  "1"   "$?"
+  is "...and says Jarvis is always on"              "yes" "$(jyn grep -q 'Jarvis is always on' "$JN/hib")"
+  is "...and names the off switch"                  "yes" "$(jyn grep -qF 'fleet-stop -s cf-toolbox master' "$JN/hib")"
+  is "...and Jarvis is still up"                    "1"   "$(up cf-toolbox master)"
+  is "...with no asleep card"                       "0"   "$([ -f "$CLAUDE_FLEET_DIR/cf-toolbox.master.asleep" ] && echo 1 || echo 0)"
+  is "the plan says the same, not the lead rule"    "yes" \
+     "$(jyn jhas 'Jarvis is always on' "$(jn "$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 0 --json 2>/dev/null \
+                                          | jq -r '.[] | select(.slot=="master") | .why')")"
+
+  # ── pause, both flavours ──
+  jn "$ROOT/bin/fleet-pause" -s cf-toolbox master > "$JN/pause" 2>&1
+  is "jarvis: fleet-pause on Jarvis is refused"     "1"   "$?"
+  is "...and says Jarvis is always on"              "yes" "$(jyn grep -q 'Jarvis is always on' "$JN/pause")"
+  is "...and names the off switch"                  "yes" "$(jyn grep -qF 'fleet-stop -s cf-toolbox master' "$JN/pause")"
+  is "...and wrote no park marker"                  "0"   "$([ -f "$CLAUDE_FLEET_DIR/cf-toolbox.master.parked" ] && echo 1 || echo 0)"
+  jn "$ROOT/bin/fleet-pause" --hibernate -s cf-toolbox master > "$JN/pauseh" 2>&1
+  is "jarvis: fleet-pause --hibernate is refused"   "1"   "$?"
+  is "...and Jarvis is still up"                    "1"   "$(up cf-toolbox master)"
+  # the MCP tool: it already refused every lead, and now says which rule it is for Jarvis
+  jmcp() { jn env CLAUDE_FLEET_SOCK="$1" node --input-type=module -e "
+    const m = await import('$ROOT/mcp/fleet-dispatch.mjs');
+    process.stdout.write(JSON.stringify(m.plan('fleet_pause', { session: 'master' })));" 2>/dev/null; }
+  is "jarvis: MCP fleet_pause on Jarvis is refused" "yes" "$(jyn jhas 'Jarvis is always on' "$(jmcp cf-toolbox)")"
+  is "...naming the CLI off switch"                 "yes" "$(jyn jhas 'fleet-stop -s cf-toolbox master' "$(jmcp cf-toolbox)")"
+  is "...and another lead's refusal is unchanged"   "yes" "$(jyn jhas "the fleet's lead" "$(jmcp cf-acme-api)")"
+  is "...without the Jarvis wording"                "no"  "$(jyn jhas 'Jarvis' "$(jmcp cf-acme-api)")"
+  # the control: an ordinary lead parks exactly as it did
+  jn "$ROOT/bin/fleet-pause" -s cf-acme-api master > "$JN/pausec" 2>&1
+  is "jarvis: another fleet's master still parks"   "0"   "$?"
+  is "...with its park marker"                      "1"   "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-api.master.parked" ] && echo 1 || echo 0)"
+  rm -f "$CLAUDE_FLEET_DIR/cf-acme-api.master.parked"
+
+  # ── the governor under pressure ──
+  # A worker so the resource ceiling has something to act on, and a ceiling every machine is
+  # over (0% of maxproc), confirmed on the first reading. The hibernate path runs for real.
+  tmux -L cf-toolbox new-session -d -s scratch -x 80 -y 24 "sleep 600" 2>/dev/null
+  sleep 0.3
+  jn "$ROOT/bin/fleet-governor" -s cf-toolbox --once --proc-pct 0 --confirm 0 > "$JN/gov" 2>&1
+  is "jarvis: the governor did act under pressure"  "yes" "$(jyn grep -q 'hibernating idle worker' "$JN/gov")"
+  is "...and Jarvis is still up"                    "1"   "$(up cf-toolbox master)"
+  is "...not parked"                                "0"   "$([ -f "$CLAUDE_FLEET_DIR/cf-toolbox.master.parked" ] && echo 1 || echo 0)"
+  is "...not asleep"                                "0"   "$([ -f "$CLAUDE_FLEET_DIR/cf-toolbox.master.asleep" ] && echo 1 || echo 0)"
+  jn "$ROOT/bin/fleet-hibernate" -s cf-toolbox --pressure > "$JN/press" 2>&1
+  is "jarvis: --pressure leaves it up"              "1"   "$(up cf-toolbox master)"
+  tmux -L cf-toolbox kill-session -t '=scratch' 2>/dev/null
+
+  # ── the off switch ──
+  jn "$ROOT/bin/fleet-stop" -s cf-acme-api master > "$JN/stopc" 2>&1
+  is "jarvis: another fleet's master still refuses fleet-stop" "1" "$?"
+  is "...and is still up"                           "1"   "$(up cf-acme-api master)"
+  jn "$ROOT/bin/fleet-stop" --reclaim -s cf-toolbox master > "$JN/stopr" 2>&1
+  is "jarvis: --reclaim on Jarvis is refused"       "1"   "$?"
+  is "...and Jarvis is still up"                    "1"   "$(up cf-toolbox master)"
+  jn "$ROOT/bin/fleet-stop" -s cf-toolbox master > "$JN/stop" 2>&1
+  is "jarvis: fleet-stop -s <its sock> master works" "0"  "$?"
+  is "...and Jarvis is gone"                        "0"   "$(up cf-toolbox master)"
+
+  # ── the control, last because it ends the pane: an ordinary lead named by --apply ──
+  jn "$ROOT/bin/fleet-hibernate" --apply master -s cf-acme-api > "$JN/hibc" 2>&1
+  is "jarvis: another fleet's master still hibernates by name" "0" "$?"
+  is "...with no veto standing in the way"          ""    "$(grep -o 'stays up — .*' "$JN/hibc")"
+  is "...and its pane is gone"                      "0"   "$(up cf-acme-api master)"
+  is "...leaving an asleep card"                    "1"   "$([ -f "$CLAUDE_FLEET_DIR/cf-acme-api.master.asleep" ] && echo 1 || echo 0)"
+
+  tmux -L cf-toolbox kill-server 2>/dev/null; tmux -L cf-acme-api kill-server 2>/dev/null
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$JN"
+else
+  skip "Jarvis never sleeps" "tmux or jq missing"
+fi
+
 # ── 4a10c11. how long a wake actually takes ──────────────────────────────────
 # The one number the design rests on, and the one most likely to be wrong. Hibernation is
 # only worth having if a slept session comes back fast enough that a tap feels like opening

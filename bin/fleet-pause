@@ -39,6 +39,18 @@ SESSION="${1:-}"
 
 [ -n "$SOCK" ]    || { echo "fleet-pause: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 [ -n "$SESSION" ] || { echo "fleet-pause: usage: fleet-pause [-s socket] <session>" >&2; exit 1; }
+# JARVIS IS NEVER PARKED. The owner's rule, not a setting: its master is the session the
+# phone talks to, and a parked Jarvis is a phone that answers nothing. --hibernate is the
+# same refusal a step earlier than fleet-hibernate's own. Which fleet is Jarvis is the
+# marker's sock (lib/jarvis.mjs); the off switch, if that is really what is meant, is
+# fleet-stop, which stays allowed for exactly this session.
+_jm="$HOME/.config/ghostfleet/jarvis"
+if [ "$SESSION" = master ] && [ -f "$_jm" ] \
+   && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
+  echo "fleet-pause: refusing — Jarvis is always on; it is never hibernated, parked or paused." >&2
+  echo "             To take it offline for good: fleet-stop -s $SOCK master" >&2
+  exit 1
+fi
 tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-pause: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
 
