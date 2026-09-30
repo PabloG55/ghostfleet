@@ -70,6 +70,10 @@ const PLAIN = process.argv.includes('--plain');
 // touch with no separator ("people-dupespeople-dupes") — so it cannot be parsed, only
 // read. The values behind it are whole; --json emits them before the formatting.
 const JSON_OUT = process.argv.includes('--json');
+// --sub <name>: draw that sub-lead's grid (itself, then its children) instead of the top
+// one. --json honours it, and so does the TUI on startup (the control plane can re-enter a
+// sub-grid it left to attach).
+const SUB_ARG = (() => { const i = process.argv.indexOf('--sub'); return i >= 0 ? (process.argv[i + 1] || '') : ''; })();
 const Z = process.env.CLAUDE_FLEET_SCOPE || SOCK.replace(/^cf-/, '');
 
 // ── colors ────────────────────────────────────────────────────────────────
@@ -821,12 +825,55 @@ function asleepSessions(liveNames) {
   return out;
 }
 
-function gather({ lead = false } = {}) {
+// ── NESTED LEADS: who is whose child ────────────────────────────────────────
+// bin/fleet-spawn tags a child spawned from a worker's worktree with its parent's name in
+// <sock>.<child>.parent. The grid reads that tag to draw a TREE two levels deep: the top
+// grid shows the sub-lead with a rollup of its workers instead of the workers themselves
+// (the top lead asked for the sub-lead, not for its team), and ⏎ on that card opens the
+// SUB-GRID — the sub-lead first, then only its children.
+//   A tag whose parent is not on this fleet any more (stopped, never there) is ignored and
+//   the child is drawn at the top: a card hidden under a parent that has no card is a
+//   session nobody can reach from any screen.
+function parentFile(name) { return path.join(FLEET_DIR, `${SOCK}.${name}.parent`); }
+function parentOf(name) {
+  try { return fs.readFileSync(parentFile(name), 'utf8').split('\n')[0].trim(); } catch { return ''; }
+}
+// The rollup a sub-lead's card carries. ONE shape on the wire and on the card: the phone's
+// web/grid.js rollupText() words it identically, and grid-parity holds the two together.
+function rollupText(w) {
+  if (!w || !w.total) return '';
+  return `${w.total} worker${w.total === 1 ? '' : 's'} · ${w.need_you} ${w.need_you === 1 ? 'needs' : 'need'} you`;
+}
+// Tag, count, and cut the rows to one level of the tree. `sub` names the sub-lead whose
+// grid is being drawn; without it this is the top grid.
+function nestRows(rows, sub) {
+  const present = new Set(rows.map(r => r.name));
+  for (const r of rows) {
+    const p = r.lead ? '' : parentOf(r.name);
+    r.parent = (p && p !== r.name && present.has(p)) ? p : null;
+  }
+  for (const r of rows) {
+    const kids = rows.filter(k => k.parent === r.name);
+    r.workers = kids.length ? {
+      total: kids.length,
+      need_you: kids.filter(k => k.status === 'need-you').length,
+      working: kids.filter(k => k.status === 'working').length,
+    } : null;
+  }
+  if (!sub) return rows.filter(r => !r.parent);
+  const head = rows.find(r => r.name === sub);
+  // The sub-lead heads its own grid as an ordinary card — its last message, ⏎ attaches —
+  // because the rollup it carries upstairs is this screen's header down here.
+  if (head) head.subHead = true;
+  return head ? [head, ...rows.filter(r => r.parent === sub)] : [];
+}
+
+function gather({ lead = false, sub = '' } = {}) {
   const live = tmuxList();
   const liveNames = new Set(live.map(s => s.name));
   const slept = asleepSessions(liveNames);
   const sessions = [
-    ...(lead ? live.filter(s => isLead(s.name)) : []),
+    ...(lead && !sub ? live.filter(s => isLead(s.name)) : []),
     ...applyOrder(live.filter(s => !isLead(s.name))),
     ...slept,
   ];
@@ -835,7 +882,7 @@ function gather({ lead = false } = {}) {
   // Once, here, and not inside the map: see prNumbers() for why nine calls is the wrong
   // shape and for why this one cannot reach the network.
   const prs = prNumbers();
-  return sessions.map(s => {
+  return nestRows(sessions.map(s => {
     const st = fleet.get(s.name) || (s.asleepAt ? undefined : recordOfPane(s.name) || undefined);
     const agent = agentOf(s.name);
     const folder = st?.folder || (s.cwd ? path.basename(s.cwd) : s.name);
@@ -893,7 +940,7 @@ function gather({ lead = false } = {}) {
              // not exist while an empty string would read as "no PR" in one place and as a
              // present-but-blank field in another.
              pr: (branch && prs.get(branch)) || null };
-  });
+  }), sub);
 }
 
 // The summary line, counted ONCE for all three consumers: the TUI header, --plain's
@@ -949,6 +996,18 @@ function tabChoice(kind) {
   return `attach${US}${tabName(kind, from)}`;
 }
 
+// A SUB-LEAD IS STOPPED WITH ITS WORKERS, by fleet-stop rather than here: the children
+// are reclaimed through fleet-clean's gates (squash-aware, #16), and one implementation of
+// "stop a sub-lead" is what lets this screen, the phone and the CLI mean the same thing.
+// Detached, because a reclaim per child can take a while and the grid must keep drawing.
+function stopSubLead(name) {
+  const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-stop');
+  try {
+    const c = spawn(bin, ['-s', SOCK, '--children', name], { detached: true, stdio: 'ignore',
+      env: { ...process.env, CLAUDE_FLEET_DIR: FLEET_DIR } });
+    c.unref();
+  } catch {}
+}
 function killSession(name) {
   try {
     execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'kill-session', '-t', name], { stdio: 'ignore' });
@@ -957,6 +1016,9 @@ function killSession(name) {
   // Drop the agent marker too, or a later session that reuses this name inherits a
   // dead one's agent and launches the wrong CLI.
   try { fs.unlinkSync(path.join(FLEET_DIR, `${SOCK}.${name}.agent`)); } catch {}
+  // ...and the parent tag, for the same name-reuser reason: a top-level worker that takes
+  // this name must not start reporting to somebody else's sub-lead.
+  try { fs.unlinkSync(parentFile(name)); } catch {}
   // An asleep card has no tmux session — the kill above does nothing for it and the marker
   // IS the card, so leaving it kept a stopped session on the grid. Same list as fleet-stop.
   try { fs.unlinkSync(asleepFile(name)); } catch {}
@@ -1192,7 +1254,13 @@ function cardLines(card, selected, idx) {
   const prTag = card.pr ? `#${card.pr}` : '';
   const l2 = `│ ${padEndV(twoCol(l2text,
                                  [agentTag, prTag].filter(Boolean).join(' '), CW - 2), CW - 2)} │`;
-  const l3 = `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
+  // A SUB-LEAD'S THIRD LINE IS ITS TEAM, not its last message. `◆ working · 4 workers · 1
+  // needs you` is 35 columns and the status line holds 28, so the rollup takes the line the
+  // quote had — decided by the owner over the alternatives (the count in the top rule, an
+  // abbreviated status line). The message is one ⏎ away, on the sub-grid's first card.
+  const l3 = card.workers?.total && !card.subHead
+    ? `│ ${padEndV(rollupText(card.workers), CW - 2)} │`
+    : `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
   const bot = `╰${'─'.repeat(CW)}╯`;
   const wrap = (s, isTop) => selected
     ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}`
@@ -1697,6 +1765,28 @@ let schedFor = null;         // session name being scheduled
 let schedInput = '';         // typed "<time> | <message>" buffer
 let timer;                   // refresh interval (session grid / projects)
 let selInit = false;         // apply --select preselect exactly once (first build)
+// ── the SUB-GRID ─────────────────────────────────────────────────────────────
+// '' = the top grid. Otherwise the sub-lead whose grid is drawn: itself first, then only
+// its workers. ⏎ on a sub-lead's card enters it; ` (or q) goes back up — one level, to
+// the top grid with that sub-lead selected, not out of the project.
+let SUB = SUB_ARG;
+// Attaching from a sub-grid leaves this process; the control plane then re-runs the grid
+// with --select <session>. This one-line file is how the next grid knows the session was
+// entered from a sub-grid, so detaching lands you back in it rather than at the top.
+function subMemFile() { return path.join(FLEET_DIR, `${SOCK}.grid-sub`); }
+function enterSub(name) { SUB = name; sel = 0; buildItems(); }
+function leaveSub() {
+  const was = SUB; SUB = ''; buildItems();
+  const i = items.findIndex(it => it.card && it.card.name === was);
+  sel = i >= 0 ? i : 0;
+}
+// What ⏎ / a digit / a click does to a card: a sub-lead's card on the top grid opens its
+// sub-grid; everything else attaches. Returns the choice to finish with, or null.
+function cardChoice(card) {
+  if (!SUB && card.workers?.total && !card.subHead) { enterSub(card.name); return null; }
+  if (SUB) { try { fs.writeFileSync(subMemFile(), SUB + '\n'); } catch {} }
+  return `attach${US}${card.name}`;
+}
 let gSettings = false;       // per-session settings page open (auto-nudge)
 let gSetSel = 0;             // selected row on the per-session settings page
 let renameOld = null;        // session being renamed (from the settings page's 'r')
@@ -1738,9 +1828,25 @@ function doRename(oldName, newName) {
   return { ok: true };
 }
 function buildItems() {
-  cards = gather();
-  const free = freeWorktrees();
-  items = [...cards.map(c => ({ card: c })), ...free.map(w => ({ freeWt: w })), { newCard: true }];
+  if (!selInit && !SUB) {
+    // Back from a session: re-open the sub-grid it was entered from, and a sub-worker's
+    // own sub-grid always — it has no card on the top grid to land on.
+    let mem = '';
+    try { mem = fs.readFileSync(subMemFile(), 'utf8').trim(); fs.unlinkSync(subMemFile()); } catch {}
+    if (SELECT) {
+      const p = parentOf(SELECT);
+      if (p && p !== SELECT) SUB = p;
+      else if (mem && mem === SELECT) SUB = mem;
+    }
+  }
+  cards = gather({ sub: SUB });
+  // The sub-lead went away under us (stopped, renamed): fall back to the top grid rather
+  // than draw an empty screen with a name on it.
+  if (SUB && !cards.length) { SUB = ''; cards = gather(); }
+  // A sub-grid is the team and nothing else: a free worktree or `+ new` there would start
+  // a TOP-level worker from inside somebody's sub-grid.
+  const free = SUB ? [] : freeWorktrees();
+  items = [...cards.map(c => ({ card: c })), ...free.map(w => ({ freeWt: w })), ...(SUB ? [] : [{ newCard: true }])];
   if (!selInit) {            // first build: land on the session we just came back from
     selInit = true;
     if (SELECT) { const i = items.findIndex(it => it.card && it.card.name === SELECT); if (i >= 0) sel = i; }
@@ -1757,7 +1863,8 @@ function renderGrid() {
   const { need_you: need, working: work, ready, parked, limit: limited, interrupted: cut }
     = statusCounts(cards);
   let buf = '\x1b[H';
-  const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
+  const crumb = SUB ? ` ${C.bold}› ${SUB}${C.reset}${C.dim} (sub-lead)${C.reset}` : '';
+  const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}${crumb}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
     (cut ? ` · ${C.yellow}${cut} interrupted${C.reset}` : '') +
     (limited ? ` · ${C.yellow}${limited} at limit${C.reset}` : '') +
@@ -1765,11 +1872,17 @@ function renderGrid() {
   // Same banner as the Projects screen, with the live counts beside the ship. Falls
   // back to the one-line header on a window too small to spend the rows on.
   buf += banner([
-    `${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}`,
+    `${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}${crumb}`,
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
       (parked ? ` · ${C.grey}${parked} parked${C.reset}` : ''),
   ]) ?? (header + '\x1b[K\n');
-  if (confirmKill)
+  const killW = confirmKill ? cards.find(c => c.name === confirmKill)?.workers : null;
+  if (confirmKill && killW?.total)
+    // THE ASK. A sub-lead does not go alone: its workers are stopped with it and their
+    // worktrees reclaimed where fleet-clean's gates say that is safe (fleet-stop --children).
+    buf += `${C.red}${C.bold} stop sub-lead '${confirmKill}' AND its ${killW.total} worker${killW.total === 1 ? '' : 's'} (worktrees reclaimed where safe)?${C.reset}` +
+           `${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
+  else if (confirmKill)
     buf += `${C.red}${C.bold} kill session '${confirmKill}'?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
   else if (confirmWt)
     // Clip to what actually fits beside the key hint: a line that wraps pushes the
@@ -1821,7 +1934,10 @@ function renderGrid() {
   // the card area against its height. At 8 cards in 24 rows it costs one more wrapped
   // line between 93 and 106 columns and none above; at 80 the banner was already being
   // pushed off by the footer as it stood, which is its own problem and not this one.
-  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 enter · n new · N parallel · w worktree · t stack · ` +
+  buf += SUB
+    ? `${C.dim} ↑↓←→/hjkl move · ⏎/1-9 enter · t stack · s sched · p pause · P resume · ${xVerb} · , settings · ` +
+      `Ctrl-t term · Ctrl-n edit · Ctrl-f jump · Ctrl-p/Q projects · q/\` up to the top grid${C.reset}\x1b[K\n`
+    : `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 enter · n new · N parallel · w worktree · t stack · ` +
          `s sched · p pause · P resume · ${xVerb} · , settings · Ctrl-t term · Ctrl-n edit · Ctrl-f jump · ` +
          `Ctrl-p/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
@@ -2195,7 +2311,7 @@ function onKey(key) {
         sel = idx;
         const it = items[sel];
         if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = false; mode = 'picker'; render(); }
-        else if (it?.card) return finish(`attach${US}${it.card.name}`);
+        else if (it?.card) { const c = cardChoice(it.card); if (c) return finish(c); render(); }
         else if (it?.freeWt) return finish(freeWtChoice(it.freeWt));
       }
     }
@@ -2225,7 +2341,11 @@ function onKey(key) {
       render(); return;
     }
     if (confirmKill) {
-      if (key === 'y' || key === 'Y') { killSession(confirmKill); confirmKill = null; buildItems(); }
+      if (key === 'y' || key === 'Y') {
+        const w = cards.find(c => c.name === confirmKill)?.workers;
+        if (w?.total) stopSubLead(confirmKill); else killSession(confirmKill);
+        confirmKill = null; buildItems();
+      }
       else confirmKill = null;
       render(); return;
     }
@@ -2271,7 +2391,10 @@ function onKey(key) {
       const j = jumpKey(key);
       if (j) { if (j !== 'handled') return finish(j); render(); return; }
     }
-    if (key === '\x03' || key === 'q' || key === '\x60') return finish('back');
+    if (key === '\x03' || key === 'q' || key === '\x60') {
+      if (SUB) { leaveSub(); render(); return; }        // up one level, not out of the project
+      return finish('back');
+    }
     if (key === '\x1b[A' || key === 'k') moveGrid('up');
     else if (key === '\x1b[B' || key === 'j') moveGrid('down');
     else if (key === '\x1b[C' || key === 'l') moveGrid('right');
@@ -2281,12 +2404,17 @@ function onKey(key) {
     // count these cards, and they have to keep meaning the same session.
     else if (key === 'H' || key === 'L' || key === 'K' || key === 'J') {
       const it = items[sel];
-      if (it?.card) {
+      // Not in a sub-grid: the order file is the TOP grid's numbering, and writing it from
+      // a list of four children would drop every other session out of it.
+      if (it?.card && !SUB) {
         const nc = cols();
         const delta = key === 'H' ? -1 : key === 'L' ? 1 : key === 'K' ? -nc : nc;
         const ni = reorderSession(it.card.name, delta);
         buildItems(); if (ni >= 0) sel = ni;      // cards lead `items`, so index == index
       }
+    }
+    else if (SUB && (key === 'n' || key === 'N' || key === 'w' || key === 'W')) {
+      wtRmMsg = `this is ${SUB}'s sub-grid — its workers are spawned by ${SUB} (fleet-spawn from its worktree); \` goes back up`;
     }
     else if (key === 'n') { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = false; mode = 'picker'; }
     else if (key === 'N') { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = true; mode = 'picker'; }
@@ -2337,7 +2465,7 @@ function onKey(key) {
     else if (key === '\x0e') { const c = tabChoice('edit'); if (c) return finish(c); render(); return; }
     else if (key >= '1' && key <= '9') {              // insta-jump: digit -> that card
       const it = items[Number(key) - 1];
-      if (it?.card) { sel = Number(key) - 1; return finish(`attach${US}${it.card.name}`); }
+      if (it?.card) { sel = Number(key) - 1; const c = cardChoice(it.card); if (c) return finish(c); }
       else if (it?.freeWt) { sel = Number(key) - 1; return finish(freeWtChoice(it.freeWt)); }
     }
     else if (key === '\x10' || key === 'Q') return finish('projects');  // ^P (or Q) -> Projects
@@ -2350,7 +2478,7 @@ function onKey(key) {
     else if (key === '\r' || key === '\n') {
       const it = items[sel];
       if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
-      else if (it?.card) return finish(`attach${US}${it.card.name}`);
+      else if (it?.card) { const c = cardChoice(it.card); if (c) return finish(c); }
       else if (it?.freeWt) return finish(freeWtChoice(it.freeWt));
     }
     render();
@@ -2505,7 +2633,14 @@ if (process.argv.includes('--checkouts')) {
 // depending on how you got there. Deliberately does NOT call gather(): it needs
 // names, not a capture-pane round trip per session.
 if (process.argv.includes('--order')) {
-  const names = applyOrder(tmuxList().filter(s => !isLead(s.name))).map(s => s.name);
+  // The TOP grid's cards, and only those: a sub-worker is drawn inside its sub-lead's grid,
+  // so counting it here would make `Ctrl-f <p> <s>` and the digits disagree about which
+  // session is number 3. A child whose parent is not on the fleet is drawn at the top, so
+  // it is counted at the top.
+  const live = tmuxList();
+  const liveNames = new Set(live.map(s => s.name));
+  const nested = n => { const p = parentOf(n); return !!p && p !== n && liveNames.has(p); };
+  const names = applyOrder(live.filter(s => !isLead(s.name) && !nested(s.name))).map(s => s.name);
   if (names.length) console.log(names.join('\n'));
   process.exit(0);
 }
@@ -2546,10 +2681,13 @@ if (process.argv.includes('--order')) {
 // opening the main agent, just the sessions". gather({lead:true}) puts it first; the TUI
 // and --plain still call gather() and are byte-for-byte what they were.
 if (JSON_OUT) {
-  const rows = gather({ lead: true });
+  const rows = gather({ lead: true, sub: SUB_ARG });
   await new Promise(res => process.stdout.write(JSON.stringify({
     project: Z,
     profile: PROFILE,
+    // Whose sub-grid this is (--sub), or null for the top one. Echoed so a client can tell
+    // a sub-grid it asked for from a top grid it got because that sub-lead has gone.
+    sub:     SUB_ARG && rows.length ? SUB_ARG : null,
     // COUNTED OVER THESE CARDS, lead included — `counts` is a fold over `cards` and
     // nothing else, which is the only definition that cannot drift: web/grid.js's
     // countsFrom() folds the same array in the client, and the suite asserts the two
@@ -2619,8 +2757,20 @@ if (JSON_OUT) {
       // be one test, and an absent key reads as false in exactly the same way a real
       // false does, right up until the day it is absent for another reason.
       lead:     c.lead,
+      // ── NESTED LEADS ──
+      // `parent`: the sub-lead this card reports to, or null. On the top grid it is always
+      // null (children are not listed there); on a sub-grid it is set on every card but the
+      // first. `workers`: a sub-lead's rollup — {total, need_you, working} — or null for a
+      // session with no children, so "is this a sub-lead" is one test for the client.
+      parent:   c.parent || null,
+      workers:  c.workers || null,
+      // true on the one card that heads a sub-grid: it is drawn and tapped as an ordinary
+      // session (its message, not its rollup — the rollup is that screen's header).
+      sub_head: !!c.subHead,
     })),
-    free_worktrees: freeWorktrees(),
+    // A sub-grid lists the sub-lead's team and nothing else: a free worktree offered there
+    // would start a TOP-level worker from inside somebody's sub-grid.
+    free_worktrees: SUB_ARG ? [] : freeWorktrees(),
   }) + '\n', res));
   process.exit(0);
 }
@@ -2687,7 +2837,9 @@ function checkJump() {
   let raw;
   try { raw = fs.readFileSync(f, 'utf8'); fs.unlinkSync(f); } catch { return false; }
   const [slot, ts] = raw.split('\t');
-  if (slot && (Date.now() / 1000 - Number(ts || 0)) < 30 && (slot === 'master' || cards.some(c => c.name === slot))) {
+  // A sub-worker has no card on the top grid but is still a session you can be sent to.
+  if (slot && (Date.now() / 1000 - Number(ts || 0)) < 30 && (slot === 'master' || cards.some(c => c.name === slot)
+      || (parentOf(slot) && tmuxList().some(t => t.name === slot)))) {
     finish(`attach${US}${slot}`);
     return true;
   }

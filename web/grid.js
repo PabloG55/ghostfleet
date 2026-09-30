@@ -105,6 +105,14 @@ function limitAtOf(card) { return card.limit_at ?? card.limitAt ?? null; }
 // instead of how long ago it spoke, that a scheduled send outranks both. A second reader
 // re-deriving those from the raw §4 object would drift on exactly the cases the comments
 // below exist to pin, and drift silently, because both would still render something.
+// A sub-lead's rollup, worded exactly as bin/fleet-grid.mjs rollupText() words it — the
+// TUI prints it on the card's third line, the phone on a line of its own. '' for a session
+// with no workers, so "is this a sub-lead" is the truth of this string.
+export function rollupText(w) {
+  if (!w || !w.total) return '';
+  return `${w.total} worker${w.total === 1 ? '' : 's'} · ${w.need_you} ${w.need_you === 1 ? 'needs' : 'need'} you`;
+}
+
 export function cardModel(card, selected = false, idx = -1) {
   const meta = STATUS[card.status] || STATUS.starting;
   // 1-9 = the digit that jumps straight to this card in the TUI; on the phone it is the
@@ -163,6 +171,16 @@ export function cardModel(card, selected = false, idx = -1) {
     // Prompts fleet-send is holding until this session's turn ends — see queuedCount in
     // bin/fleet-grid.mjs. The phone draws it as a chip; 0 draws nothing.
     queued: card.queued || 0,
+    // ── NESTED LEADS ─────────────────────────────────────────────────────────
+    // A sub-lead's card carries its team instead of its last message on the TUI (28
+    // columns cannot hold both); the phone has room for both and shows the rollup as its
+    // own line. Tapping a card with a rollup opens its sub-grid rather than the session.
+    // '' on the card that HEADS a sub-grid: there it is an ordinary session, and the
+    // rollup is that screen's header.
+    rollup: card.sub_head ? '' : rollupText(card.workers),
+    subHead: !!card.sub_head,
+    workersNeed: card.workers?.need_you || 0,
+    parent: card.parent || null,
   };
 }
 

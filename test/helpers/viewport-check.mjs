@@ -621,6 +621,21 @@ async function walk(w, h) {
   await escSheet(); await seeing('noSheet', 'the sheet to close');
   await tapCard('acme-api'); await seeingCard('api-fix');
   await at('grid');
+  // ── NESTED LEADS: a sub-lead's card opens its sub-grid, and back comes up ──
+  // Tapped for real, through the same gesture machine, because "the card has a rollup" and
+  // "a tap on it goes somewhere different" are two claims and only the second is the feature.
+  // Both directions: the sub-grid holds the team and nothing else, and back lands on the
+  // TOP grid (api-fix is there again) rather than on Projects.
+  if (w === 390) {
+    const names = () => evaluate(() => [...document.querySelectorAll('#app .card .c-name')].map(n => n.textContent.trim()));
+    is('grid: the sub-lead card carries its rollup', true,
+       await evaluate(() => [...document.querySelectorAll('#app .card')].some(c =>
+         /cache-keys/.test(c.querySelector('.c-name')?.textContent || '') && /2 workers · 1 needs you/.test(c.textContent))));
+    await tapCard('cache-keys'); await seeingCard('cache-keys-ttl');
+    is('sub-grid: the sub-lead, then only its workers', 'cache-keys,cache-keys-ttl,cache-keys-docs', (await names()).join(','));
+    await evaluate(() => { history.back(); return null; }); await seeingCard('api-fix');
+    is('sub-grid: back comes up to the top grid', true, (await names()).includes('docs-pass'));
+  }
   await tapCard('api-fix'); await seeing('session', 'the session screen');
   await at('session/chat');
   // The two controls the photographs showed cut in half — AT EVERY TEXT SIZE, not only at

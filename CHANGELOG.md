@@ -17,6 +17,17 @@ the detail, and every entry here names the PR that carries the argument.
   answering a worker's prompt and a second worker per request are **refused by the tools**
   until the owner says or taps yes. It restarts fresh once a day while idle, carrying a
   `HANDOFF.md` forward.
+- **Nested leads: a worker can run its own workers** (docs/ORCHESTRATION.md). `fleet-spawn`
+  from a worker's worktree used to refuse; it now makes a **child** of that worker — branched
+  from its branch, PR into it, same fleet, tagged with its parent. The child's done and
+  need-you go to the **sub-lead's** inbox and wake it; the top master sees one card reading
+  `2 workers · 1 needs you`, and ⏎ (or a tap on the phone) opens the sub-lead's **sub-grid**.
+  Exactly two levels: a sub-worker cannot spawn. `fleet-stop` on a sub-lead with workers now
+  refuses until `--children`, which stops and reclaims them first. The subagent guard's
+  worktree exemption now covers only sub-workers — a top-level worker is pointed at
+  `fleet-spawn` like a lead. A sub-lead may merge its **children's** PRs into its own branch
+  with *workers can merge* off (base = its branch, head = a child's branch); its own PR
+  upward is still its master's to merge. Phone client v49.
 - **Conversation mode on the phone**: a Jarvis screen (from the top of Projects) where one tap
   on *talk* runs a spoken conversation — on-device voice detection, transcription by
   whisper.cpp on the Mac (audio never leaves it), answers read aloud. Optional:

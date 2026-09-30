@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-stop [-s SOCKET] [--reclaim [--force]] <session>   (flags may go on either side)
+# fleet-stop [-s SOCKET] [--reclaim [--force]] [--children] <session>   (flags may go on either side)
 #
 # Cleanly STOP a fleet worker: kill its tmux session and clear ALL of its fleet
 # state — the status file, the park + schedule markers (and the detached schedule
@@ -31,6 +31,14 @@
 # implementation is what lets the TUI and the phone (bin/fleet-serve) mean the same thing
 # by it. It DELETES UNCOMMITTED WORK by design.
 #
+# A SUB-LEAD (a worker that spawned workers of its own — see bin/fleet-spawn) is not
+# stopped on its own: its children would be left reporting to nobody, on branches whose
+# only integrator is gone. So this ASKS: without `--children` it refuses and names them.
+# With it, each child is stopped and reclaimed first — through this same command with
+# --reclaim, so the squash-aware gates in fleet-clean decide each worktree exactly as they
+# would for any finished worker — and then the sub-lead itself. `--reclaim`/`--force`
+# still apply to the sub-lead only; a child's worktree is never force-removed from here.
+#
 # Socket defaults to $CLAUDE_FLEET_SOCK.
 set -uo pipefail
 
@@ -44,12 +52,13 @@ _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;
 # DROPPED the flag — the session stopped, the worktree stayed, and nothing said why. A
 # real agent hit that within a day, having copied the order from this repo's own skill
 # table. An option that is ignored without complaint is worse than one that errors.
-RECLAIM=0; FORCE=0; SESSION=""
+RECLAIM=0; FORCE=0; CHILDREN=0; SESSION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)        SOCK="${2:-}"; shift 2 ;;
     --reclaim) RECLAIM=1; shift ;;
     --force)   FORCE=1;   shift ;;
+    --children) CHILDREN=1; shift ;;
     -*)        echo "fleet-stop: unknown option $1" >&2; exit 1 ;;
     *)         [ -z "$SESSION" ] && SESSION="$1" || { echo "fleet-stop: unexpected arg $1" >&2; exit 1; }
                shift ;;
@@ -73,6 +82,36 @@ _me=""; [ -n "${TMUX_PANE:-}" ] && case "${TMUX:-}" in *"/$SOCK,"*)
   && { echo "fleet-stop: refusing to stop the calling session ('$SESSION')" >&2; exit 1; }
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+
+# ── a sub-lead's workers: asked about, then stopped first ────────────────────
+# A child is a session whose <sock>.<child>.parent names this one. Only those still on the
+# fleet count — live, or asleep (an asleep card is still a card, and still a worktree).
+kids=()
+for pt in "$FLEET_DIR/$SOCK".*.parent; do
+  [ -f "$pt" ] || continue
+  [ "$(head -1 "$pt" 2>/dev/null)" = "$SESSION" ] || continue
+  k="${pt#"$FLEET_DIR/$SOCK."}"; k="${k%.parent}"
+  [ -n "$k" ] && [ "$k" != "$SESSION" ] || continue
+  if tmux -L "$SOCK" has-session -t "$k" 2>/dev/null || [ -f "$FLEET_DIR/$SOCK.$k.asleep" ]; then
+    kids+=("$k")
+  else
+    rm -f "$pt" 2>/dev/null            # a tag for a session that is gone is just litter
+  fi
+done
+if [ "${#kids[@]}" -gt 0 ] && [ "$CHILDREN" != 1 ]; then
+  { echo "fleet-stop: '$SESSION' is a sub-lead with ${#kids[@]} worker(s): ${kids[*]}"
+    echo "  Stopping it stops them too, and reclaims their worktrees where that is safe. Say so:"
+    _rc=""; [ "$RECLAIM" = 1 ] && _rc=" --reclaim"
+    echo "      fleet-stop -s $SOCK --children$_rc $SESSION"
+    echo "  Nothing was stopped."; } >&2
+  exit 1
+fi
+if [ "${#kids[@]}" -gt 0 ]; then
+  for k in "${kids[@]}"; do
+    echo "fleet-stop: stopping worker '$k' of sub-lead '$SESSION'"
+    CLAUDE_FLEET_DIR="$FLEET_DIR" "$0" -s "$SOCK" --reclaim "$k" 2>&1 | sed 's/^/  /'
+  done
+fi
 
 # WHERE THIS WORKER LIVES, asked while it is still alive. Once the session is killed
 # tmux cannot answer, and the manifest can be stale for a session that was renamed or
@@ -129,6 +168,10 @@ done
 rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to" "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
 # the display label too, or a session that reuses this name inherits a stranger's title
 rm -f "$FLEET_DIR/$SOCK.$SESSION.label" 2>/dev/null
+# its parent tag (a name-reuser must not report to somebody else's sub-lead) and, for a
+# sub-lead, the inbox its workers wrote into — a stranger's backlog, to whoever is next
+rm -f "$FLEET_DIR/$SOCK.$SESSION.parent" "$FLEET_DIR/$SOCK.$SESSION.inbox" \
+      "$FLEET_DIR/$SOCK.$SESSION.inbox.seen" "$FLEET_DIR/$SOCK.$SESSION.notify.stamp" 2>/dev/null
 # THE ASLEEP MARKER IS A CARD. A hibernated session has no tmux session to kill, so the
 # kill above is a no-op for it — and the marker alone is what draws it on the grid and the
 # phone. Seen: a fleet "cleaned" session by session, and three asleep cards stayed behind.

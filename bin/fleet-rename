@@ -21,6 +21,8 @@
 #   - its display label (the grid's `,` then `l`)
 #   - its agent, exited and asleep markers, and its relay stamp
 #   - its phone attachments directory (attach/<sock>.<session>/)
+#   - its parent tag (a sub-worker keeps its sub-lead), and every child's tag that names
+#     it (a sub-lead keeps its workers), plus the sub-lead's own inbox and read offset
 #   - every reply-to marker in this fleet that names it as the ASKER, so an answer on its
 #     way back to it still finds it
 #   - its state record(s): slot, cwd and folder, so every by-name reader finds it at once
@@ -91,6 +93,21 @@ mv -f "$FLEET_DIR/$SOCK.$OLD.label"           "$FLEET_DIR/$SOCK.$NEW.label"     
 # back as claude), the exited/asleep markers (a card that should say exited or asleep
 # said nothing), and the relay stamp.
 mv -f "$FLEET_DIR/$SOCK.$OLD.agent"           "$FLEET_DIR/$SOCK.$NEW.agent"           2>/dev/null || true
+# the inbox a sub-lead's children write into, with the offset it has already read
+mv -f "$FLEET_DIR/$SOCK.$OLD.inbox"           "$FLEET_DIR/$SOCK.$NEW.inbox"           2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.inbox.seen"      "$FLEET_DIR/$SOCK.$NEW.inbox.seen"      2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.notify.stamp"    "$FLEET_DIR/$SOCK.$NEW.notify.stamp"    2>/dev/null || true
+# THE PARENT TAG, BOTH WAYS. A renamed CHILD keeps its parent (its own tag moves with it);
+# a renamed SUB-LEAD keeps its children, whose tags name it and are re-pointed here. Miss
+# the second and every child silently falls back to reporting to master — a tag naming a
+# session that is not there is treated as no tag (hooks/fleet-event.sh), which is the
+# right answer for a stopped parent and the wrong one for a renamed one.
+mv -f "$FLEET_DIR/$SOCK.$OLD.parent"          "$FLEET_DIR/$SOCK.$NEW.parent"          2>/dev/null || true
+for pt in "$FLEET_DIR/$SOCK".*.parent; do
+  [ -f "$pt" ] || continue
+  [ "$(head -1 "$pt" 2>/dev/null)" = "$OLD" ] || continue
+  printf '%s\n' "$NEW" > "$pt.$$.tmp" 2>/dev/null && mv -f "$pt.$$.tmp" "$pt" 2>/dev/null || rm -f "$pt.$$.tmp" 2>/dev/null
+done
 mv -f "$FLEET_DIR/$SOCK.$OLD.exited"          "$FLEET_DIR/$SOCK.$NEW.exited"          2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.asleep"          "$FLEET_DIR/$SOCK.$NEW.asleep"          2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.relay.stamp"     "$FLEET_DIR/$SOCK.$NEW.relay.stamp"     2>/dev/null || true

@@ -34,6 +34,7 @@ const S = {
   projects: null,       // last /api/projects payload
   profile: 'all',       // the projects screen's tab: 'all' | a profile name (see PROFILES)
   grid: null,           // last §4 payload
+  sub: '',              // '' = the top grid; else the sub-lead whose sub-grid is open
   sess: null,           // last /api/session payload  { messages, next_before, … }
   view: 'chat',         // the session screen: 'chat' (the conversation) | 'pane' (the terminal)
   pane: null,           // last /api/pane payload   { pane, at, … }
@@ -87,7 +88,7 @@ function save() {
       // not on this fleet's grid any more". It was always broken and was easy to miss
       // while that screen was a card and a row of buttons; it is the whole viewport now.
       session: S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode,
-      projects: S.projects, grid: S.grid,
+      projects: S.projects, grid: S.grid, sub: S.sub,
     }));
   } catch {}
 }
@@ -97,6 +98,8 @@ function restore() {
   S.projects = j.projects || null; S.grid = j.grid || null;
   S.project = j.project || null; S.screen = j.screen || 'projects';
   S.session = j.session || null;
+  // the sub-grid you were in; the next grid read falls back to the top if it has gone
+  S.sub = (S.project && typeof j.sub === 'string') ? j.sub : '';
   S.jarvisMode = !!j.jarvisMode && S.screen === 'session';
   // 'msgs' was the old list view's name and is not a view any more; anything unrecognised
   // falls to the default rather than rendering neither.
@@ -160,7 +163,12 @@ async function refresh() {
       // than Jarvis answers 404, which means "no band", not "the Projects screen is broken".
       try { S.jarvis = await api.getJarvis(); } catch (e) { if (e instanceof api.AuthError) throw e; }
     }
-    else if (S.screen === 'grid') S.grid = await api.getGrid(S.project);
+    else if (S.screen === 'grid') {
+      S.grid = await api.getGrid(S.project, S.sub);
+      // The sub-lead went away while its grid was open: the server answers the top grid's
+      // shape with no cards, and staying on an empty screen with a name on it is the lie.
+      if (S.sub && S.grid && !S.grid.sub) { S.sub = ''; S.grid = await api.getGrid(S.project); }
+    }
     else if (S.screen === 'session') {
       // JARVIS IS A PROJECT like any other, so once it is known the rest of this branch is
       // the ordinary session read — the same grid card, the same transcript, the same pane.
@@ -169,7 +177,7 @@ async function refresh() {
         if (!S.jarvis || !S.jarvis.present) { S.stale = 0; renderUnlessTyping(); return; }
         S.project = S.jarvis.project; S.session = 'master';
       }
-      S.grid = await api.getGrid(S.project);
+      S.grid = await api.getGrid(S.project, S.sub);
       // The pane has its OWN faster timer (panePoll below), so this loop only has to
       // fetch it once, to fill the box on the way in rather than up to a poll later.
       if (S.view === 'pane' && !S.pane) await readPane();
@@ -615,7 +623,7 @@ function toProjects() {
 
 function openProject(name) {
   if (!name) return;
-  S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null;
+  S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null; S.sub = '';
   // Another project's card list is a different list; row 12 of it means nothing here.
   scrollMem.delete('grid');
   pushNav();                          // so the back gesture returns to Projects, not out
@@ -654,7 +662,9 @@ function items() {
   return [
     ...(g.cards || []).map(c => ({ card: c })),
     ...(g.free_worktrees || []).map(w => ({ freeWt: w })),
-    { newCard: true },
+    // Not in a sub-grid, as at the desk: a session started from there would be a TOP-level
+    // worker, and a sub-lead's workers are spawned by the sub-lead from its worktree.
+    ...(S.sub ? [] : [{ newCard: true }]),
   ];
 }
 // The four counts that fit a phone row, each a tile. ONLY A NON-ZERO COUNT IS COLOURED:
@@ -705,7 +715,7 @@ function gridProps() {
   const counts = G.countsFrom(g.cards || []);
   const sel = its[S.sel] || {};
   return {
-    scope: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]`,
+    scope: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]` + (S.sub ? ` › ${S.sub}` : ''),
     mode: modeSpec(),
     stale: S.stale,
     // WORDED AND COLOURED HERE, drawn there. countsSegments() is grid.js's, so the phone's
@@ -730,8 +740,11 @@ function gridProps() {
         }, idx);
       }
       const c = it.card;
-      return cardEl(G.cardModel(c, isSel, idx), {
-        tap: () => (c.asleep ? wakeSession(c.name) : openSession(c.name)),
+      const m = G.cardModel(c, isSel, idx);
+      return cardEl(m, {
+        // A sub-lead's card on the top grid opens its sub-grid, as ⏎ does at the desk; the
+        // same card heading its own sub-grid (no rollup there) opens the session.
+        tap: () => (c.asleep ? wakeSession(c.name) : m.rollup ? openSub(c.name) : openSession(c.name)),
         longPress: () => askKill(c.name),
         swipeLeft: () => pauseSession(c.name),
         swipeRight: () => resumeSession(c.name),
@@ -1411,6 +1424,15 @@ function openSession(name) {
   S.draft = ''; S.pending = null; stopSpeaking();
   // Another session's offset means nothing in this one's pane or transcript.
   scrollMem.delete('pane'); scrollMem.delete('chat');
+  pushNav();
+  render(); refresh();
+}
+// A sub-lead's card opens its SUB-GRID — itself first, then only its workers — one level
+// down, so back (the ‹, the swipe, popTo) comes up to the top grid rather than out.
+function openSub(name) {
+  if (!name) return;
+  S.sub = name; S.sel = 0; S.grid = null;
+  scrollMem.delete('grid');
   pushNav();
   render(); refresh();
 }
@@ -2780,6 +2802,9 @@ function popTo() {
   // Jarvis was opened from Projects and sits one level under it, whatever its session is.
   if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; S.speakSel = ''; stopSpeaking(); }
   else if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; S.speakSel = ''; stopSpeaking(); }
+  // A SUB-GRID IS ONE LEVEL DOWN, so back from it is the top grid, not the projects list —
+  // the same ` the desk uses to go up.
+  else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; }
   else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; }
   else return;                                  // at the root: let the platform have it
   navDepth = Math.max(0, navDepth - 1);
@@ -2870,6 +2895,10 @@ function cardEl(m, h, idx) {
   if (m.pr) meta.append(el('span', { class: 'chip tag', text: m.pr }));
   if (m.queued) meta.append(el('span', { class: 'chip tag', text: `queued: ${m.queued}` }));
   if (meta.childNodes.length) d.append(meta);
+  // ── a sub-lead's team: its own line, above its message ──────────────────
+  // The desk gives the rollup the message's line (28 columns cannot hold both); here there
+  // is room for both, so the team gets a line and the message keeps its two.
+  if (m.rollup) d.append(el('div', { class: 'c-meta c-roll' }, [el('span', { class: 'chip tag', text: m.rollup })]));
   // ── the agent's last line, two real lines of it ─────────────────────────
   // THE POINT OF THE REDESIGN. Rendered as text, never as markup: this is whatever the
   // agent last said, and app.css clamps it rather than the client truncating it — so the
@@ -2996,8 +3025,10 @@ function confirmSpec() {
   const yn = 'y = yes · any other key = cancel';
   const cancelBtn = { label: 'cancel', onClick: cancel };
   if (c.kind === 'kill' || c.kind === 'reclaim-kill') {
-    return { cls: 'red', q: `kill session '${c.name}'?`, keys: yn, buttons: [
-      { label: 'y = yes', cls: 'danger', onClick: () => c.kind === 'kill' ? confirmedKill(c.name) : askReclaimWorktree(c.name) },
+    return { cls: 'red', q: c.workers
+        ? `stop sub-lead '${c.name}' AND its ${c.workers} worker${c.workers === 1 ? '' : 's'} (worktrees reclaimed where safe)?`
+        : `kill session '${c.name}'?`, keys: yn, buttons: [
+      { label: 'y = yes', cls: 'danger', onClick: () => c.kind === 'kill' ? confirmedKill(c.name, c.workers) : askReclaimWorktree(c.name) },
       cancelBtn,
     ] };
   }
@@ -3087,10 +3118,15 @@ async function wakeSession(name) {
   openSession(name);
 }
 
-function askKill(name) { if (name && !leadGuard(name, 'stopped')) { S.confirm = { kind: 'kill', name }; render(); } }
-async function confirmedKill(name) {
+function askKill(name) {
+  if (!name || leadGuard(name, 'stopped')) return;
+  // A sub-lead is asked about WITH its team: stopping it stops and reclaims its workers.
+  const w = (cardOf(name) || {}).workers;
+  S.confirm = { kind: 'kill', name, workers: (w && w.total) || 0 }; render();
+}
+async function confirmedKill(name, workers = 0) {
   S.confirm = null;
-  await doVerb('fleet_stop', { project: S.project, session: name });
+  await doVerb('fleet_stop', { project: S.project, session: name, ...(workers ? { children: true } : {}) });
   if (S.screen === 'session' && S.session === name) back(); else render();
 }
 // stop --reclaim removes the worktree too, so it takes BOTH of the TUI's prompts: the
@@ -3816,7 +3852,7 @@ function onKey(e) {
     // reflex, and this particular one throws away real work.
     if (c.force) { if (k === 'f' || k === 'F') removeWorktree(c, true); else cancel(); return; }
     if (k === 'y' || k === 'Y') {
-      if (c.kind === 'kill') confirmedKill(c.name);
+      if (c.kind === 'kill') confirmedKill(c.name, c.workers);
       else if (c.kind === 'reclaim-kill') askReclaimWorktree(c.name);
       else if (c.kind === 'reclaim-wt') confirmedReclaim(c.name);
       else if (c.kind === 'wt') removeWorktree(c, false);

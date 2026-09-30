@@ -544,8 +544,10 @@ is('...and activate drops the old ones', true, /if \(k !== VERSION\) await cache
 
 // ── 3. the fixtures are §4, exactly ───────────────────────────────────────
 const NINE = ['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted'];
-const TOP = ['project', 'profile', 'counts', 'cards', 'free_worktrees'].sort().join(',');
-const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'pr', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead', 'exited'].sort().join(',');
+// `sub`, `parent`, `workers`, `sub_head`: nested leads — whose sub-grid this is, whose team a
+// card belongs to, a sub-lead's rollup, and the card that heads its own sub-grid.
+const TOP = ['project', 'profile', 'sub', 'counts', 'cards', 'free_worktrees'].sort().join(',');
+const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'pr', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead', 'exited', 'parent', 'workers', 'sub_head'].sort().join(',');
 const COUNTS = ['need_you', 'working', 'ready', 'parked', 'limit', 'interrupted'].sort().join(',');
 const fixDir = path.join(WEB, 'fixtures');
 const grids = fs.readdirSync(fixDir).filter(f => /^grid-.*\.json$/.test(f)).sort();
@@ -796,7 +798,8 @@ is('reclaim takes BOTH confirmations', true, /reclaim-kill/.test(APP) && /reclai
 // — which is why the run.sh group drives the refusal through the planner as well.
 is('the lead is read off the card, not the name', true,
    /function isLeadCard\(name\) \{ const c = cardOf\(name\); return !!\(c && c\.lead\); \}/.test(APP));
-is('...and kill goes through the guard', true, /function askKill\(name\) \{ if \(name && !leadGuard\(/.test(APP));
+// the guard is the FIRST statement: a sub-lead's worker count is read only after it
+is('...and kill goes through the guard', true, /function askKill\(name\) \{\s*if \(!name \|\| leadGuard\(/.test(APP));
 is('...and reclaim too', true, /function askReclaim\(name\) \{ if \(name && !leadGuard\(/.test(APP));
 is('...and rename too', true, /function sheetRename\(name\) \{[\s\S]{0,400}?leadGuard\(name, 'renamed'\)/.test(APP));
 is('the lead keeps send/answer/pause', true, /const lead = !!\(c && c\.lead\);/.test(APP));

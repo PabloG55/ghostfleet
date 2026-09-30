@@ -47,6 +47,50 @@ which is what keeps a long-running or restarted lead from getting lost:
 | **stop** a worker for good (or a dead orphan) | `fleet-stop <session>` |
 | the checkout's **dev-stack slot** | `fleet-slot of <path>` · `fleet-slot list` |
 
+### Nested leads — a worker can run its own workers
+
+A worker whose task wants a team is a **sub-lead**: a lead for its children and a worker to
+its master. `fleet-spawn` run from a worker's worktree makes a **child of that session** —
+before, it refused there, so a worker that wanted helpers either used subagents the fleet
+cannot see or spawned from the main checkout, which made its children flat siblings of the
+top lead: their events went to a master that had not asked for them, and nothing tied them
+to the lead they belonged to.
+
+```
+master (main checkout)
+├── docs-pass              a plain worker
+└── api-fix                a sub-lead, branch feat/api-fix
+    ├── api-fix-tests      branched from feat/api-fix, PR → feat/api-fix
+    └── api-fix-docs       branched from feat/api-fix, PR → feat/api-fix
+```
+
+- **Branches.** A child is cut from the sub-lead's branch and PRs into it. The sub-lead
+  merges its children's PRs and opens the one PR to the integration branch. That merge is
+  allowed with *workers can merge* off — the guard checks that the PR's base is the
+  sub-lead's own branch and its head is one of its children's branches — while the
+  sub-lead's own PR upward is merged by its master like any worker's. A session-level
+  `workers-merge-off` still vetoes it.
+- **Same fleet, tagged.** Children are ordinary sessions on the same socket;
+  `<fleet dir>/<sock>.<child>.parent` names the sub-lead. `fleet-rename` carries the tag
+  both ways (a renamed child keeps its parent, a renamed sub-lead keeps its children) and
+  `fleet-stop` clears it.
+- **Events.** A child's `done` / `need-you` go to `<sock>.<sub-lead>.inbox` — what
+  `fleet-inbox` shows when the sub-lead runs it — and wake the sub-lead (on by default; the
+  fleet's `notify-lead-off` kill switch and the child's own `-off` marker still win). The
+  top master sees only the rollup on the sub-lead's card, and `fleet-digest` lists children
+  as `project/sub-lead/child`. A tag whose sub-lead is gone hands the child back to master.
+- **Screens.** The sub-lead's card reads `◆ working` · `2 workers · 1 needs you` (the rollup
+  takes the message line; 28 columns cannot hold both). ⏎ opens its **sub-grid** — the
+  sub-lead first, then only its children; `` ` `` goes back up. The phone is the same: a tap
+  on the card opens the sub-grid, back comes up (`/api/grid?sub=`, `fleet-grid.mjs --json --sub`).
+- **Two levels, exactly.** A child cannot spawn (`fleet-spawn` refuses and says
+  "sub-worker"). The subagent guard follows the same line: a sub-worker's subagents are its
+  own business, while a top-level worker is redirected to `fleet-spawn` like a lead.
+- **Stopping a sub-lead asks.** `fleet-stop <sub-lead>` refuses and names its children;
+  `fleet-stop --children [--reclaim] <sub-lead>` stops and reclaims each child through
+  fleet-clean's squash-aware gates, then the sub-lead. The grid's `x` and the phone's
+  long-press ask the same question with the worker count in it.
+
 ### Dev-stack slots — one integer per checkout
 
 Several checkouts of one repo each need their own local stack: an API port, a web port,

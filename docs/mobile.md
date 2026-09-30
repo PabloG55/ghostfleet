@@ -107,6 +107,7 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
 {
   "project": "acme-api",
   "profile": "work",
+  "sub":     null,                        // a sub-lead's name with --sub, see "nested leads"
   "counts": { "need_you": 0, "working": 2, "ready": 5,   // the lead is counted, see below
               "parked": 0, "limit": 0, "interrupted": 0 },
   "cards": [
@@ -123,7 +124,10 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
       "attached":  true,
       "sched":     null,
       "limit_at":  null,
-      "lead":      true                   // not a worker: no stop, no reclaim, no rename
+      "lead":      true,                  // not a worker: no stop, no reclaim, no rename
+      "parent":    null,
+      "workers":   null,
+      "sub_head":  false
     },
     {
       "name":      "api-fix",             // what fleet-send/fleet-read address
@@ -141,7 +145,10 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
       "attached":  false,
       "sched":     null,                  // { "at": <epoch>, "msg": "…" } → card shows @HH:MM
       "limit_at":  null,                  // "10:20pm" → card shows ↻ 10:20pm
-      "lead":      false                  // on every card, never omitted
+      "lead":      false,                 // on every card, never omitted
+      "parent":    null,                  // the sub-lead this card reports to; null at the top
+      "workers":   null,                  // a SUB-LEAD's team — {total, need_you, working} — else null
+      "sub_head":  false                  // true on the card that heads its own sub-grid
     }
   ],
   "free_worktrees": [
@@ -150,6 +157,26 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
   ]
 }
 ```
+
+### nested leads: `sub`, `parent`, `workers`, `sub_head`
+
+A worker can run workers of its own (`fleet-spawn` from its worktree makes a child, tagged in
+`<sock>.<child>.parent`). Exactly two levels, and the wire mirrors the screens:
+
+- **The top grid does not list a sub-worker.** It lists the sub-lead, whose `workers` is its
+  team's rollup — `{total, need_you, working}` — and the card words it as
+  `2 workers · 1 needs you` (`rollupText()`, one wording in `web/grid.js` and the TUI). On the
+  desk that line replaces the quoted message, because 28 columns cannot hold both; the phone
+  has room and shows it as its own line. `counts` still folds `cards`, so a child's need-you
+  is **not** in the top grid's counts: the top lead asked for the sub-lead, not for its team.
+- **`--sub <name>` is that sub-lead's grid**: the sub-lead first (`sub_head: true`, drawn and
+  tapped as an ordinary session), then only its children, each with `parent` set. `sub`
+  echoes the name, and is `null` when the sub-lead has gone — a client asked for a sub-grid
+  and got an empty top one, and must go back up rather than draw a name over nothing.
+  `/api/grid?project=&sub=` is this, verbatim. `free_worktrees` is always empty there: a
+  free worktree offered inside a sub-grid would start a top-level worker from it.
+- **A tag whose parent is not on the fleet is ignored**, and that child is a top-level card
+  again. A card hidden under a parent with no card is a session no screen can reach.
 
 ### `lead`: the card the TUI does not have
 

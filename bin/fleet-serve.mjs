@@ -798,9 +798,12 @@ function gridHasFlag(flag) {
 const gridSupportsJson = () => gridHasFlag('--json');
 const NINE = new Set(['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted']);
 
-function gridJson(t) {
+function gridJson(t, sub = '') {
   return new Promise((resolve) => {
-    execFile(process.execPath, [GRID, t.sock, TMUX_CONF, '--json'],
+    // --sub is only passed when the grid knows it: an unknown flag is ignored by --json
+    // (it is argv, not a mode), but a sub-grid answered as the top grid would draw the top
+    // grid under a sub-lead's name — so an old runtime is refused below instead.
+    execFile(process.execPath, [GRID, t.sock, TMUX_CONF, '--json', ...(sub ? ['--sub', sub] : [])],
       // 64 MB. TWO fields in §4 are emitted WHOLE and are user-authored: `msg`, the last
       // assistant line, and since #41 `sched.msg`, the text a scheduled send will deliver.
       // Neither has a bound, and the cards multiply them. Measured on the live fleets:
@@ -1747,7 +1750,13 @@ function agentCatalogue() {
     const t = rp.t;
     if (!gridSupportsJson())
       return send(res, 503, { ok: false, text: `this fleet-grid.mjs has no --json flag (${GRID}). It is §4 of docs/mobile.md; the grid is never launched without it, because an unknown flag falls through to the interactive TUI and blocks on the tty.` });
-    const r = await gridJson(t);
+    // A sub-lead's grid (nested leads): its own card, then only its workers. The name is a
+    // session name or nothing — it becomes argv, and nothing else is one.
+    const sub = url.searchParams.get('sub') || '';
+    if (sub && !/^[A-Za-z0-9._~-]+$/.test(sub)) return send(res, 400, { ok: false, text: `'${sub}' is not a session name` });
+    if (sub && !gridHasFlag('--sub'))
+      return send(res, 503, { ok: false, text: `this fleet-grid.mjs has no --sub flag (${GRID}) — it predates nested leads; cf-sync the runtime` });
+    const r = await gridJson(t, sub);
     // §4, verbatim — no wrapper. The client reads .cards/.counts/.project off the top
     // level and decides success from the HTTP status, so an envelope here would be a
     // second shape for the same payload.

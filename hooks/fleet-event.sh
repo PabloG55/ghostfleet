@@ -352,24 +352,24 @@ _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
 # either would swallow the other's wake. Called with the socket alone it is what it always
 # was: this fleet's dir, the notify stamp, the worker nudge — whose words live HERE, inside
 # the function, so it still works when lifted out and run on its own (the suite does).
-_defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=message]
+_defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=message $5=target]
   # declared separately, not `local a=$1 b=…$a…`: bash expands every assignment word in a
   # single `local` before binding any of them, so the second would read an unset $sock and
   # abort the hook under `set -u`
-  local sock dir kind msg lock p
-  sock="$1"; dir="${2:-$FLEET_DIR}"; kind="${3:-notify}"; msg="${4:-[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it.}"
+  local sock dir kind msg lock p to
+  sock="$1"; dir="${2:-$FLEET_DIR}"; kind="${3:-notify}"; msg="${4:-[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it.}"; to="${5:-master}"
   lock="$dir/$sock.$kind.retry"
   p="$(cat "$lock" 2>/dev/null)"
   case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
   export -f _input_state _input_empty
   FLEET_DIR="$dir" nohup bash -c '
-    sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"; kind="${5:-notify}"; msg="$6"
+    sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"; kind="${5:-notify}"; msg="$6"; to="${7:-master}"
     echo $$ > "$lock" 2>/dev/null
     trap "rm -f \"$lock\"" EXIT
     i=0
     while [ "$i" -lt "$tries" ]; do
       sleep "$every"; i=$((i + 1))
-      tmux -L "$sock" has-session -t master 2>/dev/null || continue
+      tmux -L "$sock" has-session -t "$to" 2>/dev/null || continue
       stamp="$FLEET_DIR/$sock.$kind.stamp"
       last="$(cat "$stamp" 2>/dev/null || echo 0)"
       case "$last" in ""|*[!0-9]*) last=0 ;; esac
@@ -378,12 +378,12 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
       now="$(date +%s)"
       # a fresh event already woke it: nothing left to deliver
       [ "$(( now - last ))" -ge "$win" ] || exit 0
-      if _input_empty "$sock" master; then
+      if _input_empty "$sock" "$to"; then
         printf "%s\n" "$now" > "$stamp" 2>/dev/null
         # CLAUDE_FLEET_DIR is where fleet-send QUEUES a prompt for a busy target, so it is
         # the target fleet dir: the one its own Stop drains. (No apostrophes in here: this
         # whole body is one single-quoted argument.)
-        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send -s "$sock" master "$msg" >/dev/null 2>&1
+        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send -s "$sock" "$to" "$msg" >/dev/null 2>&1
         exit 0
       fi
     done
@@ -391,7 +391,7 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
       "$(date +%Y-%m-%dT%H:%M:%S)" "$(( every * tries ))" \
       >> "$FLEET_DIR/$sock.$kind.undelivered" 2>/dev/null
   ' _ "$sock" "$lock" "${CLAUDE_FLEET_NOTIFY_RETRY_EVERY:-20}" \
-       "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" "$kind" "$msg" >/dev/null 2>&1 &
+       "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" "$kind" "$msg" "$to" >/dev/null 2>&1 &
 }
 
 # Did this turn already hand the answer to the asker DIRECTLY? fleet-send --reply-to now
@@ -446,6 +446,27 @@ _peer_answered() {              # $1=transcript $2=line this turn starts at $3=a
 # and a worker DONE (its turn ended → idle, the completion signal — a worker's
 # autonomous turn Stops once when its whole tool-loop finishes). Workers only,
 # never the lead's own turns; best-effort, never fail the hook.
+# ── A SUB-WORKER REPORTS TO ITS SUB-LEAD, NOT TO MASTER ──────────────────────
+# A child spawned from a worker's worktree (bin/fleet-spawn) carries its parent's name in
+# <sock>.<child>.parent. Its events go to THAT session's inbox, <sock>.<parent>.inbox, and
+# wake THAT session: the sub-lead asked for this worker and is waiting on it, and the top
+# master asked for the sub-lead, not for its team — it sees the rollup on the sub-lead's
+# card. Same socket, same fleet dir; only the inbox and the wake target move.
+#   A PARENT THAT IS GONE HANDS ITS CHILDREN BACK TO MASTER, rather than filing their
+# events into an inbox nobody will ever drain. Silence is this fleet's worst symptom, and
+# a tag pointing at a stopped session is exactly how it would arrive.
+_parent=""; _to=master; _inbox="$FLEET_DIR/${CLAUDE_FLEET_SOCK:-}.inbox"
+_submsg="[fleet] One of YOUR workers finished or needs you — run fleet-inbox to see what changed, then continue (merge its PR into your branch, dispatch the next step, or unblock). Automated nudge; no need to reply to it."
+if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] \
+   && [ -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.parent" ]; then
+  _parent="$(head -1 "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.parent" 2>/dev/null)"
+  case "$_parent" in ''|master|*[!A-Za-z0-9._~-]*) _parent="" ;; esac
+  if [ -n "$_parent" ] && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_parent" 2>/dev/null; then
+    _to="$_parent"; _inbox="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${_parent}.inbox"
+  else
+    _parent=""
+  fi
+fi
 if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; then
   ev=""; detail=""
   if   [ "$status" = "need-you" ]; then ev="need-you"; detail="${NOTE:0:120}"
@@ -453,7 +474,7 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
   fi
   if [ -n "$ev" ]; then
     printf '%s\t%s\t%s\t%s\n' "$now" "$SLOT" "$ev" "$detail" \
-      >> "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.inbox" 2>/dev/null || true
+      >> "$_inbox" 2>/dev/null || true
 
     # Opt-in PUSH: instead of the lead polling, WAKE it so it drains the inbox and
     # acts. Enable per fleet by `touch $FLEET_DIR/<sock>.notify-lead` (live, no
@@ -477,7 +498,15 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     _sm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}"
     _pm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}"
     _push=0
-    if   [ -n "$SLOT" ] && [ -f "$_sm.notify-lead-off" ]; then _push=0
+    # A SUB-LEAD IS WOKEN BY DEFAULT. The opt-in below exists to keep background chatter
+    # off a master that did not ask to be interrupted; a sub-lead spawned these workers in
+    # order to wait for them, and a done it has to poll for is the gap this whole feature
+    # closes. The kill switch and the child's own -off marker still win — "never push from
+    # this fleet" and "silence this worker" mean what they say at every level.
+    if   [ -n "$_parent" ] && [ -f "$_sm.notify-lead-off" ]; then _push=0
+    elif [ -n "$_parent" ] && [ -f "$_pm.notify-lead-off" ]; then _push=0
+    elif [ -n "$_parent" ];                                  then _push=1
+    elif [ -n "$SLOT" ] && [ -f "$_sm.notify-lead-off" ]; then _push=0
     elif [ -n "$SLOT" ] && [ -f "$_sm.notify-lead" ];     then _push=1
     elif [ -f "$_pm.notify-lead-off" ];                   then _push=0
     elif [ "${CLAUDE_FLEET_NOTIFY_LEAD:-0}" = 1 ] \
@@ -485,8 +514,10 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
       || [ -f "$HOME/.config/ghostfleet/notify-lead" ]; then _push=1
     fi
     if [ "$_push" = 1 ] \
-       && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t master 2>/dev/null; then
+       && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_to" 2>/dev/null; then
+      # One stamp per WAKE TARGET: a sub-lead's burst must not swallow master's next wake.
       stamp="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify.stamp"
+      [ -n "$_parent" ] && stamp="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${_parent}.notify.stamp"
       last="$(cat "$stamp" 2>/dev/null || echo 0)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
       win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"; case "$win" in ''|*[!0-9]*) win=30 ;; esac
       if [ "$(( now - last ))" -ge "$win" ]; then
@@ -494,10 +525,17 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
         # all (see _input_state). Don't stamp on skip, so the next event re-checks right
         # away instead of waiting out the cooldown — and arm a re-check, because when the
         # LAST worker to finish is the skipped one there is no next event (_defer_nudge).
-        if _input_empty "$CLAUDE_FLEET_SOCK" master; then
+        if _input_empty "$CLAUDE_FLEET_SOCK" "$_to"; then
           printf '%s\n' "$now" > "$stamp" 2>/dev/null
           _sock="$CLAUDE_FLEET_SOCK"
-          ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+          if [ -n "$_parent" ]; then
+            ( fleet-send -s "$_sock" "$_to" "$_submsg" >/dev/null 2>&1 & )
+          else
+            ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+          fi
+        elif [ -n "$_parent" ]; then
+          # its own kind, so the retry's lock and stamp are the sub-lead's and not master's
+          _defer_nudge "$CLAUDE_FLEET_SOCK" "$FLEET_DIR" "$_parent.notify" "$_submsg" "$_parent"
         else
           _defer_nudge "$CLAUDE_FLEET_SOCK"
         fi
@@ -535,9 +573,11 @@ if [ -f "$JMARK" ] && [ -n "$SOCK" ] && [ -n "$SLOT" ] \
   # JARVIS'S OWN WORKERS already reach it: the worker block above wrote their row into this
   # same inbox and, when notify-lead is on, nudged this same master. Doing it again here
   # would be a second row for one event and a second wake a stamp apart.
+  # A SUB-WORKER on Jarvis's own fleet belongs to its sub-lead, which the block above
+  # already filed and woke: Jarvis sees that one on the sub-lead's card, like any master.
   j_own=0; [ "$SOCK" = "$j_sock" ] && j_own=1
   if [ -n "$j_sock" ] && ! { [ "$SOCK" = "$j_sock" ] && [ "$SLOT" = master ]; } \
-     && ! { [ "$j_own" = 1 ] && [ "${_push:-0}" = 1 ]; }; then
+     && ! { [ "$j_own" = 1 ] && { [ "${_push:-0}" = 1 ] || [ -n "$_parent" ]; }; }; then
     j_dir="$j_cfg/fleet"; mkdir -p "$j_dir" 2>/dev/null
     j_who="${SOCK#cf-}/$SLOT"
     j_stamp="$j_dir/$j_sock.jarvis.stamp"

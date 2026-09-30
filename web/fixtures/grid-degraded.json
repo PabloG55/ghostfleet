@@ -1,6 +1,7 @@
 {
   "project": "acme-api",
   "profile": "work",
+  "sub": null,
   "counts": {
     "need_you": 2,
     "working": 0,
@@ -24,7 +25,10 @@
       "sched": null,
       "limit_at": null,
       "lead": true,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "api-fix",
@@ -40,7 +44,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "docs-pass",
@@ -56,7 +63,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "cache-keys",
@@ -72,7 +82,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "csv-export",
@@ -82,13 +95,16 @@
       "branch": "csv-export",
       "agent": "claude",
       "pr": null,
-      "msg": "Interrupted mid-edit \u2014 the file is half-written.",
+      "msg": "Interrupted mid-edit — the file is half-written.",
       "age": 300,
       "attached": false,
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "rate-limit",
@@ -104,7 +120,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "list-pages",
@@ -120,7 +139,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "adapter-probe",
@@ -136,7 +158,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "docs-sweep",
@@ -146,13 +171,16 @@
       "branch": "docs-sweep",
       "agent": "claude",
       "pr": null,
-      "msg": "Nothing to do \u2014 the sweep found no stale pages.",
+      "msg": "Nothing to do — the sweep found no stale pages.",
       "age": 5400,
       "attached": false,
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "types",
@@ -168,7 +196,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     }
   ],
   "free_worktrees": []

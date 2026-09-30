@@ -49,27 +49,44 @@ if you see that refusal it is not an obstacle to route around — reach for `fle
 
 `ExitWorktree` is never blocked: a session that already got moved needs its way back.
 
-## First: are you the lead, or are you already a worker?
+## First: are you the lead, a sub-lead, or a worker?
 
-**If this session is already in a git worktree, do not spawn anything.** You are a
-worker, and workers are leaves — spawning here adds a second worktree beside the one you
-are sitting in. When you finish a PR and are asked to start fresh work, re-branch where
-you stand:
+**A master** is in the project's main checkout. Everything below is for it.
+
+**A worker** is in a linked worktree. When you finish a PR and are asked to start fresh
+work, re-branch where you stand — no new worktree, no new session:
 
 ```bash
 git fetch origin && git checkout -B <new-branch> origin/staging
 ```
 
 That is the whole operation: same worktree, same session, same dev-stack slot, and the
-dependencies you already installed. `fleet-spawn` refuses from a linked worktree and
-says this, so if you see that refusal it is not an obstacle to work around — it means
-the request was "start new work", not "start a new worker".
+dependencies you already installed. That re-branch is for the human in THIS pane who asked
+for it. It is not how a lead hands a worker its next task — a lead gives a new task a new
+session (below), and when you finish one, say so and end your turn rather than asking for more.
 
-That re-branch is for the human in THIS pane who asked for it. It is not how a lead hands a
-worker its next task — a lead gives a new task a new session (below), and when you finish
-one, say so and end your turn rather than asking for more.
+**A worker whose task needs a team of its own is a SUB-LEAD** — a lead for its children and
+a worker to its master. `fleet-spawn` (or `fleet_spawn`) run from your worktree makes a
+**child of this session**, never a sibling of the top lead:
 
-Everything below is for a **lead** in the project's main checkout.
+- the child branches from **your** branch and its PR targets **your** branch
+  (`gh pr create --base <your-branch>`); its brief is told so automatically
+- its `done` / `need-you` land in **your** `fleet-inbox` and wake you, not master; master
+  sees only the rollup on your card (`◆ working` · `4 workers · 1 needs you`)
+- **you integrate**: merge each child's PR into your branch (`gh pr merge <n>` — the guard
+  allows exactly this: base = your branch, head = one of your children's branches, even
+  with "workers can merge" off), then open ONE PR from your branch to the integration
+  branch and report that to your master, who merges it
+- **exactly two levels**: a child cannot spawn. If you are a child (the spawn refuses and
+  says "sub-worker"), do the work yourself or ask your sub-lead to split it
+- retire a finished child with `fleet-stop --reclaim <child>`; stopping a sub-lead that
+  still has children is refused until you pass `--children` — ask the human first, it stops
+  and reclaims every one of them
+
+Everything else in this skill applies to a sub-lead as to a master — look before you spawn,
+a new task is a new session, resolve the brief's decisions before you dispatch — scoped to
+its own children. Do NOT run fleet-spawn from the main checkout to get "more workers": that
+makes them the top lead's, and nothing ties them to you.
 
 ## A new task is a new SESSION — reuse the folder, never the worker
 
@@ -168,7 +185,8 @@ retry?", or a trust prompt, use:
   answer as before.
 - **You merge; your workers do not.** A worker opens its PR and reports the number; the
   lead reviews and merges it from the main checkout. `gh pr merge` from a linked worktree
-  is refused by the fleet's PreToolUse guard.
+  is refused by the fleet's PreToolUse guard — except a SUB-LEAD merging one of its own
+  children's PRs into its own branch, which needs no setting (its own PR upward still does).
 - **Both are settings, OFF by default** — for a fleet whose workers own their task:
   `fleet-project set <project> workers-merge on` / `agents-approve on` for the whole
   project (or the grid's `,` page), or add `--session <worker>` to make ONE worker the
@@ -311,6 +329,8 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
 - **You can't see a worker's screen.** Use `fleet-read` / `fleet-inbox` to observe,
   never assume.
 - Only sessions in *your* fleet (same `CLAUDE_FLEET_SOCK`) are reachable.
+- **A sub-lead's children are its own.** A master does not dispatch to, merge, or stop a
+  sub-worker directly; it talks to the sub-lead, whose one PR is the unit it reviews.
 
 ## Example
 
