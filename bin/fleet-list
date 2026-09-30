@@ -22,7 +22,30 @@ SELF="${CLAUDE_FLEET_SLOT:-}"
 [ "$SOCK" = "$AMBIENT" ] || SELF=""
 
 names="$(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null)"
-[ -n "$names" ] || { echo "(no sessions on $SOCK)"; exit 0; }
+# A HIBERNATED SESSION HAS NO TMUX SESSION — its asleep marker is the whole of it, and it
+# is a card on the grid and the phone. Walking tmux alone left an agent asked to "clean up
+# the asleep ones" with nothing to find, and a fleet whose every session slept read as
+# "(no sessions)" under a screen full of cards. Scoped by socket: the marker is
+# <sock>.<name>.asleep, and names repeat across fleets.
+asleep=""
+for f in "$FLEET_DIR/$SOCK".*.asleep; do
+  [ -f "$f" ] || continue
+  a="${f##*/}"; a="${a#"$SOCK".}"; a="${a%.asleep}"
+  # a live session under the name wins: the marker is stale, and the wake clears it
+  grep -qxF -- "$a" <<< "$names" && continue
+  asleep="$asleep$a"$'\n'
+done
+[ -n "$names$asleep" ] || { echo "(no sessions on $SOCK)"; exit 0; }
+
+# 3h / 2d / 5m — the age a person reads, from the marker's first column (epoch seconds).
+age() {
+  local s; s="$(head -1 "$1" 2>/dev/null | cut -f1)"
+  case "$s" in ''|*[!0-9]*) printf '?'; return ;; esac
+  s=$(( $(date +%s) - s )); [ "$s" -lt 0 ] && s=0
+  if   [ "$s" -ge 86400 ]; then printf '%dd' $(( s / 86400 ))
+  elif [ "$s" -ge 3600 ];  then printf '%dh' $(( s / 3600 ))
+  else printf '%dm' $(( s / 60 )); fi
+}
 
 printf '%-22s %-10s %s\n' "SESSION" "STATUS" ""
 while IFS= read -r name; do
@@ -53,4 +76,12 @@ while IFS= read -r name; do
   printf '%-22s %-10s %s\n' "$name" "${st:-?}" "$mark"
 done <<EOF
 $names
+EOF
+
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  printf '%-22s %-10s %s\n' "$name" "asleep" \
+    "$(age "$FLEET_DIR/$SOCK.$name.asleep") · wake: fleet-hibernate --wake $name · clear: fleet-stop $name"
+done <<EOF
+$asleep
 EOF

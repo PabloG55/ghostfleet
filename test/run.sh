@@ -4455,9 +4455,37 @@ FSOUT="$(node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/ru
 if grep -q 'no chrome' <<< "$FSOUT"; then
   skip "fleet-shots against a real page" "no chrome to photograph in"
 else
-  is "it writes a page, a manifest and shots" "yes" \
-     "$([ -f "$FSH/run/index.html" ] && [ -f "$FSH/run/manifest.json" ] && \
-        [ "$(ls "$FSH/run"/*.png 2>/dev/null | grep -c .)" = 4 ] && echo yes || echo no)"
+  # ONE VIDEO OF THE FLOW WHERE THERE IS AN ENCODER, a still per step where there is not.
+  # Which one this machine gets is decided by fleet-shots and read back from the manifest,
+  # so both halves are asserted wherever they can be, and the --stills run below makes the
+  # fallback run here too rather than only on a machine without ffmpeg.
+  fsvid="$(node -e 'const m=require(process.argv[1]);console.log(m.video||"")' "$FSH/run/manifest.json" 2>/dev/null)"
+  if [ -n "$fsvid" ]; then
+    is "it writes a page, a manifest and ONE video" "yes" \
+       "$([ -f "$FSH/run/index.html" ] && [ -s "$FSH/run/$fsvid" ] && echo yes || echo no)"
+    # STILLS ONLY WHERE A STEP FAILED: step 2's POST 404s, nothing else is flagged.
+    is "...and a still only for the step that failed" "02-after-signing.png" \
+       "$(cd "$FSH/run" && ls *.png 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+    # CHAPTERS IN ORDER, covering the recording end to end — a chapter that starts after the
+    # video ends is a click that lands nowhere.
+    is "...one chapter per step, in order, ending where the video does" "yes" \
+       "$(node -e 'const m=require(process.argv[1]),s=m.steps;
+          const ok=s.length===4&&s[0].start<0.5&&s.every((x,i)=>x.end>x.start&&(i===0||x.start>=s[i-1].end-0.001))&&Math.abs(s[3].end-m.duration)<0.01;
+          console.log(ok?"yes":"no: "+JSON.stringify(s.map(x=>[x.start,x.end]))+" / "+m.duration)' "$FSH/run/manifest.json" 2>/dev/null)"
+    if command -v ffprobe >/dev/null 2>&1; then
+      is "...and the video is as long as the chapters say" "yes" \
+         "$(d="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$FSH/run/$fsvid" 2>/dev/null)"; \
+            node -e 'const m=require(process.argv[1]);const d=Number(process.argv[2]);console.log(Math.abs(d-m.duration)<0.6?"yes":"no: file "+d+"s, manifest "+m.duration+"s")' "$FSH/run/manifest.json" "$d")"
+    fi
+    is "...and the page is the recorded-run page"  "yes" "$(grep -q '<video id="v"' "$FSH/run/index.html" && echo yes || echo no)"
+    node "$ROOT/bin/fleet-shots.mjs" --flow "$FSH/flow.json" --out "$FSH/stills" --stills >/dev/null 2>&1
+    is "--stills: a still per step and no video"   "4:no" \
+       "$(ls "$FSH/stills"/*.png 2>/dev/null | grep -c .):$(ls "$FSH/stills"/flow.* >/dev/null 2>&1 && echo yes || echo no)"
+  else
+    is "it writes a page, a manifest and shots" "yes" \
+       "$([ -f "$FSH/run/index.html" ] && [ -f "$FSH/run/manifest.json" ] && \
+          [ "$(ls "$FSH/run"/*.png 2>/dev/null | grep -c .)" = 4 ] && echo yes || echo no)"
+  fi
   # A STEP THAT THREW STILL GETS A ROW, so the count is asserted rather than the presence:
   # a flow of four rendering as three looks complete.
   is "...one row per step"                "4" \
@@ -4634,6 +4662,80 @@ else
   done < "$STEPO/out"
 fi
 rm -rf "$STEPO"
+
+
+# ── a recorded flow is reviewed as one thing ─────────────────────────────────
+# A folder of stills showed where each step ENDED, and asked for a verdict on each one. A
+# recording is one continuous flow with a chapter per step, so the verdict is on the FLOW:
+# approve or reject, with an optional note per chapter — and the flag rule survives whole:
+# a chapter the run flagged is not approved by silence, and a note on it is the reason
+# that clears it. No browser needed for any of this: the manifest is written by hand, the
+# same shape the recorder writes, and the verbs are the real ones.
+group "fleet-shots: a recorded flow has one verdict"
+RV="$(cd "$(mktemp -d "$TEST_RUNS.$$.recv.XXXXXX")" && pwd -P)"
+mkdir -p "$RV/shots/run1" "$RV/shots/old1"
+cat > "$RV/shots/run1/manifest.json" <<'MF'
+{ "provenance": { "commit": "0000000000000000000000000000000000000000", "branch": "api-fix", "dirty": false,
+    "base": "http://127.0.0.1:1", "viewport": { "width": 390, "height": 844 }, "at": "2026-01-01T00:00:00.000Z" },
+  "video": "flow.mp4", "duration": 9.5, "problems": 1,
+  "steps": [
+    { "n": 1, "name": "the sign-in screen", "start": 0,   "end": 3.2, "file": null, "notes": [], "requests": [] },
+    { "n": 2, "name": "after signing in",   "start": 3.2, "end": 6.1, "file": "02-after-signing.png",
+      "notes": ["POST http://127.0.0.1:1/api/v1/signin answered 404"], "requests": [] },
+    { "n": 3, "name": "a clean screen",     "start": 6.1, "end": 9.5, "file": null, "notes": [], "requests": [] } ] }
+MF
+printf '{"steps":[{"n":1,"name":"old","file":"01-old.png","notes":[],"requests":[]}]}' > "$RV/shots/old1/manifest.json"
+fs() { node "$ROOT/bin/fleet-shots.mjs" "$@" 2>&1; }
+out="$(fs --check "$RV/shots/run1")"; rc=$?
+is "check: an unreviewed flow is not approved"        "1:yes" "$rc:$(grep -q 'not been reviewed' <<< "$out" && echo yes || echo no)"
+out="$(printf -- '- [approve] flow — looks right\n' | fs verdict "$RV/shots/run1")"
+is "verdict: the page's approve line is recorded"    "approve" "$(node -e 'console.log(require(process.argv[1]).flow.v)' "$RV/shots/run1/verdict.json" 2>/dev/null)"
+out="$(fs --check "$RV/shots/run1")"; rc=$?
+is "check: approved over a flagged chapter with no reason still fails" "1:yes" \
+   "$rc:$(grep -q '^flagged  2\. after signing in' <<< "$out" && echo yes || echo no)"
+printf -- '- [approve] flow — looks right\n- [note] 2. after signing in — the 404 is the fixture, the real endpoint is stubbed\n- [note] 3. a clean screen — fine\n' \
+  | fs verdict "$RV/shots/run1" >/dev/null
+out="$(fs --check "$RV/shots/run1")"; rc=$?
+is "check: a note on the flagged chapter clears it"   "0" "$rc"
+is "check: ...and the reason is on the record"        "yes" "$(grep -q '^accepted  2\..*fixture' <<< "$out" && echo yes || echo no)"
+is "check: ...and an unflagged chapter's note is printed too" "yes" "$(grep -q '^note  3\. a clean screen — fine' <<< "$out" && echo yes || echo no)"
+printf -- '- [reject] flow — the button does nothing\n' | fs verdict "$RV/shots/run1" >/dev/null
+out="$(fs --check "$RV/shots/run1")"; rc=$?
+is "check: a rejected flow fails, with its note"      "1:yes" "$rc:$(grep -q 'rejected — the button does nothing' <<< "$out" && echo yes || echo no)"
+is "verdict: text with no flow line is refused"       "1" "$(printf -- '- [note] 1. x — y\n' | fs verdict "$RV/shots/run1" >/dev/null; echo $?)"
+out="$(fs list --dir "$RV/shots")"
+is "list: a rejected recorded run reads as rejected"  "yes" "$(grep -qE '^rejected +run1' <<< "$out" && echo yes || echo no)"
+is "list: ...beside an old per-step run, still read"  "yes" "$(grep -qE 'unreviewed +old1' <<< "$out" && echo yes || echo no)"
+# THE PALETTE IS THE PHONE CLIENT'S. The review page inlines its tokens (it must open over
+# file://), so the copy is compared against web/app.css rather than trusted to stay in step.
+pal() { node -e '
+  const fs=require("fs"), src=fs.readFileSync(process.argv[1],"utf8");
+  const root=(process.argv[2]==="css" ? src : src.slice(src.indexOf("const FLOWSKIN"))).match(/:root\s*\{([^}]*)\}/)[1];
+  const o={}; for (const m of root.matchAll(/--(bg|fg|dim|hair|red|green|cyan|yellow|grey|white)\s*:\s*(#[0-9a-fA-F]{3,8})/g)) o[m[1]]=m[2].toLowerCase();
+  console.log(Object.keys(o).sort().map(k=>k+"="+o[k]).join(" "));' "$1" "$2" 2>/dev/null; }
+is "the review page's colours are web/app.css's"      "$(pal "$ROOT/web/app.css" css)" "$(pal "$ROOT/bin/fleet-shots.mjs" js)"
+is "...all ten of them"                               "10" "$(pal "$ROOT/web/app.css" css | wc -w | tr -d ' ')"
+rm -rf "$RV"
+
+# ── the recorded-run page, driven ────────────────────────────────────────────
+# Behaviour, so it is clicked rather than read: the keys, the chapter seeks (which need the
+# server's byte ranges — without them every chapter lands at 0:00), the verdict landing in
+# verdict.json, and the layout at a desk width and a phone width. The helper encodes a
+# synthetic video with ffmpeg, so it needs Chrome AND ffmpeg, and says which is missing.
+group "fleet-shots: the review page plays, seeks and decides"
+FRC="$(mktemp -d "$TEST_RUNS.$$.frc.XXXXXX")"
+node "$ROOT/test/helpers/flow-review-check.mjs" > "$FRC/out" 2> "$FRC/err"
+if grep -q '^#SKIP' "$FRC/out" 2>/dev/null; then
+  skip "the recorded-run review page" "$(head -1 "$FRC/out" | cut -d "$US" -f3)"
+else
+  is "flow-review-check produced its rows" "yes" \
+     "$([ "$(grep -c . "$FRC/out")" -ge 14 ] && echo yes || echo "no: $(grep -c . "$FRC/out") rows; $(head -c 300 "$FRC/err")")"
+  while IFS=$'\x1f' read -r name want got; do
+    [ -n "$name" ] || continue
+    is "$name" "$want" "$got"
+  done < "$FRC/out"
+fi
+rm -rf "$FRC"
 
 # ── a manifest.json that is not OURS must not take the review server down ──────────────
 # `serve` and `list` find runs by looking for a `manifest.json` in each subdirectory of
@@ -7527,6 +7629,90 @@ else
   skip "the folder browser takes a typed path" "tmux or node missing"
 fi
 
+
+
+# ── the folder browser narrows as you type, and can make the folder ──────────
+# Two gaps on the same screen. A home directory with dozens of sibling checkouts is a long
+# arrow down, and `/` only helped if you knew the whole path. And a project whose root did
+# not exist yet meant leaving for a shell to mkdir (and git init: a root with no git has
+# nothing to branch worktrees from). Real TUI, real keys, a fixture HOME with the demo
+# names — nothing here reads the owner's home.
+group "the folder browser filters and makes a folder (real TUI)"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  FB="$(cd "$(mktemp -d "$TEST_RUNS.$$.fb.XXXXXX")" && pwd -P)"
+  mkdir -p "$FB/acme-api" "$FB/acme-web" "$FB/billing-svc" "$FB/toolbox" "$FB/scratch"
+  fbstart() {
+    rm -f "$FB/choice"; tmux -L cffb kill-server 2>/dev/null
+    tmux -L cffb new-session -d -x 160 -y 40 \
+      "cd '$FB' && HOME='$FB' GIT_CONFIG_GLOBAL=/dev/null node '$ROOT/bin/fleet-grid.mjs' - --screen addproject > '$FB/choice' 2>/dev/null" 2>/dev/null
+    wait_for 8 "the folder browser to draw" 'pane_has cffb "pick a root folder"'
+  }
+  fbscreen() { tmux -L cffb capture-pane -p 2>/dev/null; }
+  if fbstart; then
+    tmux -L cffb send-keys '/' 2>/dev/null
+    wait_for 5 "the filter box to open" 'pane_has cffb "type or paste"'
+    tmux -L cffb send-keys -l 'acme' 2>/dev/null; sleep 0.5
+    scr="$(fbscreen)"
+    is "filter: typing narrows the listing to matches"      "yes:yes:no" \
+       "$(grep -q 'acme-api/' <<< "$scr" && echo yes || echo no):$(grep -q 'acme-web/' <<< "$scr" && echo yes || echo no):$(grep -q 'billing-svc/' <<< "$scr" && echo yes || echo no)"
+    is "filter: ...and says how many of how many"           "yes" "$(grep -q '2 of 5' <<< "$scr" && echo yes || echo no)"
+    tmux -L cffb send-keys Down Enter 2>/dev/null
+    wait_for 5 "the browser to open the match" 'pane_has cffb "~/acme-web"'
+    tmux -L cffb send-keys 's' 2>/dev/null
+    wait_for 5 "the browser to answer" '[ -s "$FB/choice" ]'
+    is "filter: ↓ ⏎ opens the second match, s picks it"     "newproject|$FB/acme-web" "$(tr '\037' '|' < "$FB/choice" 2>/dev/null)"
+  else
+    bad "the folder browser draws" "a screen" "nothing in 8s"
+  fi
+  if fbstart; then
+    tmux -L cffb send-keys '/' 2>/dev/null; wait_for 5 "the filter box" 'pane_has cffb "type or paste"'
+    tmux -L cffb send-keys -l 'zzq' 2>/dev/null; sleep 0.5
+    is "filter: no match says so"                           "yes" "$(pane_has cffb 'no folder here matches' && echo yes || echo no)"
+    # CASE-INSENSITIVE, and an exact name still goes where the typed path always went
+    tmux -L cffb send-keys BSpace BSpace BSpace 2>/dev/null; tmux -L cffb send-keys -l 'TOOLBOX' 2>/dev/null; sleep 0.3
+    tmux -L cffb send-keys Enter 2>/dev/null
+    is "filter: case-insensitive, ⏎ lands on the match"     "yes" "$(wait_for 5 'the browser to land' 'pane_has cffb "~/toolbox"' && echo yes || echo no)"
+  fi
+
+  # ── n = new folder ──
+  if fbstart; then
+    is "new: the hint bar advertises n"                     "yes" "$(pane_has cffb 'n new folder' && echo yes || echo no)"
+    tmux -L cffb send-keys 'n' 2>/dev/null
+    wait_for 5 "the name box" 'pane_has cffb "new folder"'
+    tmux -L cffb send-keys -l 'acme-api' 2>/dev/null; tmux -L cffb send-keys Enter 2>/dev/null; sleep 0.5
+    is "new: an existing name is refused"                   "yes" "$(pane_has cffb 'already exists' && echo yes || echo no)"
+    tmux -L cffb send-keys BSpace BSpace BSpace BSpace BSpace BSpace BSpace BSpace 2>/dev/null
+    tmux -L cffb send-keys -l 'a/b' 2>/dev/null; tmux -L cffb send-keys Enter 2>/dev/null; sleep 0.5
+    is "new: a name with / is refused"                      "yes:no" \
+       "$(pane_has cffb 'one folder' && echo yes || echo no):$([ -e "$FB/a" ] && echo yes || echo no)"
+    tmux -L cffb send-keys BSpace BSpace BSpace 2>/dev/null
+    tmux -L cffb send-keys -l 'docs-pass' 2>/dev/null; tmux -L cffb send-keys Enter 2>/dev/null
+    wait_for 5 "the git init question" 'pane_has cffb "git init"'
+    is "new: the folder is made"                            "yes" "$([ -d "$FB/docs-pass" ] && echo yes || echo no)"
+    is "new: ...and git init is offered, Y by default"      "yes" "$(grep -qF '[Y/n]' <<< "$(fbscreen)" && echo yes || echo no)"
+    tmux -L cffb send-keys Enter 2>/dev/null
+    wait_for 5 "the listing to come back" 'pane_has cffb "pick a root folder"'
+    is "new: ⏎ at the question runs git init"               "yes" "$([ -d "$FB/docs-pass/.git" ] && echo yes || echo no)"
+    is "new: ...and the cursor lands on the new folder"     "yes" "$(grep -q '▸ docs-pass/' <<< "$(fbscreen)" && echo yes || echo no)"
+    tmux -L cffb send-keys Enter 2>/dev/null
+    wait_for 5 "the browser to open it" 'pane_has cffb "~/docs-pass"'
+    tmux -L cffb send-keys 's' 2>/dev/null
+    wait_for 5 "the browser to answer" '[ -s "$FB/choice" ]'
+    is "new: ⏎ then s picks it"                             "newproject|$FB/docs-pass" "$(tr '\037' '|' < "$FB/choice" 2>/dev/null)"
+  fi
+  if fbstart; then
+    tmux -L cffb send-keys 'n' 2>/dev/null; wait_for 5 "the name box" 'pane_has cffb "new folder"'
+    tmux -L cffb send-keys -l 'scratch-2' 2>/dev/null; tmux -L cffb send-keys Enter 2>/dev/null
+    wait_for 5 "the git init question" 'pane_has cffb "git init"'
+    tmux -L cffb send-keys 'n' 2>/dev/null
+    wait_for 5 "the listing to come back" 'pane_has cffb "pick a root folder"'
+    is "new: n at the question makes the folder without git" "yes:no" \
+       "$([ -d "$FB/scratch-2" ] && echo yes || echo no):$([ -e "$FB/scratch-2/.git" ] && echo yes || echo no)"
+  fi
+  tmux -L cffb kill-server 2>/dev/null; rm -rf "$FB"
+else
+  skip "the folder browser filters and makes a folder" "tmux, node or git missing"
+fi
 
 # The name the control plane attaches to must be the name fleet-tab really creates. The
 # loop has to know it BEFORE the session exists, so it asks fleet-tab rather than
@@ -14161,6 +14347,50 @@ else
   skip "a stale asleep marker does not outlive its session" "tmux not available"
 fi
 
+# ── an agent can find the asleep ones ────────────────────────────────────────
+# Asked to "clean up the asleep ones", an agent had nothing to find them with: fleet_list
+# walked tmux's sessions, and a hibernated session has none — its marker is the whole of
+# it. fleet_stop already cleared the marker; the list is what could not see it. One live
+# session and two asleep ones, one of them three hours old; plus a marker from ANOTHER
+# fleet, which must not appear here (every fleet has a master, and names repeat).
+group "fleet_list shows asleep sessions with their age"
+if command -v tmux >/dev/null 2>&1; then
+  FL="$(cd "$(mktemp -d "$TEST_RUNS.$$.flasleep.XXXXXX")" && pwd -P)"
+  mkdir -p "$FL/fleet" "$FL/wt"
+  flmark() { printf '%s\t%s\t%s\t%s\n' "$(( $(date +%s) - $3 ))" "aaaaaaaa-7777-7777-7777-000000000007" "$FL/wt" 100 > "$FL/fleet/$1.$2.asleep"; }
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s api-fix -c "$FL/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+  flmark cf-acme-api docs-pass 10800
+  flmark cf-acme-api scratch   120
+  flmark cf-acme-web billing-svc 60
+  fl() { CLAUDE_FLEET_DIR="$FL/fleet" CLAUDE_FLEET_SLOT= TMUX= "$ROOT/bin/fleet-list" -s cf-acme-api 2>&1; }
+  out="$(fl)"
+  is "fleet-list: the live session is listed"                 "yes" "$(grep -qE '^api-fix ' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: an asleep session is listed as asleep"      "yes" "$(grep -qE '^docs-pass +asleep ' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: ...with its age"                            "yes" "$(grep -qE '^docs-pass .*\b3h\b' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: ...and how to clear it"                     "yes" "$(grep -qE '^docs-pass .*fleet-stop docs-pass' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: a younger one reads in minutes"             "yes" "$(grep -qE '^scratch .*\b2m\b' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: another fleet's asleep session is not ours" "no"  "$(grep -q 'billing-svc' <<< "$out" && echo yes || echo no)"
+  # A FLEET WHOSE EVERY SESSION IS ASLEEP has no tmux server at all — the case where the
+  # old early exit said "(no sessions)" over a fleet with cards on the grid.
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  out="$(fl)"
+  is "fleet-list: with no live server the asleep ones still list" "yes" "$(grep -qE '^docs-pass +asleep ' <<< "$out" && echo yes || echo no)"
+  # ...and the clear it names is the clear that works: after fleet-stop the row is gone.
+  CLAUDE_FLEET_DIR="$FL/fleet" CLAUDE_FLEET_SLOT= TMUX= "$ROOT/bin/fleet-stop" -s cf-acme-api docs-pass >/dev/null 2>&1
+  out="$(fl)"
+  is "fleet-list: fleet-stop clears the asleep row"           "no"  "$(grep -q '^docs-pass ' <<< "$out" && echo yes || echo no)"
+  is "fleet-list: ...and leaves the other asleep one"         "yes" "$(grep -q '^scratch ' <<< "$out" && echo yes || echo no)"
+  # THE DESCRIPTIONS ARE WHAT AN AGENT READS to choose a tool, so the case has to be named
+  # there, not only handled. Read from the served tool list, not the source text.
+  desc="$(cd "$ROOT" && node -e 'import("./mcp/fleet-dispatch.mjs").then(m=>{const t=Object.fromEntries(m.TOOLS.map(x=>[x.name,x.description]));console.log("LIST:"+t.fleet_list);console.log("STOP:"+t.fleet_stop)})' 2>/dev/null)"
+  is "fleet_list's description says it lists asleep sessions" "yes" "$(grep -qiE '^LIST:.*asleep' <<< "$desc" && echo yes || echo no)"
+  is "fleet_stop's description names clearing an asleep one"  "yes" "$(grep -qiE '^STOP:.*asleep' <<< "$desc" && echo yes || echo no)"
+  rm -rf "$FL"
+else
+  skip "fleet_list shows asleep sessions with their age" "tmux not available"
+fi
+
 # ── 4a10c12d. the new-session screen lists what is parked in that checkout ──
 # E. The owner's words: "could you add a list of parked parallel sessions pls". The name
 # screen is where a person says "a session in THIS checkout", and it offered only a new
@@ -14989,6 +15219,147 @@ is "...and runs the wake"                     "yes" \
    "$(grep -q 'fleet-hibernate\" -s \"\$SOCK\" --wake' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
 is "...and a failed wake is reported, not swallowed" "yes" \
    "$(grep -q 'could not wake' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
+
+
+# ── ghostfleet update ────────────────────────────────────────────────────────
+# Nothing told a clone or an npm install how to update, and every long-lived piece keeps
+# old code until it restarts — so an update was five steps nobody had written down, and
+# the one that fails worst is the first: the repository was recreated three times, and a
+# clone from before a recreate shares NO history with origin. `git pull` on it either
+# refuses ("refusing to merge unrelated histories") or, with the wrong flag, welds two
+# unrelated trees together. Every row here runs the real bin/fleet-update against fixture
+# repos, with launchctl, fleet-restart and npx as stubs on PATH that only record what they
+# were asked — nothing here can reach the owner's real daemon or fleets.
+group "ghostfleet update"
+if command -v git >/dev/null 2>&1; then
+  UP="$(cd "$(mktemp -d "$TEST_RUNS.$$.update.XXXXXX")" && pwd -P)"
+  mkdir -p "$UP/stub" "$UP/agents" "$UP/home"
+  for s in launchctl fleet-restart npx; do
+    printf '#!/bin/sh\necho "%s $*" >> "%s/calls"\n' "$s" "$UP" > "$UP/stub/$s"; chmod +x "$UP/stub/$s"
+  done
+  # the phone daemon's job, named the way a hand-written plist names it
+  cat > "$UP/agents/com.acme.ghostfleet.fleet-serve.plist" <<'PL'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>Label</key>
+  <string>com.acme.ghostfleet.fleet-serve</string>
+</dict></plist>
+PL
+  ug() { git -C "$1" -c user.name=fixture -c user.email=fixture@example.invalid "${@:2}" >/dev/null 2>&1; }
+  # ORIGIN: main + staging, and an install.sh that records it ran
+  git init -q -b main "$UP/origin" 2>/dev/null || { git init -q "$UP/origin"; git -C "$UP/origin" checkout -q -b main; }
+  printf '#!/bin/sh\necho "install $(git rev-parse --short HEAD)" >> "%s/calls"\n' "$UP" > "$UP/origin/install.sh"
+  chmod +x "$UP/origin/install.sh"; ug "$UP/origin" add install.sh; ug "$UP/origin" commit -m one
+  ug "$UP/origin" branch staging
+  git clone -q "$UP/origin" "$UP/clone" 2>/dev/null
+  git -C "$UP/clone" checkout -q -b staging --track origin/staging 2>/dev/null; git -C "$UP/clone" checkout -q main 2>/dev/null
+  echo a > "$UP/origin/a"; ug "$UP/origin" add a; ug "$UP/origin" commit -m two
+  echo b > "$UP/origin/b"; ug "$UP/origin" add b; ug "$UP/origin" commit -m three
+  fu() { rm -f "$UP/calls"; ( cd "$UP" && env HOME="$UP/home" PATH="$UP/stub:$PATH" GHOSTFLEET_LAUNCH_AGENTS="$UP/agents" GHOSTFLEET_NPM_REGISTRY=http://127.0.0.1:9 \
+         "$ROOT/bin/fleet-update" --repo "$@" </dev/null 2>&1 ); }
+  calls() { cat "$UP/calls" 2>/dev/null; }
+
+  out="$(fu "$UP/clone" --yes)"; rc=$?
+  is "update: a clone behind origin fast-forwards"            "0:yes" \
+     "$rc:$([ "$(git -C "$UP/clone" rev-parse HEAD)" = "$(git -C "$UP/origin" rev-parse main)" ] && echo yes || echo no)"
+  is "update: ...says how far it moved"                       "yes" "$(grep -q '2 commits' <<< "$out" && echo yes || echo no)"
+  is "update: ...runs the install from the NEW tree"          "yes" \
+     "$(grep -qx "install $(git -C "$UP/origin" rev-parse --short main)" <<< "$(calls)" && echo yes || echo no)"
+  is "update: ...restarts the phone daemon's launchd job"     "yes" \
+     "$(grep -q '^launchctl kickstart -k gui/[0-9]*/com.acme.ghostfleet.fleet-serve$' <<< "$(calls)" && echo yes || echo no)"
+  is "update: ...with --yes restarts every fleet"             "yes" "$(grep -qx 'fleet-restart --all --yes' <<< "$(calls)" && echo yes || echo no)"
+  is "update: ...and says to relaunch the phone app"          "yes" "$(grep -qi 'phone app' <<< "$out" && echo yes || echo no)"
+
+  # WITHOUT A TERMINAL AND WITHOUT --yes the restart is OFFERED, never taken: it relaunches
+  # every session on the machine, and nobody said yes.
+  echo c > "$UP/origin/c"; ug "$UP/origin" add c; ug "$UP/origin" commit -m four
+  out="$(fu "$UP/clone")"
+  is "update: no tty, no --yes: fleet-restart is not run"     "no"  "$(grep -q '^fleet-restart' <<< "$(calls)" && echo yes || echo no)"
+  is "update: ...but the command is printed"                  "yes" "$(grep -qF 'fleet-restart --all --yes' <<< "$out" && echo yes || echo no)"
+  out="$(fu "$UP/clone")"; rc=$?
+  is "update: already current is a success that says so"      "0:yes" "$rc:$(grep -qi 'up to date' <<< "$out" && echo yes || echo no)"
+
+  # STAGING, for following development: --branch switches the tracked branch.
+  echo s > "$UP/origin/s"; ug "$UP/origin" checkout -q staging; ug "$UP/origin" add s; ug "$UP/origin" commit -m st; ug "$UP/origin" checkout -q main
+  out="$(fu "$UP/clone" --branch staging --yes)"; rc=$?
+  is "update: --branch staging follows staging"               "0:staging:yes" \
+     "$rc:$(git -C "$UP/clone" rev-parse --abbrev-ref HEAD):$([ "$(git -C "$UP/clone" rev-parse HEAD)" = "$(git -C "$UP/origin" rev-parse staging)" ] && echo yes || echo no)"
+
+  # REFUSALS, each one naming its way out.
+  git -C "$UP/clone" checkout -q -b api-fix 2>/dev/null
+  out="$(fu "$UP/clone")"; rc=$?
+  is "update: a feature branch refuses"                       "1:yes" "$rc:$(grep -qF -- '--branch' <<< "$out" && echo yes || echo no)"
+  git -C "$UP/clone" checkout -q staging 2>/dev/null
+  echo dirty >> "$UP/clone/install.sh"
+  out="$(fu "$UP/clone")"; rc=$?
+  is "update: uncommitted changes refuse"                     "1:yes" "$rc:$(grep -qi 'uncommitted' <<< "$out" && echo yes || echo no)"
+  is "update: ...and install nothing"                         "no"  "$(grep -q '^install' <<< "$(calls)" && echo yes || echo no)"
+  git -C "$UP/clone" checkout -q -- install.sh
+  ug "$UP/clone" commit --allow-empty -m local-only
+  echo d > "$UP/origin/d"; ug "$UP/origin" checkout -q staging; ug "$UP/origin" add d; ug "$UP/origin" commit -m st2; ug "$UP/origin" checkout -q main
+  out="$(fu "$UP/clone")"; rc=$?
+  is "update: local commits origin lacks refuse (no merge)"   "1:yes" "$rc:$(grep -qi 'diverged\|not on origin' <<< "$out" && echo yes || echo no)"
+
+  # THE RECREATED REPOSITORY. Same URL, a new root commit: the clone's history and origin's
+  # share nothing. The update must say re-clone, and must not have touched the clone.
+  rm -rf "$UP/origin"; git init -q -b main "$UP/origin" 2>/dev/null || { git init -q "$UP/origin"; git -C "$UP/origin" checkout -q -b main; }
+  cp "$UP/clone/install.sh" "$UP/origin/"; ug "$UP/origin" add install.sh; ug "$UP/origin" commit -m reborn; ug "$UP/origin" branch staging
+  git -C "$UP/clone" reset -q --hard HEAD~1 2>/dev/null
+  before="$(git -C "$UP/clone" rev-parse HEAD)"
+  out="$(fu "$UP/clone" --yes)"; rc=$?
+  is "update: a clone from before a recreate refuses"         "1" "$rc"
+  is "update: ...says to re-clone"                            "yes" "$(grep -qi 're-clone' <<< "$out" && echo yes || echo no)"
+  is "update: ...names the history as unrelated"              "yes" "$(grep -qi 'unrelated' <<< "$out" && echo yes || echo no)"
+  is "update: ...and leaves the clone where it was"           "$before" "$(git -C "$UP/clone" rev-parse HEAD)"
+  is "update: ...with nothing installed or restarted"         "" "$(calls)"
+
+  # AN NPM INSTALL has no history to fast-forward: the package is the release, so update
+  # is `npx ghostfleet-cli@latest` (which runs install.sh), then the same restarts.
+  mkdir -p "$UP/pkg"; printf '{"name":"ghostfleet-cli","version":"0.4.0"}\n' > "$UP/pkg/package.json"
+  out="$(fu "$UP/pkg" --yes)"; rc=$?
+  is "update: an npm install runs the latest package"         "0:yes" "$rc:$(grep -qx 'npx -y ghostfleet-cli@latest' <<< "$(calls)" && echo yes || echo no)"
+  is "update: ...and restarts the daemon too"                 "yes" "$(grep -q '^launchctl kickstart' <<< "$(calls)" && echo yes || echo no)"
+
+  # THE NOTICE. `ghostfleet` says when npm has a newer version — from a CACHE, so startup
+  # never waits on the network. The cache is filled by `fleet-update --npm-refresh`, which
+  # is what ghostfleet runs in the background; here it is pointed at a loopback registry.
+  RT="$UP/runtime"; mkdir -p "$RT/bin"; cp "$ROOT/bin/ghostfleet" "$RT/bin/"; echo "$UP/pkg" > "$RT/.source"
+  printf '0.4.0\n' > "$RT/.version"
+  nt() { env HOME="$UP/home" GHOSTFLEET_NPM_REGISTRY="${REG:-http://127.0.0.1:9}" "$RT/bin/ghostfleet" --update-check 2>&1; }
+  mkdir -p "$UP/home/.config/ghostfleet"
+  printf '%s\t0.5.0\n' "$(date +%s)" > "$UP/home/.config/ghostfleet/npm-latest"
+  is "notice: a newer npm version is announced"               "yes" "$(grep -q '0.5.0' <<< "$(nt)" && grep -q 'ghostfleet update' <<< "$(nt)" && echo yes || echo no)"
+  printf '%s\t0.4.0\n' "$(date +%s)" > "$UP/home/.config/ghostfleet/npm-latest"
+  is "notice: the same version is silent"                     ""    "$(nt)"
+  printf '%s\t0.3.9\n' "$(date +%s)" > "$UP/home/.config/ghostfleet/npm-latest"
+  is "notice: an older one is silent"                         ""    "$(nt)"
+  printf '%s\t0.10.0\n' "$(date +%s)" > "$UP/home/.config/ghostfleet/npm-latest"
+  is "notice: versions compare as numbers, not strings"       "yes" "$(grep -q '0.10.0' <<< "$(nt)" && echo yes || echo no)"
+  # A CLONE never gets the npm notice: it updates from git, and sync-check covers it.
+  echo "$UP/clone" > "$RT/.source"
+  is "notice: a clone is not told about npm"                  ""    "$(nt)"
+  echo "$UP/pkg" > "$RT/.source"
+  # NEVER BLOCKING: a registry that does not answer must not hold the startup check.
+  printf '1\t0.4.0\n' > "$UP/home/.config/ghostfleet/npm-latest"
+  t0=$(date +%s); nt >/dev/null; t1=$(date +%s)
+  is "notice: a stale cache with a dead registry returns at once" "yes" "$([ $((t1 - t0)) -le 1 ] && echo yes || echo "no: $((t1 - t0))s")"
+  # THE REFRESH, against a loopback registry that answers what npm's /latest answers.
+  REGPORT_FILE="$UP/regport"
+  node -e 'const s=require("http").createServer((q,r)=>{r.setHeader("content-type","application/json");r.end(JSON.stringify({name:"ghostfleet-cli",version:"0.6.1"}))});s.listen(0,"127.0.0.1",()=>{require("fs").writeFileSync(process.argv[1],String(s.address().port))});setTimeout(()=>process.exit(0),15000)' "$REGPORT_FILE" &
+  REGPID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$REGPORT_FILE" ] && break; sleep 0.2; done
+  REG="http://127.0.0.1:$(cat "$REGPORT_FILE" 2>/dev/null)"
+  env HOME="$UP/home" GHOSTFLEET_NPM_REGISTRY="$REG" "$ROOT/bin/fleet-update" --npm-refresh >/dev/null 2>&1
+  is "refresh: the registry's latest lands in the cache"      "0.6.1" "$(cut -f2 "$UP/home/.config/ghostfleet/npm-latest" 2>/dev/null)"
+  is "refresh: ...and the notice reads it"                    "yes" "$(grep -q '0.6.1' <<< "$(nt)" && echo yes || echo no)"
+  kill "$REGPID" 2>/dev/null; wait "$REGPID" 2>/dev/null
+  # ...and `ghostfleet update` reaches it at all.
+  is "ghostfleet routes 'update' to fleet-update"             "yes" \
+     "$(grep -qE '^if \[ "\$\{1:-\}" = update \]' "$ROOT/bin/ghostfleet" && echo yes || echo no)"
+  rm -rf "$UP"
+else
+  skip "ghostfleet update" "git not available"
+fi
 
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
 
