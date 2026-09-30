@@ -2162,6 +2162,7 @@ agpress() {          # $1 = the pattern the agent row must reach after one Space
 # an unset read here would abort the whole suite rather than skip one arm.
 AGUP=0
 AGROW_AGENT=""
+AGNEW=""
 agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = the row's 4th column
   if [ -n "$AGROW_AGENT" ]; then
     printf 'acme-api\t%s/a\twork\t%s\n' "$T" "$AGROW_AGENT" > "$T/.config/ghostfleet/projects"
@@ -2170,19 +2171,44 @@ agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = 
   fi
   rm -f "$T/bin/claude" "$T/bin/codex" "$T/bin/opencode"
   for a in "$@"; do agent_stub "$a"; done
-  tmux -L cfagcol kill-server 2>/dev/null
+  agkill
   # PATH IS SET INSIDE THE COMMAND, NOT WITH -e, and that is not a style choice: on this
   # tmux the pane came up with the SERVER's PATH and ignored `-e PATH=`, so the scrub
   # silently did nothing and both arms tested the same ring. HOME does come through `-e`
   # (every other group here relies on that); PATH is the one that has to be assigned in
   # the shell tmux runs. Measured by printing $PATH from inside the pane.
-  tmux -L cfagcol new-session -d -x 120 -y 24 -e HOME="$T" \
+  AGNEW="$(tmux -L cfagcol new-session -d -x 120 -y 24 -e HOME="$T" \
     -e CLAUDE_FLEET_PROJECTS="$T/.config/ghostfleet/projects" \
-    "PATH='$T/bin'; export PATH; '$T/bin/node' '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 20"
-  agwait 'acme-api' || { AGUP=0; bad "the agent-column session comes up" "the projects screen" "nothing drawn in 30s"; return 1; }
+    "PATH='$T/bin'; export PATH; '$T/bin/node' '$ROOT/bin/fleet-grid.mjs' - --screen projects; sleep 20" 2>&1)"
+  agwait 'acme-api' || { AGUP=0; bad "the agent-column session comes up" "the projects screen" "nothing drawn in 30s"; agseen; return 1; }
   tmux -L cfagcol send-keys ','
-  agwait 'settings' || { AGUP=0; bad "the agent-column session comes up" "the settings page" "',' did not land in 30s"; return 1; }
+  agwait 'settings' || { AGUP=0; bad "the agent-column session comes up" "the settings page" "',' did not land in 30s"; agseen; return 1; }
   AGUP=1
+}
+# KILL, THEN WAIT FOR THE PROCESS TO BE GONE. `kill-server` returns once the server has
+# been TOLD to exit, not once it has, and on tmux 3.4 the old server goes on accepting on
+# its socket for that moment. The `new-session` right behind it connected to the dying
+# server, which exited under it: `server exited unexpectedly` on stderr, no session, and
+# a pane that stayed empty for the whole ceiling. That is why raising the ceiling from 12s
+# to 30s changed nothing — nothing was ever going to be drawn. It hit the second or third
+# arm, never the first (the first has nothing to kill), about one ubuntu run in three;
+# the same two lines on their own reproduce it about once in 200 on an idle box.
+agkill() {
+  local pid i=0
+  pid="$(tmux -L cfagcol display-message -p '#{pid}' 2>/dev/null)"
+  tmux -L cfagcol kill-server 2>/dev/null
+  [ -n "$pid" ] || return 0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt "$AG_CEIL" ]; do sleep 0.05; i=$((i+1)); done
+}
+# WHAT WAS ON SCREEN when a wait gave up. "nothing drawn" used to be the whole report, and
+# it could not tell a slow grid from a grid that crashed from a session that never existed —
+# which is how a dead server passed for a slow one through one raised timeout already.
+agseen() {
+  local pane; pane="$(tmux -L cfagcol capture-pane -p 2>&1)"
+  printf '     %snew-session:%s %s\n' "$D" "$N" "${AGNEW:-(no output)}"
+  printf '     %spane:%s\n' "$D" "$N"
+  if [ -n "${pane//[[:space:]]/}" ]; then printf '%s\n' "$pane" | sed '/^[[:space:]]*$/d; s/^/       │ /'
+  else printf '       │ (empty)\n'; fi
 }
 agrow()  { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'acme-api' | head -1; }
 agfoot() { tmux -L cfagcol capture-pane -p 2>/dev/null | grep -E 'esc/. back' | head -1; }
