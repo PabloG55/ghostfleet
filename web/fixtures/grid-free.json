@@ -45,17 +45,17 @@
   ],
   "free_worktrees": [
     {
-      "path": "/Users/pgarces/gf-demo/toolbox-3",
+      "path": "/Users/you/gf-demo/toolbox-3",
       "branch": "feat/x",
       "task": "rework the CSV column mapper"
     },
     {
-      "path": "/Users/pgarces/gf-demo/grid-json",
+      "path": "/Users/you/gf-demo/grid-json",
       "branch": "feat/grid-json",
       "task": ""
     },
     {
-      "path": "/Users/pgarces/gf-demo/stack-view",
+      "path": "/Users/you/gf-demo/stack-view",
       "branch": "feat/stack-view",
       "task": "landed in #36, safe to reclaim"
     }

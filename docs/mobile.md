@@ -145,7 +145,7 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
     }
   ],
   "free_worktrees": [
-    { "path": "/Users/pgarces/gf-demo/toolbox-3", "branch": "feat/x", "task": "rework the CSV column mapper",
+    { "path": "/Users/you/gf-demo/toolbox-3", "branch": "feat/x", "task": "rework the CSV column mapper",
       "removing": false }                // true while `git worktree remove` is still running
   ]
 }

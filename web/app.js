@@ -194,7 +194,7 @@ async function refresh() {
     S.stale = 0;
     save();
   } catch (e) {
-    if (e instanceof api.AuthError) return lock('refresh');
+    if (e instanceof api.AuthError) return lock();
     // Offline: keep the cards that are on screen and say how old they are. A blank
     // screen with an error on it is strictly less useful than a stale fleet with a
     // date on it — the question this app answers is "is anything blocked on me", and
@@ -220,78 +220,14 @@ function lastFetchedAt() {
 
 // Installed, by either signal. iOS has honoured navigator.standalone since before the
 // media query existed and the two have not always agreed, so anything that depends on
-// being installed asks both — and the probe reports them SEPARATELY, so one launch says
-// which is true here instead of leaving an OR nobody can attribute.
+// being installed asks both.
 const mmStandalone = () => { try { return !!matchMedia('(display-mode: standalone)').matches; } catch { return false; } };
 const navStandalone = () => { try { return !!navigator.standalone; } catch { return false; } };
 function markStandalone() {
   try { document.documentElement.classList.toggle('standalone', mmStandalone() || navStandalone()); } catch {}
 }
 
-// ── what the screen ACTUALLY measures, from the device ────────────────────
-// "still it doesnt use the full screen", in the installed app. The suspicion is that the
-// shell's `height: 100dvh` resolves SHORTER than the physical screen in iOS standalone
-// with a black-translucent status bar — but that is a suspicion, and the only engine that
-// can settle it is the one on the phone. No desktop viewport reproduces it (dvh there is
-// the window), and the home-screen app cannot be driven from here.
-//
-// So the device reports its own geometry, once, after the first layout has settled.
-// Everything is an integer in the PATH, because fleet-serve drops query strings.
-//
-//   ih  innerHeight            sh  screen.height        (CSS px)
-//   sl  the shell's bottom edge                          <- 100dvh, resolved
-//   cb  the composer's bottom edge, when one is drawn
-//   gap innerHeight - the lowest painted edge            <- the band, measured
-//   sat/sab  the safe-area insets this page actually resolves
-//
-// If `sl` comes back short of `sh` by about a status bar, the suspicion is the cause and
-// the shape has to stop being sized by dvh. If they match, it is something else and this
-// says so before anything is changed.
-//   IT WAITS FOR THE SHELL. `#app` only carries `.shell` — and therefore `height: 100dvh`
-// — once a real screen is drawn; on the lock screen it is content-height, so a report sent
-// at load measures the lock screen and says nothing about the thing under suspicion.
-// Measured locally: it came back sl524 against ih844, which is the ship and two buttons,
-// not a viewport. So it retries until the shell exists and gives up rather than lying.
-//   ONCE PER SCREEN, NOT ONCE PER LAUNCH. The first version reported whichever shell
-// appeared first, which is the grid — and the grid has no composer, so it came back cb0
-// gap0 and said nothing about the thing the band is under. The composer only exists on the
-// chat screen, so the measurement has to be taken there too. Keyed by screen so a launch
-// that visits both sends both, and neither repeats on the 5s poll.
-const geoSent = new Set();
-let geoTries = 0;
-function reportGeometry() {
-  const el = document.getElementById('app');
-  const where = S.screen;
-  if (!el || !el.classList.contains('shell')) {
-    if (++geoTries < 40) setTimeout(reportGeometry, 1500);
-    return;
-  }
-  if (geoSent.has(where)) return;
-  geoSent.add(where);
-  try {
-    const shell = el;
-    const comp = document.querySelector('.composer');
-    // env() cannot be read directly; a throwaway element resolves it for us.
-    const probe = document.createElement('div');
-    probe.style.cssText = 'position:fixed;left:-9999px;top:0;'
-      + 'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
-    document.body.appendChild(probe);
-    const ps = getComputedStyle(probe);
-    const sat = Math.round(parseFloat(ps.paddingTop) || 0);
-    const sab = Math.round(parseFloat(ps.paddingBottom) || 0);
-    probe.remove();
-    const r = shell.getBoundingClientRect();
-    const c = comp ? comp.getBoundingClientRect() : null;
-    const low = c ? c.bottom : (r ? r.bottom : 0);
-    const sa = (mmStandalone() || navStandalone()) ? 1 : 0;
-    api.diag('geo', where, 'sa' + sa, 'mm' + (mmStandalone() ? 1 : 0), 'ns' + (navStandalone() ? 1 : 0), 'ih' + Math.round(innerHeight), 'sh' + Math.round(screen.height),
-             'sl' + Math.round(r ? r.bottom : 0), 'cb' + Math.round(c ? c.bottom : 0),
-             'gap' + Math.round(innerHeight - low), 'sat' + sat, 'sab' + sab);
-  } catch {}
-}
-
-function lock(why = 'x') {
-  api.diag('lock', why, 'tok' + (api.haveToken() ? 1 : 0), 'pend' + (swReloadPending ? 1 : 0));
+function lock() {
   // A LOCKED SCREEN HAS NO MICROPHONE: conversation mode ends with the session it ran on.
   if (S.talk) talkStop('');
   S.locked = true; api.clearToken(); render();
@@ -382,11 +318,8 @@ function render() {
     app.classList.toggle('shell', shell);
     document.documentElement.classList.toggle('shell', shell);
   } catch {}
-  if (shell) {
-    markNav(app, S.screen);
-    // A screen this launch has not measured yet gets measured, once it has settled.
-    if (!geoSent.has(S.screen)) { geoTries = 0; setTimeout(reportGeometry, 900); }
-  } else navFrom = null;
+  if (shell) markNav(app, S.screen);
+  else navFrom = null;
   // ── the Preact screens ─────────────────────────────────────────────────────────────
   // They DIFF, so this path must not empty #app first: the whole gain is that the .cards
   // node survives the 5s poll and keeps the reader's scroll position instead of being
@@ -1195,7 +1128,7 @@ async function answerProposal(p, yes) {
     toast(yes ? `yes — Jarvis will ${p.summary}` : `no — Jarvis will not ${p.summary}`, 'good');
     await refresh();
   } catch (e) {
-    if (e instanceof api.AuthError) { lock('jarvis'); return; }
+    if (e instanceof api.AuthError) { lock(); return; }
     toast(String((e && e.message) || e), 'bad');
     render();
   }
@@ -1325,7 +1258,7 @@ async function endUtterance() {
   try { text = String((await api.jarvisHear(encodeWav(frames, T.rate))).text || '').trim(); }
   catch (e) {
     if (!talkLive(g)) return;
-    if (e instanceof api.AuthError) { talkStop(''); lock('talk'); return; }
+    if (e instanceof api.AuthError) { talkStop(''); lock(); return; }
     talkStop(`could not hear that: ${(e && e.message) || e}`); return;
   }
   if (!talkLive(g)) return;
@@ -2690,7 +2623,6 @@ export function reloadAction(pending, typing, authed) {
 export function takeNewClientIfIdle() {
   const typing = typingNow(), authed = api.haveToken();
   const act = reloadAction(swReloadPending, typing, authed);
-  if (swReloadPending) api.diag('swap', act, 'typ' + (typing ? 1 : 0), 'auth' + (authed ? 1 : 0));
   if (act !== 'reload') return false;
   try { location.reload(); } catch { return false; }
   return true;
@@ -2794,7 +2726,7 @@ async function readPane() {
     S.pane = j;
     if (S.paneErr) { S.paneErr = ''; renderUnlessTyping(); }
   } catch (e) {
-    if (e instanceof api.AuthError) return lock('poll');
+    if (e instanceof api.AuthError) return lock();
     const msg = e instanceof api.OfflineError
       ? 'offline — this is the last pane captured' : String(e.message || e);
     // Rendered only when it CHANGES. The poll is every two seconds; re-rendering the
@@ -3212,7 +3144,7 @@ async function doVerb(tool, args, opts = {}) {
     await refresh();
     return r;
   } catch (e) {
-    if (e instanceof api.AuthError) { lock('pane'); return null; }
+    if (e instanceof api.AuthError) { lock(); return null; }
     toast(String(e.message || e), 'bad');
     render();
     return null;
@@ -3268,8 +3200,7 @@ function lockScreen() {
       }, 'go'));
     } else if (pk.available()) {
       row.append(btn('unlock with Face ID', async () => {
-        try { api.diag('auth', 'start'); await pk.open(); api.diag('auth', 'ok');
-              S.locked = false; render(); refresh(); }
+        try { await pk.open(); S.locked = false; render(); refresh(); }
         catch (e) { toast(String(e.message || e), 'bad'); }
       }, 'go'));
     }
@@ -4042,7 +3973,7 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   const act = onVisibleAction();
-  if (act === 'lock') lock('visible');
+  if (act === 'lock') lock();
   else if (act === 'refresh') refresh();
   syncPanePoll();
 });
@@ -4058,24 +3989,10 @@ document.addEventListener('visibilitychange', () => {
 //   Never mid-sentence. A reload throws away S.draft, which lives in memory — so if you
 // are typing, it waits, and the poll spends it when you are not.
 if ('serviceWorker' in navigator) {
-  // WHAT THE PAGE WOKE UP AS. `hadController` is the guard that decides whether a
-  // controllerchange is a first install (ignore) or a swap (reload), and it is read once,
-  // here, at module evaluation. If it reads wrong, every conclusion after it is wrong —
-  // and the log cannot show it, because a controlled page still hits the network for the
-  // whole shell (sw.js revalidates behind the paint). So the page says it out loud.
+  // Read once, at module evaluation: it is what decides whether a controllerchange is a
+  // first install (ignore) or a swap (reload).
   let hadController = !!navigator.serviceWorker.controller;
-  api.diag('load', 'ctl' + (hadController ? 1 : 0),
-       'sa' + ((() => { try { return matchMedia('(display-mode: standalone)').matches || navigator.standalone ? 1 : 0; } catch { return 0; } })()),
-       'lock' + (S.locked ? 1 : 0));
-  navigator.serviceWorker.register('./sw.js').then(reg => {
-    // WHICH STATES EXIST AT REGISTRATION. A worker that installs on every launch is the
-    // whole puzzle: this says whether one was already active, whether a new one is
-    // installing, and whether one is stuck waiting.
-    if (!reg) return;
-    const st = r => (r ? r.state : 'none');
-    api.diag('reg', 'i-' + st(reg.installing), 'w-' + st(reg.waiting), 'a-' + st(reg.active));
-    reg.addEventListener('updatefound', () => api.diag('updatefound', 'a-' + st(reg.active)));
-  }).catch(() => api.diag('reg', 'failed'));
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
   askShellVersion();
   // A TAPPED NOTIFICATION FROM JARVIS lands on Jarvis (sw.js posts this to an open window,
   // or opens one on #jarvis). Opened after the unlock, never instead of it.
@@ -4083,32 +4000,11 @@ if ('serviceWorker' in navigator) {
     if (ev && ev.data && ev.data.open === 'jarvis') { S.wantJarvis = true; if (!S.locked) refresh(); }
   });
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    api.diag('cc', 'had' + (hadController ? 1 : 0), 'tok' + (api.haveToken() ? 1 : 0),
-         'lock' + (S.locked ? 1 : 0));
     if (!hadController) { hadController = true; return; }
     swReloadPending = true;
     takeNewClientIfIdle();
   });
 }
-// ── the navigation nothing of ours admits to ──────────────────────────────
-// A launch logged `load`, then a second `load` seven seconds later with no cc, no swap and
-// no lock line before it — so something navigated that none of our reload paths issued,
-// and it landed while the first Face ID sheet was open. Guessing at it is what the last two
-// rounds cost, so the page reports its own lifecycle instead:
-//
-//   pagehide p1  the page went into the back/forward cache (a restore is coming)
-//   pagehide p0  the page is being torn down — a REAL navigation
-//   pageshow p1  restored from bfcache, which fetches no shell and would explain a
-//                `load` with no requests behind it
-//   pageshow p0  a fresh document
-//   unload       the last thing a document ever does
-//
-// Paired with auth/start above, the order settles it: a pagehide between `auth/start` and
-// the assert means the WebAuthn sheet is what tore the document down.
-addEventListener('pageshow', e => api.diag('pageshow', 'p' + (e && e.persisted ? 1 : 0)));
-addEventListener('pagehide', e => api.diag('pagehide', 'p' + (e && e.persisted ? 1 : 0)));
-addEventListener('unload', () => api.diag('unload'));
-
 if (location.hash === '#jarvis') {
   S.wantJarvis = true;
   try { history.replaceState(history.state, '', location.pathname + location.search); } catch {}
@@ -4117,9 +4013,6 @@ markStandalone();
 addEventListener('orientationchange', markStandalone);
 addEventListener('resize', markStandalone);
 render();
-// One measurement, after layout has settled — early enough to be in the same log burst as
-// the launch, late enough that the shell has been sized.
-setTimeout(reportGeometry, 1200);
 // Paint first, ask second. The lock screen above is drawn against the 'probing' mode —
 // the ship, and one line saying which origin is being asked — so this only ever fills in
 // the answer. Waiting for the probe before the first paint would put a blank page in

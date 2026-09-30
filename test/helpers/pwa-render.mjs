@@ -706,8 +706,8 @@ is('a tab says how many need you', true, await until(() => /●\d/.test((tabStri
 api.setFixtureName('grid-acme-api.json');
 
 // ── the fleets the shipped fixture is not ─────────────────────────────────
-const fleetOf = (...rows) => ({ home: '/Users/pgarces', projects: rows.map(([name, profile, need]) => ({
-  name, profile, path: `/Users/pgarces/gf-demo/${name}`, agent: null, socket: `cf-${name}`,
+const fleetOf = (...rows) => ({ home: '/Users/you', projects: rows.map(([name, profile, need]) => ({
+  name, profile, path: `/Users/you/gf-demo/${name}`, agent: null, socket: `cf-${name}`,
   // The third element is OPTIONAL and every existing caller omits it, so they all keep
   // need: 0. It exists because a tab badge can only be tested by a fleet that has
   // something blocked in it.

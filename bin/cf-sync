@@ -128,8 +128,8 @@ is_sha() { case "$1" in *[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = 40 ]; }
 # unconditionally. Seen live: TCC denied one directory and cf-sync reported success over
 # the top of rsync's own error.
 #
-#     rsync(87193): error: open /Users/pgarces/…/ghostfleet/web/: Operation not permitted
-#     cf-sync: synced runtime  /Users/pgarces/…/ghostfleet  ->  /Users/pgarces/.local/…
+#     rsync(87193): error: open /Users/you/…/ghostfleet/web/: Operation not permitted
+#     cf-sync: synced runtime  /Users/you/…/ghostfleet  ->  /Users/you/.local/…
 #
 # That is worse than failing: a success line is what you check BEFORE concluding the
 # runtime is current, so the one safeguard against the repo-vs-runtime trap at the top of

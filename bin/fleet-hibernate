@@ -9,6 +9,10 @@
 #     fleet-hibernate --idle-hours N  the threshold (default 48)
 #     fleet-hibernate --json          the same plan, machine-readable
 #     -s SOCK                         one fleet instead of all of them
+#     fleet-hibernate --resolve SOCK SLOT
+#                                     which conversation that session's process is in:
+#                                     prints id<US>transcript<US>how, corrects the record,
+#                                     exits 1 when it cannot be established (fleet-restart)
 #
 # WHY THIS EXISTS, in numbers measured on the machine that asked for it: 64 claude sessions
 # holding 21.75 GB of physical footprint, on a 64 GB laptop that was 39.6/40.0 GB into swap
@@ -71,8 +75,9 @@ while [ $# -gt 0 ]; do
     --idle-hours) IDLE_HOURS="${2:?}"; shift 2 ;;
     --timeout)    WAKE_TIMEOUT="${2:?}"; shift 2 ;;
     --json)       JSON=yes; shift ;;
+    --resolve)    MODE=resolve; ONLY_SOCK="${2:?--resolve needs SOCK SLOT}"; NAMED="${3:?--resolve needs SOCK SLOT}"; shift 3 ;;
     -s)           ONLY_SOCK="${2:?}"; shift 2 ;;
-    -h|--help)    sed -n '2,13p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
+    -h|--help)    sed -n '2,15p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
     *)            echo "fleet-hibernate: unknown option '$1'" >&2; exit 2 ;;
   esac
 done
@@ -785,6 +790,20 @@ command -v tmux >/dev/null 2>&1 || { echo "fleet-hibernate: tmux required" >&2; 
 load_records; load_trusted; load_ps
 
 case "$MODE" in
+  # ── ONE ANSWER TO "WHICH CONVERSATION", ASKED BY EVERYTHING THAT RESUMES ─────
+  # fleet-restart used to trust the recorded id, which is the bug live_sid exists for, and it
+  # bit there too: a lead relaunched onto an id with no transcript anywhere, the resume
+  # failed, and the pane closed with the card. The fix is to ask THIS code rather than grow
+  # a second copy of it — two spellings of "which conversation is live" would drift the way
+  # this repo keeps writing down. No guessing is added here: the answer is live_sid's or
+  # nothing, and the caller decides what nothing means.
+  resolve)
+    live_sid "$ONLY_SOCK" "$NAMED" || exit 1
+    _old="$(field_for "$ONLY_SOCK" "$NAMED" 4)"; _cwd="$(field_for "$ONLY_SOCK" "$NAMED" 7)"
+    [ -n "$_cwd" ] || _cwd="$(tmux -L "$ONLY_SOCK" display-message -p -t "$NAMED" '#{pane_current_path}' 2>/dev/null)"
+    [ "$LIVE_ID" = "$_old" ] || correct_record "$ONLY_SOCK" "$NAMED" "$_old" "$LIVE_ID" "$LIVE_TR" "$_cwd"
+    printf '%s\x1f%s\x1f%s\n' "$LIVE_ID" "$LIVE_TR" "$LIVE_HOW"
+    exit 0 ;;
   wake)
     SOCK="${ONLY_SOCK:-}"
     # ── WHICH FLEET, WHEN NONE WAS NAMED ──────────────────────────────────────

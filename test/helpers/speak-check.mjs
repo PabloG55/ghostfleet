@@ -130,7 +130,7 @@ for (const [what, input, address, name] of [
   ['a hex id',        'The marker holds 0x1f4ade00 as its pid word.',                      '0x1f4ade00',                               'a hex id'],
   ['an \\x escape',   'tmux escapes \\x1f, so the split fails.',                           '\\x1f',                                    'an escape code'],
   ['an octal escape', 'It comes back as \\037 instead.',                                   '\\037',                                    'an escape code'],
-  ['a rooted path',   'The grid is at /Users/pgarces/gf-demo/acme-api now.',               '/Users/pgarces',                           'acme-api'],
+  ['a rooted path',   'The grid is at /Users/you/gf-demo/acme-api now.',               '/Users/you',                           'acme-api'],
   ['a home path',     'Markers live in ~/.claude/fleet on this machine.',                  '~/.claude',                                'fleet'],
   ['a relative path', 'See docs/mobile.md for the payload.',                               'docs/',                                    'mobile.md'],
   ['a path + line',   'Fixed bin/fleet-grid.mjs:86 this morning.',                         'bin/fleet-grid.mjs:86',                    'fleet-grid.mjs line 86'],

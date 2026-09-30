@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 9b25680652d7
+// CLIENT-HASH: 74a1d935d123
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -282,7 +282,9 @@
 // prompt it is answering, and sends its fingerprint; the daemon refuses if that prompt is
 // no longer on screen ("the prompt changed") and the sheet re-reads the pane. AN OLDER
 // CLIENT SENDS NO FINGERPRINT, SO ITS ANSWERS ARE REFUSED — with a message saying to reload.
-const VERSION = 'ghostfleet-v47';
+// v48 drops the __diag probes: the client no longer beacons its load, lifecycle or
+// geometry to the daemon's log. Nothing else changes for an older client.
+const VERSION = 'ghostfleet-v48';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
