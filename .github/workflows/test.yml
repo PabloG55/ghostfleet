@@ -87,16 +87,20 @@ jobs:
       # tmux is on neither runner image; jq is on both today, and that is not a
       # promise. Both are installed rather than assumed. No npm step: the suite has
       # no dependencies and the repo has no lockfile.
-      - name: Install tmux and jq (Linux)
+      #   ffmpeg too, because fleet-shots RECORDS a flow and the recording is the feature:
+      # without an encoder the recorded-run groups skip, and a skip that only names a
+      # missing tool is refused by the suite's own skip rule. Neither image ships it.
+      # --no-install-recommends keeps the apt side to the codecs it needs.
+      - name: Install tmux, jq and ffmpeg (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y tmux jq
+          sudo apt-get install -y --no-install-recommends tmux jq ffmpeg
 
-      - name: Install tmux and jq (macOS)
+      - name: Install tmux, jq and ffmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
-          for p in tmux jq; do
+          for p in tmux jq ffmpeg; do
             brew list --formula "$p" >/dev/null 2>&1 || brew install "$p"
           done
 
@@ -122,6 +126,7 @@ jobs:
           node --version
           tmux -V
           jq --version
+          ffmpeg -hide_banner -version | head -1
 
       # No isolation needed beyond what the suite already does: it puts every tmux
       # server it starts under its own per-run $TMUX_TMPDIR and sweeps the leftovers

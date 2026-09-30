@@ -28,9 +28,9 @@ const skip = (why) => { console.log(`#SKIP${US}${US}${why}`); process.exit(0); }
 if (!findChrome()) skip('no chrome to click in');
 let enc = '';
 try { enc = execFileSync('ffmpeg', ['-hide_banner', '-encoders'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
-catch { skip('no ffmpeg to encode a video with'); }
+catch { skip('ffmpeg is not installed, so there is no video to play'); }
 const x264 = /\blibx264\b/.test(enc);
-if (!x264 && !/\blibvpx-vp9\b/.test(enc)) skip('ffmpeg has neither libx264 nor libvpx-vp9');
+if (!x264 && !/\blibvpx-vp9\b/.test(enc)) skip('ffmpeg is here, but its h264 and vp9 encoders are not available');
 
 // A ROOT THIS FILE OWNS, for stepper-check's reason: `serve` lists a directory by its
 // manifest.json files, and a shared temp dir holds other programs' too.
