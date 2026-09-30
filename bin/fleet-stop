@@ -72,7 +72,20 @@ done
   && { echo "fleet-stop: --force only means something with --reclaim (without it nothing touches git)" >&2; exit 1; }
 [ -n "$SOCK" ]    || { echo "fleet-stop: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 [ -n "$SESSION" ] || { echo "fleet-stop: usage: fleet-stop [-s socket] <session>" >&2; exit 1; }
-[ "$SESSION" = master ] && { echo "fleet-stop: refusing to stop 'master' (the lead)" >&2; exit 1; }
+# THE ONE LEAD THIS STOPS IS JARVIS'S, and only by name from the CLI. Jarvis is never slept
+# (fleet-hibernate, fleet-pause and the governor all refuse it), so a deliberate stop has to
+# be the off switch that works — every one of those refusals names this command. Never with
+# --reclaim: a master's checkout is its repo. The MCP fleet_stop still refuses every master,
+# so an agent calling a tool cannot take Jarvis down; only a person at a shell can.
+_jm="$HOME/.config/ghostfleet/jarvis"
+if [ "$SESSION" = master ]; then
+  if [ "$RECLAIM" != 1 ] && [ -f "$_jm" ] \
+     && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
+    echo "fleet-stop: stopping Jarvis ('master' on $SOCK) — it stays off until it is started again" >&2
+  else
+    echo "fleet-stop: refusing to stop 'master' (the lead)" >&2; exit 1
+  fi
+fi
 # The caller's name is asked of its PANE as well as read from the environment: the
 # environment holds the name it was LAUNCHED with, so after a rename the old guard compared
 # against a name nobody has and let a session stop itself. Either one matching refuses.

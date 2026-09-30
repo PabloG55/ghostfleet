@@ -557,6 +557,17 @@ correct_record() {
   return 0
 }
 
+# THE MARKER bin/fleet-jarvis writes: key=value lines, read with grep+cut the way the
+# governor and the event hook read it. Only the master on that sock is Jarvis — a worker
+# Jarvis spawned is a worker (isJarvisSelf in lib/jarvis.mjs).
+is_jarvis() {
+  [ "$2" = master ] && [ -f "$HOME/.config/ghostfleet/jarvis" ] \
+    && [ "$1" = "$(grep -m1 '^sock=' "$HOME/.config/ghostfleet/jarvis" 2>/dev/null | cut -d= -f2-)" ]
+}
+jarvis_always_on() {
+  printf 'Jarvis is always on — it is never hibernated, parked or paused. To take it offline for good: fleet-stop -s %s master' "$1"
+}
+
 # ── the veto list ─────────────────────────────────────────────────────────────
 # Returns a reason, or nothing when the session may sleep. Every entry is a way for
 # hibernation to destroy something rather than defer it.
@@ -566,6 +577,12 @@ veto_for() {
   # a conversation, and reporting it as "no recorded conversation id" is true but useless —
   # on a real fleet that was two thirds of the list, every row saying the same wrong thing.
   case "$slot" in _*) printf 'a tab, not an agent'; return ;; esac
+  # ── JARVIS IS NEVER SLEPT, NOT EVEN BY NAME ─────────────────────────────────
+  # The owner's rule, and a rule rather than a setting. Every other lead can be slept by
+  # naming it; Jarvis's master cannot, because it is the one session the phone talks to when
+  # nothing else is up. Which fleet is Jarvis is the marker's sock (lib/jarvis.mjs), never a
+  # name spelled here. Ahead of the lead rule so the reason printed is the one that holds.
+  if is_jarvis "$sock" "$slot"; then jarvis_always_on "$sock"; return; fi
   # ── A FLEET'S LEAD IS NEVER SLEPT BY A RULE ─────────────────────────────────
   # Neither the threshold nor --pressure may take it; only `--apply master` naming it. The
   # lead is the session a person comes back to, and the one measured case of hibernation

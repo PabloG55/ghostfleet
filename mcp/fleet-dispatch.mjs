@@ -438,6 +438,15 @@ export function plan(name, a = {}) {
       //   RESUME IS DELIBERATELY NOT GUARDED. The recovery direction has to stay open, or
       // a lead parked by an older build — or by hand — could not be turned back on from
       // the one surface that can see it.
+      //   JARVIS SAYS WHY. Its master is refused like every lead, but the rule that holds
+      // for it is stronger — it is never slept at all — and the owner reading the refusal
+      // needs the one way that does take it down, which is the CLI's, not a tool's.
+      if (String(a.session) === LEAD) {
+        let m = null; try { m = readMarker(); } catch {}
+        const sock = t ? t.sock : (self()?.sock || process.env.CLAUDE_FLEET_SOCK);
+        if (m && sock && sock === m.sock)
+          return { kind: 'fail', ...fail(`fleet_pause: refusing — Jarvis is always on; it is never hibernated, parked or paused. To take it offline for good, from a shell: fleet-stop -s ${m.sock} master`) };
+      }
       const nl = notTheLead('fleet_pause', a.session, 'park');
       if (nl) return nl;
       return run('fleet-pause', [String(a.session)], t);
