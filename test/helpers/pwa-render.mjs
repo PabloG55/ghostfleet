@@ -1487,6 +1487,13 @@ is('...nor rename', false, !!acts && /r\s+rename/.test(acts.textContent));
 is('...nor pause', false, !!acts && /p  pause/.test(acts.textContent));
 is('...and it says why', true, !!acts && /cannot be stopped, reclaimed, renamed or paused/.test(acts.textContent));
 closeSheetFromTest();
+// The lead's pane is not waiting on a key: the answer sheet says so and offers none.
+click(btnWith(/⋯/));
+click(sheetHost.find(n => n.tag === 'button' && /answer keys/.test(n.textContent)));
+is('with no prompt on screen, answer keys says so', true,
+   await until(() => !!sheetHost.firstChild && /no prompt on screen/.test(sheetHost.firstChild.textContent), 4000));
+is('...and offers no answer button', false, !!sheetHost.find(n => n.tag === 'button' && /^\s*answer\s*$/.test(n.textContent)));
+closeSheetFromTest();
 
 // ── the back gesture, which had nothing to pop before ───────────────────
 // Two forward moves were made to get here (project, then session), so there are two of our
@@ -1517,6 +1524,21 @@ is('a worker keeps kill', true, !!wacts && /kill/.test(wacts.textContent));
 is('...and stop + reclaim', true, !!wacts && /reclaim worktree/.test(wacts.textContent));
 is('...and rename', true, !!wacts && /rename/.test(wacts.textContent));
 is('...and pause', true, !!wacts && /pause/.test(wacts.textContent));
+closeSheetFromTest();
+
+// ── answer keys answers the prompt it SHOWS, and nothing else ──────────
+// api-fix's pane is a real permission dialog ("Do you want to create hello.txt?"). The
+// sheet reads the pane first and says what it is about to answer, with its options as
+// buttons; the lead's pane has no prompt, and there the sheet refuses to offer keys at all,
+// because keys with no prompt to receive them become a message.
+click(btnWith(/⋯/));
+click(sheetHost.find(n => n.tag === 'button' && /answer keys/.test(n.textContent)));
+is('the answer sheet names the prompt', true,
+   await until(() => !!sheetHost.firstChild && /asks to run/.test(sheetHost.firstChild.textContent), 4000));
+is('...its tool', true, /Create file/.test(sheetHost.firstChild.textContent));
+is('...and its options, as buttons', true,
+   !!sheetHost.find(n => n.tag === 'button' && /^\s*1\.\s+Yes\s*$/.test(n.textContent))
+   && !!sheetHost.find(n => n.tag === 'button' && /^\s*3\.\s+No\s*$/.test(n.textContent)));
 closeSheetFromTest();
 
 // ── the banner that pays for the new default ────────────────────────────

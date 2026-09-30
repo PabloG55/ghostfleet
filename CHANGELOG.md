@@ -30,6 +30,31 @@ the detail, and every entry here names the PR that carries the argument.
 - **Apple refused real pushes with HTTP 403.** The VAPID subject defaulted to
   `mailto:ghostfleet@<host>.local`; it is now the server's https origin, and a push service's
   refusal reason is logged instead of discarded. Restart `fleet-serve` to pick it up.
+- **A lead could approve a worker's tool call.** `fleet-answer` and the `fleet_answer` MCP
+  tool pressed any key into any pane, a permission dialog included. Now, when the pane is
+  showing one (claude, codex or opencode), an approving key is refused unless
+  `--human-approved` is passed — a flag the MCP tool cannot set — and the refusal prints the
+  dialog: the tool and the exact command. Declining still works. Jarvis's question quotes
+  the same dialog, and its owner's yes is what lets the approval through; the phone, where
+  the owner taps the answer, is unaffected. Needs a **new** Claude session to reach the MCP
+  server (see CLAUDE.md, "Deploying a change").
+- **A worker could merge its own PR.** `gh pr merge` (and the GitHub MCP merge tool) from a
+  session in a linked worktree is now refused by the PreToolUse guard; the lead merges.
+  Re-run `./install.sh` to widen the guard's matcher to Bash.
+- Both of the above are **settings**, off by default: *workers can merge* and *agents can
+  approve tool calls*. Turn either on for a project (`fleet-project set <project>
+  workers-merge on`, or the grid's `,` page) or for one worker that is the sub-master of
+  its task (`--session <worker>`); its siblings stay blocked, `fleet-rename` carries the
+  override and `fleet-stop` clears it. A worker cannot turn them on for itself, and Jarvis
+  ignores both. Every refusal names the setting that would allow it.
+- **A phone answer could land as a chat message.** The phone answered the prompt it had
+  drawn from its last pane poll; if that prompt was answered at the desk or timed out in
+  between, "1" and Enter went into the composer as a turn. The answer now carries the
+  prompt's fingerprint (kind, tool, command, options, from `/api/pane`), and
+  `fleet-answer --expect` re-captures just before sending and refuses "the prompt changed"
+  otherwise. An answer with no prompt on screen is refused. The phone's answer sheet shows
+  the prompt it is answering. **Relaunch the installed app** (client v47): an older one
+  sends no fingerprint, and its answers are refused with a message saying to reload.
 
 ## 0.4.0 — 2026-09-24
 

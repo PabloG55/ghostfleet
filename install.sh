@@ -704,10 +704,13 @@ wire_hooks() {
     # safe re-install rather than a second stanza racing the first.
     # The matcher is a regex over the tool name: EnterWorktree would move this session,
     # and Agent (Task in older builds) would do the work somewhere the fleet cannot see.
+    # Bash and the GitHub MCP merge tool are there for ONE question — is a worker in a
+    # linked worktree merging its own PR — and the guard leaves a non-merge Bash call
+    # before it has so much as started jq.
     | .hooks.PreToolUse = (
         [ (.hooks.PreToolUse // [])[]
           | select([.hooks[]?.command] | index($guard) | not) ]
-        + [ { matcher: "EnterWorktree|Agent|Task",
+        + [ { matcher: "EnterWorktree|Agent|Task|Bash|mcp__.*__merge_pull_request",
               hooks: [ { type: "command", command: $guard } ] } ] )
     | (if .mcpServers then .mcpServers |= del(.["ghostfleet"]) else . end)
     | (if (.mcpServers // {}) == {} then del(.mcpServers) else . end)

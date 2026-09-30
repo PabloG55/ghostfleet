@@ -115,6 +115,11 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.parked" "$FLEET_DIR/$SESSION.parked" \
 # per-session auto-nudge overrides (grid settings page) — drop them too, so a future
 # session that reuses this name doesn't silently inherit a stale explicit on/off.
 rm -f "$FLEET_DIR/$SOCK.$SESSION.notify-lead" "$FLEET_DIR/$SOCK.$SESSION.notify-lead-off" 2>/dev/null
+# the boundary overrides (lib/boundary.sh): a sub-master's "may merge / may approve" is
+# about THAT worker's task, and a session that reuses the name must start blocked.
+for _b in workers-merge agents-approve; do
+  rm -f "$FLEET_DIR/$SOCK.$SESSION.$_b" "$FLEET_DIR/$SOCK.$SESSION.$_b-off" 2>/dev/null
+done
 # a pending reply address (fleet-send --reply-to): the session that would have answered
 # is gone, and a name-reuser must not inherit a stranger's question to answer.
 rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to" "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null

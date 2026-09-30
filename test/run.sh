@@ -2807,7 +2807,7 @@ is "optional reclaim stays optional"       "1" "$(grep -cF 'fleet-stop [w1]' "$A
 is "optional all stays optional"           "1" "$(grep -cF 'fleet-inbox [--all]' "$AG/ran" || true)"
 is "optional prompt stays optional"        "1" "$(grep -cF 'fleet-resume [w1] [go]' "$AG/ran" || true)"
 is "a tool with no required args runs"     "1" "$(grep -cF 'fleet-list' "$AG/ran" || true)"
-is "empty text reaches fleet-answer"       "1" "$(grep -cF 'fleet-answer [w1] []' "$AG/ran" || true)"
+is "empty text reaches fleet-answer"       "1" "$(grep -cF 'fleet-answer [--] [w1] []' "$AG/ran" || true)"
 # and NOTHING else did — a refusal that still shelled out would show up here
 is "exactly the 8 valid calls ran"         "8" "$(grep -c . "$AG/ran" || true)"
 is "no command was handed 'undefined'"     "0" "$(grep -c undefined "$AG/ran" || true)"
@@ -2843,6 +2843,366 @@ if command -v tmux >/dev/null 2>&1; then
   tmux -L cfansempty kill-server 2>/dev/null
 else
   skip "fleet-answer empty text" "tmux missing"
+fi
+
+# ── 4a7c. an agent does not approve another agent's tool call ───────────────
+# fleet-answer presses raw keys, and fleet_answer hands that to an agent. Nothing asked
+# what the pane showed, so a lead could answer "1" to a worker's "Do you want to
+# proceed?" and approve a command no human had seen. lib/permission-dialog.mjs is the one
+# detector for "is this a permission dialog, and would these keys approve it".
+#
+# BOTH DIRECTIONS, AGAINST REAL PANES. Every fixture below was captured from a live CLI:
+# three agents' permission dialogs at full width and at 56 columns, AND the menus that
+# look exactly like them and must stay answerable — claude's folder trust, codex's trust
+# and update prompts, a usage-limit pane, idle and busy panes. A detector that said
+# "dialog" to everything would pass the first half and strand every limited worker; one
+# that said it to nothing would pass the second half and be the hole this closes.
+group "permission dialogs: detected on real panes, and only on those"
+if command -v node >/dev/null 2>&1; then
+  PD="$ROOT/lib/permission-dialog.mjs"
+  pdv() { local f="$1"; shift; node "$PD" "$@" < "$ROOT/test/fixtures/$f" >/dev/null 2>&1; echo $?; }
+  for f in claude-permission-dialog-sgr.txt claude-permission-bash.txt claude-permission-bash-56col.txt \
+           codex-approval.txt codex-approval-56col.txt opencode-permission.txt opencode-permission-56col.txt; do
+    is "$f: '1' would approve (11)"          "11" "$(pdv "$f" --text 1)"
+    is "$f: Enter would approve"             "11" "$(pdv "$f" --key Enter)"
+    is "$f: Escape declines (10)"            "10" "$(pdv "$f" --key Escape)"
+  done
+  # The "No" option is a decline where there is one to type; opencode's menu has no numbers,
+  # so a "3" there is just a keystroke and is not waved through.
+  for f in claude-permission-bash.txt claude-permission-dialog-sgr.txt codex-approval.txt codex-approval-56col.txt; do
+    is "$f: the No option's number declines" "10" "$(pdv "$f" --text 3)"
+  done
+  is "opencode: a number is not a decline"   "11" "$(pdv opencode-permission.txt --text 3)"
+  # codex binds letters as well as numbers: "(y)" on option 1 approves just the same.
+  is "codex: its letter shortcut approves"   "11" "$(pdv codex-approval.txt --text y)"
+  for f in claude-trust.txt codex-trust.txt codex-trust-folder.txt codex-update.txt claude-limit-hit.txt \
+           claude-idle.txt claude-busy.txt claude-idle-quoting-limit.txt codex-idle-home.txt opencode-idle.txt opencode-busy.txt; do
+    is "$f: not a permission dialog (0)"     "0"  "$(pdv "$f" --text 1)"
+  done
+  # A QUOTED dialog is history, not a question: the same Bash dialog, with an idle
+  # session's transcript and input box drawn after it, must read as no dialog.
+  PQ="$(mktemp)"; cat "$ROOT/test/fixtures/claude-permission-bash.txt" "$ROOT/test/fixtures/claude-idle.txt" > "$PQ"
+  is "a dialog above an input box is quoted"  "0" "$(node "$PD" --text 1 < "$PQ" >/dev/null 2>&1; echo $?)"
+  rm -f "$PQ"
+  # WHAT THE HUMAN IS SHOWN is the worker's own command, verbatim, per agent.
+  pdt() { node "$PD" --text 1 < "$ROOT/test/fixtures/$1" 2>/dev/null; }
+  is "claude: prints the exact command"      "1" "$([ "$(pdt claude-permission-bash.txt | grep -cF 'git log --oneline -1 && touch notes.txt')" -ge 1 ] && echo 1 || echo 0)"
+  is "...and names the tool"                 "1" "$([ "$(pdt claude-permission-bash.txt | grep -c '^claude · Bash command')" -ge 1 ] && echo 1 || echo 0)"
+  is "...at 56 columns too"                  "1" "$([ "$(pdt claude-permission-bash-56col.txt | grep -cF 'git log --oneline -1 && touch notes.txt')" -ge 1 ] && echo 1 || echo 0)"
+  is "claude file write: names the file"     "1" "$([ "$(pdt claude-permission-dialog-sgr.txt | grep -cF 'Do you want to create hello.txt?')" -ge 1 ] && echo 1 || echo 0)"
+  is "codex: prints the exact command"       "1" "$([ "$(pdt codex-approval.txt | grep -cF '$ touch /private/tmp/gf-cap/notes.txt')" -ge 1 ] && echo 1 || echo 0)"
+  is "opencode: prints the exact command"    "1" "$([ "$(pdt opencode-permission.txt | grep -cF '$ touch notes.txt')" -ge 1 ] && echo 1 || echo 0)"
+  is "...and the way to decline"             "1" "$([ "$(pdt claude-permission-bash.txt | grep -cF 'to decline: "3" (No) or --key Escape')" -ge 1 ] && echo 1 || echo 0)"
+else
+  skip "permission dialog detector" "node missing"
+fi
+
+# The same, through the verb, on a real pane: the keys that reach it are what matters.
+# A pane replays the captured dialog and then blocks on a line, so "the pane changed" is
+# a consequence of fleet-answer and not of time passing — the serve group's shape.
+group "fleet-answer refuses to approve a permission dialog"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  FA="$(mktemp -d)"
+  cat > "$FA/replay.sh" <<'SH'
+#!/bin/sh
+clear; cat "$1"; read -r answer; clear; printf 'ANSWERED [%s]\n' "$answer"; sleep 600
+SH
+  chmod +x "$FA/replay.sh"
+  fa_pane() {   # $1 session, $2 fixture — and wait until it is on screen
+    tmux -L cfansdlg kill-session -t "$1" 2>/dev/null
+    tmux -L cfansdlg new-session -d -s "$1" -x 100 -y 30 "$FA/replay.sh $ROOT/test/fixtures/$2" 2>/dev/null
+    local i=0; while [ "$i" -lt 60 ] && [ -z "$(tmux -L cfansdlg capture-pane -p -t "$1" 2>/dev/null | tr -d '[:space:]')" ]; do i=$((i+1)); sleep 0.1; done; sleep 0.2; }
+  fa_answered() { tmux -L cfansdlg capture-pane -p -t "$1" 2>/dev/null | grep -c "ANSWERED \[$2\]" || true; }
+  fa() { TMUX= "$ROOT/bin/fleet-answer" -s cfansdlg "$@" 2>&1; echo "rc=$?"; }
+  tmux -L cfansdlg kill-server 2>/dev/null
+
+  fa_pane d1 claude-permission-bash.txt
+  out="$(fa d1 1)"
+  is "an approving key is refused (rc 3)"     "1" "$(grep -c 'rc=3' <<< "$out" || true)"
+  is "...saying why"                          "1" "$(grep -c 'REFUSED .* PERMISSION dialog' <<< "$out" || true)"
+  is "...with the worker's exact command"     "1" "$([ "$(grep -cF 'git log --oneline -1 && touch notes.txt' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and how a human approves it"         "1" "$(grep -cF 'fleet-answer -s cfansdlg --human-approved d1 1' <<< "$out" || true)"
+  sleep 0.3
+  is "...and NOTHING reached the pane"        "0" "$(fa_answered d1 1)"
+  # A text that looks like the flag is text. This is the MCP's path: it passes `--`.
+  out="$(fa -- d1 --human-approved)"
+  is "a text of --human-approved is not the flag" "1" "$(grep -c 'rc=3' <<< "$out" || true)"
+  # THE OTHER DIRECTIONS: a decline gets through, and so does a human's yes.
+  out="$(fa d1 3)"
+  is "the No option is sent"                  "1" "$(grep -c 'declining the permission dialog' <<< "$out" || true)"
+  is "...and reaches the pane"                "1" "$(sleep 0.3; fa_answered d1 3)"
+  fa_pane d2 codex-approval.txt
+  out="$(fa d2 --key Escape)"
+  is "Escape is sent as a decline"            "1" "$(grep -c "sent keys: Escape" <<< "$out" || true)"
+  fa_pane d3 opencode-permission.txt
+  is "opencode Enter is refused"              "1" "$(fa d3 --key Enter | grep -c 'rc=3' || true)"
+  fa_pane d4 claude-permission-bash.txt
+  out="$(fa --human-approved d4 1)"
+  is "--human-approved sends the yes"         "1" "$(grep -c 'approving a permission dialog' <<< "$out" || true)"
+  is "...and it reaches the pane"             "1" "$(sleep 0.3; fa_answered d4 1)"
+  # AND THE MENUS THAT ARE NOT PERMISSION DIALOGS ANSWER AS BEFORE — a trust prompt and a
+  # limited worker are exactly what a lead is meant to unblock.
+  for f in claude-trust.txt codex-trust-folder.txt claude-limit-hit.txt claude-idle.txt; do
+    fa_pane d5 "$f"
+    fa d5 1 >/dev/null
+    is "$f: answered, no flag needed"         "1" "$(sleep 0.3; fa_answered d5 1)"
+  done
+  # NO NODE, NO DETECTOR — and that is treated as a dialog, not as "no dialog".
+  NN="$FA/nonode"; mkdir -p "$NN"
+  for c in tmux sh bash sed grep tail cat dirname readlink sleep; do p="$(command -v "$c")" && ln -sf "$p" "$NN/$c"; done
+  fa_pane d6 claude-idle.txt
+  out="$(PATH="$NN" TMUX= bash "$ROOT/bin/fleet-answer" -s cfansdlg d6 1 2>&1; echo "rc=$?")"
+  is "without node an approving key is refused" "1" "$(grep -c 'rc=3' <<< "$out" || true)"
+  is "...and says why"                         "1" "$(grep -c 'could not check this pane' <<< "$out" || true)"
+  tmux -L cfansdlg kill-server 2>/dev/null
+  rm -rf "$FA"
+else
+  skip "fleet-answer permission refusal" "tmux or node missing"
+fi
+
+# THE PHONE ANSWERS WHAT IT DREW, which may be gone. It polls the pane every couple of
+# seconds; the prompt on it can be answered at the desk or time out in between, and then
+# "1" and Enter land in the composer as a MESSAGE. So an answer carries the prompt's
+# fingerprint and fleet-answer --expect re-captures and compares just before send-keys.
+# The fingerprint is the detector's: kind, tool, command and options, whitespace dropped.
+group "prompt fingerprints: every kind, stable across a resize, distinct across prompts"
+if command -v node >/dev/null 2>&1; then
+  PD="$ROOT/lib/permission-dialog.mjs"
+  fpj() { node "$PD" --fingerprint < "$ROOT/test/fixtures/$1" 2>/dev/null; }
+  fpk() { fpj "$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);process.stdout.write(j?j[process.argv[1]]:"null")})' "$2"; }
+  for f in claude-permission-bash.txt codex-approval.txt opencode-permission.txt claude-permission-dialog-sgr.txt; do
+    is "$f: a permission prompt"              "permission" "$(fpk "$f" kind)"
+  done
+  for f in claude-trust.txt codex-trust.txt codex-trust-folder.txt; do
+    is "$f: a trust prompt"                   "trust" "$(fpk "$f" kind)"
+  done
+  is "codex-update.txt: a menu"               "menu"  "$(fpk codex-update.txt kind)"
+  for f in claude-idle.txt claude-busy.txt claude-limit-hit.txt claude-idle-quoting-limit.txt codex-idle-home.txt \
+           opencode-idle.txt opencode-busy.txt claude-composer-typed.txt pane-draft-multiline.txt; do
+    is "$f: no prompt at all"                 "null" "$(fpj "$f" | tr -d '\n')"
+  done
+  # A RESIZE IS NOT A CHANGE: the same dialog at 100 and 56 columns re-wraps (codex breaks a
+  # path mid-word), and the phone's poll and the answer can straddle one.
+  for a in claude-permission-bash codex-approval opencode-permission; do
+    is "$a: same fingerprint at 56 columns"   "$(fpk "$a.txt" fingerprint)" "$(fpk "$a-56col.txt" fingerprint)"
+  done
+  # ...and different prompts are different.
+  is "two permission dialogs differ"          "no" "$([ "$(fpk claude-permission-bash.txt fingerprint)" = "$(fpk claude-permission-dialog-sgr.txt fingerprint)" ] && echo yes || echo no)"
+  is "trust and update prompts differ"        "no" "$([ "$(fpk codex-trust-folder.txt fingerprint)" = "$(fpk codex-update.txt fingerprint)" ] && echo yes || echo no)"
+  is "the fingerprint carries the command"    "touch /private/tmp/gf-cap/notes.txt" "$(fpk codex-approval.txt command)"
+else
+  skip "prompt fingerprints" "node missing"
+fi
+
+group "fleet-answer --expect sends only to the prompt that was showing"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  EX="$(mktemp -d)"
+  cat > "$EX/replay.sh" <<'SH'
+#!/bin/sh
+clear; cat "$1"; read -r answer; clear; printf 'ANSWERED [%s]\n' "$answer"; sleep 600
+SH
+  chmod +x "$EX/replay.sh"
+  tmux -L cfansexp kill-server 2>/dev/null
+  ex_pane() { tmux -L cfansexp kill-session -t "$1" 2>/dev/null
+    tmux -L cfansexp new-session -d -s "$1" -x "${3:-100}" -y 30 "$EX/replay.sh $ROOT/test/fixtures/$2" 2>/dev/null
+    local i=0; while [ "$i" -lt 60 ] && [ -z "$(tmux -L cfansexp capture-pane -p -t "$1" 2>/dev/null | tr -d '[:space:]')" ]; do i=$((i+1)); sleep 0.1; done; sleep 0.2; }
+  ex_pane_has() { sleep 0.3; tmux -L cfansexp capture-pane -p -t "$1" 2>/dev/null | grep -c -- "$2" || true; }
+  exa() { TMUX= "$ROOT/bin/fleet-answer" -s cfansexp "$@" 2>&1; echo "rc=$?"; }
+  fpf() { node "$ROOT/lib/permission-dialog.mjs" --fingerprint < "$ROOT/test/fixtures/$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>process.stdout.write(JSON.parse(d)?.fingerprint||""))'; }
+  FP_TRUST="$(fpf codex-trust-folder.txt)"; FP_UPD="$(fpf codex-update.txt)"; FP_DLG="$(fpf claude-permission-bash.txt)"
+  # the same prompt: sent
+  ex_pane e1 codex-trust-folder.txt
+  is "the prompt that was showing is answered" "1" "$(exa --expect "$FP_TRUST" e1 1 | grep -c 'rc=0' || true)"
+  is "...and the keys reach it"               "1" "$(ex_pane_has e1 'ANSWERED \[1\]')"
+  # a different prompt took its place: refused, untouched
+  ex_pane e2 codex-update.txt
+  out="$(exa --expect "$FP_TRUST" e2 1)"
+  is "a different prompt is refused (rc 4)"   "1" "$(grep -c 'rc=4' <<< "$out" || true)"
+  is "...as 'the prompt changed'"             "1" "$(grep -c 'the prompt changed' <<< "$out" || true)"
+  is "...naming what is there now"            "1" "$(grep -c 'different prompt (menu' <<< "$out" || true)"
+  is "...and nothing reached the pane"        "0" "$(ex_pane_has e2 'ANSWERED')"
+  # NO PROMPT AT ALL — the desk answered it, and the composer is back. The keys must not
+  # become a message there. The pane is an idle session, whose composer would take them.
+  ex_pane e3 claude-idle.txt
+  out="$(exa --expect "$FP_DLG" --human-approved e3 1)"
+  is "no prompt on screen is refused"         "1" "$(grep -c 'rc=4' <<< "$out" || true)"
+  is "...saying it is not there any more"     "1" "$(grep -c 'not showing a prompt any more' <<< "$out" || true)"
+  is "...even with --human-approved"          "0" "$(ex_pane_has e3 'ANSWERED')"
+  is "an EMPTY expect is refused too"         "1" "$(exa --expect '' e3 1 | grep -c 'rc=4' || true)"
+  # the same dialog after a resize: still the same prompt
+  ex_pane e4 claude-permission-bash-56col.txt 56
+  is "a resized dialog still matches"         "1" "$(exa --expect "$FP_DLG" e4 3 | grep -c 'rc=0' || true)"
+  # --expect does not bypass the approval boundary: a matching fingerprint is not a yes
+  ex_pane e5 claude-permission-bash.txt
+  is "a matching fingerprint is still not a yes" "1" "$(exa --expect "$FP_DLG" e5 1 | grep -c 'rc=3' || true)"
+  # without --expect, the CLI answers as it always has
+  ex_pane e6 codex-update.txt
+  is "no --expect: the CLI is unchanged"      "1" "$(exa e6 2 | grep -c 'rc=0' || true)"
+  tmux -L cfansexp kill-server 2>/dev/null
+  rm -rf "$EX"
+else
+  skip "fleet-answer --expect" "tmux or node missing"
+fi
+
+# THE MCP CANNOT SET THE FLAG. fleet_answer's arguments go after `--`, so no text or
+# session it is handed can be --human-approved; and the only ways the flag is added are a
+# Jarvis owner-grant and the phone daemon's opts.human — neither of which is an argument.
+group "fleet_answer never passes --human-approved on its own"
+if command -v node >/dev/null 2>&1; then
+  MA="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$MA/mcp" "$MA/bin" "$MA/lib" "$MA/home"
+  cp "$ROOT"/lib/*.mjs "$MA/lib/"; cp "$ROOT"/mcp/*.mjs "$MA/mcp/"
+  printf '#!/bin/sh\nprintf "%%s" fleet-answer >> "%s/ran"; for a in "$@"; do printf " [%%s]" "$a" >> "%s/ran"; done; printf "\\n" >> "%s/ran"\n' "$MA" "$MA" "$MA" > "$MA/bin/fleet-answer"
+  chmod +x "$MA/bin/fleet-answer"; : > "$MA/ran"
+  HOME="$MA/home" TMUX= CLAUDE_FLEET_SOCK=cfmaflag node --input-type=module -e "
+    const m = await import('$MA/mcp/fleet-dispatch.mjs');
+    m.callTool('fleet_answer', { session: 'w1', text: '--human-approved' });
+    m.callTool('fleet_answer', { session: '--human-approved', text: '1' });
+    await m.callToolAsync('fleet_answer', { session: 'w1', text: '1' });
+    await m.callToolAsync('fleet_answer', { session: 'w1', text: '2' }, { human: true });" 2>/dev/null
+  is "a text of the flag goes after --"       "1" "$(grep -cxF 'fleet-answer [--] [w1] [--human-approved]' "$MA/ran" || true)"
+  is "so does a session of it"                "1" "$(grep -cxF 'fleet-answer [--] [--human-approved] [1]' "$MA/ran" || true)"
+  is "the async path adds nothing either"     "1" "$(grep -cxF 'fleet-answer [--] [w1] [1]' "$MA/ran" || true)"
+  is "only opts.human adds the flag"          "1" "$(grep -cxF 'fleet-answer [--human-approved] [--] [w1] [2]' "$MA/ran" || true)"
+  is "...and on no other call"                "1" "$(grep -c '^fleet-answer \[--human-approved\]' "$MA/ran" || true)"
+  rm -rf "$MA"
+else
+  skip "fleet_answer flag" "node missing"
+fi
+
+# JARVIS AND fleet-answer AGREE, because they read one detector. Jarvis already asks its
+# owner before any fleet_answer; on a permission dialog the question now quotes the dialog,
+# and his yes is what lets the approving key through fleet-answer's refusal. Run for real:
+# Jarvis's master on a cf-* socket, a dialog pane beside it, the real bin/fleet-answer.
+group "Jarvis: the owner's yes is what approves a permission dialog"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  JA="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$JA/.config/ghostfleet" "$JA/.claude/fleet" "$JA/j"
+  printf 'name=jarvis\nsock=cf-jaans\ncfg=%s/.claude\npath=%s/j\n' "$JA" "$JA" > "$JA/.config/ghostfleet/jarvis"
+  cat > "$JA/run.mjs" <<EOF
+const m = await import('$ROOT/mcp/fleet-dispatch.mjs');
+const J = await import('$ROOT/lib/jarvis.mjs');
+const fs = await import('node:fs');
+const { execFileSync } = await import('node:child_process');
+const cap = () => execFileSync('tmux', ['-L', 'cf-jaans', 'capture-pane', '-p', '-t', 'r'], { encoding: 'utf8' });
+const r1 = m.callTool('fleet_answer', { session: 'r', text: '1' });
+fs.writeFileSync('$JA/asked.txt', String(r1.text ?? r1));
+// Jarvis's own Bash door, with every setting on: fleet-answer must still refuse it.
+const { spawnSync } = await import('node:child_process');
+const b = spawnSync('$ROOT/bin/fleet-answer', ['r', '1'], { encoding: 'utf8' });
+fs.writeFileSync('$JA/bash.txt', 'rc=' + b.status + '\n' + b.stderr);
+await new Promise(r => setTimeout(r, 400));
+fs.writeFileSync('$JA/before.txt', cap());
+const id = (String(r1.text).match(/proposal (\S+?)[ .]/) || [])[1];
+J.answer(id, true, 'phone');
+m.callTool('fleet_answer', { session: 'r', text: '1' });
+await new Promise(r => setTimeout(r, 400));
+fs.writeFileSync('$JA/after.txt', cap());
+EOF
+  # JARVIS IGNORES BOTH SETTINGS: turned on for its project AND its master, and nothing
+  # below may change because of it — its confirm-list stays on.
+  for b in agents-approve workers-merge; do : > "$JA/.claude/fleet/cf-jaans.$b"; : > "$JA/.claude/fleet/cf-jaans.master.$b"; done
+  tmux -L cf-jaans kill-server 2>/dev/null
+  tmux -L cf-jaans new-session -d -s r -x 100 -y 30 "sh -c 'clear; cat $ROOT/test/fixtures/claude-permission-bash.txt; read a; clear; echo ANSWERED \$a; sleep 600'" 2>/dev/null
+  i=0; while [ "$i" -lt 60 ] && ! grep -q 'Do you want to proceed' <<< "$(tmux -L cf-jaans capture-pane -p -t r 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
+  tmux -L cf-jaans new-session -d -s master "env HOME=$JA PATH=$PATH node $JA/run.mjs > $JA/log 2>&1; touch $JA/done; sleep 60" 2>/dev/null
+  i=0; while [ "$i" -lt 150 ] && [ ! -f "$JA/done" ]; do i=$((i+1)); sleep 0.1; done
+  is "the question quotes the worker's command" "1" "$([ "$(grep -cF 'git log --oneline -1 && touch notes.txt' "$JA/asked.txt" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
+  is "...and calls it a permission dialog"      "1" "$(grep -c "approve r's permission dialog" "$JA/asked.txt" 2>/dev/null || true)"
+  is "before his yes nothing reached the pane"  "0" "$(grep -c 'ANSWERED' "$JA/before.txt" 2>/dev/null || true)"
+  is "...with every setting on, Jarvis's Bash fleet-answer is refused" "1" "$(grep -c '^rc=3' "$JA/bash.txt" 2>/dev/null || true)"
+  is "...and told the setting is not its to use"   "1" "$(grep -c 'never applies to you' "$JA/bash.txt" 2>/dev/null || true)"
+  is "after it, the yes did"                    "1" "$(grep -c 'ANSWERED 1' "$JA/after.txt" 2>/dev/null || true)"
+  tmux -L cf-jaans kill-server 2>/dev/null
+  rm -rf "$JA"
+else
+  skip "Jarvis permission answer" "tmux or node missing"
+fi
+
+# "AGENTS CAN APPROVE TOOL CALLS" IS A SETTING: off by default (the group above), on for a
+# project, or on for ONE calling session — the sub-master of its task — while a sibling in
+# the same fleet stays blocked. The caller is whoever runs fleet-answer, read from its live
+# $TMUX, so the session cases run fleet-answer from INSIDE a real pane on the same socket.
+group "agents can approve: project-on and session-on, and only that session"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  AS="$(cd "$(mktemp -d)" && pwd -P)"; ASF="$AS/fleet"; mkdir -p "$ASF"
+  cat > "$AS/replay.sh" <<'SH'
+#!/bin/sh
+clear; cat "$1"; read -r answer; clear; printf 'ANSWERED [%s]\n' "$answer"; sleep 600
+SH
+  chmod +x "$AS/replay.sh"
+  tmux -L cf-ansset kill-server 2>/dev/null
+  as_pane() { tmux -L cf-ansset kill-session -t "$1" 2>/dev/null
+    tmux -L cf-ansset new-session -d -s "$1" -x 100 -y 30 "$AS/replay.sh $ROOT/test/fixtures/claude-permission-bash.txt" 2>/dev/null
+    local i=0; while [ "$i" -lt 60 ] && ! grep -q 'Do you want to proceed' <<< "$(tmux -L cf-ansset capture-pane -p -t "$1" 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done; }
+  as_answered() { sleep 0.3; tmux -L cf-ansset capture-pane -p -t "$1" 2>/dev/null | grep -c "ANSWERED \[1\]" || true; }
+  # Run fleet-answer AS session $1 (a real pane on cf-ansset), answering $2 with "1".
+  as_from() { local me="$1" tgt="$2"; rm -f "$AS/$me.done"
+    tmux -L cf-ansset kill-session -t "$me" 2>/dev/null
+    tmux -L cf-ansset new-session -d -s "$me" "env CLAUDE_FLEET_DIR=$ASF HOME=$AS $ROOT/bin/fleet-answer $tgt 1 > $AS/$me.out 2>&1; echo rc=\$? >> $AS/$me.out; touch $AS/$me.done; sleep 60" 2>/dev/null
+    local i=0; while [ "$i" -lt 100 ] && [ ! -f "$AS/$me.done" ]; do i=$((i+1)); sleep 0.1; done; }
+  # project on — from a plain terminal, so only the target project's setting can apply
+  : > "$ASF/cf-ansset.agents-approve"
+  as_pane t1
+  out="$(env -u TMUX CLAUDE_FLEET_DIR="$ASF" HOME="$AS" "$ROOT/bin/fleet-answer" -s cf-ansset t1 1 2>&1; echo "rc=$?")"
+  is "project on: an approving key is sent"      "1" "$(grep -c 'agents can approve tool calls" is on' <<< "$out" || true)"
+  is "...and reaches the pane"                   "1" "$(as_answered t1)"
+  rm -f "$ASF/cf-ansset.agents-approve"
+  # session on — the sub-master may, its sibling may not
+  : > "$ASF/cf-ansset.sub.agents-approve"
+  as_pane t2; as_from sub t2
+  is "session on: the sub-master's yes is sent"  "1" "$(grep -c 'rc=0' "$AS/sub.out" || true)"
+  is "...and reaches the pane"                   "1" "$(as_answered t2)"
+  as_pane t3; as_from sib t3
+  is "...its sibling is still refused"           "1" "$(grep -c 'rc=3' "$AS/sib.out" || true)"
+  is "...and nothing reached that pane"          "0" "$(as_answered t3)"
+  is "...and is told the setting that would allow it" "1" "$(grep -c '"agents can approve tool calls" is off' "$AS/sib.out" || true)"
+  is "...for itself, by session"                 "1" "$(grep -cF 'fleet-project set -s cf-ansset agents-approve on --session sib' "$AS/sib.out" || true)"
+  # a session override of OFF beats a project that is on
+  : > "$ASF/cf-ansset.agents-approve"; : > "$ASF/cf-ansset.sib.agents-approve-off"
+  as_pane t4; as_from sib t4
+  is "a session's off beats the project's on"    "1" "$(grep -c 'rc=3' "$AS/sib.out" || true)"
+  tmux -L cf-ansset kill-server 2>/dev/null
+  rm -rf "$AS"
+else
+  skip "agents-approve setting" "tmux or node missing"
+fi
+
+# THE SETTINGS HAVE ONE WRITER AND FOLLOW THE SESSION: fleet-project writes them (the grid
+# calls it), fleet-rename carries a session's override to its new name, and fleet-stop
+# clears it, so a name reused later starts blocked rather than inheriting a sub-master's.
+group "boundary settings: set, carried by rename, cleared by stop"
+if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  BS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$BS/home/.config/ghostfleet" "$BS/repo"
+  printf 'acme-api\t%s\n' "$BS" > "$BS/home/.config/ghostfleet/projects"
+  BSF="$BS/home/.claude/fleet"
+  fp() { HOME="$BS/home" "$ROOT/bin/fleet-project" "$@" 2>&1; }
+  fp set acme-api workers-merge on >/dev/null
+  is "project on writes <sock>.<setting>"         "1" "$([ -f "$BSF/cf-acme-api.workers-merge" ] && echo 1 || echo 0)"
+  is "get reads it back"                          "1" "$(fp get acme-api | grep -cE '^workers-merge +on' || true)"
+  is "...and the other stays off by default"      "1" "$(fp get acme-api | grep -cE '^agents-approve +off' || true)"
+  fp set acme-api workers-merge off >/dev/null
+  is "project off removes it"                     "0" "$([ -f "$BSF/cf-acme-api.workers-merge" ] && echo 1 || echo 0)"
+  fp set -s cf-acme-api agents-approve on --session api-fix >/dev/null
+  is "by socket, for one session"                 "1" "$([ -f "$BSF/cf-acme-api.api-fix.agents-approve" ] && echo 1 || echo 0)"
+  is "...which only that session resolves to"     "1" "$(fp get acme-api --session api-fix | grep -cE '^agents-approve +on' || true)"
+  is "...and a sibling does not"                  "1" "$(fp get acme-api --session docs-pass | grep -cE '^agents-approve +off' || true)"
+  is "a bad setting name is refused"              "1" "$(fp set acme-api merge-anything on | grep -c usage || true)"
+  git init -q -b main "$BS/repo" 2>/dev/null
+  git -C "$BS/repo" config user.email t@t; git -C "$BS/repo" config user.name t
+  : > "$BS/repo/f"; git -C "$BS/repo" add f; git -C "$BS/repo" commit -qm init 2>/dev/null
+  git -C "$BS/repo" worktree add -q "$BS/api-fix" -b api-fix 2>/dev/null
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s api-fix -c "$BS/api-fix" "sleep 120" 2>/dev/null
+  : > "$BSF/cf-acme-api.api-fix.workers-merge"
+  env -u TMUX CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-rename" -s cf-acme-api api-fix api-retry >/dev/null 2>&1
+  is "rename carries the approve override"        "1" "$([ -f "$BSF/cf-acme-api.api-retry.agents-approve" ] && echo 1 || echo 0)"
+  is "...and the merge override"                  "1" "$([ -f "$BSF/cf-acme-api.api-retry.workers-merge" ] && echo 1 || echo 0)"
+  is "...leaving nothing under the old name"      "0" "$(ls "$BSF" | grep -c '^cf-acme-api\.api-fix\.' || true)"
+  env -u TMUX -u CLAUDE_FLEET_SLOT CLAUDE_FLEET_DIR="$BSF" "$ROOT/bin/fleet-stop" -s cf-acme-api api-retry >/dev/null 2>&1
+  is "stop clears the session's overrides"        "0" "$(ls "$BSF" | grep -cE '^cf-acme-api\.api-retry\.(workers-merge|agents-approve)' || true)"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  rm -rf "$BS"
+else
+  skip "boundary settings lifecycle" "tmux or git missing"
 fi
 
 # ── 4a8. dev-stack slots ─────────────────────────────────────────────────────
@@ -3510,6 +3870,98 @@ else
   skip "EnterWorktree guard" "git or jq missing"
 fi
 
+# ── 4a10b1. a worker does not merge its own PR ───────────────────────────────
+# The lead scans a worker's PR and merges it. That lived in the brief, and a worker that
+# saw a green check merged its own anyway. So the guard refuses the merge from a LINKED
+# worktree — and the directions that matter as much: the lead in the main checkout merges
+# freely, a worker's other gh/git calls pass, and a session outside any fleet is untouched.
+group "a worker in a linked worktree cannot merge a PR"
+if command -v git >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  WM="$(cd "$(mktemp -d)" && pwd -P)"
+  git init -q -b main "$WM/repo" 2>/dev/null
+  git -C "$WM/repo" config user.email t@t; git -C "$WM/repo" config user.name t
+  : > "$WM/repo/f"; git -C "$WM/repo" add f; git -C "$WM/repo" commit -qm init 2>/dev/null
+  git -C "$WM/repo" worktree add -q "$WM/wt-a" -b wt-a 2>/dev/null
+  # Clean env, as the groups beside this: the suite may itself run inside a fleet session,
+  # and an inherited CLAUDE_PROJECT_DIR naming a linked worktree would decide every case.
+  mg() { local cwd="$1" cmd="$2"; shift 2
+    MOUT="$(jq -nc --arg c "$cmd" --arg d "$cwd" '{hook_event_name:"PreToolUse",tool_name:"Bash",cwd:$d,tool_input:{command:$c}}' \
+      | env -u TMUX -u CLAUDE_FLEET_SOCK -u CLAUDE_PROJECT_DIR "$@" bash "$ROOT/hooks/fleet-guard.sh" 2>&1)"; MRC=$?; }
+  mt() { local cwd="$1" tool="$2"; shift 2
+    MOUT="$(jq -nc --arg t "$tool" --arg d "$cwd" '{hook_event_name:"PreToolUse",tool_name:$t,cwd:$d,tool_input:{owner:"o",repo:"r",pullNumber:12}}' \
+      | env -u TMUX -u CLAUDE_FLEET_SOCK -u CLAUDE_PROJECT_DIR "$@" bash "$ROOT/hooks/fleet-guard.sh" 2>&1)"; MRC=$?; }
+
+  mg "$WM/wt-a" 'gh pr merge 12 --squash' CLAUDE_FLEET_SOCK=cf-x
+  is "gh pr merge from a worker is refused"     "2" "$MRC"
+  is "...saying the lead merges"                "1" "$(grep -c 'the LEAD merges' <<< "$MOUT" || true)"
+  is "...and what to do instead"                "1" "$(grep -c 'report the PR number' <<< "$MOUT" || true)"
+  mg "$WM/wt-a" 'gh -R acme/acme-api pr merge 12 --auto' CLAUDE_FLEET_SOCK=cf-x
+  is "...with flags before pr, and --auto"      "2" "$MRC"
+  mg "$WM/wt-a" 'gh api -X PUT repos/acme/acme-api/pulls/12/merge' CLAUDE_FLEET_SOCK=cf-x
+  is "...the REST merge endpoint too"           "2" "$MRC"
+  mg "$WM/wt-a" $'git push &&\n  gh pr merge 12' CLAUDE_FLEET_SOCK=cf-x
+  is "...split across lines"                    "2" "$MRC"
+  # cd-ing into the main checkout is not a way round it: the session STARTED in the worktree.
+  mg "$WM/repo" 'gh pr merge 12' CLAUDE_FLEET_SOCK=cf-x CLAUDE_PROJECT_DIR="$WM/wt-a"
+  is "...from a worker that cd'd to the main checkout" "2" "$MRC"
+  mt "$WM/wt-a" mcp__github__merge_pull_request CLAUDE_FLEET_SOCK=cf-x
+  is "the GitHub MCP merge tool is refused"     "2" "$MRC"
+
+  # ── the directions that prove it is not "refuse gh" ──
+  mg "$WM/repo" 'gh pr merge 12 --squash' CLAUDE_FLEET_SOCK=cf-x CLAUDE_PROJECT_DIR="$WM/repo"
+  is "the lead in the main checkout merges"     "0" "$MRC"
+  mt "$WM/repo" mcp__github__merge_pull_request CLAUDE_FLEET_SOCK=cf-x
+  is "...with the MCP tool too"                 "0" "$MRC"
+  for c in 'gh pr create --base staging --fill' 'gh pr view 12 --json mergeable' 'git merge origin/staging' 'gh pr checks 12'; do
+    mg "$WM/wt-a" "$c" CLAUDE_FLEET_SOCK=cf-x
+    is "a worker may still: $c"                 "0" "$MRC"
+  done
+  mg "$WM/wt-a" 'gh pr merge 12'
+  is "outside any fleet it is not ours to refuse" "0" "$MRC"
+
+  # THE INSTALLED MATCHER must route Bash and the MCP tool here at all, or none of the
+  # above ever runs. Read out of install.sh, and matched the way Claude Code matches it.
+  MM="$(grep -o 'matcher: "EnterWorktree[^"]*"' "$ROOT/install.sh" | head -1 | sed 's/^matcher: "//; s/"$//')"
+  for t in EnterWorktree Agent Task Bash mcp__github__merge_pull_request; do
+    is "the installed matcher sends $t here"    "1" "$(grep -cxE "$MM" <<< "$t" || true)"
+  done
+  is "...and not Read"                          "0" "$(grep -cxE "$MM" <<< "Read" || true)"
+
+  # ── "workers can merge" is a SETTING: default blocks (above), project-on allows,
+  # session-on allows only that session, and a worker cannot flip it. The session name is
+  # CLAUDE_FLEET_SLOT here because there is no tmux server behind cf-x to ask.
+  WF="$WM/fleet"; mkdir -p "$WF"
+  mgs() { local sess="$1" cmd="$2"; shift 2; mg "$WM/wt-a" "$cmd" CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_DIR="$WF" CLAUDE_FLEET_SLOT="$sess" "$@"; }
+  mgs w1 'gh pr merge 12'
+  is "default: off, the worker is refused"      "2" "$MRC"
+  is "...and the refusal names the setting"     "1" "$(grep -c '"workers can merge" is off' <<< "$MOUT" || true)"
+  is "...and how to turn it on, project-wide"   "1" "$([ "$(grep -cE 'fleet-project set -s cf-x workers-merge on +# the whole project' <<< "$MOUT")" -ge 1 ] && echo 1 || echo 0)"
+  is "...or for this session"                   "1" "$(grep -cF 'fleet-project set -s cf-x workers-merge on --session w1' <<< "$MOUT" || true)"
+  : > "$WF/cf-x.workers-merge"
+  mgs w1 'gh pr merge 12';  is "project on: a worker may merge"          "0" "$MRC"
+  mgs w2 'gh pr merge 12';  is "...any worker in it"                     "0" "$MRC"
+  : > "$WF/cf-x.w2.workers-merge-off"
+  mgs w2 'gh pr merge 12';  is "...except one whose session says off"    "2" "$MRC"
+  rm -f "$WF/cf-x.workers-merge" "$WF/cf-x.w2.workers-merge-off"
+  : > "$WF/cf-x.w1.workers-merge"
+  mgs w1 'gh pr merge 12';  is "session on: the sub-master may merge"    "0" "$MRC"
+  mgs w2 'gh pr merge 12';  is "...its sibling stays blocked"            "2" "$MRC"
+  mt "$WM/wt-a" mcp__github__merge_pull_request CLAUDE_FLEET_SOCK=cf-x CLAUDE_FLEET_DIR="$WF" CLAUDE_FLEET_SLOT=w1
+  is "...the MCP merge tool follows the same setting" "0" "$MRC"
+  rm -f "$WF/cf-x.w1.workers-merge"
+  # A WORKER DOES NOT GRANT ITSELF, by command or by marker — and the lead may.
+  mgs w1 'fleet-project set -s cf-x workers-merge on --session w1'
+  is "a worker cannot turn the setting on"      "2" "$MRC"
+  is "...and is told who can"                   "1" "$(grep -c 'does not change its own boundaries' <<< "$MOUT" || true)"
+  mgs w1 "touch $WF/cf-x.w1.agents-approve"
+  is "...nor write the marker by hand"          "2" "$MRC"
+  mg "$WM/repo" 'fleet-project set -s cf-x workers-merge on --session w1' CLAUDE_FLEET_SOCK=cf-x
+  is "the lead in the main checkout may set it" "0" "$MRC"
+  rm -rf "$WM"
+else
+  skip "worker merge guard" "git or jq missing"
+fi
+
 # ── 4a10b2. a subagent is not a worker ───────────────────────────────────────
 # The Agent tool (Task in older builds) does the work INSIDE the lead's own
 # conversation. It WORKS, which is why it goes unnoticed — and the fleet can see none
@@ -3742,6 +4194,10 @@ PYX
 )" "$(wc -c < "$OC/contract" 2>/dev/null | tr -d ' ')"
   is "...and it is about OBSERVING"           "1" "$(contracthas 'state what you OBSERVED')"
   is "...and it names the test-suite trap"    "1" "$(contracthas 'not observing the thing you changed')"
+  # The two boundaries the tools enforce, said where every session reads them first, so a
+  # refusal from fleet-guard.sh or fleet-answer is the expected answer and not a puzzle.
+  is "...and says a worker never merges"      "1" "$(contracthas 'linked worktree never merges a PR')"
+  is "...and that nobody approves for another" "1" "$(contracthas 'no session approves a tool call another session')"
   # Three clauses, three measurements, asserted separately — a contract that silently
   # lost one would still pass a test that only asked "is there a system prompt".
   #   receipt:    30 of 50 measurable re-reports had NO file changed between the two
@@ -9473,6 +9929,7 @@ if sv_start verbs; then
   is "send needs no passkey"                 "200" "$(pf send.ok verbs)"
   is "...and reaches another project too"    "200" "$(pf send.other verbs)"
   is "answer needs no passkey"               "200" "$(pf answer.ok verbs)"
+  is "an answer that names no prompt is refused" "409" "$(pf answer.noExpect verbs)"
   is "spawn with no assertion is refused"    "401" "$(pf spawn.noAssertion verbs)"
   is "...asking for one at the action"       "1"   "$(pb spawn.noAssertion verbs | grep -c 'X-Fleet-Assertion' || true)"
   is "spawn with a forged assertion"         "401" "$(pf spawn.badAssertion verbs)"
@@ -9899,11 +10356,26 @@ else
   is "the other fleet's 'dlg' is its own"    "1"   "$(pnb pane.otherFleet | grep -c 'WRONG-FLEET-PANE' || true)"
   is "...and not this fleet's dialog"        "0"   "$(pnb pane.otherFleet | grep -c 'Do you want to create' || true)"
 
+  # ── 1b. what the pane is waiting on, and the fingerprint an answer must echo ─
+  is "the pane names its prompt"             "1"   "$(pnb pane.dialog | grep -c '"prompt":{"kind":"permission"' || true)"
+  is "...with a fingerprint"                 "1"   "$(pnb pane.dialog | grep -cE '"fingerprint":"[0-9a-f]{16}"' || true)"
   # ── 2. answer keys ─────────────────────────────────────────────────────────
+  # A STALE FINGERPRINT — the phone drew a prompt that is not the one on screen — is
+  # refused as "the prompt changed", and the pane is exactly as it was: still the dialog,
+  # and no stray keys typed into it.
+  is "a stale fingerprint is refused"        "409" "$(pnf pane.stale)"
+  is "...as 'the prompt changed'"            "1"   "$(pnb pane.stale | grep -c 'the prompt changed' || true)"
+  is "...flagged for the phone to re-poll"   "1"   "$(pnb pane.stale | grep -c '"changed":true' || true)"
+  is "...and the dialog is untouched"        "1"   "$(pnb pane.afterStale | grep -c 'Do you want to create' || true)"
+  is "...with nothing typed into it"         "0"   "$(pnb pane.afterStale | grep -c 'Z8' || true)"
   is "answer keys is accepted"               "200" "$(pnf pane.answer)"
   # ── 3. ...and the pane it showed has changed ───────────────────────────────
   is "the dialog is gone from the pane"      "0"   "$(pnb pane.after | grep -c 'Do you want to create' || true)"
   is "...and the answer landed as sent"      "1"   "$(pnb pane.after | grep -c 'ANSWERED \[1\]' || true)"
+  # THE RACE ITSELF: the same answer again once the prompt is gone — keys for a dialog must
+  # never become a message in whatever replaced it.
+  is "an answer to a prompt that has gone is refused" "409" "$(pnf pane.answerGone)"
+  is "...and nothing reached the pane"       "0"   "$(pnb pane.afterGone | grep -c 'Z9' || true)"
 
   # ── the endpoint's edges, each refused by name ─────────────────────────────
   is "no session is refused"                 "400" "$(pnf pane.noSession)"
@@ -11407,10 +11879,16 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command
   # ── the Bash door: merge and push are shell commands ────────────────────────
   JPANE="$(tmux -L cf-jarvis display-message -p -t master '#{pane_id}')"
   HPANE="$(tmux -L cf-jarvis display-message -p -t helper '#{pane_id}')"
+  # A HERE-STRING, NOT A PIPE. With no Jarvis marker the guard exits BEFORE it reads stdin,
+  # so a `jq | guard` writer can hit a closed pipe: jq exits 2 on the EPIPE (141 if the
+  # signal gets it first), and pipefail makes that the pipeline's status — the guard's
+  # clean 0 read as a refusal. Which one wins is a race with the pipe buffer, so it went red
+  # on one macOS runner and green everywhere else; a 240KB command reproduces it every time.
+  # CLAUDE.md's pipefail entry, arriving through a hook instead of a grep.
   guard() {            # $1 = pane to run as, $2 = the command -> "rc|first line of stderr"
     local e rc
-    e="$(jq -n --arg c "$2" '{hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c}}' \
-      | HOME="$JC/home" TMUX="$JSP,1,0" TMUX_PANE="$1" "$ROOT/hooks/jarvis-guard.sh" 2>&1 >/dev/null)"; rc=$?
+    e="$(HOME="$JC/home" TMUX="$JSP,1,0" TMUX_PANE="$1" "$ROOT/hooks/jarvis-guard.sh" 2>&1 >/dev/null \
+      <<< "$(jq -n --arg c "$2" '{hook_event_name:"PreToolUse",tool_name:"Bash",tool_input:{command:$c}}')")"; rc=$?
     printf '%s|%s' "$rc" "$(head -1 <<< "$e")"
   }
   is "gh pr merge is held for a yes"               "2" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
@@ -11431,8 +11909,19 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command
   is "a merge through gh api is held"              "1" "$(guard "$JPANE" 'gh api -X PUT repos/o/r/pulls/1/merge' | grep -c 'confirm-list' || true)"
   is "keys into ANOTHER fleet's pane are held"     "1" "$(guard "$JPANE" 'tmux -L cf-acme-api send -t api-fix 2 Enter' | grep -c 'confirm-list' || true)"
   is "the same merge from another session passes"  "0" "$(guard "$HPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  # JARVIS IGNORES THE BOUNDARY SETTINGS: both on, for its project and its master, and its
+  # confirm-list still holds the merge.
+  mkdir -p "$JC/home/.claude/fleet"
+  for b in workers-merge agents-approve; do : > "$JC/home/.claude/fleet/cf-jarvis.$b"; : > "$JC/home/.claude/fleet/cf-jarvis.master.$b"; done
+  is "with both settings on, Jarvis's merge is still held" "2" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  rm -f "$JC/home/.claude/fleet"/cf-jarvis.*workers-merge "$JC/home/.claude/fleet"/cf-jarvis.*agents-approve
   rm -f "$JC/home/.config/ghostfleet/jarvis"
   is "with no Jarvis marker nothing is guarded"    "0" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  # ...and deterministically: a command no pipe buffer holds, which is what turned the row
+  # above red on a runner with a small one. The guard's answer, not the writer's, is what
+  # this reads.
+  is "...even for a command bigger than any pipe buffer" "0" \
+     "$(guard "$JPANE" "gh pr merge 12 $(head -c 240000 /dev/zero | tr '\0' x)" | cut -d'|' -f1)"
   tmux -L cf-jarvis kill-server 2>/dev/null
   rm -rf "$JC"
 else

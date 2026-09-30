@@ -23,6 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readMarker, isJarvisSelf, mcpConfirmSpec, gate } from '../lib/jarvis.mjs';
+import { permissionDialog, approves } from '../lib/permission-dialog.mjs';
 
 export const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin');
 export const HOME = os.homedir();
@@ -219,8 +220,8 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" } }, additionalProperties: false } },
   { name: 'fleet_inbox', description: "Drain the lead's attention feed: worker 'need-you' events (permission / usage-limit / real questions), governor park/resume, and answers relayed back from sessions you asked with fleet_send reply_to that could not message you directly (the usual case now is a direct message in the conversation, so a missing ANSWERED row is not a missing answer). One call replaces polling every sibling — shows only what is new since last call. Pass `project` to drain ANOTHER project's feed instead of your own.",
     inputSchema: { type: 'object', properties: { all: { type: 'boolean', description: 'show the whole inbox instead of only new entries' }, project: { type: 'string', description: "another project's fleet to read (name from fleet_projects); omit for your own — your relayed answers arrive in YOUR OWN inbox, so omit it for those" } }, additionalProperties: false } },
-  { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a permission dialog, a "reached usage limit — retry?", a trust prompt (e.g. text "2"). Use this to unblock a worker; use fleet_send for normal task prompts.',
-    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
+  { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a "reached usage limit — retry?", a trust prompt, any menu (e.g. text "2"). Use this to unblock a worker; use fleet_send for normal task prompts. A PERMISSION dialog (the worker asking to run a tool) is the exception: this tool may DECLINE one — send the number of its "No" option — but any approving key is REFUSED, because an agent does not approve another agent\'s tool call — unless the project (or your own session) has the setting "agents can approve tool calls" on, which the refusal names. The refusal quotes the dialog, the tool and the exact command: show that to the human and let them approve it (fleet-answer --human-approved in their own terminal, or the phone).',
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, expect: { type: 'string', description: 'optional: the fingerprint of the prompt you are answering (served by /api/pane as prompt.fingerprint). When given, the keys are sent only if that same prompt is still on screen; otherwise it is refused as "the prompt changed"' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
   { name: 'fleet_pause', description: "Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work. Can't park 'master': it is the fleet's lead, and a fleet whose lead is off dispatches nothing (the governor excludes it for the same reason).",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_wake', description: "Wake a session that fleet-hibernate put to sleep: start its process again and replay its conversation by id. Different from fleet_resume, which un-parks a session that never stopped running — this one's process is gone. Fails loudly if the folder was never trusted or the transcript does not replay inside the timeout.",
@@ -408,9 +409,16 @@ export function plan(name, a = {}) {
                  { cwd: t ? checkoutOf(t) : undefined });
     case 'fleet_worktrees': return run('fleet-worktrees', [], t, { cwd: t ? checkoutOf(t) : undefined });
     case 'fleet_inbox': return run('fleet-inbox', a.all ? ['--all'] : [], t);
+    // `--` BEFORE THE POSITIONALS, always. fleet-answer takes --human-approved, and a text
+    // or session of "--human-approved" handed over bare would parse as it — the one flag
+    // this tool must never be able to set. See withHuman() for the one path that sets it.
     case 'fleet_answer': {
-      const args = [String(a.session), String(a.text)];
+      const args = [];
       if (a.no_enter) args.push('--no-enter');
+      // The fingerprint of the prompt the caller was looking at (the phone always sends
+      // one): fleet-answer re-captures and refuses if it is not what is on screen now.
+      if (a.expect !== undefined && a.expect !== null) args.push('--expect', String(a.expect));
+      args.push('--', String(a.session), String(a.text));
       return run('fleet-answer', args, t);
     }
     case 'fleet_wake': {
@@ -482,16 +490,49 @@ export function plan(name, a = {}) {
 // that is not on the list costs nothing extra even from inside Jarvis.
 //   A refusal is fail()'s, so the agent sees a failed call and not a quiet success — and its
 // text is the whole instruction: which proposal, what to ask him, and to try again after.
-function jarvisRefusal(name, a) {
+//   A fleet_answer aimed at a PERMISSION DIALOG says so in the question, with the dialog's
+// own text: "answer w1's prompt with 1" is not something an owner can say yes to
+// meaningfully, "approve w1's Bash command: git push …" is. Same detector fleet-answer
+// refuses with (lib/permission-dialog.mjs), read off the same pane.
+//   Returns {fail} for a refusal, {granted:true} when his yes was just spent on this call.
+function jarvisCheck(name, a, p) {
   let m = null;
   try { m = readMarker(); } catch {}
-  if (!m) return null;
-  const spec = mcpConfirmSpec(name, a, m);
-  if (!spec) return null;
-  if (!isJarvisSelf(self(), m)) return null;
-  if (spec.refuse) return fail(spec.text);
+  if (!m) return {};
+  let spec = mcpConfirmSpec(name, a, m);
+  if (!spec) return {};
+  if (!isJarvisSelf(self(), m)) return {};
+  if (spec.refuse) return { fail: fail(spec.text) };
+  const d = name === 'fleet_answer' ? dialogOn(p) : null;
+  if (d && approves(d, { text: String(a.text) }))
+    spec = { ...spec, summary: `approve ${a.project ? a.project + '/' : ''}${a.session}'s permission dialog — ${d.tool || 'a tool call'}: ${firstCommand(d)}` };
   const g = gate(spec);
-  return g.ok ? null : fail(g.text);
+  if (!g.ok) return { fail: fail(d ? `${g.text}\n\nThe dialog, as ${a.session} shows it — read it to him:\n${d.text}` : g.text) };
+  return { granted: !!g.by };
+}
+
+// The permission dialog on the pane a fleet_answer plan will type into, or null.
+function dialogOn(p) {
+  try {
+    const sock = p.t ? p.t.sock : (self()?.sock || process.env.CLAUDE_FLEET_SOCK);
+    const session = p.args[p.args.indexOf('--') + 1];
+    if (!sock || !session) return null;
+    return permissionDialog(execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', session],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+  } catch { return null; }
+}
+function firstCommand(d) {
+  const lines = d.text.split('\n').map(l => l.trim()).filter(Boolean);
+  const cmd = lines.find(l => l.startsWith('$ ')) || lines[1] || lines[0] || '';
+  return cmd.replace(/^\$\s*/, '').slice(0, 120);
+}
+
+// THE ONLY WAY --human-approved reaches fleet-answer from here, and neither is an argument
+// a caller can pass: the owner's yes spent on this exact call (Jarvis), or opts.human from
+// the phone's daemon, whose request a passkey-minted token authorised. The MCP server calls
+// callTool(name, args) and has no opts to forward.
+function withHuman(p) {
+  return p.cmd === 'fleet-answer' ? { ...p, args: ['--human-approved', ...p.args] } : p;
 }
 
 // The MCP server's entry point. Same signature and same return shape it always had: a
@@ -500,9 +541,9 @@ export function callTool(name, a = {}) {
   const p = plan(name, a);
   if (p.kind === 'fail') return { isError: true, text: p.text };
   if (p.kind === 'text') return p.text;
-  const j = jarvisRefusal(name, a);
-  if (j) return j;
-  return execPlan(p);
+  const j = jarvisCheck(name, a, p);
+  if (j.fail) return j.fail;
+  return execPlan(j.granted ? withHuman(p) : p);
 }
 
 // The HTTP server's entry point. Identical decisions, non-blocking execution, and a
@@ -511,7 +552,7 @@ export async function callToolAsync(name, a = {}, opts = {}) {
   const p = plan(name, a);
   if (p.kind === 'fail') return { isError: true, text: p.text };
   if (p.kind === 'text') return p.text;
-  const j = jarvisRefusal(name, a);
-  if (j) return j;
-  return execPlanAsync(p, opts);
+  const j = jarvisCheck(name, a, p);
+  if (j.fail) return j.fail;
+  return execPlanAsync(j.granted || opts.human === true ? withHuman(p) : p, opts);
 }

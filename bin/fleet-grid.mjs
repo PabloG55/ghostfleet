@@ -2959,7 +2959,27 @@ const SETCOLS = [
       const pos = (ring.length > 2 && i >= 0) ? ` ${i + 1}/${ring.length}` : '';
       return { on: !!a, label: (a || 'claude') + pos };
     } },
+  // THE TWO BOUNDARIES (lib/boundary.sh), both OFF by default: a worker merging a PR, and an
+  // agent approving another session's permission dialog. Project-wide here; the one-session
+  // form (the sub-master of its task) is `fleet-project set … --session <s>`. Written
+  // through fleet-project, like AGENT, so the markers have one writer.
+  { title: 'WORKERS MERGE', onColor: C.red, toggle: p => toggleBoundary(p, 'workers-merge'),
+    blurb: `${C.dim}workers can merge: ${C.reset}${C.bold}on${C.reset}${C.dim} = a worker in a linked worktree may merge a PR itself · ${C.reset}${C.bold}off${C.reset}${C.dim} = only the lead merges (default)${C.reset}`,
+    state: p => { const on = boundaryOn(p, 'workers-merge'); return { on, label: on ? 'on' : 'off' }; } },
+  { title: 'AGENTS APPROVE', onColor: C.red, toggle: p => toggleBoundary(p, 'agents-approve'),
+    blurb: `${C.dim}agents can approve tool calls: ${C.reset}${C.bold}on${C.reset}${C.dim} = fleet-answer may send a yes to a worker's permission dialog · ${C.reset}${C.bold}off${C.reset}${C.dim} = a human approves (default). Jarvis always asks you.${C.reset}`,
+    state: p => { const on = boundaryOn(p, 'agents-approve'); return { on, label: on ? 'on' : 'off' }; } },
 ];
+function boundaryOn(proj, b) {
+  try { return fs.existsSync(path.join(profileDir(proj.profile), 'fleet', `${sockOf(proj)}.${b}`)); } catch { return false; }
+}
+function toggleBoundary(proj, b) {
+  const want = boundaryOn(proj, b) ? 'off' : 'on';
+  for (const bin of [path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-project'), 'fleet-project']) {
+    try { execFileSync(bin, ['set', proj.name, b, want], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); return; }
+    catch {}
+  }
+}
 // One line naming only the agents that HAVE a caveat, so a fully-capable fourth agent
 // adds nothing to it and the line stays readable at 80 columns.
 function agentCaveats() {

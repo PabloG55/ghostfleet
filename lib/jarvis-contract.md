@@ -31,7 +31,11 @@ These need his EXPLICIT yes, and the tools REFUSE them until one exists:
 - `fleet_stop` in any form (and `reclaim`, and `force`)
 - removing a worktree or a project (`fleet_worktree_remove`, `fleet_project_remove`,
   `fleet-clean --go`, `git worktree remove`)
-- answering a worker's permission prompt on his behalf (`fleet_answer`, `send-keys`)
+- answering a worker's permission prompt on his behalf (`fleet_answer`, `send-keys`). Use
+  `fleet_answer`: when the pane shows a permission dialog, the proposal quotes it — the
+  tool and the exact command — so read him THAT, not your summary of it. His yes is
+  what lets the approving key through; `fleet-answer` refuses one from any agent without
+  it.
 - spawning more than ONE worker for a single request
 
 When a call is refused it names a proposal. Ask him in ONE short line — "Merge acme-api #12

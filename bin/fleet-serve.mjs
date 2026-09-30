@@ -43,6 +43,7 @@ import path from 'node:path';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { callToolAsync, projects, BIN, TOOLS } from '../mcp/fleet-dispatch.mjs';
+import { promptSummary } from '../lib/permission-dialog.mjs';
 import { fleetDirs as scanDirs, scanStatus } from '../lib/fleet-scan.mjs';
 import * as jarvis from '../lib/jarvis.mjs';
 import { jarvisState, vocabulary } from './fleet-jarvis.mjs';
@@ -563,7 +564,7 @@ const TOOLS_ALLOWED = {
   // the 'since last look' stamp.
   fleet_digest:          { fields: ['json', 'peek'], noProject: true },
   fleet_send:            { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
-  fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter'], write: true, subject: 'session' },
+  fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter', 'expect'], write: true, subject: 'session' },
   fleet_pause:           { fields: ['project', 'session'],                     write: true, subject: 'session' },
   fleet_resume:          { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   // Waking starts a process; parking and un-parking do not. Same write class as the rest of
@@ -715,8 +716,24 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   const summary = `${tool.replace(/^fleet_/, '')} ${Object.entries(args).filter(([k]) => k !== 'project')
     .map(([k, val]) => k === 'prompt' || k === 'text' ? `${k}=${String(val).slice(0, 60)}` : `${k}=${val}`).join(' ')}`.trim();
 
-  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000 });
+  // human: THIS REQUEST IS THE OWNER, and fleet_answer is the one verb that asks. A key
+  // pressed on a worker's permission dialog approves that worker's tool call, which
+  // fleet-answer refuses from any agent; the phone is where he reads the dialog on the pane
+  // view and taps the answer himself. The MCP server has no way to pass this — only a
+  // request that reached runVerb with a passkey-minted session does.
+  // A PHONE ANSWER NAMES THE PROMPT IT ANSWERS. The phone draws a pane it polled a moment
+  // ago; the prompt on it may have been answered at the desk or timed out since, and then
+  // "1" and Enter land in the composer as a MESSAGE. So an answer must carry the prompt's
+  // fingerprint (served beside the pane by /api/pane), and fleet-answer re-captures and
+  // compares immediately before send-keys. No fingerprint — an old cached client, or a
+  // pane that showed no prompt — is refused here, before anything reaches tmux.
+  if (tool === 'fleet_answer' && !(typeof args.expect === 'string' && args.expect))
+    return { status: 409, json: { ok: false, changed: true,
+      text: 'the prompt changed: the pane you answered was not showing a prompt (or this app is too old to say which one — reload it). Nothing was sent.' } };
+  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true });
   const text = typeof out === 'string' ? out : String(out.text);
+  if (tool === 'fleet_answer' && /^fleet-answer: the prompt changed/m.test(text))
+    return { status: 409, json: { ok: false, changed: true, text: text.replace(/^fleet-answer: /, '') } };
   const refused = typeof out !== 'string' && out.isError === true;
   // WHAT THE PHONE SAYS TO JARVIS IS THE OWNER SPEAKING, and this is the one component that
   // knows it: the request carries a token a passkey minted. Recorded here, into the ledger
@@ -1774,7 +1791,11 @@ function agentCatalogue() {
     // reaches this port already has full parity, which is RCE — and masking `sk_live_…`
     // corrupts any session that is legitimately about key handling. Bounded for transport
     // cost only, by `scrollback`.
-    return send(res, 200, { ok: true, project: t.name, session, scrollback, at: now(), pane: r.pane });
+    // `prompt`: what the pane is waiting on, from lib/permission-dialog.mjs — the same
+    // detector fleet-answer re-checks with. Its fingerprint is what an answer must echo.
+    let prompt = null;
+    try { prompt = promptSummary(r.pane); } catch {}
+    return send(res, 200, { ok: true, project: t.name, session, scrollback, at: now(), pane: r.pane, prompt });
   }
 
   if (p === '/api/checkouts' && req.method === 'GET') {

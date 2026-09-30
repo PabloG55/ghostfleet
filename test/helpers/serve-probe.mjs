@@ -155,7 +155,10 @@ if (phase === 'verbs') {
   // The same verb aimed at ANOTHER project, from the same daemon process: the child's
   // scope/root/socket have to be that project's, not whichever one was asked for first.
   row('send.other', await a.verb(base, 'fleet_send', { project: 'other', session: 'o1', prompt: 'over there' }));
-  row('answer.ok', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'w1', text: '2' }));
+  row('answer.ok', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'w1', text: '2', expect: 'stub-fingerprint' }));
+  // An answer that does not say which prompt it answers is refused before anything runs:
+  // it is what an old cached client sends, and what a pane with no prompt would produce.
+  row('answer.noExpect', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'w1', text: '2' }));
 
   // Destructive: a fresh assertion at the moment of action, enforced on the tool name.
   row('spawn.noAssertion', await a.verb(base, 'fleet_spawn', { project: 'demo', name: 'api-9' }));
@@ -277,7 +280,14 @@ if (phase === 'pane') {
   // because a pane read that ignored the socket would return a plausible screenful of
   // somebody else's work rather than an error — CLAUDE.md's most-repeated scar.
   row('pane.otherFleet', await a.api(base, 'GET', '/api/pane?project=other&session=dlg'));
-  row('pane.answer', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'dlg', text: '1' }));
+  // THE RACE: the phone answers the prompt it drew, which may not be the one on screen. A
+  // fingerprint that does not match is refused and the pane is left exactly as it was.
+  const dialog = await a.api(base, 'GET', '/api/pane?project=demo&session=dlg');
+  const fp = dialog.json?.prompt?.fingerprint || '';
+  row('pane.stale', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'dlg', text: 'Z8', expect: '0000000000000000' }));
+  await new Promise(r => setTimeout(r, 300));
+  row('pane.afterStale', await a.api(base, 'GET', '/api/pane?project=demo&session=dlg'));
+  row('pane.answer', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'dlg', text: '1', expect: fp }));
   // The pane is read again only after the far side has had a moment to redraw. Polled, not
   // slept: a fixed sleep tuned to this machine is a test that passes on this machine.
   let after = null;
@@ -287,6 +297,11 @@ if (phase === 'pane') {
     await new Promise(r => setTimeout(r, 100));
   }
   row('pane.after', after);
+  // ...and the SAME answer again, now that the prompt is gone: exactly the phone that polled
+  // before the desk answered. Refused, and nothing is typed where the prompt used to be.
+  row('pane.answerGone', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'dlg', text: 'Z9', expect: fp }));
+  await new Promise(r => setTimeout(r, 300));
+  row('pane.afterGone', await a.api(base, 'GET', '/api/pane?project=demo&session=dlg'));
   // The argument checks and the geometry, on the same server: a missing session, a
   // scrollback out of range, and a scrollback that is allowed.
   row('pane.noSession', await a.api(base, 'GET', '/api/pane?project=demo'));

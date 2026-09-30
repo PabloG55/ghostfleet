@@ -157,6 +157,24 @@ retry?", or a trust prompt, use:
   Enter by default. `--no-enter` to skip Enter; `--key <Name>` (repeatable) for
   special keys (Enter, Escape, Up, Down…). It prints the pane afterward so you see
   the effect.
+- **A permission dialog is not yours to approve.** When the worker is asking to RUN
+  something ("Do you want to proceed?", codex's "Would you like to run the following
+  command?", opencode's "Permission required"), `fleet-answer` refuses any approving key
+  and prints the dialog — the tool and the exact command. You may DECLINE it (the "No"
+  option's number, or `--key Escape`). To approve, show the human that dialog and let
+  them run `fleet-answer --human-approved …` themselves, or tap it on the phone. Never add
+  the flag yourself: an agent approving another agent's tool call is the thing the
+  dialog exists to stop. Usage-limit and trust prompts are not permission dialogs and
+  answer as before.
+- **You merge; your workers do not.** A worker opens its PR and reports the number; the
+  lead reviews and merges it from the main checkout. `gh pr merge` from a linked worktree
+  is refused by the fleet's PreToolUse guard.
+- **Both are settings, OFF by default** — for a fleet whose workers own their task:
+  `fleet-project set <project> workers-merge on` / `agents-approve on` for the whole
+  project (or the grid's `,` page), or add `--session <worker>` to make ONE worker the
+  sub-master of its task while its siblings stay blocked. `fleet-project get <project>`
+  shows them. Only you or the human set these — a worker's own attempt is refused. Jarvis
+  ignores both: its confirm-list always asks the owner.
 
 ## Budget: one shared account
 
@@ -267,7 +285,8 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
   that ignores a `fleet-send`, or shows `working` with no progress, is usually
   **blocked on a dialog** (a permission prompt, a "reached usage limit — retry?",
   a trust prompt). A prompt can't dismiss a dialog — send the keystroke:
-  `fleet-answer <session> "2"`. (`fleet-inbox` flags these as `need-you`.) This is
+  `fleet-answer <session> "2"` (a permission prompt is the exception: decline it, or
+  take its dialog to the human — see above). (`fleet-inbox` flags these as `need-you`.) This is
   the single most common mis-step; when in doubt, `fleet-read`/`fleet-answer` to
   see and clear the dialog before sending more work.
 - **A send to a busy worker is queued, not pasted in.** If it's `working`, `fleet-send`
@@ -297,7 +316,7 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
 
 ```bash
 fleet-worktrees          # → "Free to reuse: api-3"
-fleet-inbox              # → api-1 NEEDS YOU: permission to run tests
+fleet-inbox              # → api-1 NEEDS YOU: reached usage limit — retry?
                          # → finished workers: api-2 (its PR #41 merged) → fleet-stop --reclaim api-2
 
 # retire the finished worker; its next task goes to a NEW session, not to it

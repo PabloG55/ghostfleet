@@ -3425,22 +3425,46 @@ function sheetSend(name) {
   ]));
 }
 
-function sheetAnswer(name) {
+// ANSWER ONLY THE PROMPT YOU CAN SEE. The pane view is a poll, so the prompt on it can be
+// answered at the desk or time out between the paint and the tap — and then "1" and Enter
+// land in the composer as a message. So the sheet reads the pane FIRST, shows the prompt it
+// is about to answer (kind, tool, command, options), and sends that prompt's fingerprint.
+// The daemon re-captures just before the keys go and refuses anything else as "the prompt
+// changed", at which point this re-reads the pane and draws what is really there.
+async function sheetAnswer(name) {
+  let prompt = null;
+  try { prompt = (await api.getPane(S.project, name)).prompt || null; }
+  catch (e) { if (e instanceof api.AuthError) { lock('pane'); return; } toast(String(e.message || e), 'bad'); return; }
   const t = input('', { placeholder: 'e.g. 2   or   yes' });
   const noEnter = el('input', { type: 'checkbox' });
-  const go = async () => {
-    const text = t.value;
+  const send = async (text) => {
     if (!text) { toast('fleet_answer refuses an empty text', 'bad'); return; }
     closeSheet();
-    await doVerb('fleet_answer', { project: S.project, session: name, text, no_enter: noEnter.checked });
+    const r = await doVerb('fleet_answer', { project: S.project, session: name, text, no_enter: noEnter.checked,
+                                              expect: prompt ? prompt.fingerprint : '' });
+    // Refused or not, the pane is read again now: after a refusal it shows what replaced the
+    // prompt, and after an answer it shows what the answer did.
+    if (!r && S.screen === 'session' && S.session === name) { S.pane = null; await readPane(); render(); }
   };
-  t.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  t.addEventListener('keydown', e => { if (e.key === 'Enter') send(t.value); });
+  if (!prompt) {
+    openSheet(sheet('answer keys', `→ ${name}`, [
+      el('p', { class: 'warn', text: 'no prompt on screen — keys sent now would land in its input box as a message. Nothing to answer.' }),
+      el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+    ]));
+    return;
+  }
+  const what = prompt.kind === 'permission'
+    ? `${prompt.agent || 'agent'} asks to run · ${prompt.tool || 'a tool'}${prompt.command ? ': ' + prompt.command : ''}`
+    : `${prompt.kind} · ${prompt.question || ''}`;
+  const opts = (prompt.options || []).map(o => btn(`${o.n}. ${o.label}`, () => send(o.n)));
   openSheet(sheet('answer keys', `→ ${name}`, [
-    el('p', { text: 'literal keystrokes for a worker blocked on a dialog — a permission prompt, "reached usage limit — retry?", a trust prompt.' }),
-    field('keys', t),
+    el('p', { text: what }),
+    opts.length ? el('div', { class: 'rows' }, opts.map(b => el('div', { class: 'srow' }, [b]))) : null,
+    field('or keys', t),
     el('label', { class: 'field' }, [noEnter, document.createTextNode(' send without pressing Enter')]),
-    el('div', { class: 'row' }, [btn('answer', go, 'go'), btn('esc back', closeSheet)]),
-  ]));
+    el('div', { class: 'row' }, [btn('answer', () => send(t.value), 'go'), btn('esc back', closeSheet)]),
+  ].filter(Boolean)));
 }
 
 function sheetRename(name) {

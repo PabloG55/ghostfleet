@@ -2,6 +2,8 @@
 # fleet-project add <path> [--name N] [--profile P] [--agent A] [--start]
 # fleet-project list
 # fleet-project rm <name>
+# fleet-project set <name | -s SOCK> <workers-merge|agents-approve> <on|off|inherit> [--session S]
+# fleet-project get <name | -s SOCK> [--session S]
 #
 # Register a PROJECT (a new fleet) from the command line — the thing the Projects
 # screen's "+ add project" does. Without this a lead had no way to create one, so
@@ -13,6 +15,13 @@
 #           without opening the TUI.
 #   list    name · profile · fleet socket · path
 #   rm      drop the list entry only — sessions, worktrees and history are untouched
+#   set     one of the two BOUNDARY settings (lib/boundary.sh), both OFF by default:
+#             workers-merge   a worker in a linked worktree may merge a PR
+#             agents-approve  an agent may approve another session's permission dialog
+#           for the whole project, or with --session for ONE session — the sub-master of
+#           its task, while its siblings stay blocked. `inherit` (session only) drops the
+#           override. The grid's settings page calls this for the project-wide form.
+#   get     what those resolve to, for the project or one session
 #
 # <path> is the project ROOT: the repo itself, or a folder holding its checkouts /
 # worktrees (same rule the TUI uses).
@@ -198,6 +207,65 @@ case "$cmd" in
     echo "fleet-project: the RUNNING master keeps the agent it started with — this applies to the next one"
     ;;
 
+  set|get)
+    . "$BIN_DIR/../lib/boundary.sh"
+    NAME=""; BSOCK=""; SESS=""; POS=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -s)        BSOCK="${2:?}"; shift 2 ;;
+        --session) SESS="${2:?}";  shift 2 ;;
+        -*) echo "fleet-project: unknown option $1" >&2; exit 1 ;;
+        *)  POS+=("$1"); shift ;;
+      esac
+    done
+    [ -n "$BSOCK" ] || { NAME="${POS[0]:-}"; POS=("${POS[@]:1}"); }
+    # Find the project's profile — it decides both the socket and the fleet dir the markers
+    # live in. By name, or by socket (what a refusal knows), across every profile's list.
+    PROF=""; found=0
+    for f in "$CFG_HOME"/projects "$CFG_HOME"/projects.*; do
+      [ -f "$f" ] || continue
+      case "${f##*/}" in projects) ;; *) case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac ;; esac
+      while IFS=$'\x1f' read -r n _p prof _a; do
+        case "$n" in ''|\#*) continue ;; esac
+        prof="${prof:-work}"
+        if { [ -n "$NAME" ] && [ "$n" = "$NAME" ]; } || { [ -n "$BSOCK" ] && [ "$(sock_for "$n" "$prof")" = "$BSOCK" ]; }; then
+          NAME="$n"; PROF="$prof"; found=1; break 2
+        fi
+      done < <(awk -F'\t' 'BEGIN{ OFS = sprintf("%c", 31) } { print $1, $2, $3, $4 }' "$f")
+    done
+    [ "$found" = 1 ] || { echo "fleet-project: no project '${NAME:-$BSOCK}'" >&2; exit 1; }
+    SOCK="$(sock_for "$NAME" "$PROF")"; DIR="$(profile_dir "$PROF")/fleet"
+    if [ "$cmd" = get ]; then
+      for b in $BOUNDARY_SETTINGS; do
+        boundary_on "$b" "$DIR" "$SOCK" "$SESS" && v=on || v=off
+        printf '%-15s %-4s  (%s)\n' "$b" "$v" "$(boundary_label "$b")"
+      done
+      exit 0
+    fi
+    B="${POS[0]:-}"; V="${POS[1]:-}"
+    case " $BOUNDARY_SETTINGS " in *" $B "*) ;; *)
+      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]" >&2; exit 1 ;; esac
+    mkdir -p "$DIR" 2>/dev/null
+    if [ -n "$SESS" ]; then
+      m="$DIR/$SOCK.$SESS.$B"
+      case "$V" in
+        on)      : > "$m";       rm -f "$m-off" ;;
+        off)     : > "$m-off";   rm -f "$m" ;;
+        inherit) rm -f "$m" "$m-off" ;;
+        *) echo "fleet-project: set --session takes on, off or inherit" >&2; exit 1 ;;
+      esac
+      boundary_on "$B" "$DIR" "$SOCK" "$SESS" && v=on || v=off
+      echo "fleet-project: '$(boundary_label "$B")' for session '$SESS' in '$NAME': $V (resolves to $v)"
+    else
+      case "$V" in
+        on)  : > "$DIR/$SOCK.$B" ;;
+        off) rm -f "$DIR/$SOCK.$B" ;;
+        *) echo "fleet-project: set takes on or off for a project (inherit is for --session)" >&2; exit 1 ;;
+      esac
+      echo "fleet-project: '$(boundary_label "$B")' for project '$NAME': $V"
+    fi
+    ;;
+
   rm|remove)
     NAME="${1:-}"; [ -n "$NAME" ] || { echo "fleet-project: usage: fleet-project rm <name>" >&2; exit 1; }
     found=0
@@ -224,5 +292,7 @@ case "$cmd" in
     echo "  fleet-project agent <name> [<agent>|--none]" >&2
     echo "  fleet-project list" >&2
     echo "  fleet-project rm <name>" >&2
+    echo "  fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]" >&2
+    echo "  fleet-project get <name|-s sock> [--session S]" >&2
     exit 1 ;;
 esac

@@ -13,8 +13,37 @@
 #   --key <Name> a tmux key name (Enter, Escape, Up, Down, Left, Right, Space,
 #                Tab, BSpace, …); repeat to send a sequence. Overrides <text>.
 #
+#   --expect <fingerprint>
+#                send ONLY if the pane is still showing that prompt (lib/permission-dialog.mjs
+#                fingerprint: kind, tool, command, options). Re-captured immediately before
+#                the keys go; a prompt that was answered, replaced or timed out since — or
+#                no prompt at all — is refused with "the prompt changed" and exit 4, so the
+#                keys never land in the composer as a message. The phone always sends it.
+#   --human-approved
+#                a HUMAN has read the permission dialog on that pane and says yes.
+#                Required to send an approving key to one; see below.
+#
 # After sending it prints the tail of the pane so you can see what happened.
 # Socket defaults to $CLAUDE_FLEET_SOCK.
+#
+# AN AGENT DOES NOT APPROVE ANOTHER AGENT'S TOOL CALL — by default. When the pane is showing a
+# permission dialog — claude's "Do you want to proceed? 1. Yes …", codex's "Would you like
+# to run the following command?", opencode's "Permission required" — any key that is not a
+# decline is REFUSED unless --human-approved is passed, and the refusal prints the dialog:
+# the tool and the exact command, so the human being asked sees what the worker actually
+# wants to run rather than the lead's summary of it. Declining (the "No" option's number,
+# or --key Escape) is always allowed. A usage-limit notice, a folder-trust prompt and every
+# other menu are not permission dialogs and answer exactly as before. The detector is
+# lib/permission-dialog.mjs, the same one the MCP dispatch shows Jarvis's owner.
+#   The setting "agents can approve tool calls" (lib/boundary.sh; `fleet-project set …
+# agents-approve on`, per project or per session) lifts this for fleets whose workers own
+# their task. Never for Jarvis — see below.
+#   The fleet_answer MCP tool cannot set the flag: it passes its arguments after `--`, so
+# no text it is handed can parse as one. The one MCP path that does pass it is Jarvis's,
+# and only after its owner said yes to that exact call (mcp/fleet-dispatch.mjs).
+#   Without node the pane cannot be read for a dialog, and that is treated as one — and
+# since a decline cannot be recognised either, EVERY key then needs --human-approved. A
+# guard that goes quiet when its dependency is missing is a guard that is off.
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
@@ -22,17 +51,22 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-SESSION=""; TEXT=""; NOENTER=0; KEYS=()
+SESSION=""; TEXT=""; NOENTER=0; KEYS=(); HUMAN=0; EXPECT=""; EXPECT_SET=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)         SOCK="${2:-}"; shift 2 ;;
     --key)      KEYS+=("${2:?}"); shift 2 ;;
     --no-enter) NOENTER=1; shift ;;
+    --human-approved) HUMAN=1; shift ;;
+    --expect)   EXPECT="${2-}"; EXPECT_SET=1; shift 2 ;;
     --)         shift; break ;;
     -*) echo "fleet-answer: unknown option $1" >&2; exit 1 ;;
     *)  if [ -z "$SESSION" ]; then SESSION="$1"; else TEXT="${TEXT:+$TEXT }$1"; fi; shift ;;
   esac
 done
+# After `--` nothing is an option — the session first if it has not been named, then the
+# text. This is what keeps a caller's TEXT from ever being read as --human-approved.
+if [ -z "$SESSION" ] && [ $# -gt 0 ]; then SESSION="$1"; shift; fi
 while [ $# -gt 0 ]; do TEXT="${TEXT:+$TEXT }$1"; shift; done
 
 [ -n "$SOCK" ]    || { echo "fleet-answer: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
@@ -40,11 +74,103 @@ while [ $# -gt 0 ]; do TEXT="${TEXT:+$TEXT }$1"; shift; done
 tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-answer: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
 
+[ "${#KEYS[@]}" -gt 0 ] || [ -n "$TEXT" ] \
+  || { echo "fleet-answer: nothing to send — give <text> or --key <Name>" >&2; exit 1; }
+
+# ── is it a permission dialog, and would this approve it? ───────────────────
+# Read the pane the keys will land on, THEN decide. 0 = no dialog; 10 = a dialog and this
+# declines it; 11 = a dialog and this would approve it. Anything else (no node, a crash)
+# is "could not tell", which is handled as 11 — see the header.
+# Through the symlink: ~/.local/bin/fleet-answer points into the staged runtime, and a
+# dirname of the LINK would look for lib/ beside ~/.local/bin, find nothing, and — by the
+# rule above — refuse every approving key on every pane. Same walk as bin/fleet-jarvis.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"
+  case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+DETECT="$(cd "$(dirname "$src")" 2>/dev/null && pwd)/../lib/permission-dialog.mjs"
+dargs=()
+if [ "${#KEYS[@]}" -gt 0 ]; then for k in "${KEYS[@]}"; do dargs+=(--key "$k"); done; else dargs+=(--text "$TEXT"); fi
+[ "$EXPECT_SET" = 1 ] && dargs+=(--expect "$EXPECT")
+dialog="$(tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null | node "$DETECT" "${dargs[@]}" 2>/dev/null)"; drc=$?
+# 12: --expect named a prompt that is not on the pane any more. Refused before anything
+# else, and never "could not tell": without node there is no fingerprint to compare, and
+# a key that cannot be shown to be meant for what is on screen does not go.
+if [ "$EXPECT_SET" = 1 ] && { [ "$drc" = 12 ] || ! command -v node >/dev/null 2>&1; }; then
+  { echo "fleet-answer: the prompt changed on '$SESSION' — nothing was sent."
+    echo "  ${dialog:-could not re-read the pane to compare}"
+    echo "  It was answered or replaced since the pane you answered was captured; look again."; } >&2
+  exit 4
+fi
+case "$drc" in
+  0|10|11) ;;
+  *)  drc=11; dialog="(could not check this pane for a permission dialog — node or lib/permission-dialog.mjs is missing, so it is treated as one)" ;;
+esac
+what="${KEYS[*]:-$TEXT}"
+if [ "${#KEYS[@]}" -gt 0 ]; then again="$(printf ' --key %q' "${KEYS[@]}")"; else again=" $(printf '%q' "$TEXT")"; fi
+[ "$NOENTER" = 1 ] && again="$again --no-enter"
+# "AGENTS CAN APPROVE TOOL CALLS" (lib/boundary.sh), off by default. Some fleets run a
+# worker that is the master of its own task and approves for it, so this is a setting:
+#   - on for the TARGET's project: any session may approve that project's dialogs
+#   - on for the CALLING session: it may approve dialogs in its own fleet, and its
+#     siblings, which do not carry the override, stay blocked
+# The caller is read from the live $TMUX, the same drift-proof source every command here
+# uses; with none (a plain terminal, or the MCP aimed at another project) only the target
+# project's setting can apply. JARVIS IS NEVER GRANTED BY IT: its confirm-list stays on
+# whatever a project says, so for Jarvis's master only --human-approved (the owner's yes)
+# lets an approval through.
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+CSOCK=""; CSESS=""
+_t="${TMUX:-}"; if [ -n "$_t" ]; then CSOCK="${_t%%,*}"; CSOCK="${CSOCK##*/}"
+  CSESS="$(tmux -L "$CSOCK" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"; fi
+JMARK="$HOME/.config/ghostfleet/jarvis"
+IS_JARVIS=0
+[ -n "$CSOCK" ] && [ "$CSESS" = master ] && [ -f "$JMARK" ] \
+  && [ "$CSOCK" = "$(grep -m1 '^sock=' "$JMARK" 2>/dev/null | cut -d= -f2-)" ] && IS_JARVIS=1
+BOUNDARY="$(dirname "$DETECT")/boundary.sh"
+SETTING_OK=0
+if [ "$drc" = 11 ] && [ "$HUMAN" != 1 ] && [ "$IS_JARVIS" = 0 ] && . "$BOUNDARY" 2>/dev/null; then
+  if [ "$CSOCK" = "$SOCK" ] && [ -n "$CSESS" ]; then
+    boundary_on agents-approve "$FLEET_DIR" "$SOCK" "$CSESS" && SETTING_OK=1
+  else
+    boundary_on agents-approve "$FLEET_DIR" "$SOCK" && SETTING_OK=1
+  fi
+fi
+
+if [ "$drc" = 11 ] && [ "$HUMAN" != 1 ] && [ "$SETTING_OK" != 1 ]; then
+  { echo "fleet-answer: REFUSED — '$SESSION' is showing a PERMISSION dialog, and '$what' would approve it."
+    echo "  An agent does not approve another agent's tool call. What it is asking to run:"
+    echo
+    printf '%s\n' "$dialog" | sed 's/^/    | /'
+    echo
+    echo "  To DECLINE, use the option shown above — that is always allowed."
+    echo "  To APPROVE, a human who has read the dialog above runs it themselves:"
+    echo "      fleet-answer -s $SOCK --human-approved $SESSION$again"
+    echo "  If you are an agent: show the human the dialog and ask. Do not add the flag yourself."
+    echo
+    if [ "$IS_JARVIS" = 1 ]; then
+      echo "  (Jarvis: the \"agents can approve tool calls\" setting never applies to you — your"
+      echo "  confirm-list does. Ask the owner.)"
+    elif command -v boundary_how >/dev/null 2>&1 || . "$BOUNDARY" 2>/dev/null; then
+      if [ "$CSOCK" = "$SOCK" ]; then boundary_how agents-approve "$SOCK" "$CSESS"; else boundary_how agents-approve "$SOCK"; fi | sed 's/^/  /'
+    fi; } >&2
+  exit 3
+fi
+if [ "$SETTING_OK" = 1 ]; then
+  { echo "fleet-answer: approving a permission dialog on '$SESSION' (\"agents can approve tool calls\" is on):"
+    printf '%s\n' "$dialog" | sed 's/^/    | /'; } >&2
+elif [ "$drc" = 11 ]; then
+  { echo "fleet-answer: approving a permission dialog on '$SESSION' (--human-approved):"
+    printf '%s\n' "$dialog" | sed 's/^/    | /'; } >&2
+elif [ "$drc" = 10 ]; then
+  echo "fleet-answer: declining the permission dialog on '$SESSION'." >&2
+fi
+
 if [ "${#KEYS[@]}" -gt 0 ]; then
   for k in "${KEYS[@]}"; do tmux -L "$SOCK" send-keys -t "$SESSION" "$k"; done
   desc="keys: ${KEYS[*]}"
 else
-  [ -n "$TEXT" ] || { echo "fleet-answer: nothing to send — give <text> or --key <Name>" >&2; exit 1; }
   tmux -L "$SOCK" send-keys -t "$SESSION" -l -- "$TEXT"
   desc="'$TEXT'"
   if [ "$NOENTER" != 1 ]; then tmux -L "$SOCK" send-keys -t "$SESSION" Enter; else desc="$desc (no enter)"; fi
