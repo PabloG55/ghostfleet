@@ -1,0 +1,40 @@
+
+      ▄▀▀▄
+     ▀▀▀▀▀▀
+    ▀▀▀▀▀▀▀▀
+   ▄▀▀    ▀▀▄
+  ▄▀▀      ▀▀▄
+
+  Antigravity CLI 1.2.14
+  dev@example.com (Google AI Pro)
+  Gemini 3.8 Flash (High)
+  ~/code/acme-api
+
+─────────────────────────────────────────────────────
+> Think carefully, then run the shell command `sleep 8;
+  echo done` and wait for it, then write a 200-word
+  explanation of git worktrees.
+
+▸ Thought for 3s, 499 tokens
+  Considering the instructions, the first step is to...
+
+● Bash(sleep 8; echo done) (ctrl+o to expand)
+⣟  The system ensures safety by preventing simultaneo...
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+esc to cancel			 Gemini 3.8 Flash · high
+
+
+
+
+
+
+
+
+
+
+
+
+
+

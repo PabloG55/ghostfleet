@@ -26,7 +26,7 @@
 #             objection happens in the lead and the outcome happens in the worker, and
 #             nothing else joins those two transcripts.
 #   --model   model for the new session (e.g. opus); default = account default
-#   --agent   which coding CLI runs the session (claude | opencode | codex).
+#   --agent   which coding CLI runs the session (claude | opencode | codex | agy).
 #             Default claude. See bin/fleet-agent for what each one can actually
 #             report back — a non-claude worker is not metered by the governor, and
 #             an unverified agent's card shows "unknown" rather than a status it

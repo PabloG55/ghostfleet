@@ -1,0 +1,40 @@
+
+      ▄▀▀▄        Antigravity CLI 1.2.14
+     ▀▀▀▀▀▀       dev@example.com (Google AI Pro)
+    ▀▀▀▀▀▀▀▀      Gemini 3.8 Flash (High)
+   ▄▀▀    ▀▀▄     ~/code/acme-api
+  ▄▀▀      ▀▀▄
+
+────────────────────────────────────────────────────────────
+> Think carefully, then run the shell command `sleep 8; echo done` and wait for it, then write a 200-word explanation of git worktrees.
+
+▸ Thought for 6s, 353 tokens
+  Initial assessment: Need to execute a shell command that pauses for a specific duration before producing output. Ensuring the specified time constraint is met. Setting a maximum wait time to acc...
+
+○ Bash(sleep 8; echo done) (ctrl+o to expand)
+⣟  Running command...
+└ Tip: Use /voice (or press f5) to record your prompt with your microphone.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+esc to cancel                                                                                                                                                                    Gemini 3.8 Flash · high
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

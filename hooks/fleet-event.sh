@@ -809,7 +809,10 @@ fi
 case "${CLAUDE_FLEET_NOTIFIER:-}" in off|none|false) EVENT_QUIET=1 ;; *) EVENT_QUIET=0 ;; esac
 if [ "$EVENT_QUIET" = 0 ] \
    && { [ "$EVENT" = "Stop" ] || { [ "$EVENT" = "Notification" ] && [ "$status" = "need-you" ]; }; }; then
-  if [ "$EVENT" = "Stop" ]; then title="✅ Claude — done"; sound="Glass"; else title="🔔 Claude — needs you"; sound="Ping"; fi
+  # A bridge for another agent (hooks/agy-fleet-event.sh) names it, so its popup does not
+  # say "Claude" over a session that is not one.
+  who="${CLAUDE_FLEET_EVENT_AGENT:-Claude}"
+  if [ "$EVENT" = "Stop" ]; then title="✅ $who — done"; sound="Glass"; else title="🔔 $who — needs you"; sound="Ping"; fi
   sub="${folder:-claude}"; [ -n "$branch" ] && sub="$sub · $branch"
   HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 

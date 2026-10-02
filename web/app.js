@@ -3324,7 +3324,11 @@ function sheetName({ cwd, name, reuse }) {
 // `w` — a brand-new worktree. The TUI's four fields, same defaults, same hints.
 function sheetWorktree() {
   const name = input(''), branch = input(''), from = input('');
-  const agent = el('select', {}, ['claude', 'codex', 'opencode'].map(a => el('option', { value: a, text: a })));
+  // From the daemon's catalogue, like the project picker below, so a fourth agent shows up
+  // here without this line changing and one that is not installed is never offered. The
+  // fixed list is only for a daemon too old to send `agents`.
+  const names = agentCatalogue().length ? agentCatalogue().map(a => a.name) : ['claude', 'codex', 'opencode', 'agy'];
+  const agent = el('select', {}, names.map(a => el('option', { value: a, text: a })));
   const go = async () => {
     const n = (name.value || '').trim();
     if (!n) { toast('a name is required', 'bad'); return; }

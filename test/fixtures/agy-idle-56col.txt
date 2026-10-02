@@ -1,0 +1,40 @@
+  A Git worktree allows you to attach multiple
+  working directories to a single repository,
+  enabling you to check out and work on different
+  branches simultaneously.
+
+  Traditionally, switching branches requires stashing
+  uncommitted changes or committing incomplete work.
+  Cloning the repository a second time avoids this
+  but wastes significant disk space and requires
+  duplicate network fetches. Git worktrees solve this
+  problem elegantly by sharing the underlying object
+  database, commit history, and configuration across
+  multiple linked working trees.
+
+  To create a new workspace, you run git worktree add
+  <path> <branch>. Git immediately creates the target
+  directory with that branch checked out, while your
+  primary directory remains undisturbed. This
+  workflow is ideal for quickly addressing urgent
+  hotfixes, reviewing pull requests, running parallel
+  test suites, or referencing another branch during
+  active development without disrupting your local
+  environment or triggering slow dependency
+  reinstalls.
+
+  Git also enforces strict safety rules: it prevents
+  checking out the same branch in multiple worktrees
+  simultaneously to avoid conflicting commits. Once
+  you are finished with a temporary workspace, you
+  can clean it up using git worktree remove <path>,
+  and Git automatically prunes the corresponding
+  metadata. Overall, worktrees provide a lightweight,
+  highly efficient way to multitask across branches
+  without painful, disruptive context-switching
+  overhead.
+
+────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────
+? for shortcuts 		 Gemini 3.8 Flash · high
