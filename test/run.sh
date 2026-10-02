@@ -2687,6 +2687,111 @@ else
   skip "rename carries the conversation" "tmux/git/jq missing"
 fi
 
+# ── a conversation sent to the background keeps its card ─────────────────────
+# Claude Code's /background (or ← into its agent view) ends a transcript with a
+# `continued-in` line and goes on under a NEW session id, in a spare process its daemon
+# started ahead of time; the pane stays behind as a viewer and fires no more hooks. Every
+# event of the live conversation then arrives from a process with no $TMUX, no $TMUX_PANE,
+# and the CLAUDE_FLEET_* of whichever session first started that daemon — another fleet's
+# socket and slot, measured on a scratch session. So the fleet showed the conversation from
+# before the hand-off, frozen, while the pane worked on, and the live one's rows went to
+# somebody else's inbox. The shapes below are the measured ones: a bg process is the one
+# with $CLAUDE_JOB_DIR and no $TMUX, and the old transcript names its successor.
+group "a conversation sent to the background keeps its card"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  BG="$(mktemp -d)"; BG="$(cd "$BG" && pwd -P)"
+  BGC="$BG/cfg"; BGF="$BGC/fleet"; mkdir -p "$BGF" "$BG/toolbox" "$BG/scratch" "$BG/job"
+  tmux -L cf-scratch kill-server 2>/dev/null
+  tmux -L cf-scratch new-session -d -s toolbox -c "$BG/toolbox" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  sleep 0.3
+  BG_SOCK="$(tmux -L cf-scratch display-message -p '#{socket_path}' 2>/dev/null)"
+  BG_PID="$(tmux -L cf-scratch display-message -p '#{pid}' 2>/dev/null)"
+  BG_PANE="$(tmux -L cf-scratch display-message -p -t toolbox '#{pane_id}' 2>/dev/null)"
+  bgenc() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+  BGD="$BGC/projects/$(bgenc "$BG/toolbox")"; mkdir -p "$BGD"
+  B1=aaaaaaaa-1111-4111-8111-111111111111     # before the hand-off
+  B2=bbbbbbbb-2222-4222-8222-222222222222     # the same conversation, backgrounded
+  printf '%s\n' \
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"acme-api stepper is half done"}]},"timestamp":"2026-09-24T10:00:05.000Z"}' \
+    "{\"type\":\"continued-in\",\"timestamp\":\"2026-09-24T10:01:00.000Z\",\"sessionId\":\"$B1\",\"continuedInSessionId\":\"$B2\"}" \
+    '{"type":"cost-state"}' > "$BGD/$B1.jsonl"
+  printf '%s\n' \
+    '{"type":"user","message":{"role":"user","content":"carry on"},"timestamp":"2026-09-24T10:02:00.000Z"}' \
+    '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"acme-api stepper is finished"}]},"timestamp":"2026-09-24T10:02:05.000Z"}' \
+    > "$BGD/$B2.jsonl"
+  # The pane's own turn, before the hand-off: a fleet session, in a pane.
+  printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s","transcript_path":"%s"}' "$B1" "$BG/toolbox" "$BGD/$B1.jsonl" \
+  | env TMUX="$BG_SOCK,$BG_PID,0" TMUX_PANE="$BG_PANE" CLAUDE_FLEET_SLOT=toolbox CLAUDE_FLEET_SOCK=cf-scratch \
+        CLAUDE_FLEET_DIR="$BGF" CLAUDE_CONFIG_DIR="$BGC" CLAUDE_FLEET_NOTIFIER=off \
+        "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  # A bg process's event: no tmux at all, a job dir, and ANOTHER fleet's identity in its env.
+  bgturn() {  # event sid cwd transcript
+    printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s"}' "$1" "$2" "$3" "$4" \
+    | env -u TMUX -u TMUX_PANE CLAUDE_JOB_DIR="$BG/job" CLAUDE_FLEET_SLOT=scratch CLAUDE_FLEET_SOCK=cf-billing-svc \
+          CLAUDE_FLEET_DIR="$BGF" CLAUDE_CONFIG_DIR="$BGC" CLAUDE_FLEET_NOTIFIER=off \
+          "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  rec() { jq -r "$2" "$BGF/$1.json" 2>/dev/null; }
+  bgread()  { env -u TMUX CLAUDE_FLEET_DIR="$BGF" CLAUDE_CONFIG_DIR="$BGC" "$ROOT/bin/fleet-read" -s cf-scratch "$1" 2>&1; }
+  bgphone() { env TMUX= CLAUDE_FLEET_SOCK=cf-scratch CLAUDE_FLEET_DIR="$BGF" CLAUDE_CONFIG_DIR="$BGC" \
+                "$ROOT/bin/fleet-read" -s cf-scratch --json "$1" 2>/dev/null | jq -r '[.messages[].text] | join(" | ")' 2>/dev/null; }
+  bgcard()  { env -u TMUX CLAUDE_FLEET_DIR="$BGF" CLAUDE_CONFIG_DIR="$BGC" node "$ROOT/bin/fleet-grid.mjs" cf-scratch --json 2>/dev/null \
+                | jq -r --arg n "$1" '.cards[] | select(.name==$n) | .msg // ""' 2>/dev/null; }
+  is "fixture: the pane's record names its pane"    "$BG_PANE@$BG_PID" "$(rec "$B1" .pane)"
+
+  # ── the hook: the live conversation is recorded as the slot it was ──
+  sleep 1
+  bgturn SessionStart "$B2" "$BG/toolbox" "$BGD/$B2.jsonl"
+  is "the backgrounded id gets a record"            "1" "$([ -f "$BGF/$B2.json" ] && echo 1 || echo 0)"
+  is "...on the fleet it was on, not the daemon's"  "cf-scratch" "$(rec "$B2" .sock)"
+  is "...under the slot it was"                     "toolbox" "$(rec "$B2" .slot)"
+  is "...holding the pane that shows it"            "$BG_PANE@$BG_PID" "$(rec "$B2" .pane)"
+  is "...and saying what it continues"              "$B1" "$(rec "$B2" .continued_from)"
+  # Counted across the Stop: the pane's own turn above already left a row of the same shape.
+  BG_ROWS="$(grep -c $'\ttoolbox\tdone\t' "$BGF/cf-scratch.inbox" 2>/dev/null || true)"
+  bgturn Stop "$B2" "$BG/toolbox" "$BGD/$B2.jsonl"
+  is "its Stop keeps the identity"                  "toolbox" "$(rec "$B2" .slot)"
+  is "its Stop adds a row to its own fleet's inbox" "$(( ${BG_ROWS:-0} + 1 ))" "$(grep -c $'\ttoolbox\tdone\t' "$BGF/cf-scratch.inbox" 2>/dev/null || true)"
+  is "...and nothing in the daemon's fleet's"       "0" "$([ -s "$BGF/cf-billing-svc.inbox" ] && echo 1 || echo 0)"
+  is "fleet-read shows the live conversation"       "1" "$([ "$(bgread toolbox | grep -c 'stepper is finished')" -ge 1 ] && echo 1 || echo 0)"
+  is "the grid card shows the live conversation"    "1" "$([ "$(bgcard toolbox | grep -c 'stepper is finished')" -ge 1 ] && echo 1 || echo 0)"
+  is "the hook said what it decided"                "1" "$([ "$(grep -c "continued from $B1" "$BGF/hook-debug.log" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
+  # The backgrounded transcript then gets an `attachment` record with the whole system
+  # prompt and tool schemas — 184KB measured, after the last reply — so the card's 64KB tail
+  # held no reply at all and read blank.
+  printf '{"type":"attachment","attachment":{"systemPrompt":"%s"}}\n' "$(head -c 200000 /dev/zero | tr '\0' 'x')" >> "$BGD/$B2.jsonl"
+  is "...and still does past an oversized last line" "1" "$([ "$(bgcard toolbox | grep -c 'stepper is finished')" -ge 1 ] && echo 1 || echo 0)"
+
+  # ── no predecessor: a bg process borrows no identity at all ──
+  B3=cccccccc-3333-4333-8333-333333333333
+  bgturn Stop "$B3" "$BG/scratch" "$BGC/projects/$(bgenc "$BG/scratch")/$B3.jsonl"
+  is "a bg session nobody hands off claims no slot" "" "$(rec "$B3" .slot)"
+  is "...and no socket"                             "" "$(rec "$B3" .sock)"
+  is "...and posts nothing to the daemon's fleet"   "0" "$([ -s "$BGF/cf-billing-svc.inbox" ] && echo 1 || echo 0)"
+
+  # ── the readers: a record from before the hand-off, and none after it ──
+  # A hook that ran an older copy, or a record lost since: the old transcript still names
+  # its successor, and that is enough.
+  rm -f "$BGF/$B2.json"
+  is "fixture: only the old record is left"         "0" "$([ -f "$BGF/$B2.json" ] && echo 1 || echo 0)"
+  is "fleet-read follows the hand-off"              "1" "$([ "$(bgread toolbox | grep -c 'stepper is finished')" -ge 1 ] && echo 1 || echo 0)"
+  is "the phone's session view follows it"          "1" "$([ "$(bgphone toolbox | grep -c 'stepper is finished')" -ge 1 ] && echo 1 || echo 0)"
+  is "...and does not show the frozen one"          "0" "$(bgphone toolbox | grep -c 'half done' || true)"
+  is "the grid card follows it"                     "1" "$([ "$(bgcard toolbox | grep -c 'stepper is finished')" -ge 1 ] && echo 1 || echo 0)"
+  # THE OTHER DIRECTION: a successor that was never written is not followed into nothing.
+  rm -f "$BGD/$B2.jsonl"
+  is "a hand-off to nowhere stays on what exists"   "1" "$([ "$(bgread toolbox | grep -c 'half done')" -ge 1 ] && echo 1 || echo 0)"
+
+  # ── a silent exit is no longer silent ──
+  printf '{"hook_event_name":"Stop"}' | env -u TMUX CLAUDE_FLEET_DIR="$BGF" CLAUDE_CONFIG_DIR="$BGC" CLAUDE_FLEET_NOTIFIER=off \
+    "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  is "a payload with no session_id leaves a line"   "1" "$([ "$(grep -c 'exit: no session_id' "$BGF/hook-debug.log" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
+  tmux -L cf-scratch kill-server 2>/dev/null
+  rm -rf "$BG"
+else
+  skip "a conversation sent to the background keeps its card" "tmux/jq missing"
+fi
+
 # ── 4a4. never hand --order to a grid that predates it ───────────────────────
 # It doesn't error: an unknown flag is no flag, so the old grid falls through to
 # DRAWING THE TUI inside the control plane's command substitution — nothing reads it,

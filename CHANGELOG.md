@@ -43,6 +43,14 @@ the detail, and every entry here names the PR that carries the argument.
 
 ### Fixed
 
+- **A conversation sent to the background vanished from the fleet.** Claude Code's
+  `/background` (or ← into its agent view) carries a conversation on under a new session id,
+  in a process its daemon started earlier with *another* session's environment. The fleet
+  kept showing the old conversation, frozen, on the grid, in `fleet-read` and on the phone,
+  while the live one's rows went to whichever fleet had started the daemon. The new id now
+  takes the slot its old transcript hands it (`continued-in`). The readers follow that line
+  too, and a backgrounded session nobody hands off claims no slot at all. The hook now logs
+  each silent exit and each record it removes to `<fleet dir>/hook-debug.log`.
 - **Notifications had never been turned on**, because nothing asked. After an unlock the
   installed app now offers *Turn on notifications* with one tap, and `fleet-phone` reports
   `notifications: not set up` until a subscription exists.

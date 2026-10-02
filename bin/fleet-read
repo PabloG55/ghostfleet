@@ -116,6 +116,21 @@ if { [ -z "$tr" ] || [ ! -f "$tr" ]; } && [ -n "$sid" ]; then
   fi
 fi
 
+# ── A CONVERSATION SENT TO THE BACKGROUND GOES ON UNDER ANOTHER ID ───────────
+# Claude Code's /background (or ← into its agent view) ends the conversation in this
+# transcript with a `continued-in` line and goes on in a new one beside it, run by another
+# process; the pane keeps showing it. A record written before the hand-off still points
+# here, so this printed the last thing said before the hand-off for as long as the new
+# conversation went on, frozen. The line names its successor, so it is followed —
+# EVIDENCE, the same as the rest of this lookup, and the reason it is not "newest in the
+# folder". Bounded, for a chain of hand-offs; the tail only, for a 100MB transcript.
+for _ in 1 2 3 4 5; do
+  [ -n "$tr" ] && [ -f "$tr" ] || break
+  _next="$(tail -c 65536 "$tr" 2>/dev/null | grep -o '"continuedInSessionId":"[0-9a-fA-F-]*"' | tail -1 | cut -d'"' -f4)"
+  [ -n "$_next" ] && [ "$_next" != "$sid" ] && [ -f "$(dirname "$tr")/$_next.jsonl" ] || break
+  sid="$_next"; tr="$(dirname "$tr")/$_next.jsonl"
+done
+
 if [ -z "$tr" ] || [ ! -f "$tr" ]; then
   msg=""
   if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
