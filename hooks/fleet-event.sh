@@ -19,8 +19,26 @@ FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 # Only when it names a cf-* (fleet) server; otherwise keep whatever env provided.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) CLAUDE_FLEET_SOCK="${_t%%,*}"; CLAUDE_FLEET_SOCK="${CLAUDE_FLEET_SOCK##*/}" ;; esac
 
-# jq is required to parse the payload; if it's missing, do nothing quietly.
-command -v jq >/dev/null 2>&1 || exit 0
+# ── AN EXIT THAT WRITES NOTHING MUST STILL LEAVE A LINE ──────────────────────
+# Every early exit below is an exit 0, because a hook must never fail the session — and
+# from outside, a hook that exits early is indistinguishable from one that never ran: no
+# record, no inbox row, hookErrors []. A conversation the fleet had lost was diagnosed as
+# "the hook exits early" for exactly that reason, when the hook had run to the end and its
+# record had gone missing later. One line per silent exit, per refused identity and per
+# record removed, so the next diagnosis starts from what happened. Bounded: rotated at
+# 256KB, one generation kept.
+_dbg() {
+  local f="$FLEET_DIR/hook-debug.log" sz
+  [ -d "$FLEET_DIR" ] || return 0
+  # -f first: a `<` on a missing file is reported by the shell before 2>/dev/null applies
+  sz=""; [ -f "$f" ] && sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+  case "$sz" in ''|*[!0-9]*) ;; *) [ "$sz" -gt 262144 ] && mv -f "$f" "$f.1" 2>/dev/null ;; esac
+  printf '%s pid=%s ppid=%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$$" "$PPID" "$*" >> "$f" 2>/dev/null
+  return 0
+}
+
+# jq is required to parse the payload; if it's missing, say so and do nothing else.
+command -v jq >/dev/null 2>&1 || { _dbg "exit: jq not on PATH ($PATH)"; exit 0; }
 mkdir -p "$FLEET_DIR" 2>/dev/null || exit 0
 
 # --- read the hook payload (single jq pass) ----------------------------------
@@ -36,10 +54,12 @@ IFS=$'\x1f' read -r EVENT SESSION CWD TRANSCRIPT NOTE < <(
       (.message // "" | gsub("[\n\r\t]"; " ")) ] | join("\u001f")' 2>/dev/null
 )
 
-[ -n "$SESSION" ] || exit 0
+[ -n "$SESSION" ] || { _dbg "exit: no session_id (event='${EVENT}', ${#input} bytes of payload)"; exit 0; }
 
-# SessionEnd: deregister and stop here.
+# SessionEnd: deregister and stop here — and say who did it, since a removed record is the
+# one outcome nothing else on disk records.
 if [ "$EVENT" = "SessionEnd" ]; then
+  [ -f "$FLEET_DIR/$SESSION.json" ] && _dbg "SessionEnd $SESSION reason=$(printf '%s' "$input" | jq -r '.reason // "?"' 2>/dev/null) job=${CLAUDE_JOB_DIR##*/} tmux=${TMUX_PANE:-} — record removed"
   rm -f "$FLEET_DIR/$SESSION.json" "$FLEET_DIR/$SESSION.task" 2>/dev/null
   exit 0
 fi
@@ -93,6 +113,58 @@ if [ -z "$SLOT" ] && [ -n "$SOCK" ] && [ -z "$PANE" ]; then
   # A leading `_` is a tab, not an agent (CLAUDE.md), and a `+` name is a tmux expression
   # rather than a name — neither is a slot this should claim.
   case "$SLOT" in _*|+*) SLOT="" ;; esac
+fi
+# ── A BACKGROUNDED CONVERSATION RUNS UNDER SOMEBODY ELSE'S ENVIRONMENT ───────
+# Claude Code can send a conversation to the background (`/background`, or ← into the agent
+# view). It does not move the process: it writes `continued-in` into the old transcript and
+# hands the conversation, under a NEW session id, to a spare process its daemon spawned
+# ahead of time. The pane's process stays behind as a viewer of it and fires no more hooks.
+# So every event of the live conversation comes from a process with no $TMUX and no
+# $TMUX_PANE, and with the CLAUDE_FLEET_* of whichever session first started the daemon —
+# one daemon per config dir, shared by every fleet on that profile. Measured: a scratch
+# session on its own socket, backgrounded, fired its next hooks with another fleet's
+# socket, slot and fleet dir, wrote a record claiming that fleet's slot, and posted a
+# `done` row into that fleet's inbox. The env is not evidence of who this is.
+#   The old transcript is. Its `continued-in` names this id, and the record that points at
+# that transcript is the conversation's identity before the hand-off: same socket, same
+# slot, same pane (the pane now shows this conversation). The line is written before the
+# old id's SessionEnd and the new id's SessionStart (measured: 0.15s and 0.46s earlier), so
+# the first event can already find it. Once found it is kept in this record as
+# continued_from, and later events reuse it rather than searching again.
+#   No predecessor — a spare's placeholder warming up, or `claude --bg` run from a shell —
+# means no fleet identity at all: an unaddressable record, like any agent run by hand,
+# rather than a borrowed one. A bg process is recognised by $CLAUDE_JOB_DIR, which only
+# those carry, with no $TMUX; the session-kind variable is visible in the process's
+# environment but is not passed to its hooks.
+FROM=""
+if [ -n "${CLAUDE_JOB_DIR:-}" ] && [ -z "${TMUX:-}" ]; then
+  _env="${SOCK:-}/${SLOT:-}"
+  SOCK=""; SLOT=""; PANE=""
+  if [ -f "$FLEET_DIR/$SESSION.json" ]; then
+    IFS=$'\x1f' read -r FROM SOCK SLOT PANE < <(jq -r \
+      '[(.continued_from // ""), (.sock // ""), (.slot // ""), (.pane // "")] | join("\u001f")' \
+      "$FLEET_DIR/$SESSION.json" 2>/dev/null)
+    [ -n "$FROM" ] || { SOCK=""; SLOT=""; PANE=""; }
+  fi
+  if [ -z "$FROM" ] && [ -n "$CWD" ]; then
+    # Candidates are the records for this checkout only; each one's transcript is asked
+    # whether it was continued in THIS id. The tail, not the file: transcripts here run to
+    # 100MB+, and the line is written at the hand-off with only bookkeeping lines after it.
+    while IFS=$'\x1f' read -r _pid _psock _pslot _ppane _ptr; do
+      [ -n "$_pid" ] && [ "$_pid" != "$SESSION" ] && [ -f "$_ptr" ] || continue
+      if tail -c 65536 "$_ptr" 2>/dev/null | grep -F "\"continuedInSessionId\":\"$SESSION\"" >/dev/null 2>&1; then
+        FROM="$_pid"; SOCK="$_psock"; SLOT="$_pslot"; PANE="$_ppane"; break
+      fi
+    done < <(jq -r --arg c "$CWD" \
+      'select(.cwd == $c) | [(.session_id // ""), (.sock // ""), (.slot // ""), (.pane // ""), (.transcript // "")] | join("\u001f")' \
+      "$FLEET_DIR"/*.json 2>/dev/null)
+    if [ -n "$FROM" ]; then _dbg "bg $EVENT $SESSION: continued from $FROM, takes ${SOCK:-?}/${SLOT:-?} (env said $_env)"
+    else _dbg "bg $EVENT $SESSION: no predecessor names this id; claims no slot (env said $_env)"; fi
+  fi
+  # Everything below — inbox rows, the lead's wake, reply-to, the queue — routes on the
+  # variable itself, so the borrowed value has to go there too, or the record would be
+  # right and every row and nudge would still land on the daemon's fleet.
+  CLAUDE_FLEET_SOCK="$SOCK"; CLAUDE_FLEET_SLOT="$SLOT"
 fi
 now="$(date +%s)"
 
@@ -233,13 +305,15 @@ if jq -n \
   --arg id "$SESSION" --arg z "$ZELL" --arg slot "$SLOT" \
   --arg sock "$SOCK" --arg pane "$PANE" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
-  --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" \
+  --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" --arg from "$FROM" \
   '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, pane:$pane, cwd:$cwd, folder:$folder,
-    branch:$branch, status:$status, transcript:$tr, ts:$ts}' \
+    branch:$branch, status:$status, transcript:$tr, ts:$ts}
+   + (if $from != "" then {continued_from:$from} else {} end)' \
   >"$tmp" 2>/dev/null
 then
-  mv -f "$tmp" "$FLEET_DIR/$SESSION.json" 2>/dev/null
+  mv -f "$tmp" "$FLEET_DIR/$SESSION.json" 2>/dev/null || _dbg "write: could not move $tmp into place"
 else
+  _dbg "write: jq could not build the record for $SESSION ($EVENT)"
   rm -f "$tmp" 2>/dev/null
 fi
 

@@ -185,6 +185,51 @@ function ownedBy(o, sock, zScope) {
   if (o.sock) return o.sock === sock;
   return !!o.zellij && o.zellij === zScope;
 }
+// ── a conversation sent to the background goes on under another id ───────────
+// Claude Code's /background (or ← into its agent view) ends a transcript with a
+// `continued-in` line naming the id it goes on under, run by another process while the
+// pane shows it. A record from before the hand-off still points at the old transcript,
+// and a card built from it shows a conversation that stopped — its last line, its age,
+// its last status — while the pane beside it is working. The line is evidence, so it is
+// followed (bin/fleet-read does the same): to the successor's own record when it has one,
+// else to its transcript, which sits beside the old one. Only the tail is read, and only
+// when the file has changed size since the last poll — transcripts here run to 100MB+.
+const contCache = new Map();   // transcript -> { size, next }
+function continuedIn(tr) {
+  let size = -1;
+  try { size = fs.statSync(tr).size; } catch { return ''; }
+  const hit = contCache.get(tr);
+  if (hit && hit.size === size) return hit.next;
+  let next = '';
+  try {
+    const fd = fs.openSync(tr, 'r');
+    try {
+      const n = Math.min(size, 65536), buf = Buffer.alloc(n);
+      fs.readSync(fd, buf, 0, n, size - n);
+      const all = [...buf.toString('utf8').matchAll(/"continuedInSessionId":"([0-9a-fA-F-]{36})"/g)];
+      if (all.length) next = all[all.length - 1][1];
+    } finally { fs.closeSync(fd); }
+  } catch {}
+  contCache.set(tr, { size, next });
+  return next;
+}
+function followContinued(o) {
+  for (let i = 0; o && o.transcript && i < 5; i++) {
+    const next = continuedIn(o.transcript);
+    if (!next || next === o.session_id) break;
+    const tr = path.join(path.dirname(o.transcript), `${next}.jsonl`);
+    if (!fs.existsSync(tr)) break;
+    let rec = null;
+    try { rec = JSON.parse(fs.readFileSync(path.join(FLEET_DIR, `${next}.json`), 'utf8')); } catch {}
+    // Its own record is on this fleet only if it says so; a successor with no record (or one
+    // that claimed nothing) keeps the identity it was handed, and has no status of its own
+    // yet — '' lets the pane decide, rather than replaying the old conversation's.
+    o = (rec && rec.sock === o.sock) ? rec
+      : { ...o, session_id: next, transcript: tr, status: '', continued_from: o.session_id };
+  }
+  return o;
+}
+
 function fleetBySlot() {
   // Index by slot, scoped to THIS fleet, keeping the newest entry per slot (avoids a
   // stale/duplicate file shadowing the live one).
@@ -200,6 +245,7 @@ function fleetBySlot() {
       if (!prev || (o.ts || 0) > (prev.ts || 0)) map.set(o.slot, o);
     } catch {}
   }
+  for (const [k, o] of map) map.set(k, followContinued(o));
   return map;
 }
 
@@ -309,9 +355,17 @@ const preview = (t) => String(t == null ? '' : t)
   .replace(/(^|[^A-Za-z0-9])\*\*(\S(?:[\s\S]*?\S)?)\*\*/g, '$1$2')
   .replace(/(^|[^A-Za-z0-9])\*([^\s*](?:[\s\S]*?\S)?)\*/g, '$1$2')
   .replace(/\s+/g, ' ').trim();
+// ONE LINE CAN BE BIGGER THAN THE WINDOW. Claude Code writes `attachment` records carrying
+// the whole system prompt and tool schemas — 184KB measured, in a conversation sent to the
+// background, written after its last reply — so a 64KB tail can hold no reply at all and
+// the card read as blank beside a session that had just answered. One wider look, only on
+// that miss: the poll's common case still reads 64KB.
 function lastAssistant(p) {
   if (!p) return '';
-  const lines = tailText(p).split('\n').filter(Boolean);
+  return lastAssistantIn(tailText(p)) || lastAssistantIn(tailText(p, 1048576));
+}
+function lastAssistantIn(txt) {
+  const lines = txt.split('\n').filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
       const o = JSON.parse(lines[i]);
@@ -681,7 +735,7 @@ function recordFor(pane, pid) {
       if (o && o.pane === pane && o.sock === SOCK && (!best || (o.ts || 0) > (best.ts || 0))) best = o;
     }
   } catch {}
-  if (best) return best;
+  if (best) return followContinued(best);
   let pids = [pid];
   try {
     pids = pids.concat(execFileSync('pgrep', ['-P', pid], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
@@ -693,9 +747,9 @@ function recordFor(pane, pid) {
     if (!sid) continue;
     const o = read(path.join(FLEET_DIR, `${sid}.json`));
     // A record on ANOTHER fleet is not this pane's, whatever id it carries.
-    if (o && (!o.sock || o.sock === SOCK)) return o;
-    return { session_id: sid, cwd: note.cwd || '',
-             transcript: note.cwd ? path.join(PROJECTS, encCwd(note.cwd), `${sid}.jsonl`) : '' };
+    if (o && (!o.sock || o.sock === SOCK)) return followContinued(o);
+    return followContinued({ session_id: sid, cwd: note.cwd || '',
+             transcript: note.cwd ? path.join(PROJECTS, encCwd(note.cwd), `${sid}.jsonl`) : '' });
   }
   return null;
 }
