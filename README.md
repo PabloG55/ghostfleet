@@ -108,7 +108,7 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | **[docs/mobile.md](docs/mobile.md)** · **[web/README.md](web/README.md)** | The phone client — the design argument, and the client itself |
 | **[docs/jarvis.md](docs/jarvis.md)** | **Jarvis, one session above every fleet.** `ghostfleet jarvis`, the digest it reads instead of polling, the confirm-list the tools enforce, conversation mode on the phone (transcribed on the Mac), and its daily fresh start |
 | **[docs/stack-view.md](docs/stack-view.md)** | Why the stack is nested attaches and not `join-pane`, and what was measured to find out |
-| **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex` and `opencode` beside `claude` — the measured capability matrix (hooks, MCP, skill, resume) and what picking a non-default agent costs |
+| **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex`, `opencode` and `agy` beside `claude` — the measured capability matrix (hooks, MCP, skill, resume) and what picking a non-default agent costs |
 | **[docs/attachments.md](docs/attachments.md)** | Sending a photo from the phone: what was measured per agent, why the bytes are converted on the Mac rather than the phone, and the two recommendations the build overturned |
 | **[docs/agent-council.md](docs/agent-council.md)** | Would a second agent checking the first one's work reduce iteration? Measured against 3,494 real turns and this repo's own history: misread intent is the *smallest* correction category, three quarters of the rest are found by a human looking at a screen, and a browser-based verifier would have passed the bug it was built for |
 | **[docs/ROADMAP.md](docs/ROADMAP.md)** · **[docs/IDEAS.md](docs/IDEAS.md)** | What is next, and what is only an idea |
@@ -125,7 +125,7 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below). With no terminal attached it has nobody to ask, so a piped or CI install prints the command instead — pass `--yes` there and it installs without prompting |
 | `jq` | the installer wires the hooks and MCP entries with it, and the status hook parses its payload with it. **macOS 26 already ships it** (`/usr/bin/jq`); anywhere it is missing the installer offers to install it |
 | macOS, Linux, or **Windows via WSL2** | sessions are tmux servers, and tmux is POSIX-only — see the native-Windows note below |
-| `codex` / `opencode` (optional) | alternative agents, chosen per worktree on the `w` form. Their pane signals are detected separately — see [docs/multi-agent-sessions.md](docs/multi-agent-sessions.md) |
+| `codex` / `opencode` / `agy` (optional) | alternative agents, chosen per worktree on the `w` form. Their pane signals are detected separately — see [docs/multi-agent-sessions.md](docs/multi-agent-sessions.md) |
 | `$EDITOR` (optional, default `nvim .`) | what `Ctrl-n`'s editor tab opens. Any editor works — override with `CLAUDE_FLEET_EDITOR`. With neither set and no Neovim new enough for LazyVim (0.11.2+), the installer offers the official Neovim release (under `~/.local`) and, only where there is no `~/.config/nvim` yet, the LazyVim starter |
 | `tailscale` (optional) | **only** for the phone client, and only off-LAN: it is how `fleet-serve` is reachable without exposing a port — see [docs/mobile.md](docs/mobile.md) |
 | `zellij` (optional) | not required, but the included layout gives you one pane that frees `Ctrl-s`/arrows from its own bindings |
@@ -278,7 +278,8 @@ guard that stops Claude Code's built-in `EnterWorktree` from walking a fleet ses
 checkout (it is *appended* to `PreToolUse`, so hooks you already have there survive); **registers the
 fleet MCP server** into each config dir's `.claude.json` via `claude mcp add -s user` (Claude Code
 reads MCP from `.claude.json`/`.mcp.json`, *not* `settings.json`) **and once, globally, for
-`codex` and `opencode`**, which keep one config each and have no per-profile equivalent;
+`codex`, `opencode` and `agy`**, which keep one config each and have no per-profile equivalent
+(agy also gets the event bridge and the skill, both under `~/.gemini/config/`);
 installs the `ghostfleet-orchestrate` skill; and links the zellij layout. Re-run any time; it's idempotent.
 
 <details>
@@ -417,7 +418,7 @@ and the `ghostfleet` entry under `mcpServers` from `settings.json` (or restore a
 (`claude mcp remove -s user ghostfleet` does it), and delete
 `skills/ghostfleet-orchestrate`.
 
-**codex and opencode** — these are registered ONCE, globally, not per profile (see the
+**codex, opencode and agy** — these are registered ONCE, globally, not per profile (see the
 comment above `register_codex_mcp` in `install.sh` for why that is correct rather than a
 shortcut):
 
@@ -426,6 +427,9 @@ codex mcp remove ghostfleet                                    # ~/.codex/config
 tmp=$(mktemp); jq 'del(.mcp.ghostfleet)' ~/.config/opencode/opencode.jsonc > "$tmp" \
   && mv "$tmp" ~/.config/opencode/opencode.jsonc              # opencode's MCP entry
 rm -f ~/.config/opencode/plugin/ghostfleet-event.js            # opencode's event bridge
+for f in hooks mcp_config; do tmp=$(mktemp); jq 'del(.ghostfleet, .mcpServers.ghostfleet)' \
+  ~/.gemini/config/$f.json > "$tmp" && mv "$tmp" ~/.gemini/config/$f.json; done  # agy's bridge + MCP
+rm -f ~/.gemini/config/skills/ghostfleet-orchestrate             # agy's skill
 ```
 
 Then delete the symlinks in `~/.local/bin`, `rm -rf ~/.local/libexec/ghostfleet`, and

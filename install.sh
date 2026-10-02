@@ -599,7 +599,7 @@ CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fle
          fleet-clean fleet-open fleet-restart fleet-project fleet-demo fleet-phone fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-hibernate fleet-meter.mjs fleet-review
          fleet-digest fleet-jarvis fleet-update
-         agent-here opencode-here codex-here)
+         agent-here opencode-here codex-here agy-here)
 linked=()
 for b in "${CF_BINS[@]}"; do
   if [ -e "$FLEET_HOME/bin/$b" ]; then ln -sf "$FLEET_HOME/bin/$b" "$BIN_DIR/$b"; linked+=("$b")
@@ -837,8 +837,50 @@ register_opencode_mcp() {
     echo "  Add this to it by hand:  \"mcp\": { \"ghostfleet\": { \"type\": \"local\", \"command\": [\"node\", \"$mcp\"] } }"
   fi
 }
+# agy keeps everything the fleet installs under ONE global customization root,
+# ~/.gemini/config/ — hooks.json, mcp_config.json and skills/<name>/SKILL.md, all three
+# read off the binary's own embedded docs (agy 1.2.14). So unlike the two above it gets
+# all three halves from one function: the event bridge, the tools, and the skill.
+#   Every write is a jq MERGE under our own key, never an assignment over the file: these
+# are the user's files, and other hooks and servers legitimately live in them. `-s` with
+# `.[0] // {}` because a fresh install leaves mcp_config.json at ZERO bytes, which plain
+# jq reads as no input at all and answers with nothing — writing an empty file back.
+register_agy() {
+  local mcp="$FLEET_HOME/mcp/fleet-mcp.mjs" bridge="$FLEET_HOME/hooks/agy-fleet-event.sh"
+  if ! command -v agy >/dev/null 2>&1; then
+    vsay "· agy not installed — skipping its event bridge and MCP (fleet-spawn --agent agy will refuse until it is)"
+    return 0
+  fi
+  local dir="${AGY_CONFIG_DIR:-$HOME/.gemini/config}" f t
+  if ! mkdir -p "$dir/skills" 2>/dev/null; then
+    echo "! could not create $dir — agy workers get no fleet events, tools or skill"
+    return 0
+  fi
+  ln -sfn "$FLEET_HOME/skill/ghostfleet-orchestrate" "$dir/skills/ghostfleet-orchestrate"
+  # hooks.json: top-level keys are NAMED hooks, merged across files by agy, so ours is one
+  # key and re-installing replaces it rather than stacking copies. The command runs under
+  # `sh -c`, so the path is single-quoted ($q) for a FLEET_HOME with a space in it.
+  local ours='{ ghostfleet: {
+      PreInvocation: [ { type: "command", command: ($q + $b + $q + " PreInvocation"), timeout: 10 } ],
+      Stop:          [ { type: "command", command: ($q + $b + $q + " Stop"),          timeout: 10 } ] } }'
+  f="$dir/hooks.json"; t="$(mktemp)"
+  if { [ -s "$f" ] && jq --arg b "$bridge" --arg q "'" ". + $ours" "$f" > "$t" 2>/dev/null; } \
+     || { [ ! -s "$f" ] && jq -n --arg b "$bridge" --arg q "'" "$ours" > "$t"; }; then
+    mv "$t" "$f"; vsay "✓ wrote the ghostfleet event bridge -> $f (agy, global)"
+  else
+    rm -f "$t"; echo "! $f is not readable as JSON, so it was left alone — agy workers fall back to pane-only detection"
+  fi
+  f="$dir/mcp_config.json"; t="$(mktemp)"
+  if { [ -s "$f" ] && jq --arg m "$mcp" '.mcpServers = ((.mcpServers // {}) + { ghostfleet: { command: "node", args: [$m] } })' "$f" > "$t" 2>/dev/null; } \
+     || { [ ! -s "$f" ] && jq -n --arg m "$mcp" '{ mcpServers: { ghostfleet: { command: "node", args: [$m] } } }' > "$t"; }; then
+    mv "$t" "$f"; vsay "✓ wrote ghostfleet MCP -> $f (agy, global)"
+  else
+    rm -f "$t"; echo "! $f is not readable as JSON, so it was left alone — agy gets no fleet_* tools"
+  fi
+}
 register_codex_mcp
 register_opencode_mcp
+register_agy
 
 # --- PATH hint ---------------------------------------------------------------
 case ":$PATH:" in

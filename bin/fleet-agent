@@ -321,10 +321,64 @@ agent_field() {
         verified)   printf 'yes' ;;
         *) return 1 ;;
       esac ;;
+    agy)
+      # Google's Antigravity CLI, measured 2026-10-01 against agy 1.2.14, signed in, in
+      # tmux panes at 30, 40, 56, 80, 120, 140 and 200 columns. Its configuration root is
+      # ~/.gemini/config/, and that one directory holds all three things the fleet installs:
+      # hooks.json, mcp_config.json and skills/<name>/SKILL.md.
+      case "$f" in
+        bin)        printf 'agy' ;;
+        launcher)   printf 'agy-here' ;;
+        # THE SPINNER, NOT THE FOOTER. The obvious signal is the footer, which reads
+        # "esc to cancel" while a turn runs and "? for shortcuts" when idle — and it stays
+        # "esc to cancel" WHILE A PERMISSION DIALOG IS UP, so a footer regex would paint a
+        # worker that is waiting on a human as working. The spinner line is the one thing
+        # present in every working frame and absent from the dialog: one of eight braille
+        # frames AT COLUMN 0, then exactly two spaces, then the phase ("Generating...",
+        # "Running command...", or a line of the model's own thinking). Measured: every
+        # working frame at every width carried it (366 frames, all eight glyphs, always two
+        # spaces), no idle frame and no dialog frame did.
+        #   COLUMN 0 is the prose guard. agy indents its own output by two ("  The task
+        # requires…"), so a model writing about a spinner cannot put one at the margin. A
+        # narrow pane does wrap some lines to column 0 ("expand)" at 40 columns), but a
+        # wrap would have to land a braille glyph and two spaces exactly there.
+        #   Alternation rather than a [⣾…] class, so a C-locale grep does not read the
+        # class as bytes.
+        busy_re)    printf '%s' '^(⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)  ' ;;
+        busy_re_js) printf '%s' '^(?:⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)  ' ;;
+        # The two dialogs a worker can stop on. The tool prompt ("Requesting permission
+        # for: / touch notes.txt / Run this command?") only appears with CLAUDE_FLEET_YOLO=0,
+        # and the folder-trust one is pre-answered by agy-here under yolo — so either one on
+        # a pane means a human really is needed.
+        blocked_re) printf '%s' 'Requesting permission for:|Do you trust the contents of this project' ;;
+        # The idle footer, at every width measured. NOT the "> " composer line, which is
+        # also drawn under the trust dialog's menu ("> Yes, I trust this folder") — a false
+        # ready would fire fleet-spawn's prompt into that dialog.
+        ready_re)   printf '%s' '^\? for shortcuts' ;;
+        # EMPTY: -p/--print is a oneshot prompt, not a review — same as claude's.
+        review)     printf '' ;;
+        # hooks/agy-fleet-event.sh, registered in ~/.gemini/config/hooks.json: Stop -> done,
+        # the first PreInvocation of a turn -> working. agy has no permission-asked event, so
+        # a tool prompt is seen only on the pane — through blocked_re above.
+        hooks)      printf 'yes' ;;
+        mcp)        printf 'yes' ;;   # ~/.gemini/config/mcp_config.json
+        # The one non-claude agent that also gets the INSTRUCTIONS: agy discovers skills from
+        # ~/.gemini/config/skills/<name>/SKILL.md, which is where install.sh links it.
+        skill)      printf 'yes' ;;
+        # YES, measured by CALLING it, the way opencode's was: with the server registered in
+        # mcp_config.json and CLAUDE_FLEET_SOCK exported, `agy -p` called fleet_list with NO
+        # arguments and got the live fleet back, the calling session marked "(you)". So agy
+        # hands its MCP children its own environment — unlike codex.
+        mcp_self)   printf 'yes' ;;
+        budget)     printf 'no'  ;;   # the footer carries the model, not a usage figure
+        resume)     printf 'yes' ;;   # -c is cwd-scoped and survives a pane kill (agy-here)
+        verified)   printf 'yes' ;;
+        *) return 1 ;;
+      esac ;;
     *) return 1 ;;
   esac
 }
-KNOWN_AGENTS="claude opencode codex"
+KNOWN_AGENTS="claude opencode codex agy"
 
 is_agent() { case " $KNOWN_AGENTS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
@@ -390,10 +444,15 @@ set -- ${ARGS[@]+"${ARGS[@]}"}
 
 case "$cmd" in
   list)      printf '%s\n' $KNOWN_AGENTS ;;
+  # EXIT 0 WHATEVER IS MISSING. Written as `command -v … && printf` in the loop, the status
+  # was the LAST agent's: absent, and the whole command exited 1. fleet-grid treats a failed
+  # run as "no adapter here" and falls back to claude alone, so the moment a fourth agent was
+  # appended to the list, every machine without it lost the other two from both pickers.
   installed)
     for a in $KNOWN_AGENTS; do
-      command -v "$(agent_field "$a" bin)" >/dev/null 2>&1 && printf '%s\n' "$a"
-    done ;;
+      if command -v "$(agent_field "$a" bin)" >/dev/null 2>&1; then printf '%s\n' "$a"; fi
+    done
+    exit 0 ;;
   # WHAT A UI HAS TO WARN ABOUT, in one place because there are now three UIs that must
   # say the same thing (the phone's add-project sheet, the phone's project settings, and
   # the TUI's `,` page). COMPOSED from the capability fields rather than written out per

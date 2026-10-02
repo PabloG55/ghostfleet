@@ -1,0 +1,40 @@
+● Bash(sleep 8; echo done) (ctrl+o to expand)
+
+▸ Thought for 4s, 837 tokens
+  Git worktrees efficiently address this by allowing multiple working direct...
+  ### Git Worktrees
+
+  A Git worktree allows you to check out and work on multiple branches of the
+  same repository simultaneously in separate directories on your filesystem.
+
+  Traditionally, switching branches requires stashing uncommitted changes,
+  making temporary "WIP" commits, or cloning the entire repository into a
+  separate folder. Making separate clones wastes disk space and network
+  bandwidth because it duplicates git history and object storage.
+
+  Git worktrees solve this by letting linked working directories share a
+  single underlying .git repository. Each worktree functions as an
+  independent workspace attached to its own branch while sharing the same
+  commit database, remotes, and reflog.
+
+  #### Key Benefits
+
+  • Seamless Context Switching: Switch to urgent hotfixes on main without
+  interrupting, stashing, or context-switching unfinished work on your
+  feature branch.
+  • Parallel Workflows: Run long-running test suites, dev servers, or builds
+  in one directory while continuing active development in another.
+  • Resource Efficiency: Shares the existing .git directory, avoiding
+  duplicate packfiles and multi-gigabyte clones.
+
+  #### Essential Commands
+
+  • Add a worktree: git worktree add ../hotfix-branch hotfix
+  • List active worktrees: git worktree list
+  • Remove a worktree: git worktree remove ../hotfix-branch
+
+────────────────────────────────────────────────────────────────────────────────
+>
+────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                          Gemini 3.8 Flash · high
+

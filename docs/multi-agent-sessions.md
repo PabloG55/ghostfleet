@@ -104,13 +104,16 @@ nothing on screen to say why.
 wiring landed, because the cost of the choice is the part that had to be established rather
 than guessed:
 
-| | claude | opencode | codex |
-|---|---|---|---|
-| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ❌ **nothing** |
-| ghostfleet MCP registered | ✅ per profile, in `.claude.json` | ✅ `opencode.jsonc` | ✅ `~/.codex/config.toml` |
-| …and a call with no `project` finds its own fleet | ✅ | ✅ | ❌ **name it every time** |
-| orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ❌ |
-| resume across a pane kill | ✅ | ✅ | ❌ |
+| | claude | opencode | codex | agy |
+|---|---|---|---|---|
+| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ❌ **nothing** | ✅ `~/.gemini/config/hooks.json` (done + working; no permission event) |
+| ghostfleet MCP registered | ✅ per profile, in `.claude.json` | ✅ `opencode.jsonc` | ✅ `~/.codex/config.toml` | ✅ `~/.gemini/config/mcp_config.json` |
+| …and a call with no `project` finds its own fleet | ✅ | ✅ | ❌ **name it every time** | ✅ |
+| orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ❌ | ✅ `~/.gemini/config/skills/` |
+| resume across a pane kill | ✅ | ✅ | ❌ | ✅ |
+
+agy was added on 2026-10-01 and measured the same way — see [agy](#agy-antigravity-cli)
+below.
 
 The MCP row went green for all three on 2026-08-27, and the row under it is what that did
 *not* buy. **MCP gives tools; hooks give push events**, and one is not a substitute for the
@@ -153,6 +156,8 @@ master never reaches the inbox reads as broken rather than as degraded.
 | OpenCode launch/resume | `bin/opencode-here` |
 | Codex launch | `bin/codex-here` |
 | OpenCode → fleet events | `hooks/opencode-fleet-event.js` |
+| agy launch/resume | `bin/agy-here` |
+| agy → fleet events | `hooks/agy-fleet-event.sh` |
 
 A session's agent is recorded in `<sock>.<session>.agent`, alongside the existing
 `.parked` / `.sched` / `.notify-lead` markers and socket-namespaced for the same
@@ -426,3 +431,73 @@ instructions for using them.
 session and lives as long as it, so a session open when the installer ran keeps the server
 it started with. `install.sh` says this in its own output, because the person who needs it
 has usually just re-run the installer to fix exactly this.
+
+## agy (Antigravity CLI)
+
+Measured 2026-10-01 against **agy 1.2.14** on macOS, signed in, in tmux panes at 30, 40,
+56, 80, 120, 140 and 200 columns. Everything below was observed, not read off docs; where
+agy's own embedded docs disagreed with the binary, the binary won.
+
+**One configuration root.** agy reads `~/.gemini/config/` globally: `hooks.json`,
+`mcp_config.json` and `skills/<name>/SKILL.md`. So `install.sh`'s `register_agy` gives it
+all three halves from one place — events, tools and the orchestrate skill — which makes it
+the one non-claude agent with the skill. `fleet-agent caveat agy` is empty.
+
+**Events.** agy has lifecycle hooks (`PreToolUse`, `PostToolUse`, `PreInvocation`,
+`PostInvocation`, `Stop`), JSON on stdin, JSON expected on stdout. `hooks/agy-fleet-event.sh`
+translates the two that matter into the payload `hooks/fleet-event.sh` already reads and
+pipes it through, so the inbox, sub-lead routing, lead wake and reply-to relay are the same
+code for every agent:
+
+| agy event | fleet event |
+|---|---|
+| `PreInvocation`, `invocationNum` 0 | `UserPromptSubmit` → working, un-park |
+| `PreInvocation`, later | working |
+| `Stop`, `terminationReason` contains "error" | `need-you` |
+| `Stop`, otherwise | `ready` + `done` |
+
+Measured with a probe hook: one turn that called three tools fired `PreInvocation` with
+`invocationNum` 0, 1, 2, 3 and then one `Stop` with `terminationReason: "NO_TOOL_CALL"` —
+upper case, where the embedded docs say `model_stop`. The hook inherits the session's
+environment (`CLAUDE_FLEET_SOCK`, `CLAUDE_FLEET_SLOT`, `$TMUX`, `$TMUX_PANE` all arrived).
+**There is no permission-asked event**, so a tool prompt is seen only on the pane.
+
+Two traps, both measured:
+
+- **A `PreToolUse` handler that prints `{}` denies the tool.** `decision` is required, and
+  every tool call in the probe session came back "tool call denied by pre-tool hook". The
+  bridge registers no `PreToolUse`, and the suite asserts it stays that way.
+- **agy's own transcript is not Claude's shape** (one step per line, the model's text in a
+  `PLANNER_RESPONSE` step's `content`), so the bridge writes the turn's last response into a
+  fleet-side `<sock>.<slot>.agy.jsonl` in the shape the grid reads, as the opencode bridge does.
+
+**The pane.**
+
+```
+⣟  The system ensures safety by preventing simultaneo...      <- working: spinner at column 0
+esc to cancel                    Gemini 3.8 Flash · high       <- footer while a turn runs
+? for shortcuts                  Gemini 3.8 Flash · high       <- footer when idle
+```
+
+The footer is the obvious busy signal and the wrong one: it **still says `esc to cancel`
+while a permission dialog waits on a human**, so it reads a blocked worker as working. The
+spinner line is present in every working frame (366 of them, all eight braille glyphs,
+always followed by two spaces) and absent from the dialog, so `busy_re` is the spinner at
+column 0. agy indents its own prose by two, which is what keeps a model writing *about* a
+spinner from matching. `blocked_re` is the dialog's `Requesting permission for:` or the
+trust prompt; `ready_re` is the idle footer — not the `> ` composer, which the trust dialog
+also draws.
+
+**Resume.** `agy -c` is cwd-scoped (codeword in repoA, newer conversation in repoB, `-c`
+from each answered with its own) and survives a pane kill (codeword planted in a TUI pane,
+tmux server killed, `-c` recalled it). `agy --conversation <id>` with an id that does not
+exist **warns and starts a fresh conversation, exit 0**, so `agy-here` checks for
+`conversations/<id>.db` and refuses instead.
+
+**Trust.** Every folder agy has not seen opens on "Do you trust the contents of this
+project?", `--dangerously-skip-permissions` does not cover it, and trust is **not**
+inherited — a fresh folder under an already-trusted `$HOME` still asked. Every new worktree
+would therefore come up on the dialog and have its brief typed into it, so under yolo
+`agy-here` appends the worktree's physical path to `trustedWorkspaces`, the same answer the
+dialog records — the shape `codex-here` already uses for codex's trust table.
+

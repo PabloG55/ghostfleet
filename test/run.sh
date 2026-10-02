@@ -603,7 +603,7 @@ is "explicit claude beats project's"   "/c/foo|w|claude"   "$(sc "/c/foo${US}w${
 # ── 2. pane detectors, both directions ───────────────────────────────────────
 # A regex that never fires looks exactly like a worker that is never busy.
 group "pane detectors (busy_re)"
-for a in claude opencode codex; do
+for a in claude opencode codex agy; do
   re="$("$ROOT/bin/fleet-agent" field "$a" busy_re 2>/dev/null)"
   # A DETECTOR THAT IS NOT THERE IS A RED ROW, NOT A SKIP. This read "no detector
   # declared" and skipped, which is a sentence about the config and was in fact a
@@ -648,6 +648,49 @@ jsm() { node -e '
 ' "$1" "$2"; }
 is "claude(js): matches the 56-col BUSY pane" "1" "$(jsm "$jsre" "$FIX/claude-busy-narrow.txt")"
 is "claude(js): silent on the 56-col IDLE pane" "0" "$(jsm "$jsre" "$FIX/claude-idle-narrow.txt")"
+
+# agy, at every width it was captured at (30, 56, 80, 200), in both dialects. The trap this
+# detector was shaped by is the LAST block: agy's footer says "esc to cancel" for the whole
+# of a turn AND while a permission dialog waits on a human, so the obvious regex read a
+# blocked worker as working. The fixtures carry that footer — asserted, so a recapture that
+# lost it cannot quietly turn the trap row into a formality.
+group "agy detectors: every width, and a dialog is not work"
+af()  { "$ROOT/bin/fleet-agent" field agy "$1" 2>/dev/null; }
+has() { [ "$(matches "$1" "$2")" -ge 1 ] && echo 1 || echo 0; }
+# Its own copy of the group above's jsm, because a filtered run carries only this group's
+# text and would report "jsm: command not found" as eight red rows about regexes.
+agjs() { node -e '
+  const fs=require("fs"), re=new RegExp(process.argv[1],"i");
+  console.log(String(fs.readFileSync(process.argv[2],"utf8").split("\n").filter(l=>re.test(l)).length ? 1 : 0));
+' "$1" "$2"; }
+are="$(af busy_re)"; ajs="$(af busy_re_js)"; abl="$(af blocked_re)"; ard="$(af ready_re)"
+is "agy declares all four pane signals" "yes" \
+   "$([ -n "$are" ] && [ -n "$ajs" ] && [ -n "$abl" ] && [ -n "$ard" ] && echo yes || echo no)"
+for w in "" -30col -56col -wide; do
+  b="$FIX/agy-busy$w.txt"; i="$FIX/agy-idle$w.txt"
+  is "agy${w:- 80col}: matches the BUSY pane"     "1" "$(has "$are" "$b")"
+  is "agy${w:- 80col}: silent on the IDLE pane"   "0" "$(has "$are" "$i")"
+  is "agy(js)${w:- 80col}: matches the BUSY pane" "1" "$(agjs "$ajs" "$b")"
+  is "agy(js)${w:- 80col}: silent on the IDLE"    "0" "$(agjs "$ajs" "$i")"
+  is "agy${w:- 80col}: the IDLE pane is ready"    "1" "$(has "$ard" "$i")"
+  is "agy${w:- 80col}: the BUSY pane is not"      "0" "$(has "$ard" "$b")"
+  is "agy${w:- 80col}: neither one is blocked"    "0" "$( [ "$(has "$abl" "$b")$(has "$abl" "$i")" = 00 ] && echo 0 || echo 1)"
+done
+for f in agy-permission.txt agy-permission-56col.txt; do
+  is "$f: carries the busy footer (the trap)"   "1" "$(has '^esc to cancel' "$FIX/$f")"
+  is "$f: is NOT read as busy"                  "0" "$(has "$are" "$FIX/$f")"
+  is "$f: ...in JS either"                      "0" "$(agjs "$ajs" "$FIX/$f")"
+  is "$f: IS read as blocked"                   "1" "$(has "$abl" "$FIX/$f")"
+  is "$f: and not as ready"                     "0" "$(has "$ard" "$FIX/$f")"
+done
+# The trust dialog draws "> Yes, I trust this folder" — the same "> " the composer uses —
+# so ready_re keys on the idle footer instead, and a false ready here would type the
+# worker's brief into the dialog.
+is "agy trust dialog: blocked"                  "1" "$(has "$abl" "$FIX/agy-trust.txt")"
+is "agy trust dialog: not ready"                "0" "$(has "$ard" "$FIX/agy-trust.txt")"
+is "agy trust dialog: not busy"                 "0" "$(has "$are" "$FIX/agy-trust.txt")"
+# Alternation, not a [⣾…] class, so a C-locale grep still matches the glyphs as strings.
+is "agy busy_re holds in the C locale"          "1" "$([ "$(LC_ALL=C grep -cE -- "$are" "$FIX/agy-busy-56col.txt" || true)" -ge 1 ] && echo 1 || echo 0)"
 
 # The governor scrapes the 5h usage % out of the same pane, and Claude TRUNCATES its
 # status line rather than wrapping it — so below ~100 columns the figure is simply not
@@ -1694,7 +1737,7 @@ done
 # Every agent has the TOOLS now, which is the change; the fields below are where they differ.
 is "all three have the fleet_* tools" "yes" \
    "$([ "$(fa field claude mcp)" = yes ] && [ "$(fa field opencode mcp)" = yes ] && [ "$(fa field codex mcp)" = yes ] && echo yes || echo no)"
-is "...and only claude has the skill" "claude" \
+is "...and only claude and agy have the skill" "claudeagy" \
    "$(for a in $(fa list); do [ "$(fa field "$a" skill)" = yes ] && printf '%s' "$a"; done)"
 is "...and only codex needs a project" "codex" \
    "$(for a in $(fa list); do [ "$(fa field "$a" mcp_self)" = no ] && printf '%s' "$a"; done)"
@@ -1702,6 +1745,9 @@ is "...and only codex needs a project" "codex" \
 # them. Both directions, because a composer that always returned text would be as useless
 # as one that never did: the fully-capable agent must come back EMPTY.
 is "claude gives up nothing"          ""  "$(fa caveat claude)"
+# agy measured at parity on every field the caveat reads: hooks, tools, its own fleet, the
+# skill, and a resume that survives a pane kill.
+is "agy gives up nothing either"      ""  "$(fa caveat agy)"
 # THE CLAUSE THAT HAD TO GO. Both of these said "no fleet_* tools" until the MCP server was
 # registered for them; asserting its ABSENCE is what stops it coming back by accident.
 is "opencode: tools, not a warning"   "0" "$(fa caveat opencode | grep -c 'no fleet_\* tools' || true)"
@@ -1719,6 +1765,10 @@ is "an unknown agent is refused"      "1" "$(fa caveat nosuch >/dev/null 2>&1; e
 # `installed` is what the pickers offer from, and it is a SUBSET of `list` — an option
 # that cannot run is worse than a missing one, because picking it leaves the next master
 # dead at `exec agent-here` with nothing on screen to say why.
+# ...and it SUCCEEDS when the last agent in the list is missing. Its status used to be that
+# last agent's, and the grid reads a failure as "no adapter" and offers claude alone.
+is "installed exits 0 with the last agent absent" "0" \
+   "$(PATH="/nowhere" "$(command -v bash)" "$ROOT/bin/fleet-agent" installed >/dev/null 2>&1; echo $?)"
 is "installed is a subset of list" "0" \
    "$(comm -13 <(fa list | sort) <(fa installed | sort) | wc -l | tr -d ' ')"
 
@@ -1877,6 +1927,100 @@ STUB
   rm -rf "$MR"
 fi
 
+# ── agy: one root holds the bridge, the tools and the skill ──────────────────
+# register_agy writes into the user's own ~/.gemini/config, so it is run against a temp
+# dir here, with a stub agy. What matters: every write is a MERGE under our own key (other
+# hooks and servers survive, a re-run does not stack copies), a ZERO-BYTE mcp_config.json —
+# what a fresh agy install leaves — is written rather than read as "no input" and emptied,
+# a file that is not JSON is left alone, and NO PreToolUse handler is registered: agy treats
+# a PreToolUse answer without a `decision` as a denial (measured — every tool call in a
+# probe session came back "tool call denied by pre-tool hook").
+group "agy: the installer, the event bridge and the launcher"
+if ! command -v jq >/dev/null 2>&1; then
+  skip "agy install/bridge/launcher" "jq is not installed"
+else
+  AY="$(cd "$(mktemp -d)" && pwd -P)"
+  sed -n '/^register_agy() {/,/^}/p' "$ROOT/install.sh" >  "$AY/lib.sh"
+  sed -n '/^vsay() {/p'              "$ROOT/install.sh" >> "$AY/lib.sh"
+  is "the agy registrar was extracted"   "1" "$(grep -c '^register_agy() {' "$AY/lib.sh")"
+  mkdir -p "$AY/bin" "$AY/cfg"; printf '#!/bin/sh\nexit 0\n' > "$AY/bin/agy"; chmod +x "$AY/bin/agy"
+  ra() { ( FLEET_HOME="$AY/rt home" AGY_CONFIG_DIR="$AY/cfg" PATH="$AY/bin:$PATH" VERBOSE=1 \
+           bash -c 'set -uo pipefail; source "$0"; register_agy' "$AY/lib.sh" 2>&1 ); }
+  : > "$AY/cfg/mcp_config.json"
+  printf '{"lint":{"Stop":[{"command":"./lint.sh"}]}}\n' > "$AY/cfg/hooks.json"
+  ra >/dev/null; out="$(ra)"
+  is "a 0-byte mcp_config.json is written"  "node" "$(jq -r '.mcpServers.ghostfleet.command' "$AY/cfg/mcp_config.json" 2>/dev/null)"
+  is "...pointing at the staged server"     "$AY/rt home/mcp/fleet-mcp.mjs" "$(jq -r '.mcpServers.ghostfleet.args[0]' "$AY/cfg/mcp_config.json" 2>/dev/null)"
+  is "someone else's hook survives"          "./lint.sh" "$(jq -r '.lint.Stop[0].command' "$AY/cfg/hooks.json" 2>/dev/null)"
+  is "ours is one key after two runs"        "2" "$(jq 'keys | length' "$AY/cfg/hooks.json" 2>/dev/null)"
+  is "Stop runs the bridge, path quoted"     "'$AY/rt home/hooks/agy-fleet-event.sh' Stop" "$(jq -r '.ghostfleet.Stop[0].command' "$AY/cfg/hooks.json" 2>/dev/null)"
+  is "PreInvocation too"                     "'$AY/rt home/hooks/agy-fleet-event.sh' PreInvocation" "$(jq -r '.ghostfleet.PreInvocation[0].command' "$AY/cfg/hooks.json" 2>/dev/null)"
+  is "and NO PreToolUse (it would deny)"     "null" "$(jq -c '.ghostfleet.PreToolUse' "$AY/cfg/hooks.json" 2>/dev/null)"
+  is "the skill is linked"                   "$AY/rt home/skill/ghostfleet-orchestrate" "$(readlink "$AY/cfg/skills/ghostfleet-orchestrate")"
+  printf '{ not json\n' > "$AY/cfg/hooks.json"; before="$(cat "$AY/cfg/hooks.json")"
+  out="$(ra)"
+  is "a hooks.json that is not JSON is left alone" "$before" "$(cat "$AY/cfg/hooks.json")"
+  is "...and it says so"                     "1" "$([ "$(grep -c 'left alone' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+  out="$(FLEET_HOME="$AY/rt" AGY_CONFIG_DIR="$AY/cfg2" PATH="$AY/empty" VERBOSE=1 "$(command -v bash)" -c 'set -uo pipefail; source "$0"; register_agy' "$AY/lib.sh" 2>&1)"
+  is "no agy: it says so"                    "1" "$([ "$(grep -c 'agy not installed' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and writes nothing"                 "no" "$([ -e "$AY/cfg2" ] && echo yes || echo no)"
+  # THE SKILL HAS TO PARSE AS STRICT YAML, or agy drops it in silence. Its description was a
+  # plain scalar containing ": " ("Other triggers: …"), which Claude Code tolerates and agy
+  # does not: `Failed to parse skill file …: mapping values are not allowed` in agy's own log,
+  # and the skill simply absent from its list. So: no frontmatter value may be an unquoted
+  # plain scalar with ": " in it. A block scalar (>-) or a quoted string is fine.
+  fmbad="$(awk 'NR==1 && $0!="---"{exit} NR>1 && $0=="---"{exit} NR>1 && /^[A-Za-z_-]+: / {
+             v=$0; sub(/^[A-Za-z_-]+: /, "", v)
+             if (v !~ /^[>|"'\''"]/ && index(v, ": ")) print NR": "substr($0,1,40) }' "$ROOT/skill/ghostfleet-orchestrate/SKILL.md")"
+  is "the skill's frontmatter is strict YAML" "" "$fmbad"
+  is "install.sh calls it"                   "1" "$([ "$(grep -c '^register_agy$' "$ROOT/install.sh")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and links agy-here"                 "1" "$([ "$(grep -c 'agy-here)' "$ROOT/install.sh")" -ge 1 ] && echo 1 || echo 0)"
+
+  # ── the bridge: agy's payload in, fleet-event.sh's record out ─────────────
+  # Payloads shaped exactly like the ones a probe hook recorded from agy 1.2.14.
+  BF="$AY/fleet"; mkdir -p "$BF" "$AY/wt/acme-api"
+  printf '%s\n' '{"step_index":3,"type":"PLANNER_RESPONSE","content":"Ran it; the worktree is ready."}' > "$AY/tr.jsonl"
+  br() { env -u TMUX CLAUDE_FLEET_DIR="$BF" CLAUDE_FLEET_SOCK=cf-agytest CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
+           "$ROOT/hooks/agy-fleet-event.sh" "$1" <<< "$2" 2>/dev/null; }
+  pl() { printf '{"conversationId":"c-1","workspacePaths":["%s"],"transcriptPath":"%s"%s}' "$AY/wt/acme-api" "$AY/tr.jsonl" "$1"; }
+  is "PreInvocation prints {}"               "{}" "$(br PreInvocation "$(pl ',"invocationNum":0')")"
+  is "...and the session reads working"      "working" "$(jq -r .status "$BF/c-1.json" 2>/dev/null)"
+  is "...on its own fleet and slot"          "cf-agytest/w1" "$(jq -r '.sock + "/" + .slot' "$BF/c-1.json" 2>/dev/null)"
+  printf 'x\n' > "$BF/cf-agytest.w1.parked"
+  br PreInvocation "$(pl ',"invocationNum":3')" >/dev/null
+  is "a LATER call in the turn does not un-park" "yes" "$([ -f "$BF/cf-agytest.w1.parked" ] && echo yes || echo no)"
+  br PreInvocation "$(pl ',"invocationNum":0')" >/dev/null
+  is "the turn's FIRST call un-parks"        "no"  "$([ -f "$BF/cf-agytest.w1.parked" ] && echo yes || echo no)"
+  out="$(br Stop "$(pl ',"terminationReason":"NO_TOOL_CALL","fullyIdle":true')")"
+  is "Stop prints {} — never a continue"     "{}" "$out"
+  is "...the session reads ready"            "ready" "$(jq -r .status "$BF/c-1.json" 2>/dev/null)"
+  is "...and the lead's inbox has a done"    "w1 done acme-api" "$(awk -F'\t' '{print $2, $3, $4}' "$BF/cf-agytest.inbox" 2>/dev/null | tail -1)"
+  is "...and the card has the last message"  "Ran it; the worktree is ready." \
+     "$(jq -r '.message.content[0].text' "$(jq -r .transcript "$BF/c-1.json")" 2>/dev/null | tail -1)"
+  br Stop "$(pl ',"terminationReason":"ERROR","error":"quota exhausted"')" >/dev/null
+  is "an ERROR stop is a need-you"           "need-you" "$(jq -r .status "$BF/c-1.json" 2>/dev/null)"
+  is "...with the error in the inbox"        "1" "$([ "$(grep -c 'need-you	agy stopped on an error: quota exhausted' "$BF/cf-agytest.inbox")" -ge 1 ] && echo 1 || echo 0)"
+  out="$(env -u TMUX -u CLAUDE_FLEET_SOCK CLAUDE_FLEET_DIR="$AY/nofleet" "$ROOT/hooks/agy-fleet-event.sh" Stop <<< '{"conversationId":"c-9"}' 2>/dev/null)"
+  is "outside a fleet: {} and nothing else"  "{}|no" "$out|$([ -e "$AY/nofleet" ] && echo yes || echo no)"
+
+  # ── the launcher ────────────────────────────────────────────────────────
+  printf '#!/bin/sh\necho "agy $*"\n' > "$AY/bin/agy"
+  mkdir -p "$AY/st/conversations" "$AY/w t"; : > "$AY/st/conversations/known.db"
+  ah() { ( cd "$AY/w t" && env -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_MODEL -u CLAUDE_FLEET_YOLO \
+           AGY_STATE_DIR="$AY/st" PATH="$AY/bin:$PATH" "$@" "$ROOT/bin/agy-here" w1 2>&1 ); }
+  is "a known id resumes exactly it"         "agy --dangerously-skip-permissions --conversation known" "$(ah CLAUDE_FLEET_RESUME=known | tail -1)"
+  # agy itself would warn, start a FRESH conversation, and exit 0 — measured.
+  is "an unknown id is refused, not guessed" "1" "$(ah CLAUDE_FLEET_RESUME=gone >/dev/null; echo $?)"
+  is "no id: -c, the cwd's own"              "agy --dangerously-skip-permissions -c" "$(ah | tail -1)"
+  is "...and the folder is pre-trusted"      "$AY/w t" "$(jq -r '.trustedWorkspaces[-1]' "$AY/st/settings.json" 2>/dev/null)"
+  ah >/dev/null
+  is "...once, however often it starts"      "1" "$(jq '.trustedWorkspaces | length' "$AY/st/settings.json" 2>/dev/null)"
+  rm -f "$AY/st/settings.json"
+  is "yolo off: no bypass flag"              "agy -c" "$(ah CLAUDE_FLEET_YOLO=0 | tail -1)"
+  is "...and no trust is recorded for it"    "no" "$([ -e "$AY/st/settings.json" ] && echo yes || echo no)"
+  rm -rf "$AY"
+fi
+
 group "fleet-review asks a DIFFERENT model, or says it cannot"
 # WHY THE REFUSALS ARE THE POINT. Exactly one of the three agents ships a non-interactive
 # review, and the tempting fallback — send the diff as an ordinary prompt and print the
@@ -1891,6 +2035,7 @@ is "codex declares a review"        "review" "$(fa field codex review)"
 # field that quietly gained a value would turn a refusal into a spend.
 is "claude declares none"           ""       "$(fa field claude review)"
 is "opencode declares none"         ""       "$(fa field opencode review)"
+is "agy declares none"              ""       "$(fa field agy review)"
 # ...and empty must be DECLARED, not missing: `field` exits 0 for a known agent with no
 # value and non-zero for an unknown one, which is the only thing separating "you spelled
 # it wrong" from "that CLI cannot do this".
@@ -2169,7 +2314,7 @@ agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = 
   else
     printf 'acme-api\t%s/a\twork\n' "$T" > "$T/.config/ghostfleet/projects"
   fi
-  rm -f "$T/bin/claude" "$T/bin/codex" "$T/bin/opencode"
+  rm -f "$T/bin/claude" "$T/bin/codex" "$T/bin/opencode" "$T/bin/agy"
   for a in "$@"; do agent_stub "$a"; done
   agkill
   # PATH IS SET INSIDE THE COMMAND, NOT WITH -e, and that is not a style choice: on this
@@ -2920,7 +3065,8 @@ if command -v node >/dev/null 2>&1; then
   PD="$ROOT/lib/permission-dialog.mjs"
   pdv() { local f="$1"; shift; node "$PD" "$@" < "$ROOT/test/fixtures/$f" >/dev/null 2>&1; echo $?; }
   for f in claude-permission-dialog-sgr.txt claude-permission-bash.txt claude-permission-bash-56col.txt \
-           codex-approval.txt codex-approval-56col.txt opencode-permission.txt opencode-permission-56col.txt; do
+           codex-approval.txt codex-approval-56col.txt opencode-permission.txt opencode-permission-56col.txt \
+           agy-permission.txt agy-permission-56col.txt; do
     is "$f: '1' would approve (11)"          "11" "$(pdv "$f" --text 1)"
     is "$f: Enter would approve"             "11" "$(pdv "$f" --key Enter)"
     is "$f: Escape declines (10)"            "10" "$(pdv "$f" --key Escape)"
@@ -2931,10 +3077,17 @@ if command -v node >/dev/null 2>&1; then
     is "$f: the No option's number declines" "10" "$(pdv "$f" --text 3)"
   done
   is "opencode: a number is not a decline"   "11" "$(pdv opencode-permission.txt --text 3)"
+  # agy's "No" is option 4, and at 56 columns options 2 and 3 wrap to COLUMN 0 — the shape
+  # that made a shared option walk stop at option 2 and lose the decline entirely.
+  for f in agy-permission.txt agy-permission-56col.txt; do
+    is "$f: '4. No, cancel' declines"        "10" "$(pdv "$f" --text 4)"
+    is "$f: '3' (always allow) approves"     "11" "$(pdv "$f" --text 3)"
+  done
   # codex binds letters as well as numbers: "(y)" on option 1 approves just the same.
   is "codex: its letter shortcut approves"   "11" "$(pdv codex-approval.txt --text y)"
   for f in claude-trust.txt codex-trust.txt codex-trust-folder.txt codex-update.txt claude-limit-hit.txt \
-           claude-idle.txt claude-busy.txt claude-idle-quoting-limit.txt codex-idle-home.txt opencode-idle.txt opencode-busy.txt; do
+           claude-idle.txt claude-busy.txt claude-idle-quoting-limit.txt codex-idle-home.txt opencode-idle.txt opencode-busy.txt \
+           agy-trust.txt agy-idle.txt agy-busy.txt agy-idle-56col.txt agy-busy-56col.txt; do
     is "$f: not a permission dialog (0)"     "0"  "$(pdv "$f" --text 1)"
   done
   # A QUOTED dialog is history, not a question: the same Bash dialog, with an idle
@@ -2950,6 +3103,11 @@ if command -v node >/dev/null 2>&1; then
   is "claude file write: names the file"     "1" "$([ "$(pdt claude-permission-dialog-sgr.txt | grep -cF 'Do you want to create hello.txt?')" -ge 1 ] && echo 1 || echo 0)"
   is "codex: prints the exact command"       "1" "$([ "$(pdt codex-approval.txt | grep -cF '$ touch /private/tmp/gf-cap/notes.txt')" -ge 1 ] && echo 1 || echo 0)"
   is "opencode: prints the exact command"    "1" "$([ "$(pdt opencode-permission.txt | grep -cF '$ touch notes.txt')" -ge 1 ] && echo 1 || echo 0)"
+  is "agy: prints the exact command"         "1" "$([ "$(pdt agy-permission-56col.txt | grep -cF 'touch notes.txt')" -ge 1 ] && echo 1 || echo 0)"
+  # An ANSWERED agy dialog is history above its composer ("> " between rules).
+  PQ="$(mktemp)"; cat "$ROOT/test/fixtures/agy-permission.txt" "$ROOT/test/fixtures/agy-idle.txt" > "$PQ"
+  is "agy: a dialog above its composer is quoted" "0" "$(node "$PD" --text 1 < "$PQ" >/dev/null 2>&1; echo $?)"
+  rm -f "$PQ"
   is "...and the way to decline"             "1" "$([ "$(pdt claude-permission-bash.txt | grep -cF 'to decline: "3" (No) or --key Escape')" -ge 1 ] && echo 1 || echo 0)"
 else
   skip "permission dialog detector" "node missing"
@@ -3028,7 +3186,7 @@ if command -v node >/dev/null 2>&1; then
   PD="$ROOT/lib/permission-dialog.mjs"
   fpj() { node "$PD" --fingerprint < "$ROOT/test/fixtures/$1" 2>/dev/null; }
   fpk() { fpj "$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);process.stdout.write(j?j[process.argv[1]]:"null")})' "$2"; }
-  for f in claude-permission-bash.txt codex-approval.txt opencode-permission.txt claude-permission-dialog-sgr.txt; do
+  for f in claude-permission-bash.txt codex-approval.txt opencode-permission.txt claude-permission-dialog-sgr.txt agy-permission.txt; do
     is "$f: a permission prompt"              "permission" "$(fpk "$f" kind)"
   done
   for f in claude-trust.txt codex-trust.txt codex-trust-folder.txt; do
@@ -3041,7 +3199,7 @@ if command -v node >/dev/null 2>&1; then
   done
   # A RESIZE IS NOT A CHANGE: the same dialog at 100 and 56 columns re-wraps (codex breaks a
   # path mid-word), and the phone's poll and the answer can straddle one.
-  for a in claude-permission-bash codex-approval opencode-permission; do
+  for a in claude-permission-bash codex-approval opencode-permission agy-permission; do
     is "$a: same fingerprint at 56 columns"   "$(fpk "$a.txt" fingerprint)" "$(fpk "$a-56col.txt" fingerprint)"
   done
   # ...and different prompts are different.

@@ -1,0 +1,40 @@
+
+      ▄▀▀▄
+     ▀▀▀▀▀▀
+    ▀▀▀▀▀▀▀▀
+   ▄▀▀    ▀▀▄
+  ▄▀▀      ▀▀▄
+
+  Antigravity CLI 1.2.14
+  dev@example.com (Google AI Pro)
+  Gemini 3.8 Flash (High)
+  ~/code/acme-api
+
+─────────────────────────────────────────────────────
+> Run the shell command `touch notes.txt` in this
+  directory. Do not do anything else.
+
+● Bash(touch notes.txt) (ctrl+o to expand)
+
+Command
+────────────────────────────────────────────────────────
+
+Requesting permission for:
+   touch notes.txt
+
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for
+commands that start with 'touch'
+  3. Yes, and always allow for commands that start with
+'touch' (Persist to settings.json)
+  4. No, cancel
+
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel			 Gemini 3.8 Flash · high
+
+
+
+
+
+

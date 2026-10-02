@@ -1,0 +1,40 @@
+
+      ▄▀▀▄
+     ▀▀▀▀▀▀
+    ▀▀▀▀▀▀▀▀
+   ▄▀▀    ▀▀▄
+  ▄▀▀      ▀▀▄
+
+  Antigravity CLI 1.2.14
+  dev@example.com (Google
+  Gemini 3.8 Flash (High)
+  ~/code/acme-api
+
+───────────────────────────
+> Think carefully, then run
+  the shell command `sleep 8;
+  echo done` and wait for it,
+  then write a 200-word
+  explanation of git
+  worktrees.
+
+▸ Thought for 2s, 459 tokens
+  Considering the instruct...
+
+○ Bash(sleep 8; e...) (ctrl+o
+to expand)
+⣯  Running command...
+──────────────────────────────
+>
+──────────────────────────────
+esc to cancel
+
+
+
+
+
+
+
+
+
+

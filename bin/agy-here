@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# agy-here — launch Google's Antigravity CLI (`agy`) *resuming* the conversation that
+# belongs to this checkout, the agy counterpart of claude-here and opencode-here.
+#
+# Usage:  agy-here [slot] [-- extra agy args...]
+#
+# Three ways in, the same three the other launchers have:
+#   CLAUDE_FLEET_FRESH=1     a deliberately NEW conversation (grid `N`)
+#   CLAUDE_FLEET_RESUME=<id> exactly that conversation: `agy --conversation <id>`. The id
+#                            is agy's conversationId, which hooks/agy-fleet-event.sh
+#                            records as the session_id, so fleet-restart can hand it back
+#   neither                  `agy -c`, "continue the most recent conversation"
+#
+# -c IS SCOPED TO THE CWD, measured on 1.2.14 in both directions the way opencode's was:
+# a codeword planted in repoA, a newer conversation in sibling repoB, and `-c` from repoA
+# answered with repoA's codeword while `-c` from repoB answered with repoB's. In a dir
+# with no conversation it starts a fresh one rather than erroring. And unlike codex, the
+# conversation SURVIVES A PANE KILL: planted in a TUI pane, the tmux server killed, and
+# `-c` recalled it — which is the case a fleet's resume exists for.
+#
+# AN EXPLICIT ID IS CHECKED HERE, because agy does not refuse one. Measured:
+# `agy --conversation <an id that does not exist>` prints `warning: conversation "…" not
+# found`, starts a FRESH conversation and exits 0 — exactly the "open something other
+# than what was asked for" that claude-here refuses. Each conversation is one
+# <id>.db in agy's state dir, so its absence is the refusal.
+set -uo pipefail
+
+slot=""
+if [ $# -gt 0 ] && [ "$1" != "--" ]; then
+  slot="$1"; shift
+fi
+[ "${1:-}" = "--" ] && shift
+[ -n "$slot" ] && export CLAUDE_FLEET_SLOT="$slot"
+
+# PRE-TRUST THIS WORKTREE, for the reason codex-here does. agy opens every folder it has
+# not seen on "Do you trust the contents of this project?", and --dangerously-skip-
+# permissions does NOT cover it (measured: the dialog came up with the flag set). Nor is
+# trust inherited — a fresh folder under an already-trusted $HOME still asked. So every
+# worker fleet-spawn makes would come up on the dialog, and the initial prompt would be
+# typed into it. Answering it by hand appends the folder to `trustedWorkspaces` in agy's
+# settings.json; this pre-records that same answer. Only under yolo, append-only, and a
+# no-op when the folder is already there or the file cannot be read as JSON.
+#   `pwd -P` because agy records the physical path (/private/tmp, not /tmp).
+trust_this_dir() {
+  local dir cfg t
+  dir="$(pwd -P 2>/dev/null)" || dir="$PWD"
+  cfg="${AGY_STATE_DIR:-$HOME/.gemini/antigravity-cli}/settings.json"
+  command -v jq >/dev/null 2>&1 || return 0
+  mkdir -p "$(dirname "$cfg")" 2>/dev/null || return 0
+  [ -s "$cfg" ] || printf '{}\n' > "$cfg" 2>/dev/null || return 0
+  jq -e --arg d "$dir" '(.trustedWorkspaces // []) | index($d)' "$cfg" >/dev/null 2>&1 && return 0
+  # Same directory as the target so the mv is a rename: agy may be reading this file from
+  # another pane, and it must never see half of it.
+  t="$(mktemp "$cfg.XXXXXX" 2>/dev/null)" || return 0
+  if jq --arg d "$dir" '.trustedWorkspaces = ((.trustedWorkspaces // []) + [$d])' "$cfg" > "$t" 2>/dev/null; then
+    mv -f "$t" "$cfg"
+  else
+    rm -f "$t"
+  fi
+}
+
+# Bypass mode by default so workers don't stop at every tool prompt, matching how the
+# fleet runs the other agents. agy spells it --dangerously-skip-permissions. Opt out with
+# CLAUDE_FLEET_YOLO=0, the one switch every launcher honours.
+YOLO=()
+case "${CLAUDE_FLEET_YOLO:-1}" in
+  0|false|no|off) ;;
+  *) YOLO=(--dangerously-skip-permissions); trust_this_dir ;;
+esac
+
+MODEL=()
+[ -n "${CLAUDE_FLEET_MODEL:-}" ] && MODEL=(--model "$CLAUDE_FLEET_MODEL")
+
+# ${a[@]+"${a[@]}"}, never "${a[@]}" — see opencode-here: bash 3.2 + set -u aborts on an
+# empty array, which is every launch that sets no model.
+OPTS=( ${YOLO[@]+"${YOLO[@]}"} ${MODEL[@]+"${MODEL[@]}"} )
+
+case "${CLAUDE_FLEET_FRESH:-0}" in
+  1|true|yes|on)
+    echo "agy-here: fresh parallel session in $PWD" >&2
+    exec agy ${OPTS[@]+"${OPTS[@]}"} "$@" ;;
+esac
+
+if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
+  db="${AGY_STATE_DIR:-$HOME/.gemini/antigravity-cli}/conversations/${CLAUDE_FLEET_RESUME}.db"
+  if [ ! -f "$db" ]; then
+    echo "agy-here: no agy conversation '${CLAUDE_FLEET_RESUME}' ($db is missing) — refusing rather than open a different one" >&2
+    exit 1
+  fi
+  echo "agy-here: resuming ${CLAUDE_FLEET_RESUME} in $PWD" >&2
+  exec agy ${OPTS[@]+"${OPTS[@]}"} --conversation "$CLAUDE_FLEET_RESUME" "$@"
+fi
+
+echo "agy-here: continuing this checkout's conversation in $PWD" >&2
+exec agy ${OPTS[@]+"${OPTS[@]}"} -c "$@"

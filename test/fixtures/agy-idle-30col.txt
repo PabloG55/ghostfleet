@@ -1,0 +1,40 @@
+  repository multiple
+  times.
+
+  Worktrees are
+  particularly valuable for
+  frequent context
+  switching: fixing an
+  urgent production bug
+  while deep into feature
+  development, running long
+  parallel test suites
+  across different
+  versions, or reviewing
+  peer pull requests side-
+  by-side. Git also
+  enforces safety by
+  preventing two worktrees
+  from checking out the
+  exact same branch at the
+  same time, preventing
+  collisions.
+
+  Once finished, cleanup is
+  quick and straightforward
+  using git worktree remove
+  <path>, leaving the
+  central repository
+  pristine. Overall, Git
+  worktrees provide an
+  elegant, lightweight
+  solution for multitasking
+  without disrupting
+  ongoing work or
+  sacrificing local storage
+  efficiency.
+
+──────────────────────────────
+>
+──────────────────────────────
+? for shortcuts

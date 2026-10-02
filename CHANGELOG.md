@@ -8,6 +8,14 @@ the detail, and every entry here names the PR that carries the argument.
 
 ### Added
 
+- **agy (Google's Antigravity CLI) as a fourth agent** (docs/multi-agent-sessions.md).
+  `fleet-spawn --agent agy`, the project agent column and the phone's pickers all offer it
+  once `agy` is on PATH. It is the first non-claude agent at full parity: `install.sh` writes
+  an event bridge, the ghostfleet MCP server and the orchestrate skill into
+  `~/.gemini/config/`, `agy -c` resumes per checkout across a pane kill, and its pane signals
+  were measured at seven widths — including that its footer says "esc to cancel" while a
+  permission dialog is waiting, so busy keys on the spinner instead. New worktrees are
+  pre-trusted so a worker does not open on agy's folder-trust prompt.
 - **Jarvis** — one conversational session above every project's lead, on every profile
   (docs/jarvis.md). `ghostfleet jarvis` creates it the first time (a small repo outside your
   checkouts, registered like any project) and opens it every time after. It reads
