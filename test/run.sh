@@ -14891,6 +14891,123 @@ else
   skip "hibernation reads the live conversation" "tmux or jq missing"
 fi
 
+# ── 4a10c12b. hibernation follows a conversation sent to the background ─────
+# ← (into Claude Code's agent view) hands the conversation to a NEW id, run by a bg process
+# whose daemon is a child of the pane's agent; the pane stays as a viewer whose own note
+# still names the OLD id. On a live fleet that made the governor sleep the slot as idle 48h
+# on the dead predecessor's clock, kill the bg process with the pane, write the predecessor
+# into the asleep marker — so the wake opened a two-day-old conversation — and, on every
+# dry run, "correct" the live id's record back to the dead one, deleting it. Measured shape,
+# reproduced on a scratch session: viewer note kind "interactive" with the old id, bg note
+# kind "bg" with the new one.
+group "hibernation follows a conversation sent to the background"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  HB="$(cd "$(mktemp -d "$TEST_RUNS.$$.hibbg.XXXXXX")" && pwd -P)"
+  export CLAUDE_FLEET_DIR="$HB/fleet"; mkdir -p "$CLAUDE_FLEET_DIR"
+  export CLAUDE_CONFIG_DIR="$HB/cfg"; mkdir -p "$CLAUDE_CONFIG_DIR" "$HB/wt" "$HB/bin"
+  jq -n --arg d "$HB/wt" '{projects:{($d):{hasTrustDialogAccepted:true}}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
+  HBD="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$HB/wt" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$HBD"
+  HA=dddddddd-1111-4111-8111-000000000001     # the conversation the pane was started in
+  HN=dddddddd-2222-4222-8222-000000000002     # the same conversation, backgrounded
+  # $1 transcript, $2 hours since the last thing a person typed, $3 the id it continued in
+  hb_tr() {
+    node -e 'const [f,h,c]=process.argv.slice(1);const L=[JSON.stringify({type:"user",
+      message:{role:"user",content:"carry on with acme-api"},timestamp:new Date(Date.now()-h*3600000).toISOString()})];
+      if(c)L.push(JSON.stringify({type:"continued-in",continuedInSessionId:c}),JSON.stringify({type:"cost-state"}));
+      require("fs").writeFileSync(f,L.join("\n")+"\n")' "$1" "$2" "${3:-}"
+  }
+  hb_plan() { "$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 48 --json 2>/dev/null | jq -r --arg k "$1" '.[] | select(.slot=="acme-api") | .[$k] // ""'; }
+  hb_has() { case "$2" in *"$1"*) echo yes ;; *) echo no ;; esac; }
+  hb_up()  { tmux -L cf-toolbox has-session -t '=acme-api' 2>/dev/null && echo yes || echo no; }
+  hb_fixture() {   # a fresh viewer pane, its note on the OLD id, and the hook's records
+    tmux -L cf-toolbox kill-server 2>/dev/null
+    rm -f "$CLAUDE_FLEET_DIR"/*.json "$CLAUDE_FLEET_DIR"/*.asleep "$CLAUDE_CONFIG_DIR"/sessions/*.json 2>/dev/null
+    tmux -L cf-toolbox new-session -d -s acme-api -c "$HB/wt" -x 80 -y 24 "sleep 600" 2>/dev/null
+    sleep 0.4
+    hb_tr "$HB/a.jsonl" 100 "$HN"; hb_tr "$HBD/$HN.jsonl" 1
+    "$ROOT/test/helpers/live-session.sh" cf-toolbox acme-api "$HA" "$HB/wt" "$HB/a.jsonl" >/dev/null
+    # What the hook leaves: the pane's record from before the hand-off, and the bg id's,
+    # newer, carrying the same slot and the id it continues.
+    jq -n --arg id "$HA" --arg tr "$HBD/$HA.jsonl" --arg cwd "$HB/wt" \
+      '{session_id:$id, sock:"cf-toolbox", slot:"acme-api", cwd:$cwd, status:"ready", transcript:$tr, ts:1}' > "$CLAUDE_FLEET_DIR/$HA.json"
+    jq -n --arg id "$HN" --arg tr "$HBD/$HN.jsonl" --arg cwd "$HB/wt" --arg from "$HA" \
+      '{session_id:$id, sock:"cf-toolbox", slot:"acme-api", cwd:$cwd, status:"ready", transcript:$tr, ts:2, continued_from:$from}' > "$CLAUDE_FLEET_DIR/$HN.json"
+  }
+  hb_bg() {   # a live process with the note a bg conversation's process writes; $1 its procStart, or the real one
+    sleep 600 & HB_BGPID=$!
+    local st; st="$(LC_ALL=C TZ=UTC ps -o lstart= -p "$HB_BGPID" | sed 's/ *$//')"
+    jq -n --argjson pid "$HB_BGPID" --arg id "$HN" --arg cwd "$HB/wt" --arg st "${1:-$st}" \
+      '{pid:$pid, sessionId:$id, cwd:$cwd, procStart:$st, kind:"bg"}' > "$CLAUDE_CONFIG_DIR/sessions/$HB_BGPID.json"
+  }
+  hb_bg_off() { kill "$HB_BGPID" 2>/dev/null; wait "$HB_BGPID" 2>/dev/null; rm -f "$CLAUDE_CONFIG_DIR/sessions/$HB_BGPID.json"; }
+
+  hb_fixture
+  is "fixture: the pane's own note names the old id"        "$HA" \
+     "$(jq -r '.sessionId' "$CLAUDE_CONFIG_DIR/sessions/$(tmux -L cf-toolbox list-panes -t acme-api -F '#{pane_pid}').json" 2>/dev/null)"
+  # ── 1. the idle clock is the successor's ──
+  is "the plan names the backgrounded conversation"         "$HN" "$(hb_plan session_id)"
+  is "...and dates it by the successor, not the dead one"   "1"   "$(hb_plan idle_hours | cut -d. -f1)"
+  is "...so it is under the threshold"                      "yes" "$(hb_has 'h threshold' "$(hb_plan why)")"
+  # The record nothing could account for: a dry run used to delete it.
+  is "a dry run leaves the successor's record in place"     "yes" "$([ -f "$CLAUDE_FLEET_DIR/$HN.json" ] && echo yes || echo no)"
+  is "--resolve (fleet-restart's question) names the successor" "$HN" \
+     "$("$ROOT/bin/fleet-hibernate" --resolve cf-toolbox acme-api 2>/dev/null | cut -d$'\x1f' -f1)"
+
+  # A pane started with --resume of the old id has no note of its own; what it was told at
+  # launch is believed only when nothing else in the folder was written since — and its own
+  # successor, written since, is the same conversation rather than a rival for it.
+  tmux -L cf-toolbox kill-server 2>/dev/null; rm -f "$CLAUDE_CONFIG_DIR"/sessions/*.json "$CLAUDE_FLEET_DIR"/*.json
+  printf '#!/bin/sh\nsleep 600\n' > "$HB/fakeagent"; chmod +x "$HB/fakeagent"
+  hb_tr "$HBD/$HA.jsonl" 100 "$HN"
+  touch -t "$(date -v-100H +%Y%m%d%H%M 2>/dev/null || date -d '-100 hours' +%Y%m%d%H%M)" "$HBD/$HA.jsonl"
+  tmux -L cf-toolbox new-session -d -s acme-api -c "$HB/wt" -x 80 -y 24 "'$HB/fakeagent' --resume $HA" 2>/dev/null
+  sleep 1.2; hb_tr "$HBD/$HN.jsonl" 1
+  rm -f "$CLAUDE_FLEET_DIR"/*.json
+  is "--resume of a handed-off id is still established"    "yes" "$(hb_has 'h threshold' "$(hb_plan why)")"
+  is "...as the successor"                                  "$HN" "$(hb_plan session_id)"
+  hb_fixture
+
+  # ── 2. a sleep records the successor ──
+  touch "$CLAUDE_FLEET_DIR/hibernate.enabled"
+  "$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 0 --apply acme-api >/dev/null 2>&1
+  is "a sleep writes the successor into the marker"         "$HN" \
+     "$(cut -f2 "$CLAUDE_FLEET_DIR/cf-toolbox.acme-api.asleep" 2>/dev/null)"
+
+  # ── 3. a conversation a bg process is running is never slept ──
+  hb_fixture; touch "$CLAUDE_FLEET_DIR/hibernate.enabled"; hb_bg
+  is "a live bg process running it vetoes the sleep"        "yes" "$(hb_has 'background process' "$(hb_plan why)")"
+  hbout="$("$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 0 --pressure 2>&1)"
+  is "...--pressure leaves the pane up"                     "yes" "$(hb_up)"
+  is "...and says why, for the governor's log"              "yes" "$(hb_has 'kept cf-toolbox/acme-api up' "$hbout")"
+  hb_bg_off
+  # THE OTHER DIRECTION: a note left by a process that is gone (or a reused pid) is not one.
+  hb_bg "Mon Jan  1 00:00:00 2024"
+  is "a bg note from another process does not veto"         "no"  "$(hb_has 'background process' "$("$ROOT/bin/fleet-hibernate" -s cf-toolbox --idle-hours 0 --json 2>/dev/null | jq -r '.[0].why')")"
+  hb_bg_off
+
+  # ── 4. a wake follows a marker written before any of this ──
+  tmux -L cf-toolbox kill-server 2>/dev/null
+  printf '#!/bin/sh\necho "$CLAUDE_FLEET_RESUME" > "%s/resumed"\necho "? for shortcuts"\nsleep 60\n' "$HB" > "$HB/bin/agent-here"
+  chmod +x "$HB/bin/agent-here"
+  hb_tr "$HBD/$HA.jsonl" 100 "$HN"
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$HA" "$HB/wt" 100 > "$CLAUDE_FLEET_DIR/cf-toolbox.acme-api.asleep"
+  hbout="$(PATH="$HB/bin:$PATH" "$ROOT/bin/fleet-hibernate" -s cf-toolbox --wake acme-api --timeout 20 2>&1)"
+  is "a wake on the predecessor's id resumes the successor" "$HN" "$(cat "$HB/resumed" 2>/dev/null)"
+  is "...and says so"                                       "yes" "$(hb_has "continued in $HN" "$hbout")"
+  tmux -L cf-toolbox kill-server 2>/dev/null; rm -f "$HB/resumed"
+  # THE OTHER DIRECTION: a successor named but never written is not resumed into nothing.
+  rm -f "$HBD/$HN.jsonl"
+  printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "$HA" "$HB/wt" 100 > "$CLAUDE_FLEET_DIR/cf-toolbox.acme-api.asleep"
+  PATH="$HB/bin:$PATH" "$ROOT/bin/fleet-hibernate" -s cf-toolbox --wake acme-api --timeout 20 >/dev/null 2>&1
+  is "a hand-off to nowhere wakes what the marker names"    "$HA" "$(cat "$HB/resumed" 2>/dev/null)"
+
+  tmux -L cf-toolbox kill-server 2>/dev/null
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$HB"
+else
+  skip "hibernation follows a conversation sent to the background" "tmux or jq missing"
+fi
+
 # ── 4a10c12c. a stale marker beside a live session, and a stop that leaves a card ──
 # C. "could not start a pane" on a wake. new-session refuses a name that exists, and a
 # marker outlives its sleep whenever the session comes back some other way — reopened by
