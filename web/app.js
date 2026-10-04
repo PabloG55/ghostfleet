@@ -50,7 +50,6 @@ const S = {
   sheet: null,          // { kind, … } — one of the TUI's full-screen forms
   toast: null,
   stale: 0,             // epoch of the payload on screen, when it came from the cache
-  hiddenAt: 0,
   draft: '',            // the composer's text, kept across repaints (a poll must not eat it)
   attaching: false,     // a photo is on its way up; the camera button says so and refuses a second
   pending: null,        // { text, at } — sent, not yet back in the transcript
@@ -2379,9 +2378,11 @@ function sheetActions(name = S.session) {
 // screen is up long enough to tap, and tapping it starts the same race again — "i put my
 // face and then it asked me again". A three-state answer is the point: "no token" and "no
 // token YET" are different facts and a two-way test cannot hold both.
-export function onVisibleAction(now = Date.now()) {
+export function onVisibleAction() {
   if (pk.busy()) return 'wait';          // an unlock is in progress; it IS the answer
-  if (S.hiddenAt && now - S.hiddenAt > pk.RELOCK_AFTER_HIDDEN) return 'lock';
+  // No hidden-for-N-minutes rule: the token's own idle window is the rule (passkey.js
+  // TOKEN_TTL). Hidden means no polls, so the local expiry is the server's to the second,
+  // and a return inside it refreshes — whose 401, if the server disagrees, locks.
   if (!api.haveToken() && !pk.bypassAllowed()) return 'lock';
   return 'refresh';
 }
@@ -4261,14 +4262,14 @@ for (const ev of ['touchend', 'click']) document.addEventListener(ev, () => unlo
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
 // this is what answers). No URL is ever read: the entries carry a depth, not a route.
 addEventListener('popstate', () => popTo());
-// §5: a passkey at every open, and again after the app has been backgrounded for a few
-// minutes. The token expiring is the same event as far as this is concerned.
+// §5: a passkey whenever there is no live session — the token dies after 15 minutes
+// without a request, and that expiry is the only thing that brings the sensor back.
 document.addEventListener('visibilitychange', () => {
   // Hidden: the pane's timer is TORN DOWN, not left to skip its turns. That is the
   // difference between an app that stops polling in a pocket and one that keeps waking
   // the radio every two seconds to decide it should not have.
   if (document.hidden) {
-    S.hiddenAt = Date.now(); stopPanePoll();
+    stopPanePoll();
     // THE LIMIT, SAID WHEN IT BITES. An installed web app gets no microphone and no speech
     // once it is off screen, so conversation mode ends here rather than pretending to run.
     if (S.talk) talkStop('conversation mode stopped — it only works with the screen on and the app open');
@@ -4320,6 +4321,13 @@ render();
 // the answer. Waiting for the probe before the first paint would put a blank page in
 // front of a cold open, which is the thing the service worker exists to prevent.
 api.ready().then(() => render());
+// THEN TRY THE SESSION WE ALREADY HAVE, before anyone is asked for a face. A relaunch inside
+// the idle window — iOS evicting the app in the background is the common one — comes back
+// on the stored token (pk.resume). Its 401 clears it and leaves the lock screen up, which is
+// where Face ID lives. Guarded on S.locked so a fast tap on "unlock" is never undone.
+pk.resume().then((r) => {
+  if (r === 'ok' && S.locked) { S.locked = false; render(); refresh(); }
+}).catch(() => {});
 
 // Polling, not a socket: `fleet-grid.mjs --plain` answers the busiest fleet in 0.39s
 // (§2), so a 5s poll is well inside what the daemon can serve and needs no new

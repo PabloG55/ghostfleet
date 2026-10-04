@@ -208,13 +208,50 @@ export function fixtureName() {
 export function setFixtureName(f) { try { localStorage.setItem(LS.fixture, f); } catch {} }
 
 // ── the session token (§5) ────────────────────────────────────────────────
-// Deliberately NOT in localStorage. A token that outlives the tab outlives the lock,
-// and the whole point of the passkey is that a phone in someone else's hand is not the
-// same as a phone plus its owner. Held in a module variable: a reload re-asserts.
+// KEPT ON THE DEVICE, for as long as the server would honour it. It used to live in a
+// module variable only, so every relaunch asserted — and iOS evicts a backgrounded
+// home-screen app freely, so "relaunch" meant most returns to the app, each one a Face ID
+// for a token the server still held. localStorage, because it is the store an installed
+// iOS web app keeps across relaunches; sessionStorage does not survive one.
+//   What this does NOT weaken: the server decides. The token dies after the idle window
+// (session_ttl, 15 minutes without a request) and on `fleet-serve revoke` whatever this
+// file believes, and the first 401 clears the stored copy (clearToken) so a dead token
+// is tried exactly once. The lock is still the passkey; this only stops asking for it
+// while the session it minted is alive.
+//   Scoped by ORIGIN, as the credential is (passkey.js credKey): a token belongs to the
+// daemon that minted it. Server mode only — a fixture stub is not worth keeping.
 let token = null, tokenExp = 0;
-export function setToken(t, expiresAt) { token = t || null; tokenExp = expiresAt || 0; }
+const LS_TOKEN = 'gf.session';
+function tokenKey() { const r = resolution(); return r.mode === 'server' && r.base ? `${LS_TOKEN}:${r.base}` : ''; }
+function storeToken() {
+  const k = tokenKey();
+  try { if (k) { if (token) localStorage.setItem(k, JSON.stringify({ t: token, exp: tokenExp })); else localStorage.removeItem(k); } } catch {}
+}
+export function setToken(t, expiresAt) { token = t || null; tokenExp = expiresAt || 0; storeToken(); }
 export function haveToken() { return !!token && Date.now() / 1000 < tokenExp; }
-export function clearToken() { token = null; tokenExp = 0; }
+export function clearToken() { token = null; tokenExp = 0; storeToken(); }
+// The cold-start half: whatever this origin's daemon minted last, if it has not visibly
+// expired. Nothing is trusted from it but the string — passkey.resume() asks the server.
+export function restoreToken() {
+  const k = tokenKey();
+  if (!k) return false;
+  let j = null;
+  try { j = JSON.parse(localStorage.getItem(k) || 'null'); } catch {}
+  if (!j || typeof j.t !== 'string' || !(Date.now() / 1000 < Number(j.exp))) {
+    try { localStorage.removeItem(k); } catch {}
+    return false;
+  }
+  token = j.t; tokenExp = Number(j.exp);
+  return true;
+}
+// THE SLIDE, mirrored. fleet-serve answers every authenticated request with the session's
+// new deadline; without copying it here, haveToken() would expire the token on the
+// client's old clock fifteen minutes after Face ID while the server still honoured it —
+// the very lockout this exists to end, moved to the other side of the wire.
+function slid(r) {
+  const x = Number(r && r.headers && r.headers.get && r.headers.get('X-Session-Expires'));
+  if (token && Number.isFinite(x) && x > tokenExp) { tokenExp = x; storeToken(); }
+}
 
 // ── the audit trail (§7) ──────────────────────────────────────────────────
 // Every mutating call is recorded. On a server the row is the server's, surfaced as a
@@ -238,6 +275,7 @@ async function get(pathAndQuery) {
     r = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {}, cache: 'no-store' });
   } catch (e) { throw new OfflineError(String(e && e.message || e)); }
   if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server rejected the session token'); }
+  slid(r);
   if (!r.ok) throw new Error(`${pathAndQuery} → HTTP ${r.status}`);
   return r.json();
 }
@@ -401,6 +439,7 @@ async function authFetch(kind, path, init) {
   let r;
   try { r = await fetch(baseUrl() + path, init); }
   catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+  slid(r);
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error((j && (j.text || j.error)) || `${kind} → HTTP ${r.status}`);
   return j;
@@ -499,6 +538,7 @@ export async function jarvisHear(wav) {
       headers: { 'Content-Type': 'audio/wav', Authorization: `Bearer ${token}` }, body: wav });
   } catch (e) { throw new OfflineError(String((e && e.message) || e)); }
   if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
+  slid(r);
   const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
   if (!j.ok) throw new Error(j.text || `hearing failed (HTTP ${r.status})`);
   return j;
@@ -518,6 +558,7 @@ export async function speakPlan(text) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ text }) });
   } catch (e) { throw new OfflineError(String((e && e.message) || e)); }
   if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
+  slid(r);
   const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
   // 404 too: a daemon from before /api/speak existed is a machine without Kokoro.
   if (r.status === 503 || r.status === 404) throw new SpeechOff(j.text || 'no Kokoro on the Mac');
@@ -529,6 +570,7 @@ export async function speakAudio(id) {
   try { r = await fetch(baseUrl() + '/api/speak/' + encodeURIComponent(id), { headers: { Authorization: `Bearer ${token}` } }); }
   catch (e) { throw new OfflineError(String((e && e.message) || e)); }
   if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
+  slid(r);
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
     throw (r.status === 503 ? new SpeechOff(j.text || 'Kokoro failed') : new Error(j.text || `audio HTTP ${r.status}`));
@@ -569,6 +611,7 @@ export async function attach(project, session, file) {
     });
   } catch (e) { throw new OfflineError(String(e && e.message || e)); }
   if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server refused the upload'); }
+  slid(r);
   const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
   record('attach', { project, session, bytes: file.size }, j.ok ? `ok: ${j.path}` : `refused: ${j.text || r.status}`);
   if (!j.ok) throw new Error(j.text || `attach failed (HTTP ${r.status})`);
@@ -591,6 +634,7 @@ export async function verb(tool, args, assertion = null) {
       });
     } catch (e) { throw new OfflineError(String(e && e.message || e)); }
     if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server refused the verb'); }
+    slid(r);
     const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
     record(tool, args, j.ok ? 'ok' : `refused: ${j.text || r.status}`);
     if (!j.ok) throw new Error(j.text || `${tool} failed`);

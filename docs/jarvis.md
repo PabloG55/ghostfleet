@@ -91,7 +91,7 @@ ask you in one line and stop. Then:
   microphone hears in noise, and whisper writes it as "Okay."; or
 - **tap yes** on the phone's Jarvis screen, which takes a fresh Face ID like any other
   destructive tap. A tapped **no** needs none. (A typed or spoken yes from the phone is as
-  strong as the unlock it came through — Face ID within the last fifteen minutes.)
+  strong as the unlock it came through — a Face ID followed by no 15-minute idle gap.)
 
 Jarvis then makes the same call again and it goes through — once. A yes you gave *before*
 the question does not answer it; one yes answers only the question asked last; an

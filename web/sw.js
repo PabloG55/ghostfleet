@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: fccc5cf13376
+// CLIENT-HASH: 92e76fc6eb58
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -296,7 +296,12 @@
 // v52 is the Mac's voice: a play button on every message, speak mode per session, and
 // speech from Kokoro on the Mac when it has it (per-sentence English/Spanish), falling back
 // to the device's voice. An older client keeps its tap-to-reveal button and device voice.
-const VERSION = 'ghostfleet-v52';
+// v53 keeps the session: the token is stored on the device and tried at launch before Face
+// ID, and its expiry slides with every request (X-Session-Expires). A phone still on v52
+// keeps working against the new daemon — its polls slide the server's window too — but it
+// still asks for Face ID at every relaunch, and still locks itself 15 minutes after an
+// unlock, because its own copy of the expiry never moves.
+const VERSION = 'ghostfleet-v53';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
