@@ -186,9 +186,13 @@ fleet-serve check-bind 0.0.0.0        # bindable: no — it listens on every int
 fleet-serve check-bind 192.168.1.5    # bindable: no — reachable by that whole network
 ```
 
-**A passkey at every open, enforced server-side.** The assertion mints a session token
-that lives ~15 minutes, and the API rejects any request without a live one — a bearer
-token on its own gets a 401, because a lock that only gates the UI is decoration.
+**A passkey whenever there is no live session, enforced server-side.** The assertion mints
+a session token that dies after 15 minutes *without a request* (`session_ttl`; every
+authenticated request slides it), and the API rejects any request without a live one — a
+bearer token on its own gets a 401, because a lock that only gates the UI is decoration.
+Live sessions are kept as hashes in `serve-sessions.json` (0600, beside `serve.json`), so
+restarting the daemon logs nobody out; `fleet-serve revoke <id>` deletes them there and
+refuses them on the running daemon at once.
 `spawn`, `stop`, `rename` and `project_add` need a *second* assertion bound to that exact
 action, plus the grid's own `y` confirmation; a forced reclaim needs its own `f` step on
 top, and only after a plain reclaim has reported why it declined.

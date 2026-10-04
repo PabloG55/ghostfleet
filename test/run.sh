@@ -10676,6 +10676,71 @@ else
   skip "fleet-serve auth" "server did not come up: $SV_WHY"
 fi
 
+# ── the session is an idle window, and it outlives a restart ─────────────────
+# Owner's decision: the 15 minutes are IDLE minutes. Every authenticated request slides the
+# deadline, a restart (every deploy is one) keeps live sessions, and revoke still kills
+# them at once — the persisted ones included. Each row below was watched going red with its
+# half removed: the slide, loadSessions(), dropPersistedSessions() and the born<=revoked_at
+# check in sessionClientLive().
+group "fleet-serve: a session is an idle window, and outlives a restart"
+# needs: free_port answers in digits
+sv_ttl() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.session_ttl=+process.argv[2];fs.writeFileSync(p,JSON.stringify(c,null,2))' "$SV/serve.json" "$1"; }
+SVS="$SV/serve-sessions.json"
+rm -f "$SVS"
+sv_ttl 2
+if sv_start idle; then
+  node "$ROOT/test/helpers/serve-idle.mjs" "$BASE" slide "$(sv_code idle1)" > "$SV/probe.idle" 2>"$SV/probe.idle.err"
+  is "serve-idle ran"                      "0" "$?"
+  is "...and produced its checks"          "yes" "$([ "$(wc -l < "$SV/probe.idle")" -ge 5 ] && echo yes || echo "no: $(cat "$SV/probe.idle" "$SV/probe.idle.err" | head -3)")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$SV/probe.idle"
+
+  # A restart keeps a LIVE session. Long ttl now: this half is about the file, not the clock.
+  sv_ttl 600
+  tok="$(node "$ROOT/test/helpers/serve-idle.mjs" "$BASE" mint "$(sv_code idle2)" 2>/dev/null)"
+  is "a token was minted to carry over"    "yes" "$([ "${#tok}" -ge 40 ] && echo yes || echo "no: $tok")"
+  h="$(printf '%s' "$tok" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(require("crypto").createHash("sha256").update(s).digest("hex")))')"
+  is "the session is on disk at once"      "1"   "$(grep -c "$h" "$SVS" 2>/dev/null || true)"
+  is "...as its hash, never the token"     "0"   "$(grep -c -- "$tok" "$SVS" 2>/dev/null || true)"
+  is "...in a file only the owner reads"   "600" "$(stat -f %Lp "$SVS" 2>/dev/null || stat -c %a "$SVS" 2>/dev/null)"
+  serve_stop
+  # And a dead row planted beside it, so "drop expired ones on load" is measured, not assumed.
+  # AFTER the stop: the daemon flushes its own table on SIGTERM, so a row planted while it
+  # ran was overwritten before the restart could read it — and the row went green unread.
+  node -e 'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p,"utf8"));j["f".repeat(64)]={client:"idle2",born:1,exp:2,purpose:"open"};fs.writeFileSync(p,JSON.stringify(j))' "$SVS"
+  if sv_start idle-restart; then
+    is "the token works after a restart"   "200" "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $tok" "$BASE/api/projects")"
+    is "...and the expired row was dropped" "0"  "$(grep -c 'ffffffffffffffff' "$SVS" 2>/dev/null || true)"
+    is "...saying so in the log"           "1"   "$(grep -c 'sessions: 1 restored from .*, [0-9]* expired or revoked dropped' "$SV/log.idle-restart" || true)"
+
+    # Revoke: refused on the RUNNING daemon at once, gone from the file, and still gone after
+    # another restart.
+    sv_cli revoke idle2 >/dev/null 2>&1
+    is "revoke kills the persisted token"  "401" "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $tok" "$BASE/api/projects")"
+    is "...and deletes it from the file"   "0"   "$(grep -c "$h" "$SVS" 2>/dev/null || true)"
+    serve_stop
+    if sv_start idle-revoked; then
+      is "...and a restart does not bring it back" "401" "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $tok" "$BASE/api/projects")"
+      # RE-ENROLLING THE SAME ID clears `revoked`. A pre-revoke token must not ride on that.
+      # `--add`: a revoked client keeps its row, so enroll treats the id as taken.
+      node "$ROOT/test/helpers/serve-idle.mjs" "$BASE" mint "$(sv_cli enroll idle2 --add | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" >/dev/null 2>&1
+      is "the client is enrolled again"    "1"   "$(sv_cli clients 2>/dev/null | grep -c '^idle2 *active' || true)"
+      serve_stop
+      # The old token planted back, as a daemon killed before it flushed the revoke would
+      # leave it — after the stop, for the reason the expired row above is.
+      node -e 'const fs=require("fs"),p=process.argv[1],j=JSON.parse(fs.readFileSync(p,"utf8"));j[process.argv[2]]={client:"idle2",born:1,exp:4e9,purpose:"open"};fs.writeFileSync(p,JSON.stringify(j))' "$SVS" "$h"
+      if sv_start idle-reenrol; then
+        is "...and its pre-revoke token is still dead" "401" "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $tok" "$BASE/api/projects")"
+        serve_stop
+      fi
+    fi
+  fi
+else
+  skip "fleet-serve idle window" "server did not come up: $SV_WHY"
+fi
+sv_ttl 900
+
 # ── verbs ────────────────────────────────────────────────────────────────────
 group "fleet-serve: destructive verbs need a fresh passkey, on the tool name"
 # needs: free_port answers in digits
@@ -12130,7 +12195,7 @@ if sv_start origin; then
   # the `auth` bucket, since every ceremony starts with a challenge.
   PWE_CODE="$(sv_code pwaenrol)"
   is "an enrolment window opened"     "yes" "$([ -n "$PWE_CODE" ] && echo yes || echo no)"
-  node "$ROOT/test/helpers/pwa-enrol.mjs" "$BASE" "$PWE_CODE" pwaenrol > "$PWO/enrol" 2> "$PWO/enrol.err"
+  PWA_STORE_OUT="$PWO/store.json" node "$ROOT/test/helpers/pwa-enrol.mjs" "$BASE" "$PWE_CODE" pwaenrol > "$PWO/enrol" 2> "$PWO/enrol.err"
   is "pwa-enrol ran"                  "0" "$?"
   is "...without complaining"         ""  "$(head -2 "$PWO/enrol.err" | tr '\n' ' ' | sed 's/ *$//')"
   is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/enrol")" -ge 40 ] && echo yes || echo "no: $(wc -l < "$PWO/enrol") rows")"
@@ -12140,6 +12205,17 @@ if sv_start origin; then
   # The client really is enrolled now, as far as the SERVER is concerned — asserted from
   # the other side, because the helper's own view of it is the client's.
   is "the daemon lists the phone as enrolled" "1" "$(sv_cli clients | grep -c '^pwaenrol *active *1' || true)"
+  # ── and a RELAUNCH gets back in on the session it already has ─────────────
+  # A new process seeded with what the enrolled "phone" left in localStorage: iOS evicting the
+  # backgrounded app and the owner tapping it again. web/passkey.js resume() must reach the
+  # daemon on the stored token without the sensor, and clear a token the daemon refuses.
+  node "$ROOT/test/helpers/pwa-relaunch.mjs" "$BASE" "$PWO/store.json" > "$PWO/relaunch" 2> "$PWO/relaunch.err"
+  is "pwa-relaunch ran"               "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PWO/relaunch.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/relaunch")" -ge 12 ] && echo yes || echo "no: $(wc -l < "$PWO/relaunch") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PWO/relaunch"
   rm -rf "$PWO"
   serve_stop
 else

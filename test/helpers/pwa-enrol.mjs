@@ -189,6 +189,11 @@ if (BASE && CODE) {
   is('the enrolled passkey unlocks', true, opened);
   is('...with a live token behind it', true, api.haveToken());
   is('...and no error', '', err);
+  // THE RELAUNCH, set up: everything this "device" now holds, for test/helpers/pwa-relaunch.mjs
+  // to start a FRESH process from. A new process, because a relaunch is a new module instance
+  // with an empty `token` variable, and nothing short of that proves the stored copy is used.
+  is('...and the token is kept on the device', true, !!localStorage.getItem(`gf.session:${BASE}`));
+  if (process.env.PWA_STORE_OUT) fs.writeFileSync(process.env.PWA_STORE_OUT, JSON.stringify([...stored]));
 
   // One use, and it is spent. The client's own pre-check says so in the SERVER's words,
   // which is why the server is asked for them here rather than trusted to match.

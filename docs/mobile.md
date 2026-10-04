@@ -337,15 +337,32 @@ either breaks confusingly or — if `*` gets pasted in while debugging — widen
 The VPN authenticates a **device**, not a person; an unlocked phone on the tailnet is
 inside. So the service also requires:
 
-- **A passkey at every open.** Face ID on cold start and after the app has been
-  backgrounded for a few minutes. Not a password: a password typed twenty times a day
+- **A passkey whenever there is no live session.** Face ID on first launch and whenever
+  the app comes back after 15 minutes without a request — backgrounded, relaunched or
+  evicted by iOS, it is the same rule. Not a password: a password typed twenty times a day
   converges on something short, autofills from a manager on the very unlocked phone that
   is the threat, and is replayable. A passkey is bound to the secure enclave, cannot be
   copied off the device, and does not degrade with use.
-- **Server-enforced, not client-enforced.** The passkey assertion mints a short-lived
-  session token (~15 min) and the API rejects any request without a live one. A lock
-  screen that only gates the UI is decoration — `curl` with the bearer token would walk
-  straight past it.
+- **Server-enforced, not client-enforced.** The passkey assertion mints a session token
+  and the API rejects any request without a live one. A lock screen that only gates the UI
+  is decoration — `curl` with the bearer token would walk straight past it.
+- **An idle window, not a deadline.** The token dies after `session_ttl` (900 s) *without
+  a request*; every authenticated request — the visible app's own polls included — pushes
+  its expiry to now + 15 min, and the response says so (`X-Session-Expires`) so the
+  client's copy moves with it. No absolute cap: an app in use never asks for a face
+  mid-task. A fixed 15 minutes from Face ID locked the owner out mid-use a quarter of an
+  hour after every unlock, which is what this replaced.
+- **Kept, so a relaunch is not an unlock.** The client stores the token in `localStorage`
+  under the daemon's origin (an installed iOS web app keeps it across relaunches;
+  `sessionStorage` does not) and tries it before the passkey; the first 401 clears it.
+  The daemon keeps live sessions as `sha256(token)` rows in `serve-sessions.json` (0600,
+  beside `serve.json`) and drops expired ones on load, so a restart — every deploy is one
+  — logs nobody out. The file holds no token: reading it opens nothing.
+- **Why that is still safe.** A stolen token is good until it goes unused for 15 minutes,
+  so the bound on it is **revocation, and revocation is instant**: `fleet-serve revoke
+  <id>` refuses the client's tokens on the running daemon's next request, deletes its
+  rows from the session file, and a token minted before the revoke stays dead even if the
+  same id is enrolled again.
 - **A bearer token** identifying the enrolled client, device-bound and individually
   revocable.
 - **A second passkey assertion on the destructive verbs** (§7).

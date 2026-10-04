@@ -284,8 +284,10 @@ What stands in front of them is identity and confirmation, not reduced capabilit
   leaving three buttons quietly missing. The gate reads §4's `lead` flag, never the name.
 
 None of that is the enforcement. §5: *server-enforced, not client-enforced* — the
-assertion's job is to make the server mint a short-lived token, and the server refuses
-anything without a live one. The lists in `api.js` decide which taps ask for a
+assertion's job is to make the server mint a token that dies after 15 minutes without a
+request, and the server refuses anything without a live one. Every authenticated response
+carries `X-Session-Expires: <epoch>`, the slid deadline, which `api.js` mirrors and stores
+per origin so a relaunch inside the window resumes without Face ID (`passkey.resume()`). The lists in `api.js` decide which taps ask for a
 fingerprint; `curl` never runs them. The lead is refused the same way: in `plan()`
 (`mcp/fleet-dispatch.mjs`), which is the layer both the MCP server and the daemon go
 through, so the button being absent is a courtesy and not the control.

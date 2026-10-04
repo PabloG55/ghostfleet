@@ -56,6 +56,9 @@ const TMUX_CONF = path.join(REPO, 'tmux', 'cf.tmux.conf');
 const WEB = path.join(REPO, 'web');                       // the PWA, when it lands
 const CFG_HOME = path.join(HOME, '.config', 'ghostfleet');
 const CONFIG = process.env.GHOSTFLEET_SERVE_CONFIG || path.join(CFG_HOME, 'serve.json');
+// Beside serve.json, never inside it: the config is rewritten by `enroll` and `revoke` from
+// another process, and a file both processes write is a file one of them clobbers.
+const SESSIONS = path.join(path.dirname(CONFIG), 'serve-sessions.json');
 const AUDIT = process.env.GHOSTFLEET_SERVE_AUDIT || path.join(CFG_HOME, 'serve-audit.jsonl');
 const VERSION = '1.0.0';
 
@@ -97,7 +100,7 @@ const PUSH_DEFAULTS = {
 
 const DEFAULTS = {
   bind: '', port: 8787, rp_id: '', origins: [], tls: null,
-  session_ttl: 900,          // §5: the assertion mints a SHORT-lived token (~15 min)
+  session_ttl: 900,          // §5: an IDLE window — every authenticated request pushes it out
   confirm_ttl: 120,          // a destructive action confirmed now, not twenty minutes ago
   enroll_ttl: 900,
   rate: { window: 60, read: 240, write: 30, auth: 10 },
@@ -443,9 +446,11 @@ function checkClientData(raw, c, expectType) {
 }
 
 // ── live state: challenges, sessions, force gates, rate limits ────────────────
-// All in memory, all short-lived, and all gone on restart — which is the correct
-// behaviour: a restarted daemon should ask for Face ID again, not honour a token minted
-// by the process that died.
+// All in memory and all short-lived. SESSIONS ALONE OUTLIVE A RESTART (persistSessions
+// below): every deploy restarts this daemon, and "every deploy logs the phone out" was a
+// Face ID prompt per deploy for nothing — the token was no less the owner's for the
+// process having been replaced. Challenges, gates and buckets are seconds-long and lose
+// nothing by being forgotten.
 const challenges = new Map();   // challenge string -> { exp }
 const sessions = new Map();     // sha(token) -> { client, exp, born, purpose }
 const declined = new Map();     // "<key>" -> exp: a removal the gates refused, once
@@ -454,7 +459,7 @@ const buckets = new Map();      // "<name>:<key>" -> { n, resetAt }
 function sweep() {
   const t = now();
   for (const [k, v] of challenges) if (v.exp <= t) challenges.delete(k);
-  for (const [k, v] of sessions) if (v.exp <= t) sessions.delete(k);
+  for (const [k, v] of sessions) if (v.exp <= t || !sessionClientLive(v)) { sessions.delete(k); sessionsDirty(); }
   for (const [k, v] of declined) if (v <= t) declined.delete(k);
   for (const [k, v] of buckets) if (v.resetAt <= t) buckets.delete(k);
 }
@@ -497,26 +502,110 @@ function takeChallenge(ch) {
 // docs/mobile.md §5 describes two — a bearer token identifying the enrolled client, and
 // a short-lived session token the assertion mints — and web/api.js sends one
 // `Authorization: Bearer`. They are reconciled rather than reduced: this token is the
-// session token, it is bound to one enrolled credential, it expires in ~15 minutes, and
-// nothing hands one out without a verified signature. So the property §5 actually
-// insists on holds exactly — "the API rejects any request without a live one", and
-// `curl` cannot walk past the lock because there is no long-lived secret to walk past
-// with. The device identity §5 wants revocable is the enrolled CREDENTIAL, and
-// `fleet-serve revoke <id>` is the one action that drops it and every token it minted.
+// session token, it is bound to one enrolled credential, it dies after session_ttl
+// (15 minutes) WITHOUT A REQUEST, and nothing hands one out without a verified signature.
+// So the property §5 actually insists on holds exactly — "the API rejects any request
+// without a live one", and `curl` cannot walk past the lock because there is no long-lived
+// secret to walk past with. The device identity §5 wants revocable is the enrolled
+// CREDENTIAL, and `fleet-serve revoke <id>` is the one action that drops it and every
+// token it minted, persisted ones included.
+//
+// AN IDLE WINDOW, NOT A FIXED ONE. The expiry used to be fifteen minutes from Face ID and
+// nothing moved it, so the owner was locked out mid-use a quarter of an hour after every
+// unlock — serve.log shows it as a 401 on /api/grid right after a stretch of 200s. Now
+// every authenticated request (the visible app's own polls included) pushes exp to
+// now + ttl. What that costs is bounded the same way: a stolen token is good until it has
+// gone unused for fifteen minutes, which a thief using it never lets happen — and that is
+// exactly why revocation is immediate and does not wait for the window. There is no
+// absolute cap, by decision: an app in use should never ask for a face mid-sentence.
 function mintSession(clientId, purpose = 'open') {
   const c = loadConfig(), tok = rand(32), ttl = c.session_ttl || 900;
   sessions.set(sha256(tok), { client: clientId, born: now(), exp: now() + ttl, purpose });
+  persistSessions();                                      // a mint is worth a write NOW
   return { token: tok, ttl, expires_at: now() + ttl };
 }
 function liveSession(tok) {
   if (!tok) return null;
-  const s = sessions.get(sha256(tok));
+  const k = sha256(tok), s = sessions.get(k);
   if (!s || s.exp <= now()) return null;
-  const cl = clientById(s.client);
   // Revoked between two requests: the token dies with the client, which is what makes
-  // revocation land on a RUNNING daemon instead of at the next restart.
-  if (!cl || cl.revoked) return null;
-  return { ...s, cl };
+  // revocation land on a RUNNING daemon instead of at the next restart. Deleted, not just
+  // refused, so the persisted copy goes on the next flush.
+  if (!sessionClientLive(s)) { sessions.delete(k); sessionsDirty(); return null; }
+  // THE SLIDE. Only a request that has already proved the token live moves it — an
+  // expired one stays expired, so a 401 is final and the phone asserts again.
+  const exp = now() + (loadConfig().session_ttl || 900);
+  if (exp > s.exp) { s.exp = exp; sessionsDirty(); }
+  return { ...s, cl: clientById(s.client) };
+}
+// born <= revoked_at: a token minted BEFORE the revoke. Without this, `revoke` and then
+// `enroll` of the same client id (which clears `revoked`) would bring every pre-revoke
+// token back to life — and with sessions on disk that is no longer only a same-process
+// race, it is any token the file still held.
+function sessionClientLive(s) {
+  const cl = clientById(s.client);
+  return !!cl && !cl.revoked && !(s.born <= (cl.revoked_at || 0));
+}
+
+// ── sessions on disk ──────────────────────────────────────────────────────
+// Hashes only, as the Map holds them: the file is sha256(token) -> {client, born, exp},
+// so reading it opens nothing — there is no token in it to send. 0600 beside serve.json.
+//
+// WRITTEN LAZILY. A slide happens on every request and the phone polls every few seconds,
+// so a write per request would be a disk write per poll to record that a deadline moved by
+// five seconds. A mint writes at once (that one would cost a Face ID to lose); a slide
+// marks the table dirty and is flushed within SESSIONS_FLUSH, and on SIGTERM. A crash loses
+// at most that much of the slide: the token comes back a few seconds shorter, never longer.
+const SESSIONS_FLUSH = 5000;
+let sessionsTimer = null;
+function sessionsDirty() {
+  if (sessionsTimer) return;
+  sessionsTimer = setTimeout(() => { sessionsTimer = null; persistSessions(); }, SESSIONS_FLUSH);
+  sessionsTimer.unref?.();
+}
+function persistSessions() {
+  if (sessionsTimer) { clearTimeout(sessionsTimer); sessionsTimer = null; }
+  const t = now(), out = {};
+  for (const [k, v] of sessions) if (v.exp > t && sessionClientLive(v)) out[k] = v;
+  try {
+    fs.mkdirSync(path.dirname(SESSIONS), { recursive: true });
+    const tmp = `${SESSIONS}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(out) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, SESSIONS);
+    try { fs.chmodSync(SESSIONS, 0o600); } catch {}
+  } catch (e) { log(`sessions: could not persist to ${SESSIONS}: ${e.message}`); }
+}
+// Expired rows and rows of a revoked client are dropped on the way IN, so a file that sat
+// through a revoke while no daemon was running cannot hand anything back.
+function loadSessions() {
+  let raw = {};
+  try { raw = JSON.parse(fs.readFileSync(SESSIONS, 'utf8')) || {}; }
+  catch (e) { if (e.code !== 'ENOENT') log(`sessions: ${SESSIONS} unreadable (${e.message}) — starting with none`); }
+  const t = now();
+  let kept = 0, dropped = 0;
+  for (const [k, v] of Object.entries(raw)) {
+    const ok = /^[0-9a-f]{64}$/.test(k) && v && typeof v.client === 'string' &&
+               Number.isFinite(v.exp) && Number.isFinite(v.born) && v.exp > t && sessionClientLive(v);
+    if (ok) { sessions.set(k, { client: v.client, born: v.born, exp: v.exp, purpose: String(v.purpose || 'open') }); kept++; }
+    else dropped++;
+  }
+  if (dropped) persistSessions();
+  return { kept, dropped };
+}
+// The CLI half of revoke: the daemon would drop these on its next request or sweep anyway
+// (sessionClientLive), but "revoke kills persisted tokens" should be true of the file
+// itself, including when no daemon is running to do it.
+function dropPersistedSessions(clientId) {
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(SESSIONS, 'utf8')) || {}; } catch { return 0; }
+  let n = 0;
+  for (const [k, v] of Object.entries(raw)) if (v && v.client === clientId) { delete raw[k]; n++; }
+  if (n) {
+    const tmp = `${SESSIONS}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(raw) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, SESSIONS);
+  }
+  return n;
 }
 function clientById(id) { return loadConfig().clients.find(c => c.id === id) || null; }
 // Their client identifies itself by credential id alone (localStorage holds `gf.cred`,
@@ -741,7 +830,7 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   // Jarvis's confirm-list reads (lib/jarvis.mjs). The prompt is delivered by fleet-send,
   // which marks it as a delivery, so the event hook does not count it a second time.
   //   ITS AUTHORITY IS THE UNLOCK. A typed or spoken yes from the phone is as strong as the
-  // session it came through — Face ID within the last fifteen minutes — while a TAPPED yes
+  // session it came through — a Face ID with no 15-minute idle gap since — while a TAPPED yes
   // on a proposal asks for a fresh one (/api/jarvis/confirm). A spoken yes must also be two
   // words, because one word is what an open microphone hears in noise.
   if (!refused && tool === 'fleet_send' && args.session === 'master') {
@@ -1574,10 +1663,14 @@ async function api(req, res, url, ip) {
   if (!OPEN.has(p)) {
     // THE POINT OF §5, and the only place it can be made: a lock that gates the UI is
     // decoration. There is no long-lived secret that opens this — the token below exists
-    // only because a passkey signed a challenge minutes ago, and it expires.
+    // only because a passkey signed a challenge, and it dies after session_ttl unused.
     const s = liveSession(bearer);
-    if (!s) return send(res, 401, { ok: false, text: 'no live session — assert a passkey at /api/auth (a token is only ever minted by one, and it expires)', needs: 'passkey' });
+    if (!s) return send(res, 401, { ok: false, text: 'no live session — assert a passkey at /api/auth (a token is only ever minted by one, and it expires once idle)', needs: 'passkey' });
     req.client = s.cl; req.session = s;
+    // The slide, told to the client: web/api.js keeps its own copy of the expiry so it can
+    // decide at launch whether a stored token is worth trying, and that copy has to move
+    // when this one does or the client would give up on a token the server still honours.
+    res.setHeader('X-Session-Expires', String(s.exp));
     // WHEN DID THIS DEVICE LAST LOOK. A GET from a live token is the phone polling, which
     // it only does while the app is on screen (web/app.js stops the timer on
     // document.hidden, and iOS hides a backgrounded PWA). That is the signal the push
@@ -2351,6 +2444,10 @@ async function serve(argv) {
   const ch0 = auditVerify();
   if (!ch0.ok && ch0.n) log(`  WARNING: audit chain broken at row ${ch0.at} (${ch0.why})`);
   armAwake();
+  {
+    const ls = loadSessions();
+    if (ls.kept || ls.dropped) log(`  sessions: ${ls.kept} restored from ${SESSIONS}${ls.dropped ? `, ${ls.dropped} expired or revoked dropped` : ''}`);
+  }
   setInterval(sweep, 30000).unref();
   armPushWatch();
   {
@@ -2369,6 +2466,7 @@ async function serve(argv) {
   for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => {
     if (stopping) { log(`${sig} again — exiting now`); process.exit(1); }
     stopping = true;
+    persistSessions();                    // the last few seconds of slide, before anything else
     log(`${sig} — draining, then stopping`);
     server.close(() => { log('stopped'); process.exit(0); });
     server.closeIdleConnections?.();
@@ -2523,8 +2621,9 @@ async function main() {
     // survives somewhere.
     if ((x.push || []).length) { log(`fleet-serve: dropping ${x.push.length} push endpoint(s) with '${id}'`); delete x.push; }
     saveConfig(c);
+    const gone = dropPersistedSessions(id);
     auditAppend({ ts: now(), client: id, ip: 'cli', verb: 'revoke', subject: id, result: 'ran', output: 'token and passkeys removed' });
-    console.log(`fleet-serve: revoked '${id}' — bearer token and passkeys dropped; its live sessions die on the daemon's next request.`);
+    console.log(`fleet-serve: revoked '${id}' — bearer token and passkeys dropped${gone ? `, ${gone} persisted session(s) deleted` : ''}; a running daemon refuses its tokens from the next request.`);
     return;
   }
 

@@ -1,8 +1,9 @@
 // web/passkey.js — the passkey gate (docs/mobile.md §5, §7).
 //
 // Two ceremonies, for two different questions:
-//   open()   — "is this the owner", at every cold start and after the app has been
-//              backgrounded for a few minutes.
+//   open()   — "is this the owner", when there is no live session to resume: the first
+//              launch, or any return after 15 minutes without a request (resume() below
+//              is tried first, and only its 401 brings the sensor out).
 //   fresh()  — "is this the owner, right now", at the moment a destructive verb is
 //              tapped. spawn, stop, rename. §7 calls this making the phone STRICTER
 //              than the terminal, which cannot ask for a fingerprint.
@@ -17,8 +18,14 @@
 
 import * as api from './api.js';
 
-export const TOKEN_TTL = 15 * 60;              // §5: ~15 minutes
-export const RELOCK_AFTER_HIDDEN = 5 * 60_000; // §5: "backgrounded for a few minutes"
+// The fixture stub's life. A server's token is the server's: an IDLE window of
+// session_ttl (15 minutes) that every request slides, never a deadline from Face ID.
+export const TOKEN_TTL = 15 * 60;
+// THERE IS NO SEPARATE "RELOCK AFTER HIDDEN" ANY MORE. It was five minutes backgrounded,
+// and it would make a resume after six minutes ask for Face ID while a relaunch after six
+// minutes (iOS having evicted the app) walked straight back in on the stored token — the
+// same absence answered two ways depending on what the OS did with the process. One rule:
+// the idle window, enforced where it means something, on the server.
 
 const LS_CRED = 'gf.cred';                     // credential id, base64url. Not a secret.
 
@@ -227,7 +234,26 @@ async function assertOnce(purpose) {
 // larger half of that on any link worth worrying about.
 const assert = (purpose) => ceremony(() => assertOnce(purpose));
 
-// Cold start / after backgrounding: assert, then hold the token the API will send.
+// A LAUNCH TRIES THE SESSION IT ALREADY HAS. The token this origin's daemon minted last is
+// kept on the device (api.js), and if the server still honours it — used within the last
+// 15 minutes, client not revoked — the app opens without the sensor. One authenticated
+// read decides, because only the server knows; its 401 clears the stored copy, so a dead
+// token costs one request and then Face ID, exactly as before.
+//   'ok' | 'none' (nothing stored, or visibly expired) | 'rejected' (the server said no)
+//   | 'offline' (could not ask — the token is kept, and the lock screen stays up).
+export async function resume() {
+  await api.ready();
+  if (api.mode() !== 'server') return 'none';
+  if (!api.haveToken() && !api.restoreToken()) return 'none';
+  try { await api.getProjects(); return 'ok'; }
+  catch (e) {
+    if (e instanceof api.AuthError) return 'rejected';
+    if (e instanceof api.OfflineError) return 'offline';
+    throw e;
+  }
+}
+
+// No live session to resume: assert, then hold the token the API will send.
 export async function open() {
   return ceremony(async () => {
     const a = await assertOnce('open');
