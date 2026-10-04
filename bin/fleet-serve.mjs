@@ -46,6 +46,7 @@ import { callToolAsync, projects, BIN, TOOLS } from '../mcp/fleet-dispatch.mjs';
 import { promptSummary } from '../lib/permission-dialog.mjs';
 import { fleetDirs as scanDirs, scanStatus } from '../lib/fleet-scan.mjs';
 import * as jarvis from '../lib/jarvis.mjs';
+import * as speech from '../lib/speech.mjs';
 import { jarvisState, vocabulary } from './fleet-jarvis.mjs';
 
 const HOME = os.homedir();
@@ -1471,6 +1472,9 @@ const ATTACH_RESIZE_OVER = 512 * 1024;     // below this an already-readable ima
 // this is headroom for a slow device rather than a length anybody talks for.
 const HEAR_BODY_CAP = 4 * 1024 * 1024;
 let hearChain = Promise.resolve();
+// One line per sentence spoken, saying which voice read it and whether it was made or
+// replayed — the record that proves a mixed reply really did switch voices.
+const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang} ${job.it.voice} ${job.it.text.length} chars ${m.ok ? (m.cached ? 'cached' : `synth ${m.ms}ms`) : `FAILED ${m.error}`}`);
 
 // SNIFFED, NEVER DECLARED. The client's content-type is a hint from a phone; the magic
 // bytes are what the file is. SVG is refused loudly and specifically further down: it is an
@@ -2087,6 +2091,38 @@ function agentCatalogue() {
     // The size and the time, never the words: a log file is a surface too.
     log(`jarvis: heard ${Math.round(body.length / 1024)} KB in ${ms}ms -> ${r.text.length} chars`);
     return send(res, 200, { ok: true, text: r.text, ms });
+  }
+
+  // SPEAKING: the reverse of hearing, and optional in the same way (lib/speech.mjs). The
+  // phone POSTs the words it wants read; the answer is the sentences, each with the voice
+  // its language got, and synthesis of all of them starts now, in order. The phone then
+  // GETs each sentence's audio by id, so the first one plays while the rest are still being
+  // made. A 503 is the phone's cue to fall back to its own speechSynthesis.
+  //   The words never reach the log: a sentence is logged by its id, its voice and its
+  // length, which is what says which voice read it without saying what was read.
+  if (p === '/api/speak' && req.method === 'POST') {
+    const v = speech.status();
+    if (!v.ready) return send(res, 503, { ok: false, text: v.why, needs: 'kokoro' });
+    const text = typeof body.text === 'string' ? body.text.slice(0, 8000) : '';
+    const items = speech.plan(text);
+    if (!items.length) return send(res, 400, { ok: false, text: 'nothing speakable in that text' });
+    speech.prefetch(items, speakLog);
+    log(`speak: ${items.length} sentence(s) planned — ${items.map(i => `${i.id.slice(0, 8)}=${i.voice}`).join(' ')}`);
+    return send(res, 200, { ok: true, sentences: items.map(({ id, lang, voice, text }) => ({ id, lang, voice, text })) });
+  }
+  if (p.startsWith('/api/speak/') && req.method === 'GET') {
+    const id = p.slice('/api/speak/'.length);
+    if (!speech.validId(id)) return send(res, 400, { ok: false, text: 'not a sentence id' });
+    const pending = speech.audio(id, speakLog);
+    if (!pending) return send(res, 404, { ok: false, text: 'unknown sentence — POST /api/speak first' });
+    let r;
+    try { r = await pending; } catch (e) { return send(res, 503, { ok: false, text: String((e && e.message) || e), needs: 'kokoro' }); }
+    let wav;
+    try { wav = fs.readFileSync(r.path); } catch { return send(res, 410, { ok: false, text: 'that audio was pruned — POST /api/speak again' }); }
+    // Private and long-lived: the id is a hash of the words and the voice, so the bytes
+    // behind it never change, and only this device's session could fetch them.
+    res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': wav.length, 'cache-control': 'private, max-age=86400' });
+    return res.end(wav);
   }
 
   // ── writes ────────────────────────────────────────────────────────────────

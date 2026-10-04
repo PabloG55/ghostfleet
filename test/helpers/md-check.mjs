@@ -205,7 +205,7 @@ is('...and reaches the document only through create* calls that cannot carry mar
 const SPEAKABLE = (APP_SRC.match(/export function speakable[\s\S]*?\n\}/) || [''])[0];
 is('speakable() exists to be checked', true, SPEAKABLE.length > 100);
 is('...and does not call the renderer', '', (SPEAKABLE.match(/\bmd\.[a-z]+/gi) || []).join(','));
-is('...and still names fenced code itself', true, /code block/.test(SPEAKABLE));
+is('...and still names fenced code itself', true, /Code omitted/.test(SPEAKABLE));
 is('...and app.js renders bubbles through md, not through el({html})', '',
    (APP_SRC.match(/html:/g) || []).join(''));
 

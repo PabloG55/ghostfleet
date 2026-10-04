@@ -504,6 +504,38 @@ export async function jarvisHear(wav) {
   return j;
 }
 
+// The Mac's Kokoro voice (lib/speech.mjs): the words go up, the sentences come back with
+// the voice each one got, and each sentence's audio is fetched by id. A SpeechOff means
+// "no Kokoro here" — the caller falls back to the device's own speechSynthesis — and is a
+// different thing from a failure, which is worth a toast. Fixtures have no Mac to speak.
+export class SpeechOff extends Error {}
+export async function speakPlan(text) {
+  if ((await ready()).mode !== 'server') throw new SpeechOff('fixtures have no Kokoro');
+  if (!haveToken()) throw new AuthError('no live session token');
+  let r;
+  try {
+    r = await fetch(baseUrl() + '/api/speak', { method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ text }) });
+  } catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+  if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
+  const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+  // 404 too: a daemon from before /api/speak existed is a machine without Kokoro.
+  if (r.status === 503 || r.status === 404) throw new SpeechOff(j.text || 'no Kokoro on the Mac');
+  if (!j.ok) throw new Error(j.text || `speech failed (HTTP ${r.status})`);
+  return j.sentences || [];
+}
+export async function speakAudio(id) {
+  let r;
+  try { r = await fetch(baseUrl() + '/api/speak/' + encodeURIComponent(id), { headers: { Authorization: `Bearer ${token}` } }); }
+  catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+  if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw (r.status === 503 ? new SpeechOff(j.text || 'Kokoro failed') : new Error(j.text || `audio HTTP ${r.status}`));
+  }
+  return r.arrayBuffer();
+}
+
 export const ATTACH_MAX_BYTES = 6 * 1024 * 1024;
 export async function attach(project, session, file) {
   if ((await ready()).mode !== 'server') {

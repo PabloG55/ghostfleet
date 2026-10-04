@@ -771,19 +771,25 @@ nothing, because a pane that never changes and a verb that does nothing look ide
 
 ### Playing a message aloud
 
-**Any message, not the newest one.** The control used to live in the composer, and it lived
-there only because "the last thing the agent said" was the only speakable thing — which made
-*the newest message* the whole feature rather than a default. Tapping a bubble reveals a play
-control on that bubble, and tapping another moves it. The count of visible speakers is
-exactly what it was, which is one: a speaker on every bubble is the button wall this screen
-was rebuilt to get rid of.
+**A play button on every message.** The control used to live in the composer, then on
+whichever bubble you had tapped — one speaker on screen at a time, to keep the button wall
+away. The owner asked for one on every message, beside the other per-message controls, so it
+is there now; tap it to play, tap it again to stop. Two voices at once stays impossible:
+starting one message stops the other.
 
-A **tap** reveals it and the control plays. Long-press is already `x kill` on a card and
-already the text-selection gesture inside a bubble, and a third meaning would be the worst
-kind of hidden. A tap that started talking would make scrolling dangerous.
+**Speak mode, per session.** The speaker in a session's top bar (Jarvis's too) turns on
+reading each *finished* reply of that session aloud, the way conversation mode reads Jarvis's
+answers — but without the microphone. It is remembered per session on the device
+(`gf.autospeak` in localStorage). A reply is finished when the newest assistant message has
+changed and the card no longer says `working`, so a turn's narration between tool calls is
+not read and then cut off by its answer. Only what finishes while the session is open in the
+chat view is read: the first transcript after opening is the baseline, so opening a session
+never starts reading its backlog.
 
 **What is spoken is not what is written**, and the gap is bigger than markdown. Fenced blocks
-become the words "code block", inline code loses its backticks, links become "link" — and
+become "code omitted", inline code loses its backticks, links become "the link", table pipes
+and rule rows go (a row is read as its cells), emoji are dropped, and every line break ends a
+sentence — and
 identifiers are **named rather than spelled**. A synthesiser reads a 40-character sha one
 character at a time: about fifty seconds, for a string nobody could write down from a speaker
 anyway, wrapped in a four-word sentence.
@@ -810,6 +816,58 @@ decoration, the viewBox, the stroke width and the horn each written once so the 
 cannot drift into different weights. The `aria-label` is load-bearing rather than a nicety —
 an icon contributes no text, so without it a screen reader says "button" and nothing else,
 which is strictly worse than the emoji it replaced.
+
+### The Mac's voice (Kokoro, optional)
+
+The device's `speechSynthesis` is passable in English and poor in Spanish, and the owner writes
+both in one message. When the Mac has [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) —
+an 82M-parameter TTS model run by onnxruntime, entirely on the Mac — `fleet-serve` speaks with
+it instead, and the phone plays the audio:
+
+1. the phone POSTs the cleaned text to `/api/speak`; the daemon splits it into sentences and
+   picks **English (`af_heart`) or Spanish (`ef_dora`) per sentence**, from accents and
+   function words, a fragment with no vote keeping the language before it;
+2. synthesis of every sentence starts at once, in order, in one long-lived Kokoro worker
+   (`lib/kokoro-worker.py`) — loading the model costs more than a short sentence, so it is
+   loaded once and kept for ten idle minutes;
+3. the phone GETs `/api/speak/<id>` for sentence 1, plays it, and fetches sentence 2 while 1
+   plays. The wait before the voice starts is one sentence, not the whole reply;
+4. audio is cached on the Mac by a hash of the words and the voice
+   (`~/.cache/ghostfleet/speech`, newest 500 kept) and decoded buffers on the phone, so a
+   replay is instant.
+
+It plays through Web Audio, not an `<audio>` element: the route needs the bearer token,
+which a media element cannot send, and the CSP refuses the `blob:` URL it would need. iOS
+lets an AudioContext run only after a tap has resumed it, so every tap anywhere in the app
+re-unlocks it (the toggle, the play button, the talk button included) and the audio session
+is set to `playback`, so a phone on silent still speaks, as the device's voice does.
+
+**Nothing here is required.** Without Kokoro, `/api/speak` answers 503 with the reason and
+the phone uses its own voice, with one toast saying why; a sentence that fails mid-reply hands
+the rest of the reply to the device's voice rather than going quiet. `fleet-serve`'s log has
+one line per sentence — its id, language, voice and whether it was synthesised or cached —
+and never the words.
+
+Setup on the Mac — outside the Documents folder, which macOS will not let a launchd daemon read:
+
+```bash
+uv venv -p 3.12 ~/.local/share/kokoro/venv        # onnxruntime has no wheels for the newest Pythons
+VIRTUAL_ENV=~/.local/share/kokoro/venv uv pip install kokoro-onnx
+curl -L -o ~/.local/share/kokoro/kokoro-v1.0.onnx \
+  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+curl -L -o ~/.local/share/kokoro/voices-v1.0.bin \
+  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+```
+
+The daemon finds it on the next request; no restart. Configuration, all optional:
+
+| variable | default | |
+|---|---|---|
+| `CLAUDE_FLEET_KOKORO_DIR` | `~/.local/share/kokoro` | holds the two model files and `venv/` |
+| `CLAUDE_FLEET_KOKORO_PYTHON` | `<dir>/venv/bin/python` | the interpreter that has kokoro-onnx installed |
+| `CLAUDE_FLEET_KOKORO` | on | `off` makes the phone use its own voice |
+| `CLAUDE_FLEET_KOKORO_VOICE_EN` / `_ES` | `af_heart` / `ef_dora` | any Kokoro voice id |
+| `CLAUDE_FLEET_SPEECH_CACHE` | `~/.cache/ghostfleet/speech` | where synthesised sentences are kept |
 
 ### The thinking indicator
 
