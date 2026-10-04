@@ -32,9 +32,15 @@
 // bold, italic, links, bullets, numbered lists, headings. That is already a lot for a chat
 // bubble.
 //
-// NOT supported, on purpose: tables (no room at 390pt), images (a transcript's images are
-// paths on another machine), blockquotes, nested lists, strikethrough, task lists, and any
-// HTML in the source, which is text like everything else here.
+// TABLES ARE SUPPORTED NOW, and the reason they were not is the reason for their shape.
+// "No room at 390pt" was true of a table squeezed into the bubble, and false of one that
+// scrolls inside its own box — which is the rule a code fence already lives by. Left as
+// source, a table was the worst of both: a wall of pipes that wrapped mid-row, so the
+// columns it was written to line up did not line up anywhere. See toDom() for the box.
+//
+// NOT supported, on purpose: images (a transcript's images are paths on another machine),
+// blockquotes, nested lists, strikethrough, task lists, and any HTML in the source, which
+// is text like everything else here.
 //
 // AND `_` IS NOT EMPHASIS. `*bold*` is, `_this_` is not, and that is a decision about THIS
 // app's messages rather than about markdown: they are full of snake_case. `DATABASE_URL`,
@@ -99,6 +105,37 @@ const FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([A-Za-z0-9_+-]*)\s*$/;
 const HEADING = /^\s{0,3}(#{1,6})\s+(.*)$/;
 const BULLET = /^\s{0,3}[-*+]\s+(.*)$/;
 const NUMBER = /^\s{0,3}(\d{1,9})[.)]\s+(.*)$/;
+// A table is a row of cells followed by its delimiter row (`|---|:--:|`), and it is the
+// DELIMITER that decides — a lone line with a pipe in it is a shell pipeline in a sentence
+// (`ps aux | grep node`), and reading that as a one-row table would eat the pipe.
+const DELIM = /^\s{0,3}\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+// The cells of one row. Split on `|` that is neither escaped (`\|`) nor inside a code span
+// — `a | b` inside backticks is one cell holding a pipeline, not two cells. The outer pipes
+// are optional in GFM, so one leading and one trailing empty cell are dropped.
+export function cells(line) {
+  const src = String(line).trim();
+  const out = [];
+  let cur = '', tick = 0;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === '\\' && src[i + 1] === '|') { cur += '|'; i++; continue; }
+    if (c === '`') {
+      let n = 1;
+      while (src[i + n] === '`') n++;
+      tick = tick === 0 ? n : (tick === n ? 0 : tick);
+      cur += src.slice(i, i + n); i += n - 1; continue;
+    }
+    if (c === '|' && !tick) { out.push(cur); cur = ''; continue; }
+    cur += c;
+  }
+  out.push(cur);
+  if (src.startsWith('|')) out.shift();
+  if (src.endsWith('|') && !src.endsWith('\\|') && out.length > 1) out.pop();
+  return out.map(c => c.trim());
+}
+const isTableAt = (lines, i) => i + 1 < lines.length && lines[i].includes('|') &&
+  DELIM.test(lines[i + 1]) && cells(lines[i]).length === cells(lines[i + 1]).length;
 
 export function parse(text) {
   const lines = String(text == null ? '' : text).split('\n');
@@ -118,6 +155,23 @@ export function parse(text) {
     }
     const head = HEADING.exec(line);
     if (head) { blocks.push({ t: 'heading', level: head[1].length, kids: inline(head[2]) }); i++; continue; }
+    if (isTableAt(lines, i)) {
+      const head = cells(line);
+      const align = cells(lines[i + 1]).map(d => (
+        /^:-+:$/.test(d) ? 'center' : /-:$/.test(d) ? 'right' : /^:-/.test(d) ? 'left' : ''));
+      const rows = [];
+      // A body row is any following line with a pipe in it, until a blank line or a line
+      // without one. Short rows are padded and long ones cut to the header's width, so
+      // every row has exactly as many cells as there are columns — a ragged row would
+      // shift its later cells under the wrong heading.
+      for (i += 2; i < lines.length && lines[i].trim() && lines[i].includes('|'); i++) {
+        const r = cells(lines[i]).slice(0, head.length);
+        while (r.length < head.length) r.push('');
+        rows.push(r.map(inline));
+      }
+      blocks.push({ t: 'table', align, head: head.map(inline), rows });
+      continue;
+    }
     if (BULLET.test(line) || NUMBER.test(line)) {
       const ordered = !BULLET.test(line);
       const items = [];
@@ -136,7 +190,8 @@ export function parse(text) {
     const para = [];
     for (; i < lines.length; i++) {
       const l = lines[i];
-      if (!l.trim() || FENCE.test(l) || HEADING.test(l) || BULLET.test(l) || NUMBER.test(l)) break;
+      if (!l.trim() || FENCE.test(l) || HEADING.test(l) || BULLET.test(l) || NUMBER.test(l) ||
+          isTableAt(lines, i)) break;
       para.push(l);
     }
     blocks.push({ t: 'para', kids: inline(para.join('\n')) });
@@ -148,6 +203,7 @@ export function parse(text) {
 // Deliberately dull, and the only part of this file that needs a document. Text reaches
 // the page through createTextNode and nowhere else.
 const TAG = { bold: 'strong', em: 'em', code: 'code' };
+export const FIT_COLS = 3;
 
 export function toDom(blocks, doc) {
   const frag = doc.createDocumentFragment();
@@ -183,6 +239,46 @@ export function toDom(blocks, doc) {
       code.appendChild(doc.createTextNode(b.text));
       pre.appendChild(code);
       frag.appendChild(pre);
+      continue;
+    }
+    if (b.t === 'table') {
+      // THE SAME RULE AS A CODE BLOCK, ONE LEVEL UP: the table keeps its real shape and
+      // scrolls inside its own box, and the page never moves sideways. The box is a <div>
+      // around the <table> because a table cannot be its own scroll container — overflow on
+      // a <table> element is ignored. The first column is pinned in app.css, so the row
+      // labels stay on screen while the numbers scroll past them.
+      const box = doc.createElement('div');
+      // A table of three columns or fewer is FITTED to the bubble rather than scrolled: it
+      // is a list of pairs, its words can wrap without the columns losing their meaning,
+      // and a two-column table that scrolls 24px is a control with nothing to show.
+      box.className = 'md-table' + (b.head.length <= FIT_COLS ? ' fit' : '');
+      const table = doc.createElement('table');
+      const row = (tag, kids) => {
+        const tr = doc.createElement('tr');
+        kids.forEach((c, n) => {
+          const cell = doc.createElement(tag);
+          // `align` comes from the delimiter row and is one of three fixed words, so this
+          // is a class from a closed set — never a value taken from the transcript.
+          if (b.align[n]) cell.className = 'a-' + b.align[n];
+          // The cell's words go in a block of their own because a table cell ignores
+          // max-width and that block does not: it is what caps a column of prose or a URL
+          // while every other column keeps its natural width (app.css).
+          const inner = doc.createElement('div');
+          inner.className = 'md-cell';
+          put(inner, c);
+          cell.appendChild(inner);
+          tr.appendChild(cell);
+        });
+        return tr;
+      };
+      const thead = doc.createElement('thead');
+      thead.appendChild(row('th', b.head));
+      table.appendChild(thead);
+      const tbody = doc.createElement('tbody');
+      for (const r of b.rows) tbody.appendChild(row('td', r));
+      table.appendChild(tbody);
+      box.appendChild(table);
+      frag.appendChild(box);
       continue;
     }
     if (b.t === 'heading') {
@@ -228,6 +324,7 @@ export function plain(blocks) {
   return blocks.map(b => (
     b.t === 'code' ? b.text
     : b.t === 'list' ? b.items.map(words).join('\n')
+    : b.t === 'table' ? [b.head, ...b.rows].map(r => r.map(words).join('\t')).join('\n')
     : words(b.kids || [])
   )).join('\n');
 }

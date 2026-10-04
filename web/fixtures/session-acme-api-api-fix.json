@@ -28,7 +28,7 @@
     {
       "ts": 1787338920,
       "role": "assistant",
-      "text": "Wrote the table test: 5xx, 429-seconds, 429-date, 429-date-in-the-past, 4xx-no-retry."
+      "text": "Wrote the table test — five cases, one row each:\n\n| Case | Status | Retry-After | Expected | Why |\n|:--|--:|---|---|---|\n| `5xx` | 503 | — | retry with backoff | the old helper already did this |\n| `429-seconds` | 429 | `120` | sleep 120s, then retry | the spec's main case |\n| `429-date` | 429 | `Wed, 21 Oct 2026 07:28:00 GMT` | sleep until that instant | https://docs.acme-api.test/retry-panel/rate-limits#retry-after-http-date |\n| `429-date-in-the-past` | 429 | a date already gone | clamp to 0, retry now | never sleep negative |\n| `4xx-no-retry` | 404 | — | **fail at once** | the one the old helper got wrong |"
     },
     {
       "ts": 1787339160,
@@ -98,7 +98,7 @@
     {
       "ts": 1787342280,
       "role": "assistant",
-      "text": "622 passed / 0 failed after the rebase."
+      "text": "Rebased on main. Before and after:\n\n| Suite | Result |\n|---|---|\n| before the rebase | 618 passed |\n| after the rebase | **622 passed / 0 failed** |"
     },
     {
       "ts": 1787342520,
