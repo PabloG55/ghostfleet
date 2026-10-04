@@ -51,6 +51,17 @@ the detail, and every entry here names the PR that carries the argument.
   takes the slot its old transcript hands it (`continued-in`). The readers follow that line
   too, and a backgrounded session nobody hands off claims no slot at all. The hook now logs
   each silent exit and each record it removes to `<fleet dir>/hook-debug.log`.
+- **Hibernation slept a backgrounded conversation on its predecessor's clock, then woke the
+  predecessor.** The pane of a conversation sent to the background still says it is in the
+  *old* id. So `fleet-hibernate` and the governor dated the slot by a transcript that had stopped
+  two days earlier, slept it as idle while the live conversation was six hours old, killed
+  the background process running it (its daemon is a child of the pane), and wrote the old id
+  into the asleep marker, so the wake resumed a two-day-old conversation. The idle clock,
+  the marker and `fleet-restart`'s resume now follow `continued-in` to the newest
+  conversation. A conversation a live background process is running is never slept
+  (the governor's log says so). A wake from a marker written before this resumes the
+  successor. Every dry run had also been deleting the live id's record, which is what removed
+  the record the readers above had to learn to read around.
 - **Notifications had never been turned on**, because nothing asked. After an unlock the
   installed app now offers *Turn on notifications* with one tap, and `fleet-phone` reports
   `notifications: not set up` until a subscription exists.
