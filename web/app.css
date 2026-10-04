@@ -955,10 +955,9 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * not, so both were drawn in body grey next to everything else. */
 .lock .warn { color: var(--yellow); }
 
-/* The per-message play control (turn()). It lives in the .meta row of the bubble you
- * tapped, so there is one on screen at most — see the comment on turn() for why that is
- * the whole point. Sized off the meta text rather than the button scale: this sits beside
- * a timestamp, not in the verb bar. */
+/* The per-message play control (turn()), on every message's .meta row. Sized off the
+ * meta text rather than the button scale: this sits beside a timestamp, not in the verb
+ * bar. */
 .chat .meta { display: flex; align-items: center; gap: .5em; }
 .chat .meta .speak.tiny { padding: 0 .45em; min-height: 0; line-height: 1.5; font-size: 1em; }
 /* The icon is sized in em so it is the button's size, and the SAME size in both states —
@@ -967,7 +966,6 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
    negative baseline shift keeps the button's box the height line-height already gave it,
    so swapping the emoji for this moves nothing else in the meta row. */
 .chat .meta .speak.tiny svg { width: 1.15em; height: 1.15em; vertical-align: -.22em; }
-.chat .bub.tappable { cursor: pointer; }
 /* The copy button sits in the same row and at the same scale as the speaker — a dim mark
  * next to the timestamp rather than a button in the verb bar. Borderless until it has
  * something to say, so a column of bubbles is not a column of boxes; "copied" is green for
@@ -979,6 +977,9 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 }
 .chat .meta .copy.tiny svg { width: 1.15em; height: 1.15em; }
 .chat .meta .copy.tiny.done { color: var(--green); }
+/* Speak mode's toggle in the session's top bar: the same speaker, lit yellow while on
+ * (.speak.on), at the bar's button scale. */
+.sbar .speak.automode svg { width: 1.15em; height: 1.15em; vertical-align: -.22em; }
 
 /* ── motion is optional, always ────────────────────────────────────────────
  * Everything this redesign added that moves is gated here, in one place, rather than each

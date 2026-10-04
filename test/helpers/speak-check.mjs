@@ -86,7 +86,9 @@ const synth = {
   voices: [], calls: [], listeners: {},
   getVoices() { return this.voices; },
   cancel() { this.calls.push('cancel'); },
-  speak(u) { this.calls.push('speak:' + (u.voice ? u.voice.name : 'default') + '@' + u.rate); },
+  // The volume-0 utterance is unlockAudio()'s primer — iOS speaks only after a gesture has
+  // spoken once — and is recorded as what it is, so it is not counted as a second voice.
+  speak(u) { this.calls.push(u.volume === 0 ? 'prime' : 'speak:' + (u.voice ? u.voice.name : 'default') + '@' + u.rate); },
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); },
   fire(ev) { for (const fn of (this.listeners[ev] || [])) fn(); },
 };
@@ -95,7 +97,7 @@ Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: tr
   value: class { constructor(t) { this.text = t; this.rate = 1; this.voice = null; this.lang = ''; } } });
 Object.defineProperty(globalThis, 'getSelection', { configurable: true, writable: true, value: () => '' });
 
-const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom } =
+const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom, finishedReply, autoSpeakOn, setAutoSpeak } =
   await import(new URL('../../web/app.js', import.meta.url).href);
 is('web/app.js exports speakable()', 'function', typeof speakable);
 
@@ -183,14 +185,25 @@ for (const [what, input, kept] of [
 // Regression rows, not new claims: identifiers were added UNDER these, and the cheapest way
 // to break them is to reorder the passes — run the path rule before the link rule and every
 // URL becomes a basename.
-is('a fenced block is named, not read', true, /code block/.test(speakable('before\n```\nrm -rf /\n```\nafter')));
+is('a fenced block is named, not read', true, /Code omitted/.test(speakable('before\n```\nrm -rf /\n```\nafter')));
 is('...and its contents are gone', false, /rm -rf/.test(speakable('before\n```\nrm -rf /\n```\nafter')));
 is('inline code keeps its text', 'run the suite first', speakable('run the `suite` first'));
 is('a markdown link becomes its label', 'the design link says so', speakable('the [design](https://x.test/a/b.md) says so'));
-is('a bare URL becomes "link"', true, / link /.test(speakable('see https://x.test/a/b.md for it')));
+is('a bare URL becomes "the link"', 'see the link for it', speakable('see https://x.test/a/b.md for it'));
 is('...and the URL is not read as a path', false, /b\.md/.test(speakable('see https://x.test/a/b.md for it')));
 is('heading marks go', 'What changed', speakable('## What changed'));
-is('bullet marks go', 'one two', speakable('- one\n- two'));
+is('bullet marks go, and each item is its own sentence', 'one. two', speakable('- one\n- two'));
+// ── 5b. what the Mac's voice must not read ────────────────────────────────
+// Sentence ends survive as full stops because lib/speech.mjs chooses the language and the
+// voice PER SENTENCE: two list items run together are one clause and one language.
+is('a line that already ends a sentence is not doubled', 'Done. Next.', speakable('Done.\nNext.'));
+is('a table is read as its cells', 'Name, State. acme-api, green', speakable('| Name | State |\n|---|:---:|\n| acme-api | green |'));
+is('...and no pipe survives', false, /\|/.test(speakable('| a | b |\n|---|---|\n| 1 | 2 |')));
+is('...and the rule row is not read as dashes', false, /-{2,}/.test(speakable('| a | b |\n|---|---|\n| 1 | 2 |')));
+is('emoji are not read', 'Shipped. Tests green', speakable('Shipped 🚀.\nTests green ✅'));
+is('...a joined emoji leaves no glue behind', 'family', speakable('👨‍👩‍👧 family'));
+is('...and the words beside them stay', true, speakable('✅ merged #42').includes('merged #42'));
+is('a fenced block ends its own sentence', 'before. Code omitted. after', speakable('before\n```\nrm -rf /\n```\nafter'));
 is('emphasis marks go', 'really not optional', speakable('**really** _not_ optional'));
 const long = speakable('word '.repeat(600));
 is('a long turn is capped', true, long.length <= 1250);
@@ -258,6 +271,28 @@ synth.calls.length = 0;
 toggleSpeak('message N');
 is('tapping the talking one only cancels', 0, synth.calls.filter(c => c.startsWith('speak:')).length);
 is('...and it did cancel', 1, synth.calls.filter(c => c === 'cancel').length);
+
+// ── 6b. speak mode: which reply, and when ─────────────────────────────────
+// The decision behind the per-session toggle, driven as a table. The baseline row is the
+// one that matters most and is easiest to lose: opening a session must not read its backlog.
+const M = (role, ts, text) => ({ role, ts, text });
+const t1 = [M('user', 1, 'go'), M('assistant', 2, 'done')];
+const t2 = [...t1, M('user', 3, 'and?'), M('assistant', 4, 'also done')];
+is('first look is the baseline, read nothing', null, finishedReply(t1, false, undefined).say);
+is('...and it records the newest reply', 'assistant|2', finishedReply(t1, false, undefined).seen);
+is('nothing new reads nothing', null, finishedReply(t1, false, 'assistant|2').say);
+is('a new reply while still working waits', null, finishedReply(t2, true, 'assistant|2').say);
+is('...and keeps the old baseline, so it is read when the turn ends', 'assistant|2', finishedReply(t2, true, 'assistant|2').seen);
+is('a new reply once the turn is over is read', 'also done', (finishedReply(t2, false, 'assistant|2').say || {}).text);
+is('a user turn alone is not a reply', null, finishedReply([...t1, M('user', 5, 'hi')], false, 'assistant|2').say);
+is('an empty assistant turn is skipped', null, finishedReply([...t1, M('assistant', 6, '  ')], false, 'assistant|2').say);
+// Per session, on the device: one session's toggle is not another's.
+setAutoSpeak(true, 'acme-api/master');
+is('speak mode is remembered per session', true, autoSpeakOn('acme-api/master'));
+is('...and not for its neighbour', false, autoSpeakOn('acme-api/acme-api-2'));
+is('...stored in localStorage', true, /acme-api\/master/.test(localStorage.getItem('gf.autospeak') || ''));
+setAutoSpeak(false, 'acme-api/master');
+is('...and turned off again', false, autoSpeakOn('acme-api/master'));
 
 // ── 7. the column count, which is what makes rotation safe ────────────────
 // gridColsFrom reads the USED value of grid-template-columns, so the keys agree with what

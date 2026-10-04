@@ -13398,6 +13398,22 @@ if [ -d "$ROOT/web" ]; then
     is "$name" "$want" "$got"
   done < "$PW/speak"
 
+  # ── which voice the Mac reads each sentence with ─────────────────────────────
+  # lib/speech.mjs picks English or Spanish PER SENTENCE, because one reply holds both, and
+  # Kokoro is optional — so the table checks detection both ways (Spanish found AND English
+  # kept), that an ambiguous fragment keeps the language before it, and that status() says
+  # not-ready for a missing file or CLAUDE_FLEET_KOKORO=off. No Kokoro is needed to run it.
+  # Watched going red with: langOf answering 'en' always, a tie going to Spanish, the
+  # abbreviation guard off, line breaks not splitting, the long-sentence cut off, a missing
+  # file ignored, the off switch ignored, and the voice dropped from the cache key.
+  node "$ROOT/test/helpers/speech-check.mjs" > "$PW/speech" 2> "$PW/speech.err"
+  is "speech-check ran"               "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PW/speech.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/speech")" -ge 25 ] && echo yes || echo "no: $(wc -l < "$PW/speech") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PW/speech"
+
   # ── the markdown a bubble renders ──────────────────────────────────────────
   # "the messages are not in nice .md format, they have the ****" — turn() set the bubble
   # with textContent, so every assistant turn was its own source. web/md.js parses to

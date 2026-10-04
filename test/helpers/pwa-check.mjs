@@ -395,11 +395,11 @@ const appjs = read('app.js');
 const composer = (/function composer\([\s\S]*?\n\}/.exec(appjs) || [''])[0];
 is('the composer has no speaker', false, /toggleSpeak/.test(composer));
 is('...and a bubble does', true, /function turn\([\s\S]*?toggleSpeak/.test(appjs));
-// ONE on screen at a time is what answers the button-wall objection the old comment
-// recorded: the control is drawn only for the bubble whose key matches the tap.
-is('...only on the tapped one', true, /S\.speakSel === key/.test(appjs));
-is('...and the old rationale was replaced, not deleted', true,
-   /button wall/.test(appjs));
+// ON EVERY MESSAGE now (the owner's call), replacing tap-to-reveal: no trace of the old
+// one-at-a-time gate may survive to hide a speaker again, and turn() says why it changed.
+is('...on every message, with no tap-to-reveal gate left', false, /speakSel/.test(appjs));
+is('...and the change of rationale is written down', true,
+   /A PLAY BUTTON ON EVERY MESSAGE/.test(appjs));
 
 // ── the speaker is an icon, and there is only ONE of it ───────────────────
 // THE STRUCTURAL HALF. pwa-render asserts the two rendered states share a viewBox; this

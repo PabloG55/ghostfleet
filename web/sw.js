@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 1b2e121a36af
+// CLIENT-HASH: fccc5cf13376
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -293,7 +293,10 @@
 // message's markdown source, and a markdown table renders as a table in its own scroller
 // with the first column pinned. A phone still on v50 shows the table as pipes and has no
 // button — nothing it does is wrong, it just cannot do either.
-const VERSION = 'ghostfleet-v51';
+// v52 is the Mac's voice: a play button on every message, speak mode per session, and
+// speech from Kokoro on the Mac when it has it (per-sentence English/Spanish), falling back
+// to the device's voice. An older client keeps its tap-to-reveal button and device voice.
+const VERSION = 'ghostfleet-v52';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

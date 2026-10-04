@@ -40,9 +40,6 @@ const S = {
   pane: null,           // last /api/pane payload   { pane, at, … }
   paneGeom: null,       // { rows, cols } — measured from that payload, not claimed by it
   paneErr: '',          // the last pane read's failure, shown once rather than per poll
-  speakSel: '',         // key of the bubble that was TAPPED — the only one showing a play
-                        // control. See turn(): this is what keeps per-message playback
-                        // from becoming a speaker on every bubble.
   copied: '',           // key of the bubble whose copy button is saying "copied" — state, so
                         // a 5s poll landing inside the feedback does not wipe it
   pscroll: 0,           // scrollback rows asked for; 0 = exactly what an attach shows
@@ -200,6 +197,7 @@ async function refresh() {
       // telling the truth.
       reconcilePending();
       if (S.jarvisMode) talkAfterRefresh();
+      autoSpeakAfterRefresh();
     }
     S.stale = 0;
     save();
@@ -615,7 +613,7 @@ const PROJECTS_HINT = 'tap a project · long-press to remove it from the list ·
 function toProjects() {
   const n = navDepth;
   S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null;
-  S.pending = null; S.speakSel = ''; stopSpeaking(); S.jarvisMode = false; talkStop('');
+  S.pending = null; stopSpeaking(); S.jarvisMode = false; talkStop('');
   navDepth = 0;
   if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
     try { history.go(-n); } catch {}    // popstate fires; popTo() sees screen==='projects'
@@ -883,10 +881,21 @@ function sayIdentifiers(t) {
 }
 export function speakable(text) {
   let t = String(text || '');
-  t = t.replace(/```[\s\S]*?```/g, ' … code block … ');   // fenced code: named, not read
+  t = t.replace(/```[\s\S]*?```/g, '\nCode omitted.\n'); // fenced code: named, not read
   t = t.replace(/`([^`]*)`/g, '$1');                      // inline code: the text, not the ticks
   t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1 link'); // [label](url) -> "label link"
-  t = t.replace(/https?:\/\/\S+/g, ' link ');            // and a bare one
+  t = t.replace(/https?:\/\/\S+/g, ' the link ');        // and a bare one
+  // A TABLE IS READ AS ITS CELLS. The rule row (|---|:--:|) is pure punctuation, and a pipe
+  // read aloud is "vertical bar" between every word; a row becomes its cells with a pause
+  // between them, and the row's line break ends it like any other line.
+  // [ \t], never \s: under /m a \s* beside ^ or $ eats the line break too, and the row
+  // runs into the next one with no stop between them.
+  t = t.replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/gm, '');
+  t = t.replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (m, cells) => cells.split('|').map(c => c.trim()).filter(Boolean).join(', '));
+  // Emoji are decoration in writing and noise in speech: a voice either says "check mark
+  // button" or stalls on a glyph it has no name for. The joiner and the variation selector
+  // go with them, or a family emoji leaves its glue behind.
+  t = t.replace(/[ \t]*[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]+/gu, '');
   t = t.replace(/^\s{0,3}#{1,6}\s+/gm, '');               // heading marks
   t = t.replace(/^\s{0,3}[-*+]\s+/gm, '');                // bullet marks
   t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, '$1$2$3');
@@ -894,6 +903,10 @@ export function speakable(text) {
   // and a URL is already the word "link"; BEFORE the cap, so the 1200 characters are spent
   // on words instead of on an address that will not be read out.
   t = sayIdentifiers(t);
+  // A LINE BREAK IS A SENTENCE END, and it has to survive the whitespace collapse as one: a
+  // list item has no full stop, and the Mac's voice picks its language and its pause per
+  // sentence — two bullets read as one clause get one language and no breath between them.
+  t = t.replace(/([^\s.!?…:;,])[ \t]*\n\s*/g, '$1. ');
   t = t.replace(/\s+/g, ' ').trim();
   return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, '') + '… and it goes on.' : t;
 }
@@ -957,38 +970,235 @@ export function savedRate() {
   try { r = Number(localStorage.getItem(LS_RATE)); } catch {}
   return Number.isFinite(r) && r >= 0.5 && r <= 2 ? r : 1.05;
 }
+// ── the Mac's voice, and the phone's as the fallback ───────────────────────
+// fleet-serve speaks with Kokoro when the Mac has it (lib/speech.mjs): better English, real
+// Spanish, and the language chosen sentence by sentence, because one reply holds both. The
+// device's speechSynthesis is what is left when it does not — no Kokoro, an old daemon,
+// fixtures, a failed sentence — so every path below ends in a voice either way.
+//
+// PLAYED THROUGH WEB AUDIO, NOT AN <audio> ELEMENT, for two reasons that both bind. The
+// audio route needs the session's bearer token, which a media element cannot send, so the
+// bytes are fetched — and the CSP is `default-src 'self'`, which refuses the blob: URL an
+// element would need to play them. A decoded buffer on an AudioContext needs neither.
+//
+// STREAMED BY SENTENCE. The phone asks for the plan, then fetches sentence N+1 while N
+// plays, and the Mac has already started on all of them in order. The wait before the
+// voice starts is one sentence, which is the whole latency budget on a loaded laptop.
+const A = { ctx: null, src: null, gen: 0, offUntil: 0, told: false, bufs: new Map() };
+const hasWebAudio = () => typeof window !== 'undefined' && !!(window.AudioContext || window.webkitAudioContext);
+const canPlay = () => canSpeak() || hasWebAudio();
+function audioCtx() {
+  if (!A.ctx && hasWebAudio()) A.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  return A.ctx;
+}
+// THE UNLOCK, AND IT HAS TO HAPPEN INSIDE A TAP. iOS lets an AudioContext run only once a
+// gesture has resumed it and played something — the same rule talkStart() honours — and a
+// reply that arrives by poll, minutes after the toggle was tapped, has no gesture of its
+// own. So it is done on EVERY tap anywhere (it is a no-op once running), which also covers
+// the context iOS suspends when the installed app goes to the background and comes back.
+//   'playback' is the audio session that ignores the silent switch, as the device's own
+// speech does; without it a phone on silent would play the Mac's voice to nobody. Not while
+// talking: conversation mode holds the microphone, which is a different session type.
+let synthPrimed = false;
+export function unlockAudio() {
+  try { if (!S.talk && navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch {}
+  try {
+    const c = audioCtx();
+    if (c && c.state !== 'running') {
+      c.resume();
+      const src = c.createBufferSource();
+      src.buffer = c.createBuffer(1, 1, 22050);
+      src.connect(c.destination); src.start(0);
+    }
+  } catch {}
+  if (!synthPrimed && canSpeak()) {
+    synthPrimed = true;
+    try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch {}
+  }
+}
 function stopSpeaking() {
-  if (!canSpeak()) { S.speaking = ''; return; }
-  try { speechSynthesis.cancel(); } catch {}
+  A.gen++;
+  try { if (A.src) { A.src.onended = null; A.src.stop(); } } catch {}
+  A.src = null;
+  if (canSpeak()) { try { speechSynthesis.cancel(); } catch {} }
   S.speaking = '';
 }
-// A TOGGLE, and it is the same button both ways: tapping the one that is speaking stops
-// it. Two voices at once is the failure mode of a play button that is really two buttons.
-export function toggleSpeak(text) {
-  if (!canSpeak()) { toast('this browser has no speech synthesis', 'bad'); return; }
-  const say = speakable(text);
-  if (!say) { toast('nothing to read out in that message', 'bad'); return; }
-  const wasSpeaking = S.speaking;
-  stopSpeaking();
-  if (wasSpeaking === say) { render(); return; }        // tapped the one that was talking
-  S.speaking = say;
+// The device's own voice, for the whole text or for what is left of it.
+function synthSay(words, g, fin) {
+  if (!canSpeak()) { fin(); return; }
   try {
-    const u = new SpeechSynthesisUtterance(say);
+    const u = new SpeechSynthesisUtterance(words);
     // The rate that was hardcoded here is now the default of a setting; the voice is null
     // when nothing is saved or the saved one is absent, and null is exactly what the
-    // browser treats as "your default". speakable() is untouched by either — what gets
-    // normalised and what reads it out are different questions.
+    // browser treats as "your default".
     u.rate = savedRate();
     const voice = pickVoice();
     if (voice) { u.voice = voice; if (voice.lang) u.lang = voice.lang; }
     // Cleared when it finishes on its own, or the button stays lit for a voice that
     // stopped talking a minute ago. `onerror` too: iOS refuses to speak at all until a
     // gesture has unlocked audio, and a stuck highlight is how that looks from outside.
-    u.onend = () => { if (S.speaking === say) { S.speaking = ''; render(); } };
-    u.onerror = () => { if (S.speaking === say) { S.speaking = ''; render(); } };
+    u.onend = fin; u.onerror = fin;
     speechSynthesis.speak(u);
-  } catch { S.speaking = ''; toast('speech synthesis refused to start', 'bad'); }
+    // WebKit can drop `onend` for an utterance it cut short, which would leave conversation
+    // mode's mic closed forever. A ceiling from the length, generous enough never to reopen
+    // the mic over a voice that is still talking.
+    setTimeout(() => { if (A.gen === g) fin(); }, 3000 + words.length * 150);
+  } catch { fin(); }
+}
+function decode(ab) {
+  const c = audioCtx();
+  // The callback form: Safari before 14.1 has no promise-returning decodeAudioData.
+  return new Promise((res, rej) => { try { c.decodeAudioData(ab, res, rej); } catch (e) { rej(e); } });
+}
+// Decoded buffers by sentence id, so a replay is instant and costs no request. Bounded:
+// a decoded sentence is a few hundred KB of floats.
+async function sentenceBuf(it) {
+  if (A.bufs.has(it.id)) return A.bufs.get(it.id);
+  const buf = await decode(await api.speakAudio(it.id));
+  A.bufs.set(it.id, buf);
+  if (A.bufs.size > 60) A.bufs.delete(A.bufs.keys().next().value);
+  return buf;
+}
+function playBuf(buf, g) {
+  return new Promise((resolve, reject) => {
+    const c = audioCtx();
+    // A context iOS still holds suspended never advances, so `onended` would never come —
+    // the button would stay lit over silence. That is a refusal, and it falls back.
+    if (c.state !== 'running') { try { c.resume(); } catch {} }
+    setTimeout(() => {
+      if (A.gen !== g) return resolve();
+      if (c.state !== 'running') return reject(new Error('audio is locked until the screen is tapped'));
+      const src = c.createBufferSource();
+      src.buffer = buf; src.connect(c.destination);
+      let done = false;
+      src.onended = () => { done = true; if (A.src === src) A.src = null; resolve(); };
+      A.src = src;
+      const t0 = c.currentTime;
+      src.start(0);
+      // A CONTEXT CAN SAY 'running' AND NOT RUN. With no output to pull it — measured in a
+      // headless browser, and the same shape as an iOS audio interruption — currentTime
+      // stays put, `onended` never comes, and the button stays lit over silence for good.
+      // So once the sentence should have finished: a clock that never moved is a refusal
+      // (the rest goes to the device's voice), and one that moved just lost its event.
+      setTimeout(() => {
+        if (done || A.gen !== g) return;
+        if (c.currentTime - t0 < 0.05) { try { src.onended = null; src.stop(); } catch {} reject(new Error('the audio output never started')); }
+        else { done = true; resolve(); }
+      }, buf.duration * 1000 + 1500);
+    }, c.state === 'running' ? 0 : 150);
+  });
+}
+// ONE ENTRY POINT FOR EVERYTHING THAT SPEAKS — the play button, speak mode, conversation
+// mode — so the voice, the fallback and the stop are the same in all three. `onend` runs
+// when this text finishes or fails, never when something newer replaced it.
+async function speakText(words, onend) {
+  stopSpeaking();
+  if (!words) { if (onend) onend(); return; }
+  const g = A.gen;
+  S.speaking = words;
+  const fin = () => { if (A.gen !== g) return; A.gen++; A.src = null; S.speaking = ''; render(); if (onend) onend(); };
+  if (hasWebAudio() && Date.now() >= A.offUntil) {
+    let plan = null, i = 0;
+    try {
+      plan = await api.speakPlan(words);
+      if (A.gen !== g) return;
+      const pending = [];
+      const get = (k) => pending[k] || (pending[k] = sentenceBuf(plan[k]));
+      for (; i < plan.length; i++) {
+        get(i); if (i + 1 < plan.length) get(i + 1).catch(() => {});
+        const buf = await get(i);
+        if (A.gen !== g) return;
+        await playBuf(buf, g);
+        if (A.gen !== g) return;
+      }
+      fin(); return;
+    } catch (e) {
+      if (A.gen !== g) return;
+      // NO KOKORO IS NOT AN ERROR, it is a Mac without the optional voice: say so once, then
+      // stop asking for a minute so each message does not pay a round trip to hear "no".
+      if (e instanceof api.SpeechOff) {
+        A.offUntil = Date.now() + 60000;
+        if (!A.told) { A.told = true; toast(`using this device's voice — ${e.message}`); }
+      } else if (!(e instanceof api.AuthError)) {
+        toast(`the Mac's voice failed, using this device's: ${(e && e.message) || e}`, 'bad');
+      }
+      // Whatever was not yet heard is said by the device: a reply cut off at sentence three
+      // is worse than one that changes voice at sentence three.
+      if (plan && i > 0) words = plan.slice(i).map(x => x.text).join(' ');
+    }
+  }
+  synthSay(words, g, fin);
+}
+// A TOGGLE, and it is the same button both ways: tapping the one that is speaking stops
+// it. Two voices at once is the failure mode of a play button that is really two buttons.
+export function toggleSpeak(text) {
+  if (!canPlay()) { toast('this browser can neither play audio nor synthesise speech', 'bad'); return; }
+  unlockAudio();
+  const say = speakable(text);
+  if (!say) { toast('nothing to read out in that message', 'bad'); return; }
+  if (S.speaking === say) { stopSpeaking(); render(); return; }        // tapped the one that was talking
+  speakText(say);
   render();
+}
+
+// ── speak mode: every finished reply of THIS session, read aloud ───────────
+// What conversation mode does for Jarvis's answers, for any session, without the mic: a
+// toggle in the session's top bar, remembered per session on this device (a phone in a
+// pocket wants it on for the lead it is following, not for every worker it glances at).
+//   A REPLY IS FINISHED when the newest assistant message has changed AND the card no
+// longer says working — a turn writes several assistant messages between tool calls, and
+// reading each as it lands would read the narration and then interrupt it with the answer.
+//   ONLY WHAT FINISHES WHILE YOU WATCH. The first transcript after opening the screen is
+// the baseline and is never read: opening a session must not start reading its backlog.
+const LS_AUTOSPEAK = 'gf.autospeak';   // { "<project>/<session>": true } — speak mode per session
+const heard = new Map();               // speak key -> msgKey of the newest reply already seen
+const speakKey = () => `${S.project || ''}/${S.session || ''}`;
+function autoSpeakMap() { try { const j = JSON.parse(localStorage.getItem(LS_AUTOSPEAK) || '{}'); return j && typeof j === 'object' ? j : {}; } catch { return {}; } }
+export function autoSpeakOn(k = speakKey()) { return !!autoSpeakMap()[k]; }
+export function setAutoSpeak(on, k = speakKey()) {
+  const m = autoSpeakMap();
+  if (on) m[k] = true; else delete m[k];
+  try { localStorage.setItem(LS_AUTOSPEAK, JSON.stringify(m)); } catch {}
+}
+function toggleAutoSpeak() {
+  unlockAudio();                       // this tap is the gesture every later reply rides on
+  const on = !autoSpeakOn();
+  setAutoSpeak(on);
+  if (!on) stopSpeaking();
+  toast(on ? `speak mode on — new replies from ${S.jarvisMode ? 'Jarvis' : S.session} are read aloud` : 'speak mode off');
+  render();
+}
+// THE DECISION, PURE, so the suite can drive it: given the transcript, whether the card
+// says working, and the newest reply already seen (undefined = never looked), what is the
+// new baseline and which message — if any — is to be read.
+export function finishedReply(ms, working, seen) {
+  let last = null;
+  for (let k = (ms || []).length - 1; k >= 0; k--) if (ms[k].role === 'assistant' && String(ms[k].text || '').trim()) { last = ms[k]; break; }
+  if (!last) return { seen, say: null };
+  const mk = msgKey(last);
+  if (seen === undefined) return { seen: mk, say: null };       // the baseline: never the backlog
+  if (seen === mk || working) return { seen, say: null };       // nothing new, or not over yet
+  return { seen: mk, say: last };
+}
+export function autoSpeakAfterRefresh() {
+  if (S.screen !== 'session' || !S.sess) return;
+  const k = speakKey(), c = cardOf(S.jarvisMode ? 'master' : S.session);
+  const r = finishedReply(S.sess.messages, !!(c && c.status === 'working'), heard.get(k));
+  if (r.seen !== undefined) heard.set(k, r.seen);
+  // Conversation mode already reads Jarvis's answer; a second voice would talk over it.
+  if (!r.say || !autoSpeakOn(k) || S.talk) return;
+  speakText(speakable(r.say.text));
+}
+function autoSpeakBtn() {
+  if (!canPlay()) return null;          // absent, not dead, on a device with no voice at all
+  const on = autoSpeakOn();
+  const b = btn('', () => toggleAutoSpeak(), 'speak automode' + (on ? ' on' : ''));
+  b.textContent = '';
+  b.appendChild(speakIcon(false));
+  b.setAttribute('aria-label', on ? 'speak mode is on — stop reading new replies aloud' : 'speak mode — read new replies aloud');
+  b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  b.setAttribute('title', on ? 'speak mode on' : 'speak mode off');
+  return b;
 }
 
 // ── Jarvis: the master of masters (docs/jarvis.md) ────────────────────────
@@ -1007,8 +1217,9 @@ function openJarvis() {
   const j = S.jarvis;
   S.jarvisMode = true; S.screen = 'session'; S.session = 'master';
   if (j && j.present) S.project = j.project;
+  heard.delete(speakKey());
   S.sess = null; S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.pending = null; S.speakSel = ''; stopSpeaking();
+  S.draft = ''; S.pending = null; stopSpeaking();
   scrollMem.delete('pane'); scrollMem.delete('chat');
   pushNav();
   render(); refresh();
@@ -1108,6 +1319,7 @@ function jarvisScreen() {
       btn('chat', () => setView('chat'), S.view === 'chat' ? 'on' : ''),
       btn('pane', () => setView('pane'), S.view === 'pane' ? 'on' : ''),
     ]),
+    autoSpeakBtn(),
   ])];
   const nb = notifyBandEl();
   if (nb) out.push(nb);
@@ -1195,6 +1407,10 @@ function talkStart() {
   try { T.ctx = T.ctx || new (window.AudioContext || window.webkitAudioContext)(); T.ctx.resume(); }
   catch (e) { toast(`no audio on this device: ${(e && e.message) || e}`, 'bad'); return; }
   if (canSpeak()) { try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch {} }
+  // The Mac's voice plays on its own context, unlocked by this same tap — and then the
+  // session type the microphone needs, which unlockAudio() leaves alone while talking.
+  unlockAudio();
+  try { if (navigator.audioSession) navigator.audioSession.type = 'play-and-record'; } catch {}
   S.talk = { phase: 'opening', sent: '', seen: 0, since: 0, gen: ++T.gen };
   render();
   openMic();
@@ -1334,33 +1550,14 @@ function talkStop(reason) {
   const was = !!S.talk;
   S.talk = null;
   closeMic(); stopTalkPoll();
-  try { if (canSpeak()) speechSynthesis.cancel(); } catch {}
-  S.speaking = '';
+  stopSpeaking();
   try { if (T.ctx) T.ctx.suspend(); } catch {}
   if (reason) toast(reason, /off$/.test(reason) ? '' : 'bad');
   if (reason || was) render();
 }
-// Spoken with the same voice, rate and normaliser as the play button on a bubble — the
-// settings sheet's choice holds here too.
-function say(text, onend) {
-  const words = speakable(text);
-  if (!canSpeak() || !words) { if (onend) onend(); return; }
-  let done = false;
-  const fin = () => { if (done) return; done = true; S.speaking = ''; if (onend) onend(); };
-  try {
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(words);
-    u.rate = savedRate();
-    const v = pickVoice(); if (v) { u.voice = v; if (v.lang) u.lang = v.lang; }
-    u.onend = fin; u.onerror = fin;
-    S.speaking = words;
-    speechSynthesis.speak(u);
-    // WebKit can drop `onend` for an utterance it cut short, which would leave the mic
-    // closed forever. A ceiling from the length, generous enough never to reopen the mic
-    // over a voice that is still talking.
-    setTimeout(fin, 3000 + words.length * 150);
-  } catch { fin(); }
-}
+// Spoken by the same speakText() as the play button on a bubble — the Mac's voice when it
+// has one, the settings sheet's choice of device voice when it does not.
+function say(text, onend) { speakText(speakable(text), onend); }
 function talkBand() {
   const ph = S.talk.phase;
   const now = ph === 'listening' ? '● listening — just talk; a second of quiet sends it'
@@ -1419,6 +1616,7 @@ export function encodeWav(frames, rate) {
 function openSession(name) {
   if (!name) return;
   S.session = name; S.screen = 'session'; S.sess = null; S.jarvisMode = false; talkStop('');
+  heard.delete(speakKey());            // speak mode reads what finishes from here on, not the backlog
   // Reset to the pane on every open rather than remembering the last choice. The card is
   // tapped to answer "what is this worker doing right now", and the pane is the answer to
   // that question; a sticky preference would sometimes answer a different one.
@@ -1480,6 +1678,7 @@ function sessionScreen() {
       btn('chat', () => setView('chat'), S.view === 'chat' ? 'on' : ''),
       btn('pane', () => setView('pane'), S.view === 'pane' ? 'on' : ''),
     ]),
+    autoSpeakBtn(),
     btn('⋯', () => sheetActions()),
   ])];
   out.push(confirmBar());
@@ -1658,20 +1857,6 @@ function thinking() {
        ['.', '.', '.'].map(d => el('span', { class: 'dot', text: d }))),
   ]);
 }
-// PER-MESSAGE PLAYBACK WITHOUT A SPEAKER ON EVERY BUBBLE.
-//
-// The composer used to carry the only 🔊, and the comment there said why: a speaker on
-// every bubble is the button wall this client keeps having to fight. That objection was
-// right and it still is — so this does not put N buttons on screen. It puts ONE, on the
-// bubble you tapped, and moves it when you tap another. The count of visible speakers is
-// the same as it was; what changed is that you choose which message it is attached to,
-// instead of it always being the newest.
-//   A TAP, not a long-press: long-press is already `x kill` on a card and already the
-// text-selection gesture inside a bubble, and a third meaning for it would be the worst
-// kind of hidden. A tap has no meaning on a bubble today, so it is free.
-//   Nothing is spoken by the tap itself. Tap reveals, the control plays — because a tap
-// that started talking would make scrolling a transcript hazardous, and because the
-// control is what carries the stop state.
 // ── the read-aloud icon, and why both states are the same drawing ───────────
 //
 // THIS CONTROL HAS ALREADY BEEN GOT WRONG ONCE, in the direction an icon makes easy. It
@@ -1828,19 +2013,12 @@ function turn(mine, text, when, pending = false, key = '') {
   if (mine) bub.textContent = String(text || '');
   else bub.appendChild(md.render(String(text || ''), document));
   const meta = el('div', { class: 'meta', text: when });
-  const speakableHere = !pending && key && canSpeak() && speakable(text);
+  // A PLAY BUTTON ON EVERY MESSAGE. It used to appear only on the bubble you had tapped,
+  // to keep a speaker off every bubble; the owner asked for one on each, beside the other
+  // per-message controls, and the tap-to-reveal step was the thing standing between a
+  // reply and hearing it.
+  const speakableHere = !pending && key && canPlay() && speakable(text);
   if (speakableHere) {
-    bub.classList.add('tappable');
-    bub.addEventListener('click', (e) => {
-      // A link is a link, and a selection is a selection. Tapping either must not also
-      // toggle a control — copying a sha out of a bubble is a thing people do here.
-      if (e.target && e.target.closest && e.target.closest('a')) return;
-      try { if (String(getSelection && getSelection() || '').length) return; } catch {}
-      S.speakSel = (S.speakSel === key) ? '' : key;
-      render();
-    });
-  }
-  if (speakableHere && S.speakSel === key) {
     const on = S.speaking === speakable(text);
     // NOT btn(): that helper assigns textContent, which would print the markup. The icon is
     // a real child element — see speakIcon() for why both states are the same drawing.
@@ -2880,8 +3058,8 @@ function popTo() {
   if (S.sheet) { closeSheet(); return; }
   if (S.confirm) { cancel(); return; }
   // Jarvis was opened from Projects and sits one level under it, whatever its session is.
-  if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; S.speakSel = ''; stopSpeaking(); }
-  else if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; S.speakSel = ''; stopSpeaking(); }
+  if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; stopSpeaking(); }
+  else if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; stopSpeaking(); }
   // A SUB-GRID IS ONE LEVEL DOWN, so back from it is the top grid, not the projects list —
   // the same ` the desk uses to go up.
   else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; }
@@ -4075,6 +4253,10 @@ try {
   }
 } catch {}
 addEventListener('keydown', onKey);
+// Every tap is a chance to unlock audio (see unlockAudio): speak mode reads replies that
+// arrive by poll, long after the tap that turned it on, and after iOS has suspended the
+// context for a trip to the background. Capture phase, passive: it never alters the tap.
+for (const ev of ['touchend', 'click']) document.addEventListener(ev, () => unlockAudio(), { capture: true, passive: true });
 // The system back gesture. Every backward move in the app comes through here, so a swipe
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
 // this is what answers). No URL is ever read: the entries carry a depth, not a route.
