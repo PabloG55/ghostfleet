@@ -23,7 +23,7 @@
     {
       "ts": 1787352915,
       "role": "assistant",
-      "text": "One: list-pages has been sitting on \"Allow pnpm test?\" for 22 minutes. Everything else is running or done.\n\nI can answer it from here if you want — it is the ordinary test command, not a migration."
+      "text": "One: list-pages has been sitting on \"Allow pnpm test?\" for 22 minutes. Everything else is running or done.\n\nI can answer it from here if you want — it is the ordinary `pnpm test` command, **not** a migration."
     },
     {
       "ts": 1787354400,

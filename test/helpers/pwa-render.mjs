@@ -148,6 +148,16 @@ class Node_ {
     k.parent = this; this.kids.push(k); return k;
   }
   remove() { if (this.parent) { this.parent.kids = this.parent.kids.filter(k => k !== this); this.parent = null; } }
+  // The copy button patches ITSELF into its "copied" state rather than re-rendering the
+  // screen (a render would close the keyboard). In the same slot, which is the point: a
+  // model that appended the replacement would move the control to the end of its row.
+  replaceWith(n) {
+    const p = this.parent;
+    if (!p) return;
+    const i = p.kids.indexOf(this);
+    if (n.parent) n.remove();
+    n.parent = p; p.kids.splice(i, 1, n); this.parent = null;
+  }
   // ── the four calls a RECONCILER makes and an append-only app never did ──────────────
   // app.js builds a screen by appending to an empty parent, so appendChild and
   // textContent were the whole of it. Preact draws the Projects screen now, and a
@@ -1389,6 +1399,12 @@ is('...and the render lands once you let go', true, appmod.renderUnlessTyping())
 const speakBtn = () => app.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('speak'));
 const tapBub = () => {
   const bubs = app.all(n => n.className.split(/\s+/).includes('bub'));
+  // BY THE BUBBLE IT BELONGS TO, not by position: earlier sections send a message, so the
+  // last bubble on screen is not the fixture's last message.
+  const copyFor = (src) => copyBtns().find(b => {
+    const bub = b.parent && b.parent.parent && b.parent.parent.kids[0];
+    return !!bub && bub.textContent.includes(src.split(/[.*`]/)[0]);
+  });
   const b = bubs[bubs.length - 1];
   if (b) (b.listeners.click || []).forEach(f => f({ target: b }));
   return !!b;
@@ -1472,6 +1488,79 @@ click(on);
 is('pressing the lit one stops it', false,
    !!(speakBtn() || { className: '' }).className.split(/\s+/).includes('on'));
 is('...without speaking again', 1, spoken.length);
+
+// ── copy one message ─────────────────────────────────────────────────────
+// "copying by hand" brought the screen along: `load 20 older` and every bubble's timestamp
+// interleaved with the text, and the rendered markdown had already lost its pipes and its
+// **. So the button copies the TRANSCRIPT'S text for one message, and these rows compare
+// what reached the clipboard with the fixture byte for byte — a copy of the rendered
+// bubble would pass a "something was copied" check and fail this one.
+{
+  const masterFx = JSON.parse(fs.readFileSync(new URL('../../web/fixtures/session-acme-api-master.json', import.meta.url), 'utf8'));
+  const copyBtns = () => app.all(n => n.tag === 'button' && n.className.split(/\s+/).includes('copy'));
+  const bubs = app.all(n => n.className.split(/\s+/).includes('bub'));
+  // BY THE BUBBLE IT BELONGS TO, not by position: earlier sections send a message, so the
+  // last bubble on screen is not the fixture's last message.
+  const copyFor = (src) => copyBtns().find(b => {
+    const bub = b.parent && b.parent.parent && b.parent.parent.kids[0];
+    return !!bub && bub.textContent.includes(src.split(/[.*`]/)[0]);
+  });
+  is('every message carries a copy button', bubs.length, copyBtns().length);
+  is('...and it is not hidden behind a tap the way the speaker is', true, bubs.length > 0);
+  const first = copyBtns()[0];
+  is('...named for VoiceOver, since an icon has no text', 'copy this message', (first || { attrs: {} }).attrs['aria-label']);
+  is('...in the meta row beside the timestamp, not inside the bubble', true,
+     !!first && /\bmeta\b/.test(first.parent.className));
+  // Route one: the clipboard API, which is what a secure context has.
+  const wrote = [];
+  globalThis.navigator.clipboard = { writeText: (t) => { wrote.push(t); return Promise.resolve(); } };
+  // A message WITH markdown in it, or the row cannot tell the source from the rendered
+  // words: measured, copying the bubble's text passed against a plain sentence.
+  const want = (masterFx.messages.find(m => /`[^`]+`/.test(m.text) && /\*\*/.test(m.text)) || { text: '' }).text;
+  is('...the fixture message carries markdown to lose', true, /`/.test(want) && /\*\*/.test(want));
+  is('...and is on screen to copy', true, !!copyFor(want));
+  click(copyFor(want));
+  await tick(0);
+  is('copy writes the message\'s own source, exactly', want, wrote[0]);
+  is('...one message, not the screen', 1, wrote.length);
+  is('...with no timestamp in it', false, wrote.some(t => /\d{1,2}:\d{2}[ap]/.test(t)));
+  is('...and no "load older" in it', false, wrote.some(t => /load \d+ older/.test(t)));
+  const lit = copyFor(want);
+  is('...and the button says copied', true, !!lit && /copied/.test(lit.textContent) && lit.className.split(/\s+/).includes('done'));
+  is('...in the same slot, not a new one', bubs.length, copyBtns().length);
+  is('...while every other one is still idle', 1, copyBtns().filter(b => b.className.split(/\s+/).includes('done')).length);
+  // A poll lands inside the 1.5s: the feedback is state, so a rebuild draws it again.
+  appmod.renderUnlessTyping();
+  is('a repaint inside the feedback keeps it', 1,
+     copyBtns().filter(b => b.className.split(/\s+/).includes('done')).length);
+  await tick(1600);
+  is('...and it goes back to idle by itself', 0,
+     copyBtns().filter(b => b.className.split(/\s+/).includes('done')).length);
+  // Route two: plain http from a tailnet address is NOT a secure context, and there is no
+  // navigator.clipboard at all. The fallback is a readonly textarea and execCommand.
+  delete globalThis.navigator.clipboard;
+  const execd = [];
+  documentStub.execCommand = (c) => {
+    const ta = documentStub.body.kids.find(k => k.tag === 'textarea');
+    execd.push([c, ta ? ta.value : null, ta ? ta.attrs.readonly : null]);
+    return true;
+  };
+  const firstWant = masterFx.messages[0].text;
+  click(copyFor(firstWant));
+  await tick(0);
+  is('without the clipboard API, copy falls back to execCommand', 'copy', (execd[0] || [])[0]);
+  is('...from a textarea holding the message\'s source', firstWant, (execd[0] || [])[1]);
+  is('...readonly, so iOS raises no keyboard for it', '', (execd[0] || [])[2]);
+  is('...which is gone again afterwards', false, !!documentStub.body.kids.find(k => k.tag === 'textarea'));
+  is('...and still says copied', 1, copyBtns().filter(b => b.className.split(/\s+/).includes('done')).length);
+  // And when neither route works, it SAYS so rather than lighting up green over nothing.
+  documentStub.execCommand = () => false;
+  await tick(1600);
+  click(copyFor(masterFx.messages[masterFx.messages.length - 1].text));
+  await tick(0);
+  is('a copy that failed does not claim it copied', 0, copyBtns().filter(b => b.className.split(/\s+/).includes('done')).length);
+  delete documentStub.execCommand;
+}
 
 // ── the ten buttons are one sheet now ───────────────────────────────────
 is('the verb wall is gone', false, !!btnWith(/answer keys/));

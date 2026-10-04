@@ -43,6 +43,8 @@ const S = {
   speakSel: '',         // key of the bubble that was TAPPED — the only one showing a play
                         // control. See turn(): this is what keeps per-message playback
                         // from becoming a speaker on every bubble.
+  copied: '',           // key of the bubble whose copy button is saying "copied" — state, so
+                        // a 5s poll landing inside the feedback does not wipe it
   pscroll: 0,           // scrollback rows asked for; 0 = exactly what an attach shows
   pfs: 0,               // the pane's font size in px, 0 until restore() or PFS_DEFAULT
   sel: 0,               // the TUI's `sel` — which card the verbs act on
@@ -1745,6 +1747,12 @@ function speakIcon(on) { return iconSvg(ICON_HORN, on ? ICON_STOP : ICON_WAVE); 
 const ICON_CAM_BODY = 'M3 8h3.2l1.6-2h8.4l1.6 2H21v11H3z';
 const ICON_CAM_LENS = 'M12 13.4m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0';
 function cameraIcon() { return iconSvg(ICON_CAM_BODY, ICON_CAM_LENS); }
+// Two offset sheets, and a tick for the moment after. Same box, same stroke, from the same
+// iconSvg() as every other drawn control here.
+const ICON_COPY_BACK = 'M15 5H6a1 1 0 0 0-1 1v9';
+const ICON_COPY_FRONT = 'M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z';
+const ICON_TICK = 'M5 12.5l4.5 4.5L19 7.5';
+function copyIcon(done) { return done ? iconSvg(ICON_TICK) : iconSvg(ICON_COPY_BACK, ICON_COPY_FRONT); }
 
 // ── a photo becomes a path in the box you are about to send ───────────────
 // "can I send a picture?", twice. The mechanism docs/attachments.md measured is that an
@@ -1848,7 +1856,79 @@ function turn(mine, text, when, pending = false, key = '') {
       onclick: (e) => { e.stopPropagation(); toggleSpeak(text); },
     }, [speakIcon(on)]));
   }
+  if (key && !pending) meta.append(copyBtn(text, key));
   return el('div', { class: 'turn ' + (mine ? 'me' : 'them') }, [bub, meta]);
+}
+
+// ── copy one message ───────────────────────────────────────────────────────
+// "copying by hand" picked up the screen, not the message: a selection dragged across a
+// few bubbles came out with `load 20 older` and every bubble's timestamp interleaved with
+// the text, and the rendered markdown had already lost its pipes, its ** and its fences —
+// so a table pasted into notes as a run of words. This copies the TRANSCRIPT'S text for
+// ONE message, the markdown as the agent wrote it, which is what pastes cleanly into code,
+// into another chat, or into notes that render it again.
+//   On every bubble, not revealed by a tap like the speaker, because copying is the one
+// thing the bubble's own long-press (text selection) does badly, and a control you have to
+// discover first is no help to the person who already gave up on the selection.
+function copyBtn(text, key) {
+  const done = S.copied === key;
+  return el('button', {
+    class: 'copy tiny' + (done ? ' done' : ''),
+    'aria-label': done ? 'copied' : 'copy this message',
+    title: done ? 'copied' : 'copy',
+    onclick: (e) => {
+      e.stopPropagation();
+      // Taken now: currentTarget is null again once the event has finished dispatching.
+      const b = e.currentTarget || e.target;
+      // copyText() decides its route BEFORE its first await: iOS only lets a page write the
+      // clipboard inside the gesture, and an await spends the gesture.
+      copyText(String(text || '')).then((ok) => {
+        if (!ok) { toast('could not copy — select the text instead', 'bad'); return; }
+        S.copied = key;
+        // In place, the way paintPane() patches the pane: a full render() here would close
+        // the keyboard if the composer had focus, for the sake of one icon. A poll that
+        // rebuilds the list meanwhile draws the same state from S.copied.
+        const fresh = copyBtn(text, key);
+        if (b && b.replaceWith && isLive(b)) b.replaceWith(fresh);
+        setTimeout(() => {
+          if (S.copied !== key) return;
+          S.copied = '';
+          if (isLive(fresh) && fresh.replaceWith) fresh.replaceWith(copyBtn(text, key));
+          else renderUnlessTyping();
+        }, COPIED_MS);
+      });
+    },
+  }, done ? [copyIcon(true), el('span', { text: 'copied' })] : [copyIcon(false)]);
+}
+const COPIED_MS = 1500;
+// navigator.clipboard is the way, where it exists — and it does not exist on a page served
+// over plain http from anything but localhost, which is exactly how a tailnet address
+// reaches the phone. The fallback is the old one: a selected, offscreen, READONLY textarea
+// and execCommand('copy'). readonly so iOS does not raise the keyboard for it, 16px so
+// focusing it does not zoom the page (the same rule as the composer), and fixed at the top
+// so selecting it does not scroll the transcript.
+function copyText(t) {
+  const viaExec = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = t;
+      ta.setAttribute('readonly', '');
+      ta.setAttribute('aria-hidden', 'true');
+      ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;';
+      document.body.appendChild(ta);
+      ta.focus && ta.focus();
+      ta.select && ta.select();
+      try { ta.setSelectionRange(0, t.length); } catch {}
+      const ok = !!(document.execCommand && document.execCommand('copy'));
+      ta.remove ? ta.remove() : document.body.removeChild(ta);
+      return ok;
+    } catch { return false; }
+  };
+  const clip = typeof navigator !== 'undefined' && navigator.clipboard;
+  if (clip && clip.writeText && (typeof isSecureContext === 'undefined' || isSecureContext)) {
+    return clip.writeText(t).then(() => true, () => viaExec());
+  }
+  return Promise.resolve(viaExec());
 }
 
 // ── the composer ────────────────────────────────────────────────────────────

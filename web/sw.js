@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 6a641fa3d5af
+// CLIENT-HASH: 1b2e121a36af
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -289,7 +289,11 @@
 // client shows the sub-lead as an ordinary card and cannot see its workers at all.
 // v50 offers agy: the new-worktree sheet's agent list comes from the daemon's installed-agent
 // catalogue instead of a hardcoded three, so a phone still on v49 never shows the fourth.
-const VERSION = 'ghostfleet-v50';
+// v51 copies one message: a copy button beside every bubble's timestamp writes that
+// message's markdown source, and a markdown table renders as a table in its own scroller
+// with the first column pinned. A phone still on v50 shows the table as pipes and has no
+// button — nothing it does is wrong, it just cannot do either.
+const VERSION = 'ghostfleet-v51';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
