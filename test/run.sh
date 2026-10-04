@@ -10703,7 +10703,7 @@ if sv_start idle; then
   h="$(printf '%s' "$tok" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(require("crypto").createHash("sha256").update(s).digest("hex")))')"
   is "the session is on disk at once"      "1"   "$(grep -c "$h" "$SVS" 2>/dev/null || true)"
   is "...as its hash, never the token"     "0"   "$(grep -c -- "$tok" "$SVS" 2>/dev/null || true)"
-  is "...in a file only the owner reads"   "600" "$(stat -f %Lp "$SVS" 2>/dev/null || stat -c %a "$SVS" 2>/dev/null)"
+  is "...in a file only the owner reads"   "600" "$(stat -c %a "$SVS" 2>/dev/null || stat -f %Lp "$SVS" 2>/dev/null)"
   serve_stop
   # And a dead row planted beside it, so "drop expired ones on load" is measured, not assumed.
   # AFTER the stop: the daemon flushes its own table on SIGTERM, so a row planted while it
