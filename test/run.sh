@@ -11510,8 +11510,19 @@ else
     : > "$PU/ok.jsonl"
     pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
     sleep 2                                    # let the scan take a baseline
+    # ...AND HE IS AT THE MAC when it happens, so it is HELD, then he leaves and it goes.
+    # Folded into this case on purpose: it costs this case's waits rather than a block of
+    # its own (the macOS leg runs within seconds of the job timeout), and every assertion
+    # below then holds for a RELEASED push — the table in push-hold-check.mjs has the rules,
+    # this proves the watcher consults them.
+    printf '{"idle":3,"locked":false}' > "$PU/atmac.json"
     pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
+    sleep 2
+    is "at the Mac, a need-you is held, not sent" "0" "$(pu_lines "$PU/ok.jsonl")"
+    is "...and serve.log says why"                "1" "$([ "$(grep -c 'push: held 1 — at the Mac (idle 3s)' "$PU/serve.log")" -ge 1 ] && echo 1 || echo 0)"
+    printf '{"idle":200,"locked":false}' > "$PU/atmac.json"
     if pu_wait "$PU/ok.jsonl" 1; then
+      is "leaving the Mac sends what was held"  "1" "$([ "$(grep -c 'push: released 1 held — left the Mac (idle 200s)' "$PU/serve.log")" -ge 1 ] && echo 1 || echo 0)"
       is "a need-you reaches the phone"        "1" "$(pu_lines "$PU/ok.jsonl")"
       is "...encrypted the way iOS requires"   "aes128gcm" "$(pu_field "$PU/ok.jsonl" content_encoding)"
       is "...with a VAPID JWT that VERIFIES"   "verified"  "$(pu_field "$PU/ok.jsonl" vapid.sig)"
@@ -11629,42 +11640,6 @@ else
       bad "anonymous sends the count only" "1 push" "0"
     fi
     pu push --detail named >/dev/null 2>&1
-
-    # ── SIX-B: at the Mac, a push is HELD, and goes when he leaves ──────────
-    # Through the real daemon, with the reading injected: the table in push-hold-check.mjs
-    # proves each rule, and this proves the watcher actually consults it — a holdStep()
-    # nobody called would pass every row there and buzz the phone here.
-    : > "$PU/ok.jsonl"; sleep 6
-    printf '{"idle":3,"locked":false}' > "$PU/atmac.json"
-    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
-    sleep 2
-    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
-    sleep 3
-    is "at the Mac, a need-you is held, not sent" "0" "$(pu_lines "$PU/ok.jsonl")"
-    is "...and serve.log says why"                "1" "$([ "$(grep -c 'push: held 1 — at the Mac (idle 3s)' "$PU/serve.log")" -ge 1 ] && echo 1 || echo 0)"
-    printf '{"idle":200,"locked":false}' > "$PU/atmac.json"
-    if pu_wait "$PU/ok.jsonl" 1; then
-      is "leaving the Mac sends what was held"   "1" "$(pu_lines "$PU/ok.jsonl")"
-      is "...naming it"                          "needs-you api-2" "$(pu_field "$PU/ok.jsonl" payload.sessions.0.kind) $(pu_field "$PU/ok.jsonl" payload.sessions.0.session)"
-    else
-      bad "leaving the Mac sends what was held" "1 push" "0 — $(grep 'push:' "$PU/serve.log" | tail -2 | tr '\n' ' ')"
-    fi
-    is "...and serve.log says released"           "1" "$([ "$(grep -c 'push: released 1 held — left the Mac (idle 200s)' "$PU/serve.log")" -ge 1 ] && echo 1 || echo 0)"
-    # ...and the other way out: seen on the phone while he was at the Mac, then the screen
-    # locks. Nothing is owed, so nothing goes — a release that ignored "seen" buzzes here.
-    : > "$PU/ok.jsonl"; sleep 6
-    printf '{"idle":3,"locked":false}' > "$PU/atmac.json"
-    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
-    sleep 2
-    pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
-    sleep 2
-    curl -s -o /dev/null -m2 -H "Authorization: Bearer $TOK" "$PUBASE/api/health"
-    sleep 1
-    printf '{"idle":3,"locked":true}' > "$PU/atmac.json"
-    sleep 3
-    is "seen on the phone, then locked: nothing sent" "0" "$(pu_lines "$PU/ok.jsonl")"
-    is "...and serve.log says it was seen"        "1" "$([ "$(grep -c 'push: dropped 1 held as seen' "$PU/serve.log")" -ge 1 ] && echo 1 || echo 0)"
-    printf '{"idle":9999,"locked":false}' > "$PU/atmac.json"
 
     # ── SEVEN: --test proves the whole path from the Mac ───────────────────
     : > "$PU/ok.jsonl"
