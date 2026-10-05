@@ -1396,8 +1396,9 @@ is('...and the render lands once you let go', true, appmod.renderUnlessTyping())
 // vacuous the moment the emoji became an SVG: an icon-only button has no text, so that
 // regex could no longer match whether synthesis existed or not, and a check that can only
 // pass proves nothing (CLAUDE.md). The class is what the control actually is.
-// `.speak.tiny` is the per-message control; the top bar's speak-mode toggle is also a
-// `.speak`, and a selector that found either would let one stand in for the other.
+// `.speak.tiny` is the per-message control; the top bar's speak-mode toggle (gone now —
+// `talk` replaced it) was also a `.speak`, and a selector that found either would let one
+// stand in for the other.
 const isPlay = (n) => n.tag === 'button' && n.className.split(/\s+/).includes('speak') && n.className.split(/\s+/).includes('tiny');
 const speakBtn = () => app.find(isPlay);
 const playCount = () => app.all(isPlay).length;
@@ -1407,6 +1408,17 @@ const realTurns = () => app.all(n => n.className.split(/\s+/).includes('turn') &
 // dead. This is the first half of the pair — until the stub below lands, canPlay() is false.
 is('no play button without synthesis or Web Audio', 0, playCount());
 is('...and no speak-mode toggle either', false, !!app.find(isToggle));
+// THE SESSION'S TALK BUTTON IS JARVIS'S. Same class, same word, same place — inside the
+// composer, between the box and send — because composer({talk: true}) is the one control
+// both screens draw. It is there without synthesis too: talking needs the Mac's ears and a
+// microphone, and its refusal says which is missing rather than the button being absent.
+const isTalk = (n) => n.tag === 'button' && n.className.split(/\s+/).includes('talk');
+const comp = () => app.find(n => n.className.split(/\s+/).includes('composer'));
+const talkB = () => (comp() || { find: () => null }).find(isTalk);
+is('a session composer has the talk button', 'talk', (talkB() || { textContent: '' }).textContent);
+is('...named for the session it talks to', true, /^talk to \S/.test((talkB() || { attrs: {} }).attrs['aria-label'] || ''));
+is('...right before send, as on Jarvis', 'send',
+   (() => { const k = (comp() || { kids: [] }).kids; const i = k.indexOf(talkB()); return i >= 0 && k[i + 1] ? k[i + 1].textContent : ''; })());
 
 // ── and now WITH synthesis, which is the half that had no DOM test ───────
 // Installed here rather than at the top so the absence above is a real measurement and not
@@ -1432,8 +1444,7 @@ appmod.renderUnlessTyping();
 // turn, counted against the turns rather than pinned to a number the fixture decides.
 is('with synthesis, every message has a play button', true, playCount() > 0 && playCount() === realTurns().length);
 is('...each inside its own turn', true, realTurns().every(t => t.all(isPlay).length === 1));
-is('...and the top bar has the speak-mode toggle', true, !!app.find(isToggle));
-is('...which says what it does', true, /speak mode/.test((app.find(isToggle) || { attrs: {} }).attrs['aria-label'] || ''));
+is('...and still no speak-mode toggle: talk replaced it', false, !!app.find(isToggle));
 is('...and nothing is spoken by drawing them', 0, spoken.length);
 
 // THE ICON, AND THE ONE PROPERTY THIS CONTROL KEEPS LOSING. It was 🔊 idle / ■ playing —

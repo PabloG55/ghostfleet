@@ -301,7 +301,7 @@
 // keeps working against the new daemon — its polls slide the server's window too — but it
 // still asks for Face ID at every relaunch, and still locks itself 15 minutes after an
 // unlock, because its own copy of the expiry never moves.
-const VERSION = 'ghostfleet-v53';
+const VERSION = 'ghostfleet-v54';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

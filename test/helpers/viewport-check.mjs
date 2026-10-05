@@ -101,8 +101,10 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'gf-viewport-'));
 // browser that will not start and will not say why: this went red on both CI legs with
 // nothing but "the browser started: false" to go on.
 let chromeErr = '';
+// --use-mock-keychain/--password-store=basic: never touch the macOS keychain (it raises a modal).
 const chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-first-run',
   '--no-default-browser-check', '--disable-extensions', '--mute-audio',
+  '--use-mock-keychain', '--password-store=basic',
   `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'],
   { stdio: ['ignore', 'ignore', 'pipe'] });
 chrome.stderr.on('data', (d) => { chromeErr += String(d); });

@@ -127,6 +127,10 @@ Voice needs whisper.cpp and a model on the Mac. The installer offers them (never
 Homebrew's `whisper-cpp` and `ggml-large-v3-turbo-q5_0.bin` into `~/.local/share/whisper`.
 Without them the talk button says how to enable voice.
 
+The same **talk** button is in every session's composer, not only Jarvis's — the same
+loop, aimed at that session instead (see `docs/mobile.md`, *Conversation mode, in every
+session*).
+
 ## Reaching you: notifications
 
 Jarvis's need-you and its answers reach the phone through the existing Web Push, like any
