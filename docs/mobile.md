@@ -794,14 +794,22 @@ away. The owner asked for one on every message, beside the other per-message con
 is there now; tap it to play, tap it again to stop. Two voices at once stays impossible:
 starting one message stops the other.
 
-**Speak mode, per session.** The speaker in a session's top bar (Jarvis's too) turns on
-reading each *finished* reply of that session aloud, the way conversation mode reads Jarvis's
-answers — but without the microphone. It is remembered per session on the device
-(`gf.autospeak` in localStorage). A reply is finished when the newest assistant message has
-changed and the card no longer says `working`, so a turn's narration between tool calls is
-not read and then cut off by its answer. Only what finishes while the session is open in the
-chat view is read: the first transcript after opening is the baseline, so opening a session
-never starts reading its backlog.
+**Conversation mode, in every session.** The composer of every session — not only Jarvis's —
+has the **talk** button, the same control in the same place: tap it once and the mic opens, a
+second of quiet ends what you said, the Mac transcribes it (whisper.cpp, the transcriber
+Jarvis uses — `fleet-jarvis voice --install`), it is sent to *that* session as a prompt, and
+when the session's turn is over its final reply is read aloud in the Mac's voice (or the
+device's, as below) before the mic opens again. A worker's turn can run for minutes with
+tools in it; the band above the chat says it is on it and for how long, the narration
+between tool calls is never read — only the reply the turn ends on — and it gives up after
+thirty minutes (five for Jarvis). A session blocked on a permission prompt says so, out
+loud, and stops. Leaving the screen stops it, as does locking the app. One implementation
+serves both: the target is Jarvis or `<project>/<session>`, taken from the screen at the
+tap, and the refusal says why in the target's terms (parked, gone from the grid, no
+transcriber on the Mac, no microphone in this browser).
+
+This replaced #12's read-aloud-only speaker toggle in the top bar; its stored setting
+(`gf.autospeak`) is cleared on load. The per-message play button stays.
 
 **What is spoken is not what is written**, and the gap is bigger than markdown. Fenced blocks
 become "code omitted", inline code loses its backticks, links become "the link", table pipes
@@ -986,6 +994,24 @@ LAN-only and does not help from a café.
 > shows no notification, so the worker is never allowed an opinion. `fleet-serve push
 > --detail anonymous` reduces the payload to a count, because his project names are client
 > names and a lock screen is readable by whoever is holding the phone.
+>
+> **Not while he is at the Mac.** A buzz in a pocket about what is on the screen in front of
+> him is noise, and the poll-based quiet cannot see it — the phone is not polling. So the
+> watcher asks the Mac: keyboard or mouse input within `push.at_mac_idle` seconds (default
+> 120) **and** the screen unlocked means he is at it. On macOS that is two `ioreg` reads, no
+> permission needed: `HIDIdleTime` on `IOHIDSystem` (nanoseconds since the last input) and
+> `IOConsoleLocked` on the registry root. They are taken only when a tick has something to
+> decide, and cached for five seconds. While he is there a push is **held, not dropped**: if
+> he leaves within `push.at_mac_hold` seconds (default 600) — idle past the threshold, or the
+> screen locks — ONE push goes for whatever is still unseen. Unseen means the phone has not
+> polled since the event and the session has not moved on (a need-you no longer blocked, or an
+> answer whose session is working again, was dealt with at the Mac). Past the hold window it
+> is dropped. A newer event for the same session replaces the held one. Every decision is one
+> line in `serve.log`: `push: held 1 — at the Mac (idle 14s)`, `push: released 2 held — left
+> the Mac (screen locked)`, `push: dropped 1 held as seen`, `push: expired 1 held after 600s
+> at the Mac`. `push.at_mac_idle: 0` turns it off; on Linux and WSL it is off (there is no
+> reading, and no reading never counts as "at the Mac" — an unreadable sensor fails toward a
+> push, never toward silence). `fleet-serve push` prints which.
 >
 > Native Claude Code push (below) is still worth having and is not replaced by this: it
 > fires on the permission prompts inside ONE session, and this says which of thirty

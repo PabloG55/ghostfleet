@@ -11417,8 +11417,13 @@ else
   PUBASE="http://localhost:$PUPORT"
   # Its own config and its own HOME: the daemon above has two work projects and no push
   # config, and this group changes both.
+  # THE AT-THE-MAC READING IS INJECTED, and starts as "away" so every case before the one
+  # about it measures what it always did. Without it this group would read THIS Mac's
+  # keyboard — green while nobody touches it, red the moment the person running it types.
+  printf '{"idle":9999,"locked":false}' > "$PU/atmac.json"
   pu() { GHOSTFLEET_SERVE_CONFIG="$PU/serve.json" GHOSTFLEET_SERVE_AUDIT="$PU/audit.jsonl" \
          GHOSTFLEET_PUSH_ALLOW_HTTP=1 HOME="$PU/home" TMUX= CLAUDE_FLEET_AWAKE=off \
+         GHOSTFLEET_AT_MAC_FILE="$PU/atmac.json" \
          node "$SV_TAG" "$ROOT/bin/fleet-serve.mjs" "$@"; }
   # A status file, exactly as hooks/fleet-event.sh writes one — INCLUDING the fields that
   # must never reach a lock screen. The transcript path and the note are planted secrets:
@@ -11505,8 +11510,19 @@ else
     : > "$PU/ok.jsonl"
     pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 working
     sleep 2                                    # let the scan take a baseline
+    # ...AND HE IS AT THE MAC when it happens, so it is HELD, then he leaves and it goes.
+    # Folded into this case on purpose: it costs this case's waits rather than a block of
+    # its own (the macOS leg runs within seconds of the job timeout), and every assertion
+    # below then holds for a RELEASED push — the table in push-hold-check.mjs has the rules,
+    # this proves the watcher consults them.
+    printf '{"idle":3,"locked":false}' > "$PU/atmac.json"
     pu_status "$PU/home/.claude/fleet" w1 cf-demo api-2 need-you
+    sleep 2
+    is "at the Mac, a need-you is held, not sent" "0" "$(pu_lines "$PU/ok.jsonl")"
+    is "...and serve.log says why"                "1" "$([ "$(grep -c 'push: held 1 — at the Mac (idle 3s)' "$PU/serve.log")" -ge 1 ] && echo 1 || echo 0)"
+    printf '{"idle":200,"locked":false}' > "$PU/atmac.json"
     if pu_wait "$PU/ok.jsonl" 1; then
+      is "leaving the Mac sends what was held"  "1" "$([ "$(grep -c 'push: released 1 held — left the Mac (idle 200s)' "$PU/serve.log")" -ge 1 ] && echo 1 || echo 0)"
       is "a need-you reaches the phone"        "1" "$(pu_lines "$PU/ok.jsonl")"
       is "...encrypted the way iOS requires"   "aes128gcm" "$(pu_field "$PU/ok.jsonl" content_encoding)"
       is "...with a VAPID JWT that VERIFIES"   "verified"  "$(pu_field "$PU/ok.jsonl" vapid.sig)"
@@ -13004,6 +13020,24 @@ fi
 # said why. Two fixes, each asserted where it can be: the subject is now an address a push
 # service accepts (an https origin this server really has, never a .local hostname), and a
 # refusal's reason is logged.
+group "push: held while he is at the Mac, released when he leaves, dropped when seen or old"
+# THE DECISION AS A TABLE (test/helpers/push-hold-check.mjs): every rule of the hold paired
+# with its other side, the two ioreg parsers fed the text ioreg prints, and the readings
+# injected — this group must not depend on whether someone is typing on the machine it runs on.
+if command -v node >/dev/null 2>&1; then
+  PH="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$PH/home"
+  HOME="$PH/home" node "$ROOT/test/helpers/push-hold-check.mjs" > "$PH/out" 2> "$PH/err"
+  is "push-hold-check ran"            "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PH/err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PH/out")" -ge 30 ] && echo yes || echo "no: $(wc -l < "$PH/out") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PH/out"
+  rm -rf "$PH"
+else
+  skip "push hold" "node missing"
+fi
+
 group "push: a subject Apple accepts, and a refusal that says why"
 if command -v node >/dev/null 2>&1; then
   PS="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$PS/home"

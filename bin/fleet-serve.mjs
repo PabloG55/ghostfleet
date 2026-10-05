@@ -91,6 +91,8 @@ const PUSH_DEFAULTS = {
   detail: 'named',        // 'named' = project/session on the lock screen · 'anonymous' = count only
   debounce: 30,           // leading-edge, seconds — the master nudge's window and its reasoning
   quiet_after_poll: 30,   // a client that polled this recently is being LOOKED AT: send nothing
+  at_mac_idle: 120,       // input this recent on an unlocked Mac = he is AT the Mac: hold; 0 = off
+  at_mac_hold: 600,       // how long a held push may wait for him to leave before it is dropped
   scan: 3,                // seconds between fleet-dir scans; only runs when something is subscribed
   ttl: 900,               // how long the push service may hold it for a phone that is off
   max_per_client: 4,      // one phone, one PWA install, some slack — not a growth surface
@@ -1385,24 +1387,122 @@ function pushEvents(rows) {
   return events;
 }
 
+// ── at the Mac ──────────────────────────────────────────────────────────────
+// A PHONE THAT BUZZES WHILE HE IS TYPING AT THE MAC is telling him what the screen in front
+// of him already says. The poll-based quiet above cannot see this: the phone is in a pocket,
+// not polling. So the Mac itself is asked whether anyone is at it — keyboard or mouse input
+// within at_mac_idle seconds AND the screen unlocked — and while the answer is yes a push is
+// HELD rather than sent. Held, not dropped: if he walks away (idle crosses the threshold, or
+// the screen locks) while what was held is still unseen, ONE push goes then for what is left.
+//   Both readings are ioreg, which needs no permission and costs ~10ms: HIDIdleTime on the
+// IOHIDSystem class (nanoseconds since the last HID event, which is what the screensaver
+// times), and IOConsoleLocked on the registry root (what loginwindow sets on a lock). They
+// are read at most once per AT_MAC_CACHE seconds and only when a tick has something to
+// decide — never per subscription.
+//   macOS only. Elsewhere the reading is null and nothing is ever held, which is the old
+// behaviour exactly. GHOSTFLEET_AT_MAC_FILE replaces both readings with a JSON file
+// ({"idle": seconds, "locked": bool}) so the suite can drive the decision both ways.
+const AT_MAC_CACHE = 5;
+let macCache = { at: 0, v: null };
+export function parseHidIdle(out) {
+  const m = /"HIDIdleTime"\s*=\s*(\d+)/.exec(String(out || ''));
+  return m ? Number(m[1]) / 1e9 : null;
+}
+export function parseConsoleLocked(out) {
+  const m = /"IOConsoleLocked"\s*=\s*(Yes|No)\b/.exec(String(out || ''));
+  return m ? m[1] === 'Yes' : null;
+}
+const ioreg = (args) => new Promise((resolve) => {
+  execFile('ioreg', args, { encoding: 'utf8', timeout: 3000, maxBuffer: 1024 * 1024 }, (e, out) => resolve(e ? '' : out));
+});
+async function readAtMac() {
+  const inj = process.env.GHOSTFLEET_AT_MAC_FILE;
+  if (inj) {
+    try { const j = JSON.parse(fs.readFileSync(inj, 'utf8')); return { idle: Number(j.idle), locked: !!j.locked }; }
+    catch { return null; }
+  }
+  if (process.platform !== 'darwin') return null;
+  if (now() - macCache.at < AT_MAC_CACHE) return macCache.v;
+  const [hid, root] = await Promise.all([ioreg(['-c', 'IOHIDSystem', '-r', '-k', 'HIDIdleTime', '-d', '1']), ioreg(['-n', 'Root', '-d', '1'])]);
+  const idle = parseHidIdle(hid), locked = parseConsoleLocked(root);
+  macCache = { at: now(), v: idle == null ? null : { idle, locked: !!locked } };
+  return macCache.v;
+}
+// A reading that could not be taken is "not at the Mac": an unreadable sensor must fail
+// toward the old behaviour (a push), never toward silence.
+export function atMac(reading, limit) {
+  return !!(reading && limit > 0 && Number.isFinite(reading.idle) && reading.idle < limit && !reading.locked);
+}
+// Whether the session has moved on from the event: a need-you that is no longer need-you
+// was answered (at the Mac, most likely), and an answer whose session is working again was
+// read and replied to. A session that is gone has nothing left to tell him about.
+export function pushResolved(ev, status) {
+  if (status === undefined) return true;
+  return ev.kind === 'needs-you' ? status !== 'need-you' : status === 'working';
+}
+// THE DECISION, PURE, so the suite can drive every rule without a clock or a Mac.
+//   held     [{ev, at}] waiting for him to leave
+//   events   this tick's fresh transitions
+//   here     atMac() now          readAt   newest poll by any subscribed phone (seconds)
+//   status   (key) -> the session's status now, for pushResolved()
+// Returns what is still held, what to send now, and one log line per decision.
+export function holdStep(held, { events, here, now: t, hold, readAt, status }) {
+  const log = [], keep = [];
+  let expired = 0, seen = 0;
+  const key = (e) => `${e.sock}/${e.session}`;
+  const newer = new Set(events.map(key));
+  for (const h of held) {
+    if (t - h.at >= hold) { expired++; continue; }
+    // "Seen": the phone polled after it, or the session has moved on, or a newer event for
+    // the same session supersedes it (one session, one line on the lock screen).
+    if (readAt > h.at || pushResolved(h.ev, status(key(h.ev))) || newer.has(key(h.ev))) { seen++; continue; }
+    keep.push(h);
+  }
+  if (expired) log.push(`push: expired ${expired} held after ${hold}s at the Mac`);
+  if (seen) log.push(`push: dropped ${seen} held as seen`);
+  if (here) {
+    for (const ev of events) keep.push({ ev, at: t });
+    if (events.length) log.push(`push: held ${events.length} — at the Mac`);
+    return { held: keep, send: [], released: 0, log };
+  }
+  if (keep.length) log.push(`push: released ${keep.length} held — left the Mac`);
+  return { held: [], send: [...keep.map(h => h.ev), ...events], released: keep.length, kept: keep, log };
+}
+let pushHeld = [];
+
 async function pushTick() {
   let c;
   try { c = loadConfig(); } catch { return; }
   const subs = allSubs();
   // Nothing subscribed: do no work at all, and forget the baseline so the first
   // subscription starts from what is on disk instead of replaying the day.
-  if (!subs.length) { pushState.clear(); return; }
+  if (!subs.length) { pushState.clear(); pushHeld = []; return; }
   // No separate seeding pass: pushEvents() treats every key's first sight as a baseline,
   // so the first scan after a subscription is silent by the same rule that keeps a
   // reappearing file quiet. One rule is one thing to get right.
-  const events = pushEvents(scanFleet());
+  const fresh = pushEvents(scanFleet());
+  if (!fresh.length && !pushHeld.length) return;
+  // AT THE MAC: what would have been sent is held instead, and what was held goes when he
+  // leaves (see holdStep). Read only when there is something to decide, and once per tick.
+  const limit = Number(c.push.at_mac_idle) || 0;
+  const reading = limit > 0 ? await readAtMac() : null;
+  const here = atMac(reading, limit);
+  const readAt = Math.max(0, ...subs.map(s => lastRead.get(s.client) || 0));
+  const step = holdStep(pushHeld, { events: fresh, here, now: now(), hold: Number(c.push.at_mac_hold) || 600, readAt,
+                                    status: (k) => pushState.get(k) });
+  const why = !reading ? '' : reading.locked ? ' (screen locked)' : ` (idle ${Math.round(reading.idle)}s)`;
+  for (const l of step.log) log(/^push: (held|released)/.test(l) ? l + why : l);
+  pushHeld = step.held;
+  const events = step.send;
   if (!events.length) return;
   // ONE NOTIFICATION PER BURST, leading edge — the same shape and the same default
   // window as the master nudge in hooks/fleet-event.sh, for the same reason: five
   // workers finishing is one thing to look at, not five. A scan that sees all five at
   // once sends one push that says so; stragglers inside the window are dropped, and the
   // stamp is NOT moved when nothing was sent, so the next event is not also swallowed.
-  if (now() - pushLastSent < (c.push.debounce ?? 30)) return;
+  // A RELEASE inside the window waits it out rather than being swallowed: it was held for
+  // him, not merely late, and the next tick sends it.
+  if (now() - pushLastSent < (c.push.debounce ?? 30)) { if (step.released) pushHeld = step.kept; return; }
   const detail = c.push.detail === 'anonymous' ? 'anonymous' : 'named';
   const payload = pushPayload(events, detail);
   const body = Buffer.from(JSON.stringify(payload));
@@ -2122,11 +2222,13 @@ function agentCatalogue() {
   // Three routes, all behind the same token as everything else. What Jarvis IS — its
   // project, its session, whether it can hear, what waits on a yes — comes from the one
   // place bin/fleet-jarvis reads it, so the phone and `fleet-jarvis status` cannot disagree.
+  //   `voice` is answered EVEN WITHOUT A JARVIS: it is the Mac's transcriber, not Jarvis's,
+  // and every session's `talk` asks it here.
   if (p === '/api/jarvis' && req.method === 'GET') {
     const st = jarvisState();
     if (st.present && !resolveProject(st.project).t)
       return send(res, 200, { ok: true, ...st, present: false, why: `the marker names project '${st.project}', which is not registered — run: fleet-jarvis init` });
-    return send(res, 200, { ok: true, ...st });
+    return send(res, 200, { ok: true, voice: jarvis.voiceStatus(), ...st });
   }
 
   // A TAPPED YES IS A DESTRUCTIVE TAP, so it carries a fresh passkey exactly as a tapped
@@ -2452,7 +2554,7 @@ async function serve(argv) {
   armPushWatch();
   {
     const n = allSubs().length, pc = loadConfig().push;
-    log(n ? `  push: ${n} subscription${n === 1 ? '' : 's'}, ${pc.detail} · scan ${pc.scan}s · one per ${pc.debounce}s · silent while polled within ${pc.quiet_after_poll}s`
+    log(n ? `  push: ${n} subscription${n === 1 ? '' : 's'}, ${pc.detail} · scan ${pc.scan}s · one per ${pc.debounce}s · silent while polled within ${pc.quiet_after_poll}s · ${pc.at_mac_idle > 0 ? (process.platform === 'darwin' ? `held while at the Mac (input within ${pc.at_mac_idle}s, unlocked) for up to ${pc.at_mac_hold}s` : 'at-the-Mac hold off (not macOS)') : 'at-the-Mac hold off'}`
           : '  push: nothing subscribed — a home-screen PWA subscribes from its settings sheet (docs/mobile.md §9)');
   }
   // SHUTTING DOWN IS THE SAME TRUNCATION BUG AS process.exit() AFTER A console.log, one
@@ -2651,6 +2753,7 @@ async function main() {
     console.log(`subject    ${vapidSubject(c)}${c.push.subject ? '' : '  (default — push.subject in the config overrides it)'}`);
     console.log(`debounce   one push per ${c.push.debounce}s, leading edge`);
     console.log(`quiet      nothing sent while a client has polled within ${c.push.quiet_after_poll}s`);
+    console.log(`at the Mac ${!(c.push.at_mac_idle > 0) ? 'off (push.at_mac_idle is 0)' : process.platform !== 'darwin' ? 'off — macOS only' : `held while there was input within ${c.push.at_mac_idle}s and the screen is unlocked; sent when he leaves, dropped after ${c.push.at_mac_hold}s`}`);
     console.log(`scan       every ${c.push.scan}s, over ${fleetDirs().length} fleet dir(s): ${fleetDirs().join(' ') || '(none — no projects registered)'}`);
     console.log(`subscribed ${subs.length ? subs.map(x => `${x.client} ${new URL(x.endpoint).host}`).join(', ') : '(nobody — a home-screen PWA subscribes from its settings sheet)'}`);
     if (!argv.includes('--test')) return;

@@ -97,7 +97,7 @@ Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: tr
   value: class { constructor(t) { this.text = t; this.rate = 1; this.voice = null; this.lang = ''; } } });
 Object.defineProperty(globalThis, 'getSelection', { configurable: true, writable: true, value: () => '' });
 
-const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom, finishedReply, autoSpeakOn, setAutoSpeak } =
+const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom, talkRefusal } =
   await import(new URL('../../web/app.js', import.meta.url).href);
 is('web/app.js exports speakable()', 'function', typeof speakable);
 
@@ -272,27 +272,26 @@ toggleSpeak('message N');
 is('tapping the talking one only cancels', 0, synth.calls.filter(c => c.startsWith('speak:')).length);
 is('...and it did cancel', 1, synth.calls.filter(c => c === 'cancel').length);
 
-// ── 6b. speak mode: which reply, and when ─────────────────────────────────
-// The decision behind the per-session toggle, driven as a table. The baseline row is the
-// one that matters most and is easiest to lose: opening a session must not read its backlog.
-const M = (role, ts, text) => ({ role, ts, text });
-const t1 = [M('user', 1, 'go'), M('assistant', 2, 'done')];
-const t2 = [...t1, M('user', 3, 'and?'), M('assistant', 4, 'also done')];
-is('first look is the baseline, read nothing', null, finishedReply(t1, false, undefined).say);
-is('...and it records the newest reply', 'assistant|2', finishedReply(t1, false, undefined).seen);
-is('nothing new reads nothing', null, finishedReply(t1, false, 'assistant|2').say);
-is('a new reply while still working waits', null, finishedReply(t2, true, 'assistant|2').say);
-is('...and keeps the old baseline, so it is read when the turn ends', 'assistant|2', finishedReply(t2, true, 'assistant|2').seen);
-is('a new reply once the turn is over is read', 'also done', (finishedReply(t2, false, 'assistant|2').say || {}).text);
-is('a user turn alone is not a reply', null, finishedReply([...t1, M('user', 5, 'hi')], false, 'assistant|2').say);
-is('an empty assistant turn is skipped', null, finishedReply([...t1, M('assistant', 6, '  ')], false, 'assistant|2').say);
-// Per session, on the device: one session's toggle is not another's.
-setAutoSpeak(true, 'acme-api/master');
-is('speak mode is remembered per session', true, autoSpeakOn('acme-api/master'));
-is('...and not for its neighbour', false, autoSpeakOn('acme-api/acme-api-2'));
-is('...stored in localStorage', true, /acme-api\/master/.test(localStorage.getItem('gf.autospeak') || ''));
-setAutoSpeak(false, 'acme-api/master');
-is('...and turned off again', false, autoSpeakOn('acme-api/master'));
+// ── 6b. why `talk` will not start, per target ─────────────────────────────
+// Conversation mode is one implementation with a target (Jarvis, or <project>/<session>),
+// and the refusal has to be about the thing tapped: a session must never be told "there is
+// no Jarvis", and Jarvis must never be told about a grid card it does not have. Each row
+// has its passing neighbour, so a refusal that always fired would fail the '' rows.
+const sess = { jarvis: false, project: 'acme-api', session: 'acme-api-2', label: 'acme-api-2' };
+const jar = { jarvis: true, project: 'jarvis', session: 'master', label: 'Jarvis' };
+const hears = { present: false, voice: { ready: true } };
+const caps = { mic: true, audio: true };
+const live = { name: 'acme-api-2', status: 'ready' };
+is('a session can be talked to with no Jarvis set up', '', talkRefusal(sess, hears, live, caps));
+is('...but Jarvis cannot', 'there is no Jarvis to talk to yet', talkRefusal(jar, hears, null, caps));
+is('...and can once it is there', '', talkRefusal(jar, { ...hears, present: true }, null, caps));
+is('a session gone from the grid says so by name', "'acme-api-2' is not on this fleet's grid any more", talkRefusal(sess, hears, null, caps));
+is('a parked session says to resume it', true, /acme-api-2 is parked — resume it/.test(talkRefusal(sess, hears, { ...live, status: 'parked' }, caps)));
+is('no answer from the Mac yet is not "voice is off"', true, /still asking the Mac/.test(talkRefusal(sess, null, live, caps)));
+is('a Mac with no transcriber says why, for a session too', 'voice is off — no whisper', talkRefusal(sess, { voice: { ready: false, why: 'no whisper' } }, live, caps));
+is('no microphone in this browser', 'this browser gives web apps no microphone', talkRefusal(sess, hears, live, { ...caps, mic: false }));
+is('no Web Audio in this browser', 'this browser has no Web Audio to listen with', talkRefusal(sess, hears, live, { ...caps, audio: false }));
+is('a working session can be talked to (the prompt queues)', '', talkRefusal(sess, hears, { ...live, status: 'working' }, caps));
 
 // ── 7. the column count, which is what makes rotation safe ────────────────
 // gridColsFrom reads the USED value of grid-template-columns, so the keys agree with what
