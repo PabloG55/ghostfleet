@@ -1,0 +1,40 @@
+
+  fleet-list: no socket (run inside a fleet session, or pass -s <socket>)
+
+
+  Call the MCP tool fleet_list from the ghostfleet server with the argument project set to acme-api. Reply with only its output, verbatim.
+
+
+    ghostfleet fleet_list
+
+  (no sessions on cf-demo-acme-api)
+
+
+  Remember this codeword: PLUM-42. Reply with only the word noted.
+
+
+  noted
+
+
+  What was the codeword I asked you to remember? Reply with only the codeword.
+
+
+  PLUM-42
+
+
+  Run the shell command: sleep 12; echo wide. Then reply with one short sentence saying what it printed.
+
+
+  $ sleep 12; echo wide 5.5s
+
+ ⠘⠤ Running  43 tokens
+    Tip: Try Cursor Grok 4.6 via /model, frontier intelligence at a fraction of the cost.
+
+
+  → Add a follow-up                                                                                                                                                                     ctrl+c to stop
+
+
+  1 task
+  Auto · 8.2%                                                                                                                                                                           Run Everything
+  ~/.cache/cf-cursor-scratch/vproj/w1 · w1
+

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: cdd119a0d121
+// CLIENT-HASH: 9f314440ca07
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -301,7 +301,9 @@
 // keeps working against the new daemon — its polls slide the server's window too — but it
 // still asks for Face ID at every relaunch, and still locks itself 15 minutes after an
 // unlock, because its own copy of the expiry never moves.
-const VERSION = 'ghostfleet-v54';
+// v55 adds cursor to the new-worktree sheet's fallback agent list, the one used when the
+// daemon is too old to send its installed-agent catalogue.
+const VERSION = 'ghostfleet-v55';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

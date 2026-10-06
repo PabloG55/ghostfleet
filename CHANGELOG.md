@@ -8,6 +8,17 @@ the detail, and every entry here names the PR that carries the argument.
 
 ### Added
 
+- **cursor (Cursor's CLI, `cursor-agent`) as a fifth agent** (docs/multi-agent-sessions.md).
+  `fleet-spawn --agent cursor`, the project agent column and the phone's pickers offer it once
+  `cursor-agent` is on PATH. `install.sh` writes an event bridge, the ghostfleet MCP server and
+  the orchestrate skill into `~/.cursor/` (merging, and keeping each edited file's original as
+  `<file>.pre-ghostfleet`); restart and reopen resume a worker's own chat by id across a pane
+  kill. One thing short of parity, measured: cursor starts MCP servers without the session's
+  environment, so a cursor session's `fleet_*` calls must name the project, as codex's do.
+  Also fixed for every fleet that runs cursor at all: `cursor-agent` runs Claude's hooks from
+  `~/.claude/settings.json` too, with its own payload, which `fleet-event.sh` read as a stray
+  "working" record with no cwd — it now ignores a cursor payload that did not come through
+  the bridge.
 - **agy (Google's Antigravity CLI) as a fourth agent** (docs/multi-agent-sessions.md).
   `fleet-spawn --agent agy`, the project agent column and the phone's pickers all offer it
   once `agy` is on PATH. It is the first non-claude agent at full parity: `install.sh` writes

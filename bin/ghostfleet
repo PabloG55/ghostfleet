@@ -347,7 +347,7 @@ ensure_projects() {
   cat > "$PROJECTS_CFG" <<'EOF'
 # ghostfleet projects — one per line:  name<TAB>path<TAB>profile<TAB>agent
 # profile: work (~/.claude) or personal (~/.claude-personal).
-# agent:   optional default coding CLI for this project (claude | opencode | codex | agy).
+# agent:   optional default coding CLI for this project (claude | opencode | codex | agy | cursor).
 #          Omit for claude. `fleet-agent list` shows what's available.
 # Add from the picker ("+ add project"), or edit here, e.g.:
 #   myapp<TAB>~/code/myapp<TAB>work

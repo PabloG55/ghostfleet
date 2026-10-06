@@ -1,0 +1,40 @@
+
+  Cursor Agent
+  v2026.10.01-e373342
+  Tip: Hit shift+tab to enable Plan Mode for large or
+  complex changes.
+
+
+  Reply with just the word hi.
+
+
+  hi
+
+
+  Run this shell command exactly: sleep 10; echo
+  ok
+
+
+  $ sleep 10; echo ok Waiting for approval...
+
+────────────────────────────────────────────────────────
+ $  sleep 10; echo ok in .
+
+ Run this command?
+ Not in allowlist: echo, sleep
+  → Run (once) (y)
+    Add Shell(sleep), Shell(echo) to allowlist? (tab)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)
+
+
+
+
+
+
+
+
+
+
+
+

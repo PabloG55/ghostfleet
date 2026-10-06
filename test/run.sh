@@ -603,7 +603,7 @@ is "explicit claude beats project's"   "/c/foo|w|claude"   "$(sc "/c/foo${US}w${
 # ── 2. pane detectors, both directions ───────────────────────────────────────
 # A regex that never fires looks exactly like a worker that is never busy.
 group "pane detectors (busy_re)"
-for a in claude opencode codex agy; do
+for a in claude opencode codex agy cursor; do
   re="$("$ROOT/bin/fleet-agent" field "$a" busy_re 2>/dev/null)"
   # A DETECTOR THAT IS NOT THERE IS A RED ROW, NOT A SKIP. This read "no detector
   # declared" and skipped, which is a sentence about the config and was in fact a
@@ -691,6 +691,74 @@ is "agy trust dialog: not ready"                "0" "$(has "$ard" "$FIX/agy-trus
 is "agy trust dialog: not busy"                 "0" "$(has "$are" "$FIX/agy-trust.txt")"
 # Alternation, not a [⣾…] class, so a C-locale grep still matches the glyphs as strings.
 is "agy busy_re holds in the C locale"          "1" "$([ "$(LC_ALL=C grep -cE -- "$are" "$FIX/agy-busy-56col.txt" || true)" -ge 1 ] && echo 1 || echo 0)"
+
+# cursor, at 30, 56, 80 and 200 columns, in both dialects. What shaped these detectors, and is
+# therefore what the rows below hold in place:
+#   - the spinner is TWO braille cells and they animate (⠰⠰ ⠘⠤ ⠠⠜ …). Captures taken while
+#     resizing froze on ⠀⠞, and a regex spelled from those missed 21 of 25 working frames of a
+#     turn left alone — the fixtures carry several frames, not only the frozen one;
+#   - the composer reads "→ Add a follow-up" WHILE a turn runs too, with "ctrl+c to stop"
+#     after it, so a ready_re on the placeholder alone called every busy pane ready;
+#   - the answered trust box stays on screen, title and all, above a composer that is ready;
+#   - Escape on the permission dialog opens a second prompt that still waits on a human.
+group "cursor detectors: every width, the frames that lie, and a dialog is not work"
+cf()  { "$ROOT/bin/fleet-agent" field cursor "$1" 2>/dev/null; }
+# Its own copies of has and jsm, for the reason agjs has one: a filtered run carries only
+# this group.
+has() { [ "$(matches "$1" "$2")" -ge 1 ] && echo 1 || echo 0; }
+cujs() { node -e '
+  const fs=require("fs"), re=new RegExp(process.argv[1],"i");
+  console.log(String(fs.readFileSync(process.argv[2],"utf8").split("\n").filter(l=>re.test(l)).length ? 1 : 0));
+' "$1" "$2"; }
+cre="$(cf busy_re)"; cjs="$(cf busy_re_js)"; cbl="$(cf blocked_re)"; crd="$(cf ready_re)"
+is "cursor declares all four pane signals" "yes" \
+   "$([ -n "$cre" ] && [ -n "$cjs" ] && [ -n "$cbl" ] && [ -n "$crd" ] && echo yes || echo no)"
+for w in "" -30col -56col -wide; do
+  b="$FIX/cursor-busy$w.txt"; i="$FIX/cursor-idle$w.txt"
+  is "cursor${w:- 80col}: matches the BUSY pane"     "1" "$(has "$cre" "$b")"
+  is "cursor${w:- 80col}: silent on the IDLE pane"   "0" "$(has "$cre" "$i")"
+  is "cursor(js)${w:- 80col}: matches the BUSY pane" "1" "$(cujs "$cjs" "$b")"
+  is "cursor(js)${w:- 80col}: silent on the IDLE"    "0" "$(cujs "$cjs" "$i")"
+  is "cursor${w:- 80col}: the IDLE pane is ready"    "1" "$(has "$crd" "$i")"
+  # The trap: the same "→ Add a follow-up" is on the busy pane, with the stop hint after it.
+  is "cursor${w:- 80col}: the BUSY pane carries the placeholder too" "1" "$(has 'Add a' "$b")"
+  is "cursor${w:- 80col}: ...and is NOT ready"       "0" "$(has "$crd" "$b")"
+  is "cursor${w:- 80col}: neither one is blocked"    "0" "$( [ "$(has "$cbl" "$b")$(has "$cbl" "$i")" = 00 ] && echo 0 || echo 1)"
+done
+# Animation, asserted rather than assumed: the busy fixtures must not all be the frozen frame,
+# or a regex that spelled ⠀⠞ out would pass every row above. LC_ALL=C on the sort because a
+# UTF-8 collation weighs these glyphs EQUAL, and `sort -u` folded five frames into one.
+is "cursor busy fixtures carry more than one spinner frame" "1" \
+   "$([ "$(cat "$FIX"/cursor-busy*.txt | grep -oE "$cre" | awk '{print $1}' | LC_ALL=C sort -u | wc -l | tr -d ' ')" -ge 2 ] && echo 1 || echo 0)"
+# The first frame of a turn has the spinner and not yet "ctrl+c to stop".
+is "cursor: the turn's first frame has no stop hint" "0" "$(has 'ctrl\+c to stop' "$FIX/cursor-busy-start.txt")"
+is "cursor: ...and is still busy"                 "1" "$(has "$cre" "$FIX/cursor-busy-start.txt")"
+for f in cursor-idle-fresh.txt cursor-idle-fresh-30col.txt; do
+  is "$f: a fresh chat's composer is ready"       "1" "$(has "$crd" "$FIX/$f")"
+  is "$f: and not busy"                           "0" "$(has "$cre" "$FIX/$f")"
+done
+for f in cursor-permission.txt cursor-permission-30col.txt cursor-permission-56col.txt cursor-permission-touch.txt; do
+  is "$f: is NOT read as busy"                    "0" "$(has "$cre" "$FIX/$f")"
+  is "$f: ...in JS either"                        "0" "$(cujs "$cjs" "$FIX/$f")"
+  is "$f: IS read as blocked"                     "1" "$(has "$cbl" "$FIX/$f")"
+  # Its selected option is drawn with the composer's own arrow: "→ Run (once) (y)".
+  is "$f: and not as ready"                       "0" "$(has "$crd" "$FIX/$f")"
+done
+is "cursor dialog: its option uses the composer's arrow" "1" "$(has '^  → Run' "$FIX/cursor-permission.txt")"
+for f in cursor-trust.txt cursor-trust-30col.txt; do
+  is "$f: blocked"                                "1" "$(has "$cbl" "$FIX/$f")"
+  is "$f: not ready"                              "0" "$(has "$crd" "$FIX/$f")"
+  is "$f: not busy"                               "0" "$(has "$cre" "$FIX/$f")"
+done
+# ANSWERED, the box keeps its title — which is why blocked_re keys on the live selector.
+is "an answered trust box keeps its title"         "1" "$(has 'Workspace Trust Required' "$FIX/cursor-trust-answered.txt")"
+is "...and is NOT blocked"                         "0" "$(has "$cbl" "$FIX/cursor-trust-answered.txt")"
+is "...and its composer is ready"                  "1" "$(has "$crd" "$FIX/cursor-trust-answered.txt")"
+# Escape opened "→ Tell the agent what to do instead": not the dialog, not idle, not working.
+is "cursor's after-Escape prompt: blocked"         "1" "$(has "$cbl" "$FIX/cursor-skip.txt")"
+is "...not ready"                                  "0" "$(has "$crd" "$FIX/cursor-skip.txt")"
+is "...not busy, though it says ctrl+c to stop"    "0" "$(has "$cre" "$FIX/cursor-skip.txt")"
+is "cursor busy_re holds in the C locale"          "1" "$([ "$(LC_ALL=C grep -cE -- "$cre" "$FIX/cursor-busy-30col.txt" || true)" -ge 1 ] && echo 1 || echo 0)"
 
 # The governor scrapes the 5h usage % out of the same pane, and Claude TRUNCATES its
 # status line rather than wrapping it — so below ~100 columns the figure is simply not
@@ -1737,9 +1805,11 @@ done
 # Every agent has the TOOLS now, which is the change; the fields below are where they differ.
 is "all three have the fleet_* tools" "yes" \
    "$([ "$(fa field claude mcp)" = yes ] && [ "$(fa field opencode mcp)" = yes ] && [ "$(fa field codex mcp)" = yes ] && echo yes || echo no)"
-is "...and only claude and agy have the skill" "claudeagy" \
+is "...and only claude, agy and cursor have the skill" "claudeagycursor" \
    "$(for a in $(fa list); do [ "$(fa field "$a" skill)" = yes ] && printf '%s' "$a"; done)"
-is "...and only codex needs a project" "codex" \
+# cursor joins codex here, measured by calling fleet_list from a real cursor worker: the
+# server it starts gets none of the session's environment.
+is "...and only codex and cursor need a project" "codexcursor" \
    "$(for a in $(fa list); do [ "$(fa field "$a" mcp_self)" = no ] && printf '%s' "$a"; done)"
 # The caveat is COMPOSED from those fields, so a fourth agent gets a warning by declaring
 # them. Both directions, because a composer that always returned text would be as useless
@@ -1748,6 +1818,11 @@ is "claude gives up nothing"          ""  "$(fa caveat claude)"
 # agy measured at parity on every field the caveat reads: hooks, tools, its own fleet, the
 # skill, and a resume that survives a pane kill.
 is "agy gives up nothing either"      ""  "$(fa caveat agy)"
+# cursor has hooks, tools, the skill and a resume — and gives up exactly ONE thing, the
+# fleet it is in, for codex's reason. The whole caveat, so a second clause cannot creep in.
+is "cursor gives up only its own fleet" \
+   "fleet_* tools must name the project: it starts the MCP server without the session's environment, so a call with no project cannot tell which fleet it is in" \
+   "$(fa caveat cursor)"
 # THE CLAUSE THAT HAD TO GO. Both of these said "no fleet_* tools" until the MCP server was
 # registered for them; asserting its ABSENCE is what stops it coming back by accident.
 is "opencode: tools, not a warning"   "0" "$(fa caveat opencode | grep -c 'no fleet_\* tools' || true)"
@@ -1974,7 +2049,7 @@ else
              if (v !~ /^[>|"'\''"]/ && index(v, ": ")) print NR": "substr($0,1,40) }' "$ROOT/skill/ghostfleet-orchestrate/SKILL.md")"
   is "the skill's frontmatter is strict YAML" "" "$fmbad"
   is "install.sh calls it"                   "1" "$([ "$(grep -c '^register_agy$' "$ROOT/install.sh")" -ge 1 ] && echo 1 || echo 0)"
-  is "...and links agy-here"                 "1" "$([ "$(grep -c 'agy-here)' "$ROOT/install.sh")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and links agy-here"                 "1" "$([ "$(grep -cE ' agy-here[ )]' "$ROOT/install.sh")" -ge 1 ] && echo 1 || echo 0)"
 
   # ── the bridge: agy's payload in, fleet-event.sh's record out ─────────────
   # Payloads shaped exactly like the ones a probe hook recorded from agy 1.2.14.
@@ -2021,6 +2096,132 @@ else
   rm -rf "$AY"
 fi
 
+# ── cursor: ~/.cursor holds the bridge, the tools and the skill ──────────────
+# register_cursor writes into the user's own ~/.cursor — files the Cursor IDE reads too — so
+# it runs against a temp dir here, with a stub cursor-agent. hooks.json is NOT agy's shape:
+# its keys are events holding arrays, so "ours" is found by the bridge's file name. What
+# matters: other hooks and servers survive, a re-run leaves ONE entry per event, the file's
+# original is kept once as .pre-ghostfleet and never overwritten by a later run, and a file
+# that is not JSON is left alone.
+group "cursor: the installer, the event bridge, the compat guard and the launcher"
+if ! command -v jq >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
+  skip "cursor install/bridge/launcher" "jq or node is not installed"
+else
+  CU="$(cd "$(mktemp -d)" && pwd -P)"
+  sed -n '/^register_cursor() {/,/^}/p' "$ROOT/install.sh" >  "$CU/lib.sh"
+  sed -n '/^vsay() {/p'                 "$ROOT/install.sh" >> "$CU/lib.sh"
+  is "the cursor registrar was extracted" "1" "$(grep -c '^register_cursor() {' "$CU/lib.sh")"
+  mkdir -p "$CU/bin" "$CU/cfg"; printf '#!/bin/sh\nexit 0\n' > "$CU/bin/cursor-agent"; chmod +x "$CU/bin/cursor-agent"
+  rc() { ( FLEET_HOME="$CU/rt home" CURSOR_FLEET_CONFIG_DIR="$CU/cfg" PATH="$CU/bin:$PATH" VERBOSE=1 \
+           bash -c 'set -uo pipefail; source "$0"; register_cursor' "$CU/lib.sh" 2>&1 ); }
+  : > "$CU/cfg/mcp.json"
+  ORIG='{"version":1,"hooks":{"stop":[{"command":"./lint.sh"}],"afterFileEdit":[{"command":"./fmt.sh"}]}}'
+  printf '%s\n' "$ORIG" > "$CU/cfg/hooks.json"
+  rc >/dev/null; rc >/dev/null
+  H="$CU/cfg/hooks.json"; BRG="'$CU/rt home/hooks/cursor-fleet-event.sh'"
+  is "a 0-byte mcp.json is written"         "node" "$(jq -r '.mcpServers.ghostfleet.command' "$CU/cfg/mcp.json" 2>/dev/null)"
+  is "...pointing at the staged server"     "$CU/rt home/mcp/fleet-mcp.mjs" "$(jq -r '.mcpServers.ghostfleet.args[0]' "$CU/cfg/mcp.json" 2>/dev/null)"
+  is "someone else's stop hook survives"    "./lint.sh" "$(jq -r '.hooks.stop[0].command' "$H" 2>/dev/null)"
+  is "...and their other event too"         "./fmt.sh"  "$(jq -r '.hooks.afterFileEdit[0].command' "$H" 2>/dev/null)"
+  is "ours is ONE stop entry after two runs" "1" "$(jq --arg b "$BRG" '[.hooks.stop[] | select(.command == $b)] | length' "$H" 2>/dev/null)"
+  is "...and one beforeSubmitPrompt"        "$BRG" "$(jq -r '.hooks.beforeSubmitPrompt | if length == 1 then .[0].command else "count=\(length)" end' "$H" 2>/dev/null)"
+  is "only the two events the bridge maps"  "afterFileEdit beforeSubmitPrompt stop" "$(jq -r '.hooks | keys | join(" ")' "$H" 2>/dev/null)"
+  is "the schema version is kept"           "1" "$(jq -r .version "$H" 2>/dev/null)"
+  is "the original is kept beside it"       "$ORIG" "$(cat "$H.pre-ghostfleet" 2>/dev/null)"
+  # A moved FLEET_HOME is the same entry, not a second one — matched by the bridge's name.
+  ( FLEET_HOME="$CU/elsewhere" CURSOR_FLEET_CONFIG_DIR="$CU/cfg" PATH="$CU/bin:$PATH" \
+    bash -c 'set -uo pipefail; source "$0"; register_cursor' "$CU/lib.sh" >/dev/null 2>&1 )
+  is "a moved runtime replaces ours"        "1" "$(jq '[.hooks.stop[] | select(.command | contains("cursor-fleet-event.sh"))] | length' "$H" 2>/dev/null)"
+  is "...and the original backup is untouched" "$ORIG" "$(cat "$H.pre-ghostfleet" 2>/dev/null)"
+  is "the skill is linked"                  "$CU/elsewhere/skill/ghostfleet-orchestrate" "$(readlink "$CU/cfg/skills/ghostfleet-orchestrate")"
+  printf '{ not json\n' > "$H"; before="$(cat "$H")"; out="$(rc)"
+  is "a hooks.json that is not JSON is left alone" "$before" "$(cat "$H")"
+  is "...and it says so"                    "1" "$([ "$(grep -c 'left alone' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+  out="$(FLEET_HOME="$CU/rt" CURSOR_FLEET_CONFIG_DIR="$CU/cfg2" PATH="$CU/empty" VERBOSE=1 "$(command -v bash)" -c 'set -uo pipefail; source "$0"; register_cursor' "$CU/lib.sh" 2>&1)"
+  is "no cursor-agent: it says so"          "1" "$([ "$(grep -c 'cursor-agent not installed' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and writes nothing"                "no" "$([ -e "$CU/cfg2" ] && echo yes || echo no)"
+  is "install.sh calls it"                  "1" "$([ "$(grep -c '^register_cursor$' "$ROOT/install.sh")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and links cursor-here"             "1" "$([ "$(grep -cE ' cursor-here[ )]' "$ROOT/install.sh")" -ge 1 ] && echo 1 || echo 0)"
+  is "the bridge is executable"             "yes" "$([ -x "$ROOT/hooks/cursor-fleet-event.sh" ] && echo yes || echo no)"
+
+  # ── the bridge: cursor's payload in, fleet-event.sh's record out ──────────
+  # Payloads shaped exactly like the ones a probe hook recorded from 2026.10.01-e373342 —
+  # including user_email, which is on every event and must land nowhere.
+  BF="$CU/fleet"; mkdir -p "$BF" "$CU/wt/acme-api"
+  { printf '%s\n' '{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nrun it\n</user_query>"}]}}'
+    printf '%s\n' '{"role":"assistant","message":{"content":[{"type":"text","text":"Ran it; the worktree is ready."}]}}'
+    printf '%s\n' '{"type":"turn_ended","status":"success"}'; } > "$CU/tr.jsonl"
+  cb() { env -u TMUX CLAUDE_FLEET_DIR="$BF" CLAUDE_FLEET_SOCK=cf-curtest CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
+           "$ROOT/hooks/cursor-fleet-event.sh" <<< "$1" 2>/dev/null; }
+  cpl() { printf '{"conversation_id":"c-1","session_id":"c-1","hook_event_name":"%s","cursor_version":"2026.10.01-e373342","workspace_roots":["%s"],"user_email":"dev@acme.example","transcript_path":"%s"%s}' \
+           "$1" "$CU/wt/acme-api" "$CU/tr.jsonl" "${2:-}"; }
+  printf 'x\n' > "$BF/cf-curtest.w1.parked"
+  is "beforeSubmitPrompt prints {}"         "{}" "$(cb "$(cpl beforeSubmitPrompt ',"prompt":"run it"')")"
+  is "...and the session reads working"     "working" "$(jq -r .status "$BF/c-1.json" 2>/dev/null)"
+  is "...on its own fleet and slot"         "cf-curtest/w1" "$(jq -r '.sock + "/" + .slot' "$BF/c-1.json" 2>/dev/null)"
+  is "...with the workspace as its cwd"     "$CU/wt/acme-api" "$(jq -r .cwd "$BF/c-1.json" 2>/dev/null)"
+  is "...and a new prompt un-parks it"      "no" "$([ -f "$BF/cf-curtest.w1.parked" ] && echo yes || echo no)"
+  is "afterAgentResponse is not an event"   "{}|working" "$(cb "$(cpl afterAgentResponse ',"text":"x"')")|$(jq -r .status "$BF/c-1.json" 2>/dev/null)"
+  out="$(cb "$(cpl stop ',"status":"completed","loop_count":0')")"
+  is "stop prints {} — never a followup"    "{}" "$out"
+  is "...the session reads ready"           "ready" "$(jq -r .status "$BF/c-1.json" 2>/dev/null)"
+  is "...and the lead's inbox has a done"   "w1 done acme-api" "$(awk -F'\t' '{print $2, $3, $4}' "$BF/cf-curtest.inbox" 2>/dev/null | tail -1)"
+  is "...and the card has the last message" "Ran it; the worktree is ready." \
+     "$(jq -r '.message.content[0].text' "$(jq -r .transcript "$BF/c-1.json")" 2>/dev/null | tail -1)"
+  printf '%s\n' '{"type":"turn_ended","status":"error","error":"Named models unavailable Free plans can only use Auto."}' >> "$CU/tr.jsonl"
+  cb "$(cpl stop ',"status":"error","loop_count":0')" >/dev/null
+  is "an error stop is a need-you"          "need-you" "$(jq -r .status "$BF/c-1.json" 2>/dev/null)"
+  is "...with cursor's own reason"          "1" "$([ "$(grep -c 'need-you	cursor stopped on an error: Named models unavailable' "$BF/cf-curtest.inbox")" -ge 1 ] && echo 1 || echo 0)"
+  is "the account's email lands nowhere"    "0" "$(cat "$BF"/* 2>/dev/null | grep -c 'dev@acme.example' || true)"
+  out="$(env -u TMUX -u CLAUDE_FLEET_SOCK CLAUDE_FLEET_DIR="$CU/nofleet" "$ROOT/hooks/cursor-fleet-event.sh" <<< "$(cpl stop)" 2>/dev/null)"
+  is "outside a fleet: {} and nothing else" "{}|no" "$out|$([ -e "$CU/nofleet" ] && echo yes || echo no)"
+
+  # ── the compat path: cursor running CLAUDE's hooks with its own payload ───
+  # Measured: cursor-agent loads ~/.claude/settings.json beside its own hooks.json and hands
+  # fleet-event.sh cursor's payload — event "stop", no cwd. Unguarded, that wrote a record of
+  # its own: status "working" (the case's default), cwd empty. Dropped whole now.
+  GF="$CU/gfleet"; mkdir -p "$GF"
+  ce() { env -u TMUX CLAUDE_FLEET_DIR="$GF" CLAUDE_FLEET_SOCK=cf-curtest CLAUDE_FLEET_SLOT=w2 CLAUDE_FLEET_NOTIFIER=off \
+           bash "$ROOT/hooks/fleet-event.sh" <<< "$1" >/dev/null 2>&1; }
+  ce '{"conversation_id":"c-2","session_id":"c-2","hook_event_name":"stop","status":"completed","cursor_version":"2026.10.01-e373342","workspace_roots":["/x"]}'
+  ce '{"conversation_id":"c-2","session_id":"c-2","hook_event_name":"beforeSubmitPrompt","prompt":"hi","cursor_version":"2026.10.01-e373342"}'
+  is "a cursor payload via Claude's hooks writes no record" "no" "$([ -e "$GF/c-2.json" ] && echo yes || echo no)"
+  # ...and the guard reads the KEY, not the bytes: a Claude prompt that merely mentions it is
+  # still a Claude prompt.
+  ce '{"session_id":"k-1","hook_event_name":"UserPromptSubmit","cwd":"/x","prompt":"why does cursor send \"cursor_version\"?"}'
+  is "...while a Claude prompt quoting the key still does" "working" "$(jq -r .status "$GF/k-1.json" 2>/dev/null)"
+
+  # ── the launcher ────────────────────────────────────────────────────────
+  printf '#!/bin/sh\nprintf cursor-agent; for a; do printf " %%s" "$a"; done; echo\n' > "$CU/bin/cursor-agent"
+  mkdir -p "$CU/w t"; WTP="$(cd "$CU/w t" && pwd -P)"
+  # cursor's own layout: chats/<md5 of the physical cwd>/<id>/meta.json — the hash taken
+  # here with node's md5, not with the launcher's md5/md5sum, so the two have to agree.
+  HH="$(node -e 'console.log(require("crypto").createHash("md5").update(process.argv[1]).digest("hex"))' "$WTP")"
+  mkdir -p "$CU/cc/chats/$HH/known" "$CU/cc/chats/$HH/empty" "$CU/cc/chats/0ther/far"
+  printf '{"schemaVersion":1,"hasConversation":true,"cwd":"%s"}\n'  "$WTP" > "$CU/cc/chats/$HH/known/meta.json"
+  printf '{"schemaVersion":1,"hasConversation":false,"cwd":"%s"}\n' "$WTP" > "$CU/cc/chats/$HH/empty/meta.json"
+  printf '{"schemaVersion":1,"hasConversation":true,"cwd":"/elsewhere"}\n' > "$CU/cc/chats/0ther/far/meta.json"
+  ch() { ( cd "$CU/w t" && env -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_YOLO -u XDG_CONFIG_HOME \
+           CLAUDE_FLEET_MODEL=opus CURSOR_CONFIG_DIR="$CU/cc" PATH="$CU/bin:$PATH" "$@" "$ROOT/bin/cursor-here" w1 2>&1 ); }
+  Y="--force --trust --approve-mcps"
+  is "a known id resumes exactly it"        "cursor-agent $Y --resume known" "$(ch CLAUDE_FLEET_RESUME=known | tail -1)"
+  is "...from whichever cwd hashed it"      "cursor-agent $Y --resume far" "$(ch CLAUDE_FLEET_RESUME=far | tail -1)"
+  # cursor itself would open an EMPTY chat under that id, exit 0 — measured — and create the
+  # directory while it did, which is why the directory alone proves nothing.
+  is "an unknown id is refused, not guessed" "1" "$(ch CLAUDE_FLEET_RESUME=gone >/dev/null; echo $?)"
+  is "...and so is one that never took a turn" "1" "$(ch CLAUDE_FLEET_RESUME=empty >/dev/null; echo $?)"
+  is "no id: --continue, the cwd's own"     "cursor-agent $Y --continue" "$(ch | tail -1)"
+  rm -rf "$CU/cc/chats/$HH/known"
+  # ...but with nothing to continue, --continue EXITS 1 and would close the pane.
+  is "no chat here yet: a fresh one"        "cursor-agent $Y" "$(ch | tail -1)"
+  is "fresh means fresh"                    "cursor-agent $Y" "$(ch CLAUDE_FLEET_FRESH=1 | tail -1)"
+  is "yolo off: no bypass flags"            "cursor-agent" "$(ch CLAUDE_FLEET_YOLO=0 | tail -1)"
+  # --model rewrites cursor's account-wide default (measured), so it is never passed.
+  is "CLAUDE_FLEET_MODEL is not passed on"  "0" "$(ch | grep -c -- '--model' || true)"
+  is "it runs cursor-agent, never 'agent'"  "0" "$(grep -cE '^[^#]*exec agent( |$)' "$ROOT/bin/cursor-here" || true)"
+  rm -rf "$CU"
+fi
+
 group "fleet-review asks a DIFFERENT model, or says it cannot"
 # WHY THE REFUSALS ARE THE POINT. Exactly one of the three agents ships a non-interactive
 # review, and the tempting fallback — send the diff as an ordinary prompt and print the
@@ -2036,6 +2237,7 @@ is "codex declares a review"        "review" "$(fa field codex review)"
 is "claude declares none"           ""       "$(fa field claude review)"
 is "opencode declares none"         ""       "$(fa field opencode review)"
 is "agy declares none"              ""       "$(fa field agy review)"
+is "cursor declares none"           ""       "$(fa field cursor review)"
 # ...and empty must be DECLARED, not missing: `field` exits 0 for a known agent with no
 # value and non-zero for an unknown one, which is the only thing separating "you spelled
 # it wrong" from "that CLI cannot do this".
@@ -2314,7 +2516,7 @@ agcol() {            # $1..$n = the agents whose binaries exist; $AGROW_AGENT = 
   else
     printf 'acme-api\t%s/a\twork\n' "$T" > "$T/.config/ghostfleet/projects"
   fi
-  rm -f "$T/bin/claude" "$T/bin/codex" "$T/bin/opencode" "$T/bin/agy"
+  rm -f "$T/bin/claude" "$T/bin/codex" "$T/bin/opencode" "$T/bin/agy" "$T/bin/cursor-agent"
   for a in "$@"; do agent_stub "$a"; done
   agkill
   # PATH IS SET INSIDE THE COMMAND, NOT WITH -e, and that is not a style choice: on this
@@ -3171,7 +3373,8 @@ if command -v node >/dev/null 2>&1; then
   pdv() { local f="$1"; shift; node "$PD" "$@" < "$ROOT/test/fixtures/$f" >/dev/null 2>&1; echo $?; }
   for f in claude-permission-dialog-sgr.txt claude-permission-bash.txt claude-permission-bash-56col.txt \
            codex-approval.txt codex-approval-56col.txt opencode-permission.txt opencode-permission-56col.txt \
-           agy-permission.txt agy-permission-56col.txt; do
+           agy-permission.txt agy-permission-56col.txt \
+           cursor-permission.txt cursor-permission-30col.txt cursor-permission-56col.txt cursor-permission-touch.txt; do
     is "$f: '1' would approve (11)"          "11" "$(pdv "$f" --text 1)"
     is "$f: Enter would approve"             "11" "$(pdv "$f" --key Enter)"
     is "$f: Escape declines (10)"            "10" "$(pdv "$f" --key Escape)"
@@ -3190,9 +3393,16 @@ if command -v node >/dev/null 2>&1; then
   done
   # codex binds letters as well as numbers: "(y)" on option 1 approves just the same.
   is "codex: its letter shortcut approves"   "11" "$(pdv codex-approval.txt --text y)"
+  # cursor binds ONLY letters, and its "n" is not a whole decline either: like Escape it opens
+  # "Tell the agent what to do instead", which is a different prompt. So a typed letter is
+  # treated as a keystroke that cannot be shown to decline, and waved through for nobody.
+  is "cursor: its 'y' approves"              "11" "$(pdv cursor-permission.txt --text y)"
+  is "cursor: its 'n' is not taken as a decline" "11" "$(pdv cursor-permission.txt --text n)"
   for f in claude-trust.txt codex-trust.txt codex-trust-folder.txt codex-update.txt claude-limit-hit.txt \
            claude-idle.txt claude-busy.txt claude-idle-quoting-limit.txt codex-idle-home.txt opencode-idle.txt opencode-busy.txt \
-           agy-trust.txt agy-idle.txt agy-busy.txt agy-idle-56col.txt agy-busy-56col.txt; do
+           agy-trust.txt agy-idle.txt agy-busy.txt agy-idle-56col.txt agy-busy-56col.txt \
+           cursor-trust.txt cursor-trust-30col.txt cursor-trust-answered.txt cursor-idle.txt cursor-busy.txt \
+           cursor-idle-30col.txt cursor-busy-30col.txt cursor-skip.txt; do
     is "$f: not a permission dialog (0)"     "0"  "$(pdv "$f" --text 1)"
   done
   # A QUOTED dialog is history, not a question: the same Bash dialog, with an idle
@@ -3213,6 +3423,20 @@ if command -v node >/dev/null 2>&1; then
   PQ="$(mktemp)"; cat "$ROOT/test/fixtures/agy-permission.txt" "$ROOT/test/fixtures/agy-idle.txt" > "$PQ"
   is "agy: a dialog above its composer is quoted" "0" "$(node "$PD" --text 1 < "$PQ" >/dev/null 2>&1; echo $?)"
   rm -f "$PQ"
+  is "cursor: prints the exact command"      "1" "$([ "$(pdt cursor-permission-touch.txt | grep -c '^\$  touch notes.txt in \.$')" -ge 1 ] && echo 1 || echo 0)"
+  is "...and names it a shell command"       "1" "$([ "$(pdt cursor-permission-30col.txt | grep -c '^cursor · shell command$')" -ge 1 ] && echo 1 || echo 0)"
+  # cursor's composer is "→ Add a follow-up", the same arrow as its selected option, and the
+  # shared COMPOSER pattern knows only ❯ and › — so this is the cursor parser's own check.
+  PQ="$(mktemp)"; cat "$ROOT/test/fixtures/cursor-permission.txt" "$ROOT/test/fixtures/cursor-idle.txt" > "$PQ"
+  is "cursor: a dialog above its composer is quoted" "0" "$(node "$PD" --text 1 < "$PQ" >/dev/null 2>&1; echo $?)"
+  # ...and the case only the composer check catches: the composer DIRECTLY under the dialog,
+  # its three lines and nothing else, so the dialog is still within NEAR_BOTTOM of the end.
+  { grep -v '^$' "$ROOT/test/fixtures/cursor-permission.txt"; grep -v '^$' "$ROOT/test/fixtures/cursor-idle.txt" | tail -3; } > "$PQ"
+  is "...even right above it"                     "0" "$(node "$PD" --text 1 < "$PQ" >/dev/null 2>&1; echo $?)"
+  rm -f "$PQ"
+  # Escape alone lands on "Tell the agent what to do instead", whose Escape goes BACK to the
+  # dialog; the hint has to name the Enter that finishes the decline.
+  is "cursor: the way to decline is two keys" "1" "$([ "$(pdt cursor-permission.txt | grep -cF 'to decline: --key Escape, then --key Enter')" -ge 1 ] && echo 1 || echo 0)"
   is "...and the way to decline"             "1" "$([ "$(pdt claude-permission-bash.txt | grep -cF 'to decline: "3" (No) or --key Escape')" -ge 1 ] && echo 1 || echo 0)"
 else
   skip "permission dialog detector" "node missing"
@@ -3291,7 +3515,8 @@ if command -v node >/dev/null 2>&1; then
   PD="$ROOT/lib/permission-dialog.mjs"
   fpj() { node "$PD" --fingerprint < "$ROOT/test/fixtures/$1" 2>/dev/null; }
   fpk() { fpj "$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);process.stdout.write(j?j[process.argv[1]]:"null")})' "$2"; }
-  for f in claude-permission-bash.txt codex-approval.txt opencode-permission.txt claude-permission-dialog-sgr.txt agy-permission.txt; do
+  for f in claude-permission-bash.txt codex-approval.txt opencode-permission.txt claude-permission-dialog-sgr.txt agy-permission.txt \
+           cursor-permission.txt; do
     is "$f: a permission prompt"              "permission" "$(fpk "$f" kind)"
   done
   for f in claude-trust.txt codex-trust.txt codex-trust-folder.txt; do
@@ -3304,9 +3529,12 @@ if command -v node >/dev/null 2>&1; then
   done
   # A RESIZE IS NOT A CHANGE: the same dialog at 100 and 56 columns re-wraps (codex breaks a
   # path mid-word), and the phone's poll and the answer can straddle one.
-  for a in claude-permission-bash codex-approval opencode-permission agy-permission; do
+  for a in claude-permission-bash codex-approval opencode-permission agy-permission cursor-permission; do
     is "$a: same fingerprint at 56 columns"   "$(fpk "$a.txt" fingerprint)" "$(fpk "$a-56col.txt" fingerprint)"
   done
+  # At 30 columns every one of cursor's options wraps, and the menu still ends at the ")" of
+  # its decline hint — the same dialog, not a shorter one.
+  is "cursor-permission: same fingerprint at 30 columns" "$(fpk cursor-permission.txt fingerprint)" "$(fpk cursor-permission-30col.txt fingerprint)"
   # ...and different prompts are different.
   is "two permission dialogs differ"          "no" "$([ "$(fpk claude-permission-bash.txt fingerprint)" = "$(fpk claude-permission-dialog-sgr.txt fingerprint)" ] && echo yes || echo no)"
   is "trust and update prompts differ"        "no" "$([ "$(fpk codex-trust-folder.txt fingerprint)" = "$(fpk codex-update.txt fingerprint)" ] && echo yes || echo no)"

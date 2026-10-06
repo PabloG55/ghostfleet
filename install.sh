@@ -599,7 +599,7 @@ CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fle
          fleet-clean fleet-open fleet-restart fleet-project fleet-demo fleet-phone fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-hibernate fleet-meter.mjs fleet-review
          fleet-digest fleet-jarvis fleet-update
-         agent-here opencode-here codex-here agy-here)
+         agent-here opencode-here codex-here agy-here cursor-here)
 linked=()
 for b in "${CF_BINS[@]}"; do
   if [ -e "$FLEET_HOME/bin/$b" ]; then ln -sf "$FLEET_HOME/bin/$b" "$BIN_DIR/$b"; linked+=("$b")
@@ -878,9 +878,66 @@ register_agy() {
     rm -f "$t"; echo "! $f is not readable as JSON, so it was left alone — agy gets no fleet_* tools"
   fi
 }
+# cursor keeps the same three things under ~/.cursor/: hooks.json, mcp.json and
+# skills/<name>/SKILL.md (cursor-agent 2026.10.01; the paths are its own — `cursor-agent mcp
+# list` names both mcp.json locations, and its skill-authoring docs name the personal root).
+# So, like agy, one function gives it the event bridge, the tools and the skill.
+#   THESE ARE THE USER'S FILES, and the Cursor IDE reads them as well as the CLI. Every write
+# is a jq MERGE that touches only our own entries, and the first time a file that already
+# existed is changed, its original is kept beside it as <file>.pre-ghostfleet — never
+# overwritten by a later run, so it stays the state from before the fleet touched it.
+#   hooks.json is NOT agy's shape. Its keys are EVENTS holding arrays, so there is no key of
+# our own to replace; ours is found by the bridge's file name, dropped and appended again, so
+# a re-run (or a FLEET_HOME that moved) leaves exactly one entry per event.
+#   cursor ALSO runs ~/.claude/settings.json's hooks — see the guard near the top of
+# hooks/fleet-event.sh, which is what keeps that path from writing records of its own.
+register_cursor() {
+  local mcp="$FLEET_HOME/mcp/fleet-mcp.mjs" bridge="$FLEET_HOME/hooks/cursor-fleet-event.sh"
+  if ! command -v cursor-agent >/dev/null 2>&1; then
+    vsay "· cursor-agent not installed — skipping its event bridge and MCP (fleet-spawn --agent cursor will refuse until it is)"
+    return 0
+  fi
+  # $HOME/.cursor, NOT $CURSOR_CONFIG_DIR: cursor honours that variable for its settings and
+  # chats but builds the hooks.json and mcp.json paths from the home directory regardless
+  # (read off the 2026.10.01 bundle), so following it would write where cursor never looks.
+  # CURSOR_FLEET_CONFIG_DIR is the suite's, to point this at a temp dir.
+  local dir="${CURSOR_FLEET_CONFIG_DIR:-$HOME/.cursor}" f t
+  if ! mkdir -p "$dir/skills" 2>/dev/null; then
+    echo "! could not create $dir — cursor workers get no fleet events, tools or skill"
+    return 0
+  fi
+  ln -sfn "$FLEET_HOME/skill/ghostfleet-orchestrate" "$dir/skills/ghostfleet-orchestrate"
+  # $1 = file, $2 = the jq program that merges into it, $3 = the one for a file that is not
+  # there (or is empty), $4/$5 = what to say. A file that is not JSON is left alone.
+  _cursor_merge() {
+    local f="$1" t; t="$(mktemp)"
+    if { [ -s "$f" ] && jq --arg b "$bridge" --arg m "$mcp" --arg q "'" "$2" "$f" > "$t" 2>/dev/null; } \
+       || { [ ! -s "$f" ] && jq -n --arg b "$bridge" --arg m "$mcp" --arg q "'" "$3" > "$t"; }; then
+      if [ -s "$f" ] && ! cmp -s "$f" "$t" && [ ! -e "$f.pre-ghostfleet" ]; then cp -p "$f" "$f.pre-ghostfleet"; fi
+      mv "$t" "$f"; vsay "✓ $4 -> $f (cursor, global)"
+    else
+      rm -f "$t"; echo "! $f is not readable as JSON, so it was left alone — $5"
+    fi
+  }
+  # The command runs under a shell, so the path is single-quoted ($q) for a FLEET_HOME with a
+  # space in it. beforeSubmitPrompt and stop only: those are the two the bridge maps.
+  local ours='{ command: ($q + $b + $q), timeout: 10 }'
+  local keep='[ .[]? | select(((.command // "") | contains("cursor-fleet-event.sh")) | not) ]'
+  _cursor_merge "$dir/hooks.json" \
+    ".version = (.version // 1) | .hooks = ((.hooks // {})
+       | .beforeSubmitPrompt = ((.beforeSubmitPrompt | $keep) + [ $ours ])
+       | .stop               = ((.stop               | $keep) + [ $ours ]))" \
+    "{ version: 1, hooks: { beforeSubmitPrompt: [ $ours ], stop: [ $ours ] } }" \
+    "wrote the ghostfleet event bridge" "cursor workers fall back to pane-only detection"
+  _cursor_merge "$dir/mcp.json" \
+    '.mcpServers = ((.mcpServers // {}) + { ghostfleet: { command: "node", args: [$m] } })' \
+    '{ mcpServers: { ghostfleet: { command: "node", args: [$m] } } }' \
+    "wrote ghostfleet MCP" "cursor gets no fleet_* tools"
+}
 register_codex_mcp
 register_opencode_mcp
 register_agy
+register_cursor
 
 # --- PATH hint ---------------------------------------------------------------
 case ":$PATH:" in

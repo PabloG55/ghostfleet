@@ -1,0 +1,40 @@
+  word noted.
+
+
+  noted
+
+
+  What was the
+  codeword I asked you
+  to remember? Reply
+  with only the
+  codeword.
+
+
+  PLUM-42
+
+
+  Run the shell
+  command: sleep 12;
+  echo wide. Then
+  reply with one short
+  sentence saying what
+  it printed.
+
+
+  $ sleep 12; echo wide 12s
+    wide
+
+  It printed wide.
+
+
+
+
+  → Add a follow-up
+
+
+  Auto· 8.3%  Run Everything
+
+  ~/.cache/cf-cursor-scratch/
+  vproj/w1 · w1
+

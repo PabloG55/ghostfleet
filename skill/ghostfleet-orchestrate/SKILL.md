@@ -154,7 +154,7 @@ project's session looks ignored no matter how long you wait. When you want an an
   **in this conversation** as a message from `<project>/<session>` — even while you are
   mid-turn. Nothing to poll, nothing to drain. Add `-s <socket>` (MCP: `project`) to ask
   another project's session; that is the case it exists for.
-- If it **couldn't** message you — you aren't an addressable peer, it runs codex/opencode/agy,
+- If it **couldn't** message you — you aren't an addressable peer, it runs codex/opencode/agy/cursor,
   or its turn died first — the answer falls back to an `ANSWERED` row in `fleet-inbox`
   naming `<project>/<session>`, with the reply's first ~200 characters; pull the rest with
   `fleet-read -s <socket> <session> 3`. So a missing row is not a missing answer: check
