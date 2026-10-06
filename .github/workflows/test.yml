@@ -46,10 +46,15 @@ jobs:
       # red with an empty `got`, matching CI exactly; with this set it is green.
       CLAUDE_FLEET_EDITOR: vi
 
-    # Local wall clock is ~4m30s, nearly all of it waiting on tmux and daemon settles
-    # rather than burning CPU. A hung tmux server would otherwise sit on the runner's
-    # 6-hour default; this fails it in a readable amount of time instead.
-    timeout-minutes: 20
+    # A hung tmux server would otherwise sit on the runner's 6-hour default; this fails
+    # it in a readable amount of time instead. The bound has to sit well above a GREEN
+    # run, not just above the suite's local time: the hosted macOS leg grew to ~19m30s
+    # while ubuntu took ~15m, and at 20 a passing run was cancelled on the clock (both
+    # legs, and then macOS alone after one more feature's rows). A cancel reads as red
+    # on the branch and says nothing about the code, so 30 keeps a hang readable while
+    # leaving a green run room to finish. If macOS approaches this too, the fix is the
+    # suite's settle time, not another bump.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
