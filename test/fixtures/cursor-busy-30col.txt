@@ -1,0 +1,40 @@
+  noted
+
+
+  What was the
+  codeword I asked you
+  to remember? Reply
+  with only the
+  codeword.
+
+
+  PLUM-42
+
+
+  Run the shell
+  command: sleep 12;
+  echo wide. Then
+  reply with one short
+  sentence saying what
+  it printed.
+
+
+  $ sleep 12; echo wide
+    207ms
+
+ ⠘⠆ Running  43 tokens
+    Tip: Type ? in the prompt
+  bar to show in-app hints.
+
+
+  → Add a     ctrl+c to stop
+    follow-
+    up
+
+
+  1 task
+  Auto· 8.2%  Run Everything
+
+  ~/.cache/cf-cursor-scratch/
+  vproj/w1 · w1
+

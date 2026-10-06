@@ -45,16 +45,31 @@ mkdir -p "$FLEET_DIR" 2>/dev/null || exit 0
 input="$(cat)"
 # Join with the unit separator (non-whitespace), not @tsv: a whitespace IFS makes
 # `read` collapse empty fields (e.g. a missing transcript_path) and shift the rest.
-IFS=$'\x1f' read -r EVENT SESSION CWD TRANSCRIPT NOTE < <(
+IFS=$'\x1f' read -r EVENT SESSION CWD TRANSCRIPT CURSOR_V NOTE < <(
   printf '%s' "$input" | jq -r '
     [ (.hook_event_name // ""),
       (.session_id // ""),
       (.cwd // .workspace.current_dir // ""),
       (.transcript_path // ""),
+      (.cursor_version // ""),
       (.message // "" | gsub("[\n\r\t]"; " ")) ] | join("\u001f")' 2>/dev/null
 )
 
 [ -n "$SESSION" ] || { _dbg "exit: no session_id (event='${EVENT}', ${#input} bytes of payload)"; exit 0; }
+
+# ── CURSOR RUNS THIS FILE TOO, AND MUST NOT ──────────────────────────────────
+# cursor-agent loads Claude's hooks as well as its own — ~/.claude/settings.json, read by its
+# hook loader beside ~/.cursor/hooks.json ("third-party extensibility", on by default) — and
+# hands them ITS payload: cursor's event names ("beforeSubmitPrompt", "stop", "sessionStart"),
+# no cwd, its own transcript. Measured: a cursor session in a fleet pane wrote a record here
+# with an empty cwd and status "working", under the slot of the pane that had launched it.
+# hooks/cursor-fleet-event.sh is the translation, and what it pipes in is Claude-shaped with
+# no cursor_version in it — so a payload that still carries one came the compat way, and is
+# dropped whole.
+if [ -n "$CURSOR_V" ]; then
+  _dbg "exit: a cursor payload through Claude's hooks (event='${EVENT}') — the cursor bridge reports this turn"
+  exit 0
+fi
 
 # SessionEnd: deregister and stop here — and say who did it, since a removed record is the
 # one outcome nothing else on disk records.
@@ -883,7 +898,7 @@ fi
 case "${CLAUDE_FLEET_NOTIFIER:-}" in off|none|false) EVENT_QUIET=1 ;; *) EVENT_QUIET=0 ;; esac
 if [ "$EVENT_QUIET" = 0 ] \
    && { [ "$EVENT" = "Stop" ] || { [ "$EVENT" = "Notification" ] && [ "$status" = "need-you" ]; }; }; then
-  # A bridge for another agent (hooks/agy-fleet-event.sh) names it, so its popup does not
+  # A bridge for another agent (hooks/agy-fleet-event.sh, hooks/cursor-fleet-event.sh) names it, so its popup does not
   # say "Claude" over a session that is not one.
   who="${CLAUDE_FLEET_EVENT_AGENT:-Claude}"
   if [ "$EVENT" = "Stop" ]; then title="✅ $who — done"; sound="Glass"; else title="🔔 $who — needs you"; sound="Ping"; fi

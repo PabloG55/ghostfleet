@@ -318,7 +318,7 @@ api	~/code/api	work	opencode
 sideproj	~/projects/sideproj	personal
 ```
 
-The 4th column is the project's **default agent** (`claude` · `opencode` · `codex` · `agy`) —
+The 4th column is the project's **default agent** (`claude` · `opencode` · `codex` · `agy` · `cursor`) —
 inherited by its master and by every session created in it, and pre-selected on the
 grid's agent screen so you don't re-pick it each time. Omit it for `claude`.
 

@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# cursor-here — launch Cursor's CLI (`cursor-agent`) *resuming* the chat that belongs to
+# this checkout, the cursor counterpart of claude-here and agy-here.
+#
+# Usage:  cursor-here [slot] [-- extra cursor-agent args...]
+#
+# Three ways in, the same three the other launchers have:
+#   CLAUDE_FLEET_FRESH=1     a deliberately NEW chat (grid `N`)
+#   CLAUDE_FLEET_RESUME=<id> exactly that chat: `cursor-agent --resume <id>`. The id is
+#                            cursor's chat id, which hooks/cursor-fleet-event.sh records as
+#                            the session_id, so fleet-restart can hand it back
+#   neither                  `--continue`, this checkout's most recent chat — or a fresh one
+#                            when the checkout has none (see below)
+#
+# ALWAYS `cursor-agent`, NEVER `agent`. The installer links both names to one binary, and
+# `agent` is generic enough that whatever else answers to it on PATH would be launched with
+# cursor's flags.
+#
+# WHERE A CHAT LIVES. <config>/chats/<md5 of the physical cwd>/<chat id>/, holding meta.json
+# and store.db. Measured on 2026.10.01: the hash is of `pwd -P` (a /tmp checkout lands under
+# the md5 of /private/tmp/...), and <config> resolves the way cursor resolves it —
+# CURSOR_CONFIG_DIR, else $XDG_CONFIG_HOME/cursor, else ~/.cursor.
+#
+# AN EXPLICIT ID IS CHECKED HERE, because cursor does not refuse one. Measured:
+# `cursor-agent --resume <an id that does not exist>` opens an empty chat with no warning and
+# no error, and CREATES the chat directory for that id while it does. So the directory
+# existing proves nothing once a bad resume has run; meta.json's "hasConversation": true is
+# the part only a chat that has taken a turn carries. Anything else is refused, rather than
+# open something other than what was asked for — the same refusal claude-here makes.
+#
+# --continue IS SCOPED TO THE CWD (a sibling checkout with no chats answered "No previous
+# chats found." while this one had three), and that is also why it cannot be the default
+# blindly: with no chat in the cwd it EXITS 1, which would close the pane the fleet just
+# opened. So it is used only when this checkout has a chat to continue.
+#
+# THE MODEL IS NOT PASSED. `--model` is not a per-session choice in cursor: launching with
+# it rewrote the account's default in ~/.cursor/cli-config.json (model, selectedModel,
+# modelSelectionHistory, hasChangedDefaultModel), so every later cursor session — the
+# owner's own, outside the fleet — came up on the worker's model. CLAUDE_FLEET_MODEL is a
+# Claude model name in practice anyway. Pick cursor's model with /model in the session.
+set -uo pipefail
+
+slot=""
+if [ $# -gt 0 ] && [ "$1" != "--" ]; then
+  slot="$1"; shift
+fi
+[ "${1:-}" = "--" ] && shift
+[ -n "$slot" ] && export CLAUDE_FLEET_SLOT="$slot"
+
+cfg="${CURSOR_CONFIG_DIR:-}"
+[ -n "$cfg" ] || { [ -n "${XDG_CONFIG_HOME:-}" ] && cfg="$XDG_CONFIG_HOME/cursor"; }
+[ -n "$cfg" ] || cfg="$HOME/.cursor"
+
+# Has this chat taken a turn? One meta.json, "hasConversation": true.
+has_turn() { [ -f "$1" ] && grep -q '"hasConversation": *true' "$1" 2>/dev/null; }
+
+md5_of() {
+  if command -v md5 >/dev/null 2>&1; then printf '%s' "$1" | md5 -q
+  elif command -v md5sum >/dev/null 2>&1; then printf '%s' "$1" | md5sum | cut -d' ' -f1
+  fi
+}
+
+# Bypass by default so workers don't stop at every tool prompt, matching how the fleet runs
+# the other agents. Three flags, because cursor splits what one flag does for claude:
+#   --force         run commands without asking (help text: "Run Everything")
+#   --trust         skip the folder-trust dialog. --force does NOT cover it, and every
+#                   folder cursor has not seen asks — a worker's brief would be typed into
+#                   the dialog. Records the same per-folder answer the dialog does
+#                   (projects/<slug>/.workspace-trusted)
+#   --approve-mcps  the ghostfleet server install.sh registers would otherwise wait on its
+#                   own approval before a session could call it
+# None of the three is written back to cli-config.json (measured: no diff after a --force
+# turn), unlike --model above. Opt out with CLAUDE_FLEET_YOLO=0, the one switch every
+# launcher honours; the dialogs are then real, and fleet-agent's blocked_re sees them.
+YOLO=()
+case "${CLAUDE_FLEET_YOLO:-1}" in
+  0|false|no|off) ;;
+  *) YOLO=(--force --trust --approve-mcps) ;;
+esac
+
+case "${CLAUDE_FLEET_FRESH:-0}" in
+  1|true|yes|on)
+    echo "cursor-here: fresh parallel session in $PWD" >&2
+    exec cursor-agent ${YOLO[@]+"${YOLO[@]}"} "$@" ;;
+esac
+
+if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
+  # Any project dir, not only this cwd's: the id names the chat, and a checkout reached by
+  # another spelling of its path would hash somewhere else.
+  meta=""
+  for m in "$cfg"/chats/*/"${CLAUDE_FLEET_RESUME}"/meta.json; do has_turn "$m" && { meta="$m"; break; }; done
+  if [ -z "$meta" ]; then
+    echo "cursor-here: no cursor chat '${CLAUDE_FLEET_RESUME}' that has taken a turn under $cfg/chats — refusing rather than open a different one" >&2
+    exit 1
+  fi
+  echo "cursor-here: resuming ${CLAUDE_FLEET_RESUME} in $PWD" >&2
+  exec cursor-agent ${YOLO[@]+"${YOLO[@]}"} --resume "$CLAUDE_FLEET_RESUME" "$@"
+fi
+
+here="$(pwd -P 2>/dev/null)" || here="$PWD"
+h="$(md5_of "$here")"
+if [ -n "$h" ]; then
+  for m in "$cfg/chats/$h"/*/meta.json; do
+    if has_turn "$m"; then
+      echo "cursor-here: continuing this checkout's chat in $PWD" >&2
+      exec cursor-agent ${YOLO[@]+"${YOLO[@]}"} --continue "$@"
+    fi
+  done
+fi
+echo "cursor-here: no chat in $PWD yet — starting one" >&2
+exec cursor-agent ${YOLO[@]+"${YOLO[@]}"} "$@"

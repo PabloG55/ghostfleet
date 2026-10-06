@@ -375,10 +375,91 @@ agent_field() {
         verified)   printf 'yes' ;;
         *) return 1 ;;
       esac ;;
+    cursor)
+      # Cursor's CLI, measured 2026-10-06 against cursor-agent 2026.10.01-e373342, signed in,
+      # in tmux panes at 30, 40, 56, 80, 120, 140 and 200 columns. It also installs itself as
+      # `agent`, a name generic enough to be something else on PATH, so the fleet only ever
+      # runs `cursor-agent`. Its configuration root is ~/.cursor/: hooks.json, mcp.json and
+      # skills/<name>/SKILL.md, the same three things agy keeps under ~/.gemini/config/.
+      case "$f" in
+        bin)        printf 'cursor-agent' ;;
+        launcher)   printf 'cursor-here' ;;
+        # THE SPINNER LINE, AT COLUMN 1. A turn draws " ⠰⠰ Working" (or "Running" while a
+        # command runs) directly above the composer: one space, a TWO-CELL braille spinner, a
+        # space, the phase. Eight spinner frames were captured (⠀⠞ ⠰⠰ ⠘⠆ ⠰⠳ ⠠⠜ ⠘⠤ ⠠⠛ ⠘⠣), so
+        # the glyphs are matched as a run of anything but letters, digits and blanks rather
+        # than spelled — which is also what keeps a C-locale grep matching them as the bytes
+        # they are. Across 333 frames at 30, 40, 56, 80, 120, 140 and 200 columns it matched
+        # all 129 working frames and none of the 172 idle ones or the 32 taken while the
+        # permission dialog waited — nor the trust dialog, nor the pane a failed turn left.
+        #   NOT THE COMPOSER'S "ctrl+c to stop", the other busy signal: it arrives a frame after
+        # the spinner when a turn starts (4 working frames had the spinner and not the hint,
+        # none the other way round). Neither one is drawn while a permission dialog waits, so
+        # cursor does not have agy's footer trap — the dialog fixtures assert it.
+        #   COLUMN 1 IS THE PROSE GUARD. cursor indents everything it prints by two ("  hi",
+        # "  $ sleep 4", the user's own prompt), so model output cannot start a line at column
+        # 1. What else is drawn there belongs to the dialog — " $  touch …" (two spaces after
+        # the "$"), " Run this command?", and the box Escape draws round the command — and none
+        # of it is a glyph run, one space and a capitalised word.
+        #   A LESSON IN WHAT A STILL FRAME HIDES: the first captures were taken while resizing
+        # the pane every quarter second, and every one of them froze on ⠀⠞ — so the first
+        # version of this regex spelled out U+2800 as the spinner's first cell. A turn left to
+        # run at one width animated, missed 21 of its 25 working frames, and the grid called
+        # the worker ready three seconds before it finished.
+        busy_re)    printf '%s' '^ [^[:alnum:][:space:]]+ [A-Z][a-z]+' ;;
+        busy_re_js) printf '%s' '^ [^A-Za-z0-9\s]+ [A-Z][a-z]+' ;;
+        # The two dialogs a worker can stop on, and neither is shown under yolo: cursor-here
+        # passes --force (no command approval) and --trust (no folder trust). Both keyed to the
+        # LIVE dialog rather than its title. The trust box stays on screen after it is
+        # answered, with "⏳ Trusting workspace..." where the selector was, so the title would
+        # read a session that is already working as blocked; "▶ [a] Trust this" is the
+        # selector and goes away. "Run this command?" is drawn at column 1, where model prose
+        # cannot be (see busy_re), and it fits one line at 30 columns.
+        #   AND THE STEP AFTER ESCAPE. Escape on that dialog does not decline it: it opens
+        # "→ Tell the agent what to do instead (Enter to send, empty to skip, Esc to cancel)",
+        # which still waits on a human — with "ctrl+c to stop" on the line, the turn still
+        # open, and neither the dialog's words nor the idle placeholder anywhere on the pane.
+        # Measured on a live worker; a second Escape goes BACK to the dialog.
+        blocked_re) printf '%s' '^ Run this command\?|▶ \[a\] Trust this|^  → Tell the agent what' ;;
+        # The composer's placeholder ALONE ON ITS LINE: "→ Plan, search, build anything" in a
+        # fresh chat, "→ Add a follow-up" after a turn. The same placeholder is drawn WHILE a
+        # turn runs, with "ctrl+c to stop" after it on the same line, so the line has to end
+        # where the placeholder does. Its tail is optional because a narrow pane wraps it
+        # ("→ Add a" / "follow-" / "up" at 30 columns). NOT a bare "→": the permission dialog
+        # draws its selected option with the same arrow ("→ Run (once) (y)").
+        ready_re)   printf '%s' '^  → (Plan, search, build( anything)?|Add a( follow-up)?) *$' ;;
+        # EMPTY: -p/--print is a oneshot prompt, and cursor's /review is a built-in skill run
+        # inside the TUI — neither is a non-interactive review.
+        review)     printf '' ;;
+        # hooks/cursor-fleet-event.sh, registered in ~/.cursor/hooks.json: beforeSubmitPrompt ->
+        # working, stop -> done (or need-you when the turn ended on an error). cursor has no
+        # permission-asked event: beforeShellExecution fires BEFORE its own approval check, the
+        # same for an allowed command as for one it is about to ask about, so a tool prompt is
+        # seen only on the pane — through blocked_re above.
+        hooks)      printf 'yes' ;;
+        mcp)        printf 'yes' ;;   # ~/.cursor/mcp.json
+        # ~/.cursor/skills/<name>/SKILL.md is cursor's personal-skill root, which is where
+        # install.sh links it.
+        skill)      printf 'yes' ;;
+        # NO — codex's answer, measured the same way, by CALLING it rather than by reading
+        # `cursor-agent mcp list`. A real worker in a scratch fleet (CLAUDE_FLEET_SOCK, $TMUX,
+        # CLAUDE_FLEET_PROJECTS all in its environment, and all reaching its hooks) called
+        # fleet_list with no arguments and the server answered `fleet-list: no socket (run
+        # inside a fleet session, or pass -s <socket>)`. Naming the project then resolved it
+        # from the DEFAULT projects file, not the scratch one the session had exported — so the
+        # server gets none of the session's environment, not merely a missing variable.
+        mcp_self)   printf 'no'  ;;
+        # "Auto · 7.4%" climbed with the conversation (to 8.2% a dozen turns on): context, not
+        # an account's usage window.
+        budget)     printf 'no'  ;;
+        resume)     printf 'yes' ;;   # --resume <id> survives a pane kill (cursor-here)
+        verified)   printf 'yes' ;;
+        *) return 1 ;;
+      esac ;;
     *) return 1 ;;
   esac
 }
-KNOWN_AGENTS="claude opencode codex agy"
+KNOWN_AGENTS="claude opencode codex agy cursor"
 
 is_agent() { case " $KNOWN_AGENTS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
