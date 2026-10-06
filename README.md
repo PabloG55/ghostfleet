@@ -2,6 +2,13 @@
   <img src="docs/logo-banner.svg" alt="ghostfleet" width="440">
 </p>
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/ghostfleet-cli"><img src="https://img.shields.io/npm/v/ghostfleet-cli?color=cb3837&label=npm" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/ghostfleet-cli"><img src="https://img.shields.io/npm/dm/ghostfleet-cli?label=downloads" alt="npm downloads"></a>
+  <a href="https://github.com/PabloG55/ghostfleet/actions/workflows/test.yml?query=branch%3Astaging"><img src="https://img.shields.io/github/actions/workflow/status/PabloG55/ghostfleet/test.yml?branch=staging&label=tests" alt="tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/PabloG55/ghostfleet" alt="MIT license"></a>
+</p>
+
 **Run a fleet of Claude Code agents in parallel, from one terminal.** Each agent gets its
 own git worktree — cut, branched, dependency-linked and booted in one keystroke — and you
 get one screen that shows what every one of them is doing.
