@@ -276,7 +276,7 @@ async function get(pathAndQuery) {
   } catch (e) { throw new OfflineError(String(e && e.message || e)); }
   if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server rejected the session token'); }
   slid(r);
-  if (!r.ok) throw new Error(`${pathAndQuery} → HTTP ${r.status}`);
+  if (!r.ok) { const e = new Error(`${pathAndQuery} → HTTP ${r.status}`); e.status = r.status; throw e; }
   return r.json();
 }
 
@@ -508,6 +508,10 @@ export async function pushUnsubscribe(endpoint) {
 // work against fixtures would be the toggle-that-pretends §9 warns about.
 export async function getJarvis() {
   if ((await ready()).mode === 'server') return get('/api/jarvis');
+  // The fixture answers the way the daemon does when Jarvis is switched off: a 404, which is
+  // how a screen opened before the project list (a #jarvis link) learns the switch.
+  const pj = await fixture('projects.json');
+  if (pj.jarvis_enabled === false) { const e = new Error('/api/jarvis → HTTP 404'); e.status = 404; throw e; }
   const j = await fixture('jarvis.json');
   return { ...j, pending: (j.pending || []).filter(p => !overlay.answered.has(p.id)) };
 }

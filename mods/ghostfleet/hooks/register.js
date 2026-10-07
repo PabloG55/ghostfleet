@@ -587,6 +587,9 @@ async function maybeJarvis($, command) {
   const dir = await jarvisDir($)
   const file = `${dir}/jarvis`
   if (!(await $.fs.exists(file))) return false
+  // Switched off (lib/jarvis.mjs enabled) is no Jarvis: nothing to ask the gate, which would
+  // otherwise refuse — it fails closed — on behalf of a Jarvis that is not there.
+  if (await $.fs.exists(`${file}.enabled`) && /^\s*off\s*$/.test(await $.fs.read(`${file}.enabled`))) return false
   const sock = markerSock(await $.fs.read(file))
   if (!sock) return false
   if (command !== undefined && !jarvisMightAct(command, sock, dir)) return false

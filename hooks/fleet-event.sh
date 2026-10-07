@@ -278,6 +278,7 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
   # worker answering "yes" can never be read as him saying it. Jarvis's master only: the
   # marker names its socket, and the name is read from tmux, not from the environment.
   if [ -n "$SOCK" ] && [ "$SLOT" = master ] && [ -f "$HOME/.config/ghostfleet/jarvis" ] \
+     && ! grep -qsx off "$HOME/.config/ghostfleet/jarvis.enabled" \
      && [ "$SOCK" = "$(grep -m1 '^sock=' "$HOME/.config/ghostfleet/jarvis" 2>/dev/null | cut -d= -f2-)" ]; then
     printf '%s' "$_prompt" | "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../bin/fleet-jarvis" said --from owner >/dev/null 2>&1
   fi
@@ -677,8 +678,10 @@ fi
 #
 # Masters included: a lead blocked on a permission prompt is exactly what he wants to hear
 # about, and the workers-only gate above exists for a different inbox.
+# SWITCHED OFF (jarvis.enabled says `off`; lib/jarvis.mjs enabled) there is no Jarvis to wake:
+# neither a need-you nor a batch reaches its fleet, whatever the marker still says.
 JMARK="$HOME/.config/ghostfleet/jarvis"
-if [ -f "$JMARK" ] && [ -n "$SOCK" ] && [ -n "$SLOT" ] \
+if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n "$SLOT" ] \
    && { [ "$status" = need-you ] || [ "$EVENT" = Stop ]; }; then
   j_sock="$(grep -m1 '^sock=' "$JMARK" 2>/dev/null | cut -d= -f2-)"
   j_cfg="$(grep -m1 '^cfg=' "$JMARK" 2>/dev/null | cut -d= -f2-)"

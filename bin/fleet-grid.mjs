@@ -23,9 +23,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFile, execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { modState, modLimitAt } from '../lib/mod-status.mjs';
+import * as J from '../lib/jarvis.mjs';
+import * as X from '../lib/experimental.mjs';
 // LOADED, NOT IMPORTED, and for the reason preview() below spells out: test/run.sh's vis35
 // group runs a COPY of this file from a temp directory, where a static import of ../lib
 // resolves to nothing and the whole control plane fails to load. A grid that cannot start
@@ -3196,6 +3198,16 @@ function readProjects() {
       .filter(x => x.name && x.path);
   } catch { return []; }
 }
+// THE PROJECTS A PERSON IS SHOWN: every registered one, less Jarvis's home while Jarvis is
+// switched off (lib/jarvis.mjs enabled). Off means gone — a card for that project would be a
+// way to start its master, contract and all, around the switch. The file is untouched, so
+// enabling brings the card back with its order and its settings.
+function visibleProjects() {
+  const all = readProjects();
+  let m = null;
+  try { m = J.enabled() ? null : J.readMarkerFile(); } catch {}
+  return m ? all.filter(p => !(p.name === m.name && (p.profile || 'work') === (m.profile || 'work'))) : all;
+}
 function profileDir(p) { return (!p || p === 'work' || p === 'default') ? path.join(HOME, '.claude') : path.join(HOME, '.claude-' + p); }
 // tmux socket for a project — work stays bare cf-<name>; other profiles are
 // namespaced so same-named projects don't collide (matches bin/ghostfleet).
@@ -3275,6 +3287,7 @@ const QUIT_WINDOW = 2000;    // ms — how long the "press ⌃C again" arming la
 let pSettings = false;       // settings page open (per-project toggles)
 let pSetSel = 0;             // selected row (project) on the settings page
 let pSetCol = 0;             // selected column (which setting) on the settings page
+let pSetMsg = '';            // what the last experimental toggle answered, shown on its row
 
 // ── worker → master auto-nudge (notify-lead) per-project settings ───────────
 // The hook (hooks/fleet-event.sh) pings a project's master when a worker finishes
@@ -3307,6 +3320,21 @@ function togglePush(proj) {
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   if (nowOn) { try { fs.writeFileSync(offP, ''); } catch {} try { fs.unlinkSync(onP); } catch {} }
   else       { try { fs.writeFileSync(onP, '');  } catch {} try { fs.unlinkSync(offP); } catch {} }
+}
+
+// ── global: the EXPERIMENTAL features (lib/experimental.mjs) ────────────────
+// One row per feature, below the projects. Flipped through `fleet-experimental` rather than
+// by writing the switch here: a feature's switch can have more to do than the file (turning
+// Jarvis off stops its session and keeps its conversation), and a second copy of that would
+// be the second implementation this repo keeps paying for. Synchronous and bounded — a tmux
+// call or two at most.
+function toggleExperimental(name) {
+  let on = false; try { on = X.enabled(name); } catch {}
+  const r = spawnSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-experimental'),
+    [on ? 'disable' : 'enable', name], { encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'] });
+  const lines = `${r.stdout || ''}${r.stderr || ''}`.split('\n').map(l => l.trim()).filter(Boolean);
+  pSetMsg = r.status === 0 ? (lines.slice(1).join(' · ') || '') : `failed: ${lines.join(' · ') || r.error || 'no answer'}`;
+  pBuild();
 }
 
 // ── per-project: ignore the budget ceiling ──────────────────────────────────
@@ -3463,7 +3491,7 @@ function agentCaveats() {
 // with a file that can be edited by hand, and this cannot go stale.
 let pFirstRun = false;
 function pBuild() {
-  const projs = readProjects();
+  const projs = visibleProjects();
   pFirstRun = projs.length === 0;
   pItems = [...projs.map(p => ({ project: p })), { add: true }];
   if (!pSelInit) {           // first build: land on the just-exited project, if any
@@ -3648,12 +3676,14 @@ function pRender() {
 }
 // settings page: per-project toggle for the worker→master auto-nudge (notify-lead)
 function pRenderSettings() {
-  const projs = readProjects();
-  pSetSel = Math.max(0, Math.min(pSetSel, Math.max(0, projs.length - 1)));
+  const projs = visibleProjects();
+  const nRows = projs.length + X.FEATURES.length;
+  pSetSel = Math.max(0, Math.min(pSetSel, nRows - 1));
+  const onExp = pSetSel >= projs.length;
   let buf = '\x1b[H';
   buf += ` ${C.bold}settings${C.reset} ${C.dim}— per project${C.reset}\x1b[K\n`;
   const glob = fs.existsSync(GLOBAL_NOTIFY());
-  buf += ` ${C.dim}${C.reset}${SETCOLS[pSetCol].blurb}\x1b[K\n`;
+  buf += ` ${C.dim}${C.reset}${onExp ? `${C.dim}experimental: off on a new install, and off means gone — not hidden${C.reset}` : SETCOLS[pSetCol].blurb}\x1b[K\n`;
   buf += ` ${C.dim}nudge global default: ${C.reset}${glob ? `${C.green}on` : `${C.grey}off`}${C.reset}\x1b[K\n\x1b[K\n`;
   const head = `   ${padEndV('', 6)}  ${padEndV('PROJECT', 22)} ${padEndV('PROFILE', 10)}`;
   buf += `${C.dim}${head}${SETCOLS.map((c, ci) => (ci === pSetCol ? C.bold + C.white : C.dim) + padEndV(c.title, 16) + C.reset).join(' ')}${C.reset}\x1b[K\n`;
@@ -3671,8 +3701,20 @@ function pRenderSettings() {
     const note = switchNote(p);
     buf += `${cur}${padEndV('', 6)}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}${note ? '  ' + note : ''}\x1b[K\n`;
   });
-  // Named per column, so the key's own description changes with what it will do.
-  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ ${SETCOLS[pSetCol].verb || 'toggle'} · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  // THE EXPERIMENTAL SECTION: global, one row per feature, each tagged every time it is
+  // drawn. Its rows continue the project rows, so ↓ walks into them and space/⏎ flips one.
+  buf += `\x1b[K\n ${C.bold}Experimental${C.reset} ${C.dim}— every project, off on a new install${C.reset}\x1b[K\n`;
+  X.FEATURES.forEach((f, k) => {
+    const sel = projs.length + k === pSetSel;
+    let on = false; try { on = X.enabled(f.name); } catch {}
+    const cur = sel ? `${C.bold}${C.white}▸ ` : '   ';
+    const st = (sel ? C.rev : '') + (on ? C.green : C.grey) + padEndV((on ? '● on' : '○ off'), 8) + C.reset;
+    buf += `${cur}${padEndV('', 6)}  ${(sel ? C.bold + C.white : C.reset) + padEndV(f.name, 22) + C.reset} ${st} ${C.yellow}[${X.TAG}]${C.reset} `
+         + `${C.dim}${sel && pSetMsg ? pSetMsg : f.what}${C.reset}\x1b[K\n`;
+  });
+  // Named per row and column, so the key's own description changes with what it will do.
+  const verb = onExp ? `turn ${X.FEATURES[pSetSel - projs.length].name} on/off` : (SETCOLS[pSetCol].verb || 'toggle');
+  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ ${verb} · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // schedule a message to a project's master (mirrors the grid's renderSchedule)
@@ -3717,13 +3759,16 @@ function onKeyProjects(key) {
     return;
   }
   if (pSettings) {                                   // per-project toggles (rows × columns)
-    const projs = readProjects();
+    const projs = visibleProjects();
     if (key === '\x1b' || key === '\x03' || key === '\x60') { pSettings = false; }
-    else if (key === '\x1b[A' || key === 'k') pSetSel = Math.max(0, pSetSel - 1);
-    else if (key === '\x1b[B' || key === 'j') pSetSel = Math.min(Math.max(0, projs.length - 1), pSetSel + 1);
+    else if (key === '\x1b[A' || key === 'k') { pSetSel = Math.max(0, pSetSel - 1); pSetMsg = ''; }
+    else if (key === '\x1b[B' || key === 'j') { pSetSel = Math.min(projs.length + X.FEATURES.length - 1, pSetSel + 1); pSetMsg = ''; }
     else if (key === '\x1b[D' || key === 'h') pSetCol = Math.max(0, pSetCol - 1);
     else if (key === '\x1b[C' || key === 'l') pSetCol = Math.min(SETCOLS.length - 1, pSetCol + 1);
-    else if (key === ' ' || key === '\r' || key === '\n') { const p = projs[pSetSel]; if (p) SETCOLS[pSetCol].toggle(p); }
+    else if (key === ' ' || key === '\r' || key === '\n') {
+      if (pSetSel >= projs.length) { const f = X.FEATURES[pSetSel - projs.length]; if (f) toggleExperimental(f.name); }
+      else { const p = projs[pSetSel]; if (p) SETCOLS[pSetCol].toggle(p); }
+    }
     pRender(); return;
   }
   if (pSchedFor) {                                   // typing a scheduled message to a master
@@ -3816,7 +3861,7 @@ function onKeyProjects(key) {
     const it = pItems[pSel] || pItems.find(x => x.project);
     if (it?.project) return finish(`tabfor${US}${it.project.name}${US}${key === '\x14' ? 'term' : 'edit'}`);
   }
-  else if (key === ',') { pSettings = true; pSetSel = 0; }   // open the settings page
+  else if (key === ',') { pSettings = true; pSetSel = 0; pSetMsg = ''; }   // open the settings page
   else if (key === '\r' || key === '\n') {
     const it = pItems[pSel];
     if (it?.add) return finish('addproject');
@@ -4158,7 +4203,7 @@ let sHitRow = new Map();
 function sBuild() {
   sMembers = stackMembers();
   sItems = [];
-  for (const p of readProjects()) {
+  for (const p of visibleProjects()) {
     // TABS FROM THIS FLEET ONLY. SOCK is the socket this grid was started on, so the
     // project you came from is the one whose terminal and editor you can put beside your
     // agent — which is the whole request — while every other project's tabs stay out of a

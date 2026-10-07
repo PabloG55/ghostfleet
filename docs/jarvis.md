@@ -1,5 +1,38 @@
 # Jarvis — one session above every fleet
 
+> **Experimental — off by default; enable with `fleet-experimental enable jarvis`** (or its
+> alias `fleet-jarvis enable`, or its row in the Experimental section of the Projects screen's
+> settings page, `,`). `fleet-experimental disable jarvis` turns it off again.
+
+## The switch
+
+Jarvis is one of the fleet's experimental features (`lib/experimental.mjs`, which
+`fleet-experimental list` prints; `fleet-shots` is another). Its switch is one global setting,
+`~/.config/ghostfleet/jarvis.enabled` (`on` or `off`), beside the fleet's other global settings. A new install is **off**. A machine where Jarvis was
+already set up (its marker exists) resolves to **on**, so nothing changes for somebody using
+it; the first `fleet-jarvis` command — or `install.sh` — writes that answer down, and from
+then on the file is the answer. Three places show it, each with an `experimental` tag: the
+settings page, `fleet-jarvis status`, and Jarvis's own screen on the phone.
+
+Off means **gone, not hidden**:
+
+- the phone has no Jarvis band, no Jarvis screen and no `talk` button (conversation mode
+  is Jarvis's: its hearing is the Mac's whisper.cpp), and `fleet-serve` answers every
+  `/api/jarvis*` route with a 404 that says Jarvis is disabled. The per-message play button,
+  `/api/speak` and Kokoro are the phone's own and keep working;
+- the Projects screen (terminal and phone) has no card for Jarvis's project;
+- `fleet-jarvis disable` stops Jarvis's session by its exact tmux target and keeps the
+  conversation it was in (written into the marker as `resume=`); enabling it
+  starts it again **resumed on that conversation**, by its recorded id — never
+  `--continue`, which reopens whichever conversation in the folder is newest;
+- nothing wakes it (a need-you anywhere, a finished-work batch), its Bash guard and the
+  mod's confirm-list let everything through (no Jarvis, nothing to guard), and the rules
+  that keep it awake (never paused, parked or hibernated) no longer apply to that session;
+- `ghostfleet jarvis` and `fleet-jarvis init` say it is disabled and how to enable it,
+  rather than starting it;
+- `install.sh` does not ask about whisper, and offers enabling Jarvis as its own step,
+  labelled experimental, with Enter meaning no — never under `--yes` or with nobody to ask.
+
 Every project in ghostfleet has a lead: its `master` session, which dispatches workers,
 merges and unblocks. Jarvis is one level above all of them. You talk to it — typed at the
 desk, typed or **spoken** on the phone — and it can see and act across every fleet on every

@@ -115,7 +115,9 @@ fi
 VOICE="$(node --input-type=module -e '
   const [jar, kok] = await Promise.all([import(process.argv[1]), import(process.argv[2])]);
   const w = jar.voiceStatus(), k = await kok.check();
-  console.log(w.ready ? `✓ hearing: whisper.cpp (${w.model})` : "· hearing: whisper.cpp is not installed, so the phone types (optional, ~550 MB): fleet-jarvis voice --install");
+  // Hearing is the conversation mode of Jarvis, so it is not offered while Jarvis is off.
+  if (!jar.enabled()) console.log("· hearing: off — talk mode is part of Jarvis, which is experimental and off (fleet-experimental enable jarvis)");
+  else console.log(w.ready ? `✓ hearing: whisper.cpp (${w.model})` : "· hearing: whisper.cpp is not installed, so the phone types (optional, ~550 MB): fleet-jarvis voice --install");
   console.log(k.ready ? "✓ speaking: Kokoro reads replies on the Mac"
     : k.state === "missing" ? "· speaking: the phone’s own voice — Kokoro is not installed (optional, ~350 MB): fleet-jarvis voice --kokoro --install"
     : k.state === "off" ? `· speaking: the phone’s own voice — ${k.why}`

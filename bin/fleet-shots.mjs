@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // fleet-shots — walk a flow, record it as one video with a chapter per step, and record
 // what each step ASKED FOR.
+// [experimental] off on a new install — enable with: fleet-experimental enable shots
 //
 //     fleet-shots --flow <file.json> [--out DIR] [--base URL] [--dry-run] [--stills]
 //     fleet-shots <url> [<url> ...]              one step per url, no flow file
@@ -51,6 +52,7 @@ import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { launch, sleep } from '../lib/browser.mjs';
+import * as X from '../lib/experimental.mjs';
 
 const ARGV = process.argv.slice(2);
 const die = (m) => { console.error('fleet-shots: ' + m); process.exit(1); };
@@ -59,9 +61,15 @@ const has = (n) => ARGV.includes(n);
 
 if (has('-h') || has('--help')) {
   const src = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n');
-  console.log(src.slice(1, 6).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
+  console.log(src.slice(1, 7).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
   process.exit(0);
 }
+// EXPERIMENTAL, AND OFF MEANS EVERY SUBCOMMAND: a flow, verdict, --check, list and serve all
+// refuse while the switch is off (lib/experimental.mjs), and --help above still answers, so
+// somebody who finds the command can learn what it is and how to turn it on. Nothing on disk
+// is touched either way: a shots folder from before stays where it was.
+X.settle('shots');
+if (!X.enabled('shots')) die(X.disabledWhy('shots', 'fleet-shots'));
 
 // EVERYTHING THE RENDERERS TOUCH LIVES ABOVE THE SERVE BLOCK. NOT AESTHETIC. `serve` parks the module
 // with `await new Promise(() => {})`, so a `const` written below that point is never

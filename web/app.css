@@ -1020,6 +1020,9 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .talkband .note { color: var(--dim); font-size: 12px; }
 .composer button.talk.on { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: 700; }
 .hint.jarvis-none p { margin: .4em 0; }
+/* Jarvis is an experimental feature, and its screen says so beside its name. */
+.sbar .who .nm .tag-exp { margin-left: .5em; padding: 0 .35em; border: 1px solid var(--yellow); border-radius: 4px;
+  color: var(--yellow); font-size: 11px; font-weight: 400; vertical-align: middle; }
 /* A [fleet] wake in Jarvis's transcript: the fleet talking, not the owner, so not a bubble. */
 .chat .sysline { display: flex; gap: .5em; align-items: baseline; margin: .5em .2em; font-size: 12px; color: var(--dim); }
 .chat .sysline .who { color: var(--yellow); flex: 0 0 auto; }

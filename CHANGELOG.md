@@ -141,6 +141,19 @@ the detail, and every entry here names the PR that carries the argument.
   the prompt it is answering. **Relaunch the installed app** (client v47): an older one
   sends no fingerprint, and its answers are refused with a message saying to reload.
 
+### Changed
+
+- **Jarvis and `fleet-shots` are experimental, and off unless you turn them on**
+  (docs/jarvis.md "The switch"). `fleet-experimental list | enable <f> | disable <f>`, or the
+  Experimental section of the settings page; `fleet-jarvis enable|disable` are aliases. A
+  machine that already uses `fleet-shots` (its `<fleet dir>/shots` exists) resolves to on;
+  off, every `fleet-shots` subcommand refuses and says how to enable it (`--help` still works).
+  For Jarvis, a machine where it is already set up resolves to on and keeps working with no
+  action; a new install is off. Off means gone: no band, screen or talk button on the phone (the play button and
+  Kokoro stay), every `/api/jarvis*` route a 404, no card for its project, no wakes, its
+  guards no-ops, and its session stopped with its conversation kept — enable resumes that
+  same conversation. `install.sh` asks about whisper only once Jarvis is on.
+
 ## 0.4.0 — 2026-09-24
 
 **This release is about sessions that outlive their process.** A session used to be exactly

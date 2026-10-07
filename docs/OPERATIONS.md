@@ -698,8 +698,10 @@ after it. A pass at the mod's door leaves a single-use relay for that exact call
 60 s, which only another door can take; the mod asking again is a second action and needs a
 second yes.
 
-**A scratch Jarvis.** `CLAUDE_FLEET_JARVIS_DIR` moves Jarvis's marker, ledger and proposals
-(and nothing else) to another directory. Every reader honours it: `lib/jarvis.mjs`,
+**A scratch Jarvis.** `CLAUDE_FLEET_JARVIS_DIR` moves Jarvis's marker, ledger, proposals
+and its on/off switch, `jarvis.enabled` (and nothing else) to another directory. Switched
+off, every one of those readers answers "no Jarvis" — nothing is gated (docs/jarvis.md,
+"The switch"). Every reader honours it: `lib/jarvis.mjs`,
 `hooks/jarvis-guard.sh`, `bin/fleet-answer` and the mod. That is how the confirm-list is
 proven on a scratch fleet without touching the real marker.
 

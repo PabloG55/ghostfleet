@@ -522,7 +522,7 @@ _sent_digest() {                   # shasum on macOS, sha256sum on most Linux, e
 # on another profile sends from another fleet dir, and Jarvis's marker is the one place both
 # can see. Written HERE, at the paste, because a queued prompt is delivered later by --dequeue.
 _jm="$HOME/.config/ghostfleet/jarvis"
-if [ "$SESSION" = master ] && [ -f "$_jm" ] \
+if [ "$SESSION" = master ] && [ -f "$_jm" ] && ! grep -qsx off "$_jm.enabled" \
    && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
   _jd="$(printf '%s' "$MSG" | shasum -a 256 2>/dev/null || printf '%s' "$MSG" | sha256sum 2>/dev/null)"
   printf '%s\t%s\n' "$(date +%s)" "${_jd:0:12}" >> "$HOME/.config/ghostfleet/jarvis.delivered" 2>/dev/null || true

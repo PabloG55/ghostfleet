@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 // fleet-jarvis — make, inspect and look after Jarvis, the master of masters (docs/jarvis.md).
 //
+//   fleet-jarvis enable|disable   Jarvis is EXPERIMENTAL and off by default. disable stops
+//                                 its session and keeps its conversation; enable brings that
+//                                 same conversation back (never a blank one)
 //   fleet-jarvis init [--profile P] [--path DIR] [--if-needed]
 //                                 create Jarvis's home (a tiny git repo OUTSIDE every
 //                                 checkout), register it as a project, write the marker
-//   fleet-jarvis status [--json]  where it lives, whether it is running, what waits on a yes
+//   fleet-jarvis status [--json]  on or off, where it lives, whether it runs, what waits on a yes
 //   fleet-jarvis pending          the proposals waiting for the owner's yes
 //   fleet-jarvis grant|deny <id>  answer one from a terminal (the phone's tap does the same)
 //   fleet-jarvis hear <file.wav>  transcribe one utterance with the local whisper.cpp
@@ -71,12 +74,15 @@ function init() {
   const dir = path.resolve(flag('--path') || J.defaultRepo());
   const quiet = has('--if-needed');
   const did = [];
+  // SWITCHED OFF IS AN ANSWER, NOT A REASON TO START IT. `ghostfleet jarvis` runs this, and
+  // a feature that is off must not come back because somebody typed its name.
+  if (!J.enabled()) die(`${J.DISABLED_WHY}\n  (then run this again, or: ghostfleet jarvis)`);
 
   // THE ONE CONFLICT THAT STOPS IT: a project already called this, somewhere else. Taking
   // the name over would hand the owner's existing project a Jarvis contract.
   const clash = projects().find(p => p.name === name && path.resolve(p.path) !== dir);
   if (clash) die(`a project called '${name}' already exists at ${clash.path} (${clash.profile}). Pick another: fleet-jarvis init --name <n>`);
-  const old = J.readMarker();
+  const old = J.readMarkerFile();
   if (old && (old.name !== name || old.profile !== prof) && has('--profile'))
     process.stderr.write(`fleet-jarvis: moving Jarvis from ${old.profile}/${old.name} to ${prof}/${name}\n`);
 
@@ -143,8 +149,9 @@ function init() {
 
 // ── status ──────────────────────────────────────────────────────────────────
 export function jarvisState() {
+  if (!J.enabled()) return { enabled: false, experimental: true, present: false, why: J.DISABLED_WHY };
   const m = J.readMarker();
-  if (!m) return { present: false, why: 'no Jarvis on this machine yet — run: ghostfleet jarvis' };
+  if (!m) return { enabled: true, experimental: true, present: false, why: 'no Jarvis on this machine yet — run: ghostfleet jarvis' };
   const rec = scanStatus([m.dir]).find(r => r.sock === m.sock && r.slot === 'master');
   let last = 0; try { last = Number(fs.readFileSync(stampFile(), 'utf8').trim()) || 0; } catch {}
   // Is the confirm-list's Bash guard actually runnable? A missing one fails open, silently.
@@ -154,7 +161,7 @@ export function jarvisState() {
     guard = ((st.hooks || {}).PreToolUse || []).flatMap(e => (e.hooks || []).map(h => h.command)).find(c => /jarvis-guard\.sh$/.test(c || '')) || '';
   } catch {}
   let guardOk = false; try { fs.accessSync(guard, fs.constants.X_OK); guardOk = true; } catch {}
-  return { present: true, project: m.name, profile: m.profile, session: 'master', path: m.path, guard: guardOk ? 'ok' : (guard ? `not runnable: ${guard}` : 'not wired'),
+  return { enabled: true, experimental: true, present: true, project: m.name, profile: m.profile, session: 'master', path: m.path, guard: guardOk ? 'ok' : (guard ? `not runnable: ${guard}` : 'not wired'),
            running: running(m), status: rec ? rec.status : null,
            voice: J.voiceStatus(), speak: speech.status(), pending: J.pending(),
            restart: { hour: m.restart_hour, last }, batch: m.batch };
@@ -162,8 +169,18 @@ export function jarvisState() {
 async function status() {
   const s = jarvisState();
   if (has('--json')) { console.log(JSON.stringify(s)); return; }
-  if (!s.present) { console.log(s.why); return; }
-  console.log(`Jarvis — ${s.profile}/${s.project} at ${s.path}`);
+  // ON OR OFF FIRST, and the tag beside it, on every answer: this is the command the docs
+  // send somebody to when they want to know whether the feature is even switched on.
+  console.log(`Jarvis [${J.EXPERIMENTAL}] — ${s.enabled ? 'enabled' : 'disabled'}`);
+  if (!s.enabled) {
+    const m = J.readMarkerFile();
+    console.log(`  ${m ? `set up at ${m.path} (${m.profile}/${m.name}), switched off` : 'never set up on this machine'}`);
+    if (m && m.resume) console.log(`  kept      conversation ${m.resume.slice(0, 8)} — enable resumes it`);
+    console.log(`  enable    ${J.ENABLE_HOWTO}`);
+    return;
+  }
+  if (!s.present) { console.log(`  ${s.why}`); console.log(`  disable   fleet-jarvis disable`); return; }
+  console.log(`  home      ${s.profile}/${s.project} at ${s.path}`);
   console.log(`  session   ${s.running ? `running${s.status ? ` (${s.status})` : ''}` : 'not running — ghostfleet jarvis starts it'}`);
   console.log(`  voice     ${s.voice.ready ? `ready (${s.voice.model})` : s.voice.why}`);
   console.log(`  speaks    ${speakLine(await K.check())}`);
@@ -171,6 +188,53 @@ async function status() {
   console.log(`  wakes     on a need-you anywhere, at once${s.batch ? `; finished work batched every ${Math.round(s.batch / 60)} min` : '; nothing else — finished work waits until he speaks'}`);
   console.log(`  restart   daily at ${String(s.restart.hour).padStart(2, '0')}:00 when idle${s.restart.last ? ` · last ${new Date(s.restart.last * 1000).toLocaleString()}` : ''}`);
   console.log(`  pending   ${s.pending.length ? s.pending.map(p => `${p.id} ${p.summary}${p.granted ? ' (yes — waiting for Jarvis to act)' : ''}`).join('\n            ') : 'nothing waits on a yes'}`);
+  console.log(`  disable   fleet-jarvis disable`);
+}
+
+// ── the switch ──────────────────────────────────────────────────────────────
+// OFF STOPS IT; IT DOES NOT FORGET IT. Disable kills Jarvis's master by its exact target on
+// its own socket — never a pattern: every fleet has a `master`, and a pattern that matches
+// this one matches all of them — and writes the conversation it was in into the marker, so
+// enable can bring back THAT conversation. The id is asked of the live process
+// (fleet-hibernate --resolve, the answer fleet-restart trusts), not copied from the status
+// file, which can name a conversation that never took a turn. Enable then starts it the way
+// fleet-restart relaunches a session: CLAUDE_FLEET_RESUME=<that id>, CLAUDE_FLEET_FRESH=0,
+// and never --continue, which reopens whichever conversation in the folder is newest.
+function resolveLive(m) {
+  const r = spawnSync(path.join(BIN, 'fleet-hibernate'), ['--resolve', m.sock, 'master'],
+    { encoding: 'utf8', timeout: 10000, env: { ...process.env, CLAUDE_CONFIG_DIR: m.cfg, CLAUDE_FLEET_DIR: m.dir } });
+  const [id, transcript] = String(r.stdout || '').trim().split('\x1f');
+  return r.status === 0 && id && transcript && fs.existsSync(transcript) ? id : '';
+}
+function startResumed(m, id) {
+  return tmux(m.sock, '-f', path.join(ROOT, 'tmux', 'cf.tmux.conf'), 'new-session', '-d', '-s', 'master', '-c', m.path,
+    '-e', `CLAUDE_CONFIG_DIR=${m.cfg}`, '-e', `CLAUDE_FLEET_SOCK=${m.sock}`, '-e', 'CLAUDE_FLEET_AGENT=',
+    '-e', `CLAUDE_FLEET_RESUME=${id}`, '-e', 'CLAUDE_FLEET_FRESH=0', `exec ${path.join(BIN, 'agent-here')} master`);
+}
+// The jarvis entry's `apply` (lib/experimental.mjs): what turning the switch on or off has
+// to do besides writing it. Runs AFTER the switch is written, so a disable that fails to stop
+// the session still leaves Jarvis off, and says how to stop it by hand.
+export async function applySwitch(on) {
+  const m = J.readMarkerFile();
+  if (!on) {
+    if (!m) return;
+    if (!running(m)) { console.log('  its session was not running'); return; }
+    const id = resolveLive(m);
+    if (id) J.writeMarker({ ...m, resume: id });
+    const r = tmux(m.sock, 'kill-session', '-t', '=master');
+    if (r.status !== 0 && running(m)) throw new Error(`Jarvis's session would not stop: ${(r.stderr || '').trim()} — stop it with: fleet-stop -s ${m.sock} master`);
+    console.log('  its session is stopped');
+    console.log(id ? `  kept      conversation ${id.slice(0, 8)} — enable resumes it` : '  (its conversation could not be established, so enable will start a fresh one)');
+    return;
+  }
+  if (!m) { console.log('  not set up on this machine yet — run: ghostfleet jarvis'); return; }
+  if (running(m)) { console.log('  its session is running'); return; }
+  if (!m.resume) { console.log('  its session is not running — ghostfleet jarvis starts it'); return; }
+  const r = startResumed(m, m.resume);
+  if (r.status !== 0) throw new Error(`could not start its session: ${(r.stderr || '').trim()}`);
+  const { resume, ...rest } = m;
+  J.writeMarker(rest);
+  console.log(`  resumed   conversation ${m.resume.slice(0, 8)} in '${m.sock}' master`);
 }
 
 // ── the daily fresh start ───────────────────────────────────────────────────
@@ -299,7 +363,11 @@ async function kokoro() {
 
 // ── dispatch ────────────────────────────────────────────────────────────────
 async function main() {
+  // Every command writes the switch down if nothing has yet (lib/jarvis.mjs settleEnabled).
+  try { J.settleEnabled(); } catch {}
   switch (cmd) {
+    // ALIASES of `fleet-experimental enable|disable jarvis` — one implementation of the switch.
+    case 'enable': case 'disable': return (await import('./fleet-experimental.mjs')).toggle('jarvis', cmd === 'enable');
     case 'init': return init();
     case 'status': return await status();
     case 'pending': {
@@ -335,7 +403,7 @@ async function main() {
     case 'voice': return await voice();
     case 'restart': return restart();
     case '-h': case '--help': case 'help':
-      return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 19).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
+      return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 22).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
     default: die(`unknown command '${cmd}' (fleet-jarvis --help)`, 2);
   }
 }

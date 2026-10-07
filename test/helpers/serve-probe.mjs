@@ -261,6 +261,20 @@ if (phase === 'jarvis') {
   row('hear.wav', await a.api(base, 'POST', '/api/jarvis/hear', wav, { contentType: 'audio/wav' }));
 }
 
+// ── Jarvis's switch: every /api/jarvis* route, the project list, and the Mac's voice ──
+//     node serve-probe.mjs <base> jarvisswitch <enrol-code> <wav-file>
+// Run once with Jarvis switched on and once off; run.sh compares the two, so an "off" row
+// can only pass because the switch changed something.
+if (phase === 'jarvisswitch') {
+  const wav = fs.readFileSync(process.argv[5]);
+  await a.enroll(base, arg);
+  row('jarvis', await a.api(base, 'GET', '/api/jarvis'));
+  row('confirm', await a.api(base, 'POST', '/api/jarvis/confirm', { id: 'NOPE', answer: 'no' }));
+  row('hear', await a.api(base, 'POST', '/api/jarvis/hear', wav, { contentType: 'audio/wav' }));
+  row('projects', await a.api(base, 'GET', '/api/projects?rollup=0'));
+  row('speak', await a.api(base, 'POST', '/api/speak', { text: 'Hello from the fleet.' }));
+}
+
 // THE PAYOFF PATH, in one phase because the whole value is the CHAIN. docs/mobile.md §7
 // put `answer keys` on the session screen from the start, and it was close to useless: a
 // worker blocked on "Allow pnpm test?" since 9pm is exactly the case the app exists for,

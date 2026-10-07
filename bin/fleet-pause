@@ -45,7 +45,7 @@ SESSION="${1:-}"
 # marker's sock (lib/jarvis.mjs); the off switch, if that is really what is meant, is
 # fleet-stop, which stays allowed for exactly this session.
 _jm="$HOME/.config/ghostfleet/jarvis"
-if [ "$SESSION" = master ] && [ -f "$_jm" ] \
+if [ "$SESSION" = master ] && [ -f "$_jm" ] && ! grep -qsx off "$_jm.enabled" \
    && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
   echo "fleet-pause: refusing — Jarvis is always on; it is never hibernated, parked or paused." >&2
   echo "             To take it offline for good: fleet-stop -s $SOCK master" >&2

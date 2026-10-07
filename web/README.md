@@ -295,7 +295,7 @@ through, so the button being absent is a courtesy and not the control.
 ## What `fleet-serve` has to answer
 
 ```
-GET  /api/projects                          -> { home, projects: [ … ] }
+GET  /api/projects                          -> { home, projects: [ … ], agents, jarvis_enabled, speak }
 GET  /api/grid?project=<name>               -> docs/mobile.md §4, verbatim
 GET  /api/session?project=&session=&limit=20[&before=<ts>]
                                             -> { session, total, messages: [{ts,role,text}], next_before, note? }
@@ -319,6 +319,8 @@ GET  /api/jarvis                            -> { ok, present, project, profile, 
 POST /api/jarvis/confirm { id, answer }     -> { ok, id, answer, summary, told }
                                             'yes' needs X-Fleet-Assertion; 'no' does not
 POST /api/jarvis/hear   <audio/wav bytes>   -> { ok, text, ms }   4 MB cap; 415 if not RIFF/WAVE
+                                            every /api/jarvis* is 404 { ok:false, disabled:true }
+                                            while Jarvis is switched off
 ```
 
 ### Notifications
@@ -344,6 +346,11 @@ gesture. "not now" is honoured for three days. A payload from Jarvis carries
 `open: "jarvis"`, and tapping it opens the Jarvis screen.
 
 ### Jarvis
+
+Jarvis is experimental and switched off by default. The client learns the switch from
+`jarvis_enabled` on `/api/projects` (or a 404 from `/api/jarvis`), never from a build flag;
+off, it draws no band, no Jarvis screen and no `talk` button, and reads the Mac's voice from
+`speak` on `/api/projects`. On, its screen carries an `experimental` tag beside the name.
 
 The master of masters (docs/jarvis.md) is the `jarvis` project's `master`, so its screen
 is the session screen pointed at it, plus three things: the proposals waiting on a yes

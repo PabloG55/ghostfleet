@@ -653,6 +653,7 @@ correct_record() {
 # Jarvis spawned is a worker (isJarvisSelf in lib/jarvis.mjs).
 is_jarvis() {
   [ "$2" = master ] && [ -f "$HOME/.config/ghostfleet/jarvis" ] \
+    && ! grep -qsx off "$HOME/.config/ghostfleet/jarvis.enabled" \
     && [ "$1" = "$(grep -m1 '^sock=' "$HOME/.config/ghostfleet/jarvis" 2>/dev/null | cut -d= -f2-)" ]
 }
 jarvis_always_on() {

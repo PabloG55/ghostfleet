@@ -802,7 +802,8 @@ away. The owner asked for one on every message, beside the other per-message con
 is there now; tap it to play, tap it again to stop. Two voices at once stays impossible:
 starting one message stops the other.
 
-**Conversation mode, in every session.** The composer of every session — not only Jarvis's —
+**Conversation mode, in every session** — while Jarvis (experimental, off by default) is
+switched on; with it off there is no talk button anywhere. The composer of every session — not only Jarvis's —
 has the **talk** button, the same control in the same place: tap it once and the mic opens, a
 second of quiet ends what you said, the Mac transcribes it (whisper.cpp, the transcriber
 Jarvis uses — `fleet-jarvis voice --install`), it is sent to *that* session as a prompt, and
@@ -918,7 +919,7 @@ a launchd daemon read. What it does, so it can be done by hand or audited:
 Where it stands is reported in three places, each with the one command that fixes it —
 *installed*, *not installed* (the phone uses its own voice) or *broken* (a damaged file, a venv
 whose Python went away): `fleet-jarvis status`, `fleet-phone`, and the phone's settings sheet,
-which reads `speak` from `/api/jarvis`.
+which reads `speak` from `/api/projects` (and from `/api/jarvis` while Jarvis is on).
 
 The daemon finds it on the next request; no restart. Configuration, all optional:
 
