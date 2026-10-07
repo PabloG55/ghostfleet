@@ -388,12 +388,14 @@ report_missing_hard() {
 ask_optional() {
   [ "$ASSUME_YES" = 1 ] && return 0
   [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null || return 2
-  local ans=""
+  # $2 = n makes Enter a NO: for the one offer whose cost (a download) nobody should get
+  # by leaning on Return.
+  local ans="" dflt="${2:-y}"
   exec 9<>/dev/tty
-  printf '%s [Y/n] ' "$1" >&9
+  if [ "$dflt" = n ]; then printf '%s [y/N] ' "$1" >&9; else printf '%s [Y/n] ' "$1" >&9; fi
   read -r ans <&9 || ans=""
   exec 9>&- 9<&-
-  case "$ans" in ""|y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
+  case "$ans" in y|Y|yes|YES|Yes) return 0 ;; "") [ "$dflt" = n ] && return 1; return 0 ;; *) return 1 ;; esac
 }
 UNASKED=()   # optional items skipped because nobody could be asked
 
@@ -499,6 +501,34 @@ elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
   esac
 else
   vsay "· voice for Jarvis (optional, ~550 MB): fleet-jarvis voice --install"
+fi
+# THE MAC'S SPEAKING VOICE: Kokoro, which fleet-serve reads the phone's replies with when it
+# is here (lib/speech.mjs) — better English, real Spanish, and nothing leaves the machine.
+# The same shape as whisper above and one rule stricter: Enter means NO. Nothing is missing
+# without it (the phone reads with its own voice), so the ~350 MB is something a person has
+# to type a y for. Never under --yes, never with nobody watching; already working is
+# silent, and a broken install is named as broken rather than offered as new.
+_kk="$("$REPO/bin/fleet-jarvis" voice --kokoro 2>&1)" && _krc=0 || _krc=$?
+if [ "$_krc" = 0 ]; then :
+elif [[ "$_kk" == *"switched off"* ]]; then :      # CLAUDE_FLEET_KOKORO=off: asked and answered
+elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
+  case "$_kk" in
+    *"not installed"*) _kq="· The phone can read replies in the Mac's voice: install Kokoro (~350 MB, optional, speech made on this machine only — without it the phone uses its own voice)?" ;;
+    *) _kq="! Kokoro, the Mac's voice for the phone, is broken: $(head -1 <<<"$_kk") — repair it?" ;;
+  esac
+  _save_yes="$ASSUME_YES"; ASSUME_YES=0
+  rc=0; ask_optional "$_kq" n || rc=$?
+  ASSUME_YES="$_save_yes"
+  case $rc in
+    0) "$REPO/bin/fleet-jarvis" voice --kokoro --install || echo "! Kokoro was not set up — the phone reads with its own voice; retry with: fleet-jarvis voice --kokoro --install" ;;
+    *) echo "  Skipped. The Mac's voice later: fleet-jarvis voice --kokoro --install" ;;
+  esac
+else
+  # Broken is a warning, and a warning never waits for --verbose; not-installed is a choice.
+  case "$_kk" in
+    *"not installed"*) vsay "· the Mac's voice for the phone (optional, ~350 MB): fleet-jarvis voice --kokoro --install" ;;
+    *) echo "! $(head -1 <<<"$_kk")" ;;
+  esac
 fi
 if [ "${#UNASKED[@]}" -gt 0 ]; then
   _u="$(printf '%s, ' "${UNASKED[@]}")"

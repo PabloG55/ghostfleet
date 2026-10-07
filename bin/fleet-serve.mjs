@@ -2223,12 +2223,13 @@ function agentCatalogue() {
   // project, its session, whether it can hear, what waits on a yes — comes from the one
   // place bin/fleet-jarvis reads it, so the phone and `fleet-jarvis status` cannot disagree.
   //   `voice` is answered EVEN WITHOUT A JARVIS: it is the Mac's transcriber, not Jarvis's,
-  // and every session's `talk` asks it here.
+  // and every session's `talk` asks it here. `speak` likewise: whether the Mac reads replies
+  // with Kokoro, which the phone's settings sheet reports beside the device's own voices.
   if (p === '/api/jarvis' && req.method === 'GET') {
     const st = jarvisState();
     if (st.present && !resolveProject(st.project).t)
       return send(res, 200, { ok: true, ...st, present: false, why: `the marker names project '${st.project}', which is not registered — run: fleet-jarvis init` });
-    return send(res, 200, { ok: true, voice: jarvis.voiceStatus(), ...st });
+    return send(res, 200, { ok: true, voice: jarvis.voiceStatus(), speak: speech.status(), ...st });
   }
 
   // A TAPPED YES IS A DESTRUCTIVE TAP, so it carries a fresh passkey exactly as a tapped

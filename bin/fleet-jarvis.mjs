@@ -10,6 +10,8 @@
 //   fleet-jarvis hear <file.wav>  transcribe one utterance with the local whisper.cpp
 //   fleet-jarvis voice [--install [--model NAME]]
 //                                 is voice ready; --install fetches whisper.cpp and a model
+//   fleet-jarvis voice --kokoro [--install]
+//                                 the Mac's speaking voice; --install sets up Kokoro (~350 MB)
 //   fleet-jarvis restart [--if-due] [--dry-run]
 //                                 the daily fresh start, carrying HANDOFF.md forward
 //   fleet-jarvis said [--from SRC]    (the event hook) record what the owner said, stdin
@@ -32,6 +34,8 @@ import { fileURLToPath } from 'node:url';
 import { projects } from '../mcp/fleet-dispatch.mjs';
 import { scanStatus } from '../lib/fleet-scan.mjs';
 import * as J from '../lib/jarvis.mjs';
+import * as speech from '../lib/speech.mjs';
+import * as K from '../lib/kokoro-setup.mjs';
 
 const BIN = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(BIN, '..');
@@ -152,16 +156,17 @@ export function jarvisState() {
   let guardOk = false; try { fs.accessSync(guard, fs.constants.X_OK); guardOk = true; } catch {}
   return { present: true, project: m.name, profile: m.profile, session: 'master', path: m.path, guard: guardOk ? 'ok' : (guard ? `not runnable: ${guard}` : 'not wired'),
            running: running(m), status: rec ? rec.status : null,
-           voice: J.voiceStatus(), pending: J.pending(),
+           voice: J.voiceStatus(), speak: speech.status(), pending: J.pending(),
            restart: { hour: m.restart_hour, last }, batch: m.batch };
 }
-function status() {
+async function status() {
   const s = jarvisState();
   if (has('--json')) { console.log(JSON.stringify(s)); return; }
   if (!s.present) { console.log(s.why); return; }
   console.log(`Jarvis — ${s.profile}/${s.project} at ${s.path}`);
   console.log(`  session   ${s.running ? `running${s.status ? ` (${s.status})` : ''}` : 'not running — ghostfleet jarvis starts it'}`);
   console.log(`  voice     ${s.voice.ready ? `ready (${s.voice.model})` : s.voice.why}`);
+  console.log(`  speaks    ${speakLine(await K.check())}`);
   console.log(`  guard     ${s.guard === 'ok' ? 'the confirm-list guard is wired' : `WARNING — ${s.guard}; Bash is NOT gated. Re-run: fleet-jarvis init`}`);
   console.log(`  wakes     on a need-you anywhere, at once${s.batch ? `; finished work batched every ${Math.round(s.batch / 60)} min` : '; nothing else — finished work waits until he speaks'}`);
   console.log(`  restart   daily at ${String(s.restart.hour).padStart(2, '0')}:00 when idle${s.restart.last ? ` · last ${new Date(s.restart.last * 1000).toLocaleString()}` : ''}`);
@@ -240,9 +245,22 @@ function restart() {
 
 // ── voice ───────────────────────────────────────────────────────────────────
 const MODELS = { 'large-v3-turbo-q5_0': 574, 'base.en': 148, 'small.en': 488 };
-function voice() {
+// THE MAC'S TWO HALVES OF A CONVERSATION, under one command: hearing is whisper.cpp (the
+// default, and what every existing "run: fleet-jarvis voice --install" means), speaking is
+// Kokoro, selected with --kokoro. Two downloads, two separate yeses — install.sh asks for
+// each on its own, so neither flag ever brings the other along. Plain `voice` reports both
+// and exits on hearing alone, which is what install.sh has always tested it for.
+export const speakLine = (k) => k.ready ? `Kokoro, installed (${k.dir})`
+  : k.state === 'missing' ? `the phone's own voice — Kokoro is not installed (optional, ~350 MB): ${speech.KOKORO_FIX}`
+  : k.state === 'off' ? k.why : `BROKEN — ${k.why}`;
+async function voice() {
+  if (has('--kokoro')) return kokoro();
   let v = J.voiceStatus();
-  if (!has('--install')) { console.log(v.ready ? `voice ready — ${v.bin} with ${v.model}` : `${v.why}\n  ${v.how}`); process.exitCode = v.ready ? 0 : 1; return; }
+  if (!has('--install')) {
+    console.log(v.ready ? `voice ready — ${v.bin} with ${v.model}` : `${v.why}\n  ${v.how}`);
+    console.log(`speaks with ${speakLine(speech.status())}`);
+    process.exitCode = v.ready ? 0 : 1; return;
+  }
   // AN OPTIONAL STEP THAT CAN FAIL AND MUST SAY SO — but never takes the install down with
   // it: install.sh calls this with `|| true`. Text keeps working without any of it.
   if (!J.whisperBin()) {
@@ -266,11 +284,24 @@ function voice() {
   process.exitCode = v.ready ? 0 : 1;
 }
 
+async function kokoro() {
+  if (!has('--install')) {
+    const k = await K.check();
+    console.log(k.ready ? `Kokoro ready — ${k.dir}` : `${k.why}${k.state === 'missing' ? `\n  ${k.how}` : ''}`);
+    process.exitCode = k.ready ? 0 : 1; return;
+  }
+  // AN OPTIONAL STEP THAT CAN FAIL AND MUST SAY SO, like whisper's above — install.sh calls
+  // it with `||` and carries on, because the phone's own voice still reads every reply.
+  const r = await K.install();
+  if (!r.ok) { process.stderr.write(`fleet-jarvis: ${r.why}\n`); process.exitCode = r.code || 1; return; }
+  process.exitCode = 0;
+}
+
 // ── dispatch ────────────────────────────────────────────────────────────────
-function main() {
+async function main() {
   switch (cmd) {
     case 'init': return init();
-    case 'status': return status();
+    case 'status': return await status();
     case 'pending': {
       const p = J.pending();
       if (has('--json')) return console.log(JSON.stringify(p));
@@ -301,13 +332,13 @@ function main() {
       if (r.error) die(r.error);
       return console.log(r.text);
     }
-    case 'voice': return voice();
+    case 'voice': return await voice();
     case 'restart': return restart();
     case '-h': case '--help': case 'help':
-      return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 17).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
+      return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 19).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
     default: die(`unknown command '${cmd}' (fleet-jarvis --help)`, 2);
   }
 }
 let direct = false;
 try { direct = !!process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url)); } catch {}
-if (direct) main();
+if (direct) main().catch((e) => die(String((e && e.stack) || e)));

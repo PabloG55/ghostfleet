@@ -873,22 +873,50 @@ the rest of the reply to the device's voice rather than going quiet. `fleet-serv
 one line per sentence — its id, language, voice and whether it was synthesised or cached —
 and never the words.
 
-Setup on the Mac — outside the Documents folder, which macOS will not let a launchd daemon read:
+Setup on the Mac — one command, which `./install.sh` also offers (default **No**, and never
+under `--yes` or without a terminal to ask at: it is ~350 MB nobody agreed to by accepting
+"install missing dependencies"):
 
 ```bash
-uv venv -p 3.12 ~/.local/share/kokoro/venv        # onnxruntime has no wheels for the newest Pythons
-VIRTUAL_ENV=~/.local/share/kokoro/venv uv pip install kokoro-onnx
-curl -L -o ~/.local/share/kokoro/kokoro-v1.0.onnx \
-  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
-curl -L -o ~/.local/share/kokoro/voices-v1.0.bin \
-  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+fleet-jarvis voice --kokoro --install    # set it up, or repair it; safe to re-run
+fleet-jarvis voice --kokoro              # is it installed and does its Python work
 ```
+
+It installs into `~/.local/share/kokoro`, outside the Documents folder, which macOS will not let
+a launchd daemon read. What it does, so it can be done by hand or audited:
+
+- **Python 3.10–3.12, pinned.** onnxruntime has no wheels for the newest Pythons (a 3.14 system
+  Python has none), so the venv is made with `uv venv --python 3.12` when `uv` is installed — uv
+  fetches 3.12 itself if it must — and otherwise with the newest `python3.12`/`3.11`/`3.10` on
+  PATH. With none of those it says what to install (uv, or `brew install python@3.12` /
+  `apt install python3.12-venv`) and stops before downloading anything. The package is
+  `kokoro-onnx==0.6.1`.
+- **The model files are pinned by size and SHA-256** — `kokoro-v1.0.onnx` and
+  `voices-v1.0.bin` from the kokoro-onnx
+  [`model-files-v1.0`](https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0)
+  release. Each downloads to a `.part`, resumes from it after an interruption, and is renamed into
+  place only once it matches; a file that does not is discarded and never reads as installed.
+  The venv is built as `venv.part` and renamed once it imports, for the same reason.
+- **Idempotent.** On a working install it hashes the files, imports the packages and downloads
+  nothing; a damaged piece is replaced on its own, so a truncated model does not cost a venv
+  rebuild and a dead venv does not cost 350 MB.
+- **It proves it speaks**: the last step synthesises one sentence through the same worker the
+  daemon runs.
+- **The directory must be short.** espeak-ng, which Kokoro phonemises through, cannot find its
+  data more than 151 characters deep, and fails every sentence with a `phontab: No such file`
+  that says nothing about length. The default is well inside that; a `CLAUDE_FLEET_KOKORO_DIR`
+  (or a `$HOME`) long enough to break it is refused before the download.
+
+Where it stands is reported in three places, each with the one command that fixes it —
+*installed*, *not installed* (the phone uses its own voice) or *broken* (a damaged file, a venv
+whose Python went away): `fleet-jarvis status`, `fleet-phone`, and the phone's settings sheet,
+which reads `speak` from `/api/jarvis`.
 
 The daemon finds it on the next request; no restart. Configuration, all optional:
 
 | variable | default | |
 |---|---|---|
-| `CLAUDE_FLEET_KOKORO_DIR` | `~/.local/share/kokoro` | holds the two model files and `venv/` |
+| `CLAUDE_FLEET_KOKORO_DIR` | `~/.local/share/kokoro` | holds the two model files and `venv/` — and where the installer puts them |
 | `CLAUDE_FLEET_KOKORO_PYTHON` | `<dir>/venv/bin/python` | the interpreter that has kokoro-onnx installed |
 | `CLAUDE_FLEET_KOKORO` | on | `off` makes the phone use its own voice |
 | `CLAUDE_FLEET_KOKORO_VOICE_EN` / `_ES` | `af_heart` / `ef_dora` | any Kokoro voice id |
