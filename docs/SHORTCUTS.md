@@ -475,6 +475,7 @@ work at stack width, and the governor's 5h usage scrape cannot read a pane narro
 | `fleet-worktrees` | inventory of worktrees + which are free |
 | `fleet-list` | live sessions + status |
 | `fleet-inbox` | who needs attention / who finished |
+| `fleet-ledger [s] [list\|all\|close <id>\|clear]` | a Claude session's open requests and promises (the mod's ledger); `/ledger` inside the session |
 | `fleet-spawn <n> --new --prompt "..."` | isolated worker (new worktree) |
 | `fleet-spawn <n> --reuse <wt>` | reuse a free worktree |
 | `fleet-send <s> "..."` | new task (only if the session is free) |
