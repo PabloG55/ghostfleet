@@ -86,6 +86,20 @@ DEFAULT_AGENT=claude
 # exactly as long as that lasted. The one field still short of the others is
 # blocked_re, which covers the trust dialog but not command approval; the fleet
 # bypasses approvals, so that prompt has never been observed to capture.
+# The Unicode braille block, U+2800..U+28FF, as an ERE alternation of its 256 literal
+# characters. A bracket range cannot say it in both locales: in C, "[⠀-⣿]" is a set of
+# BYTES, 0x80..0xE2 among them, which covers every byte of "✓" (E2 9C 93) too. A literal
+# alternation is the same string to a byte matcher and a character matcher. Octal escapes
+# because /bin/bash 3.2 has no \u.
+braille_ere() {
+  local m l out=""
+  for m in 240 241 242 243; do for l in 0 1 2 3 4 5 6 7; do
+    out="$out|\\342\\$m\\2${l}0|\\342\\$m\\2${l}1|\\342\\$m\\2${l}2|\\342\\$m\\2${l}3"
+    out="$out|\\342\\$m\\2${l}4|\\342\\$m\\2${l}5|\\342\\$m\\2${l}6|\\342\\$m\\2${l}7"
+  done; done
+  # shellcheck disable=SC2059   # the format IS the payload: printf expands the escapes
+  printf "(${out#|})"
+}
 agent_field() {
   local a="$1" f="$2"
   case "$a" in
@@ -387,11 +401,16 @@ agent_field() {
         # THE SPINNER LINE, AT COLUMN 1. A turn draws " ⠰⠰ Working" (or "Running" while a
         # command runs) directly above the composer: one space, a TWO-CELL braille spinner, a
         # space, the phase. Eight spinner frames were captured (⠀⠞ ⠰⠰ ⠘⠆ ⠰⠳ ⠠⠜ ⠘⠤ ⠠⠛ ⠘⠣), so
-        # the glyphs are matched as a run of anything but letters, digits and blanks rather
-        # than spelled — which is also what keeps a C-locale grep matching them as the bytes
-        # they are. Across 333 frames at 30, 40, 56, 80, 120, 140 and 200 columns it matched
-        # all 129 working frames and none of the 172 idle ones or the 32 taken while the
-        # permission dialog waited — nor the trust dialog, nor the pane a failed turn left.
+        # the glyphs are matched as the whole braille block rather than spelled frame by
+        # frame. Across 333 frames at 30, 40, 56, 80, 120, 140 and 200 columns that shape
+        # matched all 129 working frames and none of the 172 idle ones or the 32 taken while
+        # the permission dialog waited — nor the trust dialog, nor the pane a failed turn left.
+        #   BRAILLE, NOT "ANY GLYPH". This first read the spinner as a run of anything but
+        # letters, digits and blanks, and signing in leaves " ✓ Login successful!" on screen
+        # above the fresh composer — the same column, the same single space, a glyph and a
+        # capitalised word. Busy outranks ready, so a worker sitting idle at its first prompt
+        # read working for as long as that line stayed up. None of the idle frames above had
+        # been taken straight after a login.
         #   NOT THE COMPOSER'S "ctrl+c to stop", the other busy signal: it arrives a frame after
         # the spinner when a turn starts (4 working frames had the spinner and not the hint,
         # none the other way round). Neither one is drawn while a permission dialog waits, so
@@ -406,8 +425,8 @@ agent_field() {
         # version of this regex spelled out U+2800 as the spinner's first cell. A turn left to
         # run at one width animated, missed 21 of its 25 working frames, and the grid called
         # the worker ready three seconds before it finished.
-        busy_re)    printf '%s' '^ [^[:alnum:][:space:]]+ [A-Z][a-z]+' ;;
-        busy_re_js) printf '%s' '^ [^A-Za-z0-9\s]+ [A-Z][a-z]+' ;;
+        busy_re)    printf '^ %s+ [A-Z][a-z]+' "$(braille_ere)" ;;
+        busy_re_js) printf '%s' '^ [\u2800-\u28FF]+ [A-Z][a-z]+' ;;
         # The two dialogs a worker can stop on, and neither is shown under yolo: cursor-here
         # passes --force (no command approval) and --trust (no folder trust). Both keyed to the
         # LIVE dialog rather than its title. The trust box stays on screen after it is

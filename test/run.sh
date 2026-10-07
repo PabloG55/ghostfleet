@@ -737,6 +737,15 @@ for f in cursor-idle-fresh.txt cursor-idle-fresh-30col.txt; do
   is "$f: a fresh chat's composer is ready"       "1" "$(has "$crd" "$FIX/$f")"
   is "$f: and not busy"                           "0" "$(has "$cre" "$FIX/$f")"
 done
+# Signing in leaves " ✓ Login successful!" above the fresh composer — column 1, one space,
+# a glyph and a capitalised word, the spinner line's exact shape with a glyph that is not
+# braille. Read as "glyphs other than letters" it pinned a just-signed-in worker at working.
+f=cursor-idle-after-login.txt
+is "$f: the login line is still on screen"        "1" "$(has 'Login successful' "$FIX/$f")"
+is "$f: the composer is ready"                    "1" "$(has "$crd" "$FIX/$f")"
+is "$f: and not busy"                             "0" "$(has "$cre" "$FIX/$f")"
+is "$f: ...in JS either"                          "0" "$(cujs "$cjs" "$FIX/$f")"
+is "$f: ...nor in the C locale"                   "0" "$(LC_ALL=C grep -cE -- "$cre" "$FIX/$f" || true)"
 for f in cursor-permission.txt cursor-permission-30col.txt cursor-permission-56col.txt cursor-permission-touch.txt; do
   is "$f: is NOT read as busy"                    "0" "$(has "$cre" "$FIX/$f")"
   is "$f: ...in JS either"                        "0" "$(cujs "$cjs" "$FIX/$f")"
