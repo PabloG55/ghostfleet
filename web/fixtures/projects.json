@@ -97,5 +97,6 @@
       "name": "codex",
       "caveat": "no fleet events: status is guessed from its pane, and a question it asks may never reach the inbox. no fleet_* tools: it cannot spawn or answer siblings from a tool call, only by running fleet-* in its own shell. no resume: recycling its pane loses the conversation"
     }
-  ]
+  ],
+  "jarvis_enabled": true
 }

@@ -131,7 +131,7 @@ _t="${TMUX:-}"; if [ -n "$_t" ]; then CSOCK="${_t%%,*}"; CSOCK="${CSOCK##*/}"
   CSESS="$(tmux -L "$CSOCK" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"; fi
 JMARK="${CLAUDE_FLEET_JARVIS_DIR:-$HOME/.config/ghostfleet}/jarvis"
 IS_JARVIS=0
-[ -n "$CSOCK" ] && [ "$CSESS" = master ] && [ -f "$JMARK" ] \
+[ -n "$CSOCK" ] && [ "$CSESS" = master ] && [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" \
   && [ "$CSOCK" = "$(grep -m1 '^sock=' "$JMARK" 2>/dev/null | cut -d= -f2-)" ] && IS_JARVIS=1
 BOUNDARY="$(dirname "$DETECT")/boundary.sh"
 SETTING_OK=0

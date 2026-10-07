@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 1951b055ed7a
+// CLIENT-HASH: e74a0e9052c3
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -315,7 +315,12 @@
 // the new field as absent and draws the lead's own status, which is what it always did.
 // v59 says the running master switches agent too (after its current turn) instead of
 // "takes effect on the NEXT master", which stopped being true with lib/agent-switch.sh.
-const VERSION = 'ghostfleet-v59';
+// v60 takes Jarvis's switch from the daemon (`jarvis_enabled` on /api/projects): off, there
+// is no Jarvis band, no Jarvis screen and no talk button, and the Mac's voice is read from
+// `speak` there instead of from /api/jarvis, which now 404s. A phone still on v59 against a
+// switched-off daemon draws no band either (the 404 leaves it nothing to draw) but keeps a
+// talk button whose hearing is refused.
+const VERSION = 'ghostfleet-v60';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

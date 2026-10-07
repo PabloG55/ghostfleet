@@ -314,6 +314,12 @@ pane_has() {                       # <socket> <pattern> [target]
 # nothing could find.
 TEST_RUNS=/tmp/ghostfleet-test                    # one <prefix>.<pid>.XXXXXX per run
 TMUX_TMPDIR="$(cd "$(mktemp -d "$TEST_RUNS.$$.XXXXXX")" && pwd -P)"; export TMUX_TMPDIR
+# THE EXPERIMENTAL SWITCHES (lib/experimental.mjs) live in this run's own directory, so no
+# command the suite runs under the real HOME can write the owner's ~/.config/ghostfleet —
+# fleet-shots writes its switch down on first use. fleet-shots is ON here because its groups
+# test what it does; the group that tests the switch itself points this somewhere else.
+CLAUDE_FLEET_EXPERIMENTAL_DIR="$TMUX_TMPDIR/experimental"; export CLAUDE_FLEET_EXPERIMENTAL_DIR
+mkdir -p "$CLAUDE_FLEET_EXPERIMENTAL_DIR"; printf 'on\n' > "$CLAUDE_FLEET_EXPERIMENTAL_DIR/shots.enabled"
 # ...and the pane id this run was started from means nothing on a fixture server. The hook
 # asks tmux which session $TMUX_PANE is in, so an inherited `%20` would name whichever
 # fixture session happened to get that id — a plausible wrong slot, not an error.
@@ -13530,6 +13536,9 @@ if CLAUDE_FLEET_WHISPER_BIN="$JW/whisper-cli" CLAUDE_FLEET_WHISPER_MODEL="$JW/gg
   # is every fleet's state and does not need Jarvis to exist.
   printf '1700000000\n' > "$JCF/digest.last"
   rm -f "$JCF/jarvis" "$JCF/jarvis.confirm.json" "$JCF/jarvis.said"
+  # SWITCHED ON, so these rows are about a Jarvis that is merely not set up yet; switched
+  # off is its own pair of probes further down.
+  printf 'on\n' > "$JCF/jarvis.enabled"
   node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" jarvis "$(sv_code jarvisa)" "$JW/quiet.wav" > "$SV/probe.jarvisa" 2>"$SV/probe.jarvisa.err"
   is "the digest needs a token"                 "401" "$(jpf digest.noToken jarvisa)"
   is "...and answers one"                       "200" "$(jpf digest jarvisa)"
@@ -13582,7 +13591,29 @@ if CLAUDE_FLEET_WHISPER_BIN="$JW/whisper-cli" CLAUDE_FLEET_WHISPER_MODEL="$JW/gg
   is "...to the words the transcriber said"     "hello fleet" "$(jj hear.wav jarvisb text)"
   is "...and no audio is kept on disk"          "0"   "$(ls "$JW" | grep -c '^gf-hear-' || true)"
   is "...nor is a word of it in the log"        "0"   "$(grep -c 'hello fleet' "$SV/log.jarvis" || true)"
-  rm -f "$JCF/jarvis" "$JCF/jarvis.confirm.json" "$JCF/jarvis.said" "$JCF/digest.last"
+  # JARVIS IS EXPERIMENTAL, AND OFF MEANS GONE: the same daemon, the same marker, the same
+  # requests, once on and once off. Every /api/jarvis* is a 404 that says so, the project
+  # list drops Jarvis's project and says the switch is off, and the Mac's voice (the play
+  # button's, not Jarvis's) answers exactly as it did with Jarvis on.
+  printf 'on\n' > "$JCF/jarvis.enabled"
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" jarvisswitch "$(sv_code jswon)" "$JW/quiet.wav" > "$SV/probe.jswon" 2>"$SV/probe.jswon.err"
+  printf 'off\n' > "$JCF/jarvis.enabled"
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" jarvisswitch "$(sv_code jswoff)" "$JW/quiet.wav" > "$SV/probe.jswoff" 2>"$SV/probe.jswoff.err"
+  is "Jarvis on: /api/jarvis answers"           "200"  "$(jpf jarvis jswon)"
+  is "...the project list says it is on"        "true" "$(jj projects jswon jarvis_enabled)"
+  is "...and lists Jarvis's project"            "1"    "$(jj projects jswon projects | grep -c '"name":"demo"' || true)"
+  is "Jarvis off: /api/jarvis is a 404"         "404"  "$(jpf jarvis jswoff)"
+  is "...that says Jarvis is disabled"          "true" "$(jj jarvis jswoff disabled)"
+  is "...and how to turn it on"                 "1"    "$(jj jarvis jswoff text | grep -c 'fleet-experimental enable jarvis' || true)"
+  is "...a yes is a 404 too"                    "404"  "$(jpf confirm jswoff)"
+  is "...and so is hearing"                     "404"  "$(jpf hear jswoff)"
+  is "...the project list says it is off"       "false" "$(jj projects jswoff jarvis_enabled)"
+  is "...and has no card for Jarvis's project"  "0"    "$(jj projects jswoff projects | grep -c '"name":"demo"' || true)"
+  is "...while the Mac's voice still answers"   "$(jpf speak jswon)" "$(jpf speak jswoff)"
+  is "...and is not a 404"                      "0"    "$(jpf speak jswoff | grep -c '^404$' || true)"
+  is "...and is still reported to the phone"    "$(jj projects jswon speak.state)" "$(jj projects jswoff speak.state)"
+  is "...as something, not nothing"             "1"    "$([ -n "$(jj projects jswoff speak.state)" ] && echo 1 || echo 0)"
+  rm -f "$JCF/jarvis" "$JCF/jarvis.confirm.json" "$JCF/jarvis.said" "$JCF/digest.last" "$JCF/jarvis.enabled"
   serve_stop
 else
   skip "fleet-serve jarvis routes" "server did not come up: $SV_WHY"
@@ -14084,6 +14115,17 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command
   for b in workers-merge agents-approve; do : > "$JC/home/.claude/fleet/cf-jarvis.$b"; : > "$JC/home/.claude/fleet/cf-jarvis.master.$b"; done
   is "with both settings on, Jarvis's merge is still held" "2" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
   rm -f "$JC/home/.claude/fleet"/cf-jarvis.*workers-merge "$JC/home/.claude/fleet"/cf-jarvis.*agents-approve
+  # SWITCHED OFF IS NO JARVIS (lib/jarvis.mjs enabled): every door lets the same merge
+  # through that it held a line above, and holds it again once the switch is back on — so
+  # the off rows pass because of the switch, not because the guard stopped working.
+  printf 'off\n' > "$JC/home/.config/ghostfleet/jarvis.enabled"
+  is "Jarvis switched off: the Bash guard lets the merge through" "0" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  is "...and so does the mod's door"               "0" "$(mg jarvis-bash 'gh pr merge 12 --squash')"
+  is "...and the MCP door"                         "0" "$(mg jarvis-mcp "$JARGS" fleet_stop)"
+  printf 'on\n' > "$JC/home/.config/ghostfleet/jarvis.enabled"
+  is "switched back on, the merge is held again"   "2" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+  is "...by the mod's door too"                    "2" "$(mg jarvis-bash 'gh pr merge 12 --squash')"
+  rm -f "$JC/home/.config/ghostfleet/jarvis.enabled"
   rm -f "$JC/home/.config/ghostfleet/jarvis"
   is "with no Jarvis marker nothing is guarded"    "0" "$(guard "$JPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
   # ...and deterministically: a command no pipe buffer holds, which is what turned the row
@@ -14208,6 +14250,30 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "the real fleet-send records a delivery into Jarvis" "1" "$(cnt "$(printf '%s' ok | shasum -a 256 2>/dev/null | cut -c1-12)" "$JW/home/.config/ghostfleet/jarvis.delivered")"
   HOME="$JW/home" TMUX= CLAUDE_FLEET_NOTIFIER=off "$ROOT/bin/fleet-send" -s cf-jarvis --anyway helper "ok" >/dev/null 2>&1
   is "...and only into Jarvis's master"             "1" "$(cnt . "$JW/home/.config/ghostfleet/jarvis.delivered")"
+  # SWITCHED OFF, NOTHING WAKES IT: neither a need-you nor a batch reaches Jarvis while the
+  # marker is still there. The control is the same need-you once it is back on.
+  sed -i.bak '/^batch=/d' "$JW/home/.config/ghostfleet/jarvis"
+  printf 'off\n' > "$JW/home/.config/ghostfleet/jarvis.enabled"
+  : > "$JW/sent.log"; rm -f "$WC/fleet/cf-jarvis.jarvis.stamp"
+  jfire Notification cf-acme-api api-fix "$WC" "Claude needs your permission to use Bash"
+  sleep 1
+  is "Jarvis switched off: a need-you does not wake it" "0" "$(sent)"
+  printf 'batch=2\n' >> "$JW/home/.config/ghostfleet/jarvis"
+  jfire Stop cf-personal-scratch w1 "$PC"; jfire Stop cf-personal-scratch w3 "$PC"
+  sleep 3
+  is "...nor does a batch of finished work"         "0" "$(sent)"
+  sed -i.bak '/^batch=/d' "$JW/home/.config/ghostfleet/jarvis"
+  jfire UserPromptSubmit cf-jarvis master "$WC" "go ahead"
+  is "...and what is typed into it is not a yes on file" "0" "$(cnt '"text":"go ahead"' "$JW/home/.config/ghostfleet/jarvis.said")"
+  : > "$JW/home/.config/ghostfleet/jarvis.delivered"
+  HOME="$JW/home" TMUX= CLAUDE_FLEET_NOTIFIER=off "$ROOT/bin/fleet-send" -s cf-jarvis --anyway master "ok" >/dev/null 2>&1
+  is "...and fleet-send records no delivery into it"  "0" "$(cnt . "$JW/home/.config/ghostfleet/jarvis.delivered")"
+  printf 'on\n' > "$JW/home/.config/ghostfleet/jarvis.enabled"
+  : > "$JW/sent.log"; rm -f "$WC/fleet/cf-jarvis.jarvis.stamp"
+  jfire Notification cf-acme-api api-fix "$WC" "Claude needs your permission to use Bash"
+  waitsent 1
+  is "switched back on, the same need-you wakes it"   "1" "$(sent)"
+  rm -f "$JW/home/.config/ghostfleet/jarvis.enabled"
   # NO MARKER, NO JARVIS: a machine without one behaves exactly as before.
   rm -f "$JW/home/.config/ghostfleet/jarvis"; : > "$JW/sent.log"
   jfire Notification cf-acme-api api-fix "$WC" "Claude needs your permission to use Bash"
@@ -14223,6 +14289,18 @@ group "fleet-jarvis init makes a home outside every repo, and registers it"
 if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   JI="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$JI/home"
   ji() { HOME="$JI/home" TMUX= "$ROOT/bin/fleet-jarvis" "$@" 2>&1; }
+  # A NEW INSTALL HAS JARVIS OFF: it is experimental. Asking is what writes that down, and
+  # init — which `ghostfleet jarvis` runs — says so instead of starting it.
+  out="$(ji status)"
+  is "a new install: Jarvis is disabled"          "1"   "$(grep -c '^Jarvis \[experimental\] — disabled' <<< "$out" || true)"
+  is "...and the answer is written down"          "off" "$(cat "$JI/home/.config/ghostfleet/jarvis.enabled" 2>/dev/null)"
+  out="$(ji init)"; rc=$?
+  is "...so init refuses"                         "1"   "$rc"
+  is "...saying how to enable it"                 "1"   "$(grep -c 'fleet-experimental enable jarvis' <<< "$out" || true)"
+  is "...and makes nothing"                       "no"  "$([ -e "$JI/home/.config/ghostfleet/jarvis" ] || [ -e "$JI/home/.local/share/ghostfleet/jarvis" ] && echo yes || echo no)"
+  out="$(ji enable)"
+  is "enable switches it on"                      "on"  "$(cat "$JI/home/.config/ghostfleet/jarvis.enabled" 2>/dev/null)"
+  is "...and says it is not set up yet"           "1"   "$(grep -c 'not set up' <<< "$out" || true)"
   out="$(ji init)"; rc=$?
   JH="$JI/home/.local/share/ghostfleet/jarvis"
   is "init runs"                                  "0"   "$rc"
@@ -14245,6 +14323,7 @@ if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   # A PROJECT ALREADY CALLED jarvis, somewhere else, is not taken over.
   mkdir -p "$JI/h2/.config/ghostfleet" "$JI/other"
   printf 'jarvis\t%s\twork\n' "$JI/other" > "$JI/h2/.config/ghostfleet/projects"
+  printf 'on\n' > "$JI/h2/.config/ghostfleet/jarvis.enabled"
   out="$(HOME="$JI/h2" "$ROOT/bin/fleet-jarvis" init 2>&1)"; rc=$?
   is "an existing project called jarvis stops it" "1"   "$rc"
   is "...saying so"                               "1"   "$(grep -c 'already exists' <<< "$out" || true)"
@@ -14303,6 +14382,169 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   rm -rf "$JR"
 else
   skip "Jarvis daily restart" "tmux or node missing"
+fi
+
+# ── Jarvis is EXPERIMENTAL: off unless switched on, and off means gone ──────────
+# Three claims, each in both directions. An install that already has Jarvis resolves ON with
+# nobody doing anything, and a new one OFF. Disable stops Jarvis's session by its exact
+# target and keeps the conversation; enable brings THAT conversation back, by id, never a
+# blank one. And the Projects screen loses the card and gains the switch. The runtime is a
+# copy whose agent-here is a stub (it records what it was asked to resume) and whose
+# fleet-hibernate --resolve names a conversation with a transcript, so no agent ever runs.
+group "Jarvis is experimental: off by default, and off means gone"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  JX="$(cd "$(mktemp -d "$TEST_RUNS.$$.jx.XXXXXX")" && pwd -P)"
+  mkdir -p "$JX/home/.config/ghostfleet" "$JX/home/.claude/fleet" "$JX/jv"
+  cp -R "$ROOT/bin" "$ROOT/lib" "$ROOT/mcp" "$ROOT/tmux" "$ROOT/hooks" "$JX/"
+  printf '#!/bin/sh\nprintf "resume=%%s fresh=%%s\\n" "${CLAUDE_FLEET_RESUME:-}" "${CLAUDE_FLEET_FRESH:-}" >> "%s/started"\nexec sleep 300\n' "$JX" > "$JX/bin/agent-here"
+  : > "$JX/t.jsonl"
+  printf '#!/bin/sh\n[ "$1" = --resolve ] && [ "$2" = cf-jarvis ] || exit 1\nprintf "conv-1234abcd\\037%s/t.jsonl\\037pane\\n"\n' "$JX" > "$JX/bin/fleet-hibernate"
+  chmod +x "$JX/bin/agent-here" "$JX/bin/fleet-hibernate"
+  JXC="$JX/home/.config/ghostfleet"
+  printf 'jarvis\t%s\twork\nacme-api\t%s\twork\n' "$JX/jv" "$JX" > "$JXC/projects"
+  printf 'name=jarvis\nprofile=work\nsock=cf-jarvis\ncfg=%s\npath=%s\n' "$JX/home/.claude" "$JX/jv" > "$JXC/jarvis"
+  jx() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_FRESH HOME="$JX/home" "$JX/bin/fleet-jarvis" "$@" 2>&1; }
+  jlive() { tmux -L cf-jarvis has-session -t '=master' 2>/dev/null && echo yes || echo no; }
+  tmux -L cf-jarvis kill-server 2>/dev/null; tmux -L cf-jxctl kill-server 2>/dev/null
+
+  # AN EXISTING INSTALL: the marker is there and nobody has said anything — ON, and the first
+  # fleet-jarvis command writes that down.
+  out="$(jx status)"
+  is "an install with Jarvis set up resolves ON"  "1"  "$(grep -c '^Jarvis \[experimental\] — enabled' <<< "$out" || true)"
+  is "...written down by the first command"       "on" "$(cat "$JXC/jarvis.enabled" 2>/dev/null)"
+  # lib/jarvis.mjs: the ONE answer every JS reader gets, and the file it is not allowed to hide.
+  rd() { HOME="$JX/home" node --input-type=module -e "import * as J from '$JX/lib/jarvis.mjs'; const m = J.readMarker(), f = J.readMarkerFile(); console.log((m ? m.name : '-') + ' ' + (f ? f.name : '-'))"; }
+  is "on: readMarker names Jarvis"                "jarvis jarvis" "$(rd)"
+
+  # A LIVE JARVIS, and a session called master on ANOTHER fleet, which is every fleet's lead
+  # and must outlive the stop: the target is exact, never a pattern.
+  env -u CLAUDE_FLEET_FRESH tmux -L cf-jarvis new-session -d -s master 'sleep 300'
+  tmux -L cf-jxctl new-session -d -s master 'sleep 300'
+  out="$(jx disable)"; rc=$?
+  is "disable succeeds"                           "0"   "$rc"
+  is "...switching it off"                        "off" "$(cat "$JXC/jarvis.enabled" 2>/dev/null)"
+  is "...stopping Jarvis's session"               "no"  "$(jlive)"
+  is "...and no other fleet's master"             "yes" "$(tmux -L cf-jxctl has-session -t '=master' 2>/dev/null && echo yes || echo no)"
+  is "...keeping its conversation in the marker"  "conv-1234abcd" "$(grep -m1 '^resume=' "$JXC/jarvis" | cut -d= -f2-)"
+  is "...and saying so"                           "1"   "$(grep -c 'kept' <<< "$out" || true)"
+  is "off: readMarker answers nobody"             "- jarvis" "$(rd)"
+  out="$(jx status)"
+  is "status says disabled, and experimental"     "1"   "$(grep -c '^Jarvis \[experimental\] — disabled' <<< "$out" || true)"
+  is "...naming the conversation it kept"         "1"   "$(grep -c 'conversation conv-123' <<< "$out" || true)"
+  out="$(jx init)"; rc=$?
+  is "init while off refuses"                     "1"   "$rc"
+  is "...and says how to enable it"               "1"   "$(grep -c 'fleet-experimental enable jarvis' <<< "$out" || true)"
+  is "...starting nothing"                        "no"  "$(jlive)"
+
+  # THE SHELL READERS, which cannot import lib/jarvis.mjs and so spell the rule themselves:
+  # off, Jarvis's master is an ordinary master again — fleet-pause no longer refuses it as
+  # "always on" — and back on, it does.
+  jp() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SLOT HOME="$JX/home" CLAUDE_FLEET_DIR="$JX/home/.claude/fleet" \
+           "$JX/bin/fleet-pause" -s cf-jarvis master 2>&1; }
+  is "off: fleet-pause does not call it Jarvis"   "0"   "$(jp | grep -c 'Jarvis is always on' || true)"
+
+  # ENABLE BRINGS BACK THE SAME CONVERSATION, by id and not fresh.
+  : > "$JX/started"
+  out="$(jx enable)"; rc=$?
+  is "enable succeeds"                            "0"   "$rc"
+  is "...switching it on"                         "on"  "$(cat "$JXC/jarvis.enabled" 2>/dev/null)"
+  sleep 0.5
+  is "...starting Jarvis's session"               "yes" "$(jlive)"
+  is "...resumed on the kept conversation"        "resume=conv-1234abcd fresh=0" "$(head -1 "$JX/started")"
+  is "...and the kept id is spent"                "0"   "$(grep -c '^resume=' "$JXC/jarvis" || true)"
+  is "on: fleet-pause calls it Jarvis again"      "1"   "$(jp | grep -c 'Jarvis is always on' || true)"
+  jx enable >/dev/null
+  is "a second enable starts nothing more"        "1"   "$(grep -c . "$JX/started")"
+
+  # THE SHELL READERS, ALL OF THEM. Every file that reads Jarvis's marker for its socket
+  # must read the switch beside it — counted per read, so a second reader added to a file
+  # that already has one is caught too. And the mod, which reads the marker through $.fs.
+  miss=""
+  while IFS= read -r f; do
+    case "$f" in *.mjs|*.js|*.md) continue ;; esac
+    grep -q 'ghostfleet}\{0,1\}/jarvis"' "$ROOT/$f" 2>/dev/null || continue
+    a="$(grep -c "\^sock=" "$ROOT/$f" || true)"; b="$(grep -c 'grep -qsx off' "$ROOT/$f" || true)"
+    [ "${b:-0}" -ge "${a:-0}" ] || miss="$miss $f"
+  done <<< "$(cd "$ROOT" && git ls-files bin hooks lib)"
+  is "every shell reader of the marker reads the switch" "" "$miss"
+  is "...and so does the mod"                     "1"   "$([ "$(grep -c 'jarvis.enabled\|}.enabled`' "$ROOT/mods/ghostfleet/hooks/register.js")" -ge 1 ] && echo 1 || echo 0)"
+
+  # THE PROJECTS SCREEN, driven in a real pane: off, no card for Jarvis's project, and the
+  # settings page's Experimental section shows the switch off with its tag; space on that row
+  # turns it on through fleet-experimental, and the card comes back. acme-api is the control
+  # that must be there throughout. The pane gets its own fleet dir and switch dir, so neither
+  # this run's nor the caller's can decide what it shows.
+  jx disable >/dev/null
+  tmux -L cfjxgrid kill-server 2>/dev/null
+  tmux -L cfjxgrid new-session -d -x 170 -y 40 -e HOME="$JX/home" -e CLAUDE_FLEET_PROJECTS="$JXC/projects" \
+    -e CLAUDE_FLEET_DIR="$JX/home/.claude/fleet" -e CLAUDE_FLEET_EXPERIMENTAL_DIR="$JXC" \
+    "node '$JX/bin/fleet-grid.mjs' - --screen projects; sleep 8" 2>/dev/null
+  sleep 2
+  scr="$(tmux -L cfjxgrid capture-pane -p 2>/dev/null)"
+  is "off: the Projects screen has acme-api"      "yes" "$(grep -q 'acme-api' <<< "$scr" && echo yes || echo no)"
+  is "...and no card for Jarvis's project"        "no"  "$(grep -q '[0-9] jarvis' <<< "$scr" && echo yes || echo no)"
+  tmux -L cfjxgrid send-keys ','; sleep 1
+  scr="$(tmux -L cfjxgrid capture-pane -p 2>/dev/null)"
+  is "the settings page has an Experimental section" "yes" "$(grep -q '^ Experimental' <<< "$scr" && echo yes || echo no)"
+  is "...with jarvis off, and tagged"             "yes" "$(grep -qE 'jarvis +○ off +\[experimental\]' <<< "$scr" && echo yes || echo no)"
+  is "...and shots, tagged"                       "yes" "$(grep -qE 'shots +[○●] (on|off) +\[experimental\]' <<< "$scr" && echo yes || echo no)"
+  is "...with no project row for Jarvis's project" "no" "$(grep -qE '^ *(▸ )? *jarvis +work' <<< "$scr" && echo yes || echo no)"
+  # acme-api is the only project row, so one ↓ is the jarvis row.
+  tmux -L cfjxgrid send-keys j; sleep 0.5
+  scr="$(tmux -L cfjxgrid capture-pane -p 2>/dev/null)"
+  is "↓ walks into it, and the key says what it does" "yes" "$(grep -q 'space/⏎ turn jarvis on/off' <<< "$scr" && echo yes || echo no)"
+  tmux -L cfjxgrid send-keys ' '; sleep 1.5
+  scr="$(tmux -L cfjxgrid capture-pane -p 2>/dev/null)"
+  is "space switches it on"                       "yes" "$(grep -qE 'jarvis +● on +\[experimental\]' <<< "$scr" && echo yes || echo no)"
+  is "...through fleet-experimental (the setting)" "on" "$(cat "$JXC/jarvis.enabled" 2>/dev/null)"
+  tmux -L cfjxgrid send-keys Escape; sleep 3
+  scr="$(tmux -L cfjxgrid capture-pane -p 2>/dev/null)"
+  is "...and the card is back"                    "yes" "$(grep -q '[0-9] jarvis' <<< "$scr" && echo yes || echo no)"
+
+  # FLEET-SHOTS, THE SECOND FEATURE: the same rule, one entry. A fleet dir with no shots in it
+  # resolves OFF and every subcommand refuses with the one sentence; --help still answers; a
+  # fleet dir that has used it resolves ON; and the generic command flips it.
+  fsx() { env -u CLAUDE_FLEET_JARVIS_DIR CLAUDE_FLEET_EXPERIMENTAL_DIR="$JX/xd" CLAUDE_FLEET_DIR="$JX/xf" HOME="$JX/home" "$@" 2>&1; }
+  printf '{"steps":[{"name":"home","goto":"http://localhost:1/"}]}\n' > "$JX/flow.json"
+  out="$(fsx node "$JX/bin/fleet-shots.mjs" --flow "$JX/flow.json" --dry-run)"; rc=$?
+  is "shots on a fresh install: refused"          "1"   "$rc"
+  is "...with the sentence that says how"         "fleet-shots: fleet-shots is experimental and disabled — enable with: fleet-experimental enable shots" "$out"
+  is "...and written down as off"                 "off" "$(cat "$JX/xd/shots.enabled" 2>/dev/null)"
+  # SERVE IS ASKED WITH A DEADLINE: a broken gate would start a server that never exits,
+  # and a row that hangs the suite is worse than one that fails. Still alive after 3s is
+  # "it served", which is the wrong answer, and it is killed by its own pid.
+  env -u CLAUDE_FLEET_JARVIS_DIR CLAUDE_FLEET_EXPERIMENTAL_DIR="$JX/xd" CLAUDE_FLEET_DIR="$JX/xf" HOME="$JX/home" \
+    node "$JX/bin/fleet-shots.mjs" serve --port 0 >/dev/null 2>&1 & fsp=$!      # env execs: $! is node
+  i=0; while [ "$i" -lt 30 ] && kill -0 "$fsp" 2>/dev/null; do i=$((i+1)); sleep 0.1; done
+  if kill -0 "$fsp" 2>/dev/null; then kill "$fsp" 2>/dev/null; wait "$fsp" 2>/dev/null; fsrc=served; else wait "$fsp"; fsrc=$?; fi
+  is "...and so is: fleet-shots serve"            "1"   "$fsrc"
+  # The SENTENCE, not the exit status: --check and verdict exit 1 on an empty folder anyway,
+  # so a status row would pass with the gate gone.
+  for sub in "list" "--check DIR" "verdict DIR"; do
+    is "...and so is: fleet-shots ${sub% DIR}"    "1"   "$(fsx node "$JX/bin/fleet-shots.mjs" ${sub/DIR/$JX} </dev/null | grep -c 'experimental and disabled' || true)"
+  done
+  is "--help still answers"                       "0"   "$(fsx node "$JX/bin/fleet-shots.mjs" --help >/dev/null 2>&1; echo $?)"
+  is "...saying it is experimental"               "1"   "$(fsx node "$JX/bin/fleet-shots.mjs" --help | grep -c 'experimental' || true)"
+  out="$(fsx "$JX/bin/fleet-experimental" enable shots)"
+  is "fleet-experimental enable shots"            "on"  "$(cat "$JX/xd/shots.enabled" 2>/dev/null)"
+  is "...and fleet-shots runs"                    "0"   "$(fsx node "$JX/bin/fleet-shots.mjs" --flow "$JX/flow.json" --dry-run >/dev/null 2>&1; echo $?)"
+  fsx "$JX/bin/fleet-experimental" disable shots >/dev/null
+  is "...disable puts it back"                    "1"   "$(fsx node "$JX/bin/fleet-shots.mjs" --flow "$JX/flow.json" --dry-run >/dev/null 2>&1; echo $?)"
+  rm -f "$JX/xd/shots.enabled"; mkdir -p "$JX/xf/shots/2026-09-30_10-00-00"
+  out="$(fsx "$JX/bin/fleet-experimental" list)"
+  is "an install that has used shots resolves ON" "1"   "$(grep -cE '^  shots +on ' <<< "$out" || true)"
+  is "...written down"                            "on"  "$(cat "$JX/xd/shots.enabled" 2>/dev/null)"
+  is "...and its folder is left alone"            "yes" "$([ -d "$JX/xf/shots/2026-09-30_10-00-00" ] && echo yes || echo no)"
+  is "list tags every feature"                    "2"   "$(grep -c '\[experimental\]' <<< "$out" || true)"
+  is "an unknown feature is refused by name"      "2"   "$(fsx "$JX/bin/fleet-experimental" enable warp >/dev/null 2>&1; echo $?)"
+  # The aliases, from OFF so the row cannot pass on a switch that was already on.
+  is "fleet-jarvis disable is an alias of it"     "off" "$(fsx "$JX/bin/fleet-jarvis" disable >/dev/null; cat "$JXC/jarvis.enabled")"
+  is "...and fleet-jarvis enable"                 "on"  "$(fsx "$JX/bin/fleet-jarvis" enable >/dev/null; cat "$JXC/jarvis.enabled")"
+  tmux -L cfjxgrid kill-server 2>/dev/null
+  tmux -L cf-jarvis kill-server 2>/dev/null; tmux -L cf-jxctl kill-server 2>/dev/null
+  rm -rf "${JX:?}"
+else
+  skip "Jarvis experimental switch" "tmux or node missing"
 fi
 
 # THE STEP NOTHING SAID WAS MISSING. fleet-phone reported a phone as fully set up while no
@@ -16916,7 +17158,7 @@ fi
 # The summary is derived now; this keeps the LIST honest.
 group "install list covers every command"
 # deliberately not linked: invoked by their parent, not by a user on PATH
-NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs fleet-digest.mjs fleet-jarvis.mjs"
+NOT_LINKED="fleet-grid.mjs fleet-serve.mjs npx-install.mjs fleet-digest.mjs fleet-jarvis.mjs fleet-experimental.mjs"
 for f in "$ROOT"/bin/*; do
   b="$(basename "$f")"
   case " $NOT_LINKED " in *" $b "*) continue ;; esac

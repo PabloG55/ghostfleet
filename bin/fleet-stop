@@ -79,7 +79,7 @@ done
 # so an agent calling a tool cannot take Jarvis down; only a person at a shell can.
 _jm="$HOME/.config/ghostfleet/jarvis"
 if [ "$SESSION" = master ]; then
-  if [ "$RECLAIM" != 1 ] && [ -f "$_jm" ] \
+  if [ "$RECLAIM" != 1 ] && [ -f "$_jm" ] && ! grep -qsx off "$_jm.enabled" \
      && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
     echo "fleet-stop: stopping Jarvis ('master' on $SOCK) — it stays off until it is started again" >&2
   else

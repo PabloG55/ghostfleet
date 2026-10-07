@@ -1925,7 +1925,14 @@ function agentCatalogue() {
     // the Projects screen would be the summary line lying at a glance, which is the one
     // place docs/mobile.md says it must not.
     const rollup = url.searchParams.get('rollup') !== '0' && gridSupportsJson();
-    const all = projects();
+    // JARVIS SWITCHED OFF IS GONE FROM THE PHONE, its own project included: that project is
+    // Jarvis's home, and a card for it would be a way to start its master with the contract
+    // and none of the switch. `jarvis_enabled` is how the client learns the switch — from
+    // the daemon, never a build flag — and `speak` rides beside it because the Mac's voice
+    // is the phone's, not Jarvis's, and /api/jarvis (which also reports it) is gone with it.
+    const jOn = jarvis.enabled();
+    const jHide = jOn ? null : jarvis.readMarkerFile();
+    const all = projects().filter(t => !(jHide && t.name === jHide.name && t.profile === jHide.profile));
     const counted = await Promise.all(all.map(async (t) => {
       let live = 0;
       try { live = execFileSync('tmux', ['-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
@@ -1946,7 +1953,7 @@ function agentCatalogue() {
         parked: cards.filter(x => st(x) === 'parked').length,
         total: cards.length } };
     }));
-    return send(res, 200, { home: HOME, projects: counted, agents: agentCatalogue() });
+    return send(res, 200, { home: HOME, projects: counted, agents: agentCatalogue(), jarvis_enabled: jOn, speak: speech.status() });
   }
 
   if (p === '/api/grid' && req.method === 'GET') {
@@ -2233,6 +2240,11 @@ function agentCatalogue() {
   //   `voice` is answered EVEN WITHOUT A JARVIS: it is the Mac's transcriber, not Jarvis's,
   // and every session's `talk` asks it here. `speak` likewise: whether the Mac reads replies
   // with Kokoro, which the phone's settings sheet reports beside the device's own voices.
+  // SWITCHED OFF, EVERY JARVIS ROUTE IS A 404 and says why — not a 200 that describes an
+  // absent Jarvis, which a client would draw as a band. /api/speak is NOT one of them: the
+  // per-message play button is the phone's own feature and keeps working.
+  if ((p === '/api/jarvis' || p.startsWith('/api/jarvis/')) && !jarvis.enabled())
+    return send(res, 404, { ok: false, disabled: true, experimental: true, text: jarvis.DISABLED_WHY });
   if (p === '/api/jarvis' && req.method === 'GET') {
     const st = jarvisState();
     if (st.present && !resolveProject(st.project).t)

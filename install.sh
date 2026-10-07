@@ -484,23 +484,47 @@ elif ! nvim_ok || [ ! -e "$NVIM_CFG" ]; then
     2) UNASKED+=("$what (the editor ^N opens)") ;;
   esac
 fi
-# JARVIS'S VOICE: whisper.cpp and one model, so the phone's conversation mode can be
-# transcribed on this machine (docs/jarvis.md). The most optional thing here, and held to a
-# stricter rule than the two above: NOT implied by --yes, because it is a ~550 MB download
-# that nobody accepted by agreeing to "install missing dependencies" — only a person at a
-# terminal saying yes to this question gets it. Already working is silent. And it can never
-# fail the install: text to Jarvis works without it, and the command says how to add it later.
-if "$REPO/bin/fleet-jarvis" voice >/dev/null 2>&1; then :
+# THE EXPERIMENTAL FEATURES (lib/experimental.mjs: Jarvis, fleet-shots) ARE OFF UNLESS SOMEBODY
+# TURNS THEM ON. `fleet-experimental list` writes every switch down the first time: on for a
+# machine that already uses a feature, so an update changes nothing for somebody using it,
+# and off everywhere else. Jarvis is the one offered here, because it has a download behind it. Offering to turn it on is a step of its own, clearly labelled, with
+# Enter meaning NO — and never under --yes or with nobody watching, because "install missing
+# dependencies" is not a yes to an experimental feature. Its voice (whisper, below) is asked
+# about only once it is on: hearing is Jarvis's conversation mode and has no other use.
+_jdir="${CLAUDE_FLEET_JARVIS_DIR:-$HOME/.config/ghostfleet}"
+"$REPO/bin/fleet-experimental" list >/dev/null 2>&1 || true
+_jon=0; grep -qsx on "$_jdir/jarvis.enabled" && _jon=1
+if [ "$_jon" = 1 ]; then :
 elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
   _save_yes="$ASSUME_YES"; ASSUME_YES=0
-  rc=0; ask_optional "· Jarvis can listen: install whisper.cpp + a speech model (~550 MB, transcribed on this machine only)?" || rc=$?
+  rc=0; ask_optional "· [experimental] Enable Jarvis — one session above every project's lead, that you type or talk to from the phone?" n || rc=$?
   ASSUME_YES="$_save_yes"
   case $rc in
-    0) "$REPO/bin/fleet-jarvis" voice --install || echo "! voice was not set up — text to Jarvis still works; retry with: fleet-jarvis voice --install" ;;
-    *) echo "  Skipped. Voice for Jarvis later: fleet-jarvis voice --install" ;;
+    0) "$REPO/bin/fleet-experimental" enable jarvis && _jon=1 ;;
+    *) echo "  Skipped. Jarvis stays off; turn it on later with: fleet-experimental enable jarvis (or the settings screen)" ;;
   esac
 else
-  vsay "· voice for Jarvis (optional, ~550 MB): fleet-jarvis voice --install"
+  vsay "· Jarvis (experimental) is off — turn it on with: fleet-experimental enable jarvis"
+fi
+if [ "$_jon" = 1 ]; then
+  # JARVIS'S VOICE: whisper.cpp and one model, so the phone's conversation mode can be
+  # transcribed on this machine (docs/jarvis.md). The most optional thing here, and held to a
+  # stricter rule than the two above: NOT implied by --yes, because it is a ~550 MB download
+  # that nobody accepted by agreeing to "install missing dependencies" — only a person at a
+  # terminal saying yes to this question gets it. Already working is silent. And it can never
+  # fail the install: text to Jarvis works without it, and the command says how to add it later.
+  if "$REPO/bin/fleet-jarvis" voice >/dev/null 2>&1; then :
+  elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
+    _save_yes="$ASSUME_YES"; ASSUME_YES=0
+    rc=0; ask_optional "· Jarvis can listen: install whisper.cpp + a speech model (~550 MB, transcribed on this machine only)?" || rc=$?
+    ASSUME_YES="$_save_yes"
+    case $rc in
+      0) "$REPO/bin/fleet-jarvis" voice --install || echo "! voice was not set up — text to Jarvis still works; retry with: fleet-jarvis voice --install" ;;
+      *) echo "  Skipped. Voice for Jarvis later: fleet-jarvis voice --install" ;;
+    esac
+  else
+    vsay "· voice for Jarvis (optional, ~550 MB): fleet-jarvis voice --install"
+  fi
 fi
 # THE MAC'S SPEAKING VOICE: Kokoro, which fleet-serve reads the phone's replies with when it
 # is here (lib/speech.mjs) — better English, real Spanish, and nothing leaves the machine.
@@ -628,7 +652,7 @@ CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fle
          fleet-worktrees fleet-ack fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy fleet-merged fleet-shipped fleet-look.mjs fleet-shots.mjs
          fleet-clean fleet-open fleet-restart fleet-project fleet-demo fleet-phone fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-hibernate fleet-meter.mjs fleet-review
-         fleet-digest fleet-jarvis fleet-update fleet-mod fleet-ledger
+         fleet-digest fleet-jarvis fleet-experimental fleet-update fleet-mod fleet-ledger
          agent-here opencode-here codex-here agy-here cursor-here)
 linked=()
 for b in "${CF_BINS[@]}"; do

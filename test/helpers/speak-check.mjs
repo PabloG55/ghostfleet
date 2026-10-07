@@ -97,7 +97,7 @@ Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: tr
   value: class { constructor(t) { this.text = t; this.rate = 1; this.voice = null; this.lang = ''; } } });
 Object.defineProperty(globalThis, 'getSelection', { configurable: true, writable: true, value: () => '' });
 
-const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom, talkRefusal } =
+const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom, talkRefusal, jarvisSurfaces } =
   await import(new URL('../../web/app.js', import.meta.url).href);
 is('web/app.js exports speakable()', 'function', typeof speakable);
 
@@ -291,6 +291,16 @@ is('no answer from the Mac yet is not "voice is off"', true, /still asking the M
 is('a Mac with no transcriber says why, for a session too', 'voice is off — no whisper', talkRefusal(sess, { voice: { ready: false, why: 'no whisper' } }, live, caps));
 is('no microphone in this browser', 'this browser gives web apps no microphone', talkRefusal(sess, hears, live, { ...caps, mic: false }));
 is('no Web Audio in this browser', 'this browser has no Web Audio to listen with', talkRefusal(sess, hears, live, { ...caps, audio: false }));
+// JARVIS IS EXPERIMENTAL, and switched off it is GONE — not a band that says "off", not a
+// talk button that refuses. Both directions, and the old-daemon case that sends no switch.
+const jp = { present: true, project: 'jarvis' };
+is('Jarvis off: no band', false, jarvisSurfaces(false, jp).bar);
+is('...no Jarvis screen', false, jarvisSurfaces(false, jp).screen);
+is('...and no talk button anywhere', false, jarvisSurfaces(false, jp).talk);
+is('Jarvis on: the band is there', true, jarvisSurfaces(true, jp).bar);
+is('...and talk', true, jarvisSurfaces(true, jp).talk);
+is('...but no band before /api/jarvis answers', false, jarvisSurfaces(true, null).bar);
+is('a daemon with no switch keeps the old behaviour', true, jarvisSurfaces(null, jp).bar && jarvisSurfaces(null, jp).talk);
 is('a working session can be talked to (the prompt queues)', '', talkRefusal(sess, hears, { ...live, status: 'working' }, caps));
 
 // ── 7. the column count, which is what makes rotation safe ────────────────

@@ -16,6 +16,8 @@
 command -v jq >/dev/null 2>&1 || exit 0
 MARK="${CLAUDE_FLEET_JARVIS_DIR:-$HOME/.config/ghostfleet}/jarvis"
 [ -f "$MARK" ] || exit 0
+# Switched off is no Jarvis, so nothing to guard — the same direction as no marker.
+grep -qsx off "$MARK.enabled" && exit 0
 input="$(cat)"
 [ "$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)" = Bash ] || exit 0
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # fleet-jarvis — make, inspect and look after Jarvis, the master of masters (docs/jarvis.md).
 #
+#   fleet-jarvis enable|disable  Jarvis is EXPERIMENTAL and off by default (docs/jarvis.md)
 #   fleet-jarvis init            create and register Jarvis's home (ghostfleet jarvis runs this)
-#   fleet-jarvis status          where it lives, whether it runs, what waits on the owner's yes
+#   fleet-jarvis status          on or off, where it lives, whether it runs, what waits on a yes
 #   fleet-jarvis voice --install the optional local speech-to-text (whisper.cpp + a model)
 #   fleet-jarvis --help          everything else
 #
