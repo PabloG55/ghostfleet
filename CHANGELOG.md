@@ -34,6 +34,16 @@ the detail, and every entry here names the PR that carries the argument.
   where the shell hook let it through; a session without the mod keeps the shell versions,
   unchanged. One yes is still one action when both run.
 
+- **Prompts delivered through the mod instead of typed into the pane** (docs/OPERATIONS.md
+  "Delivering prompts through the mod"). For a Claude session whose mod is live,
+  `fleet-send` (and so `fleet_send`, the phone and every nudge) hands the prompt to the mod,
+  which submits it as a turn of its own once the session is idle. A half-typed message in the
+  box stays where it is. "Could not confirm submit" gives way to the id of the turn the
+  prompt started, and a `--reply-to` is armed by that turn rather than by whichever prompt
+  comes next. The queue, the outputs and the exit codes are unchanged. `--now` still pastes.
+  Sessions without a live mod get the paste, as before, and so does any call with
+  `CLAUDE_FLEET_MOD_DELIVER=off`.
+
 - **cursor (Cursor's CLI, `cursor-agent`) as a fifth agent** (docs/multi-agent-sessions.md).
   `fleet-spawn --agent cursor`, the project agent column and the phone's pickers offer it once
   `cursor-agent` is on PATH. `install.sh` writes an event bridge, the ghostfleet MCP server and

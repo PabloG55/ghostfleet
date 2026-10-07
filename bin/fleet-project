@@ -95,7 +95,10 @@ case "$cmd" in
     # than an error, because nothing ever reports that it didn't.
     if [ -n "$AGENT" ]; then
       if command -v fleet-agent >/dev/null 2>&1; then
-        fleet-agent list 2>/dev/null | grep -qx -- "$AGENT" \
+        # A HERE-STRING, NOT A PIPE (CLAUDE.md, pipefail). Piped, `grep -q` quits on the
+        # match and `fleet-agent list` can take SIGPIPE writing the agents after it, which
+        # pipefail turns into "unknown agent 'opencode'": measured 15 of 400 on macOS.
+        grep -qx -- "$AGENT" <<< "$(fleet-agent list 2>/dev/null)" \
           || { echo "fleet-project: unknown agent '$AGENT' (known: $(fleet-agent list | tr '\n' ' '))" >&2; exit 1; }
       else
         case "$AGENT" in *[!a-z0-9_-]*) echo "fleet-project: bad agent '$AGENT'" >&2; exit 1 ;; esac
@@ -157,7 +160,7 @@ case "$cmd" in
     case "$WANT" in
       --none|none|'') WANT="" ;;
       *) if command -v fleet-agent >/dev/null 2>&1; then
-           fleet-agent list 2>/dev/null | grep -qx -- "$WANT" \
+           grep -qx -- "$WANT" <<< "$(fleet-agent list 2>/dev/null)" \
              || { echo "fleet-project: unknown agent '$WANT' (known: $(fleet-agent list | tr '\n' ' '))" >&2; exit 1; }
          else
            case "$WANT" in *[!a-z0-9_-]*) echo "fleet-project: bad agent '$WANT'" >&2; exit 1 ;; esac

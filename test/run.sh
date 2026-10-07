@@ -1127,6 +1127,11 @@ is "...and warns what the choice costs"       "1" \
    "$(fp agent already codex 2>&1 | grep -c 'heads up' || true)"
 is "...and does not warn for the default"     "0" \
    "$(fp agent already --none 2>&1 | grep -c 'heads up' || true)"
+# THE ROW ABOVE FAILED ONE macOS LEG with no change to this command: the agent check piped
+# `fleet-agent list` into `grep -qx` under pipefail, and the SIGPIPE race (CLAUDE.md) said
+# "unknown agent 'opencode'" in 15 of 400 runs. A race is not assertable; the shape is.
+is "...and the agent check pipes into no grep -q" "0" \
+   "$(matches '^[^#]*fleet-agent list[^|]*[|] *grep -q' "$ROOT/bin/fleet-project")"
 rm -rf "$T"
 
 # ── the demo profile, built rather than hand-made ────────────────────────────
@@ -7933,6 +7938,144 @@ if command -v tmux >/dev/null 2>&1; then
   tmux -L cfqr kill-server 2>/dev/null; rm -rf "$QR"
 else
   skip "a queued question carries its reply address" "tmux missing"
+fi
+
+# ── 4c1m. a session whose mod is live takes its prompts from the mod ─────────
+# fleet-send hands a prompt to mods/ghostfleet (register.js, DELIVERY) instead of pasting
+# it when the target's record says the mod is live AND delivers. The fixture below is that
+# mod's protocol in bash, run as the pane's program: it claims <id>.json by renaming it,
+# logs TURN, writes the receipt with a turnId, and ends each turn with the REAL Stop hook,
+# so the queue's drain under test is the one the fleet runs. Its cursor sits inside a drawn
+# composer, so a half-typed message is really in the box. What the engine's side does
+# (submitting, naming the turn) is the harness's (`claude plugin test`) and the live proof's.
+group "a session whose mod is live takes its prompts from the mod"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  M="$(mktemp -d)"; MF="$M/fleet"; MA="$M/ask"; mkdir -p "$MF" "$MA"
+  cat > "$M/mod" <<'MOD'
+#!/usr/bin/env bash
+# $1 = fleet dir, $2 = turn log, $3 = seconds a turn lasts (a task-slow-* turn, longer)
+dir="$1"; log="$2"; dur="$3"; sid=fm-1; sp="$dir/$sid.handoff"; st=ready; n=0
+rule='────────────────────────────────────────'
+mkdir -p "$sp"
+rec() { jq -n --arg s "$st" --argjson pid $$ --argjson hb "$(( $(date +%s) * 1000 ))" \
+          '{session_id:"fm-1", sock:"cffm", slot:"w1", status:$s, state:$s, source:"mod", mod:{v:"t", pid:$pid, hb:$hb}}' \
+          > "$dir/.fm.tmp" && mv -f "$dir/.fm.tmp" "$dir/$sid.json"; }
+rec; printf '%s\n' $$ > "$sp/.ready"
+printf '\033[2J\033[H%s\n❯ \n%s\n  status' "$rule" "$rule"; printf '\033[2;3H'
+while :; do
+  rec
+  f=""; [ -f "$dir/pause" ] || f="$(ls "$sp" 2>/dev/null | grep -E '^[0-9].*\.json$' | sort | head -1)"
+  if [ -n "$f" ] && mv "$sp/$f" "$sp/${f%.json}.taken" 2>/dev/null; then
+    id="${f%.json}"; n=$((n + 1))
+    text="$(jq -r .text "$sp/$id.taken" | tail -n 1)"; rs="$(jq -r '.reply.sock // ""' "$sp/$id.taken")"
+    if [ "$text" = DROPME ]; then
+      printf '{"id":"%s","dropped":"refused by a hook"}' "$id" > "$sp/$id.done"; rm -f "$sp/$id.taken"; continue
+    fi
+    st=working; rec
+    printf 'TURN %s%s\n' "$text" "${rs:+ reply=$rs}" >> "$log"
+    printf '{"id":"%s","turnId":"t%s"}' "$id" "$n" > "$sp/$id.done"; rm -f "$sp/$id.taken"
+    case "$text" in task-slow-*) sleep 1.5 ;; *) sleep "$dur" ;; esac; st=ready; rec
+    printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s"}' "$sid" "$PWD" | "$HOOK" >/dev/null 2>&1
+    rec
+  fi
+  sleep 0.2
+done
+MOD
+  tmux -L cffm kill-server 2>/dev/null
+  tmux -L cffm new-session -d -x 120 -y 30 -s w1 \
+    "env CLAUDE_FLEET_DIR='$MF' CLAUDE_FLEET_SOCK=cffm CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
+         CLAUDE_FLEET_QUEUE_EVERY=0.3 HOOK='$ROOT/hooks/fleet-event.sh' PATH='$ROOT/bin':\"\$PATH\" \
+         bash '$M/mod' '$MF' '$M/turns' 0.3" 2>/dev/null
+  MS() { env -u TMUX CLAUDE_FLEET_DIR="$MF" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cffm "$@" 2>&1; }
+  # The paste's own submit check waits up to 8s for a composer this fixture never clears,
+  # so the fallback rows start the send in the background, read the pane as soon as the
+  # paste lands, and stop that one send by its pid.
+  mbg() { local out="$1" pat="$2" pid i; shift 2
+          MS "$@" > "$out" & pid=$!
+          for i in $(seq 1 40); do grep -q -- "$pat" <<< "$(mpane)" && break; sleep 0.1; done
+          kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+  mpane() { tmux -L cffm capture-pane -p -t w1 2>/dev/null; }
+  mturns() { tr '\n' '|' < "$M/turns" 2>/dev/null | sed 's/|$//'; }
+  mwait() { local i; for i in $(seq 1 "$2"); do [ "$(grep -c . "$M/turns" 2>/dev/null)" -ge "$1" ] && return 0; sleep 0.2; done; return 1; }
+  # Between rows: the last turn over, its Stop hook run, and the fixture claiming again.
+  mready() { local i; for i in $(seq 1 40); do
+               [ "$(jq -r .state "$MF/fm-1.json" 2>/dev/null)" = ready ] \
+                 && ! grep -qE '\.(json|taken)$' <<< "$(ls "$MF/fm-1.handoff" 2>/dev/null)" \
+                 && [ ! -s "$MF/cffm.w1.queue" ] && return 0; sleep 0.1; done; }
+  for _ in $(seq 1 30); do [ -s "$MF/fm-1.handoff/.ready" ] && break; sleep 0.1; done
+
+  is "mod-target: a live mod that delivers is found" "fm-1 ready" \
+     "$(node "$ROOT/lib/mod-target.mjs" "$MF" cffm w1 | cut -f1,2 | tr '\t' ' ')"
+  # A record whose writer is gone (a pid nobody has) is not a target, whatever .ready says.
+  mrec="$(node --input-type=module -e "
+    import { modTarget } from '$ROOT/lib/mod-target.mjs';
+    const d = '$MF', now = Date.now();
+    console.log([modTarget(d, 'cffm', 'w1', now + 200000) ? 'stale-taken' : 'stale-refused',
+                 modTarget(d, 'cffm', 'w1', now, () => false) ? 'dead-taken' : 'dead-refused',
+                 modTarget(d, 'cffm', 'nobody', now) ? 'other-taken' : 'other-refused'].join(' '))")"
+  is "mod-target: a stale heartbeat, a dead writer, another slot are not targets" \
+     "stale-refused dead-refused other-refused" "$mrec"
+
+  # A half-typed message sits in the composer the whole time; no delivery may touch it.
+  tmux -L cffm send-keys -t w1 -l "half typed words"
+  for _ in $(seq 1 20); do grep -q 'half typed' <<< "$(mpane)" && break; sleep 0.1; done
+  ma="$(MS w1 "task-alpha")"; mwait 1 25
+  is "an idle session: delivered through the mod"     "fleet-send: → w1" "$ma"
+  is "...as a turn of its own"                        "TURN task-alpha" "$(mturns)"
+  is "...and the receipt names the turn it started"   "1" "$(cat "$MF"/fm-1.handoff/*.done 2>/dev/null | grep -c '"turnId":"t1"' || true)"
+  is "...the half-typed message is untouched"         "1" "$(grep -c '❯ half typed words$' <<< "$(mpane)" || true)"
+  is "...with nothing glued onto it"                  "0" "$(grep -c 'task-alpha' <<< "$(mpane)" || true)"
+
+  # Busy: queued as today, then drained by the real Stop hook through the mod, in order,
+  # with the half-typed message still in the box (the mod does not wait for it to clear).
+  # The queued one is a question: its address rides in the queue record, then in the
+  # handoff, and the mod arms it at that prompt's turn.start, so fleet-send writes no
+  # marker of its own that a stranger's turn could arm.
+  mready; : > "$M/turns"
+  MS w1 "task-slow-charlie" >/dev/null; mwait 1 25
+  md="$(MS --reply-to cf-ask/master --reply-dir "$MA" w1 "what broke")"
+  is "a working session: queued, as before"           "1" "$(grep -c 'queued #1' <<< "$md" || true)"
+  mwait 2 40
+  is "...and run as its own turn after, in order"     "TURN task-slow-charlie|TURN what broke reply=cf-ask" "$(mturns)"
+  is "...the box still holds what was typed"          "1" "$(grep -c '❯ half typed words$' <<< "$(mpane)" || true)"
+  is "...and fleet-send armed nothing itself"         "0" "$([ -f "$MF/cffm.w1.reply-to" ] && echo 1 || echo 0)"
+
+  mready
+  mx="$(MS w1 "DROPME")"; mxc=$?
+  is "a prompt the session refuses: exit 1, and said" "1 1" "$mxc $(grep -c 'not delivered' <<< "$mx" || true)"
+
+  # A mod that is live and idle but never claims: taken back and pasted.
+  : > "$M/turns"; touch "$MF/pause"
+  CLAUDE_FLEET_MOD_CLAIM=1 mbg "$M/mf" task-foxtrot w1 "task-foxtrot"
+  is "an unclaimed handoff is taken back and pasted"  "1 1" \
+     "$(grep -c 'did not take the prompt' "$M/mf" || true) $(grep -c 'task-foxtrot' <<< "$(mpane)" || true)"
+  is "...and leaves nothing for the mod to deliver"   "0" "$(ls "$MF/fm-1.handoff" | grep -c 'json$' || true)"
+  rm -f "$MF/pause"; sleep 0.5
+  is "...so it never runs twice"                      "" "$(mturns)"
+
+  # No .ready: a mod that only reports. The paste, at once, with no window waited out.
+  rm -f "$MF/fm-1.handoff/.ready"
+  mbg "$M/mg" task-golf w1 "task-golf"
+  is "a mod that does not deliver: the paste"         "1 0" \
+     "$(grep -c 'task-golf' <<< "$(mpane)" || true) $(grep -c 'did not take' "$M/mg" || true)"
+  tmux -L cffm kill-server 2>/dev/null
+
+  # The arming the mod wrote names its turn, and a prompt typed into that turn must not
+  # move it (the hook re-arms only a paste's).
+  printf 'cf-ask\037master\037%s\n' "$MA" > "$MF/cffm.w1.reply-to"
+  printf '5\nturn t9\n' > "$MF/cffm.w1.reply-to.armed"
+  printf '{"hook_event_name":"UserPromptSubmit","session_id":"fm-1","cwd":"%s","prompt":"typed mid-turn"}' "$M" \
+    | env -u TMUX CLAUDE_FLEET_DIR="$MF" CLAUDE_FLEET_SOCK=cffm CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
+      "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  is "a mod's arming survives a prompt typed into its turn" "5|turn t9" "$(paste -sd'|' "$MF/cffm.w1.reply-to.armed")"
+  printf '5\n' > "$MF/cffm.w1.reply-to.armed"
+  printf '{"hook_event_name":"UserPromptSubmit","session_id":"fm-1","cwd":"%s","prompt":"next"}' "$M" \
+    | env -u TMUX CLAUDE_FLEET_DIR="$MF" CLAUDE_FLEET_SOCK=cffm CLAUDE_FLEET_SLOT=w1 CLAUDE_FLEET_NOTIFIER=off \
+      "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  is "...while a paste's arming is redone, as before" "0" "$(head -n 1 "$MF/cffm.w1.reply-to.armed")"
+  rm -rf "${M:?}"
+else
+  skip "a session whose mod is live takes its prompts from the mod" "tmux/jq/node missing"
 fi
 
 # The queue is keyed by the session NAME, like every other per-session marker, so a rename

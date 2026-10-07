@@ -762,7 +762,11 @@ fi
 # can't confirm the submit, which closes the common way that happens.
 if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
   rt="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.reply-to"
-  if [ -f "$rt" ] && [ "$EVENT" = "UserPromptSubmit" ]; then
+  # An arming the mod wrote names its turn on a second line (`turn <id>`): it was armed by
+  # the turn.start of the very prompt that asked, and a prompt typed into that turn must
+  # not move its offset past the start of the answer. Only a paste's arming is redone.
+  if [ -f "$rt" ] && [ "$EVENT" = "UserPromptSubmit" ] \
+     && ! grep -q '^turn ' "$rt.armed" 2>/dev/null; then
     # The arming marker also carries WHERE THIS TURN STARTS in the transcript — the line
     # count now — so the Stop below can ask "did this turn SendMessage the answer" without
     # finding the one that answered the previous question to the same asker. An empty or
@@ -896,8 +900,13 @@ if [ "$EVENT" = "Stop" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] \
   case "$_qp" in ''|*[!0-9]*) _qp="" ;; esac
   if [ -z "$_qp" ] || ! kill -0 "$_qp" 2>/dev/null; then
     export -f _input_state
+    # A session whose mod delivers takes the prompt without touching the composer
+    # (register.js, DELIVERY), so a half-typed message there is no reason to wait. Asked
+    # only when the composer is NOT empty, and asked again each time: a mod that has died
+    # since means the paste, and the paste still waits.
+    _qmt="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../lib/mod-target.mjs"
     FLEET_DIR="$FLEET_DIR" nohup bash -c '
-      sock="$1"; slot="$2"; lock="$3"; every="$4"; tries="$5"
+      sock="$1"; slot="$2"; lock="$3"; every="$4"; tries="$5"; mt="$6"
       echo $$ > "$lock" 2>/dev/null
       trap "rm -f \"$lock\"" EXIT
       i=0
@@ -905,12 +914,16 @@ if [ "$EVENT" = "Stop" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] \
         sleep "$every"; i=$((i + 1))
         tmux -L "$sock" has-session -t "=$slot" 2>/dev/null || exit 0
         [ -s "$FLEET_DIR/$sock.$slot.queue" ] || exit 0
-        _input_state "$sock" "$slot"; [ "$?" = 0 ] || continue
+        _input_state "$sock" "$slot"
+        if [ "$?" != 0 ]; then
+          [ "${CLAUDE_FLEET_MOD_DELIVER:-on}" != off ] && [ -f "$mt" ] \
+            && node "$mt" "$FLEET_DIR" "$sock" "$slot" >/dev/null 2>&1 || continue
+        fi
         fleet-send -s "$sock" --dequeue "$slot" >/dev/null 2>&1
         [ "$?" = 3 ] || exit 0
       done
     ' _ "$CLAUDE_FLEET_SOCK" "$SLOT" "$_qd" "${CLAUDE_FLEET_QUEUE_EVERY:-1}" \
-         "${CLAUDE_FLEET_QUEUE_TRIES:-300}" >/dev/null 2>&1 &
+         "${CLAUDE_FLEET_QUEUE_TRIES:-300}" "$_qmt" >/dev/null 2>&1 &
   fi
 fi
 
