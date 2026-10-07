@@ -574,25 +574,39 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     # master turn on the shared account. Never fires for the lead's own turns (this
     # block is workers-only); fleet-send queues it if the master is mid-turn.
     #
-    # Precedence (matches the TUI settings page, projects screen → ,):
-    #   <sock>.notify-lead-off  is an authoritative KILL SWITCH — if present this
-    #   fleet NEVER pushes, overriding the env var, the per-fleet on-marker, AND the
-    #   global default. That's how "disable worker→master nudges for THIS project"
-    #   works even when the global default is on. Otherwise push is on when any of
-    #   env=1 / per-fleet on-marker / global marker is set.
-    # MOST SPECIFIC WINS: a per-SESSION marker (<sock>.<session>.notify-lead[-off],
-    # set from the grid's settings page) overrides the project's, which overrides the
-    # env var / global default. So one noisy worker can be silenced without touching
-    # the project, and one worker can push while the rest of the project stays quiet.
+    # PRECEDENCE — MOST SPECIFIC WINS, at every level. This is the one statement of it;
+    # the grid's settings pages, fleet-serve and the docs point here.
+    #   A worker of MASTER:
+    #     1. its own <sock>.<worker>.notify-lead-off -> silent; .notify-lead -> push
+    #     2. the project's <sock>.notify-lead-off    -> silent (overrides env and global)
+    #     3. env CLAUDE_FLEET_NOTIFY_LEAD=1, the project's <sock>.notify-lead, or the
+    #        global ~/.config/ghostfleet/notify-lead  -> push;  none of them -> silent
+    #   A CHILD OF A SUB-LEAD (a live parent named in <sock>.<child>.parent):
+    #     1. the child's own .notify-lead-off -> silent; its .notify-lead -> push
+    #     2. the SUB-LEAD's own .notify-lead-off -> silent; its .notify-lead -> push
+    #     3. the project's <sock>.notify-lead-off -> silent
+    #     4. otherwise -> push
+    # Per-session markers are set from the grid's settings page (,); the project's from the
+    # projects screen (,). So one noisy worker can be silenced without touching the
+    # project, and one can push while the rest of the project stays quiet.
+    # A sub-lead's own marker is the same file that decides whether ITS turns nudge master,
+    # so switching a sub-lead off quiets it in both directions.
+    #   A SUB-LEAD IS WOKEN BY DEFAULT (step 4). The opt-in exists to keep background
+    # chatter off a master that did not ask to be interrupted; a sub-lead spawned these
+    # workers in order to wait for them, and a done it has to poll for is the gap this
+    # whole feature closes. The project's off-switch used to sit ABOVE the per-session
+    # markers on this path only, so a project switched off with every session switched on
+    # filed its children's dones in the sub-lead's inbox and never woke it — while the
+    # settings page said the session's setting won. Now the sub-lead path reads like
+    # master's, with the sub-lead as one more level between the child and the project.
     _sm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}"
     _pm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}"
+    _lm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${_parent}"
     _push=0
-    # A SUB-LEAD IS WOKEN BY DEFAULT. The opt-in below exists to keep background chatter
-    # off a master that did not ask to be interrupted; a sub-lead spawned these workers in
-    # order to wait for them, and a done it has to poll for is the gap this whole feature
-    # closes. The kill switch and the child's own -off marker still win — "never push from
-    # this fleet" and "silence this worker" mean what they say at every level.
     if   [ -n "$_parent" ] && [ -f "$_sm.notify-lead-off" ]; then _push=0
+    elif [ -n "$_parent" ] && [ -f "$_sm.notify-lead" ];     then _push=1
+    elif [ -n "$_parent" ] && [ -f "$_lm.notify-lead-off" ]; then _push=0
+    elif [ -n "$_parent" ] && [ -f "$_lm.notify-lead" ];     then _push=1
     elif [ -n "$_parent" ] && [ -f "$_pm.notify-lead-off" ]; then _push=0
     elif [ -n "$_parent" ];                                  then _push=1
     elif [ -n "$SLOT" ] && [ -f "$_sm.notify-lead-off" ]; then _push=0

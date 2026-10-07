@@ -4133,6 +4133,48 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   nlfire docs-pass Stop
   is "a top-level worker's done still goes to master" "1" "$(nlc 'docs-pass	done' "$NLF/cfnl.inbox")"
   is "...and never to a sub-lead"                   "0" "$(nlc 'docs-pass' "$NLF/cfnl.api-fix.inbox")"
+
+  # ── who wakes: MOST SPECIFIC WINS, child → sub-lead → project → default push ──
+  # The project's off-switch once sat above every per-session marker on this path only, so
+  # a project switched off with all three sessions switched on filed four dones in the
+  # sub-lead's inbox and never woke it. Each row sets the markers from scratch, fires one
+  # done, and reads the wake target's stamp — written synchronously at the moment of the
+  # decision, before the backgrounded fleet-send, so a row costs no wait in either
+  # direction. A row is "C:on L:off P:off": child, sub-lead, project; absent = no marker.
+  nlmark() {                                    # $1 = file prefix, $2 = on|off|''
+    rm -f "$1.notify-lead" "$1.notify-lead-off"
+    case "$2" in on) : > "$1.notify-lead" ;; off) : > "$1.notify-lead-off" ;; esac
+  }
+  nlwake() {                                    # $1 = slot, then C:/L:/P: settings → 1|0
+    local slot="$1" c='' l='' pr='' kv; shift
+    for kv in "$@"; do case "$kv" in C:*) c="${kv#C:}" ;; L:*) l="${kv#L:}" ;; P:*) pr="${kv#P:}" ;; esac; done
+    nlmark "$NLF/cfnl.$slot" "$c"; nlmark "$NLF/cfnl.api-fix" "$l"; nlmark "$NLF/cfnl" "$pr"
+    rm -f "$NLF/cfnl.api-fix.notify.stamp" "$NLF/cfnl.notify.stamp"
+    nlfire "$slot" Stop
+    local st="$NLF/cfnl.notify.stamp"; [ "$slot" = api-fix-tests ] && st="$NLF/cfnl.api-fix.notify.stamp"
+    [ -s "$st" ] && echo 1 || echo 0
+  }
+  is "child: no markers anywhere wakes the sub-lead"          "1" "$(nlwake api-fix-tests)"
+  is "child: project off, nothing per-session -> silent"      "0" "$(nlwake api-fix-tests P:off)"
+  is "child: project off, ALL sessions on -> sub-lead woken"  "1" "$(nlwake api-fix-tests P:off L:on C:on)"
+  is "child: project off, sub-lead on -> woken"               "1" "$(nlwake api-fix-tests P:off L:on)"
+  is "child: project off, child on -> woken"                  "1" "$(nlwake api-fix-tests P:off C:on)"
+  is "child: sub-lead off -> silent"                          "0" "$(nlwake api-fix-tests L:off)"
+  is "child: sub-lead off beats project on"                   "0" "$(nlwake api-fix-tests L:off P:on)"
+  is "child: child on beats sub-lead off"                     "1" "$(nlwake api-fix-tests C:on L:off P:off)"
+  is "child: child off -> silent even with sub-lead on"       "0" "$(nlwake api-fix-tests C:off L:on)"
+  is "child: child off beats everything on"                   "0" "$(nlwake api-fix-tests C:off L:on P:on)"
+  # master's path is unchanged: off by default, the project switch silences it, and a
+  # worker's own marker still beats the project's
+  is "master: no markers anywhere -> silent"                  "0" "$(nlwake docs-pass)"
+  is "master: project on -> woken"                            "1" "$(nlwake docs-pass P:on)"
+  is "master: project off -> silent"                          "0" "$(nlwake docs-pass P:off)"
+  is "master: project off, worker on -> woken"                "1" "$(nlwake docs-pass P:off C:on)"
+  is "master: project on, worker off -> silent"               "0" "$(nlwake docs-pass P:on C:off)"
+  is "master: a sub-lead's marker means nothing to master"    "0" "$(nlwake docs-pass L:on)"
+  nlmark "$NLF/cfnl.api-fix-tests" ''; nlmark "$NLF/cfnl.docs-pass" ''; nlmark "$NLF/cfnl.api-fix" ''; nlmark "$NLF/cfnl" ''
+  # those dones overwrote the child's status; the cards below read it as needing you
+  nlfire api-fix-tests Notification 'Claude needs your permission to use Bash'
   # fleet-inbox, run AS the sub-lead, reads the sub-lead's inbox; run as master, master's
   sub_in="$(nlenv CLAUDE_FLEET_SLOT=api-fix "$ROOT/bin/fleet-inbox" -s cfnl --all 2>&1)"
   top_in="$(nlenv CLAUDE_FLEET_SLOT=master  "$ROOT/bin/fleet-inbox" -s cfnl --all 2>&1)"
