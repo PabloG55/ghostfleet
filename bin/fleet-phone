@@ -109,6 +109,19 @@ if command -v tailscale >/dev/null 2>&1; then
   case "$TAILNET" in *[!0-9.]*) TAILNET="" ;; esac
 fi
 
+# The voice lines, from the same code fleet-jarvis and fleet-serve answer with, so the three
+# cannot disagree. Kokoro's is the deep check (does the venv import), which costs a Python
+# start: worth it here, where somebody asked, and why the phone's poll uses the cheap one.
+VOICE="$(node --input-type=module -e '
+  const [jar, kok] = await Promise.all([import(process.argv[1]), import(process.argv[2])]);
+  const w = jar.voiceStatus(), k = await kok.check();
+  console.log(w.ready ? `✓ hearing: whisper.cpp (${w.model})` : "· hearing: whisper.cpp is not installed, so the phone types (optional, ~550 MB): fleet-jarvis voice --install");
+  console.log(k.ready ? "✓ speaking: Kokoro reads replies on the Mac"
+    : k.state === "missing" ? "· speaking: the phone’s own voice — Kokoro is not installed (optional, ~350 MB): fleet-jarvis voice --kokoro --install"
+    : k.state === "off" ? `· speaking: the phone’s own voice — ${k.why}`
+    : `! speaking: Kokoro is BROKEN, so the phone uses its own voice — ${k.why}`);
+' "$BIN_DIR/../lib/jarvis.mjs" "$BIN_DIR/../lib/kokoro-setup.mjs" 2>/dev/null)"
+
 DONE=0
 [ "$CONFIGURED" = 1 ] && DONE=$((DONE + 1))
 [ "$ENROLLED" = 1 ]   && DONE=$((DONE + 1))
@@ -150,6 +163,13 @@ mark() { [ "$1" = 1 ] && printf '  ✓ %s\n' "$2" || printf '  · %s\n' "$2"; }
   mark "$ENROLLED"   "$([ "$ENROLLED" = 1 ] && echo "a phone is enrolled" || echo "no passkey enrolled yet")"
   mark "$RUNNING"    "$([ "$RUNNING" = 1 ] && echo "the daemon is listening" || echo "the daemon is not running")"
   mark "$NOTIFY"     "$([ "$NOTIFY" = 1 ] && echo "notifications: on ($SUBS device$([ "$SUBS" = 1 ] || echo s))" || echo "notifications: not set up")"
+  # THE MAC'S VOICE, BOTH HALVES, and not a step: neither is needed for the phone to work,
+  # so neither counts toward "N of 4" or ever becomes the Next line. Without whisper the
+  # phone types; without Kokoro it reads replies in its own voice. They are listed because
+  # otherwise nobody learns they exist — each with the one command that adds or repairs it.
+  if [ -n "$VOICE" ]; then
+    while IFS= read -r vl; do printf '  %s\n' "$vl"; done <<< "$VOICE"
+  fi
   if [ -n "$NEXT" ]; then
     echo
     echo "  Next:"

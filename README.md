@@ -199,6 +199,19 @@ over **Tailscale** — `fleet-serve` refuses a wildcard, a LAN address or a publ
 the socket opens, because this endpoint runs commands. See [docs/mobile.md](docs/mobile.md)
 for the design and the threat model.
 
+**Optional, and local only: the Mac's voice.** The phone can read replies aloud with
+[Kokoro](https://github.com/thewh1teagle/kokoro-onnx) running on your machine — better English,
+real Spanish, chosen sentence by sentence — instead of the phone's own voice. It is ~350 MB, so
+`./install.sh` asks and the default is **No** (`--yes` does not answer it). Add it any time:
+
+```bash
+fleet-jarvis voice --kokoro --install   # verified download + a pinned Python 3.12 venv; re-run to repair
+```
+
+Without it nothing is missing: the phone reads with its own voice. `fleet-phone` and
+`fleet-jarvis status` say whether it is installed, not installed or broken.
+[docs/mobile.md](docs/mobile.md#the-macs-voice-kokoro-optional) has the details.
+
 Two things that cost people time, so they are in that command's output too: the passkey is
 enforced server-side, so until a phone is enrolled the app sits on its lock screen and the
 API answers 401 — and **an installed iOS PWA resumed from the app switcher does not pick up

@@ -8,7 +8,7 @@
 // English — a detector that answered 'es' for everything would pass every Spanish row —
 // and the ambiguous fragment keeps the language it was already in rather than flipping.
 // Nothing here needs Kokoro: status() is checked against a directory that is missing and
-// one that is complete-but-empty, and the plan is pure.
+// one whose files are sparse at the pinned sizes, and the plan is pure.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,20 +57,40 @@ is('same words, other language: other id', false, S.idFor('Hola.', S.VOICES.es) 
 is('an id is what the route accepts', true, S.validId(plan[0].id));
 is('...and a path is not', false, S.validId('../../etc/passwd'));
 
-// ── 3. optional: found, missing, or switched off ──────────────────────────
+// ── 3. optional: installed, missing, broken, or switched off ──────────────
+// The model files are made at their PINNED sizes, sparse (truncate allocates nothing), so
+// "installed" here is the real size rule and not an empty-file shortcut. Each state says
+// the one command that fixes it — the phone shows `why` in a toast, and a toast that only
+// says "no" is how nobody found out Kokoro existed.
+const FIX = 'fleet-jarvis voice --kokoro --install';
 is('no Kokoro dir: not ready', false, S.status().ready);
-is('...and it says where it looked', true, /nowhere/.test(S.status().why) && /docs\/mobile\.md/.test(S.status().why));
+is('...and is "missing", not "broken"', 'missing', S.status().state);
+is('...and it says where it looked, and the fix', true, /nowhere/.test(S.status().why) && S.status().why.includes(FIX));
 const full = path.join(tmp, 'kokoro');
-fs.mkdirSync(path.join(full, 'venv', 'bin'), { recursive: true });
-for (const f of ['kokoro-v1.0.onnx', 'voices-v1.0.bin', path.join('venv', 'bin', 'python')]) fs.writeFileSync(path.join(full, f), '');
+const P = S.pins();
+const make = () => {
+  fs.mkdirSync(path.join(full, 'venv', 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(full, 'kokoro-v1.0.onnx'), ''); fs.truncateSync(path.join(full, 'kokoro-v1.0.onnx'), P.model.size);
+  fs.writeFileSync(path.join(full, 'voices-v1.0.bin'), ''); fs.truncateSync(path.join(full, 'voices-v1.0.bin'), P.voices.size);
+  fs.writeFileSync(path.join(full, 'venv', 'bin', 'python'), '');
+};
+make();
 process.env.CLAUDE_FLEET_KOKORO_DIR = full;
-is('all three files present: ready', true, S.status().ready);
+is('all three present at the pinned sizes: ready', true, S.status().ready);
+is('...and "installed"', 'installed', S.status().state);
 fs.rmSync(path.join(full, 'voices-v1.0.bin'));
 is('one missing: not ready', false, S.status().ready);
+is('...and "broken", since the rest is there', 'broken', S.status().state);
 is('...and it names the one', true, /voices-v1\.0\.bin/.test(S.status().why) && !/kokoro-v1\.0\.onnx/.test(S.status().why));
-fs.writeFileSync(path.join(full, 'voices-v1.0.bin'), '');
+// A download cut short under the final name is the failure a size catches, and the one a
+// bare existence test (what this file checked before) called ready.
+make(); fs.truncateSync(path.join(full, 'kokoro-v1.0.onnx'), 4096);
+is('a short model: not ready', false, S.status().ready);
+is('...broken, naming the model and the fix', true, S.status().state === 'broken' && /kokoro-v1\.0\.onnx/.test(S.status().why) && S.status().why.includes(FIX));
+make();
 process.env.CLAUDE_FLEET_KOKORO = 'off';
 is('CLAUDE_FLEET_KOKORO=off wins over a complete install', false, S.status().ready);
+is('...and is "off"', 'off', S.status().state);
 delete process.env.CLAUDE_FLEET_KOKORO;
 // An id nobody planned cannot make the daemon synthesise anything.
 is('audio for an unplanned id is refused', null, S.audio('0'.repeat(32)));

@@ -2011,6 +2011,196 @@ STUB
   rm -rf "$MR"
 fi
 
+# ── Kokoro, the Mac's voice: offered, verified, never assumed ───────────────
+# lib/kokoro-setup.mjs fetches ~350 MB and builds a venv, so NOTHING here touches the
+# network or pip: the model files come from file:// URLs (curl resumes those exactly as it
+# resumes https), their pins are swapped for the fixtures' with CLAUDE_FLEET_KOKORO_PINS,
+# and uv / python / the venv's interpreter are stubs on a PATH that holds node and /usr/bin
+# and nothing else — so the machine's own uv or python3.12 cannot answer for the stubs.
+# Every python name is SHADOWED by one that reports 3.14, because Ubuntu's /usr/bin has a
+# real python3.12 and the "no usable Python" row would otherwise pass on macOS and fail
+# there — or, worse, the other way round. The venv stub's `-c` is the import probe; with
+# kokoro-worker.py as its argument it runs a node stand-in that writes a real WAV header,
+# which is all the installer's smoke test reads.
+#   Watched going red with: the sha check skipped (a wrong-checksum file installed and
+# called ready), the venv probe skipped (an existing install re-fetched every run), the
+# .part rename done before the hash, the Python search taking 3.14, the length guard off,
+# the prompt's default flipped to yes, and --yes allowed to answer it.
+group "Kokoro: an optional voice, verified before it counts as installed"
+KK="$(mktemp -d)"
+mkdir -p "$KK/fb" "$KK/nodebin" "$KK/src" "$KK/h"
+ln -s "$(command -v node)" "$KK/nodebin/node"
+head -c 3000 /dev/urandom > "$KK/src/model"; head -c 1200 /dev/urandom > "$KK/src/voices"
+sha() { node -e 'process.stdout.write(require("crypto").createHash("sha256").update(require("fs").readFileSync(process.argv[1])).digest("hex"))' "$1"; }
+KSHA_M="$(sha "$KK/src/model")"; KSHA_V="$(sha "$KK/src/voices")"
+kpins() {   # <voices sha override or empty>
+  printf '{"model":{"name":"kokoro-v1.0.onnx","url":"file://%s","size":3000,"sha256":"%s"},"voices":{"name":"voices-v1.0.bin","url":"file://%s","size":1200,"sha256":"%s"}}' \
+    "$KK/src/model" "$KSHA_M" "$KK/src/voices" "${1:-$KSHA_V}"; }
+cat > "$KK/worker.mjs" <<'EOF'
+import fs from 'node:fs'; import readline from 'node:readline';
+console.log(JSON.stringify({ ready: true }));
+for await (const l of readline.createInterface({ input: process.stdin })) {
+  const j = JSON.parse(l); const b = Buffer.alloc(64); b.write('RIFF', 0); b.write('WAVE', 8);
+  fs.writeFileSync(j.out, b); console.log(JSON.stringify({ id: j.id, ok: true, ms: 1 }));
+}
+EOF
+# The venv's interpreter: the probe answers a data-path length (or fails when the venv is
+# marked broken), the worker runs the stand-in, `-m pip` is logged.
+cat > "$KK/venvpy" <<EOF
+#!/bin/sh
+case "\$1" in
+  -c) [ -f "\$(dirname "\$0")/../BROKEN" ] && { echo "ModuleNotFoundError: No module named 'kokoro_onnx'" >&2; exit 1; }; echo 60; exit 0 ;;
+  -m) echo "pip \$*" >> "$KK/calls"; exit 0 ;;
+esac
+exec node "$KK/worker.mjs"
+EOF
+cat > "$KK/uv" <<EOF
+#!/bin/sh
+echo "uv \$*" >> "$KK/calls"
+case "\$1" in venv) for a; do d="\$a"; done; mkdir -p "\$d/bin"; cp "$KK/venvpy" "\$d/bin/python"; chmod +x "\$d/bin/python" ;; esac
+exit 0
+EOF
+chmod +x "$KK/venvpy" "$KK/uv"
+for p in python3.12 python3.11 python3.10 python3; do printf '#!/bin/sh\necho 3.14\n' > "$KK/fb/$p"; chmod +x "$KK/fb/$p"; done
+KPATH="$KK/fb:$KK/nodebin:/usr/bin:/bin"
+kj() {   # <dir> <pins> args… — fleet-jarvis on the stubbed PATH, under a fake HOME
+  local d="$1" p="$2"; shift 2
+  env HOME="$KK/h" PATH="$KPATH" CLAUDE_FLEET_KOKORO_DIR="$d" CLAUDE_FLEET_KOKORO_PINS="$p" \
+      node "$ROOT/bin/fleet-jarvis.mjs" voice --kokoro "$@" 2>&1; }
+ncalls() { [ -f "$KK/calls" ] && wc -l < "$KK/calls" | tr -d ' ' || echo 0; }
+
+# 1. no usable Python: said, with the way out, and BEFORE anything is downloaded.
+out="$(kj "$KK/k1" "$(kpins)" --install)"; rc=$?
+is "no Python 3.10–3.12: the install stops with code 3"   "3"   "$rc"
+is "...naming what is missing"                             "yes" "$(grep -q 'needs Python 3.10–3.12' <<<"$out" && grep -q 'python3.12 is 3.14' <<<"$out" && echo yes || echo no)"
+is "...and how to get it"                                  "yes" "$(grep -q 'astral.sh/uv/install.sh' <<<"$out" && echo yes || echo no)"
+is "...before a byte was fetched"                          "no"  "$(ls "$KK"/k1/*onnx* >/dev/null 2>&1 && echo yes || echo no)"
+
+# 2. a fresh install, with uv.
+cp "$KK/uv" "$KK/fb/uv"
+out="$(kj "$KK/k2" "$(kpins)" --install)"; rc=$?
+is "a fresh install succeeds"                              "0"   "$rc"
+is "...fetching both files"                                "yes" "$(cmp -s "$KK/src/model" "$KK/k2/kokoro-v1.0.onnx" && cmp -s "$KK/src/voices" "$KK/k2/voices-v1.0.bin" && echo yes || echo no)"
+is "...leaving no .part behind"                            ""    "$(ls "$KK/k2" | grep '\.part$' || true)"
+is "...building a 3.12 venv and installing the pinned package" "yes" "$(grep -q 'uv venv -q --python 3.12' "$KK/calls" && grep -q 'kokoro-onnx==0.6.1' "$KK/calls" && echo yes || echo no)"
+is "...and proving it speaks"                              "yes" "$(grep -q 'spoke a test sentence' <<<"$out" && echo yes || echo no)"
+is "...after which the check says ready"                   "0"   "$(kj "$KK/k2" "$(kpins)" >/dev/null; echo $?)"
+
+# 3. already installed: detected, verified, nothing fetched. The sources are moved away,
+# so a download that happened anyway is a failure, not a quiet success.
+mv "$KK/src" "$KK/src.away"; before="$(ncalls)"
+out="$(kj "$KK/k2" "$(kpins)" --install)"; rc=$?
+mv "$KK/src.away" "$KK/src"
+is "an existing install is detected and skipped"           "0"   "$rc"
+is "...saying so"                                          "yes" "$(grep -q 'already installed and verified' <<<"$out" && echo yes || echo no)"
+is "...without a download or a venv rebuild"               "$before" "$(ncalls)"
+
+# 4. a bad checksum is never installed, and does not read as installed.
+out="$(kj "$KK/k4" "$(kpins "$(printf '0%.0s' $(seq 64))")" --install)"; rc=$?
+is "a file with the wrong checksum fails the install"      "1"   "$rc"
+is "...named as such"                                      "yes" "$(grep -q 'did not match its pinned checksum' <<<"$out" && echo yes || echo no)"
+is "...with nothing under the final name"                  "no"  "$([ -e "$KK/k4/voices-v1.0.bin" ] && echo yes || echo no)"
+is "...nor a .part to resume from"                         "no"  "$([ -e "$KK/k4/voices-v1.0.bin.part" ] && echo yes || echo no)"
+is "...and the check does not call it installed"           "1"   "$(kj "$KK/k4" "$(kpins)" >/dev/null; echo $?)"
+
+# 5. a cut-short download resumes; a damaged final file is replaced, not trusted.
+mkdir -p "$KK/k5"; head -c 1000 "$KK/src/model" > "$KK/k5/kokoro-v1.0.onnx.part"
+out="$(kj "$KK/k5" "$(kpins)" --install)"
+is "a .part from a cut-short run is resumed"               "yes" "$(grep -q 'resuming kokoro-v1.0.onnx' <<<"$out" && cmp -s "$KK/src/model" "$KK/k5/kokoro-v1.0.onnx" && echo yes || echo no)"
+head -c 3000 /dev/zero > "$KK/k5/kokoro-v1.0.onnx"
+is "a right-size wrong-bytes model reads as installed to the cheap check" "0" "$(kj "$KK/k5" "$(kpins)" >/dev/null; echo $?)"
+out="$(kj "$KK/k5" "$(kpins)" --install)"
+is "...but the install hashes it, and fetches it again"    "yes" "$(grep -q 'kokoro-v1.0.onnx is damaged' <<<"$out" && cmp -s "$KK/src/model" "$KK/k5/kokoro-v1.0.onnx" && echo yes || echo no)"
+
+# 6. a broken venv is reported as broken, and repaired without a download.
+touch "$KK/k2/venv/BROKEN"
+out="$(kj "$KK/k2" "$(kpins)")"; rc=$?
+is "a venv that cannot import kokoro_onnx is BROKEN"       "1|yes" "$rc|$(grep -q 'is broken: its Python cannot import kokoro_onnx' <<<"$out" && grep -q 'fleet-jarvis voice --kokoro --install' <<<"$out" && echo yes || echo no)"
+mv "$KK/src" "$KK/src.away"
+out="$(kj "$KK/k2" "$(kpins)" --install)"; rc=$?
+mv "$KK/src.away" "$KK/src"
+is "...and --install rebuilds only the venv"               "0|no" "$rc|$(grep -q 'downloading' <<<"$out" && echo yes || echo no)"
+
+# 7. no uv: the newest 3.10–3.12 on PATH builds it instead.
+rm -f "$KK/fb/uv"
+cat > "$KK/fb/python3.11" <<EOF
+#!/bin/sh
+case "\$1" in
+  -c) echo 3.11 ;;
+  -m) echo "py311 \$*" >> "$KK/calls"; mkdir -p "\$3/bin"; cp "$KK/venvpy" "\$3/bin/python"; chmod +x "\$3/bin/python" ;;
+esac
+EOF
+chmod +x "$KK/fb/python3.11"
+out="$(kj "$KK/k7" "$(kpins)" --install)"; rc=$?
+is "without uv, python3.11 makes the venv"                 "0|yes" "$rc|$(grep -q 'py311 -m venv' "$KK/calls" && grep -q 'pip -m pip install.*kokoro-onnx==0.6.1' "$KK/calls" && echo yes || echo no)"
+
+# 8. a directory espeak-ng cannot read its data from is refused before the download.
+long="$KK/$(printf 'd%.0s' $(seq 100))"
+out="$(kj "$long" "$(kpins)" --install)"; rc=$?
+is "a Kokoro dir too deep for espeak-ng is refused"        "1|yes" "$rc|$(grep -q 'too long a path for Kokoro' <<<"$out" && echo yes || echo no)"
+is "...before anything is fetched into it"                 "no"  "$([ -e "$long" ] && echo yes || echo no)"
+
+# 9. install.sh: the offer itself. Lifted out the way the claude offer is, and run against
+# a stub fleet-jarvis whose check answers what each row needs and whose --install leaves a
+# mark. Default No, NEVER under --yes, never with nobody watching, silent when installed.
+{ sed -n '/^vsay() {/p' "$ROOT/install.sh"
+  sed -n '/^ask_optional() {/,/^}/p' "$ROOT/install.sh"
+  sed -n "/^# THE MAC'S SPEAKING VOICE/,/^fi\$/p" "$ROOT/install.sh"; } > "$KK/offer.sh"
+is "the Kokoro offer came out of install.sh"               "yes" "$(grep -q 'voice --kokoro --install' "$KK/offer.sh" && echo yes || echo no)"
+mkdir -p "$KK/repo/bin"
+cat > "$KK/repo/bin/fleet-jarvis" <<EOF
+#!/bin/sh
+case "\$*" in
+  *--install*) echo INSTALLED >> "$KK/offer.log"; exit 0 ;;
+esac
+case "\$(cat "$KK/state")" in
+  ok) echo "Kokoro ready"; exit 0 ;;
+  broken) echo "Kokoro in /x is broken: its Python cannot import kokoro_onnx — run: fleet-jarvis voice --kokoro --install"; exit 1 ;;
+  *) echo "Kokoro is not installed (looked in /x) — run: fleet-jarvis voice --kokoro --install"; exit 1 ;;
+esac
+EOF
+chmod +x "$KK/repo/bin/fleet-jarvis"
+offer() {   # <state> <ASSUME_YES> — with stdout captured, i.e. nobody watching
+  echo "$1" > "$KK/state"; : > "$KK/offer.log"
+  env REPO="$KK/repo" ASSUME_YES="$2" VERBOSE=0 bash -c 'set -uo pipefail; . "$1"' _ "$KK/offer.sh" 2>&1; }
+out="$(offer missing 0)"
+is "nobody watching: no prompt, no install"                "|" "$out|$(cat "$KK/offer.log")"
+out="$(offer missing 1)"
+is "...and --yes changes nothing"                          "|" "$out|$(cat "$KK/offer.log")"
+out="$(offer broken 0)"
+is "a broken install is a warning even unasked"            "yes" "$(grep -q '^! Kokoro in /x is broken' <<<"$out" && [ ! -s "$KK/offer.log" ] && echo yes || echo no)"
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "the Kokoro prompt in a terminal" "tmux not installed"
+else
+  # IN A REAL TERMINAL, because that is the only place it asks: a pane whose stdout is a
+  # tty. What the person sees is read off the pane; what happened is read off the stub.
+  kpane() {   # <state> <ASSUME_YES> <keys…>
+    local st="$1" ay="$2"; shift 2
+    echo "$st" > "$KK/state"; : > "$KK/offer.log"; rm -f "$KK/pane.done"
+    tmux -L cfkokoro kill-server 2>/dev/null
+    tmux -L cfkokoro new-session -d -x 200 -y 20 \
+      "env REPO='$KK/repo' ASSUME_YES=$ay VERBOSE=0 bash -c 'set -uo pipefail; . \"\$1\"; touch \"\$2\"; sleep 30' _ '$KK/offer.sh' '$KK/pane.done'"
+    if [ "$#" -gt 0 ]; then
+      wait_for 10 "the Kokoro prompt" "pane_has cfkokoro 'y/N'" || { echo "TIMEOUT"; return; }
+      tmux -L cfkokoro send-keys "$@"
+    fi
+    wait_for 10 "the offer to finish" "[ -e '$KK/pane.done' ]"
+    tmux -L cfkokoro capture-pane -p; tmux -L cfkokoro kill-server 2>/dev/null; }
+  scr="$(kpane missing 0 Enter)"
+  is "in a terminal it asks, [y/N], saying the size and the fallback" "yes" \
+     "$(grep -q 'install Kokoro (~350 MB, optional' <<<"$scr" && grep -q 'phone uses its own voice)? \[y/N\]' <<<"$scr" && echo yes || echo no)"
+  is "...and Enter is a NO"                                "|yes" "$(cat "$KK/offer.log")|$(grep -q 'Skipped. The Mac.s voice later: fleet-jarvis voice --kokoro --install' <<<"$scr" && echo yes || echo no)"
+  scr="$(kpane missing 1 Enter)"
+  is "--yes still asks, and Enter is still a no"           "|yes" "$(cat "$KK/offer.log")|$(grep -q '\[y/N\]' <<<"$scr" && echo yes || echo no)"
+  scr="$(kpane missing 0 y Enter)"
+  is "a typed y installs it"                               "INSTALLED" "$(cat "$KK/offer.log")"
+  scr="$(kpane ok 0)"
+  is "an install that works is not offered again"          "no|" "$(grep -q 'Kokoro' <<<"$scr" && echo yes || echo no)|$(cat "$KK/offer.log")"
+  scr="$(kpane broken 0 Enter)"
+  is "a broken one is offered as a REPAIR"                 "yes" "$(grep -q 'is broken: .* repair it? \[y/N\]' <<<"$scr" && echo yes || echo no)"
+fi
+rm -rf "$KK"
+
 # ── agy: one root holds the bridge, the tools and the skill ──────────────────
 # register_agy writes into the user's own ~/.gemini/config, so it is run against a temp
 # dir here, with a stub agy. What matters: every write is a MERGE under our own key (other

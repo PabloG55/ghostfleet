@@ -4025,6 +4025,16 @@ async function sheetSettings() {
   // ── the voice, next to the diagnostic line it sits above ──────────────────
   // A <select> and not a list of buttons: the list is however many voices the OS ships
   // (dozens on iOS) and that is the one place a native control beats anything drawn here.
+  //   THE MAC'S VOICE COMES FIRST under the heading, because when it is there it is what
+  // reads, and the list below is only the fallback. Said only once /api/jarvis has answered:
+  // an old daemon without `speak` says nothing rather than something wrong.
+  const k = S.jarvis && S.jarvis.speak;
+  const macVoice = k && k.state ? el('div', { class: 'dim small', text:
+    k.ready ? "the Mac reads replies with Kokoro — this device's voice below is only the fallback"
+    : k.state === 'off' ? "the Mac's Kokoro is switched off, so this device's voice reads replies"
+    : k.state === 'missing' ? "the Mac has no Kokoro, so this device's voice reads replies — at the Mac (optional, ~350 MB): fleet-jarvis voice --kokoro --install"
+    : "the Mac's Kokoro is broken, so this device's voice reads replies — at the Mac: fleet-jarvis voice --kokoro --install" }) : null;
+  if (!canSpeak() && macVoice) kids.push(el('h2', { text: 'read-aloud voice' }), macVoice);
   if (canSpeak()) {
     const vs = allVoices();
     const cur = savedVoice();
@@ -4060,6 +4070,7 @@ async function sheetSettings() {
       render();
     });
     kids.push(el('h2', { text: 'read-aloud voice' }));
+    if (macVoice) kids.push(macVoice);
     kids.push(sel);
     // THE COUNT, BECAUSE ONE OPTION AND NO LIST LOOK IDENTICAL FROM THE OUTSIDE. "I only
     // see the default voice" has at least two causes — the device really reports one, or the
