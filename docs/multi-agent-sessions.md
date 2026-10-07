@@ -573,6 +573,11 @@ checks that the address reaches no file.
   A turn left alone at one width animated through eight frames (`⠀⠞ ⠰⠰ ⠘⠆ ⠰⠳ ⠠⠜ ⠘⠤ ⠠⠛ ⠘⠣`).
   That regex missed 21 of the turn's 25 working frames, and the grid called the worker ready
   three seconds before it finished.
+- **…and "any glyph" was too loose.** Overcorrecting, the next regex took the spinner as a run
+  of anything but letters and digits, and signing in leaves ` ✓ Login successful!` above the
+  fresh composer: column 1, one space, a glyph, a capitalised word. Busy outranks ready, so a
+  just-signed-in worker read working while it sat idle. The spinner is now the braille block
+  (U+2800–U+28FF) and nothing else; `cursor-idle-after-login.txt` is that pane.
 - **ready** is the placeholder alone on its line. `→ Add a follow-up` is also drawn while
   the turn runs, with the stop hint after it, so a placeholder match alone read every busy
   pane as ready.
