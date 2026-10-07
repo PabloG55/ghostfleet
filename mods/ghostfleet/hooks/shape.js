@@ -10,7 +10,7 @@ export const VERSION = '0.1.0'
 // on every event and carries exactly these forward; test/run.sh holds the two lists to
 // each other, so a field added here and forgotten there goes red instead of vanishing
 // on the next shell event.
-export const MOD_FIELDS = ['source', 'state', 'turnId', 'mod', 'usage']
+export const MOD_FIELDS = ['source', 'state', 'turnId', 'mod', 'usage', 'ledger']
 
 // The state words are the fleet's own (bin/fleet-grid.mjs's STATUS table), so a reader
 // needs no translation:

@@ -1,0 +1,293 @@
+// The request ledger's vocabulary, as plain functions: no `$`, no I/O. The LEDGER section
+// of register.js uses them; bin/fleet-ledger reads and writes the same file through them,
+// and test/run.sh imports this file with node.
+//
+// <fleet dir>/<session_id>.ledger   (JSON, but deliberately NOT named *.json: eight readers
+//                                    glob <fleet dir>/*.json as status records)
+//   { v: 1, seq, items: [ { id, text, at, turnId, state, source, ... } ], judge? }
+//
+//   state    open | done | not-done
+//   source   user     typed at the prompt (or the phone's bridge), idle or mid-turn
+//            fleet    a prompt fleet-send handed to the mod (DELIVERY)
+//            promise  a commitment the agent made in a final message ("I'll merge when green")
+//   gated    true once the gate has re-prompted about it: at most once per item, ever
+//   closedBy judge | hand
+
+export const LEDGER_VERSION = 1
+export const KEEP_ITEMS = 200                 // the file keeps the newest 200
+export const BAND_DAYS = 7                    // older than this drops off the band and the gate
+export const EXCERPT = 240                    // a request's text as kept
+const DAY_MS = 86_400_000
+
+export const ledgerFile = (dir, sessionId) => `${dir}/${sessionId}.ledger`
+
+export const emptyLedger = () => ({ v: LEDGER_VERSION, seq: 0, items: [] })
+
+// A file that is missing, torn or someone else's shape reads as empty, never as a throw.
+export function parseLedger(text) {
+  try {
+    const l = JSON.parse(text)
+    if (l && typeof l === 'object' && Array.isArray(l.items)) return { ...emptyLedger(), ...l, items: l.items.filter(i => i && i.id) }
+  } catch {}
+  return emptyLedger()
+}
+
+// The switches, from the environment (a settings file's `env` block lands there too).
+//   CLAUDE_FLEET_LEDGER=off               the whole feature
+//   CLAUDE_FLEET_LEDGER_GATE=off          record and show, never re-prompt
+//   CLAUDE_FLEET_LEDGER_PROMISES=show|gate|off   (default show)
+export function ledgerConfig(get) {
+  const off = v => /^(off|0|false|no)$/i.test(String(v || '').trim())
+  const p = String(get('CLAUDE_FLEET_LEDGER_PROMISES') || 'show').trim().toLowerCase()
+  return {
+    on: !off(get('CLAUDE_FLEET_LEDGER')),
+    gate: !off(get('CLAUDE_FLEET_LEDGER_GATE')),
+    promises: p === 'gate' || p === 'off' ? p : 'show',
+    model: String(get('CLAUDE_FLEET_LEDGER_MODEL') || 'haiku').trim() || 'haiku',
+  }
+}
+
+const oneLine = s => String(s || '').replace(/\s+/g, ' ').trim()
+export const excerpt = (s, n = EXCERPT) => {
+  const t = oneLine(s)
+  return t.length > n ? `${t.slice(0, n - 1)}…` : t
+}
+
+// Which submitted prompts are requests, and whose. Only the person's: composer, the phone's
+// bridge, and what the engine cannot attest (`unclassified`). This mod's own submits are
+// never read here: a fleet-send handoff is recorded by DELIVERY at the turn it started (it
+// knows the turn exactly), and the gate's re-prompt must never become an item of its own,
+// which would be a loop with extra steps. Everything else (a background task's
+// notification, a /loop firing, a peer's message) is not a request somebody is waiting on.
+// A slash command is an instruction to the harness, not work for the agent.
+export function sourceOf(e) {
+  const text = String(e && e.text || '')
+  if (!text.trim() || text.trimStart().startsWith('/')) return null
+  const o = (e && e.origin) || { kind: 'composer' }
+  return o.kind === 'composer' || o.kind === 'bridge' || o.kind === 'unclassified' ? 'user' : null
+}
+
+// A request submitted idle names its turn at that turn's start, which carries its text.
+export function stampTurn(ledger, text, turnId) {
+  const t = String(text || '').trim()
+  const i = ledger.items.findIndex(x => x.state === 'open' && !x.turnId && x.source !== 'promise' && x.text === excerpt(t))
+  if (!t || i < 0) return null
+  return { ...ledger, items: ledger.items.map((x, k) => (k === i ? { ...x, turnId } : x)) }
+}
+
+// `queued`: typed over a running turn. Such a message can still be pulled back out of the
+// queue (Up edits it) and never reach the model; see `withdrawn` below.
+export function addItem(ledger, { text, at, turnId, source, queued }) {
+  const seq = (Number(ledger.seq) || 0) + 1
+  const item = { id: String(seq), text: excerpt(text), at, ...(turnId ? { turnId } : {}), state: 'open', source, ...(queued ? { queued: true } : {}) }
+  const items = [...ledger.items, item].slice(-KEEP_ITEMS)
+  return { ...ledger, seq, items }
+}
+
+const fresh = (i, nowMs) => nowMs - (Number(i.at) || 0) <= BAND_DAYS * DAY_MS
+export const openItems = (ledger, nowMs) => ledger.items.filter(i => i.state === 'open' && fresh(i, nowMs))
+
+// What the record and the band say: open requests, open promises, the oldest open of each.
+export function ledgerSummary(ledger, nowMs) {
+  const open = openItems(ledger, nowMs)
+  const req = open.filter(i => i.source !== 'promise')
+  const prom = open.filter(i => i.source === 'promise')
+  const oldest = list => list.length ? { id: list[0].id, text: excerpt(list[0].text, 80), at: list[0].at } : null
+  return { open: req.length, promises: prom.length, oldest: oldest(req), oldestPromise: oldest(prom) }
+}
+
+// Is there anything for the judge? Open items, or an answer that sounds like a commitment.
+// The regex is only a cheap door in front of the model call, never the decision: it lets a
+// turn that promises nothing go by without one.
+const PROMISE_WORDS = /\b(I'll|I will|I'm going to|I am going to|next,? I|then I|once .{1,60}(I'll|I will)|when .{1,60}(I'll|I will)|later|after (that|this|CI|the))\b/i
+export const soundsLikeAPromise = answer => PROMISE_WORDS.test(String(answer || ''))
+
+// The one judge call: which open items the final message addressed, and what it promised.
+// Inputs are truncated: item texts to EXCERPT, the answer to its last ANSWER_CHARS (a final
+// message reports at its end).
+export const ANSWER_CHARS = 6000
+export const EARLIER_CHARS = 1500
+const tailOf = (s, n) => { const a = String(s || ''); return a.length > n ? `…${a.slice(-n)}` : a }
+export function judgePrompt(items, answer, { promises, earlier = [] }) {
+  const tail = tailOf(answer, ANSWER_CHARS)
+  const before = earlier.slice(-2).map(t => tailOf(t, EARLIER_CHARS))
+  const list = items.length
+    ? items.map(i => `${i.id} [${i.source === 'promise' ? 'promise the agent made' : 'request to the agent'}]: ${excerpt(i.text)}`).join('\n')
+    : '(none)'
+  return [
+    'You audit an AI coding agent. Below are items it owes, and the final message it just ended its turn with.',
+    '',
+    'ITEMS:',
+    list,
+    '',
+    ...(before.length ? ['EARLIER FINAL MESSAGES (oldest first; an item answered here is answered):', ...before.map(t => `<<<\n${t}\n>>>`), ''] : []),
+    'FINAL MESSAGE:',
+    '<<<',
+    tail,
+    '>>>',
+    '',
+    'For EACH item decide:',
+    '- "done": a final message reports it completed or answered.',
+    '- "not-done": a final message explicitly says THIS item was not or cannot be done AND gives a reason. A refusal with no reason, or one that does not say which request it means, is "open".',
+    '- "open": anything else: not mentioned, only acknowledged, partly done, or still in progress.',
+    'Judge an item by what it asked for NOW: a part it explicitly put off ("not in this reply", "later", "after X") is not owed yet.',
+    'An item that only approves, confirms or thanks ("go ahead", "yes", "thanks") asks for no work of its own: it is "done" once a final message acts on what it approved, or if there is nothing to act on.',
+    promises === 'off'
+      ? 'Return "promises": [] always.'
+      : 'Also list "promises", from the FINAL MESSAGE only: things the agent says IT WILL DO LATER in this session ("I\'ll merge once CI is green", "next I\'ll add the tests"), each as a short imperative phrase of at most 12 words. Only a firm commitment to a specific action: not work it already did, not suggestions for the user, not questions, not offers that wait on the user ("I can do X if you\'d like"), not statements about how it will behave in general ("I\'ll keep responding normally"). [] if none.',
+    '',
+    'Reply with ONLY this JSON, no prose, no code fence:',
+    '{"items":[{"id":"<id>","status":"done|not-done|open","reason":"<at most 12 words>"}],"promises":["..."]}',
+  ].join('\n')
+}
+
+// The judge's reply, held to the shape asked for. null when it is not that shape: the gate
+// fails OPEN on null (nothing closes, nothing is re-prompted).
+export function parseVerdict(text, ids) {
+  const s = String(text || '')
+  const a = s.indexOf('{'), b = s.lastIndexOf('}')
+  if (a < 0 || b <= a) return null
+  let v
+  try { v = JSON.parse(s.slice(a, b + 1)) } catch { return null }
+  if (!v || typeof v !== 'object' || !Array.isArray(v.items)) return null
+  const known = new Set(ids)
+  const items = []
+  for (const it of v.items) {
+    if (!it || !known.has(String(it.id))) continue
+    const status = String(it.status || '')
+    if (!['done', 'not-done', 'open'].includes(status)) continue
+    items.push({ id: String(it.id), status, reason: excerpt(it.reason, 120) })
+  }
+  const promises = Array.isArray(v.promises)
+    ? v.promises.map(p => excerpt(p, 120)).filter(Boolean).slice(0, 3) : []
+  return { items, promises }
+}
+
+// The verdict applied: judged items close, promises join as items of their own (one with the
+// same words as an open promise is that promise, not a second one).
+export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
+  const by = new Map(verdict.items.map(i => [i.id, i]))
+  let next = {
+    ...ledger,
+    items: ledger.items.map(i => {
+      const v = by.get(i.id)
+      if (!v || i.state !== 'open' || v.status === 'open') return i
+      return { ...i, state: v.status, closedAt: nowMs, closedBy: 'judge', ...(v.reason ? { reason: v.reason } : {}) }
+    }),
+  }
+  if (promises !== 'off') {
+    const have = new Set(next.items.filter(i => i.source === 'promise' && i.state === 'open').map(i => i.text.toLowerCase()))
+    for (const p of verdict.promises) {
+      if (have.has(p.toLowerCase())) continue
+      have.add(p.toLowerCase())
+      next = addItem(next, { text: p, at: nowMs, turnId, source: 'promise' })
+    }
+  }
+  return next
+}
+
+// The items the gate may re-prompt about: open, fresh, never gated before; promises only
+// when promises gate.
+export function gateTargets(ledger, nowMs, { promises }) {
+  return openItems(ledger, nowMs).filter(i => !i.gated && (i.source !== 'promise' || promises === 'gate'))
+}
+
+// The queued items the model never received. A message typed over a running turn fires
+// prompt.submit at Enter and is then queued; Up pulls it back into the composer, and nothing
+// raises an event for that. Measured: the gate then re-prompted about a message the model
+// had never seen, and the model rightly said it was never asked. So before a re-prompt, a
+// queued item has to be found among the session's user messages; one that is not, with the
+// session idle and no later turn started, was withdrawn. (Resubmitted, it is a new item.)
+// Matched on the item's opening words: the item keeps an excerpt, the transcript the whole.
+export function withdrawn(items, userTexts) {
+  const norm = t => oneLine(t).toLowerCase()
+  const texts = userTexts.map(norm)
+  return items.filter(i => i.queued && i.source !== 'promise').filter(i => {
+    const head = norm(i.text).replace(/…$/, '').slice(0, 80)
+    return head && !texts.some(t => t.includes(head))
+  }).map(i => i.id)
+}
+
+export const dropItems = (ledger, ids) => ({ ...ledger, items: ledger.items.filter(i => !ids.includes(i.id)) })
+
+export function gatePrompt(items) {
+  const lines = items.map(i => `${i.id}. ${i.source === 'promise' ? '(you said you would) ' : ''}"${excerpt(i.text, 160)}"`)
+  return [
+    `[ghostfleet ledger] ${items.length === 1 ? 'One request is' : `${items.length} requests are`} still open from this session:`,
+    ...lines,
+    'Finish each one now, or say for each that it is not done and why. (Asked once per item; it will not be asked again.)',
+  ].join('\n')
+}
+
+export const markGated = (ledger, ids, nowMs) => ({
+  ...ledger,
+  items: ledger.items.map(i => (ids.includes(i.id) ? { ...i, gated: true, gatedAt: nowMs } : i)),
+})
+
+// By hand: `fleet-ledger close <id>` and `/ledger close <id>`. null when there is no such
+// open item.
+export function closeByHand(ledger, id, nowMs) {
+  const it = ledger.items.find(i => i.id === String(id))
+  if (!it || it.state !== 'open') return null
+  return {
+    ...ledger,
+    items: ledger.items.map(i => (i === it ? { ...i, state: 'done', closedAt: nowMs, closedBy: 'hand' } : i)),
+  }
+}
+
+// `clear` closes every open item by hand; the history stays in the file.
+export const clearOpen = (ledger, nowMs) => ({
+  ...ledger,
+  items: ledger.items.map(i => (i.state === 'open' ? { ...i, state: 'done', closedAt: nowMs, closedBy: 'hand' } : i)),
+})
+
+const ago = ms => {
+  const s = Math.max(0, Math.round(ms / 1000))
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : s < 86400 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`
+}
+
+// The listing both the CLI and /ledger print.
+export function listing(ledger, nowMs, { all = false } = {}) {
+  const rows = (all ? ledger.items : openItems(ledger, nowMs))
+  if (!rows.length) return all ? 'ledger: empty' : 'ledger: nothing open'
+  const out = rows.map(i => {
+    const tag = i.source === 'promise' ? 'promise' : i.source
+    const why = i.reason ? `  (${i.reason})` : ''
+    return `${i.id.padStart(3)}  ${i.state.padEnd(8)} ${tag.padEnd(7)} ${ago(nowMs - i.at).padStart(4)}  ${excerpt(i.text, 100)}${i.gated ? '  [gated]' : ''}${why}`
+  })
+  const j = ledger.judge
+  if (j && !j.ok) out.push(`last judge call failed open: ${j.why} (${ago(nowMs - j.at)} ago)`)
+  return out.join('\n')
+}
+
+// The band's ledger row as text runs, the longest form that fits `columns`:
+//   ledger · 2 open · oldest 4m "fix the login redirect…" · promise: merge when green
+// Narrower, the quote goes, then the promise's words, then everything but the counts.
+export const LEDGER_COLOR = { open: '#ffd75f', promise: '#87afd7' }
+export function ledgerRuns(s, nowMs, columns) {
+  if (!s || (!s.open && !s.promises)) return null
+  const cols = Math.max(1, Number(columns) || 80)
+  const sep = { text: ' · ', dim: true }
+  const head = { text: 'ledger', dim: true }
+  const open = s.open ? { text: `${s.open} open`, color: LEDGER_COLOR.open, bold: true } : null
+  const age = s.oldest ? ago(nowMs - s.oldest.at) : ''
+  const quote = n => (s.oldest ? { text: `oldest ${age} “${excerpt(s.oldest.text, n)}”`, dim: true } : null)
+  const prom = n => (s.promises
+    ? { text: n && s.oldestPromise ? `promise: ${excerpt(s.oldestPromise.text, n)}${s.promises > 1 ? ` +${s.promises - 1}` : ''}`
+      : `${s.promises} ${s.promises === 1 ? 'promise' : 'promises'}`, color: LEDGER_COLOR.promise }
+    : null)
+  const forms = [
+    [head, open, quote(48), prom(40)],
+    [head, open, quote(24), prom(24)],
+    [head, open, s.oldest ? { text: `oldest ${age}`, dim: true } : null, prom(0)],
+    [open, prom(0)],
+    [s.open ? { ...open, text: `${s.open}○` } : null, s.promises ? { text: `${s.promises}◇`, color: LEDGER_COLOR.promise } : null],
+    [s.open ? { ...open, text: `${s.open}○` } : { text: `${s.promises}◇`, color: LEDGER_COLOR.promise }],
+  ]
+  let runs = null
+  for (const parts of forms) {
+    runs = parts.filter(Boolean).flatMap((r, i) => (i ? [sep, r] : [r]))
+    if (runs.reduce((k, r) => k + [...r.text].length, 0) <= cols) return runs
+  }
+  return runs
+}

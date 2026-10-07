@@ -9,8 +9,18 @@ export type Band = {
   prs?: { green: number; red: number; pending: number } | null
 }
 
+/** What the ledger's row draws (hooks/ledger.js ledgerSummary), against `asOf`, a minute. */
+export type LedgerItemRef = { id: string; text: string; at: number }
+export type Ledger = {
+  open: number
+  promises: number
+  oldest: LedgerItemRef | null
+  oldestPromise: LedgerItemRef | null
+  asOf: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    ghostfleet: { band: Band | null }
+    ghostfleet: { band: Band | null; ledger: Ledger | null }
   }
 }

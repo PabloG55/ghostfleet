@@ -323,7 +323,7 @@ esac
 # mod writes while this hook runs, and the later the read the smaller the window in which
 # its write is lost. The list is mods/ghostfleet/hooks/shape.js's MOD_FIELDS, and the
 # suite holds the two to each other.
-_mod="$(jq -c '{source, state, turnId, mod, usage} | with_entries(select(.value != null))' \
+_mod="$(jq -c '{source, state, turnId, mod, usage, ledger} | with_entries(select(.value != null))' \
   "$FLEET_DIR/$SESSION.json" 2>/dev/null)"
 case "$_mod" in '{'*) ;; *) _mod='{}' ;; esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"

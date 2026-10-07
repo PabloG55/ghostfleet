@@ -7,14 +7,15 @@
 // fleet-inbox through Bash. From in here there is nothing to guess: a turn starts, a turn
 // completes, a dialog is about to be drawn, the engine measures the account.
 //
-// Six things, each a section below, all sharing the record I/O at the top:
+// Seven things, each a section below, all sharing the record I/O at the top:
 //   STATE     written into the session's status record as it changes
 //   BUDGET    the account's rate-limit windows, from the engine's own measurement
 //   COMMANDS  /fleet and /inbox, answered without a turn
 //   DELIVERY  the fleet's prompts, submitted as turns of their own
 //   GUARDS    the fleet's refusals in front of Bash and the MCP tools, failing CLOSED
 //   BAND      a lead's team above its prompt
-// What is written is shaped by ./shape.js, ./handoff.js, ./guard-shape.js and ./band-shape.js,
+//   LEDGER    every request made of the session, held open until a final message answers it
+// What is written is shaped by ./shape.js, ./handoff.js, ./guard-shape.js, ./band-shape.js and ./ledger.js,
 // plain functions the suite can run with node. The engine follows `$` only into functions
 // declared in this file, never across an import, which is why the hooks are one file and not six.
 //
@@ -24,8 +25,10 @@
 // carries a `.catch` that could refuse in its place. GUARDS is the one section whose hooks
 // refuse, and each is registered with a `.catch` that refuses too (that section says why).
 // DELIVERY acts, but only on prompts the fleet already decided to send: it refuses nothing,
-// and a failure there leaves the prompt for fleet-send to paste.
-// Nothing here touches the network or a model. Every file and process call is bounded
+// and a failure there leaves the prompt for fleet-send to paste. LEDGER is a nag, not a
+// guard: it observes, and its one act (a single re-prompt per item) fails OPEN.
+// Nothing here touches the network. The one model call is LEDGER's judge, made only when a
+// turn left something to judge. Every file and process call is bounded
 // (IO_MS), because a `$` call in flight does not count against a hook's budget and an
 // unbounded one would hold a turn open for as long as the filesystem stalled.
 
@@ -38,6 +41,11 @@ import {
   jarvisMightAct,
 } from './guard-shape.js'
 import { teamOf, latestBySlot, summarize, prSummary, bandRuns } from './band-shape.js'
+import {
+  ledgerFile, parseLedger, ledgerConfig, sourceOf, addItem, openItems, ledgerSummary,
+  soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
+  markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems,
+} from './ledger.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
 } from './handoff.js'
@@ -192,8 +200,11 @@ async function startState($) {
 }
 
 async function onTurnStart($, e, next) {
+  currentTurn = e.turnId
+  turnsStarted++
   await setState($, 'working', e.turnId)
   await deliveryTurnStart($, e)
+  await ledgerTurnStart($, e)
   return next(e)
 }
 
@@ -203,6 +214,8 @@ async function onTurnComplete($, e, next) {
   const done = await next(e)
   if (e.agentId === undefined) await setState($, stateAfterTurn(e.reason))
   deliveryTurnComplete(e)
+  // Not awaited: the judge is a model call, and the turn's end must not wait on it.
+  if (e.agentId === undefined) void ledgerTurnComplete($, e).catch(() => {})
   return done
 }
 
@@ -437,6 +450,7 @@ async function deliveryTurnStart($, e) {
     await bounded($, (async () => {
       if (p.reply) await armReply($, p.reply, e.turnId)
       await receipt($, p.id, { turnId: e.turnId })
+      await ledgerFleetItem($, p.text, e.turnId)
     })(), IO_MS * 4, null)
   } else if (p && (await $.clock.now()) - p.at > START_MS) {
     pending = null
@@ -485,6 +499,7 @@ async function onSessionStart($, e, next) {
   const started = await next(e)
   await startState($)
   await startCommands($)
+  await ledgerStart($)
   startBand($)
   await deliveryStart($)
   return started
@@ -505,6 +520,8 @@ export const register = on => {
   on('tool.call', { tool: 'Bash' }, onBash).catch(bashFailedClosed)
   on('tool.call', { tool: /^mcp__/ }, onMcp).catch(mcpFailedClosed)
   on('ui.render', { component: 'AbovePrompt' }, onBandRender)
+  on('prompt.submit', onPromptSubmit)
+  on('command.run', { command: 'ledger' }, onLedgerCommand)
 }
 
 // ── GUARDS ──────────────────────────────────────────────────────────────────
@@ -890,19 +907,21 @@ async function refreshPrs($) {
   return refresh($)
 }
 
+// The team's row, then the ledger's (LEDGER, below), each only when it has something to say.
 async function onBandRender($, e, next) {
   if (e.props.hasSurvey) return next(e)
   const { value } = await $.state.get(BAND)
-  const runs = value ? bandRuns(value, value.prs, e.props.bodyColumns) : null
-  if (!runs) return next(e)
+  const team = value ? bandRuns(value, value.prs, e.props.bodyColumns) : null
+  const led = (await $.state.get(LEDGER)).value
+  const book = led ? ledgerRuns(led, led.asOf, e.props.bodyColumns) : null
+  if (!team && !book) return next(e)
   const { Box, Text } = $.ui.resolve(e)
-  return (
-    h(Box, { flexDirection: 'row' },
-      ...runs.map((r, i) => h(Text, {
-        key: String(i), wrap: 'truncate-end',
-        ...(r.color ? { color: r.color } : {}), ...(r.dim ? { dimColor: true } : {}), ...(r.bold ? { bold: true } : {}),
-      }, r.text)))
-  )
+  const row = (runs, k) => h(Box, { key: k, flexDirection: 'row' },
+    ...runs.map((r, i) => h(Text, {
+      key: String(i), wrap: 'truncate-end',
+      ...(r.color ? { color: r.color } : {}), ...(r.dim ? { dimColor: true } : {}), ...(r.bold ? { bold: true } : {}),
+    }, r.text)))
+  return h(Box, { flexDirection: 'column' }, ...(team ? [row(team, 'team')] : []), ...(book ? [row(book, 'ledger')] : []))
 }
 
 // Started from onSessionStart (one session.start hook per module), after the record exists.
@@ -910,6 +929,271 @@ function startBand($) {
   if (bandTick) bandTick.cancel()
   if (prTick) prTick.cancel()
   refresh($).catch(() => {})
-  bandTick = $.clock.every(BAND_TICK_MS, () => { refresh($).catch(() => {}) })
+  bandTick = $.clock.every(BAND_TICK_MS, () => { refresh($).catch(() => {}); ledgerRefresh($).catch(() => {}) })
   prTick = $.clock.every(BAND_PR_MS, () => { refreshPrs($).catch(() => {}) })
+}
+
+// ── LEDGER ──────────────────────────────────────────────────────────────────
+//
+// Every request made of this session, held open until a final message answers it.
+//
+// A person types three messages while a turn runs; the prompt tells the model to treat each
+// as queued work and never to end a turn with one neither done nor reported not-done. That
+// instruction is dropped often enough to matter, and nothing outside the model could see it
+// happen: the second message's answer is simply never written, and the person finds out
+// when they go looking. So does "I'll merge when it's green", said once and never done.
+// From in here both are visible: `prompt.submit` sees every message the moment Enter is
+// pressed (with the turn it was typed over), and `turn.complete` sees the final text.
+//
+//   RECORD   each request an item in <fleet dir>/<session_id>.ledger (./ledger.js has the
+//            shape), its open count in the status record (`ledger`), the oldest on the band
+//   JUDGE    at a main-loop turn.complete that ended with an answer, ONE small-model call
+//            (when something is open, or the answer sounds like a promise): which open
+//            items the final text addressed, and what it promised to do later
+//   GATE     items still open after that get ONE re-prompt, ever, naming them
+//
+// A NAG, NOT A GUARD. It fails OPEN everywhere: a judge that errors, times out or answers
+// a wrong shape closes nothing and re-prompts nothing (the item stays open, the failure is
+// noted in the file and the debug log). It never gates a turn the person interrupted, a
+// subagent's run, a headless (-p) session, or after a queued message has already started
+// the next turn (that turn's own end is judged instead). The loop bound is in the data,
+// not in a counter that a reload would reset: an item carries `gated` once it has been
+// re-prompted, and a gated item is never re-prompted again.
+//
+// Not retroactive: only messages submitted after the mod loaded. The judge runs after
+// turn.complete has resolved, never inside it, so the turn's end never waits on a model.
+
+const LEDGER = /** @type {const} */ ({ plugin: 'ghostfleet', key: 'ledger' })
+const JUDGE_MS = 30_000
+
+let ledgerCfg = null
+let ledgerQueue = Promise.resolve()
+let currentTurn = ''
+let judging = false
+let judgeNext = null     // a turn.complete that arrived while the judge was busy
+let turnsStarted = 0     // main-loop turn.starts, so a verdict can tell it went stale
+let answers = []         // the last few final messages: { at, text }
+let ledgerShown = ''     // what the band and the record last said
+let ledgerAsOf = 0
+
+async function ledgerConfigOf($) {
+  if (ledgerCfg) return ledgerCfg
+  // Each name spelled out: the engine lists what a module reads from its literal names.
+  const env = {
+    CLAUDE_FLEET_LEDGER: await bounded($, $.env.get('CLAUDE_FLEET_LEDGER'), IO_MS, undefined),
+    CLAUDE_FLEET_LEDGER_GATE: await bounded($, $.env.get('CLAUDE_FLEET_LEDGER_GATE'), IO_MS, undefined),
+    CLAUDE_FLEET_LEDGER_PROMISES: await bounded($, $.env.get('CLAUDE_FLEET_LEDGER_PROMISES'), IO_MS, undefined),
+    CLAUDE_FLEET_LEDGER_MODEL: await bounded($, $.env.get('CLAUDE_FLEET_LEDGER_MODEL'), IO_MS, undefined),
+  }
+  ledgerCfg = ledgerConfig(k => env[k])
+  return ledgerCfg
+}
+
+async function ledgerPath($) {
+  const sid = await $.session.id()
+  return sid ? ledgerFile(await fleetDir($), sid) : ''
+}
+
+// A missing file is an empty ledger; one that could not be read (a stall, a permission) is
+// null, and a change against null is skipped: written over, it would wipe the history.
+const UNREAD = Symbol('unread')
+async function readLedger($, file) {
+  const text = await bounded($, (async () => ((await $.fs.exists(file)) ? $.fs.read(file) : ''))(), IO_MS, UNREAD)
+  return text === UNREAD ? null : parseLedger(text)
+}
+
+// One change at a time, read-modify-write against the FILE, never a copy held here:
+// fleet-ledger closes items from outside, and a copy would undo it on the next write.
+function changeLedger($, change) {
+  const run = ledgerQueue.then(() => bounded($, applyLedger($, change), IO_MS * 3, null))
+  ledgerQueue = run.then(() => undefined, () => undefined)
+  return run
+}
+
+async function applyLedger($, change) {
+  const file = await ledgerPath($)
+  if (!file) return null
+  const cur = await readLedger($, file)
+  if (!cur) return null
+  const next = change(cur)
+  if (!next) return null
+  const dir = file.slice(0, file.lastIndexOf('/'))
+  const tmp = `${dir}/.${file.slice(dir.length + 1)}.tmp`
+  await $.fs.write(tmp, JSON.stringify(next))
+  const moved = await $.process.run(['mv', '-f', tmp, file], { timeoutMs: IO_MS })
+  if (moved.exitCode !== 0) return null
+  await showLedger($, next)
+  return next
+}
+
+// The band's row and the record's count, rewritten only when what they say changed. The
+// band's "oldest 4m" is drawn against `asOf`, a minute bucket, so the age moves once a
+// minute rather than redrawing every tick.
+async function showLedger($, ledger) {
+  const nowMs = await $.clock.now()
+  const s = ledgerSummary(ledger, nowMs)
+  const asOf = Math.floor(nowMs / 60_000) * 60_000
+  const said = JSON.stringify(s)
+  if (said === ledgerShown && asOf === ledgerAsOf) return
+  const recChanged = said !== ledgerShown
+  ledgerShown = said
+  ledgerAsOf = asOf
+  await bounded($, $.state.set(LEDGER, (s.open || s.promises) ? { ...s, asOf } : null), IO_MS, null)
+  if (recChanged) {
+    const field = { open: s.open, promises: s.promises, ...(s.oldest ? { oldest_at: Math.floor(s.oldest.at / 1000) } : {}) }
+    await patchRecord($, rec => ({ ...rec, ledger: field }))
+  }
+}
+
+async function ledgerStart($) {
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on) return
+  await bounded($, $.command.register({
+    name: 'ledger', description: "This session's open requests and promises; close <id>, clear (no turn)", immediate: true,
+  }), IO_MS, null)
+  ledgerShown = ''
+  ledgerAsOf = 0
+  await ledgerRefresh($)
+}
+
+// The band tick rereads the file, so a close made from outside shows within a tick.
+async function ledgerRefresh($) {
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on) return
+  const file = await ledgerPath($)
+  const l = file ? await readLedger($, file) : null
+  if (l) await showLedger($, l)
+}
+
+async function onPromptSubmit($, e, next) {
+  const before = currentTurn
+  const r = await next(e)
+  if (!r || r.drop !== undefined) return r
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on) return r
+  const source = sourceOf(e)
+  if (!source) return r
+  const at = await $.clock.now()
+  // Typed over a running turn, it carries that turn's id. Submitted idle, `next` resolves
+  // once its own turn started: a turn.start since is that turn; failing that, the turn's
+  // start names it (ledgerTurnStart), whichever of the two lands second.
+  const turnId = e.turnId || (currentTurn !== before ? currentTurn : '')
+  await changeLedger($, l => addItem(l, { text: e.text, at, turnId, source, queued: Boolean(e.turnId) }))
+  return r
+}
+
+async function ledgerTurnStart($, e) {
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on || !e.text) return
+  await changeLedger($, l => stampTurn(l, e.text, e.turnId))
+}
+
+// A prompt fleet-send handed over, recorded at the turn it started (DELIVERY knows it).
+async function ledgerFleetItem($, text, turnId) {
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on) return
+  const at = await $.clock.now()
+  await changeLedger($, l => addItem(l, { text, at, turnId, source: 'fleet' }))
+}
+
+// One judge at a time. A turn.complete that arrives while one runs is not dropped: the
+// newest waits and is judged next (measured: two queued messages ran as a 1-second turn
+// while the first turn's judge was still out, and that turn's answer was never judged).
+async function ledgerTurnComplete($, e, generation = turnsStarted) {
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on || e.reason !== 'answer') return
+  const at = await $.clock.now()
+  answers = [...answers, { at, text: String(e.answer || '') }].slice(-3)
+  if (judging) { judgeNext = { e, generation }; return }
+  judging = true
+  try {
+    await judgeTurn($, cfg, e, at, generation)
+  } catch (err) {
+    void $.ui.log(`ghostfleet ledger: judge threw (${String(err && err.message || err)}); failing open`, { to: 'debug' })
+  } finally {
+    judging = false
+  }
+  const queued = judgeNext
+  judgeNext = null
+  if (queued) {
+    answers = answers.filter(a => a.text !== String(queued.e.answer || ''))
+    await ledgerTurnComplete($, queued.e, queued.generation)
+  }
+}
+
+// `generation`: how many turns had started when this one ended.
+async function judgeTurn($, cfg, e, nowMs, generation) {
+  const surfaces = await bounded($, $.session.surfaces(), IO_MS, null)
+  if (!surfaces || !surfaces.length) return                  // -p, the SDK: nobody to nag
+  const file = await ledgerPath($)
+  if (!file) return
+  const cur = await readLedger($, file)
+  if (!cur) return
+  const open = openItems(cur, nowMs)
+  const promises = cfg.promises !== 'off' && soundsLikeAPromise(e.answer)
+  if (!open.length && !promises) return                      // nothing to judge: no call
+  // The final messages since the oldest open item was made, this one last: a request
+  // answered one turn ago and only referred to now ("I ended my previous reply with it")
+  // is still answered.
+  const since = open.length ? Math.min(...open.map(i => i.at)) : nowMs
+  const earlier = answers.slice(0, -1).filter(a => a.at >= since).map(a => a.text)
+  const r = await $.model.complete({
+    model: cfg.model, prompt: judgePrompt(open, e.answer, { ...cfg, earlier }), maxTokens: 700, effort: 'low', timeoutMs: JUDGE_MS,
+  })
+  const verdict = r && r.isAnswered ? parseVerdict(r.text, open.map(i => i.id)) : null
+  if (!verdict) {
+    const why = !r ? 'no result' : !r.isAnswered ? `${r.reason}${r.error ? ` ${r.error}` : ''}` : 'reply was not the JSON asked for'
+    await changeLedger($, l => ({ ...l, judge: { at: nowMs, ok: false, why } }))
+    void $.ui.log(`ghostfleet ledger: judge failed open (${why}); ${open.length} item(s) stay open`, { to: 'debug' })
+    return
+  }
+  const after = await changeLedger($, l => ({
+    ...applyVerdict(l, verdict, { nowMs, turnId: e.turnId, promises: cfg.promises }), judge: { at: nowMs, ok: true },
+  }))
+  if (!after || !cfg.gate) return
+  // A turn started since this one ended (a queued message, typed or handed over): the
+  // verdict is about work that has moved on, and that turn's own end is judged next. Asked
+  // by count, not by "is a turn running now": the measured case was a turn that started
+  // AND finished while the judge was out, which an is-it-running check reads as idle.
+  if (turnsStarted !== generation || turnRunning || pending || judgeNext) return
+  const judged = new Set(open.map(i => i.id))
+  let targets = gateTargets(after, nowMs, cfg).filter(i => judged.has(i.id))
+  if (!targets.length) return
+  if (targets.some(i => i.queued)) {
+    const msgs = await bounded($, $.session.messages(), IO_MS, null)
+    // Cannot tell what the model received: fail open, no nag about a queued message.
+    const gone = msgs ? withdrawn(targets, msgs.filter(m => m.role === 'user').map(m => m.text)) : targets.filter(i => i.queued).map(i => i.id)
+    if (msgs && gone.length) await changeLedger($, l => dropItems(l, gone))
+    targets = targets.filter(i => !gone.includes(i.id))
+    if (!targets.length) return
+  }
+  const ids = targets.map(i => i.id)
+  // Marked BEFORE the submit: a crash between the two loses one nag, never adds a second.
+  const marked = await changeLedger($, l => markGated(l, ids, nowMs))
+  if (!marked) return
+  // Framed ("the ghostfleet plugin sent a message"), not asUser: it is the mod talking.
+  void Promise.resolve($.prompt.submit({ text: gatePrompt(targets) })).catch(() => {})
+}
+
+async function onLedgerCommand($, e) {
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on) return { text: 'ledger: off (CLAUDE_FLEET_LEDGER=off)' }
+  const file = await ledgerPath($)
+  if (!file) return { text: 'ledger: this session has no id yet' }
+  const [verb = 'list', arg] = String(e.args || '').trim().split(/\s+/).filter(Boolean)
+  const nowMs = await $.clock.now()
+  if (verb === 'list' || verb === 'all') {
+    const l = await readLedger($, file)
+    return { text: l ? listing(l, nowMs, { all: verb === 'all' }) : 'ledger: the file could not be read just now' }
+  }
+  if (verb === 'close' && arg) {
+    let found = false
+    await changeLedger($, l => { const n = closeByHand(l, arg, nowMs); found = Boolean(n); return n })
+    return { text: found ? `ledger: closed ${arg}` : `ledger: no open item ${arg}` }
+  }
+  if (verb === 'clear') {
+    await changeLedger($, l => clearOpen(l, nowMs))
+    return { text: 'ledger: every open item closed (the history stays in the file)' }
+  }
+  return { text: 'usage: /ledger [list|all|close <id>|clear]' }
 }

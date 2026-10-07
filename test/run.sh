@@ -3346,13 +3346,14 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   # 1. the shell hook carries the mod's fields forward — and adds none to a record without
   printf '{"session_id":"m9","sock":"cfmodtest","slot":"w9","status":"working","ts":1,"source":"mod","state":"working","turnId":"t1","mod":{"pid":%s,"hb":%s},"usage":{"at":1,"limits":{"five_hour":{"pct":12,"resets":%s}}}}' \
     "$$" "$NOWMS" "$((NOWS + 3600))" > "${MD:?}/m9.json"
+  jq -c '. + {ledger: {open: 2, promises: 1}}' "$MD/m9.json" > "${MD:?}/m9.x" && mv "${MD:?}/m9.x" "${MD:?}/m9.json"
   printf '{"session_id":"m8","sock":"cfmodtest","slot":"w8","status":"working","ts":1}' > "${MD:?}/m8.json"
   mdhook() { printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s","transcript_path":""}' "$1" "$MD" \
     | env -u TMUX -u TMUX_PANE -u CLAUDE_JOB_DIR CLAUDE_FLEET_DIR="$MD" CLAUDE_FLEET_SOCK=cfmodtest \
           CLAUDE_FLEET_SLOT="$2" CLAUDE_FLEET_NOTIFIER=off "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1; }
   mdhook m9 w9; mdhook m8 w8
-  is "mod: a Stop keeps the mod's state, turn, pid and budget" "ready working t1 $$ 12" \
-     "$(jq -r '"\(.status) \(.state) \(.turnId) \(.mod.pid) \(.usage.limits.five_hour.pct)"' "$MD/m9.json" 2>/dev/null)"
+  is "mod: a Stop keeps the mod's state, turn, pid, budget and ledger count" "ready working t1 $$ 12 2" \
+     "$(jq -r '"\(.status) \(.state) \(.turnId) \(.mod.pid) \(.usage.limits.five_hour.pct) \(.ledger.open)"' "$MD/m9.json" 2>/dev/null)"
   is "mod: ...and gives a record that never had them none"     "ready null null" \
      "$(jq -r '"\(.status) \(.source) \(.mod)"' "$MD/m8.json" 2>/dev/null)"
   # The two lists of mod-owned fields are one list: a field added to the mod and not to the
@@ -3462,8 +3463,8 @@ STUB
       skip "mod: its harness" "mods not available in this claude: $(grep -o 'the rollout switch[^:]*' <<< "$mdt" | head -1)"
     else
     is "mod: its harness runs and nothing fails" "0" "$(grep -oE '^ *[0-9]+ fail$' <<< "$mdt" | grep -oE '[0-9]+')"
-    [ "$(grep -cE '^\(pass\)' <<< "$mdt" || true)" -ge 10 ] && ok "mod: ...and all ten tests ran" \
-      || bad "mod: ...and all ten tests ran" ">= 10 passing" "$(grep -cE '^\(pass\)' <<< "$mdt" || true) passing"
+    [ "$(grep -cE '^\(pass\)' <<< "$mdt" || true)" -ge 62 ] && ok "mod: ...and all 62 tests ran" \
+      || bad "mod: ...and all 62 tests ran" ">= 62 passing" "$(grep -cE '^\(pass\)' <<< "$mdt" || true) passing"
     fi
   else
     skip "mod: claude plugin validate/test" "no claude with plugin test"
@@ -3586,6 +3587,81 @@ EOF
   is "band: gh failing reads 'PRs ?', never a count" "3 workers · PRs ?" "$bq"
 else
   skip "the mod's guards and band" "node missing"
+fi
+
+# ── the mod's ledger: the parts that are plain functions, and fleet-ledger ─────
+# The LEDGER section's hooks are the harness's (`claude plugin test`, test/ledger.test.ts) and
+# the live proof's. Here: the judge's reply is held to the shape asked for, so prose or a
+# made-up id closes nothing (the gate fails OPEN on it); a gated item is never a target
+# again (the loop bound is in the data); only the person's prompts are requests; the band row
+# fits every width; the file is not a `*.json`, which eight readers glob as status records;
+# and fleet-ledger lists, closes and clears it from outside, by name on THIS socket.
+group "the mod's ledger: the judge's shape, the loop bound, the band row, fleet-ledger"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  lj="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const now = 10 * 86400000
+    let l = L.emptyLedger()
+    for (const t of ['fix the login redirect', 'bump the version', 'add a changelog line']) l = L.addItem(l, { text: t, at: now - 60000, source: 'user' })
+    l = L.addItem(l, { text: 'a week-old ask', at: now - 8 * 86400000, source: 'user' })
+    const ids = L.openItems(l, now).map(i => i.id)
+    const good = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"done\"},{\"id\":\"2\",\"status\":\"not-done\",\"reason\":\"release-managed\"},{\"id\":\"9\",\"status\":\"done\"}],\"promises\":[\"merge when green\"]}', ids)
+    const prose = L.parseVerdict('Item 1 is done, item 2 too.', ids)
+    l = L.applyVerdict(l, good, { nowMs: now, turnId: 't1', promises: 'show' })
+    const states = l.items.map(i => i.id + ':' + i.state + ':' + i.source).join(',')
+    const t1 = L.gateTargets(l, now, { promises: 'show' }).map(i => i.id).join('')
+    l = L.markGated(l, ['3'], now)
+    const t2 = L.gateTargets(l, now, { promises: 'show' }).map(i => i.id).join('') || '-'
+    const t3 = L.gateTargets(l, now, { promises: 'gate' }).map(i => i.id).join('')
+    const src = [
+      { text: 'do it', origin: { kind: 'composer' } }, { text: 'do it', origin: { kind: 'bridge' } },
+      { text: '/fleet', origin: { kind: 'composer' } }, { text: 'do it', origin: { kind: 'plugin', name: 'ghostfleet' } },
+      { text: 'done', origin: { kind: 'task-notification' } },
+    ].map(e => L.sourceOf(e) || '-').join(',')
+    let over = 0
+    const s = L.ledgerSummary(l, now)
+    for (let c = 1; c <= 120; c++) { const r = L.ledgerRuns(s, now, c); if (r.reduce((k, x) => k + [...x.text].length, 0) > c && c >= 2) over++ }
+    const wide = L.ledgerRuns(s, now, 200).map(r => r.text).join('')
+    console.log([prose === null, good.items.length, states, t1, t2, t3, src, over, s.open + '/' + s.promises,
+      L.ledgerFile('/d', 'abc').endsWith('.json'), wide].join(' | '))" 2>&1)"
+  is "ledger: prose closes nothing; unknown ids dropped; the verdict applied; gated never again; who asks; every width; not *.json" \
+     "true | 2 | 1:done:user,2:not-done:user,3:open:user,4:open:user,5:open:promise | 3 | - | 5 | user,user,-,-,- | 0 | 1/1 | false | ledger · 1 open · oldest 1m “add a changelog line” · promise: merge when green" "$lj"
+
+  # A queued message pulled back out of the queue (Up) never reaches the model: the gate must
+  # not nag about it. Only a QUEUED item missing from the user messages is withdrawn.
+  lw="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    let l = L.emptyLedger()
+    l = L.addItem(l, { text: 'write a haiku about rain', at: 1, source: 'user' })
+    l = L.addItem(l, { text: 'also list ten primes', at: 2, source: 'user', queued: true })
+    l = L.addItem(l, { text: 'and a limerick', at: 3, source: 'user', queued: true })
+    l = L.addItem(l, { text: 'never typed here', at: 4, source: 'user' })
+    console.log(L.withdrawn(l.items, ['Write a haiku about rain', 'and a  limerick please']).join(','))" 2>&1)"
+  is "ledger: a queued message the model never received is withdrawn; a delivered or idle one is not" "2" "$lw"
+
+  # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
+  LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
+  printf '{"session_id":"lg-1","sock":"cf-lgtest","slot":"w1","ts":5}' > "${LG:?}/lg-1.json"
+  printf '{"session_id":"lg-2","sock":"cf-other","slot":"w1","ts":9}' > "${LG:?}/lg-2.json"
+  node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    import fs from 'node:fs'
+    let l = L.emptyLedger()
+    for (const t of ['fix the login redirect', 'bump the version']) l = L.addItem(l, { text: t, at: Date.now(), source: 'user' })
+    fs.writeFileSync('$LG/lg-1.ledger', JSON.stringify(l))" 2>/dev/null
+  lgc() { env -u TMUX CLAUDE_FLEET_DIR="$LG" "$ROOT/bin/fleet-ledger" -s cf-lgtest "$@" 2>&1; }
+  lg1="$(lgc w1 | grep -c ' open ' || true)"
+  lgc w1 close 1 >/dev/null; lg2="$(lgc w1 close 1 >/dev/null 2>&1; echo $?)"
+  lg3="$(lgc w1 | grep -c ' open ' || true)"
+  lgc w1 clear >/dev/null
+  is "fleet-ledger: lists 2, closes 1, refuses a second close, clears, writes no *.json" "2 1 1 0 2" \
+     "$lg1 $lg2 $lg3 $(lgc w1 | grep -c ' open ' || true) $(ls "$LG" | grep -c '\.json$' || true)"
+  is "fleet-ledger: a name on another socket is not this session" "1" \
+     "$(env -u TMUX CLAUDE_FLEET_DIR="$LG" "$ROOT/bin/fleet-ledger" -s cf-nofleet w1 >/dev/null 2>&1; echo $?)"
+  is "fleet-ledger: install.sh links it" "1" "$(grep -cE '^ +fleet-digest .*fleet-ledger' "$ROOT/install.sh" || true)"
+  rm -rf "${LG:?}"
+else
+  skip "the mod's ledger" "node or jq missing"
 fi
 
 # ── 4a6b. a codex worker has history, and the grid has to find it ────────────
