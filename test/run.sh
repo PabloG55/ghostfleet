@@ -17361,9 +17361,12 @@ if [ "$mode" = typed ]; then draw "half a thought"; else draw ""; fi
 while IFS= read -r line; do
   echo "$line" >> "$dir/$slot.got"
   if [ "$line" = /reload-plugins ] && [ "$mode" = loads ]; then
-    now="$(date +%s)"
-    printf '{"session_id":"sid-%s","sock":"%s","slot":"%s","status":"ready","ts":%s,"source":"mod","state":"ready","mod":{"pid":%s,"hb":%s000}}\n' \
-      "$slot" "$sock" "$slot" "$now" "$$" "$now" > "$dir/.t.$slot" && mv "$dir/.t.$slot" "$dir/sid-$slot.json"
+    # MILLISECONDS, as the mod writes them. Whole seconds with 000 appended put the heartbeat
+    # BEFORE the reload whenever the answer landed in the same second the reload was sent,
+    # and the record was rightly not believed: red on both CI legs, green here by luck.
+    now="$(perl -MTime::HiRes=time -e 'printf "%d", time * 1000')"
+    printf '{"session_id":"sid-%s","sock":"%s","slot":"%s","status":"ready","ts":%s,"source":"mod","state":"ready","mod":{"pid":%s,"hb":%s}}\n' \
+      "$slot" "$sock" "$slot" "${now%???}" "$$" "$now" > "$dir/.t.$slot" && mv "$dir/.t.$slot" "$dir/sid-$slot.json"
   fi
   draw ""
 done
@@ -17390,7 +17393,10 @@ STUB
   }
   mnote api-fix 2.1.292 idle; mnote docs-pass 2.1.292 idle; mnote rate-limit 2.1.292 idle
   mnote master 2.1.292 busy; mnote cache-keys 2.1.284 idle
-  mrun() { env HOME="$MR/home" FLEET_MOD_RELOAD_WAIT=2 "$ROOT/bin/fleet-mod" reload --only cf-acme-api "$@" 2>&1; }
+  # The wait is the real command's 15 s: a ✓ returns the moment its record lands, so a
+  # generous window costs nothing on a fast run and holds on a loaded one. Only the ✗ row,
+  # which by construction waits it out, is given 2 s (nothing will ever answer it).
+  mrun() { env HOME="$MR/home" FLEET_MOD_RELOAD_WAIT="${MR_WAIT:-15}" "$ROOT/bin/fleet-mod" reload --only cf-acme-api "$@" 2>&1; }
   # One session's row, its columns split on the table's two-space gutters. After --apply the
   # plan is printed first and the result last, so a result is the last match.
   row() { grep -E "^cf-acme-api/$1 " <<< "$2" | sed -E 's/  +/ | /g'; }
@@ -17415,9 +17421,10 @@ STUB
      "$(row api-fix "$(mrun)" | awk -F' [|] ' '{print $5}')"
   printf '{"version":2,"plugins":{"ghostfleet@ghostfleet":[{"scope":"user"}]}}\n' > "$MR/cfg/plugins/installed_plugins.json"
 
-  out="$(mrun --apply --reload-only)"; rc=$?
+  out="$(mrun --apply --reload-only --only cf-acme-api/api-fix)"
   is "reload: api-fix was sent the command"   "/reload-plugins" "$(cat "$MR/fleet/api-fix.got" 2>/dev/null)"
   is "reload: ...and is on the mod, by its record" "✓ on mod" "$(row api-fix "$out" | tail -1 | awk -F' [|] ' '{print $5}')"
+  out="$(MR_WAIT=2 mrun --apply --reload-only)"; rc=$?
   is "reload: a reload nothing answered is ✗, with why" "✗ no mod record after 2s" "$(row docs-pass "$out" | tail -1 | awk -F' [|] ' '{print $5}')"
   is "reload: ...and a run with a ✗ exits non-zero" "1" "$rc"
   is "reload: rate-limit read nothing"        "no" "$([ -e "$MR/fleet/rate-limit.got" ] && echo yes || echo no)"
