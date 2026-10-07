@@ -11958,7 +11958,7 @@ group "fleet-serve: a session is an idle window, and outlives a restart"
 sv_ttl() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.session_ttl=+process.argv[2];fs.writeFileSync(p,JSON.stringify(c,null,2))' "$SV/serve.json" "$1"; }
 SVS="$SV/serve-sessions.json"
 rm -f "$SVS"
-sv_ttl 2
+sv_ttl 3
 if sv_start idle; then
   node "$ROOT/test/helpers/serve-idle.mjs" "$BASE" slide "$(sv_code idle1)" > "$SV/probe.idle" 2>"$SV/probe.idle.err"
   is "serve-idle ran"                      "0" "$?"
