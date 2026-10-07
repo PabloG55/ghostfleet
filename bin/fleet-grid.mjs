@@ -149,7 +149,7 @@ function tmuxList() {
       if (!f) return null;
       const [name, cwd, attached] = f;
       return { name, cwd: cwd || '', attached: attached === '1' };
-    }).filter(Boolean).filter(s => !isTab(s.name));
+    }).filter(Boolean).filter(s => !isTab(s.name) && !isHold(s.name));
   } catch { return []; }
 }
 
@@ -164,6 +164,9 @@ function tmuxList() {
 //   You do not lose the tab by hiding it — C-t from the session reuses the one you
 // have, and ` inside it comes back here.
 function isTab(name) { return /^_(?:term|edit)-/.test(name || ''); }
+// The placeholder lib/agent-switch.sh holds a fleet's server open with while it swaps a
+// session's agent: never a card, never counted.
+function isHold(name) { return /^_hold-/.test(name || ''); }
 
 // THE LEAD. Every project has exactly one session called `master` — it is the one the
 // grid is drawn FROM, and the one work is dispatched from. Every filter here used to
@@ -3217,7 +3220,7 @@ function sessionStatuses(proj, includeTabs = false) {
     // editor beside your OWN agent — so the caller opts in per project and the stack
     // screen opts in for exactly one: the fleet it was opened from. Other projects' tabs
     // stay hidden, so the objection that closed this door the first time still holds.
-    names = o.split('\n').filter(Boolean).filter(n => includeTabs || !isTab(n));
+    names = o.split('\n').filter(Boolean).filter(n => !isHold(n) && (includeTabs || !isTab(n)));
   } catch { return []; }
   const dir = path.join(profileDir(proj.profile), 'fleet');
   const bySlot = new Map();

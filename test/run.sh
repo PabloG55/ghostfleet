@@ -1218,6 +1218,9 @@ STUB
 #!/bin/sh
 [ "\$1" = agents ] && exit 0
 printf '%s\n' "\$*" >> "$SW/argv.$a"
+# A real dialog first, when the test asks for one: Enter answers it, as a person would.
+# Its blank lines dropped — captured from a 40-row pane, they would scroll it out of this one.
+[ "$a" = codex ] && [ -f "$SW/codex-dialog" ] && { grep -v '^ *$' "$FIX/codex-daemon-0160-120col.txt"; read -r _; }
 exec "$SW/bin/_screen" '$foot'
 STUB
     chmod +x "$SW/bin/$a"
@@ -1318,6 +1321,35 @@ STUB
   is "...and tells it which session it is"       "yes" "$(grep -q 'the session w1 in this fleet' <<< "$(tmux -L "$SWS" capture-pane -p -J -t w1)" && echo yes || echo no)"
   is "...not the project's column"               "" "$(awk -F'\t' '$1=="billing-svc"{print $4}' "$SW/.config/ghostfleet/projects")"
   is "...nor the master"                         "$P0" "$(swpid master)"
+
+  # 7. a new agent that comes up on a DIALOG is waiting on a person, not failed to start.
+  # Seen live: codex 0.160.1 opened on its daemon dialog and the switch rolled it back at the
+  # ready timeout as a crash. It must still be pending past that timeout, read as need-you
+  # on the card, and finish once the dialog is answered.
+  : > "$SW/codex-dialog"
+  swfp agent billing-svc codex >/dev/null; sleep 6      # READY_SECS is 4 here
+  is "a new agent on a dialog is not rolled back"   "codex" "$(cat "$SWF/$SWS.master.switch" 2>/dev/null)"
+  is "...and nothing is reported failed"            "no" "$([ -f "$SWF/$SWS.master.switch-failed" ] && echo yes || echo no)"
+  is "...and the card says it needs you"            "need-you" \
+     "$(HOME="$SW" CLAUDE_FLEET_DIR="$SWF" PATH="$swpath" node "$ROOT/bin/fleet-grid.mjs" "$SWS" --json 2>/dev/null | jq -r '.cards[] | select(.name=="master") | .status' 2>/dev/null)"
+  rm -f "$SW/codex-dialog"; tmux -L "$SWS" send-keys -t master Enter; swwait master
+  is "...and answering it finishes the switch"      "codex" "$(cat "$SWF/$SWS.master.agent" 2>/dev/null)"
+  is "...with the handoff after the dialog"         "yes" "$(grep -q 'taking over from claude' <<< "$(tmux -L "$SWS" capture-pane -p -J -t master)" && echo yes || echo no)"
+
+  # 8. THE SERVER OUTLIVES THE SWAP. A master is often the only session on its server, and
+  # tmux exits with its last session: the kill took the server down and the new-session after
+  # it started a fresh one — no fleet config, and the requester's environment as its global
+  # one. Seen live when a master switched itself through its MCP server: codex came up on its
+  # sign-in screen under the wrong HOME.
+  swfp agent billing-svc --none >/dev/null; swwait master
+  tmux -L "$SWS" kill-session -t '=w1' 2>/dev/null
+  SPID="$(tmux -L "$SWS" display-message -p '#{pid}' 2>/dev/null)"
+  tmux -L "$SWS" set-environment -g SW_MARK kept
+  swfp agent billing-svc codex >/dev/null; swwait master
+  is "the only session is switched"                 "codex" "$(cat "$SWF/$SWS.master.agent" 2>/dev/null)"
+  is "...on the SAME tmux server"                   "$SPID" "$(tmux -L "$SWS" display-message -p '#{pid}' 2>/dev/null)"
+  is "...whose environment survived"                "SW_MARK=kept" "$(tmux -L "$SWS" show-environment -g SW_MARK 2>/dev/null)"
+  is "...and the placeholder is gone"               "0" "$(tmux -L "$SWS" list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^_hold-' || true)"
 
   # Every rm in the engine is under its fleet dir; an empty one must refuse, not resolve to /.
   bash "$ROOT/lib/agent-switch.sh" request "" "$SWS" master codex >/dev/null 2>&1

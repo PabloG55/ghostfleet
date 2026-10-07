@@ -168,14 +168,29 @@ launch() {   # agent id model cwd
 }
 # Up to READY_SECS for the agent's own ready pattern. A session that disappears is a launcher
 # that came straight back (agent-here takes the pane down when the agent never got going).
+# STOPPED ON A DIALOG IS NOT FAILED TO START. Seen live: codex 0.160.1 came up on "Background
+# server has incompatible feature settings", which a human answers in a second, and the
+# switch killed it at 90s and rolled back as though it had crashed. While the pane matches the
+# agent's blocked_re the clock is paused — up to BLOCKED_SECS — the pending marker stays (the
+# row keeps saying "switching to <agent>…") and the grid reads the pane as need-you, so the
+# person who asked is shown where to answer. The hold stays on the server throughout.
+BLOCKED_SECS="${CLAUDE_FLEET_SWITCH_BLOCKED_SECS:-600}"
 WHY_NOT=""
 wait_ready() {
-  local agent="$1" re i=0 max
+  local agent="$1" re bre pane i=0 b=0 max bmax noted=0
   re="$(FA field "$agent" ready_re 2>/dev/null)"
-  max=$((READY_SECS * 2)); WHY_NOT="did not reach a prompt in ${READY_SECS}s"
+  bre="$(FA field "$agent" blocked_re 2>/dev/null)"
+  max=$((READY_SECS * 2)); bmax=$((BLOCKED_SECS * 2)); WHY_NOT="did not reach a prompt in ${READY_SECS}s"
   while [ "$i" -lt "$max" ]; do
     alive || { WHY_NOT="exited before it reached a prompt"; return 1; }
-    if [ -n "$re" ] && grep -qE -- "$re" <<< "$(tmux -L "$SOCK" capture-pane -p -t "$SLOT" 2>/dev/null)"; then
+    pane="$(tmux -L "$SOCK" capture-pane -p -t "$SLOT" 2>/dev/null)"
+    if [ -n "$bre" ] && grep -qE -- "$bre" <<< "$pane"; then
+      [ "$noted" = 1 ] || { log "$agent is waiting on a dialog in $SLOT's pane — the switch finishes once it is answered"; noted=1; }
+      b=$((b+1))
+      [ "$b" -lt "$bmax" ] || { WHY_NOT="sat on a dialog nobody answered for ${BLOCKED_SECS}s"; return 1; }
+      sleep 0.5; continue
+    fi
+    if [ -n "$re" ] && grep -qE -- "$re" <<< "$pane"; then
       # Held a moment: a launcher that draws a prompt and dies straight after is a failed
       # start too, and the old agent is already gone.
       sleep "${CLAUDE_FLEET_SWITCH_READY_HOLD:-1}"; alive && return 0
@@ -185,6 +200,17 @@ wait_ready() {
   done
   return 1
 }
+# ── THE SERVER MUST OUTLIVE THE SWAP ─────────────────────────────────────────
+# A master is often the ONLY session on its fleet's server, and tmux exits with its last
+# session. Killing it took the server down, and the new-session after it started a FRESH
+# one: no fleet tmux config, and a global environment copied from whoever ran this — seen
+# live when a master switched itself through its MCP server, whose environment differed, and
+# codex came up on its sign-in screen under the wrong HOME. A placeholder session holds the
+# server across the gap. `_hold-` is hidden like a tab; its sleep ends it on its own if this
+# process dies before it can.
+HOLD="_hold-$SLOT"
+hold_on()  { tmux -L "$SOCK" new-session -d -s "$HOLD" "sleep 600" 2>/dev/null || true; }
+hold_off() { tmux -L "$SOCK" kill-session -t "=$HOLD" 2>/dev/null || true; }
 kill_slot() {
   local i=0
   tmux -L "$SOCK" kill-session -t "=$SLOT" 2>/dev/null
@@ -255,9 +281,14 @@ do_switch() {
   [ -n "$rid" ] && resumed=1
   log "switching $SLOT $from -> $to ($([ -n "$rid" ] && printf 'resume %s' "$rid" || printf fresh)) in $cwd"
 
+  hold_on
   kill_slot
+  # The marker says what the PANE runs, from the moment it runs it: a reader waiting with this
+  # (the grid's need-you on a dialog, above all) must read the new agent's pane with the new
+  # agent's patterns. The fallback below puts it back.
+  FA set "$SLOT" "$to" -s "$SOCK" >/dev/null 2>&1
   if launch "$to" "$rid" "$rmodel" "$cwd" && wait_ready "$to"; then
-    FA set "$SLOT" "$to" -s "$SOCK" >/dev/null 2>&1
+    hold_off
     rm -f "${FAILED:?}" 2>/dev/null
     [ "$(cat "$PENDING" 2>/dev/null)" = "$to" ] && rm -f "${PENDING:?}"
     log "switched $SLOT to $to"
@@ -272,10 +303,13 @@ do_switch() {
   fid=""; fmodel="$(conv_get "$from" model)"
   [ "$(FA field "$from" resume 2>/dev/null)" = yes ] && fid="$(conv_get "$from" id)"
   if launch "$from" "$fid" "$fmodel" "$cwd" && wait_ready "$from"; then
+    hold_off
     FA set "$SLOT" "$from" -s "$SOCK" >/dev/null 2>&1
     fail "$to failed to start ($why) — $SLOT is back on $from${fid:+ (resumed)}"
     [ -n "$fid" ] || send_prompt "$(handoff "$from" "$to" 0)"
   else
+    hold_off
+    FA set "$SLOT" "$from" -s "$SOCK" >/dev/null 2>&1
     fail "$to failed to start AND $from did not come back — reopen it: fleet-restart --reopen $SLOT -s $SOCK"
   fi
   rm -f "${PENDING:?}" 2>/dev/null
