@@ -628,7 +628,7 @@ CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fle
          fleet-worktrees fleet-ack fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy fleet-merged fleet-shipped fleet-look.mjs fleet-shots.mjs
          fleet-clean fleet-open fleet-restart fleet-project fleet-demo fleet-phone fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-hibernate fleet-meter.mjs fleet-review
-         fleet-digest fleet-jarvis fleet-update
+         fleet-digest fleet-jarvis fleet-update fleet-mod
          agent-here opencode-here codex-here agy-here cursor-here)
 linked=()
 for b in "${CF_BINS[@]}"; do
@@ -767,7 +767,37 @@ done
 #   The COUNT is what matters here rather than the names: "2 profiles" answers "did it
 # find my personal profile too", which is the question this loop exists for, and
 # --verbose still names each file it wrote.
-echo "✓ wired hooks + MCP into $N_WIRED Claude profile$([ "$N_WIRED" = 1 ] || echo s)"
+
+MOD_IN=""
+# --- the Claude Code mod (mods/ghostfleet) into the same profiles ------------
+# The hooks above tell the fleet about a session from OUTSIDE it; the mod reports its exact
+# state and budget from inside (docs/OPERATIONS.md, "The mod"). bin/fleet-mod does the
+# work: same profile loop, settings and plugin registries backed up first, idempotent, and
+# a no-op on a Claude too old to have mods. It is code that runs inside every Claude
+# session with your permissions, so it has an off switch that is not "uninstall later":
+# CLAUDE_FLEET_MOD=off skips it here, and `fleet-mod uninstall` removes it after the fact.
+case "${CLAUDE_FLEET_MOD:-}" in
+  0|n|N|no|No|NO|false|False|FALSE|off|Off|OFF)
+    MOD_IN=" (not the Claude Code mod: CLAUDE_FLEET_MOD=off)" ;;
+  *)
+    if _mod_out="$(CLAUDE_FLEET_HOME="$FLEET_HOME" "$FLEET_HOME/bin/fleet-mod" install 2>&1)"; then
+      # Quiet by default like the rest: ONE line, whichever of the three things happened.
+      # fleet-mod says why it installed nothing in a line of its own, so that line is the
+      # summary; otherwise the summary is that it is in.
+      # It rides on the hooks line below, whatever happened, rather than adding one: the
+      # first screen has a line budget the suite holds it to, and "it is in" (or why not)
+      # is the same news as the hooks. fleet-mod says why it installed nothing in a line of
+      # its own, and that line is the reason given.
+      [ "$VERBOSE" = 1 ] && printf '%s\n' "$_mod_out"
+      if _why="$(grep -m1 '^fleet-mod:' <<< "$_mod_out")"; then MOD_IN=" (not the Claude Code mod: ${_why#fleet-mod: })"
+      else MOD_IN=" + the Claude Code mod"
+      fi
+    else
+      printf '%s\n' "$_mod_out"
+      echo "! the Claude Code mod did not install everywhere — the fleet still works from outside; see above"
+    fi ;;
+esac
+echo "✓ wired hooks + MCP${MOD_IN:-} into $N_WIRED Claude profile$([ "$N_WIRED" = 1 ] || echo s)"
 
 # --- the other two agents' MCP: one registration each, and that is correct ----
 # WHY THIS LOOKS WRONG NEXT TO THE CLAUDE PATH ABOVE, AND IS NOT. register_mcp() runs once

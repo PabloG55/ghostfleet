@@ -209,7 +209,11 @@ if [ -f "$REPO/vite.config.mjs" ] && [ -d "$REPO/web/src" ]; then
 fi
 
 failed=""
-for d in bin lib tmux hooks mcp skill layouts web; do
+# `mods` and `.claude-plugin` are the Claude Code mod and the marketplace that lists it.
+# The runtime IS that marketplace (bin/fleet-mod), and a folder marketplace is read in
+# place, so this copy is the whole of deploying a change to the mod: a new session loads
+# it, a running one on /reload-plugins.
+for d in bin lib tmux hooks mcp skill layouts web mods .claude-plugin; do
   [ -d "$REPO/$d" ] || continue
   if command -v rsync >/dev/null 2>&1; then
     rsync -a --delete "$REPO/$d/" "$DEST/$d/"; rc=$?

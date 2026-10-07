@@ -1537,7 +1537,7 @@ else
   # $REPO a non-repo, so that branch is skipped entirely — which is also the npx case.
   mkdir -p "$IR/src"
   cp -Rp "$ROOT"/bin "$ROOT"/lib "$ROOT"/tmux "$ROOT"/hooks "$ROOT"/mcp "$ROOT"/skill \
-         "$ROOT"/layouts "$ROOT"/web "$ROOT"/install.sh "$IR/src/" 2>/dev/null
+         "$ROOT"/layouts "$ROOT"/web "$ROOT"/mods "$ROOT"/.claude-plugin "$ROOT"/install.sh "$IR/src/" 2>/dev/null
   mkdir -p "$IR/h/.claude"
   # XDG_CONFIG_HOME TOO, NOT JUST HOME. install.sh reads the editor's config from
   # ${XDG_CONFIG_HOME:-$HOME/.config}, which is the correct thing for it to do and the
@@ -1559,7 +1559,10 @@ else
   is "...and does not list every command"  "no"  "$(grep -q 'claude-here cf-sync' <<<"$first" && echo yes || echo no)"
   # It still has to say the main work happened. Quieting the per-profile narration
   # without replacing it would leave the output claiming only that symlinks were made.
-  is "...but says the hooks + MCP landed"  "yes" "$(grep -q 'wired hooks + MCP into' <<<"$first" && echo yes || echo no)"
+  is "...but says the hooks + MCP landed"  "yes" "$(grep -qE 'wired hooks \+ MCP( \+ the Claude Code mod| \(not the Claude Code mod: [^)]+\))? into' <<<"$first" && echo yes || echo no)"
+  # ...and the mod's outcome is ON that line, either way, never a line of its own: in or
+  # why not. Measured on both: a claude on PATH installs it, a runner without one does not.
+  is "...and says what became of the mod there" "yes" "$(grep -qE 'MCP (\+ the Claude Code mod|\(not the Claude Code mod: )' <<<"$first" && echo yes || echo no)"
   is "...and how many commands"            "yes" "$(grep -q 'linked .* commands' <<<"$first" && echo yes || echo no)"
   # THE NEXT STEP IS THE POINT OF THE WHOLE CHANGE.
   is "...and leads with the demo"          "yes" "$(grep -q 'ghostfleet demo' <<<"$first" && echo yes || echo no)"
@@ -3313,6 +3316,156 @@ if command -v tmux >/dev/null 2>&1; then
   rm -rf "$NY"
 else
   skip "answered need-you" "tmux missing"
+fi
+
+# ── the Claude Code mod: the session's own word, and when to believe it ──────
+# mods/ghostfleet writes a Claude session's state and budget into its status record from
+# INSIDE Claude Code. Four things have to hold for that to be worth anything, and each is
+# a place it can quietly stop being true:
+#   1. the shell hook rebuilds the record on every event; if it drops the mod's fields,
+#      every Stop erases them and the readers fall back to the pane without a word
+#   2. a reader believes the mod only while it is still being written (pid alive,
+#      heartbeat recent) — a dead process's `working` must not stand forever
+#   3. the readers that matter (the grid, the scan the phone and digest use, fleet-list,
+#      the governor) actually prefer it, and fall back when they should
+#   4. installing it into the owner's profiles is idempotent and a dry run changes nothing
+# The mod's own hooks are tested by its harness (`claude plugin test`), run here where
+# claude is on PATH. Every rm below is `${MD:?}`: an unset MD must stop the run, never
+# widen a glob to /.
+group "the Claude Code mod: the session's own word, and when to believe it"
+if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  MD="$(mktemp -d)" && MD="$(cd "${MD:?}" && pwd -P)"
+  NOWS="$(date +%s)"; NOWMS="$((NOWS * 1000))"
+  sleep 0 & MDEAD=$!; wait "$MDEAD" 2>/dev/null           # a pid that is certainly gone
+
+  # 1. the shell hook carries the mod's fields forward — and adds none to a record without
+  printf '{"session_id":"m9","sock":"cfmodtest","slot":"w9","status":"working","ts":1,"source":"mod","state":"working","turnId":"t1","mod":{"pid":%s,"hb":%s},"usage":{"at":1,"limits":{"five_hour":{"pct":12,"resets":%s}}}}' \
+    "$$" "$NOWMS" "$((NOWS + 3600))" > "${MD:?}/m9.json"
+  printf '{"session_id":"m8","sock":"cfmodtest","slot":"w8","status":"working","ts":1}' > "${MD:?}/m8.json"
+  mdhook() { printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s","transcript_path":""}' "$1" "$MD" \
+    | env -u TMUX -u TMUX_PANE -u CLAUDE_JOB_DIR CLAUDE_FLEET_DIR="$MD" CLAUDE_FLEET_SOCK=cfmodtest \
+          CLAUDE_FLEET_SLOT="$2" CLAUDE_FLEET_NOTIFIER=off "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1; }
+  mdhook m9 w9; mdhook m8 w8
+  is "mod: a Stop keeps the mod's state, turn, pid and budget" "ready working t1 $$ 12" \
+     "$(jq -r '"\(.status) \(.state) \(.turnId) \(.mod.pid) \(.usage.limits.five_hour.pct)"' "$MD/m9.json" 2>/dev/null)"
+  is "mod: ...and gives a record that never had them none"     "ready null null" \
+     "$(jq -r '"\(.status) \(.source) \(.mod)"' "$MD/m8.json" 2>/dev/null)"
+  # The two lists of mod-owned fields are one list: a field added to the mod and not to the
+  # hook would survive exactly until the next Stop.
+  is "mod: the hook carries exactly the fields the mod owns" \
+     "$(node --input-type=module -e "import('$ROOT/mods/ghostfleet/hooks/shape.js').then(m => console.log([...m.MOD_FIELDS].sort().join(' ')))" 2>/dev/null)" \
+     "$(grep -oE "jq -c '\{[a-zA-Z, ]+\}" "$ROOT/hooks/fleet-event.sh" | head -1 | sed "s/^jq -c '//" | grep -oE '[a-zA-Z]+' | sort | tr '\n' ' ' | sed 's/ $//')"
+
+  # 2. when to believe it
+  mdstate() { node --input-type=module -e "
+    import { modState } from '$ROOT/lib/mod-status.mjs';
+    console.log(String(modState(JSON.parse(process.argv[1]))));" "$1" 2>&1; }
+  # The record is built by printf and handed over in a variable: a literal `{...,...}`
+  # written inside "$( )" is one quoting slip away from brace expansion.
+  mdjs() { printf '{"source":"mod","state":"%s","mod":{"pid":%s,"hb":%s}}' "$1" "$2" "$3"; }
+  is "mod: alive and beating -> its state"       "need-you" "$(mdstate "$(mdjs need-you "$$" "$NOWMS")")"
+  is "mod: its process is gone -> not believed"  "null"     "$(mdstate "$(mdjs working "$MDEAD" "$NOWMS")")"
+  is "mod: alive but silent 10m -> not believed" "null"     "$(mdstate "$(mdjs working "$$" "$((NOWMS - 600000))")")"
+  is "mod: a record the mod never wrote -> null" "null"   "$(mdstate '{"status":"working"}')"
+
+  # 3. the readers. Four sessions on a scratch server, each with a record that tells a
+  # different story; the shell hook's own `status` is deliberately "ready" on all of them,
+  # so a reader that ignores the mod is caught by the word, not by a flag.
+  rm -f "${MD:?}"/*.json
+  mdrec() {  # slot state pid hb
+    printf '{"session_id":"id-%s","sock":"cfmodtest","slot":"%s","cwd":"%s","status":"ready","ts":%s,"source":"mod","state":"%s","mod":{"pid":%s,"hb":%s}}' \
+      "$1" "$1" "$MD" "$NOWS" "$2" "$3" "$4" > "${MD:?}/id-$1.json"; }
+  mdrec live working "$$" "$NOWMS"
+  mdrec ask need-you "$$" "$NOWMS"
+  mdrec dead working "$MDEAD" "$NOWMS"
+  mdrec mute working "$$" "$((NOWMS - 600000))"
+  is "mod: the push/digest scan takes the live mod's word, the hook's for the rest" \
+     "ask=need-you dead=ready live=working mute=ready" \
+     "$(node --input-type=module -e "
+        import { scanStatus } from '$ROOT/lib/fleet-scan.mjs';
+        console.log(scanStatus(['$MD']).map(r => r.slot + '=' + r.status).sort().join(' '));" 2>&1)"
+  if command -v tmux >/dev/null 2>&1; then
+    tmux -L cfmodtest kill-server 2>/dev/null
+    # Started in $MD, where there is no conversation: a fallback card then reads `idle`, and
+    # cannot borrow `ready` from whatever transcript the checkout running the suite has.
+    for s in live ask dead mute; do tmux -L cfmodtest new-session -d -s "$s" -c "$MD" -x 120 -y 30 "sleep 120" 2>/dev/null; done
+    mdgrid() { env -u TMUX -u TMUX_PANE CLAUDE_FLEET_DIR="$MD" "$@" node "$ROOT/bin/fleet-grid.mjs" cfmodtest --json 2>/dev/null \
+               | jq -r '.cards | sort_by(.name)[] | "\(.name)=\(.status)/\(.status_from)"' | tr '\n' ' ' | sed 's/ $//'; }
+    # With the pane regex switched off, the live mod's cards are still exact; the others
+    # have nothing left to go on but the hook's word, and say so (`pane`).
+    is "mod: grid, pane regex OFF: the live mod's state, from the mod" \
+       "ask=need-you/mod dead=ready/pane live=working/mod mute=ready/pane" "$(mdgrid CLAUDE_FLEET_PANE_BUSY=off)"
+    # With it on, a dead or silent mod falls back to the pane, which shows a shell
+    # prompt: not busy, so the record's `ready` and no transcript read as idle.
+    is "mod: grid, pane regex on: a dead or silent mod falls back to the pane" \
+       "ask=need-you/mod dead=idle/pane live=working/mod mute=idle/pane" "$(mdgrid)"
+    is "mod: fleet-list (and so /fleet) takes the live mod's word" "ask=need-you dead=ready live=working mute=ready" \
+       "$(env -u TMUX CLAUDE_FLEET_DIR="$MD" "$ROOT/bin/fleet-list" -s cfmodtest 2>/dev/null | tail -n +2 \
+          | awk '{print $1"="$2}' | sort | tr '\n' ' ' | sed 's/ $//')"
+
+    # The governor: the mod's 5h figure, while its window has not reset, over the pane,
+    # which on these panes carries no figure at all.
+    jq --argjson n "$NOWS" '. + {usage: {at: ($n - 40), limits: {five_hour: {pct: 37.5, resets: ($n + 3600)}}}}' \
+      "$MD/id-dead.json" > "${MD:?}/x" && mv "${MD:?}/x" "${MD:?}/id-dead.json"
+    mdgov() { env -u TMUX CLAUDE_FLEET_DIR="$MD" "$ROOT/bin/fleet-governor" -s cfmodtest --once --dry-run --no-resource 2>&1 | tail -1; }
+    is "mod: governor reads the mod's figure (even a dead session's: same window)" "1" \
+       "$(mdgov | grep -c 'budget 37% (healthy) — from the mod: dead, read 4[0-9]s ago' || true)"
+    jq --argjson n "$NOWS" '.usage.limits.five_hour.resets = ($n - 1)' "$MD/id-dead.json" > "${MD:?}/x" && mv "${MD:?}/x" "${MD:?}/id-dead.json"
+    is "mod: ...and ignores it once its window has reset" "0" "$(mdgov | grep -c 'from the mod' || true)"
+    tmux -L cfmodtest kill-server 2>/dev/null
+  else
+    skip "mod: grid, fleet-list and governor" "tmux missing"
+  fi
+
+  # 4. fleet-mod against a stub claude: what a dry run says, what it does not do, and the
+  # version gate. The stub logs every command that is not a read.
+  mkdir -p "${MD:?}/stub" "${MD:?}/prof" "${MD:?}/rt/.claude-plugin"
+  echo '{}' > "${MD:?}/rt/.claude-plugin/marketplace.json"
+  echo '{"theme":"dark"}' > "${MD:?}/prof/settings.json"
+  cat > "${MD:?}/stub/claude" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  --version) echo "${STUB_VER:-2.1.292} (Claude Code)" ;;
+  "plugin marketplace list --json"|"plugin list --json") echo '[]' ;;
+  *) echo "$*" >> "$STUB_LOG" ;;
+esac
+STUB
+  chmod +x "$MD/stub/claude"
+  mdmod() { env PATH="$MD/stub:$PATH" STUB_LOG="$MD/stub.log" CLAUDE_FLEET_HOME="$MD/rt" \
+              "$ROOT/bin/fleet-mod" "$@" --profile "$MD/prof" 2>&1; }
+  : > "${MD:?}/stub.log"; mdout="$(mdmod install --dry-run)"
+  is "mod: a dry run names the backup and both commands" "3" \
+     "$(grep -cE 'would back up .*settings.json|would run .*marketplace add .*/rt$|would run .*install ghostfleet@ghostfleet --scope user' <<< "$mdout")"
+  is "mod: ...and runs none of them, touches nothing" "0 {\"theme\":\"dark\"} 0" \
+     "$(wc -l < "$MD/stub.log" | tr -d ' ') $(cat "$MD/prof/settings.json") $(ls "$MD/prof" | grep -c bak || true)"
+  : > "${MD:?}/stub.log"; mdmod install >/dev/null
+  is "mod: a real install backs up first, then adds and installs" "1|plugin marketplace add $MD/rt|plugin install ghostfleet@ghostfleet --scope user" \
+     "$(ls "$MD/prof" | grep -c 'settings.json.bak' || true)|$(paste -sd'|' "$MD/stub.log")"
+  : > "${MD:?}/stub.log"; mdout="$(STUB_VER=2.1.200 mdmod install)"
+  is "mod: a Claude without mods gets nothing installed" "1 0" \
+     "$(grep -c 'has no mods' <<< "$mdout" || true) $(wc -l < "$MD/stub.log" | tr -d ' ')"
+  is "mod: cf-sync ships the mod and its marketplace" "1" \
+     "$(grep -cE '^for d in .* mods \.claude-plugin; do' "$ROOT/bin/cf-sync" || true)"
+
+  # The mod's own harness and the engine's validator, where there is an engine to ask.
+  if command -v claude >/dev/null 2>&1 && grep -qE '^  test ' <<< "$(claude plugin --help 2>/dev/null)"; then
+    is "mod: claude plugin validate passes" "1" "$(claude plugin validate "$ROOT/mods/ghostfleet" 2>&1 | grep -c 'Validation passed' || true)"
+    mdt="$(claude plugin test "$ROOT/mods/ghostfleet" 2>&1)"
+    # The engine can have mods switched off for the whole process (a rollout switch it
+    # caches per config dir). That is the machine, not the mod: said, and counted as such.
+    if grep -q 'hooks modules are turned off' <<< "$mdt"; then
+      skip "mod: its harness" "mods not available in this claude: $(grep -o 'the rollout switch[^:]*' <<< "$mdt" | head -1)"
+    else
+    is "mod: its harness runs and nothing fails" "0" "$(grep -oE '^ *[0-9]+ fail$' <<< "$mdt" | grep -oE '[0-9]+')"
+    [ "$(grep -cE '^\(pass\)' <<< "$mdt" || true)" -ge 10 ] && ok "mod: ...and all ten tests ran" \
+      || bad "mod: ...and all ten tests ran" ">= 10 passing" "$(grep -cE '^\(pass\)' <<< "$mdt" || true) passing"
+    fi
+  else
+    skip "mod: claude plugin validate/test" "no claude with plugin test"
+  fi
+  rm -rf "${MD:?}"
+else
+  skip "the Claude Code mod" "jq or node missing"
 fi
 
 # ── 4a6b. a codex worker has history, and the grid has to find it ────────────
@@ -7124,8 +7277,9 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   # 4. AND IT SAYS SO when a record does not split, instead of reporting an empty fleet.
   # That silence is why one formatter change became 122 red assertions rather than one.
   is "an unsplit record is reported"    "1" \
-     "$(sed 's/^const TF = .*$/const TF = "\\x1f";/' "$ROOT/bin/fleet-grid.mjs" > "$VS/old.mjs"
-        shimmed env CLAUDE_FLEET_DIR="$VS" node "$VS/old.mjs" cfvis35 --plain 2>&1 >/dev/null \
+     "$(mkdir -p "${VS:?}/bin" && ln -sfn "$ROOT/lib" "${VS:?}/lib"      # its ../lib imports resolve
+        sed 's/^const TF = .*$/const TF = "\\x1f";/' "$ROOT/bin/fleet-grid.mjs" > "$VS/bin/old.mjs"
+        shimmed env CLAUDE_FLEET_DIR="$VS" node "$VS/bin/old.mjs" cfvis35 --plain 2>&1 >/dev/null \
         | grep -c 'rewrote the separator' || true)"
   tmux -L cfvis35 kill-server 2>/dev/null
 
@@ -10153,7 +10307,7 @@ if command -v tmux >/dev/null 2>&1; then
   # names, so a rename is a broken client, not a refactor.
   is "top-level keys"    "project profile sub counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
   is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
-  is "card keys"         "name label status team_status folder branch agent pr msg age exited asleep lost queued attached sched limit_at lead parent workers sub_head" \
+  is "card keys"         "name label status status_from team_status folder branch agent pr msg age exited asleep lost queued attached sched limit_at lead parent workers sub_head" \
                          "$(J 'Object.keys(o.cards[0]).join(" ")')"
   is "project is the fleet's project" "demoproj" "$(J 'o.project')"
   is "profile is the profile"         "work"     "$(J 'o.profile')"

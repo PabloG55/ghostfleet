@@ -195,9 +195,38 @@ is_fossil() {
 BUDGET_PCT=0
 BUDGET_BLIND=""
 BUDGET_FROZEN=""
+BUDGET_FROM=""
+# ── THE ENGINE'S OWN FIGURE FIRST ────────────────────────────────────────────
+# mods/ghostfleet writes what Claude Code measured — the same 5h figure the status bar
+# paints — into each session's record (`usage.limits.five_hour`: pct, and `resets`, the
+# epoch second its window rolls over). Neither failure above applies to it: it does not
+# depend on how wide anything is, and it carries its own expiry. Within one window usage
+# only rises, so every reading whose window has not reset is a true lower bound on the
+# account NOW, however old it is and whether or not its session is parked; a reading
+# whose window has reset is ignored. The max of the live ones is the best lower bound
+# there is. Every record in the fleet dir counts, not just this socket's: the dir is the
+# profile's, and a profile is one account, so a sibling fleet's reading is this account's.
+# Sets BUDGET_PCT and BUDGET_FROM (the session and age of the reading); leaves both
+# empty when no record carries a live figure, and the pane scrape below runs as before.
+mod_budget() {
+  local now f best=""
+  now="$(date +%s)"
+  best="$(for f in "$FLEET_DIR"/*.json; do
+      jq -r --argjson now "$now" '.usage as $u | ($u.limits.five_hour // empty) as $w
+        | select(($w.pct | type) == "number")
+        | select(if $w.resets then $w.resets > $now else (($u.at // 0) > $now - 600) end)
+        | [($w.pct | floor), (.slot // .session_id // "?"), ($now - ($u.at // $now)), ($w.resets // 0)] | @tsv' "$f" 2>/dev/null
+    done | sort -t$'\t' -k1,1nr -k3,3n | head -1)"
+  [ -n "$best" ] || return 1
+  local pct who age resets
+  IFS=$'\t' read -r pct who age resets <<< "$best"
+  BUDGET_PCT="$pct"
+  BUDGET_FROM="from the mod: $who, read ${age}s ago$([ "$resets" != 0 ] && printf ', window resets %s' "$(date -r "$resets" +%H:%M 2>/dev/null || date -d "@$resets" +%H:%M 2>/dev/null)")"
+}
 budget() {
   local p="" s="" w=""
-  BUDGET_PCT=0; BUDGET_BLIND=""; BUDGET_FROZEN=""
+  BUDGET_PCT=0; BUDGET_BLIND=""; BUDGET_FROZEN=""; BUDGET_FROM=""
+  mod_budget && return 0
   for s in $(tmux -L "$SOCK" list-sessions -F '#{session_name}' 2>/dev/null); do
     meterable "$s" || continue
     if is_parked "$s"; then BUDGET_FROZEN="$BUDGET_FROZEN $s"; continue; fi
@@ -431,7 +460,9 @@ tick() {
   fi
 
   budget; pct="$BUDGET_PCT"
-  if [ -z "$pct" ] || [ "$pct" -eq 0 ]; then
+  # 0 from a pane is "nothing to read"; 0 from the mod is a real reading (a window that
+  # has just rolled over), and saying "no reading" over it would be the log lying.
+  if [ -z "$pct" ] || { [ "$pct" -eq 0 ] && [ -z "$BUDGET_FROM" ]; }; then
     # Say WHICH panes couldn't be read and how wide they were. Without this, a fleet
     # whose sessions are all in a stack looks identical to a fleet at 0% usage, and the
     # ceiling silently stops being enforced.
@@ -474,7 +505,7 @@ tick() {
       n=${#active[@]}
     fi
     if [ "$n" -gt 0 ]; then
-      log "budget ${pct}% >= ${PAUSE_AT}% -> parking ALL ${n} worker(s)"
+      log "budget ${pct}% >= ${PAUSE_AT}% -> parking ALL ${n} worker(s)${BUDGET_FROM:+ — $BUDGET_FROM}"
       notify "budget ${pct}% — parked ${n} worker(s); auto-resume under ${RESUME}%"
       for w in "${active[@]}"; do
         log "  park $w"
@@ -513,12 +544,12 @@ tick() {
         break
       fi
     done
-    [ "$resumed" = 0 ] && log "budget ${pct}% (healthy)"
+    [ "$resumed" = 0 ] && log "budget ${pct}% (healthy)${BUDGET_FROM:+ — $BUDGET_FROM}"
     return
   fi
 
   # between RESUME and PAUSE_AT -> full throttle, do nothing
-  log "budget ${pct}% (running full-throttle; ceiling ${PAUSE_AT}%)"
+  log "budget ${pct}% (running full-throttle; ceiling ${PAUSE_AT}%)${BUDGET_FROM:+ — $BUDGET_FROM}"
 }
 
 modelabel="ACTIVE (parks all at ceiling)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"

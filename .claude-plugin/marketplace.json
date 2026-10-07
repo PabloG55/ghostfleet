@@ -1,0 +1,17 @@
+{
+  "name": "ghostfleet",
+  "description": "The ghostfleet mod, served from this repository (or from its staged runtime).",
+  "owner": {
+    "name": "ghostfleet"
+  },
+  "plugins": [
+    {
+      "name": "ghostfleet",
+      "source": "./mods/ghostfleet",
+      "description": "A fleet session's exact state and budget, written from inside Claude Code.",
+      "author": {
+        "name": "ghostfleet"
+      }
+    }
+  ]
+}

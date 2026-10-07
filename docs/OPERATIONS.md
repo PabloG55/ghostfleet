@@ -525,6 +525,101 @@ Cross-project spawns from a lead (`fleet_spawn` with `project:`) deliberately *d
 pass `-s`: they run `fleet-spawn` inside the target's checkout and let `route_to_owner`
 find the fleet, which is the mechanism that makes targeting work at all.
 
+## The mod: Claude reporting on itself (Claude Code 2.1.287+)
+
+Everything above reads a Claude session from **outside**: a regex over its pane for "is
+it working", its status bar for the 5h budget, a shell hook that fires on five events and
+guesses the rest. Most of the fleet's status bugs came from there: a 56-column pane that
+drops the spinner's timer, a leftover login line read as a spinner, a governor log full of
+`no budget reading this tick — no pane carries the 5h figure`.
+
+`mods/ghostfleet` is a Claude Code **mod**: a plugin of function hooks that runs inside
+every Claude session and reports from there. It does three things:
+
+| | from | written to |
+|---|---|---|
+| **state** | `turn.start` → `working`, `turn.complete` → `ready` (`interrupted` on Esc), the permission dialog → `need-you` (the engine's `tool.check` verdict is `ask` on a real call), the call resolving → `working` again | the session's status record, `<fleet dir>/<session_id>.json`, merged beside the shell hook's fields as `source: "mod"`, `state`, `turnId`, `mod: { pid, hb }` |
+| **budget** | `session.measure`: the engine's own context and rate-limit figures, pushed after each turn | the same record, `usage.limits.five_hour: { pct, resets }` |
+| **`/fleet`, `/inbox`** | `fleet-list` and `fleet-inbox`, run as processes | the transcript, **without starting a turn**, mid-turn too |
+
+**Who believes it.** The grid (and so the phone), the push/digest scan and `fleet-list`
+take the mod's `state` over the pane while it is still being written: the pid that wrote
+it is alive and its once-a-minute heartbeat is under 150 s old (`lib/mod-status.mjs`).
+Otherwise (a crash, the plugin off, an older Claude, any other agent) they do exactly what
+they did before. `fleet-grid.mjs --json` says which on every card (`status_from: "mod"` or
+`"pane"`). The governor takes the highest 5h figure whose window has not reset yet, from
+any record in the profile's fleet dir, and names it in its log:
+
+```
+[fleet-governor 09:14:02] budget 37% (healthy) — from the mod: master, read 40s ago, window resets 13:00
+```
+
+With no such figure it scrapes the panes as before.
+
+**What it cannot see.** `classic.PermissionRequest` and `classic.Notification` never
+reach a user-installed mod on this Claude build (the debug log says they are `bypassed by
+cc-plugin-sec-default`), which is why the dialog is read from `tool.check`. That verdict
+cannot tell a person's dialog from **auto mode's** classifier, and a hook cannot read the
+permission mode, so in auto mode a classified call reads `need-you` until it resolves.
+Bypass mode is unaffected: its verdict is `allow`. A hard rate limit has no event either.
+The grid reads it from the 5h figure the mod writes (`limit` at 100%).
+
+**`/inbox` and the model.** A command's output is a transcript row the model reads as well
+as you. For `/inbox` that is the point: it marks the rows seen exactly as `fleet-inbox`
+does, so if the model could not read them they would be gone from the one place it looks.
+
+**Installing it.** `install.sh` runs `fleet-mod install`, which adds the runtime
+(`~/.local/libexec/ghostfleet`, itself a marketplace) and installs `ghostfleet@ghostfleet`
+at user scope into every profile the hooks are wired into, after backing up each one's
+`settings.json` and plugin registries. It is idempotent, and does nothing on a Claude
+without mods. See what it would do first:
+
+```bash
+fleet-mod install --dry-run     # every backup and `claude plugin` command, per profile
+fleet-mod status                # where each profile stands
+```
+
+**Deploying a change.** A marketplace that is a folder is read **in place**:
+`claude plugin list` shows `Read from: ~/.local/libexec/ghostfleet/mods/ghostfleet`. So
+`cf-sync` is the whole deploy, as for every other file: a new session loads the new mod,
+a running one picks it up on `/reload-plugins`. No version bump, no reinstall.
+
+**Seeing it loaded.** In a session, `/plugin` lists it as `1 mod active · ghostfleet`.
+`claude plugin list` shows it `✔ enabled`. A card whose `status_from` is `mod` is the
+proof that matters. `CLAUDE_FLEET_PANE_BUSY=off` turns the pane regex off for a grid run,
+so a card that still goes `working` → `ready` got that from the mod and from nothing else.
+
+**Turning it off.** `/plugin disable ghostfleet@ghostfleet` in one profile;
+`fleet-mod uninstall` everywhere (it backs up first, too); `CLAUDE_FLEET_MOD=off
+./install.sh` to install without it. The fleet then reads Claude from outside, as before:
+the heartbeat stops and within 150 s every reader falls back to the pane.
+
+**It is code that runs with your permissions**, inside every Claude session in those
+profiles, so it is kept small enough to read (`mods/ghostfleet/hooks/register.js`) and
+does very little. It makes no network or model calls and spends no usage. Every hook only
+observes: one that throws or overruns is skipped by the engine and the session carries on
+as if the mod were not there, and every file and process call is bounded so a stalled
+disk cannot hold a turn open. What it touches, as `claude plugin validate` reads it:
+
+```
+$ claude plugin validate mods/ghostfleet
+  ❯ ./register.js hooks: session.start, turn.start, turn.complete, tool.check, tool.call, session.end, session.measure, command.run{command=fleet}, command.run{command=inbox}
+  ❯ ./register.js answers its own command: command.run{command=fleet}
+  ❯ ./register.js answers its own command: command.run{command=inbox}
+  ❯ ./register.js gating hook without .catch: tool.check
+  ❯ ./register.js gating hook without .catch: tool.call
+  ❯ ./register.js calls: $.clock.after (via startState), $.clock.every (via startState), $.clock.now, $.clock.sleep (via bounded), $.command.register (via startCommands), $.env.get (via fleetDir, identity), $.fs.read (via readRecord), $.fs.write (via applyPatch), $.process.run, $.session.id (via applyPatch, ownRecord), $.session.turns (via startState)
+  ❯ ./register.js env writes: nothing
+  ❯ ./register.js env reads: CLAUDE_CONFIG_DIR, CLAUDE_FLEET_DIR, CLAUDE_FLEET_SLOT, CLAUDE_FLEET_SOCK, CLAUDE_JOB_DIR, HOME, TMUX
+
+✔ Validation passed
+```
+
+The two "gating hook without .catch" lines are deliberate. Those events can refuse, and a
+hook there with no `.catch` fails open, which is what an observer should do. Both hooks
+only read what `next(e)` returned and hand it back unchanged.
+`claude plugin test mods/ghostfleet` runs its hooks against the engine.
+
 ## Updating Claude Code under a fleet
 
 Fleet sessions run with `DISABLE_AUTOUPDATER=1`. Claude Code's background-service

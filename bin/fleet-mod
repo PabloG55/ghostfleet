@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# fleet-mod install|uninstall|status [--dry-run] [--profile DIR]...
+#
+# Installs ghostfleet's Claude Code mod (mods/ghostfleet) into every Claude profile the
+# fleet uses, removes it, or says where it stands. install.sh runs `install`; this is
+# also the opt-out (`uninstall`), and `--dry-run` prints every file it would back up and
+# every command it would run, per profile, and changes nothing.
+#
+# WHERE IT IS READ FROM. The runtime ($CLAUDE_FLEET_HOME, staged out of ~/Documents for
+# the reason install.sh gives) is itself a marketplace: .claude-plugin/marketplace.json
+# at its root lists ./mods/ghostfleet. A marketplace that is a FOLDER, whose entry is a
+# relative path, is read from that folder in place, never from the copy `claude plugin
+# install` leaves under plugins/cache (measured: `claude plugin list` says "Read from:
+# <runtime>/mods/ghostfleet", and a second install answers "it loads in place ... so
+# edits there take effect at the next session start or /reload-plugins"). So the deploy
+# path is the one every other file here already has: cf-sync copies the repo into the
+# runtime, a NEW session loads the new mod, and a running one picks it up on
+# /reload-plugins. No version bump, no reinstall.
+#
+# WHICH PROFILES. A profile is a config dir: ~/.claude, and ~/.claude-<name> for every
+# other one (the projects file's profile column names exactly these). The same loop and
+# the same "is this really a config dir" test install.sh wires the hooks with, so the
+# mod reaches every profile the hooks do and no other. --profile narrows it.
+#
+# BEFORE ANY CHANGE, the profile's settings.json and its two plugin registries are
+# copied aside (<file>.bak.<stamp>), as install.sh does for settings.json. The changes
+# themselves are made by `claude plugin`, with CLAUDE_CONFIG_DIR set to the profile: it
+# writes extraKnownMarketplaces and enabledPlugins into settings.json and its own
+# records under plugins/, which is the format it alone should be writing.
+#
+# A Claude older than 2.1.287 has no mods: nothing is installed into it, and nothing
+# else about the fleet changes (the pane regex and the shell hook carry on as before).
+set -uo pipefail
+
+MIN_VERSION="2.1.287"
+FLEET_HOME="${CLAUDE_FLEET_HOME:-$HOME/.local/libexec/ghostfleet}"
+PLUGIN="ghostfleet@ghostfleet"
+MARKET="ghostfleet"
+
+usage() { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; }
+
+ACTION="${1:-}"; [ $# -gt 0 ] && shift
+DRY=0; PROFILES=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --profile) PROFILES+=("${2:?--profile needs a directory}"); shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "fleet-mod: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+case "$ACTION" in install|uninstall|status) ;; -h|--help|help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;; esac
+
+is_config_dir() { [ -f "$1/settings.json" ] || [ -d "$1/projects" ] || [ -f "$1/.claude.json" ]; }
+if [ "${#PROFILES[@]}" -eq 0 ]; then
+  PROFILES=("$HOME/.claude")
+  for d in "$HOME"/.claude-*; do [ -d "$d" ] && is_config_dir "$d" && PROFILES+=("$d"); done
+fi
+
+TILDE='~'
+short() { printf '%s' "${1/#$HOME/$TILDE}"; }
+
+command -v claude >/dev/null 2>&1 || { echo "fleet-mod: no claude on PATH — nothing to do"; exit 0; }
+command -v jq >/dev/null 2>&1     || { echo "fleet-mod: jq is required" >&2; exit 1; }
+
+# Version as three numbers, compared field by field; anything unparseable is "too old",
+# which is the answer that changes nothing.
+ver="$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+ver_ge() {
+  local a b i; IFS=. read -r -a a <<< "$1"; IFS=. read -r -a b <<< "$2"
+  for i in 0 1 2; do
+    [ "${a[$i]:-0}" -gt "${b[$i]:-0}" ] && return 0
+    [ "${a[$i]:-0}" -lt "${b[$i]:-0}" ] && return 1
+  done
+  return 0
+}
+if [ "$ACTION" = install ] && { [ -z "$ver" ] || ! ver_ge "$ver" "$MIN_VERSION"; }; then
+  echo "fleet-mod: Claude Code ${ver:-?} has no mods (needs $MIN_VERSION+) — not installed; the fleet reads Claude from outside as before"
+  exit 0
+fi
+
+# A dry run is how the owner checks the plan BEFORE deploying, which is exactly when the
+# runtime does not hold the marketplace yet; it says so and plans anyway.
+if [ "$ACTION" = install ] && [ ! -f "$FLEET_HOME/.claude-plugin/marketplace.json" ]; then
+  if [ "$DRY" = 1 ]; then echo "(note: $(short "$FLEET_HOME") holds no marketplace yet; cf-sync puts it there before a real install)"
+  else echo "fleet-mod: $(short "$FLEET_HOME") holds no marketplace — run cf-sync first" >&2; exit 1; fi
+fi
+
+# What `claude plugin` says about one profile: the marketplace's path ("" when absent)
+# and whether the plugin is installed at user scope (the folder it reads from, or "").
+market_path() { CLAUDE_CONFIG_DIR="$1" claude plugin marketplace list --json 2>/dev/null \
+  | jq -r --arg m "$MARKET" '.[]? | select(.name == $m) | .path // .installLocation // ""' 2>/dev/null | head -1; }
+plugin_from() { CLAUDE_CONFIG_DIR="$1" claude plugin list --json 2>/dev/null \
+  | jq -r --arg p "$PLUGIN" '.[]? | select(.id == $p and .scope == "user") | (.readFromFolder // .installPath // "?")' 2>/dev/null | head -1; }
+
+STAMP="$(date +%Y%m%d%H%M%S)"
+backup() {
+  local dir="$1" f
+  for f in settings.json plugins/known_marketplaces.json plugins/installed_plugins.json; do
+    [ -f "$dir/$f" ] || continue
+    if [ "$DRY" = 1 ]; then echo "    would back up  $(short "$dir/$f") -> $(basename "$f").bak.$STAMP"
+    else cp -p "$dir/$f" "$dir/$f.bak.$STAMP"; fi
+  done
+}
+# Runs a `claude plugin` command for one profile, or under --dry-run says it would.
+run() {
+  local dir="$1"; shift
+  if [ "$DRY" = 1 ]; then echo "    would run      CLAUDE_CONFIG_DIR=$(short "$dir") claude plugin ${*//$HOME/$TILDE}"; return 0; fi
+  CLAUDE_CONFIG_DIR="$dir" claude plugin "$@" >/dev/null 2>&1 || {
+    echo "  ! $(short "$dir"): claude plugin $* failed — run it by hand to see why"; return 1; }
+}
+
+rc=0; changed=0
+[ "$DRY" = 1 ] && echo "fleet-mod $ACTION --dry-run (Claude ${ver:-?}; marketplace $(short "$FLEET_HOME")) — nothing below is changed:"
+for dir in "${PROFILES[@]}"; do
+  have_m="$(market_path "$dir")"; have_p="$(plugin_from "$dir")"
+  case "$ACTION" in
+    status)
+      m="absent"; [ -z "$have_m" ] || m="at $(short "$have_m")"
+      p="not installed"; [ -z "$have_p" ] || p="reads from $(short "$have_p")"
+      echo "$(short "$dir"): marketplace $m; plugin $p" ;;
+    install)
+      want_p="$FLEET_HOME/mods/ghostfleet"
+      if [ "$have_m" = "$FLEET_HOME" ] && [ "$have_p" = "$want_p" ]; then
+        echo "  $(short "$dir"): already installed, reads from $(short "$want_p") — nothing to do"; continue
+      fi
+      changed=1
+      echo "  $(short "$dir"): installing ($([ -n "$have_m" ] && echo "marketplace at $(short "$have_m")" || echo "no marketplace"), $([ -n "$have_p" ] && echo "plugin installed" || echo "plugin not installed"))"
+      backup "$dir"
+      # A marketplace of this name pointing anywhere else (a clone, an older runtime) is
+      # replaced, not stacked: two sources for one name is two answers to "which code".
+      if [ -n "$have_m" ] && [ "$have_m" != "$FLEET_HOME" ]; then run "$dir" marketplace remove "$MARKET" || rc=1; have_m=""; fi
+      [ -n "$have_m" ] || run "$dir" marketplace add "$FLEET_HOME" || rc=1
+      [ -n "$have_p" ] && [ "$have_p" = "$want_p" ] || run "$dir" install "$PLUGIN" --scope user || rc=1
+      [ "$DRY" = 1 ] || echo "  ✓ $(short "$dir"): $(plugin_from "$dir" | sed "s#^$HOME#~#;s#^#reads from #")" ;;
+    uninstall)
+      if [ -z "$have_m" ] && [ -z "$have_p" ]; then echo "  $(short "$dir"): not installed — nothing to do"; continue; fi
+      changed=1
+      echo "  $(short "$dir"): removing"
+      backup "$dir"
+      [ -z "$have_p" ] || run "$dir" uninstall "$PLUGIN" --scope user || rc=1
+      [ -z "$have_m" ] || run "$dir" marketplace remove "$MARKET" || rc=1 ;;
+  esac
+done
+if [ "$changed" = 1 ] && [ "$DRY" = 0 ] && [ "$rc" = 0 ]; then
+  echo "  (running sessions keep what they loaded: /reload-plugins in one, or start a new one)"
+fi
+exit "$rc"
