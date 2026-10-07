@@ -7,21 +7,24 @@
 // fleet-inbox through Bash. From in here there is nothing to guess: a turn starts, a turn
 // completes, a dialog is about to be drawn, the engine measures the account.
 //
-// Five things, each a section below, all sharing the record I/O at the top:
+// Six things, each a section below, all sharing the record I/O at the top:
 //   STATE     written into the session's status record as it changes
 //   BUDGET    the account's rate-limit windows, from the engine's own measurement
 //   COMMANDS  /fleet and /inbox, answered without a turn
+//   DELIVERY  the fleet's prompts, submitted as turns of their own
 //   GUARDS    the fleet's refusals in front of Bash and the MCP tools, failing CLOSED
 //   BAND      a lead's team above its prompt
-// What is written is shaped by ./shape.js, ./guard-shape.js and ./band-shape.js, plain
-// functions the suite can run with node. The engine follows `$` only into functions declared
-// in this file, never across an import, which is why the hooks are one file and not five.
+// What is written is shaped by ./shape.js, ./handoff.js, ./guard-shape.js and ./band-shape.js,
+// plain functions the suite can run with node. The engine follows `$` only into functions
+// declared in this file, never across an import, which is why the hooks are one file and not six.
 //
 // THE OBSERVERS DECIDE NOTHING, THE GUARDS DECIDE AND FAIL CLOSED. STATE, BUDGET, COMMANDS
 // and BAND only observe: a hook of theirs that throws or runs out of time is skipped and the
 // session goes on as if this were not loaded, which is exactly right for an observer, so none
 // carries a `.catch` that could refuse in its place. GUARDS is the one section whose hooks
 // refuse, and each is registered with a `.catch` that refuses too (that section says why).
+// DELIVERY acts, but only on prompts the fleet already decided to send: it refuses nothing,
+// and a failure there leaves the prompt for fleet-send to paste.
 // Nothing here touches the network or a model. Every file and process call is bounded
 // (IO_MS), because a `$` call in flight does not count against a hook's budget and an
 // unbounded one would hold a turn open for as long as the filesystem stalled.
@@ -35,6 +38,9 @@ import {
   jarvisMightAct,
 } from './guard-shape.js'
 import { teamOf, latestBySlot, summarize, prSummary, bandRuns } from './band-shape.js'
+import {
+  spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
+} from './handoff.js'
 
 // ── the record ──────────────────────────────────────────────────────────────
 //
@@ -187,6 +193,7 @@ async function startState($) {
 
 async function onTurnStart($, e, next) {
   await setState($, 'working', e.turnId)
+  await deliveryTurnStart($, e)
   return next(e)
 }
 
@@ -195,6 +202,7 @@ async function onTurnStart($, e, next) {
 async function onTurnComplete($, e, next) {
   const done = await next(e)
   if (e.agentId === undefined) await setState($, stateAfterTurn(e.reason))
+  deliveryTurnComplete(e)
   return done
 }
 
@@ -235,6 +243,7 @@ async function onToolCall($, e, next) {
 async function onSessionEnd($, e, next) {
   if (e.reason !== 'clear' && heartbeat) { heartbeat.cancel(); heartbeat = null }
   state = ''
+  await deliveryEnd($)
   const done = await next(e)
   await bounded($, queue, 500, null)
   const dir = await fleetDir($)
@@ -297,6 +306,179 @@ async function runFleet($, name) {
 async function onFleet($) { return runFleet($, 'fleet-list') }
 async function onInbox($) { return runFleet($, 'fleet-inbox') }
 
+// ── DELIVERY ────────────────────────────────────────────────────────────────
+//
+// The fleet's prompts submitted from in here, not typed into the pane. bin/fleet-send
+// used to deliver the way a person would: paste into the input box, press Enter. Each of
+// its known failures came from standing outside: a paste glued onto a half-typed message
+// (hence the empty-composer guards and deferrals), an Enter that raced the paste and
+// never submitted ("could not confirm submit"), a prompt pasted into a busy session
+// folded into the running turn so the next Stop belonged to work nobody asked for (hence
+// arming reply-to on UserPromptSubmit). From in here it is one call, `$.prompt.submit`,
+// which leaves the person's draft alone, runs as a turn of its own, and whose turn this
+// section can name exactly.
+//
+// THE CHANNEL IS A SPOOL DIRECTORY PER SESSION, polled (./handoff.js has the layout).
+// Claude Code's cross-session messaging was the other candidate and loses on each count
+// that matters here: its sender has to be a Claude session, and fleet-send is run by a
+// shell, by codex, by opencode, by the phone server; its registry is per config dir, so a
+// lead on another profile cannot address it; it lands framed as a peer's message rather
+// than as the prompt; and one in flight when the mod reloads is gone. A file is written
+// by anything, survives a reload, a crash and a restart, and orders by name. The cost is
+// latency, one poll period at worst (POLL_MS), against a turn that takes seconds.
+//
+// EACH STEP IS A RENAME, so exactly one side owns an entry at any moment:
+//   fleet-send writes <id>.json and waits for <id>.done;
+//   this claims it (.json -> .taken) only while no turn runs, and submits it; at the
+//     turn.start whose text is that prompt it writes <id>.done with the turnId and arms
+//     the prompt's reply address, if it has one, for THAT turn;
+//   fleet-send, finding the entry unclaimed when its window closes, takes it back
+//     (.json -> .revoked) and pastes. The loser of a rename knows it lost, so a prompt is
+//     never both submitted and pasted.
+//
+// NOT HERE: the queue, and --now. A prompt for a busy session still goes to fleet-send's
+// <sock>.<slot>.queue, counted on the card and drained by the shell hook's Stop through
+// fleet-send, which hands each one here: one queue, one order, and a mod that dies with
+// prompts waiting leaves them where the shell drain finds them. --now still pastes: the
+// API runs a plugin's prompt as its own turn, once idle, and the only way into a running
+// turn is a peer's message, which the model reads as somebody else's words.
+//
+// Fails open like the rest: a section that never claims costs the sender its window,
+// then the paste it would have made anyway.
+
+const POLL_MS = 500
+// How long a claimed prompt may take to reach its turn.start before it is written off: the
+// engine runs it "once idle", and a person's own turn can put that off.
+const START_MS = 120_000
+
+let turnRunning = false
+let pending = null                         // { id, text, reply, at }: submitted, not started
+let claiming = false
+let poll = null
+let spool = ''
+let deliverSid = ''
+
+const runBounded = ($, argv, ms = IO_MS) =>
+  bounded($, $.process.run(argv, { timeoutMs: ms }), ms + 500, null)
+
+async function writeSpool($, dir, name, text) {
+  const tmp = `${dir}/.${name}.tmp`
+  await bounded($, $.fs.write(tmp, text), IO_MS, null)
+  const moved = await runBounded($, ['mv', '-f', tmp, `${dir}/${name}`])
+  return moved?.exitCode === 0
+}
+
+async function receipt($, id, fields) {
+  const nowMs = await $.clock.now()
+  await writeSpool($, spool, `${id}.done`, JSON.stringify({ id, ...fields, at: nowMs }))
+  await runBounded($, ['rm', '-f', `${spool}/${id}.taken`])
+}
+
+// One at a time, and only while idle: a prompt claimed mid-turn would sit inside the
+// engine, where fleet-send can no longer take it back and nothing shows it waiting.
+async function deliverTick($) {
+  if (claiming || pending || turnRunning || !spool) return
+  claiming = true
+  try {
+    const entries = await bounded($, $.fs.list(spool), IO_MS, null)
+    if (!entries) return
+    const nowMs = await $.clock.now()
+    const old = staleReceipts(entries, nowMs)
+    if (old.length) void runBounded($, ['rm', '-f', ...old.map(n => `${spool}/${n}`)])
+    const id = waiting(entries)[0]
+    if (!id) return
+    const took = await runBounded($, ['mv', `${spool}/${id}.json`, `${spool}/${id}.taken`])
+    if (took?.exitCode !== 0) return                     // revoked under us: it is theirs
+    const entry = await readRecord($, `${spool}/${id}.taken`)
+    if (!entry || typeof entry.text !== 'string' || !entry.text.trim()) {
+      await receipt($, id, { error: 'unreadable entry' })
+      return
+    }
+    pending = { id, text: entry.text, reply: replyOf(entry), at: nowMs }
+    // Settles once the turn started or the engine queued it; turn.start is what names the
+    // turn, so this is not awaited for that. A refusal is answered here.
+    const settled = r => (r && r.drop !== undefined ? { dropped: String(r.drop) } : null)
+    Promise.resolve($.prompt.submit({ text: entry.text, asUser: true })).then(
+      async r => { const d = settled(r); if (d && pending?.id === id) { pending = null; await receipt($, id, d) } },
+      async err => { if (pending?.id === id) { pending = null; await receipt($, id, { error: String(err?.message || err) }) } })
+  } finally {
+    claiming = false
+  }
+}
+
+// THE REPLY ADDRESS, ARMED BY THE TURN ITSELF. hooks/fleet-event.sh relays the answer on
+// the Stop of an armed address, and for a pasted prompt arms it on the next
+// UserPromptSubmit, which is right only if that submit was this prompt. Here the turn is
+// known: the address is written and armed together at its turn.start, with the transcript
+// offset (the relay reads the answer from after it) and the turnId, which tells the hook
+// not to re-arm on a prompt somebody types into this turn.
+async function armReply($, reply, turnId) {
+  const dir = await fleetDir($)
+  const rec = await readRecord($, `${dir}/${deliverSid}.json`)
+  if (!rec || !rec.sock || !rec.slot) return
+  let lines = 0
+  if (rec.transcript) {
+    const wc = await runBounded($, ['wc', '-l', String(rec.transcript)])
+    lines = Number(String(wc?.stdout || '').trim().split(/\s+/)[0]) || 0
+  }
+  const base = `${rec.sock}.${rec.slot}.reply-to`
+  await writeSpool($, dir, base, replyMarker(reply))
+  await writeSpool($, dir, `${base}.armed`, armedMarker(lines, turnId))
+}
+
+// The turn the claimed prompt started is the first main-loop turn.start carrying its text.
+// One that starts first with other text (a person typing in the same second) is theirs,
+// and the prompt goes on waiting for its own.
+async function deliveryTurnStart($, e) {
+  turnRunning = true
+  const p = pending
+  if (isTurnOf(p, e.text)) {
+    pending = null
+    await bounded($, (async () => {
+      if (p.reply) await armReply($, p.reply, e.turnId)
+      await receipt($, p.id, { turnId: e.turnId })
+    })(), IO_MS * 4, null)
+  } else if (p && (await $.clock.now()) - p.at > START_MS) {
+    pending = null
+    await bounded($, receipt($, p.id, { error: 'its turn never started' }), IO_MS * 2, null)
+  }
+}
+
+function deliveryTurnComplete(e) {
+  if (e.agentId === undefined) turnRunning = false
+}
+
+async function deliveryStart($) {
+  await bounded($, (async () => {
+    const sid = await $.session.id()
+    if (!sid || !pid) return
+    const dir = spoolOf(await fleetDir($), sid)
+    await runBounded($, ['mkdir', '-p', dir])
+    // A claim an earlier process of this conversation made and never finished goes back,
+    // so the next tick delivers it instead of leaving it stranded as `.taken`.
+    for (const t of (await bounded($, $.fs.list(dir), IO_MS, null)) || []) {
+      const id = t && t.kind === 'file' ? entryId(t.name, '.taken') : null
+      if (id) await runBounded($, ['mv', '-n', `${dir}/${id}.taken`, `${dir}/${id}.json`])
+    }
+    spool = dir
+    deliverSid = sid
+    pending = null
+    turnRunning = false
+    await writeSpool($, dir, '.ready', `${pid}\n`)
+    if (poll) poll.cancel()
+    poll = $.clock.every(POLL_MS, () => { void deliverTick($) })
+  })(), IO_MS * 6, null)
+}
+
+// The spool stays (a prompt in it is somebody's); only this process's claim on it ends.
+async function deliveryEnd($) {
+  if (poll) { poll.cancel(); poll = null }
+  const dir = spool
+  spool = ''
+  deliverSid = ''
+  if (dir) await bounded($, $.process.run(['rm', '-f', `${dir}/.ready`], { timeoutMs: 400 }), 450, null)
+}
+
 // ── wiring ──────────────────────────────────────────────────────────────────
 
 async function onSessionStart($, e, next) {
@@ -304,6 +486,7 @@ async function onSessionStart($, e, next) {
   await startState($)
   await startCommands($)
   startBand($)
+  await deliveryStart($)
   return started
 }
 

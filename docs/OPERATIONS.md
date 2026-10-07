@@ -693,6 +693,63 @@ guards only refuse, so nothing changes there. An organization that sets
 `allowManagedModsOnly` (or `allowManagedHooksOnly`) keeps the mod from loading; the shell
 guards then do the work, as before the mod, and `allowManagedHooksOnly` turns those off too.
 
+### Delivering prompts through the mod
+
+`fleet-send` used to deliver every prompt the way a person would: paste it into the pane's
+input box and press Enter. That paste could land on a half-typed message, the Enter could
+race the paste and never submit ("could not confirm submit"), and a prompt pasted into a
+busy session folded into the running turn. For a Claude session whose mod is live,
+`fleet-send` now hands the prompt to the mod instead. The mod submits it with
+`$.prompt.submit({ text, asUser: true })` as a turn of its own, once the session is idle,
+and records which turn it started. The composer is never touched.
+
+| | paste (no mod) | mod |
+|---|---|---|
+| idle session | paste + Enter, confirmed by watching the box | handed over, submitted, confirmed by the turn's id (`fleet-send: → w1`) |
+| a half-typed message in the box | the paste joins it | left exactly where it is |
+| busy session | `queued #N`, drained after Stop | the same queue and drain, which hands each prompt to the mod (no waiting for an empty box) |
+| `--now` | pasted into the running turn | **still the paste**: the API runs a plugin's prompt only once idle |
+| `--reply-to` | armed by the next UserPromptSubmit | armed by the mod at the `turn.start` of that prompt's turn |
+
+**Which sessions.** A believable mod record for that socket and slot (`lib/mod-status.mjs`),
+whose `<session_id>.handoff/.ready` names the same process (`lib/mod-target.mjs`). A
+phase-one mod that only reports, codex/opencode/agy/cursor, an older Claude, a disabled
+plugin and a machine without node all get the paste, exactly as before.
+`CLAUDE_FLEET_MOD_DELIVER=off` forces the paste for one call or one hook.
+
+**The channel** is a spool directory per session, `<fleet dir>/<session_id>.handoff/`,
+which the mod polls every 500 ms. Claude Code's own cross-session messaging was the
+alternative. It needs a Claude session to send (`fleet-send` is also run by shells, codex,
+opencode and the phone server), it cannot cross profiles, the target reads its messages as
+a peer's words, and a message is lost if the mod reloads. A file has none of those
+problems.
+
+```
+<id>.json      fleet-send left it: { id, text, reply? }
+<id>.taken     the mod claimed it (a rename) while no turn was running
+<id>.done      the receipt: { turnId } once its turn started, or { dropped | error }
+<id>.revoked   fleet-send took it back unclaimed and pasted it instead
+.ready         the pid of the mod process that delivers from here
+```
+
+Each step is a rename, so exactly one side owns an entry at a time. If the mod has not
+claimed the entry within `CLAUDE_FLEET_MOD_CLAIM` seconds (default 3), `fleet-send`
+renames it to `.revoked`. If the session went busy in that gap, the prompt is queued.
+Otherwise it is pasted, with a note on stderr. If the mod claimed it first, the revoke's
+rename fails, so a prompt is never both submitted and pasted. Receipts are kept for an
+hour.
+
+**What stays the same.** Outputs and exit codes, the queue and its card count, the
+`[fleet]` preambles, the nudges and their deferral (they still wait for an empty box,
+because they may still be pasted), the `.sent` log, and the Jarvis delivery marker. That
+marker is still written before the handoff, so a prompt the fleet delivered into Jarvis's
+master never counts as the owner speaking. The phone's prompts go through `fleet-send` as
+before. One new failure gets a code: a prompt the mod could not submit (a hook dropped it)
+exits 1 with `not delivered`.
+
+**Seeing it.** The transcript labels a delivered prompt `Prompt from the ghostfleet
+plugin`. The record's `turnId` and the handoff's `<id>.done` name the same turn.
+
 ## Updating Claude Code under a fleet
 
 Fleet sessions run with `DISABLE_AUTOUPDATER=1`. Claude Code's background-service
