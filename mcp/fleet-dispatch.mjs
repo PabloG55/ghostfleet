@@ -512,7 +512,7 @@ export function plan(name, a = {}) {
 // meaningfully, "approve w1's Bash command: git push …" is. Same detector fleet-answer
 // refuses with (lib/permission-dialog.mjs), read off the same pane.
 //   Returns {fail} for a refusal, {granted:true} when his yes was just spent on this call.
-function jarvisCheck(name, a, p) {
+function jarvisCheck(name, a, p, door = 'mcp') {
   let m = null;
   try { m = readMarker(); } catch {}
   if (!m) return {};
@@ -523,9 +523,37 @@ function jarvisCheck(name, a, p) {
   const d = name === 'fleet_answer' ? dialogOn(p) : null;
   if (d && approves(d, { text: String(a.text) }))
     spec = { ...spec, summary: `approve ${a.project ? a.project + '/' : ''}${a.session}'s permission dialog — ${d.tool || 'a tool call'}: ${firstCommand(d)}` };
-  const g = gate(spec);
+  const g = gate(spec, Date.now(), door);
   if (!g.ok) return { fail: fail(d ? `${g.text}\n\nThe dialog, as ${a.session} shows it — read it to him:\n${d.text}` : g.text) };
   return { granted: !!g.by };
+}
+
+// THE SAME QUESTION, ASKED FROM THE MOD (mods/ghostfleet, through lib/mod-gate.mjs):
+// its tool.call hook refuses a listed call before the MCP server is even reached, so the
+// proposal it records must be this one, dialog and all. Asked at door 'mod', so a pass
+// leaves the relay the MCP door above takes when the call arrives (lib/jarvis.mjs gate).
+// A call plan() refuses or answers itself is not on the list. {} = go, {fail} = refused.
+export function jarvisGateCall(name, a = {}) {
+  const p = plan(name, a);
+  if (p.kind === 'fail' || p.kind === 'text') return {};
+  return jarvisCheck(name, a, p, 'mod');
+}
+
+// "AGENTS CAN APPROVE TOOL CALLS", asked before a fleet_answer runs (the mod, through
+// lib/mod-gate.mjs): fleet-answer's own decision, made by fleet-answer itself under the
+// exact invocation this call would get (target socket, cleared $TMUX), with --check so
+// nothing is sent. {code} is fleet-answer's exit status, {text} what it said. A call plan()
+// refuses never reaches fleet-answer, so it is not this question.
+export function answerCheck(a = {}) {
+  const p = plan('fleet_answer', a);
+  if (p.kind === 'fail' || p.kind === 'text') return { code: 0, text: '' };
+  const { file, argv, env, cwd } = invocation({ ...p, args: ['--check', ...p.args] });
+  try {
+    execFileSync(file, argv, { encoding: 'utf8', env, cwd, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
+    return { code: 0, text: '' };
+  } catch (e) {
+    return { code: typeof e.status === 'number' ? e.status : -1, text: `${e.stdout || ''}${e.stderr || ''}`.trim() || String(e.message) };
+  }
 }
 
 // The permission dialog on the pane a fleet_answer plan will type into, or null.

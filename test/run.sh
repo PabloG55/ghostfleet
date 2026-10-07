@@ -3468,6 +3468,121 @@ else
   skip "the Claude Code mod" "jq or node missing"
 fi
 
+# ── the mod's guards and band: the parts that are plain functions ────────────
+# The mod's GUARDS section judges a merge with mods/ghostfleet/hooks/guard-shape.js and the
+# shell guard with hooks/fleet-guard.sh's merges_a_pr / changes_a_boundary. Two copies of a
+# rule are two answers waiting to happen, so each command below is put to BOTH and they must
+# agree, in both directions (the shell functions are lifted out of the hook and run as they
+# are). The band (band-shape.js) must fit every width it is handed and keep "need you" in
+# view at all of them. The hooks themselves are the harness's (`claude plugin test`), above.
+group "the mod's guards agree with the shell guard; the band fits any width"
+if command -v node >/dev/null 2>&1; then
+  eval "$(sed -n '/^merges_a_pr() {/,/^}/p;/^changes_a_boundary() {/,/^}/p' "$ROOT/hooks/fleet-guard.sh")"
+  if ! command -v merges_a_pr >/dev/null 2>&1 || ! command -v changes_a_boundary >/dev/null 2>&1; then
+    bad "the shell guard's merge functions can be lifted out" "merges_a_pr and changes_a_boundary" "not found in hooks/fleet-guard.sh"
+  else
+    GS="$(mktemp -d)" && GS="$(cd "${GS:?}" && pwd -P)"
+    # one command per line; the expected verdict is whatever the SHELL says, so the table
+    # only has to hold commands, and a row where both say no proves as much as one where
+    # both say yes. The count below makes sure both kinds are present.
+    cat > "$GS/cmds" <<'EOF'
+gh pr merge 42 --squash
+gh pr merge --auto --squash
+gh -R o/r pr merge 7
+gh api -X PUT repos/o/r/pulls/7/merge
+gh api graphql -f query='mutation { mergePullRequest(input:{}) { clientMutationId } }'
+cd /tmp && gh pr merge 1
+git merge origin/staging
+gh pr view 42 --json mergeable
+gh pr list --search "is:merged"
+echo gh pr merge
+fleet-project set -s cf-acme-api workers-merge on
+touch ~/.claude/fleet/cf-acme-api.w1.workers-merge
+rm ~/.claude/fleet/cf-acme-api.w1.agents-approve-off
+fleet-project list
+ls ~/.claude/fleet/cf-acme-api.workers-merged-notes
+EOF
+    sh_v=""; while IFS= read -r c; do
+      m=0; merges_a_pr <<< "$c" && m=1; b=0; changes_a_boundary <<< "$c" && b=1; sh_v="$sh_v$m$b "
+    done < "$GS/cmds"
+    js_v="$(node --no-warnings --input-type=module -e "
+      import { mergesAPr, changesABoundary } from '$ROOT/mods/ghostfleet/hooks/guard-shape.js'
+      import fs from 'node:fs'
+      const out = fs.readFileSync('$GS/cmds', 'utf8').split('\n').filter(Boolean)
+        .map(c => (mergesAPr(c) ? '1' : '0') + (changesABoundary(c) ? '1' : '0') + ' ').join('')
+      process.stdout.write(out)" 2>&1)"
+    is "mod guard: every command judged as the shell guard judges it" "$sh_v" "$js_v"
+    is "...and the table holds merges, boundary writes and neither" "1 1 1" \
+       "$([ "$(grep -o '10' <<< "$sh_v" | wc -l)" -ge 3 ] && echo 1 || echo 0) $([ "$(grep -o '01' <<< "$sh_v" | wc -l)" -ge 2 ] && echo 1 || echo 0) $([ "$(grep -o '00' <<< "$sh_v" | wc -l)" -ge 3 ] && echo 1 || echo 0)"
+    rm -rf "${GS:?}"
+  fi
+  # THE MOD ASKS JARVIS'S GATE ONLY WHEN IT MIGHT SAY NO (guard-shape.js jarvisMightAct), so
+  # a broken gate refuses the commands on the list and not Jarvis's every `ls`. That filter
+  # must be a strict superset of lib/jarvis.mjs bashSpec: a command the gate would hold or
+  # refuse that the filter skips is a confirm-list hole. Every command below is put to both.
+  GJ="$(mktemp -d)" && GJ="$(cd "${GJ:?}" && pwd -P)"
+  cat > "$GJ/cmds" <<'EOF'
+gh pr merge 12 --squash
+gh api -X PUT repos/o/r/pulls/1/merge
+git push origin feat/x
+git -C ../acme-api push
+git worktree remove ../acme-api-3
+fleet-stop api-fix
+fleet-clean --go
+fleet-project rm scratch
+fleet-answer api-fix 2
+fleet-spawn api-b --prompt go
+fleet-companion api-fix
+fleet-send master yes
+fleet-jarvis grant K7Q2
+cd ~ && tmux send-keys -t master yes Enter
+echo yes | tmux load-buffer - ; tmux pasteb -t master
+echo yes >> ~/.config/ghostfleet/jarvis.said
+cat JDIR/jarvis.confirm.json
+some-tool -L cf-jarvis
+ls -la
+npm test
+cat README.md
+git log --oneline --grep push
+EOF
+  sed -i.bak "s|JDIR|$GJ/j|" "$GJ/cmds" && rm -f "${GJ:?}/cmds.bak"
+  sj="$(CLAUDE_FLEET_JARVIS_DIR="$GJ/j" node --no-warnings --input-type=module -e "
+    import { bashSpec } from '$ROOT/lib/jarvis.mjs'
+    import { jarvisMightAct } from '$ROOT/mods/ghostfleet/hooks/guard-shape.js'
+    import fs from 'node:fs'
+    const m = { sock: 'cf-jarvis' }
+    let acts = 0, holes = [], quiet = 0
+    for (const c of fs.readFileSync('$GJ/cmds', 'utf8').split('\n').filter(Boolean)) {
+      const a = bashSpec(c, m).action !== 'ok', f = jarvisMightAct(c, 'cf-jarvis', '$GJ/j')
+      if (a) acts++; if (a && !f) holes.push(c); if (!f) quiet++
+    }
+    console.log(acts, quiet, holes.length ? 'HOLES: ' + holes.join(' | ') : 'none')" 2>&1)"
+  is "mod guard: the gate filter misses nothing the confirm-list acts on (acts, skipped, holes)" "18 3 none" "$sj"
+  rm -rf "${GJ:?}"
+  # THE BAND at every width from 2 to 120: never wider than it was given, and while anyone
+  # needs the lead, saying so (the one word that must survive a narrow pane).
+  bw="$(node --no-warnings --input-type=module -e "
+    import { bandRuns, plain, width } from '$ROOT/mods/ghostfleet/hooks/band-shape.js'
+    const s = { workers: 12, working: 4, need: 3 }, p = { green: 10, red: 2, pending: 3 }
+    let over = 0, lost = 0
+    for (let c = 2; c <= 120; c++) {
+      const r = bandRuns(s, p, c)
+      if (width(r) > c) over++
+      if (!/^3( need|!)|· 3 need you/.test(plain(r))) lost++
+    }
+    const quiet = bandRuns({ workers: 0, working: 0, need: 0 }, undefined, 80)
+    console.log(over, lost, plain(bandRuns(s, p, 200)), quiet === null)" 2>&1)"
+  is "band: fits every width, keeps 'need you', reads as the brief at full width" \
+     "0 0 12 workers · 4 working · 3 need you · 10 PRs green · 2 red · 3 pending true" "$bw"
+  bq="$(node --no-warnings --input-type=module -e "
+    import { bandRuns, plain } from '$ROOT/mods/ghostfleet/hooks/band-shape.js'
+    const s = { workers: 3, working: 0, need: 0 }
+    console.log(plain(bandRuns(s, null, 80)))" 2>&1)"
+  is "band: gh failing reads 'PRs ?', never a count" "3 workers · PRs ?" "$bq"
+else
+  skip "the mod's guards and band" "node missing"
+fi
+
 # ── 4a6b. a codex worker has history, and the grid has to find it ────────────
 # codex has no hooks, so no status file is ever pushed for it, and its history is in
 # its own layout ($CODEX_HOME/sessions/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl) that the
@@ -3824,6 +3939,12 @@ SH
   # A text that looks like the flag is text. This is the MCP's path: it passes `--`.
   out="$(fa -- d1 --human-approved)"
   is "a text of --human-approved is not the flag" "1" "$(grep -c 'rc=3' <<< "$out" || true)"
+  # --check is the mod's question (mods/ghostfleet GUARDS): the same decision, sending nothing.
+  out="$(fa --check d1 1)"
+  is "--check refuses an approving key the same way (rc 3)" "1" "$(grep -c 'rc=3' <<< "$out" || true)"
+  out="$(fa --check d1 3)"
+  is "--check passes a decline (rc 0)"        "1" "$(grep -c 'rc=0' <<< "$out" || true)"
+  is "...and sends nothing either way"        "0" "$(sleep 0.3; fa_answered d1 3)"
   # THE OTHER DIRECTIONS: a decline gets through, and so does a human's yes.
   out="$(fa d1 3)"
   is "the No option is sent"                  "1" "$(grep -c 'declining the permission dialog' <<< "$out" || true)"
@@ -13482,6 +13603,36 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command
   is "a merge through gh api is held"              "1" "$(guard "$JPANE" 'gh api -X PUT repos/o/r/pulls/1/merge' | grep -c 'confirm-list' || true)"
   is "keys into ANOTHER fleet's pane are held"     "1" "$(guard "$JPANE" 'tmux -L cf-acme-api send -t api-fix 2 Enter' | grep -c 'confirm-list' || true)"
   is "the same merge from another session passes"  "0" "$(guard "$HPANE" 'gh pr merge 12 --squash' | cut -d'|' -f1)"
+
+  # ── the mod's door, and the relay that keeps one yes from being spent twice ──
+  # In a session running the mod, its tool.call hook asks first (lib/mod-gate.mjs) and the
+  # older door still asks after it about the SAME call. Without the relay, the second door
+  # finds the yes spent, proposes afresh, and refuses what the owner just said yes to.
+  mg() {               # $1 question, $2 stdin, [$3 tool] -> rc
+    printf '%s' "$2" | HOME="$JC/home" TMUX="$(jtmux master)" node "$ROOT/lib/mod-gate.mjs" "$1" ${3:+"$3"} >/dev/null 2>&1; echo $?
+  }
+  rm -f "$JC/home/.config/ghostfleet/jarvis.confirm.json"
+  is "mod door: Jarvis's push is held"             "2" "$(mg jarvis-bash 'git push origin feat/relay')"
+  said "yes" "$(node -e "console.log(Date.now() + 1)")"; sleep 0.01
+  is "mod door: after his yes it passes"           "0" "$(mg jarvis-bash 'git push origin feat/relay')"
+  is "...and the Bash hook behind it passes the SAME call" "0" "$(guard "$JPANE" 'git push origin feat/relay' | cut -d'|' -f1)"
+  is "...once: the relay is single-use"            "2" "$(guard "$JPANE" 'git push origin feat/relay' | cut -d'|' -f1)"
+  is "the mod asking again is a second action"     "2" "$(mg jarvis-bash 'git push origin feat/relay')"
+  is "a worker on Jarvis's socket is not gated by the mod door" "0" \
+     "$(printf 'git push' | HOME="$JC/home" TMUX="$(jtmux helper)" node "$ROOT/lib/mod-gate.mjs" jarvis-bash >/dev/null 2>&1; echo $?)"
+  JARGS='{"project":"acme-api","session":"api-fix"}'
+  is "mod door: Jarvis's fleet_stop is held"       "2" "$(mg jarvis-mcp "$JARGS" fleet_stop)"
+  said "yes, go ahead" "$(node -e "console.log(Date.now() + 1)")"; sleep 0.01
+  is "mod door: after his yes it passes"           "0" "$(mg jarvis-mcp "$JARGS" fleet_stop)"
+  # callTool is the MCP server's own entry point (mcpj above, without its JSON-RPC round trip)
+  out="$(HOME="$JC/home" TMUX="$(jtmux master)" CLAUDE_FLEET_NOTIFIER=off node --no-warnings --input-type=module -e "
+    import { callTool } from '$ROOT/mcp/fleet-dispatch.mjs'
+    console.log(JSON.stringify(callTool('fleet_stop', $JARGS)))" 2>&1)"
+  is "...and the MCP door behind it does not ask again" "0" "$(grep -c 'confirm-list' <<< "$out" || true)"
+  is "mod door: unreadable arguments are no answer (not 0, not 2)" "1" "$(mg jarvis-mcp 'not json' fleet_stop)"
+  # The scratch-Jarvis override: the marker found through CLAUDE_FLEET_JARVIS_DIR, not HOME.
+  is "CLAUDE_FLEET_JARVIS_DIR moves the marker"    "2" \
+     "$(printf 'git push origin x' | HOME="$JC/elsewhere" CLAUDE_FLEET_JARVIS_DIR="$JC/home/.config/ghostfleet" TMUX="$(jtmux master)" node "$ROOT/lib/mod-gate.mjs" jarvis-bash >/dev/null 2>&1; echo $?)"
   # JARVIS IGNORES THE BOUNDARY SETTINGS: both on, for its project and its master, and its
   # confirm-list still holds the merge.
   mkdir -p "$JC/home/.claude/fleet"

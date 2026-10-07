@@ -596,29 +596,102 @@ the heartbeat stops and within 150 s every reader falls back to the pane.
 
 **It is code that runs with your permissions**, inside every Claude session in those
 profiles, so it is kept small enough to read (`mods/ghostfleet/hooks/register.js`) and
-does very little. It makes no network or model calls and spends no usage. Every hook only
-observes: one that throws or overruns is skipped by the engine and the session carries on
-as if the mod were not there, and every file and process call is bounded so a stalled
-disk cannot hold a turn open. What it touches, as `claude plugin validate` reads it:
+does very little. It makes no network or model calls and spends no usage. Its observers
+(state, budget, the band) fail open: one that throws or overruns is skipped by the engine and
+the session carries on as if the mod were not there. Its guards fail closed (see "The
+guards" below). Every file and process call is bounded, so a stalled disk cannot hold a turn
+open. What it touches, as `claude plugin validate` reads it:
 
 ```
 $ claude plugin validate mods/ghostfleet
-  ❯ ./register.js hooks: session.start, turn.start, turn.complete, tool.check, tool.call, session.end, session.measure, command.run{command=fleet}, command.run{command=inbox}
+  ❯ ./register.js hooks: session.start, turn.start, turn.complete, tool.check, tool.call, session.end, session.measure, command.run{command=fleet}, command.run{command=inbox}, tool.call{tool=Bash}, tool.call{tool=/"^mcp__"/}, ui.render{component=AbovePrompt}
   ❯ ./register.js answers its own command: command.run{command=fleet}
   ❯ ./register.js answers its own command: command.run{command=inbox}
   ❯ ./register.js gating hook without .catch: tool.check
   ❯ ./register.js gating hook without .catch: tool.call
-  ❯ ./register.js calls: $.clock.after (via startState), $.clock.every (via startState), $.clock.now, $.clock.sleep (via bounded), $.command.register (via startCommands), $.env.get (via fleetDir, identity), $.fs.read (via readRecord), $.fs.write (via applyPatch), $.process.run, $.session.id (via applyPatch, ownRecord), $.session.turns (via startState)
+  ❯ ./register.js gating hook with .catch: tool.call{tool=Bash}
+  ❯ ./register.js gating hook with .catch: tool.call{tool=/"^mcp__"/}
+  ❯ ./register.js calls: $.clock.after (via startState), $.clock.every (via startBand, startState), $.clock.now, $.clock.sleep (via bounded), $.command.register (via startCommands), $.env.get (via fleetDir, identity, jarvisDir, mergeGuard, registeredProject), $.fs.exists (via maybeJarvis, registeredProject), $.fs.list (via childBranches, mergeGuard, refresh, registeredProject), $.fs.read (via childBranches, childrenOf, maybeJarvis, readRecord, readTeamRecords, refreshPrs, registeredProject), $.fs.write (via applyPatch), $.process.run, $.session.cwd (via answerGuardBash, mergeGuard, refreshPrs), $.session.id (via applyPatch, ownRecord), $.session.root (via mergeGuard), $.session.turns (via startState), $.state.get, $.state.set (via publish), $.ui.resolve
   ❯ ./register.js env writes: nothing
-  ❯ ./register.js env reads: CLAUDE_CONFIG_DIR, CLAUDE_FLEET_DIR, CLAUDE_FLEET_SLOT, CLAUDE_FLEET_SOCK, CLAUDE_JOB_DIR, HOME, TMUX
+  ❯ ./register.js env reads: CLAUDE_CONFIG_DIR, CLAUDE_FLEET_DIR, CLAUDE_FLEET_JARVIS_DIR, CLAUDE_FLEET_SLOT, CLAUDE_FLEET_SOCK, CLAUDE_JOB_DIR, HOME, TMUX, TMUX_PANE
+  ❯ ./register.js state writes: ghostfleet.band
+  ❯ ./register.js state reads: ghostfleet.band
 
 ✔ Validation passed
 ```
 
-The two "gating hook without .catch" lines are deliberate. Those events can refuse, and a
-hook there with no `.catch` fails open, which is what an observer should do. Both hooks
-only read what `next(e)` returned and hand it back unchanged.
+The two "gating hook without .catch" lines are the observers, and are deliberate: a hook
+there with no `.catch` fails open, which is right for one that only reads what `next(e)`
+returned and hands it back unchanged. The two "with .catch" are the guards, whose handler
+refuses.
 `claude plugin test mods/ghostfleet` runs its hooks against the engine.
+
+### The lead's band
+
+A master, and a sub-lead (a worker with children), draws its team above the prompt:
+
+```
+3 workers · 1 working · 1 need you · 2 PRs green · 1 red
+```
+
+- **Who is on the team.** master: every session on its socket but itself and the terminal
+  tabs. A sub-lead: its children (`<sock>.<child>.parent`). A worker without children draws
+  nothing and starts no process for it; it becomes a band the tick after its first child.
+- **Where the numbers come from.** The status records in the fleet dir, read every 5 s (a
+  record is reread only when its mtime moved), the mod's `state` while its heartbeat is
+  fresh and the shell hook's `status` otherwise, and `tmux list-sessions` for who is alive.
+  PRs come from `gh pr list` every 2 minutes. master's are the open PRs from a branch its
+  manifest names, so a finished worker's green PR still counts; a sub-lead's are the ones
+  into its own branch. `PRs ?` means gh did not answer, never zero.
+- **Narrow panes.** Words shorten first, then `need you` moves to the front, then only the
+  essentials stay: `1 need · 1 busy · 4w` at 28 columns, `1!` at the very end.
+- **Cost.** No turn, no model call. A redraw happens only when what the line says changes.
+
+### The guards
+
+The fleet's refusals used to live only in shell hooks and inside commands, and a shell hook
+can only fail **open**: one that cannot find jq exits 0 and the call goes ahead. The mod
+puts the same refusals in front of the tool as `tool.call` hooks, each registered with a
+`.catch` that answers `deny`. If a guard throws, gets no answer, or runs out of time, the
+call is **refused**, with the reason:
+
+| guard | refuses | how it decides |
+|---|---|---|
+| Jarvis's confirm-list | the listed Bash commands and `fleet_*` MCP calls, from Jarvis's master | `lib/mod-gate.mjs` asks the same gate the MCP door and `hooks/jarvis-guard.sh` ask (`lib/jarvis.mjs`), under the same lock |
+| a worker does not merge its own PR | `gh pr merge`, the REST and GraphQL merges, any `merge_pull_request` MCP tool, and a worker changing its own boundary, from a linked worktree | the rule from `hooks/fleet-guard.sh`, ported (`mods/ghostfleet/hooks/guard-shape.js`; the suite holds the two to the same verdicts) |
+| an agent does not approve another agent's tool call | an approving key from `fleet-answer` (Bash) or `fleet_answer` (MCP) into a permission dialog | `fleet-answer --check`: fleet-answer's own decision, sending nothing |
+
+Same switches, same defaults: "workers can merge" and "agents can approve tool calls" (off),
+per project or per session, and Jarvis's confirm-list ignores both. The shell versions stay
+wired and are what guards every session without the mod: another agent, an older Claude, a
+profile where the mod is off.
+
+**What changes when a guard cannot decide.** The shell merge guard lets a merge through when
+jq is missing, and when git cannot be asked. The mod refuses it: "this command could not be
+checked, so it is refused (a guard fails closed)". For Jarvis only the commands the
+confirm-list could act on are put to the gate (`gh`, `git`, `tmux`, `fleet-*`, Jarvis's files
+and verbs, its own socket), so a broken gate refuses those and not every `ls`.
+
+**One yes, one action, through two doors.** Where both the mod and an older door run (the
+Bash hook, the MCP server), the same call is asked about twice: the mod first, the older door
+after it. A pass at the mod's door leaves a single-use relay for that exact call, valid for
+60 s, which only another door can take; the mod asking again is a second action and needs a
+second yes.
+
+**A scratch Jarvis.** `CLAUDE_FLEET_JARVIS_DIR` moves Jarvis's marker, ledger and proposals
+(and nothing else) to another directory. Every reader honours it: `lib/jarvis.mjs`,
+`hooks/jarvis-guard.sh`, `bin/fleet-answer` and the mod. That is how the confirm-list is
+proven on a scratch fleet without touching the real marker.
+
+**Where it runs among other mods** (Claude Code docs, "The order mods run in"): `PreToolUse`
+hooks from managed settings run before every mod, and a block there is final. Then the
+built-in `sec-default` guard and an organization's prepended mods, then mods a person
+installs (this one), then the settings hooks of every other file, `hooks/fleet-guard.sh` and
+`hooks/jarvis-guard.sh` among them. A profile signed in to a Team or Enterprise plan loads
+`sec-default` even with no managed settings. It restricts mods that *approve* calls, and these
+guards only refuse, so nothing changes there. An organization that sets
+`allowManagedModsOnly` (or `allowManagedHooksOnly`) keeps the mod from loading; the shell
+guards then do the work, as before the mod, and `allowManagedHooksOnly` turns those off too.
 
 ## Updating Claude Code under a fleet
 

@@ -14,7 +14,7 @@
 # session that is not Jarvis's master — exits 0: a guard that breaks the session it guards
 # is worse than the thing it guards against.
 command -v jq >/dev/null 2>&1 || exit 0
-MARK="$HOME/.config/ghostfleet/jarvis"
+MARK="${CLAUDE_FLEET_JARVIS_DIR:-$HOME/.config/ghostfleet}/jarvis"
 [ -f "$MARK" ] || exit 0
 input="$(cat)"
 [ "$(printf '%s' "$input" | jq -r '.tool_name // ""' 2>/dev/null)" = Bash ] || exit 0
