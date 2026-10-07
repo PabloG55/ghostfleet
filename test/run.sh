@@ -1031,6 +1031,29 @@ is "codex 0.160: NOT ready on trust dialog" "0" "$(matches "$cre" "$FIX/codex-tr
 bre="$("$ROOT/bin/fleet-agent" field codex blocked_re)"
 is "codex: blocked on trust dialog"   "1" "$(matches "$bre" "$FIX/codex-trust.txt")"
 is "codex: not blocked when idle"     "0" "$(matches "$bre" "$FIX/codex-idle-home.txt")"
+# codex 0.160.1 REWORDED the trust dialog ("Trust this folder?" over "› 1. Trust and
+# continue") and added a second one a session stops on before its composer draws ("1. Run
+# without daemon this time"). The old sentence matched neither, so a codex pane waiting on a
+# human read as ready. Real captures, at the widths a fleet pane actually has — the prose
+# wraps and truncates at 30 columns, so the option line is what is keyed on.
+for w in 120 56 30; do
+  is "codex 0.160: trust dialog is need-you at $w cols"  "1" "$(matches "$bre" "$FIX/codex-trust-0160-${w}col.txt")"
+done
+for w in 120 30; do
+  is "codex 0.160: daemon dialog is need-you at $w cols" "1" "$(matches "$bre" "$FIX/codex-daemon-0160-${w}col.txt")"
+done
+for k in idle busy; do for w in 160 30; do
+  is "codex 0.160: a $k pane is NOT need-you at $w cols"  "0" "$(matches "$bre" "$FIX/codex-$k-0160-${w}col.txt")"
+done; done
+# ...and the fixtures really are what they are named: the busy ones carry codex's working
+# line, the idle ones its composer, so a "not need-you" above is about the right pane.
+is "codex 0.160: the busy captures are working"  "2" "$(cat "$FIX"/codex-busy-0160-*col.txt | grep -c 'Working (' || true)"
+is "codex 0.160: the idle captures have a prompt" "yes" "$(grep -q 'Context [0-9]*% used' "$FIX/codex-idle-0160-160col.txt" && echo yes || echo no)"
+# The grid reads the JS spelling. Same fixtures, same answers, or the card disagrees with
+# fleet-agent about the same pane.
+bjs="$("$ROOT/bin/fleet-agent" field codex blocked_re_js)"
+is "codex: blocked_re_js agrees on every capture" "1 1 1 1 1 0 0 0 0" "$(for f in trust-0160-120col trust-0160-30col daemon-0160-30col trust-0160 trust idle-0160-160col idle-0160-30col busy-0160-160col busy-0160-30col; do
+   node -e 'const fs=require("fs");const re=new RegExp(process.argv[1]);process.stdout.write(String(fs.readFileSync(process.argv[2],"utf8").split("\n").some(l=>re.test(l))?1:0))' "$bjs" "$FIX/codex-$f.txt"; printf ' '; done | sed 's/ $//')"
 
 # ── 3. the projects file ─────────────────────────────────────────────────────
 group "projects file columns"
@@ -1140,6 +1163,30 @@ is "...and does not warn for the default"     "0" \
 is "...and the agent check pipes into no grep -q" "0" \
    "$(matches '^[^#]*fleet-agent list[^|]*[|] *grep -q' "$ROOT/bin/fleet-project")"
 rm -rf "$T"
+
+# ── a codex pane on a dialog is need-you ON THE CARD, not only to fleet-agent ──
+# blocked_re was read by `fleet-agent blocked` and nothing else, so a codex session stopped on
+# its trust or daemon dialog drew as ready on the desk and on the phone. Real captures, shown
+# in real panes, read by the same --json the phone gets.
+group "codex dialog reads as need-you on the card"
+if command -v tmux >/dev/null 2>&1; then
+  CDX="$(mktemp -d)"; CDS=cf-toolbox
+  for n in dlg30 dlg120 idl; do printf 'codex\n' > "$CDX/$CDS.$n.agent"; done
+  tmux -L "$CDS" new-session -d -x 30  -y 30 -s dlg30  "cat '$FIX/codex-trust-0160-30col.txt'; sleep 60"
+  tmux -L "$CDS" new-session -d -x 120 -y 30 -s dlg120 "cat '$FIX/codex-daemon-0160-120col.txt'; sleep 60"
+  tmux -L "$CDS" new-session -d -x 160 -y 30 -s idl    "cat '$FIX/codex-idle-0160-160col.txt'; sleep 60"
+  sleep 0.5
+  cdj="$(CLAUDE_FLEET_DIR="$CDX" node "$ROOT/bin/fleet-grid.mjs" "$CDS" --json 2>/dev/null)"
+  cst() { jq -r --arg n "$1" '.cards[] | select(.name==$n) | .status' <<< "$cdj" 2>/dev/null; }
+  is "a codex pane on the trust dialog (30 cols) is need-you"  "need-you" "$(cst dlg30)"
+  is "...and on the daemon dialog (120 cols)"                  "need-you" "$(cst dlg120)"
+  is "...while an idle codex pane is not"                      "yes" "$([ -n "$(cst idl)" ] && [ "$(cst idl)" != need-you ] && echo yes || echo "no ($(cst idl))")"
+  is "...and the header counts the two"                        "2" "$(jq -r '.counts.need_you' <<< "$cdj" 2>/dev/null)"
+  tmux -L "$CDS" kill-server 2>/dev/null
+  rm -rf "${CDX:?}"
+else
+  skip "codex dialog reads as need-you on the card" "tmux missing"
+fi
 
 # ── a RUNNING session moves to the new agent, and back onto its own conversation ──
 # lib/agent-switch.sh, against real tmux sessions running STUB agents: each stub logs the

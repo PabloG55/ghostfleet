@@ -29,6 +29,8 @@
 #               dialects and the pre-adapter code already had both; they must always
 #               express the SAME signal.
 #   blocked_re  ERE matching "stopped, waiting on a human" in the pane. Empty = none.
+#   blocked_re_js  the same signal as a JavaScript regex, for fleet-grid.mjs. Declared only
+#               by an agent with no hooks (codex): one with hooks pushes need-you itself.
 #   ready_re    ERE matching "the input box exists, a prompt will land" — fleet-spawn
 #               waits for this before dispatching an initial prompt.
 #   review      the subcommand that runs a NON-INTERACTIVE code review, or EMPTY when
@@ -281,7 +283,20 @@ agent_field() {
         # fleet worker actually hits (every fresh worktree), but codex's command
         # approval prompts were not observed, because the fleet runs with approvals
         # bypassed. Do not read a non-match as "definitely not blocked".
-        blocked_re) printf '%s' 'Do you trust the contents of this directory' ;;
+        #   REWRITTEN FOR codex-cli 0.160.1, measured 2026-10-07. The old dialog's sentence is
+        # gone: it is now "Trust this folder? …" over "› 1. Trust and continue". And there is a
+        # second dialog a session can stop on before its composer ever draws — "Background
+        # server has incompatible feature settings", over "1. Run without daemon this time".
+        # Both are keyed to their FIRST OPTION LINE, not their prose: a numbered option alone
+        # on its line, behind the selector or the two-space indent, survives a 30-column pane
+        # (the prose wraps and is truncated there), and it is not how codex draws a reply.
+        # Captured at 30, 56 and 120 columns; idle and working panes at 30 and 160 do not
+        # match. The old sentence stays for the builds that still print it.
+        #   READ BY THE GRID AS need-you (blocked_re_js), because codex has no hooks to say so
+        # itself: a codex session stopped on either dialog looked READY, and a switch onto it
+        # rolled it back as "failed to start".
+        blocked_re) printf '%s' 'Do you trust the contents of this directory|^(›| ) 1\. Trust and continue *$|^(›| ) 1\. Run without daemon this( time)? *$' ;;
+        blocked_re_js) printf '%s' 'Do you trust the contents of this directory|^(?:›| ) 1\. Trust and continue *$|^(?:›| ) 1\. Run without daemon this(?: time)? *$' ;;
         # The composer footer ("gpt-5.5 medium · ~/work/repo"). Deliberately NOT the
         # "›" input marker: that also renders on the trust dialog's menu, and a false
         # ready would make fleet-spawn fire its prompt into that dialog and lose it.

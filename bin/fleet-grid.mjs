@@ -560,6 +560,22 @@ function paneBusy(sock, name) {
   } catch { return false; }
 }
 
+// STOPPED ON A DIALOG, read off the pane — for an agent with no hooks to push need-you itself
+// (bin/fleet-agent declares blocked_re_js only for those; codex today). Without this a codex
+// session waiting on its folder-trust or daemon dialog drew as READY: nothing else in the
+// status path ever asked the pane whether a human was being waited on. Per line, like
+// paneBusy, and false whenever the pattern is absent or the pane cannot be read.
+function paneBlocked(sock, name) {
+  const src = agentField(agentOf(name), 'blocked_re_js');
+  if (!src) return false;
+  let re; try { re = new RegExp(src); } catch { return false; }
+  try {
+    const txt = execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', name],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return txt.split('\n').some(line => re.test(line));
+  } catch { return false; }
+}
+
 // "This account is spent" — returns the reset time (e.g. "10:20pm") or null.
 //
 // TWO SIGNALS, AND IT NEEDS BOTH. Claude prints "You've hit your session limit ·
@@ -1090,6 +1106,8 @@ function gather({ lead = false, sub = '' } = {}) {
     let status = s.asleepAt ? (st?.status || 'unknown')
                : ms || deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
     if (!busy && isParked(s.name)) status = 'parked';     // intentionally off (fleet-pause)
+    // A dialog outranks ready: it is the one idle-looking state that needs you to act.
+    else if (!busy && !gone && !ms && paneBlocked(SOCK, s.name)) status = 'need-you';
     // A LOST CARD IS NEVER need-you, AND NEVER COUNTED AS ANYTHING LIVE. Its record holds
     // whatever the session was doing when the machine went down, and a crash mid-question
     // would otherwise paint a dead session in the need-you red and count it in the header.
