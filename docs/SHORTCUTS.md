@@ -276,8 +276,11 @@ say why. The blurb under the column carries the short form of what choosing it g
 the full version is the capability matrix in
 [docs/multi-agent-sessions.md](multi-agent-sessions.md).
 
-**A master that is already running does not change.** The setting is read when a master is
-created, so this takes effect on the next one.
+**The running master switches too** — at once when idle, after its current turn when not,
+with `switching to <agent>…` on the row until it does. Switching back resumes the
+conversation that agent had (codex cannot, and the row says it starts fresh). A failed
+switch leaves the old agent running and puts its reason on the row. See
+[docs/OPERATIONS.md](OPERATIONS.md) for the details.
 
 `Esc`/`` ` ``/`Ctrl-C` closes the settings screen, no confirmation needed.
 

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 75654f60ac70
+// CLIENT-HASH: 1951b055ed7a
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -313,7 +313,9 @@
 // v58 draws a sub-lead's card in its TEAM's status (`team_status`) with the lead's own state
 // in the age slot, and says how many of its workers are working. A phone still on v57 reads
 // the new field as absent and draws the lead's own status, which is what it always did.
-const VERSION = 'ghostfleet-v58';
+// v59 says the running master switches agent too (after its current turn) instead of
+// "takes effect on the NEXT master", which stopped being true with lib/agent-switch.sh.
+const VERSION = 'ghostfleet-v59';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

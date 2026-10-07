@@ -966,16 +966,18 @@ const openProjSettings = () => clickVerb('settings');
 openProjSettings();
 await tick(20);
 is('project settings lists the agent', true, sheetHas(/which coding CLI/));
-// THE RUNNING MASTER DOES NOT CHANGE, said at the point of change. CLAUDE_FLEET_AGENT is
-// read once, when the tmux session is created; without this the setting reads as broken.
-is('...and says it is the NEXT master', true, sheetHas(/NEXT master/));
+// WHEN THE RUNNING MASTER CHANGES, said at the point of change: after its current turn
+// (lib/agent-switch.sh). It used to say "the NEXT master" and that is now false — the old
+// sentence must be gone, not merely joined by the new one.
+is('...and says the running master switches after its turn', true, sheetHas(/running master switches too, once its current turn ends/));
+is('...and no longer says only the NEXT master gets it', false, sheetHas(/NEXT master/));
 // toolbox is `codex` in the fixture and acme-api has none — both directions on one screen.
 is('...showing a project that has one', true, !!sBtn(/^codex$/));
 is('...and claude for one that has not', true, !!sBtn(/^claude$/));
 sClick(/^claude$/);            // acme-api's row: opens its own sheet
 await tick(20);
 is('a project opens its own agent sheet', true, sheetHas(/agent · /));
-is('...repeating the next-master rule', true, sheetHas(/NEXT master/));
+is('...repeating when the running master switches', true, sheetHas(/running master switches too/));
 sClick(/^opencode$/);
 await tick(5);
 is('...and warns before you save', true, sheetHas(/no fleet_\* tools/));

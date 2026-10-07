@@ -330,8 +330,23 @@ and on a per-project row in its `, settings` sheet for the projects that already
 **Only agents whose binary is actually installed are offered**, because picking one that
 cannot run leaves the next master dead with nothing on screen to say why, and each option
 carries what choosing it costs — see the capability
-matrix in [docs/multi-agent-sessions.md](multi-agent-sessions.md). Changing it does not
-touch a master that is already running; the next one gets it.
+matrix in [docs/multi-agent-sessions.md](multi-agent-sessions.md).
+
+**Changing it moves the RUNNING master too** (`lib/agent-switch.sh`). An idle master is
+switched within a few seconds; one in the middle of a turn finishes that turn first, and
+meanwhile the settings row and the project's card say `switching to <agent>…`. Changing
+it again before it fires takes the latest value, and changing it back cancels it. The
+new agent starts with a short handoff — it is now the master, run `fleet-worktrees` and
+`fleet-inbox` — and nothing of the old conversation. That conversation is not lost:
+before the pane is killed its id is recorded in `<fleet dir>/<sock>.<slot>.convs.json`,
+one entry per agent (`{"claude": {"id": …, "model": …, "ts": …}, …}`), and switching
+BACK to an agent that can resume reopens exactly that id — never `--continue`. codex
+cannot (its TUI does not survive a pane kill), so returning to it starts fresh, and the
+settings row says so. If the new agent is not installed the switch is refused untouched;
+if it starts and dies, the old agent is brought back on its own conversation, the setting
+is put back, and the row says why. Running workers keep their agent; new ones take the
+column. `fleet-project agent <name> <agent> --session <s>` does the same for one session
+(a sub-master) and leaves the column alone.
 
 Each project's sessions live on their own socket under that account's config dir, so accounts never
 mix. Work keeps the bare `cf-<project>`; every other profile is namespaced `cf-<profile>-<project>`,

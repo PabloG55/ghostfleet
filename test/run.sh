@@ -1024,9 +1024,36 @@ is "codex: ready under \$HOME"        "1" "$(matches "$cre" "$FIX/codex-idle-hom
 is "codex: ready outside \$HOME"      "1" "$(matches "$cre" "$FIX/codex-idle-abs.txt")"
 # A false ready here fires the initial prompt into the dialog, where it is swallowed.
 is "codex: NOT ready on trust dialog" "0" "$(matches "$cre" "$FIX/codex-trust.txt")"
+# codex 0.160.1 dropped the "· <path>" from its footer, and the pattern above matched nothing
+# on it: an agent switch read a running codex as one that never started and rolled it back.
+is "codex 0.160: ready at 56 columns"       "1" "$(matches "$cre" "$FIX/codex-idle-0160-56col.txt")"
+is "codex 0.160: NOT ready on trust dialog" "0" "$(matches "$cre" "$FIX/codex-trust-0160.txt")"
 bre="$("$ROOT/bin/fleet-agent" field codex blocked_re)"
 is "codex: blocked on trust dialog"   "1" "$(matches "$bre" "$FIX/codex-trust.txt")"
 is "codex: not blocked when idle"     "0" "$(matches "$bre" "$FIX/codex-idle-home.txt")"
+# codex 0.160.1 REWORDED the trust dialog ("Trust this folder?" over "› 1. Trust and
+# continue") and added a second one a session stops on before its composer draws ("1. Run
+# without daemon this time"). The old sentence matched neither, so a codex pane waiting on a
+# human read as ready. Real captures, at the widths a fleet pane actually has — the prose
+# wraps and truncates at 30 columns, so the option line is what is keyed on.
+for w in 120 56 30; do
+  is "codex 0.160: trust dialog is need-you at $w cols"  "1" "$(matches "$bre" "$FIX/codex-trust-0160-${w}col.txt")"
+done
+for w in 120 30; do
+  is "codex 0.160: daemon dialog is need-you at $w cols" "1" "$(matches "$bre" "$FIX/codex-daemon-0160-${w}col.txt")"
+done
+for k in idle busy; do for w in 160 30; do
+  is "codex 0.160: a $k pane is NOT need-you at $w cols"  "0" "$(matches "$bre" "$FIX/codex-$k-0160-${w}col.txt")"
+done; done
+# ...and the fixtures really are what they are named: the busy ones carry codex's working
+# line, the idle ones its composer, so a "not need-you" above is about the right pane.
+is "codex 0.160: the busy captures are working"  "2" "$(cat "$FIX"/codex-busy-0160-*col.txt | grep -c 'Working (' || true)"
+is "codex 0.160: the idle captures have a prompt" "yes" "$(grep -q 'Context [0-9]*% used' "$FIX/codex-idle-0160-160col.txt" && echo yes || echo no)"
+# The grid reads the JS spelling. Same fixtures, same answers, or the card disagrees with
+# fleet-agent about the same pane.
+bjs="$("$ROOT/bin/fleet-agent" field codex blocked_re_js)"
+is "codex: blocked_re_js agrees on every capture" "1 1 1 1 1 0 0 0 0" "$(for f in trust-0160-120col trust-0160-30col daemon-0160-30col trust-0160 trust idle-0160-160col idle-0160-30col busy-0160-160col busy-0160-30col; do
+   node -e 'const fs=require("fs");const re=new RegExp(process.argv[1]);process.stdout.write(String(fs.readFileSync(process.argv[2],"utf8").split("\n").some(l=>re.test(l))?1:0))' "$bjs" "$FIX/codex-$f.txt"; printf ' '; done | sed 's/ $//')"
 
 # ── 3. the projects file ─────────────────────────────────────────────────────
 group "projects file columns"
@@ -1118,10 +1145,13 @@ is "2-col: socket still bare"        "cf-twocol" "$(fp list 2>/dev/null | awk '$
 fp agent three notreal >/dev/null 2>&1; is "unknown agent is refused"  "1" "$?"
 is "...and nothing was written"      "0"        "$(grep -c 'notreal' "$cf" || true)"
 fp agent nosuchproject codex >/dev/null 2>&1; is "unknown project is refused" "1" "$?"
-# THE RUNNING MASTER DOES NOT CHANGE, and the command has to say so — CLAUDE_FLEET_AGENT
-# is read once, when the tmux session is created. Without this line the setting reads as
-# broken: you pick codex and the master goes on answering as claude.
-is "it says the running master is unaffected" "1" \
+# THE RUNNING MASTER USED TO BE LEFT ALONE, with a line saying so, and the owner read the
+# setting as broken anyway. It switches now ("agent switch" below proves that against a
+# live session); what is left to say HERE, with no master running, is that the next one
+# gets it — and the old sentence must be gone, or the command contradicts what it does.
+is "with no master running, it says the next one gets it" "1" \
+   "$(fp agent already opencode 2>&1 | grep -c "'master' is not running — it starts as opencode next time" || true)"
+is "...and no longer says the running master keeps its agent" "0" \
    "$(fp agent already opencode 2>&1 | grep -c 'RUNNING master keeps the agent' || true)"
 is "...and warns what the choice costs"       "1" \
    "$(fp agent already codex 2>&1 | grep -c 'heads up' || true)"
@@ -1133,6 +1163,202 @@ is "...and does not warn for the default"     "0" \
 is "...and the agent check pipes into no grep -q" "0" \
    "$(matches '^[^#]*fleet-agent list[^|]*[|] *grep -q' "$ROOT/bin/fleet-project")"
 rm -rf "$T"
+
+# ── a codex pane on a dialog is need-you ON THE CARD, not only to fleet-agent ──
+# blocked_re was read by `fleet-agent blocked` and nothing else, so a codex session stopped on
+# its trust or daemon dialog drew as ready on the desk and on the phone. Real captures, shown
+# in real panes, read by the same --json the phone gets.
+group "codex dialog reads as need-you on the card"
+if command -v tmux >/dev/null 2>&1; then
+  CDX="$(mktemp -d)"; CDS=cf-toolbox
+  for n in dlg30 dlg120 idl; do printf 'codex\n' > "$CDX/$CDS.$n.agent"; done
+  tmux -L "$CDS" new-session -d -x 30  -y 30 -s dlg30  "cat '$FIX/codex-trust-0160-30col.txt'; sleep 60"
+  tmux -L "$CDS" new-session -d -x 120 -y 30 -s dlg120 "cat '$FIX/codex-daemon-0160-120col.txt'; sleep 60"
+  tmux -L "$CDS" new-session -d -x 160 -y 30 -s idl    "cat '$FIX/codex-idle-0160-160col.txt'; sleep 60"
+  sleep 0.5
+  cdj="$(CLAUDE_FLEET_DIR="$CDX" node "$ROOT/bin/fleet-grid.mjs" "$CDS" --json 2>/dev/null)"
+  cst() { jq -r --arg n "$1" '.cards[] | select(.name==$n) | .status' <<< "$cdj" 2>/dev/null; }
+  is "a codex pane on the trust dialog (30 cols) is need-you"  "need-you" "$(cst dlg30)"
+  is "...and on the daemon dialog (120 cols)"                  "need-you" "$(cst dlg120)"
+  is "...while an idle codex pane is not"                      "yes" "$([ -n "$(cst idl)" ] && [ "$(cst idl)" != need-you ] && echo yes || echo "no ($(cst idl))")"
+  is "...and the header counts the two"                        "2" "$(jq -r '.counts.need_you' <<< "$cdj" 2>/dev/null)"
+  tmux -L "$CDS" kill-server 2>/dev/null
+  rm -rf "${CDX:?}"
+else
+  skip "codex dialog reads as need-you on the card" "tmux missing"
+fi
+
+# ── a RUNNING session moves to the new agent, and back onto its own conversation ──
+# lib/agent-switch.sh, against real tmux sessions running STUB agents: each stub logs the
+# argv its launcher handed it (that is where --resume <id> or its absence shows) and then
+# echoes its tty, so a pasted handoff prompt lands on screen. The pane is made "busy" by
+# typing a line claude's busy_re reads as a spinner, and idle again with a terminal reset.
+group "agent switch: a running master moves, waits for its turn, and comes back resumed"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  SW="$(mktemp -d)"; mkdir -p "$SW/.config/ghostfleet" "$SW/.claude/fleet" "$SW/bin" "$SW/repo" "$SW/wt"
+  SWF="$SW/.claude/fleet"; SWS=cf-billing-svc
+  printf 'billing-svc\t%s\twork\n' "$SW" > "$SW/.config/ghostfleet/projects"
+  # The stub agents. `claude agents --json` is claude-here asking whether the id is held by
+  # a background agent; it must answer at once, not sit on the tty.
+  #   EACH ONE DRAWS A COMPOSER: the last line typed above two rules, the cursor between
+  # them, redrawn on Enter. That is what fleet-send reads to confirm a prompt was submitted
+  # (the probe leaves the box); a bare `cat` never confirms, and every switch then paid
+  # fleet-send's full eight-second wait.
+  cat > "$SW/bin/_screen" <<'STUB'
+#!/bin/sh
+foot="$1"; last=""
+draw() { printf '\033[2J\033[H%s\n────────\n❯ \0337\n────────\n%s\0338' "$last" "$foot"; }
+draw
+while IFS= read -r line; do last="$line"; draw; done
+STUB
+  chmod +x "$SW/bin/_screen"
+  for a in claude codex; do
+    foot='status'; [ "$a" = codex ] && foot='  main · model · Context 0% used'
+    cat > "$SW/bin/$a" <<STUB
+#!/bin/sh
+[ "\$1" = agents ] && exit 0
+printf '%s\n' "\$*" >> "$SW/argv.$a"
+# A real dialog first, when the test asks for one: Enter answers it, as a person would.
+# Its blank lines dropped — captured from a 40-row pane, they would scroll it out of this one.
+[ "$a" = codex ] && [ -f "$SW/codex-dialog" ] && { grep -v '^ *$' "$FIX/codex-daemon-0160-120col.txt"; read -r _; }
+exec "$SW/bin/_screen" '$foot'
+STUB
+    chmod +x "$SW/bin/$a"
+  done
+  # opencode starts and falls over at once: the "fails to start" case.
+  printf '#!/bin/sh\nexit 1\n' > "$SW/bin/opencode"; chmod +x "$SW/bin/opencode"
+  # ONLY THE TOOLS, LINKED ONE BY ONE. Their directories would bring every agent installed
+  # beside them — a real opencode in /opt/homebrew/bin made "a missing binary" not missing.
+  mkdir -p "$SW/sys"; for t in tmux jq node; do ln -s "$(command -v "$t")" "$SW/sys/$t"; done
+  swpath="$ROOT/bin:$SW/bin:$SW/sys:/usr/bin:/bin"
+  SWE=(env HOME="$SW" PATH="$swpath" CLAUDE_FLEET_SWITCH_SETTLE=0 CLAUDE_FLEET_SWITCH_POLL=0.2
+       CLAUDE_FLEET_SWITCH_IDLE_N=2 CLAUDE_FLEET_SWITCH_READY_SECS=4 CLAUDE_FLEET_SWITCH_PROMPT_DELAY=0.3
+       CLAUDE_FLEET_SWITCH_READY_HOLD=0.2)
+  swstart() {          # $1 = session, $2 = agent, $3 = cwd
+    "${SWE[@]}" tmux -L "$SWS" new-session -d -x 120 -y 30 -s "$1" -c "$3" \
+      -e CLAUDE_FLEET_DIR="$SWF" -e CLAUDE_FLEET_SOCK="$SWS" -e CLAUDE_FLEET_AGENT="$2" \
+      -e CLAUDE_FLEET_FRESH=1 -e CLAUDE_FLEET_MODEL=haiku "exec agent-here $1"
+  }
+  swpid() { tmux -L "$SWS" display-message -p -t "$1" '#{pane_pid}' 2>/dev/null; }
+  swfp()  { "${SWE[@]}" "$ROOT/bin/fleet-project" "$@" 2>&1; }
+  swwait() {           # wait (up to 10s) until the pending switch for $1 is gone
+    local i=0; while [ -f "$SWF/$SWS.$1.switch" ] && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+    i=0; while [ -f "$SWF/$SWS.$1.switch.pid" ] && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+  }
+  swbusy() { tmux -L "$SWS" send-keys -t "$1" -l '✻ Cooking… (3s · esc to interrupt)'; tmux -L "$SWS" send-keys -t "$1" Enter; }
+  swidle() { tmux -L "$SWS" send-keys -R -t "$1"; tmux -L "$SWS" clear-history -t "$1"; }
+  # The conversation the claude master is in, as its hook would have recorded it. The stub
+  # is not a real claude, so fleet-hibernate cannot read it off the process and the engine
+  # falls back to this record — the same fallback a session it cannot resolve gets.
+  SWID=aaaaaaaa-1111-2222-3333-444444444444
+  printf '{"session_id":"%s","sock":"%s","slot":"master","cwd":"%s","status":"ready","ts":%s}\n' \
+    "$SWID" "$SWS" "$SW/repo" "$(date +%s)" > "$SWF/$SWID.json"
+  swstart master claude "$SW/repo"; swstart w1 claude "$SW/wt"; sleep 1
+  W1PID="$(swpid w1)"
+
+  # 1. idle claude -> codex: now, fresh, with the handoff prompt, and the claude id kept
+  out="$(swfp agent billing-svc codex)"
+  is "an idle master is switched now"            "1" "$(grep -c "switching 'master' from claude to codex now" <<< "$out" || true)"
+  swwait master
+  is "...the pane now runs codex"                "codex" "$(cat "$SWF/$SWS.master.agent" 2>/dev/null)"
+  is "...started FRESH, never resumed by guess"  "0" "$(grep -c 'resume' "$SW/argv.codex" 2>/dev/null || true)"
+  # Presence, not a count: the stub's tty echoes the paste AND cat prints it back.
+  is "...and told it took over from claude"      "yes" "$(grep -q 'taking over from claude' <<< "$(tmux -L "$SWS" capture-pane -p -J -t master)" && echo yes || echo no)"
+  is "...claude's conversation recorded first"   "$SWID" "$(jq -r '.claude.id' "$SWF/$SWS.master.convs.json" 2>/dev/null)"
+  # haiku is a claude model; handed to codex it is an error, so it travels with claude
+  is "...with its model, for the way back"       "haiku" "$(jq -r '.claude.model' "$SWF/$SWS.master.convs.json" 2>/dev/null)"
+  is "...and codex is not handed it"             "CLAUDE_FLEET_MODEL=" "$(tmux -L "$SWS" show-environment -t master CLAUDE_FLEET_MODEL 2>/dev/null)"
+  is "a worker is not touched"                   "$W1PID" "$(swpid w1)"
+
+  # 2. back to claude: on its OWN recorded id, never --continue, model restored
+  : > "$SW/argv.claude"
+  swfp agent billing-svc --none >/dev/null; swwait master
+  is "switching back resumes the recorded id"    "1" "$(grep -c -- "--resume $SWID" "$SW/argv.claude" 2>/dev/null || true)"
+  is "...never --continue"                       "0" "$(grep -c -- '--continue' "$SW/argv.claude" 2>/dev/null || true)"
+  is "...on the model it left with"              "1" "$(grep -c -- '--model haiku' "$SW/argv.claude" 2>/dev/null || true)"
+  is "...and gets the one-line welcome back"     "yes" "$(grep -q "master again, taking over from codex" <<< "$(tmux -L "$SWS" capture-pane -p -J -t master)" && echo yes || echo no)"
+  # codex has a history here now and cannot resume it: said at the moment of choosing
+  swbusy master
+  out="$(swfp agent billing-svc codex)"
+  is "codex with history says it starts fresh"   "1" "$(grep -c "codex can't resume, it starts fresh" <<< "$out" || true)"
+
+  # 3. mid-turn: it WAITS, the latest wish wins, and changing back cancels
+  is "...and a busy master waits for its turn"   "1" "$(grep -c 'when its current turn ends' <<< "$out" || true)"
+  # IDLE_N x POLL is 0.4s here, so a second is well past the point it would have fired.
+  P0="$(swpid master)"; sleep 1
+  is "...still the same pane while it works"     "$P0" "$(swpid master)"
+  is "...with the switch pending"                "codex" "$(cat "$SWF/$SWS.master.switch" 2>/dev/null)"
+  is "...which the card's message shows"         "switching to codex…" \
+     "$(HOME="$SW" CLAUDE_FLEET_DIR="$SWF" PATH="$swpath" node "$ROOT/bin/fleet-grid.mjs" "$SWS" --json 2>/dev/null | jq -r '.cards[] | select(.name=="master") | .msg' 2>/dev/null)"
+  swfp agent billing-svc --none >/dev/null
+  is "changing back before it fires cancels it"  "no" "$([ -f "$SWF/$SWS.master.switch" ] && echo yes || echo no)"
+  swfp agent billing-svc codex >/dev/null; sleep 0.5
+  is "...and a new wish replaces the old"        "codex" "$(cat "$SWF/$SWS.master.switch" 2>/dev/null)"
+  swidle master; swwait master
+  is "...and fires once the turn ends"           "codex" "$(cat "$SWF/$SWS.master.agent" 2>/dev/null)"
+
+  # 4. a new agent that falls over: the old one comes back, the setting with it
+  swfp agent billing-svc --none >/dev/null; swwait master
+  : > "$SW/argv.claude"
+  swfp agent billing-svc opencode >/dev/null; swwait master
+  is "a failed start puts the old agent back"    "claude" "$(cat "$SWF/$SWS.master.agent" 2>/dev/null)"
+  is "...resumed on its own conversation"        "1" "$(grep -c -- "--resume $SWID" "$SW/argv.claude" 2>/dev/null || true)"
+  is "...and says why on the settings row"       "1" "$(grep -c 'opencode failed to start' "$SWF/$SWS.master.switch-failed" 2>/dev/null || true)"
+  is "...with the setting back on claude"        "" "$(awk -F'\t' '$1=="billing-svc"{print $4}' "$SW/.config/ghostfleet/projects")"
+  is "...and claude's record intact"             "$SWID" "$(jq -r '.claude.id' "$SWF/$SWS.master.convs.json" 2>/dev/null)"
+
+  # 5. a binary that is not there is refused before anything is killed
+  P0="$(swpid master)"
+  rm -f "$SW/bin/opencode"
+  swfp agent billing-svc opencode >/dev/null; rc=$?
+  is "a missing binary is refused"               "1" "$rc"
+  is "...without touching the pane"              "$P0" "$(swpid master)"
+  is "...or leaving a switch pending"            "no" "$([ -f "$SWF/$SWS.master.switch" ] && echo yes || echo no)"
+
+  # 6. --session moves ONE session, and leaves the project's column alone
+  swfp agent billing-svc codex --session w1 >/dev/null; swwait w1
+  is "--session switches that session"           "codex" "$(cat "$SWF/$SWS.w1.agent" 2>/dev/null)"
+  is "...and tells it which session it is"       "yes" "$(grep -q 'the session w1 in this fleet' <<< "$(tmux -L "$SWS" capture-pane -p -J -t w1)" && echo yes || echo no)"
+  is "...not the project's column"               "" "$(awk -F'\t' '$1=="billing-svc"{print $4}' "$SW/.config/ghostfleet/projects")"
+  is "...nor the master"                         "$P0" "$(swpid master)"
+
+  # 7. a new agent that comes up on a DIALOG is waiting on a person, not failed to start.
+  # Seen live: codex 0.160.1 opened on its daemon dialog and the switch rolled it back at the
+  # ready timeout as a crash. It must still be pending past that timeout, read as need-you
+  # on the card, and finish once the dialog is answered.
+  : > "$SW/codex-dialog"
+  swfp agent billing-svc codex >/dev/null; sleep 6      # READY_SECS is 4 here
+  is "a new agent on a dialog is not rolled back"   "codex" "$(cat "$SWF/$SWS.master.switch" 2>/dev/null)"
+  is "...and nothing is reported failed"            "no" "$([ -f "$SWF/$SWS.master.switch-failed" ] && echo yes || echo no)"
+  is "...and the card says it needs you"            "need-you" \
+     "$(HOME="$SW" CLAUDE_FLEET_DIR="$SWF" PATH="$swpath" node "$ROOT/bin/fleet-grid.mjs" "$SWS" --json 2>/dev/null | jq -r '.cards[] | select(.name=="master") | .status' 2>/dev/null)"
+  rm -f "$SW/codex-dialog"; tmux -L "$SWS" send-keys -t master Enter; swwait master
+  is "...and answering it finishes the switch"      "codex" "$(cat "$SWF/$SWS.master.agent" 2>/dev/null)"
+  is "...with the handoff after the dialog"         "yes" "$(grep -q 'taking over from claude' <<< "$(tmux -L "$SWS" capture-pane -p -J -t master)" && echo yes || echo no)"
+
+  # 8. THE SERVER OUTLIVES THE SWAP. A master is often the only session on its server, and
+  # tmux exits with its last session: the kill took the server down and the new-session after
+  # it started a fresh one — no fleet config, and the requester's environment as its global
+  # one. Seen live when a master switched itself through its MCP server: codex came up on its
+  # sign-in screen under the wrong HOME.
+  swfp agent billing-svc --none >/dev/null; swwait master
+  tmux -L "$SWS" kill-session -t '=w1' 2>/dev/null
+  SPID="$(tmux -L "$SWS" display-message -p '#{pid}' 2>/dev/null)"
+  tmux -L "$SWS" set-environment -g SW_MARK kept
+  swfp agent billing-svc codex >/dev/null; swwait master
+  is "the only session is switched"                 "codex" "$(cat "$SWF/$SWS.master.agent" 2>/dev/null)"
+  is "...on the SAME tmux server"                   "$SPID" "$(tmux -L "$SWS" display-message -p '#{pid}' 2>/dev/null)"
+  is "...whose environment survived"                "SW_MARK=kept" "$(tmux -L "$SWS" show-environment -g SW_MARK 2>/dev/null)"
+  is "...and the placeholder is gone"               "0" "$(tmux -L "$SWS" list-sessions -F '#{session_name}' 2>/dev/null | grep -c '^_hold-' || true)"
+
+  # Every rm in the engine is under its fleet dir; an empty one must refuse, not resolve to /.
+  bash "$ROOT/lib/agent-switch.sh" request "" "$SWS" master codex >/dev/null 2>&1
+  is "an empty fleet dir is refused"             "2" "$?"
+  tmux -L "$SWS" kill-server 2>/dev/null
+  rm -rf "${SW:?}"
+else
+  skip "agent switch" "tmux or jq missing"
+fi
 
 # ── the demo profile, built rather than hand-made ────────────────────────────
 # `ghostfleet demo` is the first line of BOTH recordings (worktree.tape:58,

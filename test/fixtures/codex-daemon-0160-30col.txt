@@ -1,0 +1,40 @@
+
+  Background server has inco
+  This session requires
+  api_key_model_discovery to
+  be disabled
+  Restart will use these sha
+    api_key_model_discovery
+    auth_elicitation = true
+    code_mode_host = true
+    mcp_oauth_refresh_coordi
+  These settings persist and
+  can disable functionality
+  for other clients. Restart
+  may interrupt active or
+  queued work.
+
+
+  1. Run without daemon this
+     time
+  2. Restart with these
+     settings
+› 3. Cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
