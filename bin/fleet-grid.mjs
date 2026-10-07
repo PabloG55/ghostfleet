@@ -25,6 +25,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { modState, modLimitAt } from '../lib/mod-status.mjs';
 // LOADED, NOT IMPORTED, and for the reason preview() below spells out: test/run.sh's vis35
 // group runs a COPY of this file from a temp directory, where a static import of ../lib
 // resolves to nothing and the whole control plane fails to load. A grid that cannot start
@@ -535,7 +536,13 @@ function busyReFor(agent) {
 }
 
 // true = working, false = not working, null = CAN'T TELL (no detector for this agent)
+//
+// CLAUDE_FLEET_PANE_BUSY=off answers null for every pane, as if no agent had a detector.
+// It exists to prove a claim, not to tune one: with it set, a Claude card that still
+// reads `working` and then `ready` got that from the mod (lib/mod-status.mjs), because
+// nothing else was asked. docs/OPERATIONS.md, "The mod".
 function paneBusy(sock, name) {
+  if (process.env.CLAUDE_FLEET_PANE_BUSY === 'off') return null;
   const re = busyReFor(agentOf(name));
   if (!re) return null;
   try {
@@ -1067,9 +1074,15 @@ function gather({ lead = false, sub = '' } = {}) {
     // A slept session has no pane to read, so it is never asked. Probing one costs a tmux
     // round trip that answers "not found" and would land as "not busy", which reads as
     // ready — a card claiming a session is waiting for input when its process is gone.
-    const busy = gone ? false : paneBusy(SOCK, s.name);
+    // THE MOD'S STATE, WHEN THERE IS ONE TO BELIEVE, AND THEN THE PANE IS NOT READ. A Claude
+    // session with mods/ghostfleet loaded writes what it is doing from inside (a turn
+    // started, a turn ended, a dialog is up), which is the thing paneBusy and the
+    // need-you latch below can only infer. lib/mod-status.mjs decides whether the record
+    // is still being written; when it is not, everything below runs as it always did.
+    const ms = gone ? null : modState(st);
+    const busy = ms ? ms === 'working' : gone ? false : paneBusy(SOCK, s.name);
     let status = s.asleepAt ? (st?.status || 'unknown')
-                            : deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
+               : ms || deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
     if (!busy && isParked(s.name)) status = 'parked';     // intentionally off (fleet-pause)
     // A LOST CARD IS NEVER need-you, AND NEVER COUNTED AS ANYTHING LIVE. Its record holds
     // whatever the session was doing when the machine went down, and a crash mid-question
@@ -1081,17 +1094,22 @@ function gather({ lead = false, sub = '' } = {}) {
     // ready one — same input box, same prompt — so nothing but the pane can tell.
     let limitAt = null;
     if (!busy && !gone && status !== 'parked') {
-      limitAt = paneLimit(SOCK, s.name);
+      // From the mod, the limit is the engine's own 5h figure and `interrupted` is
+      // already the state; neither needs the pane.
+      limitAt = ms ? modLimitAt(st) : paneLimit(SOCK, s.name);
       if (limitAt) status = 'limit';
       // Limit wins if both are showing: it says WHY the session is stuck and when it
       // comes back, where "interrupted" only says it stopped.
-      else if (paneInterrupted(SOCK, s.name)) status = 'interrupted';
+      else if (!ms && paneInterrupted(SOCK, s.name)) status = 'interrupted';
     }
     const ageBase = tmt || st?.ts || 0;
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
     return { name: s.name, cwd: s.cwd || '', folder, branch, status, age, msg: lastAssistant(transcript),
+             // Where `status` came from: `mod` when the session's own plugin wrote it,
+             // `pane` when it was read off the screen. --json only; the card looks the same.
+             statusFrom: ms ? 'mod' : 'pane',
              attached: s.attached, sched, agent, label: labelOf(s.name), limitAt, lead: isLead(s.name),
              // ONE BUILDER FEEDS BOTH SCREENS: bin/fleet-serve.mjs shells out to this
              // file's --json, so the phone gets this field without a second producer —
@@ -2920,6 +2938,10 @@ if (JSON_OUT) {
       // genuinely cannot tell, and a client that renders it as a confident green dot
       // undoes the one thing this status layer is for.
       status:   c.status,
+      // `mod` when the session's own plugin wrote `status` (mods/ghostfleet), `pane`
+      // when it was read off the screen. Lets the phone and a reader of --json tell an
+      // exact state from an inferred one without a second producer.
+      status_from: c.statusFrom || 'pane',
       // A sub-lead's card status: the busiest of itself and its team (teamStatusOf), which
       // is what every card renderer and every count draws from. null on a session with no
       // workers and on the head of a sub-grid. `status` stays the session's OWN state,
@@ -3187,9 +3209,11 @@ function sessionStatuses(proj, includeTabs = false) {
   ];
   return ordered.map(name => {
     const o = bySlot.get(name);
-    const busy = paneBusy(sock, name);
+    const ms = modState(o);                       // the mod's own word first, as on the cards
+    const busy = ms ? ms === 'working' : paneBusy(sock, name);
     // intentionally off (marker is namespaced by socket — every project has a `master`)
     if (!busy && fs.existsSync(path.join(dir, sock + '.' + name + '.parked'))) return { sock, name, status: 'parked' };
+    if (ms) return { sock, name, status: ms };
     const tmt = o && o.transcript ? mtimeSec(o.transcript) : 0;
     return { sock, name, status: deriveStatus(o ? o.status : '', o ? o.transcript : '', busy, o ? (o.ts || 0) : 0, tmt) };
   });

@@ -1,0 +1,8 @@
+{
+  "name": "ghostfleet",
+  "version": "0.1.0",
+  "description": "Reports a fleet session's exact state and budget from inside Claude Code, and answers /fleet and /inbox without starting a turn.",
+  "author": {
+    "name": "ghostfleet"
+  }
+}

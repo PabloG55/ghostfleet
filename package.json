@@ -21,6 +21,9 @@
     "layouts/",
     "scripts/",
     "web/",
+    "mods/ghostfleet/.claude-plugin/plugin.json",
+    "mods/ghostfleet/hooks/",
+    ".claude-plugin/",
     "CHANGELOG.md",
     "install.sh",
     "LICENSE"

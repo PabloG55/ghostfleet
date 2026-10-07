@@ -76,7 +76,16 @@ while IFS= read -r name; do
     # scope by sock: matching slot alone collides across fleets (every one has a
     # `master`), so it would report another project's status here. Legacy entries
     # (no sock) are a last resort, never for the ambiguous `master`.
-    st="$(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$name" --arg k "$SOCK" 'select(.slot==$s and ((.sock // "") == $k))|[(.ts//0),.status]|@tsv' "$f" 2>/dev/null; done | sort -rn | head -1 | cut -f2)"
+    # The mod's state (mods/ghostfleet) when its heartbeat is recent, else the hook's
+    # status — then the mod's pid is asked whether it is still alive, the same two tests
+    # lib/mod-status.mjs applies for the grid. "-" and 0 stand in for an absent field:
+    # tab is IFS whitespace, so an empty one would collapse and shift the rest left.
+    IFS=$'\t' read -r _ts st _ms _mp < <(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$name" --arg k "$SOCK" \
+      'select(.slot==$s and ((.sock // "") == $k))
+       | [(.ts//0), (.status // "?"),
+          (if .source == "mod" and ((.mod.hb // 0) / 1000) > (now - 150) then (.state // "-") else "-" end),
+          (.mod.pid // 0)] | @tsv' "$f" 2>/dev/null; done | sort -rn | head -1)
+    if [ "${_ms:--}" != "-" ] && { [ "${_mp:-0}" = 0 ] || kill -0 "$_mp" 2>/dev/null; }; then st="$_ms"; fi
     if [ -z "$st" ] && [ "$name" != master ]; then
       st="$(for f in "$FLEET_DIR"/*.json; do jq -r --arg s "$name" 'select(.slot==$s and ((.sock // "") == ""))|[(.ts//0),.status]|@tsv' "$f" 2>/dev/null; done | sort -rn | head -1 | cut -f2)"
     fi

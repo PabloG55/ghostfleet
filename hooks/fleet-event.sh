@@ -315,15 +315,27 @@ case "$EVENT" in
 esac
 
 # --- write status file (atomic) ----------------------------------------------
+# THE MOD'S FIELDS RIDE ALONG. mods/ghostfleet writes a Claude session's exact state into
+# this same record from inside Claude Code (source, state, turnId, mod, usage), and this
+# hook rebuilds the record from nothing on every event, so without this every Stop and
+# every Notification would wipe them and the readers would fall back to the pane until
+# the mod's next write. Read from the file at the moment of writing, not at the top: the
+# mod writes while this hook runs, and the later the read the smaller the window in which
+# its write is lost. The list is mods/ghostfleet/hooks/shape.js's MOD_FIELDS, and the
+# suite holds the two to each other.
+_mod="$(jq -c '{source, state, turnId, mod, usage} | with_entries(select(.value != null))' \
+  "$FLEET_DIR/$SESSION.json" 2>/dev/null)"
+case "$_mod" in '{'*) ;; *) _mod='{}' ;; esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"
 if jq -n \
   --arg id "$SESSION" --arg z "$ZELL" --arg slot "$SLOT" \
   --arg sock "$SOCK" --arg pane "$PANE" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
   --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" --arg from "$FROM" \
+  --argjson mod "$_mod" \
   '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, pane:$pane, cwd:$cwd, folder:$folder,
     branch:$branch, status:$status, transcript:$tr, ts:$ts}
-   + (if $from != "" then {continued_from:$from} else {} end)' \
+   + (if $from != "" then {continued_from:$from} else {} end) + $mod' \
   >"$tmp" 2>/dev/null
 then
   mv -f "$tmp" "$FLEET_DIR/$SESSION.json" 2>/dev/null || _dbg "write: could not move $tmp into place"

@@ -8,6 +8,18 @@ the detail, and every entry here names the PR that carries the argument.
 
 ### Added
 
+- **A Claude Code mod that reports a session's state and budget from inside it**
+  (`mods/ghostfleet`, docs/OPERATIONS.md "The mod"; Claude Code 2.1.287+). `working`,
+  `ready`, `interrupted` and `need-you` come from the turn and permission events themselves
+  rather than from a regex over the pane, and the grid, the phone, the digest and
+  `fleet-list` prefer them while the session that wrote them is alive, falling back to the
+  pane otherwise. The governor reads the engine's own 5h figure, so a narrow pane no longer
+  leaves it blind. `/fleet` and `/inbox` answer without starting a turn, mid-turn too.
+  `install.sh` installs it into every profile, after backing each one up. The new
+  `fleet-mod` command plans it (`--dry-run`), reports it (`status`) or removes it
+  (`uninstall`), and `CLAUDE_FLEET_MOD=off` skips it.
+  Known gap: in auto mode, a call the classifier decides reads `need-you` until it resolves.
+
 - **cursor (Cursor's CLI, `cursor-agent`) as a fifth agent** (docs/multi-agent-sessions.md).
   `fleet-spawn --agent cursor`, the project agent column and the phone's pickers offer it once
   `cursor-agent` is on PATH. `install.sh` writes an event bridge, the ghostfleet MCP server and
