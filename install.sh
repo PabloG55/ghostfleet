@@ -1150,6 +1150,15 @@ echo "    ghostfleet            # your own projects (the empty screen walks you 
 # here, because this list is where a new install looks for what to do next, and
 # `fleet-phone` is the step rather than a pointer at a document.
 echo "    fleet-phone           # put the fleet on your phone — it reports what is left to do"
+# A RUNNING CLAUDE KEEPS THE PLUGINS IT STARTED WITH, so installing the mod reaches only
+# sessions started from here on. Every session already open goes on being read from its
+# pane, which looks exactly like the mod not working. Said only when there are some.
+if [ "$MOD_IN" = " + the Claude Code mod" ]; then
+  _pre="$("$FLEET_HOME/bin/fleet-mod" reload --count 2>/dev/null || true)"
+  case "$_pre" in ''|*[!0-9]*|0) ;;
+    *) echo "    fleet-mod reload --apply   # $_pre running session$([ "$_pre" = 1 ] && echo " predates" || echo "s predate") the mod (without --apply: the plan)" ;;
+  esac
+fi
 # THE RE-RUN COMMAND HAS TO BE ONE THE READER CAN ACTUALLY TYPE. This printed
 # `./install.sh --verbose` at everyone, including the npx reader, whose working directory
 # has no install.sh in it and never did — the installer ran out of a cache directory they
