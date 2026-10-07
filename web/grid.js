@@ -107,14 +107,39 @@ function limitAtOf(card) { return card.limit_at ?? card.limitAt ?? null; }
 // below exist to pin, and drift silently, because both would still render something.
 // A sub-lead's rollup, worded exactly as bin/fleet-grid.mjs rollupText() words it — the
 // TUI prints it on the card's third line, the phone on a line of its own. '' for a session
-// with no workers, so "is this a sub-lead" is the truth of this string.
-export function rollupText(w) {
+// with no workers, so "is this a sub-lead" is the truth of this string. `width` is the
+// desk's 28 columns, where the whole sentence does not fit; the phone passes none and gets
+// all of it.
+export function rollupText(w, width = Infinity) {
   if (!w || !w.total) return '';
-  return `${w.total} worker${w.total === 1 ? '' : 's'} · ${w.need_you} ${w.need_you === 1 ? 'needs' : 'need'} you`;
+  const n = w.need_you || 0, k = w.working || 0;
+  const need = `${n} ${n === 1 ? 'needs' : 'need'} you`;
+  const forms = [
+    `${w.total} worker${w.total === 1 ? '' : 's'} · ${k} working · ${need}`,
+    `${k} of ${w.total} working · ${need}`,
+    `${k}/${w.total} working · ${need}`,
+    `◆ ${k}/${w.total} · ● ${n}`,
+  ];
+  const fit = forms.find(f => [...f].length <= width);
+  return fit ?? forms[forms.length - 1];
+}
+// A sub-lead lifted to its team's status keeps its OWN state in the age slot — `lead ✓
+// 14s ago` — as bin/fleet-grid.mjs leadAgeText() does, so a cyan card never hides that the
+// lead itself is waiting at its prompt. '' on a card that was not lifted.
+export function leadAgeText(card, label, width = Infinity) {
+  const st = card.team_status ?? card.teamStatus;
+  if (!st || st === card.status) return '';
+  const g = [...((STATUS[card.status] || STATUS.unknown).label)][0];
+  const age = card.age == null ? '' : ` ${humanAge(card.age)}`;
+  const long = `lead ${g}${age}${age ? ' ago' : ''}`;
+  return [...label].length + 1 + [...long].length <= width ? long : `lead ${g}${age}`;
 }
 
 export function cardModel(card, selected = false, idx = -1) {
-  const meta = STATUS[card.status] || STATUS.starting;
+  // A sub-lead's card is drawn in its TEAM's status (§4 `team_status`, null everywhere
+  // else). `status` below stays the session's own: the session screen reads it as "is
+  // this pane busy", and a lead at its prompt is not.
+  const meta = STATUS[card.team_status || card.status] || STATUS.starting;
   // 1-9 = the digit that jumps straight to this card in the TUI; on the phone it is the
   // card's position, which is what a drag rewrites.
   const num = idx >= 0 && idx < 9 ? idx + 1 : null;
@@ -123,7 +148,7 @@ export function cardModel(card, selected = false, idx = -1) {
   // says when it last spoke, which is not the question you are asking of that card.
   const when = card.sched ? `@${clockLabel(card.sched.at)}`
              : card.status === 'limit' && limitAtOf(card) ? `↻ ${limitAtOf(card)}`
-             : idle;   // @ = scheduled send
+             : leadAgeText(card, meta.label) || idle;   // @ = scheduled send
   // Leads with the WORKTREE — the thing the session is sitting in. The branch is
   // appended only when it ADDS something; on most worktrees it is the same string
   // twice. With a label on top, the session name takes the second slot instead: it is
@@ -135,7 +160,9 @@ export function cardModel(card, selected = false, idx = -1) {
     kind: 'card', num, selected,
     title: card.label || card.name,
     name: card.name,
-    status: card.status,
+    // The status the card is DRAWN in — its team's on a sub-lead — so the s-<status>
+    // class, the chip and the rail all agree with the colour.
+    status: card.team_status || card.status,
     // The TUI's own word for the status, glyph and all. §7: the vocabulary is the TUI's,
     // so the chip prints what the desk prints rather than a synonym chosen for a phone.
     statusLabel: meta.label,
@@ -207,7 +234,9 @@ export function cardModel(card, selected = false, idx = -1) {
 // `counts` object; the suite asserts the two agree on every fixture rather than
 // trusting one of them.
 export function countsFrom(cards) {
-  const n = s => cards.filter(c => c.status === s).length;
+  // Counted as drawn: a sub-lead lifted by its team counts in its team's status, exactly
+  // as bin/fleet-grid.mjs statusCounts() does.
+  const n = s => cards.filter(c => (c.team_status || c.status) === s).length;
   return { need_you: n('need-you'), working: n('working'), ready: n('ready'),
            parked: n('parked'), limit: n('limit'), interrupted: n('interrupted') };
 }

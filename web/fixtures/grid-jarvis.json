@@ -15,6 +15,7 @@
       "name": "master",
       "label": null,
       "status": "ready",
+      "team_status": null,
       "folder": "jarvis",
       "branch": "main",
       "agent": "claude",

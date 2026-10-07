@@ -133,6 +133,7 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
       "name":      "api-fix",             // what fleet-send/fleet-read address
       "label":     null,                  // titles the card when set; name moves to line 2
       "status":    "working",             // the nine-value vocabulary, verbatim
+      "team_status": null,                // a sub-lead's: its team's busiest (see nested leads)
       "folder":    "api-fix",             // the worktree it sits in
       "branch":    "feat/retry-backoff",
       "agent":     "claude",              // rendered only when != claude
@@ -158,17 +159,24 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
 }
 ```
 
-### nested leads: `sub`, `parent`, `workers`, `sub_head`
+### nested leads: `sub`, `parent`, `workers`, `team_status`, `sub_head`
 
 A worker can run workers of its own (`fleet-spawn` from its worktree makes a child, tagged in
 `<sock>.<child>.parent`). Exactly two levels, and the wire mirrors the screens:
 
 - **The top grid does not list a sub-worker.** It lists the sub-lead, whose `workers` is its
-  team's rollup — `{total, need_you, working}` — and the card words it as
-  `2 workers · 1 needs you` (`rollupText()`, one wording in `web/grid.js` and the TUI). On the
-  desk that line replaces the quoted message, because 28 columns cannot hold both; the phone
-  has room and shows it as its own line. `counts` still folds `cards`, so a child's need-you
-  is **not** in the top grid's counts: the top lead asked for the sub-lead, not for its team.
+  team's rollup — `{total, need_you, working}`, each DIRECT worker counted by its own team's
+  state — and the card words it as `2 workers · 1 working · 0 need you` (`rollupText()`, one
+  wording in `web/grid.js` and the TUI; the desk's 28 columns take the shorter
+  `1 of 2 working · 0 need you`). On the desk that line replaces the quoted message; the
+  phone has room and shows it as its own line.
+- **`team_status` is what a sub-lead's card is drawn in**: the busiest of the lead and its
+  whole subtree, `need-you` over `working` over the lead's own `status` (nothing else travels
+  up, and an asleep or exited worker lifts nothing). `null` on every card without workers
+  and on `sub_head`. `status` stays the session's OWN state — the session screen reads it as
+  "is this pane busy" — so a card is drawn from `team_status || status`, and when the two
+  differ the age slot says the lead's own (`lead ✓ 2m ago`). `counts` folds the cards as
+  drawn, so a sub-lead lifted to need-you is a need-you in the top grid's counts.
 - **`--sub <name>` is that sub-lead's grid**: the sub-lead first (`sub_head: true`, drawn and
   tapped as an ordinary session), then only its children, each with `parent` set. `sub`
   echoes the name, and is `null` when the sub-lead has gone — a client asked for a sub-grid

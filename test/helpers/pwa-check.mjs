@@ -544,10 +544,11 @@ is('...and activate drops the old ones', true, /if \(k !== VERSION\) await cache
 
 // ── 3. the fixtures are §4, exactly ───────────────────────────────────────
 const NINE = ['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted'];
-// `sub`, `parent`, `workers`, `sub_head`: nested leads — whose sub-grid this is, whose team a
-// card belongs to, a sub-lead's rollup, and the card that heads its own sub-grid.
+// `sub`, `parent`, `workers`, `team_status`, `sub_head`: nested leads — whose sub-grid this
+// is, whose team a card belongs to, a sub-lead's rollup, the team's status its card is drawn
+// in, and the card that heads its own sub-grid.
 const TOP = ['project', 'profile', 'sub', 'counts', 'cards', 'free_worktrees'].sort().join(',');
-const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'pr', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead', 'exited', 'parent', 'workers', 'sub_head'].sort().join(',');
+const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'pr', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead', 'exited', 'parent', 'workers', 'team_status', 'sub_head'].sort().join(',');
 const COUNTS = ['need_you', 'working', 'ready', 'parked', 'limit', 'interrupted'].sort().join(',');
 const fixDir = path.join(WEB, 'fixtures');
 const grids = fs.readdirSync(fixDir).filter(f => /^grid-.*\.json$/.test(f)).sort();
