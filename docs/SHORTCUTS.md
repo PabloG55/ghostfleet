@@ -368,7 +368,9 @@ its own name — no naming prompt, that's only for the "+ new session" flow (see
 
 `↑↓`/`k j` move between sessions; `space`/`⏎` cycles that specific session's push
 (`notify-lead`) override — more specific than the Projects screen's per-project toggle
-(wins over it, per the precedence in `hooks/fleet-event.sh`). `Esc`/`q`/`` ` `` closes.
+(wins over it, per the precedence in `hooks/fleet-event.sh`). In a sub-lead's sub-grid
+a child set to `inherit` follows the sub-lead's own setting first, then the project's off
+switch, and otherwise wakes its sub-lead — the row says which. `Esc`/`q`/`` ` `` closes.
 
 **`r` — rename** [not upstream yet — added locally, see the fork's PR]: opens a rename
 screen for the selected session, pre-filled with its current name, fully editable

@@ -75,8 +75,12 @@ master (main checkout)
   both ways (a renamed child keeps its parent, a renamed sub-lead keeps its children) and
   `fleet-stop` clears it.
 - **Events.** A child's `done` / `need-you` go to `<sock>.<sub-lead>.inbox` — what
-  `fleet-inbox` shows when the sub-lead runs it — and wake the sub-lead (on by default; the
-  fleet's `notify-lead-off` kill switch and the child's own `-off` marker still win). The
+  `fleet-inbox` shows when the sub-lead runs it — and wake the sub-lead. Whether it wakes
+  is decided most-specific-first: the child's own setting, then the sub-lead's, then the
+  project's off switch, and with none of them set it wakes (a sub-lead spawned its workers
+  to wait for them). So a project switched off still wakes a sub-lead whose sessions are
+  switched on; the project switch keeps silencing master exactly as before. The one
+  statement of the table is the PRECEDENCE comment in `hooks/fleet-event.sh`. The
   top master sees only the rollup on the sub-lead's card, and `fleet-digest` lists children
   as `project/sub-lead/child`. A tag whose sub-lead is gone hands the child back to master.
 - **Screens.** The sub-lead's card reads `◆ working` · `2 workers · 1 needs you` (the rollup

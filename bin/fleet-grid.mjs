@@ -2241,7 +2241,14 @@ function renderSettings() {
     const badge = st === 'on'  ? `${C.green}● on     ${C.reset}`
                 : st === 'off' ? `${C.red}○ off    ${C.reset}`
                 :                `${C.grey}· inherit${C.reset}`;
-    const detail = st === 'inherit' ? `follows project · ${pOn ? 'on' : 'off'}` : 'this session';
+    // A sub-lead's child inherits from the SUB-LEAD first, and with neither saying anything
+    // it pushes unless the project is switched off (hooks/fleet-event.sh, PRECEDENCE).
+    const par = (cards[i] && cards[i].parent) || null;
+    const parSt = par ? sessPush(par) : 'inherit';
+    const detail = st !== 'inherit' ? 'this session'
+      : par && parSt !== 'inherit' ? `follows ${par} · ${parSt}`
+      : par ? `follows project · ${fs.existsSync(path.join(FLEET_DIR, SOCK + '.notify-lead-off')) ? 'off' : 'on'}`
+      : `follows project · ${pOn ? 'on' : 'off'}`;
     buf += `${selRow ? `${C.bold}${C.white}▸ ` : '   '}${badge}  ` +
            `${(selRow ? C.bold + C.white : C.reset) + padEndV(n, 22) + C.reset} ${C.dim}${detail}${C.reset}\x1b[K\n`;
   });
