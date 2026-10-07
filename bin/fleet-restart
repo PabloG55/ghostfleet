@@ -281,9 +281,16 @@ relaunch() {
   # a stale park marker would boot the fresh session "parked" (same guard fleet-open
   # and fleet-spawn use)
   rm -f "$FLEET_DIR/$sock.$slot.parked" "$FLEET_DIR/$slot.parked" 2>/dev/null
+  # CLAUDE_FLEET_FRESH=0, EXPLICITLY. A tmux server's global environment is whatever its
+  # FIRST client exported, and a fleet started from inside a session spawned as a parallel
+  # one carries CLAUDE_FLEET_FRESH=1 there (found on a live fleet). Every <agent>-here takes
+  # the fresh branch before it looks at CLAUDE_FLEET_RESUME, so the relaunch opened a BLANK
+  # conversation under the old card's name. That looks like success and is the one outcome
+  # this command exists to prevent. A per-session -e outranks the global value.
   tmux -L "$sock" new-session -d -s "$slot" -c "$cwd" \
     -e "CLAUDE_FLEET_SOCK=$sock" \
     -e "CLAUDE_FLEET_RESUME=$id" \
+    -e "CLAUDE_FLEET_FRESH=0" \
     "exec agent-here \"$slot\"" 2>/dev/null
 }
 

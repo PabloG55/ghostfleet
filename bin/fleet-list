@@ -35,11 +35,32 @@ for f in "$FLEET_DIR/$SOCK".*.asleep; do
   grep -qxF -- "$a" <<< "$names" && continue
   asleep="$asleep$a"$'\n'
 done
-[ -n "$names$asleep" ] || { echo "(no sessions on $SOCK)"; exit 0; }
+# A LOST SESSION HAS NEITHER — the machine killed it (a crash, a reboot) and left only its
+# status record and its conversation. The rule is lib/fleet-scan.mjs's lostSessions, the
+# one the grid and the digest ask, so this cannot list a different set than the cards show.
+# One line per session: name, then the record's epoch.
+lost=""
+if command -v node >/dev/null 2>&1 && tmux -V >/dev/null 2>&1; then
+  _lib="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd -P)/lib/fleet-scan.mjs"
+  _panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_id}@#{pid}' 2>/dev/null)"
+  [ -f "$_lib" ] && lost="$(LIB="$_lib" DIR="$FLEET_DIR" SOCK="$SOCK" NAMES="$names" PANES="$_panes" \
+    CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" node --input-type=module -e '
+      const { lostSessions } = await import(process.env.LIB);
+      const set = (v) => new Set((v || "").split("\n").filter(Boolean));
+      for (const l of lostSessions({ dir: process.env.DIR, sock: process.env.SOCK, live: set(process.env.NAMES),
+                                     panes: set(process.env.PANES), cfg: process.env.CFG }))
+        console.log(l.name + "\t" + l.at);
+    ' 2>/dev/null)"
+fi
+[ -n "$names$asleep$lost" ] || { echo "(no sessions on $SOCK)"; exit 0; }
 
 # 3h / 2d / 5m — the age a person reads, from the marker's first column (epoch seconds).
 age() {
   local s; s="$(head -1 "$1" 2>/dev/null | cut -f1)"
+  age_of "$s"
+}
+age_of() {
+  local s="$1"
   case "$s" in ''|*[!0-9]*) printf '?'; return ;; esac
   s=$(( $(date +%s) - s )); [ "$s" -lt 0 ] && s=0
   if   [ "$s" -ge 86400 ]; then printf '%dd' $(( s / 86400 ))
@@ -84,4 +105,12 @@ while IFS= read -r name; do
     "$(age "$FLEET_DIR/$SOCK.$name.asleep") · wake: fleet-hibernate --wake $name · clear: fleet-stop $name"
 done <<EOF
 $asleep
+EOF
+
+while IFS=$'\t' read -r name at; do
+  [ -n "$name" ] || continue
+  printf '%-22s %-10s %s\n' "$name" "lost" \
+    "$(age_of "$at") ago, no session · reopen: fleet-restart -s $SOCK --reopen $name · forget: fleet-stop -s $SOCK $name"
+done <<EOF
+$lost
 EOF

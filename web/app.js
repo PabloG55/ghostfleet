@@ -749,7 +749,7 @@ function gridProps() {
       return cardEl(m, {
         // A sub-lead's card on the top grid opens its sub-grid, as ⏎ does at the desk; the
         // same card heading its own sub-grid (no rollup there) opens the session.
-        tap: () => (c.asleep ? wakeSession(c.name) : m.rollup ? openSub(c.name) : openSession(c.name)),
+        tap: () => (c.lost ? reopenSession(c.name) : c.asleep ? wakeSession(c.name) : m.rollup ? openSub(c.name) : openSession(c.name)),
         longPress: () => askKill(c.name),
         swipeLeft: () => pauseSession(c.name),
         swipeRight: () => resumeSession(c.name),
@@ -3146,7 +3146,8 @@ function cardEl(m, h, idx) {
   // doing, and showing it beside "asleep" would read as a live session.
   //   No new chip colour — the palette is fixed, and a state that needs its own colour to be
   // understood is a state whose WORDS are wrong. The plain chip plus the line below carries it.
-  if (m.asleep) meta.append(el('span', { class: 'chip st', text: 'asleep' }));
+  if (m.lost) meta.append(el('span', { class: 'chip st', text: 'lost' }));
+  else if (m.asleep) meta.append(el('span', { class: 'chip st', text: 'asleep' }));
   else if (m.exited) meta.append(el('span', { class: 'chip st exited', text: 'exited' }));
   else if (m.statusLabel) meta.append(el('span', { class: 'chip st', text: m.statusLabel }));
   if (m.where) meta.append(el('span', { class: 'c-where', text: m.where }));
@@ -3163,7 +3164,11 @@ function cardEl(m, h, idx) {
   // THE POINT OF THE REDESIGN. Rendered as text, never as markup: this is whatever the
   // agent last said, and app.css clamps it rather than the client truncating it — so the
   // browser decides where two lines end, at whatever size the reader has chosen.
-  if (m.asleep) {
+  if (m.lost) {
+    // Same plain chip and the same "say what to do" line as asleep: no colour of its own,
+    // and above all not the need-you one, because nothing is waiting on anybody.
+    d.append(el('div', { class: 'c-msg none', text: 'lost in a crash — tap to reopen · hold to forget' }));
+  } else if (m.asleep) {
     // The card says what to DO, not what happened to it. An exited card waits for a person
     // to press enter because a person ended it; this one was ended by the fleet to give the
     // memory back, so the way home is a tap and the card is the thing that knows it.
@@ -3287,6 +3292,10 @@ function confirmSpec() {
   if (c.kind === 'kill' || c.kind === 'reclaim-kill') {
     return { cls: 'red', q: c.workers
         ? `stop sub-lead '${c.name}' AND its ${c.workers} worker${c.workers === 1 ? '' : 's'} (worktrees reclaimed where safe)?`
+        // The TUI's wording, word for word (pwa-check holds the two together): on a lost
+        // card the same verb forgets a record, and saying "kill" about a session that is
+        // already dead reads as if the conversation went with it.
+        : c.lost ? `dismiss lost session '${c.name}'? forgets the card; the conversation stays on disk`
         : `kill session '${c.name}'?`, keys: yn, buttons: [
       { label: 'y = yes', cls: 'danger', onClick: () => c.kind === 'kill' ? confirmedKill(c.name, c.workers) : askReclaimWorktree(c.name) },
       cancelBtn,
@@ -3378,11 +3387,22 @@ async function wakeSession(name) {
   openSession(name);
 }
 
+// A LOST SESSION COMES BACK THROUGH THE VERB, AND THE TAP WAITS FOR IT, for wake's reason:
+// a reopen starts a process, and opening optimistically would show an empty pane for a
+// session that never came back.
+async function reopenSession(name) {
+  if (!name) return;
+  const r = await doVerb('fleet_reopen', { project: S.project, session: name });
+  if (!r || r.ok === false) return;          // doVerb has already surfaced the reason
+  openSession(name);
+}
+
 function askKill(name) {
   if (!name || leadGuard(name, 'stopped')) return;
   // A sub-lead is asked about WITH its team: stopping it stops and reclaims its workers.
-  const w = (cardOf(name) || {}).workers;
-  S.confirm = { kind: 'kill', name, workers: (w && w.total) || 0 }; render();
+  const c = cardOf(name) || {};
+  const w = c.workers;
+  S.confirm = { kind: 'kill', name, workers: (w && w.total) || 0, lost: !!c.lost }; render();
 }
 async function confirmedKill(name, workers = 0) {
   S.confirm = null;

@@ -214,11 +214,17 @@ if [ -f "$MANIFEST" ]; then
 fi
 
 # per-session status file(s) (keyed by session_id; .slot is the session name) so
-# it disappears from fleet-list / the grid immediately
+# it disappears from fleet-list / the grid immediately — and so it is not shown as LOST
+# afterwards: a record with nobody under its name is exactly what a crash leaves, and a
+# stop is the one way the record is told apart from one. SCOPED BY SOCKET: a bare slot
+# match deleted every fleet's record of that name (each has a `master`, and worker names
+# repeat), which would erase another project's crashed session along with this one.
+# A record with no sock predates scoping and is still removed by name, as it always was.
 if command -v jq >/dev/null 2>&1; then
   for f in "$FLEET_DIR"/*.json; do
     [ -f "$f" ] || continue
-    [ "$(jq -r '.slot // empty' "$f" 2>/dev/null)" = "$SESSION" ] && rm -f "$f" 2>/dev/null
+    jq -e --arg s "$SESSION" --arg k "$SOCK" '(.slot // "") == $s and ((.sock // "") == $k or (.sock // "") == "")' \
+      "$f" >/dev/null 2>&1 && rm -f "$f" 2>/dev/null
   done
 fi
 

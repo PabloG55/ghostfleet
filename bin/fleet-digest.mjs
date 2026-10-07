@@ -17,6 +17,9 @@
 //
 //   asleep    the .asleep marker: no process at all, and no status file left to read
 //   exited    the .exited marker: agent-here is holding the pane so the card stays
+//   lost      no session, no marker, a recent record and its transcript: killed by the
+//             machine (a crash, a reboot), not stopped by a person — lib/fleet-scan.mjs's
+//             lostSessions, the same rule the grid's cards use
 //   parked    the .parked marker: the hook's last status is stale BY DESIGN, since an
 //             Escape interrupt fires no Stop
 //   <status>  the newest status file for (sock, slot): need-you, working, ready, idle
@@ -49,7 +52,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { projects, checkoutOf, BIN, self } from '../mcp/fleet-dispatch.mjs';
-import { fleetDirs, scanStatus, markersFor, inboxSince, parentsFor } from '../lib/fleet-scan.mjs';
+import { fleetDirs, scanStatus, markersFor, inboxSince, parentsFor, lostSessions } from '../lib/fleet-scan.mjs';
 
 const HOME = os.homedir();
 // ONE STAMP PER READER. "Since last look" is a question about a particular looker: a lead
@@ -89,6 +92,15 @@ function liveSessions(sock) {
   } catch { return new Set(); }        // no server on that socket: nothing live
 }
 
+// The panes on a socket, as `<pane_id>@<server pid>` — the shape the hook writes into a
+// record — so a session renamed by hand is not reported lost under its old name.
+function livePanes(sock) {
+  try {
+    return new Set(execFileSync('tmux', ['-L', sock, 'list-panes', '-a', '-F', '#{pane_id}@#{pid}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).split('\n').filter(Boolean));
+  } catch { return new Set(); }
+}
+
 // Open PRs the cache already knows. fleet-merged --prs --cached prints
 // branch<US>number<US>state and never reaches gh.
 function openPrs(t) {
@@ -103,7 +115,7 @@ function openPrs(t) {
   }).filter(p => p.branch && p.state === 'OPEN');
 }
 
-const KINDS = ['need-you', 'working', 'ready', 'idle', 'parked', 'asleep', 'exited', 'unknown'];
+const KINDS = ['need-you', 'working', 'ready', 'idle', 'parked', 'asleep', 'exited', 'lost', 'unknown'];
 
 export function buildDigest({ since, tmuxOk }) {
   const all = projects();
@@ -134,6 +146,15 @@ export function buildDigest({ since, tmuxOk }) {
       else if (k.has('parked')) status = 'parked';
       else status = rec && KINDS.includes(rec.status) ? rec.status : (rec && rec.status ? rec.status : 'unknown');
       sessions.push({ name, status, ts: rec ? rec.ts : 0, lead: name === 'master' });
+    }
+    // Lost is only asked when liveness was: with no tmux to ask, every record would read
+    // as a dead session, which is the empty-fleet lie the header above warns about.
+    if (live) {
+      for (const l of lostSessions({ dir, sock: t.sock, live, panes: livePanes(t.sock), cfg: t.cfg })) {
+        if (names.has(l.name)) continue;
+        names.add(l.name);
+        sessions.push({ name: l.name, status: 'lost', ts: l.at, lead: l.name === 'master' });
+      }
     }
     // ── NESTED LEADS: a sub-worker is shown UNDER its sub-lead ──
     // `parent` is set only when that parent is itself one of these sessions: a tag naming a
@@ -193,7 +214,7 @@ function renderText(d) {
   L.push('');
   L.push(`NEED YOU (${need.length})${need.length ? '' : ' — nobody is blocked on you'}`);
   for (const r of need) L.push(line(r));
-  for (const st of ['working', 'ready', 'idle', 'parked', 'asleep', 'exited', 'unknown']) {
+  for (const st of ['working', 'ready', 'idle', 'parked', 'asleep', 'exited', 'lost', 'unknown']) {
     const rs = rowsOf(st);
     if (!rs.length) continue;
     L.push('');
