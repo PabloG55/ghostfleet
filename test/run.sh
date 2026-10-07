@@ -1127,6 +1127,11 @@ is "...and warns what the choice costs"       "1" \
    "$(fp agent already codex 2>&1 | grep -c 'heads up' || true)"
 is "...and does not warn for the default"     "0" \
    "$(fp agent already --none 2>&1 | grep -c 'heads up' || true)"
+# THE ROW ABOVE FAILED ONE macOS LEG with no change to this command: the agent check piped
+# `fleet-agent list` into `grep -qx` under pipefail, and the SIGPIPE race (CLAUDE.md) said
+# "unknown agent 'opencode'" in 15 of 400 runs. A race is not assertable; the shape is.
+is "...and the agent check pipes into no grep -q" "0" \
+   "$(matches '^[^#]*fleet-agent list[^|]*[|] *grep -q' "$ROOT/bin/fleet-project")"
 rm -rf "$T"
 
 # ── the demo profile, built rather than hand-made ────────────────────────────
