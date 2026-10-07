@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # fleet-mod install|uninstall|status [--dry-run] [--profile DIR]...
+# fleet-mod reload [--apply] [--only SOCK[/SESSION]] [--reload-only]
 #
 # Installs ghostfleet's Claude Code mod (mods/ghostfleet) into every Claude profile the
 # fleet uses, removes it, or says where it stands. install.sh runs `install`; this is
@@ -37,7 +38,19 @@ FLEET_HOME="${CLAUDE_FLEET_HOME:-$HOME/.local/libexec/ghostfleet}"
 PLUGIN="ghostfleet@ghostfleet"
 MARKET="ghostfleet"
 
-usage() { sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# `reload` is about running SESSIONS, not profiles: it brings every live Claude that started
+# before the install onto the mod (lib/mod-reload.mjs says how, and why a restart for some).
+# Dry run by default, like every command here that touches a session.
+if [ "${1:-}" = reload ]; then
+  shift
+  _src="${BASH_SOURCE[0]}"
+  while [ -L "$_src" ]; do
+    _lnk="$(readlink "$_src")"; case "$_lnk" in /*) _src="$_lnk" ;; *) _src="$(dirname "$_src")/$_lnk" ;; esac
+  done
+  FLEET_MOD_MIN="$MIN_VERSION" exec node "$(cd "$(dirname "$_src")" && pwd)/../lib/mod-reload.mjs" "$@"
+fi
 
 ACTION="${1:-}"; [ $# -gt 0 ] && shift
 DRY=0; PROFILES=()

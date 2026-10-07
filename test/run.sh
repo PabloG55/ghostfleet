@@ -17294,6 +17294,21 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     skip "restart: no tty" "perl is not installed"
   fi
 
+  # ONE SESSION, for fleet-mod reload: --session narrows the plan to it, and --no-continue
+  # never prompts it, even when its record says a turn was running.
+  # (whichever record claims it: the no-tty run above has already corrected OLD to NEW)
+  rstatus() { local f; for f in "$RL"/fleet/*.json; do
+    [ "$(jq -r .slot "$f")" = api-fix ] && jq --arg s "$1" '.status = $s' "$f" > "$RL/w.json" && mv "$RL/w.json" "$f"; done; }
+  rstatus working
+  out="$(PATH="$RL/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --session api-fix --dry-run 2>&1)"
+  is "restart: --session plans that one session only" "api-fix" \
+     "$(awk 'NR>1 && $1=="cf-acme-api" {print $2}' <<< "$out" | tr '\n' ' ' | sed 's/ $//')"
+  is "restart: ...a working one would be told to continue" "resume-continue" "$(awk '$2=="api-fix" {print $5}' <<< "$out")"
+  out="$(PATH="$RL/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --session api-fix --no-continue --dry-run 2>&1)"
+  is "restart: ...and with --no-continue it is not" "resume-idle" "$(awk '$2=="api-fix" {print $5}' <<< "$out")"
+  is "restart: --session without a fleet is an argument error" "2" \
+     "$("$ROOT/bin/fleet-restart" --all --session api-fix >/dev/null 2>&1; echo $?)"
+  rstatus ready
   out="$(PATH="$RL/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --yes 2>&1)"
   # The relaunch returns before the pane's shell has run the stub: wait for its line, with
   # a ceiling, rather than for a clock.
@@ -17314,6 +17329,105 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   rm -rf "$RL"
 else
   skip "fleet-restart resumes the live conversation" "tmux or jq is not installed"
+fi
+
+# ── fleet-mod reload: onto the mod, touching only what is idle and empty ─────
+# A running Claude keeps the plugins it started with, so `fleet-mod install` reached only
+# sessions started after it. `fleet-mod reload` types /reload-plugins into the idle ones
+# (or, for a Claude too old to run mods, restarts them by id), and calls it done only when
+# the session's record says `source: "mod"`. Each fixture pane is a stub agent that draws
+# an input box the way Claude does, carries a process note (version, status) like the one
+# Claude writes about itself, and, for `loads`, answers /reload-plugins by writing the
+# record the mod would. Every line a stub reads is written down, so "untouched" is a file
+# that does not exist rather than a pane that looks the same.
+#   api-fix    2.1.292, idle, box empty, loads    -> reload, ✓
+#   docs-pass  2.1.292, idle, box empty, ignores  -> reload, ✗ with the reason
+#   rate-limit 2.1.292, idle, something typed     -> skipped, reads nothing
+#   master     2.1.292, Claude says busy          -> skipped, reads nothing
+#   cache-keys 2.1.284, idle                      -> restart (and never, with --reload-only)
+#   scratch    a codex session                    -> not claude
+# WATCHED GOING RED three ways: decide() without its draft rule (rate-limit planned as a
+# reload), --apply marking ✓ without reading a record (docs-pass read ✓), and a dry run that
+# acted (four rows, the untouched panes first).
+group "fleet-mod reload: idle and empty only, and done is the record"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  MR="$(cd "$(mktemp -d "$TEST_RUNS.$$.mreload.XXXXXX")" && pwd -P)"
+  mkdir -p "$MR/fleet" "$MR/cfg/plugins" "$MR/home" "$MR/wt"
+  cat > "$MR/agent" <<'STUB'
+#!/usr/bin/env bash
+dir="$1" sock="$2" slot="$3" mode="$4"
+draw() { printf '\033[2J\033[H  agent %s\n──────────────────────\n❯ %s\n──────────────────────\n' "$slot" "$1"; }
+if [ "$mode" = typed ]; then draw "half a thought"; else draw ""; fi
+while IFS= read -r line; do
+  echo "$line" >> "$dir/$slot.got"
+  if [ "$line" = /reload-plugins ] && [ "$mode" = loads ]; then
+    now="$(date +%s)"
+    printf '{"session_id":"sid-%s","sock":"%s","slot":"%s","status":"ready","ts":%s,"source":"mod","state":"ready","mod":{"pid":%s,"hb":%s000}}\n' \
+      "$slot" "$sock" "$slot" "$now" "$$" "$now" > "$dir/.t.$slot" && mv "$dir/.t.$slot" "$dir/sid-$slot.json"
+  fi
+  draw ""
+done
+STUB
+  chmod +x "$MR/agent"
+  printf '{"version":2,"plugins":{"ghostfleet@ghostfleet":[{"scope":"user"}]}}\n' > "$MR/cfg/plugins/installed_plugins.json"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s _term -c "$MR/wt" "sleep 600" 2>/dev/null
+  tmux -L cf-acme-api set-environment -g CLAUDE_CONFIG_DIR "$MR/cfg"
+  tmux -L cf-acme-api set-environment -g CLAUDE_FLEET_DIR "$MR/fleet"
+  for s in api-fix:loads docs-pass:ignores rate-limit:typed master:ignores cache-keys:ignores scratch:ignores; do
+    tmux -L cf-acme-api new-session -d -s "${s%%:*}" -c "$MR/wt" -x 100 -y 20 \
+      "exec '$MR/agent' '$MR/fleet' cf-acme-api '${s%%:*}' '${s#*:}'" 2>/dev/null
+  done
+  echo codex > "$MR/fleet/cf-acme-api.scratch.agent"
+  stubs_drawn() { local s; for s in api-fix docs-pass rate-limit master cache-keys; do pane_has cf-acme-api '❯' "$s" || return 1; done; }
+  wait_for 5 "every stub drew its box" stubs_drawn
+  is "reload: the stub panes are up" "0" "$([ "$WAITED" = timeout ] && echo "timeout: $WAIT_UNMET" || echo 0)"
+  # The note Claude writes about itself, version and status included.
+  mnote() {   # slot version status
+    CLAUDE_CONFIG_DIR="$MR/cfg" "$ROOT/test/helpers/live-session.sh" cf-acme-api "$1" "sid-$1" "$MR/wt" >/dev/null
+    local p; p="$(tmux -L cf-acme-api list-panes -t "$1" -F '#{pane_pid}' | head -1)"
+    jq --arg v "$2" --arg s "$3" '. + {version:$v, status:$s}' "$MR/cfg/sessions/$p.json" > "$MR/n" && mv "$MR/n" "$MR/cfg/sessions/$p.json"
+  }
+  mnote api-fix 2.1.292 idle; mnote docs-pass 2.1.292 idle; mnote rate-limit 2.1.292 idle
+  mnote master 2.1.292 busy; mnote cache-keys 2.1.284 idle
+  mrun() { env HOME="$MR/home" FLEET_MOD_RELOAD_WAIT=2 "$ROOT/bin/fleet-mod" reload --only cf-acme-api "$@" 2>&1; }
+  # One session's row, its columns split on the table's two-space gutters. After --apply the
+  # plan is printed first and the result last, so a result is the last match.
+  row() { grep -E "^cf-acme-api/$1 " <<< "$2" | sed -E 's/  +/ | /g'; }
+  snap() { for s in api-fix docs-pass rate-limit master cache-keys scratch; do tmux -L cf-acme-api capture-pane -p -t "$s"; done; ls -l "$MR/fleet"; }
+
+  before="$(snap)"; plan="$(mrun)"
+  is "reload: an idle 2.1.292 with an empty box is reloaded" "reload"  "$(row api-fix "$plan" | awk -F' [|] ' '{print $5}')"
+  is "reload: ...reading its version from the process note" "2.1.292" "$(row api-fix "$plan" | awk -F' [|] ' '{print $3}')"
+  is "reload: a half-typed box is skipped"    "skip: something is typed in its input box" "$(row rate-limit "$plan" | awk -F' [|] ' '{print $5}')"
+  is "reload: a busy one is skipped"          "skip: busy" "$(row master "$plan" | awk -F' [|] ' '{print $5}')"
+  is "reload: a 2.1.284 is restarted"         "restart" "$(row cache-keys "$plan" | awk -F' [|] ' '{print $5}')"
+  is "reload: a codex session is not claude"  "skip: not claude (codex)" "$(row scratch "$plan" | awk -F' [|] ' '{print $5}')"
+  is "reload: the tab is not listed"          "" "$(row _term "$plan")"
+  is "reload: the dry run touched nothing"    "$before" "$(snap)"
+  is "reload: ...and no stub read a line"     "" "$(cat "$MR"/fleet/*.got 2>/dev/null)"
+  is "reload: --reload-only never restarts"   "skip: Claude 2.1.284 needs a restart (--reload-only)" \
+     "$(row cache-keys "$(mrun --reload-only)" | awk -F' [|] ' '{print $5}')"
+  is "reload: --count is every claude not on the mod" "5" "$(env HOME="$MR/home" "$ROOT/bin/fleet-mod" reload --count --only cf-acme-api)"
+  # not installed in the profile: nothing to reload into
+  printf '{"version":2,"plugins":{}}\n' > "$MR/cfg/plugins/installed_plugins.json"
+  is "reload: a profile without the mod is told to install it" "skip: mod not installed in this profile: fleet-mod install" \
+     "$(row api-fix "$(mrun)" | awk -F' [|] ' '{print $5}')"
+  printf '{"version":2,"plugins":{"ghostfleet@ghostfleet":[{"scope":"user"}]}}\n' > "$MR/cfg/plugins/installed_plugins.json"
+
+  out="$(mrun --apply --reload-only)"; rc=$?
+  is "reload: api-fix was sent the command"   "/reload-plugins" "$(cat "$MR/fleet/api-fix.got" 2>/dev/null)"
+  is "reload: ...and is on the mod, by its record" "✓ on mod" "$(row api-fix "$out" | tail -1 | awk -F' [|] ' '{print $5}')"
+  is "reload: a reload nothing answered is ✗, with why" "✗ no mod record after 2s" "$(row docs-pass "$out" | tail -1 | awk -F' [|] ' '{print $5}')"
+  is "reload: ...and a run with a ✗ exits non-zero" "1" "$rc"
+  is "reload: rate-limit read nothing"        "no" "$([ -e "$MR/fleet/rate-limit.got" ] && echo yes || echo no)"
+  is "reload: ...and its draft is still there" "yes" "$(pane_has cf-acme-api 'half a thought' rate-limit && echo yes || echo no)"
+  is "reload: master read nothing"            "no" "$([ -e "$MR/fleet/master.got" ] && echo yes || echo no)"
+  is "reload: --count drops by the one that loaded" "4" "$(env HOME="$MR/home" "$ROOT/bin/fleet-mod" reload --count --only cf-acme-api)"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  rm -rf "$MR"
+else
+  skip "fleet-mod reload" "tmux, jq or node is not installed"
 fi
 
 # ── `exit` keeps the card ────────────────────────────────────────────────────

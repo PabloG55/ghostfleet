@@ -13,6 +13,10 @@
 #                                     which conversation that session's process is in:
 #                                     prints id<US>transcript<US>how, corrects the record,
 #                                     exits 1 when it cannot be established (fleet-restart)
+#     fleet-hibernate --composer SOCK SLOT
+#                                     what that session's input box holds: prints draft,
+#                                     empty, or none (no box drawn); changes nothing
+#                                     (fleet-mod reload)
 #
 # WHY THIS EXISTS, in numbers measured on the machine that asked for it: 64 claude sessions
 # holding 21.75 GB of physical footprint, on a 64 GB laptop that was 39.6/40.0 GB into swap
@@ -76,6 +80,7 @@ while [ $# -gt 0 ]; do
     --timeout)    WAKE_TIMEOUT="${2:?}"; shift 2 ;;
     --json)       JSON=yes; shift ;;
     --resolve)    MODE=resolve; ONLY_SOCK="${2:?--resolve needs SOCK SLOT}"; NAMED="${3:?--resolve needs SOCK SLOT}"; shift 3 ;;
+    --composer)   MODE=composer; ONLY_SOCK="${2:?--composer needs SOCK SLOT}"; NAMED="${3:?--composer needs SOCK SLOT}"; shift 3 ;;
     -s)           ONLY_SOCK="${2:?}"; shift 2 ;;
     -h|--help)    sed -n '2,15p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
     *)            echo "fleet-hibernate: unknown option '$1'" >&2; exit 2 ;;
@@ -940,6 +945,18 @@ case "$MODE" in
     [ -n "$_cwd" ] || _cwd="$(tmux -L "$ONLY_SOCK" display-message -p -t "$NAMED" '#{pane_current_path}' 2>/dev/null)"
     [ "$LIVE_ID" = "$_old" ] || correct_record "$ONLY_SOCK" "$NAMED" "$_old" "$LIVE_ID" "$LIVE_TR" "$_cwd" "$NAMED" "$FOLLOW_PREV"
     printf '%s\x1f%s\x1f%s\n' "$LIVE_ID" "$LIVE_TR" "$LIVE_HOW"
+    exit 0 ;;
+  # ── WHAT IS IN THE INPUT BOX, FOR A CALLER ABOUT TO TYPE INTO IT ──────────────
+  # fleet-mod reload types a command into an idle session, and must never do it on top of
+  # something a person has half-written or into a pane that is not at a prompt at all. The
+  # draft rule above (dim suggestions are not drafts, the glyph's no-break space) took live
+  # panes to get right, so it is asked here rather than copied. Three answers, because "no
+  # box drawn" (a dialog, a menu, a pane still starting) is a third thing, not an empty box.
+  composer)
+    if has_draft "$ONLY_SOCK" "$NAMED"; then echo draft
+    elif composer_lines "$(tmux -L "$ONLY_SOCK" capture-pane -p -t "$NAMED" 2>/dev/null)" >/dev/null 2>&1; then echo empty
+    else echo none
+    fi
     exit 0 ;;
   wake)
     SOCK="${ONLY_SOCK:-}"

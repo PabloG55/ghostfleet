@@ -600,6 +600,42 @@ fleet-mod status                # where each profile stands
 `cf-sync` is the whole deploy, as for every other file: a new session loads the new mod,
 a running one picks it up on `/reload-plugins`. No version bump, no reinstall.
 
+**Sessions that predate it.** A running Claude keeps the plugins it started with, so an
+install reaches only sessions started after it; the rest are still read from their panes.
+`fleet-mod reload` brings them onto it, across every fleet and every profile:
+
+```
+$ fleet-mod reload                 # the plan; changes nothing
+SESSION              PROFILE         VERSION  STATE    ACTION
+cf-acme-api/master   ~/.claude       2.1.284  ready    restart
+cf-acme-api/api-fix  ~/.claude       2.1.292  idle     reload
+cf-acme-web/master   ~/.claude-work  2.1.292  working  skip: busy
+cf-acme-web/scratch  ~/.claude-work  ?        -        skip: not claude (codex)
+cf-toolbox/master    ~/.claude       2.1.292  ready    already on mod
+$ fleet-mod reload --apply         # do it, then read every record back: ✓ on mod / ✗ why
+```
+
+- **reload**: `/reload-plugins` typed into the session. No turn starts, and on a new
+  enough Claude the mod is loaded and writing its record within a couple of seconds.
+- **restart**: a process older than 2.1.287 cannot run the mod whatever is on disk, because
+  it keeps the version it started with. On 2.1.284, `/reload-plugins` reads the plugin as
+  enabled and then refuses its hooks (the debug log: "hooks modules are not turned on for
+  installed plugins in this process"), with nothing in `/plugin`'s Errors tab. So it is
+  relaunched on the current binary by `fleet-restart`'s by-id path, the same conversation,
+  never `--continue`. A session whose conversation cannot be established is left alone
+  with the reason.
+- **Only an idle session with an empty input box is touched.** A turn running (or a
+  background command that will start one), a permission dialog, a question waiting on you,
+  something half-typed, a pane with no input box drawn: each is listed with why, and left
+  as it was. Neither is the session running the command.
+- **Done means the record says so.** Each session gets 15 seconds to write `source: "mod"`
+  from a live process after the action; otherwise it is ✗ with what its pane said.
+
+`--only <sock>[/<session>]` narrows it to one fleet or one session; `--reload-only` never
+restarts. The running version comes from Claude's own note about the process
+(`<profile>/sessions/<pid>.json`), or failing that the newest `version` in its transcript.
+`install.sh` says how many sessions predate the mod when there are any.
+
 **Seeing it loaded.** In a session, `/plugin` lists it as `1 mod active · ghostfleet`.
 `claude plugin list` shows it `✔ enabled`. A card whose `status_from` is `mod` is the
 proof that matters. `CLAUDE_FLEET_PANE_BUSY=off` turns the pane regex off for a grid run,

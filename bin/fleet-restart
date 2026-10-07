@@ -8,6 +8,8 @@
 #   fleet-restart --dry-run            print the plan and change nothing
 #   fleet-restart --yes                skip the confirmation
 #   fleet-restart --reopen <session>   bring back a session you typed `exit` in
+#   fleet-restart -s <socket> --session <name> [--no-continue]
+#                                      one session only; --no-continue never prompts it
 #   fleet-restart --self-test          the built-in checks (test/run.sh runs these)
 #
 # ── WHY THIS EXISTS ───────────────────────────────────────────────────────────
@@ -43,7 +45,7 @@ FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 SOCK_DIR="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
 US=$'\x1f'
 
-MODE=""; ONE=""; DRY=0; YES=0; SELFTEST=0; REOPEN=""
+MODE=""; ONE=""; DRY=0; YES=0; SELFTEST=0; REOPEN=""; ONLY_SLOT=""; NO_CONTINUE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --all)      MODE=all ;;
@@ -52,8 +54,10 @@ while [ $# -gt 0 ]; do
     --dry-run)  DRY=1 ;;
     --yes|-y)   YES=1 ;;
     --reopen)   MODE=reopen; REOPEN="${2:-}"; shift ;;
+    --session)  ONLY_SLOT="${2:-}"; shift ;;
+    --no-continue) NO_CONTINUE=1 ;;
     --self-test) SELFTEST=1 ;;
-    -h|--help)  sed -n '2,10p' "$0"; exit 0 ;;
+    -h|--help)  sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "fleet-restart: unknown argument '$1'" >&2; exit 2 ;;
   esac
   shift
@@ -234,6 +238,7 @@ plan_rows() {
       # everything this listed, every one of them reported as "no recorded
       # conversation id". Measured: 20 of 30 sessions on one socket.
       case "$slot" in _*) continue ;; esac
+      [ -z "$ONLY_SLOT" ] || [ "$slot" = "$ONLY_SLOT" ] || continue
       agent="$(agent_for "$sock" "$slot")"
       st="$(status_for "$sock" "$slot")"
       id="$(sid_for "$sock" "$slot")"
@@ -241,6 +246,11 @@ plan_rows() {
       live_id "$sock" "$slot" "$agent" "$id"; id="$RID"
       classify "$agent" "$st" "$id" "$([ "$sock" = "$SELF_SOCK" ] && [ "$slot" = "$SELF_SLOT" ] && echo 1 || echo 0)" "$RWHY"
       act="$ACT"; why="$WHY"
+      # --no-continue: the caller restarts an IDLE session for its own reason (fleet-mod
+      # reload, onto a Claude that can run the mod). A record can still say `working` from a
+      # turn whose Stop never came, and telling that session to "continue" would start a turn
+      # nobody asked for. Decided here, so the table and the snapshot say what will happen.
+      [ "$NO_CONTINUE" = 1 ] && [ "$act" = resume-continue ] && act=resume-idle
       PLAN="$PLAN$sock$US$slot$US$agent$US$st$US$act$US$id$US$cwd$US$why
 "
     done < <(tmux -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null)
@@ -532,6 +542,8 @@ fi
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 [ -n "$MODE" ] || { echo "fleet-restart: pass --all, -s <socket> or --project <name> (--help for more)" >&2; exit 2; }
+# A name is only a session inside one fleet: every fleet has a `master`.
+[ -z "$ONLY_SLOT" ] || [ "$MODE" = one ] || { echo "fleet-restart: --session needs -s <socket> or --project <name>" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "fleet-restart: jq is required to read the fleet records" >&2; exit 1; }
 
 load_records
