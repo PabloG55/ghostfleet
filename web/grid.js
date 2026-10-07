@@ -168,6 +168,11 @@ export function cardModel(card, selected = false, idx = -1) {
     // its own way home. Same shape, two different sentences, one builder — so the phone and
     // the TUI cannot disagree about which of the two happened.
     asleep: !!card.asleep,
+    // ── LOST: KILLED BY THE MACHINE, NOT BY A PERSON OR THE FLEET ────────────
+    // A crash takes the tmux server and leaves no marker; the record and the conversation
+    // survive. The tap reopens it on its own conversation (fleet_reopen), and a long press
+    // forgets it (fleet_stop) without touching the transcript.
+    lost: !!card.lost,
     // Prompts fleet-send is holding until this session's turn ends — see queuedCount in
     // bin/fleet-grid.mjs. The phone draws it as a chip; 0 draws nothing.
     queued: card.queued || 0,

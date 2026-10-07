@@ -25,6 +25,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+// LOADED, NOT IMPORTED, and for the reason preview() below spells out: test/run.sh's vis35
+// group runs a COPY of this file from a temp directory, where a static import of ../lib
+// resolves to nothing and the whole control plane fails to load. A grid that cannot start
+// is a worse bug than a lost card that is not drawn, so a missing lib means no lost cards
+// and everything else as before. cf-sync stages lib/ beside bin/, so the real install has it.
+let lostSessions = () => [];
+try { ({ lostSessions } = await import(new URL('../lib/fleet-scan.mjs', import.meta.url))); } catch {}
 
 const HOME = os.homedir();
 // Everything is scoped to one Claude config dir (= one account/profile).
@@ -922,14 +929,46 @@ function nestRows(rows, sub) {
   return head ? [head, ...rows.filter(r => r.parent === sub)] : [];
 }
 
+// ── A SESSION THE MACHINE KILLED HAS NO MARKER, AND HAD NO CARD ─────────────
+// The asleep problem again, one layer down: a crash takes the tmux server and leaves
+// nothing on disk that says "this was running", so the session dropped off every screen
+// while its record and its conversation sat there intact. lib/fleet-scan.mjs decides what
+// counts as lost (one reader, shared with the digest and fleet-list). This only says who
+// is alive: every name on the socket including tabs, plus every pane, because a session
+// renamed by hand still owns the pane its old record names.
+function livePanes() {
+  try {
+    const out = execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-panes', '-a', '-F', '#{pane_id}@#{pid}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return new Set(out.split('\n').filter(Boolean));
+  } catch { return new Set(); }
+}
+function allLiveNames() {
+  try {
+    const out = execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F', '#{session_name}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return new Set(out.split('\n').filter(Boolean));
+  } catch { return new Set(); }     // no server on this socket: that IS the crash case
+}
+function lostCards(liveNames, { lead = false, sub = '' } = {}) {
+  const names = new Set([...allLiveNames(), ...liveNames]);
+  return lostSessions({ dir: FLEET_DIR, sock: SOCK, live: names, panes: livePanes(), cfg: CFG })
+    // The lead follows the same rule the live list does: the TUI is drawn from inside it,
+    // and only --json (the phone) carries its card.
+    .filter(l => !isLead(l.name) || (lead && !sub))
+    .map(l => ({ name: l.name, cwd: l.cwd, attached: false, lostAt: l.at, lostId: l.id, lostTranscript: l.transcript }));
+}
+
 function gather({ lead = false, sub = '' } = {}) {
   const live = tmuxList();
   const liveNames = new Set(live.map(s => s.name));
   const slept = asleepSessions(liveNames);
+  const lost = lostCards(new Set([...liveNames, ...slept.map(s => s.name)]), { lead, sub });
   const sessions = [
     ...(lead && !sub ? live.filter(s => isLead(s.name)) : []),
     ...applyOrder(live.filter(s => !isLead(s.name))),
     ...slept,
+    ...lost,
   ];
   const fleet = fleetBySlot();
   const nowS = Math.floor(Date.now() / 1000);
@@ -937,7 +976,8 @@ function gather({ lead = false, sub = '' } = {}) {
   // shape and for why this one cannot reach the network.
   const prs = prNumbers();
   return nestRows(sessions.map(s => {
-    const st = fleet.get(s.name) || (s.asleepAt ? undefined : recordOfPane(s.name) || undefined);
+    const gone = !!(s.asleepAt || s.lostAt);      // no process, so no pane to ask anything
+    const st = fleet.get(s.name) || (gone ? undefined : recordOfPane(s.name) || undefined);
     const agent = agentOf(s.name);
     const folder = st?.folder || (s.cwd ? path.basename(s.cwd) : s.name);
     const branch = st?.branch || (s.cwd ? gitBranch(s.cwd) : '');
@@ -951,7 +991,8 @@ function gather({ lead = false, sub = '' } = {}) {
     // immediately: seven slept cards in one fleet all showing the same last message, each of
     // them a neighbour's. The marker records the conversation id that was live at the moment
     // of sleeping, which is exactly the one the card is about.
-    const transcript = (s.asleepId && s.cwd)
+    const transcript = s.lostTranscript ? s.lostTranscript
+      : (s.asleepId && s.cwd)
       ? path.join(CFG, 'projects', s.cwd.replace(/[^A-Za-z0-9]/g, '-'), s.asleepId + '.jsonl')
       : (st?.transcript ||
          (agent === 'codex' ? codexTranscript(s.cwd || '') : newestTranscript(s.cwd || '')));
@@ -959,15 +1000,20 @@ function gather({ lead = false, sub = '' } = {}) {
     // A slept session has no pane to read, so it is never asked. Probing one costs a tmux
     // round trip that answers "not found" and would land as "not busy", which reads as
     // ready — a card claiming a session is waiting for input when its process is gone.
-    const busy = s.asleepAt ? false : paneBusy(SOCK, s.name);
+    const busy = gone ? false : paneBusy(SOCK, s.name);
     let status = s.asleepAt ? (st?.status || 'unknown')
                             : deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
     if (!busy && isParked(s.name)) status = 'parked';     // intentionally off (fleet-pause)
+    // A LOST CARD IS NEVER need-you, AND NEVER COUNTED AS ANYTHING LIVE. Its record holds
+    // whatever the session was doing when the machine went down, and a crash mid-question
+    // would otherwise paint a dead session in the need-you red and count it in the header.
+    // `idle` is the status nobody counts, and `lost` beside it says what really happened.
+    if (s.lostAt) status = 'idle';
     // Checked last and only on a session that is neither generating nor deliberately
     // off: those two already describe it better. A limited session looks exactly like a
     // ready one — same input box, same prompt — so nothing but the pane can tell.
     let limitAt = null;
-    if (!busy && status !== 'parked') {
+    if (!busy && !gone && status !== 'parked') {
       limitAt = paneLimit(SOCK, s.name);
       if (limitAt) status = 'limit';
       // Limit wins if both are showing: it says WHY the session is stuck and when it
@@ -989,6 +1035,10 @@ function gather({ lead = false, sub = '' } = {}) {
              // that timed out leaves that shape). Both are asleep as far as a card is
              // concerned, and the second is how a live session ends up under an asleep card.
              asleep: !!s.asleepAt || isAsleep(s.name),
+             // Killed by the machine rather than by a person: a record, a transcript, and
+             // nobody under the name. Beside the status like the two above. ⏎ reopens it on
+             // its own conversation (fleet-restart --reopen), x forgets it.
+             lost: !!s.lostAt,
              queued: queuedCount(s.name),
              // null, never 0 or '': the card tests it for truth, and a PR numbered 0 does
              // not exist while an empty string would read as "no PR" in one place and as a
@@ -1215,7 +1265,7 @@ function cardLines(card, selected, idx) {
   // A SLEEPING CARD IS DRAWN IN THE GREY `parked` AND `idle` ALREADY USE. It is not
   // running, and a card lit in its last status' colour claims otherwise. No new colour:
   // this is the palette's own grey, the same one the two other not-working states take.
-  const color = card.asleep ? C.grey : meta.color;
+  const color = (card.asleep || card.lost) ? C.grey : meta.color;
   // 1-9 prefix = the digit that jumps straight to this card (see onKey)
   const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
   // A labelled card is titled by the label; an unlabelled one is unchanged.
@@ -1252,7 +1302,12 @@ function cardLines(card, selected, idx) {
   // which fits the 28 this line has with room to spare — measured, because a label that
   // fits at one width and not another is this file's most repeated bug.
   const asleepAge = card.age == null ? '' : ` ${humanAge(card.age)}`;
-  const l1 = card.asleep
+  // A LOST card keeps its age for the asleep reason: "how long ago did it die" is the
+  // question, and it decides whether you reopen or dismiss. `✕ lost 6d23h` is 12 columns
+  // and `⏎ reopen` 8, inside the 28 with room to spare.
+  const l1 = card.lost
+    ? `│ ${padEndV(twoCol(`✕ lost${asleepAge}`, '⏎ reopen', CW - 2), CW - 2)} │`
+    : card.asleep
     ? `│ ${padEndV(twoCol(`☾ asleep${asleepAge}`, '⏎ wakes', CW - 2), CW - 2)} │`
     : card.exited
     ? `│ ${padEndV(twoCol('✗ exited', '⏎ resumes', CW - 2), CW - 2)} │`
@@ -1836,7 +1891,25 @@ function leaveSub() {
 }
 // What ⏎ / a digit / a click does to a card: a sub-lead's card on the top grid opens its
 // sub-grid; everything else attaches. Returns the choice to finish with, or null.
+// ⏎ ON A LOST CARD REOPENS IT, THEN ATTACHES. It is not done in bin/ghostfleet's attach
+// path the way a wake is, because that path has nothing to read: an asleep session leaves a
+// marker holding its id, and a lost one leaves only its record. The reopen is
+// fleet-restart's own, so there is ONE way back for a dead session whether it is typed or
+// pressed: its own conversation by id, in its recorded cwd, as its recorded agent, and
+// never "the newest conversation in this folder".
+function reopenLost(name) {
+  const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-restart');
+  try {
+    execFileSync(bin, ['-s', SOCK, '--reopen', name], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, CLAUDE_FLEET_DIR: FLEET_DIR }, timeout: 20000 });
+    return true;
+  } catch (e) {
+    wtRmMsg = `could not reopen '${name}': ${String(e.stderr || e.message || '').trim().replace(/^fleet-restart: /, '')}`;
+    return false;
+  }
+}
 function cardChoice(card) {
+  if (card.lost && !reopenLost(card.name)) return null;
   if (!SUB && card.workers?.total && !card.subHead) { enterSub(card.name); return null; }
   if (SUB) { try { fs.writeFileSync(subMemFile(), SUB + '\n'); } catch {} }
   return `attach${US}${card.name}`;
@@ -1936,6 +2009,8 @@ function renderGrid() {
     // worktrees reclaimed where fleet-clean's gates say that is safe (fleet-stop --children).
     buf += `${C.red}${C.bold} stop sub-lead '${confirmKill}' AND its ${killW.total} worker${killW.total === 1 ? '' : 's'} (worktrees reclaimed where safe)?${C.reset}` +
            `${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
+  else if (confirmKill && cards.find(c => c.name === confirmKill)?.lost)
+    buf += `${C.red}${C.bold} dismiss lost session '${confirmKill}'?${C.reset}${C.red} forgets the card; the conversation stays on disk · y = yes · any other key = cancel${C.reset}\x1b[K\n`;
   else if (confirmKill)
     buf += `${C.red}${C.bold} kill session '${confirmKill}'?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
   else if (confirmWt)
@@ -2783,6 +2858,9 @@ if (JSON_OUT) {
       // trigger it. The field existed at both ends and nothing carried it between them.
       exited:   !!c.exited,
       asleep:   !!c.asleep,
+      // Killed by the machine with no marker left (lib/fleet-scan.mjs lostSessions). The
+      // phone reopens it with fleet_reopen and dismisses it with fleet_stop.
+      lost:     !!c.lost,
       // Prompts waiting for this session's turn to end (fleet-send's queue); 0 = none.
       queued:   c.queued || 0,
       attached: c.attached,
@@ -2871,7 +2949,7 @@ if (PLAIN) {
       // asleep and exited REPLACE the status here, for the reason they ride beside it on a
       // card: the nine statuses say what a RUNNING agent is doing, and neither of these is
       // running. Printing the last status it happened to hold reads as a live session.
-      clip(c.asleep ? 'asleep' : c.exited ? 'exited' : c.status, 11).padEnd(11), clip(c.msg, 44).padEnd(46), idle,
+      clip(c.lost ? 'lost' : c.asleep ? 'asleep' : c.exited ? 'exited' : c.status, 11).padEnd(11), clip(c.msg, 44).padEnd(46), idle,
     ].join(''));
   }
   if (!rows.length) console.log('(no sessions)');

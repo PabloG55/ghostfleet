@@ -10029,7 +10029,7 @@ if command -v tmux >/dev/null 2>&1; then
   # names, so a rename is a broken client, not a refactor.
   is "top-level keys"    "project profile sub counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
   is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
-  is "card keys"         "name label status folder branch agent pr msg age exited asleep queued attached sched limit_at lead parent workers sub_head" \
+  is "card keys"         "name label status folder branch agent pr msg age exited asleep lost queued attached sched limit_at lead parent workers sub_head" \
                          "$(J 'Object.keys(o.cards[0]).join(" ")')"
   is "project is the fleet's project" "demoproj" "$(J 'o.project')"
   is "profile is the profile"         "work"     "$(J 'o.profile')"
@@ -12991,6 +12991,11 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   # A GHOST: a status file for a session that is no longer on the socket.
   dg_status "$DG/home/.claude/fleet" a5 cf-acme-api gone-worker need-you "$((NOW-60))"
   dg_status "$DG/home/.claude-personal/fleet" p1 cf-personal-scratch master ready "$((NOW-5))"
+  # A LOST ONE: the ghost's shape, but with a checkout and a conversation still on disk —
+  # what a crash leaves. The ghost above (no cwd, no transcript) must stay unreported.
+  printf 'said before the crash\n' > "$DG/crashed.jsonl"
+  printf '{"session_id":"a6","sock":"cf-acme-api","slot":"crashed-task","pane":"","cwd":"%s","status":"working","transcript":"%s","ts":%s}\n' \
+    "$DG/api" "$DG/crashed.jsonl" "$((NOW-900))" > "$DG/home/.claude/fleet/a6.json"
   # asleep and parked are MARKERS beside the status, and the marker is the truth.
   : > "$DG/home/.claude-personal/fleet/cf-personal-scratch.old-task.asleep"
   : > "$DG/home/.claude/fleet/cf-acme-api.docs-pass.parked"
@@ -13011,6 +13016,7 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "...even when it is read first"             "1"   "$(grep -c 'acme-api/lint-fix *ready' <<<"$out" || true)"
   is "...and its park marker is the truth"      "1"   "$(grep -c 'docs-pass.*parked' <<<"$out" || true)"
   is "a ghost record is not reported"           "0"   "$(grep -c 'gone-worker' <<<"$out" || true)"
+  is "...but a crashed one with its conversation is, as lost" "1" "$(grep -c 'acme-api/crashed-task *lost' <<<"$out" || true)"
   is "an asleep marker is a session"            "1"   "$(grep -c 'old-task.*asleep' <<<"$out" || true)"
   is "the personal master is listed"            "1"   "$(grep -c 'scratch/master.*ready' <<<"$out" || true)"
   is "since-last lists the done"                "1"   "$(grep -c 'docs-pass.*done' <<<"$out" || true)"
@@ -13023,6 +13029,7 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   is "...and working"                           "1"   "$(jf totals.working)"
   is "...and asleep"                            "1"   "$(jf totals.asleep)"
   is "...and parked"                            "1"   "$(jf totals.parked)"
+  is "...and lost"                              "1"   "$(jf totals.lost)"
   is "...and the events since last look"        "3"   "$(jf totals.since)"
   is "...naming the profile per project"        "personal" "$(jf projects.1.profile)"
   # THE STAMP. A plain run is Jarvis looking, and advances it; --peek is the phone
@@ -15883,6 +15890,148 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   rm -rf "$GD"
 else
   skip "a hibernated session shows on the grid" "node or tmux missing"
+fi
+
+# ── a session the machine killed shows as lost, and nothing else does ───────
+# A kernel panic took every AWAKE session's tmux server with it. The asleep ones came back as
+# asleep cards because their marker is a file. The awake ones left no marker and vanished from
+# the grid, the phone and the digest, while their status records and conversations sat on disk
+# intact: about thirty of them after one reboot, and the owner noticed one only by remembering
+# its name. `fleet-restart --reopen` could already bring each one back.
+#   "Lost" is decided by elimination, so every rule here is asserted in BOTH directions: one
+# record that must be lost, and one beside it for each piece of evidence that it was ended on
+# purpose. A detector that never fires passes every "is not lost" row, and that is why the
+# first row is the positive one.
+group "a session killed by a crash shows as lost"
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  LS="$(cd "$(mktemp -d "$TEST_RUNS.$$.lost.XXXXXX")" && pwd -P)"
+  export CLAUDE_FLEET_DIR="$LS/fleet"; export CLAUDE_CONFIG_DIR="$LS/cfg"
+  mkdir -p "$CLAUDE_FLEET_DIR" "$CLAUDE_CONFIG_DIR/projects" "$LS/wt"
+  NOW="$(date +%s)"
+  # lost_rec <slot> <sid> <age-seconds> [sock] [cwd] — the hook's shape, transcript derived
+  # from cwd + id the way Claude keys it (the field is "" on a session's first record).
+  lost_rec() {
+    local slot="$1" sid="$2" age="$3" sock="${4:-cf-acme-api}" cwd="${5:-$LS/wt}" pd
+    pd="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
+    mkdir -p "$pd"
+    printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"said by '"$slot"'"}]}}' > "$pd/$sid.jsonl"
+    printf '{"session_id":"%s","sock":"%s","slot":"%s","pane":"","cwd":"%s","status":"need-you","transcript":"","ts":%s}\n' \
+      "$sid" "$sock" "$slot" "$cwd" "$((NOW-age))" > "$CLAUDE_FLEET_DIR/$sid.json"
+  }
+  lost_names() { node "$ROOT/bin/fleet-grid.mjs" cf-acme-api --json 2>/dev/null \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);
+        process.stdout.write((j.cards||[]).filter(c=>c.lost).map(c=>c.name).sort().join(","))})'; }
+
+  lost_rec api-fix      a0000000-0000-0000-0000-000000000001 7200
+  lost_rec billing-svc  a0000000-0000-0000-0000-000000000002 7200
+  printf '%s\t%s\t%s\n' "$NOW" a0000000-0000-0000-0000-000000000002 "$LS/wt" > "$CLAUDE_FLEET_DIR/cf-acme-api.billing-svc.asleep"
+  lost_rec docs-pass    a0000000-0000-0000-0000-000000000003 7200
+  : > "$CLAUDE_FLEET_DIR/cf-acme-api.docs-pass.exited"
+  lost_rec old-task     a0000000-0000-0000-0000-000000000004 $((8*86400))
+  lost_rec no-transcript a0000000-0000-0000-0000-000000000005 7200
+  rm -f "$CLAUDE_CONFIG_DIR"/projects/*/a0000000-0000-0000-0000-000000000005.jsonl
+  lost_rec reclaimed    a0000000-0000-0000-0000-000000000006 7200 cf-acme-api "$LS/gone-worktree"
+  rm -rf "$LS/gone-worktree"
+  lost_rec _term-api-fix a0000000-0000-0000-0000-000000000007 7200
+  lost_rec api-fix      a0000000-0000-0000-0000-000000000008 7200 cf-acme-web   # another fleet's
+  # ANOTHER AGENT'S RECORD: opencode keeps its transcript fleet-side and names it in the record.
+  printf '%s\n' '{"role":"assistant","text":"opencode said this"}' > "$CLAUDE_FLEET_DIR/cf-acme-api.scratch.opencode.jsonl"
+  printf '{"session_id":"ses_opencode1","sock":"cf-acme-api","slot":"scratch","pane":"","cwd":"%s","status":"ready","transcript":"%s","ts":%s}\n' \
+    "$LS/wt" "$CLAUDE_FLEET_DIR/cf-acme-api.scratch.opencode.jsonl" "$((NOW-600))" > "$CLAUDE_FLEET_DIR/ses_opencode1.json"
+  printf 'opencode\n' > "$CLAUDE_FLEET_DIR/cf-acme-api.scratch.agent"
+  # A RECORD FROM BEFORE `sock` EXISTED names no fleet, and every fleet has the slot names it
+  # could mean; it must not become a lost card anywhere.
+  lost_rec legacy-task a0000000-0000-0000-0000-00000000000c 7200
+  sed -i.bak 's/"sock":"cf-acme-api",//' "$CLAUDE_FLEET_DIR/a0000000-0000-0000-0000-00000000000c.json"
+  # The transcripts are dated from their records, as on a real machine: a crash leaves the
+  # last write and the last hook event at the same moment. A fresh mtime would read as "it
+  # moved on after the question" and clear need-you on its own, hiding the rule that must.
+  node -e 'const fs=require("fs"),p=require("path"),d=process.argv[1];for(const f of fs.readdirSync(d)){if(!f.endsWith(".json"))continue;
+    try{const j=JSON.parse(fs.readFileSync(p.join(d,f),"utf8"));const t=j.transcript||p.join(process.argv[2],"projects",j.cwd.replace(/[^A-Za-z0-9]/g,"-"),j.session_id+".jsonl");
+    fs.utimesSync(t,j.ts,j.ts)}catch{}}' "$CLAUDE_FLEET_DIR" "$CLAUDE_CONFIG_DIR"
+  tmux -L cf-acme-api kill-server 2>/dev/null       # no server at all: the crash case
+
+  is "lost: a record with no session, no marker and a transcript is lost (and other agents too)" \
+     "api-fix,scratch" "$(lost_names)"
+  is "lost: ...and it is NOT need-you, whatever its record said" "0" \
+     "$(node "$ROOT/bin/fleet-grid.mjs" cf-acme-api --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(String((JSON.parse(s).cards||[]).filter(c=>c.lost&&c.status==="need-you").length)))')"
+  is "lost: an asleep marker keeps it asleep" "true" \
+     "$(node "$ROOT/bin/fleet-grid.mjs" cf-acme-api --json 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const c=(JSON.parse(s).cards||[]).find(c=>c.name==="billing-svc");process.stdout.write(String(!!c&&c.asleep&&!c.lost))})')"
+  is "lost: the desk table says lost" "yes" \
+     "$(grep -qE '^api-fix +.* lost ' <<< "$(node "$ROOT/bin/fleet-grid.mjs" cf-acme-api --plain 2>/dev/null)" && echo yes || echo no)"
+  is "lost: fleet-list lists it, with the way back" "yes" \
+     "$(grep -qE '^api-fix +lost .*--reopen api-fix' <<< "$("$ROOT/bin/fleet-list" -s cf-acme-api 2>/dev/null)" && echo yes || echo no)"
+  is "lost: ...and nothing the grid does not" "api-fix,scratch" \
+     "$("$ROOT/bin/fleet-list" -s cf-acme-api 2>/dev/null | awk '$2=="lost"{print $1}' | sort | paste -sd, -)"
+  is "lost: the phone model carries it" "true" \
+     "$(node -e 'import("'"$ROOT"'/web/grid.js").then(G=>process.stdout.write(String(G.cardModel({name:"api-fix",lost:true}).lost)))')"
+  # The rule itself, asked of the shared reader, for the rows the grid cannot tell apart from
+  # "not there": each one flips to lost when its single piece of evidence is removed.
+  lost_lib() { node --input-type=module -e '
+    const { lostSessions } = await import(process.argv[1]);
+    const r = lostSessions({ dir: process.env.CLAUDE_FLEET_DIR, sock: "cf-acme-api", live: new Set(JSON.parse(process.argv[2])),
+                             panes: new Set(JSON.parse(process.argv[3])), cfg: process.env.CLAUDE_CONFIG_DIR, now: Number(process.argv[4]) });
+    process.stdout.write(r.map(l => l.name).sort().join(","));' "$ROOT/lib/fleet-scan.mjs" "${1:-[]}" "${2:-[]}" "${3:-$NOW}"; }
+  is "lost: a live session of that name is not lost"  "scratch" "$(lost_lib '["api-fix"]')"
+  is "lost: ...nor one whose pane is alive under another name (a raw tmux rename)" "scratch" \
+     "$(sed -i.bak 's/"pane":""/"pane":"%3@4242"/' "$CLAUDE_FLEET_DIR/a0000000-0000-0000-0000-000000000001.json"; lost_lib '[]' '["%3@4242"]')"
+  is "lost: ...and the same record IS lost once that pane is gone" "api-fix,scratch" "$(lost_lib '[]' '["%3@9999"]')"
+  is "lost: the 7-day window ends exactly there" "api-fix,old-task,scratch" "$(lost_lib '[]' '[]' "$((NOW - 2*86400))")"
+  is "lost: no liveness means nothing is lost" "" \
+     "$(node --input-type=module -e 'const {lostSessions}=await import(process.argv[1]);process.stdout.write(String(lostSessions({dir:process.env.CLAUDE_FLEET_DIR,sock:"cf-acme-api",live:null}).length||""))' "$ROOT/lib/fleet-scan.mjs")"
+  # The evidence rows, one by one: restore each missing piece and it must turn lost.
+  rm -f "$CLAUDE_FLEET_DIR/cf-acme-api.docs-pass.exited"
+  is "lost: the exited marker was the only thing keeping docs-pass off" "api-fix,docs-pass,scratch" "$(lost_lib)"
+  lost_rec no-transcript a0000000-0000-0000-0000-000000000005 7200
+  is "lost: ...and the missing transcript the only thing keeping no-transcript off" "api-fix,docs-pass,no-transcript,scratch" "$(lost_lib)"
+  mkdir -p "$LS/gone-worktree"
+  is "lost: ...and the missing worktree the only thing keeping reclaimed off" "api-fix,docs-pass,no-transcript,reclaimed,scratch" "$(lost_lib)"
+  rm -rf "$LS/gone-worktree"
+
+  # STOPPED ON PURPOSE IS NOT LOST — the real fleet-stop, with no session to kill.
+  "$ROOT/bin/fleet-stop" -s cf-acme-api docs-pass >/dev/null 2>&1
+  is "lost: fleet-stop forgets it (the record goes)" "api-fix,no-transcript,scratch" "$(lost_lib)"
+  # ...and only on ITS fleet: stopping api-fix here used to delete every fleet's api-fix record.
+  "$ROOT/bin/fleet-stop" -s cf-acme-api api-fix >/dev/null 2>&1
+  is "lost: ...and stopping one fleet's api-fix keeps another fleet's record" "yes" \
+     "$([ -f "$CLAUDE_FLEET_DIR/a0000000-0000-0000-0000-000000000008.json" ] && echo yes || echo no)"
+  is "lost: ...and never touches the transcript" "yes" \
+     "$(ls "$CLAUDE_CONFIG_DIR"/projects/*/a0000000-0000-0000-0000-000000000001.jsonl >/dev/null 2>&1 && echo yes || echo no)"
+
+  # RENAMED IS NOT LOST UNDER ITS OLD NAME — the real fleet-rename, then the crash.
+  git init -q "$LS/repo" && git -C "$LS/repo" commit -q --allow-empty -m init 2>/dev/null
+  git -C "$LS/repo" worktree add -q "$LS/acme-old" -b acme-old 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s master -c "$LS/repo" 'sleep 120'
+  tmux -L cf-acme-api new-session -d -s acme-old -c "$LS/acme-old" 'sleep 120'
+  lost_rec acme-old a0000000-0000-0000-0000-000000000009 60 cf-acme-api "$LS/acme-old"
+  # the transcript is named in the record, as on every record after the first turn
+  tr9="$(ls "$CLAUDE_CONFIG_DIR"/projects/*/a0000000-0000-0000-0000-000000000009.jsonl)"
+  sed -i.bak "s#\"transcript\":\"\"#\"transcript\":\"$tr9\"#" "$CLAUDE_FLEET_DIR/a0000000-0000-0000-0000-000000000009.json"
+  "$ROOT/bin/fleet-rename" -s cf-acme-api acme-old acme-new >/dev/null 2>&1
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  is "lost: a renamed session is lost under its NEW name only" "acme-new,no-transcript,scratch" "$(lost_lib)"
+
+  # ⏎ IS fleet-restart --reopen: its own id (not the folder's newest), its recorded cwd.
+  # A stub agent-here records what it was launched with instead of starting an agent.
+  mkdir -p "$LS/stub"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\t%%s\\t%%s\\t%%s\\n" "$1" "$CLAUDE_FLEET_RESUME" "$PWD" "${CLAUDE_FLEET_FRESH:-0}" > "%s/launched"\nsleep 60\n' "$LS" > "$LS/stub/agent-here"
+  chmod +x "$LS/stub/agent-here"
+  lost_rec api-fix a0000000-0000-0000-0000-00000000000a 300
+  lost_rec api-neighbour a0000000-0000-0000-0000-00000000000b 10    # newer, same folder
+  # FRESH=1 in the environment that starts the server: what a fleet first opened from inside a
+  # parallel session carries globally, and every launcher takes that branch before RESUME.
+  CLAUDE_FLEET_FRESH=1 PATH="$LS/stub:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen api-fix >/dev/null 2>&1
+  wait_for 5 "the stub agent to start" '[ -s "$LS/launched" ]'
+  is "lost: reopen resumes ITS OWN conversation in its recorded cwd" \
+     "api-fix	a0000000-0000-0000-0000-00000000000a	$LS/wt	0" "$(cat "$LS/launched" 2>/dev/null)"
+  is "lost: ...and the card is a live one again" "no" \
+     "$(grep -q 'api-fix' <<< "$(lost_lib "$(tmux -L cf-acme-api list-sessions -F '"#{session_name}"' 2>/dev/null | paste -sd, - | sed 's/^/[/;s/$/]/')")" && echo yes || echo no)"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+
+  unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR
+  rm -rf "$LS"
+else
+  skip "a session killed by a crash shows as lost" "node, tmux or git missing"
 fi
 
 # ── 6b. every command is actually installed ──────────────────────────────────

@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 2bfcc838bff1
+// CLIENT-HASH: 82b8eec39890
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -306,7 +306,11 @@
 // v56 says which voice the Mac reads with: the settings sheet names Kokoro as installed,
 // missing or broken, with the one command that fixes it. A phone still on v55 reads aloud
 // exactly the same — it just cannot tell you why the voice is the device's own.
-const VERSION = 'ghostfleet-v56';
+// v57 draws a LOST card (a session a crash killed): tap reopens it with fleet_reopen, a long
+// press forgets it. A phone still on v56 shows the same card as an ordinary idle one, and
+// tapping it opens a session that is not there; a daemon from before fleet_reopen refuses
+// the verb by name.
+const VERSION = 'ghostfleet-v57';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

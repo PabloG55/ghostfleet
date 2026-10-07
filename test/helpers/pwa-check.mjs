@@ -767,6 +767,8 @@ const APP = JS['app.js'];
 // assertion fails and says so, instead of the second one blaming the phone.
 const PROMPTS = [
   ["kill session '",                                          'the kill question'],
+  ["dismiss lost session '",                                  'the lost-card dismiss question'],
+  ['forgets the card; the conversation stays on disk',        "...and its promise to keep the transcript"],
   ['y = yes · any other key = cancel',                         'the y/cancel keys'],
   ['f = remove anyway · any key = cancel',                     'the force key'],
   ["remove worktree '",                                        'the worktree question'],

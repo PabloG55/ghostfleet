@@ -662,6 +662,9 @@ const TOOLS_ALLOWED = {
   // Waking starts a process; parking and un-parking do not. Same write class as the rest of
   // the session verbs, no passkey: it restores a conversation the fleet itself put to sleep.
   fleet_wake:            { fields: ['project', 'session'],                     write: true, subject: 'session' },
+  // The same class as a wake, for the same reason: it restores the session's own
+  // conversation, by id, under the name it already had — nothing new is created.
+  fleet_reopen:          { fields: ['project', 'session'],                     write: true, subject: 'session' },
   fleet_spawn:           { fields: ['project', 'name', 'branch', 'from', 'prompt', 'model', 'reuse', 'force_new'],
                            write: true, passkey: true, subject: 'name' },
   fleet_stop:            { fields: ['project', 'session', 'reclaim', 'force'], write: true, passkey: true, subject: 'session' },
