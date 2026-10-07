@@ -1205,7 +1205,8 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   SWF="$SW/.claude/fleet"; SWS=cf-billing-svc
   printf 'billing-svc\t%s\twork\n' "$SW" > "$SW/.config/ghostfleet/projects"
   # The stub agents. `claude agents --json` is claude-here asking whether the id is held by
-  # a background agent; it must answer at once, not sit on the tty.
+  # a background agent, and `codex --help` is codex-here probing for --no-daemon; both must
+  # answer at once, not sit on the tty.
   #   EACH ONE DRAWS A COMPOSER: the last line typed above two rules, the cursor between
   # them, redrawn on Enter. That is what fleet-send reads to confirm a prompt was submitted
   # (the probe leaves the box); a bare `cat` never confirms, and every switch then paid
@@ -1223,6 +1224,7 @@ STUB
     cat > "$SW/bin/$a" <<STUB
 #!/bin/sh
 [ "\$1" = agents ] && exit 0
+[ "\$1" = --help ] && exit 0
 printf '%s\n' "\$*" >> "$SW/argv.$a"
 # A real dialog first, when the test asks for one: Enter answers it, as a person would.
 # Its blank lines dropped — captured from a 40-row pane, they would scroll it out of this one.
@@ -2660,6 +2662,33 @@ else
   is "it runs cursor-agent, never 'agent'"  "0" "$(grep -cE '^[^#]*exec agent( |$)' "$ROOT/bin/cursor-here" || true)"
   rm -rf "$CU"
 fi
+
+group "codex-here runs without the shared daemon, when codex has the flag"
+# A stub codex that echoes its argv and answers --help like the build named by CXHELP:
+# 0.160.1's help lists --no-daemon, 0.146.0's does not, and passing it there would stop
+# the pane before codex drew anything. The real launcher, not a copy of its logic.
+CX="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$CX/bin" "$CX/w"
+cat > "$CX/bin/codex" <<'STUB'
+#!/bin/sh
+if [ "$1" = --help ]; then
+  echo "Usage: codex [OPTIONS] [PROMPT]"
+  [ "$CXHELP" = 0.160.1 ] && echo "      --no-daemon"
+  exit 0
+fi
+printf codex; for a; do printf " %s" "$a"; done; echo
+STUB
+chmod +x "$CX/bin/codex"
+cxh() { ( cd "$CX/w" && env -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_MODEL \
+          -u CLAUDE_FLEET_CODEX_DAEMON CLAUDE_FLEET_YOLO=0 CODEX_HOME="$CX/home" CXHELP=0.160.1 \
+          PATH="$CX/bin:$PATH" "$@" "$ROOT/bin/codex-here" w1 2>/dev/null ); }
+is "fresh: no daemon"                     "codex --no-daemon" "$(cxh CLAUDE_FLEET_FRESH=1)"
+is "resume by id: no daemon"              "codex resume abc --no-daemon" "$(cxh CLAUDE_FLEET_RESUME=abc)"
+is "resume --last: no daemon"             "codex resume --last --no-daemon" "$(cxh)"
+is "...after the other flags"             "codex --dangerously-bypass-approvals-and-sandbox --model m --no-daemon" \
+   "$(cxh CLAUDE_FLEET_FRESH=1 CLAUDE_FLEET_YOLO=1 CLAUDE_FLEET_CODEX_TRUST=0 CLAUDE_FLEET_MODEL=m)"
+is "a codex without the flag never gets it" "codex resume --last" "$(cxh CXHELP=0.146.0)"
+is "CLAUDE_FLEET_CODEX_DAEMON=1 attaches"  "codex resume --last" "$(cxh CLAUDE_FLEET_CODEX_DAEMON=1)"
+rm -rf "${CX:?}"
 
 group "fleet-review asks a DIFFERENT model, or says it cannot"
 # WHY THE REFUSALS ARE THE POINT. Exactly one of the three agents ships a non-interactive
