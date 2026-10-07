@@ -20,6 +20,20 @@ the detail, and every entry here names the PR that carries the argument.
   (`uninstall`), and `CLAUDE_FLEET_MOD=off` skips it.
   Known gap: in auto mode, a call the classifier decides reads `need-you` until it resolves.
 
+- **A lead's team above its prompt** (the mod's band, docs/OPERATIONS.md "The lead's band").
+  A master, and a worker once it has children, draws one line above its prompt:
+  `3 workers · 1 working · 1 need you · 2 PRs green`, from the fleet's status records every
+  5 s and `gh pr list` every 2 minutes, without starting a turn. It narrows with the pane and
+  keeps `need you` in view at any width. `PRs ?` when gh cannot answer. Workers draw nothing.
+
+- **The fleet's guards also run inside Claude, and fail closed there** (the mod's guards,
+  docs/OPERATIONS.md "The guards"). Jarvis's confirm-list, "a worker does not merge its own
+  PR" and "an agent does not approve another agent's tool call" are now `tool.call` hooks in
+  front of Bash and the MCP tools, with the same rules, switches and defaults. A guard that
+  cannot decide (git, gh, node or fleet-answer not answering) now **refuses** the call,
+  where the shell hook let it through; a session without the mod keeps the shell versions,
+  unchanged. One yes is still one action when both run.
+
 - **cursor (Cursor's CLI, `cursor-agent`) as a fifth agent** (docs/multi-agent-sessions.md).
   `fleet-spawn --agent cursor`, the project agent column and the phone's pickers offer it once
   `cursor-agent` is on PATH. `install.sh` writes an event bridge, the ghostfleet MCP server and

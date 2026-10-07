@@ -22,6 +22,10 @@
 #   --human-approved
 #                a HUMAN has read the permission dialog on that pane and says yes.
 #                Required to send an approving key to one; see below.
+#   --check      decide and send nothing: exit 0 when the keys would go, and the same
+#                refusal (and exit code) as a real run when they would not. The mod's
+#                tool.call hook asks this before a fleet-answer or fleet_answer runs, so the
+#                rule lives here once (mods/ghostfleet/hooks/guards.js).
 #
 # After sending it prints the tail of the pane so you can see what happened.
 # Socket defaults to $CLAUDE_FLEET_SOCK.
@@ -51,13 +55,14 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-SESSION=""; TEXT=""; NOENTER=0; KEYS=(); HUMAN=0; EXPECT=""; EXPECT_SET=0
+SESSION=""; TEXT=""; NOENTER=0; KEYS=(); HUMAN=0; EXPECT=""; EXPECT_SET=0; CHECK=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)         SOCK="${2:-}"; shift 2 ;;
     --key)      KEYS+=("${2:?}"); shift 2 ;;
     --no-enter) NOENTER=1; shift ;;
     --human-approved) HUMAN=1; shift ;;
+    --check)    CHECK=1; shift ;;
     --expect)   EXPECT="${2-}"; EXPECT_SET=1; shift 2 ;;
     --)         shift; break ;;
     -*) echo "fleet-answer: unknown option $1" >&2; exit 1 ;;
@@ -124,7 +129,7 @@ FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 CSOCK=""; CSESS=""
 _t="${TMUX:-}"; if [ -n "$_t" ]; then CSOCK="${_t%%,*}"; CSOCK="${CSOCK##*/}"
   CSESS="$(tmux -L "$CSOCK" display-message -p -t "${TMUX_PANE:-}" '#{session_name}' 2>/dev/null)"; fi
-JMARK="$HOME/.config/ghostfleet/jarvis"
+JMARK="${CLAUDE_FLEET_JARVIS_DIR:-$HOME/.config/ghostfleet}/jarvis"
 IS_JARVIS=0
 [ -n "$CSOCK" ] && [ "$CSESS" = master ] && [ -f "$JMARK" ] \
   && [ "$CSOCK" = "$(grep -m1 '^sock=' "$JMARK" 2>/dev/null | cut -d= -f2-)" ] && IS_JARVIS=1
@@ -157,6 +162,7 @@ if [ "$drc" = 11 ] && [ "$HUMAN" != 1 ] && [ "$SETTING_OK" != 1 ]; then
     fi; } >&2
   exit 3
 fi
+[ "$CHECK" = 1 ] && exit 0
 if [ "$SETTING_OK" = 1 ]; then
   { echo "fleet-answer: approving a permission dialog on '$SESSION' (\"agents can approve tool calls\" is on):"
     printf '%s\n' "$dialog" | sed 's/^/    | /'; } >&2

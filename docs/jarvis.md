@@ -79,6 +79,10 @@ These need your explicit yes, and the tools **refuse** them until one exists:
 | answering a worker's prompt for you | the MCP dispatch (`fleet_answer`), and `fleet-answer` / `tmux send-keys` in Bash |
 | more than one new worker per request | the MCP dispatch and `fleet-spawn` in Bash — the first is free |
 
+In a session running the ghostfleet mod, the same list is also enforced in front of the
+tool, for Bash and the MCP tools alike, and a check that cannot run refuses rather than
+passing (docs/OPERATIONS.md "The guards"). One yes is still one action.
+
 A refused call becomes a **proposal** with a four-letter id, and the refusal tells Jarvis to
 ask you in one line and stop. Then:
 
