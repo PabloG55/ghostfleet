@@ -4391,7 +4391,7 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   sub="$(nlgrid --json --sub api-fix)"
   is "the sub-grid is the sub-lead, then its children" "api-fix api-fix-tests" "$(jq -r '[.cards[].name] | join(" ")' <<< "$sub")"
   is "...and names whose grid it is"              "api-fix" "$(jq -r '.sub' <<< "$sub")"
-  is "the rollup reads as the owner wrote it"     "1 worker · 1 needs you" \
+  is "the rollup reads as the owner wrote it"     "1 worker · 0 working · 1 needs you" \
      "$(node -e 'import(process.argv[1]).then(G=>console.log(G.cardModel(JSON.parse(process.argv[2])).rollup))' \
         "$ROOT/web/grid.js" "$(jq -c '.cards[] | select(.name=="api-fix")' <<< "$top")" 2>/dev/null)"
 
@@ -4440,6 +4440,88 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   rm -rf "$NL"
 else
   skip "nested leads" "git/tmux/jq missing"
+fi
+
+# ── 4a10b1. a sub-lead's card is its TEAM's state ────────────────────────────
+# Seen live: a sub-lead idle at its prompt drew `✓ ready` in green on the top grid while
+# one of its workers was mid-turn, and green read as "nothing is happening there". The
+# card now takes the busiest of the lead and its whole subtree — need-you over working
+# over the lead's own — keeps the lead's own state in the age slot, and says how many
+# workers are working. Every row reads the real --json/--plain of a real fleet: panes that
+# draw a spinner or do not, status files the hook would have written, parent tags on disk.
+#   Teams, each built for one verdict and each with its other direction beside it:
+#     api-fix   ready lead, one worker WORKING             -> working
+#     then      a second worker NEEDS YOU                  -> need-you
+#     billing   ready lead, worker ready                   -> ready (nothing lifts)
+#     toolbox   ready lead -> idle sub-lead -> WORKING     -> working, two levels down
+#     scratch   ready lead, ASLEEP worker last seen working -> ready (a stale status lifts nothing)
+#     billing   also a LOST worker last seen need-you      -> still ready, nobody needs you
+#     docs-pass a plain worker                              -> untouched
+group "a sub-lead's card is its team's state"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  RU="$(cd "$(mktemp -d)" && pwd -P)"; RUF="$RU/fleet"; mkdir -p "$RUF" "$RU/home"
+  : > "$RU/t.jsonl"                       # a transcript to point at: what makes a lead `ready`
+  BUSY="printf '✻ Working… (3s · esc to interrupt)\\n'; sleep 300"
+  tmux -L cfru kill-server 2>/dev/null
+  rus() { tmux -L cfru new-session -d -s "$1" -c "$RU" "${2:-sleep 300}"; }
+  rust() { printf '{"sock":"cfru","slot":"%s","status":"%s","ts":%s,"transcript":"%s"}' \
+             "$1" "$2" "$(date +%s)" "${3-$RU/t.jsonl}" > "$RUF/$1.json"; }
+  rup() { printf '%s\n' "$2" > "$RUF/cfru.$1.parent"; }
+  rus master; rust master ready
+  rus api-fix;           rust api-fix ready
+  rus api-fix-tests "$BUSY"; rup api-fix-tests api-fix
+  rus billing-svc;       rust billing-svc ready
+  rus billing-svc-docs;  rust billing-svc-docs ready;  rup billing-svc-docs billing-svc
+  rus toolbox;           rust toolbox ready
+  rus toolbox-cli;       rust toolbox-cli idle '';     rup toolbox-cli toolbox
+  rus toolbox-cli-tests "$BUSY";                       rup toolbox-cli-tests toolbox-cli
+  rus scratch;           rust scratch ready
+  rust scratch-z working; rup scratch-z scratch
+  printf '%s\tnone\t%s\n' "$(date +%s)" "$RU" > "$RUF/cfru.scratch-z.asleep"
+  rus docs-pass;         rust docs-pass ready
+  # a LOST worker: a record a crash left, last seen asking for you, with no session and no
+  # marker. need-you and not working, because need-you is the one a record can carry on its
+  # own — working only ever comes from a pane, and a lost session has none.
+  printf '{"sock":"cfru","slot":"billing-svc-gone","status":"need-you","ts":%s,"session_id":"gone-1","cwd":"%s","transcript":"%s"}' \
+    "$(date +%s)" "$RU" "$RU/t.jsonl" > "$RUF/billing-svc-gone.json"
+  rup billing-svc-gone billing-svc
+  rugrid() { env -u TMUX -u TMUX_PANE HOME="$RU/home" CLAUDE_FLEET_DIR="$RUF" \
+               node "$ROOT/bin/fleet-grid.mjs" cfru "$@" 2>/dev/null; }
+  # the spinner panes have to have drawn before anything is read
+  wait_for 5 "the busy panes to draw" \
+    'grep -q Working <<< "$(tmux -L cfru capture-pane -p -t api-fix-tests)" && grep -q Working <<< "$(tmux -L cfru capture-pane -p -t toolbox-cli-tests)"' || true
+  ruj() { jq -r --arg n "$1" ".cards[] | select(.name==\$n) | $2" <<< "$top"; }
+  top="$(rugrid --json)"
+  is "an idle sub-lead with a working worker is a WORKING card" "ready working" "$(ruj api-fix '"\(.status) \(.team_status)"')"
+  is "...and counts the worker it is working for"   "1|1|0" "$(ruj api-fix '"\(.workers.total)|\(.workers.working)|\(.workers.need_you)"')"
+  # two cards are drawn working — api-fix and toolbox, both lifted — and no session on this
+  # top grid is working on its own; 0 here is the header still counting own status
+  is "...and the header counts the cards as drawn"  "2" "$(jq -r '.counts.working' <<< "$top")"
+  is "a sub-lead whose team is all ready stays ready" "ready" "$(ruj billing-svc '.team_status')"
+  is "...and a LOST worker last seen needing you lifts nothing" "2|0|0" "$(ruj billing-svc '"\(.workers.total)|\(.workers.working)|\(.workers.need_you)"')"
+  is "...though it is on the sub-grid, as lost"     "true" "$(rugrid --json --sub billing-svc | jq -r '.cards[] | select(.name=="billing-svc-gone") | .lost')"
+  is "a busy worker two levels down lifts the top card" "working" "$(ruj toolbox '.team_status')"
+  is "...through the sub-lead between, idle itself" "idle working" "$(rugrid --json --sub toolbox | jq -r '.cards[] | select(.name=="toolbox-cli") | "\(.status) \(.team_status)"')"
+  is "an asleep worker's stale status lifts nothing" "ready|0" "$(ruj scratch '"\(.team_status)|\(.workers.working)"')"
+  is "a plain worker's card is untouched"           "ready null" "$(ruj docs-pass '"\(.status) \(.team_status)"')"
+  is "the head of a sub-grid is drawn as itself"    "null" "$(rugrid --json --sub api-fix | jq -r '.cards[0].team_status')"
+  # --plain: the same verdict, the team on the message column, the lead's own state kept
+  pl="$(rugrid --plain)"
+  row="$(grep '^api-fix ' <<< "$pl")"
+  is "--plain draws the sub-lead working"           "1" "$([ "$(grep -c ' working ' <<< "$row")" -ge 1 ] && echo 1 || echo 0)"
+  is "...says how many are working"                 "1" "$([ "$(grep -c '1 worker · 1 working · 0 need you' <<< "$row")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and that the lead itself is waiting"       "1" "$([ "$(grep -c 'lead ✓' <<< "$row")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and leaves a plain worker's row alone"     "0" "$(grep '^docs-pass ' <<< "$pl" | grep -c 'lead ' || true)"
+  # need-you outranks working, from inside the team
+  rus api-fix-perm; rust api-fix-perm need-you ''; rup api-fix-perm api-fix
+  top="$(rugrid --json)"
+  is "a worker that needs you makes the card NEED YOU" "need-you" "$(ruj api-fix '.team_status')"
+  is "...over the one still working"                "2|1|1" "$(ruj api-fix '"\(.workers.total)|\(.workers.working)|\(.workers.need_you)"')"
+  is "...and the header counts it"                  "1" "$(jq -r '.counts.need_you' <<< "$top")"
+  tmux -L cfru kill-server 2>/dev/null
+  rm -rf "$RU"
+else
+  skip "a sub-lead's card is its team's state" "tmux/jq missing"
 fi
 
 # ── 4a10a1. an explicit socket has to be able to win ─────────────────────────
@@ -8715,7 +8797,7 @@ is "merely quoting  -> ready"        "ready" "$(lim "$FIX/claude-idle-quoting-li
 is "a plain idle pane -> ready"      "ready" "$(lim "$FIX/claude-idle.txt")"
 # the status must exist, be counted apart from ready, and never be folded into it
 is "the grid has a 'limit' status"   "1" "$(grep -ac '^  limit: ' "$ROOT/bin/fleet-grid.mjs" || true)"
-is "...counted apart from ready"     "1" "$(grep -ac "c.status === 'limit'" "$ROOT/bin/fleet-grid.mjs" || true)"
+is "...counted apart from ready"     "1" "$(grep -acE "limit: +n\('limit'\)" "$ROOT/bin/fleet-grid.mjs" || true)"
 # The stack picker reaches other projects' fleets through sessionStatuses, NOT tmuxList,
 # so hiding tabs from the grid did nothing for it — every terminal in every project
 # showed up there as an "idle" session you could stack.
@@ -10071,7 +10153,7 @@ if command -v tmux >/dev/null 2>&1; then
   # names, so a rename is a broken client, not a refactor.
   is "top-level keys"    "project profile sub counts cards free_worktrees" "$(J 'Object.keys(o).join(" ")')"
   is "counts keys"       "need_you working ready parked limit interrupted" "$(J 'Object.keys(o.counts).join(" ")')"
-  is "card keys"         "name label status folder branch agent pr msg age exited asleep lost queued attached sched limit_at lead parent workers sub_head" \
+  is "card keys"         "name label status team_status folder branch agent pr msg age exited asleep lost queued attached sched limit_at lead parent workers sub_head" \
                          "$(J 'Object.keys(o.cards[0]).join(" ")')"
   is "project is the fleet's project" "demoproj" "$(J 'o.project')"
   is "profile is the profile"         "work"     "$(J 'o.profile')"

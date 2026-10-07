@@ -632,7 +632,7 @@ async function walk(w, h) {
     const names = () => evaluate(() => [...document.querySelectorAll('#app .card .c-name')].map(n => n.textContent.trim()));
     is('grid: the sub-lead card carries its rollup', true,
        await evaluate(() => [...document.querySelectorAll('#app .card')].some(c =>
-         /cache-keys/.test(c.querySelector('.c-name')?.textContent || '') && /2 workers · 1 needs you/.test(c.textContent))));
+         /cache-keys/.test(c.querySelector('.c-name')?.textContent || '') && /2 workers · 1 working · 1 needs you/.test(c.textContent))));
     await tapCard('cache-keys'); await seeingCard('cache-keys-ttl');
     is('sub-grid: the sub-lead, then only its workers', 'cache-keys,cache-keys-ttl,cache-keys-docs', (await names()).join(','));
     await evaluate(() => { history.back(); return null; }); await seeingCard('api-fix');

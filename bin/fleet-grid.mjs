@@ -901,9 +901,65 @@ function parentOf(name) {
 }
 // The rollup a sub-lead's card carries. ONE shape on the wire and on the card: the phone's
 // web/grid.js rollupText() words it identically, and grid-parity holds the two together.
-function rollupText(w) {
+//   `width` is the room the line has. The sentence the owner asked for — `2 workers · 1
+// working · 0 need you` — is 34 columns and the desk's third line holds 28, so it gives way
+// to the same facts said shorter, in a fixed order, and the first that fits wins. The
+// phone passes no width and gets the whole sentence. Measured, not assumed: at 28 every
+// single-digit team lands on the second form (`1 of 2 working · 1 needs you` is exactly
+// 28), a two-digit one on the third, and only a three-digit team reaches the glyphs.
+function rollupText(w, width = Infinity) {
   if (!w || !w.total) return '';
-  return `${w.total} worker${w.total === 1 ? '' : 's'} · ${w.need_you} ${w.need_you === 1 ? 'needs' : 'need'} you`;
+  const n = w.need_you || 0, k = w.working || 0;
+  const need = `${n} ${n === 1 ? 'needs' : 'need'} you`;
+  const forms = [
+    `${w.total} worker${w.total === 1 ? '' : 's'} · ${k} working · ${need}`,
+    `${k} of ${w.total} working · ${need}`,
+    `${k}/${w.total} working · ${need}`,
+    `◆ ${k}/${w.total} · ● ${n}`,
+  ];
+  const fit = forms.find(f => [...f].length <= width);
+  return fit ?? forms[forms.length - 1];
+}
+// ── A SUB-LEAD'S CARD IS ITS TEAM'S STATE, not only its own pane's ──────────
+// Seen live: a sub-lead idle at its prompt drew `✓ ready` in green on the top grid while
+// one of its workers was mid-turn. Green reads as "nothing is happening there", and the
+// card was the only thing on that screen standing for the whole team — the worker itself
+// is one ⏎ away and not drawn. So the card takes the BUSIEST state in its subtree, and
+// only two states lift it: need-you over working over whatever the lead itself is. Ready,
+// parked, limit and the rest are statements about ONE session and say nothing about a
+// team, so they never travel up — a parked worker under a working lead must not turn the
+// card grey, and a lead at its usage limit is still the most useful thing to say when
+// nobody below it is busy.
+//   An asleep, exited or LOST worker does not lift anything: there is no process behind it,
+// and its status is whatever it was doing when it stopped (a lost card is held at `idle`
+// today, but that is a display choice and this must not lean on it) — a stale `working`
+// there is exactly the lie this exists to remove.
+//   Recursive, so a sub-lead under a sub-lead reports its whole team upward; `seen` is for
+// a tag loop, which no spawn writes and a hand-edited marker could.
+const LIFTS = ['need-you', 'working'];
+// THE LEAD'S OWN STATE, kept on a lifted card. A sub-lead drawn `◆ working` because a
+// worker is busy is still a session sitting at its prompt waiting for you, and hiding that
+// would trade one lie for another. So the age slot — the only place on the status line
+// that is the lead's own — says whose age it is and what the lead is doing: `lead ✓ 14s
+// ago`. The glyph rather than the word, because `⚠ interrupted` beside `● NEEDS YOU` does
+// not fit 28 columns and the glyph is the vocabulary every card already uses. `ago` is
+// the first thing to go: the status label is what twoCol() would otherwise clip.
+// '' on a card that was not lifted, which is then drawn exactly as before.
+function leadAgeText(card, label, width = Infinity) {
+  const st = card.teamStatus ?? card.team_status;
+  if (!st || st === card.status) return '';
+  const g = [...((STATUS[card.status] || STATUS.unknown).label)][0];
+  const age = card.age == null ? '' : ` ${humanAge(card.age)}`;
+  const long = `lead ${g}${age}${age ? ' ago' : ''}`;
+  return [...label].length + 1 + [...long].length <= width ? long : `lead ${g}${age}`;
+}
+function teamStatusOf(r, kidsOf, seen = new Set()) {
+  if (seen.has(r.name)) return r.status;
+  seen.add(r.name);
+  const live = x => !x.asleep && !x.exited && !x.lost;
+  const states = [live(r) ? r.status : '',
+                  ...(kidsOf.get(r.name) || []).filter(live).map(k => teamStatusOf(k, kidsOf, seen))];
+  return LIFTS.find(s => states.includes(s)) || r.status;
 }
 // Tag, count, and cut the rows to one level of the tree. `sub` names the sub-lead whose
 // grid is being drawn; without it this is the top grid.
@@ -913,19 +969,30 @@ function nestRows(rows, sub) {
     const p = r.lead ? '' : parentOf(r.name);
     r.parent = (p && p !== r.name && present.has(p)) ? p : null;
   }
+  const kidsOf = new Map();
+  for (const r of rows) if (r.parent) kidsOf.set(r.parent, [...(kidsOf.get(r.parent) || []), r]);
   for (const r of rows) {
-    const kids = rows.filter(k => k.parent === r.name);
+    const kids = kidsOf.get(r.name) || [];
+    // `teamStatus` is null on a session with no children: a plain worker's card is drawn
+    // from its own status exactly as before, and "was this card lifted" is one test.
+    r.teamStatus = kids.length ? teamStatusOf(r, kidsOf) : null;
+    // Each DIRECT worker counted by its own team's state, so the number on this card is
+    // the number of cards the sub-grid behind it will draw in that colour. Counting the
+    // whole subtree instead would let a card say `1 worker · 2 working`.
+    const live = kids.filter(k => !k.asleep && !k.exited && !k.lost);
     r.workers = kids.length ? {
       total: kids.length,
-      need_you: kids.filter(k => k.status === 'need-you').length,
-      working: kids.filter(k => k.status === 'working').length,
+      need_you: live.filter(k => teamStatusOf(k, kidsOf) === 'need-you').length,
+      working: live.filter(k => teamStatusOf(k, kidsOf) === 'working').length,
     } : null;
   }
   if (!sub) return rows.filter(r => !r.parent);
   const head = rows.find(r => r.name === sub);
   // The sub-lead heads its own grid as an ordinary card — its last message, ⏎ attaches —
-  // because the rollup it carries upstairs is this screen's header down here.
-  if (head) head.subHead = true;
+  // because the rollup it carries upstairs is this screen's header down here. Its OWN
+  // status, too: its workers are drawn beside it on this screen, and a head lifted to
+  // their colour would count a working worker twice in the header.
+  if (head) { head.subHead = true; head.teamStatus = null; }
   return head ? [head, ...rows.filter(r => r.parent === sub)] : [];
 }
 
@@ -1064,14 +1131,20 @@ function gather({ lead = false, sub = '' } = {}) {
 // `starting` and `unknown` are carried per card and counted by nobody — a consumer that
 // wants them reads cards[], and must not infer them by subtracting these six from
 // cards.length as though the remainder were one status.
+//
+// A CARD IS COUNTED AS IT IS DRAWN: a sub-lead lifted to working by its team counts as
+// working, so the header never says `0 working` over a cyan card. One count per CARD, not
+// per session — the workers behind it are not on this screen, and the sub-grid's header
+// counts them.
 function statusCounts(cards) {
+  const n = s => cards.filter(c => (c.teamStatus || c.status) === s).length;
   return {
-    need_you:    cards.filter(c => c.status === 'need-you').length,
-    working:     cards.filter(c => c.status === 'working').length,
-    ready:       cards.filter(c => c.status === 'ready').length,
-    parked:      cards.filter(c => c.status === 'parked').length,
-    limit:       cards.filter(c => c.status === 'limit').length,
-    interrupted: cards.filter(c => c.status === 'interrupted').length,
+    need_you:    n('need-you'),
+    working:     n('working'),
+    ready:       n('ready'),
+    parked:      n('parked'),
+    limit:       n('limit'),
+    interrupted: n('interrupted'),
   };
 }
 
@@ -1261,7 +1334,9 @@ function humanAge(a) {
 // ── card rendering ────────────────────────────────────────────────────────
 const CW = 30; // inner content width
 function cardLines(card, selected, idx) {
-  const meta = STATUS[card.status] || STATUS.starting;
+  // A sub-lead's card wears its TEAM's status (see teamStatusOf); every other card's
+  // teamStatus is null and this is its own status, as it always was.
+  const meta = STATUS[card.teamStatus || card.status] || STATUS.starting;
   // A SLEEPING CARD IS DRAWN IN THE GREY `parked` AND `idle` ALREADY USE. It is not
   // running, and a card lit in its last status' colour claims otherwise. No new colour:
   // this is the palette's own grey, the same one the two other not-working states take.
@@ -1280,7 +1355,7 @@ function cardLines(card, selected, idx) {
   const right = card.sched ? `@${clockLabel(card.sched.at)}`
               : card.status === 'limit' && card.limitAt ? `↻ ${card.limitAt}`
               : card.queued ? `queued: ${card.queued}`
-              : idle;   // @ = scheduled send
+              : leadAgeText(card, meta.label, CW - 2) || idle;   // @ = scheduled send
   // ── AN EXITED SESSION SAYS SO WHERE ITS STATUS WOULD BE ───────────────────
   // The agent is gone; the pane and the card are not (bin/agent-here holds them). None
   // of the nine statuses describes that — they are what a RUNNING agent is doing — and
@@ -1368,7 +1443,7 @@ function cardLines(card, selected, idx) {
   // quote had — decided by the owner over the alternatives (the count in the top rule, an
   // abbreviated status line). The message is one ⏎ away, on the sub-grid's first card.
   const l3 = card.workers?.total && !card.subHead
-    ? `│ ${padEndV(rollupText(card.workers), CW - 2)} │`
+    ? `│ ${padEndV(rollupText(card.workers, CW - 2), CW - 2)} │`
     : `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
   const bot = `╰${'─'.repeat(CW)}╯`;
   const wrap = (s, isTop) => selected
@@ -2845,6 +2920,12 @@ if (JSON_OUT) {
       // genuinely cannot tell, and a client that renders it as a confident green dot
       // undoes the one thing this status layer is for.
       status:   c.status,
+      // A sub-lead's card status: the busiest of itself and its team (teamStatusOf), which
+      // is what every card renderer and every count draws from. null on a session with no
+      // workers and on the head of a sub-grid. `status` stays the session's OWN state,
+      // because the phone's session screen reads it as "is this pane busy" — the thinking
+      // dots, the answer-a-question flow — and a lead at its prompt is not busy.
+      team_status: c.teamStatus || null,
       folder:   c.folder,
       branch:   c.branch,
       agent:    c.agent,          // the card only draws it when != claude
@@ -2949,14 +3030,19 @@ if (PLAIN) {
   console.log(['TAB', 'CHECKOUT', 'BRANCH', 'AGENT', 'STATUS', 'LAST MSG', 'IDLE']
     .map((h, i) => h.padEnd([12, 14, 26, 9, 11, 46, 8][i])).join(''));
   for (const c of rows) {
-    const idle = c.age == null ? '' : (c.status === 'working' ? `busy ${humanAge(c.age)}` : `${humanAge(c.age)} ago`);
+    // A sub-lead reads here as it does on its card: its team's status in STATUS, the team
+    // in LAST MSG, and — when the team lifted it — the lead's own state in IDLE, unclipped
+    // because it is the last column.
+    const idle = leadAgeText(c, '') ||
+      (c.age == null ? '' : (c.status === 'working' ? `busy ${humanAge(c.age)}` : `${humanAge(c.age)} ago`));
+    const msg = c.workers?.total && !c.subHead ? rollupText(c.workers) : c.msg;
     console.log([
       clip(c.name, 12).padEnd(12), clip(c.folder, 14).padEnd(14), clip(c.branch, 26).padEnd(26),
       clip(c.agent, 9).padEnd(9),
       // asleep and exited REPLACE the status here, for the reason they ride beside it on a
       // card: the nine statuses say what a RUNNING agent is doing, and neither of these is
       // running. Printing the last status it happened to hold reads as a live session.
-      clip(c.lost ? 'lost' : c.asleep ? 'asleep' : c.exited ? 'exited' : c.status, 11).padEnd(11), clip(c.msg, 44).padEnd(46), idle,
+      clip(c.lost ? 'lost' : c.asleep ? 'asleep' : c.exited ? 'exited' : (c.teamStatus || c.status), 11).padEnd(11), clip(msg, 44).padEnd(46), idle,
     ].join(''));
   }
   if (!rows.length) console.log('(no sessions)');

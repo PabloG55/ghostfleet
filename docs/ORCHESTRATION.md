@@ -83,8 +83,12 @@ master (main checkout)
   statement of the table is the PRECEDENCE comment in `hooks/fleet-event.sh`. The
   top master sees only the rollup on the sub-lead's card, and `fleet-digest` lists children
   as `project/sub-lead/child`. A tag whose sub-lead is gone hands the child back to master.
-- **Screens.** The sub-lead's card reads `◆ working` · `2 workers · 1 needs you` (the rollup
-  takes the message line; 28 columns cannot hold both). ⏎ opens its **sub-grid** — the
+- **Screens.** The sub-lead's card wears its **team's** state: the busiest of itself and
+  everything under it, need-you over working over the lead's own status, so a lead idle at
+  its prompt with a worker mid-turn draws `◆ working` and not a green `✓ ready`. The age slot
+  keeps the lead's own state (`lead ✓ 2m ago`), and the third line counts the team —
+  `1 of 2 working · 0 need you` on the desk, `2 workers · 1 working · 0 need you` on the
+  phone (the rollup takes the message line; 28 columns cannot hold both). ⏎ opens its **sub-grid** — the
   sub-lead first, then only its children; `` ` `` goes back up. The phone is the same: a tap
   on the card opens the sub-grid, back comes up (`/api/grid?sub=`, `fleet-grid.mjs --json --sub`).
 - **Two levels, exactly.** A child cannot spawn (`fleet-spawn` refuses and says

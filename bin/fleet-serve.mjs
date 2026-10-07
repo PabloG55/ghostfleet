@@ -1935,10 +1935,15 @@ function agentCatalogue() {
       const g = await gridJson(t);
       if (g.error) return { ...row, sessions: null };
       const cards = g.json.cards || [];
+      // As DRAWN: a sub-lead whose worker is mid-turn is a working card on the grid, so
+      // it is a working session here — the project card must not read `ready` over a team
+      // that is busy, any more than the grid card may. `team_status` is null on every
+      // other card.
+      const st = x => x.team_status || x.status;
       return { ...row, sessions: {
-        need: cards.filter(x => x.status === 'need-you').length,
-        working: cards.filter(x => x.status === 'working').length,
-        parked: cards.filter(x => x.status === 'parked').length,
+        need: cards.filter(x => st(x) === 'need-you').length,
+        working: cards.filter(x => st(x) === 'working').length,
+        parked: cards.filter(x => st(x) === 'parked').length,
         total: cards.length } };
     }));
     return send(res, 200, { home: HOME, projects: counted, agents: agentCatalogue() });
