@@ -697,6 +697,12 @@ function queuedCount(name) {
   } catch { return 0; }
 }
 
+// The target of a switch waiting on this session's turn (lib/agent-switch.sh), or ''.
+function pendingSwitchIn(dir, sock, name) {
+  try { const a = fs.readFileSync(path.join(dir, `${sock}.${name}.switch`), 'utf8').trim(); return /^[a-z0-9_-]+$/.test(a) ? a : ''; }
+  catch { return ''; }
+}
+function pendingSwitch(name) { return pendingSwitchIn(FLEET_DIR, SOCK, name); }
 function asleepFile(name) { return path.join(FLEET_DIR, SOCK + '.' + name + '.asleep'); }
 function isAsleep(name) {
   try { return fs.existsSync(asleepFile(name)); } catch { return false; }
@@ -1106,7 +1112,13 @@ function gather({ lead = false, sub = '' } = {}) {
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
-    return { name: s.name, cwd: s.cwd || '', folder, branch, status, age, msg: lastAssistant(transcript),
+    // A SWITCH WAITING ON THIS SESSION'S TURN (lib/agent-switch.sh) takes the message line:
+    // the session goes on looking exactly as it did until the switch fires, and "why is it
+    // still claude?" is the question the card is asked meanwhile. One field, so the phone's
+    // --json gets it from the same producer.
+    const switchingTo = pendingSwitch(s.name);
+    return { name: s.name, cwd: s.cwd || '', folder, branch, status, age,
+             msg: switchingTo ? `switching to ${switchingTo}…` : lastAssistant(transcript), switchingTo,
              // Where `status` came from: `mod` when the session's own plugin wrote it,
              // `pane` when it was read off the screen. --json only; the card looks the same.
              statusFrom: ms ? 'mod' : 'pane',
@@ -3333,6 +3345,8 @@ const SETCOLS = [
   // the NEXT master (CLAUDE_FLEET_AGENT is read once, when the tmux session is created),
   // and what the non-default choices cost. `fleet-agent caveat` composes that from the
   // registry's measured capability fields, so a fourth agent brings its own warning.
+  // "The NEXT one" was true until lib/agent-switch.sh: the running master now moves too,
+  // so what the row has to say is WHEN — see switchNote(), drawn at the row's end.
   // A RING DRAWN AS A RADIO READS AS A DEAD KEY. The other two columns are genuinely
   // binary, so `○`/`●` and a footer that says "toggle" are honest for them; this one
   // cycles through however many agents are installed, and three presses land back on
@@ -3343,7 +3357,7 @@ const SETCOLS = [
   // this column and `N/M` in the cell gives the ring a position, so the wrap is
   // something you watch happen rather than something you deduce afterwards.
   { title: 'AGENT', onColor: C.cyan, toggle: cycleAgent, verb: 'cycle',
-    blurb: `${C.dim}agent: which CLI this project's master runs — ${C.reset}${C.bold}the NEXT one${C.reset}${C.dim}; a running master keeps what it started with. ${C.reset}${C.yellow}${agentCaveats()}${C.reset}`,
+    blurb: `${C.dim}agent: which CLI this project's master runs — ${C.reset}${C.bold}the running one switches${C.reset}${C.dim} (after its current turn), and switching back resumes its conversation. ${C.reset}${C.yellow}${agentCaveats()}${C.reset}`,
     state: p => {
       const ring = agentRing();
       const a = p.agent && p.agent !== 'claude' ? p.agent : '';
@@ -3380,6 +3394,29 @@ function toggleBoundary(proj, b) {
     try { execFileSync(bin, ['set', proj.name, b, want], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); return; }
     catch {}
   }
+}
+// ── A SWITCH IN FLIGHT, OR ONE THAT DID NOT HAPPEN ─────────────────────────────
+// Cycling AGENT moves the running master (lib/agent-switch.sh), but not always at once: it
+// waits for the turn in progress, and a new agent that will not start is rolled back. Both
+// are invisible from the cell, which shows the SETTING — so the row says which of them is
+// going on, from the engine's own markers rather than a guess:
+//   <sock>.master.switch         pending target       -> "switching to codex…"
+//   <sock>.master.switch-failed  why the last one did not happen
+// and, beside a pending switch to an agent that cannot resume, whether this master has a
+// conversation on that agent it will NOT get back (codex's TUI does not flush on a pane kill).
+function switchNote(proj) {
+  const dir = path.join(profileDir(proj.profile), 'fleet'), k = path.join(dir, `${sockOf(proj)}.master`);
+  const pend = pendingSwitchIn(dir, sockOf(proj), 'master');
+  if (pend) {
+    let fresh = '';
+    try {
+      const convs = JSON.parse(fs.readFileSync(k + '.convs.json', 'utf8'));
+      if (convs && convs[pend] && agentField(pend, 'resume') !== 'yes') fresh = ` · ${pend} can't resume — starts fresh`;
+    } catch {}
+    return `${C.yellow}switching to ${pend}…${fresh}${C.reset}`;
+  }
+  try { const f = fs.readFileSync(k + '.switch-failed', 'utf8').trim(); if (f) return `${C.red}${f}${C.reset}`; } catch {}
+  return '';
 }
 // One line naming only the agents that HAVE a caveat, so a fully-capable fourth agent
 // adds nothing to it and the line stays readable at 80 columns.
@@ -3568,7 +3605,12 @@ function pRender() {
       const pdir = path.join(profileDir(it.project.profile), 'fleet');
       const want = it.project.agent || 'claude';
       const live = st.total > 0 ? (agentOfIn(pdir, sockOf(it.project), 'master') || 'claude') : '';
-      const who = (live && live !== want)
+      // A SWITCH THAT IS WAITING says so instead of the arrow: the arrow means "restart it to
+      // apply", and since lib/agent-switch.sh nothing needs restarting — it is on its way.
+      const pend = live ? pendingSwitchIn(pdir, sockOf(it.project), 'master') : '';
+      const who = pend
+        ? `${it.project.profile} · switching to ${pend}…`
+        : (live && live !== want)
         ? `${it.project.profile} · ${live}→${want}`
         : (it.project.agent ? `${it.project.profile} · ${it.project.agent}` : it.project.profile);
       return boxCard(`${i + j < 9 ? `${i + j + 1} ` : ''}${it.project.name}`, [who, it.project.path.replace(HOME, '~'), line], color, sel);
@@ -3605,7 +3647,8 @@ function pRenderSettings() {
       const txt = padEndV((st.on ? '● ' : '○ ') + st.label, 16);
       return (lit ? C.rev : '') + (st.on ? c.onColor : C.grey) + txt + C.reset;
     });
-    buf += `${cur}${padEndV('', 6)}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}\x1b[K\n`;
+    const note = switchNote(p);
+    buf += `${cur}${padEndV('', 6)}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}${note ? '  ' + note : ''}\x1b[K\n`;
   });
   // Named per column, so the key's own description changes with what it will do.
   buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ ${SETCOLS[pSetCol].verb || 'toggle'} · esc/\` back${C.reset}\x1b[K\n\x1b[J`;

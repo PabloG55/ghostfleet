@@ -291,7 +291,14 @@ agent_field() {
         # "· /" and passed its test only because the test worktree sat in /private/tmp;
         # every REAL worktree lives under $HOME, so it never matched in practice and
         # fleet-spawn silently fell back to its timed send.
-        ready_re)   printf '%s' '· [~/]' ;;
+        #   AND A SECOND SHAPE, because the first one went away. Measured 2026-10-07 on
+        # codex-cli 0.160.1: the footer is now "<branch> · <model> · Context 0% used · 5h …"
+        # and the path is drawn only in the header, with no "· " in front of it — so "· [~/]"
+        # matched NOTHING and an agent switch that waits for this read a working codex as one
+        # that never started, and rolled it back. "Context N% used" is on the footer while the
+        # composer is up (idle and mid-turn alike, which is what "a prompt will land" means),
+        # survives a 56-column pane, and is not drawn on the new trust dialog.
+        ready_re)   printf '%s' '· [~/]|· Context [0-9]+% used' ;;
         # THE ONE AGENT THAT HAS THIS. `codex review` is a documented non-interactive
         # subcommand and takes the selector itself (--base BRANCH, --uncommitted,
         # --commit SHA) plus custom instructions as a positional, so fleet-review passes

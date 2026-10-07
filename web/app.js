@@ -3799,18 +3799,18 @@ function agentPicker(current, onPick) {
   if (!cat.length) note.textContent = 'this fleet did not report which agents are installed — only the default is offered.';
   return { row, note };
 }
-// THE RUNNING MASTER DOES NOT CHANGE, said at the point of change. CLAUDE_FLEET_AGENT is
-// read once, by agent-here, when the tmux session is created; the session has already
-// exec'd its CLI and nothing re-reads the projects file. Without this line the setting
-// looks broken — you pick codex, the master keeps answering as claude, and nothing
-// anywhere explains it. Same family as every long-lived-process trap in CLAUDE.md.
-const NEXT_MASTER = 'takes effect on the NEXT master — a running one keeps the CLI it started with (stop it, or open the project again, to switch).';
+// WHEN THE RUNNING MASTER CHANGES, said at the point of change. It used to be "never":
+// CLAUDE_FLEET_AGENT is read once, when the tmux session is created, so a project set to
+// codex kept answering as claude. bin/fleet-project now moves the running master too
+// (lib/agent-switch.sh) — but after the turn it is in, which is the part a reader would
+// otherwise mistake for the setting not working.
+const NEXT_MASTER = 'the running master switches too, once its current turn ends — and switching back resumes the conversation it had (codex starts fresh).';
 
 // The edit path for a project that already exists — reached from the projects screen's
 // settings sheet, where the other two per-project settings live. A sheet of its own
 // rather than a cycling button in that row, because the option that matters most about
-// this setting is the sentence under it: what the choice costs, and that it applies to
-// the next master rather than the one that is running.
+// this setting is the sentence under it: what the choice costs, and when the running
+// master moves.
 function sheetProjectAgent(p) {
   let agent = p.agent && p.agent !== 'claude' ? p.agent : '';
   const pick = agentPicker(agent, v => { agent = v; });
@@ -3924,7 +3924,7 @@ async function sheetSettings() {
     // column per setting, and this is the same table. A project created before today —
     // which is all of them — had no edit path at all on the phone, so a picker that only
     // worked at creation time would not have answered the request.
-    kids.push(el('p', { text: "agent: which coding CLI this project's master runs. It " + NEXT_MASTER }));
+    kids.push(el('p', { text: "agent: which coding CLI this project's master runs — " + NEXT_MASTER }));
     const rows = el('div', { class: 'rows' });
     for (const p of S.projects || []) {
       rows.append(el('div', { class: 'srow' }, [
