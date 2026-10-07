@@ -1205,7 +1205,8 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   SWF="$SW/.claude/fleet"; SWS=cf-billing-svc
   printf 'billing-svc\t%s\twork\n' "$SW" > "$SW/.config/ghostfleet/projects"
   # The stub agents. `claude agents --json` is claude-here asking whether the id is held by
-  # a background agent; it must answer at once, not sit on the tty.
+  # a background agent, and `codex --help` is codex-here probing for --no-daemon; both must
+  # answer at once, not sit on the tty.
   #   EACH ONE DRAWS A COMPOSER: the last line typed above two rules, the cursor between
   # them, redrawn on Enter. That is what fleet-send reads to confirm a prompt was submitted
   # (the probe leaves the box); a bare `cat` never confirms, and every switch then paid
@@ -1223,6 +1224,7 @@ STUB
     cat > "$SW/bin/$a" <<STUB
 #!/bin/sh
 [ "\$1" = agents ] && exit 0
+[ "\$1" = --help ] && exit 0
 printf '%s\n' "\$*" >> "$SW/argv.$a"
 # A real dialog first, when the test asks for one: Enter answers it, as a person would.
 # Its blank lines dropped — captured from a 40-row pane, they would scroll it out of this one.
