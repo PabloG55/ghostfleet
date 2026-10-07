@@ -4,9 +4,54 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
-## Unreleased
+## 0.5.0 — 2026-10-07
+
+**After upgrading**, run `fleet-mod reload` to see which running Claude sessions predate the
+mod, then `fleet-mod reload --apply`: a session reaches the mod only by starting after the
+install, so everything below that lives in the mod passes the ones already running by.
 
 ### Added
+
+- **A request ledger, a one-shot gate and promises** (the mod's ledger, docs/OPERATIONS.md;
+  #26). Every message a Claude session receives, typed mid-turn or sent by the fleet, is an
+  item until the session finishes it or reports it not done; the band shows
+  `ledger · 3 open · oldest …`. At the end of a turn a small model judges which items the
+  final message answered, and if any are left the session gets **one** follow-up naming them
+  — never a second for the same item, never after Esc, never in a subagent; a judge that
+  fails lets the turn end. Commitments the agent makes ("I'll merge when green") are kept as
+  promises, shown but not chased unless `CLAUDE_FLEET_LEDGER_PROMISES=gate`. `/ledger` and
+  `fleet-ledger [session] list|close <id>|clear` read and close them by hand;
+  `CLAUDE_FLEET_LEDGER=off` and `CLAUDE_FLEET_LEDGER_GATE=off` switch it off.
+
+- **`fleet-mod reload` moves running sessions onto the mod** (#29). A dry run by default: a
+  table of every live session on every profile with its running Claude version and what it
+  would do. `--apply` sends `/reload-plugins` to one new enough to load the mod, and restarts
+  an older one onto its own conversation by id; only idle sessions with an empty input box
+  are touched, and each row ends ✓ or ✗ by the session's own status record. A process keeps
+  the version it started with, so a session older than 2.1.287 cannot load a mod by
+  reloading — measured, and the reason this restarts rather than reloads.
+
+- **Changing a project's agent switches its running master** (#27). The settings page's agent
+  column, `fleet-project agent` and the `fleet_project_agent` tool used to apply to the *next*
+  master only. Now an idle master is restarted under the new agent at once, and a busy one
+  after its turn (`switching to codex…` on its card). Each agent's conversation is kept per
+  slot, so switching back resumes the one it had — except codex, which cannot resume a killed
+  pane and says so. A new agent that fails to start rolls back to the old one, resumed. A
+  master can switch itself. Running workers keep their agent.
+
+- **The phone talks to any session, and reads to you in the Mac's voice** (#11, #12, #14).
+  Speak mode on every session, not only Jarvis; a play button on every message; Kokoro on the
+  Mac picks a voice per sentence, falling back to the phone's own voice when it is not
+  installed (`fleet-jarvis voice --kokoro --install`, or the installer's new question, #19).
+  Copy one message's markdown, and tables render as tables. Pushes are held while you are at
+  the Mac (input in the last two minutes and the screen unlocked), for up to ten minutes.
+
+- **Sessions a crash killed come back as lost cards** (#21). A session from the last seven
+  days with a record but no process and no marker shows as lost; ⏎ reopens it on its own
+  conversation and `x` dismisses it.
+
+- **`ghostfleet update`** and a folder browser that filters and makes folders (#4).
+
 
 - **A Claude Code mod that reports a session's state and budget from inside it**
   (`mods/ghostfleet`, docs/OPERATIONS.md "The mod"; Claude Code 2.1.287+). `working`,
@@ -90,6 +135,19 @@ the detail, and every entry here names the PR that carries the argument.
 
 ### Fixed
 
+- **A fleet codex session stopped on "Background server has incompatible feature settings".**
+  codex's shared background server updates itself, so it can run a newer codex than the one
+  on PATH, and every session of the older one then asked whether to restart it (#30). Fleet
+  codex sessions now start with `--no-daemon` where codex has the flag, and never restart the
+  shared server; `CLAUDE_FLEET_CODEX_DAEMON=1` restores the old behaviour. A codex stopped on
+  that dialog, or on 0.160's new folder-trust dialog, reads as need-you rather than ready (#27).
+- **The phone signed you out every 15 minutes, in use or not** (#13). The window now slides
+  with every request, survives a server restart and resumes on relaunch.
+- **A sub-lead's card showed its own pane, not its team** (#20), and **a sub-lead was not
+  nudged by its workers** — the most specific nudge setting now wins for a sub-lead, as it
+  already did for a master (#22).
+- **A cursor session read as working while idle** (#18): its busy pattern matched any glyph
+  where cursor's spinner is braille.
 - **A conversation sent to the background vanished from the fleet.** Claude Code's
   `/background` (or ← into its agent view) carries a conversation on under a new session id,
   in a process its daemon started earlier with *another* session's environment. The fleet
