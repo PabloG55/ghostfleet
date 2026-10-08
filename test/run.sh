@@ -3900,6 +3900,38 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     console.log(L.withdrawn(l.items, ['Write a haiku about rain', 'and a  limerick please']).join(','))" 2>&1)"
   is "ledger: a queued message the model never received is withdrawn; a delivered or idle one is not" "2" "$lw"
 
+  # The judge reads the WHOLE turn: a post written in block 1 and "the draft is above" in the
+  # last block reach it together, in order; a long turn loses its middle, never its start (the
+  # work) or its end (the report); a turn whose steps were missed falls back to its final
+  # text, and the last-block-only input it used to get carries no draft at all.
+  lt="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const items = [{ id: '1', text: 'done now draft the post', source: 'user' }]
+    const blocks = L.turnBlocks(['DRAFT-HERE', '', '  ', 'the draft is above'], 'the draft is above')
+    const whole = L.judgePrompt(items, blocks, { promises: 'show' })
+    const old = L.judgePrompt(items, 'the draft is above', { promises: 'show' })
+    const long = L.turnText(['START' + 'a'.repeat(9000), 'b'.repeat(9000) + 'END'], L.ANSWER_CHARS)
+    console.log([blocks.length, whole.indexOf('DRAFT-HERE') > -1 && whole.indexOf('DRAFT-HERE') < whole.indexOf('the draft is above'),
+      old.includes('DRAFT-HERE'), long.startsWith('[block 1 of 2]\nSTART'), long.endsWith('END'), /characters from the middle/.test(long),
+      long.length <= L.ANSWER_CHARS + 80, L.turnBlocks([], 'only this').join('|'), L.turnBlocks(['a', 'b'], 'c').join('|')].join(' '))" 2>&1)"
+  is "ledger: the whole turn in order; cut from the middle; missed steps fall back to the final text" \
+     "2 true false true true true true only this a|b|c" "$lt"
+
+  # An item is the person's own words: a paste is set aside and marked, a ledger reminder
+  # quoted back is never a request (alone, no item at all), and a paste with nothing typed
+  # around it is still an item.
+  lp="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const nag = L.gatePrompt([{ id: '12', text: 'done now draft the post', source: 'user' }])
+    const r = [
+      L.requestText('see this <pasted_content id=\"ab12\">a long log\n' + nag + '</pasted_content id=\"ab12\"> why'),
+      L.requestText(nag), L.requestText(nag + '\nwhy did it ask'), L.requestText('<pasted_content>a log line</pasted_content>'),
+      L.sourceOf({ text: nag, origin: { kind: 'composer' } }) || '-',
+    ]
+    console.log(r.join(' | '))" 2>&1)"
+  is "ledger: the person's words, not the paste; a quoted reminder is no request" \
+     "see this why [+ pasted text] |  | why did it ask | [pasted] a log line | -" "$lp"
+
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
   printf '{"session_id":"lg-1","sock":"cf-lgtest","slot":"w1","ts":5}' > "${LG:?}/lg-1.json"

@@ -66,6 +66,10 @@ function world(on: any, env: Record<string, string> = {}): World {
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('turn.start', (_$: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
+  // The model's side of a step: what the step's response said, as the engine returns it.
+  on('turn.step', async function* (_$: any, e: any) {
+    return { turnId: e.turnId, index: e.index, answer: e.model, toolUses: [], stopReason: 'end_turn', usage: null }
+  })
   return w
 }
 
@@ -79,6 +83,13 @@ const done = (turnId: string, answer: string, extra: object = {}) =>
   ({ answer, durationMs: 1, isAborted: false, turnId, reason: 'answer', ...extra }) as any
 // The judge runs after turn.complete resolved, unawaited: let it finish.
 const settle = async (clock: any) => { for (let i = 0; i < 6; i++) await clock.advance(10) }
+// One model step of a turn that wrote `text` ('' for a step that only called tools). The
+// stub beneath answers with the text it is handed, carried in `model`.
+const step = async ($: any, turnId: string, index: number, text: string, extra: object = {}) => {
+  const s = $.turn.step({ turnId, index, model: text, messageCount: 1, ...extra } as any)
+  for await (const _ of s) { /* drained */ }
+  return s.result
+}
 // The re-prompts the gate sent: the mod's own framed submits, not the test's typing.
 const nags = (w: World) => w.submitted.filter(e => e.origin?.kind === 'plugin' && !e.origin?.asUser)
 
@@ -360,4 +371,198 @@ test('/ledger lists, closes by hand, and clears, without a turn', async ($, on) 
   await $.command.run({ command: 'ledger', args: 'clear' } as any)
   await clock.advance(10)
   expect(rec(w).ledger.open).toBe(0)
+})
+
+// THE WHOLE TURN, NOT ITS LAST BLOCK. Measured live: a turn wrote a post in its first block,
+// ran two commands, and ended "The draft is above. The publish went through…; I'm checking
+// the registry until it does". turn.complete's `answer` is that last block alone, so the
+// judge was shown "the draft is above" with nothing above it, kept the request open, and the
+// gate re-prompted for a reply the person had just read. The stub judge answers "done" only
+// when it can SEE the draft: these rows go red if the judge is handed `e.answer` again.
+const DRAFT = 'acme-api 0.5.0 is out: faster startup, a new sync command, fewer dependencies.'
+const LAST = "The draft is above. The publish went through: the registry accepted 0.5.0 and said it may take a few minutes to show up. I'm checking the registry until it does…"
+const seesDraft = (prompt: string) => verdict(() => (prompt.includes(DRAFT) ? 'done' : 'open'))(prompt)
+
+test('a draft written early in the turn closes the request the turn ends by pointing at', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'done now draft the post')
+  await $.turn.start({ text: 'done now draft the post', turnId: 't1' })
+  w.judge = seesDraft
+  await step($, 't1', 0, DRAFT)
+  await step($, 't1', 1, '')
+  await step($, 't1', 2, '')
+  await step($, 't1', 3, LAST)
+  await $.turn.complete(done('t1', LAST))
+  await settle(clock)
+  expect(w.judged.length).toBe(1)
+  // in order, labelled, the last block named as the end
+  const p = w.judged[0]
+  expect(p.indexOf('[block 1 of 2]')).toBeGreaterThan(-1)
+  expect(p.indexOf(DRAFT)).toBeLessThan(p.indexOf(LAST))
+  expect(p).toContain('the LAST block (2 of 2)')
+  expect(book(w).items[0].state).toBe('done')
+  expect(nags(w).length).toBe(0)
+})
+
+test('a turn whose steps were missed (a reload mid-turn) is judged on its final text: the old input, and it nags', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'done now draft the post')
+  await $.turn.start({ text: 'done now draft the post', turnId: 't1' })
+  w.judge = seesDraft
+  await $.turn.complete(done('t1', LAST))
+  await settle(clock)
+  expect(w.judged[0]).not.toContain(DRAFT)
+  expect(w.judged[0]).not.toContain('[block')
+  expect(book(w).items[0].state).toBe('open')
+  expect(nags(w).length).toBe(1)
+})
+
+test("a subagent's steps are not the main turn's text, and a turn's text is not the next turn's", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'done now draft the post')
+  await $.turn.start({ text: 'done now draft the post', turnId: 't1' })
+  w.judge = seesDraft
+  await step($, 't1', 0, DRAFT, { agentId: 'agent-7' })
+  await step($, 't1', 1, LAST)
+  await $.turn.complete(done('t1', LAST))
+  await settle(clock)
+  expect(w.judged[0]).not.toContain(DRAFT)
+  expect(book(w).items[0].state).toBe('open')
+  // the next turn starts with nothing of t1's carried as its own blocks
+  await type($, 'and one more line', undefined)
+  await $.turn.start({ text: 'and one more line', turnId: 't2' })
+  await step($, 't2', 0, 'Added.')
+  await $.turn.complete(done('t2', 'Added.'))
+  await settle(clock)
+  const p = w.judged[1]
+  expect(p.slice(p.indexOf('THIS TURN'))).not.toContain(LAST)
+})
+
+// THE PERSON'S WORDS, NOT THE PASTE. Measured live, the same session: "u see what it just did"
+// + a pasted transcript (the previous turn's draft AND the gate's re-prompt) + "its like
+// reminding literally the last response". The item kept the paste's first lines; the person's
+// words fell past the excerpt; the judge read a pasted reminder as the request and the gate
+// re-prompted it. The ITEM is what the judge is shown, so that is what these rows hold.
+const REMINDER = [
+  'The ghostfleet plugin sent a message:',
+  '[ghostfleet ledger] One request is still open from this session:',
+  '12. "done now draft the post"',
+  'Finish each one now, or say for each that it is not done and why. (Asked once per item; it will not be asked again.)',
+  '',
+  "This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.",
+].join('\n')
+const PASTED = `u see what it just did <pasted_content id="ab12">⏺ ${DRAFT}\n⏺ ${LAST}\n${REMINDER}</pasted_content id="ab12"> its like reminding literally the last response`
+const itemsOf = (prompt: string) => prompt.slice(prompt.indexOf('ITEMS:'), prompt.indexOf('THIS TURN'))
+
+test('a message that is mostly a paste is the person\'s own words, the paste set aside and marked', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, PASTED)
+  await $.turn.start({ text: PASTED, turnId: 't1' })
+  expect(book(w).items[0].text).toBe('u see what it just did its like reminding literally the last response [+ pasted text]')
+  expect(book(w).items[0].turnId).toBe('t1')
+  await step($, 't1', 0, 'Yes: the gate re-prompted a request the turn had answered. Sent a fix to a worker.')
+  await $.turn.complete(done('t1', 'Yes: the gate re-prompted a request the turn had answered. Sent a fix to a worker.'))
+  await settle(clock)
+  const items = itemsOf(w.judged[0])
+  expect(items).toContain('reminding literally the last response')
+  expect(items).not.toContain(DRAFT)
+  expect(items).not.toContain('[ghostfleet ledger]')
+})
+
+test('a ledger reminder quoted back is never a request: alone it is no item, inside a message it is dropped', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, REMINDER)
+  await type($, `<pasted_content id="cd34">${REMINDER}</pasted_content id="cd34">`)
+  expect(book(w)?.items ?? []).toEqual([])
+  await type($, `${REMINDER}\nwhy did it ask this`)
+  expect(book(w).items.map((i: any) => i.text)).toEqual(['why did it ask this'])
+})
+
+test('a pasted message queued mid-turn and delivered is found in the transcript: nagged, not dropped as withdrawn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  await type($, PASTED, 't1')
+  w.heard = ['fix the login redirect', PASTED]
+  w.judge = verdict(id => (id === '1' ? 'done' : 'open'))
+  await $.turn.complete(done('t1', 'Fixed the redirect.'))
+  await settle(clock)
+  expect(book(w).items.length).toBe(2)
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('reminding literally the last response')
+  expect(nags(w)[0].text).not.toContain('One request is still open from this session:\n12.')
+})
+
+// ONE MESSAGE, TWO ITEMS. Measured live: a message sent, stopped with Esc before the turn
+// wrote anything (which rewinds it out of the conversation and hands it back to the
+// composer), then sent again with a few words added. Two prompt.submits, two items with the
+// same excerpt, and the gate named both. The transcript holds the resend alone.
+const RESENT = `<pasted_content id="ef56">acme-api 0.5.0 draft: faster startup, a sync command.</pasted_content id="ef56"> dont lead with the version, its more of a harness?? what do u think`
+
+test('a message stopped before it was answered and sent again is ONE request: the rewound copy is dropped, not nagged', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, RESENT)
+  await $.turn.start({ text: RESENT, turnId: 't1' })
+  await $.turn.complete({ ...done('t1', ''), reason: 'aborted', isAborted: true })
+  await settle(clock)
+  expect(book(w).items[0].interrupted).toBe(true)
+  // sent again as it came back (the live resend added a few words past the excerpt's head)
+  await type($, RESENT)
+  await $.turn.start({ text: RESENT, turnId: 't2' })
+  w.heard = [RESENT]
+  w.judge = verdict(() => 'open')
+  await step($, 't2', 0, 'It reads more like an orchestration layer than a harness.')
+  await $.turn.complete(done('t2', 'It reads more like an orchestration layer than a harness.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('One request is')
+  expect(book(w).items.map((i: any) => i.id)).toEqual(['2'])
+  expect(book(w).items[0].text).toContain('what do u think')
+})
+
+test('the same words sent twice and both answered are two requests; a stopped message that reached the model stays', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'run the tests')
+  await $.turn.start({ text: 'run the tests', turnId: 't1' })
+  // stopped AFTER it started answering: the message stays in the conversation
+  await $.turn.complete({ ...done('t1', 'Running…'), reason: 'aborted', isAborted: true })
+  await type($, 'run the tests')
+  await $.turn.start({ text: 'run the tests', turnId: 't2' })
+  w.heard = ['run the tests', 'run the tests']
+  w.judge = verdict(() => 'open')
+  await $.turn.complete(done('t2', 'Looking at something else.'))
+  await settle(clock)
+  expect(book(w).items.length).toBe(2)
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('2 requests are')
+})
+
+test('a long message with an inline paste keeps the words typed after it', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  const inline = `${DRAFT} ${DRAFT} ${DRAFT} ${DRAFT} dont lead with the version, its more of a harness?? what do u think`
+  await type($, inline)
+  const t = book(w).items[0].text
+  expect(t.length).toBeLessThanOrEqual(240)
+  expect(t.startsWith(DRAFT.slice(0, 60))).toBe(true)
+  expect(t.endsWith('what do u think')).toBe(true)
+  await $.turn.start({ text: inline, turnId: 't1' })
+  expect(book(w).items[0].turnId).toBe('t1')
 })
