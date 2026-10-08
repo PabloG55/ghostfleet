@@ -556,7 +556,7 @@ every Claude session and reports from there. It does three things:
 | **state** | `turn.start` → `working`, `turn.complete` → `ready` (`interrupted` on Esc), the permission dialog → `need-you` (the engine's `tool.check` verdict is `ask` on a real call), the call resolving → `working` again | the session's status record, `<fleet dir>/<session_id>.json`, merged beside the shell hook's fields as `source: "mod"`, `state`, `turnId`, `mod: { pid, hb }` |
 | **budget** | `session.measure`: the engine's own context and rate-limit figures, pushed after each turn | the same record, `usage.limits.five_hour: { pct, resets }` |
 | **`/fleet`, `/inbox`** | `fleet-list` and `fleet-inbox`, run as processes | the transcript, **without starting a turn**, mid-turn too |
-| **ledger** | `prompt.submit` (every message, mid-turn ones too) and `turn.complete` (the final text) | `<fleet dir>/<session_id>.ledger`, the record's `ledger: { open, promises, oldest_at }`, a row above the prompt; see "The request ledger" |
+| **ledger** | `prompt.submit` (every message, mid-turn ones too) and `turn.complete` (the final text) | `<fleet dir>/<session_id>.ledger`, the record's `ledger: { open, promises, oldest_at, judge_failing? }`, a row above the prompt; see "The request ledger" |
 
 **Who believes it.** The grid (and so the phone), the push/digest scan and `fleet-list`
 take the mod's `state` over the pane while it is still being written: the pid that wrote
@@ -649,8 +649,8 @@ the heartbeat stops and within 150 s every reader falls back to the pane.
 **It is code that runs with your permissions**, inside every Claude session in those
 profiles, so it is kept small enough to read (`mods/ghostfleet/hooks/register.js`) and
 does very little. It makes no network calls. Its one model call is the ledger's judge (see
-"The request ledger" below): a small model, at most once per answered turn, and only when
-there is something to judge; `CLAUDE_FLEET_LEDGER=off` removes it. Its observers
+"The request ledger" below): a small model, once per answered turn per ten open items, and
+only when there is something to judge; `CLAUDE_FLEET_LEDGER=off` removes it. Its observers
 (state, budget, the band) fail open: one that throws or overruns is skipped by the engine and
 the session carries on as if the mod were not there. Its guards fail closed (see "The
 guards" below). Every file and process call is bounded, so a stalled disk cannot hold a turn
@@ -826,17 +826,27 @@ ledger · 2 open · oldest 4m “add a changelog line” · promise: merge the P
   at the turn it started. Not items: slash commands, background-task notifications, `/loop`
   firings, and the ledger's own re-prompt. Only messages after the mod loaded: nothing is
   backfilled.
-- **What closes one.** At the end of each answered main-loop turn, one small-model call
-  (`haiku` by default) reads the open items and the turn's final text (its last 6,000
+- **What closes one.** At the end of each answered main-loop turn, a small-model call
+  (`haiku` by default) for every ten open items, newest first, reads them and the turn's final text (its last 6,000
   characters, plus up to two earlier final messages since the oldest open item) and answers
   strict JSON: each item `done`, `not-done` (said so, **with a reason**), or `open`. A part
   an item itself put off ("not in this reply") is not owed yet. A bare "go ahead" or "thanks"
   closes once the agent acted. The call is made only when something is open or the answer
-  reads like a promise, so a quiet session costs nothing.
+  reads like a promise, so a quiet session costs nothing. Measured on haiku, one call for 46
+  items needed 1,737 tokens of reply and was cut off at 700 before its closing brace; a call
+  of ten takes at most ~600, and each may now use 1,500. A reply cut off anyway still
+  applies every item it finished.
 - **Promises.** The same call lists commitments from the final message ("next I'll add the
   tests"), firm ones only: not offers that wait on the person, not "I'll keep doing X". Each
   becomes an item with `source: promise`, drawn separately on the band, and closed the same
-  way by a later turn's text.
+  way by a later turn's text. A promise the judge has been shown and kept open for five
+  judged turns closes as `stale`: nothing gates a promise, so one the session dropped would
+  otherwise sit on the band for a week. Requests never go stale.
+  One commitment is one promise: the judge is shown the open promises and names the one a
+  new phrasing restates, and a phrasing that shares most of its content words with an open
+  promise (or any earlier phrasing of it) is that promise too. What the agent asks the
+  person to do ("still waiting on you: run X") is never a promise. At most five are open;
+  a sixth closes the oldest as `stale`.
 - **The gate.** Items still open after the judge get **one** framed re-prompt ("the ghostfleet
   plugin sent a message") naming them and asking the agent to finish each or say why not.
   The bound is in the data: an item carries `gated` once asked, and is never asked again,
@@ -848,8 +858,10 @@ ledger · 2 open · oldest 4m “add a changelog line” · promise: merge the P
   session's user messages, and one that is not is dropped (resubmitted, it is a new item).
   Promises show and do not gate, unless `CLAUDE_FLEET_LEDGER_PROMISES=gate`.
 - **It fails open.** A judge that errors, times out (30 s) or answers anything but the JSON
-  asked for closes nothing and re-prompts nothing; the file keeps `judge: { ok: false, why }`
-  and the debug log says so. The ledger is a nag, not a guard.
+  asked for closes nothing and re-prompts nothing; the file keeps `judge: { ok: false, why }`,
+  the band leads with `judge failing: <why>` while anything is open, the record carries
+  `ledger.judge_failing`, and `fleet-ledger list` ends with the last judge's status, failing
+  or ok. The ledger is a nag, not a guard.
 - **By hand.** `fleet-ledger [-s socket] [session] [list|all|close <id>|clear]` from any
   shell, by session name on that fleet or by session id; `/ledger` (same verbs) inside the
   session, without a turn. `clear` closes every open item and keeps the history. Items

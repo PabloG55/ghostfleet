@@ -3932,6 +3932,37 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   is "ledger: the person's words, not the paste; a quoted reminder is no request" \
      "see this why [+ pasted text] |  | why did it ask | [pasted] a log line | -" "$lp"
 
+  # A judge never asks for more verdicts than its reply holds, and a reply cut off anyway keeps
+  # what it finished: one call for 46 items was cut off, dropped whole, and closed nothing.
+  lb="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    let l = L.emptyLedger()
+    for (let k = 0; k < 46; k++) l = L.addItem(l, { text: 'ask ' + k, at: 1000 + k, source: 'user' })
+    const b = L.judgeBatches(l.items)
+    const full = JSON.stringify({ items: ['1', '2', '3'].map(id => ({ id, status: 'done', reason: 'r' })), promises: ['x'] })
+    const cut = L.parseVerdict(full.slice(0, full.indexOf('\\\"id\\\":\\\"3')), ['1', '2', '3'])
+    const whole = L.parseVerdict(full, ['1', '2', '3'])
+    const junk = L.parseVerdict('{\\\"items\\\":[{\\\"id\\\":\\\"1\\\",\\\"sta', ['1'])
+    console.log([b.map(x => x.length).join(','), b[0][0].id, cut.items.map(i => i.id).join(''), cut.partial, cut.promises.length,
+      whole.partial === undefined, String(junk)].join(' '))" 2>&1)"
+  is "ledger: 46 items in batches of 10, newest first; a cut-off reply keeps its finished items" \
+     "10,10,10,10,6 46 12 true 0 true null" "$lb"
+  # One commitment is one promise in ANY order it arrives: the four phrasings of one follow-up
+  # measured live fold into one in all 24 orders, and three different promises stay three.
+  lp="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const four = ['read the ledgers after the next turns', 'watch for re-prompt closure in acme-api and acme-web',
+      'check acme-api, acme-web, toolbox ledgers after next turns', 'read acme-api, acme-web, toolbox ledgers after next turns']
+    const three = ['merge the PR once CI is green', 'tag the release after the merge', 'add the changelog entry for acme-web 0.6']
+    const perms = a => a.length < 2 ? [a] : a.flatMap((x, k) => perms([...a.slice(0, k), ...a.slice(k + 1)]).map(r => [x, ...r]))
+    const counts = new Set()
+    for (const order of perms(four)) {
+      let l = L.emptyLedger()
+      for (const p of [...order, ...three]) l = L.applyVerdict(l, { items: [], promises: [{ text: p }] }, { nowMs: 1, turnId: 't', promises: 'show' })
+      counts.add(l.items.filter(i => i.state === 'open').length)
+    }
+    console.log([...counts].join(','))" 2>&1)"
+  is "ledger: four phrasings of one promise fold into one in every order; three different ones stay" "4" "$lp"
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
   printf '{"session_id":"lg-1","sock":"cf-lgtest","slot":"w1","ts":5}' > "${LG:?}/lg-1.json"
@@ -3949,6 +3980,16 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   lgc w1 clear >/dev/null
   is "fleet-ledger: lists 2, closes 1, refuses a second close, clears, writes no *.json" "2 1 1 0 2" \
      "$lg1 $lg2 $lg3 $(lgc w1 | grep -c ' open ' || true) $(ls "$LG" | grep -c '\.json$' || true)"
+  # The last judge's status, both ways: a failing one names why, a working one says so.
+  lgj() { node --no-warnings --input-type=module -e "
+    import fs from 'node:fs'
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const l = L.addItem(L.emptyLedger(), { text: 'fix the login redirect', at: Date.now(), source: 'user' })
+    fs.writeFileSync('$LG/lg-1.ledger', JSON.stringify({ ...l, judge: { at: Date.now(), ...JSON.parse(process.argv[1]) } }))" "$1"
+    lgc w1 | grep '^last judge'; }
+  is "fleet-ledger: list shows the last judge's status, failing or ok" \
+     "last judge: FAILING, failed open: reply was not the JSON asked for (0s ago)|last judge: ok, 46 items in 5 calls (0s ago)" \
+     "$(lgj '{"ok":false,"why":"reply was not the JSON asked for"}')|$(lgj '{"ok":true,"items":46,"calls":5}')"
   is "fleet-ledger: a name on another socket is not this session" "1" \
      "$(env -u TMUX CLAUDE_FLEET_DIR="$LG" "$ROOT/bin/fleet-ledger" -s cf-nofleet w1 >/dev/null 2>&1; echo $?)"
   is "fleet-ledger: install.sh links it" "1" "$(grep -cE '^ +fleet-digest .*fleet-ledger' "$ROOT/install.sh" || true)"

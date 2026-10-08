@@ -16,6 +16,8 @@ export type Ledger = {
   promises: number
   oldest: LedgerItemRef | null
   oldestPromise: LedgerItemRef | null
+  /** Why the judge's last call failed open; null while it is working. */
+  judgeFailing: string | null
   asOf: number
 }
 
