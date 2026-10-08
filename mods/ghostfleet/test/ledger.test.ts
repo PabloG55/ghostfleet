@@ -504,3 +504,65 @@ test('a pasted message queued mid-turn and delivered is found in the transcript:
   expect(nags(w)[0].text).toContain('reminding literally the last response')
   expect(nags(w)[0].text).not.toContain('One request is still open from this session:\n12.')
 })
+
+// ONE MESSAGE, TWO ITEMS. Measured live: a message sent, stopped with Esc before the turn
+// wrote anything (which rewinds it out of the conversation and hands it back to the
+// composer), then sent again with a few words added. Two prompt.submits, two items with the
+// same excerpt, and the gate named both. The transcript holds the resend alone.
+const RESENT = `<pasted_content id="ef56">acme-api 0.5.0 draft: faster startup, a sync command.</pasted_content id="ef56"> dont lead with the version, its more of a harness?? what do u think`
+
+test('a message stopped before it was answered and sent again is ONE request: the rewound copy is dropped, not nagged', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, RESENT)
+  await $.turn.start({ text: RESENT, turnId: 't1' })
+  await $.turn.complete({ ...done('t1', ''), reason: 'aborted', isAborted: true })
+  await settle(clock)
+  expect(book(w).items[0].interrupted).toBe(true)
+  // sent again as it came back (the live resend added a few words past the excerpt's head)
+  await type($, RESENT)
+  await $.turn.start({ text: RESENT, turnId: 't2' })
+  w.heard = [RESENT]
+  w.judge = verdict(() => 'open')
+  await step($, 't2', 0, 'It reads more like an orchestration layer than a harness.')
+  await $.turn.complete(done('t2', 'It reads more like an orchestration layer than a harness.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('One request is')
+  expect(book(w).items.map((i: any) => i.id)).toEqual(['2'])
+  expect(book(w).items[0].text).toContain('what do u think')
+})
+
+test('the same words sent twice and both answered are two requests; a stopped message that reached the model stays', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'run the tests')
+  await $.turn.start({ text: 'run the tests', turnId: 't1' })
+  // stopped AFTER it started answering: the message stays in the conversation
+  await $.turn.complete({ ...done('t1', 'Running…'), reason: 'aborted', isAborted: true })
+  await type($, 'run the tests')
+  await $.turn.start({ text: 'run the tests', turnId: 't2' })
+  w.heard = ['run the tests', 'run the tests']
+  w.judge = verdict(() => 'open')
+  await $.turn.complete(done('t2', 'Looking at something else.'))
+  await settle(clock)
+  expect(book(w).items.length).toBe(2)
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('2 requests are')
+})
+
+test('a long message with an inline paste keeps the words typed after it', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  const inline = `${DRAFT} ${DRAFT} ${DRAFT} ${DRAFT} dont lead with the version, its more of a harness?? what do u think`
+  await type($, inline)
+  const t = book(w).items[0].text
+  expect(t.length).toBeLessThanOrEqual(240)
+  expect(t.startsWith(DRAFT.slice(0, 60))).toBe(true)
+  expect(t.endsWith('what do u think')).toBe(true)
+  await $.turn.start({ text: inline, turnId: 't1' })
+  expect(book(w).items[0].turnId).toBe('t1')
+})

@@ -11,6 +11,8 @@
 //            fleet    a prompt fleet-send handed to the mod (DELIVERY)
 //            promise  a commitment the agent made in a final message ("I'll merge when green")
 //   gated    true once the gate has re-prompted about it: at most once per item, ever
+//   queued   typed over a running turn; interrupted: its turn was stopped (Esc). Either may
+//            never have reached the model, and the gate asks the transcript first
 //   closedBy judge | hand
 
 export const LEDGER_VERSION = 1
@@ -78,6 +80,17 @@ export function requestText(text) {
   return pasted ? `[pasted] ${pasted}` : ''
 }
 
+// A request as an item keeps its start AND its end. A paste the composer shows inline carries
+// no marker, and the person's own words come after it: measured live, a three-line draft and
+// "what do u think" was kept as the draft's opening lines, the judge read the request as
+// "write the draft", and an answered question was re-prompted. The start stays the longer
+// part (the withdrawn check matches on an item's opening words).
+const ITEM_HEAD = 140
+export function requestItem(text) {
+  const t = requestText(text)
+  return t.length > EXCERPT ? `${t.slice(0, ITEM_HEAD - 1)}… ${t.slice(-(EXCERPT - ITEM_HEAD - 1))}` : t
+}
+
 // Which submitted prompts are requests, and whose. Only the person's: composer, the phone's
 // bridge, and what the engine cannot attest (`unclassified`). This mod's own submits are
 // never read here: a fleet-send handoff is recorded by DELIVERY at the turn it started (it
@@ -95,7 +108,7 @@ export function sourceOf(e) {
 // A request submitted idle names its turn at that turn's start, which carries its text.
 export function stampTurn(ledger, text, turnId) {
   const t = String(text || '').trim()
-  const i = ledger.items.findIndex(x => x.state === 'open' && !x.turnId && x.source !== 'promise' && x.text === excerpt(requestText(t)))
+  const i = ledger.items.findIndex(x => x.state === 'open' && !x.turnId && x.source !== 'promise' && x.text === requestItem(t))
   if (!t || i < 0) return null
   return { ...ledger, items: ledger.items.map((x, k) => (k === i ? { ...x, turnId } : x)) }
 }
@@ -104,7 +117,7 @@ export function stampTurn(ledger, text, turnId) {
 // queue (Up edits it) and never reach the model; see `withdrawn` below.
 export function addItem(ledger, { text, at, turnId, source, queued }) {
   const seq = (Number(ledger.seq) || 0) + 1
-  const item = { id: String(seq), text: excerpt(source === 'promise' ? text : requestText(text)), at, ...(turnId ? { turnId } : {}), state: 'open', source, ...(queued ? { queued: true } : {}) }
+  const item = { id: String(seq), text: source === 'promise' ? excerpt(text) : requestItem(text), at, ...(turnId ? { turnId } : {}), state: 'open', source, ...(queued ? { queued: true } : {}) }
   const items = [...ledger.items, item].slice(-KEEP_ITEMS)
   return { ...ledger, seq, items }
 }
@@ -189,6 +202,7 @@ export function judgePrompt(items, turn, { promises, earlier = [] }) {
     '- "not-done": the agent explicitly says THIS item was not or cannot be done AND gives a reason. A refusal with no reason, or one that does not say which request it means, is "open".',
     '- "open": anything else: not mentioned, only acknowledged, or partly done with no report of why the rest is waiting.',
     'Judge an item by what it asked for NOW: a part it explicitly put off ("not in this reply", "later", "after X") is not owed yet.',
+    'An item may open with material the person pasted with no marker (a draft, a log, a transcript) and end with their own words: judge what THOSE words ask. A question ("what do you think?") is "done" once the agent answers it; an answer that ends by offering more or asking something back does not reopen it.',
     'An item is the person\'s own words. "[+ pasted text]" means they also pasted material (a transcript, a log, an earlier reply) as context for those words: the material is not a request of its own, and a "[ghostfleet ledger]" reminder quoted in it is this tool talking, never a request. Judge what the person\'s own words ask; a remark about the paste ("see what it did") asks for the agent to look at it, and is done once the agent has.',
     'An item that only approves, confirms or thanks ("go ahead", "yes", "thanks") asks for no work of its own: it is "done" once the agent acts on what it approved, or if there is nothing to act on. An item that confirms AND asks ("done, now draft the post") is judged by what it asks.',
     promises === 'off'
@@ -258,13 +272,38 @@ export function gateTargets(ledger, nowMs, { promises }) {
 // queued item has to be found among the session's user messages; one that is not, with the
 // session idle and no later turn started, was withdrawn. (Resubmitted, it is a new item.)
 // Matched on the item's opening words: the item keeps an excerpt, the transcript the whole.
-export function withdrawn(items, userTexts) {
+//
+// An INTERRUPTED item is asked the same. Esc before the turn wrote anything rewinds the
+// message out of the conversation and hands it back to the composer; sent again, edited or
+// not, it is a second prompt.submit and so a second item. Measured live: one message the
+// person sent once (to their mind) was two items with the same excerpt, and the gate named
+// both. The transcript held one copy, the resend; the first was a sibling of it, off the
+// conversation. So one message in the transcript accounts for one item: an item is
+// withdrawn when the items from it onward that carry its words outnumber the messages that
+// do, and the newest keep the messages. Two sends of the same words that both reached the
+// model are two messages, and stay two items.
+//   `all`: every item in the ledger, which the later items are counted from.
+export function withdrawn(items, userTexts, all = items) {
   const norm = t => oneLine(t).toLowerCase()
   const texts = userTexts.map(t => norm(requestText(t)))
-  return items.filter(i => i.queued && i.source !== 'promise').filter(i => {
-    const head = norm(i.text).replace(/…$/, '').slice(0, 80)
-    return head && !texts.some(t => t.includes(head))
+  const asks = all.filter(i => i.source !== 'promise')
+  return items.filter(i => (i.queued || i.interrupted) && i.source !== 'promise').filter(i => {
+    const head = norm(i.text).replace(/…$/, '').split('…')[0].slice(0, 80)
+    if (!head) return false
+    const said = texts.filter(t => t.includes(head)).length
+    const from = asks.filter(x => Number(x.id) >= Number(i.id) && norm(x.text).includes(head)).length
+    return said < from
   }).map(i => i.id)
+}
+
+// The person's items of a turn that was interrupted: the gate asks the transcript about
+// them before naming any (see `withdrawn`).
+export function markInterrupted(ledger, turnId) {
+  if (!turnId || !ledger.items.some(i => i.turnId === turnId && i.state === 'open' && i.source !== 'promise')) return null
+  return {
+    ...ledger,
+    items: ledger.items.map(i => (i.turnId === turnId && i.state === 'open' && i.source !== 'promise' ? { ...i, interrupted: true } : i)),
+  }
 }
 
 export const dropItems = (ledger, ids) => ({ ...ledger, items: ledger.items.filter(i => !ids.includes(i.id)) })

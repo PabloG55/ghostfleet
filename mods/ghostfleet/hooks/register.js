@@ -45,6 +45,7 @@ import {
   ledgerFile, parseLedger, ledgerConfig, sourceOf, addItem, openItems, ledgerSummary,
   soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
+  markInterrupted,
 } from './ledger.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
@@ -1130,7 +1131,9 @@ function takeSteps(e) {
 // while the first turn's judge was still out, and that turn's answer was never judged).
 async function ledgerTurnComplete($, e, blocks = turnBlocks([], e.answer), generation = turnsStarted) {
   const cfg = await ledgerConfigOf($)
-  if (!cfg.on || e.reason !== 'answer') return
+  if (!cfg.on) return
+  if (e.reason === 'aborted') await changeLedger($, l => markInterrupted(l, e.turnId))
+  if (e.reason !== 'answer') return
   const at = await $.clock.now()
   answers = [...answers, { at, turnId: e.turnId, blocks }].slice(-3)
   if (judging) { judgeNext = { e, blocks, generation }; return }
@@ -1189,10 +1192,12 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const judged = new Set(open.map(i => i.id))
   let targets = gateTargets(after, nowMs, cfg).filter(i => judged.has(i.id))
   if (!targets.length) return
-  if (targets.some(i => i.queued)) {
+  if (targets.some(i => i.queued || i.interrupted)) {
     const msgs = await bounded($, $.session.messages(), IO_MS, null)
-    // Cannot tell what the model received: fail open, no nag about a queued message.
-    const gone = msgs ? withdrawn(targets, msgs.filter(m => m.role === 'user').map(m => m.text)) : targets.filter(i => i.queued).map(i => i.id)
+    // Cannot tell what the model received: fail open, no nag about a queued or interrupted message.
+    const gone = msgs
+      ? withdrawn(targets, msgs.filter(m => m.role === 'user').map(m => m.text), after.items)
+      : targets.filter(i => i.queued || i.interrupted).map(i => i.id)
     if (msgs && gone.length) await changeLedger($, l => dropItems(l, gone))
     targets = targets.filter(i => !gone.includes(i.id))
     if (!targets.length) return
