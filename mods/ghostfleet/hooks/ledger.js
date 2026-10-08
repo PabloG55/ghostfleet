@@ -4,16 +4,21 @@
 //
 // <fleet dir>/<session_id>.ledger   (JSON, but deliberately NOT named *.json: eight readers
 //                                    glob <fleet dir>/*.json as status records)
-//   { v: 1, seq, items: [ { id, text, at, turnId, state, source, ... } ], judge? }
+//   { v: 1, seq, prompt, window, items: [ { id, text, at, turnId, state, source, ... } ], judge? }
 //
 //   state    open | done | not-done | stale (a promise no judged turn addressed, see STALE_TURNS)
+//            | dropped (the agent said it was not a real ask, or the person cancelled it)
 //   source   user     typed at the prompt (or the phone's bridge), idle or mid-turn
 //            fleet    a prompt fleet-send handed to the mod (DELIVERY)
 //            promise  a commitment the agent made in a final message ("I'll merge when green")
 //   gated    true once the gate has re-prompted about it: at most once per item, ever
 //   queued   typed over a running turn; interrupted: its turn was stopped (Esc). Either may
 //            never have reached the model, and the gate asks the transcript first
-//   closedBy judge | hand
+//   prompt   the number of the prompt that made it (ledger.prompt counts them); `window` is
+//            the first prompt of the latest one, and only items from `window` on are gated.
+//            An item from before this field existed has none, and is never gated again
+//   closedBy agent (ledger_close / ledger_drop, with `proof` or `reason`) | judge |
+//            person (/ledger close, fleet-ledger close; `hand` in a file written before)
 
 export const LEDGER_VERSION = 1
 export const KEEP_ITEMS = 200                 // the file keeps the newest 200
@@ -69,6 +74,7 @@ const PASTE_TAG = /<\/?pasted_content\b[^>]*>/g
 const REMINDER = [
   /(?:The ghostfleet plugin sent a message:\s*)?\[ghostfleet ledger\][\s\S]*?(?:it will not be asked again\.\)|$)/g,
   /This is how Claude Code surfaces a prompt a plugin submits between turns[^\n]*/g,
+  /\[ghostfleet ledger: open items\][\s\S]*?(?:for an ask this list missed\.|$)/g,
 ]
 const unquote = t => REMINDER.reduce((a, re) => a.replace(re, ' '), t)
 export function requestText(text) {
@@ -105,19 +111,87 @@ export function sourceOf(e) {
   return o.kind === 'composer' || o.kind === 'bridge' || o.kind === 'unclassified' ? 'user' : null
 }
 
-// A request submitted idle names its turn at that turn's start, which carries its text.
+// The asks in one message, each an item of its own, so each can be closed on its own proof.
+// A message of three asks kept as one item could only close when all three were done, and
+// the agent closing it had to vouch for the two it did not mention. Split only where the
+// split is plain: two or more sentences or list lines that each read as an ask (a list line,
+// a question, a sentence that opens with a verb of work or a "can you"). A message with
+// fewer is one item, exactly as it always was, and so is one with a paste in it (the paste's
+// sentences are not the person's asks) or one long enough to be a pasted brief. The cheap
+// side of the trade is deliberate: a miss is an ask the agent adds with ledger_add, while a
+// false split is an item nobody asked for, which the gate would then re-prompt.
+const ASK_VERB = /^(please\b|pls\b|can you|could you|would you|will you|can we|could we|let'?s|make sure|i need you|i want you|we need to|add|fix|build|write|rewrite|update|remove|delete|rename|run|rerun|re-run|test|check|review|merge|push|pull|open|close|create|make|send|show|tell|explain|find|look (at|into)|move|bump|change|refactor|document|deploy|publish|release|draft|summari[sz]e|list|compare|measure|verify|install|set up|clean|revert|commit|ship|wire|port|split|reply|answer|investigate|debug|profile|benchmark|translate|describe|generate|implement|try|shorten|trim|cut|edit|polish|format|lint|simplify|tighten|extend|convert|replace|swap|post|upload|share|save|schedule|plan|design|outline|research|read|search|fetch|download|start|stop|restart|retry|resend|confirm|count)\b/i
+const ASK_ANYWHERE = /\b(please|can you|could you|need you to|want you to)\b/i
+const LEAD_IN = /^(and|also|then|plus|so|oh and|and also)[, ]+/i
+const RULE = /^(do not|don'?t|never|avoid|without|no need)\b/i
+const STILL_ASKS = /^(do not|don'?t|never) forget\b/i
+const LISTED = /^\s*(\d+[.)]|[-*•])\s+/
+const SPLIT_MAX = 4000
+const ASKS_MAX = 8
+export function requestAsks(text) {
+  const raw = String(text || '')
+  const whole = requestItem(raw)
+  if (!whole) return []
+  if (PASTE.test(raw) || raw.length > SPLIT_MAX) { PASTE.lastIndex = 0; return [whole] }
+  PASTE.lastIndex = 0
+  const own = REMINDER.reduce((a, re) => a.replace(re, ' '), raw)
+  const parts = own.split(/\n+/).flatMap(line => {
+    const listed = LISTED.test(line)
+    return line.replace(LISTED, '').split(/(?<=[.?!])\s+/).map((t, k) => ({ t: oneLine(t), listed: listed && k === 0 }))
+  }).filter(x => x.t)
+  const asks = []
+  for (const { t, listed } of parts) {
+    if (t.length < 6 || t.length > 300) continue
+    const bare = t.replace(LEAD_IN, '')
+    if (RULE.test(bare) && !STILL_ASKS.test(bare)) continue
+    if (listed || t.endsWith('?') || STILL_ASKS.test(bare) || ASK_VERB.test(bare) || ASK_ANYWHERE.test(t)) asks.push(excerpt(t))
+    if (asks.length >= ASKS_MAX) break
+  }
+  return asks.length >= 2 ? asks : [whole]
+}
+
+// A message, as items: one per ask (requestAsks), all carrying the message's prompt number.
+// A message typed idle starts a new window, the one the gate may re-prompt about; one typed
+// over a running turn joins the window that turn belongs to, since that turn's end is not
+// gated (a queued message has started the next) and the next turn answers both.
+// `ids`, when given, is filled with the new items' ids.
+export function addPrompt(ledger, { text, at, turnId, source, queued, whole = false }, ids = []) {
+  const asks = whole ? [requestItem(text)].filter(Boolean) : requestAsks(text)
+  if (!asks.length) return null
+  const prompt = (Number(ledger.prompt) || 0) + 1
+  const window = queued && ledger.window ? ledger.window : prompt
+  let next = { ...ledger, prompt, window }
+  for (const ask of asks) {
+    next = addItem(next, { text: ask, at, turnId, source, queued, prompt, asIs: true })
+    ids.push(next.items[next.items.length - 1].id)
+  }
+  return next
+}
+
+// A request submitted idle names its turn at that turn's start, which carries its text: every
+// item of the newest message with those words that has no turn yet.
 export function stampTurn(ledger, text, turnId) {
   const t = String(text || '').trim()
-  const i = ledger.items.findIndex(x => x.state === 'open' && !x.turnId && x.source !== 'promise' && x.text === requestItem(t))
-  if (!t || i < 0) return null
-  return { ...ledger, items: ledger.items.map((x, k) => (k === i ? { ...x, turnId } : x)) }
+  if (!t) return null
+  const asks = new Set([requestItem(t), ...requestAsks(t)])
+  const fits = ledger.items.filter(x => x.state === 'open' && !x.turnId && x.source !== 'promise' && asks.has(x.text))
+  if (!fits.length) return null
+  // An item from before prompts were numbered has none: the first match, as it always was.
+  const newest = Math.max(...fits.map(x => Number(x.prompt) || 0))
+  const pick = new Set(newest ? fits.filter(x => Number(x.prompt) === newest).map(x => x.id) : [fits[0].id])
+  return { ...ledger, items: ledger.items.map(x => (pick.has(x.id) ? { ...x, turnId } : x)) }
 }
 
 // `queued`: typed over a running turn. Such a message can still be pulled back out of the
 // queue (Up edits it) and never reach the model; see `withdrawn` below.
-export function addItem(ledger, { text, at, turnId, source, queued }) {
+// `prompt`: the message it came from (addPrompt). `asIs`: the text is already an item's.
+export function addItem(ledger, { text, at, turnId, source, queued, prompt, by, asIs }) {
   const seq = (Number(ledger.seq) || 0) + 1
-  const item = { id: String(seq), text: source === 'promise' ? excerpt(text) : requestItem(text), at, ...(turnId ? { turnId } : {}), state: 'open', source, ...(queued ? { queued: true } : {}) }
+  const words = asIs ? String(text) : source === 'promise' ? excerpt(text) : requestItem(text)
+  const item = {
+    id: String(seq), text: words, at, ...(turnId ? { turnId } : {}), state: 'open', source,
+    ...(queued ? { queued: true } : {}), ...(prompt ? { prompt } : {}), ...(by ? { addedBy: by } : {}),
+  }
   const items = [...ledger.items, item].slice(-KEEP_ITEMS)
   return { ...ledger, seq, items }
 }
@@ -378,17 +452,22 @@ export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
       if (like.length > 1) close(like.slice(1).map(i => i.id), `same as promise ${keep.id}`)
       continue
     }
-    next = addItem(next, { text: p.text, at: nowMs, turnId, source: 'promise' })
+    next = addItem(next, { text: p.text, at: nowMs, turnId, source: 'promise', prompt: Number(next.prompt) || 0 })
   }
   const over = openP().length - PROMISE_CAP
   if (over > 0) close(openP().slice(0, over).map(i => i.id), `over the cap of ${PROMISE_CAP} open promises`)
   return next
 }
 
-// The items the gate may re-prompt about: open, fresh, never gated before; promises only
-// when promises gate.
+// The items the gate may re-prompt about: open, fresh, never gated before, from the latest
+// prompt's window (addPrompt); promises only when promises gate. An older item stays on the
+// band and in /ledger, closable by the agent, the judge or the person, and is never named
+// again: a session that moved on from it was answering what it was asked next, and a gate
+// that reached back made every turn's end about the backlog instead of the turn.
 export function gateTargets(ledger, nowMs, { promises }) {
-  return openItems(ledger, nowMs).filter(i => !i.gated && (i.source !== 'promise' || promises === 'gate'))
+  const from = Number(ledger.window) || 0
+  return openItems(ledger, nowMs).filter(i => !i.gated && from && Number(i.prompt) >= from
+    && (i.source !== 'promise' || promises === 'gate'))
 }
 
 // The queued items the model never received. A message typed over a running turn fires
@@ -439,7 +518,7 @@ export function gatePrompt(items) {
   return [
     `[ghostfleet ledger] ${items.length === 1 ? 'One request is' : `${items.length} requests are`} still open from this session:`,
     ...lines,
-    'Finish each one now, or say for each that it is not done and why. (Asked once per item; it will not be asked again.)',
+    `Finish each one now and close it with ${TOOL.close} and its proof, or say for each that it is not done and why (${TOOL.drop} if it was not a real ask). (Asked once per item; it will not be asked again.)`,
   ].join('\n')
 }
 
@@ -448,6 +527,66 @@ export const markGated = (ledger, ids, nowMs) => ({
   items: ledger.items.map(i => (ids.includes(i.id) ? { ...i, gated: true, gatedAt: nowMs } : i)),
 })
 
+// ── the agent's own hand: the tools ledger_close, ledger_drop, ledger_add ──────
+//
+// The judge reads the turn's text and never its work: it cannot see that a commit landed or a
+// file was written, only whether the prose said so, and it costs a model call every turn that
+// leaves anything open. The agent knows what it did. So the agent closes its own items as it
+// finishes them, each with the proof that it is done, and the judge reads only what is still
+// open after that (register.js, judgeTurn): a turn whose agent closed everything costs no call.
+export const TOOL = { close: 'mcp__ghostfleet__ledger_close', drop: 'mcp__ghostfleet__ledger_drop', add: 'mcp__ghostfleet__ledger_add' }
+export const PROOF = 240
+
+// Each answers { ledger, said }: `ledger` null when nothing changed, `said` what the agent
+// reads back. A close needs proof, a drop a reason: an empty one is refused, not defaulted,
+// since "closed, because I say so" is the judge's failure in the agent's hand.
+function closeAs(ledger, id, state, field, why, { nowMs, turnId }) {
+  const it = ledger.items.find(i => i.id === String(id ?? '').trim())
+  if (!it) return { ledger: null, said: `ledger: no item ${id}` }
+  if (it.state !== 'open') return { ledger: null, said: `ledger: item ${it.id} is already ${it.state}` }
+  const closed = { ...it, state, closedAt: nowMs, closedBy: 'agent', [field]: excerpt(why, PROOF), ...(turnId ? { closedTurn: turnId } : {}) }
+  return { ledger: { ...ledger, items: ledger.items.map(i => (i === it ? closed : i)) }, said: `ledger: ${it.id} ${state === 'done' ? 'closed' : 'dropped'}` }
+}
+export function closeByAgent(ledger, id, proof, ctx) {
+  if (!oneLine(proof)) return { ledger: null, said: `ledger: ${id} not closed: proof is required (a path, link, commit, PR number or command result)` }
+  return closeAs(ledger, id, 'done', 'proof', proof, ctx)
+}
+export function dropByAgent(ledger, id, reason, ctx) {
+  if (!oneLine(reason)) return { ledger: null, said: `ledger: ${id} not dropped: a reason is required` }
+  return closeAs(ledger, id, 'dropped', 'reason', reason, ctx)
+}
+// An ask the split missed joins the latest prompt's window, so the gate covers it too.
+export function addByAgent(ledger, text, { nowMs, turnId }) {
+  const t = excerpt(text)
+  if (!t) return { ledger: null, said: 'ledger: nothing added: the text was empty' }
+  const next = addItem(ledger, { text: t, at: nowMs, turnId, source: 'user', prompt: Number(ledger.prompt) || 0, by: 'agent', asIs: true })
+  return { ledger: next, said: `ledger: tracking ${next.seq}` }
+}
+
+// The note a prompt carries to the model, never shown the person: what is open, by id, and
+// the rule. Requests first, newest first (the message just sent is the one most likely to be
+// worked on), then promises; NOTE_ITEMS at most, each cut to NOTE_TEXT, so the note stays
+// under ~1.5k characters however long the backlog grows; the rest is a count and /ledger.
+// '' when nothing is open: a session with a clean ledger reads nothing extra.
+export const NOTE_ITEMS = 8
+export const NOTE_TEXT = 100
+export const NOTE_HEAD = '[ghostfleet ledger: open items]'
+export function contextNote(ledger, nowMs) {
+  const open = openItems(ledger, nowMs)
+  if (!open.length) return ''
+  const newest = (a, b) => Number(b.id) - Number(a.id)
+  const req = open.filter(i => i.source !== 'promise').sort(newest)
+  const prom = open.filter(i => i.source === 'promise').sort(newest)
+  const shown = [...req, ...prom].slice(0, NOTE_ITEMS)
+  const more = open.length - shown.length
+  return [
+    NOTE_HEAD,
+    ...shown.map(i => `${i.id} ${i.source === 'promise' ? '(you said you would)' : '(asked)'}: ${excerpt(i.text, NOTE_TEXT)}`),
+    ...(more > 0 ? [`+${more} more open (/ledger lists them)`] : []),
+    `When one is finished, call ${TOOL.close} with its id and the proof (a path, link, commit, PR number or command result). ${TOOL.drop} with a reason if it is not a real ask or the person cancelled it; ${TOOL.add} for an ask this list missed.`,
+  ].join('\n')
+}
+
 // By hand: `fleet-ledger close <id>` and `/ledger close <id>`. null when there is no such
 // open item.
 export function closeByHand(ledger, id, nowMs) {
@@ -455,14 +594,14 @@ export function closeByHand(ledger, id, nowMs) {
   if (!it || it.state !== 'open') return null
   return {
     ...ledger,
-    items: ledger.items.map(i => (i === it ? { ...i, state: 'done', closedAt: nowMs, closedBy: 'hand' } : i)),
+    items: ledger.items.map(i => (i === it ? { ...i, state: 'done', closedAt: nowMs, closedBy: 'person' } : i)),
   }
 }
 
 // `clear` closes every open item by hand; the history stays in the file.
 export const clearOpen = (ledger, nowMs) => ({
   ...ledger,
-  items: ledger.items.map(i => (i.state === 'open' ? { ...i, state: 'done', closedAt: nowMs, closedBy: 'hand' } : i)),
+  items: ledger.items.map(i => (i.state === 'open' ? { ...i, state: 'done', closedAt: nowMs, closedBy: 'person' } : i)),
 })
 
 const ago = ms => {
@@ -480,7 +619,9 @@ export function listing(ledger, nowMs, { all = false } = {}) {
   if (!rows.length) return [all ? 'ledger: empty' : 'ledger: nothing open', ...judged].join('\n')
   const out = rows.map(i => {
     const tag = i.source === 'promise' ? 'promise' : i.source
-    const why = i.reason ? `  (${i.reason})` : ''
+    const by = i.state !== 'open' && i.closedBy ? `${i.closedBy === 'hand' ? 'person' : i.closedBy}: ` : ''
+    const said = i.proof || i.reason
+    const why = said || by ? `  (${by}${said ? excerpt(said, 80) : ''})`.replace(': )', ')') : ''
     return `${i.id.padStart(3)}  ${i.state.padEnd(8)} ${tag.padEnd(7)} ${ago(nowMs - i.at).padStart(4)}  ${excerpt(i.text, 100)}${i.gated ? '  [gated]' : ''}${why}`
   })
   return [...out, ...judged].join('\n')

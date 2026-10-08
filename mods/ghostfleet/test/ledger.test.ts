@@ -16,6 +16,7 @@ type World = {
   // what the model received: user messages in the transcript (null: messages() unavailable)
   heard: string[] | null
   unreadable: Set<string>
+  tools: any[]
 }
 
 // What the judge model would answer: every item it is shown, with the status `status(id)`.
@@ -25,7 +26,7 @@ const verdict = (status: (id: string) => string, promises: string[] = []) => (pr
 }
 
 function world(on: any, env: Record<string, string> = {}): World {
-  const w: World = { files: new Map(), submitted: [], judged: [], judge: verdict(() => 'open'), surfaces: ['terminal'], registered: [], heard: [], unreadable: new Set() }
+  const w: World = { files: new Map(), submitted: [], judged: [], judge: verdict(() => 'open'), surfaces: ['terminal'], registered: [], heard: [], unreadable: new Set(), tools: [] }
   w.files.set(FILE, JSON.stringify(BASE))
   mock.env(on, { CLAUDE_FLEET_DIR: DIR, HOME: '/home/u', ...env })
   on('session.id', () => ({ value: ID }))
@@ -63,6 +64,7 @@ function world(on: any, env: Record<string, string> = {}): World {
   on('ui.log', () => ({ value: undefined }))
   on('prompt.submit', (_$: any, e: any) => { w.submitted.push(e); return { text: e.text } })
   on('command.register', (_$: any, e: any) => { w.registered.push(e.name); return { value: { command: e.name } } })
+  on('tool.register', (_$: any, e: any) => { w.tools.push(e); return { value: { tool: `mcp__ghostfleet__${e.name}` } } })
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('turn.start', (_$: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
@@ -302,13 +304,14 @@ test('an answer with no promise wording and nothing open makes no judge call at 
   expect(w.judged).toEqual([])
 })
 
-test('CLAUDE_FLEET_LEDGER_PROMISES=gate: a promise a later turn leaves open is re-prompted once', async ($, on) => {
+test('CLAUDE_FLEET_LEDGER_PROMISES=gate: a promise a later turn of the same prompt leaves open is re-prompted once', async ($, on) => {
   const clock = mock.clock(on)
   const w = world(on, { CLAUDE_FLEET_LEDGER_PROMISES: 'gate' })
   await start($)
-  await $.turn.start({ text: '', turnId: 't1' })
-  w.judge = verdict(() => 'open', ['merge the PR once CI is green'])
-  await $.turn.complete(done('t1', "I'll merge it once CI is green."))
+  await type($, 'ship the release')
+  await $.turn.start({ text: 'ship the release', turnId: 't1' })
+  w.judge = verdict(id => (id === '1' ? 'done' : 'open'), ['merge the PR once CI is green'])
+  await $.turn.complete(done('t1', "Release cut. I'll merge it once CI is green."))
   await settle(clock)
   // not in the turn that made it: the promise is for later
   expect(nags(w)).toEqual([])
@@ -367,7 +370,7 @@ test('/ledger lists, closes by hand, and clears, without a turn', async ($, on) 
   expect(list.text).toContain('fix the login redirect')
   expect((await $.command.run({ command: 'ledger', args: 'close 1' } as any)).text).toBe('ledger: closed 1')
   expect((await $.command.run({ command: 'ledger', args: 'close 1' } as any)).text).toBe('ledger: no open item 1')
-  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'hand' }))
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'person' }))
   await $.command.run({ command: 'ledger', args: 'clear' } as any)
   await clock.advance(10)
   expect(rec(w).ledger.open).toBe(0)
@@ -534,7 +537,7 @@ test('a message stopped before it was answered and sent again is ONE request: th
   expect(book(w).items[0].text).toContain('what do u think')
 })
 
-test('the same words sent twice and both answered are two requests; a stopped message that reached the model stays', async ($, on) => {
+test('the same words sent twice and both answered are two requests; a stopped message that reached the model stays (and, older, is not re-prompted)', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const w = world(on)
   await start($)
@@ -548,9 +551,12 @@ test('the same words sent twice and both answered are two requests; a stopped me
   w.judge = verdict(() => 'open')
   await $.turn.complete(done('t2', 'Looking at something else.'))
   await settle(clock)
-  expect(book(w).items.length).toBe(2)
+  expect(book(w).items.map((i: any) => [i.id, i.state])).toEqual([['1', 'open'], ['2', 'open']])
   expect(nags(w).length).toBe(1)
-  expect(nags(w)[0].text).toContain('2 requests are')
+  // the gate names the latest prompt's item only; the first send stays open, on the band
+  expect(nags(w)[0].text).toContain('One request is')
+  expect(nags(w)[0].text).toContain('2. "run the tests"')
+  expect(nags(w)[0].text).not.toContain('1. "run the tests"')
 })
 
 test('a long message with an inline paste keeps the words typed after it', async ($, on) => {
@@ -768,4 +774,226 @@ test('at most five open promises: a sixth stales the oldest', async ($, on) => {
   }
   expect(openPromises(w).map((i: any) => i.text)).toEqual(seven.slice(2))
   expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'stale', reason: 'over the cap of 5 open promises' }))
+})
+
+// ── THE HYBRID: the agent closes its own items with proof; the judge is the backup ─────────
+const CLOSE = 'mcp__ghostfleet__ledger_close'
+const DROP = 'mcp__ghostfleet__ledger_drop'
+const ADD = 'mcp__ghostfleet__ledger_add'
+const tool = async ($: any, name: string, args: object) => String(((await $.tool.call({ tool: name, ...args } as any)) as any).result)
+const THREE = 'Shorten the intro to three lines. Can you add the pricing table under it? And send me the preview link when it is done.'
+// The note each prompt carried to the model, as the engine beneath received it.
+const notes = (w: World) => w.submitted.map(e => (e.context ?? []).join('\n'))
+
+test('decision 1: the three tools are registered, and ledger_close needs proof and records who closed it', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  expect(w.tools.map(t => t.name)).toEqual(['ledger_close', 'ledger_drop', 'ledger_add'])
+  expect(w.tools[0].inputSchema.required).toEqual(['id', 'proof'])
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  expect(await tool($, CLOSE, { id: '1', proof: '  ' })).toContain('proof is required')
+  expect(book(w).items[0].state).toBe('open')
+  expect(await tool($, CLOSE, { id: '9', proof: 'x' })).toBe('ledger: no item 9')
+  expect(await tool($, CLOSE, { id: '1', proof: 'commit 1a2b3c on fix/login, test/run.sh green' })).toBe('ledger: 1 closed')
+  expect(book(w).items[0]).toEqual(expect.objectContaining({
+    state: 'done', closedBy: 'agent', proof: 'commit 1a2b3c on fix/login, test/run.sh green', closedTurn: 't1',
+  }))
+  expect(await tool($, CLOSE, { id: '1', proof: 'again' })).toBe('ledger: item 1 is already done')
+  await clock.advance(10)
+  expect(rec(w).ledger.open).toBe(0)
+})
+
+test('decision 1: ledger_drop needs a reason; ledger_add tracks a missed ask in the latest prompt', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  expect(await tool($, DROP, { id: '1', reason: '' })).toContain('a reason is required')
+  expect(await tool($, ADD, { text: 'and add a regression test' })).toBe('ledger: tracking 2')
+  expect(await tool($, DROP, { id: '1', reason: 'the person withdrew it' })).toBe('ledger: 1 dropped')
+  const [a, b] = book(w).items
+  expect(a).toEqual(expect.objectContaining({ state: 'dropped', closedBy: 'agent', reason: 'the person withdrew it' }))
+  expect(b).toEqual(expect.objectContaining({ state: 'open', source: 'user', addedBy: 'agent', prompt: a.prompt, turnId: 't1' }))
+  // the added ask is the latest prompt's: the gate covers it
+  w.judge = verdict(() => 'open')
+  await $.turn.complete(done('t1', 'Fixed the redirect.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('2. "and add a regression test"')
+})
+
+test('decision 2: the prompt carries a note of the open items by id, requests first, capped; none when nothing is open', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  // a notification with nothing open: no note at all
+  await $.prompt.submit({ text: 'background task finished', origin: { kind: 'task-notification' }, wait: false } as any)
+  expect(notes(w)).toEqual([''])
+  await type($, THREE)
+  const note = notes(w)[1]
+  expect(note.split('\n')[0]).toBe('[ghostfleet ledger: open items]')
+  // its own three asks, newest first, by id
+  expect(note).toContain('3 (asked): And send me the preview link when it is done.\n2 (asked): Can you add the pricing table under it?\n1 (asked): Shorten the intro to three lines.')
+  expect(note).toContain(`call ${CLOSE} with its id and the proof`)
+  // a promise sorts after every request, and past eight items the rest is a count
+  const l = book(w)
+  l.items.push({ id: '4', text: 'merge once CI is green', at: 1_000_000, state: 'open', source: 'promise' })
+  l.seq = 4
+  w.files.set(LEDGER, JSON.stringify(l))
+  for (const t of ['fix a', 'fix b', 'fix c', 'fix d', 'fix e', 'fix f']) await type($, t)
+  const last = notes(w)[notes(w).length - 1]
+  const rows = last.split('\n').filter(r => /^\d+ \(/.test(r))
+  expect(rows.length).toBe(8)
+  expect(rows.every(r => r.includes('(asked)'))).toBe(true)
+  expect(last).toContain('+2 more open (/ledger lists them)')
+  // closed, the next notification carries nothing
+  await $.command.run({ command: 'ledger', args: 'clear' } as any)
+  await $.prompt.submit({ text: 'background task finished', origin: { kind: 'task-notification' }, wait: false } as any)
+  expect(notes(w)[notes(w).length - 1]).toBe('')
+  await clock.advance(10)
+})
+
+test('decision 3: the gate names only the latest prompt; an item from two prompts ago stays open and is never re-prompted', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.heard = ['rename the config key', 'bump the version', 'write the changelog line']
+  // prompt 1, stopped before its end: never gated
+  await type($, 'rename the config key')
+  await $.turn.start({ text: 'rename the config key', turnId: 't1' })
+  await $.turn.complete({ ...done('t1', 'Renaming…'), reason: 'aborted', isAborted: true })
+  await settle(clock)
+  // prompt 2 and prompt 3, each answered with nothing done
+  w.judge = verdict(() => 'open')
+  for (const [k, t] of [[2, 'bump the version'], [3, 'write the changelog line']] as const) {
+    await type($, t)
+    await $.turn.start({ text: t, turnId: `t${k}` })
+    await $.turn.complete(done(`t${k}`, 'Looked around.'))
+    await settle(clock)
+  }
+  expect(nags(w).map(n => n.text.split('\n')[1])).toEqual(['2. "bump the version"', '3. "write the changelog line"'])
+  expect(book(w).items.map((i: any) => [i.id, i.state, Boolean(i.gated)])).toEqual([['1', 'open', false], ['2', 'open', true], ['3', 'open', true]])
+  // and it is still on the band and in /ledger
+  expect((await $.command.run({ command: 'ledger', args: '' } as any)).text).toContain('rename the config key')
+})
+
+test('decision 3: a message queued over a turn joins that prompt, and a fleet-delivered prompt is a prompt of its own', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.heard = ['fix the login redirect', 'also bump the version']
+  w.judge = verdict(() => 'open')
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  await type($, 'also bump the version', 't1')
+  await $.turn.complete(done('t1', 'Fixed it.'))
+  await $.turn.start({ text: 'also bump the version', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Looked.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('2 requests are')
+  // a fleet delivery: the gate names it, and not the two already gated
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'run the tests' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'run the tests', turnId: 't3' })
+  await $.turn.complete(done('t3', 'Looked.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(2)
+  expect(nags(w)[1].text).toContain('One request is')
+  expect(nags(w)[1].text).toContain('3. "run the tests"')
+})
+
+test('decision 4: a 3-ask prompt the agent closes with proof costs no judge call, promise wording or not', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, THREE)
+  expect(book(w).items.map((i: any) => i.text)).toEqual([
+    'Shorten the intro to three lines.', 'Can you add the pricing table under it?', 'And send me the preview link when it is done.',
+  ])
+  await $.turn.start({ text: THREE, turnId: 't1' })
+  for (const [id, proof] of [['1', 'web/index.html:12, intro is 3 lines'], ['2', 'web/index.html:40, pricing table added'], ['3', 'http://localhost:4173/preview sent in the reply']])
+    expect(await tool($, CLOSE, { id, proof })).toBe(`ledger: ${id} closed`)
+  await $.turn.complete(done('t1', "All three done. I'll keep the preview server running."))
+  await settle(clock)
+  expect(w.judged).toEqual([])
+  expect(nags(w)).toEqual([])
+  expect(book(w).items.every((i: any) => i.state === 'done' && i.closedBy === 'agent')).toBe(true)
+})
+
+test('decision 4: what the agent skipped is judged alone, and gets one re-prompt', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.heard = [THREE]
+  await type($, THREE)
+  await $.turn.start({ text: THREE, turnId: 't1' })
+  await tool($, CLOSE, { id: '1', proof: 'web/index.html:12' })
+  await tool($, CLOSE, { id: '2', proof: 'web/index.html:40' })
+  w.judge = verdict(() => 'open')
+  await $.turn.complete(done('t1', 'Shortened the intro and added the table.'))
+  await settle(clock)
+  expect(w.judged.length).toBe(1)
+  expect([...w.judged[0].matchAll(/^(\d+) \[/gm)].map(m => m[1])).toEqual(['3'])
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('3. "And send me the preview link when it is done."')
+  expect(nags(w)[0].text).not.toContain('Shorten')
+  // the re-prompt's own turn: still open, never a second nag
+  await $.turn.start({ text: nags(w)[0].text, turnId: 't2' })
+  await $.turn.complete(done('t2', 'Still on it.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+})
+
+test('decision 5: a ledger written before the hybrid is closable by the tools, and its items are never re-prompted', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  // the shape a session already has on disk: no prompt numbers, no window, closedBy hand
+  w.files.set(LEDGER, JSON.stringify({ v: 1, seq: 3, items: [
+    { id: '1', text: 'update the README', at: 999_000, state: 'open', source: 'user', turnId: 'old1' },
+    { id: '2', text: 'rotate the token', at: 999_000, state: 'open', source: 'user', turnId: 'old2' },
+    { id: '3', text: 'tag the release', at: 999_000, state: 'done', source: 'user', closedBy: 'hand', closedAt: 999_500 },
+  ] }))
+  await start($)
+  await type($, 'look at the logs')
+  expect(notes(w)[0]).toContain('1 (asked): update the README')
+  await $.turn.start({ text: 'look at the logs', turnId: 't1' })
+  expect(await tool($, CLOSE, { id: '1', proof: 'README.md updated in commit 9f8e7d' })).toBe('ledger: 1 closed')
+  w.judge = verdict(() => 'open')
+  await $.turn.complete(done('t1', 'Read them.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('4. "look at the logs"')
+  expect(nags(w)[0].text).not.toContain('rotate the token')
+  const all = (await $.command.run({ command: 'ledger', args: 'all' } as any)).text
+  expect(all).toContain('(agent: README.md updated in commit 9f8e7d)')
+  expect(all).toContain('(person)')
+})
+
+test('the fleet\'s own nudge is a wake-up, never an item: matched by its handoff marker, not its words', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  // the words of a request, the marker of a nudge: no item
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'run fleet-inbox and merge what is green', kind: 'nudge' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'run fleet-inbox and merge what is green', turnId: 't1' })
+  expect(book(w)?.items ?? []).toEqual([])
+  await $.turn.complete(done('t1', 'Merged.'))
+  await settle(clock)
+  expect(w.judged).toEqual([])
+  // the same words with no marker are a request
+  w.files.set(`${SPOOL}/1000-2.json`, JSON.stringify({ id: '1000-2', text: 'run fleet-inbox and merge what is green' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'run fleet-inbox and merge what is green', turnId: 't2' })
+  expect(book(w).items.map((i: any) => [i.id, i.source, i.turnId])).toEqual([['1', 'fleet', 't2']])
+  // a plugin's submit carries no context, so the turn's first tool result carries the note
+  expect(notes(w)[1]).toBe('')
+  const first: any = await $.tool.call({ tool: ADD, text: 'and post the result' } as any)
+  expect((first.context ?? []).join('\n')).toContain('1 (asked): run fleet-inbox and merge what is green')
+  const second: any = await $.tool.call({ tool: ADD, text: 'and one more' } as any)
+  expect(second.context ?? []).toEqual([])
 })

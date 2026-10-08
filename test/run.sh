@@ -3863,7 +3863,8 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
     const now = 10 * 86400000
     let l = L.emptyLedger()
-    for (const t of ['fix the login redirect', 'bump the version', 'add a changelog line']) l = L.addItem(l, { text: t, at: now - 60000, source: 'user' })
+    // one prompt and two messages queued over its turn: one window, which the gate covers
+    for (const [k, t] of ['fix the login redirect', 'bump the version', 'add a changelog line'].entries()) l = L.addPrompt(l, { text: t, at: now - 60000, source: 'user', queued: k > 0 })
     l = L.addItem(l, { text: 'a week-old ask', at: now - 8 * 86400000, source: 'user' })
     const ids = L.openItems(l, now).map(i => i.id)
     const good = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"done\"},{\"id\":\"2\",\"status\":\"not-done\",\"reason\":\"release-managed\"},{\"id\":\"9\",\"status\":\"done\"}],\"promises\":[\"merge when green\"]}', ids)
@@ -5014,8 +5015,11 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   is "a child's done lands in its sub-lead's inbox" "1" "$(nlc 'api-fix-tests	done' "$NLF/cfnl.api-fix.inbox")"
   is "...and NOT in the top master's"               "0" "$(nlc 'api-fix-tests' "$NLF/cfnl.inbox")"
   wait_for 5 "the sub-lead's wake" '[ -s "$NL/sent" ]' || true
-  is "...and push-wakes the sub-lead"               "1" "$([ "$(grep -c '^-s cfnl api-fix ' "$NL/sent" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
-  is "...and not the master"                        "0" "$(grep -c '^-s cfnl master ' "$NL/sent" 2>/dev/null || true)"
+  # marked as the fleet's own wake-up (fleet-send --nudge), so the sub-lead's ledger records
+  # no request for it; "not the master" matches with or without the marker, so it cannot
+  # pass just because the marker moved the arguments along.
+  is "...and push-wakes the sub-lead"               "1" "$([ "$(grep -c '^--nudge -s cfnl api-fix ' "$NL/sent" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
+  is "...and not the master"                        "0" "$(grep -cE '(^| )-s cfnl master ' "$NL/sent" 2>/dev/null || true)"
   nlfire api-fix-tests Notification 'Claude needs your permission to use Bash'
   is "a child's need-you goes to the sub-lead too"  "1" "$(nlc 'api-fix-tests	need-you' "$NLF/cfnl.api-fix.inbox")"
   nlfire docs-pass Stop
@@ -8415,11 +8419,12 @@ while :; do
   if [ -n "$f" ] && mv "$sp/$f" "$sp/${f%.json}.taken" 2>/dev/null; then
     id="${f%.json}"; n=$((n + 1))
     text="$(jq -r .text "$sp/$id.taken" | tail -n 1)"; rs="$(jq -r '.reply.sock // ""' "$sp/$id.taken")"
+    k="$(jq -r '.kind // ""' "$sp/$id.taken")"
     if [ "$text" = DROPME ]; then
       printf '{"id":"%s","dropped":"refused by a hook"}' "$id" > "$sp/$id.done"; rm -f "$sp/$id.taken"; continue
     fi
     st=working; rec
-    printf 'TURN %s%s\n' "$text" "${rs:+ reply=$rs}" >> "$log"
+    printf 'TURN %s%s%s\n' "$text" "${rs:+ reply=$rs}" "${k:+ kind=$k}" >> "$log"
     printf '{"id":"%s","turnId":"t%s"}' "$id" "$n" > "$sp/$id.done"; rm -f "$sp/$id.taken"
     case "$text" in task-slow-*) sleep 1.5 ;; *) sleep "$dur" ;; esac; st=ready; rec
     printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s"}' "$sid" "$PWD" | "$HOOK" >/dev/null 2>&1
@@ -8486,6 +8491,18 @@ MOD
   is "...and run as its own turn after, in order"     "TURN task-slow-charlie|TURN what broke reply=cf-ask" "$(mturns)"
   is "...the box still holds what was typed"          "1" "$(grep -c '❯ half typed words$' <<< "$(mpane)" || true)"
   is "...and fleet-send armed nothing itself"         "0" "$([ -f "$MF/cffm.w1.reply-to" ] && echo 1 || echo 0)"
+
+  # The fleet's own wake-up says so in the entry, idle or drained from the queue, so the
+  # mod's ledger can leave it out by its marker and never by its words; an ordinary prompt
+  # carries no kind (every TURN row above has none).
+  mready; : > "$M/turns"
+  MS --nudge w1 "nudge-hotel" >/dev/null; mwait 1 25
+  MS w1 "task-slow-india" >/dev/null; mwait 2 25
+  MS --nudge w1 "nudge-juliet" >/dev/null
+  is "a nudge is queued with its marker"              "nudge" \
+     "$(cut -d$'\x1f' -f6 "$MF/cffm.w1.queue" 2>/dev/null | head -1)"
+  mwait 3 40
+  is "...and, idle or drained, reaches the mod marked" "TURN nudge-hotel kind=nudge|TURN task-slow-india|TURN nudge-juliet kind=nudge" "$(mturns)"
 
   mready
   mx="$(MS w1 "DROPME")"; mxc=$?

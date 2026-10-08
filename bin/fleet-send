@@ -3,6 +3,12 @@
 #            [--anyway] <session> <prompt...>
 # fleet-send [-s SOCKET] --dequeue <session>        (what the Stop hook runs)
 #
+# --nudge marks the prompt as the fleet's own wake-up (hooks/fleet-event.sh's "a worker
+# finished, run fleet-inbox"), not something anyone asked of the session: the mod's ledger
+# records no item for it. It rides the handoff entry and the queue record as a marker, so the
+# ledger never has to recognise a nudge by its wording. A nudge that falls back to the paste
+# arrives as typed text and carries nothing; that path records it as the person's.
+#
 # To a session that is mid-turn the prompt is QUEUED and runs as its own turn after that
 # one ends (see "the queue" below); --now pastes it into the running turn instead.
 #
@@ -57,6 +63,7 @@ XPROF=0
 # send (the default) queues behind a running turn; --now pastes into it; --dequeue delivers
 # the next queued prompt, and is what the Stop hook runs (see "the queue" below).
 MODE=send
+KIND=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)          SOCK="${2:-}";      shift 2 ;;
@@ -64,6 +71,7 @@ while [ $# -gt 0 ]; do
     --reply-dir) REPLY_DIR="${2:-}"; shift 2 ;;
     --anyway)    ANYWAY=1;           shift ;;
     --now)       MODE=now;           shift ;;
+    --nudge)     KIND=nudge;         shift ;;
     --dequeue)   MODE=dequeue;       shift ;;
     # Internal: the queue's own delivery (what --dequeue runs). Past the gate like --now,
     # but a turn of its own rather than a paste into one, so it may go through the mod.
@@ -243,11 +251,12 @@ if [ "$MODE" = dequeue ]; then
   _qt="$QUEUE.$$.tmp"
   tail -n +2 "$QUEUE" > "$_qt" 2>/dev/null && mv -f "$_qt" "$QUEUE"
   [ -s "$QUEUE" ] || rm -f "$QUEUE"
-  IFS=$'\x1f' read -r _q_at _q_rs _q_rss _q_rd _q_msg _q_extra <<< "$_line"
+  IFS=$'\x1f' read -r _q_at _q_rs _q_rss _q_rd _q_msg _q_kind _q_extra <<< "$_line"
   _body="$(_unb64 "${_q_msg:-}")"
   [ -n "$_body" ] && [ -z "${_q_extra:-}" ] \
     || { echo "fleet-send: dropped an unreadable queue record for '$SESSION'" >&2; exit 1; }
   _args=(--queued --anyway -s "$SOCK")
+  [ "${_q_kind:-}" = nudge ] && _args+=(--nudge)
   [ -n "$_q_rs" ] && [ -n "$_q_rss" ] && _args+=(--reply-to "$_q_rs/$_q_rss" ${_q_rd:+--reply-dir "$_q_rd"})
   # Delivered UNDER the lock: a second drainer must not see the box empty in the gap
   # between this paste and the spinner, and fold the next prompt into this one.
@@ -314,7 +323,8 @@ fi
 # Appends this prompt (the caller's words, before any preamble: the delivery adds that)
 # to the queue, under the lock the caller holds; sets _n to its place.
 _enqueue() {
-  _rec="$(printf '%s\x1f%s\x1f%s\x1f%s' "${RSOCK:-}" "${RSESS:-}" "${rdir:-}" "$(_b64 "$RAW_MSG")")"
+  # A sixth field only for a nudge, so every other record is the five fields it always was.
+  _rec="$(printf '%s\x1f%s\x1f%s\x1f%s' "${RSOCK:-}" "${RSESS:-}" "${rdir:-}" "$(_b64 "$RAW_MSG")")${KIND:+$'\x1f'$KIND}"
   # The same prompt already waiting is not a second task: the automated nudges (a
   # worker finished, an answer relayed) repeat word for word and would stack one turn
   # each behind a long lead turn.
@@ -539,7 +549,7 @@ if [ "$USE_MOD" = 1 ]; then
   _spool="$MOD_DIR/$MOD_SID.handoff"
   _hid="${MOD_NOW:-$(date +%s)000}-$$"
   _rargs=(); [ -n "$RSESS" ] && _rargs=("$RSOCK" "$RSESS" "$rdir")
-  if printf '%s' "$MSG" | node "$MOD_TARGET" --handoff "$_spool" "$_hid" ${_rargs[@]+"${_rargs[@]}"}; then
+  if printf '%s' "$MSG" | CLAUDE_FLEET_HANDOFF_KIND="$KIND" node "$MOD_TARGET" --handoff "$_spool" "$_hid" ${_rargs[@]+"${_rargs[@]}"}; then
     _claimed=no
     _w="${CLAUDE_FLEET_MOD_CLAIM:-3}"; case "$_w" in ''|*[!0-9]*) _w=3 ;; esac
     for _ in $(seq 1 $(( _w * 10 ))); do

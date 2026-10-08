@@ -485,7 +485,7 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
         # CLAUDE_FLEET_DIR is where fleet-send QUEUES a prompt for a busy target, so it is
         # the target fleet dir: the one its own Stop drains. (No apostrophes in here: this
         # whole body is one single-quoted argument.)
-        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send -s "$sock" "$to" "$msg" >/dev/null 2>&1
+        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send --nudge -s "$sock" "$to" "$msg" >/dev/null 2>&1
         exit 0
       fi
     done
@@ -645,9 +645,9 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
           printf '%s\n' "$now" > "$stamp" 2>/dev/null
           _sock="$CLAUDE_FLEET_SOCK"
           if [ -n "$_parent" ]; then
-            ( fleet-send -s "$_sock" "$_to" "$_submsg" >/dev/null 2>&1 & )
+            ( fleet-send --nudge -s "$_sock" "$_to" "$_submsg" >/dev/null 2>&1 & )
           else
-            ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+            ( fleet-send --nudge -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
           fi
         elif [ -n "$_parent" ]; then
           # its own kind, so the retry's lock and stamp are the sub-lead's and not master's
@@ -712,7 +712,7 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
           # Jarvis's dirs, not this session's: another profile's hook is running this, and
           # a busy Jarvis QUEUES the prompt under CLAUDE_FLEET_DIR — which must be the dir
           # Jarvis's own Stop drains, or the wake waits in a file nothing reads.
-          ( CLAUDE_FLEET_DIR="$j_dir" CLAUDE_CONFIG_DIR="$j_cfg" fleet-send -s "$j_sock" master "$j_msg" >/dev/null 2>&1 & )
+          ( CLAUDE_FLEET_DIR="$j_dir" CLAUDE_CONFIG_DIR="$j_cfg" fleet-send --nudge -s "$j_sock" master "$j_msg" >/dev/null 2>&1 & )
         else
           _defer_nudge "$j_sock" "$j_dir" jarvis "$j_msg"
         fi
@@ -735,7 +735,7 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
           tmux -L "$sock" has-session -t master 2>/dev/null || exit 0
           _input_empty "$sock" master || exit 0
           date +%s > "$stamp" 2>/dev/null
-          CLAUDE_FLEET_DIR="$dir" fleet-send -s "$sock" master "[fleet] batch: work finished across the fleets in the last $(( after / 60 )) minutes. Run fleet_digest and tell the owner only what he would want to know unprompted, in one line. Automated wake." >/dev/null 2>&1
+          CLAUDE_FLEET_DIR="$dir" fleet-send --nudge -s "$sock" master "[fleet] batch: work finished across the fleets in the last $(( after / 60 )) minutes. Run fleet_digest and tell the owner only what he would want to know unprompted, in one line. Automated wake." >/dev/null 2>&1
         ' _ "$j_sock" "$j_lock" "$j_stamp" "$j_batch" "$now" "$j_dir" >/dev/null 2>&1 &
       fi
     fi
