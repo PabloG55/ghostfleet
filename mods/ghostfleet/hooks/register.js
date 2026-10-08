@@ -1180,12 +1180,15 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   // by the first call; the others are told to return none. The calls run one after another:
   // the newest batch is the one most likely to matter, and it lands first.
   const batches = open.length ? judgeBatches(open) : [[]]
+  // The first call reads the turn's promises, so it is shown every open one to name the one a
+  // phrase restates, whichever batch that promise is judged in.
+  const openPromises = judgeBatches(open.filter(i => i.source === 'promise'))[0] || []
   let after = null
   const failed = []
   let answered = 0
   for (const [k, batch] of batches.entries()) {
     const r = await $.model.complete({
-      model: cfg.model, prompt: judgePrompt(batch, blocks, { ...cfg, promises: k ? 'off' : cfg.promises, earlier }),
+      model: cfg.model, prompt: judgePrompt(batch, blocks, { ...cfg, promises: k ? 'off' : cfg.promises, earlier, openPromises }),
       maxTokens: JUDGE_TOKENS, effort: 'low', timeoutMs: JUDGE_MS,
     })
     const verdict = r && r.isAnswered ? parseVerdict(r.text, batch.map(i => i.id)) : null

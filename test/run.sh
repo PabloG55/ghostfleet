@@ -3947,6 +3947,22 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
       whole.partial === undefined, String(junk)].join(' '))" 2>&1)"
   is "ledger: 46 items in batches of 10, newest first; a cut-off reply keeps its finished items" \
      "10,10,10,10,6 46 12 true 0 true null" "$lb"
+  # One commitment is one promise in ANY order it arrives: the four phrasings of one follow-up
+  # measured live fold into one in all 24 orders, and three different promises stay three.
+  lp="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const four = ['read the ledgers after the next turns', 'watch for re-prompt closure in acme-api and acme-web',
+      'check acme-api, acme-web, toolbox ledgers after next turns', 'read acme-api, acme-web, toolbox ledgers after next turns']
+    const three = ['merge the PR once CI is green', 'tag the release after the merge', 'add the changelog entry for acme-web 0.6']
+    const perms = a => a.length < 2 ? [a] : a.flatMap((x, k) => perms([...a.slice(0, k), ...a.slice(k + 1)]).map(r => [x, ...r]))
+    const counts = new Set()
+    for (const order of perms(four)) {
+      let l = L.emptyLedger()
+      for (const p of [...order, ...three]) l = L.applyVerdict(l, { items: [], promises: [{ text: p }] }, { nowMs: 1, turnId: 't', promises: 'show' })
+      counts.add(l.items.filter(i => i.state === 'open').length)
+    }
+    console.log([...counts].join(','))" 2>&1)"
+  is "ledger: four phrasings of one promise fold into one in every order; three different ones stay" "4" "$lp"
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
   printf '{"session_id":"lg-1","sock":"cf-lgtest","slot":"w1","ts":5}' > "${LG:?}/lg-1.json"

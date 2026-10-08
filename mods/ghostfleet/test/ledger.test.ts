@@ -695,3 +695,76 @@ test('a promise no judged turn addresses closes as stale after five; one address
   await settle(clock)
   expect(book(w).items.find((i: any) => i.id === p.id).state).toBe('done')
 })
+
+// ONE COMMITMENT, ONE PROMISE. Measured live: four open promises were one follow-up in four
+// phrasings, added on three consecutive turns, because the judge was never shown which
+// promises were open and the only dedupe was exact text. And two "promises" were steps the
+// agent asked the PERSON to take, read off a closing "Still waiting on you:" list.
+const promised = (list: any[], status: (id: string) => string = () => 'open') => (prompt: string) =>
+  ({ ...verdict(status)(prompt), text: JSON.stringify({ items: [...prompt.matchAll(/^(\d+) \[/gm)].map(m => ({ id: m[1], status: status(m[1]), reason: 'r' })), promises: list }) })
+const openPromises = (w: World) => book(w).items.filter((i: any) => i.source === 'promise' && i.state === 'open')
+const turn = async ($: any, clock: any, id: string, answer: string) => {
+  await $.turn.start({ text: '', turnId: id })
+  await $.turn.complete(done(id, answer))
+  await settle(clock)
+}
+
+test('a promise the judge says restates an open one is that one, in its newer words; the judge is shown the open ones', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.judge = promised(['merge the PR once CI is green'])
+  await turn($, clock, 't1', "I'll merge the PR once CI is green.")
+  w.judge = promised([{ text: 'land the change when the checks pass', by: 'agent', same: '1' }])
+  await turn($, clock, 't2', "I'll land it when the checks pass.")
+  expect(w.judged[1]).toContain('ALREADY OPEN PROMISES')
+  expect(w.judged[1]).toContain('1: merge the PR once CI is green')
+  expect(openPromises(w).map((i: any) => [i.id, i.text])).toEqual([['1', 'land the change when the checks pass']])
+})
+
+test('the same follow-up in four phrasings over three turns is one promise; three different ones stay three', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.judge = promised(['read the ledgers after the next turns'])
+  await turn($, clock, 't1', "I'll read the ledgers after the next turns.")
+  w.judge = promised(['watch for re-prompt closure in acme-api and acme-web'])
+  await turn($, clock, 't2', "I'll watch for re-prompt closure in acme-api and acme-web.")
+  w.judge = promised(['check acme-api, acme-web, toolbox ledgers after next turns', 'read acme-api, acme-web, toolbox ledgers after next turns'])
+  await turn($, clock, 't3', "I'll check the acme-api, acme-web, toolbox ledgers after the next turns.")
+  expect(openPromises(w).map((i: any) => i.text)).toEqual(['read the ledgers after the next turns'])
+  expect(book(w).items.find((i: any) => i.id === '2')).toEqual(expect.objectContaining({ state: 'stale', reason: 'same as promise 1' }))
+  w.judge = promised(['merge the PR once CI is green', 'tag the release after the merge', 'add the changelog entry for acme-web 0.6'])
+  await turn($, clock, 't4', "I'll merge once CI is green, then tag the release, and add the changelog entry.")
+  expect(openPromises(w).length).toBe(4)
+})
+
+test("what the agent asks the PERSON to do is not its promise", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.judge = promised([
+    { text: 'Run npm login && npm publish', by: 'person', same: '' },
+    { text: 'Type /reload-plugins between turns', by: 'person', same: '' },
+    'wait for you to approve the release',
+    { text: 'rerun the acme-api smoke test', by: 'agent', same: '' },
+  ])
+  await turn($, clock, 't1', "I'll rerun the acme-api smoke test.\n\nStill waiting on you:\n- Run npm login && npm publish\n- Type /reload-plugins between turns")
+  expect(w.judged[0]).toContain('waiting on you')
+  expect(w.judged[0]).toContain('"by":"agent|person"')
+  expect(openPromises(w).map((i: any) => i.text)).toEqual(['rerun the acme-api smoke test'])
+})
+
+test('at most five open promises: a sixth stales the oldest', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  const seven = ['merge the PR', 'tag the release', 'publish to npm', 'update the docs site', 'rotate the deploy key', 'bump acme-web', 'archive toolbox']
+  for (const [k, p] of seven.entries()) {
+    // judges no item, so the five-turn stale rule never fires: only the cap closes one here
+    w.judge = () => ({ isAnswered: true, text: JSON.stringify({ items: [], promises: [p] }), usage: {} })
+    await turn($, clock, `t${k}`, `I'll ${p} next.`)
+  }
+  expect(openPromises(w).map((i: any) => i.text)).toEqual(seven.slice(2))
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'stale', reason: 'over the cap of 5 open promises' }))
+})

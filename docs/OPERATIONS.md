@@ -841,6 +841,11 @@ ledger · 2 open · oldest 4m “add a changelog line” · promise: merge the P
   way by a later turn's text. A promise the judge has been shown and kept open for five
   judged turns closes as `stale`: nothing gates a promise, so one the session dropped would
   otherwise sit on the band for a week. Requests never go stale.
+  One commitment is one promise: the judge is shown the open promises and names the one a
+  new phrasing restates, and a phrasing that shares most of its content words with an open
+  promise (or any earlier phrasing of it) is that promise too. What the agent asks the
+  person to do ("still waiting on you: run X") is never a promise. At most five are open;
+  a sixth closes the oldest as `stale`.
 - **The gate.** Items still open after the judge get **one** framed re-prompt ("the ghostfleet
   plugin sent a message") naming them and asking the agent to finish each or say why not.
   The bound is in the data: an item carries `gated` once asked, and is never asked again,

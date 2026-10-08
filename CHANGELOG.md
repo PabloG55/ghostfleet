@@ -15,6 +15,11 @@ the detail, and every entry here names the PR that carries the argument.
   what a cut-off reply finished. A failing judge is on the band (`judge failing: <why>`) and
   in `fleet-ledger list`, and a promise no judged turn addresses in five closes as `stale`.
   A session's existing backlog is judged on its next answered turn.
+- **Promises stop multiplying.** The same follow-up restated in new words each turn was a
+  new promise each time, and steps the agent asked the person to take ("still waiting on
+  you: run X") were recorded as the agent's own. The judge now names the open promise a
+  phrasing restates, a word-overlap check catches the ones it misses, person-addressed
+  steps are dropped, and at most five promises are open at once.
 
 ## 0.5.1 — 2026-10-08
 

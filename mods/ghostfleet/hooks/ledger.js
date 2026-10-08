@@ -182,7 +182,7 @@ export function turnText(blocks, n) {
 // `turn` is the turn's blocks (turnBlocks), or one string for a turn of one block.
 export const ANSWER_CHARS = 6000
 export const EARLIER_CHARS = 1500
-export function judgePrompt(items, turn, { promises, earlier = [] }) {
+export function judgePrompt(items, turn, { promises, earlier = [], openPromises = [] }) {
   const blocks = typeof turn === 'string' ? [turn] : turn || []
   const tail = turnText(blocks, ANSWER_CHARS)
   const final = blocks.length > 1 ? `the LAST block (${blocks.length} of ${blocks.length})` : 'the message'
@@ -211,12 +211,21 @@ export function judgePrompt(items, turn, { promises, earlier = [] }) {
     'An item may open with material the person pasted with no marker (a draft, a log, a transcript) and end with their own words: judge what THOSE words ask. A question ("what do you think?") is "done" once the agent answers it; an answer that ends by offering more or asking something back does not reopen it.',
     'An item is the person\'s own words. "[+ pasted text]" means they also pasted material (a transcript, a log, an earlier reply) as context for those words: the material is not a request of its own, and a "[ghostfleet ledger]" reminder quoted in it is this tool talking, never a request. Judge what the person\'s own words ask; a remark about the paste ("see what it did") asks for the agent to look at it, and is done once the agent has.',
     'An item that only approves, confirms or thanks ("go ahead", "yes", "thanks") asks for no work of its own: it is "done" once the agent acts on what it approved, or if there is nothing to act on. An item that confirms AND asks ("done, now draft the post") is judged by what it asks.',
-    promises === 'off'
-      ? 'Return "promises": [] always.'
-      : `Also list "promises", from ${final} only: things the agent says IT WILL DO LATER in this session ("I'll merge once CI is green", "next I'll add the tests"), each as a short imperative phrase of at most 12 words. Only a firm commitment to a specific action: not work it already did, not suggestions for the user, not questions, not offers that wait on the user ("I can do X if you'd like"), not statements about how it will behave in general ("I'll keep responding normally"). [] if none.`,
+    ...(promises === 'off'
+      ? ['Return "promises": [] always.']
+      : [
+        `Also list "promises", from ${final} only: things the AGENT says IT WILL DO LATER in this session ("I'll merge once CI is green", "next I'll add the tests"), each as a short imperative phrase of at most 12 words. Only a firm commitment to a specific action: not work it already did, not suggestions for the user, not questions, not offers that wait on the user ("I can do X if you'd like"), not statements about how it will behave in general ("I'll keep responding normally").`,
+        'A promise is something the AGENT will do. What it asks the PERSON to do is never a promise: "you run X", "type X", "waiting on you", and every line of a list under "still waiting on you" or "for you to do". If you list one anyway, mark it "by":"person".',
+        ...(openPromises.length
+          ? ['ALREADY OPEN PROMISES (one commitment is one promise, however it is worded):',
+            ...openPromises.map(i => `${i.id}: ${excerpt(i.text, 120)}`),
+            'A promise in this turn that restates one of these (the same follow-up in other words, or narrower or wider) is that promise: give its id as "same". Only a different commitment has "same":"".']
+          : []),
+        '[] if none.',
+      ]),
     '',
     'Reply with ONLY this JSON, no prose, no code fence:',
-    '{"items":[{"id":"<id>","status":"done|not-done|open","reason":"<at most 12 words>"}],"promises":["..."]}',
+    `{"items":[{"id":"<id>","status":"done|not-done|open","reason":"<at most 12 words>"}],"promises":[${promises === 'off' ? '' : '{"text":"<at most 12 words>","by":"agent|person","same":"<open promise id, or empty>"}'}]}`,
   ].join('\n')
 }
 
@@ -258,8 +267,13 @@ export function parseVerdict(text, ids) {
     items.push({ id: String(it.id), status, reason: excerpt(it.reason, 120) })
   }
   if (partial && !items.length) return null
-  const promises = Array.isArray(v.promises)
-    ? v.promises.map(p => excerpt(p, 120)).filter(Boolean).slice(0, 3) : []
+  // Each promise as { text, same? }: a plain string (the shape before `same`) is a new one, and
+  // one the judge says is the PERSON's to do is not a promise at all.
+  const promises = (Array.isArray(v.promises) ? v.promises : [])
+    .map(p => (p && typeof p === 'object' ? p : { text: p }))
+    .filter(p => String(p.by || 'agent').toLowerCase() !== 'person')
+    .map(p => ({ text: excerpt(p.text, 120), ...(p.same ? { same: String(p.same) } : {}) }))
+    .filter(p => p.text && !addressedToPerson(p.text)).slice(0, 3)
   return { items, promises, ...(partial ? { partial: true } : {}) }
 }
 
@@ -282,8 +296,48 @@ export function judgeBatches(items, n = JUDGE_BATCH) {
 // of other work; five turns that never mention it is a commitment the session has dropped.
 export const STALE_TURNS = 5
 
-// The verdict applied: judged items close, promises join as items of their own (one with the
-// same words as an open promise is that promise, not a second one).
+// One commitment is one promise. Measured live: four open promises were one follow-up in
+// four phrasings, added on three consecutive turns ("read the ledgers after the next turns",
+// "watch for re-prompt closure in acme-api and acme-web", "check acme-api, acme-web, toolbox
+// ledgers after next turns", "read acme-api, acme-web, toolbox ledgers ..."): the judge was
+// never told which promises were open, kept the old one open (correctly) and extracted the
+// same commitment again in new words, and the only check was exact text. The judge now sees
+// the open promises and names the one a phrase restates (`same`); this is the backstop for
+// when it does not. Two phrasings are one promise when they share at least two content
+// words and those are at least SAME_SHARE of the shorter one's. Verbs of looking are one
+// verb, and a plural is its singular. On the four above, any two linked through a third:
+// the first and second share only the verb (1 of 4). So a promise keeps the phrasings folded
+// into it (`said`, the last SAID_KEPT) and a new one is matched against all of them; and when
+// a new phrasing matches two open promises, they were one all along and fold into the older.
+export const SAME_SHARE = 0.6
+const SAID_KEPT = 4
+const STOP = new Set('a an the to of in on at for and or then once when after before with by from it its is be this that these those any all i ill will we me my our up out as so just again'.split(' '))
+const LOOK = new Set(['read', 'check', 'watch', 'look', 'review', 'verify', 'inspect', 'monitor', 'confirm', 'see'])
+export function promiseWords(text) {
+  return new Set(String(text || '').toLowerCase().replace(/[’']/g, '').split(/[^a-z0-9.\-/]+/)
+    .map(w => w.replace(/^[.\-/]+|[.\-/]+$/g, ''))
+    .filter(w => w && !STOP.has(w))
+    .map(w => (LOOK.has(w) ? 'check' : w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w)))
+}
+export function samePromise(a, b) {
+  const x = promiseWords(a), y = promiseWords(b)
+  const shared = [...x].filter(w => y.has(w)).length
+  return shared >= 2 && shared / Math.min(x.size, y.size) >= SAME_SHARE
+}
+
+// What the agent asks the PERSON to do is not its promise. Measured live: "Run npm login &&
+// npm publish" and "Type /reload-plugins between turns" became promises, read off a closing
+// "Still waiting on you:" list. The prompt says so; this catches a phrase that names the
+// person outright.
+export const addressedToPerson = text => /\b(you|your|yourself)\b/i.test(String(text || ''))
+
+// At most PROMISE_CAP open promises: a new one past it stales the oldest. Promises are shown,
+// not gated, and five is already more than a band row or a person can keep in view.
+export const PROMISE_CAP = 5
+
+// The verdict applied: judged items close, promises join as items of their own. A promise
+// the judge says restates an open one (`same`), or that reads as one (samePromise), is that
+// promise, never a second; its newer words replace the older ones only when the judge said so.
 export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
   const by = new Map(verdict.items.map(i => [i.id, i]))
   let next = {
@@ -300,14 +354,32 @@ export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
       return { ...i, state: v.status, closedAt: nowMs, closedBy: 'judge', ...(v.reason ? { reason: v.reason } : {}) }
     }),
   }
-  if (promises !== 'off') {
-    const have = new Set(next.items.filter(i => i.source === 'promise' && i.state === 'open').map(i => i.text.toLowerCase()))
-    for (const p of verdict.promises) {
-      if (have.has(p.toLowerCase())) continue
-      have.add(p.toLowerCase())
-      next = addItem(next, { text: p, at: nowMs, turnId, source: 'promise' })
-    }
+  if (promises === 'off') return next
+  const openP = () => next.items.filter(i => i.source === 'promise' && i.state === 'open')
+  const close = (ids, reason) => {
+    next = { ...next, items: next.items.map(i => (ids.includes(i.id) ? { ...i, state: 'stale', closedAt: nowMs, closedBy: 'judge', reason } : i)) }
   }
+  for (const p of verdict.promises) {
+    const named = p.same && openP().find(i => i.id === p.same)
+    if (named) {
+      next = { ...next, items: next.items.map(i => (i === named ? { ...i, text: excerpt(p.text) } : i)) }
+      continue
+    }
+    const said = i => [i.text, ...(i.said || [])]
+    const like = openP().filter(i => said(i).some(t => t.toLowerCase() === p.text.toLowerCase() || samePromise(t, p.text)))
+    if (like.length) {
+      // The oldest keeps the commitment, and every phrasing of it; the others it bridges were
+      // the same one all along.
+      const keep = like[0]
+      const words = [...new Set([...(keep.said || []), ...like.slice(1).flatMap(said), p.text])].filter(t => t !== keep.text).slice(-SAID_KEPT)
+      next = { ...next, items: next.items.map(i => (i.id === keep.id ? { ...i, said: words } : i)) }
+      if (like.length > 1) close(like.slice(1).map(i => i.id), `same as promise ${keep.id}`)
+      continue
+    }
+    next = addItem(next, { text: p.text, at: nowMs, turnId, source: 'promise' })
+  }
+  const over = openP().length - PROMISE_CAP
+  if (over > 0) close(openP().slice(0, over).map(i => i.id), `over the cap of ${PROMISE_CAP} open promises`)
   return next
 }
 
