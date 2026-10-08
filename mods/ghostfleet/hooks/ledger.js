@@ -278,11 +278,13 @@ export function parseVerdict(text, ids) {
 }
 
 // The judge asks about at most JUDGE_BATCH items per call, the newest first. One verdict is
-// one {"id","status","reason"} object per item, 25-40 tokens each, so a ledger of 46 items
-// asked in one call needs ~1,600 tokens of reply against a budget of 700, and is cut off.
-// Ten items is ~400 at the high end, plus three promises, inside 700 with room to spare.
+// one {"id","status","reason"} object per item. Measured on haiku: 46 items in one call took
+// 1,737 output tokens (38 an item) against the 700 the call allowed, so it was cut off.
+// Batches of ten took 325-343, and the first batch, the one that also reads promises, 589:
+// 84% of 700, too close. So ten a call, and 1,500 tokens each, over twice the worst measured.
+// The budget is a ceiling, not a cost: a call is billed for what it writes.
 export const JUDGE_BATCH = 10
-export const JUDGE_TOKENS = 700
+export const JUDGE_TOKENS = 1500
 export function judgeBatches(items, n = JUDGE_BATCH) {
   const newest = [...items].sort((x, y) => (Number(y.at) || 0) - (Number(x.at) || 0) || Number(y.id) - Number(x.id))
   const out = []

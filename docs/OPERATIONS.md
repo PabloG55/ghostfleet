@@ -832,9 +832,10 @@ ledger · 2 open · oldest 4m “add a changelog line” · promise: merge the P
   strict JSON: each item `done`, `not-done` (said so, **with a reason**), or `open`. A part
   an item itself put off ("not in this reply") is not owed yet. A bare "go ahead" or "thanks"
   closes once the agent acted. The call is made only when something is open or the answer
-  reads like a promise, so a quiet session costs nothing. Ten is what fits the reply's 700
-  tokens with room to spare: one call for 46 items was cut off before its closing brace,
-  and a reply cut off anyway still applies every item it finished.
+  reads like a promise, so a quiet session costs nothing. Measured on haiku, one call for 46
+  items needed 1,737 tokens of reply and was cut off at 700 before its closing brace; a call
+  of ten takes at most ~600, and each may now use 1,500. A reply cut off anyway still
+  applies every item it finished.
 - **Promises.** The same call lists commitments from the final message ("next I'll add the
   tests"), firm ones only: not offers that wait on the person, not "I'll keep doing X". Each
   becomes an item with `source: promise`, drawn separately on the band, and closed the same

@@ -572,12 +572,13 @@ test('a long message with an inline paste keeps the words typed after it', async
 // before its closing brace, and the whole of it was dropped. Nothing closed, so the next turn
 // asked about more items and failed the same way, and the band only showed a growing count.
 // This judge answers like the model does: one object per item with a reason of a dozen
-// words, cut at the call's own token budget (4 characters a token, generous for JSON).
+// words, cut at the call's own token budget at 2 characters a token, as measured on haiku's
+// verdicts (934 characters took 589 tokens; 3,705 took 1,737).
 const budgeted = (status: (id: string) => string) => (prompt: string, call: any) => {
   const ids = [...prompt.matchAll(/^(\d+) \[/gm)].map(m => m[1])
   const reason = 'the agent reported this finished in its final block of the turn'
   const full = JSON.stringify({ items: ids.map(id => ({ id, status: status(id), reason })), promises: [] })
-  return { isAnswered: true, text: full.slice(0, (call?.maxTokens ?? 700) * 4), usage: {} }
+  return { isAnswered: true, text: full.slice(0, (call?.maxTokens ?? 700) * 2), usage: {} }
 }
 const band = async ($: any, cols = 160) => {
   const ui = await $.ui.mount({ plugin: 'ghostfleet', surface: 'terminal', component: 'AbovePrompt',
