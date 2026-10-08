@@ -53,6 +53,31 @@ export const excerpt = (s, n = EXCERPT) => {
   return t.length > n ? `${t.slice(0, n - 1)}…` : t
 }
 
+// What a message asks, in the person's own words. A message is often mostly material: a
+// pasted transcript or log with a line of the person's around it. Kept as typed, the item's
+// excerpt was the paste's first lines, the person's words were cut off past the excerpt,
+// and the judge, shown a pasted draft and a pasted ledger reminder, judged THOSE: measured
+// live, "u see what it just did <a pasted turn> its like reminding literally the last
+// response" was re-prompted as an open request. So the pastes are set aside (marked, so the
+// judge knows something was pasted) and so is any ledger reminder quoted in the text: it is
+// this mod's own words, never the person's request. A message that is nothing but a quoted
+// reminder is no request at all ('').
+const PASTE = /<pasted_content\b[^>]*>[\s\S]*?(?:<\/pasted_content\b[^>]*>|$)/g
+const PASTE_TAG = /<\/?pasted_content\b[^>]*>/g
+const REMINDER = [
+  /(?:The ghostfleet plugin sent a message:\s*)?\[ghostfleet ledger\][\s\S]*?(?:it will not be asked again\.\)|$)/g,
+  /This is how Claude Code surfaces a prompt a plugin submits between turns[^\n]*/g,
+]
+const unquote = t => REMINDER.reduce((a, re) => a.replace(re, ' '), t)
+export function requestText(text) {
+  const pastes = []
+  const own = oneLine(unquote(String(text || '').replace(PASTE, m => { pastes.push(m.replace(PASTE_TAG, ' ')); return ' ' })))
+  if (!pastes.length) return own
+  if (own) return `${own} [+ pasted text]`
+  const pasted = oneLine(unquote(pastes.join(' ')))
+  return pasted ? `[pasted] ${pasted}` : ''
+}
+
 // Which submitted prompts are requests, and whose. Only the person's: composer, the phone's
 // bridge, and what the engine cannot attest (`unclassified`). This mod's own submits are
 // never read here: a fleet-send handoff is recorded by DELIVERY at the turn it started (it
@@ -62,7 +87,7 @@ export const excerpt = (s, n = EXCERPT) => {
 // A slash command is an instruction to the harness, not work for the agent.
 export function sourceOf(e) {
   const text = String(e && e.text || '')
-  if (!text.trim() || text.trimStart().startsWith('/')) return null
+  if (!requestText(text) || text.trimStart().startsWith('/')) return null
   const o = (e && e.origin) || { kind: 'composer' }
   return o.kind === 'composer' || o.kind === 'bridge' || o.kind === 'unclassified' ? 'user' : null
 }
@@ -70,7 +95,7 @@ export function sourceOf(e) {
 // A request submitted idle names its turn at that turn's start, which carries its text.
 export function stampTurn(ledger, text, turnId) {
   const t = String(text || '').trim()
-  const i = ledger.items.findIndex(x => x.state === 'open' && !x.turnId && x.source !== 'promise' && x.text === excerpt(t))
+  const i = ledger.items.findIndex(x => x.state === 'open' && !x.turnId && x.source !== 'promise' && x.text === excerpt(requestText(t)))
   if (!t || i < 0) return null
   return { ...ledger, items: ledger.items.map((x, k) => (k === i ? { ...x, turnId } : x)) }
 }
@@ -79,7 +104,7 @@ export function stampTurn(ledger, text, turnId) {
 // queue (Up edits it) and never reach the model; see `withdrawn` below.
 export function addItem(ledger, { text, at, turnId, source, queued }) {
   const seq = (Number(ledger.seq) || 0) + 1
-  const item = { id: String(seq), text: excerpt(text), at, ...(turnId ? { turnId } : {}), state: 'open', source, ...(queued ? { queued: true } : {}) }
+  const item = { id: String(seq), text: excerpt(source === 'promise' ? text : requestText(text)), at, ...(turnId ? { turnId } : {}), state: 'open', source, ...(queued ? { queued: true } : {}) }
   const items = [...ledger.items, item].slice(-KEEP_ITEMS)
   return { ...ledger, seq, items }
 }
@@ -164,6 +189,7 @@ export function judgePrompt(items, turn, { promises, earlier = [] }) {
     '- "not-done": the agent explicitly says THIS item was not or cannot be done AND gives a reason. A refusal with no reason, or one that does not say which request it means, is "open".',
     '- "open": anything else: not mentioned, only acknowledged, or partly done with no report of why the rest is waiting.',
     'Judge an item by what it asked for NOW: a part it explicitly put off ("not in this reply", "later", "after X") is not owed yet.',
+    'An item is the person\'s own words. "[+ pasted text]" means they also pasted material (a transcript, a log, an earlier reply) as context for those words: the material is not a request of its own, and a "[ghostfleet ledger]" reminder quoted in it is this tool talking, never a request. Judge what the person\'s own words ask; a remark about the paste ("see what it did") asks for the agent to look at it, and is done once the agent has.',
     'An item that only approves, confirms or thanks ("go ahead", "yes", "thanks") asks for no work of its own: it is "done" once the agent acts on what it approved, or if there is nothing to act on. An item that confirms AND asks ("done, now draft the post") is judged by what it asks.',
     promises === 'off'
       ? 'Return "promises": [] always.'
@@ -234,7 +260,7 @@ export function gateTargets(ledger, nowMs, { promises }) {
 // Matched on the item's opening words: the item keeps an excerpt, the transcript the whole.
 export function withdrawn(items, userTexts) {
   const norm = t => oneLine(t).toLowerCase()
-  const texts = userTexts.map(norm)
+  const texts = userTexts.map(t => norm(requestText(t)))
   return items.filter(i => i.queued && i.source !== 'promise').filter(i => {
     const head = norm(i.text).replace(/…$/, '').slice(0, 80)
     return head && !texts.some(t => t.includes(head))

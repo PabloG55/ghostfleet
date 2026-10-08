@@ -443,3 +443,64 @@ test("a subagent's steps are not the main turn's text, and a turn's text is not 
   const p = w.judged[1]
   expect(p.slice(p.indexOf('THIS TURN'))).not.toContain(LAST)
 })
+
+// THE PERSON'S WORDS, NOT THE PASTE. Measured live, the same session: "u see what it just did"
+// + a pasted transcript (the previous turn's draft AND the gate's re-prompt) + "its like
+// reminding literally the last response". The item kept the paste's first lines; the person's
+// words fell past the excerpt; the judge read a pasted reminder as the request and the gate
+// re-prompted it. The ITEM is what the judge is shown, so that is what these rows hold.
+const REMINDER = [
+  'The ghostfleet plugin sent a message:',
+  '[ghostfleet ledger] One request is still open from this session:',
+  '12. "done now draft the post"',
+  'Finish each one now, or say for each that it is not done and why. (Asked once per item; it will not be asked again.)',
+  '',
+  "This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.",
+].join('\n')
+const PASTED = `u see what it just did <pasted_content id="ab12">⏺ ${DRAFT}\n⏺ ${LAST}\n${REMINDER}</pasted_content id="ab12"> its like reminding literally the last response`
+const itemsOf = (prompt: string) => prompt.slice(prompt.indexOf('ITEMS:'), prompt.indexOf('THIS TURN'))
+
+test('a message that is mostly a paste is the person\'s own words, the paste set aside and marked', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, PASTED)
+  await $.turn.start({ text: PASTED, turnId: 't1' })
+  expect(book(w).items[0].text).toBe('u see what it just did its like reminding literally the last response [+ pasted text]')
+  expect(book(w).items[0].turnId).toBe('t1')
+  await step($, 't1', 0, 'Yes: the gate re-prompted a request the turn had answered. Sent a fix to a worker.')
+  await $.turn.complete(done('t1', 'Yes: the gate re-prompted a request the turn had answered. Sent a fix to a worker.'))
+  await settle(clock)
+  const items = itemsOf(w.judged[0])
+  expect(items).toContain('reminding literally the last response')
+  expect(items).not.toContain(DRAFT)
+  expect(items).not.toContain('[ghostfleet ledger]')
+})
+
+test('a ledger reminder quoted back is never a request: alone it is no item, inside a message it is dropped', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, REMINDER)
+  await type($, `<pasted_content id="cd34">${REMINDER}</pasted_content id="cd34">`)
+  expect(book(w)?.items ?? []).toEqual([])
+  await type($, `${REMINDER}\nwhy did it ask this`)
+  expect(book(w).items.map((i: any) => i.text)).toEqual(['why did it ask this'])
+})
+
+test('a pasted message queued mid-turn and delivered is found in the transcript: nagged, not dropped as withdrawn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  await type($, PASTED, 't1')
+  w.heard = ['fix the login redirect', PASTED]
+  w.judge = verdict(id => (id === '1' ? 'done' : 'open'))
+  await $.turn.complete(done('t1', 'Fixed the redirect.'))
+  await settle(clock)
+  expect(book(w).items.length).toBe(2)
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('reminding literally the last response')
+  expect(nags(w)[0].text).not.toContain('One request is still open from this session:\n12.')
+})

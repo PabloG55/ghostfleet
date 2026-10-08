@@ -3917,6 +3917,21 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   is "ledger: the whole turn in order; cut from the middle; missed steps fall back to the final text" \
      "2 true false true true true true only this a|b|c" "$lt"
 
+  # An item is the person's own words: a paste is set aside and marked, a ledger reminder
+  # quoted back is never a request (alone, no item at all), and a paste with nothing typed
+  # around it is still an item.
+  lp="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const nag = L.gatePrompt([{ id: '12', text: 'done now draft the post', source: 'user' }])
+    const r = [
+      L.requestText('see this <pasted_content id=\"ab12\">a long log\n' + nag + '</pasted_content id=\"ab12\"> why'),
+      L.requestText(nag), L.requestText(nag + '\nwhy did it ask'), L.requestText('<pasted_content>a log line</pasted_content>'),
+      L.sourceOf({ text: nag, origin: { kind: 'composer' } }) || '-',
+    ]
+    console.log(r.join(' | '))" 2>&1)"
+  is "ledger: the person's words, not the paste; a quoted reminder is no request" \
+     "see this why [+ pasted text] |  | why did it ask | [pasted] a log line | -" "$lp"
+
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
   printf '{"session_id":"lg-1","sock":"cf-lgtest","slot":"w1","ts":5}' > "${LG:?}/lg-1.json"
