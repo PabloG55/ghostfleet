@@ -6941,6 +6941,43 @@ else
   skip "npm package sweep" "npm or git missing"
 fi
 
+# ── 4a10b6b. the registry gets the bin the package declares ──────────────────
+# CAUGHT ONE STEP BEFORE THE REGISTRY. npm 11.19 "auto-corrects" package.json on publish,
+# and a bin path written `./bin/npx-install.mjs` was "invalid and removed" — from the
+# manifest it SENDS, while the tarball's own package.json kept it. `npx ghostfleet-cli`
+# resolves its command from that manifest, so the release would have installed and then
+# had nothing to run. 0.4.0 went out under an older npm that normalised the `./` away
+# instead, which is why the same line published once and not the next time. The only sign
+# was a warning in the middle of the publish output.
+#
+# Assert the shape npm keeps: every bin target is a plain relative path (no `./`, no
+# leading `/`), names a tracked file, and that file is executable.
+group "the npm package's bin survives npm's publish-time fixes"
+if command -v node >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  bin_problems() {  # $1 = a package.json; prints one line per bad bin target
+    node -e '
+      const fs = require("fs"), path = require("path");
+      const p = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const tracked = new Set(process.argv[3].split("\n"));
+      const bins = typeof p.bin === "string" ? { [p.name]: p.bin } : (p.bin || {});
+      for (const [name, t] of Object.entries(bins)) {
+        if (/^\.\/|^\//.test(t)) { console.log(`${name}: ${t} starts with ./ or /`); continue; }
+        if (!tracked.has(t)) { console.log(`${name}: ${t} is not a tracked file`); continue; }
+        try { fs.accessSync(path.join(process.argv[2], t), fs.constants.X_OK); }
+        catch { console.log(`${name}: ${t} is not executable`); }
+      }' "$1" "$ROOT" "$(cd "$ROOT" && git ls-files)"
+  }
+  is "every bin target is plain, tracked and executable" "" "$(bin_problems "$ROOT/package.json")"
+  # Both directions: the check must reject the exact line that was about to ship.
+  BADPKG="$(mktemp "${TMPDIR:-/tmp}/pkg.XXXXXX")"
+  node -e 'const p=require(process.argv[1]); p.bin={ghostfleet:"./bin/npx-install.mjs"}; console.log(JSON.stringify(p))' \
+    "$ROOT/package.json" > "$BADPKG"
+  is "...and it refuses ./bin/…" "ghostfleet: ./bin/npx-install.mjs starts with ./ or /" "$(bin_problems "$BADPKG")"
+  rm -f "${BADPKG:?}"
+else
+  skip "npm bin shape" "node or git missing"
+fi
+
 # ── 4a10b7. no assertion may pipe into a short-circuiting reader ──────────────
 # THIS ONE FAILED ON ONE LEG OF ONE RUN AND BLAMED AN INNOCENT FILE. `set -uo pipefail`
 # is on (top of this file), and `grep -q` stops reading at its FIRST match — so the
