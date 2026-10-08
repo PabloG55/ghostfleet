@@ -66,6 +66,10 @@ function world(on: any, env: Record<string, string> = {}): World {
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('turn.start', (_$: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
+  // The model's side of a step: what the step's response said, as the engine returns it.
+  on('turn.step', async function* (_$: any, e: any) {
+    return { turnId: e.turnId, index: e.index, answer: e.model, toolUses: [], stopReason: 'end_turn', usage: null }
+  })
   return w
 }
 
@@ -79,6 +83,13 @@ const done = (turnId: string, answer: string, extra: object = {}) =>
   ({ answer, durationMs: 1, isAborted: false, turnId, reason: 'answer', ...extra }) as any
 // The judge runs after turn.complete resolved, unawaited: let it finish.
 const settle = async (clock: any) => { for (let i = 0; i < 6; i++) await clock.advance(10) }
+// One model step of a turn that wrote `text` ('' for a step that only called tools). The
+// stub beneath answers with the text it is handed, carried in `model`.
+const step = async ($: any, turnId: string, index: number, text: string, extra: object = {}) => {
+  const s = $.turn.step({ turnId, index, model: text, messageCount: 1, ...extra } as any)
+  for await (const _ of s) { /* drained */ }
+  return s.result
+}
 // The re-prompts the gate sent: the mod's own framed submits, not the test's typing.
 const nags = (w: World) => w.submitted.filter(e => e.origin?.kind === 'plugin' && !e.origin?.asUser)
 
@@ -360,4 +371,75 @@ test('/ledger lists, closes by hand, and clears, without a turn', async ($, on) 
   await $.command.run({ command: 'ledger', args: 'clear' } as any)
   await clock.advance(10)
   expect(rec(w).ledger.open).toBe(0)
+})
+
+// THE WHOLE TURN, NOT ITS LAST BLOCK. Measured live: a turn wrote a post in its first block,
+// ran two commands, and ended "The draft is above. The publish went through…; I'm checking
+// the registry until it does". turn.complete's `answer` is that last block alone, so the
+// judge was shown "the draft is above" with nothing above it, kept the request open, and the
+// gate re-prompted for a reply the person had just read. The stub judge answers "done" only
+// when it can SEE the draft: these rows go red if the judge is handed `e.answer` again.
+const DRAFT = 'acme-api 0.5.0 is out: faster startup, a new sync command, fewer dependencies.'
+const LAST = "The draft is above. The publish went through: the registry accepted 0.5.0 and said it may take a few minutes to show up. I'm checking the registry until it does…"
+const seesDraft = (prompt: string) => verdict(() => (prompt.includes(DRAFT) ? 'done' : 'open'))(prompt)
+
+test('a draft written early in the turn closes the request the turn ends by pointing at', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'done now draft the post')
+  await $.turn.start({ text: 'done now draft the post', turnId: 't1' })
+  w.judge = seesDraft
+  await step($, 't1', 0, DRAFT)
+  await step($, 't1', 1, '')
+  await step($, 't1', 2, '')
+  await step($, 't1', 3, LAST)
+  await $.turn.complete(done('t1', LAST))
+  await settle(clock)
+  expect(w.judged.length).toBe(1)
+  // in order, labelled, the last block named as the end
+  const p = w.judged[0]
+  expect(p.indexOf('[block 1 of 2]')).toBeGreaterThan(-1)
+  expect(p.indexOf(DRAFT)).toBeLessThan(p.indexOf(LAST))
+  expect(p).toContain('the LAST block (2 of 2)')
+  expect(book(w).items[0].state).toBe('done')
+  expect(nags(w).length).toBe(0)
+})
+
+test('a turn whose steps were missed (a reload mid-turn) is judged on its final text: the old input, and it nags', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'done now draft the post')
+  await $.turn.start({ text: 'done now draft the post', turnId: 't1' })
+  w.judge = seesDraft
+  await $.turn.complete(done('t1', LAST))
+  await settle(clock)
+  expect(w.judged[0]).not.toContain(DRAFT)
+  expect(w.judged[0]).not.toContain('[block')
+  expect(book(w).items[0].state).toBe('open')
+  expect(nags(w).length).toBe(1)
+})
+
+test("a subagent's steps are not the main turn's text, and a turn's text is not the next turn's", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'done now draft the post')
+  await $.turn.start({ text: 'done now draft the post', turnId: 't1' })
+  w.judge = seesDraft
+  await step($, 't1', 0, DRAFT, { agentId: 'agent-7' })
+  await step($, 't1', 1, LAST)
+  await $.turn.complete(done('t1', LAST))
+  await settle(clock)
+  expect(w.judged[0]).not.toContain(DRAFT)
+  expect(book(w).items[0].state).toBe('open')
+  // the next turn starts with nothing of t1's carried as its own blocks
+  await type($, 'and one more line', undefined)
+  await $.turn.start({ text: 'and one more line', turnId: 't2' })
+  await step($, 't2', 0, 'Added.')
+  await $.turn.complete(done('t2', 'Added.'))
+  await settle(clock)
+  const p = w.judged[1]
+  expect(p.slice(p.indexOf('THIS TURN'))).not.toContain(LAST)
 })

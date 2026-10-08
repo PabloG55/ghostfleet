@@ -102,39 +102,72 @@ export function ledgerSummary(ledger, nowMs) {
 const PROMISE_WORDS = /\b(I'll|I will|I'm going to|I am going to|next,? I|then I|once .{1,60}(I'll|I will)|when .{1,60}(I'll|I will)|later|after (that|this|CI|the))\b/i
 export const soundsLikeAPromise = answer => PROMISE_WORDS.test(String(answer || ''))
 
-// The one judge call: which open items the final message addressed, and what it promised.
-// Inputs are truncated: item texts to EXCERPT, the answer to its last ANSWER_CHARS (a final
-// message reports at its end).
+// What a turn said: every text block it wrote, in order, one per model step that wrote any.
+// `turn.complete`'s `answer` is only the LAST of them, and judged alone it lost the work:
+// a turn wrote a post in its first block, ran two commands, and ended "the draft is above",
+// and the judge, shown that line with nothing above it, kept the request open and the gate
+// re-prompted for a reply the person had just read. `steps` are the texts the turn's steps
+// returned; `answer` is the turn's final text, the whole record when the steps were missed
+// (the module reloaded mid-turn) and appended when the last step did not end on it.
+export function turnBlocks(steps, answer) {
+  const blocks = (steps || []).map(s => String(s || '')).filter(s => s.trim())
+  const last = String(answer || '')
+  if (last.trim() && (!blocks.length || blocks[blocks.length - 1].trim() !== last.trim())) blocks.push(last)
+  return blocks
+}
+
+// The turn as the judge reads it: each block labelled with its place, and a long turn cut
+// from the MIDDLE. The start is where the work tends to be (the draft, the answer) and the
+// end is where the turn reports; a tail-only cut drops exactly the half the report points at.
+const HEAD_SHARE = 0.4
+export function middleCut(s, n) {
+  const a = String(s || '')
+  if (a.length <= n) return a
+  const head = Math.floor(n * HEAD_SHARE)
+  const tail = n - head
+  return `${a.slice(0, head)}\n[… ${a.length - head - tail} characters from the middle of the turn left out …]\n${a.slice(-tail)}`
+}
+export function turnText(blocks, n) {
+  const list = typeof blocks === 'string' ? [blocks] : blocks || []
+  const text = list.length > 1 ? list.map((b, k) => `[block ${k + 1} of ${list.length}]\n${b}`).join('\n\n') : String(list[0] || '')
+  return middleCut(text, n)
+}
+
+// The one judge call: which open items the turn addressed, and what it promised. Inputs are
+// truncated: item texts to EXCERPT, the turn to ANSWER_CHARS, an earlier turn to EARLIER_CHARS.
+// `turn` is the turn's blocks (turnBlocks), or one string for a turn of one block.
 export const ANSWER_CHARS = 6000
 export const EARLIER_CHARS = 1500
-const tailOf = (s, n) => { const a = String(s || ''); return a.length > n ? `…${a.slice(-n)}` : a }
-export function judgePrompt(items, answer, { promises, earlier = [] }) {
-  const tail = tailOf(answer, ANSWER_CHARS)
-  const before = earlier.slice(-2).map(t => tailOf(t, EARLIER_CHARS))
+export function judgePrompt(items, turn, { promises, earlier = [] }) {
+  const blocks = typeof turn === 'string' ? [turn] : turn || []
+  const tail = turnText(blocks, ANSWER_CHARS)
+  const final = blocks.length > 1 ? `the LAST block (${blocks.length} of ${blocks.length})` : 'the message'
+  const before = earlier.slice(-2).map(t => turnText(t, EARLIER_CHARS))
   const list = items.length
     ? items.map(i => `${i.id} [${i.source === 'promise' ? 'promise the agent made' : 'request to the agent'}]: ${excerpt(i.text)}`).join('\n')
     : '(none)'
   return [
-    'You audit an AI coding agent. Below are items it owes, and the final message it just ended its turn with.',
+    'You audit an AI coding agent. Below are items it owes, and everything it wrote in the turn it just ended.',
     '',
     'ITEMS:',
     list,
     '',
-    ...(before.length ? ['EARLIER FINAL MESSAGES (oldest first; an item answered here is answered):', ...before.map(t => `<<<\n${t}\n>>>`), ''] : []),
-    'FINAL MESSAGE:',
+    ...(before.length ? ['EARLIER TURNS (oldest first; an item answered here is answered):', ...before.map(t => `<<<\n${t}\n>>>`), ''] : []),
+    `THIS TURN (every text block the agent wrote, in order; its tool calls and their output ran between blocks and are left out; ${final} is how it ended):`,
     '<<<',
     tail,
     '>>>',
     '',
     'For EACH item decide:',
-    '- "done": a final message reports it completed or answered.',
-    '- "not-done": a final message explicitly says THIS item was not or cannot be done AND gives a reason. A refusal with no reason, or one that does not say which request it means, is "open".',
-    '- "open": anything else: not mentioned, only acknowledged, partly done, or still in progress.',
+    '- "done": the turn (any block of it) or an earlier turn did it, answered it, or reports it completed. Work written in an earlier block counts: "the draft is above" in the last block refers to a draft in an earlier one.',
+    '- "done" also, with reason "reported: waiting on <what>", when the agent did everything it can do now and says plainly that the rest waits on something outside its control (CI running, a registry or deploy propagating, a review, the person\'s own action), and what happens next. Work the agent could have done itself and simply did not is not this: it is "open".',
+    '- "not-done": the agent explicitly says THIS item was not or cannot be done AND gives a reason. A refusal with no reason, or one that does not say which request it means, is "open".',
+    '- "open": anything else: not mentioned, only acknowledged, or partly done with no report of why the rest is waiting.',
     'Judge an item by what it asked for NOW: a part it explicitly put off ("not in this reply", "later", "after X") is not owed yet.',
-    'An item that only approves, confirms or thanks ("go ahead", "yes", "thanks") asks for no work of its own: it is "done" once a final message acts on what it approved, or if there is nothing to act on.',
+    'An item that only approves, confirms or thanks ("go ahead", "yes", "thanks") asks for no work of its own: it is "done" once the agent acts on what it approved, or if there is nothing to act on. An item that confirms AND asks ("done, now draft the post") is judged by what it asks.',
     promises === 'off'
       ? 'Return "promises": [] always.'
-      : 'Also list "promises", from the FINAL MESSAGE only: things the agent says IT WILL DO LATER in this session ("I\'ll merge once CI is green", "next I\'ll add the tests"), each as a short imperative phrase of at most 12 words. Only a firm commitment to a specific action: not work it already did, not suggestions for the user, not questions, not offers that wait on the user ("I can do X if you\'d like"), not statements about how it will behave in general ("I\'ll keep responding normally"). [] if none.',
+      : `Also list "promises", from ${final} only: things the agent says IT WILL DO LATER in this session ("I'll merge once CI is green", "next I'll add the tests"), each as a short imperative phrase of at most 12 words. Only a firm commitment to a specific action: not work it already did, not suggestions for the user, not questions, not offers that wait on the user ("I can do X if you'd like"), not statements about how it will behave in general ("I'll keep responding normally"). [] if none.`,
     '',
     'Reply with ONLY this JSON, no prose, no code fence:',
     '{"items":[{"id":"<id>","status":"done|not-done|open","reason":"<at most 12 words>"}],"promises":["..."]}',

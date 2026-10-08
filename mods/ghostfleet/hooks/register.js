@@ -44,7 +44,7 @@ import { teamOf, latestBySlot, summarize, prSummary, bandRuns } from './band-sha
 import {
   ledgerFile, parseLedger, ledgerConfig, sourceOf, addItem, openItems, ledgerSummary,
   soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
-  markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems,
+  markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
 } from './ledger.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
@@ -215,8 +215,16 @@ async function onTurnComplete($, e, next) {
   if (e.agentId === undefined) await setState($, stateAfterTurn(e.reason))
   deliveryTurnComplete(e)
   // Not awaited: the judge is a model call, and the turn's end must not wait on it.
-  if (e.agentId === undefined) void ledgerTurnComplete($, e).catch(() => {})
+  if (e.agentId === undefined) void ledgerTurnComplete($, e, takeSteps(e)).catch(() => {})
   return done
+}
+
+// Every step's text is passed through untouched and noted for the ledger's judge, which
+// reads the whole turn (see turnBlocks in ./ledger.js). A subagent's steps are its own.
+async function* onTurnStep($, e, next) {
+  const r = yield* next(e)
+  if (e.agentId === undefined && r && r.answer) noteStep(e.turnId, r.answer)
+  return r
 }
 
 // THE PERMISSION DIALOG, FROM THE VERDICT THAT OPENS IT. The obvious events are
@@ -509,6 +517,7 @@ async function onSessionStart($, e, next) {
 export const register = on => {
   on('session.start', onSessionStart)
   on('turn.start', onTurnStart)
+  on('turn.step', onTurnStep)
   on('turn.complete', onTurnComplete)
   on('tool.check', onToolCheck)
   on('tool.call', onToolCall)
@@ -946,13 +955,14 @@ function startBand($) {
 // happen: the second message's answer is simply never written, and the person finds out
 // when they go looking. So does "I'll merge when it's green", said once and never done.
 // From in here both are visible: `prompt.submit` sees every message the moment Enter is
-// pressed (with the turn it was typed over), and `turn.complete` sees the final text.
+// pressed (with the turn it was typed over), `turn.step` sees the text of every step of a
+// turn, and `turn.complete` sees how it ended.
 //
 //   RECORD   each request an item in <fleet dir>/<session_id>.ledger (./ledger.js has the
 //            shape), its open count in the status record (`ledger`), the oldest on the band
 //   JUDGE    at a main-loop turn.complete that ended with an answer, ONE small-model call
 //            (when something is open, or the answer sounds like a promise): which open
-//            items the final text addressed, and what it promised to do later
+//            items the turn's text, all of it, addressed, and what its final text promised
 //   GATE     items still open after that get ONE re-prompt, ever, naming them
 //
 // A NAG, NOT A GUARD. It fails OPEN everywhere: a judge that errors, times out or answers
@@ -975,7 +985,8 @@ let currentTurn = ''
 let judging = false
 let judgeNext = null     // a turn.complete that arrived while the judge was busy
 let turnsStarted = 0     // main-loop turn.starts, so a verdict can tell it went stale
-let answers = []         // the last few final messages: { at, text }
+let answers = []         // the last few judged turns: { at, turnId, blocks }
+let stepTexts = new Map() // turnId -> the text each of its main-loop steps wrote, in order
 let ledgerShown = ''     // what the band and the record last said
 let ledgerAsOf = 0
 
@@ -1099,18 +1110,33 @@ async function ledgerFleetItem($, text, turnId) {
   await changeLedger($, l => addItem(l, { text, at, turnId, source: 'fleet' }))
 }
 
+// Kept for the last few turns only: a turn that never completes (a crash, a reload) must
+// not hold its texts for the life of the session.
+function noteStep(turnId, text) {
+  const list = stepTexts.get(turnId) || []
+  stepTexts.delete(turnId)
+  stepTexts.set(turnId, [...list, text])
+  while (stepTexts.size > 4) stepTexts.delete(stepTexts.keys().next().value)
+}
+
+function takeSteps(e) {
+  const steps = stepTexts.get(e.turnId) || []
+  stepTexts.delete(e.turnId)
+  return turnBlocks(steps, e.answer)
+}
+
 // One judge at a time. A turn.complete that arrives while one runs is not dropped: the
 // newest waits and is judged next (measured: two queued messages ran as a 1-second turn
 // while the first turn's judge was still out, and that turn's answer was never judged).
-async function ledgerTurnComplete($, e, generation = turnsStarted) {
+async function ledgerTurnComplete($, e, blocks = turnBlocks([], e.answer), generation = turnsStarted) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on || e.reason !== 'answer') return
   const at = await $.clock.now()
-  answers = [...answers, { at, text: String(e.answer || '') }].slice(-3)
-  if (judging) { judgeNext = { e, generation }; return }
+  answers = [...answers, { at, turnId: e.turnId, blocks }].slice(-3)
+  if (judging) { judgeNext = { e, blocks, generation }; return }
   judging = true
   try {
-    await judgeTurn($, cfg, e, at, generation)
+    await judgeTurn($, cfg, e, blocks, at, generation)
   } catch (err) {
     void $.ui.log(`ghostfleet ledger: judge threw (${String(err && err.message || err)}); failing open`, { to: 'debug' })
   } finally {
@@ -1119,13 +1145,14 @@ async function ledgerTurnComplete($, e, generation = turnsStarted) {
   const queued = judgeNext
   judgeNext = null
   if (queued) {
-    answers = answers.filter(a => a.text !== String(queued.e.answer || ''))
-    await ledgerTurnComplete($, queued.e, queued.generation)
+    answers = answers.filter(a => a.turnId !== queued.e.turnId)
+    await ledgerTurnComplete($, queued.e, queued.blocks, queued.generation)
   }
 }
 
-// `generation`: how many turns had started when this one ended.
-async function judgeTurn($, cfg, e, nowMs, generation) {
+// `blocks`: every text block the turn wrote. `generation`: how many turns had started when
+// this one ended.
+async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const surfaces = await bounded($, $.session.surfaces(), IO_MS, null)
   if (!surfaces || !surfaces.length) return                  // -p, the SDK: nobody to nag
   const file = await ledgerPath($)
@@ -1135,13 +1162,13 @@ async function judgeTurn($, cfg, e, nowMs, generation) {
   const open = openItems(cur, nowMs)
   const promises = cfg.promises !== 'off' && soundsLikeAPromise(e.answer)
   if (!open.length && !promises) return                      // nothing to judge: no call
-  // The final messages since the oldest open item was made, this one last: a request
-  // answered one turn ago and only referred to now ("I ended my previous reply with it")
-  // is still answered.
+  // The turns since the oldest open item was made, this one last: a request answered one
+  // turn ago and only referred to now ("I ended my previous reply with it") is still
+  // answered.
   const since = open.length ? Math.min(...open.map(i => i.at)) : nowMs
-  const earlier = answers.slice(0, -1).filter(a => a.at >= since).map(a => a.text)
+  const earlier = answers.slice(0, -1).filter(a => a.at >= since).map(a => a.blocks)
   const r = await $.model.complete({
-    model: cfg.model, prompt: judgePrompt(open, e.answer, { ...cfg, earlier }), maxTokens: 700, effort: 'low', timeoutMs: JUDGE_MS,
+    model: cfg.model, prompt: judgePrompt(open, blocks, { ...cfg, earlier }), maxTokens: 700, effort: 'low', timeoutMs: JUDGE_MS,
   })
   const verdict = r && r.isAnswered ? parseVerdict(r.text, open.map(i => i.id)) : null
   if (!verdict) {
