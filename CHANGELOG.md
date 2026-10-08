@@ -4,6 +4,18 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
+## Unreleased
+
+### Fixed
+
+- **The ledger's judge no longer breaks for good past ~20 open items.** It asked for one
+  verdict per open item in a single 700-token reply; past about twenty the reply was cut
+  off, dropped whole, and nothing closed, so every later turn failed the same way while the
+  band showed only a growing count. It now asks ten items a call, newest first, and keeps
+  what a cut-off reply finished. A failing judge is on the band (`judge failing: <why>`) and
+  in `fleet-ledger list`, and a promise no judged turn addresses in five closes as `stale`.
+  A session's existing backlog is judged on its next answered turn.
+
 ## 0.5.1 — 2026-10-08
 
 **After upgrading**, a running session keeps the ledger it loaded: `/reload-plugins` in it

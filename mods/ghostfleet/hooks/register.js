@@ -45,6 +45,7 @@ import {
   ledgerFile, parseLedger, ledgerConfig, sourceOf, addItem, openItems, ledgerSummary,
   soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
+  judgeBatches, JUDGE_TOKENS,
   markInterrupted,
 } from './ledger.js'
 import {
@@ -961,9 +962,10 @@ function startBand($) {
 //
 //   RECORD   each request an item in <fleet dir>/<session_id>.ledger (./ledger.js has the
 //            shape), its open count in the status record (`ledger`), the oldest on the band
-//   JUDGE    at a main-loop turn.complete that ended with an answer, ONE small-model call
-//            (when something is open, or the answer sounds like a promise): which open
-//            items the turn's text, all of it, addressed, and what its final text promised
+//   JUDGE    at a main-loop turn.complete that ended with an answer, a small-model call per
+//            ten open items (when something is open, or the answer sounds like a promise):
+//            which open items the turn's text, all of it, addressed, and what its final text
+//            promised. A promise kept open through five judged turns closes as stale
 //   GATE     items still open after that get ONE re-prompt, ever, naming them
 //
 // A NAG, NOT A GUARD. It fails OPEN everywhere: a judge that errors, times out or answers
@@ -1053,9 +1055,12 @@ async function showLedger($, ledger) {
   const recChanged = said !== ledgerShown
   ledgerShown = said
   ledgerAsOf = asOf
-  await bounded($, $.state.set(LEDGER, (s.open || s.promises) ? { ...s, asOf } : null), IO_MS, null)
+  await bounded($, $.state.set(LEDGER, (s.open || s.promises || s.judgeFailing) ? { ...s, asOf } : null), IO_MS, null)
   if (recChanged) {
-    const field = { open: s.open, promises: s.promises, ...(s.oldest ? { oldest_at: Math.floor(s.oldest.at / 1000) } : {}) }
+    const field = {
+      open: s.open, promises: s.promises, ...(s.oldest ? { oldest_at: Math.floor(s.oldest.at / 1000) } : {}),
+      ...(s.judgeFailing ? { judge_failing: s.judgeFailing } : {}),
+    }
     await patchRecord($, rec => ({ ...rec, ledger: field }))
   }
 }
@@ -1170,19 +1175,39 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   // answered.
   const since = open.length ? Math.min(...open.map(i => i.at)) : nowMs
   const earlier = answers.slice(0, -1).filter(a => a.at >= since).map(a => a.blocks)
-  const r = await $.model.complete({
-    model: cfg.model, prompt: judgePrompt(open, blocks, { ...cfg, earlier }), maxTokens: 700, effort: 'low', timeoutMs: JUDGE_MS,
-  })
-  const verdict = r && r.isAnswered ? parseVerdict(r.text, open.map(i => i.id)) : null
-  if (!verdict) {
-    const why = !r ? 'no result' : !r.isAnswered ? `${r.reason}${r.error ? ` ${r.error}` : ''}` : 'reply was not the JSON asked for'
-    await changeLedger($, l => ({ ...l, judge: { at: nowMs, ok: false, why } }))
-    void $.ui.log(`ghostfleet ledger: judge failed open (${why}); ${open.length} item(s) stay open`, { to: 'debug' })
+  // In batches, newest first (ledger.js JUDGE_BATCH): one call for every open item ran out of
+  // reply past ~20 items, and from then on every turn's judge failed. Promises are read once,
+  // by the first call; the others are told to return none. The calls run one after another:
+  // the newest batch is the one most likely to matter, and it lands first.
+  const batches = open.length ? judgeBatches(open) : [[]]
+  let after = null
+  const failed = []
+  let answered = 0
+  for (const [k, batch] of batches.entries()) {
+    const r = await $.model.complete({
+      model: cfg.model, prompt: judgePrompt(batch, blocks, { ...cfg, promises: k ? 'off' : cfg.promises, earlier }),
+      maxTokens: JUDGE_TOKENS, effort: 'low', timeoutMs: JUDGE_MS,
+    })
+    const verdict = r && r.isAnswered ? parseVerdict(r.text, batch.map(i => i.id)) : null
+    if (!verdict) {
+      failed.push(!r ? 'no result' : !r.isAnswered ? `${r.reason}${r.error ? ` ${r.error}` : ''}` : 'reply was not the JSON asked for')
+      continue
+    }
+    // What a cut-off reply finished still applies; the items it never reached stay open.
+    if (verdict.partial) failed.push(`reply cut off after ${verdict.items.length} of ${batch.length} items`)
+    answered += verdict.items.length
+    after = await changeLedger($, l => applyVerdict(l, verdict, { nowMs, turnId: e.turnId, promises: k ? 'off' : cfg.promises })) || after
+  }
+  const judge = failed.length
+    ? { at: nowMs, ok: false, why: failed[0], items: answered, calls: batches.length, failedCalls: failed.length }
+    : { at: nowMs, ok: true, items: answered, calls: batches.length }
+  const kept = await changeLedger($, l => ({ ...l, judge }))
+  if (failed.length) {
+    void $.ui.log(`ghostfleet ledger: judge failed open on ${failed.length} of ${batches.length} call(s) (${failed[0]}); ${open.length - answered} item(s) unjudged`, { to: 'debug' })
+    // A batch that failed closes nothing and re-prompts nothing: no gate on this turn.
     return
   }
-  const after = await changeLedger($, l => ({
-    ...applyVerdict(l, verdict, { nowMs, turnId: e.turnId, promises: cfg.promises }), judge: { at: nowMs, ok: true },
-  }))
+  after = kept || after
   if (!after || !cfg.gate) return
   // A turn started since this one ended (a queued message, typed or handed over): the
   // verdict is about work that has moved on, and that turn's own end is judged next. Asked

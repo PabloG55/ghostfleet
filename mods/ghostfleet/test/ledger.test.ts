@@ -10,7 +10,7 @@ const LEDGER = `${DIR}/${ID}.ledger`
 const SPOOL = `${DIR}/${ID}.handoff`
 const BASE = { session_id: ID, sock: 'cf-acme-api', slot: 'w1', status: 'idle', ts: 1, cwd: '/w/acme-api' }
 
-type Judge = (prompt: string) => any
+type Judge = (prompt: string, call?: any) => any
 type World = {
   files: Map<string, string>; submitted: any[]; judged: string[]; judge: Judge; surfaces: string[]; registered: string[]
   // what the model received: user messages in the transcript (null: messages() unavailable)
@@ -59,7 +59,7 @@ function world(on: any, env: Record<string, string> = {}): World {
     const stdout = argv[0] === '/bin/sh' ? '4242\n' : argv[0] === 'tmux' ? 'w1\n' : ''
     return { value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('model.complete', async (_$: any, e: any) => { w.judged.push(e.prompt); return { value: await w.judge(e.prompt) } })
+  on('model.complete', async (_$: any, e: any) => { w.judged.push(e.prompt); return { value: await w.judge(e.prompt, e) } })
   on('ui.log', () => ({ value: undefined }))
   on('prompt.submit', (_$: any, e: any) => { w.submitted.push(e); return { text: e.text } })
   on('command.register', (_$: any, e: any) => { w.registered.push(e.name); return { value: { command: e.name } } })
@@ -565,4 +565,133 @@ test('a long message with an inline paste keeps the words typed after it', async
   expect(t.endsWith('what do u think')).toBe(true)
   await $.turn.start({ text: inline, turnId: 't1' })
   expect(book(w).items[0].turnId).toBe('t1')
+})
+
+// THE JUDGE NEVER RUNS OUT OF REPLY. Measured live: a session's ledger reached 46 open items,
+// the one judge call asked for 46 verdicts within 700 tokens of reply, the reply was cut off
+// before its closing brace, and the whole of it was dropped. Nothing closed, so the next turn
+// asked about more items and failed the same way, and the band only showed a growing count.
+// This judge answers like the model does: one object per item with a reason of a dozen
+// words, cut at the call's own token budget (4 characters a token, generous for JSON).
+const budgeted = (status: (id: string) => string) => (prompt: string, call: any) => {
+  const ids = [...prompt.matchAll(/^(\d+) \[/gm)].map(m => m[1])
+  const reason = 'the agent reported this finished in its final block of the turn'
+  const full = JSON.stringify({ items: ids.map(id => ({ id, status: status(id), reason })), promises: [] })
+  return { isAnswered: true, text: full.slice(0, (call?.maxTokens ?? 700) * 4), usage: {} }
+}
+const band = async ($: any, cols = 160) => {
+  const ui = await $.ui.mount({ plugin: 'ghostfleet', surface: 'terminal', component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns: cols, scroll: { offset: 0, bodyRows: 5 } } } as any)
+  const text = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text).join('')
+  await ui.unmount()
+  return text
+}
+
+test('46 open items: every verdict lands, none lost to a cut-off reply', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  for (let k = 1; k <= 46; k++) await type($, `request number ${k} for acme-api`)
+  await $.turn.start({ text: '', turnId: 't1' })
+  w.heard = null
+  w.judge = budgeted(() => 'done')
+  await $.turn.complete(done('t1', 'All of them are done.'))
+  await settle(clock)
+  expect(book(w).items.filter((i: any) => i.state === 'open').map((i: any) => i.id)).toEqual([])
+  expect(book(w).judge).toEqual(expect.objectContaining({ ok: true, items: 46 }))
+  // no call asked about more items than its reply can hold, and the newest were asked first
+  for (const p of w.judged) expect([...p.matchAll(/^(\d+) \[/gm)].length).toBeLessThanOrEqual(10)
+  expect(w.judged[0]).toContain('46 [request')
+  expect(nags(w)).toEqual([])
+})
+
+test('a reply cut off mid-item still applies the items it finished; the rest stay open', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  await type($, 'also bump the version')
+  await type($, 'and add a changelog line')
+  await $.turn.start({ text: '', turnId: 't1' })
+  w.heard = null
+  const full = JSON.stringify({ items: ['3', '2', '1'].map(id => ({ id, status: 'done', reason: 'reported finished' })), promises: [] })
+  const cut = full.slice(0, full.indexOf('"id":"1"') + 12)
+  w.judge = () => ({ isAnswered: true, text: cut, usage: {} })
+  await $.turn.complete(done('t1', 'Done with the version and the changelog.'))
+  await settle(clock)
+  expect(book(w).items.map((i: any) => i.state)).toEqual(['open', 'done', 'done'])
+  expect(book(w).judge).toEqual(expect.objectContaining({ ok: false, why: 'reply cut off after 2 of 3 items' }))
+  // a cut-off reply is a failing judge: it is shown, and nothing is re-prompted on it
+  expect(nags(w)).toEqual([])
+})
+
+test('a failing judge is on the band and in /ledger; a working one clears it', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'refactor the parser')
+  await type($, 'and the lexer')
+  await $.turn.start({ text: '', turnId: 't1' })
+  w.heard = null
+  w.judge = () => ({ isAnswered: true, text: 'Sure! Item 1 looks done.', usage: {} })
+  await $.turn.complete(done('t1', 'Refactored.'))
+  await settle(clock)
+  expect(await band($)).toContain('ledger · judge failing: reply was not the JSON asked for · 2 open')
+  expect(await band($, 30)).toContain('judge failing')
+  expect((await $.command.run({ command: 'ledger', args: '' } as any)).text)
+    .toContain('last judge: FAILING, failed open: reply was not the JSON asked for')
+  expect(rec(w).ledger.judge_failing).toBe('reply was not the JSON asked for')
+  // the next judge call works: the band drops the failure, the listing says ok
+  w.judge = verdict(id => (id === '1' ? 'done' : 'open'))
+  await $.turn.start({ text: '', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Refactored the parser.'))
+  await settle(clock)
+  const after = await band($)
+  expect(after).toContain('ledger · 1 open')
+  expect(after).not.toContain('judge failing')
+  expect((await $.command.run({ command: 'ledger', args: '' } as any)).text).toContain('last judge: ok, 2 items in 1 call')
+  expect(rec(w).ledger.judge_failing).toBeUndefined()
+})
+
+test('a promise no judged turn addresses closes as stale after five; one addressed in time closes as done', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await $.turn.start({ text: '', turnId: 't0' })
+  w.judge = verdict(() => 'open', ['merge the PR once CI is green'])
+  await $.turn.complete(done('t0', "I'll merge it once CI is green."))
+  await settle(clock)
+  w.judge = verdict(() => 'open')
+  for (let k = 1; k <= 4; k++) {
+    await $.turn.start({ text: '', turnId: `t${k}` })
+    await $.turn.complete(done(`t${k}`, 'Updated the docs.'))
+    await settle(clock)
+  }
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'open', keptOpen: 4 }))
+  expect(await band($)).toContain('promise: merge the PR once CI is green')
+  await $.turn.start({ text: '', turnId: 't5' })
+  await $.turn.complete(done('t5', 'Updated the docs.'))
+  await settle(clock)
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'stale', closedBy: 'judge' }))
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 0, promises: 0 }))
+  expect(nags(w)).toEqual([])
+  // a request kept open as long is NOT closed: only promises go stale
+  await type($, 'fix the login redirect')
+  for (let k = 6; k <= 12; k++) {
+    await $.turn.start({ text: '', turnId: `t${k}` })
+    await $.turn.complete(done(`t${k}`, 'Looking at other things.'))
+    await settle(clock)
+  }
+  expect(book(w).items[1].state).toBe('open')
+  // and a promise judged done on its third turn closes as done, never stale
+  w.judge = verdict(() => 'open', ['tag the release after the merge'])
+  await $.turn.start({ text: '', turnId: 't13' })
+  await $.turn.complete(done('t13', "I'll tag the release after the merge."))
+  await settle(clock)
+  const p = book(w).items.find((i: any) => i.text === 'tag the release after the merge')
+  w.judge = verdict(id => (id === p.id ? 'done' : 'open'))
+  await $.turn.start({ text: '', turnId: 't14' })
+  await $.turn.complete(done('t14', 'Tagged it.'))
+  await settle(clock)
+  expect(book(w).items.find((i: any) => i.id === p.id).state).toBe('done')
 })
