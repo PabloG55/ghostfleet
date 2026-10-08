@@ -107,6 +107,7 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
 {
   "project": "acme-api",
   "profile": "work",
+  "sub":     null,                        // a sub-lead's name with --sub, see "nested leads"
   "counts": { "need_you": 0, "working": 2, "ready": 5,   // the lead is counted, see below
               "parked": 0, "limit": 0, "interrupted": 0 },
   "cards": [
@@ -123,12 +124,16 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
       "attached":  true,
       "sched":     null,
       "limit_at":  null,
-      "lead":      true                   // not a worker: no stop, no reclaim, no rename
+      "lead":      true,                  // not a worker: no stop, no reclaim, no rename
+      "parent":    null,
+      "workers":   null,
+      "sub_head":  false
     },
     {
       "name":      "api-fix",             // what fleet-send/fleet-read address
       "label":     null,                  // titles the card when set; name moves to line 2
       "status":    "working",             // the nine-value vocabulary, verbatim
+      "team_status": null,                // a sub-lead's: its team's busiest (see nested leads)
       "folder":    "api-fix",             // the worktree it sits in
       "branch":    "feat/retry-backoff",
       "agent":     "claude",              // rendered only when != claude
@@ -141,15 +146,45 @@ two of its eight cards, plus one `free_worktrees` row from `grid-free.json`, sin
       "attached":  false,
       "sched":     null,                  // { "at": <epoch>, "msg": "…" } → card shows @HH:MM
       "limit_at":  null,                  // "10:20pm" → card shows ↻ 10:20pm
-      "lead":      false                  // on every card, never omitted
+      "lead":      false,                 // on every card, never omitted
+      "parent":    null,                  // the sub-lead this card reports to; null at the top
+      "workers":   null,                  // a SUB-LEAD's team — {total, need_you, working} — else null
+      "sub_head":  false                  // true on the card that heads its own sub-grid
     }
   ],
   "free_worktrees": [
-    { "path": "/Users/pgarces/gf-demo/toolbox-3", "branch": "feat/x", "task": "rework the CSV column mapper",
+    { "path": "/Users/you/gf-demo/toolbox-3", "branch": "feat/x", "task": "rework the CSV column mapper",
       "removing": false }                // true while `git worktree remove` is still running
   ]
 }
 ```
+
+### nested leads: `sub`, `parent`, `workers`, `team_status`, `sub_head`
+
+A worker can run workers of its own (`fleet-spawn` from its worktree makes a child, tagged in
+`<sock>.<child>.parent`). Exactly two levels, and the wire mirrors the screens:
+
+- **The top grid does not list a sub-worker.** It lists the sub-lead, whose `workers` is its
+  team's rollup — `{total, need_you, working}`, each DIRECT worker counted by its own team's
+  state — and the card words it as `2 workers · 1 working · 0 need you` (`rollupText()`, one
+  wording in `web/grid.js` and the TUI; the desk's 28 columns take the shorter
+  `1 of 2 working · 0 need you`). On the desk that line replaces the quoted message; the
+  phone has room and shows it as its own line.
+- **`team_status` is what a sub-lead's card is drawn in**: the busiest of the lead and its
+  whole subtree, `need-you` over `working` over the lead's own `status` (nothing else travels
+  up, and an asleep or exited worker lifts nothing). `null` on every card without workers
+  and on `sub_head`. `status` stays the session's OWN state — the session screen reads it as
+  "is this pane busy" — so a card is drawn from `team_status || status`, and when the two
+  differ the age slot says the lead's own (`lead ✓ 2m ago`). `counts` folds the cards as
+  drawn, so a sub-lead lifted to need-you is a need-you in the top grid's counts.
+- **`--sub <name>` is that sub-lead's grid**: the sub-lead first (`sub_head: true`, drawn and
+  tapped as an ordinary session), then only its children, each with `parent` set. `sub`
+  echoes the name, and is `null` when the sub-lead has gone — a client asked for a sub-grid
+  and got an empty top one, and must go back up rather than draw a name over nothing.
+  `/api/grid?project=&sub=` is this, verbatim. `free_worktrees` is always empty there: a
+  free worktree offered inside a sub-grid would start a top-level worker from it.
+- **A tag whose parent is not on the fleet is ignored**, and that child is a top-level card
+  again. A card hidden under a parent with no card is a session no screen can reach.
 
 ### `lead`: the card the TUI does not have
 
@@ -310,15 +345,32 @@ either breaks confusingly or — if `*` gets pasted in while debugging — widen
 The VPN authenticates a **device**, not a person; an unlocked phone on the tailnet is
 inside. So the service also requires:
 
-- **A passkey at every open.** Face ID on cold start and after the app has been
-  backgrounded for a few minutes. Not a password: a password typed twenty times a day
+- **A passkey whenever there is no live session.** Face ID on first launch and whenever
+  the app comes back after 15 minutes without a request — backgrounded, relaunched or
+  evicted by iOS, it is the same rule. Not a password: a password typed twenty times a day
   converges on something short, autofills from a manager on the very unlocked phone that
   is the threat, and is replayable. A passkey is bound to the secure enclave, cannot be
   copied off the device, and does not degrade with use.
-- **Server-enforced, not client-enforced.** The passkey assertion mints a short-lived
-  session token (~15 min) and the API rejects any request without a live one. A lock
-  screen that only gates the UI is decoration — `curl` with the bearer token would walk
-  straight past it.
+- **Server-enforced, not client-enforced.** The passkey assertion mints a session token
+  and the API rejects any request without a live one. A lock screen that only gates the UI
+  is decoration — `curl` with the bearer token would walk straight past it.
+- **An idle window, not a deadline.** The token dies after `session_ttl` (900 s) *without
+  a request*; every authenticated request — the visible app's own polls included — pushes
+  its expiry to now + 15 min, and the response says so (`X-Session-Expires`) so the
+  client's copy moves with it. No absolute cap: an app in use never asks for a face
+  mid-task. A fixed 15 minutes from Face ID locked the owner out mid-use a quarter of an
+  hour after every unlock, which is what this replaced.
+- **Kept, so a relaunch is not an unlock.** The client stores the token in `localStorage`
+  under the daemon's origin (an installed iOS web app keeps it across relaunches;
+  `sessionStorage` does not) and tries it before the passkey; the first 401 clears it.
+  The daemon keeps live sessions as `sha256(token)` rows in `serve-sessions.json` (0600,
+  beside `serve.json`) and drops expired ones on load, so a restart — every deploy is one
+  — logs nobody out. The file holds no token: reading it opens nothing.
+- **Why that is still safe.** A stolen token is good until it goes unused for 15 minutes,
+  so the bound on it is **revocation, and revocation is instant**: `fleet-serve revoke
+  <id>` refuses the client's tokens on the running daemon's next request, deletes its
+  rows from the session file, and a token minted before the revoke stays dead even if the
+  same id is enrolled again.
 - **A bearer token** identifying the enrolled client, device-bound and individually
   revocable.
 - **A second passkey assertion on the destructive verbs** (§7).
@@ -744,19 +796,34 @@ nothing, because a pane that never changes and a verb that does nothing look ide
 
 ### Playing a message aloud
 
-**Any message, not the newest one.** The control used to live in the composer, and it lived
-there only because "the last thing the agent said" was the only speakable thing — which made
-*the newest message* the whole feature rather than a default. Tapping a bubble reveals a play
-control on that bubble, and tapping another moves it. The count of visible speakers is
-exactly what it was, which is one: a speaker on every bubble is the button wall this screen
-was rebuilt to get rid of.
+**A play button on every message.** The control used to live in the composer, then on
+whichever bubble you had tapped — one speaker on screen at a time, to keep the button wall
+away. The owner asked for one on every message, beside the other per-message controls, so it
+is there now; tap it to play, tap it again to stop. Two voices at once stays impossible:
+starting one message stops the other.
 
-A **tap** reveals it and the control plays. Long-press is already `x kill` on a card and
-already the text-selection gesture inside a bubble, and a third meaning would be the worst
-kind of hidden. A tap that started talking would make scrolling dangerous.
+**Conversation mode, in every session** — while Jarvis (experimental, off by default) is
+switched on; with it off there is no talk button anywhere. The composer of every session — not only Jarvis's —
+has the **talk** button, the same control in the same place: tap it once and the mic opens, a
+second of quiet ends what you said, the Mac transcribes it (whisper.cpp, the transcriber
+Jarvis uses — `fleet-jarvis voice --install`), it is sent to *that* session as a prompt, and
+when the session's turn is over its final reply is read aloud in the Mac's voice (or the
+device's, as below) before the mic opens again. A worker's turn can run for minutes with
+tools in it; the band above the chat says it is on it and for how long, the narration
+between tool calls is never read — only the reply the turn ends on — and it gives up after
+thirty minutes (five for Jarvis). A session blocked on a permission prompt says so, out
+loud, and stops. Leaving the screen stops it, as does locking the app. One implementation
+serves both: the target is Jarvis or `<project>/<session>`, taken from the screen at the
+tap, and the refusal says why in the target's terms (parked, gone from the grid, no
+transcriber on the Mac, no microphone in this browser).
+
+This replaced #12's read-aloud-only speaker toggle in the top bar; its stored setting
+(`gf.autospeak`) is cleared on load. The per-message play button stays.
 
 **What is spoken is not what is written**, and the gap is bigger than markdown. Fenced blocks
-become the words "code block", inline code loses its backticks, links become "link" — and
+become "code omitted", inline code loses its backticks, links become "the link", table pipes
+and rule rows go (a row is read as its cells), emoji are dropped, and every line break ends a
+sentence — and
 identifiers are **named rather than spelled**. A synthesiser reads a 40-character sha one
 character at a time: about fifty seconds, for a string nobody could write down from a speaker
 anyway, wrapped in a four-word sentence.
@@ -783,6 +850,86 @@ decoration, the viewBox, the stroke width and the horn each written once so the 
 cannot drift into different weights. The `aria-label` is load-bearing rather than a nicety —
 an icon contributes no text, so without it a screen reader says "button" and nothing else,
 which is strictly worse than the emoji it replaced.
+
+### The Mac's voice (Kokoro, optional)
+
+The device's `speechSynthesis` is passable in English and poor in Spanish, and the owner writes
+both in one message. When the Mac has [Kokoro](https://github.com/thewh1teagle/kokoro-onnx) —
+an 82M-parameter TTS model run by onnxruntime, entirely on the Mac — `fleet-serve` speaks with
+it instead, and the phone plays the audio:
+
+1. the phone POSTs the cleaned text to `/api/speak`; the daemon splits it into sentences and
+   picks **English (`af_heart`) or Spanish (`ef_dora`) per sentence**, from accents and
+   function words, a fragment with no vote keeping the language before it;
+2. synthesis of every sentence starts at once, in order, in one long-lived Kokoro worker
+   (`lib/kokoro-worker.py`) — loading the model costs more than a short sentence, so it is
+   loaded once and kept for ten idle minutes;
+3. the phone GETs `/api/speak/<id>` for sentence 1, plays it, and fetches sentence 2 while 1
+   plays. The wait before the voice starts is one sentence, not the whole reply;
+4. audio is cached on the Mac by a hash of the words and the voice
+   (`~/.cache/ghostfleet/speech`, newest 500 kept) and decoded buffers on the phone, so a
+   replay is instant.
+
+It plays through Web Audio, not an `<audio>` element: the route needs the bearer token,
+which a media element cannot send, and the CSP refuses the `blob:` URL it would need. iOS
+lets an AudioContext run only after a tap has resumed it, so every tap anywhere in the app
+re-unlocks it (the toggle, the play button, the talk button included) and the audio session
+is set to `playback`, so a phone on silent still speaks, as the device's voice does.
+
+**Nothing here is required.** Without Kokoro, `/api/speak` answers 503 with the reason and
+the phone uses its own voice, with one toast saying why; a sentence that fails mid-reply hands
+the rest of the reply to the device's voice rather than going quiet. `fleet-serve`'s log has
+one line per sentence — its id, language, voice and whether it was synthesised or cached —
+and never the words.
+
+Setup on the Mac — one command, which `./install.sh` also offers (default **No**, and never
+under `--yes` or without a terminal to ask at: it is ~350 MB nobody agreed to by accepting
+"install missing dependencies"):
+
+```bash
+fleet-jarvis voice --kokoro --install    # set it up, or repair it; safe to re-run
+fleet-jarvis voice --kokoro              # is it installed and does its Python work
+```
+
+It installs into `~/.local/share/kokoro`, outside the Documents folder, which macOS will not let
+a launchd daemon read. What it does, so it can be done by hand or audited:
+
+- **Python 3.10–3.12, pinned.** onnxruntime has no wheels for the newest Pythons (a 3.14 system
+  Python has none), so the venv is made with `uv venv --python 3.12` when `uv` is installed — uv
+  fetches 3.12 itself if it must — and otherwise with the newest `python3.12`/`3.11`/`3.10` on
+  PATH. With none of those it says what to install (uv, or `brew install python@3.12` /
+  `apt install python3.12-venv`) and stops before downloading anything. The package is
+  `kokoro-onnx==0.6.1`.
+- **The model files are pinned by size and SHA-256** — `kokoro-v1.0.onnx` and
+  `voices-v1.0.bin` from the kokoro-onnx
+  [`model-files-v1.0`](https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0)
+  release. Each downloads to a `.part`, resumes from it after an interruption, and is renamed into
+  place only once it matches; a file that does not is discarded and never reads as installed.
+  The venv is built as `venv.part` and renamed once it imports, for the same reason.
+- **Idempotent.** On a working install it hashes the files, imports the packages and downloads
+  nothing; a damaged piece is replaced on its own, so a truncated model does not cost a venv
+  rebuild and a dead venv does not cost 350 MB.
+- **It proves it speaks**: the last step synthesises one sentence through the same worker the
+  daemon runs.
+- **The directory must be short.** espeak-ng, which Kokoro phonemises through, cannot find its
+  data more than 151 characters deep, and fails every sentence with a `phontab: No such file`
+  that says nothing about length. The default is well inside that; a `CLAUDE_FLEET_KOKORO_DIR`
+  (or a `$HOME`) long enough to break it is refused before the download.
+
+Where it stands is reported in three places, each with the one command that fixes it —
+*installed*, *not installed* (the phone uses its own voice) or *broken* (a damaged file, a venv
+whose Python went away): `fleet-jarvis status`, `fleet-phone`, and the phone's settings sheet,
+which reads `speak` from `/api/projects` (and from `/api/jarvis` while Jarvis is on).
+
+The daemon finds it on the next request; no restart. Configuration, all optional:
+
+| variable | default | |
+|---|---|---|
+| `CLAUDE_FLEET_KOKORO_DIR` | `~/.local/share/kokoro` | holds the two model files and `venv/` — and where the installer puts them |
+| `CLAUDE_FLEET_KOKORO_PYTHON` | `<dir>/venv/bin/python` | the interpreter that has kokoro-onnx installed |
+| `CLAUDE_FLEET_KOKORO` | on | `off` makes the phone use its own voice |
+| `CLAUDE_FLEET_KOKORO_VOICE_EN` / `_ES` | `af_heart` / `ef_dora` | any Kokoro voice id |
+| `CLAUDE_FLEET_SPEECH_CACHE` | `~/.cache/ghostfleet/speech` | where synthesised sentences are kept |
 
 ### The thinking indicator
 
@@ -884,6 +1031,24 @@ LAN-only and does not help from a café.
 > shows no notification, so the worker is never allowed an opinion. `fleet-serve push
 > --detail anonymous` reduces the payload to a count, because his project names are client
 > names and a lock screen is readable by whoever is holding the phone.
+>
+> **Not while he is at the Mac.** A buzz in a pocket about what is on the screen in front of
+> him is noise, and the poll-based quiet cannot see it — the phone is not polling. So the
+> watcher asks the Mac: keyboard or mouse input within `push.at_mac_idle` seconds (default
+> 120) **and** the screen unlocked means he is at it. On macOS that is two `ioreg` reads, no
+> permission needed: `HIDIdleTime` on `IOHIDSystem` (nanoseconds since the last input) and
+> `IOConsoleLocked` on the registry root. They are taken only when a tick has something to
+> decide, and cached for five seconds. While he is there a push is **held, not dropped**: if
+> he leaves within `push.at_mac_hold` seconds (default 600) — idle past the threshold, or the
+> screen locks — ONE push goes for whatever is still unseen. Unseen means the phone has not
+> polled since the event and the session has not moved on (a need-you no longer blocked, or an
+> answer whose session is working again, was dealt with at the Mac). Past the hold window it
+> is dropped. A newer event for the same session replaces the held one. Every decision is one
+> line in `serve.log`: `push: held 1 — at the Mac (idle 14s)`, `push: released 2 held — left
+> the Mac (screen locked)`, `push: dropped 1 held as seen`, `push: expired 1 held after 600s
+> at the Mac`. `push.at_mac_idle: 0` turns it off; on Linux and WSL it is off (there is no
+> reading, and no reading never counts as "at the Mac" — an unreadable sensor fails toward a
+> push, never toward silence). `fleet-serve push` prints which.
 >
 > Native Claude Code push (below) is still worth having and is not replaced by this: it
 > fires on the permission prompts inside ONE session, and this says which of thirty

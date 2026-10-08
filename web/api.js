@@ -7,7 +7,7 @@
 //
 // ── the contract fleet-serve has to meet ──────────────────────────────────
 //   GET  /api/projects                          -> { home, projects: [ … ] }
-//   GET  /api/grid?project=<name>               -> docs/mobile.md §4, verbatim
+//   GET  /api/grid?project=<name>[&sub=<session>] -> docs/mobile.md §4, verbatim (sub = that sub-lead's grid)
 //   GET  /api/session?project=&session=&limit=20[&before=<ts>]
 //                                               -> { session, total, messages: [ {ts,role,text} ], note? }
 //   GET  /api/pane?project=&session=[&scrollback=N]
@@ -200,55 +200,58 @@ export const FIXTURES = [
   { file: 'grid-degraded.json', project: 'acme-api', title: 'acme-api — unknown · limit · interrupted · parked' },
   { file: 'grid-free.json',     project: 'toolbox',  title: 'toolbox — free worktrees' },
   { file: 'grid-empty.json',    project: 'scratch',  title: 'scratch — nothing running' },
+  { file: 'grid-jarvis.json',   project: 'jarvis',   title: 'jarvis — the master of masters' },
 ];
 export function fixtureName() {
   try { return localStorage.getItem(LS.fixture) || FIXTURES[0].file; } catch { return FIXTURES[0].file; }
 }
 export function setFixtureName(f) { try { localStorage.setItem(LS.fixture, f); } catch {} }
 
-// ── a temporary beacon, because the phone is the only place it happens ────
-// The unlock loop reproduces on one installed iOS home-screen app and on no instrument in
-// this repo, so the only way to stop guessing is to have the device say what it did.
-// fleet-serve logs every request path, so a request that 404s is still a line in the log:
-// no server change, and nothing to deploy but the client.
-//
-// IN THE PATH, NOT A QUERY. fleet-serve logs `(req.url || '').split('?')[0]`, so a query
-// string is dropped before it is ever written. Everything worth reading has to be a path
-// segment.
-//
-// IT LIVES HERE because this is the one module that talks to the network — the rule
-// pwa-check enforces, and it is right: a caller that reaches for its own URL works against
-// fixtures and then asks for something no resolver knows about.
-//
-// Off with localStorage['gf.diag'] = '0'. It comes out again once the log has answered;
-// a probe that ships twice is a feature nobody designed.
-//   READ LAZILY, NOT AT MODULE SCOPE. node's own `localStorage` global warns on stderr
-// unless --localstorage-file is given, and the suite asserts its helpers write nothing
-// there — so touching it while this module is merely IMPORTED turns a probe into a red
-// row in a group that has nothing to do with it. Measured: that is exactly what happened.
-let diagOn = null;
-function diagEnabled() {
-  if (diagOn !== null) return diagOn;
-  diagOn = true;
-  try { if (typeof localStorage !== 'undefined') diagOn = localStorage.getItem('gf.diag') !== '0'; } catch {}
-  return diagOn;
-}
-export function diag(...parts) {
-  if (typeof fetch !== 'function' || !diagEnabled()) return;
-  try {
-    const p = parts.map(x => String(x).replace(/[^A-Za-z0-9._-]/g, '')).filter(Boolean).join('/');
-    fetch('./__diag/' + p, { cache: 'no-store' }).catch(() => {});
-  } catch {}
-}
-
 // ── the session token (§5) ────────────────────────────────────────────────
-// Deliberately NOT in localStorage. A token that outlives the tab outlives the lock,
-// and the whole point of the passkey is that a phone in someone else's hand is not the
-// same as a phone plus its owner. Held in a module variable: a reload re-asserts.
+// KEPT ON THE DEVICE, for as long as the server would honour it. It used to live in a
+// module variable only, so every relaunch asserted — and iOS evicts a backgrounded
+// home-screen app freely, so "relaunch" meant most returns to the app, each one a Face ID
+// for a token the server still held. localStorage, because it is the store an installed
+// iOS web app keeps across relaunches; sessionStorage does not survive one.
+//   What this does NOT weaken: the server decides. The token dies after the idle window
+// (session_ttl, 15 minutes without a request) and on `fleet-serve revoke` whatever this
+// file believes, and the first 401 clears the stored copy (clearToken) so a dead token
+// is tried exactly once. The lock is still the passkey; this only stops asking for it
+// while the session it minted is alive.
+//   Scoped by ORIGIN, as the credential is (passkey.js credKey): a token belongs to the
+// daemon that minted it. Server mode only — a fixture stub is not worth keeping.
 let token = null, tokenExp = 0;
-export function setToken(t, expiresAt) { token = t || null; tokenExp = expiresAt || 0; }
+const LS_TOKEN = 'gf.session';
+function tokenKey() { const r = resolution(); return r.mode === 'server' && r.base ? `${LS_TOKEN}:${r.base}` : ''; }
+function storeToken() {
+  const k = tokenKey();
+  try { if (k) { if (token) localStorage.setItem(k, JSON.stringify({ t: token, exp: tokenExp })); else localStorage.removeItem(k); } } catch {}
+}
+export function setToken(t, expiresAt) { token = t || null; tokenExp = expiresAt || 0; storeToken(); }
 export function haveToken() { return !!token && Date.now() / 1000 < tokenExp; }
-export function clearToken() { token = null; tokenExp = 0; }
+export function clearToken() { token = null; tokenExp = 0; storeToken(); }
+// The cold-start half: whatever this origin's daemon minted last, if it has not visibly
+// expired. Nothing is trusted from it but the string — passkey.resume() asks the server.
+export function restoreToken() {
+  const k = tokenKey();
+  if (!k) return false;
+  let j = null;
+  try { j = JSON.parse(localStorage.getItem(k) || 'null'); } catch {}
+  if (!j || typeof j.t !== 'string' || !(Date.now() / 1000 < Number(j.exp))) {
+    try { localStorage.removeItem(k); } catch {}
+    return false;
+  }
+  token = j.t; tokenExp = Number(j.exp);
+  return true;
+}
+// THE SLIDE, mirrored. fleet-serve answers every authenticated request with the session's
+// new deadline; without copying it here, haveToken() would expire the token on the
+// client's old clock fifteen minutes after Face ID while the server still honoured it —
+// the very lockout this exists to end, moved to the other side of the wire.
+function slid(r) {
+  const x = Number(r && r.headers && r.headers.get && r.headers.get('X-Session-Expires'));
+  if (token && Number.isFinite(x) && x > tokenExp) { tokenExp = x; storeToken(); }
+}
 
 // ── the audit trail (§7) ──────────────────────────────────────────────────
 // Every mutating call is recorded. On a server the row is the server's, surfaced as a
@@ -272,7 +275,8 @@ async function get(pathAndQuery) {
     r = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {}, cache: 'no-store' });
   } catch (e) { throw new OfflineError(String(e && e.message || e)); }
   if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server rejected the session token'); }
-  if (!r.ok) throw new Error(`${pathAndQuery} → HTTP ${r.status}`);
+  slid(r);
+  if (!r.ok) { const e = new Error(`${pathAndQuery} → HTTP ${r.status}`); e.status = r.status; throw e; }
   return r.json();
 }
 
@@ -319,8 +323,15 @@ async function rollup(project) {
 // §4's payload, whichever end it came from. `overlay` replays the verbs performed in
 // fixture mode so a pause you just asked for is visible on the card — on a server the
 // fleet itself is the one that changes and there is nothing to replay.
-export async function getGrid(project) {
-  if ((await ready()).mode === 'server') return get(`/api/grid?project=${encodeURIComponent(project || '')}`);
+export async function getGrid(project, sub = '') {
+  if ((await ready()).mode === 'server')
+    return get(`/api/grid?project=${encodeURIComponent(project || '')}` + (sub ? `&sub=${encodeURIComponent(sub)}` : ''));
+  // A sub-grid is its own fixture, named for the project and the sub-lead — the server
+  // answers it from `fleet-grid.mjs --json --sub`, which draws only that team.
+  if (sub) {
+    try { return applyOverlay(await fixture(`grid-${project}-sub-${sub}.json`)); }
+    catch { return applyOverlay({ project, sub: null, counts: {}, cards: [], free_worktrees: [] }); }
+  }
   const chosen = FIXTURES.find(f => f.file === fixtureName());
   // The fixture picked in settings wins when it belongs to the project you opened;
   // otherwise the first fixture for that project. A project with no fixture gets the
@@ -428,6 +439,7 @@ async function authFetch(kind, path, init) {
   let r;
   try { r = await fetch(baseUrl() + path, init); }
   catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+  slid(r);
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error((j && (j.text || j.error)) || `${kind} → HTTP ${r.status}`);
   return j;
@@ -489,6 +501,87 @@ export async function pushUnsubscribe(endpoint) {
 // The same number bin/fleet-serve.mjs enforces. Stated twice on purpose — the server's
 // copy is the control and this one is the courtesy — and asserted equal in the suite so
 // they cannot drift into a client that refuses what the server would have taken.
+// ── Jarvis (docs/jarvis.md) ───────────────────────────────────────────────
+// What Jarvis is on this machine — its project, whether it can hear, what waits on the
+// owner's yes. The fixture answers with a Jarvis that cannot hear, because it cannot: there
+// is no microphone path without a daemon to transcribe on, and a talk button that seemed to
+// work against fixtures would be the toggle-that-pretends §9 warns about.
+export async function getJarvis() {
+  if ((await ready()).mode === 'server') return get('/api/jarvis');
+  // The fixture answers the way the daemon does when Jarvis is switched off: a 404, which is
+  // how a screen opened before the project list (a #jarvis link) learns the switch.
+  const pj = await fixture('projects.json');
+  if (pj.jarvis_enabled === false) { const e = new Error('/api/jarvis → HTTP 404'); e.status = 404; throw e; }
+  const j = await fixture('jarvis.json');
+  return { ...j, pending: (j.pending || []).filter(p => !overlay.answered.has(p.id)) };
+}
+// A yes carries a fresh assertion (the daemon refuses one without); a no does not need one.
+export async function jarvisConfirm(id, answer, assertion = null) {
+  if ((await ready()).mode !== 'server') {
+    overlay.answered.add(id);
+    record('jarvis_confirm', { id, answer }, 'ok (fixture — recorded, not executed)');
+    return { ok: true, id, answer, told: false, text: `fixture: ${answer} recorded for ${id}, nothing ran` };
+  }
+  if (!haveToken()) throw new AuthError('no live session token');
+  const j = await authFetch('confirm', '/api/jarvis/confirm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`,
+               ...(assertion ? { 'X-Fleet-Assertion': JSON.stringify(assertion) } : {}) },
+    body: JSON.stringify({ id, answer }),
+  });
+  record('jarvis_confirm', { id, answer }, 'ok');
+  return j;
+}
+// One utterance, as WAV bytes, to the Mac's own whisper.cpp. Nothing else hears it.
+export async function jarvisHear(wav) {
+  if ((await ready()).mode !== 'server') throw new Error('voice needs a real fleet-serve — fixtures have nothing to transcribe with');
+  if (!haveToken()) throw new AuthError('no live session token');
+  let r;
+  try {
+    r = await fetch(baseUrl() + '/api/jarvis/hear', { method: 'POST',
+      headers: { 'Content-Type': 'audio/wav', Authorization: `Bearer ${token}` }, body: wav });
+  } catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+  if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
+  slid(r);
+  const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+  if (!j.ok) throw new Error(j.text || `hearing failed (HTTP ${r.status})`);
+  return j;
+}
+
+// The Mac's Kokoro voice (lib/speech.mjs): the words go up, the sentences come back with
+// the voice each one got, and each sentence's audio is fetched by id. A SpeechOff means
+// "no Kokoro here" — the caller falls back to the device's own speechSynthesis — and is a
+// different thing from a failure, which is worth a toast. Fixtures have no Mac to speak.
+export class SpeechOff extends Error {}
+export async function speakPlan(text) {
+  if ((await ready()).mode !== 'server') throw new SpeechOff('fixtures have no Kokoro');
+  if (!haveToken()) throw new AuthError('no live session token');
+  let r;
+  try {
+    r = await fetch(baseUrl() + '/api/speak', { method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ text }) });
+  } catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+  if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
+  slid(r);
+  const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
+  // 404 too: a daemon from before /api/speak existed is a machine without Kokoro.
+  if (r.status === 503 || r.status === 404) throw new SpeechOff(j.text || 'no Kokoro on the Mac');
+  if (!j.ok) throw new Error(j.text || `speech failed (HTTP ${r.status})`);
+  return j.sentences || [];
+}
+export async function speakAudio(id) {
+  let r;
+  try { r = await fetch(baseUrl() + '/api/speak/' + encodeURIComponent(id), { headers: { Authorization: `Bearer ${token}` } }); }
+  catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+  if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
+  slid(r);
+  if (!r.ok) {
+    const j = await r.json().catch(() => ({}));
+    throw (r.status === 503 ? new SpeechOff(j.text || 'Kokoro failed') : new Error(j.text || `audio HTTP ${r.status}`));
+  }
+  return r.arrayBuffer();
+}
+
 export const ATTACH_MAX_BYTES = 6 * 1024 * 1024;
 export async function attach(project, session, file) {
   if ((await ready()).mode !== 'server') {
@@ -522,6 +615,7 @@ export async function attach(project, session, file) {
     });
   } catch (e) { throw new OfflineError(String(e && e.message || e)); }
   if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server refused the upload'); }
+  slid(r);
   const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
   record('attach', { project, session, bytes: file.size }, j.ok ? `ok: ${j.path}` : `refused: ${j.text || r.status}`);
   if (!j.ok) throw new Error(j.text || `attach failed (HTTP ${r.status})`);
@@ -544,6 +638,7 @@ export async function verb(tool, args, assertion = null) {
       });
     } catch (e) { throw new OfflineError(String(e && e.message || e)); }
     if (r.status === 401 || r.status === 403) { clearToken(); throw new AuthError('the server refused the verb'); }
+    slid(r);
     const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
     record(tool, args, j.ok ? 'ok' : `refused: ${j.text || r.status}`);
     if (!j.ok) throw new Error(j.text || `${tool} failed`);
@@ -559,7 +654,7 @@ export async function verb(tool, args, assertion = null) {
 // Kept as an OVERLAY rather than by editing the fixture in memory, so reloading always
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
-const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map() };
+const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set() };
 function applyOverlay(g) {
   let cards = (g.cards || [])
     .filter(c => !overlay.gone.has(c.name))
@@ -611,7 +706,10 @@ function fixtureVerb(tool, a) {
       overlay.sent.set(a.session, list);
       return ok(`sent to '${a.session}'`);
     }
-    case 'fleet_answer': overlay.status.set(a.session, 'working'); return ok(`answered '${a.session}'`);
+    // Same rule as the daemon: an answer names the prompt it answers, or nothing is sent.
+    case 'fleet_answer':
+      if (!a.expect) return { ok: false, text: 'the prompt changed: the pane you answered was not showing a prompt. Nothing was sent.' };
+      overlay.status.set(a.session, 'working'); return ok(`answered '${a.session}'`);
     case 'fleet_stop':
       // The planner refuses the lead before it reaches a command (mcp/fleet-dispatch.mjs),
       // so fixture mode has to refuse it too — this backend stands in for the SERVER, and
@@ -678,5 +776,5 @@ function fixtureVerb(tool, a) {
 export function resetOverlay() {
   overlay.status.clear(); overlay.gone.clear(); overlay.sched.clear();
   overlay.label.clear(); overlay.freeGone.clear(); overlay.added.length = 0; overlay.order.length = 0;
-  overlay.sent.clear();
+  overlay.sent.clear(); overlay.answered.clear();
 }

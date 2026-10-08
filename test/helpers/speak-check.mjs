@@ -86,7 +86,9 @@ const synth = {
   voices: [], calls: [], listeners: {},
   getVoices() { return this.voices; },
   cancel() { this.calls.push('cancel'); },
-  speak(u) { this.calls.push('speak:' + (u.voice ? u.voice.name : 'default') + '@' + u.rate); },
+  // The volume-0 utterance is unlockAudio()'s primer — iOS speaks only after a gesture has
+  // spoken once — and is recorded as what it is, so it is not counted as a second voice.
+  speak(u) { this.calls.push(u.volume === 0 ? 'prime' : 'speak:' + (u.voice ? u.voice.name : 'default') + '@' + u.rate); },
   addEventListener(ev, fn) { (this.listeners[ev] = this.listeners[ev] || []).push(fn); },
   fire(ev) { for (const fn of (this.listeners[ev] || [])) fn(); },
 };
@@ -95,7 +97,7 @@ Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: tr
   value: class { constructor(t) { this.text = t; this.rate = 1; this.voice = null; this.lang = ''; } } });
 Object.defineProperty(globalThis, 'getSelection', { configurable: true, writable: true, value: () => '' });
 
-const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom } =
+const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom, talkRefusal, jarvisSurfaces } =
   await import(new URL('../../web/app.js', import.meta.url).href);
 is('web/app.js exports speakable()', 'function', typeof speakable);
 
@@ -130,7 +132,7 @@ for (const [what, input, address, name] of [
   ['a hex id',        'The marker holds 0x1f4ade00 as its pid word.',                      '0x1f4ade00',                               'a hex id'],
   ['an \\x escape',   'tmux escapes \\x1f, so the split fails.',                           '\\x1f',                                    'an escape code'],
   ['an octal escape', 'It comes back as \\037 instead.',                                   '\\037',                                    'an escape code'],
-  ['a rooted path',   'The grid is at /Users/pgarces/gf-demo/acme-api now.',               '/Users/pgarces',                           'acme-api'],
+  ['a rooted path',   'The grid is at /Users/you/gf-demo/acme-api now.',               '/Users/you',                           'acme-api'],
   ['a home path',     'Markers live in ~/.claude/fleet on this machine.',                  '~/.claude',                                'fleet'],
   ['a relative path', 'See docs/mobile.md for the payload.',                               'docs/',                                    'mobile.md'],
   ['a path + line',   'Fixed bin/fleet-grid.mjs:86 this morning.',                         'bin/fleet-grid.mjs:86',                    'fleet-grid.mjs line 86'],
@@ -183,14 +185,25 @@ for (const [what, input, kept] of [
 // Regression rows, not new claims: identifiers were added UNDER these, and the cheapest way
 // to break them is to reorder the passes — run the path rule before the link rule and every
 // URL becomes a basename.
-is('a fenced block is named, not read', true, /code block/.test(speakable('before\n```\nrm -rf /\n```\nafter')));
+is('a fenced block is named, not read', true, /Code omitted/.test(speakable('before\n```\nrm -rf /\n```\nafter')));
 is('...and its contents are gone', false, /rm -rf/.test(speakable('before\n```\nrm -rf /\n```\nafter')));
 is('inline code keeps its text', 'run the suite first', speakable('run the `suite` first'));
 is('a markdown link becomes its label', 'the design link says so', speakable('the [design](https://x.test/a/b.md) says so'));
-is('a bare URL becomes "link"', true, / link /.test(speakable('see https://x.test/a/b.md for it')));
+is('a bare URL becomes "the link"', 'see the link for it', speakable('see https://x.test/a/b.md for it'));
 is('...and the URL is not read as a path', false, /b\.md/.test(speakable('see https://x.test/a/b.md for it')));
 is('heading marks go', 'What changed', speakable('## What changed'));
-is('bullet marks go', 'one two', speakable('- one\n- two'));
+is('bullet marks go, and each item is its own sentence', 'one. two', speakable('- one\n- two'));
+// ── 5b. what the Mac's voice must not read ────────────────────────────────
+// Sentence ends survive as full stops because lib/speech.mjs chooses the language and the
+// voice PER SENTENCE: two list items run together are one clause and one language.
+is('a line that already ends a sentence is not doubled', 'Done. Next.', speakable('Done.\nNext.'));
+is('a table is read as its cells', 'Name, State. acme-api, green', speakable('| Name | State |\n|---|:---:|\n| acme-api | green |'));
+is('...and no pipe survives', false, /\|/.test(speakable('| a | b |\n|---|---|\n| 1 | 2 |')));
+is('...and the rule row is not read as dashes', false, /-{2,}/.test(speakable('| a | b |\n|---|---|\n| 1 | 2 |')));
+is('emoji are not read', 'Shipped. Tests green', speakable('Shipped 🚀.\nTests green ✅'));
+is('...a joined emoji leaves no glue behind', 'family', speakable('👨‍👩‍👧 family'));
+is('...and the words beside them stay', true, speakable('✅ merged #42').includes('merged #42'));
+is('a fenced block ends its own sentence', 'before. Code omitted. after', speakable('before\n```\nrm -rf /\n```\nafter'));
 is('emphasis marks go', 'really not optional', speakable('**really** _not_ optional'));
 const long = speakable('word '.repeat(600));
 is('a long turn is capped', true, long.length <= 1250);
@@ -258,6 +271,37 @@ synth.calls.length = 0;
 toggleSpeak('message N');
 is('tapping the talking one only cancels', 0, synth.calls.filter(c => c.startsWith('speak:')).length);
 is('...and it did cancel', 1, synth.calls.filter(c => c === 'cancel').length);
+
+// ── 6b. why `talk` will not start, per target ─────────────────────────────
+// Conversation mode is one implementation with a target (Jarvis, or <project>/<session>),
+// and the refusal has to be about the thing tapped: a session must never be told "there is
+// no Jarvis", and Jarvis must never be told about a grid card it does not have. Each row
+// has its passing neighbour, so a refusal that always fired would fail the '' rows.
+const sess = { jarvis: false, project: 'acme-api', session: 'acme-api-2', label: 'acme-api-2' };
+const jar = { jarvis: true, project: 'jarvis', session: 'master', label: 'Jarvis' };
+const hears = { present: false, voice: { ready: true } };
+const caps = { mic: true, audio: true };
+const live = { name: 'acme-api-2', status: 'ready' };
+is('a session can be talked to with no Jarvis set up', '', talkRefusal(sess, hears, live, caps));
+is('...but Jarvis cannot', 'there is no Jarvis to talk to yet', talkRefusal(jar, hears, null, caps));
+is('...and can once it is there', '', talkRefusal(jar, { ...hears, present: true }, null, caps));
+is('a session gone from the grid says so by name', "'acme-api-2' is not on this fleet's grid any more", talkRefusal(sess, hears, null, caps));
+is('a parked session says to resume it', true, /acme-api-2 is parked — resume it/.test(talkRefusal(sess, hears, { ...live, status: 'parked' }, caps)));
+is('no answer from the Mac yet is not "voice is off"', true, /still asking the Mac/.test(talkRefusal(sess, null, live, caps)));
+is('a Mac with no transcriber says why, for a session too', 'voice is off — no whisper', talkRefusal(sess, { voice: { ready: false, why: 'no whisper' } }, live, caps));
+is('no microphone in this browser', 'this browser gives web apps no microphone', talkRefusal(sess, hears, live, { ...caps, mic: false }));
+is('no Web Audio in this browser', 'this browser has no Web Audio to listen with', talkRefusal(sess, hears, live, { ...caps, audio: false }));
+// JARVIS IS EXPERIMENTAL, and switched off it is GONE — not a band that says "off", not a
+// talk button that refuses. Both directions, and the old-daemon case that sends no switch.
+const jp = { present: true, project: 'jarvis' };
+is('Jarvis off: no band', false, jarvisSurfaces(false, jp).bar);
+is('...no Jarvis screen', false, jarvisSurfaces(false, jp).screen);
+is('...and no talk button anywhere', false, jarvisSurfaces(false, jp).talk);
+is('Jarvis on: the band is there', true, jarvisSurfaces(true, jp).bar);
+is('...and talk', true, jarvisSurfaces(true, jp).talk);
+is('...but no band before /api/jarvis answers', false, jarvisSurfaces(true, null).bar);
+is('a daemon with no switch keeps the old behaviour', true, jarvisSurfaces(null, jp).bar && jarvisSurfaces(null, jp).talk);
+is('a working session can be talked to (the prompt queues)', '', talkRefusal(sess, hears, { ...live, status: 'working' }, caps));
 
 // ── 7. the column count, which is what makes rotation safe ────────────────
 // gridColsFrom reads the USED value of grid-template-columns, so the keys agree with what

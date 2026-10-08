@@ -22,6 +22,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readMarker, isJarvisSelf, mcpConfirmSpec, gate } from '../lib/jarvis.mjs';
+import { permissionDialog, approves } from '../lib/permission-dialog.mjs';
 
 export const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin');
 export const HOME = os.homedir();
@@ -196,13 +198,13 @@ function execPlanAsync(p, { timeout = 0, maxBuffer = 1024 * 1024 } = {}) {
 }
 
 export const TOOLS = [
-  { name: 'fleet_list', description: "List the Claude sessions in a fleet (parallel worktrees) with their status. Call this first to see which siblings exist and whether they are free. Pass `project` to list ANOTHER project's fleet.",
+  { name: 'fleet_list', description: "List the Claude sessions in a fleet (parallel worktrees) with their status. Call this first to see which siblings exist and whether they are free. ASLEEP sessions (hibernated: no process, only a card on the grid and the phone) are listed too, with how long they have slept — wake one with fleet_wake, or clear it for good with fleet_stop. Pass `project` to list ANOTHER project's fleet.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" } }, additionalProperties: false } },
   { name: 'fleet_send', description: 'Send a prompt to a sibling fleet session and submit it (it runs there). The prompt must be self-contained — the sibling does not share your context. A NEW task goes to a NEW session (fleet_spawn), never to a worker that already finished one: a send to a worker whose task shipped is refused unless anyway:true. Set reply_to:true when you are ASKING something rather than dispatching work: without it a send is one-way and the answer never comes back to you.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'target session name (see fleet_list)' }, prompt: { type: 'string', description: 'the full, self-contained prompt to run there' }, reply_to: { type: 'boolean', description: "ask for an answer back: that session is told to answer YOU directly, so its reply usually arrives in this conversation as a message from it (even while you are mid-turn) — no polling, and nothing to drain. If it can't reach you (not a Claude session, or its turn dies first) the answer falls back to an ANSWERED row in your fleet_inbox, so check there if nothing arrives" }, anyway: { type: 'boolean', description: "send even though the target already FINISHED a task that shipped (its PR merged, or it is clean and even with the integration branch after a done). Without it such a send is REFUSED: a new task is a new session — fleet_stop reclaim:true, then fleet_spawn. Only for a follow-up on that same work; an open PR's follow-ups (a red CI row, a review note) are never refused and need no flag" } }, required: ['session', 'prompt'], additionalProperties: false } },
   { name: 'fleet_read', description: 'Read the last N assistant messages from a sibling session, to check its progress/output.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, n: { type: 'number', description: 'how many recent assistant messages (default 1)' }, json: { type: 'boolean', description: "return the messages as DATA — {ts, role, text} per message plus a next_before cursor — instead of as text. For a machine consumer (bin/fleet-serve's /api/session); a reader wanting the output should leave it off and use n" }, limit: { type: 'number', description: 'with json: how many messages in this page (default 20)' }, before: { type: 'string', description: "with json: page backwards from this message's ts (the previous page's next_before)" } }, required: ['session'], additionalProperties: false } },
-  { name: 'fleet_spawn', description: "Create a new git worktree and start a fresh parallel session in it (in the background), optionally with an initial task prompt. Defaults to YOUR OWN repo; pass `project` to spawn a worker into ANOTHER project's fleet (name from fleet_projects) — it runs in that project's checkout and the worker lands on that fleet, with that project's default agent. Call fleet_worktrees FIRST (same `project`): if free worktrees exist, spawn refuses unless you reuse one (reuse) or force a new one (force_new).",
+  { name: 'fleet_spawn', description: "Create a new git worktree and start a fresh parallel session in it (in the background), optionally with an initial task prompt. Called from a WORKER (a session in a linked worktree), the new session is that worker's CHILD: branched from its branch, its PR into that branch, its done/need-you in the worker's own fleet_inbox — a sub-worker cannot spawn in turn. Defaults to YOUR OWN repo; pass `project` to spawn a worker into ANOTHER project's fleet (name from fleet_projects) — it runs in that project's checkout and the worker lands on that fleet, with that project's default agent. Call fleet_worktrees FIRST (same `project`): if free worktrees exist, spawn refuses unless you reuse one (reuse) or force a new one (force_new).",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, name: { type: 'string', description: 'session + worktree name' }, branch: { type: 'string', description: 'branch to use/create (default: name)' }, from: { type: 'string', description: 'base ref for a new branch; bases on your LOCAL ref (use "HEAD" for current), falls back to the remote tip only if local is behind' }, prompt: { type: 'string', description: 'initial task to send once it boots' }, model: { type: 'string', description: 'model for the worker (e.g. opus); default = account default' }, reuse: { type: 'string', description: 'start in this EXISTING free worktree (name or path); combine with branch+from to clean & rebranch it in one step' }, force_new: { type: 'boolean', description: 'create a new worktree even if free ones exist' } }, required: ['name'], additionalProperties: false } },
   // A SECOND SESSION IN THE SAME WORKTREE, which had a CLI and no tool. fleet-companion
   // is the answer to "give me another session here" and an agent restricted to MCP could
@@ -218,21 +220,23 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" } }, additionalProperties: false } },
   { name: 'fleet_inbox', description: "Drain the lead's attention feed: worker 'need-you' events (permission / usage-limit / real questions), governor park/resume, and answers relayed back from sessions you asked with fleet_send reply_to that could not message you directly (the usual case now is a direct message in the conversation, so a missing ANSWERED row is not a missing answer). One call replaces polling every sibling — shows only what is new since last call. Pass `project` to drain ANOTHER project's feed instead of your own.",
     inputSchema: { type: 'object', properties: { all: { type: 'boolean', description: 'show the whole inbox instead of only new entries' }, project: { type: 'string', description: "another project's fleet to read (name from fleet_projects); omit for your own — your relayed answers arrive in YOUR OWN inbox, so omit it for those" } }, additionalProperties: false } },
-  { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a permission dialog, a "reached usage limit — retry?", a trust prompt (e.g. text "2"). Use this to unblock a worker; use fleet_send for normal task prompts.',
-    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
+  { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a "reached usage limit — retry?", a trust prompt, any menu (e.g. text "2"). Use this to unblock a worker; use fleet_send for normal task prompts. A PERMISSION dialog (the worker asking to run a tool) is the exception: this tool may DECLINE one — send the number of its "No" option — but any approving key is REFUSED, because an agent does not approve another agent\'s tool call — unless the project (or your own session) has the setting "agents can approve tool calls" on, which the refusal names. The refusal quotes the dialog, the tool and the exact command: show that to the human and let them approve it (fleet-answer --human-approved in their own terminal, or the phone).',
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, expect: { type: 'string', description: 'optional: the fingerprint of the prompt you are answering (served by /api/pane as prompt.fingerprint). When given, the keys are sent only if that same prompt is still on screen; otherwise it is refused as "the prompt changed"' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
   { name: 'fleet_pause', description: "Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work. Can't park 'master': it is the fleet's lead, and a fleet whose lead is off dispatches nothing (the governor excludes it for the same reason).",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_wake', description: "Wake a session that fleet-hibernate put to sleep: start its process again and replay its conversation by id. Different from fleet_resume, which un-parks a session that never stopped running — this one's process is gone. Fails loudly if the folder was never trusted or the transcript does not replay inside the timeout.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_reopen', description: "Reopen a LOST session: one the machine killed (a crash or reboot took its tmux server) that left its status record and conversation behind, shown as `lost` by fleet_list, fleet_digest and the grid. Starts it again under the same name, resuming ITS OWN conversation by id, in its recorded folder, as its recorded agent (fleet-restart --reopen) — never the newest conversation in the folder. To forget a lost session instead, fleet_stop it; its transcript is kept either way.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_resume', description: 'Un-park a worker paused with fleet_pause; optionally dispatch a prompt to wake it immediately.',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session'], additionalProperties: false } },
-  { name: 'fleet_stop', description: "Cleanly STOP a worker for good: kill its session and clear its fleet state (status file, park/schedule markers + the schedule waiter, manifest entry). Use for a finished worker, or an ORPHAN whose git worktree was removed (its session lingers in fleet_list otherwise). Unlike fleet_pause (which only parks), this removes it. reclaim:true ALSO removes its git worktree — the one-call \"this one is done\", instead of stopping here and running `git worktree remove` somewhere else. Whether removal is safe is decided by fleet-clean's own gates (clean tree, no other session, PR merged or fully pushed); if it isn't, the session still stops and the worktree is kept with the reason. force:true (with reclaim) is the escalation for exactly that case — `git worktree remove --force`, which DELETES uncommitted work; ask for it only after a plain reclaim reported why it declined. Without reclaim it does not touch git. Can't stop 'master': it is the fleet's lead, and reclaim would aim at the repo's own main checkout.",
-    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, reclaim: { type: 'boolean', description: "also remove its git worktree when it is safe to (PR merged or fully pushed, clean, no other session)" }, force: { type: 'boolean', description: "with reclaim: remove the worktree ANYWAY, past those gates. Destroys uncommitted work — the deliberate second step after a reclaim was declined" } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_stop', description: "Cleanly STOP a worker for good: kill its session and clear its fleet state (status file, park/schedule markers + the schedule waiter, manifest entry). Use for a finished worker, an ORPHAN whose git worktree was removed (its session lingers in fleet_list otherwise), or an ASLEEP session (hibernated; fleet_list shows it as asleep with its age) — for that one there is no process to kill, and this clears the card it leaves on the grid and the phone. \"Clean up the asleep ones\" = fleet_list, then fleet_stop each asleep row. Unlike fleet_pause (which only parks), this removes it. reclaim:true ALSO removes its git worktree — the one-call \"this one is done\", instead of stopping here and running `git worktree remove` somewhere else. Whether removal is safe is decided by fleet-clean's own gates (clean tree, no other session, PR merged or fully pushed); if it isn't, the session still stops and the worktree is kept with the reason. force:true (with reclaim) is the escalation for exactly that case — `git worktree remove --force`, which DELETES uncommitted work; ask for it only after a plain reclaim reported why it declined. Without reclaim it does not touch git. Can't stop 'master': it is the fleet's lead, and reclaim would aim at the repo's own main checkout.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, reclaim: { type: 'boolean', description: "also remove its git worktree when it is safe to (PR merged or fully pushed, clean, no other session)" }, force: { type: 'boolean', description: "with reclaim: remove the worktree ANYWAY, past those gates. Destroys uncommitted work — the deliberate second step after a reclaim was declined" }, children: { type: 'boolean', description: "the session is a SUB-LEAD (it spawned workers of its own): stop and reclaim its workers first, then it. Without this a stop of a sub-lead that still has workers is REFUSED and names them — ask the owner before passing it" } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_rename', description: "Rename a worker's session AND move its worktree folder (git worktree move) in one step, so the two never drift apart. Migrates its state record (so fleet_read, the grid and the phone keep finding its conversation), its pause/notify-lead/schedule/agent/exited/asleep markers, reply addresses, fleet_worktrees manifest row, its slot in the grid's card order, and its _term-/_edit- tabs to the new name. Refuses on a live-session/path collision or a dirty worktree git won't move. Can't rename 'master'.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string', description: 'current session name' }, new_name: { type: 'string', description: 'new name for both the session and its worktree folder' } }, required: ['session', 'new_name'], additionalProperties: false } },
   { name: 'fleet_project_add', description: "Register a NEW project (its own fleet) from a path — the CLI form of the Projects screen's '+ add project'. Use this when work belongs to a repo that is NOT part of any existing fleet: registering it and starting its master is correct, whereas spawning a worker inside your own fleet would put it on the wrong socket and under the wrong project. start:true boots its master immediately so you can fleet_send to it.",
     inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'project root: the repo, or a folder holding its checkouts' }, name: { type: 'string', description: 'project name (default: the folder name)' }, profile: { type: 'string', description: 'work (default) or another profile' }, agent: { type: 'string', description: "default coding CLI for this project's master and its workers (fleet-agent list; omit for claude)" }, start: { type: 'boolean', description: 'also start its master session' } }, required: ['path'], additionalProperties: false } },
-  { name: 'fleet_project_agent', description: "Set or clear an EXISTING project's default agent — the 4th column of the projects list, inherited by the next master it starts and by workers spawned in it that do not name one. Omit `agent` (or pass an empty string) to clear it back to the default, claude. The RUNNING master is unaffected: CLAUDE_FLEET_AGENT is read once, when its tmux session is created, so this applies to the next one.",
+  { name: 'fleet_project_agent', description: "Set or clear an EXISTING project's default agent — the 4th column of the projects list, inherited by the next master it starts and by workers spawned in it that do not name one. Omit `agent` (or pass an empty string) to clear it back to the default, claude. The RUNNING master switches too: at once when idle, after its current turn when not; switching back to an agent it ran before resumes that agent's own conversation (codex, which cannot resume, starts fresh). Running workers keep their agent.",
     inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'project name (from fleet_projects)' }, agent: { type: 'string', description: 'an agent from fleet-agent list; empty or omitted clears it back to claude' } }, required: ['name'], additionalProperties: false } },
   { name: 'fleet_worktree_remove', description: "Remove ONE git worktree that no session is using — the `x` on a grey FREE card in the grid. Whether removal is safe is decided by fleet-clean's own gates (clean tree, fully pushed or merged, no live session); if they decline, the worktree is kept and the reason is printed. force:true is the escalation for exactly that case — the grid's `f = remove anyway` — and it DELETES UNCOMMITTED WORK. It still refuses a main checkout, a worktree a live session is standing in, and Claude's own .claude/worktrees trees. Use fleet_stop reclaim for a worktree that still has a session on it.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "the project whose worktree this is (name from fleet_projects); omit for your own fleet" }, path: { type: 'string', description: 'absolute path of the worktree to remove' }, force: { type: 'boolean', description: 'remove it past those gates — destroys uncommitted work; the deliberate second step after a plain removal was declined' } }, required: ['path'], additionalProperties: false } },
@@ -240,6 +244,13 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'project name (from fleet_projects)' } }, required: ['name'], additionalProperties: false } },
   { name: 'fleet_projects', description: "List every ghostfleet project: name, profile, path, fleet socket and how many sessions are live. These names are what the `project` argument accepts, so a lead in one repo can list/send/read/answer/pause/stop a session in ANOTHER project's fleet.",
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  // ONE LOOK AT EVERYTHING, FROM FILES. fleet_list is one fleet and fleet_inbox is one
+  // fleet's feed; a master of masters that called them per project would spend a turn per
+  // project to learn that nothing happened, which is the polling the inbox exists to
+  // remove. This reads what the hooks already wrote across every profile — status files,
+  // inboxes, the asleep/parked/exited markers — and costs no agent anything.
+  { name: 'fleet_digest', description: "One rollup across EVERY fleet on EVERY profile, read from files: who needs you (with the note), what is working, what is ready, asleep, parked or exited, what finished or was answered since your last look, and the open PRs already known. Cheap — no session is asked anything. Call this FIRST when asked how everything is doing, or when woken; then act on ONE project with the per-fleet tools. A plain call advances the 'since last look' stamp; peek:true does not.",
+    inputSchema: { type: 'object', properties: { json: { type: 'boolean', description: 'return the digest as data rather than as text' }, peek: { type: 'boolean', description: "look without advancing the 'since last look' stamp (for a poll, not for a read)" } }, additionalProperties: false } },
 ];
 
 // REFUSING A CALL, so the caller can see it was refused. MCP's error channel for a tool
@@ -344,6 +355,14 @@ export function plan(name, a = {}) {
     case 'fleet_project_agent':
       return run('fleet-project', ['agent', String(a.name), String(a.agent || '').trim() || '--none']);
     case 'fleet_projects': return { kind: 'text', text: projectTable() };
+    // No target and no -s: the digest is every fleet at once, and it resolves the
+    // profiles itself from the same projects files target() reads.
+    case 'fleet_digest': {
+      const args = [];
+      if (a.json) args.push('--json');
+      if (a.peek) args.push('--peek');
+      return run('fleet-digest', args);
+    }
     case 'fleet_list': return run('fleet-list', [], t);
     case 'fleet_send': {
       const args = [];
@@ -392,9 +411,16 @@ export function plan(name, a = {}) {
                  { cwd: t ? checkoutOf(t) : undefined });
     case 'fleet_worktrees': return run('fleet-worktrees', [], t, { cwd: t ? checkoutOf(t) : undefined });
     case 'fleet_inbox': return run('fleet-inbox', a.all ? ['--all'] : [], t);
+    // `--` BEFORE THE POSITIONALS, always. fleet-answer takes --human-approved, and a text
+    // or session of "--human-approved" handed over bare would parse as it — the one flag
+    // this tool must never be able to set. See withHuman() for the one path that sets it.
     case 'fleet_answer': {
-      const args = [String(a.session), String(a.text)];
+      const args = [];
       if (a.no_enter) args.push('--no-enter');
+      // The fingerprint of the prompt the caller was looking at (the phone always sends
+      // one): fleet-answer re-captures and refuses if it is not what is on screen now.
+      if (a.expect !== undefined && a.expect !== null) args.push('--expect', String(a.expect));
+      args.push('--', String(a.session), String(a.text));
       return run('fleet-answer', args, t);
     }
     case 'fleet_wake': {
@@ -404,6 +430,11 @@ export function plan(name, a = {}) {
       // fleet from $TMUX, and refuses a name asleep in several rather than picking one.
       return run('fleet-hibernate', ['--wake', String(a.session)], t);
     }
+    // fleet-restart refuses a live name, a session with no recorded id and a checkout that is
+    // gone, each with its reason — so a reopen that cannot happen says why instead of
+    // starting a blank conversation under the old card's name.
+    case 'fleet_reopen':
+      return run('fleet-restart', ['--reopen', String(a.session)], t);
     case 'fleet_pause': {
       // Pause is a WORKER verb — its own description says "park a worker" — and the
       // governor already keeps this rule for itself: bin/fleet-governor excludes master
@@ -414,6 +445,15 @@ export function plan(name, a = {}) {
       //   RESUME IS DELIBERATELY NOT GUARDED. The recovery direction has to stay open, or
       // a lead parked by an older build — or by hand — could not be turned back on from
       // the one surface that can see it.
+      //   JARVIS SAYS WHY. Its master is refused like every lead, but the rule that holds
+      // for it is stronger — it is never slept at all — and the owner reading the refusal
+      // needs the one way that does take it down, which is the CLI's, not a tool's.
+      if (String(a.session) === LEAD) {
+        let m = null; try { m = readMarker(); } catch {}
+        const sock = t ? t.sock : (self()?.sock || process.env.CLAUDE_FLEET_SOCK);
+        if (m && sock && sock === m.sock)
+          return { kind: 'fail', ...fail(`fleet_pause: refusing — Jarvis is always on; it is never hibernated, parked or paused. To take it offline for good, from a shell: fleet-stop -s ${m.sock} master`) };
+      }
       const nl = notTheLead('fleet_pause', a.session, 'park');
       if (nl) return nl;
       return run('fleet-pause', [String(a.session)], t);
@@ -435,6 +475,7 @@ export function plan(name, a = {}) {
       const args = [];
       if (a.reclaim) args.push('--reclaim');
       if (a.force) args.push('--force');
+      if (a.children) args.push('--children');
       args.push(String(a.session));
       return run('fleet-stop', args, t);
     }
@@ -458,13 +499,96 @@ export function plan(name, a = {}) {
   }
 }
 
+// JARVIS'S CONFIRM-LIST, at the one layer every MCP call goes through. Only when the caller
+// is Jarvis's own master — resolved from the live $TMUX by self(), never from an argument —
+// and only for the tools on the list (lib/jarvis.mjs mcpConfirmSpec). Everyone else, the
+// phone's daemon included (it is not inside a fleet, so self() is null and its destructive
+// taps already carry a passkey), is untouched. The spec is checked BEFORE self(), so a call
+// that is not on the list costs nothing extra even from inside Jarvis.
+//   A refusal is fail()'s, so the agent sees a failed call and not a quiet success — and its
+// text is the whole instruction: which proposal, what to ask him, and to try again after.
+//   A fleet_answer aimed at a PERMISSION DIALOG says so in the question, with the dialog's
+// own text: "answer w1's prompt with 1" is not something an owner can say yes to
+// meaningfully, "approve w1's Bash command: git push …" is. Same detector fleet-answer
+// refuses with (lib/permission-dialog.mjs), read off the same pane.
+//   Returns {fail} for a refusal, {granted:true} when his yes was just spent on this call.
+function jarvisCheck(name, a, p, door = 'mcp') {
+  let m = null;
+  try { m = readMarker(); } catch {}
+  if (!m) return {};
+  let spec = mcpConfirmSpec(name, a, m);
+  if (!spec) return {};
+  if (!isJarvisSelf(self(), m)) return {};
+  if (spec.refuse) return { fail: fail(spec.text) };
+  const d = name === 'fleet_answer' ? dialogOn(p) : null;
+  if (d && approves(d, { text: String(a.text) }))
+    spec = { ...spec, summary: `approve ${a.project ? a.project + '/' : ''}${a.session}'s permission dialog — ${d.tool || 'a tool call'}: ${firstCommand(d)}` };
+  const g = gate(spec, Date.now(), door);
+  if (!g.ok) return { fail: fail(d ? `${g.text}\n\nThe dialog, as ${a.session} shows it — read it to him:\n${d.text}` : g.text) };
+  return { granted: !!g.by };
+}
+
+// THE SAME QUESTION, ASKED FROM THE MOD (mods/ghostfleet, through lib/mod-gate.mjs):
+// its tool.call hook refuses a listed call before the MCP server is even reached, so the
+// proposal it records must be this one, dialog and all. Asked at door 'mod', so a pass
+// leaves the relay the MCP door above takes when the call arrives (lib/jarvis.mjs gate).
+// A call plan() refuses or answers itself is not on the list. {} = go, {fail} = refused.
+export function jarvisGateCall(name, a = {}) {
+  const p = plan(name, a);
+  if (p.kind === 'fail' || p.kind === 'text') return {};
+  return jarvisCheck(name, a, p, 'mod');
+}
+
+// "AGENTS CAN APPROVE TOOL CALLS", asked before a fleet_answer runs (the mod, through
+// lib/mod-gate.mjs): fleet-answer's own decision, made by fleet-answer itself under the
+// exact invocation this call would get (target socket, cleared $TMUX), with --check so
+// nothing is sent. {code} is fleet-answer's exit status, {text} what it said. A call plan()
+// refuses never reaches fleet-answer, so it is not this question.
+export function answerCheck(a = {}) {
+  const p = plan('fleet_answer', a);
+  if (p.kind === 'fail' || p.kind === 'text') return { code: 0, text: '' };
+  const { file, argv, env, cwd } = invocation({ ...p, args: ['--check', ...p.args] });
+  try {
+    execFileSync(file, argv, { encoding: 'utf8', env, cwd, stdio: ['ignore', 'pipe', 'pipe'], timeout: 15000 });
+    return { code: 0, text: '' };
+  } catch (e) {
+    return { code: typeof e.status === 'number' ? e.status : -1, text: `${e.stdout || ''}${e.stderr || ''}`.trim() || String(e.message) };
+  }
+}
+
+// The permission dialog on the pane a fleet_answer plan will type into, or null.
+function dialogOn(p) {
+  try {
+    const sock = p.t ? p.t.sock : (self()?.sock || process.env.CLAUDE_FLEET_SOCK);
+    const session = p.args[p.args.indexOf('--') + 1];
+    if (!sock || !session) return null;
+    return permissionDialog(execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', session],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+  } catch { return null; }
+}
+function firstCommand(d) {
+  const lines = d.text.split('\n').map(l => l.trim()).filter(Boolean);
+  const cmd = lines.find(l => l.startsWith('$ ')) || lines[1] || lines[0] || '';
+  return cmd.replace(/^\$\s*/, '').slice(0, 120);
+}
+
+// THE ONLY WAY --human-approved reaches fleet-answer from here, and neither is an argument
+// a caller can pass: the owner's yes spent on this exact call (Jarvis), or opts.human from
+// the phone's daemon, whose request a passkey-minted token authorised. The MCP server calls
+// callTool(name, args) and has no opts to forward.
+function withHuman(p) {
+  return p.cmd === 'fleet-answer' ? { ...p, args: ['--human-approved', ...p.args] } : p;
+}
+
 // The MCP server's entry point. Same signature and same return shape it always had: a
 // string for a call that RAN, fail()'s {isError,text} for one we refused to run.
 export function callTool(name, a = {}) {
   const p = plan(name, a);
   if (p.kind === 'fail') return { isError: true, text: p.text };
   if (p.kind === 'text') return p.text;
-  return execPlan(p);
+  const j = jarvisCheck(name, a, p);
+  if (j.fail) return j.fail;
+  return execPlan(j.granted ? withHuman(p) : p);
 }
 
 // The HTTP server's entry point. Identical decisions, non-blocking execution, and a
@@ -473,5 +597,7 @@ export async function callToolAsync(name, a = {}, opts = {}) {
   const p = plan(name, a);
   if (p.kind === 'fail') return { isError: true, text: p.text };
   if (p.kind === 'text') return p.text;
-  return execPlanAsync(p, opts);
+  const j = jarvisCheck(name, a, p);
+  if (j.fail) return j.fail;
+  return execPlanAsync(j.granted || opts.human === true ? withHuman(p) : p, opts);
 }

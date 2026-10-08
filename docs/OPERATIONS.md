@@ -186,9 +186,13 @@ fleet-serve check-bind 0.0.0.0        # bindable: no — it listens on every int
 fleet-serve check-bind 192.168.1.5    # bindable: no — reachable by that whole network
 ```
 
-**A passkey at every open, enforced server-side.** The assertion mints a session token
-that lives ~15 minutes, and the API rejects any request without a live one — a bearer
-token on its own gets a 401, because a lock that only gates the UI is decoration.
+**A passkey whenever there is no live session, enforced server-side.** The assertion mints
+a session token that dies after 15 minutes *without a request* (`session_ttl`; every
+authenticated request slides it), and the API rejects any request without a live one — a
+bearer token on its own gets a 401, because a lock that only gates the UI is decoration.
+Live sessions are kept as hashes in `serve-sessions.json` (0600, beside `serve.json`), so
+restarting the daemon logs nobody out; `fleet-serve revoke <id>` deletes them there and
+refuses them on the running daemon at once.
 `spawn`, `stop`, `rename` and `project_add` need a *second* assertion bound to that exact
 action, plus the grid's own `y` confirmation; a forced reclaim needs its own `f` step on
 top, and only after a plain reclaim has reported why it declined.
@@ -314,7 +318,7 @@ api	~/code/api	work	opencode
 sideproj	~/projects/sideproj	personal
 ```
 
-The 4th column is the project's **default agent** (`claude` · `opencode` · `codex`) —
+The 4th column is the project's **default agent** (`claude` · `opencode` · `codex` · `agy` · `cursor`) —
 inherited by its master and by every session created in it, and pre-selected on the
 grid's agent screen so you don't re-pick it each time. Omit it for `claude`.
 
@@ -326,8 +330,23 @@ and on a per-project row in its `, settings` sheet for the projects that already
 **Only agents whose binary is actually installed are offered**, because picking one that
 cannot run leaves the next master dead with nothing on screen to say why, and each option
 carries what choosing it costs — see the capability
-matrix in [docs/multi-agent-sessions.md](multi-agent-sessions.md). Changing it does not
-touch a master that is already running; the next one gets it.
+matrix in [docs/multi-agent-sessions.md](multi-agent-sessions.md).
+
+**Changing it moves the RUNNING master too** (`lib/agent-switch.sh`). An idle master is
+switched within a few seconds; one in the middle of a turn finishes that turn first, and
+meanwhile the settings row and the project's card say `switching to <agent>…`. Changing
+it again before it fires takes the latest value, and changing it back cancels it. The
+new agent starts with a short handoff — it is now the master, run `fleet-worktrees` and
+`fleet-inbox` — and nothing of the old conversation. That conversation is not lost:
+before the pane is killed its id is recorded in `<fleet dir>/<sock>.<slot>.convs.json`,
+one entry per agent (`{"claude": {"id": …, "model": …, "ts": …}, …}`), and switching
+BACK to an agent that can resume reopens exactly that id — never `--continue`. codex
+cannot (its TUI does not survive a pane kill), so returning to it starts fresh, and the
+settings row says so. If the new agent is not installed the switch is refused untouched;
+if it starts and dies, the old agent is brought back on its own conversation, the setting
+is put back, and the row says why. Running workers keep their agent; new ones take the
+column. `fleet-project agent <name> <agent> --session <s>` does the same for one session
+(a sub-master) and leaves the column alone.
 
 Each project's sessions live on their own socket under that account's config dir, so accounts never
 mix. Work keeps the bare `cf-<project>`; every other profile is namespaced `cf-<profile>-<project>`,
@@ -520,6 +539,343 @@ and is still worth having in a recording script.
 Cross-project spawns from a lead (`fleet_spawn` with `project:`) deliberately *don't*
 pass `-s`: they run `fleet-spawn` inside the target's checkout and let `route_to_owner`
 find the fleet, which is the mechanism that makes targeting work at all.
+
+## The mod: Claude reporting on itself (Claude Code 2.1.287+)
+
+Everything above reads a Claude session from **outside**: a regex over its pane for "is
+it working", its status bar for the 5h budget, a shell hook that fires on five events and
+guesses the rest. Most of the fleet's status bugs came from there: a 56-column pane that
+drops the spinner's timer, a leftover login line read as a spinner, a governor log full of
+`no budget reading this tick — no pane carries the 5h figure`.
+
+`mods/ghostfleet` is a Claude Code **mod**: a plugin of function hooks that runs inside
+every Claude session and reports from there. It does three things:
+
+| | from | written to |
+|---|---|---|
+| **state** | `turn.start` → `working`, `turn.complete` → `ready` (`interrupted` on Esc), the permission dialog → `need-you` (the engine's `tool.check` verdict is `ask` on a real call), the call resolving → `working` again | the session's status record, `<fleet dir>/<session_id>.json`, merged beside the shell hook's fields as `source: "mod"`, `state`, `turnId`, `mod: { pid, hb }` |
+| **budget** | `session.measure`: the engine's own context and rate-limit figures, pushed after each turn | the same record, `usage.limits.five_hour: { pct, resets }` |
+| **`/fleet`, `/inbox`** | `fleet-list` and `fleet-inbox`, run as processes | the transcript, **without starting a turn**, mid-turn too |
+| **ledger** | `prompt.submit` (every message, mid-turn ones too) and `turn.complete` (the final text) | `<fleet dir>/<session_id>.ledger`, the record's `ledger: { open, promises, oldest_at }`, a row above the prompt; see "The request ledger" |
+
+**Who believes it.** The grid (and so the phone), the push/digest scan and `fleet-list`
+take the mod's `state` over the pane while it is still being written: the pid that wrote
+it is alive and its once-a-minute heartbeat is under 150 s old (`lib/mod-status.mjs`).
+Otherwise (a crash, the plugin off, an older Claude, any other agent) they do exactly what
+they did before. `fleet-grid.mjs --json` says which on every card (`status_from: "mod"` or
+`"pane"`). The governor takes the highest 5h figure whose window has not reset yet, from
+any record in the profile's fleet dir, and names it in its log:
+
+```
+[fleet-governor 09:14:02] budget 37% (healthy) — from the mod: master, read 40s ago, window resets 13:00
+```
+
+With no such figure it scrapes the panes as before.
+
+**What it cannot see.** `classic.PermissionRequest` and `classic.Notification` never
+reach a user-installed mod on this Claude build (the debug log says they are `bypassed by
+cc-plugin-sec-default`), which is why the dialog is read from `tool.check`. That verdict
+cannot tell a person's dialog from **auto mode's** classifier, and a hook cannot read the
+permission mode, so in auto mode a classified call reads `need-you` until it resolves.
+Bypass mode is unaffected: its verdict is `allow`. A hard rate limit has no event either.
+The grid reads it from the 5h figure the mod writes (`limit` at 100%).
+
+**`/inbox` and the model.** A command's output is a transcript row the model reads as well
+as you. For `/inbox` that is the point: it marks the rows seen exactly as `fleet-inbox`
+does, so if the model could not read them they would be gone from the one place it looks.
+
+**Installing it.** `install.sh` runs `fleet-mod install`, which adds the runtime
+(`~/.local/libexec/ghostfleet`, itself a marketplace) and installs `ghostfleet@ghostfleet`
+at user scope into every profile the hooks are wired into, after backing up each one's
+`settings.json` and plugin registries. It is idempotent, and does nothing on a Claude
+without mods. See what it would do first:
+
+```bash
+fleet-mod install --dry-run     # every backup and `claude plugin` command, per profile
+fleet-mod status                # where each profile stands
+```
+
+**Deploying a change.** A marketplace that is a folder is read **in place**:
+`claude plugin list` shows `Read from: ~/.local/libexec/ghostfleet/mods/ghostfleet`. So
+`cf-sync` is the whole deploy, as for every other file: a new session loads the new mod,
+a running one picks it up on `/reload-plugins`. No version bump, no reinstall.
+
+**Sessions that predate it.** A running Claude keeps the plugins it started with, so an
+install reaches only sessions started after it; the rest are still read from their panes.
+`fleet-mod reload` brings them onto it, across every fleet and every profile:
+
+```
+$ fleet-mod reload                 # the plan; changes nothing
+SESSION              PROFILE         VERSION  STATE    ACTION
+cf-acme-api/master   ~/.claude       2.1.284  ready    restart
+cf-acme-api/api-fix  ~/.claude       2.1.292  idle     reload
+cf-acme-web/master   ~/.claude-work  2.1.292  working  skip: busy
+cf-acme-web/scratch  ~/.claude-work  ?        -        skip: not claude (codex)
+cf-toolbox/master    ~/.claude       2.1.292  ready    already on mod
+$ fleet-mod reload --apply         # do it, then read every record back: ✓ on mod / ✗ why
+```
+
+- **reload**: `/reload-plugins` typed into the session. No turn starts, and on a new
+  enough Claude the mod is loaded and writing its record within a couple of seconds.
+- **restart**: a process older than 2.1.287 cannot run the mod whatever is on disk, because
+  it keeps the version it started with. On 2.1.284, `/reload-plugins` reads the plugin as
+  enabled and then refuses its hooks (the debug log: "hooks modules are not turned on for
+  installed plugins in this process"), with nothing in `/plugin`'s Errors tab. So it is
+  relaunched on the current binary by `fleet-restart`'s by-id path, the same conversation,
+  never `--continue`. A session whose conversation cannot be established is left alone
+  with the reason.
+- **Only an idle session with an empty input box is touched.** A turn running (or a
+  background command that will start one), a permission dialog, a question waiting on you,
+  something half-typed, a pane with no input box drawn: each is listed with why, and left
+  as it was. Neither is the session running the command.
+- **Done means the record says so.** Each session gets 15 seconds to write `source: "mod"`
+  from a live process after the action; otherwise it is ✗ with what its pane said.
+
+`--only <sock>[/<session>]` narrows it to one fleet or one session; `--reload-only` never
+restarts. The running version comes from Claude's own note about the process
+(`<profile>/sessions/<pid>.json`), or failing that the newest `version` in its transcript.
+`install.sh` says how many sessions predate the mod when there are any.
+
+**Seeing it loaded.** In a session, `/plugin` lists it as `1 mod active · ghostfleet`.
+`claude plugin list` shows it `✔ enabled`. A card whose `status_from` is `mod` is the
+proof that matters. `CLAUDE_FLEET_PANE_BUSY=off` turns the pane regex off for a grid run,
+so a card that still goes `working` → `ready` got that from the mod and from nothing else.
+
+**Turning it off.** `/plugin disable ghostfleet@ghostfleet` in one profile;
+`fleet-mod uninstall` everywhere (it backs up first, too); `CLAUDE_FLEET_MOD=off
+./install.sh` to install without it. The fleet then reads Claude from outside, as before:
+the heartbeat stops and within 150 s every reader falls back to the pane.
+
+**It is code that runs with your permissions**, inside every Claude session in those
+profiles, so it is kept small enough to read (`mods/ghostfleet/hooks/register.js`) and
+does very little. It makes no network calls. Its one model call is the ledger's judge (see
+"The request ledger" below): a small model, at most once per answered turn, and only when
+there is something to judge; `CLAUDE_FLEET_LEDGER=off` removes it. Its observers
+(state, budget, the band) fail open: one that throws or overruns is skipped by the engine and
+the session carries on as if the mod were not there. Its guards fail closed (see "The
+guards" below). Every file and process call is bounded, so a stalled disk cannot hold a turn
+open. What it touches, as `claude plugin validate` reads it:
+
+```
+$ claude plugin validate mods/ghostfleet
+  ❯ ./register.js hooks: session.start, turn.start, turn.complete, tool.check, tool.call, session.end, session.measure, command.run{command=fleet}, command.run{command=inbox}, tool.call{tool=Bash}, tool.call{tool=/"^mcp__"/}, ui.render{component=AbovePrompt}, prompt.submit, command.run{command=ledger}
+  ❯ ./register.js answers its own command: command.run{command=fleet}
+  ❯ ./register.js answers its own command: command.run{command=inbox}
+  ❯ ./register.js answers its own command: command.run{command=ledger}
+  ❯ ./register.js gating hook without .catch: tool.check
+  ❯ ./register.js gating hook without .catch: tool.call
+  ❯ ./register.js gating hook with .catch: tool.call{tool=Bash}
+  ❯ ./register.js gating hook with .catch: tool.call{tool=/"^mcp__"/}
+  ❯ ./register.js gating hook without .catch: prompt.submit
+  ❯ ./register.js calls: $.clock.after (via startState), $.clock.every (via deliveryStart, startBand, startState), $.clock.now, $.clock.sleep (via bounded), $.command.register (via ledgerStart, startCommands), $.env.get (via fleetDir, identity, jarvisDir, ledgerConfigOf, mergeGuard, registeredProject), $.fs.exists (via maybeJarvis, readLedger, registeredProject), $.fs.list (via childBranches, deliverTick, deliveryStart, mergeGuard, refresh, registeredProject), $.fs.read (via childBranches, childrenOf, maybeJarvis, readLedger, readRecord, readTeamRecords, refreshPrs, registeredProject), $.fs.write (via applyLedger, applyPatch, writeSpool), $.model.complete (via judgeTurn), $.process.run, $.prompt.submit (via deliverTick, judgeTurn), $.session.cwd (via answerGuardBash, mergeGuard, refreshPrs), $.session.id (via applyPatch, deliveryStart, ledgerPath, ownRecord), $.session.messages (via judgeTurn), $.session.root (via mergeGuard), $.session.surfaces (via judgeTurn), $.session.turns (via startS… [+117 chars]
+  ❯ ./register.js env writes: nothing
+  ❯ ./register.js env reads: CLAUDE_CONFIG_DIR, CLAUDE_FLEET_DIR, CLAUDE_FLEET_JARVIS_DIR, CLAUDE_FLEET_LEDGER, CLAUDE_FLEET_LEDGER_GATE, CLAUDE_FLEET_LEDGER_MODEL, CLAUDE_FLEET_LEDGER_PROMISES, CLAUDE_FLEET_SLOT, CLAUDE_FLEET_SOCK, CLAUDE_JOB_DIR, HOME, TMUX, TMUX_PANE
+  ❯ ./register.js state writes: ghostfleet.band, ghostfleet.ledger
+  ❯ ./register.js state reads: ghostfleet.band, ghostfleet.ledger
+
+✔ Validation passed
+```
+
+The three "gating hook without .catch" lines are the observers, and are deliberate: a hook
+there with no `.catch` fails open, which is right for one that only reads what `next(e)`
+returned and hands it back unchanged. The two "with .catch" are the guards, whose handler
+refuses.
+`claude plugin test mods/ghostfleet` runs its hooks against the engine.
+
+### The lead's band
+
+A master, and a sub-lead (a worker with children), draws its team above the prompt:
+
+```
+3 workers · 1 working · 1 need you · 2 PRs green · 1 red
+```
+
+- **Who is on the team.** master: every session on its socket but itself and the terminal
+  tabs. A sub-lead: its children (`<sock>.<child>.parent`). A worker without children draws
+  nothing and starts no process for it; it becomes a band the tick after its first child.
+- **Where the numbers come from.** The status records in the fleet dir, read every 5 s (a
+  record is reread only when its mtime moved), the mod's `state` while its heartbeat is
+  fresh and the shell hook's `status` otherwise, and `tmux list-sessions` for who is alive.
+  PRs come from `gh pr list` every 2 minutes. master's are the open PRs from a branch its
+  manifest names, so a finished worker's green PR still counts; a sub-lead's are the ones
+  into its own branch. `PRs ?` means gh did not answer, never zero.
+- **Narrow panes.** Words shorten first, then `need you` moves to the front, then only the
+  essentials stay: `1 need · 1 busy · 4w` at 28 columns, `1!` at the very end.
+- **Cost.** No turn, no model call. A redraw happens only when what the line says changes.
+
+### The guards
+
+The fleet's refusals used to live only in shell hooks and inside commands, and a shell hook
+can only fail **open**: one that cannot find jq exits 0 and the call goes ahead. The mod
+puts the same refusals in front of the tool as `tool.call` hooks, each registered with a
+`.catch` that answers `deny`. If a guard throws, gets no answer, or runs out of time, the
+call is **refused**, with the reason:
+
+| guard | refuses | how it decides |
+|---|---|---|
+| Jarvis's confirm-list | the listed Bash commands and `fleet_*` MCP calls, from Jarvis's master | `lib/mod-gate.mjs` asks the same gate the MCP door and `hooks/jarvis-guard.sh` ask (`lib/jarvis.mjs`), under the same lock |
+| a worker does not merge its own PR | `gh pr merge`, the REST and GraphQL merges, any `merge_pull_request` MCP tool, and a worker changing its own boundary, from a linked worktree | the rule from `hooks/fleet-guard.sh`, ported (`mods/ghostfleet/hooks/guard-shape.js`; the suite holds the two to the same verdicts) |
+| an agent does not approve another agent's tool call | an approving key from `fleet-answer` (Bash) or `fleet_answer` (MCP) into a permission dialog | `fleet-answer --check`: fleet-answer's own decision, sending nothing |
+
+Same switches, same defaults: "workers can merge" and "agents can approve tool calls" (off),
+per project or per session, and Jarvis's confirm-list ignores both. The shell versions stay
+wired and are what guards every session without the mod: another agent, an older Claude, a
+profile where the mod is off.
+
+**What changes when a guard cannot decide.** The shell merge guard lets a merge through when
+jq is missing, and when git cannot be asked. The mod refuses it: "this command could not be
+checked, so it is refused (a guard fails closed)". For Jarvis only the commands the
+confirm-list could act on are put to the gate (`gh`, `git`, `tmux`, `fleet-*`, Jarvis's files
+and verbs, its own socket), so a broken gate refuses those and not every `ls`.
+
+**One yes, one action, through two doors.** Where both the mod and an older door run (the
+Bash hook, the MCP server), the same call is asked about twice: the mod first, the older door
+after it. A pass at the mod's door leaves a single-use relay for that exact call, valid for
+60 s, which only another door can take; the mod asking again is a second action and needs a
+second yes.
+
+**A scratch Jarvis.** `CLAUDE_FLEET_JARVIS_DIR` moves Jarvis's marker, ledger, proposals
+and its on/off switch, `jarvis.enabled` (and nothing else) to another directory. Switched
+off, every one of those readers answers "no Jarvis" — nothing is gated (docs/jarvis.md,
+"The switch"). Every reader honours it: `lib/jarvis.mjs`,
+`hooks/jarvis-guard.sh`, `bin/fleet-answer` and the mod. That is how the confirm-list is
+proven on a scratch fleet without touching the real marker.
+
+**Where it runs among other mods** (Claude Code docs, "The order mods run in"): `PreToolUse`
+hooks from managed settings run before every mod, and a block there is final. Then the
+built-in `sec-default` guard and an organization's prepended mods, then mods a person
+installs (this one), then the settings hooks of every other file, `hooks/fleet-guard.sh` and
+`hooks/jarvis-guard.sh` among them. A profile signed in to a Team or Enterprise plan loads
+`sec-default` even with no managed settings. It restricts mods that *approve* calls, and these
+guards only refuse, so nothing changes there. An organization that sets
+`allowManagedModsOnly` (or `allowManagedHooksOnly`) keeps the mod from loading; the shell
+guards then do the work, as before the mod, and `allowManagedHooksOnly` turns those off too.
+
+### Delivering prompts through the mod
+
+`fleet-send` used to deliver every prompt the way a person would: paste it into the pane's
+input box and press Enter. That paste could land on a half-typed message, the Enter could
+race the paste and never submit ("could not confirm submit"), and a prompt pasted into a
+busy session folded into the running turn. For a Claude session whose mod is live,
+`fleet-send` now hands the prompt to the mod instead. The mod submits it with
+`$.prompt.submit({ text, asUser: true })` as a turn of its own, once the session is idle,
+and records which turn it started. The composer is never touched.
+
+| | paste (no mod) | mod |
+|---|---|---|
+| idle session | paste + Enter, confirmed by watching the box | handed over, submitted, confirmed by the turn's id (`fleet-send: → w1`) |
+| a half-typed message in the box | the paste joins it | left exactly where it is |
+| busy session | `queued #N`, drained after Stop | the same queue and drain, which hands each prompt to the mod (no waiting for an empty box) |
+| `--now` | pasted into the running turn | **still the paste**: the API runs a plugin's prompt only once idle |
+| `--reply-to` | armed by the next UserPromptSubmit | armed by the mod at the `turn.start` of that prompt's turn |
+
+**Which sessions.** A believable mod record for that socket and slot (`lib/mod-status.mjs`),
+whose `<session_id>.handoff/.ready` names the same process (`lib/mod-target.mjs`). A
+phase-one mod that only reports, codex/opencode/agy/cursor, an older Claude, a disabled
+plugin and a machine without node all get the paste, exactly as before.
+`CLAUDE_FLEET_MOD_DELIVER=off` forces the paste for one call or one hook.
+
+**The channel** is a spool directory per session, `<fleet dir>/<session_id>.handoff/`,
+which the mod polls every 500 ms. Claude Code's own cross-session messaging was the
+alternative. It needs a Claude session to send (`fleet-send` is also run by shells, codex,
+opencode and the phone server), it cannot cross profiles, the target reads its messages as
+a peer's words, and a message is lost if the mod reloads. A file has none of those
+problems.
+
+```
+<id>.json      fleet-send left it: { id, text, reply? }
+<id>.taken     the mod claimed it (a rename) while no turn was running
+<id>.done      the receipt: { turnId } once its turn started, or { dropped | error }
+<id>.revoked   fleet-send took it back unclaimed and pasted it instead
+.ready         the pid of the mod process that delivers from here
+```
+
+Each step is a rename, so exactly one side owns an entry at a time. If the mod has not
+claimed the entry within `CLAUDE_FLEET_MOD_CLAIM` seconds (default 3), `fleet-send`
+renames it to `.revoked`. If the session went busy in that gap, the prompt is queued.
+Otherwise it is pasted, with a note on stderr. If the mod claimed it first, the revoke's
+rename fails, so a prompt is never both submitted and pasted. Receipts are kept for an
+hour.
+
+**What stays the same.** Outputs and exit codes, the queue and its card count, the
+`[fleet]` preambles, the nudges and their deferral (they still wait for an empty box,
+because they may still be pasted), the `.sent` log, and the Jarvis delivery marker. That
+marker is still written before the handoff, so a prompt the fleet delivered into Jarvis's
+master never counts as the owner speaking. The phone's prompts go through `fleet-send` as
+before. One new failure gets a code: a prompt the mod could not submit (a hook dropped it)
+exits 1 with `not delivered`.
+
+**Seeing it.** The transcript labels a delivered prompt `Prompt from the ghostfleet
+plugin`. The record's `turnId` and the handoff's `<id>.done` name the same turn.
+
+### The request ledger
+
+A person types three messages while a turn runs. The prompt tells the model to treat each
+as queued work and never end a turn with one of them neither done nor reported not-done,
+and that instruction is dropped often enough to matter: the second message's answer is
+never written, and nobody finds out until they go looking. So does "I'll merge when it's
+green", said once and never done. The mod holds both to account from inside the session.
+
+```
+ledger · 2 open · oldest 4m “add a changelog line” · promise: merge the PR once CI is green
+```
+
+- **What becomes an item.** Every message the person submits: typed at an idle prompt,
+  typed over a running turn (`prompt.submit` fires at Enter, with that turn's id), or sent
+  from the phone. A prompt `fleet-send` hands the mod (see above) is an item too, recorded
+  at the turn it started. Not items: slash commands, background-task notifications, `/loop`
+  firings, and the ledger's own re-prompt. Only messages after the mod loaded: nothing is
+  backfilled.
+- **What closes one.** At the end of each answered main-loop turn, one small-model call
+  (`haiku` by default) reads the open items and the turn's final text (its last 6,000
+  characters, plus up to two earlier final messages since the oldest open item) and answers
+  strict JSON: each item `done`, `not-done` (said so, **with a reason**), or `open`. A part
+  an item itself put off ("not in this reply") is not owed yet. A bare "go ahead" or "thanks"
+  closes once the agent acted. The call is made only when something is open or the answer
+  reads like a promise, so a quiet session costs nothing.
+- **Promises.** The same call lists commitments from the final message ("next I'll add the
+  tests"), firm ones only: not offers that wait on the person, not "I'll keep doing X". Each
+  becomes an item with `source: promise`, drawn separately on the band, and closed the same
+  way by a later turn's text.
+- **The gate.** Items still open after the judge get **one** framed re-prompt ("the ghostfleet
+  plugin sent a message") naming them and asking the agent to finish each or say why not.
+  The bound is in the data: an item carries `gated` once asked, and is never asked again,
+  across reloads too. Never after Esc (an `aborted` turn is not judged at all), never for a
+  subagent's run, never in `-p` or the SDK, never when another turn has started since (a
+  queued message runs first, and its own end is judged next), and never about a queued
+  message that never reached the model: Up pulls a queued message back into the composer
+  with no event to say so, so before a re-prompt a queued item has to be found among the
+  session's user messages, and one that is not is dropped (resubmitted, it is a new item).
+  Promises show and do not gate, unless `CLAUDE_FLEET_LEDGER_PROMISES=gate`.
+- **It fails open.** A judge that errors, times out (30 s) or answers anything but the JSON
+  asked for closes nothing and re-prompts nothing; the file keeps `judge: { ok: false, why }`
+  and the debug log says so. The ledger is a nag, not a guard.
+- **By hand.** `fleet-ledger [-s socket] [session] [list|all|close <id>|clear]` from any
+  shell, by session name on that fleet or by session id; `/ledger` (same verbs) inside the
+  session, without a turn. `clear` closes every open item and keeps the history. Items
+  older than 7 days drop off the band and the gate; the file keeps the newest 200.
+
+**The file is not a `*.json`.** `<session_id>.ledger` holds JSON, but eight readers glob
+`<fleet dir>/*.json` as status records (fleet-list, the governor, the grid, fleet-read,
+fleet-stop, …), and a ledger named `.json` would be read as a session. It is written
+atomically, beside itself and renamed over, by the mod and by `fleet-ledger` alike; both
+re-read it before each change, so a close from outside is never undone by the mod's next
+write. It outlives the session, so `--resume` comes back to the same ledger.
+
+**For readers.** The status record's `ledger` field (`open`, `promises`, `oldest_at` in
+epoch seconds) is carried by the shell hook like the mod's other fields, so `fleet-list`,
+the grid card and the phone can show it. None of them draws it yet.
+
+| switch | default | effect |
+|---|---|---|
+| `CLAUDE_FLEET_LEDGER=off` | on | the whole feature: no file, no record field, no `/ledger`, no model call, no re-prompt |
+| `CLAUDE_FLEET_LEDGER_GATE=off` | on | record, judge and show; never re-prompt |
+| `CLAUDE_FLEET_LEDGER_PROMISES=show\|gate\|off` | `show` | `gate` lets an open promise be re-prompted once too; `off` stops extracting them |
+| `CLAUDE_FLEET_LEDGER_MODEL` | `haiku` | the judge's model (an alias or a full id) |
+
+Each is read from the session's environment, so a settings file's `env` block sets it for a
+profile and an exported variable for one session. Codex, opencode, agy, cursor, an older
+Claude, and an organization that blocks mods have no ledger and behave exactly as before.
 
 ## Updating Claude Code under a fleet
 

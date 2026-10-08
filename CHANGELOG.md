@@ -4,6 +4,214 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
+## 0.5.0 — 2026-10-07
+
+**After upgrading**, run `fleet-mod reload` to see which running Claude sessions predate the
+mod, then `fleet-mod reload --apply`: a session reaches the mod only by starting after the
+install, so everything below that lives in the mod passes the ones already running by.
+
+### Added
+
+- **A request ledger, a one-shot gate and promises** (the mod's ledger, docs/OPERATIONS.md;
+  #26). Every message a Claude session receives, typed mid-turn or sent by the fleet, is an
+  item until the session finishes it or reports it not done; the band shows
+  `ledger · 3 open · oldest …`. At the end of a turn a small model judges which items the
+  final message answered, and if any are left the session gets **one** follow-up naming them
+  — never a second for the same item, never after Esc, never in a subagent; a judge that
+  fails lets the turn end. Commitments the agent makes ("I'll merge when green") are kept as
+  promises, shown but not chased unless `CLAUDE_FLEET_LEDGER_PROMISES=gate`. `/ledger` and
+  `fleet-ledger [session] list|close <id>|clear` read and close them by hand;
+  `CLAUDE_FLEET_LEDGER=off` and `CLAUDE_FLEET_LEDGER_GATE=off` switch it off.
+
+- **`fleet-mod reload` moves running sessions onto the mod** (#29). A dry run by default: a
+  table of every live session on every profile with its running Claude version and what it
+  would do. `--apply` sends `/reload-plugins` to one new enough to load the mod, and restarts
+  an older one onto its own conversation by id; only idle sessions with an empty input box
+  are touched, and each row ends ✓ or ✗ by the session's own status record. A process keeps
+  the version it started with, so a session older than 2.1.287 cannot load a mod by
+  reloading — measured, and the reason this restarts rather than reloads.
+
+- **Changing a project's agent switches its running master** (#27). The settings page's agent
+  column, `fleet-project agent` and the `fleet_project_agent` tool used to apply to the *next*
+  master only. Now an idle master is restarted under the new agent at once, and a busy one
+  after its turn (`switching to codex…` on its card). Each agent's conversation is kept per
+  slot, so switching back resumes the one it had — except codex, which cannot resume a killed
+  pane and says so. A new agent that fails to start rolls back to the old one, resumed. A
+  master can switch itself. Running workers keep their agent.
+
+- **The phone talks to any session, and reads to you in the Mac's voice** (#11, #12, #14).
+  Speak mode on every session, not only Jarvis; a play button on every message; Kokoro on the
+  Mac picks a voice per sentence, falling back to the phone's own voice when it is not
+  installed (`fleet-jarvis voice --kokoro --install`, or the installer's new question, #19).
+  Copy one message's markdown, and tables render as tables. Pushes are held while you are at
+  the Mac (input in the last two minutes and the screen unlocked), for up to ten minutes.
+
+- **Sessions a crash killed come back as lost cards** (#21). A session from the last seven
+  days with a record but no process and no marker shows as lost; ⏎ reopens it on its own
+  conversation and `x` dismisses it.
+
+- **`ghostfleet update`** and a folder browser that filters and makes folders (#4).
+
+
+- **A Claude Code mod that reports a session's state and budget from inside it**
+  (`mods/ghostfleet`, docs/OPERATIONS.md "The mod"; Claude Code 2.1.287+). `working`,
+  `ready`, `interrupted` and `need-you` come from the turn and permission events themselves
+  rather than from a regex over the pane, and the grid, the phone, the digest and
+  `fleet-list` prefer them while the session that wrote them is alive, falling back to the
+  pane otherwise. The governor reads the engine's own 5h figure, so a narrow pane no longer
+  leaves it blind. `/fleet` and `/inbox` answer without starting a turn, mid-turn too.
+  `install.sh` installs it into every profile, after backing each one up. The new
+  `fleet-mod` command plans it (`--dry-run`), reports it (`status`) or removes it
+  (`uninstall`), and `CLAUDE_FLEET_MOD=off` skips it.
+  Known gap: in auto mode, a call the classifier decides reads `need-you` until it resolves.
+
+- **A lead's team above its prompt** (the mod's band, docs/OPERATIONS.md "The lead's band").
+  A master, and a worker once it has children, draws one line above its prompt:
+  `3 workers · 1 working · 1 need you · 2 PRs green`, from the fleet's status records every
+  5 s and `gh pr list` every 2 minutes, without starting a turn. It narrows with the pane and
+  keeps `need you` in view at any width. `PRs ?` when gh cannot answer. Workers draw nothing.
+
+- **The fleet's guards also run inside Claude, and fail closed there** (the mod's guards,
+  docs/OPERATIONS.md "The guards"). Jarvis's confirm-list, "a worker does not merge its own
+  PR" and "an agent does not approve another agent's tool call" are now `tool.call` hooks in
+  front of Bash and the MCP tools, with the same rules, switches and defaults. A guard that
+  cannot decide (git, gh, node or fleet-answer not answering) now **refuses** the call,
+  where the shell hook let it through; a session without the mod keeps the shell versions,
+  unchanged. One yes is still one action when both run.
+
+- **Prompts delivered through the mod instead of typed into the pane** (docs/OPERATIONS.md
+  "Delivering prompts through the mod"). For a Claude session whose mod is live,
+  `fleet-send` (and so `fleet_send`, the phone and every nudge) hands the prompt to the mod,
+  which submits it as a turn of its own once the session is idle. A half-typed message in the
+  box stays where it is. "Could not confirm submit" gives way to the id of the turn the
+  prompt started, and a `--reply-to` is armed by that turn rather than by whichever prompt
+  comes next. The queue, the outputs and the exit codes are unchanged. `--now` still pastes.
+  Sessions without a live mod get the paste, as before, and so does any call with
+  `CLAUDE_FLEET_MOD_DELIVER=off`.
+
+- **cursor (Cursor's CLI, `cursor-agent`) as a fifth agent** (docs/multi-agent-sessions.md).
+  `fleet-spawn --agent cursor`, the project agent column and the phone's pickers offer it once
+  `cursor-agent` is on PATH. `install.sh` writes an event bridge, the ghostfleet MCP server and
+  the orchestrate skill into `~/.cursor/` (merging, and keeping each edited file's original as
+  `<file>.pre-ghostfleet`); restart and reopen resume a worker's own chat by id across a pane
+  kill. One thing short of parity, measured: cursor starts MCP servers without the session's
+  environment, so a cursor session's `fleet_*` calls must name the project, as codex's do.
+  Also fixed for every fleet that runs cursor at all: `cursor-agent` runs Claude's hooks from
+  `~/.claude/settings.json` too, with its own payload, which `fleet-event.sh` read as a stray
+  "working" record with no cwd — it now ignores a cursor payload that did not come through
+  the bridge.
+- **agy (Google's Antigravity CLI) as a fourth agent** (docs/multi-agent-sessions.md).
+  `fleet-spawn --agent agy`, the project agent column and the phone's pickers all offer it
+  once `agy` is on PATH. It is the first non-claude agent at full parity: `install.sh` writes
+  an event bridge, the ghostfleet MCP server and the orchestrate skill into
+  `~/.gemini/config/`, `agy -c` resumes per checkout across a pane kill, and its pane signals
+  were measured at seven widths — including that its footer says "esc to cancel" while a
+  permission dialog is waiting, so busy keys on the spinner instead. New worktrees are
+  pre-trusted so a worker does not open on agy's folder-trust prompt.
+- **Jarvis** — one conversational session above every project's lead, on every profile
+  (docs/jarvis.md). `ghostfleet jarvis` creates it the first time (a small repo outside your
+  checkouts, registered like any project) and opens it every time after. It reads
+  **`fleet-digest`** / **`fleet_digest`** — one pass over every profile's status files,
+  inboxes and markers, no agent asked anything — and is woken **only** by a need-you
+  anywhere, so an idle Jarvis costs zero turns. Merging, pushing, stopping, removing,
+  answering a worker's prompt and a second worker per request are **refused by the tools**
+  until the owner says or taps yes. It restarts fresh once a day while idle, carrying a
+  `HANDOFF.md` forward.
+- **Nested leads: a worker can run its own workers** (docs/ORCHESTRATION.md). `fleet-spawn`
+  from a worker's worktree used to refuse; it now makes a **child** of that worker — branched
+  from its branch, PR into it, same fleet, tagged with its parent. The child's done and
+  need-you go to the **sub-lead's** inbox and wake it; the top master sees one card reading
+  `2 workers · 1 needs you`, and ⏎ (or a tap on the phone) opens the sub-lead's **sub-grid**.
+  Exactly two levels: a sub-worker cannot spawn. `fleet-stop` on a sub-lead with workers now
+  refuses until `--children`, which stops and reclaims them first. The subagent guard's
+  worktree exemption now covers only sub-workers — a top-level worker is pointed at
+  `fleet-spawn` like a lead. A sub-lead may merge its **children's** PRs into its own branch
+  with *workers can merge* off (base = its branch, head = a child's branch); its own PR
+  upward is still its master's to merge. Phone client v49.
+- **Conversation mode on the phone**: a Jarvis screen (from the top of Projects) where one tap
+  on *talk* runs a spoken conversation — on-device voice detection, transcription by
+  whisper.cpp on the Mac (audio never leaves it), answers read aloud. Optional:
+  `fleet-jarvis voice --install`, or the installer's new question. Screen on, app open only.
+
+### Fixed
+
+- **A fleet codex session stopped on "Background server has incompatible feature settings".**
+  codex's shared background server updates itself, so it can run a newer codex than the one
+  on PATH, and every session of the older one then asked whether to restart it (#30). Fleet
+  codex sessions now start with `--no-daemon` where codex has the flag, and never restart the
+  shared server; `CLAUDE_FLEET_CODEX_DAEMON=1` restores the old behaviour. A codex stopped on
+  that dialog, or on 0.160's new folder-trust dialog, reads as need-you rather than ready (#27).
+- **The phone signed you out every 15 minutes, in use or not** (#13). The window now slides
+  with every request, survives a server restart and resumes on relaunch.
+- **A sub-lead's card showed its own pane, not its team** (#20), and **a sub-lead was not
+  nudged by its workers** — the most specific nudge setting now wins for a sub-lead, as it
+  already did for a master (#22).
+- **A cursor session read as working while idle** (#18): its busy pattern matched any glyph
+  where cursor's spinner is braille.
+- **A conversation sent to the background vanished from the fleet.** Claude Code's
+  `/background` (or ← into its agent view) carries a conversation on under a new session id,
+  in a process its daemon started earlier with *another* session's environment. The fleet
+  kept showing the old conversation, frozen, on the grid, in `fleet-read` and on the phone,
+  while the live one's rows went to whichever fleet had started the daemon. The new id now
+  takes the slot its old transcript hands it (`continued-in`). The readers follow that line
+  too, and a backgrounded session nobody hands off claims no slot at all. The hook now logs
+  each silent exit and each record it removes to `<fleet dir>/hook-debug.log`.
+- **Hibernation slept a backgrounded conversation on its predecessor's clock, then woke the
+  predecessor.** The pane of a conversation sent to the background still says it is in the
+  *old* id. So `fleet-hibernate` and the governor dated the slot by a transcript that had stopped
+  two days earlier, slept it as idle while the live conversation was six hours old, killed
+  the background process running it (its daemon is a child of the pane), and wrote the old id
+  into the asleep marker, so the wake resumed a two-day-old conversation. The idle clock,
+  the marker and `fleet-restart`'s resume now follow `continued-in` to the newest
+  conversation. A conversation a live background process is running is never slept
+  (the governor's log says so). A wake from a marker written before this resumes the
+  successor. Every dry run had also been deleting the live id's record, which is what removed
+  the record the readers above had to learn to read around.
+- **Notifications had never been turned on**, because nothing asked. After an unlock the
+  installed app now offers *Turn on notifications* with one tap, and `fleet-phone` reports
+  `notifications: not set up` until a subscription exists.
+- **Apple refused real pushes with HTTP 403.** The VAPID subject defaulted to
+  `mailto:ghostfleet@<host>.local`; it is now the server's https origin, and a push service's
+  refusal reason is logged instead of discarded. Restart `fleet-serve` to pick it up.
+- **A lead could approve a worker's tool call.** `fleet-answer` and the `fleet_answer` MCP
+  tool pressed any key into any pane, a permission dialog included. Now, when the pane is
+  showing one (claude, codex or opencode), an approving key is refused unless
+  `--human-approved` is passed — a flag the MCP tool cannot set — and the refusal prints the
+  dialog: the tool and the exact command. Declining still works. Jarvis's question quotes
+  the same dialog, and its owner's yes is what lets the approval through; the phone, where
+  the owner taps the answer, is unaffected. Needs a **new** Claude session to reach the MCP
+  server (see CLAUDE.md, "Deploying a change").
+- **A worker could merge its own PR.** `gh pr merge` (and the GitHub MCP merge tool) from a
+  session in a linked worktree is now refused by the PreToolUse guard; the lead merges.
+  Re-run `./install.sh` to widen the guard's matcher to Bash.
+- Both of the above are **settings**, off by default: *workers can merge* and *agents can
+  approve tool calls*. Turn either on for a project (`fleet-project set <project>
+  workers-merge on`, or the grid's `,` page) or for one worker that is the sub-master of
+  its task (`--session <worker>`); its siblings stay blocked, `fleet-rename` carries the
+  override and `fleet-stop` clears it. A worker cannot turn them on for itself, and Jarvis
+  ignores both. Every refusal names the setting that would allow it.
+- **A phone answer could land as a chat message.** The phone answered the prompt it had
+  drawn from its last pane poll; if that prompt was answered at the desk or timed out in
+  between, "1" and Enter went into the composer as a turn. The answer now carries the
+  prompt's fingerprint (kind, tool, command, options, from `/api/pane`), and
+  `fleet-answer --expect` re-captures just before sending and refuses "the prompt changed"
+  otherwise. An answer with no prompt on screen is refused. The phone's answer sheet shows
+  the prompt it is answering. **Relaunch the installed app** (client v47): an older one
+  sends no fingerprint, and its answers are refused with a message saying to reload.
+
+### Changed
+
+- **Jarvis and `fleet-shots` are experimental, and off unless you turn them on**
+  (docs/jarvis.md "The switch"). `fleet-experimental list | enable <f> | disable <f>`, or the
+  Experimental section of the settings page; `fleet-jarvis enable|disable` are aliases. A
+  machine that already uses `fleet-shots` (its `<fleet dir>/shots` exists) resolves to on;
+  off, every `fleet-shots` subcommand refuses and says how to enable it (`--help` still works).
+  For Jarvis, a machine where it is already set up resolves to on and keeps working with no
+  action; a new install is off. Off means gone: no band, screen or talk button on the phone (the play button and
+  Kokoro stay), every `/api/jarvis*` route a 404, no card for its project, no wakes, its
+  guards no-ops, and its session stopped with its conversation kept — enable resumes that
+  same conversation. `install.sh` asks about whisper only once Jarvis is on.
+
 ## 0.4.0 — 2026-09-24
 
 **This release is about sessions that outlive their process.** A session used to be exactly

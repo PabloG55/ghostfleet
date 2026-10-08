@@ -2,6 +2,13 @@
   <img src="docs/logo-banner.svg" alt="ghostfleet" width="440">
 </p>
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/ghostfleet-cli"><img src="https://img.shields.io/npm/v/ghostfleet-cli?color=cb3837&label=npm" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/ghostfleet-cli"><img src="https://img.shields.io/npm/dm/ghostfleet-cli?label=downloads" alt="npm downloads"></a>
+  <a href="https://github.com/PabloG55/ghostfleet/actions/workflows/test.yml?query=branch%3Astaging"><img src="https://img.shields.io/github/actions/workflow/status/PabloG55/ghostfleet/test.yml?branch=staging&label=tests" alt="tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/PabloG55/ghostfleet" alt="MIT license"></a>
+</p>
+
 **Run a fleet of Claude Code agents in parallel, from one terminal.** Each agent gets its
 own git worktree — cut, branched, dependency-linked and booted in one keystroke — and you
 get one screen that shows what every one of them is doing.
@@ -106,8 +113,9 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | **[docs/ORCHESTRATION.md](docs/ORCHESTRATION.md)** | **A lead session driving workers.** Dispatching briefs to siblings, watching them, unblocking them, reusing worktrees before making more, and metering cost with the governor |
 | **[docs/OPERATIONS.md](docs/OPERATIONS.md)** | **The special cases.** Adopting Claude sessions you started by hand, the phone client, notifications, work-vs-personal profiles, staying awake, where a worktree goes, the two ways to register a project, which fleet a worker lands on, and updating Claude Code under a live fleet |
 | **[docs/mobile.md](docs/mobile.md)** · **[web/README.md](web/README.md)** | The phone client — the design argument, and the client itself |
+| **[docs/jarvis.md](docs/jarvis.md)** | **Jarvis, one session above every fleet** — *experimental, off by default; `fleet-experimental enable jarvis` turns it on.* `ghostfleet jarvis`, the digest it reads instead of polling, the confirm-list the tools enforce, conversation mode on the phone (transcribed on the Mac), and its daily fresh start |
 | **[docs/stack-view.md](docs/stack-view.md)** | Why the stack is nested attaches and not `join-pane`, and what was measured to find out |
-| **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex` and `opencode` beside `claude` — the measured capability matrix (hooks, MCP, skill, resume) and what picking a non-default agent costs |
+| **[docs/multi-agent-sessions.md](docs/multi-agent-sessions.md)** | Running `codex`, `opencode`, `agy` and `cursor` beside `claude` — the measured capability matrix (hooks, MCP, skill, resume) and what picking a non-default agent costs |
 | **[docs/attachments.md](docs/attachments.md)** | Sending a photo from the phone: what was measured per agent, why the bytes are converted on the Mac rather than the phone, and the two recommendations the build overturned |
 | **[docs/agent-council.md](docs/agent-council.md)** | Would a second agent checking the first one's work reduce iteration? Measured against 3,494 real turns and this repo's own history: misread intent is the *smallest* correction category, three quarters of the rest are found by a human looking at a screen, and a browser-based verifier would have passed the bug it was built for |
 | **[docs/ROADMAP.md](docs/ROADMAP.md)** · **[docs/IDEAS.md](docs/IDEAS.md)** | What is next, and what is only an idea |
@@ -124,7 +132,7 @@ had grown to 78% of this page and a README is not where you go to check a keystr
 | `tmux` | the hidden substrate that keeps sessions alive in the background — missing? the installer offers to install it for you (see below). With no terminal attached it has nobody to ask, so a piped or CI install prints the command instead — pass `--yes` there and it installs without prompting |
 | `jq` | the installer wires the hooks and MCP entries with it, and the status hook parses its payload with it. **macOS 26 already ships it** (`/usr/bin/jq`); anywhere it is missing the installer offers to install it |
 | macOS, Linux, or **Windows via WSL2** | sessions are tmux servers, and tmux is POSIX-only — see the native-Windows note below |
-| `codex` / `opencode` (optional) | alternative agents, chosen per worktree on the `w` form. Their pane signals are detected separately — see [docs/multi-agent-sessions.md](docs/multi-agent-sessions.md) |
+| `codex` / `opencode` / `agy` / `cursor-agent` (optional) | alternative agents, chosen per worktree on the `w` form. Their pane signals are detected separately — see [docs/multi-agent-sessions.md](docs/multi-agent-sessions.md) |
 | `$EDITOR` (optional, default `nvim .`) | what `Ctrl-n`'s editor tab opens. Any editor works — override with `CLAUDE_FLEET_EDITOR`. With neither set and no Neovim new enough for LazyVim (0.11.2+), the installer offers the official Neovim release (under `~/.local`) and, only where there is no `~/.config/nvim` yet, the LazyVim starter |
 | `tailscale` (optional) | **only** for the phone client, and only off-LAN: it is how `fleet-serve` is reachable without exposing a port — see [docs/mobile.md](docs/mobile.md) |
 | `zellij` (optional) | not required, but the included layout gives you one pane that frees `Ctrl-s`/arrows from its own bindings |
@@ -190,6 +198,19 @@ you, because each opens a port, writes a config or spends a passkey. It reaches 
 over **Tailscale** — `fleet-serve` refuses a wildcard, a LAN address or a public one before
 the socket opens, because this endpoint runs commands. See [docs/mobile.md](docs/mobile.md)
 for the design and the threat model.
+
+**Optional, and local only: the Mac's voice.** The phone can read replies aloud with
+[Kokoro](https://github.com/thewh1teagle/kokoro-onnx) running on your machine — better English,
+real Spanish, chosen sentence by sentence — instead of the phone's own voice. It is ~350 MB, so
+`./install.sh` asks and the default is **No** (`--yes` does not answer it). Add it any time:
+
+```bash
+fleet-jarvis voice --kokoro --install   # verified download + a pinned Python 3.12 venv; re-run to repair
+```
+
+Without it nothing is missing: the phone reads with its own voice. `fleet-phone` and
+`fleet-jarvis status` say whether it is installed, not installed or broken.
+[docs/mobile.md](docs/mobile.md#the-macs-voice-kokoro-optional) has the details.
 
 Two things that cost people time, so they are in that command's output too: the passkey is
 enforced server-side, so until a phone is enrolled the app sits on its lock screen and the
@@ -277,7 +298,9 @@ guard that stops Claude Code's built-in `EnterWorktree` from walking a fleet ses
 checkout (it is *appended* to `PreToolUse`, so hooks you already have there survive); **registers the
 fleet MCP server** into each config dir's `.claude.json` via `claude mcp add -s user` (Claude Code
 reads MCP from `.claude.json`/`.mcp.json`, *not* `settings.json`) **and once, globally, for
-`codex` and `opencode`**, which keep one config each and have no per-profile equivalent;
+`codex`, `opencode`, `agy` and `cursor-agent`**, which keep one config each and have no per-profile
+equivalent (agy and cursor also get the event bridge and the skill, under `~/.gemini/config/` and
+`~/.cursor/`; an edited `~/.cursor` file keeps its original beside it as `<file>.pre-ghostfleet`);
 installs the `ghostfleet-orchestrate` skill; and links the zellij layout. Re-run any time; it's idempotent.
 
 <details>
@@ -376,6 +399,38 @@ and `fleet-*` tools):
 
 ---
 
+## Updating
+
+```bash
+ghostfleet update                    # releases: follows the branch your clone is on
+ghostfleet update --branch staging   # follow development instead (--branch main to go back)
+ghostfleet update --yes              # ...and restart every session without asking
+```
+
+One command, because the code is not the only thing that is old. In order, it:
+
+1. **brings the code up** — in a clone, fetches and *fast-forwards* the tracked branch
+   (`main` for releases, `staging` for development); from npm, runs
+   `npx ghostfleet-cli@latest`. It never merges and never stashes: uncommitted edits or
+   local commits that origin lacks are yours, so it stops and says which it found.
+2. **runs the install**, so new commands, hooks and the MCP registration land too.
+3. **restarts the phone daemon** — a launchd job whose label ends in
+   `ghostfleet.fleet-serve` is kickstarted. Run by hand instead? Restart it by hand.
+4. **offers `fleet-restart --all`** — every session's MCP server is the one it started
+   with, for as long as it lives. This relaunches every session on the machine onto its
+   own conversation, so it asks (or takes `--yes`).
+5. **tells you to relaunch the phone app** — swipe it away and open it again. Reopening it
+   from the app switcher is a resume, and a resume keeps the client it already had.
+
+**A clone from before the repository was recreated cannot be updated.** Its history shares
+no commit with origin's, so there is nothing to fast-forward from — `ghostfleet update`
+says so and prints the `git clone` to run, and changes nothing. Keep the old clone until
+anything only it holds has been copied out.
+
+An npm install is told when a newer version is out: the Projects screen prints one line.
+The check reads a cache (`~/.config/ghostfleet/npm-latest`, refreshed in the background at
+most daily), so startup never waits on the network.
+
 ## Uninstall
 
 **Claude** — in each config dir (`~/.claude`, `~/.claude-*`): remove the fleet `hooks` blocks
@@ -384,7 +439,7 @@ and the `ghostfleet` entry under `mcpServers` from `settings.json` (or restore a
 (`claude mcp remove -s user ghostfleet` does it), and delete
 `skills/ghostfleet-orchestrate`.
 
-**codex and opencode** — these are registered ONCE, globally, not per profile (see the
+**codex, opencode, agy and cursor** — these are registered ONCE, globally, not per profile (see the
 comment above `register_codex_mcp` in `install.sh` for why that is correct rather than a
 shortcut):
 
@@ -393,6 +448,13 @@ codex mcp remove ghostfleet                                    # ~/.codex/config
 tmp=$(mktemp); jq 'del(.mcp.ghostfleet)' ~/.config/opencode/opencode.jsonc > "$tmp" \
   && mv "$tmp" ~/.config/opencode/opencode.jsonc              # opencode's MCP entry
 rm -f ~/.config/opencode/plugin/ghostfleet-event.js            # opencode's event bridge
+for f in hooks mcp_config; do tmp=$(mktemp); jq 'del(.ghostfleet, .mcpServers.ghostfleet)' \
+  ~/.gemini/config/$f.json > "$tmp" && mv "$tmp" ~/.gemini/config/$f.json; done  # agy's bridge + MCP
+rm -f ~/.gemini/config/skills/ghostfleet-orchestrate             # agy's skill
+tmp=$(mktemp); jq '.hooks |= with_entries(.value |= map(select((.command // "") | contains("cursor-fleet-event.sh") | not)))' \
+  ~/.cursor/hooks.json > "$tmp" && mv "$tmp" ~/.cursor/hooks.json   # cursor's bridge
+tmp=$(mktemp); jq 'del(.mcpServers.ghostfleet)' ~/.cursor/mcp.json > "$tmp" && mv "$tmp" ~/.cursor/mcp.json  # cursor's MCP
+rm -f ~/.cursor/skills/ghostfleet-orchestrate                    # cursor's skill
 ```
 
 Then delete the symlinks in `~/.local/bin`, `rm -rf ~/.local/libexec/ghostfleet`, and

@@ -395,11 +395,11 @@ const appjs = read('app.js');
 const composer = (/function composer\([\s\S]*?\n\}/.exec(appjs) || [''])[0];
 is('the composer has no speaker', false, /toggleSpeak/.test(composer));
 is('...and a bubble does', true, /function turn\([\s\S]*?toggleSpeak/.test(appjs));
-// ONE on screen at a time is what answers the button-wall objection the old comment
-// recorded: the control is drawn only for the bubble whose key matches the tap.
-is('...only on the tapped one', true, /S\.speakSel === key/.test(appjs));
-is('...and the old rationale was replaced, not deleted', true,
-   /button wall/.test(appjs));
+// ON EVERY MESSAGE now (the owner's call), replacing tap-to-reveal: no trace of the old
+// one-at-a-time gate may survive to hide a speaker again, and turn() says why it changed.
+is('...on every message, with no tap-to-reveal gate left', false, /speakSel/.test(appjs));
+is('...and the change of rationale is written down', true,
+   /A PLAY BUTTON ON EVERY MESSAGE/.test(appjs));
 
 // ── the speaker is an icon, and there is only ONE of it ───────────────────
 // THE STRUCTURAL HALF. pwa-render asserts the two rendered states share a viewBox; this
@@ -544,8 +544,11 @@ is('...and activate drops the old ones', true, /if \(k !== VERSION\) await cache
 
 // ── 3. the fixtures are §4, exactly ───────────────────────────────────────
 const NINE = ['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted'];
-const TOP = ['project', 'profile', 'counts', 'cards', 'free_worktrees'].sort().join(',');
-const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'pr', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead', 'exited'].sort().join(',');
+// `sub`, `parent`, `workers`, `team_status`, `sub_head`: nested leads — whose sub-grid this
+// is, whose team a card belongs to, a sub-lead's rollup, the team's status its card is drawn
+// in, and the card that heads its own sub-grid.
+const TOP = ['project', 'profile', 'sub', 'counts', 'cards', 'free_worktrees'].sort().join(',');
+const CARD = ['name', 'label', 'status', 'folder', 'branch', 'agent', 'pr', 'msg', 'age', 'attached', 'sched', 'limit_at', 'lead', 'exited', 'parent', 'workers', 'team_status', 'sub_head'].sort().join(',');
 const COUNTS = ['need_you', 'working', 'ready', 'parked', 'limit', 'interrupted'].sort().join(',');
 const fixDir = path.join(WEB, 'fixtures');
 const grids = fs.readdirSync(fixDir).filter(f => /^grid-.*\.json$/.test(f)).sort();
@@ -620,8 +623,7 @@ is('...and the page still claims the bottom edge', true, /viewport-fit=cover/.te
 // full screen — while the web view was 812 tall under a translucent bar.)
 is('...and no rule pays the status bar back into a height', 0,
    (CSS.replace(/\/\*[\s\S]*?\*\//g, '').match(/height:\s*calc\([^;]*env\(safe-area-inset-top\)/g) || []).length);
-// The probe still reports which standalone signal was true; the device's next line is the
-// one that says whether the fix landed (sat0 and no band), so it stays in.
+// Standalone is still marked from either signal: the fix for the band depends on it.
 is('the client still marks standalone from either signal', true, /classList\.toggle\('standalone'/.test(JS['app.js']));
 is('...from navigator.standalone as well', true, /navigator\.standalone/.test(JS['app.js']));
 is('...and again on rotation', true, /orientationchange['"]?,\s*markStandalone/.test(JS['app.js']));
@@ -634,12 +636,6 @@ is('...and again on rotation', true, /orientationchange['"]?,\s*markStandalone/.
 const chatSrc = (/function chatView\([\s\S]*?\nfunction /.exec(JS['app.js']) || [''])[0];
 is('an empty transcript says so in plain words', true, /No messages yet — send one below/.test(chatSrc));
 is("...and never prints fleet-read's note", false, /text:\s*s\.note/.test(chatSrc));
-
-// The probe has to measure the screen that HAS a composer. Keyed per screen: the grid has
-// none, so the first reading came back cb0/gap0 and said nothing about the band.
-is('the geometry probe measures each screen once', true, /geoSent\.has\(where\)/.test(JS['app.js']));
-is('...naming which screen it measured', true, /api\.diag\('geo', where/.test(JS['app.js']));
-is('...and reports the two standalone signals apart', true, /'mm' \+/.test(JS['app.js']) && /'ns' \+/.test(JS['app.js']));
 
 // ── moving between screens says WHICH WAY ─────────────────────────────────
 // "add cool animations ... like getting out of a session." The screens are a stack, so the
@@ -721,27 +717,14 @@ is('the keyboard inset is removed, not emptied', true, /removeProperty\('--kb-in
 is('...and never set to an empty string', false, /setProperty\('--kb-inset',\s*(keyboard[^)]*)?''/.test(kb));
 is('...while the keyboard-open path still writes 0', true, /setProperty\('--kb-inset',\s*'0px'\)/.test(kb));
 
-// ── the geometry probe measures the shell, not the lock screen ────────────
-// "still it doesnt use the full screen", in the installed app. No engine here reproduces
-// it — dvh on a desktop is the window, and the home-screen app cannot be driven from this
-// machine — so the device reports its own numbers and the log is the instrument.
-//
-// THE PROBE HAS ONE WAY TO LIE, and it did on its first run: `#app` only carries `.shell`
-// (and therefore `height: 100dvh`) once a real screen is drawn, so a report sent at load
-// measures the LOCK SCREEN. Measured: sl524 against ih844 — the ship and two buttons, not
-// a viewport. A number that looks like a short shell and is actually a short page would
-// have sent the next change in the wrong direction entirely.
-const geo = (/function reportGeometry\(\)[\s\S]*?\n}/.exec(JS['app.js']) || [''])[0];
-is('the geometry probe exists', true, geo.length > 0);
-is('...and waits for the shell', true, /classList\.contains\('shell'\)/.test(geo));
-is('...rather than reporting whatever is drawn', true, /geoTries/.test(geo));
-// Both screen and viewport, or the comparison that decides this cannot be made: the
-// suspicion is that the VIEWPORT is short of the SCREEN, not that the shell is short of
-// the viewport, and only one of those is visible from inside the page without both.
-is('...reporting the viewport', true, /ih.*innerHeight/.test(geo));
-is('...and the physical screen beside it', true, /sh.*screen\.height/.test(geo));
-// Path segments, never a query: fleet-serve logs (req.url).split('?')[0].
-is('...and it beacons through api.diag', true, /api\.diag\('geo'/.test(geo));
+// ── the phone probes are gone, and stay gone ──────────────────────────────
+// The __diag beacons (load / lifecycle / geo) were shipped to find two bugs that no engine
+// here reproduces — the Face-ID reload and the iOS 26 standalone viewport — and to come out
+// once both fixes held on the device. They have. A beacon left in fires a request per launch
+// per screen into a log nobody is reading any more, so the absence is asserted: the next
+// probe is written on purpose, not inherited.
+is('the client sends no __diag beacon', false, /__diag/.test(JS['api.js'] + JS['app.js']));
+is('...and has no diag() to call', false, /\bdiag\(/.test(JS['api.js'] + JS['app.js']));
 
 // ── the client swap must not spend somebody's passkey ─────────────────────
 // The decision itself is driven in pwa-render (reloadAction). What that cannot see is how
@@ -785,6 +768,8 @@ const APP = JS['app.js'];
 // assertion fails and says so, instead of the second one blaming the phone.
 const PROMPTS = [
   ["kill session '",                                          'the kill question'],
+  ["dismiss lost session '",                                  'the lost-card dismiss question'],
+  ['forgets the card; the conversation stays on disk',        "...and its promise to keep the transcript"],
   ['y = yes · any other key = cancel',                         'the y/cancel keys'],
   ['f = remove anyway · any key = cancel',                     'the force key'],
   ["remove worktree '",                                        'the worktree question'],
@@ -816,7 +801,8 @@ is('reclaim takes BOTH confirmations', true, /reclaim-kill/.test(APP) && /reclai
 // — which is why the run.sh group drives the refusal through the planner as well.
 is('the lead is read off the card, not the name', true,
    /function isLeadCard\(name\) \{ const c = cardOf\(name\); return !!\(c && c\.lead\); \}/.test(APP));
-is('...and kill goes through the guard', true, /function askKill\(name\) \{ if \(name && !leadGuard\(/.test(APP));
+// the guard is the FIRST statement: a sub-lead's worker count is read only after it
+is('...and kill goes through the guard', true, /function askKill\(name\) \{\s*if \(!name \|\| leadGuard\(/.test(APP));
 is('...and reclaim too', true, /function askReclaim\(name\) \{ if \(name && !leadGuard\(/.test(APP));
 is('...and rename too', true, /function sheetRename\(name\) \{[\s\S]{0,400}?leadGuard\(name, 'renamed'\)/.test(APP));
 is('the lead keeps send/answer/pause', true, /const lead = !!\(c && c\.lead\);/.test(APP));
@@ -1130,9 +1116,23 @@ is('...and app.js still hands the staleness over', 2,
 // §5's rule about the token, checked as CODE and not as prose: the first version of
 // this assertion matched api.js's own comment explaining why the token is not stored,
 // and so passed while proving nothing. Only a real write counts.
-const stores = [...read('api.js').matchAll(/(?:localStorage|sessionStorage)\.setItem\(([^)]*)\)/g)].map(m => m[1]);
-is('no storage write mentions the token', '', stores.filter(a => /token/i.test(a)).join('|'));
-is('the token lives in a module variable', true, /^let token = null, tokenExp = 0;$/m.test(read('api.js')));
+//   THE RULE CHANGED, by the owner's decision: the token is now KEPT on the device so a
+// relaunch inside the idle window needs no Face ID (the server's 15-minute idle window and
+// `revoke` are the bound). What still has to hold is narrower and checkable: ONE write,
+// under a key scoped to the daemon's origin, and every 401 the client can receive clears
+// it — so a dead token is tried once and never lingers.
+const API = read('api.js');
+const stores = [...API.matchAll(/(?:localStorage|sessionStorage)\.setItem\(([^)]*)\)/g)].map(m => m[1]);
+is('exactly one storage write carries the token', 1, stores.filter(a => /token/i.test(a)).length);
+is('...in localStorage, under the per-origin key', true,
+   /localStorage\.setItem\(k, JSON\.stringify\(\{ t: token, exp: tokenExp \}\)\)/.test(API)
+   && /`\$\{LS_TOKEN\}:\$\{r\.base\}`/.test(API));
+is('...and never in sessionStorage (an iOS relaunch drops it)', false, /sessionStorage\.setItem/.test(API));
+const on401 = API.split('\n').filter(l => /if \(r\.status === 401/.test(l));   // the branches that ACT on one, not the probe's sentence about it
+is('every 401 branch clears the token', '', on401.filter(l => !/clearToken\(\)/.test(l)).join(' | '));
+is('...and there are 401 branches to check', true, on401.length >= 4);
+is('clearToken removes the stored copy', true,
+   /export function clearToken\(\) \{ token = null; tokenExp = 0; storeToken\(\); \}/.test(API));
 
 // ── 9. the probe asks a route the server really has ───────────────────────
 // api.js decides between the daemon and the bundled fixtures by asking ONE endpoint, and

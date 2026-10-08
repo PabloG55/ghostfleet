@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: cd2ae724b897
+// CLIENT-HASH: e74a0e9052c3
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -274,7 +274,53 @@
 // deploy landed is the client line in the settings sheet.
 // v45 draws `queued: N` on a card: prompts fleet-send is holding until that session's turn
 // ends, instead of pasting them into it.
-const VERSION = 'ghostfleet-v45';
+// v46 is Jarvis: a band at the top of Projects, the Jarvis screen with its proposals and
+// conversation mode, and the one-tap "Turn on notifications" after an unlock — the offer
+// push never had, which is why it had never been turned on. A tap on a notification from
+// Jarvis opens Jarvis. An older client shows none of it and keeps working.
+// v47 answers only the prompt it drew: the answer sheet reads the pane first, shows the
+// prompt it is answering, and sends its fingerprint; the daemon refuses if that prompt is
+// no longer on screen ("the prompt changed") and the sheet re-reads the pane. AN OLDER
+// CLIENT SENDS NO FINGERPRINT, SO ITS ANSWERS ARE REFUSED — with a message saying to reload.
+// v48 drops the __diag probes: the client no longer beacons its load, lifecycle or
+// geometry to the daemon's log. Nothing else changes for an older client.
+// v49 is nested leads: a sub-lead's card carries `N workers · M need you` and a tap opens
+// its sub-grid (itself, then only its workers); back comes up to the top grid. An older
+// client shows the sub-lead as an ordinary card and cannot see its workers at all.
+// v50 offers agy: the new-worktree sheet's agent list comes from the daemon's installed-agent
+// catalogue instead of a hardcoded three, so a phone still on v49 never shows the fourth.
+// v51 copies one message: a copy button beside every bubble's timestamp writes that
+// message's markdown source, and a markdown table renders as a table in its own scroller
+// with the first column pinned. A phone still on v50 shows the table as pipes and has no
+// button — nothing it does is wrong, it just cannot do either.
+// v52 is the Mac's voice: a play button on every message, speak mode per session, and
+// speech from Kokoro on the Mac when it has it (per-sentence English/Spanish), falling back
+// to the device's voice. An older client keeps its tap-to-reveal button and device voice.
+// v53 keeps the session: the token is stored on the device and tried at launch before Face
+// ID, and its expiry slides with every request (X-Session-Expires). A phone still on v52
+// keeps working against the new daemon — its polls slide the server's window too — but it
+// still asks for Face ID at every relaunch, and still locks itself 15 minutes after an
+// unlock, because its own copy of the expiry never moves.
+// v55 adds cursor to the new-worktree sheet's fallback agent list, the one used when the
+// daemon is too old to send its installed-agent catalogue.
+// v56 says which voice the Mac reads with: the settings sheet names Kokoro as installed,
+// missing or broken, with the one command that fixes it. A phone still on v55 reads aloud
+// exactly the same — it just cannot tell you why the voice is the device's own.
+// v57 draws a LOST card (a session a crash killed): tap reopens it with fleet_reopen, a long
+// press forgets it. A phone still on v56 shows the same card as an ordinary idle one, and
+// tapping it opens a session that is not there; a daemon from before fleet_reopen refuses
+// the verb by name.
+// v58 draws a sub-lead's card in its TEAM's status (`team_status`) with the lead's own state
+// in the age slot, and says how many of its workers are working. A phone still on v57 reads
+// the new field as absent and draws the lead's own status, which is what it always did.
+// v59 says the running master switches agent too (after its current turn) instead of
+// "takes effect on the NEXT master", which stopped being true with lib/agent-switch.sh.
+// v60 takes Jarvis's switch from the daemon (`jarvis_enabled` on /api/projects): off, there
+// is no Jarvis band, no Jarvis screen and no talk button, and the Mac's voice is read from
+// `speak` there instead of from /api/jarvis, which now 404s. A phone still on v59 against a
+// switched-off daemon draws no band either (the 404 leaves it nothing to draw) but keeps a
+// talk button whose hearing is refused.
+const VERSION = 'ghostfleet-v60';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
@@ -286,13 +332,14 @@ const SHELL = [
   './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png',
   './fixtures/projects.json', './fixtures/checkouts.json',
-  './fixtures/grid-acme-api.json', './fixtures/grid-degraded.json',
+  './fixtures/grid-acme-api.json', './fixtures/grid-acme-api-sub-cache-keys.json', './fixtures/grid-degraded.json',
   './fixtures/grid-free.json', './fixtures/grid-empty.json',
   './fixtures/settings-acme-api.json',
   './fixtures/session-acme-api-api-fix.json', './fixtures/session-acme-api-docs-pass.json',
   './fixtures/session-acme-api-master.json',
   './fixtures/pane-acme-api-api-fix.json', './fixtures/pane-acme-api-docs-pass.json',
   './fixtures/pane-acme-api-master.json',
+  './fixtures/jarvis.json', './fixtures/grid-jarvis.json', './fixtures/session-jarvis-master.json',
 ];
 
 self.addEventListener('install', e => {
@@ -373,19 +420,27 @@ self.addEventListener('push', e => {
     renotify: true,
     icon: './icons/icon-192.png',
     badge: './icons/icon-192.png',
-    data: { at: (d && d.at) || 0 },
+    // WHICH SCREEN A TAP OPENS, from the payload's one-word enum (fleet-serve pushPayload).
+    data: { at: (d && d.at) || 0, open: d && d.open === 'jarvis' ? 'jarvis' : '' },
   }));
 });
 
 // Tapping it opens the app — the grid, not a deep link. The card list is one tap from
 // everywhere and a URL that named a session would be a second route to keep in step with
 // app.js's own navigation for no gain.
+//   ONE EXCEPTION, AND IT IS A SCREEN, NOT A SESSION: an answer from Jarvis opens Jarvis,
+// because that is where the answer is. An open window is told by message; a cold start
+// gets '#jarvis', which app.js reads once and clears. Both land AFTER the unlock.
 self.addEventListener('notificationclick', e => {
   e.notification.close();
+  const jarvis = !!(e.notification.data && e.notification.data.open === 'jarvis');
   e.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const c of all) if ('focus' in c) return c.focus();
-    return self.clients.openWindow('./');
+    for (const c of all) if ('focus' in c) {
+      if (jarvis) { try { c.postMessage({ open: 'jarvis' }); } catch {} }
+      return c.focus();
+    }
+    return self.clients.openWindow(jarvis ? './#jarvis' : './');
   })());
 });
 

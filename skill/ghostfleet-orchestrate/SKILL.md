@@ -1,6 +1,7 @@
 ---
 name: ghostfleet-orchestrate
-description: Coordinate, spawn, observe, unblock, and budget sibling Claude Code sessions in the same ghostfleet (parallel git worktrees). Use when you are a "lead"/master session dividing work across siblings — see which worktrees are free and reuse the FOLDER (never a finished worker's session) before creating another, give every new task a NEW session, retire finished workers, dispatch a prompt to a worker, list the fleet, read a worker's output, check who needs you, unblock a worker stuck on a prompt, or park/resume workers to control cost. USE THIS FOR ANY MENTION OF A WORKTREE IN A FLEET SESSION — "start a worktree", "make/create a worktree", "spin up a worktree", "worktree this", "start a wrotree" and every other typo of it. In a ghostfleet session that ALWAYS means a ghostfleet worktree (a sibling of the repo, run by a NEW session), never Claude Code's built-in EnterWorktree tool, which would move THIS session into <repo>/.claude/worktrees/ and abandon the thread the user is talking to. Other triggers: "spin up a worker for X", "work on a worktree to fix Y", "which worktrees are free / reuse a worktree", "create a new session/worktree on branch Z", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "who needs me / check the inbox", "unblock/answer <session>", "pause/park <session>", "resume <session>". Runs the fleet-* commands (or the fleet_* MCP tools).
+description: >-
+  Coordinate, spawn, observe, unblock, and budget sibling Claude Code sessions in the same ghostfleet (parallel git worktrees). Use when you are a "lead"/master session dividing work across siblings — see which worktrees are free and reuse the FOLDER (never a finished worker's session) before creating another, give every new task a NEW session, retire finished workers, dispatch a prompt to a worker, list the fleet, read a worker's output, check who needs you, unblock a worker stuck on a prompt, or park/resume workers to control cost. USE THIS FOR ANY MENTION OF A WORKTREE IN A FLEET SESSION — "start a worktree", "make/create a worktree", "spin up a worktree", "worktree this", "start a wrotree" and every other typo of it. In a ghostfleet session that ALWAYS means a ghostfleet worktree (a sibling of the repo, run by a NEW session), never Claude Code's built-in EnterWorktree tool, which would move THIS session into <repo>/.claude/worktrees/ and abandon the thread the user is talking to. Other triggers: "spin up a worker for X", "work on a worktree to fix Y", "which worktrees are free / reuse a worktree", "create a new session/worktree on branch Z", "parallelize this into workers", "kick off the workers", "send this to <session>", "have <session> do X", "check what <session> said", "who needs me / check the inbox", "unblock/answer <session>", "pause/park <session>", "resume <session>". Runs the fleet-* commands (or the fleet_* MCP tools).
 ---
 
 # Orchestrating sibling fleet sessions
@@ -24,6 +25,9 @@ lead starts blank, so **do not act from memory — read the real state first:**
   it acknowledged while naming none — worth a `fleet-read` before it gets far.
 - **`fleet-inbox`** — what has needed you since you last looked (see below).
 - **`fleet-list`** — the live sessions and their status.
+- **`fleet-digest`** (MCP `fleet_digest`) — every fleet on every profile at once, read
+  from files: who needs the owner, what is working, what finished since the last look.
+  For a question about *everything*; `--peek` looks without moving the "since" stamp.
 
 ## "Start a worktree" means fleet-spawn — never EnterWorktree
 
@@ -46,27 +50,44 @@ if you see that refusal it is not an obstacle to route around — reach for `fle
 
 `ExitWorktree` is never blocked: a session that already got moved needs its way back.
 
-## First: are you the lead, or are you already a worker?
+## First: are you the lead, a sub-lead, or a worker?
 
-**If this session is already in a git worktree, do not spawn anything.** You are a
-worker, and workers are leaves — spawning here adds a second worktree beside the one you
-are sitting in. When you finish a PR and are asked to start fresh work, re-branch where
-you stand:
+**A master** is in the project's main checkout. Everything below is for it.
+
+**A worker** is in a linked worktree. When you finish a PR and are asked to start fresh
+work, re-branch where you stand — no new worktree, no new session:
 
 ```bash
 git fetch origin && git checkout -B <new-branch> origin/staging
 ```
 
 That is the whole operation: same worktree, same session, same dev-stack slot, and the
-dependencies you already installed. `fleet-spawn` refuses from a linked worktree and
-says this, so if you see that refusal it is not an obstacle to work around — it means
-the request was "start new work", not "start a new worker".
+dependencies you already installed. That re-branch is for the human in THIS pane who asked
+for it. It is not how a lead hands a worker its next task — a lead gives a new task a new
+session (below), and when you finish one, say so and end your turn rather than asking for more.
 
-That re-branch is for the human in THIS pane who asked for it. It is not how a lead hands a
-worker its next task — a lead gives a new task a new session (below), and when you finish
-one, say so and end your turn rather than asking for more.
+**A worker whose task needs a team of its own is a SUB-LEAD** — a lead for its children and
+a worker to its master. `fleet-spawn` (or `fleet_spawn`) run from your worktree makes a
+**child of this session**, never a sibling of the top lead:
 
-Everything below is for a **lead** in the project's main checkout.
+- the child branches from **your** branch and its PR targets **your** branch
+  (`gh pr create --base <your-branch>`); its brief is told so automatically
+- its `done` / `need-you` land in **your** `fleet-inbox` and wake you, not master; master
+  sees only the rollup on your card (`◆ working` · `4 workers · 1 needs you`)
+- **you integrate**: merge each child's PR into your branch (`gh pr merge <n>` — the guard
+  allows exactly this: base = your branch, head = one of your children's branches, even
+  with "workers can merge" off), then open ONE PR from your branch to the integration
+  branch and report that to your master, who merges it
+- **exactly two levels**: a child cannot spawn. If you are a child (the spawn refuses and
+  says "sub-worker"), do the work yourself or ask your sub-lead to split it
+- retire a finished child with `fleet-stop --reclaim <child>`; stopping a sub-lead that
+  still has children is refused until you pass `--children` — ask the human first, it stops
+  and reclaims every one of them
+
+Everything else in this skill applies to a sub-lead as to a master — look before you spawn,
+a new task is a new session, resolve the brief's decisions before you dispatch — scoped to
+its own children. Do NOT run fleet-spawn from the main checkout to get "more workers": that
+makes them the top lead's, and nothing ties them to you.
 
 ## A new task is a new SESSION — reuse the folder, never the worker
 
@@ -133,7 +154,7 @@ project's session looks ignored no matter how long you wait. When you want an an
   **in this conversation** as a message from `<project>/<session>` — even while you are
   mid-turn. Nothing to poll, nothing to drain. Add `-s <socket>` (MCP: `project`) to ask
   another project's session; that is the case it exists for.
-- If it **couldn't** message you — you aren't an addressable peer, it runs codex/opencode,
+- If it **couldn't** message you — you aren't an addressable peer, it runs codex/opencode/agy/cursor,
   or its turn died first — the answer falls back to an `ANSWERED` row in `fleet-inbox`
   naming `<project>/<session>`, with the reply's first ~200 characters; pull the rest with
   `fleet-read -s <socket> <session> 3`. So a missing row is not a missing answer: check
@@ -154,6 +175,25 @@ retry?", or a trust prompt, use:
   Enter by default. `--no-enter` to skip Enter; `--key <Name>` (repeatable) for
   special keys (Enter, Escape, Up, Down…). It prints the pane afterward so you see
   the effect.
+- **A permission dialog is not yours to approve.** When the worker is asking to RUN
+  something ("Do you want to proceed?", codex's "Would you like to run the following
+  command?", opencode's "Permission required"), `fleet-answer` refuses any approving key
+  and prints the dialog — the tool and the exact command. You may DECLINE it (the "No"
+  option's number, or `--key Escape`). To approve, show the human that dialog and let
+  them run `fleet-answer --human-approved …` themselves, or tap it on the phone. Never add
+  the flag yourself: an agent approving another agent's tool call is the thing the
+  dialog exists to stop. Usage-limit and trust prompts are not permission dialogs and
+  answer as before.
+- **You merge; your workers do not.** A worker opens its PR and reports the number; the
+  lead reviews and merges it from the main checkout. `gh pr merge` from a linked worktree
+  is refused by the fleet's PreToolUse guard — except a SUB-LEAD merging one of its own
+  children's PRs into its own branch, which needs no setting (its own PR upward still does).
+- **Both are settings, OFF by default** — for a fleet whose workers own their task:
+  `fleet-project set <project> workers-merge on` / `agents-approve on` for the whole
+  project (or the grid's `,` page), or add `--session <worker>` to make ONE worker the
+  sub-master of its task while its siblings stay blocked. `fleet-project get <project>`
+  shows them. Only you or the human set these — a worker's own attempt is refused. Jarvis
+  ignores both: its confirm-list always asks the owner.
 
 ## Budget: one shared account
 
@@ -189,7 +229,7 @@ Help it: don't over-fan-out, and **park idle/expensive workers yourself**:
 | read a worker's output | `fleet-read <session> [n]` |
 | **look at what was built** | `fleet-look.mjs <url \| file.html \| file.pdf>` — renders it and prints a PNG path; `Read` that path to actually see it. `--tree` for the accessibility tree |
 | **have another model read your diff** | `fleet-review` — runs the reviewing CLI's own non-interactive review. Defaults to uncommitted changes, else this branch against the integration branch, and to an agent OTHER than yours. Exactly one of the three ships a review; the rest say so rather than faking one |
-| **photograph a flow for a human to approve** | `fleet-shots --flow <f.json>` — walks the steps, shoots each one, records the REQUESTS it made, and writes a folder whose `index.html` opens with no server. A 404 behind a page that looks right is the thing this catches and a screenshot cannot |
+| **photograph a flow for a human to approve** *(experimental — off unless `fleet-experimental enable shots`)* | `fleet-shots --flow <f.json>` — walks the steps, shoots each one, records the REQUESTS it made, and writes a folder whose `index.html` opens with no server. A 404 behind a page that looks right is the thing this catches and a screenshot cannot |
 | reuse a free worktree | `fleet-spawn <name> --reuse <worktree> [--prompt "…"]` |
 | recycle a worktree onto a new branch | `fleet-spawn <name> --reuse <wt> --branch <new> --from <base>` |
 | new worker (only if none free) | `fleet-spawn <name> [--branch b] [--from ref] [--new] [--prompt "…"]` |
@@ -208,9 +248,11 @@ actually run lint/typecheck/tests.
 
 ## Asking for a visual verification
 
-`fleet-shots` is how a worker hands back something you can LOOK at instead of a claim. The
-brief below is the one that works; the parts that look fussy are each a failure that already
-happened once.
+`fleet-shots` is **experimental**: off on a new install, and while it is off every subcommand
+refuses and says `fleet-experimental enable shots`. Check `fleet-experimental list` before you
+brief a worker with it. When it is on, `fleet-shots` is how a worker hands back something
+you can LOOK at instead of a claim. The brief below is the one that works; the parts that
+look fussy are each a failure that already happened once.
 
 ```
 When you're done, produce a visual verification:
@@ -264,7 +306,8 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
   that ignores a `fleet-send`, or shows `working` with no progress, is usually
   **blocked on a dialog** (a permission prompt, a "reached usage limit — retry?",
   a trust prompt). A prompt can't dismiss a dialog — send the keystroke:
-  `fleet-answer <session> "2"`. (`fleet-inbox` flags these as `need-you`.) This is
+  `fleet-answer <session> "2"` (a permission prompt is the exception: decline it, or
+  take its dialog to the human — see above). (`fleet-inbox` flags these as `need-you`.) This is
   the single most common mis-step; when in doubt, `fleet-read`/`fleet-answer` to
   see and clear the dialog before sending more work.
 - **A send to a busy worker is queued, not pasted in.** If it's `working`, `fleet-send`
@@ -289,12 +332,14 @@ Then `fleet-shots serve` and review it — one step at a time, approve / changes
 - **You can't see a worker's screen.** Use `fleet-read` / `fleet-inbox` to observe,
   never assume.
 - Only sessions in *your* fleet (same `CLAUDE_FLEET_SOCK`) are reachable.
+- **A sub-lead's children are its own.** A master does not dispatch to, merge, or stop a
+  sub-worker directly; it talks to the sub-lead, whose one PR is the unit it reviews.
 
 ## Example
 
 ```bash
 fleet-worktrees          # → "Free to reuse: api-3"
-fleet-inbox              # → api-1 NEEDS YOU: permission to run tests
+fleet-inbox              # → api-1 NEEDS YOU: reached usage limit — retry?
                          # → finished workers: api-2 (its PR #41 merged) → fleet-stop --reclaim api-2
 
 # retire the finished worker; its next task goes to a NEW session, not to it

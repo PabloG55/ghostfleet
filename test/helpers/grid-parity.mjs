@@ -70,11 +70,13 @@ const lifted = [
   lift(/^function humanAge\(/),
   lift(/^function clockLabel\(/),
   SRC.split('\n').find(l => /^const CW = /.test(l)),
+  lift(/^function rollupText\(/),
+  lift(/^function leadAgeText\(/),
   lift(/^function cardLines\(/),
   lift(/^function newCardLines\(/),
   lift(/^function freeCardLines\(/),
   lift(/^function boxCard\(/),
-  `export { C, STATUS, CW, cardLines, newCardLines, freeCardLines, boxCard, clockLabel, humanAge, clip, padEndV, twoCol, vis };`,
+  `export { C, STATUS, CW, cardLines, newCardLines, freeCardLines, boxCard, clockLabel, humanAge, clip, padEndV, twoCol, vis, rollupText, leadAgeText };`,
 ].join('\n\n');
 
 const TUI = await import('data:text/javascript;base64,' + Buffer.from(lifted, 'utf8').toString('base64'));
@@ -86,7 +88,8 @@ const strip = s => s.replace(/\x1b\[[0-9;]*m/g, '');
 // The TUI's card object is camelCase; §4's JSON is snake_case. Feeding the TUI the
 // same card the phone gets is the whole comparison, so the adapter is HERE and named
 // — inlining it would let a typo read as agreement.
-function toTui(c) { return { ...c, limitAt: c.limit_at ?? c.limitAt ?? null }; }
+function toTui(c) { return { ...c, limitAt: c.limit_at ?? c.limitAt ?? null, subHead: c.sub_head ?? c.subHead ?? false,
+                                teamStatus: c.team_status ?? c.teamStatus ?? null }; }
 
 // ── 1. the STATUS table, both directions ───────────────────────────────────
 // Nine statuses, the same labels, the same colours. Both directions: a status the PWA
@@ -144,6 +147,10 @@ const POKE = {
   branch: 'zzz-probe-branch', agent: 'opencode', pr: '98765', msg: 'zzz probe message',
   age: 4321, status: 'interrupted', lead: true, attached: true,
   sched: { at: 1700000000 }, limit_at: '11:11pm',
+  // a sub-lead's rollup, and the flag that says the card heads its own sub-grid
+  workers: { total: 7, need_you: 3, working: 2 }, sub_head: true,
+  // the team's status a sub-lead's card is drawn in
+  team_status: 'need-you',
 };
 const modelText = (m) => JSON.stringify(m);
 
@@ -156,7 +163,7 @@ for (const f of grids) {
     // The phone's model must carry the TUI's own status word, verbatim. The chip prints
     // it, and §7 is emphatic that the vocabulary is the desk's rather than a synonym
     // chosen to read better on a phone.
-    is(`${f}#${i} ${c.name} status word`, TUI.STATUS[c.status].label, PWA.cardModel(c, false, i).statusLabel);
+    is(`${f}#${i} ${c.name} status word`, TUI.STATUS[c.team_status || c.status].label, PWA.cardModel(c, false, i).statusLabel);
     for (const [field, poked] of Object.entries(POKE)) {
       const before = TUI.cardLines(toTui(c), false, i).map(strip).join('\n');
       const after  = TUI.cardLines(toTui({ ...c, [field]: poked }), false, i).map(strip).join('\n');
@@ -198,12 +205,14 @@ const hdrExpr = hdrStmt
   .replace(/^\s*const header = /, '')
   .replace(/;\s*$/, '')
   .replace(/\$\{C\.\w+\}/g, '');
-const tuiHeader = new Function('need', 'work', 'ready', 'cut', 'limited', 'parked', 'PROFILE', 'Z',
+// `crumb` is the sub-grid's `› <sub-lead>` after the scope — empty on the top grid, which
+// is the header the phone's count strip is compared against.
+const tuiHeader = new Function('need', 'work', 'ready', 'cut', 'limited', 'parked', 'PROFILE', 'Z', 'crumb',
   `return (${hdrExpr});`);
 // strip the ` ghostfleet [profile:project]   ` prefix — the phone's header carries the
 // project name elsewhere; the COUNTS are what has to match.
 const tuiCounts = (n, w, r, cut, lim, park) =>
-  tuiHeader(n, w, r, cut, lim, park, 'work', 'acme-api').replace(/^.*?\]\s{2,}/, '');
+  tuiHeader(n, w, r, cut, lim, park, 'work', 'acme-api', '').replace(/^.*?\]\s{2,}/, '');
 const CASES = [
   ['a quiet fleet', 0, 0, 0, 0, 0, 0],
   ['the doc\'s example', 0, 2, 4, 0, 0, 0],
@@ -370,5 +379,54 @@ for (const [what, c] of [
   // ...and the branch is never silently emptied by a long anything.
   is(`...and the card still says where it is, with ${what}`, true, !!m.where);
 }
+
+// ── 6. a SUB-LEAD's card: its team's status, the lead's own, and the team line ──
+// The card a sub-lead draws is lifted to the busiest state in its team, keeps the lead's
+// own state in the age slot, and says how many workers are working. Measured on the desk
+// at the width that ships, with every own-status under each lifting team status, ages from
+// seconds to days, and teams from one worker to three digits: every line is CW+2 columns,
+// the team's status label is never the thing clipped, and the third line never ends in the
+// clip's `…` — the rollup has its own shorter forms, and reaching the clip means none fit.
+const strip2 = s => s.replace(/\x1b\[[0-9;]*m/g, '');
+const SUBL = { name: 'cache-keys', folder: 'cache-keys', branch: 'cache-keys', agent: 'claude', msg: 'm',
+               attached: false, sched: null, limit_at: null, lead: false, sub_head: false };
+let subCards = 0;
+for (const team of ['need-you', 'working']) {
+  for (const own of tuiKeys) {
+    for (const age of [null, 14, 3599, 46799, 999999]) {
+      for (const [t, k, n] of [[1, 1, 0], [2, 1, 1], [9, 9, 9], [12, 10, 10], [100, 100, 100]]) {
+        const c = { ...SUBL, status: own, team_status: own === team ? null : team, age,
+                    workers: { total: t, working: k, need_you: n } };
+        const lines = TUI.cardLines(toTui(c), false, 0).map(strip2);
+        subCards++;
+        const label = TUI.STATUS[c.team_status || own].label;
+        const tag = `${own}→${team} age=${age} ${t}/${k}/${n}`;
+        if (lines.some(l => TUI.vis(l) !== TUI.CW + 2)) is(`sub-lead card ${tag}: every line CW+2`, true, false);
+        if (!lines[1].startsWith(`│ ${label}`)) is(`sub-lead card ${tag}: status label intact`, `│ ${label}`, lines[1].slice(0, label.length + 2));
+        if (/…\s*│$/.test(lines[3])) is(`sub-lead card ${tag}: rollup fits without the clip`, true, false);
+        // the phone draws the same status and says the same team, in its longer form
+        const m = PWA.cardModel(c, false, 0);
+        if (m.statusLabel !== label) is(`sub-lead card ${tag}: phone status`, label, m.statusLabel);
+        if (m.rollup !== TUI.rollupText(c.workers)) is(`sub-lead card ${tag}: phone rollup`, TUI.rollupText(c.workers), m.rollup);
+        if (PWA.rollupText(c.workers, TUI.CW - 2) !== TUI.rollupText(c.workers, TUI.CW - 2))
+          is(`sub-lead card ${tag}: narrow rollup`, TUI.rollupText(c.workers, TUI.CW - 2), PWA.rollupText(c.workers, TUI.CW - 2));
+      }
+    }
+  }
+}
+is('sub-lead cards measured', true, subCards >= 180);
+// ...and the cases the owner reads, as VALUES, because the loop above only proves the two
+// sides agree and fit — both could agree on the wrong words.
+const liftedSub = { ...SUBL, status: 'ready', team_status: 'working', age: 14, workers: { total: 2, working: 1, need_you: 0 } };
+const ll = TUI.cardLines(toTui(liftedSub), false, 0).map(strip2);
+is('a ready lead with a working worker draws ◆ working', true, ll[1].startsWith('│ ◆ working'));
+is('...says the lead itself is waiting, and since when', true, /lead ✓ 14s ago │$/.test(ll[1]));
+is('...and how many are working, in 28 columns', '│ 1 of 2 working · 0 need you  │', ll[3]);
+is('...and the phone says the whole sentence', '2 workers · 1 working · 0 need you', PWA.cardModel(liftedSub, false, 0).rollup);
+is('...beside the same lead age', 'lead ✓ 14s ago', PWA.cardModel(liftedSub, false, 0).when);
+is('a card NOT lifted keeps its own age slot', '14s ago', PWA.cardModel({ ...liftedSub, team_status: 'ready' }, false, 0).when);
+is('...and a plain worker is untouched', '14s ago', PWA.cardModel({ ...liftedSub, team_status: null, workers: null }, false, 0).when);
+is('counts fold a lifted card as drawn', 1, PWA.countsFrom([liftedSub]).working);
+is('...and not as its own status', 0, PWA.countsFrom([liftedSub]).ready);
 
 console.log(rows.join('\n'));

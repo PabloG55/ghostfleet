@@ -66,6 +66,17 @@ CONFIGURED=0; ENROLLED=0; RUNNING=0; TAILNET=""
 # step it prints is the one that finishes the job.
 [ "$(cfg_get '(c.clients||[]).filter(x => !x.revoked && (x.creds||[]).length).length')" != "0" ] \
   && [ -n "$(cfg_get '(c.clients||[]).filter(x => !x.revoked && (x.creds||[]).length).length')" ] && ENROLLED=1
+# NOTIFICATIONS ARE A STEP, and the one nobody could see was missing. Push was built and
+# the daemon scanned every fleet for it, but for weeks of use the log held no
+# /api/push/key request at all: nothing on the phone asked for it — the switch lived in a
+# settings sheet — and this command, the one place that lists what is left to do, reported
+# the phone as fully set up the whole time. A phone that is set up but silent is
+# the failure this whole feature exists to prevent, so "set up" now includes a subscription,
+# counted from the config the daemon itself keeps them in (revoked clients do not count;
+# their rows are dropped with them).
+SUBS="$(cfg_get '(c.clients||[]).filter(x => !x.revoked).reduce((n, x) => n + ((x.push||[]).length), 0)')"
+case "$SUBS" in ''|*[!0-9]*) SUBS=0 ;; esac
+NOTIFY=0; [ "$SUBS" -gt 0 ] && NOTIFY=1
 ORIGIN="$(cfg_get '(c.origins||[])[0] || ""')"
 BINDPORT="$(cfg_get '(c.bind||"") + ":" + (c.port||"")')"
 
@@ -98,10 +109,26 @@ if command -v tailscale >/dev/null 2>&1; then
   case "$TAILNET" in *[!0-9.]*) TAILNET="" ;; esac
 fi
 
+# The voice lines, from the same code fleet-jarvis and fleet-serve answer with, so the three
+# cannot disagree. Kokoro's is the deep check (does the venv import), which costs a Python
+# start: worth it here, where somebody asked, and why the phone's poll uses the cheap one.
+VOICE="$(node --input-type=module -e '
+  const [jar, kok] = await Promise.all([import(process.argv[1]), import(process.argv[2])]);
+  const w = jar.voiceStatus(), k = await kok.check();
+  // Hearing is the conversation mode of Jarvis, so it is not offered while Jarvis is off.
+  if (!jar.enabled()) console.log("· hearing: off — talk mode is part of Jarvis, which is experimental and off (fleet-experimental enable jarvis)");
+  else console.log(w.ready ? `✓ hearing: whisper.cpp (${w.model})` : "· hearing: whisper.cpp is not installed, so the phone types (optional, ~550 MB): fleet-jarvis voice --install");
+  console.log(k.ready ? "✓ speaking: Kokoro reads replies on the Mac"
+    : k.state === "missing" ? "· speaking: the phone’s own voice — Kokoro is not installed (optional, ~350 MB): fleet-jarvis voice --kokoro --install"
+    : k.state === "off" ? `· speaking: the phone’s own voice — ${k.why}`
+    : `! speaking: Kokoro is BROKEN, so the phone uses its own voice — ${k.why}`);
+' "$BIN_DIR/../lib/jarvis.mjs" "$BIN_DIR/../lib/kokoro-setup.mjs" 2>/dev/null)"
+
 DONE=0
 [ "$CONFIGURED" = 1 ] && DONE=$((DONE + 1))
 [ "$ENROLLED" = 1 ]   && DONE=$((DONE + 1))
 [ "$RUNNING" = 1 ]    && DONE=$((DONE + 1))
+[ "$NOTIFY" = 1 ]     && DONE=$((DONE + 1))
 
 # ── the one command to run next ─────────────────────────────────────────────
 next_cmd() {
@@ -111,6 +138,9 @@ next_cmd() {
     else printf 'fleet-serve init --bind 127.0.0.1    # this machine only; see docs/mobile.md §5 for the tailnet\n'; fi
   elif [ "$ENROLLED" = 0 ]; then printf 'fleet-serve enroll phone\n'
   elif [ "$RUNNING" = 0 ];  then printf 'fleet-serve\n'
+  # Not a command: it is a tap, and it has to be — iOS only shows the permission prompt in
+  # answer to a gesture inside the installed app. The app offers it right after the unlock.
+  elif [ "$NOTIFY" = 0 ];   then printf 'open the installed app, unlock it, and tap "Turn on notifications"\n'
   else printf '' ; fi
 }
 NEXT="$(next_cmd)"
@@ -125,7 +155,7 @@ if [ "$MODE" = if-needed ] && [ -z "$NEXT" ]; then exit 0; fi
 mark() { [ "$1" = 1 ] && printf '  ✓ %s\n' "$2" || printf '  · %s\n' "$2"; }
 {
   if [ -z "$NEXT" ]; then echo "ghostfleet on your phone — set up and serving"
-  else                    echo "ghostfleet on your phone — $DONE of 3 steps done"; fi
+  else                    echo "ghostfleet on your phone — $DONE of 4 steps done"; fi
   echo
   echo "  The same fleet as an installable app: every session as a chat, the real pane one"
   echo "  tap away, and a notification when a worker is blocked or has an answer — so a"
@@ -134,6 +164,14 @@ mark() { [ "$1" = 1 ] && printf '  ✓ %s\n' "$2" || printf '  · %s\n' "$2"; }
   mark "$CONFIGURED" "$([ "$CONFIGURED" = 1 ] && echo "configured — ${BINDPORT}${ORIGIN:+ · $ORIGIN}" || echo "not configured yet")"
   mark "$ENROLLED"   "$([ "$ENROLLED" = 1 ] && echo "a phone is enrolled" || echo "no passkey enrolled yet")"
   mark "$RUNNING"    "$([ "$RUNNING" = 1 ] && echo "the daemon is listening" || echo "the daemon is not running")"
+  mark "$NOTIFY"     "$([ "$NOTIFY" = 1 ] && echo "notifications: on ($SUBS device$([ "$SUBS" = 1 ] || echo s))" || echo "notifications: not set up")"
+  # THE MAC'S VOICE, BOTH HALVES, and not a step: neither is needed for the phone to work,
+  # so neither counts toward "N of 4" or ever becomes the Next line. Without whisper the
+  # phone types; without Kokoro it reads replies in its own voice. They are listed because
+  # otherwise nobody learns they exist — each with the one command that adds or repairs it.
+  if [ -n "$VOICE" ]; then
+    while IFS= read -r vl; do printf '  %s\n' "$vl"; done <<< "$VOICE"
+  fi
   if [ -n "$NEXT" ]; then
     echo
     echo "  Next:"

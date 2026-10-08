@@ -34,14 +34,14 @@ const S = {
   projects: null,       // last /api/projects payload
   profile: 'all',       // the projects screen's tab: 'all' | a profile name (see PROFILES)
   grid: null,           // last §4 payload
+  sub: '',              // '' = the top grid; else the sub-lead whose sub-grid is open
   sess: null,           // last /api/session payload  { messages, next_before, … }
   view: 'chat',         // the session screen: 'chat' (the conversation) | 'pane' (the terminal)
   pane: null,           // last /api/pane payload   { pane, at, … }
   paneGeom: null,       // { rows, cols } — measured from that payload, not claimed by it
   paneErr: '',          // the last pane read's failure, shown once rather than per poll
-  speakSel: '',         // key of the bubble that was TAPPED — the only one showing a play
-                        // control. See turn(): this is what keeps per-message playback
-                        // from becoming a speaker on every bubble.
+  copied: '',           // key of the bubble whose copy button is saying "copied" — state, so
+                        // a 5s poll landing inside the feedback does not wipe it
   pscroll: 0,           // scrollback rows asked for; 0 = exactly what an attach shows
   pfs: 0,               // the pane's font size in px, 0 until restore() or PFS_DEFAULT
   sel: 0,               // the TUI's `sel` — which card the verbs act on
@@ -50,11 +50,17 @@ const S = {
   sheet: null,          // { kind, … } — one of the TUI's full-screen forms
   toast: null,
   stale: 0,             // epoch of the payload on screen, when it came from the cache
-  hiddenAt: 0,
   draft: '',            // the composer's text, kept across repaints (a poll must not eat it)
   attaching: false,     // a photo is on its way up; the camera button says so and refuses a second
   pending: null,        // { text, at } — sent, not yet back in the transcript
   speaking: '',         // the text currently being read aloud, '' when silent
+  jarvis: null,         // last /api/jarvis payload — null until asked, {present:false} when absent
+  jarvisOn: null,       // the Mac's Jarvis switch (/api/projects jarvis_enabled): null = not told yet
+  speak: null,          // the Mac's voice (/api/projects speak) — reported with Jarvis off too
+  jarvisMode: false,    // the session screen is showing JARVIS (see openJarvis): back goes to Projects
+  wantJarvis: false,    // a notification from Jarvis was tapped; open it once unlocked
+  pushOffer: false,     // show the one-tap "Turn on notifications" band (see maybePushOffer)
+  talk: null,           // conversation mode: { phase, sent, seen, since } — null when off
 };
 // WHICH VIEW A TAP ON A CARD LANDS ON, and it moved. #45 made it the pane, because a
 // message list could not show a command and the first person to use the app said so. It is
@@ -81,8 +87,8 @@ function save() {
       // session and reopening restored the session SCREEN with nothing on it: "'null' is
       // not on this fleet's grid any more". It was always broken and was easy to miss
       // while that screen was a card and a row of buttons; it is the whole viewport now.
-      session: S.session, view: S.view, profile: S.profile,
-      projects: S.projects, grid: S.grid,
+      session: S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode,
+      projects: S.projects, grid: S.grid, sub: S.sub,
     }));
   } catch {}
 }
@@ -92,6 +98,9 @@ function restore() {
   S.projects = j.projects || null; S.grid = j.grid || null;
   S.project = j.project || null; S.screen = j.screen || 'projects';
   S.session = j.session || null;
+  // the sub-grid you were in; the next grid read falls back to the top if it has gone
+  S.sub = (S.project && typeof j.sub === 'string') ? j.sub : '';
+  S.jarvisMode = !!j.jarvisMode && S.screen === 'session';
   // 'msgs' was the old list view's name and is not a view any more; anything unrecognised
   // falls to the default rather than rendering neither.
   S.view = j.view === 'pane' ? 'pane' : DEFAULT_VIEW;
@@ -110,7 +119,7 @@ function restore() {
   // ...and give the back gesture the trail it would have had if you had walked here. A
   // cold open is at the root of its own history, so without this the first swipe out of a
   // restored session screen leaves the app — the exact complaint, one reopen later.
-  seedNav(S.screen === 'session' ? 2 : S.screen === 'grid' ? 1 : 0);
+  seedNav(S.screen === 'session' ? (S.jarvisMode ? 1 : 2) : S.screen === 'grid' ? 1 : 0);
 }
 function seedNav(depth) { for (let i = 0; i < depth; i++) pushNav(); }
 
@@ -139,6 +148,9 @@ async function refresh() {
   // invisible from the phone (push simply stops), so the check rides along with the poll
   // that is already running rather than waiting for someone to open the settings sheet.
   maybeSyncPush();
+  maybePushOffer();
+  // A tapped notification from Jarvis, once there is a session to open it with.
+  if (S.wantJarvis && !S.locked) { S.wantJarvis = false; openJarvis(); return; }
   try {
     if (S.screen === 'projects') {
       // The payload carries the agent CATALOGUE beside the projects, and both are needed:
@@ -147,10 +159,37 @@ async function refresh() {
       // tell that apart from a machine with one agent installed.
       const j = await api.getProjects();
       S.projects = j.projects; S.agents = j.agents || [];
+      // JARVIS IS EXPERIMENTAL and the Mac says whether it is on. Off is GONE: no band, no
+      // Jarvis screen, no talk — and no /api/jarvis request, which would only 404. A daemon
+      // older than the switch sends no field, and keeps the old behaviour.
+      if (typeof j.jarvis_enabled === 'boolean') S.jarvisOn = j.jarvis_enabled;
+      if (j.speak) S.speak = j.speak;
+      // The Jarvis band. Its own request, and allowed to fail on its own: a daemon older
+      // than Jarvis answers 404, which means "no band", not "the Projects screen is broken".
+      if (S.jarvisOn === false) S.jarvis = null;
+      else try { S.jarvis = await api.getJarvis(); } catch (e) { jarvisFailed(e); }
     }
-    else if (S.screen === 'grid') S.grid = await api.getGrid(S.project);
+    else if (S.screen === 'grid') {
+      S.grid = await api.getGrid(S.project, S.sub);
+      // The sub-lead went away while its grid was open: the server answers the top grid's
+      // shape with no cards, and staying on an empty screen with a name on it is the lie.
+      if (S.sub && S.grid && !S.grid.sub) { S.sub = ''; S.grid = await api.getGrid(S.project); }
+    }
     else if (S.screen === 'session') {
-      S.grid = await api.getGrid(S.project);
+      // JARVIS IS A PROJECT like any other, so once it is known the rest of this branch is
+      // the ordinary session read — the same grid card, the same transcript, the same pane.
+      if (S.jarvisMode) {
+        try { S.jarvis = await api.getJarvis(); } catch (e) { jarvisFailed(e); }
+        // Switched off while it was open: there is no Jarvis screen to stay on.
+        if (S.jarvisOn === false) { S.jarvisMode = false; S.screen = 'projects'; render(); refresh(); return; }
+        if (!S.jarvis || !S.jarvis.present) { S.stale = 0; renderUnlessTyping(); return; }
+        S.project = S.jarvis.project; S.session = 'master';
+      }
+      S.grid = await api.getGrid(S.project, S.sub);
+      // THE MAC'S EARS, for a session's `talk`: whether it can transcribe is reported by
+      // /api/jarvis, which a session screen opened straight from a notification has never
+      // asked. Once, and allowed to fail like the Projects band's read of it.
+      if (!S.jarvisMode && !S.jarvis && S.jarvisOn !== false) { try { S.jarvis = await api.getJarvis(); } catch (e) { jarvisFailed(e); } }
       // The pane has its OWN faster timer (panePoll below), so this loop only has to
       // fetch it once, to fill the box on the way in rather than up to a poll later.
       if (S.view === 'pane' && !S.pane) await readPane();
@@ -163,18 +202,22 @@ async function refresh() {
       // expensive call this client makes — /api/session buffers 32 MB because one page
       // is 20 whole assistant turns — and paying for it every five seconds to render
       // nothing is the kind of waste that is invisible until it is a phone bill.
-      if (S.view !== 'pane' && (!S.sess || S.sess.pages === 1)) {
+      // ...and while a spoken turn is owed an answer, whatever was paged in: the answer is
+      // looked for in the newest page, and conversation mode cannot wait on a frozen one.
+      const owed = !!(S.talk && S.talk.phase === 'waiting');
+      if ((S.view !== 'pane' && (!S.sess || S.sess.pages === 1)) || owed) {
         const fresh = await api.getSession(S.project, S.session);
         S.sess = { ...fresh, pages: 1 };
       }
       // Whatever the transcript now says decides whether the optimistic bubble is still
       // telling the truth.
       reconcilePending();
+      talkAfterRefresh();
     }
     S.stale = 0;
     save();
   } catch (e) {
-    if (e instanceof api.AuthError) return lock('refresh');
+    if (e instanceof api.AuthError) return lock();
     // Offline: keep the cards that are on screen and say how old they are. A blank
     // screen with an error on it is strictly less useful than a stale fleet with a
     // date on it — the question this app answers is "is anything blocked on me", and
@@ -200,78 +243,16 @@ function lastFetchedAt() {
 
 // Installed, by either signal. iOS has honoured navigator.standalone since before the
 // media query existed and the two have not always agreed, so anything that depends on
-// being installed asks both — and the probe reports them SEPARATELY, so one launch says
-// which is true here instead of leaving an OR nobody can attribute.
+// being installed asks both.
 const mmStandalone = () => { try { return !!matchMedia('(display-mode: standalone)').matches; } catch { return false; } };
 const navStandalone = () => { try { return !!navigator.standalone; } catch { return false; } };
 function markStandalone() {
   try { document.documentElement.classList.toggle('standalone', mmStandalone() || navStandalone()); } catch {}
 }
 
-// ── what the screen ACTUALLY measures, from the device ────────────────────
-// "still it doesnt use the full screen", in the installed app. The suspicion is that the
-// shell's `height: 100dvh` resolves SHORTER than the physical screen in iOS standalone
-// with a black-translucent status bar — but that is a suspicion, and the only engine that
-// can settle it is the one on the phone. No desktop viewport reproduces it (dvh there is
-// the window), and the home-screen app cannot be driven from here.
-//
-// So the device reports its own geometry, once, after the first layout has settled.
-// Everything is an integer in the PATH, because fleet-serve drops query strings.
-//
-//   ih  innerHeight            sh  screen.height        (CSS px)
-//   sl  the shell's bottom edge                          <- 100dvh, resolved
-//   cb  the composer's bottom edge, when one is drawn
-//   gap innerHeight - the lowest painted edge            <- the band, measured
-//   sat/sab  the safe-area insets this page actually resolves
-//
-// If `sl` comes back short of `sh` by about a status bar, the suspicion is the cause and
-// the shape has to stop being sized by dvh. If they match, it is something else and this
-// says so before anything is changed.
-//   IT WAITS FOR THE SHELL. `#app` only carries `.shell` — and therefore `height: 100dvh`
-// — once a real screen is drawn; on the lock screen it is content-height, so a report sent
-// at load measures the lock screen and says nothing about the thing under suspicion.
-// Measured locally: it came back sl524 against ih844, which is the ship and two buttons,
-// not a viewport. So it retries until the shell exists and gives up rather than lying.
-//   ONCE PER SCREEN, NOT ONCE PER LAUNCH. The first version reported whichever shell
-// appeared first, which is the grid — and the grid has no composer, so it came back cb0
-// gap0 and said nothing about the thing the band is under. The composer only exists on the
-// chat screen, so the measurement has to be taken there too. Keyed by screen so a launch
-// that visits both sends both, and neither repeats on the 5s poll.
-const geoSent = new Set();
-let geoTries = 0;
-function reportGeometry() {
-  const el = document.getElementById('app');
-  const where = S.screen;
-  if (!el || !el.classList.contains('shell')) {
-    if (++geoTries < 40) setTimeout(reportGeometry, 1500);
-    return;
-  }
-  if (geoSent.has(where)) return;
-  geoSent.add(where);
-  try {
-    const shell = el;
-    const comp = document.querySelector('.composer');
-    // env() cannot be read directly; a throwaway element resolves it for us.
-    const probe = document.createElement('div');
-    probe.style.cssText = 'position:fixed;left:-9999px;top:0;'
-      + 'padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
-    document.body.appendChild(probe);
-    const ps = getComputedStyle(probe);
-    const sat = Math.round(parseFloat(ps.paddingTop) || 0);
-    const sab = Math.round(parseFloat(ps.paddingBottom) || 0);
-    probe.remove();
-    const r = shell.getBoundingClientRect();
-    const c = comp ? comp.getBoundingClientRect() : null;
-    const low = c ? c.bottom : (r ? r.bottom : 0);
-    const sa = (mmStandalone() || navStandalone()) ? 1 : 0;
-    api.diag('geo', where, 'sa' + sa, 'mm' + (mmStandalone() ? 1 : 0), 'ns' + (navStandalone() ? 1 : 0), 'ih' + Math.round(innerHeight), 'sh' + Math.round(screen.height),
-             'sl' + Math.round(r ? r.bottom : 0), 'cb' + Math.round(c ? c.bottom : 0),
-             'gap' + Math.round(innerHeight - low), 'sat' + sat, 'sab' + sab);
-  } catch {}
-}
-
-function lock(why = 'x') {
-  api.diag('lock', why, 'tok' + (api.haveToken() ? 1 : 0), 'pend' + (swReloadPending ? 1 : 0));
+function lock() {
+  // A LOCKED SCREEN HAS NO MICROPHONE: conversation mode ends with the session it ran on.
+  if (S.talk) talkStop('');
   S.locked = true; api.clearToken(); render();
   // The session just ended, so a swap that was waiting for it is free now — and this is
   // the moment the poll cannot cover, because the poll does not run while locked. Without
@@ -360,11 +341,8 @@ function render() {
     app.classList.toggle('shell', shell);
     document.documentElement.classList.toggle('shell', shell);
   } catch {}
-  if (shell) {
-    markNav(app, S.screen);
-    // A screen this launch has not measured yet gets measured, once it has settled.
-    if (!geoSent.has(S.screen)) { geoTries = 0; setTimeout(reportGeometry, 900); }
-  } else navFrom = null;
+  if (shell) markNav(app, S.screen);
+  else navFrom = null;
   // ── the Preact screens ─────────────────────────────────────────────────────────────
   // They DIFF, so this path must not empty #app first: the whole gain is that the .cards
   // node survives the 5s poll and keeps the reader's scroll position instead of being
@@ -403,7 +381,7 @@ function render() {
   // Only the session screen reaches here now: `projects` and `grid` returned above, and
   // the lock screen returned above that. Left as a bare call rather than a ternary with one
   // live arm, which would read as a choice that no longer exists.
-  const screen = sessionScreen();
+  const screen = S.jarvisMode ? jarvisScreen() : sessionScreen();
   // THE TOAST GOES ABOVE THE COMPOSER, IN FLOW — it is a band of the shell column now, not
   // a fixed overlay, so where it sits in this array is where it sits on screen. Appending
   // it last put it BELOW the input on the session screen, which with the old
@@ -601,6 +579,8 @@ function projectsProps() {
       need: tabNeed(projects, name),
     })) : null,
     onTab: setProfile,
+    jarvis: jarvisBarSpec(),
+    notify: notifySpec(),
     confirm: confirmSpec(),
     // ── the seam ────────────────────────────────────────────────────────────────────
     // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
@@ -648,7 +628,7 @@ const PROJECTS_HINT = 'tap a project · long-press to remove it from the list ·
 function toProjects() {
   const n = navDepth;
   S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null;
-  S.pending = null; S.speakSel = ''; stopSpeaking();
+  S.pending = null; stopSpeaking(); S.jarvisMode = false; talkStop('');
   navDepth = 0;
   if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
     try { history.go(-n); } catch {}    // popstate fires; popTo() sees screen==='projects'
@@ -658,7 +638,7 @@ function toProjects() {
 
 function openProject(name) {
   if (!name) return;
-  S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null;
+  S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null; S.sub = '';
   // Another project's card list is a different list; row 12 of it means nothing here.
   scrollMem.delete('grid');
   pushNav();                          // so the back gesture returns to Projects, not out
@@ -697,7 +677,9 @@ function items() {
   return [
     ...(g.cards || []).map(c => ({ card: c })),
     ...(g.free_worktrees || []).map(w => ({ freeWt: w })),
-    { newCard: true },
+    // Not in a sub-grid, as at the desk: a session started from there would be a TOP-level
+    // worker, and a sub-lead's workers are spawned by the sub-lead from its worktree.
+    ...(S.sub ? [] : [{ newCard: true }]),
   ];
 }
 // The four counts that fit a phone row, each a tile. ONLY A NON-ZERO COUNT IS COLOURED:
@@ -748,7 +730,7 @@ function gridProps() {
   const counts = G.countsFrom(g.cards || []);
   const sel = its[S.sel] || {};
   return {
-    scope: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]`,
+    scope: `[${(S.grid && S.grid.profile) || ''}:${S.project || ''}]` + (S.sub ? ` › ${S.sub}` : ''),
     mode: modeSpec(),
     stale: S.stale,
     // WORDED AND COLOURED HERE, drawn there. countsSegments() is grid.js's, so the phone's
@@ -773,8 +755,11 @@ function gridProps() {
         }, idx);
       }
       const c = it.card;
-      return cardEl(G.cardModel(c, isSel, idx), {
-        tap: () => (c.asleep ? wakeSession(c.name) : openSession(c.name)),
+      const m = G.cardModel(c, isSel, idx);
+      return cardEl(m, {
+        // A sub-lead's card on the top grid opens its sub-grid, as ⏎ does at the desk; the
+        // same card heading its own sub-grid (no rollup there) opens the session.
+        tap: () => (c.lost ? reopenSession(c.name) : c.asleep ? wakeSession(c.name) : m.rollup ? openSub(c.name) : openSession(c.name)),
         longPress: () => askKill(c.name),
         swipeLeft: () => pauseSession(c.name),
         swipeRight: () => resumeSession(c.name),
@@ -911,10 +896,21 @@ function sayIdentifiers(t) {
 }
 export function speakable(text) {
   let t = String(text || '');
-  t = t.replace(/```[\s\S]*?```/g, ' … code block … ');   // fenced code: named, not read
+  t = t.replace(/```[\s\S]*?```/g, '\nCode omitted.\n'); // fenced code: named, not read
   t = t.replace(/`([^`]*)`/g, '$1');                      // inline code: the text, not the ticks
   t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1 link'); // [label](url) -> "label link"
-  t = t.replace(/https?:\/\/\S+/g, ' link ');            // and a bare one
+  t = t.replace(/https?:\/\/\S+/g, ' the link ');        // and a bare one
+  // A TABLE IS READ AS ITS CELLS. The rule row (|---|:--:|) is pure punctuation, and a pipe
+  // read aloud is "vertical bar" between every word; a row becomes its cells with a pause
+  // between them, and the row's line break ends it like any other line.
+  // [ \t], never \s: under /m a \s* beside ^ or $ eats the line break too, and the row
+  // runs into the next one with no stop between them.
+  t = t.replace(/^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$/gm, '');
+  t = t.replace(/^[ \t]*\|(.*)\|[ \t]*$/gm, (m, cells) => cells.split('|').map(c => c.trim()).filter(Boolean).join(', '));
+  // Emoji are decoration in writing and noise in speech: a voice either says "check mark
+  // button" or stalls on a glyph it has no name for. The joiner and the variation selector
+  // go with them, or a family emoji leaves its glue behind.
+  t = t.replace(/[ \t]*[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]+/gu, '');
   t = t.replace(/^\s{0,3}#{1,6}\s+/gm, '');               // heading marks
   t = t.replace(/^\s{0,3}[-*+]\s+/gm, '');                // bullet marks
   t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, '$1$2$3');
@@ -922,6 +918,10 @@ export function speakable(text) {
   // and a URL is already the word "link"; BEFORE the cap, so the 1200 characters are spent
   // on words instead of on an address that will not be read out.
   t = sayIdentifiers(t);
+  // A LINE BREAK IS A SENTENCE END, and it has to survive the whitespace collapse as one: a
+  // list item has no full stop, and the Mac's voice picks its language and its pause per
+  // sentence — two bullets read as one clause get one language and no breath between them.
+  t = t.replace(/([^\s.!?…:;,])[ \t]*\n\s*/g, '$1. ');
   t = t.replace(/\s+/g, ' ').trim();
   return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, '') + '… and it goes on.' : t;
 }
@@ -985,38 +985,640 @@ export function savedRate() {
   try { r = Number(localStorage.getItem(LS_RATE)); } catch {}
   return Number.isFinite(r) && r >= 0.5 && r <= 2 ? r : 1.05;
 }
+// ── the Mac's voice, and the phone's as the fallback ───────────────────────
+// fleet-serve speaks with Kokoro when the Mac has it (lib/speech.mjs): better English, real
+// Spanish, and the language chosen sentence by sentence, because one reply holds both. The
+// device's speechSynthesis is what is left when it does not — no Kokoro, an old daemon,
+// fixtures, a failed sentence — so every path below ends in a voice either way.
+//
+// PLAYED THROUGH WEB AUDIO, NOT AN <audio> ELEMENT, for two reasons that both bind. The
+// audio route needs the session's bearer token, which a media element cannot send, so the
+// bytes are fetched — and the CSP is `default-src 'self'`, which refuses the blob: URL an
+// element would need to play them. A decoded buffer on an AudioContext needs neither.
+//
+// STREAMED BY SENTENCE. The phone asks for the plan, then fetches sentence N+1 while N
+// plays, and the Mac has already started on all of them in order. The wait before the
+// voice starts is one sentence, which is the whole latency budget on a loaded laptop.
+const A = { ctx: null, src: null, gen: 0, offUntil: 0, told: false, bufs: new Map() };
+const hasWebAudio = () => typeof window !== 'undefined' && !!(window.AudioContext || window.webkitAudioContext);
+const canPlay = () => canSpeak() || hasWebAudio();
+function audioCtx() {
+  if (!A.ctx && hasWebAudio()) A.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  return A.ctx;
+}
+// THE UNLOCK, AND IT HAS TO HAPPEN INSIDE A TAP. iOS lets an AudioContext run only once a
+// gesture has resumed it and played something — the same rule talkStart() honours — and a
+// reply that arrives by poll, minutes after the toggle was tapped, has no gesture of its
+// own. So it is done on EVERY tap anywhere (it is a no-op once running), which also covers
+// the context iOS suspends when the installed app goes to the background and comes back.
+//   'playback' is the audio session that ignores the silent switch, as the device's own
+// speech does; without it a phone on silent would play the Mac's voice to nobody. Not while
+// talking: conversation mode holds the microphone, which is a different session type.
+let synthPrimed = false;
+export function unlockAudio() {
+  try { if (!S.talk && navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch {}
+  try {
+    const c = audioCtx();
+    if (c && c.state !== 'running') {
+      c.resume();
+      const src = c.createBufferSource();
+      src.buffer = c.createBuffer(1, 1, 22050);
+      src.connect(c.destination); src.start(0);
+    }
+  } catch {}
+  if (!synthPrimed && canSpeak()) {
+    synthPrimed = true;
+    try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch {}
+  }
+}
 function stopSpeaking() {
-  if (!canSpeak()) { S.speaking = ''; return; }
-  try { speechSynthesis.cancel(); } catch {}
+  A.gen++;
+  try { if (A.src) { A.src.onended = null; A.src.stop(); } } catch {}
+  A.src = null;
+  if (canSpeak()) { try { speechSynthesis.cancel(); } catch {} }
   S.speaking = '';
 }
-// A TOGGLE, and it is the same button both ways: tapping the one that is speaking stops
-// it. Two voices at once is the failure mode of a play button that is really two buttons.
-export function toggleSpeak(text) {
-  if (!canSpeak()) { toast('this browser has no speech synthesis', 'bad'); return; }
-  const say = speakable(text);
-  if (!say) { toast('nothing to read out in that message', 'bad'); return; }
-  const wasSpeaking = S.speaking;
-  stopSpeaking();
-  if (wasSpeaking === say) { render(); return; }        // tapped the one that was talking
-  S.speaking = say;
+// The device's own voice, for the whole text or for what is left of it.
+function synthSay(words, g, fin) {
+  if (!canSpeak()) { fin(); return; }
   try {
-    const u = new SpeechSynthesisUtterance(say);
+    const u = new SpeechSynthesisUtterance(words);
     // The rate that was hardcoded here is now the default of a setting; the voice is null
     // when nothing is saved or the saved one is absent, and null is exactly what the
-    // browser treats as "your default". speakable() is untouched by either — what gets
-    // normalised and what reads it out are different questions.
+    // browser treats as "your default".
     u.rate = savedRate();
     const voice = pickVoice();
     if (voice) { u.voice = voice; if (voice.lang) u.lang = voice.lang; }
     // Cleared when it finishes on its own, or the button stays lit for a voice that
     // stopped talking a minute ago. `onerror` too: iOS refuses to speak at all until a
     // gesture has unlocked audio, and a stuck highlight is how that looks from outside.
-    u.onend = () => { if (S.speaking === say) { S.speaking = ''; render(); } };
-    u.onerror = () => { if (S.speaking === say) { S.speaking = ''; render(); } };
+    u.onend = fin; u.onerror = fin;
     speechSynthesis.speak(u);
-  } catch { S.speaking = ''; toast('speech synthesis refused to start', 'bad'); }
+    // WebKit can drop `onend` for an utterance it cut short, which would leave conversation
+    // mode's mic closed forever. A ceiling from the length, generous enough never to reopen
+    // the mic over a voice that is still talking.
+    setTimeout(() => { if (A.gen === g) fin(); }, 3000 + words.length * 150);
+  } catch { fin(); }
+}
+function decode(ab) {
+  const c = audioCtx();
+  // The callback form: Safari before 14.1 has no promise-returning decodeAudioData.
+  return new Promise((res, rej) => { try { c.decodeAudioData(ab, res, rej); } catch (e) { rej(e); } });
+}
+// Decoded buffers by sentence id, so a replay is instant and costs no request. Bounded:
+// a decoded sentence is a few hundred KB of floats.
+async function sentenceBuf(it) {
+  if (A.bufs.has(it.id)) return A.bufs.get(it.id);
+  const buf = await decode(await api.speakAudio(it.id));
+  A.bufs.set(it.id, buf);
+  if (A.bufs.size > 60) A.bufs.delete(A.bufs.keys().next().value);
+  return buf;
+}
+function playBuf(buf, g) {
+  return new Promise((resolve, reject) => {
+    const c = audioCtx();
+    // A context iOS still holds suspended never advances, so `onended` would never come —
+    // the button would stay lit over silence. That is a refusal, and it falls back.
+    if (c.state !== 'running') { try { c.resume(); } catch {} }
+    setTimeout(() => {
+      if (A.gen !== g) return resolve();
+      if (c.state !== 'running') return reject(new Error('audio is locked until the screen is tapped'));
+      const src = c.createBufferSource();
+      src.buffer = buf; src.connect(c.destination);
+      let done = false;
+      src.onended = () => { done = true; if (A.src === src) A.src = null; resolve(); };
+      A.src = src;
+      const t0 = c.currentTime;
+      src.start(0);
+      // A CONTEXT CAN SAY 'running' AND NOT RUN. With no output to pull it — measured in a
+      // headless browser, and the same shape as an iOS audio interruption — currentTime
+      // stays put, `onended` never comes, and the button stays lit over silence for good.
+      // So once the sentence should have finished: a clock that never moved is a refusal
+      // (the rest goes to the device's voice), and one that moved just lost its event.
+      setTimeout(() => {
+        if (done || A.gen !== g) return;
+        if (c.currentTime - t0 < 0.05) { try { src.onended = null; src.stop(); } catch {} reject(new Error('the audio output never started')); }
+        else { done = true; resolve(); }
+      }, buf.duration * 1000 + 1500);
+    }, c.state === 'running' ? 0 : 150);
+  });
+}
+// ONE ENTRY POINT FOR EVERYTHING THAT SPEAKS — the play button, speak mode, conversation
+// mode — so the voice, the fallback and the stop are the same in all three. `onend` runs
+// when this text finishes or fails, never when something newer replaced it.
+async function speakText(words, onend) {
+  stopSpeaking();
+  if (!words) { if (onend) onend(); return; }
+  const g = A.gen;
+  S.speaking = words;
+  const fin = () => { if (A.gen !== g) return; A.gen++; A.src = null; S.speaking = ''; render(); if (onend) onend(); };
+  if (hasWebAudio() && Date.now() >= A.offUntil) {
+    let plan = null, i = 0;
+    try {
+      plan = await api.speakPlan(words);
+      if (A.gen !== g) return;
+      const pending = [];
+      const get = (k) => pending[k] || (pending[k] = sentenceBuf(plan[k]));
+      for (; i < plan.length; i++) {
+        get(i); if (i + 1 < plan.length) get(i + 1).catch(() => {});
+        const buf = await get(i);
+        if (A.gen !== g) return;
+        await playBuf(buf, g);
+        if (A.gen !== g) return;
+      }
+      fin(); return;
+    } catch (e) {
+      if (A.gen !== g) return;
+      // NO KOKORO IS NOT AN ERROR, it is a Mac without the optional voice: say so once, then
+      // stop asking for a minute so each message does not pay a round trip to hear "no".
+      if (e instanceof api.SpeechOff) {
+        A.offUntil = Date.now() + 60000;
+        if (!A.told) { A.told = true; toast(`using this device's voice — ${e.message}`); }
+      } else if (!(e instanceof api.AuthError)) {
+        toast(`the Mac's voice failed, using this device's: ${(e && e.message) || e}`, 'bad');
+      }
+      // Whatever was not yet heard is said by the device: a reply cut off at sentence three
+      // is worse than one that changes voice at sentence three.
+      if (plan && i > 0) words = plan.slice(i).map(x => x.text).join(' ');
+    }
+  }
+  synthSay(words, g, fin);
+}
+// A TOGGLE, and it is the same button both ways: tapping the one that is speaking stops
+// it. Two voices at once is the failure mode of a play button that is really two buttons.
+export function toggleSpeak(text) {
+  if (!canPlay()) { toast('this browser can neither play audio nor synthesise speech', 'bad'); return; }
+  unlockAudio();
+  const say = speakable(text);
+  if (!say) { toast('nothing to read out in that message', 'bad'); return; }
+  if (S.speaking === say) { stopSpeaking(); render(); return; }        // tapped the one that was talking
+  speakText(say);
   render();
+}
+
+// ── speak mode is gone: conversation mode replaced it ─────────────────────
+// #12 put a read-aloud-only toggle in every session's top bar. The owner replaced it with
+// the one control Jarvis already had — `talk`, which reads the reply AND listens for the
+// next thing said — so a session has one voice control, not two that half-overlap. Its
+// stored per-session setting is cleared once rather than left to rot in localStorage.
+try { localStorage.removeItem('gf.autospeak'); } catch {}
+
+// ── Jarvis: the master of masters (docs/jarvis.md) ────────────────────────
+// A PROJECT, SHOWN AS ITS OWN SCREEN. Jarvis is an ordinary fleet — its master is a Claude
+// session like any lead's — so the screen for it is the session screen pointed at that
+// master, with three things only Jarvis has: the proposals waiting on the owner's yes, the
+// talk control, and a way in from the top of Projects. It is a MODE of the session screen
+// rather than a copy of it because everything underneath — the transcript, the pending
+// bubble, the pane for a permission prompt, the working indicator — is exactly what a chat
+// with Jarvis needs, and two copies of that machinery is two places for a scroll or a
+// keyboard fix to land in only one of.
+// WHAT JARVIS'S SWITCH LEAVES ON SCREEN, as data, so the suite can drive both directions
+// without a phone. `on` is the daemon's word (true, false, or null for a daemon older than
+// the switch, which keeps the old behaviour); `j` is the last /api/jarvis answer.
+export function jarvisSurfaces(on, j) {
+  const off = on === false;
+  return { bar: !off && !!j, screen: !off, talk: !off };
+}
+// A 404 FROM /api/jarvis IS THE SWITCH, said by the daemon: Jarvis is off (or the daemon is
+// older than Jarvis, which comes to the same screen). Anything else is a failed read, and the
+// screens keep what they had.
+function jarvisFailed(e) {
+  if (e instanceof api.AuthError) throw e;
+  if (e && e.status === 404) { S.jarvisOn = false; S.jarvis = null; if (S.talk && S.talk.target.jarvis) talkStop(''); }
+}
+function openJarvis() {
+  // Switched off on the Mac: a stale link or notification lands on nothing, and says why.
+  if (!jarvisSurfaces(S.jarvisOn, S.jarvis).screen) { toast('Jarvis is off on the Mac (experimental) — enable it at the desk: fleet-experimental enable jarvis', 'bad'); return; }
+  // ALREADY HERE (a notification tapped while reading Jarvis): refresh, and keep the half-typed
+  // draft and the history — pushing another entry would make the next back land on Jarvis.
+  if (S.jarvisMode && S.screen === 'session') { refresh(); return; }
+  const j = S.jarvis;
+  talkStop('');                        // a conversation with a session ends where its screen does
+  S.jarvisMode = true; S.screen = 'session'; S.session = 'master';
+  if (j && j.present) S.project = j.project;
+  S.sess = null; S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
+  S.draft = ''; S.pending = null; stopSpeaking();
+  scrollMem.delete('pane'); scrollMem.delete('chat');
+  pushNav();
+  render(); refresh();
+}
+// The band at the top of Projects. Every word is decided here (screens.jsx's rule: the
+// strings cross the seam as data), and it is drawn only once /api/jarvis has answered — an
+// old daemon without the route leaves S.jarvis null, which is no band rather than a wrong one.
+function jarvisBarSpec() {
+  const j = S.jarvis;
+  if (!jarvisSurfaces(S.jarvisOn, j).bar) return null;
+  if (!j.present) return { title: 'Jarvis', sub: 'not set up — at the Mac: ghostfleet jarvis', tone: 'dim', onOpen: openJarvis };
+  const need = (S.projects || []).reduce((n, p) => n + ((p.sessions && p.sessions.need) || 0), 0);
+  const ask = (j.pending || []).length;
+  const bits = [];
+  bits.push(need ? `${need} need${need === 1 ? 's' : ''} you` : 'nothing blocked');
+  if (ask) bits.push(`${ask} waiting on your yes`);
+  bits.push(!j.running ? 'not running' : j.voice && j.voice.ready ? 'talk or type' : 'type to it');
+  return { title: 'Jarvis', sub: bits.join(' · '), tone: need || ask ? 'hot' : '', onOpen: openJarvis };
+}
+
+// ── "Turn on notifications", offered once, after the unlock ───────────────
+// PUSH HAD NEVER BEEN TURNED ON, and nothing said so. The switch lived in the settings sheet,
+// so a phone could be enrolled, installed and used every day while no notification ever
+// left the Mac — the daemon's log showed no /api/push/key request at all. So the app asks,
+// once, in the only moment iOS allows asking: right after an unlock, with a button, because
+// the permission prompt appears only in answer to a TAP (a prompt raised from a timer or on
+// load is silently refused). "Not now" is honoured for three days, then it asks again.
+const LS_PUSH_LATER = 'gf.push.later';
+let pushOfferChecked = false;
+async function maybePushOffer() {
+  if (pushOfferChecked || !api.haveToken() || api.mode() !== 'server') return;
+  pushOfferChecked = true;
+  // Where it CANNOT be turned on (an iOS tab, a denied permission, no Push API) there is
+  // nothing to offer; the settings sheet says why, in those same words.
+  if (pushBlockedReason()) return;
+  let later = 0;
+  try { later = Number(localStorage.getItem(LS_PUSH_LATER)) || 0; } catch {}
+  if (Date.now() - later < 3 * 86400 * 1000) return;
+  // Already on HERE and known THERE: nothing to ask. Either half missing is worth one tap.
+  try {
+    if (pushPermission() === 'granted' && await pushCurrent()) {
+      const k = await api.pushKey();
+      if (k && k.subscribed) return;
+    }
+  } catch { return; }
+  S.pushOffer = true;
+  render();
+}
+function notifySpec() {
+  if (!S.pushOffer) return null;
+  return {
+    text: "Turn on notifications — so a blocked session, or Jarvis's answer, reaches this phone when the app is closed.",
+    enable: 'Turn on notifications', later: 'not now',
+    onEnable: () => enablePushFromOffer(),
+    onLater: () => { try { localStorage.setItem(LS_PUSH_LATER, String(Date.now())); } catch {} S.pushOffer = false; render(); },
+  };
+}
+// CALLED FROM THE TAP, and pushEnable()'s first await is the permission request itself, so
+// the gesture is still live when iOS asks whether it counts as one.
+async function enablePushFromOffer() {
+  try {
+    await pushEnable();
+    S.pushOffer = false;
+    toast('notifications are on for this phone', 'good');
+  } catch (e) {
+    if (pushPermission() === 'denied') S.pushOffer = false;
+    toast(String((e && e.message) || e), 'bad');
+  }
+  render();
+}
+function notifyBandEl() {
+  const n = notifySpec();
+  if (!n) return null;
+  return el('div', { class: 'notify-bar' }, [
+    el('span', { class: 'nt', text: n.text }),
+    btn(n.enable, n.onEnable, 'go'),
+    btn(n.later, n.onLater),
+  ]);
+}
+
+// ── the screen ────────────────────────────────────────────────────────────
+function jarvisScreen() {
+  const j = S.jarvis;
+  const c = cardOf('master');
+  const meta = (c && G.STATUS[c.status]) || null;
+  const out = [el('div', { class: 'sbar' }, [
+    btn('‹', () => back()),
+    el('div', { class: 'who' }, [
+      // EXPERIMENTAL, said on its own screen as it is beside the switch and in fleet-jarvis status.
+      el('span', { class: 'nm' }, [el('span', { text: 'Jarvis' }), el('span', { class: 'tag-exp', text: 'experimental' })]),
+      el('span', { class: 'st' }, [
+        meta ? el('span', { style: `color:${G.COLORS[meta.color]}`, text: meta.label }) : null,
+        el('span', { class: 'scope', text: ' every fleet, every profile' }),
+        modeChip(),
+      ]),
+    ]),
+    el('div', { class: 'seg' }, [
+      btn('chat', () => setView('chat'), S.view === 'chat' ? 'on' : ''),
+      btn('pane', () => setView('pane'), S.view === 'pane' ? 'on' : ''),
+    ]),
+  ])];
+  const nb = notifyBandEl();
+  if (nb) out.push(nb);
+  if (!j) { out.push(el('div', { class: 'hint', text: 'asking the Mac about Jarvis…' })); return out; }
+  if (!j.present) {
+    out.push(el('div', { class: 'hint jarvis-none' }, [
+      el('p', { text: 'There is no Jarvis on this Mac yet.' }),
+      el('p', { text: 'At the desk, run  ghostfleet jarvis  once. It makes a small project outside your repos, starts its session, and from then on this screen talks to it.' }),
+    ]));
+    return out;
+  }
+  if (!j.running) out.push(el('div', { class: 'hint', text: "Jarvis's session is not running — ghostfleet jarvis at the desk starts it. Messages sent now wait for it." }));
+  // THE CONFIRM-LIST, WHERE HE CAN ANSWER IT. Each is a call Jarvis tried and the tool
+  // refused until he says yes — spoken, typed, or here. Yes costs a Face ID, like any tap
+  // that lets something be deleted or merged; no costs nothing.
+  for (const p of (j.pending || [])) {
+    out.push(el('div', { class: 'ask' }, [
+      el('span', { class: 't', text: `${p.granted ? 'yes given — ' : 'Jarvis asks: '}${p.summary}?` }),
+      el('span', { class: 'id', text: p.id }),
+      p.granted ? null : btn('yes', () => answerProposal(p, true), 'go'),
+      p.granted ? null : btn('no', () => answerProposal(p, false)),
+    ]));
+  }
+  if (S.talk) out.push(talkBand());
+  out.push(S.view === 'pane' ? paneView() : chatView(c));
+  out.push(composer(c, { talk: true }));
+  return out.filter(Boolean);
+}
+async function answerProposal(p, yes) {
+  try {
+    const assertion = yes ? await assertFor(`jarvis yes ${p.id}`) : null;
+    await api.jarvisConfirm(p.id, yes ? 'yes' : 'no', assertion);
+    toast(yes ? `yes — Jarvis will ${p.summary}` : `no — Jarvis will not ${p.summary}`, 'good');
+    await refresh();
+  } catch (e) {
+    if (e instanceof api.AuthError) { lock(); return; }
+    toast(String((e && e.message) || e), 'bad');
+    render();
+  }
+}
+
+// ── conversation mode ─────────────────────────────────────────────────────
+// Tap `talk` ONCE and the conversation runs itself: the mic opens, a second of quiet ends
+// what you said, the Mac transcribes it, the session answers, the answer is read aloud, and
+// the mic opens again. No button per sentence — that is push-to-talk, and a hand on a phone
+// is exactly what somebody talking to a session does not have free.
+//
+// ONE IMPLEMENTATION, A TARGET. It was Jarvis's alone; now every session's composer has the
+// same button, and what differs is only WHO is spoken to — {project, session, label} — taken
+// from the screen when the tap happens and carried in S.talk, so nothing below asks which
+// screen it is on. Jarvis is the target whose session is 'master' in Jarvis's project.
+//
+// WHERE THE AUDIO GOES: from this page to fleet-serve as WAV, into whisper.cpp on the Mac,
+// and nowhere else. Web Speech recognition is not used on purpose — it does not work in an
+// installed iOS app, and where it does work it sends the audio to Apple.
+//
+// THE MIC IS CLOSED WHILE ANYTHING ELSE HAPPENS. From the end of an utterance until the
+// answer has been spoken, the tracks are STOPPED, not muted: Jarvis's own voice through the
+// speaker is the loudest thing in the room, and a mic that could hear it would answer
+// itself. Stopping (rather than a gain of zero) also hands iOS its speaker back — a live
+// capture session routes speech to the quiet earpiece.
+//
+// IT ENDS: on a tap, on twenty seconds of nothing, when the app leaves the screen (an
+// installed web app gets no microphone in the background — the band says so), and when
+// something fails, saying what.
+// WAIT_MAX_MS is per target: Jarvis answers in seconds, while a worker's turn with tools in
+// it can run for many minutes — giving up on that at five would end most real conversations.
+const TALK = { END_QUIET_MS: 1000, MIN_SPEECH_MS: 350, MAX_UTTER_MS: 30000, GIVE_UP_MS: 20000, WAIT_MAX_MS: { jarvis: 5 * 60 * 1000, session: 30 * 60 * 1000 } };
+const T = { ctx: null, stream: null, src: null, proc: null, frames: [], pre: [], inSpeech: false,
+            voiceAt: 0, speechAt: 0, listenAt: 0, noise: 0.004, hot: 0, rate: 48000, poll: null, gen: 0 };
+// EVERY AWAIT IN THE LOOP IS A PLACE THE WORLD CAN CHANGE: stop, then talk again, while an
+// old utterance is still being heard, and that old continuation would find a live S.talk —
+// a NEW one — and send its words, or open a second microphone beside the first. Each talk
+// session carries a generation; a continuation that wakes to a different one does nothing.
+const talkLive = (g) => !!S.talk && S.talk.gen === g;
+// Who `talk` would speak to from the screen on show. Null where there is no conversation
+// to have (not on a session screen).
+export function talkTarget() {
+  if (S.screen !== 'session') return null;
+  if (S.jarvisMode) {
+    const j = S.jarvis;
+    return { jarvis: true, project: (j && j.project) || S.project, session: 'master', label: 'Jarvis' };
+  }
+  const c = cardOf(S.session);
+  return { jarvis: false, project: S.project, session: S.session, label: (c && c.label) || S.session };
+}
+// WHY `talk` CANNOT START, in words about the thing tapped, or '' when it can. The voice is
+// the Mac's (one transcriber for every target), and /api/jarvis reports it whether or not
+// Jarvis exists — so a session can be talked to on a Mac that never set Jarvis up.
+// Pure, so the suite can drive every reason without a phone: `j` is /api/jarvis's answer,
+// `card` the target's grid card, `caps` what this browser has.
+export function talkRefusal(t, j, card, caps) {
+  if (!t) return 'there is nothing on this screen to talk to';
+  if (t.jarvis && (!j || !j.present)) return 'there is no Jarvis to talk to yet';
+  if (!t.jarvis) {
+    if (!card) return `'${t.session}' is not on this fleet's grid any more`;
+    if (card.status === 'parked') return `${t.label} is parked — resume it from ⋯ before talking to it`;
+  }
+  if (!j || !j.voice) return 'still asking the Mac whether it can hear — try again in a moment';
+  if (!j.voice.ready) return `voice is off — ${j.voice.why || 'the Mac has no transcriber'}`;
+  if (!caps.mic) return 'this browser gives web apps no microphone';
+  if (!caps.audio) return 'this browser has no Web Audio to listen with';
+  return '';
+}
+function talkWhyNot(t = talkTarget()) {
+  return talkRefusal(t, S.jarvis, t && !t.jarvis ? cardOf(t.session) : null, {
+    mic: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+    audio: !!(window.AudioContext || window.webkitAudioContext),
+  });
+}
+function talkToggle() { if (S.talk) talkStop('conversation mode off'); else talkStart(); }
+function talkStart() {
+  const target = talkTarget();
+  const why = talkWhyNot(target);
+  // toast() only sets state; a refusal nobody renders is a button that does nothing.
+  if (why) { toast(why, 'bad'); render(); return; }
+  // BOTH OF THESE MUST HAPPEN INSIDE THE TAP. iOS lets an AudioContext run, and
+  // speechSynthesis speak, only once a gesture has unlocked them; everything after this
+  // point (the answer, the reopened mic) happens from timers and network callbacks.
+  try { T.ctx = T.ctx || new (window.AudioContext || window.webkitAudioContext)(); T.ctx.resume(); }
+  catch (e) { toast(`no audio on this device: ${(e && e.message) || e}`, 'bad'); return; }
+  if (canSpeak()) { try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch {} }
+  // The Mac's voice plays on its own context, unlocked by this same tap — and then the
+  // session type the microphone needs, which unlockAudio() leaves alone while talking.
+  unlockAudio();
+  try { if (navigator.audioSession) navigator.audioSession.type = 'play-and-record'; } catch {}
+  S.talk = { phase: 'opening', sent: '', seen: 0, since: 0, gen: ++T.gen, target };
+  // A CONVERSATION IS READ IN THE CHAT. The answer is found in the transcript, which the
+  // pane view does not fetch — and the count that tells a repeated "check again" from the
+  // last one needs the transcript on screen BEFORE it is sent, not after.
+  if (S.view === 'pane') { S.view = 'chat'; refresh(); }
+  render();
+  openMic();
+}
+async function openMic() {
+  if (!S.talk) return;
+  const g = S.talk.gen;
+  closeMic();                                     // never two streams: the old one goes first
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  } catch (e) {
+    if (talkLive(g)) talkStop(e && e.name === 'NotAllowedError'
+      ? 'the microphone is not allowed for this app — iOS Settings → ghostfleet → Microphone'
+      : `no microphone: ${(e && e.message) || e}`);
+    return;
+  }
+  // Stopped (or stopped and restarted) while the permission sheet was up: this stream is
+  // nobody's, so it is closed rather than wired.
+  if (!talkLive(g) || T.stream) { try { stream.getTracks().forEach(t => t.stop()); } catch {} return; }
+  T.stream = stream;
+  try { await T.ctx.resume(); } catch {}
+  if (!talkLive(g) || T.stream !== stream) { if (T.stream === stream) closeMic(); return; }
+  T.rate = T.ctx.sampleRate;
+  T.src = T.ctx.createMediaStreamSource(T.stream);
+  // ScriptProcessor rather than an AudioWorklet: it is deprecated and still everywhere,
+  // and a worklet is a second module file the service worker would have to precache for a
+  // loop that does one sum per 85 ms.
+  T.proc = T.ctx.createScriptProcessor(4096, 1, 1);
+  T.proc.onaudioprocess = onTalkFrame;
+  T.src.connect(T.proc); T.proc.connect(T.ctx.destination);   // Safari only pulls a connected node
+  T.frames = []; T.pre = []; T.inSpeech = false; T.hot = 0; T.listenAt = Date.now();
+  S.talk.phase = 'listening';
+  render();
+}
+function closeMic() {
+  try { if (T.proc) { T.proc.onaudioprocess = null; T.proc.disconnect(); } } catch {}
+  try { if (T.src) T.src.disconnect(); } catch {}
+  try { if (T.stream) T.stream.getTracks().forEach(t => t.stop()); } catch {}
+  T.proc = T.src = T.stream = null;
+}
+// VOICE ACTIVITY, ON THE DEVICE, from loudness against a floor it keeps learning. Two
+// loud frames start speech (one is a click); a second under 60% of the threshold ends it.
+// The ~0.4 s of audio before the start is kept, or the first syllable is always cut.
+function onTalkFrame(e) {
+  if (!S.talk || S.talk.phase !== 'listening') return;
+  const d = new Float32Array(e.inputBuffer.getChannelData(0));
+  let sum = 0;
+  for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
+  const rms = Math.sqrt(sum / d.length), now = Date.now();
+  const thr = Math.max(0.012, T.noise * 3.5);
+  if (!T.inSpeech) {
+    if (rms <= thr) T.noise = T.noise * 0.95 + rms * 0.05;
+    T.pre.push(d); if (T.pre.length > 5) T.pre.shift();
+    if (rms > thr) {
+      if (++T.hot >= 2) { T.inSpeech = true; T.speechAt = now; T.voiceAt = now; T.frames = T.pre.slice(); T.pre = []; }
+    } else {
+      T.hot = 0;
+      if (now - T.listenAt > TALK.GIVE_UP_MS) talkStop('nothing heard for 20 seconds — conversation mode is off');
+    }
+    return;
+  }
+  T.frames.push(d);
+  if (rms > thr * 0.6) T.voiceAt = now;
+  if (now - T.voiceAt > TALK.END_QUIET_MS || now - T.speechAt > TALK.MAX_UTTER_MS) endUtterance();
+}
+async function endUtterance() {
+  const frames = T.frames, spoke = T.voiceAt - T.speechAt;
+  T.frames = []; T.inSpeech = false;
+  closeMic();                          // closed from here until the answer has been spoken
+  if (!S.talk) return;
+  const g = S.talk.gen;
+  if (spoke < TALK.MIN_SPEECH_MS) { talkReopen(); return; }     // a cough, a door, a chair
+  S.talk.phase = 'hearing'; render();
+  let text = '';
+  try { text = String((await api.jarvisHear(encodeWav(frames, T.rate))).text || '').trim(); }
+  catch (e) {
+    if (!talkLive(g)) return;
+    if (e instanceof api.AuthError) { talkStop(''); lock(); return; }
+    talkStop(`could not hear that: ${(e && e.message) || e}`); return;
+  }
+  if (!talkLive(g)) return;
+  if (!text) { talkReopen(); return; }
+  // "(spoken)" TELLS JARVIS HOW TO ANSWER: its contract says a spoken turn gets an answer
+  // that sounds right read aloud. It is also ignored by the yes-detector, so "(spoken) yes"
+  // confirms exactly as a typed "yes" does.
+  const prompt = `(spoken) ${text}`;
+  const target = S.talk.target;
+  S.talk = { phase: 'waiting', sent: prompt, seen: countSaid(prompt), since: Date.now(), gen: g, target };
+  S.pending = { text: prompt, at: Math.floor(Date.now() / 1000), seen: countSaid(prompt) };
+  scrollMem.delete('chat');
+  render();
+  say('checking');
+  const r = await doVerb('fleet_send', { project: target.project, session: target.session, prompt }, { quiet: true });
+  if (!talkLive(g)) return;
+  if (!r) { S.pending = null; talkStop(`that did not reach ${target.label}`); return; }
+  startTalkPoll();
+}
+function talkReopen() { if (!S.talk) return; S.talk.phase = 'opening'; render(); openMic(); }
+// THE ANSWER IS THE LAST THING THE SESSION SAID AFTER WHAT YOU SAID, once its turn is over —
+// so a worker's narration between tool calls is never read, only the reply it ends on. The
+// match counts occurrences rather than looking for the text, for the reason sendDraft gives:
+// saying "yes" twice must wait for the second one, not read out the answer to the first.
+function talkAfterRefresh() {
+  const t = S.talk;
+  if (!t || t.phase !== 'waiting') return;
+  const max = TALK.WAIT_MAX_MS[t.target.jarvis ? 'jarvis' : 'session'];
+  if (Date.now() - t.since > max) { talkStop(`no answer after ${Math.round(max / 60000)} minutes — conversation mode is off`); return; }
+  // The baseline FOLLOWS THE PAGE DOWN, as reconcilePending's does: /api/session serves a
+  // window that rolls, and an earlier identical turn scrolling out of it must not make the
+  // new one look like no change at all.
+  const said = countSaid(t.sent);
+  if (said < t.seen) t.seen = said;
+  if (said <= t.seen) return;                              // not in the transcript yet
+  const ms = (S.sess && S.sess.messages) || [];
+  let i = -1;
+  for (let k = ms.length - 1; k >= 0; k--) if (ms[k].role === 'user' && String(ms[k].text || '').trim() === t.sent) { i = k; break; }
+  if (i < 0) return;                                       // never "everything after nothing"
+  const c = cardOf(t.target.session);
+  if (c && c.status === 'need-you') {
+    t.phase = 'speaking'; stopTalkPoll(); render();
+    const g0 = t.gen;
+    say(`${t.target.label} is stopped on a permission prompt. Open the pane to answer it.`, () => { if (talkLive(g0)) talkStop(''); });
+    return;
+  }
+  const after = ms.slice(i + 1).filter(m => m.role === 'assistant' && String(m.text || '').trim());
+  if (!after.length || (c && c.status === 'working')) return;
+  t.phase = 'speaking'; stopTalkPoll(); render();
+  const g = t.gen;
+  say(after[after.length - 1].text, () => { if (talkLive(g) && S.talk.phase === 'speaking') talkReopen(); });
+}
+// Faster than the 5s poll while an answer is owed, because in a conversation five seconds
+// of silence after the answer has landed is a long time.
+function startTalkPoll() {
+  stopTalkPoll();
+  T.poll = setInterval(() => { if (S.talk && S.talk.phase === 'waiting' && !pollPaused()) refresh(); }, 1500);
+}
+function stopTalkPoll() { if (T.poll) { clearInterval(T.poll); T.poll = null; } }
+function talkStop(reason) {
+  const was = !!S.talk;
+  S.talk = null;
+  closeMic(); stopTalkPoll();
+  stopSpeaking();
+  try { if (T.ctx) T.ctx.suspend(); } catch {}
+  if (reason) toast(reason, /off$/.test(reason) ? '' : 'bad');
+  if (reason || was) render();
+}
+// How long the answer has been owed, once that is long enough to be worth saying: a
+// worker's turn can run minutes, and a band that only ever says "on it" looks stuck.
+function waitedFor(since) {
+  const s = Math.floor((Date.now() - since) / 1000);
+  return s < 20 ? '' : s < 120 ? ` · ${s}s` : ` · ${Math.floor(s / 60)} min`;
+}
+// Spoken by the same speakText() as the play button on a bubble — the Mac's voice when it
+// has one, the settings sheet's choice of device voice when it does not.
+function say(text, onend) { speakText(speakable(text), onend); }
+function talkBand() {
+  const ph = S.talk.phase;
+  const now = ph === 'listening' ? '● listening — just talk; a second of quiet sends it'
+            : ph === 'hearing' ? '… hearing you (on the Mac)'
+            : ph === 'waiting' ? `… checking — ${S.talk.target.label} is on it${waitedFor(S.talk.since)}`
+            : ph === 'speaking' ? '▶ answering — the mic is off while it speaks'
+            : '… opening the microphone';
+  return el('div', { class: 'talkband' }, [
+    el('span', { class: 'ph ' + ph, text: now }),
+    el('span', { class: 'note', text: 'conversation mode only works with the screen on and this app open' }),
+  ]);
+}
+// 16 kHz mono 16-bit PCM, which is what whisper.cpp reads without converting anything.
+// Downsampled by linear interpolation: speech has nothing above 8 kHz that a transcriber
+// wants, and a filter would be a lot of code to remove what the mic's own processing
+// mostly already has.
+export function encodeWav(frames, rate) {
+  let n = 0;
+  for (const f of frames) n += f.length;
+  const pcm = new Float32Array(n);
+  let o = 0;
+  for (const f of frames) { pcm.set(f, o); o += f.length; }
+  const OUT = 16000, ratio = rate / OUT, len = Math.max(0, Math.floor(pcm.length / ratio));
+  const buf = new ArrayBuffer(44 + len * 2), v = new DataView(buf);
+  const str = (at, s) => { for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + len * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, OUT, true); v.setUint32(28, OUT * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, len * 2, true);
+  for (let i = 0; i < len; i++) {
+    const x = i * ratio, a = Math.floor(x), b = Math.min(a + 1, pcm.length - 1), fr = x - a;
+    const s = Math.max(-1, Math.min(1, pcm[a] * (1 - fr) + pcm[b] * fr));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buf;
 }
 
 // ── the session screen ────────────────────────────────────────────────────
@@ -1039,7 +1641,7 @@ export function toggleSpeak(text) {
 // different things, not two attempts at one.
 function openSession(name) {
   if (!name) return;
-  S.session = name; S.screen = 'session'; S.sess = null;
+  S.session = name; S.screen = 'session'; S.sess = null; S.jarvisMode = false; talkStop('');
   // Reset to the pane on every open rather than remembering the last choice. The card is
   // tapped to answer "what is this worker doing right now", and the pane is the answer to
   // that question; a sticky preference would sometimes answer a different one.
@@ -1047,6 +1649,15 @@ function openSession(name) {
   S.draft = ''; S.pending = null; stopSpeaking();
   // Another session's offset means nothing in this one's pane or transcript.
   scrollMem.delete('pane'); scrollMem.delete('chat');
+  pushNav();
+  render(); refresh();
+}
+// A sub-lead's card opens its SUB-GRID — itself first, then only its workers — one level
+// down, so back (the ‹, the swipe, popTo) comes up to the top grid rather than out.
+function openSub(name) {
+  if (!name) return;
+  S.sub = name; S.sel = 0; S.grid = null;
+  scrollMem.delete('grid');
   pushNav();
   render(); refresh();
 }
@@ -1098,8 +1709,9 @@ function sessionScreen() {
   if (!c) out.push(el('div', { class: 'hint', text: `'${S.session}' is not on this fleet's grid any more.` }));
   // The lead still says what it is, in one line rather than by three missing buttons.
   if (lead) out.push(el('div', { class: 'hint lead1', text: "the fleet's lead — no stop, reclaim, rename or pause" }));
+  if (S.talk) out.push(talkBand());
   out.push(S.view === 'pane' ? paneView() : chatView(c));
-  out.push(composer(c));
+  out.push(composer(c, { talk: true }));
   return out.filter(Boolean);
 }
 
@@ -1214,7 +1826,24 @@ function chatView(card) {
   } else if (s.total) {
     wrap.append(el('div', { class: 'meta l', text: '— the beginning of the transcript —' }));
   }
-  for (const m of (s.messages || [])) wrap.append(turn(m.role === 'user', m.text, G.clockLabel(m.ts), false, msgKey(m)));
+  for (const m of (s.messages || [])) {
+    // ON JARVIS'S SCREEN, THE MACHINE IS NOT THE OWNER. Its wakes arrive as prompts, so the
+    // transcript files them as user turns — and a big right-hand bubble reading "[fleet]
+    // need-you: …" says HE wrote it, on the one screen where who said what is the whole
+    // confirm-list. One dim line, its first sentence, marked as the fleet's.
+    if (S.jarvisMode && m.role === 'user' && /^\[fleet\]/.test(String(m.text || ''))) {
+      // No lookbehind: before Safari 16.4 it is a PARSE error, and the whole client blanks.
+      const body = String(m.text).replace(/^\[fleet\]\s*/, ''), cut = body.search(/\.\s/);
+      const first = cut >= 0 ? body.slice(0, cut + 1) : body;
+      wrap.append(el('div', { class: 'sysline' }, [
+        el('span', { class: 'who', text: 'fleet' }),
+        el('span', { class: 't', text: first.length > 140 ? first.slice(0, 139) + '…' : first }),
+        el('span', { class: 'at', text: G.clockLabel(m.ts) }),
+      ]));
+      continue;
+    }
+    wrap.append(turn(m.role === 'user', m.text, G.clockLabel(m.ts), false, msgKey(m)));
+  }
   // Sent, not yet echoed by the transcript. Dimmed rather than absent: a chat where your
   // own message disappears for five seconds reads as a send that failed, and this app's
   // whole job is telling you what is actually happening.
@@ -1253,20 +1882,6 @@ function thinking() {
        ['.', '.', '.'].map(d => el('span', { class: 'dot', text: d }))),
   ]);
 }
-// PER-MESSAGE PLAYBACK WITHOUT A SPEAKER ON EVERY BUBBLE.
-//
-// The composer used to carry the only 🔊, and the comment there said why: a speaker on
-// every bubble is the button wall this client keeps having to fight. That objection was
-// right and it still is — so this does not put N buttons on screen. It puts ONE, on the
-// bubble you tapped, and moves it when you tap another. The count of visible speakers is
-// the same as it was; what changed is that you choose which message it is attached to,
-// instead of it always being the newest.
-//   A TAP, not a long-press: long-press is already `x kill` on a card and already the
-// text-selection gesture inside a bubble, and a third meaning for it would be the worst
-// kind of hidden. A tap has no meaning on a bubble today, so it is free.
-//   Nothing is spoken by the tap itself. Tap reveals, the control plays — because a tap
-// that started talking would make scrolling a transcript hazardous, and because the
-// control is what carries the stop state.
 // ── the read-aloud icon, and why both states are the same drawing ───────────
 //
 // THIS CONTROL HAS ALREADY BEEN GOT WRONG ONCE, in the direction an icon makes easy. It
@@ -1342,6 +1957,12 @@ function speakIcon(on) { return iconSvg(ICON_HORN, on ? ICON_STOP : ICON_WAVE); 
 const ICON_CAM_BODY = 'M3 8h3.2l1.6-2h8.4l1.6 2H21v11H3z';
 const ICON_CAM_LENS = 'M12 13.4m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0';
 function cameraIcon() { return iconSvg(ICON_CAM_BODY, ICON_CAM_LENS); }
+// Two offset sheets, and a tick for the moment after. Same box, same stroke, from the same
+// iconSvg() as every other drawn control here.
+const ICON_COPY_BACK = 'M15 5H6a1 1 0 0 0-1 1v9';
+const ICON_COPY_FRONT = 'M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z';
+const ICON_TICK = 'M5 12.5l4.5 4.5L19 7.5';
+function copyIcon(done) { return done ? iconSvg(ICON_TICK) : iconSvg(ICON_COPY_BACK, ICON_COPY_FRONT); }
 
 // ── a photo becomes a path in the box you are about to send ───────────────
 // "can I send a picture?", twice. The mechanism docs/attachments.md measured is that an
@@ -1417,19 +2038,12 @@ function turn(mine, text, when, pending = false, key = '') {
   if (mine) bub.textContent = String(text || '');
   else bub.appendChild(md.render(String(text || ''), document));
   const meta = el('div', { class: 'meta', text: when });
-  const speakableHere = !pending && key && canSpeak() && speakable(text);
+  // A PLAY BUTTON ON EVERY MESSAGE. It used to appear only on the bubble you had tapped,
+  // to keep a speaker off every bubble; the owner asked for one on each, beside the other
+  // per-message controls, and the tap-to-reveal step was the thing standing between a
+  // reply and hearing it.
+  const speakableHere = !pending && key && canPlay() && speakable(text);
   if (speakableHere) {
-    bub.classList.add('tappable');
-    bub.addEventListener('click', (e) => {
-      // A link is a link, and a selection is a selection. Tapping either must not also
-      // toggle a control — copying a sha out of a bubble is a thing people do here.
-      if (e.target && e.target.closest && e.target.closest('a')) return;
-      try { if (String(getSelection && getSelection() || '').length) return; } catch {}
-      S.speakSel = (S.speakSel === key) ? '' : key;
-      render();
-    });
-  }
-  if (speakableHere && S.speakSel === key) {
     const on = S.speaking === speakable(text);
     // NOT btn(): that helper assigns textContent, which would print the markup. The icon is
     // a real child element — see speakIcon() for why both states are the same drawing.
@@ -1445,7 +2059,79 @@ function turn(mine, text, when, pending = false, key = '') {
       onclick: (e) => { e.stopPropagation(); toggleSpeak(text); },
     }, [speakIcon(on)]));
   }
+  if (key && !pending) meta.append(copyBtn(text, key));
   return el('div', { class: 'turn ' + (mine ? 'me' : 'them') }, [bub, meta]);
+}
+
+// ── copy one message ───────────────────────────────────────────────────────
+// "copying by hand" picked up the screen, not the message: a selection dragged across a
+// few bubbles came out with `load 20 older` and every bubble's timestamp interleaved with
+// the text, and the rendered markdown had already lost its pipes, its ** and its fences —
+// so a table pasted into notes as a run of words. This copies the TRANSCRIPT'S text for
+// ONE message, the markdown as the agent wrote it, which is what pastes cleanly into code,
+// into another chat, or into notes that render it again.
+//   On every bubble, not revealed by a tap like the speaker, because copying is the one
+// thing the bubble's own long-press (text selection) does badly, and a control you have to
+// discover first is no help to the person who already gave up on the selection.
+function copyBtn(text, key) {
+  const done = S.copied === key;
+  return el('button', {
+    class: 'copy tiny' + (done ? ' done' : ''),
+    'aria-label': done ? 'copied' : 'copy this message',
+    title: done ? 'copied' : 'copy',
+    onclick: (e) => {
+      e.stopPropagation();
+      // Taken now: currentTarget is null again once the event has finished dispatching.
+      const b = e.currentTarget || e.target;
+      // copyText() decides its route BEFORE its first await: iOS only lets a page write the
+      // clipboard inside the gesture, and an await spends the gesture.
+      copyText(String(text || '')).then((ok) => {
+        if (!ok) { toast('could not copy — select the text instead', 'bad'); return; }
+        S.copied = key;
+        // In place, the way paintPane() patches the pane: a full render() here would close
+        // the keyboard if the composer had focus, for the sake of one icon. A poll that
+        // rebuilds the list meanwhile draws the same state from S.copied.
+        const fresh = copyBtn(text, key);
+        if (b && b.replaceWith && isLive(b)) b.replaceWith(fresh);
+        setTimeout(() => {
+          if (S.copied !== key) return;
+          S.copied = '';
+          if (isLive(fresh) && fresh.replaceWith) fresh.replaceWith(copyBtn(text, key));
+          else renderUnlessTyping();
+        }, COPIED_MS);
+      });
+    },
+  }, done ? [copyIcon(true), el('span', { text: 'copied' })] : [copyIcon(false)]);
+}
+const COPIED_MS = 1500;
+// navigator.clipboard is the way, where it exists — and it does not exist on a page served
+// over plain http from anything but localhost, which is exactly how a tailnet address
+// reaches the phone. The fallback is the old one: a selected, offscreen, READONLY textarea
+// and execCommand('copy'). readonly so iOS does not raise the keyboard for it, 16px so
+// focusing it does not zoom the page (the same rule as the composer), and fixed at the top
+// so selecting it does not scroll the transcript.
+function copyText(t) {
+  const viaExec = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = t;
+      ta.setAttribute('readonly', '');
+      ta.setAttribute('aria-hidden', 'true');
+      ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;';
+      document.body.appendChild(ta);
+      ta.focus && ta.focus();
+      ta.select && ta.select();
+      try { ta.setSelectionRange(0, t.length); } catch {}
+      const ok = !!(document.execCommand && document.execCommand('copy'));
+      ta.remove ? ta.remove() : document.body.removeChild(ta);
+      return ok;
+    } catch { return false; }
+  };
+  const clip = typeof navigator !== 'undefined' && navigator.clipboard;
+  if (clip && clip.writeText && (typeof isSecureContext === 'undefined' || isSecureContext)) {
+    return clip.writeText(t).then(() => true, () => viaExec());
+  }
+  return Promise.resolve(viaExec());
 }
 
 // ── the composer ────────────────────────────────────────────────────────────
@@ -1527,7 +2213,7 @@ function growComposer(box) {
 // and the smaller of the two wins. They disagreed (160 here, 120 there), so this constant
 // had no effect above 120px and the box stopped growing for a reason not written anywhere.
 const COMPOSER_MAX_PX = 120;
-function composer(card) {
+function composer(card, opts = {}) {
   const box = el('textarea', { rows: '1', placeholder: 'message this session…',
                                autocapitalize: 'sentences', spellcheck: 'false' });
   box.value = S.draft || '';
@@ -1580,7 +2266,20 @@ function composer(card) {
   cam.setAttribute('aria-label', S.attaching ? 'sending a photo' : 'attach a photo');
   cam.setAttribute('title', 'attach a photo');
   if (S.attaching) cam.setAttribute('disabled', 'disabled');
-  const kids = [pick, cam, box, btn('send', () => sendDraft(), 'go')];
+  const kids = [pick, cam, box];
+  // THE COMPOSER ALSO TALKS — Jarvis's and every session's, the same button in the same
+  // place. One more control, the same size as the two beside it, and it is the whole of
+  // conversation mode's UI besides the band above: tap once and the conversation runs itself
+  // until you tap it again (see talkStart).
+  // TALK IS PART OF JARVIS — its hearing is the Mac's whisper, which exists for Jarvis — so
+  // with Jarvis switched off there is no button at all, not a button that refuses.
+  if (opts.talk && jarvisSurfaces(S.jarvisOn, S.jarvis).talk) {
+    const t = btn(S.talk ? 'stop' : 'talk', () => talkToggle(), 'talk' + (S.talk ? ' on' : ''));
+    const tg = talkTarget();
+    t.setAttribute('aria-label', S.talk ? 'stop conversation mode' : `talk to ${(tg && tg.label) || 'this session'}`);
+    kids.push(t);
+  }
+  kids.push(btn('send', () => sendDraft(), 'go'));
   return el('div', { class: 'composer' }, kids);
 }
 async function sendDraft() {
@@ -1709,9 +2408,11 @@ function sheetActions(name = S.session) {
 // screen is up long enough to tap, and tapping it starts the same race again — "i put my
 // face and then it asked me again". A three-state answer is the point: "no token" and "no
 // token YET" are different facts and a two-way test cannot hold both.
-export function onVisibleAction(now = Date.now()) {
+export function onVisibleAction() {
   if (pk.busy()) return 'wait';          // an unlock is in progress; it IS the answer
-  if (S.hiddenAt && now - S.hiddenAt > pk.RELOCK_AFTER_HIDDEN) return 'lock';
+  // No hidden-for-N-minutes rule: the token's own idle window is the rule (passkey.js
+  // TOKEN_TTL). Hidden means no polls, so the local expiry is the server's to the second,
+  // and a return inside it refreshes — whose 401, if the server disagrees, locks.
   if (!api.haveToken() && !pk.bypassAllowed()) return 'lock';
   return 'refresh';
 }
@@ -2233,7 +2934,6 @@ export function reloadAction(pending, typing, authed) {
 export function takeNewClientIfIdle() {
   const typing = typingNow(), authed = api.haveToken();
   const act = reloadAction(swReloadPending, typing, authed);
-  if (swReloadPending) api.diag('swap', act, 'typ' + (typing ? 1 : 0), 'auth' + (authed ? 1 : 0));
   if (act !== 'reload') return false;
   try { location.reload(); } catch { return false; }
   return true;
@@ -2337,7 +3037,7 @@ async function readPane() {
     S.pane = j;
     if (S.paneErr) { S.paneErr = ''; renderUnlessTyping(); }
   } catch (e) {
-    if (e instanceof api.AuthError) return lock('poll');
+    if (e instanceof api.AuthError) return lock();
     const msg = e instanceof api.OfflineError
       ? 'offline — this is the last pane captured' : String(e.message || e);
     // Rendered only when it CHANGES. The poll is every two seconds; re-rendering the
@@ -2388,7 +3088,12 @@ function pushNav() {
 function popTo() {
   if (S.sheet) { closeSheet(); return; }
   if (S.confirm) { cancel(); return; }
-  if (S.screen === 'session') { S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; S.speakSel = ''; stopSpeaking(); }
+  // Jarvis was opened from Projects and sits one level under it, whatever its session is.
+  if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; stopSpeaking(); }
+  else if (S.screen === 'session') { talkStop(''); S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; stopSpeaking(); }
+  // A SUB-GRID IS ONE LEVEL DOWN, so back from it is the top grid, not the projects list —
+  // the same ` the desk uses to go up.
+  else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; }
   else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; }
   else return;                                  // at the root: let the platform have it
   navDepth = Math.max(0, navDepth - 1);
@@ -2470,7 +3175,8 @@ function cardEl(m, h, idx) {
   // doing, and showing it beside "asleep" would read as a live session.
   //   No new chip colour — the palette is fixed, and a state that needs its own colour to be
   // understood is a state whose WORDS are wrong. The plain chip plus the line below carries it.
-  if (m.asleep) meta.append(el('span', { class: 'chip st', text: 'asleep' }));
+  if (m.lost) meta.append(el('span', { class: 'chip st', text: 'lost' }));
+  else if (m.asleep) meta.append(el('span', { class: 'chip st', text: 'asleep' }));
   else if (m.exited) meta.append(el('span', { class: 'chip st exited', text: 'exited' }));
   else if (m.statusLabel) meta.append(el('span', { class: 'chip st', text: m.statusLabel }));
   if (m.where) meta.append(el('span', { class: 'c-where', text: m.where }));
@@ -2479,11 +3185,19 @@ function cardEl(m, h, idx) {
   if (m.pr) meta.append(el('span', { class: 'chip tag', text: m.pr }));
   if (m.queued) meta.append(el('span', { class: 'chip tag', text: `queued: ${m.queued}` }));
   if (meta.childNodes.length) d.append(meta);
+  // ── a sub-lead's team: its own line, above its message ──────────────────
+  // The desk gives the rollup the message's line (28 columns cannot hold both); here there
+  // is room for both, so the team gets a line and the message keeps its two.
+  if (m.rollup) d.append(el('div', { class: 'c-meta c-roll' }, [el('span', { class: 'chip tag', text: m.rollup })]));
   // ── the agent's last line, two real lines of it ─────────────────────────
   // THE POINT OF THE REDESIGN. Rendered as text, never as markup: this is whatever the
   // agent last said, and app.css clamps it rather than the client truncating it — so the
   // browser decides where two lines end, at whatever size the reader has chosen.
-  if (m.asleep) {
+  if (m.lost) {
+    // Same plain chip and the same "say what to do" line as asleep: no colour of its own,
+    // and above all not the need-you one, because nothing is waiting on anybody.
+    d.append(el('div', { class: 'c-msg none', text: 'lost in a crash — tap to reopen · hold to forget' }));
+  } else if (m.asleep) {
     // The card says what to DO, not what happened to it. An exited card waits for a person
     // to press enter because a person ended it; this one was ended by the fleet to give the
     // memory back, so the way home is a tap and the card is the thing that knows it.
@@ -2605,8 +3319,14 @@ function confirmSpec() {
   const yn = 'y = yes · any other key = cancel';
   const cancelBtn = { label: 'cancel', onClick: cancel };
   if (c.kind === 'kill' || c.kind === 'reclaim-kill') {
-    return { cls: 'red', q: `kill session '${c.name}'?`, keys: yn, buttons: [
-      { label: 'y = yes', cls: 'danger', onClick: () => c.kind === 'kill' ? confirmedKill(c.name) : askReclaimWorktree(c.name) },
+    return { cls: 'red', q: c.workers
+        ? `stop sub-lead '${c.name}' AND its ${c.workers} worker${c.workers === 1 ? '' : 's'} (worktrees reclaimed where safe)?`
+        // The TUI's wording, word for word (pwa-check holds the two together): on a lost
+        // card the same verb forgets a record, and saying "kill" about a session that is
+        // already dead reads as if the conversation went with it.
+        : c.lost ? `dismiss lost session '${c.name}'? forgets the card; the conversation stays on disk`
+        : `kill session '${c.name}'?`, keys: yn, buttons: [
+      { label: 'y = yes', cls: 'danger', onClick: () => c.kind === 'kill' ? confirmedKill(c.name, c.workers) : askReclaimWorktree(c.name) },
       cancelBtn,
     ] };
   }
@@ -2696,10 +3416,26 @@ async function wakeSession(name) {
   openSession(name);
 }
 
-function askKill(name) { if (name && !leadGuard(name, 'stopped')) { S.confirm = { kind: 'kill', name }; render(); } }
-async function confirmedKill(name) {
+// A LOST SESSION COMES BACK THROUGH THE VERB, AND THE TAP WAITS FOR IT, for wake's reason:
+// a reopen starts a process, and opening optimistically would show an empty pane for a
+// session that never came back.
+async function reopenSession(name) {
+  if (!name) return;
+  const r = await doVerb('fleet_reopen', { project: S.project, session: name });
+  if (!r || r.ok === false) return;          // doVerb has already surfaced the reason
+  openSession(name);
+}
+
+function askKill(name) {
+  if (!name || leadGuard(name, 'stopped')) return;
+  // A sub-lead is asked about WITH its team: stopping it stops and reclaims its workers.
+  const c = cardOf(name) || {};
+  const w = c.workers;
+  S.confirm = { kind: 'kill', name, workers: (w && w.total) || 0, lost: !!c.lost }; render();
+}
+async function confirmedKill(name, workers = 0) {
   S.confirm = null;
-  await doVerb('fleet_stop', { project: S.project, session: name });
+  await doVerb('fleet_stop', { project: S.project, session: name, ...(workers ? { children: true } : {}) });
   if (S.screen === 'session' && S.session === name) back(); else render();
 }
 // stop --reclaim removes the worktree too, so it takes BOTH of the TUI's prompts: the
@@ -2753,7 +3489,7 @@ async function doVerb(tool, args, opts = {}) {
     await refresh();
     return r;
   } catch (e) {
-    if (e instanceof api.AuthError) { lock('pane'); return null; }
+    if (e instanceof api.AuthError) { lock(); return null; }
     toast(String(e.message || e), 'bad');
     render();
     return null;
@@ -2809,8 +3545,7 @@ function lockScreen() {
       }, 'go'));
     } else if (pk.available()) {
       row.append(btn('unlock with Face ID', async () => {
-        try { api.diag('auth', 'start'); await pk.open(); api.diag('auth', 'ok');
-              S.locked = false; render(); refresh(); }
+        try { await pk.open(); S.locked = false; render(); refresh(); }
         catch (e) { toast(String(e.message || e), 'bad'); }
       }, 'go'));
     }
@@ -2898,7 +3633,11 @@ function sheetName({ cwd, name, reuse }) {
 // `w` — a brand-new worktree. The TUI's four fields, same defaults, same hints.
 function sheetWorktree() {
   const name = input(''), branch = input(''), from = input('');
-  const agent = el('select', {}, ['claude', 'codex', 'opencode'].map(a => el('option', { value: a, text: a })));
+  // From the daemon's catalogue, like the project picker below, so a fourth agent shows up
+  // here without this line changing and one that is not installed is never offered. The
+  // fixed list is only for a daemon too old to send `agents`.
+  const names = agentCatalogue().length ? agentCatalogue().map(a => a.name) : ['claude', 'codex', 'opencode', 'agy', 'cursor'];
+  const agent = el('select', {}, names.map(a => el('option', { value: a, text: a })));
   const go = async () => {
     const n = (name.value || '').trim();
     if (!n) { toast('a name is required', 'bad'); return; }
@@ -2966,22 +3705,46 @@ function sheetSend(name) {
   ]));
 }
 
-function sheetAnswer(name) {
+// ANSWER ONLY THE PROMPT YOU CAN SEE. The pane view is a poll, so the prompt on it can be
+// answered at the desk or time out between the paint and the tap — and then "1" and Enter
+// land in the composer as a message. So the sheet reads the pane FIRST, shows the prompt it
+// is about to answer (kind, tool, command, options), and sends that prompt's fingerprint.
+// The daemon re-captures just before the keys go and refuses anything else as "the prompt
+// changed", at which point this re-reads the pane and draws what is really there.
+async function sheetAnswer(name) {
+  let prompt = null;
+  try { prompt = (await api.getPane(S.project, name)).prompt || null; }
+  catch (e) { if (e instanceof api.AuthError) { lock('pane'); return; } toast(String(e.message || e), 'bad'); return; }
   const t = input('', { placeholder: 'e.g. 2   or   yes' });
   const noEnter = el('input', { type: 'checkbox' });
-  const go = async () => {
-    const text = t.value;
+  const send = async (text) => {
     if (!text) { toast('fleet_answer refuses an empty text', 'bad'); return; }
     closeSheet();
-    await doVerb('fleet_answer', { project: S.project, session: name, text, no_enter: noEnter.checked });
+    const r = await doVerb('fleet_answer', { project: S.project, session: name, text, no_enter: noEnter.checked,
+                                              expect: prompt ? prompt.fingerprint : '' });
+    // Refused or not, the pane is read again now: after a refusal it shows what replaced the
+    // prompt, and after an answer it shows what the answer did.
+    if (!r && S.screen === 'session' && S.session === name) { S.pane = null; await readPane(); render(); }
   };
-  t.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  t.addEventListener('keydown', e => { if (e.key === 'Enter') send(t.value); });
+  if (!prompt) {
+    openSheet(sheet('answer keys', `→ ${name}`, [
+      el('p', { class: 'warn', text: 'no prompt on screen — keys sent now would land in its input box as a message. Nothing to answer.' }),
+      el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
+    ]));
+    return;
+  }
+  const what = prompt.kind === 'permission'
+    ? `${prompt.agent || 'agent'} asks to run · ${prompt.tool || 'a tool'}${prompt.command ? ': ' + prompt.command : ''}`
+    : `${prompt.kind} · ${prompt.question || ''}`;
+  const opts = (prompt.options || []).map(o => btn(`${o.n}. ${o.label}`, () => send(o.n)));
   openSheet(sheet('answer keys', `→ ${name}`, [
-    el('p', { text: 'literal keystrokes for a worker blocked on a dialog — a permission prompt, "reached usage limit — retry?", a trust prompt.' }),
-    field('keys', t),
+    el('p', { text: what }),
+    opts.length ? el('div', { class: 'rows' }, opts.map(b => el('div', { class: 'srow' }, [b]))) : null,
+    field('or keys', t),
     el('label', { class: 'field' }, [noEnter, document.createTextNode(' send without pressing Enter')]),
-    el('div', { class: 'row' }, [btn('answer', go, 'go'), btn('esc back', closeSheet)]),
-  ]));
+    el('div', { class: 'row' }, [btn('answer', () => send(t.value), 'go'), btn('esc back', closeSheet)]),
+  ].filter(Boolean)));
 }
 
 function sheetRename(name) {
@@ -2994,6 +3757,7 @@ function sheetRename(name) {
     if (!n || n === name) { closeSheet(); return; }
     closeSheet();
     await doVerb('fleet_rename', { project: S.project, session: name, new_name: n });
+    if (S.talk && S.talk.target.session === name && S.talk.target.project === S.project) { S.talk.target.session = n; if (S.talk.target.label === name) S.talk.target.label = n; }
     if (S.session === name) { S.session = n; S.sess = null; refresh(); }
   };
   openSheet(sheet('rename', name, [
@@ -3064,18 +3828,18 @@ function agentPicker(current, onPick) {
   if (!cat.length) note.textContent = 'this fleet did not report which agents are installed — only the default is offered.';
   return { row, note };
 }
-// THE RUNNING MASTER DOES NOT CHANGE, said at the point of change. CLAUDE_FLEET_AGENT is
-// read once, by agent-here, when the tmux session is created; the session has already
-// exec'd its CLI and nothing re-reads the projects file. Without this line the setting
-// looks broken — you pick codex, the master keeps answering as claude, and nothing
-// anywhere explains it. Same family as every long-lived-process trap in CLAUDE.md.
-const NEXT_MASTER = 'takes effect on the NEXT master — a running one keeps the CLI it started with (stop it, or open the project again, to switch).';
+// WHEN THE RUNNING MASTER CHANGES, said at the point of change. It used to be "never":
+// CLAUDE_FLEET_AGENT is read once, when the tmux session is created, so a project set to
+// codex kept answering as claude. bin/fleet-project now moves the running master too
+// (lib/agent-switch.sh) — but after the turn it is in, which is the part a reader would
+// otherwise mistake for the setting not working.
+const NEXT_MASTER = 'the running master switches too, once its current turn ends — and switching back resumes the conversation it had (codex starts fresh).';
 
 // The edit path for a project that already exists — reached from the projects screen's
 // settings sheet, where the other two per-project settings live. A sheet of its own
 // rather than a cycling button in that row, because the option that matters most about
-// this setting is the sentence under it: what the choice costs, and that it applies to
-// the next master rather than the one that is running.
+// this setting is the sentence under it: what the choice costs, and when the running
+// master moves.
 function sheetProjectAgent(p) {
   let agent = p.agent && p.agent !== 'claude' ? p.agent : '';
   const pick = agentPicker(agent, v => { agent = v; });
@@ -3189,7 +3953,7 @@ async function sheetSettings() {
     // column per setting, and this is the same table. A project created before today —
     // which is all of them — had no edit path at all on the phone, so a picker that only
     // worked at creation time would not have answered the request.
-    kids.push(el('p', { text: "agent: which coding CLI this project's master runs. It " + NEXT_MASTER }));
+    kids.push(el('p', { text: "agent: which coding CLI this project's master runs — " + NEXT_MASTER }));
     const rows = el('div', { class: 'rows' });
     for (const p of S.projects || []) {
       rows.append(el('div', { class: 'srow' }, [
@@ -3310,6 +4074,16 @@ async function sheetSettings() {
   // ── the voice, next to the diagnostic line it sits above ──────────────────
   // A <select> and not a list of buttons: the list is however many voices the OS ships
   // (dozens on iOS) and that is the one place a native control beats anything drawn here.
+  //   THE MAC'S VOICE COMES FIRST under the heading, because when it is there it is what
+  // reads, and the list below is only the fallback. Said only once /api/jarvis has answered:
+  // an old daemon without `speak` says nothing rather than something wrong.
+  const k = (S.jarvis && S.jarvis.speak) || S.speak;
+  const macVoice = k && k.state ? el('div', { class: 'dim small', text:
+    k.ready ? "the Mac reads replies with Kokoro — this device's voice below is only the fallback"
+    : k.state === 'off' ? "the Mac's Kokoro is switched off, so this device's voice reads replies"
+    : k.state === 'missing' ? "the Mac has no Kokoro, so this device's voice reads replies — at the Mac (optional, ~350 MB): fleet-jarvis voice --kokoro --install"
+    : "the Mac's Kokoro is broken, so this device's voice reads replies — at the Mac: fleet-jarvis voice --kokoro --install" }) : null;
+  if (!canSpeak() && macVoice) kids.push(el('h2', { text: 'read-aloud voice' }), macVoice);
   if (canSpeak()) {
     const vs = allVoices();
     const cur = savedVoice();
@@ -3345,6 +4119,7 @@ async function sheetSettings() {
       render();
     });
     kids.push(el('h2', { text: 'read-aloud voice' }));
+    if (macVoice) kids.push(macVoice);
     kids.push(sel);
     // THE COUNT, BECAUSE ONE OPTION AND NO LIST LOOK IDENTICAL FROM THE OUTSIDE. "I only
     // see the default voice" has at least two causes — the device really reports one, or the
@@ -3402,7 +4177,7 @@ function onKey(e) {
     // reflex, and this particular one throws away real work.
     if (c.force) { if (k === 'f' || k === 'F') removeWorktree(c, true); else cancel(); return; }
     if (k === 'y' || k === 'Y') {
-      if (c.kind === 'kill') confirmedKill(c.name);
+      if (c.kind === 'kill') confirmedKill(c.name, c.workers);
       else if (c.kind === 'reclaim-kill') askReclaimWorktree(c.name);
       else if (c.kind === 'reclaim-wt') confirmedReclaim(c.name);
       else if (c.kind === 'wt') removeWorktree(c, false);
@@ -3541,19 +4316,29 @@ try {
   }
 } catch {}
 addEventListener('keydown', onKey);
+// Every tap is a chance to unlock audio (see unlockAudio): speak mode reads replies that
+// arrive by poll, long after the tap that turned it on, and after iOS has suspended the
+// context for a trip to the background. Capture phase, passive: it never alters the tap.
+for (const ev of ['touchend', 'click']) document.addEventListener(ev, () => unlockAudio(), { capture: true, passive: true });
 // The system back gesture. Every backward move in the app comes through here, so a swipe
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
 // this is what answers). No URL is ever read: the entries carry a depth, not a route.
 addEventListener('popstate', () => popTo());
-// §5: a passkey at every open, and again after the app has been backgrounded for a few
-// minutes. The token expiring is the same event as far as this is concerned.
+// §5: a passkey whenever there is no live session — the token dies after 15 minutes
+// without a request, and that expiry is the only thing that brings the sensor back.
 document.addEventListener('visibilitychange', () => {
   // Hidden: the pane's timer is TORN DOWN, not left to skip its turns. That is the
   // difference between an app that stops polling in a pocket and one that keeps waking
   // the radio every two seconds to decide it should not have.
-  if (document.hidden) { S.hiddenAt = Date.now(); stopPanePoll(); return; }
+  if (document.hidden) {
+    stopPanePoll();
+    // THE LIMIT, SAID WHEN IT BITES. An installed web app gets no microphone and no speech
+    // once it is off screen, so conversation mode ends here rather than pretending to run.
+    if (S.talk) talkStop('conversation mode stopped — it only works with the screen on and the app open');
+    return;
+  }
   const act = onVisibleAction();
-  if (act === 'lock') lock('visible');
+  if (act === 'lock') lock();
   else if (act === 'refresh') refresh();
   syncPanePoll();
 });
@@ -3569,64 +4354,42 @@ document.addEventListener('visibilitychange', () => {
 //   Never mid-sentence. A reload throws away S.draft, which lives in memory — so if you
 // are typing, it waits, and the poll spends it when you are not.
 if ('serviceWorker' in navigator) {
-  // WHAT THE PAGE WOKE UP AS. `hadController` is the guard that decides whether a
-  // controllerchange is a first install (ignore) or a swap (reload), and it is read once,
-  // here, at module evaluation. If it reads wrong, every conclusion after it is wrong —
-  // and the log cannot show it, because a controlled page still hits the network for the
-  // whole shell (sw.js revalidates behind the paint). So the page says it out loud.
+  // Read once, at module evaluation: it is what decides whether a controllerchange is a
+  // first install (ignore) or a swap (reload).
   let hadController = !!navigator.serviceWorker.controller;
-  api.diag('load', 'ctl' + (hadController ? 1 : 0),
-       'sa' + ((() => { try { return matchMedia('(display-mode: standalone)').matches || navigator.standalone ? 1 : 0; } catch { return 0; } })()),
-       'lock' + (S.locked ? 1 : 0));
-  navigator.serviceWorker.register('./sw.js').then(reg => {
-    // WHICH STATES EXIST AT REGISTRATION. A worker that installs on every launch is the
-    // whole puzzle: this says whether one was already active, whether a new one is
-    // installing, and whether one is stuck waiting.
-    if (!reg) return;
-    const st = r => (r ? r.state : 'none');
-    api.diag('reg', 'i-' + st(reg.installing), 'w-' + st(reg.waiting), 'a-' + st(reg.active));
-    reg.addEventListener('updatefound', () => api.diag('updatefound', 'a-' + st(reg.active)));
-  }).catch(() => api.diag('reg', 'failed'));
+  navigator.serviceWorker.register('./sw.js').catch(() => {});
   askShellVersion();
+  // A TAPPED NOTIFICATION FROM JARVIS lands on Jarvis (sw.js posts this to an open window,
+  // or opens one on #jarvis). Opened after the unlock, never instead of it.
+  navigator.serviceWorker.addEventListener('message', (ev) => {
+    if (ev && ev.data && ev.data.open === 'jarvis') { S.wantJarvis = true; if (!S.locked) refresh(); }
+  });
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    api.diag('cc', 'had' + (hadController ? 1 : 0), 'tok' + (api.haveToken() ? 1 : 0),
-         'lock' + (S.locked ? 1 : 0));
     if (!hadController) { hadController = true; return; }
     swReloadPending = true;
     takeNewClientIfIdle();
   });
 }
-// ── the navigation nothing of ours admits to ──────────────────────────────
-// A launch logged `load`, then a second `load` seven seconds later with no cc, no swap and
-// no lock line before it — so something navigated that none of our reload paths issued,
-// and it landed while the first Face ID sheet was open. Guessing at it is what the last two
-// rounds cost, so the page reports its own lifecycle instead:
-//
-//   pagehide p1  the page went into the back/forward cache (a restore is coming)
-//   pagehide p0  the page is being torn down — a REAL navigation
-//   pageshow p1  restored from bfcache, which fetches no shell and would explain a
-//                `load` with no requests behind it
-//   pageshow p0  a fresh document
-//   unload       the last thing a document ever does
-//
-// Paired with auth/start above, the order settles it: a pagehide between `auth/start` and
-// the assert means the WebAuthn sheet is what tore the document down.
-addEventListener('pageshow', e => api.diag('pageshow', 'p' + (e && e.persisted ? 1 : 0)));
-addEventListener('pagehide', e => api.diag('pagehide', 'p' + (e && e.persisted ? 1 : 0)));
-addEventListener('unload', () => api.diag('unload'));
-
+if (location.hash === '#jarvis') {
+  S.wantJarvis = true;
+  try { history.replaceState(history.state, '', location.pathname + location.search); } catch {}
+}
 markStandalone();
 addEventListener('orientationchange', markStandalone);
 addEventListener('resize', markStandalone);
 render();
-// One measurement, after layout has settled — early enough to be in the same log burst as
-// the launch, late enough that the shell has been sized.
-setTimeout(reportGeometry, 1200);
 // Paint first, ask second. The lock screen above is drawn against the 'probing' mode —
 // the ship, and one line saying which origin is being asked — so this only ever fills in
 // the answer. Waiting for the probe before the first paint would put a blank page in
 // front of a cold open, which is the thing the service worker exists to prevent.
 api.ready().then(() => render());
+// THEN TRY THE SESSION WE ALREADY HAVE, before anyone is asked for a face. A relaunch inside
+// the idle window — iOS evicting the app in the background is the common one — comes back
+// on the stored token (pk.resume). Its 401 clears it and leaves the lock screen up, which is
+// where Face ID lives. Guarded on S.locked so a fast tap on "unlock" is never undone.
+pk.resume().then((r) => {
+  if (r === 'ok' && S.locked) { S.locked = false; render(); refresh(); }
+}).catch(() => {});
 
 // Polling, not a socket: `fleet-grid.mjs --plain` answers the busiest fleet in 0.39s
 // (§2), so a 5s poll is well inside what the daemon can serve and needs no new

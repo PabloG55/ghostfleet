@@ -852,6 +852,67 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 }
 .chat .bub .md-code code { background: none; border: 0; padding: 0; font-size: .88em; }
 .chat .bub a { color: var(--cyan); }
+/* ── a table: its real shape, its own scroller, its labels pinned ──────────────
+ * The same rule as .md-code above, and for the same reason: a table is as wide as its
+ * widest row, and squeezed into a 390pt bubble it either pushes the page sideways or —
+ * with the bubble's `overflow-wrap: anywhere` inherited — folds every cell to one letter
+ * a line. So the BOX scrolls (a <table> cannot be its own scroll container) and the table
+ * inside it is laid out at its NATURAL width, `max-content`, never fitted to the box.
+ *   Fitting was tried first and it is the wrong knob in both directions: auto layout
+ * squeezes every column toward its min-content, so `429-seconds` folded to `429-` /
+ * `seconds`, and a min-width floor big enough to stop that made a column holding "429"
+ * as wide as one holding a sentence. Natural width keeps short columns short.
+ *   What stops natural width from being a 1500px prose column is .md-cell, the block md.js
+ * puts in every cell: a cell ignores max-width, a block inside it does not, so a column is
+ * its content's width up to 16em and wraps beyond that. `break-word` wraps a long word only
+ * when it must, and a LINK may break anywhere, because a URL is one 70-character word. */
+.chat .bub .md-table {
+  margin: 0; min-width: 0; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--hair); border-radius: 8px;
+}
+.chat .bub .md-table table {
+  width: max-content; border-collapse: separate; border-spacing: 0;
+  font-size: .9em; line-height: 1.4;
+}
+.chat .bub .md-table th, .chat .bub .md-table td {
+  padding: .4em .65em; text-align: left; vertical-align: top;
+  white-space: normal; border-bottom: 1px solid var(--hair);
+}
+.chat .bub .md-table .md-cell { max-width: min(16em, 32vw); overflow-wrap: break-word; word-break: normal; }
+.chat .bub .md-table tr > * + * { border-left: 1px solid var(--hair); }
+.chat .bub .md-table tbody tr:last-child > * { border-bottom: 0; }
+.chat .bub .md-table th { font-weight: 700; color: var(--white); background: #1c2128; }
+.chat .bub .md-table td a { overflow-wrap: anywhere; }
+/* A NARROW TABLE FITS (md.js FIT_COLS). Auto layout, so its columns share the bubble and
+ * the prose wraps at word boundaries — and its code spans do NOT wrap, which is what keeps
+ * min-content honest: `429-seconds` is one unbreakable unit, never `429-` over `seconds`. */
+.chat .bub .md-table.fit table { width: auto; }
+.chat .bub .md-table.fit code { white-space: nowrap; }
+/* Uncapped here, because the table is fitted to the box anyway; and a nowrap code span in a
+ * capped block would paint past its own cell into the next one. */
+.chat .bub .md-table.fit .md-cell { max-width: none; }
+.chat .bub .md-table .a-right { text-align: right; }
+.chat .bub .md-table .a-center { text-align: center; }
+/* THE FIRST COLUMN STAYS. Sticky inside the box that scrolls, so a row's label is on
+ * screen next to the numbers it labels however far right you are. `separate` borders
+ * above, not `collapse`: WebKit paints a collapsed border on the table rather than on the
+ * cell, so a sticky cell slides over its own edge and loses it. And an opaque background,
+ * the bubble's own, or the cells scrolling underneath show through. */
+.chat .bub .md-table th:first-child, .chat .bub .md-table td:first-child {
+  position: sticky; left: 0; z-index: 1; background: #14181d;
+  box-shadow: 1px 0 0 var(--hair);
+}
+.chat .bub .md-table th:first-child { background: #1c2128; z-index: 2; }
+/* ...and narrower than the rest. A pinned column never scrolls away, so every em it takes
+ * is an em the other columns cannot use — at 16em it would be most of a phone's bubble. */
+.chat .bub .md-table tr > :first-child .md-cell { max-width: min(9em, 24vw); }
+/* THE TWO CAPS ARE ONE BUDGET, in vw because the bubble is a fraction of the viewport. The
+ * pinned column plus ANY one other column has to fit in the box together, or scrolling to
+ * the end slides that column's start — its header with it — under the pinned one. Measured
+ * at 390: with 9em and 16em the pinned column was 148px, the last column 250px and the box
+ * 278px, and "Why" sat 29px from the box's edge, behind "Case". 24vw + 32vw plus their
+ * padding comes to 56% of the viewport; the bubble's box is about 71%. */
 /* A TOAST CANNOT OVERLAP THE CHAT, BY CONSTRUCTION. It used to be
  * `position: fixed; bottom: …; z-index: 20` — and on the session screen the composer is
  * also at the bottom, so the toast landed on top of the input and the newest message.
@@ -894,10 +955,9 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * not, so both were drawn in body grey next to everything else. */
 .lock .warn { color: var(--yellow); }
 
-/* The per-message play control (turn()). It lives in the .meta row of the bubble you
- * tapped, so there is one on screen at most — see the comment on turn() for why that is
- * the whole point. Sized off the meta text rather than the button scale: this sits beside
- * a timestamp, not in the verb bar. */
+/* The per-message play control (turn()), on every message's .meta row. Sized off the
+ * meta text rather than the button scale: this sits beside a timestamp, not in the verb
+ * bar. */
 .chat .meta { display: flex; align-items: center; gap: .5em; }
 .chat .meta .speak.tiny { padding: 0 .45em; min-height: 0; line-height: 1.5; font-size: 1em; }
 /* The icon is sized in em so it is the button's size, and the SAME size in both states —
@@ -906,7 +966,20 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
    negative baseline shift keeps the button's box the height line-height already gave it,
    so swapping the emoji for this moves nothing else in the meta row. */
 .chat .meta .speak.tiny svg { width: 1.15em; height: 1.15em; vertical-align: -.22em; }
-.chat .bub.tappable { cursor: pointer; }
+/* The copy button sits in the same row and at the same scale as the speaker — a dim mark
+ * next to the timestamp rather than a button in the verb bar. Borderless until it has
+ * something to say, so a column of bubbles is not a column of boxes; "copied" is green for
+ * the 1.5s it is up, which is the app's word for "that worked" (.toast.good). */
+.chat .meta .copy.tiny {
+  padding: 0 .3em; min-height: 0; line-height: 1.5; font-size: 1em;
+  color: var(--dim); background: none; border-color: transparent;
+  display: inline-flex; align-items: center; gap: .3em;
+}
+.chat .meta .copy.tiny svg { width: 1.15em; height: 1.15em; }
+.chat .meta .copy.tiny.done { color: var(--green); }
+/* Speak mode's toggle in the session's top bar: the same speaker, lit yellow while on
+ * (.speak.on), at the bar's button scale. */
+.sbar .speak.automode svg { width: 1.15em; height: 1.15em; vertical-align: -.22em; }
 
 /* ── motion is optional, always ────────────────────────────────────────────
  * Everything this redesign added that moves is gated here, in one place, rather than each
@@ -915,6 +988,47 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * snapping is motion too: `scroll-behavior` and the snap easing both go, and the list
  * keeps working — proximity snapping degrades to ordinary scrolling, which is the point of
  * choosing proximity over mandatory. */
+/* ── Jarvis (docs/jarvis.md) ────────────────────────────────────────────────
+ * NO NEW COLOURS: every rule below is one of the tokens at the top of this file, which
+ * are the TUI's own and locked. Cyan is the fleet's "go" colour and marks the way in;
+ * yellow is the colour this client already uses for "wants you"; green for a live mic.
+ *   Bands of the shell column, so they are sized to their content and never scroll —
+ * the card list and the chat under them are what scrolls. */
+#app.shell > .jarvis-bar, #app.shell > .notify-bar,
+#app.shell > .ask, #app.shell > .talkband { flex: 0 0 auto; }
+.jarvis-bar { display: flex; align-items: baseline; gap: .6em; width: 100%; text-align: left;
+  margin: 4px 0 6px; padding: .55em .7em; background: transparent; border: 1px solid var(--cyan);
+  border-radius: 6px; font-size: 14px; }
+.jarvis-bar .jt { color: var(--cyan); font-weight: 700; flex: 0 0 auto; }
+.jarvis-bar .js { color: var(--dim); flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.jarvis-bar .jgo { color: var(--cyan); flex: 0 0 auto; }
+.jarvis-bar.hot { border-color: var(--yellow); }
+.jarvis-bar.hot .js { color: var(--yellow); }
+.jarvis-bar.dim { border-color: var(--hair); }
+.jarvis-bar.dim .jt, .jarvis-bar.dim .jgo { color: var(--dim); }
+/* The push offer and a proposal are the same shape: a sentence and one or two answers. The
+ * buttons are pinned to 14px like the composer's, for the composer's reason. */
+.notify-bar, .ask { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 4px 0; padding: .5em .6em; border: 1px solid var(--yellow); border-radius: 6px; font-size: 14px; }
+.notify-bar .nt, .ask .t { flex: 1 1 12em; min-width: 0; color: var(--fg); }
+.notify-bar button, .ask button { font-size: 14px; flex: 0 0 auto; }
+.ask .id { color: var(--dim); font-size: 12px; flex: 0 0 auto; }
+.talkband { display: flex; flex-direction: column; gap: 2px; padding: .35em .2em; font-size: 13px; }
+.talkband .ph { color: var(--fg); }
+.talkband .ph.listening { color: var(--green); }
+.talkband .note { color: var(--dim); font-size: 12px; }
+.composer button.talk.on { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: 700; }
+.hint.jarvis-none p { margin: .4em 0; }
+/* Jarvis is an experimental feature, and its screen says so beside its name. */
+.sbar .who .nm .tag-exp { margin-left: .5em; padding: 0 .35em; border: 1px solid var(--yellow); border-radius: 4px;
+  color: var(--yellow); font-size: 11px; font-weight: 400; vertical-align: middle; }
+/* A [fleet] wake in Jarvis's transcript: the fleet talking, not the owner, so not a bubble. */
+.chat .sysline { display: flex; gap: .5em; align-items: baseline; margin: .5em .2em; font-size: 12px; color: var(--dim); }
+.chat .sysline .who { color: var(--yellow); flex: 0 0 auto; }
+.chat .sysline .t { flex: 1 1 auto; min-width: 0; }
+.chat .sysline .at { flex: 0 0 auto; }
+
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .001ms !important; animation-iteration-count: 1 !important;
       transition-duration: .001ms !important; scroll-behavior: auto !important; }

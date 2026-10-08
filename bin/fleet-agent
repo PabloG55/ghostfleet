@@ -29,6 +29,8 @@
 #               dialects and the pre-adapter code already had both; they must always
 #               express the SAME signal.
 #   blocked_re  ERE matching "stopped, waiting on a human" in the pane. Empty = none.
+#   blocked_re_js  the same signal as a JavaScript regex, for fleet-grid.mjs. Declared only
+#               by an agent with no hooks (codex): one with hooks pushes need-you itself.
 #   ready_re    ERE matching "the input box exists, a prompt will land" — fleet-spawn
 #               waits for this before dispatching an initial prompt.
 #   review      the subcommand that runs a NON-INTERACTIVE code review, or EMPTY when
@@ -86,6 +88,20 @@ DEFAULT_AGENT=claude
 # exactly as long as that lasted. The one field still short of the others is
 # blocked_re, which covers the trust dialog but not command approval; the fleet
 # bypasses approvals, so that prompt has never been observed to capture.
+# The Unicode braille block, U+2800..U+28FF, as an ERE alternation of its 256 literal
+# characters. A bracket range cannot say it in both locales: in C, "[⠀-⣿]" is a set of
+# BYTES, 0x80..0xE2 among them, which covers every byte of "✓" (E2 9C 93) too. A literal
+# alternation is the same string to a byte matcher and a character matcher. Octal escapes
+# because /bin/bash 3.2 has no \u.
+braille_ere() {
+  local m l out=""
+  for m in 240 241 242 243; do for l in 0 1 2 3 4 5 6 7; do
+    out="$out|\\342\\$m\\2${l}0|\\342\\$m\\2${l}1|\\342\\$m\\2${l}2|\\342\\$m\\2${l}3"
+    out="$out|\\342\\$m\\2${l}4|\\342\\$m\\2${l}5|\\342\\$m\\2${l}6|\\342\\$m\\2${l}7"
+  done; done
+  # shellcheck disable=SC2059   # the format IS the payload: printf expands the escapes
+  printf "(${out#|})"
+}
 agent_field() {
   local a="$1" f="$2"
   case "$a" in
@@ -267,7 +283,20 @@ agent_field() {
         # fleet worker actually hits (every fresh worktree), but codex's command
         # approval prompts were not observed, because the fleet runs with approvals
         # bypassed. Do not read a non-match as "definitely not blocked".
-        blocked_re) printf '%s' 'Do you trust the contents of this directory' ;;
+        #   REWRITTEN FOR codex-cli 0.160.1, measured 2026-10-07. The old dialog's sentence is
+        # gone: it is now "Trust this folder? …" over "› 1. Trust and continue". And there is a
+        # second dialog a session can stop on before its composer ever draws — "Background
+        # server has incompatible feature settings", over "1. Run without daemon this time".
+        # Both are keyed to their FIRST OPTION LINE, not their prose: a numbered option alone
+        # on its line, behind the selector or the two-space indent, survives a 30-column pane
+        # (the prose wraps and is truncated there), and it is not how codex draws a reply.
+        # Captured at 30, 56 and 120 columns; idle and working panes at 30 and 160 do not
+        # match. The old sentence stays for the builds that still print it.
+        #   READ BY THE GRID AS need-you (blocked_re_js), because codex has no hooks to say so
+        # itself: a codex session stopped on either dialog looked READY, and a switch onto it
+        # rolled it back as "failed to start".
+        blocked_re) printf '%s' 'Do you trust the contents of this directory|^(›| ) 1\. Trust and continue *$|^(›| ) 1\. Run without daemon this( time)? *$' ;;
+        blocked_re_js) printf '%s' 'Do you trust the contents of this directory|^(?:›| ) 1\. Trust and continue *$|^(?:›| ) 1\. Run without daemon this(?: time)? *$' ;;
         # The composer footer ("gpt-5.5 medium · ~/work/repo"). Deliberately NOT the
         # "›" input marker: that also renders on the trust dialog's menu, and a false
         # ready would make fleet-spawn fire its prompt into that dialog and lose it.
@@ -277,7 +306,14 @@ agent_field() {
         # "· /" and passed its test only because the test worktree sat in /private/tmp;
         # every REAL worktree lives under $HOME, so it never matched in practice and
         # fleet-spawn silently fell back to its timed send.
-        ready_re)   printf '%s' '· [~/]' ;;
+        #   AND A SECOND SHAPE, because the first one went away. Measured 2026-10-07 on
+        # codex-cli 0.160.1: the footer is now "<branch> · <model> · Context 0% used · 5h …"
+        # and the path is drawn only in the header, with no "· " in front of it — so "· [~/]"
+        # matched NOTHING and an agent switch that waits for this read a working codex as one
+        # that never started, and rolled it back. "Context N% used" is on the footer while the
+        # composer is up (idle and mid-turn alike, which is what "a prompt will land" means),
+        # survives a 56-column pane, and is not drawn on the new trust dialog.
+        ready_re)   printf '%s' '· [~/]|· Context [0-9]+% used' ;;
         # THE ONE AGENT THAT HAS THIS. `codex review` is a documented non-interactive
         # subcommand and takes the selector itself (--base BRANCH, --uncommitted,
         # --commit SHA) plus custom instructions as a positional, so fleet-review passes
@@ -321,10 +357,150 @@ agent_field() {
         verified)   printf 'yes' ;;
         *) return 1 ;;
       esac ;;
+    agy)
+      # Google's Antigravity CLI, measured 2026-10-01 against agy 1.2.14, signed in, in
+      # tmux panes at 30, 40, 56, 80, 120, 140 and 200 columns. Its configuration root is
+      # ~/.gemini/config/, and that one directory holds all three things the fleet installs:
+      # hooks.json, mcp_config.json and skills/<name>/SKILL.md.
+      case "$f" in
+        bin)        printf 'agy' ;;
+        launcher)   printf 'agy-here' ;;
+        # THE SPINNER, NOT THE FOOTER. The obvious signal is the footer, which reads
+        # "esc to cancel" while a turn runs and "? for shortcuts" when idle — and it stays
+        # "esc to cancel" WHILE A PERMISSION DIALOG IS UP, so a footer regex would paint a
+        # worker that is waiting on a human as working. The spinner line is the one thing
+        # present in every working frame and absent from the dialog: one of eight braille
+        # frames AT COLUMN 0, then exactly two spaces, then the phase ("Generating...",
+        # "Running command...", or a line of the model's own thinking). Measured: every
+        # working frame at every width carried it (366 frames, all eight glyphs, always two
+        # spaces), no idle frame and no dialog frame did.
+        #   COLUMN 0 is the prose guard. agy indents its own output by two ("  The task
+        # requires…"), so a model writing about a spinner cannot put one at the margin. A
+        # narrow pane does wrap some lines to column 0 ("expand)" at 40 columns), but a
+        # wrap would have to land a braille glyph and two spaces exactly there.
+        #   Alternation rather than a [⣾…] class, so a C-locale grep does not read the
+        # class as bytes.
+        busy_re)    printf '%s' '^(⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)  ' ;;
+        busy_re_js) printf '%s' '^(?:⣾|⣽|⣻|⢿|⡿|⣟|⣯|⣷)  ' ;;
+        # The two dialogs a worker can stop on. The tool prompt ("Requesting permission
+        # for: / touch notes.txt / Run this command?") only appears with CLAUDE_FLEET_YOLO=0,
+        # and the folder-trust one is pre-answered by agy-here under yolo — so either one on
+        # a pane means a human really is needed.
+        blocked_re) printf '%s' 'Requesting permission for:|Do you trust the contents of this project' ;;
+        # The idle footer, at every width measured. NOT the "> " composer line, which is
+        # also drawn under the trust dialog's menu ("> Yes, I trust this folder") — a false
+        # ready would fire fleet-spawn's prompt into that dialog.
+        ready_re)   printf '%s' '^\? for shortcuts' ;;
+        # EMPTY: -p/--print is a oneshot prompt, not a review — same as claude's.
+        review)     printf '' ;;
+        # hooks/agy-fleet-event.sh, registered in ~/.gemini/config/hooks.json: Stop -> done,
+        # the first PreInvocation of a turn -> working. agy has no permission-asked event, so
+        # a tool prompt is seen only on the pane — through blocked_re above.
+        hooks)      printf 'yes' ;;
+        mcp)        printf 'yes' ;;   # ~/.gemini/config/mcp_config.json
+        # The one non-claude agent that also gets the INSTRUCTIONS: agy discovers skills from
+        # ~/.gemini/config/skills/<name>/SKILL.md, which is where install.sh links it.
+        skill)      printf 'yes' ;;
+        # YES, measured by CALLING it, the way opencode's was: with the server registered in
+        # mcp_config.json and CLAUDE_FLEET_SOCK exported, `agy -p` called fleet_list with NO
+        # arguments and got the live fleet back, the calling session marked "(you)". So agy
+        # hands its MCP children its own environment — unlike codex.
+        mcp_self)   printf 'yes' ;;
+        budget)     printf 'no'  ;;   # the footer carries the model, not a usage figure
+        resume)     printf 'yes' ;;   # -c is cwd-scoped and survives a pane kill (agy-here)
+        verified)   printf 'yes' ;;
+        *) return 1 ;;
+      esac ;;
+    cursor)
+      # Cursor's CLI, measured 2026-10-06 against cursor-agent 2026.10.01-e373342, signed in,
+      # in tmux panes at 30, 40, 56, 80, 120, 140 and 200 columns. It also installs itself as
+      # `agent`, a name generic enough to be something else on PATH, so the fleet only ever
+      # runs `cursor-agent`. Its configuration root is ~/.cursor/: hooks.json, mcp.json and
+      # skills/<name>/SKILL.md, the same three things agy keeps under ~/.gemini/config/.
+      case "$f" in
+        bin)        printf 'cursor-agent' ;;
+        launcher)   printf 'cursor-here' ;;
+        # THE SPINNER LINE, AT COLUMN 1. A turn draws " ⠰⠰ Working" (or "Running" while a
+        # command runs) directly above the composer: one space, a TWO-CELL braille spinner, a
+        # space, the phase. Eight spinner frames were captured (⠀⠞ ⠰⠰ ⠘⠆ ⠰⠳ ⠠⠜ ⠘⠤ ⠠⠛ ⠘⠣), so
+        # the glyphs are matched as the whole braille block rather than spelled frame by
+        # frame. Across 333 frames at 30, 40, 56, 80, 120, 140 and 200 columns that shape
+        # matched all 129 working frames and none of the 172 idle ones or the 32 taken while
+        # the permission dialog waited — nor the trust dialog, nor the pane a failed turn left.
+        #   BRAILLE, NOT "ANY GLYPH". This first read the spinner as a run of anything but
+        # letters, digits and blanks, and signing in leaves " ✓ Login successful!" on screen
+        # above the fresh composer — the same column, the same single space, a glyph and a
+        # capitalised word. Busy outranks ready, so a worker sitting idle at its first prompt
+        # read working for as long as that line stayed up. None of the idle frames above had
+        # been taken straight after a login.
+        #   NOT THE COMPOSER'S "ctrl+c to stop", the other busy signal: it arrives a frame after
+        # the spinner when a turn starts (4 working frames had the spinner and not the hint,
+        # none the other way round). Neither one is drawn while a permission dialog waits, so
+        # cursor does not have agy's footer trap — the dialog fixtures assert it.
+        #   COLUMN 1 IS THE PROSE GUARD. cursor indents everything it prints by two ("  hi",
+        # "  $ sleep 4", the user's own prompt), so model output cannot start a line at column
+        # 1. What else is drawn there belongs to the dialog — " $  touch …" (two spaces after
+        # the "$"), " Run this command?", and the box Escape draws round the command — and none
+        # of it is a glyph run, one space and a capitalised word.
+        #   A LESSON IN WHAT A STILL FRAME HIDES: the first captures were taken while resizing
+        # the pane every quarter second, and every one of them froze on ⠀⠞ — so the first
+        # version of this regex spelled out U+2800 as the spinner's first cell. A turn left to
+        # run at one width animated, missed 21 of its 25 working frames, and the grid called
+        # the worker ready three seconds before it finished.
+        busy_re)    printf '^ %s+ [A-Z][a-z]+' "$(braille_ere)" ;;
+        busy_re_js) printf '%s' '^ [\u2800-\u28FF]+ [A-Z][a-z]+' ;;
+        # The two dialogs a worker can stop on, and neither is shown under yolo: cursor-here
+        # passes --force (no command approval) and --trust (no folder trust). Both keyed to the
+        # LIVE dialog rather than its title. The trust box stays on screen after it is
+        # answered, with "⏳ Trusting workspace..." where the selector was, so the title would
+        # read a session that is already working as blocked; "▶ [a] Trust this" is the
+        # selector and goes away. "Run this command?" is drawn at column 1, where model prose
+        # cannot be (see busy_re), and it fits one line at 30 columns.
+        #   AND THE STEP AFTER ESCAPE. Escape on that dialog does not decline it: it opens
+        # "→ Tell the agent what to do instead (Enter to send, empty to skip, Esc to cancel)",
+        # which still waits on a human — with "ctrl+c to stop" on the line, the turn still
+        # open, and neither the dialog's words nor the idle placeholder anywhere on the pane.
+        # Measured on a live worker; a second Escape goes BACK to the dialog.
+        blocked_re) printf '%s' '^ Run this command\?|▶ \[a\] Trust this|^  → Tell the agent what' ;;
+        # The composer's placeholder ALONE ON ITS LINE: "→ Plan, search, build anything" in a
+        # fresh chat, "→ Add a follow-up" after a turn. The same placeholder is drawn WHILE a
+        # turn runs, with "ctrl+c to stop" after it on the same line, so the line has to end
+        # where the placeholder does. Its tail is optional because a narrow pane wraps it
+        # ("→ Add a" / "follow-" / "up" at 30 columns). NOT a bare "→": the permission dialog
+        # draws its selected option with the same arrow ("→ Run (once) (y)").
+        ready_re)   printf '%s' '^  → (Plan, search, build( anything)?|Add a( follow-up)?) *$' ;;
+        # EMPTY: -p/--print is a oneshot prompt, and cursor's /review is a built-in skill run
+        # inside the TUI — neither is a non-interactive review.
+        review)     printf '' ;;
+        # hooks/cursor-fleet-event.sh, registered in ~/.cursor/hooks.json: beforeSubmitPrompt ->
+        # working, stop -> done (or need-you when the turn ended on an error). cursor has no
+        # permission-asked event: beforeShellExecution fires BEFORE its own approval check, the
+        # same for an allowed command as for one it is about to ask about, so a tool prompt is
+        # seen only on the pane — through blocked_re above.
+        hooks)      printf 'yes' ;;
+        mcp)        printf 'yes' ;;   # ~/.cursor/mcp.json
+        # ~/.cursor/skills/<name>/SKILL.md is cursor's personal-skill root, which is where
+        # install.sh links it.
+        skill)      printf 'yes' ;;
+        # NO — codex's answer, measured the same way, by CALLING it rather than by reading
+        # `cursor-agent mcp list`. A real worker in a scratch fleet (CLAUDE_FLEET_SOCK, $TMUX,
+        # CLAUDE_FLEET_PROJECTS all in its environment, and all reaching its hooks) called
+        # fleet_list with no arguments and the server answered `fleet-list: no socket (run
+        # inside a fleet session, or pass -s <socket>)`. Naming the project then resolved it
+        # from the DEFAULT projects file, not the scratch one the session had exported — so the
+        # server gets none of the session's environment, not merely a missing variable.
+        mcp_self)   printf 'no'  ;;
+        # "Auto · 7.4%" climbed with the conversation (to 8.2% a dozen turns on): context, not
+        # an account's usage window.
+        budget)     printf 'no'  ;;
+        resume)     printf 'yes' ;;   # --resume <id> survives a pane kill (cursor-here)
+        verified)   printf 'yes' ;;
+        *) return 1 ;;
+      esac ;;
     *) return 1 ;;
   esac
 }
-KNOWN_AGENTS="claude opencode codex"
+KNOWN_AGENTS="claude opencode codex agy cursor"
 
 is_agent() { case " $KNOWN_AGENTS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
@@ -390,10 +566,15 @@ set -- ${ARGS[@]+"${ARGS[@]}"}
 
 case "$cmd" in
   list)      printf '%s\n' $KNOWN_AGENTS ;;
+  # EXIT 0 WHATEVER IS MISSING. Written as `command -v … && printf` in the loop, the status
+  # was the LAST agent's: absent, and the whole command exited 1. fleet-grid treats a failed
+  # run as "no adapter here" and falls back to claude alone, so the moment a fourth agent was
+  # appended to the list, every machine without it lost the other two from both pickers.
   installed)
     for a in $KNOWN_AGENTS; do
-      command -v "$(agent_field "$a" bin)" >/dev/null 2>&1 && printf '%s\n' "$a"
-    done ;;
+      if command -v "$(agent_field "$a" bin)" >/dev/null 2>&1; then printf '%s\n' "$a"; fi
+    done
+    exit 0 ;;
   # WHAT A UI HAS TO WARN ABOUT, in one place because there are now three UIs that must
   # say the same thing (the phone's add-project sheet, the phone's project settings, and
   # the TUI's `,` page). COMPOSED from the capability fields rather than written out per

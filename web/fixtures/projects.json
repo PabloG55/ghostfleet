@@ -1,14 +1,14 @@
 {
-  "home": "/Users/pgarces",
+  "home": "/Users/you",
   "projects": [
     {
       "name": "acme-api",
       "profile": "work",
-      "path": "/Users/pgarces/gf-demo/acme-api",
+      "path": "/Users/you/gf-demo/acme-api",
       "agent": null,
       "socket": "cf-acme-api",
       "sessions": {
-        "need": 0,
+        "need": 1,
         "working": 2,
         "parked": 0,
         "total": 7
@@ -20,7 +20,7 @@
     {
       "name": "acme-web",
       "profile": "work",
-      "path": "/Users/pgarces/gf-demo/acme-web",
+      "path": "/Users/you/gf-demo/acme-web",
       "agent": null,
       "socket": "cf-acme-web",
       "sessions": {
@@ -38,7 +38,7 @@
     {
       "name": "toolbox",
       "profile": "work",
-      "path": "/Users/pgarces/gf-demo/toolbox",
+      "path": "/Users/you/gf-demo/toolbox",
       "agent": "codex",
       "socket": "cf-toolbox",
       "sessions": {
@@ -54,7 +54,7 @@
     {
       "name": "billing-svc",
       "profile": "work",
-      "path": "/Users/pgarces/gf-demo/billing-svc",
+      "path": "/Users/you/gf-demo/billing-svc",
       "agent": null,
       "socket": "cf-billing-svc",
       "sessions": {
@@ -70,7 +70,7 @@
     {
       "name": "scratch",
       "profile": "personal",
-      "path": "/Users/pgarces/gf-demo/scratch",
+      "path": "/Users/you/gf-demo/scratch",
       "agent": null,
       "socket": "cf-personal-scratch",
       "sessions": {
@@ -97,5 +97,6 @@
       "name": "codex",
       "caveat": "no fleet events: status is guessed from its pane, and a question it asks may never reach the inbox. no fleet_* tools: it cannot spawn or answer siblings from a tool call, only by running fleet-* in its own shell. no resume: recycling its pane loses the conversation"
     }
-  ]
+  ],
+  "jarvis_enabled": true
 }

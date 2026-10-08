@@ -1,0 +1,24 @@
+  Run the shell command: sleep 8; echo ok. Then reply with one short
+  sentence saying what it printed.
+
+
+  $ sleep 8; echo ok 8.2s
+    ok
+
+  It printed ok.
+
+
+  Run the shell command: sleep 10; echo ok. Then reply with one short
+  sentence saying what it printed.
+
+
+ ⠀⠞ Working  77 tokens
+
+
+  → Add a follow-up
+
+
+  Auto · 7.7%                                                   Run Everything
+  ~/.cache/cf-cursor-scratch/vproj/w1 · w1
+
+

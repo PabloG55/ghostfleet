@@ -43,6 +43,11 @@ import path from 'node:path';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { callToolAsync, projects, BIN, TOOLS } from '../mcp/fleet-dispatch.mjs';
+import { promptSummary } from '../lib/permission-dialog.mjs';
+import { fleetDirs as scanDirs, scanStatus } from '../lib/fleet-scan.mjs';
+import * as jarvis from '../lib/jarvis.mjs';
+import * as speech from '../lib/speech.mjs';
+import { jarvisState, vocabulary } from './fleet-jarvis.mjs';
 
 const HOME = os.homedir();
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -51,6 +56,9 @@ const TMUX_CONF = path.join(REPO, 'tmux', 'cf.tmux.conf');
 const WEB = path.join(REPO, 'web');                       // the PWA, when it lands
 const CFG_HOME = path.join(HOME, '.config', 'ghostfleet');
 const CONFIG = process.env.GHOSTFLEET_SERVE_CONFIG || path.join(CFG_HOME, 'serve.json');
+// Beside serve.json, never inside it: the config is rewritten by `enroll` and `revoke` from
+// another process, and a file both processes write is a file one of them clobbers.
+const SESSIONS = path.join(path.dirname(CONFIG), 'serve-sessions.json');
 const AUDIT = process.env.GHOSTFLEET_SERVE_AUDIT || path.join(CFG_HOME, 'serve-audit.jsonl');
 const VERSION = '1.0.0';
 
@@ -83,6 +91,8 @@ const PUSH_DEFAULTS = {
   detail: 'named',        // 'named' = project/session on the lock screen · 'anonymous' = count only
   debounce: 30,           // leading-edge, seconds — the master nudge's window and its reasoning
   quiet_after_poll: 30,   // a client that polled this recently is being LOOKED AT: send nothing
+  at_mac_idle: 120,       // input this recent on an unlocked Mac = he is AT the Mac: hold; 0 = off
+  at_mac_hold: 600,       // how long a held push may wait for him to leave before it is dropped
   scan: 3,                // seconds between fleet-dir scans; only runs when something is subscribed
   ttl: 900,               // how long the push service may hold it for a phone that is off
   max_per_client: 4,      // one phone, one PWA install, some slack — not a growth surface
@@ -92,7 +102,7 @@ const PUSH_DEFAULTS = {
 
 const DEFAULTS = {
   bind: '', port: 8787, rp_id: '', origins: [], tls: null,
-  session_ttl: 900,          // §5: the assertion mints a SHORT-lived token (~15 min)
+  session_ttl: 900,          // §5: an IDLE window — every authenticated request pushes it out
   confirm_ttl: 120,          // a destructive action confirmed now, not twenty minutes ago
   enroll_ttl: 900,
   rate: { window: 60, read: 240, write: 30, auth: 10 },
@@ -438,9 +448,11 @@ function checkClientData(raw, c, expectType) {
 }
 
 // ── live state: challenges, sessions, force gates, rate limits ────────────────
-// All in memory, all short-lived, and all gone on restart — which is the correct
-// behaviour: a restarted daemon should ask for Face ID again, not honour a token minted
-// by the process that died.
+// All in memory and all short-lived. SESSIONS ALONE OUTLIVE A RESTART (persistSessions
+// below): every deploy restarts this daemon, and "every deploy logs the phone out" was a
+// Face ID prompt per deploy for nothing — the token was no less the owner's for the
+// process having been replaced. Challenges, gates and buckets are seconds-long and lose
+// nothing by being forgotten.
 const challenges = new Map();   // challenge string -> { exp }
 const sessions = new Map();     // sha(token) -> { client, exp, born, purpose }
 const declined = new Map();     // "<key>" -> exp: a removal the gates refused, once
@@ -449,7 +461,7 @@ const buckets = new Map();      // "<name>:<key>" -> { n, resetAt }
 function sweep() {
   const t = now();
   for (const [k, v] of challenges) if (v.exp <= t) challenges.delete(k);
-  for (const [k, v] of sessions) if (v.exp <= t) sessions.delete(k);
+  for (const [k, v] of sessions) if (v.exp <= t || !sessionClientLive(v)) { sessions.delete(k); sessionsDirty(); }
   for (const [k, v] of declined) if (v <= t) declined.delete(k);
   for (const [k, v] of buckets) if (v.resetAt <= t) buckets.delete(k);
 }
@@ -492,26 +504,110 @@ function takeChallenge(ch) {
 // docs/mobile.md §5 describes two — a bearer token identifying the enrolled client, and
 // a short-lived session token the assertion mints — and web/api.js sends one
 // `Authorization: Bearer`. They are reconciled rather than reduced: this token is the
-// session token, it is bound to one enrolled credential, it expires in ~15 minutes, and
-// nothing hands one out without a verified signature. So the property §5 actually
-// insists on holds exactly — "the API rejects any request without a live one", and
-// `curl` cannot walk past the lock because there is no long-lived secret to walk past
-// with. The device identity §5 wants revocable is the enrolled CREDENTIAL, and
-// `fleet-serve revoke <id>` is the one action that drops it and every token it minted.
+// session token, it is bound to one enrolled credential, it dies after session_ttl
+// (15 minutes) WITHOUT A REQUEST, and nothing hands one out without a verified signature.
+// So the property §5 actually insists on holds exactly — "the API rejects any request
+// without a live one", and `curl` cannot walk past the lock because there is no long-lived
+// secret to walk past with. The device identity §5 wants revocable is the enrolled
+// CREDENTIAL, and `fleet-serve revoke <id>` is the one action that drops it and every
+// token it minted, persisted ones included.
+//
+// AN IDLE WINDOW, NOT A FIXED ONE. The expiry used to be fifteen minutes from Face ID and
+// nothing moved it, so the owner was locked out mid-use a quarter of an hour after every
+// unlock — serve.log shows it as a 401 on /api/grid right after a stretch of 200s. Now
+// every authenticated request (the visible app's own polls included) pushes exp to
+// now + ttl. What that costs is bounded the same way: a stolen token is good until it has
+// gone unused for fifteen minutes, which a thief using it never lets happen — and that is
+// exactly why revocation is immediate and does not wait for the window. There is no
+// absolute cap, by decision: an app in use should never ask for a face mid-sentence.
 function mintSession(clientId, purpose = 'open') {
   const c = loadConfig(), tok = rand(32), ttl = c.session_ttl || 900;
   sessions.set(sha256(tok), { client: clientId, born: now(), exp: now() + ttl, purpose });
+  persistSessions();                                      // a mint is worth a write NOW
   return { token: tok, ttl, expires_at: now() + ttl };
 }
 function liveSession(tok) {
   if (!tok) return null;
-  const s = sessions.get(sha256(tok));
+  const k = sha256(tok), s = sessions.get(k);
   if (!s || s.exp <= now()) return null;
-  const cl = clientById(s.client);
   // Revoked between two requests: the token dies with the client, which is what makes
-  // revocation land on a RUNNING daemon instead of at the next restart.
-  if (!cl || cl.revoked) return null;
-  return { ...s, cl };
+  // revocation land on a RUNNING daemon instead of at the next restart. Deleted, not just
+  // refused, so the persisted copy goes on the next flush.
+  if (!sessionClientLive(s)) { sessions.delete(k); sessionsDirty(); return null; }
+  // THE SLIDE. Only a request that has already proved the token live moves it — an
+  // expired one stays expired, so a 401 is final and the phone asserts again.
+  const exp = now() + (loadConfig().session_ttl || 900);
+  if (exp > s.exp) { s.exp = exp; sessionsDirty(); }
+  return { ...s, cl: clientById(s.client) };
+}
+// born <= revoked_at: a token minted BEFORE the revoke. Without this, `revoke` and then
+// `enroll` of the same client id (which clears `revoked`) would bring every pre-revoke
+// token back to life — and with sessions on disk that is no longer only a same-process
+// race, it is any token the file still held.
+function sessionClientLive(s) {
+  const cl = clientById(s.client);
+  return !!cl && !cl.revoked && !(s.born <= (cl.revoked_at || 0));
+}
+
+// ── sessions on disk ──────────────────────────────────────────────────────
+// Hashes only, as the Map holds them: the file is sha256(token) -> {client, born, exp},
+// so reading it opens nothing — there is no token in it to send. 0600 beside serve.json.
+//
+// WRITTEN LAZILY. A slide happens on every request and the phone polls every few seconds,
+// so a write per request would be a disk write per poll to record that a deadline moved by
+// five seconds. A mint writes at once (that one would cost a Face ID to lose); a slide
+// marks the table dirty and is flushed within SESSIONS_FLUSH, and on SIGTERM. A crash loses
+// at most that much of the slide: the token comes back a few seconds shorter, never longer.
+const SESSIONS_FLUSH = 5000;
+let sessionsTimer = null;
+function sessionsDirty() {
+  if (sessionsTimer) return;
+  sessionsTimer = setTimeout(() => { sessionsTimer = null; persistSessions(); }, SESSIONS_FLUSH);
+  sessionsTimer.unref?.();
+}
+function persistSessions() {
+  if (sessionsTimer) { clearTimeout(sessionsTimer); sessionsTimer = null; }
+  const t = now(), out = {};
+  for (const [k, v] of sessions) if (v.exp > t && sessionClientLive(v)) out[k] = v;
+  try {
+    fs.mkdirSync(path.dirname(SESSIONS), { recursive: true });
+    const tmp = `${SESSIONS}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(out) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, SESSIONS);
+    try { fs.chmodSync(SESSIONS, 0o600); } catch {}
+  } catch (e) { log(`sessions: could not persist to ${SESSIONS}: ${e.message}`); }
+}
+// Expired rows and rows of a revoked client are dropped on the way IN, so a file that sat
+// through a revoke while no daemon was running cannot hand anything back.
+function loadSessions() {
+  let raw = {};
+  try { raw = JSON.parse(fs.readFileSync(SESSIONS, 'utf8')) || {}; }
+  catch (e) { if (e.code !== 'ENOENT') log(`sessions: ${SESSIONS} unreadable (${e.message}) — starting with none`); }
+  const t = now();
+  let kept = 0, dropped = 0;
+  for (const [k, v] of Object.entries(raw)) {
+    const ok = /^[0-9a-f]{64}$/.test(k) && v && typeof v.client === 'string' &&
+               Number.isFinite(v.exp) && Number.isFinite(v.born) && v.exp > t && sessionClientLive(v);
+    if (ok) { sessions.set(k, { client: v.client, born: v.born, exp: v.exp, purpose: String(v.purpose || 'open') }); kept++; }
+    else dropped++;
+  }
+  if (dropped) persistSessions();
+  return { kept, dropped };
+}
+// The CLI half of revoke: the daemon would drop these on its next request or sweep anyway
+// (sessionClientLive), but "revoke kills persisted tokens" should be true of the file
+// itself, including when no daemon is running to do it.
+function dropPersistedSessions(clientId) {
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(SESSIONS, 'utf8')) || {}; } catch { return 0; }
+  let n = 0;
+  for (const [k, v] of Object.entries(raw)) if (v && v.client === clientId) { delete raw[k]; n++; }
+  if (n) {
+    const tmp = `${SESSIONS}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(raw) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, SESSIONS);
+  }
+  return n;
 }
 function clientById(id) { return loadConfig().clients.find(c => c.id === id) || null; }
 // Their client identifies itself by credential id alone (localStorage holds `gf.cred`,
@@ -555,13 +651,20 @@ const TOOLS_ALLOWED = {
   fleet_worktrees:       { fields: ['project'] },
   fleet_inbox:           { fields: ['project', 'all'] },
   fleet_projects:        { fields: [], noProject: true },
+  // Every fleet at once, from files. A read, and one the Jarvis screen polls — so the
+  // client always asks with peek:true (see /api/digest), and only Jarvis's own reads move
+  // the 'since last look' stamp.
+  fleet_digest:          { fields: ['json', 'peek'], noProject: true },
   fleet_send:            { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
-  fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter'], write: true, subject: 'session' },
+  fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter', 'expect'], write: true, subject: 'session' },
   fleet_pause:           { fields: ['project', 'session'],                     write: true, subject: 'session' },
   fleet_resume:          { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   // Waking starts a process; parking and un-parking do not. Same write class as the rest of
   // the session verbs, no passkey: it restores a conversation the fleet itself put to sleep.
   fleet_wake:            { fields: ['project', 'session'],                     write: true, subject: 'session' },
+  // The same class as a wake, for the same reason: it restores the session's own
+  // conversation, by id, under the name it already had — nothing new is created.
+  fleet_reopen:          { fields: ['project', 'session'],                     write: true, subject: 'session' },
   fleet_spawn:           { fields: ['project', 'name', 'branch', 'from', 'prompt', 'model', 'reuse', 'force_new'],
                            write: true, passkey: true, subject: 'name' },
   fleet_stop:            { fields: ['project', 'session', 'reclaim', 'force'], write: true, passkey: true, subject: 'session' },
@@ -615,7 +718,7 @@ const NOT_YET = {
   fleet_project_order: 'the projects order is written by the Projects screen',
 };
 
-const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start']);
+const BOOLS = new Set(['all', 'no_enter', 'force_new', 'reclaim', 'force', 'start', 'json', 'peek']);
 
 // Turn a request body into the arguments the shared planner takes, refusing anything the
 // tool does not declare. Returns {args, t, v} or {error}.
@@ -708,9 +811,39 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   const summary = `${tool.replace(/^fleet_/, '')} ${Object.entries(args).filter(([k]) => k !== 'project')
     .map(([k, val]) => k === 'prompt' || k === 'text' ? `${k}=${String(val).slice(0, 60)}` : `${k}=${val}`).join(' ')}`.trim();
 
-  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000 });
+  // human: THIS REQUEST IS THE OWNER, and fleet_answer is the one verb that asks. A key
+  // pressed on a worker's permission dialog approves that worker's tool call, which
+  // fleet-answer refuses from any agent; the phone is where he reads the dialog on the pane
+  // view and taps the answer himself. The MCP server has no way to pass this — only a
+  // request that reached runVerb with a passkey-minted session does.
+  // A PHONE ANSWER NAMES THE PROMPT IT ANSWERS. The phone draws a pane it polled a moment
+  // ago; the prompt on it may have been answered at the desk or timed out since, and then
+  // "1" and Enter land in the composer as a MESSAGE. So an answer must carry the prompt's
+  // fingerprint (served beside the pane by /api/pane), and fleet-answer re-captures and
+  // compares immediately before send-keys. No fingerprint — an old cached client, or a
+  // pane that showed no prompt — is refused here, before anything reaches tmux.
+  if (tool === 'fleet_answer' && !(typeof args.expect === 'string' && args.expect))
+    return { status: 409, json: { ok: false, changed: true,
+      text: 'the prompt changed: the pane you answered was not showing a prompt (or this app is too old to say which one — reload it). Nothing was sent.' } };
+  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true });
   const text = typeof out === 'string' ? out : String(out.text);
+  if (tool === 'fleet_answer' && /^fleet-answer: the prompt changed/m.test(text))
+    return { status: 409, json: { ok: false, changed: true, text: text.replace(/^fleet-answer: /, '') } };
   const refused = typeof out !== 'string' && out.isError === true;
+  // WHAT THE PHONE SAYS TO JARVIS IS THE OWNER SPEAKING, and this is the one component that
+  // knows it: the request carries a token a passkey minted. Recorded here, into the ledger
+  // Jarvis's confirm-list reads (lib/jarvis.mjs). The prompt is delivered by fleet-send,
+  // which marks it as a delivery, so the event hook does not count it a second time.
+  //   ITS AUTHORITY IS THE UNLOCK. A typed or spoken yes from the phone is as strong as the
+  // session it came through — a Face ID with no 15-minute idle gap since — while a TAPPED yes
+  // on a proposal asks for a fresh one (/api/jarvis/confirm). A spoken yes must also be two
+  // words, because one word is what an open microphone hears in noise.
+  if (!refused && tool === 'fleet_send' && args.session === 'master') {
+    try {
+      const jm = jarvis.readMarker();
+      if (jm && (args.project === jm.name || args.project === jm.sock)) jarvis.recordSaid(String(args.prompt || ''), 'phone');
+    } catch {}
+  }
 
   if (v.write) {
     auditAppend({ ts: now(), client: client.id, ip, verb: tool, project: args.project || null, subject,
@@ -760,9 +893,12 @@ function gridHasFlag(flag) {
 const gridSupportsJson = () => gridHasFlag('--json');
 const NINE = new Set(['need-you', 'working', 'ready', 'parked', 'idle', 'starting', 'unknown', 'limit', 'interrupted']);
 
-function gridJson(t) {
+function gridJson(t, sub = '') {
   return new Promise((resolve) => {
-    execFile(process.execPath, [GRID, t.sock, TMUX_CONF, '--json'],
+    // --sub is only passed when the grid knows it: an unknown flag is ignored by --json
+    // (it is argv, not a mode), but a sub-grid answered as the top grid would draw the top
+    // grid under a sub-lead's name — so an old runtime is refused below instead.
+    execFile(process.execPath, [GRID, t.sock, TMUX_CONF, '--json', ...(sub ? ['--sub', sub] : [])],
       // 64 MB. TWO fields in §4 are emitted WHOLE and are user-authored: `msg`, the last
       // assistant line, and since #41 `sched.msg`, the text a scheduled send will deliver.
       // Neither has a bound, and the cards multiply them. Measured on the live fleets:
@@ -928,7 +1064,7 @@ function send(res, status, obj, extra = {}) {
     'content-length': body.length, 'cache-control': 'no-store', ...extra });
   res.end(body);
 }
-async function readBody(req, cap = 1024 * 1024) {
+async function readBody(req, cap = 1024 * 1024, { raw = false } = {}) {
   return new Promise((resolve, reject) => {
     let n = 0; const parts = [];
     req.on('data', (d) => {
@@ -941,6 +1077,7 @@ async function readBody(req, cap = 1024 * 1024) {
       parts.push(d);
     });
     req.on('end', () => {
+      if (raw) return resolve(Buffer.concat(parts));
       if (!parts.length) return resolve({});
       try { resolve(JSON.parse(Buffer.concat(parts).toString('utf8'))); }
       catch (e) { reject(new Error('body is not JSON')); }
@@ -1014,13 +1151,28 @@ function ensureVapid() {
   log('push: generated a VAPID key pair');
   return c.push.vapid;
 }
+// THE SUBJECT APPLE ACCEPTS. The JWT's `sub` defaulted to mailto:ghostfleet@<hostname>, and
+// on a Mac the hostname is `<name>.local` — an address on a domain that cannot receive mail.
+// Measured on the owner's machine: the first push after a real subscription came back
+// HTTP 403 from web.push.apple.com, which is the status Apple's service gives a JWT it will
+// not accept (its body says BadJwtToken; this daemon was throwing the body away, so the log
+// said only "refused with HTTP 403"). RFC 8292 allows an https: URL as the contact, and this
+// server always has one that is really its own — the origin the phone was enrolled on. A
+// configured `push.subject` still wins; the mailto is the last resort for a config with no
+// https origin, and it names this machine's short name rather than a .local one.
+export function vapidSubject(c = loadConfig()) {
+  if (c.push && c.push.subject) return c.push.subject;
+  const https = (c.origins || []).find(o => /^https:\/\//.test(o));
+  if (https) { try { return `https://${new URL(https).hostname}`; } catch {} }
+  return `mailto:ghostfleet@${os.hostname().replace(/\.local$/i, '') || 'localhost'}.invalid`;
+}
 function vapidAuth(endpoint) {
   const v = ensureVapid(), c = loadConfig();
   const head = b64u(JSON.stringify({ typ: 'JWT', alg: 'ES256' }));
   const body = b64u(JSON.stringify({
     aud: new URL(endpoint).origin,                // the push SERVICE's origin, not ours
     exp: now() + 12 * 3600,
-    sub: c.push.subject || `mailto:ghostfleet@${os.hostname()}`,
+    sub: vapidSubject(c),
   }));
   const sig = crypto.sign('sha256', Buffer.from(`${head}.${body}`), {
     key: crypto.createPrivateKey({ key: v.jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363',
@@ -1122,7 +1274,19 @@ function pushPost(sub, body) {
         authorization: auth,
       },
       timeout: 10000,
-    }, (r) => { r.resume(); r.on('end', () => resolve(r.statusCode || 0)); });
+    }, (r) => {
+      // THE BODY IS THE REASON, and it used to be discarded: Apple answers a refused push
+      // with {"reason":"BadJwtToken"} or similar, and "refused with HTTP 403" alone left
+      // nothing to act on. Logged for a refusal only, and short — it is the service's own
+      // words about our request, never anything of ours.
+      let b = '';
+      r.on('data', (d) => { if (b.length < 300) b += d; });
+      r.on('end', () => {
+        const st = r.statusCode || 0;
+        if (st >= 400) log(`push: ${u.host} said HTTP ${st}${b.trim() ? `: ${b.trim().replace(/\s+/g, ' ').slice(0, 200)}` : ''}`);
+        resolve(st);
+      });
+    });
     req.on('timeout', () => { req.destroy(new Error('timeout')); });
     req.on('error', (e) => resolve({ err: e.message }));
     req.end(body);
@@ -1133,9 +1297,14 @@ function pushPost(sub, body) {
 // that appears in a status file — a note, a message, a transcript path — has no route
 // into this object even if someone adds one to the hook tomorrow. That is Pablo's stated
 // requirement made structural rather than reviewed.
-function pushPayload(events, detail) {
+export function pushPayload(events, detail) {
   const kinds = new Set(events.map(e => (PUSH_KINDS.has(e.kind) ? e.kind : 'answer')));
   const out = { v: 1, kind: kinds.size === 1 ? [...kinds][0] : 'mixed', n: events.length, at: now() };
+  // WHERE A TAP SHOULD LAND, as one word from an enum rather than a name: an answer from
+  // Jarvis opens the Jarvis screen, anything else opens the app where it was. Present in
+  // anonymous mode too — it says which screen, not which project.
+  let jm = null; try { jm = jarvis.readMarker(); } catch {}
+  if (jm && events.some(e => e.sock === jm.sock)) out.open = 'jarvis';
   if (detail !== 'anonymous') {
     const sessions = [];
     for (const e of events.slice(0, 4)) {
@@ -1153,13 +1322,7 @@ function pushPayload(events, detail) {
 // and nothing to grep. The dirs come from projects(), the same list the rest of this
 // server resolves against, so a new profile cannot be missing from one and present in
 // the other.
-function fleetDirs() {
-  const seen = new Map();
-  for (const t of projects()) {
-    seen.set(path.join(t.cfg, 'fleet'), true);
-  }
-  return [...seen.keys()];
-}
+function fleetDirs() { return scanDirs(projects()); }
 function sockProjects() {
   const m = new Map();
   for (const t of projects()) m.set(t.sock, t.name);
@@ -1178,24 +1341,10 @@ function sockProjects() {
 // fleet-grid.mjs's fleetBySlot() has had this fix for a while — "keeping the newest entry
 // per slot (avoids a stale/duplicate file shadowing the live one)" — and a second reader
 // of the same files needs the same rule, or the two disagree about what the fleet is.
-function scanFleet() {
-  const newest = new Map();
-  for (const dir of fleetDirs()) {
-    let names = [];
-    try { names = fs.readdirSync(dir); } catch { continue; }
-    for (const n of names) {
-      if (!n.endsWith('.json') || n.startsWith('.')) continue;
-      let j;
-      try { j = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8')); } catch { continue; }
-      if (!j || typeof j !== 'object' || !j.sock || !j.slot) continue;   // not a fleet session
-      const row = { sock: String(j.sock), slot: String(j.slot), status: String(j.status || ''), ts: Number(j.ts) || 0 };
-      const key = `${row.sock}/${row.slot}`;
-      const prev = newest.get(key);
-      if (!prev || row.ts > prev.ts) newest.set(key, row);
-    }
-  }
-  return [...newest.values()];
-}
+//   THE READER NOW LIVES IN lib/fleet-scan.mjs, because fleet-digest is that second
+// reader: it wants exactly this scan, and a copy of it would be the drift described above
+// with a third participant. The four-field rule is kept there, with the reason.
+function scanFleet() { return scanStatus(fleetDirs()); }
 
 const pushState = new Map();      // "<sock>/<slot>" -> the status we last saw
 const lastRead = new Map();       // client id -> when it last polled anything
@@ -1232,14 +1381,97 @@ function pushEvents(rows) {
     pushState.set(key, r.status);
     if (!known || prev === r.status) continue;
     const project = names.get(r.sock) || r.sock.replace(/^cf-/, '');
-    if (r.status === 'need-you') events.push({ kind: 'needs-you', project, session: r.slot });
+    if (r.status === 'need-you') events.push({ kind: 'needs-you', project, session: r.slot, sock: r.sock });
     // working -> ready is a turn that ENDED. `idle` (SessionStart) is not an answer, and
     // ready -> ready is the same session sitting where it was.
-    else if (r.status === 'ready' && prev === 'working') events.push({ kind: 'answer', project, session: r.slot });
+    else if (r.status === 'ready' && prev === 'working') events.push({ kind: 'answer', project, session: r.slot, sock: r.sock });
   }
   for (const k of [...pushState.keys()]) if (!seen.has(k)) pushState.delete(k);
   return events;
 }
+
+// ── at the Mac ──────────────────────────────────────────────────────────────
+// A PHONE THAT BUZZES WHILE HE IS TYPING AT THE MAC is telling him what the screen in front
+// of him already says. The poll-based quiet above cannot see this: the phone is in a pocket,
+// not polling. So the Mac itself is asked whether anyone is at it — keyboard or mouse input
+// within at_mac_idle seconds AND the screen unlocked — and while the answer is yes a push is
+// HELD rather than sent. Held, not dropped: if he walks away (idle crosses the threshold, or
+// the screen locks) while what was held is still unseen, ONE push goes then for what is left.
+//   Both readings are ioreg, which needs no permission and costs ~10ms: HIDIdleTime on the
+// IOHIDSystem class (nanoseconds since the last HID event, which is what the screensaver
+// times), and IOConsoleLocked on the registry root (what loginwindow sets on a lock). They
+// are read at most once per AT_MAC_CACHE seconds and only when a tick has something to
+// decide — never per subscription.
+//   macOS only. Elsewhere the reading is null and nothing is ever held, which is the old
+// behaviour exactly. GHOSTFLEET_AT_MAC_FILE replaces both readings with a JSON file
+// ({"idle": seconds, "locked": bool}) so the suite can drive the decision both ways.
+const AT_MAC_CACHE = 5;
+let macCache = { at: 0, v: null };
+export function parseHidIdle(out) {
+  const m = /"HIDIdleTime"\s*=\s*(\d+)/.exec(String(out || ''));
+  return m ? Number(m[1]) / 1e9 : null;
+}
+export function parseConsoleLocked(out) {
+  const m = /"IOConsoleLocked"\s*=\s*(Yes|No)\b/.exec(String(out || ''));
+  return m ? m[1] === 'Yes' : null;
+}
+const ioreg = (args) => new Promise((resolve) => {
+  execFile('ioreg', args, { encoding: 'utf8', timeout: 3000, maxBuffer: 1024 * 1024 }, (e, out) => resolve(e ? '' : out));
+});
+async function readAtMac() {
+  const inj = process.env.GHOSTFLEET_AT_MAC_FILE;
+  if (inj) {
+    try { const j = JSON.parse(fs.readFileSync(inj, 'utf8')); return { idle: Number(j.idle), locked: !!j.locked }; }
+    catch { return null; }
+  }
+  if (process.platform !== 'darwin') return null;
+  if (now() - macCache.at < AT_MAC_CACHE) return macCache.v;
+  const [hid, root] = await Promise.all([ioreg(['-c', 'IOHIDSystem', '-r', '-k', 'HIDIdleTime', '-d', '1']), ioreg(['-n', 'Root', '-d', '1'])]);
+  const idle = parseHidIdle(hid), locked = parseConsoleLocked(root);
+  macCache = { at: now(), v: idle == null ? null : { idle, locked: !!locked } };
+  return macCache.v;
+}
+// A reading that could not be taken is "not at the Mac": an unreadable sensor must fail
+// toward the old behaviour (a push), never toward silence.
+export function atMac(reading, limit) {
+  return !!(reading && limit > 0 && Number.isFinite(reading.idle) && reading.idle < limit && !reading.locked);
+}
+// Whether the session has moved on from the event: a need-you that is no longer need-you
+// was answered (at the Mac, most likely), and an answer whose session is working again was
+// read and replied to. A session that is gone has nothing left to tell him about.
+export function pushResolved(ev, status) {
+  if (status === undefined) return true;
+  return ev.kind === 'needs-you' ? status !== 'need-you' : status === 'working';
+}
+// THE DECISION, PURE, so the suite can drive every rule without a clock or a Mac.
+//   held     [{ev, at}] waiting for him to leave
+//   events   this tick's fresh transitions
+//   here     atMac() now          readAt   newest poll by any subscribed phone (seconds)
+//   status   (key) -> the session's status now, for pushResolved()
+// Returns what is still held, what to send now, and one log line per decision.
+export function holdStep(held, { events, here, now: t, hold, readAt, status }) {
+  const log = [], keep = [];
+  let expired = 0, seen = 0;
+  const key = (e) => `${e.sock}/${e.session}`;
+  const newer = new Set(events.map(key));
+  for (const h of held) {
+    if (t - h.at >= hold) { expired++; continue; }
+    // "Seen": the phone polled after it, or the session has moved on, or a newer event for
+    // the same session supersedes it (one session, one line on the lock screen).
+    if (readAt > h.at || pushResolved(h.ev, status(key(h.ev))) || newer.has(key(h.ev))) { seen++; continue; }
+    keep.push(h);
+  }
+  if (expired) log.push(`push: expired ${expired} held after ${hold}s at the Mac`);
+  if (seen) log.push(`push: dropped ${seen} held as seen`);
+  if (here) {
+    for (const ev of events) keep.push({ ev, at: t });
+    if (events.length) log.push(`push: held ${events.length} — at the Mac`);
+    return { held: keep, send: [], released: 0, log };
+  }
+  if (keep.length) log.push(`push: released ${keep.length} held — left the Mac`);
+  return { held: [], send: [...keep.map(h => h.ev), ...events], released: keep.length, kept: keep, log };
+}
+let pushHeld = [];
 
 async function pushTick() {
   let c;
@@ -1247,18 +1479,33 @@ async function pushTick() {
   const subs = allSubs();
   // Nothing subscribed: do no work at all, and forget the baseline so the first
   // subscription starts from what is on disk instead of replaying the day.
-  if (!subs.length) { pushState.clear(); return; }
+  if (!subs.length) { pushState.clear(); pushHeld = []; return; }
   // No separate seeding pass: pushEvents() treats every key's first sight as a baseline,
   // so the first scan after a subscription is silent by the same rule that keeps a
   // reappearing file quiet. One rule is one thing to get right.
-  const events = pushEvents(scanFleet());
+  const fresh = pushEvents(scanFleet());
+  if (!fresh.length && !pushHeld.length) return;
+  // AT THE MAC: what would have been sent is held instead, and what was held goes when he
+  // leaves (see holdStep). Read only when there is something to decide, and once per tick.
+  const limit = Number(c.push.at_mac_idle) || 0;
+  const reading = limit > 0 ? await readAtMac() : null;
+  const here = atMac(reading, limit);
+  const readAt = Math.max(0, ...subs.map(s => lastRead.get(s.client) || 0));
+  const step = holdStep(pushHeld, { events: fresh, here, now: now(), hold: Number(c.push.at_mac_hold) || 600, readAt,
+                                    status: (k) => pushState.get(k) });
+  const why = !reading ? '' : reading.locked ? ' (screen locked)' : ` (idle ${Math.round(reading.idle)}s)`;
+  for (const l of step.log) log(/^push: (held|released)/.test(l) ? l + why : l);
+  pushHeld = step.held;
+  const events = step.send;
   if (!events.length) return;
   // ONE NOTIFICATION PER BURST, leading edge — the same shape and the same default
   // window as the master nudge in hooks/fleet-event.sh, for the same reason: five
   // workers finishing is one thing to look at, not five. A scan that sees all five at
   // once sends one push that says so; stragglers inside the window are dropped, and the
   // stamp is NOT moved when nothing was sent, so the next event is not also swallowed.
-  if (now() - pushLastSent < (c.push.debounce ?? 30)) return;
+  // A RELEASE inside the window waits it out rather than being swallowed: it was held for
+  // him, not merely late, and the next tick sends it.
+  if (now() - pushLastSent < (c.push.debounce ?? 30)) { if (step.released) pushHeld = step.kept; return; }
   const detail = c.push.detail === 'anonymous' ? 'anonymous' : 'named';
   const payload = pushPayload(events, detail);
   const body = Buffer.from(JSON.stringify(payload));
@@ -1413,6 +1660,13 @@ const ATTACH_MAX_BYTES = 6 * 1024 * 1024;  // ...and the decoded length is check
 const ATTACH_QUOTA = 24 * 1024 * 1024;     // per session, oldest deleted first
 const ATTACH_MAX_PX = 1600;                // what a converter downscales to, when there is one
 const ATTACH_RESIZE_OVER = 512 * 1024;     // below this an already-readable image is kept as it is
+// Two minutes of 16 kHz 16-bit mono is 3.8 MB; the client stops an utterance at 30 s, so
+// this is headroom for a slow device rather than a length anybody talks for.
+const HEAR_BODY_CAP = 4 * 1024 * 1024;
+let hearChain = Promise.resolve();
+// One line per sentence spoken, saying which voice read it and whether it was made or
+// replayed — the record that proves a mixed reply really did switch voices.
+const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang} ${job.it.voice} ${job.it.text.length} chars ${m.ok ? (m.cached ? 'cached' : `synth ${m.ms}ms`) : `FAILED ${m.error}`}`);
 
 // SNIFFED, NEVER DECLARED. The client's content-type is a hint from a phone; the magic
 // bytes are what the file is. SVG is refused loudly and specifically further down: it is an
@@ -1512,10 +1766,14 @@ async function api(req, res, url, ip) {
   if (!OPEN.has(p)) {
     // THE POINT OF §5, and the only place it can be made: a lock that gates the UI is
     // decoration. There is no long-lived secret that opens this — the token below exists
-    // only because a passkey signed a challenge minutes ago, and it expires.
+    // only because a passkey signed a challenge, and it dies after session_ttl unused.
     const s = liveSession(bearer);
-    if (!s) return send(res, 401, { ok: false, text: 'no live session — assert a passkey at /api/auth (a token is only ever minted by one, and it expires)', needs: 'passkey' });
+    if (!s) return send(res, 401, { ok: false, text: 'no live session — assert a passkey at /api/auth (a token is only ever minted by one, and it expires once idle)', needs: 'passkey' });
     req.client = s.cl; req.session = s;
+    // The slide, told to the client: web/api.js keeps its own copy of the expiry so it can
+    // decide at launch whether a stored token is worth trying, and that copy has to move
+    // when this one does or the client would give up on a token the server still honours.
+    res.setHeader('X-Session-Expires', String(s.exp));
     // WHEN DID THIS DEVICE LAST LOOK. A GET from a live token is the phone polling, which
     // it only does while the app is on screen (web/app.js stops the timer on
     // document.hidden, and iOS hides a backgrounded PWA). That is the signal the push
@@ -1534,7 +1792,8 @@ async function api(req, res, url, ip) {
   let body;
   try {
     body = req.method === 'POST'
-      ? await readBody(req, p === '/api/attach' ? ATTACH_BODY_CAP : undefined) : {};
+      ? await readBody(req, p === '/api/attach' ? ATTACH_BODY_CAP : p === '/api/jarvis/hear' ? HEAR_BODY_CAP : undefined,
+                       { raw: p === '/api/jarvis/hear' }) : {};
   } catch (e) {
     // ...and the refusal says the NUMBER. "body larger than 8388608 bytes" is actionable;
     // a dropped connection is what this used to do.
@@ -1666,7 +1925,14 @@ function agentCatalogue() {
     // the Projects screen would be the summary line lying at a glance, which is the one
     // place docs/mobile.md says it must not.
     const rollup = url.searchParams.get('rollup') !== '0' && gridSupportsJson();
-    const all = projects();
+    // JARVIS SWITCHED OFF IS GONE FROM THE PHONE, its own project included: that project is
+    // Jarvis's home, and a card for it would be a way to start its master with the contract
+    // and none of the switch. `jarvis_enabled` is how the client learns the switch — from
+    // the daemon, never a build flag — and `speak` rides beside it because the Mac's voice
+    // is the phone's, not Jarvis's, and /api/jarvis (which also reports it) is gone with it.
+    const jOn = jarvis.enabled();
+    const jHide = jOn ? null : jarvis.readMarkerFile();
+    const all = projects().filter(t => !(jHide && t.name === jHide.name && t.profile === jHide.profile));
     const counted = await Promise.all(all.map(async (t) => {
       let live = 0;
       try { live = execFileSync('tmux', ['-L', t.sock, 'list-sessions', '-F', '#{session_name}'],
@@ -1676,13 +1942,18 @@ function agentCatalogue() {
       const g = await gridJson(t);
       if (g.error) return { ...row, sessions: null };
       const cards = g.json.cards || [];
+      // As DRAWN: a sub-lead whose worker is mid-turn is a working card on the grid, so
+      // it is a working session here — the project card must not read `ready` over a team
+      // that is busy, any more than the grid card may. `team_status` is null on every
+      // other card.
+      const st = x => x.team_status || x.status;
       return { ...row, sessions: {
-        need: cards.filter(x => x.status === 'need-you').length,
-        working: cards.filter(x => x.status === 'working').length,
-        parked: cards.filter(x => x.status === 'parked').length,
+        need: cards.filter(x => st(x) === 'need-you').length,
+        working: cards.filter(x => st(x) === 'working').length,
+        parked: cards.filter(x => st(x) === 'parked').length,
         total: cards.length } };
     }));
-    return send(res, 200, { home: HOME, projects: counted, agents: agentCatalogue() });
+    return send(res, 200, { home: HOME, projects: counted, agents: agentCatalogue(), jarvis_enabled: jOn, speak: speech.status() });
   }
 
   if (p === '/api/grid' && req.method === 'GET') {
@@ -1691,7 +1962,13 @@ function agentCatalogue() {
     const t = rp.t;
     if (!gridSupportsJson())
       return send(res, 503, { ok: false, text: `this fleet-grid.mjs has no --json flag (${GRID}). It is §4 of docs/mobile.md; the grid is never launched without it, because an unknown flag falls through to the interactive TUI and blocks on the tty.` });
-    const r = await gridJson(t);
+    // A sub-lead's grid (nested leads): its own card, then only its workers. The name is a
+    // session name or nothing — it becomes argv, and nothing else is one.
+    const sub = url.searchParams.get('sub') || '';
+    if (sub && !/^[A-Za-z0-9._~-]+$/.test(sub)) return send(res, 400, { ok: false, text: `'${sub}' is not a session name` });
+    if (sub && !gridHasFlag('--sub'))
+      return send(res, 503, { ok: false, text: `this fleet-grid.mjs has no --sub flag (${GRID}) — it predates nested leads; cf-sync the runtime` });
+    const r = await gridJson(t, sub);
     // §4, verbatim — no wrapper. The client reads .cards/.counts/.project off the top
     // level and decides success from the HTTP status, so an envelope here would be a
     // second shape for the same payload.
@@ -1735,7 +2012,11 @@ function agentCatalogue() {
     // reaches this port already has full parity, which is RCE — and masking `sk_live_…`
     // corrupts any session that is legitimately about key handling. Bounded for transport
     // cost only, by `scrollback`.
-    return send(res, 200, { ok: true, project: t.name, session, scrollback, at: now(), pane: r.pane });
+    // `prompt`: what the pane is waiting on, from lib/permission-dialog.mjs — the same
+    // detector fleet-answer re-checks with. Its fingerprint is what an answer must echo.
+    let prompt = null;
+    try { prompt = promptSummary(r.pane); } catch {}
+    return send(res, 200, { ok: true, project: t.name, session, scrollback, at: now(), pane: r.pane, prompt });
   }
 
   if (p === '/api/checkouts' && req.method === 'GET') {
@@ -1765,6 +2046,20 @@ function agentCatalogue() {
     // worker's need-you.
     const out = await callToolAsync('fleet_inbox', { project: t.name, all: true }, { timeout: 30000 });
     return send(res, 200, { ok: true, project: t.name, text: typeof out === 'string' ? out : String(out.text) });
+  }
+
+  // ── the digest: every fleet, every profile, from files ───────────────────
+  // PEEKED, ALWAYS. This is the Jarvis screen's poll, and a poll must not advance the
+  // "since last look" stamp — that is Jarvis's own read to spend, the same reason
+  // /api/inbox reads with --all. Through the dispatch, so the same fleet-digest the MCP
+  // tool runs is the one the phone reads; a second implementation of "what is the fleet"
+  // is the drift docs/mobile.md §3 forbids.
+  if (p === '/api/digest' && req.method === 'GET') {
+    const out = await callToolAsync('fleet_digest', { json: true, peek: true }, { timeout: 30000, maxBuffer: 8 * 1024 * 1024 });
+    const text = typeof out === 'string' ? out : String(out.text);
+    let j;
+    try { j = JSON.parse(text); } catch { return send(res, 502, { ok: false, text: `fleet-digest did not return JSON: ${text.trim().slice(0, 200)}` }); }
+    return send(res, 200, { ok: true, ...j });
   }
 
   if (p === '/api/worktrees' && req.method === 'GET') {
@@ -1938,6 +2233,114 @@ function agentCatalogue() {
       converted: path.extname(out) === '.jpg' && kind !== 'jpg', dropped });
   }
 
+  // ── Jarvis: the master of masters (docs/jarvis.md) ──────────────────────────
+  // Three routes, all behind the same token as everything else. What Jarvis IS — its
+  // project, its session, whether it can hear, what waits on a yes — comes from the one
+  // place bin/fleet-jarvis reads it, so the phone and `fleet-jarvis status` cannot disagree.
+  //   `voice` is answered EVEN WITHOUT A JARVIS: it is the Mac's transcriber, not Jarvis's,
+  // and every session's `talk` asks it here. `speak` likewise: whether the Mac reads replies
+  // with Kokoro, which the phone's settings sheet reports beside the device's own voices.
+  // SWITCHED OFF, EVERY JARVIS ROUTE IS A 404 and says why — not a 200 that describes an
+  // absent Jarvis, which a client would draw as a band. /api/speak is NOT one of them: the
+  // per-message play button is the phone's own feature and keeps working.
+  if ((p === '/api/jarvis' || p.startsWith('/api/jarvis/')) && !jarvis.enabled())
+    return send(res, 404, { ok: false, disabled: true, experimental: true, text: jarvis.DISABLED_WHY });
+  if (p === '/api/jarvis' && req.method === 'GET') {
+    const st = jarvisState();
+    if (st.present && !resolveProject(st.project).t)
+      return send(res, 200, { ok: true, ...st, present: false, why: `the marker names project '${st.project}', which is not registered — run: fleet-jarvis init` });
+    return send(res, 200, { ok: true, voice: jarvis.voiceStatus(), speak: speech.status(), ...st });
+  }
+
+  // A TAPPED YES IS A DESTRUCTIVE TAP, so it carries a fresh passkey exactly as a tapped
+  // stop does (§7): the yes is what lets Jarvis merge, push or delete. A NO needs nothing —
+  // declining can only stop an action. Either way Jarvis is told, since it is waiting to be.
+  //   What this does NOT make true: that every yes from the phone costs a Face ID. A yes
+  // typed or spoken to Jarvis rides on the session's own unlock (see runVerb), which is the
+  // owner's stated design — "spoken or tapped" — and is written down there rather than
+  // implied here.
+  if (p === '/api/jarvis/confirm') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    const m = jarvis.readMarker();
+    if (!m) return send(res, 409, { ok: false, text: 'there is no Jarvis on this machine — run: ghostfleet jarvis' });
+    const id = typeof body.id === 'string' ? body.id : '';
+    const ans = body.answer;
+    if (!id || (ans !== 'yes' && ans !== 'no')) return send(res, 400, { ok: false, text: "send {id, answer: 'yes'|'no'} — the id is a proposal from GET /api/jarvis" });
+    if (ans === 'yes') {
+      const a = headerAssertion(req, c);
+      if (!a) return send(res, 401, { ok: false, text: 'a yes needs a fresh passkey assertion in X-Fleet-Assertion — it authorises Jarvis to do something on the confirm-list', needs: 'passkey' });
+      if (a.error) return send(res, 401, { ok: false, text: a.error, needs: 'passkey' });
+    }
+    const r = jarvis.answer(id, ans === 'yes', 'phone');
+    if (!r.ok) return send(res, 404, { ok: false, text: r.text });
+    try { auditAppend({ ts: now(), client: req.client.id, ip, verb: 'jarvis_confirm', project: m.name, subject: id, result: 'ran',
+                        confirmed: ans === 'yes' ? 'passkey:jarvis-yes' : null, output: `${ans} — ${r.summary}`.slice(0, 300) }); } catch {}
+    inboxRow(proj(m.name), 'master', `${ans} to ${id} (${r.summary}) · from ${req.client.id}@${ip}`);
+    const tell = ans === 'yes'
+      ? `[fleet] The owner tapped YES on the phone for proposal ${id} (${r.summary}). Make that exact call now, then tell him in one line that it is done.`
+      : `[fleet] The owner tapped NO on the phone for proposal ${id} (${r.summary}). Do not do it; acknowledge in one short line.`;
+    let told = false;
+    if (proj(m.name)) {
+      const out = await serialize(() => callToolAsync('fleet_send', { project: m.name, session: 'master', prompt: tell }, { timeout: 30000 }));
+      told = !(out && typeof out === 'object' && out.isError);
+    }
+    return send(res, 200, { ok: true, id, answer: ans, summary: r.summary, told });
+  }
+
+  // HEARING: one utterance in, its words out. The bytes are the WAV the client encoded (16
+  // kHz mono PCM) and the transcriber is whisper.cpp ON THIS MACHINE — the audio goes no
+  // further than this process and a private temp dir that is gone before the reply is. The
+  // words go back to the phone, which shows them and sends them itself, so what Jarvis is
+  // told is exactly what the owner saw he said.
+  if (p === '/api/jarvis/hear') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    if (!Buffer.isBuffer(body) || !body.length) return send(res, 400, { ok: false, text: 'no audio in the body — POST the WAV bytes themselves (audio/wav)' });
+    if (!jarvis.isWav(body)) return send(res, 415, { ok: false, text: 'that is not a WAV file — the body is read for RIFF/WAVE, not trusted from its content-type' });
+    const v = jarvis.voiceStatus();
+    if (!v.ready) return send(res, 503, { ok: false, text: v.why, needs: 'voice' });
+    const t0 = Date.now();
+    // One at a time: whisper uses every core it is given, and two at once would each take
+    // twice as long while he waits on both.
+    const r = await (hearChain = hearChain.then(() => jarvis.transcribeAsync(body, { prompt: vocabulary() }), () => jarvis.transcribeAsync(body, { prompt: vocabulary() })));
+    const ms = Date.now() - t0;
+    if (r.error) return send(res, 502, { ok: false, text: r.error });
+    // The size and the time, never the words: a log file is a surface too.
+    log(`jarvis: heard ${Math.round(body.length / 1024)} KB in ${ms}ms -> ${r.text.length} chars`);
+    return send(res, 200, { ok: true, text: r.text, ms });
+  }
+
+  // SPEAKING: the reverse of hearing, and optional in the same way (lib/speech.mjs). The
+  // phone POSTs the words it wants read; the answer is the sentences, each with the voice
+  // its language got, and synthesis of all of them starts now, in order. The phone then
+  // GETs each sentence's audio by id, so the first one plays while the rest are still being
+  // made. A 503 is the phone's cue to fall back to its own speechSynthesis.
+  //   The words never reach the log: a sentence is logged by its id, its voice and its
+  // length, which is what says which voice read it without saying what was read.
+  if (p === '/api/speak' && req.method === 'POST') {
+    const v = speech.status();
+    if (!v.ready) return send(res, 503, { ok: false, text: v.why, needs: 'kokoro' });
+    const text = typeof body.text === 'string' ? body.text.slice(0, 8000) : '';
+    const items = speech.plan(text);
+    if (!items.length) return send(res, 400, { ok: false, text: 'nothing speakable in that text' });
+    speech.prefetch(items, speakLog);
+    log(`speak: ${items.length} sentence(s) planned — ${items.map(i => `${i.id.slice(0, 8)}=${i.voice}`).join(' ')}`);
+    return send(res, 200, { ok: true, sentences: items.map(({ id, lang, voice, text }) => ({ id, lang, voice, text })) });
+  }
+  if (p.startsWith('/api/speak/') && req.method === 'GET') {
+    const id = p.slice('/api/speak/'.length);
+    if (!speech.validId(id)) return send(res, 400, { ok: false, text: 'not a sentence id' });
+    const pending = speech.audio(id, speakLog);
+    if (!pending) return send(res, 404, { ok: false, text: 'unknown sentence — POST /api/speak first' });
+    let r;
+    try { r = await pending; } catch (e) { return send(res, 503, { ok: false, text: String((e && e.message) || e), needs: 'kokoro' }); }
+    let wav;
+    try { wav = fs.readFileSync(r.path); } catch { return send(res, 410, { ok: false, text: 'that audio was pruned — POST /api/speak again' }); }
+    // Private and long-lived: the id is a hash of the words and the voice, so the bytes
+    // behind it never change, and only this device's session could fetch them.
+    res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': wav.length, 'cache-control': 'private, max-age=86400' });
+    return res.end(wav);
+  }
+
   // ── writes ────────────────────────────────────────────────────────────────
   if (p === '/api/verb') {
     if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
@@ -1949,27 +2352,30 @@ function agentCatalogue() {
     }
     // The destructive verbs' fresh assertion travels in a header (web/api.js), verified
     // here against a challenge we issued and have not seen before.
-    let assertion = null;
-    const hdr = req.headers['x-fleet-assertion'];
-    if (hdr) {
-      let parsed;
-      try { parsed = JSON.parse(Array.isArray(hdr) ? hdr[0] : hdr); }
-      catch { assertion = { error: 'X-Fleet-Assertion is not JSON' }; }
-      if (parsed) {
-        const r = verifyAssertion(parsed, c);
-        // An assertion signed by a DIFFERENT enrolled client is not this session's
-        // confirmation: the token and the fingerprint have to be the same person.
-        assertion = r.error ? { error: r.error }
-                  : r.client.id !== req.client.id ? { error: 'that assertion belongs to another enrolled client' }
-                  : { purpose: r.purpose };
-      }
-    }
+    const assertion = headerAssertion(req, c);
     const go = () => runVerb({ tool, rawArgs: body.args, client: req.client, ip, session: req.session, assertion });
     const r = v.write ? await serialize(go) : await go();
     return send(res, r.status, r.json);
   }
 
   return send(res, 404, { ok: false, text: `no such endpoint: ${p}` });
+}
+
+// The X-Fleet-Assertion header, verified. Shared by /api/verb and Jarvis's yes: one
+// implementation, so the second factor on a tapped yes cannot end up weaker than the one on
+// a tapped stop. null = no header at all.
+function headerAssertion(req, c) {
+  const hdr = req.headers['x-fleet-assertion'];
+  if (!hdr) return null;
+  let parsed;
+  try { parsed = JSON.parse(Array.isArray(hdr) ? hdr[0] : hdr); }
+  catch { return { error: 'X-Fleet-Assertion is not JSON' }; }
+  const r = verifyAssertion(parsed, c);
+  // An assertion signed by a DIFFERENT enrolled client is not this session's
+  // confirmation: the token and the fingerprint have to be the same person.
+  return r.error ? { error: r.error }
+       : r.client.id !== req.client.id ? { error: 'that assertion belongs to another enrolled client' }
+       : { purpose: r.purpose };
 }
 
 let awakeHeld = false;
@@ -2161,11 +2567,15 @@ async function serve(argv) {
   const ch0 = auditVerify();
   if (!ch0.ok && ch0.n) log(`  WARNING: audit chain broken at row ${ch0.at} (${ch0.why})`);
   armAwake();
+  {
+    const ls = loadSessions();
+    if (ls.kept || ls.dropped) log(`  sessions: ${ls.kept} restored from ${SESSIONS}${ls.dropped ? `, ${ls.dropped} expired or revoked dropped` : ''}`);
+  }
   setInterval(sweep, 30000).unref();
   armPushWatch();
   {
     const n = allSubs().length, pc = loadConfig().push;
-    log(n ? `  push: ${n} subscription${n === 1 ? '' : 's'}, ${pc.detail} · scan ${pc.scan}s · one per ${pc.debounce}s · silent while polled within ${pc.quiet_after_poll}s`
+    log(n ? `  push: ${n} subscription${n === 1 ? '' : 's'}, ${pc.detail} · scan ${pc.scan}s · one per ${pc.debounce}s · silent while polled within ${pc.quiet_after_poll}s · ${pc.at_mac_idle > 0 ? (process.platform === 'darwin' ? `held while at the Mac (input within ${pc.at_mac_idle}s, unlocked) for up to ${pc.at_mac_hold}s` : 'at-the-Mac hold off (not macOS)') : 'at-the-Mac hold off'}`
           : '  push: nothing subscribed — a home-screen PWA subscribes from its settings sheet (docs/mobile.md §9)');
   }
   // SHUTTING DOWN IS THE SAME TRUNCATION BUG AS process.exit() AFTER A console.log, one
@@ -2179,6 +2589,7 @@ async function serve(argv) {
   for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => {
     if (stopping) { log(`${sig} again — exiting now`); process.exit(1); }
     stopping = true;
+    persistSessions();                    // the last few seconds of slide, before anything else
     log(`${sig} — draining, then stopping`);
     server.close(() => { log('stopped'); process.exit(0); });
     server.closeIdleConnections?.();
@@ -2333,8 +2744,9 @@ async function main() {
     // survives somewhere.
     if ((x.push || []).length) { log(`fleet-serve: dropping ${x.push.length} push endpoint(s) with '${id}'`); delete x.push; }
     saveConfig(c);
+    const gone = dropPersistedSessions(id);
     auditAppend({ ts: now(), client: id, ip: 'cli', verb: 'revoke', subject: id, result: 'ran', output: 'token and passkeys removed' });
-    console.log(`fleet-serve: revoked '${id}' — bearer token and passkeys dropped; its live sessions die on the daemon's next request.`);
+    console.log(`fleet-serve: revoked '${id}' — bearer token and passkeys dropped${gone ? `, ${gone} persisted session(s) deleted` : ''}; a running daemon refuses its tokens from the next request.`);
     return;
   }
 
@@ -2359,8 +2771,10 @@ async function main() {
     const v = c.push.vapid;
     console.log(`detail     ${c.push.detail}${c.push.detail === 'anonymous' ? '  (a count only — no project or session names leave this machine)' : '  (project/session travel to the lock screen)'}`);
     console.log(`vapid      ${v && v.public ? v.public.slice(0, 24) + '…  (private key in ' + CONFIG + ', 0600)' : 'not generated yet — the first subscription makes one'}`);
+    console.log(`subject    ${vapidSubject(c)}${c.push.subject ? '' : '  (default — push.subject in the config overrides it)'}`);
     console.log(`debounce   one push per ${c.push.debounce}s, leading edge`);
     console.log(`quiet      nothing sent while a client has polled within ${c.push.quiet_after_poll}s`);
+    console.log(`at the Mac ${!(c.push.at_mac_idle > 0) ? 'off (push.at_mac_idle is 0)' : process.platform !== 'darwin' ? 'off — macOS only' : `held while there was input within ${c.push.at_mac_idle}s and the screen is unlocked; sent when he leaves, dropped after ${c.push.at_mac_hold}s`}`);
     console.log(`scan       every ${c.push.scan}s, over ${fleetDirs().length} fleet dir(s): ${fleetDirs().join(' ') || '(none — no projects registered)'}`);
     console.log(`subscribed ${subs.length ? subs.map(x => `${x.client} ${new URL(x.endpoint).host}`).join(', ') : '(nobody — a home-screen PWA subscribes from its settings sheet)'}`);
     if (!argv.includes('--test')) return;

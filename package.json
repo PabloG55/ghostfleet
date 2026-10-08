@@ -1,6 +1,6 @@
 {
   "name": "ghostfleet-cli",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Run a fleet of Claude Code agents in parallel, from one terminal.",
   "license": "MIT",
   "homepage": "https://github.com/PabloG55/ghostfleet",
@@ -13,6 +13,7 @@
   },
   "files": [
     "bin/",
+    "lib/",
     "tmux/",
     "hooks/",
     "mcp/",
@@ -20,6 +21,9 @@
     "layouts/",
     "scripts/",
     "web/",
+    "mods/ghostfleet/.claude-plugin/plugin.json",
+    "mods/ghostfleet/hooks/",
+    ".claude-plugin/",
     "CHANGELOG.md",
     "install.sh",
     "LICENSE"

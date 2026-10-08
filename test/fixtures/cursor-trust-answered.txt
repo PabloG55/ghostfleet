@@ -1,0 +1,40 @@
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │                                                                          │
+  │  ⚠ Workspace Trust Required                                              │
+  │                                                                          │
+  │  Cursor Agent can execute code and access files in this directory.       │
+  │                                                                          │
+  │  Do you trust the contents of this directory?                            │
+  │                                                                          │
+  │    /Users/someone/.cache/cf-cursor-scratch/billing-svc                   │
+  │                                                                          │
+  │                                                                          │
+  │    [a] Trust this workspace                                              │
+  │    [q] Quit                                                              │
+  │                                                                          │
+  │  ⏳ Trusting workspace...                                                │
+  │                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+
+  Cursor Agent
+  v2026.10.01-e373342
+  Tip: Hit shift+tab to enable Plan Mode for large or complex changes.
+
+
+
+
+  → Plan, search, build anything
+
+
+  Auto
+  ~/.cache/cf-cursor-scratch/billing-svc · master
+
+
+
+
+
+
+
+

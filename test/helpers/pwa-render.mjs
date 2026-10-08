@@ -148,6 +148,16 @@ class Node_ {
     k.parent = this; this.kids.push(k); return k;
   }
   remove() { if (this.parent) { this.parent.kids = this.parent.kids.filter(k => k !== this); this.parent = null; } }
+  // The copy button patches ITSELF into its "copied" state rather than re-rendering the
+  // screen (a render would close the keyboard). In the same slot, which is the point: a
+  // model that appended the replacement would move the control to the end of its row.
+  replaceWith(n) {
+    const p = this.parent;
+    if (!p) return;
+    const i = p.kids.indexOf(this);
+    if (n.parent) n.remove();
+    n.parent = p; p.kids.splice(i, 1, n); this.parent = null;
+  }
   // ── the four calls a RECONCILER makes and an append-only app never did ──────────────
   // app.js builds a screen by appending to an empty parent, so appendChild and
   // textContent were the whole of it. Preact draws the Projects screen now, and a
@@ -706,8 +716,8 @@ is('a tab says how many need you', true, await until(() => /●\d/.test((tabStri
 api.setFixtureName('grid-acme-api.json');
 
 // ── the fleets the shipped fixture is not ─────────────────────────────────
-const fleetOf = (...rows) => ({ home: '/Users/pgarces', projects: rows.map(([name, profile, need]) => ({
-  name, profile, path: `/Users/pgarces/gf-demo/${name}`, agent: null, socket: `cf-${name}`,
+const fleetOf = (...rows) => ({ home: '/Users/you', projects: rows.map(([name, profile, need]) => ({
+  name, profile, path: `/Users/you/gf-demo/${name}`, agent: null, socket: `cf-${name}`,
   // The third element is OPTIONAL and every existing caller omits it, so they all keep
   // need: 0. It exists because a tab badge can only be tested by a fleet that has
   // something blocked in it.
@@ -956,16 +966,18 @@ const openProjSettings = () => clickVerb('settings');
 openProjSettings();
 await tick(20);
 is('project settings lists the agent', true, sheetHas(/which coding CLI/));
-// THE RUNNING MASTER DOES NOT CHANGE, said at the point of change. CLAUDE_FLEET_AGENT is
-// read once, when the tmux session is created; without this the setting reads as broken.
-is('...and says it is the NEXT master', true, sheetHas(/NEXT master/));
+// WHEN THE RUNNING MASTER CHANGES, said at the point of change: after its current turn
+// (lib/agent-switch.sh). It used to say "the NEXT master" and that is now false — the old
+// sentence must be gone, not merely joined by the new one.
+is('...and says the running master switches after its turn', true, sheetHas(/running master switches too, once its current turn ends/));
+is('...and no longer says only the NEXT master gets it', false, sheetHas(/NEXT master/));
 // toolbox is `codex` in the fixture and acme-api has none — both directions on one screen.
 is('...showing a project that has one', true, !!sBtn(/^codex$/));
 is('...and claude for one that has not', true, !!sBtn(/^claude$/));
 sClick(/^claude$/);            // acme-api's row: opens its own sheet
 await tick(20);
 is('a project opens its own agent sheet', true, sheetHas(/agent · /));
-is('...repeating the next-master rule', true, sheetHas(/NEXT master/));
+is('...repeating when the running master switches', true, sheetHas(/running master switches too/));
 sClick(/^opencode$/);
 await tick(5);
 is('...and warns before you save', true, sheetHas(/no fleet_\* tools/));
@@ -1386,22 +1398,29 @@ is('...and the render lands once you let go', true, appmod.renderUnlessTyping())
 // vacuous the moment the emoji became an SVG: an icon-only button has no text, so that
 // regex could no longer match whether synthesis existed or not, and a check that can only
 // pass proves nothing (CLAUDE.md). The class is what the control actually is.
-const speakBtn = () => app.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('speak'));
-const tapBub = () => {
-  const bubs = app.all(n => n.className.split(/\s+/).includes('bub'));
-  const b = bubs[bubs.length - 1];
-  if (b) (b.listeners.click || []).forEach(f => f({ target: b }));
-  return !!b;
-};
-// A phone with no speech synthesis at all: the control must be ABSENT, not dead. This is
-// the first half of the pair — until the stub below lands, canSpeak() is false.
-//   IT TAPS A BUBBLE FIRST, and that is not ceremony. The speaker only exists on a bubble
-// you tapped, so "no button on screen" is ALSO true of a synthesis-capable phone nobody
-// has tapped yet — measured: with canSpeak() forced true, the untapped assertion stayed
-// green. Tapping is what makes the row able to fail.
-is('no bubble offers to be tapped without synthesis', false,
-   !!app.find(n => n.className.split(/\s+/).includes('tappable')));
-is('...and tapping one anyway reveals no speaker', false, (tapBub(), !!speakBtn()));
+// `.speak.tiny` is the per-message control; the top bar's speak-mode toggle (gone now —
+// `talk` replaced it) was also a `.speak`, and a selector that found either would let one
+// stand in for the other.
+const isPlay = (n) => n.tag === 'button' && n.className.split(/\s+/).includes('speak') && n.className.split(/\s+/).includes('tiny');
+const speakBtn = () => app.find(isPlay);
+const playCount = () => app.all(isPlay).length;
+const isToggle = (n) => n.tag === 'button' && n.className.split(/\s+/).includes('automode');
+const realTurns = () => app.all(n => n.className.split(/\s+/).includes('turn') && !n.className.split(/\s+/).includes('thinking') && !n.find(k => k.className.split(/\s+/).includes('pending')));
+// A phone with neither speech synthesis nor Web Audio: the controls must be ABSENT, not
+// dead. This is the first half of the pair — until the stub below lands, canPlay() is false.
+is('no play button without synthesis or Web Audio', 0, playCount());
+is('...and no speak-mode toggle either', false, !!app.find(isToggle));
+// THE SESSION'S TALK BUTTON IS JARVIS'S. Same class, same word, same place — inside the
+// composer, between the box and send — because composer({talk: true}) is the one control
+// both screens draw. It is there without synthesis too: talking needs the Mac's ears and a
+// microphone, and its refusal says which is missing rather than the button being absent.
+const isTalk = (n) => n.tag === 'button' && n.className.split(/\s+/).includes('talk');
+const comp = () => app.find(n => n.className.split(/\s+/).includes('composer'));
+const talkB = () => (comp() || { find: () => null }).find(isTalk);
+is('a session composer has the talk button', 'talk', (talkB() || { textContent: '' }).textContent);
+is('...named for the session it talks to', true, /^talk to \S/.test((talkB() || { attrs: {} }).attrs['aria-label'] || ''));
+is('...right before send, as on Jarvis', 'send',
+   (() => { const k = (comp() || { kids: [] }).kids; const i = k.indexOf(talkB()); return i >= 0 && k[i + 1] ? k[i + 1].textContent : ''; })());
 
 // ── and now WITH synthesis, which is the half that had no DOM test ───────
 // Installed here rather than at the top so the absence above is a real measurement and not
@@ -1414,7 +1433,8 @@ const voiceList = [
 ];
 Object.defineProperty(globalThis, 'speechSynthesis', { configurable: true, writable: true, value: {
   getVoices: () => voiceList,
-  speak: (u) => spoken.push(u.text),
+  // The volume-0 utterance is unlockAudio()'s primer, not something said.
+  speak: (u) => { if (u.volume !== 0) spoken.push(u.text); },
   cancel: () => {},
   addEventListener: () => {},
 } });
@@ -1422,15 +1442,12 @@ Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: tr
   value: function SpeechSynthesisUtterance(t) { this.text = t; } });
 const allVoicesReported = () => { try { return speechSynthesis.getVoices().length; } catch { return 0; } };
 appmod.renderUnlessTyping();
-// NOTHING IS SPOKEN BY THE TAP ITSELF, and nothing is offered before it: the control is
-// revealed by tapping a bubble and belongs to that bubble only (see turn()).
-is('with synthesis, a bubble offers to be tapped', true,
-   !!app.find(n => n.className.split(/\s+/).includes('tappable')));
-is('...but no speaker is on screen until one is tapped', false, !!speakBtn());
-is('...tapped a bubble', true, tapBub());
-is('...which reveals exactly one speaker', 1,
-   app.all(n => n.tag === 'button' && n.className.split(/\s+/).includes('speak')).length);
-is('...and speaks nothing by itself', 0, spoken.length);
+// A PLAY BUTTON ON EVERY MESSAGE (the owner's call, replacing tap-to-reveal): one per
+// turn, counted against the turns rather than pinned to a number the fixture decides.
+is('with synthesis, every message has a play button', true, playCount() > 0 && playCount() === realTurns().length);
+is('...each inside its own turn', true, realTurns().every(t => t.all(isPlay).length === 1));
+is('...and still no speak-mode toggle: talk replaced it', false, !!app.find(isToggle));
+is('...and nothing is spoken by drawing them', 0, spoken.length);
 
 // THE ICON, AND THE ONE PROPERTY THIS CONTROL KEEPS LOSING. It was 🔊 idle / ■ playing —
 // two typefaces, two weights, three times the size — so a tap read as a different button
@@ -1473,6 +1490,79 @@ is('pressing the lit one stops it', false,
    !!(speakBtn() || { className: '' }).className.split(/\s+/).includes('on'));
 is('...without speaking again', 1, spoken.length);
 
+// ── copy one message ─────────────────────────────────────────────────────
+// "copying by hand" brought the screen along: `load 20 older` and every bubble's timestamp
+// interleaved with the text, and the rendered markdown had already lost its pipes and its
+// **. So the button copies the TRANSCRIPT'S text for one message, and these rows compare
+// what reached the clipboard with the fixture byte for byte — a copy of the rendered
+// bubble would pass a "something was copied" check and fail this one.
+{
+  const masterFx = JSON.parse(fs.readFileSync(new URL('../../web/fixtures/session-acme-api-master.json', import.meta.url), 'utf8'));
+  const copyBtns = () => app.all(n => n.tag === 'button' && n.className.split(/\s+/).includes('copy'));
+  const bubs = app.all(n => n.className.split(/\s+/).includes('bub'));
+  // BY THE BUBBLE IT BELONGS TO, not by position: earlier sections send a message, so the
+  // last bubble on screen is not the fixture's last message.
+  const copyFor = (src) => copyBtns().find(b => {
+    const bub = b.parent && b.parent.parent && b.parent.parent.kids[0];
+    return !!bub && bub.textContent.includes(src.split(/[.*`]/)[0]);
+  });
+  is('every message carries a copy button', bubs.length, copyBtns().length);
+  is('...and it is not hidden behind a tap the way the speaker is', true, bubs.length > 0);
+  const first = copyBtns()[0];
+  is('...named for VoiceOver, since an icon has no text', 'copy this message', (first || { attrs: {} }).attrs['aria-label']);
+  is('...in the meta row beside the timestamp, not inside the bubble', true,
+     !!first && /\bmeta\b/.test(first.parent.className));
+  // Route one: the clipboard API, which is what a secure context has.
+  const wrote = [];
+  globalThis.navigator.clipboard = { writeText: (t) => { wrote.push(t); return Promise.resolve(); } };
+  // A message WITH markdown in it, or the row cannot tell the source from the rendered
+  // words: measured, copying the bubble's text passed against a plain sentence.
+  const want = (masterFx.messages.find(m => /`[^`]+`/.test(m.text) && /\*\*/.test(m.text)) || { text: '' }).text;
+  is('...the fixture message carries markdown to lose', true, /`/.test(want) && /\*\*/.test(want));
+  is('...and is on screen to copy', true, !!copyFor(want));
+  click(copyFor(want));
+  await tick(0);
+  is('copy writes the message\'s own source, exactly', want, wrote[0]);
+  is('...one message, not the screen', 1, wrote.length);
+  is('...with no timestamp in it', false, wrote.some(t => /\d{1,2}:\d{2}[ap]/.test(t)));
+  is('...and no "load older" in it', false, wrote.some(t => /load \d+ older/.test(t)));
+  const lit = copyFor(want);
+  is('...and the button says copied', true, !!lit && /copied/.test(lit.textContent) && lit.className.split(/\s+/).includes('done'));
+  is('...in the same slot, not a new one', bubs.length, copyBtns().length);
+  is('...while every other one is still idle', 1, copyBtns().filter(b => b.className.split(/\s+/).includes('done')).length);
+  // A poll lands inside the 1.5s: the feedback is state, so a rebuild draws it again.
+  appmod.renderUnlessTyping();
+  is('a repaint inside the feedback keeps it', 1,
+     copyBtns().filter(b => b.className.split(/\s+/).includes('done')).length);
+  await tick(1600);
+  is('...and it goes back to idle by itself', 0,
+     copyBtns().filter(b => b.className.split(/\s+/).includes('done')).length);
+  // Route two: plain http from a tailnet address is NOT a secure context, and there is no
+  // navigator.clipboard at all. The fallback is a readonly textarea and execCommand.
+  delete globalThis.navigator.clipboard;
+  const execd = [];
+  documentStub.execCommand = (c) => {
+    const ta = documentStub.body.kids.find(k => k.tag === 'textarea');
+    execd.push([c, ta ? ta.value : null, ta ? ta.attrs.readonly : null]);
+    return true;
+  };
+  const firstWant = masterFx.messages[0].text;
+  click(copyFor(firstWant));
+  await tick(0);
+  is('without the clipboard API, copy falls back to execCommand', 'copy', (execd[0] || [])[0]);
+  is('...from a textarea holding the message\'s source', firstWant, (execd[0] || [])[1]);
+  is('...readonly, so iOS raises no keyboard for it', '', (execd[0] || [])[2]);
+  is('...which is gone again afterwards', false, !!documentStub.body.kids.find(k => k.tag === 'textarea'));
+  is('...and still says copied', 1, copyBtns().filter(b => b.className.split(/\s+/).includes('done')).length);
+  // And when neither route works, it SAYS so rather than lighting up green over nothing.
+  documentStub.execCommand = () => false;
+  await tick(1600);
+  click(copyFor(masterFx.messages[masterFx.messages.length - 1].text));
+  await tick(0);
+  is('a copy that failed does not claim it copied', 0, copyBtns().filter(b => b.className.split(/\s+/).includes('done')).length);
+  delete documentStub.execCommand;
+}
+
 // ── the ten buttons are one sheet now ───────────────────────────────────
 is('the verb wall is gone', false, !!btnWith(/answer keys/));
 click(btnWith(/⋯/));
@@ -1486,6 +1576,13 @@ is('...no reclaim either', false, !!acts && /reclaim worktree/.test(acts.textCon
 is('...nor rename', false, !!acts && /r\s+rename/.test(acts.textContent));
 is('...nor pause', false, !!acts && /p  pause/.test(acts.textContent));
 is('...and it says why', true, !!acts && /cannot be stopped, reclaimed, renamed or paused/.test(acts.textContent));
+closeSheetFromTest();
+// The lead's pane is not waiting on a key: the answer sheet says so and offers none.
+click(btnWith(/⋯/));
+click(sheetHost.find(n => n.tag === 'button' && /answer keys/.test(n.textContent)));
+is('with no prompt on screen, answer keys says so', true,
+   await until(() => !!sheetHost.firstChild && /no prompt on screen/.test(sheetHost.firstChild.textContent), 4000));
+is('...and offers no answer button', false, !!sheetHost.find(n => n.tag === 'button' && /^\s*answer\s*$/.test(n.textContent)));
 closeSheetFromTest();
 
 // ── the back gesture, which had nothing to pop before ───────────────────
@@ -1517,6 +1614,21 @@ is('a worker keeps kill', true, !!wacts && /kill/.test(wacts.textContent));
 is('...and stop + reclaim', true, !!wacts && /reclaim worktree/.test(wacts.textContent));
 is('...and rename', true, !!wacts && /rename/.test(wacts.textContent));
 is('...and pause', true, !!wacts && /pause/.test(wacts.textContent));
+closeSheetFromTest();
+
+// ── answer keys answers the prompt it SHOWS, and nothing else ──────────
+// api-fix's pane is a real permission dialog ("Do you want to create hello.txt?"). The
+// sheet reads the pane first and says what it is about to answer, with its options as
+// buttons; the lead's pane has no prompt, and there the sheet refuses to offer keys at all,
+// because keys with no prompt to receive them become a message.
+click(btnWith(/⋯/));
+click(sheetHost.find(n => n.tag === 'button' && /answer keys/.test(n.textContent)));
+is('the answer sheet names the prompt', true,
+   await until(() => !!sheetHost.firstChild && /asks to run/.test(sheetHost.firstChild.textContent), 4000));
+is('...its tool', true, /Create file/.test(sheetHost.firstChild.textContent));
+is('...and its options, as buttons', true,
+   !!sheetHost.find(n => n.tag === 'button' && /^\s*1\.\s+Yes\s*$/.test(n.textContent))
+   && !!sheetHost.find(n => n.tag === 'button' && /^\s*3\.\s+No\s*$/.test(n.textContent)));
 closeSheetFromTest();
 
 // ── the banner that pays for the new default ────────────────────────────
@@ -1664,32 +1776,17 @@ is('the indicator is measured on a client that can speak', true,
 appmod.renderUnlessTyping();
 await tick(5);
 const lastAgentBub = () => bubs().filter(n => n.className.split(/\s+/).includes('agent')).pop();
-is('with synthesis, a real agent turn is tappable', true,
-   lastAgentBub().className.split(/\s+/).includes('tappable'));
-is('...and nothing in the indicator is', false, tSub('tappable'));
-// A bubble's handler reads e.target (a tap on a link inside it must not toggle the
-// control), so it needs a real event — `click()` above fires with none, which is fine for
-// a button and is not for this.
-const tapBubble = (n) => (n.listeners.click || []).forEach(f => f({ target: n }));
-tapBubble(lastAgentBub());
-await tick(5);
-// MATCHED ON THE CLASS. These two read `btnWith(/🔊/)` and a count of buttons whose text is
-// /🔊|🔇/, which the SVG control cannot satisfy in either direction — an icon-only button
-// has no text at all. Both went red on the rebase rather than quietly vacuous, which is the
-// good version of this, but the claim they make is about the control existing and being
-// unique, not about which glyph it wears.
-is('...tapping a real turn reveals a play control', true, !!speakBtn());
-is('...exactly one, on the turn that was tapped', 1,
-   app.all(n => n.tag === 'button' && n.className.split(/\s+/).includes('speak')).length);
+is('with synthesis, a real agent turn has its play control', true,
+   !!lastAgentBub() && realTurns().some(t => t.find(k => k === lastAgentBub()) && t.all(isPlay).length === 1));
+// MATCHED ON THE CLASS, never on a glyph: an icon-only button has no text at all.
 is('...and never on the indicator', 0, tButtons());
-// WHERE IT LANDS, with the indicator on screen. The control belongs to the meta row of the
-// turn you tapped; the indicator is a sibling at the end of the same list, so "it is in the
-// list somewhere" is not the same claim as "it is in that turn". Both are asserted, because
-// a control that drifted to the end would look correct in a screenshot of one message.
+// WHERE THEY LAND, with the indicator on screen. Every control belongs to the meta row of
+// its own turn; the indicator is a sibling at the end of the same list, so "they are in the
+// list somewhere" is not the same claim as "each is in its turn".
 const turnsWithSpeaker = () => app.all(n => n.className.split(/\s+/).includes('turn'))
-  .filter(t => !!t.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('speak')));
-is('...inside one turn, next to that turn\'s own bubble', true,
-   turnsWithSpeaker().length === 1 && !!turnsWithSpeaker()[0].find(n => n.className.split(/\s+/).includes('bub')));
+  .filter(t => !!t.find(isPlay));
+is('...one per turn, each next to that turn\'s own bubble', true,
+   turnsWithSpeaker().length === playCount() && turnsWithSpeaker().every(t => !!t.find(n => n.className.split(/\s+/).includes('bub'))));
 is('...and the indicator is still the last thing in the list', true, (() => {
   const k = chatKids(); return k.length > 0 && k[k.length - 1].className.split(/\s+/).includes('thinking');
 })());
@@ -1713,10 +1810,9 @@ is('...and the indicator is still the last thing in the list', true, (() => {
   is('the indicator goes when the session stops working', true,
      await until(() => !thinkingNode(), 4000));
   await tick(5);
-  // The revealed control is drawn from S.speakSel on every render, and the renders that
-  // add and remove the indicator are renders like any other — so the tapped turn must
-  // still have its speaker, and still only one, on both edges.
-  is('...and the tapped turn keeps its speaker', 1, turnsWithSpeaker().length);
+  // The renders that add and remove the indicator are renders like any other — so every
+  // turn must still have exactly its one speaker on both edges.
+  is('...and every turn keeps its speaker', true, turnsWithSpeaker().length === realTurns().length);
   const gone = chatBox();
   is('...and the list really did get shorter', true, gone.scrollHeight < tallWith);
   is('...and the reader has not moved', parkedAt, gone.scrollTop);
@@ -1727,8 +1823,8 @@ is('...and the indicator is still the last thing in the list', true, (() => {
   await pollTick();
   is('the indicator comes back when work resumes', true, await until(() => !!thinkingNode(), 4000));
   await tick(5);
-  is('...and the speaker is still on that turn, not on the indicator', '1,0',
-     [turnsWithSpeaker().length, tButtons()].join(','));
+  is('...and the speakers are still on the turns, not on the indicator', 'true,0',
+     [turnsWithSpeaker().length === realTurns().length, tButtons()].join(','));
   const back = chatBox();
   is('...and the list is taller again', tallWith, back.scrollHeight);
   is('...and the reader STILL has not moved', parkedAt, back.scrollTop);

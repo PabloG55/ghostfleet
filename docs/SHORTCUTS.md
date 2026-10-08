@@ -276,8 +276,11 @@ say why. The blurb under the column carries the short form of what choosing it g
 the full version is the capability matrix in
 [docs/multi-agent-sessions.md](multi-agent-sessions.md).
 
-**A master that is already running does not change.** The setting is read when a master is
-created, so this takes effect on the next one.
+**The running master switches too** — at once when idle, after its current turn when not,
+with `switching to <agent>…` on the row until it does. Switching back resumes the
+conversation that agent had (codex cannot, and the row says it starts fresh). A failed
+switch leaves the old agent running and puts its reason on the row. See
+[docs/OPERATIONS.md](OPERATIONS.md) for the details.
 
 `Esc`/`` ` ``/`Ctrl-C` closes the settings screen, no confirmation needed.
 
@@ -368,7 +371,9 @@ its own name — no naming prompt, that's only for the "+ new session" flow (see
 
 `↑↓`/`k j` move between sessions; `space`/`⏎` cycles that specific session's push
 (`notify-lead`) override — more specific than the Projects screen's per-project toggle
-(wins over it, per the precedence in `hooks/fleet-event.sh`). `Esc`/`q`/`` ` `` closes.
+(wins over it, per the precedence in `hooks/fleet-event.sh`). In a sub-lead's sub-grid
+a child set to `inherit` follows the sub-lead's own setting first, then the project's off
+switch, and otherwise wakes its sub-lead — the row says which. `Esc`/`q`/`` ` `` closes.
 
 **`r` — rename** [not upstream yet — added locally, see the fork's PR]: opens a rename
 screen for the selected session, pre-filled with its current name, fully editable
@@ -473,6 +478,7 @@ work at stack width, and the governor's 5h usage scrape cannot read a pane narro
 | `fleet-worktrees` | inventory of worktrees + which are free |
 | `fleet-list` | live sessions + status |
 | `fleet-inbox` | who needs attention / who finished |
+| `fleet-ledger [s] [list\|all\|close <id>\|clear]` | a Claude session's open requests and promises (the mod's ledger); `/ledger` inside the session |
 | `fleet-spawn <n> --new --prompt "..."` | isolated worker (new worktree) |
 | `fleet-spawn <n> --reuse <wt>` | reuse a free worktree |
 | `fleet-send <s> "..."` | new task (only if the session is free) |

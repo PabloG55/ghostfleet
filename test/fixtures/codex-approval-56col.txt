@@ -1,0 +1,30 @@
+  Tip: Use /mcp to list configured MCP tools.
+
+
+› Run this shell command and write the file outside the
+  sandbox (request escalation): touch /private/tmp/gf-
+  cap/notes.txt
+
+
+• I’ll request escalation to create the file outside the
+  read-only sandbox.
+
+• Running touch /private/tmp/gf-cap/notes.txt
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: Allow creating /private/tmp/gf-cap/notes.txt
+  outside the read-only sandbox?
+
+  $ touch /private/tmp/gf-cap/notes.txt
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start
+     with `touch /private/tmp/gf-cap/notes.txt` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

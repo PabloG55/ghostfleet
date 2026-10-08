@@ -128,8 +128,8 @@ is_sha() { case "$1" in *[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = 40 ]; }
 # unconditionally. Seen live: TCC denied one directory and cf-sync reported success over
 # the top of rsync's own error.
 #
-#     rsync(87193): error: open /Users/pgarces/…/ghostfleet/web/: Operation not permitted
-#     cf-sync: synced runtime  /Users/pgarces/…/ghostfleet  ->  /Users/pgarces/.local/…
+#     rsync(87193): error: open /Users/you/…/ghostfleet/web/: Operation not permitted
+#     cf-sync: synced runtime  /Users/you/…/ghostfleet  ->  /Users/you/.local/…
 #
 # That is worse than failing: a success line is what you check BEFORE concluding the
 # runtime is current, so the one safeguard against the repo-vs-runtime trap at the top of
@@ -209,7 +209,11 @@ if [ -f "$REPO/vite.config.mjs" ] && [ -d "$REPO/web/src" ]; then
 fi
 
 failed=""
-for d in bin lib tmux hooks mcp skill layouts web; do
+# `mods` and `.claude-plugin` are the Claude Code mod and the marketplace that lists it.
+# The runtime IS that marketplace (bin/fleet-mod), and a folder marketplace is read in
+# place, so this copy is the whole of deploying a change to the mod: a new session loads
+# it, a running one on /reload-plugins.
+for d in bin lib tmux hooks mcp skill layouts web mods .claude-plugin; do
   [ -d "$REPO/$d" ] || continue
   if command -v rsync >/dev/null 2>&1; then
     rsync -a --delete "$REPO/$d/" "$DEST/$d/"; rc=$?
@@ -261,6 +265,13 @@ else
   # record is none. Any older stamp is about code that is no longer in $DEST.
   rm -f "$STAMP"
 fi
+
+# THE RELEASE, beside the commit. An npm install has no commit to stamp above, so this is
+# the only thing that says which version the runtime holds — what `ghostfleet` compares
+# with npm's latest. Removed when unreadable, for the stamp's reason: a stale claim is
+# worse than none.
+ver="$(sed -n 's/^  "version": *"\([^"]*\)".*/\1/p' "$REPO/package.json" 2>/dev/null | head -1)"
+if [ -n "$ver" ]; then printf '%s\n' "$ver" > "$DEST/.version"; else rm -f "$DEST/.version"; fi
 
 echo "cf-sync: synced runtime  $REPO  ->  $DEST"
 echo "  (the ~/.local/bin symlinks + settings hook + MCP already point here; no relink needed)"

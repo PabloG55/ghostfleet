@@ -26,7 +26,7 @@
 #             objection happens in the lead and the outcome happens in the worker, and
 #             nothing else joins those two transcripts.
 #   --model   model for the new session (e.g. opus); default = account default
-#   --agent   which coding CLI runs the session (claude | opencode | codex).
+#   --agent   which coding CLI runs the session (claude | opencode | codex | agy | cursor).
 #             Default claude. See bin/fleet-agent for what each one can actually
 #             report back — a non-claude worker is not metered by the governor, and
 #             an unverified agent's card shows "unknown" rather than a status it
@@ -119,28 +119,42 @@ fi
 
 GITROOT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" \
   || { echo "fleet-spawn: not inside a git repo" >&2; exit 1; }
-# A WORKER MUST NOT SPAWN WORKERS. Run from inside a linked worktree, this would add
-# another worktree beside the one you are already sitting in — which is what happens
-# when a session finishes a PR, is told "branch off fresh staging", and reaches for the
-# orchestrate skill instead of just re-branching where it stands. The fleet's shape is
-# master in the main checkout and workers as leaves; nesting is never what was meant.
+# A WORKER CAN RUN ITS OWN WORKERS — ONE LEVEL DOWN, AND NO FURTHER.
+#
+# This used to refuse outright from a linked worktree, on the reasoning that a worker
+# spawning was always a session that had finished a PR and reached for the orchestrate
+# skill instead of re-branching where it stood. That was half the story. A worker acting
+# as the master of its own task had no way to dispatch THROUGH the fleet: refused here,
+# and waved through by hooks/fleet-guard.sh ("a leaf has no fleet-spawn alternative"), it
+# either ran subagents the fleet cannot see, or ran this from the main checkout — which
+# made its four children flat siblings of the top lead. Their done and need-you went to a
+# master that had not asked for them, and nothing tied them to the lead they belonged to.
+#
+# So a spawn from a linked worktree now makes a CHILD of the session standing in it:
+#   - branched off THAT session's branch (not staging), and told to PR into it — the
+#     sub-lead integrates, and opens the one PR to the integration branch
+#   - on the same fleet, tagged with its parent in <fleet dir>/<sock>.<child>.parent
+#   - its done / need-you go to the sub-lead's inbox and wake the sub-lead (fleet-event.sh)
+# EXACTLY TWO LEVELS: a session that is itself a child cannot spawn. That is the leaf rule
+# the old refusal enforced, moved one level down — a tree of arbitrary depth is a tree
+# nobody can read from its root.
+#
+# WHO IS THE PARENT is resolved below, once the socket is final (route_to_owner can move
+# it): the calling pane's session, else the session standing in this worktree. A linked
+# worktree with no session in it has nobody to be a child OF, and still gets the old
+# refusal — that shape is still a shell that wandered into a worktree, not a lead.
 #   A linked worktree has its own git-dir under the shared common dir; the main
 # checkout's two are the same path. That is exact, unlike guessing from the folder name.
+LINKED_ROOT=""
 if [ "${CLAUDE_FLEET_ALLOW_NESTED:-0}" != 1 ] \
    && [ "$(git -C "$PWD" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$PWD" rev-parse --git-common-dir 2>/dev/null)" ]; then
+  LINKED_ROOT="$GITROOT"
+  # Everything downstream — where the child's worktree goes, which project owns the repo,
+  # whose node_modules to link — is a question about the REPO, and the answer is its main
+  # checkout. Asked from inside the sub-lead's tree, a repo with a .worktrees/ convention
+  # would nest the child inside the parent's checkout.
   _main="$(git -C "$PWD" worktree list 2>/dev/null | head -1 | awk '{print $1}')"
-  _br="$(git -C "$PWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-  { echo "fleet-spawn: this session is ALREADY in a worktree ($GITROOT, branch $_br)."
-    echo "  Spawning here would add another one beside it, which is almost never what was meant."
-    echo
-    echo "  Starting fresh work in THIS worktree — no new worktree, no new session:"
-    echo "      git fetch origin && git checkout -B <new-branch> origin/staging"
-    echo
-    echo "  Really want another worker? Run it from the main checkout:"
-    echo "      (cd ${_main:-<main checkout>} && fleet-spawn $NAME …)"
-    echo "  or from a lead, fleet_spawn with project: \"<name>\" — it runs there for you."
-    echo "  Override deliberately with CLAUDE_FLEET_ALLOW_NESTED=1."; } >&2
-  exit 1
+  [ -n "$_main" ] && [ -d "$_main" ] && GITROOT="$_main"
 fi
 
 # ── IS THIS BRIEF ONE THING, AND DOES IT SAY WHAT DONE LOOKS LIKE? ───────────
@@ -382,6 +396,62 @@ sess_for() {
 $panes
 EOF
 }
+# ── WHOSE CHILD IS THIS? (a spawn from a linked worktree — see the top) ──────
+# Asked only now, because the socket is final only now: route_to_owner can move it, and a
+# parent is a session ON a socket. Most definite first:
+#   the calling PANE     $TMUX_PANE on this very fleet — the session that ran the command
+#   $CLAUDE_FLEET_SLOT   the name the session was launched with, when it is live here and
+#                        standing in this worktree (an MCP server inherits it, not a pane)
+#   whoever stands here  the session whose pane is in this worktree
+# `master` is never a parent: the lead is the top of the tree by definition, and a master
+# whose pane has wandered into a worktree is still spawning top-level workers.
+FLEET_DIR_NOW="${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}"
+PARENT_SESS=""; PARENT_BRANCH=""
+if [ -n "$LINKED_ROOT" ]; then
+  case "${TMUX:-}" in *"/$SOCK,"*)
+    [ -n "${TMUX_PANE:-}" ] && PARENT_SESS="$(tmux -L "$SOCK" display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" ;; esac
+  if [ -z "$PARENT_SESS" ] && [ -n "${CLAUDE_FLEET_SLOT:-}" ]; then
+    _here="$(sess_for "$LINKED_ROOT")"
+    [ -n "$_here" ] && tmux -L "$SOCK" has-session -t "$CLAUDE_FLEET_SLOT" 2>/dev/null \
+      && case "$(tmux -L "$SOCK" display-message -p -t "$CLAUDE_FLEET_SLOT" '#{pane_current_path}' 2>/dev/null)" in
+           "$LINKED_ROOT"|"$LINKED_ROOT"/*) PARENT_SESS="$CLAUDE_FLEET_SLOT" ;; esac
+  fi
+  [ -n "$PARENT_SESS" ] || PARENT_SESS="$(sess_for "$LINKED_ROOT")"
+  _br="$(git -C "$LINKED_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  if [ -z "$PARENT_SESS" ]; then
+    { echo "fleet-spawn: this is ALREADY in a worktree ($LINKED_ROOT, branch $_br), with no fleet session in it."
+      echo "  A spawn from a worktree makes a child of the session standing there, and there is none."
+      echo
+      echo "  Starting fresh work in THIS worktree — no new worktree, no new session:"
+      echo "      git fetch origin && git checkout -B <new-branch> origin/staging"
+      echo
+      echo "  A top-level worker comes from the main checkout:"
+      echo "      (cd $GITROOT && fleet-spawn $NAME …)"
+      echo "  Override deliberately (a flat sibling, no parent) with CLAUDE_FLEET_ALLOW_NESTED=1."; } >&2
+    exit 1
+  fi
+  if [ "$PARENT_SESS" != master ] && [ -f "$FLEET_DIR_NOW/$SOCK.$PARENT_SESS.parent" ]; then
+    _gp="$(head -1 "$FLEET_DIR_NOW/$SOCK.$PARENT_SESS.parent" 2>/dev/null)"
+    { echo "fleet-spawn: '$PARENT_SESS' is a sub-worker (of '$_gp') — a sub-worker cannot spawn workers."
+      echo "  Do the work here, in $LINKED_ROOT. If it needs splitting, say so to '$_gp' and let it spawn."
+      echo
+      echo "  Exactly two levels: master → sub-lead → workers. A tree any deeper is one nobody can"
+      echo "  read from its root, and its events would have to climb through a lead that is itself"
+      echo "  somebody's worker. Nothing was created."; } >&2
+    exit 1
+  fi
+  if [ "$PARENT_SESS" = master ]; then
+    PARENT_SESS=""                              # the lead's workers are top-level, as ever
+  else
+    PARENT_BRANCH="$_br"
+    # The child starts from what the sub-lead has, not from the integration branch: its PR
+    # goes into the sub-lead's branch, and a base the sub-lead does not have would bring
+    # the sub-lead a diff full of somebody else's work. An explicit --from still wins.
+    [ -n "$FROM" ] || FROM="$PARENT_BRANCH"
+    echo "fleet-spawn: spawning from the worktree of '$PARENT_SESS' — '$NAME' will be its child, on $PARENT_BRANCH" >&2
+  fi
+fi
+
 free_worktrees() {                     # "<label> (<branch>, clean)" per free worktree
   # ASK fleet-worktrees, which looks across every clone under the project root. That is
   # the whole reason this guard was toothless here: a project can be several independent
@@ -701,6 +771,15 @@ else
     fleet-agent set -s "$SOCK" "$name" "$AGENT" 2>/dev/null
 fi
 
+# THE PARENT TAG, before the session starts for the reason the agent marker is: the hook
+# reads it on the child's FIRST event, and a killed same-named session may have left one
+# behind — a top-level worker must not inherit a stranger's parent and report to it.
+if [ -n "$PARENT_SESS" ]; then
+  printf '%s\n' "$PARENT_SESS" > "$FLEET_DIR_NOW/$SOCK.$name.parent" 2>/dev/null
+else
+  rm -f "$FLEET_DIR_NOW/$SOCK.$name.parent" 2>/dev/null
+fi
+
 # SAY "STARTED" ONLY WHEN A SESSION IS ACTUALLY THERE.
 #
 # This printed the success line unconditionally, one line below a `new-session` whose
@@ -761,6 +840,7 @@ session_live() {                   # is $sid still a session on this fleet?
 # a message whose advice that form throws away. Headline, cause, what to run, what is on
 # disk — then the reasoning, which is the part that can afford to be cut.
 spawn_failed() {                   # <headline> <cause> [<hint>] — and NAME what is on disk
+  rm -f "$FLEET_DIR_NOW/$SOCK.$name.parent" 2>/dev/null   # a tag names a session; there is none
   { echo "fleet-spawn: $1"
     echo "  $2"
     [ -n "${3:-}" ] && echo "  $3"
@@ -796,6 +876,9 @@ session_live || spawn_failed \
   "Check that first: '$( [ "$AGENT" = claude ] && echo claude || echo "$AGENT" ) --version'. A package update mid-install leaves one that cannot run."
 
 echo "fleet-spawn: started '$name' in $WT (branch $BRANCH)${AGENT:+ [agent: $AGENT]}"
+# A LINE OF ITS OWN, after the one fleet-grid.mjs parses (/started '([^']+)'/), so that
+# parse is untouched and a reader of either stream sees the tree.
+[ -n "$PARENT_SESS" ] && echo "fleet-spawn: '$name' is a child of '$PARENT_SESS' — branched from $PARENT_BRANCH, its PR goes into $PARENT_BRANCH, and its done/need-you go to '$PARENT_SESS'"
 
 # record what this worktree is for, so fleet-worktrees (and a lead that restarted
 # and lost its memory) can see intent without guessing. Keyed by worktree path.
@@ -854,6 +937,14 @@ fi
 # would wait the full fallback before its prompt landed. An agent with NO known ready
 # marker (an unverified adapter) skips straight to the timed fallback rather than
 # polling for a pattern that can't appear.
+# A CHILD IS TOLD WHERE ITS WORK GOES, in the brief itself, because a brief is read once
+# and the default every worker carries is "open the PR against the integration branch".
+# The parent tag steers the events; only this steers the PR. After the brief-check marker,
+# for the reason that marker trails: the head of the brief is the human's ask.
+if [ -n "$PROMPT" ] && [ -n "$PARENT_SESS" ]; then
+  DISPATCH_PROMPT="$DISPATCH_PROMPT
+nested-lead: you are a sub-worker of '$PARENT_SESS'. Your branch was cut from $PARENT_BRANCH; open your PR against $PARENT_BRANCH (gh pr create --base $PARENT_BRANCH), not against the integration branch — '$PARENT_SESS' merges it and opens the one PR upward. Your done and need-you go to '$PARENT_SESS', not to master. You cannot spawn workers of your own."
+fi
 if [ -n "$PROMPT" ]; then
   READY_RE='❯|bypass permissions|for shortcuts'
   if [ "$AGENT" != claude ] && command -v fleet-agent >/dev/null 2>&1; then

@@ -104,13 +104,16 @@ nothing on screen to say why.
 wiring landed, because the cost of the choice is the part that had to be established rather
 than guessed:
 
-| | claude | opencode | codex |
-|---|---|---|---|
-| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ❌ **nothing** |
-| ghostfleet MCP registered | ✅ per profile, in `.claude.json` | ✅ `opencode.jsonc` | ✅ `~/.codex/config.toml` |
-| …and a call with no `project` finds its own fleet | ✅ | ✅ | ❌ **name it every time** |
-| orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ❌ |
-| resume across a pane kill | ✅ | ✅ | ❌ |
+| | claude | opencode | codex | agy | cursor |
+|---|---|---|---|---|---|
+| fleet event hooks | ✅ `settings.json` | ✅ `opencode-fleet-event.js` | ❌ **nothing** | ✅ `~/.gemini/config/hooks.json` (done + working; no permission event) | ✅ `~/.cursor/hooks.json` (done + working + need-you on an error; no permission event) |
+| ghostfleet MCP registered | ✅ per profile, in `.claude.json` | ✅ `opencode.jsonc` | ✅ `~/.codex/config.toml` | ✅ `~/.gemini/config/mcp_config.json` | ✅ `~/.cursor/mcp.json` |
+| …and a call with no `project` finds its own fleet | ✅ | ✅ | ❌ **name it every time** | ✅ | ❌ **name it every time** |
+| orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ❌ | ✅ `~/.gemini/config/skills/` | ✅ `~/.cursor/skills/` |
+| resume across a pane kill | ✅ | ✅ | ❌ | ✅ | ✅ |
+
+agy was added on 2026-10-01 and cursor on 2026-10-06, both measured the same way — see
+[agy](#agy-antigravity-cli) and [cursor](#cursor-cursor-agent) below.
 
 The MCP row went green for all three on 2026-08-27, and the row under it is what that did
 *not* buy. **MCP gives tools; hooks give push events**, and one is not a substitute for the
@@ -153,6 +156,10 @@ master never reaches the inbox reads as broken rather than as degraded.
 | OpenCode launch/resume | `bin/opencode-here` |
 | Codex launch | `bin/codex-here` |
 | OpenCode → fleet events | `hooks/opencode-fleet-event.js` |
+| agy launch/resume | `bin/agy-here` |
+| agy → fleet events | `hooks/agy-fleet-event.sh` |
+| cursor launch/resume | `bin/cursor-here` |
+| cursor → fleet events | `hooks/cursor-fleet-event.sh` |
 
 A session's agent is recorded in `<sock>.<session>.agent`, alongside the existing
 `.parked` / `.sched` / `.notify-lead` markers and socket-namespaced for the same
@@ -426,3 +433,196 @@ instructions for using them.
 session and lives as long as it, so a session open when the installer ran keeps the server
 it started with. `install.sh` says this in its own output, because the person who needs it
 has usually just re-run the installer to fix exactly this.
+
+## agy (Antigravity CLI)
+
+Measured 2026-10-01 against **agy 1.2.14** on macOS, signed in, in tmux panes at 30, 40,
+56, 80, 120, 140 and 200 columns. Everything below was observed, not read off docs; where
+agy's own embedded docs disagreed with the binary, the binary won.
+
+**One configuration root.** agy reads `~/.gemini/config/` globally: `hooks.json`,
+`mcp_config.json` and `skills/<name>/SKILL.md`. So `install.sh`'s `register_agy` gives it
+all three halves from one place — events, tools and the orchestrate skill — which makes it
+the one non-claude agent with the skill. `fleet-agent caveat agy` is empty.
+
+**Events.** agy has lifecycle hooks (`PreToolUse`, `PostToolUse`, `PreInvocation`,
+`PostInvocation`, `Stop`), JSON on stdin, JSON expected on stdout. `hooks/agy-fleet-event.sh`
+translates the two that matter into the payload `hooks/fleet-event.sh` already reads and
+pipes it through, so the inbox, sub-lead routing, lead wake and reply-to relay are the same
+code for every agent:
+
+| agy event | fleet event |
+|---|---|
+| `PreInvocation`, `invocationNum` 0 | `UserPromptSubmit` → working, un-park |
+| `PreInvocation`, later | working |
+| `Stop`, `terminationReason` contains "error" | `need-you` |
+| `Stop`, otherwise | `ready` + `done` |
+
+Measured with a probe hook: one turn that called three tools fired `PreInvocation` with
+`invocationNum` 0, 1, 2, 3 and then one `Stop` with `terminationReason: "NO_TOOL_CALL"` —
+upper case, where the embedded docs say `model_stop`. The hook inherits the session's
+environment (`CLAUDE_FLEET_SOCK`, `CLAUDE_FLEET_SLOT`, `$TMUX`, `$TMUX_PANE` all arrived).
+**There is no permission-asked event**, so a tool prompt is seen only on the pane.
+
+Two traps, both measured:
+
+- **A `PreToolUse` handler that prints `{}` denies the tool.** `decision` is required, and
+  every tool call in the probe session came back "tool call denied by pre-tool hook". The
+  bridge registers no `PreToolUse`, and the suite asserts it stays that way.
+- **agy's own transcript is not Claude's shape** (one step per line, the model's text in a
+  `PLANNER_RESPONSE` step's `content`), so the bridge writes the turn's last response into a
+  fleet-side `<sock>.<slot>.agy.jsonl` in the shape the grid reads, as the opencode bridge does.
+
+**The pane.**
+
+```
+⣟  The system ensures safety by preventing simultaneo...      <- working: spinner at column 0
+esc to cancel                    Gemini 3.8 Flash · high       <- footer while a turn runs
+? for shortcuts                  Gemini 3.8 Flash · high       <- footer when idle
+```
+
+The footer is the obvious busy signal and the wrong one: it **still says `esc to cancel`
+while a permission dialog waits on a human**, so it reads a blocked worker as working. The
+spinner line is present in every working frame (366 of them, all eight braille glyphs,
+always followed by two spaces) and absent from the dialog, so `busy_re` is the spinner at
+column 0. agy indents its own prose by two, which is what keeps a model writing *about* a
+spinner from matching. `blocked_re` is the dialog's `Requesting permission for:` or the
+trust prompt; `ready_re` is the idle footer — not the `> ` composer, which the trust dialog
+also draws.
+
+**Resume.** `agy -c` is cwd-scoped (codeword in repoA, newer conversation in repoB, `-c`
+from each answered with its own) and survives a pane kill (codeword planted in a TUI pane,
+tmux server killed, `-c` recalled it). `agy --conversation <id>` with an id that does not
+exist **warns and starts a fresh conversation, exit 0**, so `agy-here` checks for
+`conversations/<id>.db` and refuses instead.
+
+**Trust.** Every folder agy has not seen opens on "Do you trust the contents of this
+project?", `--dangerously-skip-permissions` does not cover it, and trust is **not**
+inherited — a fresh folder under an already-trusted `$HOME` still asked. Every new worktree
+would therefore come up on the dialog and have its brief typed into it, so under yolo
+`agy-here` appends the worktree's physical path to `trustedWorkspaces`, the same answer the
+dialog records — the shape `codex-here` already uses for codex's trust table.
+
+## cursor (`cursor-agent`)
+
+Measured 2026-10-06 against **cursor-agent 2026.10.01-e373342** on macOS, signed in on a free
+plan, in tmux panes at 30, 40, 56, 80, 120, 140 and 200 columns, and then as a real worker:
+`fleet-spawn --agent cursor` into a scratch project on its own socket and its own fleet dir.
+Where cursor's bundled docs and the binary disagreed, the binary won.
+
+The installer puts it at `~/.local/bin/cursor-agent` **and** `~/.local/bin/agent`. The second
+name is generic enough to be anything on another machine's PATH, so the fleet runs only
+`cursor-agent`.
+
+**One configuration root, shared with the IDE.** `~/.cursor/` holds `hooks.json`, `mcp.json`
+and `skills/<name>/SKILL.md`, and `install.sh`'s `register_cursor` writes all three. The
+Cursor IDE reads the same files, so every write merges into them, and the first time a file
+that already existed is changed its original is copied to `<file>.pre-ghostfleet` — once,
+never refreshed by a later run. `CURSOR_CONFIG_DIR` moves cursor's settings and chats but
+**not** these two JSON files, whose paths it builds from the home directory; the installer
+follows the binary, not the variable.
+
+**It also runs Claude's hooks.** cursor's hook loader reads `~/.claude/settings.json`
+beside its own `hooks.json` (Claude-compatibility, on by default, no switch found) and the
+orchestrate skill from `~/.claude/skills/` the same way. The hooks get **cursor's** payload:
+cursor's event names (`stop`, `beforeSubmitPrompt`, `sessionStart`), no `cwd`, cursor's
+transcript. Before this change a cursor session in a fleet pane was therefore already writing
+records through `fleet-event.sh`: measured, one landed in the live fleet dir with status
+`working`, an empty cwd, and the slot of the pane that launched the session. `fleet-event.sh`
+now drops any payload that carries `cursor_version`. The bridge's own payload never does, and
+the check reads the key, not the bytes, so a Claude prompt that merely mentions the key is
+unaffected.
+
+**Events.** `hooks/cursor-fleet-event.sh` is registered for two of cursor's events and
+translates them into the payload `fleet-event.sh` reads, like the agy bridge:
+
+| cursor event | fleet event |
+|---|---|
+| `beforeSubmitPrompt` | `UserPromptSubmit` → working, un-park, arm a reply-to relay |
+| `stop`, `status: "error"` | `need-you`, with the transcript's own error text |
+| `stop`, otherwise | `ready` + `done` |
+
+A probe hook on every event showed the order of one turn: `beforeSubmitPrompt`, then the tool
+events, then `afterAgentResponse` and `stop` in the same second and in **either order**. So the
+card's last message is read at `stop` from cursor's transcript, not taken from
+`afterAgentResponse`. That transcript is almost Claude's shape, keyed on `role` where the grid
+reads `type`, so the bridge appends the turn's last assistant text to a fleet-side
+`<sock>.<slot>.cursor.jsonl`. The error mapping was seen for real: the free plan refuses every
+named model ("Free plans can only use Auto"), and that turn ended `status: "error"`. **There is
+no permission-asked event**: `beforeShellExecution` fires before cursor's own approval check,
+the same for a command it will allow as for one it is about to ask about. Every event carries
+the account's email (`user_email`). The bridge passes on only the named fields, and the suite
+checks that the address reaches no file.
+
+**The pane.**
+
+```
+ ⠰⠰ Working                                                <- working: two braille cells at column 1
+  → Add a follow-up                       ctrl+c to stop   <- the composer, WHILE a turn runs
+  → Add a follow-up                                        <- the composer when idle
+```
+
+- **busy** is the spinner line: one space, a two-cell braille spinner, a space, the phase
+  (`Working`, `Running`). Across 333 frames it matched all 129 working frames and nothing else.
+  The composer's `ctrl+c to stop` is never drawn without the spinner, but the spinner sometimes
+  appears without it: the first frame of a turn draws the spinner a beat before the hint.
+  Neither is drawn while the permission dialog waits, so cursor does not have agy's footer
+  trap. Column 1 is the prose guard, because cursor indents everything it prints by two.
+- **A still frame lied.** The first captures resized the pane every quarter second, and
+  every one froze on `⠀⠞`, so the first regex spelled U+2800 as the spinner's first cell.
+  A turn left alone at one width animated through eight frames (`⠀⠞ ⠰⠰ ⠘⠆ ⠰⠳ ⠠⠜ ⠘⠤ ⠠⠛ ⠘⠣`).
+  That regex missed 21 of the turn's 25 working frames, and the grid called the worker ready
+  three seconds before it finished.
+- **…and "any glyph" was too loose.** Overcorrecting, the next regex took the spinner as a run
+  of anything but letters and digits, and signing in leaves ` ✓ Login successful!` above the
+  fresh composer: column 1, one space, a glyph, a capitalised word. Busy outranks ready, so a
+  just-signed-in worker read working while it sat idle. The spinner is now the braille block
+  (U+2800–U+28FF) and nothing else; `cursor-idle-after-login.txt` is that pane.
+- **ready** is the placeholder alone on its line. `→ Add a follow-up` is also drawn while
+  the turn runs, with the stop hint after it, so a placeholder match alone read every busy
+  pane as ready.
+- **blocked** is the dialog's `Run this command?` (at column 1), the trust box's live
+  selector `▶ [a] Trust this`, or the prompt Escape opens (next bullet). Not the trust box's
+  title: once answered, the box stays on screen, title and all, with `⏳ Trusting
+  workspace...` in place of the selector, above a composer that is ready.
+
+**The permission dialog** (with `CLAUDE_FLEET_YOLO=0` only) is keyed by **letters**: `→ Run
+(once) (y)`, `Add … to allowlist? (tab)`, `Run Everything (shift+tab)`, `Skip & tell the agent
+what to do instead (esc or n)`. The selected option uses the composer's own arrow.
+`lib/permission-dialog.mjs` reads it at every width and fingerprints it the same at 30, 56
+and 80 columns. It returns no typeable options, as for opencode: the phone sends an option and
+then Enter, and Enter after `y` would land in the composer. **Escape is half a decline.**
+Measured on a live worker, it opens `→ Tell the agent what to do instead (Enter to send, empty
+to skip, Esc to cancel)`. A second Escape goes back to the dialog, and Enter on the empty line
+completes the skip ("The shell command was blocked"). So `fleet-answer` names both keys, and
+the second is answerable on its own because that line is no longer a permission dialog.
+`fleet-answer --key Enter` on the dialog itself was refused.
+
+**Resume.** `--resume <chatId>` reopens exactly that chat, and it survives a pane kill:
+a codeword was planted, the pane killed, and `fleet-restart --reopen` relaunched with
+`--resume <id>` and the codeword came back. The id is the hooks' `conversation_id`, so the
+record carries it. **An unknown id is not refused.** cursor opens an empty chat under it, with
+no warning, and creates `chats/<md5>/<id>/` while it does, so the directory existing proves
+nothing. `cursor-here` requires that chat's `meta.json` to say `"hasConversation": true`.
+Chats live at `<config>/chats/<md5 of the physical cwd>/<id>/`. `--continue` is cwd-scoped,
+but in a checkout with no chat it **exits 1** ("No previous chats found."), which would close
+the pane. So `cursor-here` uses it only when that hash directory holds a chat that took a turn,
+and starts a fresh one otherwise.
+
+**Trust and approvals.** Every folder cursor has not seen opens on the trust box, and
+`--force` does not cover it. Under yolo, `cursor-here` passes `--force --trust
+--approve-mcps`. None of the three is written back to `cli-config.json` (measured: no diff
+after a `--force` turn). **`--model` is**: one launch with it rewrote the account's default
+model, so every later cursor session, the owner's own included, came up on it. `cursor-here`
+never passes `CLAUDE_FLEET_MODEL`; pick cursor's model with `/model` inside the session.
+
+**MCP: tools, not its own fleet.** cursor starts the ghostfleet server without the session's
+environment, which is codex's behaviour. A real worker with `CLAUDE_FLEET_SOCK`, `$TMUX` and
+`CLAUDE_FLEET_PROJECTS` exported called `fleet_list` with no arguments and got `fleet-list: no
+socket`. Naming the project resolved it from the default projects file, not the one the session
+had exported. So `mcp_self` is `no`, and that is the whole of `fleet-agent caveat cursor`.
+
+**Worth knowing before pointing cursor at a repo with commit rules.** cursor's
+`cli-config.json` has `attribution.attributeCommitsToAgent` and `attributePRsToAgent`, both on
+in the account measured. The fleet does not change them, and what they add to a commit was
+not measured.

@@ -19,27 +19,62 @@ FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 # Only when it names a cf-* (fleet) server; otherwise keep whatever env provided.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) CLAUDE_FLEET_SOCK="${_t%%,*}"; CLAUDE_FLEET_SOCK="${CLAUDE_FLEET_SOCK##*/}" ;; esac
 
-# jq is required to parse the payload; if it's missing, do nothing quietly.
-command -v jq >/dev/null 2>&1 || exit 0
+# ── AN EXIT THAT WRITES NOTHING MUST STILL LEAVE A LINE ──────────────────────
+# Every early exit below is an exit 0, because a hook must never fail the session — and
+# from outside, a hook that exits early is indistinguishable from one that never ran: no
+# record, no inbox row, hookErrors []. A conversation the fleet had lost was diagnosed as
+# "the hook exits early" for exactly that reason, when the hook had run to the end and its
+# record had gone missing later. One line per silent exit, per refused identity and per
+# record removed, so the next diagnosis starts from what happened. Bounded: rotated at
+# 256KB, one generation kept.
+_dbg() {
+  local f="$FLEET_DIR/hook-debug.log" sz
+  [ -d "$FLEET_DIR" ] || return 0
+  # -f first: a `<` on a missing file is reported by the shell before 2>/dev/null applies
+  sz=""; [ -f "$f" ] && sz="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+  case "$sz" in ''|*[!0-9]*) ;; *) [ "$sz" -gt 262144 ] && mv -f "$f" "$f.1" 2>/dev/null ;; esac
+  printf '%s pid=%s ppid=%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S)" "$$" "$PPID" "$*" >> "$f" 2>/dev/null
+  return 0
+}
+
+# jq is required to parse the payload; if it's missing, say so and do nothing else.
+command -v jq >/dev/null 2>&1 || { _dbg "exit: jq not on PATH ($PATH)"; exit 0; }
 mkdir -p "$FLEET_DIR" 2>/dev/null || exit 0
 
 # --- read the hook payload (single jq pass) ----------------------------------
 input="$(cat)"
 # Join with the unit separator (non-whitespace), not @tsv: a whitespace IFS makes
 # `read` collapse empty fields (e.g. a missing transcript_path) and shift the rest.
-IFS=$'\x1f' read -r EVENT SESSION CWD TRANSCRIPT NOTE < <(
+IFS=$'\x1f' read -r EVENT SESSION CWD TRANSCRIPT CURSOR_V NOTE < <(
   printf '%s' "$input" | jq -r '
     [ (.hook_event_name // ""),
       (.session_id // ""),
       (.cwd // .workspace.current_dir // ""),
       (.transcript_path // ""),
+      (.cursor_version // ""),
       (.message // "" | gsub("[\n\r\t]"; " ")) ] | join("\u001f")' 2>/dev/null
 )
 
-[ -n "$SESSION" ] || exit 0
+[ -n "$SESSION" ] || { _dbg "exit: no session_id (event='${EVENT}', ${#input} bytes of payload)"; exit 0; }
 
-# SessionEnd: deregister and stop here.
+# ── CURSOR RUNS THIS FILE TOO, AND MUST NOT ──────────────────────────────────
+# cursor-agent loads Claude's hooks as well as its own — ~/.claude/settings.json, read by its
+# hook loader beside ~/.cursor/hooks.json ("third-party extensibility", on by default) — and
+# hands them ITS payload: cursor's event names ("beforeSubmitPrompt", "stop", "sessionStart"),
+# no cwd, its own transcript. Measured: a cursor session in a fleet pane wrote a record here
+# with an empty cwd and status "working", under the slot of the pane that had launched it.
+# hooks/cursor-fleet-event.sh is the translation, and what it pipes in is Claude-shaped with
+# no cursor_version in it — so a payload that still carries one came the compat way, and is
+# dropped whole.
+if [ -n "$CURSOR_V" ]; then
+  _dbg "exit: a cursor payload through Claude's hooks (event='${EVENT}') — the cursor bridge reports this turn"
+  exit 0
+fi
+
+# SessionEnd: deregister and stop here — and say who did it, since a removed record is the
+# one outcome nothing else on disk records.
 if [ "$EVENT" = "SessionEnd" ]; then
+  [ -f "$FLEET_DIR/$SESSION.json" ] && _dbg "SessionEnd $SESSION reason=$(printf '%s' "$input" | jq -r '.reason // "?"' 2>/dev/null) job=${CLAUDE_JOB_DIR##*/} tmux=${TMUX_PANE:-} — record removed"
   rm -f "$FLEET_DIR/$SESSION.json" "$FLEET_DIR/$SESSION.task" 2>/dev/null
   exit 0
 fi
@@ -94,6 +129,58 @@ if [ -z "$SLOT" ] && [ -n "$SOCK" ] && [ -z "$PANE" ]; then
   # rather than a name — neither is a slot this should claim.
   case "$SLOT" in _*|+*) SLOT="" ;; esac
 fi
+# ── A BACKGROUNDED CONVERSATION RUNS UNDER SOMEBODY ELSE'S ENVIRONMENT ───────
+# Claude Code can send a conversation to the background (`/background`, or ← into the agent
+# view). It does not move the process: it writes `continued-in` into the old transcript and
+# hands the conversation, under a NEW session id, to a spare process its daemon spawned
+# ahead of time. The pane's process stays behind as a viewer of it and fires no more hooks.
+# So every event of the live conversation comes from a process with no $TMUX and no
+# $TMUX_PANE, and with the CLAUDE_FLEET_* of whichever session first started the daemon —
+# one daemon per config dir, shared by every fleet on that profile. Measured: a scratch
+# session on its own socket, backgrounded, fired its next hooks with another fleet's
+# socket, slot and fleet dir, wrote a record claiming that fleet's slot, and posted a
+# `done` row into that fleet's inbox. The env is not evidence of who this is.
+#   The old transcript is. Its `continued-in` names this id, and the record that points at
+# that transcript is the conversation's identity before the hand-off: same socket, same
+# slot, same pane (the pane now shows this conversation). The line is written before the
+# old id's SessionEnd and the new id's SessionStart (measured: 0.15s and 0.46s earlier), so
+# the first event can already find it. Once found it is kept in this record as
+# continued_from, and later events reuse it rather than searching again.
+#   No predecessor — a spare's placeholder warming up, or `claude --bg` run from a shell —
+# means no fleet identity at all: an unaddressable record, like any agent run by hand,
+# rather than a borrowed one. A bg process is recognised by $CLAUDE_JOB_DIR, which only
+# those carry, with no $TMUX; the session-kind variable is visible in the process's
+# environment but is not passed to its hooks.
+FROM=""
+if [ -n "${CLAUDE_JOB_DIR:-}" ] && [ -z "${TMUX:-}" ]; then
+  _env="${SOCK:-}/${SLOT:-}"
+  SOCK=""; SLOT=""; PANE=""
+  if [ -f "$FLEET_DIR/$SESSION.json" ]; then
+    IFS=$'\x1f' read -r FROM SOCK SLOT PANE < <(jq -r \
+      '[(.continued_from // ""), (.sock // ""), (.slot // ""), (.pane // "")] | join("\u001f")' \
+      "$FLEET_DIR/$SESSION.json" 2>/dev/null)
+    [ -n "$FROM" ] || { SOCK=""; SLOT=""; PANE=""; }
+  fi
+  if [ -z "$FROM" ] && [ -n "$CWD" ]; then
+    # Candidates are the records for this checkout only; each one's transcript is asked
+    # whether it was continued in THIS id. The tail, not the file: transcripts here run to
+    # 100MB+, and the line is written at the hand-off with only bookkeeping lines after it.
+    while IFS=$'\x1f' read -r _pid _psock _pslot _ppane _ptr; do
+      [ -n "$_pid" ] && [ "$_pid" != "$SESSION" ] && [ -f "$_ptr" ] || continue
+      if tail -c 65536 "$_ptr" 2>/dev/null | grep -F "\"continuedInSessionId\":\"$SESSION\"" >/dev/null 2>&1; then
+        FROM="$_pid"; SOCK="$_psock"; SLOT="$_pslot"; PANE="$_ppane"; break
+      fi
+    done < <(jq -r --arg c "$CWD" \
+      'select(.cwd == $c) | [(.session_id // ""), (.sock // ""), (.slot // ""), (.pane // ""), (.transcript // "")] | join("\u001f")' \
+      "$FLEET_DIR"/*.json 2>/dev/null)
+    if [ -n "$FROM" ]; then _dbg "bg $EVENT $SESSION: continued from $FROM, takes ${SOCK:-?}/${SLOT:-?} (env said $_env)"
+    else _dbg "bg $EVENT $SESSION: no predecessor names this id; claims no slot (env said $_env)"; fi
+  fi
+  # Everything below — inbox rows, the lead's wake, reply-to, the queue — routes on the
+  # variable itself, so the borrowed value has to go there too, or the record would be
+  # right and every row and nudge would still land on the daemon's fleet.
+  CLAUDE_FLEET_SOCK="$SOCK"; CLAUDE_FLEET_SLOT="$SLOT"
+fi
 now="$(date +%s)"
 
 # --- a prompt typed into a RUNNING turn is the next task, not a replacement ----
@@ -122,7 +209,38 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
       [ -f "$_taskf" ] && IFS=$'\x1f' read -r _t_at _t_line < "$_taskf"
       case "$_t_at" in ''|*[!0-9]*) _t_at="" ;; esac
       _mid=0
-      if [ "$_prev" = working ] && [ -n "$_t_line" ]; then
+      # ── AND THE AGENT HAS TO SAY SO ITSELF, because the status above is only what this hook
+      # last WROTE. A prompt that started no turn (a hook refused it, the API failed before the
+      # first token) leaves `working` and its own .task behind with no Stop to clear them, and
+      # the NEXT prompt into that idle session was labelled as arriving mid-task — quoting the
+      # same prompt as the task in hand when it was the one re-sent. Seen twice in one day on
+      # the owner's own prompts into an idle lead.
+      #   The measurement is the agent's note about itself, <config>/sessions/<pid>.json, found
+      # by walking up from this hook to the process whose note names this session. Measured on
+      # 2.1.284 at the moment this hook runs: an idle submit already reads `busy`, with
+      # statusUpdatedAt 60–230ms old — the prompt itself flipped it; a mid-turn submit reads
+      # `busy` since the turn began, 5.4s earlier in the measured case. So "a turn is running"
+      # is busy AND busy since before this prompt. 2s of margin: a prompt sent in a turn's
+      # first two seconds goes unlabelled, which is the harmless direction. No note, no
+      # measurement, no label.
+      _busy_ms=""
+      _p="$PPID"; _cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+      for _ in 1 2 3 4 5 6; do
+        case "$_p" in ''|0|1|*[!0-9]*) break ;; esac
+        if [ -f "$_cfg/sessions/$_p.json" ]; then
+          _busy_ms="$(jq -r --arg s "$SESSION" --arg p "$_p" \
+            'select(.sessionId == $s and (.pid|tostring) == $p and .status == "busy")
+             | (now * 1000 - (.statusUpdatedAt // 0)) | floor' "$_cfg/sessions/$_p.json" 2>/dev/null)"
+          break
+        fi
+        _p="$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ')"
+      done
+      case "$_busy_ms" in ''|*[!0-9]*) _busy_ms=0 ;; esac
+      # ...and never the prompt being annotated: if the task in hand IS this prompt, it was
+      # re-sent, not queued behind anything.
+      _this="$(printf '%s\n' "$_prompt" | awk 'NF { print; exit }' | tr '\t\037' '  ')"
+      if [ "$_prev" = working ] && [ -n "$_t_line" ] && [ "$_busy_ms" -ge 2000 ] \
+         && [ "$_t_line" != "${_this:0:160}" ]; then
         _mid=1
         if [ -n "$_t_at" ] && [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] \
            && tail -n "+$(( _t_at + 1 ))" "$TRANSCRIPT" 2>/dev/null \
@@ -151,6 +269,19 @@ if [ "$EVENT" = "UserPromptSubmit" ]; then
         printf '%s\x1f%s\n' "$_tl" "${_first:0:160}" > "$_taskf" 2>/dev/null
       fi ;;
   esac
+  # ── JARVIS'S LEDGER: what the OWNER said, which is how a yes is proven ────────
+  # Jarvis's confirm-list (lib/jarvis.mjs) lets a listed action through only after a yes that
+  # the model did not write. This is where that yes is recorded: a prompt SUBMITTED into
+  # Jarvis's own master, which is him at the desk, the phone's composer, or a transcript of
+  # his voice. The machine's own traffic — every nudge, relay and reply-to preamble starts
+  # with [fleet], Claude Code's injected turns with < — is dropped by the recorder, so a
+  # worker answering "yes" can never be read as him saying it. Jarvis's master only: the
+  # marker names its socket, and the name is read from tmux, not from the environment.
+  if [ -n "$SOCK" ] && [ "$SLOT" = master ] && [ -f "$HOME/.config/ghostfleet/jarvis" ] \
+     && ! grep -qsx off "$HOME/.config/ghostfleet/jarvis.enabled" \
+     && [ "$SOCK" = "$(grep -m1 '^sock=' "$HOME/.config/ghostfleet/jarvis" 2>/dev/null | cut -d= -f2-)" ]; then
+    printf '%s' "$_prompt" | "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../bin/fleet-jarvis" said --from owner >/dev/null 2>&1
+  fi
 fi
 [ "$EVENT" = "Stop" ] && rm -f "$FLEET_DIR/$SESSION.task" 2>/dev/null
 
@@ -185,18 +316,32 @@ case "$EVENT" in
 esac
 
 # --- write status file (atomic) ----------------------------------------------
+# THE MOD'S FIELDS RIDE ALONG. mods/ghostfleet writes a Claude session's exact state into
+# this same record from inside Claude Code (source, state, turnId, mod, usage), and this
+# hook rebuilds the record from nothing on every event, so without this every Stop and
+# every Notification would wipe them and the readers would fall back to the pane until
+# the mod's next write. Read from the file at the moment of writing, not at the top: the
+# mod writes while this hook runs, and the later the read the smaller the window in which
+# its write is lost. The list is mods/ghostfleet/hooks/shape.js's MOD_FIELDS, and the
+# suite holds the two to each other.
+_mod="$(jq -c '{source, state, turnId, mod, usage, ledger} | with_entries(select(.value != null))' \
+  "$FLEET_DIR/$SESSION.json" 2>/dev/null)"
+case "$_mod" in '{'*) ;; *) _mod='{}' ;; esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"
 if jq -n \
   --arg id "$SESSION" --arg z "$ZELL" --arg slot "$SLOT" \
   --arg sock "$SOCK" --arg pane "$PANE" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
-  --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" \
+  --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" --arg from "$FROM" \
+  --argjson mod "$_mod" \
   '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, pane:$pane, cwd:$cwd, folder:$folder,
-    branch:$branch, status:$status, transcript:$tr, ts:$ts}' \
+    branch:$branch, status:$status, transcript:$tr, ts:$ts}
+   + (if $from != "" then {continued_from:$from} else {} end) + $mod' \
   >"$tmp" 2>/dev/null
 then
-  mv -f "$tmp" "$FLEET_DIR/$SESSION.json" 2>/dev/null
+  mv -f "$tmp" "$FLEET_DIR/$SESSION.json" 2>/dev/null || _dbg "write: could not move $tmp into place"
 else
+  _dbg "write: jq could not build the record for $SESSION ($EVENT)"
   rm -f "$tmp" 2>/dev/null
 fi
 
@@ -304,42 +449,51 @@ _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
 # end state is still greppable rather than silent — the whole complaint about the old
 # behaviour was the absence of a trace, and a retry that expires quietly would recreate it
 # at a longer timescale.
-_defer_nudge() {                      # $1=socket — re-check until the box is clear
+#   IT TAKES A DIRECTORY, A KIND AND A MESSAGE, so the same machinery wakes Jarvis: another
+# profile's fleet is another directory, and Jarvis's stamp must not be the master nudge's —
+# either would swallow the other's wake. Called with the socket alone it is what it always
+# was: this fleet's dir, the notify stamp, the worker nudge — whose words live HERE, inside
+# the function, so it still works when lifted out and run on its own (the suite does).
+_defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=message $5=target]
   # declared separately, not `local a=$1 b=…$a…`: bash expands every assignment word in a
   # single `local` before binding any of them, so the second would read an unset $sock and
   # abort the hook under `set -u`
-  local sock lock p
-  sock="$1"; lock="$FLEET_DIR/$sock.notify.retry"
+  local sock dir kind msg lock p to
+  sock="$1"; dir="${2:-$FLEET_DIR}"; kind="${3:-notify}"; msg="${4:-[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it.}"; to="${5:-master}"
+  lock="$dir/$sock.$kind.retry"
   p="$(cat "$lock" 2>/dev/null)"
   case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
   export -f _input_state _input_empty
-  FLEET_DIR="$FLEET_DIR" nohup bash -c '
-    sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"
+  FLEET_DIR="$dir" nohup bash -c '
+    sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"; kind="${5:-notify}"; msg="$6"; to="${7:-master}"
     echo $$ > "$lock" 2>/dev/null
     trap "rm -f \"$lock\"" EXIT
     i=0
     while [ "$i" -lt "$tries" ]; do
       sleep "$every"; i=$((i + 1))
-      tmux -L "$sock" has-session -t master 2>/dev/null || continue
-      stamp="$FLEET_DIR/$sock.notify.stamp"
+      tmux -L "$sock" has-session -t "$to" 2>/dev/null || continue
+      stamp="$FLEET_DIR/$sock.$kind.stamp"
       last="$(cat "$stamp" 2>/dev/null || echo 0)"
       case "$last" in ""|*[!0-9]*) last=0 ;; esac
-      win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"
+      case "$kind" in jarvis) win="${CLAUDE_FLEET_JARVIS_DEBOUNCE:-30}" ;; *) win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}" ;; esac
       case "$win" in ""|*[!0-9]*) win=30 ;; esac
       now="$(date +%s)"
       # a fresh event already woke it: nothing left to deliver
       [ "$(( now - last ))" -ge "$win" ] || exit 0
-      if _input_empty "$sock" master; then
+      if _input_empty "$sock" "$to"; then
         printf "%s\n" "$now" > "$stamp" 2>/dev/null
-        fleet-send -s "$sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1
+        # CLAUDE_FLEET_DIR is where fleet-send QUEUES a prompt for a busy target, so it is
+        # the target fleet dir: the one its own Stop drains. (No apostrophes in here: this
+        # whole body is one single-quoted argument.)
+        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send -s "$sock" "$to" "$msg" >/dev/null 2>&1
         exit 0
       fi
     done
     printf "%s deferred wake expired after %ss with the input box never clear\n" \
       "$(date +%Y-%m-%dT%H:%M:%S)" "$(( every * tries ))" \
-      >> "$FLEET_DIR/$sock.notify.undelivered" 2>/dev/null
+      >> "$FLEET_DIR/$sock.$kind.undelivered" 2>/dev/null
   ' _ "$sock" "$lock" "${CLAUDE_FLEET_NOTIFY_RETRY_EVERY:-20}" \
-       "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" >/dev/null 2>&1 &
+       "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" "$kind" "$msg" "$to" >/dev/null 2>&1 &
 }
 
 # Did this turn already hand the answer to the asker DIRECTLY? fleet-send --reply-to now
@@ -394,6 +548,27 @@ _peer_answered() {              # $1=transcript $2=line this turn starts at $3=a
 # and a worker DONE (its turn ended → idle, the completion signal — a worker's
 # autonomous turn Stops once when its whole tool-loop finishes). Workers only,
 # never the lead's own turns; best-effort, never fail the hook.
+# ── A SUB-WORKER REPORTS TO ITS SUB-LEAD, NOT TO MASTER ──────────────────────
+# A child spawned from a worker's worktree (bin/fleet-spawn) carries its parent's name in
+# <sock>.<child>.parent. Its events go to THAT session's inbox, <sock>.<parent>.inbox, and
+# wake THAT session: the sub-lead asked for this worker and is waiting on it, and the top
+# master asked for the sub-lead, not for its team — it sees the rollup on the sub-lead's
+# card. Same socket, same fleet dir; only the inbox and the wake target move.
+#   A PARENT THAT IS GONE HANDS ITS CHILDREN BACK TO MASTER, rather than filing their
+# events into an inbox nobody will ever drain. Silence is this fleet's worst symptom, and
+# a tag pointing at a stopped session is exactly how it would arrive.
+_parent=""; _to=master; _inbox="$FLEET_DIR/${CLAUDE_FLEET_SOCK:-}.inbox"
+_submsg="[fleet] One of YOUR workers finished or needs you — run fleet-inbox to see what changed, then continue (merge its PR into your branch, dispatch the next step, or unblock). Automated nudge; no need to reply to it."
+if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] \
+   && [ -f "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.parent" ]; then
+  _parent="$(head -1 "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.parent" 2>/dev/null)"
+  case "$_parent" in ''|master|*[!A-Za-z0-9._~-]*) _parent="" ;; esac
+  if [ -n "$_parent" ] && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_parent" 2>/dev/null; then
+    _to="$_parent"; _inbox="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${_parent}.inbox"
+  else
+    _parent=""
+  fi
+fi
 if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; then
   ev=""; detail=""
   if   [ "$status" = "need-you" ]; then ev="need-you"; detail="${NOTE:0:120}"
@@ -401,7 +576,7 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
   fi
   if [ -n "$ev" ]; then
     printf '%s\t%s\t%s\t%s\n' "$now" "$SLOT" "$ev" "$detail" \
-      >> "$FLEET_DIR/${CLAUDE_FLEET_SOCK}.inbox" 2>/dev/null || true
+      >> "$_inbox" 2>/dev/null || true
 
     # Opt-in PUSH: instead of the lead polling, WAKE it so it drains the inbox and
     # acts. Enable per fleet by `touch $FLEET_DIR/<sock>.notify-lead` (live, no
@@ -412,20 +587,42 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
     # master turn on the shared account. Never fires for the lead's own turns (this
     # block is workers-only); fleet-send queues it if the master is mid-turn.
     #
-    # Precedence (matches the TUI settings page, projects screen → ,):
-    #   <sock>.notify-lead-off  is an authoritative KILL SWITCH — if present this
-    #   fleet NEVER pushes, overriding the env var, the per-fleet on-marker, AND the
-    #   global default. That's how "disable worker→master nudges for THIS project"
-    #   works even when the global default is on. Otherwise push is on when any of
-    #   env=1 / per-fleet on-marker / global marker is set.
-    # MOST SPECIFIC WINS: a per-SESSION marker (<sock>.<session>.notify-lead[-off],
-    # set from the grid's settings page) overrides the project's, which overrides the
-    # env var / global default. So one noisy worker can be silenced without touching
-    # the project, and one worker can push while the rest of the project stays quiet.
+    # PRECEDENCE — MOST SPECIFIC WINS, at every level. This is the one statement of it;
+    # the grid's settings pages, fleet-serve and the docs point here.
+    #   A worker of MASTER:
+    #     1. its own <sock>.<worker>.notify-lead-off -> silent; .notify-lead -> push
+    #     2. the project's <sock>.notify-lead-off    -> silent (overrides env and global)
+    #     3. env CLAUDE_FLEET_NOTIFY_LEAD=1, the project's <sock>.notify-lead, or the
+    #        global ~/.config/ghostfleet/notify-lead  -> push;  none of them -> silent
+    #   A CHILD OF A SUB-LEAD (a live parent named in <sock>.<child>.parent):
+    #     1. the child's own .notify-lead-off -> silent; its .notify-lead -> push
+    #     2. the SUB-LEAD's own .notify-lead-off -> silent; its .notify-lead -> push
+    #     3. the project's <sock>.notify-lead-off -> silent
+    #     4. otherwise -> push
+    # Per-session markers are set from the grid's settings page (,); the project's from the
+    # projects screen (,). So one noisy worker can be silenced without touching the
+    # project, and one can push while the rest of the project stays quiet.
+    # A sub-lead's own marker is the same file that decides whether ITS turns nudge master,
+    # so switching a sub-lead off quiets it in both directions.
+    #   A SUB-LEAD IS WOKEN BY DEFAULT (step 4). The opt-in exists to keep background
+    # chatter off a master that did not ask to be interrupted; a sub-lead spawned these
+    # workers in order to wait for them, and a done it has to poll for is the gap this
+    # whole feature closes. The project's off-switch used to sit ABOVE the per-session
+    # markers on this path only, so a project switched off with every session switched on
+    # filed its children's dones in the sub-lead's inbox and never woke it — while the
+    # settings page said the session's setting won. Now the sub-lead path reads like
+    # master's, with the sub-lead as one more level between the child and the project.
     _sm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}"
     _pm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}"
+    _lm="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${_parent}"
     _push=0
-    if   [ -n "$SLOT" ] && [ -f "$_sm.notify-lead-off" ]; then _push=0
+    if   [ -n "$_parent" ] && [ -f "$_sm.notify-lead-off" ]; then _push=0
+    elif [ -n "$_parent" ] && [ -f "$_sm.notify-lead" ];     then _push=1
+    elif [ -n "$_parent" ] && [ -f "$_lm.notify-lead-off" ]; then _push=0
+    elif [ -n "$_parent" ] && [ -f "$_lm.notify-lead" ];     then _push=1
+    elif [ -n "$_parent" ] && [ -f "$_pm.notify-lead-off" ]; then _push=0
+    elif [ -n "$_parent" ];                                  then _push=1
+    elif [ -n "$SLOT" ] && [ -f "$_sm.notify-lead-off" ]; then _push=0
     elif [ -n "$SLOT" ] && [ -f "$_sm.notify-lead" ];     then _push=1
     elif [ -f "$_pm.notify-lead-off" ];                   then _push=0
     elif [ "${CLAUDE_FLEET_NOTIFY_LEAD:-0}" = 1 ] \
@@ -433,8 +630,10 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
       || [ -f "$HOME/.config/ghostfleet/notify-lead" ]; then _push=1
     fi
     if [ "$_push" = 1 ] \
-       && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t master 2>/dev/null; then
+       && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_to" 2>/dev/null; then
+      # One stamp per WAKE TARGET: a sub-lead's burst must not swallow master's next wake.
       stamp="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify.stamp"
+      [ -n "$_parent" ] && stamp="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${_parent}.notify.stamp"
       last="$(cat "$stamp" 2>/dev/null || echo 0)"; case "$last" in ''|*[!0-9]*) last=0 ;; esac
       win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"; case "$win" in ''|*[!0-9]*) win=30 ;; esac
       if [ "$(( now - last ))" -ge "$win" ]; then
@@ -442,13 +641,102 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
         # all (see _input_state). Don't stamp on skip, so the next event re-checks right
         # away instead of waiting out the cooldown — and arm a re-check, because when the
         # LAST worker to finish is the skipped one there is no next event (_defer_nudge).
-        if _input_empty "$CLAUDE_FLEET_SOCK" master; then
+        if _input_empty "$CLAUDE_FLEET_SOCK" "$_to"; then
           printf '%s\n' "$now" > "$stamp" 2>/dev/null
           _sock="$CLAUDE_FLEET_SOCK"
-          ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+          if [ -n "$_parent" ]; then
+            ( fleet-send -s "$_sock" "$_to" "$_submsg" >/dev/null 2>&1 & )
+          else
+            ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+          fi
+        elif [ -n "$_parent" ]; then
+          # its own kind, so the retry's lock and stamp are the sub-lead's and not master's
+          _defer_nudge "$CLAUDE_FLEET_SOCK" "$FLEET_DIR" "$_parent.notify" "$_submsg" "$_parent"
         else
           _defer_nudge "$CLAUDE_FLEET_SOCK"
         fi
+      fi
+    fi
+  fi
+fi
+
+# --- wake JARVIS, the master of masters, for a need-you ANYWHERE ---------------
+# Every fleet's own master is woken by the block above, on ITS socket and in ITS fleet dir.
+# Jarvis is above all of them, on whichever profile it was put on, so this is the one path
+# that crosses profiles on purpose — which is why it reads the marker for Jarvis's socket AND
+# its config dir, and writes into THAT fleet dir rather than this one. A row written to the
+# wrong profile's dir is invisible with nothing to grep (CLAUDE.md, "every push channel is
+# scoped to ONE fleet socket").
+#
+# ONLY A NEED-YOU WAKES IT, AND ONLY FOR SOMEBODY ELSE. A finished turn does not: Jarvis
+# reads finished work from the digest when the owner asks, so a day of workers finishing
+# costs it nothing — an idle Jarvis spends zero turns. The one opt-in exception is `batch=`
+# in the marker, a minutes-scale window after which ONE nudge covers everything that
+# finished (off by default, because every Jarvis turn that ends is a push to his phone).
+# Jarvis's own need-you reaches the phone through fleet-serve's watcher like any lead's; it
+# never wakes itself.
+#
+# Masters included: a lead blocked on a permission prompt is exactly what he wants to hear
+# about, and the workers-only gate above exists for a different inbox.
+# SWITCHED OFF (jarvis.enabled says `off`; lib/jarvis.mjs enabled) there is no Jarvis to wake:
+# neither a need-you nor a batch reaches its fleet, whatever the marker still says.
+JMARK="$HOME/.config/ghostfleet/jarvis"
+if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n "$SLOT" ] \
+   && { [ "$status" = need-you ] || [ "$EVENT" = Stop ]; }; then
+  j_sock="$(grep -m1 '^sock=' "$JMARK" 2>/dev/null | cut -d= -f2-)"
+  j_cfg="$(grep -m1 '^cfg=' "$JMARK" 2>/dev/null | cut -d= -f2-)"
+  j_batch="$(grep -m1 '^batch=' "$JMARK" 2>/dev/null | cut -d= -f2-)"
+  case "$j_batch" in ''|*[!0-9]*) j_batch=0 ;; esac
+  case "$j_cfg" in /*) ;; *) j_sock="" ;; esac           # a relative dir is not a place to write
+  # JARVIS'S OWN WORKERS already reach it: the worker block above wrote their row into this
+  # same inbox and, when notify-lead is on, nudged this same master. Doing it again here
+  # would be a second row for one event and a second wake a stamp apart.
+  # A SUB-WORKER on Jarvis's own fleet belongs to its sub-lead, which the block above
+  # already filed and woke: Jarvis sees that one on the sub-lead's card, like any master.
+  j_own=0; [ "$SOCK" = "$j_sock" ] && j_own=1
+  if [ -n "$j_sock" ] && ! { [ "$SOCK" = "$j_sock" ] && [ "$SLOT" = master ]; } \
+     && ! { [ "$j_own" = 1 ] && { [ "${_push:-0}" = 1 ] || [ -n "$_parent" ]; }; }; then
+    j_dir="$j_cfg/fleet"; mkdir -p "$j_dir" 2>/dev/null
+    j_who="${SOCK#cf-}/$SLOT"
+    j_stamp="$j_dir/$j_sock.jarvis.stamp"
+    j_last="$(cat "$j_stamp" 2>/dev/null || echo 0)"; case "$j_last" in ''|*[!0-9]*) j_last=0 ;; esac
+    j_win="${CLAUDE_FLEET_JARVIS_DEBOUNCE:-30}"; case "$j_win" in ''|*[!0-9]*) j_win=30 ;; esac
+    if [ "$status" = need-you ]; then
+      [ "$j_own" = 1 ] || printf '%s\t%s\t%s\t%s\n' "$now" "$j_who" "need-you" "${NOTE:0:160}" >> "$j_dir/$j_sock.inbox" 2>/dev/null
+      j_msg="[fleet] need-you: $j_who — ${NOTE:0:120}. Run fleet_digest, then tell the owner in one line what is blocked and what you propose. Answering it for him is on the confirm-list. Automated wake."
+      # Leading-edge, like every other wake here: a burst of blocks is one look, and the digest
+      # the look starts with names all of them. Not running: the row waits in its inbox.
+      if tmux -L "$j_sock" has-session -t master 2>/dev/null && [ "$(( now - j_last ))" -ge "$j_win" ]; then
+        if _input_empty "$j_sock" master; then
+          printf '%s\n' "$now" > "$j_stamp" 2>/dev/null
+          # Jarvis's dirs, not this session's: another profile's hook is running this, and
+          # a busy Jarvis QUEUES the prompt under CLAUDE_FLEET_DIR — which must be the dir
+          # Jarvis's own Stop drains, or the wake waits in a file nothing reads.
+          ( CLAUDE_FLEET_DIR="$j_dir" CLAUDE_CONFIG_DIR="$j_cfg" fleet-send -s "$j_sock" master "$j_msg" >/dev/null 2>&1 & )
+        else
+          _defer_nudge "$j_sock" "$j_dir" jarvis "$j_msg"
+        fi
+      fi
+    elif [ "$j_batch" -gt 0 ]; then
+      # ONE SLEEPER PER JARVIS, armed by the first finish after a quiet spell. When it wakes it
+      # nudges only if nothing else woke Jarvis in the meantime — a need-you already made it
+      # look, and that look read the whole digest.
+      j_lock="$j_dir/$j_sock.jarvis.batch"
+      j_p="$(cat "$j_lock" 2>/dev/null)"
+      case "$j_p" in ''|*[!0-9]*) j_p="" ;; esac
+      if [ -z "$j_p" ] || ! kill -0 "$j_p" 2>/dev/null; then
+        export -f _input_state _input_empty
+        nohup bash -c '
+          sock="$1"; lock="$2"; stamp="$3"; after="$4"; armed="$5"; dir="$6"
+          echo $$ > "$lock" 2>/dev/null; trap "rm -f \"$lock\"" EXIT
+          sleep "$after"
+          last="$(cat "$stamp" 2>/dev/null || echo 0)"; case "$last" in ""|*[!0-9]*) last=0 ;; esac
+          [ "$last" -ge "$armed" ] && exit 0
+          tmux -L "$sock" has-session -t master 2>/dev/null || exit 0
+          _input_empty "$sock" master || exit 0
+          date +%s > "$stamp" 2>/dev/null
+          CLAUDE_FLEET_DIR="$dir" fleet-send -s "$sock" master "[fleet] batch: work finished across the fleets in the last $(( after / 60 )) minutes. Run fleet_digest and tell the owner only what he would want to know unprompted, in one line. Automated wake." >/dev/null 2>&1
+        ' _ "$j_sock" "$j_lock" "$j_stamp" "$j_batch" "$now" "$j_dir" >/dev/null 2>&1 &
       fi
     fi
   fi
@@ -477,7 +765,11 @@ fi
 # can't confirm the submit, which closes the common way that happens.
 if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
   rt="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.reply-to"
-  if [ -f "$rt" ] && [ "$EVENT" = "UserPromptSubmit" ]; then
+  # An arming the mod wrote names its turn on a second line (`turn <id>`): it was armed by
+  # the turn.start of the very prompt that asked, and a prompt typed into that turn must
+  # not move its offset past the start of the answer. Only a paste's arming is redone.
+  if [ -f "$rt" ] && [ "$EVENT" = "UserPromptSubmit" ] \
+     && ! grep -q '^turn ' "$rt.armed" 2>/dev/null; then
     # The arming marker also carries WHERE THIS TURN STARTS in the transcript — the line
     # count now — so the Stop below can ask "did this turn SendMessage the answer" without
     # finding the one that answered the previous question to the same asker. An empty or
@@ -611,8 +903,13 @@ if [ "$EVENT" = "Stop" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] \
   case "$_qp" in ''|*[!0-9]*) _qp="" ;; esac
   if [ -z "$_qp" ] || ! kill -0 "$_qp" 2>/dev/null; then
     export -f _input_state
+    # A session whose mod delivers takes the prompt without touching the composer
+    # (register.js, DELIVERY), so a half-typed message there is no reason to wait. Asked
+    # only when the composer is NOT empty, and asked again each time: a mod that has died
+    # since means the paste, and the paste still waits.
+    _qmt="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/../lib/mod-target.mjs"
     FLEET_DIR="$FLEET_DIR" nohup bash -c '
-      sock="$1"; slot="$2"; lock="$3"; every="$4"; tries="$5"
+      sock="$1"; slot="$2"; lock="$3"; every="$4"; tries="$5"; mt="$6"
       echo $$ > "$lock" 2>/dev/null
       trap "rm -f \"$lock\"" EXIT
       i=0
@@ -620,12 +917,16 @@ if [ "$EVENT" = "Stop" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] \
         sleep "$every"; i=$((i + 1))
         tmux -L "$sock" has-session -t "=$slot" 2>/dev/null || exit 0
         [ -s "$FLEET_DIR/$sock.$slot.queue" ] || exit 0
-        _input_state "$sock" "$slot"; [ "$?" = 0 ] || continue
+        _input_state "$sock" "$slot"
+        if [ "$?" != 0 ]; then
+          [ "${CLAUDE_FLEET_MOD_DELIVER:-on}" != off ] && [ -f "$mt" ] \
+            && node "$mt" "$FLEET_DIR" "$sock" "$slot" >/dev/null 2>&1 || continue
+        fi
         fleet-send -s "$sock" --dequeue "$slot" >/dev/null 2>&1
         [ "$?" = 3 ] || exit 0
       done
     ' _ "$CLAUDE_FLEET_SOCK" "$SLOT" "$_qd" "${CLAUDE_FLEET_QUEUE_EVERY:-1}" \
-         "${CLAUDE_FLEET_QUEUE_TRIES:-300}" >/dev/null 2>&1 &
+         "${CLAUDE_FLEET_QUEUE_TRIES:-300}" "$_qmt" >/dev/null 2>&1 &
   fi
 fi
 
@@ -639,7 +940,10 @@ fi
 case "${CLAUDE_FLEET_NOTIFIER:-}" in off|none|false) EVENT_QUIET=1 ;; *) EVENT_QUIET=0 ;; esac
 if [ "$EVENT_QUIET" = 0 ] \
    && { [ "$EVENT" = "Stop" ] || { [ "$EVENT" = "Notification" ] && [ "$status" = "need-you" ]; }; }; then
-  if [ "$EVENT" = "Stop" ]; then title="✅ Claude — done"; sound="Glass"; else title="🔔 Claude — needs you"; sound="Ping"; fi
+  # A bridge for another agent (hooks/agy-fleet-event.sh, hooks/cursor-fleet-event.sh) names it, so its popup does not
+  # say "Claude" over a session that is not one.
+  who="${CLAUDE_FLEET_EVENT_AGENT:-Claude}"
+  if [ "$EVENT" = "Stop" ]; then title="✅ $who — done"; sound="Glass"; else title="🔔 $who — needs you"; sound="Ping"; fi
   sub="${folder:-claude}"; [ -n "$branch" ] && sub="$sub · $branch"
   HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 

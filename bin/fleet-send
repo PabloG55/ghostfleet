@@ -65,6 +65,9 @@ while [ $# -gt 0 ]; do
     --anyway)    ANYWAY=1;           shift ;;
     --now)       MODE=now;           shift ;;
     --dequeue)   MODE=dequeue;       shift ;;
+    # Internal: the queue's own delivery (what --dequeue runs). Past the gate like --now,
+    # but a turn of its own rather than a paste into one, so it may go through the mod.
+    --queued)    MODE=queued;        shift ;;
     *) break ;;
   esac
 done
@@ -131,11 +134,61 @@ fi
 # grep: `grep -qE ""` matches every line, which would report the session as
 # permanently busy and make fleet-send queue every prompt behind a phantom turn.
 busy() {
+  # A target whose mod is live says what it is doing exactly; the pane is the fallback.
+  if [ -n "$MOD_SID" ] && _mod_look; then
+    case "$MOD_STATE" in working|need-you) return 0 ;; *) return 1 ;; esac
+  fi
   [ -n "$BUSY_RE" ] || return 1
   # A here-string, not a pipe: under pipefail a `grep -q` that MATCHES can hand its
   # writer a SIGPIPE and read as a miss (CLAUDE.md) — and the queue below now decides
   # where a prompt goes on this answer.
   grep -qE "$BUSY_RE" <<< "$(tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null)"
+}
+
+# --- the mod (mods/ghostfleet) -------------------------------------------------
+# A Claude session running the ghostfleet mod takes its prompts from inside: the mod
+# submits each one as a turn of its own once the session is idle, never touching the
+# composer, and names the turn it started (register.js, DELIVERY). So for such a target
+# this script hands the prompt over instead of pasting it, and reads "is it busy" from
+# the mod's record instead of the pane. Everything else here (the queue, the reply
+# preamble, the logs, the exit codes) is the same either way.
+#   "Such a target" is decided by lib/mod-target.mjs: a believable mod record for this
+# socket and slot AND a mod that delivers (its .ready names the same process). Not a
+# Claude session, an older Claude, a mod that is off or dead, no node: the paste, as
+# before. CLAUDE_FLEET_MOD_DELIVER=off forces the paste for one call.
+#   The spool lives in the TARGET's fleet dir, which on another profile is not ours.
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _lnk="$(readlink "$_src")"; case "$_lnk" in /*) _src="$_lnk" ;; *) _src="$(dirname "$_src")/$_lnk" ;; esac
+done
+MOD_TARGET="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/mod-target.mjs"
+MOD_SID=""; MOD_STATE=""; MOD_NOW=""; MOD_DIR=""
+_mod_look() {
+  local out
+  out="$(node "$MOD_TARGET" "$MOD_DIR" "$SOCK" "$SESSION" 2>/dev/null)" || { MOD_SID=""; return 1; }
+  IFS=$'\t' read -r MOD_SID MOD_STATE MOD_NOW <<< "$out"
+  [ -n "$MOD_SID" ]
+}
+if { [ -z "$_a" ] || [ "$_a" = claude ]; } \
+   && [ "${CLAUDE_FLEET_MOD_DELIVER:-on}" != off ] && [ -f "$MOD_TARGET" ] && command -v node >/dev/null 2>&1; then
+  MOD_DIR="$(tmux -L "$SOCK" show-environment -t "$SESSION" CLAUDE_FLEET_DIR 2>/dev/null)"
+  MOD_DIR="${MOD_DIR#CLAUDE_FLEET_DIR=}"; case "$MOD_DIR" in /*) ;; *) MOD_DIR="" ;; esac
+  if [ -z "$MOD_DIR" ]; then
+    _c="$(tmux -L "$SOCK" show-environment -t "$SESSION" CLAUDE_CONFIG_DIR 2>/dev/null)"
+    _c="${_c#CLAUDE_CONFIG_DIR=}"; case "$_c" in /*) MOD_DIR="$_c/fleet" ;; esac
+  fi
+  [ -n "$MOD_DIR" ] || MOD_DIR="$FLEET_DIR"
+  MOD_SID=pending; _mod_look || true
+fi
+# Prompts handed to the mod and not yet started are a backlog like the queue's: a send
+# arriving behind one must wait behind it, not be handed over beside it.
+_mod_backlog() {
+  [ -n "$MOD_SID" ] || return 1
+  local f
+  for f in "$MOD_DIR/$MOD_SID.handoff/"*.json "$MOD_DIR/$MOD_SID.handoff/"*.taken; do
+    [ -e "$f" ] && return 0
+  done
+  return 1
 }
 
 # --- the queue -----------------------------------------------------------------
@@ -194,12 +247,18 @@ if [ "$MODE" = dequeue ]; then
   _body="$(_unb64 "${_q_msg:-}")"
   [ -n "$_body" ] && [ -z "${_q_extra:-}" ] \
     || { echo "fleet-send: dropped an unreadable queue record for '$SESSION'" >&2; exit 1; }
-  _args=(--now --anyway -s "$SOCK")
+  _args=(--queued --anyway -s "$SOCK")
   [ -n "$_q_rs" ] && [ -n "$_q_rss" ] && _args+=(--reply-to "$_q_rs/$_q_rss" ${_q_rd:+--reply-dir "$_q_rd"})
   # Delivered UNDER the lock: a second drainer must not see the box empty in the gap
   # between this paste and the spinner, and fold the next prompt into this one.
   "$SELF" "${_args[@]}" "$SESSION" "$_body"
-  exit $?
+  _rc=$?
+  # 3 from the delivery is a turn that started in the gap (the mod did not take the
+  # prompt because the session went busy): it goes back to the HEAD, as it was.
+  if [ "$_rc" = 3 ]; then
+    { printf '%s\n' "$_line"; cat "$QUEUE" 2>/dev/null; } > "$_qt" && mv -f "$_qt" "$QUEUE"
+  fi
+  exit "$_rc"
 fi
 
 # --- the reply address ---------------------------------------------------------
@@ -252,19 +311,25 @@ fi
 # The gate. Decided UNDER the lock, so a drain delivering the head right now either
 # finishes first (and this sees its turn running) or has not started (and this sees the
 # queue non-empty). Either way it goes behind, and order holds.
+# Appends this prompt (the caller's words, before any preamble: the delivery adds that)
+# to the queue, under the lock the caller holds; sets _n to its place.
+_enqueue() {
+  _rec="$(printf '%s\x1f%s\x1f%s\x1f%s' "${RSOCK:-}" "${RSESS:-}" "${rdir:-}" "$(_b64 "$RAW_MSG")")"
+  # The same prompt already waiting is not a second task: the automated nudges (a
+  # worker finished, an answer relayed) repeat word for word and would stack one turn
+  # each behind a long lead turn.
+  if grep -qxF -- "$_rec" <<< "$(cut -d$'\x1f' -f2- "$QUEUE" 2>/dev/null)"; then
+    echo "fleet-send: → $SESSION (already queued; not added twice)"; exit 0
+  fi
+  printf '%s\x1f%s\n' "$(date +%s)" "$_rec" >> "$QUEUE"
+  _n="$(wc -l < "$QUEUE" | tr -d ' ')"
+}
+RAW_MSG="$MSG"
 if [ "$MODE" = send ] && [ "$QUEUEABLE" = 1 ]; then
   _qlock || { echo "fleet-send: queue for '$SESSION' is locked — not sent (retry, or --now)" >&2; exit 1; }
-  if busy || [ -s "$QUEUE" ]; then
-    _rec="$(printf '%s\x1f%s\x1f%s\x1f%s' "${RSOCK:-}" "${RSESS:-}" "${rdir:-}" "$(_b64 "$MSG")")"
-    # The same prompt already waiting is not a second task: the automated nudges (a
-    # worker finished, an answer relayed) repeat word for word and would stack one turn
-    # each behind a long lead turn.
-    if grep -qxF -- "$_rec" <<< "$(cut -d$'\x1f' -f2- "$QUEUE" 2>/dev/null)"; then
-      echo "fleet-send: → $SESSION (already queued; not added twice)"; exit 0
-    fi
-    printf '%s\x1f%s\n' "$(date +%s)" "$_rec" >> "$QUEUE"
-    _n="$(wc -l < "$QUEUE" | tr -d ' ')"
-    if busy; then
+  if busy || [ -s "$QUEUE" ] || _mod_backlog; then
+    _enqueue
+    if busy || _mod_backlog; then
       echo "fleet-send: → $SESSION (queued #$_n — it is mid-turn; this runs as its own turn after that one ends. --now folds it in instead)"
       [ -n "${RSESS:-}" ] && echo "fleet-send: the answer to it comes back to $RSOCK/$RSESS when that queued turn ends"
       exit 0
@@ -276,6 +341,11 @@ if [ "$MODE" = send ] && [ "$QUEUEABLE" = 1 ]; then
   fi
   _qunlock
 fi
+
+# Through the mod or by paste: decided here, before the reply marker below is written.
+# Past the gate a Claude target is idle (a busy one was queued), so a live mod takes it.
+USE_MOD=0
+[ -n "$MOD_SID" ] && [ "$MODE" != now ] && USE_MOD=1
 
 if [ -n "$RSESS" ]; then
 
@@ -311,11 +381,17 @@ if [ -n "$RSESS" ]; then
   # `read` over it collapses an empty field and shifts every later one left — and the
   # last field here is a PATH, which is exactly the field you least want to receive
   # something else's value. The hook re-validates all three anyway.
-  printf '%s\x1f%s\x1f%s\n' "$RSOCK" "$RSESS" "$rdir" \
-    > "$FLEET_DIR/$SOCK.$SESSION.reply-to" 2>/dev/null
-  # Clear any arming left by an earlier request, or this brand-new address would look
-  # armed to the turn that is running RIGHT NOW and answer it with that turn's work.
-  rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
+  #   NOT for a prompt the mod delivers: that address rides in the handoff and the mod
+  # writes and arms it at the turn.start of THIS prompt's turn, so nothing here can be
+  # armed by somebody else's. A handoff that falls back to the paste writes it then.
+  _paste_reply_marker() {
+    printf '%s\x1f%s\x1f%s\n' "$RSOCK" "$RSESS" "$rdir" \
+      > "$FLEET_DIR/$SOCK.$SESSION.reply-to" 2>/dev/null
+    # Clear any arming left by an earlier request, or this brand-new address would look
+    # armed to the turn that is running RIGHT NOW and answer it with that turn's work.
+    rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
+  }
+  [ "$USE_MOD" = 1 ] || _paste_reply_marker
 
   # THE ASKER'S PEER NAME — what Claude Code's cross-session messaging can address, and
   # the reason bin/claude-here now passes --name: it is the SAME string the hook prints in
@@ -439,6 +515,82 @@ _sent_digest() {                   # shasum on macOS, sha256sum on most Linux, e
     "$(printf '%s' "$MSG" | wc -c | tr -d ' ')" "$(_sent_digest "$MSG")"
 } >> "$_sent_log" 2>/dev/null || true
 
+# INTO JARVIS'S MASTER, SAY SO FIRST. Jarvis's confirm-list counts a yes only from the owner,
+# and the hook that records what was submitted cannot tell a paste from typing — so every
+# prompt this command delivers there leaves a line (time + digest, never the text) where the
+# ledger checks (lib/jarvis.mjs consumeDelivery). Profile-independent on purpose: a worker
+# on another profile sends from another fleet dir, and Jarvis's marker is the one place both
+# can see. Written HERE, at the paste, because a queued prompt is delivered later by --dequeue.
+_jm="$HOME/.config/ghostfleet/jarvis"
+if [ "$SESSION" = master ] && [ -f "$_jm" ] && ! grep -qsx off "$_jm.enabled" \
+   && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
+  _jd="$(printf '%s' "$MSG" | shasum -a 256 2>/dev/null || printf '%s' "$MSG" | sha256sum 2>/dev/null)"
+  printf '%s\t%s\n' "$(date +%s)" "${_jd:0:12}" >> "$HOME/.config/ghostfleet/jarvis.delivered" 2>/dev/null || true
+fi
+# THROUGH THE MOD. Handed over, then three outcomes, each told apart by a rename (the mod's
+# DELIVERY section has the protocol):
+#   claimed and its turn started: the receipt names the turn, and that is "→ <session>";
+#   not claimed within the window, and the session has gone busy (a turn started in the
+#     gap): taken back and queued, exactly as if it had been busy at the gate;
+#   not claimed and still idle (a mod that is stuck, or died a moment ago): taken back and
+#     pasted below, as if there were no mod at all.
+# A prompt the mod claimed is never pasted: the rename that would take it back fails.
+if [ "$USE_MOD" = 1 ]; then
+  _spool="$MOD_DIR/$MOD_SID.handoff"
+  _hid="${MOD_NOW:-$(date +%s)000}-$$"
+  _rargs=(); [ -n "$RSESS" ] && _rargs=("$RSOCK" "$RSESS" "$rdir")
+  if printf '%s' "$MSG" | node "$MOD_TARGET" --handoff "$_spool" "$_hid" ${_rargs[@]+"${_rargs[@]}"}; then
+    _claimed=no
+    _w="${CLAUDE_FLEET_MOD_CLAIM:-3}"; case "$_w" in ''|*[!0-9]*) _w=3 ;; esac
+    for _ in $(seq 1 $(( _w * 10 ))); do
+      [ -e "$_spool/$_hid.json" ] || { _claimed=yes; break; }
+      sleep 0.1
+    done
+    if [ "$_claimed" = no ] && ! mv "$_spool/$_hid.json" "$_spool/$_hid.revoked" 2>/dev/null; then
+      _claimed=yes                                  # it went in the instant we gave up
+    fi
+    if [ "$_claimed" = no ]; then
+      rm -f "$_spool/$_hid.revoked" 2>/dev/null
+      if busy; then
+        # The drain's own delivery: hand it back to --dequeue, which puts it at the head.
+        [ "$MODE" = queued ] && exit 3
+        _qlock || { echo "fleet-send: queue for '$SESSION' is locked — not sent (retry, or --now)" >&2; exit 1; }
+        _enqueue; _qunlock
+        echo "fleet-send: → $SESSION (queued #$_n — it is mid-turn; this runs as its own turn after that one ends. --now folds it in instead)"
+        [ -n "${RSESS:-}" ] && echo "fleet-send: the answer to it comes back to $RSOCK/$RSESS when that queued turn ends"
+        exit 0
+      fi
+      echo "fleet-send: note — the mod in '$SESSION' did not take the prompt within ${_w}s; pasting it instead" >&2
+      USE_MOD=0
+    else
+      _rcpt=""
+      _s="${CLAUDE_FLEET_MOD_START:-20}"; case "$_s" in ''|*[!0-9]*) _s=20 ;; esac
+      for _ in $(seq 1 $(( _s * 10 ))); do
+        [ -s "$_spool/$_hid.done" ] && { _rcpt="$(cat "$_spool/$_hid.done" 2>/dev/null)"; break; }
+        sleep 0.1
+      done
+      _turn="$(sed -n 's/.*"turnId":"\([^"]*\)".*/\1/p' <<< "$_rcpt")"
+      _why="$(sed -nE 's/.*"(dropped|error)":"([^"]*)".*/\2/p' <<< "$_rcpt")"
+      if [ -n "$_turn" ]; then
+        echo "fleet-send: → $SESSION"
+      elif [ -n "$_rcpt" ]; then
+        echo "fleet-send: → $SESSION (not delivered: the mod could not submit it — ${_why:-no reason given})" >&2
+        exit 1
+      else
+        # Claimed and not started yet. The mod still holds it and will submit it once the
+        # session is idle; its reply address is armed by that turn, so nothing to take back.
+        echo "fleet-send: → $SESSION (warning: could not confirm submit — verify it landed)" >&2
+      fi
+    fi
+  else
+    echo "fleet-send: note — could not hand the prompt to the mod in '$SESSION'; pasting it instead" >&2
+    USE_MOD=0
+  fi
+  # Fell back: the paste path below needs its reply marker, which was held for the mod.
+  [ "$USE_MOD" = 0 ] && [ -n "$RSESS" ] && _paste_reply_marker
+fi
+
+if [ "$USE_MOD" = 0 ]; then
 tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
 tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
 
@@ -514,6 +666,7 @@ else
       && rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to" 2>/dev/null
   fi
 fi
+fi   # the paste
 
 # A plain `[ -n … ] && echo` here would leave a FALSE exit status behind when there is no
 # reply address, and callers read fleet-send's status as "did the send work" (the MCP

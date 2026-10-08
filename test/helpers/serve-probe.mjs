@@ -155,7 +155,10 @@ if (phase === 'verbs') {
   // The same verb aimed at ANOTHER project, from the same daemon process: the child's
   // scope/root/socket have to be that project's, not whichever one was asked for first.
   row('send.other', await a.verb(base, 'fleet_send', { project: 'other', session: 'o1', prompt: 'over there' }));
-  row('answer.ok', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'w1', text: '2' }));
+  row('answer.ok', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'w1', text: '2', expect: 'stub-fingerprint' }));
+  // An answer that does not say which prompt it answers is refused before anything runs:
+  // it is what an old cached client sends, and what a pane with no prompt would produce.
+  row('answer.noExpect', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'w1', text: '2' }));
 
   // Destructive: a fresh assertion at the moment of action, enforced on the tool name.
   row('spawn.noAssertion', await a.verb(base, 'fleet_spawn', { project: 'demo', name: 'api-9' }));
@@ -223,6 +226,55 @@ if (phase === 'reads') {
   row('health', await a.api(base, 'GET', '/api/health'));
 }
 
+// ── Jarvis: the digest, the marker, a yes, and a voice ─────────────────────
+//     node serve-probe.mjs <base> jarvis <enrol-code> <wav-file>
+// Everything that must FAIL is asked as well as everything that must work: the digest
+// must not spend the stamp, a yes must need a token AND a fresh passkey, a no must not, and
+// audio that is not audio is refused by its bytes. Proposals are made by the SHELL before
+// this runs (lib/jarvis.mjs gate(), exactly as Jarvis would make one), so this phase reads
+// their ids back from /api/jarvis rather than inventing any.
+if (phase === 'jarvis') {
+  const wav = fs.readFileSync(process.argv[5]);
+  row('digest.noToken', await request(base, 'GET', '/api/digest'));
+  row('jarvis.noToken', await request(base, 'GET', '/api/jarvis'));
+  row('confirm.noToken', await request(base, 'POST', '/api/jarvis/confirm', { body: { id: 'X', answer: 'no' } }));
+  row('hear.noToken', await request(base, 'POST', '/api/jarvis/hear', { body: wav, contentType: 'audio/wav' }));
+  await a.enroll(base, arg);
+  row('digest', await a.api(base, 'GET', '/api/digest'));
+  row('digest.verb', await a.verb(base, 'fleet_digest', { peek: true }));
+  const j = await a.api(base, 'GET', '/api/jarvis');
+  row('jarvis', j);
+  const ids = ((j.json && j.json.pending) || []).map(p => p.id);
+  row('confirm.noAction', await a.api(base, 'POST', '/api/jarvis/confirm', { id: ids[0] || 'X' }));
+  row('confirm.unknown', await a.api(base, 'POST', '/api/jarvis/confirm', { id: 'NOPE', answer: 'no' }));
+  // A YES WITHOUT A FINGERPRINT is the case the passkey is for: a phone in someone else's
+  // hand with a live token must not be able to let Jarvis merge.
+  row('confirm.yesNoPasskey', await a.api(base, 'POST', '/api/jarvis/confirm', { id: ids[0] || 'X', answer: 'yes' }));
+  const fresh = await a.fresh(base, 'jarvis-yes');
+  row('confirm.yes', await a.api(base, 'POST', '/api/jarvis/confirm', { id: ids[0] || 'X', answer: 'yes' },
+                                  { headers: { 'x-fleet-assertion': JSON.stringify(fresh) } }));
+  row('confirm.no', await a.api(base, 'POST', '/api/jarvis/confirm', { id: ids[1] || 'X', answer: 'no' }));
+  row('jarvis.after', await a.api(base, 'GET', '/api/jarvis'));
+  row('said.phone', await a.verb(base, 'fleet_send', { project: 'demo', session: 'master', prompt: 'yes please' }));
+  row('hear.empty', await a.api(base, 'POST', '/api/jarvis/hear', Buffer.alloc(0), { contentType: 'audio/wav' }));
+  row('hear.text', await a.api(base, 'POST', '/api/jarvis/hear', Buffer.from('this is not audio at all, only text wearing a header'), { contentType: 'audio/wav' }));
+  row('hear.wav', await a.api(base, 'POST', '/api/jarvis/hear', wav, { contentType: 'audio/wav' }));
+}
+
+// ── Jarvis's switch: every /api/jarvis* route, the project list, and the Mac's voice ──
+//     node serve-probe.mjs <base> jarvisswitch <enrol-code> <wav-file>
+// Run once with Jarvis switched on and once off; run.sh compares the two, so an "off" row
+// can only pass because the switch changed something.
+if (phase === 'jarvisswitch') {
+  const wav = fs.readFileSync(process.argv[5]);
+  await a.enroll(base, arg);
+  row('jarvis', await a.api(base, 'GET', '/api/jarvis'));
+  row('confirm', await a.api(base, 'POST', '/api/jarvis/confirm', { id: 'NOPE', answer: 'no' }));
+  row('hear', await a.api(base, 'POST', '/api/jarvis/hear', wav, { contentType: 'audio/wav' }));
+  row('projects', await a.api(base, 'GET', '/api/projects?rollup=0'));
+  row('speak', await a.api(base, 'POST', '/api/speak', { text: 'Hello from the fleet.' }));
+}
+
 // THE PAYOFF PATH, in one phase because the whole value is the CHAIN. docs/mobile.md §7
 // put `answer keys` on the session screen from the start, and it was close to useless: a
 // worker blocked on "Allow pnpm test?" since 9pm is exactly the case the app exists for,
@@ -242,7 +294,14 @@ if (phase === 'pane') {
   // because a pane read that ignored the socket would return a plausible screenful of
   // somebody else's work rather than an error — CLAUDE.md's most-repeated scar.
   row('pane.otherFleet', await a.api(base, 'GET', '/api/pane?project=other&session=dlg'));
-  row('pane.answer', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'dlg', text: '1' }));
+  // THE RACE: the phone answers the prompt it drew, which may not be the one on screen. A
+  // fingerprint that does not match is refused and the pane is left exactly as it was.
+  const dialog = await a.api(base, 'GET', '/api/pane?project=demo&session=dlg');
+  const fp = dialog.json?.prompt?.fingerprint || '';
+  row('pane.stale', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'dlg', text: 'Z8', expect: '0000000000000000' }));
+  await new Promise(r => setTimeout(r, 300));
+  row('pane.afterStale', await a.api(base, 'GET', '/api/pane?project=demo&session=dlg'));
+  row('pane.answer', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'dlg', text: '1', expect: fp }));
   // The pane is read again only after the far side has had a moment to redraw. Polled, not
   // slept: a fixed sleep tuned to this machine is a test that passes on this machine.
   let after = null;
@@ -252,6 +311,11 @@ if (phase === 'pane') {
     await new Promise(r => setTimeout(r, 100));
   }
   row('pane.after', after);
+  // ...and the SAME answer again, now that the prompt is gone: exactly the phone that polled
+  // before the desk answered. Refused, and nothing is typed where the prompt used to be.
+  row('pane.answerGone', await a.verb(base, 'fleet_answer', { project: 'demo', session: 'dlg', text: 'Z9', expect: fp }));
+  await new Promise(r => setTimeout(r, 300));
+  row('pane.afterGone', await a.api(base, 'GET', '/api/pane?project=demo&session=dlg'));
   // The argument checks and the geometry, on the same server: a missing session, a
   // scrollback out of range, and a scrollback that is allowed.
   row('pane.noSession', await a.api(base, 'GET', '/api/pane?project=demo'));

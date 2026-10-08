@@ -15,38 +15,18 @@ name: test
 on:
   push:
     branches: [main, staging]
-  # `edited` IS THE POINT, and it is not in the default set. A title or body can change
-  # after every check has passed, and the body is the one piece of text that reaches
-  # public history without ever having been in the repository — GitHub composes it into
-  # the commit message at squash-merge, after the last run and the last reviewer. Listing
-  # types replaces the default, so the other three are spelled out rather than inherited.
+  # NOT `edited`. A body edit used to fire a second run of THIS workflow on the same commit
+  # with the test job skipped, and a skipped matrix job reports ONE check called plain
+  # `test` rather than one per leg. GitHub then reads the required `test (ubuntu-latest)`
+  # and `test (macos-latest)` from that newest suite, finds neither, and holds the PR
+  # BLOCKED with every required check green — measured twice; re-running the real run did
+  # not clear it, only a new commit did. So an edit never reaches this workflow: the check
+  # that has something to say about an edit lives in pr-text.yml, which is its own suite.
   pull_request:
-    types: [opened, edited, synchronize, reopened]
+    types: [opened, synchronize, reopened]
 
 jobs:
-  # THE TEXT CHECK IS ITS OWN JOB because it is the only one that has anything to say
-  # about an edit. Fixing a typo in a body should not spend twenty-eight runner-minutes
-  # re-proving the suite, so `test` sits out an `edited` and this runs in seconds.
-  pr-text:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      # THROUGH THE ENVIRONMENT, NEVER INTERPOLATED INTO THE COMMAND. A title on a public
-      # repository is text a stranger wrote, and `run: node x "${{ …title }}"` is a shell
-      # injection wearing a friendly name: the substitution happens before the shell sees
-      # it, so no amount of quoting downstream can help. env: hands the bytes to the
-      # process without anything parsing them on the way.
-      - name: No withheld name in the PR title or body
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: node test/helpers/pr-text-sweep.mjs
-
   test:
-    # An edit changes no code, so there is nothing here for the suite to say. On a push
-    # `github.event.action` is empty, which is not 'edited', so pushes still run.
-    if: github.event.action != 'edited'
     strategy:
       # Not fail-fast: the two legs are the point. macOS is where this is developed
       # and Linux is where the macOS-only guards (stat -f, date -r, osascript,
@@ -66,10 +46,15 @@ jobs:
       # red with an empty `got`, matching CI exactly; with this set it is green.
       CLAUDE_FLEET_EDITOR: vi
 
-    # Local wall clock is ~4m30s, nearly all of it waiting on tmux and daemon settles
-    # rather than burning CPU. A hung tmux server would otherwise sit on the runner's
-    # 6-hour default; this fails it in a readable amount of time instead.
-    timeout-minutes: 20
+    # A hung tmux server would otherwise sit on the runner's 6-hour default; this fails
+    # it in a readable amount of time instead. The bound has to sit well above a GREEN
+    # run, not just above the suite's local time: the hosted macOS leg grew to ~19m30s
+    # while ubuntu took ~15m, and at 20 a passing run was cancelled on the clock (both
+    # legs, and then macOS alone after one more feature's rows). A cancel reads as red
+    # on the branch and says nothing about the code, so 30 keeps a hang readable while
+    # leaving a green run room to finish. If macOS approaches this too, the fix is the
+    # suite's settle time, not another bump.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -107,16 +92,20 @@ jobs:
       # tmux is on neither runner image; jq is on both today, and that is not a
       # promise. Both are installed rather than assumed. No npm step: the suite has
       # no dependencies and the repo has no lockfile.
-      - name: Install tmux and jq (Linux)
+      #   ffmpeg too, because fleet-shots RECORDS a flow and the recording is the feature:
+      # without an encoder the recorded-run groups skip, and a skip that only names a
+      # missing tool is refused by the suite's own skip rule. Neither image ships it.
+      # --no-install-recommends keeps the apt side to the codecs it needs.
+      - name: Install tmux, jq and ffmpeg (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y tmux jq
+          sudo apt-get install -y --no-install-recommends tmux jq ffmpeg
 
-      - name: Install tmux and jq (macOS)
+      - name: Install tmux, jq and ffmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
-          for p in tmux jq; do
+          for p in tmux jq ffmpeg; do
             brew list --formula "$p" >/dev/null 2>&1 || brew install "$p"
           done
 
@@ -142,6 +131,7 @@ jobs:
           node --version
           tmux -V
           jq --version
+          ffmpeg -hide_banner -version | head -1
 
       # No isolation needed beyond what the suite already does: it puts every tmux
       # server it starts under its own per-run $TMUX_TMPDIR and sweeps the leftovers

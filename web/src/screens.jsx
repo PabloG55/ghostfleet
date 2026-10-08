@@ -265,8 +265,40 @@ function CardScreen({ scope, mode, stale, counts, onMore, band, confirm, cards, 
   );
 }
 
+// ── two more bands on Projects: the way to Jarvis, and the one-tap push offer ──────────
+// Both are data from app.js (jarvisBarSpec / notifySpec) and draw NOTHING when handed null —
+// no Jarvis on the Mac, or a daemon too old to say, is no band; push already on is no
+// offer. The offer goes FIRST because it is the one that disappears after a tap, and a band
+// that moves the Jarvis bar when it goes is better than one that moves the tabs under a
+// thumb. The Jarvis bar is a single button: the whole row is the target, the way a card is.
+function JarvisBar({ jarvis }) {
+  if (!jarvis) return null;
+  return (
+    <button class={('jarvis-bar ' + (jarvis.tone || '')).trim()} onClick={jarvis.onOpen}
+            aria-label={`${jarvis.title} — ${jarvis.sub}`}>
+      <span class="jt">{jarvis.title}</span>
+      <span class="js">{jarvis.sub}</span>
+      <span class="jgo" aria-hidden="true">›</span>
+    </button>
+  );
+}
+function NotifyBar({ notify }) {
+  if (!notify) return null;
+  return (
+    <div class="notify-bar">
+      <span class="nt">{notify.text}</span>
+      <Btn label={notify.enable} onClick={notify.onEnable} cls="go" />
+      <Btn label={notify.later} onClick={notify.onLater} />
+    </div>
+  );
+}
+
 function ProjectsScreen(p) {
-  return <CardScreen {...p} band={<ProfileTabs tabs={p.tabs} onTab={p.onTab} />} />;
+  return <CardScreen {...p} band={<Fragment>
+    <NotifyBar notify={p.notify} />
+    <JarvisBar jarvis={p.jarvis} />
+    <ProfileTabs tabs={p.tabs} onTab={p.onTab} />
+  </Fragment>} />;
 }
 function GridScreen(p) {
   return <CardScreen {...p} band={<CountStrip strip={p.strip} />} />;

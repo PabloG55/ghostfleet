@@ -65,8 +65,21 @@ try {
       const e = [...document.querySelectorAll('button')].find(x => x.textContent.trim().startsWith('continue without a passkey'));
       if (e) e.click(); return null;
     });
-    await sleep(1000);
+    // FOR THE CARD, NOT FOR A SECOND. A fixed 1s was how long this waited for the grid to
+    // draw after the passkey screen, and on a loaded ubuntu runner that was sometimes not
+    // long enough: the first gesture found "no card" and the row went red on a branch that
+    // had not touched it. The poll returns the moment a card has its title row; the ceiling
+    // only bounds a run where one never comes.
+    await until(() => b.evaluate(() => !!document.querySelector('#app .card .c-top')));
   };
+  // A condition, polled, with a ceiling. Answers the condition's last value, so a caller
+  // that times out asserts on what was really there rather than on a guess.
+  async function until(cond, ms = 15000) {
+    const t0 = Date.now();
+    let v = await cond();
+    while (!v && Date.now() - t0 < ms) { await sleep(100); v = await cond(); }
+    return v;
+  }
   // ASKED AS THE END STATE, never as a transition. A poll for "did it change" can miss a
   // navigation that happened instantly and then wait forever for a change already made.
   const onGrid = () => b.evaluate(() => /:/.test((document.querySelector('#app > .hdr .scope') || {}).textContent || ''));
@@ -108,8 +121,11 @@ try {
     await fresh();
     const sent = await gesture(tgt, dy, back);
     if (sent !== 'sent') { is(what, want, `gesture failed: ${sent}`); continue; }
-    await sleep(1000);
-    is(what, want, await onGrid());
+    // AN OPEN IS WAITED FOR; A NON-OPEN IS GIVEN THE SAME SECOND IT ALWAYS HAD. A poll can
+    // prove that something arrived and never that it will not, so the `false` rows settle
+    // for a beat before asking — and a slow runner only makes those rows harder to pass by
+    // accident, never easier to fail.
+    is(what, want, want ? await until(onGrid, 5000) : (await sleep(1000), await onGrid()));
   }
 
   // ...AND THE DRAG STILL REORDERS, which is what the grip is for and the thing a fix that

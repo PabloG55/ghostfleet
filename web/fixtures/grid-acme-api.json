@@ -2,9 +2,9 @@
   "project": "acme-api",
   "profile": "work",
   "counts": {
-    "need_you": 0,
+    "need_you": 1,
     "working": 2,
-    "ready": 5,
+    "ready": 4,
     "parked": 0,
     "limit": 0,
     "interrupted": 0
@@ -14,6 +14,7 @@
       "name": "master",
       "label": null,
       "status": "ready",
+      "team_status": null,
       "folder": "acme-api",
       "branch": "main",
       "agent": "claude",
@@ -24,12 +25,16 @@
       "sched": null,
       "limit_at": null,
       "lead": true,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "api-fix",
       "label": null,
       "status": "working",
+      "team_status": null,
       "folder": "api-fix",
       "branch": "feat/retry-backoff",
       "agent": "claude",
@@ -40,28 +45,36 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "docs-pass",
       "label": null,
       "status": "ready",
+      "team_status": null,
       "folder": "docs-pass",
       "branch": "docs/openapi-examples",
       "agent": "opencode",
       "pr": "1170",
-      "msg": "Done. Draft PR #212 \u2014 the drift was two schemas sharing one $ref.",
+      "msg": "Done. Draft PR #212 — the drift was two schemas sharing one $ref.",
       "age": 3000,
       "attached": false,
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "types",
       "label": "PR 198 strict types",
       "status": "ready",
+      "team_status": null,
       "folder": "types-strict",
       "branch": "strict-null-checks",
       "agent": "codex",
@@ -74,12 +87,16 @@
       },
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "list-pages",
       "label": null,
       "status": "working",
+      "team_status": null,
       "folder": "list-pages",
       "branch": "list-pages",
       "agent": "codex",
@@ -90,12 +107,16 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "cache-keys",
       "label": null,
       "status": "ready",
+      "team_status": "need-you",
       "folder": "cache-keys",
       "branch": "feat/cache-key-scope",
       "agent": "claude",
@@ -106,12 +127,20 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": {
+        "total": 2,
+        "need_you": 1,
+        "working": 1
+      },
+      "sub_head": false
     },
     {
       "name": "rate-limit",
       "label": null,
       "status": "starting",
+      "team_status": null,
       "folder": "rate-limit",
       "branch": "fix/rate-limit-window",
       "agent": "claude",
@@ -122,12 +151,16 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "csv-export",
       "label": null,
       "status": "ready",
+      "team_status": null,
       "folder": "csv-export",
       "branch": "csv-export",
       "agent": "claude",
@@ -138,8 +171,12 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     }
   ],
-  "free_worktrees": []
+  "free_worktrees": [],
+  "sub": null
 }

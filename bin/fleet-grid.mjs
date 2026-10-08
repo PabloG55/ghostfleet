@@ -23,8 +23,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFile, execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { modState, modLimitAt } from '../lib/mod-status.mjs';
+import * as J from '../lib/jarvis.mjs';
+import * as X from '../lib/experimental.mjs';
+// LOADED, NOT IMPORTED, and for the reason preview() below spells out: test/run.sh's vis35
+// group runs a COPY of this file from a temp directory, where a static import of ../lib
+// resolves to nothing and the whole control plane fails to load. A grid that cannot start
+// is a worse bug than a lost card that is not drawn, so a missing lib means no lost cards
+// and everything else as before. cf-sync stages lib/ beside bin/, so the real install has it.
+let lostSessions = () => [];
+try { ({ lostSessions } = await import(new URL('../lib/fleet-scan.mjs', import.meta.url))); } catch {}
 
 const HOME = os.homedir();
 // Everything is scoped to one Claude config dir (= one account/profile).
@@ -70,6 +80,10 @@ const PLAIN = process.argv.includes('--plain');
 // touch with no separator ("people-dupespeople-dupes") — so it cannot be parsed, only
 // read. The values behind it are whole; --json emits them before the formatting.
 const JSON_OUT = process.argv.includes('--json');
+// --sub <name>: draw that sub-lead's grid (itself, then its children) instead of the top
+// one. --json honours it, and so does the TUI on startup (the control plane can re-enter a
+// sub-grid it left to attach).
+const SUB_ARG = (() => { const i = process.argv.indexOf('--sub'); return i >= 0 ? (process.argv[i + 1] || '') : ''; })();
 const Z = process.env.CLAUDE_FLEET_SCOPE || SOCK.replace(/^cf-/, '');
 
 // ── colors ────────────────────────────────────────────────────────────────
@@ -137,7 +151,7 @@ function tmuxList() {
       if (!f) return null;
       const [name, cwd, attached] = f;
       return { name, cwd: cwd || '', attached: attached === '1' };
-    }).filter(Boolean).filter(s => !isTab(s.name));
+    }).filter(Boolean).filter(s => !isTab(s.name) && !isHold(s.name));
   } catch { return []; }
 }
 
@@ -152,6 +166,9 @@ function tmuxList() {
 //   You do not lose the tab by hiding it — C-t from the session reuses the one you
 // have, and ` inside it comes back here.
 function isTab(name) { return /^_(?:term|edit)-/.test(name || ''); }
+// The placeholder lib/agent-switch.sh holds a fleet's server open with while it swaps a
+// session's agent: never a card, never counted.
+function isHold(name) { return /^_hold-/.test(name || ''); }
 
 // THE LEAD. Every project has exactly one session called `master` — it is the one the
 // grid is drawn FROM, and the one work is dispatched from. Every filter here used to
@@ -181,6 +198,51 @@ function ownedBy(o, sock, zScope) {
   if (o.sock) return o.sock === sock;
   return !!o.zellij && o.zellij === zScope;
 }
+// ── a conversation sent to the background goes on under another id ───────────
+// Claude Code's /background (or ← into its agent view) ends a transcript with a
+// `continued-in` line naming the id it goes on under, run by another process while the
+// pane shows it. A record from before the hand-off still points at the old transcript,
+// and a card built from it shows a conversation that stopped — its last line, its age,
+// its last status — while the pane beside it is working. The line is evidence, so it is
+// followed (bin/fleet-read does the same): to the successor's own record when it has one,
+// else to its transcript, which sits beside the old one. Only the tail is read, and only
+// when the file has changed size since the last poll — transcripts here run to 100MB+.
+const contCache = new Map();   // transcript -> { size, next }
+function continuedIn(tr) {
+  let size = -1;
+  try { size = fs.statSync(tr).size; } catch { return ''; }
+  const hit = contCache.get(tr);
+  if (hit && hit.size === size) return hit.next;
+  let next = '';
+  try {
+    const fd = fs.openSync(tr, 'r');
+    try {
+      const n = Math.min(size, 65536), buf = Buffer.alloc(n);
+      fs.readSync(fd, buf, 0, n, size - n);
+      const all = [...buf.toString('utf8').matchAll(/"continuedInSessionId":"([0-9a-fA-F-]{36})"/g)];
+      if (all.length) next = all[all.length - 1][1];
+    } finally { fs.closeSync(fd); }
+  } catch {}
+  contCache.set(tr, { size, next });
+  return next;
+}
+function followContinued(o) {
+  for (let i = 0; o && o.transcript && i < 5; i++) {
+    const next = continuedIn(o.transcript);
+    if (!next || next === o.session_id) break;
+    const tr = path.join(path.dirname(o.transcript), `${next}.jsonl`);
+    if (!fs.existsSync(tr)) break;
+    let rec = null;
+    try { rec = JSON.parse(fs.readFileSync(path.join(FLEET_DIR, `${next}.json`), 'utf8')); } catch {}
+    // Its own record is on this fleet only if it says so; a successor with no record (or one
+    // that claimed nothing) keeps the identity it was handed, and has no status of its own
+    // yet — '' lets the pane decide, rather than replaying the old conversation's.
+    o = (rec && rec.sock === o.sock) ? rec
+      : { ...o, session_id: next, transcript: tr, status: '', continued_from: o.session_id };
+  }
+  return o;
+}
+
 function fleetBySlot() {
   // Index by slot, scoped to THIS fleet, keeping the newest entry per slot (avoids a
   // stale/duplicate file shadowing the live one).
@@ -196,6 +258,7 @@ function fleetBySlot() {
       if (!prev || (o.ts || 0) > (prev.ts || 0)) map.set(o.slot, o);
     } catch {}
   }
+  for (const [k, o] of map) map.set(k, followContinued(o));
   return map;
 }
 
@@ -305,9 +368,17 @@ const preview = (t) => String(t == null ? '' : t)
   .replace(/(^|[^A-Za-z0-9])\*\*(\S(?:[\s\S]*?\S)?)\*\*/g, '$1$2')
   .replace(/(^|[^A-Za-z0-9])\*([^\s*](?:[\s\S]*?\S)?)\*/g, '$1$2')
   .replace(/\s+/g, ' ').trim();
+// ONE LINE CAN BE BIGGER THAN THE WINDOW. Claude Code writes `attachment` records carrying
+// the whole system prompt and tool schemas — 184KB measured, in a conversation sent to the
+// background, written after its last reply — so a 64KB tail can hold no reply at all and
+// the card read as blank beside a session that had just answered. One wider look, only on
+// that miss: the poll's common case still reads 64KB.
 function lastAssistant(p) {
   if (!p) return '';
-  const lines = tailText(p).split('\n').filter(Boolean);
+  return lastAssistantIn(tailText(p)) || lastAssistantIn(tailText(p, 1048576));
+}
+function lastAssistantIn(txt) {
+  const lines = txt.split('\n').filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
       const o = JSON.parse(lines[i]);
@@ -470,7 +541,13 @@ function busyReFor(agent) {
 }
 
 // true = working, false = not working, null = CAN'T TELL (no detector for this agent)
+//
+// CLAUDE_FLEET_PANE_BUSY=off answers null for every pane, as if no agent had a detector.
+// It exists to prove a claim, not to tune one: with it set, a Claude card that still
+// reads `working` and then `ready` got that from the mod (lib/mod-status.mjs), because
+// nothing else was asked. docs/OPERATIONS.md, "The mod".
 function paneBusy(sock, name) {
+  if (process.env.CLAUDE_FLEET_PANE_BUSY === 'off') return null;
   const re = busyReFor(agentOf(name));
   if (!re) return null;
   try {
@@ -484,6 +561,22 @@ function paneBusy(sock, name) {
     //
     // Test PER LINE, never the whole blob: \s in the regex matches newlines, so a
     // whole-pane test matches across line boundaries and false-positives on idle panes.
+    return txt.split('\n').some(line => re.test(line));
+  } catch { return false; }
+}
+
+// STOPPED ON A DIALOG, read off the pane — for an agent with no hooks to push need-you itself
+// (bin/fleet-agent declares blocked_re_js only for those; codex today). Without this a codex
+// session waiting on its folder-trust or daemon dialog drew as READY: nothing else in the
+// status path ever asked the pane whether a human was being waited on. Per line, like
+// paneBusy, and false whenever the pattern is absent or the pane cannot be read.
+function paneBlocked(sock, name) {
+  const src = agentField(agentOf(name), 'blocked_re_js');
+  if (!src) return false;
+  let re; try { re = new RegExp(src); } catch { return false; }
+  try {
+    const txt = execFileSync('tmux', ['-L', sock, 'capture-pane', '-p', '-t', name],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     return txt.split('\n').some(line => re.test(line));
   } catch { return false; }
 }
@@ -625,6 +718,12 @@ function queuedCount(name) {
   } catch { return 0; }
 }
 
+// The target of a switch waiting on this session's turn (lib/agent-switch.sh), or ''.
+function pendingSwitchIn(dir, sock, name) {
+  try { const a = fs.readFileSync(path.join(dir, `${sock}.${name}.switch`), 'utf8').trim(); return /^[a-z0-9_-]+$/.test(a) ? a : ''; }
+  catch { return ''; }
+}
+function pendingSwitch(name) { return pendingSwitchIn(FLEET_DIR, SOCK, name); }
 function asleepFile(name) { return path.join(FLEET_DIR, SOCK + '.' + name + '.asleep'); }
 function isAsleep(name) {
   try { return fs.existsSync(asleepFile(name)); } catch { return false; }
@@ -677,7 +776,7 @@ function recordFor(pane, pid) {
       if (o && o.pane === pane && o.sock === SOCK && (!best || (o.ts || 0) > (best.ts || 0))) best = o;
     }
   } catch {}
-  if (best) return best;
+  if (best) return followContinued(best);
   let pids = [pid];
   try {
     pids = pids.concat(execFileSync('pgrep', ['-P', pid], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
@@ -689,9 +788,9 @@ function recordFor(pane, pid) {
     if (!sid) continue;
     const o = read(path.join(FLEET_DIR, `${sid}.json`));
     // A record on ANOTHER fleet is not this pane's, whatever id it carries.
-    if (o && (!o.sock || o.sock === SOCK)) return o;
-    return { session_id: sid, cwd: note.cwd || '',
-             transcript: note.cwd ? path.join(PROJECTS, encCwd(note.cwd), `${sid}.jsonl`) : '' };
+    if (o && (!o.sock || o.sock === SOCK)) return followContinued(o);
+    return followContinued({ session_id: sid, cwd: note.cwd || '',
+             transcript: note.cwd ? path.join(PROJECTS, encCwd(note.cwd), `${sid}.jsonl`) : '' });
   }
   return null;
 }
@@ -821,22 +920,165 @@ function asleepSessions(liveNames) {
   return out;
 }
 
-function gather({ lead = false } = {}) {
+// ── NESTED LEADS: who is whose child ────────────────────────────────────────
+// bin/fleet-spawn tags a child spawned from a worker's worktree with its parent's name in
+// <sock>.<child>.parent. The grid reads that tag to draw a TREE two levels deep: the top
+// grid shows the sub-lead with a rollup of its workers instead of the workers themselves
+// (the top lead asked for the sub-lead, not for its team), and ⏎ on that card opens the
+// SUB-GRID — the sub-lead first, then only its children.
+//   A tag whose parent is not on this fleet any more (stopped, never there) is ignored and
+//   the child is drawn at the top: a card hidden under a parent that has no card is a
+//   session nobody can reach from any screen.
+function parentFile(name) { return path.join(FLEET_DIR, `${SOCK}.${name}.parent`); }
+function parentOf(name) {
+  try { return fs.readFileSync(parentFile(name), 'utf8').split('\n')[0].trim(); } catch { return ''; }
+}
+// The rollup a sub-lead's card carries. ONE shape on the wire and on the card: the phone's
+// web/grid.js rollupText() words it identically, and grid-parity holds the two together.
+//   `width` is the room the line has. The sentence the owner asked for — `2 workers · 1
+// working · 0 need you` — is 34 columns and the desk's third line holds 28, so it gives way
+// to the same facts said shorter, in a fixed order, and the first that fits wins. The
+// phone passes no width and gets the whole sentence. Measured, not assumed: at 28 every
+// single-digit team lands on the second form (`1 of 2 working · 1 needs you` is exactly
+// 28), a two-digit one on the third, and only a three-digit team reaches the glyphs.
+function rollupText(w, width = Infinity) {
+  if (!w || !w.total) return '';
+  const n = w.need_you || 0, k = w.working || 0;
+  const need = `${n} ${n === 1 ? 'needs' : 'need'} you`;
+  const forms = [
+    `${w.total} worker${w.total === 1 ? '' : 's'} · ${k} working · ${need}`,
+    `${k} of ${w.total} working · ${need}`,
+    `${k}/${w.total} working · ${need}`,
+    `◆ ${k}/${w.total} · ● ${n}`,
+  ];
+  const fit = forms.find(f => [...f].length <= width);
+  return fit ?? forms[forms.length - 1];
+}
+// ── A SUB-LEAD'S CARD IS ITS TEAM'S STATE, not only its own pane's ──────────
+// Seen live: a sub-lead idle at its prompt drew `✓ ready` in green on the top grid while
+// one of its workers was mid-turn. Green reads as "nothing is happening there", and the
+// card was the only thing on that screen standing for the whole team — the worker itself
+// is one ⏎ away and not drawn. So the card takes the BUSIEST state in its subtree, and
+// only two states lift it: need-you over working over whatever the lead itself is. Ready,
+// parked, limit and the rest are statements about ONE session and say nothing about a
+// team, so they never travel up — a parked worker under a working lead must not turn the
+// card grey, and a lead at its usage limit is still the most useful thing to say when
+// nobody below it is busy.
+//   An asleep, exited or LOST worker does not lift anything: there is no process behind it,
+// and its status is whatever it was doing when it stopped (a lost card is held at `idle`
+// today, but that is a display choice and this must not lean on it) — a stale `working`
+// there is exactly the lie this exists to remove.
+//   Recursive, so a sub-lead under a sub-lead reports its whole team upward; `seen` is for
+// a tag loop, which no spawn writes and a hand-edited marker could.
+const LIFTS = ['need-you', 'working'];
+// THE LEAD'S OWN STATE, kept on a lifted card. A sub-lead drawn `◆ working` because a
+// worker is busy is still a session sitting at its prompt waiting for you, and hiding that
+// would trade one lie for another. So the age slot — the only place on the status line
+// that is the lead's own — says whose age it is and what the lead is doing: `lead ✓ 14s
+// ago`. The glyph rather than the word, because `⚠ interrupted` beside `● NEEDS YOU` does
+// not fit 28 columns and the glyph is the vocabulary every card already uses. `ago` is
+// the first thing to go: the status label is what twoCol() would otherwise clip.
+// '' on a card that was not lifted, which is then drawn exactly as before.
+function leadAgeText(card, label, width = Infinity) {
+  const st = card.teamStatus ?? card.team_status;
+  if (!st || st === card.status) return '';
+  const g = [...((STATUS[card.status] || STATUS.unknown).label)][0];
+  const age = card.age == null ? '' : ` ${humanAge(card.age)}`;
+  const long = `lead ${g}${age}${age ? ' ago' : ''}`;
+  return [...label].length + 1 + [...long].length <= width ? long : `lead ${g}${age}`;
+}
+function teamStatusOf(r, kidsOf, seen = new Set()) {
+  if (seen.has(r.name)) return r.status;
+  seen.add(r.name);
+  const live = x => !x.asleep && !x.exited && !x.lost;
+  const states = [live(r) ? r.status : '',
+                  ...(kidsOf.get(r.name) || []).filter(live).map(k => teamStatusOf(k, kidsOf, seen))];
+  return LIFTS.find(s => states.includes(s)) || r.status;
+}
+// Tag, count, and cut the rows to one level of the tree. `sub` names the sub-lead whose
+// grid is being drawn; without it this is the top grid.
+function nestRows(rows, sub) {
+  const present = new Set(rows.map(r => r.name));
+  for (const r of rows) {
+    const p = r.lead ? '' : parentOf(r.name);
+    r.parent = (p && p !== r.name && present.has(p)) ? p : null;
+  }
+  const kidsOf = new Map();
+  for (const r of rows) if (r.parent) kidsOf.set(r.parent, [...(kidsOf.get(r.parent) || []), r]);
+  for (const r of rows) {
+    const kids = kidsOf.get(r.name) || [];
+    // `teamStatus` is null on a session with no children: a plain worker's card is drawn
+    // from its own status exactly as before, and "was this card lifted" is one test.
+    r.teamStatus = kids.length ? teamStatusOf(r, kidsOf) : null;
+    // Each DIRECT worker counted by its own team's state, so the number on this card is
+    // the number of cards the sub-grid behind it will draw in that colour. Counting the
+    // whole subtree instead would let a card say `1 worker · 2 working`.
+    const live = kids.filter(k => !k.asleep && !k.exited && !k.lost);
+    r.workers = kids.length ? {
+      total: kids.length,
+      need_you: live.filter(k => teamStatusOf(k, kidsOf) === 'need-you').length,
+      working: live.filter(k => teamStatusOf(k, kidsOf) === 'working').length,
+    } : null;
+  }
+  if (!sub) return rows.filter(r => !r.parent);
+  const head = rows.find(r => r.name === sub);
+  // The sub-lead heads its own grid as an ordinary card — its last message, ⏎ attaches —
+  // because the rollup it carries upstairs is this screen's header down here. Its OWN
+  // status, too: its workers are drawn beside it on this screen, and a head lifted to
+  // their colour would count a working worker twice in the header.
+  if (head) { head.subHead = true; head.teamStatus = null; }
+  return head ? [head, ...rows.filter(r => r.parent === sub)] : [];
+}
+
+// ── A SESSION THE MACHINE KILLED HAS NO MARKER, AND HAD NO CARD ─────────────
+// The asleep problem again, one layer down: a crash takes the tmux server and leaves
+// nothing on disk that says "this was running", so the session dropped off every screen
+// while its record and its conversation sat there intact. lib/fleet-scan.mjs decides what
+// counts as lost (one reader, shared with the digest and fleet-list). This only says who
+// is alive: every name on the socket including tabs, plus every pane, because a session
+// renamed by hand still owns the pane its old record names.
+function livePanes() {
+  try {
+    const out = execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-panes', '-a', '-F', '#{pane_id}@#{pid}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return new Set(out.split('\n').filter(Boolean));
+  } catch { return new Set(); }
+}
+function allLiveNames() {
+  try {
+    const out = execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'list-sessions', '-F', '#{session_name}'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return new Set(out.split('\n').filter(Boolean));
+  } catch { return new Set(); }     // no server on this socket: that IS the crash case
+}
+function lostCards(liveNames, { lead = false, sub = '' } = {}) {
+  const names = new Set([...allLiveNames(), ...liveNames]);
+  return lostSessions({ dir: FLEET_DIR, sock: SOCK, live: names, panes: livePanes(), cfg: CFG })
+    // The lead follows the same rule the live list does: the TUI is drawn from inside it,
+    // and only --json (the phone) carries its card.
+    .filter(l => !isLead(l.name) || (lead && !sub))
+    .map(l => ({ name: l.name, cwd: l.cwd, attached: false, lostAt: l.at, lostId: l.id, lostTranscript: l.transcript }));
+}
+
+function gather({ lead = false, sub = '' } = {}) {
   const live = tmuxList();
   const liveNames = new Set(live.map(s => s.name));
   const slept = asleepSessions(liveNames);
+  const lost = lostCards(new Set([...liveNames, ...slept.map(s => s.name)]), { lead, sub });
   const sessions = [
-    ...(lead ? live.filter(s => isLead(s.name)) : []),
+    ...(lead && !sub ? live.filter(s => isLead(s.name)) : []),
     ...applyOrder(live.filter(s => !isLead(s.name))),
     ...slept,
+    ...lost,
   ];
   const fleet = fleetBySlot();
   const nowS = Math.floor(Date.now() / 1000);
   // Once, here, and not inside the map: see prNumbers() for why nine calls is the wrong
   // shape and for why this one cannot reach the network.
   const prs = prNumbers();
-  return sessions.map(s => {
-    const st = fleet.get(s.name) || (s.asleepAt ? undefined : recordOfPane(s.name) || undefined);
+  return nestRows(sessions.map(s => {
+    const gone = !!(s.asleepAt || s.lostAt);      // no process, so no pane to ask anything
+    const st = fleet.get(s.name) || (gone ? undefined : recordOfPane(s.name) || undefined);
     const agent = agentOf(s.name);
     const folder = st?.folder || (s.cwd ? path.basename(s.cwd) : s.name);
     const branch = st?.branch || (s.cwd ? gitBranch(s.cwd) : '');
@@ -850,7 +1092,8 @@ function gather({ lead = false } = {}) {
     // immediately: seven slept cards in one fleet all showing the same last message, each of
     // them a neighbour's. The marker records the conversation id that was live at the moment
     // of sleeping, which is exactly the one the card is about.
-    const transcript = (s.asleepId && s.cwd)
+    const transcript = s.lostTranscript ? s.lostTranscript
+      : (s.asleepId && s.cwd)
       ? path.join(CFG, 'projects', s.cwd.replace(/[^A-Za-z0-9]/g, '-'), s.asleepId + '.jsonl')
       : (st?.transcript ||
          (agent === 'codex' ? codexTranscript(s.cwd || '') : newestTranscript(s.cwd || '')));
@@ -858,26 +1101,50 @@ function gather({ lead = false } = {}) {
     // A slept session has no pane to read, so it is never asked. Probing one costs a tmux
     // round trip that answers "not found" and would land as "not busy", which reads as
     // ready — a card claiming a session is waiting for input when its process is gone.
-    const busy = s.asleepAt ? false : paneBusy(SOCK, s.name);
+    // THE MOD'S STATE, WHEN THERE IS ONE TO BELIEVE, AND THEN THE PANE IS NOT READ. A Claude
+    // session with mods/ghostfleet loaded writes what it is doing from inside (a turn
+    // started, a turn ended, a dialog is up), which is the thing paneBusy and the
+    // need-you latch below can only infer. lib/mod-status.mjs decides whether the record
+    // is still being written; when it is not, everything below runs as it always did.
+    const ms = gone ? null : modState(st);
+    const busy = ms ? ms === 'working' : gone ? false : paneBusy(SOCK, s.name);
     let status = s.asleepAt ? (st?.status || 'unknown')
-                            : deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
+               : ms || deriveStatus(st?.status || '', transcript, busy, st?.ts || 0, tmt);
     if (!busy && isParked(s.name)) status = 'parked';     // intentionally off (fleet-pause)
+    // A dialog outranks ready: it is the one idle-looking state that needs you to act.
+    else if (!busy && !gone && !ms && paneBlocked(SOCK, s.name)) status = 'need-you';
+    // A LOST CARD IS NEVER need-you, AND NEVER COUNTED AS ANYTHING LIVE. Its record holds
+    // whatever the session was doing when the machine went down, and a crash mid-question
+    // would otherwise paint a dead session in the need-you red and count it in the header.
+    // `idle` is the status nobody counts, and `lost` beside it says what really happened.
+    if (s.lostAt) status = 'idle';
     // Checked last and only on a session that is neither generating nor deliberately
     // off: those two already describe it better. A limited session looks exactly like a
     // ready one — same input box, same prompt — so nothing but the pane can tell.
     let limitAt = null;
-    if (!busy && status !== 'parked') {
-      limitAt = paneLimit(SOCK, s.name);
+    if (!busy && !gone && status !== 'parked') {
+      // From the mod, the limit is the engine's own 5h figure and `interrupted` is
+      // already the state; neither needs the pane.
+      limitAt = ms ? modLimitAt(st) : paneLimit(SOCK, s.name);
       if (limitAt) status = 'limit';
       // Limit wins if both are showing: it says WHY the session is stuck and when it
       // comes back, where "interrupted" only says it stopped.
-      else if (paneInterrupted(SOCK, s.name)) status = 'interrupted';
+      else if (!ms && paneInterrupted(SOCK, s.name)) status = 'interrupted';
     }
     const ageBase = tmt || st?.ts || 0;
     const age = ageBase ? Math.max(0, nowS - ageBase) : null;
     const mk = readSched(s.name);                 // socket-namespaced marker
     const sched = (mk && mk.at > nowS) ? mk : null;
-    return { name: s.name, cwd: s.cwd || '', folder, branch, status, age, msg: lastAssistant(transcript),
+    // A SWITCH WAITING ON THIS SESSION'S TURN (lib/agent-switch.sh) takes the message line:
+    // the session goes on looking exactly as it did until the switch fires, and "why is it
+    // still claude?" is the question the card is asked meanwhile. One field, so the phone's
+    // --json gets it from the same producer.
+    const switchingTo = pendingSwitch(s.name);
+    return { name: s.name, cwd: s.cwd || '', folder, branch, status, age,
+             msg: switchingTo ? `switching to ${switchingTo}…` : lastAssistant(transcript), switchingTo,
+             // Where `status` came from: `mod` when the session's own plugin wrote it,
+             // `pane` when it was read off the screen. --json only; the card looks the same.
+             statusFrom: ms ? 'mod' : 'pane',
              attached: s.attached, sched, agent, label: labelOf(s.name), limitAt, lead: isLead(s.name),
              // ONE BUILDER FEEDS BOTH SCREENS: bin/fleet-serve.mjs shells out to this
              // file's --json, so the phone gets this field without a second producer —
@@ -888,12 +1155,16 @@ function gather({ lead = false } = {}) {
              // that timed out leaves that shape). Both are asleep as far as a card is
              // concerned, and the second is how a live session ends up under an asleep card.
              asleep: !!s.asleepAt || isAsleep(s.name),
+             // Killed by the machine rather than by a person: a record, a transcript, and
+             // nobody under the name. Beside the status like the two above. ⏎ reopens it on
+             // its own conversation (fleet-restart --reopen), x forgets it.
+             lost: !!s.lostAt,
              queued: queuedCount(s.name),
              // null, never 0 or '': the card tests it for truth, and a PR numbered 0 does
              // not exist while an empty string would read as "no PR" in one place and as a
              // present-but-blank field in another.
              pr: (branch && prs.get(branch)) || null };
-  });
+  }), sub);
 }
 
 // The summary line, counted ONCE for all three consumers: the TUI header, --plain's
@@ -913,14 +1184,20 @@ function gather({ lead = false } = {}) {
 // `starting` and `unknown` are carried per card and counted by nobody — a consumer that
 // wants them reads cards[], and must not infer them by subtracting these six from
 // cards.length as though the remainder were one status.
+//
+// A CARD IS COUNTED AS IT IS DRAWN: a sub-lead lifted to working by its team counts as
+// working, so the header never says `0 working` over a cyan card. One count per CARD, not
+// per session — the workers behind it are not on this screen, and the sub-grid's header
+// counts them.
 function statusCounts(cards) {
+  const n = s => cards.filter(c => (c.teamStatus || c.status) === s).length;
   return {
-    need_you:    cards.filter(c => c.status === 'need-you').length,
-    working:     cards.filter(c => c.status === 'working').length,
-    ready:       cards.filter(c => c.status === 'ready').length,
-    parked:      cards.filter(c => c.status === 'parked').length,
-    limit:       cards.filter(c => c.status === 'limit').length,
-    interrupted: cards.filter(c => c.status === 'interrupted').length,
+    need_you:    n('need-you'),
+    working:     n('working'),
+    ready:       n('ready'),
+    parked:      n('parked'),
+    limit:       n('limit'),
+    interrupted: n('interrupted'),
   };
 }
 
@@ -949,6 +1226,18 @@ function tabChoice(kind) {
   return `attach${US}${tabName(kind, from)}`;
 }
 
+// A SUB-LEAD IS STOPPED WITH ITS WORKERS, by fleet-stop rather than here: the children
+// are reclaimed through fleet-clean's gates (squash-aware, #16), and one implementation of
+// "stop a sub-lead" is what lets this screen, the phone and the CLI mean the same thing.
+// Detached, because a reclaim per child can take a while and the grid must keep drawing.
+function stopSubLead(name) {
+  const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-stop');
+  try {
+    const c = spawn(bin, ['-s', SOCK, '--children', name], { detached: true, stdio: 'ignore',
+      env: { ...process.env, CLAUDE_FLEET_DIR: FLEET_DIR } });
+    c.unref();
+  } catch {}
+}
 function killSession(name) {
   try {
     execFileSync('tmux', ['-L', SOCK, ...(CONF ? ['-f', CONF] : []), 'kill-session', '-t', name], { stdio: 'ignore' });
@@ -957,6 +1246,9 @@ function killSession(name) {
   // Drop the agent marker too, or a later session that reuses this name inherits a
   // dead one's agent and launches the wrong CLI.
   try { fs.unlinkSync(path.join(FLEET_DIR, `${SOCK}.${name}.agent`)); } catch {}
+  // ...and the parent tag, for the same name-reuser reason: a top-level worker that takes
+  // this name must not start reporting to somebody else's sub-lead.
+  try { fs.unlinkSync(parentFile(name)); } catch {}
   // An asleep card has no tmux session — the kill above does nothing for it and the marker
   // IS the card, so leaving it kept a stopped session on the grid. Same list as fleet-stop.
   try { fs.unlinkSync(asleepFile(name)); } catch {}
@@ -1095,11 +1387,13 @@ function humanAge(a) {
 // ── card rendering ────────────────────────────────────────────────────────
 const CW = 30; // inner content width
 function cardLines(card, selected, idx) {
-  const meta = STATUS[card.status] || STATUS.starting;
+  // A sub-lead's card wears its TEAM's status (see teamStatusOf); every other card's
+  // teamStatus is null and this is its own status, as it always was.
+  const meta = STATUS[card.teamStatus || card.status] || STATUS.starting;
   // A SLEEPING CARD IS DRAWN IN THE GREY `parked` AND `idle` ALREADY USE. It is not
   // running, and a card lit in its last status' colour claims otherwise. No new colour:
   // this is the palette's own grey, the same one the two other not-working states take.
-  const color = card.asleep ? C.grey : meta.color;
+  const color = (card.asleep || card.lost) ? C.grey : meta.color;
   // 1-9 prefix = the digit that jumps straight to this card (see onKey)
   const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
   // A labelled card is titled by the label; an unlabelled one is unchanged.
@@ -1114,7 +1408,7 @@ function cardLines(card, selected, idx) {
   const right = card.sched ? `@${clockLabel(card.sched.at)}`
               : card.status === 'limit' && card.limitAt ? `↻ ${card.limitAt}`
               : card.queued ? `queued: ${card.queued}`
-              : idle;   // @ = scheduled send
+              : leadAgeText(card, meta.label, CW - 2) || idle;   // @ = scheduled send
   // ── AN EXITED SESSION SAYS SO WHERE ITS STATUS WOULD BE ───────────────────
   // The agent is gone; the pane and the card are not (bin/agent-here holds them). None
   // of the nine statuses describes that — they are what a RUNNING agent is doing — and
@@ -1136,7 +1430,12 @@ function cardLines(card, selected, idx) {
   // which fits the 28 this line has with room to spare — measured, because a label that
   // fits at one width and not another is this file's most repeated bug.
   const asleepAge = card.age == null ? '' : ` ${humanAge(card.age)}`;
-  const l1 = card.asleep
+  // A LOST card keeps its age for the asleep reason: "how long ago did it die" is the
+  // question, and it decides whether you reopen or dismiss. `✕ lost 6d23h` is 12 columns
+  // and `⏎ reopen` 8, inside the 28 with room to spare.
+  const l1 = card.lost
+    ? `│ ${padEndV(twoCol(`✕ lost${asleepAge}`, '⏎ reopen', CW - 2), CW - 2)} │`
+    : card.asleep
     ? `│ ${padEndV(twoCol(`☾ asleep${asleepAge}`, '⏎ wakes', CW - 2), CW - 2)} │`
     : card.exited
     ? `│ ${padEndV(twoCol('✗ exited', '⏎ resumes', CW - 2), CW - 2)} │`
@@ -1192,7 +1491,13 @@ function cardLines(card, selected, idx) {
   const prTag = card.pr ? `#${card.pr}` : '';
   const l2 = `│ ${padEndV(twoCol(l2text,
                                  [agentTag, prTag].filter(Boolean).join(' '), CW - 2), CW - 2)} │`;
-  const l3 = `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
+  // A SUB-LEAD'S THIRD LINE IS ITS TEAM, not its last message. `◆ working · 4 workers · 1
+  // needs you` is 35 columns and the status line holds 28, so the rollup takes the line the
+  // quote had — decided by the owner over the alternatives (the count in the top rule, an
+  // abbreviated status line). The message is one ⏎ away, on the sub-grid's first card.
+  const l3 = card.workers?.total && !card.subHead
+    ? `│ ${padEndV(rollupText(card.workers, CW - 2), CW - 2)} │`
+    : `│ ${padEndV(card.msg ? `"${card.msg}"` : (card.attached ? '(attached)' : '…'), CW - 2)} │`;
   const bot = `╰${'─'.repeat(CW)}╯`;
   const wrap = (s, isTop) => selected
     ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}`
@@ -1697,6 +2002,46 @@ let schedFor = null;         // session name being scheduled
 let schedInput = '';         // typed "<time> | <message>" buffer
 let timer;                   // refresh interval (session grid / projects)
 let selInit = false;         // apply --select preselect exactly once (first build)
+// ── the SUB-GRID ─────────────────────────────────────────────────────────────
+// '' = the top grid. Otherwise the sub-lead whose grid is drawn: itself first, then only
+// its workers. ⏎ on a sub-lead's card enters it; ` (or q) goes back up — one level, to
+// the top grid with that sub-lead selected, not out of the project.
+let SUB = SUB_ARG;
+// Attaching from a sub-grid leaves this process; the control plane then re-runs the grid
+// with --select <session>. This one-line file is how the next grid knows the session was
+// entered from a sub-grid, so detaching lands you back in it rather than at the top.
+function subMemFile() { return path.join(FLEET_DIR, `${SOCK}.grid-sub`); }
+function enterSub(name) { SUB = name; sel = 0; buildItems(); }
+function leaveSub() {
+  const was = SUB; SUB = ''; buildItems();
+  const i = items.findIndex(it => it.card && it.card.name === was);
+  sel = i >= 0 ? i : 0;
+}
+// What ⏎ / a digit / a click does to a card: a sub-lead's card on the top grid opens its
+// sub-grid; everything else attaches. Returns the choice to finish with, or null.
+// ⏎ ON A LOST CARD REOPENS IT, THEN ATTACHES. It is not done in bin/ghostfleet's attach
+// path the way a wake is, because that path has nothing to read: an asleep session leaves a
+// marker holding its id, and a lost one leaves only its record. The reopen is
+// fleet-restart's own, so there is ONE way back for a dead session whether it is typed or
+// pressed: its own conversation by id, in its recorded cwd, as its recorded agent, and
+// never "the newest conversation in this folder".
+function reopenLost(name) {
+  const bin = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-restart');
+  try {
+    execFileSync(bin, ['-s', SOCK, '--reopen', name], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, CLAUDE_FLEET_DIR: FLEET_DIR }, timeout: 20000 });
+    return true;
+  } catch (e) {
+    wtRmMsg = `could not reopen '${name}': ${String(e.stderr || e.message || '').trim().replace(/^fleet-restart: /, '')}`;
+    return false;
+  }
+}
+function cardChoice(card) {
+  if (card.lost && !reopenLost(card.name)) return null;
+  if (!SUB && card.workers?.total && !card.subHead) { enterSub(card.name); return null; }
+  if (SUB) { try { fs.writeFileSync(subMemFile(), SUB + '\n'); } catch {} }
+  return `attach${US}${card.name}`;
+}
 let gSettings = false;       // per-session settings page open (auto-nudge)
 let gSetSel = 0;             // selected row on the per-session settings page
 let renameOld = null;        // session being renamed (from the settings page's 'r')
@@ -1738,9 +2083,25 @@ function doRename(oldName, newName) {
   return { ok: true };
 }
 function buildItems() {
-  cards = gather();
-  const free = freeWorktrees();
-  items = [...cards.map(c => ({ card: c })), ...free.map(w => ({ freeWt: w })), { newCard: true }];
+  if (!selInit && !SUB) {
+    // Back from a session: re-open the sub-grid it was entered from, and a sub-worker's
+    // own sub-grid always — it has no card on the top grid to land on.
+    let mem = '';
+    try { mem = fs.readFileSync(subMemFile(), 'utf8').trim(); fs.unlinkSync(subMemFile()); } catch {}
+    if (SELECT) {
+      const p = parentOf(SELECT);
+      if (p && p !== SELECT) SUB = p;
+      else if (mem && mem === SELECT) SUB = mem;
+    }
+  }
+  cards = gather({ sub: SUB });
+  // The sub-lead went away under us (stopped, renamed): fall back to the top grid rather
+  // than draw an empty screen with a name on it.
+  if (SUB && !cards.length) { SUB = ''; cards = gather(); }
+  // A sub-grid is the team and nothing else: a free worktree or `+ new` there would start
+  // a TOP-level worker from inside somebody's sub-grid.
+  const free = SUB ? [] : freeWorktrees();
+  items = [...cards.map(c => ({ card: c })), ...free.map(w => ({ freeWt: w })), ...(SUB ? [] : [{ newCard: true }])];
   if (!selInit) {            // first build: land on the session we just came back from
     selInit = true;
     if (SELECT) { const i = items.findIndex(it => it.card && it.card.name === SELECT); if (i >= 0) sel = i; }
@@ -1757,7 +2118,8 @@ function renderGrid() {
   const { need_you: need, working: work, ready, parked, limit: limited, interrupted: cut }
     = statusCounts(cards);
   let buf = '\x1b[H';
-  const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}   ` +
+  const crumb = SUB ? ` ${C.bold}› ${SUB}${C.reset}${C.dim} (sub-lead)${C.reset}` : '';
+  const header = ` ${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}${crumb}   ` +
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
     (cut ? ` · ${C.yellow}${cut} interrupted${C.reset}` : '') +
     (limited ? ` · ${C.yellow}${limited} at limit${C.reset}` : '') +
@@ -1765,11 +2127,19 @@ function renderGrid() {
   // Same banner as the Projects screen, with the live counts beside the ship. Falls
   // back to the one-line header on a window too small to spend the rows on.
   buf += banner([
-    `${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}`,
+    `${C.bold}ghostfleet${C.reset} ${C.dim}[${PROFILE}:${Z}]${C.reset}${crumb}`,
     `${C.red}${need} need you${C.reset} · ${C.cyan}${work} working${C.reset} · ${C.green}${ready} ready${C.reset}` +
       (parked ? ` · ${C.grey}${parked} parked${C.reset}` : ''),
   ]) ?? (header + '\x1b[K\n');
-  if (confirmKill)
+  const killW = confirmKill ? cards.find(c => c.name === confirmKill)?.workers : null;
+  if (confirmKill && killW?.total)
+    // THE ASK. A sub-lead does not go alone: its workers are stopped with it and their
+    // worktrees reclaimed where fleet-clean's gates say that is safe (fleet-stop --children).
+    buf += `${C.red}${C.bold} stop sub-lead '${confirmKill}' AND its ${killW.total} worker${killW.total === 1 ? '' : 's'} (worktrees reclaimed where safe)?${C.reset}` +
+           `${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
+  else if (confirmKill && cards.find(c => c.name === confirmKill)?.lost)
+    buf += `${C.red}${C.bold} dismiss lost session '${confirmKill}'?${C.reset}${C.red} forgets the card; the conversation stays on disk · y = yes · any other key = cancel${C.reset}\x1b[K\n`;
+  else if (confirmKill)
     buf += `${C.red}${C.bold} kill session '${confirmKill}'?${C.reset}${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
   else if (confirmWt)
     // Clip to what actually fits beside the key hint: a line that wraps pushes the
@@ -1821,7 +2191,10 @@ function renderGrid() {
   // the card area against its height. At 8 cards in 24 rows it costs one more wrapped
   // line between 93 and 106 columns and none above; at 80 the banner was already being
   // pushed off by the footer as it stood, which is its own problem and not this one.
-  buf += `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 enter · n new · N parallel · w worktree · t stack · ` +
+  buf += SUB
+    ? `${C.dim} ↑↓←→/hjkl move · ⏎/1-9 enter · t stack · s sched · p pause · P resume · ${xVerb} · , settings · ` +
+      `Ctrl-t term · Ctrl-n edit · Ctrl-f jump · Ctrl-p/Q projects · q/\` up to the top grid${C.reset}\x1b[K\n`
+    : `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 enter · n new · N parallel · w worktree · t stack · ` +
          `s sched · p pause · P resume · ${xVerb} · , settings · Ctrl-t term · Ctrl-n edit · Ctrl-f jump · ` +
          `Ctrl-p/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
@@ -1996,7 +2369,14 @@ function renderSettings() {
     const badge = st === 'on'  ? `${C.green}● on     ${C.reset}`
                 : st === 'off' ? `${C.red}○ off    ${C.reset}`
                 :                `${C.grey}· inherit${C.reset}`;
-    const detail = st === 'inherit' ? `follows project · ${pOn ? 'on' : 'off'}` : 'this session';
+    // A sub-lead's child inherits from the SUB-LEAD first, and with neither saying anything
+    // it pushes unless the project is switched off (hooks/fleet-event.sh, PRECEDENCE).
+    const par = (cards[i] && cards[i].parent) || null;
+    const parSt = par ? sessPush(par) : 'inherit';
+    const detail = st !== 'inherit' ? 'this session'
+      : par && parSt !== 'inherit' ? `follows ${par} · ${parSt}`
+      : par ? `follows project · ${fs.existsSync(path.join(FLEET_DIR, SOCK + '.notify-lead-off')) ? 'off' : 'on'}`
+      : `follows project · ${pOn ? 'on' : 'off'}`;
     buf += `${selRow ? `${C.bold}${C.white}▸ ` : '   '}${badge}  ` +
            `${(selRow ? C.bold + C.white : C.reset) + padEndV(n, 22) + C.reset} ${C.dim}${detail}${C.reset}\x1b[K\n`;
   });
@@ -2195,7 +2575,7 @@ function onKey(key) {
         sel = idx;
         const it = items[sel];
         if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = false; mode = 'picker'; render(); }
-        else if (it?.card) return finish(`attach${US}${it.card.name}`);
+        else if (it?.card) { const c = cardChoice(it.card); if (c) return finish(c); render(); }
         else if (it?.freeWt) return finish(freeWtChoice(it.freeWt));
       }
     }
@@ -2225,7 +2605,11 @@ function onKey(key) {
       render(); return;
     }
     if (confirmKill) {
-      if (key === 'y' || key === 'Y') { killSession(confirmKill); confirmKill = null; buildItems(); }
+      if (key === 'y' || key === 'Y') {
+        const w = cards.find(c => c.name === confirmKill)?.workers;
+        if (w?.total) stopSubLead(confirmKill); else killSession(confirmKill);
+        confirmKill = null; buildItems();
+      }
       else confirmKill = null;
       render(); return;
     }
@@ -2271,7 +2655,10 @@ function onKey(key) {
       const j = jumpKey(key);
       if (j) { if (j !== 'handled') return finish(j); render(); return; }
     }
-    if (key === '\x03' || key === 'q' || key === '\x60') return finish('back');
+    if (key === '\x03' || key === 'q' || key === '\x60') {
+      if (SUB) { leaveSub(); render(); return; }        // up one level, not out of the project
+      return finish('back');
+    }
     if (key === '\x1b[A' || key === 'k') moveGrid('up');
     else if (key === '\x1b[B' || key === 'j') moveGrid('down');
     else if (key === '\x1b[C' || key === 'l') moveGrid('right');
@@ -2281,12 +2668,17 @@ function onKey(key) {
     // count these cards, and they have to keep meaning the same session.
     else if (key === 'H' || key === 'L' || key === 'K' || key === 'J') {
       const it = items[sel];
-      if (it?.card) {
+      // Not in a sub-grid: the order file is the TOP grid's numbering, and writing it from
+      // a list of four children would drop every other session out of it.
+      if (it?.card && !SUB) {
         const nc = cols();
         const delta = key === 'H' ? -1 : key === 'L' ? 1 : key === 'K' ? -nc : nc;
         const ni = reorderSession(it.card.name, delta);
         buildItems(); if (ni >= 0) sel = ni;      // cards lead `items`, so index == index
       }
+    }
+    else if (SUB && (key === 'n' || key === 'N' || key === 'w' || key === 'W')) {
+      wtRmMsg = `this is ${SUB}'s sub-grid — its workers are spawned by ${SUB} (fleet-spawn from its worktree); \` goes back up`;
     }
     else if (key === 'n') { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = false; mode = 'picker'; }
     else if (key === 'N') { checkouts = discoverCheckouts(); pickSel = 0; pickFresh = true; mode = 'picker'; }
@@ -2337,7 +2729,7 @@ function onKey(key) {
     else if (key === '\x0e') { const c = tabChoice('edit'); if (c) return finish(c); render(); return; }
     else if (key >= '1' && key <= '9') {              // insta-jump: digit -> that card
       const it = items[Number(key) - 1];
-      if (it?.card) { sel = Number(key) - 1; return finish(`attach${US}${it.card.name}`); }
+      if (it?.card) { sel = Number(key) - 1; const c = cardChoice(it.card); if (c) return finish(c); }
       else if (it?.freeWt) { sel = Number(key) - 1; return finish(freeWtChoice(it.freeWt)); }
     }
     else if (key === '\x10' || key === 'Q') return finish('projects');  // ^P (or Q) -> Projects
@@ -2350,7 +2742,7 @@ function onKey(key) {
     else if (key === '\r' || key === '\n') {
       const it = items[sel];
       if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
-      else if (it?.card) return finish(`attach${US}${it.card.name}`);
+      else if (it?.card) { const c = cardChoice(it.card); if (c) return finish(c); }
       else if (it?.freeWt) return finish(freeWtChoice(it.freeWt));
     }
     render();
@@ -2505,7 +2897,14 @@ if (process.argv.includes('--checkouts')) {
 // depending on how you got there. Deliberately does NOT call gather(): it needs
 // names, not a capture-pane round trip per session.
 if (process.argv.includes('--order')) {
-  const names = applyOrder(tmuxList().filter(s => !isLead(s.name))).map(s => s.name);
+  // The TOP grid's cards, and only those: a sub-worker is drawn inside its sub-lead's grid,
+  // so counting it here would make `Ctrl-f <p> <s>` and the digits disagree about which
+  // session is number 3. A child whose parent is not on the fleet is drawn at the top, so
+  // it is counted at the top.
+  const live = tmuxList();
+  const liveNames = new Set(live.map(s => s.name));
+  const nested = n => { const p = parentOf(n); return !!p && p !== n && liveNames.has(p); };
+  const names = applyOrder(live.filter(s => !isLead(s.name) && !nested(s.name))).map(s => s.name);
   if (names.length) console.log(names.join('\n'));
   process.exit(0);
 }
@@ -2546,10 +2945,13 @@ if (process.argv.includes('--order')) {
 // opening the main agent, just the sessions". gather({lead:true}) puts it first; the TUI
 // and --plain still call gather() and are byte-for-byte what they were.
 if (JSON_OUT) {
-  const rows = gather({ lead: true });
+  const rows = gather({ lead: true, sub: SUB_ARG });
   await new Promise(res => process.stdout.write(JSON.stringify({
     project: Z,
     profile: PROFILE,
+    // Whose sub-grid this is (--sub), or null for the top one. Echoed so a client can tell
+    // a sub-grid it asked for from a top grid it got because that sub-lead has gone.
+    sub:     SUB_ARG && rows.length ? SUB_ARG : null,
     // COUNTED OVER THESE CARDS, lead included — `counts` is a fold over `cards` and
     // nothing else, which is the only definition that cannot drift: web/grid.js's
     // countsFrom() folds the same array in the client, and the suite asserts the two
@@ -2571,6 +2973,16 @@ if (JSON_OUT) {
       // genuinely cannot tell, and a client that renders it as a confident green dot
       // undoes the one thing this status layer is for.
       status:   c.status,
+      // `mod` when the session's own plugin wrote `status` (mods/ghostfleet), `pane`
+      // when it was read off the screen. Lets the phone and a reader of --json tell an
+      // exact state from an inferred one without a second producer.
+      status_from: c.statusFrom || 'pane',
+      // A sub-lead's card status: the busiest of itself and its team (teamStatusOf), which
+      // is what every card renderer and every count draws from. null on a session with no
+      // workers and on the head of a sub-grid. `status` stays the session's OWN state,
+      // because the phone's session screen reads it as "is this pane busy" — the thinking
+      // dots, the answer-a-question flow — and a lead at its prompt is not busy.
+      team_status: c.teamStatus || null,
       folder:   c.folder,
       branch:   c.branch,
       agent:    c.agent,          // the card only draws it when != claude
@@ -2591,6 +3003,9 @@ if (JSON_OUT) {
       // trigger it. The field existed at both ends and nothing carried it between them.
       exited:   !!c.exited,
       asleep:   !!c.asleep,
+      // Killed by the machine with no marker left (lib/fleet-scan.mjs lostSessions). The
+      // phone reopens it with fleet_reopen and dismisses it with fleet_stop.
+      lost:     !!c.lost,
       // Prompts waiting for this session's turn to end (fleet-send's queue); 0 = none.
       queued:   c.queued || 0,
       attached: c.attached,
@@ -2619,8 +3034,20 @@ if (JSON_OUT) {
       // be one test, and an absent key reads as false in exactly the same way a real
       // false does, right up until the day it is absent for another reason.
       lead:     c.lead,
+      // ── NESTED LEADS ──
+      // `parent`: the sub-lead this card reports to, or null. On the top grid it is always
+      // null (children are not listed there); on a sub-grid it is set on every card but the
+      // first. `workers`: a sub-lead's rollup — {total, need_you, working} — or null for a
+      // session with no children, so "is this a sub-lead" is one test for the client.
+      parent:   c.parent || null,
+      workers:  c.workers || null,
+      // true on the one card that heads a sub-grid: it is drawn and tapped as an ordinary
+      // session (its message, not its rollup — the rollup is that screen's header).
+      sub_head: !!c.subHead,
     })),
-    free_worktrees: freeWorktrees(),
+    // A sub-grid lists the sub-lead's team and nothing else: a free worktree offered there
+    // would start a TOP-level worker from inside somebody's sub-grid.
+    free_worktrees: SUB_ARG ? [] : freeWorktrees(),
   }) + '\n', res));
   process.exit(0);
 }
@@ -2660,14 +3087,19 @@ if (PLAIN) {
   console.log(['TAB', 'CHECKOUT', 'BRANCH', 'AGENT', 'STATUS', 'LAST MSG', 'IDLE']
     .map((h, i) => h.padEnd([12, 14, 26, 9, 11, 46, 8][i])).join(''));
   for (const c of rows) {
-    const idle = c.age == null ? '' : (c.status === 'working' ? `busy ${humanAge(c.age)}` : `${humanAge(c.age)} ago`);
+    // A sub-lead reads here as it does on its card: its team's status in STATUS, the team
+    // in LAST MSG, and — when the team lifted it — the lead's own state in IDLE, unclipped
+    // because it is the last column.
+    const idle = leadAgeText(c, '') ||
+      (c.age == null ? '' : (c.status === 'working' ? `busy ${humanAge(c.age)}` : `${humanAge(c.age)} ago`));
+    const msg = c.workers?.total && !c.subHead ? rollupText(c.workers) : c.msg;
     console.log([
       clip(c.name, 12).padEnd(12), clip(c.folder, 14).padEnd(14), clip(c.branch, 26).padEnd(26),
       clip(c.agent, 9).padEnd(9),
       // asleep and exited REPLACE the status here, for the reason they ride beside it on a
       // card: the nine statuses say what a RUNNING agent is doing, and neither of these is
       // running. Printing the last status it happened to hold reads as a live session.
-      clip(c.asleep ? 'asleep' : c.exited ? 'exited' : c.status, 11).padEnd(11), clip(c.msg, 44).padEnd(46), idle,
+      clip(c.lost ? 'lost' : c.asleep ? 'asleep' : c.exited ? 'exited' : (c.teamStatus || c.status), 11).padEnd(11), clip(msg, 44).padEnd(46), idle,
     ].join(''));
   }
   if (!rows.length) console.log('(no sessions)');
@@ -2687,7 +3119,9 @@ function checkJump() {
   let raw;
   try { raw = fs.readFileSync(f, 'utf8'); fs.unlinkSync(f); } catch { return false; }
   const [slot, ts] = raw.split('\t');
-  if (slot && (Date.now() / 1000 - Number(ts || 0)) < 30 && (slot === 'master' || cards.some(c => c.name === slot))) {
+  // A sub-worker has no card on the top grid but is still a session you can be sent to.
+  if (slot && (Date.now() / 1000 - Number(ts || 0)) < 30 && (slot === 'master' || cards.some(c => c.name === slot)
+      || (parentOf(slot) && tmuxList().some(t => t.name === slot)))) {
     finish(`attach${US}${slot}`);
     return true;
   }
@@ -2764,6 +3198,16 @@ function readProjects() {
       .filter(x => x.name && x.path);
   } catch { return []; }
 }
+// THE PROJECTS A PERSON IS SHOWN: every registered one, less Jarvis's home while Jarvis is
+// switched off (lib/jarvis.mjs enabled). Off means gone — a card for that project would be a
+// way to start its master, contract and all, around the switch. The file is untouched, so
+// enabling brings the card back with its order and its settings.
+function visibleProjects() {
+  const all = readProjects();
+  let m = null;
+  try { m = J.enabled() ? null : J.readMarkerFile(); } catch {}
+  return m ? all.filter(p => !(p.name === m.name && (p.profile || 'work') === (m.profile || 'work'))) : all;
+}
 function profileDir(p) { return (!p || p === 'work' || p === 'default') ? path.join(HOME, '.claude') : path.join(HOME, '.claude-' + p); }
 // tmux socket for a project — work stays bare cf-<name>; other profiles are
 // namespaced so same-named projects don't collide (matches bin/ghostfleet).
@@ -2788,7 +3232,7 @@ function sessionStatuses(proj, includeTabs = false) {
     // editor beside your OWN agent — so the caller opts in per project and the stack
     // screen opts in for exactly one: the fleet it was opened from. Other projects' tabs
     // stay hidden, so the objection that closed this door the first time still holds.
-    names = o.split('\n').filter(Boolean).filter(n => includeTabs || !isTab(n));
+    names = o.split('\n').filter(Boolean).filter(n => !isHold(n) && (includeTabs || !isTab(n)));
   } catch { return []; }
   const dir = path.join(profileDir(proj.profile), 'fleet');
   const bySlot = new Map();
@@ -2810,9 +3254,11 @@ function sessionStatuses(proj, includeTabs = false) {
   ];
   return ordered.map(name => {
     const o = bySlot.get(name);
-    const busy = paneBusy(sock, name);
+    const ms = modState(o);                       // the mod's own word first, as on the cards
+    const busy = ms ? ms === 'working' : paneBusy(sock, name);
     // intentionally off (marker is namespaced by socket — every project has a `master`)
     if (!busy && fs.existsSync(path.join(dir, sock + '.' + name + '.parked'))) return { sock, name, status: 'parked' };
+    if (ms) return { sock, name, status: ms };
     const tmt = o && o.transcript ? mtimeSec(o.transcript) : 0;
     return { sock, name, status: deriveStatus(o ? o.status : '', o ? o.transcript : '', busy, o ? (o.ts || 0) : 0, tmt) };
   });
@@ -2841,6 +3287,7 @@ const QUIT_WINDOW = 2000;    // ms — how long the "press ⌃C again" arming la
 let pSettings = false;       // settings page open (per-project toggles)
 let pSetSel = 0;             // selected row (project) on the settings page
 let pSetCol = 0;             // selected column (which setting) on the settings page
+let pSetMsg = '';            // what the last experimental toggle answered, shown on its row
 
 // ── worker → master auto-nudge (notify-lead) per-project settings ───────────
 // The hook (hooks/fleet-event.sh) pings a project's master when a worker finishes
@@ -2873,6 +3320,21 @@ function togglePush(proj) {
   try { fs.mkdirSync(dir, { recursive: true }); } catch {}
   if (nowOn) { try { fs.writeFileSync(offP, ''); } catch {} try { fs.unlinkSync(onP); } catch {} }
   else       { try { fs.writeFileSync(onP, '');  } catch {} try { fs.unlinkSync(offP); } catch {} }
+}
+
+// ── global: the EXPERIMENTAL features (lib/experimental.mjs) ────────────────
+// One row per feature, below the projects. Flipped through `fleet-experimental` rather than
+// by writing the switch here: a feature's switch can have more to do than the file (turning
+// Jarvis off stops its session and keeps its conversation), and a second copy of that would
+// be the second implementation this repo keeps paying for. Synchronous and bounded — a tmux
+// call or two at most.
+function toggleExperimental(name) {
+  let on = false; try { on = X.enabled(name); } catch {}
+  const r = spawnSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-experimental'),
+    [on ? 'disable' : 'enable', name], { encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'pipe'] });
+  const lines = `${r.stdout || ''}${r.stderr || ''}`.split('\n').map(l => l.trim()).filter(Boolean);
+  pSetMsg = r.status === 0 ? (lines.slice(1).join(' · ') || '') : `failed: ${lines.join(' · ') || r.error || 'no answer'}`;
+  pBuild();
 }
 
 // ── per-project: ignore the budget ceiling ──────────────────────────────────
@@ -2932,6 +3394,8 @@ const SETCOLS = [
   // the NEXT master (CLAUDE_FLEET_AGENT is read once, when the tmux session is created),
   // and what the non-default choices cost. `fleet-agent caveat` composes that from the
   // registry's measured capability fields, so a fourth agent brings its own warning.
+  // "The NEXT one" was true until lib/agent-switch.sh: the running master now moves too,
+  // so what the row has to say is WHEN — see switchNote(), drawn at the row's end.
   // A RING DRAWN AS A RADIO READS AS A DEAD KEY. The other two columns are genuinely
   // binary, so `○`/`●` and a footer that says "toggle" are honest for them; this one
   // cycles through however many agents are installed, and three presses land back on
@@ -2942,7 +3406,7 @@ const SETCOLS = [
   // this column and `N/M` in the cell gives the ring a position, so the wrap is
   // something you watch happen rather than something you deduce afterwards.
   { title: 'AGENT', onColor: C.cyan, toggle: cycleAgent, verb: 'cycle',
-    blurb: `${C.dim}agent: which CLI this project's master runs — ${C.reset}${C.bold}the NEXT one${C.reset}${C.dim}; a running master keeps what it started with. ${C.reset}${C.yellow}${agentCaveats()}${C.reset}`,
+    blurb: `${C.dim}agent: which CLI this project's master runs — ${C.reset}${C.bold}the running one switches${C.reset}${C.dim} (after its current turn), and switching back resumes its conversation. ${C.reset}${C.yellow}${agentCaveats()}${C.reset}`,
     state: p => {
       const ring = agentRing();
       const a = p.agent && p.agent !== 'claude' ? p.agent : '';
@@ -2959,7 +3423,50 @@ const SETCOLS = [
       const pos = (ring.length > 2 && i >= 0) ? ` ${i + 1}/${ring.length}` : '';
       return { on: !!a, label: (a || 'claude') + pos };
     } },
+  // THE TWO BOUNDARIES (lib/boundary.sh), both OFF by default: a worker merging a PR, and an
+  // agent approving another session's permission dialog. Project-wide here; the one-session
+  // form (the sub-master of its task) is `fleet-project set … --session <s>`. Written
+  // through fleet-project, like AGENT, so the markers have one writer.
+  { title: 'WORKERS MERGE', onColor: C.red, toggle: p => toggleBoundary(p, 'workers-merge'),
+    blurb: `${C.dim}workers can merge: ${C.reset}${C.bold}on${C.reset}${C.dim} = a worker in a linked worktree may merge a PR itself · ${C.reset}${C.bold}off${C.reset}${C.dim} = only the lead merges (default)${C.reset}`,
+    state: p => { const on = boundaryOn(p, 'workers-merge'); return { on, label: on ? 'on' : 'off' }; } },
+  { title: 'AGENTS APPROVE', onColor: C.red, toggle: p => toggleBoundary(p, 'agents-approve'),
+    blurb: `${C.dim}agents can approve tool calls: ${C.reset}${C.bold}on${C.reset}${C.dim} = fleet-answer may send a yes to a worker's permission dialog · ${C.reset}${C.bold}off${C.reset}${C.dim} = a human approves (default). Jarvis always asks you.${C.reset}`,
+    state: p => { const on = boundaryOn(p, 'agents-approve'); return { on, label: on ? 'on' : 'off' }; } },
 ];
+function boundaryOn(proj, b) {
+  try { return fs.existsSync(path.join(profileDir(proj.profile), 'fleet', `${sockOf(proj)}.${b}`)); } catch { return false; }
+}
+function toggleBoundary(proj, b) {
+  const want = boundaryOn(proj, b) ? 'off' : 'on';
+  for (const bin of [path.join(path.dirname(fileURLToPath(import.meta.url)), 'fleet-project'), 'fleet-project']) {
+    try { execFileSync(bin, ['set', proj.name, b, want], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); return; }
+    catch {}
+  }
+}
+// ── A SWITCH IN FLIGHT, OR ONE THAT DID NOT HAPPEN ─────────────────────────────
+// Cycling AGENT moves the running master (lib/agent-switch.sh), but not always at once: it
+// waits for the turn in progress, and a new agent that will not start is rolled back. Both
+// are invisible from the cell, which shows the SETTING — so the row says which of them is
+// going on, from the engine's own markers rather than a guess:
+//   <sock>.master.switch         pending target       -> "switching to codex…"
+//   <sock>.master.switch-failed  why the last one did not happen
+// and, beside a pending switch to an agent that cannot resume, whether this master has a
+// conversation on that agent it will NOT get back (codex's TUI does not flush on a pane kill).
+function switchNote(proj) {
+  const dir = path.join(profileDir(proj.profile), 'fleet'), k = path.join(dir, `${sockOf(proj)}.master`);
+  const pend = pendingSwitchIn(dir, sockOf(proj), 'master');
+  if (pend) {
+    let fresh = '';
+    try {
+      const convs = JSON.parse(fs.readFileSync(k + '.convs.json', 'utf8'));
+      if (convs && convs[pend] && agentField(pend, 'resume') !== 'yes') fresh = ` · ${pend} can't resume — starts fresh`;
+    } catch {}
+    return `${C.yellow}switching to ${pend}…${fresh}${C.reset}`;
+  }
+  try { const f = fs.readFileSync(k + '.switch-failed', 'utf8').trim(); if (f) return `${C.red}${f}${C.reset}`; } catch {}
+  return '';
+}
 // One line naming only the agents that HAVE a caveat, so a fully-capable fourth agent
 // adds nothing to it and the line stays readable at 80 columns.
 function agentCaveats() {
@@ -2984,7 +3491,7 @@ function agentCaveats() {
 // with a file that can be edited by hand, and this cannot go stale.
 let pFirstRun = false;
 function pBuild() {
-  const projs = readProjects();
+  const projs = visibleProjects();
   pFirstRun = projs.length === 0;
   pItems = [...projs.map(p => ({ project: p })), { add: true }];
   if (!pSelInit) {           // first build: land on the just-exited project, if any
@@ -3147,7 +3654,12 @@ function pRender() {
       const pdir = path.join(profileDir(it.project.profile), 'fleet');
       const want = it.project.agent || 'claude';
       const live = st.total > 0 ? (agentOfIn(pdir, sockOf(it.project), 'master') || 'claude') : '';
-      const who = (live && live !== want)
+      // A SWITCH THAT IS WAITING says so instead of the arrow: the arrow means "restart it to
+      // apply", and since lib/agent-switch.sh nothing needs restarting — it is on its way.
+      const pend = live ? pendingSwitchIn(pdir, sockOf(it.project), 'master') : '';
+      const who = pend
+        ? `${it.project.profile} · switching to ${pend}…`
+        : (live && live !== want)
         ? `${it.project.profile} · ${live}→${want}`
         : (it.project.agent ? `${it.project.profile} · ${it.project.agent}` : it.project.profile);
       return boxCard(`${i + j < 9 ? `${i + j + 1} ` : ''}${it.project.name}`, [who, it.project.path.replace(HOME, '~'), line], color, sel);
@@ -3164,12 +3676,14 @@ function pRender() {
 }
 // settings page: per-project toggle for the worker→master auto-nudge (notify-lead)
 function pRenderSettings() {
-  const projs = readProjects();
-  pSetSel = Math.max(0, Math.min(pSetSel, Math.max(0, projs.length - 1)));
+  const projs = visibleProjects();
+  const nRows = projs.length + X.FEATURES.length;
+  pSetSel = Math.max(0, Math.min(pSetSel, nRows - 1));
+  const onExp = pSetSel >= projs.length;
   let buf = '\x1b[H';
   buf += ` ${C.bold}settings${C.reset} ${C.dim}— per project${C.reset}\x1b[K\n`;
   const glob = fs.existsSync(GLOBAL_NOTIFY());
-  buf += ` ${C.dim}${C.reset}${SETCOLS[pSetCol].blurb}\x1b[K\n`;
+  buf += ` ${C.dim}${C.reset}${onExp ? `${C.dim}experimental: off on a new install, and off means gone — not hidden${C.reset}` : SETCOLS[pSetCol].blurb}\x1b[K\n`;
   buf += ` ${C.dim}nudge global default: ${C.reset}${glob ? `${C.green}on` : `${C.grey}off`}${C.reset}\x1b[K\n\x1b[K\n`;
   const head = `   ${padEndV('', 6)}  ${padEndV('PROJECT', 22)} ${padEndV('PROFILE', 10)}`;
   buf += `${C.dim}${head}${SETCOLS.map((c, ci) => (ci === pSetCol ? C.bold + C.white : C.dim) + padEndV(c.title, 16) + C.reset).join(' ')}${C.reset}\x1b[K\n`;
@@ -3184,10 +3698,23 @@ function pRenderSettings() {
       const txt = padEndV((st.on ? '● ' : '○ ') + st.label, 16);
       return (lit ? C.rev : '') + (st.on ? c.onColor : C.grey) + txt + C.reset;
     });
-    buf += `${cur}${padEndV('', 6)}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}\x1b[K\n`;
+    const note = switchNote(p);
+    buf += `${cur}${padEndV('', 6)}  ${name} ${C.dim}${padEndV(p.profile, 10)}${C.reset}${cells.join(' ')}${note ? '  ' + note : ''}\x1b[K\n`;
   });
-  // Named per column, so the key's own description changes with what it will do.
-  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ ${SETCOLS[pSetCol].verb || 'toggle'} · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
+  // THE EXPERIMENTAL SECTION: global, one row per feature, each tagged every time it is
+  // drawn. Its rows continue the project rows, so ↓ walks into them and space/⏎ flips one.
+  buf += `\x1b[K\n ${C.bold}Experimental${C.reset} ${C.dim}— every project, off on a new install${C.reset}\x1b[K\n`;
+  X.FEATURES.forEach((f, k) => {
+    const sel = projs.length + k === pSetSel;
+    let on = false; try { on = X.enabled(f.name); } catch {}
+    const cur = sel ? `${C.bold}${C.white}▸ ` : '   ';
+    const st = (sel ? C.rev : '') + (on ? C.green : C.grey) + padEndV((on ? '● on' : '○ off'), 8) + C.reset;
+    buf += `${cur}${padEndV('', 6)}  ${(sel ? C.bold + C.white : C.reset) + padEndV(f.name, 22) + C.reset} ${st} ${C.yellow}[${X.TAG}]${C.reset} `
+         + `${C.dim}${sel && pSetMsg ? pSetMsg : f.what}${C.reset}\x1b[K\n`;
+  });
+  // Named per row and column, so the key's own description changes with what it will do.
+  const verb = onExp ? `turn ${X.FEATURES[pSetSel - projs.length].name} on/off` : (SETCOLS[pSetCol].verb || 'toggle');
+  buf += `\x1b[K\n${C.dim} ↑↓/jk row · ←→/hl column · space/⏎ ${verb} · esc/\` back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 // schedule a message to a project's master (mirrors the grid's renderSchedule)
@@ -3232,13 +3759,16 @@ function onKeyProjects(key) {
     return;
   }
   if (pSettings) {                                   // per-project toggles (rows × columns)
-    const projs = readProjects();
+    const projs = visibleProjects();
     if (key === '\x1b' || key === '\x03' || key === '\x60') { pSettings = false; }
-    else if (key === '\x1b[A' || key === 'k') pSetSel = Math.max(0, pSetSel - 1);
-    else if (key === '\x1b[B' || key === 'j') pSetSel = Math.min(Math.max(0, projs.length - 1), pSetSel + 1);
+    else if (key === '\x1b[A' || key === 'k') { pSetSel = Math.max(0, pSetSel - 1); pSetMsg = ''; }
+    else if (key === '\x1b[B' || key === 'j') { pSetSel = Math.min(projs.length + X.FEATURES.length - 1, pSetSel + 1); pSetMsg = ''; }
     else if (key === '\x1b[D' || key === 'h') pSetCol = Math.max(0, pSetCol - 1);
     else if (key === '\x1b[C' || key === 'l') pSetCol = Math.min(SETCOLS.length - 1, pSetCol + 1);
-    else if (key === ' ' || key === '\r' || key === '\n') { const p = projs[pSetSel]; if (p) SETCOLS[pSetCol].toggle(p); }
+    else if (key === ' ' || key === '\r' || key === '\n') {
+      if (pSetSel >= projs.length) { const f = X.FEATURES[pSetSel - projs.length]; if (f) toggleExperimental(f.name); }
+      else { const p = projs[pSetSel]; if (p) SETCOLS[pSetCol].toggle(p); }
+    }
     pRender(); return;
   }
   if (pSchedFor) {                                   // typing a scheduled message to a master
@@ -3331,7 +3861,7 @@ function onKeyProjects(key) {
     const it = pItems[pSel] || pItems.find(x => x.project);
     if (it?.project) return finish(`tabfor${US}${it.project.name}${US}${key === '\x14' ? 'term' : 'edit'}`);
   }
-  else if (key === ',') { pSettings = true; pSetSel = 0; }   // open the settings page
+  else if (key === ',') { pSettings = true; pSetSel = 0; pSetMsg = ''; }   // open the settings page
   else if (key === '\r' || key === '\n') {
     const it = pItems[pSel];
     if (it?.add) return finish('addproject');
@@ -3379,20 +3909,60 @@ function dRenderClone() {
 // project stay separate — ⏎ in a text box is also how a typo gets dismissed, and that is
 // not a key that should be able to register the wrong folder. So this lands you there and
 // `s` still does the selecting, one line below on the same hint bar.
-let dTyping = false, dPathInput = '';
+let dTyping = false, dPathInput = '', dFSel = 0;
+// TYPE TO FILTER, IN THE SAME BOX. A home directory with dozens of sibling checkouts is a
+// long arrow down, and the path box only helped a reader who already knew the whole path.
+// So what is typed here is BOTH: while it has no `/` and no leading `~` it is part of a
+// name, and the folders on screen narrow to the ones containing it (case-insensitive) with
+// ↑↓ to pick among them; the moment it reads as a path, it is the path box it always was.
+// Every letter on the listing screen is already a command (hjkl move, s select, c clone,
+// n new), so the filter lives behind `/`, which is where anyone who wants to type goes.
+//   ⏎ on an EXACT name goes there, as the relative path always did — so `toolbox` lands in
+// toolbox even when `toolbox-old` sorts first among the matches.
+const dIsPath = (v) => v.includes('/') || v.startsWith('~');
+// ONE READ IS NOT ONE KEY. Keys typed fast, or sent by tmux in one go, arrive as a single
+// chunk: `↓⏎` as "\x1b[B\r", three backspaces as "\x7f\x7f\x7f". Handled whole, the first
+// was an escape sequence and dropped (⏎ with it), the second took off one character. Split
+// into arrows, ⏎, DEL and runs of text — a paste stays ONE run, which is what the clone and
+// path boxes rely on.
+function dKeys(key) {
+  return String(key || '').match(/\x1b\[[0-9;]*[A-Za-z~]|\x1b.?|[\r\n]|[\x7f\b]|[^\x1b\r\n\x7f\b]+/g) || [];
+}
+function dMatches() {
+  const q = dPathInput.trim().toLowerCase();
+  const subs = dirEntries.filter(e => e !== '..');
+  return q && !dIsPath(q) ? subs.filter(e => e.toLowerCase().includes(q)) : subs;
+}
 function dRenderPath() {
   let buf = '\x1b[H';
-  buf += ` ${C.bold}go to a folder${C.reset} ${C.dim}— type or paste its path${C.reset}\x1b[K\n`;
+  buf += ` ${C.bold}go to a folder${C.reset} ${C.dim}— type or paste its path, or part of a name to filter${C.reset}\x1b[K\n`;
   buf += ` ${C.dim}from${C.reset} ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
   buf += ` path:  ${C.bold}${dPathInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
   buf += (dMsg ? ` ${C.red}${dMsg}${C.reset}` : '') + '\x1b[K\n';
-  buf += ` ${C.dim}absolute, ${C.reset}~/…${C.dim}, or relative to the folder above${C.reset}\x1b[K\n\x1b[K\n`;
-  buf += `${C.dim} ⏎ go there (then ${C.reset}s${C.dim} to pick it) · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
+  if (dIsPath(dPathInput.trim())) {
+    buf += ` ${C.dim}absolute, ${C.reset}~/…${C.dim}, or relative to the folder above${C.reset}\x1b[K\n\x1b[K\n`;
+    buf += `${C.dim} ⏎ go there (then ${C.reset}s${C.dim} to pick it) · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
+    return out(buf);
+  }
+  const all = dirEntries.filter(e => e !== '..').length, ms = dMatches();
+  dFSel = Math.max(0, Math.min(dFSel, ms.length - 1));
+  buf += ` ${C.dim}${ms.length} of ${all} folder${all === 1 ? '' : 's'}${C.reset}\x1b[K\n`;
+  const maxShow = Math.max(4, (process.stderr.rows || 24) - 12);
+  let start = Math.max(0, dFSel - Math.floor(maxShow / 2));
+  const end = Math.min(ms.length, start + maxShow);
+  start = Math.max(0, end - maxShow);
+  if (!ms.length) buf += `  ${C.dim}no folder here matches '${dPathInput.trim()}'${C.reset}\x1b[K\n`;
+  for (let i = start; i < end; i++) {
+    const sel = i === dFSel;
+    buf += `${sel ? `${C.bold}${C.green}▸ ` : '  '}${ms[i]}/${sel ? C.reset : ''}\x1b[K\n`;
+  }
+  buf += `\x1b[K\n${C.dim} ↑↓ pick · ⏎ open it (then ${C.reset}s${C.dim} to pick it) · a / or ~ makes it a path · esc back${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function dRender() {
   if (dCloning) return dRenderClone();
   if (dTyping) return dRenderPath();
+  if (dNewing) return dRenderNew();
   let buf = '\x1b[H';
   buf += ` ${C.bold}add project${C.reset} ${C.dim}— pick a root folder (holds your checkouts/worktrees)${C.reset}\x1b[K\n`;
   buf += ` ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
@@ -3404,7 +3974,8 @@ function dRender() {
     const e = dirEntries[i], sel = i === dSel;
     buf += `${sel ? `${C.bold}${C.green}▸ ` : '  '}${e === '..' ? '../' : e + '/'}${sel ? C.reset : ''}\x1b[K\n`;
   }
-  buf += `\x1b[K\n${C.dim} ↑↓ move · ⏎/→ open · ← up · / type a path · s select THIS folder · c clone a repo here · esc/\` cancel${C.reset}\x1b[K\n\x1b[J`;
+  buf += (dMsg ? ` ${C.green}${dMsg}${C.reset}` : '') + '\x1b[K\n';
+  buf += `${C.dim} ↑↓ move · ⏎/→ open · ← up · / type a path or filter · s select THIS folder · n new folder · c clone here · esc cancel${C.reset}\x1b[K\n\x1b[J`;
   out(buf);
 }
 function onKeyClone(key) {
@@ -3426,11 +3997,19 @@ function onKeyClone(key) {
   dRender();
 }
 function onKeyPath(key) {
+  const ks = dKeys(key);
+  if (ks.length > 1) { for (const k of ks) onKeyAdd(k); return; }   // each key where it now lands
   if (key === '\x03') return finish('');
   if (key === '\x1b' || key === '\x60') { dTyping = false; dMsg = ''; return dRender(); }
   if (key === '\r' || key === '\n') {
     const v = dPathInput.trim();
     if (!v) { dMsg = 'type a path, or esc to go back'; return dRender(); }
+    if (!dIsPath(v)) {
+      const ms = dMatches();
+      const pick = ms.find(e => e.toLowerCase() === v.toLowerCase()) ?? ms[dFSel];
+      if (pick) { dTyping = false; dMsg = ''; curDir = path.join(curDir, pick); dSel = 0; dBuild(); return dRender(); }
+      // no match: `.` and `..` are still paths, and anything else gets the path box's answer
+    }
     // ~ IS THE SHELL'S, NOT THE KERNEL'S. Nothing has expanded it by the time a keystroke
     // reaches here, so `~/code` would be looked up as a folder literally called `~`.
     const abs = path.resolve(curDir, v === '~' ? HOME : v.startsWith('~/') ? path.join(HOME, v.slice(2)) : v);
@@ -3442,20 +4021,87 @@ function onKeyPath(key) {
     if (!ok) { dMsg = fs.existsSync(abs) ? `${abs.replace(HOME, '~')} is a file, not a folder` : `no folder at ${abs.replace(HOME, '~')}`; return dRender(); }
     dTyping = false; dMsg = ''; curDir = abs; dSel = 0; dBuild(); return dRender();
   }
-  if (key === '\x7f' || key === '\b') { dPathInput = dPathInput.slice(0, -1); dMsg = ''; }
+  if (key === '\x1b[A') { dFSel = Math.max(0, dFSel - 1); return dRender(); }
+  if (key === '\x1b[B') { dFSel++; return dRender(); }
+  if (key === '\x7f' || key === '\b') { dPathInput = dPathInput.slice(0, -1); dMsg = ''; dFSel = 0; }
   else {
     // SPACES ARE LEGAL IN A PATH, which is the one way this filter differs from the clone
     // box's: `ch > ' '` there drops the space, and a folder with one in its name could
     // then be typed but never reached. Escape sequences and DEL still go.
     const t = (!key || key.startsWith('\x1b')) ? '' : [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
-    if (t) { dPathInput += t; dMsg = ''; }
+    if (t) { dPathInput += t; dMsg = ''; dFSel = 0; }
+  }
+  dRender();
+}
+
+// N = NEW FOLDER HERE. A project whose root did not exist yet meant leaving for a shell to
+// mkdir — and to git init, because a root with no git has nothing to branch worktrees
+// from, so the first spawn in it fails for a reason the reader never chose. The name is
+// ONE folder: a `/` would make parents nobody asked for, and an existing name is refused
+// rather than "reused", since a folder that was already there is not the empty one the
+// reader thinks they just made. git init is a question with Y as the default, because a
+// fleet root is almost always a repo — and n is there for a container that will hold
+// clones instead. Cursor lands on the new folder; ⏎ opens it and s picks it, as ever.
+let dNewing = false, dNewInput = '', dInitFor = '';
+function dRenderNew() {
+  let buf = '\x1b[H';
+  if (dInitFor) {
+    buf += ` ${C.bold}made${C.reset} ${C.cyan}${path.join(curDir, dInitFor).replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+    buf += ` git init it? ${C.dim}a root with no git has nothing to branch worktrees from${C.reset}  ${C.bold}[Y/n]${C.reset}\x1b[K\n\x1b[K\n`;
+    buf += (dMsg ? ` ${C.red}${dMsg}${C.reset}` : '') + '\x1b[K\n\x1b[J';
+    return out(buf);
+  }
+  buf += ` ${C.bold}new folder${C.reset} ${C.dim}— made here, empty${C.reset}\x1b[K\n`;
+  buf += ` ${C.dim}in${C.reset} ${C.cyan}${curDir.replace(HOME, '~')}${C.reset}\x1b[K\n\x1b[K\n`;
+  buf += ` name:  ${C.bold}${dNewInput}${C.reset}▏\x1b[K\n\x1b[K\n`;
+  buf += (dMsg ? ` ${C.red}${dMsg}${C.reset}` : '') + '\x1b[K\n';
+  buf += `${C.dim} ⏎ make it · esc back to the folders${C.reset}\x1b[K\n\x1b[J`;
+  out(buf);
+}
+function dLandOn(name) {
+  dNewing = false; dInitFor = ''; dBuild();
+  const i = dirEntries.indexOf(name); if (i >= 0) dSel = i;
+  dRender();
+}
+function onKeyNew(key) {
+  const ks = dKeys(key);
+  if (ks.length > 1) { for (const k of ks) onKeyAdd(k); return; }
+  if (key === '\x03') return finish('');
+  if (dInitFor) {
+    const name = dInitFor;
+    if (key === '\r' || key === '\n' || key === 'y' || key === 'Y') {
+      try { execFileSync('git', ['init', '-q'], { cwd: path.join(curDir, name), stdio: 'ignore' }); dMsg = `git init — ${name} is a repo`; }
+      catch (e) { dMsg = `made ${name}, but git init failed: ${String(e.message || e).split('\n')[0]}`; }
+      return dLandOn(name);
+    }
+    if (key === 'n' || key === 'N' || key === '\x1b' || key === '\x60') { dMsg = `made ${name} (no git)`; return dLandOn(name); }
+    return;
+  }
+  if (key === '\x1b' || key === '\x60') { dNewing = false; dMsg = ''; return dRender(); }
+  if (key === '\r' || key === '\n') {
+    const v = dNewInput.trim();
+    if (!v) { dMsg = 'type a name, or esc to go back'; return dRender(); }
+    if (v.includes('/')) { dMsg = `a name is one folder — no '/' (go there first, then n)`; return dRender(); }
+    if (v === '.' || v === '..') { dMsg = `'${v}' is not a name`; return dRender(); }
+    if (fs.existsSync(path.join(curDir, v))) { dMsg = `${v} already exists here`; return dRender(); }
+    try { fs.mkdirSync(path.join(curDir, v)); }
+    catch (e) { dMsg = `could not make ${v}: ${e.code || e.message}`; return dRender(); }
+    dInitFor = v; dMsg = ''; return dRender();
+  }
+  if (key === '\x7f' || key === '\b') { dNewInput = dNewInput.slice(0, -1); dMsg = ''; }
+  else {
+    // the path box's filter: spaces are legal in a name, escape sequences and DEL are not
+    const t = (!key || key.startsWith('\x1b')) ? '' : [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
+    if (t) { dNewInput += t; dMsg = ''; }
   }
   dRender();
 }
 function onKeyAdd(key) {
   if (dCloning) return onKeyClone(key);
   if (dTyping) return onKeyPath(key);
-  if (key === '/') { dTyping = true; dPathInput = ''; dMsg = ''; return dRender(); }
+  if (dNewing) return onKeyNew(key);
+  if (key === '/') { dTyping = true; dPathInput = ''; dFSel = 0; dMsg = ''; return dRender(); }
+  if (key === 'n' || key === 'N') { dNewing = true; dNewInput = ''; dInitFor = ''; dMsg = ''; return dRender(); }
   if (key === 'c' || key === 'C') { dCloning = true; dCloneInput = ''; dMsg = ''; return dRender(); }
   if (key === '\x1b' || key === '\x03' || key === '\x60') return finish('');
   if (key === '\x1b[A' || key === 'k') dSel = Math.max(0, dSel - 1);
@@ -3557,7 +4203,7 @@ let sHitRow = new Map();
 function sBuild() {
   sMembers = stackMembers();
   sItems = [];
-  for (const p of readProjects()) {
+  for (const p of visibleProjects()) {
     // TABS FROM THIS FLEET ONLY. SOCK is the socket this grid was started on, so the
     // project you came from is the one whose terminal and editor you can put beside your
     // agent — which is the whole request — while every other project's tabs stay out of a

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# fleet-experimental — the fleet's experimental features and their switches.
+#
+#   fleet-experimental [list]           every feature, on or off
+#   fleet-experimental enable|disable <name>
+#
+# A launcher, exactly like bin/fleet-jarvis is for fleet-jarvis.mjs: the logic is node, and
+# this is what puts `fleet-experimental` on PATH with a readable error when node is missing.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"
+  case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+BIN_DIR="$(cd "$(dirname "$src")" && pwd)"
+
+command -v node >/dev/null 2>&1 || { echo "fleet-experimental: node is required (>=18)" >&2; exit 1; }
+exec node "$BIN_DIR/fleet-experimental.mjs" "$@"

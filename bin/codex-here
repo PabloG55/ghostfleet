@@ -24,8 +24,8 @@
 # Resuming here is therefore best-effort: it restores a cleanly-exited conversation
 # and silently starts fresh otherwise, which is strictly better than never trying.
 #
-# Also still true: codex pushes no need-you/done events (hooks=no), and its blocked_re
-# covers only the trust dialog.
+# Also still true: codex pushes no need-you/done events (hooks=no), so its blocked_re
+# is what reads the trust dialog and the daemon dialog (see --no-daemon below) as need-you.
 set -uo pipefail
 
 slot=""
@@ -69,9 +69,31 @@ esac
 MODEL=()
 [ -n "${CLAUDE_FLEET_MODEL:-}" ] && MODEL=(--model "$CLAUDE_FLEET_MODEL")
 
+# Run without codex's shared background server. Since 0.160 a TUI attaches to one
+# per-user app-server daemon, and the daemon installs and updates ITSELF under
+# ~/.codex/packages — independently of the `codex` on PATH. Measured 2026-10-07: a
+# 0.160.1 cask CLI against a self-updated 0.161.0 daemon. 0.161 promoted
+# api_key_model_discovery to stable/on while 0.160.1 still defaults it off, so EVERY
+# 0.160.1 TUI — a plain `codex` in a clean environment as much as a fleet pane — stops
+# on "Background server has incompatible feature settings" before it draws a prompt,
+# and a fleet-spawn's first prompt is typed into that dialog.
+#   Matching the daemon is not available from here: `--enable`/`-c` overrides force
+# embedded mode anyway (codex warns as much), and writing [features] into config.toml
+# changes every other client's settings. "Restart with these settings" restarts the
+# shared daemon under sessions the fleet does not own. --no-daemon is the dialog's own
+# option 1, answered in advance; the daemon is left exactly as it was.
+#   Probed, not assumed: 0.146 has no --no-daemon and would refuse to start with it.
+# CLAUDE_FLEET_CODEX_DAEMON=1 attaches to the daemon again.
+DAEMON=()
+case "${CLAUDE_FLEET_CODEX_DAEMON:-0}" in
+  1|true|yes|on) ;;
+  *) help="$(codex --help 2>/dev/null)"
+     grep -q -- '--no-daemon' <<< "$help" && DAEMON=(--no-daemon) ;;
+esac
+
 # ${a[@]+"${a[@]}"}, never "${a[@]}" — see opencode-here: bash 3.2 + set -u aborts
 # on an empty array, which would kill the pane whenever yolo/model are unset.
-OPTS=( ${YOLO[@]+"${YOLO[@]}"} ${MODEL[@]+"${MODEL[@]}"} )
+OPTS=( ${YOLO[@]+"${YOLO[@]}"} ${MODEL[@]+"${MODEL[@]}"} ${DAEMON[@]+"${DAEMON[@]}"} )
 
 # A parallel session (grid `N`, fleet-spawn) is a deliberately NEW conversation in a
 # dir that already has one — must never resume, same contract as claude-here.

@@ -388,12 +388,14 @@ report_missing_hard() {
 ask_optional() {
   [ "$ASSUME_YES" = 1 ] && return 0
   [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null || return 2
-  local ans=""
+  # $2 = n makes Enter a NO: for the one offer whose cost (a download) nobody should get
+  # by leaning on Return.
+  local ans="" dflt="${2:-y}"
   exec 9<>/dev/tty
-  printf '%s [Y/n] ' "$1" >&9
+  if [ "$dflt" = n ]; then printf '%s [y/N] ' "$1" >&9; else printf '%s [Y/n] ' "$1" >&9; fi
   read -r ans <&9 || ans=""
   exec 9>&- 9<&-
-  case "$ans" in ""|y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
+  case "$ans" in y|Y|yes|YES|Yes) return 0 ;; "") [ "$dflt" = n ] && return 1; return 0 ;; *) return 1 ;; esac
 }
 UNASKED=()   # optional items skipped because nobody could be asked
 
@@ -480,6 +482,76 @@ elif ! nvim_ok || [ ! -e "$NVIM_CFG" ]; then
     1) if nvim_ok; then echo "  Skipped. ^N will open plain Neovim."
        else echo "  Skipped. ^N needs an editor: install Neovim $NVIM_MIN+, or set CLAUDE_FLEET_EDITOR."; fi ;;
     2) UNASKED+=("$what (the editor ^N opens)") ;;
+  esac
+fi
+# THE EXPERIMENTAL FEATURES (lib/experimental.mjs: Jarvis, fleet-shots) ARE OFF UNLESS SOMEBODY
+# TURNS THEM ON. `fleet-experimental list` writes every switch down the first time: on for a
+# machine that already uses a feature, so an update changes nothing for somebody using it,
+# and off everywhere else. Jarvis is the one offered here, because it has a download behind it. Offering to turn it on is a step of its own, clearly labelled, with
+# Enter meaning NO — and never under --yes or with nobody watching, because "install missing
+# dependencies" is not a yes to an experimental feature. Its voice (whisper, below) is asked
+# about only once it is on: hearing is Jarvis's conversation mode and has no other use.
+_jdir="${CLAUDE_FLEET_JARVIS_DIR:-$HOME/.config/ghostfleet}"
+"$REPO/bin/fleet-experimental" list >/dev/null 2>&1 || true
+_jon=0; grep -qsx on "$_jdir/jarvis.enabled" && _jon=1
+if [ "$_jon" = 1 ]; then :
+elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
+  _save_yes="$ASSUME_YES"; ASSUME_YES=0
+  rc=0; ask_optional "· [experimental] Enable Jarvis — one session above every project's lead, that you type or talk to from the phone?" n || rc=$?
+  ASSUME_YES="$_save_yes"
+  case $rc in
+    0) "$REPO/bin/fleet-experimental" enable jarvis && _jon=1 ;;
+    *) echo "  Skipped. Jarvis stays off; turn it on later with: fleet-experimental enable jarvis (or the settings screen)" ;;
+  esac
+else
+  vsay "· Jarvis (experimental) is off — turn it on with: fleet-experimental enable jarvis"
+fi
+if [ "$_jon" = 1 ]; then
+  # JARVIS'S VOICE: whisper.cpp and one model, so the phone's conversation mode can be
+  # transcribed on this machine (docs/jarvis.md). The most optional thing here, and held to a
+  # stricter rule than the two above: NOT implied by --yes, because it is a ~550 MB download
+  # that nobody accepted by agreeing to "install missing dependencies" — only a person at a
+  # terminal saying yes to this question gets it. Already working is silent. And it can never
+  # fail the install: text to Jarvis works without it, and the command says how to add it later.
+  if "$REPO/bin/fleet-jarvis" voice >/dev/null 2>&1; then :
+  elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
+    _save_yes="$ASSUME_YES"; ASSUME_YES=0
+    rc=0; ask_optional "· Jarvis can listen: install whisper.cpp + a speech model (~550 MB, transcribed on this machine only)?" || rc=$?
+    ASSUME_YES="$_save_yes"
+    case $rc in
+      0) "$REPO/bin/fleet-jarvis" voice --install || echo "! voice was not set up — text to Jarvis still works; retry with: fleet-jarvis voice --install" ;;
+      *) echo "  Skipped. Voice for Jarvis later: fleet-jarvis voice --install" ;;
+    esac
+  else
+    vsay "· voice for Jarvis (optional, ~550 MB): fleet-jarvis voice --install"
+  fi
+fi
+# THE MAC'S SPEAKING VOICE: Kokoro, which fleet-serve reads the phone's replies with when it
+# is here (lib/speech.mjs) — better English, real Spanish, and nothing leaves the machine.
+# The same shape as whisper above and one rule stricter: Enter means NO. Nothing is missing
+# without it (the phone reads with its own voice), so the ~350 MB is something a person has
+# to type a y for. Never under --yes, never with nobody watching; already working is
+# silent, and a broken install is named as broken rather than offered as new.
+_kk="$("$REPO/bin/fleet-jarvis" voice --kokoro 2>&1)" && _krc=0 || _krc=$?
+if [ "$_krc" = 0 ]; then :
+elif [[ "$_kk" == *"switched off"* ]]; then :      # CLAUDE_FLEET_KOKORO=off: asked and answered
+elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
+  case "$_kk" in
+    *"not installed"*) _kq="· The phone can read replies in the Mac's voice: install Kokoro (~350 MB, optional, speech made on this machine only — without it the phone uses its own voice)?" ;;
+    *) _kq="! Kokoro, the Mac's voice for the phone, is broken: $(head -1 <<<"$_kk") — repair it?" ;;
+  esac
+  _save_yes="$ASSUME_YES"; ASSUME_YES=0
+  rc=0; ask_optional "$_kq" n || rc=$?
+  ASSUME_YES="$_save_yes"
+  case $rc in
+    0) "$REPO/bin/fleet-jarvis" voice --kokoro --install || echo "! Kokoro was not set up — the phone reads with its own voice; retry with: fleet-jarvis voice --kokoro --install" ;;
+    *) echo "  Skipped. The Mac's voice later: fleet-jarvis voice --kokoro --install" ;;
+  esac
+else
+  # Broken is a warning, and a warning never waits for --verbose; not-installed is a choice.
+  case "$_kk" in
+    *"not installed"*) vsay "· the Mac's voice for the phone (optional, ~350 MB): fleet-jarvis voice --kokoro --install" ;;
+    *) echo "! $(head -1 <<<"$_kk")" ;;
   esac
 fi
 if [ "${#UNASKED[@]}" -gt 0 ]; then
@@ -580,7 +652,8 @@ CF_BINS=(ghostfleet claude-here cf-sync fleet-schedule fleet-send fleet-list fle
          fleet-worktrees fleet-ack fleet-answer fleet-inbox fleet-stop fleet-scratch fleet-companion fleet-tab fleet-copy fleet-merged fleet-shipped fleet-look.mjs fleet-shots.mjs
          fleet-clean fleet-open fleet-restart fleet-project fleet-demo fleet-phone fleet-adopt fleet-awake fleet-cycle
          fleet-rename fleet-agent fleet-stack fleet-slot fleet-serve fleet-hibernate fleet-meter.mjs fleet-review
-         agent-here opencode-here codex-here)
+         fleet-digest fleet-jarvis fleet-experimental fleet-update fleet-mod fleet-ledger
+         agent-here opencode-here codex-here agy-here cursor-here)
 linked=()
 for b in "${CF_BINS[@]}"; do
   if [ -e "$FLEET_HOME/bin/$b" ]; then ln -sf "$FLEET_HOME/bin/$b" "$BIN_DIR/$b"; linked+=("$b")
@@ -685,10 +758,13 @@ wire_hooks() {
     # safe re-install rather than a second stanza racing the first.
     # The matcher is a regex over the tool name: EnterWorktree would move this session,
     # and Agent (Task in older builds) would do the work somewhere the fleet cannot see.
+    # Bash and the GitHub MCP merge tool are there for ONE question — is a worker in a
+    # linked worktree merging its own PR — and the guard leaves a non-merge Bash call
+    # before it has so much as started jq.
     | .hooks.PreToolUse = (
         [ (.hooks.PreToolUse // [])[]
           | select([.hooks[]?.command] | index($guard) | not) ]
-        + [ { matcher: "EnterWorktree|Agent|Task",
+        + [ { matcher: "EnterWorktree|Agent|Task|Bash|mcp__.*__merge_pull_request",
               hooks: [ { type: "command", command: $guard } ] } ] )
     | (if .mcpServers then .mcpServers |= del(.["ghostfleet"]) else . end)
     | (if (.mcpServers // {}) == {} then del(.mcpServers) else . end)
@@ -715,7 +791,37 @@ done
 #   The COUNT is what matters here rather than the names: "2 profiles" answers "did it
 # find my personal profile too", which is the question this loop exists for, and
 # --verbose still names each file it wrote.
-echo "✓ wired hooks + MCP into $N_WIRED Claude profile$([ "$N_WIRED" = 1 ] || echo s)"
+
+MOD_IN=""
+# --- the Claude Code mod (mods/ghostfleet) into the same profiles ------------
+# The hooks above tell the fleet about a session from OUTSIDE it; the mod reports its exact
+# state and budget from inside (docs/OPERATIONS.md, "The mod"). bin/fleet-mod does the
+# work: same profile loop, settings and plugin registries backed up first, idempotent, and
+# a no-op on a Claude too old to have mods. It is code that runs inside every Claude
+# session with your permissions, so it has an off switch that is not "uninstall later":
+# CLAUDE_FLEET_MOD=off skips it here, and `fleet-mod uninstall` removes it after the fact.
+case "${CLAUDE_FLEET_MOD:-}" in
+  0|n|N|no|No|NO|false|False|FALSE|off|Off|OFF)
+    MOD_IN=" (not the Claude Code mod: CLAUDE_FLEET_MOD=off)" ;;
+  *)
+    if _mod_out="$(CLAUDE_FLEET_HOME="$FLEET_HOME" "$FLEET_HOME/bin/fleet-mod" install 2>&1)"; then
+      # Quiet by default like the rest: ONE line, whichever of the three things happened.
+      # fleet-mod says why it installed nothing in a line of its own, so that line is the
+      # summary; otherwise the summary is that it is in.
+      # It rides on the hooks line below, whatever happened, rather than adding one: the
+      # first screen has a line budget the suite holds it to, and "it is in" (or why not)
+      # is the same news as the hooks. fleet-mod says why it installed nothing in a line of
+      # its own, and that line is the reason given.
+      [ "$VERBOSE" = 1 ] && printf '%s\n' "$_mod_out"
+      if _why="$(grep -m1 '^fleet-mod:' <<< "$_mod_out")"; then MOD_IN=" (not the Claude Code mod: ${_why#fleet-mod: })"
+      else MOD_IN=" + the Claude Code mod"
+      fi
+    else
+      printf '%s\n' "$_mod_out"
+      echo "! the Claude Code mod did not install everywhere — the fleet still works from outside; see above"
+    fi ;;
+esac
+echo "✓ wired hooks + MCP${MOD_IN:-} into $N_WIRED Claude profile$([ "$N_WIRED" = 1 ] || echo s)"
 
 # --- the other two agents' MCP: one registration each, and that is correct ----
 # WHY THIS LOOKS WRONG NEXT TO THE CLAUDE PATH ABOVE, AND IS NOT. register_mcp() runs once
@@ -815,8 +921,107 @@ register_opencode_mcp() {
     echo "  Add this to it by hand:  \"mcp\": { \"ghostfleet\": { \"type\": \"local\", \"command\": [\"node\", \"$mcp\"] } }"
   fi
 }
+# agy keeps everything the fleet installs under ONE global customization root,
+# ~/.gemini/config/ — hooks.json, mcp_config.json and skills/<name>/SKILL.md, all three
+# read off the binary's own embedded docs (agy 1.2.14). So unlike the two above it gets
+# all three halves from one function: the event bridge, the tools, and the skill.
+#   Every write is a jq MERGE under our own key, never an assignment over the file: these
+# are the user's files, and other hooks and servers legitimately live in them. `-s` with
+# `.[0] // {}` because a fresh install leaves mcp_config.json at ZERO bytes, which plain
+# jq reads as no input at all and answers with nothing — writing an empty file back.
+register_agy() {
+  local mcp="$FLEET_HOME/mcp/fleet-mcp.mjs" bridge="$FLEET_HOME/hooks/agy-fleet-event.sh"
+  if ! command -v agy >/dev/null 2>&1; then
+    vsay "· agy not installed — skipping its event bridge and MCP (fleet-spawn --agent agy will refuse until it is)"
+    return 0
+  fi
+  local dir="${AGY_CONFIG_DIR:-$HOME/.gemini/config}" f t
+  if ! mkdir -p "$dir/skills" 2>/dev/null; then
+    echo "! could not create $dir — agy workers get no fleet events, tools or skill"
+    return 0
+  fi
+  ln -sfn "$FLEET_HOME/skill/ghostfleet-orchestrate" "$dir/skills/ghostfleet-orchestrate"
+  # hooks.json: top-level keys are NAMED hooks, merged across files by agy, so ours is one
+  # key and re-installing replaces it rather than stacking copies. The command runs under
+  # `sh -c`, so the path is single-quoted ($q) for a FLEET_HOME with a space in it.
+  local ours='{ ghostfleet: {
+      PreInvocation: [ { type: "command", command: ($q + $b + $q + " PreInvocation"), timeout: 10 } ],
+      Stop:          [ { type: "command", command: ($q + $b + $q + " Stop"),          timeout: 10 } ] } }'
+  f="$dir/hooks.json"; t="$(mktemp)"
+  if { [ -s "$f" ] && jq --arg b "$bridge" --arg q "'" ". + $ours" "$f" > "$t" 2>/dev/null; } \
+     || { [ ! -s "$f" ] && jq -n --arg b "$bridge" --arg q "'" "$ours" > "$t"; }; then
+    mv "$t" "$f"; vsay "✓ wrote the ghostfleet event bridge -> $f (agy, global)"
+  else
+    rm -f "$t"; echo "! $f is not readable as JSON, so it was left alone — agy workers fall back to pane-only detection"
+  fi
+  f="$dir/mcp_config.json"; t="$(mktemp)"
+  if { [ -s "$f" ] && jq --arg m "$mcp" '.mcpServers = ((.mcpServers // {}) + { ghostfleet: { command: "node", args: [$m] } })' "$f" > "$t" 2>/dev/null; } \
+     || { [ ! -s "$f" ] && jq -n --arg m "$mcp" '{ mcpServers: { ghostfleet: { command: "node", args: [$m] } } }' > "$t"; }; then
+    mv "$t" "$f"; vsay "✓ wrote ghostfleet MCP -> $f (agy, global)"
+  else
+    rm -f "$t"; echo "! $f is not readable as JSON, so it was left alone — agy gets no fleet_* tools"
+  fi
+}
+# cursor keeps the same three things under ~/.cursor/: hooks.json, mcp.json and
+# skills/<name>/SKILL.md (cursor-agent 2026.10.01; the paths are its own — `cursor-agent mcp
+# list` names both mcp.json locations, and its skill-authoring docs name the personal root).
+# So, like agy, one function gives it the event bridge, the tools and the skill.
+#   THESE ARE THE USER'S FILES, and the Cursor IDE reads them as well as the CLI. Every write
+# is a jq MERGE that touches only our own entries, and the first time a file that already
+# existed is changed, its original is kept beside it as <file>.pre-ghostfleet — never
+# overwritten by a later run, so it stays the state from before the fleet touched it.
+#   hooks.json is NOT agy's shape. Its keys are EVENTS holding arrays, so there is no key of
+# our own to replace; ours is found by the bridge's file name, dropped and appended again, so
+# a re-run (or a FLEET_HOME that moved) leaves exactly one entry per event.
+#   cursor ALSO runs ~/.claude/settings.json's hooks — see the guard near the top of
+# hooks/fleet-event.sh, which is what keeps that path from writing records of its own.
+register_cursor() {
+  local mcp="$FLEET_HOME/mcp/fleet-mcp.mjs" bridge="$FLEET_HOME/hooks/cursor-fleet-event.sh"
+  if ! command -v cursor-agent >/dev/null 2>&1; then
+    vsay "· cursor-agent not installed — skipping its event bridge and MCP (fleet-spawn --agent cursor will refuse until it is)"
+    return 0
+  fi
+  # $HOME/.cursor, NOT $CURSOR_CONFIG_DIR: cursor honours that variable for its settings and
+  # chats but builds the hooks.json and mcp.json paths from the home directory regardless
+  # (read off the 2026.10.01 bundle), so following it would write where cursor never looks.
+  # CURSOR_FLEET_CONFIG_DIR is the suite's, to point this at a temp dir.
+  local dir="${CURSOR_FLEET_CONFIG_DIR:-$HOME/.cursor}" f t
+  if ! mkdir -p "$dir/skills" 2>/dev/null; then
+    echo "! could not create $dir — cursor workers get no fleet events, tools or skill"
+    return 0
+  fi
+  ln -sfn "$FLEET_HOME/skill/ghostfleet-orchestrate" "$dir/skills/ghostfleet-orchestrate"
+  # $1 = file, $2 = the jq program that merges into it, $3 = the one for a file that is not
+  # there (or is empty), $4/$5 = what to say. A file that is not JSON is left alone.
+  _cursor_merge() {
+    local f="$1" t; t="$(mktemp)"
+    if { [ -s "$f" ] && jq --arg b "$bridge" --arg m "$mcp" --arg q "'" "$2" "$f" > "$t" 2>/dev/null; } \
+       || { [ ! -s "$f" ] && jq -n --arg b "$bridge" --arg m "$mcp" --arg q "'" "$3" > "$t"; }; then
+      if [ -s "$f" ] && ! cmp -s "$f" "$t" && [ ! -e "$f.pre-ghostfleet" ]; then cp -p "$f" "$f.pre-ghostfleet"; fi
+      mv "$t" "$f"; vsay "✓ $4 -> $f (cursor, global)"
+    else
+      rm -f "$t"; echo "! $f is not readable as JSON, so it was left alone — $5"
+    fi
+  }
+  # The command runs under a shell, so the path is single-quoted ($q) for a FLEET_HOME with a
+  # space in it. beforeSubmitPrompt and stop only: those are the two the bridge maps.
+  local ours='{ command: ($q + $b + $q), timeout: 10 }'
+  local keep='[ .[]? | select(((.command // "") | contains("cursor-fleet-event.sh")) | not) ]'
+  _cursor_merge "$dir/hooks.json" \
+    ".version = (.version // 1) | .hooks = ((.hooks // {})
+       | .beforeSubmitPrompt = ((.beforeSubmitPrompt | $keep) + [ $ours ])
+       | .stop               = ((.stop               | $keep) + [ $ours ]))" \
+    "{ version: 1, hooks: { beforeSubmitPrompt: [ $ours ], stop: [ $ours ] } }" \
+    "wrote the ghostfleet event bridge" "cursor workers fall back to pane-only detection"
+  _cursor_merge "$dir/mcp.json" \
+    '.mcpServers = ((.mcpServers // {}) + { ghostfleet: { command: "node", args: [$m] } })' \
+    '{ mcpServers: { ghostfleet: { command: "node", args: [$m] } } }' \
+    "wrote ghostfleet MCP" "cursor gets no fleet_* tools"
+}
 register_codex_mcp
 register_opencode_mcp
+register_agy
+register_cursor
 
 # --- PATH hint ---------------------------------------------------------------
 case ":$PATH:" in
@@ -945,6 +1150,15 @@ echo "    ghostfleet            # your own projects (the empty screen walks you 
 # here, because this list is where a new install looks for what to do next, and
 # `fleet-phone` is the step rather than a pointer at a document.
 echo "    fleet-phone           # put the fleet on your phone — it reports what is left to do"
+# A RUNNING CLAUDE KEEPS THE PLUGINS IT STARTED WITH, so installing the mod reaches only
+# sessions started from here on. Every session already open goes on being read from its
+# pane, which looks exactly like the mod not working. Said only when there are some.
+if [ "$MOD_IN" = " + the Claude Code mod" ]; then
+  _pre="$("$FLEET_HOME/bin/fleet-mod" reload --count 2>/dev/null || true)"
+  case "$_pre" in ''|*[!0-9]*|0) ;;
+    *) echo "    fleet-mod reload --apply   # $_pre running session$([ "$_pre" = 1 ] && echo " predates" || echo "s predate") the mod (without --apply: the plan)" ;;
+  esac
+fi
 # THE RE-RUN COMMAND HAS TO BE ONE THE READER CAN ACTUALLY TYPE. This printed
 # `./install.sh --verbose` at everyone, including the npx reader, whose working directory
 # has no install.sh in it and never did — the installer ran out of a cache directory they

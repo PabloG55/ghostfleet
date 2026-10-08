@@ -13,7 +13,7 @@
 
 [38;5;239m[48;5;237m❯ [38;5;231mCreate a file called hello.txt containing the word hi[39m
 
-[38;5;246m[49m⏺[39m [1mWrite[0m(]8;id=11yu51x;file:///private/tmp/claude-501/-Users-pgarces-Documents-me-pane-view/cd996aa8-4747-4219-89b0-9b9ea33b5d8e/scratchpad/dlg/hello.txt\hello.txt]8;;\)
+[38;5;246m[49m⏺[39m [1mWrite[0m(]8;id=11yu51x;file:///private/tmp/claude-501/-Users-you-Documents-me-pane-view/cd996aa8-4747-4219-89b0-9b9ea33b5d8e/scratchpad/dlg/hello.txt\hello.txt]8;;\)
 
 [38;5;153m────────────────────────────────────────────────────────────────────────────────────────────────────
 [39m [1m[38;5;153mCreate file[0m

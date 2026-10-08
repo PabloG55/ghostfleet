@@ -9,6 +9,14 @@
 #     fleet-hibernate --idle-hours N  the threshold (default 48)
 #     fleet-hibernate --json          the same plan, machine-readable
 #     -s SOCK                         one fleet instead of all of them
+#     fleet-hibernate --resolve SOCK SLOT
+#                                     which conversation that session's process is in:
+#                                     prints id<US>transcript<US>how, corrects the record,
+#                                     exits 1 when it cannot be established (fleet-restart)
+#     fleet-hibernate --composer SOCK SLOT
+#                                     what that session's input box holds: prints draft,
+#                                     empty, or none (no box drawn); changes nothing
+#                                     (fleet-mod reload)
 #
 # WHY THIS EXISTS, in numbers measured on the machine that asked for it: 64 claude sessions
 # holding 21.75 GB of physical footprint, on a 64 GB laptop that was 39.6/40.0 GB into swap
@@ -71,8 +79,10 @@ while [ $# -gt 0 ]; do
     --idle-hours) IDLE_HOURS="${2:?}"; shift 2 ;;
     --timeout)    WAKE_TIMEOUT="${2:?}"; shift 2 ;;
     --json)       JSON=yes; shift ;;
+    --resolve)    MODE=resolve; ONLY_SOCK="${2:?--resolve needs SOCK SLOT}"; NAMED="${3:?--resolve needs SOCK SLOT}"; shift 3 ;;
+    --composer)   MODE=composer; ONLY_SOCK="${2:?--composer needs SOCK SLOT}"; NAMED="${3:?--composer needs SOCK SLOT}"; shift 3 ;;
     -s)           ONLY_SOCK="${2:?}"; shift 2 ;;
-    -h|--help)    sed -n '2,13p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
+    -h|--help)    sed -n '2,15p' "$0" | sed 's|^# \{0,1\}||'; exit 0 ;;
     *)            echo "fleet-hibernate: unknown option '$1'" >&2; exit 2 ;;
   esac
 done
@@ -461,9 +471,92 @@ proc_age() {
     n = split(s, t, ":"); x = 0; for (i = 1; i <= n; i++) x = x * 60 + t[i]; print d * 86400 + x }'
 }
 
+# ── A CONVERSATION SENT TO THE BACKGROUND GOES ON UNDER ANOTHER ID ───────────
+# Claude Code's ← (into its agent view) or /background ends the conversation in its
+# transcript with a `continued-in` line and goes on under a NEW id, in a separate process the
+# daemon runs. The pane's process stays as a viewer — and the note it keeps about itself
+# still names the OLD id, because that is the conversation it was started in. Measured on a
+# scratch session: viewer note `kind:"interactive"` with the old id, a second note
+# `kind:"bg"` with the new one. So every answer above is the dead predecessor, and three
+# things went wrong from it on a live fleet:
+#   - the idle clock dated the predecessor, last written two days earlier, and a session
+#     whose conversation had finished a turn six hours before was slept as "idle 48.00h";
+#   - the asleep marker recorded the predecessor, so the wake resumed a two-day-old
+#     conversation into the card;
+#   - the plan "corrected" the slot's record from the live id back to the dead one, which
+#     deletes the live id's record — on every dry run and every governor tick. That is what
+#     kept removing the record bin/fleet-read had to learn to read around.
+# The line is followed the way bin/fleet-read and the grid follow it: only that line, and
+# only to a successor whose transcript exists beside it. Bounded, for a chain of hand-offs;
+# the tail only, for a 100MB transcript. FOLLOW_PREV is the id just before the newest, so a
+# record moved onto it can carry continued_from — the hook reads its identity from that.
+FOLLOW_ID=""; FOLLOW_TR=""; FOLLOW_PREV=""
+continued_in() {   # transcript -> the id it was continued in, or nothing
+  tail -c 65536 "$1" 2>/dev/null | grep -o '"continuedInSessionId":"[0-9a-fA-F-]*"' | tail -1 | cut -d'"' -f4
+}
+_chain_ids() {   # id transcript -> " id successor successor… ", space-delimited for a case match
+  local id="$1" tr="$2" next out=" $1 " _
+  for _ in 1 2 3 4 5; do
+    [ -n "$tr" ] && [ -f "$tr" ] || break
+    next="$(continued_in "$tr")"
+    is_uuid "$next" && [ "$next" != "$id" ] && [ -f "$(dirname "$tr")/$next.jsonl" ] || break
+    out="$out$next "; id="$next"; tr="$(dirname "$tr")/$next.jsonl"
+  done
+  printf '%s' "$out"
+}
+follow_continued() {   # id transcript -> FOLLOW_ID FOLLOW_TR FOLLOW_PREV
+  local ids
+  FOLLOW_ID="$1"; FOLLOW_TR="$2"; FOLLOW_PREV=""
+  [ -n "$1" ] || return 0
+  read -ra ids <<< "$(_chain_ids "$1" "$2")"
+  FOLLOW_ID="${ids[${#ids[@]}-1]}"
+  if [ "${#ids[@]}" -gt 1 ]; then
+    FOLLOW_PREV="${ids[${#ids[@]}-2]}"; FOLLOW_TR="$(dirname "$2")/$FOLLOW_ID.jsonl"
+  fi
+}
+
+# ── IS THAT CONVERSATION RUNNING IN A BACKGROUND PROCESS RIGHT NOW? ──────────
+# A backgrounded conversation is not idle because its pane looks idle: it can be mid-turn or
+# holding background shell tasks, in a process the pane does not show. And sleeping the pane
+# kills it — the daemon that runs it is a CHILD of the pane's process (measured: `claude
+# daemon run --origin transient`, ppid = the pane's agent), so ending the pane ended the
+# conversation and its three running shell tasks on a live fleet. The evidence is the bg
+# process's own note: `kind:"bg"` and the conversation's id, believed only when its pid is
+# alive with the start time the note claims — the same test live_sid applies.
+bg_runner() {   # id -> the pid of a live bg process running it
+  local id="$1" cfg f row fpid fkind fstart
+  [ -n "$id" ] || return 1
+  while IFS= read -r cfg; do
+    [ -n "$cfg" ] && [ -d "$cfg/sessions" ] || continue
+    while IFS= read -r f; do
+      [ -f "$f" ] || continue
+      row="$(jq -r --arg id "$id" 'select(.sessionId == $id)
+              | [(.pid // "" | tostring), (.kind // ""), (.procStart // "")] | join("\u001f")' "$f" 2>/dev/null)"
+      [ -n "$row" ] || continue
+      IFS=$'\x1f' read -r fpid fkind fstart <<< "$row"
+      [ "$fkind" = bg ] && [ -n "$fpid" ] && [ -n "$fstart" ] || continue
+      [ "$(printf '%s' "$fstart" | tr -s ' ')" = \
+        "$(LC_ALL=C TZ=UTC ps -o lstart= -p "$fpid" 2>/dev/null | tr -s ' ' | sed 's/^ //; s/ $//')" ] || continue
+      printf '%s' "$fpid"; return 0
+    done < <(grep -lF "\"$id\"" "$cfg"/sessions/*.json 2>/dev/null)
+  done < <(cfg_dirs | sort -u)
+  return 1
+}
+
 live_sid() {
-  local sock="$1" slot="$2" top p cfg f row fpid fid fcwd fstart pstart id cwd age since m d pids
-  LIVE_ID=""; LIVE_TR=""; LIVE_HOW=""
+  local sock="$1" slot="$2"
+  _live_sid "$sock" "$slot" || return 1
+  # Whichever source answered, it answered with the conversation this process STARTED in;
+  # a hand-off since then is in that conversation's transcript.
+  follow_continued "$LIVE_ID" "$LIVE_TR"
+  if [ "$FOLLOW_ID" != "$LIVE_ID" ]; then
+    LIVE_ID="$FOLLOW_ID"; LIVE_TR="$FOLLOW_TR"; LIVE_HOW="$LIVE_HOW+continued"
+  fi
+  return 0
+}
+_live_sid() {
+  local sock="$1" slot="$2" top p cfg f row fpid fid fcwd fstart pstart id cwd age since m d pids chain
+  LIVE_ID=""; LIVE_TR=""; LIVE_HOW=""; FOLLOW_PREV=""
   command -v jq >/dev/null 2>&1 || return 1
   top="$(pane_pid_of "$sock" "$slot")"
   [ -n "$top" ] || return 1
@@ -502,9 +595,13 @@ live_sid() {
     while IFS= read -r cfg; do
       [ -n "$cfg" ] || continue
       d="$(proj_dir "$cfg" "$cwd")"; [ -d "$d" ] || continue
+      # Its own hand-offs are the same conversation going on, not a rival for it: the
+      # successors its transcript names are skipped here, and live_sid follows them.
+      chain=" $id "; [ -f "$d/$id.jsonl" ] && chain="$(_chain_ids "$id" "$d/$id.jsonl")"
       for f in "$d"/*.jsonl; do
         [ -f "$f" ] || continue
         if [ "${f##*/}" = "$id.jsonl" ]; then LIVE_TR="$f"; continue; fi
+        case "$chain" in *" $(basename "$f" .jsonl) "*) continue ;; esac
         m="$(mtime "$f")" || continue
         [ "$m" -ge "$since" ] && { LIVE_TR=""; return 1; }
       done
@@ -523,7 +620,7 @@ live_sid() {
 # back. If the live conversation already has a record of its own, the hook got there first
 # and only the stale claim has to go.
 correct_record() {
-  local sock="$1" slot="$2" old="$3" new="$4" tr="$5" cwd="$6" was="${7:-$2}"
+  local sock="$1" slot="$2" old="$3" new="$4" tr="$5" cwd="$6" was="${7:-$2}" from="${8:-}"
   local dst="${FLEET_DIR:?}/$4.json" src=""
   command -v jq >/dev/null 2>&1 || return 0
   [ "$old" != "$new" ] || return 0
@@ -533,14 +630,18 @@ correct_record() {
   elif [ -n "$src" ] && [ -f "$src" ]; then
     # .slot too: a renamed session's stale record is filed under its old name, and moving
     # it without re-filing it would leave the live conversation under a name nothing reads.
-    jq --arg id "$new" --arg tr "$tr" --arg slot "$slot" \
-       '.session_id = $id | .transcript = $tr | .slot = $slot' "$src" \
+    # continued_from when the move follows a hand-off: the hook takes a bg conversation's
+    # sock and slot from it, and a record without it is read as nobody's.
+    jq --arg id "$new" --arg tr "$tr" --arg slot "$slot" --arg from "$from" \
+       '.session_id = $id | .transcript = $tr | .slot = $slot
+        | if $from != "" then .continued_from = $from else . end' "$src" \
       > "$dst.tmp.$$" 2>/dev/null && mv -f "$dst.tmp.$$" "$dst" 2>/dev/null || rm -f "$dst.tmp.$$" 2>/dev/null
   else
     jq -n --arg id "$new" --arg sock "$sock" --arg slot "$slot" --arg cwd "$cwd" --arg tr "$tr" \
-          --argjson ts "$(now)" \
+          --argjson ts "$(now)" --arg from "$from" \
       '{session_id:$id, zellij:"", sock:$sock, slot:$slot, cwd:$cwd,
-        folder:($cwd|split("/")|last), branch:"", status:"unknown", transcript:$tr, ts:$ts}' \
+        folder:($cwd|split("/")|last), branch:"", status:"unknown", transcript:$tr, ts:$ts}
+       + (if $from != "" then {continued_from:$from} else {} end)' \
       > "$dst.tmp.$$" 2>/dev/null && mv -f "$dst.tmp.$$" "$dst" 2>/dev/null || rm -f "$dst.tmp.$$" 2>/dev/null
   fi
   # Only a record that claims THIS slot on THIS fleet is removed: an id is a conversation,
@@ -552,7 +653,22 @@ correct_record() {
   return 0
 }
 
+# THE MARKER bin/fleet-jarvis writes: key=value lines, read with grep+cut the way the
+# governor and the event hook read it. Only the master on that sock is Jarvis — a worker
+# Jarvis spawned is a worker (isJarvisSelf in lib/jarvis.mjs).
+is_jarvis() {
+  [ "$2" = master ] && [ -f "$HOME/.config/ghostfleet/jarvis" ] \
+    && ! grep -qsx off "$HOME/.config/ghostfleet/jarvis.enabled" \
+    && [ "$1" = "$(grep -m1 '^sock=' "$HOME/.config/ghostfleet/jarvis" 2>/dev/null | cut -d= -f2-)" ]
+}
+jarvis_always_on() {
+  printf 'Jarvis is always on — it is never hibernated, parked or paused. To take it offline for good: fleet-stop -s %s master' "$1"
+}
+
 # ── the veto list ─────────────────────────────────────────────────────────────
+# The one veto the apply loop also reports, so a governor's log says why a session that
+# looks idle was left up.
+BG_VETO='its conversation is running in a background process:'
 # Returns a reason, or nothing when the session may sleep. Every entry is a way for
 # hibernation to destroy something rather than defer it.
 veto_for() {
@@ -561,6 +677,12 @@ veto_for() {
   # a conversation, and reporting it as "no recorded conversation id" is true but useless —
   # on a real fleet that was two thirds of the list, every row saying the same wrong thing.
   case "$slot" in _*) printf 'a tab, not an agent'; return ;; esac
+  # ── JARVIS IS NEVER SLEPT, NOT EVEN BY NAME ─────────────────────────────────
+  # The owner's rule, and a rule rather than a setting. Every other lead can be slept by
+  # naming it; Jarvis's master cannot, because it is the one session the phone talks to when
+  # nothing else is up. Which fleet is Jarvis is the marker's sock (lib/jarvis.mjs), never a
+  # name spelled here. Ahead of the lead rule so the reason printed is the one that holds.
+  if is_jarvis "$sock" "$slot"; then jarvis_always_on "$sock"; return; fi
   # ── A FLEET'S LEAD IS NEVER SLEPT BY A RULE ─────────────────────────────────
   # Neither the threshold nor --pressure may take it; only `--apply master` naming it. The
   # lead is the session a person comes back to, and the one measured case of hibernation
@@ -571,6 +693,10 @@ veto_for() {
   fi
   [ -n "$id" ] || { printf 'no recorded conversation id — it could not be woken'; return; }
   [ -f "${FLEET_DIR:?}/$sock.$slot.asleep" ] && { printf 'already asleep'; return; }
+  # Ahead of every clock: a conversation a bg process is running is not idle whatever its
+  # transcript says, and ending the pane ends it (bg_runner).
+  local bgpid
+  bgpid="$(bg_runner "$id")" && { printf '%s %s (pid %s) — sleeping the pane would end it' "$BG_VETO" "$id" "$bgpid"; return; }
   # A STALE STATUS IS NOT A LIVE ONE. Measured: a session marked `working` whose transcript
   # had not moved in 26.8 days. Vetoing on the word alone would pin its memory forever, so
   # the veto needs the status to be BOTH busy and recent.
@@ -645,11 +771,14 @@ build_plan() {
         fi
         if [ "$live" = yes ]; then
           [ -n "$cwd" ] || cwd="$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_current_path}' 2>/dev/null)"
-          [ "$LIVE_ID" = "$id" ] || correct_record "$sock" "$slot" "$id" "$LIVE_ID" "$LIVE_TR" "$cwd" "${_rs:-$slot}"
+          [ "$LIVE_ID" = "$id" ] || correct_record "$sock" "$slot" "$id" "$LIVE_ID" "$LIVE_TR" "$cwd" "${_rs:-$slot}" "$FOLLOW_PREV"
           # the live transcript or none: falling back to the recorded one is the bug itself
           id="$LIVE_ID"; tr="$LIVE_TR"
         fi ;;
       esac
+      # A recorded id the process could not confirm is still followed, so what is printed —
+      # and dated — is the newest conversation, never a dead predecessor.
+      follow_continued "$id" "$tr"; id="$FOLLOW_ID"; tr="$FOLLOW_TR"
       idle="$(idle_hours "$tr")"
       why="$(veto_for "$sock" "$slot" "$st" "$ts" "$cwd" "$id" "$idle" "$live")"
       # ── \x1f, NOT A TAB, and this row is exactly why CLAUDE.md says so ──────
@@ -692,6 +821,25 @@ wake_one() {
   [ -f "$marker" ] || { echo "fleet-hibernate: '$slot' is not asleep on $sock" >&2; return 1; }
   IFS=$'\t' read -r _ id cwd _ < "$marker"
   [ -n "$cwd" ] || cwd="$HOME"
+  # ── A MARKER CAN NAME A CONVERSATION THAT HAS SINCE MOVED ON ─────────────────
+  # One written before sleeping followed hand-offs recorded the predecessor, and a wake by it
+  # opened a conversation two days older than the one the card had been showing. The marker
+  # is not rewritten here: it is the way home if this wake fails.
+  local mtr="" c
+  if is_uuid "$id"; then
+    while IFS= read -r c; do
+      [ -n "$c" ] || continue
+      [ -f "$(proj_dir "$c" "$cwd")/$id.jsonl" ] && { mtr="$(proj_dir "$c" "$cwd")/$id.jsonl"; break; }
+    done < <(cfg_dirs)
+    # A cwd recorded under another spelling of the path (a symlink, a moved checkout) still
+    # has its transcript somewhere under a projects dir, named by the id.
+    [ -n "$mtr" ] || mtr="$(cfg_dirs | while IFS= read -r c; do [ -n "$c" ] && ls "$c"/projects/*/"$id.jsonl" 2>/dev/null; done | head -1)"
+    follow_continued "$id" "$mtr"
+    if [ "$FOLLOW_ID" != "$id" ]; then
+      echo "fleet-hibernate: '$slot' was asleep on $id, which was continued in $FOLLOW_ID — resuming that"
+      id="$FOLLOW_ID"
+    fi
+  fi
   # ── A SESSION OF THAT NAME IS ALREADY THERE ─────────────────────────────────
   # "could not start a pane" was this: new-session refuses a name that exists. A marker
   # outlives the sleep whenever the session comes back some other way — reopened by hand
@@ -762,8 +910,8 @@ print_plan() {
       [ -n "$sock" ] || continue
       [ "$first" = 1 ] || printf ','
       first=0
-      printf '{"sock":"%s","slot":"%s","status":"%s","idle_hours":%s,"would_sleep":%s,"why":"%s"}' \
-        "$sock" "$slot" "$st" "${idle:-null}" "$([ -z "$why" ] && echo true || echo false)" "$why"
+      printf '{"sock":"%s","slot":"%s","status":"%s","session_id":"%s","idle_hours":%s,"would_sleep":%s,"why":"%s"}' \
+        "$sock" "$slot" "$st" "$id" "${idle:-null}" "$([ -z "$why" ] && echo true || echo false)" "$why"
     done <<< "$PLAN"
     printf ']\n'
     return
@@ -785,6 +933,32 @@ command -v tmux >/dev/null 2>&1 || { echo "fleet-hibernate: tmux required" >&2; 
 load_records; load_trusted; load_ps
 
 case "$MODE" in
+  # ── ONE ANSWER TO "WHICH CONVERSATION", ASKED BY EVERYTHING THAT RESUMES ─────
+  # fleet-restart used to trust the recorded id, which is the bug live_sid exists for, and it
+  # bit there too: a lead relaunched onto an id with no transcript anywhere, the resume
+  # failed, and the pane closed with the card. The fix is to ask THIS code rather than grow
+  # a second copy of it — two spellings of "which conversation is live" would drift the way
+  # this repo keeps writing down. No guessing is added here: the answer is live_sid's or
+  # nothing, and the caller decides what nothing means.
+  resolve)
+    live_sid "$ONLY_SOCK" "$NAMED" || exit 1
+    _old="$(field_for "$ONLY_SOCK" "$NAMED" 4)"; _cwd="$(field_for "$ONLY_SOCK" "$NAMED" 7)"
+    [ -n "$_cwd" ] || _cwd="$(tmux -L "$ONLY_SOCK" display-message -p -t "$NAMED" '#{pane_current_path}' 2>/dev/null)"
+    [ "$LIVE_ID" = "$_old" ] || correct_record "$ONLY_SOCK" "$NAMED" "$_old" "$LIVE_ID" "$LIVE_TR" "$_cwd" "$NAMED" "$FOLLOW_PREV"
+    printf '%s\x1f%s\x1f%s\n' "$LIVE_ID" "$LIVE_TR" "$LIVE_HOW"
+    exit 0 ;;
+  # ── WHAT IS IN THE INPUT BOX, FOR A CALLER ABOUT TO TYPE INTO IT ──────────────
+  # fleet-mod reload types a command into an idle session, and must never do it on top of
+  # something a person has half-written or into a pane that is not at a prompt at all. The
+  # draft rule above (dim suggestions are not drafts, the glyph's no-break space) took live
+  # panes to get right, so it is asked here rather than copied. Three answers, because "no
+  # box drawn" (a dialog, a menu, a pane still starting) is a third thing, not an empty box.
+  composer)
+    if has_draft "$ONLY_SOCK" "$NAMED"; then echo draft
+    elif composer_lines "$(tmux -L "$ONLY_SOCK" capture-pane -p -t "$NAMED" 2>/dev/null)" >/dev/null 2>&1; then echo empty
+    else echo none
+    fi
+    exit 0 ;;
   wake)
     SOCK="${ONLY_SOCK:-}"
     # ── WHICH FLEET, WHEN NONE WAS NAMED ──────────────────────────────────────
@@ -826,6 +1000,7 @@ case "$MODE" in
     slept=0
     while IFS=$'\x1f' read -r sock slot st idle id cwd why; do
       [ -n "$sock" ] || continue
+      case "$why" in "$BG_VETO"*) echo "fleet-hibernate: kept $sock/$slot up — $why" ;; esac
       [ -z "$why" ] || continue
       sleep_one "$sock" "$slot" "$id" "$cwd" "$idle"
       echo "fleet-hibernate: slept $sock/$slot (idle ${idle}h)"

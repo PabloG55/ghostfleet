@@ -284,8 +284,10 @@ What stands in front of them is identity and confirmation, not reduced capabilit
   leaving three buttons quietly missing. The gate reads §4's `lead` flag, never the name.
 
 None of that is the enforcement. §5: *server-enforced, not client-enforced* — the
-assertion's job is to make the server mint a short-lived token, and the server refuses
-anything without a live one. The lists in `api.js` decide which taps ask for a
+assertion's job is to make the server mint a token that dies after 15 minutes without a
+request, and the server refuses anything without a live one. Every authenticated response
+carries `X-Session-Expires: <epoch>`, the slid deadline, which `api.js` mirrors and stores
+per origin so a relaunch inside the window resumes without Face ID (`passkey.resume()`). The lists in `api.js` decide which taps ask for a
 fingerprint; `curl` never runs them. The lead is refused the same way: in `plan()`
 (`mcp/fleet-dispatch.mjs`), which is the layer both the MCP server and the daemon go
 through, so the button being absent is a courtesy and not the control.
@@ -293,7 +295,7 @@ through, so the button being absent is a courtesy and not the control.
 ## What `fleet-serve` has to answer
 
 ```
-GET  /api/projects                          -> { home, projects: [ … ] }
+GET  /api/projects                          -> { home, projects: [ … ], agents, jarvis_enabled, speak }
 GET  /api/grid?project=<name>               -> docs/mobile.md §4, verbatim
 GET  /api/session?project=&session=&limit=20[&before=<ts>]
                                             -> { session, total, messages: [{ts,role,text}], next_before, note? }
@@ -311,6 +313,14 @@ GET  /api/health                            -> { ok, version, … }    the probe
 GET  /api/push/key                          -> { key, detail, subscribed, endpoints }
 POST /api/push/subscribe { endpoint, keys } -> { ok, subscribed, detail }   201
 POST /api/push/unsubscribe { endpoint }     -> { ok, removed }
+GET  /api/digest                            -> { ok, at, since, liveness, projects, totals }   always peeked
+GET  /api/jarvis                            -> { ok, present, project, profile, session, running,
+                                                 status, voice: { ready, why? }, pending: [{id,tool,summary,ts,granted}] }
+POST /api/jarvis/confirm { id, answer }     -> { ok, id, answer, summary, told }
+                                            'yes' needs X-Fleet-Assertion; 'no' does not
+POST /api/jarvis/hear   <audio/wav bytes>   -> { ok, text, ms }   4 MB cap; 415 if not RIFF/WAVE
+                                            every /api/jarvis* is 404 { ok:false, disabled:true }
+                                            while Jarvis is switched off
 ```
 
 ### Notifications
@@ -329,7 +339,26 @@ screen is written by `sw.js` from those. `fleet-serve push --detail anonymous` d
 `sessions` array so the count is all that travels.
 
 Only a **home-screen install** can subscribe: on iOS a Safari tab has no Push API at all,
-so the settings sheet says so instead of offering a button that opens no prompt.
+so the settings sheet says so instead of offering a button that opens no prompt. In an
+install, the first unlock offers it too — a **Turn on notifications** band on Projects and
+on the Jarvis screen, one tap, because iOS only shows the permission prompt in answer to a
+gesture. "not now" is honoured for three days. A payload from Jarvis carries
+`open: "jarvis"`, and tapping it opens the Jarvis screen.
+
+### Jarvis
+
+Jarvis is experimental and switched off by default. The client learns the switch from
+`jarvis_enabled` on `/api/projects` (or a 404 from `/api/jarvis`), never from a build flag;
+off, it draws no band, no Jarvis screen and no `talk` button, and reads the Mac's voice from
+`speak` on `/api/projects`. On, its screen carries an `experimental` tag beside the name.
+
+The master of masters (docs/jarvis.md) is the `jarvis` project's `master`, so its screen
+is the session screen pointed at it, plus three things: the proposals waiting on a yes
+(yes / no, the yes behind a fresh passkey), the `talk` control for conversation mode, and
+a band at the top of Projects. Audio goes up as 16 kHz mono WAV and is transcribed by the
+Mac's whisper.cpp; nothing is kept. The fixtures (`jarvis.json`, `grid-jarvis.json`,
+`session-jarvis-master.json`) have one pending proposal and no voice, because there is
+nothing to transcribe with.
 
 ### Enrolling the phone
 

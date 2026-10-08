@@ -3,3 +3,6 @@
 *.bak.*
 *.tmp
 node_modules
+# Laid beside a mod by Claude Code each time it loads one from a folder you own
+# (--plugin-dir), for the editor; the engine rewrites it, so it is never ours to commit.
+mods/*/tsconfig.json

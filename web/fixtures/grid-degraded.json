@@ -1,6 +1,7 @@
 {
   "project": "acme-api",
   "profile": "work",
+  "sub": null,
   "counts": {
     "need_you": 2,
     "working": 0,
@@ -14,6 +15,7 @@
       "name": "master",
       "label": null,
       "status": "need-you",
+      "team_status": null,
       "folder": "acme-api",
       "branch": "main",
       "agent": "claude",
@@ -24,12 +26,16 @@
       "sched": null,
       "limit_at": null,
       "lead": true,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "api-fix",
       "label": null,
       "status": "need-you",
+      "team_status": null,
       "folder": "api-fix",
       "branch": "feat/retry-backoff",
       "agent": "claude",
@@ -40,12 +46,16 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "docs-pass",
       "label": null,
       "status": "limit",
+      "team_status": null,
       "folder": "docs-pass",
       "branch": "docs/openapi-examples",
       "agent": "claude",
@@ -56,12 +66,16 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "cache-keys",
       "label": null,
       "status": "limit",
+      "team_status": null,
       "folder": "cache-keys",
       "branch": "feat/cache-key-scope",
       "agent": "claude",
@@ -72,28 +86,36 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "csv-export",
       "label": null,
       "status": "interrupted",
+      "team_status": null,
       "folder": "csv-export",
       "branch": "csv-export",
       "agent": "claude",
       "pr": null,
-      "msg": "Interrupted mid-edit \u2014 the file is half-written.",
+      "msg": "Interrupted mid-edit — the file is half-written.",
       "age": 300,
       "attached": false,
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "rate-limit",
       "label": null,
       "status": "parked",
+      "team_status": null,
       "folder": "rate-limit",
       "branch": "fix/rate-limit-window",
       "agent": "claude",
@@ -104,12 +126,16 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "list-pages",
       "label": null,
       "status": "parked",
+      "team_status": null,
       "folder": "list-pages",
       "branch": "list-pages",
       "agent": "claude",
@@ -120,12 +146,16 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "adapter-probe",
       "label": null,
       "status": "unknown",
+      "team_status": null,
       "folder": "adapter-probe",
       "branch": "probe/opencode-adapter",
       "agent": "opencode",
@@ -136,28 +166,36 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "docs-sweep",
       "label": null,
       "status": "idle",
+      "team_status": null,
       "folder": "docs-sweep",
       "branch": "docs-sweep",
       "agent": "claude",
       "pr": null,
-      "msg": "Nothing to do \u2014 the sweep found no stale pages.",
+      "msg": "Nothing to do — the sweep found no stale pages.",
       "age": 5400,
       "attached": false,
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     },
     {
       "name": "types",
       "label": null,
       "status": "ready",
+      "team_status": null,
       "folder": "types-strict",
       "branch": "strict-null-checks",
       "agent": "claude",
@@ -168,7 +206,10 @@
       "sched": null,
       "limit_at": null,
       "lead": false,
-      "exited": false
+      "exited": false,
+      "parent": null,
+      "workers": null,
+      "sub_head": false
     }
   ],
   "free_worktrees": []

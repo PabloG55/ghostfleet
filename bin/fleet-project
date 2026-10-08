@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # fleet-project add <path> [--name N] [--profile P] [--agent A] [--start]
+# fleet-project agent <name> [<agent>|--none] [--session S]
 # fleet-project list
 # fleet-project rm <name>
+# fleet-project set <name | -s SOCK> <workers-merge|agents-approve> <on|off|inherit> [--session S]
+# fleet-project get <name | -s SOCK> [--session S]
 #
 # Register a PROJECT (a new fleet) from the command line — the thing the Projects
 # screen's "+ add project" does. Without this a lead had no way to create one, so
@@ -12,7 +15,18 @@
 #           boots its master right away, so the new fleet is usable immediately
 #           without opening the TUI.
 #   list    name · profile · fleet socket · path
+#   agent   set the project's agent (the 4th column) AND move its RUNNING master onto it —
+#           at once when idle, after the current turn when not; switching back resumes the
+#           conversation that agent had (lib/agent-switch.sh). --session S switches that
+#           one session instead and leaves the column alone. Running workers keep theirs.
 #   rm      drop the list entry only — sessions, worktrees and history are untouched
+#   set     one of the two BOUNDARY settings (lib/boundary.sh), both OFF by default:
+#             workers-merge   a worker in a linked worktree may merge a PR
+#             agents-approve  an agent may approve another session's permission dialog
+#           for the whole project, or with --session for ONE session — the sub-master of
+#           its task, while its siblings stay blocked. `inherit` (session only) drops the
+#           override. The grid's settings page calls this for the project-wide form.
+#   get     what those resolve to, for the project or one session
 #
 # <path> is the project ROOT: the repo itself, or a folder holding its checkouts /
 # worktrees (same rule the TUI uses).
@@ -86,7 +100,10 @@ case "$cmd" in
     # than an error, because nothing ever reports that it didn't.
     if [ -n "$AGENT" ]; then
       if command -v fleet-agent >/dev/null 2>&1; then
-        fleet-agent list 2>/dev/null | grep -qx -- "$AGENT" \
+        # A HERE-STRING, NOT A PIPE (CLAUDE.md, pipefail). Piped, `grep -q` quits on the
+        # match and `fleet-agent list` can take SIGPIPE writing the agents after it, which
+        # pipefail turns into "unknown agent 'opencode'": measured 15 of 400 on macOS.
+        grep -qx -- "$AGENT" <<< "$(fleet-agent list 2>/dev/null)" \
           || { echo "fleet-project: unknown agent '$AGENT' (known: $(fleet-agent list | tr '\n' ' '))" >&2; exit 1; }
       else
         case "$AGENT" in *[!a-z0-9_-]*) echo "fleet-project: bad agent '$AGENT'" >&2; exit 1 ;; esac
@@ -143,18 +160,26 @@ case "$cmd" in
   # literal word `claude` would make every default project start displaying "· claude".
   # Absent means claude; that is the contract set_project() already implements.
   agent)
-    NAME="${1:-}"; WANT="${2-}"
-    [ -n "$NAME" ] || { echo "fleet-project: usage: fleet-project agent <name> [<agent>|--none]" >&2; exit 1; }
+    NAME=""; WANT=""; HAVE_WANT=0; SESS=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --session) SESS="${2:?}"; shift 2 ;;
+        --none)    WANT=""; HAVE_WANT=1; shift ;;
+        -*) echo "fleet-project: unknown option $1" >&2; exit 1 ;;
+        *) if [ -z "$NAME" ]; then NAME="$1"; else WANT="$1"; HAVE_WANT=1; fi; shift ;;
+      esac
+    done
+    [ -n "$NAME" ] || { echo "fleet-project: usage: fleet-project agent <name> [<agent>|--none] [--session S]" >&2; exit 1; }
     case "$WANT" in
-      --none|none|'') WANT="" ;;
+      none|'') WANT="" ;;
       *) if command -v fleet-agent >/dev/null 2>&1; then
-           fleet-agent list 2>/dev/null | grep -qx -- "$WANT" \
+           grep -qx -- "$WANT" <<< "$(fleet-agent list 2>/dev/null)" \
              || { echo "fleet-project: unknown agent '$WANT' (known: $(fleet-agent list | tr '\n' ' '))" >&2; exit 1; }
          else
            case "$WANT" in *[!a-z0-9_-]*) echo "fleet-project: bad agent '$WANT'" >&2; exit 1 ;; esac
          fi ;;
     esac
-    found=0
+    found=0; PROF=""
     for f in "$CFG_HOME"/projects "$CFG_HOME"/projects.*; do
       [ -f "$f" ] || continue
       case "${f##*/}" in
@@ -162,6 +187,10 @@ case "$cmd" in
         *) case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac ;;
       esac
       awk -F'\t' -v n="$NAME" '$1==n{f=1} END{exit !f}' "$f" || continue
+      PROF="$(awk -F'\t' -v n="$NAME" '$1==n{print $3; exit}' "$f")"; PROF="${PROF:-work}"
+      # --session NEVER TOUCHES THE PROJECTS FILE: the setting for one session is its own
+      # agent marker, which the switch below writes once the session is really running it.
+      if [ -n "$SESS" ]; then found=1; break; fi
       tmp="$f.$$.tmp"
       # REWRITTEN WITH awk, AND THE COMMENTS SURVIVE. `$1==n` never matches a comment line,
       # so they and the blanks pass through untouched — the header this file ships with is
@@ -183,19 +212,110 @@ case "$cmd" in
       rm -f "$tmp" 2>/dev/null
     done
     [ "$found" = 1 ] || { echo "fleet-project: no project '$NAME'" >&2; exit 1; }
-    if [ -n "$WANT" ]; then
-      echo "fleet-project: '$NAME' will start its master as $WANT"
-      cav="$(fleet-agent caveat "$WANT" 2>/dev/null || true)"
-      [ -n "$cav" ] && echo "fleet-project: heads up — $cav"
-    else
-      echo "fleet-project: '$NAME' is back to the default agent (claude)"
+    [ -n "$SESS" ] && [ "$HAVE_WANT" = 0 ] && { echo "fleet-project: --session needs an agent (or --none)" >&2; exit 1; }
+    # The switch engine calls back in here to put the setting right after a failed switch;
+    # that call must write the column and nothing else, or it would request a switch of
+    # its own.
+    [ "${CLAUDE_FLEET_SWITCH_SETTING_ONLY:-0}" = 1 ] && exit 0
+    if [ -z "$SESS" ]; then
+      if [ -n "$WANT" ]; then
+        echo "fleet-project: '$NAME' will start its master as $WANT"
+        cav="$(fleet-agent caveat "$WANT" 2>/dev/null || true)"
+        [ -n "$cav" ] && echo "fleet-project: heads up — $cav"
+      else
+        echo "fleet-project: '$NAME' is back to the default agent (claude)"
+      fi
     fi
-    # THE RUNNING MASTER DOES NOT CHANGE, and saying so here is the whole difference
-    # between a setting and a broken feature. CLAUDE_FLEET_AGENT is read once, by
-    # `agent-here`, at the moment the tmux session is created; the session then exec'd its
-    # CLI and nothing re-reads this file. Same family as every long-lived-process entry in
-    # CLAUDE.md — a governor, an MCP server, a PWA shell.
-    echo "fleet-project: the RUNNING master keeps the agent it started with — this applies to the next one"
+    # ── AND THE RUNNING ONE SWITCHES TOO ─────────────────────────────────────────
+    # This used to stop at the setting, with a line saying the running master keeps the
+    # agent it started with — CLAUDE_FLEET_AGENT is read once, when the tmux session is
+    # created. The owner set a project to codex and its master went on answering as claude,
+    # which is a setting that reads as broken however clearly the line said so. Now the
+    # running session is moved onto the new agent by lib/agent-switch.sh: at once when idle,
+    # after its current turn when not, with both conversations kept (its header has the
+    # rules). Workers are NOT touched — a running worker keeps its agent, a new one inherits
+    # the column.
+    SLOT="${SESS:-master}"; SOCK="$(sock_for "$NAME" "$PROF")"; DIR="$(profile_dir "$PROF")/fleet"
+    TO="${WANT:-claude}"
+    res="$(bash "$BIN_DIR/../lib/agent-switch.sh" request "$DIR" "$SOCK" "$SLOT" "$TO" "$([ -z "$SESS" ] && printf '%s' "$NAME")" 2>&1)"
+    # codex keeps no conversation through a pane kill, so "back to codex" is a NEW one. Said
+    # here, at the moment of choosing, and only when there was a codex conversation to lose.
+    fresh_note=""
+    if [ "$(fleet-agent field "$TO" resume 2>/dev/null)" != yes ] \
+       && jq -e --arg a "$TO" 'has($a)' "$DIR/$SOCK.$SLOT.convs.json" >/dev/null 2>&1; then
+      fresh_note=" — $TO can't resume, it starts fresh"
+    fi
+    case "$res" in
+      not-running*)  echo "fleet-project: '$SLOT' is not running — it starts as $TO next time" ;;
+      already*)      echo "fleet-project: '$SLOT' already runs $TO" ;;
+      cancelled*)    echo "fleet-project: '$SLOT' already runs $TO — the pending switch is cancelled" ;;
+      missing*)      set -- $res
+                     echo "fleet-project: cannot switch the running '$SLOT' — $2 is not installed ('$3' is not on PATH), so it stays on $4" >&2
+                     [ -z "$SESS" ] && echo "fleet-project: '$NAME' is back on $4, so the next master does not start into a missing binary" >&2
+                     exit 1 ;;
+      pending-busy*) echo "fleet-project: switching '$SLOT' from ${res#pending-busy } to $TO when its current turn ends$fresh_note" ;;
+      pending*)      echo "fleet-project: switching '$SLOT' from ${res#pending } to $TO now$fresh_note" ;;
+      *)             echo "fleet-project: could not switch the running '$SLOT': $res" >&2 ;;
+    esac
+    ;;
+
+  set|get)
+    . "$BIN_DIR/../lib/boundary.sh"
+    NAME=""; BSOCK=""; SESS=""; POS=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -s)        BSOCK="${2:?}"; shift 2 ;;
+        --session) SESS="${2:?}";  shift 2 ;;
+        -*) echo "fleet-project: unknown option $1" >&2; exit 1 ;;
+        *)  POS+=("$1"); shift ;;
+      esac
+    done
+    [ -n "$BSOCK" ] || { NAME="${POS[0]:-}"; POS=("${POS[@]:1}"); }
+    # Find the project's profile — it decides both the socket and the fleet dir the markers
+    # live in. By name, or by socket (what a refusal knows), across every profile's list.
+    PROF=""; found=0
+    for f in "$CFG_HOME"/projects "$CFG_HOME"/projects.*; do
+      [ -f "$f" ] || continue
+      case "${f##*/}" in projects) ;; *) case "${f##*/projects.}" in *[!A-Za-z0-9_-]*) continue ;; esac ;; esac
+      while IFS=$'\x1f' read -r n _p prof _a; do
+        case "$n" in ''|\#*) continue ;; esac
+        prof="${prof:-work}"
+        if { [ -n "$NAME" ] && [ "$n" = "$NAME" ]; } || { [ -n "$BSOCK" ] && [ "$(sock_for "$n" "$prof")" = "$BSOCK" ]; }; then
+          NAME="$n"; PROF="$prof"; found=1; break 2
+        fi
+      done < <(awk -F'\t' 'BEGIN{ OFS = sprintf("%c", 31) } { print $1, $2, $3, $4 }' "$f")
+    done
+    [ "$found" = 1 ] || { echo "fleet-project: no project '${NAME:-$BSOCK}'" >&2; exit 1; }
+    SOCK="$(sock_for "$NAME" "$PROF")"; DIR="$(profile_dir "$PROF")/fleet"
+    if [ "$cmd" = get ]; then
+      for b in $BOUNDARY_SETTINGS; do
+        boundary_on "$b" "$DIR" "$SOCK" "$SESS" && v=on || v=off
+        printf '%-15s %-4s  (%s)\n' "$b" "$v" "$(boundary_label "$b")"
+      done
+      exit 0
+    fi
+    B="${POS[0]:-}"; V="${POS[1]:-}"
+    case " $BOUNDARY_SETTINGS " in *" $B "*) ;; *)
+      echo "fleet-project: usage: fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]" >&2; exit 1 ;; esac
+    mkdir -p "$DIR" 2>/dev/null
+    if [ -n "$SESS" ]; then
+      m="$DIR/$SOCK.$SESS.$B"
+      case "$V" in
+        on)      : > "$m";       rm -f "$m-off" ;;
+        off)     : > "$m-off";   rm -f "$m" ;;
+        inherit) rm -f "$m" "$m-off" ;;
+        *) echo "fleet-project: set --session takes on, off or inherit" >&2; exit 1 ;;
+      esac
+      boundary_on "$B" "$DIR" "$SOCK" "$SESS" && v=on || v=off
+      echo "fleet-project: '$(boundary_label "$B")' for session '$SESS' in '$NAME': $V (resolves to $v)"
+    else
+      case "$V" in
+        on)  : > "$DIR/$SOCK.$B" ;;
+        off) rm -f "$DIR/$SOCK.$B" ;;
+        *) echo "fleet-project: set takes on or off for a project (inherit is for --session)" >&2; exit 1 ;;
+      esac
+      echo "fleet-project: '$(boundary_label "$B")' for project '$NAME': $V"
+    fi
     ;;
 
   rm|remove)
@@ -221,8 +341,10 @@ case "$cmd" in
   *)
     echo "fleet-project: usage:" >&2
     echo "  fleet-project add <path> [--name N] [--profile P] [--agent A] [--start]" >&2
-    echo "  fleet-project agent <name> [<agent>|--none]" >&2
+    echo "  fleet-project agent <name> [<agent>|--none] [--session S]" >&2
     echo "  fleet-project list" >&2
     echo "  fleet-project rm <name>" >&2
+    echo "  fleet-project set <name|-s sock> <workers-merge|agents-approve> <on|off|inherit> [--session S]" >&2
+    echo "  fleet-project get <name|-s sock> [--session S]" >&2
     exit 1 ;;
 esac

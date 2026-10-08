@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet-stop [-s SOCKET] [--reclaim [--force]] <session>   (flags may go on either side)
+# fleet-stop [-s SOCKET] [--reclaim [--force]] [--children] <session>   (flags may go on either side)
 #
 # Cleanly STOP a fleet worker: kill its tmux session and clear ALL of its fleet
 # state — the status file, the park + schedule markers (and the detached schedule
@@ -31,6 +31,14 @@
 # implementation is what lets the TUI and the phone (bin/fleet-serve) mean the same thing
 # by it. It DELETES UNCOMMITTED WORK by design.
 #
+# A SUB-LEAD (a worker that spawned workers of its own — see bin/fleet-spawn) is not
+# stopped on its own: its children would be left reporting to nobody, on branches whose
+# only integrator is gone. So this ASKS: without `--children` it refuses and names them.
+# With it, each child is stopped and reclaimed first — through this same command with
+# --reclaim, so the squash-aware gates in fleet-clean decide each worktree exactly as they
+# would for any finished worker — and then the sub-lead itself. `--reclaim`/`--force`
+# still apply to the sub-lead only; a child's worktree is never force-removed from here.
+#
 # Socket defaults to $CLAUDE_FLEET_SOCK.
 set -uo pipefail
 
@@ -44,12 +52,13 @@ _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;
 # DROPPED the flag — the session stopped, the worktree stayed, and nothing said why. A
 # real agent hit that within a day, having copied the order from this repo's own skill
 # table. An option that is ignored without complaint is worse than one that errors.
-RECLAIM=0; FORCE=0; SESSION=""
+RECLAIM=0; FORCE=0; CHILDREN=0; SESSION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)        SOCK="${2:-}"; shift 2 ;;
     --reclaim) RECLAIM=1; shift ;;
     --force)   FORCE=1;   shift ;;
+    --children) CHILDREN=1; shift ;;
     -*)        echo "fleet-stop: unknown option $1" >&2; exit 1 ;;
     *)         [ -z "$SESSION" ] && SESSION="$1" || { echo "fleet-stop: unexpected arg $1" >&2; exit 1; }
                shift ;;
@@ -63,7 +72,20 @@ done
   && { echo "fleet-stop: --force only means something with --reclaim (without it nothing touches git)" >&2; exit 1; }
 [ -n "$SOCK" ]    || { echo "fleet-stop: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 [ -n "$SESSION" ] || { echo "fleet-stop: usage: fleet-stop [-s socket] <session>" >&2; exit 1; }
-[ "$SESSION" = master ] && { echo "fleet-stop: refusing to stop 'master' (the lead)" >&2; exit 1; }
+# THE ONE LEAD THIS STOPS IS JARVIS'S, and only by name from the CLI. Jarvis is never slept
+# (fleet-hibernate, fleet-pause and the governor all refuse it), so a deliberate stop has to
+# be the off switch that works — every one of those refusals names this command. Never with
+# --reclaim: a master's checkout is its repo. The MCP fleet_stop still refuses every master,
+# so an agent calling a tool cannot take Jarvis down; only a person at a shell can.
+_jm="$HOME/.config/ghostfleet/jarvis"
+if [ "$SESSION" = master ]; then
+  if [ "$RECLAIM" != 1 ] && [ -f "$_jm" ] && ! grep -qsx off "$_jm.enabled" \
+     && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
+    echo "fleet-stop: stopping Jarvis ('master' on $SOCK) — it stays off until it is started again" >&2
+  else
+    echo "fleet-stop: refusing to stop 'master' (the lead)" >&2; exit 1
+  fi
+fi
 # The caller's name is asked of its PANE as well as read from the environment: the
 # environment holds the name it was LAUNCHED with, so after a rename the old guard compared
 # against a name nobody has and let a session stop itself. Either one matching refuses.
@@ -73,6 +95,36 @@ _me=""; [ -n "${TMUX_PANE:-}" ] && case "${TMUX:-}" in *"/$SOCK,"*)
   && { echo "fleet-stop: refusing to stop the calling session ('$SESSION')" >&2; exit 1; }
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+
+# ── a sub-lead's workers: asked about, then stopped first ────────────────────
+# A child is a session whose <sock>.<child>.parent names this one. Only those still on the
+# fleet count — live, or asleep (an asleep card is still a card, and still a worktree).
+kids=()
+for pt in "$FLEET_DIR/$SOCK".*.parent; do
+  [ -f "$pt" ] || continue
+  [ "$(head -1 "$pt" 2>/dev/null)" = "$SESSION" ] || continue
+  k="${pt#"$FLEET_DIR/$SOCK."}"; k="${k%.parent}"
+  [ -n "$k" ] && [ "$k" != "$SESSION" ] || continue
+  if tmux -L "$SOCK" has-session -t "$k" 2>/dev/null || [ -f "$FLEET_DIR/$SOCK.$k.asleep" ]; then
+    kids+=("$k")
+  else
+    rm -f "$pt" 2>/dev/null            # a tag for a session that is gone is just litter
+  fi
+done
+if [ "${#kids[@]}" -gt 0 ] && [ "$CHILDREN" != 1 ]; then
+  { echo "fleet-stop: '$SESSION' is a sub-lead with ${#kids[@]} worker(s): ${kids[*]}"
+    echo "  Stopping it stops them too, and reclaims their worktrees where that is safe. Say so:"
+    _rc=""; [ "$RECLAIM" = 1 ] && _rc=" --reclaim"
+    echo "      fleet-stop -s $SOCK --children$_rc $SESSION"
+    echo "  Nothing was stopped."; } >&2
+  exit 1
+fi
+if [ "${#kids[@]}" -gt 0 ]; then
+  for k in "${kids[@]}"; do
+    echo "fleet-stop: stopping worker '$k' of sub-lead '$SESSION'"
+    CLAUDE_FLEET_DIR="$FLEET_DIR" "$0" -s "$SOCK" --reclaim "$k" 2>&1 | sed 's/^/  /'
+  done
+fi
 
 # WHERE THIS WORKER LIVES, asked while it is still alive. Once the session is killed
 # tmux cannot answer, and the manifest can be stale for a session that was renamed or
@@ -105,6 +157,10 @@ fi
 if tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null; then
   tmux -L "$SOCK" kill-session -t "$SESSION" 2>/dev/null \
     && echo "fleet-stop: killed session '$SESSION'"
+elif [ -f "$FLEET_DIR/$SOCK.$SESSION.asleep" ]; then
+  # not a leftover: an asleep session has no process by design, and the marker cleared
+  # below IS the session as far as the grid and the phone are concerned
+  echo "fleet-stop: '$SESSION' was asleep (no process to kill) — clearing its card"
 else
   echo "fleet-stop: no live session '$SESSION' on $SOCK — clearing any leftover state" >&2
 fi
@@ -115,11 +171,20 @@ rm -f "$FLEET_DIR/$SOCK.$SESSION.parked" "$FLEET_DIR/$SESSION.parked" \
 # per-session auto-nudge overrides (grid settings page) — drop them too, so a future
 # session that reuses this name doesn't silently inherit a stale explicit on/off.
 rm -f "$FLEET_DIR/$SOCK.$SESSION.notify-lead" "$FLEET_DIR/$SOCK.$SESSION.notify-lead-off" 2>/dev/null
+# the boundary overrides (lib/boundary.sh): a sub-master's "may merge / may approve" is
+# about THAT worker's task, and a session that reuses the name must start blocked.
+for _b in workers-merge agents-approve; do
+  rm -f "$FLEET_DIR/$SOCK.$SESSION.$_b" "$FLEET_DIR/$SOCK.$SESSION.$_b-off" 2>/dev/null
+done
 # a pending reply address (fleet-send --reply-to): the session that would have answered
 # is gone, and a name-reuser must not inherit a stranger's question to answer.
 rm -f "$FLEET_DIR/$SOCK.$SESSION.reply-to" "$FLEET_DIR/$SOCK.$SESSION.reply-to.armed" 2>/dev/null
 # the display label too, or a session that reuses this name inherits a stranger's title
 rm -f "$FLEET_DIR/$SOCK.$SESSION.label" 2>/dev/null
+# its parent tag (a name-reuser must not report to somebody else's sub-lead) and, for a
+# sub-lead, the inbox its workers wrote into — a stranger's backlog, to whoever is next
+rm -f "$FLEET_DIR/$SOCK.$SESSION.parent" "$FLEET_DIR/$SOCK.$SESSION.inbox" \
+      "$FLEET_DIR/$SOCK.$SESSION.inbox.seen" "$FLEET_DIR/$SOCK.$SESSION.notify.stamp" 2>/dev/null
 # THE ASLEEP MARKER IS A CARD. A hibernated session has no tmux session to kill, so the
 # kill above is a no-op for it — and the marker alone is what draws it on the grid and the
 # phone. Seen: a fleet "cleaned" session by session, and three asleep cards stayed behind.
@@ -149,11 +214,17 @@ if [ -f "$MANIFEST" ]; then
 fi
 
 # per-session status file(s) (keyed by session_id; .slot is the session name) so
-# it disappears from fleet-list / the grid immediately
+# it disappears from fleet-list / the grid immediately — and so it is not shown as LOST
+# afterwards: a record with nobody under its name is exactly what a crash leaves, and a
+# stop is the one way the record is told apart from one. SCOPED BY SOCKET: a bare slot
+# match deleted every fleet's record of that name (each has a `master`, and worker names
+# repeat), which would erase another project's crashed session along with this one.
+# A record with no sock predates scoping and is still removed by name, as it always was.
 if command -v jq >/dev/null 2>&1; then
   for f in "$FLEET_DIR"/*.json; do
     [ -f "$f" ] || continue
-    [ "$(jq -r '.slot // empty' "$f" 2>/dev/null)" = "$SESSION" ] && rm -f "$f" 2>/dev/null
+    jq -e --arg s "$SESSION" --arg k "$SOCK" '(.slot // "") == $s and ((.sock // "") == $k or (.sock // "") == "")' \
+      "$f" >/dev/null 2>&1 && rm -f "$f" 2>/dev/null
   done
 fi
 

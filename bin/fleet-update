@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# fleet-update — bring this machine's ghostfleet up to date, and restart what keeps old code.
+#
+#   ghostfleet update                    follow the branch the clone is on (main or staging)
+#   ghostfleet update --branch staging   switch to following development (or back: main)
+#   ghostfleet update --yes              also restart every fleet's sessions, without asking
+#   fleet-update --npm-refresh           refresh the cached "latest on npm" (what the notice
+#                                        in `ghostfleet` reads; run in the background)
+#   fleet-update --repo DIR              update that clone/package instead of the recorded one
+#
+# WHY ONE COMMAND. The install is a clone (or an npm package) staged into a runtime, and
+# every long-lived piece keeps the code it started with: the phone daemon, the sessions'
+# MCP servers, the installed phone app. So "update" was five steps that nobody had written
+# down, done in whatever order they were remembered — and the phone went on serving the old
+# client after a pull that looked complete.
+#
+# THE STEP THAT FAILS WORST IS THE FIRST. The repository has been recreated, and a clone
+# from before a recreate shares NO history with origin: same URL, a different root commit.
+# `git pull` there refuses with "refusing to merge unrelated histories" — or, with the flag
+# a search suggests, welds two unrelated trees into one. Neither is an update. So the merge
+# base is asked for BEFORE anything moves, and no merge base means: re-clone, and nothing
+# on this machine was touched.
+#
+# ONLY FAST-FORWARDS. A clone with local commits origin lacks, or uncommitted edits, is
+# somebody's work; an updater that merges or stashes it has made a decision that was theirs.
+# It refuses, and says which of the two it found.
+set -uo pipefail
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  t="$(readlink "$src")"; case "$t" in /*) src="$t" ;; *) src="$(dirname "$src")/$t" ;; esac
+done
+HERE="$(cd "$(dirname "$src")/.." && pwd)"          # the runtime (or the clone) we run from
+CFG="$HOME/.config/ghostfleet"
+PKG=ghostfleet-cli
+REGISTRY="${GHOSTFLEET_NPM_REGISTRY:-https://registry.npmjs.org}"
+
+# ── the npm cache ────────────────────────────────────────────────────────────
+# `<epoch>\t<version>` in ~/.config/ghostfleet/npm-latest. Written whole through a temp
+# file, so the notice never reads half a line. A registry that does not answer inside the
+# timeout leaves the old cache alone: no answer is not an answer of "no newer version".
+if [ "${1:-}" = "--npm-refresh" ]; then
+  mkdir -p "$CFG" 2>/dev/null
+  v="$(node -e '
+    const ac = AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined;
+    fetch(process.argv[1] + "/" + process.argv[2] + "/latest", { signal: ac })
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(j => { if (/^\d+\.\d+\.\d+/.test(j.version || "")) console.log(j.version); })
+      .catch(() => {});' "$REGISTRY" "$PKG" 2>/dev/null)"
+  [ -n "$v" ] || exit 1
+  tmp="$CFG/.npm-latest.$$"
+  printf '%s\t%s\n' "$(date +%s)" "$v" > "$tmp" && mv -f "$tmp" "$CFG/npm-latest"
+  exit 0
+fi
+
+YES=0; BRANCH=""; SRC=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --yes|-y)  YES=1 ;;
+    --branch)  BRANCH="${2:-}"; shift ;;
+    --repo)    SRC="${2:-}"; shift ;;
+    -h|--help) sed -n '2,9p' "$src" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)         echo "fleet-update: unknown argument $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+case "$BRANCH" in ''|main|staging) ;; *) echo "fleet-update: --branch is main (releases) or staging (development), not '$BRANCH'" >&2; exit 1 ;; esac
+
+# Which copy is the install? A runtime records where it was staged from in .source; run
+# from a clone directly, the clone is the answer.
+if [ -z "$SRC" ]; then
+  SRC="$(cat "$HERE/.source" 2>/dev/null || true)"
+  [ -n "$SRC" ] && [ -d "$SRC" ] || SRC="$HERE"
+fi
+SRC="$(cd "$SRC" 2>/dev/null && pwd)" || { echo "fleet-update: no such folder: $SRC" >&2; exit 1; }
+is_repo() { [ -e "$1/.git" ]; }
+
+say()  { printf '%s\n' "$*"; }
+step() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+g()    { git -C "$SRC" "$@"; }
+
+# ── 1. the code ──────────────────────────────────────────────────────────────
+if is_repo "$SRC"; then
+  cur="$(g rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  BR="${BRANCH:-$cur}"
+  case "$BR" in
+    main|staging) ;;
+    *) say "fleet-update: $SRC is on '$cur', and update follows main (releases) or staging (development)."
+       say "  pick one: ghostfleet update --branch main   (or --branch staging)"
+       exit 1 ;;
+  esac
+  if [ -n "$(g status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    say "fleet-update: $SRC has uncommitted changes — commit or discard them first; nothing was changed."
+    exit 1
+  fi
+  remote="$(g config "branch.$BR.remote" 2>/dev/null || true)"; remote="${remote:-origin}"
+  step "fetching $remote/$BR"
+  g fetch -q "$remote" "$BR" || { say "fleet-update: could not fetch $BR from $remote ($(g remote get-url "$remote" 2>/dev/null))"; exit 1; }
+  theirs="$(g rev-parse FETCH_HEAD)"
+  if ! base="$(g merge-base HEAD "$theirs" 2>/dev/null)"; then
+    url="$(g remote get-url "$remote" 2>/dev/null)"
+    say "fleet-update: this clone's history is UNRELATED to $remote's — it was made before the"
+    say "  repository was recreated, so there is nothing to fast-forward from. Re-clone it:"
+    say ""
+    say "    git clone -b $BR ${url:-<url>} $(dirname "$SRC")/$(basename "$SRC")-new"
+    say "    cd $(dirname "$SRC")/$(basename "$SRC")-new && ./install.sh"
+    say ""
+    say "  Nothing here was touched: keep $SRC until anything only it holds has been copied out."
+    exit 1
+  fi
+  old="$(g rev-parse HEAD)"
+  if [ "$BR" != "$cur" ]; then
+    # switching the followed branch: the local branch, if it exists, must be behind origin's
+    if g rev-parse -q --verify "refs/heads/$BR" >/dev/null; then g checkout -q "$BR" || exit 1
+    else g checkout -q -b "$BR" --track "$remote/$BR" 2>/dev/null || g checkout -q -b "$BR" "$theirs" || exit 1; fi
+    old="$(g rev-parse HEAD)"
+    base="$(g merge-base HEAD "$theirs" 2>/dev/null)"
+  fi
+  if [ "$old" = "$theirs" ]; then
+    say "fleet-update: $BR is up to date ($(g rev-parse --short HEAD))."
+  elif [ "$base" != "$old" ]; then
+    n="$(g rev-list --count "$theirs..HEAD")"
+    say "fleet-update: $BR has diverged — $n local commit(s) not on $remote/$BR. Nothing was merged;"
+    say "  push them somewhere (or reset to $remote/$BR) and run this again."
+    exit 1
+  else
+    g merge -q --ff-only "$theirs" || { say "fleet-update: the fast-forward failed; nothing was installed."; exit 1; }
+    n="$(g rev-list --count "$old..HEAD")"
+    say "fleet-update: $BR moved $n commit$([ "$n" = 1 ] || echo s) ($(g rev-parse --short "$old") → $(g rev-parse --short HEAD))."
+  fi
+  step "installing"
+  ( cd "$SRC" && ./install.sh ) || { say "fleet-update: install.sh failed — the lines above say why. The clone is updated; re-run ./install.sh there."; exit 1; }
+else
+  # AN NPM INSTALL: the package IS the release. npx fetches the latest and runs its
+  # install.sh, which stages it — and keeps a clone's source pointer if one is recorded.
+  step "installing the latest $PKG from npm"
+  npx -y "$PKG@latest" || { say "fleet-update: npx $PKG@latest failed."; exit 1; }
+  "$src" --npm-refresh >/dev/null 2>&1 || true     # so the notice stops saying so
+fi
+
+# ── 2. the phone daemon ──────────────────────────────────────────────────────
+# fleet-serve serves the phone client from the runtime, and a running daemon keeps the
+# code it started with. Under launchd (KeepAlive) a kickstart -k is the restart: kill,
+# and launchd brings it straight back on the new code. The label is the owner's own —
+# com.<user>.ghostfleet.fleet-serve by convention — so it is read from the plist, never
+# composed from $USER.
+step "phone daemon"
+AGENTS="${GHOSTFLEET_LAUNCH_AGENTS:-$HOME/Library/LaunchAgents}"
+label=""
+for p in "$AGENTS"/*ghostfleet*fleet-serve*.plist; do
+  [ -f "$p" ] || continue
+  label="$(sed -n '/<key>Label<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$p" | head -1)"
+  [ -n "$label" ] && break
+done
+if [ -n "$label" ] && command -v launchctl >/dev/null 2>&1; then
+  if launchctl kickstart -k "gui/$(id -u)/$label" >/dev/null 2>&1; then say "restarted $label"
+  else say "could not restart $label — try: launchctl kickstart -k gui/$(id -u)/$label"; fi
+else
+  say "no launchd job for fleet-serve here — if you run it by hand, restart it (stop it, then: fleet-serve)"
+fi
+
+# ── 3. the sessions ──────────────────────────────────────────────────────────
+# Each session's MCP server is the fleet-mcp.mjs it started with, for as long as it lives.
+# fleet-restart relaunches every session onto its own conversation — but it relaunches
+# EVERY session on the machine, so it is asked for, never assumed.
+step "sessions"
+RESTART="$(command -v fleet-restart 2>/dev/null || echo "$HERE/bin/fleet-restart")"
+if [ "$YES" = 1 ]; then
+  "$RESTART" --all --yes
+elif { : </dev/tty; } 2>/dev/null && [ -t 1 ]; then
+  printf 'restart every fleet session onto the new code now? [y/N] '
+  read -r a </dev/tty || a=""
+  case "$a" in y|Y|yes) "$RESTART" --all --yes ;; *) say "skipped — later: fleet-restart --all --yes" ;; esac
+else
+  say "running sessions keep the old code until they restart: fleet-restart --all --yes"
+fi
+
+# ── 4. the phone app ─────────────────────────────────────────────────────────
+step "phone app"
+say "relaunch the phone app: swipe it away and open it again — reopening it from the app"
+say "switcher is a resume, and a resume keeps running the client it already had."
+exit 0

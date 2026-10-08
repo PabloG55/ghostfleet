@@ -1,0 +1,9 @@
+{
+  "name": "ghostfleet",
+  "version": "0.1.0",
+  "description": "Reports a fleet session's exact state and budget from inside Claude Code, answers /fleet and /inbox without a turn, draws a lead's team above its prompt, and enforces the fleet's guards in-process, failing closed.",
+  "author": {
+    "name": "ghostfleet"
+  },
+  "types": "./types/index.d.ts"
+}

@@ -137,6 +137,51 @@ is('mixed inline keeps its order', 'text,bold,text,code,text', tags('a **b** c `
 is('empty in, nothing out', 0, md.inline('').length);
 is('null in, nothing out', 0, md.parse(null).length);
 
+// ── 6. tables: the real shape, every word, and nothing that only looks like one ──
+// A table used to be shown as its own source — a wall of pipes that wrapped mid-row. The
+// survival rows come first again: a parser that dropped every row would have no pipes in
+// its output either.
+{
+  const T = [
+    'Results:',
+    '',
+    '| Case | Status | Retry-After | Why |',
+    '|:--|--:|:-:|---|',
+    '| `429-date` | 429 | `Wed, 21 Oct 2026` | see [spec](https://docs.acme-api.test/retry) |',
+    '| `4xx-no-retry` | 404 | — | **fail at once** |',
+    '| short row | 200 |',
+    '',
+    'after the table',
+  ].join('\n');
+  const b = md.parse(T);
+  const tb = b.find(x => x.t === 'table') || { head: [], rows: [], align: [] };
+  for (const w of ['Case', 'Retry-After', '429-date', 'Wed, 21 Oct 2026', 'spec', 'fail at once', '4xx-no-retry', 'short row', 'after the table']) {
+    is(`a table keeps "${w}"`, true, text(T).includes(w));
+  }
+  is('a table is one block between its paragraphs', 'para,table,para', kinds(T));
+  is('...with its header row', 4, tb.head.length);
+  is('...and every body row', 3, tb.rows.length);
+  is('...each padded to the header\'s width', '4,4,4', tb.rows.map(r => r.length).join(','));
+  is('...with the alignment the delimiter row asked for', 'left,right,center,', tb.align.join(','));
+  is('a cell is inline markdown: code stays code', 'code', ((tb.rows[0] || [])[0] || [{}])[0].t);
+  is('...a link stays a link', true, ((tb.rows[0] || [])[3] || []).some(k => k.t === 'link'));
+  is('...and bold stays bold', 'bold', ((tb.rows[1] || [])[3] || [{}])[0].t);
+  is('no pipe survives into the words', false, /\|/.test(text(T).replace(/\t/g, '')));
+  // THINGS THAT LOOK LIKE A TABLE AND ARE NOT. A pipe in a sentence is a shell pipeline,
+  // and it is the delimiter row that makes a table — without one, the pipe is the point.
+  is('a pipeline in a sentence is not a table', 'para', kinds('run ps aux | grep node | head'));
+  is('...and keeps its pipes', 'run ps aux | grep node | head', text('run ps aux | grep node | head'));
+  is('a header with no delimiter row is not a table', 'para', kinds('| a | b |\n| c | d |'));
+  is('a delimiter row of the wrong width is not a table', 'para', kinds('| a | b |\n|---|---|---|'));
+  is('a pipe inside a code span does not split the cell', '`a | b`,c', md.cells('| `a | b` | c |').join(','));
+  is('...nor an escaped one', 'a | b,c', md.cells('| a \\| b | c |').join(','));
+  is('outer pipes are optional', 'a,b', md.cells('a | b').join(','));
+  is('a fenced table is code, not a table', 'code', kinds('```\n| a | b |\n|---|---|\n```'));
+  is('a paragraph stops where a table starts', 'para,table', kinds('intro line\n| a | b |\n|---|---|\n| 1 | 2 |'));
+  // The width rule md.js and app.css share: three columns or fewer fit, more scroll.
+  is('a narrow table is fitted, a wide one scrolls', '3', String(md.FIT_COLS));
+}
+
 // ── 7. the renderer and the read-aloud stay independent ───────────────────
 // They are complementary — rendered for the eye, stripped for the ear — and neither may be
 // built on the other's output. If speakable() ever spoke md.js's plain text it would
@@ -160,7 +205,7 @@ is('...and reaches the document only through create* calls that cannot carry mar
 const SPEAKABLE = (APP_SRC.match(/export function speakable[\s\S]*?\n\}/) || [''])[0];
 is('speakable() exists to be checked', true, SPEAKABLE.length > 100);
 is('...and does not call the renderer', '', (SPEAKABLE.match(/\bmd\.[a-z]+/gi) || []).join(','));
-is('...and still names fenced code itself', true, /code block/.test(SPEAKABLE));
+is('...and still names fenced code itself', true, /Code omitted/.test(SPEAKABLE));
 is('...and app.js renders bubbles through md, not through el({html})', '',
    (APP_SRC.match(/html:/g) || []).join(''));
 

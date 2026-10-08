@@ -1,0 +1,30 @@
+  │                                                                          │
+  │    [a] Trust this workspace                                              │
+  │    [q] Quit                                                              │
+  │                                                                          │
+  │  ⏳ Trusting workspace...                                                │
+  │                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+
+  Cursor Agent
+  v2026.10.01-e373342
+  Tip: Use /plan to plan execution and reach the right outcome faster.
+
+
+  Run the shell command: touch notes.txt
+
+
+  $ touch notes.txt Waiting for approval...
+
+────────────────────────────────────────────────────────────────────────────────
+ $  touch notes.txt in .
+
+ Run this command?
+ Not in allowlist: touch
+  → Run (once) (y)
+    Add Shell(touch) to allowlist? (tab)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)
+
+
