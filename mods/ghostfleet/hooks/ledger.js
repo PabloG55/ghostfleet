@@ -11,6 +11,8 @@
 //            fleet    a prompt fleet-send handed to the mod (DELIVERY)
 //            promise  a commitment the agent made in a final message ("I'll merge when green")
 //   gated    true once the gate has re-prompted about it: at most once per item, ever
+//   queued   typed over a running turn; interrupted: its turn was stopped (Esc). Either may
+//            never have reached the model, and the gate asks the transcript first
 //   closedBy judge | hand
 
 export const LEDGER_VERSION = 1
@@ -53,6 +55,42 @@ export const excerpt = (s, n = EXCERPT) => {
   return t.length > n ? `${t.slice(0, n - 1)}…` : t
 }
 
+// What a message asks, in the person's own words. A message is often mostly material: a
+// pasted transcript or log with a line of the person's around it. Kept as typed, the item's
+// excerpt was the paste's first lines, the person's words were cut off past the excerpt,
+// and the judge, shown a pasted draft and a pasted ledger reminder, judged THOSE: measured
+// live, "u see what it just did <a pasted turn> its like reminding literally the last
+// response" was re-prompted as an open request. So the pastes are set aside (marked, so the
+// judge knows something was pasted) and so is any ledger reminder quoted in the text: it is
+// this mod's own words, never the person's request. A message that is nothing but a quoted
+// reminder is no request at all ('').
+const PASTE = /<pasted_content\b[^>]*>[\s\S]*?(?:<\/pasted_content\b[^>]*>|$)/g
+const PASTE_TAG = /<\/?pasted_content\b[^>]*>/g
+const REMINDER = [
+  /(?:The ghostfleet plugin sent a message:\s*)?\[ghostfleet ledger\][\s\S]*?(?:it will not be asked again\.\)|$)/g,
+  /This is how Claude Code surfaces a prompt a plugin submits between turns[^\n]*/g,
+]
+const unquote = t => REMINDER.reduce((a, re) => a.replace(re, ' '), t)
+export function requestText(text) {
+  const pastes = []
+  const own = oneLine(unquote(String(text || '').replace(PASTE, m => { pastes.push(m.replace(PASTE_TAG, ' ')); return ' ' })))
+  if (!pastes.length) return own
+  if (own) return `${own} [+ pasted text]`
+  const pasted = oneLine(unquote(pastes.join(' ')))
+  return pasted ? `[pasted] ${pasted}` : ''
+}
+
+// A request as an item keeps its start AND its end. A paste the composer shows inline carries
+// no marker, and the person's own words come after it: measured live, a three-line draft and
+// "what do u think" was kept as the draft's opening lines, the judge read the request as
+// "write the draft", and an answered question was re-prompted. The start stays the longer
+// part (the withdrawn check matches on an item's opening words).
+const ITEM_HEAD = 140
+export function requestItem(text) {
+  const t = requestText(text)
+  return t.length > EXCERPT ? `${t.slice(0, ITEM_HEAD - 1)}… ${t.slice(-(EXCERPT - ITEM_HEAD - 1))}` : t
+}
+
 // Which submitted prompts are requests, and whose. Only the person's: composer, the phone's
 // bridge, and what the engine cannot attest (`unclassified`). This mod's own submits are
 // never read here: a fleet-send handoff is recorded by DELIVERY at the turn it started (it
@@ -62,7 +100,7 @@ export const excerpt = (s, n = EXCERPT) => {
 // A slash command is an instruction to the harness, not work for the agent.
 export function sourceOf(e) {
   const text = String(e && e.text || '')
-  if (!text.trim() || text.trimStart().startsWith('/')) return null
+  if (!requestText(text) || text.trimStart().startsWith('/')) return null
   const o = (e && e.origin) || { kind: 'composer' }
   return o.kind === 'composer' || o.kind === 'bridge' || o.kind === 'unclassified' ? 'user' : null
 }
@@ -70,7 +108,7 @@ export function sourceOf(e) {
 // A request submitted idle names its turn at that turn's start, which carries its text.
 export function stampTurn(ledger, text, turnId) {
   const t = String(text || '').trim()
-  const i = ledger.items.findIndex(x => x.state === 'open' && !x.turnId && x.source !== 'promise' && x.text === excerpt(t))
+  const i = ledger.items.findIndex(x => x.state === 'open' && !x.turnId && x.source !== 'promise' && x.text === requestItem(t))
   if (!t || i < 0) return null
   return { ...ledger, items: ledger.items.map((x, k) => (k === i ? { ...x, turnId } : x)) }
 }
@@ -79,7 +117,7 @@ export function stampTurn(ledger, text, turnId) {
 // queue (Up edits it) and never reach the model; see `withdrawn` below.
 export function addItem(ledger, { text, at, turnId, source, queued }) {
   const seq = (Number(ledger.seq) || 0) + 1
-  const item = { id: String(seq), text: excerpt(text), at, ...(turnId ? { turnId } : {}), state: 'open', source, ...(queued ? { queued: true } : {}) }
+  const item = { id: String(seq), text: source === 'promise' ? excerpt(text) : requestItem(text), at, ...(turnId ? { turnId } : {}), state: 'open', source, ...(queued ? { queued: true } : {}) }
   const items = [...ledger.items, item].slice(-KEEP_ITEMS)
   return { ...ledger, seq, items }
 }
@@ -102,39 +140,74 @@ export function ledgerSummary(ledger, nowMs) {
 const PROMISE_WORDS = /\b(I'll|I will|I'm going to|I am going to|next,? I|then I|once .{1,60}(I'll|I will)|when .{1,60}(I'll|I will)|later|after (that|this|CI|the))\b/i
 export const soundsLikeAPromise = answer => PROMISE_WORDS.test(String(answer || ''))
 
-// The one judge call: which open items the final message addressed, and what it promised.
-// Inputs are truncated: item texts to EXCERPT, the answer to its last ANSWER_CHARS (a final
-// message reports at its end).
+// What a turn said: every text block it wrote, in order, one per model step that wrote any.
+// `turn.complete`'s `answer` is only the LAST of them, and judged alone it lost the work:
+// a turn wrote a post in its first block, ran two commands, and ended "the draft is above",
+// and the judge, shown that line with nothing above it, kept the request open and the gate
+// re-prompted for a reply the person had just read. `steps` are the texts the turn's steps
+// returned; `answer` is the turn's final text, the whole record when the steps were missed
+// (the module reloaded mid-turn) and appended when the last step did not end on it.
+export function turnBlocks(steps, answer) {
+  const blocks = (steps || []).map(s => String(s || '')).filter(s => s.trim())
+  const last = String(answer || '')
+  if (last.trim() && (!blocks.length || blocks[blocks.length - 1].trim() !== last.trim())) blocks.push(last)
+  return blocks
+}
+
+// The turn as the judge reads it: each block labelled with its place, and a long turn cut
+// from the MIDDLE. The start is where the work tends to be (the draft, the answer) and the
+// end is where the turn reports; a tail-only cut drops exactly the half the report points at.
+const HEAD_SHARE = 0.4
+export function middleCut(s, n) {
+  const a = String(s || '')
+  if (a.length <= n) return a
+  const head = Math.floor(n * HEAD_SHARE)
+  const tail = n - head
+  return `${a.slice(0, head)}\n[… ${a.length - head - tail} characters from the middle of the turn left out …]\n${a.slice(-tail)}`
+}
+export function turnText(blocks, n) {
+  const list = typeof blocks === 'string' ? [blocks] : blocks || []
+  const text = list.length > 1 ? list.map((b, k) => `[block ${k + 1} of ${list.length}]\n${b}`).join('\n\n') : String(list[0] || '')
+  return middleCut(text, n)
+}
+
+// The one judge call: which open items the turn addressed, and what it promised. Inputs are
+// truncated: item texts to EXCERPT, the turn to ANSWER_CHARS, an earlier turn to EARLIER_CHARS.
+// `turn` is the turn's blocks (turnBlocks), or one string for a turn of one block.
 export const ANSWER_CHARS = 6000
 export const EARLIER_CHARS = 1500
-const tailOf = (s, n) => { const a = String(s || ''); return a.length > n ? `…${a.slice(-n)}` : a }
-export function judgePrompt(items, answer, { promises, earlier = [] }) {
-  const tail = tailOf(answer, ANSWER_CHARS)
-  const before = earlier.slice(-2).map(t => tailOf(t, EARLIER_CHARS))
+export function judgePrompt(items, turn, { promises, earlier = [] }) {
+  const blocks = typeof turn === 'string' ? [turn] : turn || []
+  const tail = turnText(blocks, ANSWER_CHARS)
+  const final = blocks.length > 1 ? `the LAST block (${blocks.length} of ${blocks.length})` : 'the message'
+  const before = earlier.slice(-2).map(t => turnText(t, EARLIER_CHARS))
   const list = items.length
     ? items.map(i => `${i.id} [${i.source === 'promise' ? 'promise the agent made' : 'request to the agent'}]: ${excerpt(i.text)}`).join('\n')
     : '(none)'
   return [
-    'You audit an AI coding agent. Below are items it owes, and the final message it just ended its turn with.',
+    'You audit an AI coding agent. Below are items it owes, and everything it wrote in the turn it just ended.',
     '',
     'ITEMS:',
     list,
     '',
-    ...(before.length ? ['EARLIER FINAL MESSAGES (oldest first; an item answered here is answered):', ...before.map(t => `<<<\n${t}\n>>>`), ''] : []),
-    'FINAL MESSAGE:',
+    ...(before.length ? ['EARLIER TURNS (oldest first; an item answered here is answered):', ...before.map(t => `<<<\n${t}\n>>>`), ''] : []),
+    `THIS TURN (every text block the agent wrote, in order; its tool calls and their output ran between blocks and are left out; ${final} is how it ended):`,
     '<<<',
     tail,
     '>>>',
     '',
     'For EACH item decide:',
-    '- "done": a final message reports it completed or answered.',
-    '- "not-done": a final message explicitly says THIS item was not or cannot be done AND gives a reason. A refusal with no reason, or one that does not say which request it means, is "open".',
-    '- "open": anything else: not mentioned, only acknowledged, partly done, or still in progress.',
+    '- "done": the turn (any block of it) or an earlier turn did it, answered it, or reports it completed. Work written in an earlier block counts: "the draft is above" in the last block refers to a draft in an earlier one.',
+    '- "done" also, with reason "reported: waiting on <what>", when the agent did everything it can do now and says plainly that the rest waits on something outside its control (CI running, a registry or deploy propagating, a review, the person\'s own action), and what happens next. Work the agent could have done itself and simply did not is not this: it is "open".',
+    '- "not-done": the agent explicitly says THIS item was not or cannot be done AND gives a reason. A refusal with no reason, or one that does not say which request it means, is "open".',
+    '- "open": anything else: not mentioned, only acknowledged, or partly done with no report of why the rest is waiting.',
     'Judge an item by what it asked for NOW: a part it explicitly put off ("not in this reply", "later", "after X") is not owed yet.',
-    'An item that only approves, confirms or thanks ("go ahead", "yes", "thanks") asks for no work of its own: it is "done" once a final message acts on what it approved, or if there is nothing to act on.',
+    'An item may open with material the person pasted with no marker (a draft, a log, a transcript) and end with their own words: judge what THOSE words ask. A question ("what do you think?") is "done" once the agent answers it; an answer that ends by offering more or asking something back does not reopen it.',
+    'An item is the person\'s own words. "[+ pasted text]" means they also pasted material (a transcript, a log, an earlier reply) as context for those words: the material is not a request of its own, and a "[ghostfleet ledger]" reminder quoted in it is this tool talking, never a request. Judge what the person\'s own words ask; a remark about the paste ("see what it did") asks for the agent to look at it, and is done once the agent has.',
+    'An item that only approves, confirms or thanks ("go ahead", "yes", "thanks") asks for no work of its own: it is "done" once the agent acts on what it approved, or if there is nothing to act on. An item that confirms AND asks ("done, now draft the post") is judged by what it asks.',
     promises === 'off'
       ? 'Return "promises": [] always.'
-      : 'Also list "promises", from the FINAL MESSAGE only: things the agent says IT WILL DO LATER in this session ("I\'ll merge once CI is green", "next I\'ll add the tests"), each as a short imperative phrase of at most 12 words. Only a firm commitment to a specific action: not work it already did, not suggestions for the user, not questions, not offers that wait on the user ("I can do X if you\'d like"), not statements about how it will behave in general ("I\'ll keep responding normally"). [] if none.',
+      : `Also list "promises", from ${final} only: things the agent says IT WILL DO LATER in this session ("I'll merge once CI is green", "next I'll add the tests"), each as a short imperative phrase of at most 12 words. Only a firm commitment to a specific action: not work it already did, not suggestions for the user, not questions, not offers that wait on the user ("I can do X if you'd like"), not statements about how it will behave in general ("I'll keep responding normally"). [] if none.`,
     '',
     'Reply with ONLY this JSON, no prose, no code fence:',
     '{"items":[{"id":"<id>","status":"done|not-done|open","reason":"<at most 12 words>"}],"promises":["..."]}',
@@ -199,13 +272,38 @@ export function gateTargets(ledger, nowMs, { promises }) {
 // queued item has to be found among the session's user messages; one that is not, with the
 // session idle and no later turn started, was withdrawn. (Resubmitted, it is a new item.)
 // Matched on the item's opening words: the item keeps an excerpt, the transcript the whole.
-export function withdrawn(items, userTexts) {
+//
+// An INTERRUPTED item is asked the same. Esc before the turn wrote anything rewinds the
+// message out of the conversation and hands it back to the composer; sent again, edited or
+// not, it is a second prompt.submit and so a second item. Measured live: one message the
+// person sent once (to their mind) was two items with the same excerpt, and the gate named
+// both. The transcript held one copy, the resend; the first was a sibling of it, off the
+// conversation. So one message in the transcript accounts for one item: an item is
+// withdrawn when the items from it onward that carry its words outnumber the messages that
+// do, and the newest keep the messages. Two sends of the same words that both reached the
+// model are two messages, and stay two items.
+//   `all`: every item in the ledger, which the later items are counted from.
+export function withdrawn(items, userTexts, all = items) {
   const norm = t => oneLine(t).toLowerCase()
-  const texts = userTexts.map(norm)
-  return items.filter(i => i.queued && i.source !== 'promise').filter(i => {
-    const head = norm(i.text).replace(/…$/, '').slice(0, 80)
-    return head && !texts.some(t => t.includes(head))
+  const texts = userTexts.map(t => norm(requestText(t)))
+  const asks = all.filter(i => i.source !== 'promise')
+  return items.filter(i => (i.queued || i.interrupted) && i.source !== 'promise').filter(i => {
+    const head = norm(i.text).replace(/…$/, '').split('…')[0].slice(0, 80)
+    if (!head) return false
+    const said = texts.filter(t => t.includes(head)).length
+    const from = asks.filter(x => Number(x.id) >= Number(i.id) && norm(x.text).includes(head)).length
+    return said < from
   }).map(i => i.id)
+}
+
+// The person's items of a turn that was interrupted: the gate asks the transcript about
+// them before naming any (see `withdrawn`).
+export function markInterrupted(ledger, turnId) {
+  if (!turnId || !ledger.items.some(i => i.turnId === turnId && i.state === 'open' && i.source !== 'promise')) return null
+  return {
+    ...ledger,
+    items: ledger.items.map(i => (i.turnId === turnId && i.state === 'open' && i.source !== 'promise' ? { ...i, interrupted: true } : i)),
+  }
 }
 
 export const dropItems = (ledger, ids) => ({ ...ledger, items: ledger.items.filter(i => !ids.includes(i.id)) })

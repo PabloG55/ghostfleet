@@ -4,6 +4,20 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
+## 0.5.1 — 2026-10-08
+
+**After upgrading**, a running session keeps the ledger it loaded: `/reload-plugins` in it
+(or start a new one) to get these fixes.
+
+### Fixed
+
+- **The ledger's gate stopped re-prompting requests the session had already answered**
+  (#35). The judge now reads every text block of the turn, not only the last, so "the draft
+  is above" closes the request the draft answered; a plain status report ("I'll merge once CI
+  is green") closes the item as reported-waiting instead of leaving it open; an item is the
+  person's own words, with pasted material marked rather than standing in for them; and a
+  message stopped with Esc and sent again is one item, not two.
+
 ## 0.5.0 — 2026-10-07
 
 **After upgrading**, run `fleet-mod reload` to see which running Claude sessions predate the
