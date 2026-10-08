@@ -42,11 +42,11 @@ import {
 } from './guard-shape.js'
 import { teamOf, latestBySlot, summarize, prSummary, bandRuns } from './band-shape.js'
 import {
-  ledgerFile, parseLedger, ledgerConfig, sourceOf, addItem, openItems, ledgerSummary,
+  ledgerFile, parseLedger, ledgerConfig, sourceOf, openItems, ledgerSummary,
   soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
   judgeBatches, JUDGE_TOKENS,
-  markInterrupted,
+  markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, TOOL,
 } from './ledger.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
@@ -255,7 +255,7 @@ async function onToolCheck($, e, next) {
 async function onToolCall($, e, next) {
   const done = await next(e)
   if (state === 'need-you') await setState($, 'working')
-  return done
+  return ledgerNoteOnTool($, done)
 }
 
 // Inside SessionEnd's one short bound (1.5s for every hook together). No state is
@@ -417,13 +417,18 @@ async function deliverTick($) {
       await receipt($, id, { error: 'unreadable entry' })
       return
     }
-    pending = { id, text: entry.text, reply: replyOf(entry), at: nowMs }
+    // `kind: "nudge"`: a wake-up fleet-send was told is one (--nudge), never a request.
+    pending = { id, text: entry.text, reply: replyOf(entry), at: nowMs, nudge: entry.kind === 'nudge' }
+    // The ledger's item for it is made HERE: a plugin's own submit passes every prompt.submit
+    // hook but its own, so LEDGER's never sees it.
+    await ledgerDelivery($, pending)
     // Settles once the turn started or the engine queued it; turn.start is what names the
     // turn, so this is not awaited for that. A refusal is answered here.
     const settled = r => (r && r.drop !== undefined ? { dropped: String(r.drop) } : null)
+    const lost = async () => { if (pending?.ledgered?.length) await ledgerUndo($, pending.ledgered) }
     Promise.resolve($.prompt.submit({ text: entry.text, asUser: true })).then(
-      async r => { const d = settled(r); if (d && pending?.id === id) { pending = null; await receipt($, id, d) } },
-      async err => { if (pending?.id === id) { pending = null; await receipt($, id, { error: String(err?.message || err) }) } })
+      async r => { const d = settled(r); if (d && pending?.id === id) { await lost(); pending = null; await receipt($, id, d) } },
+      async err => { if (pending?.id === id) { await lost(); pending = null; await receipt($, id, { error: String(err?.message || err) }) } })
   } finally {
     claiming = false
   }
@@ -460,7 +465,11 @@ async function deliveryTurnStart($, e) {
     await bounded($, (async () => {
       if (p.reply) await armReply($, p.reply, e.turnId)
       await receipt($, p.id, { turnId: e.turnId })
-      await ledgerFleetItem($, p.text, e.turnId)
+      // Recorded at its prompt.submit when that hook saw it (so its note could name it);
+      // stamped with its turn here. A nudge is never an item.
+      if (p.ledgered) await stampItems($, p.ledgered, e.turnId)
+      if (p.ledgered && p.ledgered.length) noteDue = e.turnId
+      else if (!p.nudge) await ledgerFleetItem($, p.text, e.turnId)
     })(), IO_MS * 4, null)
   } else if (p && (await $.clock.now()) - p.at > START_MS) {
     pending = null
@@ -533,6 +542,10 @@ export const register = on => {
   on('ui.render', { component: 'AbovePrompt' }, onBandRender)
   on('prompt.submit', onPromptSubmit)
   on('command.run', { command: 'ledger' }, onLedgerCommand)
+  // Spelled out, not TOOL.*: `claude plugin validate` reads a matcher only from its literal.
+  on('tool.call', { tool: 'mcp__ghostfleet__ledger_close' }, onLedgerTool)
+  on('tool.call', { tool: 'mcp__ghostfleet__ledger_drop' }, onLedgerTool)
+  on('tool.call', { tool: 'mcp__ghostfleet__ledger_add' }, onLedgerTool)
 }
 
 // ── GUARDS ──────────────────────────────────────────────────────────────────
@@ -1068,9 +1081,28 @@ async function showLedger($, ledger) {
 async function ledgerStart($) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
-  await bounded($, $.command.register({
-    name: 'ledger', description: "This session's open requests and promises; close <id>, clear (no turn)", immediate: true,
-  }), IO_MS, null)
+  await bounded($, Promise.all([
+    $.command.register({
+      name: 'ledger', description: "This session's open requests and promises; close <id>, clear (no turn)", immediate: true,
+    }),
+    // Not deferred: a tool the agent has to go looking for is a tool it forgets to call, and
+    // the three schemas together are a few hundred characters.
+    $.tool.register({
+      name: 'ledger_close', isDeferred: false,
+      description: "Close one of this session's ledger items (the open requests and promises the prompt's ledger note lists) once it is finished. The proof is required: a path, link, commit, PR number or command result that shows it is done.",
+      inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The item id, as the ledger note gives it' }, proof: { type: 'string', description: 'What shows it is done: a path, link, commit, PR number or command result' } }, required: ['id', 'proof'] },
+    }),
+    $.tool.register({
+      name: 'ledger_drop', isDeferred: false,
+      description: 'Drop a ledger item that is not a real ask, or that the person cancelled. The reason is required.',
+      inputSchema: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } }, required: ['id', 'reason'] },
+    }),
+    $.tool.register({
+      name: 'ledger_add', isDeferred: false,
+      description: "Track an ask from the person's latest message that the ledger note did not list.",
+      inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'The ask, in the person\'s words' } }, required: ['text'] },
+    }),
+  ]), IO_MS, null)
   ledgerShown = ''
   ledgerAsOf = 0
   await ledgerRefresh($)
@@ -1085,21 +1117,59 @@ async function ledgerRefresh($) {
   if (l) await showLedger($, l)
 }
 
+// Recorded BEFORE `next`, so the note the prompt carries can name its own items by id; the
+// turn they belong to is stamped after, once `next` has started it. A slash command is the
+// harness's, and carries nothing.
 async function onPromptSubmit($, e, next) {
-  const before = currentTurn
-  const r = await next(e)
-  if (!r || r.drop !== undefined) return r
   const cfg = await ledgerConfigOf($)
-  if (!cfg.on) return r
-  const source = sourceOf(e)
-  if (!source) return r
+  if (!cfg.on || String(e.text || '').trimStart().startsWith('/')) return next(e)
+  const before = currentTurn
   const at = await $.clock.now()
+  const source = sourceOf(e)
+  const ids = []
+  let window = 0
+  let cur = source ? await changeLedger($, l => {
+    window = Number(l.window) || 0
+    return addPrompt(l, { text: e.text, at, turnId: e.turnId || '', source, queued: Boolean(e.turnId) }, ids)
+  }) : null
+  if (!cur) {
+    const file = await ledgerPath($)
+    cur = file ? await readLedger($, file) : null
+  }
+  const note = cur ? contextNote(cur, at) : ''
+  const r = await next(note ? { ...e, context: [...(e.context || []), note] } : e)
+  if (!ids.length) return r
+  if (!r || r.drop !== undefined) {
+    // It never entered: its items go, and the window goes back to the one before.
+    await changeLedger($, l => ({ ...dropItems(l, ids), window }))
+    return r
+  }
   // Typed over a running turn, it carries that turn's id. Submitted idle, `next` resolves
   // once its own turn started: a turn.start since is that turn; failing that, the turn's
   // start names it (ledgerTurnStart), whichever of the two lands second.
   const turnId = e.turnId || (currentTurn !== before ? currentTurn : '')
-  await changeLedger($, l => addItem(l, { text: e.text, at, turnId, source, queued: Boolean(e.turnId) }))
+  if (turnId && !e.turnId) await stampItems($, ids, turnId)
   return r
+}
+
+async function stampItems($, ids, turnId) {
+  if (!ids.length || !turnId) return
+  await changeLedger($, l => (l.items.some(i => ids.includes(i.id) && !i.turnId)
+    ? { ...l, items: l.items.map(i => (ids.includes(i.id) && !i.turnId ? { ...i, turnId } : i)) } : null))
+}
+
+// ledger_close, ledger_drop and ledger_add: the agent's own hand on its items (./ledger.js).
+async function onLedgerTool($, e) {
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on) return { result: 'ledger: off (CLAUDE_FLEET_LEDGER=off)' }
+  const a = callArgs(e)
+  const ctx = { nowMs: await $.clock.now(), turnId: currentTurn }
+  const act = e.tool === TOOL.close ? l => closeByAgent(l, a.id, a.proof, ctx)
+    : e.tool === TOOL.drop ? l => dropByAgent(l, a.id, a.reason, ctx)
+      : l => addByAgent(l, a.text, ctx)
+  let said = 'ledger: the file could not be read just now; nothing changed'
+  await changeLedger($, l => { const r = act(l); said = r.said; return r.ledger })
+  return { result: said }
 }
 
 async function ledgerTurnStart($, e) {
@@ -1108,12 +1178,42 @@ async function ledgerTurnStart($, e) {
   await changeLedger($, l => stampTurn(l, e.text, e.turnId))
 }
 
-// A prompt fleet-send handed over, recorded at the turn it started (DELIVERY knows it).
+// A prompt fleet-send handed over, as DELIVERY claims it: one item (a brief is not split into
+// its sentences) in a window of its own, unless it is a nudge. Its turn.start stamps the item
+// with the turn and arms the note (ledgerNoteOnTool).
+async function ledgerDelivery($, p) {
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on) return
+  const at = await $.clock.now()
+  const ids = []
+  if (!p.nudge) await changeLedger($, l => addPrompt(l, { text: p.text, at, source: 'fleet', whole: true }, ids))
+  p.ledgered = ids
+}
+
+async function ledgerUndo($, ids) {
+  await changeLedger($, l => dropItems(l, ids))
+}
+
+// A plugin's submit cannot carry context either (PromptSubmitArgs leaves it out), so the note
+// a delivered prompt should have had rides on the first tool result of the turn it started,
+// read as a PostToolUse reminder is: a worker handed a brief nearly always calls a tool before
+// it calls ledger_close, and without the note it could not name the brief's item at all.
+let noteDue = ''          // the turn whose first tool result carries the ledger note
+async function ledgerNoteOnTool($, done) {
+  if (!noteDue || noteDue !== currentTurn || !done || done.deny !== undefined || done.isError) return done
+  noteDue = ''
+  const file = await ledgerPath($)
+  const cur = file ? await readLedger($, file) : null
+  const note = cur ? contextNote(cur, await $.clock.now()) : ''
+  return note ? { ...done, context: [...(done.context || []), note] } : done
+}
+
+// Recorded at the turn it started, for a prompt DELIVERY claimed before this process did.
 async function ledgerFleetItem($, text, turnId) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
   const at = await $.clock.now()
-  await changeLedger($, l => addItem(l, { text, at, turnId, source: 'fleet' }))
+  await changeLedger($, l => addPrompt(l, { text, at, turnId, source: 'fleet', whole: true }))
 }
 
 // Kept for the last few turns only: a turn that never completes (a crash, a reload) must
@@ -1167,9 +1267,14 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   if (!file) return
   const cur = await readLedger($, file)
   if (!cur) return
+  // The judge is the backup: it reads only what is still open after the agent's own closes
+  // (ledger_close, ledger_drop), and a turn whose agent closed everything costs no call at
+  // all, not even the promise read: an agent that closes its items with proof is the one
+  // the hybrid is for, and a call per turn to second-guess it is the cost it removes.
   const open = openItems(cur, nowMs)
+  const closedOwn = cur.items.some(i => i.closedBy === 'agent' && i.closedTurn === e.turnId)
   const promises = cfg.promises !== 'off' && soundsLikeAPromise(e.answer)
-  if (!open.length && !promises) return                      // nothing to judge: no call
+  if (!open.length && (closedOwn || !promises)) return       // nothing to judge: no call
   // The turns since the oldest open item was made, this one last: a request answered one
   // turn ago and only referred to now ("I ended my previous reply with it") is still
   // answered.
@@ -1220,12 +1325,17 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const judged = new Set(open.map(i => i.id))
   let targets = gateTargets(after, nowMs, cfg).filter(i => judged.has(i.id))
   if (!targets.length) return
-  if (targets.some(i => i.queued || i.interrupted)) {
+  // Asked of every open queued or interrupted item, not only the targets: the rewound copy of
+  // a message stopped and sent again is from the window before, so the gate would never name
+  // it, and unasked it stayed open beside its resend as a second item for one message.
+  const unsure = [...targets, ...openItems(after, nowMs).filter(i => (i.queued || i.interrupted) && !targets.includes(i))]
+    .filter(i => i.queued || i.interrupted)
+  if (unsure.length) {
     const msgs = await bounded($, $.session.messages(), IO_MS, null)
     // Cannot tell what the model received: fail open, no nag about a queued or interrupted message.
     const gone = msgs
-      ? withdrawn(targets, msgs.filter(m => m.role === 'user').map(m => m.text), after.items)
-      : targets.filter(i => i.queued || i.interrupted).map(i => i.id)
+      ? withdrawn(unsure, msgs.filter(m => m.role === 'user').map(m => m.text), after.items)
+      : unsure.map(i => i.id)
     if (msgs && gone.length) await changeLedger($, l => dropItems(l, gone))
     targets = targets.filter(i => !gone.includes(i.id))
     if (!targets.length) return

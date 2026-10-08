@@ -556,7 +556,7 @@ every Claude session and reports from there. It does three things:
 | **state** | `turn.start` → `working`, `turn.complete` → `ready` (`interrupted` on Esc), the permission dialog → `need-you` (the engine's `tool.check` verdict is `ask` on a real call), the call resolving → `working` again | the session's status record, `<fleet dir>/<session_id>.json`, merged beside the shell hook's fields as `source: "mod"`, `state`, `turnId`, `mod: { pid, hb }` |
 | **budget** | `session.measure`: the engine's own context and rate-limit figures, pushed after each turn | the same record, `usage.limits.five_hour: { pct, resets }` |
 | **`/fleet`, `/inbox`** | `fleet-list` and `fleet-inbox`, run as processes | the transcript, **without starting a turn**, mid-turn too |
-| **ledger** | `prompt.submit` (every message, mid-turn ones too) and `turn.complete` (the final text) | `<fleet dir>/<session_id>.ledger`, the record's `ledger: { open, promises, oldest_at, judge_failing? }`, a row above the prompt; see "The request ledger" |
+| **ledger** | `prompt.submit` (every message, mid-turn ones too, and the note it carries), `tool.call` (`ledger_close`, `ledger_drop`, `ledger_add`) and `turn.complete` (the turn's text) | `<fleet dir>/<session_id>.ledger`, the record's `ledger: { open, promises, oldest_at, judge_failing? }`, a row above the prompt; see "The request ledger" |
 
 **Who believes it.** The grid (and so the phone), the push/digest scan and `fleet-list`
 take the mod's `state` over the pane while it is still being written: the pid that wrote
@@ -650,7 +650,8 @@ the heartbeat stops and within 150 s every reader falls back to the pane.
 profiles, so it is kept small enough to read (`mods/ghostfleet/hooks/register.js`) and
 does very little. It makes no network calls. Its one model call is the ledger's judge (see
 "The request ledger" below): a small model, once per answered turn per ten open items, and
-only when there is something to judge; `CLAUDE_FLEET_LEDGER=off` removes it. Its observers
+only when something is still open after the agent closed what it finished;
+`CLAUDE_FLEET_LEDGER=off` removes it. Its observers
 (state, budget, the band) fail open: one that throws or overruns is skipped by the engine and
 the session carries on as if the mod were not there. Its guards fail closed (see "The
 guards" below). Every file and process call is bounded, so a stalled disk cannot hold a turn
@@ -658,7 +659,7 @@ open. What it touches, as `claude plugin validate` reads it:
 
 ```
 $ claude plugin validate mods/ghostfleet
-  ❯ ./register.js hooks: session.start, turn.start, turn.complete, tool.check, tool.call, session.end, session.measure, command.run{command=fleet}, command.run{command=inbox}, tool.call{tool=Bash}, tool.call{tool=/"^mcp__"/}, ui.render{component=AbovePrompt}, prompt.submit, command.run{command=ledger}
+  ❯ ./register.js hooks: session.start, turn.start, turn.step, turn.complete, tool.check, tool.call, session.end, session.measure, command.run{command=fleet}, command.run{command=inbox}, tool.call{tool=Bash}, tool.call{tool=/"^mcp__"/}, ui.render{component=AbovePrompt}, prompt.submit, command.run{command=ledger}, tool.call{tool=mcp__ghostfleet__ledger_close}, tool.call{tool=mcp__ghostfleet__ledger_drop}, tool.call{tool=mcp__ghostfleet__ledger_add}
   ❯ ./register.js answers its own command: command.run{command=fleet}
   ❯ ./register.js answers its own command: command.run{command=inbox}
   ❯ ./register.js answers its own command: command.run{command=ledger}
@@ -667,6 +668,9 @@ $ claude plugin validate mods/ghostfleet
   ❯ ./register.js gating hook with .catch: tool.call{tool=Bash}
   ❯ ./register.js gating hook with .catch: tool.call{tool=/"^mcp__"/}
   ❯ ./register.js gating hook without .catch: prompt.submit
+  ❯ ./register.js gating hook without .catch: tool.call{tool=mcp__ghostfleet__ledger_close}
+  ❯ ./register.js gating hook without .catch: tool.call{tool=mcp__ghostfleet__ledger_drop}
+  ❯ ./register.js gating hook without .catch: tool.call{tool=mcp__ghostfleet__ledger_add}
   ❯ ./register.js calls: $.clock.after (via startState), $.clock.every (via deliveryStart, startBand, startState), $.clock.now, $.clock.sleep (via bounded), $.command.register (via ledgerStart, startCommands), $.env.get (via fleetDir, identity, jarvisDir, ledgerConfigOf, mergeGuard, registeredProject), $.fs.exists (via maybeJarvis, readLedger, registeredProject), $.fs.list (via childBranches, deliverTick, deliveryStart, mergeGuard, refresh, registeredProject), $.fs.read (via childBranches, childrenOf, maybeJarvis, readLedger, readRecord, readTeamRecords, refreshPrs, registeredProject), $.fs.write (via applyLedger, applyPatch, writeSpool), $.model.complete (via judgeTurn), $.process.run, $.prompt.submit (via deliverTick, judgeTurn), $.session.cwd (via answerGuardBash, mergeGuard, refreshPrs), $.session.id (via applyPatch, deliveryStart, ledgerPath, ownRecord), $.session.messages (via judgeTurn), $.session.root (via mergeGuard), $.session.surfaces (via judgeTurn), $.session.turns (via startS… [+117 chars]
   ❯ ./register.js env writes: nothing
   ❯ ./register.js env reads: CLAUDE_CONFIG_DIR, CLAUDE_FLEET_DIR, CLAUDE_FLEET_JARVIS_DIR, CLAUDE_FLEET_LEDGER, CLAUDE_FLEET_LEDGER_GATE, CLAUDE_FLEET_LEDGER_MODEL, CLAUDE_FLEET_LEDGER_PROMISES, CLAUDE_FLEET_SLOT, CLAUDE_FLEET_SOCK, CLAUDE_JOB_DIR, HOME, TMUX, TMUX_PANE
@@ -676,9 +680,11 @@ $ claude plugin validate mods/ghostfleet
 ✔ Validation passed
 ```
 
-The three "gating hook without .catch" lines are the observers, and are deliberate: a hook
-there with no `.catch` fails open, which is right for one that only reads what `next(e)`
-returned and hands it back unchanged. The two "with .catch" are the guards, whose handler
+The first three "gating hook without .catch" lines are the observers, and are deliberate: a
+hook there with no `.catch` fails open, which is right for one that only reads what `next(e)`
+returned and hands it back unchanged. The last three serve the ledger's own tools: a failure
+there fails the agent's `ledger_close` call and nothing else, and the item stays open for
+the judge. The two "with .catch" are the guards, whose handler
 refuses.
 `claude plugin test mods/ghostfleet` runs its hooks against the engine.
 
@@ -820,43 +826,79 @@ green", said once and never done. The mod holds both to account from inside the 
 ledger · 2 open · oldest 4m “add a changelog line” · promise: merge the PR once CI is green
 ```
 
+The ledger is a hybrid. **The agent closes its own items** as it finishes them, through
+three tools the mod registers, each with proof; **the judge is the backup**, asked only about
+what the agent left open; and **the gate** re-prompts once, only about the latest prompt.
+
 - **What becomes an item.** Every message the person submits: typed at an idle prompt,
   typed over a running turn (`prompt.submit` fires at Enter, with that turn's id), or sent
-  from the phone. A prompt `fleet-send` hands the mod (see above) is an item too, recorded
-  at the turn it started. Not items: slash commands, background-task notifications, `/loop`
-  firings, and the ledger's own re-prompt. Only messages after the mod loaded: nothing is
-  backfilled.
-- **What closes one.** At the end of each answered main-loop turn, a small-model call
-  (`haiku` by default) for every ten open items, newest first, reads them and the turn's final text (its last 6,000
-  characters, plus up to two earlier final messages since the oldest open item) and answers
+  from the phone. A message of two or more plain asks (list lines, questions, sentences that
+  open with a verb of work or "can you") is one item per ask, so each closes on its own
+  proof; anything less plain, a paste, or a message over 4,000 characters stays one item. A
+  prompt `fleet-send` hands the mod (see above) is one item, never split. Not items: slash
+  commands, background-task notifications, `/loop` firings, the ledger's own re-prompt, and
+  **the fleet's own wake-ups** ("a worker finished, run fleet-inbox", Jarvis's and the batch
+  wake): `hooks/fleet-event.sh` sends those with `fleet-send --nudge`, which marks the
+  handoff entry `kind: "nudge"` (and the queue record, for a busy lead), and the mod records
+  nothing for a marked entry. The marker is the test, never the wording. A nudge that falls
+  back to the paste (a lead whose mod is not delivering) arrives as typed text and is
+  recorded like one. Only messages after the mod loaded: nothing is backfilled.
+- **The note.** Each prompt carries a note to the model, never shown the person: the open
+  items with their ids, requests first and newest first, then promises, **eight at most**
+  (each cut to 100 characters, so the note stays under ~1.5k), `+N more open (/ledger lists
+  them)` past that, and the rule: close with `ledger_close` and proof. No note when nothing
+  is open. A plugin's own submit cannot carry context, so a prompt `fleet-send` delivered
+  gets its note on the first tool result of the turn it started instead.
+- **The agent's tools.** `mcp__ghostfleet__ledger_close(id, proof)`: the proof is required
+  and non-empty (a path, link, commit, PR number, command result) and kept on the item.
+  `ledger_drop(id, reason)`: not a real ask, or the person cancelled it; state `dropped`.
+  `ledger_add(text)`: an ask the split missed, added to the latest prompt so the gate covers
+  it. Every close records who made it: `closedBy` is `agent`, `judge`, or `person` (`hand`
+  in a file written before this). Old ledgers need no migration: their items are closable
+  by the tools as they are.
+- **The judge, as backup.** At the end of each answered main-loop turn, after the agent's
+  own closes, a small-model call (`haiku` by default) for every ten items **still open**,
+  newest first, reads them and the turn's text (all of its blocks, cut from the middle past
+  6,000 characters, plus up to two earlier turns since the oldest open item) and answers
   strict JSON: each item `done`, `not-done` (said so, **with a reason**), or `open`. A part
   an item itself put off ("not in this reply") is not owed yet. A bare "go ahead" or "thanks"
-  closes once the agent acted. The call is made only when something is open or the answer
-  reads like a promise, so a quiet session costs nothing. Measured on haiku, one call for 46
-  items needed 1,737 tokens of reply and was cut off at 700 before its closing brace; a call
-  of ten takes at most ~600, and each may now use 1,500. A reply cut off anyway still
-  applies every item it finished.
+  closes once the agent acted. **A turn in which the agent closed items and left nothing
+  open makes no call at all**, promise wording or not; otherwise the call is made only when
+  something is open or the answer reads like a promise, so a quiet session costs nothing.
+  Measured on haiku, one call for 46 items needed 1,737 tokens of reply and was cut off at
+  700 before its closing brace; a call of ten takes at most ~600, and each may now use
+  1,500. A reply cut off anyway still applies every item it finished. The judge still reads
+  older open items too, and may close them; it is only the gate that ignores them.
 - **Promises.** The same call lists commitments from the final message ("next I'll add the
   tests"), firm ones only: not offers that wait on the person, not "I'll keep doing X". Each
   becomes an item with `source: promise`, drawn separately on the band, and closed the same
-  way by a later turn's text. A promise the judge has been shown and kept open for five
-  judged turns closes as `stale`: nothing gates a promise, so one the session dropped would
-  otherwise sit on the band for a week. Requests never go stale.
+  way by a later turn's text, or by the agent with `ledger_close`. A promise the judge has
+  been shown and kept open for five judged turns closes as `stale`: nothing gates a promise,
+  so one the session dropped would otherwise sit on the band for a week. Requests never go
+  stale.
   One commitment is one promise: the judge is shown the open promises and names the one a
   new phrasing restates, and a phrasing that shares most of its content words with an open
   promise (or any earlier phrasing of it) is that promise too. What the agent asks the
   person to do ("still waiting on you: run X") is never a promise. At most five are open;
   a sixth closes the oldest as `stale`.
-- **The gate.** Items still open after the judge get **one** framed re-prompt ("the ghostfleet
-  plugin sent a message") naming them and asking the agent to finish each or say why not.
-  The bound is in the data: an item carries `gated` once asked, and is never asked again,
-  across reloads too. Never after Esc (an `aborted` turn is not judged at all), never for a
-  subagent's run, never in `-p` or the SDK, never when another turn has started since (a
-  queued message runs first, and its own end is judged next), and never about a queued
-  message that never reached the model: Up pulls a queued message back into the composer
-  with no event to say so, so before a re-prompt a queued item has to be found among the
-  session's user messages, and one that is not is dropped (resubmitted, it is a new item).
-  Promises show and do not gate, unless `CLAUDE_FLEET_LEDGER_PROMISES=gate`.
+- **The gate.** Items **from the latest prompt** still open after the judge get **one**
+  framed re-prompt ("the ghostfleet plugin sent a message") naming them and asking the agent
+  to finish and close each with proof, or say why not. The latest prompt is the last message
+  typed at an idle prompt or delivered by `fleet-send`, plus every message typed over the
+  turn it started (those queue behind it, so that turn's end is not gated and the next turn
+  answers them together), plus what `ledger_add` added. **An older open item is never
+  re-prompted**: it stays on the band and in `/ledger`, closable by the agent, the judge or
+  the person. A ledger written before prompts were numbered has no item in any window, so
+  none of its items is ever re-prompted. The bound is in the data: an item carries `gated`
+  once asked, and is never asked again, across reloads too. Never after Esc (an `aborted`
+  turn is not judged at all), never for a subagent's run, never in `-p` or the SDK, never
+  when another turn has started since (a queued message runs first, and its own end is
+  judged next), and never about a queued or interrupted message that never reached the
+  model: Up pulls a queued message back into the composer with no event to say so, so
+  before a re-prompt every such open item has to be found among the session's user
+  messages, and one that is not is dropped (resubmitted, it is a new item). Promises show
+  and do not gate, unless `CLAUDE_FLEET_LEDGER_PROMISES=gate`, and then only a promise made
+  in the latest prompt's turns.
 - **It fails open.** A judge that errors, times out (30 s) or answers anything but the JSON
   asked for closes nothing and re-prompts nothing; the file keeps `judge: { ok: false, why }`,
   the band leads with `judge failing: <why>` while anything is open, the record carries
@@ -864,8 +906,9 @@ ledger · 2 open · oldest 4m “add a changelog line” · promise: merge the P
   or ok. The ledger is a nag, not a guard.
 - **By hand.** `fleet-ledger [-s socket] [session] [list|all|close <id>|clear]` from any
   shell, by session name on that fleet or by session id; `/ledger` (same verbs) inside the
-  session, without a turn. `clear` closes every open item and keeps the history. Items
-  older than 7 days drop off the band and the gate; the file keeps the newest 200.
+  session, without a turn. `clear` closes every open item and keeps the history; `all` shows
+  who closed each and the proof or reason. Items older than 7 days drop off the band and
+  the gate; the file keeps the newest 200.
 
 **The file is not a `*.json`.** `<session_id>.ledger` holds JSON, but eight readers glob
 `<fleet dir>/*.json` as status records (fleet-list, the governor, the grid, fleet-read,
