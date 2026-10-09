@@ -20,7 +20,7 @@ the detail, and every entry here names the PR that carries the argument.
   you: run X") were recorded as the agent's own. The judge now names the open promise a
   phrasing restates, a word-overlap check catches the ones it misses, person-addressed
   steps are dropped, and at most five promises are open at once.
-- **The ledger's gate stops re-prompting work the session already reported on** (#PR). "Open"
+- **The ledger's gate stops re-prompting work the session already reported on** (#41). "Open"
   meant both "the turn ignored this" and "the turn reported on it while a worker builds it",
   and the gate re-prompted both, so an agent that had just said "the build is in progress in
   a worker" was told to finish it now and could only say the same thing again. The judge now
