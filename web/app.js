@@ -283,8 +283,11 @@ function btn(label, onclick, cls = '') {
   else b.textContent = label;
   return b;
 }
-function toast(text, kind = '') {
-  S.toast = { text, kind };
+// `action` is one button on the toast — {label, fn} — for the message that is only useful
+// with a way to act on it ("queued behind a question" -> answer it). It stays up longer,
+// because a button that leaves before the thumb arrives is no button.
+function toast(text, kind = '', action = null) {
+  S.toast = { text, kind, ...(action ? { action } : {}) };
   clearTimeout(toast._t);
   // ...AND ITS EXPIRY IS A RENDER ON A TIMER, which is the other way the keyboard closed
   // with nobody touching anything. attachPhoto() ends in a toast, and the flow it exists
@@ -292,7 +295,7 @@ function toast(text, kind = '') {
   // the toast quietly rebuilt the screen and took the keyboard with it. A toast that
   // outstays its welcome by a few seconds is a toast; one that closes the keyboard is a
   // bug, so this one waits its turn.
-  toast._t = setTimeout(() => { S.toast = null; renderUnlessTyping(); }, 4200);
+  toast._t = setTimeout(() => { S.toast = null; renderUnlessTyping(); }, action ? 9000 : 4200);
 }
 
 // ── render ────────────────────────────────────────────────────────────────
@@ -390,7 +393,11 @@ function render() {
   // overlap impossible rather than merely unlikely — the scroller above simply gets shorter
   // by the toast's height for as long as it is up.
   if (S.toast) {
-    const t = el('div', { class: ('toast ' + (S.toast.kind || '')).trim(), text: S.toast.text });
+    const a = S.toast.action;
+    const t = a
+      ? el('div', { class: ('toast act ' + (S.toast.kind || '')).trim() },
+          [el('span', { text: S.toast.text }), btn(a.label, () => { S.toast = null; a.fn(); })])
+      : el('div', { class: ('toast ' + (S.toast.kind || '')).trim(), text: S.toast.text });
     const ci = screen.findIndex(n => n && n.classList && n.classList.contains('composer'));
     if (ci >= 0) screen.splice(ci, 0, t); else screen.push(t);
   }
@@ -1789,6 +1796,7 @@ function chatView(card) {
   if (card && card.status === 'need-you') {
     wrap.append(el('div', { class: 'blocked' }, [
       el('div', { class: 't', text: 'this session is waiting on you — a permission prompt or a question is drawn in its pane, and a transcript cannot show one' }),
+      btn('answer', () => sheetAnswer(S.session)),
       btn('open the pane', () => setView('pane')),
     ]));
   }
@@ -3485,7 +3493,15 @@ async function doVerb(tool, args, opts = {}) {
   try {
     const assertion = api.DESTRUCTIVE.has(tool) ? await assertFor(`${tool} ${args.session || args.name || ''}`.trim()) : null;
     const r = await api.verb(tool, args, assertion);
-    if (!opts.quiet) toast(r.text || `${tool} ok`, 'good');
+    // HELD, NOT SENT. fleet-send queues a prompt to a session that is waiting on a prompt
+    // of its own, and it will not run until someone answers that — so "sent" (or a quiet
+    // nothing) would be the app saying the opposite of what is happening. Said even for a
+    // quiet send, with the way to unblock it one tap away.
+    if (r && r.queued === 'question' && args.session) {
+      const who = args.session, proj = args.project || S.project;
+      toast(`queued behind a question — ${who} is waiting on an answer in its pane; this runs once it has one`, '',
+            { label: 'answer it', fn: () => sheetAnswer(who, proj) });
+    } else if (!opts.quiet) toast(r.text || `${tool} ok`, 'good');
     await refresh();
     return r;
   } catch (e) {
@@ -3711,16 +3727,17 @@ function sheetSend(name) {
 // is about to answer (kind, tool, command, options), and sends that prompt's fingerprint.
 // The daemon re-captures just before the keys go and refuses anything else as "the prompt
 // changed", at which point this re-reads the pane and draws what is really there.
-async function sheetAnswer(name) {
+async function sheetAnswer(name, project = S.project) {
   let prompt = null;
-  try { prompt = (await api.getPane(S.project, name)).prompt || null; }
+  try { prompt = (await api.getPane(project, name)).prompt || null; }
   catch (e) { if (e instanceof api.AuthError) { lock('pane'); return; } toast(String(e.message || e), 'bad'); return; }
+  if (prompt && prompt.kind === 'question') { sheetQuestion(name, project, prompt); return; }
   const t = input('', { placeholder: 'e.g. 2   or   yes' });
   const noEnter = el('input', { type: 'checkbox' });
   const send = async (text) => {
     if (!text) { toast('fleet_answer refuses an empty text', 'bad'); return; }
     closeSheet();
-    const r = await doVerb('fleet_answer', { project: S.project, session: name, text, no_enter: noEnter.checked,
+    const r = await doVerb('fleet_answer', { project, session: name, text, no_enter: noEnter.checked,
                                               expect: prompt ? prompt.fingerprint : '' });
     // Refused or not, the pane is read again now: after a refusal it shows what replaced the
     // prompt, and after an answer it shows what the answer did.
@@ -3745,6 +3762,90 @@ async function sheetAnswer(name) {
     el('label', { class: 'field' }, [noEnter, document.createTextNode(' send without pressing Enter')]),
     el('div', { class: 'row' }, [btn('answer', () => send(t.value), 'go'), btn('esc back', closeSheet)]),
   ].filter(Boolean)));
+}
+
+// A QUESTION PICKER IS ANSWERED ONE TAB AT A TIME, and the sheet follows it. claude's
+// AskUserQuestion draws one tab per question and a Submit tab, and a digit there selects AND
+// moves on (lib/permission-dialog.mjs has the measurements) — so each tap sends one digit,
+// never an Enter, and then the pane is read again and the sheet redrawn for whatever it
+// shows now: the next question, the Submit step with the answers to review, or nothing,
+// which means the session has its answers. Every send carries the fingerprint of the step
+// it answers, so a tap on a step that has gone is refused rather than landing on the next.
+//   "Type something" is two steps on the pane and one here: its digit makes the row an
+// input (a different prompt, by fingerprint), and only once the pane says so does the text
+// go, with the Enter that submits it.
+function sheetQuestion(name, project, prompt, note = '') {
+  const tabs = prompt.tabs || [];
+  const cur = prompt.tab != null ? tabs[prompt.tab] : null;
+  const where = prompt.submit ? 'review and submit'
+    : prompt.tabCount > 1 ? `question ${prompt.tab != null ? prompt.tab + 1 : '?'} of ${prompt.tabCount}${cur && !cur.submit ? ' · ' + cur.label : ''}`
+    : `question${cur ? ' · ' + cur.label : ''}`;
+  let busy = false;
+  const press = async (text, noEnter, expect) => {
+    try { return await api.verb('fleet_answer', { project, session: name, text, no_enter: noEnter, expect }); }
+    catch (e) { if (e instanceof api.AuthError) { closeSheet(); lock(); return null; } toast(String(e.message || e), 'bad'); return null; }
+  };
+  const reread = async (was) => {
+    // The pane redraws a beat after the key; a read that still shows the step just answered
+    // is read again once rather than drawn as if nothing had happened.
+    for (let i = 0; i < 3; i++) {
+      let p = null;
+      try { p = (await api.getPane(project, name)).prompt || null; } catch {}
+      if (!p || p.fingerprint !== was) return p;
+      await new Promise(r => setTimeout(r, 400));
+    }
+    return prompt;
+  };
+  const after = async (p, said) => {
+    if (p && p.kind === 'question') { sheetQuestion(name, project, p, said); return; }
+    closeSheet();
+    toast(p ? `answered — ${name} now shows another prompt` : `answered — ${name} has its answers`, 'good',
+          p ? { label: 'answer it', fn: () => sheetAnswer(name, project) } : null);
+    await refresh();
+    if (S.screen === 'session' && S.session === name) { S.pane = null; await readPane(); render(); }
+  };
+  const choose = async (o) => {
+    if (busy) return; busy = true;
+    const r = await press(o.n, true, prompt.fingerprint);
+    // Refused (the prompt changed) or not, what the pane shows now is what to draw.
+    const p = await reread(prompt.fingerprint);
+    await after(p, r ? `sent ${o.n}. ${o.label}` : 'that was not sent — this is what the pane shows now');
+  };
+  const freeBox = input('', { placeholder: 'your answer' });
+  const freeOpt = (prompt.options || []).find(o => o.free);
+  const sendFree = async () => {
+    const text = (freeBox.value || '').trim();
+    if (!text) { toast('type an answer first', 'bad'); return; }
+    if (busy || !freeOpt) return; busy = true;
+    let fp = prompt.fingerprint;
+    if (!prompt.typing) {
+      if (!(await press(freeOpt.n, true, fp))) { await after(await reread(fp), 'that was not sent — this is what the pane shows now'); return; }
+      const p = await reread(fp);
+      if (!p || p.kind !== 'question' || !p.typing) { await after(p, `could not open "${freeOpt.label}" for typing — nothing was typed`); return; }
+      fp = p.fingerprint;
+    }
+    const r = await press(text, false, fp);
+    await after(await reread(fp), r ? `sent "${text}"` : 'that was not sent — this is what the pane shows now');
+  };
+  freeBox.addEventListener('keydown', e => { if (e.key === 'Enter') sendFree(); });
+  const rows = [];
+  for (const o of (prompt.options || [])) {
+    if (o.free) continue;
+    const b = btn(`${o.n}. ${o.label}${o.chosen ? ' ✔' : ''}`, () => choose(o), o.chat ? '' : 'go');
+    rows.push(el('div', { class: 'srow q' }, [b,
+      o.description ? el('span', { class: 'd', text: o.description }) : null,
+      o.chat ? el('span', { class: 'd', text: 'declines these questions and goes back to the chat' }) : null].filter(Boolean)));
+  }
+  openSheet(sheet('answer the question', `→ ${name} · ${where}`, [
+    note ? el('p', { class: 'warn', text: note }) : null,
+    prompt.submit && (prompt.review || []).length
+      ? el('ul', { class: 'review' }, prompt.review.map(r => el('li', {}, [el('span', { text: r.question }), el('b', { text: ' → ' + (r.answer || '—') })])))
+      : null,
+    el('p', { class: 'q', text: prompt.question || '' }),
+    el('div', { class: 'rows' }, rows),
+    freeOpt ? field(`${freeOpt.n}. type an answer`, freeBox) : null,
+    el('div', { class: 'row' }, [freeOpt ? btn('send answer', sendFree, 'go') : null, btn('esc back', closeSheet)].filter(Boolean)),
+  ].filter(Boolean)), false);
 }
 
 function sheetRename(name) {

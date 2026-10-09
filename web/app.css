@@ -492,6 +492,13 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .sheet .err { color: var(--red); }
 .sheet .ok { color: var(--green); }
 .sheet .warn { color: var(--yellow); }
+/* the answer sheet for a question picker: the question as the thing to read, each option's
+ * description under its button, and the Submit step's review of what was chosen */
+.sheet p.q { color: var(--white); }
+.srow.q { flex-direction: column; align-items: stretch; gap: .25em; }
+.srow.q .d { color: var(--dim); font-size: .9em; padding-left: .2em; }
+.sheet .review { margin: .4em 0; padding-left: 1.1em; color: var(--dim); }
+.sheet .review b { color: var(--white); font-weight: normal; }
 
 /* the settings rows (per-session nudge, per-project columns) */
 .rows { margin: .6em 0; }
@@ -942,6 +949,11 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
   overflow-wrap: anywhere;
 }
 .toast.bad { color: var(--red); border-color: #40202a; }
+/* A toast with a button ("queued behind a question" -> answer it) is a row, not a clamped
+ * box: the clamp would hide the button with the third line. */
+.toast.act { display: flex; align-items: center; gap: .6em; -webkit-line-clamp: none; }
+.toast.act > span { flex: 1; min-width: 0; }
+.toast.act > button { flex: none; min-height: 44px; }
 .toast.good { color: var(--green); }
 .audit { color: var(--dim); }
 .audit li { margin: .3em 0; overflow-wrap: anywhere; }

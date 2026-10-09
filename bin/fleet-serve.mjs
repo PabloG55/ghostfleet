@@ -864,7 +864,10 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   }
   // {ok, text} — the shape web/api.js reads, and it throws on !ok with `text` as the
   // message, so a refusal has to arrive as text rather than as a status code alone.
-  return { status: refused ? 400 : 200, json: { ok: !refused, text } };
+  //   `queued: 'question'` when fleet-send held the prompt behind a prompt in the pane: it
+  // succeeded, and it will not run until somebody answers, so the phone must not say "sent".
+  const queued = !refused && tool === 'fleet_send' && /queued #\d+ behind a question/.test(text) ? 'question' : undefined;
+  return { status: refused ? 400 : 200, json: { ok: !refused, text, ...(queued ? { queued } : {}) } };
 }
 
 // ── reads: proxy, never reimplement (§3, one producer) ───────────────────────

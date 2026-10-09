@@ -1,0 +1,40 @@
+
+
+
+
+
+⏺ Database: SQLite · Deploy: Staging
+
+✻ Cooked for 3s · done 10:30 PM
+
+❯ Now call AskUserQuestion once with ONE question, header "Cache": "How should toolbox cache build
+  artifacts between runs of the scratch pipeline?" options: "Local disk (Recommended)" desc "Keep
+  artifacts in a directory beside the worktree, cleared when the worktree is removed; fastest, and
+  nothing leaves the machine", "Object store" desc "Upload artifacts to a shared bucket so every
+  runner can reuse them, at the cost of a network round trip per job", "No cache" desc "Rebuild
+  everything every time; slowest, but there is nothing that can ever go stale or be shared by
+  mistake", "Per-branch" desc "One cache per branch, so a long-lived branch keeps its own warm
+  cache and a short one starts cold". Then repeat my answer in one line.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Cache
+
+How should toolbox cache build artifacts between runs of the scratch pipeline?
+
+  1. Local disk (Recommended)
+     Keep artifacts in a directory beside the worktree, cleared when the worktree is removed;
+     fastest, and nothing leaves the machine
+  2. Object store
+     Upload artifacts to a shared bucket so every runner can reuse them, at the cost of a network
+     round trip per job
+  3. No cache
+     Rebuild everything every time; slowest, but there is nothing that can ever go stale or be
+     shared by mistake
+  4. Per-branch
+     One cache per branch, so a long-lived branch keeps its own warm cache and a short one starts
+     cold
+❯ 5. shared disk on the runner
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel
+

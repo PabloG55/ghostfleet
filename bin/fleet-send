@@ -340,7 +340,16 @@ if [ "$MODE" = send ] && [ "$QUEUEABLE" = 1 ]; then
   if busy || [ -s "$QUEUE" ] || _mod_backlog; then
     _enqueue
     if busy || _mod_backlog; then
-      echo "fleet-send: → $SESSION (queued #$_n — it is mid-turn; this runs as its own turn after that one ends. --now folds it in instead)"
+      # NEED-YOU IS NOT MID-TURN. A session stopped on a permission dialog or a question
+      # picker reads as busy too, and the prompt waits for the same Stop — which will not
+      # come until someone answers the prompt in its pane. Said in words a phone can show,
+      # because "queued … mid-turn" read as "sent" and the owner waited on a session that
+      # was waiting on him. fleet-serve keys on "behind a question".
+      if [ "$MOD_STATE" = need-you ]; then
+        echo "fleet-send: → $SESSION (queued #$_n behind a question — it is waiting on an answer in its pane, and this runs as its own turn only once that is answered and the turn ends)"
+      else
+        echo "fleet-send: → $SESSION (queued #$_n — it is mid-turn; this runs as its own turn after that one ends. --now folds it in instead)"
+      fi
       [ -n "${RSESS:-}" ] && echo "fleet-send: the answer to it comes back to $RSOCK/$RSESS when that queued turn ends"
       exit 0
     fi

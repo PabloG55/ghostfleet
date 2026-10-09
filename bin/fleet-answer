@@ -112,6 +112,14 @@ case "$drc" in
   0|10|11) ;;
   *)  drc=11; dialog="(could not check this pane for a permission dialog — node or lib/permission-dialog.mjs is missing, so it is treated as one)" ;;
 esac
+# A QUESTION PICKER TAKES ITS DIGIT WITHOUT ENTER. Claude's AskUserQuestion selects and
+# advances on the digit alone; the Enter after it answered the next tab with whatever was
+# highlighted there (measured: "3" + Enter set the first question to 3 AND the second to
+# its default, and nobody chose that). The detector says when the text is such a digit.
+if [ "$drc" = 0 ] && [ "$NOENTER" != 1 ] && [ "$dialog" = question-option ]; then
+  NOENTER=1
+  echo "fleet-answer: '$SESSION' is showing a question picker — sending '$TEXT' without Enter (a digit there selects and moves on)." >&2
+fi
 what="${KEYS[*]:-$TEXT}"
 if [ "${#KEYS[@]}" -gt 0 ]; then again="$(printf ' --key %q' "${KEYS[@]}")"; else again=" $(printf '%q' "$TEXT")"; fi
 [ "$NOENTER" = 1 ] && again="$again --no-enter"

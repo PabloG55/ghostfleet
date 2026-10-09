@@ -4325,6 +4325,80 @@ else
   skip "permission dialog detector" "node missing"
 fi
 
+# ── claude's question picker (AskUserQuestion) ──────────────────────────────
+# A session sat on a multi-question picker and the phone said "no prompt on screen —
+# Nothing to answer": the generic menu walk looks back 24 lines for the selected option,
+# and four options whose descriptions wrap at 30 columns put it 27 lines up. Captured from
+# a scratch session (synthetic content) single and multi, at 100/56/30 columns, on each
+# tab, on Submit, and with the free-text row taking text. BOTH DIRECTIONS: it is a
+# question on every one of those, and on nothing else — the permission dialogs, trust
+# prompts and idle panes above keep the kind they had.
+group "question pickers: detected on real captures, and only on those"
+if command -v node >/dev/null 2>&1; then
+  PD="$ROOT/lib/permission-dialog.mjs"
+  qj() { node "$PD" --fingerprint < "$ROOT/test/fixtures/$1" 2>/dev/null; }
+  qk() { qj "$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);const v=j?process.argv[1].split(".").reduce((o,k)=>o==null?o:o[k],j):null;process.stdout.write(v==null?"null":typeof v==="object"?JSON.stringify(v):String(v))})' "$2"; }
+  for f in claude-question-multi.txt claude-question-multi-sgr.txt claude-question-multi-56col.txt claude-question-multi-30col.txt \
+           claude-question-multi-tab2-sgr.txt claude-question-multi-back.txt claude-question-submit.txt claude-question-submit-sgr.txt \
+           claude-question-single.txt claude-question-single-30col.txt claude-question-single-typing.txt claude-question-single-typed.txt; do
+    is "$f: a question"                       "question" "$(qk "$f" kind)"
+  done
+  # THE SHAPE THAT WAS BLIND: a single question whose descriptions wrap at 30 columns.
+  is "the 30-column single question has all six options" "6" "$(qk claude-question-single-30col.txt options.length)"
+  # What a phone needs to draw it: the question, the options with their descriptions apart
+  # from their labels, and which rows are not plain choices.
+  is "the question is the question"           "Which database should acme-api use for the billing-svc ledger?" "$(qk claude-question-multi-30col.txt question)"
+  is "...a label is just the label"           "Postgres (Recommended)" "$(qk claude-question-multi.txt options.0.label)"
+  is "...its description rides beside it"     "Relational, already used by toolbox" "$(qk claude-question-multi.txt options.0.description)"
+  is "\"Type something.\" is the free-text row" "true" "$(qk claude-question-multi.txt options.3.free)"
+  is "\"Chat about this\" is marked as chat"  "true" "$(qk claude-question-multi.txt options.4.chat)"
+  is "...and a plain option is neither"       "null" "$(qk claude-question-multi.txt options.1.free)"
+  # Where in the picker: tab count, the current tab (from its colour when the pane has
+  # one), and the Submit step with what was answered.
+  is "two questions, plus Submit"             "2" "$(qk claude-question-multi.txt tabCount)"
+  is "a single question is one tab"           "1" "$(qk claude-question-single.txt tabCount)"
+  is "tab 1 is current (from the colour)"     "0" "$(qk claude-question-multi-sgr.txt tab)"
+  is "tab 2 is current (from the colour)"     "1" "$(qk claude-question-multi-tab2-sgr.txt tab)"
+  is "Submit is the third tab"                "2" "$(qk claude-question-submit-sgr.txt tab)"
+  is "...and says it is the Submit step"      "true" "$(qk claude-question-submit.txt submit)"
+  is "...with the answers to review"          "SQLite" "$(qk claude-question-submit.txt review.0.answer)"
+  is "...and its choices"                     "Submit answers" "$(qk claude-question-submit.txt options.0.label)"
+  is "an answered option is marked chosen"    "true" "$(qk claude-question-multi-back.txt options.0.chosen)"
+  is "...without the tick in its label"       "Staging" "$(qk claude-question-multi-back.txt options.0.label)"
+  is "the free-text row taking text is typing" "true" "$(qk claude-question-single-typing.txt typing)"
+  is "...and the menu is not"                 "false" "$(qk claude-question-single.txt typing)"
+  # THE FINGERPRINT fleet-answer re-checks with: one per step, the same at every width and
+  # with or without colour (the phone captures with -e, fleet-answer without), and changed
+  # by typing mode — a key sent there is text, not a choice.
+  for f in claude-question-multi-sgr.txt claude-question-multi-56col.txt claude-question-multi-30col.txt; do
+    is "$f: same fingerprint as at 100 columns" "$(qk claude-question-multi.txt fingerprint)" "$(qk "$f" fingerprint)"
+  done
+  is "single: same fingerprint at 30 columns" "$(qk claude-question-single.txt fingerprint)" "$(qk claude-question-single-30col.txt fingerprint)"
+  is "submit: same fingerprint with colour"   "$(qk claude-question-submit.txt fingerprint)" "$(qk claude-question-submit-sgr.txt fingerprint)"
+  is "tab 1 and tab 2 differ"                 "no" "$([ "$(qk claude-question-multi.txt fingerprint)" = "$(qk claude-question-multi-tab2-sgr.txt fingerprint)" ] && echo yes || echo no)"
+  is "typing is a different step"             "no" "$([ "$(qk claude-question-single.txt fingerprint)" = "$(qk claude-question-single-typing.txt fingerprint)" ] && echo yes || echo no)"
+  # AND ONLY THERE. The prompts that already parse keep their kind, and panes with no
+  # prompt stay null — a todo list's "☐ task" in a transcript included.
+  for f in claude-permission-bash.txt claude-permission-dialog-sgr.txt claude-permission-bash-56col.txt; do
+    is "$f: still a permission dialog"        "permission" "$(qk "$f" kind)"
+  done
+  is "claude-trust.txt: still a trust prompt" "trust" "$(qk claude-trust.txt kind)"
+  is "codex-update.txt: still a menu"         "menu" "$(qk codex-update.txt kind)"
+  for f in claude-idle.txt claude-busy.txt claude-limit-hit.txt claude-composer-typed.txt; do
+    is "$f: still no prompt"                  "null" "$(qk "$f" kind)"
+  done
+  QT="$(mktemp)"
+  { printf '⏺ Update Todos\n  ⎿  ☐ Wire acme-api to billing-svc\n     ☐ Rebuild toolbox\n     ☒ Read the ledger\n\n'
+    cat "$ROOT/test/fixtures/claude-idle.txt"; } > "$QT"
+  is "a todo list in a transcript is no prompt" "null" "$(node "$PD" --fingerprint < "$QT" | tr -d '\n')"
+  # A picker that was answered is history above the composer.
+  cat "$ROOT/test/fixtures/claude-question-multi.txt" "$ROOT/test/fixtures/claude-idle.txt" > "$QT"
+  is "a picker above an input box is quoted"  "null" "$(node "$PD" --fingerprint < "$QT" | tr -d '\n')"
+  rm -f "$QT"
+else
+  skip "question pickers" "node missing"
+fi
+
 # The same, through the verb, on a real pane: the keys that reach it are what matters.
 # A pane replays the captured dialog and then blocks on a line, so "the pane changed" is
 # a consequence of fleet-answer and not of time passing — the serve group's shape.
@@ -4480,6 +4554,59 @@ SH
   rm -rf "$EX"
 else
   skip "fleet-answer --expect" "tmux or node missing"
+fi
+
+# A QUESTION PICKER'S DIGIT GOES WITHOUT ENTER. Measured on a live picker: a digit selects
+# AND advances, so "3" + Enter answered the first question with 3 and the second with
+# whatever was highlighted — an answer nobody gave. fleet-answer drops the Enter itself when
+# the text is an option number of a picker, which also covers an agent's fleet_answer. The
+# pane reads raw bytes, so what is asserted is what reached it: the digit, and whether an
+# Enter came after it.
+group "fleet-answer sends a picker's digit without Enter"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  QX="$(mktemp -d)"
+  cat > "$QX/keys.sh" <<'SH'
+#!/bin/sh
+clear; cat "$1"
+stty -icanon -echo min 1 time 0
+k=$(dd bs=1 count=1 2>/dev/null)
+stty min 0 time 10
+# several reads: the text and its Enter are two send-keys, and one read can end between
+# them; a read that waits its full second for nothing ends it
+rest=$(dd bs=64 count=8 2>/dev/null | od -An -c | tr -d ' \n')
+clear; printf 'KEY [%s] REST [%s]\n' "$k" "$rest"; sleep 600
+SH
+  chmod +x "$QX/keys.sh"
+  tmux -L cfansq kill-server 2>/dev/null
+  qx_pane() { tmux -L cfansq kill-session -t "$1" 2>/dev/null
+    tmux -L cfansq new-session -d -s "$1" -x 100 -y 40 "$QX/keys.sh $ROOT/test/fixtures/$2" 2>/dev/null
+    local i=0; while [ "$i" -lt 60 ] && [ -z "$(tmux -L cfansq capture-pane -p -t "$1" 2>/dev/null | tr -d '[:space:]')" ]; do i=$((i+1)); sleep 0.1; done; sleep 0.2; }
+  qx_got() { local i=0; while [ "$i" -lt 40 ] && ! grep -q 'KEY \[' <<< "$(tmux -L cfansq capture-pane -p -t "$1" 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
+             tmux -L cfansq capture-pane -p -t "$1" 2>/dev/null | grep -m1 'KEY \['; }
+  qxa() { TMUX= "$ROOT/bin/fleet-answer" -s cfansq "$@" 2>&1; }
+  qx_pane q1 claude-question-multi.txt
+  out="$(qxa q1 3)"
+  is "a picker digit: the digit, and nothing after it" "KEY [3] REST []" "$(qx_got q1)"
+  is "...saying why there was no Enter"       "1" "$(grep -c 'question picker — sending' <<< "$out" || true)"
+  qx_pane q2 claude-question-submit.txt
+  qxa q2 1 >/dev/null
+  is "Submit's digit goes alone too"          "KEY [1] REST []" "$(qx_got q2)"
+  # THE OTHER DIRECTIONS: a menu that is not a picker still gets its Enter, and so does the
+  # text typed into a picker's free-text row — that Enter is what submits it.
+  qx_pane q3 codex-update.txt
+  qxa q3 2 >/dev/null
+  is "a plain menu still gets its Enter"      "1" "$(qx_got q3 | grep -cE '^KEY \[2\] REST \[\\[rn]\]$' || true)"
+  qx_pane q4 claude-question-single-typing.txt
+  qxa q4 local >/dev/null
+  is "free text into the row is submitted"    "1" "$(qx_got q4 | grep -cE '^KEY \[l\] REST \[ocal\\[rn]\]$' || true)"
+  # A number that is not one of its options is not a choice; it keeps its Enter.
+  qx_pane q5 claude-question-multi.txt
+  qxa q5 9 >/dev/null
+  is "a number that is no option keeps Enter" "1" "$(qx_got q5 | grep -cE '^KEY \[9\] REST \[\\[rn]\]$' || true)"
+  tmux -L cfansq kill-server 2>/dev/null
+  rm -rf "$QX"
+else
+  skip "fleet-answer picker digit" "tmux or node missing"
 fi
 
 # THE MCP CANNOT SET THE FLAG. fleet_answer's arguments go after `--`, so no text or
@@ -8545,6 +8672,40 @@ fi
 # The queue is keyed by the session NAME, like every other per-session marker, so a rename
 # that left it behind would strand work already sent, and a stop that left it would hand a
 # stranger's backlog to the next session that reuses the name.
+# NEED-YOU IS NOT MID-TURN. A session stopped on a permission dialog or a question picker
+# is busy to fleet-send, so a prompt to it is queued — and it runs only after somebody
+# answers the prompt in its pane. "queued — it is mid-turn" read as "sent" on the phone,
+# and the owner waited on a session that was waiting on him. The reply says which it is;
+# fleet-serve keys `queued: 'question'` on these words, so they are asserted exactly.
+group "a send held behind a question says so"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  NQ="$(mktemp -d)"; NF="$NQ/fleet"; mkdir -p "$NF/nq-1.handoff"
+  tmux -L cfnq kill-server 2>/dev/null
+  tmux -L cfnq new-session -d -s w1 -x 100 -y 30 "sleep 600" 2>/dev/null
+  NQPID="$(tmux -L cfnq display-message -p -t w1 '#{pane_pid}' 2>/dev/null)"
+  # The mod's record, written as the mod writes it: this slot, a fresh heartbeat, a live pid.
+  nq_rec() { jq -n --arg s "$1" --argjson pid "$NQPID" --argjson hb "$(( $(date +%s) * 1000 ))" \
+               '{session_id:"nq-1", sock:"cfnq", slot:"w1", status:$s, state:$s, source:"mod", mod:{v:"t", pid:$pid, hb:$hb}}' \
+               > "$NF/nq-1.json"; printf '%s\n' "$NQPID" > "$NF/nq-1.handoff/.ready"; }
+  NS() { env -u TMUX CLAUDE_FLEET_DIR="$NF" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cfnq "$@" 2>&1; }
+  nq_rec need-you
+  is "mod-target reads it as need-you"        "nq-1 need-you" "$(node "$ROOT/lib/mod-target.mjs" "$NF" cfnq w1 | cut -f1,2 | tr '\t' ' ')"
+  out="$(NS w1 "list the toolbox scripts")"
+  is "a send to a need-you session is queued behind a question" "1" "$(grep -c 'queued #1 behind a question' <<< "$out" || true)"
+  is "...and not called mid-turn"             "0" "$(grep -c 'mid-turn' <<< "$out" || true)"
+  is "...and it is held, not sent"            "1" "$(grep -c . "$NF/cfnq.w1.queue" 2>/dev/null || echo 0)"
+  rm -f "$NF/cfnq.w1.queue"
+  # THE OTHER DIRECTION: a session that is merely working keeps the words it always had.
+  nq_rec working
+  out="$(NS w1 "list the acme-api routes")"
+  is "a working session is still mid-turn"    "1" "$(grep -c 'queued #1 — it is mid-turn' <<< "$out" || true)"
+  is "...and not behind a question"           "0" "$(grep -c 'behind a question' <<< "$out" || true)"
+  tmux -L cfnq kill-server 2>/dev/null
+  rm -rf "$NQ"
+else
+  skip "a send held behind a question" "tmux, jq or node missing"
+fi
+
 group "the queue moves with a rename and goes with a stop"
 if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   QM="$(mktemp -d)"; QMF="$QM/fleet"; mkdir -p "$QMF" "$QM/repo"
@@ -12672,6 +12833,37 @@ else
   # ...and -J is absent too: joining wrapped lines would un-wrap the grid tmux laid out,
   # which is the one thing the client cannot recover from.
   is "capture-pane is not asked to join"     "0"   "$(grep -c "'-J'" "$ROOT/bin/fleet-serve.mjs" || true)"
+
+  # ── a send held behind a question is not "sent" ───────────────────────────
+  # fleet-send queues a prompt to a need-you session, and it runs only once somebody
+  # answers the prompt in that pane. The verb's reply carries `queued: 'question'` so the
+  # phone says so (and offers the answer sheet) instead of a plain success. The session's
+  # mod record says need-you, written as the mod writes it, against the pane's own pid.
+  HF="$PN/heldfleet"; mkdir -p "$HF/hq-1.handoff"
+  tmux -L cf-demo new-session -d -s held -x 100 -y 30 -e CLAUDE_FLEET_DIR="$HF" "sleep 600" 2>/dev/null
+  HQPID="$(tmux -L cf-demo display-message -p -t held '#{pane_pid}' 2>/dev/null)"
+  hq_rec() { jq -n --arg s "$1" --argjson pid "$HQPID" --argjson hb "$(( $(date +%s) * 1000 ))" \
+               '{session_id:"hq-1", sock:"cf-demo", slot:"held", status:$s, state:$s, source:"mod", mod:{v:"t", pid:$pid, hb:$hb}}' \
+               > "$HF/hq-1.json"; printf '%s\n' "$HQPID" > "$HF/hq-1.handoff/.ready"; }
+  hq_send() { node --input-type=module -e "
+    import { Authenticator } from '$ROOT/test/helpers/serve-client.mjs';
+    const a = new Authenticator({ rpId: new URL('$PNBASE').hostname, origin: '$PNBASE' });
+    const e = await a.enroll('$PNBASE', process.argv[1]);
+    if (e.status !== 200) { console.log('enrol ' + e.status); process.exit(0); }
+    const r = await a.verb('$PNBASE', 'fleet_send', { project: 'demo', session: 'held', prompt: process.argv[2] });
+    console.log(JSON.stringify({ status: r.status, ok: r.json.ok, queued: r.json.queued ?? null }));" "$1" "$2"; }
+  if command -v jq >/dev/null 2>&1; then
+    hq_rec need-you
+    out="$(hq_send "$(pn_cli enroll phone-held | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the toolbox scripts")"
+    is "a send to a need-you session says queued behind a question" '{"status":200,"ok":true,"queued":"question"}' "$out"
+    rm -f "$PN/home/.claude/fleet/cf-demo.held.queue"
+    # ...and a send that is only mid-turn carries no such flag.
+    hq_rec working
+    out="$(hq_send "$(pn_cli enroll phone-held2 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the acme-api routes")"
+    is "...and a working one does not"        '{"status":200,"ok":true,"queued":null}' "$out"
+  else
+    skip "a send held behind a question (serve)" "jq missing"
+  fi
 fi
 kill $PN_PID 2>/dev/null
 tmux -L cf-demo kill-server 2>/dev/null

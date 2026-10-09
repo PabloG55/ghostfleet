@@ -1,0 +1,40 @@
+⏺ Database: SQLite · Deploy: Staging
+
+✻ Cooked for 3s · done 10:30 PM
+
+❯ Now call AskUserQuestion once with ONE question, header "Cache": "How should toolbox cache build
+  artifacts between runs of the scratch pipeline?" options: "Local disk (Recommended)" desc "Keep
+  artifacts in a directory beside the worktree, cleared when the worktree is removed; fastest, and
+  nothing leaves the machine", "Object store" desc "Upload artifacts to a shared bucket so every
+  runner can reuse them, at the cost of a network round trip per job", "No cache" desc "Rebuild
+  everything every time; slowest, but there is nothing that can ever go stale or be shared by
+  mistake", "Per-branch" desc "One cache per branch, so a long-lived branch keeps its own warm
+  cache and a short one starts cold". Then repeat my answer in one line.
+
+⏺ User answered Claude's questions:
+  ⎿  · How should toolbox cache build artifacts between runs of the scratch pipeline? → shared disk
+     on the runner
+
+⏺ Cache: shared disk on the runner (your own answer, not one of the listed options)
+
+✻ Churned for 4s · done 10:31 PM
+
+❯ Same two-question AskUserQuestion call as the first time (Database, Deploy). Then repeat my
+  answers in one line.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Database  ☒ Deploy  ✔ Submit  →
+
+Where should acme-web deploy first?
+
+❯ 1. Staging ✔
+     The shared integration environment
+  2. Production
+     Straight to users
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+
+

@@ -1652,6 +1652,101 @@ tap(cardTitled(/master/));
 is('a blocked session says so', true, await until(() =>
   !!app.find(n => n.className.split(/\s+/).includes('blocked')), 4000));
 is('...naming what a transcript cannot show', true, /a transcript cannot show one/.test(app.textContent));
+
+// ── a question picker is answered from the banner, tab by tab ─────────────
+// A session sat on claude's multi-question picker and the phone said "Nothing to answer".
+// The pane here is a REAL capture per step (test/fixtures/claude-question-*.txt), with the
+// prompt the daemon would serve beside it computed by the real detector — and it ADVANCES
+// when the app records an answer, the way the pane does, so the sheet following it is the
+// app reading what changed rather than the test drawing it.
+{
+  const { promptSummary } = await import(new URL('../../lib/permission-dialog.mjs', import.meta.url).href);
+  const cap = (f) => fs.readFileSync(new URL(`../../test/fixtures/${f}`, import.meta.url), 'utf8');
+  const paneOf = (f) => { const pane = f ? cap(f) : ''; return { ok: true, project: 'acme-api', session: 'master', scrollback: 0, at: 0, pane, prompt: f ? promptSummary(pane) : null }; };
+  // NEWEST FIRST, as auditLog() returns them, and counted by identity rather than by
+  // length: the log keeps the last 200, so a length can stop moving while answers do not.
+  const answers = () => api.auditLog().filter(r => r.tool === 'fleet_answer');
+  let steps = [], seen = new Set();
+  const fresh = () => answers().filter(r => !seen.has(r));
+  const walk = (files) => { steps = files.map(paneOf); seen = new Set(answers()); };
+  fixtureOverride = { get 'pane-acme-api-master.json'() { return steps[Math.min(fresh().length, steps.length - 1)]; } };
+  // An answer sets the fixture session working, as a real one would; the banner is for a
+  // need-you session, so each walk starts from the degraded fleet as shipped.
+  const blockedAgain = async () => { api.resetOverlay(); await pollTick();
+    await until(() => !!app.find(n => n.className.split(/\s+/).includes('blocked')), 4000); };
+  const sheetTxt = () => (sheetHost.firstChild ? sheetHost.firstChild.textContent.replace(/\s+/g, ' ') : '');
+  const sheetBtn = (re) => sheetHost.firstChild && sheetHost.firstChild.find(n => n.tag === 'button' && re.test(n.textContent.replace(/\s+/g, ' ').trim()));
+  const fp = (f) => promptSummary(cap(f)).fingerprint;
+
+  walk(['claude-question-multi-sgr.txt', 'claude-question-multi-tab2-sgr.txt', 'claude-question-submit-sgr.txt', null]);
+  is('the banner offers to answer', true, !!btnWith(/^answer$/));
+  click(btnWith(/^answer$/));
+  is('...and opens the question, not "nothing to answer"', true, await until(() => /answer the question/.test(sheetTxt()), 4000));
+  is('...saying which of how many', true, /question 1 of 2 · Database/.test(sheetTxt()));
+  is('...with the question itself', true, /Which database should acme-api use for the billing-svc ledger\?/.test(sheetTxt()));
+  is('...one button per option', true, !!sheetBtn(/^1\. Postgres \(Recommended\)$/) && !!sheetBtn(/^3\. DynamoDB$/));
+  is('...its description beside it', true, /Relational, already used by toolbox/.test(sheetTxt()));
+  is('...the free-text row as a field, not a button', true, !sheetBtn(/^4\. Type something/) && /4\. type an answer/.test(sheetTxt()));
+  is('..."Chat about this" saying what it does', true, !!sheetBtn(/^5\. Chat about this$/) && /declines these questions/.test(sheetTxt()));
+  click(sheetBtn(/^3\. DynamoDB$/));
+  is('a tap moves the sheet to the next question', true, await until(() => /question 2 of 2 · Deploy/.test(sheetTxt()), 4000));
+  const a1 = fresh()[0] || { args: {} };
+  is('...having sent the digit alone', '3|true', `${a1.args.text}|${a1.args.no_enter}`);
+  is('...for the step it was showing', fp('claude-question-multi-sgr.txt'), a1.args.expect);
+  is('...and says what it sent', true, /sent 3\. DynamoDB/.test(sheetTxt()));
+  click(sheetBtn(/^1\. Staging$/));
+  is('the last question leads to Submit', true, await until(() => /review and submit/.test(sheetTxt()), 4000));
+  is('...showing what was chosen', true, /→ SQLite/.test(sheetTxt()) && /Ready to submit your answers\?/.test(sheetTxt()));
+  click(sheetBtn(/^1\. Submit answers$/));
+  is('Submit closes the sheet', true, await until(() => !sheetHost.firstChild, 4000));
+  is('...and says the session has its answers', true, /has its answers/.test(app.textContent));
+  const three = fresh().reverse();
+  is('three taps, three digits, no Enter', '3,1,1|true,true,true',
+     `${three.map(r => r.args.text).join(',')}|${three.map(r => r.args.no_enter).join(',')}`);
+
+  // FREE TEXT: its digit makes the row an input, and only once the pane says so does the
+  // text go — with the Enter that submits it, against the TYPING step's fingerprint.
+  await blockedAgain();
+  walk(['claude-question-single.txt', 'claude-question-single-typing.txt', null]);
+  click(btnWith(/^answer$/));
+  await until(() => /answer the question/.test(sheetTxt()), 4000);
+  const fbox = sheetHost.firstChild && sheetHost.firstChild.find(n => n.tag === 'input');
+  is('a single question has a field for its own answer', true, !!fbox && /5\. type an answer/.test(sheetTxt()));
+  if (fbox) fbox.value = 'local disk on the runner';
+  click(sheetBtn(/^send answer$/));
+  is('a typed answer closes the sheet', true, await until(() => !sheetHost.firstChild, 4000));
+  const two = fresh().reverse().map(r => r.args);
+  is('...after the row\'s digit, alone', '5|true', `${two[0] && two[0].text}|${two[0] && two[0].no_enter}`);
+  is('...then the text, with Enter', 'local disk on the runner|false', `${two[1] && two[1].text}|${two[1] && two[1].no_enter}`);
+  is('...sent to the typing step', fp('claude-question-single-typing.txt'), two[1] && two[1].expect);
+  fixtureOverride = null;
+
+  // A SEND HELD BEHIND A QUESTION SAYS SO, with the way to answer it on the toast.
+  await blockedAgain();
+  const qta = app.find(n => n.tag === 'textarea');
+  qta.value = 'also list the toolbox scripts';
+  (qta.listeners.input || []).forEach(f => f());
+  click(btnWith(/^send$/));
+  const held = () => app.find(n => n.className.split(/\s+/).includes('toast'));
+  is('a send to a need-you session says it is queued behind a question', true,
+     await until(() => /queued behind a question/.test((held() || { textContent: '' }).textContent), 4000));
+  is('...not that it was sent', false, /\bsent to\b/.test((held() || { textContent: '' }).textContent));
+  const hb = held() && held().find(n => n.tag === 'button');
+  is('...with a button to answer it', 'answer it', hb ? hb.textContent.trim() : '');
+  walk(['claude-question-multi-sgr.txt']);
+  fixtureOverride = { get 'pane-acme-api-master.json'() { return steps[0]; } };
+  click(hb);
+  is('...which opens the answer sheet', true, await until(() => /answer the question/.test(sheetTxt()), 4000));
+  closeSheetFromTest();
+  fixtureOverride = null;
+  // Out and back in, as a finger would: the answers above left this screen holding the
+  // last pane the walk served, and the rows below read the shipped one.
+  swipeBack();
+  await until(onGrid, 4000);
+  await blockedAgain();
+  tap(cardTitled(/master/));
+  await until(() => !!app.find(n => n.className.split(/\s+/).includes('blocked')), 4000);
+}
 // ...and the button goes where the answer has to be typed. This is the whole seam between
 // the two views: the chat is the better place to read, the pane the only place to unblock.
 click(btnWith(/open the pane/));

@@ -1,0 +1,40 @@
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude[0m [1mCode[0m [38;5;246mv2.1.293[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mOpus[39m [38;5;246m5.5[39m [38;5;246m·[39m [38;5;246mClaude[39m [38;5;246mTeam[39m
+[38;5;174m ▝▝[39m   [38;5;174m▝▝[39m   [38;5;246m~/src/acme-api[39m
+
+
+[38;5;246m[48;5;237m❯ [38;5;231mCall the AskUserQuestion tool exactly once, with two questions and nothing else first. Question [39m
+  [38;5;231m1, header "Database": "Which database should acme-api use for the billing-svc ledger?" options: [39m
+  [38;5;231m"Postgres (Recommended)" desc "Relational, already used by toolbox", "SQLite" desc "Single file, [39m
+  [38;5;231mfine for scratch", "DynamoDB" desc "Managed key-value store". Question 2, header "Deploy": "Where[39m
+  [38;5;231mshould acme-web deploy first?" options: "Staging" desc "The shared integration environment", [39m
+  [38;5;231m"Production" desc "Straight to users". After I answer, just repeat my answers back in one line.[39m
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────────────────────────
+← [38;5;16m[48;5;153m ☐ Database [39m[49m ☐ Deploy  ✔ Submit  →
+
+[1m[38;5;231mWhich database should acme-api use for the billing-svc ledger?[0m
+
+[38;5;153m❯[39m [38;5;246m1.[39m [38;5;153mPostgres (Recommended)[39m
+     [38;5;246mRelational, already used by toolbox[39m
+  [38;5;246m2.[39m SQLite
+     [38;5;246mSingle[39m [38;5;246mfile,[39m [38;5;246mfine[39m [38;5;246mfor[39m [38;5;246mscratch[39m
+  [38;5;246m3.[39m DynamoDB
+     [38;5;246mManaged[39m [38;5;246mkey-value[39m [38;5;246mstore[39m
+  [38;5;246m4.[39m [38;5;246mType[39m [38;5;246msomething.[39m
+[38;5;246m────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  5. Chat about this
+
+[38;5;246mEnter[39m [38;5;246mto[39m [38;5;246mselect[39m [38;5;246m·[39m [38;5;246mTab/Arrow[39m [38;5;246mkeys[39m [38;5;246mto[39m [38;5;246mnavigate[39m [38;5;246m·[39m [38;5;246mEsc[39m [38;5;246mto[39m [38;5;246mcancel[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
