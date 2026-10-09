@@ -860,7 +860,11 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   own closes, a small-model call (`haiku` by default) for every ten items **still open**,
   newest first, reads them and the turn's text (all of its blocks, cut from the middle past
   6,000 characters, plus up to two earlier turns since the oldest open item) and answers
-  strict JSON: each item `done`, `not-done` (said so, **with a reason**), or `open`. A part
+  strict JSON: each item `done`, `in-progress` (the turn reported its state and the work
+  goes on elsewhere: a worker, a build, CI, the person's pick), `not-done` (said so, **with
+  a reason**), or `open` (the turn did not address it), and whether the turn ends waiting on
+  the person (`waitingOnPerson`). An `in-progress` item stays open, marked `[in progress]`
+  in `/ledger`, and is judged again on later turns. A part
   an item itself put off ("not in this reply") is not owed yet. A bare "go ahead" or "thanks"
   closes once the agent acted. **A turn in which the agent closed items and left nothing
   open makes no call at all**, promise wording or not; otherwise the call is made only when
@@ -879,7 +883,9 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   One commitment is one promise: the judge is shown the open promises and names the one a
   new phrasing restates, and a phrasing that shares most of its content words with an open
   promise (or any earlier phrasing of it) is that promise too. What the agent asks the
-  person to do ("still waiting on you: run X") is never a promise. At most five are open;
+  person to do ("still waiting on you: run X") is never a promise, nor is waiting on them
+  ("I'll wait for your reply", "once they decide"), nor the follow-through of an item judged
+  `in-progress` ("I'll ship it when the worker lands"). At most five are open;
   a sixth closes the oldest as `stale`.
 - **The gate.** Items **from the latest prompt** still open after the judge get **one**
   framed re-prompt ("the ghostfleet plugin sent a message") naming them and asking the agent
@@ -899,6 +905,14 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   messages, and one that is not is dropped (resubmitted, it is a new item). Promises show
   and do not gate, unless `CLAUDE_FLEET_LEDGER_PROMISES=gate`, and then only a promise made
   in the latest prompt's turns.
+  **Never about an `in-progress` item**: naming it gets the same report back. And no
+  re-prompt at all at the end of a turn that the gate's own re-prompt started, one that
+  ends asking the person something or waiting on their decision, a lead's turn while its
+  workers are still working or waiting on a person, or one within five minutes of the last
+  re-prompt. Each of these leaves the items open and un-gated, and the file keeps
+  `judge.held` (`gate-turn`, `waiting`, `workers`, `cooldown`)
+  with the ids it held back. An item the turn simply never mentioned is still re-prompted
+  once.
 - **It fails open.** A judge that errors, times out (30 s) or answers anything but the JSON
   asked for closes nothing and re-prompts nothing; the file keeps `judge: { ok: false, why }`,
   the band leads with `judge failing: <why>` while anything is open, the record carries

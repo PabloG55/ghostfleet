@@ -20,6 +20,17 @@ the detail, and every entry here names the PR that carries the argument.
   you: run X") were recorded as the agent's own. The judge now names the open promise a
   phrasing restates, a word-overlap check catches the ones it misses, person-addressed
   steps are dropped, and at most five promises are open at once.
+- **The ledger's gate stops re-prompting work the session already reported on** (#41). "Open"
+  meant both "the turn ignored this" and "the turn reported on it while a worker builds it",
+  and the gate re-prompted both, so an agent that had just said "the build is in progress in
+  a worker" was told to finish it now and could only say the same thing again. The judge now
+  has an `in-progress` verdict: the item stays open, on the band and in `/ledger` (marked
+  `[in progress]`), and the gate never names it. There is also no re-prompt at the end of a
+  turn that asks the person something or waits on their decision, a turn the gate's own
+  re-prompt started, a lead's turn while its workers are still working, or within five
+  minutes of the last re-prompt. "I'll wait
+  for your reply" is no longer recorded as a promise. An item a turn never mentions is
+  still re-prompted once.
 
 ## 0.5.1 — 2026-10-08
 

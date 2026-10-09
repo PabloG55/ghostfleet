@@ -93,6 +93,8 @@ const step = async ($: any, turnId: string, index: number, text: string, extra: 
   return s.result
 }
 // The re-prompts the gate sent: the mod's own framed submits, not the test's typing.
+// ledger.js GATE_COOLDOWN_MS, and a little: two re-prompts are never closer than that.
+const COOLDOWN = 5 * 60_000 + 1000
 const nags = (w: World) => w.submitted.filter(e => e.origin?.kind === 'plugin' && !e.origin?.asUser)
 
 test('a task and two messages typed mid-turn are three open items, on the record and the band', async ($, on) => {
@@ -866,9 +868,10 @@ test('decision 3: the gate names only the latest prompt; an item from two prompt
   await $.turn.start({ text: 'rename the config key', turnId: 't1' })
   await $.turn.complete({ ...done('t1', 'Renaming…'), reason: 'aborted', isAborted: true })
   await settle(clock)
-  // prompt 2 and prompt 3, each answered with nothing done
+  // prompt 2 and prompt 3, each answered with nothing done, past the gate's cooldown apart
   w.judge = verdict(() => 'open')
   for (const [k, t] of [[2, 'bump the version'], [3, 'write the changelog line']] as const) {
+    await clock.advance(COOLDOWN)
     await type($, t)
     await $.turn.start({ text: t, turnId: `t${k}` })
     await $.turn.complete(done(`t${k}`, 'Looked around.'))
@@ -896,6 +899,7 @@ test('decision 3: a message queued over a turn joins that prompt, and a fleet-de
   expect(nags(w).length).toBe(1)
   expect(nags(w)[0].text).toContain('2 requests are')
   // a fleet delivery: the gate names it, and not the two already gated
+  await clock.advance(COOLDOWN)
   w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'run the tests' }))
   await clock.advance(500)
   await $.turn.start({ text: 'run the tests', turnId: 't3' })
@@ -996,4 +1000,154 @@ test('the fleet\'s own nudge is a wake-up, never an item: matched by its handoff
   expect((first.context ?? []).join('\n')).toContain('1 (asked): run fleet-inbox and merge what is green')
   const second: any = await $.tool.call({ tool: ADD, text: 'and one more' } as any)
   expect(second.context ?? []).toEqual([])
+})
+
+// ── the gate's guardrails: a turn that reported on its work is not re-prompted ──
+// "open" used to mean both "the turn ignored it" and "the turn reported on it while the work
+// went on elsewhere", and the gate re-prompted both: the agent could only repeat its report.
+
+const verdictOf = (status: (id: string) => string, extra: object = {}) => (prompt: string) => {
+  const ids = [...prompt.matchAll(/^(\d+) \[/gm)].map(m => m[1])
+  return { isAnswered: true, text: JSON.stringify({ items: ids.map(id => ({ id, status: status(id), reason: 'r' })), promises: [], ...extra }), usage: {} }
+}
+const REPORT = 'Dry run done. The build is still in progress in a worker; I will ship it when it lands.'
+
+test('an item the turn reported in progress is never re-prompted, and stays open, listed and judged', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'build the acme-api export')
+  await $.turn.start({ text: 'build the acme-api export', turnId: 't1' })
+  w.heard = ['build the acme-api export']
+  w.judge = verdictOf(() => 'in-progress')
+  await $.turn.complete(done('t1', REPORT))
+  await settle(clock)
+  expect(nags(w)).toEqual([])
+  const it = book(w).items[0]
+  expect([it.state, Boolean(it.gated), it.progress?.turnId]).toEqual(['open', false, 't1'])
+  expect(rec(w).ledger).toEqual(expect.objectContaining({ open: 1 }))
+  expect((await $.command.run({ command: 'ledger', args: '' } as any)).text).toContain('[in progress')
+  // a later turn still judges it, and still does not re-prompt it, even when it says nothing of it
+  w.judge = verdictOf(() => 'open')
+  await clock.advance(COOLDOWN)
+  await $.turn.start({ text: '', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Checked the logs.'))
+  await settle(clock)
+  expect(w.judged.length).toBe(2)
+  expect(w.judged[1]).toContain('1 [request')
+  expect(nags(w)).toEqual([])
+})
+
+test('two asks, one in progress and one never mentioned: the re-prompt names only the ignored one, once', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'build the acme-api export', )
+  await $.turn.start({ text: 'build the acme-api export', turnId: 't1' })
+  await type($, 'and rename the toolbox flag', 't1')
+  w.heard = ['build the acme-api export', 'and rename the toolbox flag']
+  w.judge = verdictOf(id => (id === '1' ? 'in-progress' : 'open'))
+  await $.turn.complete(done('t1', REPORT))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('2. "and rename the toolbox flag"')
+  expect(nags(w)[0].text).not.toContain('acme-api export')
+  expect(book(w).items.map((i: any) => [i.id, i.state, Boolean(i.gated)])).toEqual([['1', 'open', false], ['2', 'open', true]])
+})
+
+test('a turn that ends on a question to the person is not re-prompted; the next one that ignores the item is', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'set up the billing-svc alerts')
+  await $.turn.start({ text: 'set up the billing-svc alerts', turnId: 't1' })
+  w.heard = ['set up the billing-svc alerts']
+  w.judge = verdictOf(() => 'open', { waitingOnPerson: true })
+  await $.turn.complete(done('t1', 'Which channel should they go to: a, b or c?'))
+  await settle(clock)
+  expect(nags(w)).toEqual([])
+  expect(book(w).judge).toEqual(expect.objectContaining({ ok: true, held: 'waiting', heldItems: ['1'] }))
+  expect(book(w).items[0].gated).toBeUndefined()
+  w.judge = verdictOf(() => 'open')
+  await $.turn.start({ text: '', turnId: 't2' })
+  await $.turn.complete(done('t2', 'Looked at other things.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+})
+
+test('the turn the re-prompt started is never re-prompted, even past the cooldown', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  w.heard = ['fix the login redirect']
+  await $.turn.complete(done('t1', 'Looked around.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  // the re-prompt's own turn adds an ask the split missed (same window), runs long, ignores it
+  await $.turn.start({ text: nags(w)[0].text, turnId: 't2' })
+  expect(await tool($, ADD, { text: 'and add a test for it' })).toBe('ledger: tracking 2')
+  await clock.advance(COOLDOWN)
+  await $.turn.complete(done('t2', 'Fixed the redirect.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(book(w).judge.held).toBe('gate-turn')
+})
+
+test('at most one re-prompt per cooldown: an ask ignored right after one waits, one ignored later is named', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.heard = ['fix the login redirect', 'bump the version', 'write the changelog line']
+  for (const [k, t] of [[1, 'fix the login redirect'], [2, 'bump the version']] as const) {
+    await type($, t)
+    await $.turn.start({ text: t, turnId: `t${k}` })
+    await $.turn.complete(done(`t${k}`, 'Looked around.'))
+    await settle(clock)
+    await clock.advance(60_000)
+  }
+  expect(nags(w).length).toBe(1)
+  expect(book(w).judge.held).toBe('cooldown')
+  await clock.advance(COOLDOWN)
+  await type($, 'write the changelog line')
+  await $.turn.start({ text: 'write the changelog line', turnId: 't3' })
+  await $.turn.complete(done('t3', 'Looked around.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(2)
+  expect(nags(w)[1].text).toContain('3. "write the changelog line"')
+})
+
+test("a lead whose workers are still working is not re-prompted", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  w.files.set(FILE, JSON.stringify({ ...BASE, slot: 'master' }))
+  w.files.set(`${DIR}/kid.json`, JSON.stringify({ session_id: 'kid', sock: 'cf-acme-api', slot: 'w1', status: 'idle', ts: 1, source: 'mod', state: 'working', mod: { pid: 7, hb: 1_000_000 } }))
+  await start($)
+  await clock.advance(10)
+  await type($, 'ship the acme-web redesign')
+  await $.turn.start({ text: 'ship the acme-web redesign', turnId: 't1' })
+  w.heard = ['ship the acme-web redesign']
+  await $.turn.complete(done('t1', 'Dispatched w1.'))
+  await settle(clock)
+  expect(nags(w)).toEqual([])
+  expect(book(w).judge.held).toBe('workers')
+})
+
+test('waiting on the person, and the follow-through of an in-progress item, are never promises', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'build the acme-api export')
+  await $.turn.start({ text: 'build the acme-api export', turnId: 't1' })
+  w.heard = ['build the acme-api export']
+  w.judge = verdictOf(() => 'in-progress', { promises: [
+    { text: "wait for the user's reply", by: 'agent', same: '' },
+    { text: 'ship the export once the worker lands', by: 'agent', same: '1' },
+    { text: 'build the acme-api export after the dry run', by: 'agent', same: '' },
+    { text: 'merge the PR once CI is green', by: 'agent', same: '' },
+  ] })
+  await $.turn.complete(done('t1', `${REPORT} I'll wait for your reply on the rest.`))
+  await settle(clock)
+  expect(book(w).items.filter((i: any) => i.source === 'promise').map((i: any) => i.text)).toEqual(['merge the PR once CI is green'])
 })

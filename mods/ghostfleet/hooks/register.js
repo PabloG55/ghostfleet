@@ -45,7 +45,7 @@ import {
   ledgerFile, parseLedger, ledgerConfig, sourceOf, openItems, ledgerSummary,
   soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
-  judgeBatches, JUDGE_TOKENS,
+  judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn,
   markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, TOOL,
 } from './ledger.js'
 import {
@@ -979,7 +979,10 @@ function startBand($) {
 //            ten open items (when something is open, or the answer sounds like a promise):
 //            which open items the turn's text, all of it, addressed, and what its final text
 //            promised. A promise kept open through five judged turns closes as stale
-//   GATE     items still open after that get ONE re-prompt, ever, naming them
+//   GATE     items still open after that get ONE re-prompt, ever, naming them; never an
+//            item the turn reported in progress, and never at all at the end of a turn the
+//            gate itself started, one that ends on a question to the person, one inside the
+//            cooldown, or a lead's while its workers are still at it (gateHold)
 //
 // A NAG, NOT A GUARD. It fails OPEN everywhere: a judge that errors, times out or answers
 // a wrong shape closes nothing and re-prompts nothing (the item stays open, the failure is
@@ -1005,6 +1008,7 @@ let answers = []         // the last few judged turns: { at, turnId, blocks }
 let stepTexts = new Map() // turnId -> the text each of its main-loop steps wrote, in order
 let ledgerShown = ''     // what the band and the record last said
 let ledgerAsOf = 0
+let gateTurns = []       // the last few turns the gate's own re-prompt started
 
 async function ledgerConfigOf($) {
   if (ledgerCfg) return ledgerCfg
@@ -1175,6 +1179,7 @@ async function onLedgerTool($, e) {
 async function ledgerTurnStart($, e) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on || !e.text) return
+  if (isGateTurn(e.text)) gateTurns = [...gateTurns, e.turnId].slice(-4)
   await changeLedger($, l => stampTurn(l, e.text, e.turnId))
 }
 
@@ -1291,6 +1296,7 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   let after = null
   const failed = []
   let answered = 0
+  let waitingOnPerson = false
   for (const [k, batch] of batches.entries()) {
     const r = await $.model.complete({
       model: cfg.model, prompt: judgePrompt(batch, blocks, { ...cfg, promises: k ? 'off' : cfg.promises, earlier, openPromises }),
@@ -1304,6 +1310,7 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
     // What a cut-off reply finished still applies; the items it never reached stay open.
     if (verdict.partial) failed.push(`reply cut off after ${verdict.items.length} of ${batch.length} items`)
     answered += verdict.items.length
+    waitingOnPerson = waitingOnPerson || verdict.waitingOnPerson
     after = await changeLedger($, l => applyVerdict(l, verdict, { nowMs, turnId: e.turnId, promises: k ? 'off' : cfg.promises })) || after
   }
   const judge = failed.length
@@ -1339,6 +1346,19 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
     if (msgs && gone.length) await changeLedger($, l => dropItems(l, gone))
     targets = targets.filter(i => !gone.includes(i.id))
     if (!targets.length) return
+  }
+  // Each of these is a turn whose re-prompt could only be answered with the report it just
+  // gave (ledger.js gateHold). The items stay open and un-gated: a later turn may still name them.
+  const band = await bounded($, $.state.get(BAND), IO_MS, null)
+  const team = band && band.value
+  const held = gateHold({
+    gateTurn: gateTurns.includes(e.turnId), waitingOnPerson, lastGate: lastGateAt(after), nowMs,
+    workers: team ? (Number(team.working) || 0) + (Number(team.need) || 0) : 0,
+  })
+  if (held) {
+    await changeLedger($, l => ({ ...l, judge: { ...(l.judge || judge), held, heldItems: targets.map(i => i.id) } }))
+    void $.ui.log(`ghostfleet ledger: no re-prompt for ${targets.map(i => i.id).join(', ')} (${held})`, { to: 'debug' })
+    return
   }
   const ids = targets.map(i => i.id)
   // Marked BEFORE the submit: a crash between the two loses one nag, never adds a second.
