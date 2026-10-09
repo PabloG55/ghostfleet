@@ -1,0 +1,40 @@
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude[0m [1mCode[0m [38;5;246mv2.1.293[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mOpus[39m [38;5;246m5.5[39m [38;5;246m·[39m [38;5;246mClaude[39m [38;5;246mTeam[39m
+[38;5;174m ▝▝[39m   [38;5;174m▝▝[39m   [38;5;246m~/src/acme-api[39m
+
+
+[38;5;246m[48;5;237m❯ [38;5;231mCall the AskUserQuestion tool exactly once, with two questions and nothing else first. Question [39m
+  [38;5;231m1, header "Database": "Which database should acme-api use for the billing-svc ledger?" options: [39m
+  [38;5;231m"Postgres (Recommended)" desc "Relational, already used by toolbox", "SQLite" desc "Single file, [39m
+  [38;5;231mfine for scratch", "DynamoDB" desc "Managed key-value store". Question 2, header "Deploy": "Where[39m
+  [38;5;231mshould acme-web deploy first?" options: "Staging" desc "The shared integration environment", [39m
+  [38;5;231m"Production" desc "Straight to users". After I answer, just repeat my answers back in one line.[39m
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m←  ☒ Database [38;5;16m[48;5;153m ☐ Deploy [39m[49m ✔ Submit  →
+
+[1m[38;5;231mWhere[0m [1m[38;5;231mshould acme-web[0m [1m[38;5;231mdeploy first?[0m
+
+[38;5;153m❯[39m [38;5;246m1.[39m [38;5;153mStaging[39m
+     [38;5;246mThe shared integration environment[39m
+  [38;5;246m2.[39m Production
+     [38;5;246mStraight to users[39m
+  [38;5;246m3. Type something.[39m
+[38;5;246m────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  4. Chat about this
+
+[38;5;246mEnter to select · Tab/Arrow keys to navigate · Esc to cancel[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

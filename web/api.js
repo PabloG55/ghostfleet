@@ -655,6 +655,9 @@ export async function verb(tool, args, assertion = null) {
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
 const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set() };
+// What each card last said it was, as drawn — so a send to a session the fixture shows as
+// need-you is held the way the daemon holds it (bin/fleet-send: "queued behind a question").
+const lastStatus = new Map();
 function applyOverlay(g) {
   let cards = (g.cards || [])
     .filter(c => !overlay.gone.has(c.name))
@@ -665,6 +668,7 @@ function applyOverlay(g) {
       label: overlay.label.has(c.name) ? overlay.label.get(c.name) : c.label,
     }));
   for (const c of overlay.added) if (!cards.some(x => x.name === c.name)) cards.push(c);
+  for (const c of cards) lastStatus.set(c.name, c.status);
   // applyOrder(), same rule as the TUI: the names the order file knows, in its order,
   // then anything it has not heard of — a new session appears at the end rather than
   // vanishing because it is not in the list.
@@ -695,6 +699,9 @@ function fixtureVerb(tool, a) {
       overlay.status.set(a.session, 'parked'); return ok(`parked '${a.session}'`);
     case 'fleet_resume': overlay.status.set(a.session, a.prompt ? 'working' : 'ready'); return ok(`resumed '${a.session}'`);
     case 'fleet_send': {
+      // Held behind the prompt in its pane, as fleet-serve reports it: `queued: 'question'`.
+      if (lastStatus.get(a.session) === 'need-you')
+        return { ...ok(`fleet-send: → ${a.session} (queued #1 behind a question — it is waiting on an answer in its pane)`), queued: 'question' };
       overlay.status.set(a.session, 'working');
       // ...and it lands in the transcript, because the chat's optimistic bubble is
       // reconciled against what the transcript says (app.js's reconcilePending). Without
