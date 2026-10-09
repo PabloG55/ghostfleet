@@ -3964,6 +3964,34 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     }
     console.log([...counts].join(','))" 2>&1)"
   is "ledger: four phrasings of one promise fold into one in every order; three different ones stay" "4" "$lp"
+  # The gate's guardrails, as data. "in-progress" is a status of its own: the item stays open
+  # (listed, judged again) and is never a gate target, while an item the same verdict calls
+  # "open" still is. Waiting on the person is no promise, and neither is the follow-through of
+  # an in-progress item. The holds each say why, and an ordinary turn has none.
+  lg="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const now = 10 * 86400000
+    let l = L.emptyLedger()
+    l = L.addPrompt(l, { text: 'build the acme-api export', at: now - 60000, source: 'user' })
+    l = L.addPrompt(l, { text: 'rename the toolbox flag', at: now - 60000, source: 'user', queued: true })
+    const v = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"in-progress\",\"reason\":\"worker building it\"},{\"id\":\"2\",\"status\":\"open\"}],\"waitingOnPerson\":true,\"promises\":[{\"text\":\"wait for the user reply\"},{\"text\":\"ship it when the build lands\",\"same\":\"1\"},{\"text\":\"merge once CI is green\"}]}', ['1', '2'])
+    const cut = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"in-progress\"},{\"id\":\"2\",\"st', ['1', '2'])
+    const plain = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"open\"}],\"promises\":[]}', ['1'])
+    l = L.applyVerdict(l, v, { nowMs: now, turnId: 't1', promises: 'show' })
+    const states = l.items.map(i => i.id + ':' + i.state + ':' + (i.progress ? 'p' : '-')).join(',')
+    const targets = L.gateTargets(l, now, { promises: 'show' }).map(i => i.id).join('')
+    const listed = /\[in progress: worker building it\]/.test(L.listing(l, now))
+    const waits = ['wait for the user reply', 'await the person\'s answer', 'once they decide, proceed', 'standing by for approval',
+      'merge once CI is green', 'wait for CI, then tag the release', 'reply to the review comments'].map(t => L.waitsOnPerson(t) ? 'w' : '-').join('')
+    const h = o => L.gateHold({ nowMs: now, ...o }) || '-'
+    const holds = [h({}), h({ gateTurn: true }), h({ waitingOnPerson: true }), h({ lastGate: now - 60000 }), h({ lastGate: now - L.GATE_COOLDOWN_MS - 1 }),
+      h({ workers: 2 })].join(',')
+    const nag = L.gatePrompt([{ id: '2', text: 'x', source: 'user' }])
+    const gt = [nag, 'The ghostfleet plugin sent a message: ' + nag, 'why did the [ghostfleet ledger] ask that', ''].map(t => L.isGateTurn(t) ? 'g' : '-').join('')
+    console.log([v.items.map(i => i.status).join('/'), v.waitingOnPerson, cut.waitingOnPerson, plain.waitingOnPerson, v.promises.length, states, targets,
+      listed, waits, holds, gt, L.lastGateAt(L.markGated(l, ['2'], now - 5)) === now - 5].join(' | '))" 2>&1)"
+  is "ledger: in-progress stays open and ungated; open is still gated; waiting is no promise; each hold says why" \
+     "in-progress/open | true | false | false | 2 | 1:open:p,2:open:-,3:open:- | 2 | true | wwww--- | -,gate-turn,waiting,cooldown,-,workers | gg-- | true" "$lg"
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
   printf '{"session_id":"lg-1","sock":"cf-lgtest","slot":"w1","ts":5}' > "${LG:?}/lg-1.json"

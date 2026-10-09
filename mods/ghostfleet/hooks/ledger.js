@@ -12,6 +12,9 @@
 //            fleet    a prompt fleet-send handed to the mod (DELIVERY)
 //            promise  a commitment the agent made in a final message ("I'll merge when green")
 //   gated    true once the gate has re-prompted about it: at most once per item, ever
+//   progress { at, turnId, reason }: a judged turn reported the item's state and said the
+//            work goes on elsewhere (a worker, a build, CI) or waits on the person. It stays
+//            open, listed and judged, and the gate never names it (gateTargets)
 //   queued   typed over a running turn; interrupted: its turn was stopped (Esc). Either may
 //            never have reached the model, and the gate asks the transcript first
 //   prompt   the number of the prompt that made it (ledger.prompt counts them); `window` is
@@ -278,9 +281,10 @@ export function judgePrompt(items, turn, { promises, earlier = [], openPromises 
     '',
     'For EACH item decide:',
     '- "done": the turn (any block of it) or an earlier turn did it, answered it, or reports it completed. Work written in an earlier block counts: "the draft is above" in the last block refers to a draft in an earlier one.',
-    '- "done" also, with reason "reported: waiting on <what>", when the agent did everything it can do now and says plainly that the rest waits on something outside its control (CI running, a registry or deploy propagating, a review, the person\'s own action), and what happens next. Work the agent could have done itself and simply did not is not this: it is "open".',
+    '- "done" also, with reason "reported: waiting on <what>", when the agent did everything the item asks of it and says plainly that only something outside its control remains (a registry or deploy propagating, a review) with nothing more for the agent to do.',
+    '- "in-progress": the turn reports THIS item\'s current state and says the work is still going on elsewhere or waits on something, with a step still owed after it. E.g. "dry run done; the build is running in a worker, I\'ll ship it when it lands", "CI is running on the PR", "waiting on your pick between A and B". Work the agent could do now and simply did not is not this: it is "open".',
     '- "not-done": the agent explicitly says THIS item was not or cannot be done AND gives a reason. A refusal with no reason, or one that does not say which request it means, is "open".',
-    '- "open": anything else: not mentioned, only acknowledged, or partly done with no report of why the rest is waiting.',
+    '- "open": the turn did not address the item: not mentioned, or only acknowledged ("on it"), or partly done with no word on the rest. E.g. two requests, and the turn only answers the first: the second is "open".',
     'Judge an item by what it asked for NOW: a part it explicitly put off ("not in this reply", "later", "after X") is not owed yet.',
     'An item may open with material the person pasted with no marker (a draft, a log, a transcript) and end with their own words: judge what THOSE words ask. A question ("what do you think?") is "done" once the agent answers it; an answer that ends by offering more or asking something back does not reopen it.',
     'An item is the person\'s own words. "[+ pasted text]" means they also pasted material (a transcript, a log, an earlier reply) as context for those words: the material is not a request of its own, and a "[ghostfleet ledger]" reminder quoted in it is this tool talking, never a request. Judge what the person\'s own words ask; a remark about the paste ("see what it did") asks for the agent to look at it, and is done once the agent has.',
@@ -290,6 +294,7 @@ export function judgePrompt(items, turn, { promises, earlier = [], openPromises 
       : [
         `Also list "promises", from ${final} only: things the AGENT says IT WILL DO LATER in this session ("I'll merge once CI is green", "next I'll add the tests"), each as a short imperative phrase of at most 12 words. Only a firm commitment to a specific action: not work it already did, not suggestions for the user, not questions, not offers that wait on the user ("I can do X if you'd like"), not statements about how it will behave in general ("I'll keep responding normally").`,
         'A promise is something the AGENT will do. What it asks the PERSON to do is never a promise: "you run X", "type X", "waiting on you", and every line of a list under "still waiting on you" or "for you to do". If you list one anyway, mark it "by":"person".',
+        'Waiting is never a promise: "I\'ll wait for your reply", "awaiting your answer", "once you decide I\'ll proceed" are the agent waiting on the person. Nor is the follow-through of an item you judged "in-progress" ("I\'ll ship it when the worker lands" for that item): give that item\'s id as "same".',
         ...(openPromises.length
           ? ['ALREADY OPEN PROMISES (one commitment is one promise, however it is worded):',
             ...openPromises.map(i => `${i.id}: ${excerpt(i.text, 120)}`),
@@ -298,8 +303,10 @@ export function judgePrompt(items, turn, { promises, earlier = [], openPromises 
         '[] if none.',
       ]),
     '',
+    'Also say "waitingOnPerson": true when the turn ENDS by asking the person a question or waiting on their decision or action ("which do you want?", "pick one of A, B, C", "tell me when it is deployed"); false otherwise, and false for an answer that merely closes with an offer ("want me to do more?").',
+    '',
     'Reply with ONLY this JSON, no prose, no code fence:',
-    `{"items":[{"id":"<id>","status":"done|not-done|open","reason":"<at most 12 words>"}],"promises":[${promises === 'off' ? '' : '{"text":"<at most 12 words>","by":"agent|person","same":"<open promise id, or empty>"}'}]}`,
+    `{"items":[{"id":"<id>","status":"done|in-progress|not-done|open","reason":"<at most 12 words>"}],"waitingOnPerson":false,"promises":[${promises === 'off' ? '' : '{"text":"<at most 12 words>","by":"agent|person","same":"<open promise or in-progress item id, or empty>"}'}]}`,
   ].join('\n')
 }
 
@@ -312,6 +319,7 @@ export function judgePrompt(items, turn, { promises, earlier = [], openPromises 
 // backlog only grew and every later turn failed the same way. So the finished objects are
 // kept, `partial` says the reply was cut, and an item it never reached is simply not judged.
 const ITEM_OBJ = /\{[^{}]*"id"[^{}]*\}/g
+const STATUSES = ['done', 'in-progress', 'not-done', 'open']
 export function parseVerdict(text, ids) {
   const s = String(text || '')
   const a = s.indexOf('{'), b = s.lastIndexOf('}')
@@ -329,7 +337,7 @@ export function parseVerdict(text, ids) {
     const pm = s.match(/"promises"\s*:\s*(\[[^\]]*\])/)
     let promises = []
     if (pm) try { promises = JSON.parse(pm[1]) } catch {}
-    v = { items: found, promises }
+    v = { items: found, promises, waitingOnPerson: /"waitingOnPerson"\s*:\s*true/.test(s) }
     partial = true
   }
   const known = new Set(ids)
@@ -337,7 +345,7 @@ export function parseVerdict(text, ids) {
   for (const it of v.items) {
     if (!it || !known.has(String(it.id))) continue
     const status = String(it.status || '')
-    if (!['done', 'not-done', 'open'].includes(status)) continue
+    if (!STATUSES.includes(status)) continue
     items.push({ id: String(it.id), status, reason: excerpt(it.reason, 120) })
   }
   if (partial && !items.length) return null
@@ -347,8 +355,8 @@ export function parseVerdict(text, ids) {
     .map(p => (p && typeof p === 'object' ? p : { text: p }))
     .filter(p => String(p.by || 'agent').toLowerCase() !== 'person')
     .map(p => ({ text: excerpt(p.text, 120), ...(p.same ? { same: String(p.same) } : {}) }))
-    .filter(p => p.text && !addressedToPerson(p.text)).slice(0, 3)
-  return { items, promises, ...(partial ? { partial: true } : {}) }
+    .filter(p => p.text && !addressedToPerson(p.text) && !waitsOnPerson(p.text)).slice(0, 3)
+  return { items, promises, waitingOnPerson: v.waitingOnPerson === true, ...(partial ? { partial: true } : {}) }
 }
 
 // The judge asks about at most JUDGE_BATCH items per call, the newest first. One verdict is
@@ -407,6 +415,14 @@ export function samePromise(a, b) {
 // person outright.
 export const addressedToPerson = text => /\b(you|your|yourself)\b/i.test(String(text || ''))
 
+// Waiting on the person is not a promise either: "wait for the user's reply" kept on the band
+// as something the agent owes is the person's move dressed as the agent's, and it would stay
+// open until it went stale. The prompt says so; this catches the phrasings that name no
+// "you" for the test above to find ("await the user's answer", "once they decide").
+const WAITS = /\b(wait(?:ing)?|await(?:ing)?|hear(?:ing)? back|stand(?:ing)? by)\b(?:(?![.;]).)*\b(user|person|owner|reply|replies|answer|answers|decision|decides?|response|confirm\w*|go-?ahead|approv\w*|input|pick|choice)\b/i
+const UPON = /^(once|when|after|if|until) (the )?(user|person|owner|they) (decides?|repl(y|ies)|answers?|confirms?|picks?|chooses?|approves?|responds?)\b/i
+export const waitsOnPerson = text => WAITS.test(String(text || '')) || UPON.test(String(text || '').trim())
+
 // At most PROMISE_CAP open promises: a new one past it stales the oldest. Promises are shown,
 // not gated, and five is already more than a band row or a person can keep in view.
 export const PROMISE_CAP = 5
@@ -414,6 +430,9 @@ export const PROMISE_CAP = 5
 // The verdict applied: judged items close, promises join as items of their own. A promise
 // the judge says restates an open one (`same`), or that reads as one (samePromise), is that
 // promise, never a second; its newer words replace the older ones only when the judge said so.
+// An item judged in-progress stays open and carries `progress`, which the gate reads: it is
+// being worked, and naming it again only gets the same report back. A promise whose words
+// are the follow-through of such an item ("ship it when the worker lands") is that item.
 export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
   const by = new Map(verdict.items.map(i => [i.id, i]))
   let next = {
@@ -421,6 +440,8 @@ export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
     items: ledger.items.map(i => {
       const v = by.get(i.id)
       if (!v || i.state !== 'open') return i
+      // Not a turn that ignored it, so it does not count towards a promise going stale.
+      if (v.status === 'in-progress') return { ...i, progress: { at: nowMs, ...(turnId ? { turnId } : {}), ...(v.reason ? { reason: v.reason } : {}) } }
       if (v.status === 'open') {
         if (i.source !== 'promise') return i
         const kept = (Number(i.keptOpen) || 0) + 1
@@ -435,7 +456,10 @@ export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
   const close = (ids, reason) => {
     next = { ...next, items: next.items.map(i => (ids.includes(i.id) ? { ...i, state: 'stale', closedAt: nowMs, closedBy: 'judge', reason } : i)) }
   }
+  const working = next.items.filter(i => i.state === 'open' && i.source !== 'promise' && i.progress)
   for (const p of verdict.promises) {
+    if (p.same && working.some(i => i.id === p.same)) continue
+    if (working.some(i => samePromise(i.text, p.text))) continue
     const named = p.same && openP().find(i => i.id === p.same)
     if (named) {
       next = { ...next, items: next.items.map(i => (i === named ? { ...i, text: excerpt(p.text) } : i)) }
@@ -464,10 +488,55 @@ export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
 // band and in /ledger, closable by the agent, the judge or the person, and is never named
 // again: a session that moved on from it was answering what it was asked next, and a gate
 // that reached back made every turn's end about the backlog instead of the turn.
+//
+// An item a turn reported in progress (`progress`, applyVerdict) is never a target: "open"
+// lumped together the item a turn ignored and the item it reported on while the work went on
+// in a worker, and the gate re-prompted both. Seen live: the person picked options with a
+// three-word reply, the agent dispatched a worker to build them and ended on "dry run done,
+// the build is in progress in a worker, I'll ship it when it lands"; the judge kept it open
+// (correctly, it was not finished), the gate said "finish it now", and all the agent could do
+// was repeat the same report. Only the ignored item is owed a nudge.
 export function gateTargets(ledger, nowMs, { promises }) {
   const from = Number(ledger.window) || 0
-  return openItems(ledger, nowMs).filter(i => !i.gated && from && Number(i.prompt) >= from
+  return openItems(ledger, nowMs).filter(i => !i.gated && !i.progress && from && Number(i.prompt) >= from
     && (i.source !== 'promise' || promises === 'gate'))
+}
+
+// When a turn's end is not re-prompted at all, whatever is open; '' when the gate may go on.
+// Each is a turn whose re-prompt could only be answered with the report it just gave:
+//   gate-turn     the turn the gate's own re-prompt started. Its items are already gated, but
+//                 one judged open in the same prompt window would be named in a second
+//                 re-prompt straight after the first: the nag answering itself
+//   waiting       the turn ended asking the person something, or waiting on their decision
+//                 (the judge's `waitingOnPerson`): the next move is theirs, and a re-prompt
+//                 lands on top of the question they are reading
+//   cooldown      a re-prompt went out less than GATE_COOLDOWN_MS ago
+//   workers       a lead whose workers are still working, or waiting on a person (the band's
+//                 count): the report is the work's state, and it moves without the agent
+// NOT the session's own background shells. The engine hands them to Stop hooks
+// (`background_tasks`), but `classic.Stop` never reaches a user-tier mod: measured, the debug
+// log reads "ghostfleet: classic.Stop bypassed by cc-plugin-sec-default (tier user)" on every
+// turn, while the harness delivers it and a test of it passes. The footer's "1 shell still
+// running" is a pane regex, which is the guess this mod exists to replace.
+// Five minutes: a re-prompt's own turn and the one after it come well inside that, while a
+// separate ask the person makes later in the session is still owed its nudge. The window is
+// read from the items' `gatedAt`, so a reload does not reset it.
+export const GATE_COOLDOWN_MS = 5 * 60_000
+export const lastGateAt = ledger => Math.max(0, ...ledger.items.map(i => Number(i.gatedAt) || 0))
+export function gateHold({ gateTurn, waitingOnPerson, lastGate = 0, nowMs, workers = 0 }) {
+  if (gateTurn) return 'gate-turn'
+  if (waitingOnPerson) return 'waiting'
+  if (lastGate && nowMs - lastGate < GATE_COOLDOWN_MS) return 'cooldown'
+  if (workers > 0) return 'workers'
+  return ''
+}
+
+// The turn the gate's re-prompt started, by its text: what the gate submits opens with this
+// head, and a plugin's framed submit may arrive with its frame in front.
+export const GATE_HEAD = '[ghostfleet ledger]'
+export const isGateTurn = text => {
+  const t = String(text || '').trimStart()
+  return t.startsWith(GATE_HEAD) || /^The ghostfleet plugin sent a message:\s*\[ghostfleet ledger\]/.test(t)
 }
 
 // The queued items the model never received. A message typed over a running turn fires
@@ -516,7 +585,7 @@ export const dropItems = (ledger, ids) => ({ ...ledger, items: ledger.items.filt
 export function gatePrompt(items) {
   const lines = items.map(i => `${i.id}. ${i.source === 'promise' ? '(you said you would) ' : ''}"${excerpt(i.text, 160)}"`)
   return [
-    `[ghostfleet ledger] ${items.length === 1 ? 'One request is' : `${items.length} requests are`} still open from this session:`,
+    `${GATE_HEAD} ${items.length === 1 ? 'One request is' : `${items.length} requests are`} still open from this session:`,
     ...lines,
     `Finish each one now and close it with ${TOOL.close} and its proof, or say for each that it is not done and why (${TOOL.drop} if it was not a real ask). (Asked once per item; it will not be asked again.)`,
   ].join('\n')
@@ -622,7 +691,8 @@ export function listing(ledger, nowMs, { all = false } = {}) {
     const by = i.state !== 'open' && i.closedBy ? `${i.closedBy === 'hand' ? 'person' : i.closedBy}: ` : ''
     const said = i.proof || i.reason
     const why = said || by ? `  (${by}${said ? excerpt(said, 80) : ''})`.replace(': )', ')') : ''
-    return `${i.id.padStart(3)}  ${i.state.padEnd(8)} ${tag.padEnd(7)} ${ago(nowMs - i.at).padStart(4)}  ${excerpt(i.text, 100)}${i.gated ? '  [gated]' : ''}${why}`
+    const working = i.state === 'open' && i.progress ? `  [in progress${i.progress.reason ? `: ${excerpt(i.progress.reason, 60)}` : ''}]` : ''
+    return `${i.id.padStart(3)}  ${i.state.padEnd(8)} ${tag.padEnd(7)} ${ago(nowMs - i.at).padStart(4)}  ${excerpt(i.text, 100)}${i.gated ? '  [gated]' : ''}${working}${why}`
   })
   return [...out, ...judged].join('\n')
 }
