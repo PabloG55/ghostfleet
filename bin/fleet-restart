@@ -166,8 +166,8 @@ classify() {
     # alone — the reason says which kind of "no" it was.
     ACT=skip; WHY="$noid"
   elif [ "$(fleet-agent field "$agent" resume 2>/dev/null)" != yes ]; then
-    # Measured in fleet-agent: codex's `resume --last` does not survive a pane
-    # kill, and a pane kill is exactly what this does. Restarting it would open a
+    # An agent whose conversation does not survive a pane kill (codex before 0.160.1
+    # was one; fleet-agent's resume field says which). Restarting it would open a
     # BLANK conversation wearing the old card's name, which is worse than a stale
     # binary because it looks like it worked.
     ACT=skip; WHY="$agent has no resume path that survives a pane kill"
@@ -201,8 +201,9 @@ classify() {
 #   fleet-hibernate already answers "which conversation is this process writing"
 # (live_sid, and the record correction beside it), so it is ASKED, not copied: a
 # second spelling of that rule is the drift this repo keeps writing down.
-#   Claude only, because that answer is claude's own note about itself. Another
-# agent whose resume survives a pane kill keeps its recorded id, as before.
+#   Claude through fleet-hibernate, codex through the rollout its process holds open
+# (lib/codex-rollout.mjs). Any other agent whose resume survives a pane kill keeps its
+# recorded id, as before.
 #   STRICT, on purpose, and the same line hibernation holds. A resolvable process
 # whose conversation has no transcript has nothing to resume; a process that cannot
 # say which conversation it is in might be in any of them, and a recorded id with a
@@ -211,9 +212,22 @@ classify() {
 # smaller loss than the card.
 # Sets RID (the id to resume, or empty) and RWHY (why it is empty).
 HIB="$(dirname "$0")/fleet-hibernate"; [ -x "$HIB" ] || HIB=fleet-hibernate
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do _t="$(readlink "$_src")"; case "$_t" in /*) _src="$_t" ;; *) _src="$(dirname "$_src")/$_t" ;; esac; done
+LIB="$(cd "$(dirname "$_src")/../lib" 2>/dev/null && pwd)"
+CONF="$(cd "$(dirname "$_src")/../tmux" 2>/dev/null && pwd)/cf.tmux.conf"
 live_id() {
   local sock="$1" slot="$2" agent="$3" rec="$4" out lid ltr
   RID="$rec"; RWHY=""
+  # codex: the rollout its process holds open (lib/codex-rollout.mjs). Unlike claude's, an
+  # unresolved codex keeps its recorded id — a codex that has not taken a turn since it was
+  # (re)opened holds nothing open yet, and its record is the one the watcher wrote for it.
+  if [ "$agent" = codex ]; then
+    local ppid_; ppid_="$(tmux -L "$sock" display-message -p -t "$slot" '#{pane_pid}' 2>/dev/null)"
+    [ -n "$ppid_" ] && out="$(node "$LIB/codex-rollout.mjs" resolve --pid "$ppid_" 2>/dev/null)" \
+      && [ -n "$out" ] && RID="${out%%"$US"*}"
+    return 0
+  fi
   [ "$agent" = claude ] || return 0
   if out="$("$HIB" --resolve "$sock" "$slot" 2>/dev/null)" && [ -n "$out" ]; then
     IFS="$US" read -r lid ltr _ <<< "$out"
@@ -285,7 +299,7 @@ write_snapshot() {
 # and nothing else. agent-here recovers the AGENT from its own marker, so a
 # non-claude session comes back as itself rather than reverting to claude.
 relaunch() {
-  local sock="$1" slot="$2" id="$3" cwd="$4"
+  local sock="$1" slot="$2" id="$3" cwd="$4" agent="${5:-}"
   [ -n "$cwd" ] || cwd="$HOME"
   tmux -L "$sock" kill-session -t "$slot" 2>/dev/null
   # a stale park marker would boot the fresh session "parked" (same guard fleet-open
@@ -297,7 +311,22 @@ relaunch() {
   # the fresh branch before it looks at CLAUDE_FLEET_RESUME, so the relaunch opened a BLANK
   # conversation under the old card's name. That looks like success and is the one outcome
   # this command exists to prevent. A per-session -e outranks the global value.
-  tmux -L "$sock" new-session -d -s "$slot" -c "$cwd" \
+  #
+  # AFTER A CRASH THERE IS NO SERVER, and this new-session STARTS one. Started bare it would
+  # load ~/.tmux.conf instead of the fleet's, and take its global environment from whoever
+  # ran this — the wrong profile, when a reopen is run from a pane on another profile. So the fleet's config (it only applies when the server starts) and the
+  # profile this fleet dir belongs to (<profile>/fleet) go with every relaunch.
+  local -a conf=() prof=()
+  [ -f "$CONF" ] && conf=(-f "$CONF")
+  case "$FLEET_DIR" in */fleet) prof=(-e "CLAUDE_CONFIG_DIR=${FLEET_DIR%/fleet}") ;; esac
+  [ -n "${CLAUDE_FLEET_DIR:-}" ] && prof+=(-e "CLAUDE_FLEET_DIR=$CLAUDE_FLEET_DIR")
+  # THE AGENT, SAID OUT LOUD. agent-here reads CLAUDE_FLEET_AGENT before the marker, and a
+  # server this starts takes its global environment from the caller — a claude master
+  # running a reopen exports CLAUDE_FLEET_AGENT=claude, and a codex session it brought
+  # back would have come back as claude, `--resume`ing a codex id.
+  [ -n "$agent" ] && prof+=(-e "CLAUDE_FLEET_AGENT=$agent")
+  tmux -L "$sock" ${conf[@]+"${conf[@]}"} new-session -d -s "$slot" -c "$cwd" \
+    ${prof[@]+"${prof[@]}"} \
     -e "CLAUDE_FLEET_SOCK=$sock" \
     -e "CLAUDE_FLEET_RESUME=$id" \
     -e "CLAUDE_FLEET_FRESH=0" \
@@ -321,7 +350,7 @@ run_plan() {
 " ;;
       self) selfrow="$sock$US$slot$US$id$US$cwd" ;;
       resume-continue|resume-idle)
-        if relaunch "$sock" "$slot" "$id" "$cwd"; then
+        if relaunch "$sock" "$slot" "$id" "$cwd" "$agent"; then
           n_ok=$((n_ok+1))
           if [ "$act" = resume-continue ]; then
             # The agent needs a moment to be listening before a prompt is typed into
@@ -459,12 +488,13 @@ self_test() {
   # The caller.
   classify claude working   id123 1; is "the calling session is left for last"        "self"           "$ACT"
 
-  # An agent whose resume does not survive a pane kill is reported, not restarted.
+  # codex resumes by its recorded id since 0.160.1 (fleet-agent's codex resume field has
+  # the measurement), so it is restarted like claude rather than skipped.
   if command -v fleet-agent >/dev/null 2>&1; then
     classify codex working id123 0
-    is "codex is reported, not restarted into a blank conversation" "skip" "$ACT"
-    classify claude working id123 0
-    is "...while claude is not" "resume-continue" "$ACT"
+    is "codex is restarted on its own conversation" "resume-continue" "$ACT"
+    classify codex working "" 0
+    is "...but never without a recorded id" "skip" "$ACT"
   fi
 
   # ── THE SNAPSHOT REALLY IS WRITTEN, AND CARRIES THE PLAN ───────────────────
@@ -523,9 +553,20 @@ reopen_one() {
   fi
   id="$(sid_for "$sock" "$name")"
   [ -n "$id" ] || { echo "fleet-restart: no recorded conversation for '$name' on $sock — nothing to resume by id, and this will not guess with --continue" >&2; return 1; }
-  cwd="$(jq -r --arg i "$id" 'select(.session_id==$i) | .cwd' "$FLEET_DIR"/*.json 2>/dev/null | head -1)"
+  local tr ragent agent
+  IFS="$US" read -r cwd tr ragent < <(jq -r --arg i "$id" 'select(.session_id==$i) | [(.cwd // ""), (.transcript // ""), (.agent // "")] | join("\u001f")' "$FLEET_DIR"/*.json 2>/dev/null | head -1)
+  # The record knows its agent when the agent wrote it (codex's does); the marker otherwise.
+  agent="${ragent:-$(agent_for "$sock" "$name")}"
   [ -n "$cwd" ] && [ -d "$cwd" ] || { echo "fleet-restart: the conversation's checkout ($cwd) is gone" >&2; return 1; }
-  if relaunch "$sock" "$name" "$id" "$cwd"; then
+  # ONE CONVERSATION, ONE PANE. A codex process holds its rollout open, so "somebody has it
+  # open" is "it is live in some pane already" — under another name, on another fleet, or
+  # in a terminal outside any fleet. Resuming it again would put two writers on one file.
+  if [ -n "$tr" ] && [ -f "$tr" ] && [ "$agent" = codex ] \
+     && node "$LIB/codex-rollout.mjs" open "$tr" 2>/dev/null; then
+    echo "fleet-restart: '$name''s conversation ${id%%-*} is already open in another pane — not resuming it twice" >&2
+    return 1
+  fi
+  if relaunch "$sock" "$name" "$id" "$cwd" "$agent"; then
     echo "fleet-restart: reopened '$name' on $sock, resuming ${id%%-*} in $cwd"
   else
     echo "fleet-restart: failed to reopen '$name'" >&2; return 1

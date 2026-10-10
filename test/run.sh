@@ -472,6 +472,27 @@ SV_BEFORE=" $(pgrep -f 'fleet-serve' 2>/dev/null | tr '\n' ' ')"
 # goes red on its own rather than being taken on trust. Both directions on the
 # sweep especially — it deletes directories and kills servers, and the direction
 # that matters is the one where it must NOT.
+# ── codex conversations: recorded by id, read like claude's ───────────────────
+# Codex has no hooks, so a codex pane left NO record, and after a crash its conversation —
+# intact on disk — looked lost. lib/codex-rollout.mjs records the rollout the codex PROCESS
+# holds open. Everything here is synthetic: rollouts written in the 0.160.1 shape (line 1
+# session_meta, response_item messages, event_msg turn markers) under a temp CODEX_HOME,
+# and a stand-in process that holds one open the way codex does.
+cx_iso() { node -e 'console.log(new Date(Date.now() - Number(process.argv[1]) * 1000).toISOString())' "$1"; }
+cx_rollout() {       # <file> <id> <cwd> <seconds-ago> <last turn event> [codeword]
+  mkdir -p "$(dirname "$1")"
+  local t; t="$(cx_iso "$4")"
+  {
+    printf '{"timestamp":"%s","ordinal":0,"type":"session_meta","payload":{"session_id":"%s","id":"%s","timestamp":"%s","cwd":"%s","originator":"codex-tui","cli_version":"0.160.1","source":"cli"}}\n' "$t" "$2" "$2" "$t" "$3"
+    printf '{"timestamp":"%s","ordinal":1,"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>sandbox</permissions instructions>"}]}}\n' "$t"
+    printf '{"timestamp":"%s","ordinal":2,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\\n  <cwd>%s</cwd>\\n</environment_context>"}]}}\n' "$t" "$3"
+    printf '{"timestamp":"%s","ordinal":3,"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}\n' "$t"
+    printf '{"timestamp":"%s","ordinal":4,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Remember the codeword %s."}]}}\n' "$t" "${6:-HERON-7}"
+    printf '{"timestamp":"%s","ordinal":5,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Noted."}]}}\n' "$t"
+    [ "$5" = task_complete ] && printf '{"timestamp":"%s","ordinal":6,"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}\n' "$t"
+  } > "$1"
+}
+
 group "socket namespace (this run's own)"
 if command -v tmux >/dev/null 2>&1; then
   tmux -L nsprobe kill-server 2>/dev/null
@@ -1278,6 +1299,13 @@ STUB
   is "...and codex is not handed it"             "CLAUDE_FLEET_MODEL=" "$(tmux -L "$SWS" show-environment -t master CLAUDE_FLEET_MODEL 2>/dev/null)"
   is "a worker is not touched"                   "$W1PID" "$(swpid w1)"
 
+  # The conversation codex took up, as lib/codex-rollout.mjs records it: tagged codex, and
+  # NEWER than claude's record for the same slot, which is exactly the interleaving that made
+  # "the newest record for this slot" the wrong agent's conversation.
+  CXID=cccccccc-1111-2222-3333-444444444444
+  printf '{"session_id":"%s","agent":"codex","sock":"%s","slot":"master","cwd":"%s","status":"ready","ts":%s}\n' \
+    "$CXID" "$SWS" "$SW/repo" "$(( $(date +%s) + 5 ))" > "$SWF/$CXID.json"
+
   # 2. back to claude: on its OWN recorded id, never --continue, model restored
   : > "$SW/argv.claude"
   swfp agent billing-svc --none >/dev/null; swwait master
@@ -1285,10 +1313,11 @@ STUB
   is "...never --continue"                       "0" "$(grep -c -- '--continue' "$SW/argv.claude" 2>/dev/null || true)"
   is "...on the model it left with"              "1" "$(grep -c -- '--model haiku' "$SW/argv.claude" 2>/dev/null || true)"
   is "...and gets the one-line welcome back"     "yes" "$(grep -q "master again, taking over from codex" <<< "$(tmux -L "$SWS" capture-pane -p -J -t master)" && echo yes || echo no)"
-  # codex has a history here now and cannot resume it: said at the moment of choosing
+  is "...codex's conversation recorded on the way out" "$CXID" "$(jq -r '.codex.id' "$SWF/$SWS.master.convs.json" 2>/dev/null)"
+  # codex resumes by id since 0.160.1, so a recorded conversation is NOT announced as lost
   swbusy master
   out="$(swfp agent billing-svc codex)"
-  is "codex with history says it starts fresh"   "1" "$(grep -c "codex can't resume, it starts fresh" <<< "$out" || true)"
+  is "codex with a recorded conversation is not 'fresh'" "0" "$(grep -c "starts fresh" <<< "$out" || true)"
 
   # 3. mid-turn: it WAITS, the latest wish wins, and changing back cancels
   is "...and a busy master waits for its turn"   "1" "$(grep -c 'when its current turn ends' <<< "$out" || true)"
@@ -1302,8 +1331,10 @@ STUB
   is "changing back before it fires cancels it"  "no" "$([ -f "$SWF/$SWS.master.switch" ] && echo yes || echo no)"
   swfp agent billing-svc codex >/dev/null; sleep 0.5
   is "...and a new wish replaces the old"        "codex" "$(cat "$SWF/$SWS.master.switch" 2>/dev/null)"
+  : > "$SW/argv.codex"
   swidle master; swwait master
   is "...and fires once the turn ends"           "codex" "$(cat "$SWF/$SWS.master.agent" 2>/dev/null)"
+  is "...back on codex's OWN conversation, by id" "yes" "$(grep -q -- "resume $CXID" "$SW/argv.codex" 2>/dev/null && echo yes || echo no)"
 
   # 4. a new agent that falls over: the old one comes back, the setting with it
   swfp agent billing-svc --none >/dev/null; swwait master
@@ -2689,6 +2720,177 @@ is "...after the other flags"             "codex --dangerously-bypass-approvals-
 is "a codex without the flag never gets it" "codex resume --last" "$(cxh CXHELP=0.146.0)"
 is "CLAUDE_FLEET_CODEX_DAEMON=1 attaches"  "codex resume --last" "$(cxh CLAUDE_FLEET_CODEX_DAEMON=1)"
 rm -rf "${CX:?}"
+
+group "codex conversations: the rollout a process holds open becomes its record"
+if command -v node >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || [ -d /proc/self/fd ]; }; then
+  CR="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$CR/src/acme-api" "$CR/src/acme-web" "$CR/fleet"
+  CRL="$ROOT/lib/codex-rollout.mjs"; CRD="$CR/home/sessions/$(date +%Y/%m/%d)"
+  CA=aaaaaaaa-0000-7000-8000-00000000000a; CB=bbbbbbbb-0000-7000-8000-00000000000b
+  CC=cccccccc-0000-7000-8000-00000000000c; CD=dddddddd-0000-7000-8000-00000000000d
+  cx_rollout "$CRD/rollout-a-$CA.jsonl" "$CA" "$CR/src/acme-api" 10 task_complete
+  cx_rollout "$CRD/rollout-b-$CB.jsonl" "$CB" "$CR/src/acme-web" 5  task_complete
+  cx_rollout "$CR/home/sessions/2026/01/02/rollout-c-$CC.jsonl" "$CC" "$CR/src/acme-api" 30000000 task_complete
+  cx_rollout "$CRD/rollout-d-$CD.jsonl" "$CD" "$CR/src/acme-api" 2 task_started PLOVER-3
+  since=$(( $(date +%s) - 60 ))
+
+  # discovery by folder + start time: the fallback, asked in both directions
+  found="$(CODEX_HOME="$CR/home" node "$CRL" find --cwd "$CR/src/acme-api" --since "$since" | cut -d $'\x1f' -f1 | tr '\n' ' ')"
+  is "a conversation started in this folder since launch is found" "yes" "$(grep -q "$CA" <<< "$found" && echo yes || echo no)"
+  is "...another folder's is not"                                  "no"  "$(grep -q "$CB" <<< "$found" && echo yes || echo no)"
+  is "...nor one this folder started months ago"                   "no"  "$(grep -q "$CC" <<< "$found" && echo yes || echo no)"
+  is "...and by id, a resumed one is found wherever it is filed"   "rollout-c-$CC.jsonl" \
+     "$(node -e "import('$CRL').then(m => console.log(require('path').basename(m.rolloutById('$CC', '$CR/home'))))")"
+  is "a turn still running reads as working"  "working" "$(node -e "import('$CRL').then(m => console.log(m.rolloutStatus('$CRD/rollout-d-$CD.jsonl')))")"
+  is "...and a finished one as ready"         "ready"   "$(node -e "import('$CRL').then(m => console.log(m.rolloutStatus('$CRD/rollout-a-$CA.jsonl')))")"
+
+  # the process: a stand-in that holds A open, then — same pid — lets it go and opens D,
+  # which is what codex does when a pane starts a new conversation
+  bash -c 'exec 3<"$1"; while [ ! -f "$2" ]; do sleep 0.1; done; exec 3<&-; exec 4<"$3"; sleep 60' _ \
+    "$CRD/rollout-a-$CA.jsonl" "$CR/go" "$CRD/rollout-d-$CD.jsonl" & CRP=$!
+  sleep 60 & CRN=$!
+  sleep 0.5
+  is "the process's own rollout is resolved"  "$CA" "$(node "$CRL" resolve --pid "$CRP" | cut -d $'\x1f' -f1)"
+  is "...and a process holding none resolves nothing" "1" "$(node "$CRL" resolve --pid "$CRN" >/dev/null; echo $?)"
+  is "an open rollout reads as open"          "0" "$(node "$CRL" open "$CRD/rollout-a-$CA.jsonl"; echo $?)"
+  is "...and one nobody holds does not"       "1" "$(node "$CRL" open "$CRD/rollout-b-$CB.jsonl"; echo $?)"
+
+  CLAUDE_FLEET_CODEX_POLL_MS=200 CODEX_HOME="$CR/home" node "$CRL" watch --pid "$CRP" --sock cf-acme-api --slot w1 \
+    --cwd "$CR/src/acme-api" --since "$since" --fleet-dir "$CR/fleet" & CRW=$!
+  i=0; while [ ! -f "$CR/fleet/$CA.json" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+  is "the watcher writes the conversation id"      "$CA" "$(jq -r .session_id "$CR/fleet/$CA.json" 2>/dev/null)"
+  is "...tagged codex"                             "codex" "$(jq -r .agent "$CR/fleet/$CA.json" 2>/dev/null)"
+  is "...with the rollout as its transcript"       "$CRD/rollout-a-$CA.jsonl" "$(jq -r .transcript "$CR/fleet/$CA.json" 2>/dev/null)"
+  is "...on its fleet and slot"                    "cf-acme-api/w1" "$(jq -r '.sock + "/" + .slot' "$CR/fleet/$CA.json" 2>/dev/null)"
+  is "...and B, the folder's other session, is not claimed" "no" "$([ -f "$CR/fleet/$CB.json" ] && echo yes || echo no)"
+  touch "$CR/go"
+  i=0; while [ ! -f "$CR/fleet/$CD.json" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+  is "a new conversation in the same pane is recorded too" "$CD" "$(jq -r .session_id "$CR/fleet/$CD.json" 2>/dev/null)"
+  is "...and is now the newest for that slot"      "$CD" \
+     "$(jq -r 'select(.sock=="cf-acme-api" and .slot=="w1") | [.ts, .session_id] | @tsv' "$CR/fleet"/*.json | sort -n | tail -1 | cut -f2)"
+  is "...mid-turn, as working"                     "working" "$(jq -r .status "$CR/fleet/$CD.json" 2>/dev/null)"
+  kill "$CRP" "$CRN" 2>/dev/null; wait "$CRP" "$CRN" 2>/dev/null
+  i=0; while kill -0 "$CRW" 2>/dev/null && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i+1)); done
+  is "the watcher ends with its process"           "gone" "$(kill -0 "$CRW" 2>/dev/null && echo alive || echo gone)"
+  kill "$CRW" 2>/dev/null
+
+  # the phone's reader: fleet-read finds the record and reads the rollout like a transcript
+  fr="$(env -u TMUX CLAUDE_FLEET_DIR="$CR/fleet" "$ROOT/bin/fleet-read" -s cf-acme-api w1 --json 2>/dev/null)"
+  is "fleet-read shows the codex user turn"        "yes" "$(jq -e '.messages[] | select(.role=="user" and (.text|test("PLOVER-3")))' <<< "$fr" >/dev/null && echo yes || echo no)"
+  is "...and its answer"                           "yes" "$(jq -e '.messages[] | select(.role=="assistant" and .text=="Noted.")' <<< "$fr" >/dev/null && echo yes || echo no)"
+  is "...but not what codex injected itself"       "no"  "$(grep -q 'environment_context\|permissions instructions' <<< "$fr" && echo yes || echo no)"
+  is "...two messages, nothing else"               "2"   "$(jq -r .total <<< "$fr")"
+  is "the plain view prints the answer"            "Noted." "$(env -u TMUX CLAUDE_FLEET_DIR="$CR/fleet" "$ROOT/bin/fleet-read" -s cf-acme-api w1 2>/dev/null)"
+  rm -rf "${CR:?}"
+else
+  skip "codex rollout records" "node, and lsof or /proc, needed"
+fi
+
+group "codex-here records only inside a fleet pane"
+# The watcher starts from the pane's own $TMUX, never from an exported CLAUDE_FLEET_SOCK,
+# which a long-running session can carry from another fleet — this suite's own environment
+# may be inside a real one. The stub codex holds a rollout open, so a watcher that ran
+# WOULD record it: the absence below is a refusal, not a watcher that found nothing.
+if command -v node >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || [ -d /proc/self/fd ]; }; then
+  CX="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$CX/bin" "$CX/w" "$CX/fleet"
+  CXI=eeeeeeee-0000-7000-8000-00000000000e
+  cx_rollout "$CX/home/sessions/$(date +%Y/%m/%d)/rollout-e-$CXI.jsonl" "$CXI" "$CX/w" 1 task_complete
+  printf '#!/bin/sh\n[ "$1" = --help ] && exit 0\nexec 3<"%s"\nsleep 2\n' "$CX/home/sessions/$(date +%Y/%m/%d)/rollout-e-$CXI.jsonl" > "$CX/bin/codex"
+  chmod +x "$CX/bin/codex"
+  cxr() { ( cd "$CX/w" && env -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_MODEL CLAUDE_FLEET_DIR="$CX/fleet" \
+            CLAUDE_FLEET_YOLO=0 CLAUDE_FLEET_CODEX_POLL_MS=200 CODEX_HOME="$CX/home" PATH="$CX/bin:$PATH" "$@" "$ROOT/bin/codex-here" w1 >/dev/null 2>&1 ); }
+  cxr env -u TMUX -u TMUX_PANE CLAUDE_FLEET_SOCK=cf-acme-api
+  is "outside a fleet pane, nothing is recorded"   "0" "$(ls "$CX/fleet" | grep -c . || true)"
+  # ...and inside one (a $TMUX naming a cf-* server, and a pane), it is
+  cxr env TMUX="$CX/cf-acme-api,1,0" TMUX_PANE=%0
+  i=0; while [ ! -f "$CX/fleet/$CXI.json" ] && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i+1)); done
+  is "inside one, the conversation is recorded"    "$CXI" "$(jq -r .session_id "$CX/fleet/$CXI.json" 2>/dev/null)"
+  is "...on the socket the pane is on"             "cf-acme-api" "$(jq -r .sock "$CX/fleet/$CXI.json" 2>/dev/null)"
+  rm -rf "${CX:?}"
+else
+  skip "codex-here records" "node, and lsof or /proc, needed"
+fi
+
+group "a lost codex session goes through the same reopen as a lost claude one"
+# One mechanism for both agents: a session whose tmux server died is `lost` by
+# lib/fleet-scan.mjs's rule (fleet-list, the grid, the digest), and comes back through
+# fleet-restart --reopen (the grid's ⏎ and fleet_reopen) or fleet-open <id>. Codex was
+# never lost because it was never recorded; with its record it takes the same path, and
+# the agent adapter turns CLAUDE_FLEET_RESUME into `codex resume <id>`.
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  RS="$(cd "$(mktemp -d)" && pwd -P)"; H="$RS/home"
+  mkdir -p "$H/.config/ghostfleet" "$H/.claude/fleet" "$RS/bin" "$RS/sys" "$RS/src/acme-api" "$RS/src/acme-web"
+  printf 'acme-api\t%s\twork\nacme-web\t%s\twork\n' "$RS/src/acme-api" "$RS/src/acme-web" > "$H/.config/ghostfleet/projects"
+  RF="$H/.claude/fleet"; NOW=$(date +%s)
+  for a in claude codex; do      # stub agents: log the argv they were launched with, stay up
+    printf '#!/bin/sh\n[ "$1" = agents ] && exit 0\n[ "$1" = --help ] && exit 0\nprintf "%%s\\n" "$*" >> "%s/argv.%s"\nexec sleep 120\n' "$RS" "$a" > "$RS/bin/$a"
+    chmod +x "$RS/bin/$a"
+  done
+  for t in tmux jq node; do ln -s "$(command -v "$t")" "$RS/sys/$t"; done
+  rsrec() {   # <id> <sock> <slot> <cwd> <ts> <transcript> [agent]
+    printf '{"session_id":"%s","sock":"%s","slot":"%s","cwd":"%s","status":"ready","transcript":"%s","ts":%s%s}\n' \
+      "$1" "$2" "$3" "$4" "$6" "$5" "${7:+,\"agent\":\"$7\"}" > "$RF/$1.json"
+  }
+  R1=11111111-0000-4000-8000-000000000001; R2=22222222-0000-7000-8000-000000000002
+  R3=33333333-0000-4000-8000-000000000003; R6=66666666-0000-7000-8000-000000000006
+  printf '{"type":"user"}\n' > "$RS/r1.jsonl"; printf '{"type":"user"}\n' > "$RS/r3.jsonl"
+  RCD="$RS/codex-home/sessions/$(date +%Y/%m/%d)"
+  cx_rollout "$RCD/rollout-x-$R2.jsonl" "$R2" "$RS/src/acme-api" 900 task_complete
+  cx_rollout "$RCD/rollout-y-$R6.jsonl" "$R6" "$RS/src/acme-api" 900 task_complete
+  rsrec "$R1" cf-acme-api master "$RS/src/acme-api" $((NOW - 100)) "$RS/r1.jsonl"
+  rsrec "$R2" cf-acme-api w1     "$RS/src/acme-api" $((NOW - 200)) "$RCD/rollout-x-$R2.jsonl" codex
+  rsrec "$R6" cf-acme-api w6     "$RS/src/acme-api" $((NOW - 250)) "$RCD/rollout-y-$R6.jsonl" codex
+  rsrec "$R3" cf-acme-web w2     "$RS/src/acme-web" $((NOW - 50))  "$RS/r3.jsonl"
+  tmux -L cf-acme-web new-session -d -s w2 'sleep 120'          # still running
+  tmux -L cf-acme-api new-session -d -s _scratch 'sleep 120'    # a server exists, w1 is not on it
+  bash -c 'exec 3<"$1"; sleep 60' _ "$RCD/rollout-y-$R6.jsonl" & RSH=$!   # w6's codex lives on elsewhere
+  sleep 0.3
+  rse() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_AGENT \
+            -u CLAUDE_FLEET_MODEL -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_SLOT \
+            HOME="$H" PATH="$ROOT/bin:$RS/bin:$RS/sys:/usr/bin:/bin" CODEX_HOME="$RS/codex-home" "$@" 2>&1; }
+  fl="$(rse "$ROOT/bin/fleet-list" -s cf-acme-api)"
+  is "fleet-list shows the lost claude session"     "yes" "$(grep -qE '^master +lost' <<< "$fl" && echo yes || echo no)"
+  is "...and the lost codex one, in the same row"   "yes" "$(grep -qE '^w1 +lost .*--reopen w1' <<< "$fl" && echo yes || echo no)"
+  is "a session whose server is alive is not lost"  "no"  "$(grep -qE '^w2 +lost' <<< "$(rse "$ROOT/bin/fleet-list" -s cf-acme-web)" && echo yes || echo no)"
+
+  rse "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen master >/dev/null
+  out="$(rse "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen w1)"
+  i=0; while { [ ! -s "$RS/argv.claude" ] || [ ! -s "$RS/argv.codex" ]; } && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+  is "the reopen resumes claude's conversation, by id" "yes" "$(grep -q -- "--resume $R1" "$RS/argv.claude" 2>/dev/null && echo yes || echo no)"
+  is "...and codex's, by id"                          "yes" "$(grep -q -- "resume $R2" "$RS/argv.codex" 2>/dev/null && echo yes || echo no)"
+  is "...never by folder"                             "0"   "$(cat "$RS/argv.claude" "$RS/argv.codex" 2>/dev/null | grep -c -- '--last\|--continue' || true)"
+  is "...as codex, from the record's agent"           "CLAUDE_FLEET_AGENT=codex" "$(tmux -L cf-acme-api show-environment -t w1 CLAUDE_FLEET_AGENT 2>/dev/null)"
+  is "...in its own checkout"                         "$RS/src/acme-api" "$(tmux -L cf-acme-api display-message -p -t w1 '#{pane_current_path}' 2>/dev/null)"
+  is "...and no longer lost"                          "no"  "$(grep -qE '^(w1|master) +lost' <<< "$(rse "$ROOT/bin/fleet-list" -s cf-acme-api)" && echo yes || echo no)"
+  is "reopening a live one again is refused"          "1"   "$(rse "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen w1 >/dev/null; echo $?)"
+  is "a codex conversation open in another pane is not resumed twice" "yes" \
+     "$(grep -q 'already open in another pane' <<< "$(rse "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen w6)" && echo yes || echo no)"
+  is "...and no pane was started for it"              "no"  "$(tmux -L cf-acme-api has-session -t =w6 2>/dev/null && echo yes || echo no)"
+  : > "$RS/argv.codex"
+  fo="$(rse "$ROOT/bin/fleet-open" "${R2%%-*}" --as w9)"
+  i=0; while [ ! -s "$RS/argv.codex" ] && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+  is "fleet-open finds a codex id among the rollouts" "yes" "$(grep -q "opened $R2 as 'w9' on cf-acme-api" <<< "$fo" && echo yes || echo no)"
+  is "...and opens it with codex resume <id>"         "yes" "$(grep -q -- "resume $R2" "$RS/argv.codex" 2>/dev/null && echo yes || echo no)"
+  kill "$RSH" 2>/dev/null
+  for s in cf-acme-api cf-acme-web; do tmux -L "$s" kill-server 2>/dev/null; done
+
+  # boot time: a pane id a NEW server reuses after a reboot is not evidence the old one lives
+  cat > "$RS/pane.mjs" <<'JS'
+import fs from 'node:fs';
+const [lib, d, tr, boot] = process.argv.slice(2);
+const m = await import(lib);
+fs.mkdirSync(d, { recursive: true });
+fs.writeFileSync(`${d}/x.json`, JSON.stringify({ session_id: 'x', sock: 'cf-p', slot: 'w9', cwd: d, transcript: tr, ts: Number(boot) - 10, pane: '%0@4242' }));
+const panes = new Set(['%0@4242']);
+const before = m.lostSessions({ dir: d, sock: 'cf-p', live: new Set(), panes, boot: Number(boot) }).length;
+const after = m.lostSessions({ dir: d, sock: 'cf-p', live: new Set(), panes, boot: Number(boot) - 100 }).length;
+console.log(`${before} ${after}`);
+JS
+  is "a pane match from before the boot is a coincidence; after it, evidence" "1 0" \
+     "$(node "$RS/pane.mjs" "$ROOT/lib/fleet-scan.mjs" "$RS/pane" "$RS/r1.jsonl" "$NOW")"
+  rm -rf "${RS:?}"
+else
+  skip "lost codex reopen" "tmux, jq and node needed"
+fi
 
 group "fleet-review asks a DIFFERENT model, or says it cannot"
 # WHY THE REFUSALS ARE THE POINT. Exactly one of the three agents ships a non-interactive

@@ -110,7 +110,7 @@ than guessed:
 | ghostfleet MCP registered | ✅ per profile, in `.claude.json` | ✅ `opencode.jsonc` | ✅ `~/.codex/config.toml` | ✅ `~/.gemini/config/mcp_config.json` | ✅ `~/.cursor/mcp.json` |
 | …and a call with no `project` finds its own fleet | ✅ | ✅ | ❌ **name it every time** | ✅ | ❌ **name it every time** |
 | orchestrate skill | ✅ symlinked into `<profile>/skills/` | ❌ | ❌ | ✅ `~/.gemini/config/skills/` | ✅ `~/.cursor/skills/` |
-| resume across a pane kill | ✅ | ✅ | ❌ | ✅ | ✅ |
+| resume across a pane kill | ✅ | ✅ | ✅ by recorded id, since 0.160.1 | ✅ | ✅ |
 
 agy was added on 2026-10-01 and cursor on 2026-10-06, both measured the same way — see
 [agy](#agy-antigravity-cli) and [cursor](#cursor-cursor-agent) below.
@@ -139,9 +139,17 @@ $ fleet-agent caveat opencode   no orchestrate skill: it has the fleet_* tools b
                                 siblings unless you tell it to
 $ fleet-agent caveat codex      no fleet events: status is guessed from its pane, and a
                                 question it asks may never reach the inbox. fleet_* tools
-                                must name the project: … . no orchestrate skill: … . no
-                                resume: recycling its pane loses the conversation
+                                must name the project: … . no orchestrate skill: …
 ```
+
+The codex `no resume` clause was shrunk away on 2026-10-10. Re-measured on codex-cli 0.160.1
+in a scratch fleet: the rollout is written as the conversation goes, not on a clean exit — a
+codeword survived a kill-server between turns, a kill mid-turn kept that turn's message, and
+`codex resume <id>` reopened it, appending to the same file under the same id. Since codex
+has no hooks to say which rollout is its own, `codex-here` starts `lib/codex-rollout.mjs`
+beside it, which records the rollout the codex process holds open (lsof, or `/proc` on Linux)
+as `<fleet dir>/<id>.json` in the claude hook's shape — so restart, a lost-session reopen, an agent switch
+and the phone all find a codex conversation by id, never by "newest in this folder".
 
 Both pickers print that beside the option and the TUI column carries the short form.
 **Shipping the option silently would be worse than not shipping it** — a fleet whose codex
@@ -360,11 +368,13 @@ What was established without executing it, and still stands:
   never reach the inbox.
 - `codex resume <id>` pinning to a cwd remains **untested**, and the matrix records the
   consequence rather than the mechanism: recycling a codex pane loses the conversation.
+  *(Superseded 2026-10-10: resume is by recorded id now, which needs no cwd pinning, and
+  0.160.1 survives a pane kill — see the capability matrix.)*
 
 Its busy and idle pane text is no longer unknown — the fixtures are in `test/fixtures/` and
 the detectors run against them in both directions, which is the bar CLAUDE.md sets for
-calling a signal reliable. What is still missing for codex is the event bridge and resume,
-both of which the matrix above states at the point where the choice is made.
+calling a signal reliable. What is still missing for codex is the event bridge, which the
+matrix above states at the point where the choice is made (resume landed 2026-10-10).
 
 ### Q4 (answered 2026-08-27). MCP registration — wired, with one asymmetry
 

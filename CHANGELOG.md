@@ -8,6 +8,30 @@ the detail, and every entry here names the PR that carries the argument.
 
 ### Fixed
 
+- **A codex session the machine killed comes back on its own conversation, the same way a
+  claude one does.** Codex has no hooks, so a codex pane left no fleet record: after a crash
+  or reboot its conversation was intact on disk but showed nowhere as `lost`, and the only
+  way back was `codex resume --last`, which picks the newest conversation in the folder.
+  `codex-here` now records the rollout the codex process has open as `<fleet dir>/<id>.json`,
+  in the same shape claude's hook writes, and keeps it current if the pane starts a new
+  conversation. A dead codex session is then `lost` in `fleet-list`, the grid, the phone and
+  the digest, and ⏎ / `fleet_reopen` / `fleet-restart --reopen` / `fleet-open <id>` bring it
+  back with `codex resume <id>` in its own checkout. Re-measured on codex-cli 0.160.1: the
+  rollout is written as the conversation goes (0.146 wrote it only on a clean exit), so the
+  codex adapter's `resume` is now `yes`, and an agent switch back to codex resumes its
+  conversation too. A conversation already open in another pane is not reopened a second time.
+- **A reopened session runs as its own agent, under its fleet's config.** The reopen now
+  passes the recorded agent explicitly, so it no longer takes whatever agent the caller's
+  environment had. When no tmux server is left (after a crash), the one it starts loads the
+  fleet's tmux config and the session's profile, not `~/.tmux.conf` and whoever ran the reopen.
+- **A pane id reused after a reboot no longer hides a lost session.** Pane ids restart at
+  `%0` with every server, and pids are reused across a reboot, so a new server could carry the
+  `%0@<pid>` an old record names. A record written before the boot (`kern.boottime` on
+  macOS, `/proc/stat` on Linux) no longer counts that match as evidence the session is alive.
+- **The phone's chat shows a codex conversation.** `fleet-read` (and so `/api/session`) reads
+  a codex rollout's user and assistant messages and drops what codex injects itself (the
+  environment block, AGENTS.md).
+
 - **The ledger's judge no longer breaks for good past ~20 open items** (#38). It asked for one
   verdict per open item in a single 700-token reply; past about twenty the reply was cut
   off, dropped whole, and nothing closed, so every later turn failed the same way while the

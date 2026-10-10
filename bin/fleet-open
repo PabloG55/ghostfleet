@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # fleet-open <session-id> [--as <name>] [--into <session>] [--list]
 #
-# Open a SPECIFIC past Claude conversation as a fleet session — the thing
-# `claude --resume <id>` does in a bare terminal, but landed on the right project's
-# fleet so it shows up as a card you can jump into.
+# Open a SPECIFIC past conversation as a fleet session — the thing `claude --resume
+# <id>` (or `codex resume <id>`) does in a bare terminal, but landed on the right
+# project's fleet so it shows up as a card you can jump into.
 #
 #   <session-id>     full id or a unique prefix (e.g. cc7b36af)
 #   --as <name>      session/card name (default: resume-<prefix>)
@@ -20,6 +20,11 @@
 # that repo, and starts the session there with claude-here (which resumes exactly
 # this id — never silently the newest one — and forks it if it's held as a
 # background agent).
+#
+# A CODEX ID IS THE SAME OPERATION. When no claude transcript matches, the id is looked
+# up among codex's rollouts ($CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-<id>.jsonl); the
+# cwd comes from its session_meta line, and the session starts as codex, which
+# codex-here turns into `codex resume <id>`. One command, one routing, one agent branch.
 set -uo pipefail
 
 ID=""; AS=""; INTO=""; LIST=0; FORCE=0
@@ -48,7 +53,24 @@ for cfg in "$HOME/.claude" "$HOME"/.claude-*; do
 done
 hits="$(printf '%s' "$hits" | grep -v '^$' || true)"
 n="$(printf '%s\n' "$hits" | grep -c . || true)"
-[ "${n:-0}" -ge 1 ] || { echo "fleet-open: no transcript matching '$ID' in any profile" >&2; exit 1; }
+AGENT=claude
+if [ "${n:-0}" -lt 1 ]; then
+  # codex: the profile is the one whose fleet recorded this conversation (codex keeps one
+  # store for every profile); with no record, the owning project's profile, decided below.
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rcfg="" b="$(basename "$f" .jsonl)"
+    for cfg in "$HOME/.claude" "$HOME"/.claude-*; do
+      [ -f "$cfg/fleet/${b: -36}.json" ] && { rcfg="$cfg"; break; }   # the id is the uuid tail
+    done
+    hits="$hits$rcfg	$f
+"
+  done < <(find "${CODEX_HOME:-$HOME/.codex}/sessions" -name "rollout-*-$ID*.jsonl" -type f 2>/dev/null)
+  hits="$(printf '%s' "$hits" | grep -v '^$' || true)"
+  n="$(printf '%s\n' "$hits" | grep -c . || true)"
+  [ "${n:-0}" -ge 1 ] && AGENT=codex
+fi
+[ "${n:-0}" -ge 1 ] || { echo "fleet-open: no transcript or codex rollout matching '$ID' in any profile" >&2; exit 1; }
 if [ "$n" -gt 1 ]; then
   echo "fleet-open: '$ID' is ambiguous — $n matches:" >&2
   printf '%s\n' "$hits" | while IFS=$'\t' read -r c f; do echo "  $(basename "$f" .jsonl)   ${f/#$HOME/~}" >&2; done
@@ -60,7 +82,12 @@ FULL_ID="$(basename "$TR" .jsonl)"
 
 # the conversation's own cwd (authoritative — the encoded dir name is lossy: both
 # '/' and '.' become '-', so it can't be decoded back to a path reliably)
-CWD="$(jq -r 'select(.cwd != null) | .cwd' "$TR" 2>/dev/null | head -1)"
+if [ "$AGENT" = codex ]; then
+  # line 1 of a rollout is session_meta, and it alone carries the id and the cwd
+  IFS=$'\x1f' read -r FULL_ID CWD < <(head -1 "$TR" | jq -r 'select(.type=="session_meta") | [.payload.id, .payload.cwd] | join("\u001f")' 2>/dev/null)
+else
+  CWD="$(jq -r 'select(.cwd != null) | .cwd' "$TR" 2>/dev/null | head -1)"
+fi
 [ -n "$CWD" ] && [ -d "$CWD" ] || { echo "fleet-open: can't determine a live cwd for $FULL_ID (recorded: ${CWD:-<none>})" >&2; exit 1; }
 
 # --- route to the fleet of the project that owns this repo ---------------------
@@ -91,10 +118,14 @@ else                                   # unknown repo -> fall back to the ambien
   PROJ="${SOCK#cf-}"
 fi
 [ -n "$SOCK" ] || { echo "fleet-open: no fleet owns $ROOT and no ambient fleet — run inside a fleet session" >&2; exit 1; }
+if [ -z "$CFG_DIR" ]; then             # a codex rollout no fleet has recorded yet
+  case "${prof:-work}" in work|default) CFG_DIR="$HOME/.claude" ;; *) CFG_DIR="$HOME/.claude-$prof" ;; esac
+fi
 FLEET_DIR="$CFG_DIR/fleet"
 
 if [ "$LIST" = 1 ]; then
   echo "id:         $FULL_ID"
+  echo "agent:      $AGENT"
   echo "transcript: ${TR/#$HOME/~}"
   echo "cwd:        $CWD"
   echo "profile:    ${CFG_DIR/#$HOME/~}"
@@ -138,7 +169,7 @@ rm -f "$FLEET_DIR/$SOCK.$name.parked" "$FLEET_DIR/$name.parked" 2>/dev/null
 
 tmux -L "$SOCK" new-session -d -s "$name" -c "$CWD" \
   -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" \
-  -e "CLAUDE_FLEET_RESUME=$FULL_ID" \
+  -e "CLAUDE_FLEET_RESUME=$FULL_ID" -e "CLAUDE_FLEET_AGENT=$AGENT" -e "CLAUDE_FLEET_FRESH=0" \
   "exec agent-here \"$name\"" \
   || { echo "fleet-open: failed to start the session" >&2; exit 1; }
 

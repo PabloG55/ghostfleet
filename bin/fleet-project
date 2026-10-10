@@ -238,12 +238,16 @@ case "$cmd" in
     SLOT="${SESS:-master}"; SOCK="$(sock_for "$NAME" "$PROF")"; DIR="$(profile_dir "$PROF")/fleet"
     TO="${WANT:-claude}"
     res="$(bash "$BIN_DIR/../lib/agent-switch.sh" request "$DIR" "$SOCK" "$SLOT" "$TO" "$([ -z "$SESS" ] && printf '%s' "$NAME")" 2>&1)"
-    # codex keeps no conversation through a pane kill, so "back to codex" is a NEW one. Said
-    # here, at the moment of choosing, and only when there was a codex conversation to lose.
+    # An agent that cannot resume, or one whose last stint left no recorded conversation (a
+    # codex before its conversations were recorded), comes back as a NEW one. Said here, at
+    # the moment of choosing, and only when the agent was here before.
     fresh_note=""
-    if [ "$(fleet-agent field "$TO" resume 2>/dev/null)" != yes ] \
-       && jq -e --arg a "$TO" 'has($a)' "$DIR/$SOCK.$SLOT.convs.json" >/dev/null 2>&1; then
-      fresh_note=" — $TO can't resume, it starts fresh"
+    if jq -e --arg a "$TO" 'has($a)' "$DIR/$SOCK.$SLOT.convs.json" >/dev/null 2>&1; then
+      if [ "$(fleet-agent field "$TO" resume 2>/dev/null)" != yes ]; then
+        fresh_note=" — $TO can't resume, it starts fresh"
+      elif ! jq -e --arg a "$TO" '(.[$a].id // "") != ""' "$DIR/$SOCK.$SLOT.convs.json" >/dev/null 2>&1; then
+        fresh_note=" — no $TO conversation was recorded here, it starts fresh"
+      fi
     fi
     case "$res" in
       not-running*)  echo "fleet-project: '$SLOT' is not running — it starts as $TO next time" ;;

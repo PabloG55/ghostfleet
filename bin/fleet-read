@@ -150,6 +150,39 @@ if [ -z "$tr" ] || [ ! -f "$tr" ]; then
   exit 1
 fi
 
+# ── A CODEX CONVERSATION IS A ROLLOUT, NOT A TRANSCRIPT ──────────────────────
+# lib/codex-rollout.mjs records a codex pane's rollout in the same `transcript` field, so
+# the lookup above finds it unchanged — and then the claude filter below read it as an
+# empty conversation, because a rollout has no `type:"user"` / `type:"assistant"` lines.
+# Its messages are `response_item`s with a role, and its user turns include what codex
+# itself injects (the environment block, AGENTS.md, an aborted-turn marker), which is the
+# machine talking and is dropped the way claude's isMeta lines are. Recognised by its first
+# line, which is always session_meta — not by the path, which a CODEX_HOME can move.
+# Both readers produce the same {ts, role, text}, so pagination and the phone are shared.
+if head -c 400 "$tr" 2>/dev/null | grep -q '"type":"session_meta"'; then
+  MSGS='select(.type=="response_item" and (.payload.type // "")=="message"
+               and (.payload.role=="user" or .payload.role=="assistant"))
+        | { ts: ((.timestamp // "") | if . == "" then 0
+                 else (sub("\\.[0-9]+Z$";"Z") | fromdateiso8601? // 0) end),
+            role: .payload.role,
+            text: ((.payload.content // [])
+                   | if type == "string" then .
+                     else (map(select(.type == "input_text" or .type == "output_text" or .type == "text") | .text) | join("\n")) end) }
+        | select((.text | type) == "string" and (.text | test("[^[:space:]]")))
+        | select((.role == "user" and (.text | test("^\\s*(<(environment_context|user_instructions|permissions instructions|turn_aborted|user_shell_command|collaboration_mode)[ >]|# AGENTS\\.md instructions)"))) | not)'
+else
+  MSGS='select(.type=="assistant" or .type=="user")
+        | select((.isSidechain // false) | not)
+        | select((.isMeta // false) | not)
+        | { ts: ((.timestamp // "") | if . == "" then 0
+                 else (sub("\\.[0-9]+Z$";"Z") | fromdateiso8601? // 0) end),
+            role: (.message.role // .type),
+            text: ((.message.content // [])
+                   | if type == "string" then .
+                     else (map(select(.type == "text") | .text) | join("\n")) end) }
+        | select((.text | type) == "string" and (.text | test("[^[:space:]]")))'
+fi
+
 # The WINDOW. 600 lines is what the default path has always read, and --json keeps a
 # bound of its own kind for the same reason: the largest transcript measured here is
 # 46 MB, and a phone asking for twenty messages must not make anybody read all of it.
@@ -164,16 +197,7 @@ if [ "$JSON" = 1 ]; then
   # a screen of tool_result blocks is not a conversation, and `content` is a plain string
   # on some user turns and an array on the rest.
   tail -n "$TAIL_LINES" "$tr" \
-    | jq -c 'select(.type=="assistant" or .type=="user")
-             | select((.isSidechain // false) | not)
-             | select((.isMeta // false) | not)
-             | { ts: ((.timestamp // "") | if . == "" then 0
-                      else (sub("\\.[0-9]+Z$";"Z") | fromdateiso8601? // 0) end),
-                 role: (.message.role // .type),
-                 text: ((.message.content // [])
-                        | if type == "string" then .
-                          else (map(select(.type == "text") | .text) | join("\n")) end) }
-             | select((.text | type) == "string" and (.text | test("[^[:space:]]")))' 2>/dev/null \
+    | jq -c "$MSGS" 2>/dev/null \
     | jq -s --argjson limit "$LIMIT" --arg before "$BEFORE" --arg s "$SESSION" --argjson trunc "$trunc" '
         . as $all
         | ($all | length) as $total
@@ -187,6 +211,9 @@ if [ "$JSON" = 1 ]; then
   exit 0
 fi
 
+# The plain view keeps claude's own filter byte for byte; a rollout goes through its reader.
+PLAIN='select(.type=="assistant") | (.message.content // []) | map(select(.type=="text")|.text) | join(" ")'
+case "$MSGS" in *response_item*) PLAIN="$MSGS"' | select(.role == "assistant") | .text' ;; esac
 tail -n 600 "$tr" \
-  | jq -r 'select(.type=="assistant") | (.message.content // []) | map(select(.type=="text")|.text) | join(" ")' 2>/dev/null \
+  | jq -r "$PLAIN" 2>/dev/null \
   | grep -v '^[[:space:]]*$' | tail -n "$N"

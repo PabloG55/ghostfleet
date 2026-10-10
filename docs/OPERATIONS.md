@@ -341,8 +341,8 @@ new agent starts with a short handoff — it is now the master, run `fleet-workt
 before the pane is killed its id is recorded in `<fleet dir>/<sock>.<slot>.convs.json`,
 one entry per agent (`{"claude": {"id": …, "model": …, "ts": …}, …}`), and switching
 BACK to an agent that can resume reopens exactly that id — never `--continue`. codex
-cannot (its TUI does not survive a pane kill), so returning to it starts fresh, and the
-settings row says so. If the new agent is not installed the switch is refused untouched;
+can since 0.160.1 (its rollout survives a pane kill, and `codex-here` records which one is
+the pane's); a codex with no recorded conversation starts fresh, and the settings row says so. If the new agent is not installed the switch is refused untouched;
 if it starts and dies, the old agent is brought back on its own conversation, the setting
 is put back, and the row says why. Running workers keep their agent; new ones take the
 column. `fleet-project agent <name> <agent> --session <s>` does the same for one session
