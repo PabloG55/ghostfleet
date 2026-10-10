@@ -33,8 +33,8 @@ import * as X from '../lib/experimental.mjs';
 // resolves to nothing and the whole control plane fails to load. A grid that cannot start
 // is a worse bug than a lost card that is not drawn, so a missing lib means no lost cards
 // and everything else as before. cf-sync stages lib/ beside bin/, so the real install has it.
-let lostSessions = () => [];
-try { ({ lostSessions } = await import(new URL('../lib/fleet-scan.mjs', import.meta.url))); } catch {}
+let lostSessions = () => [], serverStart = () => 0;
+try { ({ lostSessions, serverStart } = await import(new URL('../lib/fleet-scan.mjs', import.meta.url))); } catch {}
 
 const HOME = os.homedir();
 // Everything is scoped to one Claude config dir (= one account/profile).
@@ -1053,7 +1053,7 @@ function allLiveNames() {
 }
 function lostCards(liveNames, { lead = false, sub = '' } = {}) {
   const names = new Set([...allLiveNames(), ...liveNames]);
-  return lostSessions({ dir: FLEET_DIR, sock: SOCK, live: names, panes: livePanes(), cfg: CFG })
+  return lostSessions({ dir: FLEET_DIR, sock: SOCK, live: names, panes: livePanes(), cfg: CFG, started: serverStart(SOCK, CONF) })
     // The lead follows the same rule the live list does: the TUI is drawn from inside it,
     // and only --json (the phone) carries its card.
     .filter(l => !isLead(l.name) || (lead && !sub))

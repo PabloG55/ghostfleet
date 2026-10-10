@@ -24,10 +24,11 @@ the detail, and every entry here names the PR that carries the argument.
   passes the recorded agent explicitly, so it no longer takes whatever agent the caller's
   environment had. When no tmux server is left (after a crash), the one it starts loads the
   fleet's tmux config and the session's profile, not `~/.tmux.conf` and whoever ran the reopen.
-- **A pane id reused after a reboot no longer hides a lost session.** Pane ids restart at
-  `%0` with every server, and pids are reused across a reboot, so a new server could carry the
-  `%0@<pid>` an old record names. A record written before the boot (`kern.boottime` on
-  macOS, `/proc/stat` on Linux) no longer counts that match as evidence the session is alive.
+- **A pane id reused after a crash no longer hides a lost session.** Pane ids restart at `%0`
+  with every tmux server, and pids are reused across a reboot, so a new server could carry the
+  `%0@<pid>` an old record names. That match now counts only when the record is no older than
+  the server holding the pane (tmux's own `start_time`), so a session renamed by hand on a
+  running server still is not lost.
 - **The phone's chat shows a codex conversation.** `fleet-read` (and so `/api/session`) reads
   a codex rollout's user and assistant messages and drops what codex injects itself (the
   environment block, AGENTS.md).

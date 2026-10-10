@@ -2873,19 +2873,21 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   kill "$RSH" 2>/dev/null
   for s in cf-acme-api cf-acme-web; do tmux -L "$s" kill-server 2>/dev/null; done
 
-  # boot time: a pane id a NEW server reuses after a reboot is not evidence the old one lives
+  # A pane id a NEW server reuses after a crash is not evidence the old session lives: the
+  # record predates the server now holding that id. On the server that wrote it, it is.
   cat > "$RS/pane.mjs" <<'JS'
 import fs from 'node:fs';
-const [lib, d, tr, boot] = process.argv.slice(2);
+const [lib, d, tr, now] = process.argv.slice(2);
 const m = await import(lib);
 fs.mkdirSync(d, { recursive: true });
-fs.writeFileSync(`${d}/x.json`, JSON.stringify({ session_id: 'x', sock: 'cf-p', slot: 'w9', cwd: d, transcript: tr, ts: Number(boot) - 10, pane: '%0@4242' }));
+fs.writeFileSync(`${d}/x.json`, JSON.stringify({ session_id: 'x', sock: 'cf-p', slot: 'w9', cwd: d, transcript: tr, ts: Number(now) - 10, pane: '%0@4242' }));
 const panes = new Set(['%0@4242']);
-const before = m.lostSessions({ dir: d, sock: 'cf-p', live: new Set(), panes, boot: Number(boot) }).length;
-const after = m.lostSessions({ dir: d, sock: 'cf-p', live: new Set(), panes, boot: Number(boot) - 100 }).length;
-console.log(`${before} ${after}`);
+const newer = m.lostSessions({ dir: d, sock: 'cf-p', live: new Set(), panes, started: Number(now) }).length;
+const same = m.lostSessions({ dir: d, sock: 'cf-p', live: new Set(), panes, started: Number(now) - 100 }).length;
+const unknown = m.lostSessions({ dir: d, sock: 'cf-p', live: new Set(), panes }).length;
+console.log(`${newer} ${same} ${unknown}`);
 JS
-  is "a pane match from before the boot is a coincidence; after it, evidence" "1 0" \
+  is "a pane id held by a server newer than the record is a coincidence; by the one that wrote it, evidence" "1 0 0" \
      "$(node "$RS/pane.mjs" "$ROOT/lib/fleet-scan.mjs" "$RS/pane" "$RS/r1.jsonl" "$NOW")"
   rm -rf "${RS:?}"
 else
