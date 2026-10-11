@@ -8,6 +8,14 @@ the detail, and every entry here names the PR that carries the argument.
 
 ### Fixed
 
+- **A click on a session card opens it the first time.** The grid refreshes with
+  synchronous tmux work that holds the screen for most of a second on a fleet of twenty
+  sessions, and a click that landed during a refresh reached it as a press and a release in
+  one read — which the screen didn't recognise as a click, so it dropped it. On a 21-session
+  fleet that was every combined press-and-release, and half of all clicks. Every screen
+  now splits what it reads into separate events first (mouse reports, arrows, ⏎, Esc), and
+  holds a mouse report the terminal sent in two pieces until the rest arrives, so the click,
+  the arrow typed beside it, and a lone Esc all land. A paste is still one piece of text.
 - **A screen never outlives the ghostfleet that opened it.** Kill the launcher while the
   grid or the Projects screen is up and the screen used to carry on in the background,
   repainting every second over whatever ran next in that window — a second `ghostfleet` there

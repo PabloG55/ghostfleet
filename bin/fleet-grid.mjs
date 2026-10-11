@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { modState, modLimitAt } from '../lib/mod-status.mjs';
 import * as J from '../lib/jarvis.mjs';
 import * as X from '../lib/experimental.mjs';
+import { keyReader } from '../lib/keys.mjs';
 // LOADED, NOT IMPORTED, and for the reason preview() below spells out: test/run.sh's vis35
 // group runs a COPY of this file from a temp directory, where a static import of ../lib
 // resolves to nothing and the whole control plane fails to load. A grid that cannot start
@@ -4042,14 +4043,6 @@ let dTyping = false, dPathInput = '', dFSel = 0;
 //   ⏎ on an EXACT name goes there, as the relative path always did — so `toolbox` lands in
 // toolbox even when `toolbox-old` sorts first among the matches.
 const dIsPath = (v) => v.includes('/') || v.startsWith('~');
-// ONE READ IS NOT ONE KEY. Keys typed fast, or sent by tmux in one go, arrive as a single
-// chunk: `↓⏎` as "\x1b[B\r", three backspaces as "\x7f\x7f\x7f". Handled whole, the first
-// was an escape sequence and dropped (⏎ with it), the second took off one character. Split
-// into arrows, ⏎, DEL and runs of text — a paste stays ONE run, which is what the clone and
-// path boxes rely on.
-function dKeys(key) {
-  return String(key || '').match(/\x1b\[[0-9;]*[A-Za-z~]|\x1b.?|[\r\n]|[\x7f\b]|[^\x1b\r\n\x7f\b]+/g) || [];
-}
 function dMatches() {
   const q = dPathInput.trim().toLowerCase();
   const subs = dirEntries.filter(e => e !== '..');
@@ -4119,8 +4112,6 @@ function onKeyClone(key) {
   dRender();
 }
 function onKeyPath(key) {
-  const ks = dKeys(key);
-  if (ks.length > 1) { for (const k of ks) onKeyAdd(k); return; }   // each key where it now lands
   if (key === '\x03') return finish('');
   if (key === '\x1b' || key === '\x60') { dTyping = false; dMsg = ''; return dRender(); }
   if (key === '\r' || key === '\n') {
@@ -4186,8 +4177,6 @@ function dLandOn(name) {
   dRender();
 }
 function onKeyNew(key) {
-  const ks = dKeys(key);
-  if (ks.length > 1) { for (const k of ks) onKeyAdd(k); return; }
   if (key === '\x03') return finish('');
   if (dInitFor) {
     const name = dInitFor;
@@ -4467,7 +4456,7 @@ boundSyncChildren();
 watchLauncher();
 
 if (SCREEN === 'projects') {
-  pBuild(); pRender(); process.stdin.on('data', onKeyProjects);
+  pBuild(); pRender(); process.stdin.on('data', keyReader(onKeyProjects));
   timer = setInterval(() => { pBuild(); pRender(); }, 2500);
 } else if (SCREEN === 'addproject') {
   // --clone opens straight on the clone box (the `c` key on the add card). It starts in
@@ -4477,18 +4466,18 @@ if (SCREEN === 'projects') {
     dCloning = true;
     try { if (fs.statSync(path.join(HOME, 'projects')).isDirectory()) curDir = path.join(HOME, 'projects'); } catch {}
   }
-  dBuild(); dRender(); process.stdin.on('data', onKeyAdd);
+  dBuild(); dRender(); process.stdin.on('data', keyReader(onKeyAdd));
 } else if (SCREEN === 'nameproject') {
   // --select carries the folder the browser landed on; the basename pre-fills the box so
   // ⏎ alone is the whole of the common case.
   pnPath = SELECT || HOME;
   pnInput = path.basename(pnPath);
-  nRender(); process.stdin.on('data', onKeyName);
+  nRender(); process.stdin.on('data', keyReader(onKeyName));
 } else if (SCREEN === 'stack') {
-  sBuild(); sRender(); process.stdin.on('data', onKeyStack);
+  sBuild(); sRender(); process.stdin.on('data', keyReader(onKeyStack));
   timer = setInterval(() => { sBuild(); sRender(); }, 2500);
 } else {
-  process.stdin.on('data', onKey);
+  process.stdin.on('data', keyReader(onKey));
   sweepRemovingMarkers();          // a previous grid may have left one behind (see above)
   buildItems();
   if (!checkJump()) render();

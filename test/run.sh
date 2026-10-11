@@ -3732,11 +3732,76 @@ if command -v tmux >/dev/null 2>&1; then
   # 140x24: too short for the ship, so cards start at row 3 — the original layout
   is "short: card 1 opens card 1"  "attach${US}ca" "$(clickcard 140 24 10 4)"
   is "short: header is not a card"    ""           "$(clickcard 140 24 10 1)"
+
+  # ONE READ, MORE THAN ONE EVENT. A grid refresh blocks the loop for most of a second on
+  # a real fleet, and a click that lands in it is read back as press AND release in one
+  # chunk — which the whole-chunk mouse regex matched as nothing, so the click vanished.
+  # tmux delivers one send-keys as one write, so these are that chunk, every time, with
+  # no race to win. $1=what to send (printf format) $2=optional second write.
+  # (Never end a send-keys argument with ';' — tmux takes it as a command separator.)
+  sendgrid() {
+    tmux -L cfclkdrv kill-session -t d 2>/dev/null; : > "$CK/choice"
+    tmux -L cfclkdrv -f /dev/null new-session -d -s d -x 140 -y 40 \
+      "CLAUDE_FLEET_DIR='$CK' CLAUDE_FLEET_SCOPE=clktest CLAUDE_FLEET_ROOT= node '$ROOT/bin/fleet-grid.mjs' cfclktest > '$CK/choice'" 2>/dev/null
+    sleep 2
+    tmux -L cfclkdrv send-keys -t d -l "$(printf "$1")" 2>/dev/null
+    if [ -n "${2:-}" ]; then sleep 0.1; tmux -L cfclkdrv send-keys -t d -l "$(printf "$2")" 2>/dev/null; fi
+    sleep 1; cat "$CK/choice"
+  }
+  is "press+release in ONE read opens card 1" "attach${US}ca" "$(sendgrid '\033[<0;10;11M\033[<0;10;11m')"
+  is "press+release in ONE read opens card 2" "attach${US}cb" "$(sendgrid '\033[<0;43;11M\033[<0;43;11m')"
+  is "a report split over two reads still opens" "attach${US}ca" "$(sendgrid '\033[<0;1' '0;11M\033[<0;10;11m')"
+  is "a wheel event in the same read does not eat the click" "attach${US}cb" \
+     "$(sendgrid '\033[<65;43;11M\033[<0;43;11M\033[<0;43;11m')"
+  is "→ and ⏎ in one read: moves, then opens"  "attach${US}cb" "$(sendgrid '\033[C\r')"
+  is "a click on the gap, combined, opens nothing" "" "$(sendgrid '\033[<0;10;15M\033[<0;10;15m')"
   tmux -L cfclkdrv kill-server 2>/dev/null; tmux -L cfclktest kill-server 2>/dev/null
   rm -rf "$CK"
 else
   skip "grid clicks" "tmux missing"
 fi
+
+# ── 4a5a. one read is not one key ────────────────────────────────────────────
+# lib/keys.mjs splits each stdin chunk into events before any screen sees it. The cases
+# are the ways a chunk stops being one key: two events at once, one event over two reads,
+# a lone ESC that looks like the start of a sequence. Real timers, because the hold and
+# the Esc timeout are the part that can go wrong.
+group "stdin splits into events (lib/keys.mjs)"
+KEYS_OUT="$(node --input-type=module -e '
+  const { splitKeys, keyReader } = await import(process.argv[1] + "/lib/keys.mjs");
+  const J = (v) => JSON.stringify(v);
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const line = (k, v) => console.log(k + "=" + v);
+  line("pr", J(splitKeys("\x1b[<0;10;11M\x1b[<0;10;11m").keys));
+  line("arrows", J(splitKeys("\x1b[B\r").keys));
+  line("dels", J(splitKeys("\x7f\x7f\x7f").keys.map(k => k.charCodeAt(0))));
+  line("paste", J(splitKeys("git@x:acme/acme-web.git").keys));
+  line("keymouse", J(splitKeys("j\x1b[<0;1;2M").keys));
+  line("ctrl", J(splitKeys("\x0612").keys));
+  line("escq", J(splitKeys("\x1bq").keys));
+  line("tail", J(splitKeys("\x1b[A\x1b[<0;1")));
+  const got = [], feed = keyReader(k => got.push(k));
+  feed("\x1b[<0;1"); await sleep(10); feed("0;11M");
+  line("split", J(got.splice(0)));
+  feed("\x1b"); await sleep(120);
+  line("esc", J(got.splice(0)));
+  feed("\x1b"); await sleep(5); feed("[A");
+  line("escarrow", J(got.splice(0)));
+  feed("\x1b[A"); line("arrow", J(got.splice(0)));
+' "$ROOT" 2>&1)"
+kv() { sed -n "s/^$1=//p" <<< "$KEYS_OUT"; }
+is "press+release in one read: two events" '["\u001b[<0;10;11M","\u001b[<0;10;11m"]' "$(kv pr)"
+is "↓⏎ in one read: two keys"               '["\u001b[B","\r"]'                       "$(kv arrows)"
+is "three DELs: three keys"                 '[127,127,127]'                           "$(kv dels)"
+is "a paste stays one run"                  '["git@x:acme/acme-web.git"]'             "$(kv paste)"
+is "a key typed with a click: both"         '["j","\u001b[<0;1;2M"]'                  "$(kv keymouse)"
+is "^F then digits: ^F on its own"          '["\u0006","12"]'                         "$(kv ctrl)"
+is "Esc then q: Esc, then q"                '["\u001b","q"]'                          "$(kv escq)"
+is "a cut-off report is held, not dispatched" '{"keys":["\u001b[A"],"rest":"\u001b[<0;1"}' "$(kv tail)"
+is "a report over two reads: one event"     '["\u001b[<0;10;11M"]'                    "$(kv split)"
+is "a lone Esc still arrives as Esc"        '["\u001b"]'                              "$(kv esc)"
+is "ESC then [A soon after: an arrow, not Esc" '["\u001b[A"]'                         "$(kv escarrow)"
+is "an arrow key arrives at once"           '["\u001b[A"]'                            "$(kv arrow)"
 
 # ── 4a5b. a screen never outlives its launcher ───────────────────────────────
 # Seen live: the launcher died while a grid was up, and the grid did not. Every screen
