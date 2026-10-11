@@ -117,7 +117,12 @@ It can't cover the interactive parts, so also verify against the live fleet, and
 prefer proof over assertion:
 
 - `fleet-grid.mjs --plain` exercises the real status path without drawing the TUI
-- **never** launch the interactive grid headlessly — it blocks on the tty and hangs
+- **never** launch the interactive grid headlessly — it blocks on the tty and hangs. Drive
+  it in a scratch tmux pane (`tmux -L <name> new-session -d …` under the run's own
+  `$TMUX_TMPDIR`) and send it keys; for anything about the LAUNCHER, start an interactive
+  shell in that pane and type `ghostfleet` into it. A launcher that is the pane's own
+  process is the session leader, so killing it hangs the tty up and SIGHUP takes the screen
+  with it — the orphan never forms and the test passes on broken code
 - destructive commands (`fleet-clean`, `fleet-adopt`) are dry-run by default; test that
   path first, on a real project
 - when a signal is claimed to be reliable, check it in both directions — a detector that

@@ -23,7 +23,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
+import cp, { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { modState, modLimitAt } from '../lib/mod-status.mjs';
 import * as J from '../lib/jarvis.mjs';
@@ -2484,6 +2485,127 @@ function finish(result) {
   process.exit(0);
 }
 
+// ── a refresh can never wedge the screen ────────────────────────────────────────
+// Every synchronous child blocks the event loop, and a blocked loop runs no signal
+// handler and reads no key: SIGTERM queues behind it and the screen looks immortal. The
+// programs the REFRESH path calls (tmux, every 1.2s; git and pgrep beside it) are the
+// ones that can wedge without anyone asking — a tmux server that stops answering takes
+// the screen with it — so they get a bound unless the call site chose its own. Long,
+// user-initiated calls (a worktree spawn, a wake) run other programs and are left alone:
+// they are asked for and can legitimately take a while.
+//   A bound per call is not enough on its own: one refresh makes a tmux call per session
+// and then some, all in a row, and the handler waits for the whole refresh. So the first
+// call that runs out trips a breaker, and that program's calls fail at once (every caller
+// already treats a failure as "no answer") until it has had a few seconds to recover.
+// Worst case a signal waits one bound, not one bound per call.
+//   It patches child_process itself rather than wrapping the calls here, because half the
+// refresh is in lib/ (fleet-scan's tmux calls were the ones measured still blocking after
+// the first cut wrapped only this file's). syncBuiltinESMExports carries the patch into
+// every module's named imports. Interactive screens only: --plain, --json and the
+// libraries' other callers keep stock behaviour.
+const SYNC_BOUND_MS = { tmux: 3000, git: 10000, pgrep: 3000 };
+function boundSyncChildren() {
+  const wedged = {};
+  const bound = (file, opts) => {
+    const ms = SYNC_BOUND_MS[path.basename(String(file))];
+    if (!ms || (opts && opts.timeout !== undefined)) return null;
+    if (Date.now() < (wedged[path.basename(String(file))] || 0)) return 'wedged';
+    return ms;
+  };
+  const trip = (file, ms) => { wedged[path.basename(String(file))] = Date.now() + 2 * ms; };
+  const realExec = cp.execFileSync, realSpawn = cp.spawnSync;
+  const split = (args, opts) => Array.isArray(args) ? [args, opts] : [[], args];
+  cp.execFileSync = function (file, a, o) {
+    const [args, opts = {}] = split(a, o), ms = bound(file, opts);
+    if (ms === null) return realExec.call(this, file, a, o);
+    if (ms === 'wedged') { const e = new Error(`${file} is not answering`); e.code = 'ETIMEDOUT'; throw e; }
+    try { return realExec.call(this, file, args, { ...opts, timeout: ms, killSignal: 'SIGKILL' }); }
+    catch (e) { if (e.code === 'ETIMEDOUT') trip(file, ms); throw e; }
+  };
+  cp.spawnSync = function (file, a, o) {
+    const [args, opts = {}] = split(a, o), ms = bound(file, opts);
+    if (ms === null) return realSpawn.call(this, file, a, o);
+    if (ms === 'wedged') { const e = new Error(`${file} is not answering`); e.code = 'ETIMEDOUT';
+      return { pid: 0, output: [null, '', ''], stdout: opts.encoding ? '' : Buffer.alloc(0), stderr: opts.encoding ? '' : Buffer.alloc(0), status: null, signal: null, error: e }; }
+    const r = realSpawn.call(this, file, args, { ...opts, timeout: ms, killSignal: 'SIGKILL' });
+    if (r.error?.code === 'ETIMEDOUT') trip(file, ms);
+    return r;
+  };
+  syncBuiltinESMExports();
+}
+
+// ── never outlive the launcher ──────────────────────────────────────────────
+// Every screen runs inside `choice="$(node … </dev/tty)"`, so its parent is a bash
+// SUBSHELL and the launcher is one level further up. Kill the launcher and the subshell
+// is reparented to init — still alive, so this process's ppid does not change — and the
+// screen goes on in a process group that is no longer the terminal's foreground: the
+// shell takes the terminal back, and the orphan keeps redrawing over whatever runs there
+// next, every 1.2s. Seen live: a second ghostfleet in the same window showed a blank screen
+// and a cursor, two programs painting one terminal. A trap in the launcher cannot prevent
+// it — bash defers a trapped signal until the command substitution's child has exited,
+// which is this process — so the screen watches for itself.
+//   What it watches is its own JOB: every ancestor that shares its process group, up to
+// and including the group's leader (the launcher, or the shell job that ran it), plus the
+// direct parent. Any of them gone means the job that owned the terminal is over. The
+// terminal's foreground group is not polled separately: a screen in a background group
+// whose job is still alive is STOPPED by the kernel on its next write (SIGTTOU), which is
+// the job-control shell's to resume or kill — and one whose job is gone is caught here.
+function jobChain() {
+  let rows;
+  try { rows = execFileSync('ps', ['-A', '-o', 'pid=,ppid=,pgid='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }); }
+  catch { return []; }
+  const proc = new Map();
+  for (const l of rows.split('\n')) {
+    const [pid, ppid, pgid] = l.trim().split(/\s+/).map(Number);
+    if (pid) proc.set(pid, { ppid, pgid });
+  }
+  const me = proc.get(process.pid);
+  if (!me || me.pgid === process.pid) return [];      // we lead our own group: nothing above us is ours
+  const chain = [];
+  for (let p = me.ppid; proc.get(p)?.pgid === me.pgid && !chain.includes(p); p = proc.get(p).ppid) {
+    chain.push(p);
+    if (p === me.pgid) break;                          // the leader
+  }
+  return chain;
+}
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+}
+// Leave without exiting normally: node's own exit path restores the termios it saw at
+// startup — with SIGTTOU blocked, so even from the background it succeeds — which would
+// drop whoever owns the terminal now (a tmux client in raw mode) back to cooked mode under
+// its feet. SIGKILL is the one exit that runs none of that.
+function abandon() {
+  try { process.kill(process.pid, 'SIGKILL'); } catch {}
+  process.reallyExit?.(1);
+}
+// The launcher is gone and the shell has the terminal back — within one poll, so too soon
+// for anyone to have started something else there. Give it back the screen modes this
+// screen turned on (alt-screen, mouse reporting, hidden cursor), or the prompt lands inside
+// the grid's picture and every click types escape codes into it. Termios is left alone for
+// the reason above; a shell sets its own at every prompt. The write goes through the async
+// stream so a terminal that has stopped reading cannot hold us, and the deadline exits
+// whether or not it landed.
+function abandonScreen() {
+  clearInterval(timer);                                // no redraw after the restore
+  setTimeout(abandon, 300).unref();
+  try { tty.write('\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l', abandon); } catch { abandon(); }
+}
+function watchLauncher() {
+  const ppid0 = process.ppid, chain = jobChain();
+  const watch = setInterval(() => {
+    if (process.ppid !== ppid0 || chain.some(p => !alive(p))) { clearInterval(watch); abandonScreen(); }
+  }, Number(process.env.CLAUDE_FLEET_SCREEN_WATCH_MS) || 1000);
+  watch.unref();
+  // The terminal itself going away: a hangup, or a read that fails (EIO is what a
+  // background group gets for reading a terminal it no longer owns) or ends. Unhandled,
+  // the read error crashed the screen with a stack trace across the next job's screen.
+  process.on('SIGHUP', abandon);
+  process.stdin.on('error', abandon);
+  process.stdin.on('end', abandon);
+  tty.on('error', abandon);
+}
+
 // ── ^F jump chord ───────────────────────────────────────────────────────────
 // The chord tmux implements as key tables (see tmux/cf.tmux.conf) is only reachable
 // from INSIDE a session, so these Node screens implement the same grammar and emit
@@ -4341,6 +4463,8 @@ process.stdin.resume();
 process.stdin.setEncoding('utf8');
 process.on('SIGTERM', () => finish(''));
 process.on('SIGINT', () => finish(''));
+boundSyncChildren();
+watchLauncher();
 
 if (SCREEN === 'projects') {
   pBuild(); pRender(); process.stdin.on('data', onKeyProjects);

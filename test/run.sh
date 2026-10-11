@@ -3738,6 +3738,74 @@ else
   skip "grid clicks" "tmux missing"
 fi
 
+# ── 4a5b. a screen never outlives its launcher ───────────────────────────────
+# Seen live: the launcher died while a grid was up, and the grid did not. Every screen
+# runs inside `choice="$(node … </dev/tty)"`, so its parent is a bash SUBSHELL; with the
+# launcher gone that subshell is reparented to init — still alive, so the grid's own ppid
+# never changes — and the grid went on in a background process group, repainting every
+# 1.2s over whatever ran next. A second ghostfleet in the same window showed a blank
+# screen and a cursor. SIGTERM did nothing either: a refresh blocked on a tmux that had
+# stopped answering, and a blocked loop runs no handler.
+#
+# Driven through the REAL bin/ghostfleet (scratch HOME, empty project list, so it opens
+# the Projects screen) from an interactive shell in a scratch pane, because the bug is
+# only there with job control: launched as a pane's own process, the launcher is the
+# session leader, its death hangs the tty up and SIGHUP kills the grid — a test that
+# passes on the broken code. Both directions: a live launcher must NOT lose its screen.
+group "a screen never outlives its launcher"
+if command -v tmux >/dev/null 2>&1; then
+  OG="$(mktemp -d)"; mkdir -p "$OG/home" "$OG/fk"
+  tmux -L cfogdrv kill-server 2>/dev/null
+  # The direct child of $1 (first one), from one ps listing; no pattern matching.
+  og_child() { ps -A -o pid=,ppid= | awk -v p="$1" '$2 == p { print $1; exit }'; }
+  # ms until $1 is gone, polling for at most $2 seconds; empty when it never went.
+  og_gone() { local i n=$(($2 * 10)); for ((i = 0; i < n; i++)); do kill -0 "$1" 2>/dev/null || { echo $((i * 100)); return; }; sleep 0.1; done; }
+  tmux -L cfogdrv -f /dev/null new-session -d -s d -x 120 -y 40 "exec env -i PATH='$PATH' HOME='$OG/home' TMUX_TMPDIR='$TMUX_TMPDIR' TERM=screen bash --norc --noprofile -i" 2>/dev/null
+  sleep 0.5
+  # env -i, so nothing of THIS run's fleet (CLAUDE_FLEET_*, TMUX) leaks in — except
+  # TMUX_TMPDIR, which keeps any tmux the launcher touches inside this run's namespace.
+  tmux -L cfogdrv send-keys -t d "CLAUDE_FLEET_AWAKE=off '$ROOT/bin/ghostfleet'" Enter
+  OG_SH="$(tmux -L cfogdrv display -p -t d '#{pane_pid}' 2>/dev/null)"
+  for _ in $(seq 1 50); do
+    OG_L="$(og_child "${OG_SH:-0}")"; OG_SUB="$(og_child "${OG_L:-0}")"; OG_SCR="$(og_child "${OG_SUB:-0}")"
+    [ -n "$OG_SCR" ] && [ "$(tmux -L cfogdrv display -p -t d '#{alternate_on}')" = 1 ] && break; sleep 0.1
+  done
+  if [ -n "$OG_SCR" ]; then
+    sleep 2.5                                  # two and a half watch polls, launcher alive
+    is "a screen with a live launcher keeps running" "alive" "$(kill -0 "$OG_SCR" 2>/dev/null && echo alive || echo gone)"
+    kill -TERM "$OG_L" 2>/dev/null
+    og_ms="$(og_gone "$OG_SCR" 5)"
+    is "its launcher killed: the screen exits within 5s" "exited" "$([ -n "$og_ms" ] && echo exited || echo "still running after 5s")"
+    sleep 0.5
+    # The shell has the terminal back, and the screen gave back the modes it set.
+    is "and leaves the alt-screen to the shell" "0" "$(tmux -L cfogdrv display -p -t d '#{alternate_on}')"
+    is "and turns mouse reporting off"          "0" "$(tmux -L cfogdrv display -p -t d '#{mouse_any_flag}')"
+    kill -KILL "$OG_SCR" "$OG_SUB" "$OG_L" 2>/dev/null
+  else
+    bad "the Projects screen came up under a real launcher" "a screen pid" "none"
+  fi
+  tmux -L cfogdrv kill-server 2>/dev/null
+
+  # SIGTERM with the loop wedged: a tmux that stops answering once $OG/fk/hang exists.
+  # `exec sleep` so the bound's SIGKILL lands on the sleeper itself, leaving no orphan.
+  printf '#!/bin/sh\n[ -f "%s/fk/hang" ] && exec sleep 60\nexec "%s" "$@"\n' "$OG" "$(command -v tmux)" > "$OG/fk/tmux"
+  chmod +x "$OG/fk/tmux"
+  tmux -L cfogfleet kill-server 2>/dev/null; tmux -L cfogfleet new-session -d -s master "sleep 120" 2>/dev/null
+  tmux -L cfogdrv -f /dev/null new-session -d -s g -x 120 -y 40 \
+    "exec env PATH='$OG/fk:$PATH' CLAUDE_FLEET_DIR='$OG' CLAUDE_FLEET_ROOT= node '$ROOT/bin/fleet-grid.mjs' cfogfleet" 2>/dev/null
+  sleep 2; OG_G="$(tmux -L cfogdrv display -p -t g '#{pane_pid}' 2>/dev/null)"
+  touch "$OG/fk/hang"; sleep 2                 # the next refresh is now stuck in tmux
+  kill -TERM "$OG_G" 2>/dev/null
+  og_ms="$(og_gone "$OG_G" 8)"
+  is "SIGTERM with tmux not answering: exits within 8s" "exited" "$([ -n "$og_ms" ] && echo exited || echo "still running after 8s")"
+  kill -KILL "$OG_G" 2>/dev/null
+  rm -f "${OG:?}/fk/hang"
+  tmux -L cfogdrv kill-server 2>/dev/null; tmux -L cfogfleet kill-server 2>/dev/null
+  rm -rf "${OG:?}"
+else
+  skip "screen outlives launcher" "tmux missing"
+fi
+
 # ── 4a6. a need-you that was answered must stop being red ────────────────────
 # need-you is LATCHED — the hook writes it and only a later hook event overwrites it —
 # so the only other way out is noticing the session moved on. That test was purely a

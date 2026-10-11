@@ -8,6 +8,15 @@ the detail, and every entry here names the PR that carries the argument.
 
 ### Fixed
 
+- **A screen never outlives the ghostfleet that opened it.** Kill the launcher while the
+  grid or the Projects screen is up and the screen used to carry on in the background,
+  repainting every second over whatever ran next in that window — a second `ghostfleet` there
+  showed a blank screen and a cursor until the old one was `kill -9`'d. A screen now exits
+  within about a second of losing its launcher (or its terminal), hands the shell back a
+  normal screen with the mouse off, and leaves the terminal's own modes to whoever owns it
+  now. A SIGTERM also exits within a few seconds when a tmux server has stopped answering:
+  the refresh's tmux, git and pgrep calls are bounded, instead of holding the screen, and
+  every signal sent to it, for as long as tmux took.
 - **A codex session the machine killed comes back on its own conversation, the same way a
   claude one does.** Codex has no hooks, so a codex pane left no fleet record: after a crash
   or reboot its conversation was intact on disk but showed nowhere as `lost`, and the only
