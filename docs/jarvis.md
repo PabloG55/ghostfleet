@@ -176,13 +176,17 @@ app, a **Turn on notifications** band offers the subscription with one tap (iOS 
 in answer to a tap), and `fleet-phone` reports `notifications: not set up` until a
 subscription exists.
 
-## Fresh every day
+## Fresh when it gets long
 
 A long context is the known failure of a session that never ends, and Jarvis is built never
-to end. So its fleet's governor restarts it once a day at `restart_hour` (default 4, in the
-marker) — only when it has been idle for ten minutes, never on the first sight of a new
-Jarvis, and never twice a day. The new session is a fresh conversation; what the old one was
-carrying goes forward as `HANDOFF.md` in Jarvis's home, built from the record rather than
-asked of the model: the proposals still waiting on you, the last things you said, its last
-answers, and the digest at the moment of the restart. `fleet-jarvis restart --dry-run`
-prints the handoff without restarting anything.
+to end. So its fleet's governor restarts it once its conversation has grown past
+`restart_tokens` context tokens (default 200000, in the marker) — at any time of day, but
+only when it has been idle for ten minutes, and never twice for the same conversation. The
+size is the context the model last saw, read from the last usage line in the tail of its
+transcript; the file's size in bytes is not used, because it does not track tokens. A
+transcript with no usage line yet is not measured and never restarted. `fleet-jarvis status`
+shows the threshold and the current size. The new session is a fresh conversation; what the
+old one was carrying goes forward as `HANDOFF.md` in Jarvis's home, built from the record
+rather than asked of the model: the proposals still waiting on you, the last things you
+said, its last answers, and the digest at the moment of the restart.
+`fleet-jarvis restart --dry-run` prints the handoff without restarting anything.

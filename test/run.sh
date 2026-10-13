@@ -15046,55 +15046,117 @@ else
   skip "fleet-jarvis init" "node or git missing"
 fi
 
-# THE DAILY FRESH START. A copy of the runtime whose agent-here is a stub, so "a fresh
-# master" is a process this suite started and can see, never a real agent. Three things
-# must hold: it does not fire on first sight or twice a day, it never replaces a Jarvis that
-# is mid-turn, and when it does fire the replacement is FRESH and the handoff exists.
-group "the daily restart is fresh, idle-only, and carries a handoff"
+# THE FRESH START, BY SIZE. A copy of the runtime whose agent-here is a stub, so "a fresh
+# master" is a process this suite started and can see, never a real agent; the transcript is
+# a file written here, so "how big is the conversation" is a number this suite chose. What
+# must hold: it fires on the context TOKENS of the last usage line and nothing else (not
+# bytes, not the clock), never on a missing measure, never on a Jarvis mid-turn or just
+# spoken to, never twice for one conversation — and when it fires the replacement is FRESH
+# and the handoff exists.
+group "Jarvis restarts when its conversation outgrows restart_tokens, idle-only, with a handoff"
 if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   JR="$(cd "$(mktemp -d)" && pwd -P)"
-  mkdir -p "$JR/home/.config/ghostfleet" "$JR/home/.claude/fleet" "$JR/jv"
+  mkdir -p "$JR/home/.config/ghostfleet" "$JR/home/.claude/fleet" "$JR/jv" "$JR/tr"
   cp -R "$ROOT/bin" "$ROOT/lib" "$ROOT/mcp" "$ROOT/tmux" "$ROOT/hooks" "$JR/"
   printf '#!/bin/sh\nprintf "fresh=%%s\\n" "${CLAUDE_FLEET_FRESH:-}" >> "%s/started"\nexec sleep 300\n' "$JR" > "$JR/bin/agent-here"
   chmod +x "$JR/bin/agent-here"
   printf 'jarvis\t%s\twork\n' "$JR/jv" > "$JR/home/.config/ghostfleet/projects"
-  printf 'name=jarvis\nprofile=work\nsock=cf-jarvis\ncfg=%s\npath=%s\nrestart_hour=0\n' "$JR/home/.claude" "$JR/jv" > "$JR/home/.config/ghostfleet/jarvis"
+  JM="$JR/home/.config/ghostfleet/jarvis"
+  jmark() { printf 'name=jarvis\nprofile=work\nsock=cf-jarvis\ncfg=%s\npath=%s\n%s' "$JR/home/.claude" "$JR/jv" "$1" > "$JM"; }
+  jmark ''
   jr() { HOME="$JR/home" TMUX= "$JR/bin/fleet-jarvis" "$@" 2>&1; }
-  jst() { printf '{"session_id":"j1","sock":"cf-jarvis","slot":"master","status":"%s","ts":%s}\n' "$1" "$2" > "$JR/home/.claude/fleet/j1.json"; }
+  # <status> <ts> [transcript]: the master's status record, as the event hook writes it
+  jst() { printf '{"session_id":"j1","sock":"cf-jarvis","slot":"master","status":"%s","ts":%s,"transcript":"%s"}\n' "$1" "$2" "${3:-$JR/tr/j1.jsonl}" > "$JR/home/.claude/fleet/j1.json"; }
+  # <tokens…> — one assistant entry per argument, in order, each split across the three
+  # input fields the measure sums; 0 writes the all-zero usage of a synthetic entry
+  use() { printf '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":%s,"cache_read_input_tokens":%s,"cache_creation_input_tokens":%s,"output_tokens":7}}}\n' \
+            $(( $1 / 10 )) $(( $1 / 2 )) $(( $1 - $1 / 10 - $1 / 2 )); }
+  jtr() { : > "$JR/tr/j1.jsonl"; for t in "$@"; do use "$t" >> "$JR/tr/j1.jsonl"; printf '{"type":"user","message":{"role":"user","content":"ok"}}\n' >> "$JR/tr/j1.jsonl"; done; }
   ppid_of() { tmux -L cf-jarvis display-message -p -t master '#{pane_pid}' 2>/dev/null; }
+  # The local hour this many hours from now, as a TZ that makes it so: the clock the old
+  # restart read, put wherever a row needs it without waiting for it.
+  tz_at() { local x=$(( ($1 - 10#$(date -u +%H) + 48) % 24 )); [ "$x" -gt 14 ] && x=$((x - 24)); [ "$x" -ge 0 ] && echo "Etc/GMT-$x" || echo "Etc/GMT+$(( -x ))"; }
   tmux -L cf-jarvis kill-server 2>/dev/null
   # WITHOUT the caller's CLAUDE_FLEET_FRESH: a session started by fleet-spawn carries it, a
   # server started from there inherits it, and then "the restart asked for a fresh one" is
   # true of every pane on that server whether the restart asked or not.
   env -u CLAUDE_FLEET_FRESH tmux -L cf-jarvis new-session -d -s master 'sleep 300'
   P0="$(ppid_of)"; NOW="$(date +%s)"
-  jst ready $((NOW - 3600))
   HOME="$JR/home" node --input-type=module -e "import * as J from '$JR/lib/jarvis.mjs'; J.recordSaid('clean up docs-pass', 'owner'); J.gate({key:'k',tool:'fleet_stop',summary:'stop acme-api/docs-pass'})"
-  jr restart --if-due >/dev/null
-  is "first sight is a baseline, not a restart"   "$P0" "$(ppid_of)"
-  printf '%s\n' $((NOW - 2 * 86400)) > "$JR/home/.config/ghostfleet/jarvis.restarted"
+
+  jst ready $((NOW - 3600)); jtr 50000 94000
+  out="$(jr restart --if-due --dry-run)"; rc=$?
+  is "under the threshold, idle: nothing happens"  "0|"  "$rc|$out"
+  is "...status shows the threshold and the size"  "1"   "$(grep -c 'restart   when context passes 200k tokens (now 94k)' <<< "$(jr status)" || true)"
+  jtr 50000 210000
+  out="$(jr restart --if-due --dry-run)"
+  is "over 200k, idle an hour: it restarts"        "1"   "$(grep -c '^# Handoff' <<< "$out" || true)"
+  is "...the handoff says why, with the size"      "1"   "$(grep -c 'restarted fresh because the conversation grew past 200k tokens (it was at 210k)' <<< "$out" || true)"
+  jtr 250000 94000
+  is "it is the LAST usage line that counts"       ""    "$(jr restart --if-due --dry-run)"
+  jtr 210000 0
+  is "...not a synthetic all-zero one after it"    "1"   "$(grep -c '^# Handoff' <<< "$(jr restart --if-due --dry-run)" || true)"
+  # BYTES ARE NOT THE MEASURE, AND THE TAIL IS ENOUGH: a megabyte of turns ahead of a small
+  # last one, and the 300k entry that opens the file is far outside the tail read.
+  jtr 300000; for _ in $(seq 1 4000); do printf '{"type":"user","message":{"role":"user","content":"%0250d"}}\n' 0; done >> "$JR/tr/j1.jsonl"; use 94000 >> "$JR/tr/j1.jsonl"
+  is "a megabyte of transcript under 200k: nothing" "" "$(jr restart --if-due --dry-run)"
+  use 220000 >> "$JR/tr/j1.jsonl"
+  is "...and its last line over: it restarts"      "1"   "$(grep -c '^# Handoff' <<< "$(jr restart --if-due --dry-run)" || true)"
+
+  jtr 210000
   jst working $((NOW - 3600))
-  out="$(jr restart --if-due)"; rc=$?
-  is "a Jarvis mid-turn is not restarted"          "3"   "$rc"
-  is "...it is deferred, saying why"               "1"   "$(grep -c 'deferred' <<< "$out" || true)"
-  is "...and its pane is the same one"             "$P0" "$(ppid_of)"
+  out="$(jr restart --if-due --dry-run)"; rc=$?
+  is "over, but mid-turn: deferred"                "3|1" "$rc|$(grep -c 'deferred' <<< "$out" || true)"
+  jst ready $((NOW - 60))
+  out="$(jr restart --if-due --dry-run)"; rc=$?
+  is "over, ready but spoken to a minute ago: deferred" "3|1" "$rc|$(grep -c 'deferred' <<< "$out" || true)"
   jst ready $((NOW - 3600))
+
+  jtr 94000
+  jmark $'restart_tokens=50000\n'
+  is "restart_tokens=50000 is honoured at 94k"     "1"   "$(grep -c 'grew past 50k tokens (it was at 94k)' <<< "$(jr restart --if-due --dry-run)" || true)"
+  is "...and status shows it"                      "1"   "$(grep -c 'when context passes 50k tokens (now 94k)' <<< "$(jr status)" || true)"
+  jmark $'restart_tokens=nonsense\n'
+  is "a restart_tokens that is not a number is the default" "" "$(jr restart --if-due --dry-run)"
+
+  jtr 210000
+  jst ready $((NOW - 3600)) "$JR/tr/nowhere.jsonl"
+  is "a transcript that does not exist: nothing"   "0|"  "$(jr restart --if-due --dry-run; echo "$?|")" 
+  printf '{"type":"user","message":{"role":"user","content":"hi"}}\n' > "$JR/tr/j2.jsonl"
+  jst ready $((NOW - 3600)) "$JR/tr/j2.jsonl"
+  is "one with no usage line yet: nothing"         ""    "$(jr restart --if-due --dry-run)"
+  rm -f "$JR/home/.claude/fleet/j1.json"
+  is "no record for the master at all: nothing"    ""    "$(jr restart --if-due --dry-run)"
+  jst ready $((NOW - 3600))
+
+  # THE CLOCK IS GONE: 04:xx with an old marker's restart_hour=4 and no restart for two days
+  # is nothing when small, and 16:xx is a restart when big.
+  jmark $'restart_hour=4\n'; printf '%s\n' $((NOW - 2 * 86400)) > "$JR/home/.config/ghostfleet/jarvis.restarted"
+  jtr 94000
+  is "04:00, restart_hour=4, small: nothing"       ""    "$(TZ="$(tz_at 4)" jr restart --if-due --dry-run)"
+  jtr 210000
+  # the clock the row sets is the one node reads, or the row proves nothing
+  is "...(the row's clock really is 04:xx)"        "04"  "$(TZ="$(tz_at 4)" node -e 'console.log(String(new Date().getHours()).padStart(2,"0"))')"
+  is "16:00, big: it restarts"                     "1"   "$(grep -c '^# Handoff' <<< "$(TZ="$(tz_at 16)" jr restart --if-due --dry-run)" || true)"
+  is "an old marker with restart_hour still reads" "1"   "$(grep -c 'when context passes 200k tokens' <<< "$(jr status)" || true)"
+
   jr restart --if-due >/dev/null
   P1="$(ppid_of)"
   i=0; while [ "$i" -lt 30 ] && [ ! -s "$JR/started" ]; do i=$((i+1)); sleep 0.1; done
-  is "an idle Jarvis, due, is restarted"           "1"   "$([ -n "$P1" ] && [ "$P1" != "$P0" ] && echo 1 || echo 0)"
+  is "an idle Jarvis over the line is restarted"   "1"   "$([ -n "$P1" ] && [ "$P1" != "$P0" ] && echo 1 || echo 0)"
   is "...as a FRESH conversation"                  "fresh=1" "$(tail -1 "$JR/started" 2>/dev/null)"
   is "...the server kept, one session: master"     "master" "$(tmux -L cf-jarvis list-sessions -F '#{session_name}' 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
   is "...with a handoff in its home"               "yes" "$([ -f "$JR/jv/HANDOFF.md" ] && echo yes || echo no)"
   is "...naming what waits on his yes"             "1"   "$(grep -c 'stop acme-api/docs-pass' "$JR/jv/HANDOFF.md" 2>/dev/null || true)"
   is "...and what he last said"                    "1"   "$(grep -c 'clean up docs-pass' "$JR/jv/HANDOFF.md" 2>/dev/null || true)"
-  is "...and it says so in Jarvis's inbox"         "1"   "$(grep -c 'restarted' "$JR/home/.claude/fleet/cf-jarvis.inbox" 2>/dev/null || true)"
+  is "...and it says so in Jarvis's inbox"         "1"   "$(grep -c 'restarted.*context passed 200k' "$JR/home/.claude/fleet/cf-jarvis.inbox" 2>/dev/null || true)"
+  # The record still names the old, big transcript until the fresh master's first event.
   jr restart --if-due >/dev/null
-  is "once a day: a second tick changes nothing"   "$P1" "$(ppid_of)"
+  is "never twice for one conversation"            "$P1" "$(ppid_of)"
   tmux -L cf-jarvis kill-server 2>/dev/null
-  rm -rf "$JR"
+  rm -rf "${JR:?}"
 else
-  skip "Jarvis daily restart" "tmux or node missing"
+  skip "Jarvis restart by size" "tmux or node missing"
 fi
 
 # ── Jarvis is EXPERIMENTAL: off unless switched on, and off means gone ──────────
