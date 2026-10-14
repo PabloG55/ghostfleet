@@ -25,6 +25,8 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+/* The UA's own surfaces dark as well — see the block in index.html for the white frame. */
+:root { color-scheme: dark; }
 /* THE PAGE NEVER SCROLLS SIDEWAYS. docs/mobile.md has said so since #48 — wide content
  * scrolls inside its OWN overflow-x box — and it was a rule somebody had to keep rather
  * than a rule the stylesheet kept. Reported from a real iPhone: with the actions sheet
@@ -168,6 +170,26 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
                          to   { clip-path: inset(0);         opacity: 1 } }
 @keyframes gf-nav-back { from { clip-path: inset(0 92% 0 0); opacity: .35 }
                          to   { clip-path: inset(0);         opacity: 1 } }
+
+/* ── the same move, as a SLIDE, where view transitions exist (slideNav in app.js) ──
+ * Pushing a screen slides the new one in over the old, which drifts a third of the way
+ * left and dims; popping does the reverse. iOS's own navigation, shortened: 260ms, one
+ * decelerating curve, no overshoot. These animate snapshots, not #app, so no box moves and
+ * the viewport rule the wipe above was shaped by still holds. The ground behind them is
+ * --bg, never the empty canvas. */
+::view-transition { background: var(--bg); }
+@media (prefers-reduced-motion: no-preference) {
+  :root[data-nav]::view-transition-old(root),
+  :root[data-nav]::view-transition-new(root) { animation-duration: 260ms; animation-timing-function: cubic-bezier(.2,.8,.2,1); animation-fill-mode: both; mix-blend-mode: normal; }
+  :root[data-nav="fwd"]::view-transition-old(root)  { animation-name: gf-push-under; }
+  :root[data-nav="fwd"]::view-transition-new(root)  { animation-name: gf-push-in; }
+  :root[data-nav="back"]::view-transition-old(root) { animation-name: gf-pop-out; z-index: 1; }
+  :root[data-nav="back"]::view-transition-new(root) { animation-name: gf-pop-under; }
+}
+@keyframes gf-push-in    { from { transform: translateX(100%) } }
+@keyframes gf-push-under { to   { transform: translateX(-30%); opacity: .5 } }
+@keyframes gf-pop-out    { to   { transform: translateX(100%) } }
+@keyframes gf-pop-under  { from { transform: translateX(-30%); opacity: .5 } }
 
 /* ── waiting, in the shape of the thing being waited for ─────────────────────
  * A skeleton rather than a spinner, because the screen then does not JUMP when the data
@@ -714,6 +736,20 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * rather than absent, because a chat where your own message vanishes for five seconds
  * reads as a send that failed. */
 .chat .bub.pending { opacity: .55; }
+/* ── a message arriving ──────────────────────────────────────────────────────
+ * Classed by app.js's arrived() only on the render where the turn is NEW — never on a poll
+ * redraw, which rebuilds every bubble. A short fade and rise for anything that arrives;
+ * your own sent bubble rises further, from the composer it just left; and the delivered
+ * turn that replaces the pending one only lifts from the pending dim, in place, because
+ * it is the same message and must not arrive twice. Transform and opacity only. */
+@media (prefers-reduced-motion: no-preference) {
+  .chat .turn.enter { animation: gf-enter 200ms cubic-bezier(.2,.8,.2,1) var(--gf-in, 0ms) both; }
+  .chat .turn.enter.sent { animation: gf-sent 220ms cubic-bezier(.2,.8,.2,1) var(--gf-in, 0ms) both; transform-origin: 100% 100%; }
+  .chat .turn.settle > .bub { animation: gf-settle 180ms ease-out var(--gf-in, 0ms) both; }
+}
+@keyframes gf-enter  { from { opacity: 0; transform: translateY(8px) } }
+@keyframes gf-sent   { from { opacity: 0; transform: translateY(28px) scale(.98) } }
+@keyframes gf-settle { from { opacity: .55 } }
 .chat .meta { font-size: 11px; color: var(--dim); padding: 0 .3em; }
 .chat .meta.r { align-self: flex-end; }
 .chat .meta.l { align-self: flex-start; }

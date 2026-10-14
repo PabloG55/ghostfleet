@@ -330,6 +330,29 @@ function markNav(app, screen) {
     navTimer = setTimeout(() => { try { app.classList.remove('nav-fwd', 'nav-back'); } catch {} }, 260);
   } catch {}
 }
+// A SLIDE, WHERE THE ENGINE CAN DRAW ONE WITHOUT MOVING A BOX. The wipe above exists
+// because a translated #app hangs every child's rect past the screen for the length of
+// the animation. A view transition translates SNAPSHOTS instead — pseudo-elements with
+// no box in the document — so the screen can push in from the right and pop back like
+// iOS navigation while every real element sits at rest, and the old screen stays painted
+// until the new one is drawn rather than leaving a frame of nothing between them.
+//   Not when the system already animated it: a back gesture slides its own snapshot, and
+// a second slide after it is the screen arriving twice. popstate says which (uaSlid).
+let uaSlid = false;
+function slideNav() {
+  if (S.locked || !SHELL_SCREENS.has(S.screen) || navFrom === null || navFrom === S.screen) return false;
+  const d = (SCREEN_DEPTH[S.screen] ?? 0) - (SCREEN_DEPTH[navFrom] ?? 0);
+  if (!d) return false;
+  if (uaSlid) { navFrom = S.screen; return false; }
+  const root = document.documentElement;
+  try {
+    if (typeof document.startViewTransition !== 'function' || matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
+    navFrom = S.screen;                   // the render inside paints with no wipe of its own
+    root.dataset.nav = d > 0 ? 'fwd' : 'back';
+    document.startViewTransition(() => render()).finished.finally(() => { try { delete root.dataset.nav; } catch {} });
+    return true;
+  } catch { return false; }
+}
 // THE TWO SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
 const PREACT_SCREENS = new Set(['projects', 'grid']);
 // Whether Preact currently owns #app. Not derivable from S.screen: the screen can change
@@ -337,6 +360,7 @@ const PREACT_SCREENS = new Set(['projects', 'grid']);
 // screen, not who would put them there now.
 let preactUp = false;
 function render() {
+  if (slideNav()) return;
   const app = document.getElementById('app');
   // Toggled on <html> as well: the page must not scroll behind a screen that owns the
   // viewport, or a drag near the edge slides the whole app and the scroller under the
@@ -1803,7 +1827,8 @@ function chatView(card) {
       btn('open the pane', () => setView('pane')),
     ]));
   }
-  if (!s) { wrap.append(el('div', { class: 'hint', text: 'reading the transcript…' })); return wrap; }
+  // A session opened afresh draws its history as history: forget what the last visit drew.
+  if (!s) { drawn.who = ''; wrap.append(el('div', { class: 'hint', text: 'reading the transcript…' })); return wrap; }
   // A session that has not taken a turn comes back with total 0 and a `note` — fleet-read's
   // own words for a terminal: "…is live but has no transcript yet — Send it work: fleet-send
   // -s … <prompt>". The API keeps the note, because "no messages" and "no transcript yet" are
@@ -1853,12 +1878,13 @@ function chatView(card) {
       ]));
       continue;
     }
-    wrap.append(turn(m.role === 'user', m.text, G.clockLabel(m.ts), false, msgKey(m)));
+    wrap.append(arrived(turn(m.role === 'user', m.text, G.clockLabel(m.ts), false, msgKey(m)), m, msgKey(m)));
   }
   // Sent, not yet echoed by the transcript. Dimmed rather than absent: a chat where your
   // own message disappears for five seconds reads as a send that failed, and this app's
   // whole job is telling you what is actually happening.
-  if (S.pending) wrap.append(turn(true, S.pending.text, 'sending…', true));
+  if (S.pending) wrap.append(arrived(turn(true, S.pending.text, 'sending…', true), null, 'pending|' + S.pending.at));
+  arrivedDone();
   // ── "it is working on it" ──────────────────────────────────────────────
   // Between the transcript echoing your prompt and the answer landing, this screen said
   // nothing at all, and a chat that goes quiet reads as a send that went nowhere. The
@@ -2088,6 +2114,59 @@ function paintPhotos() {
 }
 
 function msgKey(m) { return String(m.role || '') + '|' + String(m.ts || ''); }
+// ── a message ENTERS once, and a poll is not an entrance ────────────────────
+// render() rebuilds #app from nothing every five seconds, so every bubble is a NEW element
+// on every poll — an entrance keyed on element creation would replay down the whole
+// transcript each interval. What enters is decided against the keys the previous render
+// of THIS conversation already drew, and nothing else.
+//   SEEDED, NOT ANIMATED, ON THE WAY IN. The first render that has messages draws the
+// history you opened, and twenty bubbles rising at once is a screen shaking, not news.
+// Only the tail can enter: a page of older turns loaded at the top is new to the set and
+// old to the reader, so a key counts only when it lands after the last one already drawn.
+//   The pending bubble enters as SENT (it rises from the composer); the turn that later
+// replaces it SETTLES from the pending dim instead of entering again, which is the
+// difference between a message that was delivered and one that appeared twice.
+//   A REBUILD MID-ANIMATION CONTINUES IT. Two renders can land milliseconds apart — the
+// one that claims a send and the one the verb's own refresh asks for — and the second
+// builds the turn again with no class, which cuts a 200ms move off at its first frame: the
+// jump this exists to remove. So for the length of the move a rebuilt turn gets its class
+// back with a negative delay (--gf-in) for the time already played, and picks up where the
+// last element left off instead of starting over or snapping to the end.
+const MOVE_MS = 260;
+const drawn = { who: '', keys: new Set(), seeded: false, pend: '', past: false, moving: new Map() };
+function moving(node, cls, at) {
+  try {
+    node.classList.add(...cls);
+    if (at) node.style.setProperty('--gf-in', `-${Date.now() - at}ms`);
+  } catch {}
+  return node;
+}
+function arrived(node, m, key) {
+  const who = `${S.project} ${S.session} ${S.jarvisMode ? 'j' : ''}`;
+  if (drawn.who !== who) Object.assign(drawn, { who, keys: new Set(), seeded: false, pend: '', past: false, moving: new Map() });
+  if (!key) return node;
+  if (drawn.keys.has(key)) {
+    drawn.past = true;
+    const mv = drawn.moving.get(key);
+    if (mv && Date.now() - mv.at < MOVE_MS) return moving(node, mv.cls, mv.at);
+    drawn.moving.delete(key);
+    return node;
+  }
+  drawn.keys.add(key);
+  if (!drawn.seeded || !drawn.past) return node;
+  const settle = !!m && m.role === 'user' && !!drawn.pend && String(m.text || '').trim() === drawn.pend;
+  const cls = settle ? ['settle'] : key.startsWith('pending|') ? ['enter', 'sent'] : ['enter'];
+  drawn.moving.set(key, { cls, at: Date.now() });
+  return moving(node, cls, 0);
+}
+// Once per chat render, after the last bubble: what this render drew is the history the
+// next one is measured against.
+function arrivedDone() {
+  drawn.seeded = drawn.keys.size > 0;
+  drawn.past = false;
+  drawn.pend = S.pending ? String(S.pending.text || '').trim() : '';
+}
+
 function turn(mine, text, when, pending = false, key = '') {
   const bub = el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : '') });
   // AN ASSISTANT'S TURN IS MARKDOWN AND WAS BEING SHOWN AS ITS OWN SOURCE — "the messages
@@ -4546,7 +4625,7 @@ for (const ev of ['touchend', 'click']) document.addEventListener(ev, () => unlo
 // The system back gesture. Every backward move in the app comes through here, so a swipe
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
 // this is what answers). No URL is ever read: the entries carry a depth, not a route.
-addEventListener('popstate', () => popTo());
+addEventListener('popstate', (e) => { uaSlid = !!(e && e.hasUAVisualTransition); try { popTo(); } finally { uaSlid = false; } });
 // §5: a passkey whenever there is no live session — the token dies after 15 minutes
 // without a request, and that expiry is the only thing that brings the sensor back.
 document.addEventListener('visibilitychange', () => {

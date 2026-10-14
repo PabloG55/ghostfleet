@@ -337,7 +337,11 @@
 // v64 keeps the session screen inside the visible area while the keyboard is up: the
 // header stays put, the list shrinks, the composer sits on the keyboard. A phone still on
 // v63 lays the shell out to the full screen and iOS scrolls the header away.
-const VERSION = 'ghostfleet-v64';
+// v65 moves: a new message fades and rises in once (never again on a poll redraw), a sent
+// bubble rises from the composer and settles in place when delivered, screens slide like
+// iOS navigation, and the first frame of every load is the dark ground rather than white.
+// A phone still on v64 swaps screens with the short wipe and can flash white going back.
+const VERSION = 'ghostfleet-v65';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

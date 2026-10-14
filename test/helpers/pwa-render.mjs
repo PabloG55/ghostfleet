@@ -1220,6 +1220,14 @@ is('...and it says it is the lead', true, /the fleet's lead/.test(app.textConten
 // The default moved from the pane (#45) to the chat, at the request of the person using
 // it, and the pane's reason survives as the blocked banner rather than as the default.
 is('...opening on the chat', true, await until(() => /anything blocked on me/.test(app.textContent), 4000));
+// ── a message enters ONCE, and a poll is not an entrance ──────────────────
+// render() rebuilds every bubble on the 5s poll, so an entrance keyed on element creation
+// would replay down the whole transcript every interval. Opening the chat is not an
+// entrance either: that is history, and twenty bubbles rising at once is a shake.
+const movers = () => app.all(n => /\bturn\b/.test(n.className) && /\b(enter|settle)\b/.test(n.className)).length;
+is('opening a chat animates none of its history', 0, movers());
+appmod.renderUnlessTyping(); await tick(5);
+is('...and a poll redraw animates none of it either', 0, movers());
 is('...oldest first, newest last', true, (() => {
   const bubs = app.all(n => n.className.split(/\s+/).includes('bub')).map(n => n.textContent);
   return bubs.length >= 4 && /which workers are free/.test(bubs[0]) && /Dispatched the retry work/.test(bubs[bubs.length - 1]);
@@ -1294,11 +1302,31 @@ ta.value = 'run the suite and report back';
 click(btnWith(/^send$/));
 is('a sent message shows at once', true, await until(() =>
   !!app.find(n => n.className.split(/\s+/).includes('pending')), 4000));
+const sentTurn = () => app.find(n => /\bturn\b/.test(n.className) && !!n.find(k => /\bpending\b/.test(k.className)));
+is('...rising from the composer as it does', 'enter sent',
+   ((sentTurn() || { className: '' }).className.match(/\benter\b|\bsent\b/g) || []).join(' '));
+is('...and only the sent bubble moves', 1, movers());
 is('...and the box is cleared', '', app.find(n => n.tag === 'textarea').value);
-is('...then the transcript claims it', true, await until(() =>
-  !app.find(n => n.className.split(/\s+/).includes('pending')), 8000));
+// The claimed turn's class is read IN the render that claims it: the next render
+// rebuilds it without one, which is the point, and may land before this line runs.
+let claimedCls = null;
+is('...then the transcript claims it', true, await until(() => {
+  if (app.find(n => n.className.split(/\s+/).includes('pending'))) return false;
+  const t = app.all(n => /\bturn\b/.test(n.className) && /run the suite and report back/.test(n.textContent)).pop();
+  claimedCls = t ? t.className : '';
+  return true;
+}, 8000));
 is('...and it is still on screen, as a real turn', true,
    app.all(n => n.className.split(/\s+/).includes('bub')).some(n => /run the suite and report back/.test(n.textContent)));
+// Delivered is the SAME message: it lifts from the pending dim in place, it does not enter
+// a second time — and the next poll, which rebuilds it, moves nothing at all.
+is('...settling into it rather than arriving twice', 'settle',
+   (String(claimedCls || '').match(/\benter\b|\bsettle\b/g) || []).join(' '));
+// A rebuild INSIDE the move continues it (a negative delay, see arrived()); a poll is five
+// seconds later, well past it, so it is waited out here rather than raced.
+await tick(300);
+appmod.renderUnlessTyping(); await tick(5);
+is('...and the poll after it animates nothing', 0, movers());
 
 // ── a node the app has thrown away cannot write the app's state ──────────
 // THE MESSAGE THAT ARRIVED CARRYING THE PREVIOUS MESSAGE'S TEXT. Reported with a
