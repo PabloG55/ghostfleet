@@ -14856,10 +14856,19 @@ rm -rf "$JW"
 # fake clock — speech with a pause inside it that must NOT end the utterance, then silence
 # that must, a second later. The encoder is fed real speech at the 48 kHz a phone's mic
 # runs at, and its output goes through the real whisper.cpp when this machine has one.
-group "conversation mode: a second of quiet ends an utterance, and the WAV is heard"
+group "conversation mode: 3.5 s of quiet ends an utterance, and the WAV is heard"
 if command -v node >/dev/null 2>&1; then
   CV="$(cd "$(mktemp -d)" && pwd -P)"
+  # The loop and everything it calls, lifted as written: the turn clock, the quiet setting
+  # it reads, and the barge gate the same loop runs while an answer is read.
   { grep '^const TALK = {.*};$' "$ROOT/web/app.js"
+    grep '^const LS_QUIET = ' "$ROOT/web/app.js"
+    grep '^export const QUIET = ' "$ROOT/web/app.js" | sed 's/^export //'
+    grep '^export const BARGE = ' "$ROOT/web/app.js" | sed 's/^export //'
+    for f in savedQuiet turnClock bargeDetector; do
+      sed -n "/^export function $f(/,/^}/p" "$ROOT/web/app.js" | sed 's/^export //'
+    done
+    for f in drawTurn talkListenText; do sed -n "/^function $f(/,/^}/p" "$ROOT/web/app.js"; done
     sed -n '/^const T = {/,/};$/p' "$ROOT/web/app.js"
     sed -n '/^function onTalkFrame(e) {/,/^}/p' "$ROOT/web/app.js"
     sed -n '/^export function encodeWav(frames, rate) {/,/^}/p' "$ROOT/web/app.js" | sed 's/^export //'
@@ -14876,7 +14885,8 @@ const frame = (amp) => { const d = new Float32Array(N); for (let i = 0; i < N; i
 const feed = (ms, amp) => { for (let t = 0; t < ms; t += MS) { if (ctx.S.talk.phase !== 'listening') return; ctx.onTalkFrame({ inputBuffer: { getChannelData: () => frame(amp) } }); clock += MS; } };
 const mode = process.argv[3];
 ctx.T.listenAt = 0;
-if (mode === 'utterance') { feed(1000, 0); feed(700, 0.1); feed(450, 0); feed(700, 0.1); const endAt = clock; feed(2500, 0);
+// A breath (450 ms) and a pause to think (2 s) inside one utterance, then silence.
+if (mode === 'utterance') { feed(1000, 0); feed(700, 0.1); feed(450, 0); feed(700, 0.1); feed(2000, 0); feed(700, 0.1); const endAt = clock; feed(5000, 0);
   console.log(JSON.stringify({ events, endAt: Math.round(endAt) })); }
 if (mode === 'silence') { feed(25000, 0); console.log(JSON.stringify({ events })); }
 if (mode === 'wav') {                 // argv[4] = raw 48 kHz s16le mono, argv[5] = out .wav
@@ -14888,9 +14898,9 @@ if (mode === 'wav') {                 // argv[4] = raw 48 kHz s16le mono, argv[5
 VAD
   u="$(node "$CV/vad.cjs" "$CV/talk.js" utterance 2>&1)"
   ends="$(node -e 'const j=JSON.parse(process.argv[1]);console.log(j.events.filter(e=>e.startsWith("end")).length)' "$u" 2>/dev/null)"
-  is "one utterance with a pause inside it ends ONCE" "1" "$ends"
-  is "...about a second after the speech stopped" "1" \
-     "$(node -e 'const j=JSON.parse(process.argv[1]);const at=Number((j.events.find(e=>e.startsWith("end"))||"end@0").slice(4));const d=at-j.endAt;console.log(d>=900&&d<=1300?1:0)' "$u" 2>/dev/null)"
+  is "one utterance with a 2 s pause inside it ends ONCE" "1" "$ends"
+  is "...about 3.5 s after the speech stopped" "1" \
+     "$(node -e 'const j=JSON.parse(process.argv[1]);const at=Number((j.events.find(e=>e.startsWith("end"))||"end@0").slice(4));const d=at-j.endAt;console.log(d>=3400&&d<=3800?1:0)' "$u" 2>/dev/null)"
   s="$(node "$CV/vad.cjs" "$CV/talk.js" silence 2>&1)"
   is "twenty seconds of nothing ends conversation mode" '{"events":["stop"]}' "$(head -1 <<< "$s")"
   # The encoder, through the real transcriber when there is one (macOS `say` + whisper.cpp).
@@ -16553,6 +16563,51 @@ if [ -d "$ROOT/web" ]; then
     done < "$AUD/out"
   fi
   rm -rf "${AUD:?}"
+
+  # ── the suite makes no sound ─────────────────────────────────────────────────
+  # A run that drove the phone's voice read its replies aloud through the owner's speakers.
+  # Headless is not silent: Chrome plays to the default output unless told not to. So every
+  # file that launches one must pass --mute-audio, the one `say` here must write to a file,
+  # and nothing plays a file. Checked over the tree rather than remembered, so the next
+  # launcher is caught too. (The player's name is split so this line is not its own match.)
+  noisy=""
+  for f in $(git -C "$ROOT" ls-files lib bin test); do
+    [ -f "$ROOT/$f" ] || continue
+    body="$(cat "$ROOT/$f")"
+    if grep -q -- "'--headless" <<< "$body" && ! grep -q -- "'--mute-audio'" <<< "$body"; then noisy="$noisy $f:unmuted-chrome"; fi
+    if grep -qE "(^|[;&|( ])af""play " <<< "$body"; then noisy="$noisy $f:plays-a-file"; fi
+  done
+  while IFS= read -r l; do
+    grep -q -- ' -o ' <<< "$l" || noisy="$noisy run.sh:say-aloud"
+  done <<< "$(grep -E '^[[:space:]]*(if .*&& )?say |&& say |; say ' "$ROOT/test/run.sh" | grep -v '^[[:space:]]*#' | grep -v 'is "')"
+  is "no browser, say or player in the suite makes a sound" "" "${noisy# }"
+
+  # ── barge-in: the owner can talk over the answer, the answer cannot ─────────
+  # Conversation mode keeps the mic open while it reads an answer, so the owner can cut in
+  # with a follow-up ("I sent it and forgot something"). The real client, in a real browser
+  # (muted — lib/browser.mjs never plays to the machine's speakers), against a fake
+  # fleet-serve, with a fake mic that HEARS THE PAGE: its own voice comes back at the worst
+  # echo ratio measured on a laptop's speaker. Both directions, because a gate that never
+  # fires and one that always fires each pass half of them: the answer is read to the end
+  # over its own echo, and the owner's voice over it stops it, listens, and is sent as a
+  # follow-up that is shown queued. Watched going red with the client before this change,
+  # the gate at 0.3 or blind to the output level (the app cut itself off at sentence 2),
+  # the barge never firing, and the band's tap ignored.
+  BGC="$(mktemp -d "$TEST_RUNS.$$.barge.XXXXXX")"
+  node "$ROOT/test/helpers/barge-check.mjs" > "$BGC/out" 2> "$BGC/err"
+  bgcrc=$?
+  if grep -q '^#SKIP' "$BGC/out" 2>/dev/null; then
+    skip "barge-in" "no chrome to listen in"
+  else
+    is "barge-check ran"                "0" "$bgcrc"
+    is "...without complaining"         ""  "$(head -2 "$BGC/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$BGC/out")" -ge 15 ] && echo yes || echo "no: $(wc -l < "$BGC/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$BGC/out"
+  fi
+  rm -rf "$BGC"
 
   is "cf-sync syncs web/ into the runtime" "yes" \
      "$(grep -qE '^for d in .*\bweb\b' "$ROOT/bin/cf-sync" && echo yes || echo no)"

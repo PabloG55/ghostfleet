@@ -95,5 +95,27 @@ delete process.env.CLAUDE_FLEET_KOKORO;
 // An id nobody planned cannot make the daemon synthesise anything.
 is('audio for an unplanned id is refused', null, S.audio('0'.repeat(32)));
 
+// ── 4. a long reply is planned in chunks, and the next chunk must not cancel this one ──
+// The phone plans chunk n+1 while chunk n plays. A plain plan supersedes the advance work of
+// the last one (a tap on another message); a plan marked `append` is the same reply going on,
+// so chunk n's unplayed sentences have to stay queued. The worker here never says ready, so
+// the queue holds still while it is read; it exits a moment later and fails what is left.
+const stub = path.join(tmp, 'never-ready.sh');
+fs.writeFileSync(stub, '#!/bin/sh\nsleep 0.3\n'); fs.chmodSync(stub, 0o755);
+process.env.CLAUDE_FLEET_KOKORO_PYTHON = stub;
+const queued = () => (S.queuedIds ? S.queuedIds() : ['(no queuedIds)']).join(',');
+const chunkA = S.plan('The first chunk has two sentences. This is the second of them.');
+const chunkB = S.plan('And here the reply goes on. It ends here.');
+S.prefetch(chunkA, null);
+is('a plan queues its sentences', chunkA.map(x => x.id).join(','), queued());
+S.prefetch(chunkB, null, { append: true });
+is('...and the next chunk, appended, keeps them ahead of its own',
+   chunkA.concat(chunkB).map(x => x.id).join(','), queued());
+const other = S.plan('A different message entirely.');
+S.prefetch(other, null);
+is('a plan that is not appended supersedes what was queued', other.map(x => x.id).join(','), queued());
+await new Promise(r => setTimeout(r, 800));
+delete process.env.CLAUDE_FLEET_KOKORO_PYTHON;
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(rows.join('\n'));

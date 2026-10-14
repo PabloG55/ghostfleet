@@ -581,13 +581,15 @@ export async function jarvisHear(wav) {
 // "no Kokoro here" — the caller falls back to the device's own speechSynthesis — and is a
 // different thing from a failure, which is worth a toast. Fixtures have no Mac to speak.
 export class SpeechOff extends Error {}
-export async function speakPlan(text) {
+// `more`: this text continues the one planned before it (the next chunk of one reply), so
+// the Mac keeps synthesising what is still to be played instead of superseding it.
+export async function speakPlan(text, more = false) {
   if ((await ready()).mode !== 'server') throw new SpeechOff('fixtures have no Kokoro');
   if (!haveToken()) throw new AuthError('no live session token');
   let r;
   try {
     r = await fetch(baseUrl() + '/api/speak', { method: 'POST', cache: 'no-store',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ text }) });
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(more ? { text, more: true } : { text }) });
   } catch (e) { throw new OfflineError(String((e && e.message) || e)); }
   if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
   slid(r);

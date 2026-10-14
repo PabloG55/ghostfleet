@@ -1806,8 +1806,8 @@ export const ATTACH_PER_MESSAGE = 10;      // web/api.js holds the phone to the 
 const ATTACH_QUOTA = Math.max(24 * 1024 * 1024, ATTACH_PER_MESSAGE * ATTACH_MAX_BYTES);  // per session, oldest deleted first
 const ATTACH_MAX_PX = 1600;                // what a converter downscales to, when there is one
 const ATTACH_RESIZE_OVER = 512 * 1024;     // below this an already-readable image is kept as it is
-// Two minutes of 16 kHz 16-bit mono is 3.8 MB; the client stops an utterance at 30 s, so
-// this is headroom for a slow device rather than a length anybody talks for.
+// Two minutes of 16 kHz 16-bit mono is 3.8 MB; the client stops an utterance at 90 s (it
+// waits through pauses now, so a thought spoken slowly runs long), and this is the headroom.
 const HEAR_BODY_CAP = 4 * 1024 * 1024;
 let hearChain = Promise.resolve();
 // One line per sentence spoken, saying which voice read it and whether it was made or
@@ -2489,8 +2489,8 @@ function agentCatalogue() {
     const text = typeof body.text === 'string' ? body.text.slice(0, 8000) : '';
     const items = speech.plan(text);
     if (!items.length) return send(res, 400, { ok: false, text: 'nothing speakable in that text' });
-    speech.prefetch(items, speakLog);
-    log(`speak: ${items.length} sentence(s) planned — ${items.map(i => `${i.id.slice(0, 8)}=${i.voice}`).join(' ')}`);
+    speech.prefetch(items, speakLog, { append: body.more === true });
+    log(`speak: ${items.length} sentence(s) planned${body.more === true ? ' (more)' : ''} — ${items.map(i => `${i.id.slice(0, 8)}=${i.voice}`).join(' ')}`);
     return send(res, 200, { ok: true, sentences: items.map(({ id, lang, voice, text }) => ({ id, lang, voice, text })) });
   }
   if (p.startsWith('/api/speak/') && req.method === 'GET') {

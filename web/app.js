@@ -76,6 +76,7 @@ const LS_LAST = 'gf.last';   // last fetched state, for a cold offline open
 const LS_PFS = 'gf.pfs';    // the pane's font size, which is a per-eyesight preference
 const LS_VOICE = 'gf.voice'; // { uri, name } of the chosen voice — see pickVoice()
 const LS_RATE = 'gf.rate';   // speaking rate, the other half of "make it listenable"
+const LS_QUIET = 'gf.talkquiet'; // seconds of silence that end a conversation-mode turn
 
 // ── persistence: something to show before the network answers ─────────────
 // "Usable offline enough to show the last fetched state rather than a blank page."
@@ -861,6 +862,13 @@ async function reorder(name, delta) {
 // and pretending otherwise wastes a minute of listening), inline code keeps its text
 // without its backticks, links become "link", and the emphasis marks go. Capped, because
 // a whole turn can be thousands of characters and there is no way to skim a voice.
+//   THE CAP WAS 1200, AND IT WAS THE "KOKORO CUTS LONG REPLIES" BUG. Measured on the Mac's
+// voice with a 2059-character reply: 1215 characters went to Kokoro, every sentence of them
+// synthesised and played, and the reply ended at "There… and it goes on." — the last third,
+// which was the question the reply existed to ask, was never sent at all. Kokoro was fine; the
+// cut was here, before it. Skimming a voice is what stop is for, so the cap is now only a
+// guard against a runaway turn (about twenty minutes of listening), and a long reply is cut
+// into chunks (speechChunks) so its length costs nothing up front.
 //
 // AND IDENTIFIERS ARE NAMED, NOT SPELLED. "it has a bunch of numbers and stuff that is not
 // relevant" — a 40-character sha is read one character at a time, which is most of a minute
@@ -874,7 +882,7 @@ async function reorder(name, delta) {
 // is the whole content of that sentence, and so are #1171, 2.1.241, 40% and 6s. Those are
 // asserted, in test/helpers/speak-check.mjs, in both directions on purpose: a test that only
 // checks that noise is gone is passed by returning the empty string.
-const SPEAK_MAX = 1200;
+const SPEAK_MAX = 20000;
 // A left edge that cannot itself be part of an identifier, as a capturing group rather than
 // a lookbehind: lookbehind only reached Safari in 16.4, this app supports the phones that
 // installed it (§9's 16.4+ is about Web Push, not about parsing), and an unsupported regex
@@ -920,8 +928,16 @@ export function speakable(text) {
   let t = String(text || '');
   t = t.replace(/```[\s\S]*?```/g, '\nCode omitted.\n'); // fenced code: named, not read
   t = t.replace(/`([^`]*)`/g, '$1');                      // inline code: the text, not the ticks
+  t = t.replace(/^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+.*$/gm, ''); // [1]: url — a footnote's address
   t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1 link'); // [label](url) -> "label link"
+  t = t.replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, '$1');      // [label][1] -> "label"
+  t = t.replace(/<https?:\/\/[^>\s]*>/g, ' the link ');   // <url>, before the bare rule eats its >
   t = t.replace(/https?:\/\/\S+/g, ' the link ');        // and a bare one
+  // HTML a reply carries for layout. Named tags only: `Array<string>` and `<= 3.5` are text.
+  t = t.replace(/<\/?(?:br|p|div|span|b|i|em|strong|code|pre|kbd|sub|sup|details|summary|img|a|hr|ul|ol|li|table|tr|td|th)\b[^>]*>/gi, ' ');
+  t = t.replace(/^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, '');  // --- / *** / ___ rules
+  t = t.replace(/^[ \t]{0,3}>[ \t]?/gm, '');              // blockquote marks
+  t = t.replace(/~~[^~\n]+~~/g, '');                       // struck out is withdrawn: not said
   // A TABLE IS READ AS ITS CELLS. The rule row (|---|:--:|) is pure punctuation, and a pipe
   // read aloud is "vertical bar" between every word; a row becomes its cells with a pause
   // between them, and the row's line break ends it like any other line.
@@ -935,6 +951,8 @@ export function speakable(text) {
   t = t.replace(/[ \t]*[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]+/gu, '');
   t = t.replace(/^\s{0,3}#{1,6}\s+/gm, '');               // heading marks
   t = t.replace(/^\s{0,3}[-*+]\s+/gm, '');                // bullet marks
+  t = t.replace(/^\[[ xX]\][ \t]+/gm, '');               // a task list's box
+  t = t.replace(/__([^_\n]+)__/g, '$1');
   t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, '$1$2$3');
   // AFTER the markdown pass, so a path inside backticks is a path by the time it gets here
   // and a URL is already the word "link"; BEFORE the cap, so the 1200 characters are spent
@@ -946,6 +964,69 @@ export function speakable(text) {
   t = t.replace(/([^\s.!?…:;,])[ \t]*\n\s*/g, '$1. ');
   t = t.replace(/\s+/g, ' ').trim();
   return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, '') + '… and it goes on.' : t;
+}
+// ── a long reply, in chunks ───────────────────────────────────────────────
+// WHAT IS SENT TO THE VOICE IS A QUEUE OF CHUNKS, NOT ONE TEXT. Each chunk is one
+// /api/speak plan, and the next chunk is planned while this one plays, so a reply of any
+// length starts after one sentence's synthesis and has no gap between chunks. That also
+// keeps fleet-serve's queue one chunk deep instead of a whole reply deep, which is the
+// difference between stop meaning stop and the Mac synthesising four minutes nobody will
+// hear; and it keeps every request well inside the server's 8000-character slice. The
+// device's own voice gets the same chunks, one utterance each, because a single long
+// utterance is exactly what WebKit's speechSynthesis is known to drop partway.
+//   Cut at sentence ends only — a full stop FOLLOWED BY SPACE, so `fleet-grid.mjs` and
+// `2.1.241` are never a boundary — then packed: short sentences fold together up to the
+// cap, and a sentence longer than the cap is cut at a clause mark, then at a space, never
+// inside a word. A single unbroken token longer than the cap stays whole: it is one word.
+// No lookbehind, for the reason IDENT_EDGE gives: an old Safari fails to PARSE it.
+export const CHUNK_MAX = 600;
+const CHUNK_ABBREV = /(?:^|\s)(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|Sr|Sra|approx|p\.ej)\.$/i;
+function sentencesOf(t) {
+  const out = [], re = /[.!?…]+["')\]]*(\s+|$)/g;
+  let from = 0, m;
+  while ((m = re.exec(t))) {
+    if (!m[0].length) { re.lastIndex++; continue; }
+    const end = m.index + m[0].length;
+    const piece = t.slice(from, m.index + m[0].length - m[1].length);
+    if (CHUNK_ABBREV.test(piece) && end < t.length) continue;   // "e.g. this" is one sentence
+    out.push(piece.trim()); from = end;
+  }
+  if (from < t.length) out.push(t.slice(from).trim());
+  return out.filter(Boolean);
+}
+// A sentence over the cap, cut at the last clause mark that leaves a real piece, else at the
+// last space; the remainder goes round again.
+function cutLong(x, max) {
+  const out = [];
+  while (x.length > max) {
+    let at = -1;
+    for (const mark of [/[,;:—–]\s/g, /\s/g]) {
+      let m, best = -1;
+      mark.lastIndex = 0;
+      while ((m = mark.exec(x)) && m.index < max) best = m.index + m[0].length - 1;
+      if (best >= max / 4) { at = best; break; }
+    }
+    if (at < 0) { const sp = x.indexOf(' ', max); if (sp < 0) break; at = sp; }   // one long word: kept whole
+    out.push(x.slice(0, at).trim()); x = x.slice(at).trim();
+  }
+  if (x) out.push(x);
+  return out;
+}
+export function speechChunks(text, max = CHUNK_MAX) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return [];
+  const out = [];
+  let cur = '';
+  for (const sen of sentencesOf(t)) {
+    for (const piece of sen.length > max ? cutLong(sen, max) : [sen]) {
+      if (cur && cur.length + 1 + piece.length > max) { out.push(cur); cur = ''; }
+      cur = cur ? `${cur} ${piece}` : piece;
+    }
+  }
+  if (cur) out.push(cur);
+  // A chunk with no letter or digit in it ("…") has nothing to say, and the Mac answers
+  // one with a 400 that would read as its voice failing.
+  return out.filter(x => /[\p{L}\p{N}]/u.test(x));
 }
 const canSpeak = () => {
   try { return typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance === 'function'; }
@@ -1021,7 +1102,22 @@ export function savedRate() {
 // STREAMED BY SENTENCE. The phone asks for the plan, then fetches sentence N+1 while N
 // plays, and the Mac has already started on all of them in order. The wait before the
 // voice starts is one sentence, which is the whole latency budget on a loaded laptop.
-const A = { ctx: null, src: null, gen: 0, offUntil: 0, told: false, bufs: new Map() };
+const A = { ctx: null, src: null, gen: 0, offUntil: 0, told: false, bufs: new Map(), mon: null, via: '', td: null };
+// HOW LOUD THE APP ITSELF IS RIGHT NOW, for barge-in: the RMS of what the Mac's voice is
+// playing, read off an analyser the buffer passes through on its way out. Null when the
+// DEVICE's voice is talking — speechSynthesis plays outside Web Audio, so there is nothing
+// to read, and the barge gate assumes the loudest it measured instead (BARGE.BLIND).
+function outLevel() {
+  if (!S.speaking) return 0;
+  if (A.via !== 'mac') return null;
+  if (!A.src || !A.mon) return 0;                 // between two sentences
+  try {
+    if (!A.td) A.td = new Float32Array(A.mon.fftSize);
+    A.mon.getFloatTimeDomainData(A.td);
+    let s = 0; for (let i = 0; i < A.td.length; i++) s += A.td[i] * A.td[i];
+    return Math.sqrt(s / A.td.length);
+  } catch { return null; }
+}
 const hasWebAudio = () => typeof window !== 'undefined' && !!(window.AudioContext || window.webkitAudioContext);
 const canPlay = () => canSpeak() || hasWebAudio();
 function audioCtx() {
@@ -1078,7 +1174,11 @@ function hush() {
 // end of speaking, and an interrupted voice never reaches the finish that releases it.
 function stopSpeaking() { hush(); releaseAudio(); }
 // The device's own voice, for the whole text or for what is left of it.
-function synthSay(words, g, fin) {
+function synthSay(words, g, fin0) {
+  // Once, whichever of onend, onerror and the ceiling comes first: with a queue of chunks,
+  // a late second call would skip the chunk after this one.
+  let done = false;
+  const fin = () => { if (!done) { done = true; fin0(); } };
   if (!canSpeak()) { fin(); return; }
   try {
     const u = new SpeechSynthesisUtterance(words);
@@ -1110,12 +1210,16 @@ function decode(ab) {
 }
 // Decoded buffers by sentence id, so a replay is instant and costs no request. Bounded:
 // a decoded sentence is a few hundred KB of floats.
-async function sentenceBuf(it) {
+// The PROMISE is what is kept, so the lookahead that starts a sentence early and the loop
+// that then waits on it are one request, not two. A failed one is forgotten, or a
+// transient error would be replayed from the cache for good.
+function sentenceBuf(it) {
   if (A.bufs.has(it.id)) return A.bufs.get(it.id);
-  const buf = await decode(await api.speakAudio(it.id));
-  A.bufs.set(it.id, buf);
+  const p = api.speakAudio(it.id).then(decode);
+  A.bufs.set(it.id, p);
+  p.catch(() => { if (A.bufs.get(it.id) === p) A.bufs.delete(it.id); });
   if (A.bufs.size > 60) A.bufs.delete(A.bufs.keys().next().value);
-  return buf;
+  return p;
 }
 function playBuf(buf, g) {
   return new Promise((resolve, reject) => {
@@ -1127,7 +1231,11 @@ function playBuf(buf, g) {
       if (A.gen !== g) return resolve();
       if (c.state !== 'running') return reject(new Error('audio is locked until the screen is tapped'));
       const src = c.createBufferSource();
-      src.buffer = buf; src.connect(c.destination);
+      src.buffer = buf;
+      try {
+        if (!A.mon || A.mon.context !== c) { A.mon = c.createAnalyser(); A.mon.fftSize = 2048; A.mon.connect(c.destination); }
+        src.connect(A.mon);
+      } catch { src.connect(c.destination); }
       let done = false;
       src.onended = () => { done = true; if (A.src === src) A.src = null; resolve(); };
       A.src = src;
@@ -1149,25 +1257,42 @@ function playBuf(buf, g) {
 // ONE ENTRY POINT FOR EVERYTHING THAT SPEAKS — the play button, speak mode, conversation
 // mode — so the voice, the fallback and the stop are the same in all three. `onend` runs
 // when this text finishes or fails, never when something newer replaced it.
+//   STOP CANCELS THE WHOLE QUEUE because every await below checks the generation that
+// stopSpeaking() bumps: the chunk playing is stopped, and no later chunk is planned, fetched
+// or played. The Mac then holds at most one planned chunk nobody will hear, which the next
+// plan supersedes.
 async function speakText(words, onend) {
   hush();
   if (!words) { if (onend) onend(); return; }
   const g = A.gen;
   S.speaking = words;
   const fin = () => { if (A.gen !== g) return; A.gen++; A.src = null; S.speaking = ''; releaseAudio(); render(); if (onend) onend(); };
+  const chunks = speechChunks(words);
+  let rest = chunks;
   if (hasWebAudio() && Date.now() >= A.offUntil) {
-    let plan = null, i = 0;
+    A.via = 'mac';
+    const plans = [];
+    // `more` tells the Mac this plan follows the one before it: it must not cancel the
+    // advance work of the chunk that is playing (lib/speech.mjs prefetch()).
+    const planOf = (k) => plans[k] || (plans[k] = api.speakPlan(chunks[k], k > 0));
+    let c = 0, i = 0, plan = null;
     try {
-      plan = await api.speakPlan(words);
-      if (A.gen !== g) return;
-      const pending = [];
-      const get = (k) => pending[k] || (pending[k] = sentenceBuf(plan[k]));
-      for (; i < plan.length; i++) {
-        get(i); if (i + 1 < plan.length) get(i + 1).catch(() => {});
-        const buf = await get(i);
+      for (; c < chunks.length; c++) {
+        plan = null; i = 0;
+        plan = await planOf(c);
         if (A.gen !== g) return;
-        await playBuf(buf, g);
-        if (A.gen !== g) return;
+        if (c + 1 < chunks.length) planOf(c + 1).catch(() => {});
+        for (; i < plan.length; i++) {
+          sentenceBuf(plan[i]);
+          // The sentence after this one — across the chunk boundary too, or every chunk would
+          // open with a pause the length of its first sentence's synthesis.
+          if (i + 1 < plan.length) sentenceBuf(plan[i + 1]).catch(() => {});
+          else if (c + 1 < chunks.length) planOf(c + 1).then(p => p.length && sentenceBuf(p[0])).catch(() => {});
+          const buf = await sentenceBuf(plan[i]);
+          if (A.gen !== g) return;
+          await playBuf(buf, g);
+          if (A.gen !== g) return;
+        }
       }
       fin(); return;
     } catch (e) {
@@ -1182,10 +1307,13 @@ async function speakText(words, onend) {
       }
       // Whatever was not yet heard is said by the device: a reply cut off at sentence three
       // is worse than one that changes voice at sentence three.
-      if (plan && i > 0) words = plan.slice(i).map(x => x.text).join(' ');
+      rest = (plan && i > 0 ? [plan.slice(i).map(x => x.text).join(' ')] : []).concat(chunks.slice(plan && i > 0 ? c + 1 : c));
     }
   }
-  synthSay(words, g, fin);
+  A.via = 'device';
+  let k = 0;
+  const next = () => { if (A.gen !== g) return; if (k >= rest.length) { fin(); return; } synthSay(rest[k++], g, next); };
+  next();
 }
 // A TOGGLE, and it is the same button both ways: tapping the one that is speaking stops
 // it. Two voices at once is the failure mode of a play button that is really two buttons.
@@ -1398,20 +1526,89 @@ async function answerProposal(p, yes) {
 // and nowhere else. Web Speech recognition is not used on purpose — it does not work in an
 // installed iOS app, and where it does work it sends the audio to Apple.
 //
-// THE MIC IS CLOSED WHILE ANYTHING ELSE HAPPENS. From the end of an utterance until the
-// answer has been spoken, the tracks are STOPPED, not muted: Jarvis's own voice through the
-// speaker is the loudest thing in the room, and a mic that could hear it would answer
-// itself. Stopping (rather than a gain of zero) also hands iOS its speaker back — a live
-// capture session routes speech to the quiet earpiece.
+// THE MIC IS CLOSED WHILE THE MAC WORKS, AND OPEN WHILE IT ANSWERS. From the end of an
+// utterance until the answer starts, the tracks are STOPPED, not muted. While the answer is
+// read they are live again, for barge-in (BARGE below): the app's own voice is the loudest
+// thing in the room, so what the mic hears then only counts as the owner when it is well
+// above the playback, for long enough. This used to stop the tracks through the answer
+// too, partly because a live capture session was seen to route speech to the quieter
+// earpiece on iOS — the price of barge-in, and unchecked on a phone; see the PR.
 //
 // IT ENDS: on a tap, on twenty seconds of nothing, when the app leaves the screen (an
 // installed web app gets no microphone in the background — the band says so), and when
 // something fails, saying what.
 // WAIT_MAX_MS is per target: Jarvis answers in seconds, while a worker's turn with tools in
 // it can run for many minutes — giving up on that at five would end most real conversations.
-const TALK = { END_QUIET_MS: 1000, MIN_SPEECH_MS: 350, MAX_UTTER_MS: 30000, GIVE_UP_MS: 20000, WAIT_MAX_MS: { jarvis: 5 * 60 * 1000, session: 30 * 60 * 1000 } };
+//
+// THE END OF A TURN IS DECIDED HERE, ON THE PHONE, AND ONLY BY SILENCE. Whisper on the Mac
+// never sees the audio until the turn is over, so it has no say in when that is. The turn
+// used to end one second after the last loud frame, which is shorter than a breath taken to
+// think: "I have to have time to think and I can't stop talking" — every pause mid-thought
+// sent half a sentence. So the quiet that ends a turn is a setting (savedQuiet(), 3.5 s by
+// default), it is counted from the LAST VOICED FRAME — a transcript that has not changed is
+// not a person who has stopped — and while it runs the band shows it running out, so the
+// owner can see a send coming and talk to hold it off, or tap the band to send now.
+//   MAX_UTTER_MS grew with it, from 30 s: thinking out loud with pauses of three seconds
+// runs past half a minute easily, and the old cap cut those off mid-sentence. 90 s of 16 kHz
+// mono is 2.9 MB, inside fleet-serve's 4 MB HEAR_BODY_CAP with room for the header.
+const TALK = { MIN_SPEECH_MS: 350, MAX_UTTER_MS: 90000, GIVE_UP_MS: 20000, WAIT_MAX_MS: { jarvis: 5 * 60 * 1000, session: 30 * 60 * 1000 } };
+export const QUIET = { MIN: 1.5, MAX: 8, STEP: 0.5, DEFAULT: 3.5 };
+export function savedQuiet() {
+  let q = NaN;
+  try { const v = localStorage.getItem(LS_QUIET); if (v != null) q = Number(v); } catch {}
+  return Number.isFinite(q) && q >= QUIET.MIN && q <= QUIET.MAX ? q : QUIET.DEFAULT;
+}
+// THE TURN'S CLOCK, pure so the suite can run it on a fake one. `start` is the first voiced
+// frame, `voice` every voiced frame after it, `tap` the owner saying "send it now". at(now)
+// answers whether the turn is over and why — '' while it is not — and how much of the
+// silence is left, as milliseconds and as the fraction the band draws.
+export function turnClock(quietMs, maxMs = TALK.MAX_UTTER_MS) {
+  const t = { speechAt: 0, voiceAt: 0, tapped: false };
+  return {
+    start(now) { t.speechAt = t.voiceAt = now; t.tapped = false; },
+    voice(now) { t.voiceAt = now; },
+    tap() { t.tapped = true; },
+    get spoke() { return t.voiceAt - t.speechAt; },
+    at(now) {
+      const left = Math.max(0, quietMs - (now - t.voiceAt));
+      const end = t.tapped ? 'tap' : left <= 0 ? 'quiet' : now - t.speechAt >= maxMs ? 'long' : '';
+      return { end, left, frac: quietMs > 0 ? left / quietMs : 0, pausing: now - t.voiceAt > 250 };
+    },
+  };
+}
+// ── barge-in: talking over the answer stops it ─────────────────────────────
+// "I sent it and forgot something — I want to add it, not hear everything you have to say."
+// So the mic stays open while the answer is read, and the owner's voice over it stops the
+// whole queue (every chunk, Kokoro's and the device's) and starts a new turn, which goes
+// out as a FOLLOW-UP: fleet_send queues it behind a turn still running, and nothing that
+// was said or sent before is replaced.
+//   THE APP'S OWN VOICE MUST NEVER COUNT AS THE OWNER'S, and the mic hears it. Measured on
+// a laptop, its built-in speaker into its built-in mic, a long Kokoro reply playing: with
+// the browser's echo cancellation the mic heard 0.006× the playback's envelope at the median
+// over 101 s; with it off, 0.15× at the median and 0.41× at the single worst frame. So
+// speech counts only when it is louder than 0.6× the playback's recent envelope (and above
+// the room's own floor), and only when it STAYS louder for 250 ms — a lone frame is a
+// consonant of the echo, a door, a cough. Replayed through this gate, every one of those
+// frames that was the speaker never barges in, nor with the mic three times as hot; the one
+// sound in that room louder than anything playing does (test/fixtures/barge-echo.json).
+// What the measurement cannot say is a phone's speaker, earpiece or AirPods; see the PR.
+export const BARGE = { HOLD_MS: 250, ECHO: 0.6, FLOOR: 0.02, BLIND: 0.08, DECAY_MS: 400 };
+export function bargeDetector(o = BARGE) {
+  let env = 0, at = 0, since = 0;
+  return {
+    // `out` is the app's own output level now, null when it cannot be read (the device's
+    // voice); `floor` the listener's speech threshold for this room.
+    frame(now, mic, out, floor = 0) {
+      env = Math.max(out == null ? 0 : out, env * Math.exp(-(at ? now - at : 0) / o.DECAY_MS)); at = now;
+      const need = Math.max(o.FLOOR, floor, out == null ? o.BLIND : o.ECHO * env);
+      if (mic <= need) { since = 0; return false; }
+      if (!since) since = now;
+      return now - since >= o.HOLD_MS;
+    },
+  };
+}
 const T = { ctx: null, stream: null, src: null, proc: null, frames: [], pre: [], inSpeech: false,
-            voiceAt: 0, speechAt: 0, listenAt: 0, noise: 0.004, hot: 0, rate: 48000, poll: null, gen: 0 };
+            turn: null, barge: null, listenAt: 0, noise: 0.004, hot: 0, rate: 48000, poll: null, gen: 0 };
 // EVERY AWAIT IN THE LOOP IS A PLACE THE WORLD CAN CHANGE: stop, then talk again, while an
 // old utterance is still being heard, and that old continuation would find a live S.talk —
 // a NEW one — and send its words, or open a second microphone beside the first. Each talk
@@ -1504,7 +1701,9 @@ async function openMic() {
   T.proc.onaudioprocess = onTalkFrame;
   T.src.connect(T.proc); T.proc.connect(T.ctx.destination);   // Safari only pulls a connected node
   T.frames = []; T.pre = []; T.inSpeech = false; T.hot = 0; T.listenAt = Date.now();
-  S.talk.phase = 'listening';
+  // Opened for the answer (barge-in), the phase stays 'speaking'; only a mic opened to
+  // listen moves the band on.
+  if (S.talk.phase === 'opening') S.talk.phase = 'listening';
   render();
 }
 function closeMic() {
@@ -1517,17 +1716,28 @@ function closeMic() {
 // loud frames start speech (one is a click); a second under 60% of the threshold ends it.
 // The ~0.4 s of audio before the start is kept, or the first syllable is always cut.
 function onTalkFrame(e) {
-  if (!S.talk || S.talk.phase !== 'listening') return;
+  if (!S.talk || (S.talk.phase !== 'listening' && S.talk.phase !== 'speaking')) return;
   const d = new Float32Array(e.inputBuffer.getChannelData(0));
   let sum = 0;
   for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
   const rms = Math.sqrt(sum / d.length), now = Date.now();
   const thr = Math.max(0.012, T.noise * 3.5);
+  if (S.talk.phase === 'speaking') {
+    // The floor is NOT learned here: what the mic hears now is mostly the answer, and a
+    // floor raised by it would make the owner's next turn hard to start.
+    T.pre.push(d); if (T.pre.length > 5) T.pre.shift();
+    if (!T.barge) T.barge = bargeDetector();
+    if (T.barge.frame(now, rms, outLevel(), thr)) bargeIn(true, now);
+    return;
+  }
   if (!T.inSpeech) {
     if (rms <= thr) T.noise = T.noise * 0.95 + rms * 0.05;
     T.pre.push(d); if (T.pre.length > 5) T.pre.shift();
     if (rms > thr) {
-      if (++T.hot >= 2) { T.inSpeech = true; T.speechAt = now; T.voiceAt = now; T.frames = T.pre.slice(); T.pre = []; }
+      if (++T.hot >= 2) {
+        T.inSpeech = true; T.frames = T.pre.slice(); T.pre = [];
+        T.turn = turnClock(savedQuiet() * 1000); T.turn.start(now);
+      }
     } else {
       T.hot = 0;
       if (now - T.listenAt > TALK.GIVE_UP_MS) talkStop('nothing heard for 20 seconds — conversation mode is off');
@@ -1535,12 +1745,36 @@ function onTalkFrame(e) {
     return;
   }
   T.frames.push(d);
-  if (rms > thr * 0.6) T.voiceAt = now;
-  if (now - T.voiceAt > TALK.END_QUIET_MS || now - T.speechAt > TALK.MAX_UTTER_MS) endUtterance();
+  if (rms > thr * 0.6) T.turn.voice(now);
+  const st = T.turn.at(now);
+  if (st.end) endUtterance(); else drawTurn(st);
+}
+// THE COUNTDOWN IS DRAWN FROM THE AUDIO LOOP, NOT BY render(). A frame lands every ~85 ms and
+// a full render per frame would rebuild the chat under the owner's thumb; this touches two
+// nodes the band already has, and does nothing when the band is not on screen. A render()
+// in between (the poll) redraws the band full and the next frame puts the bar back.
+function drawTurn(st) {
+  if (typeof document === 'undefined' || !document.getElementById) return;
+  const bar = document.getElementById('turnbar'), ph = document.getElementById('turnph');
+  if (bar) bar.style.transform = `scaleX(${st.pausing ? st.frac.toFixed(3) : 1})`;
+  if (ph) ph.textContent = talkListenText(st);
+}
+function talkListenText(st) {
+  if (!st || !T.inSpeech) return `● listening — take your time; ${savedQuiet()} s of quiet sends it`;
+  return st.pausing ? `● sending in ${(st.left / 1000).toFixed(1)} s — keep talking to hold it, tap here to send now`
+                    : '● hearing you — tap here to send now';
+}
+// TAP TO SEND NOW. The band, not the talk button: the button already means "conversation
+// mode off", and an owner reaching for it to stop must not send half a thought instead.
+// Before anything has been said there is nothing to send, so the tap does nothing.
+function talkSendNow() {
+  if (!S.talk || S.talk.phase !== 'listening' || !T.inSpeech || !T.turn) return;
+  T.turn.tap();
+  endUtterance();
 }
 async function endUtterance() {
-  const frames = T.frames, spoke = T.voiceAt - T.speechAt;
-  T.frames = []; T.inSpeech = false;
+  const frames = T.frames, spoke = T.turn ? T.turn.spoke : 0;
+  T.frames = []; T.inSpeech = false; T.turn = null;
   closeMic();                          // closed from here until the answer has been spoken
   if (!S.talk) return;
   const g = S.talk.gen;
@@ -1572,6 +1806,36 @@ async function endUtterance() {
   startTalkPoll();
 }
 function talkReopen() { if (!S.talk) return; S.talk.phase = 'opening'; render(); openMic(); }
+// Listen again on the mic that is already open — it stayed open through the answer for
+// barge-in — or open one if it is not.
+function talkListen() {
+  if (!S.talk) return;
+  if (!T.stream) { talkReopen(); return; }
+  T.frames = []; T.inSpeech = false; T.hot = 0; T.turn = null; T.barge = null; T.listenAt = Date.now();
+  S.talk.phase = 'listening';
+  render();
+}
+// The answer is being read and the mic is opened under it, so the owner can cut in.
+function talkSpeak(text, onend) {
+  const t = S.talk;
+  t.phase = 'speaking'; stopTalkPoll(); T.barge = bargeDetector(); T.pre = [];
+  render();
+  if (!T.stream) openMic();
+  say(text, onend);
+}
+// CUT IN: stop every chunk still to be read and listen. `heard` is the detector having
+// caught the owner already talking — the frames that tripped it are the first of the new
+// turn, kept, or the first word is always gone. A tap (heard false) waits for speech.
+function bargeIn(heard, now = Date.now()) {
+  if (!S.talk || S.talk.phase !== 'speaking') return;
+  stopSpeaking();
+  talkListen();
+  if (heard) {
+    T.inSpeech = true; T.frames = T.pre.slice(); T.pre = [];
+    T.turn = turnClock(savedQuiet() * 1000); T.turn.start(now - BARGE.HOLD_MS); T.turn.voice(now);
+  }
+  render();
+}
 // THE ANSWER IS THE LAST THING THE SESSION SAID AFTER WHAT YOU SAID, once its turn is over —
 // so a worker's narration between tool calls is never read, only the reply it ends on. The
 // match counts occurrences rather than looking for the text, for the reason sendDraft gives:
@@ -1593,16 +1857,14 @@ function talkAfterRefresh() {
   if (i < 0) return;                                       // never "everything after nothing"
   const c = cardOf(t.target.session);
   if (c && c.status === 'need-you') {
-    t.phase = 'speaking'; stopTalkPoll(); render();
     const g0 = t.gen;
-    say(`${t.target.label} is stopped on a permission prompt. Open the pane to answer it.`, () => { if (talkLive(g0)) talkStop(''); });
+    talkSpeak(`${t.target.label} is stopped on a permission prompt. Open the pane to answer it.`, () => { if (talkLive(g0)) talkStop(''); });
     return;
   }
   const after = ms.slice(i + 1).filter(m => m.role === 'assistant' && String(m.text || '').trim());
   if (!after.length || (c && c.status === 'working')) return;
-  t.phase = 'speaking'; stopTalkPoll(); render();
   const g = t.gen;
-  say(after[after.length - 1].text, () => { if (talkLive(g) && S.talk.phase === 'speaking') talkReopen(); });
+  talkSpeak(after[after.length - 1].text, () => { if (talkLive(g) && S.talk.phase === 'speaking') talkListen(); });
 }
 // Faster than the 5s poll while an answer is owed, because in a conversation five seconds
 // of silence after the answer has landed is a long time.
@@ -1636,13 +1898,20 @@ function waitedFor(since) {
 function say(text, onend) { speakText(speakable(text), onend); }
 function talkBand() {
   const ph = S.talk.phase;
-  const now = ph === 'listening' ? '● listening — just talk; a second of quiet sends it'
+  const now = ph === 'listening' ? talkListenText(T.turn && T.turn.at(Date.now()))
             : ph === 'hearing' ? '… hearing you (on the Mac)'
             : ph === 'waiting' ? `… checking — ${S.talk.target.label} is on it${waitedFor(S.talk.since)}`
-            : ph === 'speaking' ? '▶ answering — the mic is off while it speaks'
+            : ph === 'speaking' ? '▶ answering — talk, or tap here, to cut in'
             : '… opening the microphone';
-  return el('div', { class: 'talkband' }, [
-    el('span', { class: 'ph ' + ph, text: now }),
+  const listening = ph === 'listening', speaking = ph === 'speaking';
+  // A TAP ON THE BAND is the manual half of both: send what was said, or cut in on the
+  // answer — for when the detector misses a soft voice.
+  const tap = listening ? talkSendNow : speaking ? () => bargeIn(false) : null;
+  return el('div', { class: 'talkband' + (tap ? ' tap' : ''), onclick: tap,
+                     role: tap ? 'button' : null,
+                     'aria-label': listening ? 'send what you said now' : speaking ? 'stop the answer and listen' : null }, [
+    el('span', { class: 'ph ' + ph, id: listening ? 'turnph' : null, text: now }),
+    listening ? el('div', { class: 'turnbar' }, [el('i', { id: 'turnbar' })]) : null,
     el('span', { class: 'note', text: 'conversation mode only works with the screen on and this app open' }),
   ]);
 }
@@ -4843,6 +5112,18 @@ async function sheetSettings() {
       el('div', { class: 'dim small', text: `rate ${rate.toFixed(2)}×` }),
       btn('− slower', () => { try { localStorage.setItem(LS_RATE, String(Math.max(0.5, rate - 0.15))); } catch {} stopSpeaking(); render(); }),
       btn('+ faster', () => { try { localStorage.setItem(LS_RATE, String(Math.min(2, rate + 0.15))); } catch {} stopSpeaking(); render(); }),
+    ]));
+  }
+  // HOW LONG A PAUSE IS, in conversation mode: the one thing about it that is a matter of
+  // the owner's own speech rather than of the machine. Shown wherever the talk button is.
+  if (jarvisSurfaces(S.jarvisOn, S.jarvis).talk) {
+    const q = savedQuiet();
+    const setQ = (v) => { try { localStorage.setItem(LS_QUIET, String(Math.min(QUIET.MAX, Math.max(QUIET.MIN, v)))); } catch {} render(); };
+    kids.push(el('h2', { text: 'conversation mode' }));
+    kids.push(el('div', { class: 'row' }, [
+      el('div', { class: 'dim small', text: `sends after ${q} s of quiet` }),
+      btn('− sooner', () => setQ(q - QUIET.STEP)),
+      btn('+ later', () => setQ(q + QUIET.STEP)),
     ]));
   }
   kids.push(el('div', { class: 'row' }, [btn('esc back', closeSheet)]));

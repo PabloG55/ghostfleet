@@ -148,13 +148,17 @@ beyond what a same-user check can honestly promise to catch.
 
 On the phone, open **Jarvis** from the top of Projects and tap **talk** once:
 
-1. the mic opens, and a voice-activity detector on the phone ends what you said after about
-   a second of quiet;
+1. the mic opens, and a voice-activity detector on the phone ends what you said after
+   **3.5 seconds of quiet** from your last word (a setting) — the band counts it down, and a
+   tap on the band sends at once;
 2. the audio goes to `fleet-serve` as a WAV and is transcribed by **whisper.cpp on the Mac**
    — it never leaves your machine, and nothing is kept once it has been turned into text;
 3. the words are shown and sent to Jarvis as `(spoken) …`, and the phone says "checking";
-4. Jarvis's answer is read aloud with the same voice as the read-aloud button; the mic stays
-   **closed** while it speaks, so it never hears itself;
+4. Jarvis's answer is read aloud with the same voice as the read-aloud button, to the end
+   however long it is. The mic stays **open** while it speaks, so you can cut in: talk over
+   it (or tap the band) and it stops and listens, and what you say goes as a follow-up. Its
+   own voice does not count as yours — only a voice well above what is playing, held for a
+   quarter of a second;
 5. the mic opens again. Tap **stop**, or say nothing for twenty seconds, to end it.
 
 It only works **with the screen on and the app open**: an installed web app gets no

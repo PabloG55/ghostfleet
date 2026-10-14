@@ -1098,6 +1098,12 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .talkband .ph { color: var(--fg); }
 .talkband .ph.listening { color: var(--green); }
 .talkband .note { color: var(--dim); font-size: 12px; }
+.talkband.tap { cursor: pointer; }
+/* The silence running out: full while the owner talks, draining over the pause that will
+ * send it, and full again the moment speech resumes. */
+.talkband .turnbar { height: 3px; border-radius: 2px; background: var(--dim); overflow: hidden; }
+.talkband .turnbar i { display: block; height: 100%; background: var(--green); transform-origin: left center;
+  transition: transform .1s linear; }
 .composer button.talk.on { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: 700; }
 .hint.jarvis-none p { margin: .4em 0; }
 /* Jarvis is an experimental feature, and its screen says so beside its name. */
