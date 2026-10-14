@@ -528,6 +528,13 @@ if (BASE) {
 // screen: whether he saw the lock screen return or the Face ID sheet a second time is not
 // answerable from this process, and the two are different bugs. That question is asked of
 // him rather than guessed at here.
+// SEVERAL PHOTOS, ONE MESSAGE: every path the agent is to read is in the one prompt, in the
+// order picked, after what was typed — and photos alone are a message too.
+is('a message carries every photo path', 'look at these /f/a.jpg /f/b.png /f/c.jpg',
+   appmod.messageWithPhotos(' look at these ', ['/f/a.jpg', '/f/b.png', '/f/c.jpg']));
+is('...photos alone are a message', '/f/a.jpg /f/b.png', appmod.messageWithPhotos('', ['/f/a.jpg', '/f/b.png']));
+is('...and no photos is just the text', 'hello', appmod.messageWithPhotos('hello', []));
+
 if (BASE) {
   const pk = await import(new URL('../../web/passkey.js', import.meta.url).href);
   is('the client registers exactly one document listener', 1, (docListeners.visibilitychange || []).length);

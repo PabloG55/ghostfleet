@@ -586,6 +586,9 @@ export async function speakAudio(id) {
 }
 
 export const ATTACH_MAX_BYTES = 6 * 1024 * 1024;
+// Photos in one message. fleet-serve sizes its per-session quota to hold this many at the
+// limit above, so a message can never push its own first photos off the disk.
+export const ATTACH_PER_MESSAGE = 10;
 export async function attach(project, session, file) {
   if ((await ready()).mode !== 'server') {
     // In fixture mode there is no disk to write to and no agent to read it. Say so rather

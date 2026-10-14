@@ -14533,6 +14533,20 @@ else
   skip "attachments" "$SV_WHY"
 fi
 
+# ── several photos, one message: none of them may be gone before it is sent ──
+# The quota drops the oldest files first and runs on every upload, so a quota smaller than a
+# whole message deleted the message's own first photos while the rest were still arriving.
+group "fleet-serve: a message of photos never deletes itself"
+AQ="$(mktemp -d "$TEST_RUNS.$$.aq.XXXXXX")"
+HOME="$AQ" node "$ROOT/test/helpers/attach-quota.mjs" "$AQ" > "$AQ/out" 2> "$AQ/err"
+is "attach-quota ran"                  "0"  "$?"
+is "...without complaining"            ""   "$(head -2 "$AQ/err" | tr '\n' ' ' | sed 's/ *$//')"
+is "...and produced its checks"        "yes" "$([ "$(wc -l < "$AQ/out")" -ge 5 ] && echo yes || echo "no: $(wc -l < "$AQ/out") rows")"
+while IFS=$'\x1f' read -r name want got; do
+  is "$name" "$want" "$got"
+done < "$AQ/out"
+rm -rf "${AQ:?}"
+
 rm -rf "$SV"
 fi
 serve_stop

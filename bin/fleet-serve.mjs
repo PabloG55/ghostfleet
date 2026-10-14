@@ -1679,7 +1679,14 @@ const proj = (name) => resolveProject(name).t || null;
 // says the number rather than dying opaquely.
 const ATTACH_BODY_CAP = 9 * 1024 * 1024;   // 6 MB of photo is 8 MB of base64, plus room
 const ATTACH_MAX_BYTES = 6 * 1024 * 1024;  // ...and the decoded length is checked too
-const ATTACH_QUOTA = 24 * 1024 * 1024;     // per session, oldest deleted first
+// SEVERAL PHOTOS GO IN ONE MESSAGE, and the phone uploads them one request at a time before
+// the message is sent. The quota drops the OLDEST files first, so at 24 MB a message of ten
+// full-size photos on a machine with no converter (nothing shrinks them) deleted its own
+// first six while the last four were still arriving — and the agent was handed six paths to
+// files that no longer existed. Sized so one whole message always fits: what gets dropped is
+// then only ever an earlier message's.
+export const ATTACH_PER_MESSAGE = 10;      // web/api.js holds the phone to the same number
+const ATTACH_QUOTA = Math.max(24 * 1024 * 1024, ATTACH_PER_MESSAGE * ATTACH_MAX_BYTES);  // per session, oldest deleted first
 const ATTACH_MAX_PX = 1600;                // what a converter downscales to, when there is one
 const ATTACH_RESIZE_OVER = 512 * 1024;     // below this an already-readable image is kept as it is
 // Two minutes of 16 kHz 16-bit mono is 3.8 MB; the client stops an utterance at 30 s, so
@@ -1754,7 +1761,7 @@ function attachDir(sock, session) {
 }
 // OLDEST FIRST, to a fixed ceiling. fleet-clean can only help once a session is dead; a
 // session that lives for weeks and gets a photo a day needs the bound enforced here.
-function enforceQuota(dir) {
+export function enforceQuota(dir, quota = ATTACH_QUOTA) {
   let files = [];
   try {
     files = fs.readdirSync(dir).map(f => {
@@ -1763,7 +1770,7 @@ function enforceQuota(dir) {
     }).filter(Boolean).sort((a, b) => a.at - b.at);
   } catch { return 0; }
   let total = files.reduce((n, f) => n + f.size, 0), dropped = 0;
-  while (total > ATTACH_QUOTA && files.length > 1) {
+  while (total > quota && files.length > 1) {
     const oldest = files.shift();
     try { fs.unlinkSync(oldest.full); total -= oldest.size; dropped++; } catch { break; }
   }

@@ -52,7 +52,7 @@ const S = {
   unlockErr: '',        // why the last unlock failed, drawn on the lock screen until the next tap
   stale: 0,             // epoch of the payload on screen, when it came from the cache
   draft: '',            // the composer's text, kept across repaints (a poll must not eat it)
-  attaching: false,     // a photo is on its way up; the camera button says so and refuses a second
+  photos: [],           // picked photos for a message: {id, key, name, thumb, state, path, err}
   pending: null,        // { text, at } — sent, not yet back in the transcript
   speaking: '',         // the text currently being read aloud, '' when silent
   jarvis: null,         // last /api/jarvis payload — null until asked, {present:false} when absent
@@ -293,7 +293,7 @@ function toast(text, kind = '', action = null) {
   S.toast = { text, kind, ...(action ? { action } : {}) };
   clearTimeout(toast._t);
   // ...AND ITS EXPIRY IS A RENDER ON A TIMER, which is the other way the keyboard closed
-  // with nobody touching anything. attachPhoto() ends in a toast, and the flow it exists
+  // with nobody touching anything. A photo upload can end in a toast, and the flow it exists
   // for is: attach a photo, tap the box to say what to do with it, and 4.2 seconds later
   // the toast quietly rebuilt the screen and took the keyboard with it. A toast that
   // outstays its welcome by a few seconds is a toast; one that closes the keyboard is a
@@ -1975,65 +1975,116 @@ const ICON_COPY_FRONT = 'M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9
 const ICON_TICK = 'M5 12.5l4.5 4.5L19 7.5';
 function copyIcon(done) { return done ? iconSvg(ICON_TICK) : iconSvg(ICON_COPY_BACK, ICON_COPY_FRONT); }
 
-// ── a photo becomes a path in the box you are about to send ───────────────
+// ── photos become paths in the message you are about to send ──────────────
 // "can I send a picture?", twice. The mechanism docs/attachments.md measured is that an
-// agent given a PATH reads the pixels — so this uploads the file and then puts the path it
-// gets back into the composer, WHERE YOU CAN SEE IT. What is sent is an ordinary prompt
-// that happens to name a file, through the same fleet_send every other message uses:
-// nothing here touches the send path, which is the most scarred code in the repo and the
-// one place a stranded prompt costs the most (#77).
-//
-// NO THUMBNAIL, DELIBERATELY. The CSP is `default-src 'self'`, so a blob: in an <img> is
-// refused and the only route is decoding to a canvas — and the format an iPhone actually
-// hands over is HEIC, which the browser may not decode at all (unmeasured, and the whole
-// reason the bytes are converted on the Mac instead). A preview that worked for a JPEG
-// from a laptop and silently showed nothing on the phone this feature exists for would be
-// worse than none. The path in the box is the confirmation, and it is the same string the
-// agent will be given.
-async function attachPhoto(file, card) {
-  if (!file) return;
-  if (S.attaching) return;
-  // WHOSE DRAFT THIS IS, decided before the upload rather than after it. An upload from a
-  // phone takes seconds and the screen is live throughout — so `S.session` at the moment
-  // the bytes land is not necessarily the session that asked for them, and appending a
-  // path to whatever draft happens to be on screen puts one worker's photo in another
-  // worker's message box. The same discipline readPane() already keeps for a capture that
-  // arrives after the screen moved.
-  const want = { project: S.project, session: S.session };
-  S.attaching = true; render();
-  let note = '', bad = false;
+// agent given a PATH reads the pixels — so each photo is uploaded as soon as it is picked,
+// and the paths the server hands back are appended to the message when it is sent. What is
+// sent is an ordinary prompt that happens to name files, through the same fleet_send every
+// other message uses: nothing here touches the send path, which is the most scarred code in
+// the repo and the one place a stranded prompt costs the most (#77).
+//   SEVERAL AT ONCE, ONE MESSAGE. The picker takes up to ATTACH_PER_MESSAGE; each one is a
+// tile above the box with its own ×, and all of them go in the one prompt the send button
+// sends. Uploaded one at a time, in the order picked: the order is the order the agent reads
+// them in, and ten parallel 6 MB bodies over a tailnet is how the first one times out.
+//   THE PREVIEW IS A CANVAS, NOT AN <img>. The CSP is `default-src 'self'`, which refuses a
+// blob: URL in an <img>, and docs/attachments.md chose not to loosen a policy on a page that
+// can spawn processes to save one element. createImageBitmap decodes the File in memory —
+// no URL, no fetch — and drawImage paints it. A format the browser cannot decode gets a
+// numbered label instead of a blank square: the tile is the confirmation, not the pixels.
+//   KEYED BY SESSION. An upload takes seconds and the screen is live throughout, so a photo
+// belongs to the session that picked it, not to whatever composer is on screen when its
+// bytes land — the same discipline readPane() keeps for a capture that arrives late.
+let photoSeq = 0, photoChain = Promise.resolve(), photoStripNode = null;
+const photoKey = (project = S.project, session = S.session) => `${project} ${session}`;
+const photosFor = (key = photoKey()) => S.photos.filter((p) => p.key === key);
+
+// The message the agent is handed: what was typed, then every photo's path, in order.
+export function messageWithPhotos(text, paths) {
+  return [String(text || '').trim(), ...paths.filter(Boolean)].filter(Boolean).join(' ');
+}
+
+function photoThumb(file, n) {
+  const c = el('canvas', { class: 'ph-img', width: '128', height: '128', 'aria-hidden': 'true' });
+  c.textContent = String(n);
+  try {
+    if (typeof createImageBitmap !== 'function') throw new Error('no decoder');
+    createImageBitmap(file).then((bm) => {
+      const g = c.getContext('2d');
+      // Cover, centred: the tile is square and a phone photo is not.
+      const sc = Math.max(128 / bm.width, 128 / bm.height);
+      const w = bm.width * sc, h = bm.height * sc;
+      g.drawImage(bm, (128 - w) / 2, (128 - h) / 2, w, h);
+      try { bm.close(); } catch {}
+    }).catch(() => { c.classList.add('undecoded'); });
+  } catch { c.classList.add('undecoded'); }
+  return c;
+}
+
+function addPhotos(files, card) {
+  files = [...(files || [])].filter(Boolean);
+  if (!files.length) return;
+  const key = photoKey(), want = { project: S.project, session: S.session };
+  const room = Math.max(0, api.ATTACH_PER_MESSAGE - photosFor(key).length);
+  const take = files.slice(0, room);
+  if (take.length < files.length) {
+    const left = files.length - take.length;
+    toast(take.length
+      ? `${api.ATTACH_PER_MESSAGE} photos per message — added ${take.length}, left out ${left}`
+      : `${api.ATTACH_PER_MESSAGE} photos per message, and this one has them — ${left} left out`, 'bad');
+    renderUnlessTyping();
+  }
+  for (const file of take) {
+    const item = { id: ++photoSeq, key, name: file.name || 'photo', state: 'up', path: '', err: '' };
+    item.thumb = photoThumb(file, photosFor(key).length + 1);
+    S.photos.push(item);
+    photoChain = photoChain.then(() => uploadPhoto(item, file, want, card));
+  }
+  paintPhotos();
+}
+
+async function uploadPhoto(item, file, want, card) {
+  if (!S.photos.includes(item)) return;            // removed before its turn came
   try {
     const r = await api.attach(want.project, want.session, file);
-    const kb = Math.max(1, Math.round(r.bytes / 1024));
-    if (S.project !== want.project || S.session !== want.session) {
-      // Not silently dropped and not pasted somewhere it does not belong: the file is
-      // stored and its path is the only thing that makes it usable, so the path is what
-      // the message says.
-      note = `photo stored for ${want.session} — you have moved on, so it is at ${r.path}`;
-    } else {
-      const sep = S.draft && !/\s$/.test(S.draft) ? ' ' : '';
-      S.draft = (S.draft || '') + sep + r.path + ' ';
-      note = r.converted ? `photo converted and stored, ${kb} KB` : `photo stored, ${kb} KB`;
-      // ...and the one honesty requirement the research left standing: two of the three
-      // agents read images and the third depends on a model ghostfleet cannot see. ONE
-      // toast, not two: S.toast is a single slot, so a second call did not add a warning,
-      // it replaced the confirmation — and the size, which is the half that says the
-      // upload worked at all, was the half nobody on an opencode worker ever saw.
-      if (card && card.agent === 'opencode')
-        note += ' — this worker runs opencode, so whether it can read an image depends on its model';
-    }
+    item.path = r.path; item.state = 'ok';
+    // ...and the one honesty requirement the research left standing: two of the three
+    // agents read images and the third depends on a model ghostfleet cannot see.
+    if (card && card.agent === 'opencode' && !photosFor(item.key).some((p) => p !== item && p.state === 'ok'))
+      { toast('this worker runs opencode, so whether it can read an image depends on its model'); renderUnlessTyping(); }
   } catch (e) {
-    note = String((e && e.message) || e); bad = true;
+    if (e instanceof api.AuthError) { item.state = 'bad'; item.err = 'locked'; paintPhotos(); lock(); return; }
+    item.state = 'bad'; item.err = String((e && e.message) || e);
+    toast(`${item.name}: ${item.err}`, 'bad');
+    renderUnlessTyping();
   }
-  S.attaching = false;
-  // THE PATH GOES INTO THE BOX YOU ARE LOOKING AT, WITHOUT REBUILDING IT. render() would
-  // show the new draft and close the keyboard doing it — the composer is where you were
-  // about to type the sentence that goes with the photo. So the live box is patched in
-  // place, the way paintPane() patches the pane, and the rest of the screen (the camera's
-  // busy state) repaints on the next poll that is allowed to run.
-  if (isLive(composerNode)) { composerNode.value = S.draft || ''; growComposer(composerNode); }
-  toast(note, bad ? 'bad' : '');
-  renderUnlessTyping();
+  paintPhotos();
+}
+
+function removePhoto(item) {
+  S.photos = S.photos.filter((p) => p !== item);
+  paintPhotos();
+}
+
+function photoTiles() {
+  return photosFor().map((p, i) => {
+    const x = btn('×', () => removePhoto(p), 'ph-x');
+    x.setAttribute('aria-label', `remove photo ${i + 1}`);
+    const state = p.state === 'up' ? 'uploading' : p.state === 'bad' ? `failed: ${p.err}` : 'ready';
+    return el('div', { class: `ph ${p.state}`, title: `${p.name} — ${state}`,
+                       'aria-label': `photo ${i + 1}, ${state}` }, [p.thumb, x]);
+  });
+}
+// THE TILES ARE PATCHED IN PLACE, WITHOUT REBUILDING THE COMPOSER. render() would rebuild the
+// textarea and close the keyboard doing it — and the composer is where you were about to
+// type the sentence that goes with the photos. So an upload finishing repaints only the
+// strip, the way paintPane() patches the pane.
+function paintPhotos() {
+  if (isLive(photoStripNode)) {
+    photoStripNode.textContent = '';
+    for (const t of photoTiles()) photoStripNode.append(t);
+    const cam = photoStripNode.parentNode && photoStripNode.parentNode.querySelector && photoStripNode.parentNode.querySelector('.cam');
+    if (cam) cam.classList.toggle('busy', photosFor().some((p) => p.state === 'up'));
+  } else renderUnlessTyping();
 }
 
 function msgKey(m) { return String(m.role || '') + '|' + String(m.ts || ''); }
@@ -2265,19 +2316,21 @@ function composer(card, opts = {}) {
   // The picker is a hidden <input type=file>; the visible control is a button, so it can
   // be styled and sized like the one beside it. accept="image/*" is what makes iOS offer
   // the camera and the library rather than a file browser.
-  const pick = el('input', { type: 'file', accept: 'image/*', class: 'pick' });
+  // `multiple`, so the library lets several be ticked at once (addPhotos caps them).
+  const pick = el('input', { type: 'file', accept: 'image/*', multiple: '', class: 'pick' });
   pick.addEventListener('change', () => {
-    const f = pick.files && pick.files[0];
+    const files = pick.files ? [...pick.files] : [];
     pick.value = '';                       // so picking the SAME photo twice still fires
-    attachPhoto(f, card);
+    addPhotos(files, card);
   });
-  const cam = btn('', () => pick.click(), 'cam' + (S.attaching ? ' busy' : ''));
+  const uploading = photosFor().some((p) => p.state === 'up');
+  const cam = btn('', () => pick.click(), 'cam' + (uploading ? ' busy' : ''));
   cam.textContent = '';
   cam.appendChild(cameraIcon());
-  cam.setAttribute('aria-label', S.attaching ? 'sending a photo' : 'attach a photo');
-  cam.setAttribute('title', 'attach a photo');
-  if (S.attaching) cam.setAttribute('disabled', 'disabled');
-  const kids = [pick, cam, box];
+  cam.setAttribute('aria-label', 'attach photos');
+  cam.setAttribute('title', `attach photos (up to ${api.ATTACH_PER_MESSAGE})`);
+  photoStripNode = el('div', { class: 'photos' }, photoTiles());
+  const kids = [photoStripNode, pick, cam, box];
   // THE COMPOSER ALSO TALKS — Jarvis's and every session's, the same button in the same
   // place. One more control, the same size as the two beside it, and it is the whole of
   // conversation mode's UI besides the band above: tap once and the conversation runs itself
@@ -2294,8 +2347,17 @@ function composer(card, opts = {}) {
   return el('div', { class: 'composer' }, kids);
 }
 async function sendDraft() {
-  const text = String(S.draft || '').trim();
+  const mine = photosFor();
+  const waiting = mine.filter((p) => p.state === 'up').length;
+  // toast() only sets state, so each refusal below also asks for the draw that shows it.
+  if (waiting) { toast(`${waiting} photo${waiting > 1 ? 's are' : ' is'} still uploading — send again when ${waiting > 1 ? 'they are' : 'it is'} ready`); renderUnlessTyping(); return; }
+  const failed = mine.filter((p) => p.state === 'bad').length;
+  if (failed) { toast(`${failed} photo${failed > 1 ? 's' : ''} did not upload — remove ${failed > 1 ? 'them' : 'it'} (×) or pick again`, 'bad'); renderUnlessTyping(); return; }
+  const text = messageWithPhotos(S.draft, mine.map((p) => p.path));
   if (!text) return;
+  // The photos leave with the message, and come back if the send does not go.
+  S.photos = S.photos.filter((p) => !mine.includes(p));
+  const typed = S.draft;
   // Optimistic, and reconciled against the transcript rather than trusted: reconcilePending
   // clears this when the real message comes back, and gives up on it after a while so a
   // failed send cannot sit there looking sent forever.
@@ -2313,7 +2375,11 @@ async function sendDraft() {
   scrollMem.delete('chat');          // a message you just sent belongs on screen
   render();
   const r = await doVerb('fleet_send', { project: S.project, session: S.session, prompt: text }, { quiet: true });
-  if (!r) { S.pending = null; render(); }        // doVerb already said why
+  if (!r) {                                      // doVerb already said why
+    S.pending = null;
+    if (mine.length) { S.photos = [...mine, ...S.photos]; if (!S.draft) S.draft = typed; }
+    render();
+  }
 }
 // The pending bubble goes when the transcript has it — matched on the text, because the
 // only id a sent prompt has is what it said. PENDING_TTL is the give-up: a send that
@@ -3002,9 +3068,8 @@ function insideComposer(n) {
   return false;
 }
 
-// The live composer <textarea>. Still kept, because attachPhoto() has to put a path into
-// the box you are looking at without rebuilding it — but nothing DECIDES anything from it
-// any more; the two guards above ask the element instead.
+// The live composer <textarea>. Still kept and still cleared by render(), but nothing
+// DECIDES anything from it any more; the two guards above ask the element instead.
 let composerNode = null;
 
 const PANE_POLL_MS = 2000, PANE_POLL_HISTORY_MS = 4000;
