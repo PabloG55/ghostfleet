@@ -1300,7 +1300,15 @@ STUB
   # The conversation the claude master is in, as its hook would have recorded it. The stub
   # is not a real claude, so fleet-hibernate cannot read it off the process and the engine
   # falls back to this record — the same fallback a session it cannot resolve gets.
-  SWID=aaaaaaaa-1111-2222-3333-444444444444
+  # THE IDS ARE THIS RUN'S OWN. codex-here refuses to resume a conversation another live
+  # process has open, and slot-claim answers that by reading EVERY process's argv on the
+  # machine — so with fixed ids, a sibling run's codex stub sitting on its dialog as
+  # `codex resume cccccccc-…` made this run's codex refuse, exit inside five seconds and
+  # take its pane down: "exited before it reached a prompt", rolled back, and every row
+  # from the dialog case on read the wrong agent. Two worktrees testing at once is the
+  # supported case (each run has its own tmux namespace), so the ids must be per-run too.
+  swuid() { printf '%s-1111-2222-3333-%s' "$1" "$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"; }
+  SWID="$(swuid aaaaaaaa)"
   printf '{"session_id":"%s","sock":"%s","slot":"master","cwd":"%s","status":"ready","ts":%s}\n' \
     "$SWID" "$SWS" "$SW/repo" "$(date +%s)" > "$SWF/$SWID.json"
   swstart master claude "$SW/repo"; swstart w1 claude "$SW/wt"; sleep 1
@@ -1323,7 +1331,7 @@ STUB
   # The conversation codex took up, as lib/codex-rollout.mjs records it: tagged codex, and
   # NEWER than claude's record for the same slot, which is exactly the interleaving that made
   # "the newest record for this slot" the wrong agent's conversation.
-  CXID=cccccccc-1111-2222-3333-444444444444
+  CXID="$(swuid cccccccc)"
   printf '{"session_id":"%s","agent":"codex","sock":"%s","slot":"master","cwd":"%s","status":"ready","ts":%s}\n' \
     "$CXID" "$SWS" "$SW/repo" "$(( $(date +%s) + 5 ))" > "$SWF/$CXID.json"
 
@@ -1386,8 +1394,17 @@ STUB
   # Seen live: codex 0.160.1 opened on its daemon dialog and the switch rolled it back at the
   # ready timeout as a crash. It must still be pending past that timeout, read as need-you
   # on the card, and finish once the dialog is answered.
+  # ON THE DIALOG FIRST, THEN PAST THE CLOCK. This slept 6s from the request, which was
+  # neither: the 4s ready clock starts at the launch, after the record and the kill, so on a
+  # slow runner 6s from the request was not past it — with the pause deleted outright, this
+  # row stayed green. It waits for the switch to say it is on the dialog (the branch that
+  # pauses the clock), then for the whole of READY_SECS, which is the claim itself.
+  swlog0="$(wc -l < "$SWF/$SWS.master.switch.log" 2>/dev/null || echo 0)"
   : > "$SW/codex-dialog"
-  swfp agent billing-svc codex >/dev/null; sleep 6      # READY_SECS is 4 here
+  swfp agent billing-svc codex >/dev/null
+  i=0; until tail -n +"$((swlog0 + 1))" "$SWF/$SWS.master.switch.log" 2>/dev/null | grep -q "waiting on a dialog in master's pane"; do
+    [ "$i" -lt 150 ] || break; sleep 0.2; i=$((i+1)); done
+  sleep 5                                               # READY_SECS is 4 here
   is "a new agent on a dialog is not rolled back"   "codex" "$(cat "$SWF/$SWS.master.switch" 2>/dev/null)"
   is "...and nothing is reported failed"            "no" "$([ -f "$SWF/$SWS.master.switch-failed" ] && echo yes || echo no)"
   is "...and the card says it needs you"            "need-you" \
@@ -3795,39 +3812,62 @@ if command -v tmux >/dev/null 2>&1; then
   # stderr is deliberately NOT redirected: the grid reads the terminal size off it, so
   # sending it to a file makes every window look like 80x24 and the ship never flies —
   # which silently turns the wide case into a second copy of the short one.
-  clickcard() {
-    tmux -L cfclkdrv kill-session -t d 2>/dev/null; : > "$CK/choice"
+  # WAIT ON THE GRID, NEVER ON THE CLOCK. These slept 2s for the grid to come up and 1s for
+  # it to answer, and a loaded runner overran both: the click went in before the first
+  # frame, or the choice was read before it was written, and the row read "" for a click
+  # that works. Up = the first full frame is on screen (card 2 is the last thing drawn, and
+  # the frame comes after raw mode and the key reader, so a click sent now is read against
+  # it). Done = the grid has EXITED. A click that should open nothing is followed by q:
+  # keys are read in order, so "back" says the click before it was read and opened nothing,
+  # where an empty file after a timeout could only say "not yet".
+  clkup() {
+    local i=0
+    until grep -q '─ 2 cb ─' <<< "$(tmux -L cfclkdrv capture-pane -p -t d 2>/dev/null)"; do
+      [ "$i" -lt 300 ] || { echo "grid never drew its cards" >&2; return 1; }; sleep 0.1; i=$((i+1)); done
+  }
+  clkdone() {
+    local i=0
+    while tmux -L cfclkdrv has-session -t =d 2>/dev/null; do
+      [ "$i" -lt 300 ] || { tmux -L cfclkdrv send-keys -t d q 2>/dev/null; echo "grid never exited" >&2; break; }; sleep 0.1; i=$((i+1)); done
+    cat "$CK/choice"
+  }
+  clkstart() {         # $1 = width  $2 = height
+    tmux -L cfclkdrv kill-session -t =d 2>/dev/null; : > "$CK/choice"
     tmux -L cfclkdrv -f /dev/null new-session -d -s d -x "$1" -y "$2" \
       "CLAUDE_FLEET_DIR='$CK' CLAUDE_FLEET_SCOPE=clktest CLAUDE_FLEET_ROOT= node '$ROOT/bin/fleet-grid.mjs' cfclktest > '$CK/choice'" 2>/dev/null
-    sleep 2
+    clkup
+  }
+  # $5 = "miss" for a click that should open nothing
+  clickcard() {
+    clkstart "$1" "$2"
     tmux -L cfclkdrv send-keys -t d -l "$(printf '\033[<0;%s;%sM' "$3" "$4")" 2>/dev/null; sleep 0.3
-    tmux -L cfclkdrv send-keys -t d -l "$(printf '\033[<0;%s;%sm' "$3" "$4")" 2>/dev/null; sleep 0.7
-    cat "$CK/choice"
+    tmux -L cfclkdrv send-keys -t d -l "$(printf '\033[<0;%s;%sm' "$3" "$4")" 2>/dev/null
+    [ "${5:-}" = miss ] && tmux -L cfclkdrv send-keys -t d q 2>/dev/null
+    clkdone
   }
   US=$'\x1f'
   # 140x40: the ship fits, so cards start at row 10
   is "wide: card 1 opens card 1"   "attach${US}ca" "$(clickcard 140 40 10 11)"
   is "wide: card 2 opens card 2"   "attach${US}cb" "$(clickcard 140 40 43 11)"
-  is "wide: the banner is not a card" ""           "$(clickcard 140 40 10 4)"
-  is "wide: the gap is not a card"    ""           "$(clickcard 140 40 10 15)"
+  is "wide: the banner is not a card" "back"       "$(clickcard 140 40 10 4 miss)"
+  is "wide: the gap is not a card"    "back"       "$(clickcard 140 40 10 15 miss)"
   # 140x24: too short for the ship, so cards start at row 3 — the original layout
   is "short: card 1 opens card 1"  "attach${US}ca" "$(clickcard 140 24 10 4)"
-  is "short: header is not a card"    ""           "$(clickcard 140 24 10 1)"
+  is "short: header is not a card"    "back"       "$(clickcard 140 24 10 1 miss)"
 
   # ONE READ, MORE THAN ONE EVENT. A grid refresh blocks the loop for most of a second on
   # a real fleet, and a click that lands in it is read back as press AND release in one
   # chunk — which the whole-chunk mouse regex matched as nothing, so the click vanished.
   # tmux delivers one send-keys as one write, so these are that chunk, every time, with
-  # no race to win. $1=what to send (printf format) $2=optional second write.
+  # no race to win. $1=what to send (printf format) $2=optional second write ("" for none)
+  # $3 = "miss" for one that should open nothing (q follows it, as in clickcard).
   # (Never end a send-keys argument with ';' — tmux takes it as a command separator.)
   sendgrid() {
-    tmux -L cfclkdrv kill-session -t d 2>/dev/null; : > "$CK/choice"
-    tmux -L cfclkdrv -f /dev/null new-session -d -s d -x 140 -y 40 \
-      "CLAUDE_FLEET_DIR='$CK' CLAUDE_FLEET_SCOPE=clktest CLAUDE_FLEET_ROOT= node '$ROOT/bin/fleet-grid.mjs' cfclktest > '$CK/choice'" 2>/dev/null
-    sleep 2
+    clkstart 140 40
     tmux -L cfclkdrv send-keys -t d -l "$(printf "$1")" 2>/dev/null
     if [ -n "${2:-}" ]; then sleep 0.1; tmux -L cfclkdrv send-keys -t d -l "$(printf "$2")" 2>/dev/null; fi
-    sleep 1; cat "$CK/choice"
+    [ "${3:-}" = miss ] && tmux -L cfclkdrv send-keys -t d q 2>/dev/null
+    clkdone
   }
   is "press+release in ONE read opens card 1" "attach${US}ca" "$(sendgrid '\033[<0;10;11M\033[<0;10;11m')"
   is "press+release in ONE read opens card 2" "attach${US}cb" "$(sendgrid '\033[<0;43;11M\033[<0;43;11m')"
@@ -3835,7 +3875,7 @@ if command -v tmux >/dev/null 2>&1; then
   is "a wheel event in the same read does not eat the click" "attach${US}cb" \
      "$(sendgrid '\033[<65;43;11M\033[<0;43;11M\033[<0;43;11m')"
   is "→ and ⏎ in one read: moves, then opens"  "attach${US}cb" "$(sendgrid '\033[C\r')"
-  is "a click on the gap, combined, opens nothing" "" "$(sendgrid '\033[<0;10;15M\033[<0;10;15m')"
+  is "a click on the gap, combined, opens nothing" "back" "$(sendgrid '\033[<0;10;15M\033[<0;10;15m' '' miss)"
   tmux -L cfclkdrv kill-server 2>/dev/null; tmux -L cfclktest kill-server 2>/dev/null
   rm -rf "$CK"
 else
@@ -4436,14 +4476,18 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   is "fleet-ledger: lists 2, closes 1, refuses a second close, clears, writes no *.json" "2 1 1 0 2" \
      "$lg1 $lg2 $lg3 $(lgc w1 | grep -c ' open ' || true) $(ls "$LG" | grep -c '\.json$' || true)"
   # The last judge's status, both ways: a failing one names why, a working one says so.
+  # The judge ran at a FIXED time and the reader's clock is pinned 42s after it. Both used
+  # to be Date.now() in two processes, and the age is rounded to the second, so a reader
+  # that started 500ms late printed "(1s ago)" — red on a loaded runner, green on re-run.
+  LGT=1760000000000
   lgj() { node --no-warnings --input-type=module -e "
     import fs from 'node:fs'
     import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
-    const l = L.addItem(L.emptyLedger(), { text: 'fix the login redirect', at: Date.now(), source: 'user' })
-    fs.writeFileSync('$LG/lg-1.ledger', JSON.stringify({ ...l, judge: { at: Date.now(), ...JSON.parse(process.argv[1]) } }))" "$1"
-    lgc w1 | grep '^last judge'; }
+    const l = L.addItem(L.emptyLedger(), { text: 'fix the login redirect', at: $LGT, source: 'user' })
+    fs.writeFileSync('$LG/lg-1.ledger', JSON.stringify({ ...l, judge: { at: $LGT, ...JSON.parse(process.argv[1]) } }))" "$1"
+    CLAUDE_FLEET_NOW_MS=$((LGT + 42000)) lgc w1 | grep '^last judge'; }
   is "fleet-ledger: list shows the last judge's status, failing or ok" \
-     "last judge: FAILING, failed open: reply was not the JSON asked for (0s ago)|last judge: ok, 46 items in 5 calls (0s ago)" \
+     "last judge: FAILING, failed open: reply was not the JSON asked for (42s ago)|last judge: ok, 46 items in 5 calls (42s ago)" \
      "$(lgj '{"ok":false,"why":"reply was not the JSON asked for"}')|$(lgj '{"ok":true,"items":46,"calls":5}')"
   # A session older than the mod's tools closes, drops and adds from Bash, through the same
   # functions the tools use; --session names the file by id. A stale promise is closable too.

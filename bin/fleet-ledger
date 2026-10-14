@@ -95,7 +95,10 @@ exec node --no-warnings --input-type=module -e '
     if (verb !== "list" && verb !== "all") { console.error(`fleet-ledger: ${msg}`); process.exit(1) }
     console.log(msg); process.exit(0)
   }
-  const now = Date.now()
+  // CLAUDE_FLEET_NOW_MS pins the clock. Every age printed here is now minus a time another
+  // process wrote, rounded to the second, so a reader started half a second late says
+  // "1s ago" where the writer meant "0s" — and no sleep makes that gap a known size.
+  const now = Number(process.env.CLAUDE_FLEET_NOW_MS) || Date.now()
   if (verb === "list" || verb === "all") { console.log(L.listing(L.parseLedger(text), now, { all: verb === "all" })); process.exit(0) }
   // Each change is made against the file as it is, written beside it and renamed over it as the
   // mod writes it (dot-led, so no glob reads it; named for this process, so two never share

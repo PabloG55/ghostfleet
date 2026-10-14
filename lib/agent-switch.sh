@@ -331,10 +331,38 @@ do_switch() {
   return 1
 }
 
+# ONE WATCHER PER SLOT, AND NEVER NONE. A request writes the wish and then starts a watcher
+# only if none is alive; a watcher leaves when the wish is gone. Cancel-then-ask in quick
+# succession hit the gap between the two: the watcher saw no wish and was on its way out,
+# the new request saw its pid still alive and started nobody, and the wish sat there with
+# nothing to fire it — the row said "switching to codex…" for as long as anyone looked.
+# So the slot is CLAIMED (O_EXCL, so two watchers starting together get one), and a watcher
+# gives its claim up BEFORE its last look at the wish: a request that wrote one after that
+# look saw no pid and started a watcher; one that wrote it before is seen.
+claim() {
+  local p _
+  for _ in 1 2 3; do
+    ( set -o noclobber; printf '%s\n' "$$" > "$PIDF" ) 2>/dev/null && return 0
+    p="$(cat "$PIDF" 2>/dev/null)"
+    [ "$p" = "$$" ] && return 0
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && return 1
+    rm -f "${PIDF:?}"        # a watcher that died without giving it up
+  done
+  return 1
+}
 watch_loop() {
-  local want live idle=0 rc seen="" since=$SECONDS
-  printf '%s\n' "$$" > "$PIDF"
+  claim || { log "watcher $$: another watcher has $SLOT"; return 0; }
   log "watcher $$ up for $SLOT"
+  while :; do
+    watch_once
+    [ "$(cat "$PIDF" 2>/dev/null)" = "$$" ] && rm -f "${PIDF:?}"
+    [ -f "$PENDING" ] && claim || break
+    log "watcher $$: a new wish for $SLOT landed as it was leaving — staying"
+  done
+  log "watcher $$ done"
+}
+watch_once() {
+  local want live idle=0 rc seen="" since=$SECONDS
   while :; do
     [ -f "$PENDING" ] || break
     want="$(tr -d '[:space:]' < "$PENDING" 2>/dev/null)"
@@ -357,8 +385,6 @@ watch_loop() {
     fi
     sleep "$POLL"
   done
-  [ "$(cat "$PIDF" 2>/dev/null)" = "$$" ] && rm -f "${PIDF:?}"
-  log "watcher $$ done"
 }
 
 PROJECT=""
