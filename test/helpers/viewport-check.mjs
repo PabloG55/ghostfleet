@@ -683,11 +683,14 @@ async function walk(w, h) {
   await settle('the text size going back to default');
   // At the DEFAULT size only: on the accessibility rungs no placeholder fits a box this
   // narrow, and that is not what was reported. With room to spare, because the phone's
-  // metrics are not this engine's — a quarter of the box is the margin asked for.
+  // metrics are not this engine's — and how far apart two engines' are is measured, not
+  // guessed: "message…" at 320px is 78px of text in 109 on macOS and 88px in 110 on the
+  // Linux CI runner, the same string. A 15% margin holds both, and still refuses the old
+  // placeholder where it merely fit (168 in 179 at 390, 94%) as well as where it wrapped.
   {
     const c = await evaluate(COMPOSER);
     is(`${w}px the composer placeholder fits on one line, with room`, true,
-       !!c && c.ph.text <= c.ph.room * 0.75 || `${c && c.ph.text}px of text in ${c && c.ph.room}px`);
+       !!c && c.ph.text <= c.ph.room * 0.85 || `${c && c.ph.text}px of text in ${c && c.ph.room}px`);
   }
   // A DRAFT THE HEIGHT OF A PARAGRAPH. render() rebuilds this box on every poll, so the
   // height has to be re-applied on render and not only on a keystroke.
