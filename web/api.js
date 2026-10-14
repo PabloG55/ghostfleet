@@ -412,11 +412,13 @@ export async function getSession(project, session, before = null) {
   // the transcript is what the chat reconciles its optimistic bubble against, so a fixture
   // that never echoes a send cannot exercise that at all.
   const msgs = [...(all.messages || []), ...(overlay.sent.get(session) || [])];
+  // ...and what is still WAITING, the field /api/session serves beside the newest page.
+  const queue = before == null ? (overlay.queue.get(session) || []).map((text, i) => ({ at: i, text })) : undefined;
   const upTo = before == null ? msgs.length : msgs.findIndex(m => String(m.ts) === String(before));
   const end = upTo < 0 ? msgs.length : upTo;
   const start = Math.max(0, end - PAGE);
   return { ...all, total: msgs.length, messages: msgs.slice(start, end),
-           next_before: start > 0 ? String(msgs[start].ts) : null };
+           next_before: start > 0 ? String(msgs[start].ts) : null, ...(queue ? { queue } : {}) };
 }
 
 // The session's real pane — `capture-pane -p -e`, escapes and all.
@@ -670,12 +672,14 @@ export async function verb(tool, args, assertion = null) {
     slid(r);
     const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
     record(tool, args, j.ok ? 'ok' : `refused: ${j.text || r.status}`);
-    if (!j.ok) throw new Error(j.text || `${tool} failed`);
+    // The body rides on the error: a refusal can carry a fact the caller acts on beyond
+    // its sentence (fleet_unqueue's `delivered` — too late to edit, not a failure).
+    if (!j.ok) throw Object.assign(new Error(j.text || `${tool} failed`), { body: j });
     return j;
   }
   const res = fixtureVerb(tool, args);
   record(tool, args, res.ok ? 'ok (fixture — recorded, not executed)' : `refused: ${res.text}`);
-  if (!res.ok) throw new Error(res.text);
+  if (!res.ok) throw Object.assign(new Error(res.text), { body: res });
   return res;
 }
 
@@ -683,11 +687,17 @@ export async function verb(tool, args, assertion = null) {
 // Kept as an OVERLAY rather than by editing the fixture in memory, so reloading always
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
-const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set() };
+const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set(), queue: new Map() };
+// What each card's FIXTURE says it is, before any tap: a send to a session the shipped
+// fixture shows mid-turn is queued, as bin/fleet-send queues it — and keyed on the fixture
+// rather than on the overlay, so a send that merely set a card working does not start
+// queueing every later send in a run that never asked for a queue.
+const baseStatus = new Map();
 // What each card last said it was, as drawn — so a send to a session the fixture shows as
 // need-you is held the way the daemon holds it (bin/fleet-send: "queued behind a question").
 const lastStatus = new Map();
 function applyOverlay(g) {
+  for (const c of g.cards || []) baseStatus.set(c.name, c.status);
   let cards = (g.cards || [])
     .filter(c => !overlay.gone.has(c.name))
     .map(c => ({
@@ -731,6 +741,12 @@ function fixtureVerb(tool, a) {
       // Held behind the prompt in its pane, as fleet-serve reports it: `queued: 'question'`.
       if (lastStatus.get(a.session) === 'need-you')
         return { ...ok(`fleet-send: → ${a.session} (queued #1 behind a question — it is waiting on an answer in its pane)`), queued: 'question' };
+      // Mid-turn in the shipped fixture, or already holding a queue: it waits, in order.
+      const q = overlay.queue.get(a.session) || [];
+      if (baseStatus.get(a.session) === 'working' && overlay.status.get(a.session) !== 'ready' || q.length) {
+        q.push(String(a.prompt || '')); overlay.queue.set(a.session, q);
+        return { ...ok(`fleet-send: → ${a.session} (queued #${q.length} — it is mid-turn; this runs as its own turn after that one ends)`), queued: 'turn' };
+      }
       overlay.status.set(a.session, 'working');
       // ...and it lands in the transcript, because the chat's optimistic bubble is
       // reconciled against what the transcript says (app.js's reconcilePending). Without
@@ -742,6 +758,19 @@ function fixtureVerb(tool, a) {
       overlay.sent.set(a.session, list);
       return ok(`sent to '${a.session}'`);
     }
+    // Taken back out of the queue, or refused as delivered — the two answers the daemon has.
+    case 'fleet_unqueue': {
+      const q = overlay.queue.get(a.session) || [];
+      const i = q.indexOf(String(a.prompt || ''));
+      if (i < 0) return { ok: false, delivered: true, text: `not in ${a.session}'s queue any more — it has already been typed into the session` };
+      q.splice(i, 1);
+      return ok(`fleet-send: took it back out of ${a.session}'s queue — it was never delivered`);
+    }
+    // The Escape: the turn ends, the session stays on. A lead takes it like any worker. An
+    // interrupt fires no Stop, so the queue is NOT drained by it — as on the daemon.
+    case 'fleet_interrupt':
+      overlay.status.set(a.session, 'ready');
+      return ok(`fleet-pause: interrupted '${a.session}' — its turn ended; the session is still running and takes work as before`);
     // Same rule as the daemon: an answer names the prompt it answers, or nothing is sent.
     case 'fleet_answer':
       if (!a.expect) return { ok: false, text: 'the prompt changed: the pane you answered was not showing a prompt. Nothing was sent.' };
@@ -809,8 +838,20 @@ function fixtureVerb(tool, a) {
     default: return { ok: false, text: `fixture mode has no handler for ${tool}` };
   }
 }
+// THE DRAIN, for the suite: the head of a session's queue is typed in and lands in the
+// transcript, as the Stop hook's `fleet-send --dequeue` does on the daemon. Fixture mode
+// has no turn that ever ends, so nothing else would ever deliver one.
+export function fixtureDeliver(session) {
+  const q = overlay.queue.get(session) || [];
+  const text = q.shift();
+  if (text === undefined) return null;
+  const list = overlay.sent.get(session) || [];
+  list.push({ ts: Math.floor(Date.now() / 1000), role: 'user', text });
+  overlay.sent.set(session, list);
+  return text;
+}
 export function resetOverlay() {
   overlay.status.clear(); overlay.gone.clear(); overlay.sched.clear();
   overlay.label.clear(); overlay.freeGone.clear(); overlay.added.length = 0; overlay.order.length = 0;
-  overlay.sent.clear(); overlay.answered.clear();
+  overlay.sent.clear(); overlay.answered.clear(); overlay.queue.clear();
 }

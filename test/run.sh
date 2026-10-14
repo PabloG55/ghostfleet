@@ -8991,6 +8991,100 @@ else
   skip "a queued question carries its reply address" "tmux missing"
 fi
 
+# The queue had one reader, the drain, so nothing could show what was waiting or take a
+# prompt back before it ran — and the phone lost sight of queued messages. fleet-send owns
+# the record format, so it owns the reader and the remover too.
+group "the queue can be read, and a waiting prompt taken back out"
+if command -v tmux >/dev/null 2>&1; then
+  QL="$(mktemp -d "$TEST_RUNS.$$.ql.XXXXXX")"; QLF="$QL/fleet"; mkdir -p "$QLF"
+  tmux -L cfql kill-server 2>/dev/null
+  tmux -L cfql new-session -d -x 200 -y 40 -s tgt "printf 'esc to interrupt\n'; sleep 60" 2>/dev/null
+  sleep 0.4
+  QLS() { env -u TMUX CLAUDE_FLEET_DIR="$QLF" "$ROOT/bin/fleet-send" -s cfql "$@" 2>&1; }
+  QLS tgt "run the acme-api suite" >/dev/null
+  QLS tgt "$(printf 'then the acme-web one\nand report both')" >/dev/null
+  QLS --nudge tgt "a worker finished — run fleet-inbox" >/dev/null
+  QLS tgt "and the billing-svc one" >/dev/null
+  ql_texts() { QLS --list-queue tgt | while IFS=$'\t' read -r at b64 kind; do
+                 printf '%s:%s|' "${kind:--}" "$(printf '%s' "$b64" | base64 -d 2>/dev/null || printf '%s' "$b64" | base64 -D)"; done; }
+  is "--list-queue lists what is waiting, in order, nudges marked" \
+     "-:run the acme-api suite|-:then the acme-web one
+and report both|nudge:a worker finished — run fleet-inbox|-:and the billing-svc one|" "$(ql_texts)"
+  is "...one line per prompt, however many lines it has" "4" "$(QLS --list-queue tgt | grep -c . || true)"
+  out="$(QLS --unqueue tgt "$(printf 'then the acme-web one\nand report both')")"; rc=$?
+  is "--unqueue takes a waiting prompt back out"  "0" "$rc"
+  is "...and says it was never delivered"         "1" "$(grep -c 'never delivered' <<< "$out" || true)"
+  is "...leaving the others, in order" \
+     "-:run the acme-api suite|nudge:a worker finished — run fleet-inbox|-:and the billing-svc one|" "$(ql_texts)"
+  # Too late is its own answer: the drain has typed it in, and the phone says so.
+  out="$(QLS --unqueue tgt "$(printf 'then the acme-web one\nand report both')")"; rc=$?
+  is "a prompt no longer waiting is refused with 4" "4" "$rc"
+  is "...saying it has been typed in"             "1" "$(grep -c 'already been typed into the session' <<< "$out" || true)"
+  # The fleet's own wake is not the owner's to take back.
+  QLS --unqueue tgt "a worker finished — run fleet-inbox" >/dev/null; rc=$?
+  is "a nudge is never taken back"                "4" "$rc"
+  # Exact text only: a prefix is a different prompt.
+  QLS --unqueue tgt "run the acme-api" >/dev/null; rc=$?
+  is "...nor a prompt that only starts the same"  "4" "$rc"
+  QLS --unqueue tgt "run the acme-api suite" >/dev/null
+  QLS --unqueue tgt "and the billing-svc one" >/dev/null
+  QLS --dequeue tgt >/dev/null 2>&1   # busy: 3, and the nudge stays
+  is "...and the drain still sees what is left"   "1" "$(grep -c . "$QLF/cfql.tgt.queue" 2>/dev/null || echo 0)"
+  is "an empty queue lists nothing"               "" "$(rm -f "$QLF/cfql.tgt.queue"; QLS --list-queue tgt)"
+  tmux -L cfql kill-server 2>/dev/null; rm -rf "${QL:?}"
+else
+  skip "the queue can be read, and a waiting prompt taken back out" "tmux missing"
+fi
+
+# Interrupt is the Escape the desk presses: the turn ends and NOTHING ELSE happens — no
+# park marker, and the lead takes it like any worker. The pane is a perl loop that redraws
+# a spinner until it reads an Escape, so "the turn ended" is the pane going still because
+# of the key, not because time passed.
+group "fleet-pause --interrupt ends the turn and parks nothing"
+if command -v tmux >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
+  QI="$(mktemp -d "$TEST_RUNS.$$.qi.XXXXXX")"; QIF="$QI/fleet"; mkdir -p "$QIF"
+  cat > "$QI/turn.pl" <<'PERL'
+use IO::Select; $| = 1; system('stty raw -echo');
+my $s = IO::Select->new(\*STDIN); my $n = 0;
+while (1) {
+  printf "\r* Working... (%ds . esc to interrupt) %d   ", $n / 10, $n++;
+  if ($s->can_read(0.1)) { sysread(STDIN, my $c, 1); last if $c eq "\e"; }
+}
+print "\r\nINTERRUPTED\r\n"; sleep 600;
+PERL
+  tmux -L cfqi kill-server 2>/dev/null
+  tmux -L cfqi new-session -d -x 120 -y 20 -s w1 "perl '$QI/turn.pl'" 2>/dev/null
+  tmux -L cfqi new-session -d -x 120 -y 20 -s master "perl '$QI/turn.pl'" 2>/dev/null
+  sleep 0.5
+  QIP() { env -u TMUX CLAUDE_FLEET_DIR="$QIF" "$ROOT/bin/fleet-pause" "$@" 2>&1; }
+  out="$(QIP --interrupt -s cfqi w1)"
+  is "--interrupt ends a running turn"            "1" "$(grep -c "interrupted 'w1'" <<< "$out" || true)"
+  is "...the pane saw the Escape"                 "1" "$(tmux -L cfqi capture-pane -p -t w1 2>/dev/null | grep -c INTERRUPTED || true)"
+  is "...and it is NOT parked"                    "no" "$([ -e "$QIF/cfqi.w1.parked" ] && echo yes || echo no)"
+  out="$(QIP --interrupt -s cfqi master)"
+  is "the lead takes an interrupt too"            "1" "$(grep -c "interrupted 'master'" <<< "$out" || true)"
+  is "...and is not parked by it either"          "no" "$([ -e "$QIF/cfqi.master.parked" ] && echo yes || echo no)"
+  out="$(QIP --interrupt -s cfqi w1)"; rc=$?
+  is "a session not mid-turn: nothing to interrupt" "1" "$(grep -c 'nothing to interrupt' <<< "$out" || true)"
+  is "...which is not an error"                   "0" "$rc"
+  # The other direction: plain pause still parks, so --interrupt is a mode and not a change
+  # to what pause does.
+  QIP -s cfqi w1 >/dev/null
+  is "plain pause still parks"                    "yes" "$([ -e "$QIF/cfqi.w1.parked" ] && echo yes || echo no)"
+  QIP --interrupt --hibernate -s cfqi w1 >/dev/null; rc=$?
+  is "--interrupt with --hibernate is refused"   "1" "$rc"
+  # The planner: interrupt is served for the lead, while pause still refuses it.
+  pl() { node --input-type=module -e "
+    const m = await import('$ROOT/mcp/fleet-dispatch.mjs');
+    const p = m.plan(process.argv[1], { session: 'master' });
+    console.log(p.kind === 'run' ? [p.cmd, ...p.args].join(' ') : p.kind);" "$1" 2>/dev/null; }
+  is "the planner sends fleet_interrupt to the lead" "fleet-pause --interrupt master" "$(pl fleet_interrupt)"
+  is "...while fleet_pause on the lead still fails"  "fail" "$(pl fleet_pause)"
+  tmux -L cfqi kill-server 2>/dev/null; rm -rf "${QI:?}"
+else
+  skip "fleet-pause --interrupt ends the turn and parks nothing" "tmux/perl missing"
+fi
+
 # ── 4c1m. a session whose mod is live takes its prompts from the mod ─────────
 # fleet-send hands a prompt to mods/ghostfleet (register.js, DELIVERY) instead of pasting
 # it when the target's record says the mod is live AND delivers. The fixture below is that
@@ -13492,10 +13586,41 @@ else
     out="$(hq_send "$(pn_cli enroll phone-held | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the toolbox scripts")"
     is "a send to a need-you session says queued behind a question" '{"status":200,"ok":true,"queued":"question"}' "$out"
     rm -f "$PN/home/.claude/fleet/cf-demo.held.queue"
-    # ...and a send that is only mid-turn carries no such flag.
+    # ...and a send that is only mid-turn is queued TOO, but not behind a question: it says
+    # `turn`, so the phone draws it as a queued bubble it can take back, and does not offer
+    # the answer sheet. It used to carry no flag at all, which is how a queued message and a
+    # delivered one looked the same from the phone.
     hq_rec working
     out="$(hq_send "$(pn_cli enroll phone-held2 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the acme-api routes")"
-    is "...and a working one does not"        '{"status":200,"ok":true,"queued":null}' "$out"
+    is "...and a working one is queued behind the turn" '{"status":200,"ok":true,"queued":"turn"}' "$out"
+
+    # ── the queue is READ beside the transcript, and a waiting prompt can be taken back ──
+    # The phone lost sight of a queued message the moment the next send replaced its one
+    # bubble, and could not edit one at all. /api/session now serves the session's queue
+    # (fleet-send --list-queue, decoded), and fleet_unqueue takes a prompt back out — or
+    # says, as `delivered`, that the drain has already typed it in.
+    hq_flow() { node --input-type=module -e "
+      import { Authenticator } from '$ROOT/test/helpers/serve-client.mjs';
+      const a = new Authenticator({ rpId: new URL('$PNBASE').hostname, origin: '$PNBASE' });
+      const e = await a.enroll('$PNBASE', process.argv[1]);
+      if (e.status !== 200) { console.log('enrol ' + e.status); process.exit(0); }
+      const multi = 'check the acme-web build\\nthen the billing-svc one';
+      await a.verb('$PNBASE', 'fleet_send', { project: 'demo', session: 'held', prompt: multi });
+      const s1 = await a.api('$PNBASE', 'GET', '/api/session?project=demo&session=held');
+      const q1 = (s1.json.queue || []).map(x => x.text);
+      const u1 = await a.verb('$PNBASE', 'fleet_unqueue', { project: 'demo', session: 'held', prompt: 'list the acme-api routes' });
+      const u2 = await a.verb('$PNBASE', 'fleet_unqueue', { project: 'demo', session: 'held', prompt: 'list the acme-api routes' });
+      const s2 = await a.api('$PNBASE', 'GET', '/api/session?project=demo&session=held');
+      const q2 = (s2.json.queue || []).map(x => x.text);
+      console.log(JSON.stringify({ q1, u1: [u1.status, u1.json.ok], u2: [u2.status, u2.json.ok, u2.json.delivered ?? null], q2 }));" "$1"; }
+    out="$(hq_flow "$(pn_cli enroll phone-held5 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')")"
+    is "the session read serves its queue, in order" \
+       '["list the acme-api routes","check the acme-web build\nthen the billing-svc one"]' \
+       "$(jq -c '.q1' <<< "$out" 2>/dev/null || echo "$out")"
+    is "a waiting prompt is taken back out"   '[200,true]'      "$(jq -c '.u1' <<< "$out" 2>/dev/null || echo "$out")"
+    is "...and a second take-back says it is gone, as delivered" '[409,false,true]' "$(jq -c '.u2' <<< "$out" 2>/dev/null || echo "$out")"
+    is "...leaving the rest of the queue, multi-line intact" \
+       '["check the acme-web build\nthen the billing-svc one"]' "$(jq -c '.q2' <<< "$out" 2>/dev/null || echo "$out")"
 
     # ── a send the mod could not submit is NOT a success ─────────────────────
     # fleet-send exits 1 with "(not delivered: the mod could not submit it — …)" when the

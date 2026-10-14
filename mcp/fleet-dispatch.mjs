@@ -231,6 +231,12 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, expect: { type: 'string', description: 'optional: the fingerprint of the prompt you are answering (served by /api/pane as prompt.fingerprint). When given, the keys are sent only if that same prompt is still on screen; otherwise it is refused as "the prompt changed"' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
   { name: 'fleet_pause', description: "Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work. Can't park 'master': it is the fleet's lead, and a fleet whose lead is off dispatches nothing (the governor excludes it for the same reason).",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_interrupt', description: "End a session's CURRENT TURN — the Escape the desk presses, retried until the spinner stops (one Escape is often swallowed mid tool-call). Nothing else: the session is not parked, not stopped and keeps taking work, so unlike fleet_pause this works on 'master' too. A prompt queued behind the turn stays queued (an interrupt fires no Stop) and the next send delivers it first.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_queue', description: "List the prompts still WAITING in a session's queue — sent with fleet_send while it was mid-turn and not delivered yet. One line per prompt: queued-at (epoch seconds), the prompt base64-encoded, and kind ('nudge' for the fleet's own wakes, else empty), tab-separated. Empty output is an empty queue.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_unqueue', description: "Take a prompt back OUT of a session's queue before it is delivered — the first waiting one whose text is exactly `prompt`. Refused, saying so, when it is no longer there: it has already been typed into the session and can no longer be edited.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session', 'prompt'], additionalProperties: false } },
   { name: 'fleet_wake', description: "Wake a session that fleet-hibernate put to sleep: start its process again and replay its conversation by id. Different from fleet_resume, which un-parks a session that never stopped running — this one's process is gone. Fails loudly if the folder was never trusted or the transcript does not replay inside the timeout.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_reopen', description: "Reopen a LOST session: one the machine killed (a crash or reboot took its tmux server) that left its status record and conversation behind, shown as `lost` by fleet_list, fleet_digest and the grid. Starts it again under the same name, resuming ITS OWN conversation by id, in its recorded folder, as its recorded agent (fleet-restart --reopen) — never the newest conversation in the folder. To forget a lost session instead, fleet_stop it; its transcript is kept either way.",
@@ -465,6 +471,16 @@ export function plan(name, a = {}) {
       if (nl) return nl;
       return run('fleet-pause', [String(a.session)], t);
     }
+    // NOT GUARDED FOR THE LEAD, ON PURPOSE. notTheLead protects the fleet from a lead that
+    // is OFF; an interrupt ends one turn and leaves it on, which is exactly what the owner
+    // needs when the lead itself is the one running away.
+    case 'fleet_interrupt':
+      return run('fleet-pause', ['--interrupt', String(a.session)], t);
+    // The queue's format belongs to fleet-send, so both are fleet-send's own modes.
+    case 'fleet_queue':
+      return run('fleet-send', ['--list-queue', String(a.session)], t);
+    case 'fleet_unqueue':
+      return run('fleet-send', ['--unqueue', String(a.session), String(a.prompt)], t);
     case 'fleet_resume': {
       const args = [String(a.session)];
       if (a.prompt) args.push(String(a.prompt));

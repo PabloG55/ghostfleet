@@ -73,6 +73,10 @@ while [ $# -gt 0 ]; do
     --now)       MODE=now;           shift ;;
     --nudge)     KIND=nudge;         shift ;;
     --dequeue)   MODE=dequeue;       shift ;;
+    # What the phone reads and edits: the prompts still WAITING in the queue, and taking one
+    # back out before it is delivered (see "reading and editing the queue" below).
+    --list-queue) MODE=list;         shift ;;
+    --unqueue)   MODE=unqueue;       shift ;;
     # Internal: the queue's own delivery (what --dequeue runs). Past the gate like --now,
     # but a turn of its own rather than a paste into one, so it may go through the mod.
     --queued)    MODE=queued;        shift ;;
@@ -84,7 +88,7 @@ MSG="$*"
 
 [ -n "$SOCK" ]    || { echo "fleet-send: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
 [ -n "$SESSION" ] || { echo "fleet-send: usage: fleet-send [-s socket] [--now] [--reply-to me|<session>|<socket>/<session>] [--anyway] <session> <prompt>" >&2; exit 1; }
-[ -n "$MSG" ] || [ "$MODE" = dequeue ] || { echo "fleet-send: empty prompt" >&2; exit 1; }
+[ -n "$MSG" ] || [ "$MODE" = dequeue ] || [ "$MODE" = list ] || { echo "fleet-send: empty prompt" >&2; exit 1; }
 tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
   || { echo "fleet-send: no session '$SESSION' on $SOCK (try: fleet-list)" >&2; exit 1; }
 # A TAB IS NOT AN AGENT. fleet-tab's _term-*/_edit-* sessions live on this same socket
@@ -95,6 +99,94 @@ tmux -L "$SOCK" has-session -t "$SESSION" 2>/dev/null \
 case "$SESSION" in
   _term-*|_edit-*) echo "fleet-send: '$SESSION' is a tab (a shell), not an agent — it cannot be prompted" >&2; exit 1 ;;
 esac
+
+# --- the queue -----------------------------------------------------------------
+# A PROMPT SENT TO A BUSY SESSION IS FOLDED INTO THE TURN THAT IS RUNNING, NOT QUEUED
+# AFTER IT. This script used to paste into the input box of a working session and say
+# "your prompt will queue after this turn"; Claude Code instead hands a message submitted
+# mid-turn to the turn in progress, and the agent reads it as a change of direction. Task
+# A was dropped for task B with nothing anywhere saying so — reported as "I'm treating it
+# as a queue and the agents are not finishing both". Measured on 2.1.280: two prompts, one
+# UserPromptSubmit each, ONE Stop between them.
+#   So a send to a working Claude session is written here instead, and hooks/fleet-event.sh
+# delivers the head of it (`fleet-send --dequeue`) after that session's Stop, as a turn of
+# its own. --now keeps the old paste for the send that MEANS to interrupt.
+#   ONE RECORD PER LINE, \x1f between fields (an empty reply field must not collapse):
+# queued-at, reply socket, reply session, reply dir, and the prompt BASE64'D, because a
+# prompt is multi-line and a line is the record. The reply address is stored RESOLVED and
+# NOT written as a marker yet: a marker written now would be armed by whichever
+# UserPromptSubmit comes next, which is not necessarily this prompt's.
+#   Claude only. The drain is the Claude Stop hook; a codex/opencode target has nothing
+# that would ever deliver a queued prompt, so it keeps the paste.
+QUEUE="$FLEET_DIR/$SOCK.$SESSION.queue"
+
+# mkdir is the lock because it is atomic everywhere this runs (flock is not on macOS).
+# The holder's pid goes inside, so one that died holding it is taken over rather than
+# waited on forever; a lock with no pid yet is only a race lost to a live holder.
+_qlock() {
+  local i=0 p
+  mkdir -p "$FLEET_DIR" 2>/dev/null
+  while ! mkdir "$QUEUE.lock" 2>/dev/null; do
+    p="$(cat "$QUEUE.lock/pid" 2>/dev/null)"
+    if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; then rm -rf "$QUEUE.lock"; continue; fi
+    i=$((i + 1)); [ "$i" -ge 200 ] && return 1          # ~20s: a delivery holds it ~8s
+    sleep 0.1
+  done
+  echo $$ > "$QUEUE.lock/pid"
+  trap 'rm -rf "$QUEUE.lock" 2>/dev/null' EXIT
+}
+_qunlock() { rm -rf "$QUEUE.lock" 2>/dev/null; trap - EXIT; }
+_b64()   { printf '%s' "$1" | base64 | tr -d '\n'; }
+_unb64() { printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 -D 2>/dev/null; }
+
+# --- reading and editing the queue ---------------------------------------------
+# A QUEUED PROMPT WAS INVISIBLE FROM THE PHONE. The send answered "queued #2" and the chat
+# drew one dim bubble that the next send replaced, so the owner lost sight of everything
+# still waiting behind a long turn — and could not take one back to fix a typo, because
+# nothing could read this file but the drain. Both live HERE because this script owns the
+# record format; a second reader in fleet-serve would drift the first time a field moved.
+#
+# --list-queue: one line per WAITING prompt, `<queued-at>\t<prompt base64>\t<kind>`.
+#   Base64 because a prompt is multi-line and the line is the record. The kind is LAST
+# because it is usually empty, and an empty field between two tabs vanishes under a shell
+# `read` (tab is IFS-whitespace) — the suite's own reader hit exactly that with it in the
+# middle, and every later column moved left.
+# --unqueue <session> <prompt>: take the FIRST waiting record that is exactly this prompt
+#   back out, under the lock the drain takes. Matched on the stored base64 of the caller's
+#   own words, byte for byte, so no decoding can make two prompts look equal. Exit 4 when
+#   it is not there: the drain has already delivered it (it was typed into the session),
+#   which is the one case where "edit it" has to become "too late".
+#   A nudge is never taken back — it is the fleet's own wake, not anything the owner wrote.
+if [ "$MODE" = list ]; then
+  [ -s "$QUEUE" ] || exit 0
+  while IFS=$'\x1f' read -r _q_at _q_rs _q_rss _q_rd _q_msg _q_kind _q_extra; do
+    [ -n "${_q_msg:-}" ] && [ -z "${_q_extra:-}" ] || continue
+    printf '%s\t%s\t%s\n' "$_q_at" "$_q_msg" "${_q_kind:-}"
+  done < "$QUEUE"
+  exit 0
+fi
+if [ "$MODE" = unqueue ]; then
+  _qlock || { echo "fleet-send: queue for '$SESSION' is locked — try again in a moment" >&2; exit 1; }
+  _want="$(_b64 "$MSG")"; _hit=0; _qt="$QUEUE.$$.tmp"
+  : > "$_qt"
+  if [ -s "$QUEUE" ]; then
+    while IFS= read -r _line; do
+      IFS=$'\x1f' read -r _q_at _q_rs _q_rss _q_rd _q_msg _q_kind _q_extra <<< "$_line"
+      if [ "$_hit" = 0 ] && [ "${_q_msg:-}" = "$_want" ] && [ "${_q_kind:-}" != nudge ]; then
+        _hit=1; continue
+      fi
+      printf '%s\n' "$_line" >> "$_qt"
+    done < "$QUEUE"
+  fi
+  if [ "$_hit" = 1 ]; then
+    if [ -s "$_qt" ]; then mv -f "$_qt" "$QUEUE"; else rm -f "${_qt:?}" "${QUEUE:?}"; fi
+    echo "fleet-send: took it back out of $SESSION's queue — it was never delivered"
+    exit 0
+  fi
+  rm -f "${_qt:?}"
+  echo "fleet-send: not in $SESSION's queue any more — it has already been typed into the session" >&2
+  exit 4
+fi
 
 # A NEW TASK IS A NEW SESSION. A worker whose task has shipped still holds all of that
 # task in its context, and the next brief gets worked through it — the files it already
@@ -203,46 +295,8 @@ _mod_backlog() {
   return 1
 }
 
-# --- the queue -----------------------------------------------------------------
-# A PROMPT SENT TO A BUSY SESSION IS FOLDED INTO THE TURN THAT IS RUNNING, NOT QUEUED
-# AFTER IT. This script used to paste into the input box of a working session and say
-# "your prompt will queue after this turn"; Claude Code instead hands a message submitted
-# mid-turn to the turn in progress, and the agent reads it as a change of direction. Task
-# A was dropped for task B with nothing anywhere saying so — reported as "I'm treating it
-# as a queue and the agents are not finishing both". Measured on 2.1.280: two prompts, one
-# UserPromptSubmit each, ONE Stop between them.
-#   So a send to a working Claude session is written here instead, and hooks/fleet-event.sh
-# delivers the head of it (`fleet-send --dequeue`) after that session's Stop, as a turn of
-# its own. --now keeps the old paste for the send that MEANS to interrupt.
-#   ONE RECORD PER LINE, \x1f between fields (an empty reply field must not collapse):
-# queued-at, reply socket, reply session, reply dir, and the prompt BASE64'D, because a
-# prompt is multi-line and a line is the record. The reply address is stored RESOLVED and
-# NOT written as a marker yet: a marker written now would be armed by whichever
-# UserPromptSubmit comes next, which is not necessarily this prompt's.
-#   Claude only. The drain is the Claude Stop hook; a codex/opencode target has nothing
-# that would ever deliver a queued prompt, so it keeps the paste.
-QUEUE="$FLEET_DIR/$SOCK.$SESSION.queue"
 QUEUEABLE=0; { [ -z "$_a" ] || [ "$_a" = claude ]; } && QUEUEABLE=1
 SELF="${BASH_SOURCE[0]}"
-
-# mkdir is the lock because it is atomic everywhere this runs (flock is not on macOS).
-# The holder's pid goes inside, so one that died holding it is taken over rather than
-# waited on forever; a lock with no pid yet is only a race lost to a live holder.
-_qlock() {
-  local i=0 p
-  mkdir -p "$FLEET_DIR" 2>/dev/null
-  while ! mkdir "$QUEUE.lock" 2>/dev/null; do
-    p="$(cat "$QUEUE.lock/pid" 2>/dev/null)"
-    if [ -n "$p" ] && ! kill -0 "$p" 2>/dev/null; then rm -rf "$QUEUE.lock"; continue; fi
-    i=$((i + 1)); [ "$i" -ge 200 ] && return 1          # ~20s: a delivery holds it ~8s
-    sleep 0.1
-  done
-  echo $$ > "$QUEUE.lock/pid"
-  trap 'rm -rf "$QUEUE.lock" 2>/dev/null' EXIT
-}
-_qunlock() { rm -rf "$QUEUE.lock" 2>/dev/null; trap - EXIT; }
-_b64()   { printf '%s' "$1" | base64 | tr -d '\n'; }
-_unb64() { printf '%s' "$1" | base64 -d 2>/dev/null || printf '%s' "$1" | base64 -D 2>/dev/null; }
 
 # --dequeue: deliver the NEXT queued prompt, if the session can take it. Exit 3 means
 # "still busy, try again" — the Stop hook runs while the turn is technically still

@@ -195,6 +195,12 @@ class Node_ {
   // Records the focused node on the document too, not just a flag on itself: the poll
   // guard asks `document.activeElement === composerNode`, which is the only way to
   // tell "you are typing" that cannot go stale when a render drops the element.
+  // A file input opens the picker on click(); counted, so a test can say WHICH input the
+  // camera button opened — the one the pick will be delivered to.
+  click() { this.clicks = (this.clicks || 0) + 1; }
+  // The caret, as a textarea keeps it. Unset until something sets it, which is what a
+  // box nobody has touched reports on a phone too (app.js falls back to the end).
+  setSelectionRange(a, b) { this.selectionStart = a; this.selectionEnd = b; }
   focus() { this.focused = true; try { documentStub.activeElement = this; } catch {} }
   blur()  { this.focused = false; try { if (documentStub.activeElement === this) documentStub.activeElement = null; } catch {} }
   get firstChild() { return this.kids[0] || null; }
@@ -1986,6 +1992,183 @@ is('...and the indicator is still the last thing in the list', true, (() => {
      end.scrollTop === end.scrollHeight - end.clientHeight);
   fixtureOverride = null;
 }
+// ── several messages sent into a turn are SEVERAL bubbles, and stay that way ──
+// The chat drew one pending bubble, held in one slot, so a second send while the first
+// said `sending…` REPLACED it — and the first was still going to run, queued behind the
+// turn on the Mac. Reported from the phone as "I lose sight of the queued ones". api-fix is
+// mid-turn in the shipped fixture, which queues a send there exactly as bin/fleet-send does.
+const outboxBubs = () => app.all(n => n.className.split(/\s+/).includes('turn')
+  && !!n.find(k => k.className.split(/\s+/).includes('pending')));
+const outboxTexts = () => outboxBubs().map(t => t.firstChild.textContent).join(' | ');
+const queuedBubs = () => outboxBubs().filter(t => t.className.split(/\s+/).includes('queued'));
+const sendText = async (text) => {
+  typeInto(app.find(n => n.tag === 'textarea'), text);
+  click(btnWith(/^send$/));
+  await until(() => outboxTexts().includes(text) && queuedBubs().some(t => t.firstChild.textContent === text), 4000);
+};
+await pollTick();                                  // the shipped fixture again, not the last override
+await tick(20);
+is('the queue is measured on a session that is mid-turn', 'working',
+   ((await api.getGrid('acme-api')).cards.find(c => c.name === 'api-fix') || {}).status);
+await sendText('first follow-up for api-fix');
+is('a message sent into a running turn is drawn as queued', 'first follow-up for api-fix',
+   queuedBubs().map(t => t.firstChild.textContent).join(' | '));
+await sendText('second follow-up for api-fix');
+is('a SECOND one does not replace it: both, in the order sent',
+   'first follow-up for api-fix | second follow-up for api-fix', outboxTexts());
+is('...and both say they are queued', 2, queuedBubs().length);
+// The poll is the path that used to lose them: the transcript does not have them yet, and
+// nothing else said they existed. Now the session read carries the Mac's queue.
+await pollTick();
+await tick(20);
+is('...and a poll keeps both', 'first follow-up for api-fix | second follow-up for api-fix', outboxTexts());
+// Leaving the chat used to clear the slot outright.
+click(btnWith(/‹/));
+await until(onGrid, 4000);
+tap(cardTitled(/api-fix/));
+await until(() => !!chatBox(), 4000);
+is('...and so does leaving the chat and coming back', true,
+   await until(() => outboxTexts() === 'first follow-up for api-fix | second follow-up for api-fix', 4000));
+// ...and the Mac's queue is the source, not just this tab's memory: a reload, or another
+// device, sees the same two.
+is('the session read serves the queue itself', 'first follow-up for api-fix,second follow-up for api-fix',
+   ((await api.getSession('acme-api', 'api-fix')).queue || []).map(e => e.text).join(','));
+
+// ── a queued message can be taken back and edited ─────────────────────────
+// A tap on it pulls it out of the fleet's queue and into the composer. Both halves are
+// asserted, because either alone is the bug: a box holding it while the queue still holds
+// it is the same message sent twice once the edit goes out.
+typeInto(app.find(n => n.tag === 'textarea'), '');
+appmod.renderUnlessTyping();
+const firstQ = queuedBubs().find(t => t.firstChild.textContent === 'first follow-up for api-fix');
+click(firstQ && firstQ.firstChild);
+await until(() => draftOf() === 'first follow-up for api-fix', 4000);
+is('tapping a queued message puts it back in the composer', 'first follow-up for api-fix', draftOf());
+is('...and takes it out of the fleet\'s queue', 'second follow-up for api-fix',
+   ((await api.getSession('acme-api', 'api-fix')).queue || []).map(e => e.text).join(','));
+is('...and off the screen, leaving the other one', 'second follow-up for api-fix', outboxTexts());
+is('...with the caret in the box, ready to edit', true,
+   documentStub.activeElement === app.find(n => n.tag === 'textarea'));
+documentStub.activeElement && documentStub.activeElement.blur();
+typeInto(app.find(n => n.tag === 'textarea'), '');
+appmod.renderUnlessTyping();
+// THE RACE: the turn ended and the drain typed it in between the bubble being drawn and
+// the tap. It is no longer editable, and the owner is told so in words.
+api.fixtureDeliver('api-fix');
+const secondQ = queuedBubs().find(t => t.firstChild.textContent === 'second follow-up for api-fix');
+click(secondQ && secondQ.firstChild);
+is('a message already typed in is not editable, and says so', true,
+   await until(() => /already typed into api-fix — it can no longer be edited/.test(app.textContent), 4000));
+is('...and the composer is left alone', '', draftOf());
+documentStub.activeElement && documentStub.activeElement.blur();
+await pollTick();
+is('...and once the transcript has it, it is a real turn and not a bubble', true,
+   await until(() => outboxTexts() === '' && bubs().some(n => /second follow-up for api-fix/.test(n.textContent)), 4000));
+
+// ── interrupt is in the ⋯, for a worker AND for the lead ────────────────────
+// Pause was the only stop the phone had, a lead refuses it, and on a worker it parks the
+// session OFF. Interrupt ends the turn and nothing else.
+const sessionMore = () => btnWith(/^⋯$/);
+const interruptRow = () => sheetHost.find(n => n.tag === 'button' && /interrupt/.test(n.textContent));
+click(sessionMore());
+is('a worker\'s ⋯ offers interrupt', true, !!interruptRow());
+click(interruptRow());
+is('...which asks the fleet for an interrupt, not a pause', 'fleet_interrupt api-fix',
+   await until(() => /fleet_interrupt/.test((api.auditLog()[0] || {}).tool || ''), 4000)
+     ? `${api.auditLog()[0].tool} ${api.auditLog()[0].args.session}` : JSON.stringify(api.auditLog()[0]));
+is('...and the session is not parked by it', 'ready',
+   ((await api.getGrid('acme-api')).cards.find(c => c.name === 'api-fix') || {}).status);
+click(btnWith(/‹/));
+await until(onGrid, 4000);
+tap(cardTitled(/master/));
+await until(() => /the fleet's lead/.test(app.textContent), 4000);
+click(sessionMore());
+is('the LEAD\'s ⋯ offers interrupt too', true, !!interruptRow());
+is('...while still offering no pause', false,
+   !!sheetHost.find(n => n.tag === 'button' && /pause/.test(n.textContent)));
+click(interruptRow());
+is('...and interrupting the lead is not refused', 'fleet_interrupt master ok',
+   await until(() => (api.auditLog()[0] || {}).args && api.auditLog()[0].args.session === 'master', 4000)
+     ? `${api.auditLog()[0].tool} ${api.auditLog()[0].args.session} ${/^ok/.test(api.auditLog()[0].result) ? 'ok' : api.auditLog()[0].result}` : 'not sent');
+
+// ── the photo picker's input survives the screen being rebuilt under it ──────
+// A picked photo sometimes never uploaded: no POST /api/attach at all. The input the iOS
+// sheet belongs to lived inside the composer, and the 5s poll rebuilds the composer
+// whenever the box does not have focus — which it does not while the picker is up. So the
+// sheet routinely outlived its input. Driven as it happens: tap the camera, let a poll land
+// while the "sheet" is open, then deliver the pick.
+const fileInputs = () => documentStub.body.all(n => n.tag === 'input' && n.attrs.type === 'file');
+// FROM A SCREEN THE POLL CAN REPAINT. An open sheet pauses it, and a poll that never
+// repaints cannot detach anything — which passes the row below on the code it is about.
+closeSheetFromTest();
+documentStub.activeElement && documentStub.activeElement.blur();
+is('the picker is measured with the poll free to repaint', false, appmod.pollPaused());
+const cam =app.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('cam'));
+click(cam);
+const opened = fileInputs().find(n => n.clicks > 0);
+is('the camera button opens a file input', true, !!opened);
+is('...that still takes several photos at once', true, !!opened && 'multiple' in opened.attrs);
+is('...and only one exists, however often the screen is drawn', 1, (appmod.renderUnlessTyping(), fileInputs().length));
+await pollTick();
+appmod.renderUnlessTyping();
+await tick(20);
+is('a poll while the picker is open leaves its input in the document', true, !!opened && opened.isConnected);
+is('...outside the part of the screen render() rebuilds', false, !!opened && !!app.find(n => n === opened));
+// The pick arrives, on the input the sheet was opened from.
+opened.files = [{ name: 'shot.jpg', size: 10, type: 'image/jpeg' }];
+(opened.listeners.change || []).forEach(f => f({ type: 'change' }));
+is('...and the pick lands on the session it was picked for', true,
+   await until(() => !!app.find(n => n.className.split(/\s+/).includes('ph')), 4000));
+// ── a photo keeps the PLACE the caret was, and its path goes there on send ──────
+// It was its long attach path appended at the END of the message, after a sentence that
+// might have been about another photo. The desktop puts it where the cursor is; so does
+// this, without writing anything into the box — the strip shows the photo.
+// Null-safe, so a client without the export is a red ROW, not a crash that eats the rest.
+const anchorsOf = () => (appmod.photoAnchors ? appmod.photoAnchors() : ['missing']);
+const liveBox = () => app.find(n => n.tag === 'textarea');
+is('a picked photo writes nothing into the text', '', draftOf());
+is('...and keeps the place the caret was (an empty box: 0)', '0', anchorsOf().join(','));
+click(app.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('ph-x')));
+typeInto(liveBox(), 'compare with this one');
+liveBox().focus(); liveBox().setSelectionRange(8, 8);          // after "compare "
+click(app.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('cam')));
+opened.files = [{ name: 'second.jpg', size: 10, type: 'image/jpeg' }];
+(opened.listeners.change || []).forEach(f => f({ type: 'change' }));
+await until(() => anchorsOf().length === 1, 4000);
+is('a photo added mid-sentence remembers that place', '8', anchorsOf().join(','));
+is('...the text is still only what was typed', 'compare with this one', draftOf());
+is('...and the caret is back where it was, in the box', '8 true',
+   `${liveBox().selectionStart} ${documentStub.activeElement === liveBox()}`);
+// EDITS BEFORE IT MOVE IT; edits after it do not.
+liveBox().setSelectionRange(7, 7);
+typeInto(liveBox(), 'please compare with this one');            // "please " typed at the front
+is('text typed BEFORE the place moves it along', '15', anchorsOf().join(','));
+typeInto(liveBox(), 'please compare with this one, both');
+is('...text typed AFTER it leaves it alone', '15', anchorsOf().join(','));
+typeInto(liveBox(), 'compare with this one, both');
+is('...and text deleted before it brings it back', '8', anchorsOf().join(','));
+documentStub.activeElement && documentStub.activeElement.blur();
+click(app.find(n => n.tag === 'button' && n.className.split(/\s+/).includes('ph-x')));
+typeInto(liveBox(), '');
+appmod.renderUnlessTyping();
+// The one function where photos become text — every rule about the outgoing message lives there.
+is('on send the path goes in AT its place, not at the end', 'compare /f/a.jpg with this one',
+   appmod.messageWithPhotos('compare with this one', [{ at: 8, path: '/f/a.jpg' }]));
+is('...two at one place keep the order they were picked', 'compare /f/a.jpg /f/b.png with that',
+   appmod.messageWithPhotos('compare with that', [{ at: 8, path: '/f/a.jpg' }, { at: 8, path: '/f/b.png' }]));
+is('...mid-word, the path is set apart by spaces', 'ab /f/a.jpg cd',
+   appmod.messageWithPhotos('abcd', [{ at: 2, path: '/f/a.jpg' }]));
+// NEVER A LEADING `/` THE OWNER DID NOT TYPE: a prompt starting with `/` is a slash command.
+is('a photo placed before the first word does not start the message with /', 'photo: /f/a.jpg look at this',
+   appmod.messageWithPhotos('look at this', [{ at: 0, path: '/f/a.jpg' }]));
+is('...but a / the owner typed is his command, left alone', '/compact /f/a.jpg',
+   appmod.messageWithPhotos('/compact', [{ at: 8, path: '/f/a.jpg' }]));
+// The one tie the text alone cannot break: "a" typed into "aa". The caret says where it went.
+is('an edit is placed by the caret where the text alone is ambiguous', 3,
+   (appmod.anchorAfterEdit || (() => 'missing'))(2, 'aa', 'aaa', 1));
+is('...a replaced span that held the place leaves it after the replacement', 5,
+   (appmod.anchorAfterEdit || (() => 'missing'))(3, 'abcdef', 'abXYZf', 5));
+
 // ── the voice picker REPORTS what the device gave it ─────────────────────
 // AT THE END, AND ON THE GRID, because `, settings` is a verb of the grid and the projects
 // screen — the session screen has no settings button, so the sheet cannot be opened from

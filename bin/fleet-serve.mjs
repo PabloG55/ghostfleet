@@ -669,6 +669,9 @@ const TOOLS_ALLOWED = {
   fleet_read:            { fields: ['project', 'session', 'n'] },
   fleet_worktrees:       { fields: ['project'] },
   fleet_inbox:           { fields: ['project', 'all'] },
+  // What is still waiting in a session's queue. /api/session serves it decoded beside the
+  // transcript; served here too because every MCP tool is either served or refused by name.
+  fleet_queue:           { fields: ['project', 'session'] },
   fleet_projects:        { fields: [], noProject: true },
   // Every fleet at once, from files. A read, and one the Jarvis screen polls — so the
   // client always asks with peek:true (see /api/digest), and only Jarvis's own reads move
@@ -677,6 +680,11 @@ const TOOLS_ALLOWED = {
   fleet_send:            { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter', 'expect'], write: true, subject: 'session' },
   fleet_pause:           { fields: ['project', 'session'],                     write: true, subject: 'session' },
+  // The Escape the desk presses, and nothing else — the lead takes it too (see the planner).
+  fleet_interrupt:       { fields: ['project', 'session'],                     write: true, subject: 'session' },
+  // Taking an undelivered prompt back out of the queue, so the phone can edit it. A write:
+  // it removes a task somebody asked for, so it is audited like the send that queued it.
+  fleet_unqueue:         { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   fleet_resume:          { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   // Waking starts a process; parking and un-parking do not. Same write class as the rest of
   // the session verbs, no passkey: it restores a conversation the fleet itself put to sleep.
@@ -914,7 +922,16 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   // message, so a refusal has to arrive as text rather than as a status code alone.
   //   `queued: 'question'` when fleet-send held the prompt behind a prompt in the pane: it
   // succeeded, and it will not run until somebody answers, so the phone must not say "sent".
-  const queued = !refused && tool === 'fleet_send' && /queued #\d+ behind a question/.test(text) ? 'question' : undefined;
+  const queued = !refused && tool === 'fleet_send' && /queued #\d+ behind a question/.test(text) ? 'question'
+    : !refused && tool === 'fleet_send' && /queued #\d+/.test(text) ? 'turn' : undefined;
+  // TOO LATE TO EDIT IS NOT AN ERROR IN THE QUEUE, it is the answer: the drain typed it into
+  // the session between the phone drawing the bubble and the tap. The executor hands a
+  // non-zero exit back as text, so it is recognised by fleet-send's own sentence, and the
+  // phone keys on `delivered` rather than on the wording.
+  if (tool === 'fleet_unqueue' && !/^fleet-send: took it back out/m.test(text))
+    return { status: 409, json: { ok: false, delivered: /already been typed into the session/.test(text), text: text.replace(/^fleet-send: /, '') } };
+  if (tool === 'fleet_interrupt' && /could not interrupt|^fleet-pause: no session|^error:/m.test(text))
+    return { status: 409, json: { ok: false, text: text.replace(/^fleet-pause: /, '') } };
   return { status: refused ? 400 : 200, json: { ok: !refused, text, ...(queued ? { queued } : {}) } };
 }
 
@@ -1003,6 +1020,25 @@ async function sessionMessages(t, session, limit, before) {
       ? `this runtime's bin/fleet-read has no --json flag — it carries the per-message timestamp and role /api/session needs`
       : `fleet-read --json did not return JSON: ${text.trim().slice(0, 200)}` };
   }
+}
+
+// ── what is still WAITING to be delivered ──────────────────────────────────
+// Served beside the newest page of the transcript, because the phone draws them as the
+// bubbles after it: a prompt sent while the session was mid-turn sits in fleet-send's queue
+// until the turn ends, and the chat used to show one of them at most and then lose it. The
+// fleet's own nudges are left out — the owner did not write them and cannot edit them.
+//   A failure here is an EMPTY queue rather than a failed page: the transcript is the
+// screen, and a session asleep or on an agent with no queue simply has nothing waiting.
+async function sessionQueue(t, session) {
+  const out = await callToolAsync('fleet_queue', { project: t.name, session }, { timeout: 10000 });
+  const text = typeof out === 'string' ? out : '';
+  const q = [];
+  for (const line of text.split('\n')) {
+    const [at, b64, kind] = line.split('\t');
+    if (!b64 || !/^\d+$/.test(at) || kind === 'nudge') continue;
+    q.push({ at: Number(at), text: Buffer.from(b64, 'base64').toString('utf8') });
+  }
+  return q;
 }
 
 // ── the session's real pane ───────────────────────────────────────────────
@@ -2113,8 +2149,11 @@ function agentCatalogue() {
     const limit = raw === null ? 20 : Number(raw);
     if (!Number.isInteger(limit) || limit < 1 || limit > 500)
       return send(res, 400, { ok: false, text: 'limit must be an integer 1-500' });
-    const r = await sessionMessages(t, session, limit, url.searchParams.get('before'));
-    return r.error ? send(res, 502, { ok: false, text: r.error }) : send(res, 200, r.json);
+    const before = url.searchParams.get('before');
+    const [r, queue] = await Promise.all([sessionMessages(t, session, limit, before),
+                                          before ? null : sessionQueue(t, session)]);
+    if (r.error) return send(res, 502, { ok: false, text: r.error });
+    return send(res, 200, queue ? { ...r.json, queue } : r.json);
   }
 
   if (p === '/api/pane' && req.method === 'GET') {

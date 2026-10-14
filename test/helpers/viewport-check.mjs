@@ -462,6 +462,18 @@ const COMPOSER = () => {
     // Is `send` beside the box or below it — the question the reporter's photograph asks.
     goBeside: Math.round(r(go).top) < Math.round(r(box).bottom),
     vw: d.clientWidth,
+    // THE PLACEHOLDER, MEASURED IN THE BOX IT SITS IN. "message this session…" wrapped to
+    // two lines beside the camera, talk and send: measured here at 375px it was 167px of
+    // text for 165px of room, and at 390 it fit by 13px — less than the difference between
+    // this engine's font metrics and the phone's. Its own width against the box's inner
+    // width, from the box's own computed font.
+    ph: (() => {
+      const cs = getComputedStyle(box);
+      const g = document.createElement('canvas').getContext('2d');
+      g.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      return { text: Math.ceil(g.measureText(box.placeholder || '').width),
+               room: Math.floor(box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)) };
+    })(),
   };
 };
 
@@ -669,6 +681,14 @@ async function walk(w, h) {
   }
   await evaluate(() => { document.body.style.fontSize = ''; return null; });
   await settle('the text size going back to default');
+  // At the DEFAULT size only: on the accessibility rungs no placeholder fits a box this
+  // narrow, and that is not what was reported. With room to spare, because the phone's
+  // metrics are not this engine's — a quarter of the box is the margin asked for.
+  {
+    const c = await evaluate(COMPOSER);
+    is(`${w}px the composer placeholder fits on one line, with room`, true,
+       !!c && c.ph.text <= c.ph.room * 0.75 || `${c && c.ph.text}px of text in ${c && c.ph.room}px`);
+  }
   // A DRAFT THE HEIGHT OF A PARAGRAPH. render() rebuilds this box on every poll, so the
   // height has to be re-applied on render and not only on a keystroke.
   const grew = await evaluate(() => {

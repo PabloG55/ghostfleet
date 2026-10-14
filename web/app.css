@@ -749,6 +749,9 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 @keyframes gf-enter  { from { opacity: 0; transform: translateY(8px) } }
 @keyframes gf-sent   { from { opacity: 0; transform: translateY(28px) scale(.98) } }
 @keyframes gf-settle { from { opacity: .55 } }
+/* Queued behind the running turn: still yours to take back, so it reads as a thing you can
+ * tap — a dashed edge in the colour it already has, no new colour. */
+.chat .turn.queued .bub.pending { cursor: pointer; border: 1px dashed currentColor; }
 .chat .meta { font-size: 11px; color: var(--dim); padding: 0 .3em; }
 .chat .meta.r { align-self: flex-end; }
 .chat .meta.l { align-self: flex-start; }
@@ -801,7 +804,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * colour, so the visible control is a real <button> that clicks it. `display: none` rather
  * than an off-screen position — nothing needs to focus it, and an off-screen input is a
  * thing screen readers announce. */
-.composer .pick { display: none; }
+.pick { display: none; }
 /* Sized like the send button beside it, so the row reads as two controls and a box rather
  * than a box with something stuck to it. The SVG is em-sized for the same reason #82 gave:
  * it is the button's size, not a glyph's. */

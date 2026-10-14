@@ -52,8 +52,9 @@ const S = {
   unlockErr: '',        // why the last unlock failed, drawn on the lock screen until the next tap
   stale: 0,             // epoch of the payload on screen, when it came from the cache
   draft: '',            // the composer's text, kept across repaints (a poll must not eat it)
+  caret: null,          // where the caret was in it, last time the box said — a photo added now keeps that place
   photos: [],           // picked photos for a message: {id, key, name, thumb, state, path, err}
-  pending: null,        // { text, at } — sent, not yet back in the transcript
+  outbox: [],           // sent from here, not yet back in the transcript — see "the outbox"
   speaking: '',         // the text currently being read aloud, '' when silent
   jarvis: null,         // last /api/jarvis payload — null until asked, {present:false} when absent
   jarvisOn: null,       // the Mac's Jarvis switch (/api/projects jarvis_enabled): null = not told yet
@@ -207,12 +208,13 @@ async function refresh() {
       // looked for in the newest page, and conversation mode cannot wait on a frozen one.
       const owed = !!(S.talk && S.talk.phase === 'waiting');
       if ((S.view !== 'pane' && (!S.sess || S.sess.pages === 1)) || owed) {
+        const seq = ++sessSeq;
         const fresh = await api.getSession(S.project, S.session);
-        S.sess = { ...fresh, pages: 1 };
+        S.sess = { ...fresh, pages: 1, seq };
       }
-      // Whatever the transcript now says decides whether the optimistic bubble is still
-      // telling the truth.
-      reconcilePending();
+      // Whatever the transcript and the queue now say decides whether each bubble in the
+      // outbox is still telling the truth.
+      reconcileOutbox();
       talkAfterRefresh();
     }
     S.stale = 0;
@@ -666,7 +668,7 @@ const PROJECTS_HINT = 'tap a project to open it · remove is here, behind ⋯ ·
 function toProjects() {
   const n = navDepth;
   S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null;
-  S.pending = null; stopSpeaking(); S.jarvisMode = false; talkStop('');
+  stopSpeaking(); S.jarvisMode = false; talkStop('');
   navDepth = 0;
   if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
     try { history.go(-n); } catch {}    // popstate fires; popTo() sees screen==='projects'
@@ -1217,7 +1219,7 @@ function openJarvis() {
   S.jarvisMode = true; S.screen = 'session'; S.session = 'master';
   if (j && j.present) S.project = j.project;
   S.sess = null; S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.pending = null; stopSpeaking();
+  S.draft = ''; S.caret = null; stopSpeaking();
   scrollMem.delete('pane'); scrollMem.delete('chat');
   pushNav();
   render(); refresh();
@@ -1537,13 +1539,14 @@ async function endUtterance() {
   const prompt = `(spoken) ${text}`;
   const target = S.talk.target;
   S.talk = { phase: 'waiting', sent: prompt, seen: countSaid(prompt), since: Date.now(), gen: g, target };
-  S.pending = { text: prompt, at: Math.floor(Date.now() / 1000), seen: countSaid(prompt) };
+  const item = outboxAdd(prompt, target.project, target.session);
   scrollMem.delete('chat');
   render();
   say('checking');
   const r = await doVerb('fleet_send', { project: target.project, session: target.session, prompt }, { quiet: true });
+  if (r) outboxAcked(item, r); else outboxDrop(item);
   if (!talkLive(g)) return;
-  if (!r) { S.pending = null; talkStop(`that did not reach ${target.label}`); return; }
+  if (!r) { talkStop(`that did not reach ${target.label}`); return; }
   startTalkPoll();
 }
 function talkReopen() { if (!S.talk) return; S.talk.phase = 'opening'; render(); openMic(); }
@@ -1556,7 +1559,7 @@ function talkAfterRefresh() {
   if (!t || t.phase !== 'waiting') return;
   const max = TALK.WAIT_MAX_MS[t.target.jarvis ? 'jarvis' : 'session'];
   if (Date.now() - t.since > max) { talkStop(`no answer after ${Math.round(max / 60000)} minutes — conversation mode is off`); return; }
-  // The baseline FOLLOWS THE PAGE DOWN, as reconcilePending's does: /api/session serves a
+  // The baseline FOLLOWS THE PAGE DOWN, as reconcileOutbox's does: /api/session serves a
   // window that rolls, and an earlier identical turn scrolling out of it must not make the
   // new one look like no change at all.
   const said = countSaid(t.sent);
@@ -1666,7 +1669,7 @@ function openSession(name) {
   // tapped to answer "what is this worker doing right now", and the pane is the answer to
   // that question; a sticky preference would sometimes answer a different one.
   S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.pending = null; stopSpeaking();
+  S.draft = ''; S.caret = null; stopSpeaking();
   // Another session's offset means nothing in this one's pane or transcript.
   scrollMem.delete('pane'); scrollMem.delete('chat');
   pushNav();
@@ -1874,8 +1877,10 @@ function chatView(card) {
   }
   // Sent, not yet echoed by the transcript. Dimmed rather than absent: a chat where your
   // own message disappears for five seconds reads as a send that failed, and this app's
-  // whole job is telling you what is actually happening.
-  if (S.pending) wrap.append(arrived(turn(true, S.pending.text, 'sending…', true), null, 'pending|' + S.pending.at));
+  // whole job is telling you what is actually happening. EVERY ONE OF THEM, in order —
+  // see "the outbox".
+  outboxRows().forEach((row, i) => wrap.append(arrived(outboxTurn(row), null,
+    `pending|${row.item ? row.item.id : `q${i} ${row.text}`}`)));
   arrivedDone();
   // ── "it is working on it" ──────────────────────────────────────────────
   // Between the transcript echoing your prompt and the answer landing, this screen said
@@ -1893,7 +1898,7 @@ function chatView(card) {
 // because that is where the answer is going to appear, but every path that treats the tail
 // of this list as content has to miss it: read-aloud keys off msgKey() and only turn()
 // mints one, so there is no play control here and speakable() is never handed it; it is
-// not in S.sess.messages, so reconcilePending and the card's own preview line cannot see
+// not in S.sess.messages, so reconcileOutbox and the card's own preview line cannot see
 // it either. Sharing turn() would have given it all three for free, which is the reason
 // this is fifteen lines instead of one argument.
 //   THE POLL IS 5s AND THIS DOES NOT PRETEND OTHERWISE. A turn that starts and finishes
@@ -2016,16 +2021,75 @@ let photoSeq = 0, photoChain = Promise.resolve(), photoStripNode = null;
 const photoKey = (project = S.project, session = S.session) => `${project} ${session}`;
 const photosFor = (key = photoKey()) => S.photos.filter((p) => p.key === key);
 
-// The message the agent is handed: what was typed, then every photo's path, in order.
-//   PHOTOS ALONE GET A WORD IN FRONT. A message that is only paths begins with `/`, and a
-// prompt beginning with `/` is a slash command to the agent — the mod refuses to submit one
-// on the owner's behalf, so a photos-only send was refused every time. The word is not for
-// the agent; it is what keeps the first character from being a command prefix. Typed text
-// that itself begins with `/` is left alone: that one IS a command, and it is the owner's.
-export function messageWithPhotos(text, paths) {
-  const typed = String(text || '').trim(), ps = paths.filter(Boolean);
-  const lead = typed || (ps.length ? (ps.length > 1 ? 'photos:' : 'photo:') : '');
-  return [lead, ...ps].filter(Boolean).join(' ');
+// ── a photo keeps its PLACE in the text, and its path goes there on send ─────
+// A photo was its long attach path appended at the END of the message, after a sentence
+// that might have been about another photo. The desktop puts it where the cursor was, so
+// "compare <this> with <that>" says which is which; the phone does the same now, without
+// putting anything in the box — the strip shows the photos, and the text stays the owner's.
+//   EACH PHOTO REMEMBERS AN OFFSET into the draft, taken from the caret when it was added,
+// and the offset follows the edits made after it (anchorAfterEdit). The path is only ever
+// written in on the way out, by messageWithPhotos.
+//
+// ONE place where photos become text, so every rule about the outgoing message has one
+// place to live. A photo goes in at its offset (clamped to the text), set apart by a space
+// on either side; several at one offset keep the order they were picked in. A plain string
+// is a path with no place and is appended, as every photo once was.
+//   NEVER A LEADING `/` THE OWNER DID NOT TYPE. A prompt beginning with `/` is a slash
+// command to the agent, and the mod refuses to submit one on the owner's behalf — so a
+// message the photos made start with a path gets a word in front: the photos-only case,
+// and now also a photo placed before the first word. Typed text that itself begins with
+// `/` is left alone: that one IS a command, and it is the owner's.
+export function messageWithPhotos(text, photos) {
+  const typed = String(text || '');
+  let out = typed;
+  const placed = (photos || []).filter((p) => p && typeof p === 'object' && p.path);
+  const tail = (photos || []).filter((p) => typeof p === 'string' && p);
+  // Right to left, so inserting one never moves the offset of the next; within one offset,
+  // the LAST picked goes in first, which leaves them in picking order.
+  const order = placed.map((p, i) => ({ p, i })).sort((a, b) => (b.p.at || 0) - (a.p.at || 0) || b.i - a.i);
+  for (const { p } of order) {
+    const at = Math.max(0, Math.min(Number.isInteger(p.at) ? p.at : out.length, typed.length));
+    const before = out.slice(0, at), after = out.slice(at);
+    out = before + (before && !/\s$/.test(before) ? ' ' : '') + p.path + (after && !/^\s/.test(after) ? ' ' : '') + after;
+  }
+  out = [out.trim(), ...tail].filter(Boolean).join(' ');
+  if (out.startsWith('/') && !typed.trim().startsWith('/')) {
+    const n = placed.length + tail.length;
+    out = `${n > 1 ? 'photos:' : 'photo:'} ${out}`;
+  }
+  return out;
+}
+// WHERE AN OFFSET GOES WHEN THE TEXT CHANGES. One input event is one edit, so the edit is
+// found as the old and new text minus what they share at the front and at the back:
+// before the edit an offset stays, after it the offset moves by the change in length, and
+// inside a replaced span it lands at the end of the replacement. That is the whole rule,
+// and it needs no history of keystrokes.
+//   THE CARET BREAKS THE ONE TIE THIS HAS. Typing "a" into "aa" reads the same at every
+// position — the text alone cannot say where it went — so when the box reports its caret,
+// the shared tail is not allowed to run past it: the edit ends where the caret is. Without
+// a caret it still gives a consistent answer, just not always the right one in that case.
+export function anchorAfterEdit(at, prev, next, caret = null) {
+  prev = String(prev || ''); next = String(next || '');
+  if (prev === next || !Number.isInteger(at)) return at;
+  const max = Math.min(prev.length, next.length);
+  let pre = 0;
+  while (pre < max && prev[pre] === next[pre]) pre++;
+  let suf = 0;
+  while (suf < max && prev[prev.length - 1 - suf] === next[next.length - 1 - suf]) suf++;
+  if (Number.isInteger(caret)) suf = Math.min(suf, Math.max(0, next.length - caret));
+  pre = Math.min(pre, prev.length - suf, next.length - suf);
+  if (at <= pre) return at;
+  if (at >= prev.length - suf) return at + (next.length - prev.length);
+  return next.length - suf;
+}
+// The offsets this session's photos hold, for the suite.
+export function photoAnchors() { return photosFor().map((p) => p.at); }
+// A message pulled back out of the queue brings its photos, with offsets into the text it
+// was sent with. That text goes in FRONT of whatever is in the box, so the photos already
+// on the strip move along by its length plus the line break between them.
+function adoptPhotos(photos, key, shiftOthersBy = 0) {
+  if (shiftOthersBy) for (const q of photosFor(key)) if (Number.isInteger(q.at)) q.at += shiftOthersBy;
+  for (const p of photos) { p.key = key; if (!S.photos.includes(p)) S.photos.push(p); }
 }
 
 function photoThumb(file, n) {
@@ -2045,10 +2109,59 @@ function photoThumb(file, n) {
   return c;
 }
 
-function addPhotos(files, card) {
+// ── the photo picker's input, which the screen must not own ───────────────
+// A PICKED PHOTO SOMETIMES NEVER UPLOADED: no POST /api/attach in the server log, and
+// picking again worked. The input the iOS picker sheet belongs to was built inside
+// composer(), and render() rebuilds #app — on the 5s poll, on a toast, on a status change
+// — whenever the composer box does not have focus, which it does not while the picker is
+// up (the tap went to the camera button). So the sheet routinely outlived its input: the
+// render detached it and dropped the last reference to it (the old camera button's click
+// handler, thrown away in the same render). That much is measured — the suite holds the
+// picker open across a poll and watches the input leave the document. What WebKit then
+// does with a pick for a detached, unreferenced input is NOT observable from a desktop
+// engine (Chrome still fires its change); a pick arriving nowhere, with no request and no
+// error, is what the phone reported. "Sometimes" is the race: a pick quicker than one poll
+// interval survived it.
+//   ONE INPUT, IN <body>, OUTSIDE EVERYTHING render() REBUILDS, made once and reused. It
+// can no longer be detached by a repaint, so there is no window to pause the poll for.
+// Where its photos go is decided when the camera button is TAPPED and carried to the
+// change: the screen may have moved on by the time the sheet closes, and a photo picked for
+// one session must not land on another's composer.
+//   `multiple`, so the library lets several be ticked at once (addPhotos caps them).
+let pickNode = null, pickFor = null;
+export function pickInput() {
+  if (pickNode && pickNode.isConnected !== false) return pickNode;
+  const pick = el('input', { type: 'file', accept: 'image/*', multiple: '', class: 'pick',
+                             'aria-hidden': 'true', tabindex: '-1' });
+  pick.addEventListener('change', () => {
+    const files = pick.files ? [...pick.files] : [];
+    pick.value = '';                       // so picking the SAME photo twice still fires
+    const want = pickFor; pickFor = null;
+    if (!want || !files.length) return;
+    // Each photo keeps the place the caret was, and the caret goes back there, so the
+    // sentence about the photo can be typed straight on. The keyboard is iOS's call — see
+    // focusComposerAt.
+    addPhotos(files, cardOf(want.session), want);
+  });
+  document.body.appendChild(pick);
+  pickNode = pick;
+  return pick;
+}
+// WHERE THE CARET WAS, taken at the tap. The box may still have focus (then it says), or
+// the tap took it (then the blur recorded it in S.caret), and with neither the photo goes
+// at the end, which is where a caret in a box nobody touched is anyway.
+function openPicker() {
+  const box = composerNode;
+  const caret = isLive(box) && document.activeElement === box && Number.isInteger(box.selectionStart)
+    ? box.selectionStart : Number.isInteger(S.caret) ? S.caret : String(S.draft || '').length;
+  pickFor = { project: S.project, session: S.session, caret };
+  pickInput().click();
+}
+
+function addPhotos(files, card, want = { project: S.project, session: S.session }) {
   files = [...(files || [])].filter(Boolean);
   if (!files.length) return;
-  const key = photoKey(), want = { project: S.project, session: S.session };
+  const key = photoKey(want.project, want.session);
   const room = Math.max(0, api.ATTACH_PER_MESSAGE - photosFor(key).length);
   const take = files.slice(0, room);
   if (take.length < files.length) {
@@ -2058,13 +2171,19 @@ function addPhotos(files, card) {
       : `${api.ATTACH_PER_MESSAGE} photos per message, and this one has them — ${left} left out`, 'bad');
     renderUnlessTyping();
   }
+  // Where the caret was at the tap, clamped to the text as it is now (see messageWithPhotos).
+  const here = S.project === want.project && S.session === want.session;
+  const len = here ? String(S.draft || '').length : 0;
+  const at = Number.isInteger(want.caret) ? Math.max(0, Math.min(want.caret, len)) : len;
   for (const file of take) {
-    const item = { id: ++photoSeq, key, name: file.name || 'photo', state: 'up', path: '', err: '' };
+    const item = { id: ++photoSeq, key, at, name: file.name || 'photo', state: 'up', path: '', err: '' };
     item.thumb = photoThumb(file, photosFor(key).length + 1);
     S.photos.push(item);
     photoChain = photoChain.then(() => uploadPhoto(item, file, want, card));
   }
   paintPhotos();
+  // The caret back where it was, so the sentence carries on from the photo.
+  if (take.length && here) focusComposerAt(at);
 }
 
 async function uploadPhoto(item, file, want, card) {
@@ -2122,7 +2241,8 @@ function msgKey(m) { return String(m.role || '') + '|' + String(m.ts || ''); }
 // history you opened, and twenty bubbles rising at once is a screen shaking, not news.
 // Only the tail can enter: a page of older turns loaded at the top is new to the set and
 // old to the reader, so a key counts only when it lands after the last one already drawn.
-//   The pending bubble enters as SENT (it rises from the composer); the turn that later
+//   An outbox bubble enters as SENT (it rises from the composer), once — keyed by its outbox
+// entry, so going from sending to queued is not a second arrival; the turn that later
 // replaces it SETTLES from the pending dim instead of entering again, which is the
 // difference between a message that was delivered and one that appeared twice.
 //   A REBUILD MID-ANIMATION CONTINUES IT. Two renders can land milliseconds apart — the
@@ -2132,7 +2252,7 @@ function msgKey(m) { return String(m.role || '') + '|' + String(m.ts || ''); }
 // back with a negative delay (--gf-in) for the time already played, and picks up where the
 // last element left off instead of starting over or snapping to the end.
 const MOVE_MS = 260;
-const drawn = { who: '', keys: new Set(), seeded: false, pend: '', past: false, moving: new Map() };
+const drawn = { who: '', keys: new Set(), seeded: false, pend: new Set(), past: false, moving: new Map() };
 function moving(node, cls, at) {
   try {
     node.classList.add(...cls);
@@ -2142,7 +2262,7 @@ function moving(node, cls, at) {
 }
 function arrived(node, m, key) {
   const who = `${S.project} ${S.session} ${S.jarvisMode ? 'j' : ''}`;
-  if (drawn.who !== who) Object.assign(drawn, { who, keys: new Set(), seeded: false, pend: '', past: false, moving: new Map() });
+  if (drawn.who !== who) Object.assign(drawn, { who, keys: new Set(), seeded: false, pend: new Set(), past: false, moving: new Map() });
   if (!key) return node;
   if (drawn.keys.has(key)) {
     drawn.past = true;
@@ -2153,7 +2273,7 @@ function arrived(node, m, key) {
   }
   drawn.keys.add(key);
   if (!drawn.seeded || !drawn.past) return node;
-  const settle = !!m && m.role === 'user' && !!drawn.pend && String(m.text || '').trim() === drawn.pend;
+  const settle = !!m && m.role === 'user' && drawn.pend.has(String(m.text || '').trim());
   const cls = settle ? ['settle'] : key.startsWith('pending|') ? ['enter', 'sent'] : ['enter'];
   drawn.moving.set(key, { cls, at: Date.now() });
   return moving(node, cls, 0);
@@ -2163,7 +2283,8 @@ function arrived(node, m, key) {
 function arrivedDone() {
   drawn.seeded = drawn.keys.size > 0;
   drawn.past = false;
-  drawn.pend = S.pending ? String(S.pending.text || '').trim() : '';
+  // Every outbox bubble on screen, not one: the turn that replaces ANY of them settles.
+  drawn.pend = new Set(outboxRows().map((r) => String(r.text || '').trim()));
 }
 
 // A compaction or a run of tool calls, as one folded card. FOLDED BY DEFAULT and REMEMBERED
@@ -2394,7 +2515,7 @@ function growComposer(box) {
 // had no effect above 120px and the box stopped growing for a reason not written anywhere.
 const COMPOSER_MAX_PX = 120;
 function composer(card, opts = {}) {
-  const box = el('textarea', { rows: '1', placeholder: 'message this session…',
+  const box = el('textarea', { rows: '1', placeholder: 'message…',
                                autocapitalize: 'sentences', spellcheck: 'false' });
   box.value = S.draft || '';
   composerNode = box;      // pollPaused() compares document.activeElement against this
@@ -2417,8 +2538,16 @@ function composer(card, opts = {}) {
   // trigger — which is also the only half of this a desktop engine can be made to prove.
   box.addEventListener('input', () => {
     if (!isLive(box)) return;
+    const prev = S.draft || '';
     S.draft = box.value; growComposer(box);
+    const caret = Number.isInteger(box.selectionStart) ? box.selectionStart : null;
+    if (caret != null) S.caret = caret;
+    // Every photo's place follows the edit (anchorAfterEdit).
+    for (const p of photosFor()) p.at = anchorAfterEdit(p.at, prev, S.draft, caret);
   });
+  // Where the caret was when the box let go — the camera tap is what usually takes it, and
+  // that is the place the photo keeps (openPicker).
+  box.addEventListener('blur', () => { if (isLive(box) && Number.isInteger(box.selectionStart)) S.caret = box.selectionStart; });
   // ...AND ON EVERY RENDER, not only on a keystroke. render() rebuilds this element from
   // scratch on the 5s poll, on a toast, on a view switch — with rows="1" and the draft
   // poured back in — so a two-line message came back as one line and a clipped sliver of
@@ -2434,21 +2563,15 @@ function composer(card, opts = {}) {
   // The picker is a hidden <input type=file>; the visible control is a button, so it can
   // be styled and sized like the one beside it. accept="image/*" is what makes iOS offer
   // the camera and the library rather than a file browser.
-  // `multiple`, so the library lets several be ticked at once (addPhotos caps them).
-  const pick = el('input', { type: 'file', accept: 'image/*', multiple: '', class: 'pick' });
-  pick.addEventListener('change', () => {
-    const files = pick.files ? [...pick.files] : [];
-    pick.value = '';                       // so picking the SAME photo twice still fires
-    addPhotos(files, card);
-  });
+  // It is NOT built here any more — see pickInput() for why the input outlives the composer.
   const uploading = photosFor().some((p) => p.state === 'up');
-  const cam = btn('', () => pick.click(), 'cam' + (uploading ? ' busy' : ''));
+  const cam = btn('', () => openPicker(), 'cam' + (uploading ? ' busy' : ''));
   cam.textContent = '';
   cam.appendChild(cameraIcon());
   cam.setAttribute('aria-label', 'attach photos');
   cam.setAttribute('title', `attach photos (up to ${api.ATTACH_PER_MESSAGE})`);
   photoStripNode = el('div', { class: 'photos' }, photoTiles());
-  const kids = [photoStripNode, pick, cam, box];
+  const kids = [photoStripNode, cam, box];
   // THE COMPOSER ALSO TALKS — Jarvis's and every session's, the same button in the same
   // place. One more control, the same size as the two beside it, and it is the whole of
   // conversation mode's UI besides the band above: tap once and the conversation runs itself
@@ -2471,16 +2594,16 @@ async function sendDraft() {
   if (waiting) { toast(`${waiting} photo${waiting > 1 ? 's are' : ' is'} still uploading — send again when ${waiting > 1 ? 'they are' : 'it is'} ready`); renderUnlessTyping(); return; }
   const failed = mine.filter((p) => p.state === 'bad').length;
   if (failed) { toast(`${failed} photo${failed > 1 ? 's' : ''} did not upload — remove ${failed > 1 ? 'them' : 'it'} (×) or pick again`, 'bad'); renderUnlessTyping(); return; }
-  const text = messageWithPhotos(S.draft, mine.map((p) => p.path));
+  const text = messageWithPhotos(S.draft, mine);
   if (!text) return;
   // The photos leave with the message, and come back if the send does not go.
   S.photos = S.photos.filter((p) => !mine.includes(p));
   const typed = S.draft;
-  // Optimistic, and reconciled against the transcript rather than trusted: reconcilePending
+  // Optimistic, and reconciled against the transcript rather than trusted: reconcileOutbox
   // clears this when the real message comes back, and gives up on it after a while so a
   // failed send cannot sit there looking sent forever.
   // ...AND HOW MANY TIMES THE TRANSCRIPT ALREADY SAID IT. The only id a sent prompt has is
-  // its own text (see reconcilePending), and matching on text alone means the SECOND time
+  // its own text (see reconcileOutbox), and matching on text alone means the SECOND time
   // you send the same thing — "run the suite", "check again", the two words this app is
   // used for most — the FIRST one already sitting in the transcript answers for it. The
   // bubble stops saying `sending…` before the message has gone anywhere, which is the same
@@ -2488,46 +2611,227 @@ async function sendDraft() {
   //   A count, not a timestamp. The obvious fix is "only match a message newer than this
   // one", but `at` is the PHONE's clock and `m.ts` is the Mac's, and the two are as close
   // as whatever synced them last. Counting occurrences needs no clock at all.
-  S.pending = { text, at: Math.floor(Date.now() / 1000), seen: countSaid(text) };
-  S.draft = '';
+  const item = outboxAdd(text, S.project, S.session, { typed, photos: mine });
+  S.draft = ''; S.caret = null;
   scrollMem.delete('chat');          // a message you just sent belongs on screen
   render();
-  const r = await doVerb('fleet_send', { project: S.project, session: S.session, prompt: text }, { quiet: true });
+  const r = await doVerb('fleet_send', { project: item.project, session: item.session, prompt: text }, { quiet: true });
+  if (r) { outboxAcked(item, r); renderUnlessTyping(); return; }
+  outboxDrop(item);                              // doVerb already said why
   // A SEND THAT DID NOT ARRIVE GIVES EVERYTHING BACK — the words as well as the photos. The
-  // daemon now answers a send fleet-send could not deliver with ok:false (it used to be a
-  // 200 with "not delivered" in the text), so this is the path that runs when the mod
-  // refuses a prompt; restoring the draft only when photos rode along lost what was typed.
-  if (!r) {                                      // doVerb already said why
-    S.pending = null;
-    if (mine.length) S.photos = [...mine, ...S.photos];
-    if (!S.draft) S.draft = typed;
-    render();
-  }
+  // daemon answers a send fleet-send could not deliver with ok:false, so this is the path
+  // that runs when the mod refuses a prompt.
+  if (mine.length) S.photos = [...mine, ...S.photos];
+  if (!S.draft) S.draft = typed;
+  render();
 }
-// The pending bubble goes when the transcript has it — matched on the text, because the
-// only id a sent prompt has is what it said. PENDING_TTL is the give-up: a send that
-// errored has already cleared this, but one that vanished for any other reason must not
-// leave a permanent "sending…" on a screen whose whole purpose is being accurate.
+// ── the outbox ────────────────────────────────────────────────────────────
+// EVERY MESSAGE SENT FROM HERE THAT THE TRANSCRIPT HAS NOT SHOWN YET, in the order sent.
+// It used to be ONE slot, S.pending, and a second send while the first said `sending…`
+// replaced it — so a message the fleet had queued behind a long turn vanished from the
+// chat and the owner lost sight of it, while it was still going to run. fleet-send keeps a
+// real queue (bin/fleet-send, "the queue"), so this keeps one entry per send and says which
+// of three things each one is:
+//   sending  the POST is in flight; nothing is known yet
+//   queued   fleet-send wrote it to the session's queue: it runs as its own turn after the
+//            one in progress, and until then it can be TAKEN BACK and edited
+//   typed    it has been typed into the session — delivered at once, or drained from the
+//            queue since. Not editable any more, and said so on a tap
+// An entry leaves when the transcript shows it (see countSaid for why that is a count).
+//   KEYED BY PROJECT AND SESSION, and kept across screens. Leaving the chat used to clear
+// the slot, which is the other way the owner lost sight of a queued message; coming back
+// now finds every entry where it was, and /api/session's `queue` re-supplies the queued
+// ones even after a reload, since those live on the Mac and not here.
+let outSeq = 0, sessSeq = 0;
+const outHere = (o) => o.project === S.project && o.session === S.session;
+function outboxAdd(text, project, session, extra = {}) {
+  const item = { id: ++outSeq, project, session, text, at: Math.floor(Date.now() / 1000),
+                 seen: countSaid(text), state: 'sending', ackSeq: 0, typedAt: 0, ...extra };
+  S.outbox.push(item);
+  return item;
+}
+// `queued` comes from fleet-serve, which reads fleet-send's own sentence for it. ackSeq is
+// the newest transcript read STARTED so far: only a queue snapshot from a read started
+// after this one can say the entry has left the queue, because an older one never had it.
+function outboxAcked(item, r) {
+  if (!S.outbox.includes(item)) return;
+  if (r && r.queued) item.state = 'queued';
+  else { item.state = 'typed'; item.typedAt = Math.floor(Date.now() / 1000); }
+  item.ackSeq = sessSeq;
+}
+function outboxDrop(item) { S.outbox = S.outbox.filter((o) => o !== item); }
+
+// What the chat draws after the transcript, in the order things will happen: what has
+// been typed in already, then the queue in the order it will drain, then what is still in
+// the air. The queue is the MAC'S list when there is one — so a message queued from
+// another device, or before a reload, is on screen too — and each local entry claims the
+// queue row with its text, so one message is never drawn twice.
+export function outboxRows() {
+  const mine = S.outbox.filter(outHere);
+  const q = S.sess && Array.isArray(S.sess.queue) ? S.sess.queue : null;
+  const rows = mine.filter((o) => o.state === 'typed').map((o) => ({ text: o.text, state: 'typed', item: o }));
+  const waiting = mine.filter((o) => o.state === 'queued');
+  const claimed = new Set();
+  for (const e of q || []) {
+    const o = waiting.find((w) => !claimed.has(w) && w.text.trim() === String(e.text).trim());
+    if (o) claimed.add(o);
+    rows.push({ text: o ? o.text : String(e.text), state: 'queued', item: o || null });
+  }
+  for (const o of waiting) if (!claimed.has(o)) rows.push({ text: o.text, state: 'queued', item: o });
+  for (const o of mine) if (o.state === 'sending') rows.push({ text: o.text, state: 'sending', item: o });
+  return rows;
+}
+
+// The bubble goes when the transcript has it — matched on the text, because the only id a
+// sent prompt has is what it said. PENDING_TTL is the give-up for one that was TYPED IN and
+// never showed up: a send that errored has already left, but one that vanished for any
+// other reason must not leave a permanent bubble on a screen whose whole purpose is being
+// accurate. A queued entry has no give-up — it can wait behind an hour-long turn, and the
+// queue itself says when it has gone.
 const PENDING_TTL = 180;
-// How many of the transcript's user turns say exactly this. The pending bubble is cleared
-// by the count GOING UP, not by the text being present — see sendDraft for why.
+// How many of the transcript's user turns say exactly this. An entry is cleared by the
+// count GOING UP, not by the text being present — see sendDraft for why.
 function countSaid(text) {
   const want = String(text || '').trim();
   const ms = (S.sess && S.sess.messages) || [];
   return ms.filter(m => m.role === 'user' && String(m.text || '').trim() === want).length;
 }
-function reconcilePending() {
-  if (!S.pending) return;
-  const said = countSaid(S.pending.text);
-  // The baseline FOLLOWS THE TRANSCRIPT DOWN. /api/session serves a page, and a long
-  // conversation rolls — so an identical turn that was in the transcript when the count was
-  // taken can be gone from it by the time the new one lands, and an arrival would then read
-  // as no change at all and sit on `sending…` until the 180s give-up. Counting relative to
-  // what is on screen now is what makes "one more of these appeared" the question, whichever
-  // direction the window moved.
-  if (said < (S.pending.seen || 0)) S.pending.seen = said;
-  if (said > (S.pending.seen || 0)) { S.pending = null; return; }
-  if (Math.floor(Date.now() / 1000) - S.pending.at > PENDING_TTL) S.pending = null;
+function reconcileOutbox() {
+  const mine = S.outbox.filter(outHere);
+  if (!mine.length) return;
+  const now = Math.floor(Date.now() / 1000);
+  const gone = new Set();
+  // SAME TEXT, IN ORDER. Two "run the suite"s sent back to back both start from the same
+  // count, so the first arrival is the first one's and only a second arrival is the
+  // second's — `claimedSoFar` is what keeps one echo from clearing both.
+  const byText = new Map();
+  for (const o of mine) {
+    const k = o.text.trim();
+    if (!byText.has(k)) byText.set(k, []);
+    byText.get(k).push(o);
+  }
+  for (const [k, list] of byText) {
+    const said = countSaid(k);
+    let claimedSoFar = 0;
+    for (const o of list) {
+      // The baseline FOLLOWS THE TRANSCRIPT DOWN. /api/session serves a page, and a long
+      // conversation rolls — so an identical turn that was in the transcript when the count
+      // was taken can be gone from it by the time the new one lands, and an arrival would
+      // then read as no change at all. Counting relative to what is on screen now is what
+      // makes "one more of these appeared" the question, whichever way the window moved.
+      if (said < o.seen) o.seen = said;
+      if (said >= o.seen + claimedSoFar + 1) { gone.add(o); claimedSoFar++; }
+      else break;
+    }
+  }
+  // OUT OF THE QUEUE AND NOT YET IN THE TRANSCRIPT is "typed": the drain has delivered it.
+  // Only a snapshot from a read that started after the ack can say so (see outboxAcked),
+  // and a daemon too old to send `queue` says nothing — the entry then waits for the
+  // transcript, which is what it did before there was a queue to read.
+  const q = S.sess && Array.isArray(S.sess.queue) && (S.sess.seq || 0) > 0 ? S.sess.queue : null;
+  if (q) {
+    const left = q.map((e) => String(e.text).trim());
+    for (const o of mine) {
+      if (gone.has(o) || o.state !== 'queued' || S.sess.seq <= o.ackSeq) continue;
+      const i = left.indexOf(o.text.trim());
+      if (i >= 0) { left.splice(i, 1); continue; }
+      o.state = 'typed'; o.typedAt = now;
+    }
+  }
+  for (const o of mine) if (o.state === 'typed' && now - o.typedAt > PENDING_TTL) gone.add(o);
+  if (gone.size) S.outbox = S.outbox.filter((o) => !gone.has(o));
+}
+
+// One outbox row as a bubble. A tap is the edit: a queued one comes back into the composer,
+// anything else says why it cannot.
+function outboxTurn(row) {
+  const label = row.state === 'queued' ? 'queued · tap to edit'
+              : row.state === 'typed' ? 'delivered' : 'sending…';
+  const t = turn(true, row.text, label, true);
+  t.classList.add(row.state);
+  const bub = t.firstChild;
+  if (bub) {
+    bub.setAttribute('role', 'button');
+    bub.setAttribute('aria-label', `${label}: ${row.text.slice(0, 80)}`);
+    bub.addEventListener('click', () => editOutbox(row, t));
+  }
+  return t;
+}
+
+// PULL A QUEUED MESSAGE BACK INTO THE COMPOSER. It is taken out of fleet-send's queue first
+// (fleet_unqueue), and only then put in the box: the other order would leave the same
+// message both in the box and on its way to the session, and the edited copy would run as
+// a second turn. Already delivered is the one answer that cannot be fixed from here, so it
+// is said in words rather than as an error.
+//   What comes back is what was TYPED, with its photos back on the strip — the paths the
+// send appended are the photos, not part of what the owner wrote. A queued message this
+// phone did not send (another device, or before a reload) comes back as its whole text.
+//   THE BOX IS FOCUSED IN THE TAP, BEFORE THE NETWORK. WebKit raises the keyboard for a
+// focus() only inside the gesture that asked for it, and an `await` ends the gesture — so a
+// focus after fleet_unqueue answers would give the caret and no keyboard. Focused first,
+// the keyboard is already up when the text lands, and the text is patched into THAT box
+// rather than re-rendered: a render replaces the focused node and lowers the keyboard
+// (typingNow), which would undo the one thing the early focus was for.
+export async function editOutbox(row, node) {
+  const who = S.session;
+  if (row.state === 'sending') { toast('still sending — tap it again once it says queued'); render(); return; }
+  if (row.state === 'typed') {
+    toast(`already typed into ${who} — it can no longer be edited`, 'bad'); render(); return;
+  }
+  const project = S.project, session = S.session;
+  focusComposerAt();
+  try {
+    await api.verb('fleet_unqueue', { project, session, prompt: row.text });
+  } catch (e) {
+    if (e instanceof api.AuthError) { lock(); return; }
+    if (e && e.body && e.body.delivered) {
+      if (row.item) { row.item.state = 'typed'; row.item.typedAt = Math.floor(Date.now() / 1000); }
+      toast(`already typed into ${who} — it can no longer be edited`, 'bad');
+    } else toast(String((e && e.message) || e), 'bad');
+    render();
+    return;
+  }
+  if (row.item) outboxDrop(row.item);
+  if (S.sess && Array.isArray(S.sess.queue)) {
+    const i = S.sess.queue.findIndex((e) => String(e.text).trim() === row.text.trim());
+    if (i >= 0) S.sess.queue = [...S.sess.queue.slice(0, i), ...S.sess.queue.slice(i + 1)];
+  }
+  const it = row.item;
+  const back = it && it.typed !== undefined ? it.typed : row.text;
+  const photos = (it && it.photos) || [];
+  if (S.project !== project || S.session !== session) {           // they moved on meanwhile
+    if (photos.length) adoptPhotos(photos, photoKey(project, session));
+    return;
+  }
+  if (photos.length) adoptPhotos(photos, photoKey(), S.draft ? back.length + 1 : 0);
+  S.draft = S.draft ? `${back}\n${S.draft}` : back;
+  const box = composerNode;
+  if (isLive(box) && document.activeElement === box) {
+    box.value = S.draft;
+    growComposer(box);
+    focusComposerAt();
+    if (node && node.remove) node.remove();
+    paintPhotos();
+  } else {
+    render();
+    focusComposerAt();
+  }
+}
+
+// FOCUS THE BOX WITH THE CARET WHERE IT BELONGS — where it was when a photo was added, or at the end of
+// a message pulled back to edit — so whatever was just put in it can be carried on from. Whether the KEYBOARD comes up is iOS's decision, not this function's: WebKit raises
+// it for a focus() inside a user gesture and not otherwise. editOutbox calls this inside the
+// tap, so it does; after the photo picker closes, `change` is not a gesture, so the box
+// gets focus and the caret and the keyboard waits for a tap on the box. No call a page can
+// make changes that.
+function focusComposerAt(pos = null) {
+  const box = composerNode;
+  if (!isLive(box)) return;
+  try { box.focus(); } catch {}
+  const len = String(box.value || '').length;
+  const n = Number.isInteger(pos) ? Math.max(0, Math.min(pos, len)) : len;
+  try { if (typeof box.setSelectionRange === 'function') box.setSelectionRange(n, n); } catch {}
+  S.caret = n;
 }
 
 // ── everything you can DO to a session, in one sheet ────────────────────────
@@ -2574,6 +2878,12 @@ function sheetActions(name = S.session) {
     // fleet_answer — keystrokes into a dialog — not a prompt, which would queue behind the
     // block instead of clearing it. It is the first row for that reason.
     btn('answer keys', go(() => sheetAnswer(name))),
+    // THE ESCAPE THE DESK PRESSES, and on the lead too. The only way to stop a runaway turn
+    // from here was `pause`, which a lead refuses and which a worker answers by going OFF
+    // until somebody resumes it — so the owner watching the lead go the wrong way had no
+    // button at all. This ends the turn and nothing else: not parked, not stopped, still
+    // taking work (fleet-pause --interrupt). A parked session has no turn to end.
+    parked ? null : btn('esc interrupt turn', go(() => interruptSession(name))),
     lead && !parked ? null
       : btn(parked ? 'P resume' : 'p pause', go(() => (parked ? resumeSession(name) : pauseSession(name)))),
     btn('s sched', go(() => sheetSchedule(name))),
@@ -2587,7 +2897,7 @@ function sheetActions(name = S.session) {
   ].filter(Boolean);
   openSheet(sheet('actions', name, [
     el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
-    lead ? el('p', { text: "the lead cannot be stopped, reclaimed, renamed or paused — every project needs one, and its checkout is the repo itself" }) : null,
+    lead ? el('p', { text: "the lead cannot be stopped, reclaimed, renamed or paused — every project needs one, and its checkout is the repo itself. Interrupting its turn is fine: it stays on" }) : null,
     el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
   ].filter(Boolean)), false);
 }
@@ -3288,8 +3598,8 @@ function popTo() {
   if (S.sheet) { closeSheet(); return; }
   if (S.confirm) { cancel(); return; }
   // Jarvis was opened from Projects and sits one level under it, whatever its session is.
-  if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; stopSpeaking(); }
-  else if (S.screen === 'session') { talkStop(''); S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; stopSpeaking(); }
+  if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
+  else if (S.screen === 'session') { talkStop(''); S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
   // A SUB-GRID IS ONE LEVEL DOWN, so back from it is the top grid, not the projects list —
   // the same ` the desk uses to go up.
   else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; }
@@ -3600,6 +3910,10 @@ function leadGuard(name, what) {
 // is. RESUME is deliberately NOT guarded: the recovery direction has to stay open.
 function pauseSession(name) {
   if (name && !leadGuard(name, 'paused')) doVerb('fleet_pause', { project: S.project, session: name });
+}
+// Not guarded for the lead, unlike pause: an interrupt never turns anything off.
+function interruptSession(name) {
+  if (name) doVerb('fleet_interrupt', { project: S.project, session: name });
 }
 function resumeSession(name) {
   if (name) doVerb('fleet_resume', { project: S.project, session: name });
