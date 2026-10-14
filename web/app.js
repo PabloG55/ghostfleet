@@ -1323,7 +1323,8 @@ function jarvisScreen() {
   ])];
   const nb = notifyBandEl();
   if (nb) out.push(nb);
-  if (!j) { out.push(el('div', { class: 'hint', text: 'asking the Mac about Jarvis…' })); return out; }
+  // What it waits for is a chat (chatView below), so it waits in that shape.
+  if (!j) { out.push(el('div', { class: 'chat', 'aria-busy': 'true' }, skeletonChat())); return out; }
   if (!j.present) {
     out.push(el('div', { class: 'hint jarvis-none' }, [
       el('p', { text: 'There is no Jarvis on this Mac yet.' }),
@@ -1817,7 +1818,7 @@ function chatView(card) {
     ]));
   }
   // A session opened afresh draws its history as history: forget what the last visit drew.
-  if (!s) { drawn.who = ''; wrap.append(el('div', { class: 'hint', text: 'reading the transcript…' })); return wrap; }
+  if (!s) { drawn.who = ''; wrap.setAttribute('aria-busy', 'true'); wrap.append(...skeletonChat()); return wrap; }
   // A session that has not taken a turn comes back with total 0 and a `note` — fleet-read's
   // own words for a terminal: "…is live but has no transcript yet — Send it work: fleet-send
   // -s … <prompt>". The API keeps the note, because "no messages" and "no transcript yet" are
@@ -3143,7 +3144,7 @@ function paneView() {
     // seconds would bury the app in its own error messages.
     box.append(el('div', { class: 'hint', text: S.paneErr }));
   } else if (!S.pane) {
-    box.append(el('div', { class: 'hint', text: 'capturing the pane…' }));
+    box.append(skeletonPane());
   } else if (S.pane.note) {
     box.append(el('div', { class: 'hint', text: S.pane.note }));
   } else {
@@ -3651,6 +3652,22 @@ function skeletonCards(n) {
     ]));
   }
   return out;
+}
+
+// The same wait, in the shape of a conversation: bubbles on the side each speaker's will
+// land, built from the real .bub classes so the radii and surfaces are the bubbles' own and
+// the bars are the cards' bars. Only ever drawn while there is NO payload yet — the poll
+// replaces S.sess with the next answer and never clears it, so a redraw every five seconds
+// finds a payload and cannot bring this back over the messages.
+const SKEL_CHAT = [['agent', 'b1', 3], ['user', 'b2', 1], ['agent', 'b3', 2], ['user', 'b4', 1], ['agent', 'b5', 2]];
+function skeletonChat() {
+  return SKEL_CHAT.map(([who, w, n]) => el('div', { class: `bub ${who} skel ${w}`, 'aria-hidden': 'true' },
+    Array.from({ length: n }, (_, i) => el('div', { class: `skel-bar ${i === n - 1 && n > 1 ? 'w2' : 'full'}` }))));
+}
+// ...and of a terminal: lines of uneven length where the capture will be drawn.
+function skeletonPane() {
+  return el('div', { class: 'pane-skel skel', 'aria-hidden': 'true' },
+    ['w2', 'w3', 'full', 'w1', 'w2', 'w3', 'w1', 'w2'].map(w => el('div', { class: `skel-bar ${w}` })));
 }
 
 function cardEl(m, h, idx) {

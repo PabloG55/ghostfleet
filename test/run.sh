@@ -16494,6 +16494,11 @@ if [ -d "$ROOT/web" ]; then
     done < "$VPO/out"
   fi
   rm -rf "$VPO"
+  # ...and the loading text cannot come back, with or without a browser to look in. The
+  # in-engine rows above hold the first answer and look at the skeleton; this one is for the
+  # machine with no Chrome, where they skip: the client must not say it is reading.
+  is "the phone waits in skeletons, never in a 'reading…' line" "" \
+     "$(grep -noE "'(reading the transcript|capturing the pane|asking the Mac about Jarvis)[^']*'" "$ROOT/web/app.js" | paste -sd' ' -)"
 
   # ── the card's title is a tap target, not a dead zone ─────────────────────
   # wire() set `dragging` on any press of the grip and pointerup then returned without ever

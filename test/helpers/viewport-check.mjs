@@ -340,7 +340,7 @@ const SEEN = {
   cards:   () => [...document.querySelectorAll('#app .card .c-name')]
                    .some(n => !/^\+/.test(n.textContent.trim())),
   // NOT just the composer. The session screen draws its shell immediately and fills the
-  // chat with `reading the transcript…` until S.sess arrives, so "the composer exists" is
+  // chat with skeleton bubbles until S.sess arrives (a line of text, once), so "the composer exists" is
   // true against a screen with no conversation in it — and the rows below it park the
   // reader at scrollTop 3000, which a chat holding one hint line cannot reach. That read
   // as a 3000-vs-0 failure on some runs and passed on others: a FLAKE I introduced and
@@ -348,7 +348,7 @@ const SEEN = {
   // message, so it exists only once the transcript came back and was drawn.
   session: () => !!document.querySelector('.composer textarea')
                  && document.querySelectorAll('#app > .chat .turn').length > 0,
-  // Same shape: .pane-box holds `capturing the pane…` until S.pane lands, and the <pre>
+  // Same shape: .pane-box holds skeleton lines until S.pane lands, and the <pre>
   // with the rendered terminal in it is what says the payload arrived.
   pane:    () => { const p = document.querySelector('.paneview .pane-box pre.pane');
                    return !!p && (p.textContent || '').trim().length > 0; },
@@ -754,6 +754,118 @@ async function bigText() {
   is('...with nothing past the right edge', '', past.join(','));
 }
 
+// ── the composer placeholder, at every phone width and every text size ────────
+// walk() measures it at 390 and 320 only, and only at the default size. The widths between
+// are where the phones are (375 the small ones, 390/393 the common ones, 430 the large), and
+// the text ladder is the owner's real setting: the box's font is pinned to 16px and its
+// buttons to 14px, so a larger iOS text size should move NEITHER the text nor the room —
+// which is a claim, and this is where it is measured. Same 15% margin as walk()'s, for the
+// same reason: two engines' metrics for one string differ by more than a fit-by-a-hair.
+async function placeholderSweep() {
+  for (const [w, h] of [[320, 568], [375, 667], [390, 844], [393, 852], [430, 932]]) {
+    await viewport(w, h);
+    await fresh();
+    await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+    await tapCard('acme-api'); await seeingCard('api-fix');
+    await tapCard('api-fix'); await seeing('session', 'the session screen');
+    const bad = [];
+    for (const fs of [16, 24, 30, 38, 44, 53]) {
+      await evaluate((fs) => { document.body.style.fontSize = fs + 'px'; return null; }, fs);
+      await settle(`the placeholder at ${fs}px`);
+      const c = await evaluate(COMPOSER);
+      if (!c || !(c.ph.text <= c.ph.room * 0.85)) bad.push(`${fs}: ${c && c.ph.text}px of text in ${c && c.ph.room}px`);
+    }
+    await evaluate(() => { document.body.style.fontSize = ''; return null; });
+    is(`${w}px the composer placeholder fits on one line at every text size`, '', bad.join('; '));
+  }
+}
+
+// ── a session that is still loading waits in the shape of a session ──────────
+// The chat said "reading the transcript…" and the pane "capturing the pane…" until their
+// first answer: a line of text in an empty column, which the messages then replaced by
+// pushing it away. They are skeletons now, and this holds the first answer back to look at
+// them — in the PAGE, because the service worker answers a fixture it has seen from its
+// cache and a hold at this server would hold nothing. Then it lets the answer through and
+// waits for a real poll (counted, not slept for) to prove the skeleton never comes back.
+const HELD_TEXT = /reading the transcript|capturing the pane|asking the Mac|loading…|reading…/i;
+async function loadingSkeletons() {
+  await viewport(390, 844);
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+  await tapCard('acme-api'); await seeingCard('api-fix');
+  await evaluate(() => {
+    const real = window.fetch.bind(window);
+    window.__gfHold = true; window.__gfHeld = []; window.__gfSessReads = 0;
+    window.fetch = (u, o) => {
+      const s = String(u);
+      if (/fixtures\/session-/.test(s)) window.__gfSessReads++;
+      if (window.__gfHold && /fixtures\/(session|pane)-/.test(s)) return new Promise(res => window.__gfHeld.push(() => res(real(u, o))));
+      return real(u, o);
+    };
+    return null;
+  });
+  // Not seeing('session'): that waits for a rendered message, which is exactly what is held.
+  await tapCard('api-fix'); await waitFor('the session shell', () => !!document.querySelector('.composer textarea'));
+  await waitFor('the chat skeleton', () => document.querySelectorAll('.chat .bub.skel').length > 0);
+  const shot = async (name) => {
+    if (!process.env.VP_SHOT_DIR) return;
+    const { data } = await call('Page.captureScreenshot', { format: 'png' });
+    fs.writeFileSync(path.join(process.env.VP_SHOT_DIR, name + '.png'), Buffer.from(data, 'base64'));
+  };
+  const chat = () => evaluate((src) => {
+    const re = new RegExp(src, 'i');
+    const c = document.querySelector('#app .chat');
+    const sk = [...document.querySelectorAll('.chat .bub.skel')];
+    const real = document.querySelector('.chat .bub.agent:not(.skel)');
+    const vw = document.documentElement.clientWidth;
+    return {
+      n: sk.length,
+      // a transcript's rhythm: speakers alternate, the agent's on the left, the owner's right
+      sides: sk.map(b => (b.getBoundingClientRect().left < vw / 4 ? 'l' : 'r') + (b.classList.contains('user') ? 'u' : 'a')).join(','),
+      radius: sk[0] ? getComputedStyle(sk[0]).borderBottomLeftRadius + '/' + getComputedStyle(sk[0]).borderTopLeftRadius : '',
+      bars: sk.every(b => b.querySelector('.skel-bar') && b.getBoundingClientRect().height > 20),
+      words: c ? c.innerText.trim() : '(no chat)',
+      text: re.test(document.querySelector('#app').innerText),
+      real: !!real,
+      anim: sk[0] ? getComputedStyle(sk[0].querySelector('.skel-bar')).animationName : '',
+    };
+  }, HELD_TEXT.source);
+  const held = await chat();
+  await shot('chat-loading-390');
+  is('loading chat: skeleton bubbles stand where the messages will', true, held.n >= 4 || `${held.n} bubbles`);
+  is('...alternating agent left, owner right', 'la,ru,la,ru,la', held.sides);
+  is("...with the agent bubble's own corners", '4px/16px', held.radius);
+  is('...each a bubble with bars in it, not an empty sliver', true, held.bars);
+  is('...and no loading text anywhere on the screen', false, held.text);
+  is('...nor any words in the chat at all', '', held.words);
+  is('...and it shimmers', 'gf-skel', held.anim);
+  await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  is('...but not for a reader who asked for less motion', 'none', (await chat()).anim);
+  await call('Emulation.setEmulatedMedia', { features: [] });
+  // the pane, held the same way
+  await evaluate(() => { const b = [...document.querySelectorAll('.seg button')].find(x => x.textContent.trim() === 'pane'); if (b) b.click(); return null; });
+  await waitFor('the pane skeleton', () => !!document.querySelector('.pane-box .pane-skel'));
+  await shot('pane-loading-390');
+  const pane = await evaluate((src) => ({
+    bars: document.querySelectorAll('.pane-box .pane-skel .skel-bar').length,
+    text: new RegExp(src, 'i').test(document.querySelector('#app').innerText),
+  }), HELD_TEXT.source);
+  is('loading pane: skeleton lines where the capture will be', true, pane.bars >= 5 || `${pane.bars} lines`);
+  is('...and no loading text', false, pane.text);
+  await evaluate(() => { const b = [...document.querySelectorAll('.seg button')].find(x => x.textContent.trim() === 'chat'); if (b) b.click(); return null; });
+  // ...and let the answers through
+  await evaluate(() => { window.__gfHold = false; window.__gfHeld.splice(0).forEach(f => f()); return null; });
+  await waitFor('the first messages', () => !!document.querySelector('.chat .bub.agent:not(.skel)'));
+  const landed = await chat();
+  is('...the messages replace it', 0, landed.n);
+  await shot('chat-loaded-390');
+  const reads = await evaluate(() => window.__gfSessReads);
+  await waitFor('a poll of the transcript', (r) => window.__gfSessReads > r, 15000, reads);
+  await sleep(300);
+  const polled = await chat();
+  is('...and a poll redraw never brings it back', '0 skeleton, messages shown', `${polled.n} skeleton, messages ${polled.real ? 'shown' : 'gone'}`);
+}
+
 // ── the keyboard, which is what was actually being reported ───────────────
 // "the scroll happens when I click on the text box to type, then the send gets bigger or I
 // don't know". Every assertion in this file until now was for the keyboard-CLOSED case: it
@@ -1011,6 +1123,8 @@ try {
   // than one track — a different layout, and so a different chance to overflow.
   await walk(1024, 768);
   await bigText();
+  await placeholderSweep();
+  await loadingSkeletons();
   await sheetCeiling();
   await keyboard(390, 844);
   await keyboard(320, 568, { indicator: false });

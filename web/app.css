@@ -203,9 +203,17 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
   height: .85em; border-radius: 3px; margin: .35em 0;
   background: rgba(255, 255, 255, .07);
 }
-.skel-bar.w1 { width: 45% } .skel-bar.w2 { width: 72% } .skel-bar.w3 { width: 58% }
+.skel-bar.w1 { width: 45% } .skel-bar.w2 { width: 72% } .skel-bar.w3 { width: 58% } .skel-bar.full { width: 100% }
+/* A conversation's wait: the bubble is the real one, so it keeps its own radii and surface;
+ * only its width is set, because an empty bubble has none of its own. Alternating sides
+ * and lengths, as a transcript does. */
+.chat .bub.skel { pointer-events: none; }
+.chat .bub.skel .skel-bar { margin: .3em 0; }
+.chat .bub.skel.b1 { width: 74% } .chat .bub.skel.b2 { width: 42% } .chat .bub.skel.b3 { width: 63% }
+.chat .bub.skel.b4 { width: 34% } .chat .bub.skel.b5 { width: 56% }
+.pane-skel { padding: .5em .6em; }
 @media (prefers-reduced-motion: no-preference) {
-  .card.skel .skel-bar { animation: gf-skel 1.1s ease-in-out infinite; }
+  .skel .skel-bar { animation: gf-skel 1.1s ease-in-out infinite; }
 }
 @keyframes gf-skel { 0%, 100% { opacity: .55 } 50% { opacity: 1 } }
 /* The scrolling region. `min-height: 0` is the whole trick — a flex child's default

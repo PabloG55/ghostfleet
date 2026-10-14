@@ -1826,7 +1826,10 @@ click(btnWith(/‹/));
 is('back on the grid for the scroll checks', true, await until(onGrid, 4000));
 tap(cardTitled(/api-fix/));
 is('...and api-fix opens', true, await until(() => !!chatBox(), 4000));
-await until(() => { const b = chatBox(); return !!b && b.scrollHeight > b.clientHeight; }, 4000);
+// A MESSAGE, not a tall box: the chat waits in skeleton bubbles that can overflow it on
+// their own, so "taller than its box" came true before the transcript did and the rows
+// below measured the skeleton.
+await until(() => { const b = chatBox(); return !!b && !!b.find(n => n.className.split(/\s+/).includes('turn')) && b.scrollHeight > b.clientHeight; }, 4000);
 {
   const box = chatBox();
   is('the chat is a scroller', true, !!box && box.scrollHeight > box.clientHeight);
