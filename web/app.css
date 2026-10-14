@@ -351,12 +351,11 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
   color: var(--fg);
 }
 .card.dim { opacity: .65; }
-.card .c-top { display: flex; align-items: baseline; gap: .5em; min-width: 0;
-               /* The title row is the drag grip, and it is still exactly ONE line: it
-                * alone swallows the vertical pan, so a drag anywhere else on the card
-                * still scrolls the list. Widening this is how reorder starts fighting
-                * the scroll. */
-               touch-action: none; }
+.card .c-top { display: flex; align-items: baseline; gap: .5em; min-width: 0; }
+/* The title row is the drag grip, and it is still exactly ONE line: it alone swallows the
+ * vertical pan, so a drag anywhere else on the card still scrolls the list. Widening this
+ * is how reorder starts fighting the scroll. `.t` is set only on a card that reorders. */
+.card .c-top.t { touch-action: none; }
 .card .c-num { color: var(--dim); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
 .card .c-name { font-weight: 600; font-size: 16px; color: var(--white);
                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

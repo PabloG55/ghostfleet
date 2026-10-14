@@ -617,8 +617,14 @@ function projectsProps() {
     notify: notifySpec(),
     confirm: confirmSpec(),
     // ── the seam ────────────────────────────────────────────────────────────────────
-    // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
-    // the list and is told nothing else about them; see web/src/screens.jsx.
+    // Real DOM, built by cardEl(). Preact places these into the list and is told nothing
+    // else about them; see web/src/screens.jsx.
+    //   A PROJECT CARD TAKES ONE GESTURE: A TAP. It used to take the grid's four, and on a
+    // phone two of them fire on the way to a scroll — a thumb that rests 600ms is a
+    // long-press, and one that lands on the title and moves a row is a drag — so ordinary
+    // scrolling raised a `remove` confirm, or a reorder the server then refused with a red
+    // banner. Removing a project is a decision, so it lives behind `⋯ → remove` and nowhere
+    // else; reordering the list is the desk's job and has no phone path at all.
     // NULL, NOT EMPTY, is the difference between "still asking" and "you have no projects".
     // An empty list is a real answer and gets the first-run path; a null one has not been
     // answered yet and gets the wait.
@@ -627,8 +633,6 @@ function projectsProps() {
         // i is the GLOBAL index, on purpose
         cardEl(G.projectModel(p, i, i === S.sel), {
           tap: () => openProject(p.name),
-          longPress: () => { S.confirm = { kind: 'project', name: p.name }; render(); },
-          reorder: d => reorderProject(p.name, d),
         }, i)),
       cardEl(G.addProjectModel(S.sel === projects.length), {
         tap: () => sheetAddProject(),
@@ -654,7 +658,7 @@ function projectsProps() {
     toast: S.toast,
   };
 }
-const PROJECTS_HINT = 'tap a project · long-press to remove it from the list · drag its title to reorder';
+const PROJECTS_HINT = 'tap a project to open it · remove is here, behind ⋯ · reorder the list at the desk';
 // `Q` / Ctrl-p jumps straight to Projects from anywhere, which is neither forward nor
 // back. Unwinding our own entries keeps the stack honest: pushing here would leave the
 // gesture retracing grid → session screens you have already left, and leaving the stack
@@ -677,30 +681,6 @@ function openProject(name) {
   scrollMem.delete('grid');
   pushNav();                          // so the back gesture returns to Projects, not out
   render(); refresh();
-}
-
-// The projects list reorders the same way the grid does, and for the same reason: the
-// digit on a project card is what `Ctrl-f <p>` counts, so the order has to persist.
-async function reorderProject(name, delta) {
-  const names = (S.projects || []).map(p => p.name);
-  const i = names.indexOf(name);
-  if (i < 0 || !delta) return;
-  // ONE PRESS IS ONE VISIBLE STEP, which means moving PAST the hidden ones. This writes
-  // the shared order file that the desk then counts, and inside a tab the neighbour above
-  // may be in another profile: a single-step swap would either look like nothing happened
-  // (it traded places with a card you cannot see) or like a jump of two. The gesture has
-  // to mean what it looks like, so the target is the next VISIBLE neighbour and the
-  // project lands directly beside it in the real order.
-  //   In the `all` tab every neighbour is visible, so this is exactly the single step it
-  // has always been — one path, not a special case.
-  const vis = visibleProjects().map(v => v.i);
-  const at = vis.indexOf(i);
-  const to = at + (delta > 0 ? 1 : -1);
-  if (at < 0 || to < 0 || to >= vis.length) return;
-  const ni = vis[to];
-  names.splice(ni, 0, ...names.splice(i, 1));
-  S.sel = ni;
-  await doVerb('fleet_project_order', { order: names }, { quiet: true });
 }
 
 // ── the grid ──────────────────────────────────────────────────────────────
@@ -774,8 +754,14 @@ function gridProps() {
     strip: stripTiles(counts),
     confirm: confirmSpec(),
     // ── the seam ────────────────────────────────────────────────────────────────────
-    // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
-    // the list and is told nothing else about them; see web/src/screens.jsx.
+    // Real DOM, built by cardEl(). Preact places these into the list and is told nothing
+    // else about them; see web/src/screens.jsx.
+    //   A PROJECT CARD TAKES ONE GESTURE: A TAP. It used to take the grid's four, and on a
+    // phone two of them fire on the way to a scroll — a thumb that rests 600ms is a
+    // long-press, and one that lands on the title and moves a row is a drag — so ordinary
+    // scrolling raised a `remove` confirm, or a reorder the server then refused with a red
+    // banner. Removing a project is a decision, so it lives behind `⋯ → remove` and nowhere
+    // else; reordering the list is the desk's job and has no phone path at all.
     // Same rule as the projects screen: a null grid has not been answered yet, an empty one
     // has. `its` always carries the `+ new session` card, so length alone cannot tell them
     // apart — ask S.grid itself.
@@ -3425,7 +3411,9 @@ function cardEl(m, h, idx) {
   // reorders, and a vertical drag anywhere else on the card still scrolls the list. That
   // one-line grip is the reason reorder does not fight the page scroll, so it did not get
   // wider just because the card got a nicer surface.
-  top.classList.add('t');
+  // ONLY A CARD THAT REORDERS HAS A GRIP. `.t` is what turns the pan off (app.css), so a
+  // card without a reorder handler — a project — keeps scrolling from its title too.
+  if (h.reorder) top.classList.add('t');
   if (idx >= 0) d.dataset.idx = String(idx);
   wire(d, h, idx);
   return d;
@@ -3500,7 +3488,9 @@ function wire(node, h, idx) {
       if (dx < 0 && h.swipeLeft) h.swipeLeft(); else if (dx > 0 && h.swipeRight) h.swipeRight();
       return;
     }
-    if (Math.hypot(dx, dy) <= MOVE_SLOP && Date.now() - t0 < LONG_PRESS && h.tap) { h.tap(); return; }
+    // `!travelled` for the reason the grip branch above gives: a finger that scrolled and
+    // came back ends where it started, and a scroll must never open anything.
+    if (!travelled && Math.hypot(dx, dy) <= MOVE_SLOP && Date.now() - t0 < LONG_PRESS && h.tap) { h.tap(); return; }
     // A touch that only moved the selection (a short scroll, a cancelled gesture) still
     // has to redraw the footer: `x` means "kill" over a session and "remove wt" over a
     // free worktree, and the TUI names which one it means RIGHT NOW rather than making
@@ -4607,8 +4597,9 @@ function onKey(e) {
     case 'p': if (it.card) pauseSession(it.card.name); break;
     case 'P': if (it.card) resumeSession(it.card.name); break;
     case 'x': case 'X':
-      if (S.screen === 'projects') { if (it.project) { S.confirm = { kind: 'project', name: it.project.name }; render(); } }
-      else if (it.card) askKill(it.card.name);
+      // Not on the projects screen: there `remove` is reached through `⋯` only (see the
+      // seam in the projects spec), and a key would be a second way in.
+      if (it.card) askKill(it.card.name);
       else if (it.freeWt) askRemoveWorktree(it.freeWt);
       break;
     case ',': sheetSettings(); break;

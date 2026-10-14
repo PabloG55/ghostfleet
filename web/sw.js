@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 35a0ecb307fb
+// CLIENT-HASH: 4ac1423b2939
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -349,7 +349,7 @@
 // message no longer begins with `/`; and a compaction or a run of tool calls draws as a
 // small folded card instead of the owner's own bubble. A phone still on v66 draws those two
 // as plain left-hand bubbles (never as the owner's), and the daemon fronts its leading photo path.
-const VERSION = 'ghostfleet-v67';
+const VERSION = 'ghostfleet-v68';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

@@ -819,33 +819,20 @@ await tick(5);
 is('a blank profile lands in work, where the desk puts it', true, shows('gamma'));
 is('...numbered where it really is', 3, numberOf('gamma'));
 
-// REORDER INSIDE A TAB MOVES PAST THE HIDDEN ONE. This writes the shared order file the
-// desk counts, so a single-step swap inside a filter would trade places with a card you
-// cannot see: from the reader's side, nothing happened. The discriminator is the CURSOR —
-// moving `gamma` up lands it beside `alpha` at index 0 and selects a card that is on
-// screen, where a single step would select the hidden `beta` and leave nothing selected.
 const selectedCard = () => {
   const c = app.all(n => n.className.split(/\s+/).includes('sel'))[0];
   return c ? partOf(c, 'c-name') : '';
 };
+// A PROJECT CARD HAS NO GRIP, in a tab or out of one. Reordering projects used to be a
+// drag by the title, and inside a filter it had to step past the hidden neighbour; the
+// phone no longer reorders projects at all (a thumb landing on the title and moving was a
+// reorder the server refused with a red banner), so the case that needed care is gone and
+// what is left to hold is that nothing on the card can start one. `t` is the grip's class,
+// and it is the thing that turns the list's own scroll off under the title.
 {
-  // By its name element, like every other card lookup here — and the grip is still the
-  // TITLE ROW, which is what carries `t`. It moved from the drawn top border to `.c-top`
-  // when the cards stopped being art, and it is still exactly one line, which is the
-  // property that keeps a reorder drag from fighting the list's own scroll.
   const card = cardNamed('gamma');
-  const grip = card && card.find(n => n.className.split(/\s+/).includes('t'));
-  is('the hidden-neighbour case is set up', true, !!grip);
-  if (grip) {
-    // THE REAL GESTURE: a drag by the title line, one row up. `reorder` is wired to the
-    // pointer handlers and to nothing else — the phone has no ⇧hjkl — so firing anything
-    // else here would be a test of a code path that does not exist.
-    const ev = (y) => ({ clientX: 0, clientY: y, target: grip, pointerId: 1, preventDefault() {} });
-    (card.listeners.pointerdown || []).forEach(f => f(ev(0)));
-    (card.listeners.pointerup || []).forEach(f => f(ev(-card.getBoundingClientRect().height)));
-    await tick(30);
-  }
-  is('...and the cursor lands on a card that is on screen', true, /alpha|gamma/.test(selectedCard()));
+  is('a project card in a tab is drawn', true, !!card);
+  is('...and carries no reorder grip', false, !!(card && card.find(n => n.className.split(/\s+/).includes('t'))));
 }
 // A TAB THAT NO LONGER MATCHES ANYTHING. The projects file is edited between opens and a
 // profile is free text, so the stored tab can name something that is simply not there any
