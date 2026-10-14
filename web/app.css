@@ -966,6 +966,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * and "the passkey is unavailable, and here is why". `.sheet .warn` existed; this one did
  * not, so both were drawn in body grey next to everything else. */
 .lock .warn { color: var(--yellow); }
+.lock .err { color: var(--red); }
 
 /* The per-message play control (turn()), on every message's .meta row. Sized off the
  * meta text rather than the button scale: this sits beside a timestamp, not in the verb

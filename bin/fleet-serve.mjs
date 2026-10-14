@@ -105,7 +105,7 @@ const DEFAULTS = {
   session_ttl: 900,          // §5: an IDLE window — every authenticated request pushes it out
   confirm_ttl: 120,          // a destructive action confirmed now, not twenty minutes ago
   enroll_ttl: 900,
-  rate: { window: 60, read: 240, write: 30, auth: 10 },
+  rate: { window: 60, read: 240, write: 30, auth: 10, challenge: 60 },
   push: null,                // filled from PUSH_DEFAULTS below — see the push section
   clients: [],
 };
@@ -467,20 +467,39 @@ function sweep() {
 }
 
 // Fixed-window counters. §5 asks for rate limiting "because a token that leaks should be
-// slow to exploit", and the three windows are sized for what each one protects: `auth` is
-// the one an attacker with a stolen bearer token grinds against, `write` bounds how much
-// damage a live session can do per minute, `read` is generous because the phone polls.
-function rateOk(name, key, res) {
-  const c = loadConfig(), limit = c.rate[name] ?? 60, win = c.rate.window || 60;
+// slow to exploit", and the windows are sized for what each one protects: `auth` is the
+// one somebody guessing at a passkey or an enrolment code grinds against, `write` bounds
+// how much damage a live session can do per minute, `read` is generous because the phone
+// polls, and `challenge` only caps a table of single-use random strings.
+function rateBucket(name, key) {
+  const c = loadConfig(), win = c.rate.window || 60;
   const k = `${name}:${key}`, t = now();
   let b = buckets.get(k);
   if (!b || b.resetAt <= t) { b = { n: 0, resetAt: t + win }; buckets.set(k, b); }
+  return { b, limit: c.rate[name] ?? 60, t };
+}
+function rateOk(name, key, res) {
+  const { b, limit, t } = rateBucket(name, key);
   b.n++;
   if (b.n > limit) {
     res.setHeader('Retry-After', String(b.resetAt - t));
     return false;
   }
   return true;
+}
+// THE `auth` BUCKET COUNTS FAILURES, NOT ATTEMPTS. It used to count every request to
+// /api/auth/* — challenges included — at 10 a minute, so a phone whose ceremony never
+// reached the sensor spent the owner's whole minute fetching challenges it could not use:
+// measured, twenty GET /api/auth/challenge and not one assert, then nine 429s in a row, and
+// the owner locked out by tapping. A challenge proves nothing and costs one map entry, so
+// it has a bucket of its own; what a brute force actually needs is many WRONG answers, so
+// only a refused register or assert spends this one (counted where the response finishes,
+// below). A full bucket still refuses the next attempt before it is looked at.
+function rateRoom(name, key, res) {
+  const { b, limit, t } = rateBucket(name, key);
+  if (b.n < limit) return true;
+  res.setHeader('Retry-After', String(b.resetAt - t));
+  return false;
 }
 
 const CHALLENGE_TTL = 120;
@@ -1763,7 +1782,13 @@ async function api(req, res, url, ip) {
   if (req.method === 'POST' && req.headers.origin && !(c.origins || []).includes(req.headers.origin))
     return send(res, 403, { ok: false, text: `origin '${req.headers.origin}' is not configured` });
 
-  if (!rateOk(OPEN.has(p) ? 'auth' : (req.method === 'POST' ? 'write' : 'read'), ip, res))
+  if (p === '/api/auth/challenge') {
+    if (!rateOk('challenge', ip, res)) return send(res, 429, { ok: false, text: 'rate limited' });
+  } else if (OPEN.has(p)) {
+    if (!rateRoom('auth', ip, res))
+      return send(res, 429, { ok: false, text: 'too many refused passkey attempts — wait a minute' });
+    res.on('finish', () => { if (res.statusCode >= 400) rateBucket('auth', ip).b.n++; });
+  } else if (!rateOk(req.method === 'POST' ? 'write' : 'read', ip, res))
     return send(res, 429, { ok: false, text: 'rate limited' });
 
   if (!OPEN.has(p)) {

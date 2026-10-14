@@ -112,10 +112,10 @@ async function challenge() {
              user: j.user || { id: 'ghostfleet', name: 'ghostfleet' },
              // Whether the terminal has a window open, and for whom. It travels with the
              // challenge because that is the one request a cold client is allowed to make.
-             enrolling: !!j.enrolling };
+             enrolling: !!j.enrolling, ttl: Number(j.ttl) || 120 };
   }
   const c = new Uint8Array(32); crypto.getRandomValues(c);
-  return { challenge: c, rpId: location.hostname, enrolling: true,
+  return { challenge: c, rpId: location.hostname, enrolling: true, ttl: 120,
            user: { id: 'ghostfleet-fixtures', name: 'ghostfleet (fixtures)' } };
 }
 
@@ -253,17 +253,161 @@ export async function resume() {
   }
 }
 
+// ── UNLOCK: THE SENSOR IS ASKED FOR INSIDE THE TAP, OR NOT AT ALL ──────────
+// WebKit only shows the passkey sheet to a call made with TRANSIENT USER ACTIVATION — inside
+// the tap's own handler. This used to be `await challenge()` and THEN
+// navigator.credentials.get(): a network round trip between the tap and the call, so by the
+// time the call was made the tap no longer counted, and get() rejected with NotAllowedError
+// without ever showing a sheet. Nothing reached the server after the challenge, which is the
+// whole signature in the daemon's log: a GET /api/auth/challenge per tap and not one POST
+// /api/auth/assert. And because the error was never drawn, the screen did nothing, so the
+// owner tapped again — each tap one more challenge — until the auth rate limit answered 429
+// to every one of them.
+//   So the challenge is fetched BEFORE the tap (prepare(), from the lock screen), refreshed
+// before the server forgets it, and open() calls get() synchronously: no await between the
+// tap and the sheet. A challenge get() never signed is still good — the server consumes one
+// only when an assertion is posted — so a refused or cancelled attempt keeps it for the
+// next tap instead of fetching another.
+let prepped = null;       // { challenge, rpId, exp } — exp in ms, client clock
+let prepping = null;      // the fetch in flight, shared by every caller
+let prepErr = null;       // the last prepare() failure, so a render cannot re-ask in a loop
+let prepTimer = null;
+let wanted = false;       // the lock screen is up and wants a challenge kept warm
+let inflight = null;      // the one unlock ceremony allowed at a time
+const PREP_MARGIN_MS = 20_000;   // refreshed this long before the server's TTL runs out
+
+export function prepared() { return !!prepped && prepped.exp - PREP_MARGIN_MS > Date.now(); }
+export function preparing() { return !!prepping; }
+export function prepareError() { return prepErr; }
+export function unlocking() { return !!inflight; }
+
+export function prepare() {
+  wanted = true;
+  if (prepared()) return Promise.resolve(true);
+  if (prepping) return prepping;
+  prepErr = null;
+  prepping = (async () => {
+    try {
+      const c = await challenge();
+      prepped = { challenge: c.challenge, rpId: c.rpId, exp: Date.now() + c.ttl * 1000 };
+      clearTimeout(prepTimer);
+      // Kept warm for as long as the lock screen is up. A hidden page is skipped: iOS
+      // suspends it anyway, and the resume path asks again.
+      prepTimer = setTimeout(() => {
+        if (!wanted) return;
+        if (typeof document !== 'undefined' && document.hidden) return;
+        prepare().catch(() => {});
+      }, Math.max(1000, c.ttl * 1000 - PREP_MARGIN_MS));
+      // A browser timer is a number; node's (the suite drives this file) would keep a test
+      // process alive for as long as the lock screen "wanted" a challenge.
+      if (prepTimer && typeof prepTimer.unref === 'function') prepTimer.unref();
+      return true;
+    } catch (e) { prepErr = e; throw e; }
+    finally { prepping = null; }
+  })();
+  return prepping;
+}
+// Unlocked: nothing to keep warm.
+export function release() {
+  wanted = false; prepped = null; prepErr = null; autoArmed = false;
+  clearTimeout(prepTimer); prepTimer = null;
+}
+
 // No live session to resume: assert, then hold the token the API will send.
-export async function open() {
-  return ceremony(async () => {
-    const a = await assertOnce('open');
-    if (api.mode() === 'server') {
-      await api.authPost('assert', a);
-    } else {
-      api.setToken('fixture-stub', Date.now() / 1000 + TOKEN_TTL);
+//   CALLED FROM THE TAP HANDLER WITHOUT AN AWAIT IN FRONT OF IT, and it makes the get()
+// call before its own first await — that is the whole fix. A second tap while a ceremony
+// is running gets the SAME promise back: it does nothing, and it fetches nothing.
+export function open({ auto = false } = {}) {
+  if (inflight) return inflight;
+  if (!available()) return Promise.reject(new Error(unavailableReason()));
+  if (!registered()) return Promise.reject(new Error('no passkey on this device yet'));
+  if (!prepared()) {
+    // Not ready yet (or the last fetch failed): fetch, but do NOT go on to the sensor —
+    // by the time the challenge lands this tap no longer counts, which is the bug.
+    if (auto) return Promise.reject(Object.assign(new Error('no challenge ready'), { name: 'NotReady' }));
+    const why = prepErr;                     // read before prepare() clears it
+    prepare().catch(() => {});
+    return Promise.reject(Object.assign(new Error(why ? describe(why) : 'still getting ready — tap unlock again in a moment'), { name: 'NotReady' }));
+  }
+  const p = prepped;
+  let got;
+  ceremonies++;
+  try {
+    got = navigator.credentials.get({
+      publicKey: {
+        challenge: p.challenge, rpId: p.rpId, timeout: 60_000, userVerification: 'required',
+        allowCredentials: [{ type: 'public-key', id: b64u.dec(localStorage.getItem(credKey())) }],
+      },
+    });
+  } catch (e) { ceremonies--; return Promise.reject(e); }
+  inflight = (async () => {
+    try {
+      const cred = await got;
+      if (!cred) throw Object.assign(new Error('the passkey prompt was dismissed'), { name: 'NotAllowedError' });
+      // Signed: whatever the server says next, this challenge is spent.
+      if (prepped === p) prepped = null;
+      if (api.mode() === 'server') {
+        await api.authPost('assert', {
+          id: b64u.enc(cred.rawId), purpose: 'open',
+          client_data: b64u.enc(cred.response.clientDataJSON),
+          authenticator_data: b64u.enc(cred.response.authenticatorData),
+          signature: b64u.enc(cred.response.signature),
+        });
+      } else {
+        api.setToken('fixture-stub', Date.now() / 1000 + TOKEN_TTL);
+      }
+      return true;
+    } finally {
+      ceremonies--; inflight = null;
+      // Still locked (a refusal, a cancel): have the next tap's challenge ready.
+      if (wanted && !api.haveToken()) prepare().catch(() => {});
     }
-    return true;
-  });
+  })();
+  return inflight;
+}
+
+// ── ONE AUTOMATIC ATTEMPT PER OPEN OR RESUME ──────────────────────────────
+// The app tries the sensor by itself when it opens or comes back locked. WebKit may refuse
+// a call no tap started (NotAllowedError, at once, no sheet) — then the button is the way
+// in, and it has to work on its first tap, which is why the attempt leaves the prepared
+// challenge where it was.
+//   ARMED, NOT RETRIED. arm() is called for an open or a resume and autoUnlock() disarms
+// before it does anything, so a refusal can never come round again on its own: the sheet
+// itself hides and re-shows the page, and a resume handler that re-tried on that would be a
+// loop that only a tap could break. arm() during a ceremony is that exact event, ignored.
+let autoArmed = false;
+export function arm() { if (!busy()) autoArmed = true; }
+// 'ok' | 'skipped' (not armed, or nothing to try with) | 'refused' (WebKit wanted a tap, or
+// the sheet was dismissed — said nowhere, the button is the answer) | an Error to show.
+export async function autoUnlock() {
+  if (!autoArmed) return 'skipped';
+  autoArmed = false;
+  if (!available() || !registered() || inflight) return 'skipped';
+  try { await prepare(); } catch (e) { return e; }
+  if (api.haveToken()) return 'skipped';         // a stored session got there first
+  try { await open({ auto: true }); return 'ok'; }
+  catch (e) {
+    if (e && (e.name === 'NotAllowedError' || e.name === 'AbortError' || e.name === 'NotReady')) return 'refused';
+    return e;
+  }
+}
+
+// WHAT HAPPENED, IN WORDS FOR THE LOCK SCREEN. The old screen showed nothing at all on a
+// failure (a toast that was never drawn), so a refused ceremony and a button that does
+// nothing were the same thing to look at. Every message says that a tap retries.
+export function describe(e) {
+  const name = (e && e.name) || '';
+  const msg = String((e && e.message) || e || '');
+  if (name === 'NotAllowedError' || name === 'AbortError')
+    return 'Face ID did not finish — it was cancelled, timed out, or the system refused to show it. Tap unlock to try again.';
+  if (name === 'NotReady') return msg;
+  if (name === 'InvalidStateError' || name === 'SecurityError')
+    return `this passkey cannot be used here (${msg}). Tap unlock to try again, or re-enrol in settings.`;
+  if (e instanceof api.OfflineError) return 'could not reach the fleet — check the connection, then tap unlock.';
+  if (e && e.status === 429)
+    return `the fleet is refusing unlock attempts for ${e.retryAfter ? `${e.retryAfter}s` : 'a minute'} (${msg}). Tap unlock after that.`;
+  if (e && e.status) return `the fleet refused: ${msg}. Tap unlock to try again.`;
+  return `${msg || 'unlock failed'}. Tap unlock to try again.`;
 }
 
 // The destructive-verb prompt. A separate ceremony every time — never a cached "you

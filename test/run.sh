@@ -12574,7 +12574,7 @@ sv_cli init --bind 127.0.0.1 --port "$PORT" >/dev/null 2>&1
 # Rate limiting has its own group below; here it must not fire. One probe phase makes
 # dozens of assertion and verb calls in a second, which no phone ever would, and a 429 in
 # the middle of the auth phase would read as an auth failure.
-sv_rate() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:+process.argv[2],write:+process.argv[3],auth:+process.argv[4]};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$SV/serve.json" "$1" "$2" "$3"; }
+sv_rate() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:+process.argv[2],write:+process.argv[3],auth:+process.argv[4],challenge:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$SV/serve.json" "$1" "$2" "$3"; }
 sv_rate 4000 4000 4000
 US=$'\x1f'
 pf() { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f2; }   # http status
@@ -13375,6 +13375,31 @@ if sv_start rate; then
   serve_stop
 else
   skip "fleet-serve rate limit" "server did not come up: $SV_WHY"
+fi
+sv_rate 4000 4000 4000
+
+group "fleet-serve: tapping unlock cannot lock the owner out"
+# needs: free_port answers in digits
+node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:3,challenge:30};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$SV/serve.json"
+if sv_start authburst; then
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" authburst "$(sv_code burst)" > "$SV/probe.burst" 2>"$SV/probe.burst.err"
+  is "authburst-probe ran"                    ""    "$(head -2 "$SV/probe.burst.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "the phone enrols"                       "200" "$(pf burst.enrol burst)"
+  # Twenty challenges against an auth cap of 3 — the shape of the night it went wrong.
+  is "a flood of challenges is not refused"   "0"   "$(pb burst.challenges burst | grep -c '429' || true)"
+  is "...all twenty were answered"            "20"  "$(pb burst.challenges burst | grep -o '200' | wc -l | tr -d ' ')"
+  is "...and the owner still gets in"         "200" "$(pf burst.assertAfterFlood burst)"
+  is "a good assertion spends nothing"        "200" "$(pf burst.assertAgain burst)"
+  # BOTH DIRECTIONS: the brute-force protection is still there, on the thing that is guessed.
+  is "a forged signature is refused"          "401" "$(pf burst.badSig3 burst)"
+  is "three refusals close the door"          "429" "$(pf burst.afterFailures burst)"
+  is "...saying why"                          "1"   "$(pb burst.afterFailures burst | grep -c 'refused passkey attempts' || true)"
+  # ...and a challenge is cheap, not free: its own ceiling still holds.
+  is "challenges still have a ceiling"        "1"   "$([ "$(pb burst.ceiling burst | grep -o '429' | wc -l)" -ge 1 ] && echo 1 || echo 0)"
+  is "...that starts above the auth cap"      "1"   "$(pb burst.ceiling burst | grep -c '^\[200' || true)"
+  serve_stop
+else
+  skip "fleet-serve auth burst" "server did not come up: $SV_WHY"
 fi
 sv_rate 4000 4000 4000
 
@@ -14222,6 +14247,19 @@ if sv_start origin; then
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PWO/relaunch"
+  # ── and the unlock TAP has to reach the sensor while it still counts ──────
+  # WebKit shows the passkey sheet only to a get() made inside the tap. The button awaited a
+  # challenge first, so every tap was refused without a sheet: a challenge per tap, never an
+  # assert, nothing drawn — and the owner tapped until the rate limit shut them out. The
+  # helper's fake get() refuses any call made outside the tap's synchronous extent.
+  PWU_CODE="$(sv_code pwaunlock)"
+  node "$ROOT/test/helpers/pwa-unlock.mjs" "$BASE" "$PWU_CODE" > "$PWO/unlock" 2> "$PWO/unlock.err"
+  is "pwa-unlock ran"                 "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PWO/unlock.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/unlock")" -ge 30 ] && echo yes || echo "no: $(wc -l < "$PWO/unlock") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PWO/unlock"
   rm -rf "$PWO"
   serve_stop
 else
