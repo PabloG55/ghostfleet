@@ -10324,8 +10324,10 @@ group "the wake finds the input box, not the last ❯"
 if command -v awk >/dev/null 2>&1; then
   # the real function, lifted from the hook with only its tmux call swapped for a file —
   # the same way the fleet-send composer detector is tested above
-  eval "$(sed -n '/^_input_state() {/,/^}/p' "$ROOT/hooks/fleet-event.sh" \
-          | sed 's|tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null|cat "$1"|')"
+  eval "$(sed -n '/^_pane_text() {/,/^}/p;/^_input_state() {/,/^}/p' "$ROOT/hooks/fleet-event.sh" \
+          | sed 's|tmux -L "$1" capture-pane -e -p -t "$2" 2>/dev/null|cat "$1"|
+                 s|tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null|cat "$1"|')"
+  CF_UNDIM="$ROOT/lib/undim.awk"
   st() { _input_state "$FIX/$1" x; echo $?; }          # 0 empty · 1 typed · 2 no box
   is "an empty composer is safe to paste"   "0" "$(st claude-composer-empty.txt)"
   is "a typed composer is NEVER clobbered"  "1" "$(st claude-composer-typed.txt)"
@@ -10334,6 +10336,35 @@ if command -v awk >/dev/null 2>&1; then
   # the older captures, which must not regress
   is "...and the plain-space empty box"     "0" "$(st claude-input-submitted.txt)"
   is "...and the plain-space typed box"     "1" "$(st claude-input-pending.txt)"
+
+  # ── AN EMPTY BOX IS NOT BLANK: IT CARRIES A DIM SUGGESTION ──
+  # Claude fills an empty composer with greyed text: `Try "…"` in a fresh session, a
+  # suggested next prompt after a turn. A plain capture drops the attribute, so both read as
+  # typed and the guard said 1 for an idle lead — every wake deferred, retried for ten
+  # minutes, and expired into a file nobody reads, while a worker sat on a permission prompt.
+  # The captures are WITH attributes (capture-pane -e), as the guard now reads them: the
+  # glyph, a no-break space, then ESC[2m…ESC[0m. Measured on a scratch session: SGR 2 and
+  # nothing else — no 256-colour grey stands in for it.
+  is "a fresh session's dim placeholder is EMPTY"   "0" "$(st claude-composer-placeholder-sgr.txt)"
+  is "a dim suggested prompt is EMPTY"              "0" "$(st claude-composer-suggestion-sgr.txt)"
+  # the other direction, or the fix is "ignore the composer": the same words, not dim
+  is "typed text captured with -e is still typed"   "1" "$(st claude-composer-typed-live-sgr.txt)"
+  is "...and the suggestion's words, typed"         "1" "$(st claude-composer-typed-sgr.txt)"
+  is "...and one word after the no-break space"     "1" "$(st claude-composer-oneword-sgr.txt)"
+  # the traps, asserted to BE in the fixtures: a fixture that lost its ESC[2m would turn
+  # the two EMPTY rows above into plain-text tests that pass for the wrong reason
+  is "the placeholder fixture is drawn dim"  "1" \
+     "$(LC_ALL=C grep -q "❯$(printf '\302\240\033')\[2mTry" "$FIX/claude-composer-placeholder-sgr.txt" && echo 1 || echo 0)"
+  is "...and the typed one is not"           "0" \
+     "$(LC_ALL=C grep -q "$(printf '\033')\[2m" "$FIX/claude-composer-typed-live-sgr.txt" && echo 1 || echo 0)"
+  # 38;5;2 is a COLOUR (green), not dim: a reader that greps for a 2 eats coloured typing
+  printf '─────────────────\n❯\302\240\033[38;5;2mgreen words\033[39m\n─────────────────\nstatus\n' > "$FIX/../.undim-$$.txt"
+  is "a colour index of 2 is not dim"        "1" "$(_input_state "$FIX/../.undim-$$.txt" x; echo $?)"
+  rm -f "$FIX/../.undim-$$.txt"
+  # a stale runtime without lib/undim.awk falls back to the plain capture rather than
+  # reading every pane as "no box" — the old behaviour, never a worse one
+  is "no undim.awk: the old reading, not a blind one" "1" \
+     "$(CF_UNDIM=/nonexistent; _input_state "$FIX/claude-input-pending.txt" x; echo $?)"
 
   # THE TRAPS, asserted to actually BE in the fixture — a fixture that quietly lost them
   # would leave the assertions above passing for the wrong reason
@@ -10382,6 +10413,7 @@ if command -v tmux >/dev/null 2>&1; then
   # carries the guard across with `export -f` — an exported function whose body reads an
   # un-exported variable is a stub that always answers "not empty" over there
   export ND
+  _pane_text() { :; }
   _input_state() { return "$(cat "$ND/state" 2>/dev/null || echo 2)"; }
   _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
   echo 1 > "$ND/state"                       # the human is mid-sentence
@@ -10421,6 +10453,22 @@ if command -v tmux >/dev/null 2>&1; then
      "$([ -f "$ND/sent.log" ] && wc -l < "$ND/sent.log" | tr -d ' ' || echo 0)"
   is "...and leaves a trace, not silence"      "1" \
      "$([ -s "$ND/cfnudge.notify.undelivered" ] && echo 1 || echo 0)"
+  # THE TRACE HAS TO BE WHERE SOMEBODY LOOKS. The marker alone went unread through four
+  # expiries while a worker sat on a permission prompt; the row goes in the inbox the wake
+  # was for, beside the rows it failed to announce.
+  for i in $(seq 1 10); do [ -s "$ND/cfnudge.inbox" ] && break; sleep 0.5; done
+  is "...and an UNDELIVERED row in master's inbox" "1" \
+     "$(awk -F'\t' '$2 == "master" && $3 == "undelivered"' "$ND/cfnudge.inbox" 2>/dev/null | grep -c . || true)"
+  # a SUB-LEAD's expiry lands in the sub-lead's inbox, not master's
+  echo 1 > "$ND/state"
+  tmux -L cfnudge new-session -d -s acme-lead 'sleep 120' 2>/dev/null
+  CLAUDE_FLEET_NOTIFY_RETRY_EVERY=1 CLAUDE_FLEET_NOTIFY_RETRY_TRIES=2 PATH="$ND/bin:$PATH" \
+    _defer_nudge cfnudge "$ND" acme-lead.notify "wake up" acme-lead
+  for i in $(seq 1 15); do [ -s "$ND/cfnudge.acme-lead.inbox" ] && break; sleep 1; done
+  is "...a sub-lead's lands in ITS inbox"          "1" \
+     "$(awk -F'\t' '$2 == "acme-lead" && $3 == "undelivered"' "$ND/cfnudge.acme-lead.inbox" 2>/dev/null | grep -c . || true)"
+  is "...and not in master's"                      "1" \
+     "$(grep -c undelivered "$ND/cfnudge.inbox" 2>/dev/null || true)"
   tmux -L cfnudge kill-server 2>/dev/null; rm -rf "$ND"
 else
   skip "deferred wake" "tmux missing"
@@ -15413,6 +15461,50 @@ if command -v node >/dev/null 2>&1; then
   rm -rf "$PH"
 else
   skip "push hold" "node missing"
+fi
+
+# ── an expired wake reaches the phone ────────────────────────────────────────
+# hooks/fleet-event.sh's deferred wake gives up after ten minutes of an occupied input box
+# and appends to <sock>.<kind>.undelivered. Nothing read that file: a worker sat on a
+# permission prompt behind four expiries until somebody found it by hand. fleet-serve now
+# treats the marker GROWING as a need-you for the lead the wake was for. Driven through the
+# real exported functions against a real directory, in both directions.
+group "push: an expired wake is a need-you for its lead"
+if command -v node >/dev/null 2>&1; then
+  UD="$(cd "$(mktemp -d)" && pwd -P)"
+  ud() { node --input-type=module -e "
+    import { undeliveredEvents, undeliveredTarget, pushResolved } from '$ROOT/bin/fleet-serve.mjs';
+    $1" 2>&1; }
+  is "notify names master"          '{"sock":"cf-acme-api","session":"master"}' \
+     "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-acme-api.notify.undelivered', ['cf-acme-api'])))")"
+  is "a sub-lead's names the lead"  '{"sock":"cf-acme-api","session":"api-lead"}' \
+     "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-acme-api.api-lead.notify.undelivered', ['cf-acme-api'])))")"
+  is "an unknown socket is nobody"  'null' \
+     "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-other.notify.undelivered', ['cf-acme-api'])))")"
+  is "the longest known socket wins" '{"sock":"cf-acme.api","session":"master"}' \
+     "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-acme.api.notify.undelivered', ['cf-acme','cf-acme.api'])))")"
+  # THE SEQUENCE, in one process so the size map carries between scans: a marker already
+  # there is a baseline; it growing is ONE event; an unchanged rescan is silent.
+  printf 'old expiry\n' > "$UD/cf-acme-api.api-lead.notify.undelivered"
+  out="$(ud "
+    import fs from 'node:fs';
+    const sizes = new Map(), d = ['$UD'], s = ['cf-acme-api'], n = new Map([['cf-acme-api','acme-api']]);
+    const a = undeliveredEvents(d, s, sizes, n);
+    fs.appendFileSync('$UD/cf-acme-api.api-lead.notify.undelivered', 'new expiry\\n');
+    const b = undeliveredEvents(d, s, sizes, n);
+    const c = undeliveredEvents(d, s, sizes, n);
+    console.log(a.length, b.length, c.length, b[0] && b[0].kind, b[0] && b[0].session, b[0] && b[0].project)")"
+  is "first sight is a baseline, growth is one need-you, a rescan is silent" \
+     "0 1 0 needs-you api-lead acme-api" "$out"
+  # resolved only by the lead taking a turn: idle is the state it was stuck in
+  # the literal lives in a variable: unquoted in a command substitution, {a,b} brace-expands
+  uev='{"kind":"needs-you","undelivered":true}'; wev='{"kind":"needs-you"}'
+  is "an idle lead has not seen it"  "false" "$(ud "console.log(pushResolved($uev, 'ready'))")"
+  is "...a working one has"          "true"  "$(ud "console.log(pushResolved($uev, 'working'))")"
+  is "...a worker's need-you is unchanged" "true" "$(ud "console.log(pushResolved($wev, 'ready'))")"
+  rm -rf "${UD:?}"
+else
+  skip "undelivered push" "node missing"
 fi
 
 group "push: a subject Apple accepts, and a refusal that says why"

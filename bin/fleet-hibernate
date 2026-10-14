@@ -303,39 +303,20 @@ composer_lines() {
 }
 
 # ── A SUGGESTION IS NOT A DRAFT ──────────────────────────────────────────────
-# The agent puts a suggested next prompt in an EMPTY composer, drawn dim — captured from a
-# live pane it is the glyph, a no-break space, then `ESC[2m merge the pr ESC[0m`. A plain
-# capture drops the attribute, so the suggestion reads as typed text and the session is
-# vetoed as holding unsent work, forever, for exactly as long as it sits idle — which is
-# the whole population hibernation is for. So the pane is captured WITH its attributes and
-# every dim run is removed before the composer is read; a person's typing is never dim.
-#   The SGR parameters are walked rather than grepped for a 2: `38;5;2` is a colour index,
-#   not dim, and a pattern would read one as the other. Everything else is then stripped, so
-#   composer_lines sees the same plain text it always did.
-undim() {
-  awk '
-    function sgr(params,   n, P, i) {
-      n = split(params, P, ";"); if (n == 0) { dim = 0; return }
-      for (i = 1; i <= n; i++) {
-        if (P[i] == "38" || P[i] == "48" || P[i] == "58") { i += (P[i+1] == "2") ? 4 : 2; continue }
-        if (P[i] == "" || P[i] == "0" || P[i] == "22") dim = 0
-        else if (P[i] == "2") dim = 1
-      }
-    }
-    { line = $0; out = ""
-      while ((k = index(line, "\033")) > 0) {
-        if (!dim) out = out substr(line, 1, k - 1)
-        line = substr(line, k)
-        if (match(line, /^\033\[[0-9;?]*[ -\/]*[@-~]/)) {
-          seq = substr(line, 1, RLENGTH); line = substr(line, RLENGTH + 1)
-          if (substr(seq, length(seq)) == "m") sgr(substr(seq, 3, length(seq) - 3))
-        } else if (match(line, /^\033\][^\007\033]*(\007|\033\\)/)) {   # OSC, a hyperlink
-          line = substr(line, RLENGTH + 1)
-        } else line = substr(line, 2)
-      }
-      if (!dim) out = out line
-      print out }'
-}
+# The agent puts a suggested next prompt in an EMPTY composer, drawn dim, and a plain capture
+# reads it as typed text — which vetoed every idle session as holding unsent work, the whole
+# population hibernation is for. So the pane is captured WITH its attributes and every dim run
+# is removed before the composer is read. The filter is lib/undim.awk, shared with the wake
+# guard in hooks/fleet-event.sh, which the same suggestion blinded; the why is there.
+#   Through the symlink: ~/.local/bin/fleet-hibernate points into the staged runtime, and a
+# dirname of the LINK would look for lib/ beside ~/.local/bin.
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _t="$(readlink "$_src")"
+  case "$_t" in /*) _src="$_t" ;; *) _src="$(dirname "$_src")/$_t" ;; esac
+done
+UNDIM="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/undim.awk"
+undim() { LC_ALL=C awk -f "$UNDIM"; }
 
 has_draft() {
   local sock="$1" slot="$2" pane composer

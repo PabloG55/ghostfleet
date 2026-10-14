@@ -1412,6 +1412,53 @@ function pushEvents(rows) {
   return events;
 }
 
+// ── A WAKE THAT NEVER LANDED IS A NEED-YOU FOR THE LEAD ─────────────────────
+// The worker's own need-you buzzes above; what nothing announced is that its lead was never
+// woken to deal with it. hooks/fleet-event.sh's deferred wake retries for ten minutes while
+// the lead's input box reads occupied, then appends a line to <sock>.<kind>.undelivered —
+// a file nobody reads, so a worker sat on a permission prompt behind four of them until it
+// was found by hand. That marker GROWING is the event: no status changes (the lead is
+// idle, as it was), so the transition rule above cannot see it.
+//   The kind names the target: `notify` and `jarvis` wake the socket's master, a sub-lead's
+// is `<lead>.notify`. A socket can carry dots no better than a session can be trusted not
+// to, so the socket is matched against the ones the scan KNOWS, longest first.
+//   SAME BASELINE RULE: the first sight of a marker is its size, never a buzz — a daemon
+// starting next to a week of expiries must not ring for all of them.
+export function undeliveredTarget(name, socks) {
+  const suf = '.undelivered';
+  if (!name.endsWith(suf)) return null;
+  const base = name.slice(0, -suf.length);
+  const sock = [...socks].filter(s => base.startsWith(`${s}.`)).sort((a, b) => b.length - a.length)[0];
+  if (!sock) return null;
+  const kind = base.slice(sock.length + 1);
+  if (kind === 'notify' || kind === 'jarvis') return { sock, session: 'master' };
+  if (kind.endsWith('.notify') && kind.length > '.notify'.length) return { sock, session: kind.slice(0, -'.notify'.length) };
+  return null;
+}
+export function undeliveredEvents(dirs, socks, sizes, names = new Map()) {
+  const events = [], present = new Set();
+  for (const dir of dirs) {
+    let list = [];
+    try { list = fs.readdirSync(dir); } catch { continue; }
+    for (const n of list) {
+      const t = undeliveredTarget(n, socks);
+      if (!t) continue;
+      const p = path.join(dir, n);
+      let size;
+      try { size = fs.statSync(p).size; } catch { continue; }
+      present.add(p);
+      const known = sizes.has(p), before = sizes.get(p);
+      sizes.set(p, size);
+      if (!known || size <= before) continue;
+      const project = names.get(t.sock) || t.sock.replace(/^cf-/, '');
+      events.push({ kind: 'needs-you', project, session: t.session, sock: t.sock, undelivered: true });
+    }
+  }
+  for (const p of [...sizes.keys()]) if (!present.has(p)) sizes.delete(p);
+  return events;
+}
+const undeliveredSizes = new Map();  // marker path -> its size at the last scan
+
 // ── at the Mac ──────────────────────────────────────────────────────────────
 // A PHONE THAT BUZZES WHILE HE IS TYPING AT THE MAC is telling him what the screen in front
 // of him already says. The poll-based quiet above cannot see this: the phone is in a pocket,
@@ -1461,8 +1508,11 @@ export function atMac(reading, limit) {
 // Whether the session has moved on from the event: a need-you that is no longer need-you
 // was answered (at the Mac, most likely), and an answer whose session is working again was
 // read and replied to. A session that is gone has nothing left to tell him about.
+//   An UNDELIVERED wake is about a lead that is idle, and idle is the state it was stuck in,
+// so it is resolved only by the lead taking a turn — "not need-you" would drop it at once.
 export function pushResolved(ev, status) {
   if (status === undefined) return true;
+  if (ev.undelivered) return status === 'working';
   return ev.kind === 'needs-you' ? status !== 'need-you' : status === 'working';
 }
 // THE DECISION, PURE, so the suite can drive every rule without a clock or a Mac.
@@ -1501,11 +1551,13 @@ async function pushTick() {
   const subs = allSubs();
   // Nothing subscribed: do no work at all, and forget the baseline so the first
   // subscription starts from what is on disk instead of replaying the day.
-  if (!subs.length) { pushState.clear(); pushHeld = []; return; }
+  if (!subs.length) { pushState.clear(); undeliveredSizes.clear(); pushHeld = []; return; }
   // No separate seeding pass: pushEvents() treats every key's first sight as a baseline,
   // so the first scan after a subscription is silent by the same rule that keeps a
   // reappearing file quiet. One rule is one thing to get right.
-  const fresh = pushEvents(scanFleet());
+  const rows = scanFleet(), names = sockProjects();
+  const socks = new Set([...names.keys(), ...rows.map(r => r.sock)]);
+  const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names)];
   if (!fresh.length && !pushHeld.length) return;
   // AT THE MAC: what would have been sent is held instead, and what was held goes when he
   // leaves (see holdStep). Read only when there is something to decide, and once per tick.

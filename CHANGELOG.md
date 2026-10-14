@@ -21,6 +21,14 @@ the detail, and every entry here names the PR that carries the argument.
   and only then by which was written last; `fleet-restart --reopen` does the same. Every such
   choice, and every conversation that moves into another pane's slot, is written to
   `<fleet dir>/slot-claim.log`.
+- **A lead is woken when a worker needs it, even with Claude's suggestion in its input
+  box.** Claude fills an empty input box with greyed text — `Try "…"` in a new session, a
+  suggested next prompt after a turn — and the wake read that text as something a person
+  had typed, so it never pasted into an idle lead: it retried for ten minutes and gave up
+  into a file nobody reads, while the worker sat on its permission prompt. Grey text now
+  counts as empty (real typing is never drawn grey). And a wake that does give up — because
+  somebody really is mid-sentence — leaves an `UNDELIVERED` row in that lead's inbox, and
+  `fleet-serve` sends it to the phone as a needs-you for the lead.
 - **A click on a session card opens it the first time.** The grid refreshes with
   synchronous tmux work that holds the screen for most of a second on a fleet of twenty
   sessions, and a click that landed during a refresh reached it as a press and a release in

@@ -369,6 +369,25 @@ else
   rm -f "$tmp" 2>/dev/null
 fi
 
+# The pane as plain text with every DIM run removed — lib/undim.awk, shared with
+# fleet-hibernate's draft check, which the same suggestion fooled. Resolved through the hook's
+# symlinks once, and EXPORTED, because the deferred wake and the queue drainer run this in a
+# detached `bash -c` that has no BASH_SOURCE of ours to resolve from. A runtime staged
+# without the file falls back to the plain capture: the old reading, never a blinder one.
+_cf_src="${BASH_SOURCE[0]}"
+while [ -L "$_cf_src" ]; do
+  _cf_t="$(readlink "$_cf_src")"
+  case "$_cf_t" in /*) _cf_src="$_cf_t" ;; *) _cf_src="$(dirname "$_cf_src")/$_cf_t" ;; esac
+done
+CF_UNDIM="$(cd "$(dirname "$_cf_src")" 2>/dev/null && pwd)/../lib/undim.awk"; export CF_UNDIM
+_pane_text() {                        # $1=socket $2=session -> the pane, dim runs removed
+  if [ -r "${CF_UNDIM:-}" ]; then
+    tmux -L "$1" capture-pane -e -p -t "$2" 2>/dev/null | LC_ALL=C awk -f "$CF_UNDIM"
+  else
+    tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null
+  fi
+}
+
 # A wake PASTES into a session's input box and presses Enter, so it must only fire when
 # that box is EMPTY — otherwise it submits whatever a human was half-way through typing
 # with the nudge glued onto the end.
@@ -417,8 +436,14 @@ fi
 # every pattern below is therefore a literal alternation, which is the same bytes in both
 # locales. `length("❯")` is 3 under C and 1 under UTF-8, and substr counts in the same
 # units either way, so the skip past the glyph is right in both.
+#   AND THE PANE IS READ WITH ITS ATTRIBUTES (_pane_text), because an EMPTY box is not blank.
+# The agent fills it with a dim suggestion — `Try "…"` in a fresh session, a suggested next
+# prompt after a turn — and `capture-pane -p` drops the attribute, so the suggestion read
+# exactly like typing. Measured on a fleet whose two idle leads both answered 1 here: every
+# wake to them was deferred, retried for the full ten minutes and expired, while a worker
+# sat on a permission prompt until somebody found it by hand.
 _input_state() {                      # $1=socket $2=session -> 0 empty / 1 typed / 2 none
-  tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null | LC_ALL=C awk '
+  _pane_text "$1" "$2" | LC_ALL=C awk '
     # A RULE MAY CARRY A LABEL. Requiring a line of NOTHING but rule glyphs looked right
     # and rejected the top edge of the composer on every worker pane, because the fleet
     # draws a labelled separator — `────── ghostfleet/docs-sync ─`. Measured on a live
@@ -487,7 +512,7 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
   lock="$dir/$sock.$kind.retry"
   p="$(cat "$lock" 2>/dev/null)"
   case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
-  export -f _input_state _input_empty
+  export -f _pane_text _input_state _input_empty
   FLEET_DIR="$dir" nohup bash -c '
     sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"; kind="${5:-notify}"; msg="$6"; to="${7:-master}"
     echo $$ > "$lock" 2>/dev/null
@@ -516,6 +541,16 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
     printf "%s deferred wake expired after %ss with the input box never clear\n" \
       "$(date +%Y-%m-%dT%H:%M:%S)" "$(( every * tries ))" \
       >> "$FLEET_DIR/$sock.$kind.undelivered" 2>/dev/null
+    # ...AND A ROW IN THE INBOX THE WAKE WAS FOR. The marker alone was a trace nobody
+    # reads: a worker sat on a permission prompt behind four such expiries before anyone
+    # looked. The row lands beside the worker rows it failed to announce, so the next
+    # fleet-inbox (and every reader of the inbox) shows the gap; fleet-serve watches the
+    # marker above and buzzes the phone. A sub-lead kind is <lead>.notify and its inbox is
+    # <sock>.<lead>.inbox; master and Jarvis read the fleet inbox.
+    case "$kind" in *.notify) inbox="$FLEET_DIR/$sock.${kind%.notify}.inbox" ;; *) inbox="$FLEET_DIR/$sock.inbox" ;; esac
+    printf "%s\t%s\t%s\t%s\n" "$(date +%s)" "$to" undelivered \
+      "wake expired after $(( every * tries ))s: the input box never read empty, so the rows above went unannounced" \
+      >> "$inbox" 2>/dev/null
   ' _ "$sock" "$lock" "${CLAUDE_FLEET_NOTIFY_RETRY_EVERY:-20}" \
        "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" "$kind" "$msg" "$to" >/dev/null 2>&1 &
 }
@@ -749,7 +784,7 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
       j_p="$(cat "$j_lock" 2>/dev/null)"
       case "$j_p" in ''|*[!0-9]*) j_p="" ;; esac
       if [ -z "$j_p" ] || ! kill -0 "$j_p" 2>/dev/null; then
-        export -f _input_state _input_empty
+        export -f _pane_text _input_state _input_empty
         nohup bash -c '
           sock="$1"; lock="$2"; stamp="$3"; after="$4"; armed="$5"; dir="$6"
           echo $$ > "$lock" 2>/dev/null; trap "rm -f \"$lock\"" EXIT
@@ -926,7 +961,7 @@ if [ "$EVENT" = "Stop" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] \
   _qp="$(cat "$_qd" 2>/dev/null)"
   case "$_qp" in ''|*[!0-9]*) _qp="" ;; esac
   if [ -z "$_qp" ] || ! kill -0 "$_qp" 2>/dev/null; then
-    export -f _input_state
+    export -f _pane_text _input_state
     # A session whose mod delivers takes the prompt without touching the composer
     # (register.js, DELIVERY), so a half-typed message there is no reason to wait. Asked
     # only when the composer is NOT empty, and asked again each time: a mod that has died
