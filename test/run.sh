@@ -1402,7 +1402,7 @@ STUB
   swlog0="$(wc -l < "$SWF/$SWS.master.switch.log" 2>/dev/null || echo 0)"
   : > "$SW/codex-dialog"
   swfp agent billing-svc codex >/dev/null
-  i=0; until tail -n +"$((swlog0 + 1))" "$SWF/$SWS.master.switch.log" 2>/dev/null | grep -q "waiting on a dialog in master's pane"; do
+  i=0; until grep -q "waiting on a dialog in master's pane" <<< "$(tail -n +"$((swlog0 + 1))" "$SWF/$SWS.master.switch.log" 2>/dev/null)"; do
     [ "$i" -lt 150 ] || break; sleep 0.2; i=$((i+1)); done
   sleep 5                                               # READY_SECS is 4 here
   is "a new agent on a dialog is not rolled back"   "codex" "$(cat "$SWF/$SWS.master.switch" 2>/dev/null)"

@@ -830,6 +830,9 @@ async function loadingSkeletons() {
       anim: sk[0] ? getComputedStyle(sk[0].querySelector('.skel-bar')).animationName : '',
     };
   }, HELD_TEXT.source);
+  // Motion asked for in so many words: a runner's browser may default to reduced motion
+  // (the macOS one does), and a row that reads the default measures the machine.
+  await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
   const held = await chat();
   await shot('chat-loading-390');
   is('loading chat: skeleton bubbles stand where the messages will', true, held.n >= 4 || `${held.n} bubbles`);
