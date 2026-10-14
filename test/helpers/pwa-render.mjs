@@ -374,10 +374,8 @@ const slow = (p) => SLOW_MS ? p.then(v => new Promise(r => setTimeout(() => r(v)
 // widens every request by a fixed amount, which is the right tool for a race that is merely
 // likely; this one has to be CERTAIN, because the assertion is "the app did not lock during
 // the window" and a window that closed early would make that pass for the wrong reason.
-// So the challenge request is held open explicitly and released by hand.
-let stallAuth = null;                  // set to a promise to hold /api/auth/* open
+// So the ceremony is held open explicitly — at the sheet, see below — and released by hand.
 globalThis.fetch = (url, opts) => slow((() => {
-  if (stallAuth && /\/api\/auth\//.test(String(url))) return stallAuth.then(() => realFetch(url, opts));
   const m = /^\.\/fixtures\/([A-Za-z0-9._-]+)$/.exec(String(url));
   if (m && fixtureOverride && fixtureOverride[m[1]]) {
     const body = fixtureOverride[m[1]];
@@ -543,10 +541,12 @@ if (BASE) {
   // No ceremony: coming back with no token IS a lock, and that behaviour is kept.
   is('coming back with no token locks', 'lock', appmod.onVisibleAction());
 
-  // Now the ceremony. The challenge request is held open, so open() is parked INSIDE the
-  // window this bug lives in for as long as the assertions below need.
+  // Now the ceremony. The challenge is fetched BEFORE the tap (passkey.js prepare()), so the
+  // window this bug lives in opens at the sheet: the fake sheet below is held up, which
+  // parks open() INSIDE it for as long as the assertions below need.
+  await pk.prepare();
   let release;
-  stallAuth = new Promise(r => { release = r; });
+  globalThis.navigator.credentials = { get: () => new Promise(r => { release = () => r(null); }) };
   const ceremony = pk.open().catch(() => 'rejected');   // never awaited while it matters
   await tick(5);
   is('a ceremony in flight is visible to the app', true, pk.busy());
@@ -565,8 +565,9 @@ if (BASE) {
   await tick(5);
   is('...and the ceremony survived the round trip', true, pk.busy());
 
-  release(); stallAuth = null;
+  release();
   await ceremony;
+  delete globalThis.navigator.credentials; pk.release();
   await tick(20);
   is('the ceremony completed rather than being abandoned', false, pk.busy());
   // ...and the guard RELEASES. A counter that leaked would leave the app permanently

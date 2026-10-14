@@ -185,7 +185,9 @@ if (BASE && CODE) {
   // took it, not that the client believes it did.
   api.clearToken();
   let opened = false; err = '';
-  try { opened = await pk.open(); } catch (e) { err = String(e.message || e); }
+  // The lock screen fetches the challenge before the tap (passkey.js prepare()); so does this.
+  try { await pk.prepare(); opened = await pk.open(); } catch (e) { err = String(e.message || e); }
+  pk.release();
   is('the enrolled passkey unlocks', true, opened);
   is('...with a live token behind it', true, api.haveToken());
   is('...and no error', '', err);

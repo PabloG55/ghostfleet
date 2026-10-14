@@ -49,6 +49,7 @@ const S = {
   confirm: null,        // { kind, … } — the TUI's confirm bar, reproduced
   sheet: null,          // { kind, … } — one of the TUI's full-screen forms
   toast: null,
+  unlockErr: '',        // why the last unlock failed, drawn on the lock screen until the next tap
   stale: 0,             // epoch of the payload on screen, when it came from the cache
   draft: '',            // the composer's text, kept across repaints (a poll must not eat it)
   attaching: false,     // a photo is on its way up; the camera button says so and refuses a second
@@ -254,6 +255,8 @@ function lock() {
   // A LOCKED SCREEN HAS NO MICROPHONE: conversation mode ends with the session it ran on.
   if (S.talk) talkStop('');
   S.locked = true; api.clearToken(); render();
+  // Coming back to an expired session: the one attempt this resume was armed for.
+  tryAutoUnlock();
   // The session just ended, so a swap that was waiting for it is free now — and this is
   // the moment the poll cannot cover, because the poll does not run while locked. Without
   // this, deferring under a live session would defer until the next cold open.
@@ -3560,10 +3563,16 @@ function lockScreen() {
         catch (e) { toast(String(e.message || e), 'bad'); }
       }, 'go'));
     } else if (pk.available()) {
-      row.append(btn('unlock with Face ID', async () => {
-        try { await pk.open(); S.locked = false; render(); refresh(); }
-        catch (e) { toast(String(e.message || e), 'bad'); }
-      }, 'go'));
+      const going = pk.unlocking();
+      const b = btn(going ? 'unlocking…' : 'unlock with Face ID', unlockTap, 'go');
+      if (going) b.setAttribute('disabled', 'disabled');
+      row.append(b);
+      // The challenge the tap will sign, fetched NOW so the tap has nothing to wait for
+      // (passkey.js open()). Once per failure, not once per render: a failed fetch is shown
+      // below and the next tap asks again.
+      if (!pk.prepared() && !pk.preparing() && !pk.prepareError()) {
+        pk.prepare().then(() => render(), (e) => { S.unlockErr = pk.describe(e); render(); });
+      }
     }
     if (pk.bypassAllowed()) {
       row.append(btn('continue without a passkey (fixtures)', () => { pk.bypass(); S.locked = false; render(); refresh(); }));
@@ -3581,8 +3590,42 @@ function lockScreen() {
   }
   row.append(btn('settings', () => sheetSettings()));
   box.append(row);
+  // WHAT WENT WRONG, ON THE SCREEN, UNTIL THE NEXT TAP. The failure used to go to toast(),
+  // which sets state and draws nothing until something else renders — and on the lock
+  // screen nothing else does. So a refused ceremony looked exactly like a dead button.
+  if (S.unlockErr) box.append(el('p', { class: 'err', role: 'alert', text: S.unlockErr }));
   if (S.toast) box.append(el('div', { class: 'toast ' + S.toast.kind, text: S.toast.text }));
   return box;
+}
+
+// SYNCHRONOUS ON PURPOSE. pk.open() has to reach navigator.credentials.get() inside this
+// tap, so nothing here may await before calling it — not even a render. A tap while a
+// ceremony runs gets the running one back and changes nothing.
+function unlockTap() {
+  if (pk.unlocking()) return;
+  S.unlockErr = '';
+  const p = pk.open();
+  render();
+  p.then(unlocked, (e) => { S.unlockErr = pk.describe(e); render(); });
+}
+function unlocked() {
+  pk.release();
+  S.unlockErr = '';
+  if (!S.locked) return;
+  S.locked = false; render(); refresh();
+}
+// Whether the last hide was the Face ID sheet's (see the visibilitychange listener).
+let hidByCeremony = false;
+// The one automatic attempt an open or a resume gets (passkey.js autoUnlock: armed by
+// pk.arm(), spent by trying). A refusal is silent — WebKit wanting a tap is not an error,
+// and the button below is the answer to it.
+function tryAutoUnlock() {
+  if (!S.locked || document.hidden) return;
+  pk.autoUnlock().then((r) => {
+    if (r === 'ok') return unlocked();
+    if (r && typeof r === 'object') S.unlockErr = pk.describe(r);
+    if (S.locked) render();
+  }).catch(() => {});
 }
 
 // ── sheets (the TUI's forms) ──────────────────────────────────────────────
@@ -4432,6 +4475,10 @@ document.addEventListener('visibilitychange', () => {
   // difference between an app that stops polling in a pocket and one that keeps waking
   // the radio every two seconds to decide it should not have.
   if (document.hidden) {
+    // THE FACE ID SHEET HIDES THE PAGE TOO. A hide that happens during a ceremony is the
+    // sheet, not the owner leaving, so coming back from it is not a resume and arms nothing
+    // — otherwise a dismissed sheet would re-try itself forever.
+    hidByCeremony = pk.busy();
     stopPanePoll();
     // THE LIMIT, SAID WHEN IT BITES. An installed web app gets no microphone and no speech
     // once it is off screen, so conversation mode ends here rather than pretending to run.
@@ -4439,8 +4486,10 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   const act = onVisibleAction();
-  if (act === 'lock') lock();
-  else if (act === 'refresh') refresh();
+  if (!hidByCeremony && act !== 'wait') pk.arm();
+  hidByCeremony = false;
+  if (act === 'lock') { if (S.locked) tryAutoUnlock(); else lock(); }
+  else if (act === 'refresh') refresh().then(() => { if (!S.locked) pk.release(); });
   syncPanePoll();
 });
 // THE SHELL IS CACHE-FIRST, so a deploy does not reach a phone that already has the app
@@ -4488,8 +4537,13 @@ api.ready().then(() => render());
 // the idle window — iOS evicting the app in the background is the common one — comes back
 // on the stored token (pk.resume). Its 401 clears it and leaves the lock screen up, which is
 // where Face ID lives. Guarded on S.locked so a fast tap on "unlock" is never undone.
+// ...and if it has none, the sensor is offered without a tap: one attempt (passkey.js
+// autoUnlock), which WebKit may refuse for want of a gesture — then the button is the way in.
+// 'offline' gets no attempt: an assertion that cannot be posted is a Face ID spent for nothing.
+pk.arm();
 pk.resume().then((r) => {
-  if (r === 'ok' && S.locked) { S.locked = false; render(); refresh(); }
+  if (r === 'ok') return unlocked();
+  if (r !== 'offline') tryAutoUnlock();
 }).catch(() => {});
 
 // Polling, not a socket: `fleet-grid.mjs --plain` answers the busiest fleet in 0.39s

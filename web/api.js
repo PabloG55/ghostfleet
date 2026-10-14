@@ -441,7 +441,10 @@ async function authFetch(kind, path, init) {
   catch (e) { throw new OfflineError(String((e && e.message) || e)); }
   slid(r);
   const j = await r.json().catch(() => null);
-  if (!r.ok) throw new Error((j && (j.text || j.error)) || `${kind} → HTTP ${r.status}`);
+  // The status and Retry-After travel with the sentence: the lock screen says how long a
+  // 429 lasts, and "refused" and "rate limited" are different instructions to a thumb.
+  if (!r.ok) throw Object.assign(new Error((j && (j.text || j.error)) || `${kind} → HTTP ${r.status}`),
+    { status: r.status, retryAfter: Number((r.headers && r.headers.get && r.headers.get('Retry-After')) || 0) || 0 });
   return j;
 }
 export async function authChallenge() {
