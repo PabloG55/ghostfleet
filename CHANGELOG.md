@@ -8,6 +8,18 @@ the detail, and every entry here names the PR that carries the argument.
 
 ### Fixed
 
+- **A lead comes back on its own conversation, and never on one another pane has open.**
+  After a crash, opening a project rebuilds `master` without naming a conversation, and on
+  tmux the launcher then took the newest conversation in the folder. In a fleet whose cards
+  share one folder that is whichever card wrote last: a lead came back running a worker's
+  conversation, the worker's card vanished, and later a lead was launched with `--resume` of a
+  conversation that was live in its own card. Claude and codex launchers now resume the
+  slot's own recorded conversation first; fall back only to one no other card claims and no
+  live process holds; and refuse an explicit id that another process holds. Two records for one
+  slot are settled by the conversation's name history (the slot it was first named as),
+  not by which was written last, and `fleet-restart --reopen` does the same. Every such
+  choice, and every conversation that moves into another pane's slot, is written to
+  `<fleet dir>/slot-claim.log`.
 - **A click on a session card opens it the first time.** The grid refreshes with
   synchronous tmux work that holds the screen for most of a second on a fleet of twenty
   sessions, and a click that landed during a refresh reached it as a press and a release in

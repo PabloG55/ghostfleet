@@ -133,15 +133,56 @@ case "${CLAUDE_FLEET_FRESH:-0}" in
     exec codex ${OPTS[@]+"${OPTS[@]}"} "$@" ;;
 esac
 
-# fleet-open <id>: resume exactly that conversation, by id.
+# ONE CONVERSATION, ONE SLOT — the same three rules as claude-here, asked of the same file
+# (lib/slot-claim.mjs) so the two agents cannot drift apart on them.
+SLOTCLAIM=""
+if command -v node >/dev/null 2>&1; then
+  _src="${BASH_SOURCE[0]}"
+  while [ -L "$_src" ]; do _tg="$(readlink "$_src")"; case "$_tg" in /*) _src="$_tg" ;; *) _src="$(dirname "$_src")/$_tg" ;; esac; done
+  _lib="$(cd "$(dirname "$_src")/../lib" 2>/dev/null && pwd)/slot-claim.mjs"
+  [ -f "$_lib" ] && SLOTCLAIM="$_lib"
+fi
+FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+
+# fleet-open <id>: resume exactly that conversation, by id — unless a live process already
+# has it open, which would put two writers on one rollout.
 if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
+  if [ -n "$SLOTCLAIM" ] && holder="$(node "$SLOTCLAIM" held --agent codex --id "$CLAUDE_FLEET_RESUME" 2>/dev/null)"; then
+    echo "codex-here: refusing — conversation $CLAUDE_FLEET_RESUME is open in live process $holder; a conversation is never resumed into a second pane" >&2
+    exit 1
+  fi
   echo "codex-here: resuming session ${CLAUDE_FLEET_RESUME} in $PWD" >&2
   exec codex resume "$CLAUDE_FLEET_RESUME" ${OPTS[@]+"${OPTS[@]}"} "$@"
 fi
 
-# Otherwise continue whatever this checkout was last doing. Reached only without a
-# recorded id (fleet-restart --reopen, fleet-open and agent switches all pass one). Safe unconditionally:
-# with no session for this cwd, codex starts a fresh one instead of erroring or
-# picking up a different directory's (verified — see the header).
+# Otherwise this slot's own recorded conversation, then the newest in this checkout that no
+# other slot claims and no live process has open. `resume --last` was the second of those
+# without either exclusion: "the newest in this folder", which in a folder two cards share
+# is the other card's.
+rid=""
+if [ -n "$SLOTCLAIM" ]; then
+  _sock="${CLAUDE_FLEET_SOCK:-}"
+  [ -n "$slot" ] && [ -n "$_sock" ] \
+    && IFS=$'\x1f' read -r rid _ _ < <(node "$SLOTCLAIM" pick --agent codex --dir "$FLEET_DIR" --sock "$_sock" --slot "$slot")
+  _rc=0
+  if [ -z "$rid" ]; then
+    _out="$(node "$SLOTCLAIM" fallback --agent codex --dir "$FLEET_DIR" \
+      --sock "$_sock" --slot "$slot" --cwd "$(pwd -P 2>/dev/null || printf '%s' "$PWD")")"; _rc=$?
+    rid="${_out%%$'\x1f'*}"
+  fi
+  if [ -n "$rid" ]; then
+    echo "codex-here: resuming session $rid in $PWD" >&2
+    exec codex resume "$rid" ${OPTS[@]+"${OPTS[@]}"} "$@"
+  fi
+  # 3: this folder's conversations all belong to someone else, so `resume --last` would take
+  # one of them. Otherwise there was nothing here to take, and --last is what it always was.
+  if [ "$_rc" = 3 ]; then
+    echo "codex-here: every conversation in $PWD belongs to another slot or is open elsewhere — starting fresh" >&2
+    exec codex ${OPTS[@]+"${OPTS[@]}"} "$@"
+  fi
+fi
+
+# Continue whatever this checkout was last doing. With no session for this cwd, codex
+# starts a fresh one instead of erroring (verified — see the header).
 echo "codex-here: resuming this checkout's last session in $PWD" >&2
 exec codex resume --last ${OPTS[@]+"${OPTS[@]}"} "$@"

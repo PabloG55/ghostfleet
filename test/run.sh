@@ -18806,6 +18806,190 @@ fi
 
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
 
+# ── ONE CONVERSATION, ONE SLOT ───────────────────────────────────────────────
+# A fleet's lead came back after a crash running a WORKER's conversation, and days later was
+# launched with --resume of a third conversation that was live in its own card. Every card in
+# that fleet shared one folder. Each mechanism is reproduced here against the real launchers
+# and the real hook, with stub agents that only log the argv they were handed:
+#   Q1  opening a project rebuilds `master` with no id, and on tmux claude-here fell to "the
+#       newest real conversation in this folder" — the worker's, which had written last;
+#   Q2  the hook then filed that conversation under the pane it ran in, so its record moved
+#       from the worker's name to `master` with nothing anywhere saying so, and the two
+#       `master` records were settled by `ts`, which the intruder had;
+#   Q3  nothing checked whether the folder's newest was open in another live process, and an
+#       explicit id was resumed whoever held it.
+#   WATCHED GOING RED: with lib/slot-claim.mjs's calls taken out of claude-here and
+# codex-here the lead resumes the intruder, the live one and the claimed one; without the
+# hook's block nothing is logged; with fleet-restart's sid_for back on `sort -rn` the reopen
+# takes the intruder.
+group "one conversation, one slot"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  OC="$(cd "$(mktemp -d "$TEST_RUNS.$$.slot.XXXXXX")" && pwd -P)"
+  OCW="$OC/acme-api"; OCC="$OC/cfg"; OCF="$OCC/fleet"; OCX="$OC/codex"
+  mkdir -p "$OCW" "$OCF" "$OC/bin" "$OC/home"
+  OCP="$OCC/projects/$(printf '%s' "$OCW" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$OCP"
+  OCS=cf-acme-api
+  for a in claude codex; do
+    cat > "$OC/bin/$a" <<STUB
+#!/bin/sh
+[ "\$1" = agents ] && exit 0
+[ "\$1" = --help ] && exit 0
+printf '%s\n' "\$*" > "$OC/argv.$a"
+STUB
+    chmod +x "$OC/bin/$a"
+  done
+  M=11111111-1111-4111-8111-111111111111   # the lead's own, born as acme-api/master
+  T=22222222-2222-4222-8222-222222222222   # a worker's, born as acme-api/toolbox
+  V=33333333-3333-4333-8333-333333333333   # a third card's, live in its own pane
+  U=44444444-4444-4444-8444-444444444444   # nobody's: an old conversation in the folder
+  convo() {   # id, first title, [later titles...] — a real turn, then the name history
+    local id="$1" f="$OCP/$1.jsonl"; shift
+    printf '{"type":"user","message":{"role":"user","content":"which fields are duplicated?"}}\n' > "$f"
+    for t in "$@"; do printf '{"type":"custom-title","customTitle":"%s","sessionId":"%s"}\n' "$t" "$id" >> "$f"; done
+  }
+  record() {  # id slot ts [pane]
+    printf '{"session_id":"%s","sock":"%s","slot":"%s","pane":"%s","cwd":"%s","transcript":"%s/%s.jsonl","status":"ready","ts":%s}\n' \
+      "$1" "$OCS" "$2" "${4:-}" "$OCW" "$OCP" "$1" "$3" > "$OCF/$1.json"
+  }
+  # Dated in this order, so the folder's newest is always the one that must NOT win.
+  convo "$U" acme-api/scratch; touch -t 202601010000 "$OCP/$U.jsonl"
+  convo "$M" acme-api/master;  touch -t 202601020000 "$OCP/$M.jsonl"
+  convo "$T" acme-api/toolbox; touch -t 202601030000 "$OCP/$T.jsonl"
+  launch() {  # agent-here's launcher for slot $1 from the shared folder, extra env after; prints the --resume id
+    rm -f "${OC:?}/argv.claude"
+    ( cd "$OCW" && env -u ZELLIJ_SESSION_NAME -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u TMUX \
+        HOME="$OC/home" PATH="$OC/bin:$PATH" CLAUDE_CONFIG_DIR="$OCC" CLAUDE_FLEET_DIR="$OCF" \
+        CLAUDE_FLEET_SOCK="$OCS" CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1 "${@:2}" \
+        /bin/bash "$ROOT/bin/claude-here" "$1" 2>"$OC/stderr" )
+    sed -n 's/.*--resume \([^ ]*\).*/\1/p' "$OC/argv.claude" 2>/dev/null
+  }
+
+  # Q1, the first night: master's record names M, the worker's names T, and T wrote last.
+  record "$M" master 1000 '%19@100'; record "$T" toolbox 1001 '%3@100'
+  is "Q1: a lead rebuilt with no id resumes ITS OWN conversation, not the folder's newest" "$M" "$(launch master)"
+
+  # Q2's aftermath: T's record now says master too, and is the newer. Name history decides.
+  record "$T" master 2000 '%0@200'
+  : > "$OCF/slot-claim.log"
+  is "Q2: two records for master — the one born as master wins, not the newer" "$M" "$(launch master)"
+  is "...and the choice is logged, naming both" "yes" \
+     "$(grep -q '2 records claim this slot: 11111111.*22222222.*resuming 11111111' "$OCF/slot-claim.log" && echo yes || echo no)"
+  # When name history cannot tell them apart, the newest — but never silently.
+  convo "$T" acme-api/master; touch -t 202601030000 "$OCP/$T.jsonl"
+  : > "$OCF/slot-claim.log"
+  is "...two born-here claimants: the newest, as before" "$T" "$(launch master)"
+  is "...and that is said too" "yes" \
+     "$(grep -q 'could not tell them apart' "$OCF/slot-claim.log" && echo yes || echo no)"
+  convo "$T" acme-api/toolbox acme-api/master; touch -t 202601030000 "$OCP/$T.jsonl"
+  record "$T" toolbox 1001 '%3@100'
+
+  # Q3: a card with no record of its own falls back to the folder — past what others own.
+  convo "$V" acme-api/docs-pass; touch -t 202601040000 "$OCP/$V.jsonl"
+  record "$V" docs-pass 1500 '%9@200'
+  is "Q3: a fresh card does not take a conversation another card's record claims" "$U" "$(launch notes)"
+  # ...and past what a live process has open, even with no record naming it (run by hand).
+  rm -f "${OCF:?}/${V:?}.json"
+  ( exec -a "claude --resume $V" sleep 60 ) & OCH=$!; disown "$OCH"
+  sleep 0.3
+  is "Q3: ...nor one a live process has open, recorded or not" "$U" "$(launch notes)"
+  is "...and says what it passed over" "yes" \
+     "$(grep -q "33333333 (open in live process $OCH)" "$OC/stderr" && echo yes || echo no)"
+  # The slot's OWN record too: a lead whose conversation is live elsewhere does not become a
+  # second writer on it (after the few seconds' grace a relaunch gets).
+  record "$V" master 3000 '%0@300'; rm -f "${OCF:?}/${M:?}.json"
+  is "Q3: a slot's own record is not resumed while another process holds it" "no" \
+     "$([ "$(launch master)" = "$V" ] && echo yes || echo no)"
+  rm -f "${OCF:?}/${V:?}.json"; record "$M" master 1000 '%19@100'
+  # An explicit id (fleet-open, a reopen, a wake) is refused outright, and claude never runs.
+  is "Q3: an explicit id another process holds is refused" "refused" \
+     "$(launch master CLAUDE_FLEET_RESUME="$V" >/dev/null; [ -f "$OC/argv.claude" ] && echo ran || echo refused)"
+  is "...saying who holds it" "yes" \
+     "$(grep -q "refusing — conversation $V is open in live process $OCH" "$OC/stderr" && echo yes || echo no)"
+  reap "$OCH"
+  # ...but a holder that is already dying — every relaunch kills the old pane just before —
+  # is given its few seconds, so a restart does not refuse its own predecessor.
+  ( exec -a "claude --resume $M" sleep 1 ) & OCH=$!; disown "$OCH"
+  sleep 0.2
+  is "...while a predecessor that exits within the grace is resumed" "$M" "$(launch master CLAUDE_FLEET_RESUME="$M")"
+  reap "$OCH"
+
+  # CODEX, THE SAME RULES. Its records carry agent:codex and no name history; its rollouts
+  # live under CODEX_HOME and carry the cwd in their first line.
+  cxroll() {  # id -> the rollout's path
+    local d; d="$OCX/sessions/$(date +%Y/%m/%d)"; mkdir -p "$d"
+    printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s","timestamp":"%s"}}\n' "$1" "$OCW" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$d/rollout-x-$1.jsonl"
+    printf '%s' "$d/rollout-x-$1.jsonl"
+  }
+  CM=55555555-5555-4555-8555-555555555555; CV=66666666-6666-4666-8666-666666666666
+  printf '{"session_id":"%s","agent":"codex","sock":"%s","slot":"api","cwd":"%s","transcript":"%s","ts":1000}\n' \
+    "$CM" "$OCS" "$OCW" "$(cxroll "$CM")" > "$OCF/$CM.json"
+  sleep 1; cxroll "$CV" >/dev/null                          # the folder's newest, nobody's slot
+  cxlaunch() {
+    rm -f "${OC:?}/argv.codex"
+    ( cd "$OCW" && env -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u TMUX HOME="$OC/home" PATH="$OC/bin:$PATH" \
+        CODEX_HOME="$OCX" CLAUDE_CONFIG_DIR="$OCC" CLAUDE_FLEET_DIR="$OCF" CLAUDE_FLEET_SOCK="$OCS" "${@:2}" \
+        /bin/bash "$ROOT/bin/codex-here" "$1" 2>"$OC/stderr" )
+    cat "$OC/argv.codex" 2>/dev/null
+  }
+  is "codex: a slot resumes its own recorded conversation, not resume --last" "resume $CM" \
+     "$(cxlaunch api | awk '{print $1, $2}')"
+  ( exec -a "codex resume $CV" sleep 60 ) & OCH=$!; disown "$OCH"
+  sleep 0.3
+  is "codex: an explicit id another process holds is refused" "refused" \
+     "$(cxlaunch api CLAUDE_FLEET_RESUME="$CV" >/dev/null; [ -f "$OC/argv.codex" ] && echo ran || echo refused)"
+  reap "$OCH"
+
+  # Q2 AT THE WRITER: the hook files a conversation under the pane it runs in. Moving into
+  # another pane's slot is logged with the slot's other claimants; a rename is not.
+  tmux -L "$OCS" new-session -d -s toolbox -c "$OCW" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  tmux -L "$OCS" new-session -d -s master  -c "$OCW" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  sleep 0.3
+  OC_SOCK="$(tmux -L "$OCS" display-message -p '#{socket_path}' 2>/dev/null)"
+  OC_PID="$(tmux -L "$OCS" display-message -p '#{pid}' 2>/dev/null)"
+  octurn() {  # session-whose-pane, sid
+    local pane; pane="$(tmux -L "$OCS" display-message -p -t "$1" '#{pane_id}' 2>/dev/null)"
+    printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s","transcript_path":"%s/%s.jsonl"}' "$2" "$OCW" "$OCP" "$2" \
+    | env TMUX="$OC_SOCK,$OC_PID,0" TMUX_PANE="$pane" CLAUDE_FLEET_SLOT="$1" CLAUDE_FLEET_SOCK="$OCS" \
+          CLAUDE_FLEET_DIR="$OCF" CLAUDE_CONFIG_DIR="$OCC" CLAUDE_FLEET_NOTIFIER=off \
+          "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  rm -f "${OCF:?}/${T:?}.json"; octurn toolbox "$T"; octurn master "$M"
+  : > "$OCF/slot-claim.log"
+  octurn master "$T"
+  is "Q2: the hook files the conversation under the pane it now runs in" "master" "$(jq -r .slot "$OCF/$T.json" 2>/dev/null)"
+  is "...and logs the move, naming the slot's other claimant" "yes" \
+     "$(grep -q "$OCS/master: conversation $T MOVED here from toolbox .* also claimed by: $M" "$OCF/slot-claim.log" && echo yes || echo no)"
+  : > "$OCF/slot-claim.log"
+  tmux -L "$OCS" rename-session -t toolbox api-2 2>/dev/null; octurn api-2 "$U"; octurn api-2 "$U"
+  tmux -L "$OCS" rename-session -t api-2 api-3 2>/dev/null; octurn api-3 "$U"
+  is "...while a rename (same pane, new name) is not a move" "0" "$(grep -c MOVED "$OCF/slot-claim.log" || true)"
+  tmux -L "$OCS" kill-server 2>/dev/null
+
+  # fleet-restart --reopen (the grid's ⏎ on a lost card, fleet_reopen) settles two records by
+  # name history too, and refuses a conversation a live process holds. No server: a reopen
+  # after a crash starts one, with this environment.
+  record "$M" master 1000 '%19@100'; record "$T" master 2000 '%0@200'
+  ocre() { env -u TMUX HOME="$OC/home" PATH="$ROOT/bin:$OC/bin:$PATH" CLAUDE_FLEET_DIR="$OCF" \
+             CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1 "$ROOT/bin/fleet-restart" -s "$OCS" --reopen master 2>&1; }
+  rm -f "${OC:?}/argv.claude"
+  out="$(ocre)"
+  oi=0; while [ ! -s "$OC/argv.claude" ] && [ "$oi" -lt 50 ]; do sleep 0.1; oi=$((oi+1)); done
+  is "reopen: a lost master comes back on the conversation born there" "$M" \
+     "$(sed -n 's/.*--resume \([^ ]*\).*/\1/p' "$OC/argv.claude" 2>/dev/null)"
+  tmux -L "$OCS" kill-server 2>/dev/null
+  ( exec -a "claude --resume $M" sleep 60 ) & OCH=$!; disown "$OCH"
+  sleep 0.3
+  out="$(ocre)"
+  is "reopen: ...and refuses it while another process has it open" "yes" \
+     "$(grep -q "already open in live process $OCH" <<< "$out" && echo yes || echo no)"
+  reap "$OCH"
+  tmux -L "$OCS" kill-server 2>/dev/null
+  rm -rf "${OC:?}"
+else
+  skip "one conversation, one slot" "node, jq or tmux missing"
+fi
+
 # ── a run leaves no fleet-serve it did not find ──────────────────────────────
 # Eight leaked daemons were found on loopback ports, from suite runs in worktrees that had
 # since been removed. Two halves: a run that was KILLED must be reapable by the next one

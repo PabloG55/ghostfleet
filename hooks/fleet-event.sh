@@ -326,6 +326,30 @@ esac
 # suite holds the two to each other.
 _mod="$(jq -c '{source, state, turnId, mod, usage, ledger} | with_entries(select(.value != null))' \
   "$FLEET_DIR/$SESSION.json" 2>/dev/null)"
+
+# ── A CONVERSATION THAT CHANGES PANES CHANGES SLOTS, AND THAT IS NEVER QUIET ────────────
+# The slot above is the pane's name, which is right for a rename (same pane, new name) and
+# is also how a conversation resumed into the WRONG pane takes that pane's name: measured,
+# a worker's conversation launched into its fleet's lead pane rewrote its own record from
+# the worker's name to `master` on its first event, the worker's card had nothing left under
+# its name, and the fleet dir held two `master` records that every reader settled by `ts`.
+# The pane really is running it, so the record still says so — but the move is written to
+# slot-claim.log, with every other record that claims the slot, so it is found the day it
+# happens rather than four days later. A rename keeps its pane and is not logged.
+if [ -n "$SOCK" ] && [ -n "$SLOT" ] && [ -f "$FLEET_DIR/$SESSION.json" ]; then
+  IFS=$'\x1f' read -r _osock _oslot _opane < <(jq -r \
+    '[(.sock // ""), (.slot // ""), (.pane // "")] | join("\u001f")' "$FLEET_DIR/$SESSION.json" 2>/dev/null)
+  if [ "$_osock" = "$SOCK" ] && [ -n "$_oslot" ] && [ "$_oslot" != "$SLOT" ] \
+     && [ -n "$PANE" ] && [ "$_opane" != "$PANE" ]; then
+    _rivals="$(jq -r --arg s "$SOCK" --arg l "$SLOT" --arg me "$SESSION" \
+      'select(.sock == $s and .slot == $l and .session_id != $me) | .session_id' \
+      "$FLEET_DIR"/*.json 2>/dev/null | tr '\n' ' ')"
+    printf '%s %s/%s: conversation %s MOVED here from %s (pane %s -> %s)%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SOCK" "$SLOT" "$SESSION" "$_oslot" "${_opane:-?}" "$PANE" \
+      "${_rivals:+ — this slot is also claimed by: ${_rivals% }}" >> "$FLEET_DIR/slot-claim.log" 2>/dev/null
+    _dbg "$EVENT $SESSION moved $_oslot -> $SLOT (pane ${_opane:-?} -> $PANE)${_rivals:+, rivals: ${_rivals% }}"
+  fi
+fi
 case "$_mod" in '{'*) ;; *) _mod='{}' ;; esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"
 if jq -n \

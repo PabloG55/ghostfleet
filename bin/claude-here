@@ -301,6 +301,16 @@ has_turns() { grep -qE '"type":[[:space:]]*"(user|assistant)"' "$1" 2>/dev/null;
 resume_id=""
 explicit=0
 
+# lib/slot-claim.mjs answers "which conversation is this slot's" for every launcher, so
+# claude and codex cannot grow two rules for it. Found through symlinks, as codex-here does.
+SLOTCLAIM=""
+if command -v node >/dev/null 2>&1; then
+  _src="${BASH_SOURCE[0]}"
+  while [ -L "$_src" ]; do _tg="$(readlink "$_src")"; case "$_tg" in /*) _src="$_tg" ;; *) _src="$(dirname "$_src")/$_tg" ;; esac; done
+  _lib="$(cd "$(dirname "$_src")/../lib" 2>/dev/null && pwd)/slot-claim.mjs"
+  [ -f "$_lib" ] && SLOTCLAIM="$_lib"
+fi
+
 # 0) EXPLICIT conversation (fleet-open <session-id>): resume exactly this one and
 # skip discovery. Deliberately never falls back to "newest in this cwd" — silently
 # opening a different conversation than the one asked for is worse than erroring.
@@ -308,6 +318,13 @@ if [ -n "${CLAUDE_FLEET_RESUME:-}" ]; then
   resume_id="$CLAUDE_FLEET_RESUME"; explicit=1
   [ -f "$dir/$resume_id.jsonl" ] \
     || echo "claude-here: warning — no transcript $dir/$resume_id.jsonl for this cwd; asking claude anyway" >&2
+  # ...and never into a SECOND pane. Two processes on one transcript interleave their turns
+  # into one file and each answers from a history the other is rewriting. lib/slot-claim.mjs
+  # gives a holder a few seconds first: every relaunch kills the old pane just before this.
+  if [ -n "$SLOTCLAIM" ] && holder="$(node "$SLOTCLAIM" held --id "$resume_id" 2>/dev/null)"; then
+    echo "claude-here: refusing — conversation $resume_id is open in live process $holder; a conversation is never resumed into a second pane" >&2
+    exit 1
+  fi
 fi
 
 # 1) exact match: the most recent session for this (zellij session + slot)
@@ -327,12 +344,31 @@ if [ "$explicit" != 1 ] && [ -n "$resume_id" ] && ! { [ -f "$dir/$resume_id.json
   resume_id=""
 fi
 
-# 2) else the newest REAL conversation in this cwd
+# 1b) a tmux fleet: THIS slot's own conversation, by its record (lib/slot-claim.mjs).
+# Step 1 above is zellij's, and nothing stood in for it on tmux — so every pane started
+# without an id (the lead, rebuilt by opening a project after a crash, is the common one)
+# fell straight to step 2. In a folder that several cards share, step 2 is whichever card
+# wrote last: measured, a lead came back on a worker's conversation that had written seven
+# seconds after its own, and later on a third card's conversation that was live in its own
+# pane at that moment.
+_sock="${CLAUDE_FLEET_SOCK:-}"
+if [ "$explicit" != 1 ] && [ -z "$resume_id" ] && [ -n "$slot" ] && [ -n "$_sock" ] && [ -n "$SLOTCLAIM" ]; then
+  IFS=$'\x1f' read -r resume_id _ _ < <(node "$SLOTCLAIM" pick --dir "$FLEET_DIR" --sock "$_sock" --slot "$slot")
+fi
+
+# 2) else the newest REAL conversation in this cwd that NOBODY ELSE OWNS: not one another
+# slot's record claims (a live card, an asleep one, a lost one), and not one a live process
+# has open. Without node the old walk stands, which is no worse than before.
 if [ "$explicit" != 1 ] && [ -z "$resume_id" ] && [ -d "$dir" ]; then
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    if has_turns "$f"; then resume_id="$(basename "$f" .jsonl)"; break; fi
-  done < <(ls -t "$dir"/*.jsonl 2>/dev/null)
+  if [ -n "$SLOTCLAIM" ]; then
+    IFS=$'\x1f' read -r resume_id _ _ < <(node "$SLOTCLAIM" fallback --dir "$FLEET_DIR" \
+      --sock "$_sock" --slot "$slot" --cwd "$PWD")
+  else
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      if has_turns "$f"; then resume_id="$(basename "$f" .jsonl)"; break; fi
+    done < <(ls -t "$dir"/*.jsonl 2>/dev/null)
+  fi
 fi
 
 # A conversation that's registered as a background agent can't be plain --resume'd:

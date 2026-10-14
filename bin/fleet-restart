@@ -96,9 +96,19 @@ load_records() {
 # matching on slot alone reports another project's conversation. Same shape as
 # fleet-list's lookup, including the legacy no-sock fallback, which is never used
 # for the ambiguous `master`.
+#   TWO RECORDS FOR ONE SLOT ARE NOT SETTLED BY RECENCY. A conversation resumed into the
+# wrong pane gets that pane's name in its record, and is then the newest claimant of a slot
+# it was never born in — so "newest" handed a lead's card back to the intruder. Asked of
+# lib/slot-claim.mjs, which reads each claimant's name history and says loudly which it took.
 sid_for() {
-  local sock="$1" slot="$2" out=""
-  out="$(printf '%s\n' "$RECORDS" | awk -F'\t' -v s="$slot" -v k="$sock" \
+  local sock="$1" slot="$2" out="" agent
+  if [ -f "$LIB/slot-claim.mjs" ] && command -v node >/dev/null 2>&1; then
+    agent="$(agent_for "$sock" "$slot")"
+    out="$(node "$LIB/slot-claim.mjs" pick --keep-live --dir "$FLEET_DIR" --sock "$sock" --slot "$slot" \
+           --agent "$([ "$agent" = codex ] && echo codex || echo claude)")"
+    out="${out%%"$US"*}"
+  fi
+  [ -n "$out" ] || out="$(printf '%s\n' "$RECORDS" | awk -F'\t' -v s="$slot" -v k="$sock" \
          '$2==s && $1==k && $4!="" {print $3"\t"$4}' | sort -rn | head -1 | cut -f2)"
   if [ -z "$out" ] && [ "$slot" != master ]; then
     out="$(printf '%s\n' "$RECORDS" | awk -F'\t' -v s="$slot" \
@@ -564,6 +574,14 @@ reopen_one() {
   if [ -n "$tr" ] && [ -f "$tr" ] && [ "$agent" = codex ] \
      && node "$LIB/codex-rollout.mjs" open "$tr" 2>/dev/null; then
     echo "fleet-restart: '$name''s conversation ${id%%-*} is already open in another pane — not resuming it twice" >&2
+    return 1
+  fi
+  # A claude conversation holds no file open; it is held by a process whose note or argv
+  # names it (lib/slot-claim.mjs). Same refusal, so the two agents keep one rule.
+  local holder
+  if [ "$agent" = claude ] && [ -f "$LIB/slot-claim.mjs" ] \
+     && holder="$(node "$LIB/slot-claim.mjs" held --grace 0 --id "$id" 2>/dev/null)"; then
+    echo "fleet-restart: '$name''s conversation ${id%%-*} is already open in live process $holder — not resuming it twice" >&2
     return 1
   fi
   if relaunch "$sock" "$name" "$id" "$cwd" "$agent"; then
