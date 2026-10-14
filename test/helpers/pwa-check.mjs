@@ -1059,7 +1059,9 @@ is('...and the pane stops measuring under it', true, /classList\.contains\('shel
 is('navigation pushes history entries', true, /history\.pushState\(\{ gf: navDepth \}, '', location\.href\)/.test(APP));
 is('...and never a url of its own', 0,
    (APP.match(/pushState\([^)]*,\s*'\/[^']*'\)/g) || []).length);
-is('...popstate is what moves back', true, /addEventListener\('popstate', \(\) => popTo\(\)\)/.test(APP));
+// The listener also records whether the platform already animated the move (slideNav), so
+// it is matched by what it calls, not by being exactly one arrow.
+is('...popstate is what moves back', true, /addEventListener\('popstate', \((e)?\) => \{?[^\n]*\bpopTo\(\)/.test(APP));
 is('...and the back button asks the platform', true, /if \(navDepth > 0 &&[^\n]*history\.back/.test(APP));
 // A sheet and a confirmation are back-steps too: the gesture must close them rather than
 // leaving the screen under them.
