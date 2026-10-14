@@ -808,6 +808,9 @@ async function keyboard(w, h, { indicator = true } = {}) {
   await evaluate((kb) => {
     const fake = { height: innerHeight - kb, width: innerWidth, offsetTop: 0, offsetLeft: 0,
                    pageTop: 0, pageLeft: 0, scale: 1, addEventListener() {}, removeEventListener() {} };
+    // Kept so the keyboard can CLOSE: in Chrome visualViewport is an own property of the
+    // global, so deleting the fake leaves no viewport at all rather than the real one.
+    if (!window.__vvReal) window.__vvReal = Object.getOwnPropertyDescriptor(window, 'visualViewport');
     Object.defineProperty(window, 'visualViewport', { configurable: true, value: fake });
     const ta = document.querySelector('.composer textarea');
     if (ta) ta.focus();
@@ -849,25 +852,22 @@ async function keyboard(w, h, { indicator = true } = {}) {
   }
   is(`${w}px keyboard: the composer really has focus`, true, open.focused);
 
-  // WHAT THIS GROUP CAN AND CANNOT PROVE — read before adding to it, because the previous
+  // WHAT THIS GROUP CAN AND CANNOT PROVE — read before adding to it, because a previous
   // version of these rows was GREEN while the app was unusable on a real iPhone.
   //
-  // It fakes visualViewport to the shape iOS presents: layout viewport unchanged, visual
-  // viewport short by a keyboard. That much is faithful. What no desktop engine does is
-  // RESPOND like Safari: it does not pan the page to reveal the focused field, and it does
-  // not leave height and offsetTop unreverted afterwards. The old rows asserted our
-  // reaction to the fake and read that as the feature working. It was not: driving the
-  // column's height from visualViewport.height and calling scrollTo(0,0) on its scroll
-  // event put the composer at the TOP of the screen over the status bar with the transcript
-  // black beneath it, and opened chats scrolled past their own content.
-  //
-  // So this asserts only what is actually observable here: THE LAYOUT DOES NOT BREAK when
-  // the visual viewport shrinks. Whether the composer is reachable above a real keyboard is
-  // Safari's pan doing its job, and it can only be confirmed on a device. Do not add a row
-  // that claims otherwise.
-  is(`${w}px keyboard: the column stays the layout viewport`, true,
-     Math.abs(open.appH - before.innerH) <= 2);
-  is(`${w}px ...because nothing writes a --vvh any more`, '', open.vvh);
+  // It fakes visualViewport to the shape iOS presents: visual viewport short by a keyboard.
+  // What no desktop engine does is RESPOND like iOS — it does not shrink innerHeight in
+  // standalone, does not scroll an overflowing document, does not pan. So these rows assert
+  // only our side of it: with the keyboard up the column is the VISIBLE height (so there is
+  // nothing for iOS to scroll the header away with), the composer ends inside it, and when
+  // the keyboard goes every property is removed and the column is the full viewport again —
+  // the half the first visualViewport version got wrong. That iOS then leaves the page alone
+  // was measured in the installed app on a simulator, and can only be confirmed there.
+  is(`${w}px keyboard: the column is the visible height`, true,
+     open.visible !== null && Math.abs(open.appH - open.visible) <= 2);
+  is(`${w}px ...so the composer ends above the keyboard`, true,
+     open.taBottom !== null && open.taBottom <= open.visible);
+  is(`${w}px ...and nothing writes a --vvh`, '', open.vvh);
   // The bottom inset is for the home indicator and the keyboard covers the home indicator:
   // "you are leaving too much space between the text box and the bottom". This is the one
   // thing the client still does with the keyboard, and it is a padding, not a geometry.
@@ -879,6 +879,30 @@ async function keyboard(w, h, { indicator = true } = {}) {
   // asserting 0 here would be asserting that the browser does not do its job.
   const m = await evaluate(OVERFLOW);
   is(`${w}px keyboard: every row still fits its own box`, '', m.boxes.join(','));
+
+  // ...and the keyboard goes: the real visualViewport back, the geometry REMOVED.
+  await evaluate(() => {
+    if (window.__vvReal) Object.defineProperty(window, 'visualViewport', window.__vvReal);
+    dispatchEvent(new Event('resize'));
+    return null;
+  });
+  await sleep(200);
+  const shut = await evaluate(() => {
+    const d = document.documentElement, app = document.getElementById('app');
+    return { appH: Math.round(app.getBoundingClientRect().height), innerH: innerHeight,
+             h: d.style.getPropertyValue('--app-h'), top: d.style.getPropertyValue('--app-top') };
+  });
+  is(`${w}px keyboard closed again: the column is the whole viewport`, true,
+     Math.abs(shut.appH - shut.innerH) <= 2);
+  is(`${w}px ...because the geometry was removed, not left behind`, '', shut.h + shut.top);
+  // Back up for the indicator half, which is about a focused composer over a short viewport.
+  await evaluate((kb) => {
+    const fake = { height: innerHeight - kb, width: innerWidth, offsetTop: 0, offsetLeft: 0,
+                   pageTop: 0, pageLeft: 0, scale: 1, addEventListener() {}, removeEventListener() {} };
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: fake });
+    dispatchEvent(new Event('resize'));
+    return null;
+  }, KB);
 
   if (!indicator) return;
   // ── the thinking indicator, under a focused composer ────────────────────

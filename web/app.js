@@ -2205,48 +2205,61 @@ function copyText(t) {
 // something is one motion, and making you switch views to find the box would be the same
 // mistake the sheet was.
 // ── the keyboard, which is the one viewport nothing else reports ──────────
-// THE SOFTWARE KEYBOARD IS NOT PART OF THE DYNAMIC VIEWPORT. On iOS `100dvh` does not
-// shrink when the keyboard opens, so the shell column stayed full height, the keyboard
-// covered its bottom, and Safari's only remaining move was to SCROLL THE PAGE to bring the
-// focused composer into view. Reported in those words: "the scroll happens when I click on
-// the text box to type". And a page that scrolls at all is a page that will also scroll
-// SIDEWAYS the moment anything is marginally too wide, which is why this and the clipping
-// were one report.
-//   visualViewport is the only thing that knows. Its `height` is what is actually visible
-// with the keyboard in place, and `offsetTop` is how far Safari has already panned; both
-// are written into CSS custom properties and the layout follows them, rather than the
-// layout being fixed and the browser panning around it.
+// THE SOFTWARE KEYBOARD IS NOT PART OF THE DYNAMIC VIEWPORT, and in the installed app it
+// is worse than that. Measured on an iOS 26.5 simulator, standalone, from the home-screen
+// icon: focusing the composer took innerHeight AND visualViewport.height from 844 to 431,
+// but the `position: fixed; inset: 0` shell stayed 844 tall — so the document overflowed by
+// the keyboard's height, iOS scrolled it 413 to reveal the box, and the header went to
+// y=-405. Reported as "the whole page scrolls and the status bar draws over the chat".
+//   So while the keyboard is up the shell is laid out to the VISIBLE area: its top is
+// visualViewport.offsetTop and its height is visualViewport.height. Nothing then overflows,
+// there is nothing left for iOS to scroll, and the column — header, list, composer —
+// shrinks into the space above the keyboard the way a chat app's does.
+//   THIS IS THE PATTERN A PREVIOUS VERSION GOT WRONG, and the two things that made it wrong
+// are both absent. It called scrollTo(0,0) on every visualViewport scroll, which fights the
+// user and the browser for the same scrollbar; nothing here scrolls the window, ever. And it
+// left its height in place when the keyboard went, so a value that does not reliably revert
+// kept the shell misaligned; here both properties are REMOVED the moment the keyboard is not
+// detected, and the closed layout is the plain `inset: 0` that was measured correct.
+//   The keyboard is "visible height well below the tallest seen at this width", not
+// "innerHeight minus visual height": in standalone innerHeight shrinks WITH the keyboard, so
+// that difference reads 0 with the keyboard fully up. Keyed by width so a rotation starts
+// over instead of comparing a landscape height against a portrait one.
 //   The bottom safe-area inset goes to 0 while the keyboard is up. It is there for the home
 // indicator, the keyboard covers the home indicator, and stacking one on the other is the
 // "too much space between the text box and the bottom" half of the same report.
+let vvTallest = 0, vvWidth = 0;
 function syncViewport() {
   try {
     const vv = typeof visualViewport !== 'undefined' ? visualViewport : null;
     if (!vv) return;
     const h = Number(vv.height) || 0;
-    const full = Number(innerHeight) || h;
+    const w = Math.round(Number(vv.width) || 0);
+    if (w !== vvWidth) { vvWidth = w; vvTallest = 0; }
+    vvTallest = Math.max(vvTallest, h, Number(innerHeight) || 0);
     // A threshold, not equality: the URL bar moves this by a few pixels all the time and a
     // keyboard takes a third of the screen. 120px is well above the former, well below the
     // latter.
-    const keyboard = full - h > 120;
-    // THE ONLY THING THIS WRITES IS A PADDING. It used to drive the shell's HEIGHT from
-    // vv.height and scrollTo(0,0) away Safari's pan; on a real iPhone that put the composer
-    // at the top of the screen over the status bar with the transcript black below it. The
-    // layout is dvh now and Safari is allowed to pan. An inset that is briefly wrong is a
-    // cosmetic 34px; a height driven by a number that does not reliably revert is a dead
-    // screen.
-    // REMOVED, NOT SET TO EMPTY, and that distinction was costing the home indicator.
-    // `padding-bottom: calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px)` only
-    // reaches its fallback when --kb-inset is ABSENT. setProperty(name, '') does not
-    // reliably remove a custom property in WebKit — it leaves one whose value substitutes
-    // as nothing or as zero — so the fallback never applied and the composer's padding
-    // resolved to 0 + 8.
-    //   MEASURED on the device: gap8 against sab29. Harmless only while the shell stopped
-    // 53pt short of the bottom; the moment it reaches the real bottom, 8px of padding puts
-    // the composer ON the home indicator. The two findings arrived in one log line and had
-    // to be fixed in one change.
-    if (keyboard) document.documentElement.style.setProperty('--kb-inset', '0px');
-    else          document.documentElement.style.removeProperty('--kb-inset');
+    const keyboard = vvTallest - h > 120;
+    const root = document.documentElement.style;
+    // A list that was showing the newest message keeps showing it as it shrinks — the
+    // keyboard opening must not leave the reader looking at whatever was mid-screen.
+    const list = document.querySelector('#app.shell > .chat');
+    const pinned = !!list && list.scrollHeight - list.clientHeight - list.scrollTop < 4;
+    // REMOVED, NOT SET TO EMPTY. `var(--kb-inset, env(safe-area-inset-bottom))` only
+    // reaches its fallback when the property is ABSENT; setProperty(name, '') does not
+    // reliably remove one in WebKit, and the composer's padding resolved to 0 + 8 — the
+    // composer on the home indicator. The same holds for the two geometry properties.
+    if (keyboard) {
+      root.setProperty('--kb-inset', '0px');
+      root.setProperty('--app-top', Math.round(Number(vv.offsetTop) || 0) + 'px');
+      root.setProperty('--app-h', Math.round(h) + 'px');
+    } else {
+      root.removeProperty('--kb-inset');
+      root.removeProperty('--app-top');
+      root.removeProperty('--app-h');
+    }
+    if (pinned) list.scrollTop = list.scrollHeight;
   } catch {}
 }
 
@@ -4514,14 +4527,15 @@ addEventListener('resize', () => {
   if (paneBoxNode) sizePaneBox(paneBoxNode);
 });
 // visualViewport fires its OWN resize when the keyboard opens — window's does not, on iOS
-// — so this is a second registration rather than a tidier one. There is deliberately NO
-// `scroll` listener: that fires while Safari pans around a focused field, and the handler
-// that used it called scrollTo(0,0), which is a scroll handler fighting the user for the
-// scrollbar. Safari's pan is now left alone.
+// — so this is a second registration rather than a tidier one. `scroll` too, because iOS
+// can still pan the visual viewport and the shell's top follows offsetTop. The handler
+// only WRITES LAYOUT; it never scrolls the window, which is what made the scroll listener
+// a version ago a fight with the user for the scrollbar.
 syncViewport();
 try {
   if (typeof visualViewport !== 'undefined' && visualViewport) {
     visualViewport.addEventListener('resize', syncViewport);
+    visualViewport.addEventListener('scroll', syncViewport);
   }
 } catch {}
 addEventListener('keydown', onKey);
