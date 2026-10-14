@@ -47,6 +47,7 @@ import {
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
   judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn,
   markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, TOOL,
+  revisit, expireDormant, endsOnChoice,
 } from './ledger.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
@@ -1015,6 +1016,7 @@ let stepTexts = new Map() // turnId -> the text each of its main-loop steps wrot
 let ledgerShown = ''     // what the band and the record last said
 let ledgerAsOf = 0
 let gateTurns = []       // the last few turns the gate's own re-prompt started
+let choiceTurn = ''      // the last turn, when it ended on a numbered question (ledger.js foldReply)
 
 async function ledgerConfigOf($) {
   if (ledgerCfg) return ledgerCfg
@@ -1137,10 +1139,11 @@ async function onPromptSubmit($, e, next) {
   const at = await $.clock.now()
   const source = sourceOf(e)
   const ids = []
+  const made = []
   let window = 0
   let cur = source ? await changeLedger($, l => {
     window = Number(l.window) || 0
-    return addPrompt(l, { text: e.text, at, turnId: e.turnId || '', source, queued: Boolean(e.turnId) }, ids)
+    return addPrompt(l, { text: e.text, at, turnId: e.turnId || '', source, queued: Boolean(e.turnId), choiceTurn }, ids, made)
   }) : null
   if (!cur) {
     const file = await ledgerPath($)
@@ -1150,8 +1153,9 @@ async function onPromptSubmit($, e, next) {
   const r = await next(note ? { ...e, context: [...(e.context || []), note] } : e)
   if (!ids.length) return r
   if (!r || r.drop !== undefined) {
-    // It never entered: its items go, and the window goes back to the one before.
-    await changeLedger($, l => ({ ...dropItems(l, ids), window }))
+    // It never entered: its items go, and the window goes back to the one before. An item it
+    // only touched (a resend, a reply) was there before it, and stays.
+    await changeLedger($, l => ({ ...dropItems(l, made), window }))
     return r
   }
   // Typed over a running turn, it carries that turn's id. Submitted idle, `next` resolves
@@ -1248,9 +1252,10 @@ function takeSteps(e) {
 async function ledgerTurnComplete($, e, blocks = turnBlocks([], e.answer), generation = turnsStarted) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
-  if (e.reason === 'aborted') await changeLedger($, l => markInterrupted(l, e.turnId))
-  if (e.reason !== 'answer') return
   const at = await $.clock.now()
+  choiceTurn = e.reason === 'answer' && endsOnChoice(blocks[blocks.length - 1]) ? e.turnId : ''
+  if (e.reason === 'aborted') await changeLedger($, l => markInterrupted(l, e.turnId, at))
+  if (e.reason !== 'answer') return
   answers = [...answers, { at, turnId: e.turnId, blocks }].slice(-3)
   if (judging) { judgeNext = { e, blocks, generation }; return }
   judging = true
@@ -1276,6 +1281,7 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   if (!surfaces || !surfaces.length) return                  // -p, the SDK: nobody to nag
   const file = await ledgerPath($)
   if (!file) return
+  await changeLedger($, l => expireDormant(l, nowMs))
   const cur = await readLedger($, file)
   if (!cur) return
   // The judge is the backup: it reads only what is still open after the agent's own closes
@@ -1285,7 +1291,9 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const open = openItems(cur, nowMs)
   const closedOwn = cur.items.some(i => i.closedBy === 'agent' && i.closedTurn === e.turnId)
   const promises = cfg.promises !== 'off' && soundsLikeAPromise(e.answer)
-  if (!open.length && (closedOwn || !promises)) return       // nothing to judge: no call
+  // A stale or waiting item this turn mentions is judged with them (ledger.js revisit).
+  const back = revisit(cur, nowMs, blocks.join('\n'))
+  if (!open.length && !back.length && (closedOwn || !promises)) return  // nothing to judge: no call
   // The turns since the oldest open item was made, this one last: a request answered one
   // turn ago and only referred to now ("I ended my previous reply with it") is still
   // answered.
@@ -1295,7 +1303,7 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   // reply past ~20 items, and from then on every turn's judge failed. Promises are read once,
   // by the first call; the others are told to return none. The calls run one after another:
   // the newest batch is the one most likely to matter, and it lands first.
-  const batches = open.length ? judgeBatches(open) : [[]]
+  const batches = open.length || back.length ? judgeBatches([...open, ...back]) : [[]]
   // The first call reads the turn's promises, so it is shown every open one to name the one a
   // phrase restates, whichever batch that promise is judged in.
   const openPromises = judgeBatches(open.filter(i => i.source === 'promise'))[0] || []

@@ -1,30 +1,46 @@
 #!/usr/bin/env bash
-# fleet-ledger [-s SOCKET] [session] [list|all|close <id>|clear]
+# fleet-ledger [-s SOCKET] [--session ID] [session] [list|all|close <id> [proof]|drop <id> <reason>|add <ask>|clear]
 #
 # A session's request LEDGER (the mod's LEDGER section, mods/ghostfleet/hooks/register.js):
 # every message submitted to it, held open until a final message answers it, and the
 # promises it made ("I'll merge when green"). This reads and closes items from outside the
 # session; inside one, /ledger does the same without a turn.
 #
-#   list        (default) what is still open
-#   all         every item the file keeps, closed ones too, with how each closed
-#   close <id>  close one by hand (the judge will not be asked about it again)
-#   clear       close every open item by hand; the history stays in the file
+#   list               (default) what is still open
+#   all                every item the file keeps, closed ones too, with how each closed
+#   close <id>         close one by hand (the judge will not be asked about it again)
+#   close <id> <proof> close one as the agent's ledger_close does: done, with its proof
+#   drop <id> <reason> as ledger_drop: not a real ask, or the person cancelled it
+#   add <ask>          as ledger_add: an ask the ledger missed, in the latest prompt
+#   clear              close every open item by hand; the history stays in the file
+#
+# The last three are the mod's tools from Bash, for a session older than the tools: the mod
+# registers them once, at session start, and /reload-plugins does not register them again.
 #
 # `session` is a session name on this fleet (its newest record on THIS socket, as
-# fleet-read finds it) or a session id. Without one: the session this runs in.
+# fleet-read finds it) or a session id; --session ID is a session id. Without one: the
+# session this runs in.
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-SESSION=""; VERB=""; ARG=""
+SESSION=""; VERB=""; ARG=""; WHY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -s) SOCK="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --session) SESSION="${2:-}"; [ -n "$SESSION" ] || { echo "fleet-ledger: --session needs a session id" >&2; exit 1; }; shift 2 ;;
+    -h|--help) sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "fleet-ledger: unknown option $1" >&2; exit 1 ;;
     list|all|clear) [ -z "$VERB" ] || { echo "fleet-ledger: unexpected arg $1" >&2; exit 1; }; VERB="$1"; shift ;;
-    close) VERB=close; ARG="${2:-}"; [ -n "$ARG" ] || { echo "fleet-ledger: close needs an item id" >&2; exit 1; }; shift 2 ;;
+    close|drop)
+      [ -z "$VERB" ] || { echo "fleet-ledger: unexpected arg $1" >&2; exit 1; }
+      VERB="$1"; ARG="${2:-}"; [ -n "$ARG" ] || { echo "fleet-ledger: $1 needs an item id" >&2; exit 1; }
+      shift 2; WHY="$*"; set --
+      [ "$VERB" = close ] || [ -n "$WHY" ] || { echo "fleet-ledger: drop needs a reason" >&2; exit 1; } ;;
+    add)
+      [ -z "$VERB" ] || { echo "fleet-ledger: unexpected arg $1" >&2; exit 1; }
+      VERB=add; shift; WHY="$*"; set --
+      [ -n "$WHY" ] || { echo "fleet-ledger: add needs the ask's text" >&2; exit 1; } ;;
     *) if [ -z "$SESSION" ] && [ -z "$VERB" ]; then SESSION="$1"; shift
        else echo "fleet-ledger: unexpected arg $1" >&2; exit 1; fi ;;
   esac
@@ -68,7 +84,7 @@ LEDGER_JS="$(cd "$(dirname "$src")/.." 2>/dev/null && pwd)/mods/ghostfleet/hooks
 [ -f "$LEDGER_JS" ] || { echo "fleet-ledger: $LEDGER_JS is missing" >&2; exit 1; }
 
 exec node --no-warnings --input-type=module -e '
-  const [js, dir, id, name, verb, arg] = process.argv.slice(1)
+  const [js, dir, id, name, verb, arg, why] = process.argv.slice(1)
   const L = await import(js)
   const fs = await import("node:fs")
   const file = L.ledgerFile(dir, id)
@@ -76,21 +92,39 @@ exec node --no-warnings --input-type=module -e '
   try { text = fs.readFileSync(file, "utf8") } catch {}
   if (text === null) {
     const msg = `${name}: no ledger (the mod has recorded nothing for this session)`
-    if (verb === "close") { console.error(`fleet-ledger: ${msg}`); process.exit(1) }
+    if (verb !== "list" && verb !== "all") { console.error(`fleet-ledger: ${msg}`); process.exit(1) }
     console.log(msg); process.exit(0)
   }
-  const ledger = L.parseLedger(text)
   const now = Date.now()
-  // Beside the file and renamed over it, as the mod writes it; dot-led so no glob reads it.
-  const save = next => { const tmp = `${dir}/.${id}.ledger.cli.tmp`; fs.writeFileSync(tmp, JSON.stringify(next)); fs.renameSync(tmp, file) }
-  if (verb === "list" || verb === "all") { console.log(L.listing(ledger, now, { all: verb === "all" })); process.exit(0) }
-  if (verb === "close") {
-    const next = L.closeByHand(ledger, arg, now)
-    if (!next) { console.error(`fleet-ledger: no open item ${arg} in ${name}`); process.exit(1) }
-    save(next); console.log(`closed ${arg}`); process.exit(0)
+  if (verb === "list" || verb === "all") { console.log(L.listing(L.parseLedger(text), now, { all: verb === "all" })); process.exit(0) }
+  // Each change is made against the file as it is, written beside it and renamed over it as the
+  // mod writes it (dot-led, so no glob reads it; named for this process, so two never share
+  // one). The mod changes the same file between turns: when the file moved while this one
+  // was computing, the change is made again against what is there now, not written over it.
+  const change = fn => {
+    for (let k = 0; k < 5; k++) {
+      const before = fs.readFileSync(file, "utf8")
+      const r = fn(L.parseLedger(before))
+      if (!r.ledger) return r
+      const tmp = `${dir}/.${id}.ledger.cli.${process.pid}.tmp`
+      fs.writeFileSync(tmp, JSON.stringify(r.ledger))
+      let now2 = null
+      try { now2 = fs.readFileSync(file, "utf8") } catch {}
+      if (now2 === before) { fs.renameSync(tmp, file); return r }
+      fs.rmSync(tmp, { force: true })
+    }
+    return { ledger: null, said: "ledger: the file kept changing under this write; nothing changed" }
   }
-  if (verb === "clear") {
-    const n = L.openItems(ledger, now).length
-    save(L.clearOpen(ledger, now)); console.log(`closed ${n} open item${n === 1 ? "" : "s"}`); process.exit(0)
-  }
-' "$LEDGER_JS" "$FLEET_DIR" "$ID" "$SESSION" "$VERB" "$ARG"
+  const ctx = { nowMs: now, turnId: "" }
+  const act = {
+    close: l => (why
+      ? L.closeByAgent(l, arg, why, ctx)
+      : (n => ({ ledger: n, said: n ? `closed ${arg}` : `fleet-ledger: no open item ${arg} in ${name}` }))(L.closeByHand(l, arg, now))),
+    drop: l => L.dropByAgent(l, arg, why, ctx),
+    add: l => L.addByAgent(l, why, ctx),
+    clear: l => { const n = L.openItems(l, now).length; return { ledger: L.clearOpen(l, now), said: `closed ${n} open item${n === 1 ? "" : "s"}` } },
+  }[verb]
+  const r = change(act)
+  if (!r.ledger) { console.error(r.said); process.exit(1) }
+  console.log(r.said); process.exit(0)
+' "$LEDGER_JS" "$FLEET_DIR" "$ID" "$SESSION" "$VERB" "$ARG" "$WHY"

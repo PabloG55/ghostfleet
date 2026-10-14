@@ -4352,6 +4352,12 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
       listed, waits, holds, gt, L.lastGateAt(L.markGated(l, ['2'], now - 5)) === now - 5].join(' | '))" 2>&1)"
   is "ledger: in-progress stays open and ungated; open is still gated; waiting is no promise; each hold says why" \
      "in-progress/open | true | false | false | 2 | 1:open:p,2:open:-,3:open:- | 2 | true | wwww--- | -,gate-turn,waiting,cooldown,-,workers | gg-- | true" "$lg"
+  # One long lead session's shapes, replayed (placeholder words; the helper says what each
+  # line means). Against the ledger.js before this fix the same replay reads 10 nudge items,
+  # 3 resends counted twice, the landed promise stale, the waiting item open, 2 answers as asks.
+  is "ledger: a week's shapes replayed: no nudge items, resends folded, a landed stale promise closed, waiting held, answers folded" \
+     "items 18|nudge items 0|resent pairs counted twice 0|done-but-stale promise: done|waiting on the person: waiting|bare answers made items 0|open now 1" \
+     "$(node --no-warnings "$ROOT/test/helpers/ledger-replay.mjs" "$ROOT/mods/ghostfleet/hooks/ledger.js" "$ROOT/test/fixtures/ledger-replay.json" 2>&1 | grep -v '^by source' | paste -sd'|' -)"
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
   printf '{"session_id":"lg-1","sock":"cf-lgtest","slot":"w1","ts":5}' > "${LG:?}/lg-1.json"
@@ -4379,6 +4385,25 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   is "fleet-ledger: list shows the last judge's status, failing or ok" \
      "last judge: FAILING, failed open: reply was not the JSON asked for (0s ago)|last judge: ok, 46 items in 5 calls (0s ago)" \
      "$(lgj '{"ok":false,"why":"reply was not the JSON asked for"}')|$(lgj '{"ok":true,"items":46,"calls":5}')"
+  # A session older than the mod's tools closes, drops and adds from Bash, through the same
+  # functions the tools use; --session names the file by id. A stale promise is closable too.
+  node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    import fs from 'node:fs'
+    let l = L.emptyLedger()
+    for (const t of ['fix the login redirect', 'bump the version']) l = L.addItem(l, { text: t, at: Date.now(), source: 'user' })
+    l = L.addItem(l, { text: 'merge the export PR when green', at: Date.now(), source: 'promise' })
+    l = { ...l, items: l.items.map(i => (i.id === '3' ? { ...i, state: 'stale' } : i)) }
+    fs.writeFileSync('$LG/lg-1.ledger', JSON.stringify(l))" 2>/dev/null
+  lgs() { env -u TMUX CLAUDE_FLEET_DIR="$LG" "$ROOT/bin/fleet-ledger" --session lg-1 "$@" 2>&1; }
+  lgs close 1 "PR #12, merged" >/dev/null
+  lgd0="$(lgs drop 2 >/dev/null 2>&1; echo $?)"
+  lgs drop 2 "the person cancelled it" >/dev/null
+  lgs add "and post the release note" >/dev/null
+  lgs close 3 "both landed: abc1234" >/dev/null
+  is "fleet-ledger: close/drop/add by --session, with proof and reason, through the tools' functions; no temp file left" \
+     "1|1:done:agent:PR #12, merged|2:dropped:agent:the person cancelled it|3:done:agent:both landed: abc1234|4:open:user:and post the release note|0" \
+     "$lgd0|$(jq -r '.items[]|"\(.id):\(.state):\(.closedBy // .source):\(.proof // .reason // .text)"' "$LG/lg-1.ledger" | paste -sd'|' -)|$(ls -A "$LG" | grep -c 'tmp' || true)"
   is "fleet-ledger: a name on another socket is not this session" "1" \
      "$(env -u TMUX CLAUDE_FLEET_DIR="$LG" "$ROOT/bin/fleet-ledger" -s cf-nofleet w1 >/dev/null 2>&1; echo $?)"
   is "fleet-ledger: install.sh links it" "1" "$(grep -cE '^ +fleet-digest .*fleet-ledger' "$ROOT/install.sh" || true)"
