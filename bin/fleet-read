@@ -204,8 +204,11 @@ else
           elif ((.origin.kind // "") == "task-notification")
                or (.type == "user" and ($text | type) == "string" and ($text | test("^\\s*<task-notification>"))) then
             { ts: $ts, role: "tool", text: "task",
-              detail: (($text | capture("<summary>(?<s>[^<]*)</summary>")?.s)
-                       // ($text | capture("<status>(?<s>[^<]*)</status>")?.s) // "finished") }
+              # `(capture(…)? | .s)`, never `capture(…)?.s`: the suffix form is jq 1.8 syntax,
+              # and jq 1.7 (Ubuntu 24.04 apt) rejects the WHOLE program, so every message
+              # vanished there while this read fine on a Mac.
+              detail: (($text | (capture("<summary>(?<s>[^<]*)</summary>")? | .s))
+                       // ($text | (capture("<status>(?<s>[^<]*)</status>")? | .s)) // "finished") }
           elif .type == "assistant" then
             ({ ts: $ts, role: (.message.role // .type), text: $text }),
             ((.message.content // []) | if type == "array" then .[] else empty end

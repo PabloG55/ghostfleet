@@ -2855,6 +2855,12 @@ if command -v jq >/dev/null 2>&1; then
   is "the compaction keeps its summary as detail"     "SUMMARY-BODY" "$(jq -r '.messages[] | select(.role=="compacted") | .detail' <<< "$fr" 2>/dev/null)"
   is "the plain view is unchanged"                    "billing-svc is green" \
      "$(env -u TMUX CLAUDE_FLEET_DIR="$MR/fleet" "$ROOT/bin/fleet-read" -s cf-scratch toolbox 2>/dev/null)"
+  # `capture(…)?.s` is jq 1.8 syntax. jq 1.7 — Ubuntu 24.04's apt jq, so the Linux CI leg —
+  # rejects the whole program, every message above vanished there, and the Mac (Homebrew
+  # 1.8) passed it all. Swept in our shell code, not in the .mjs/.js where `?.` is optional
+  # chaining; a comment may name the form.
+  is "no jq 1.8-only ')?.field' in shell code"        "" \
+     "$(git -C "$ROOT" grep -nE '\)\?\.[A-Za-z_]' -- bin hooks lib scripts ':!*.mjs' ':!*.js' 2>/dev/null | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
   rm -rf "${MR:?}"
 else
   skip "the phone's chat shows only what the owner wrote" "jq missing"
