@@ -16529,6 +16529,31 @@ if [ -d "$ROOT/web" ]; then
   fi
   rm -rf "$GRP"
 
+  # ── the owner's music keeps playing until they ask the app to speak ──────────
+  # Opening the installed app paused whatever the phone was playing: unlockAudio() ran on
+  # every first tap anywhere, and set a non-mixable 'playback' session, resumed an
+  # AudioContext and spoke a silent utterance — each of which takes the iOS audio session.
+  # The helper stubs those APIs before app.js runs and records every call, then taps for
+  # real. Watched going red on the pre-fix client (every plain-tap row logged all six calls),
+  # and the talk rows with talkStop() put back to suspend-without-release. The other
+  # direction is asserted too: the speaker DOES unlock, inside its own tap, and hands the
+  # session back when the voice ends. Whether music actually resumes is a phone's to say.
+  AUD="$(mktemp -d "$TEST_RUNS.$$.aud.XXXXXX")"
+  node "$ROOT/test/helpers/audio-check.mjs" > "$AUD/out" 2> "$AUD/err"
+  audrc=$?
+  if grep -q 'no chrome' "$AUD/out" 2>/dev/null; then
+    skip "the audio session" "no chrome to tap in"
+  else
+    is "audio-check ran"                "0" "$audrc"
+    is "...without complaining"         ""  "$(head -2 "$AUD/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$AUD/out")" -ge 14 ] && echo yes || echo "no: $(wc -l < "$AUD/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$AUD/out"
+  fi
+  rm -rf "${AUD:?}"
+
   is "cf-sync syncs web/ into the runtime" "yes" \
      "$(grep -qE '^for d in .*\bweb\b' "$ROOT/bin/cf-sync" && echo yes || echo no)"
   is "...and npm ships it"                 "yes" \

@@ -1029,10 +1029,12 @@ function audioCtx() {
   return A.ctx;
 }
 // THE UNLOCK, AND IT HAS TO HAPPEN INSIDE A TAP. iOS lets an AudioContext run only once a
-// gesture has resumed it and played something — the same rule talkStart() honours — and a
-// reply that arrives by poll, minutes after the toggle was tapped, has no gesture of its
-// own. So it is done on EVERY tap anywhere (it is a no-op once running), which also covers
-// the context iOS suspends when the installed app goes to the background and comes back.
+// gesture has resumed it and played something — the same rule talkStart() honours.
+//   ONLY INSIDE A TAP THAT ASKED FOR SOUND: the speaker on a bubble and `talk`, nowhere
+// else. It used to run on every tap anywhere, and every one of its three steps claims the
+// phone's audio session — so the first tap on the Projects screen paused whatever music
+// the owner had playing, in an app they had opened to read. The music is theirs until they
+// ask this app to speak, and it is handed back by releaseAudio() when the voice stops.
 //   'playback' is the audio session that ignores the silent switch, as the device's own
 // speech does; without it a phone on silent would play the Mac's voice to nobody. Not while
 // talking: conversation mode holds the microphone, which is a different session type.
@@ -1053,13 +1055,28 @@ export function unlockAudio() {
     try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch {}
   }
 }
-function stopSpeaking() {
+// HAND THE AUDIO SESSION BACK, so music the voice interrupted can resume: the mixable
+// default, and the context CLOSED rather than suspended — a suspended context is still a
+// claim iOS can hold on to. The next speaker tap makes a new one, inside that tap. Never
+// mid-conversation: talk mode's answers play from timers, with no tap to unlock a new
+// context, so it is released by talkStop() when the conversation ends instead.
+function releaseAudio() {
+  if (S.talk) return;
+  try { if (A.ctx) A.ctx.close(); } catch {}
+  A.ctx = null; A.src = null;
+  try { if (navigator.audioSession && navigator.audioSession.type !== 'auto') navigator.audioSession.type = 'auto'; } catch {}
+}
+// Silences whatever is talking and keeps the session: speakText() is about to use it.
+function hush() {
   A.gen++;
   try { if (A.src) { A.src.onended = null; A.src.stop(); } } catch {}
   A.src = null;
   if (canSpeak()) { try { speechSynthesis.cancel(); } catch {} }
   S.speaking = '';
 }
+// Every other stop — leaving a screen, a new voice or rate, the tapped speaker — is the
+// end of speaking, and an interrupted voice never reaches the finish that releases it.
+function stopSpeaking() { hush(); releaseAudio(); }
 // The device's own voice, for the whole text or for what is left of it.
 function synthSay(words, g, fin) {
   if (!canSpeak()) { fin(); return; }
@@ -1083,7 +1100,11 @@ function synthSay(words, g, fin) {
   } catch { fin(); }
 }
 function decode(ab) {
-  const c = audioCtx();
+  // NEVER A NEW CONTEXT FROM HERE: a sentence still downloading when the voice was stopped
+  // lands after releaseAudio(), outside any tap, and making a context then would claim the
+  // audio session the stop just handed back.
+  const c = A.ctx;
+  if (!c) return Promise.reject(new Error('the voice was stopped'));
   // The callback form: Safari before 14.1 has no promise-returning decodeAudioData.
   return new Promise((res, rej) => { try { c.decodeAudioData(ab, res, rej); } catch (e) { rej(e); } });
 }
@@ -1129,11 +1150,11 @@ function playBuf(buf, g) {
 // mode — so the voice, the fallback and the stop are the same in all three. `onend` runs
 // when this text finishes or fails, never when something newer replaced it.
 async function speakText(words, onend) {
-  stopSpeaking();
+  hush();
   if (!words) { if (onend) onend(); return; }
   const g = A.gen;
   S.speaking = words;
-  const fin = () => { if (A.gen !== g) return; A.gen++; A.src = null; S.speaking = ''; render(); if (onend) onend(); };
+  const fin = () => { if (A.gen !== g) return; A.gen++; A.src = null; S.speaking = ''; releaseAudio(); render(); if (onend) onend(); };
   if (hasWebAudio() && Date.now() >= A.offUntil) {
     let plan = null, i = 0;
     try {
@@ -1594,8 +1615,13 @@ function talkStop(reason) {
   const was = !!S.talk;
   S.talk = null;
   closeMic(); stopTalkPoll();
-  stopSpeaking();
-  try { if (T.ctx) T.ctx.suspend(); } catch {}
+  hush();
+  // 'play-and-record' is the most exclusive session there is; the owner's music waits on
+  // it for as long as the conversation runs and not a moment longer. Closed, not
+  // suspended, for the reason releaseAudio() gives — talkStart() makes a new one.
+  try { if (T.ctx) T.ctx.close(); } catch {}
+  T.ctx = null;
+  releaseAudio();
   if (reason) toast(reason, /off$/.test(reason) ? '' : 'bad');
   if (reason || was) render();
 }
@@ -4985,10 +5011,9 @@ try {
   }
 } catch {}
 addEventListener('keydown', onKey);
-// Every tap is a chance to unlock audio (see unlockAudio): speak mode reads replies that
-// arrive by poll, long after the tap that turned it on, and after iOS has suspended the
-// context for a trip to the background. Capture phase, passive: it never alters the tap.
-for (const ev of ['touchend', 'click']) document.addEventListener(ev, () => unlockAudio(), { capture: true, passive: true });
+// NO TAP-ANYWHERE AUDIO UNLOCK. There was one here, for speak mode's replies that arrived
+// long after the tap; speak mode is gone, and the listener went on claiming the phone's
+// audio session on every first tap — which paused the owner's music. See unlockAudio().
 // The system back gesture. Every backward move in the app comes through here, so a swipe
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
 // this is what answers). No URL is ever read: the entries carry a depth, not a route.

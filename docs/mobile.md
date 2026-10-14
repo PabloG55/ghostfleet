@@ -881,9 +881,13 @@ it instead, and the phone plays the audio:
 
 It plays through Web Audio, not an `<audio>` element: the route needs the bearer token,
 which a media element cannot send, and the CSP refuses the `blob:` URL it would need. iOS
-lets an AudioContext run only after a tap has resumed it, so every tap anywhere in the app
-re-unlocks it (the toggle, the play button, the talk button included) and the audio session
-is set to `playback`, so a phone on silent still speaks, as the device's voice does.
+lets an AudioContext run only after a tap has resumed it, so the speaker on a bubble and the
+talk button unlock it inside their own tap — and nothing else does. Any audio the app starts
+claims the phone's audio session, which pauses the owner's music, so an ordinary tap touches
+none of it. A speaker tap sets the session to `playback`, so a phone on silent still speaks
+as the device's voice does; when the voice ends (or is stopped) the context is closed and
+the session goes back to `auto`, so the music can resume. Conversation mode holds
+`play-and-record` for as long as it runs and releases it the same way when it stops.
 
 **Nothing here is required.** Without Kokoro, `/api/speak` answers 503 with the reason and
 the phone uses its own voice, with one toast saying why; a sentence that fails mid-reply hands

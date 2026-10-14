@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: c3673c0a4e0f
+// CLIENT-HASH: bf3b0015b843
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -355,7 +355,10 @@
 // v70 waits in the shape of what it waits for: a session's chat, Jarvis's and the pane
 // draw skeleton bubbles and lines until their first answer instead of a line of text. A
 // phone still on v69 shows "reading the transcript…" until the transcript lands.
-const VERSION = 'ghostfleet-v70';
+// v71 leaves the owner's music playing: no tap claims the audio session any more, only the
+// speaker and `talk`, and the session is handed back when the voice or the conversation
+// ends. A phone still on v70 pauses whatever is playing on its first tap.
+const VERSION = 'ghostfleet-v71';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
