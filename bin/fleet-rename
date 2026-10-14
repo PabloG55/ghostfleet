@@ -110,6 +110,7 @@ for pt in "$FLEET_DIR/$SOCK".*.parent; do
 done
 mv -f "$FLEET_DIR/$SOCK.$OLD.exited"          "$FLEET_DIR/$SOCK.$NEW.exited"          2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.asleep"          "$FLEET_DIR/$SOCK.$NEW.asleep"          2>/dev/null || true
+mv -f "$FLEET_DIR/$SOCK.$OLD.owner"           "$FLEET_DIR/$SOCK.$NEW.owner"           2>/dev/null || true
 mv -f "$FLEET_DIR/$SOCK.$OLD.relay.stamp"     "$FLEET_DIR/$SOCK.$NEW.relay.stamp"     2>/dev/null || true
 # Prompts queued behind its running turn (fleet-send): work already sent to this session
 # must still reach it under the new name. The Stop hook resolves its slot from the pane's

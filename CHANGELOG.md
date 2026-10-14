@@ -16,8 +16,9 @@ the detail, and every entry here names the PR that carries the argument.
   conversation that was live in its own card. Claude and codex launchers now resume the
   slot's own recorded conversation first; fall back only to one no other card claims and no
   live process holds; and refuse an explicit id that another process holds. Two records for one
-  slot are settled by the conversation's name history (the slot it was first named as),
-  not by which was written last, and `fleet-restart --reopen` does the same. Every such
+  slot are settled first by a deliberate placement (`fleet-open <id> --into <slot>` now
+  records one), then by the conversation's name history (the slot it was first named as),
+  and only then by which was written last; `fleet-restart --reopen` does the same. Every such
   choice, and every conversation that moves into another pane's slot, is written to
   `<fleet dir>/slot-claim.log`.
 - **A click on a session card opens it the first time.** The grid refreshes with

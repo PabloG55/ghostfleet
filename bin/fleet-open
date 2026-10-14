@@ -133,6 +133,27 @@ if [ "$LIST" = 1 ]; then
   exit 0
 fi
 
+# --- one conversation, one pane ------------------------------------------------
+# Checked BEFORE --into kills anything: a refusal from the launcher afterwards would leave
+# the target's card dead as well. The one holder that is fine is the --into target itself,
+# which is about to be killed (re-placing the conversation a slot already runs).
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do _tg="$(readlink "$_src")"; case "$_tg" in /*) _src="$_tg" ;; *) _src="$(dirname "$_src")/$_tg" ;; esac; done
+_lib="$(cd "$(dirname "$_src")/../lib" 2>/dev/null && pwd)/slot-claim.mjs"
+if [ -f "$_lib" ] && command -v node >/dev/null 2>&1 \
+   && holder="$(CLAUDE_CONFIG_DIR="$CFG_DIR" node "$_lib" held --grace 0 --agent "$AGENT" --id "$FULL_ID" --transcript "$TR" 2>/dev/null)"; then
+  _ok=0
+  if [ -n "$INTO" ] && [ "$holder" != "?" ]; then
+    _pp="$(tmux -L "$SOCK" display-message -p -t "$INTO" '#{pane_pid}' 2>/dev/null)" _p="$holder"
+    for _ in 1 2 3 4 5 6 7 8; do
+      [ -n "$_p" ] && [ "$_p" != 0 ] && [ "$_p" != 1 ] || break
+      [ "$_p" = "$_pp" ] && { _ok=1; break; }
+      _p="$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ')"
+    done
+  fi
+  [ "$_ok" = 1 ] || { echo "fleet-open: refusing — $FULL_ID is open in live process $holder; a conversation is never resumed into a second pane" >&2; exit 1; }
+fi
+
 # --- pick the session name ------------------------------------------------------
 if [ -n "$INTO" ]; then
   tmux -L "$SOCK" has-session -t "$INTO" 2>/dev/null \
@@ -172,6 +193,11 @@ tmux -L "$SOCK" new-session -d -s "$name" -c "$CWD" \
   -e "CLAUDE_FLEET_RESUME=$FULL_ID" -e "CLAUDE_FLEET_AGENT=$AGENT" -e "CLAUDE_FLEET_FRESH=0" \
   "exec agent-here \"$name\"" \
   || { echo "fleet-open: failed to start the session" >&2; exit 1; }
+
+# A DELIBERATE PLACEMENT, written down. When two records later claim this slot — a crash
+# leaves the replaced conversation's record behind — this is what settles it
+# (lib/slot-claim.mjs), ahead of name history: the person who put it here decided.
+printf '%s\t%s\n' "$FULL_ID" "$(date +%s)" > "$FLEET_DIR/$SOCK.$name.owner" 2>/dev/null || true
 
 echo "fleet-open: opened $FULL_ID as '$name' on $SOCK (cwd $CWD)"
 echo "fleet-open: jump in from the grid, or: fleet-send $name \"<message>\""

@@ -18818,6 +18818,8 @@ node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "openco
 #       `master` records were settled by `ts`, which the intruder had;
 #   Q3  nothing checked whether the folder's newest was open in another live process, and an
 #       explicit id was resumed whoever held it.
+# And the owner's repair: a conversation put into a slot ON PURPOSE (fleet-open --into) owns
+# it, ahead of name history, even when the replaced conversation's record is still there.
 #   WATCHED GOING RED: with lib/slot-claim.mjs's calls taken out of claude-here and
 # codex-here the lead resumes the intruder, the live one and the claimed one; without the
 # hook's block nothing is logged; with fleet-restart's sid_for back on `sort -rn` the reopen
@@ -18825,7 +18827,7 @@ node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "openco
 group "one conversation, one slot"
 if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
   OC="$(cd "$(mktemp -d "$TEST_RUNS.$$.slot.XXXXXX")" && pwd -P)"
-  OCW="$OC/acme-api"; OCC="$OC/cfg"; OCF="$OCC/fleet"; OCX="$OC/codex"
+  OCW="$OC/acme-api"; OCC="$OC/home/.claude"; OCF="$OCC/fleet"; OCX="$OC/codex"
   mkdir -p "$OCW" "$OCF" "$OC/bin" "$OC/home"
   OCP="$OCC/projects/$(printf '%s' "$OCW" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$OCP"
   OCS=cf-acme-api
@@ -18844,7 +18846,7 @@ STUB
   U=44444444-4444-4444-8444-444444444444   # nobody's: an old conversation in the folder
   convo() {   # id, first title, [later titles...] — a real turn, then the name history
     local id="$1" f="$OCP/$1.jsonl"; shift
-    printf '{"type":"user","message":{"role":"user","content":"which fields are duplicated?"}}\n' > "$f"
+    printf '{"type":"user","cwd":"%s","message":{"role":"user","content":"which fields are duplicated?"}}\n' "$OCW" > "$f"
     for t in "$@"; do printf '{"type":"custom-title","customTitle":"%s","sessionId":"%s"}\n' "$t" "$id" >> "$f"; done
   }
   record() {  # id slot ts [pane]
@@ -18879,7 +18881,7 @@ STUB
   : > "$OCF/slot-claim.log"
   is "...two born-here claimants: the newest, as before" "$T" "$(launch master)"
   is "...and that is said too" "yes" \
-     "$(grep -q 'could not tell them apart' "$OCF/slot-claim.log" && echo yes || echo no)"
+     "$(grep -q 'the newest, because neither a placement nor name history could tell them apart' "$OCF/slot-claim.log" && echo yes || echo no)"
   convo "$T" acme-api/toolbox acme-api/master; touch -t 202601030000 "$OCP/$T.jsonl"
   record "$T" toolbox 1001 '%3@100'
 
@@ -18965,6 +18967,41 @@ STUB
   tmux -L "$OCS" rename-session -t api-2 api-3 2>/dev/null; octurn api-3 "$U"
   is "...while a rename (same pane, new name) is not a move" "0" "$(grep -c MOVED "$OCF/slot-claim.log" || true)"
   tmux -L "$OCS" kill-server 2>/dev/null
+
+  # THE OWNER'S CASE. The lead was repaired by hand with `fleet-open <worker's> --into master
+  # --force`, and that conversation IS the lead now. A crash leaves the replaced one's record
+  # behind, born as master and — here — even the newer: the placement must still win.
+  mkdir -p "$OC/home/.config/ghostfleet"
+  printf 'acme-api\t%s\twork\n' "$OCW" > "$OC/home/.config/ghostfleet/projects"
+  OCE=(env -u TMUX -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK
+       HOME="$OC/home" PATH="$ROOT/bin:$OC/bin:$PATH" CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1)
+  "${OCE[@]}" tmux -L "$OCS" new-session -d -s master -c "$OCW" "sleep 600; :" 2>/dev/null
+  record "$M" master 1000 '%19@100'
+  rm -f "${OC:?}/argv.claude"
+  out="$("${OCE[@]}" "$ROOT/bin/fleet-open" "$T" --into master --force 2>&1)"
+  oi=0; while [ ! -s "$OC/argv.claude" ] && [ "$oi" -lt 50 ]; do sleep 0.1; oi=$((oi+1)); done
+  is "placement: fleet-open --into puts the conversation in"  "$T" \
+     "$(sed -n 's/.*--resume \([^ ]*\).*/\1/p' "$OC/argv.claude" 2>/dev/null)"
+  is "...and records that it was put there on purpose"       "$T" "$(cut -f1 "$OCF/$OCS.master.owner" 2>/dev/null)"
+  tmux -L "$OCS" kill-server 2>/dev/null
+  record "$M" master 3000 '%19@100'; record "$T" master 2000 '%0@200'
+  : > "$OCF/slot-claim.log"
+  is "placement: after a crash, both records claim master and the placed one comes back" "$T" "$(launch master)"
+  is "...and the log says why" "yes" \
+     "$(grep -q 'resuming 22222222, the one deliberately placed here' "$OCF/slot-claim.log" && echo yes || echo no)"
+  # fleet-open checks for a holder BEFORE it kills the target: refused after the kill, the
+  # target's card would be gone as well.
+  "${OCE[@]}" tmux -L "$OCS" new-session -d -s master -c "$OCW" "sleep 600; :" 2>/dev/null
+  OCP0="$(tmux -L "$OCS" display-message -p -t master '#{pane_pid}' 2>/dev/null)"
+  ( exec -a "claude --resume $M" sleep 60 ) & OCH=$!; disown "$OCH"
+  sleep 0.3
+  out="$("${OCE[@]}" "$ROOT/bin/fleet-open" "$M" --into master --force 2>&1)"
+  is "placement: fleet-open refuses a conversation another process holds" "yes" \
+     "$(grep -q "refusing — $M is open in live process $OCH" <<< "$out" && echo yes || echo no)"
+  is "...and leaves the target running" "$OCP0" "$(tmux -L "$OCS" display-message -p -t master '#{pane_pid}' 2>/dev/null)"
+  reap "$OCH"
+  tmux -L "$OCS" kill-server 2>/dev/null
+  rm -f "${OCF:?}/$OCS.master.owner"
 
   # fleet-restart --reopen (the grid's ⏎ on a lost card, fleet_reopen) settles two records by
   # name history too, and refuses a conversation a live process holds. No server: a reopen
