@@ -18915,6 +18915,16 @@ STUB
   is "...while a predecessor that exits within the grace is resumed" "$M" "$(launch master CLAUDE_FLEET_RESUME="$M")"
   reap "$OCH"
 
+  # A PATH WITH AN UNDERSCORE. claude-here names a transcript folder by turning only `/` and
+  # `.` into `-`; lib/slot-claim.mjs once re-derived it turning everything non-alphanumeric,
+  # and the two disagree on `_`. A macOS runner's $TMPDIR is /var/folders/<xx>/<a_b…>/T/, so
+  # there the fallback read a folder that did not exist and every resume started fresh.
+  mkdir -p "$OC/acme_api"
+  OCU="$OCC/projects/$(printf '%s' "$OC/acme_api" | sed 's#[/.]#-#g')"; mkdir -p "$OCU"
+  printf '{"type":"user","cwd":"%s","message":{"role":"user","content":"hi"}}\n' "$OC/acme_api" > "$OCU/$U.jsonl"
+  is "a checkout whose path holds an underscore still resumes its conversation" "$U" \
+     "$(OCW="$OC/acme_api" launch scratch)"
+
   # CODEX, THE SAME RULES. Its records carry agent:codex and no name history; its rollouts
   # live under CODEX_HOME and carry the cwd in their first line.
   cxroll() {  # id -> the rollout's path

@@ -362,7 +362,7 @@ fi
 if [ "$explicit" != 1 ] && [ -z "$resume_id" ] && [ -d "$dir" ]; then
   if [ -n "$SLOTCLAIM" ]; then
     IFS=$'\x1f' read -r resume_id _ _ < <(node "$SLOTCLAIM" fallback --dir "$FLEET_DIR" \
-      --sock "$_sock" --slot "$slot" --cwd "$PWD")
+      --sock "$_sock" --slot "$slot" --cwd "$PWD" --projects-dir "$dir")
   else
     while IFS= read -r f; do
       [ -n "$f" ] || continue
