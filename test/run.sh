@@ -333,8 +333,18 @@ unset TMUX_PANE
 # for two weeks, as the owner's words. CI never had these set, so unsetting them is also
 # what makes a local run the run CI does. The engine's own commands still want the profile
 # the run was started under, so it is kept aside for them (SUITE_CLAUDE_CONFIG_DIR).
+#   UNSETTING IS NOT ENOUGH, because HOME is the default every one of those falls back to,
+# and $TMUX names the caller's own server. With the variables gone, a group that redirected
+# CLAUDE_FLEET_DIR but not HOME still had the hook read the REAL Jarvis marker in
+# ~/.config/ghostfleet and file its fixtures' need-yous (`agytest/w1`, `curtest/w1`) in the
+# real Jarvis's inbox; and a hook run with $TMUX still set resolved the caller's real socket
+# and slot, putting a fixture's `done` row in the real lead's inbox under the worker's own
+# name. So the run gets a HOME of its own and no $TMUX, which is also the machine CI is.
+# The real HOME is kept only for the engine (`claude plugin …`), which needs its login.
 SUITE_CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
-unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR CLAUDE_FLEET_SOCK CLAUDE_FLEET_SLOT CLAUDE_FLEET_JARVIS_DIR
+SUITE_HOME="$HOME"
+unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR CLAUDE_FLEET_SOCK CLAUDE_FLEET_SLOT CLAUDE_FLEET_JARVIS_DIR TMUX
+HOME="$TMUX_TMPDIR/home"; export HOME; mkdir -p "$HOME"
 
 # A fixed name is self-limiting: the next run kills the server. A unique one is
 # not, so a run that dies half way leaks its servers for good. Two guards — our
@@ -4064,7 +4074,8 @@ STUB
 
   # The mod's own harness and the engine's validator, where there is an engine to ask.
   if command -v claude >/dev/null 2>&1 && grep -qE '^  test ' <<< "$(claude plugin --help 2>/dev/null)"; then
-    eng() { if [ -n "$SUITE_CLAUDE_CONFIG_DIR" ]; then CLAUDE_CONFIG_DIR="$SUITE_CLAUDE_CONFIG_DIR" claude "$@"; else claude "$@"; fi; }
+    eng() { if [ -n "$SUITE_CLAUDE_CONFIG_DIR" ]; then HOME="$SUITE_HOME" CLAUDE_CONFIG_DIR="$SUITE_CLAUDE_CONFIG_DIR" claude "$@"
+            else HOME="$SUITE_HOME" claude "$@"; fi; }
     is "mod: claude plugin validate passes" "1" "$(eng plugin validate "$ROOT/mods/ghostfleet" 2>&1 | grep -c 'Validation passed' || true)"
     mdt="$(eng plugin test "$ROOT/mods/ghostfleet" 2>&1)"
     # The engine can have mods switched off for the whole process (a rollout switch it
@@ -9117,6 +9128,47 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   tmux -L cfxsrv kill-server 2>/dev/null; rm -rf "${XS:?}"
 else
   skip "a mod record on another tmux server is not this session's mod" "tmux/jq/node missing"
+fi
+
+# ── 4c1o. a run leaves the fleet that started it untouched ─────────────────────
+# The suite is run BY fleet sessions, and everything it inherits from one points at a live
+# fleet: CLAUDE_FLEET_DIR, CLAUDE_CONFIG_DIR, $TMUX, and HOME with Jarvis's marker in it.
+# Each of those reached the real thing at least once: two-byte prompts into the real
+# Jarvis's master, fixture need-yous in the real Jarvis's inbox, a fixture's `done` row in
+# the real lead's inbox under the worker's own name. So: a caller made of sentinels — its
+# own HOME holding a Jarvis marker, its own fleet dir, a live tmux server for its $TMUX —
+# runs the groups that leaked, and afterwards that caller's files are exactly what it put
+# there. Nested runs skip this group, or it would run itself.
+group "a run leaves the fleet that started it untouched"
+if [ -n "${SUITE_NESTED:-}" ]; then
+  skip "a run leaves the fleet that started it untouched" "this is the nested run"
+elif command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  SN="$(cd "$(mktemp -d)" && pwd -P)"; SNH="$SN/home"
+  mkdir -p "$SNH/.config/ghostfleet" "$SNH/.claude/fleet"
+  printf 'name=jarvis\nprofile=work\nsock=cf-jarvis\ncfg=%s\npath=%s\n' "$SNH/.claude" "$SN/jv" > "$SNH/.config/ghostfleet/jarvis"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s api-fix 'sleep 600' 2>/dev/null
+  sntmux="$(tmux -L cf-acme-api display-message -p -t api-fix '#{socket_path},#{pid},#{session_id}' 2>/dev/null)"
+  snbefore="$(cd "$SNH" && find . -type f | sort)"
+  # -u CF_ONLY: this run may itself be a filtered one, and a nested run that inherits the
+  # mark takes itself for already filtered and runs everything.
+  ( cd "$ROOT" && env -u CF_ONLY -u CF_F HOME="$SNH" TMUX="$sntmux" TMUX_PANE=%0 SUITE_NESTED=1 \
+      CLAUDE_FLEET_DIR="$SNH/.claude/fleet" CLAUDE_CONFIG_DIR="$SNH/.claude" \
+      CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=api-fix \
+      "$ROOT/test/run.sh" "a need-you anywhere wakes Jarvis at once; finished work never does" \
+        "agy: the installer, the event bridge and the launcher" \
+        "cursor: the installer, the event bridge, the compat guard and the launcher" \
+        "a reply that cannot arrive is not promised" \
+        "a mod record on another tmux server is not this session's mod" ) > "$SN/nested.log" 2>&1
+  is "the nested run ran its groups"                  "1" \
+     "$([ "$(grep -cE '^[0-9]+ passed' "$SN/nested.log" || true)" -ge 1 ] && echo 1 || echo 0)"
+  is "...and they pass with a fleet calling them"     " 0 failed" \
+     "$(grep -oE ' [0-9]+ failed' <<< "$(sed 's/\x1b\[[0-9;]*m//g' "$SN/nested.log")" | tail -1)"
+  is "...and the caller's home and fleet dir hold only what the caller put there" "$snbefore" \
+     "$(cd "$SNH" && find . -type f | sort)"
+  tmux -L cf-acme-api kill-server 2>/dev/null; rm -rf "${SN:?}"
+else
+  skip "a run leaves the fleet that started it untouched" "tmux/jq/node missing"
 fi
 
 # The queue is keyed by the session NAME, like every other per-session marker, so a rename
