@@ -12,10 +12,10 @@ const ID = 'sess-1'
 const FILE = `${DIR}/${ID}.json`
 const BASE = { session_id: ID, sock: 'cf-acme-api', slot: 'w1', status: 'idle', ts: 1, cwd: '/w/acme-api' }
 
-type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[] }
+type World = { files: Map<string, string>; runs: string[][]; stall: boolean; submitted: any[]; order: string[] }
 
 function world(on: any, env: Record<string, string> = {}, record: object | null = BASE): World {
-  const w: World = { files: new Map(), runs: [], stall: false, submitted: [] }
+  const w: World = { files: new Map(), runs: [], stall: false, submitted: [], order: [] }
   if (record) w.files.set(FILE, JSON.stringify(record))
   mock.env(on, { CLAUDE_FLEET_DIR: DIR, HOME: '/home/u', ...env })
   // Ops answer `{ value }`; the engine's own events answer their result shape.
@@ -31,6 +31,7 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
   on('process.run', (_$: any, e: any) => {
     const argv = [...e.argv]
     w.runs.push(argv)
+    w.order.push(`${String(argv[0]).split('/').pop()} ${argv[1] ?? ''}${e.init?.stdin !== undefined ? ` <${e.init.stdin}` : ''}`.trim())
     let exitCode = 0
     if (argv[0] === 'mv') {
       // `mv [-f|-n] src dst`: a rename, which fails when there is nothing to rename. The
@@ -43,12 +44,13 @@ function world(on: any, env: Record<string, string> = {}, record: object | null 
       : argv[0].endsWith('fleet-inbox') ? 'w2  need-you  permission\n' : ''
     return { value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
+  on('fs.exists', (_$: any, e: any) => ({ value: w.files.has(e.path) }))
   on('fs.list', (_$: any, e: any) => {
     const pre = `${e.path}/`
     const names = [...w.files.keys()].filter(f => f.startsWith(pre) && !f.slice(pre.length).includes('/'))
     return { value: names.map(f => ({ name: f.slice(pre.length), kind: 'file', size: 1 })) }
   })
-  on('prompt.submit', (_$: any, e: any) => { w.submitted.push(e); return { text: e.text } })
+  on('prompt.submit', (_$: any, e: any) => { w.submitted.push(e); w.order.push(`submit ${e.text}`); return { text: e.text } })
   on('command.register', (_$: any, e: any) => ({ value: { command: e.name } }))
   on('session.start', (_$: any, e: any) => ({ cwd: e.cwd }))
   on('session.end', (_$: any, e: any) => ({ sessionId: e.sessionId }))
@@ -287,4 +289,46 @@ test('SessionEnd withdraws .ready, and the spool keeps what is waiting', async (
   expect(w.files.has(`${SPOOL}/.ready`)).toBe(false)
   expect(w.files.has(`${SPOOL}/1000-1.json`)).toBe(true)
   expect(w.submitted).toEqual([])
+})
+
+// A PROMPT HANDED INTO JARVIS'S MASTER IS THE FLEET TALKING, and it is marked as such HERE, in
+// the session that receives it, under the HOME its own event hook reads. fleet-send marked it
+// in the SENDER's home, and a sender whose HOME was not Jarvis's (a test run that redirected
+// it) left every one of its "ok"s to be read as the owner's yes. Marked before the submit,
+// because the hook that consumes the mark runs on that submit. Not in any other session.
+const JMARK = '/home/u/.config/ghostfleet/jarvis'
+const delivered = (w: World) => w.order.filter(o => o.startsWith('fleet-jarvis delivered'))
+
+test('a prompt it delivers into Jarvis\'s master is marked as the fleet\'s before it is submitted', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on, {}, { ...BASE, sock: 'cf-jarvis', slot: 'master' })
+  w.files.set(JMARK, 'name=jarvis\nsock=cf-jarvis\n')
+  await start($)
+  w.files.set(...entry('1000-1', 'ok'))
+  await clock.advance(500)
+  expect(delivered(w)).toEqual(['fleet-jarvis delivered <ok'])
+  expect(w.order.indexOf('fleet-jarvis delivered <ok')).toBeLessThan(w.order.indexOf('submit ok'))
+})
+
+test('...and not into a worker of Jarvis\'s own fleet', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on, {}, { ...BASE, sock: 'cf-jarvis', slot: 'w1' })
+  w.files.set(JMARK, 'name=jarvis\nsock=cf-jarvis\n')
+  await start($)
+  w.files.set(...entry('1000-1', 'ok'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['ok'])
+  expect(delivered(w)).toEqual([])
+})
+
+test('...a Jarvis switched off is no Jarvis', async ($, on) => {
+  const clock = mock.clock(on)
+  const w = world(on, {}, { ...BASE, sock: 'cf-jarvis', slot: 'master' })
+  w.files.set(JMARK, 'name=jarvis\nsock=cf-jarvis\n')
+  w.files.set(`${JMARK}.enabled`, 'off\n')
+  await start($)
+  w.files.set(...entry('1000-1', 'ok'))
+  await clock.advance(500)
+  expect(w.submitted.map(e => e.text)).toEqual(['ok'])
+  expect(delivered(w)).toEqual([])
 })

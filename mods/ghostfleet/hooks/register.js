@@ -422,6 +422,12 @@ async function deliverTick($) {
     // The ledger's item for it is made HERE: a plugin's own submit passes every prompt.submit
     // hook but its own, so LEDGER's never sees it.
     await ledgerDelivery($, pending)
+    // INTO JARVIS'S MASTER, the fleet's words are marked as the fleet's before they are
+    // submitted: the event hook that records the owner's yes runs on this submit and skips
+    // what a mark accounts for (lib/jarvis.mjs consumeDelivery). Marked here and not by the
+    // sender, because this is the session that receives, under the HOME that hook reads.
+    if (await maybeJarvis($).catch(() => false))
+      await bounded($, guardRun($, [bin($, 'fleet-jarvis'), 'delivered'], { stdin: entry.text }), GUARD_MS + 500, null)
     // Settles once the turn started or the engine queued it; turn.start is what names the
     // turn, so this is not awaited for that. A refusal is answered here.
     const settled = r => (r && r.drop !== undefined ? { dropped: String(r.drop) } : null)

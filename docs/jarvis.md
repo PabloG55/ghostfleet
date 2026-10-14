@@ -123,7 +123,8 @@ ask you in one line and stop. Then:
   what you type or say on the phone is recorded by `fleet-serve`, which knows it came from
   your enrolled phone (`~/.config/ghostfleet/jarvis.said`). Anything the *fleet* delivers —
   a `[fleet]` line, a relay, a worker or another lead running `fleet-send` into Jarvis, even
-  Jarvis itself — is marked by `fleet-send` as it pastes and never counts as you. A **spoken**
+  Jarvis itself — is marked as it is delivered (by `fleet-send` when it pastes, by the mod
+  in Jarvis's own session when it submits) and never counts as you. A **spoken**
   yes must be at least two words ("yes, do it", "go ahead"): a single word is what an open
   microphone hears in noise, and whisper writes it as "Okay."; or
 - **tap yes** on the phone's Jarvis screen, which takes a fresh Face ID like any other

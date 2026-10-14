@@ -324,6 +324,17 @@ mkdir -p "$CLAUDE_FLEET_EXPERIMENTAL_DIR"; printf 'on\n' > "$CLAUDE_FLEET_EXPERI
 # asks tmux which session $TMUX_PANE is in, so an inherited `%20` would name whichever
 # fixture session happened to get that id — a plausible wrong slot, not an error.
 unset TMUX_PANE
+# ...and neither does the fleet it was started from. A worker runs this suite with its own
+# fleet's CLAUDE_FLEET_DIR / CLAUDE_CONFIG_DIR exported, so every command here that redirects
+# only HOME still wrote into the REAL fleet dir — and read from it: fleet-send, finding no
+# fleet dir in a fixture session's tmux env, falls back to its own, where the live record of
+# the real session of the same name was waiting to take the prompt. Measured: the jarvis
+# group's two `fleet-send -s cf-jarvis master "ok"` reached the real Jarvis on every run,
+# for two weeks, as the owner's words. CI never had these set, so unsetting them is also
+# what makes a local run the run CI does. The engine's own commands still want the profile
+# the run was started under, so it is kept aside for them (SUITE_CLAUDE_CONFIG_DIR).
+SUITE_CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
+unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR CLAUDE_FLEET_SOCK CLAUDE_FLEET_SLOT CLAUDE_FLEET_JARVIS_DIR
 
 # A fixed name is self-limiting: the next run kills the server. A unique one is
 # not, so a run that dies half way leaks its servers for good. Two guards — our
@@ -4053,8 +4064,9 @@ STUB
 
   # The mod's own harness and the engine's validator, where there is an engine to ask.
   if command -v claude >/dev/null 2>&1 && grep -qE '^  test ' <<< "$(claude plugin --help 2>/dev/null)"; then
-    is "mod: claude plugin validate passes" "1" "$(claude plugin validate "$ROOT/mods/ghostfleet" 2>&1 | grep -c 'Validation passed' || true)"
-    mdt="$(claude plugin test "$ROOT/mods/ghostfleet" 2>&1)"
+    eng() { if [ -n "$SUITE_CLAUDE_CONFIG_DIR" ]; then CLAUDE_CONFIG_DIR="$SUITE_CLAUDE_CONFIG_DIR" claude "$@"; else claude "$@"; fi; }
+    is "mod: claude plugin validate passes" "1" "$(eng plugin validate "$ROOT/mods/ghostfleet" 2>&1 | grep -c 'Validation passed' || true)"
+    mdt="$(eng plugin test "$ROOT/mods/ghostfleet" 2>&1)"
     # The engine can have mods switched off for the whole process (a rollout switch it
     # caches per config dir). That is the machine, not the mod: said, and counted as such.
     if grep -q 'hooks modules are turned off' <<< "$mdt"; then
@@ -9032,6 +9044,79 @@ MOD
   rm -rf "${M:?}"
 else
   skip "a session whose mod is live takes its prompts from the mod" "tmux/jq/node missing"
+fi
+
+# ── 4c1n. a mod record on ANOTHER tmux server is not this session's mod ─────────
+# A record is matched by socket NAME and slot, and a name is not a server: this suite's
+# own `cf-jarvis` lives under its private $TMUX_TMPDIR, while the fleet dir it inherited
+# from the worker running it held the live record of the REAL session of that name. The
+# target's tmux env names no fleet dir (a fixture sets none), so fleet-send fell back to
+# its own — the real one — found that record, and handed the prompt to a mod on a server
+# it never addressed. Measured: a pair of two-byte prompts into another fleet's master
+# every time the suite ran, five pairs in half an hour, each answered as the owner's
+# words. The record's pane already names its server (`%N@<server pid>`, from $TMUX), so
+# the server fleet-send addresses must be that one. Both directions: the same record,
+# naming the fixture's own server, still takes the prompt.
+group "a mod record on another tmux server is not this session's mod"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  # The suite itself first: nothing it runs may inherit the fleet that started it (above).
+  is "the suite names no fleet dir of its caller's"   "||" "${CLAUDE_FLEET_DIR:-}|${CLAUDE_CONFIG_DIR:-}|${CLAUDE_FLEET_SOCK:-}"
+  XS="$(mktemp -d)"; XF="$XS/elsewhere"; XH="$XS/home"; mkdir -p "$XF/xs-1.handoff" "$XH"
+  tmux -L cfxsrv kill-server 2>/dev/null
+  tmux -L cfxsrv new-session -d -x 100 -y 20 -s master \
+    "printf '────────────────────────────\n❯ \n────────────────────────────\n'; cat >/dev/null" 2>/dev/null
+  xspid="$(tmux -L cfxsrv display-message -p -t master '#{pid}' 2>/dev/null)"
+  # A claimer standing in for the other server's mod: it takes whatever lands in its spool
+  # and logs it, which is exactly what the live one did. Its pid is the record's writer.
+  ( exec -a xs-claimer bash -c '
+      sp="$1"; log="$2"; end=$((SECONDS + 60))
+      while [ "$SECONDS" -lt "$end" ]; do
+        for f in "$sp"/[0-9]*.json; do
+          [ -e "$f" ] || continue
+          id="${f##*/}"; id="${id%.json}"
+          mv "$f" "$sp/$id.taken" 2>/dev/null || continue
+          jq -r .text "$sp/$id.taken" >> "$log"
+          printf "{\"id\":\"%s\",\"turnId\":\"t1\"}" "$id" > "$sp/$id.done"; rm -f "$sp/$id.taken"
+        done
+        sleep 0.1
+      done' _ "$XF/xs-1.handoff" "$XS/claimed" ) & XCP=$!
+  xrec() {           # $1 = the server pid the record's pane names
+    jq -n --argjson pid "$XCP" --argjson hb "$(( $(date +%s) * 1000 ))" --arg pane "%0@$1" \
+      '{session_id:"xs-1", sock:"cfxsrv", slot:"master", pane:$pane, status:"ready", state:"ready",
+        source:"mod", mod:{v:"t", pid:$pid, hb:$hb}}' > "$XF/xs-1.json"
+    printf '%s\n' "$XCP" > "$XF/xs-1.handoff/.ready"; }
+  # Exactly the shape that leaked: HOME redirected, the fleet dir left as the caller's.
+  XSEND() { env -u TMUX HOME="$XH" CLAUDE_FLEET_DIR="$XF" CLAUDE_FLEET_NOTIFIER=off \
+              CLAUDE_FLEET_MOD_CLAIM=2 CLAUDE_FLEET_MOD_START=2 \
+              "$ROOT/bin/fleet-send" -s cfxsrv --anyway master "$1" 2>&1; }
+  # A server that is not this one: the pid of a process that is alive and is no tmux server.
+  xrec "$XCP"
+  is "mod-target: a record naming another server is not a target" "refused" \
+     "$(node "$ROOT/lib/mod-target.mjs" "$XF" cfxsrv master "$xspid" >/dev/null && echo taken || echo refused)"
+  XSEND "ok" >/dev/null; sleep 0.3
+  is "...so fleet-send hands it nothing"              "0" "$(grep -c . "$XS/claimed" 2>/dev/null || echo 0)"
+  is "...and the prompt reaches the server it named"  "1" \
+     "$(grep -cx 'ok' <<< "$(tmux -L cfxsrv capture-pane -p -t master 2>/dev/null)" || true)"
+  xrec "$xspid"
+  is "mod-target: the same record naming THIS server is" "taken" \
+     "$(node "$ROOT/lib/mod-target.mjs" "$XF" cfxsrv master "$xspid" >/dev/null && echo taken || echo refused)"
+  XSEND "task-hotel" >/dev/null
+  is "...and fleet-send hands it the prompt"          "task-hotel" "$(cat "$XS/claimed" 2>/dev/null)"
+  # WHO SENT IT, on the row: the next prompt nobody can explain names its caller.
+  xrow="$(cd "$XS" && env -u TMUX HOME="$XH" CLAUDE_FLEET_DIR="$XF" CLAUDE_FLEET_NOTIFIER=off \
+            CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=api-fix CLAUDE_FLEET_MOD_DELIVER=off \
+            "$ROOT/bin/fleet-send" -s cfxsrv --anyway master "go" >/dev/null 2>&1; tail -n 1 "$XF/cfxsrv.sent")"
+  is "the sent log names the sending session"         "from=env:cf-acme-api/api-fix" \
+     "$(awk -F'\t' '{print $5}' <<< "$xrow" | grep -o 'from=[^ ]*')"
+  is "...the directory it ran in"                     "cwd=$(cd "$XS" && pwd -P)" \
+     "$(awk -F'\t' '{print $5}' <<< "$xrow" | grep -o 'cwd=[^ ]*')"
+  is "...and the process that ran it"                 "1" \
+     "$(awk -F'\t' '{print $5}' <<< "$xrow" | grep -c 'by=.*bash' || true)"
+  is "...still one record of five fields"             "5" "$(awk -F'\t' '{print NF}' <<< "$xrow")"
+  kill "$XCP" 2>/dev/null; wait "$XCP" 2>/dev/null
+  tmux -L cfxsrv kill-server 2>/dev/null; rm -rf "${XS:?}"
+else
+  skip "a mod record on another tmux server is not this session's mod" "tmux/jq/node missing"
 fi
 
 # The queue is keyed by the session NAME, like every other per-session marker, so a rename
@@ -15015,6 +15100,16 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "the real fleet-send records a delivery into Jarvis" "1" "$(cnt "$(printf '%s' ok | shasum -a 256 2>/dev/null | cut -c1-12)" "$JW/home/.config/ghostfleet/jarvis.delivered")"
   HOME="$JW/home" TMUX= CLAUDE_FLEET_NOTIFIER=off "$ROOT/bin/fleet-send" -s cf-jarvis --anyway helper "ok" >/dev/null 2>&1
   is "...and only into Jarvis's master"             "1" "$(cnt . "$JW/home/.config/ghostfleet/jarvis.delivered")"
+  # A PROMPT THE MOD SUBMITS is marked by the mod, through `fleet-jarvis delivered`, in the
+  # receiving session's home. That writer and the hook's reader must agree on the record, or
+  # the mark is written and never matched: the mod's "ok" is then the owner's yes again.
+  : > "$JW/home/.config/ghostfleet/jarvis.delivered"; : > "$JW/home/.config/ghostfleet/jarvis.said"
+  printf '%s' "ok" | HOME="$JW/home" "$ROOT/bin/fleet-jarvis" delivered
+  jfire UserPromptSubmit cf-jarvis master "$WC" "ok"
+  is "a prompt the mod marked is not recorded as the owner" "0" "$(cnt '"text":"ok"' "$JW/home/.config/ghostfleet/jarvis.said")"
+  is "...and the mark is spent on it"                 "0" "$(cnt . "$JW/home/.config/ghostfleet/jarvis.delivered")"
+  jfire UserPromptSubmit cf-jarvis master "$WC" "ok"
+  is "...so the owner's own ok after it is recorded"  "1" "$(cnt '"text":"ok"' "$JW/home/.config/ghostfleet/jarvis.said")"
   # SWITCHED OFF, NOTHING WAKES IT: neither a need-you nor a batch reaches Jarvis while the
   # marker is still there. The control is the same need-you once it is back on.
   sed -i.bak '/^batch=/d' "$JW/home/.config/ghostfleet/jarvis"

@@ -805,10 +805,22 @@ hour.
 
 **What stays the same.** Outputs and exit codes, the queue and its card count, the
 `[fleet]` preambles, the nudges and their deferral (they still wait for an empty box,
-because they may still be pasted), the `.sent` log, and the Jarvis delivery marker. That
-marker is still written before the handoff, so a prompt the fleet delivered into Jarvis's
-master never counts as the owner speaking. The phone's prompts go through `fleet-send` as
-before. One new failure gets a code: a prompt the mod could not submit (a hook dropped it)
+because they may still be pasted), and the `.sent` log. The Jarvis delivery marker is now
+written by the side that delivers: `fleet-send` when it pastes, and the mod, inside
+Jarvis's own session, just before it submits. Either way a prompt the fleet delivered into
+Jarvis's master never counts as the owner speaking, even when the sender's `HOME` is not
+Jarvis's. The phone's prompts go through `fleet-send` as before.
+
+**Only the addressed server's mod.** A record matches by socket name and slot, and a name
+is not a server. The record's `pane` names the tmux server it runs on (`%N@<server pid>`),
+and `fleet-send` passes the pid of the server it addresses, so a record of the same name on
+another server is never handed the prompt. Without this, a fixture server under a test
+run's own `$TMUX_TMPDIR`, reached with the caller's fleet dir, delivered into the live
+session of that name.
+
+**Who sent it.** Each `.sent` row carries a fifth field:
+`from=<sock>/<session> cwd=<dir> by=<parent command>`. The session comes from `$TMUX`, and
+is marked `env:` when it was only read from the environment. `-` means no fleet session. One new failure gets a code: a prompt the mod could not submit (a hook dropped it)
 exits 1 with `not delivered`.
 
 **Seeing it.** The transcript labels a delivered prompt `Prompt from the ghostfleet

@@ -171,9 +171,13 @@ while [ -L "$_src" ]; do
 done
 MOD_TARGET="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/mod-target.mjs"
 MOD_SID=""; MOD_STATE=""; MOD_NOW=""; MOD_DIR=""
+# THE SERVER THIS SEND ADDRESSES, so a record of the same name on another one is not taken
+# for it (lib/mod-target.mjs). Empty when tmux cannot say, which refuses every record that
+# names a server: the paste, on the server that was named.
+MOD_SRV="$(tmux -L "$SOCK" display-message -p -t "$SESSION" '#{pid}' 2>/dev/null)"
 _mod_look() {
   local out
-  out="$(node "$MOD_TARGET" "$MOD_DIR" "$SOCK" "$SESSION" 2>/dev/null)" || { MOD_SID=""; return 1; }
+  out="$(node "$MOD_TARGET" "$MOD_DIR" "$SOCK" "$SESSION" "$MOD_SRV" 2>/dev/null)" || { MOD_SID=""; return 1; }
   IFS=$'\t' read -r MOD_SID MOD_STATE MOD_NOW <<< "$out"
   [ -n "$MOD_SID" ]
 }
@@ -529,23 +533,48 @@ _sent_digest() {                   # shasum on macOS, sha256sum on most Linux, e
   printf '%s' "${h:0:12}"
   [ -n "$h" ] || printf 'no-digest-tool'
 }
-{ printf '%s\t%s\t%s\t%s\n' \
+#
+# AND WHO SENT IT. A row that says what arrived but not from where answered "is this what
+# was sent" and nothing else: two-byte prompts into another fleet's master, a hundred of
+# them over two weeks, with every sender's transcript searched and none of them guilty —
+# because the sender was no session at all, but a test run. The fifth field names the
+# sending fleet session when there is one, the directory it ran in, and the process that
+# ran it, which is what would have pointed at that run on the first row.
+# The session comes from $TMUX where there is one (SELF_*, above); the environment's is
+# marked `env:`, because the MCP server repoints CLAUDE_FLEET_SOCK at the TARGET's fleet.
+_sent_by() {                       # "from=<sock>/<slot>|env:<sock>/<slot>|- cwd=<dir> by=<parent>"
+  local by from="-"
+  if [ -n "$SELF_SOCK" ]; then from="$SELF_SOCK/${SELF_SESS:-?}"
+  elif [ -n "${CLAUDE_FLEET_SOCK:-}" ]; then from="env:$CLAUDE_FLEET_SOCK/${CLAUDE_FLEET_SLOT:-?}"
+  fi
+  by="$(ps -o args= -p "$PPID" 2>/dev/null | tr '\t\n\r' '   ')"
+  printf 'from=%s cwd=%s by=%s' "$from" "$(pwd -P 2>/dev/null | tr '\t\n' '  ')" "${by:0:160}"
+}
+{ printf '%s\t%s\t%s\t%s\t%s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SESSION" \
-    "$(printf '%s' "$MSG" | wc -c | tr -d ' ')" "$(_sent_digest "$MSG")"
+    "$(printf '%s' "$MSG" | wc -c | tr -d ' ')" "$(_sent_digest "$MSG")" "$(_sent_by)"
 } >> "$_sent_log" 2>/dev/null || true
 
 # INTO JARVIS'S MASTER, SAY SO FIRST. Jarvis's confirm-list counts a yes only from the owner,
 # and the hook that records what was submitted cannot tell a paste from typing — so every
-# prompt this command delivers there leaves a line (time + digest, never the text) where the
+# prompt this command PASTES there leaves a line (time + digest, never the text) where the
 # ledger checks (lib/jarvis.mjs consumeDelivery). Profile-independent on purpose: a worker
 # on another profile sends from another fleet dir, and Jarvis's marker is the one place both
-# can see. Written HERE, at the paste, because a queued prompt is delivered later by --dequeue.
-_jm="$HOME/.config/ghostfleet/jarvis"
-if [ "$SESSION" = master ] && [ -f "$_jm" ] && ! grep -qsx off "$_jm.enabled" \
-   && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
-  _jd="$(printf '%s' "$MSG" | shasum -a 256 2>/dev/null || printf '%s' "$MSG" | sha256sum 2>/dev/null)"
-  printf '%s\t%s\n' "$(date +%s)" "${_jd:0:12}" >> "$HOME/.config/ghostfleet/jarvis.delivered" 2>/dev/null || true
-fi
+# can see. Called at the paste, because a queued prompt is delivered later by --dequeue.
+#   A prompt the MOD delivers is recorded by the mod (register.js, DELIVERY), not here:
+# this line lands in the SENDER's home, and a sender whose HOME is not Jarvis's — a test
+# run that redirected it — wrote its line into a directory Jarvis never reads, so every
+# such prompt counted as the owner's own word. The mod runs inside the session that
+# receives, under the HOME its hook checks. Writing both would leave a second line that
+# swallowed the owner's next real yes.
+_jarvis_delivered() {
+  local _jm="$HOME/.config/ghostfleet/jarvis" _jd
+  if [ "$SESSION" = master ] && [ -f "$_jm" ] && ! grep -qsx off "$_jm.enabled" \
+     && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
+    _jd="$(printf '%s' "$MSG" | shasum -a 256 2>/dev/null || printf '%s' "$MSG" | sha256sum 2>/dev/null)"
+    printf '%s\t%s\n' "$(date +%s)" "${_jd:0:12}" >> "$HOME/.config/ghostfleet/jarvis.delivered" 2>/dev/null || true
+  fi
+}
 # THROUGH THE MOD. Handed over, then three outcomes, each told apart by a rename (the mod's
 # DELIVERY section has the protocol):
 #   claimed and its turn started: the receipt names the turn, and that is "→ <session>";
@@ -610,6 +639,7 @@ if [ "$USE_MOD" = 1 ]; then
 fi
 
 if [ "$USE_MOD" = 0 ]; then
+_jarvis_delivered
 tmux -L "$SOCK" set-buffer -b _fleet -- "$MSG"
 tmux -L "$SOCK" paste-buffer -p -d -b _fleet -t "$SESSION"
 

@@ -19,6 +19,7 @@
 //                                 a fresh start, carrying HANDOFF.md forward; --if-due only
 //                                 once the conversation has outgrown restart_tokens
 //   fleet-jarvis said [--from SRC]    (the event hook) record what the owner said, stdin
+//   fleet-jarvis delivered            (the mod) the prompt on stdin is the fleet's, not the owner's
 //   fleet-jarvis gate-bash            (hooks/jarvis-guard.sh) judge a Bash command, stdin
 //
 // WHY A PROJECT AND NOT A NEW KIND OF THING. A registered project already gets a socket, a
@@ -449,6 +450,8 @@ async function main() {
     // The hook's call. A prompt bin/fleet-send delivered is the fleet talking, whatever it
     // says, and is not recorded as him (lib/jarvis.mjs consumeDelivery).
     case 'said': { const t = readStdin(); if (!J.consumeDelivery(t)) J.recordSaid(t, flag('--from') || 'owner'); return; }
+    // The mod's call, as it submits a prompt the fleet handed into Jarvis's master.
+    case 'delivered': { if (!J.recordDelivery(readStdin())) process.exit(1); return; }
     case 'gate-bash': {
       const c = readStdin();
       const spec = J.bashSpec(c);
