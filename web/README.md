@@ -286,8 +286,10 @@ What stands in front of them is identity and confirmation, not reduced capabilit
 None of that is the enforcement. §5: *server-enforced, not client-enforced* — the
 assertion's job is to make the server mint a token that dies after 15 minutes without a
 request, and the server refuses anything without a live one. Every authenticated response
-carries `X-Session-Expires: <epoch>`, the slid deadline, which `api.js` mirrors and stores
-per origin so a relaunch inside the window resumes without Face ID (`passkey.resume()`). The lists in `api.js` decide which taps ask for a
+carries `X-Session-Expires: <epoch>`, the slid deadline, which `api.js` mirrors and keeps
+per origin in `sessionStorage` — so the app's own reload (taking a new client) resumes
+without Face ID (`passkey.resume()`), and a cold launch, closed from the app switcher and
+reopened, starts locked. The lists in `api.js` decide which taps ask for a
 fingerprint; `curl` never runs them. The lead is refused the same way: in `plan()`
 (`mcp/fleet-dispatch.mjs`), which is the layer both the MCP server and the daemon go
 through, so the button being absent is a courtesy and not the control.
@@ -307,6 +309,7 @@ POST /api/verb   { tool, args }             -> { ok, text }         Bearer token
 GET  /api/auth/challenge                    -> { challenge, rp_id, user, enrolling }
 POST /api/auth/register { code, id, … }     -> { token, expires_at }
 POST /api/auth/assert                       -> { token, expires_at }
+POST /api/auth/end                          -> { ok }               Bearer token required; ends that session
 POST /api/attach { project, session, data } -> { ok, path, bytes, from, converted }
                                             Bearer token required; 9 MB body cap, 6 MB photo
 GET  /api/health                            -> { ok, version, … }    the probe's target

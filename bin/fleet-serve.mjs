@@ -1973,6 +1973,18 @@ async function api(req, res, url, ip) {
     return send(res, 200, { ok: true, token: sess.token, expires_at: sess.expires_at, client_id: v.client.id });
   }
 
+  // ENDING A SESSION, by the token itself. Behind the gate like any read — only a live
+  // token can end itself — so all it can do to anyone is log them out of the session they
+  // hold. The phone calls it once, for the copy an older client kept in localStorage: that
+  // token would otherwise stay live here for the rest of its idle window with nothing on
+  // the device left to use it or say it exists (web/api.js retireStoredToken).
+  if (p === '/api/auth/end') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    sessions.delete(sha256(bearer)); persistSessions();
+    log(`session for '${req.client.id}' ended from ${ip}`);
+    return send(res, 200, { ok: true });
+  }
+
 // WHICH AGENTS THE PHONE MAY OFFER, asked of the machine rather than listed here. The
 // names come from `fleet-agent list`, the presence from `fleet-agent installed`, and the
 // warning from `fleet-agent caveat` — so a fourth agent appears in the picker, with its

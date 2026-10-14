@@ -31,6 +31,17 @@ Object.defineProperty(globalThis, 'localStorage', {
     removeItem: (k) => { stored.delete(k); },
   },
 });
+// The session token's store (api.js). Node 20 has none, and a missing one is a token that
+// silently never persists — stubbed, so the client runs here as it does on the phone.
+const session = new Map();
+Object.defineProperty(globalThis, 'sessionStorage', {
+  configurable: true, writable: true,
+  value: {
+    getItem: (k) => (session.has(k) ? session.get(k) : null),
+    setItem: (k, v) => { session.set(k, String(v)); },
+    removeItem: (k) => { session.delete(k); },
+  },
+});
 const BASE = (process.argv[2] || '').replace(/\/+$/, '');
 const CODE = process.argv[3] || '';
 const U = new URL(BASE);

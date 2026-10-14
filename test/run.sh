@@ -14446,14 +14446,15 @@ if sv_start origin; then
   # The client really is enrolled now, as far as the SERVER is concerned — asserted from
   # the other side, because the helper's own view of it is the client's.
   is "the daemon lists the phone as enrolled" "1" "$(sv_cli clients | grep -c '^pwaenrol *active *1' || true)"
-  # ── and a RELAUNCH gets back in on the session it already has ─────────────
-  # A new process seeded with what the enrolled "phone" left in localStorage: iOS evicting the
-  # backgrounded app and the owner tapping it again. web/passkey.js resume() must reach the
-  # daemon on the stored token without the sensor, and clear a token the daemon refuses.
+  # ── and a COLD LAUNCH is locked, while the app's own reload is not ─────────
+  # A new process seeded with what the enrolled "phone" left behind. Closed from the app
+  # switcher and reopened, it must NOT resume (the owner's "when I exit the app, lock it");
+  # reloaded by its service worker, it must, without the sensor; and a token an older
+  # client kept in localStorage must be ended on the daemon rather than walked in on.
   node "$ROOT/test/helpers/pwa-relaunch.mjs" "$BASE" "$PWO/store.json" > "$PWO/relaunch" 2> "$PWO/relaunch.err"
   is "pwa-relaunch ran"               "0" "$?"
   is "...without complaining"         ""  "$(head -2 "$PWO/relaunch.err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/relaunch")" -ge 12 ] && echo yes || echo "no: $(wc -l < "$PWO/relaunch") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/relaunch")" -ge 20 ] && echo yes || echo "no: $(wc -l < "$PWO/relaunch") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PWO/relaunch"

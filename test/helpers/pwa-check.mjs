@@ -1126,18 +1126,21 @@ is('...and app.js still hands the staleness over', 2,
 // §5's rule about the token, checked as CODE and not as prose: the first version of
 // this assertion matched api.js's own comment explaining why the token is not stored,
 // and so passed while proving nothing. Only a real write counts.
-//   THE RULE CHANGED, by the owner's decision: the token is now KEPT on the device so a
-// relaunch inside the idle window needs no Face ID (the server's 15-minute idle window and
-// `revoke` are the bound). What still has to hold is narrower and checkable: ONE write,
-// under a key scoped to the daemon's origin, and every 401 the client can receive clears
-// it — so a dead token is tried once and never lingers.
+//   THE RULE CHANGED TWICE, both by the owner's decision. The token was kept in localStorage
+// so a relaunch inside the idle window needed no Face ID; then "when I completely exit the
+// app, it should lock" — so it is kept for the life of the PAGE PROCESS: sessionStorage,
+// which a kill from the iOS app switcher empties and the app's own reload keeps (measured
+// in an installed home-screen app; pwa-relaunch.mjs drives both against a live daemon).
+// What still has to hold: ONE write, under a key scoped to the daemon's origin, and every
+// 401 the client can receive clears it — so a dead token is tried once and never lingers.
 const API = read('api.js');
 const stores = [...API.matchAll(/(?:localStorage|sessionStorage)\.setItem\(([^)]*)\)/g)].map(m => m[1]);
 is('exactly one storage write carries the token', 1, stores.filter(a => /token/i.test(a)).length);
-is('...in localStorage, under the per-origin key', true,
-   /localStorage\.setItem\(k, JSON\.stringify\(\{ t: token, exp: tokenExp \}\)\)/.test(API)
+is('...in sessionStorage, under the per-origin key', true,
+   /sessionStorage\.setItem\(k, JSON\.stringify\(\{ t: token, exp: tokenExp \}\)\)/.test(API)
    && /`\$\{LS_TOKEN\}:\$\{r\.base\}`/.test(API));
-is('...and never in sessionStorage (an iOS relaunch drops it)', false, /sessionStorage\.setItem/.test(API));
+is('...and never in localStorage (it outlives a kill, and the app stays unlocked)', false,
+   /localStorage\.setItem\(k, JSON\.stringify\(\{ t: token/.test(API));
 const on401 = API.split('\n').filter(l => /if \(r\.status === 401/.test(l));   // the branches that ACT on one, not the probe's sentence about it
 is('every 401 branch clears the token', '', on401.filter(l => !/clearToken\(\)/.test(l)).join(' | '));
 is('...and there are 401 branches to check', true, on401.length >= 4);

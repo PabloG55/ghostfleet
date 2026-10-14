@@ -315,6 +315,12 @@ for (const [name, value] of [
     setItem: (k, v) => { stored.set(k, String(v)); },
     removeItem: (k) => { stored.delete(k); },
   }],
+  // The session token's store (api.js); node 20 has none.
+  ['sessionStorage', (() => { const m = new Map(); return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => { m.set(k, String(v)); },
+    removeItem: (k) => { m.delete(k); },
+  }; })()],
   ['document', documentStub],
   // A REAL REGISTRY, not a no-op. app.js's back gesture is wired to `popstate`, and a
   // swallowed listener would make the whole feature untestable outside a browser — which

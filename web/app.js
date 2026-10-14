@@ -3088,10 +3088,10 @@ let swReloadPending = false;
 export function reloadAction(pending, typing, authed) {
   if (!pending) return 'none';
   if (typing) return 'wait';               // never mid-sentence: a reload eats S.draft
-  // NEVER UNDER A LIVE SESSION, and this is the whole fix. The token is in memory by
-  // design, so a reload ENDS the session — do it while somebody is holding one and they
-  // land on the lock screen they just cleared, and the passkey they just spent bought
-  // them one second of app.
+  // NEVER UNDER A LIVE SESSION. This was written when a reload ENDED the session — the
+  // owner landed on the lock screen they had just cleared. The token now survives a reload
+  // of the same page (api.js, sessionStorage), so that is no longer the cost; what is left
+  // is the screen they were on and its scroll, which is still no reason to swap mid-use.
   //   It used to be guarded on pollPaused(), which counts S.locked as paused. That
   // deferred the swap while locked and spent it the instant the app unlocked — waiting
   // for precisely the transition that costs a Face ID. Locked is the FREE moment: there is
@@ -4691,10 +4691,11 @@ render();
 // the answer. Waiting for the probe before the first paint would put a blank page in
 // front of a cold open, which is the thing the service worker exists to prevent.
 api.ready().then(() => render());
-// THEN TRY THE SESSION WE ALREADY HAVE, before anyone is asked for a face. A relaunch inside
-// the idle window — iOS evicting the app in the background is the common one — comes back
-// on the stored token (pk.resume). Its 401 clears it and leaves the lock screen up, which is
-// where Face ID lives. Guarded on S.locked so a fast tap on "unlock" is never undone.
+// THEN TRY THE SESSION WE ALREADY HAVE, before anyone is asked for a face. Only a reload of
+// this same page process has one (the app taking a new client) — a cold launch, closed from
+// the app switcher or evicted by iOS, has none and stays locked (api.js). Its 401 clears it
+// and leaves the lock screen up, which is where Face ID lives. Guarded on S.locked so a fast
+// tap on "unlock" is never undone.
 // ...and if it has none, the sensor is offered without a tap: one attempt (passkey.js
 // autoUnlock), which WebKit may refuse for want of a gesture — then the button is the way in.
 // 'offline' gets no attempt: an assertion that cannot be posted is a Face ID spent for nothing.

@@ -208,16 +208,20 @@ export function fixtureName() {
 export function setFixtureName(f) { try { localStorage.setItem(LS.fixture, f); } catch {} }
 
 // ── the session token (§5) ────────────────────────────────────────────────
-// KEPT ON THE DEVICE, for as long as the server would honour it. It used to live in a
-// module variable only, so every relaunch asserted — and iOS evicts a backgrounded
-// home-screen app freely, so "relaunch" meant most returns to the app, each one a Face ID
-// for a token the server still held. localStorage, because it is the store an installed
-// iOS web app keeps across relaunches; sessionStorage does not survive one.
-//   What this does NOT weaken: the server decides. The token dies after the idle window
+// KEPT FOR THE LIFE OF THE PAGE PROCESS, and no longer. It used to be localStorage, so
+// that a relaunch inside the idle window walked straight back in — which is exactly what
+// the owner did not want: closing the app from the app switcher left it UNLOCKED for
+// whoever picked the phone up next, for as long as the server's 15 minutes ran.
+//   sessionStorage, measured rather than assumed, in an installed iOS 26.5 home-screen
+// app: a kill from the app switcher (and an OS eviction, which is the same new process)
+// starts it EMPTY; a resume (switch away and back, screen off and on) is the same page and
+// never reads it; and location.reload() — which is how the app takes a new client the
+// service worker installed — KEEPS it. A module variable alone would get the first two
+// right and lock the owner out on the third, in the middle of using the app, for a swap
+// they never asked for.
+//   What did not change: the server decides. The token dies after the idle window
 // (session_ttl, 15 minutes without a request) and on `fleet-serve revoke` whatever this
-// file believes, and the first 401 clears the stored copy (clearToken) so a dead token
-// is tried exactly once. The lock is still the passkey; this only stops asking for it
-// while the session it minted is alive.
+// file believes, and the first 401 clears the stored copy (clearToken).
 //   Scoped by ORIGIN, as the credential is (passkey.js credKey): a token belongs to the
 // daemon that minted it. Server mode only — a fixture stub is not worth keeping.
 let token = null, tokenExp = 0;
@@ -225,24 +229,43 @@ const LS_TOKEN = 'gf.session';
 function tokenKey() { const r = resolution(); return r.mode === 'server' && r.base ? `${LS_TOKEN}:${r.base}` : ''; }
 function storeToken() {
   const k = tokenKey();
-  try { if (k) { if (token) localStorage.setItem(k, JSON.stringify({ t: token, exp: tokenExp })); else localStorage.removeItem(k); } } catch {}
+  try { if (k) { if (token) sessionStorage.setItem(k, JSON.stringify({ t: token, exp: tokenExp })); else sessionStorage.removeItem(k); } } catch {}
 }
 export function setToken(t, expiresAt) { token = t || null; tokenExp = expiresAt || 0; storeToken(); }
 export function haveToken() { return !!token && Date.now() / 1000 < tokenExp; }
 export function clearToken() { token = null; tokenExp = 0; storeToken(); }
-// The cold-start half: whatever this origin's daemon minted last, if it has not visibly
-// expired. Nothing is trusted from it but the string — passkey.resume() asks the server.
+// The reload half: whatever this page process minted before the app reloaded itself, if it
+// has not visibly expired. Nothing is trusted from it but the string — passkey.resume()
+// asks the server.
 export function restoreToken() {
   const k = tokenKey();
   if (!k) return false;
   let j = null;
-  try { j = JSON.parse(localStorage.getItem(k) || 'null'); } catch {}
+  try { j = JSON.parse(sessionStorage.getItem(k) || 'null'); } catch {}
   if (!j || typeof j.t !== 'string' || !(Date.now() / 1000 < Number(j.exp))) {
-    try { localStorage.removeItem(k); } catch {}
+    try { sessionStorage.removeItem(k); } catch {}
     return false;
   }
   token = j.t; tokenExp = Number(j.exp);
   return true;
+}
+// THE COPY AN OLDER CLIENT LEFT ON THE DEVICE. Every phone that ran the localStorage
+// version still holds a token there, and it outlives this change: not used by anything,
+// but a live bearer on disk until the server's idle window closes. So it is taken off the
+// device AND ended on the server — not merely ignored — because ignoring it would leave a
+// session nobody can see open for the rest of its window. Best effort: offline, it is gone
+// from the device anyway and dies on the server's clock.
+export async function retireStoredToken() {
+  const k = tokenKey();
+  if (!k) return false;
+  let j = null;
+  try { j = JSON.parse(localStorage.getItem(k) || 'null'); localStorage.removeItem(k); } catch {}
+  if (!j || typeof j.t !== 'string' || !(Date.now() / 1000 < Number(j.exp))) return false;
+  try {
+    const r = await fetch(baseUrl() + '/api/auth/end',
+      { method: 'POST', headers: { Authorization: `Bearer ${j.t}` }, cache: 'no-store' });
+    return r.ok;
+  } catch { return false; }
 }
 // THE SLIDE, mirrored. fleet-serve answers every authenticated request with the session's
 // new deadline; without copying it here, haveToken() would expire the token on the

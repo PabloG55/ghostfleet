@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 4704e1aceefc
+// CLIENT-HASH: 77f893c85cce
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -341,7 +341,11 @@
 // bubble rises from the composer and settles in place when delivered, screens slide like
 // iOS navigation, and the first frame of every load is the dark ground rather than white.
 // A phone still on v64 swaps screens with the short wipe and can flash white going back.
-const VERSION = 'ghostfleet-v65';
+// v66 locks on a cold launch: the session token lives in sessionStorage, which a kill from
+// the app switcher empties and the app's own reload keeps, and the copy an older client left
+// in localStorage is ended on the server at the first open. A phone still on v65 keeps
+// walking back in after a kill, for as long as the server's idle window allows.
+const VERSION = 'ghostfleet-v66';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
