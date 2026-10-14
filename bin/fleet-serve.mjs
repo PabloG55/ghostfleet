@@ -802,6 +802,27 @@ const serialize = (fn) => (chain = chain.then(fn, fn));
 const REFUSED_RE = /^\s*(?:fleet-stop: kept |keep )/m;
 const forceKey = (tool, args) => `${tool}:${args.project || '-'}:${args.session || args.path || '-'}`;
 
+// fleet-send's failure lines are written for a terminal — `fleet-send: → master (not
+// delivered: …)` — and the phone shows this text as a toast, so it leads with what the
+// owner needs: that it did not reach the session. The reason stays, word for word.
+export function undeliveredText(session, out) {
+  const why = String(out || '').split('\n').map(l => l.replace(/^fleet-send:\s*/, '').trim()).filter(Boolean)
+    .map(l => l.replace(/^→ \S+ \((?:not delivered: )?(.*)\)$/, '$1')).join(' — ');
+  return `did not reach ${session || 'the session'}: ${why || 'fleet-send failed and said nothing'}`;
+}
+// A PROMPT THAT OPENS WITH ONE OF OUR OWN UPLOAD PATHS IS NOT A COMMAND. The client before
+// this one put a photo's path FIRST, so its message began with `/` and the mod refused to
+// submit it as a slash command — every photo from that client failed. An installed PWA keeps
+// running the client it cached until it is relaunched, so the server says it too, and says it
+// narrowly: only a leading path under this fleet's attach directory gets a word in front.
+// Anything else that begins with `/` is still the owner typing a command, and is left for
+// the mod to judge — the guard there is not loosened, it is simply not asked about a path.
+export function unslashPhotoPrompt(prompt) {
+  const p = String(prompt ?? '');
+  const root = path.join(process.env.CLAUDE_FLEET_DIR || path.join(os.homedir(), '.claude', 'fleet'), 'attach') + path.sep;
+  return p.startsWith(root) ? `photo: ${p}` : prompt;
+}
+
 async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   const built = buildArgs(tool, rawArgs);
   if (built.error) return { status: built.status || 400, json: { ok: false, text: built.error } };
@@ -844,11 +865,19 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   if (tool === 'fleet_answer' && !(typeof args.expect === 'string' && args.expect))
     return { status: 409, json: { ok: false, changed: true,
       text: 'the prompt changed: the pane you answered was not showing a prompt (or this app is too old to say which one — reload it). Nothing was sent.' } };
-  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true });
-  const text = typeof out === 'string' ? out : String(out.text);
+  if (tool === 'fleet_send') args.prompt = unslashPhotoPrompt(args.prompt);
+  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true, status: tool === 'fleet_send' });
+  let text = typeof out === 'string' ? out : String(out.text);
+  // A SEND THAT RAN AND DID NOT ARRIVE is a failure, not a quiet success. fleet-send exits
+  // non-zero when the prompt never reached the session — the mod refused to submit it, the
+  // queue was locked, the session is gone — and that status used to be dropped here, so the
+  // phone got 200, cleared the composer and drew `sending…` over a message nobody would
+  // ever read. Said as what happened to the message, with fleet-send's reason after it.
+  const undelivered = tool === 'fleet_send' && typeof out === 'object' && !out.isError && out.code !== 0;
+  if (undelivered) text = undeliveredText(args.session, text);
   if (tool === 'fleet_answer' && /^fleet-answer: the prompt changed/m.test(text))
     return { status: 409, json: { ok: false, changed: true, text: text.replace(/^fleet-answer: /, '') } };
-  const refused = typeof out !== 'string' && out.isError === true;
+  const refused = undelivered || (typeof out !== 'string' && out.isError === true);
   // WHAT THE PHONE SAYS TO JARVIS IS THE OWNER SPEAKING, and this is the one component that
   // knows it: the request carries a token a passkey minted. Recorded here, into the ledger
   // Jarvis's confirm-list reads (lib/jarvis.mjs). The prompt is delivered by fleet-send,
@@ -871,7 +900,7 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
                   // §7 again: the log says what the fingerprint was FOR, not merely that
                   // one happened. `purpose` is the client's own word for the tap.
                   confirmed: v.passkey ? `passkey:${assertion?.purpose || 'unnamed'}` : null,
-                  result: refused ? 'refused' : 'ran',
+                  result: undelivered ? 'not delivered' : refused ? 'refused' : 'ran',
                   output: text.slice(0, 500) });
     inboxRow(t, subject, `${summary}${refused ? ' — REFUSED' : ''} · from ${client.id}@${ip}`);
   }

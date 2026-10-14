@@ -680,6 +680,15 @@ which goes through `fleet-read --json` and emits `{ts, role, text}` — assistan
 all. So the screen was not under-rendering the commands; it never had them, and no amount
 of client work could have produced them.
 
+*Later:* the payload grew two event roles, so the chat can say THAT something happened
+without pretending to be the pane. `compacted` is a context compaction (its summary as a
+folded detail), and `tools` is a run of consecutive tool calls folded into one item —
+`tools: [{name, detail, ts}]`, where `detail` is one line of what the call was asked (a
+command, a path) and a finished background task is a call named `task`. Both draw as a small
+muted card. Before that, the compaction summary and every background-task notification were
+`role: "user"` and drew as the owner's own bubble. Results are still not in the payload: the
+pane is the place for output.
+
 And "exactly as the computer version" has a precise answer, because at the desk `⏎` on a
 card **attaches to the tmux pane**: you get the Claude Code TUI — `⏺` bullets,
 `⎿ Bash(…)` tool headers, the spinner, the elapsed counter, the permission dialog. That is

@@ -538,8 +538,28 @@ if (BASE) {
 // order picked, after what was typed — and photos alone are a message too.
 is('a message carries every photo path', 'look at these /f/a.jpg /f/b.png /f/c.jpg',
    appmod.messageWithPhotos(' look at these ', ['/f/a.jpg', '/f/b.png', '/f/c.jpg']));
-is('...photos alone are a message', '/f/a.jpg /f/b.png', appmod.messageWithPhotos('', ['/f/a.jpg', '/f/b.png']));
+// ...and photos alone are a message that does NOT begin with `/`: a prompt that does is a
+// slash command, and the mod refuses to submit one — so a photos-only send never arrived.
+is('...photos alone are a message', 'photos: /f/a.jpg /f/b.png', appmod.messageWithPhotos('', ['/f/a.jpg', '/f/b.png']));
+is('...one photo alone too', 'photo: /f/a.jpg', appmod.messageWithPhotos('  ', ['/f/a.jpg']));
+is('...and no message built from photos begins with /', false,
+   /^\s*\//.test(appmod.messageWithPhotos('', ['/f/a.jpg'])));
 is('...and no photos is just the text', 'hello', appmod.messageWithPhotos('hello', []));
+
+// EVENTS ARE CARDS, NEVER THE OWNER'S BUBBLE. bin/fleet-read serves a compaction and a run of
+// tool calls as roles of their own; the chat draws them as a folded <details> card. The bug
+// this pins was one of these drawn as a right-hand `turn me` bubble.
+{
+  const tc = appmod.eventCard({ role: 'tools', ts: 1, text: '3 tool calls',
+    tools: [{ name: 'Bash', detail: 'Run the acme-api suite' }, { name: 'Read', detail: 'web/app.js' }, { name: 'Bash', detail: 'x' }] });
+  is('a run of tool calls is a folded card', 'details', tc.tag);
+  is('...styled as an event, not a turn', true, tc.classList.contains('evt') && !tc.classList.contains('turn') && !tc.classList.contains('me'));
+  is('...its one line names the tools once each', true, /3 tool calls · Bash, Read/.test(tc.textContent));
+  is('...and holds what each was asked', true, /Run the acme-api suite/.test(tc.textContent));
+  const cc = appmod.eventCard({ role: 'compacted', ts: 2, text: 'conversation compacted', detail: 'the summary' });
+  is('a compaction is a card too', 'details', cc.tag);
+  is('...that says so', true, /conversation compacted/.test(cc.textContent) && cc.classList.contains('compacted'));
+}
 
 if (BASE) {
   const pk = await import(new URL('../../web/passkey.js', import.meta.url).href);

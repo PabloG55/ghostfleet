@@ -1863,6 +1863,12 @@ function chatView(card) {
     wrap.append(el('div', { class: 'meta l', text: '— the beginning of the transcript —' }));
   }
   for (const m of (s.messages || [])) {
+    // EVENTS ARE CARDS, NOT BUBBLES. A compaction and a run of tool calls used to arrive as
+    // user turns and drew as the owner's own words; bin/fleet-read now serves them as roles of
+    // their own, and they draw as a small muted card that is plainly nobody speaking. Any role
+    // this screen does not know is never drawn as his.
+    if (m.role === 'compacted' || m.role === 'tools') { wrap.append(arrived(eventCard(m), m, msgKey(m))); continue; }
+    if (m.role !== 'user' && m.role !== 'assistant') continue;
     // ON JARVIS'S SCREEN, THE MACHINE IS NOT THE OWNER. Its wakes arrive as prompts, so the
     // transcript files them as user turns — and a big right-hand bubble reading "[fleet]
     // need-you: …" says HE wrote it, on the one screen where who said what is the whole
@@ -2025,8 +2031,15 @@ const photoKey = (project = S.project, session = S.session) => `${project} ${ses
 const photosFor = (key = photoKey()) => S.photos.filter((p) => p.key === key);
 
 // The message the agent is handed: what was typed, then every photo's path, in order.
+//   PHOTOS ALONE GET A WORD IN FRONT. A message that is only paths begins with `/`, and a
+// prompt beginning with `/` is a slash command to the agent — the mod refuses to submit one
+// on the owner's behalf, so a photos-only send was refused every time. The word is not for
+// the agent; it is what keeps the first character from being a command prefix. Typed text
+// that itself begins with `/` is left alone: that one IS a command, and it is the owner's.
 export function messageWithPhotos(text, paths) {
-  return [String(text || '').trim(), ...paths.filter(Boolean)].filter(Boolean).join(' ');
+  const typed = String(text || '').trim(), ps = paths.filter(Boolean);
+  const lead = typed || (ps.length ? (ps.length > 1 ? 'photos:' : 'photo:') : '');
+  return [lead, ...ps].filter(Boolean).join(' ');
 }
 
 function photoThumb(file, n) {
@@ -2167,6 +2180,33 @@ function arrivedDone() {
   drawn.pend = S.pending ? String(S.pending.text || '').trim() : '';
 }
 
+// A compaction or a run of tool calls, as one folded card. FOLDED BY DEFAULT and REMEMBERED
+// OPEN: the chat is rebuilt on every 5s poll, so a <details> left to itself snaps shut under
+// the thumb that opened it. Keyed like a message, which is stable across polls and pages.
+const openCards = new Set();
+export function eventCard(m) {
+  const key = msgKey(m);
+  const tools = m.role === 'tools' ? (m.tools || []) : [];
+  const names = [...new Set(tools.map((t) => t.name))];
+  const label = m.role === 'compacted' ? 'conversation compacted'
+    : `${m.text || `${tools.length} tool calls`}${names.length ? ' · ' + names.slice(0, 3).join(', ') + (names.length > 3 ? ', …' : '') : ''}`;
+  const body = m.role === 'compacted'
+    ? (m.detail ? [el('div', { class: 'evt-sum', text: m.detail })] : [el('div', { class: 'evt-sum', text: 'earlier turns were summarised to make room' })])
+    : tools.map((t) => el('div', { class: 'evt-row' }, [
+        el('span', { class: 'evt-name', text: t.name }),
+        t.detail ? el('span', { class: 'evt-detail', text: t.detail }) : null,
+      ]));
+  const d = el('details', { class: `evt ${m.role}`, ontoggle: () => { if (d.open) openCards.add(key); else openCards.delete(key); } }, [
+    el('summary', {}, [
+      el('span', { class: 'evt-ico', text: m.role === 'compacted' ? '⟲' : '⚙', 'aria-hidden': 'true' }),
+      el('span', { class: 'evt-t', text: label }),
+      el('span', { class: 'evt-at', text: G.clockLabel(m.ts) }),
+    ]),
+    el('div', { class: 'evt-body' }, body),
+  ]);
+  if (openCards.has(key)) d.open = true;
+  return d;
+}
 function turn(mine, text, when, pending = false, key = '') {
   const bub = el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : '') });
   // AN ASSISTANT'S TURN IS MARKDOWN AND WAS BEING SHOWN AS ITS OWN SOURCE — "the messages
@@ -2467,9 +2507,14 @@ async function sendDraft() {
   scrollMem.delete('chat');          // a message you just sent belongs on screen
   render();
   const r = await doVerb('fleet_send', { project: S.project, session: S.session, prompt: text }, { quiet: true });
+  // A SEND THAT DID NOT ARRIVE GIVES EVERYTHING BACK — the words as well as the photos. The
+  // daemon now answers a send fleet-send could not deliver with ok:false (it used to be a
+  // 200 with "not delivered" in the text), so this is the path that runs when the mod
+  // refuses a prompt; restoring the draft only when photos rode along lost what was typed.
   if (!r) {                                      // doVerb already said why
     S.pending = null;
-    if (mine.length) { S.photos = [...mine, ...S.photos]; if (!S.draft) S.draft = typed; }
+    if (mine.length) S.photos = [...mine, ...S.photos];
+    if (!S.draft) S.draft = typed;
     render();
   }
 }

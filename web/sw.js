@@ -345,7 +345,11 @@
 // the app switcher empties and the app's own reload keeps, and the copy an older client left
 // in localStorage is ended on the server at the first open. A phone still on v65 keeps
 // walking back in after a kill, for as long as the server's idle window allows.
-const VERSION = 'ghostfleet-v66';
+// v67 says when a send did not arrive, restoring the draft and the photos; a photos-only
+// message no longer begins with `/`; and a compaction or a run of tool calls draws as a
+// small folded card instead of the owner's own bubble. A phone still on v66 draws those two
+// as plain left-hand bubbles (never as the owner's), and the daemon fronts its leading photo path.
+const VERSION = 'ghostfleet-v67';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

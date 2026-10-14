@@ -180,19 +180,26 @@ function execPlan(p) {
 // DID collect alongside the error, so a naive `stdout || stderr` returns a payload cut off
 // mid-value — which for JSON fails loudly at the parse, and for text does not fail at all:
 // it looks like a short answer. So it is named rather than merged into the generic path.
-function execPlanAsync(p, { timeout = 0, maxBuffer = 1024 * 1024 } = {}) {
+//   `status: true` resolves {text, code} instead of the text alone, for the one caller that
+// has to tell a command which RAN AND FAILED from one that worked: the phone's send. Without
+// it fleet-send's exit 1 ("not delivered") came back as a string, the daemon answered 200,
+// and the phone cleared the composer over a message that never arrived. Opt-in, because
+// most commands here write to stderr on success and their callers want the text either way.
+function execPlanAsync(p, { timeout = 0, maxBuffer = 1024 * 1024, status = false } = {}) {
   const { file, argv, env, cwd } = invocation(p);
-  return new Promise((resolve) => {
+  return new Promise((done) => {
+    const resolve = (text, code) => done(status ? { text, code } : text);
     execFile(file, argv, { encoding: 'utf8', env, cwd, timeout, maxBuffer },
       (err, stdout, stderr) => {
-        if (!err) return resolve(stdout || '(no output)');
+        if (!err) return resolve(stdout || '(no output)', 0);
         // A killed-by-timeout child has usually printed nothing, so say what happened
         // rather than handing back an empty string that reads like success.
         if (err.killed && timeout && err.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
-          return resolve(`error: ${p.cmd} timed out after ${timeout}ms`);
+          return resolve(`error: ${p.cmd} timed out after ${timeout}ms`, -1);
         if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
-          return resolve(`error: ${p.cmd} produced more than ${maxBuffer} bytes — the answer was cut off, so it is refused rather than returned short`);
-        resolve(`${stdout || ''}${stderr || ''}`.trim() || `error: ${err.message}`);
+          return resolve(`error: ${p.cmd} produced more than ${maxBuffer} bytes — the answer was cut off, so it is refused rather than returned short`, -1);
+        resolve(`${stdout || ''}${stderr || ''}`.trim() || `error: ${err.message}`,
+                typeof err.code === 'number' ? err.code : -1);
       });
   });
 }

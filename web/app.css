@@ -1094,6 +1094,23 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .sbar .who .nm .tag-exp { margin-left: .5em; padding: 0 .35em; border: 1px solid var(--yellow); border-radius: 4px;
   color: var(--yellow); font-size: 11px; font-weight: 400; vertical-align: middle; }
 /* A [fleet] wake in Jarvis's transcript: the fleet talking, not the owner, so not a bubble. */
+/* EVENTS: a compaction, a run of tool calls. A card, not a bubble — full width of neither
+ * side, the palette's own --dim and --hair, so it reads as the machine and never as him.
+ * Folded to one line; the body is the detail for whoever wants it. */
+.chat .evt { align-self: stretch; margin: .35em .2em; border: 1px solid var(--hair); border-radius: 8px;
+             font-size: 12px; color: var(--dim); background: rgba(255, 255, 255, .02); min-width: 0; }
+.chat .evt > summary { display: flex; gap: .5em; align-items: baseline; padding: .35em .6em; cursor: pointer;
+                       list-style: none; min-width: 0; }
+.chat .evt > summary::-webkit-details-marker { display: none; }
+.chat .evt .evt-ico { flex: 0 0 auto; }
+.chat .evt .evt-t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat .evt .evt-at { flex: 0 0 auto; }
+.chat .evt[open] > summary { border-bottom: 1px solid var(--hair); }
+.chat .evt .evt-body { padding: .35em .6em .45em; display: flex; flex-direction: column; gap: .25em; }
+.chat .evt .evt-row { display: flex; gap: .5em; min-width: 0; }
+.chat .evt .evt-name { flex: 0 0 auto; color: var(--fg); opacity: .7; }
+.chat .evt .evt-detail { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, Menlo, monospace; }
+.chat .evt .evt-sum { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18em; overflow-y: auto; }
 .chat .sysline { display: flex; gap: .5em; align-items: baseline; margin: .5em .2em; font-size: 12px; color: var(--dim); }
 .chat .sysline .who { color: var(--yellow); flex: 0 0 auto; }
 .chat .sysline .t { flex: 1 1 auto; min-width: 0; }
