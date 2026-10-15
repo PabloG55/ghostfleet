@@ -105,7 +105,7 @@ const DEFAULTS = {
   session_ttl: 900,          // §5: an IDLE window — every authenticated request pushes it out
   confirm_ttl: 120,          // a destructive action confirmed now, not twenty minutes ago
   enroll_ttl: 900,
-  rate: { window: 60, read: 240, write: 30, auth: 10 },
+  rate: { window: 60, read: 240, write: 30, auth: 10, challenge: 60 },
   push: null,                // filled from PUSH_DEFAULTS below — see the push section
   clients: [],
 };
@@ -467,20 +467,39 @@ function sweep() {
 }
 
 // Fixed-window counters. §5 asks for rate limiting "because a token that leaks should be
-// slow to exploit", and the three windows are sized for what each one protects: `auth` is
-// the one an attacker with a stolen bearer token grinds against, `write` bounds how much
-// damage a live session can do per minute, `read` is generous because the phone polls.
-function rateOk(name, key, res) {
-  const c = loadConfig(), limit = c.rate[name] ?? 60, win = c.rate.window || 60;
+// slow to exploit", and the windows are sized for what each one protects: `auth` is the
+// one somebody guessing at a passkey or an enrolment code grinds against, `write` bounds
+// how much damage a live session can do per minute, `read` is generous because the phone
+// polls, and `challenge` only caps a table of single-use random strings.
+function rateBucket(name, key) {
+  const c = loadConfig(), win = c.rate.window || 60;
   const k = `${name}:${key}`, t = now();
   let b = buckets.get(k);
   if (!b || b.resetAt <= t) { b = { n: 0, resetAt: t + win }; buckets.set(k, b); }
+  return { b, limit: c.rate[name] ?? 60, t };
+}
+function rateOk(name, key, res) {
+  const { b, limit, t } = rateBucket(name, key);
   b.n++;
   if (b.n > limit) {
     res.setHeader('Retry-After', String(b.resetAt - t));
     return false;
   }
   return true;
+}
+// THE `auth` BUCKET COUNTS FAILURES, NOT ATTEMPTS. It used to count every request to
+// /api/auth/* — challenges included — at 10 a minute, so a phone whose ceremony never
+// reached the sensor spent the owner's whole minute fetching challenges it could not use:
+// measured, twenty GET /api/auth/challenge and not one assert, then nine 429s in a row, and
+// the owner locked out by tapping. A challenge proves nothing and costs one map entry, so
+// it has a bucket of its own; what a brute force actually needs is many WRONG answers, so
+// only a refused register or assert spends this one (counted where the response finishes,
+// below). A full bucket still refuses the next attempt before it is looked at.
+function rateRoom(name, key, res) {
+  const { b, limit, t } = rateBucket(name, key);
+  if (b.n < limit) return true;
+  res.setHeader('Retry-After', String(b.resetAt - t));
+  return false;
 }
 
 const CHALLENGE_TTL = 120;
@@ -650,6 +669,9 @@ const TOOLS_ALLOWED = {
   fleet_read:            { fields: ['project', 'session', 'n'] },
   fleet_worktrees:       { fields: ['project'] },
   fleet_inbox:           { fields: ['project', 'all'] },
+  // What is still waiting in a session's queue. /api/session serves it decoded beside the
+  // transcript; served here too because every MCP tool is either served or refused by name.
+  fleet_queue:           { fields: ['project', 'session'] },
   fleet_projects:        { fields: [], noProject: true },
   // Every fleet at once, from files. A read, and one the Jarvis screen polls — so the
   // client always asks with peek:true (see /api/digest), and only Jarvis's own reads move
@@ -658,6 +680,11 @@ const TOOLS_ALLOWED = {
   fleet_send:            { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   fleet_answer:          { fields: ['project', 'session', 'text', 'no_enter', 'expect'], write: true, subject: 'session' },
   fleet_pause:           { fields: ['project', 'session'],                     write: true, subject: 'session' },
+  // The Escape the desk presses, and nothing else — the lead takes it too (see the planner).
+  fleet_interrupt:       { fields: ['project', 'session'],                     write: true, subject: 'session' },
+  // Taking an undelivered prompt back out of the queue, so the phone can edit it. A write:
+  // it removes a task somebody asked for, so it is audited like the send that queued it.
+  fleet_unqueue:         { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   fleet_resume:          { fields: ['project', 'session', 'prompt'],           write: true, subject: 'session' },
   // Waking starts a process; parking and un-parking do not. Same write class as the rest of
   // the session verbs, no passkey: it restores a conversation the fleet itself put to sleep.
@@ -783,6 +810,27 @@ const serialize = (fn) => (chain = chain.then(fn, fn));
 const REFUSED_RE = /^\s*(?:fleet-stop: kept |keep )/m;
 const forceKey = (tool, args) => `${tool}:${args.project || '-'}:${args.session || args.path || '-'}`;
 
+// fleet-send's failure lines are written for a terminal — `fleet-send: → master (not
+// delivered: …)` — and the phone shows this text as a toast, so it leads with what the
+// owner needs: that it did not reach the session. The reason stays, word for word.
+export function undeliveredText(session, out) {
+  const why = String(out || '').split('\n').map(l => l.replace(/^fleet-send:\s*/, '').trim()).filter(Boolean)
+    .map(l => l.replace(/^→ \S+ \((?:not delivered: )?(.*)\)$/, '$1')).join(' — ');
+  return `did not reach ${session || 'the session'}: ${why || 'fleet-send failed and said nothing'}`;
+}
+// A PROMPT THAT OPENS WITH ONE OF OUR OWN UPLOAD PATHS IS NOT A COMMAND. The client before
+// this one put a photo's path FIRST, so its message began with `/` and the mod refused to
+// submit it as a slash command — every photo from that client failed. An installed PWA keeps
+// running the client it cached until it is relaunched, so the server says it too, and says it
+// narrowly: only a leading path under this fleet's attach directory gets a word in front.
+// Anything else that begins with `/` is still the owner typing a command, and is left for
+// the mod to judge — the guard there is not loosened, it is simply not asked about a path.
+export function unslashPhotoPrompt(prompt) {
+  const p = String(prompt ?? '');
+  const root = path.join(process.env.CLAUDE_FLEET_DIR || path.join(os.homedir(), '.claude', 'fleet'), 'attach') + path.sep;
+  return p.startsWith(root) ? `photo: ${p}` : prompt;
+}
+
 async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   const built = buildArgs(tool, rawArgs);
   if (built.error) return { status: built.status || 400, json: { ok: false, text: built.error } };
@@ -825,11 +873,19 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   if (tool === 'fleet_answer' && !(typeof args.expect === 'string' && args.expect))
     return { status: 409, json: { ok: false, changed: true,
       text: 'the prompt changed: the pane you answered was not showing a prompt (or this app is too old to say which one — reload it). Nothing was sent.' } };
-  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true });
-  const text = typeof out === 'string' ? out : String(out.text);
+  if (tool === 'fleet_send') args.prompt = unslashPhotoPrompt(args.prompt);
+  const out = await callToolAsync(tool, args, { timeout: 15 * 60 * 1000, human: true, status: tool === 'fleet_send' });
+  let text = typeof out === 'string' ? out : String(out.text);
+  // A SEND THAT RAN AND DID NOT ARRIVE is a failure, not a quiet success. fleet-send exits
+  // non-zero when the prompt never reached the session — the mod refused to submit it, the
+  // queue was locked, the session is gone — and that status used to be dropped here, so the
+  // phone got 200, cleared the composer and drew `sending…` over a message nobody would
+  // ever read. Said as what happened to the message, with fleet-send's reason after it.
+  const undelivered = tool === 'fleet_send' && typeof out === 'object' && !out.isError && out.code !== 0;
+  if (undelivered) text = undeliveredText(args.session, text);
   if (tool === 'fleet_answer' && /^fleet-answer: the prompt changed/m.test(text))
     return { status: 409, json: { ok: false, changed: true, text: text.replace(/^fleet-answer: /, '') } };
-  const refused = typeof out !== 'string' && out.isError === true;
+  const refused = undelivered || (typeof out !== 'string' && out.isError === true);
   // WHAT THE PHONE SAYS TO JARVIS IS THE OWNER SPEAKING, and this is the one component that
   // knows it: the request carries a token a passkey minted. Recorded here, into the ledger
   // Jarvis's confirm-list reads (lib/jarvis.mjs). The prompt is delivered by fleet-send,
@@ -852,7 +908,7 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
                   // §7 again: the log says what the fingerprint was FOR, not merely that
                   // one happened. `purpose` is the client's own word for the tap.
                   confirmed: v.passkey ? `passkey:${assertion?.purpose || 'unnamed'}` : null,
-                  result: refused ? 'refused' : 'ran',
+                  result: undelivered ? 'not delivered' : refused ? 'refused' : 'ran',
                   output: text.slice(0, 500) });
     inboxRow(t, subject, `${summary}${refused ? ' — REFUSED' : ''} · from ${client.id}@${ip}`);
   }
@@ -864,7 +920,19 @@ async function runVerb({ tool, rawArgs, client, ip, session, assertion }) {
   }
   // {ok, text} — the shape web/api.js reads, and it throws on !ok with `text` as the
   // message, so a refusal has to arrive as text rather than as a status code alone.
-  return { status: refused ? 400 : 200, json: { ok: !refused, text } };
+  //   `queued: 'question'` when fleet-send held the prompt behind a prompt in the pane: it
+  // succeeded, and it will not run until somebody answers, so the phone must not say "sent".
+  const queued = !refused && tool === 'fleet_send' && /queued #\d+ behind a question/.test(text) ? 'question'
+    : !refused && tool === 'fleet_send' && /queued #\d+/.test(text) ? 'turn' : undefined;
+  // TOO LATE TO EDIT IS NOT AN ERROR IN THE QUEUE, it is the answer: the drain typed it into
+  // the session between the phone drawing the bubble and the tap. The executor hands a
+  // non-zero exit back as text, so it is recognised by fleet-send's own sentence, and the
+  // phone keys on `delivered` rather than on the wording.
+  if (tool === 'fleet_unqueue' && !/^fleet-send: took it back out/m.test(text))
+    return { status: 409, json: { ok: false, delivered: /already been typed into the session/.test(text), text: text.replace(/^fleet-send: /, '') } };
+  if (tool === 'fleet_interrupt' && /could not interrupt|^fleet-pause: no session|^error:/m.test(text))
+    return { status: 409, json: { ok: false, text: text.replace(/^fleet-pause: /, '') } };
+  return { status: refused ? 400 : 200, json: { ok: !refused, text, ...(queued ? { queued } : {}) } };
 }
 
 // ── reads: proxy, never reimplement (§3, one producer) ───────────────────────
@@ -952,6 +1020,25 @@ async function sessionMessages(t, session, limit, before) {
       ? `this runtime's bin/fleet-read has no --json flag — it carries the per-message timestamp and role /api/session needs`
       : `fleet-read --json did not return JSON: ${text.trim().slice(0, 200)}` };
   }
+}
+
+// ── what is still WAITING to be delivered ──────────────────────────────────
+// Served beside the newest page of the transcript, because the phone draws them as the
+// bubbles after it: a prompt sent while the session was mid-turn sits in fleet-send's queue
+// until the turn ends, and the chat used to show one of them at most and then lose it. The
+// fleet's own nudges are left out — the owner did not write them and cannot edit them.
+//   A failure here is an EMPTY queue rather than a failed page: the transcript is the
+// screen, and a session asleep or on an agent with no queue simply has nothing waiting.
+async function sessionQueue(t, session) {
+  const out = await callToolAsync('fleet_queue', { project: t.name, session }, { timeout: 10000 });
+  const text = typeof out === 'string' ? out : '';
+  const q = [];
+  for (const line of text.split('\n')) {
+    const [at, b64, kind] = line.split('\t');
+    if (!b64 || !/^\d+$/.test(at) || kind === 'nudge') continue;
+    q.push({ at: Number(at), text: Buffer.from(b64, 'base64').toString('utf8') });
+  }
+  return q;
 }
 
 // ── the session's real pane ───────────────────────────────────────────────
@@ -1390,6 +1477,53 @@ function pushEvents(rows) {
   return events;
 }
 
+// ── A WAKE THAT NEVER LANDED IS A NEED-YOU FOR THE LEAD ─────────────────────
+// The worker's own need-you buzzes above; what nothing announced is that its lead was never
+// woken to deal with it. hooks/fleet-event.sh's deferred wake retries for ten minutes while
+// the lead's input box reads occupied, then appends a line to <sock>.<kind>.undelivered —
+// a file nobody reads, so a worker sat on a permission prompt behind four of them until it
+// was found by hand. That marker GROWING is the event: no status changes (the lead is
+// idle, as it was), so the transition rule above cannot see it.
+//   The kind names the target: `notify` and `jarvis` wake the socket's master, a sub-lead's
+// is `<lead>.notify`. A socket can carry dots no better than a session can be trusted not
+// to, so the socket is matched against the ones the scan KNOWS, longest first.
+//   SAME BASELINE RULE: the first sight of a marker is its size, never a buzz — a daemon
+// starting next to a week of expiries must not ring for all of them.
+export function undeliveredTarget(name, socks) {
+  const suf = '.undelivered';
+  if (!name.endsWith(suf)) return null;
+  const base = name.slice(0, -suf.length);
+  const sock = [...socks].filter(s => base.startsWith(`${s}.`)).sort((a, b) => b.length - a.length)[0];
+  if (!sock) return null;
+  const kind = base.slice(sock.length + 1);
+  if (kind === 'notify' || kind === 'jarvis') return { sock, session: 'master' };
+  if (kind.endsWith('.notify') && kind.length > '.notify'.length) return { sock, session: kind.slice(0, -'.notify'.length) };
+  return null;
+}
+export function undeliveredEvents(dirs, socks, sizes, names = new Map()) {
+  const events = [], present = new Set();
+  for (const dir of dirs) {
+    let list = [];
+    try { list = fs.readdirSync(dir); } catch { continue; }
+    for (const n of list) {
+      const t = undeliveredTarget(n, socks);
+      if (!t) continue;
+      const p = path.join(dir, n);
+      let size;
+      try { size = fs.statSync(p).size; } catch { continue; }
+      present.add(p);
+      const known = sizes.has(p), before = sizes.get(p);
+      sizes.set(p, size);
+      if (!known || size <= before) continue;
+      const project = names.get(t.sock) || t.sock.replace(/^cf-/, '');
+      events.push({ kind: 'needs-you', project, session: t.session, sock: t.sock, undelivered: true });
+    }
+  }
+  for (const p of [...sizes.keys()]) if (!present.has(p)) sizes.delete(p);
+  return events;
+}
+const undeliveredSizes = new Map();  // marker path -> its size at the last scan
+
 // ── at the Mac ──────────────────────────────────────────────────────────────
 // A PHONE THAT BUZZES WHILE HE IS TYPING AT THE MAC is telling him what the screen in front
 // of him already says. The poll-based quiet above cannot see this: the phone is in a pocket,
@@ -1439,8 +1573,11 @@ export function atMac(reading, limit) {
 // Whether the session has moved on from the event: a need-you that is no longer need-you
 // was answered (at the Mac, most likely), and an answer whose session is working again was
 // read and replied to. A session that is gone has nothing left to tell him about.
+//   An UNDELIVERED wake is about a lead that is idle, and idle is the state it was stuck in,
+// so it is resolved only by the lead taking a turn — "not need-you" would drop it at once.
 export function pushResolved(ev, status) {
   if (status === undefined) return true;
+  if (ev.undelivered) return status === 'working';
   return ev.kind === 'needs-you' ? status !== 'need-you' : status === 'working';
 }
 // THE DECISION, PURE, so the suite can drive every rule without a clock or a Mac.
@@ -1479,11 +1616,13 @@ async function pushTick() {
   const subs = allSubs();
   // Nothing subscribed: do no work at all, and forget the baseline so the first
   // subscription starts from what is on disk instead of replaying the day.
-  if (!subs.length) { pushState.clear(); pushHeld = []; return; }
+  if (!subs.length) { pushState.clear(); undeliveredSizes.clear(); pushHeld = []; return; }
   // No separate seeding pass: pushEvents() treats every key's first sight as a baseline,
   // so the first scan after a subscription is silent by the same rule that keeps a
   // reappearing file quiet. One rule is one thing to get right.
-  const fresh = pushEvents(scanFleet());
+  const rows = scanFleet(), names = sockProjects();
+  const socks = new Set([...names.keys(), ...rows.map(r => r.sock)]);
+  const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names)];
   if (!fresh.length && !pushHeld.length) return;
   // AT THE MAC: what would have been sent is held instead, and what was held goes when he
   // leaves (see holdStep). Read only when there is something to decide, and once per tick.
@@ -1657,11 +1796,18 @@ const proj = (name) => resolveProject(name).t || null;
 // says the number rather than dying opaquely.
 const ATTACH_BODY_CAP = 9 * 1024 * 1024;   // 6 MB of photo is 8 MB of base64, plus room
 const ATTACH_MAX_BYTES = 6 * 1024 * 1024;  // ...and the decoded length is checked too
-const ATTACH_QUOTA = 24 * 1024 * 1024;     // per session, oldest deleted first
+// SEVERAL PHOTOS GO IN ONE MESSAGE, and the phone uploads them one request at a time before
+// the message is sent. The quota drops the OLDEST files first, so at 24 MB a message of ten
+// full-size photos on a machine with no converter (nothing shrinks them) deleted its own
+// first six while the last four were still arriving — and the agent was handed six paths to
+// files that no longer existed. Sized so one whole message always fits: what gets dropped is
+// then only ever an earlier message's.
+export const ATTACH_PER_MESSAGE = 10;      // web/api.js holds the phone to the same number
+const ATTACH_QUOTA = Math.max(24 * 1024 * 1024, ATTACH_PER_MESSAGE * ATTACH_MAX_BYTES);  // per session, oldest deleted first
 const ATTACH_MAX_PX = 1600;                // what a converter downscales to, when there is one
 const ATTACH_RESIZE_OVER = 512 * 1024;     // below this an already-readable image is kept as it is
-// Two minutes of 16 kHz 16-bit mono is 3.8 MB; the client stops an utterance at 30 s, so
-// this is headroom for a slow device rather than a length anybody talks for.
+// Two minutes of 16 kHz 16-bit mono is 3.8 MB; the client stops an utterance at 90 s (it
+// waits through pauses now, so a thought spoken slowly runs long), and this is the headroom.
 const HEAR_BODY_CAP = 4 * 1024 * 1024;
 let hearChain = Promise.resolve();
 // One line per sentence spoken, saying which voice read it and whether it was made or
@@ -1732,7 +1878,7 @@ function attachDir(sock, session) {
 }
 // OLDEST FIRST, to a fixed ceiling. fleet-clean can only help once a session is dead; a
 // session that lives for weeks and gets a photo a day needs the bound enforced here.
-function enforceQuota(dir) {
+export function enforceQuota(dir, quota = ATTACH_QUOTA) {
   let files = [];
   try {
     files = fs.readdirSync(dir).map(f => {
@@ -1741,7 +1887,7 @@ function enforceQuota(dir) {
     }).filter(Boolean).sort((a, b) => a.at - b.at);
   } catch { return 0; }
   let total = files.reduce((n, f) => n + f.size, 0), dropped = 0;
-  while (total > ATTACH_QUOTA && files.length > 1) {
+  while (total > quota && files.length > 1) {
     const oldest = files.shift();
     try { fs.unlinkSync(oldest.full); total -= oldest.size; dropped++; } catch { break; }
   }
@@ -1760,7 +1906,13 @@ async function api(req, res, url, ip) {
   if (req.method === 'POST' && req.headers.origin && !(c.origins || []).includes(req.headers.origin))
     return send(res, 403, { ok: false, text: `origin '${req.headers.origin}' is not configured` });
 
-  if (!rateOk(OPEN.has(p) ? 'auth' : (req.method === 'POST' ? 'write' : 'read'), ip, res))
+  if (p === '/api/auth/challenge') {
+    if (!rateOk('challenge', ip, res)) return send(res, 429, { ok: false, text: 'rate limited' });
+  } else if (OPEN.has(p)) {
+    if (!rateRoom('auth', ip, res))
+      return send(res, 429, { ok: false, text: 'too many refused passkey attempts — wait a minute' });
+    res.on('finish', () => { if (res.statusCode >= 400) rateBucket('auth', ip).b.n++; });
+  } else if (!rateOk(req.method === 'POST' ? 'write' : 'read', ip, res))
     return send(res, 429, { ok: false, text: 'rate limited' });
 
   if (!OPEN.has(p)) {
@@ -1886,6 +2038,18 @@ async function api(req, res, url, ip) {
     return send(res, 200, { ok: true, token: sess.token, expires_at: sess.expires_at, client_id: v.client.id });
   }
 
+  // ENDING A SESSION, by the token itself. Behind the gate like any read — only a live
+  // token can end itself — so all it can do to anyone is log them out of the session they
+  // hold. The phone calls it once, for the copy an older client kept in localStorage: that
+  // token would otherwise stay live here for the rest of its idle window with nothing on
+  // the device left to use it or say it exists (web/api.js retireStoredToken).
+  if (p === '/api/auth/end') {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+    sessions.delete(sha256(bearer)); persistSessions();
+    log(`session for '${req.client.id}' ended from ${ip}`);
+    return send(res, 200, { ok: true });
+  }
+
 // WHICH AGENTS THE PHONE MAY OFFER, asked of the machine rather than listed here. The
 // names come from `fleet-agent list`, the presence from `fleet-agent installed`, and the
 // warning from `fleet-agent caveat` — so a fourth agent appears in the picker, with its
@@ -1985,8 +2149,11 @@ function agentCatalogue() {
     const limit = raw === null ? 20 : Number(raw);
     if (!Number.isInteger(limit) || limit < 1 || limit > 500)
       return send(res, 400, { ok: false, text: 'limit must be an integer 1-500' });
-    const r = await sessionMessages(t, session, limit, url.searchParams.get('before'));
-    return r.error ? send(res, 502, { ok: false, text: r.error }) : send(res, 200, r.json);
+    const before = url.searchParams.get('before');
+    const [r, queue] = await Promise.all([sessionMessages(t, session, limit, before),
+                                          before ? null : sessionQueue(t, session)]);
+    if (r.error) return send(res, 502, { ok: false, text: r.error });
+    return send(res, 200, queue ? { ...r.json, queue } : r.json);
   }
 
   if (p === '/api/pane' && req.method === 'GET') {
@@ -2322,8 +2489,8 @@ function agentCatalogue() {
     const text = typeof body.text === 'string' ? body.text.slice(0, 8000) : '';
     const items = speech.plan(text);
     if (!items.length) return send(res, 400, { ok: false, text: 'nothing speakable in that text' });
-    speech.prefetch(items, speakLog);
-    log(`speak: ${items.length} sentence(s) planned — ${items.map(i => `${i.id.slice(0, 8)}=${i.voice}`).join(' ')}`);
+    speech.prefetch(items, speakLog, { append: body.more === true });
+    log(`speak: ${items.length} sentence(s) planned${body.more === true ? ' (more)' : ''} — ${items.map(i => `${i.id.slice(0, 8)}=${i.voice}`).join(' ')}`);
     return send(res, 200, { ok: true, sentences: items.map(({ id, lang, voice, text }) => ({ id, lang, voice, text })) });
   }
   if (p.startsWith('/api/speak/') && req.method === 'GET') {

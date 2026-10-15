@@ -42,10 +42,12 @@ import {
 } from './guard-shape.js'
 import { teamOf, latestBySlot, summarize, prSummary, bandRuns } from './band-shape.js'
 import {
-  ledgerFile, parseLedger, ledgerConfig, sourceOf, addItem, openItems, ledgerSummary,
+  ledgerFile, parseLedger, ledgerConfig, sourceOf, openItems, ledgerSummary,
   soundsLikeAPromise, judgePrompt, parseVerdict, applyVerdict, gateTargets, gatePrompt,
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
-  markInterrupted,
+  judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn,
+  markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, TOOL,
+  revisit, expireDormant, endsOnChoice,
 } from './ledger.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
@@ -254,7 +256,7 @@ async function onToolCheck($, e, next) {
 async function onToolCall($, e, next) {
   const done = await next(e)
   if (state === 'need-you') await setState($, 'working')
-  return done
+  return ledgerNoteOnTool($, done)
 }
 
 // Inside SessionEnd's one short bound (1.5s for every hook together). No state is
@@ -416,13 +418,24 @@ async function deliverTick($) {
       await receipt($, id, { error: 'unreadable entry' })
       return
     }
-    pending = { id, text: entry.text, reply: replyOf(entry), at: nowMs }
+    // `kind: "nudge"`: a wake-up fleet-send was told is one (--nudge), never a request.
+    pending = { id, text: entry.text, reply: replyOf(entry), at: nowMs, nudge: entry.kind === 'nudge' }
+    // The ledger's item for it is made HERE: a plugin's own submit passes every prompt.submit
+    // hook but its own, so LEDGER's never sees it.
+    await ledgerDelivery($, pending)
+    // INTO JARVIS'S MASTER, the fleet's words are marked as the fleet's before they are
+    // submitted: the event hook that records the owner's yes runs on this submit and skips
+    // what a mark accounts for (lib/jarvis.mjs consumeDelivery). Marked here and not by the
+    // sender, because this is the session that receives, under the HOME that hook reads.
+    if (await maybeJarvis($).catch(() => false))
+      await bounded($, guardRun($, [bin($, 'fleet-jarvis'), 'delivered'], { stdin: entry.text }), GUARD_MS + 500, null)
     // Settles once the turn started or the engine queued it; turn.start is what names the
     // turn, so this is not awaited for that. A refusal is answered here.
     const settled = r => (r && r.drop !== undefined ? { dropped: String(r.drop) } : null)
+    const lost = async () => { if (pending?.ledgered?.length) await ledgerUndo($, pending.ledgered) }
     Promise.resolve($.prompt.submit({ text: entry.text, asUser: true })).then(
-      async r => { const d = settled(r); if (d && pending?.id === id) { pending = null; await receipt($, id, d) } },
-      async err => { if (pending?.id === id) { pending = null; await receipt($, id, { error: String(err?.message || err) }) } })
+      async r => { const d = settled(r); if (d && pending?.id === id) { await lost(); pending = null; await receipt($, id, d) } },
+      async err => { if (pending?.id === id) { await lost(); pending = null; await receipt($, id, { error: String(err?.message || err) }) } })
   } finally {
     claiming = false
   }
@@ -459,7 +472,11 @@ async function deliveryTurnStart($, e) {
     await bounded($, (async () => {
       if (p.reply) await armReply($, p.reply, e.turnId)
       await receipt($, p.id, { turnId: e.turnId })
-      await ledgerFleetItem($, p.text, e.turnId)
+      // Recorded at its prompt.submit when that hook saw it (so its note could name it);
+      // stamped with its turn here. A nudge is never an item.
+      if (p.ledgered) await stampItems($, p.ledgered, e.turnId)
+      if (p.ledgered && p.ledgered.length) noteDue = e.turnId
+      else if (!p.nudge) await ledgerFleetItem($, p.text, e.turnId)
     })(), IO_MS * 4, null)
   } else if (p && (await $.clock.now()) - p.at > START_MS) {
     pending = null
@@ -532,6 +549,10 @@ export const register = on => {
   on('ui.render', { component: 'AbovePrompt' }, onBandRender)
   on('prompt.submit', onPromptSubmit)
   on('command.run', { command: 'ledger' }, onLedgerCommand)
+  // Spelled out, not TOOL.*: `claude plugin validate` reads a matcher only from its literal.
+  on('tool.call', { tool: 'mcp__ghostfleet__ledger_close' }, onLedgerTool)
+  on('tool.call', { tool: 'mcp__ghostfleet__ledger_drop' }, onLedgerTool)
+  on('tool.call', { tool: 'mcp__ghostfleet__ledger_add' }, onLedgerTool)
 }
 
 // ── GUARDS ──────────────────────────────────────────────────────────────────
@@ -961,10 +982,14 @@ function startBand($) {
 //
 //   RECORD   each request an item in <fleet dir>/<session_id>.ledger (./ledger.js has the
 //            shape), its open count in the status record (`ledger`), the oldest on the band
-//   JUDGE    at a main-loop turn.complete that ended with an answer, ONE small-model call
-//            (when something is open, or the answer sounds like a promise): which open
-//            items the turn's text, all of it, addressed, and what its final text promised
-//   GATE     items still open after that get ONE re-prompt, ever, naming them
+//   JUDGE    at a main-loop turn.complete that ended with an answer, a small-model call per
+//            ten open items (when something is open, or the answer sounds like a promise):
+//            which open items the turn's text, all of it, addressed, and what its final text
+//            promised. A promise kept open through five judged turns closes as stale
+//   GATE     items still open after that get ONE re-prompt, ever, naming them; never an
+//            item the turn reported in progress, and never at all at the end of a turn the
+//            gate itself started, one that ends on a question to the person, one inside the
+//            cooldown, or a lead's while its workers are still at it (gateHold)
 //
 // A NAG, NOT A GUARD. It fails OPEN everywhere: a judge that errors, times out or answers
 // a wrong shape closes nothing and re-prompts nothing (the item stays open, the failure is
@@ -990,6 +1015,8 @@ let answers = []         // the last few judged turns: { at, turnId, blocks }
 let stepTexts = new Map() // turnId -> the text each of its main-loop steps wrote, in order
 let ledgerShown = ''     // what the band and the record last said
 let ledgerAsOf = 0
+let gateTurns = []       // the last few turns the gate's own re-prompt started
+let choiceTurn = ''      // the last turn, when it ended on a numbered question (ledger.js foldReply)
 
 async function ledgerConfigOf($) {
   if (ledgerCfg) return ledgerCfg
@@ -1053,9 +1080,12 @@ async function showLedger($, ledger) {
   const recChanged = said !== ledgerShown
   ledgerShown = said
   ledgerAsOf = asOf
-  await bounded($, $.state.set(LEDGER, (s.open || s.promises) ? { ...s, asOf } : null), IO_MS, null)
+  await bounded($, $.state.set(LEDGER, (s.open || s.promises || s.judgeFailing) ? { ...s, asOf } : null), IO_MS, null)
   if (recChanged) {
-    const field = { open: s.open, promises: s.promises, ...(s.oldest ? { oldest_at: Math.floor(s.oldest.at / 1000) } : {}) }
+    const field = {
+      open: s.open, promises: s.promises, ...(s.oldest ? { oldest_at: Math.floor(s.oldest.at / 1000) } : {}),
+      ...(s.judgeFailing ? { judge_failing: s.judgeFailing } : {}),
+    }
     await patchRecord($, rec => ({ ...rec, ledger: field }))
   }
 }
@@ -1063,9 +1093,28 @@ async function showLedger($, ledger) {
 async function ledgerStart($) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
-  await bounded($, $.command.register({
-    name: 'ledger', description: "This session's open requests and promises; close <id>, clear (no turn)", immediate: true,
-  }), IO_MS, null)
+  await bounded($, Promise.all([
+    $.command.register({
+      name: 'ledger', description: "This session's open requests and promises; close <id>, clear (no turn)", immediate: true,
+    }),
+    // Not deferred: a tool the agent has to go looking for is a tool it forgets to call, and
+    // the three schemas together are a few hundred characters.
+    $.tool.register({
+      name: 'ledger_close', isDeferred: false,
+      description: "Close one of this session's ledger items (the open requests and promises the prompt's ledger note lists) once it is finished. The proof is required: a path, link, commit, PR number or command result that shows it is done.",
+      inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The item id, as the ledger note gives it' }, proof: { type: 'string', description: 'What shows it is done: a path, link, commit, PR number or command result' } }, required: ['id', 'proof'] },
+    }),
+    $.tool.register({
+      name: 'ledger_drop', isDeferred: false,
+      description: 'Drop a ledger item that is not a real ask, or that the person cancelled. The reason is required.',
+      inputSchema: { type: 'object', properties: { id: { type: 'string' }, reason: { type: 'string' } }, required: ['id', 'reason'] },
+    }),
+    $.tool.register({
+      name: 'ledger_add', isDeferred: false,
+      description: "Track an ask from the person's latest message that the ledger note did not list.",
+      inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'The ask, in the person\'s words' } }, required: ['text'] },
+    }),
+  ]), IO_MS, null)
   ledgerShown = ''
   ledgerAsOf = 0
   await ledgerRefresh($)
@@ -1080,35 +1129,106 @@ async function ledgerRefresh($) {
   if (l) await showLedger($, l)
 }
 
+// Recorded BEFORE `next`, so the note the prompt carries can name its own items by id; the
+// turn they belong to is stamped after, once `next` has started it. A slash command is the
+// harness's, and carries nothing.
 async function onPromptSubmit($, e, next) {
-  const before = currentTurn
-  const r = await next(e)
-  if (!r || r.drop !== undefined) return r
   const cfg = await ledgerConfigOf($)
-  if (!cfg.on) return r
-  const source = sourceOf(e)
-  if (!source) return r
+  if (!cfg.on || String(e.text || '').trimStart().startsWith('/')) return next(e)
+  const before = currentTurn
   const at = await $.clock.now()
+  const source = sourceOf(e)
+  const ids = []
+  const made = []
+  let window = 0
+  let cur = source ? await changeLedger($, l => {
+    window = Number(l.window) || 0
+    return addPrompt(l, { text: e.text, at, turnId: e.turnId || '', source, queued: Boolean(e.turnId), choiceTurn }, ids, made)
+  }) : null
+  if (!cur) {
+    const file = await ledgerPath($)
+    cur = file ? await readLedger($, file) : null
+  }
+  const note = cur ? contextNote(cur, at) : ''
+  const r = await next(note ? { ...e, context: [...(e.context || []), note] } : e)
+  if (!ids.length) return r
+  if (!r || r.drop !== undefined) {
+    // It never entered: its items go, and the window goes back to the one before. An item it
+    // only touched (a resend, a reply) was there before it, and stays.
+    await changeLedger($, l => ({ ...dropItems(l, made), window }))
+    return r
+  }
   // Typed over a running turn, it carries that turn's id. Submitted idle, `next` resolves
   // once its own turn started: a turn.start since is that turn; failing that, the turn's
   // start names it (ledgerTurnStart), whichever of the two lands second.
   const turnId = e.turnId || (currentTurn !== before ? currentTurn : '')
-  await changeLedger($, l => addItem(l, { text: e.text, at, turnId, source, queued: Boolean(e.turnId) }))
+  if (turnId && !e.turnId) await stampItems($, ids, turnId)
   return r
+}
+
+async function stampItems($, ids, turnId) {
+  if (!ids.length || !turnId) return
+  await changeLedger($, l => (l.items.some(i => ids.includes(i.id) && !i.turnId)
+    ? { ...l, items: l.items.map(i => (ids.includes(i.id) && !i.turnId ? { ...i, turnId } : i)) } : null))
+}
+
+// ledger_close, ledger_drop and ledger_add: the agent's own hand on its items (./ledger.js).
+async function onLedgerTool($, e) {
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on) return { result: 'ledger: off (CLAUDE_FLEET_LEDGER=off)' }
+  const a = callArgs(e)
+  const ctx = { nowMs: await $.clock.now(), turnId: currentTurn }
+  const act = e.tool === TOOL.close ? l => closeByAgent(l, a.id, a.proof, ctx)
+    : e.tool === TOOL.drop ? l => dropByAgent(l, a.id, a.reason, ctx)
+      : l => addByAgent(l, a.text, ctx)
+  let said = 'ledger: the file could not be read just now; nothing changed'
+  await changeLedger($, l => { const r = act(l); said = r.said; return r.ledger })
+  return { result: said }
 }
 
 async function ledgerTurnStart($, e) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on || !e.text) return
+  if (isGateTurn(e.text)) gateTurns = [...gateTurns, e.turnId].slice(-4)
   await changeLedger($, l => stampTurn(l, e.text, e.turnId))
 }
 
-// A prompt fleet-send handed over, recorded at the turn it started (DELIVERY knows it).
+// A prompt fleet-send handed over, as DELIVERY claims it: one item (a brief is not split into
+// its sentences) in a window of its own, unless it is a nudge. Its turn.start stamps the item
+// with the turn and arms the note (ledgerNoteOnTool).
+async function ledgerDelivery($, p) {
+  const cfg = await ledgerConfigOf($)
+  if (!cfg.on) return
+  const at = await $.clock.now()
+  const ids = []
+  if (!p.nudge) await changeLedger($, l => addPrompt(l, { text: p.text, at, source: 'fleet', whole: true }, ids))
+  p.ledgered = ids
+}
+
+async function ledgerUndo($, ids) {
+  await changeLedger($, l => dropItems(l, ids))
+}
+
+// A plugin's submit cannot carry context either (PromptSubmitArgs leaves it out), so the note
+// a delivered prompt should have had rides on the first tool result of the turn it started,
+// read as a PostToolUse reminder is: a worker handed a brief nearly always calls a tool before
+// it calls ledger_close, and without the note it could not name the brief's item at all.
+let noteDue = ''          // the turn whose first tool result carries the ledger note
+async function ledgerNoteOnTool($, done) {
+  if (!noteDue || noteDue !== currentTurn || !done || done.deny !== undefined || done.isError) return done
+  noteDue = ''
+  const file = await ledgerPath($)
+  const cur = file ? await readLedger($, file) : null
+  const note = cur ? contextNote(cur, await $.clock.now()) : ''
+  return note ? { ...done, context: [...(done.context || []), note] } : done
+}
+
+// Recorded at the turn it started, for a prompt DELIVERY claimed before this process did.
 async function ledgerFleetItem($, text, turnId) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
   const at = await $.clock.now()
-  await changeLedger($, l => addItem(l, { text, at, turnId, source: 'fleet' }))
+  await changeLedger($, l => addPrompt(l, { text, at, turnId, source: 'fleet', whole: true }))
 }
 
 // Kept for the last few turns only: a turn that never completes (a crash, a reload) must
@@ -1132,9 +1252,10 @@ function takeSteps(e) {
 async function ledgerTurnComplete($, e, blocks = turnBlocks([], e.answer), generation = turnsStarted) {
   const cfg = await ledgerConfigOf($)
   if (!cfg.on) return
-  if (e.reason === 'aborted') await changeLedger($, l => markInterrupted(l, e.turnId))
-  if (e.reason !== 'answer') return
   const at = await $.clock.now()
+  choiceTurn = e.reason === 'answer' && endsOnChoice(blocks[blocks.length - 1]) ? e.turnId : ''
+  if (e.reason === 'aborted') await changeLedger($, l => markInterrupted(l, e.turnId, at))
+  if (e.reason !== 'answer') return
   answers = [...answers, { at, turnId: e.turnId, blocks }].slice(-3)
   if (judging) { judgeNext = { e, blocks, generation }; return }
   judging = true
@@ -1160,29 +1281,62 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   if (!surfaces || !surfaces.length) return                  // -p, the SDK: nobody to nag
   const file = await ledgerPath($)
   if (!file) return
+  await changeLedger($, l => expireDormant(l, nowMs))
   const cur = await readLedger($, file)
   if (!cur) return
+  // The judge is the backup: it reads only what is still open after the agent's own closes
+  // (ledger_close, ledger_drop), and a turn whose agent closed everything costs no call at
+  // all, not even the promise read: an agent that closes its items with proof is the one
+  // the hybrid is for, and a call per turn to second-guess it is the cost it removes.
   const open = openItems(cur, nowMs)
+  const closedOwn = cur.items.some(i => i.closedBy === 'agent' && i.closedTurn === e.turnId)
   const promises = cfg.promises !== 'off' && soundsLikeAPromise(e.answer)
-  if (!open.length && !promises) return                      // nothing to judge: no call
+  // A stale or waiting item this turn mentions is judged with them (ledger.js revisit).
+  const back = revisit(cur, nowMs, blocks.join('\n'))
+  if (!open.length && !back.length && (closedOwn || !promises)) return  // nothing to judge: no call
   // The turns since the oldest open item was made, this one last: a request answered one
   // turn ago and only referred to now ("I ended my previous reply with it") is still
   // answered.
   const since = open.length ? Math.min(...open.map(i => i.at)) : nowMs
   const earlier = answers.slice(0, -1).filter(a => a.at >= since).map(a => a.blocks)
-  const r = await $.model.complete({
-    model: cfg.model, prompt: judgePrompt(open, blocks, { ...cfg, earlier }), maxTokens: 700, effort: 'low', timeoutMs: JUDGE_MS,
-  })
-  const verdict = r && r.isAnswered ? parseVerdict(r.text, open.map(i => i.id)) : null
-  if (!verdict) {
-    const why = !r ? 'no result' : !r.isAnswered ? `${r.reason}${r.error ? ` ${r.error}` : ''}` : 'reply was not the JSON asked for'
-    await changeLedger($, l => ({ ...l, judge: { at: nowMs, ok: false, why } }))
-    void $.ui.log(`ghostfleet ledger: judge failed open (${why}); ${open.length} item(s) stay open`, { to: 'debug' })
+  // In batches, newest first (ledger.js JUDGE_BATCH): one call for every open item ran out of
+  // reply past ~20 items, and from then on every turn's judge failed. Promises are read once,
+  // by the first call; the others are told to return none. The calls run one after another:
+  // the newest batch is the one most likely to matter, and it lands first.
+  const batches = open.length || back.length ? judgeBatches([...open, ...back]) : [[]]
+  // The first call reads the turn's promises, so it is shown every open one to name the one a
+  // phrase restates, whichever batch that promise is judged in.
+  const openPromises = judgeBatches(open.filter(i => i.source === 'promise'))[0] || []
+  let after = null
+  const failed = []
+  let answered = 0
+  let waitingOnPerson = false
+  for (const [k, batch] of batches.entries()) {
+    const r = await $.model.complete({
+      model: cfg.model, prompt: judgePrompt(batch, blocks, { ...cfg, promises: k ? 'off' : cfg.promises, earlier, openPromises }),
+      maxTokens: JUDGE_TOKENS, effort: 'low', timeoutMs: JUDGE_MS,
+    })
+    const verdict = r && r.isAnswered ? parseVerdict(r.text, batch.map(i => i.id)) : null
+    if (!verdict) {
+      failed.push(!r ? 'no result' : !r.isAnswered ? `${r.reason}${r.error ? ` ${r.error}` : ''}` : 'reply was not the JSON asked for')
+      continue
+    }
+    // What a cut-off reply finished still applies; the items it never reached stay open.
+    if (verdict.partial) failed.push(`reply cut off after ${verdict.items.length} of ${batch.length} items`)
+    answered += verdict.items.length
+    waitingOnPerson = waitingOnPerson || verdict.waitingOnPerson
+    after = await changeLedger($, l => applyVerdict(l, verdict, { nowMs, turnId: e.turnId, promises: k ? 'off' : cfg.promises })) || after
+  }
+  const judge = failed.length
+    ? { at: nowMs, ok: false, why: failed[0], items: answered, calls: batches.length, failedCalls: failed.length }
+    : { at: nowMs, ok: true, items: answered, calls: batches.length }
+  const kept = await changeLedger($, l => ({ ...l, judge }))
+  if (failed.length) {
+    void $.ui.log(`ghostfleet ledger: judge failed open on ${failed.length} of ${batches.length} call(s) (${failed[0]}); ${open.length - answered} item(s) unjudged`, { to: 'debug' })
+    // A batch that failed closes nothing and re-prompts nothing: no gate on this turn.
     return
   }
-  const after = await changeLedger($, l => ({
-    ...applyVerdict(l, verdict, { nowMs, turnId: e.turnId, promises: cfg.promises }), judge: { at: nowMs, ok: true },
-  }))
+  after = kept || after
   if (!after || !cfg.gate) return
   // A turn started since this one ended (a queued message, typed or handed over): the
   // verdict is about work that has moved on, and that turn's own end is judged next. Asked
@@ -1192,15 +1346,33 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   const judged = new Set(open.map(i => i.id))
   let targets = gateTargets(after, nowMs, cfg).filter(i => judged.has(i.id))
   if (!targets.length) return
-  if (targets.some(i => i.queued || i.interrupted)) {
+  // Asked of every open queued or interrupted item, not only the targets: the rewound copy of
+  // a message stopped and sent again is from the window before, so the gate would never name
+  // it, and unasked it stayed open beside its resend as a second item for one message.
+  const unsure = [...targets, ...openItems(after, nowMs).filter(i => (i.queued || i.interrupted) && !targets.includes(i))]
+    .filter(i => i.queued || i.interrupted)
+  if (unsure.length) {
     const msgs = await bounded($, $.session.messages(), IO_MS, null)
     // Cannot tell what the model received: fail open, no nag about a queued or interrupted message.
     const gone = msgs
-      ? withdrawn(targets, msgs.filter(m => m.role === 'user').map(m => m.text), after.items)
-      : targets.filter(i => i.queued || i.interrupted).map(i => i.id)
+      ? withdrawn(unsure, msgs.filter(m => m.role === 'user').map(m => m.text), after.items)
+      : unsure.map(i => i.id)
     if (msgs && gone.length) await changeLedger($, l => dropItems(l, gone))
     targets = targets.filter(i => !gone.includes(i.id))
     if (!targets.length) return
+  }
+  // Each of these is a turn whose re-prompt could only be answered with the report it just
+  // gave (ledger.js gateHold). The items stay open and un-gated: a later turn may still name them.
+  const band = await bounded($, $.state.get(BAND), IO_MS, null)
+  const team = band && band.value
+  const held = gateHold({
+    gateTurn: gateTurns.includes(e.turnId), waitingOnPerson, lastGate: lastGateAt(after), nowMs,
+    workers: team ? (Number(team.working) || 0) + (Number(team.need) || 0) : 0,
+  })
+  if (held) {
+    await changeLedger($, l => ({ ...l, judge: { ...(l.judge || judge), held, heldItems: targets.map(i => i.id) } }))
+    void $.ui.log(`ghostfleet ledger: no re-prompt for ${targets.map(i => i.id).join(', ')} (${held})`, { to: 'debug' })
+    return
   }
   const ids = targets.map(i => i.id)
   // Marked BEFORE the submit: a crash between the two loses one nag, never adds a second.

@@ -97,9 +97,20 @@ Object.defineProperty(globalThis, 'SpeechSynthesisUtterance', { configurable: tr
   value: class { constructor(t) { this.text = t; this.rate = 1; this.voice = null; this.lang = ''; } } });
 Object.defineProperty(globalThis, 'getSelection', { configurable: true, writable: true, value: () => '' });
 
-const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom, talkRefusal, jarvisSurfaces } =
-  await import(new URL('../../web/app.js', import.meta.url).href);
+const APP = await import(new URL('../../web/app.js', import.meta.url).href);
+const { speakable, allVoices, pickVoice, savedRate, toggleSpeak, gridColsFrom, talkRefusal, jarvisSurfaces } = APP;
+// A client without these still runs every row below, and every row about them goes red on
+// its own, rather than one TypeError taking the whole file's rows with it.
+const speechChunks = APP.speechChunks || (() => ['(no speechChunks)']);
+const CHUNK_MAX = APP.CHUNK_MAX || 0;
+const absent = { end: '(no turnClock)', left: NaN, frac: NaN, pausing: null };
+const turnClock = APP.turnClock || (() => ({ start() {}, voice() {}, tap() {}, spoke: NaN, at: () => absent }));
+const savedQuiet = APP.savedQuiet || (() => NaN);
+const QUIET = APP.QUIET || {};
+const bargeDetector = APP.bargeDetector || (() => ({ frame: () => '(no bargeDetector)' }));
 is('web/app.js exports speakable()', 'function', typeof speakable);
+is('web/app.js exports speechChunks()', 'function', typeof APP.speechChunks);
+is('web/app.js exports turnClock()', 'function', typeof APP.turnClock);
 
 // ── 1. the four messages this was measured on, whole ──────────────────────
 // Real assistant turns from this repo. Asserted as EXACT output rather than as a bag of
@@ -205,11 +216,153 @@ is('...a joined emoji leaves no glue behind', 'family', speakable('👨‍👩�
 is('...and the words beside them stay', true, speakable('✅ merged #42').includes('merged #42'));
 is('a fenced block ends its own sentence', 'before. Code omitted. after', speakable('before\n```\nrm -rf /\n```\nafter'));
 is('emphasis marks go', 'really not optional', speakable('**really** _not_ optional'));
-const long = speakable('word '.repeat(600));
-is('a long turn is capped', true, long.length <= 1250);
+// THE CAP WAS THE BUG. A long reply was cut at 1200 characters with "… and it goes on.",
+// before Kokoro ever saw the rest — measured on a 2059-character reply, whose closing
+// question was never read. A real long reply is read to its last sentence now; only a
+// runaway turn, twenty minutes of listening, is still capped.
+const longReply = Array.from({ length: 30 }, (_, i) =>
+  `Step ${i + 1} of the acme-api rollout went through, and the billing-svc checks stayed green.`).join(' ') +
+  ' Should I merge it now or wait for the toolbox build?';
+const readWhole = speakable(longReply);
+is('a 2700-character reply is not capped', false, /and it goes on\.$/.test(readWhole));
+is('...and reaches its last sentence', true, readWhole.endsWith('Should I merge it now or wait for the toolbox build?'));
+const long = speakable('word '.repeat(5000));
+is('a runaway turn is still capped', true, long.length <= 20050);
 is('...and says that it goes on', true, long.endsWith('… and it goes on.'));
 is('empty in, empty out', '', speakable(''));
 is('null in, empty out', '', speakable(null));
+
+// ── 5b. markdown is read as speech, not as its marks ─────────────────────
+for (const [what, input, want] of [
+  ['a blockquote mark',      '> the PR says it is ready',                     'the PR says it is ready'],
+  ['a starred rule',         'above\n\n***\n\nbelow',                        'above. below'],
+  ['struck-out text',        'the ~~old~~ new plan',                          'the new plan'],
+  ['an autolink',            'see <https://example.com/acme-web/42> now',     'see the link now'],
+  ['an html line break',     'one<br>two',                                    'one two'],
+  ['underscore bold',        'this is __important__ here',                    'this is important here'],
+  ['a task list',            '- [ ] write the test\n- [x] fix the bug',      'write the test. fix the bug'],
+  ['a reference link',       'read [the guide][1] first\n\n[1]: https://example.com/guide', 'read the guide first.'],
+]) is(`markdown: ${what}`, want, speakable(input));
+is('...and a generic type is text, not a tag', 'Array<string> stays', speakable('Array<string> stays'));
+is('...and so is a comparison', 'tmux <= 3.5 escapes it', speakable('tmux <= 3.5 escapes it'));
+
+// ── 5c. a long reply, in chunks ───────────────────────────────────────────
+// Ordered, each under the cap, and the words round-trip EXACTLY: a chunker that dropped a
+// sentence, reordered two, or cut inside a word (which joining with a space would expose as
+// "fleet- grid") fails the last row even if every chunk is the right size.
+const chunks = speechChunks(readWhole);
+is('a long reply becomes several chunks', true, chunks.length >= 4);
+is('...each under the cap', true, chunks.every(c => c.length <= CHUNK_MAX));
+is('...in order, losing and adding nothing', readWhole, chunks.join(' '));
+is('...cut only after a sentence end', true, chunks.slice(0, -1).every(c => /[.!?…]$/.test(c)));
+const dotted = 'Fixed fleet-grid.mjs line 86 in 2.1.241 for acme-web. '.repeat(40).trim();
+const dc = speechChunks(dotted, 200);
+is('a dotted name is never a boundary', true, dc.every(c => !/^(mjs|1\.241|241)\b/.test(c)) && dc.join(' ') === dotted);
+is('short sentences fold into one chunk', ['Yes. No. Done. OK, merged.'], speechChunks('Yes. No. Done. OK, merged.'));
+const runOn = 'the acme-api deploy finished, ' .repeat(40) + 'and that is all.';
+const rc = speechChunks(runOn, 300);
+is('a sentence over the cap is cut at a clause', true, rc.length > 1 && rc.every(c => c.length <= 300) && rc.slice(0, -1).every(c => c.endsWith(',')));
+is('...and still round-trips', runOn.replace(/\s+/g, ' ').trim(), rc.join(' '));
+const noComma = ('acme ').repeat(200).trim();
+const nc = speechChunks(noComma, 300);
+is('...or at a space, never inside a word', true, nc.every(c => c.length <= 300 && /^acme( acme)*$/.test(c)));
+const token = 'x'.repeat(700);
+is('one token longer than the cap stays whole', [`see ${token}`], speechChunks(`see ${token}`, 300));
+// A chunk 290 long, then a sentence with "e.g." in it: were "e.g." a sentence end, the
+// first nine characters would still fit and the chunk would end on it.
+const ab1 = 'a '.repeat(143) + 'end.';
+is('an abbreviation is not a sentence end', [ab1, 'Use e.g. dry-run first.'], speechChunks(`${ab1} Use e.g. dry-run first.`, 300));
+is('nothing to say is no chunks', [], speechChunks(' … '));
+
+// ── 5d. conversation mode: when a turn ends, on a fake clock ──────────────
+// "I have to have time to think and I can't stop talking": the turn ended one second after
+// the last loud frame. Now it waits savedQuiet() seconds, counted from the LAST SPEECH, and
+// talking again resets it.
+const q = turnClock(3500);
+q.start(0); q.voice(1000);
+is('a 2 s pause does not end the turn', '', q.at(3000).end);
+is('...and the countdown shows what is left', 1500, q.at(3000).left);
+is('...as a fraction for the bar', '0.43', Number(q.at(3000).frac).toFixed(2));
+is('...and it is a pause, not speech', true, q.at(3000).pausing);
+is('3.5 s of quiet ends it', 'quiet', q.at(4500).end);
+const r = turnClock(3500);
+r.start(0); r.voice(1000);
+is('3 s in, still waiting', '', r.at(4000).end);
+r.voice(4000);
+is('speech resets the countdown', 3500, r.at(4000).left);
+is('...so the old deadline passes without a send', '', r.at(4600).end);
+is('...and the new one sends', 'quiet', r.at(7500).end);
+const tp = turnClock(3500);
+tp.start(0); tp.voice(500);
+tp.tap();
+is('a tap ends it now', 'tap', tp.at(600).end);
+const lg = turnClock(3500, 90000);
+lg.start(0);
+for (let t = 0; t <= 90000; t += 1000) lg.voice(t);
+is('a turn that never pauses still ends at the cap', 'long', lg.at(90000).end);
+is('...and not before it', '', lg.at(89000).end);
+is('how long speech lasted is measured to the last voice', 90000, lg.spoke);
+localStorage.removeItem('gf.talkquiet');
+is('the quiet setting defaults to 3.5 s', 3.5, savedQuiet());
+localStorage.setItem('gf.talkquiet', '5');
+is('...and is the saved value', 5, savedQuiet());
+localStorage.setItem('gf.talkquiet', '30');
+is('...unless it is out of range', QUIET.DEFAULT, savedQuiet());
+localStorage.setItem('gf.talkquiet', '1');
+is('...either way', QUIET.DEFAULT, savedQuiet());
+localStorage.removeItem('gf.talkquiet');
+
+// ── 5e. barge-in: the owner talking over the answer, never the answer itself ──
+// The REAL frames first: a long Kokoro reply played through a laptop's speaker into its own
+// mic, with echo cancellation on and off (test/fixtures/barge-echo.json). The app's own
+// voice alone must never barge in — not one frame, the whole reply, either way.
+is('web/app.js exports bargeDetector()', 'function', typeof APP.bargeDetector);
+// ONE SOUND IN THAT RECORDING WAS NOT THE SPEAKER: 280 ms at ~90 s where the mic read up to
+// 0.19 while the reply sat between two sentences at 0.0008 — five to ten times louder than
+// anything playing, with echo cancelling on, when with it off the echo never passed 0.41×.
+// That is the room, and the fixture marks it (`room`). It is replayed in BOTH directions:
+// everything else never barges in, and that sound DOES, because a voice in the room loud
+// and long enough is exactly what the gate is for — it cannot tell who is speaking.
+const ECHO_FX = JSON.parse(fs.readFileSync(new URL('../fixtures/barge-echo.json', import.meta.url), 'utf8'));
+const echo = ECHO_FX.frames;
+const inRoom = (k, t) => (ECHO_FX.room[k] || []).some(([a, z]) => t >= a - 300 && t <= z + 300);
+for (const k of ['aec', 'raw']) {
+  const det = bargeDetector();
+  const playing = echo[k].filter(f => f[1] && !inRoom(k, f[0]));
+  const fired = playing.filter(([t, , out, mic]) => det.frame(t, mic, out, 0.012) === true).length;
+  is(`own playback alone never barges in (${k === 'aec' ? 'echo cancelled' : 'no echo cancelling'}, ${playing.length} real frames)`, 0, fired);
+  // The same frames from a speaker three times as loud: the mic scaled, the output not —
+  // the margin the gate has before a louder phone would cut itself off.
+  const det3 = bargeDetector();
+  is(`...nor with that speaker three times as loud (${k})`, 0,
+     playing.filter(([t, , out, mic]) => det3.frame(t, mic * 3, out, 0.012) === true).length);
+}
+is('...and the replay is the long one, not a sample', true, echo.aec.filter(f => f[1]).length >= 1000 && echo.raw.filter(f => f[1]).length >= 400);
+{ const det = bargeDetector(); let at = -1;
+  for (const [t, p, out, mic] of echo.aec) if (p && at < 0 && det.frame(t, mic, out, 0.012) === true) at = t;
+  is('...while the real sound in that room does barge in, at ~90 s', true, at >= 89800 && at <= 90200); }
+// The owner, on a fake clock and a fake mic: frames every 85 ms, as the ScriptProcessor
+// delivers them, over an answer playing at a level the measurement saw often (0.1 RMS).
+const run = (frames) => { const d = bargeDetector(); let at = -1;
+  frames.forEach(([t, mic, out]) => { if (at < 0 && d.frame(t, mic, out, 0.012) === true) at = t; }); return at; };
+const over = (fromMs, toMs, mic, out = 0.1) => Array.from({ length: Math.ceil((toMs - fromMs) / 85) }, (_, i) => [fromMs + i * 85, mic, out]);
+const talkOver = [...over(0, 2000, 0.03), ...over(2000, 3000, 0.2)];
+is('the owner talking over the answer barges in', true, run(talkOver) > 0);
+is('...after 250 ms of it, not on the first frame', true, run(talkOver) >= 2250 && run(talkOver) < 2400);
+is('one loud frame over the answer is not the owner', -1, run([...over(0, 1000, 0.03), [1000, 0.3, 0.1], ...over(1085, 3000, 0.03)]));
+is('speech that is only as loud as the echo could be does not', -1, run(over(0, 3000, 0.055)));
+// The echo DECAYS after the voice does, so the tail of a loud word cannot barge in either;
+// but once the reply has been quiet a while, ordinary speech can.
+is('a loud word ending does not open a gap for its own tail', -1,
+   run([...over(0, 500, 0.02, 0.25), ...over(500, 900, 0.09, 0)]));
+is('...and a voice after the reply has gone quiet barges in', true,
+   run([...over(0, 500, 0.02, 0.1), ...over(500, 3000, 0.002, 0), ...over(3000, 3600, 0.05, 0)]) > 3000);
+// The device's voice plays outside Web Audio, so there is no level to compare: the gate
+// assumes the loud end of what was measured.
+is('with no output level, a normal voice still barges in', true, run(over(0, 600, 0.15, null)) > 0);
+is('...and a quiet echo does not', -1, run(over(0, 3000, 0.05, null)));
+is('nothing below the room\'s own floor ever does', -1, (() => { const d = bargeDetector(); let at = -1;
+  over(0, 2000, 0.03, 0).forEach(([t, m]) => { if (at < 0 && d.frame(t, m, 0, 0.04) === true) at = t; }); return at; })());
 
 // ── 6. the voice picker, and the three ways it breaks ─────────────────────
 // EMPTY ON THE FIRST CALL is not an edge case, it is Safari's documented behaviour: the

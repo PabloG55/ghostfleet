@@ -49,10 +49,12 @@ const S = {
   confirm: null,        // { kind, … } — the TUI's confirm bar, reproduced
   sheet: null,          // { kind, … } — one of the TUI's full-screen forms
   toast: null,
+  unlockErr: '',        // why the last unlock failed, drawn on the lock screen until the next tap
   stale: 0,             // epoch of the payload on screen, when it came from the cache
   draft: '',            // the composer's text, kept across repaints (a poll must not eat it)
-  attaching: false,     // a photo is on its way up; the camera button says so and refuses a second
-  pending: null,        // { text, at } — sent, not yet back in the transcript
+  caret: null,          // where the caret was in it, last time the box said — a photo added now keeps that place
+  photos: [],           // picked photos for a message: {id, key, name, thumb, state, path, err}
+  outbox: [],           // sent from here, not yet back in the transcript — see "the outbox"
   speaking: '',         // the text currently being read aloud, '' when silent
   jarvis: null,         // last /api/jarvis payload — null until asked, {present:false} when absent
   jarvisOn: null,       // the Mac's Jarvis switch (/api/projects jarvis_enabled): null = not told yet
@@ -74,6 +76,7 @@ const LS_LAST = 'gf.last';   // last fetched state, for a cold offline open
 const LS_PFS = 'gf.pfs';    // the pane's font size, which is a per-eyesight preference
 const LS_VOICE = 'gf.voice'; // { uri, name } of the chosen voice — see pickVoice()
 const LS_RATE = 'gf.rate';   // speaking rate, the other half of "make it listenable"
+const LS_QUIET = 'gf.talkquiet'; // seconds of silence that end a conversation-mode turn
 
 // ── persistence: something to show before the network answers ─────────────
 // "Usable offline enough to show the last fetched state rather than a blank page."
@@ -206,12 +209,13 @@ async function refresh() {
       // looked for in the newest page, and conversation mode cannot wait on a frozen one.
       const owed = !!(S.talk && S.talk.phase === 'waiting');
       if ((S.view !== 'pane' && (!S.sess || S.sess.pages === 1)) || owed) {
+        const seq = ++sessSeq;
         const fresh = await api.getSession(S.project, S.session);
-        S.sess = { ...fresh, pages: 1 };
+        S.sess = { ...fresh, pages: 1, seq };
       }
-      // Whatever the transcript now says decides whether the optimistic bubble is still
-      // telling the truth.
-      reconcilePending();
+      // Whatever the transcript and the queue now say decides whether each bubble in the
+      // outbox is still telling the truth.
+      reconcileOutbox();
       talkAfterRefresh();
     }
     S.stale = 0;
@@ -254,6 +258,8 @@ function lock() {
   // A LOCKED SCREEN HAS NO MICROPHONE: conversation mode ends with the session it ran on.
   if (S.talk) talkStop('');
   S.locked = true; api.clearToken(); render();
+  // Coming back to an expired session: the one attempt this resume was armed for.
+  tryAutoUnlock();
   // The session just ended, so a swap that was waiting for it is free now — and this is
   // the moment the poll cannot cover, because the poll does not run while locked. Without
   // this, deferring under a live session would defer until the next cold open.
@@ -283,16 +289,19 @@ function btn(label, onclick, cls = '') {
   else b.textContent = label;
   return b;
 }
-function toast(text, kind = '') {
-  S.toast = { text, kind };
+// `action` is one button on the toast — {label, fn} — for the message that is only useful
+// with a way to act on it ("queued behind a question" -> answer it). It stays up longer,
+// because a button that leaves before the thumb arrives is no button.
+function toast(text, kind = '', action = null) {
+  S.toast = { text, kind, ...(action ? { action } : {}) };
   clearTimeout(toast._t);
   // ...AND ITS EXPIRY IS A RENDER ON A TIMER, which is the other way the keyboard closed
-  // with nobody touching anything. attachPhoto() ends in a toast, and the flow it exists
+  // with nobody touching anything. A photo upload can end in a toast, and the flow it exists
   // for is: attach a photo, tap the box to say what to do with it, and 4.2 seconds later
   // the toast quietly rebuilt the screen and took the keyboard with it. A toast that
   // outstays its welcome by a few seconds is a toast; one that closes the keyboard is a
   // bug, so this one waits its turn.
-  toast._t = setTimeout(() => { S.toast = null; renderUnlessTyping(); }, 4200);
+  toast._t = setTimeout(() => { S.toast = null; renderUnlessTyping(); }, action ? 9000 : 4200);
 }
 
 // ── render ────────────────────────────────────────────────────────────────
@@ -324,6 +333,29 @@ function markNav(app, screen) {
     navTimer = setTimeout(() => { try { app.classList.remove('nav-fwd', 'nav-back'); } catch {} }, 260);
   } catch {}
 }
+// A SLIDE, WHERE THE ENGINE CAN DRAW ONE WITHOUT MOVING A BOX. The wipe above exists
+// because a translated #app hangs every child's rect past the screen for the length of
+// the animation. A view transition translates SNAPSHOTS instead — pseudo-elements with
+// no box in the document — so the screen can push in from the right and pop back like
+// iOS navigation while every real element sits at rest, and the old screen stays painted
+// until the new one is drawn rather than leaving a frame of nothing between them.
+//   Not when the system already animated it: a back gesture slides its own snapshot, and
+// a second slide after it is the screen arriving twice. popstate says which (uaSlid).
+let uaSlid = false;
+function slideNav() {
+  if (S.locked || !SHELL_SCREENS.has(S.screen) || navFrom === null || navFrom === S.screen) return false;
+  const d = (SCREEN_DEPTH[S.screen] ?? 0) - (SCREEN_DEPTH[navFrom] ?? 0);
+  if (!d) return false;
+  if (uaSlid) { navFrom = S.screen; return false; }
+  const root = document.documentElement;
+  try {
+    if (typeof document.startViewTransition !== 'function' || matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
+    navFrom = S.screen;                   // the render inside paints with no wipe of its own
+    root.dataset.nav = d > 0 ? 'fwd' : 'back';
+    document.startViewTransition(() => render()).finished.finally(() => { try { delete root.dataset.nav; } catch {} });
+    return true;
+  } catch { return false; }
+}
 // THE TWO SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
 const PREACT_SCREENS = new Set(['projects', 'grid']);
 // Whether Preact currently owns #app. Not derivable from S.screen: the screen can change
@@ -331,6 +363,7 @@ const PREACT_SCREENS = new Set(['projects', 'grid']);
 // screen, not who would put them there now.
 let preactUp = false;
 function render() {
+  if (slideNav()) return;
   const app = document.getElementById('app');
   // Toggled on <html> as well: the page must not scroll behind a screen that owns the
   // viewport, or a drag near the edge slides the whole app and the scroller under the
@@ -390,7 +423,11 @@ function render() {
   // overlap impossible rather than merely unlikely — the scroller above simply gets shorter
   // by the toast's height for as long as it is up.
   if (S.toast) {
-    const t = el('div', { class: ('toast ' + (S.toast.kind || '')).trim(), text: S.toast.text });
+    const a = S.toast.action;
+    const t = a
+      ? el('div', { class: ('toast act ' + (S.toast.kind || '')).trim() },
+          [el('span', { text: S.toast.text }), btn(a.label, () => { S.toast = null; a.fn(); })])
+      : el('div', { class: ('toast ' + (S.toast.kind || '')).trim(), text: S.toast.text });
     const ci = screen.findIndex(n => n && n.classList && n.classList.contains('composer'));
     if (ci >= 0) screen.splice(ci, 0, t); else screen.push(t);
   }
@@ -583,8 +620,14 @@ function projectsProps() {
     notify: notifySpec(),
     confirm: confirmSpec(),
     // ── the seam ────────────────────────────────────────────────────────────────────
-    // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
-    // the list and is told nothing else about them; see web/src/screens.jsx.
+    // Real DOM, built by cardEl(). Preact places these into the list and is told nothing
+    // else about them; see web/src/screens.jsx.
+    //   A PROJECT CARD TAKES ONE GESTURE: A TAP. It used to take the grid's four, and on a
+    // phone two of them fire on the way to a scroll — a thumb that rests 600ms is a
+    // long-press, and one that lands on the title and moves a row is a drag — so ordinary
+    // scrolling raised a `remove` confirm, or a reorder the server then refused with a red
+    // banner. Removing a project is a decision, so it lives behind `⋯ → remove` and nowhere
+    // else; reordering the list is the desk's job and has no phone path at all.
     // NULL, NOT EMPTY, is the difference between "still asking" and "you have no projects".
     // An empty list is a real answer and gets the first-run path; a null one has not been
     // answered yet and gets the wait.
@@ -593,8 +636,6 @@ function projectsProps() {
         // i is the GLOBAL index, on purpose
         cardEl(G.projectModel(p, i, i === S.sel), {
           tap: () => openProject(p.name),
-          longPress: () => { S.confirm = { kind: 'project', name: p.name }; render(); },
-          reorder: d => reorderProject(p.name, d),
         }, i)),
       cardEl(G.addProjectModel(S.sel === projects.length), {
         tap: () => sheetAddProject(),
@@ -620,7 +661,7 @@ function projectsProps() {
     toast: S.toast,
   };
 }
-const PROJECTS_HINT = 'tap a project · long-press to remove it from the list · drag its title to reorder';
+const PROJECTS_HINT = 'tap a project to open it · remove is here, behind ⋯ · reorder the list at the desk';
 // `Q` / Ctrl-p jumps straight to Projects from anywhere, which is neither forward nor
 // back. Unwinding our own entries keeps the stack honest: pushing here would leave the
 // gesture retracing grid → session screens you have already left, and leaving the stack
@@ -628,7 +669,7 @@ const PROJECTS_HINT = 'tap a project · long-press to remove it from the list ·
 function toProjects() {
   const n = navDepth;
   S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null;
-  S.pending = null; stopSpeaking(); S.jarvisMode = false; talkStop('');
+  stopSpeaking(); S.jarvisMode = false; talkStop('');
   navDepth = 0;
   if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
     try { history.go(-n); } catch {}    // popstate fires; popTo() sees screen==='projects'
@@ -643,30 +684,6 @@ function openProject(name) {
   scrollMem.delete('grid');
   pushNav();                          // so the back gesture returns to Projects, not out
   render(); refresh();
-}
-
-// The projects list reorders the same way the grid does, and for the same reason: the
-// digit on a project card is what `Ctrl-f <p>` counts, so the order has to persist.
-async function reorderProject(name, delta) {
-  const names = (S.projects || []).map(p => p.name);
-  const i = names.indexOf(name);
-  if (i < 0 || !delta) return;
-  // ONE PRESS IS ONE VISIBLE STEP, which means moving PAST the hidden ones. This writes
-  // the shared order file that the desk then counts, and inside a tab the neighbour above
-  // may be in another profile: a single-step swap would either look like nothing happened
-  // (it traded places with a card you cannot see) or like a jump of two. The gesture has
-  // to mean what it looks like, so the target is the next VISIBLE neighbour and the
-  // project lands directly beside it in the real order.
-  //   In the `all` tab every neighbour is visible, so this is exactly the single step it
-  // has always been — one path, not a special case.
-  const vis = visibleProjects().map(v => v.i);
-  const at = vis.indexOf(i);
-  const to = at + (delta > 0 ? 1 : -1);
-  if (at < 0 || to < 0 || to >= vis.length) return;
-  const ni = vis[to];
-  names.splice(ni, 0, ...names.splice(i, 1));
-  S.sel = ni;
-  await doVerb('fleet_project_order', { order: names }, { quiet: true });
 }
 
 // ── the grid ──────────────────────────────────────────────────────────────
@@ -740,8 +757,14 @@ function gridProps() {
     strip: stripTiles(counts),
     confirm: confirmSpec(),
     // ── the seam ────────────────────────────────────────────────────────────────────
-    // Real DOM, built by cardEl(), which wires the four gestures. Preact places these into
-    // the list and is told nothing else about them; see web/src/screens.jsx.
+    // Real DOM, built by cardEl(). Preact places these into the list and is told nothing
+    // else about them; see web/src/screens.jsx.
+    //   A PROJECT CARD TAKES ONE GESTURE: A TAP. It used to take the grid's four, and on a
+    // phone two of them fire on the way to a scroll — a thumb that rests 600ms is a
+    // long-press, and one that lands on the title and moves a row is a drag — so ordinary
+    // scrolling raised a `remove` confirm, or a reorder the server then refused with a red
+    // banner. Removing a project is a decision, so it lives behind `⋯ → remove` and nowhere
+    // else; reordering the list is the desk's job and has no phone path at all.
     // Same rule as the projects screen: a null grid has not been answered yet, an empty one
     // has. `its` always carries the `+ new session` card, so length alone cannot tell them
     // apart — ask S.grid itself.
@@ -839,6 +862,13 @@ async function reorder(name, delta) {
 // and pretending otherwise wastes a minute of listening), inline code keeps its text
 // without its backticks, links become "link", and the emphasis marks go. Capped, because
 // a whole turn can be thousands of characters and there is no way to skim a voice.
+//   THE CAP WAS 1200, AND IT WAS THE "KOKORO CUTS LONG REPLIES" BUG. Measured on the Mac's
+// voice with a 2059-character reply: 1215 characters went to Kokoro, every sentence of them
+// synthesised and played, and the reply ended at "There… and it goes on." — the last third,
+// which was the question the reply existed to ask, was never sent at all. Kokoro was fine; the
+// cut was here, before it. Skimming a voice is what stop is for, so the cap is now only a
+// guard against a runaway turn (about twenty minutes of listening), and a long reply is cut
+// into chunks (speechChunks) so its length costs nothing up front.
 //
 // AND IDENTIFIERS ARE NAMED, NOT SPELLED. "it has a bunch of numbers and stuff that is not
 // relevant" — a 40-character sha is read one character at a time, which is most of a minute
@@ -852,7 +882,7 @@ async function reorder(name, delta) {
 // is the whole content of that sentence, and so are #1171, 2.1.241, 40% and 6s. Those are
 // asserted, in test/helpers/speak-check.mjs, in both directions on purpose: a test that only
 // checks that noise is gone is passed by returning the empty string.
-const SPEAK_MAX = 1200;
+const SPEAK_MAX = 20000;
 // A left edge that cannot itself be part of an identifier, as a capturing group rather than
 // a lookbehind: lookbehind only reached Safari in 16.4, this app supports the phones that
 // installed it (§9's 16.4+ is about Web Push, not about parsing), and an unsupported regex
@@ -898,8 +928,16 @@ export function speakable(text) {
   let t = String(text || '');
   t = t.replace(/```[\s\S]*?```/g, '\nCode omitted.\n'); // fenced code: named, not read
   t = t.replace(/`([^`]*)`/g, '$1');                      // inline code: the text, not the ticks
+  t = t.replace(/^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*\S+.*$/gm, ''); // [1]: url — a footnote's address
   t = t.replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1 link'); // [label](url) -> "label link"
+  t = t.replace(/\[([^\]\n]+)\]\[[^\]\n]*\]/g, '$1');      // [label][1] -> "label"
+  t = t.replace(/<https?:\/\/[^>\s]*>/g, ' the link ');   // <url>, before the bare rule eats its >
   t = t.replace(/https?:\/\/\S+/g, ' the link ');        // and a bare one
+  // HTML a reply carries for layout. Named tags only: `Array<string>` and `<= 3.5` are text.
+  t = t.replace(/<\/?(?:br|p|div|span|b|i|em|strong|code|pre|kbd|sub|sup|details|summary|img|a|hr|ul|ol|li|table|tr|td|th)\b[^>]*>/gi, ' ');
+  t = t.replace(/^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/gm, '');  // --- / *** / ___ rules
+  t = t.replace(/^[ \t]{0,3}>[ \t]?/gm, '');              // blockquote marks
+  t = t.replace(/~~[^~\n]+~~/g, '');                       // struck out is withdrawn: not said
   // A TABLE IS READ AS ITS CELLS. The rule row (|---|:--:|) is pure punctuation, and a pipe
   // read aloud is "vertical bar" between every word; a row becomes its cells with a pause
   // between them, and the row's line break ends it like any other line.
@@ -913,6 +951,8 @@ export function speakable(text) {
   t = t.replace(/[ \t]*[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]+/gu, '');
   t = t.replace(/^\s{0,3}#{1,6}\s+/gm, '');               // heading marks
   t = t.replace(/^\s{0,3}[-*+]\s+/gm, '');                // bullet marks
+  t = t.replace(/^\[[ xX]\][ \t]+/gm, '');               // a task list's box
+  t = t.replace(/__([^_\n]+)__/g, '$1');
   t = t.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/(^|\W)[*_]([^*_]+)[*_](\W|$)/g, '$1$2$3');
   // AFTER the markdown pass, so a path inside backticks is a path by the time it gets here
   // and a URL is already the word "link"; BEFORE the cap, so the 1200 characters are spent
@@ -924,6 +964,69 @@ export function speakable(text) {
   t = t.replace(/([^\s.!?…:;,])[ \t]*\n\s*/g, '$1. ');
   t = t.replace(/\s+/g, ' ').trim();
   return t.length > SPEAK_MAX ? t.slice(0, SPEAK_MAX).replace(/\s\S*$/, '') + '… and it goes on.' : t;
+}
+// ── a long reply, in chunks ───────────────────────────────────────────────
+// WHAT IS SENT TO THE VOICE IS A QUEUE OF CHUNKS, NOT ONE TEXT. Each chunk is one
+// /api/speak plan, and the next chunk is planned while this one plays, so a reply of any
+// length starts after one sentence's synthesis and has no gap between chunks. That also
+// keeps fleet-serve's queue one chunk deep instead of a whole reply deep, which is the
+// difference between stop meaning stop and the Mac synthesising four minutes nobody will
+// hear; and it keeps every request well inside the server's 8000-character slice. The
+// device's own voice gets the same chunks, one utterance each, because a single long
+// utterance is exactly what WebKit's speechSynthesis is known to drop partway.
+//   Cut at sentence ends only — a full stop FOLLOWED BY SPACE, so `fleet-grid.mjs` and
+// `2.1.241` are never a boundary — then packed: short sentences fold together up to the
+// cap, and a sentence longer than the cap is cut at a clause mark, then at a space, never
+// inside a word. A single unbroken token longer than the cap stays whole: it is one word.
+// No lookbehind, for the reason IDENT_EDGE gives: an old Safari fails to PARSE it.
+export const CHUNK_MAX = 600;
+const CHUNK_ABBREV = /(?:^|\s)(?:e\.g|i\.e|etc|vs|Mr|Mrs|Ms|Dr|Sr|Sra|approx|p\.ej)\.$/i;
+function sentencesOf(t) {
+  const out = [], re = /[.!?…]+["')\]]*(\s+|$)/g;
+  let from = 0, m;
+  while ((m = re.exec(t))) {
+    if (!m[0].length) { re.lastIndex++; continue; }
+    const end = m.index + m[0].length;
+    const piece = t.slice(from, m.index + m[0].length - m[1].length);
+    if (CHUNK_ABBREV.test(piece) && end < t.length) continue;   // "e.g. this" is one sentence
+    out.push(piece.trim()); from = end;
+  }
+  if (from < t.length) out.push(t.slice(from).trim());
+  return out.filter(Boolean);
+}
+// A sentence over the cap, cut at the last clause mark that leaves a real piece, else at the
+// last space; the remainder goes round again.
+function cutLong(x, max) {
+  const out = [];
+  while (x.length > max) {
+    let at = -1;
+    for (const mark of [/[,;:—–]\s/g, /\s/g]) {
+      let m, best = -1;
+      mark.lastIndex = 0;
+      while ((m = mark.exec(x)) && m.index < max) best = m.index + m[0].length - 1;
+      if (best >= max / 4) { at = best; break; }
+    }
+    if (at < 0) { const sp = x.indexOf(' ', max); if (sp < 0) break; at = sp; }   // one long word: kept whole
+    out.push(x.slice(0, at).trim()); x = x.slice(at).trim();
+  }
+  if (x) out.push(x);
+  return out;
+}
+export function speechChunks(text, max = CHUNK_MAX) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return [];
+  const out = [];
+  let cur = '';
+  for (const sen of sentencesOf(t)) {
+    for (const piece of sen.length > max ? cutLong(sen, max) : [sen]) {
+      if (cur && cur.length + 1 + piece.length > max) { out.push(cur); cur = ''; }
+      cur = cur ? `${cur} ${piece}` : piece;
+    }
+  }
+  if (cur) out.push(cur);
+  // A chunk with no letter or digit in it ("…") has nothing to say, and the Mac answers
+  // one with a 400 that would read as its voice failing.
+  return out.filter(x => /[\p{L}\p{N}]/u.test(x));
 }
 const canSpeak = () => {
   try { return typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance === 'function'; }
@@ -999,7 +1102,22 @@ export function savedRate() {
 // STREAMED BY SENTENCE. The phone asks for the plan, then fetches sentence N+1 while N
 // plays, and the Mac has already started on all of them in order. The wait before the
 // voice starts is one sentence, which is the whole latency budget on a loaded laptop.
-const A = { ctx: null, src: null, gen: 0, offUntil: 0, told: false, bufs: new Map() };
+const A = { ctx: null, src: null, gen: 0, offUntil: 0, told: false, bufs: new Map(), mon: null, via: '', td: null };
+// HOW LOUD THE APP ITSELF IS RIGHT NOW, for barge-in: the RMS of what the Mac's voice is
+// playing, read off an analyser the buffer passes through on its way out. Null when the
+// DEVICE's voice is talking — speechSynthesis plays outside Web Audio, so there is nothing
+// to read, and the barge gate assumes the loudest it measured instead (BARGE.BLIND).
+function outLevel() {
+  if (!S.speaking) return 0;
+  if (A.via !== 'mac') return null;
+  if (!A.src || !A.mon) return 0;                 // between two sentences
+  try {
+    if (!A.td) A.td = new Float32Array(A.mon.fftSize);
+    A.mon.getFloatTimeDomainData(A.td);
+    let s = 0; for (let i = 0; i < A.td.length; i++) s += A.td[i] * A.td[i];
+    return Math.sqrt(s / A.td.length);
+  } catch { return null; }
+}
 const hasWebAudio = () => typeof window !== 'undefined' && !!(window.AudioContext || window.webkitAudioContext);
 const canPlay = () => canSpeak() || hasWebAudio();
 function audioCtx() {
@@ -1007,10 +1125,12 @@ function audioCtx() {
   return A.ctx;
 }
 // THE UNLOCK, AND IT HAS TO HAPPEN INSIDE A TAP. iOS lets an AudioContext run only once a
-// gesture has resumed it and played something — the same rule talkStart() honours — and a
-// reply that arrives by poll, minutes after the toggle was tapped, has no gesture of its
-// own. So it is done on EVERY tap anywhere (it is a no-op once running), which also covers
-// the context iOS suspends when the installed app goes to the background and comes back.
+// gesture has resumed it and played something — the same rule talkStart() honours.
+//   ONLY INSIDE A TAP THAT ASKED FOR SOUND: the speaker on a bubble and `talk`, nowhere
+// else. It used to run on every tap anywhere, and every one of its three steps claims the
+// phone's audio session — so the first tap on the Projects screen paused whatever music
+// the owner had playing, in an app they had opened to read. The music is theirs until they
+// ask this app to speak, and it is handed back by releaseAudio() when the voice stops.
 //   'playback' is the audio session that ignores the silent switch, as the device's own
 // speech does; without it a phone on silent would play the Mac's voice to nobody. Not while
 // talking: conversation mode holds the microphone, which is a different session type.
@@ -1031,15 +1151,34 @@ export function unlockAudio() {
     try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch {}
   }
 }
-function stopSpeaking() {
+// HAND THE AUDIO SESSION BACK, so music the voice interrupted can resume: the mixable
+// default, and the context CLOSED rather than suspended — a suspended context is still a
+// claim iOS can hold on to. The next speaker tap makes a new one, inside that tap. Never
+// mid-conversation: talk mode's answers play from timers, with no tap to unlock a new
+// context, so it is released by talkStop() when the conversation ends instead.
+function releaseAudio() {
+  if (S.talk) return;
+  try { if (A.ctx) A.ctx.close(); } catch {}
+  A.ctx = null; A.src = null;
+  try { if (navigator.audioSession && navigator.audioSession.type !== 'auto') navigator.audioSession.type = 'auto'; } catch {}
+}
+// Silences whatever is talking and keeps the session: speakText() is about to use it.
+function hush() {
   A.gen++;
   try { if (A.src) { A.src.onended = null; A.src.stop(); } } catch {}
   A.src = null;
   if (canSpeak()) { try { speechSynthesis.cancel(); } catch {} }
   S.speaking = '';
 }
+// Every other stop — leaving a screen, a new voice or rate, the tapped speaker — is the
+// end of speaking, and an interrupted voice never reaches the finish that releases it.
+function stopSpeaking() { hush(); releaseAudio(); }
 // The device's own voice, for the whole text or for what is left of it.
-function synthSay(words, g, fin) {
+function synthSay(words, g, fin0) {
+  // Once, whichever of onend, onerror and the ceiling comes first: with a queue of chunks,
+  // a late second call would skip the chunk after this one.
+  let done = false;
+  const fin = () => { if (!done) { done = true; fin0(); } };
   if (!canSpeak()) { fin(); return; }
   try {
     const u = new SpeechSynthesisUtterance(words);
@@ -1061,18 +1200,26 @@ function synthSay(words, g, fin) {
   } catch { fin(); }
 }
 function decode(ab) {
-  const c = audioCtx();
+  // NEVER A NEW CONTEXT FROM HERE: a sentence still downloading when the voice was stopped
+  // lands after releaseAudio(), outside any tap, and making a context then would claim the
+  // audio session the stop just handed back.
+  const c = A.ctx;
+  if (!c) return Promise.reject(new Error('the voice was stopped'));
   // The callback form: Safari before 14.1 has no promise-returning decodeAudioData.
   return new Promise((res, rej) => { try { c.decodeAudioData(ab, res, rej); } catch (e) { rej(e); } });
 }
 // Decoded buffers by sentence id, so a replay is instant and costs no request. Bounded:
 // a decoded sentence is a few hundred KB of floats.
-async function sentenceBuf(it) {
+// The PROMISE is what is kept, so the lookahead that starts a sentence early and the loop
+// that then waits on it are one request, not two. A failed one is forgotten, or a
+// transient error would be replayed from the cache for good.
+function sentenceBuf(it) {
   if (A.bufs.has(it.id)) return A.bufs.get(it.id);
-  const buf = await decode(await api.speakAudio(it.id));
-  A.bufs.set(it.id, buf);
+  const p = api.speakAudio(it.id).then(decode);
+  A.bufs.set(it.id, p);
+  p.catch(() => { if (A.bufs.get(it.id) === p) A.bufs.delete(it.id); });
   if (A.bufs.size > 60) A.bufs.delete(A.bufs.keys().next().value);
-  return buf;
+  return p;
 }
 function playBuf(buf, g) {
   return new Promise((resolve, reject) => {
@@ -1084,7 +1231,11 @@ function playBuf(buf, g) {
       if (A.gen !== g) return resolve();
       if (c.state !== 'running') return reject(new Error('audio is locked until the screen is tapped'));
       const src = c.createBufferSource();
-      src.buffer = buf; src.connect(c.destination);
+      src.buffer = buf;
+      try {
+        if (!A.mon || A.mon.context !== c) { A.mon = c.createAnalyser(); A.mon.fftSize = 2048; A.mon.connect(c.destination); }
+        src.connect(A.mon);
+      } catch { src.connect(c.destination); }
       let done = false;
       src.onended = () => { done = true; if (A.src === src) A.src = null; resolve(); };
       A.src = src;
@@ -1106,25 +1257,42 @@ function playBuf(buf, g) {
 // ONE ENTRY POINT FOR EVERYTHING THAT SPEAKS — the play button, speak mode, conversation
 // mode — so the voice, the fallback and the stop are the same in all three. `onend` runs
 // when this text finishes or fails, never when something newer replaced it.
+//   STOP CANCELS THE WHOLE QUEUE because every await below checks the generation that
+// stopSpeaking() bumps: the chunk playing is stopped, and no later chunk is planned, fetched
+// or played. The Mac then holds at most one planned chunk nobody will hear, which the next
+// plan supersedes.
 async function speakText(words, onend) {
-  stopSpeaking();
+  hush();
   if (!words) { if (onend) onend(); return; }
   const g = A.gen;
   S.speaking = words;
-  const fin = () => { if (A.gen !== g) return; A.gen++; A.src = null; S.speaking = ''; render(); if (onend) onend(); };
+  const fin = () => { if (A.gen !== g) return; A.gen++; A.src = null; S.speaking = ''; releaseAudio(); render(); if (onend) onend(); };
+  const chunks = speechChunks(words);
+  let rest = chunks;
   if (hasWebAudio() && Date.now() >= A.offUntil) {
-    let plan = null, i = 0;
+    A.via = 'mac';
+    const plans = [];
+    // `more` tells the Mac this plan follows the one before it: it must not cancel the
+    // advance work of the chunk that is playing (lib/speech.mjs prefetch()).
+    const planOf = (k) => plans[k] || (plans[k] = api.speakPlan(chunks[k], k > 0));
+    let c = 0, i = 0, plan = null;
     try {
-      plan = await api.speakPlan(words);
-      if (A.gen !== g) return;
-      const pending = [];
-      const get = (k) => pending[k] || (pending[k] = sentenceBuf(plan[k]));
-      for (; i < plan.length; i++) {
-        get(i); if (i + 1 < plan.length) get(i + 1).catch(() => {});
-        const buf = await get(i);
+      for (; c < chunks.length; c++) {
+        plan = null; i = 0;
+        plan = await planOf(c);
         if (A.gen !== g) return;
-        await playBuf(buf, g);
-        if (A.gen !== g) return;
+        if (c + 1 < chunks.length) planOf(c + 1).catch(() => {});
+        for (; i < plan.length; i++) {
+          sentenceBuf(plan[i]);
+          // The sentence after this one — across the chunk boundary too, or every chunk would
+          // open with a pause the length of its first sentence's synthesis.
+          if (i + 1 < plan.length) sentenceBuf(plan[i + 1]).catch(() => {});
+          else if (c + 1 < chunks.length) planOf(c + 1).then(p => p.length && sentenceBuf(p[0])).catch(() => {});
+          const buf = await sentenceBuf(plan[i]);
+          if (A.gen !== g) return;
+          await playBuf(buf, g);
+          if (A.gen !== g) return;
+        }
       }
       fin(); return;
     } catch (e) {
@@ -1139,10 +1307,13 @@ async function speakText(words, onend) {
       }
       // Whatever was not yet heard is said by the device: a reply cut off at sentence three
       // is worse than one that changes voice at sentence three.
-      if (plan && i > 0) words = plan.slice(i).map(x => x.text).join(' ');
+      rest = (plan && i > 0 ? [plan.slice(i).map(x => x.text).join(' ')] : []).concat(chunks.slice(plan && i > 0 ? c + 1 : c));
     }
   }
-  synthSay(words, g, fin);
+  A.via = 'device';
+  let k = 0;
+  const next = () => { if (A.gen !== g) return; if (k >= rest.length) { fin(); return; } synthSay(rest[k++], g, next); };
+  next();
 }
 // A TOGGLE, and it is the same button both ways: tapping the one that is speaking stops
 // it. Two voices at once is the failure mode of a play button that is really two buttons.
@@ -1197,7 +1368,7 @@ function openJarvis() {
   S.jarvisMode = true; S.screen = 'session'; S.session = 'master';
   if (j && j.present) S.project = j.project;
   S.sess = null; S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.pending = null; stopSpeaking();
+  S.draft = ''; S.caret = null; stopSpeaking();
   scrollMem.delete('pane'); scrollMem.delete('chat');
   pushNav();
   render(); refresh();
@@ -1301,7 +1472,8 @@ function jarvisScreen() {
   ])];
   const nb = notifyBandEl();
   if (nb) out.push(nb);
-  if (!j) { out.push(el('div', { class: 'hint', text: 'asking the Mac about Jarvis…' })); return out; }
+  // What it waits for is a chat (chatView below), so it waits in that shape.
+  if (!j) { out.push(el('div', { class: 'chat', 'aria-busy': 'true' }, skeletonChat())); return out; }
   if (!j.present) {
     out.push(el('div', { class: 'hint jarvis-none' }, [
       el('p', { text: 'There is no Jarvis on this Mac yet.' }),
@@ -1354,20 +1526,89 @@ async function answerProposal(p, yes) {
 // and nowhere else. Web Speech recognition is not used on purpose — it does not work in an
 // installed iOS app, and where it does work it sends the audio to Apple.
 //
-// THE MIC IS CLOSED WHILE ANYTHING ELSE HAPPENS. From the end of an utterance until the
-// answer has been spoken, the tracks are STOPPED, not muted: Jarvis's own voice through the
-// speaker is the loudest thing in the room, and a mic that could hear it would answer
-// itself. Stopping (rather than a gain of zero) also hands iOS its speaker back — a live
-// capture session routes speech to the quiet earpiece.
+// THE MIC IS CLOSED WHILE THE MAC WORKS, AND OPEN WHILE IT ANSWERS. From the end of an
+// utterance until the answer starts, the tracks are STOPPED, not muted. While the answer is
+// read they are live again, for barge-in (BARGE below): the app's own voice is the loudest
+// thing in the room, so what the mic hears then only counts as the owner when it is well
+// above the playback, for long enough. This used to stop the tracks through the answer
+// too, partly because a live capture session was seen to route speech to the quieter
+// earpiece on iOS — the price of barge-in, and unchecked on a phone; see the PR.
 //
 // IT ENDS: on a tap, on twenty seconds of nothing, when the app leaves the screen (an
 // installed web app gets no microphone in the background — the band says so), and when
 // something fails, saying what.
 // WAIT_MAX_MS is per target: Jarvis answers in seconds, while a worker's turn with tools in
 // it can run for many minutes — giving up on that at five would end most real conversations.
-const TALK = { END_QUIET_MS: 1000, MIN_SPEECH_MS: 350, MAX_UTTER_MS: 30000, GIVE_UP_MS: 20000, WAIT_MAX_MS: { jarvis: 5 * 60 * 1000, session: 30 * 60 * 1000 } };
+//
+// THE END OF A TURN IS DECIDED HERE, ON THE PHONE, AND ONLY BY SILENCE. Whisper on the Mac
+// never sees the audio until the turn is over, so it has no say in when that is. The turn
+// used to end one second after the last loud frame, which is shorter than a breath taken to
+// think: "I have to have time to think and I can't stop talking" — every pause mid-thought
+// sent half a sentence. So the quiet that ends a turn is a setting (savedQuiet(), 3.5 s by
+// default), it is counted from the LAST VOICED FRAME — a transcript that has not changed is
+// not a person who has stopped — and while it runs the band shows it running out, so the
+// owner can see a send coming and talk to hold it off, or tap the band to send now.
+//   MAX_UTTER_MS grew with it, from 30 s: thinking out loud with pauses of three seconds
+// runs past half a minute easily, and the old cap cut those off mid-sentence. 90 s of 16 kHz
+// mono is 2.9 MB, inside fleet-serve's 4 MB HEAR_BODY_CAP with room for the header.
+const TALK = { MIN_SPEECH_MS: 350, MAX_UTTER_MS: 90000, GIVE_UP_MS: 20000, WAIT_MAX_MS: { jarvis: 5 * 60 * 1000, session: 30 * 60 * 1000 } };
+export const QUIET = { MIN: 1.5, MAX: 8, STEP: 0.5, DEFAULT: 3.5 };
+export function savedQuiet() {
+  let q = NaN;
+  try { const v = localStorage.getItem(LS_QUIET); if (v != null) q = Number(v); } catch {}
+  return Number.isFinite(q) && q >= QUIET.MIN && q <= QUIET.MAX ? q : QUIET.DEFAULT;
+}
+// THE TURN'S CLOCK, pure so the suite can run it on a fake one. `start` is the first voiced
+// frame, `voice` every voiced frame after it, `tap` the owner saying "send it now". at(now)
+// answers whether the turn is over and why — '' while it is not — and how much of the
+// silence is left, as milliseconds and as the fraction the band draws.
+export function turnClock(quietMs, maxMs = TALK.MAX_UTTER_MS) {
+  const t = { speechAt: 0, voiceAt: 0, tapped: false };
+  return {
+    start(now) { t.speechAt = t.voiceAt = now; t.tapped = false; },
+    voice(now) { t.voiceAt = now; },
+    tap() { t.tapped = true; },
+    get spoke() { return t.voiceAt - t.speechAt; },
+    at(now) {
+      const left = Math.max(0, quietMs - (now - t.voiceAt));
+      const end = t.tapped ? 'tap' : left <= 0 ? 'quiet' : now - t.speechAt >= maxMs ? 'long' : '';
+      return { end, left, frac: quietMs > 0 ? left / quietMs : 0, pausing: now - t.voiceAt > 250 };
+    },
+  };
+}
+// ── barge-in: talking over the answer stops it ─────────────────────────────
+// "I sent it and forgot something — I want to add it, not hear everything you have to say."
+// So the mic stays open while the answer is read, and the owner's voice over it stops the
+// whole queue (every chunk, Kokoro's and the device's) and starts a new turn, which goes
+// out as a FOLLOW-UP: fleet_send queues it behind a turn still running, and nothing that
+// was said or sent before is replaced.
+//   THE APP'S OWN VOICE MUST NEVER COUNT AS THE OWNER'S, and the mic hears it. Measured on
+// a laptop, its built-in speaker into its built-in mic, a long Kokoro reply playing: with
+// the browser's echo cancellation the mic heard 0.006× the playback's envelope at the median
+// over 101 s; with it off, 0.15× at the median and 0.41× at the single worst frame. So
+// speech counts only when it is louder than 0.6× the playback's recent envelope (and above
+// the room's own floor), and only when it STAYS louder for 250 ms — a lone frame is a
+// consonant of the echo, a door, a cough. Replayed through this gate, every one of those
+// frames that was the speaker never barges in, nor with the mic three times as hot; the one
+// sound in that room louder than anything playing does (test/fixtures/barge-echo.json).
+// What the measurement cannot say is a phone's speaker, earpiece or AirPods; see the PR.
+export const BARGE = { HOLD_MS: 250, ECHO: 0.6, FLOOR: 0.02, BLIND: 0.08, DECAY_MS: 400 };
+export function bargeDetector(o = BARGE) {
+  let env = 0, at = 0, since = 0;
+  return {
+    // `out` is the app's own output level now, null when it cannot be read (the device's
+    // voice); `floor` the listener's speech threshold for this room.
+    frame(now, mic, out, floor = 0) {
+      env = Math.max(out == null ? 0 : out, env * Math.exp(-(at ? now - at : 0) / o.DECAY_MS)); at = now;
+      const need = Math.max(o.FLOOR, floor, out == null ? o.BLIND : o.ECHO * env);
+      if (mic <= need) { since = 0; return false; }
+      if (!since) since = now;
+      return now - since >= o.HOLD_MS;
+    },
+  };
+}
 const T = { ctx: null, stream: null, src: null, proc: null, frames: [], pre: [], inSpeech: false,
-            voiceAt: 0, speechAt: 0, listenAt: 0, noise: 0.004, hot: 0, rate: 48000, poll: null, gen: 0 };
+            turn: null, barge: null, listenAt: 0, noise: 0.004, hot: 0, rate: 48000, poll: null, gen: 0 };
 // EVERY AWAIT IN THE LOOP IS A PLACE THE WORLD CAN CHANGE: stop, then talk again, while an
 // old utterance is still being heard, and that old continuation would find a live S.talk —
 // a NEW one — and send its words, or open a second microphone beside the first. Each talk
@@ -1460,7 +1701,9 @@ async function openMic() {
   T.proc.onaudioprocess = onTalkFrame;
   T.src.connect(T.proc); T.proc.connect(T.ctx.destination);   // Safari only pulls a connected node
   T.frames = []; T.pre = []; T.inSpeech = false; T.hot = 0; T.listenAt = Date.now();
-  S.talk.phase = 'listening';
+  // Opened for the answer (barge-in), the phase stays 'speaking'; only a mic opened to
+  // listen moves the band on.
+  if (S.talk.phase === 'opening') S.talk.phase = 'listening';
   render();
 }
 function closeMic() {
@@ -1473,17 +1716,28 @@ function closeMic() {
 // loud frames start speech (one is a click); a second under 60% of the threshold ends it.
 // The ~0.4 s of audio before the start is kept, or the first syllable is always cut.
 function onTalkFrame(e) {
-  if (!S.talk || S.talk.phase !== 'listening') return;
+  if (!S.talk || (S.talk.phase !== 'listening' && S.talk.phase !== 'speaking')) return;
   const d = new Float32Array(e.inputBuffer.getChannelData(0));
   let sum = 0;
   for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
   const rms = Math.sqrt(sum / d.length), now = Date.now();
   const thr = Math.max(0.012, T.noise * 3.5);
+  if (S.talk.phase === 'speaking') {
+    // The floor is NOT learned here: what the mic hears now is mostly the answer, and a
+    // floor raised by it would make the owner's next turn hard to start.
+    T.pre.push(d); if (T.pre.length > 5) T.pre.shift();
+    if (!T.barge) T.barge = bargeDetector();
+    if (T.barge.frame(now, rms, outLevel(), thr)) bargeIn(true, now);
+    return;
+  }
   if (!T.inSpeech) {
     if (rms <= thr) T.noise = T.noise * 0.95 + rms * 0.05;
     T.pre.push(d); if (T.pre.length > 5) T.pre.shift();
     if (rms > thr) {
-      if (++T.hot >= 2) { T.inSpeech = true; T.speechAt = now; T.voiceAt = now; T.frames = T.pre.slice(); T.pre = []; }
+      if (++T.hot >= 2) {
+        T.inSpeech = true; T.frames = T.pre.slice(); T.pre = [];
+        T.turn = turnClock(savedQuiet() * 1000); T.turn.start(now);
+      }
     } else {
       T.hot = 0;
       if (now - T.listenAt > TALK.GIVE_UP_MS) talkStop('nothing heard for 20 seconds — conversation mode is off');
@@ -1491,12 +1745,36 @@ function onTalkFrame(e) {
     return;
   }
   T.frames.push(d);
-  if (rms > thr * 0.6) T.voiceAt = now;
-  if (now - T.voiceAt > TALK.END_QUIET_MS || now - T.speechAt > TALK.MAX_UTTER_MS) endUtterance();
+  if (rms > thr * 0.6) T.turn.voice(now);
+  const st = T.turn.at(now);
+  if (st.end) endUtterance(); else drawTurn(st);
+}
+// THE COUNTDOWN IS DRAWN FROM THE AUDIO LOOP, NOT BY render(). A frame lands every ~85 ms and
+// a full render per frame would rebuild the chat under the owner's thumb; this touches two
+// nodes the band already has, and does nothing when the band is not on screen. A render()
+// in between (the poll) redraws the band full and the next frame puts the bar back.
+function drawTurn(st) {
+  if (typeof document === 'undefined' || !document.getElementById) return;
+  const bar = document.getElementById('turnbar'), ph = document.getElementById('turnph');
+  if (bar) bar.style.transform = `scaleX(${st.pausing ? st.frac.toFixed(3) : 1})`;
+  if (ph) ph.textContent = talkListenText(st);
+}
+function talkListenText(st) {
+  if (!st || !T.inSpeech) return `● listening — take your time; ${savedQuiet()} s of quiet sends it`;
+  return st.pausing ? `● sending in ${(st.left / 1000).toFixed(1)} s — keep talking to hold it, tap here to send now`
+                    : '● hearing you — tap here to send now';
+}
+// TAP TO SEND NOW. The band, not the talk button: the button already means "conversation
+// mode off", and an owner reaching for it to stop must not send half a thought instead.
+// Before anything has been said there is nothing to send, so the tap does nothing.
+function talkSendNow() {
+  if (!S.talk || S.talk.phase !== 'listening' || !T.inSpeech || !T.turn) return;
+  T.turn.tap();
+  endUtterance();
 }
 async function endUtterance() {
-  const frames = T.frames, spoke = T.voiceAt - T.speechAt;
-  T.frames = []; T.inSpeech = false;
+  const frames = T.frames, spoke = T.turn ? T.turn.spoke : 0;
+  T.frames = []; T.inSpeech = false; T.turn = null;
   closeMic();                          // closed from here until the answer has been spoken
   if (!S.talk) return;
   const g = S.talk.gen;
@@ -1517,16 +1795,47 @@ async function endUtterance() {
   const prompt = `(spoken) ${text}`;
   const target = S.talk.target;
   S.talk = { phase: 'waiting', sent: prompt, seen: countSaid(prompt), since: Date.now(), gen: g, target };
-  S.pending = { text: prompt, at: Math.floor(Date.now() / 1000), seen: countSaid(prompt) };
+  const item = outboxAdd(prompt, target.project, target.session);
   scrollMem.delete('chat');
   render();
   say('checking');
   const r = await doVerb('fleet_send', { project: target.project, session: target.session, prompt }, { quiet: true });
+  if (r) outboxAcked(item, r); else outboxDrop(item);
   if (!talkLive(g)) return;
-  if (!r) { S.pending = null; talkStop(`that did not reach ${target.label}`); return; }
+  if (!r) { talkStop(`that did not reach ${target.label}`); return; }
   startTalkPoll();
 }
 function talkReopen() { if (!S.talk) return; S.talk.phase = 'opening'; render(); openMic(); }
+// Listen again on the mic that is already open — it stayed open through the answer for
+// barge-in — or open one if it is not.
+function talkListen() {
+  if (!S.talk) return;
+  if (!T.stream) { talkReopen(); return; }
+  T.frames = []; T.inSpeech = false; T.hot = 0; T.turn = null; T.barge = null; T.listenAt = Date.now();
+  S.talk.phase = 'listening';
+  render();
+}
+// The answer is being read and the mic is opened under it, so the owner can cut in.
+function talkSpeak(text, onend) {
+  const t = S.talk;
+  t.phase = 'speaking'; stopTalkPoll(); T.barge = bargeDetector(); T.pre = [];
+  render();
+  if (!T.stream) openMic();
+  say(text, onend);
+}
+// CUT IN: stop every chunk still to be read and listen. `heard` is the detector having
+// caught the owner already talking — the frames that tripped it are the first of the new
+// turn, kept, or the first word is always gone. A tap (heard false) waits for speech.
+function bargeIn(heard, now = Date.now()) {
+  if (!S.talk || S.talk.phase !== 'speaking') return;
+  stopSpeaking();
+  talkListen();
+  if (heard) {
+    T.inSpeech = true; T.frames = T.pre.slice(); T.pre = [];
+    T.turn = turnClock(savedQuiet() * 1000); T.turn.start(now - BARGE.HOLD_MS); T.turn.voice(now);
+  }
+  render();
+}
 // THE ANSWER IS THE LAST THING THE SESSION SAID AFTER WHAT YOU SAID, once its turn is over —
 // so a worker's narration between tool calls is never read, only the reply it ends on. The
 // match counts occurrences rather than looking for the text, for the reason sendDraft gives:
@@ -1536,7 +1845,7 @@ function talkAfterRefresh() {
   if (!t || t.phase !== 'waiting') return;
   const max = TALK.WAIT_MAX_MS[t.target.jarvis ? 'jarvis' : 'session'];
   if (Date.now() - t.since > max) { talkStop(`no answer after ${Math.round(max / 60000)} minutes — conversation mode is off`); return; }
-  // The baseline FOLLOWS THE PAGE DOWN, as reconcilePending's does: /api/session serves a
+  // The baseline FOLLOWS THE PAGE DOWN, as reconcileOutbox's does: /api/session serves a
   // window that rolls, and an earlier identical turn scrolling out of it must not make the
   // new one look like no change at all.
   const said = countSaid(t.sent);
@@ -1548,16 +1857,14 @@ function talkAfterRefresh() {
   if (i < 0) return;                                       // never "everything after nothing"
   const c = cardOf(t.target.session);
   if (c && c.status === 'need-you') {
-    t.phase = 'speaking'; stopTalkPoll(); render();
     const g0 = t.gen;
-    say(`${t.target.label} is stopped on a permission prompt. Open the pane to answer it.`, () => { if (talkLive(g0)) talkStop(''); });
+    talkSpeak(`${t.target.label} is stopped on a permission prompt. Open the pane to answer it.`, () => { if (talkLive(g0)) talkStop(''); });
     return;
   }
   const after = ms.slice(i + 1).filter(m => m.role === 'assistant' && String(m.text || '').trim());
   if (!after.length || (c && c.status === 'working')) return;
-  t.phase = 'speaking'; stopTalkPoll(); render();
   const g = t.gen;
-  say(after[after.length - 1].text, () => { if (talkLive(g) && S.talk.phase === 'speaking') talkReopen(); });
+  talkSpeak(after[after.length - 1].text, () => { if (talkLive(g) && S.talk.phase === 'speaking') talkListen(); });
 }
 // Faster than the 5s poll while an answer is owed, because in a conversation five seconds
 // of silence after the answer has landed is a long time.
@@ -1570,8 +1877,13 @@ function talkStop(reason) {
   const was = !!S.talk;
   S.talk = null;
   closeMic(); stopTalkPoll();
-  stopSpeaking();
-  try { if (T.ctx) T.ctx.suspend(); } catch {}
+  hush();
+  // 'play-and-record' is the most exclusive session there is; the owner's music waits on
+  // it for as long as the conversation runs and not a moment longer. Closed, not
+  // suspended, for the reason releaseAudio() gives — talkStart() makes a new one.
+  try { if (T.ctx) T.ctx.close(); } catch {}
+  T.ctx = null;
+  releaseAudio();
   if (reason) toast(reason, /off$/.test(reason) ? '' : 'bad');
   if (reason || was) render();
 }
@@ -1586,13 +1898,20 @@ function waitedFor(since) {
 function say(text, onend) { speakText(speakable(text), onend); }
 function talkBand() {
   const ph = S.talk.phase;
-  const now = ph === 'listening' ? '● listening — just talk; a second of quiet sends it'
+  const now = ph === 'listening' ? talkListenText(T.turn && T.turn.at(Date.now()))
             : ph === 'hearing' ? '… hearing you (on the Mac)'
             : ph === 'waiting' ? `… checking — ${S.talk.target.label} is on it${waitedFor(S.talk.since)}`
-            : ph === 'speaking' ? '▶ answering — the mic is off while it speaks'
+            : ph === 'speaking' ? '▶ answering — talk, or tap here, to cut in'
             : '… opening the microphone';
-  return el('div', { class: 'talkband' }, [
-    el('span', { class: 'ph ' + ph, text: now }),
+  const listening = ph === 'listening', speaking = ph === 'speaking';
+  // A TAP ON THE BAND is the manual half of both: send what was said, or cut in on the
+  // answer — for when the detector misses a soft voice.
+  const tap = listening ? talkSendNow : speaking ? () => bargeIn(false) : null;
+  return el('div', { class: 'talkband' + (tap ? ' tap' : ''), onclick: tap,
+                     role: tap ? 'button' : null,
+                     'aria-label': listening ? 'send what you said now' : speaking ? 'stop the answer and listen' : null }, [
+    el('span', { class: 'ph ' + ph, id: listening ? 'turnph' : null, text: now }),
+    listening ? el('div', { class: 'turnbar' }, [el('i', { id: 'turnbar' })]) : null,
     el('span', { class: 'note', text: 'conversation mode only works with the screen on and this app open' }),
   ]);
 }
@@ -1646,7 +1965,7 @@ function openSession(name) {
   // tapped to answer "what is this worker doing right now", and the pane is the answer to
   // that question; a sticky preference would sometimes answer a different one.
   S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.pending = null; stopSpeaking();
+  S.draft = ''; S.caret = null; stopSpeaking();
   // Another session's offset means nothing in this one's pane or transcript.
   scrollMem.delete('pane'); scrollMem.delete('chat');
   pushNav();
@@ -1789,10 +2108,12 @@ function chatView(card) {
   if (card && card.status === 'need-you') {
     wrap.append(el('div', { class: 'blocked' }, [
       el('div', { class: 't', text: 'this session is waiting on you — a permission prompt or a question is drawn in its pane, and a transcript cannot show one' }),
+      btn('answer', () => sheetAnswer(S.session)),
       btn('open the pane', () => setView('pane')),
     ]));
   }
-  if (!s) { wrap.append(el('div', { class: 'hint', text: 'reading the transcript…' })); return wrap; }
+  // A session opened afresh draws its history as history: forget what the last visit drew.
+  if (!s) { drawn.who = ''; wrap.setAttribute('aria-busy', 'true'); wrap.append(...skeletonChat()); return wrap; }
   // A session that has not taken a turn comes back with total 0 and a `note` — fleet-read's
   // own words for a terminal: "…is live but has no transcript yet — Send it work: fleet-send
   // -s … <prompt>". The API keeps the note, because "no messages" and "no transcript yet" are
@@ -1827,6 +2148,12 @@ function chatView(card) {
     wrap.append(el('div', { class: 'meta l', text: '— the beginning of the transcript —' }));
   }
   for (const m of (s.messages || [])) {
+    // EVENTS ARE CARDS, NOT BUBBLES. A compaction and a run of tool calls used to arrive as
+    // user turns and drew as the owner's own words; bin/fleet-read now serves them as roles of
+    // their own, and they draw as a small muted card that is plainly nobody speaking. Any role
+    // this screen does not know is never drawn as his.
+    if (m.role === 'compacted' || m.role === 'tools') { wrap.append(arrived(eventCard(m), m, msgKey(m))); continue; }
+    if (m.role !== 'user' && m.role !== 'assistant') continue;
     // ON JARVIS'S SCREEN, THE MACHINE IS NOT THE OWNER. Its wakes arrive as prompts, so the
     // transcript files them as user turns — and a big right-hand bubble reading "[fleet]
     // need-you: …" says HE wrote it, on the one screen where who said what is the whole
@@ -1842,12 +2169,15 @@ function chatView(card) {
       ]));
       continue;
     }
-    wrap.append(turn(m.role === 'user', m.text, G.clockLabel(m.ts), false, msgKey(m)));
+    wrap.append(arrived(turn(m.role === 'user', m.text, G.clockLabel(m.ts), false, msgKey(m)), m, msgKey(m)));
   }
   // Sent, not yet echoed by the transcript. Dimmed rather than absent: a chat where your
   // own message disappears for five seconds reads as a send that failed, and this app's
-  // whole job is telling you what is actually happening.
-  if (S.pending) wrap.append(turn(true, S.pending.text, 'sending…', true));
+  // whole job is telling you what is actually happening. EVERY ONE OF THEM, in order —
+  // see "the outbox".
+  outboxRows().forEach((row, i) => wrap.append(arrived(outboxTurn(row), null,
+    `pending|${row.item ? row.item.id : `q${i} ${row.text}`}`)));
+  arrivedDone();
   // ── "it is working on it" ──────────────────────────────────────────────
   // Between the transcript echoing your prompt and the answer landing, this screen said
   // nothing at all, and a chat that goes quiet reads as a send that went nowhere. The
@@ -1864,7 +2194,7 @@ function chatView(card) {
 // because that is where the answer is going to appear, but every path that treats the tail
 // of this list as content has to miss it: read-aloud keys off msgKey() and only turn()
 // mints one, so there is no play control here and speakable() is never handed it; it is
-// not in S.sess.messages, so reconcilePending and the card's own preview line cannot see
+// not in S.sess.messages, so reconcileOutbox and the card's own preview line cannot see
 // it either. Sharing turn() would have given it all three for free, which is the reason
 // this is fifteen lines instead of one argument.
 //   THE POLL IS 5s AND THIS DOES NOT PRETEND OTHERWISE. A turn that starts and finishes
@@ -1964,68 +2294,322 @@ const ICON_COPY_FRONT = 'M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9
 const ICON_TICK = 'M5 12.5l4.5 4.5L19 7.5';
 function copyIcon(done) { return done ? iconSvg(ICON_TICK) : iconSvg(ICON_COPY_BACK, ICON_COPY_FRONT); }
 
-// ── a photo becomes a path in the box you are about to send ───────────────
+// ── photos become paths in the message you are about to send ──────────────
 // "can I send a picture?", twice. The mechanism docs/attachments.md measured is that an
-// agent given a PATH reads the pixels — so this uploads the file and then puts the path it
-// gets back into the composer, WHERE YOU CAN SEE IT. What is sent is an ordinary prompt
-// that happens to name a file, through the same fleet_send every other message uses:
-// nothing here touches the send path, which is the most scarred code in the repo and the
-// one place a stranded prompt costs the most (#77).
+// agent given a PATH reads the pixels — so each photo is uploaded as soon as it is picked,
+// and the paths the server hands back are appended to the message when it is sent. What is
+// sent is an ordinary prompt that happens to name files, through the same fleet_send every
+// other message uses: nothing here touches the send path, which is the most scarred code in
+// the repo and the one place a stranded prompt costs the most (#77).
+//   SEVERAL AT ONCE, ONE MESSAGE. The picker takes up to ATTACH_PER_MESSAGE; each one is a
+// tile above the box with its own ×, and all of them go in the one prompt the send button
+// sends. Uploaded one at a time, in the order picked: the order is the order the agent reads
+// them in, and ten parallel 6 MB bodies over a tailnet is how the first one times out.
+//   THE PREVIEW IS A CANVAS, NOT AN <img>. The CSP is `default-src 'self'`, which refuses a
+// blob: URL in an <img>, and docs/attachments.md chose not to loosen a policy on a page that
+// can spawn processes to save one element. createImageBitmap decodes the File in memory —
+// no URL, no fetch — and drawImage paints it. A format the browser cannot decode gets a
+// numbered label instead of a blank square: the tile is the confirmation, not the pixels.
+//   KEYED BY SESSION. An upload takes seconds and the screen is live throughout, so a photo
+// belongs to the session that picked it, not to whatever composer is on screen when its
+// bytes land — the same discipline readPane() keeps for a capture that arrives late.
+let photoSeq = 0, photoChain = Promise.resolve(), photoStripNode = null;
+const photoKey = (project = S.project, session = S.session) => `${project} ${session}`;
+const photosFor = (key = photoKey()) => S.photos.filter((p) => p.key === key);
+
+// ── a photo keeps its PLACE in the text, and its path goes there on send ─────
+// A photo was its long attach path appended at the END of the message, after a sentence
+// that might have been about another photo. The desktop puts it where the cursor was, so
+// "compare <this> with <that>" says which is which; the phone does the same now, without
+// putting anything in the box — the strip shows the photos, and the text stays the owner's.
+//   EACH PHOTO REMEMBERS AN OFFSET into the draft, taken from the caret when it was added,
+// and the offset follows the edits made after it (anchorAfterEdit). The path is only ever
+// written in on the way out, by messageWithPhotos.
 //
-// NO THUMBNAIL, DELIBERATELY. The CSP is `default-src 'self'`, so a blob: in an <img> is
-// refused and the only route is decoding to a canvas — and the format an iPhone actually
-// hands over is HEIC, which the browser may not decode at all (unmeasured, and the whole
-// reason the bytes are converted on the Mac instead). A preview that worked for a JPEG
-// from a laptop and silently showed nothing on the phone this feature exists for would be
-// worse than none. The path in the box is the confirmation, and it is the same string the
-// agent will be given.
-async function attachPhoto(file, card) {
-  if (!file) return;
-  if (S.attaching) return;
-  // WHOSE DRAFT THIS IS, decided before the upload rather than after it. An upload from a
-  // phone takes seconds and the screen is live throughout — so `S.session` at the moment
-  // the bytes land is not necessarily the session that asked for them, and appending a
-  // path to whatever draft happens to be on screen puts one worker's photo in another
-  // worker's message box. The same discipline readPane() already keeps for a capture that
-  // arrives after the screen moved.
-  const want = { project: S.project, session: S.session };
-  S.attaching = true; render();
-  let note = '', bad = false;
+// ONE place where photos become text, so every rule about the outgoing message has one
+// place to live. A photo goes in at its offset (clamped to the text), set apart by a space
+// on either side; several at one offset keep the order they were picked in. A plain string
+// is a path with no place and is appended, as every photo once was.
+//   NEVER A LEADING `/` THE OWNER DID NOT TYPE. A prompt beginning with `/` is a slash
+// command to the agent, and the mod refuses to submit one on the owner's behalf — so a
+// message the photos made start with a path gets a word in front: the photos-only case,
+// and now also a photo placed before the first word. Typed text that itself begins with
+// `/` is left alone: that one IS a command, and it is the owner's.
+export function messageWithPhotos(text, photos) {
+  const typed = String(text || '');
+  let out = typed;
+  const placed = (photos || []).filter((p) => p && typeof p === 'object' && p.path);
+  const tail = (photos || []).filter((p) => typeof p === 'string' && p);
+  // Right to left, so inserting one never moves the offset of the next; within one offset,
+  // the LAST picked goes in first, which leaves them in picking order.
+  const order = placed.map((p, i) => ({ p, i })).sort((a, b) => (b.p.at || 0) - (a.p.at || 0) || b.i - a.i);
+  for (const { p } of order) {
+    const at = Math.max(0, Math.min(Number.isInteger(p.at) ? p.at : out.length, typed.length));
+    const before = out.slice(0, at), after = out.slice(at);
+    out = before + (before && !/\s$/.test(before) ? ' ' : '') + p.path + (after && !/^\s/.test(after) ? ' ' : '') + after;
+  }
+  out = [out.trim(), ...tail].filter(Boolean).join(' ');
+  if (out.startsWith('/') && !typed.trim().startsWith('/')) {
+    const n = placed.length + tail.length;
+    out = `${n > 1 ? 'photos:' : 'photo:'} ${out}`;
+  }
+  return out;
+}
+// WHERE AN OFFSET GOES WHEN THE TEXT CHANGES. One input event is one edit, so the edit is
+// found as the old and new text minus what they share at the front and at the back:
+// before the edit an offset stays, after it the offset moves by the change in length, and
+// inside a replaced span it lands at the end of the replacement. That is the whole rule,
+// and it needs no history of keystrokes.
+//   THE CARET BREAKS THE ONE TIE THIS HAS. Typing "a" into "aa" reads the same at every
+// position — the text alone cannot say where it went — so when the box reports its caret,
+// the shared tail is not allowed to run past it: the edit ends where the caret is. Without
+// a caret it still gives a consistent answer, just not always the right one in that case.
+export function anchorAfterEdit(at, prev, next, caret = null) {
+  prev = String(prev || ''); next = String(next || '');
+  if (prev === next || !Number.isInteger(at)) return at;
+  const max = Math.min(prev.length, next.length);
+  let pre = 0;
+  while (pre < max && prev[pre] === next[pre]) pre++;
+  let suf = 0;
+  while (suf < max && prev[prev.length - 1 - suf] === next[next.length - 1 - suf]) suf++;
+  if (Number.isInteger(caret)) suf = Math.min(suf, Math.max(0, next.length - caret));
+  pre = Math.min(pre, prev.length - suf, next.length - suf);
+  if (at <= pre) return at;
+  if (at >= prev.length - suf) return at + (next.length - prev.length);
+  return next.length - suf;
+}
+// The offsets this session's photos hold, for the suite.
+export function photoAnchors() { return photosFor().map((p) => p.at); }
+// A message pulled back out of the queue brings its photos, with offsets into the text it
+// was sent with. That text goes in FRONT of whatever is in the box, so the photos already
+// on the strip move along by its length plus the line break between them.
+function adoptPhotos(photos, key, shiftOthersBy = 0) {
+  if (shiftOthersBy) for (const q of photosFor(key)) if (Number.isInteger(q.at)) q.at += shiftOthersBy;
+  for (const p of photos) { p.key = key; if (!S.photos.includes(p)) S.photos.push(p); }
+}
+
+function photoThumb(file, n) {
+  const c = el('canvas', { class: 'ph-img', width: '128', height: '128', 'aria-hidden': 'true' });
+  c.textContent = String(n);
+  try {
+    if (typeof createImageBitmap !== 'function') throw new Error('no decoder');
+    createImageBitmap(file).then((bm) => {
+      const g = c.getContext('2d');
+      // Cover, centred: the tile is square and a phone photo is not.
+      const sc = Math.max(128 / bm.width, 128 / bm.height);
+      const w = bm.width * sc, h = bm.height * sc;
+      g.drawImage(bm, (128 - w) / 2, (128 - h) / 2, w, h);
+      try { bm.close(); } catch {}
+    }).catch(() => { c.classList.add('undecoded'); });
+  } catch { c.classList.add('undecoded'); }
+  return c;
+}
+
+// ── the photo picker's input, which the screen must not own ───────────────
+// A PICKED PHOTO SOMETIMES NEVER UPLOADED: no POST /api/attach in the server log, and
+// picking again worked. The input the iOS picker sheet belongs to was built inside
+// composer(), and render() rebuilds #app — on the 5s poll, on a toast, on a status change
+// — whenever the composer box does not have focus, which it does not while the picker is
+// up (the tap went to the camera button). So the sheet routinely outlived its input: the
+// render detached it and dropped the last reference to it (the old camera button's click
+// handler, thrown away in the same render). That much is measured — the suite holds the
+// picker open across a poll and watches the input leave the document. What WebKit then
+// does with a pick for a detached, unreferenced input is NOT observable from a desktop
+// engine (Chrome still fires its change); a pick arriving nowhere, with no request and no
+// error, is what the phone reported. "Sometimes" is the race: a pick quicker than one poll
+// interval survived it.
+//   ONE INPUT, IN <body>, OUTSIDE EVERYTHING render() REBUILDS, made once and reused. It
+// can no longer be detached by a repaint, so there is no window to pause the poll for.
+// Where its photos go is decided when the camera button is TAPPED and carried to the
+// change: the screen may have moved on by the time the sheet closes, and a photo picked for
+// one session must not land on another's composer.
+//   `multiple`, so the library lets several be ticked at once (addPhotos caps them).
+let pickNode = null, pickFor = null;
+export function pickInput() {
+  if (pickNode && pickNode.isConnected !== false) return pickNode;
+  const pick = el('input', { type: 'file', accept: 'image/*', multiple: '', class: 'pick',
+                             'aria-hidden': 'true', tabindex: '-1' });
+  pick.addEventListener('change', () => {
+    const files = pick.files ? [...pick.files] : [];
+    pick.value = '';                       // so picking the SAME photo twice still fires
+    const want = pickFor; pickFor = null;
+    if (!want || !files.length) return;
+    // Each photo keeps the place the caret was, and the caret goes back there, so the
+    // sentence about the photo can be typed straight on. The keyboard is iOS's call — see
+    // focusComposerAt.
+    addPhotos(files, cardOf(want.session), want);
+  });
+  document.body.appendChild(pick);
+  pickNode = pick;
+  return pick;
+}
+// WHERE THE CARET WAS, taken at the tap. The box may still have focus (then it says), or
+// the tap took it (then the blur recorded it in S.caret), and with neither the photo goes
+// at the end, which is where a caret in a box nobody touched is anyway.
+function openPicker() {
+  const box = composerNode;
+  const caret = isLive(box) && document.activeElement === box && Number.isInteger(box.selectionStart)
+    ? box.selectionStart : Number.isInteger(S.caret) ? S.caret : String(S.draft || '').length;
+  pickFor = { project: S.project, session: S.session, caret };
+  pickInput().click();
+}
+
+function addPhotos(files, card, want = { project: S.project, session: S.session }) {
+  files = [...(files || [])].filter(Boolean);
+  if (!files.length) return;
+  const key = photoKey(want.project, want.session);
+  const room = Math.max(0, api.ATTACH_PER_MESSAGE - photosFor(key).length);
+  const take = files.slice(0, room);
+  if (take.length < files.length) {
+    const left = files.length - take.length;
+    toast(take.length
+      ? `${api.ATTACH_PER_MESSAGE} photos per message — added ${take.length}, left out ${left}`
+      : `${api.ATTACH_PER_MESSAGE} photos per message, and this one has them — ${left} left out`, 'bad');
+    renderUnlessTyping();
+  }
+  // Where the caret was at the tap, clamped to the text as it is now (see messageWithPhotos).
+  const here = S.project === want.project && S.session === want.session;
+  const len = here ? String(S.draft || '').length : 0;
+  const at = Number.isInteger(want.caret) ? Math.max(0, Math.min(want.caret, len)) : len;
+  for (const file of take) {
+    const item = { id: ++photoSeq, key, at, name: file.name || 'photo', state: 'up', path: '', err: '' };
+    item.thumb = photoThumb(file, photosFor(key).length + 1);
+    S.photos.push(item);
+    photoChain = photoChain.then(() => uploadPhoto(item, file, want, card));
+  }
+  paintPhotos();
+  // The caret back where it was, so the sentence carries on from the photo.
+  if (take.length && here) focusComposerAt(at);
+}
+
+async function uploadPhoto(item, file, want, card) {
+  if (!S.photos.includes(item)) return;            // removed before its turn came
   try {
     const r = await api.attach(want.project, want.session, file);
-    const kb = Math.max(1, Math.round(r.bytes / 1024));
-    if (S.project !== want.project || S.session !== want.session) {
-      // Not silently dropped and not pasted somewhere it does not belong: the file is
-      // stored and its path is the only thing that makes it usable, so the path is what
-      // the message says.
-      note = `photo stored for ${want.session} — you have moved on, so it is at ${r.path}`;
-    } else {
-      const sep = S.draft && !/\s$/.test(S.draft) ? ' ' : '';
-      S.draft = (S.draft || '') + sep + r.path + ' ';
-      note = r.converted ? `photo converted and stored, ${kb} KB` : `photo stored, ${kb} KB`;
-      // ...and the one honesty requirement the research left standing: two of the three
-      // agents read images and the third depends on a model ghostfleet cannot see. ONE
-      // toast, not two: S.toast is a single slot, so a second call did not add a warning,
-      // it replaced the confirmation — and the size, which is the half that says the
-      // upload worked at all, was the half nobody on an opencode worker ever saw.
-      if (card && card.agent === 'opencode')
-        note += ' — this worker runs opencode, so whether it can read an image depends on its model';
-    }
+    item.path = r.path; item.state = 'ok';
+    // ...and the one honesty requirement the research left standing: two of the three
+    // agents read images and the third depends on a model ghostfleet cannot see.
+    if (card && card.agent === 'opencode' && !photosFor(item.key).some((p) => p !== item && p.state === 'ok'))
+      { toast('this worker runs opencode, so whether it can read an image depends on its model'); renderUnlessTyping(); }
   } catch (e) {
-    note = String((e && e.message) || e); bad = true;
+    if (e instanceof api.AuthError) { item.state = 'bad'; item.err = 'locked'; paintPhotos(); lock(); return; }
+    item.state = 'bad'; item.err = String((e && e.message) || e);
+    toast(`${item.name}: ${item.err}`, 'bad');
+    renderUnlessTyping();
   }
-  S.attaching = false;
-  // THE PATH GOES INTO THE BOX YOU ARE LOOKING AT, WITHOUT REBUILDING IT. render() would
-  // show the new draft and close the keyboard doing it — the composer is where you were
-  // about to type the sentence that goes with the photo. So the live box is patched in
-  // place, the way paintPane() patches the pane, and the rest of the screen (the camera's
-  // busy state) repaints on the next poll that is allowed to run.
-  if (isLive(composerNode)) { composerNode.value = S.draft || ''; growComposer(composerNode); }
-  toast(note, bad ? 'bad' : '');
-  renderUnlessTyping();
+  paintPhotos();
+}
+
+function removePhoto(item) {
+  S.photos = S.photos.filter((p) => p !== item);
+  paintPhotos();
+}
+
+function photoTiles() {
+  return photosFor().map((p, i) => {
+    const x = btn('×', () => removePhoto(p), 'ph-x');
+    x.setAttribute('aria-label', `remove photo ${i + 1}`);
+    const state = p.state === 'up' ? 'uploading' : p.state === 'bad' ? `failed: ${p.err}` : 'ready';
+    return el('div', { class: `ph ${p.state}`, title: `${p.name} — ${state}`,
+                       'aria-label': `photo ${i + 1}, ${state}` }, [p.thumb, x]);
+  });
+}
+// THE TILES ARE PATCHED IN PLACE, WITHOUT REBUILDING THE COMPOSER. render() would rebuild the
+// textarea and close the keyboard doing it — and the composer is where you were about to
+// type the sentence that goes with the photos. So an upload finishing repaints only the
+// strip, the way paintPane() patches the pane.
+function paintPhotos() {
+  if (isLive(photoStripNode)) {
+    photoStripNode.textContent = '';
+    for (const t of photoTiles()) photoStripNode.append(t);
+    const cam = photoStripNode.parentNode && photoStripNode.parentNode.querySelector && photoStripNode.parentNode.querySelector('.cam');
+    if (cam) cam.classList.toggle('busy', photosFor().some((p) => p.state === 'up'));
+  } else renderUnlessTyping();
 }
 
 function msgKey(m) { return String(m.role || '') + '|' + String(m.ts || ''); }
+// ── a message ENTERS once, and a poll is not an entrance ────────────────────
+// render() rebuilds #app from nothing every five seconds, so every bubble is a NEW element
+// on every poll — an entrance keyed on element creation would replay down the whole
+// transcript each interval. What enters is decided against the keys the previous render
+// of THIS conversation already drew, and nothing else.
+//   SEEDED, NOT ANIMATED, ON THE WAY IN. The first render that has messages draws the
+// history you opened, and twenty bubbles rising at once is a screen shaking, not news.
+// Only the tail can enter: a page of older turns loaded at the top is new to the set and
+// old to the reader, so a key counts only when it lands after the last one already drawn.
+//   An outbox bubble enters as SENT (it rises from the composer), once — keyed by its outbox
+// entry, so going from sending to queued is not a second arrival; the turn that later
+// replaces it SETTLES from the pending dim instead of entering again, which is the
+// difference between a message that was delivered and one that appeared twice.
+//   A REBUILD MID-ANIMATION CONTINUES IT. Two renders can land milliseconds apart — the
+// one that claims a send and the one the verb's own refresh asks for — and the second
+// builds the turn again with no class, which cuts a 200ms move off at its first frame: the
+// jump this exists to remove. So for the length of the move a rebuilt turn gets its class
+// back with a negative delay (--gf-in) for the time already played, and picks up where the
+// last element left off instead of starting over or snapping to the end.
+const MOVE_MS = 260;
+const drawn = { who: '', keys: new Set(), seeded: false, pend: new Set(), past: false, moving: new Map() };
+function moving(node, cls, at) {
+  try {
+    node.classList.add(...cls);
+    if (at) node.style.setProperty('--gf-in', `-${Date.now() - at}ms`);
+  } catch {}
+  return node;
+}
+function arrived(node, m, key) {
+  const who = `${S.project} ${S.session} ${S.jarvisMode ? 'j' : ''}`;
+  if (drawn.who !== who) Object.assign(drawn, { who, keys: new Set(), seeded: false, pend: new Set(), past: false, moving: new Map() });
+  if (!key) return node;
+  if (drawn.keys.has(key)) {
+    drawn.past = true;
+    const mv = drawn.moving.get(key);
+    if (mv && Date.now() - mv.at < MOVE_MS) return moving(node, mv.cls, mv.at);
+    drawn.moving.delete(key);
+    return node;
+  }
+  drawn.keys.add(key);
+  if (!drawn.seeded || !drawn.past) return node;
+  const settle = !!m && m.role === 'user' && drawn.pend.has(String(m.text || '').trim());
+  const cls = settle ? ['settle'] : key.startsWith('pending|') ? ['enter', 'sent'] : ['enter'];
+  drawn.moving.set(key, { cls, at: Date.now() });
+  return moving(node, cls, 0);
+}
+// Once per chat render, after the last bubble: what this render drew is the history the
+// next one is measured against.
+function arrivedDone() {
+  drawn.seeded = drawn.keys.size > 0;
+  drawn.past = false;
+  // Every outbox bubble on screen, not one: the turn that replaces ANY of them settles.
+  drawn.pend = new Set(outboxRows().map((r) => String(r.text || '').trim()));
+}
+
+// A compaction or a run of tool calls, as one folded card. FOLDED BY DEFAULT and REMEMBERED
+// OPEN: the chat is rebuilt on every 5s poll, so a <details> left to itself snaps shut under
+// the thumb that opened it. Keyed like a message, which is stable across polls and pages.
+const openCards = new Set();
+export function eventCard(m) {
+  const key = msgKey(m);
+  const tools = m.role === 'tools' ? (m.tools || []) : [];
+  const names = [...new Set(tools.map((t) => t.name))];
+  const label = m.role === 'compacted' ? 'conversation compacted'
+    : `${m.text || `${tools.length} tool calls`}${names.length ? ' · ' + names.slice(0, 3).join(', ') + (names.length > 3 ? ', …' : '') : ''}`;
+  const body = m.role === 'compacted'
+    ? (m.detail ? [el('div', { class: 'evt-sum', text: m.detail })] : [el('div', { class: 'evt-sum', text: 'earlier turns were summarised to make room' })])
+    : tools.map((t) => el('div', { class: 'evt-row' }, [
+        el('span', { class: 'evt-name', text: t.name }),
+        t.detail ? el('span', { class: 'evt-detail', text: t.detail }) : null,
+      ]));
+  const d = el('details', { class: `evt ${m.role}`, ontoggle: () => { if (d.open) openCards.add(key); else openCards.delete(key); } }, [
+    el('summary', {}, [
+      el('span', { class: 'evt-ico', text: m.role === 'compacted' ? '⟲' : '⚙', 'aria-hidden': 'true' }),
+      el('span', { class: 'evt-t', text: label }),
+      el('span', { class: 'evt-at', text: G.clockLabel(m.ts) }),
+    ]),
+    el('div', { class: 'evt-body' }, body),
+  ]);
+  if (openCards.has(key)) d.open = true;
+  return d;
+}
 function turn(mine, text, when, pending = false, key = '') {
   const bub = el('div', { class: 'bub ' + (mine ? 'user' : 'agent') + (pending ? ' pending' : '') });
   // AN ASSISTANT'S TURN IS MARKDOWN AND WAS BEING SHOWN AS ITS OWN SOURCE — "the messages
@@ -2143,48 +2727,61 @@ function copyText(t) {
 // something is one motion, and making you switch views to find the box would be the same
 // mistake the sheet was.
 // ── the keyboard, which is the one viewport nothing else reports ──────────
-// THE SOFTWARE KEYBOARD IS NOT PART OF THE DYNAMIC VIEWPORT. On iOS `100dvh` does not
-// shrink when the keyboard opens, so the shell column stayed full height, the keyboard
-// covered its bottom, and Safari's only remaining move was to SCROLL THE PAGE to bring the
-// focused composer into view. Reported in those words: "the scroll happens when I click on
-// the text box to type". And a page that scrolls at all is a page that will also scroll
-// SIDEWAYS the moment anything is marginally too wide, which is why this and the clipping
-// were one report.
-//   visualViewport is the only thing that knows. Its `height` is what is actually visible
-// with the keyboard in place, and `offsetTop` is how far Safari has already panned; both
-// are written into CSS custom properties and the layout follows them, rather than the
-// layout being fixed and the browser panning around it.
+// THE SOFTWARE KEYBOARD IS NOT PART OF THE DYNAMIC VIEWPORT, and in the installed app it
+// is worse than that. Measured on an iOS 26.5 simulator, standalone, from the home-screen
+// icon: focusing the composer took innerHeight AND visualViewport.height from 844 to 431,
+// but the `position: fixed; inset: 0` shell stayed 844 tall — so the document overflowed by
+// the keyboard's height, iOS scrolled it 413 to reveal the box, and the header went to
+// y=-405. Reported as "the whole page scrolls and the status bar draws over the chat".
+//   So while the keyboard is up the shell is laid out to the VISIBLE area: its top is
+// visualViewport.offsetTop and its height is visualViewport.height. Nothing then overflows,
+// there is nothing left for iOS to scroll, and the column — header, list, composer —
+// shrinks into the space above the keyboard the way a chat app's does.
+//   THIS IS THE PATTERN A PREVIOUS VERSION GOT WRONG, and the two things that made it wrong
+// are both absent. It called scrollTo(0,0) on every visualViewport scroll, which fights the
+// user and the browser for the same scrollbar; nothing here scrolls the window, ever. And it
+// left its height in place when the keyboard went, so a value that does not reliably revert
+// kept the shell misaligned; here both properties are REMOVED the moment the keyboard is not
+// detected, and the closed layout is the plain `inset: 0` that was measured correct.
+//   The keyboard is "visible height well below the tallest seen at this width", not
+// "innerHeight minus visual height": in standalone innerHeight shrinks WITH the keyboard, so
+// that difference reads 0 with the keyboard fully up. Keyed by width so a rotation starts
+// over instead of comparing a landscape height against a portrait one.
 //   The bottom safe-area inset goes to 0 while the keyboard is up. It is there for the home
 // indicator, the keyboard covers the home indicator, and stacking one on the other is the
 // "too much space between the text box and the bottom" half of the same report.
+let vvTallest = 0, vvWidth = 0;
 function syncViewport() {
   try {
     const vv = typeof visualViewport !== 'undefined' ? visualViewport : null;
     if (!vv) return;
     const h = Number(vv.height) || 0;
-    const full = Number(innerHeight) || h;
+    const w = Math.round(Number(vv.width) || 0);
+    if (w !== vvWidth) { vvWidth = w; vvTallest = 0; }
+    vvTallest = Math.max(vvTallest, h, Number(innerHeight) || 0);
     // A threshold, not equality: the URL bar moves this by a few pixels all the time and a
     // keyboard takes a third of the screen. 120px is well above the former, well below the
     // latter.
-    const keyboard = full - h > 120;
-    // THE ONLY THING THIS WRITES IS A PADDING. It used to drive the shell's HEIGHT from
-    // vv.height and scrollTo(0,0) away Safari's pan; on a real iPhone that put the composer
-    // at the top of the screen over the status bar with the transcript black below it. The
-    // layout is dvh now and Safari is allowed to pan. An inset that is briefly wrong is a
-    // cosmetic 34px; a height driven by a number that does not reliably revert is a dead
-    // screen.
-    // REMOVED, NOT SET TO EMPTY, and that distinction was costing the home indicator.
-    // `padding-bottom: calc(var(--kb-inset, env(safe-area-inset-bottom)) + 8px)` only
-    // reaches its fallback when --kb-inset is ABSENT. setProperty(name, '') does not
-    // reliably remove a custom property in WebKit — it leaves one whose value substitutes
-    // as nothing or as zero — so the fallback never applied and the composer's padding
-    // resolved to 0 + 8.
-    //   MEASURED on the device: gap8 against sab29. Harmless only while the shell stopped
-    // 53pt short of the bottom; the moment it reaches the real bottom, 8px of padding puts
-    // the composer ON the home indicator. The two findings arrived in one log line and had
-    // to be fixed in one change.
-    if (keyboard) document.documentElement.style.setProperty('--kb-inset', '0px');
-    else          document.documentElement.style.removeProperty('--kb-inset');
+    const keyboard = vvTallest - h > 120;
+    const root = document.documentElement.style;
+    // A list that was showing the newest message keeps showing it as it shrinks — the
+    // keyboard opening must not leave the reader looking at whatever was mid-screen.
+    const list = document.querySelector('#app.shell > .chat');
+    const pinned = !!list && list.scrollHeight - list.clientHeight - list.scrollTop < 4;
+    // REMOVED, NOT SET TO EMPTY. `var(--kb-inset, env(safe-area-inset-bottom))` only
+    // reaches its fallback when the property is ABSENT; setProperty(name, '') does not
+    // reliably remove one in WebKit, and the composer's padding resolved to 0 + 8 — the
+    // composer on the home indicator. The same holds for the two geometry properties.
+    if (keyboard) {
+      root.setProperty('--kb-inset', '0px');
+      root.setProperty('--app-top', Math.round(Number(vv.offsetTop) || 0) + 'px');
+      root.setProperty('--app-h', Math.round(h) + 'px');
+    } else {
+      root.removeProperty('--kb-inset');
+      root.removeProperty('--app-top');
+      root.removeProperty('--app-h');
+    }
+    if (pinned) list.scrollTop = list.scrollHeight;
   } catch {}
 }
 
@@ -2214,7 +2811,7 @@ function growComposer(box) {
 // had no effect above 120px and the box stopped growing for a reason not written anywhere.
 const COMPOSER_MAX_PX = 120;
 function composer(card, opts = {}) {
-  const box = el('textarea', { rows: '1', placeholder: 'message this session…',
+  const box = el('textarea', { rows: '1', placeholder: 'message…',
                                autocapitalize: 'sentences', spellcheck: 'false' });
   box.value = S.draft || '';
   composerNode = box;      // pollPaused() compares document.activeElement against this
@@ -2237,8 +2834,16 @@ function composer(card, opts = {}) {
   // trigger — which is also the only half of this a desktop engine can be made to prove.
   box.addEventListener('input', () => {
     if (!isLive(box)) return;
+    const prev = S.draft || '';
     S.draft = box.value; growComposer(box);
+    const caret = Number.isInteger(box.selectionStart) ? box.selectionStart : null;
+    if (caret != null) S.caret = caret;
+    // Every photo's place follows the edit (anchorAfterEdit).
+    for (const p of photosFor()) p.at = anchorAfterEdit(p.at, prev, S.draft, caret);
   });
+  // Where the caret was when the box let go — the camera tap is what usually takes it, and
+  // that is the place the photo keeps (openPicker).
+  box.addEventListener('blur', () => { if (isLive(box) && Number.isInteger(box.selectionStart)) S.caret = box.selectionStart; });
   // ...AND ON EVERY RENDER, not only on a keystroke. render() rebuilds this element from
   // scratch on the 5s poll, on a toast, on a view switch — with rows="1" and the draft
   // poured back in — so a two-line message came back as one line and a clipped sliver of
@@ -2254,19 +2859,15 @@ function composer(card, opts = {}) {
   // The picker is a hidden <input type=file>; the visible control is a button, so it can
   // be styled and sized like the one beside it. accept="image/*" is what makes iOS offer
   // the camera and the library rather than a file browser.
-  const pick = el('input', { type: 'file', accept: 'image/*', class: 'pick' });
-  pick.addEventListener('change', () => {
-    const f = pick.files && pick.files[0];
-    pick.value = '';                       // so picking the SAME photo twice still fires
-    attachPhoto(f, card);
-  });
-  const cam = btn('', () => pick.click(), 'cam' + (S.attaching ? ' busy' : ''));
+  // It is NOT built here any more — see pickInput() for why the input outlives the composer.
+  const uploading = photosFor().some((p) => p.state === 'up');
+  const cam = btn('', () => openPicker(), 'cam' + (uploading ? ' busy' : ''));
   cam.textContent = '';
   cam.appendChild(cameraIcon());
-  cam.setAttribute('aria-label', S.attaching ? 'sending a photo' : 'attach a photo');
-  cam.setAttribute('title', 'attach a photo');
-  if (S.attaching) cam.setAttribute('disabled', 'disabled');
-  const kids = [pick, cam, box];
+  cam.setAttribute('aria-label', 'attach photos');
+  cam.setAttribute('title', `attach photos (up to ${api.ATTACH_PER_MESSAGE})`);
+  photoStripNode = el('div', { class: 'photos' }, photoTiles());
+  const kids = [photoStripNode, cam, box];
   // THE COMPOSER ALSO TALKS — Jarvis's and every session's, the same button in the same
   // place. One more control, the same size as the two beside it, and it is the whole of
   // conversation mode's UI besides the band above: tap once and the conversation runs itself
@@ -2283,13 +2884,22 @@ function composer(card, opts = {}) {
   return el('div', { class: 'composer' }, kids);
 }
 async function sendDraft() {
-  const text = String(S.draft || '').trim();
+  const mine = photosFor();
+  const waiting = mine.filter((p) => p.state === 'up').length;
+  // toast() only sets state, so each refusal below also asks for the draw that shows it.
+  if (waiting) { toast(`${waiting} photo${waiting > 1 ? 's are' : ' is'} still uploading — send again when ${waiting > 1 ? 'they are' : 'it is'} ready`); renderUnlessTyping(); return; }
+  const failed = mine.filter((p) => p.state === 'bad').length;
+  if (failed) { toast(`${failed} photo${failed > 1 ? 's' : ''} did not upload — remove ${failed > 1 ? 'them' : 'it'} (×) or pick again`, 'bad'); renderUnlessTyping(); return; }
+  const text = messageWithPhotos(S.draft, mine);
   if (!text) return;
-  // Optimistic, and reconciled against the transcript rather than trusted: reconcilePending
+  // The photos leave with the message, and come back if the send does not go.
+  S.photos = S.photos.filter((p) => !mine.includes(p));
+  const typed = S.draft;
+  // Optimistic, and reconciled against the transcript rather than trusted: reconcileOutbox
   // clears this when the real message comes back, and gives up on it after a while so a
   // failed send cannot sit there looking sent forever.
   // ...AND HOW MANY TIMES THE TRANSCRIPT ALREADY SAID IT. The only id a sent prompt has is
-  // its own text (see reconcilePending), and matching on text alone means the SECOND time
+  // its own text (see reconcileOutbox), and matching on text alone means the SECOND time
   // you send the same thing — "run the suite", "check again", the two words this app is
   // used for most — the FIRST one already sitting in the transcript answers for it. The
   // bubble stops saying `sending…` before the message has gone anywhere, which is the same
@@ -2297,37 +2907,227 @@ async function sendDraft() {
   //   A count, not a timestamp. The obvious fix is "only match a message newer than this
   // one", but `at` is the PHONE's clock and `m.ts` is the Mac's, and the two are as close
   // as whatever synced them last. Counting occurrences needs no clock at all.
-  S.pending = { text, at: Math.floor(Date.now() / 1000), seen: countSaid(text) };
-  S.draft = '';
+  const item = outboxAdd(text, S.project, S.session, { typed, photos: mine });
+  S.draft = ''; S.caret = null;
   scrollMem.delete('chat');          // a message you just sent belongs on screen
   render();
-  const r = await doVerb('fleet_send', { project: S.project, session: S.session, prompt: text }, { quiet: true });
-  if (!r) { S.pending = null; render(); }        // doVerb already said why
+  const r = await doVerb('fleet_send', { project: item.project, session: item.session, prompt: text }, { quiet: true });
+  if (r) { outboxAcked(item, r); renderUnlessTyping(); return; }
+  outboxDrop(item);                              // doVerb already said why
+  // A SEND THAT DID NOT ARRIVE GIVES EVERYTHING BACK — the words as well as the photos. The
+  // daemon answers a send fleet-send could not deliver with ok:false, so this is the path
+  // that runs when the mod refuses a prompt.
+  if (mine.length) S.photos = [...mine, ...S.photos];
+  if (!S.draft) S.draft = typed;
+  render();
 }
-// The pending bubble goes when the transcript has it — matched on the text, because the
-// only id a sent prompt has is what it said. PENDING_TTL is the give-up: a send that
-// errored has already cleared this, but one that vanished for any other reason must not
-// leave a permanent "sending…" on a screen whose whole purpose is being accurate.
+// ── the outbox ────────────────────────────────────────────────────────────
+// EVERY MESSAGE SENT FROM HERE THAT THE TRANSCRIPT HAS NOT SHOWN YET, in the order sent.
+// It used to be ONE slot, S.pending, and a second send while the first said `sending…`
+// replaced it — so a message the fleet had queued behind a long turn vanished from the
+// chat and the owner lost sight of it, while it was still going to run. fleet-send keeps a
+// real queue (bin/fleet-send, "the queue"), so this keeps one entry per send and says which
+// of three things each one is:
+//   sending  the POST is in flight; nothing is known yet
+//   queued   fleet-send wrote it to the session's queue: it runs as its own turn after the
+//            one in progress, and until then it can be TAKEN BACK and edited
+//   typed    it has been typed into the session — delivered at once, or drained from the
+//            queue since. Not editable any more, and said so on a tap
+// An entry leaves when the transcript shows it (see countSaid for why that is a count).
+//   KEYED BY PROJECT AND SESSION, and kept across screens. Leaving the chat used to clear
+// the slot, which is the other way the owner lost sight of a queued message; coming back
+// now finds every entry where it was, and /api/session's `queue` re-supplies the queued
+// ones even after a reload, since those live on the Mac and not here.
+let outSeq = 0, sessSeq = 0;
+const outHere = (o) => o.project === S.project && o.session === S.session;
+function outboxAdd(text, project, session, extra = {}) {
+  const item = { id: ++outSeq, project, session, text, at: Math.floor(Date.now() / 1000),
+                 seen: countSaid(text), state: 'sending', ackSeq: 0, typedAt: 0, ...extra };
+  S.outbox.push(item);
+  return item;
+}
+// `queued` comes from fleet-serve, which reads fleet-send's own sentence for it. ackSeq is
+// the newest transcript read STARTED so far: only a queue snapshot from a read started
+// after this one can say the entry has left the queue, because an older one never had it.
+function outboxAcked(item, r) {
+  if (!S.outbox.includes(item)) return;
+  if (r && r.queued) item.state = 'queued';
+  else { item.state = 'typed'; item.typedAt = Math.floor(Date.now() / 1000); }
+  item.ackSeq = sessSeq;
+}
+function outboxDrop(item) { S.outbox = S.outbox.filter((o) => o !== item); }
+
+// What the chat draws after the transcript, in the order things will happen: what has
+// been typed in already, then the queue in the order it will drain, then what is still in
+// the air. The queue is the MAC'S list when there is one — so a message queued from
+// another device, or before a reload, is on screen too — and each local entry claims the
+// queue row with its text, so one message is never drawn twice.
+export function outboxRows() {
+  const mine = S.outbox.filter(outHere);
+  const q = S.sess && Array.isArray(S.sess.queue) ? S.sess.queue : null;
+  const rows = mine.filter((o) => o.state === 'typed').map((o) => ({ text: o.text, state: 'typed', item: o }));
+  const waiting = mine.filter((o) => o.state === 'queued');
+  const claimed = new Set();
+  for (const e of q || []) {
+    const o = waiting.find((w) => !claimed.has(w) && w.text.trim() === String(e.text).trim());
+    if (o) claimed.add(o);
+    rows.push({ text: o ? o.text : String(e.text), state: 'queued', item: o || null });
+  }
+  for (const o of waiting) if (!claimed.has(o)) rows.push({ text: o.text, state: 'queued', item: o });
+  for (const o of mine) if (o.state === 'sending') rows.push({ text: o.text, state: 'sending', item: o });
+  return rows;
+}
+
+// The bubble goes when the transcript has it — matched on the text, because the only id a
+// sent prompt has is what it said. PENDING_TTL is the give-up for one that was TYPED IN and
+// never showed up: a send that errored has already left, but one that vanished for any
+// other reason must not leave a permanent bubble on a screen whose whole purpose is being
+// accurate. A queued entry has no give-up — it can wait behind an hour-long turn, and the
+// queue itself says when it has gone.
 const PENDING_TTL = 180;
-// How many of the transcript's user turns say exactly this. The pending bubble is cleared
-// by the count GOING UP, not by the text being present — see sendDraft for why.
+// How many of the transcript's user turns say exactly this. An entry is cleared by the
+// count GOING UP, not by the text being present — see sendDraft for why.
 function countSaid(text) {
   const want = String(text || '').trim();
   const ms = (S.sess && S.sess.messages) || [];
   return ms.filter(m => m.role === 'user' && String(m.text || '').trim() === want).length;
 }
-function reconcilePending() {
-  if (!S.pending) return;
-  const said = countSaid(S.pending.text);
-  // The baseline FOLLOWS THE TRANSCRIPT DOWN. /api/session serves a page, and a long
-  // conversation rolls — so an identical turn that was in the transcript when the count was
-  // taken can be gone from it by the time the new one lands, and an arrival would then read
-  // as no change at all and sit on `sending…` until the 180s give-up. Counting relative to
-  // what is on screen now is what makes "one more of these appeared" the question, whichever
-  // direction the window moved.
-  if (said < (S.pending.seen || 0)) S.pending.seen = said;
-  if (said > (S.pending.seen || 0)) { S.pending = null; return; }
-  if (Math.floor(Date.now() / 1000) - S.pending.at > PENDING_TTL) S.pending = null;
+function reconcileOutbox() {
+  const mine = S.outbox.filter(outHere);
+  if (!mine.length) return;
+  const now = Math.floor(Date.now() / 1000);
+  const gone = new Set();
+  // SAME TEXT, IN ORDER. Two "run the suite"s sent back to back both start from the same
+  // count, so the first arrival is the first one's and only a second arrival is the
+  // second's — `claimedSoFar` is what keeps one echo from clearing both.
+  const byText = new Map();
+  for (const o of mine) {
+    const k = o.text.trim();
+    if (!byText.has(k)) byText.set(k, []);
+    byText.get(k).push(o);
+  }
+  for (const [k, list] of byText) {
+    const said = countSaid(k);
+    let claimedSoFar = 0;
+    for (const o of list) {
+      // The baseline FOLLOWS THE TRANSCRIPT DOWN. /api/session serves a page, and a long
+      // conversation rolls — so an identical turn that was in the transcript when the count
+      // was taken can be gone from it by the time the new one lands, and an arrival would
+      // then read as no change at all. Counting relative to what is on screen now is what
+      // makes "one more of these appeared" the question, whichever way the window moved.
+      if (said < o.seen) o.seen = said;
+      if (said >= o.seen + claimedSoFar + 1) { gone.add(o); claimedSoFar++; }
+      else break;
+    }
+  }
+  // OUT OF THE QUEUE AND NOT YET IN THE TRANSCRIPT is "typed": the drain has delivered it.
+  // Only a snapshot from a read that started after the ack can say so (see outboxAcked),
+  // and a daemon too old to send `queue` says nothing — the entry then waits for the
+  // transcript, which is what it did before there was a queue to read.
+  const q = S.sess && Array.isArray(S.sess.queue) && (S.sess.seq || 0) > 0 ? S.sess.queue : null;
+  if (q) {
+    const left = q.map((e) => String(e.text).trim());
+    for (const o of mine) {
+      if (gone.has(o) || o.state !== 'queued' || S.sess.seq <= o.ackSeq) continue;
+      const i = left.indexOf(o.text.trim());
+      if (i >= 0) { left.splice(i, 1); continue; }
+      o.state = 'typed'; o.typedAt = now;
+    }
+  }
+  for (const o of mine) if (o.state === 'typed' && now - o.typedAt > PENDING_TTL) gone.add(o);
+  if (gone.size) S.outbox = S.outbox.filter((o) => !gone.has(o));
+}
+
+// One outbox row as a bubble. A tap is the edit: a queued one comes back into the composer,
+// anything else says why it cannot.
+function outboxTurn(row) {
+  const label = row.state === 'queued' ? 'queued · tap to edit'
+              : row.state === 'typed' ? 'delivered' : 'sending…';
+  const t = turn(true, row.text, label, true);
+  t.classList.add(row.state);
+  const bub = t.firstChild;
+  if (bub) {
+    bub.setAttribute('role', 'button');
+    bub.setAttribute('aria-label', `${label}: ${row.text.slice(0, 80)}`);
+    bub.addEventListener('click', () => editOutbox(row, t));
+  }
+  return t;
+}
+
+// PULL A QUEUED MESSAGE BACK INTO THE COMPOSER. It is taken out of fleet-send's queue first
+// (fleet_unqueue), and only then put in the box: the other order would leave the same
+// message both in the box and on its way to the session, and the edited copy would run as
+// a second turn. Already delivered is the one answer that cannot be fixed from here, so it
+// is said in words rather than as an error.
+//   What comes back is what was TYPED, with its photos back on the strip — the paths the
+// send appended are the photos, not part of what the owner wrote. A queued message this
+// phone did not send (another device, or before a reload) comes back as its whole text.
+//   THE BOX IS FOCUSED IN THE TAP, BEFORE THE NETWORK. WebKit raises the keyboard for a
+// focus() only inside the gesture that asked for it, and an `await` ends the gesture — so a
+// focus after fleet_unqueue answers would give the caret and no keyboard. Focused first,
+// the keyboard is already up when the text lands, and the text is patched into THAT box
+// rather than re-rendered: a render replaces the focused node and lowers the keyboard
+// (typingNow), which would undo the one thing the early focus was for.
+export async function editOutbox(row, node) {
+  const who = S.session;
+  if (row.state === 'sending') { toast('still sending — tap it again once it says queued'); render(); return; }
+  if (row.state === 'typed') {
+    toast(`already typed into ${who} — it can no longer be edited`, 'bad'); render(); return;
+  }
+  const project = S.project, session = S.session;
+  focusComposerAt();
+  try {
+    await api.verb('fleet_unqueue', { project, session, prompt: row.text });
+  } catch (e) {
+    if (e instanceof api.AuthError) { lock(); return; }
+    if (e && e.body && e.body.delivered) {
+      if (row.item) { row.item.state = 'typed'; row.item.typedAt = Math.floor(Date.now() / 1000); }
+      toast(`already typed into ${who} — it can no longer be edited`, 'bad');
+    } else toast(String((e && e.message) || e), 'bad');
+    render();
+    return;
+  }
+  if (row.item) outboxDrop(row.item);
+  if (S.sess && Array.isArray(S.sess.queue)) {
+    const i = S.sess.queue.findIndex((e) => String(e.text).trim() === row.text.trim());
+    if (i >= 0) S.sess.queue = [...S.sess.queue.slice(0, i), ...S.sess.queue.slice(i + 1)];
+  }
+  const it = row.item;
+  const back = it && it.typed !== undefined ? it.typed : row.text;
+  const photos = (it && it.photos) || [];
+  if (S.project !== project || S.session !== session) {           // they moved on meanwhile
+    if (photos.length) adoptPhotos(photos, photoKey(project, session));
+    return;
+  }
+  if (photos.length) adoptPhotos(photos, photoKey(), S.draft ? back.length + 1 : 0);
+  S.draft = S.draft ? `${back}\n${S.draft}` : back;
+  const box = composerNode;
+  if (isLive(box) && document.activeElement === box) {
+    box.value = S.draft;
+    growComposer(box);
+    focusComposerAt();
+    if (node && node.remove) node.remove();
+    paintPhotos();
+  } else {
+    render();
+    focusComposerAt();
+  }
+}
+
+// FOCUS THE BOX WITH THE CARET WHERE IT BELONGS — where it was when a photo was added, or at the end of
+// a message pulled back to edit — so whatever was just put in it can be carried on from. Whether the KEYBOARD comes up is iOS's decision, not this function's: WebKit raises
+// it for a focus() inside a user gesture and not otherwise. editOutbox calls this inside the
+// tap, so it does; after the photo picker closes, `change` is not a gesture, so the box
+// gets focus and the caret and the keyboard waits for a tap on the box. No call a page can
+// make changes that.
+function focusComposerAt(pos = null) {
+  const box = composerNode;
+  if (!isLive(box)) return;
+  try { box.focus(); } catch {}
+  const len = String(box.value || '').length;
+  const n = Number.isInteger(pos) ? Math.max(0, Math.min(pos, len)) : len;
+  try { if (typeof box.setSelectionRange === 'function') box.setSelectionRange(n, n); } catch {}
+  S.caret = n;
 }
 
 // ── everything you can DO to a session, in one sheet ────────────────────────
@@ -2374,6 +3174,12 @@ function sheetActions(name = S.session) {
     // fleet_answer — keystrokes into a dialog — not a prompt, which would queue behind the
     // block instead of clearing it. It is the first row for that reason.
     btn('answer keys', go(() => sheetAnswer(name))),
+    // THE ESCAPE THE DESK PRESSES, and on the lead too. The only way to stop a runaway turn
+    // from here was `pause`, which a lead refuses and which a worker answers by going OFF
+    // until somebody resumes it — so the owner watching the lead go the wrong way had no
+    // button at all. This ends the turn and nothing else: not parked, not stopped, still
+    // taking work (fleet-pause --interrupt). A parked session has no turn to end.
+    parked ? null : btn('esc interrupt turn', go(() => interruptSession(name))),
     lead && !parked ? null
       : btn(parked ? 'P resume' : 'p pause', go(() => (parked ? resumeSession(name) : pauseSession(name)))),
     btn('s sched', go(() => sheetSchedule(name))),
@@ -2387,7 +3193,7 @@ function sheetActions(name = S.session) {
   ].filter(Boolean);
   openSheet(sheet('actions', name, [
     el('div', { class: 'rows' }, rows.map(b => el('div', { class: 'srow' }, [b]))),
-    lead ? el('p', { text: "the lead cannot be stopped, reclaimed, renamed or paused — every project needs one, and its checkout is the repo itself" }) : null,
+    lead ? el('p', { text: "the lead cannot be stopped, reclaimed, renamed or paused — every project needs one, and its checkout is the repo itself. Interrupting its turn is fine: it stays on" }) : null,
     el('div', { class: 'row' }, [btn('esc back', closeSheet)]),
   ].filter(Boolean)), false);
 }
@@ -2633,7 +3439,7 @@ function paneView() {
     // seconds would bury the app in its own error messages.
     box.append(el('div', { class: 'hint', text: S.paneErr }));
   } else if (!S.pane) {
-    box.append(el('div', { class: 'hint', text: 'capturing the pane…' }));
+    box.append(skeletonPane());
   } else if (S.pane.note) {
     box.append(el('div', { class: 'hint', text: S.pane.note }));
   } else {
@@ -2919,10 +3725,10 @@ let swReloadPending = false;
 export function reloadAction(pending, typing, authed) {
   if (!pending) return 'none';
   if (typing) return 'wait';               // never mid-sentence: a reload eats S.draft
-  // NEVER UNDER A LIVE SESSION, and this is the whole fix. The token is in memory by
-  // design, so a reload ENDS the session — do it while somebody is holding one and they
-  // land on the lock screen they just cleared, and the passkey they just spent bought
-  // them one second of app.
+  // NEVER UNDER A LIVE SESSION. This was written when a reload ENDED the session — the
+  // owner landed on the lock screen they had just cleared. The token now survives a reload
+  // of the same page (api.js, sessionStorage), so that is no longer the cost; what is left
+  // is the screen they were on and its scroll, which is still no reason to swap mid-use.
   //   It used to be guarded on pollPaused(), which counts S.locked as paused. That
   // deferred the swap while locked and spent it the instant the app unlocked — waiting
   // for precisely the transition that costs a Face ID. Locked is the FREE moment: there is
@@ -2991,9 +3797,8 @@ function insideComposer(n) {
   return false;
 }
 
-// The live composer <textarea>. Still kept, because attachPhoto() has to put a path into
-// the box you are looking at without rebuilding it — but nothing DECIDES anything from it
-// any more; the two guards above ask the element instead.
+// The live composer <textarea>. Still kept and still cleared by render(), but nothing
+// DECIDES anything from it any more; the two guards above ask the element instead.
 let composerNode = null;
 
 const PANE_POLL_MS = 2000, PANE_POLL_HISTORY_MS = 4000;
@@ -3089,8 +3894,8 @@ function popTo() {
   if (S.sheet) { closeSheet(); return; }
   if (S.confirm) { cancel(); return; }
   // Jarvis was opened from Projects and sits one level under it, whatever its session is.
-  if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; stopSpeaking(); }
-  else if (S.screen === 'session') { talkStop(''); S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; S.pending = null; stopSpeaking(); }
+  if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
+  else if (S.screen === 'session') { talkStop(''); S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
   // A SUB-GRID IS ONE LEVEL DOWN, so back from it is the top grid, not the projects list —
   // the same ` the desk uses to go up.
   else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; }
@@ -3142,6 +3947,22 @@ function skeletonCards(n) {
     ]));
   }
   return out;
+}
+
+// The same wait, in the shape of a conversation: bubbles on the side each speaker's will
+// land, built from the real .bub classes so the radii and surfaces are the bubbles' own and
+// the bars are the cards' bars. Only ever drawn while there is NO payload yet — the poll
+// replaces S.sess with the next answer and never clears it, so a redraw every five seconds
+// finds a payload and cannot bring this back over the messages.
+const SKEL_CHAT = [['agent', 'b1', 3], ['user', 'b2', 1], ['agent', 'b3', 2], ['user', 'b4', 1], ['agent', 'b5', 2]];
+function skeletonChat() {
+  return SKEL_CHAT.map(([who, w, n]) => el('div', { class: `bub ${who} skel ${w}`, 'aria-hidden': 'true' },
+    Array.from({ length: n }, (_, i) => el('div', { class: `skel-bar ${i === n - 1 && n > 1 ? 'w2' : 'full'}` }))));
+}
+// ...and of a terminal: lines of uneven length where the capture will be drawn.
+function skeletonPane() {
+  return el('div', { class: 'pane-skel skel', 'aria-hidden': 'true' },
+    ['w2', 'w3', 'full', 'w1', 'w2', 'w3', 'w1', 'w2'].map(w => el('div', { class: `skel-bar ${w}` })));
 }
 
 function cardEl(m, h, idx) {
@@ -3212,7 +4033,9 @@ function cardEl(m, h, idx) {
   // reorders, and a vertical drag anywhere else on the card still scrolls the list. That
   // one-line grip is the reason reorder does not fight the page scroll, so it did not get
   // wider just because the card got a nicer surface.
-  top.classList.add('t');
+  // ONLY A CARD THAT REORDERS HAS A GRIP. `.t` is what turns the pan off (app.css), so a
+  // card without a reorder handler — a project — keeps scrolling from its title too.
+  if (h.reorder) top.classList.add('t');
   if (idx >= 0) d.dataset.idx = String(idx);
   wire(d, h, idx);
   return d;
@@ -3287,7 +4110,9 @@ function wire(node, h, idx) {
       if (dx < 0 && h.swipeLeft) h.swipeLeft(); else if (dx > 0 && h.swipeRight) h.swipeRight();
       return;
     }
-    if (Math.hypot(dx, dy) <= MOVE_SLOP && Date.now() - t0 < LONG_PRESS && h.tap) { h.tap(); return; }
+    // `!travelled` for the reason the grip branch above gives: a finger that scrolled and
+    // came back ends where it started, and a scroll must never open anything.
+    if (!travelled && Math.hypot(dx, dy) <= MOVE_SLOP && Date.now() - t0 < LONG_PRESS && h.tap) { h.tap(); return; }
     // A touch that only moved the selection (a short scroll, a cancelled gesture) still
     // has to redraw the footer: `x` means "kill" over a session and "remove wt" over a
     // free worktree, and the TUI names which one it means RIGHT NOW rather than making
@@ -3398,6 +4223,10 @@ function leadGuard(name, what) {
 function pauseSession(name) {
   if (name && !leadGuard(name, 'paused')) doVerb('fleet_pause', { project: S.project, session: name });
 }
+// Not guarded for the lead, unlike pause: an interrupt never turns anything off.
+function interruptSession(name) {
+  if (name) doVerb('fleet_interrupt', { project: S.project, session: name });
+}
 function resumeSession(name) {
   if (name) doVerb('fleet_resume', { project: S.project, session: name });
 }
@@ -3485,7 +4314,15 @@ async function doVerb(tool, args, opts = {}) {
   try {
     const assertion = api.DESTRUCTIVE.has(tool) ? await assertFor(`${tool} ${args.session || args.name || ''}`.trim()) : null;
     const r = await api.verb(tool, args, assertion);
-    if (!opts.quiet) toast(r.text || `${tool} ok`, 'good');
+    // HELD, NOT SENT. fleet-send queues a prompt to a session that is waiting on a prompt
+    // of its own, and it will not run until someone answers that — so "sent" (or a quiet
+    // nothing) would be the app saying the opposite of what is happening. Said even for a
+    // quiet send, with the way to unblock it one tap away.
+    if (r && r.queued === 'question' && args.session) {
+      const who = args.session, proj = args.project || S.project;
+      toast(`queued behind a question — ${who} is waiting on an answer in its pane; this runs once it has one`, '',
+            { label: 'answer it', fn: () => sheetAnswer(who, proj) });
+    } else if (!opts.quiet) toast(r.text || `${tool} ok`, 'good');
     await refresh();
     return r;
   } catch (e) {
@@ -3544,10 +4381,16 @@ function lockScreen() {
         catch (e) { toast(String(e.message || e), 'bad'); }
       }, 'go'));
     } else if (pk.available()) {
-      row.append(btn('unlock with Face ID', async () => {
-        try { await pk.open(); S.locked = false; render(); refresh(); }
-        catch (e) { toast(String(e.message || e), 'bad'); }
-      }, 'go'));
+      const going = pk.unlocking();
+      const b = btn(going ? 'unlocking…' : 'unlock with Face ID', unlockTap, 'go');
+      if (going) b.setAttribute('disabled', 'disabled');
+      row.append(b);
+      // The challenge the tap will sign, fetched NOW so the tap has nothing to wait for
+      // (passkey.js open()). Once per failure, not once per render: a failed fetch is shown
+      // below and the next tap asks again.
+      if (!pk.prepared() && !pk.preparing() && !pk.prepareError()) {
+        pk.prepare().then(() => render(), (e) => { S.unlockErr = pk.describe(e); render(); });
+      }
     }
     if (pk.bypassAllowed()) {
       row.append(btn('continue without a passkey (fixtures)', () => { pk.bypass(); S.locked = false; render(); refresh(); }));
@@ -3565,8 +4408,42 @@ function lockScreen() {
   }
   row.append(btn('settings', () => sheetSettings()));
   box.append(row);
+  // WHAT WENT WRONG, ON THE SCREEN, UNTIL THE NEXT TAP. The failure used to go to toast(),
+  // which sets state and draws nothing until something else renders — and on the lock
+  // screen nothing else does. So a refused ceremony looked exactly like a dead button.
+  if (S.unlockErr) box.append(el('p', { class: 'err', role: 'alert', text: S.unlockErr }));
   if (S.toast) box.append(el('div', { class: 'toast ' + S.toast.kind, text: S.toast.text }));
   return box;
+}
+
+// SYNCHRONOUS ON PURPOSE. pk.open() has to reach navigator.credentials.get() inside this
+// tap, so nothing here may await before calling it — not even a render. A tap while a
+// ceremony runs gets the running one back and changes nothing.
+function unlockTap() {
+  if (pk.unlocking()) return;
+  S.unlockErr = '';
+  const p = pk.open();
+  render();
+  p.then(unlocked, (e) => { S.unlockErr = pk.describe(e); render(); });
+}
+function unlocked() {
+  pk.release();
+  S.unlockErr = '';
+  if (!S.locked) return;
+  S.locked = false; render(); refresh();
+}
+// Whether the last hide was the Face ID sheet's (see the visibilitychange listener).
+let hidByCeremony = false;
+// The one automatic attempt an open or a resume gets (passkey.js autoUnlock: armed by
+// pk.arm(), spent by trying). A refusal is silent — WebKit wanting a tap is not an error,
+// and the button below is the answer to it.
+function tryAutoUnlock() {
+  if (!S.locked || document.hidden) return;
+  pk.autoUnlock().then((r) => {
+    if (r === 'ok') return unlocked();
+    if (r && typeof r === 'object') S.unlockErr = pk.describe(r);
+    if (S.locked) render();
+  }).catch(() => {});
 }
 
 // ── sheets (the TUI's forms) ──────────────────────────────────────────────
@@ -3711,16 +4588,17 @@ function sheetSend(name) {
 // is about to answer (kind, tool, command, options), and sends that prompt's fingerprint.
 // The daemon re-captures just before the keys go and refuses anything else as "the prompt
 // changed", at which point this re-reads the pane and draws what is really there.
-async function sheetAnswer(name) {
+async function sheetAnswer(name, project = S.project) {
   let prompt = null;
-  try { prompt = (await api.getPane(S.project, name)).prompt || null; }
+  try { prompt = (await api.getPane(project, name)).prompt || null; }
   catch (e) { if (e instanceof api.AuthError) { lock('pane'); return; } toast(String(e.message || e), 'bad'); return; }
+  if (prompt && prompt.kind === 'question') { sheetQuestion(name, project, prompt); return; }
   const t = input('', { placeholder: 'e.g. 2   or   yes' });
   const noEnter = el('input', { type: 'checkbox' });
   const send = async (text) => {
     if (!text) { toast('fleet_answer refuses an empty text', 'bad'); return; }
     closeSheet();
-    const r = await doVerb('fleet_answer', { project: S.project, session: name, text, no_enter: noEnter.checked,
+    const r = await doVerb('fleet_answer', { project, session: name, text, no_enter: noEnter.checked,
                                               expect: prompt ? prompt.fingerprint : '' });
     // Refused or not, the pane is read again now: after a refusal it shows what replaced the
     // prompt, and after an answer it shows what the answer did.
@@ -3745,6 +4623,90 @@ async function sheetAnswer(name) {
     el('label', { class: 'field' }, [noEnter, document.createTextNode(' send without pressing Enter')]),
     el('div', { class: 'row' }, [btn('answer', () => send(t.value), 'go'), btn('esc back', closeSheet)]),
   ].filter(Boolean)));
+}
+
+// A QUESTION PICKER IS ANSWERED ONE TAB AT A TIME, and the sheet follows it. claude's
+// AskUserQuestion draws one tab per question and a Submit tab, and a digit there selects AND
+// moves on (lib/permission-dialog.mjs has the measurements) — so each tap sends one digit,
+// never an Enter, and then the pane is read again and the sheet redrawn for whatever it
+// shows now: the next question, the Submit step with the answers to review, or nothing,
+// which means the session has its answers. Every send carries the fingerprint of the step
+// it answers, so a tap on a step that has gone is refused rather than landing on the next.
+//   "Type something" is two steps on the pane and one here: its digit makes the row an
+// input (a different prompt, by fingerprint), and only once the pane says so does the text
+// go, with the Enter that submits it.
+function sheetQuestion(name, project, prompt, note = '') {
+  const tabs = prompt.tabs || [];
+  const cur = prompt.tab != null ? tabs[prompt.tab] : null;
+  const where = prompt.submit ? 'review and submit'
+    : prompt.tabCount > 1 ? `question ${prompt.tab != null ? prompt.tab + 1 : '?'} of ${prompt.tabCount}${cur && !cur.submit ? ' · ' + cur.label : ''}`
+    : `question${cur ? ' · ' + cur.label : ''}`;
+  let busy = false;
+  const press = async (text, noEnter, expect) => {
+    try { return await api.verb('fleet_answer', { project, session: name, text, no_enter: noEnter, expect }); }
+    catch (e) { if (e instanceof api.AuthError) { closeSheet(); lock(); return null; } toast(String(e.message || e), 'bad'); return null; }
+  };
+  const reread = async (was) => {
+    // The pane redraws a beat after the key; a read that still shows the step just answered
+    // is read again once rather than drawn as if nothing had happened.
+    for (let i = 0; i < 3; i++) {
+      let p = null;
+      try { p = (await api.getPane(project, name)).prompt || null; } catch {}
+      if (!p || p.fingerprint !== was) return p;
+      await new Promise(r => setTimeout(r, 400));
+    }
+    return prompt;
+  };
+  const after = async (p, said) => {
+    if (p && p.kind === 'question') { sheetQuestion(name, project, p, said); return; }
+    closeSheet();
+    toast(p ? `answered — ${name} now shows another prompt` : `answered — ${name} has its answers`, 'good',
+          p ? { label: 'answer it', fn: () => sheetAnswer(name, project) } : null);
+    await refresh();
+    if (S.screen === 'session' && S.session === name) { S.pane = null; await readPane(); render(); }
+  };
+  const choose = async (o) => {
+    if (busy) return; busy = true;
+    const r = await press(o.n, true, prompt.fingerprint);
+    // Refused (the prompt changed) or not, what the pane shows now is what to draw.
+    const p = await reread(prompt.fingerprint);
+    await after(p, r ? `sent ${o.n}. ${o.label}` : 'that was not sent — this is what the pane shows now');
+  };
+  const freeBox = input('', { placeholder: 'your answer' });
+  const freeOpt = (prompt.options || []).find(o => o.free);
+  const sendFree = async () => {
+    const text = (freeBox.value || '').trim();
+    if (!text) { toast('type an answer first', 'bad'); return; }
+    if (busy || !freeOpt) return; busy = true;
+    let fp = prompt.fingerprint;
+    if (!prompt.typing) {
+      if (!(await press(freeOpt.n, true, fp))) { await after(await reread(fp), 'that was not sent — this is what the pane shows now'); return; }
+      const p = await reread(fp);
+      if (!p || p.kind !== 'question' || !p.typing) { await after(p, `could not open "${freeOpt.label}" for typing — nothing was typed`); return; }
+      fp = p.fingerprint;
+    }
+    const r = await press(text, false, fp);
+    await after(await reread(fp), r ? `sent "${text}"` : 'that was not sent — this is what the pane shows now');
+  };
+  freeBox.addEventListener('keydown', e => { if (e.key === 'Enter') sendFree(); });
+  const rows = [];
+  for (const o of (prompt.options || [])) {
+    if (o.free) continue;
+    const b = btn(`${o.n}. ${o.label}${o.chosen ? ' ✔' : ''}`, () => choose(o), o.chat ? '' : 'go');
+    rows.push(el('div', { class: 'srow q' }, [b,
+      o.description ? el('span', { class: 'd', text: o.description }) : null,
+      o.chat ? el('span', { class: 'd', text: 'declines these questions and goes back to the chat' }) : null].filter(Boolean)));
+  }
+  openSheet(sheet('answer the question', `→ ${name} · ${where}`, [
+    note ? el('p', { class: 'warn', text: note }) : null,
+    prompt.submit && (prompt.review || []).length
+      ? el('ul', { class: 'review' }, prompt.review.map(r => el('li', {}, [el('span', { text: r.question }), el('b', { text: ' → ' + (r.answer || '—') })])))
+      : null,
+    el('p', { class: 'q', text: prompt.question || '' }),
+    el('div', { class: 'rows' }, rows),
+    freeOpt ? field(`${freeOpt.n}. type an answer`, freeBox) : null,
+    el('div', { class: 'row' }, [freeOpt ? btn('send answer', sendFree, 'go') : null, btn('esc back', closeSheet)].filter(Boolean)),
+  ].filter(Boolean)), false);
 }
 
 function sheetRename(name) {
@@ -4152,6 +5114,18 @@ async function sheetSettings() {
       btn('+ faster', () => { try { localStorage.setItem(LS_RATE, String(Math.min(2, rate + 0.15))); } catch {} stopSpeaking(); render(); }),
     ]));
   }
+  // HOW LONG A PAUSE IS, in conversation mode: the one thing about it that is a matter of
+  // the owner's own speech rather than of the machine. Shown wherever the talk button is.
+  if (jarvisSurfaces(S.jarvisOn, S.jarvis).talk) {
+    const q = savedQuiet();
+    const setQ = (v) => { try { localStorage.setItem(LS_QUIET, String(Math.min(QUIET.MAX, Math.max(QUIET.MIN, v)))); } catch {} render(); };
+    kids.push(el('h2', { text: 'conversation mode' }));
+    kids.push(el('div', { class: 'row' }, [
+      el('div', { class: 'dim small', text: `sends after ${q} s of quiet` }),
+      btn('− sooner', () => setQ(q - QUIET.STEP)),
+      btn('+ later', () => setQ(q + QUIET.STEP)),
+    ]));
+  }
   kids.push(el('div', { class: 'row' }, [btn('esc back', closeSheet)]));
   // Last row, and deliberately plain: it is diagnostic, not a setting. `no worker` means
   // you are on the network rather than a cached shell; `unknown` means the worker serving
@@ -4261,8 +5235,9 @@ function onKey(e) {
     case 'p': if (it.card) pauseSession(it.card.name); break;
     case 'P': if (it.card) resumeSession(it.card.name); break;
     case 'x': case 'X':
-      if (S.screen === 'projects') { if (it.project) { S.confirm = { kind: 'project', name: it.project.name }; render(); } }
-      else if (it.card) askKill(it.card.name);
+      // Not on the projects screen: there `remove` is reached through `⋯` only (see the
+      // seam in the projects spec), and a key would be a second way in.
+      if (it.card) askKill(it.card.name);
       else if (it.freeWt) askRemoveWorktree(it.freeWt);
       break;
     case ',': sheetSettings(); break;
@@ -4305,25 +5280,25 @@ addEventListener('resize', () => {
   if (paneBoxNode) sizePaneBox(paneBoxNode);
 });
 // visualViewport fires its OWN resize when the keyboard opens — window's does not, on iOS
-// — so this is a second registration rather than a tidier one. There is deliberately NO
-// `scroll` listener: that fires while Safari pans around a focused field, and the handler
-// that used it called scrollTo(0,0), which is a scroll handler fighting the user for the
-// scrollbar. Safari's pan is now left alone.
+// — so this is a second registration rather than a tidier one. `scroll` too, because iOS
+// can still pan the visual viewport and the shell's top follows offsetTop. The handler
+// only WRITES LAYOUT; it never scrolls the window, which is what made the scroll listener
+// a version ago a fight with the user for the scrollbar.
 syncViewport();
 try {
   if (typeof visualViewport !== 'undefined' && visualViewport) {
     visualViewport.addEventListener('resize', syncViewport);
+    visualViewport.addEventListener('scroll', syncViewport);
   }
 } catch {}
 addEventListener('keydown', onKey);
-// Every tap is a chance to unlock audio (see unlockAudio): speak mode reads replies that
-// arrive by poll, long after the tap that turned it on, and after iOS has suspended the
-// context for a trip to the background. Capture phase, passive: it never alters the tap.
-for (const ev of ['touchend', 'click']) document.addEventListener(ev, () => unlockAudio(), { capture: true, passive: true });
+// NO TAP-ANYWHERE AUDIO UNLOCK. There was one here, for speak mode's replies that arrived
+// long after the tap; speak mode is gone, and the listener went on claiming the phone's
+// audio session on every first tap — which paused the owner's music. See unlockAudio().
 // The system back gesture. Every backward move in the app comes through here, so a swipe
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
 // this is what answers). No URL is ever read: the entries carry a depth, not a route.
-addEventListener('popstate', () => popTo());
+addEventListener('popstate', (e) => { uaSlid = !!(e && e.hasUAVisualTransition); try { popTo(); } finally { uaSlid = false; } });
 // §5: a passkey whenever there is no live session — the token dies after 15 minutes
 // without a request, and that expiry is the only thing that brings the sensor back.
 document.addEventListener('visibilitychange', () => {
@@ -4331,6 +5306,10 @@ document.addEventListener('visibilitychange', () => {
   // difference between an app that stops polling in a pocket and one that keeps waking
   // the radio every two seconds to decide it should not have.
   if (document.hidden) {
+    // THE FACE ID SHEET HIDES THE PAGE TOO. A hide that happens during a ceremony is the
+    // sheet, not the owner leaving, so coming back from it is not a resume and arms nothing
+    // — otherwise a dismissed sheet would re-try itself forever.
+    hidByCeremony = pk.busy();
     stopPanePoll();
     // THE LIMIT, SAID WHEN IT BITES. An installed web app gets no microphone and no speech
     // once it is off screen, so conversation mode ends here rather than pretending to run.
@@ -4338,8 +5317,10 @@ document.addEventListener('visibilitychange', () => {
     return;
   }
   const act = onVisibleAction();
-  if (act === 'lock') lock();
-  else if (act === 'refresh') refresh();
+  if (!hidByCeremony && act !== 'wait') pk.arm();
+  hidByCeremony = false;
+  if (act === 'lock') { if (S.locked) tryAutoUnlock(); else lock(); }
+  else if (act === 'refresh') refresh().then(() => { if (!S.locked) pk.release(); });
   syncPanePoll();
 });
 // THE SHELL IS CACHE-FIRST, so a deploy does not reach a phone that already has the app
@@ -4383,12 +5364,18 @@ render();
 // the answer. Waiting for the probe before the first paint would put a blank page in
 // front of a cold open, which is the thing the service worker exists to prevent.
 api.ready().then(() => render());
-// THEN TRY THE SESSION WE ALREADY HAVE, before anyone is asked for a face. A relaunch inside
-// the idle window — iOS evicting the app in the background is the common one — comes back
-// on the stored token (pk.resume). Its 401 clears it and leaves the lock screen up, which is
-// where Face ID lives. Guarded on S.locked so a fast tap on "unlock" is never undone.
+// THEN TRY THE SESSION WE ALREADY HAVE, before anyone is asked for a face. Only a reload of
+// this same page process has one (the app taking a new client) — a cold launch, closed from
+// the app switcher or evicted by iOS, has none and stays locked (api.js). Its 401 clears it
+// and leaves the lock screen up, which is where Face ID lives. Guarded on S.locked so a fast
+// tap on "unlock" is never undone.
+// ...and if it has none, the sensor is offered without a tap: one attempt (passkey.js
+// autoUnlock), which WebKit may refuse for want of a gesture — then the button is the way in.
+// 'offline' gets no attempt: an assertion that cannot be posted is a Face ID spent for nothing.
+pk.arm();
 pk.resume().then((r) => {
-  if (r === 'ok' && S.locked) { S.locked = false; render(); refresh(); }
+  if (r === 'ok') return unlocked();
+  if (r !== 'offline') tryAutoUnlock();
 }).catch(() => {});
 
 // Polling, not a socket: `fleet-grid.mjs --plain` answers the busiest fleet in 0.39s

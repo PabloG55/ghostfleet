@@ -260,7 +260,11 @@ function CardScreen({ scope, mode, stale, counts, onMore, band, confirm, cards, 
           than a fixed overlay, so its position here is its position on screen — and with the
           footer gone the one control it must never cover is the ⋯ at the top, which it
           cannot reach. */}
-      {toast ? <div class={('toast ' + (toast.kind || '')).trim()}>{toast.text}</div> : null}
+      {/* ...and one with an action ("queued behind a question" -> answer it) is a row with
+          its button, the same as app.js draws on the session screen. */}
+      {toast && toast.action
+        ? <div class={('toast act ' + (toast.kind || '')).trim()}><span>{toast.text}</span><button onClick={toast.action.fn}>{toast.action.label}</button></div>
+        : toast ? <div class={('toast ' + (toast.kind || '')).trim()}>{toast.text}</div> : null}
     </Fragment>
   );
 }

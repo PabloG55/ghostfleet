@@ -123,7 +123,8 @@ ask you in one line and stop. Then:
   what you type or say on the phone is recorded by `fleet-serve`, which knows it came from
   your enrolled phone (`~/.config/ghostfleet/jarvis.said`). Anything the *fleet* delivers —
   a `[fleet]` line, a relay, a worker or another lead running `fleet-send` into Jarvis, even
-  Jarvis itself — is marked by `fleet-send` as it pastes and never counts as you. A **spoken**
+  Jarvis itself — is marked as it is delivered (by `fleet-send` when it pastes, by the mod
+  in Jarvis's own session when it submits) and never counts as you. A **spoken**
   yes must be at least two words ("yes, do it", "go ahead"): a single word is what an open
   microphone hears in noise, and whisper writes it as "Okay."; or
 - **tap yes** on the phone's Jarvis screen, which takes a fresh Face ID like any other
@@ -147,13 +148,17 @@ beyond what a same-user check can honestly promise to catch.
 
 On the phone, open **Jarvis** from the top of Projects and tap **talk** once:
 
-1. the mic opens, and a voice-activity detector on the phone ends what you said after about
-   a second of quiet;
+1. the mic opens, and a voice-activity detector on the phone ends what you said after
+   **3.5 seconds of quiet** from your last word (a setting) — the band counts it down, and a
+   tap on the band sends at once;
 2. the audio goes to `fleet-serve` as a WAV and is transcribed by **whisper.cpp on the Mac**
    — it never leaves your machine, and nothing is kept once it has been turned into text;
 3. the words are shown and sent to Jarvis as `(spoken) …`, and the phone says "checking";
-4. Jarvis's answer is read aloud with the same voice as the read-aloud button; the mic stays
-   **closed** while it speaks, so it never hears itself;
+4. Jarvis's answer is read aloud with the same voice as the read-aloud button, to the end
+   however long it is. The mic stays **open** while it speaks, so you can cut in: talk over
+   it (or tap the band) and it stops and listens, and what you say goes as a follow-up. Its
+   own voice does not count as yours — only a voice well above what is playing, held for a
+   quarter of a second;
 5. the mic opens again. Tap **stop**, or say nothing for twenty seconds, to end it.
 
 It only works **with the screen on and the app open**: an installed web app gets no
@@ -176,13 +181,17 @@ app, a **Turn on notifications** band offers the subscription with one tap (iOS 
 in answer to a tap), and `fleet-phone` reports `notifications: not set up` until a
 subscription exists.
 
-## Fresh every day
+## Fresh when it gets long
 
 A long context is the known failure of a session that never ends, and Jarvis is built never
-to end. So its fleet's governor restarts it once a day at `restart_hour` (default 4, in the
-marker) — only when it has been idle for ten minutes, never on the first sight of a new
-Jarvis, and never twice a day. The new session is a fresh conversation; what the old one was
-carrying goes forward as `HANDOFF.md` in Jarvis's home, built from the record rather than
-asked of the model: the proposals still waiting on you, the last things you said, its last
-answers, and the digest at the moment of the restart. `fleet-jarvis restart --dry-run`
-prints the handoff without restarting anything.
+to end. So its fleet's governor restarts it once its conversation has grown past
+`restart_tokens` context tokens (default 200000, in the marker) — at any time of day, but
+only when it has been idle for ten minutes, and never twice for the same conversation. The
+size is the context the model last saw, read from the last usage line in the tail of its
+transcript; the file's size in bytes is not used, because it does not track tokens. A
+transcript with no usage line yet is not measured and never restarted. `fleet-jarvis status`
+shows the threshold and the current size. The new session is a fresh conversation; what the
+old one was carrying goes forward as `HANDOFF.md` in Jarvis's home, built from the record
+rather than asked of the model: the proposals still waiting on you, the last things you
+said, its last answers, and the digest at the moment of the restart.
+`fleet-jarvis restart --dry-run` prints the handoff without restarting anything.

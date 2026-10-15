@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" style="background:#0b0d10">
 <head>
 <meta charset="utf-8">
 <!-- viewport-fit=cover + the safe-area insets in app.css: the page runs under the home
@@ -7,6 +7,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ghostfleet</title>
 <meta name="theme-color" content="#0b0d10">
+<!-- THE GROUND IS PAINTED BEFORE ANYTHING IS FETCHED. Going back could show a fully white
+     screen until the page came up: a document's first frame is drawn before app.css has
+     arrived, and until then the canvas is the browser's LIGHT default — as is the web view
+     behind it, which is what the system back gesture slides in when it has no snapshot of
+     the screen it is returning to. So the colour is inline, on <html> and in this block,
+     and `color-scheme: dark` makes the UA's own defaults (canvas, the view under the page,
+     form controls before styling) dark too. The value is --bg's, and app.css restates it. -->
+<meta name="color-scheme" content="dark">
+<style>html,body{background:#0b0d10;color-scheme:dark;margin:0}</style>
 <!-- iOS installs from these two, not from the manifest (16.4+ reads the manifest for
      display/scope but still wants the apple-touch-icon). -->
 <meta name="apple-mobile-web-app-capable" content="yes">

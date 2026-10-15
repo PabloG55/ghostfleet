@@ -326,6 +326,30 @@ esac
 # suite holds the two to each other.
 _mod="$(jq -c '{source, state, turnId, mod, usage, ledger} | with_entries(select(.value != null))' \
   "$FLEET_DIR/$SESSION.json" 2>/dev/null)"
+
+# ── A CONVERSATION THAT CHANGES PANES CHANGES SLOTS, AND THAT IS NEVER QUIET ────────────
+# The slot above is the pane's name, which is right for a rename (same pane, new name) and
+# is also how a conversation resumed into the WRONG pane takes that pane's name: measured,
+# a worker's conversation launched into its fleet's lead pane rewrote its own record from
+# the worker's name to `master` on its first event, the worker's card had nothing left under
+# its name, and the fleet dir held two `master` records that every reader settled by `ts`.
+# The pane really is running it, so the record still says so — but the move is written to
+# slot-claim.log, with every other record that claims the slot, so it is found the day it
+# happens rather than four days later. A rename keeps its pane and is not logged.
+if [ -n "$SOCK" ] && [ -n "$SLOT" ] && [ -f "$FLEET_DIR/$SESSION.json" ]; then
+  IFS=$'\x1f' read -r _osock _oslot _opane < <(jq -r \
+    '[(.sock // ""), (.slot // ""), (.pane // "")] | join("\u001f")' "$FLEET_DIR/$SESSION.json" 2>/dev/null)
+  if [ "$_osock" = "$SOCK" ] && [ -n "$_oslot" ] && [ "$_oslot" != "$SLOT" ] \
+     && [ -n "$PANE" ] && [ "$_opane" != "$PANE" ]; then
+    _rivals="$(jq -r --arg s "$SOCK" --arg l "$SLOT" --arg me "$SESSION" \
+      'select(.sock == $s and .slot == $l and .session_id != $me) | .session_id' \
+      "$FLEET_DIR"/*.json 2>/dev/null | tr '\n' ' ')"
+    printf '%s %s/%s: conversation %s MOVED here from %s (pane %s -> %s)%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SOCK" "$SLOT" "$SESSION" "$_oslot" "${_opane:-?}" "$PANE" \
+      "${_rivals:+ — this slot is also claimed by: ${_rivals% }}" >> "$FLEET_DIR/slot-claim.log" 2>/dev/null
+    _dbg "$EVENT $SESSION moved $_oslot -> $SLOT (pane ${_opane:-?} -> $PANE)${_rivals:+, rivals: ${_rivals% }}"
+  fi
+fi
 case "$_mod" in '{'*) ;; *) _mod='{}' ;; esac
 tmp="$FLEET_DIR/.$SESSION.$$.tmp"
 if jq -n \
@@ -344,6 +368,25 @@ else
   _dbg "write: jq could not build the record for $SESSION ($EVENT)"
   rm -f "$tmp" 2>/dev/null
 fi
+
+# The pane as plain text with every DIM run removed — lib/undim.awk, shared with
+# fleet-hibernate's draft check, which the same suggestion fooled. Resolved through the hook's
+# symlinks once, and EXPORTED, because the deferred wake and the queue drainer run this in a
+# detached `bash -c` that has no BASH_SOURCE of ours to resolve from. A runtime staged
+# without the file falls back to the plain capture: the old reading, never a blinder one.
+_cf_src="${BASH_SOURCE[0]}"
+while [ -L "$_cf_src" ]; do
+  _cf_t="$(readlink "$_cf_src")"
+  case "$_cf_t" in /*) _cf_src="$_cf_t" ;; *) _cf_src="$(dirname "$_cf_src")/$_cf_t" ;; esac
+done
+CF_UNDIM="$(cd "$(dirname "$_cf_src")" 2>/dev/null && pwd)/../lib/undim.awk"; export CF_UNDIM
+_pane_text() {                        # $1=socket $2=session -> the pane, dim runs removed
+  if [ -r "${CF_UNDIM:-}" ]; then
+    tmux -L "$1" capture-pane -e -p -t "$2" 2>/dev/null | LC_ALL=C awk -f "$CF_UNDIM"
+  else
+    tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null
+  fi
+}
 
 # A wake PASTES into a session's input box and presses Enter, so it must only fire when
 # that box is EMPTY — otherwise it submits whatever a human was half-way through typing
@@ -393,8 +436,14 @@ fi
 # every pattern below is therefore a literal alternation, which is the same bytes in both
 # locales. `length("❯")` is 3 under C and 1 under UTF-8, and substr counts in the same
 # units either way, so the skip past the glyph is right in both.
+#   AND THE PANE IS READ WITH ITS ATTRIBUTES (_pane_text), because an EMPTY box is not blank.
+# The agent fills it with a dim suggestion — `Try "…"` in a fresh session, a suggested next
+# prompt after a turn — and `capture-pane -p` drops the attribute, so the suggestion read
+# exactly like typing. Measured on a fleet whose two idle leads both answered 1 here: every
+# wake to them was deferred, retried for the full ten minutes and expired, while a worker
+# sat on a permission prompt until somebody found it by hand.
 _input_state() {                      # $1=socket $2=session -> 0 empty / 1 typed / 2 none
-  tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null | LC_ALL=C awk '
+  _pane_text "$1" "$2" | LC_ALL=C awk '
     # A RULE MAY CARRY A LABEL. Requiring a line of NOTHING but rule glyphs looked right
     # and rejected the top edge of the composer on every worker pane, because the fleet
     # draws a labelled separator — `────── ghostfleet/docs-sync ─`. Measured on a live
@@ -463,7 +512,7 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
   lock="$dir/$sock.$kind.retry"
   p="$(cat "$lock" 2>/dev/null)"
   case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
-  export -f _input_state _input_empty
+  export -f _pane_text _input_state _input_empty
   FLEET_DIR="$dir" nohup bash -c '
     sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"; kind="${5:-notify}"; msg="$6"; to="${7:-master}"
     echo $$ > "$lock" 2>/dev/null
@@ -485,13 +534,23 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
         # CLAUDE_FLEET_DIR is where fleet-send QUEUES a prompt for a busy target, so it is
         # the target fleet dir: the one its own Stop drains. (No apostrophes in here: this
         # whole body is one single-quoted argument.)
-        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send -s "$sock" "$to" "$msg" >/dev/null 2>&1
+        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send --nudge -s "$sock" "$to" "$msg" >/dev/null 2>&1
         exit 0
       fi
     done
     printf "%s deferred wake expired after %ss with the input box never clear\n" \
       "$(date +%Y-%m-%dT%H:%M:%S)" "$(( every * tries ))" \
       >> "$FLEET_DIR/$sock.$kind.undelivered" 2>/dev/null
+    # ...AND A ROW IN THE INBOX THE WAKE WAS FOR. The marker alone was a trace nobody
+    # reads: a worker sat on a permission prompt behind four such expiries before anyone
+    # looked. The row lands beside the worker rows it failed to announce, so the next
+    # fleet-inbox (and every reader of the inbox) shows the gap; fleet-serve watches the
+    # marker above and buzzes the phone. A sub-lead kind is <lead>.notify and its inbox is
+    # <sock>.<lead>.inbox; master and Jarvis read the fleet inbox.
+    case "$kind" in *.notify) inbox="$FLEET_DIR/$sock.${kind%.notify}.inbox" ;; *) inbox="$FLEET_DIR/$sock.inbox" ;; esac
+    printf "%s\t%s\t%s\t%s\n" "$(date +%s)" "$to" undelivered \
+      "wake expired after $(( every * tries ))s: the input box never read empty, so the rows above went unannounced" \
+      >> "$inbox" 2>/dev/null
   ' _ "$sock" "$lock" "${CLAUDE_FLEET_NOTIFY_RETRY_EVERY:-20}" \
        "${CLAUDE_FLEET_NOTIFY_RETRY_TRIES:-30}" "$kind" "$msg" "$to" >/dev/null 2>&1 &
 }
@@ -645,9 +704,9 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
           printf '%s\n' "$now" > "$stamp" 2>/dev/null
           _sock="$CLAUDE_FLEET_SOCK"
           if [ -n "$_parent" ]; then
-            ( fleet-send -s "$_sock" "$_to" "$_submsg" >/dev/null 2>&1 & )
+            ( fleet-send --nudge -s "$_sock" "$_to" "$_submsg" >/dev/null 2>&1 & )
           else
-            ( fleet-send -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
+            ( fleet-send --nudge -s "$_sock" master "[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it." >/dev/null 2>&1 & )
           fi
         elif [ -n "$_parent" ]; then
           # its own kind, so the retry's lock and stamp are the sub-lead's and not master's
@@ -712,7 +771,7 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
           # Jarvis's dirs, not this session's: another profile's hook is running this, and
           # a busy Jarvis QUEUES the prompt under CLAUDE_FLEET_DIR — which must be the dir
           # Jarvis's own Stop drains, or the wake waits in a file nothing reads.
-          ( CLAUDE_FLEET_DIR="$j_dir" CLAUDE_CONFIG_DIR="$j_cfg" fleet-send -s "$j_sock" master "$j_msg" >/dev/null 2>&1 & )
+          ( CLAUDE_FLEET_DIR="$j_dir" CLAUDE_CONFIG_DIR="$j_cfg" fleet-send --nudge -s "$j_sock" master "$j_msg" >/dev/null 2>&1 & )
         else
           _defer_nudge "$j_sock" "$j_dir" jarvis "$j_msg"
         fi
@@ -725,7 +784,7 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
       j_p="$(cat "$j_lock" 2>/dev/null)"
       case "$j_p" in ''|*[!0-9]*) j_p="" ;; esac
       if [ -z "$j_p" ] || ! kill -0 "$j_p" 2>/dev/null; then
-        export -f _input_state _input_empty
+        export -f _pane_text _input_state _input_empty
         nohup bash -c '
           sock="$1"; lock="$2"; stamp="$3"; after="$4"; armed="$5"; dir="$6"
           echo $$ > "$lock" 2>/dev/null; trap "rm -f \"$lock\"" EXIT
@@ -735,7 +794,7 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
           tmux -L "$sock" has-session -t master 2>/dev/null || exit 0
           _input_empty "$sock" master || exit 0
           date +%s > "$stamp" 2>/dev/null
-          CLAUDE_FLEET_DIR="$dir" fleet-send -s "$sock" master "[fleet] batch: work finished across the fleets in the last $(( after / 60 )) minutes. Run fleet_digest and tell the owner only what he would want to know unprompted, in one line. Automated wake." >/dev/null 2>&1
+          CLAUDE_FLEET_DIR="$dir" fleet-send --nudge -s "$sock" master "[fleet] batch: work finished across the fleets in the last $(( after / 60 )) minutes. Run fleet_digest and tell the owner only what he would want to know unprompted, in one line. Automated wake." >/dev/null 2>&1
         ' _ "$j_sock" "$j_lock" "$j_stamp" "$j_batch" "$now" "$j_dir" >/dev/null 2>&1 &
       fi
     fi
@@ -902,7 +961,7 @@ if [ "$EVENT" = "Stop" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ] \
   _qp="$(cat "$_qd" 2>/dev/null)"
   case "$_qp" in ''|*[!0-9]*) _qp="" ;; esac
   if [ -z "$_qp" ] || ! kill -0 "$_qp" 2>/dev/null; then
-    export -f _input_state
+    export -f _pane_text _input_state
     # A session whose mod delivers takes the prompt without touching the composer
     # (register.js, DELIVERY), so a half-typed message there is no reason to wait. Asked
     # only when the composer is NOT empty, and asked again each time: a mod that has died

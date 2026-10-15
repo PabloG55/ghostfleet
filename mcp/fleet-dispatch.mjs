@@ -180,19 +180,26 @@ function execPlan(p) {
 // DID collect alongside the error, so a naive `stdout || stderr` returns a payload cut off
 // mid-value — which for JSON fails loudly at the parse, and for text does not fail at all:
 // it looks like a short answer. So it is named rather than merged into the generic path.
-function execPlanAsync(p, { timeout = 0, maxBuffer = 1024 * 1024 } = {}) {
+//   `status: true` resolves {text, code} instead of the text alone, for the one caller that
+// has to tell a command which RAN AND FAILED from one that worked: the phone's send. Without
+// it fleet-send's exit 1 ("not delivered") came back as a string, the daemon answered 200,
+// and the phone cleared the composer over a message that never arrived. Opt-in, because
+// most commands here write to stderr on success and their callers want the text either way.
+function execPlanAsync(p, { timeout = 0, maxBuffer = 1024 * 1024, status = false } = {}) {
   const { file, argv, env, cwd } = invocation(p);
-  return new Promise((resolve) => {
+  return new Promise((done) => {
+    const resolve = (text, code) => done(status ? { text, code } : text);
     execFile(file, argv, { encoding: 'utf8', env, cwd, timeout, maxBuffer },
       (err, stdout, stderr) => {
-        if (!err) return resolve(stdout || '(no output)');
+        if (!err) return resolve(stdout || '(no output)', 0);
         // A killed-by-timeout child has usually printed nothing, so say what happened
         // rather than handing back an empty string that reads like success.
         if (err.killed && timeout && err.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
-          return resolve(`error: ${p.cmd} timed out after ${timeout}ms`);
+          return resolve(`error: ${p.cmd} timed out after ${timeout}ms`, -1);
         if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
-          return resolve(`error: ${p.cmd} produced more than ${maxBuffer} bytes — the answer was cut off, so it is refused rather than returned short`);
-        resolve(`${stdout || ''}${stderr || ''}`.trim() || `error: ${err.message}`);
+          return resolve(`error: ${p.cmd} produced more than ${maxBuffer} bytes — the answer was cut off, so it is refused rather than returned short`, -1);
+        resolve(`${stdout || ''}${stderr || ''}`.trim() || `error: ${err.message}`,
+                typeof err.code === 'number' ? err.code : -1);
       });
   });
 }
@@ -220,10 +227,16 @@ export const TOOLS = [
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" } }, additionalProperties: false } },
   { name: 'fleet_inbox', description: "Drain the lead's attention feed: worker 'need-you' events (permission / usage-limit / real questions), governor park/resume, and answers relayed back from sessions you asked with fleet_send reply_to that could not message you directly (the usual case now is a direct message in the conversation, so a missing ANSWERED row is not a missing answer). One call replaces polling every sibling — shows only what is new since last call. Pass `project` to drain ANOTHER project's feed instead of your own.",
     inputSchema: { type: 'object', properties: { all: { type: 'boolean', description: 'show the whole inbox instead of only new entries' }, project: { type: 'string', description: "another project's fleet to read (name from fleet_projects); omit for your own — your relayed answers arrive in YOUR OWN inbox, so omit it for those" } }, additionalProperties: false } },
-  { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a "reached usage limit — retry?", a trust prompt, any menu (e.g. text "2"). Use this to unblock a worker; use fleet_send for normal task prompts. A PERMISSION dialog (the worker asking to run a tool) is the exception: this tool may DECLINE one — send the number of its "No" option — but any approving key is REFUSED, because an agent does not approve another agent\'s tool call — unless the project (or your own session) has the setting "agents can approve tool calls" on, which the refusal names. The refusal quotes the dialog, the tool and the exact command: show that to the human and let them approve it (fleet-answer --human-approved in their own terminal, or the phone).',
+  { name: 'fleet_answer', description: 'Send raw keystrokes to a worker BLOCKED on a prompt — a "reached usage limit — retry?", a trust prompt, any menu (e.g. text "2"). A claude question picker (AskUserQuestion, with its tab bar) takes one option number per call and NO Enter — the digit selects and moves to the next tab, so an Enter would answer that one too; fleet-answer drops the Enter itself. Use this to unblock a worker; use fleet_send for normal task prompts. A PERMISSION dialog (the worker asking to run a tool) is the exception: this tool may DECLINE one — send the number of its "No" option — but any approving key is REFUSED, because an agent does not approve another agent\'s tool call — unless the project (or your own session) has the setting "agents can approve tool calls" on, which the refusal names. The refusal quotes the dialog, the tool and the exact command: show that to the human and let them approve it (fleet-answer --human-approved in their own terminal, or the phone).',
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, text: { type: 'string', description: 'literal keys to send (e.g. "2" or "yes"); Enter is pressed after unless no_enter is true' }, expect: { type: 'string', description: 'optional: the fingerprint of the prompt you are answering (served by /api/pane as prompt.fingerprint). When given, the keys are sent only if that same prompt is still on screen; otherwise it is refused as "the prompt changed"' }, no_enter: { type: 'boolean' } }, required: ['session', 'text'], additionalProperties: false } },
   { name: 'fleet_pause', description: "Park a worker: reliably interrupt it and mark it OFF (zero budget). Use to shed idle or expensive workers on the shared account. Un-park with fleet_resume or by sending it work. Can't park 'master': it is the fleet's lead, and a fleet whose lead is off dispatches nothing (the governor excludes it for the same reason).",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_interrupt', description: "End a session's CURRENT TURN — the Escape the desk presses, retried until the spinner stops (one Escape is often swallowed mid tool-call). Nothing else: the session is not parked, not stopped and keeps taking work, so unlike fleet_pause this works on 'master' too. A prompt queued behind the turn stays queued (an interrupt fires no Stop) and the next send delivers it first.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_queue', description: "List the prompts still WAITING in a session's queue — sent with fleet_send while it was mid-turn and not delivered yet. One line per prompt: queued-at (epoch seconds), the prompt base64-encoded, and kind ('nudge' for the fleet's own wakes, else empty), tab-separated. Empty output is an empty queue.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
+  { name: 'fleet_unqueue', description: "Take a prompt back OUT of a session's queue before it is delivered — the first waiting one whose text is exactly `prompt`. Refused, saying so, when it is no longer there: it has already been typed into the session and can no longer be edited.",
+    inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' }, prompt: { type: 'string' } }, required: ['session', 'prompt'], additionalProperties: false } },
   { name: 'fleet_wake', description: "Wake a session that fleet-hibernate put to sleep: start its process again and replay its conversation by id. Different from fleet_resume, which un-parks a session that never stopped running — this one's process is gone. Fails loudly if the folder was never trusted or the transcript does not replay inside the timeout.",
     inputSchema: { type: 'object', properties: { project: { type: 'string', description: "another project's fleet to act on (name from fleet_projects); omit for your own fleet" }, session: { type: 'string' } }, required: ['session'], additionalProperties: false } },
   { name: 'fleet_reopen', description: "Reopen a LOST session: one the machine killed (a crash or reboot took its tmux server) that left its status record and conversation behind, shown as `lost` by fleet_list, fleet_digest and the grid. Starts it again under the same name, resuming ITS OWN conversation by id, in its recorded folder, as its recorded agent (fleet-restart --reopen) — never the newest conversation in the folder. To forget a lost session instead, fleet_stop it; its transcript is kept either way.",
@@ -458,6 +471,16 @@ export function plan(name, a = {}) {
       if (nl) return nl;
       return run('fleet-pause', [String(a.session)], t);
     }
+    // NOT GUARDED FOR THE LEAD, ON PURPOSE. notTheLead protects the fleet from a lead that
+    // is OFF; an interrupt ends one turn and leaves it on, which is exactly what the owner
+    // needs when the lead itself is the one running away.
+    case 'fleet_interrupt':
+      return run('fleet-pause', ['--interrupt', String(a.session)], t);
+    // The queue's format belongs to fleet-send, so both are fleet-send's own modes.
+    case 'fleet_queue':
+      return run('fleet-send', ['--list-queue', String(a.session)], t);
+    case 'fleet_unqueue':
+      return run('fleet-send', ['--unqueue', String(a.session), String(a.prompt)], t);
     case 'fleet_resume': {
       const args = [String(a.session)];
       if (a.prompt) args.push(String(a.prompt));

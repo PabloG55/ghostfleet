@@ -52,7 +52,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { projects, checkoutOf, BIN, self } from '../mcp/fleet-dispatch.mjs';
-import { fleetDirs, scanStatus, markersFor, inboxSince, parentsFor, lostSessions } from '../lib/fleet-scan.mjs';
+import { fleetDirs, scanStatus, markersFor, inboxSince, parentsFor, lostSessions, serverStart } from '../lib/fleet-scan.mjs';
 
 const HOME = os.homedir();
 // ONE STAMP PER READER. "Since last look" is a question about a particular looker: a lead
@@ -150,7 +150,7 @@ export function buildDigest({ since, tmuxOk }) {
     // Lost is only asked when liveness was: with no tmux to ask, every record would read
     // as a dead session, which is the empty-fleet lie the header above warns about.
     if (live) {
-      for (const l of lostSessions({ dir, sock: t.sock, live, panes: livePanes(t.sock), cfg: t.cfg })) {
+      for (const l of lostSessions({ dir, sock: t.sock, live, panes: livePanes(t.sock), cfg: t.cfg, started: serverStart(t.sock) })) {
         if (names.has(l.name)) continue;
         names.add(l.name);
         sessions.push({ name: l.name, status: 'lost', ts: l.at, lead: l.name === 'master' });

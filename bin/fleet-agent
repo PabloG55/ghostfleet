@@ -345,15 +345,17 @@ agent_field() {
         # "my own fleet" works; fleet_send's reply_to needs a self too, so it stays out.
         mcp_self)   printf 'no'  ;;
         budget)     printf 'no'  ;;
-        # NO, and the reason is subtle enough to write down. `codex resume --last` IS
-        # cwd-scoped and works — verified both directions plus the empty case, using
-        # `codex exec`. But the TUI only persists its rollout on a clean exit: kill the
-        # pane (SIGHUP) and nothing reaches ~/.codex/sessions, so there is nothing left
-        # to resume. Killing panes is precisely how the fleet recycles a session, so the
-        # case resume exists for is the case it doesn't survive. Verified: a codeword
-        # planted in a TUI pane, pane killed, session re-opened -> "unknown", and the
-        # word appears in no rollout file. Flip this the day the TUI flushes on SIGHUP.
-        resume)     printf 'no'  ;;
+        # YES since codex-cli 0.160.1, re-measured 2026-10-10 in a scratch fleet. Under
+        # 0.146.0 this was NO: the TUI persisted its rollout only on a clean exit, so a
+        # killed pane left nothing to resume, and killing panes is how the fleet recycles.
+        # 0.160.1 writes the rollout as it goes — a planted codeword survived a kill-server
+        # between turns, a kill MID-TURN kept that turn's message, and `codex resume <id>`
+        # reopened the conversation in the same file under the same id.
+        #   BY ID, never by folder: codex-here starts lib/codex-rollout.mjs beside codex,
+        # which records the rollout the process holds open as <fleet-dir>/<id>.json, so a
+        # restart, a reopen or an agent switch passes CLAUDE_FLEET_RESUME=<id>. A 0.146
+        # pane still loses a killed conversation; there is nothing on disk for any id.
+        resume)     printf 'yes' ;;
         verified)   printf 'yes' ;;
         *) return 1 ;;
       esac ;;

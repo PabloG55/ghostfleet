@@ -51,8 +51,8 @@
 # ── NEVER --continue ─────────────────────────────────────────────────────────
 # The incoming agent resumes ONLY by its own recorded id (CLAUDE_FLEET_RESUME, the path
 # fleet-restart uses — read its header for why --continue reaches the wrong conversation in
-# a checkout with several). With no id, or an agent whose `resume` field is not yes (codex:
-# its TUI does not flush a killed pane's rollout), it starts with CLAUDE_FLEET_FRESH=1 —
+# a checkout with several). With no id, or an agent whose `resume` field is not yes, it
+# starts with CLAUDE_FLEET_FRESH=1 —
 # not the launcher's "newest in this cwd" discovery, which is --continue by another name.
 #
 # ── NEVER NO MASTER ──────────────────────────────────────────────────────────
@@ -130,10 +130,24 @@ outgoing_id() {
       return 0
     fi
   fi
+  # codex: the same question, asked of the rollout its process holds open
+  # (lib/codex-rollout.mjs). A codex that never took a turn holds none, and like claude's
+  # unresolved case that is "nothing to come back to", not "fall back to an older record".
+  if [ "$agent" = codex ]; then
+    local ppid_; ppid_="$(tmux -L "$SOCK" display-message -p -t "$SLOT" '#{pane_pid}' 2>/dev/null)"
+    if [ -n "$ppid_" ] && out="$(node "$LIB_DIR/codex-rollout.mjs" resolve --pid "$ppid_" 2>/dev/null)" && [ -n "$out" ]; then
+      printf '%s' "${out%%$'\x1f'*}"; return 0
+    fi
+  fi
   others=""
   [ -f "$CONVS" ] && others="$(jq -r --arg a "$agent" 'to_entries[] | select(.key != $a) | .value.id // empty' "$CONVS" 2>/dev/null)"
-  jq -r --arg s "$SOCK" --arg l "$SLOT" \
-     'select(.sock == $s and .slot == $l and (.session_id // "") != "") | [(.ts // 0), .session_id] | @tsv' \
+  # A codex record says so (`agent`), and a record that does not is some other agent's:
+  # without this, the newest record for the slot after a stint on codex is codex's, and a
+  # switch back to claude would `--resume` a codex id.
+  jq -r --arg s "$SOCK" --arg l "$SLOT" --arg a "$agent" \
+     'select(.sock == $s and .slot == $l and (.session_id // "") != "")
+      | select(if $a == "codex" then .agent == "codex" else (.agent // "") != "codex" end)
+      | [(.ts // 0), .session_id] | @tsv' \
      "$DIR"/*.json 2>/dev/null | sort -rn | cut -f2 | while IFS= read -r id; do
        grep -qxF -- "$id" <<< "$others" && continue
        printf '%s' "$id"; break
@@ -317,10 +331,38 @@ do_switch() {
   return 1
 }
 
+# ONE WATCHER PER SLOT, AND NEVER NONE. A request writes the wish and then starts a watcher
+# only if none is alive; a watcher leaves when the wish is gone. Cancel-then-ask in quick
+# succession hit the gap between the two: the watcher saw no wish and was on its way out,
+# the new request saw its pid still alive and started nobody, and the wish sat there with
+# nothing to fire it — the row said "switching to codex…" for as long as anyone looked.
+# So the slot is CLAIMED (O_EXCL, so two watchers starting together get one), and a watcher
+# gives its claim up BEFORE its last look at the wish: a request that wrote one after that
+# look saw no pid and started a watcher; one that wrote it before is seen.
+claim() {
+  local p _
+  for _ in 1 2 3; do
+    ( set -o noclobber; printf '%s\n' "$$" > "$PIDF" ) 2>/dev/null && return 0
+    p="$(cat "$PIDF" 2>/dev/null)"
+    [ "$p" = "$$" ] && return 0
+    [ -n "$p" ] && kill -0 "$p" 2>/dev/null && return 1
+    rm -f "${PIDF:?}"        # a watcher that died without giving it up
+  done
+  return 1
+}
 watch_loop() {
-  local want live idle=0 rc seen="" since=$SECONDS
-  printf '%s\n' "$$" > "$PIDF"
+  claim || { log "watcher $$: another watcher has $SLOT"; return 0; }
   log "watcher $$ up for $SLOT"
+  while :; do
+    watch_once
+    [ "$(cat "$PIDF" 2>/dev/null)" = "$$" ] && rm -f "${PIDF:?}"
+    [ -f "$PENDING" ] && claim || break
+    log "watcher $$: a new wish for $SLOT landed as it was leaving — staying"
+  done
+  log "watcher $$ done"
+}
+watch_once() {
+  local want live idle=0 rc seen="" since=$SECONDS
   while :; do
     [ -f "$PENDING" ] || break
     want="$(tr -d '[:space:]' < "$PENDING" 2>/dev/null)"
@@ -343,8 +385,6 @@ watch_loop() {
     fi
     sleep "$POLL"
   done
-  [ "$(cat "$PIDF" 2>/dev/null)" = "$$" ] && rm -f "${PIDF:?}"
-  log "watcher $$ done"
 }
 
 PROJECT=""

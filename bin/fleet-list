@@ -45,10 +45,11 @@ if command -v node >/dev/null 2>&1 && tmux -V >/dev/null 2>&1; then
   _panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_id}@#{pid}' 2>/dev/null)"
   [ -f "$_lib" ] && lost="$(LIB="$_lib" DIR="$FLEET_DIR" SOCK="$SOCK" NAMES="$names" PANES="$_panes" \
     CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" node --input-type=module -e '
-      const { lostSessions } = await import(process.env.LIB);
+      const { lostSessions, serverStart } = await import(process.env.LIB);
       const set = (v) => new Set((v || "").split("\n").filter(Boolean));
       for (const l of lostSessions({ dir: process.env.DIR, sock: process.env.SOCK, live: set(process.env.NAMES),
-                                     panes: set(process.env.PANES), cfg: process.env.CFG }))
+                                     panes: set(process.env.PANES), cfg: process.env.CFG,
+                                     started: serverStart(process.env.SOCK) }))
         console.log(l.name + "\t" + l.at);
     ' 2>/dev/null)"
 fi

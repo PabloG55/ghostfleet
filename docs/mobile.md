@@ -680,6 +680,15 @@ which goes through `fleet-read --json` and emits `{ts, role, text}` — assistan
 all. So the screen was not under-rendering the commands; it never had them, and no amount
 of client work could have produced them.
 
+*Later:* the payload grew two event roles, so the chat can say THAT something happened
+without pretending to be the pane. `compacted` is a context compaction (its summary as a
+folded detail), and `tools` is a run of consecutive tool calls folded into one item —
+`tools: [{name, detail, ts}]`, where `detail` is one line of what the call was asked (a
+command, a path) and a finished background task is a call named `task`. Both draw as a small
+muted card. Before that, the compaction summary and every background-task notification were
+`role: "user"` and drew as the owner's own bubble. Results are still not in the payload: the
+pane is the place for output.
+
 And "exactly as the computer version" has a precise answer, because at the desk `⏎` on a
 card **attaches to the tmux pane**: you get the Claude Code TUI — `⏺` bullets,
 `⎿ Bash(…)` tool headers, the spinner, the elapsed counter, the permission dialog. That is
@@ -804,11 +813,21 @@ starting one message stops the other.
 
 **Conversation mode, in every session** — while Jarvis (experimental, off by default) is
 switched on; with it off there is no talk button anywhere. The composer of every session — not only Jarvis's —
-has the **talk** button, the same control in the same place: tap it once and the mic opens, a
-second of quiet ends what you said, the Mac transcribes it (whisper.cpp, the transcriber
-Jarvis uses — `fleet-jarvis voice --install`), it is sent to *that* session as a prompt, and
-when the session's turn is over its final reply is read aloud in the Mac's voice (or the
-device's, as below) before the mic opens again. A worker's turn can run for minutes with
+has the **talk** button, the same control in the same place: tap it once and the mic opens,
+**3.5 seconds of quiet** ends what you said (counted from your last word; a setting, 1.5–8 s,
+under **conversation mode** in settings — a pause to think does not send half a sentence),
+the Mac transcribes it (whisper.cpp, the transcriber Jarvis uses — `fleet-jarvis voice
+--install`), it is sent to *that* session as a prompt, and when the session's turn is over its
+final reply is read aloud in the Mac's voice (or the device's, as below) before the mic opens
+again. While the quiet runs, the band above the chat drains a bar and says how long is left;
+talking again fills it, and **a tap on the band sends now**. **Talking over an answer cuts
+in**: the voice stops (every chunk still to come), the mic is already listening, and what you
+say goes out as a follow-up — queued behind the turn if the session is still working, never
+in place of anything. A tap on the band while it speaks does the same, for a voice too soft
+to trip it. The mic is open while the answer plays for that reason, and the app's own voice
+only counts as yours when what the mic hears is well above what is playing, for a quarter of
+a second; on a laptop's speaker it never did (test/fixtures/barge-echo.json), and a phone's
+speaker, earpiece and AirPods are each their own case. A worker's turn can run for minutes with
 tools in it; the band above the chat says it is on it and for how long, the narration
 between tool calls is never read — only the reply the turn ends on — and it gives up after
 thirty minutes (five for Jarvis). A session blocked on a permission prompt says so, out
@@ -821,7 +840,9 @@ This replaced #12's read-aloud-only speaker toggle in the top bar; its stored se
 (`gf.autospeak`) is cleared on load. The per-message play button stays.
 
 **What is spoken is not what is written**, and the gap is bigger than markdown. Fenced blocks
-become "code omitted", inline code loses its backticks, links become "the link", table pipes
+become "code omitted", inline code loses its backticks, links become "the link" (so do
+`<url>`s and reference links, and a footnote's `[1]: url` line is not read at all), quote
+marks, `***` rules, task boxes and struck-out text go, table pipes
 and rule rows go (a row is read as its cells), emoji are dropped, and every line break ends a
 sentence — and
 identifiers are **named rather than spelled**. A synthesiser reads a 40-character sha one
@@ -872,9 +893,13 @@ it instead, and the phone plays the audio:
 
 It plays through Web Audio, not an `<audio>` element: the route needs the bearer token,
 which a media element cannot send, and the CSP refuses the `blob:` URL it would need. iOS
-lets an AudioContext run only after a tap has resumed it, so every tap anywhere in the app
-re-unlocks it (the toggle, the play button, the talk button included) and the audio session
-is set to `playback`, so a phone on silent still speaks, as the device's voice does.
+lets an AudioContext run only after a tap has resumed it, so the speaker on a bubble and the
+talk button unlock it inside their own tap — and nothing else does. Any audio the app starts
+claims the phone's audio session, which pauses the owner's music, so an ordinary tap touches
+none of it. A speaker tap sets the session to `playback`, so a phone on silent still speaks
+as the device's voice does; when the voice ends (or is stopped) the context is closed and
+the session goes back to `auto`, so the music can resume. Conversation mode holds
+`play-and-record` for as long as it runs and releases it the same way when it stops.
 
 **Nothing here is required.** Without Kokoro, `/api/speak` answers 503 with the reason and
 the phone uses its own voice, with one toast saying why; a sentence that fails mid-reply hands

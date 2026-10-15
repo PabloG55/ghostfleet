@@ -49,6 +49,16 @@ Object.defineProperty(globalThis, 'localStorage', {
     removeItem: (k) => { stored.delete(k); },
   },
 });
+// The session token's store: emptied by a cold launch, kept by the app's own reload.
+const session = new Map();
+Object.defineProperty(globalThis, 'sessionStorage', {
+  configurable: true, writable: true,
+  value: {
+    getItem: (k) => (session.has(k) ? session.get(k) : null),
+    setItem: (k, v) => { session.set(k, String(v)); },
+    removeItem: (k) => { session.delete(k); },
+  },
+});
 const BASE = (process.argv[2] || '').replace(/\/+$/, '');
 const CODE = process.argv[3] || '';
 const CLIENT = process.argv[4] || 'phone';       // whoever `fleet-serve enroll` opened it for
@@ -185,15 +195,19 @@ if (BASE && CODE) {
   // took it, not that the client believes it did.
   api.clearToken();
   let opened = false; err = '';
-  try { opened = await pk.open(); } catch (e) { err = String(e.message || e); }
+  // The lock screen fetches the challenge before the tap (passkey.js prepare()); so does this.
+  try { await pk.prepare(); opened = await pk.open(); } catch (e) { err = String(e.message || e); }
+  pk.release();
   is('the enrolled passkey unlocks', true, opened);
   is('...with a live token behind it', true, api.haveToken());
   is('...and no error', '', err);
   // THE RELAUNCH, set up: everything this "device" now holds, for test/helpers/pwa-relaunch.mjs
   // to start a FRESH process from. A new process, because a relaunch is a new module instance
   // with an empty `token` variable, and nothing short of that proves the stored copy is used.
-  is('...and the token is kept on the device', true, !!localStorage.getItem(`gf.session:${BASE}`));
-  if (process.env.PWA_STORE_OUT) fs.writeFileSync(process.env.PWA_STORE_OUT, JSON.stringify([...stored]));
+  is('...and the token is kept for the life of the page', true, !!sessionStorage.getItem(`gf.session:${BASE}`));
+  is('...and never where a cold launch would find it', null, localStorage.getItem(`gf.session:${BASE}`));
+  if (process.env.PWA_STORE_OUT)
+    fs.writeFileSync(process.env.PWA_STORE_OUT, JSON.stringify({ local: [...stored], session: [...session] }));
 
   // One use, and it is spent. The client's own pre-check says so in the SERVER's words,
   // which is why the server is asked for them here rather than trusted to match.

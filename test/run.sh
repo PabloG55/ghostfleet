@@ -324,6 +324,27 @@ mkdir -p "$CLAUDE_FLEET_EXPERIMENTAL_DIR"; printf 'on\n' > "$CLAUDE_FLEET_EXPERI
 # asks tmux which session $TMUX_PANE is in, so an inherited `%20` would name whichever
 # fixture session happened to get that id — a plausible wrong slot, not an error.
 unset TMUX_PANE
+# ...and neither does the fleet it was started from. A worker runs this suite with its own
+# fleet's CLAUDE_FLEET_DIR / CLAUDE_CONFIG_DIR exported, so every command here that redirects
+# only HOME still wrote into the REAL fleet dir — and read from it: fleet-send, finding no
+# fleet dir in a fixture session's tmux env, falls back to its own, where the live record of
+# the real session of the same name was waiting to take the prompt. Measured: the jarvis
+# group's two `fleet-send -s cf-jarvis master "ok"` reached the real Jarvis on every run,
+# for two weeks, as the owner's words. CI never had these set, so unsetting them is also
+# what makes a local run the run CI does. The engine's own commands still want the profile
+# the run was started under, so it is kept aside for them (SUITE_CLAUDE_CONFIG_DIR).
+#   UNSETTING IS NOT ENOUGH, because HOME is the default every one of those falls back to,
+# and $TMUX names the caller's own server. With the variables gone, a group that redirected
+# CLAUDE_FLEET_DIR but not HOME still had the hook read the REAL Jarvis marker in
+# ~/.config/ghostfleet and file its fixtures' need-yous (`agytest/w1`, `curtest/w1`) in the
+# real Jarvis's inbox; and a hook run with $TMUX still set resolved the caller's real socket
+# and slot, putting a fixture's `done` row in the real lead's inbox under the worker's own
+# name. So the run gets a HOME of its own and no $TMUX, which is also the machine CI is.
+# The real HOME is kept only for the engine (`claude plugin …`), which needs its login.
+SUITE_CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-}"
+SUITE_HOME="$HOME"
+unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR CLAUDE_FLEET_SOCK CLAUDE_FLEET_SLOT CLAUDE_FLEET_JARVIS_DIR TMUX
+HOME="$TMUX_TMPDIR/home"; export HOME; mkdir -p "$HOME"
 
 # A fixed name is self-limiting: the next run kills the server. A unique one is
 # not, so a run that dies half way leaks its servers for good. Two guards — our
@@ -472,6 +493,27 @@ SV_BEFORE=" $(pgrep -f 'fleet-serve' 2>/dev/null | tr '\n' ' ')"
 # goes red on its own rather than being taken on trust. Both directions on the
 # sweep especially — it deletes directories and kills servers, and the direction
 # that matters is the one where it must NOT.
+# ── codex conversations: recorded by id, read like claude's ───────────────────
+# Codex has no hooks, so a codex pane left NO record, and after a crash its conversation —
+# intact on disk — looked lost. lib/codex-rollout.mjs records the rollout the codex PROCESS
+# holds open. Everything here is synthetic: rollouts written in the 0.160.1 shape (line 1
+# session_meta, response_item messages, event_msg turn markers) under a temp CODEX_HOME,
+# and a stand-in process that holds one open the way codex does.
+cx_iso() { node -e 'console.log(new Date(Date.now() - Number(process.argv[1]) * 1000).toISOString())' "$1"; }
+cx_rollout() {       # <file> <id> <cwd> <seconds-ago> <last turn event> [codeword]
+  mkdir -p "$(dirname "$1")"
+  local t; t="$(cx_iso "$4")"
+  {
+    printf '{"timestamp":"%s","ordinal":0,"type":"session_meta","payload":{"session_id":"%s","id":"%s","timestamp":"%s","cwd":"%s","originator":"codex-tui","cli_version":"0.160.1","source":"cli"}}\n' "$t" "$2" "$2" "$t" "$3"
+    printf '{"timestamp":"%s","ordinal":1,"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>sandbox</permissions instructions>"}]}}\n' "$t"
+    printf '{"timestamp":"%s","ordinal":2,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\\n  <cwd>%s</cwd>\\n</environment_context>"}]}}\n' "$t" "$3"
+    printf '{"timestamp":"%s","ordinal":3,"type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}\n' "$t"
+    printf '{"timestamp":"%s","ordinal":4,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Remember the codeword %s."}]}}\n' "$t" "${6:-HERON-7}"
+    printf '{"timestamp":"%s","ordinal":5,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Noted."}]}}\n' "$t"
+    [ "$5" = task_complete ] && printf '{"timestamp":"%s","ordinal":6,"type":"event_msg","payload":{"type":"task_complete","turn_id":"t1"}}\n' "$t"
+  } > "$1"
+}
+
 group "socket namespace (this run's own)"
 if command -v tmux >/dev/null 2>&1; then
   tmux -L nsprobe kill-server 2>/dev/null
@@ -1258,7 +1300,15 @@ STUB
   # The conversation the claude master is in, as its hook would have recorded it. The stub
   # is not a real claude, so fleet-hibernate cannot read it off the process and the engine
   # falls back to this record — the same fallback a session it cannot resolve gets.
-  SWID=aaaaaaaa-1111-2222-3333-444444444444
+  # THE IDS ARE THIS RUN'S OWN. codex-here refuses to resume a conversation another live
+  # process has open, and slot-claim answers that by reading EVERY process's argv on the
+  # machine — so with fixed ids, a sibling run's codex stub sitting on its dialog as
+  # `codex resume cccccccc-…` made this run's codex refuse, exit inside five seconds and
+  # take its pane down: "exited before it reached a prompt", rolled back, and every row
+  # from the dialog case on read the wrong agent. Two worktrees testing at once is the
+  # supported case (each run has its own tmux namespace), so the ids must be per-run too.
+  swuid() { printf '%s-1111-2222-3333-%s' "$1" "$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"; }
+  SWID="$(swuid aaaaaaaa)"
   printf '{"session_id":"%s","sock":"%s","slot":"master","cwd":"%s","status":"ready","ts":%s}\n' \
     "$SWID" "$SWS" "$SW/repo" "$(date +%s)" > "$SWF/$SWID.json"
   swstart master claude "$SW/repo"; swstart w1 claude "$SW/wt"; sleep 1
@@ -1278,6 +1328,13 @@ STUB
   is "...and codex is not handed it"             "CLAUDE_FLEET_MODEL=" "$(tmux -L "$SWS" show-environment -t master CLAUDE_FLEET_MODEL 2>/dev/null)"
   is "a worker is not touched"                   "$W1PID" "$(swpid w1)"
 
+  # The conversation codex took up, as lib/codex-rollout.mjs records it: tagged codex, and
+  # NEWER than claude's record for the same slot, which is exactly the interleaving that made
+  # "the newest record for this slot" the wrong agent's conversation.
+  CXID="$(swuid cccccccc)"
+  printf '{"session_id":"%s","agent":"codex","sock":"%s","slot":"master","cwd":"%s","status":"ready","ts":%s}\n' \
+    "$CXID" "$SWS" "$SW/repo" "$(( $(date +%s) + 5 ))" > "$SWF/$CXID.json"
+
   # 2. back to claude: on its OWN recorded id, never --continue, model restored
   : > "$SW/argv.claude"
   swfp agent billing-svc --none >/dev/null; swwait master
@@ -1285,10 +1342,11 @@ STUB
   is "...never --continue"                       "0" "$(grep -c -- '--continue' "$SW/argv.claude" 2>/dev/null || true)"
   is "...on the model it left with"              "1" "$(grep -c -- '--model haiku' "$SW/argv.claude" 2>/dev/null || true)"
   is "...and gets the one-line welcome back"     "yes" "$(grep -q "master again, taking over from codex" <<< "$(tmux -L "$SWS" capture-pane -p -J -t master)" && echo yes || echo no)"
-  # codex has a history here now and cannot resume it: said at the moment of choosing
+  is "...codex's conversation recorded on the way out" "$CXID" "$(jq -r '.codex.id' "$SWF/$SWS.master.convs.json" 2>/dev/null)"
+  # codex resumes by id since 0.160.1, so a recorded conversation is NOT announced as lost
   swbusy master
   out="$(swfp agent billing-svc codex)"
-  is "codex with history says it starts fresh"   "1" "$(grep -c "codex can't resume, it starts fresh" <<< "$out" || true)"
+  is "codex with a recorded conversation is not 'fresh'" "0" "$(grep -c "starts fresh" <<< "$out" || true)"
 
   # 3. mid-turn: it WAITS, the latest wish wins, and changing back cancels
   is "...and a busy master waits for its turn"   "1" "$(grep -c 'when its current turn ends' <<< "$out" || true)"
@@ -1302,8 +1360,10 @@ STUB
   is "changing back before it fires cancels it"  "no" "$([ -f "$SWF/$SWS.master.switch" ] && echo yes || echo no)"
   swfp agent billing-svc codex >/dev/null; sleep 0.5
   is "...and a new wish replaces the old"        "codex" "$(cat "$SWF/$SWS.master.switch" 2>/dev/null)"
+  : > "$SW/argv.codex"
   swidle master; swwait master
   is "...and fires once the turn ends"           "codex" "$(cat "$SWF/$SWS.master.agent" 2>/dev/null)"
+  is "...back on codex's OWN conversation, by id" "yes" "$(grep -q -- "resume $CXID" "$SW/argv.codex" 2>/dev/null && echo yes || echo no)"
 
   # 4. a new agent that falls over: the old one comes back, the setting with it
   swfp agent billing-svc --none >/dev/null; swwait master
@@ -1334,8 +1394,17 @@ STUB
   # Seen live: codex 0.160.1 opened on its daemon dialog and the switch rolled it back at the
   # ready timeout as a crash. It must still be pending past that timeout, read as need-you
   # on the card, and finish once the dialog is answered.
+  # ON THE DIALOG FIRST, THEN PAST THE CLOCK. This slept 6s from the request, which was
+  # neither: the 4s ready clock starts at the launch, after the record and the kill, so on a
+  # slow runner 6s from the request was not past it — with the pause deleted outright, this
+  # row stayed green. It waits for the switch to say it is on the dialog (the branch that
+  # pauses the clock), then for the whole of READY_SECS, which is the claim itself.
+  swlog0="$(wc -l < "$SWF/$SWS.master.switch.log" 2>/dev/null || echo 0)"
   : > "$SW/codex-dialog"
-  swfp agent billing-svc codex >/dev/null; sleep 6      # READY_SECS is 4 here
+  swfp agent billing-svc codex >/dev/null
+  i=0; until grep -q "waiting on a dialog in master's pane" <<< "$(tail -n +"$((swlog0 + 1))" "$SWF/$SWS.master.switch.log" 2>/dev/null)"; do
+    [ "$i" -lt 150 ] || break; sleep 0.2; i=$((i+1)); done
+  sleep 5                                               # READY_SECS is 4 here
   is "a new agent on a dialog is not rolled back"   "codex" "$(cat "$SWF/$SWS.master.switch" 2>/dev/null)"
   is "...and nothing is reported failed"            "no" "$([ -f "$SWF/$SWS.master.switch-failed" ] && echo yes || echo no)"
   is "...and the card says it needs you"            "need-you" \
@@ -2690,6 +2759,239 @@ is "a codex without the flag never gets it" "codex resume --last" "$(cxh CXHELP=
 is "CLAUDE_FLEET_CODEX_DAEMON=1 attaches"  "codex resume --last" "$(cxh CLAUDE_FLEET_CODEX_DAEMON=1)"
 rm -rf "${CX:?}"
 
+group "codex conversations: the rollout a process holds open becomes its record"
+if command -v node >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || [ -d /proc/self/fd ]; }; then
+  CR="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$CR/src/acme-api" "$CR/src/acme-web" "$CR/fleet"
+  CRL="$ROOT/lib/codex-rollout.mjs"; CRD="$CR/home/sessions/$(date +%Y/%m/%d)"
+  CA=aaaaaaaa-0000-7000-8000-00000000000a; CB=bbbbbbbb-0000-7000-8000-00000000000b
+  CC=cccccccc-0000-7000-8000-00000000000c; CD=dddddddd-0000-7000-8000-00000000000d
+  cx_rollout "$CRD/rollout-a-$CA.jsonl" "$CA" "$CR/src/acme-api" 10 task_complete
+  cx_rollout "$CRD/rollout-b-$CB.jsonl" "$CB" "$CR/src/acme-web" 5  task_complete
+  cx_rollout "$CR/home/sessions/2026/01/02/rollout-c-$CC.jsonl" "$CC" "$CR/src/acme-api" 30000000 task_complete
+  cx_rollout "$CRD/rollout-d-$CD.jsonl" "$CD" "$CR/src/acme-api" 2 task_started PLOVER-3
+  since=$(( $(date +%s) - 60 ))
+
+  # discovery by folder + start time: the fallback, asked in both directions
+  found="$(CODEX_HOME="$CR/home" node "$CRL" find --cwd "$CR/src/acme-api" --since "$since" | cut -d $'\x1f' -f1 | tr '\n' ' ')"
+  is "a conversation started in this folder since launch is found" "yes" "$(grep -q "$CA" <<< "$found" && echo yes || echo no)"
+  is "...another folder's is not"                                  "no"  "$(grep -q "$CB" <<< "$found" && echo yes || echo no)"
+  is "...nor one this folder started months ago"                   "no"  "$(grep -q "$CC" <<< "$found" && echo yes || echo no)"
+  is "...and by id, a resumed one is found wherever it is filed"   "rollout-c-$CC.jsonl" \
+     "$(node -e "import('$CRL').then(m => console.log(require('path').basename(m.rolloutById('$CC', '$CR/home'))))")"
+  is "a turn still running reads as working"  "working" "$(node -e "import('$CRL').then(m => console.log(m.rolloutStatus('$CRD/rollout-d-$CD.jsonl')))")"
+  is "...and a finished one as ready"         "ready"   "$(node -e "import('$CRL').then(m => console.log(m.rolloutStatus('$CRD/rollout-a-$CA.jsonl')))")"
+
+  # the process: a stand-in that holds A open, then — same pid — lets it go and opens D,
+  # which is what codex does when a pane starts a new conversation
+  bash -c 'exec 3<"$1"; while [ ! -f "$2" ]; do sleep 0.1; done; exec 3<&-; exec 4<"$3"; sleep 60' _ \
+    "$CRD/rollout-a-$CA.jsonl" "$CR/go" "$CRD/rollout-d-$CD.jsonl" & CRP=$!
+  sleep 60 & CRN=$!
+  sleep 0.5
+  is "the process's own rollout is resolved"  "$CA" "$(node "$CRL" resolve --pid "$CRP" | cut -d $'\x1f' -f1)"
+  is "...and a process holding none resolves nothing" "1" "$(node "$CRL" resolve --pid "$CRN" >/dev/null; echo $?)"
+  is "an open rollout reads as open"          "0" "$(node "$CRL" open "$CRD/rollout-a-$CA.jsonl"; echo $?)"
+  is "...and one nobody holds does not"       "1" "$(node "$CRL" open "$CRD/rollout-b-$CB.jsonl"; echo $?)"
+
+  CLAUDE_FLEET_CODEX_POLL_MS=200 CODEX_HOME="$CR/home" node "$CRL" watch --pid "$CRP" --sock cf-acme-api --slot w1 \
+    --cwd "$CR/src/acme-api" --since "$since" --fleet-dir "$CR/fleet" & CRW=$!
+  i=0; while [ ! -f "$CR/fleet/$CA.json" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+  is "the watcher writes the conversation id"      "$CA" "$(jq -r .session_id "$CR/fleet/$CA.json" 2>/dev/null)"
+  is "...tagged codex"                             "codex" "$(jq -r .agent "$CR/fleet/$CA.json" 2>/dev/null)"
+  is "...with the rollout as its transcript"       "$CRD/rollout-a-$CA.jsonl" "$(jq -r .transcript "$CR/fleet/$CA.json" 2>/dev/null)"
+  is "...on its fleet and slot"                    "cf-acme-api/w1" "$(jq -r '.sock + "/" + .slot' "$CR/fleet/$CA.json" 2>/dev/null)"
+  is "...and B, the folder's other session, is not claimed" "no" "$([ -f "$CR/fleet/$CB.json" ] && echo yes || echo no)"
+  touch "$CR/go"
+  i=0; while [ ! -f "$CR/fleet/$CD.json" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+  is "a new conversation in the same pane is recorded too" "$CD" "$(jq -r .session_id "$CR/fleet/$CD.json" 2>/dev/null)"
+  is "...and is now the newest for that slot"      "$CD" \
+     "$(jq -r 'select(.sock=="cf-acme-api" and .slot=="w1") | [.ts, .session_id] | @tsv' "$CR/fleet"/*.json | sort -n | tail -1 | cut -f2)"
+  is "...mid-turn, as working"                     "working" "$(jq -r .status "$CR/fleet/$CD.json" 2>/dev/null)"
+  kill "$CRP" "$CRN" 2>/dev/null; wait "$CRP" "$CRN" 2>/dev/null
+  i=0; while kill -0 "$CRW" 2>/dev/null && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i+1)); done
+  is "the watcher ends with its process"           "gone" "$(kill -0 "$CRW" 2>/dev/null && echo alive || echo gone)"
+  kill "$CRW" 2>/dev/null
+
+  # the phone's reader: fleet-read finds the record and reads the rollout like a transcript
+  fr="$(env -u TMUX CLAUDE_FLEET_DIR="$CR/fleet" "$ROOT/bin/fleet-read" -s cf-acme-api w1 --json 2>/dev/null)"
+  is "fleet-read shows the codex user turn"        "yes" "$(jq -e '.messages[] | select(.role=="user" and (.text|test("PLOVER-3")))' <<< "$fr" >/dev/null && echo yes || echo no)"
+  is "...and its answer"                           "yes" "$(jq -e '.messages[] | select(.role=="assistant" and .text=="Noted.")' <<< "$fr" >/dev/null && echo yes || echo no)"
+  is "...but not what codex injected itself"       "no"  "$(grep -q 'environment_context\|permissions instructions' <<< "$fr" && echo yes || echo no)"
+  is "...two messages, nothing else"               "2"   "$(jq -r .total <<< "$fr")"
+  is "the plain view prints the answer"            "Noted." "$(env -u TMUX CLAUDE_FLEET_DIR="$CR/fleet" "$ROOT/bin/fleet-read" -s cf-acme-api w1 2>/dev/null)"
+  rm -rf "${CR:?}"
+else
+  skip "codex rollout records" "node, and lsof or /proc, needed"
+fi
+
+group "the phone's chat shows only what the owner wrote"
+# Claude files much of its own traffic as `type:"user"` lines, and /api/session (fleet-read
+# --json) drew every one as the owner's bubble: a compaction's summary, a background task
+# finishing, a slash command's wrappers, an interrupt marker. The EVENTS among them are now
+# roles of their own the phone draws as cards — `compacted`, and `tools` (a folded run of
+# calls, the agent's own tool_use included) — and the rest is dropped. Each shape below is
+# one such record with a placeholder body; the real prompts beside them (a typed one, a
+# lead's delivery with origin.kind "plugin", a paste that merely QUOTES a tag) must survive.
+# Asserted in both directions in one transcript.
+if command -v jq >/dev/null 2>&1; then
+  MR="$TMUX_TMPDIR/machinerec"; mkdir -p "$MR/fleet"
+  MRT="$MR/t.jsonl"
+  mr() { printf '%s\n' "$1" >> "$MRT"; }
+  mr '{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"check the acme-api routes"},"timestamp":"2026-10-01T10:00:00.000Z"}'
+  mr '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"acme-api has four routes"}]},"timestamp":"2026-10-01T10:00:05.000Z"}'
+  mr '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"Bash","input":{"command":"pnpm test --filter acme-api","description":"Run the acme-api suite"}}]},"timestamp":"2026-10-01T10:00:06.000Z"}'
+  mr '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":"ROUTE-DUMP"}]},"timestamp":"2026-10-01T10:00:07.000Z"}'
+  mr '{"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command finished</summary>\n</task-notification>"},"timestamp":"2026-10-01T10:01:00.000Z"}'
+  mr '{"type":"user","message":{"role":"user","content":"<task-notification>an older one with no origin</task-notification>"},"timestamp":"2026-10-01T10:01:01.000Z"}'
+  mr '{"type":"user","message":{"role":"user","content":"<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args></command-args>"},"timestamp":"2026-10-01T10:01:02.000Z"}'
+  mr '{"type":"user","message":{"role":"user","content":"<local-command-stdout>Set model to toolbox-default</local-command-stdout>"},"timestamp":"2026-10-01T10:01:03.000Z"}'
+  mr '{"type":"user","message":{"role":"user","content":"Caveat: The messages below were generated by the user while running local commands."},"timestamp":"2026-10-01T10:01:04.000Z"}'
+  mr '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"timestamp":"2026-10-01T10:01:05.000Z"}'
+  mr '{"type":"user","isMeta":true,"message":{"role":"user","content":"a meta record"},"timestamp":"2026-10-01T10:01:06.000Z"}'
+  mr '{"type":"user","isCompactSummary":true,"isVisibleInTranscriptOnly":true,"message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context.\nSUMMARY-BODY"},"timestamp":"2026-10-01T10:02:00.000Z"}'
+  mr '{"type":"user","origin":{"kind":"plugin","name":"ghostfleet","asUser":true},"message":{"role":"user","content":"Lead says: run the billing-svc suite"},"timestamp":"2026-10-01T10:03:00.000Z"}'
+  mr '{"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"why did it print <task-notification> in scratch?"},"timestamp":"2026-10-01T10:03:30.000Z"}'
+  mr '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"billing-svc is green"}]},"timestamp":"2026-10-01T10:04:00.000Z"}'
+  jq -n --arg t "$MRT" '{session_id:"mr-1", sock:"cf-scratch", slot:"toolbox", transcript:$t, ts:1}' > "$MR/fleet/mr-1.json"
+  fr="$(env -u TMUX CLAUDE_FLEET_DIR="$MR/fleet" "$ROOT/bin/fleet-read" -s cf-scratch toolbox --json 2>/dev/null)"
+  owner="$(jq -r '[.messages[] | select(.role=="user") | .text] | join(" | ")' <<< "$fr" 2>/dev/null)"
+  is "the owner's typed prompt is a user turn"        "yes" "$(grep -q 'check the acme-api routes' <<< "$owner" && echo yes || echo no)"
+  is "...and so is a lead's delivery"                 "yes" "$(grep -q 'run the billing-svc suite' <<< "$owner" && echo yes || echo no)"
+  is "...and a message that only quotes a tag"        "yes" "$(grep -q 'why did it print' <<< "$owner" && echo yes || echo no)"
+  is "no task notification is the owner's"            "no"  "$(grep -q 'task-id\|older one with no origin' <<< "$owner" && echo yes || echo no)"
+  is "no slash-command wrapper or its output"         "no"  "$(grep -q 'command-name\|toolbox-default\|Caveat:' <<< "$fr" && echo yes || echo no)"
+  is "no interrupt marker"                            "no"  "$(grep -q 'Request interrupted' <<< "$fr" && echo yes || echo no)"
+  is "no tool result and no meta record"              "no"  "$(grep -q 'ROUTE-DUMP\|a meta record' <<< "$fr" && echo yes || echo no)"
+  is "the compaction's summary is not the owner's"    "no"  "$(grep -q 'SUMMARY-BODY\|being continued' <<< "$owner" && echo yes || echo no)"
+  is "events keep their place, as cards"              "user assistant tools compacted user user assistant" \
+     "$(jq -r '[.messages[].role] | join(" ")' <<< "$fr" 2>/dev/null)"
+  is "...a run of calls is ONE item, in order"        "Bash task task" \
+     "$(jq -r '[.messages[] | select(.role=="tools") | .tools[].name] | join(" ")' <<< "$fr" 2>/dev/null)"
+  is "...titled by its count"                         "3 tool calls" "$(jq -r '.messages[] | select(.role=="tools") | .text' <<< "$fr" 2>/dev/null)"
+  is "...a call says what it was asked"               "Run the acme-api suite" "$(jq -r '.messages[] | select(.role=="tools") | .tools[0].detail' <<< "$fr" 2>/dev/null)"
+  is "...a finished task carries its summary line"    "Background command finished" "$(jq -r '.messages[] | select(.role=="tools") | .tools[1].detail' <<< "$fr" 2>/dev/null)"
+  is "the compaction keeps its summary as detail"     "SUMMARY-BODY" "$(jq -r '.messages[] | select(.role=="compacted") | .detail' <<< "$fr" 2>/dev/null)"
+  is "the plain view is unchanged"                    "billing-svc is green" \
+     "$(env -u TMUX CLAUDE_FLEET_DIR="$MR/fleet" "$ROOT/bin/fleet-read" -s cf-scratch toolbox 2>/dev/null)"
+  # `capture(…)?.s` is jq 1.8 syntax. jq 1.7 — Ubuntu 24.04's apt jq, so the Linux CI leg —
+  # rejects the whole program, every message above vanished there, and the Mac (Homebrew
+  # 1.8) passed it all. Swept in our shell code, not in the .mjs/.js where `?.` is optional
+  # chaining; a comment may name the form.
+  is "no jq 1.8-only ')?.field' in shell code"        "" \
+     "$(git -C "$ROOT" grep -nE '\)\?\.[A-Za-z_]' -- bin hooks lib scripts ':!*.mjs' ':!*.js' 2>/dev/null | grep -vE ':[0-9]+:[[:space:]]*#' || true)"
+  rm -rf "${MR:?}"
+else
+  skip "the phone's chat shows only what the owner wrote" "jq missing"
+fi
+
+group "codex-here records only inside a fleet pane"
+# The watcher starts from the pane's own $TMUX, never from an exported CLAUDE_FLEET_SOCK,
+# which a long-running session can carry from another fleet — this suite's own environment
+# may be inside a real one. The stub codex holds a rollout open, so a watcher that ran
+# WOULD record it: the absence below is a refusal, not a watcher that found nothing.
+if command -v node >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || [ -d /proc/self/fd ]; }; then
+  CX="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$CX/bin" "$CX/w" "$CX/fleet"
+  CXI=eeeeeeee-0000-7000-8000-00000000000e
+  cx_rollout "$CX/home/sessions/$(date +%Y/%m/%d)/rollout-e-$CXI.jsonl" "$CXI" "$CX/w" 1 task_complete
+  printf '#!/bin/sh\n[ "$1" = --help ] && exit 0\nexec 3<"%s"\nsleep 2\n' "$CX/home/sessions/$(date +%Y/%m/%d)/rollout-e-$CXI.jsonl" > "$CX/bin/codex"
+  chmod +x "$CX/bin/codex"
+  cxr() { ( cd "$CX/w" && env -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_MODEL CLAUDE_FLEET_DIR="$CX/fleet" \
+            CLAUDE_FLEET_YOLO=0 CLAUDE_FLEET_CODEX_POLL_MS=200 CODEX_HOME="$CX/home" PATH="$CX/bin:$PATH" "$@" "$ROOT/bin/codex-here" w1 >/dev/null 2>&1 ); }
+  cxr env -u TMUX -u TMUX_PANE CLAUDE_FLEET_SOCK=cf-acme-api
+  is "outside a fleet pane, nothing is recorded"   "0" "$(ls "$CX/fleet" | grep -c . || true)"
+  # ...and inside one (a $TMUX naming a cf-* server, and a pane), it is
+  cxr env TMUX="$CX/cf-acme-api,1,0" TMUX_PANE=%0
+  i=0; while [ ! -f "$CX/fleet/$CXI.json" ] && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i+1)); done
+  is "inside one, the conversation is recorded"    "$CXI" "$(jq -r .session_id "$CX/fleet/$CXI.json" 2>/dev/null)"
+  is "...on the socket the pane is on"             "cf-acme-api" "$(jq -r .sock "$CX/fleet/$CXI.json" 2>/dev/null)"
+  rm -rf "${CX:?}"
+else
+  skip "codex-here records" "node, and lsof or /proc, needed"
+fi
+
+group "a lost codex session goes through the same reopen as a lost claude one"
+# One mechanism for both agents: a session whose tmux server died is `lost` by
+# lib/fleet-scan.mjs's rule (fleet-list, the grid, the digest), and comes back through
+# fleet-restart --reopen (the grid's ⏎ and fleet_reopen) or fleet-open <id>. Codex was
+# never lost because it was never recorded; with its record it takes the same path, and
+# the agent adapter turns CLAUDE_FLEET_RESUME into `codex resume <id>`.
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  RS="$(cd "$(mktemp -d)" && pwd -P)"; H="$RS/home"
+  mkdir -p "$H/.config/ghostfleet" "$H/.claude/fleet" "$RS/bin" "$RS/sys" "$RS/src/acme-api" "$RS/src/acme-web"
+  printf 'acme-api\t%s\twork\nacme-web\t%s\twork\n' "$RS/src/acme-api" "$RS/src/acme-web" > "$H/.config/ghostfleet/projects"
+  RF="$H/.claude/fleet"; NOW=$(date +%s)
+  for a in claude codex; do      # stub agents: log the argv they were launched with, stay up
+    printf '#!/bin/sh\n[ "$1" = agents ] && exit 0\n[ "$1" = --help ] && exit 0\nprintf "%%s\\n" "$*" >> "%s/argv.%s"\nexec sleep 120\n' "$RS" "$a" > "$RS/bin/$a"
+    chmod +x "$RS/bin/$a"
+  done
+  for t in tmux jq node; do ln -s "$(command -v "$t")" "$RS/sys/$t"; done
+  rsrec() {   # <id> <sock> <slot> <cwd> <ts> <transcript> [agent]
+    printf '{"session_id":"%s","sock":"%s","slot":"%s","cwd":"%s","status":"ready","transcript":"%s","ts":%s%s}\n' \
+      "$1" "$2" "$3" "$4" "$6" "$5" "${7:+,\"agent\":\"$7\"}" > "$RF/$1.json"
+  }
+  R1=11111111-0000-4000-8000-000000000001; R2=22222222-0000-7000-8000-000000000002
+  R3=33333333-0000-4000-8000-000000000003; R6=66666666-0000-7000-8000-000000000006
+  printf '{"type":"user"}\n' > "$RS/r1.jsonl"; printf '{"type":"user"}\n' > "$RS/r3.jsonl"
+  RCD="$RS/codex-home/sessions/$(date +%Y/%m/%d)"
+  cx_rollout "$RCD/rollout-x-$R2.jsonl" "$R2" "$RS/src/acme-api" 900 task_complete
+  cx_rollout "$RCD/rollout-y-$R6.jsonl" "$R6" "$RS/src/acme-api" 900 task_complete
+  rsrec "$R1" cf-acme-api master "$RS/src/acme-api" $((NOW - 100)) "$RS/r1.jsonl"
+  rsrec "$R2" cf-acme-api w1     "$RS/src/acme-api" $((NOW - 200)) "$RCD/rollout-x-$R2.jsonl" codex
+  rsrec "$R6" cf-acme-api w6     "$RS/src/acme-api" $((NOW - 250)) "$RCD/rollout-y-$R6.jsonl" codex
+  rsrec "$R3" cf-acme-web w2     "$RS/src/acme-web" $((NOW - 50))  "$RS/r3.jsonl"
+  tmux -L cf-acme-web new-session -d -s w2 'sleep 120'          # still running
+  tmux -L cf-acme-api new-session -d -s _scratch 'sleep 120'    # a server exists, w1 is not on it
+  bash -c 'exec 3<"$1"; sleep 60' _ "$RCD/rollout-y-$R6.jsonl" & RSH=$!   # w6's codex lives on elsewhere
+  sleep 0.3
+  rse() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_DIR -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_AGENT \
+            -u CLAUDE_FLEET_MODEL -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_SLOT \
+            HOME="$H" PATH="$ROOT/bin:$RS/bin:$RS/sys:/usr/bin:/bin" CODEX_HOME="$RS/codex-home" "$@" 2>&1; }
+  fl="$(rse "$ROOT/bin/fleet-list" -s cf-acme-api)"
+  is "fleet-list shows the lost claude session"     "yes" "$(grep -qE '^master +lost' <<< "$fl" && echo yes || echo no)"
+  is "...and the lost codex one, in the same row"   "yes" "$(grep -qE '^w1 +lost .*--reopen w1' <<< "$fl" && echo yes || echo no)"
+  is "a session whose server is alive is not lost"  "no"  "$(grep -qE '^w2 +lost' <<< "$(rse "$ROOT/bin/fleet-list" -s cf-acme-web)" && echo yes || echo no)"
+
+  rse "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen master >/dev/null
+  out="$(rse "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen w1)"
+  i=0; while { [ ! -s "$RS/argv.claude" ] || [ ! -s "$RS/argv.codex" ]; } && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+  is "the reopen resumes claude's conversation, by id" "yes" "$(grep -q -- "--resume $R1" "$RS/argv.claude" 2>/dev/null && echo yes || echo no)"
+  is "...and codex's, by id"                          "yes" "$(grep -q -- "resume $R2" "$RS/argv.codex" 2>/dev/null && echo yes || echo no)"
+  is "...never by folder"                             "0"   "$(cat "$RS/argv.claude" "$RS/argv.codex" 2>/dev/null | grep -c -- '--last\|--continue' || true)"
+  is "...as codex, from the record's agent"           "CLAUDE_FLEET_AGENT=codex" "$(tmux -L cf-acme-api show-environment -t w1 CLAUDE_FLEET_AGENT 2>/dev/null)"
+  is "...in its own checkout"                         "$RS/src/acme-api" "$(tmux -L cf-acme-api display-message -p -t w1 '#{pane_current_path}' 2>/dev/null)"
+  is "...and no longer lost"                          "no"  "$(grep -qE '^(w1|master) +lost' <<< "$(rse "$ROOT/bin/fleet-list" -s cf-acme-api)" && echo yes || echo no)"
+  is "reopening a live one again is refused"          "1"   "$(rse "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen w1 >/dev/null; echo $?)"
+  is "a codex conversation open in another pane is not resumed twice" "yes" \
+     "$(grep -q 'already open in another pane' <<< "$(rse "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen w6)" && echo yes || echo no)"
+  is "...and no pane was started for it"              "no"  "$(tmux -L cf-acme-api has-session -t =w6 2>/dev/null && echo yes || echo no)"
+  : > "$RS/argv.codex"
+  fo="$(rse "$ROOT/bin/fleet-open" "${R2%%-*}" --as w9)"
+  i=0; while [ ! -s "$RS/argv.codex" ] && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+  is "fleet-open finds a codex id among the rollouts" "yes" "$(grep -q "opened $R2 as 'w9' on cf-acme-api" <<< "$fo" && echo yes || echo no)"
+  is "...and opens it with codex resume <id>"         "yes" "$(grep -q -- "resume $R2" "$RS/argv.codex" 2>/dev/null && echo yes || echo no)"
+  kill "$RSH" 2>/dev/null
+  for s in cf-acme-api cf-acme-web; do tmux -L "$s" kill-server 2>/dev/null; done
+
+  # A pane id a NEW server reuses after a crash is not evidence the old session lives: the
+  # record predates the server now holding that id. On the server that wrote it, it is.
+  cat > "$RS/pane.mjs" <<'JS'
+import fs from 'node:fs';
+const [lib, d, tr, now] = process.argv.slice(2);
+const m = await import(lib);
+fs.mkdirSync(d, { recursive: true });
+fs.writeFileSync(`${d}/x.json`, JSON.stringify({ session_id: 'x', sock: 'cf-p', slot: 'w9', cwd: d, transcript: tr, ts: Number(now) - 10, pane: '%0@4242' }));
+const panes = new Set(['%0@4242']);
+const newer = m.lostSessions({ dir: d, sock: 'cf-p', live: new Set(), panes, started: Number(now) }).length;
+const same = m.lostSessions({ dir: d, sock: 'cf-p', live: new Set(), panes, started: Number(now) - 100 }).length;
+const unknown = m.lostSessions({ dir: d, sock: 'cf-p', live: new Set(), panes }).length;
+console.log(`${newer} ${same} ${unknown}`);
+JS
+  is "a pane id held by a server newer than the record is a coincidence; by the one that wrote it, evidence" "1 0 0" \
+     "$(node "$RS/pane.mjs" "$ROOT/lib/fleet-scan.mjs" "$RS/pane" "$RS/r1.jsonl" "$NOW")"
+  rm -rf "${RS:?}"
+else
+  skip "lost codex reopen" "tmux, jq and node needed"
+fi
+
 group "fleet-review asks a DIFFERENT model, or says it cannot"
 # WHY THE REFUSALS ARE THE POINT. Exactly one of the three agents ships a non-interactive
 # review, and the tempting fallback — send the diff as an ordinary prompt and print the
@@ -3510,28 +3812,184 @@ if command -v tmux >/dev/null 2>&1; then
   # stderr is deliberately NOT redirected: the grid reads the terminal size off it, so
   # sending it to a file makes every window look like 80x24 and the ship never flies —
   # which silently turns the wide case into a second copy of the short one.
-  clickcard() {
-    tmux -L cfclkdrv kill-session -t d 2>/dev/null; : > "$CK/choice"
+  # WAIT ON THE GRID, NEVER ON THE CLOCK. These slept 2s for the grid to come up and 1s for
+  # it to answer, and a loaded runner overran both: the click went in before the first
+  # frame, or the choice was read before it was written, and the row read "" for a click
+  # that works. Up = the first full frame is on screen (card 2 is the last thing drawn, and
+  # the frame comes after raw mode and the key reader, so a click sent now is read against
+  # it). Done = the grid has EXITED. A click that should open nothing is followed by q:
+  # keys are read in order, so "back" says the click before it was read and opened nothing,
+  # where an empty file after a timeout could only say "not yet".
+  clkup() {
+    local i=0
+    until grep -q '─ 2 cb ─' <<< "$(tmux -L cfclkdrv capture-pane -p -t d 2>/dev/null)"; do
+      [ "$i" -lt 300 ] || { echo "grid never drew its cards" >&2; return 1; }; sleep 0.1; i=$((i+1)); done
+  }
+  clkdone() {
+    local i=0
+    while tmux -L cfclkdrv has-session -t =d 2>/dev/null; do
+      [ "$i" -lt 300 ] || { tmux -L cfclkdrv send-keys -t d q 2>/dev/null; echo "grid never exited" >&2; break; }; sleep 0.1; i=$((i+1)); done
+    cat "$CK/choice"
+  }
+  clkstart() {         # $1 = width  $2 = height
+    tmux -L cfclkdrv kill-session -t =d 2>/dev/null; : > "$CK/choice"
     tmux -L cfclkdrv -f /dev/null new-session -d -s d -x "$1" -y "$2" \
       "CLAUDE_FLEET_DIR='$CK' CLAUDE_FLEET_SCOPE=clktest CLAUDE_FLEET_ROOT= node '$ROOT/bin/fleet-grid.mjs' cfclktest > '$CK/choice'" 2>/dev/null
-    sleep 2
+    clkup
+  }
+  # $5 = "miss" for a click that should open nothing
+  clickcard() {
+    clkstart "$1" "$2"
     tmux -L cfclkdrv send-keys -t d -l "$(printf '\033[<0;%s;%sM' "$3" "$4")" 2>/dev/null; sleep 0.3
-    tmux -L cfclkdrv send-keys -t d -l "$(printf '\033[<0;%s;%sm' "$3" "$4")" 2>/dev/null; sleep 0.7
-    cat "$CK/choice"
+    tmux -L cfclkdrv send-keys -t d -l "$(printf '\033[<0;%s;%sm' "$3" "$4")" 2>/dev/null
+    [ "${5:-}" = miss ] && tmux -L cfclkdrv send-keys -t d q 2>/dev/null
+    clkdone
   }
   US=$'\x1f'
   # 140x40: the ship fits, so cards start at row 10
   is "wide: card 1 opens card 1"   "attach${US}ca" "$(clickcard 140 40 10 11)"
   is "wide: card 2 opens card 2"   "attach${US}cb" "$(clickcard 140 40 43 11)"
-  is "wide: the banner is not a card" ""           "$(clickcard 140 40 10 4)"
-  is "wide: the gap is not a card"    ""           "$(clickcard 140 40 10 15)"
+  is "wide: the banner is not a card" "back"       "$(clickcard 140 40 10 4 miss)"
+  is "wide: the gap is not a card"    "back"       "$(clickcard 140 40 10 15 miss)"
   # 140x24: too short for the ship, so cards start at row 3 — the original layout
   is "short: card 1 opens card 1"  "attach${US}ca" "$(clickcard 140 24 10 4)"
-  is "short: header is not a card"    ""           "$(clickcard 140 24 10 1)"
+  is "short: header is not a card"    "back"       "$(clickcard 140 24 10 1 miss)"
+
+  # ONE READ, MORE THAN ONE EVENT. A grid refresh blocks the loop for most of a second on
+  # a real fleet, and a click that lands in it is read back as press AND release in one
+  # chunk — which the whole-chunk mouse regex matched as nothing, so the click vanished.
+  # tmux delivers one send-keys as one write, so these are that chunk, every time, with
+  # no race to win. $1=what to send (printf format) $2=optional second write ("" for none)
+  # $3 = "miss" for one that should open nothing (q follows it, as in clickcard).
+  # (Never end a send-keys argument with ';' — tmux takes it as a command separator.)
+  sendgrid() {
+    clkstart 140 40
+    tmux -L cfclkdrv send-keys -t d -l "$(printf "$1")" 2>/dev/null
+    if [ -n "${2:-}" ]; then sleep 0.1; tmux -L cfclkdrv send-keys -t d -l "$(printf "$2")" 2>/dev/null; fi
+    [ "${3:-}" = miss ] && tmux -L cfclkdrv send-keys -t d q 2>/dev/null
+    clkdone
+  }
+  is "press+release in ONE read opens card 1" "attach${US}ca" "$(sendgrid '\033[<0;10;11M\033[<0;10;11m')"
+  is "press+release in ONE read opens card 2" "attach${US}cb" "$(sendgrid '\033[<0;43;11M\033[<0;43;11m')"
+  is "a report split over two reads still opens" "attach${US}ca" "$(sendgrid '\033[<0;1' '0;11M\033[<0;10;11m')"
+  is "a wheel event in the same read does not eat the click" "attach${US}cb" \
+     "$(sendgrid '\033[<65;43;11M\033[<0;43;11M\033[<0;43;11m')"
+  is "→ and ⏎ in one read: moves, then opens"  "attach${US}cb" "$(sendgrid '\033[C\r')"
+  is "a click on the gap, combined, opens nothing" "back" "$(sendgrid '\033[<0;10;15M\033[<0;10;15m' '' miss)"
   tmux -L cfclkdrv kill-server 2>/dev/null; tmux -L cfclktest kill-server 2>/dev/null
   rm -rf "$CK"
 else
   skip "grid clicks" "tmux missing"
+fi
+
+# ── 4a5a. one read is not one key ────────────────────────────────────────────
+# lib/keys.mjs splits each stdin chunk into events before any screen sees it. The cases
+# are the ways a chunk stops being one key: two events at once, one event over two reads,
+# a lone ESC that looks like the start of a sequence. Real timers, because the hold and
+# the Esc timeout are the part that can go wrong.
+group "stdin splits into events (lib/keys.mjs)"
+KEYS_OUT="$(node --input-type=module -e '
+  const { splitKeys, keyReader } = await import(process.argv[1] + "/lib/keys.mjs");
+  const J = (v) => JSON.stringify(v);
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const line = (k, v) => console.log(k + "=" + v);
+  line("pr", J(splitKeys("\x1b[<0;10;11M\x1b[<0;10;11m").keys));
+  line("arrows", J(splitKeys("\x1b[B\r").keys));
+  line("dels", J(splitKeys("\x7f\x7f\x7f").keys.map(k => k.charCodeAt(0))));
+  line("paste", J(splitKeys("git@x:acme/acme-web.git").keys));
+  line("keymouse", J(splitKeys("j\x1b[<0;1;2M").keys));
+  line("ctrl", J(splitKeys("\x0612").keys));
+  line("escq", J(splitKeys("\x1bq").keys));
+  line("tail", J(splitKeys("\x1b[A\x1b[<0;1")));
+  const got = [], feed = keyReader(k => got.push(k));
+  feed("\x1b[<0;1"); await sleep(10); feed("0;11M");
+  line("split", J(got.splice(0)));
+  feed("\x1b"); await sleep(120);
+  line("esc", J(got.splice(0)));
+  feed("\x1b"); await sleep(5); feed("[A");
+  line("escarrow", J(got.splice(0)));
+  feed("\x1b[A"); line("arrow", J(got.splice(0)));
+' "$ROOT" 2>&1)"
+kv() { sed -n "s/^$1=//p" <<< "$KEYS_OUT"; }
+is "press+release in one read: two events" '["\u001b[<0;10;11M","\u001b[<0;10;11m"]' "$(kv pr)"
+is "↓⏎ in one read: two keys"               '["\u001b[B","\r"]'                       "$(kv arrows)"
+is "three DELs: three keys"                 '[127,127,127]'                           "$(kv dels)"
+is "a paste stays one run"                  '["git@x:acme/acme-web.git"]'             "$(kv paste)"
+is "a key typed with a click: both"         '["j","\u001b[<0;1;2M"]'                  "$(kv keymouse)"
+is "^F then digits: ^F on its own"          '["\u0006","12"]'                         "$(kv ctrl)"
+is "Esc then q: Esc, then q"                '["\u001b","q"]'                          "$(kv escq)"
+is "a cut-off report is held, not dispatched" '{"keys":["\u001b[A"],"rest":"\u001b[<0;1"}' "$(kv tail)"
+is "a report over two reads: one event"     '["\u001b[<0;10;11M"]'                    "$(kv split)"
+is "a lone Esc still arrives as Esc"        '["\u001b"]'                              "$(kv esc)"
+is "ESC then [A soon after: an arrow, not Esc" '["\u001b[A"]'                         "$(kv escarrow)"
+is "an arrow key arrives at once"           '["\u001b[A"]'                            "$(kv arrow)"
+
+# ── 4a5b. a screen never outlives its launcher ───────────────────────────────
+# Seen live: the launcher died while a grid was up, and the grid did not. Every screen
+# runs inside `choice="$(node … </dev/tty)"`, so its parent is a bash SUBSHELL; with the
+# launcher gone that subshell is reparented to init — still alive, so the grid's own ppid
+# never changes — and the grid went on in a background process group, repainting every
+# 1.2s over whatever ran next. A second ghostfleet in the same window showed a blank
+# screen and a cursor. SIGTERM did nothing either: a refresh blocked on a tmux that had
+# stopped answering, and a blocked loop runs no handler.
+#
+# Driven through the REAL bin/ghostfleet (scratch HOME, empty project list, so it opens
+# the Projects screen) from an interactive shell in a scratch pane, because the bug is
+# only there with job control: launched as a pane's own process, the launcher is the
+# session leader, its death hangs the tty up and SIGHUP kills the grid — a test that
+# passes on the broken code. Both directions: a live launcher must NOT lose its screen.
+group "a screen never outlives its launcher"
+if command -v tmux >/dev/null 2>&1; then
+  OG="$(mktemp -d)"; mkdir -p "$OG/home" "$OG/fk"
+  tmux -L cfogdrv kill-server 2>/dev/null
+  # The direct child of $1 (first one), from one ps listing; no pattern matching.
+  og_child() { ps -A -o pid=,ppid= | awk -v p="$1" '$2 == p { print $1; exit }'; }
+  # ms until $1 is gone, polling for at most $2 seconds; empty when it never went.
+  og_gone() { local i n=$(($2 * 10)); for ((i = 0; i < n; i++)); do kill -0 "$1" 2>/dev/null || { echo $((i * 100)); return; }; sleep 0.1; done; }
+  tmux -L cfogdrv -f /dev/null new-session -d -s d -x 120 -y 40 "exec env -i PATH='$PATH' HOME='$OG/home' TMUX_TMPDIR='$TMUX_TMPDIR' TERM=screen bash --norc --noprofile -i" 2>/dev/null
+  sleep 0.5
+  # env -i, so nothing of THIS run's fleet (CLAUDE_FLEET_*, TMUX) leaks in — except
+  # TMUX_TMPDIR, which keeps any tmux the launcher touches inside this run's namespace.
+  tmux -L cfogdrv send-keys -t d "CLAUDE_FLEET_AWAKE=off '$ROOT/bin/ghostfleet'" Enter
+  OG_SH="$(tmux -L cfogdrv display -p -t d '#{pane_pid}' 2>/dev/null)"
+  for _ in $(seq 1 50); do
+    OG_L="$(og_child "${OG_SH:-0}")"; OG_SUB="$(og_child "${OG_L:-0}")"; OG_SCR="$(og_child "${OG_SUB:-0}")"
+    [ -n "$OG_SCR" ] && [ "$(tmux -L cfogdrv display -p -t d '#{alternate_on}')" = 1 ] && break; sleep 0.1
+  done
+  if [ -n "$OG_SCR" ]; then
+    sleep 2.5                                  # two and a half watch polls, launcher alive
+    is "a screen with a live launcher keeps running" "alive" "$(kill -0 "$OG_SCR" 2>/dev/null && echo alive || echo gone)"
+    kill -TERM "$OG_L" 2>/dev/null
+    og_ms="$(og_gone "$OG_SCR" 5)"
+    is "its launcher killed: the screen exits within 5s" "exited" "$([ -n "$og_ms" ] && echo exited || echo "still running after 5s")"
+    sleep 0.5
+    # The shell has the terminal back, and the screen gave back the modes it set.
+    is "and leaves the alt-screen to the shell" "0" "$(tmux -L cfogdrv display -p -t d '#{alternate_on}')"
+    is "and turns mouse reporting off"          "0" "$(tmux -L cfogdrv display -p -t d '#{mouse_any_flag}')"
+    kill -KILL "$OG_SCR" "$OG_SUB" "$OG_L" 2>/dev/null
+  else
+    bad "the Projects screen came up under a real launcher" "a screen pid" "none"
+  fi
+  tmux -L cfogdrv kill-server 2>/dev/null
+
+  # SIGTERM with the loop wedged: a tmux that stops answering once $OG/fk/hang exists.
+  # `exec sleep` so the bound's SIGKILL lands on the sleeper itself, leaving no orphan.
+  printf '#!/bin/sh\n[ -f "%s/fk/hang" ] && exec sleep 60\nexec "%s" "$@"\n' "$OG" "$(command -v tmux)" > "$OG/fk/tmux"
+  chmod +x "$OG/fk/tmux"
+  tmux -L cfogfleet kill-server 2>/dev/null; tmux -L cfogfleet new-session -d -s master "sleep 120" 2>/dev/null
+  tmux -L cfogdrv -f /dev/null new-session -d -s g -x 120 -y 40 \
+    "exec env PATH='$OG/fk:$PATH' CLAUDE_FLEET_DIR='$OG' CLAUDE_FLEET_ROOT= node '$ROOT/bin/fleet-grid.mjs' cfogfleet" 2>/dev/null
+  sleep 2; OG_G="$(tmux -L cfogdrv display -p -t g '#{pane_pid}' 2>/dev/null)"
+  touch "$OG/fk/hang"; sleep 2                 # the next refresh is now stuck in tmux
+  kill -TERM "$OG_G" 2>/dev/null
+  og_ms="$(og_gone "$OG_G" 8)"
+  is "SIGTERM with tmux not answering: exits within 8s" "exited" "$([ -n "$og_ms" ] && echo exited || echo "still running after 8s")"
+  kill -KILL "$OG_G" 2>/dev/null
+  rm -f "${OG:?}/fk/hang"
+  tmux -L cfogdrv kill-server 2>/dev/null; tmux -L cfogfleet kill-server 2>/dev/null
+  rm -rf "${OG:?}"
+else
+  skip "screen outlives launcher" "tmux missing"
 fi
 
 # ── 4a6. a need-you that was answered must stop being red ────────────────────
@@ -3716,8 +4174,10 @@ STUB
 
   # The mod's own harness and the engine's validator, where there is an engine to ask.
   if command -v claude >/dev/null 2>&1 && grep -qE '^  test ' <<< "$(claude plugin --help 2>/dev/null)"; then
-    is "mod: claude plugin validate passes" "1" "$(claude plugin validate "$ROOT/mods/ghostfleet" 2>&1 | grep -c 'Validation passed' || true)"
-    mdt="$(claude plugin test "$ROOT/mods/ghostfleet" 2>&1)"
+    eng() { if [ -n "$SUITE_CLAUDE_CONFIG_DIR" ]; then HOME="$SUITE_HOME" CLAUDE_CONFIG_DIR="$SUITE_CLAUDE_CONFIG_DIR" claude "$@"
+            else HOME="$SUITE_HOME" claude "$@"; fi; }
+    is "mod: claude plugin validate passes" "1" "$(eng plugin validate "$ROOT/mods/ghostfleet" 2>&1 | grep -c 'Validation passed' || true)"
+    mdt="$(eng plugin test "$ROOT/mods/ghostfleet" 2>&1)"
     # The engine can have mods switched off for the whole process (a rollout switch it
     # caches per config dir). That is the machine, not the mod: said, and counted as such.
     if grep -q 'hooks modules are turned off' <<< "$mdt"; then
@@ -3863,7 +4323,8 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
     const now = 10 * 86400000
     let l = L.emptyLedger()
-    for (const t of ['fix the login redirect', 'bump the version', 'add a changelog line']) l = L.addItem(l, { text: t, at: now - 60000, source: 'user' })
+    // one prompt and two messages queued over its turn: one window, which the gate covers
+    for (const [k, t] of ['fix the login redirect', 'bump the version', 'add a changelog line'].entries()) l = L.addPrompt(l, { text: t, at: now - 60000, source: 'user', queued: k > 0 })
     l = L.addItem(l, { text: 'a week-old ask', at: now - 8 * 86400000, source: 'user' })
     const ids = L.openItems(l, now).map(i => i.id)
     const good = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"done\"},{\"id\":\"2\",\"status\":\"not-done\",\"reason\":\"release-managed\"},{\"id\":\"9\",\"status\":\"done\"}],\"promises\":[\"merge when green\"]}', ids)
@@ -3932,6 +4393,71 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   is "ledger: the person's words, not the paste; a quoted reminder is no request" \
      "see this why [+ pasted text] |  | why did it ask | [pasted] a log line | -" "$lp"
 
+  # A judge never asks for more verdicts than its reply holds, and a reply cut off anyway keeps
+  # what it finished: one call for 46 items was cut off, dropped whole, and closed nothing.
+  lb="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    let l = L.emptyLedger()
+    for (let k = 0; k < 46; k++) l = L.addItem(l, { text: 'ask ' + k, at: 1000 + k, source: 'user' })
+    const b = L.judgeBatches(l.items)
+    const full = JSON.stringify({ items: ['1', '2', '3'].map(id => ({ id, status: 'done', reason: 'r' })), promises: ['x'] })
+    const cut = L.parseVerdict(full.slice(0, full.indexOf('\\\"id\\\":\\\"3')), ['1', '2', '3'])
+    const whole = L.parseVerdict(full, ['1', '2', '3'])
+    const junk = L.parseVerdict('{\\\"items\\\":[{\\\"id\\\":\\\"1\\\",\\\"sta', ['1'])
+    console.log([b.map(x => x.length).join(','), b[0][0].id, cut.items.map(i => i.id).join(''), cut.partial, cut.promises.length,
+      whole.partial === undefined, String(junk)].join(' '))" 2>&1)"
+  is "ledger: 46 items in batches of 10, newest first; a cut-off reply keeps its finished items" \
+     "10,10,10,10,6 46 12 true 0 true null" "$lb"
+  # One commitment is one promise in ANY order it arrives: the four phrasings of one follow-up
+  # measured live fold into one in all 24 orders, and three different promises stay three.
+  lp="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const four = ['read the ledgers after the next turns', 'watch for re-prompt closure in acme-api and acme-web',
+      'check acme-api, acme-web, toolbox ledgers after next turns', 'read acme-api, acme-web, toolbox ledgers after next turns']
+    const three = ['merge the PR once CI is green', 'tag the release after the merge', 'add the changelog entry for acme-web 0.6']
+    const perms = a => a.length < 2 ? [a] : a.flatMap((x, k) => perms([...a.slice(0, k), ...a.slice(k + 1)]).map(r => [x, ...r]))
+    const counts = new Set()
+    for (const order of perms(four)) {
+      let l = L.emptyLedger()
+      for (const p of [...order, ...three]) l = L.applyVerdict(l, { items: [], promises: [{ text: p }] }, { nowMs: 1, turnId: 't', promises: 'show' })
+      counts.add(l.items.filter(i => i.state === 'open').length)
+    }
+    console.log([...counts].join(','))" 2>&1)"
+  is "ledger: four phrasings of one promise fold into one in every order; three different ones stay" "4" "$lp"
+  # The gate's guardrails, as data. "in-progress" is a status of its own: the item stays open
+  # (listed, judged again) and is never a gate target, while an item the same verdict calls
+  # "open" still is. Waiting on the person is no promise, and neither is the follow-through of
+  # an in-progress item. The holds each say why, and an ordinary turn has none.
+  lg="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const now = 10 * 86400000
+    let l = L.emptyLedger()
+    l = L.addPrompt(l, { text: 'build the acme-api export', at: now - 60000, source: 'user' })
+    l = L.addPrompt(l, { text: 'rename the toolbox flag', at: now - 60000, source: 'user', queued: true })
+    const v = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"in-progress\",\"reason\":\"worker building it\"},{\"id\":\"2\",\"status\":\"open\"}],\"waitingOnPerson\":true,\"promises\":[{\"text\":\"wait for the user reply\"},{\"text\":\"ship it when the build lands\",\"same\":\"1\"},{\"text\":\"merge once CI is green\"}]}', ['1', '2'])
+    const cut = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"in-progress\"},{\"id\":\"2\",\"st', ['1', '2'])
+    const plain = L.parseVerdict('{\"items\":[{\"id\":\"1\",\"status\":\"open\"}],\"promises\":[]}', ['1'])
+    l = L.applyVerdict(l, v, { nowMs: now, turnId: 't1', promises: 'show' })
+    const states = l.items.map(i => i.id + ':' + i.state + ':' + (i.progress ? 'p' : '-')).join(',')
+    const targets = L.gateTargets(l, now, { promises: 'show' }).map(i => i.id).join('')
+    const listed = /\[in progress: worker building it\]/.test(L.listing(l, now))
+    const waits = ['wait for the user reply', 'await the person\'s answer', 'once they decide, proceed', 'standing by for approval',
+      'merge once CI is green', 'wait for CI, then tag the release', 'reply to the review comments'].map(t => L.waitsOnPerson(t) ? 'w' : '-').join('')
+    const h = o => L.gateHold({ nowMs: now, ...o }) || '-'
+    const holds = [h({}), h({ gateTurn: true }), h({ waitingOnPerson: true }), h({ lastGate: now - 60000 }), h({ lastGate: now - L.GATE_COOLDOWN_MS - 1 }),
+      h({ workers: 2 })].join(',')
+    const nag = L.gatePrompt([{ id: '2', text: 'x', source: 'user' }])
+    const gt = [nag, 'The ghostfleet plugin sent a message: ' + nag, 'why did the [ghostfleet ledger] ask that', ''].map(t => L.isGateTurn(t) ? 'g' : '-').join('')
+    console.log([v.items.map(i => i.status).join('/'), v.waitingOnPerson, cut.waitingOnPerson, plain.waitingOnPerson, v.promises.length, states, targets,
+      listed, waits, holds, gt, L.lastGateAt(L.markGated(l, ['2'], now - 5)) === now - 5].join(' | '))" 2>&1)"
+  is "ledger: in-progress stays open and ungated; open is still gated; waiting is no promise; each hold says why" \
+     "in-progress/open | true | false | false | 2 | 1:open:p,2:open:-,3:open:- | 2 | true | wwww--- | -,gate-turn,waiting,cooldown,-,workers | gg-- | true" "$lg"
+  # One long lead session's shapes, replayed (placeholder words; the helper says what each
+  # line means). Against the ledger.js before this fix the same replay reads 10 nudge items,
+  # 3 resends counted twice, the landed promise stale, the waiting item open, 2 answers as asks.
+  is "ledger: a week's shapes replayed: no nudge items, resends folded, a landed stale promise closed, waiting held, answers folded" \
+     "items 18|nudge items 0|resent pairs counted twice 0|done-but-stale promise: done|waiting on the person: waiting|bare answers made items 0|open now 1" \
+     "$(node --no-warnings "$ROOT/test/helpers/ledger-replay.mjs" "$ROOT/mods/ghostfleet/hooks/ledger.js" "$ROOT/test/fixtures/ledger-replay.json" 2>&1 | grep -v '^by source' | paste -sd'|' -)"
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"
   printf '{"session_id":"lg-1","sock":"cf-lgtest","slot":"w1","ts":5}' > "${LG:?}/lg-1.json"
@@ -3949,6 +4475,39 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   lgc w1 clear >/dev/null
   is "fleet-ledger: lists 2, closes 1, refuses a second close, clears, writes no *.json" "2 1 1 0 2" \
      "$lg1 $lg2 $lg3 $(lgc w1 | grep -c ' open ' || true) $(ls "$LG" | grep -c '\.json$' || true)"
+  # The last judge's status, both ways: a failing one names why, a working one says so.
+  # The judge ran at a FIXED time and the reader's clock is pinned 42s after it. Both used
+  # to be Date.now() in two processes, and the age is rounded to the second, so a reader
+  # that started 500ms late printed "(1s ago)" — red on a loaded runner, green on re-run.
+  LGT=1760000000000
+  lgj() { node --no-warnings --input-type=module -e "
+    import fs from 'node:fs'
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const l = L.addItem(L.emptyLedger(), { text: 'fix the login redirect', at: $LGT, source: 'user' })
+    fs.writeFileSync('$LG/lg-1.ledger', JSON.stringify({ ...l, judge: { at: $LGT, ...JSON.parse(process.argv[1]) } }))" "$1"
+    CLAUDE_FLEET_NOW_MS=$((LGT + 42000)) lgc w1 | grep '^last judge'; }
+  is "fleet-ledger: list shows the last judge's status, failing or ok" \
+     "last judge: FAILING, failed open: reply was not the JSON asked for (42s ago)|last judge: ok, 46 items in 5 calls (42s ago)" \
+     "$(lgj '{"ok":false,"why":"reply was not the JSON asked for"}')|$(lgj '{"ok":true,"items":46,"calls":5}')"
+  # A session older than the mod's tools closes, drops and adds from Bash, through the same
+  # functions the tools use; --session names the file by id. A stale promise is closable too.
+  node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    import fs from 'node:fs'
+    let l = L.emptyLedger()
+    for (const t of ['fix the login redirect', 'bump the version']) l = L.addItem(l, { text: t, at: Date.now(), source: 'user' })
+    l = L.addItem(l, { text: 'merge the export PR when green', at: Date.now(), source: 'promise' })
+    l = { ...l, items: l.items.map(i => (i.id === '3' ? { ...i, state: 'stale' } : i)) }
+    fs.writeFileSync('$LG/lg-1.ledger', JSON.stringify(l))" 2>/dev/null
+  lgs() { env -u TMUX CLAUDE_FLEET_DIR="$LG" "$ROOT/bin/fleet-ledger" --session lg-1 "$@" 2>&1; }
+  lgs close 1 "PR #12, merged" >/dev/null
+  lgd0="$(lgs drop 2 >/dev/null 2>&1; echo $?)"
+  lgs drop 2 "the person cancelled it" >/dev/null
+  lgs add "and post the release note" >/dev/null
+  lgs close 3 "both landed: abc1234" >/dev/null
+  is "fleet-ledger: close/drop/add by --session, with proof and reason, through the tools' functions; no temp file left" \
+     "1|1:done:agent:PR #12, merged|2:dropped:agent:the person cancelled it|3:done:agent:both landed: abc1234|4:open:user:and post the release note|0" \
+     "$lgd0|$(jq -r '.items[]|"\(.id):\(.state):\(.closedBy // .source):\(.proof // .reason // .text)"' "$LG/lg-1.ledger" | paste -sd'|' -)|$(ls -A "$LG" | grep -c 'tmp' || true)"
   is "fleet-ledger: a name on another socket is not this session" "1" \
      "$(env -u TMUX CLAUDE_FLEET_DIR="$LG" "$ROOT/bin/fleet-ledger" -s cf-nofleet w1 >/dev/null 2>&1; echo $?)"
   is "fleet-ledger: install.sh links it" "1" "$(grep -cE '^ +fleet-digest .*fleet-ledger' "$ROOT/install.sh" || true)"
@@ -4283,6 +4842,80 @@ else
   skip "permission dialog detector" "node missing"
 fi
 
+# ── claude's question picker (AskUserQuestion) ──────────────────────────────
+# A session sat on a multi-question picker and the phone said "no prompt on screen —
+# Nothing to answer": the generic menu walk looks back 24 lines for the selected option,
+# and four options whose descriptions wrap at 30 columns put it 27 lines up. Captured from
+# a scratch session (synthetic content) single and multi, at 100/56/30 columns, on each
+# tab, on Submit, and with the free-text row taking text. BOTH DIRECTIONS: it is a
+# question on every one of those, and on nothing else — the permission dialogs, trust
+# prompts and idle panes above keep the kind they had.
+group "question pickers: detected on real captures, and only on those"
+if command -v node >/dev/null 2>&1; then
+  PD="$ROOT/lib/permission-dialog.mjs"
+  qj() { node "$PD" --fingerprint < "$ROOT/test/fixtures/$1" 2>/dev/null; }
+  qk() { qj "$1" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);const v=j?process.argv[1].split(".").reduce((o,k)=>o==null?o:o[k],j):null;process.stdout.write(v==null?"null":typeof v==="object"?JSON.stringify(v):String(v))})' "$2"; }
+  for f in claude-question-multi.txt claude-question-multi-sgr.txt claude-question-multi-56col.txt claude-question-multi-30col.txt \
+           claude-question-multi-tab2-sgr.txt claude-question-multi-back.txt claude-question-submit.txt claude-question-submit-sgr.txt \
+           claude-question-single.txt claude-question-single-30col.txt claude-question-single-typing.txt claude-question-single-typed.txt; do
+    is "$f: a question"                       "question" "$(qk "$f" kind)"
+  done
+  # THE SHAPE THAT WAS BLIND: a single question whose descriptions wrap at 30 columns.
+  is "the 30-column single question has all six options" "6" "$(qk claude-question-single-30col.txt options.length)"
+  # What a phone needs to draw it: the question, the options with their descriptions apart
+  # from their labels, and which rows are not plain choices.
+  is "the question is the question"           "Which database should acme-api use for the billing-svc ledger?" "$(qk claude-question-multi-30col.txt question)"
+  is "...a label is just the label"           "Postgres (Recommended)" "$(qk claude-question-multi.txt options.0.label)"
+  is "...its description rides beside it"     "Relational, already used by toolbox" "$(qk claude-question-multi.txt options.0.description)"
+  is "\"Type something.\" is the free-text row" "true" "$(qk claude-question-multi.txt options.3.free)"
+  is "\"Chat about this\" is marked as chat"  "true" "$(qk claude-question-multi.txt options.4.chat)"
+  is "...and a plain option is neither"       "null" "$(qk claude-question-multi.txt options.1.free)"
+  # Where in the picker: tab count, the current tab (from its colour when the pane has
+  # one), and the Submit step with what was answered.
+  is "two questions, plus Submit"             "2" "$(qk claude-question-multi.txt tabCount)"
+  is "a single question is one tab"           "1" "$(qk claude-question-single.txt tabCount)"
+  is "tab 1 is current (from the colour)"     "0" "$(qk claude-question-multi-sgr.txt tab)"
+  is "tab 2 is current (from the colour)"     "1" "$(qk claude-question-multi-tab2-sgr.txt tab)"
+  is "Submit is the third tab"                "2" "$(qk claude-question-submit-sgr.txt tab)"
+  is "...and says it is the Submit step"      "true" "$(qk claude-question-submit.txt submit)"
+  is "...with the answers to review"          "SQLite" "$(qk claude-question-submit.txt review.0.answer)"
+  is "...and its choices"                     "Submit answers" "$(qk claude-question-submit.txt options.0.label)"
+  is "an answered option is marked chosen"    "true" "$(qk claude-question-multi-back.txt options.0.chosen)"
+  is "...without the tick in its label"       "Staging" "$(qk claude-question-multi-back.txt options.0.label)"
+  is "the free-text row taking text is typing" "true" "$(qk claude-question-single-typing.txt typing)"
+  is "...and the menu is not"                 "false" "$(qk claude-question-single.txt typing)"
+  # THE FINGERPRINT fleet-answer re-checks with: one per step, the same at every width and
+  # with or without colour (the phone captures with -e, fleet-answer without), and changed
+  # by typing mode — a key sent there is text, not a choice.
+  for f in claude-question-multi-sgr.txt claude-question-multi-56col.txt claude-question-multi-30col.txt; do
+    is "$f: same fingerprint as at 100 columns" "$(qk claude-question-multi.txt fingerprint)" "$(qk "$f" fingerprint)"
+  done
+  is "single: same fingerprint at 30 columns" "$(qk claude-question-single.txt fingerprint)" "$(qk claude-question-single-30col.txt fingerprint)"
+  is "submit: same fingerprint with colour"   "$(qk claude-question-submit.txt fingerprint)" "$(qk claude-question-submit-sgr.txt fingerprint)"
+  is "tab 1 and tab 2 differ"                 "no" "$([ "$(qk claude-question-multi.txt fingerprint)" = "$(qk claude-question-multi-tab2-sgr.txt fingerprint)" ] && echo yes || echo no)"
+  is "typing is a different step"             "no" "$([ "$(qk claude-question-single.txt fingerprint)" = "$(qk claude-question-single-typing.txt fingerprint)" ] && echo yes || echo no)"
+  # AND ONLY THERE. The prompts that already parse keep their kind, and panes with no
+  # prompt stay null — a todo list's "☐ task" in a transcript included.
+  for f in claude-permission-bash.txt claude-permission-dialog-sgr.txt claude-permission-bash-56col.txt; do
+    is "$f: still a permission dialog"        "permission" "$(qk "$f" kind)"
+  done
+  is "claude-trust.txt: still a trust prompt" "trust" "$(qk claude-trust.txt kind)"
+  is "codex-update.txt: still a menu"         "menu" "$(qk codex-update.txt kind)"
+  for f in claude-idle.txt claude-busy.txt claude-limit-hit.txt claude-composer-typed.txt; do
+    is "$f: still no prompt"                  "null" "$(qk "$f" kind)"
+  done
+  QT="$(mktemp)"
+  { printf '⏺ Update Todos\n  ⎿  ☐ Wire acme-api to billing-svc\n     ☐ Rebuild toolbox\n     ☒ Read the ledger\n\n'
+    cat "$ROOT/test/fixtures/claude-idle.txt"; } > "$QT"
+  is "a todo list in a transcript is no prompt" "null" "$(node "$PD" --fingerprint < "$QT" | tr -d '\n')"
+  # A picker that was answered is history above the composer.
+  cat "$ROOT/test/fixtures/claude-question-multi.txt" "$ROOT/test/fixtures/claude-idle.txt" > "$QT"
+  is "a picker above an input box is quoted"  "null" "$(node "$PD" --fingerprint < "$QT" | tr -d '\n')"
+  rm -f "$QT"
+else
+  skip "question pickers" "node missing"
+fi
+
 # The same, through the verb, on a real pane: the keys that reach it are what matters.
 # A pane replays the captured dialog and then blocks on a line, so "the pane changed" is
 # a consequence of fleet-answer and not of time passing — the serve group's shape.
@@ -4438,6 +5071,59 @@ SH
   rm -rf "$EX"
 else
   skip "fleet-answer --expect" "tmux or node missing"
+fi
+
+# A QUESTION PICKER'S DIGIT GOES WITHOUT ENTER. Measured on a live picker: a digit selects
+# AND advances, so "3" + Enter answered the first question with 3 and the second with
+# whatever was highlighted — an answer nobody gave. fleet-answer drops the Enter itself when
+# the text is an option number of a picker, which also covers an agent's fleet_answer. The
+# pane reads raw bytes, so what is asserted is what reached it: the digit, and whether an
+# Enter came after it.
+group "fleet-answer sends a picker's digit without Enter"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  QX="$(mktemp -d)"
+  cat > "$QX/keys.sh" <<'SH'
+#!/bin/sh
+clear; cat "$1"
+stty -icanon -echo min 1 time 0
+k=$(dd bs=1 count=1 2>/dev/null)
+stty min 0 time 10
+# several reads: the text and its Enter are two send-keys, and one read can end between
+# them; a read that waits its full second for nothing ends it
+rest=$(dd bs=64 count=8 2>/dev/null | od -An -c | tr -d ' \n')
+clear; printf 'KEY [%s] REST [%s]\n' "$k" "$rest"; sleep 600
+SH
+  chmod +x "$QX/keys.sh"
+  tmux -L cfansq kill-server 2>/dev/null
+  qx_pane() { tmux -L cfansq kill-session -t "$1" 2>/dev/null
+    tmux -L cfansq new-session -d -s "$1" -x 100 -y 40 "$QX/keys.sh $ROOT/test/fixtures/$2" 2>/dev/null
+    local i=0; while [ "$i" -lt 60 ] && [ -z "$(tmux -L cfansq capture-pane -p -t "$1" 2>/dev/null | tr -d '[:space:]')" ]; do i=$((i+1)); sleep 0.1; done; sleep 0.2; }
+  qx_got() { local i=0; while [ "$i" -lt 40 ] && ! grep -q 'KEY \[' <<< "$(tmux -L cfansq capture-pane -p -t "$1" 2>/dev/null)"; do i=$((i+1)); sleep 0.1; done
+             tmux -L cfansq capture-pane -p -t "$1" 2>/dev/null | grep -m1 'KEY \['; }
+  qxa() { TMUX= "$ROOT/bin/fleet-answer" -s cfansq "$@" 2>&1; }
+  qx_pane q1 claude-question-multi.txt
+  out="$(qxa q1 3)"
+  is "a picker digit: the digit, and nothing after it" "KEY [3] REST []" "$(qx_got q1)"
+  is "...saying why there was no Enter"       "1" "$(grep -c 'question picker — sending' <<< "$out" || true)"
+  qx_pane q2 claude-question-submit.txt
+  qxa q2 1 >/dev/null
+  is "Submit's digit goes alone too"          "KEY [1] REST []" "$(qx_got q2)"
+  # THE OTHER DIRECTIONS: a menu that is not a picker still gets its Enter, and so does the
+  # text typed into a picker's free-text row — that Enter is what submits it.
+  qx_pane q3 codex-update.txt
+  qxa q3 2 >/dev/null
+  is "a plain menu still gets its Enter"      "1" "$(qx_got q3 | grep -cE '^KEY \[2\] REST \[\\[rn]\]$' || true)"
+  qx_pane q4 claude-question-single-typing.txt
+  qxa q4 local >/dev/null
+  is "free text into the row is submitted"    "1" "$(qx_got q4 | grep -cE '^KEY \[l\] REST \[ocal\\[rn]\]$' || true)"
+  # A number that is not one of its options is not a choice; it keeps its Enter.
+  qx_pane q5 claude-question-multi.txt
+  qxa q5 9 >/dev/null
+  is "a number that is no option keeps Enter" "1" "$(qx_got q5 | grep -cE '^KEY \[9\] REST \[\\[rn]\]$' || true)"
+  tmux -L cfansq kill-server 2>/dev/null
+  rm -rf "$QX"
+else
+  skip "fleet-answer picker digit" "tmux or node missing"
 fi
 
 # THE MCP CANNOT SET THE FLAG. fleet_answer's arguments go after `--`, so no text or
@@ -4973,8 +5659,11 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command 
   is "a child's done lands in its sub-lead's inbox" "1" "$(nlc 'api-fix-tests	done' "$NLF/cfnl.api-fix.inbox")"
   is "...and NOT in the top master's"               "0" "$(nlc 'api-fix-tests' "$NLF/cfnl.inbox")"
   wait_for 5 "the sub-lead's wake" '[ -s "$NL/sent" ]' || true
-  is "...and push-wakes the sub-lead"               "1" "$([ "$(grep -c '^-s cfnl api-fix ' "$NL/sent" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
-  is "...and not the master"                        "0" "$(grep -c '^-s cfnl master ' "$NL/sent" 2>/dev/null || true)"
+  # marked as the fleet's own wake-up (fleet-send --nudge), so the sub-lead's ledger records
+  # no request for it; "not the master" matches with or without the marker, so it cannot
+  # pass just because the marker moved the arguments along.
+  is "...and push-wakes the sub-lead"               "1" "$([ "$(grep -c '^--nudge -s cfnl api-fix ' "$NL/sent" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
+  is "...and not the master"                        "0" "$(grep -cE '(^| )-s cfnl master ' "$NL/sent" 2>/dev/null || true)"
   nlfire api-fix-tests Notification 'Claude needs your permission to use Bash'
   is "a child's need-you goes to the sub-lead too"  "1" "$(nlc 'api-fix-tests	need-you' "$NLF/cfnl.api-fix.inbox")"
   nlfire docs-pass Stop
@@ -8346,6 +9035,100 @@ else
   skip "a queued question carries its reply address" "tmux missing"
 fi
 
+# The queue had one reader, the drain, so nothing could show what was waiting or take a
+# prompt back before it ran — and the phone lost sight of queued messages. fleet-send owns
+# the record format, so it owns the reader and the remover too.
+group "the queue can be read, and a waiting prompt taken back out"
+if command -v tmux >/dev/null 2>&1; then
+  QL="$(mktemp -d "$TEST_RUNS.$$.ql.XXXXXX")"; QLF="$QL/fleet"; mkdir -p "$QLF"
+  tmux -L cfql kill-server 2>/dev/null
+  tmux -L cfql new-session -d -x 200 -y 40 -s tgt "printf 'esc to interrupt\n'; sleep 60" 2>/dev/null
+  sleep 0.4
+  QLS() { env -u TMUX CLAUDE_FLEET_DIR="$QLF" "$ROOT/bin/fleet-send" -s cfql "$@" 2>&1; }
+  QLS tgt "run the acme-api suite" >/dev/null
+  QLS tgt "$(printf 'then the acme-web one\nand report both')" >/dev/null
+  QLS --nudge tgt "a worker finished — run fleet-inbox" >/dev/null
+  QLS tgt "and the billing-svc one" >/dev/null
+  ql_texts() { QLS --list-queue tgt | while IFS=$'\t' read -r at b64 kind; do
+                 printf '%s:%s|' "${kind:--}" "$(printf '%s' "$b64" | base64 -d 2>/dev/null || printf '%s' "$b64" | base64 -D)"; done; }
+  is "--list-queue lists what is waiting, in order, nudges marked" \
+     "-:run the acme-api suite|-:then the acme-web one
+and report both|nudge:a worker finished — run fleet-inbox|-:and the billing-svc one|" "$(ql_texts)"
+  is "...one line per prompt, however many lines it has" "4" "$(QLS --list-queue tgt | grep -c . || true)"
+  out="$(QLS --unqueue tgt "$(printf 'then the acme-web one\nand report both')")"; rc=$?
+  is "--unqueue takes a waiting prompt back out"  "0" "$rc"
+  is "...and says it was never delivered"         "1" "$(grep -c 'never delivered' <<< "$out" || true)"
+  is "...leaving the others, in order" \
+     "-:run the acme-api suite|nudge:a worker finished — run fleet-inbox|-:and the billing-svc one|" "$(ql_texts)"
+  # Too late is its own answer: the drain has typed it in, and the phone says so.
+  out="$(QLS --unqueue tgt "$(printf 'then the acme-web one\nand report both')")"; rc=$?
+  is "a prompt no longer waiting is refused with 4" "4" "$rc"
+  is "...saying it has been typed in"             "1" "$(grep -c 'already been typed into the session' <<< "$out" || true)"
+  # The fleet's own wake is not the owner's to take back.
+  QLS --unqueue tgt "a worker finished — run fleet-inbox" >/dev/null; rc=$?
+  is "a nudge is never taken back"                "4" "$rc"
+  # Exact text only: a prefix is a different prompt.
+  QLS --unqueue tgt "run the acme-api" >/dev/null; rc=$?
+  is "...nor a prompt that only starts the same"  "4" "$rc"
+  QLS --unqueue tgt "run the acme-api suite" >/dev/null
+  QLS --unqueue tgt "and the billing-svc one" >/dev/null
+  QLS --dequeue tgt >/dev/null 2>&1   # busy: 3, and the nudge stays
+  is "...and the drain still sees what is left"   "1" "$(grep -c . "$QLF/cfql.tgt.queue" 2>/dev/null || echo 0)"
+  is "an empty queue lists nothing"               "" "$(rm -f "$QLF/cfql.tgt.queue"; QLS --list-queue tgt)"
+  tmux -L cfql kill-server 2>/dev/null; rm -rf "${QL:?}"
+else
+  skip "the queue can be read, and a waiting prompt taken back out" "tmux missing"
+fi
+
+# Interrupt is the Escape the desk presses: the turn ends and NOTHING ELSE happens — no
+# park marker, and the lead takes it like any worker. The pane is a perl loop that redraws
+# a spinner until it reads an Escape, so "the turn ended" is the pane going still because
+# of the key, not because time passed.
+group "fleet-pause --interrupt ends the turn and parks nothing"
+if command -v tmux >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
+  QI="$(mktemp -d "$TEST_RUNS.$$.qi.XXXXXX")"; QIF="$QI/fleet"; mkdir -p "$QIF"
+  cat > "$QI/turn.pl" <<'PERL'
+use IO::Select; $| = 1; system('stty raw -echo');
+my $s = IO::Select->new(\*STDIN); my $n = 0;
+while (1) {
+  printf "\r* Working... (%ds . esc to interrupt) %d   ", $n / 10, $n++;
+  if ($s->can_read(0.1)) { sysread(STDIN, my $c, 1); last if $c eq "\e"; }
+}
+print "\r\nINTERRUPTED\r\n"; sleep 600;
+PERL
+  tmux -L cfqi kill-server 2>/dev/null
+  tmux -L cfqi new-session -d -x 120 -y 20 -s w1 "perl '$QI/turn.pl'" 2>/dev/null
+  tmux -L cfqi new-session -d -x 120 -y 20 -s master "perl '$QI/turn.pl'" 2>/dev/null
+  sleep 0.5
+  QIP() { env -u TMUX CLAUDE_FLEET_DIR="$QIF" "$ROOT/bin/fleet-pause" "$@" 2>&1; }
+  out="$(QIP --interrupt -s cfqi w1)"
+  is "--interrupt ends a running turn"            "1" "$(grep -c "interrupted 'w1'" <<< "$out" || true)"
+  is "...the pane saw the Escape"                 "1" "$(tmux -L cfqi capture-pane -p -t w1 2>/dev/null | grep -c INTERRUPTED || true)"
+  is "...and it is NOT parked"                    "no" "$([ -e "$QIF/cfqi.w1.parked" ] && echo yes || echo no)"
+  out="$(QIP --interrupt -s cfqi master)"
+  is "the lead takes an interrupt too"            "1" "$(grep -c "interrupted 'master'" <<< "$out" || true)"
+  is "...and is not parked by it either"          "no" "$([ -e "$QIF/cfqi.master.parked" ] && echo yes || echo no)"
+  out="$(QIP --interrupt -s cfqi w1)"; rc=$?
+  is "a session not mid-turn: nothing to interrupt" "1" "$(grep -c 'nothing to interrupt' <<< "$out" || true)"
+  is "...which is not an error"                   "0" "$rc"
+  # The other direction: plain pause still parks, so --interrupt is a mode and not a change
+  # to what pause does.
+  QIP -s cfqi w1 >/dev/null
+  is "plain pause still parks"                    "yes" "$([ -e "$QIF/cfqi.w1.parked" ] && echo yes || echo no)"
+  QIP --interrupt --hibernate -s cfqi w1 >/dev/null; rc=$?
+  is "--interrupt with --hibernate is refused"   "1" "$rc"
+  # The planner: interrupt is served for the lead, while pause still refuses it.
+  pl() { node --input-type=module -e "
+    const m = await import('$ROOT/mcp/fleet-dispatch.mjs');
+    const p = m.plan(process.argv[1], { session: 'master' });
+    console.log(p.kind === 'run' ? [p.cmd, ...p.args].join(' ') : p.kind);" "$1" 2>/dev/null; }
+  is "the planner sends fleet_interrupt to the lead" "fleet-pause --interrupt master" "$(pl fleet_interrupt)"
+  is "...while fleet_pause on the lead still fails"  "fail" "$(pl fleet_pause)"
+  tmux -L cfqi kill-server 2>/dev/null; rm -rf "${QI:?}"
+else
+  skip "fleet-pause --interrupt ends the turn and parks nothing" "tmux/perl missing"
+fi
+
 # ── 4c1m. a session whose mod is live takes its prompts from the mod ─────────
 # fleet-send hands a prompt to mods/ghostfleet (register.js, DELIVERY) instead of pasting
 # it when the target's record says the mod is live AND delivers. The fixture below is that
@@ -8374,11 +9157,12 @@ while :; do
   if [ -n "$f" ] && mv "$sp/$f" "$sp/${f%.json}.taken" 2>/dev/null; then
     id="${f%.json}"; n=$((n + 1))
     text="$(jq -r .text "$sp/$id.taken" | tail -n 1)"; rs="$(jq -r '.reply.sock // ""' "$sp/$id.taken")"
+    k="$(jq -r '.kind // ""' "$sp/$id.taken")"
     if [ "$text" = DROPME ]; then
       printf '{"id":"%s","dropped":"refused by a hook"}' "$id" > "$sp/$id.done"; rm -f "$sp/$id.taken"; continue
     fi
     st=working; rec
-    printf 'TURN %s%s\n' "$text" "${rs:+ reply=$rs}" >> "$log"
+    printf 'TURN %s%s%s\n' "$text" "${rs:+ reply=$rs}" "${k:+ kind=$k}" >> "$log"
     printf '{"id":"%s","turnId":"t%s"}' "$id" "$n" > "$sp/$id.done"; rm -f "$sp/$id.taken"
     case "$text" in task-slow-*) sleep 1.5 ;; *) sleep "$dur" ;; esac; st=ready; rec
     printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s"}' "$sid" "$PWD" | "$HOOK" >/dev/null 2>&1
@@ -8446,6 +9230,18 @@ MOD
   is "...the box still holds what was typed"          "1" "$(grep -c '❯ half typed words$' <<< "$(mpane)" || true)"
   is "...and fleet-send armed nothing itself"         "0" "$([ -f "$MF/cffm.w1.reply-to" ] && echo 1 || echo 0)"
 
+  # The fleet's own wake-up says so in the entry, idle or drained from the queue, so the
+  # mod's ledger can leave it out by its marker and never by its words; an ordinary prompt
+  # carries no kind (every TURN row above has none).
+  mready; : > "$M/turns"
+  MS --nudge w1 "nudge-hotel" >/dev/null; mwait 1 25
+  MS w1 "task-slow-india" >/dev/null; mwait 2 25
+  MS --nudge w1 "nudge-juliet" >/dev/null
+  is "a nudge is queued with its marker"              "nudge" \
+     "$(cut -d$'\x1f' -f6 "$MF/cffm.w1.queue" 2>/dev/null | head -1)"
+  mwait 3 40
+  is "...and, idle or drained, reaches the mod marked" "TURN nudge-hotel kind=nudge|TURN task-slow-india|TURN nudge-juliet kind=nudge" "$(mturns)"
+
   mready
   mx="$(MS w1 "DROPME")"; mxc=$?
   is "a prompt the session refuses: exit 1, and said" "1 1" "$mxc $(grep -c 'not delivered' <<< "$mx" || true)"
@@ -8484,9 +9280,157 @@ else
   skip "a session whose mod is live takes its prompts from the mod" "tmux/jq/node missing"
 fi
 
+# ── 4c1n. a mod record on ANOTHER tmux server is not this session's mod ─────────
+# A record is matched by socket NAME and slot, and a name is not a server: this suite's
+# own `cf-jarvis` lives under its private $TMUX_TMPDIR, while the fleet dir it inherited
+# from the worker running it held the live record of the REAL session of that name. The
+# target's tmux env names no fleet dir (a fixture sets none), so fleet-send fell back to
+# its own — the real one — found that record, and handed the prompt to a mod on a server
+# it never addressed. Measured: a pair of two-byte prompts into another fleet's master
+# every time the suite ran, five pairs in half an hour, each answered as the owner's
+# words. The record's pane already names its server (`%N@<server pid>`, from $TMUX), so
+# the server fleet-send addresses must be that one. Both directions: the same record,
+# naming the fixture's own server, still takes the prompt.
+group "a mod record on another tmux server is not this session's mod"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  # The suite itself first: nothing it runs may inherit the fleet that started it (above).
+  is "the suite names no fleet dir of its caller's"   "||" "${CLAUDE_FLEET_DIR:-}|${CLAUDE_CONFIG_DIR:-}|${CLAUDE_FLEET_SOCK:-}"
+  XS="$(mktemp -d)"; XF="$XS/elsewhere"; XH="$XS/home"; mkdir -p "$XF/xs-1.handoff" "$XH"
+  tmux -L cfxsrv kill-server 2>/dev/null
+  tmux -L cfxsrv new-session -d -x 100 -y 20 -s master \
+    "printf '────────────────────────────\n❯ \n────────────────────────────\n'; cat >/dev/null" 2>/dev/null
+  xspid="$(tmux -L cfxsrv display-message -p -t master '#{pid}' 2>/dev/null)"
+  # A claimer standing in for the other server's mod: it takes whatever lands in its spool
+  # and logs it, which is exactly what the live one did. Its pid is the record's writer.
+  ( exec -a xs-claimer bash -c '
+      sp="$1"; log="$2"; end=$((SECONDS + 60))
+      while [ "$SECONDS" -lt "$end" ]; do
+        for f in "$sp"/[0-9]*.json; do
+          [ -e "$f" ] || continue
+          id="${f##*/}"; id="${id%.json}"
+          mv "$f" "$sp/$id.taken" 2>/dev/null || continue
+          jq -r .text "$sp/$id.taken" >> "$log"
+          printf "{\"id\":\"%s\",\"turnId\":\"t1\"}" "$id" > "$sp/$id.done"; rm -f "$sp/$id.taken"
+        done
+        sleep 0.1
+      done' _ "$XF/xs-1.handoff" "$XS/claimed" ) & XCP=$!
+  xrec() {           # $1 = the server pid the record's pane names
+    jq -n --argjson pid "$XCP" --argjson hb "$(( $(date +%s) * 1000 ))" --arg pane "%0@$1" \
+      '{session_id:"xs-1", sock:"cfxsrv", slot:"master", pane:$pane, status:"ready", state:"ready",
+        source:"mod", mod:{v:"t", pid:$pid, hb:$hb}}' > "$XF/xs-1.json"
+    printf '%s\n' "$XCP" > "$XF/xs-1.handoff/.ready"; }
+  # Exactly the shape that leaked: HOME redirected, the fleet dir left as the caller's.
+  XSEND() { env -u TMUX HOME="$XH" CLAUDE_FLEET_DIR="$XF" CLAUDE_FLEET_NOTIFIER=off \
+              CLAUDE_FLEET_MOD_CLAIM=2 CLAUDE_FLEET_MOD_START=2 \
+              "$ROOT/bin/fleet-send" -s cfxsrv --anyway master "$1" 2>&1; }
+  # A server that is not this one: the pid of a process that is alive and is no tmux server.
+  xrec "$XCP"
+  is "mod-target: a record naming another server is not a target" "refused" \
+     "$(node "$ROOT/lib/mod-target.mjs" "$XF" cfxsrv master "$xspid" >/dev/null && echo taken || echo refused)"
+  XSEND "ok" >/dev/null; sleep 0.3
+  is "...so fleet-send hands it nothing"              "0" "$(grep -c . "$XS/claimed" 2>/dev/null || echo 0)"
+  is "...and the prompt reaches the server it named"  "1" \
+     "$(grep -cx 'ok' <<< "$(tmux -L cfxsrv capture-pane -p -t master 2>/dev/null)" || true)"
+  xrec "$xspid"
+  is "mod-target: the same record naming THIS server is" "taken" \
+     "$(node "$ROOT/lib/mod-target.mjs" "$XF" cfxsrv master "$xspid" >/dev/null && echo taken || echo refused)"
+  XSEND "task-hotel" >/dev/null
+  is "...and fleet-send hands it the prompt"          "task-hotel" "$(cat "$XS/claimed" 2>/dev/null)"
+  # WHO SENT IT, on the row: the next prompt nobody can explain names its caller.
+  xrow="$(cd "$XS" && env -u TMUX HOME="$XH" CLAUDE_FLEET_DIR="$XF" CLAUDE_FLEET_NOTIFIER=off \
+            CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=api-fix CLAUDE_FLEET_MOD_DELIVER=off \
+            "$ROOT/bin/fleet-send" -s cfxsrv --anyway master "go" >/dev/null 2>&1; tail -n 1 "$XF/cfxsrv.sent")"
+  is "the sent log names the sending session"         "from=env:cf-acme-api/api-fix" \
+     "$(awk -F'\t' '{print $5}' <<< "$xrow" | grep -o 'from=[^ ]*')"
+  is "...the directory it ran in"                     "cwd=$(cd "$XS" && pwd -P)" \
+     "$(awk -F'\t' '{print $5}' <<< "$xrow" | grep -o 'cwd=[^ ]*')"
+  is "...and the process that ran it"                 "1" \
+     "$(awk -F'\t' '{print $5}' <<< "$xrow" | grep -c 'by=.*bash' || true)"
+  is "...still one record of five fields"             "5" "$(awk -F'\t' '{print NF}' <<< "$xrow")"
+  kill "$XCP" 2>/dev/null; wait "$XCP" 2>/dev/null
+  tmux -L cfxsrv kill-server 2>/dev/null; rm -rf "${XS:?}"
+else
+  skip "a mod record on another tmux server is not this session's mod" "tmux/jq/node missing"
+fi
+
+# ── 4c1o. a run leaves the fleet that started it untouched ─────────────────────
+# The suite is run BY fleet sessions, and everything it inherits from one points at a live
+# fleet: CLAUDE_FLEET_DIR, CLAUDE_CONFIG_DIR, $TMUX, and HOME with Jarvis's marker in it.
+# Each of those reached the real thing at least once: two-byte prompts into the real
+# Jarvis's master, fixture need-yous in the real Jarvis's inbox, a fixture's `done` row in
+# the real lead's inbox under the worker's own name. So: a caller made of sentinels — its
+# own HOME holding a Jarvis marker, its own fleet dir, a live tmux server for its $TMUX —
+# runs the groups that leaked, and afterwards that caller's files are exactly what it put
+# there. Nested runs skip this group, or it would run itself.
+group "a run leaves the fleet that started it untouched"
+if [ -n "${SUITE_NESTED:-}" ]; then
+  skip "a run leaves the fleet that started it untouched" "this is the nested run"
+elif command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  SN="$(cd "$(mktemp -d)" && pwd -P)"; SNH="$SN/home"
+  mkdir -p "$SNH/.config/ghostfleet" "$SNH/.claude/fleet"
+  printf 'name=jarvis\nprofile=work\nsock=cf-jarvis\ncfg=%s\npath=%s\n' "$SNH/.claude" "$SN/jv" > "$SNH/.config/ghostfleet/jarvis"
+  tmux -L cf-acme-api kill-server 2>/dev/null
+  tmux -L cf-acme-api new-session -d -s api-fix 'sleep 600' 2>/dev/null
+  sntmux="$(tmux -L cf-acme-api display-message -p -t api-fix '#{socket_path},#{pid},#{session_id}' 2>/dev/null)"
+  snbefore="$(cd "$SNH" && find . -type f | sort)"
+  # -u CF_ONLY: this run may itself be a filtered one, and a nested run that inherits the
+  # mark takes itself for already filtered and runs everything.
+  ( cd "$ROOT" && env -u CF_ONLY -u CF_F HOME="$SNH" TMUX="$sntmux" TMUX_PANE=%0 SUITE_NESTED=1 \
+      CLAUDE_FLEET_DIR="$SNH/.claude/fleet" CLAUDE_CONFIG_DIR="$SNH/.claude" \
+      CLAUDE_FLEET_SOCK=cf-acme-api CLAUDE_FLEET_SLOT=api-fix \
+      "$ROOT/test/run.sh" "a need-you anywhere wakes Jarvis at once; finished work never does" \
+        "agy: the installer, the event bridge and the launcher" \
+        "cursor: the installer, the event bridge, the compat guard and the launcher" \
+        "a reply that cannot arrive is not promised" \
+        "a mod record on another tmux server is not this session's mod" ) > "$SN/nested.log" 2>&1
+  is "the nested run ran its groups"                  "1" \
+     "$([ "$(grep -cE '^[0-9]+ passed' "$SN/nested.log" || true)" -ge 1 ] && echo 1 || echo 0)"
+  is "...and they pass with a fleet calling them"     " 0 failed" \
+     "$(grep -oE ' [0-9]+ failed' <<< "$(sed 's/\x1b\[[0-9;]*m//g' "$SN/nested.log")" | tail -1)"
+  is "...and the caller's home and fleet dir hold only what the caller put there" "$snbefore" \
+     "$(cd "$SNH" && find . -type f | sort)"
+  tmux -L cf-acme-api kill-server 2>/dev/null; rm -rf "${SN:?}"
+else
+  skip "a run leaves the fleet that started it untouched" "tmux/jq/node missing"
+fi
+
 # The queue is keyed by the session NAME, like every other per-session marker, so a rename
 # that left it behind would strand work already sent, and a stop that left it would hand a
 # stranger's backlog to the next session that reuses the name.
+# NEED-YOU IS NOT MID-TURN. A session stopped on a permission dialog or a question picker
+# is busy to fleet-send, so a prompt to it is queued — and it runs only after somebody
+# answers the prompt in its pane. "queued — it is mid-turn" read as "sent" on the phone,
+# and the owner waited on a session that was waiting on him. The reply says which it is;
+# fleet-serve keys `queued: 'question'` on these words, so they are asserted exactly.
+group "a send held behind a question says so"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  NQ="$(mktemp -d)"; NF="$NQ/fleet"; mkdir -p "$NF/nq-1.handoff"
+  tmux -L cfnq kill-server 2>/dev/null
+  tmux -L cfnq new-session -d -s w1 -x 100 -y 30 "sleep 600" 2>/dev/null
+  NQPID="$(tmux -L cfnq display-message -p -t w1 '#{pane_pid}' 2>/dev/null)"
+  # The mod's record, written as the mod writes it: this slot, a fresh heartbeat, a live pid.
+  nq_rec() { jq -n --arg s "$1" --argjson pid "$NQPID" --argjson hb "$(( $(date +%s) * 1000 ))" \
+               '{session_id:"nq-1", sock:"cfnq", slot:"w1", status:$s, state:$s, source:"mod", mod:{v:"t", pid:$pid, hb:$hb}}' \
+               > "$NF/nq-1.json"; printf '%s\n' "$NQPID" > "$NF/nq-1.handoff/.ready"; }
+  NS() { env -u TMUX CLAUDE_FLEET_DIR="$NF" PATH="$ROOT/bin:$PATH" "$ROOT/bin/fleet-send" -s cfnq "$@" 2>&1; }
+  nq_rec need-you
+  is "mod-target reads it as need-you"        "nq-1 need-you" "$(node "$ROOT/lib/mod-target.mjs" "$NF" cfnq w1 | cut -f1,2 | tr '\t' ' ')"
+  out="$(NS w1 "list the toolbox scripts")"
+  is "a send to a need-you session is queued behind a question" "1" "$(grep -c 'queued #1 behind a question' <<< "$out" || true)"
+  is "...and not called mid-turn"             "0" "$(grep -c 'mid-turn' <<< "$out" || true)"
+  is "...and it is held, not sent"            "1" "$(grep -c . "$NF/cfnq.w1.queue" 2>/dev/null || echo 0)"
+  rm -f "$NF/cfnq.w1.queue"
+  # THE OTHER DIRECTION: a session that is merely working keeps the words it always had.
+  nq_rec working
+  out="$(NS w1 "list the acme-api routes")"
+  is "a working session is still mid-turn"    "1" "$(grep -c 'queued #1 — it is mid-turn' <<< "$out" || true)"
+  is "...and not behind a question"           "0" "$(grep -c 'behind a question' <<< "$out" || true)"
+  tmux -L cfnq kill-server 2>/dev/null
+  rm -rf "$NQ"
+else
+  skip "a send held behind a question" "tmux, jq or node missing"
+fi
+
 group "the queue moves with a rename and goes with a stop"
 if command -v tmux >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   QM="$(mktemp -d)"; QMF="$QM/fleet"; mkdir -p "$QMF" "$QM/repo"
@@ -9740,8 +10684,10 @@ group "the wake finds the input box, not the last ❯"
 if command -v awk >/dev/null 2>&1; then
   # the real function, lifted from the hook with only its tmux call swapped for a file —
   # the same way the fleet-send composer detector is tested above
-  eval "$(sed -n '/^_input_state() {/,/^}/p' "$ROOT/hooks/fleet-event.sh" \
-          | sed 's|tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null|cat "$1"|')"
+  eval "$(sed -n '/^_pane_text() {/,/^}/p;/^_input_state() {/,/^}/p' "$ROOT/hooks/fleet-event.sh" \
+          | sed 's|tmux -L "$1" capture-pane -e -p -t "$2" 2>/dev/null|cat "$1"|
+                 s|tmux -L "$1" capture-pane -p -t "$2" 2>/dev/null|cat "$1"|')"
+  CF_UNDIM="$ROOT/lib/undim.awk"
   st() { _input_state "$FIX/$1" x; echo $?; }          # 0 empty · 1 typed · 2 no box
   is "an empty composer is safe to paste"   "0" "$(st claude-composer-empty.txt)"
   is "a typed composer is NEVER clobbered"  "1" "$(st claude-composer-typed.txt)"
@@ -9750,6 +10696,35 @@ if command -v awk >/dev/null 2>&1; then
   # the older captures, which must not regress
   is "...and the plain-space empty box"     "0" "$(st claude-input-submitted.txt)"
   is "...and the plain-space typed box"     "1" "$(st claude-input-pending.txt)"
+
+  # ── AN EMPTY BOX IS NOT BLANK: IT CARRIES A DIM SUGGESTION ──
+  # Claude fills an empty composer with greyed text: `Try "…"` in a fresh session, a
+  # suggested next prompt after a turn. A plain capture drops the attribute, so both read as
+  # typed and the guard said 1 for an idle lead — every wake deferred, retried for ten
+  # minutes, and expired into a file nobody reads, while a worker sat on a permission prompt.
+  # The captures are WITH attributes (capture-pane -e), as the guard now reads them: the
+  # glyph, a no-break space, then ESC[2m…ESC[0m. Measured on a scratch session: SGR 2 and
+  # nothing else — no 256-colour grey stands in for it.
+  is "a fresh session's dim placeholder is EMPTY"   "0" "$(st claude-composer-placeholder-sgr.txt)"
+  is "a dim suggested prompt is EMPTY"              "0" "$(st claude-composer-suggestion-sgr.txt)"
+  # the other direction, or the fix is "ignore the composer": the same words, not dim
+  is "typed text captured with -e is still typed"   "1" "$(st claude-composer-typed-live-sgr.txt)"
+  is "...and the suggestion's words, typed"         "1" "$(st claude-composer-typed-sgr.txt)"
+  is "...and one word after the no-break space"     "1" "$(st claude-composer-oneword-sgr.txt)"
+  # the traps, asserted to BE in the fixtures: a fixture that lost its ESC[2m would turn
+  # the two EMPTY rows above into plain-text tests that pass for the wrong reason
+  is "the placeholder fixture is drawn dim"  "1" \
+     "$(LC_ALL=C grep -q "❯$(printf '\302\240\033')\[2mTry" "$FIX/claude-composer-placeholder-sgr.txt" && echo 1 || echo 0)"
+  is "...and the typed one is not"           "0" \
+     "$(LC_ALL=C grep -q "$(printf '\033')\[2m" "$FIX/claude-composer-typed-live-sgr.txt" && echo 1 || echo 0)"
+  # 38;5;2 is a COLOUR (green), not dim: a reader that greps for a 2 eats coloured typing
+  printf '─────────────────\n❯\302\240\033[38;5;2mgreen words\033[39m\n─────────────────\nstatus\n' > "$FIX/../.undim-$$.txt"
+  is "a colour index of 2 is not dim"        "1" "$(_input_state "$FIX/../.undim-$$.txt" x; echo $?)"
+  rm -f "$FIX/../.undim-$$.txt"
+  # a stale runtime without lib/undim.awk falls back to the plain capture rather than
+  # reading every pane as "no box" — the old behaviour, never a worse one
+  is "no undim.awk: the old reading, not a blind one" "1" \
+     "$(CF_UNDIM=/nonexistent; _input_state "$FIX/claude-input-pending.txt" x; echo $?)"
 
   # THE TRAPS, asserted to actually BE in the fixture — a fixture that quietly lost them
   # would leave the assertions above passing for the wrong reason
@@ -9798,6 +10773,7 @@ if command -v tmux >/dev/null 2>&1; then
   # carries the guard across with `export -f` — an exported function whose body reads an
   # un-exported variable is a stub that always answers "not empty" over there
   export ND
+  _pane_text() { :; }
   _input_state() { return "$(cat "$ND/state" 2>/dev/null || echo 2)"; }
   _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
   echo 1 > "$ND/state"                       # the human is mid-sentence
@@ -9837,6 +10813,22 @@ if command -v tmux >/dev/null 2>&1; then
      "$([ -f "$ND/sent.log" ] && wc -l < "$ND/sent.log" | tr -d ' ' || echo 0)"
   is "...and leaves a trace, not silence"      "1" \
      "$([ -s "$ND/cfnudge.notify.undelivered" ] && echo 1 || echo 0)"
+  # THE TRACE HAS TO BE WHERE SOMEBODY LOOKS. The marker alone went unread through four
+  # expiries while a worker sat on a permission prompt; the row goes in the inbox the wake
+  # was for, beside the rows it failed to announce.
+  for i in $(seq 1 10); do [ -s "$ND/cfnudge.inbox" ] && break; sleep 0.5; done
+  is "...and an UNDELIVERED row in master's inbox" "1" \
+     "$(awk -F'\t' '$2 == "master" && $3 == "undelivered"' "$ND/cfnudge.inbox" 2>/dev/null | grep -c . || true)"
+  # a SUB-LEAD's expiry lands in the sub-lead's inbox, not master's
+  echo 1 > "$ND/state"
+  tmux -L cfnudge new-session -d -s acme-lead 'sleep 120' 2>/dev/null
+  CLAUDE_FLEET_NOTIFY_RETRY_EVERY=1 CLAUDE_FLEET_NOTIFY_RETRY_TRIES=2 PATH="$ND/bin:$PATH" \
+    _defer_nudge cfnudge "$ND" acme-lead.notify "wake up" acme-lead
+  for i in $(seq 1 15); do [ -s "$ND/cfnudge.acme-lead.inbox" ] && break; sleep 1; done
+  is "...a sub-lead's lands in ITS inbox"          "1" \
+     "$(awk -F'\t' '$2 == "acme-lead" && $3 == "undelivered"' "$ND/cfnudge.acme-lead.inbox" 2>/dev/null | grep -c . || true)"
+  is "...and not in master's"                      "1" \
+     "$(grep -c undelivered "$ND/cfnudge.inbox" 2>/dev/null || true)"
   tmux -L cfnudge kill-server 2>/dev/null; rm -rf "$ND"
 else
   skip "deferred wake" "tmux missing"
@@ -11990,7 +12982,7 @@ sv_cli init --bind 127.0.0.1 --port "$PORT" >/dev/null 2>&1
 # Rate limiting has its own group below; here it must not fire. One probe phase makes
 # dozens of assertion and verb calls in a second, which no phone ever would, and a 429 in
 # the middle of the auth phase would read as an auth failure.
-sv_rate() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:+process.argv[2],write:+process.argv[3],auth:+process.argv[4]};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$SV/serve.json" "$1" "$2" "$3"; }
+sv_rate() { node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:+process.argv[2],write:+process.argv[3],auth:+process.argv[4],challenge:4000};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$SV/serve.json" "$1" "$2" "$3"; }
 sv_rate 4000 4000 4000
 US=$'\x1f'
 pf() { grep -m1 "^$1$US" "$SV/probe.$2" | cut -d "$US" -f2; }   # http status
@@ -12614,6 +13606,106 @@ else
   # ...and -J is absent too: joining wrapped lines would un-wrap the grid tmux laid out,
   # which is the one thing the client cannot recover from.
   is "capture-pane is not asked to join"     "0"   "$(grep -c "'-J'" "$ROOT/bin/fleet-serve.mjs" || true)"
+
+  # ── a send held behind a question is not "sent" ───────────────────────────
+  # fleet-send queues a prompt to a need-you session, and it runs only once somebody
+  # answers the prompt in that pane. The verb's reply carries `queued: 'question'` so the
+  # phone says so (and offers the answer sheet) instead of a plain success. The session's
+  # mod record says need-you, written as the mod writes it, against the pane's own pid.
+  HF="$PN/heldfleet"; mkdir -p "$HF/hq-1.handoff"
+  tmux -L cf-demo new-session -d -s held -x 100 -y 30 -e CLAUDE_FLEET_DIR="$HF" "sleep 600" 2>/dev/null
+  HQPID="$(tmux -L cf-demo display-message -p -t held '#{pane_pid}' 2>/dev/null)"
+  hq_rec() { jq -n --arg s "$1" --argjson pid "$HQPID" --argjson hb "$(( $(date +%s) * 1000 ))" \
+               '{session_id:"hq-1", sock:"cf-demo", slot:"held", status:$s, state:$s, source:"mod", mod:{v:"t", pid:$pid, hb:$hb}}' \
+               > "$HF/hq-1.json"; printf '%s\n' "$HQPID" > "$HF/hq-1.handoff/.ready"; }
+  hq_send() { node --input-type=module -e "
+    import { Authenticator } from '$ROOT/test/helpers/serve-client.mjs';
+    const a = new Authenticator({ rpId: new URL('$PNBASE').hostname, origin: '$PNBASE' });
+    const e = await a.enroll('$PNBASE', process.argv[1]);
+    if (e.status !== 200) { console.log('enrol ' + e.status); process.exit(0); }
+    const r = await a.verb('$PNBASE', 'fleet_send', { project: 'demo', session: 'held', prompt: process.argv[2] });
+    console.log(JSON.stringify({ status: r.status, ok: r.json.ok, queued: r.json.queued ?? null }));" "$1" "$2"; }
+  if command -v jq >/dev/null 2>&1; then
+    hq_rec need-you
+    out="$(hq_send "$(pn_cli enroll phone-held | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the toolbox scripts")"
+    is "a send to a need-you session says queued behind a question" '{"status":200,"ok":true,"queued":"question"}' "$out"
+    rm -f "$PN/home/.claude/fleet/cf-demo.held.queue"
+    # ...and a send that is only mid-turn is queued TOO, but not behind a question: it says
+    # `turn`, so the phone draws it as a queued bubble it can take back, and does not offer
+    # the answer sheet. It used to carry no flag at all, which is how a queued message and a
+    # delivered one looked the same from the phone.
+    hq_rec working
+    out="$(hq_send "$(pn_cli enroll phone-held2 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the acme-api routes")"
+    is "...and a working one is queued behind the turn" '{"status":200,"ok":true,"queued":"turn"}' "$out"
+
+    # ── the queue is READ beside the transcript, and a waiting prompt can be taken back ──
+    # The phone lost sight of a queued message the moment the next send replaced its one
+    # bubble, and could not edit one at all. /api/session now serves the session's queue
+    # (fleet-send --list-queue, decoded), and fleet_unqueue takes a prompt back out — or
+    # says, as `delivered`, that the drain has already typed it in.
+    hq_flow() { node --input-type=module -e "
+      import { Authenticator } from '$ROOT/test/helpers/serve-client.mjs';
+      const a = new Authenticator({ rpId: new URL('$PNBASE').hostname, origin: '$PNBASE' });
+      const e = await a.enroll('$PNBASE', process.argv[1]);
+      if (e.status !== 200) { console.log('enrol ' + e.status); process.exit(0); }
+      const multi = 'check the acme-web build\\nthen the billing-svc one';
+      await a.verb('$PNBASE', 'fleet_send', { project: 'demo', session: 'held', prompt: multi });
+      const s1 = await a.api('$PNBASE', 'GET', '/api/session?project=demo&session=held');
+      const q1 = (s1.json.queue || []).map(x => x.text);
+      const u1 = await a.verb('$PNBASE', 'fleet_unqueue', { project: 'demo', session: 'held', prompt: 'list the acme-api routes' });
+      const u2 = await a.verb('$PNBASE', 'fleet_unqueue', { project: 'demo', session: 'held', prompt: 'list the acme-api routes' });
+      const s2 = await a.api('$PNBASE', 'GET', '/api/session?project=demo&session=held');
+      const q2 = (s2.json.queue || []).map(x => x.text);
+      console.log(JSON.stringify({ q1, u1: [u1.status, u1.json.ok], u2: [u2.status, u2.json.ok, u2.json.delivered ?? null], q2 }));" "$1"; }
+    out="$(hq_flow "$(pn_cli enroll phone-held5 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')")"
+    is "the session read serves its queue, in order" \
+       '["list the acme-api routes","check the acme-web build\nthen the billing-svc one"]' \
+       "$(jq -c '.q1' <<< "$out" 2>/dev/null || echo "$out")"
+    is "a waiting prompt is taken back out"   '[200,true]'      "$(jq -c '.u1' <<< "$out" 2>/dev/null || echo "$out")"
+    is "...and a second take-back says it is gone, as delivered" '[409,false,true]' "$(jq -c '.u2' <<< "$out" 2>/dev/null || echo "$out")"
+    is "...leaving the rest of the queue, multi-line intact" \
+       '["check the acme-web build\nthen the billing-svc one"]' "$(jq -c '.q2' <<< "$out" 2>/dev/null || echo "$out")"
+
+    # ── a send the mod could not submit is NOT a success ─────────────────────
+    # fleet-send exits 1 with "(not delivered: the mod could not submit it — …)" when the
+    # mod's receipt says it refused, and the daemon used to drop that status: 200, ok:true,
+    # the composer cleared and the owner believed it sent. A stand-in mod answers the
+    # handoff here exactly as the real one did — the claim, then a receipt — once with the
+    # refusal it gave for a prompt beginning with `/`, and once with a started turn, so the
+    # assertion is proven in both directions through the same daemon and the same fleet-send.
+    rm -f "$PN/home/.claude/fleet/cf-demo.held.queue"
+    hq_rec idle
+    hq_mod() {   # $1 = the receipt the stand-in writes for every handoff it claims
+      ( for _ in $(seq 1 300); do
+          for f in "$HF/hq-1.handoff/"*.json; do
+            [ -f "$f" ] || continue
+            rm -f "$f"; printf '%s\n' "$1" > "${f%.json}.done"
+          done
+          sleep 0.05
+        done ) & HQ_MOD=$!
+    }
+    hq_verb() { node --input-type=module -e "
+      import { Authenticator } from '$ROOT/test/helpers/serve-client.mjs';
+      const a = new Authenticator({ rpId: new URL('$PNBASE').hostname, origin: '$PNBASE' });
+      const e = await a.enroll('$PNBASE', process.argv[1]);
+      if (e.status !== 200) { console.log('enrol ' + e.status); process.exit(0); }
+      const r = await a.verb('$PNBASE', 'fleet_send', { project: 'demo', session: 'held', prompt: process.argv[2] });
+      console.log(JSON.stringify({ status: r.status, ok: r.json.ok, text: r.json.text }));" "$1" "$2"; }
+    hq_mod '{"error":"prompt.submit: refused — a text beginning with / would run a command as the user"}'
+    out="$(hq_verb "$(pn_cli enroll phone-held3 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "/review the acme-api routes")"
+    kill "$HQ_MOD" 2>/dev/null; wait "$HQ_MOD" 2>/dev/null
+    is "a send the mod refused is not ok"        "false" "$(jq -r '.ok' <<< "$out" 2>/dev/null)"
+    is "...and is not a 200"                     "400"   "$(jq -r '.status' <<< "$out" 2>/dev/null)"
+    is "...saying it did not reach the session"  "1"     "$([ "$(grep -c 'did not reach held' <<< "$out" || true)" -ge 1 ] && echo 1 || echo 0)"
+    is "...and why, in the mod's words"          "1"     "$([ "$(grep -c 'would run a command' <<< "$out" || true)" -ge 1 ] && echo 1 || echo 0)"
+    hq_mod '{"turnId":"t-1"}'
+    out="$(hq_verb "$(pn_cli enroll phone-held4 | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')" "list the billing-svc jobs")"
+    kill "$HQ_MOD" 2>/dev/null; wait "$HQ_MOD" 2>/dev/null
+    is "...and one the mod started stays a quiet success" "200 true" "$(jq -r '"\(.status) \(.ok)"' <<< "$out" 2>/dev/null)"
+    is "...with no failure in its text"          "0"     "$(grep -c 'did not reach' <<< "$out" || true)"
+  else
+    skip "a send held behind a question (serve)" "jq missing"
+  fi
 fi
 kill $PN_PID 2>/dev/null
 tmux -L cf-demo kill-server 2>/dev/null
@@ -12760,6 +13852,31 @@ if sv_start rate; then
   serve_stop
 else
   skip "fleet-serve rate limit" "server did not come up: $SV_WHY"
+fi
+sv_rate 4000 4000 4000
+
+group "fleet-serve: tapping unlock cannot lock the owner out"
+# needs: free_port answers in digits
+node -e 'const fs=require("fs"),p=process.argv[1],c=JSON.parse(fs.readFileSync(p,"utf8"));c.rate={window:60,read:4000,write:4000,auth:3,challenge:30};fs.writeFileSync(p,JSON.stringify(c,null,2))' "$SV/serve.json"
+if sv_start authburst; then
+  node "$ROOT/test/helpers/serve-probe.mjs" "$BASE" authburst "$(sv_code burst)" > "$SV/probe.burst" 2>"$SV/probe.burst.err"
+  is "authburst-probe ran"                    ""    "$(head -2 "$SV/probe.burst.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "the phone enrols"                       "200" "$(pf burst.enrol burst)"
+  # Twenty challenges against an auth cap of 3 — the shape of the night it went wrong.
+  is "a flood of challenges is not refused"   "0"   "$(pb burst.challenges burst | grep -c '429' || true)"
+  is "...all twenty were answered"            "20"  "$(pb burst.challenges burst | grep -o '200' | wc -l | tr -d ' ')"
+  is "...and the owner still gets in"         "200" "$(pf burst.assertAfterFlood burst)"
+  is "a good assertion spends nothing"        "200" "$(pf burst.assertAgain burst)"
+  # BOTH DIRECTIONS: the brute-force protection is still there, on the thing that is guessed.
+  is "a forged signature is refused"          "401" "$(pf burst.badSig3 burst)"
+  is "three refusals close the door"          "429" "$(pf burst.afterFailures burst)"
+  is "...saying why"                          "1"   "$(pb burst.afterFailures burst | grep -c 'refused passkey attempts' || true)"
+  # ...and a challenge is cheap, not free: its own ceiling still holds.
+  is "challenges still have a ceiling"        "1"   "$([ "$(pb burst.ceiling burst | grep -o '429' | wc -l)" -ge 1 ] && echo 1 || echo 0)"
+  is "...that starts above the auth cap"      "1"   "$(pb burst.ceiling burst | grep -c '^\[200' || true)"
+  serve_stop
+else
+  skip "fleet-serve auth burst" "server did not come up: $SV_WHY"
 fi
 sv_rate 4000 4000 4000
 
@@ -13596,17 +14713,31 @@ if sv_start origin; then
   # The client really is enrolled now, as far as the SERVER is concerned — asserted from
   # the other side, because the helper's own view of it is the client's.
   is "the daemon lists the phone as enrolled" "1" "$(sv_cli clients | grep -c '^pwaenrol *active *1' || true)"
-  # ── and a RELAUNCH gets back in on the session it already has ─────────────
-  # A new process seeded with what the enrolled "phone" left in localStorage: iOS evicting the
-  # backgrounded app and the owner tapping it again. web/passkey.js resume() must reach the
-  # daemon on the stored token without the sensor, and clear a token the daemon refuses.
+  # ── and a COLD LAUNCH is locked, while the app's own reload is not ─────────
+  # A new process seeded with what the enrolled "phone" left behind. Closed from the app
+  # switcher and reopened, it must NOT resume (the owner's "when I exit the app, lock it");
+  # reloaded by its service worker, it must, without the sensor; and a token an older
+  # client kept in localStorage must be ended on the daemon rather than walked in on.
   node "$ROOT/test/helpers/pwa-relaunch.mjs" "$BASE" "$PWO/store.json" > "$PWO/relaunch" 2> "$PWO/relaunch.err"
   is "pwa-relaunch ran"               "0" "$?"
   is "...without complaining"         ""  "$(head -2 "$PWO/relaunch.err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/relaunch")" -ge 12 ] && echo yes || echo "no: $(wc -l < "$PWO/relaunch") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/relaunch")" -ge 20 ] && echo yes || echo "no: $(wc -l < "$PWO/relaunch") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PWO/relaunch"
+  # ── and the unlock TAP has to reach the sensor while it still counts ──────
+  # WebKit shows the passkey sheet only to a get() made inside the tap. The button awaited a
+  # challenge first, so every tap was refused without a sheet: a challenge per tap, never an
+  # assert, nothing drawn — and the owner tapped until the rate limit shut them out. The
+  # helper's fake get() refuses any call made outside the tap's synchronous extent.
+  PWU_CODE="$(sv_code pwaunlock)"
+  node "$ROOT/test/helpers/pwa-unlock.mjs" "$BASE" "$PWU_CODE" > "$PWO/unlock" 2> "$PWO/unlock.err"
+  is "pwa-unlock ran"                 "0" "$?"
+  is "...without complaining"         ""  "$(head -2 "$PWO/unlock.err" | tr '\n' ' ' | sed 's/ *$//')"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PWO/unlock")" -ge 30 ] && echo yes || echo "no: $(wc -l < "$PWO/unlock") rows")"
+  while IFS=$'\x1f' read -r name want got; do
+    is "$name" "$want" "$got"
+  done < "$PWO/unlock"
   rm -rf "$PWO"
   serve_stop
 else
@@ -13725,10 +14856,19 @@ rm -rf "$JW"
 # fake clock — speech with a pause inside it that must NOT end the utterance, then silence
 # that must, a second later. The encoder is fed real speech at the 48 kHz a phone's mic
 # runs at, and its output goes through the real whisper.cpp when this machine has one.
-group "conversation mode: a second of quiet ends an utterance, and the WAV is heard"
+group "conversation mode: 3.5 s of quiet ends an utterance, and the WAV is heard"
 if command -v node >/dev/null 2>&1; then
   CV="$(cd "$(mktemp -d)" && pwd -P)"
+  # The loop and everything it calls, lifted as written: the turn clock, the quiet setting
+  # it reads, and the barge gate the same loop runs while an answer is read.
   { grep '^const TALK = {.*};$' "$ROOT/web/app.js"
+    grep '^const LS_QUIET = ' "$ROOT/web/app.js"
+    grep '^export const QUIET = ' "$ROOT/web/app.js" | sed 's/^export //'
+    grep '^export const BARGE = ' "$ROOT/web/app.js" | sed 's/^export //'
+    for f in savedQuiet turnClock bargeDetector; do
+      sed -n "/^export function $f(/,/^}/p" "$ROOT/web/app.js" | sed 's/^export //'
+    done
+    for f in drawTurn talkListenText; do sed -n "/^function $f(/,/^}/p" "$ROOT/web/app.js"; done
     sed -n '/^const T = {/,/};$/p' "$ROOT/web/app.js"
     sed -n '/^function onTalkFrame(e) {/,/^}/p' "$ROOT/web/app.js"
     sed -n '/^export function encodeWav(frames, rate) {/,/^}/p' "$ROOT/web/app.js" | sed 's/^export //'
@@ -13745,7 +14885,8 @@ const frame = (amp) => { const d = new Float32Array(N); for (let i = 0; i < N; i
 const feed = (ms, amp) => { for (let t = 0; t < ms; t += MS) { if (ctx.S.talk.phase !== 'listening') return; ctx.onTalkFrame({ inputBuffer: { getChannelData: () => frame(amp) } }); clock += MS; } };
 const mode = process.argv[3];
 ctx.T.listenAt = 0;
-if (mode === 'utterance') { feed(1000, 0); feed(700, 0.1); feed(450, 0); feed(700, 0.1); const endAt = clock; feed(2500, 0);
+// A breath (450 ms) and a pause to think (2 s) inside one utterance, then silence.
+if (mode === 'utterance') { feed(1000, 0); feed(700, 0.1); feed(450, 0); feed(700, 0.1); feed(2000, 0); feed(700, 0.1); const endAt = clock; feed(5000, 0);
   console.log(JSON.stringify({ events, endAt: Math.round(endAt) })); }
 if (mode === 'silence') { feed(25000, 0); console.log(JSON.stringify({ events })); }
 if (mode === 'wav') {                 // argv[4] = raw 48 kHz s16le mono, argv[5] = out .wav
@@ -13757,9 +14898,9 @@ if (mode === 'wav') {                 // argv[4] = raw 48 kHz s16le mono, argv[5
 VAD
   u="$(node "$CV/vad.cjs" "$CV/talk.js" utterance 2>&1)"
   ends="$(node -e 'const j=JSON.parse(process.argv[1]);console.log(j.events.filter(e=>e.startsWith("end")).length)' "$u" 2>/dev/null)"
-  is "one utterance with a pause inside it ends ONCE" "1" "$ends"
-  is "...about a second after the speech stopped" "1" \
-     "$(node -e 'const j=JSON.parse(process.argv[1]);const at=Number((j.events.find(e=>e.startsWith("end"))||"end@0").slice(4));const d=at-j.endAt;console.log(d>=900&&d<=1300?1:0)' "$u" 2>/dev/null)"
+  is "one utterance with a 2 s pause inside it ends ONCE" "1" "$ends"
+  is "...about 3.5 s after the speech stopped" "1" \
+     "$(node -e 'const j=JSON.parse(process.argv[1]);const at=Number((j.events.find(e=>e.startsWith("end"))||"end@0").slice(4));const d=at-j.endAt;console.log(d>=3400&&d<=3800?1:0)' "$u" 2>/dev/null)"
   s="$(node "$CV/vad.cjs" "$CV/talk.js" silence 2>&1)"
   is "twenty seconds of nothing ends conversation mode" '{"events":["stop"]}' "$(head -1 <<< "$s")"
   # The encoder, through the real transcriber when there is one (macOS `say` + whisper.cpp).
@@ -13879,6 +15020,20 @@ if sv_start attach; then
 else
   skip "attachments" "$SV_WHY"
 fi
+
+# ── several photos, one message: none of them may be gone before it is sent ──
+# The quota drops the oldest files first and runs on every upload, so a quota smaller than a
+# whole message deleted the message's own first photos while the rest were still arriving.
+group "fleet-serve: a message of photos never deletes itself"
+AQ="$(mktemp -d "$TEST_RUNS.$$.aq.XXXXXX")"
+HOME="$AQ" node "$ROOT/test/helpers/attach-quota.mjs" "$AQ" > "$AQ/out" 2> "$AQ/err"
+is "attach-quota ran"                  "0"  "$?"
+is "...without complaining"            ""   "$(head -2 "$AQ/err" | tr '\n' ' ' | sed 's/ *$//')"
+is "...and produced its checks"        "yes" "$([ "$(wc -l < "$AQ/out")" -ge 5 ] && echo yes || echo "no: $(wc -l < "$AQ/out") rows")"
+while IFS=$'\x1f' read -r name want got; do
+  is "$name" "$want" "$got"
+done < "$AQ/out"
+rm -rf "${AQ:?}"
 
 rm -rf "$SV"
 fi
@@ -14348,6 +15503,16 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "the real fleet-send records a delivery into Jarvis" "1" "$(cnt "$(printf '%s' ok | shasum -a 256 2>/dev/null | cut -c1-12)" "$JW/home/.config/ghostfleet/jarvis.delivered")"
   HOME="$JW/home" TMUX= CLAUDE_FLEET_NOTIFIER=off "$ROOT/bin/fleet-send" -s cf-jarvis --anyway helper "ok" >/dev/null 2>&1
   is "...and only into Jarvis's master"             "1" "$(cnt . "$JW/home/.config/ghostfleet/jarvis.delivered")"
+  # A PROMPT THE MOD SUBMITS is marked by the mod, through `fleet-jarvis delivered`, in the
+  # receiving session's home. That writer and the hook's reader must agree on the record, or
+  # the mark is written and never matched: the mod's "ok" is then the owner's yes again.
+  : > "$JW/home/.config/ghostfleet/jarvis.delivered"; : > "$JW/home/.config/ghostfleet/jarvis.said"
+  printf '%s' "ok" | HOME="$JW/home" "$ROOT/bin/fleet-jarvis" delivered
+  jfire UserPromptSubmit cf-jarvis master "$WC" "ok"
+  is "a prompt the mod marked is not recorded as the owner" "0" "$(cnt '"text":"ok"' "$JW/home/.config/ghostfleet/jarvis.said")"
+  is "...and the mark is spent on it"                 "0" "$(cnt . "$JW/home/.config/ghostfleet/jarvis.delivered")"
+  jfire UserPromptSubmit cf-jarvis master "$WC" "ok"
+  is "...so the owner's own ok after it is recorded"  "1" "$(cnt '"text":"ok"' "$JW/home/.config/ghostfleet/jarvis.said")"
   # SWITCHED OFF, NOTHING WAKES IT: neither a need-you nor a batch reaches Jarvis while the
   # marker is still there. The control is the same need-you once it is back on.
   sed -i.bak '/^batch=/d' "$JW/home/.config/ghostfleet/jarvis"
@@ -14431,55 +15596,117 @@ else
   skip "fleet-jarvis init" "node or git missing"
 fi
 
-# THE DAILY FRESH START. A copy of the runtime whose agent-here is a stub, so "a fresh
-# master" is a process this suite started and can see, never a real agent. Three things
-# must hold: it does not fire on first sight or twice a day, it never replaces a Jarvis that
-# is mid-turn, and when it does fire the replacement is FRESH and the handoff exists.
-group "the daily restart is fresh, idle-only, and carries a handoff"
+# THE FRESH START, BY SIZE. A copy of the runtime whose agent-here is a stub, so "a fresh
+# master" is a process this suite started and can see, never a real agent; the transcript is
+# a file written here, so "how big is the conversation" is a number this suite chose. What
+# must hold: it fires on the context TOKENS of the last usage line and nothing else (not
+# bytes, not the clock), never on a missing measure, never on a Jarvis mid-turn or just
+# spoken to, never twice for one conversation — and when it fires the replacement is FRESH
+# and the handoff exists.
+group "Jarvis restarts when its conversation outgrows restart_tokens, idle-only, with a handoff"
 if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   JR="$(cd "$(mktemp -d)" && pwd -P)"
-  mkdir -p "$JR/home/.config/ghostfleet" "$JR/home/.claude/fleet" "$JR/jv"
+  mkdir -p "$JR/home/.config/ghostfleet" "$JR/home/.claude/fleet" "$JR/jv" "$JR/tr"
   cp -R "$ROOT/bin" "$ROOT/lib" "$ROOT/mcp" "$ROOT/tmux" "$ROOT/hooks" "$JR/"
   printf '#!/bin/sh\nprintf "fresh=%%s\\n" "${CLAUDE_FLEET_FRESH:-}" >> "%s/started"\nexec sleep 300\n' "$JR" > "$JR/bin/agent-here"
   chmod +x "$JR/bin/agent-here"
   printf 'jarvis\t%s\twork\n' "$JR/jv" > "$JR/home/.config/ghostfleet/projects"
-  printf 'name=jarvis\nprofile=work\nsock=cf-jarvis\ncfg=%s\npath=%s\nrestart_hour=0\n' "$JR/home/.claude" "$JR/jv" > "$JR/home/.config/ghostfleet/jarvis"
+  JM="$JR/home/.config/ghostfleet/jarvis"
+  jmark() { printf 'name=jarvis\nprofile=work\nsock=cf-jarvis\ncfg=%s\npath=%s\n%s' "$JR/home/.claude" "$JR/jv" "$1" > "$JM"; }
+  jmark ''
   jr() { HOME="$JR/home" TMUX= "$JR/bin/fleet-jarvis" "$@" 2>&1; }
-  jst() { printf '{"session_id":"j1","sock":"cf-jarvis","slot":"master","status":"%s","ts":%s}\n' "$1" "$2" > "$JR/home/.claude/fleet/j1.json"; }
+  # <status> <ts> [transcript]: the master's status record, as the event hook writes it
+  jst() { printf '{"session_id":"j1","sock":"cf-jarvis","slot":"master","status":"%s","ts":%s,"transcript":"%s"}\n' "$1" "$2" "${3:-$JR/tr/j1.jsonl}" > "$JR/home/.claude/fleet/j1.json"; }
+  # <tokens…> — one assistant entry per argument, in order, each split across the three
+  # input fields the measure sums; 0 writes the all-zero usage of a synthetic entry
+  use() { printf '{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":%s,"cache_read_input_tokens":%s,"cache_creation_input_tokens":%s,"output_tokens":7}}}\n' \
+            $(( $1 / 10 )) $(( $1 / 2 )) $(( $1 - $1 / 10 - $1 / 2 )); }
+  jtr() { : > "$JR/tr/j1.jsonl"; for t in "$@"; do use "$t" >> "$JR/tr/j1.jsonl"; printf '{"type":"user","message":{"role":"user","content":"ok"}}\n' >> "$JR/tr/j1.jsonl"; done; }
   ppid_of() { tmux -L cf-jarvis display-message -p -t master '#{pane_pid}' 2>/dev/null; }
+  # The local hour this many hours from now, as a TZ that makes it so: the clock the old
+  # restart read, put wherever a row needs it without waiting for it.
+  tz_at() { local x=$(( ($1 - 10#$(date -u +%H) + 48) % 24 )); [ "$x" -gt 14 ] && x=$((x - 24)); [ "$x" -ge 0 ] && echo "Etc/GMT-$x" || echo "Etc/GMT+$(( -x ))"; }
   tmux -L cf-jarvis kill-server 2>/dev/null
   # WITHOUT the caller's CLAUDE_FLEET_FRESH: a session started by fleet-spawn carries it, a
   # server started from there inherits it, and then "the restart asked for a fresh one" is
   # true of every pane on that server whether the restart asked or not.
   env -u CLAUDE_FLEET_FRESH tmux -L cf-jarvis new-session -d -s master 'sleep 300'
   P0="$(ppid_of)"; NOW="$(date +%s)"
-  jst ready $((NOW - 3600))
   HOME="$JR/home" node --input-type=module -e "import * as J from '$JR/lib/jarvis.mjs'; J.recordSaid('clean up docs-pass', 'owner'); J.gate({key:'k',tool:'fleet_stop',summary:'stop acme-api/docs-pass'})"
-  jr restart --if-due >/dev/null
-  is "first sight is a baseline, not a restart"   "$P0" "$(ppid_of)"
-  printf '%s\n' $((NOW - 2 * 86400)) > "$JR/home/.config/ghostfleet/jarvis.restarted"
+
+  jst ready $((NOW - 3600)); jtr 50000 94000
+  out="$(jr restart --if-due --dry-run)"; rc=$?
+  is "under the threshold, idle: nothing happens"  "0|"  "$rc|$out"
+  is "...status shows the threshold and the size"  "1"   "$(grep -c 'restart   when context passes 200k tokens (now 94k)' <<< "$(jr status)" || true)"
+  jtr 50000 210000
+  out="$(jr restart --if-due --dry-run)"
+  is "over 200k, idle an hour: it restarts"        "1"   "$(grep -c '^# Handoff' <<< "$out" || true)"
+  is "...the handoff says why, with the size"      "1"   "$(grep -c 'restarted fresh because the conversation grew past 200k tokens (it was at 210k)' <<< "$out" || true)"
+  jtr 250000 94000
+  is "it is the LAST usage line that counts"       ""    "$(jr restart --if-due --dry-run)"
+  jtr 210000 0
+  is "...not a synthetic all-zero one after it"    "1"   "$(grep -c '^# Handoff' <<< "$(jr restart --if-due --dry-run)" || true)"
+  # BYTES ARE NOT THE MEASURE, AND THE TAIL IS ENOUGH: a megabyte of turns ahead of a small
+  # last one, and the 300k entry that opens the file is far outside the tail read.
+  jtr 300000; for _ in $(seq 1 4000); do printf '{"type":"user","message":{"role":"user","content":"%0250d"}}\n' 0; done >> "$JR/tr/j1.jsonl"; use 94000 >> "$JR/tr/j1.jsonl"
+  is "a megabyte of transcript under 200k: nothing" "" "$(jr restart --if-due --dry-run)"
+  use 220000 >> "$JR/tr/j1.jsonl"
+  is "...and its last line over: it restarts"      "1"   "$(grep -c '^# Handoff' <<< "$(jr restart --if-due --dry-run)" || true)"
+
+  jtr 210000
   jst working $((NOW - 3600))
-  out="$(jr restart --if-due)"; rc=$?
-  is "a Jarvis mid-turn is not restarted"          "3"   "$rc"
-  is "...it is deferred, saying why"               "1"   "$(grep -c 'deferred' <<< "$out" || true)"
-  is "...and its pane is the same one"             "$P0" "$(ppid_of)"
+  out="$(jr restart --if-due --dry-run)"; rc=$?
+  is "over, but mid-turn: deferred"                "3|1" "$rc|$(grep -c 'deferred' <<< "$out" || true)"
+  jst ready $((NOW - 60))
+  out="$(jr restart --if-due --dry-run)"; rc=$?
+  is "over, ready but spoken to a minute ago: deferred" "3|1" "$rc|$(grep -c 'deferred' <<< "$out" || true)"
   jst ready $((NOW - 3600))
+
+  jtr 94000
+  jmark $'restart_tokens=50000\n'
+  is "restart_tokens=50000 is honoured at 94k"     "1"   "$(grep -c 'grew past 50k tokens (it was at 94k)' <<< "$(jr restart --if-due --dry-run)" || true)"
+  is "...and status shows it"                      "1"   "$(grep -c 'when context passes 50k tokens (now 94k)' <<< "$(jr status)" || true)"
+  jmark $'restart_tokens=nonsense\n'
+  is "a restart_tokens that is not a number is the default" "" "$(jr restart --if-due --dry-run)"
+
+  jtr 210000
+  jst ready $((NOW - 3600)) "$JR/tr/nowhere.jsonl"
+  is "a transcript that does not exist: nothing"   "0|"  "$(jr restart --if-due --dry-run; echo "$?|")" 
+  printf '{"type":"user","message":{"role":"user","content":"hi"}}\n' > "$JR/tr/j2.jsonl"
+  jst ready $((NOW - 3600)) "$JR/tr/j2.jsonl"
+  is "one with no usage line yet: nothing"         ""    "$(jr restart --if-due --dry-run)"
+  rm -f "$JR/home/.claude/fleet/j1.json"
+  is "no record for the master at all: nothing"    ""    "$(jr restart --if-due --dry-run)"
+  jst ready $((NOW - 3600))
+
+  # THE CLOCK IS GONE: 04:xx with an old marker's restart_hour=4 and no restart for two days
+  # is nothing when small, and 16:xx is a restart when big.
+  jmark $'restart_hour=4\n'; printf '%s\n' $((NOW - 2 * 86400)) > "$JR/home/.config/ghostfleet/jarvis.restarted"
+  jtr 94000
+  is "04:00, restart_hour=4, small: nothing"       ""    "$(TZ="$(tz_at 4)" jr restart --if-due --dry-run)"
+  jtr 210000
+  # the clock the row sets is the one node reads, or the row proves nothing
+  is "...(the row's clock really is 04:xx)"        "04"  "$(TZ="$(tz_at 4)" node -e 'console.log(String(new Date().getHours()).padStart(2,"0"))')"
+  is "16:00, big: it restarts"                     "1"   "$(grep -c '^# Handoff' <<< "$(TZ="$(tz_at 16)" jr restart --if-due --dry-run)" || true)"
+  is "an old marker with restart_hour still reads" "1"   "$(grep -c 'when context passes 200k tokens' <<< "$(jr status)" || true)"
+
   jr restart --if-due >/dev/null
   P1="$(ppid_of)"
   i=0; while [ "$i" -lt 30 ] && [ ! -s "$JR/started" ]; do i=$((i+1)); sleep 0.1; done
-  is "an idle Jarvis, due, is restarted"           "1"   "$([ -n "$P1" ] && [ "$P1" != "$P0" ] && echo 1 || echo 0)"
+  is "an idle Jarvis over the line is restarted"   "1"   "$([ -n "$P1" ] && [ "$P1" != "$P0" ] && echo 1 || echo 0)"
   is "...as a FRESH conversation"                  "fresh=1" "$(tail -1 "$JR/started" 2>/dev/null)"
   is "...the server kept, one session: master"     "master" "$(tmux -L cf-jarvis list-sessions -F '#{session_name}' 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
   is "...with a handoff in its home"               "yes" "$([ -f "$JR/jv/HANDOFF.md" ] && echo yes || echo no)"
   is "...naming what waits on his yes"             "1"   "$(grep -c 'stop acme-api/docs-pass' "$JR/jv/HANDOFF.md" 2>/dev/null || true)"
   is "...and what he last said"                    "1"   "$(grep -c 'clean up docs-pass' "$JR/jv/HANDOFF.md" 2>/dev/null || true)"
-  is "...and it says so in Jarvis's inbox"         "1"   "$(grep -c 'restarted' "$JR/home/.claude/fleet/cf-jarvis.inbox" 2>/dev/null || true)"
+  is "...and it says so in Jarvis's inbox"         "1"   "$(grep -c 'restarted.*context passed 200k' "$JR/home/.claude/fleet/cf-jarvis.inbox" 2>/dev/null || true)"
+  # The record still names the old, big transcript until the fresh master's first event.
   jr restart --if-due >/dev/null
-  is "once a day: a second tick changes nothing"   "$P1" "$(ppid_of)"
+  is "never twice for one conversation"            "$P1" "$(ppid_of)"
   tmux -L cf-jarvis kill-server 2>/dev/null
-  rm -rf "$JR"
+  rm -rf "${JR:?}"
 else
-  skip "Jarvis daily restart" "tmux or node missing"
+  skip "Jarvis restart by size" "tmux or node missing"
 fi
 
 # ── Jarvis is EXPERIMENTAL: off unless switched on, and off means gone ──────────
@@ -14684,6 +15911,50 @@ if command -v node >/dev/null 2>&1; then
   rm -rf "$PH"
 else
   skip "push hold" "node missing"
+fi
+
+# ── an expired wake reaches the phone ────────────────────────────────────────
+# hooks/fleet-event.sh's deferred wake gives up after ten minutes of an occupied input box
+# and appends to <sock>.<kind>.undelivered. Nothing read that file: a worker sat on a
+# permission prompt behind four expiries until somebody found it by hand. fleet-serve now
+# treats the marker GROWING as a need-you for the lead the wake was for. Driven through the
+# real exported functions against a real directory, in both directions.
+group "push: an expired wake is a need-you for its lead"
+if command -v node >/dev/null 2>&1; then
+  UD="$(cd "$(mktemp -d)" && pwd -P)"
+  ud() { node --input-type=module -e "
+    import { undeliveredEvents, undeliveredTarget, pushResolved } from '$ROOT/bin/fleet-serve.mjs';
+    $1" 2>&1; }
+  is "notify names master"          '{"sock":"cf-acme-api","session":"master"}' \
+     "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-acme-api.notify.undelivered', ['cf-acme-api'])))")"
+  is "a sub-lead's names the lead"  '{"sock":"cf-acme-api","session":"api-lead"}' \
+     "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-acme-api.api-lead.notify.undelivered', ['cf-acme-api'])))")"
+  is "an unknown socket is nobody"  'null' \
+     "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-other.notify.undelivered', ['cf-acme-api'])))")"
+  is "the longest known socket wins" '{"sock":"cf-acme.api","session":"master"}' \
+     "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-acme.api.notify.undelivered', ['cf-acme','cf-acme.api'])))")"
+  # THE SEQUENCE, in one process so the size map carries between scans: a marker already
+  # there is a baseline; it growing is ONE event; an unchanged rescan is silent.
+  printf 'old expiry\n' > "$UD/cf-acme-api.api-lead.notify.undelivered"
+  out="$(ud "
+    import fs from 'node:fs';
+    const sizes = new Map(), d = ['$UD'], s = ['cf-acme-api'], n = new Map([['cf-acme-api','acme-api']]);
+    const a = undeliveredEvents(d, s, sizes, n);
+    fs.appendFileSync('$UD/cf-acme-api.api-lead.notify.undelivered', 'new expiry\\n');
+    const b = undeliveredEvents(d, s, sizes, n);
+    const c = undeliveredEvents(d, s, sizes, n);
+    console.log(a.length, b.length, c.length, b[0] && b[0].kind, b[0] && b[0].session, b[0] && b[0].project)")"
+  is "first sight is a baseline, growth is one need-you, a rescan is silent" \
+     "0 1 0 needs-you api-lead acme-api" "$out"
+  # resolved only by the lead taking a turn: idle is the state it was stuck in
+  # the literal lives in a variable: unquoted in a command substitution, {a,b} brace-expands
+  uev='{"kind":"needs-you","undelivered":true}'; wev='{"kind":"needs-you"}'
+  is "an idle lead has not seen it"  "false" "$(ud "console.log(pushResolved($uev, 'ready'))")"
+  is "...a working one has"          "true"  "$(ud "console.log(pushResolved($uev, 'working'))")"
+  is "...a worker's need-you is unchanged" "true" "$(ud "console.log(pushResolved($wev, 'ready'))")"
+  rm -rf "${UD:?}"
+else
+  skip "undelivered push" "node missing"
 fi
 
 group "push: a subject Apple accepts, and a refusal that says why"
@@ -15233,6 +16504,11 @@ if [ -d "$ROOT/web" ]; then
     done < "$VPO/out"
   fi
   rm -rf "$VPO"
+  # ...and the loading text cannot come back, with or without a browser to look in. The
+  # in-engine rows above hold the first answer and look at the skeleton; this one is for the
+  # machine with no Chrome, where they skip: the client must not say it is reading.
+  is "the phone waits in skeletons, never in a 'reading…' line" "" \
+     "$(grep -noE "'(reading the transcript|capturing the pane|asking the Mac about Jarvis)[^']*'" "$ROOT/web/app.js" | paste -sd' ' -)"
 
   # ── the card's title is a tap target, not a dead zone ─────────────────────
   # wire() set `dragging` on any press of the grip and pointerup then returned without ever
@@ -15262,6 +16538,76 @@ if [ -d "$ROOT/web" ]; then
     done < "$GRP/out"
   fi
   rm -rf "$GRP"
+
+  # ── the owner's music keeps playing until they ask the app to speak ──────────
+  # Opening the installed app paused whatever the phone was playing: unlockAudio() ran on
+  # every first tap anywhere, and set a non-mixable 'playback' session, resumed an
+  # AudioContext and spoke a silent utterance — each of which takes the iOS audio session.
+  # The helper stubs those APIs before app.js runs and records every call, then taps for
+  # real. Watched going red on the pre-fix client (every plain-tap row logged all six calls),
+  # and the talk rows with talkStop() put back to suspend-without-release. The other
+  # direction is asserted too: the speaker DOES unlock, inside its own tap, and hands the
+  # session back when the voice ends. Whether music actually resumes is a phone's to say.
+  AUD="$(mktemp -d "$TEST_RUNS.$$.aud.XXXXXX")"
+  node "$ROOT/test/helpers/audio-check.mjs" > "$AUD/out" 2> "$AUD/err"
+  audrc=$?
+  if grep -q 'no chrome' "$AUD/out" 2>/dev/null; then
+    skip "the audio session" "no chrome to tap in"
+  else
+    is "audio-check ran"                "0" "$audrc"
+    is "...without complaining"         ""  "$(head -2 "$AUD/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$AUD/out")" -ge 14 ] && echo yes || echo "no: $(wc -l < "$AUD/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$AUD/out"
+  fi
+  rm -rf "${AUD:?}"
+
+  # ── the suite makes no sound ─────────────────────────────────────────────────
+  # A run that drove the phone's voice read its replies aloud through the owner's speakers.
+  # Headless is not silent: Chrome plays to the default output unless told not to. So every
+  # file that launches one must pass --mute-audio, the one `say` here must write to a file,
+  # and nothing plays a file. Checked over the tree rather than remembered, so the next
+  # launcher is caught too. (The player's name is split so this line is not its own match.)
+  noisy=""
+  for f in $(git -C "$ROOT" ls-files lib bin test); do
+    [ -f "$ROOT/$f" ] || continue
+    body="$(cat "$ROOT/$f")"
+    if grep -q -- "'--headless" <<< "$body" && ! grep -q -- "'--mute-audio'" <<< "$body"; then noisy="$noisy $f:unmuted-chrome"; fi
+    if grep -qE "(^|[;&|( ])af""play " <<< "$body"; then noisy="$noisy $f:plays-a-file"; fi
+  done
+  while IFS= read -r l; do
+    grep -q -- ' -o ' <<< "$l" || noisy="$noisy run.sh:say-aloud"
+  done <<< "$(grep -E '^[[:space:]]*(if .*&& )?say |&& say |; say ' "$ROOT/test/run.sh" | grep -v '^[[:space:]]*#' | grep -v 'is "')"
+  is "no browser, say or player in the suite makes a sound" "" "${noisy# }"
+
+  # ── barge-in: the owner can talk over the answer, the answer cannot ─────────
+  # Conversation mode keeps the mic open while it reads an answer, so the owner can cut in
+  # with a follow-up ("I sent it and forgot something"). The real client, in a real browser
+  # (muted — lib/browser.mjs never plays to the machine's speakers), against a fake
+  # fleet-serve, with a fake mic that HEARS THE PAGE: its own voice comes back at the worst
+  # echo ratio measured on a laptop's speaker. Both directions, because a gate that never
+  # fires and one that always fires each pass half of them: the answer is read to the end
+  # over its own echo, and the owner's voice over it stops it, listens, and is sent as a
+  # follow-up that is shown queued. Watched going red with the client before this change,
+  # the gate at 0.3 or blind to the output level (the app cut itself off at sentence 2),
+  # the barge never firing, and the band's tap ignored.
+  BGC="$(mktemp -d "$TEST_RUNS.$$.barge.XXXXXX")"
+  node "$ROOT/test/helpers/barge-check.mjs" > "$BGC/out" 2> "$BGC/err"
+  bgcrc=$?
+  if grep -q '^#SKIP' "$BGC/out" 2>/dev/null; then
+    skip "barge-in" "no chrome to listen in"
+  else
+    is "barge-check ran"                "0" "$bgcrc"
+    is "...without complaining"         ""  "$(head -2 "$BGC/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$BGC/out")" -ge 15 ] && echo yes || echo "no: $(wc -l < "$BGC/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$BGC/out"
+  fi
+  rm -rf "$BGC"
 
   is "cf-sync syncs web/ into the runtime" "yes" \
      "$(grep -qE '^for d in .*\bweb\b' "$ROOT/bin/cf-sync" && echo yes || echo no)"
@@ -18128,6 +19474,237 @@ else
 fi
 
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
+
+# ── ONE CONVERSATION, ONE SLOT ───────────────────────────────────────────────
+# A fleet's lead came back after a crash running a WORKER's conversation, and days later was
+# launched with --resume of a third conversation that was live in its own card. Every card in
+# that fleet shared one folder. Each mechanism is reproduced here against the real launchers
+# and the real hook, with stub agents that only log the argv they were handed:
+#   Q1  opening a project rebuilds `master` with no id, and on tmux claude-here fell to "the
+#       newest real conversation in this folder" — the worker's, which had written last;
+#   Q2  the hook then filed that conversation under the pane it ran in, so its record moved
+#       from the worker's name to `master` with nothing anywhere saying so, and the two
+#       `master` records were settled by `ts`, which the intruder had;
+#   Q3  nothing checked whether the folder's newest was open in another live process, and an
+#       explicit id was resumed whoever held it.
+# And the owner's repair: a conversation put into a slot ON PURPOSE (fleet-open --into) owns
+# it, ahead of name history, even when the replaced conversation's record is still there.
+#   WATCHED GOING RED: with lib/slot-claim.mjs's calls taken out of claude-here and
+# codex-here the lead resumes the intruder, the live one and the claimed one; without the
+# hook's block nothing is logged; with fleet-restart's sid_for back on `sort -rn` the reopen
+# takes the intruder.
+group "one conversation, one slot"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  OC="$(cd "$(mktemp -d "$TEST_RUNS.$$.slot.XXXXXX")" && pwd -P)"
+  OCW="$OC/acme-api"; OCC="$OC/home/.claude"; OCF="$OCC/fleet"; OCX="$OC/codex"
+  mkdir -p "$OCW" "$OCF" "$OC/bin" "$OC/home"
+  OCP="$OCC/projects/$(printf '%s' "$OCW" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$OCP"
+  OCS=cf-acme-api
+  for a in claude codex; do
+    cat > "$OC/bin/$a" <<STUB
+#!/bin/sh
+[ "\$1" = agents ] && exit 0
+[ "\$1" = --help ] && exit 0
+printf '%s\n' "\$*" > "$OC/argv.$a"
+STUB
+    chmod +x "$OC/bin/$a"
+  done
+  M=11111111-1111-4111-8111-111111111111   # the lead's own, born as acme-api/master
+  T=22222222-2222-4222-8222-222222222222   # a worker's, born as acme-api/toolbox
+  V=33333333-3333-4333-8333-333333333333   # a third card's, live in its own pane
+  U=44444444-4444-4444-8444-444444444444   # nobody's: an old conversation in the folder
+  convo() {   # id, first title, [later titles...] — a real turn, then the name history
+    local id="$1" f="$OCP/$1.jsonl"; shift
+    printf '{"type":"user","cwd":"%s","message":{"role":"user","content":"which fields are duplicated?"}}\n' "$OCW" > "$f"
+    for t in "$@"; do printf '{"type":"custom-title","customTitle":"%s","sessionId":"%s"}\n' "$t" "$id" >> "$f"; done
+  }
+  record() {  # id slot ts [pane]
+    printf '{"session_id":"%s","sock":"%s","slot":"%s","pane":"%s","cwd":"%s","transcript":"%s/%s.jsonl","status":"ready","ts":%s}\n' \
+      "$1" "$OCS" "$2" "${4:-}" "$OCW" "$OCP" "$1" "$3" > "$OCF/$1.json"
+  }
+  # Dated in this order, so the folder's newest is always the one that must NOT win.
+  convo "$U" acme-api/scratch; touch -t 202601010000 "$OCP/$U.jsonl"
+  convo "$M" acme-api/master;  touch -t 202601020000 "$OCP/$M.jsonl"
+  convo "$T" acme-api/toolbox; touch -t 202601030000 "$OCP/$T.jsonl"
+  launch() {  # agent-here's launcher for slot $1 from the shared folder, extra env after; prints the --resume id
+    rm -f "${OC:?}/argv.claude"
+    ( cd "$OCW" && env -u ZELLIJ_SESSION_NAME -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u TMUX \
+        HOME="$OC/home" PATH="$OC/bin:$PATH" CLAUDE_CONFIG_DIR="$OCC" CLAUDE_FLEET_DIR="$OCF" \
+        CLAUDE_FLEET_SOCK="$OCS" CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1 "${@:2}" \
+        /bin/bash "$ROOT/bin/claude-here" "$1" 2>"$OC/stderr" )
+    sed -n 's/.*--resume \([^ ]*\).*/\1/p' "$OC/argv.claude" 2>/dev/null
+  }
+
+  # Q1, the first night: master's record names M, the worker's names T, and T wrote last.
+  record "$M" master 1000 '%19@100'; record "$T" toolbox 1001 '%3@100'
+  is "Q1: a lead rebuilt with no id resumes ITS OWN conversation, not the folder's newest" "$M" "$(launch master)"
+
+  # Q2's aftermath: T's record now says master too, and is the newer. Name history decides.
+  record "$T" master 2000 '%0@200'
+  : > "$OCF/slot-claim.log"
+  is "Q2: two records for master — the one born as master wins, not the newer" "$M" "$(launch master)"
+  is "...and the choice is logged, naming both" "yes" \
+     "$(grep -q '2 records claim this slot: 11111111.*22222222.*resuming 11111111' "$OCF/slot-claim.log" && echo yes || echo no)"
+  # When name history cannot tell them apart, the newest — but never silently.
+  convo "$T" acme-api/master; touch -t 202601030000 "$OCP/$T.jsonl"
+  : > "$OCF/slot-claim.log"
+  is "...two born-here claimants: the newest, as before" "$T" "$(launch master)"
+  is "...and that is said too" "yes" \
+     "$(grep -q 'the newest, because neither a placement nor name history could tell them apart' "$OCF/slot-claim.log" && echo yes || echo no)"
+  convo "$T" acme-api/toolbox acme-api/master; touch -t 202601030000 "$OCP/$T.jsonl"
+  record "$T" toolbox 1001 '%3@100'
+
+  # Q3: a card with no record of its own falls back to the folder — past what others own.
+  convo "$V" acme-api/docs-pass; touch -t 202601040000 "$OCP/$V.jsonl"
+  record "$V" docs-pass 1500 '%9@200'
+  is "Q3: a fresh card does not take a conversation another card's record claims" "$U" "$(launch notes)"
+  # ...and past what a live process has open, even with no record naming it (run by hand).
+  rm -f "${OCF:?}/${V:?}.json"
+  ( exec -a "claude --resume $V" sleep 60 ) & OCH=$!; disown "$OCH"
+  sleep 0.3
+  is "Q3: ...nor one a live process has open, recorded or not" "$U" "$(launch notes)"
+  is "...and says what it passed over" "yes" \
+     "$(grep -q "33333333 (open in live process $OCH)" "$OC/stderr" && echo yes || echo no)"
+  # The slot's OWN record too: a lead whose conversation is live elsewhere does not become a
+  # second writer on it (after the few seconds' grace a relaunch gets).
+  record "$V" master 3000 '%0@300'; rm -f "${OCF:?}/${M:?}.json"
+  is "Q3: a slot's own record is not resumed while another process holds it" "no" \
+     "$([ "$(launch master)" = "$V" ] && echo yes || echo no)"
+  rm -f "${OCF:?}/${V:?}.json"; record "$M" master 1000 '%19@100'
+  # An explicit id (fleet-open, a reopen, a wake) is refused outright, and claude never runs.
+  is "Q3: an explicit id another process holds is refused" "refused" \
+     "$(launch master CLAUDE_FLEET_RESUME="$V" >/dev/null; [ -f "$OC/argv.claude" ] && echo ran || echo refused)"
+  is "...saying who holds it" "yes" \
+     "$(grep -q "refusing — conversation $V is open in live process $OCH" "$OC/stderr" && echo yes || echo no)"
+  reap "$OCH"
+  # ...but a holder that is already dying — every relaunch kills the old pane just before —
+  # is given its few seconds, so a restart does not refuse its own predecessor.
+  ( exec -a "claude --resume $M" sleep 1 ) & OCH=$!; disown "$OCH"
+  sleep 0.2
+  is "...while a predecessor that exits within the grace is resumed" "$M" "$(launch master CLAUDE_FLEET_RESUME="$M")"
+  reap "$OCH"
+
+  # A PATH WITH AN UNDERSCORE. claude-here names a transcript folder by turning only `/` and
+  # `.` into `-`; lib/slot-claim.mjs once re-derived it turning everything non-alphanumeric,
+  # and the two disagree on `_`. A macOS runner's $TMPDIR is /var/folders/<xx>/<a_b…>/T/, so
+  # there the fallback read a folder that did not exist and every resume started fresh.
+  mkdir -p "$OC/acme_api"
+  OCU="$OCC/projects/$(printf '%s' "$OC/acme_api" | sed 's#[/.]#-#g')"; mkdir -p "$OCU"
+  printf '{"type":"user","cwd":"%s","message":{"role":"user","content":"hi"}}\n' "$OC/acme_api" > "$OCU/$U.jsonl"
+  is "a checkout whose path holds an underscore still resumes its conversation" "$U" \
+     "$(OCW="$OC/acme_api" launch scratch)"
+
+  # CODEX, THE SAME RULES. Its records carry agent:codex and no name history; its rollouts
+  # live under CODEX_HOME and carry the cwd in their first line.
+  cxroll() {  # id -> the rollout's path
+    local d; d="$OCX/sessions/$(date +%Y/%m/%d)"; mkdir -p "$d"
+    printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s","timestamp":"%s"}}\n' "$1" "$OCW" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$d/rollout-x-$1.jsonl"
+    printf '%s' "$d/rollout-x-$1.jsonl"
+  }
+  CM=55555555-5555-4555-8555-555555555555; CV=66666666-6666-4666-8666-666666666666
+  printf '{"session_id":"%s","agent":"codex","sock":"%s","slot":"api","cwd":"%s","transcript":"%s","ts":1000}\n' \
+    "$CM" "$OCS" "$OCW" "$(cxroll "$CM")" > "$OCF/$CM.json"
+  sleep 1; cxroll "$CV" >/dev/null                          # the folder's newest, nobody's slot
+  cxlaunch() {
+    rm -f "${OC:?}/argv.codex"
+    ( cd "$OCW" && env -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u TMUX HOME="$OC/home" PATH="$OC/bin:$PATH" \
+        CODEX_HOME="$OCX" CLAUDE_CONFIG_DIR="$OCC" CLAUDE_FLEET_DIR="$OCF" CLAUDE_FLEET_SOCK="$OCS" "${@:2}" \
+        /bin/bash "$ROOT/bin/codex-here" "$1" 2>"$OC/stderr" )
+    cat "$OC/argv.codex" 2>/dev/null
+  }
+  is "codex: a slot resumes its own recorded conversation, not resume --last" "resume $CM" \
+     "$(cxlaunch api | awk '{print $1, $2}')"
+  ( exec -a "codex resume $CV" sleep 60 ) & OCH=$!; disown "$OCH"
+  sleep 0.3
+  is "codex: an explicit id another process holds is refused" "refused" \
+     "$(cxlaunch api CLAUDE_FLEET_RESUME="$CV" >/dev/null; [ -f "$OC/argv.codex" ] && echo ran || echo refused)"
+  reap "$OCH"
+
+  # Q2 AT THE WRITER: the hook files a conversation under the pane it runs in. Moving into
+  # another pane's slot is logged with the slot's other claimants; a rename is not.
+  tmux -L "$OCS" new-session -d -s toolbox -c "$OCW" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  tmux -L "$OCS" new-session -d -s master  -c "$OCW" -x 120 -y 30 "sleep 600; :" 2>/dev/null
+  sleep 0.3
+  OC_SOCK="$(tmux -L "$OCS" display-message -p '#{socket_path}' 2>/dev/null)"
+  OC_PID="$(tmux -L "$OCS" display-message -p '#{pid}' 2>/dev/null)"
+  octurn() {  # session-whose-pane, sid
+    local pane; pane="$(tmux -L "$OCS" display-message -p -t "$1" '#{pane_id}' 2>/dev/null)"
+    printf '{"hook_event_name":"Stop","session_id":"%s","cwd":"%s","transcript_path":"%s/%s.jsonl"}' "$2" "$OCW" "$OCP" "$2" \
+    | env TMUX="$OC_SOCK,$OC_PID,0" TMUX_PANE="$pane" CLAUDE_FLEET_SLOT="$1" CLAUDE_FLEET_SOCK="$OCS" \
+          CLAUDE_FLEET_DIR="$OCF" CLAUDE_CONFIG_DIR="$OCC" CLAUDE_FLEET_NOTIFIER=off \
+          "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  rm -f "${OCF:?}/${T:?}.json"; octurn toolbox "$T"; octurn master "$M"
+  : > "$OCF/slot-claim.log"
+  octurn master "$T"
+  is "Q2: the hook files the conversation under the pane it now runs in" "master" "$(jq -r .slot "$OCF/$T.json" 2>/dev/null)"
+  is "...and logs the move, naming the slot's other claimant" "yes" \
+     "$(grep -q "$OCS/master: conversation $T MOVED here from toolbox .* also claimed by: $M" "$OCF/slot-claim.log" && echo yes || echo no)"
+  : > "$OCF/slot-claim.log"
+  tmux -L "$OCS" rename-session -t toolbox api-2 2>/dev/null; octurn api-2 "$U"; octurn api-2 "$U"
+  tmux -L "$OCS" rename-session -t api-2 api-3 2>/dev/null; octurn api-3 "$U"
+  is "...while a rename (same pane, new name) is not a move" "0" "$(grep -c MOVED "$OCF/slot-claim.log" || true)"
+  tmux -L "$OCS" kill-server 2>/dev/null
+
+  # THE OWNER'S CASE. The lead was repaired by hand with `fleet-open <worker's> --into master
+  # --force`, and that conversation IS the lead now. A crash leaves the replaced one's record
+  # behind, born as master and — here — even the newer: the placement must still win.
+  mkdir -p "$OC/home/.config/ghostfleet"
+  printf 'acme-api\t%s\twork\n' "$OCW" > "$OC/home/.config/ghostfleet/projects"
+  OCE=(env -u TMUX -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_SOCK
+       HOME="$OC/home" PATH="$ROOT/bin:$OC/bin:$PATH" CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1)
+  "${OCE[@]}" tmux -L "$OCS" new-session -d -s master -c "$OCW" "sleep 600; :" 2>/dev/null
+  record "$M" master 1000 '%19@100'
+  rm -f "${OC:?}/argv.claude"
+  out="$("${OCE[@]}" "$ROOT/bin/fleet-open" "$T" --into master --force 2>&1)"
+  oi=0; while [ ! -s "$OC/argv.claude" ] && [ "$oi" -lt 50 ]; do sleep 0.1; oi=$((oi+1)); done
+  is "placement: fleet-open --into puts the conversation in"  "$T" \
+     "$(sed -n 's/.*--resume \([^ ]*\).*/\1/p' "$OC/argv.claude" 2>/dev/null)"
+  is "...and records that it was put there on purpose"       "$T" "$(cut -f1 "$OCF/$OCS.master.owner" 2>/dev/null)"
+  tmux -L "$OCS" kill-server 2>/dev/null
+  record "$M" master 3000 '%19@100'; record "$T" master 2000 '%0@200'
+  : > "$OCF/slot-claim.log"
+  is "placement: after a crash, both records claim master and the placed one comes back" "$T" "$(launch master)"
+  is "...and the log says why" "yes" \
+     "$(grep -q 'resuming 22222222, the one deliberately placed here' "$OCF/slot-claim.log" && echo yes || echo no)"
+  # fleet-open checks for a holder BEFORE it kills the target: refused after the kill, the
+  # target's card would be gone as well.
+  "${OCE[@]}" tmux -L "$OCS" new-session -d -s master -c "$OCW" "sleep 600; :" 2>/dev/null
+  OCP0="$(tmux -L "$OCS" display-message -p -t master '#{pane_pid}' 2>/dev/null)"
+  ( exec -a "claude --resume $M" sleep 60 ) & OCH=$!; disown "$OCH"
+  sleep 0.3
+  out="$("${OCE[@]}" "$ROOT/bin/fleet-open" "$M" --into master --force 2>&1)"
+  is "placement: fleet-open refuses a conversation another process holds" "yes" \
+     "$(grep -q "refusing — $M is open in live process $OCH" <<< "$out" && echo yes || echo no)"
+  is "...and leaves the target running" "$OCP0" "$(tmux -L "$OCS" display-message -p -t master '#{pane_pid}' 2>/dev/null)"
+  reap "$OCH"
+  tmux -L "$OCS" kill-server 2>/dev/null
+  rm -f "${OCF:?}/$OCS.master.owner"
+
+  # fleet-restart --reopen (the grid's ⏎ on a lost card, fleet_reopen) settles two records by
+  # name history too, and refuses a conversation a live process holds. No server: a reopen
+  # after a crash starts one, with this environment.
+  record "$M" master 1000 '%19@100'; record "$T" master 2000 '%0@200'
+  ocre() { env -u TMUX HOME="$OC/home" PATH="$ROOT/bin:$OC/bin:$PATH" CLAUDE_FLEET_DIR="$OCF" \
+             CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1 "$ROOT/bin/fleet-restart" -s "$OCS" --reopen master 2>&1; }
+  rm -f "${OC:?}/argv.claude"
+  out="$(ocre)"
+  oi=0; while [ ! -s "$OC/argv.claude" ] && [ "$oi" -lt 50 ]; do sleep 0.1; oi=$((oi+1)); done
+  is "reopen: a lost master comes back on the conversation born there" "$M" \
+     "$(sed -n 's/.*--resume \([^ ]*\).*/\1/p' "$OC/argv.claude" 2>/dev/null)"
+  tmux -L "$OCS" kill-server 2>/dev/null
+  ( exec -a "claude --resume $M" sleep 60 ) & OCH=$!; disown "$OCH"
+  sleep 0.3
+  out="$(ocre)"
+  is "reopen: ...and refuses it while another process has it open" "yes" \
+     "$(grep -q "already open in live process $OCH" <<< "$out" && echo yes || echo no)"
+  reap "$OCH"
+  tmux -L "$OCS" kill-server 2>/dev/null
+  rm -rf "${OC:?}"
+else
+  skip "one conversation, one slot" "node, jq or tmux missing"
+fi
 
 # ── a run leaves no fleet-serve it did not find ──────────────────────────────
 # Eight leaked daemons were found on loopback ports, from suite runs in worktrees that had

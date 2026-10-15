@@ -4,6 +4,237 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
+## 0.6.0 — 2026-10-14
+
+**This release is mostly about two things: the ledger, and the phone.** The ledger stops
+being something a side model guesses at from the turn's prose — the agent now closes its
+own items with proof as it works, and the judge only reads what is left — and it stops
+recording the fleet's own wake-ups, resends and bare "2"s as asks. The phone client took
+most of the rest: it can answer a claude question picker, send several photos in one
+message, keep every queued message and take one back to edit, interrupt a turn, and hold a
+conversation in conversation mode without cutting the owner off mid-thought. Alongside
+that, a lead or a codex session that a crash took down comes back on its own conversation,
+never on one another pane has open.
+
+0.5.1 was merged but never published to npm, so if you are upgrading from npm's 0.5.0 its
+ledger fix (below, under 0.5.1) arrives with this release too.
+
+**After upgrading**, the pieces that are long-lived keep their old code until they restart:
+
+- a running Claude session keeps the mod and the MCP server it started with —
+  `/reload-plugins` in it, or start a new one, for the ledger tools and `fleet_interrupt` /
+  `fleet_queue` / `fleet_unqueue`; Jarvis needs a restart for the mod's delivery marking
+  (#50);
+- `fleet-serve` is a daemon: restart it for the unlock rate limits (#46), `/api/auth/end`
+  (#54) and the session queue (#56);
+- the installed phone app runs the client it cached: swipe it away and relaunch it, since
+  reopening it from the app switcher is a resume and keeps the old one. The first cold
+  launch after the upgrade still runs the old client; the one after that locks (#54).
+
+### Added
+
+- **The agent closes its own ledger items, with proof, and the judge is only the backup**
+  (#39). The judge was the only way an item closed, and it read the turn's prose rather than
+  its work: a commit that landed counted only if the text said so, and every turn that left
+  anything open cost a model call. The mod now registers `ledger_close(id, proof)`,
+  `ledger_drop(id, reason)` and `ledger_add(text)` (a close with no proof and a drop with no
+  reason are refused), each prompt carries a short hidden note of what is open, the judge
+  is asked only about what the agent left open — a turn that closed everything makes no
+  call at all — and the gate re-prompts only the latest prompt's items. A message with two
+  or more plain asks becomes one item per ask. Every close records who made it: `agent`,
+  `judge` or `person`.
+- **`fleet-ledger close`, `drop` and `add`, for an older session** (#51), with `--session
+  <id>`. They run through the same functions the mod's tools use, and close `stale`,
+  `waiting` and `expired` items as well as open ones.
+- **A claude question picker can be answered from the phone, one tab at a time** (#40). A
+  session sitting on an `AskUserQuestion` picker used to show "Nothing to answer": a picker
+  whose descriptions wrapped put its selected option further up than the menu reader
+  looked. The phone's answer sheet now shows the question and one button per option,
+  follows a multi-question picker tab by tab to its Submit step, and takes a typed answer
+  for the free-text row. `fleet-answer` no longer adds an Enter after a picker's option
+  number — a digit already moves to the next tab, so `3` + Enter answered the next
+  question too. A send to a session waiting on a question says "queued behind a question",
+  on the phone with a button that opens the sheet.
+- **The phone sends several photos in one message** (#48), up to ten, each a tile above the
+  box with its own ×. Send waits for every upload and refuses while one is failing. The
+  daemon's per-session attachment quota is now at least one whole message: before, ten large
+  photos on a machine with no image converter deleted the first six of their own message
+  while the rest were still uploading.
+- **The phone keeps every queued message, and can take one back to edit** (#56). Two sends
+  to a busy session drew one bubble; now each stays, in order, marked `queued · tap to
+  edit`, across polls and across leaving the chat. A tap pulls it back into the box and out
+  of the fleet's queue (`fleet-send --unqueue`), and says so if it was typed in first. A
+  photo's path goes in where the caret was and follows later edits.
+- **Interrupt a turn from the phone's ⋯ menu, the lead included** (#56). `fleet-pause
+  --interrupt` (and the `fleet_interrupt` tool) sends Escape until the turn ends, and never
+  parks or kills — so it is allowed on a lead and on Jarvis.
+- **Conversation mode can be talked over** (#60). While an answer is read the mic stays
+  open, and the owner talking over it stops the whole reply and starts listening, keeping
+  the first word; a tap on the band does the same. The app's own voice is gated out against
+  echo measured on a real speaker and mic. **Unchecked on a phone:** whether iOS then plays
+  replies through the earpiece rather than the loudspeaker — see the PR before relying on
+  it.
+
+### Changed
+
+- **Jarvis restarts when its conversation outgrows `restart_tokens`, not at 4am** (#45). The
+  daily restart threw away a good conversation every morning whatever it held. The trigger
+  is now the context the model last saw (default 200k tokens), still only when Jarvis is
+  idle, and `fleet-jarvis status` shows where it stands. An old marker's `restart_hour` is
+  read and ignored.
+- **Closing the phone app from the app switcher locks it** (#54). The session token was kept
+  in `localStorage`, which survives a kill, so closing the app and looking away for a
+  second got the same answer. It is in `sessionStorage` now: a resume stays unlocked, the
+  app's own reload to take a new client stays unlocked, a cold launch asks for Face ID. An
+  iOS eviction of a backgrounded app is also a cold launch, so it locks too. The token an
+  older client left behind is removed and ended on the server on first open.
+- **A project card on the phone takes a tap and nothing else** (#55). Ordinary thumb
+  movement was reaching a long-press "remove from projects?" and a title drag that the
+  server refused with a red banner. Both are gone, with the `x` key; remove stays under
+  `⋯ → remove`. Session cards keep all their gestures.
+- **Messages enter once, screens slide like iOS, and back no longer flashes white** (#57).
+  The phone rebuilds the screen on every poll, so an entrance tied to drawing replayed over
+  the whole transcript; a new message now fades in once and a sent one rises from the
+  composer. The page's dark background is inline, so a back gesture before the stylesheet
+  arrives shows dark, not white. `prefers-reduced-motion` turns the motion off.
+- **The phone waits in skeletons instead of loading text** (#58) — the chat, Jarvis's chat
+  and the pane draw placeholder bubbles until the first answer arrives — and the composer's
+  placeholder is `message…`, which fits on one line at every phone width.
+
+### Fixed
+
+- **A lead comes back on its own conversation, and never on one another pane has open**
+  (#47). After a crash, opening a project rebuilds `master` without naming a conversation,
+  and on tmux the launcher then took the newest conversation in the folder. In a fleet whose
+  cards share one folder that is whichever card wrote last: a lead came back running a
+  worker's conversation, the worker's card vanished, and later a lead was launched with
+  `--resume` of a conversation that was live in its own card. Claude and codex launchers now
+  resume the slot's own recorded conversation first; fall back only to one no other card
+  claims and no live process holds; and refuse an explicit id that another process holds.
+  Two records for one slot are settled first by a deliberate placement (`fleet-open <id>
+  --into <slot>` now records one), then by the conversation's name history (the slot it was
+  first named as), and only then by which was written last; `fleet-restart --reopen` does
+  the same. Every such choice, and every conversation that moves into another pane's slot,
+  is written to `<fleet dir>/slot-claim.log`.
+- **A lead is woken when a worker needs it, even with Claude's suggestion in its input box**
+  (#49). Claude fills an empty input box with greyed text — `Try "…"` in a new session, a
+  suggested next prompt after a turn — and the wake read that text as something a person had
+  typed, so it never pasted into an idle lead: it retried for ten minutes and gave up into a
+  file nobody reads, while the worker sat on its permission prompt. Grey text now counts as
+  empty (real typing is never drawn grey). And a wake that does give up — because somebody
+  really is mid-sentence — leaves an `UNDELIVERED` row in that lead's inbox, and
+  `fleet-serve` sends it to the phone as a needs-you for the lead.
+- **A click on a session card opens it the first time** (#44). The grid refreshes with
+  synchronous tmux work that holds the screen for most of a second on a fleet of twenty
+  sessions, and a click that landed during a refresh reached it as a press and a release in
+  one read — which the screen didn't recognise as a click, so it dropped it. On a 21-session
+  fleet that was every combined press-and-release, and half of all clicks. Every screen now
+  splits what it reads into separate events first (mouse reports, arrows, ⏎, Esc), and holds
+  a mouse report the terminal sent in two pieces until the rest arrives, so the click, the
+  arrow typed beside it, and a lone Esc all land. A paste is still one piece of text.
+- **A screen never outlives the ghostfleet that opened it** (#43). Kill the launcher while
+  the grid or the Projects screen is up and the screen used to carry on in the background,
+  repainting every second over whatever ran next in that window — a second `ghostfleet`
+  there showed a blank screen and a cursor until the old one was `kill -9`'d. A screen now
+  exits within about a second of losing its launcher (or its terminal), hands the shell back
+  a normal screen with the mouse off, and leaves the terminal's own modes to whoever owns it
+  now. A SIGTERM also exits within a few seconds when a tmux server has stopped answering:
+  the refresh's tmux, git and pgrep calls are bounded, instead of holding the screen, and
+  every signal sent to it, for as long as tmux took.
+- **A codex session the machine killed comes back on its own conversation, the same way a
+  claude one does** (#42). Codex has no hooks, so a codex pane left no fleet record: after a
+  crash or reboot its conversation was intact on disk but showed nowhere as `lost`, and the
+  only way back was `codex resume --last`, which picks the newest conversation in the
+  folder. `codex-here` now records the rollout the codex process has open as `<fleet
+  dir>/<id>.json`, in the same shape claude's hook writes, and keeps it current if the pane
+  starts a new conversation. A dead codex session is then `lost` in `fleet-list`, the grid,
+  the phone and the digest, and ⏎ / `fleet_reopen` / `fleet-restart --reopen` / `fleet-open
+  <id>` bring it back with `codex resume <id>` in its own checkout. Re-measured on codex-cli
+  0.160.1: the rollout is written as the conversation goes (0.146 wrote it only on a clean
+  exit), so the codex adapter's `resume` is now `yes`, and an agent switch back to codex
+  resumes its conversation too. A conversation already open in another pane is not reopened
+  a second time.
+- **A reopened session runs as its own agent, under its fleet's config** (#42). The reopen
+  now passes the recorded agent explicitly, so it no longer takes whatever agent the
+  caller's environment had. When no tmux server is left (after a crash), the one it starts
+  loads the fleet's tmux config and the session's profile, not `~/.tmux.conf` and whoever
+  ran the reopen.
+- **A pane id reused after a crash no longer hides a lost session** (#42). Pane ids restart
+  at `%0` with every tmux server, and pids are reused across a reboot, so a new server could
+  carry the `%0@<pid>` an old record names. That match now counts only when the record is no
+  older than the server holding the pane (tmux's own `start_time`), so a session renamed by
+  hand on a running server still is not lost.
+- **The phone's chat shows a codex conversation** (#42). `fleet-read` (and so
+  `/api/session`) reads a codex rollout's user and assistant messages and drops what codex
+  injects itself (the environment block, AGENTS.md).
+- **The ledger's judge no longer breaks for good past ~20 open items** (#38). It asked for one
+  verdict per open item in a single 700-token reply; past about twenty the reply was cut
+  off, dropped whole, and nothing closed, so every later turn failed the same way while the
+  band showed only a growing count. It now asks ten items a call, newest first, and keeps
+  what a cut-off reply finished. A failing judge is on the band (`judge failing: <why>`) and
+  in `fleet-ledger list`, and a promise no judged turn addresses in five closes as `stale`.
+  A session's existing backlog is judged on its next answered turn.
+- **Promises stop multiplying** (#38). The same follow-up restated in new words each turn was a
+  new promise each time, and steps the agent asked the person to take ("still waiting on
+  you: run X") were recorded as the agent's own. The judge now names the open promise a
+  phrasing restates, a word-overlap check catches the ones it misses, person-addressed
+  steps are dropped, and at most five promises are open at once.
+- **The ledger's gate stops re-prompting work the session already reported on** (#41). "Open"
+  meant both "the turn ignored this" and "the turn reported on it while a worker builds it",
+  and the gate re-prompted both, so an agent that had just said "the build is in progress in
+  a worker" was told to finish it now and could only say the same thing again. The judge now
+  has an `in-progress` verdict: the item stays open, on the band and in `/ledger` (marked
+  `[in progress]`), and the gate never names it. There is also no re-prompt at the end of a
+  turn that asks the person something or waits on their decision, a turn the gate's own
+  re-prompt started, a lead's turn while its workers are still working, or within five
+  minutes of the last re-prompt. "I'll wait for your reply" is no longer recorded as a
+  promise. An item a turn never mentions is still re-prompted once.
+- **Unlocking the phone asks for Face ID inside the tap, and tapping cannot lock the owner
+  out** (#46). After an iOS update the installed app stopped unlocking: the button fetched
+  its challenge and only then asked for the passkey, which spent the tap, so WebKit
+  refused with no sheet and no message — and every further tap was one more challenge,
+  until the daemon's auth limit answered 429 to all of them. The challenge is now fetched
+  before the tap, one ceremony runs at a time, the error is on screen, and challenges have
+  their own rate bucket; only refused assertions count toward the auth limit.
+- **The suite stops sending prompts into the live fleet, and a fleet delivery into Jarvis is
+  never the owner's yes** (#50). A worker running `test/run.sh` exported its own fleet
+  directory, the suite's Jarvis group fell back to it, and a live mod record matched by socket
+  name alone — so the real Jarvis received `ok`, recorded as the owner's own words, about a
+  hundred times over two weeks. The suite now runs under its own `HOME` with the caller's
+  fleet variables unset; `fleet-send` hands a prompt only to the mod of the tmux server it
+  addresses; the mod marks what it delivers into Jarvis from inside Jarvis's session; and a
+  `.sent` row names its caller.
+- **The ledger stops tracking nudges and resends, and stale or waiting items can still
+  close** (#51). Measured on one lead's week of ledger (156 items): ten of its fourteen fleet
+  items were the same wake-up nudge, a message stopped and resent counted twice, a stale
+  promise could never be judged again even after its work landed, an item waiting on the
+  person counted as open, and a bare "2" answering a numbered question became an ask of its
+  own. A replay of that shape goes from 33 items, 14 open at the end, to 18 items and 1.
+- **A phone send that did not arrive says so** (#52). An undelivered `fleet-send` reached
+  the phone as a quiet 200; it is now a red toast naming the session, with the typed text
+  and photos back in the box. A photos-only message no longer starts with `/` (which the mod
+  refuses as a slash command), and background-task notices, compaction summaries and
+  slash-command wrappers stop drawing as the owner's bubbles: compactions and runs of tool
+  calls are small folded cards.
+- **The session screen stays inside the visible area while the iOS keyboard is up** (#53).
+  In the installed app the keyboard shrank the visible area but not the screen, so iOS
+  scrolled the page and the header went up under the status bar. The screen now takes its
+  height from the visible area while the keyboard is up, and the layout is exactly the old
+  one when it closes.
+- **A picked photo no longer goes missing** (#56). The poll's redraw could drop the file
+  input the photo picker belonged to before the pick came back; there is one persistent
+  input now, outside everything a redraw rebuilds.
+- **The phone app stops pausing the owner's music when it opens** (#59). The first tap
+  anywhere claimed the iOS audio session for playback, which interrupts other apps' audio.
+  Audio is now claimed only inside a tap that asks for sound (a bubble's speaker, `talk`)
+  and given back when the voice ends or is stopped.
+- **Conversation mode waits through a pause, and long replies are read to the end** (#60).
+  A turn ended one second after the owner stopped making sound, shorter than a breath taken
+  to think; the pause is now a setting (3.5 s by default, 1.5–8 s), shown as a draining bar
+  that refills when speech resumes, and a tap on the band sends now. Replies were cut at 1200
+  characters, so a long one never reached its closing question; they are now read in chunks,
+  the next prepared while the current one plays.
+
 ## 0.5.1 — 2026-10-08
 
 **After upgrading**, a running session keeps the ledger it loaded: `/reload-plugins` in it

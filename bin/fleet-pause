@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # fleet-pause [-s SOCKET] <session>
+# fleet-pause --interrupt [-s SOCKET] <session>     (end the turn; do NOT park)
 #
 # Reliably stop a fleet worker and PARK it (mark it intentionally off, for cost
 # control). Two things make "just turn it off" unreliable, both handled here:
@@ -24,6 +25,15 @@
 # that reports a state other than the one it is in.
 #   `--hibernate` is the one that gives the memory back: it ends the process and keeps the
 # conversation, so the card can be woken by resume-by-id. See bin/fleet-hibernate.
+#
+# `--interrupt` is the Escape the desk presses, and nothing else: the same retry loop (one
+# Escape is swallowed mid tool-call, so a single key "worked" about half the time), and then
+# NO park marker. The session keeps taking work, so it is allowed on a lead and on Jarvis —
+# the refusals below are about turning a session OFF, and an interrupt never does. Built
+# because the phone's only way to stop a runaway turn was "pause", which a lead refuses and
+# which a worker answers by going OFF until somebody resumes it.
+#   An Esc interrupt fires no Stop (hooks/fleet-event.sh), so a prompt queued behind the turn
+# is NOT delivered by this: it stays queued, and the next send delivers it first.
 set -uo pipefail
 
 SOCK="${CLAUDE_FLEET_SOCK:-}"
@@ -31,10 +41,13 @@ SOCK="${CLAUDE_FLEET_SOCK:-}"
 # drift-proof; a long-running --resume/--fork Claude can hold a stale
 # CLAUDE_FLEET_SOCK. Only when it names a cf-* fleet server; -s still overrides.
 _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;; esac
-HIBERNATE=no
+HIBERNATE=no; INTERRUPT=no
 if [ "${1:-}" = "--hibernate" ]; then HIBERNATE=yes; shift; fi
+if [ "${1:-}" = "--interrupt" ]; then INTERRUPT=yes; shift; fi
 if [ "${1:-}" = "-s" ]; then SOCK="${2:-}"; shift 2; fi
 if [ "${1:-}" = "--hibernate" ]; then HIBERNATE=yes; shift; fi
+if [ "${1:-}" = "--interrupt" ]; then INTERRUPT=yes; shift; fi
+[ "$HIBERNATE$INTERRUPT" = yesyes ] && { echo "fleet-pause: --interrupt and --hibernate are opposites — one keeps the session, the other ends it" >&2; exit 1; }
 SESSION="${1:-}"
 
 [ -n "$SOCK" ]    || { echo "fleet-pause: no socket (run inside a fleet session, or pass -s <socket>)" >&2; exit 1; }
@@ -45,7 +58,7 @@ SESSION="${1:-}"
 # marker's sock (lib/jarvis.mjs); the off switch, if that is really what is meant, is
 # fleet-stop, which stays allowed for exactly this session.
 _jm="$HOME/.config/ghostfleet/jarvis"
-if [ "$SESSION" = master ] && [ -f "$_jm" ] && ! grep -qsx off "$_jm.enabled" \
+if [ "$INTERRUPT" = no ] && [ "$SESSION" = master ] && [ -f "$_jm" ] && ! grep -qsx off "$_jm.enabled" \
    && [ "$SOCK" = "$(grep -m1 '^sock=' "$_jm" 2>/dev/null | cut -d= -f2-)" ]; then
   echo "fleet-pause: refusing — Jarvis is always on; it is never hibernated, parked or paused." >&2
   echo "             To take it offline for good: fleet-stop -s $SOCK master" >&2
@@ -60,6 +73,9 @@ snap()    { tmux -L "$SOCK" capture-pane -p -t "$SESSION" 2>/dev/null; }
 is_idle() { local a b; a="$(snap)"; sleep 0.6; b="$(snap)"; [ "$a" = "$b" ]; }
 
 if is_idle; then
+  if [ "$INTERRUPT" = yes ]; then
+    echo "fleet-pause: '$SESSION' was not mid-turn — nothing to interrupt"; exit 0
+  fi
   echo "fleet-pause: '$SESSION' was already idle" >&2
 else
   stopped=no
@@ -72,6 +88,11 @@ else
     echo "fleet-pause: could not interrupt '$SESSION' after 10 tries (still redrawing). Try again in a moment." >&2
     exit 1
   fi
+fi
+
+if [ "$INTERRUPT" = yes ]; then
+  echo "fleet-pause: interrupted '$SESSION' — its turn ended; the session is still running and takes work as before"
+  exit 0
 fi
 
 # mark parked — the grid reads this to show it OFF and skip it in the live counts.

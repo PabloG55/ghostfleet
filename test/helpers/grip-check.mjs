@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// grip-check — the card's TITLE is a tap target, and a drag from it still reorders.
+// grip-check — the card's TITLE is a tap target, a drag from it reorders a SESSION card,
+// and no gesture on a PROJECT card can reorder or remove the project.
 //
 //     node test/helpers/grip-check.mjs        # "name <US> want <US> got" rows
 //
@@ -128,14 +129,96 @@ try {
     is(what, want, want ? await until(onGrid, 5000) : (await sleep(1000), await onGrid()));
   }
 
-  // ...AND THE DRAG STILL REORDERS, which is what the grip is for and the thing a fix that
-  // simply deleted the dragging branch would have destroyed. Against the ORDER, because
-  // that is the observable: the reorder verb is refused in fixture mode, so what is
+  // ── A PROJECT CARD TAKES A TAP AND NOTHING ELSE ─────────────────────────────────────
+  // The owner's report, from the installed app: ordinary thumb movement on the Projects
+  // list raised a red `remove '<project>' from projects?` confirm (a resting thumb is a
+  // long-press) and a reorder the server refused with a red banner (a thumb that lands on
+  // the title and moves is a drag). Neither may be reachable by a gesture any more —
+  // remove lives behind `⋯`, and reordering projects has no phone path at all.
+  //   Each row asks for the END STATE the report was about: a confirm bar, a toast, a
+  // lifted card, the order of the names. Every one of them is what the old wire() produced.
+  const after = () => b.evaluate(() => ({
+    confirm: (document.querySelector('#app .confirm .q') || {}).textContent || '',
+    toast: (document.querySelector('#app .toast') || {}).textContent || '',
+    lifted: !!window.__liftedDuring || !!document.querySelector('#app .card.lift, #app .card.drop-above, #app .card.drop-below'),
+  }));
+  const quiet = { confirm: '', toast: '', lifted: false };
+  const press = (part, steps, holdMs) => b.evaluate(async (pt, st, ms) => {
+    const c = [...document.querySelectorAll('#app .card')][0];
+    if (!c) return 'no card';
+    const t = pt === 'grip' ? c.querySelector('.c-top') : (c.querySelector('.c-where') || c);
+    const r = t.getBoundingClientRect();
+    const x = Math.round(r.left + 20), y = Math.round(r.top + 4);
+    const pe = (n, X, Y, on) => on.dispatchEvent(new PointerEvent(n, { bubbles: true, clientX: X, clientY: Y, pointerId: 1 }));
+    pe('pointerdown', x, y, t);
+    // SAMPLED MID-GESTURE, because release clears the lift: asked afterwards, a drag that
+    // was recognised and one that was not look the same.
+    let liftedDuring = false;
+    for (const [dx, dy] of st) {
+      pe('pointermove', x + dx, y + dy, t);
+      liftedDuring = liftedDuring || /\b(lift|drop-above|drop-below)\b/.test(c.className);
+    }
+    if (ms) await new Promise(res => setTimeout(res, ms));
+    const [ex, ey] = st.length ? st[st.length - 1] : [0, 0];
+    pe('pointerup', x + ex, y + ey, c);
+    window.__liftedDuring = liftedDuring;
+    return 'sent';
+  }, part, steps, holdMs);
+
+  for (const [what, part, steps, holdMs] of [
+    ['a long-press on a project card asks nothing',          'body', [],                     900],
+    ['...nor a long-press on its title',                     'grip', [],                     900],
+    ['a drag of a full row from the title reorders nothing', 'grip', [[0, 55], [0, 110]],    0],
+    ['...nor two rows up',                                   'grip', [[0, -110], [0, -220]], 0],
+    ['a swipe left across a project card does nothing',      'body', [[-40, 0], [-120, 0]],  0],
+    ['...nor a swipe right',                                 'body', [[40, 0], [120, 0]],    0],
+    ['a scroll-shaped move over the card does nothing',      'body', [[0, -30], [0, -200]],  0],
+  ]) {
+    await fresh();
+    const before = await cardNames();
+    const sent = await press(part, steps, holdMs);
+    if (sent !== 'sent') { is(what, quiet, `gesture failed: ${sent}`); continue; }
+    await sleep(800);
+    is(what, quiet, await after());
+    is(what + ' (order unchanged)', before, await cardNames());
+    is(what + ' (still on Projects)', false, await onGrid());
+  }
+
+  // THE TITLE IS NOT A GRIP ON A PROJECT CARD, so a scroll that starts on the name pans the
+  // list instead of being swallowed. `touch-action: none` is what a grip sets, and a card
+  // that cannot reorder has no business setting it.
+  await fresh();
+  is('a project card title lets the page scroll', true,
+     await b.evaluate(() => getComputedStyle(document.querySelector('#app .card .c-top')).touchAction !== 'none'));
+
+  // The keyboard shortcut was the same path with a key on it: `x` on a project.
+  await fresh();
+  await b.evaluate(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'x', bubbles: true })); return null; });
+  await sleep(500);
+  is('x on the Projects screen asks nothing', '', (await after()).confirm);
+
+  // ...AND REMOVE IS STILL THERE, behind `⋯`, with the TUI's own question.
+  await fresh();
+  const first = (await cardNames())[0];
+  await b.evaluate(() => { document.querySelector('#app button.more').click(); return null; });
+  await until(() => b.evaluate(() => [...document.querySelectorAll('.sheet button')].some(x => x.textContent.trim() === 'remove')), 5000);
+  await b.evaluate(() => { [...document.querySelectorAll('.sheet button')].find(x => x.textContent.trim() === 'remove').click(); return null; });
+  is('⋯ → remove still asks to remove the selected project', ` remove '${first}' from projects?`,
+     await until(() => b.evaluate(() => (document.querySelector('#app .confirm .q') || {}).textContent || ''), 5000));
+
+  // ── THE DRAG STILL REORDERS WHERE IT MEANS SOMETHING: a session card on the grid ────
+  // What a fix that simply deleted the dragging branch would have destroyed. Against the
+  // CLASSES, because the reorder verb's effect is not observable in fixture mode: what is
   // asserted is that the drag was RECOGNISED — the card lifts, and the drop indicator
   // names a direction.
   await fresh();
+  await b.evaluate(() => { document.querySelector('#app .card .c-where, #app .card').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })); return null; });
+  await b.evaluate(() => { const c = document.querySelector('#app .card'); c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 })); return null; });
+  await until(onGrid, 5000);
+  await until(() => b.evaluate(() => !!document.querySelector('#app .card .c-top.t')), 5000);
   const lifted = await b.evaluate(() => {
-    const c = [...document.querySelectorAll('#app .card')][0];
+    const c = [...document.querySelectorAll('#app .card')].find(n => n.querySelector('.c-top.t'));
+    if (!c) return { onDown: 'no grid card with a grip', dir: '', cleared: '' };
     const t = c.querySelector('.c-top');
     const r = t.getBoundingClientRect();
     const x = Math.round(r.left + 20), y = Math.round(r.top + 4);
@@ -144,11 +227,13 @@ try {
     const onDown = c.classList.contains('lift');
     pe('pointermove', x, y + 110, t);
     const dir = c.classList.contains('drop-below') ? 'below' : c.classList.contains('drop-above') ? 'above' : 'none';
-    pe('pointerup', x, y + 110, c);
+    // Cancelled, not released: this asserts the recognition and must not go on to fire
+    // the reorder verb and leave a toast behind for nothing.
+    c.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerId: 1 }));
     const cleared = !c.classList.contains('lift') && !c.classList.contains('drop-below');
     return { onDown, dir, cleared };
   });
-  is('a drag from the title lifts the card', true, lifted.onDown);
+  is('a drag from a session card title lifts the card', true, lifted.onDown);
   is('...and shows which way it will drop', 'below', lifted.dir);
   is('...and clears both on release', true, lifted.cleared);
 } catch (e) {

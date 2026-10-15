@@ -340,7 +340,7 @@ const SEEN = {
   cards:   () => [...document.querySelectorAll('#app .card .c-name')]
                    .some(n => !/^\+/.test(n.textContent.trim())),
   // NOT just the composer. The session screen draws its shell immediately and fills the
-  // chat with `reading the transcript…` until S.sess arrives, so "the composer exists" is
+  // chat with skeleton bubbles until S.sess arrives (a line of text, once), so "the composer exists" is
   // true against a screen with no conversation in it — and the rows below it park the
   // reader at scrollTop 3000, which a chat holding one hint line cannot reach. That read
   // as a 3000-vs-0 failure on some runs and passed on others: a FLAKE I introduced and
@@ -348,7 +348,7 @@ const SEEN = {
   // message, so it exists only once the transcript came back and was drawn.
   session: () => !!document.querySelector('.composer textarea')
                  && document.querySelectorAll('#app > .chat .turn').length > 0,
-  // Same shape: .pane-box holds `capturing the pane…` until S.pane lands, and the <pre>
+  // Same shape: .pane-box holds skeleton lines until S.pane lands, and the <pre>
   // with the rendered terminal in it is what says the payload arrived.
   pane:    () => { const p = document.querySelector('.paneview .pane-box pre.pane');
                    return !!p && (p.textContent || '').trim().length > 0; },
@@ -462,6 +462,18 @@ const COMPOSER = () => {
     // Is `send` beside the box or below it — the question the reporter's photograph asks.
     goBeside: Math.round(r(go).top) < Math.round(r(box).bottom),
     vw: d.clientWidth,
+    // THE PLACEHOLDER, MEASURED IN THE BOX IT SITS IN. "message this session…" wrapped to
+    // two lines beside the camera, talk and send: measured here at 375px it was 167px of
+    // text for 165px of room, and at 390 it fit by 13px — less than the difference between
+    // this engine's font metrics and the phone's. Its own width against the box's inner
+    // width, from the box's own computed font.
+    ph: (() => {
+      const cs = getComputedStyle(box);
+      const g = document.createElement('canvas').getContext('2d');
+      g.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      return { text: Math.ceil(g.measureText(box.placeholder || '').width),
+               room: Math.floor(box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)) };
+    })(),
   };
 };
 
@@ -669,6 +681,17 @@ async function walk(w, h) {
   }
   await evaluate(() => { document.body.style.fontSize = ''; return null; });
   await settle('the text size going back to default');
+  // At the DEFAULT size only: on the accessibility rungs no placeholder fits a box this
+  // narrow, and that is not what was reported. With room to spare, because the phone's
+  // metrics are not this engine's — and how far apart two engines' are is measured, not
+  // guessed: "message…" at 320px is 78px of text in 109 on macOS and 88px in 110 on the
+  // Linux CI runner, the same string. A 15% margin holds both, and still refuses the old
+  // placeholder where it merely fit (168 in 179 at 390, 94%) as well as where it wrapped.
+  {
+    const c = await evaluate(COMPOSER);
+    is(`${w}px the composer placeholder fits on one line, with room`, true,
+       !!c && c.ph.text <= c.ph.room * 0.85 || `${c && c.ph.text}px of text in ${c && c.ph.room}px`);
+  }
   // A DRAFT THE HEIGHT OF A PARAGRAPH. render() rebuilds this box on every poll, so the
   // height has to be re-applied on render and not only on a keystroke.
   const grew = await evaluate(() => {
@@ -729,6 +752,121 @@ async function bigText() {
   const { over, past } = await evaluate(OVERFLOW);
   is('...and the page still does not scroll sideways', 0, over);
   is('...with nothing past the right edge', '', past.join(','));
+}
+
+// ── the composer placeholder, at every phone width and every text size ────────
+// walk() measures it at 390 and 320 only, and only at the default size. The widths between
+// are where the phones are (375 the small ones, 390/393 the common ones, 430 the large), and
+// the text ladder is the owner's real setting: the box's font is pinned to 16px and its
+// buttons to 14px, so a larger iOS text size should move NEITHER the text nor the room —
+// which is a claim, and this is where it is measured. Same 15% margin as walk()'s, for the
+// same reason: two engines' metrics for one string differ by more than a fit-by-a-hair.
+async function placeholderSweep() {
+  for (const [w, h] of [[320, 568], [375, 667], [390, 844], [393, 852], [430, 932]]) {
+    await viewport(w, h);
+    await fresh();
+    await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+    await tapCard('acme-api'); await seeingCard('api-fix');
+    await tapCard('api-fix'); await seeing('session', 'the session screen');
+    const bad = [];
+    for (const fs of [16, 24, 30, 38, 44, 53]) {
+      await evaluate((fs) => { document.body.style.fontSize = fs + 'px'; return null; }, fs);
+      await settle(`the placeholder at ${fs}px`);
+      const c = await evaluate(COMPOSER);
+      if (!c || !(c.ph.text <= c.ph.room * 0.85)) bad.push(`${fs}: ${c && c.ph.text}px of text in ${c && c.ph.room}px`);
+    }
+    await evaluate(() => { document.body.style.fontSize = ''; return null; });
+    is(`${w}px the composer placeholder fits on one line at every text size`, '', bad.join('; '));
+  }
+}
+
+// ── a session that is still loading waits in the shape of a session ──────────
+// The chat said "reading the transcript…" and the pane "capturing the pane…" until their
+// first answer: a line of text in an empty column, which the messages then replaced by
+// pushing it away. They are skeletons now, and this holds the first answer back to look at
+// them — in the PAGE, because the service worker answers a fixture it has seen from its
+// cache and a hold at this server would hold nothing. Then it lets the answer through and
+// waits for a real poll (counted, not slept for) to prove the skeleton never comes back.
+const HELD_TEXT = /reading the transcript|capturing the pane|asking the Mac|loading…|reading…/i;
+async function loadingSkeletons() {
+  await viewport(390, 844);
+  await fresh();
+  await clickText('continue without a passkey'); await seeing('cards', 'the projects payload');
+  await tapCard('acme-api'); await seeingCard('api-fix');
+  await evaluate(() => {
+    const real = window.fetch.bind(window);
+    window.__gfHold = true; window.__gfHeld = []; window.__gfSessReads = 0;
+    window.fetch = (u, o) => {
+      const s = String(u);
+      if (/fixtures\/session-/.test(s)) window.__gfSessReads++;
+      if (window.__gfHold && /fixtures\/(session|pane)-/.test(s)) return new Promise(res => window.__gfHeld.push(() => res(real(u, o))));
+      return real(u, o);
+    };
+    return null;
+  });
+  // Not seeing('session'): that waits for a rendered message, which is exactly what is held.
+  await tapCard('api-fix'); await waitFor('the session shell', () => !!document.querySelector('.composer textarea'));
+  await waitFor('the chat skeleton', () => document.querySelectorAll('.chat .bub.skel').length > 0);
+  const shot = async (name) => {
+    if (!process.env.VP_SHOT_DIR) return;
+    const { data } = await call('Page.captureScreenshot', { format: 'png' });
+    fs.writeFileSync(path.join(process.env.VP_SHOT_DIR, name + '.png'), Buffer.from(data, 'base64'));
+  };
+  const chat = () => evaluate((src) => {
+    const re = new RegExp(src, 'i');
+    const c = document.querySelector('#app .chat');
+    const sk = [...document.querySelectorAll('.chat .bub.skel')];
+    const real = document.querySelector('.chat .bub.agent:not(.skel)');
+    const vw = document.documentElement.clientWidth;
+    return {
+      n: sk.length,
+      // a transcript's rhythm: speakers alternate, the agent's on the left, the owner's right
+      sides: sk.map(b => (b.getBoundingClientRect().left < vw / 4 ? 'l' : 'r') + (b.classList.contains('user') ? 'u' : 'a')).join(','),
+      radius: sk[0] ? getComputedStyle(sk[0]).borderBottomLeftRadius + '/' + getComputedStyle(sk[0]).borderTopLeftRadius : '',
+      bars: sk.every(b => b.querySelector('.skel-bar') && b.getBoundingClientRect().height > 20),
+      words: c ? c.innerText.trim() : '(no chat)',
+      text: re.test(document.querySelector('#app').innerText),
+      real: !!real,
+      anim: sk[0] ? getComputedStyle(sk[0].querySelector('.skel-bar')).animationName : '',
+    };
+  }, HELD_TEXT.source);
+  // Motion asked for in so many words: a runner's browser may default to reduced motion
+  // (the macOS one does), and a row that reads the default measures the machine.
+  await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+  const held = await chat();
+  await shot('chat-loading-390');
+  is('loading chat: skeleton bubbles stand where the messages will', true, held.n >= 4 || `${held.n} bubbles`);
+  is('...alternating agent left, owner right', 'la,ru,la,ru,la', held.sides);
+  is("...with the agent bubble's own corners", '4px/16px', held.radius);
+  is('...each a bubble with bars in it, not an empty sliver', true, held.bars);
+  is('...and no loading text anywhere on the screen', false, held.text);
+  is('...nor any words in the chat at all', '', held.words);
+  is('...and it shimmers', 'gf-skel', held.anim);
+  await call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+  is('...but not for a reader who asked for less motion', 'none', (await chat()).anim);
+  await call('Emulation.setEmulatedMedia', { features: [] });
+  // the pane, held the same way
+  await evaluate(() => { const b = [...document.querySelectorAll('.seg button')].find(x => x.textContent.trim() === 'pane'); if (b) b.click(); return null; });
+  await waitFor('the pane skeleton', () => !!document.querySelector('.pane-box .pane-skel'));
+  await shot('pane-loading-390');
+  const pane = await evaluate((src) => ({
+    bars: document.querySelectorAll('.pane-box .pane-skel .skel-bar').length,
+    text: new RegExp(src, 'i').test(document.querySelector('#app').innerText),
+  }), HELD_TEXT.source);
+  is('loading pane: skeleton lines where the capture will be', true, pane.bars >= 5 || `${pane.bars} lines`);
+  is('...and no loading text', false, pane.text);
+  await evaluate(() => { const b = [...document.querySelectorAll('.seg button')].find(x => x.textContent.trim() === 'chat'); if (b) b.click(); return null; });
+  // ...and let the answers through
+  await evaluate(() => { window.__gfHold = false; window.__gfHeld.splice(0).forEach(f => f()); return null; });
+  await waitFor('the first messages', () => !!document.querySelector('.chat .bub.agent:not(.skel)'));
+  const landed = await chat();
+  is('...the messages replace it', 0, landed.n);
+  await shot('chat-loaded-390');
+  const reads = await evaluate(() => window.__gfSessReads);
+  await waitFor('a poll of the transcript', (r) => window.__gfSessReads > r, 15000, reads);
+  await sleep(300);
+  const polled = await chat();
+  is('...and a poll redraw never brings it back', '0 skeleton, messages shown', `${polled.n} skeleton, messages ${polled.real ? 'shown' : 'gone'}`);
 }
 
 // ── the keyboard, which is what was actually being reported ───────────────
@@ -808,6 +946,9 @@ async function keyboard(w, h, { indicator = true } = {}) {
   await evaluate((kb) => {
     const fake = { height: innerHeight - kb, width: innerWidth, offsetTop: 0, offsetLeft: 0,
                    pageTop: 0, pageLeft: 0, scale: 1, addEventListener() {}, removeEventListener() {} };
+    // Kept so the keyboard can CLOSE: in Chrome visualViewport is an own property of the
+    // global, so deleting the fake leaves no viewport at all rather than the real one.
+    if (!window.__vvReal) window.__vvReal = Object.getOwnPropertyDescriptor(window, 'visualViewport');
     Object.defineProperty(window, 'visualViewport', { configurable: true, value: fake });
     const ta = document.querySelector('.composer textarea');
     if (ta) ta.focus();
@@ -849,25 +990,22 @@ async function keyboard(w, h, { indicator = true } = {}) {
   }
   is(`${w}px keyboard: the composer really has focus`, true, open.focused);
 
-  // WHAT THIS GROUP CAN AND CANNOT PROVE — read before adding to it, because the previous
+  // WHAT THIS GROUP CAN AND CANNOT PROVE — read before adding to it, because a previous
   // version of these rows was GREEN while the app was unusable on a real iPhone.
   //
-  // It fakes visualViewport to the shape iOS presents: layout viewport unchanged, visual
-  // viewport short by a keyboard. That much is faithful. What no desktop engine does is
-  // RESPOND like Safari: it does not pan the page to reveal the focused field, and it does
-  // not leave height and offsetTop unreverted afterwards. The old rows asserted our
-  // reaction to the fake and read that as the feature working. It was not: driving the
-  // column's height from visualViewport.height and calling scrollTo(0,0) on its scroll
-  // event put the composer at the TOP of the screen over the status bar with the transcript
-  // black beneath it, and opened chats scrolled past their own content.
-  //
-  // So this asserts only what is actually observable here: THE LAYOUT DOES NOT BREAK when
-  // the visual viewport shrinks. Whether the composer is reachable above a real keyboard is
-  // Safari's pan doing its job, and it can only be confirmed on a device. Do not add a row
-  // that claims otherwise.
-  is(`${w}px keyboard: the column stays the layout viewport`, true,
-     Math.abs(open.appH - before.innerH) <= 2);
-  is(`${w}px ...because nothing writes a --vvh any more`, '', open.vvh);
+  // It fakes visualViewport to the shape iOS presents: visual viewport short by a keyboard.
+  // What no desktop engine does is RESPOND like iOS — it does not shrink innerHeight in
+  // standalone, does not scroll an overflowing document, does not pan. So these rows assert
+  // only our side of it: with the keyboard up the column is the VISIBLE height (so there is
+  // nothing for iOS to scroll the header away with), the composer ends inside it, and when
+  // the keyboard goes every property is removed and the column is the full viewport again —
+  // the half the first visualViewport version got wrong. That iOS then leaves the page alone
+  // was measured in the installed app on a simulator, and can only be confirmed there.
+  is(`${w}px keyboard: the column is the visible height`, true,
+     open.visible !== null && Math.abs(open.appH - open.visible) <= 2);
+  is(`${w}px ...so the composer ends above the keyboard`, true,
+     open.taBottom !== null && open.taBottom <= open.visible);
+  is(`${w}px ...and nothing writes a --vvh`, '', open.vvh);
   // The bottom inset is for the home indicator and the keyboard covers the home indicator:
   // "you are leaving too much space between the text box and the bottom". This is the one
   // thing the client still does with the keyboard, and it is a padding, not a geometry.
@@ -879,6 +1017,30 @@ async function keyboard(w, h, { indicator = true } = {}) {
   // asserting 0 here would be asserting that the browser does not do its job.
   const m = await evaluate(OVERFLOW);
   is(`${w}px keyboard: every row still fits its own box`, '', m.boxes.join(','));
+
+  // ...and the keyboard goes: the real visualViewport back, the geometry REMOVED.
+  await evaluate(() => {
+    if (window.__vvReal) Object.defineProperty(window, 'visualViewport', window.__vvReal);
+    dispatchEvent(new Event('resize'));
+    return null;
+  });
+  await sleep(200);
+  const shut = await evaluate(() => {
+    const d = document.documentElement, app = document.getElementById('app');
+    return { appH: Math.round(app.getBoundingClientRect().height), innerH: innerHeight,
+             h: d.style.getPropertyValue('--app-h'), top: d.style.getPropertyValue('--app-top') };
+  });
+  is(`${w}px keyboard closed again: the column is the whole viewport`, true,
+     Math.abs(shut.appH - shut.innerH) <= 2);
+  is(`${w}px ...because the geometry was removed, not left behind`, '', shut.h + shut.top);
+  // Back up for the indicator half, which is about a focused composer over a short viewport.
+  await evaluate((kb) => {
+    const fake = { height: innerHeight - kb, width: innerWidth, offsetTop: 0, offsetLeft: 0,
+                   pageTop: 0, pageLeft: 0, scale: 1, addEventListener() {}, removeEventListener() {} };
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: fake });
+    dispatchEvent(new Event('resize'));
+    return null;
+  }, KB);
 
   if (!indicator) return;
   // ── the thinking indicator, under a focused composer ────────────────────
@@ -964,6 +1126,8 @@ try {
   // than one track — a different layout, and so a different chance to overflow.
   await walk(1024, 768);
   await bigText();
+  await placeholderSweep();
+  await loadingSkeletons();
   await sheetCeiling();
   await keyboard(390, 844);
   await keyboard(320, 568, { indicator: false });

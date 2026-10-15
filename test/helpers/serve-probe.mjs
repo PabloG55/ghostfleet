@@ -337,6 +337,26 @@ if (phase === 'rate') {
   console.log(`burst${US}0${US}${JSON.stringify(seen)}`);
 }
 
+// THE OWNER MUST NOT BE ABLE TO LOCK THEMSELVES OUT BY TAPPING. A phone whose ceremony
+// never reached the sensor fetched a challenge per tap and never asserted — twenty in a few
+// minutes — and every one was spent from the same bucket as a wrong signature, so the
+// server answered 429 to the owner. Run with rate.auth=3 and rate.challenge=30: a challenge
+// flood well past 3 must leave the real assertion working, three REFUSED assertions must
+// still shut the door on the fourth, and challenges must still have a ceiling of their own.
+if (phase === 'authburst') {
+  row('burst.enrol', await a.enroll(base, arg));
+  const flood = [];
+  for (let i = 0; i < 20; i++) flood.push((await request(base, 'GET', '/api/auth/challenge')).status);
+  console.log(`burst.challenges${US}0${US}${JSON.stringify(flood)}`);
+  row('burst.assertAfterFlood', await a.assert(base));
+  row('burst.assertAgain', await a.assert(base));
+  for (let i = 1; i <= 3; i++) row(`burst.badSig${i}`, await a.assert(base, { tamper: { signature: Buffer.alloc(70) } }));
+  row('burst.afterFailures', await a.assert(base));
+  const more = [];
+  for (let i = 0; i < 40; i++) more.push((await request(base, 'GET', '/api/auth/challenge')).status);
+  console.log(`burst.ceiling${US}0${US}${JSON.stringify(more)}`);
+}
+
 // Phase two of revocation: the token minted before `fleet-serve revoke` ran, replayed
 // after it — and the passkey that minted it, trying for another.
 if (phase === 'revoked') {

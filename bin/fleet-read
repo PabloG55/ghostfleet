@@ -5,7 +5,8 @@
 # Print the last n (default 1) assistant messages from a sibling session's
 # transcript — so a lead session can check a worker's progress/output.
 #
-# --json emits the same messages as DATA — {ts, role, text} per message, with a cursor —
+# --json emits the same messages as DATA — {ts, role, text} per message, with a cursor, plus
+# two event roles the phone draws as cards: `compacted`, and `tools` (a folded run of calls) —
 # for bin/fleet-serve's /api/session (docs/mobile.md §11.3). It is additive for the same
 # reason fleet-grid.mjs --json is: the phone needs a timestamp and a role per message,
 # and the alternative was a second reader of the transcript. There is already exactly one
@@ -150,6 +151,77 @@ if [ -z "$tr" ] || [ ! -f "$tr" ]; then
   exit 1
 fi
 
+# ── A CODEX CONVERSATION IS A ROLLOUT, NOT A TRANSCRIPT ──────────────────────
+# lib/codex-rollout.mjs records a codex pane's rollout in the same `transcript` field, so
+# the lookup above finds it unchanged — and then the claude filter below read it as an
+# empty conversation, because a rollout has no `type:"user"` / `type:"assistant"` lines.
+# Its messages are `response_item`s with a role, and its user turns include what codex
+# itself injects (the environment block, AGENTS.md, an aborted-turn marker), which is the
+# machine talking and is dropped the way claude's isMeta lines are. Recognised by its first
+# line, which is always session_meta — not by the path, which a CODEX_HOME can move.
+# Both readers produce the same {ts, role, text}, so pagination and the phone are shared.
+if head -c 400 "$tr" 2>/dev/null | grep -q '"type":"session_meta"'; then
+  MSGS='select(.type=="response_item" and (.payload.type // "")=="message"
+               and (.payload.role=="user" or .payload.role=="assistant"))
+        | { ts: ((.timestamp // "") | if . == "" then 0
+                 else (sub("\\.[0-9]+Z$";"Z") | fromdateiso8601? // 0) end),
+            role: .payload.role,
+            text: ((.payload.content // [])
+                   | if type == "string" then .
+                     else (map(select(.type == "input_text" or .type == "output_text" or .type == "text") | .text) | join("\n")) end) }
+        | select((.text | type) == "string" and (.text | test("[^[:space:]]")))
+        | select((.role == "user" and (.text | test("^\\s*(<(environment_context|user_instructions|permissions instructions|turn_aborted|user_shell_command|collaboration_mode)[ >]|# AGENTS\\.md instructions)"))) | not)'
+else
+  # NOT EVERY `type:"user"` LINE IS THE OWNER. Claude files a good deal of its own traffic
+  # as user turns, and each of these reached the phone as a right-hand bubble he never wrote.
+  # The ones that are EVENTS keep their place in the conversation, as a role of their own the
+  # phone draws as a small muted card — never as his:
+  #   - the compaction summary (`isCompactSummary`): a several-screen "This session is being
+  #     continued…" block becomes role `compacted`, its summary kept (capped) as the card's
+  #     folded-away detail rather than as a message;
+  #   - a background task finishing (`origin.kind` "task-notification", a `<task-notification>`
+  #     body) — by far the most common — becomes a `tool` row named `task`, carrying its
+  #     <summary> line;
+  #   - and the agent's own tool calls, which this reader used to skip entirely, are `tool`
+  #     rows too: the tool's name and one line of what it was asked (a command, a path).
+  # The rest is the machine talking to itself and is dropped: a slash command's wrappers and
+  # its local output (`<command-name>`, `<local-command-…>`, the "Caveat: The messages
+  # below…" preamble), shell-mode echoes (`<bash-…>`), a prompt hook's injection, and the
+  # "[Request interrupted by user…]" marker. Matched on the LEADING tag, never anywhere in
+  # the text: a pasted message that quotes one is still his. A fleet delivery (`origin.kind`
+  # "plugin") is a real prompt — a lead's or the phone's — so it is kept. tool_result blocks
+  # never get this far: a result is the pane's to show, and it is most of the file.
+  MSGS='select(.type=="assistant" or .type=="user")
+        | select((.isSidechain // false) | not)
+        | select((.isMeta // false) | not)
+        | ((.timestamp // "") | if . == "" then 0
+             else (sub("\\.[0-9]+Z$";"Z") | fromdateiso8601? // 0) end) as $ts
+        | ((.message.content // []) | if type == "string" then .
+             else (map(select(.type == "text") | .text) | join("\n")) end) as $text
+        | if (.isCompactSummary // false) then
+            { ts: $ts, role: "compacted", text: "conversation compacted",
+              detail: (($text // "") | tostring | sub("^\\s*This session is being continued[^\n]*\n*"; "") | .[0:1200]) }
+          elif ((.origin.kind // "") == "task-notification")
+               or (.type == "user" and ($text | type) == "string" and ($text | test("^\\s*<task-notification>"))) then
+            { ts: $ts, role: "tool", text: "task",
+              # `(capture(…)? | .s)`, never `capture(…)?.s`: the suffix form is jq 1.8 syntax,
+              # and jq 1.7 (Ubuntu 24.04 apt) rejects the WHOLE program, so every message
+              # vanished there while this read fine on a Mac.
+              detail: (($text | (capture("<summary>(?<s>[^<]*)</summary>")? | .s))
+                       // ($text | (capture("<status>(?<s>[^<]*)</status>")? | .s)) // "finished") }
+          elif .type == "assistant" then
+            ({ ts: $ts, role: (.message.role // .type), text: $text }),
+            ((.message.content // []) | if type == "array" then .[] else empty end
+             | select(.type == "tool_use")
+             | { ts: $ts, role: "tool", text: (.name // "tool"),
+                 detail: ((.input // {}) | (.description // .command // .file_path // .path // .pattern
+                          // .url // .query // .skill // .prompt // .subject // "")
+                          | tostring | gsub("\\s+"; " ") | .[0:160]) })
+          else { ts: $ts, role: (.message.role // .type), text: $text } end
+        | select(.role == "tool" or ((.text | type) == "string" and (.text | test("[^[:space:]]"))))
+        | select((.role == "user" and (.text | test("^\\s*(<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat|bash-input|bash-stdout|bash-stderr|user-prompt-submit-hook|system-reminder)>|Caveat: The messages below were generated|\\[Request interrupted by user)"))) | not)'
+fi
+
 # The WINDOW. 600 lines is what the default path has always read, and --json keeps a
 # bound of its own kind for the same reason: the largest transcript measured here is
 # 46 MB, and a phone asking for twenty messages must not make anybody read all of it.
@@ -164,18 +236,19 @@ if [ "$JSON" = 1 ]; then
   # a screen of tool_result blocks is not a conversation, and `content` is a plain string
   # on some user turns and an array on the rest.
   tail -n "$TAIL_LINES" "$tr" \
-    | jq -c 'select(.type=="assistant" or .type=="user")
-             | select((.isSidechain // false) | not)
-             | select((.isMeta // false) | not)
-             | { ts: ((.timestamp // "") | if . == "" then 0
-                      else (sub("\\.[0-9]+Z$";"Z") | fromdateiso8601? // 0) end),
-                 role: (.message.role // .type),
-                 text: ((.message.content // [])
-                        | if type == "string" then .
-                          else (map(select(.type == "text") | .text) | join("\n")) end) }
-             | select((.text | type) == "string" and (.text | test("[^[:space:]]")))' 2>/dev/null \
+    | jq -c "$MSGS" 2>/dev/null \
     | jq -s --argjson limit "$LIMIT" --arg before "$BEFORE" --arg s "$SESSION" --argjson trunc "$trunc" '
-        . as $all
+        # A RUN OF TOOL CALLS IS ONE ITEM. One assistant turn can make forty calls, and a page
+        # is twenty items: unfolded, a busy turn would fill the phone with cards and push the
+        # conversation out of the page. Folded here, before paging, so a page still counts
+        # things a person reads. The item keeps the first call ts as its own, which is the
+        # cursor a later page asks for.
+        reduce .[] as $m ([];
+          if $m.role != "tool" then . + [$m]
+          elif (length > 0 and .[-1].role == "tools") then .[-1].tools += [{ name: $m.text, detail: $m.detail, ts: $m.ts }]
+          else . + [{ ts: $m.ts, role: "tools", tools: [{ name: $m.text, detail: $m.detail, ts: $m.ts }] }] end)
+        | map(if .role == "tools" then .text = ((.tools | length | tostring) + (if (.tools | length) == 1 then " tool call" else " tool calls" end)) else . end)
+        | . as $all
         | ($all | length) as $total
         | (if $before == "" then $total
            else ([ $all | to_entries[] | select((.value.ts | tostring) == $before) | .key ] | first // $total)
@@ -187,6 +260,9 @@ if [ "$JSON" = 1 ]; then
   exit 0
 fi
 
+# The plain view keeps claude's own filter byte for byte; a rollout goes through its reader.
+PLAIN='select(.type=="assistant") | (.message.content // []) | map(select(.type=="text")|.text) | join(" ")'
+case "$MSGS" in *response_item*) PLAIN="$MSGS"' | select(.role == "assistant") | .text' ;; esac
 tail -n 600 "$tr" \
-  | jq -r 'select(.type=="assistant") | (.message.content // []) | map(select(.type=="text")|.text) | join(" ")' 2>/dev/null \
+  | jq -r "$PLAIN" 2>/dev/null \
   | grep -v '^[[:space:]]*$' | tail -n "$N"

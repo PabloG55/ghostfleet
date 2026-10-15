@@ -16,8 +16,10 @@
 //   fleet-jarvis voice --kokoro [--install]
 //                                 the Mac's speaking voice; --install sets up Kokoro (~350 MB)
 //   fleet-jarvis restart [--if-due] [--dry-run]
-//                                 the daily fresh start, carrying HANDOFF.md forward
+//                                 a fresh start, carrying HANDOFF.md forward; --if-due only
+//                                 once the conversation has outgrown restart_tokens
 //   fleet-jarvis said [--from SRC]    (the event hook) record what the owner said, stdin
+//   fleet-jarvis delivered            (the mod) the prompt on stdin is the fleet's, not the owner's
 //   fleet-jarvis gate-bash            (hooks/jarvis-guard.sh) judge a Bash command, stdin
 //
 // WHY A PROJECT AND NOT A NEW KIND OF THING. A registered project already gets a socket, a
@@ -35,7 +37,7 @@ import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { projects } from '../mcp/fleet-dispatch.mjs';
-import { scanStatus } from '../lib/fleet-scan.mjs';
+import { scanStatus, transcriptOf } from '../lib/fleet-scan.mjs';
 import * as J from '../lib/jarvis.mjs';
 import * as speech from '../lib/speech.mjs';
 import * as K from '../lib/kokoro-setup.mjs';
@@ -133,7 +135,7 @@ function init() {
     did.push(`registered project '${name}' on the ${prof} profile`);
   }
   const m = { name, profile: prof, sock: sockFor(name, prof), cfg: cfgFor(prof), path: dir,
-              batch: old ? old.batch || '' : '', restart_hour: old ? old.restart_hour : '' };
+              batch: old ? old.batch || '' : '', restart_tokens: old ? old.restart_tokens : '' };
   if (!old || ['name', 'profile', 'sock', 'cfg', 'path'].some(k => old[k] !== m[k])) { J.writeMarker(m); did.push(`wrote the marker (${J.markerPath()})`); }
 
   if (quiet && !did.length) return;
@@ -154,6 +156,8 @@ export function jarvisState() {
   if (!m) return { enabled: true, experimental: true, present: false, why: 'no Jarvis on this machine yet — run: ghostfleet jarvis' };
   const rec = scanStatus([m.dir]).find(r => r.sock === m.sock && r.slot === 'master');
   let last = 0; try { last = Number(fs.readFileSync(stampFile(), 'utf8').trim()) || 0; } catch {}
+  // A record from before the last restart still measures the conversation it replaced.
+  const c = contextOf(m);
   // Is the confirm-list's Bash guard actually runnable? A missing one fails open, silently.
   let guard = '';
   try {
@@ -164,7 +168,7 @@ export function jarvisState() {
   return { enabled: true, experimental: true, present: true, project: m.name, profile: m.profile, session: 'master', path: m.path, guard: guardOk ? 'ok' : (guard ? `not runnable: ${guard}` : 'not wired'),
            running: running(m), status: rec ? rec.status : null,
            voice: J.voiceStatus(), speak: speech.status(), pending: J.pending(),
-           restart: { hour: m.restart_hour, last }, batch: m.batch };
+           restart: { tokens: m.restartTokens, now: c.ts > last ? c.tokens : null, last }, batch: m.batch };
 }
 async function status() {
   const s = jarvisState();
@@ -186,7 +190,7 @@ async function status() {
   console.log(`  speaks    ${speakLine(await K.check())}`);
   console.log(`  guard     ${s.guard === 'ok' ? 'the confirm-list guard is wired' : `WARNING — ${s.guard}; Bash is NOT gated. Re-run: fleet-jarvis init`}`);
   console.log(`  wakes     on a need-you anywhere, at once${s.batch ? `; finished work batched every ${Math.round(s.batch / 60)} min` : '; nothing else — finished work waits until he speaks'}`);
-  console.log(`  restart   daily at ${String(s.restart.hour).padStart(2, '0')}:00 when idle${s.restart.last ? ` · last ${new Date(s.restart.last * 1000).toLocaleString()}` : ''}`);
+  console.log(`  restart   when context passes ${kTok(s.restart.tokens)} tokens (now ${s.restart.now == null ? 'not measured yet' : kTok(s.restart.now)})${s.restart.last ? ` · last ${new Date(s.restart.last * 1000).toLocaleString()}` : ''}`);
   console.log(`  pending   ${s.pending.length ? s.pending.map(p => `${p.id} ${p.summary}${p.granted ? ' (yes — waiting for Jarvis to act)' : ''}`).join('\n            ') : 'nothing waits on a yes'}`);
   console.log(`  disable   fleet-jarvis disable`);
 }
@@ -237,15 +241,71 @@ export async function applySwitch(on) {
   console.log(`  resumed   conversation ${m.resume.slice(0, 8)} in '${m.sock}' master`);
 }
 
-// ── the daily fresh start ───────────────────────────────────────────────────
+// ── the fresh start ─────────────────────────────────────────────────────────
 // A LONG CONTEXT IS THE KNOWN FAILURE of a session that never ends, and Jarvis is the one
-// session built never to end. So once a day, while it is idle, it is replaced by a new
-// conversation — and what it was carrying goes forward as a file, built from the record
-// rather than asked of the model: a summary Jarvis writes costs a turn and can be wrong about
-// itself, while these are the rows that actually happened.
-function buildHandoff(m) {
+// session built never to end. So once its conversation has grown past restart_tokens, and
+// while it is idle, it is replaced by a new one — and what it was carrying goes forward as a
+// file, built from the record rather than asked of the model: a summary Jarvis writes costs a
+// turn and can be wrong about itself, while these are the rows that actually happened.
+//   SIZE, NOT THE CLOCK. This used to fire every morning at restart_hour, which threw away a
+// perfectly good conversation daily whatever it held. And size in TOKENS, not bytes: a
+// transcript's bytes are mostly tool output that never reaches the context in full, and the
+// two do not track — measured, 1.9MB was 130k tokens and 0.8MB was 81k.
+
+const kTok = (n) => `${Math.round(n / 1000)}k`;
+// HOW BIG THE LIVE CONVERSATION IS: what the API last billed as the context of one request —
+// input + cache read + cache creation of the LAST assistant entry that carries usage. That
+// is the whole prompt as the model saw it, which is the size that degrades, and it is already
+// in the transcript, so measuring costs no request.
+//   The governor asks every tick, so it is the TAIL only, read once: the last line with usage
+// is near the end, and a transcript runs to many MB. A last entry longer than the tail is
+// skipped for the one before it, which is a slightly stale measure, not a wrong one.
+//   The transcript is the one the master's newest status record names (the record
+// fleet-read finds, scoped by socket — every fleet has a master), followed through a
+// /background hand-off's `continued-in` line the way fleet-read follows it, or the size
+// measured would be a conversation that has stopped growing.
+const TAIL = 256 * 1024;
+function contextOf(m) {
+  let rec = null;
+  let names = []; try { names = fs.readdirSync(m.dir); } catch {}
+  for (const n of names) {
+    if (!n.endsWith('.json') || n.startsWith('.')) continue;
+    let j; try { j = JSON.parse(fs.readFileSync(path.join(m.dir, n), 'utf8')); } catch { continue; }
+    if (j && j.sock === m.sock && j.slot === 'master' && (!rec || (Number(j.ts) || 0) > (Number(rec.ts) || 0))) rec = j;
+  }
+  const out = { tokens: null, ts: rec ? Number(rec.ts) || 0 : 0 };
+  let file = rec ? transcriptOf(rec, m.cfg) : '';
+  for (let hop = 0; hop < 5 && file; hop++) {
+    let fd; try { fd = fs.openSync(file, 'r'); } catch { return out; }
+    let text = '', cut = false;
+    try {
+      const size = fs.fstatSync(fd).size, len = Math.min(size, TAIL), buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      text = buf.toString('utf8'); cut = len < size;
+    } catch { return out; } finally { fs.closeSync(fd); }
+    const next = [...text.matchAll(/"continuedInSessionId":"([0-9a-fA-F-]+)"/g)].pop();
+    const succ = next && path.join(path.dirname(file), `${next[1]}.jsonl`);
+    if (succ && succ !== file && fs.existsSync(succ)) { file = succ; continue; }
+    const lines = text.split('\n');
+    if (cut) lines.shift();                                     // the first is a fragment
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"usage"')) continue;
+      let e; try { e = JSON.parse(lines[i]); } catch { continue; }
+      const u = e && e.type === 'assistant' && !e.isSidechain && e.message && e.message.usage;
+      if (!u) continue;
+      const n = (Number(u.input_tokens) || 0) + (Number(u.cache_read_input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0);
+      // An all-zero usage is a synthetic entry (an API error rendered as a reply), not a
+      // measurement of anything; the real one is further up.
+      if (n > 0) { out.tokens = n; return out; }
+    }
+    return out;
+  }
+  return out;
+}
+
+function buildHandoff(m, why) {
   const L = [`# Handoff — ${new Date().toLocaleString()}`, '',
-    'You were restarted fresh this morning (the daily restart). This is what the previous',
+    `You were restarted fresh ${why}. This is what the previous`,
     'conversation left behind. Read it, then carry on; nothing here needs doing unprompted.', ''];
   const pend = J.pending();
   L.push('## Waiting on his yes');
@@ -268,13 +328,19 @@ function restart() {
   if (!m) die('no Jarvis on this machine (fleet-jarvis init)');
   const now = Math.floor(Date.now() / 1000);
   let last = 0; try { last = Number(fs.readFileSync(stampFile(), 'utf8').trim()) || 0; } catch {}
+  let why = '(by hand: fleet-jarvis restart)';
   if (has('--if-due')) {
-    // FIRST SIGHT IS A BASELINE, NOT A RESTART — the same rule as the push watcher's. A
-    // Jarvis created at 3:55 must not be torn down at 4:00 by a timer that had never seen it.
-    if (!last) { fs.writeFileSync(stampFile(), `${now}\n`); return; }
-    const d = new Date(); d.setHours(m.restart_hour, 0, 0, 0);
-    const due = Math.floor(d.getTime() / 1000);
-    if (now < due || last >= due) return;                       // not yet today, or done today
+    // Silent unless it is time: the governor logs whatever this prints, every tick. A missing
+    // measure — no record, no transcript, no usage line yet — is not a big conversation.
+    const c = contextOf(m);
+    if (c.tokens == null || c.tokens < m.restartTokens) return;
+    // A RECORD OLDER THAN THE LAST RESTART DESCRIBES THE CONVERSATION THAT RESTART REPLACED.
+    // Until the fresh master's first event rewrites the record, the newest one still names
+    // the old transcript, which is still over the line — and would restart the fresh master
+    // on the next tick, and the one after that.
+    if (c.ts <= last) return;
+    why = `because the conversation grew past ${kTok(m.restartTokens)} tokens (it was at ${kTok(c.tokens)})`;
+    if (!running(m)) return;                                    // the next start is fresh anyway
   }
   if (!running(m)) { if (!has('--dry-run')) fs.writeFileSync(stampFile(), `${now}\n`); console.log('fleet-jarvis: not running — nothing to restart (the next start is fresh anyway)'); return; }
   // ONLY WHEN IDLE, and idle for a while. A restart mid-turn throws away the turn; one while
@@ -286,7 +352,7 @@ function restart() {
     console.log(`fleet-jarvis: not idle (${rec.status}, last event ${quietFor}s ago) — deferred`);
     process.exitCode = 3; return;
   }
-  const handoff = buildHandoff(m);
+  const handoff = buildHandoff(m, why);
   if (has('--dry-run')) { process.stdout.write(handoff); return; }
   fs.writeFileSync(path.join(m.path, 'HANDOFF.md'), handoff);
   // RENAME, START, THEN KILL — never kill first. Jarvis's fleet usually holds one session,
@@ -303,7 +369,7 @@ function restart() {
   }
   tmux(m.sock, 'kill-session', '-t', `=${old}`);
   fs.writeFileSync(stampFile(), `${now}\n`);
-  try { fs.appendFileSync(path.join(m.dir, `${m.sock}.inbox`), `${now}\tmaster\trestarted\tdaily fresh start — HANDOFF.md carried forward\n`); } catch {}
+  try { fs.appendFileSync(path.join(m.dir, `${m.sock}.inbox`), `${now}\tmaster\trestarted\tfresh start ${has('--if-due') ? `— context passed ${kTok(m.restartTokens)} tokens ` : ''}— HANDOFF.md carried forward\n`); } catch {}
   console.log(`fleet-jarvis: restarted fresh; HANDOFF.md written to ${m.path}`);
 }
 
@@ -384,6 +450,8 @@ async function main() {
     // The hook's call. A prompt bin/fleet-send delivered is the fleet talking, whatever it
     // says, and is not recorded as him (lib/jarvis.mjs consumeDelivery).
     case 'said': { const t = readStdin(); if (!J.consumeDelivery(t)) J.recordSaid(t, flag('--from') || 'owner'); return; }
+    // The mod's call, as it submits a prompt the fleet handed into Jarvis's master.
+    case 'delivered': { if (!J.recordDelivery(readStdin())) process.exit(1); return; }
     case 'gate-bash': {
       const c = readStdin();
       const spec = J.bashSpec(c);

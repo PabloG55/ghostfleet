@@ -1,0 +1,40 @@
+  options: "Postgres
+  (Recommended)" desc
+  "Relational, already used
+  by toolbox", "SQLite" desc
+  "Single file, fine for
+  scratch", "DynamoDB" desc
+  "Managed key-value store".
+  Question 2, header
+  "Deploy": "Where should
+  acme-web deploy first?"
+  options: "Staging" desc
+  "The shared integration
+  environment", "Production"
+  desc "Straight to users".
+  After I answer, just repeat
+  my answers back in one
+  line.
+──────────────────────────────
+←  ☐ Dat…  ☐ Dep…  ✔ Submit  →
+
+Which database should acme-api
+use for the billing-svc
+ledger?
+
+❯ 1. Postgres (Recommended)
+     Relational, already used
+     by toolbox
+  2. SQLite
+     Single file, fine for
+     scratch
+  3. DynamoDB
+     Managed key-value store
+  4. Type something.
+──────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow
+keys to navigate · Esc to
+cancel
+

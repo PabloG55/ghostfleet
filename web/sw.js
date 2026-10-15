@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: e74a0e9052c3
+// CLIENT-HASH: 13e765c2fd74
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -320,7 +320,49 @@
 // `speak` there instead of from /api/jarvis, which now 404s. A phone still on v59 against a
 // switched-off daemon draws no band either (the 404 leaves it nothing to draw) but keeps a
 // talk button whose hearing is refused.
-const VERSION = 'ghostfleet-v60';
+// v61 answers a claude question picker: the answer sheet draws the question and one button
+// per option, follows the picker tab by tab to Submit, and types a free-text answer; a send
+// held behind a question says so, with a button to answer it. A phone still on v60 against
+// the new daemon draws a picker as a generic menu (or as nothing, when it is long) and its
+// "1" + Enter answers two tabs at once — fleet-answer now drops that Enter, so it answers one.
+// v62 unlocks on the first tap: the challenge is fetched before the tap so the passkey sheet
+// is asked for inside it (WebKit refuses a get() that a network round trip separated from
+// its tap), one ceremony at a time, one automatic attempt per open or resume, and a failure
+// is drawn on the lock screen instead of vanishing. A phone still on v61 keeps fetching a
+// challenge per tap and never reaching the sensor; the daemon no longer counts those
+// challenges against its unlock limit, so they no longer lock it out on top.
+// v63 takes several photos at once: the picker allows up to ten, each a removable tile
+// above the box, and all of them go in one message. A phone still on v62 picks one photo
+// at a time and pastes its path into the box, which the daemon still accepts.
+// v64 keeps the session screen inside the visible area while the keyboard is up: the
+// header stays put, the list shrinks, the composer sits on the keyboard. A phone still on
+// v63 lays the shell out to the full screen and iOS scrolls the header away.
+// v65 moves: a new message fades and rises in once (never again on a poll redraw), a sent
+// bubble rises from the composer and settles in place when delivered, screens slide like
+// iOS navigation, and the first frame of every load is the dark ground rather than white.
+// A phone still on v64 swaps screens with the short wipe and can flash white going back.
+// v66 locks on a cold launch: the session token lives in sessionStorage, which a kill from
+// the app switcher empties and the app's own reload keeps, and the copy an older client left
+// in localStorage is ended on the server at the first open. A phone still on v65 keeps
+// walking back in after a kill, for as long as the server's idle window allows.
+// v67 says when a send did not arrive, restoring the draft and the photos; a photos-only
+// message no longer begins with `/`; and a compaction or a run of tool calls draws as a
+// small folded card instead of the owner's own bubble. A phone still on v66 draws those two
+// as plain left-hand bubbles (never as the owner's), and the daemon fronts its leading photo path.
+// v69 keeps every queued message on screen and lets one be taken back to edit, interrupts
+// a turn from the session menu, keeps a photo pick from being lost to a poll, and puts
+// each photo's path where the caret was. A phone still on v68 shows one pending bubble.
+// v70 waits in the shape of what it waits for: a session's chat, Jarvis's and the pane
+// draw skeleton bubbles and lines until their first answer instead of a line of text. A
+// phone still on v69 shows "reading the transcript…" until the transcript lands.
+// v71 leaves the owner's music playing: no tap claims the audio session any more, only the
+// speaker and `talk`, and the session is handed back when the voice or the conversation
+// ends. A phone still on v70 pauses whatever is playing on its first tap.
+// v72 waits through pauses in conversation mode (3.5 s of quiet, a setting, with the time
+// left drawn on the band and a tap to send now), lets the owner talk over an answer to cut
+// in with a follow-up, and reads a long reply to the end in chunks instead of stopping at
+// 1200 characters. A phone still on v71 sends after a second of quiet and stops long replies.
+const VERSION = 'ghostfleet-v72';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

@@ -25,6 +25,8 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+/* The UA's own surfaces dark as well — see the block in index.html for the white frame. */
+:root { color-scheme: dark; }
 /* THE PAGE NEVER SCROLLS SIDEWAYS. docs/mobile.md has said so since #48 — wide content
  * scrolls inside its OWN overflow-x box — and it was a rule somebody had to keep rather
  * than a rule the stylesheet kept. Reported from a real iPhone: with the actions sheet
@@ -126,8 +128,12 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
    * sl759 sat0 sab29, composer bottom at 722 — 8px above the home-indicator inset — and
    * nothing under it.
    *   THE SHELL IS STILL PINNED, not sized: inset: 0 fills whatever web view iOS hands the
-   * page, which is the right thing to fill. Nothing here adds an inset to a height again. */
-  position: fixed; inset: 0;
+   * page, which is the right thing to fill. Nothing here adds an inset to a height again.
+   *   ...EXCEPT WHILE THE KEYBOARD IS UP, when app.js writes --app-top and --app-h from
+   * visualViewport and removes them when it goes (syncViewport says why). With a height
+   * given, `bottom` is the over-constrained side and is dropped, so the column ends at the
+   * top of the keyboard; with neither property present this is exactly `inset: 0`. */
+  position: fixed; inset: var(--app-top, 0px) 0 0; height: var(--app-h, auto);
   display: flex; flex-direction: column; gap: 0;
   /* A transformed child during a screen transition must not become page scroll. The bands
    * inside have their own scrollers; this box has never needed one, and clipping here is
@@ -165,6 +171,26 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
 @keyframes gf-nav-back { from { clip-path: inset(0 92% 0 0); opacity: .35 }
                          to   { clip-path: inset(0);         opacity: 1 } }
 
+/* ── the same move, as a SLIDE, where view transitions exist (slideNav in app.js) ──
+ * Pushing a screen slides the new one in over the old, which drifts a third of the way
+ * left and dims; popping does the reverse. iOS's own navigation, shortened: 260ms, one
+ * decelerating curve, no overshoot. These animate snapshots, not #app, so no box moves and
+ * the viewport rule the wipe above was shaped by still holds. The ground behind them is
+ * --bg, never the empty canvas. */
+::view-transition { background: var(--bg); }
+@media (prefers-reduced-motion: no-preference) {
+  :root[data-nav]::view-transition-old(root),
+  :root[data-nav]::view-transition-new(root) { animation-duration: 260ms; animation-timing-function: cubic-bezier(.2,.8,.2,1); animation-fill-mode: both; mix-blend-mode: normal; }
+  :root[data-nav="fwd"]::view-transition-old(root)  { animation-name: gf-push-under; }
+  :root[data-nav="fwd"]::view-transition-new(root)  { animation-name: gf-push-in; }
+  :root[data-nav="back"]::view-transition-old(root) { animation-name: gf-pop-out; z-index: 1; }
+  :root[data-nav="back"]::view-transition-new(root) { animation-name: gf-pop-under; }
+}
+@keyframes gf-push-in    { from { transform: translateX(100%) } }
+@keyframes gf-push-under { to   { transform: translateX(-30%); opacity: .5 } }
+@keyframes gf-pop-out    { to   { transform: translateX(100%) } }
+@keyframes gf-pop-under  { from { transform: translateX(-30%); opacity: .5 } }
+
 /* ── waiting, in the shape of the thing being waited for ─────────────────────
  * A skeleton rather than a spinner, because the screen then does not JUMP when the data
  * lands: the placeholder already occupies the final layout, so the real cards swap into
@@ -177,9 +203,17 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
   height: .85em; border-radius: 3px; margin: .35em 0;
   background: rgba(255, 255, 255, .07);
 }
-.skel-bar.w1 { width: 45% } .skel-bar.w2 { width: 72% } .skel-bar.w3 { width: 58% }
+.skel-bar.w1 { width: 45% } .skel-bar.w2 { width: 72% } .skel-bar.w3 { width: 58% } .skel-bar.full { width: 100% }
+/* A conversation's wait: the bubble is the real one, so it keeps its own radii and surface;
+ * only its width is set, because an empty bubble has none of its own. Alternating sides
+ * and lengths, as a transcript does. */
+.chat .bub.skel { pointer-events: none; }
+.chat .bub.skel .skel-bar { margin: .3em 0; }
+.chat .bub.skel.b1 { width: 74% } .chat .bub.skel.b2 { width: 42% } .chat .bub.skel.b3 { width: 63% }
+.chat .bub.skel.b4 { width: 34% } .chat .bub.skel.b5 { width: 56% }
+.pane-skel { padding: .5em .6em; }
 @media (prefers-reduced-motion: no-preference) {
-  .card.skel .skel-bar { animation: gf-skel 1.1s ease-in-out infinite; }
+  .skel .skel-bar { animation: gf-skel 1.1s ease-in-out infinite; }
 }
 @keyframes gf-skel { 0%, 100% { opacity: .55 } 50% { opacity: 1 } }
 /* The scrolling region. `min-height: 0` is the whole trick — a flex child's default
@@ -325,12 +359,11 @@ html.shell, html.shell body { height: 100%; overflow-x: clip; overflow-y: hidden
   color: var(--fg);
 }
 .card.dim { opacity: .65; }
-.card .c-top { display: flex; align-items: baseline; gap: .5em; min-width: 0;
-               /* The title row is the drag grip, and it is still exactly ONE line: it
-                * alone swallows the vertical pan, so a drag anywhere else on the card
-                * still scrolls the list. Widening this is how reorder starts fighting
-                * the scroll. */
-               touch-action: none; }
+.card .c-top { display: flex; align-items: baseline; gap: .5em; min-width: 0; }
+/* The title row is the drag grip, and it is still exactly ONE line: it alone swallows the
+ * vertical pan, so a drag anywhere else on the card still scrolls the list. Widening this
+ * is how reorder starts fighting the scroll. `.t` is set only on a card that reorders. */
+.card .c-top.t { touch-action: none; }
 .card .c-num { color: var(--dim); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
 .card .c-name { font-weight: 600; font-size: 16px; color: var(--white);
                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -492,6 +525,13 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .sheet .err { color: var(--red); }
 .sheet .ok { color: var(--green); }
 .sheet .warn { color: var(--yellow); }
+/* the answer sheet for a question picker: the question as the thing to read, each option's
+ * description under its button, and the Submit step's review of what was chosen */
+.sheet p.q { color: var(--white); }
+.srow.q { flex-direction: column; align-items: stretch; gap: .25em; }
+.srow.q .d { color: var(--dim); font-size: .9em; padding-left: .2em; }
+.sheet .review { margin: .4em 0; padding-left: 1.1em; color: var(--dim); }
+.sheet .review b { color: var(--white); font-weight: normal; }
 
 /* the settings rows (per-session nudge, per-project columns) */
 .rows { margin: .6em 0; }
@@ -703,6 +743,23 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * rather than absent, because a chat where your own message vanishes for five seconds
  * reads as a send that failed. */
 .chat .bub.pending { opacity: .55; }
+/* ── a message arriving ──────────────────────────────────────────────────────
+ * Classed by app.js's arrived() only on the render where the turn is NEW — never on a poll
+ * redraw, which rebuilds every bubble. A short fade and rise for anything that arrives;
+ * your own sent bubble rises further, from the composer it just left; and the delivered
+ * turn that replaces the pending one only lifts from the pending dim, in place, because
+ * it is the same message and must not arrive twice. Transform and opacity only. */
+@media (prefers-reduced-motion: no-preference) {
+  .chat .turn.enter { animation: gf-enter 200ms cubic-bezier(.2,.8,.2,1) var(--gf-in, 0ms) both; }
+  .chat .turn.enter.sent { animation: gf-sent 220ms cubic-bezier(.2,.8,.2,1) var(--gf-in, 0ms) both; transform-origin: 100% 100%; }
+  .chat .turn.settle > .bub { animation: gf-settle 180ms ease-out var(--gf-in, 0ms) both; }
+}
+@keyframes gf-enter  { from { opacity: 0; transform: translateY(8px) } }
+@keyframes gf-sent   { from { opacity: 0; transform: translateY(28px) scale(.98) } }
+@keyframes gf-settle { from { opacity: .55 } }
+/* Queued behind the running turn: still yours to take back, so it reads as a thing you can
+ * tap — a dashed edge in the colour it already has, no new colour. */
+.chat .turn.queued .bub.pending { cursor: pointer; border: 1px dashed currentColor; }
 .chat .meta { font-size: 11px; color: var(--dim); padding: 0 .3em; }
 .chat .meta.r { align-self: flex-end; }
 .chat .meta.l { align-self: flex-start; }
@@ -741,9 +798,12 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * the two buttons and the gaps come to 94px of a 304px row at the narrowest phone — and a
  * backstop that never fires is what a backstop is for.
  *   The gap and the row's padding are pinned with them. They are the spacing BETWEEN
- * affordances, not text, and at 53px `.45em` was a 24px gutter either side of the box. */
+ * affordances, not text, and at 53px `.45em` was a 24px gutter either side of the box.
+ *   4px above the box, not 7: the list ends flush with this hairline (measured in the
+ * installed app, last turn bottom = list bottom = composer top), so this padding is the
+ * whole of the space between the conversation and the box — "tight like a normal chat app". */
 .composer { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-end; min-width: 0; flex: 0 0 auto;
-  padding: 7px 1px 0; border-top: 1px solid var(--hair); }
+  padding: 4px 1px 0; border-top: 1px solid var(--hair); }
 /* Reported as the send button rendering "senc" — its last character past the right edge.
  * The textarea is the one thing here that may shrink, and the buttons must not: with every
  * child shrinkable the browser is free to take the width out of whichever it likes. */
@@ -752,13 +812,27 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * colour, so the visible control is a real <button> that clicks it. `display: none` rather
  * than an off-screen position — nothing needs to focus it, and an off-screen input is a
  * thing screen readers announce. */
-.composer .pick { display: none; }
+.pick { display: none; }
 /* Sized like the send button beside it, so the row reads as two controls and a box rather
  * than a box with something stuck to it. The SVG is em-sized for the same reason #82 gave:
  * it is the button's size, not a glyph's. */
 .composer button.cam { display: inline-flex; align-items: center; justify-content: center; }
 .composer button.cam svg { width: 1.25em; height: 1.25em; display: block; }
 .composer button.cam.busy { opacity: .55; }
+/* The photos picked for this message: a row of their own above the box, scrolling sideways
+ * rather than wrapping, so ten of them cost one row and the box stays where the thumb is.
+ * Gone entirely when there are none — an empty row would push the box up for nothing. */
+.composer .photos { flex: 1 0 100%; display: flex; gap: 6px; overflow-x: auto; padding: 2px 0 1px; }
+.composer .photos:empty { display: none; }
+.composer .ph { position: relative; flex: 0 0 auto; width: 56px; height: 56px;
+  border: 1px solid var(--hair); border-radius: 8px; overflow: hidden; background: #14181d; }
+.composer .ph-img { width: 100%; height: 100%; display: block; }
+/* Still going up: dimmed, so "send" waiting on it is not a surprise. Failed: a red edge. */
+.composer .ph.up .ph-img { opacity: .45; }
+.composer .ph.bad { border-color: var(--red); }
+.composer .ph button.ph-x { position: absolute; top: 2px; right: 2px; padding: 0; width: 20px; height: 20px;
+  font-size: 13px; line-height: 18px; border-radius: 10px; color: var(--white); background: rgba(0, 0, 0, .65);
+  border: 1px solid rgba(255, 255, 255, .35); }
 .composer textarea {
   /* 16px, for the reason spelled out on `.sheet input` above: below it, focusing this box
    * makes iOS Safari zoom the whole page and the chat goes off the right edge. This is the
@@ -942,6 +1016,11 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
   overflow-wrap: anywhere;
 }
 .toast.bad { color: var(--red); border-color: #40202a; }
+/* A toast with a button ("queued behind a question" -> answer it) is a row, not a clamped
+ * box: the clamp would hide the button with the third line. */
+.toast.act { display: flex; align-items: center; gap: .6em; -webkit-line-clamp: none; }
+.toast.act > span { flex: 1; min-width: 0; }
+.toast.act > button { flex: none; min-height: 44px; }
 .toast.good { color: var(--green); }
 .audit { color: var(--dim); }
 .audit li { margin: .3em 0; overflow-wrap: anywhere; }
@@ -954,6 +1033,7 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
  * and "the passkey is unavailable, and here is why". `.sheet .warn` existed; this one did
  * not, so both were drawn in body grey next to everything else. */
 .lock .warn { color: var(--yellow); }
+.lock .err { color: var(--red); }
 
 /* The per-message play control (turn()), on every message's .meta row. Sized off the
  * meta text rather than the button scale: this sits beside a timestamp, not in the verb
@@ -1018,12 +1098,35 @@ button.go { color: var(--bg); background: var(--cyan); border-color: var(--cyan)
 .talkband .ph { color: var(--fg); }
 .talkband .ph.listening { color: var(--green); }
 .talkband .note { color: var(--dim); font-size: 12px; }
+.talkband.tap { cursor: pointer; }
+/* The silence running out: full while the owner talks, draining over the pause that will
+ * send it, and full again the moment speech resumes. */
+.talkband .turnbar { height: 3px; border-radius: 2px; background: var(--dim); overflow: hidden; }
+.talkband .turnbar i { display: block; height: 100%; background: var(--green); transform-origin: left center;
+  transition: transform .1s linear; }
 .composer button.talk.on { color: var(--bg); background: var(--green); border-color: var(--green); font-weight: 700; }
 .hint.jarvis-none p { margin: .4em 0; }
 /* Jarvis is an experimental feature, and its screen says so beside its name. */
 .sbar .who .nm .tag-exp { margin-left: .5em; padding: 0 .35em; border: 1px solid var(--yellow); border-radius: 4px;
   color: var(--yellow); font-size: 11px; font-weight: 400; vertical-align: middle; }
 /* A [fleet] wake in Jarvis's transcript: the fleet talking, not the owner, so not a bubble. */
+/* EVENTS: a compaction, a run of tool calls. A card, not a bubble — full width of neither
+ * side, the palette's own --dim and --hair, so it reads as the machine and never as him.
+ * Folded to one line; the body is the detail for whoever wants it. */
+.chat .evt { align-self: stretch; margin: .35em .2em; border: 1px solid var(--hair); border-radius: 8px;
+             font-size: 12px; color: var(--dim); background: rgba(255, 255, 255, .02); min-width: 0; }
+.chat .evt > summary { display: flex; gap: .5em; align-items: baseline; padding: .35em .6em; cursor: pointer;
+                       list-style: none; min-width: 0; }
+.chat .evt > summary::-webkit-details-marker { display: none; }
+.chat .evt .evt-ico { flex: 0 0 auto; }
+.chat .evt .evt-t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat .evt .evt-at { flex: 0 0 auto; }
+.chat .evt[open] > summary { border-bottom: 1px solid var(--hair); }
+.chat .evt .evt-body { padding: .35em .6em .45em; display: flex; flex-direction: column; gap: .25em; }
+.chat .evt .evt-row { display: flex; gap: .5em; min-width: 0; }
+.chat .evt .evt-name { flex: 0 0 auto; color: var(--fg); opacity: .7; }
+.chat .evt .evt-detail { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, Menlo, monospace; }
+.chat .evt .evt-sum { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18em; overflow-y: auto; }
 .chat .sysline { display: flex; gap: .5em; align-items: baseline; margin: .5em .2em; font-size: 12px; color: var(--dim); }
 .chat .sysline .who { color: var(--yellow); flex: 0 0 auto; }
 .chat .sysline .t { flex: 1 1 auto; min-width: 0; }

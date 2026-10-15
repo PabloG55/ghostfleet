@@ -208,16 +208,20 @@ export function fixtureName() {
 export function setFixtureName(f) { try { localStorage.setItem(LS.fixture, f); } catch {} }
 
 // ── the session token (§5) ────────────────────────────────────────────────
-// KEPT ON THE DEVICE, for as long as the server would honour it. It used to live in a
-// module variable only, so every relaunch asserted — and iOS evicts a backgrounded
-// home-screen app freely, so "relaunch" meant most returns to the app, each one a Face ID
-// for a token the server still held. localStorage, because it is the store an installed
-// iOS web app keeps across relaunches; sessionStorage does not survive one.
-//   What this does NOT weaken: the server decides. The token dies after the idle window
+// KEPT FOR THE LIFE OF THE PAGE PROCESS, and no longer. It used to be localStorage, so
+// that a relaunch inside the idle window walked straight back in — which is exactly what
+// the owner did not want: closing the app from the app switcher left it UNLOCKED for
+// whoever picked the phone up next, for as long as the server's 15 minutes ran.
+//   sessionStorage, measured rather than assumed, in an installed iOS 26.5 home-screen
+// app: a kill from the app switcher (and an OS eviction, which is the same new process)
+// starts it EMPTY; a resume (switch away and back, screen off and on) is the same page and
+// never reads it; and location.reload() — which is how the app takes a new client the
+// service worker installed — KEEPS it. A module variable alone would get the first two
+// right and lock the owner out on the third, in the middle of using the app, for a swap
+// they never asked for.
+//   What did not change: the server decides. The token dies after the idle window
 // (session_ttl, 15 minutes without a request) and on `fleet-serve revoke` whatever this
-// file believes, and the first 401 clears the stored copy (clearToken) so a dead token
-// is tried exactly once. The lock is still the passkey; this only stops asking for it
-// while the session it minted is alive.
+// file believes, and the first 401 clears the stored copy (clearToken).
 //   Scoped by ORIGIN, as the credential is (passkey.js credKey): a token belongs to the
 // daemon that minted it. Server mode only — a fixture stub is not worth keeping.
 let token = null, tokenExp = 0;
@@ -225,24 +229,43 @@ const LS_TOKEN = 'gf.session';
 function tokenKey() { const r = resolution(); return r.mode === 'server' && r.base ? `${LS_TOKEN}:${r.base}` : ''; }
 function storeToken() {
   const k = tokenKey();
-  try { if (k) { if (token) localStorage.setItem(k, JSON.stringify({ t: token, exp: tokenExp })); else localStorage.removeItem(k); } } catch {}
+  try { if (k) { if (token) sessionStorage.setItem(k, JSON.stringify({ t: token, exp: tokenExp })); else sessionStorage.removeItem(k); } } catch {}
 }
 export function setToken(t, expiresAt) { token = t || null; tokenExp = expiresAt || 0; storeToken(); }
 export function haveToken() { return !!token && Date.now() / 1000 < tokenExp; }
 export function clearToken() { token = null; tokenExp = 0; storeToken(); }
-// The cold-start half: whatever this origin's daemon minted last, if it has not visibly
-// expired. Nothing is trusted from it but the string — passkey.resume() asks the server.
+// The reload half: whatever this page process minted before the app reloaded itself, if it
+// has not visibly expired. Nothing is trusted from it but the string — passkey.resume()
+// asks the server.
 export function restoreToken() {
   const k = tokenKey();
   if (!k) return false;
   let j = null;
-  try { j = JSON.parse(localStorage.getItem(k) || 'null'); } catch {}
+  try { j = JSON.parse(sessionStorage.getItem(k) || 'null'); } catch {}
   if (!j || typeof j.t !== 'string' || !(Date.now() / 1000 < Number(j.exp))) {
-    try { localStorage.removeItem(k); } catch {}
+    try { sessionStorage.removeItem(k); } catch {}
     return false;
   }
   token = j.t; tokenExp = Number(j.exp);
   return true;
+}
+// THE COPY AN OLDER CLIENT LEFT ON THE DEVICE. Every phone that ran the localStorage
+// version still holds a token there, and it outlives this change: not used by anything,
+// but a live bearer on disk until the server's idle window closes. So it is taken off the
+// device AND ended on the server — not merely ignored — because ignoring it would leave a
+// session nobody can see open for the rest of its window. Best effort: offline, it is gone
+// from the device anyway and dies on the server's clock.
+export async function retireStoredToken() {
+  const k = tokenKey();
+  if (!k) return false;
+  let j = null;
+  try { j = JSON.parse(localStorage.getItem(k) || 'null'); localStorage.removeItem(k); } catch {}
+  if (!j || typeof j.t !== 'string' || !(Date.now() / 1000 < Number(j.exp))) return false;
+  try {
+    const r = await fetch(baseUrl() + '/api/auth/end',
+      { method: 'POST', headers: { Authorization: `Bearer ${j.t}` }, cache: 'no-store' });
+    return r.ok;
+  } catch { return false; }
 }
 // THE SLIDE, mirrored. fleet-serve answers every authenticated request with the session's
 // new deadline; without copying it here, haveToken() would expire the token on the
@@ -389,11 +412,13 @@ export async function getSession(project, session, before = null) {
   // the transcript is what the chat reconciles its optimistic bubble against, so a fixture
   // that never echoes a send cannot exercise that at all.
   const msgs = [...(all.messages || []), ...(overlay.sent.get(session) || [])];
+  // ...and what is still WAITING, the field /api/session serves beside the newest page.
+  const queue = before == null ? (overlay.queue.get(session) || []).map((text, i) => ({ at: i, text })) : undefined;
   const upTo = before == null ? msgs.length : msgs.findIndex(m => String(m.ts) === String(before));
   const end = upTo < 0 ? msgs.length : upTo;
   const start = Math.max(0, end - PAGE);
   return { ...all, total: msgs.length, messages: msgs.slice(start, end),
-           next_before: start > 0 ? String(msgs[start].ts) : null };
+           next_before: start > 0 ? String(msgs[start].ts) : null, ...(queue ? { queue } : {}) };
 }
 
 // The session's real pane — `capture-pane -p -e`, escapes and all.
@@ -441,7 +466,10 @@ async function authFetch(kind, path, init) {
   catch (e) { throw new OfflineError(String((e && e.message) || e)); }
   slid(r);
   const j = await r.json().catch(() => null);
-  if (!r.ok) throw new Error((j && (j.text || j.error)) || `${kind} → HTTP ${r.status}`);
+  // The status and Retry-After travel with the sentence: the lock screen says how long a
+  // 429 lasts, and "refused" and "rate limited" are different instructions to a thumb.
+  if (!r.ok) throw Object.assign(new Error((j && (j.text || j.error)) || `${kind} → HTTP ${r.status}`),
+    { status: r.status, retryAfter: Number((r.headers && r.headers.get && r.headers.get('Retry-After')) || 0) || 0 });
   return j;
 }
 export async function authChallenge() {
@@ -553,13 +581,15 @@ export async function jarvisHear(wav) {
 // "no Kokoro here" — the caller falls back to the device's own speechSynthesis — and is a
 // different thing from a failure, which is worth a toast. Fixtures have no Mac to speak.
 export class SpeechOff extends Error {}
-export async function speakPlan(text) {
+// `more`: this text continues the one planned before it (the next chunk of one reply), so
+// the Mac keeps synthesising what is still to be played instead of superseding it.
+export async function speakPlan(text, more = false) {
   if ((await ready()).mode !== 'server') throw new SpeechOff('fixtures have no Kokoro');
   if (!haveToken()) throw new AuthError('no live session token');
   let r;
   try {
     r = await fetch(baseUrl() + '/api/speak', { method: 'POST', cache: 'no-store',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ text }) });
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(more ? { text, more: true } : { text }) });
   } catch (e) { throw new OfflineError(String((e && e.message) || e)); }
   if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
   slid(r);
@@ -583,6 +613,9 @@ export async function speakAudio(id) {
 }
 
 export const ATTACH_MAX_BYTES = 6 * 1024 * 1024;
+// Photos in one message. fleet-serve sizes its per-session quota to hold this many at the
+// limit above, so a message can never push its own first photos off the disk.
+export const ATTACH_PER_MESSAGE = 10;
 export async function attach(project, session, file) {
   if ((await ready()).mode !== 'server') {
     // In fixture mode there is no disk to write to and no agent to read it. Say so rather
@@ -641,12 +674,14 @@ export async function verb(tool, args, assertion = null) {
     slid(r);
     const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));
     record(tool, args, j.ok ? 'ok' : `refused: ${j.text || r.status}`);
-    if (!j.ok) throw new Error(j.text || `${tool} failed`);
+    // The body rides on the error: a refusal can carry a fact the caller acts on beyond
+    // its sentence (fleet_unqueue's `delivered` — too late to edit, not a failure).
+    if (!j.ok) throw Object.assign(new Error(j.text || `${tool} failed`), { body: j });
     return j;
   }
   const res = fixtureVerb(tool, args);
   record(tool, args, res.ok ? 'ok (fixture — recorded, not executed)' : `refused: ${res.text}`);
-  if (!res.ok) throw new Error(res.text);
+  if (!res.ok) throw Object.assign(new Error(res.text), { body: res });
   return res;
 }
 
@@ -654,8 +689,17 @@ export async function verb(tool, args, assertion = null) {
 // Kept as an OVERLAY rather than by editing the fixture in memory, so reloading always
 // lands back on the shipped fixture and no test can pass because a previous tap left
 // something behind.
-const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set() };
+const overlay = { status: new Map(), gone: new Set(), sched: new Map(), label: new Map(), added: [], freeGone: new Set(), order: [], sent: new Map(), projAgent: new Map(), answered: new Set(), queue: new Map() };
+// What each card's FIXTURE says it is, before any tap: a send to a session the shipped
+// fixture shows mid-turn is queued, as bin/fleet-send queues it — and keyed on the fixture
+// rather than on the overlay, so a send that merely set a card working does not start
+// queueing every later send in a run that never asked for a queue.
+const baseStatus = new Map();
+// What each card last said it was, as drawn — so a send to a session the fixture shows as
+// need-you is held the way the daemon holds it (bin/fleet-send: "queued behind a question").
+const lastStatus = new Map();
 function applyOverlay(g) {
+  for (const c of g.cards || []) baseStatus.set(c.name, c.status);
   let cards = (g.cards || [])
     .filter(c => !overlay.gone.has(c.name))
     .map(c => ({
@@ -665,6 +709,7 @@ function applyOverlay(g) {
       label: overlay.label.has(c.name) ? overlay.label.get(c.name) : c.label,
     }));
   for (const c of overlay.added) if (!cards.some(x => x.name === c.name)) cards.push(c);
+  for (const c of cards) lastStatus.set(c.name, c.status);
   // applyOrder(), same rule as the TUI: the names the order file knows, in its order,
   // then anything it has not heard of — a new session appears at the end rather than
   // vanishing because it is not in the list.
@@ -695,6 +740,15 @@ function fixtureVerb(tool, a) {
       overlay.status.set(a.session, 'parked'); return ok(`parked '${a.session}'`);
     case 'fleet_resume': overlay.status.set(a.session, a.prompt ? 'working' : 'ready'); return ok(`resumed '${a.session}'`);
     case 'fleet_send': {
+      // Held behind the prompt in its pane, as fleet-serve reports it: `queued: 'question'`.
+      if (lastStatus.get(a.session) === 'need-you')
+        return { ...ok(`fleet-send: → ${a.session} (queued #1 behind a question — it is waiting on an answer in its pane)`), queued: 'question' };
+      // Mid-turn in the shipped fixture, or already holding a queue: it waits, in order.
+      const q = overlay.queue.get(a.session) || [];
+      if (baseStatus.get(a.session) === 'working' && overlay.status.get(a.session) !== 'ready' || q.length) {
+        q.push(String(a.prompt || '')); overlay.queue.set(a.session, q);
+        return { ...ok(`fleet-send: → ${a.session} (queued #${q.length} — it is mid-turn; this runs as its own turn after that one ends)`), queued: 'turn' };
+      }
       overlay.status.set(a.session, 'working');
       // ...and it lands in the transcript, because the chat's optimistic bubble is
       // reconciled against what the transcript says (app.js's reconcilePending). Without
@@ -706,6 +760,19 @@ function fixtureVerb(tool, a) {
       overlay.sent.set(a.session, list);
       return ok(`sent to '${a.session}'`);
     }
+    // Taken back out of the queue, or refused as delivered — the two answers the daemon has.
+    case 'fleet_unqueue': {
+      const q = overlay.queue.get(a.session) || [];
+      const i = q.indexOf(String(a.prompt || ''));
+      if (i < 0) return { ok: false, delivered: true, text: `not in ${a.session}'s queue any more — it has already been typed into the session` };
+      q.splice(i, 1);
+      return ok(`fleet-send: took it back out of ${a.session}'s queue — it was never delivered`);
+    }
+    // The Escape: the turn ends, the session stays on. A lead takes it like any worker. An
+    // interrupt fires no Stop, so the queue is NOT drained by it — as on the daemon.
+    case 'fleet_interrupt':
+      overlay.status.set(a.session, 'ready');
+      return ok(`fleet-pause: interrupted '${a.session}' — its turn ended; the session is still running and takes work as before`);
     // Same rule as the daemon: an answer names the prompt it answers, or nothing is sent.
     case 'fleet_answer':
       if (!a.expect) return { ok: false, text: 'the prompt changed: the pane you answered was not showing a prompt. Nothing was sent.' };
@@ -773,8 +840,20 @@ function fixtureVerb(tool, a) {
     default: return { ok: false, text: `fixture mode has no handler for ${tool}` };
   }
 }
+// THE DRAIN, for the suite: the head of a session's queue is typed in and lands in the
+// transcript, as the Stop hook's `fleet-send --dequeue` does on the daemon. Fixture mode
+// has no turn that ever ends, so nothing else would ever deliver one.
+export function fixtureDeliver(session) {
+  const q = overlay.queue.get(session) || [];
+  const text = q.shift();
+  if (text === undefined) return null;
+  const list = overlay.sent.get(session) || [];
+  list.push({ ts: Math.floor(Date.now() / 1000), role: 'user', text });
+  overlay.sent.set(session, list);
+  return text;
+}
 export function resetOverlay() {
   overlay.status.clear(); overlay.gone.clear(); overlay.sched.clear();
   overlay.label.clear(); overlay.freeGone.clear(); overlay.added.length = 0; overlay.order.length = 0;
-  overlay.sent.clear(); overlay.answered.clear();
+  overlay.sent.clear(); overlay.answered.clear(); overlay.queue.clear();
 }

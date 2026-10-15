@@ -149,7 +149,13 @@ function CardScreen({ scope, mode, stale, counts, onMore, band, confirm, cards, 
 			nodes: cards,
 			listRef
 		}),
-		toast ? /* @__PURE__ */ u("div", {
+		toast && toast.action ? /* @__PURE__ */ u("div", {
+			class: ("toast act " + (toast.kind || "")).trim(),
+			children: [/* @__PURE__ */ u("span", { children: toast.text }), /* @__PURE__ */ u("button", {
+				onClick: toast.action.fn,
+				children: toast.action.label
+			})]
+		}) : toast ? /* @__PURE__ */ u("div", {
 			class: ("toast " + (toast.kind || "")).trim(),
 			children: toast.text
 		}) : null

@@ -49,6 +49,17 @@ Object.defineProperty(globalThis, 'localStorage', {
     removeItem: (k) => { stored.delete(k); },
   },
 });
+// The session token's store (api.js). Node 20 has none, and a missing one is a token that
+// silently never persists — stubbed, so the client runs here as it does on the phone.
+const session = new Map();
+Object.defineProperty(globalThis, 'sessionStorage', {
+  configurable: true, writable: true,
+  value: {
+    getItem: (k) => (session.has(k) ? session.get(k) : null),
+    setItem: (k, v) => { session.set(k, String(v)); },
+    removeItem: (k) => { session.delete(k); },
+  },
+});
 // Where the page is standing. A file:// open has origin 'null', which is the case that
 // must not be probed at all.
 function pageAt(origin) {

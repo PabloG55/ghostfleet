@@ -220,28 +220,29 @@ is('...and the shell does not hand the scrollport back', false,
 // much space between the text box and the bottom".
 is('the bottom inset can collapse for the keyboard', true,
    /padding: calc\(env\(safe-area-inset-top\) \+ 8px\) 8px calc\(var\(--kb-inset, env\(safe-area-inset-bottom\)\) \+ 8px\)/.test(CSS));
-// ...and THE HEIGHT IS dvh, not the visual viewport. These three assertions are inverted
-// from what they said a version ago, and the inversion is the point: driving this height
-// from visualViewport.height, and calling scrollTo(0,0) on visualViewport's scroll event to
-// undo Safari's pan, was measured on a real iPhone as a composer pinned to the top of the
-// screen over the status bar with the transcript black beneath it, and a chat that opened
-// scrolled past its own content. The pattern is known-fragile: visualViewport's height and
-// offsetTop do not reliably revert when the keyboard closes, so anything positioned from
-// them is left misaligned — and a scrollTo inside a scroll handler fights the user for the
-// scrollbar. Safari pans to reveal a focused field by itself; a pan that ends is survivable
-// where a layout that never recovers is not.
-//   So these fail if anyone reintroduces it, which is the only reason they exist.
-//   THIS ROW USED TO PIN THE LITERAL `height: 100vh; height: 100dvh;`, and the premise
-// changed rather than the coverage being dropped. Its own paragraph above says what it is
-// really for: nothing may drive this height from visualViewport. dvh was the answer to that
-// when it was written; the shell is `position: fixed; inset: 0` now, because the device
-// measured dvh resolving 53pt short of the physical screen in standalone (ih759 vs sh812).
-// Both answers satisfy the rule this row exists to enforce, so it asks the rule — and the
-// two --vvh rows below, which are the sharp end of it, are untouched.
-is('the shell height is not driven by the visual viewport', false,
-   /visualViewport[^\n]*height/.test(JS['app.js'].replace(/\/\/[^\n]*/g, '')));
-is('...and nothing drives that height from visualViewport', false, /--vvh/.test(CSS));
-is('...and the client never writes a --vvh at all', false, /--vvh/.test(JS['app.js']));
+// ...and THE HEIGHT FOLLOWS THE VISUAL VIEWPORT ONLY WHILE THE KEYBOARD IS UP. These rows
+// have been inverted twice, and the history is the reason they are shaped as they are.
+//   First version: the height was driven from visualViewport.height and scrollTo(0,0) undid
+// Safari's pan on every visualViewport scroll. On a real iPhone that pinned the composer to
+// the top of the screen over the status bar, because a scrollTo inside a scroll handler
+// fights the user for the scrollbar and a height left in place after the keyboard closed
+// never recovered.
+//   Second version: no visualViewport geometry at all, `position: fixed; inset: 0`. Measured
+// in the installed app on an iOS 26.5 simulator, that shell stayed 844 tall while
+// innerHeight and the visual viewport went to 431, so the document overflowed by the
+// keyboard and iOS scrolled it 413: the header went to y=-405. Reported as "the whole page
+// scrolls when the keyboard opens".
+//   So the rule now asks what actually made the first version fatal, not whether
+// visualViewport is mentioned: the geometry is written ONLY with the keyboard up, it is
+// REMOVED (not emptied) when the keyboard goes, and nothing ever scrolls the window.
+is('the shell takes its keyboard-up geometry from custom properties', true,
+   /inset: var\(--app-top, 0px\) 0 0; height: var\(--app-h, auto\)/.test(CSS));
+is('...which the client writes from the visual viewport', true,
+   /setProperty\('--app-h', Math\.round\(h\) \+ 'px'\)/.test(JS['app.js']) &&
+   /setProperty\('--app-top'/.test(JS['app.js']));
+is('...and REMOVES when the keyboard goes, so the closed layout is plain inset: 0', true,
+   /removeProperty\('--app-h'\)/.test(JS['app.js']) && /removeProperty\('--app-top'\)/.test(JS['app.js']));
+is('...and the old --vvh is not coming back', false, /--vvh/.test(CSS) || /--vvh/.test(JS['app.js']));
 
 // ── the bottom inset is owed ONCE ─────────────────────────────────────────
 // Reported as a band of unused space above the bottom of the screen. #app ends in
@@ -269,15 +270,18 @@ is('...and once on the sheet, which is not inside it', 1,
 is('no shell child re-adds the bottom inset', 0,
    bottomInsetRules.filter(l => /#app\.shell\s*>/.test(l)).length);
 // The keyboard is still DETECTED, because the collapsing bottom inset above needs to know.
-// Detection only — one padding, no height, no scrolling.
+// It also drives the keyboard-up geometry above; it never scrolls.
 is('the keyboard is still detected for the inset', true,
    /visualViewport\.addEventListener\('resize', syncViewport\)/.test(JS['app.js']) &&
    /setProperty\('--kb-inset'/.test(JS['app.js']));
-// NO scroll listener, and no scrollTo anywhere near one. This is the assertion that would
-// have caught the regression, and it did not exist.
-is('...and it does not listen for visualViewport scroll', false,
-   /visualViewport\.addEventListener\('scroll'/.test(JS['app.js']));
-is('...and never scrolls the window itself', false, /\bscrollTo\(0, 0\)/.test(JS['app.js']));
+// A scroll listener IS registered now — iOS can pan the visual viewport and the shell's top
+// follows offsetTop — so the row that matters is the one that would have caught the first
+// regression: the handler writes layout and never scrolls the window. Nowhere in the client
+// does, which is the stronger statement and the cheaper one to check.
+is('...and it follows visualViewport scroll', true,
+   /visualViewport\.addEventListener\('scroll', syncViewport\)/.test(JS['app.js']));
+is('...and never scrolls the window itself', false,
+   /\b(window\.)?scroll(To|By)\(|\bwindow\.scroll\(/.test(JS['app.js'].replace(/\/\/[^\n]*/g, '')));
 // NOT position: fixed. It is the obvious reach for "pin this to the bottom" and it is the
 // thing that fights iOS keyboards hardest — the composer is a flex child of a column whose
 // height is correct, which needs no pinning.
@@ -702,7 +706,11 @@ is('...only while the answer is still missing', 2,
 const shellRule = (/#app\.shell\s*\{[\s\S]*?\n}/.exec(CSS) || [''])[0];
 const shellDecls = shellRule.replace(/\/\*[\s\S]*?\*\//g, '');
 is('the shell rule exists', true, shellRule.length > 0);
-is('...pinned to the screen', true, /position:\s*fixed/.test(shellDecls) && /inset:\s*0/.test(shellDecls));
+// With the keyboard down its inset is `var(--app-top, 0px) 0 0` with `height: var(--app-h,
+// auto)` — both properties absent, which is `inset: 0` exactly. The keyboard-up half is
+// asserted in the visual-viewport block above.
+is('...pinned to the screen', true, /position:\s*fixed/.test(shellDecls) &&
+   /inset:\s*(0;|var\(--app-top, 0px\) 0 0;)/.test(shellDecls) && /height:\s*var\(--app-h, auto\)/.test(shellDecls));
 is('...and not sized by the viewport', false, /\b\d+(dvh|vh|svh|lvh)\b/.test(shellDecls));
 
 // ── --kb-inset is REMOVED when the keyboard closes, never zeroed ──────────
@@ -1051,7 +1059,9 @@ is('...and the pane stops measuring under it', true, /classList\.contains\('shel
 is('navigation pushes history entries', true, /history\.pushState\(\{ gf: navDepth \}, '', location\.href\)/.test(APP));
 is('...and never a url of its own', 0,
    (APP.match(/pushState\([^)]*,\s*'\/[^']*'\)/g) || []).length);
-is('...popstate is what moves back', true, /addEventListener\('popstate', \(\) => popTo\(\)\)/.test(APP));
+// The listener also records whether the platform already animated the move (slideNav), so
+// it is matched by what it calls, not by being exactly one arrow.
+is('...popstate is what moves back', true, /addEventListener\('popstate', \((e)?\) => \{?[^\n]*\bpopTo\(\)/.test(APP));
 is('...and the back button asks the platform', true, /if \(navDepth > 0 &&[^\n]*history\.back/.test(APP));
 // A sheet and a confirmation are back-steps too: the gesture must close them rather than
 // leaving the screen under them.
@@ -1116,18 +1126,21 @@ is('...and app.js still hands the staleness over', 2,
 // §5's rule about the token, checked as CODE and not as prose: the first version of
 // this assertion matched api.js's own comment explaining why the token is not stored,
 // and so passed while proving nothing. Only a real write counts.
-//   THE RULE CHANGED, by the owner's decision: the token is now KEPT on the device so a
-// relaunch inside the idle window needs no Face ID (the server's 15-minute idle window and
-// `revoke` are the bound). What still has to hold is narrower and checkable: ONE write,
-// under a key scoped to the daemon's origin, and every 401 the client can receive clears
-// it — so a dead token is tried once and never lingers.
+//   THE RULE CHANGED TWICE, both by the owner's decision. The token was kept in localStorage
+// so a relaunch inside the idle window needed no Face ID; then "when I completely exit the
+// app, it should lock" — so it is kept for the life of the PAGE PROCESS: sessionStorage,
+// which a kill from the iOS app switcher empties and the app's own reload keeps (measured
+// in an installed home-screen app; pwa-relaunch.mjs drives both against a live daemon).
+// What still has to hold: ONE write, under a key scoped to the daemon's origin, and every
+// 401 the client can receive clears it — so a dead token is tried once and never lingers.
 const API = read('api.js');
 const stores = [...API.matchAll(/(?:localStorage|sessionStorage)\.setItem\(([^)]*)\)/g)].map(m => m[1]);
 is('exactly one storage write carries the token', 1, stores.filter(a => /token/i.test(a)).length);
-is('...in localStorage, under the per-origin key', true,
-   /localStorage\.setItem\(k, JSON\.stringify\(\{ t: token, exp: tokenExp \}\)\)/.test(API)
+is('...in sessionStorage, under the per-origin key', true,
+   /sessionStorage\.setItem\(k, JSON\.stringify\(\{ t: token, exp: tokenExp \}\)\)/.test(API)
    && /`\$\{LS_TOKEN\}:\$\{r\.base\}`/.test(API));
-is('...and never in sessionStorage (an iOS relaunch drops it)', false, /sessionStorage\.setItem/.test(API));
+is('...and never in localStorage (it outlives a kill, and the app stays unlocked)', false,
+   /localStorage\.setItem\(k, JSON\.stringify\(\{ t: token/.test(API));
 const on401 = API.split('\n').filter(l => /if \(r\.status === 401/.test(l));   // the branches that ACT on one, not the probe's sentence about it
 is('every 401 branch clears the token', '', on401.filter(l => !/clearToken\(\)/.test(l)).join(' | '));
 is('...and there are 401 branches to check', true, on401.length >= 4);
