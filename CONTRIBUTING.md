@@ -63,7 +63,8 @@ a red `staging` belongs to whoever is around, not to whoever merged last.
 **Releases go `staging` → `main` as a merge commit, never a squash.** A squash would put
 a brand-new commit on `main` that shares no history with the branch it came from, so the
 *next* release would conflict with everything in between. A merge keeps `main` a genuine
-ancestor of `staging` and every release after it trivial.
+ancestor of `staging` and every release after it trivial. The whole release, through to
+npm, is in [docs/releasing.md](docs/releasing.md).
 
 ## Arm the pre-push hook, first thing
 
