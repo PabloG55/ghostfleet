@@ -17,15 +17,45 @@ out of date — `wsl --update`, then launch Ubuntu again.
 The first launch asks for a Linux username and password. **Don't skip that step and
 run everything as `root`** (`--no-launch` skips it): the fleet's config, runtime and
 Claude sign-in all live in your home directory, and a root install puts them in `/root`.
-If you already have a root-only distro, make a user and set it as the default:
+The installer warns when it finds itself running as root inside WSL, and carries on.
+
+### If the distro opens as root anyway
+
+The symptom, right as the distro opens:
+
+```text
+getpwuid(1000) failed
+root@<host>:/#
+```
+
+a `#` prompt, and a home directory of `/` (or `/root`). You did make a user — it just
+isn't the one WSL opens. Some images (Ubuntu 26.04's among them) already ship a user
+called `ubuntu` with UID 1000, so the account made at first boot gets **1001**. WSL's
+stored default is still UID 1000, so it either can't resolve it (`getpwuid(1000) failed`)
+or falls back to root.
+
+Set the default user by name, from **Windows PowerShell**:
+
+```powershell
+wsl --manage Ubuntu --set-default-user <you>
+wsl --terminate Ubuntu
+```
+
+then reopen it. `Ubuntu` is the distro's name as `wsl -l -v` lists it, and `<you>` is the
+Linux username you made. This is the fix to reach for first: on a distro in the state
+above, the `/etc/wsl.conf` setting below did **not** take effect, while this did.
+
+**Older WSL** (no `--manage`; `wsl --update` gets you one that has it), or a root-only
+distro with no user yet — make one, then set the default in `/etc/wsl.conf`:
 
 ```bash
-useradd -m -s /bin/bash -G sudo <you>
+useradd -m -s /bin/bash -G sudo <you>     # skip if the user already exists
 passwd <you>
 printf '[user]\ndefault=<you>\n' > /etc/wsl.conf
 ```
 
-then `wsl --terminate Ubuntu` from PowerShell, and reopen it.
+then `wsl --terminate Ubuntu` from PowerShell, and reopen it. Check with `id` — it should
+print your name, not `uid=0(root)`.
 
 ## 2. The two things the installer needs to already be there (inside WSL)
 
@@ -108,7 +138,11 @@ git config --global user.email "<your GitHub email>"
 ## Notes
 
 - Use a real terminal window (Windows Terminal with the Ubuntu profile). `ghostfleet` is a
-  full-screen TUI; run through a piped, non-tty `wsl.exe -- …` it waits for a screen that
-  never comes.
+  full-screen TUI; run through a piped, non-tty `wsl.exe -- …` it says it needs a terminal
+  and exits. `ghostfleet --help` lists the forms that work without one (`update`,
+  `--sync-check`, `--update-check`, `<project> --plain`).
+- Installed with `npx`, you update by running it again — `npx ghostfleet-cli`, or
+  `ghostfleet update`, which does the same. `cf-sync` is for working from a clone; on an
+  npx install it has nothing to sync from, and says so.
 - `Ctrl-n` / `Ctrl-t` are taken by the fleet inside a session (editor / terminal tab), so
   inside Claude they no longer reach Claude. `Ctrl-a n` / `Ctrl-a t` do the same.

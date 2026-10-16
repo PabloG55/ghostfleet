@@ -19450,6 +19450,12 @@ PL
   # A CLONE never gets the npm notice: it updates from git, and sync-check covers it.
   echo "$UP/clone" > "$RT/.source"
   is "notice: a clone is not told about npm"                  ""    "$(nt)"
+  # NO POINTER AT ALL is what an npx install leaves now: the cache it ran from is pruned by
+  # npm, so install.sh records none rather than one that will dangle. The notice is the only
+  # way such an install hears about a release, so a missing .source has to read as npm.
+  rm -f "$RT/.source"
+  printf '%s\t0.5.0\n' "$(date +%s)" > "$UP/home/.config/ghostfleet/npm-latest"
+  is "notice: an npx install with no source pointer still hears" "yes" "$(grep -q '0.5.0' <<< "$(nt)" && echo yes || echo no)"
   echo "$UP/pkg" > "$RT/.source"
   # NEVER BLOCKING: a registry that does not answer must not hold the startup check.
   printf '1\t0.4.0\n' > "$UP/home/.config/ghostfleet/npm-latest"
@@ -19474,6 +19480,158 @@ else
 fi
 
 node --check "$ROOT/hooks/opencode-fleet-event.js" >/dev/null 2>&1 && ok "opencode plugin parses" || bad "opencode plugin parses" "ok" "syntax error"
+
+# ── a clean npx install on WSL ───────────────────────────────────────────────
+# Four papercuts from one first install, `npx -y ghostfleet-cli --yes` on a fresh WSL2
+# distro with no clone anywhere on the machine. Each one is small, and each one cost the
+# reader the next step: a help flag that hung, a re-run line naming a file they did not
+# have, a sync that pointed at a directory npm had already deleted, and a distro that
+# started as root without saying why.
+group "a clean npx install on WSL"
+# A wall-clock bound that works on both legs: GNU `timeout` is on the Linux runner and not
+# on a stock Mac, where perl's alarm does the same job. 124 is timeout's "it was still
+# running", and the alarm's 142 is mapped onto it so the rows read the same everywhere.
+tmo() {
+  local s="$1" rc=0; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; return $?; fi
+  perl -e 'alarm shift; exec @ARGV or exit 127' "$s" "$@" || rc=$?
+  [ "$rc" = 142 ] && rc=124
+  return "$rc"
+}
+NW="$(mktemp -d)"; mkdir -p "$NW/home/.config/ghostfleet"
+
+# 1. `ghostfleet --help` OPENED THE TUI, and with no terminal it waited for one forever:
+# `wsl -- bash -lc 'ghostfleet --help'` sat there until it was killed. stdin is /dev/null
+# here and stdout is a capture, which is that invocation's shape. A row that hangs fails
+# as 124, never as a pass.
+if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  gfn() { tmo 10 env HOME="$NW/home" CLAUDE_FLEET_AWAKE=off "$ROOT/bin/ghostfleet" "$@" </dev/null 2>&1; }
+  hout="$(gfn --help)"; hrc=$?
+  is "--help exits 0, and does not wait for a screen"   "0"   "$hrc"
+  is "...printing the usage"                            "yes" "$(grep -q '^usage: ghostfleet' <<<"$hout" && echo yes || echo no)"
+  # The forms it lists are the ones the launcher really parses: a usage that names a flag
+  # the case statements do not have is the next help that lies.
+  is "...naming the forms that need no terminal"        "yes" "$(grep -q -- '--plain' <<<"$hout" && grep -q -- '--sync-check' <<<"$hout" && grep -q -- '--update-check' <<<"$hout" && grep -q 'ghostfleet update' <<<"$hout" && echo yes || echo no)"
+  is "-h is the same"                                   "0"   "$(gfn -h >/dev/null; echo $?)"
+  is "...and so is help"                                "0"   "$(gfn help >/dev/null; echo $?)"
+  # The other half: plain `ghostfleet` with no terminal is a screen nobody can see, so it
+  # says so and stops instead of blocking.
+  nout="$(gfn)"; nrc=$?
+  is "no terminal: ghostfleet does not hang"            "no"  "$([ "$nrc" = 124 ] && echo yes || echo no)"
+  is "...it exits non-zero"                             "yes" "$([ "$nrc" != 0 ] && [ "$nrc" != 124 ] && echo yes || echo "no: $nrc")"
+  is "...saying it needs a terminal"                    "yes" "$(grep -q 'needs a terminal' <<<"$nout" && echo yes || echo no)"
+  # THE HANG ITSELF needs a terminal to exist while stdin and stdout are not it — with no
+  # /dev/tty at all, the screens fail at once and the loop falls out with 0, which is wrong
+  # but quick. A tmux pane is that shape: /dev/tty is the pane, the redirections are not.
+  # The pane holds the old code's TUI forever, so only the rc file can end the wait.
+  tmux -L gfnotty kill-server 2>/dev/null
+  for nt_args in --help ""; do
+    rm -f "$NW/pane.rc"
+    tmux -L gfnotty new-session -d -x 100 -y 30 \
+      "env HOME='$NW/home' CLAUDE_FLEET_AWAKE=off '$ROOT/bin/ghostfleet' $nt_args </dev/null >'$NW/pane.out' 2>&1; echo \$? > '$NW/pane.rc'"
+    wait_for 8 "ghostfleet ${nt_args:-(bare)} to exit in a pane" '[ -s "$NW/pane.rc" ]'
+    is "in a pane, redirected: ghostfleet ${nt_args:-(bare)} returns" "yes" \
+       "$([ -s "$NW/pane.rc" ] && echo yes || echo "no: still running after 8s")"
+    tmux -L gfnotty kill-server 2>/dev/null
+  done
+  is "...and bare ghostfleet there is a refusal"        "yes" "$([ "$(cat "$NW/pane.rc" 2>/dev/null)" = 1 ] && grep -q 'needs a terminal' "$NW/pane.out" && echo yes || echo no)"
+  # ...and nothing that never needed one starts refusing.
+  is "no terminal: --sync-check still answers"          "0"   "$(gfn --sync-check >/dev/null; echo $?)"
+  uout="$(gfn update --help)"; urc=$?
+  is "no terminal: update still reaches fleet-update"   "0:yes" "$urc:$(grep -q 'fleet-update' <<<"$uout" && echo yes || echo no)"
+  mkdir -p "$NW/proj"
+  printf 'acme-api\t%s\twork\n' "$NW/proj" > "$NW/home/.config/ghostfleet/projects"
+  pout="$(gfn acme-api --plain)"; prc=$?
+  is "no terminal: <project> --plain still prints"      "yes" "$([ "$prc" != 124 ] && ! grep -q 'needs a terminal' <<<"$pout" && echo yes || echo "no: $prc $pout")"
+  rm -f "$NW/home/.config/ghostfleet/projects"
+else
+  skip "ghostfleet with no terminal" "tmux or node not available"
+fi
+
+# 2 + 3. THE NPX SHAPE, through the real shim. The package sits where npx unpacks it, in a
+# dir that is not a git repo, and the shim is run from somewhere else — the reader's home,
+# which is where docs/windows.md tells them to run it.
+#   2: the shim spawned install.sh with cwd = the package dir, so `$REPO = $PWD` held and
+# the closing line said `./install.sh --verbose` to a reader with no install.sh.
+#   3: the install recorded the cache as cf-sync's source. npm prunes it, and the next
+# `cf-sync` said "don't know the source repo. Pass it once: cf-sync /path/to/ghostfleet" —
+# to somebody who has no clone to pass.
+if command -v node >/dev/null 2>&1; then
+  NPXPKG="$NW/home/.npm/_npx/0a1b2c3d4e5f/node_modules/ghostfleet-cli"
+  mkdir -p "$NPXPKG" "$NW/home/.claude"
+  cp -Rp "$ROOT"/bin "$ROOT"/lib "$ROOT"/tmux "$ROOT"/hooks "$ROOT"/mcp "$ROOT"/skill \
+         "$ROOT"/layouts "$ROOT"/web "$ROOT"/install.sh "$ROOT"/package.json "$NPXPKG/" 2>/dev/null
+  NRT="$NW/home/rt"
+  sout="$(cd "$NW/home" && env HOME="$NW/home" CLAUDE_FLEET_HOME="$NRT" CLAUDE_FLEET_BIN="$NW/home/bin" \
+          SHELL=/bin/bash node "$NPXPKG/bin/npx-install.mjs" 2>&1)"; src=$?
+  is "npx install: the shim's install succeeds"         "0"   "$src"
+  is "npx install: the re-run line is the npx one"      "yes" "$(grep -q 'npx ghostfleet-cli --verbose' <<<"$sout" && echo yes || echo no)"
+  is "...not a ./install.sh the reader does not have"   "no"  "$(grep -q './install.sh --verbose' <<<"$sout" && echo yes || echo no)"
+  is "npx install: no source pointer at npm's cache"    "absent" "$([ -e "$NRT/.source" ] && echo "present: $(cat "$NRT/.source")" || echo absent)"
+  # The release is still recorded — it is what the update notice compares with npm.
+  is "...the installed version still is"                "yes" "$([ -s "$NRT/.version" ] && echo yes || echo no)"
+  # A PERSISTENT non-git source keeps its pointer: an unpacked tarball, a global npm
+  # install. Only the npx cache is known to vanish.
+  TARB="$NW/unpacked/ghostfleet-cli"; mkdir -p "$TARB"; cp -Rp "$NPXPKG/." "$TARB/"
+  env HOME="$NW/home" CLAUDE_FLEET_HOME="$NW/rt2" CLAUDE_FLEET_BIN="$NW/home/bin2" SHELL=/bin/bash \
+      "$TARB/install.sh" >/dev/null 2>&1
+  is "...while a source that stays still records one"   "$TARB" "$(cat "$NW/rt2/.source" 2>/dev/null)"
+
+  # cf-sync with nothing to sync from. It must speak to BOTH readers: the npx one, whose
+  # update is a re-run, and the clone one, whose fix is the pointer.
+  cfs() { env HOME="$NW/home" CLAUDE_FLEET_HOME="$NRT" "$NRT/bin/cf-sync" 2>&1; }
+  cout="$(cfs)"; crc=$?
+  is "cf-sync with no source: refuses"                  "1"   "$crc"
+  is "...telling an npx install to re-run npx"          "yes" "$(grep -q 'npx ghostfleet-cli' <<<"$cout" && echo yes || echo no)"
+  is "...and still telling a clone how to point it"     "yes" "$(grep -q 'cf-sync /path/to/ghostfleet' <<<"$cout" && echo yes || echo no)"
+  # An install from before this fix: the pointer is there and npm has pruned what it names.
+  echo "$NW/home/.npm/_npx/ffffffffffff/node_modules/ghostfleet-cli" > "$NRT/.source"
+  vout="$(cfs)"; vrc=$?
+  is "cf-sync with a pruned npx source: refuses"        "1"   "$vrc"
+  is "...saying npm pruned it, and to re-run npx"       "yes" "$(grep -q 'npm prunes' <<<"$vout" && grep -q 'npx ghostfleet-cli' <<<"$vout" && echo yes || echo no)"
+  # And the launcher's stale-runtime line, which reads the same pointer, stays quiet in
+  # both shapes: it reports only a distance it measured, and there is none to measure.
+  is "--sync-check with a pruned npx source is silent"  ""    "$(env HOME="$NW/home" "$NRT/bin/ghostfleet" --sync-check 2>&1)"
+  rm -f "$NRT/.source"
+  is "--sync-check with no source is silent"            ""    "$(env HOME="$NW/home" "$NRT/bin/ghostfleet" --sync-check 2>&1)"
+else
+  skip "the npx install shape" "node not available"
+fi
+
+# 4. ROOT INSIDE WSL. Ubuntu 26.04's WSL image already has a uid-1000 user, so the one made
+# at first boot is 1001 while WSL's stored default is still 1000: `getpwuid(1000) failed`,
+# and the shell comes up as root. An install from there lands in /root. Warned, not refused
+# — a root-only container is a real install — and the warning names the fix that worked.
+# The kernel release is the WSL marker, read from a path the suite can point at a file, and
+# root is an `id` on PATH that says 0: the installer asks `id -u`, and nothing else here.
+mkdir -p "$NW/wsl/bin"
+printf '6.6.87.2-microsoft-standard-WSL2\n' > "$NW/wsl/osrelease-wsl"
+printf '6.8.0-31-generic\n'                 > "$NW/wsl/osrelease-plain"
+printf '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n' > "$NW/wsl/bin/id"
+chmod +x "$NW/wsl/bin/id"
+# A COPY, NOT THE REPO: install.sh writes core.hooksPath into $REPO's git config.
+mkdir -p "$NW/wsl/src"
+cp -Rp "$ROOT"/bin "$ROOT"/lib "$ROOT"/tmux "$ROOT"/hooks "$ROOT"/mcp "$ROOT"/skill \
+       "$ROOT"/layouts "$ROOT"/web "$ROOT"/install.sh "$NW/wsl/src/" 2>/dev/null
+wr() { local p="$NW/wsl/bin:$PATH"; [ "${3:-}" = user ] && p="$PATH"
+       mkdir -p "$NW/wsl/h-$1/.claude"
+       env PATH="$p" HOME="$NW/wsl/h-$1" CLAUDE_FLEET_HOME="$NW/wsl/h-$1/rt" \
+           CLAUDE_FLEET_BIN="$NW/wsl/h-$1/bin" CLAUDE_FLEET_WSL_PROBE="$NW/wsl/osrelease-$2" \
+           SHELL=/bin/bash "$NW/wsl/src/install.sh" 2>&1; }
+w1="$(wr a wsl)"
+is "root inside WSL: the install warns"               "yes" "$(grep -q 'root inside WSL' <<<"$w1" && echo yes || echo no)"
+is "...naming the fix that worked"                    "yes" "$(grep -q 'wsl --manage .* --set-default-user' <<<"$w1" && echo yes || echo no)"
+is "...and still installs"                            "yes" "$(grep -q '^Done. Next:' <<<"$w1" && echo yes || echo no)"
+w2="$(wr b plain)"
+is "root outside WSL: no WSL warning"                 "no"  "$(grep -q 'root inside WSL' <<<"$w2" && echo yes || echo no)"
+# Without the shim this row asks the runner's own uid, so it means something only off root.
+if [ "$(id -u)" != 0 ]; then
+  w3="$(wr c wsl user)"
+  is "a user inside WSL: no warning"                  "no"  "$(grep -q 'root inside WSL' <<<"$w3" && echo yes || echo no)"
+else
+  skip "a user inside WSL: no warning" "the suite is running as root"
+fi
+rm -rf "$NW"
 
 # ── ONE CONVERSATION, ONE SLOT ───────────────────────────────────────────────
 # A fleet's lead came back after a crash running a WORKER's conversation, and days later was

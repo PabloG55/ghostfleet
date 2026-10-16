@@ -115,6 +115,35 @@ vsay "  runtime:  $FLEET_HOME   (executed from here)"
 vsay "  bin dir:  $BIN_DIR"
 [ "$ASSUME_YES" = 1 ] && echo "  deps:     $YES_VIA given — missing dependencies will be installed WITHOUT asking"
 
+# --- root inside WSL ----------------------------------------------------------
+# A WARNING, NOT A REFUSAL: a root-only container is a real install, and so is a distro
+# somebody chose to run as root. But inside WSL it is almost never chosen. Ubuntu 26.04's
+# WSL image already ships a uid-1000 user, so the account made at first boot gets 1001
+# while WSL's stored default uid stays 1000: the distro prints `getpwuid(1000) failed` and
+# comes up as root, prompt `#`, home `/`. An install from there puts the config, the
+# runtime and the Claude sign-in under /root, where the reader's own account never sees
+# them. `[user] default=` in /etc/wsl.conf did not fix that; `wsl --manage` did.
+#   The marker is the kernel release WSL builds ("…-microsoft-standard-WSL2"; WSL1 says
+# "Microsoft"). CLAUDE_FLEET_WSL_PROBE points the check at another file, for the suite.
+wsl_root_warning() {
+  local f probes=(/proc/sys/kernel/osrelease /proc/version)
+  [ -n "${CLAUDE_FLEET_WSL_PROBE:-}" ] && probes=("$CLAUDE_FLEET_WSL_PROBE")
+  [ "$(id -u)" = 0 ] || return 0
+  for f in "${probes[@]}"; do
+    grep -qiE 'microsoft|wsl' "$f" 2>/dev/null || continue
+    echo
+    echo "! running as root inside WSL, so this installs into /root — not into your own account."
+    echo "  If the distro printed \`getpwuid(1000) failed\` when it opened, its default user is"
+    echo "  wrong. Fix it from Windows PowerShell, reopen the distro, and re-run this as you:"
+    echo "      wsl --manage ${WSL_DISTRO_NAME:-<Distro>} --set-default-user <you>"
+    echo "  (docs/windows.md has the whole story.) Carrying on as root."
+    echo
+    return 0
+  done
+  return 0                         # under set -e a non-zero here would end the install
+}
+wsl_root_warning
+
 # IS THIS A RE-INSTALL? Measured BEFORE cf-sync stages anything, because afterwards the
 # runtime always exists and the question can no longer be asked. It decides one thing: a
 # first-timer does not need the live-sessions caveat at the end (they have no sessions),
@@ -598,6 +627,9 @@ chmod +x "$REPO"/hooks/*.sh "$REPO"/bin/*
 # clone, and a second clone, because the guard only ever fires when THIS copy could not
 # serve as a sync source in the first place.
 is_repo() { [ -e "$1/.git" ]; }   # a directory in a clone, a FILE in a git worktree
+# Where npx unpacks a package: ~/.npm/_npx/<hash>/node_modules/<pkg>. npm PRUNES it, so it
+# is a place to run from once and never a place to point anything at.
+is_npx_cache() { case "$1" in */_npx/*) return 0 ;; esac; return 1; }
 KEEP_SOURCE=""
 if ! is_repo "$REPO"; then
   prev="$(cat "$FLEET_HOME/.source" 2>/dev/null || true)"
@@ -638,6 +670,14 @@ if [ -n "$KEEP_SOURCE" ]; then
   echo "· this install ran from $REPO, which is not a git repo,"
   echo "  so cf-sync's source pointer stays on your clone: $KEEP_SOURCE"
   echo "  (to repoint it deliberately: cf-sync /path/to/ghostfleet)"
+elif ! is_repo "$REPO" && is_npx_cache "$REPO"; then
+  # NO CLONE AND AN NPX CACHE: record no pointer at all. cf-sync wrote one at the cache, and
+  # npm prunes that directory, so a later `cf-sync` failed with "don't know the source repo.
+  # Pass it once: cf-sync /path/to/ghostfleet" — advice for somebody with a clone, given to
+  # somebody without one. The npx reader updates by re-running npx (`ghostfleet update`
+  # does exactly that), and cf-sync says so when there is nothing recorded. The release
+  # itself is still in .version, which is what the npm update notice reads.
+  rm -f "$FLEET_HOME/.source"
 fi
 chmod +x "$FLEET_HOME"/hooks/*.sh "$FLEET_HOME"/bin/* 2>/dev/null || true
 
@@ -1164,8 +1204,12 @@ fi
 # has no install.sh in it and never did — the installer ran out of a cache directory they
 # were never shown. Name whichever of the two actually reaches this script.
 if [ "$VERBOSE" != 1 ]; then
-  if [ -f "$REPO/install.sh" ] && [ "$REPO" = "$PWD" ]; then _again="./install.sh --verbose"
-  elif is_repo "$REPO";                                 then _again="$(short "$REPO")/install.sh --verbose"
-  else                                                       _again="npx ghostfleet-cli --verbose"; fi
+  # An npx cache is never the answer, whatever the cwd: it is a directory the reader was
+  # never shown and npm will delete. bin/npx-install.mjs used to run this with the cwd SET to
+  # the cache, so `$REPO = $PWD` held and every npx install was told `./install.sh`.
+  if is_npx_cache "$REPO" && ! is_repo "$REPO";                 then _again="npx ghostfleet-cli --verbose"
+  elif [ -f "$REPO/install.sh" ] && [ "$REPO" = "$PWD" ];       then _again="./install.sh --verbose"
+  elif is_repo "$REPO";                                         then _again="$(short "$REPO")/install.sh --verbose"
+  else                                                               _again="npx ghostfleet-cli --verbose"; fi
   echo "    $_again   # everything this just did, step by step"
 fi
