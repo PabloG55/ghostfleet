@@ -15,9 +15,12 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.join(here, '..');
 const installSh = path.join(repoRoot, 'install.sh');
 
+// The reader's own working directory, NOT the package's. install.sh finds itself from its
+// own path, and the one thing it reads the cwd for is the closing re-run line: with
+// cwd = the package dir it decided the reader was standing next to an install.sh, and told
+// them to run `./install.sh --verbose` from a directory that has none.
 const res = spawnSync('bash', [installSh, ...process.argv.slice(2)], {
   stdio: 'inherit',
-  cwd: repoRoot,
 });
 
 if (res.error) {

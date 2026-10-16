@@ -30,7 +30,35 @@
 #   ghostfleet <project> --plain   one-shot non-interactive list (for scripts)
 #   ghostfleet --sync-check    print one line if the RUNTIME is behind its source repo
 #                                (nothing when it is current, or when it cannot tell)
+#   ghostfleet -h | --help     the usage below
 set -uo pipefail
+
+# FIRST, before anything can reach for a terminal. `--help` used to fall through to the
+# Projects screen like any other unknown flag, and with no terminal behind it — `wsl --
+# bash -lc 'ghostfleet --help'` — it waited for a screen that never came, until killed.
+# Every form listed here is one the code below actually parses; keep the two in step.
+case "${1:-}" in
+  -h|--help|help)
+    cat <<'EOF'
+usage: ghostfleet [<profile> | <project> | demo | jarvis] [--new | --plain]
+
+  ghostfleet                     the Projects screen (the work profile)
+  ghostfleet <profile>           another profile's Projects screen — an unknown one is refused
+  ghostfleet <profile> --new     create that profile's (empty) project list, then open it
+  ghostfleet <project>           straight into a work project's Master Claude
+  ghostfleet demo                three throwaway projects under ~/gf-demo, built if absent
+  ghostfleet jarvis              the master of masters (docs/jarvis.md)
+
+These need no terminal:
+  ghostfleet <project> --plain   print that project's sessions once, and exit
+  ghostfleet update              update to the latest release (git or npm) and reinstall;
+                                   ghostfleet update --help for its flags
+  ghostfleet --sync-check        one line if the runtime is behind its source repo
+  ghostfleet --update-check      one line if npm has a newer release
+  ghostfleet -h | --help         this
+EOF
+    exit 0 ;;
+esac
 
 # Resolve this script through the ~/.local/bin symlink to find the repo root.
 src="${BASH_SOURCE[0]}"
@@ -134,10 +162,13 @@ _ver_gt() {                        # is $1 a higher x.y.z than $2? numerically, 
   done
   return 1
 }
+#   NO .source AT ALL is an npm install too, and the commonest one: install.sh records no
+# pointer at npx's cache, because npm prunes it (see the staging block there). A clone's
+# runtime always has one — cf-sync writes it on every sync — so its absence is not a clone.
 npm_status() {                     # prints ONE line if npm has a newer version; else nothing
   local srcdir="" have="" line="" ts="" latest="" cache="$HOME/.config/ghostfleet/npm-latest"
-  IFS= read -r srcdir 2>/dev/null < "$REPO/.source" || return 0
-  [ -n "$srcdir" ] && [ ! -e "$srcdir/.git" ] || return 0
+  IFS= read -r srcdir 2>/dev/null < "$REPO/.source" || true
+  [ -z "$srcdir" ] || [ ! -e "$srcdir/.git" ] || return 0
   IFS= read -r have 2>/dev/null < "$REPO/.version" || return 0
   [ -n "$have" ] || return 0
   IFS= read -r line 2>/dev/null < "$cache" || line=""
@@ -867,6 +898,17 @@ PROJECT=""; PROJECT_AGENT=""
 if [ -n "$JUMP" ]; then
   set_project "$JUMP"
   [ "${2:-}" = "--plain" ] && exec node "$GRID" "$SOCK" "$CONF" --plain
+fi
+
+# EVERYTHING FROM HERE ON IS A SCREEN, and a screen with nobody at it blocks forever: the
+# node screens draw on /dev/tty, so with stdin or stdout redirected the Projects screen
+# opens on whatever terminal is behind them and the caller waits on output that never
+# comes. Refuse instead, in one line. Placed after every form that does NOT need a
+# terminal (the checks, `update`, `--plain`, the unknown-profile refusal) so none of them
+# starts failing, and before the first thing that draws.
+if [ ! -t 0 ] || [ ! -t 1 ]; then
+  echo "ghostfleet: needs a terminal — its screens are interactive (ghostfleet --help lists what runs without one)" >&2
+  exit 1
 fi
 
 _clear

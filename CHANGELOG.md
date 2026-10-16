@@ -4,6 +4,37 @@ What changed between releases, and why it might matter to you. Written for someb
 deciding whether to upgrade rather than for somebody reading the diff — the commit log has
 the detail, and every entry here names the PR that carries the argument.
 
+## 0.6.1 — 2026-10-16
+
+**A first install from npm on WSL now goes cleanly.** Four things a fresh
+`npx -y ghostfleet-cli --yes` on a new WSL2 distro, with no clone on the machine, tripped
+over (#64):
+
+### Fixed
+
+- **`ghostfleet --help` prints its usage and exits** instead of opening the Projects
+  screen. And any form that would open a screen with no terminal behind it — `wsl -- bash
+  -lc 'ghostfleet'`, a script, a pipe — now exits 1 with "needs a terminal" rather than
+  waiting forever on a screen nobody can see. The forms that never needed one (`update`,
+  `<project> --plain`, `--sync-check`, `--update-check`) are unchanged.
+- **The installer's closing line tells an npx user a command they can run.** It said
+  `./install.sh --verbose`, because the npx shim ran the installer from inside the package
+  directory; it now runs from your own directory, and an npx install is told
+  `npx ghostfleet-cli --verbose`.
+- **An npx install no longer points the runtime at npm's cache.** `.source` recorded
+  `~/.npm/_npx/<hash>/…`, which npm prunes, after which `cf-sync` asked for a repository
+  you never cloned. No pointer is written for the npx cache now, `cf-sync` says to re-run
+  `npx ghostfleet-cli` (or `ghostfleet update`) when there is nothing usable to sync from,
+  and the "a newer version is on npm" notice, which stayed silent without a pointer, now
+  shows for these installs too.
+- **A WSL distro that opens as root is called out.** Ubuntu 26.04's WSL image already has a
+  UID-1000 user, so the account you create gets 1001, WSL's stored default no longer
+  resolves (`getpwuid(1000) failed`) and you land as root — where a ghostfleet install
+  would sit in `/root` without your Claude sign-in. The installer now warns when it runs as
+  root inside WSL and names the fix, and docs/windows.md leads with
+  `wsl --manage <Distro> --set-default-user <you>`, keeping `/etc/wsl.conf` as the fallback
+  for older WSL.
+
 ## 0.6.0 — 2026-10-14
 
 **This release is mostly about two things: the ledger, and the phone.** The ledger stops

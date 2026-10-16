@@ -68,10 +68,26 @@ if [ "${1:-}" = --pm ]; then pick_pm && printf '%s\n' "$PM"; exit 0; fi
 DEPS=0; [ "${1:-}" = --deps ] && { DEPS=1; shift; }
 
 # figure out the SOURCE repo: arg > recorded .source > give up with guidance
-REPO="${1:-}"
-[ -n "$REPO" ] || REPO="$(cat "$DEST/.source" 2>/dev/null || true)"
+REPO="${1:-}"; FROM=arg
+[ -n "$REPO" ] || { REPO="$(cat "$DEST/.source" 2>/dev/null || true)"; FROM=recorded; }
+# NOTHING TO SYNC FROM is the NORMAL state of an npx install: install.sh records no pointer
+# at npx's cache, because npm prunes it — and an install from before that recorded one,
+# which now names a directory that is gone. Both readers land here, and they need different
+# advice: the npx one updates by re-running npx and has no clone to point at, which is all
+# the old message ("Pass it once: cf-sync /path/to/ghostfleet") offered. So say both, npx
+# first, because a clone user is the one who knows they have a clone.
 if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
-  echo "cf-sync: don't know the source repo. Pass it once: cf-sync /path/to/ghostfleet" >&2
+  {
+    if [ "$FROM" = arg ];          then echo "cf-sync: no such folder: $REPO"
+    elif [ -z "$REPO" ];           then echo "cf-sync: no source recorded to sync from (nothing in $DEST/.source)."
+    else case "$REPO" in
+           */_npx/*) echo "cf-sync: the source this was installed from is gone — $REPO was npx's cache, which npm prunes." ;;
+           *)        echo "cf-sync: the recorded source is gone: $REPO" ;;
+         esac
+    fi
+    echo "  installed with npx?    update by re-running it:  npx ghostfleet-cli   (or: ghostfleet update)"
+    echo "  working from a clone?  point this at it once:    cf-sync /path/to/ghostfleet"
+  } >&2
   exit 1
 fi
 REPO="$(cd "$REPO" && pwd)"
