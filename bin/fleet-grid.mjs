@@ -40,13 +40,26 @@ try { ({ lostSessions, serverStart } = await import(new URL('../lib/fleet-scan.m
 
 const HOME = os.homedir();
 // Everything is scoped to one Claude config dir (= one account/profile).
-const CFG = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
-const FLEET_DIR = process.env.CLAUDE_FLEET_DIR || path.join(CFG, 'fleet');
+// THE SOCKET SAYS WHOSE FLEET THIS IS, AND THE ENV ONLY SAYS WHOSE PANE RAN US. A fleet
+// session exports CLAUDE_FLEET_DIR for its OWN profile, so a grid started with another
+// profile's env read that profile's fleet dir: a fleet on another profile whose server had
+// died, with six sessions recorded and every conversation intact, drew "nothing running yet"
+// and its lost cards were never reached. So the fleet's own project (lib/projects.mjs, the
+// reader the phone's /api/grid already resolves through) decides the account, and the env
+// is the answer only for a socket no project owns. Loaded, not imported, for the reason the
+// fleet-scan import above is: a copy of this file run from a temp directory has no ../lib,
+// and then the env is all there is — which is exactly what this did before.
+let OWN = null;
+try { OWN = (await import(new URL('../lib/projects.mjs', import.meta.url))).projectForSock(process.argv[2]); } catch {}
+const CFG = OWN?.cfg || process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
+const FLEET_DIR = OWN ? path.join(OWN.cfg, 'fleet') : (process.env.CLAUDE_FLEET_DIR || path.join(CFG, 'fleet'));
+// ...and everything this starts (a reopen, a stop, a spawn) is told the same account.
+if (OWN) Object.assign(process.env, { CLAUDE_CONFIG_DIR: CFG, CLAUDE_FLEET_DIR: FLEET_DIR, CLAUDE_FLEET_PROFILE: OWN.profile });
 const PROJECTS = path.join(CFG, 'projects');
 // codex keeps its own history, in its own place, under its own env var (same name and
 // default the binary uses). Nothing about it is reachable from PROJECTS above.
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
-const PROFILE = process.env.CLAUDE_FLEET_PROFILE || 'work';
+const PROFILE = OWN?.profile || process.env.CLAUDE_FLEET_PROFILE || 'work';
 // TWO WIRES, TWO SEPARATORS, and conflating them cost 122 red assertions.
 //
 // US is OUR OWN protocol: the chosen action this file prints on stdout for the bash

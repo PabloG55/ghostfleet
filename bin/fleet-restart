@@ -42,15 +42,18 @@
 set -uo pipefail
 
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+# The CALLER's account, kept only to be named in a refusal and to hold the snapshot of a
+# multi-fleet run. A fleet's own account comes from use_fleet below, never from here.
+CALLER_CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"; CALLER_FLEET_DIR="$FLEET_DIR"
 SOCK_DIR="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
 US=$'\x1f'
 
-MODE=""; ONE=""; DRY=0; YES=0; SELFTEST=0; REOPEN=""; ONLY_SLOT=""; NO_CONTINUE=0
+MODE=""; ONE=""; PROJECT_ARG=""; DRY=0; YES=0; SELFTEST=0; REOPEN=""; ONLY_SLOT=""; NO_CONTINUE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --all)      MODE=all ;;
     -s)         MODE=one; ONE="${2:-}"; shift ;;
-    --project)  MODE=one; ONE="cf-${2:-}"; shift ;;
+    --project)  MODE=one; PROJECT_ARG="${2:-}"; shift ;;
     --dry-run)  DRY=1 ;;
     --yes|-y)   YES=1 ;;
     --reopen)   MODE=reopen; REOPEN="${2:-}"; shift ;;
@@ -226,6 +229,46 @@ _src="${BASH_SOURCE[0]}"
 while [ -L "$_src" ]; do _t="$(readlink "$_src")"; case "$_t" in /*) _src="$_t" ;; *) _src="$(dirname "$_src")/$_t" ;; esac; done
 LIB="$(cd "$(dirname "$_src")/../lib" 2>/dev/null && pwd)"
 CONF="$(cd "$(dirname "$_src")/../tmux" 2>/dev/null && pwd)/cf.tmux.conf"
+
+# ── WHOSE FLEET IS THIS: the socket's own account, never the caller's ─────────
+# Every fleet session exports CLAUDE_FLEET_DIR for ITS OWN profile, and this used to take
+# the account from that. Run from a pane on the default profile against a fleet on another
+# one, a reopen relaunched that fleet's session under the default account: it stopped at a
+# "trust this folder?" that account had never been asked, and one whose conversation lived
+# only under its own account said "no conversation found" and exited. Prefixing the right
+# CLAUDE_CONFIG_DIR did not help, because CLAUDE_FLEET_DIR outranked it.
+#   So the socket is resolved to its project through lib/projects.mjs — the reader the MCP
+# tools and the phone already use, from the same projects files bin/ghostfleet reads — and
+# that project's config dir and fleet dir are used for everything: the records read, the
+# helpers asked (exported, so fleet-hibernate and fleet-send agree), the session launched.
+#   A socket no project owns is REFUSED, not run under the caller's account: that fallback
+# is exactly the bug, and there is no third place to learn the answer from.
+# Sets FLEET_DIR and RCFG RPROF RNAME RROOT; 1 when the socket is nobody's.
+RCFG=""; RPROF=""; RNAME=""; RROOT=""
+use_fleet() {
+  local out=""
+  RCFG=""; RPROF=""; RNAME=""; RROOT=""
+  command -v node >/dev/null 2>&1 && [ -f "$LIB/projects.mjs" ] || return 1
+  out="$(node "$LIB/projects.mjs" sock "$1" 2>/dev/null)" && [ -n "$out" ] || return 1
+  IFS="$US" read -r RNAME RPROF RCFG RROOT _ <<< "$out"
+  [ -n "$RCFG" ] || return 1
+  FLEET_DIR="$RCFG/fleet"
+  export CLAUDE_CONFIG_DIR="$RCFG" CLAUDE_FLEET_DIR="$FLEET_DIR" CLAUDE_FLEET_PROFILE="$RPROF"
+}
+# --project <name> is a socket only once its profile is known: cf-<name> on the default
+# profile, cf-<profile>-<name> on any other. Spelling it cf-<name> unconditionally named a
+# fleet that does not exist for every project off the default profile.
+if [ -n "$PROJECT_ARG" ]; then
+  _p="$(node "$LIB/projects.mjs" name "$PROJECT_ARG" 2>/dev/null)"; _rc=$?
+  case "$_rc" in
+    0) ONE="${_p##*"$US"}" ;;
+    3) echo "fleet-restart: two profiles each have a project called '$PROJECT_ARG' — pass -s <socket>" >&2; exit 2 ;;
+    *) echo "fleet-restart: no registered project called '$PROJECT_ARG'" >&2; exit 1 ;;
+  esac
+fi
+unowned() {
+  printf 'no registered project owns %s, so the account it runs under is unknown — not relaunching it under yours (%s)' "$1" "$CALLER_CFG"
+}
 live_id() {
   local sock="$1" slot="$2" agent="$3" rec="$4" out lid ltr
   RID="$rec"; RWHY=""
@@ -253,6 +296,18 @@ plan_rows() {
   local sock slot agent st id cwd act why
   while IFS= read -r sock; do
     [ -n "$sock" ] || continue
+    # EACH FLEET UNDER ITS OWN ACCOUNT. --all walks every fleet on the machine, and they are
+    # not all on the caller's profile; one whose owner cannot be named is listed, not touched.
+    if ! use_fleet "$sock"; then
+      while IFS= read -r slot; do
+        case "$slot" in _*|'') continue ;; esac
+        [ -z "$ONLY_SLOT" ] || [ "$slot" = "$ONLY_SLOT" ] || continue
+        PLAN="$PLAN$sock$US$slot$US-${US}unknown${US}skip$US$US$(cwd_for "$sock" "$slot")$US$(unowned "$sock")
+"
+      done < <(tmux -L "$sock" list-sessions -F '#{session_name}' 2>/dev/null)
+      continue
+    fi
+    load_records
     while IFS= read -r slot; do
       [ -n "$slot" ] || continue
       # A LEADING UNDERSCORE IS A TAB, NOT AN AGENT. CLAUDE.md: tab sessions are
@@ -288,8 +343,9 @@ plan_rows() {
 # process does not survive to print it again.
 SNAP=""
 write_snapshot() {
-  mkdir -p "$FLEET_DIR" 2>/dev/null
-  SNAP="$FLEET_DIR/restart-$(date +%Y%m%d-%H%M%S).tsv"
+  local d="${SNAP_DIR:-$FLEET_DIR}"
+  mkdir -p "$d" 2>/dev/null
+  SNAP="$d/restart-$(date +%Y%m%d-%H%M%S).tsv"
   {
     printf '# fleet-restart snapshot %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
     printf '# sock\tslot\tagent\tstatus\taction\tsession_id\tcwd\tnote\n'
@@ -324,18 +380,25 @@ relaunch() {
   #
   # AFTER A CRASH THERE IS NO SERVER, and this new-session STARTS one. Started bare it would
   # load ~/.tmux.conf instead of the fleet's, and take its global environment from whoever
-  # ran this — the wrong profile, when a reopen is run from a pane on another profile. So the fleet's config (it only applies when the server starts) and the
-  # profile this fleet dir belongs to (<profile>/fleet) go with every relaunch.
-  local -a conf=() prof=()
+  # ran this — the wrong profile, when a reopen is run from a pane on another profile. So the
+  # fleet's config (it only applies when the server starts) goes with every relaunch, and the
+  # FLEET's account (use_fleet) goes both ways: per session with -e, which outranks a server's
+  # global value, and into the environment of the tmux client itself, which a server it starts
+  # takes as its global one — so the next session anybody opens on it inherits the right
+  # account too, not the caller's.
+  local -a conf=() prof=() penv=()
   [ -f "$CONF" ] && conf=(-f "$CONF")
-  case "$FLEET_DIR" in */fleet) prof=(-e "CLAUDE_CONFIG_DIR=${FLEET_DIR%/fleet}") ;; esac
-  [ -n "${CLAUDE_FLEET_DIR:-}" ] && prof+=(-e "CLAUDE_FLEET_DIR=$CLAUDE_FLEET_DIR")
+  [ -n "$RCFG" ] || return 1
+  prof=(-e "CLAUDE_CONFIG_DIR=$RCFG" -e "CLAUDE_FLEET_DIR=$RCFG/fleet" -e "CLAUDE_FLEET_PROFILE=$RPROF"
+        -e "CLAUDE_FLEET_SCOPE=$RNAME" -e "CLAUDE_FLEET_ROOT=$RROOT")
+  penv=(CLAUDE_CONFIG_DIR="$RCFG" CLAUDE_FLEET_DIR="$RCFG/fleet" CLAUDE_FLEET_PROFILE="$RPROF"
+        CLAUDE_FLEET_SCOPE="$RNAME" CLAUDE_FLEET_ROOT="$RROOT" CLAUDE_FLEET_SOCK="$sock")
   # THE AGENT, SAID OUT LOUD. agent-here reads CLAUDE_FLEET_AGENT before the marker, and a
   # server this starts takes its global environment from the caller — a claude master
   # running a reopen exports CLAUDE_FLEET_AGENT=claude, and a codex session it brought
   # back would have come back as claude, `--resume`ing a codex id.
   [ -n "$agent" ] && prof+=(-e "CLAUDE_FLEET_AGENT=$agent")
-  tmux -L "$sock" ${conf[@]+"${conf[@]}"} new-session -d -s "$slot" -c "$cwd" \
+  env "${penv[@]}" tmux -L "$sock" ${conf[@]+"${conf[@]}"} new-session -d -s "$slot" -c "$cwd" \
     ${prof[@]+"${prof[@]}"} \
     -e "CLAUDE_FLEET_SOCK=$sock" \
     -e "CLAUDE_FLEET_RESUME=$id" \
@@ -351,7 +414,7 @@ relaunch() {
 run_plan() {
   local sock slot agent st act id cwd why
   local n_ok=0 n_cont=0 n_skip=0 n_idle=0
-  local skipped="" needyou="" failed="" selfrow=""
+  local skipped="" needyou="" failed="" selfrow="" RSOCK=""
 
   while IFS="$US" read -r sock slot agent st act id cwd why; do
     [ -n "$sock" ] || continue
@@ -360,6 +423,8 @@ run_plan() {
 " ;;
       self) selfrow="$sock$US$slot$US$id$US$cwd" ;;
       resume-continue|resume-idle)
+        # the plan spans fleets under --all; each relaunch is under its own fleet's account
+        [ "$sock" = "$RSOCK" ] || { use_fleet "$sock"; RSOCK="$sock"; }
         if relaunch "$sock" "$slot" "$id" "$cwd" "$agent"; then
           n_ok=$((n_ok+1))
           if [ "$act" = resume-continue ]; then
@@ -561,6 +626,8 @@ reopen_one() {
     echo "fleet-restart: '$name' is already running on $sock — nothing to reopen" >&2
     return 1
   fi
+  use_fleet "$sock" || { echo "fleet-restart: $(unowned "$sock")" >&2; return 1; }
+  load_records
   id="$(sid_for "$sock" "$name")"
   [ -n "$id" ] || { echo "fleet-restart: no recorded conversation for '$name' on $sock — nothing to resume by id, and this will not guess with --continue" >&2; return 1; }
   local tr ragent agent
@@ -568,6 +635,23 @@ reopen_one() {
   # The record knows its agent when the agent wrote it (codex's does); the marker otherwise.
   agent="${ragent:-$(agent_for "$sock" "$name")}"
   [ -n "$cwd" ] && [ -d "$cwd" ] || { echo "fleet-restart: the conversation's checkout ($cwd) is gone" >&2; return 1; }
+  # THE CONVERSATION HAS TO BE THERE, UNDER THE ACCOUNT IT IS ABOUT TO RUN AS. A resume of an
+  # id that account has no transcript for is a pane that prints "no conversation found" and
+  # exits — the card comes back for a second and goes, and the reason is gone with the pane.
+  # Claude keeps a conversation in <config dir>/projects/<cwd, every non-alphanumeric a '-'>;
+  # the record's own path is taken too when it is under that account. Another agent keeps it
+  # where its record says, so that is the file asked about.
+  local want=""
+  if [ "$agent" = claude ]; then
+    want="$RCFG/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')/$id.jsonl"
+    [ -f "$want" ] || case "$tr" in "$RCFG"/*) [ -f "$tr" ] && want="$tr" ;; esac
+  elif [ -n "$tr" ]; then
+    want="$tr"
+  fi
+  if [ -n "$want" ] && [ ! -f "$want" ]; then
+    echo "fleet-restart: '$name''s conversation $id has no transcript under $RCFG (looked for $want) — resuming it would open a pane that exits, so it is not reopened" >&2
+    return 1
+  fi
   # ONE CONVERSATION, ONE PANE. A codex process holds its rollout open, so "somebody has it
   # open" is "it is live in some pane already" — under another name, on another fleet, or
   # in a terminal outside any fleet. Resuming it again would put two writers on one file.
@@ -584,6 +668,13 @@ reopen_one() {
     echo "fleet-restart: '$name''s conversation ${id%%-*} is already open in live process $holder — not resuming it twice" >&2
     return 1
   fi
+  # --dry-run is a promise to touch nothing, and it used to be read only by the --all/-s walk:
+  # beside --reopen it printed "reopened" and created the session. Asked here, after every
+  # refusal above has had its say, so a dry run reports the same outcome the real one would.
+  if [ "$DRY" = 1 ]; then
+    echo "fleet-restart: would reopen '$name' on $sock, resuming $id in $cwd as $RCFG — --dry-run, nothing was touched"
+    return 0
+  fi
   if relaunch "$sock" "$name" "$id" "$cwd" "$agent"; then
     echo "fleet-restart: reopened '$name' on $sock, resuming ${id%%-*} in $cwd"
   else
@@ -594,7 +685,6 @@ reopen_one() {
 if [ "$MODE" = reopen ]; then
   [ -n "$REOPEN" ] || { echo "fleet-restart: --reopen needs a session name" >&2; exit 2; }
   command -v jq >/dev/null 2>&1 || { echo "fleet-restart: jq is required to read the fleet records" >&2; exit 1; }
-  load_records
   reopen_one "$REOPEN"
   exit $?
 fi
@@ -605,7 +695,14 @@ fi
 [ -z "$ONLY_SLOT" ] || [ "$MODE" = one ] || { echo "fleet-restart: --session needs -s <socket> or --project <name>" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "fleet-restart: jq is required to read the fleet records" >&2; exit 1; }
 
-load_records
+# One fleet: refused up front when nobody owns it, and its snapshot goes in its own fleet dir.
+# Every fleet: each is resolved in plan_rows, and the snapshot stays with the caller.
+if [ "$MODE" = one ]; then
+  use_fleet "$ONE" || { echo "fleet-restart: $(unowned "$ONE")" >&2; exit 1; }
+  SNAP_DIR="$FLEET_DIR"
+else
+  SNAP_DIR="$CALLER_FLEET_DIR"
+fi
 plan_rows
 [ -n "$PLAN" ] || { echo "fleet-restart: no sessions found"; exit 0; }
 

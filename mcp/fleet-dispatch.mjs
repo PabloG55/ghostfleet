@@ -24,6 +24,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readMarker, isJarvisSelf, mcpConfirmSpec, gate } from '../lib/jarvis.mjs';
 import { permissionDialog, approves } from '../lib/permission-dialog.mjs';
+import { projects } from '../lib/projects.mjs';
 
 export const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin');
 export const HOME = os.homedir();
@@ -34,31 +35,8 @@ export const HOME = os.homedir();
 // (e.g. replying to a session fleet-open put on another project's fleet) was
 // impossible from a tool call. Resolve a project name -> its socket + config dir,
 // from the same ~/.config/ghostfleet/projects[.<profile>] files ghostfleet reads.
-export function projects() {
-  const dir = path.join(HOME, '.config', 'ghostfleet');
-  const files = [path.join(dir, 'projects')];
-  // only real profile lists: 'projects.bak.1785…' is a backup, not a profile
-  try { for (const f of fs.readdirSync(dir)) if (/^projects\.[A-Za-z0-9_-]+$/.test(f)) files.push(path.join(dir, f)); } catch {}
-  const out = [];
-  for (const f of files) {
-    let txt; try { txt = fs.readFileSync(f, 'utf8'); } catch { continue; }
-    for (const line of txt.split('\n')) {
-      const t = line.replace(/\r$/, '');
-      if (!t.trim() || t.startsWith('#')) continue;
-      const [name, p, prof0, agent0] = t.split('\t');
-      if (!name || !p) continue;
-      const prof = prof0 || 'work';
-      const isWork = prof === 'work' || prof === 'default';
-      // 4th column = that project's default agent. Carried so a cross-fleet spawn uses
-      // the TARGET's default rather than inheriting whatever the caller happens to run.
-      const agent = /^[a-z0-9_-]+$/.test((agent0 || '').trim()) ? agent0.trim() : '';
-      out.push({ name, path: p.replace(/^~/, HOME), profile: prof, agent,
-                 sock: isWork ? `cf-${name}` : `cf-${prof}-${name}`,
-                 cfg: isWork ? path.join(HOME, '.claude') : path.join(HOME, '.claude-' + prof) });
-    }
-  }
-  return out;
-}
+// (lib/projects.mjs holds the reader; re-exported because fleet-serve imports it from here.)
+export { projects };
 export function target(proj) {
   if (!proj) return null;                       // omitted -> the caller's own fleet
   const s = String(proj), all = projects();

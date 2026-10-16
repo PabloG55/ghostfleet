@@ -2934,7 +2934,10 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   RCD="$RS/codex-home/sessions/$(date +%Y/%m/%d)"
   cx_rollout "$RCD/rollout-x-$R2.jsonl" "$R2" "$RS/src/acme-api" 900 task_complete
   cx_rollout "$RCD/rollout-y-$R6.jsonl" "$R6" "$RS/src/acme-api" 900 task_complete
-  rsrec "$R1" cf-acme-api master "$RS/src/acme-api" $((NOW - 100)) "$RS/r1.jsonl"
+  # claude keeps a conversation under its account, and a reopen now asks for it THERE
+  R1T="$H/.claude/projects/$(printf '%s' "$RS/src/acme-api" | sed 's/[^A-Za-z0-9]/-/g')/$R1.jsonl"
+  mkdir -p "$(dirname "$R1T")" && cp "$RS/r1.jsonl" "$R1T"
+  rsrec "$R1" cf-acme-api master "$RS/src/acme-api" $((NOW - 100)) "$R1T"
   rsrec "$R2" cf-acme-api w1     "$RS/src/acme-api" $((NOW - 200)) "$RCD/rollout-x-$R2.jsonl" codex
   rsrec "$R6" cf-acme-api w6     "$RS/src/acme-api" $((NOW - 250)) "$RCD/rollout-y-$R6.jsonl" codex
   rsrec "$R3" cf-acme-web w2     "$RS/src/acme-web" $((NOW - 50))  "$RS/r3.jsonl"
@@ -12733,6 +12736,9 @@ group "notification carries the jump chord"
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   NT="$(mktemp -d)"; mkdir -p "$NT/home/.config/ghostfleet" "$NT/fleet" "$NT/stub"
   printf 'alpha\t/tmp/alpha\twork\nbravo\t/tmp/bravo\twork\n' > "$NT/home/.config/ghostfleet/projects"
+  # bravo is registered on the default profile, and the grid reads a registered fleet from
+  # ITS account's dir, so that dir is the fixture's — as it is in a real session's env.
+  mkdir -p "$NT/home/.claude"; ln -s "$NT/fleet" "$NT/home/.claude/fleet"
   printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$OSA_OUT"\n' > "$NT/stub/osascript"
   chmod +x "$NT/stub/osascript"
   printf '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n' > "$NT/t.jsonl"
@@ -18580,7 +18586,11 @@ if command -v node >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1 && command
   lost_rec api-neighbour a0000000-0000-0000-0000-00000000000b 10    # newer, same folder
   # FRESH=1 in the environment that starts the server: what a fleet first opened from inside a
   # parallel session carries globally, and every launcher takes that branch before RESUME.
-  CLAUDE_FLEET_FRESH=1 PATH="$LS/stub:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen api-fix >/dev/null 2>&1
+  # fleet-restart takes a fleet's account from its project, never from the caller, so the
+  # fleet is registered in a HOME whose default account IS this group's dirs.
+  mkdir -p "$LS/home/.config/ghostfleet"; ln -s "$CLAUDE_CONFIG_DIR" "$LS/home/.claude"; ln -s "$CLAUDE_FLEET_DIR" "$CLAUDE_CONFIG_DIR/fleet"
+  printf 'acme-api\t%s\twork\n' "$LS/wt" > "$LS/home/.config/ghostfleet/projects"
+  CLAUDE_FLEET_FRESH=1 HOME="$LS/home" PATH="$LS/stub:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --reopen api-fix >/dev/null 2>&1
   wait_for 5 "the stub agent to start" '[ -s "$LS/launched" ]'
   is "lost: reopen resumes ITS OWN conversation in its recorded cwd" \
      "api-fix	a0000000-0000-0000-0000-00000000000a	$LS/wt	0" "$(cat "$LS/launched" 2>/dev/null)"
@@ -18898,8 +18908,10 @@ fi
 group "fleet-restart refuses rather than guessing"
 if [ -x "$ROOT/bin/fleet-restart" ]; then
   FRD="$(mktemp -d "$TEST_RUNS.$$.frd.XXXXXX")"
-  mkdir -p "$FRD/fleet"
-  out="$(CLAUDE_FLEET_DIR="$FRD/fleet" PATH="$ROOT/bin:$PATH" \
+  mkdir -p "$FRD/fleet" "$FRD/home/.config/ghostfleet" "$FRD/home/.claude/fleet"
+  # REGISTERED, so the refusal reached is "no record" and not "nobody owns this fleet"
+  printf 'nope\t%s\twork\n' "$FRD" > "$FRD/home/.config/ghostfleet/projects"
+  out="$(HOME="$FRD/home" CLAUDE_FLEET_DIR="$FRD/fleet" PATH="$ROOT/bin:$PATH" \
          "$ROOT/bin/fleet-restart" -s cf-nope --reopen anything 2>&1)"
   is "reopening with no record is refused"     "1" "$(printf '%s' "$out" | grep -c 'no recorded conversation' || true)"
   is "...and it says it will not use --continue" "1" "$(printf '%s' "$out" | grep -c -- '--continue' || true)"
@@ -18956,6 +18968,10 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   done
   sleep 0.4
   export CLAUDE_FLEET_DIR="$RL/fleet" CLAUDE_CONFIG_DIR="$RL/cfg"
+  # fleet-restart takes the fleet's account from its project: registered in a HOME whose
+  # default account is this group's dirs (RLH), so the two cannot disagree.
+  RLH="$RL/home"; mkdir -p "$RLH/.config/ghostfleet"; ln -s "$RL/cfg" "$RLH/.claude"; ln -s "$RL/fleet" "$RL/cfg/fleet"
+  printf 'acme-api\t%s\twork\n' "$RL/wt" > "$RLH/.config/ghostfleet/projects"
   rrec api-fix "$R_OLD" "$RL/t.jsonl"
   "$ROOT/test/helpers/live-session.sh" cf-acme-api api-fix "$R_NEW" "$RL/wt" "$RL/t.jsonl" >/dev/null
   rrec master "$R_EMPTY" ""
@@ -18968,7 +18984,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # perl's setsid, because it is on both runners and it is the one way to be a process
   # with no controlling terminal no matter where this suite was started from.
   if command -v perl >/dev/null 2>&1; then
-    out="$(PATH="$ROOT/bin:$PATH" perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' \
+    out="$(HOME="$RLH" PATH="$ROOT/bin:$PATH" perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' \
            "$ROOT/bin/fleet-restart" -s cf-acme-api </dev/null 2>&1)"; rrc=$?
     is "restart: with no tty it says to re-run with --yes" "yes" \
        "$(grep -q 'no terminal to confirm on — re-run with --yes' <<< "$out" && echo yes || echo no)"
@@ -18986,16 +19002,16 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   rstatus() { local f; for f in "$RL"/fleet/*.json; do
     [ "$(jq -r .slot "$f")" = api-fix ] && jq --arg s "$1" '.status = $s' "$f" > "$RL/w.json" && mv "$RL/w.json" "$f"; done; }
   rstatus working
-  out="$(PATH="$RL/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --session api-fix --dry-run 2>&1)"
+  out="$(HOME="$RLH" PATH="$RL/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --session api-fix --dry-run 2>&1)"
   is "restart: --session plans that one session only" "api-fix" \
      "$(awk 'NR>1 && $1=="cf-acme-api" {print $2}' <<< "$out" | tr '\n' ' ' | sed 's/ $//')"
   is "restart: ...a working one would be told to continue" "resume-continue" "$(awk '$2=="api-fix" {print $5}' <<< "$out")"
-  out="$(PATH="$RL/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --session api-fix --no-continue --dry-run 2>&1)"
+  out="$(HOME="$RLH" PATH="$RL/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --session api-fix --no-continue --dry-run 2>&1)"
   is "restart: ...and with --no-continue it is not" "resume-idle" "$(awk '$2=="api-fix" {print $5}' <<< "$out")"
   is "restart: --session without a fleet is an argument error" "2" \
      "$("$ROOT/bin/fleet-restart" --all --session api-fix >/dev/null 2>&1; echo $?)"
   rstatus ready
-  out="$(PATH="$RL/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --yes 2>&1)"
+  out="$(HOME="$RLH" PATH="$RL/stub:$ROOT/bin:$PATH" "$ROOT/bin/fleet-restart" -s cf-acme-api --yes 2>&1)"
   # The relaunch returns before the pane's shell has run the stub: wait for its line, with
   # a ceiling, rather than for a clock.
   for _ in $(seq 1 50); do grep -q '^api-fix ' "$RL/relaunched" 2>/dev/null && break; sleep 0.1; done
@@ -19015,6 +19031,140 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   rm -rf "$RL"
 else
   skip "fleet-restart resumes the live conversation" "tmux or jq is not installed"
+fi
+
+# ── a fleet is restarted, and drawn, under ITS OWN account ───────────────────
+# Four tmux servers died at once, and the recovery ran from a pane on another profile. A
+# fleet session exports CLAUDE_FLEET_DIR for its own profile, and fleet-restart took the
+# account from that: `-s <another profile's fleet> --reopen w1` relaunched w1 under the
+# caller's config dir, where it stopped at a "trust this folder?" it had never been asked,
+# and a session whose conversation lived only under its own account said "no conversation
+# found" and exited — a pane that came up and went away. `--dry-run` beside --reopen was
+# ignored and did all of that for real. And a grid run under the same env read the caller's
+# fleet dir, so a fleet with six recoverable sessions drew "nothing running yet".
+# The fixture is that shape: two projects in a fake HOME, one on the default profile and one
+# on `personal`; the personal fleet's server is gone and its master was recreated; six workers in
+# plain folders (not worktrees) left records and transcripts under ~/.claude-personal. Every
+# command runs with the CALLER's env pointing at the default profile.
+# WATCHED GOING RED against the previous bin/fleet-restart and grid: the dry run created w1,
+# the reopen launched it as the default account, the unknown-profile and missing-transcript
+# reopens both created a session, --all relaunched the personal session as the default
+# account, and the grid drew 0 of the 6 lost cards.
+group "a fleet is restarted and drawn under its own account, not the caller's"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  PA="$(cd "$(mktemp -d "$TEST_RUNS.$$.prof.XXXXXX")" && pwd -P)"; H="$PA/home"
+  WK="$H/.claude"; CL="$H/.claude-personal"; PSOCK=cf-personal-acme-api; WSOCK=cf-acme-web
+  # --all walks every cf-* socket it can see, so this group's servers live in a directory of
+  # their own under the run's — nothing another group left behind can join the plan.
+  PA_TMUX="$TMUX_TMPDIR/p"; mkdir -p "$PA_TMUX"
+  mkdir -p "$H/.config/ghostfleet" "$WK/fleet" "$CL/fleet" "$PA/stub" "$PA/src/acme-api" "$PA/src/acme-web"
+  printf 'acme-web\t%s\twork\nacme-api\t%s\tpersonal\n' "$PA/src/acme-web" "$PA/src/acme-api" > "$H/.config/ghostfleet/projects"
+  # A stub agent-here writes down what it was launched as, then stays up like an agent.
+  printf '#!/bin/sh\necho "$1 ${CLAUDE_FLEET_RESUME:-} ${CLAUDE_CONFIG_DIR:-} ${CLAUDE_FLEET_DIR:-}" >> "%s/launched"\nexec sleep 600\n' "$PA" > "$PA/stub/agent-here"
+  chmod +x "$PA/stub/agent-here"
+  NOW="$(date +%s)"
+  # prec <config-dir> <sock> <slot> <id> [<config-dir the transcript is under>]
+  prec() {
+    local cfg="$1" sock="$2" slot="$3" id="$4" tcfg="${5:-$1}" cwd pd
+    case "$sock" in "$WSOCK") cwd="$PA/src/acme-web/$slot" ;; *) cwd="$PA/src/acme-api/$slot" ;; esac
+    mkdir -p "$cwd"; pd="$tcfg/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$pd"
+    printf '{"type":"user","message":{"role":"user","content":"hi"}}\n' > "$pd/$id.jsonl"
+    jq -n --arg id "$id" --arg sock "$sock" --arg slot "$slot" --arg cwd "$cwd" --argjson ts "$((NOW - 3600))" \
+      '{session_id:$id, sock:$sock, slot:$slot, pane:"", cwd:$cwd, status:"ready", transcript:"", ts:$ts}' > "$cfg/fleet/$id.json"
+  }
+  for i in 1 2 3 4 5 6; do prec "$CL" "$PSOCK" "w$i" "cccccccc-0000-4000-8000-00000000000$i"; done
+  # w7's conversation exists, but only under the OTHER account: the shape that said
+  # "no conversation found" and exited.
+  prec "$CL" "$PSOCK" w7 cccccccc-0000-4000-8000-000000000007 "$WK"
+  # STRAY COPIES IN THE CALLER'S DIR, which is how the old code found an id to resume at all:
+  # a session once launched under the wrong account writes its hook records there. A fix that
+  # still read the caller's dir would find these and launch them; the fleet's own dir has the
+  # truth, and for a fleet no project owns there is no fleet dir to read.
+  cp "$CL/fleet/cccccccc-0000-4000-8000-000000000001.json" "$CL/fleet/cccccccc-0000-4000-8000-000000000007.json" "$WK/fleet/"
+  prec "$WK" cf-nobody-acme-api w2 eeeeeeee-0000-4000-8000-000000000002
+  # the caller: a pane on the default profile, with that profile's fleet env
+  pa() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH \
+           HOME="$H" TMUX_TMPDIR="$PA_TMUX" CLAUDE_CONFIG_DIR="$WK" CLAUDE_FLEET_DIR="$WK/fleet" CLAUDE_FLEET_PROFILE=work \
+           PATH="$PA/stub:$ROOT/bin:$PATH" "$@" 2>&1; }
+  ptmux() { TMUX_TMPDIR="$PA_TMUX" tmux "$@"; }
+  # the personal fleet's server died; reopening the project recreated its master, nothing else
+  ptmux -L "$PSOCK" new-session -d -s master -c "$PA/src/acme-api" 'sleep 600'
+  ptmux -L "$PSOCK" set-environment -g PATH "$PA/stub:$ROOT/bin:$PATH"
+  sleep 0.3
+  # By the status WORD, not by its column: --plain leaves an empty branch column blank, and
+  # a blank shifts every awk field after it.
+  plost() { pa node "$ROOT/bin/fleet-grid.mjs" "$PSOCK" --plain | awk '/ lost /{print $1}' | sort | paste -sd, -; }
+
+  # ── BUG 3: the grid draws the dead server's sessions, from the fleet's own dir ──
+  is "account: the grid draws every recoverable session on the dead server as lost" \
+     "w1,w2,w3,w4,w5,w6" "$(plost)"
+  is "account: ...and the phone's data says the same" "w1,w2,w3,w4,w5,w6" \
+     "$(pa node "$ROOT/bin/fleet-grid.mjs" "$PSOCK" --json | jq -r '[.cards[] | select(.lost) | .name] | sort | join(",")' 2>/dev/null)"
+  # STOPPED ON PURPOSE IS NOT LOST: fleet-stop deletes the record, run as that fleet would be.
+  env -u TMUX HOME="$H" TMUX_TMPDIR="$PA_TMUX" CLAUDE_CONFIG_DIR="$CL" CLAUDE_FLEET_DIR="$CL/fleet" \
+    "$ROOT/bin/fleet-stop" -s "$PSOCK" w6 >/dev/null 2>&1
+  is "account: a session fleet-stop forgot draws no card" "w1,w2,w3,w4,w5" "$(plost)"
+  # A LIVE SESSION is a normal card, beside the lost ones.
+  ptmux -L "$PSOCK" new-session -d -s scratch -c "$PA/src/acme-api" 'sleep 600'
+  is "account: a live session is a normal card, not a lost one" "yes" \
+     "$(pa node "$ROOT/bin/fleet-grid.mjs" "$PSOCK" --plain | awk '$1=="scratch" && !/ lost /{f=1} END{print f?"yes":"no"}')"
+  ptmux -L "$PSOCK" kill-session -t scratch 2>/dev/null
+
+  # ── BUG 1: --dry-run beside --reopen touches nothing ────────────────────────
+  out="$(pa "$ROOT/bin/fleet-restart" -s "$PSOCK" --reopen w1 --dry-run)"; rc=$?
+  is "account: a dry-run reopen says what it WOULD do" "yes" \
+     "$(grep -q "would reopen 'w1'.*cccccccc-0000-4000-8000-000000000001.*as $CL" <<< "$out" && echo yes || echo "no: $out")"
+  is "account: ...exits 0" "0" "$rc"
+  is "account: ...and creates no session" "no" \
+     "$(ptmux -L "$PSOCK" has-session -t '=w1' 2>/dev/null && echo yes || echo no)"
+
+  # ── BUG 2: the reopen runs under the FLEET's account ────────────────────────
+  out="$(pa "$ROOT/bin/fleet-restart" -s "$PSOCK" --reopen w1)"
+  wait_for 5 "the stub agent to start" '[ -s "$PA/launched" ]'
+  is "account: a reopen from another profile's pane launches as the fleet's account" \
+     "w1 cccccccc-0000-4000-8000-000000000001 $CL $CL/fleet" "$(grep '^w1 ' "$PA/launched" 2>/dev/null)"
+  is "account: ...and the session's own environment says so" "CLAUDE_CONFIG_DIR=$CL" \
+     "$(ptmux -L "$PSOCK" show-environment -t w1 CLAUDE_CONFIG_DIR 2>/dev/null)"
+  # A fleet no project owns: nobody can say which account it runs under, so it is refused.
+  out="$(pa "$ROOT/bin/fleet-restart" -s cf-nobody-acme-api --reopen w2)"; rc=$?
+  is "account: a fleet whose profile cannot be resolved is refused" "yes" \
+     "$(grep -q 'no registered project owns cf-nobody-acme-api' <<< "$out" && [ "$rc" != 0 ] && echo yes || echo "no: rc=$rc $out")"
+  is "account: ...and no session is created for it" "no" \
+     "$(ptmux -L cf-nobody-acme-api has-session -t '=w2' 2>/dev/null && echo yes || echo no)"
+  # A conversation with no transcript under the fleet's account would open a pane that exits.
+  out="$(pa "$ROOT/bin/fleet-restart" -s "$PSOCK" --reopen w7)"; rc=$?
+  is "account: a reopen whose transcript is missing under that account is refused, naming the id and where it looked" "yes" \
+     "$(grep -q 'cccccccc-0000-4000-8000-000000000007' <<< "$out" && grep -qF "$CL/projects/" <<< "$out" && [ "$rc" != 0 ] && echo yes || echo "no: rc=$rc $out")"
+  is "account: ...and no session is created" "no" \
+     "$(ptmux -L "$PSOCK" has-session -t '=w7' 2>/dev/null && echo yes || echo no)"
+
+  # ── --all walks every fleet, and each one gets its own account ──────────────
+  ptmux -L "$WSOCK" new-session -d -s web-task -c "$PA/src/acme-web" 'sleep 600'
+  ptmux -L "$WSOCK" set-environment -g PATH "$PA/stub:$ROOT/bin:$PATH"
+  prec "$WK" "$WSOCK" web-task dddddddd-0000-4000-8000-000000000001
+  sleep 0.3
+  CLAUDE_CONFIG_DIR="$WK" TMUX_TMPDIR="$PA_TMUX" "$ROOT/test/helpers/live-session.sh" "$WSOCK" web-task dddddddd-0000-4000-8000-000000000001 "$PA/src/acme-web/web-task" >/dev/null
+  # w5 is running again (on its own fleet, in its own conversation) for --all to restart
+  ptmux -L "$PSOCK" new-session -d -s w5 -c "$PA/src/acme-api/w5" 'sleep 600'
+  sleep 0.3
+  CLAUDE_CONFIG_DIR="$CL" TMUX_TMPDIR="$PA_TMUX" "$ROOT/test/helpers/live-session.sh" "$PSOCK" w5 cccccccc-0000-4000-8000-000000000005 "$PA/src/acme-api/w5" >/dev/null
+  : > "$PA/launched"
+  out="$(pa "$ROOT/bin/fleet-restart" --all --yes)"
+  for _ in $(seq 1 50); do [ "$(grep -cE '^(w5|web-task) ' "$PA/launched" 2>/dev/null)" -ge 2 ] && break; sleep 0.1; done
+  is "account: --all relaunches the personal fleet's session as the personal account" \
+     "w5 cccccccc-0000-4000-8000-000000000005 $CL $CL/fleet" "$(grep '^w5 ' "$PA/launched" 2>/dev/null)"
+  is "account: ...and the default fleet's as the default account" \
+     "web-task dddddddd-0000-4000-8000-000000000001 $WK $WK/fleet" "$(grep '^web-task ' "$PA/launched" 2>/dev/null)"
+
+  # --project is a NAME, and off the default profile its socket carries the profile
+  out="$(pa "$ROOT/bin/fleet-restart" --project acme-api --session w5 --dry-run)"
+  is "account: --project finds a fleet on another profile by its name" "cf-personal-acme-api" \
+     "$(awk '$2=="w5"{print $1}' <<< "$out")"
+
+  for s in "$PSOCK" "$WSOCK" cf-nobody-acme-api; do ptmux -L "$s" kill-server 2>/dev/null; done
+  rm -rf "${PA:?}" "${PA_TMUX:?}"
+else
+  skip "a fleet is restarted and drawn under its own account" "tmux, jq or node missing"
 fi
 
 # ── fleet-mod reload: onto the mod, touching only what is idle and empty ─────
