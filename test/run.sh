@@ -19184,7 +19184,11 @@ fi
 # skipped on switch-away, main's saved copy stayed at-A1; with markNeedsLogin's guard removed,
 # a dead login was re-announced every tick; with the tick's working-status guard removed, a
 # busy w1 was relaunched mid-turn; and with the hook's switch check removed, StopFailure wrote
-# a record with the feature off.
+# a record with the feature off. The window and unsaved-login rows: with the old max-of-every-
+# record, a stale 99% kept backup exhausted and both workers parked; with the old merge alone,
+# a leftover record displaced the stored later window; with no slop, a reset one second early
+# lost its figure; with the unknown span opened at the noticing tick instead of the last saved
+# one, the reading taken in between was credited to backup.
 group "accounts: several logins per profile, failover at the limit"
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   AC="$(cd "$(mktemp -d "$TEST_RUNS.$$.acct.XXXXXX")" && pwd -P)"; AH="$AC/home"; AW="$AH/.claude"
@@ -19441,6 +19445,74 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   atick >/dev/null
   is "accounts: a pane with the binary's own 'Please run /login' line -> NEEDS-LOGIN" "w1 is asking for /login" \
      "$(jq -r '.accounts.spare.needs_login.why // ""' "$AW/fleet/accounts.json")"
+
+  # ── one account, one window ──────────────────────────────────────────────────────
+  # Two readings of backup's 5h from two different windows: a 99% from a window that resets
+  # in half an hour (taken while another login sat in the config dir — the next block is how
+  # that happens) and a 12% from the window backup is really in, which resets two hours out.
+  # The later window is the current one, and a figure from an earlier window says nothing
+  # about it — but a plain max let the 99% win, so with main and spare unusable every worker
+  # stayed parked until the stale window ran out, while backup had 88% left.
+  atmux -L "$ASOCK" kill-session -t w1; atmux -L "$ASOCK" new-session -d -s w1 -x 120 -y 30 'sleep 600'; sleep 0.3
+  ax node "$FL" set "$AW" bob B3; ax "$ROOT/bin/fleet-accounts" add work backup >/dev/null
+  T="$(date +%s)"; R1=$((T + 1800)); R2=$((T + 7200))
+  jq --argjson t "$T" --argjson r1 "$R1" '.accounts.main.usage = {five_hour:{pct:99, resets:($t + 3600), at:$t}}
+      | .accounts.backup.usage = {five_hour:{pct:99, resets:$r1, at:$t}} | .exhausted = {since:$t, until:$r1}' \
+    "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+  for s in w1 w2; do printf 'backup\t%s\n' "$((T - 5))" > "$AW/fleet/$ASOCK.$s.account"; rm -f "$AW/fleet/$ASOCK.$s.parked"; done
+  arec w1 "$ID1" ready 99 10 "$T" "$R1"; arec w2 "$ID2" ready 12 10 "$T" "$R2"
+  atick >/dev/null
+  is "accounts: a 99% from an earlier 5h window does not out-vote 12% from the current one" "backup 12 $R2" \
+     "$(active) $(jq -r '.accounts.backup.usage.five_hour | "\(.pct) \(.resets)"' "$AW/fleet/accounts.json")"
+  is "accounts: ...so backup is under the line, exhausted clears, and nobody is parked" "null none none" \
+     "$(jq -c .exhausted "$AW/fleet/accounts.json") $(for s in w1 w2; do cut -d' ' -f1 "$AW/fleet/$ASOCK.$s.parked" 2>/dev/null || echo none; done | paste -sd' ' -)"
+  # The session that read 12% ends and takes its record with it: only the stale 99% is left in
+  # the fleet dir, and the window the state already holds is still the later one.
+  rm -f "$AW/fleet/$ID2.json"
+  atick >/dev/null
+  is "accounts: ...and a stale record alone does not replace the stored current window" "backup 12 null" \
+     "$(active) $(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json") $(jq -c .exhausted "$AW/fleet/accounts.json")"
+  # A reset time a second EARLIER is the same window, not an older one: there the higher figure
+  # wins, where a strict "later reset wins" would keep the 12%.
+  arec w2 "$ID2" ready 40 10 "$(date +%s)" "$((R2 - 1))"
+  atick >/dev/null
+  is "accounts: resets a second apart are one window, where the higher figure still wins" "40" \
+     "$(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json")"
+
+  # ── a /login by hand to a login that is NOT saved ────────────────────────────────
+  # The owner logs the config dir into dave, whom no account holds. What dave reads is not
+  # backup's, from the last tick that still saw a saved login; and while dave is live the
+  # profile is the owner's: no failover, no park, nothing relaunched onto a saved login, and
+  # what the engine parked is let go — said once. dave's 99% sits in a window that resets
+  # AFTER backup's, so one-window-per-account alone would hand it to backup.
+  T="$(date +%s)"; rows0="$(inbox_n 'work: on a login that is not saved (fleet-accounts add to manage it) — failover paused')"
+  jq --argjson t "$T" --argjson r1 "$R1" '.exhausted = {since:$t, until:$r1}' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+  for s in w1 w2; do printf 'governor-accounts %s\n' "$T" > "$AW/fleet/$ASOCK.$s.parked"; done
+  printf 'main\t%s\n' "$((T - 5))" > "$AW/fleet/$ASOCK.w2.account"   # due a move, were the engine in charge
+  ax node "$FL" set "$AW" dave D1
+  # Read BEFORE the tick that notices dave, as the first minute of a hand /login always is:
+  # the second between them is what makes "the span opens at the last saved tick" matter.
+  arec w1 "$ID1" ready 99 10 "$(date +%s)" "$((R2 + 1800))"; sleep 1
+  out="$(atick; atick)"
+  is "accounts: on an unsaved login, its 99% is not credited to backup and nothing fails over" "backup 40 dave" \
+     "$(active) $(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json") $(livewho)"
+  is "accounts: ...exhausted clears, the engine's parks are let go, nothing is relaunched" "null none none 0" \
+     "$(jq -c .exhausted "$AW/fleet/accounts.json") $(for s in w1 w2; do cut -d' ' -f1 "$AW/fleet/$ASOCK.$s.parked" 2>/dev/null || echo none; done | paste -sd' ' -) $(grep -c relaunch <<< "$out" || true)"
+  is "accounts: ...said once over two ticks, and the span is nobody's in the history" "1 \"\"" \
+     "$(( $(inbox_n 'work: on a login that is not saved (fleet-accounts add to manage it) — failover paused') - rows0 )) $(jq -c '.history[-1].account' "$AW/fleet/accounts.json")"
+  is "accounts: ...and fleet-accounts list says so, rather than calling backup active" "yes" \
+     "$(grep -q 'ON A LOGIN THAT IS NOT SAVED, failover paused' <<< "$(ax "$ROOT/bin/fleet-accounts" list)" && echo yes || echo no)"
+  # Back to a saved login by hand — the one already marked active — and the engine has it again.
+  rows0="$(inbox_n 'work: now on backup (a /login by hand)')"
+  ax node "$FL" set "$AW" bob B4
+  atick >/dev/null
+  is "accounts: a /login back to the active account is adopted again, readings and all" "backup 1 \"backup\"" \
+     "$(active) $(( $(inbox_n 'work: now on backup (a /login by hand)') - rows0 )) $(jq -c '.history[-1].account' "$AW/fleet/accounts.json")"
+  # ...and `use` of the account marked active, while an unsaved login is live, swaps it back in
+  # rather than answering that it is already there.
+  ax node "$FL" set "$AW" dave D2; atick >/dev/null
+  ax "$ROOT/bin/fleet-accounts" use work backup >/dev/null
+  is "accounts: 'use' of the active account over an unsaved login puts the saved one back" "bob" "$(livewho)"
 
   # ── the Linux store: 0600 files beside .credentials.json ─────────────────────────
   LH="$AC/lhome"; mkdir -p "$LH/.config/ghostfleet" "$LH/.claude/fleet"; printf 'on\n' > "$LH/.config/ghostfleet/accounts.enabled"

@@ -40,7 +40,7 @@ function list(only) {
   if (!profs.length) { console.log('  no profile has an account yet — fleet-accounts add <profile> <name>'); return; }
   for (const p of profs) {
     const st = A.load(p);
-    console.log(`\n${p}  (${cfgFor(p).replace(process.env.HOME || '\0', '~')})${st.exhausted ? `  — ALL EXHAUSTED${st.exhausted.until ? ' until ' + A.hhmm(st.exhausted.until) : ''}, workers paused` : ''}`);
+    console.log(`\n${p}  (${cfgFor(p).replace(process.env.HOME || '\0', '~')})${A.onUnsaved(st) ? '  — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)' : st.exhausted ? `  — ALL EXHAUSTED${st.exhausted.until ? ' until ' + A.hhmm(st.exhausted.until) : ''}, workers paused` : ''}`);
     if (!st.order.length) { console.log('  (no accounts)'); continue; }
     if (st.order.length < 2) console.log('  one account: nothing to fail over to yet — add another');
     const w = Math.max(...st.order.map(n => n.length));
