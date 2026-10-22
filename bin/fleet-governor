@@ -552,6 +552,25 @@ tick() {
   log "budget ${pct}% (running full-throttle; ceiling ${PAUSE_AT}%)${BUDGET_FROM:+ — $BUDGET_FROM}"
 }
 
+# ── SEVERAL ACCOUNTS ON THIS PROFILE (experimental) ──────────────────────────
+# With `fleet-experimental enable accounts` and two or more logins saved for this fleet's
+# profile (fleet-accounts), the BUDGET ceiling is lib/accounts.mjs's, not tick()'s: at the
+# threshold it moves the profile to the next login with room, and parks the workers only when
+# every login is spent. tick() must not also run — it takes the max 5h figure of EVERY record
+# in the fleet dir, so the account just switched away from would go on reading 98% and park
+# the fleet that had just been moved onto a fresh one.
+#   0 = the accounts engine owns the budget this pass; 1 = not managed, tick() as before. The
+# switch file is checked here first so a fleet with the feature off pays one grep, not a node.
+LIB_DIR="$(cd "$BIN_DIR/../lib" 2>/dev/null && pwd)"
+accounts_tick() {
+  local out rc
+  grep -qsx on "${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/accounts.enabled" || return 1
+  command -v node >/dev/null 2>&1 && [ -f "$LIB_DIR/accounts.mjs" ] || return 1
+  out="$(node "$LIB_DIR/accounts.mjs" tick "$SOCK" $([ "$DRY" = 1 ] && echo --dry-run) 2>&1)"; rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out" | while IFS= read -r line; do log "$line"; done
+  [ "$rc" = 0 ]
+}
+
 modelabel="ACTIVE (parks all at ceiling)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"
 reslabel="mem-level>=${MEM_LEVEL}, swap>=${SWAP_PCT}%, procs>=${PROC_PCT}%"; [ "$RESOURCE" = 1 ] || reslabel="off"
 log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<${RESUME}%; resources ${reslabel}; interval ${INTERVAL}s"
@@ -559,11 +578,11 @@ log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<
 # a token reading is beside the point, and letting the budget path also act on the same
 # pass could resume for one ceiling what the other just parked for.
 if [ "$ONCE" = 1 ]; then
-  resource_tick || tick
+  resource_tick || accounts_tick || tick
 else
   while true; do
     tmux -L "$SOCK" list-sessions >/dev/null 2>&1 || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
-    resource_tick || tick
+    resource_tick || accounts_tick || tick
     # JARVIS'S FRESH START rides on ITS OWN fleet's governor — the one long-lived process
     # that is already alive exactly as long as Jarvis is, so the restart needs no daemon, cron
     # entry or launchd job of its own. Every other fleet's governor sees a socket that is not

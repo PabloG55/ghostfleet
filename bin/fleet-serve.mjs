@@ -1214,7 +1214,7 @@ function allowedHosts(c) {
 // travel are matched against NAME_OK first. The sender never opens a transcript — its
 // whole input is the status files the hook writes, and those hold a status word, not
 // prose.
-const PUSH_KINDS = new Set(['needs-you', 'answer']);
+const PUSH_KINDS = new Set(['needs-you', 'answer', 'account']);
 // Deliberately narrow, and deliberately NOT a sanitiser: a name that does not look like
 // a name is dropped rather than trimmed into one. Project names come from the projects
 // file (a space is legal in a folder name) and session names from fleet-rename, which
@@ -1392,6 +1392,27 @@ export function pushPayload(events, detail) {
   // anonymous mode too — it says which screen, not which project.
   let jm = null; try { jm = jarvis.readMarker(); } catch {}
   if (jm && events.some(e => e.sock === jm.sock)) out.open = 'jarvis';
+  // AN ACCOUNT NOTICE (fleet-accounts) is the one kind that is not about a session: which
+  // profile moved to which login, or ran out until when. Same rule as the rest — every key
+  // literal, every name through NAME_OK, numbers as numbers — so web/sw.js composes the
+  // sentence and the payload still has nowhere to put one. Names are dropped in anonymous
+  // mode; the event word and the time are not, since neither says whose they are.
+  const acct = events.find(e => e.kind === 'account' && e.account);
+  if (acct) {
+    const a = acct.account, named = detail !== 'anonymous';
+    const EV = new Set(['switched', 'exhausted', 'needs-login', 'resumed']);
+    const CAUSE = new Set(['limit', 'needs-login', 'by-hand', 'none-active']);
+    out.account = { event: EV.has(a.event) ? a.event : 'switched' };
+    if (CAUSE.has(a.cause)) out.account.cause = a.cause;
+    if (a.limit === '5h' || a.limit === '7d') out.account.limit = a.limit;
+    if (Number.isFinite(a.pct)) out.account.pct = Math.max(0, Math.min(100, Math.floor(a.pct)));
+    if (Number.isFinite(a.until) && a.until > 0) out.account.until = Math.floor(a.until);
+    if (named) {
+      for (const k of ['profile', 'from', 'to', 'account']) { const v = safeName(a[k]); if (v) out.account[k] = v; }
+      const nl = (Array.isArray(a.needs_login) ? a.needs_login : []).map(safeName).filter(Boolean).slice(0, 4);
+      if (nl.length) out.account.needs_login = nl;
+    }
+  }
   if (detail !== 'anonymous') {
     const sessions = [];
     for (const e of events.slice(0, 4)) {
@@ -1524,6 +1545,37 @@ export function undeliveredEvents(dirs, socks, sizes, names = new Map()) {
 }
 const undeliveredSizes = new Map();  // marker path -> its size at the last scan
 
+// ── an account notice is a line in <fleet dir>/accounts.notify ──────────────
+// lib/accounts.mjs appends one JSON line per switch / exhausted / needs-login / resumed.
+// Read by growth, exactly as the undelivered markers are: the first sight of a file is a
+// baseline (yesterday's switch is not news), and only the bytes added since are read. Each
+// line becomes one event; pushPayload() copies its fields out by name, never by spreading.
+export function accountEvents(dirs, sizes) {
+  const events = [], present = new Set();
+  for (const dir of dirs) {
+    const p = path.join(dir, 'accounts.notify');
+    let size;
+    try { size = fs.statSync(p).size; } catch { continue; }
+    present.add(p);
+    const known = sizes.has(p), before = sizes.get(p) || 0;
+    sizes.set(p, size);
+    if (!known || size <= before) continue;
+    let chunk = '';
+    try {
+      const fd = fs.openSync(p, 'r');
+      try { const b = Buffer.alloc(Math.min(size - before, 65536)); fs.readSync(fd, b, 0, b.length, before); chunk = b.toString('utf8'); }
+      finally { fs.closeSync(fd); }
+    } catch { continue; }
+    for (const line of chunk.split('\n')) {
+      let j; try { j = JSON.parse(line); } catch { continue; }
+      if (j && typeof j === 'object') events.push({ kind: 'account', project: '', session: '', account: j });
+    }
+  }
+  for (const p of [...sizes.keys()]) if (!present.has(p)) sizes.delete(p);
+  return events;
+}
+const accountSizes = new Map();
+
 // ── at the Mac ──────────────────────────────────────────────────────────────
 // A PHONE THAT BUZZES WHILE HE IS TYPING AT THE MAC is telling him what the screen in front
 // of him already says. The poll-based quiet above cannot see this: the phone is in a pocket,
@@ -1576,6 +1628,9 @@ export function atMac(reading, limit) {
 //   An UNDELIVERED wake is about a lead that is idle, and idle is the state it was stuck in,
 // so it is resolved only by the lead taking a turn — "not need-you" would drop it at once.
 export function pushResolved(ev, status) {
+  // An account notice belongs to no session, so no status can answer it: only the phone
+  // polling (readAt) or the hold expiring does.
+  if (ev.kind === 'account') return false;
   if (status === undefined) return true;
   if (ev.undelivered) return status === 'working';
   return ev.kind === 'needs-you' ? status !== 'need-you' : status === 'working';
@@ -1616,13 +1671,14 @@ async function pushTick() {
   const subs = allSubs();
   // Nothing subscribed: do no work at all, and forget the baseline so the first
   // subscription starts from what is on disk instead of replaying the day.
-  if (!subs.length) { pushState.clear(); undeliveredSizes.clear(); pushHeld = []; return; }
+  if (!subs.length) { pushState.clear(); undeliveredSizes.clear(); accountSizes.clear(); pushHeld = []; return; }
   // No separate seeding pass: pushEvents() treats every key's first sight as a baseline,
   // so the first scan after a subscription is silent by the same rule that keeps a
   // reappearing file quiet. One rule is one thing to get right.
   const rows = scanFleet(), names = sockProjects();
   const socks = new Set([...names.keys(), ...rows.map(r => r.sock)]);
-  const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names)];
+  const fresh = [...pushEvents(rows), ...undeliveredEvents(fleetDirs(), socks, undeliveredSizes, names),
+                 ...accountEvents(fleetDirs(), accountSizes)];
   if (!fresh.length && !pushHeld.length) return;
   // AT THE MAC: what would have been sent is held instead, and what was held goes when he
   // leaves (see holdStep). Read only when there is something to decide, and once per tick.

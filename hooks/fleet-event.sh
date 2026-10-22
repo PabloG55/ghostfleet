@@ -79,6 +79,20 @@ if [ "$EVENT" = "SessionEnd" ]; then
   exit 0
 fi
 
+# ── StopFailure: a turn that ended on an API error instead of an answer ────────
+# Wired only by `fleet-accounts add` (lib/accounts.mjs wireStopFailure), and read only by
+# it: an `authentication_failed` here is how a saved login that no longer works is seen
+# after it was swapped in. The error is one word from the binary's own enum, kept as
+# `failure` in the record until the next event rebuilds it. With the accounts switch off this
+# is the hook it was before StopFailure was wired: nothing written.
+FAILURE=""
+if [ "$EVENT" = "StopFailure" ]; then
+  grep -qsx on "${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/accounts.enabled" \
+    || { _dbg "exit: StopFailure with the accounts switch off"; exit 0; }
+  FAILURE="$(printf '%s' "$input" | jq -r '.error // "unknown"' 2>/dev/null | tr -cd 'a-z_')"
+  [ -n "$FAILURE" ] || FAILURE=unknown
+fi
+
 # --- derive identity ---------------------------------------------------------
 folder="${CWD##*/}"
 branch="$(git -C "${CWD:-.}" --no-optional-locks rev-parse --abbrev-ref HEAD 2>/dev/null)"
@@ -310,6 +324,7 @@ case "$EVENT" in
     esac
     ;;
   Stop)             status="ready"    ;;
+  StopFailure)      status="ready"    ;;   # the turn is over; `failure` says how
   SubagentStop)     status="working"  ;;
   SessionStart)     status="idle"     ;;
   *)                status="working"  ;;
@@ -357,10 +372,11 @@ if jq -n \
   --arg sock "$SOCK" --arg pane "$PANE" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
   --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" --arg from "$FROM" \
-  --argjson mod "$_mod" \
+  --argjson mod "$_mod" --arg failure "$FAILURE" \
   '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, pane:$pane, cwd:$cwd, folder:$folder,
     branch:$branch, status:$status, transcript:$tr, ts:$ts}
-   + (if $from != "" then {continued_from:$from} else {} end) + $mod' \
+   + (if $from != "" then {continued_from:$from} else {} end) + $mod
+   + (if $failure != "" then {failure:{error:$failure, at:$ts}} else {} end)' \
   >"$tmp" 2>/dev/null
 then
   mv -f "$tmp" "$FLEET_DIR/$SESSION.json" 2>/dev/null || _dbg "write: could not move $tmp into place"

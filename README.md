@@ -397,6 +397,16 @@ and `fleet-*` tools):
 
 `ghostfleet <project> --plain` prints a one-shot, non-interactive table for that project (scripts).
 
+### Several Claude accounts on one profile (experimental)
+
+Off by default. `fleet-experimental enable accounts`, then `/login` to each account in turn and
+save it with `fleet-accounts add <profile> <name>`; when the account in use reaches 97% of its
+5-hour or weekly limit, the profile moves to the next one with room and each session is
+relaunched onto it as its turn ends, on the same conversation. When all are spent the workers
+are parked until the earliest reset. Rotating accounts to get past usage limits may conflict
+with Anthropic's terms of service; that is your responsibility. Details, and what happens when a
+saved login expires: [docs/OPERATIONS.md](docs/OPERATIONS.md#several-claude-accounts-on-one-profile-experimental).
+
 ---
 
 ## Updating

@@ -362,7 +362,9 @@
 // left drawn on the band and a tap to send now), lets the owner talk over an answer to cut
 // in with a follow-up, and reads a long reply to the end in chunks instead of stopping at
 // 1200 characters. A phone still on v71 sends after a second of quiet and stops long replies.
-const VERSION = 'ghostfleet-v72';
+// v73 says what a Claude account notice is (fleet-accounts): a profile that switched login,
+// ran out, or needs /login. A phone still on v72 shows such a push as "a session has an answer".
+const VERSION = 'ghostfleet-v73';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',
@@ -433,6 +435,7 @@ function pushText(d) {
   // this is not the surface that knows what.
   const usable = d && typeof d.n === 'number' && d.n > 0 && typeof d.kind === 'string';
   if (!usable) return { title: 'ghostfleet', body: 'something needs you — open to see which' };
+  if (d.kind === 'account' && d.account && typeof d.account === 'object') return accountText(d.account);
   const n = d.n;
   const named = Array.isArray(d.sessions) ? d.sessions.filter(x => x && x.project && x.session) : [];
   const kind = d.kind === 'needs-you' ? 'needs-you' : d.kind === 'mixed' ? 'mixed' : 'answer';
@@ -451,6 +454,26 @@ function pushText(d) {
            // No names to list is the POINT of anonymous mode, not a degraded version of
            // the other one, so it says what to do instead of showing an empty list.
            body: named.length ? named.map(x => `${x.project}/${x.session}`).join(' · ') : 'open ghostfleet to see which' };
+}
+// A Claude account notice (fleet-accounts): which profile moved to which login, or ran out.
+// Every word is here; the payload carries an event word, names (absent in anonymous mode),
+// a limit, a percentage and an epoch second.
+function accountText(a) {
+  const p = a.profile || 'a profile';
+  const at = (t) => { try { return new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
+  if (a.event === 'exhausted') {
+    const nl = Array.isArray(a.needs_login) && a.needs_login.length ? ` · needs /login: ${a.needs_login.join(', ')}` : '';
+    return a.until
+      ? { title: `all ${p} accounts exhausted`, body: `until ${at(a.until)} — workers paused, they resume then${nl}` }
+      : { title: `no ${p} account can run`, body: `workers paused${nl || ' · open ghostfleet at the desk'}` };
+  }
+  if (a.event === 'needs-login') {
+    const who = a.account ? `${p}/${a.account}` : 'a Claude account';
+    return { title: `${who} needs /login`, body: a.account ? `run /login as it in a ${p} session, then: fleet-accounts add ${p} ${a.account}` : 'see the inbox at the desk' };
+  }
+  if (a.event === 'resumed') return { title: `${p}: resumed`, body: a.to ? `on ${a.to}` : 'an account has room again' };
+  const why = a.cause === 'limit' && a.limit ? ` (${a.limit} at ${a.pct}%)` : a.cause === 'needs-login' ? ' (it needs /login)' : a.cause === 'by-hand' ? ' (by hand)' : '';
+  return { title: `${p}: switched${a.to ? ' to ' + a.to : ' account'}`, body: `${a.from ? 'from ' + a.from : 'to another login'}${why}` };
 }
 self.addEventListener('push', e => {
   let d = null;

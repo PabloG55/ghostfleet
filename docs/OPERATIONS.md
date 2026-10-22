@@ -419,6 +419,76 @@ ghostfleet client --new   # writes ~/.config/ghostfleet/projects.client, then op
 
 </details>
 
+## Several Claude accounts on one profile (experimental)
+
+> **Experimental — off by default; enable with `fleet-experimental enable accounts`.** With it
+> off nothing below runs, and nothing it reads or writes exists.
+
+Rotating between Claude accounts to get past usage limits may conflict with Anthropic's terms
+of service; whether to use this, and how, is your responsibility.
+
+A profile keeps **one** config dir — its conversations, settings, plugins, folder trust and
+`fleet/` dir never move. What changes is the **login** that dir holds, which is exactly what
+`/login` to another account does by hand. An *account* here is a saved login for a profile, and
+a profile can have any number of them, in order: main, fallback 1, fallback 2, …
+
+```bash
+fleet-experimental enable accounts
+# in a session of the profile (or: CLAUDE_CONFIG_DIR=~/.claude claude), /login as the first account, then
+fleet-accounts add work main
+# /login as the next account, then
+fleet-accounts add work backup
+fleet-accounts use work main          # put the first one back; `add` leaves the profile on the login it just saved
+fleet-accounts list
+```
+
+```
+accounts; switch at 97% of the 5h or 7d limit
+
+work  (~/.claude)
+  * main    5h  98% (resets 14:00)      7d  41% (resets Mon 09:00)  exhausted until 14:00 (active)
+    backup  5h —                        7d —                        ready
+```
+
+**What happens at the limit.** Every fleet's governor reads the active account's 5-hour and
+weekly figures from the mod's session records (`usage.limits.five_hour` / `seven_day`). When
+either reaches the threshold (`fleet-accounts threshold`, default 97), the profile moves to the
+next account in order that still has room: the current login is copied back into its slot, the
+next one is put where Claude Code reads its login, and an inbox row plus a phone push say
+`work: switched from main to backup (5h at 97%)`. Each Claude session is then relaunched onto
+it **as its turn ends** — never mid-turn — resuming its own conversation through `fleet-restart`.
+(A running Claude re-reads its login every 30 seconds, so it may move sooner; the relaunch makes
+it certain.) It **does not switch back** when an earlier account's window resets: it stays on
+the one it is on until that one is over the line, and the next switch then takes the first
+account in order with room. `fleet-accounts use <profile> <name>` switches by hand.
+
+**When every account is spent**, every worker in the profile's fleets is parked (the lead is
+not), an inbox row and a push say `all work accounts exhausted until 14:00`, and at the
+earliest reset the profile moves to that account and the parked workers are relaunched and told
+to continue.
+
+**A login that stops working** — expired, revoked, or never refreshed — is seen three ways: Claude
+Code blanking the tokens in the stored login (what it does when a refresh is refused), a turn
+ending in `StopFailure` with `authentication_failed` (`fleet-accounts add` wires that hook into
+the profile's `settings.json`), or a session launched on it showing Claude's own `Please run
+/login` line. The account is marked **NEEDS-LOGIN**, said once (`work/backup needs /login — run:
+…` with the exact command), and skipped until you `/login` to it again and re-run `fleet-accounts
+add work backup`, which clears the mark. It is never retried in a loop, and the profile's own
+first account expiring is the same case.
+
+**Where the logins are.** Claude Code keeps a config dir's login in the macOS Keychain (item
+`Claude Code-credentials-<hash of the config dir>`) or, on Linux, `<config dir>/.credentials.json`,
+and who it belongs to in `.claude.json`'s `oauthAccount`. ghostfleet keeps each *saved* account
+only in the same place: a Keychain item of its own (`ghostfleet-claude-login`, account
+`<profile>.<name>`) or a 0600 file beside `.credentials.json`. `accounts.json` in the profile's
+`fleet/` dir holds the order, the readings and a one-way id per login — never a token — and
+nothing here prints or logs one. Tokens that Claude Code refreshes while an account is in use are
+copied back into its slot on every governor tick and at the moment of switching away, and an
+older saved copy is never written over a newer live one.
+
+`fleet-accounts remove <profile> <name>` forgets one (not the one in use — switch first).
+Codex, opencode, agy and cursor keep their single login and are not touched.
+
 ## Where a worktree goes, and which ones you can reuse
 
 `w` puts a worktree beside the repo — unless the repo says otherwise. A repo that runs

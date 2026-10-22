@@ -15866,7 +15866,9 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   is "an install that has used shots resolves ON" "1"   "$(grep -cE '^  shots +on ' <<< "$out" || true)"
   is "...written down"                            "on"  "$(cat "$JX/xd/shots.enabled" 2>/dev/null)"
   is "...and its folder is left alone"            "yes" "$([ -d "$JX/xf/shots/2026-09-30_10-00-00" ] && echo yes || echo no)"
-  is "list tags every feature"                    "2"   "$(grep -c '\[experimental\]' <<< "$out" || true)"
+  # Counted against the features the module DECLARES, so a new one is not a red row here.
+  is "list tags every feature"                    "$(node --input-type=module -e "import('$ROOT/lib/experimental.mjs').then(m => console.log(m.FEATURES.length))")" \
+     "$(grep -c '\[experimental\]' <<< "$out" || true)"
   is "an unknown feature is refused by name"      "2"   "$(fsx "$JX/bin/fleet-experimental" enable warp >/dev/null 2>&1; echo $?)"
   # The aliases, from OFF so the row cannot pass on a switch that was already on.
   is "fleet-jarvis disable is an alias of it"     "off" "$(fsx "$JX/bin/fleet-jarvis" disable >/dev/null; cat "$JXC/jarvis.enabled")"
@@ -19165,6 +19167,324 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   rm -rf "${PA:?}" "${PA_TMUX:?}"
 else
   skip "a fleet is restarted and drawn under its own account" "tmux, jq or node missing"
+fi
+
+# ── several Claude logins per profile, and failover between them (experimental) ─
+# A profile is one config dir and stays one; an ACCOUNT is a saved login for it. When the
+# login in use reaches the threshold (5h OR 7d, default 97%), lib/accounts.mjs puts the next
+# saved login where Claude Code reads its own and relaunches each session onto it as its turn
+# ends — same config dir, same conversation. A saved login that no longer works is marked
+# NEEDS-LOGIN and skipped; when nothing is left, the workers are parked until the earliest
+# reset. Everything here runs in a fake HOME, against a fake `security` (test/helpers/
+# fake-security.mjs) that refuses to run without its own directory, and fake logins whose
+# "tokens" are labels: no row can reach a real Keychain, config dir or fleet.
+#   The fleet: acme-api on the default profile, sessions master/w1/w2 on stub agents; three
+# accounts in order main (alice), backup (bob), spare (carol).
+# WATCHED GOING RED: with the threshold test inverted (>), 97 did not switch; with recapture
+# skipped on switch-away, main's saved copy stayed at-A1; with markNeedsLogin's guard removed,
+# a dead login was re-announced every tick; with the tick's working-status guard removed, a
+# busy w1 was relaunched mid-turn; and with the hook's switch check removed, StopFailure wrote
+# a record with the feature off.
+group "accounts: several logins per profile, failover at the limit"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  AC="$(cd "$(mktemp -d "$TEST_RUNS.$$.acct.XXXXXX")" && pwd -P)"; AH="$AC/home"; AW="$AH/.claude"
+  AC_TMUX="$TMUX_TMPDIR/acct"; mkdir -p "$AC_TMUX"
+  ASOCK=cf-acme-api; FL="$ROOT/test/helpers/fake-login.mjs"
+  mkdir -p "$AH/.config/ghostfleet" "$AW/fleet" "$AC/stub" "$AC/src/acme-api"
+  printf 'acme-api\t%s\twork\n' "$AC/src/acme-api" > "$AH/.config/ghostfleet/projects"
+  printf '#!/bin/sh\necho "$1 ${CLAUDE_FLEET_RESUME:-} ${CLAUDE_CONFIG_DIR:-} ${CLAUDE_FLEET_DIR:-}" >> "%s/launched"\nexec sleep 600\n' "$AC" > "$AC/stub/agent-here"
+  chmod +x "$AC/stub/agent-here"
+  # Everything as the fleet's governor would run it: this HOME, this tmux namespace, the
+  # fake store, and readings counted from the first second after a switch.
+  ax() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR \
+           -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_FLEET_PROFILE \
+           HOME="$AH" TMUX_TMPDIR="$AC_TMUX" CLAUDE_FLEET_LOGIN_STORE=keychain FAKE_KEYCHAIN="$AC/kc" \
+           CLAUDE_FLEET_SECURITY="$ROOT/test/helpers/fake-security.mjs" CLAUDE_FLEET_ACCOUNTS_GRACE=0 \
+           PATH="$AC/stub:$ROOT/bin:$PATH" "$@" 2>&1; }
+  atick() { ax node "$ROOT/lib/accounts.mjs" tick "$ASOCK"; }
+  atmux() { TMUX_TMPDIR="$AC_TMUX" tmux "$@"; }
+  active() { jq -r '.active // ""' "$AW/fleet/accounts.json" 2>/dev/null; }
+  livewho() { ax node "$FL" live "$AW" | awk '{print $1}'; }
+  saved() { ax node "$FL" saved work "$AW" "$1"; }
+  # a literal substring, counted; 0 when there is no inbox yet
+  inbox_n() { awk -v p="$1" 'index($0, p) {n++} END {print n+0}' < <(cat "$AW/fleet/$ASOCK.inbox" 2>/dev/null); }
+  NOW="$(date +%s)"
+  # arec <slot> <id> <status> <5h pct> <7d pct> [<usage.at>] [<5h resets>] — the record the
+  # hook and the mod would have written, with a conversation transcript under the profile.
+  arec() {
+    local slot="$1" id="$2" st="$3" p5="$4" p7="$5" at="${6:-$(date +%s)}" r5="${7:-$(( $(date +%s) + 3600 ))}" cwd pd
+    cwd="$AC/src/acme-api/$slot"; mkdir -p "$cwd"
+    pd="$AW/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$pd"
+    [ -f "$pd/$id.jsonl" ] || printf '{"type":"user","message":{"role":"user","content":"hi"}}\n' > "$pd/$id.jsonl"
+    jq -n --arg id "$id" --arg sock "$ASOCK" --arg slot "$slot" --arg cwd "$cwd" --arg st "$st" --arg tr "$pd/$id.jsonl" \
+      --argjson ts "$(date +%s)" --argjson at "$at" --argjson p5 "$p5" --argjson p7 "$p7" --argjson r5 "$r5" \
+      --argjson r7 "$(( $(date +%s) + 86400 ))" \
+      '{session_id:$id, sock:$sock, slot:$slot, pane:"", cwd:$cwd, status:$st, transcript:$tr, ts:$ts,
+        usage:{at:$at, limits:{five_hour:{pct:$p5, resets:$r5}, seven_day:{pct:$p7, resets:$r7}}}}' > "$AW/fleet/$id.json"
+  }
+  # The process note fleet-restart's live lookup reads, for the pane as it is now.
+  alive() { CLAUDE_CONFIG_DIR="$AW" TMUX_TMPDIR="$AC_TMUX" "$ROOT/test/helpers/live-session.sh" "$ASOCK" "$1" "$2" "$AC/src/acme-api/$1" >/dev/null; }
+  atmux -L "$ASOCK" new-session -d -s _term -c "$AC/src/acme-api" 'sleep 600'
+  atmux -L "$ASOCK" set-environment -g PATH "$AC/stub:$ROOT/bin:$PATH"
+  for s in master w1 w2; do mkdir -p "$AC/src/acme-api/$s"; atmux -L "$ASOCK" new-session -d -s "$s" -c "$AC/src/acme-api/$s" -x 120 -y 30 'sleep 600'; done
+  sleep 0.3
+  ID1=dddddddd-0000-4000-8000-000000000001; ID2=dddddddd-0000-4000-8000-000000000002; IDM=dddddddd-0000-4000-8000-00000000000a
+
+  # ── setup: three logins, each captured after its own /login ──────────────────
+  out="$(ax "$ROOT/bin/fleet-accounts" add work main)"; rc=$?
+  is "accounts: off by default — add refuses and says how to enable" "1 yes" \
+     "$rc $(grep -q 'fleet-experimental enable accounts' <<< "$out" && echo yes || echo "no: $out")"
+  ax "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
+  out="$(ax "$ROOT/bin/fleet-accounts" add work main)"; rc=$?
+  is "accounts: with no login in the config dir, add refuses with the exact login command" "1 yes" \
+     "$rc $(grep -q 'CLAUDE_CONFIG_DIR=~/.claude claude, /login as main, then fleet-accounts add work main' <<< "$out" && echo yes || echo "no: $out")"
+  ax node "$FL" set "$AW" alice A1;                ax "$ROOT/bin/fleet-accounts" add work main   >/dev/null
+  ax node "$FL" set "$AW" bob B1;                  ax "$ROOT/bin/fleet-accounts" add work backup >/dev/null
+  ax node "$FL" set "$AW" carol C1;                ax "$ROOT/bin/fleet-accounts" add work spare  >/dev/null
+  out="$(ax "$ROOT/bin/fleet-accounts" add work again)"; rc=$?
+  is "accounts: the same login cannot be saved under a second name" "1 yes" \
+     "$rc $(grep -q "already saved as 'spare'" <<< "$out" && echo yes || echo "no: $out")"
+  ax "$ROOT/bin/fleet-accounts" use work main >/dev/null
+  is "accounts: three in the order they were added, and 'use' puts main's login back" "main,backup,spare main alice" \
+     "$(jq -r '.order | join(",")' "$AW/fleet/accounts.json") $(active) $(livewho)"
+  is "accounts: the secret went to the store on STDIN, never in argv" "0 yes" \
+     "$(grep -c '^add-argv' "$AC/kc/calls.log" || true) $(grep -q '^add-stdin	ghostfleet-claude-login	work.backup$' "$AC/kc/calls.log" && echo yes || echo no)"
+  is "accounts: the live login is the binary's own item for this config dir" \
+     "Claude Code-credentials-$({ command -v sha256sum >/dev/null && printf '%s' "$AW" | sha256sum || printf '%s' "$AW" | shasum -a 256; } | cut -c1-8)" \
+     "$(awk -F'\t' '$1=="add-stdin" && $2 ~ /^Claude Code-credentials-/ {print $2}' "$AC/kc/calls.log" | sort -u)"
+  is "accounts: no token text in accounts.json" "0" "$(grep -cE '"(at|rt)-[A-C][0-9]' "$AW/fleet/accounts.json" || true)"
+  is "accounts: add wired StopFailure into the profile's settings" "1" \
+     "$(jq '[.hooks.StopFailure[]?.hooks[]? | select(.command | endswith("/hooks/fleet-event.sh"))] | length' "$AW/settings.json" 2>/dev/null)"
+
+  # ── the switch is OFF: nothing changes ────────────────────────────────────────
+  for s in w1 w2 master; do printf 'main\t%s\n' "$NOW" > "$AW/fleet/$ASOCK.$s.account"; done
+  arec w1 "$ID1" ready 99 10
+  ax "$ROOT/bin/fleet-experimental" disable accounts >/dev/null
+  rows0="$(inbox_n "	account	")"
+  out="$(atick)"; rc=$?
+  is "accounts off: the tick does not manage the profile (exit 3) and moves no login" "3 alice" "$rc $(livewho)"
+  is "accounts off: ...no inbox row, nothing relaunched" "0 no" "$(( $(inbox_n "	account	") - rows0 )) $([ -s "$AC/launched" ] && echo yes || echo no)"
+  printf '{"hook_event_name":"StopFailure","session_id":"%s","cwd":"%s","error":"authentication_failed"}' \
+    eeeeeeee-0000-4000-8000-0000000000f1 "$AC/src/acme-api/w2" \
+    | env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_EXPERIMENTAL_DIR \
+          HOME="$AH" CLAUDE_CONFIG_DIR="$AW" CLAUDE_FLEET_DIR="$AW/fleet" bash "$ROOT/hooks/fleet-event.sh"
+  is "accounts off: a StopFailure writes no record, as before it was wired" "no" \
+     "$([ -f "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json" ] && echo yes || echo no)"
+  ax "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
+  printf '{"hook_event_name":"StopFailure","session_id":"%s","cwd":"%s","error":"authentication_failed"}' \
+    eeeeeeee-0000-4000-8000-0000000000f1 "$AC/src/acme-api/w2" \
+    | env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_EXPERIMENTAL_DIR \
+          HOME="$AH" CLAUDE_CONFIG_DIR="$AW" CLAUDE_FLEET_DIR="$AW/fleet" bash "$ROOT/hooks/fleet-event.sh"
+  is "accounts on: ...and with it on, the record carries the failure word" "ready authentication_failed" \
+     "$(jq -r '"\(.status) \(.failure.error)"' "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json" 2>/dev/null)"
+  rm -f "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json"
+
+  # ── 5h at the threshold, and one point under it ───────────────────────────────
+  arec w1 "$ID1" working 96 10
+  atick >/dev/null
+  is "accounts: 5h at 96% stays on main" "main alice" "$(active) $(livewho)"
+  # Claude Code refreshed main's token while it was in use: A2, later expiry. The tick copies
+  # it back; an OLDER live copy (A0) is never written over it.
+  ax node "$FL" set "$AW" alice A2 "$(( (NOW + 9 * 3600) * 1000 ))"
+  atick >/dev/null
+  is "accounts: a refreshed live login is copied back into its slot on the tick" "alice at-A2" "$(saved main)"
+  ax node "$FL" set "$AW" alice A0 "$(( (NOW + 3600) * 1000 ))"
+  atick >/dev/null
+  is "accounts: ...and an older live copy never overwrites the newer saved one" "alice at-A2" "$(saved main)"
+  # SWITCHING AWAY copies the live login back first — tested by hand (`use`), since a tick
+  # would already have copied it on its own and could not tell the two apart.
+  ax node "$FL" set "$AW" alice A3 "$(( (NOW + 10 * 3600) * 1000 ))"
+  ax "$ROOT/bin/fleet-accounts" use work backup >/dev/null
+  is "accounts: switching away re-captures main's CURRENT login, not the one saved before" "alice at-A2|alice at-A3" \
+     "alice at-A2|$(saved main)"
+  ax "$ROOT/bin/fleet-accounts" use work main >/dev/null
+  is "accounts: ...and switching back installs that refreshed copy" "alice at-A3" "$(ax node "$FL" live "$AW")"
+  # w1 is mid-turn, and relaunchable in every other respect (its process note is there), so
+  # only "never mid-turn" can keep it where it is.
+  alive w1 "$ID1"; arec w1 "$ID1" working 97 10
+  out="$(atick)"
+  is "accounts: 5h at 97% switches main -> backup, the next in order" "backup bob" "$(active) $(livewho)"
+  is "accounts: ...one inbox row naming both and the limit" "1" "$(inbox_n 'work: switched from main to backup (5h at 97%)')"
+  is "accounts: ...and one line for the phone, as fields" "switched main backup limit 5h 97" \
+     "$(tail -1 "$AW/fleet/accounts.notify" | jq -r '"\(.event) \(.from) \(.to) \(.cause) \(.limit) \(.pct)"')"
+  # ── a busy session finishes its turn first ───────────────────────────────────
+  alive w2 "$ID2"; arec w2 "$ID2" ready 10 10 "$NOW"
+  is "accounts: w1 is mid-turn, so it was NOT relaunched" "no" "$(grep -q '^w1 ' "$AC/launched" 2>/dev/null && echo yes || echo no)"
+  atick >/dev/null
+  wait_for 10 "w2 relaunched" 'grep -q "^w2 " "$AC/launched" 2>/dev/null'
+  is "accounts: an idle w2 is relaunched onto backup, resuming ITS OWN conversation, in the profile's dirs" \
+     "w2 $ID2 $AW $AW/fleet" "$(grep '^w2 ' "$AC/launched" | tail -1)"
+  is "accounts: ...and its launch is recorded as on backup" "backup" "$(cut -f1 "$AW/fleet/$ASOCK.w2.account")"
+  # w1 ends its turn still on main's process, and its last reading lands AFTER the switch.
+  # By the clock it is backup's; by its launch it is main's. It is nobody's — a 97% wrongly
+  # credited to a fresh account would move the profile on again at once.
+  alive w1 "$ID1"; arec w1 "$ID1" ready 97 10
+  atick >/dev/null
+  wait_for 10 "w1 relaunched" 'grep -q "^w1 " "$AC/launched" 2>/dev/null'
+  is "accounts: a reading from a session still on main's process is not credited to backup" "backup" "$(active)"
+  is "accounts: w1, once its turn ended, comes back on its own conversation" "w1 $ID1" "$(grep '^w1 ' "$AC/launched" | tail -1 | cut -d' ' -f1-2)"
+  # ...and a reading taken in the very SECOND w1 was relaunched may be the old process's last:
+  # also nobody's. (Found as a once-in-five red on the 7d rows below, before it had a row.)
+  T="$(date +%s)"; printf 'backup\t%s\n' "$T" > "$AW/fleet/$ASOCK.w1.account"; arec w1 "$ID1" ready 99 10 "$T"
+  atick >/dev/null
+  is "accounts: a reading from the second of a relaunch is not credited to the new login" "backup" "$(active)"
+  arec w1 "$ID1" ready 10 10 "$((T - 5))"
+
+  # ── 7d at the threshold: backup -> spare (main still over its 5h) ──────────────
+  arec w2 "$ID2" working 20 98
+  atick >/dev/null
+  is "accounts: 7d at 98% switches backup -> spare, skipping main which is still over" "spare carol" "$(active) $(livewho)"
+  is "accounts: ...naming the 7d limit" "1" "$(inbox_n 'work: switched from backup to spare (7d at 98%)')"
+  # main's window resets. NEVER SWITCH BACK: spare stays until it is over the line itself.
+  jq '.accounts.main.usage.five_hour.resets = 1' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+  arec w1 "$ID1" ready 97 10 "$((NOW - 100))" 1
+  atick >/dev/null
+  is "accounts: after main resets the profile stays on spare (no switch back)" "spare carol" "$(active) $(livewho)"
+  # ...and when spare runs low, the next switch goes to the HIGHEST-priority account with room.
+  printf 'spare\t%s\n' "$(( $(date +%s) - 1 ))" > "$AW/fleet/$ASOCK.w2.account"
+  arec w2 "$ID2" working 99 10
+  atick >/dev/null
+  is "accounts: spare at 99% -> main (first in order with room), not backup" "main alice at-A3" "$(active) $(ax node "$FL" live "$AW")"
+
+  # ── a saved login that no longer works ───────────────────────────────────────
+  # spare's saved copy dies (its refresh token expired while it sat unused). main then runs
+  # low with backup still over its 7d: spare is tried, found dead, marked — and with nowhere
+  # left the workers are parked. Three ticks, one announcement, one read of spare's copy.
+  ax node "$FL" deadsaved work "$AW" spare
+  jq 'del(.accounts.spare.usage)' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+  printf 'main\t%s\n' "$(( $(date +%s) - 1 ))" > "$AW/fleet/$ASOCK.w2.account"
+  arec w2 "$ID2" working 98 10
+  finds0="$(awk -F'\t' '$1=="find" && $3=="work.spare"' "$AC/kc/calls.log" | wc -l | tr -d ' ')"
+  atick >/dev/null; atick >/dev/null; atick >/dev/null
+  is "accounts: a dead saved login is marked NEEDS-LOGIN" "its refresh token has expired" \
+     "$(jq -r '.accounts.spare.needs_login.why // ""' "$AW/fleet/accounts.json")"
+  is "accounts: ...announced once with the exact command, not every tick" "1" \
+     "$(inbox_n 'work/spare needs /login (its refresh token has expired) — run: CLAUDE_CONFIG_DIR=~/.claude claude, /login as spare, then fleet-accounts add work spare')"
+  is "accounts: ...and its saved copy was read once, not retried" "1" \
+     "$(( $(awk -F'\t' '$1=="find" && $3=="work.spare"' "$AC/kc/calls.log" | wc -l | tr -d ' ') - finds0 ))"
+  is "accounts: ...the phone line names it" "needs-login spare" \
+     "$(grep '"needs-login"' "$AW/fleet/accounts.notify" | tail -1 | jq -r '"\(.event) \(.account)"')"
+  # ── nothing left: workers parked, said once, with who needs a login ──────────────
+  is "accounts: all exhausted -> workers parked by the accounts engine, the lead is not" "w1=governor-accounts w2=governor-accounts master=none" \
+     "$(for s in w1 w2 master; do printf '%s=%s ' "$s" "$(cut -d' ' -f1 "$AW/fleet/$ASOCK.$s.parked" 2>/dev/null || echo none)"; done | sed 's/ $//')"
+  is "accounts: ...one inbox row with the earliest reset and who needs /login" "1" \
+     "$(grep -cE "all work accounts exhausted until [A-Za-z0-9: ]+ \(needs /login: spare\) — workers paused" "$AW/fleet/$ASOCK.inbox" || true)"
+  is "accounts: ...and a phone line carrying the reset time" "exhausted spare yes" \
+     "$(grep '"exhausted"' "$AW/fleet/accounts.notify" | tail -1 | jq -r '"\(.event) \(.needs_login|join(",")) \(if .until > 0 then "yes" else "no" end)"')"
+  out="$(ax "$ROOT/bin/fleet-accounts" list)"
+  is "accounts: fleet-accounts list shows both" "yes yes" \
+     "$(grep -q 'ALL EXHAUSTED until' <<< "$out" && echo yes || echo no) $(grep -qE '^    spare .*NEEDS-LOGIN' <<< "$out" && echo yes || echo "no: $out")"
+  # Turning the feature off must not strand them: the governor only releases its own parks.
+  cp "$AW/fleet/$ASOCK.w1.parked" "$AC/w1.parked"; cp "$AW/fleet/$ASOCK.w2.parked" "$AC/w2.parked"; cp "$AW/fleet/accounts.json" "$AC/acc.json"
+  out="$(ax "$ROOT/bin/fleet-experimental" disable accounts)"
+  is "accounts: disabling releases the workers it parked" "no no yes" \
+     "$([ -f "$AW/fleet/$ASOCK.w1.parked" ] && echo yes || echo no) $([ -f "$AW/fleet/$ASOCK.w2.parked" ] && echo yes || echo no) $(grep -q "un-parked $ASOCK.w1" <<< "$out" && echo yes || echo "no: $out")"
+  ax "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
+  cp "$AC/w1.parked" "$AW/fleet/$ASOCK.w1.parked"; cp "$AC/w2.parked" "$AW/fleet/$ASOCK.w2.parked"; cp "$AC/acc.json" "$AW/fleet/accounts.json"
+  # ── the earliest reset (main's 5h) passes: resume, and bring back what was parked ──
+  : > "$AC/launched"
+  jq '.accounts.main.usage.five_hour.resets = 1' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+  arec w2 "$ID2" ready 98 10 "$(date +%s)" 1
+  alive w1 "$ID1"; alive w2 "$ID2"
+  atick >/dev/null
+  wait_for 20 "both workers back" 'grep -q "^w1 " "$AC/launched" && grep -q "^w2 " "$AC/launched"'
+  is "accounts: at main's reset the profile resumes on it by itself" "main alice 1 null" \
+     "$(active) $(livewho) $(inbox_n 'work: resumed on main') $(jq -c .exhausted "$AW/fleet/accounts.json")"
+  is "accounts: ...the parked workers are relaunched on their own conversations, unparked" "w1 $ID1|w2 $ID2|none none" \
+     "$(grep '^w1 ' "$AC/launched" | tail -1 | cut -d' ' -f1-2)|$(grep '^w2 ' "$AC/launched" | tail -1 | cut -d' ' -f1-2)|$(cut -d' ' -f1 "$AW/fleet/$ASOCK.w1.parked" 2>/dev/null || echo none) $(cut -d' ' -f1 "$AW/fleet/$ASOCK.w2.parked" 2>/dev/null || echo none)"
+
+  # ── re-add clears the mark ─────────────────────────────────────────────────────
+  ax node "$FL" set "$AW" carol C2
+  ax "$ROOT/bin/fleet-accounts" add work spare >/dev/null
+  is "accounts: a fresh /login + re-add clears NEEDS-LOGIN" "null carol" \
+     "$(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json") $(livewho)"
+  ax "$ROOT/bin/fleet-accounts" use work backup >/dev/null
+  jq 'del(.accounts.backup.usage)' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+
+  # ── a login that dies AFTER it is in use: each signal, both directions ─────────
+  # (a) the store: Claude Code blanks the tokens on invalid_grant.
+  printf 'backup\t%s\n' "$(( $(date +%s) - 1 ))" > "$AW/fleet/$ASOCK.w1.account"; arec w1 "$ID1" ready 10 10
+  atick >/dev/null
+  is "accounts: a working backup is left alone" "backup null" "$(active) $(jq -c .accounts.backup.needs_login "$AW/fleet/accounts.json")"
+  # w2 was due to move to backup, but its process note is stale (its pane was relaunched
+  # since), so fleet-restart refused it: its launch marker must still name the login it IS on.
+  is "accounts: a relaunch fleet-restart refused leaves the session's launch marker as it was" "main" \
+     "$(cut -f1 "$AW/fleet/$ASOCK.w2.account" 2>/dev/null)"
+  ax node "$FL" blank "$AW"
+  atick >/dev/null
+  is "accounts: tokens blanked by Claude Code -> backup NEEDS-LOGIN, and the profile moves on" "yes" \
+     "$(jq -e '.accounts.backup.needs_login' "$AW/fleet/accounts.json" >/dev/null && [ "$(active)" != backup ] && echo yes || echo no)"
+  # (b) the hook: a turn refused for auth, on the account in use.
+  ax node "$FL" set "$AW" bob B2; ax "$ROOT/bin/fleet-accounts" add work backup >/dev/null; ax "$ROOT/bin/fleet-accounts" use work spare >/dev/null
+  printf 'spare\t%s\n' "$(( $(date +%s) - 1 ))" > "$AW/fleet/$ASOCK.w1.account"
+  arec w1 "$ID1" ready 10 10; jq --argjson t "$(date +%s)" '.failure = {error:"rate_limit", at:$t}' "$AW/fleet/$ID1.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/$ID1.json"
+  atick >/dev/null
+  is "accounts: a StopFailure that is NOT about auth (rate_limit) marks nothing" "spare null" "$(active) $(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json")"
+  jq --argjson t "$(date +%s)" '.failure = {error:"authentication_failed", at:$t}' "$AW/fleet/$ID1.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/$ID1.json"
+  atick >/dev/null
+  is "accounts: authentication_failed on spare -> spare NEEDS-LOGIN, moved on" "yes" \
+     "$(jq -e '.accounts.spare.needs_login' "$AW/fleet/accounts.json" >/dev/null && [ "$(active)" != spare ] && echo yes || echo no)"
+  # (c) the pane, read only from a session launched on the account since it went in.
+  ax node "$FL" set "$AW" carol C3; ax "$ROOT/bin/fleet-accounts" add work spare >/dev/null
+  rm -f "$AW/fleet/$ID1.json" "$AW/fleet/$ID2.json"
+  printf 'spare\t%s\n' "$(date +%s)" > "$AW/fleet/$ASOCK.w1.account"
+  atmux -L "$ASOCK" kill-session -t w1; atmux -L "$ASOCK" new-session -d -s w1 -x 120 -y 30 "cat '$FIX/claude-idle.txt'; sleep 600"; sleep 0.3
+  atick >/dev/null
+  is "accounts: a real idle pane is not a login prompt" "spare null" "$(active) $(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json")"
+  atmux -L "$ASOCK" kill-session -t w1
+  atmux -L "$ASOCK" new-session -d -s w1 -x 120 -y 30 "printf '%s\n' '> hi' '  ⎿  API Error: 401 · OAuth token revoked · Please run /login' '' '>'; sleep 600"; sleep 0.3
+  atick >/dev/null
+  is "accounts: a pane with the binary's own 'Please run /login' line -> NEEDS-LOGIN" "w1 is asking for /login" \
+     "$(jq -r '.accounts.spare.needs_login.why // ""' "$AW/fleet/accounts.json")"
+
+  # ── the Linux store: 0600 files beside .credentials.json ─────────────────────────
+  LH="$AC/lhome"; mkdir -p "$LH/.config/ghostfleet" "$LH/.claude/fleet"; printf 'on\n' > "$LH/.config/ghostfleet/accounts.enabled"
+  lx() { env -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR -u CLAUDE_FLEET_EXPERIMENTAL_DIR HOME="$LH" CLAUDE_FLEET_LOGIN_STORE=file "$@" 2>&1; }
+  lx node "$FL" set "$LH/.claude" alice L1; lx "$ROOT/bin/fleet-accounts" add work main >/dev/null
+  lx node "$FL" set "$LH/.claude" bob L2;   lx "$ROOT/bin/fleet-accounts" add work backup >/dev/null
+  lx "$ROOT/bin/fleet-accounts" use work main >/dev/null
+  is "accounts (file store): saved logins are 0600 files beside .credentials.json" "600 600" \
+     "$(for n in main backup; do node -e 'console.log((require("fs").statSync(process.argv[1]).mode & 0o777).toString(8))' "$LH/.claude/.credentials.ghostfleet-$n.json"; done | paste -sd' ' -)"
+  is "accounts (file store): 'use' puts main's login back in .credentials.json" "at-L1" "$(jq -r .claudeAiOauth.accessToken "$LH/.claude/.credentials.json")"
+
+  # ── the phone: fields copied by name, names gone in anonymous mode ──────────────
+  out="$(HOME="$AH" node --input-type=module -e "
+    import { accountEvents, pushPayload } from '$ROOT/bin/fleet-serve.mjs';
+    const sizes = new Map(); accountEvents(['$AW/fleet'], sizes);
+    import('node:fs').then(fs => {
+      fs.appendFileSync('$AW/fleet/accounts.notify', JSON.stringify({ at: 1, profile: 'work', event: 'switched', from: 'main', to: 'backup', cause: 'limit', limit: '5h', pct: 97.6, note: 'never sent' }) + '\n');
+      const ev = accountEvents(['$AW/fleet'], sizes);
+      console.log(JSON.stringify(pushPayload(ev, 'named').account), JSON.stringify(pushPayload(ev, 'anonymous').account));
+    });" 2>&1)"
+  is "accounts: the push carries the switch as fields, and nothing else" \
+     '{"event":"switched","cause":"limit","limit":"5h","pct":97,"profile":"work","from":"main","to":"backup"} {"event":"switched","cause":"limit","limit":"5h","pct":97}' "$out"
+
+  # ── the governor: the accounts engine owns the budget ceiling, or nothing changes ──
+  # A 99% reading left by the account switched AWAY from is in the fleet dir. The governor's
+  # own ceiling takes the max of every record, so it would park the fleet that was just moved
+  # onto a fresh login — unless the accounts engine has the profile, and then it must not run.
+  arec w1 "$ID1" ready 99 10 "$((NOW - 30))"
+  gov() { ax env CLAUDE_FLEET_DIR="$AW/fleet" "$ROOT/bin/fleet-governor" -s "$ASOCK" --once --no-resource --confirm 0 --dry-run; }
+  out="$(gov)"
+  is "accounts on: the governor hands the budget to the accounts engine (no single-account park)" "0 0" \
+     "$(grep -c 'parking ALL' <<< "$out" || true) $(grep -c 'budget 99%' <<< "$out" || true)"
+  ax "$ROOT/bin/fleet-experimental" disable accounts >/dev/null
+  out="$(gov)"
+  is "accounts off: the governor's own ceiling, exactly as before" "1" "$(grep -c 'budget 99% >= 98% -> parking ALL' <<< "$out" || true)"
+  # ── the launch says which login it started on, only with the switch on ──────────
+  printf '#!/bin/sh\nexit 0\n' > "$AC/stub/claude"; chmod +x "$AC/stub/claude"
+  here() { ax env CLAUDE_FLEET_DIR="$AW/fleet" CLAUDE_CONFIG_DIR="$AW" CLAUDE_FLEET_SOCK="$ASOCK" CLAUDE_FLEET_FRESH=1 \
+             CLAUDE_FLEET_NO_OBSERVE_CONTRACT=1 "$ROOT/bin/claude-here" w9 >/dev/null; }
+  here
+  is "accounts off: claude-here writes no launch marker" "no" "$([ -f "$AW/fleet/$ASOCK.w9.account" ] && echo yes || echo no)"
+  ax "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
+  here
+  is "accounts on: claude-here records the login the session starts on" "$(active)" "$(cut -f1 "$AW/fleet/$ASOCK.w9.account" 2>/dev/null)"
+
+  atmux -L "$ASOCK" kill-server 2>/dev/null
+  rm -rf "${AC:?}" "${AC_TMUX:?}"
+else
+  skip "accounts: several logins per profile" "tmux, jq or node missing"
 fi
 
 # ── fleet-mod reload: onto the mod, touching only what is idle and empty ─────
