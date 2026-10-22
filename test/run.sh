@@ -19335,6 +19335,12 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   arec w1 "$ID1" ready 10 10 "$((T - 5))"
 
   # ── 7d at the threshold: backup -> spare (main still over its 5h) ──────────────
+  # w2's launch marker is from its relaunch a few rows up, and on a fast runner that is the
+  # SAME second as this reading — which, by the rule just above, credits it to nobody, so
+  # nothing switched and every row below cascaded red (sixteen of them, on ubuntu, with the
+  # whole group done in under four seconds). Dated a second back, as the other rows do: the
+  # reading is meant to come from a session already running on backup.
+  printf 'backup\t%s\n' "$(( $(date +%s) - 1 ))" > "$AW/fleet/$ASOCK.w2.account"
   arec w2 "$ID2" working 20 98
   atick >/dev/null
   is "accounts: 7d at 98% switches backup -> spare, skipping main which is still over" "spare carol" "$(active) $(livewho)"
