@@ -19425,6 +19425,11 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "accounts: authentication_failed on spare -> spare NEEDS-LOGIN, moved on" "yes" \
      "$(jq -e '.accounts.spare.needs_login' "$AW/fleet/accounts.json" >/dev/null && [ "$(active)" != spare ] && echo yes || echo no)"
   # (c) the pane, read only from a session launched on the account since it went in.
+  # spare was last verified in the tick above. On a fast runner that tick and this re-add share
+  # a second, so "verified since it went in" held for a login that had never been tried — and
+  # the pane was never read (red on ubuntu-latest only). Pinned here so it holds on any runner:
+  # a re-added login is a NEW login, proven by nothing that came before it.
+  jq --argjson t "$(( $(date +%s) + 5 ))" '.accounts.spare.verified_at = $t' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
   ax node "$FL" set "$AW" carol C3; ax "$ROOT/bin/fleet-accounts" add work spare >/dev/null
   rm -f "$AW/fleet/$ID1.json" "$AW/fleet/$ID2.json"
   printf 'spare\t%s\n' "$(date +%s)" > "$AW/fleet/$ASOCK.w1.account"
