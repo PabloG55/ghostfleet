@@ -19169,6 +19169,49 @@ else
   skip "a fleet is restarted and drawn under its own account" "tmux, jq or node missing"
 fi
 
+# ── the background work a relaunch would kill ───────────────────────────────────
+# A ready session can still own a background shell, a Monitor or a background agent, and
+# relaunching it ends them. lib/accounts.mjs reads the count Claude puts on its mode line,
+# and the task list it draws under it for an agent. Every fixture here is one real session,
+# captured as it ran (an `acme-api` scratch Claude, its path scrubbed): one background
+# shell at 120/56/40/30 columns; two shells and a monitor wide and at 48, where the mode
+# line truncates to "1 monit"; a background agent at 56 and 30; and the same session once
+# everything had finished, including a tall capture whose replies still say "still running"
+# in prose. Its banner warns that transcript saving is off — it ran under a Claude session,
+# and that line, with its own " · ", is left in as found. The two -footer fixtures are the
+# composer and status lines of live fleet panes, identity scrubbed: the user's status line,
+# a labelled rule, and the "← N agents" every fleet pane shows, which is NOT background work.
+#   At 30 columns the mode line has no room for the count at all, and the pane alone is
+# blind there: that row pins the blind spot, and the tick reads the process tree for it.
+# WATCHED GOING RED: with the whole pane read instead of what is below the last rule, the
+# turn-end lines above were counted too (8 rows; the 30-column pane "saw" its shell in the
+# conversation); with whole words only, "1 monit" at 48 was missed.
+group "accounts: the background work a relaunch would kill"
+if command -v node >/dev/null 2>&1; then
+  bgw() { AM="$ROOT/lib/accounts.mjs" node -e '
+    import(process.env.AM).then(m => console.log(m.backgroundWork(require("fs").readFileSync(process.argv[1], "utf8")) || "none"))
+  ' "$FIX/$1"; }
+  is "bg work: one shell, 120 columns"                    "1 shell"             "$(bgw claude-bgwork-shell.txt)"
+  is "bg work: ...at 56"                                  "1 shell"             "$(bgw claude-bgwork-shell-56col.txt)"
+  is "bg work: ...at 40, the count the last thing left"   "1 shell"             "$(bgw claude-bgwork-shell-40col.txt)"
+  is "bg work: ...at 30 the mode line has no count: blind" "none"               "$(bgw claude-bgwork-shell-30col.txt)"
+  is "bg work: two shells and a monitor"                  "2 shells, 1 monitor" "$(bgw claude-bgwork-mixed-wide.txt)"
+  is "bg work: ...truncated to '1 monit' at 48"           "2 shells, 1 monit"   "$(bgw claude-bgwork-mixed-48col.txt)"
+  is "bg work: a background agent's task list, at 56"     "2 shells, 1 monitor, a background agent" "$(bgw claude-bgwork-agent-56col.txt)"
+  is "bg work: ...and at 30, where the count is gone"     "a background agent"  "$(bgw claude-bgwork-agent-30col.txt)"
+  is "bg work: a live fleet footer with a shell"          "1 shell"             "$(bgw claude-bgwork-fleet-shell-footer.txt)"
+  is "bg work: silent once the shell ended"               "none"                "$(bgw claude-bgwork-done.txt)"
+  is "bg work: ...at 30 too"                              "none"                "$(bgw claude-bgwork-done-30col.txt)"
+  is "bg work: silent after the agent finished ('/tasks to see subagents')" "none" "$(bgw claude-bgwork-agent-done.txt)"
+  is "bg work: silent on 'still running' in the replies above the composer" "none" "$(bgw claude-bgwork-done-prose.txt)"
+  is "bg work: silent on a live idle fleet footer and its '← 3 agents'"   "none" "$(bgw claude-bgwork-fleet-idle-footer.txt)"
+  for f in claude-idle.txt claude-idle-wide.txt claude-idle-narrow.txt claude-interrupted.txt; do
+    is "bg work: silent on $f" "none" "$(bgw "$f")"
+  done
+else
+  skip "the background work a relaunch would kill" "node missing"
+fi
+
 # ── several Claude logins per profile, and failover between them (experimental) ─
 # A profile is one config dir and stays one; an ACCOUNT is a saved login for it. When the
 # login in use reaches the threshold (5h OR 7d, default 97%), lib/accounts.mjs puts the next
@@ -19188,7 +19231,10 @@ fi
 # record, a stale 99% kept backup exhausted and both workers parked; with the old merge alone,
 # a leftover record displaced the stored later window; with no slop, a reset one second early
 # lost its figure; with the unknown span opened at the noticing tick instead of the last saved
-# one, the reading taken in between was credited to backup.
+# one, the reading taken in between was credited to backup. The background-work rows: on the
+# code before the guard, w2 was relaunched with its shell running and the parked w1 resumed
+# with its agent out; with the process tree ignored, the 30-column w2 was relaunched; with
+# only the un-park guard removed, w1 was.
 group "accounts: several logins per profile, failover at the limit"
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   AC="$(cd "$(mktemp -d "$TEST_RUNS.$$.acct.XXXXXX")" && pwd -P)"; AH="$AC/home"; AW="$AH/.claude"
@@ -19314,11 +19360,40 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   # ── a busy session finishes its turn first ───────────────────────────────────
   alive w2 "$ID2"; arec w2 "$ID2" ready 10 10 "$NOW"
   is "accounts: w1 is mid-turn, so it was NOT relaunched" "no" "$(grep -q '^w1 ' "$AC/launched" 2>/dev/null && echo yes || echo no)"
+  # ── ...and a ready one waits for the work it still has running ──────────────
+  # w2's turn has ended, but its pane says a background shell is still going, and a relaunch
+  # ends it — seen live, one account switch killed three sessions' long jobs. It is asked
+  # again every tick, not once per account, so no try marker may be left behind. The panes
+  # are the background-work fixtures above: the shell running, then the same session after.
+  atmux -L "$ASOCK" respawn-pane -k -t w2 "cat '$FIX/claude-bgwork-shell.txt'; sleep 600"; sleep 0.3
+  alive w2 "$ID2"
+  # Asked of the tick's own output: fleet-restart has answered by the time the tick returns,
+  # but the stub writes `launched` only once the new pane runs, so an absence read from that
+  # file straight away is green whatever the tick did (watched: it was, on the unfixed code).
+  out="$(atick)"
+  is "accounts: a ready w2 whose pane shows a background shell is NOT relaunched" "no" \
+     "$(grep -qE 'relaunch(ed| refused) w2' <<< "$out" && echo yes || echo no)"
+  is "accounts: ...it says what it is waiting on, and leaves no try marker" "yes no" \
+     "$(grep -q 'waiting on w2: 1 shell still running' <<< "$out" && echo yes || echo "no: $out") $([ -e "$AW/fleet/$ASOCK.w2.account-try" ] && echo yes || echo no)"
+  out="$(atick)"
+  is "accounts: ...said once, not every tick it waits" "0 no" \
+     "$(grep -c 'waiting on w2' <<< "$out" || true) $(grep -qE 'relaunch(ed| refused) w2' <<< "$out" && echo yes || echo no)"
+  # At 30 columns the count is gone from the mode line. The shell under Claude's process is
+  # not: one whose command line sources the binary's shell snapshot, as every Bash call does.
+  mkdir -p "$AC/cfg/shell-snapshots"; : > "$AC/cfg/shell-snapshots/snapshot-bash-0-acme.sh"
+  atmux -L "$ASOCK" respawn-pane -k -t w2 "bash -c 'sleep 600; :' '$AC/cfg/shell-snapshots/snapshot-bash-0-acme.sh' & cat '$FIX/claude-bgwork-shell-30col.txt'; sleep 600"; sleep 0.3
+  alive w2 "$ID2"
+  out="$(atick)"
+  is "accounts: ...nor at 30 columns, where only the process tree still shows the shell" "no yes" \
+     "$(grep -qE 'relaunch(ed| refused) w2' <<< "$out" && echo yes || echo no) $(grep -q 'waiting on w2: 1 shell under its process' <<< "$out" && echo yes || echo "no: $out")"
+  atmux -L "$ASOCK" respawn-pane -k -t w2 "cat '$FIX/claude-bgwork-done.txt'; sleep 600"; sleep 0.3
+  alive w2 "$ID2"
   atick >/dev/null
   wait_for 10 "w2 relaunched" 'grep -q "^w2 " "$AC/launched" 2>/dev/null'
-  is "accounts: an idle w2 is relaunched onto backup, resuming ITS OWN conversation, in the profile's dirs" \
+  is "accounts: once its pane is plain idle, w2 IS relaunched onto backup, resuming ITS OWN conversation, in the profile's dirs" \
      "w2 $ID2 $AW $AW/fleet" "$(grep '^w2 ' "$AC/launched" | tail -1)"
-  is "accounts: ...and its launch is recorded as on backup" "backup" "$(cut -f1 "$AW/fleet/$ASOCK.w2.account")"
+  is "accounts: ...and its launch is recorded as on backup, the wait note gone" "backup no" \
+     "$(cut -f1 "$AW/fleet/$ASOCK.w2.account") $([ -e "$AW/fleet/$ASOCK.w2.account-wait" ] && echo yes || echo no)"
   # w1 ends its turn still on main's process, and its last reading lands AFTER the switch.
   # By the clock it is backup's; by its launch it is main's. It is nobody's — a 97% wrongly
   # credited to a fresh account would move the profile on again at once.
@@ -19395,7 +19470,17 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   : > "$AC/launched"
   jq '.accounts.main.usage.five_hour.resets = 1' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
   arec w2 "$ID2" ready 98 10 "$(date +%s)" 1
+  # A park is an Escape, and an Escape ends the turn and leaves its background shells,
+  # monitors and agents running (measured: four Escapes, and "2 shells, 1 monitor" and the
+  # agent were all still there). So the un-park waits for them too: w1 still has an agent out.
+  atmux -L "$ASOCK" respawn-pane -k -t w1 "cat '$FIX/claude-bgwork-agent-56col.txt'; sleep 600"; sleep 0.3
   alive w1 "$ID1"; alive w2 "$ID2"
+  out="$(atick)"
+  wait_for 20 "w2 back" 'grep -q "^w2 " "$AC/launched"'
+  is "accounts: ...a parked w1 whose background agent is still out stays parked, not relaunched" "no governor-accounts" \
+     "$(grep -q 'resumed w1' <<< "$out" && echo yes || echo no) $(cut -d' ' -f1 "$AW/fleet/$ASOCK.w1.parked" 2>/dev/null || echo none)"
+  atmux -L "$ASOCK" respawn-pane -k -t w1 "cat '$FIX/claude-bgwork-agent-done.txt'; sleep 600"; sleep 0.3
+  alive w1 "$ID1"
   atick >/dev/null
   wait_for 20 "both workers back" 'grep -q "^w1 " "$AC/launched" && grep -q "^w2 " "$AC/launched"'
   is "accounts: at main's reset the profile resumes on it by itself" "main alice 1 null" \

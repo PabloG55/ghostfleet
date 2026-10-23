@@ -1,0 +1,5 @@
+────────────────────────────────────────────────────────────── acme-api/master ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  dev@example.com | Example Account | acme-api |   main
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 3 agents

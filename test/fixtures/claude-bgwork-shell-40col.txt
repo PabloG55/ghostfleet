@@ -1,0 +1,40 @@
+
+           Claude Code v2.1.295
+ ▐▛███▛█   Opus 5.5 with high effort
+▝▜██████▀  Claude Team
+ ▝▝   ▝▝   ~/src/acme-api
+
+
+❯ Use the Bash tool with
+  run_in_background set to true to run
+  exactly: sleep 150 . Then end your
+  turn immediately with the single
+  word: started
+
+  Ran 1 shell command
+
+⏺ started
+
+✻ Baked for 2s · done 8:53 PM · 1 shell
+  still running
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────
+❯ 
+────────────────────────────────────────
+  ⚠ Transcript saving is off — inheri…
+  ⏵⏵ bypass permissions on · 1 shell ·
