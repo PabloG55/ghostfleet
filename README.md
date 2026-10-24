@@ -401,9 +401,9 @@ and `fleet-*` tools):
 
 Off by default. `fleet-experimental enable accounts`, then `/login` to each account in turn and
 save it with `fleet-accounts add <profile> <name>`; when the account in use reaches 97% of its
-5-hour or weekly limit, the profile moves to the next one with room and each session is
-relaunched onto it as its turn ends, on the same conversation. When all are spent the workers
-are parked until the earliest reset. Rotating accounts to get past usage limits may conflict
+5-hour or weekly limit, the profile moves to the next one with room. Like a `/login` by hand,
+that restarts nothing: each running session picks the new login up by itself. When all are
+spent the workers are parked until the earliest reset, then told to continue. Rotating accounts to get past usage limits may conflict
 with Anthropic's terms of service; that is your responsibility. Details, and what happens when a
 saved login expires: [docs/OPERATIONS.md](docs/OPERATIONS.md#several-claude-accounts-on-one-profile-experimental).
 

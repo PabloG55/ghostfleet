@@ -455,17 +455,21 @@ weekly figures from the mod's session records (`usage.limits.five_hour` / `seven
 either reaches the threshold (`fleet-accounts threshold`, default 97), the profile moves to the
 next account in order that still has room: the current login is copied back into its slot, the
 next one is put where Claude Code reads its login, and an inbox row plus a phone push say
-`work: switched from main to backup (5h at 97%)`. Each Claude session is then relaunched onto
-it **as its turn ends** — never mid-turn — resuming its own conversation through `fleet-restart`.
-(A running Claude re-reads its login every 30 seconds, so it may move sooner; the relaunch makes
-it certain.) It **does not switch back** when an earlier account's window resets: it stays on
+`work: switched from main to backup (5h at 97%)`. That is the whole switch, the same thing a
+`/login` by hand does: **no session is restarted**. Each running Claude re-reads its login by
+itself (from the Keychain every 30 seconds on macOS, from `.credentials.json` on Linux), so a
+session mid-turn finishes that turn and its next request goes out on the new account, with its
+screen, its scrollback and anything it has running in the background left as they were. For a
+short grace window after a switch (`CLAUDE_FLEET_ACCOUNTS_GRACE`, default 90 seconds) a session
+may still be on the old login, so usage read in that window is credited to neither account. It **does not switch back** when an earlier account's window resets: it stays on
 the one it is on until that one is over the line, and the next switch then takes the first
 account in order with room. `fleet-accounts use <profile> <name>` switches by hand.
 
 **When every account is spent**, every worker in the profile's fleets is parked (the lead is
 not), an inbox row and a push say `all work accounts exhausted until 14:00`, and at the
-earliest reset the profile moves to that account and the parked workers are relaunched and told
-to continue.
+earliest reset the profile moves to that account and the parked workers are resumed where they
+are, as `fleet-resume` does it: the park is cleared and a prompt telling them to continue is typed
+into the session that is already running.
 
 **A login that stops working** — expired, revoked, or never refreshed — is seen three ways: Claude
 Code blanking the tokens in the stored login (what it does when a refresh is refused), a turn

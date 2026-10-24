@@ -19169,56 +19169,13 @@ else
   skip "a fleet is restarted and drawn under its own account" "tmux, jq or node missing"
 fi
 
-# ── the background work a relaunch would kill ───────────────────────────────────
-# A ready session can still own a background shell, a Monitor or a background agent, and
-# relaunching it ends them. lib/accounts.mjs reads the count Claude puts on its mode line,
-# and the task list it draws under it for an agent. Every fixture here is one real session,
-# captured as it ran (an `acme-api` scratch Claude, its path scrubbed): one background
-# shell at 120/56/40/30 columns; two shells and a monitor wide and at 48, where the mode
-# line truncates to "1 monit"; a background agent at 56 and 30; and the same session once
-# everything had finished, including a tall capture whose replies still say "still running"
-# in prose. Its banner warns that transcript saving is off — it ran under a Claude session,
-# and that line, with its own " · ", is left in as found. The two -footer fixtures are the
-# composer and status lines of live fleet panes, identity scrubbed: the user's status line,
-# a labelled rule, and the "← N agents" every fleet pane shows, which is NOT background work.
-#   At 30 columns the mode line has no room for the count at all, and the pane alone is
-# blind there: that row pins the blind spot, and the tick reads the process tree for it.
-# WATCHED GOING RED: with the whole pane read instead of what is below the last rule, the
-# turn-end lines above were counted too (8 rows; the 30-column pane "saw" its shell in the
-# conversation); with whole words only, "1 monit" at 48 was missed.
-group "accounts: the background work a relaunch would kill"
-if command -v node >/dev/null 2>&1; then
-  bgw() { AM="$ROOT/lib/accounts.mjs" node -e '
-    import(process.env.AM).then(m => console.log(m.backgroundWork(require("fs").readFileSync(process.argv[1], "utf8")) || "none"))
-  ' "$FIX/$1"; }
-  is "bg work: one shell, 120 columns"                    "1 shell"             "$(bgw claude-bgwork-shell.txt)"
-  is "bg work: ...at 56"                                  "1 shell"             "$(bgw claude-bgwork-shell-56col.txt)"
-  is "bg work: ...at 40, the count the last thing left"   "1 shell"             "$(bgw claude-bgwork-shell-40col.txt)"
-  is "bg work: ...at 30 the mode line has no count: blind" "none"               "$(bgw claude-bgwork-shell-30col.txt)"
-  is "bg work: two shells and a monitor"                  "2 shells, 1 monitor" "$(bgw claude-bgwork-mixed-wide.txt)"
-  is "bg work: ...truncated to '1 monit' at 48"           "2 shells, 1 monit"   "$(bgw claude-bgwork-mixed-48col.txt)"
-  is "bg work: a background agent's task list, at 56"     "2 shells, 1 monitor, a background agent" "$(bgw claude-bgwork-agent-56col.txt)"
-  is "bg work: ...and at 30, where the count is gone"     "a background agent"  "$(bgw claude-bgwork-agent-30col.txt)"
-  is "bg work: a live fleet footer with a shell"          "1 shell"             "$(bgw claude-bgwork-fleet-shell-footer.txt)"
-  is "bg work: silent once the shell ended"               "none"                "$(bgw claude-bgwork-done.txt)"
-  is "bg work: ...at 30 too"                              "none"                "$(bgw claude-bgwork-done-30col.txt)"
-  is "bg work: silent after the agent finished ('/tasks to see subagents')" "none" "$(bgw claude-bgwork-agent-done.txt)"
-  is "bg work: silent on 'still running' in the replies above the composer" "none" "$(bgw claude-bgwork-done-prose.txt)"
-  is "bg work: silent on a live idle fleet footer and its '← 3 agents'"   "none" "$(bgw claude-bgwork-fleet-idle-footer.txt)"
-  for f in claude-idle.txt claude-idle-wide.txt claude-idle-narrow.txt claude-interrupted.txt; do
-    is "bg work: silent on $f" "none" "$(bgw "$f")"
-  done
-else
-  skip "the background work a relaunch would kill" "node missing"
-fi
-
 # ── several Claude logins per profile, and failover between them (experimental) ─
 # A profile is one config dir and stays one; an ACCOUNT is a saved login for it. When the
 # login in use reaches the threshold (5h OR 7d, default 97%), lib/accounts.mjs puts the next
-# saved login where Claude Code reads its own and relaunches each session onto it as its turn
-# ends — same config dir, same conversation. A saved login that no longer works is marked
-# NEEDS-LOGIN and skipped; when nothing is left, the workers are parked until the earliest
-# reset. Everything here runs in a fake HOME, against a fake `security` (test/helpers/
+# saved login where Claude Code reads its own, and that is all: like a /login by hand, it
+# restarts no session, and each running Claude moves onto the new login by itself. A saved
+# login that no longer works is marked NEEDS-LOGIN and skipped; when nothing is left, the
+# workers are parked until the earliest reset, then resumed in the processes they are in. Everything here runs in a fake HOME, against a fake `security` (test/helpers/
 # fake-security.mjs) that refuses to run without its own directory, and fake logins whose
 # "tokens" are labels: no row can reach a real Keychain, config dir or fleet.
 #   The fleet: acme-api on the default profile, sessions master/w1/w2 on stub agents; three
@@ -19231,10 +19188,11 @@ fi
 # record, a stale 99% kept backup exhausted and both workers parked; with the old merge alone,
 # a leftover record displaced the stored later window; with no slop, a reset one second early
 # lost its figure; with the unknown span opened at the noticing tick instead of the last saved
-# one, the reading taken in between was credited to backup. The background-work rows: on the
-# code before the guard, w2 was relaunched with its shell running and the parked w1 resumed
-# with its agent out; with the process tree ignored, the 30-column w2 was relaunched; with
-# only the un-park guard removed, w1 was.
+# one, the reading taken in between was credited to backup. The no-restart rows, on the code
+# that relaunched every idle session onto the new login: the automatic switch gave w2 a new
+# process and wrote a fleet-restart snapshot, the hand switch did it again, the parked workers
+# came back as new processes with no prompt typed into the old ones, and the reading after
+# the grace window was credited to nobody, because w1's launch marker still named main.
 group "accounts: several logins per profile, failover at the limit"
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   AC="$(cd "$(mktemp -d "$TEST_RUNS.$$.acct.XXXXXX")" && pwd -P)"; AH="$AC/home"; AW="$AH/.claude"
@@ -19274,6 +19232,15 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   }
   # The process note fleet-restart's live lookup reads, for the pane as it is now.
   alive() { CLAUDE_CONFIG_DIR="$AW" TMUX_TMPDIR="$AC_TMUX" "$ROOT/test/helpers/live-session.sh" "$ASOCK" "$1" "$2" "$AC/src/acme-api/$1" >/dev/null; }
+  # What "restarted nothing" is made of: the process each pane runs, and the snapshot
+  # fleet-restart writes into the fleet dir before its first kill, whatever it then does.
+  pids() { for s in master w1 w2; do atmux -L "$ASOCK" display-message -p -t "$s" '#{pane_pid}'; done | paste -sd' ' -; }
+  restarts() { find "$AW/fleet" -name 'restart-*.tsv' | wc -l | tr -d ' '; }
+  # the tick's restart-shaped lines, or `none`
+  acts() { local a; a="$(grep -E 'relaunch|resumed' <<< "$1" | paste -sd, -)"; echo "${a:-none}"; }
+  # A reading meant for the account active NOW: the second of a switch is nobody's (the
+  # reading that triggered it may share that second), so one taken in it is dated past it.
+  on_active() { local f n; f="$(jq -r '.history[-1].from // 0' "$AW/fleet/accounts.json")"; n="$(date +%s)"; echo $(( n > f ? n : f + 1 )); }
   atmux -L "$ASOCK" new-session -d -s _term -c "$AC/src/acme-api" 'sleep 600'
   atmux -L "$ASOCK" set-environment -g PATH "$AC/stub:$ROOT/bin:$PATH"
   for s in master w1 w2; do mkdir -p "$AC/src/acme-api/$s"; atmux -L "$ASOCK" new-session -d -s "$s" -c "$AC/src/acme-api/$s" -x 120 -y 30 'sleep 600'; done
@@ -19349,74 +19316,58 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
      "alice at-A2|$(saved main)"
   ax "$ROOT/bin/fleet-accounts" use work main >/dev/null
   is "accounts: ...and switching back installs that refreshed copy" "alice at-A3" "$(ax node "$FL" live "$AW")"
-  # w1 is mid-turn, and relaunchable in every other respect (its process note is there), so
-  # only "never mid-turn" can keep it where it is.
-  alive w1 "$ID1"; arec w1 "$ID1" working 97 10
-  out="$(atick)"
+  # ── a switch restarts NOTHING ───────────────────────────────────────────────
+  # w1 is mid-turn and w2 has ended its turn. Both carry the process note fleet-restart's
+  # by-id path needs and a launch marker naming main, so the code that relaunched every idle
+  # session gave w2 a new process on this very tick. A switch is a /login now: the login
+  # moves under the running sessions and each pane keeps the process it had. Seen live, the
+  # relaunch cost a session that had run /compact half a minute earlier everything above
+  # the compaction, on screen and in its scrollback.
+  alive w1 "$ID1"; arec w1 "$ID1" working 97 10 "$(on_active)"
+  alive w2 "$ID2"; arec w2 "$ID2" ready 10 10 "$NOW"
+  P0="$(pids)"; R0="$(restarts)"
+  out="$(atick)"; sleep 0.5
   is "accounts: 5h at 97% switches main -> backup, the next in order" "backup bob" "$(active) $(livewho)"
   is "accounts: ...one inbox row naming both and the limit" "1" "$(inbox_n 'work: switched from main to backup (5h at 97%)')"
   is "accounts: ...and one line for the phone, as fields" "switched main backup limit 5h 97" \
      "$(tail -1 "$AW/fleet/accounts.notify" | jq -r '"\(.event) \(.from) \(.to) \(.cause) \(.limit) \(.pct)"')"
-  # ── a busy session finishes its turn first ───────────────────────────────────
-  alive w2 "$ID2"; arec w2 "$ID2" ready 10 10 "$NOW"
-  is "accounts: w1 is mid-turn, so it was NOT relaunched" "no" "$(grep -q '^w1 ' "$AC/launched" 2>/dev/null && echo yes || echo no)"
-  # ── ...and a ready one waits for the work it still has running ──────────────
-  # w2's turn has ended, but its pane says a background shell is still going, and a relaunch
-  # ends it — seen live, one account switch killed three sessions' long jobs. It is asked
-  # again every tick, not once per account, so no try marker may be left behind. The panes
-  # are the background-work fixtures above: the shell running, then the same session after.
-  atmux -L "$ASOCK" respawn-pane -k -t w2 "cat '$FIX/claude-bgwork-shell.txt'; sleep 600"; sleep 0.3
-  alive w2 "$ID2"
-  # Asked of the tick's own output: fleet-restart has answered by the time the tick returns,
-  # but the stub writes `launched` only once the new pane runs, so an absence read from that
-  # file straight away is green whatever the tick did (watched: it was, on the unfixed code).
-  out="$(atick)"
-  is "accounts: a ready w2 whose pane shows a background shell is NOT relaunched" "no" \
-     "$(grep -qE 'relaunch(ed| refused) w2' <<< "$out" && echo yes || echo no)"
-  is "accounts: ...it says what it is waiting on, and leaves no try marker" "yes no" \
-     "$(grep -q 'waiting on w2: 1 shell still running' <<< "$out" && echo yes || echo "no: $out") $([ -e "$AW/fleet/$ASOCK.w2.account-try" ] && echo yes || echo no)"
-  out="$(atick)"
-  is "accounts: ...said once, not every tick it waits" "0 no" \
-     "$(grep -c 'waiting on w2' <<< "$out" || true) $(grep -qE 'relaunch(ed| refused) w2' <<< "$out" && echo yes || echo no)"
-  # At 30 columns the count is gone from the mode line. The shell under Claude's process is
-  # not: one whose command line sources the binary's shell snapshot, as every Bash call does.
-  mkdir -p "$AC/cfg/shell-snapshots"; : > "$AC/cfg/shell-snapshots/snapshot-bash-0-acme.sh"
-  atmux -L "$ASOCK" respawn-pane -k -t w2 "bash -c 'sleep 600; :' '$AC/cfg/shell-snapshots/snapshot-bash-0-acme.sh' & cat '$FIX/claude-bgwork-shell-30col.txt'; sleep 600"; sleep 0.3
-  alive w2 "$ID2"
-  out="$(atick)"
-  is "accounts: ...nor at 30 columns, where only the process tree still shows the shell" "no yes" \
-     "$(grep -qE 'relaunch(ed| refused) w2' <<< "$out" && echo yes || echo no) $(grep -q 'waiting on w2: 1 shell under its process' <<< "$out" && echo yes || echo "no: $out")"
-  atmux -L "$ASOCK" respawn-pane -k -t w2 "cat '$FIX/claude-bgwork-done.txt'; sleep 600"; sleep 0.3
-  alive w2 "$ID2"
-  atick >/dev/null
-  wait_for 10 "w2 relaunched" 'grep -q "^w2 " "$AC/launched" 2>/dev/null'
-  is "accounts: once its pane is plain idle, w2 IS relaunched onto backup, resuming ITS OWN conversation, in the profile's dirs" \
-     "w2 $ID2 $AW $AW/fleet" "$(grep '^w2 ' "$AC/launched" | tail -1)"
-  is "accounts: ...and its launch is recorded as on backup, the wait note gone" "backup no" \
-     "$(cut -f1 "$AW/fleet/$ASOCK.w2.account") $([ -e "$AW/fleet/$ASOCK.w2.account-wait" ] && echo yes || echo no)"
-  # w1 ends its turn still on main's process, and its last reading lands AFTER the switch.
-  # By the clock it is backup's; by its launch it is main's. It is nobody's — a 97% wrongly
-  # credited to a fresh account would move the profile on again at once.
-  alive w1 "$ID1"; arec w1 "$ID1" ready 97 10
-  atick >/dev/null
-  wait_for 10 "w1 relaunched" 'grep -q "^w1 " "$AC/launched" 2>/dev/null'
-  is "accounts: a reading from a session still on main's process is not credited to backup" "backup" "$(active)"
-  is "accounts: w1, once its turn ended, comes back on its own conversation" "w1 $ID1" "$(grep '^w1 ' "$AC/launched" | tail -1 | cut -d' ' -f1-2)"
-  # ...and a reading taken in the very SECOND w1 was relaunched may be the old process's last:
-  # also nobody's. (Found as a once-in-five red on the 7d rows below, before it had a row.)
-  T="$(date +%s)"; printf 'backup\t%s\n' "$T" > "$AW/fleet/$ASOCK.w1.account"; arec w1 "$ID1" ready 99 10 "$T"
-  atick >/dev/null
-  is "accounts: a reading from the second of a relaunch is not credited to the new login" "backup" "$(active)"
-  arec w1 "$ID1" ready 10 10 "$((T - 5))"
+  is "accounts: an automatic switch restarts no session — every pane keeps its process, fleet-restart never ran" \
+     "$P0 $R0 none no" \
+     "$(pids) $(restarts) $(acts "$out") $([ -s "$AC/launched" ] && echo yes || echo no)"
+  # ...and one by hand is the same: `use` moves the login, it says so without promising a
+  # restart, and the tick after it starts nobody again.
+  P1="$(pids)"; R1="$(restarts)"
+  uout="$(ax "$ROOT/bin/fleet-accounts" use work spare)"
+  out="$(atick)"; sleep 0.5
+  is "accounts: a switch by hand restarts no session either, and 'use' does not say it will" \
+     "spare carol $P1 $R1 none no" \
+     "$(active) $(livewho) $(pids) $(restarts) $(acts "$out") $(grep -qi 'relaunch' <<< "$uout" && echo yes || echo no)"
+  ax "$ROOT/bin/fleet-accounts" use work backup >/dev/null
+
+  # ── the grace window: a reading is the new login's once every process can be on it ─
+  # Nothing restarts, so for a while after a switch a running session may still be on the
+  # login it replaced: the binary re-reads a Keychain login every 30s, and a request already
+  # under way reports the account it started on. A reading inside that window is nobody's;
+  # one after it is the new login's. The history is dated back so that both sides of a 60s
+  # window can be read now rather than waited for.
+  #   This replaces the launch-marker rows ("a reading from a session still on main's
+  # process", "...from the second of a relaunch"): the marker no longer gates anything,
+  # and the clock is what decides.
+  T="$(date +%s)"
+  jq --argjson t "$T" '.history = [{account:"main", from:0}, {account:"backup", from:($t - 100)}]' \
+    "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+  gtick() { ax env CLAUDE_FLEET_ACCOUNTS_GRACE=60 node "$ROOT/lib/accounts.mjs" tick "$ASOCK"; }
+  arec w2 "$ID2" ready 10 10 "$((T - 200))"
+  arec w1 "$ID1" ready 97 10 "$((T - 90))"
+  gtick >/dev/null
+  inside="$(active) $(jq -r '.accounts.backup.usage.five_hour.pct // "none"' "$AW/fleet/accounts.json")"
+  arec w1 "$ID1" ready 42 10 "$((T - 30))"
+  gtick >/dev/null
+  is "accounts: a reading inside the grace window after a switch is nobody's, one after it is the new login's" \
+     "backup none|backup 42" "$inside|$(active) $(jq -r '.accounts.backup.usage.five_hour.pct // "none"' "$AW/fleet/accounts.json")"
 
   # ── 7d at the threshold: backup -> spare (main still over its 5h) ──────────────
-  # w2's launch marker is from its relaunch a few rows up, and on a fast runner that is the
-  # SAME second as this reading — which, by the rule just above, credits it to nobody, so
-  # nothing switched and every row below cascaded red (sixteen of them, on ubuntu, with the
-  # whole group done in under four seconds). Dated a second back, as the other rows do: the
-  # reading is meant to come from a session already running on backup.
-  printf 'backup\t%s\n' "$(( $(date +%s) - 1 ))" > "$AW/fleet/$ASOCK.w2.account"
-  arec w2 "$ID2" working 20 98
+  arec w2 "$ID2" working 20 98 "$(on_active)"
   atick >/dev/null
   is "accounts: 7d at 98% switches backup -> spare, skipping main which is still over" "spare carol" "$(active) $(livewho)"
   is "accounts: ...naming the 7d limit" "1" "$(inbox_n 'work: switched from backup to spare (7d at 98%)')"
@@ -19426,8 +19377,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   atick >/dev/null
   is "accounts: after main resets the profile stays on spare (no switch back)" "spare carol" "$(active) $(livewho)"
   # ...and when spare runs low, the next switch goes to the HIGHEST-priority account with room.
-  printf 'spare\t%s\n' "$(( $(date +%s) - 1 ))" > "$AW/fleet/$ASOCK.w2.account"
-  arec w2 "$ID2" working 99 10
+  arec w2 "$ID2" working 99 10 "$(on_active)"
   atick >/dev/null
   is "accounts: spare at 99% -> main (first in order with room), not backup" "main alice at-A3" "$(active) $(ax node "$FL" live "$AW")"
 
@@ -19437,8 +19387,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   # left the workers are parked. Three ticks, one announcement, one read of spare's copy.
   ax node "$FL" deadsaved work "$AW" spare
   jq 'del(.accounts.spare.usage)' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
-  printf 'main\t%s\n' "$(( $(date +%s) - 1 ))" > "$AW/fleet/$ASOCK.w2.account"
-  arec w2 "$ID2" working 98 10
+  arec w2 "$ID2" working 98 10 "$(on_active)"
   finds0="$(awk -F'\t' '$1=="find" && $3=="work.spare"' "$AC/kc/calls.log" | wc -l | tr -d ' ')"
   atick >/dev/null; atick >/dev/null; atick >/dev/null
   is "accounts: a dead saved login is marked NEEDS-LOGIN" "its refresh token has expired" \
@@ -19467,26 +19416,22 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   ax "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
   cp "$AC/w1.parked" "$AW/fleet/$ASOCK.w1.parked"; cp "$AC/w2.parked" "$AW/fleet/$ASOCK.w2.parked"; cp "$AC/acc.json" "$AW/fleet/accounts.json"
   # ── the earliest reset (main's 5h) passes: resume, and bring back what was parked ──
+  # Into the processes they are in. A park is an Escape: the turn ends, and the process, its
+  # conversation and whatever it left running in the background do not. So a parked worker
+  # is resumed the way fleet-resume does it — the marker cleared, the prompt typed into the
+  # live pane (whose tty echoes it) — and nothing is restarted.
   : > "$AC/launched"
   jq '.accounts.main.usage.five_hour.resets = 1' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
   arec w2 "$ID2" ready 98 10 "$(date +%s)" 1
-  # A park is an Escape, and an Escape ends the turn and leaves its background shells,
-  # monitors and agents running (measured: four Escapes, and "2 shells, 1 monitor" and the
-  # agent were all still there). So the un-park waits for them too: w1 still has an agent out.
-  atmux -L "$ASOCK" respawn-pane -k -t w1 "cat '$FIX/claude-bgwork-agent-56col.txt'; sleep 600"; sleep 0.3
   alive w1 "$ID1"; alive w2 "$ID2"
-  out="$(atick)"
-  wait_for 20 "w2 back" 'grep -q "^w2 " "$AC/launched"'
-  is "accounts: ...a parked w1 whose background agent is still out stays parked, not relaunched" "no governor-accounts" \
-     "$(grep -q 'resumed w1' <<< "$out" && echo yes || echo no) $(cut -d' ' -f1 "$AW/fleet/$ASOCK.w1.parked" 2>/dev/null || echo none)"
-  atmux -L "$ASOCK" respawn-pane -k -t w1 "cat '$FIX/claude-bgwork-agent-done.txt'; sleep 600"; sleep 0.3
-  alive w1 "$ID1"
-  atick >/dev/null
-  wait_for 20 "both workers back" 'grep -q "^w1 " "$AC/launched" && grep -q "^w2 " "$AC/launched"'
+  P2="$(pids)"; R2R="$(restarts)"
+  out="$(atick)"; sleep 0.5
   is "accounts: at main's reset the profile resumes on it by itself" "main alice 1 null" \
      "$(active) $(livewho) $(inbox_n 'work: resumed on main') $(jq -c .exhausted "$AW/fleet/accounts.json")"
-  is "accounts: ...the parked workers are relaunched on their own conversations, unparked" "w1 $ID1|w2 $ID2|none none" \
-     "$(grep '^w1 ' "$AC/launched" | tail -1 | cut -d' ' -f1-2)|$(grep '^w2 ' "$AC/launched" | tail -1 | cut -d' ' -f1-2)|$(cut -d' ' -f1 "$AW/fleet/$ASOCK.w1.parked" 2>/dev/null || echo none) $(cut -d' ' -f1 "$AW/fleet/$ASOCK.w2.parked" 2>/dev/null || echo none)"
+  prompted() { grep -q 'Continue what you were working on' <<< "$(atmux -L "$ASOCK" capture-pane -p -J -t "$1")" && echo yes || echo no; }
+  is "accounts: ...each parked worker is resumed in its OWN process: unparked, told to continue, never restarted" \
+     "none none|resumed w1,resumed w2|yes yes|$P2 $R2R no" \
+     "$(cut -d' ' -f1 "$AW/fleet/$ASOCK.w1.parked" 2>/dev/null || echo none) $(cut -d' ' -f1 "$AW/fleet/$ASOCK.w2.parked" 2>/dev/null || echo none)|$(grep -E '^accounts: (resumed|un-parked) w' <<< "$out" | sed 's/^accounts: //' | paste -sd, -)|$(prompted w1) $(prompted w2)|$(pids) $(restarts) $([ -s "$AC/launched" ] && echo yes || echo no)"
 
   # ── re-add clears the mark ─────────────────────────────────────────────────────
   ax node "$FL" set "$AW" carol C2
@@ -19498,28 +19443,24 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
 
   # ── a login that dies AFTER it is in use: each signal, both directions ─────────
   # (a) the store: Claude Code blanks the tokens on invalid_grant.
-  printf 'backup\t%s\n' "$(( $(date +%s) - 1 ))" > "$AW/fleet/$ASOCK.w1.account"; arec w1 "$ID1" ready 10 10
+  arec w1 "$ID1" ready 10 10
   atick >/dev/null
   is "accounts: a working backup is left alone" "backup null" "$(active) $(jq -c .accounts.backup.needs_login "$AW/fleet/accounts.json")"
-  # w2 was due to move to backup, but its process note is stale (its pane was relaunched
-  # since), so fleet-restart refused it: its launch marker must still name the login it IS on.
-  is "accounts: a relaunch fleet-restart refused leaves the session's launch marker as it was" "main" \
-     "$(cut -f1 "$AW/fleet/$ASOCK.w2.account" 2>/dev/null)"
   ax node "$FL" blank "$AW"
   atick >/dev/null
   is "accounts: tokens blanked by Claude Code -> backup NEEDS-LOGIN, and the profile moves on" "yes" \
      "$(jq -e '.accounts.backup.needs_login' "$AW/fleet/accounts.json" >/dev/null && [ "$(active)" != backup ] && echo yes || echo no)"
   # (b) the hook: a turn refused for auth, on the account in use.
   ax node "$FL" set "$AW" bob B2; ax "$ROOT/bin/fleet-accounts" add work backup >/dev/null; ax "$ROOT/bin/fleet-accounts" use work spare >/dev/null
-  printf 'spare\t%s\n' "$(( $(date +%s) - 1 ))" > "$AW/fleet/$ASOCK.w1.account"
   arec w1 "$ID1" ready 10 10; jq --argjson t "$(date +%s)" '.failure = {error:"rate_limit", at:$t}' "$AW/fleet/$ID1.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/$ID1.json"
   atick >/dev/null
   is "accounts: a StopFailure that is NOT about auth (rate_limit) marks nothing" "spare null" "$(active) $(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json")"
-  jq --argjson t "$(date +%s)" '.failure = {error:"authentication_failed", at:$t}' "$AW/fleet/$ID1.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/$ID1.json"
+  jq --argjson t "$(on_active)" '.failure = {error:"authentication_failed", at:$t}' "$AW/fleet/$ID1.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/$ID1.json"
   atick >/dev/null
   is "accounts: authentication_failed on spare -> spare NEEDS-LOGIN, moved on" "yes" \
      "$(jq -e '.accounts.spare.needs_login' "$AW/fleet/accounts.json" >/dev/null && [ "$(active)" != spare ] && echo yes || echo no)"
-  # (c) the pane, read only from a session launched on the account since it went in.
+  # (c) the pane, read only from a session that can be on the account: launched on it since
+  # it went in, or done something since every running process had moved onto it.
   # spare was last verified in the tick above. On a fast runner that tick and this re-add share
   # a second, so "verified since it went in" held for a login that had never been tried — and
   # the pane was never read (red on ubuntu-latest only). Pinned here so it holds on any runner:
@@ -19533,8 +19474,25 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   is "accounts: a real idle pane is not a login prompt" "spare null" "$(active) $(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json")"
   atmux -L "$ASOCK" kill-session -t w1
   atmux -L "$ASOCK" new-session -d -s w1 -x 120 -y 30 "printf '%s\n' '> hi' '  ⎿  API Error: 401 · OAuth token revoked · Please run /login' '' '>'; sleep 600"; sleep 0.3
+  # A switch restarts nothing, so the same line on a session that was launched before the
+  # switch and has done nothing since may be about the login it replaced, still on screen.
+  SINCE="$(jq -r '.history[-1].from' "$AW/fleet/accounts.json")"
+  printf 'main\t%s\n' "$((SINCE - 60))" > "$AW/fleet/$ASOCK.w1.account"
+  pending() { jq -n --arg id "$ID1" --arg sock "$ASOCK" --argjson ts "$1" '{session_id:$id, sock:$sock, slot:"w1", status:"ready", ts:$ts}' > "$AW/fleet/$ID1.json"; }
+  pending "$((SINCE - 30))"
   atick >/dev/null
-  is "accounts: a pane with the binary's own 'Please run /login' line -> NEEDS-LOGIN" "w1 is asking for /login" \
+  is "accounts: a 'Please run /login' on a session idle since before the switch is not read" "spare null" \
+     "$(active) $(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json")"
+  pending "$(date +%s)"
+  atick >/dev/null
+  is "accounts: ...once that session has done something since, it is -> NEEDS-LOGIN" "w1 is asking for /login" \
+     "$(jq -r '.accounts.spare.needs_login.why // ""' "$AW/fleet/accounts.json")"
+  # ...and a session LAUNCHED on the login since it went in is read with no record at all.
+  jq '.accounts.spare.needs_login = null' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+  ax "$ROOT/bin/fleet-accounts" use work spare >/dev/null
+  rm -f "$AW/fleet/$ID1.json"; printf 'spare\t%s\n' "$(on_active)" > "$AW/fleet/$ASOCK.w1.account"
+  atick >/dev/null
+  is "accounts: a pane with the binary's own 'Please run /login' line, launched on the login -> NEEDS-LOGIN" "w1 is asking for /login" \
      "$(jq -r '.accounts.spare.needs_login.why // ""' "$AW/fleet/accounts.json")"
 
   # ── one account, one window ──────────────────────────────────────────────────────
@@ -19546,11 +19504,11 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   # stayed parked until the stale window ran out, while backup had 88% left.
   atmux -L "$ASOCK" kill-session -t w1; atmux -L "$ASOCK" new-session -d -s w1 -x 120 -y 30 'sleep 600'; sleep 0.3
   ax node "$FL" set "$AW" bob B3; ax "$ROOT/bin/fleet-accounts" add work backup >/dev/null
-  T="$(date +%s)"; R1=$((T + 1800)); R2=$((T + 7200))
+  T="$(on_active)"; R1=$((T + 1800)); R2=$((T + 7200))
   jq --argjson t "$T" --argjson r1 "$R1" '.accounts.main.usage = {five_hour:{pct:99, resets:($t + 3600), at:$t}}
       | .accounts.backup.usage = {five_hour:{pct:99, resets:$r1, at:$t}} | .exhausted = {since:$t, until:$r1}' \
     "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
-  for s in w1 w2; do printf 'backup\t%s\n' "$((T - 5))" > "$AW/fleet/$ASOCK.$s.account"; rm -f "$AW/fleet/$ASOCK.$s.parked"; done
+  for s in w1 w2; do rm -f "$AW/fleet/$ASOCK.$s.parked"; done
   arec w1 "$ID1" ready 99 10 "$T" "$R1"; arec w2 "$ID2" ready 12 10 "$T" "$R2"
   atick >/dev/null
   is "accounts: a 99% from an earlier 5h window does not out-vote 12% from the current one" "backup 12 $R2" \
@@ -19565,7 +19523,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
      "$(active) $(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json") $(jq -c .exhausted "$AW/fleet/accounts.json")"
   # A reset time a second EARLIER is the same window, not an older one: there the higher figure
   # wins, where a strict "later reset wins" would keep the 12%.
-  arec w2 "$ID2" ready 40 10 "$(date +%s)" "$((R2 - 1))"
+  arec w2 "$ID2" ready 40 10 "$(on_active)" "$((R2 - 1))"
   atick >/dev/null
   is "accounts: resets a second apart are one window, where the higher figure still wins" "40" \
      "$(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json")"
@@ -19579,7 +19537,6 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   T="$(date +%s)"; rows0="$(inbox_n 'work: on a login that is not saved (fleet-accounts add to manage it) — failover paused')"
   jq --argjson t "$T" --argjson r1 "$R1" '.exhausted = {since:$t, until:$r1}' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
   for s in w1 w2; do printf 'governor-accounts %s\n' "$T" > "$AW/fleet/$ASOCK.$s.parked"; done
-  printf 'main\t%s\n' "$((T - 5))" > "$AW/fleet/$ASOCK.w2.account"   # due a move, were the engine in charge
   ax node "$FL" set "$AW" dave D1
   # Read BEFORE the tick that notices dave, as the first minute of a hand /login always is:
   # the second between them is what makes "the span opens at the last saved tick" matter.
