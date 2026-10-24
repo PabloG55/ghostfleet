@@ -286,9 +286,10 @@ case "${CLAUDE_FLEET_NO_OBSERVE_CONTRACT:-0}" in
 esac
 
 # ── WHICH LOGIN THIS PROCESS STARTS ON (fleet-accounts, experimental) ─────────
-# A profile with several saved logins moves between them (lib/accounts.mjs), and a usage
-# reading is only credited to an account when the session that took it was launched on that
-# account. So the launch says which one it was: <sock>.<slot>.account, "<name>\t<epoch>".
+# A profile with several saved logins moves between them (lib/accounts.mjs) without restarting
+# anything, so which login a process STARTED on credits no usage reading — the clock does. It
+# still tells the engine a session began on the login now in use, so a "Please run /login" on
+# its screen is about that login: <sock>.<slot>.account, "<name>\t<epoch>".
 # Nothing at all when the switch is off or the profile has no accounts.
 if [ -n "$slot" ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -f "$FLEET_DIR/accounts.json" ] \
    && grep -qsx on "${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/accounts.enabled"; then

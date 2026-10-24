@@ -332,9 +332,9 @@ plan_rows() {
       # turn whose Stop never came, and telling that session to "continue" would start a turn
       # nobody asked for. Decided here, so the table and the snapshot say what will happen.
       [ "$NO_CONTINUE" = 1 ] && [ "$act" = resume-continue ] && act=resume-idle
-      # --continue: the caller KNOWS this session's turn was cut short and why — the accounts
-      # engine relaunching a worker it parked when every login had run out. Its record says
-      # whatever the park left (interrupted, ready), and only the caller can say "continue".
+      # --continue: the caller KNOWS this session's turn was cut short and why — a worker
+      # parked mid-task, say. Its record says whatever the park left (interrupted, ready), and
+      # only the caller can say "continue".
       [ -n "$FORCE_CONT" ] && [ "$act" = resume-idle ] && act=resume-continue
       PLAN="$PLAN$sock$US$slot$US$agent$US$st$US$act$US$id$US$cwd$US$why
 "

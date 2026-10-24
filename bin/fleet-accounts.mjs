@@ -16,7 +16,8 @@
 //     /login as B   ->  fleet-accounts add work backup
 // The order you add them in is the order they are used. The governor of each of the profile's
 // fleets then watches the active account's 5h and 7d figures and, at the threshold, swaps the
-// next account's login in and relaunches each session as its turn ends (lib/accounts.mjs).
+// next account's login in — what a /login by hand does, and like one it restarts no session:
+// each running Claude moves onto it by itself within half a minute (lib/accounts.mjs).
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,7 +87,7 @@ async function main() {
       const p = prof(a1); if (!a2) die('use needs <profile> <name>', 2);
       let r; try { r = A.use(p, a2); } catch (e) { die(e.message); }
       if (r.same) return console.log(`${p} is already on '${a2}'`);
-      return console.log(`${p}: switched to '${a2}' — each session is relaunched onto it as its turn ends (by the fleet's governor, within a minute)`);
+      return console.log(`${p}: switched to '${a2}' — running sessions move onto it by themselves within half a minute, as after a /login; nothing is restarted`);
     }
     case 'threshold': {
       if (a1 === undefined) return console.log(`${A.threshold()}`);
