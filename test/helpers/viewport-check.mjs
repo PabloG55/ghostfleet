@@ -157,7 +157,7 @@ function wsConnect(url) {
     });
     sock.on('error', reject);
     let buf = Buffer.alloc(0), open = false, frag = Buffer.alloc(0);
-    const onText = [];
+    const onText = [], onClose = [];
     sock.on('data', (chunk) => {
       buf = Buffer.concat([buf, chunk]);
       if (!open) {
@@ -199,14 +199,21 @@ function wsConnect(url) {
     }
     const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16BE(n); return b; };
     const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(n)); return b; };
+    sock.on('close', () => { for (const f of onClose) f(); });
     const api = {
       onMessage: (f) => onText.push(f),
+      onClose: (f) => onClose.push(f),
       send: (text) => sock.write(frame(Buffer.from(text, 'utf8'))),
       close: () => { try { sock.end(); } catch {} },
     };
   });
 }
 
+// A REPLY THAT NEVER COMES gets a deadline, as in lib/browser.mjs (this file keeps its own
+// client). Seen with a client that threw while booting: history.back() from a page that
+// had pushed nothing navigated away mid-evaluate, the reply never arrived, and the run sat
+// for 33 minutes instead of failing. A minute is far above any one call this file makes.
+const CALL_MS = 60000;
 async function connect(wsUrl) {
   const ws = await wsConnect(wsUrl);
   let id = 0; const waits = new Map();
@@ -216,9 +223,12 @@ async function connect(wsUrl) {
   });
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
     const i = ++id;
-    waits.set(i, m => (m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result)));
+    const t = setTimeout(() => { waits.delete(i); rej(new Error(`${method}: no answer from Chrome in ${CALL_MS / 1000}s`)); }, CALL_MS);
+    t.unref();
+    waits.set(i, m => { clearTimeout(t); m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result); });
     ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
+  ws.onClose(() => { for (const [i, f] of waits) { waits.delete(i); f({ error: { message: 'the debugging socket closed with this call unanswered' } }); } });
   return { send, close: () => ws.close() };
 }
 // A browser that will not be driven is an environment, not a regression: say so and let
@@ -231,6 +241,13 @@ const { sessionId } = await browserWs.send('Target.attachToTarget', { targetId, 
 const call = (m, p = {}) => browserWs.send(m, p, sessionId);
 await call('Page.enable');
 await call('Runtime.enable');
+// What the page threw, recorded by the page itself on every navigation: a boot that broke
+// is told apart from one that is slow (see goto), and a row that times out says which.
+await call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+  const e = window.__bootErrs = [];
+  addEventListener('error', (ev) => e.push(String((ev.error && ev.error.message) || ev.message || 'error')));
+  addEventListener('unhandledrejection', (ev) => e.push('unhandled: ' + String((ev.reason && ev.reason.message) || ev.reason)));
+})();` });
 // FOCUS EMULATION, because a headless browser is not a focused one. Element.focus() only
 // takes when the page is CONSIDERED focused, and a headless window on the macOS runner is
 // never activated while the Linux one is — so document.activeElement never became the
@@ -282,6 +299,8 @@ const onScreen = async () => {
       const app = document.getElementById('app'), sheet = document.getElementById('sheet');
       return JSON.stringify({
         url: location.pathname,
+        ready: document.readyState,
+        errors: (window.__bootErrs || []).slice(0, 3),
         app: app ? (app.className || '-') : '(no #app on this page)',
         kids: app ? app.children.length : 0,
         cards: document.querySelectorAll('#app .card').length,
@@ -363,13 +382,27 @@ const seeing = (k, label, budget) => waitFor(label || k, SEEN[k], budget);
 const seeingCard = (re) => waitFor(`a card named ${re}`, (re) =>
   [...document.querySelectorAll('#app .card .c-name')]
     .some(n => new RegExp('^(?:' + re + ')$').test(n.textContent.trim())), WAIT_MS, re);
+// A BOOT IS A PAGE LOAD, and it does not get a screen's budget. WAIT_MS is for a screen
+// that is already running to draw its next state; a navigation is that PLUS fetching and
+// parsing every module and the first render, and on a loaded macOS runner it took longer
+// than 8s once — `{url:/, app:-, kids:0}` at the deadline, then the very next rows of the
+// same flow measured the page it had become. So the boot waits up to BOOT_MS, and returns
+// the moment the app mounts. What it must NOT do is wait that long on a boot that broke:
+// a page that threw is answered at once, with what it threw.
+const BOOT_MS = 30000;
 const goto = async (u, ready) => {
   await call('Page.navigate', { url: u });
   // Not `readyState === 'complete'` alone: that is true of the static shell, which is an
   // empty #app and a <script type=module> the browser has not run yet. The self-test page
   // at the foot of this file is a plain document with no #app at all, so it passes its
   // own predicate rather than waiting forever for a client that is not there.
-  await waitFor(`${u} to be ready`, ready || SEEN.booted);
+  const want = ready || SEEN.booted;
+  const settled = await waitFor(`${u} to be ready`, (src) =>
+    (window.__bootErrs || []).length > 0 || (0, eval)(src)(), BOOT_MS, `(${want})`);
+  if (settled) {
+    const errs = await evaluate(() => (window.__bootErrs || []).slice(0, 3));
+    if (errs.length && !(await evaluate(want))) is(`${u} boots`, 'without throwing', `it threw: ${errs.join(' | ')}`);
+  }
 };
 // A FLOW THAT MUST START LOCKED HAS TO SAY SO. restore() brings back the screen the client
 // was last on, so a bare goto after an earlier flow left the session screen up returns to

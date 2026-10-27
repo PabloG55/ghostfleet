@@ -7952,6 +7952,28 @@ else
   skip "fleet-look cleanup" "node or pgrep missing"
 fi
 
+# ── a browser that stops answering is a red row, not a hung job ──────────────
+# Every CDP reply was awaited with no deadline, and the macOS leg twice sat silent inside a
+# fleet-look group until the job's 30-minute timeout cancelled it — Chrome and node still
+# alive, no row anywhere saying which call. The helper stops ITS OWN Chrome (by the pid
+# launch() returns) and asks it something. WATCHED GOING RED with the deadline taken out of
+# lib/browser.mjs's send(): the call never returned and the helper's own 45s bound reported it.
+group "a browser that stops answering is a red row, not a hung job"
+if command -v node >/dev/null 2>&1; then
+  BST="$(mktemp -d "$TEST_RUNS.$$.bst.XXXXXX")"
+  node "$ROOT/test/helpers/browser-stall.mjs" > "$BST/out" 2> "$BST/err"; bstrc=$?
+  if grep -q '^#SKIP' "$BST/out" 2>/dev/null; then
+    skip "a stalled browser" "no chrome"
+  else
+    is "browser-stall ran"              "0" "$bstrc"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$BST/out")" -ge 4 ] && echo yes || echo "no: $(wc -l < "$BST/out") rows, $(head -1 "$BST/err")")"
+    while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$BST/out"
+  fi
+  rm -rf "$BST"
+else
+  skip "a stalled browser" "node missing"
+fi
+
 # ── 4a10c. Claude's own worktrees are not ghostfleet's to hand out ────────────
 # They are git worktrees like any other, so a stale one lands in the free-list looking
 # clean and sessionless. fleet-spawn then shadows itself: it offers a tree you cannot
@@ -16968,6 +16990,12 @@ if [ -d "$ROOT/web" ]; then
   # and the talk rows with talkStop() put back to suspend-without-release. The other
   # direction is asserted too: the speaker DOES unlock, inside its own tap, and hands the
   # session back when the voice ends. Whether music actually resumes is a phone's to say.
+  #   The session rows went red on macOS CI with nothing wrong: each tap was delivered twice
+  # (touch, then a mouse pair), and on a loaded runner the second click opened the card the
+  # first one had just drawn, skipping the grid. One tap is one click now, asserted, and a
+  # step that misses says what was on screen. WATCHED GOING RED: the mouse pair put back
+  # (`a tap is one click` got 2), openProject() made a no-op (the session row names the
+  # Projects screen it was still on), and the speaker's class renamed (no speaker, why).
   AUD="$(mktemp -d "$TEST_RUNS.$$.aud.XXXXXX")"
   node "$ROOT/test/helpers/audio-check.mjs" > "$AUD/out" 2> "$AUD/err"
   audrc=$?
@@ -19749,13 +19777,25 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   printf 'acme-api\t%s\twork\n' "$AC/src/acme-api" > "$AH/.config/ghostfleet/projects"
   printf '#!/bin/sh\necho "$1 ${CLAUDE_FLEET_RESUME:-} ${CLAUDE_CONFIG_DIR:-} ${CLAUDE_FLEET_DIR:-}" >> "%s/launched"\nexec sleep 600\n' "$AC" > "$AC/stub/agent-here"
   chmod +x "$AC/stub/agent-here"
+  # THE GROUP'S OWN CLOCK. Every row here is about which second something fell in — a
+  # reading against a switch, a switch against the grace window — and the wall clock made
+  # that a race: a reading dated "the second after main went in" was main's when the switch
+  # tick ran in that second and backup's when the runner was slow enough for the tick to
+  # land one later, so backup started the grace-window row already at 97% and every row
+  # after it ran from the wrong account (seen once on macOS, as 6 reds). So the engine reads
+  # CLAUDE_FLEET_ACCOUNTS_CLOCK, and here that is a file: every command run as the fleet is
+  # one second after the last, whether it ran in a subshell or not and however long the
+  # machine took, and a reading or a marker is dated from the same clock.
+  printf '%s\n' "$(date +%s)" > "$AC/clock"
+  tnow() { cat "$AC/clock"; }
+  tadv() { printf '%s\n' "$(( $(tnow) + ${1:-1} ))" > "$AC/clock"; }
   # Everything as the fleet's governor would run it: this HOME, this tmux namespace, the
-  # fake store, and readings counted from the first second after a switch.
-  ax() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR \
+  # fake store, readings counted from the first second after a switch, and the clock above.
+  ax() { tadv; env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR \
            -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_FLEET_PROFILE \
            HOME="$AH" TMUX_TMPDIR="$AC_TMUX" CLAUDE_FLEET_LOGIN_STORE=keychain FAKE_KEYCHAIN="$AC/kc" \
            CLAUDE_FLEET_SECURITY="$ROOT/test/helpers/fake-security.mjs" CLAUDE_FLEET_ACCOUNTS_GRACE=0 \
-           PATH="$AC/stub:$ROOT/bin:$PATH" "$@" 2>&1; }
+           CLAUDE_FLEET_ACCOUNTS_CLOCK="$(tnow)" PATH="$AC/stub:$ROOT/bin:$PATH" "$@" 2>&1; }
   atick() { ax node "$ROOT/lib/accounts.mjs" tick "$ASOCK"; }
   atmux() { TMUX_TMPDIR="$AC_TMUX" tmux "$@"; }
   active() { jq -r '.active // ""' "$AW/fleet/accounts.json" 2>/dev/null; }
@@ -19763,17 +19803,17 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   saved() { ax node "$FL" saved work "$AW" "$1"; }
   # a literal substring, counted; 0 when there is no inbox yet
   inbox_n() { awk -v p="$1" 'index($0, p) {n++} END {print n+0}' < <(cat "$AW/fleet/$ASOCK.inbox" 2>/dev/null); }
-  NOW="$(date +%s)"
+  NOW="$(tnow)"
   # arec <slot> <id> <status> <5h pct> <7d pct> [<usage.at>] [<5h resets>] — the record the
   # hook and the mod would have written, with a conversation transcript under the profile.
   arec() {
-    local slot="$1" id="$2" st="$3" p5="$4" p7="$5" at="${6:-$(date +%s)}" r5="${7:-$(( $(date +%s) + 3600 ))}" cwd pd
+    local slot="$1" id="$2" st="$3" p5="$4" p7="$5" at="${6:-$(tnow)}" r5="${7:-$(( $(tnow) + 3600 ))}" cwd pd
     cwd="$AC/src/acme-api/$slot"; mkdir -p "$cwd"
     pd="$AW/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"; mkdir -p "$pd"
     [ -f "$pd/$id.jsonl" ] || printf '{"type":"user","message":{"role":"user","content":"hi"}}\n' > "$pd/$id.jsonl"
     jq -n --arg id "$id" --arg sock "$ASOCK" --arg slot "$slot" --arg cwd "$cwd" --arg st "$st" --arg tr "$pd/$id.jsonl" \
-      --argjson ts "$(date +%s)" --argjson at "$at" --argjson p5 "$p5" --argjson p7 "$p7" --argjson r5 "$r5" \
-      --argjson r7 "$(( $(date +%s) + 86400 ))" \
+      --argjson ts "$(tnow)" --argjson at "$at" --argjson p5 "$p5" --argjson p7 "$p7" --argjson r5 "$r5" \
+      --argjson r7 "$(( $(tnow) + 86400 ))" \
       '{session_id:$id, sock:$sock, slot:$slot, pane:"", cwd:$cwd, status:$st, transcript:$tr, ts:$ts,
         usage:{at:$at, limits:{five_hour:{pct:$p5, resets:$r5}, seven_day:{pct:$p7, resets:$r7}}}}' > "$AW/fleet/$id.json"
   }
@@ -19787,7 +19827,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   acts() { local a; a="$(grep -E 'relaunch|resumed' <<< "$1" | paste -sd, -)"; echo "${a:-none}"; }
   # A reading meant for the account active NOW: the second of a switch is nobody's (the
   # reading that triggered it may share that second), so one taken in it is dated past it.
-  on_active() { local f n; f="$(jq -r '.history[-1].from // 0' "$AW/fleet/accounts.json")"; n="$(date +%s)"; echo $(( n > f ? n : f + 1 )); }
+  on_active() { local f n; f="$(jq -r '.history[-1].from // 0' "$AW/fleet/accounts.json")"; n="$(tnow)"; echo $(( n > f ? n : f + 1 )); }
   atmux -L "$ASOCK" new-session -d -s _term -c "$AC/src/acme-api" 'sleep 600'
   atmux -L "$ASOCK" set-environment -g PATH "$AC/stub:$ROOT/bin:$PATH"
   for s in master w1 w2; do mkdir -p "$AC/src/acme-api/$s"; atmux -L "$ASOCK" new-session -d -s "$s" -c "$AC/src/acme-api/$s" -x 120 -y 30 'sleep 600'; done
@@ -19900,7 +19940,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   #   This replaces the launch-marker rows ("a reading from a session still on main's
   # process", "...from the second of a relaunch"): the marker no longer gates anything,
   # and the clock is what decides.
-  T="$(date +%s)"
+  T="$(tnow)"
   jq --argjson t "$T" '.history = [{account:"main", from:0}, {account:"backup", from:($t - 100)}]' \
     "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
   gtick() { ax env CLAUDE_FLEET_ACCOUNTS_GRACE=60 node "$ROOT/lib/accounts.mjs" tick "$ASOCK"; }
@@ -19969,13 +20009,17 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   # live pane (whose tty echoes it) — and nothing is restarted.
   : > "$AC/launched"
   jq '.accounts.main.usage.five_hour.resets = 1' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
-  arec w2 "$ID2" ready 98 10 "$(date +%s)" 1
+  arec w2 "$ID2" ready 98 10 "$(tnow)" 1
   alive w1 "$ID1"; alive w2 "$ID2"
   P2="$(pids)"; R2R="$(restarts)"
   out="$(atick)"; sleep 0.5
   is "accounts: at main's reset the profile resumes on it by itself" "main alice 1 null" \
      "$(active) $(livewho) $(inbox_n 'work: resumed on main') $(jq -c .exhausted "$AW/fleet/accounts.json")"
-  prompted() { grep -q 'Continue what you were working on' <<< "$(atmux -L "$ASOCK" capture-pane -p -J -t "$1")" && echo yes || echo no; }
+  # The prompt is typed into the pane and its tty echoes it: waited for, up to 5s, rather
+  # than read once after a fixed beat a loaded runner may not have given it.
+  prompted() { local i; for i in $(seq 1 50); do
+      grep -q 'Continue what you were working on' <<< "$(atmux -L "$ASOCK" capture-pane -p -J -t "$1")" && { echo yes; return; }
+      sleep 0.1; done; echo no; }
   is "accounts: ...each parked worker is resumed in its OWN process: unparked, told to continue, never restarted" \
      "none none|resumed w1,resumed w2|yes yes|$P2 $R2R no" \
      "$(cut -d' ' -f1 "$AW/fleet/$ASOCK.w1.parked" 2>/dev/null || echo none) $(cut -d' ' -f1 "$AW/fleet/$ASOCK.w2.parked" 2>/dev/null || echo none)|$(grep -E '^accounts: (resumed|un-parked) w' <<< "$out" | sed 's/^accounts: //' | paste -sd, -)|$(prompted w1) $(prompted w2)|$(pids) $(restarts) $([ -s "$AC/launched" ] && echo yes || echo no)"
@@ -19999,7 +20043,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
      "$(jq -e '.accounts.backup.needs_login' "$AW/fleet/accounts.json" >/dev/null && [ "$(active)" != backup ] && echo yes || echo no)"
   # (b) the hook: a turn refused for auth, on the account in use.
   ax node "$FL" set "$AW" bob B2; ax "$ROOT/bin/fleet-accounts" add work backup >/dev/null; ax "$ROOT/bin/fleet-accounts" use work spare >/dev/null
-  arec w1 "$ID1" ready 10 10; jq --argjson t "$(date +%s)" '.failure = {error:"rate_limit", at:$t}' "$AW/fleet/$ID1.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/$ID1.json"
+  arec w1 "$ID1" ready 10 10; jq --argjson t "$(tnow)" '.failure = {error:"rate_limit", at:$t}' "$AW/fleet/$ID1.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/$ID1.json"
   atick >/dev/null
   is "accounts: a StopFailure that is NOT about auth (rate_limit) marks nothing" "spare null" "$(active) $(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json")"
   jq --argjson t "$(on_active)" '.failure = {error:"authentication_failed", at:$t}' "$AW/fleet/$ID1.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/$ID1.json"
@@ -20012,10 +20056,10 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   # a second, so "verified since it went in" held for a login that had never been tried — and
   # the pane was never read (red on ubuntu-latest only). Pinned here so it holds on any runner:
   # a re-added login is a NEW login, proven by nothing that came before it.
-  jq --argjson t "$(( $(date +%s) + 5 ))" '.accounts.spare.verified_at = $t' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+  jq --argjson t "$(( $(tnow) + 5 ))" '.accounts.spare.verified_at = $t' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
   ax node "$FL" set "$AW" carol C3; ax "$ROOT/bin/fleet-accounts" add work spare >/dev/null
   rm -f "$AW/fleet/$ID1.json" "$AW/fleet/$ID2.json"
-  printf 'spare\t%s\n' "$(date +%s)" > "$AW/fleet/$ASOCK.w1.account"
+  printf 'spare\t%s\n' "$(tnow)" > "$AW/fleet/$ASOCK.w1.account"
   atmux -L "$ASOCK" kill-session -t w1; atmux -L "$ASOCK" new-session -d -s w1 -x 120 -y 30 "cat '$FIX/claude-idle.txt'; sleep 600"; sleep 0.3
   atick >/dev/null
   is "accounts: a real idle pane is not a login prompt" "spare null" "$(active) $(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json")"
@@ -20030,7 +20074,7 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   atick >/dev/null
   is "accounts: a 'Please run /login' on a session idle since before the switch is not read" "spare null" \
      "$(active) $(jq -c .accounts.spare.needs_login "$AW/fleet/accounts.json")"
-  pending "$(date +%s)"
+  pending "$(tnow)"
   atick >/dev/null
   is "accounts: ...once that session has done something since, it is -> NEEDS-LOGIN" "w1 is asking for /login" \
      "$(jq -r '.accounts.spare.needs_login.why // ""' "$AW/fleet/accounts.json")"
@@ -20081,13 +20125,13 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   # profile is the owner's: no failover, no park, nothing relaunched onto a saved login, and
   # what the engine parked is let go — said once. dave's 99% sits in a window that resets
   # AFTER backup's, so one-window-per-account alone would hand it to backup.
-  T="$(date +%s)"; rows0="$(inbox_n 'work: on a login that is not saved (fleet-accounts add to manage it) — failover paused')"
+  T="$(tnow)"; rows0="$(inbox_n 'work: on a login that is not saved (fleet-accounts add to manage it) — failover paused')"
   jq --argjson t "$T" --argjson r1 "$R1" '.exhausted = {since:$t, until:$r1}' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
   for s in w1 w2; do printf 'governor-accounts %s\n' "$T" > "$AW/fleet/$ASOCK.$s.parked"; done
   ax node "$FL" set "$AW" dave D1
   # Read BEFORE the tick that notices dave, as the first minute of a hand /login always is:
   # the second between them is what makes "the span opens at the last saved tick" matter.
-  arec w1 "$ID1" ready 99 10 "$(date +%s)" "$((R2 + 1800))"; sleep 1
+  arec w1 "$ID1" ready 99 10 "$(tnow)" "$((R2 + 1800))"; tadv
   out="$(atick; atick)"
   is "accounts: on an unsaved login, its 99% is not credited to backup and nothing fails over" "backup 40 dave" \
      "$(active) $(jq -r .accounts.backup.usage.five_hour.pct "$AW/fleet/accounts.json") $(livewho)"
