@@ -96,16 +96,20 @@ jobs:
       # without an encoder the recorded-run groups skip, and a skip that only names a
       # missing tool is refused by the suite's own skip rule. Neither image ships it.
       # --no-install-recommends keeps the apt side to the codecs it needs.
-      - name: Install tmux, jq and ffmpeg (Linux)
+      #   neovim too, because the editor tab's drag-to-copy is only proven by a real nvim
+      # taking a real drag. The two legs differ on purpose: apt's is 0.9, which has no
+      # getregion and runs lib/nvim-copy-on-select.lua's yank fallback, and Homebrew's is
+      # current. CLAUDE_FLEET_EDITOR above still says vi, so nothing else starts using it.
+      - name: Install tmux, jq, ffmpeg and neovim (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tmux jq ffmpeg
+          sudo apt-get install -y --no-install-recommends tmux jq ffmpeg neovim
 
-      - name: Install tmux, jq and ffmpeg (macOS)
+      - name: Install tmux, jq, ffmpeg and neovim (macOS)
         if: runner.os == 'macOS'
         run: |
-          for p in tmux jq ffmpeg; do
+          for p in tmux jq ffmpeg neovim; do
             brew list --formula "$p" >/dev/null 2>&1 || brew install "$p"
           done
 
@@ -132,6 +136,7 @@ jobs:
           tmux -V
           jq --version
           ffmpeg -hide_banner -version | head -1
+          nvim --version | head -1
 
       # No isolation needed beyond what the suite already does: it puts every tmux
       # server it starts under its own per-run $TMUX_TMPDIR and sweeps the leftovers
