@@ -118,6 +118,23 @@ esac
 # UserPromptSubmit comes next, which is not necessarily this prompt's.
 #   Claude only. The drain is the Claude Stop hook; a codex/opencode target has nothing
 # that would ever deliver a queued prompt, so it keeps the paste.
+# ── THE TARGET'S FILES GO IN THE TARGET FLEET'S DIRECTORY ─────────────────────
+# Everything below that is keyed by $SOCK — the queue, the reply-to marker the target's Stop
+# hook reads, the --now mark, the manifest, the sent log — belongs to the TARGET, and was
+# written under the CALLER's fleet dir. A send from a default-profile pane to a fleet on
+# another profile left its reply-to request in the default dir while the target's hook
+# looked in its own, so the question was worked on and never answered: from the asking
+# side, indistinguishable from being ignored. The fleet's dir comes from its project
+# (lib/fleet-env.mjs); a socket no project owns keeps the caller's, as before.
+CALLER_FLEET_DIR="$FLEET_DIR"
+_fsrc="${BASH_SOURCE[0]}"
+while [ -L "$_fsrc" ]; do _l="$(readlink "$_fsrc")"; case "$_l" in /*) _fsrc="$_l" ;; *) _fsrc="$(dirname "$_fsrc")/$_l" ;; esac; done
+FLEET_ENV="$(cd "$(dirname "$_fsrc")/../lib" 2>/dev/null && pwd)/fleet-env.mjs"
+if command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
+   && _env="$(node "$FLEET_ENV" of "$SOCK" 2>/dev/null)" && [ -n "$_env" ]; then
+  IFS=$'\x1f' read -r _ _dir _ <<< "$_env"
+  [ -n "$_dir" ] && FLEET_DIR="$_dir"
+fi
 QUEUE="$FLEET_DIR/$SOCK.$SESSION.queue"
 
 # mkdir is the lock because it is atomic everywhere this runs (flock is not on macOS).
@@ -372,7 +389,11 @@ if [ -n "$REPLY_TO" ]; then
     _c="$(tmux -L "$RSOCK" show-environment -t "$RSESS" CLAUDE_CONFIG_DIR 2>/dev/null)"
     _c="${_c#CLAUDE_CONFIG_DIR=}"; case "$_c" in /*) rdir="$_c/fleet" ;; esac
   fi
-  [ -n "$rdir" ] || rdir="$FLEET_DIR"           # ...then same-profile, which it usually is
+  if [ -z "$rdir" ] && command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
+     && _env="$(node "$FLEET_ENV" of "$RSOCK" 2>/dev/null)" && [ -n "$_env" ]; then
+    IFS=$'\x1f' read -r _ rdir _ <<< "$_env"   # ...then the asker fleet's own project
+  fi
+  [ -n "$rdir" ] || rdir="$CALLER_FLEET_DIR"    # ...then same-profile, which it usually is
 fi
 
 # The gate. Decided UNDER the lock, so a drain delivering the head right now either
@@ -578,7 +599,7 @@ fi
 #
 # The digest is written through whichever of the two usual tools this host has, and never
 # left blank: an empty field would look like a logged dispatch while answering nothing.
-_sent_log="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}/$SOCK.sent"
+_sent_log="$FLEET_DIR/$SOCK.sent"
 _sent_digest() {                   # shasum on macOS, sha256sum on most Linux, else say so
   local h
   h="$(printf '%s' "$1" | shasum -a 256 2>/dev/null)" || h=""

@@ -409,7 +409,12 @@ relaunch() {
     -e "CLAUDE_FLEET_SOCK=$sock" \
     -e "CLAUDE_FLEET_RESUME=$id" \
     -e "CLAUDE_FLEET_FRESH=0" \
-    "exec agent-here \"$slot\"" 2>/dev/null
+    "exec agent-here \"$slot\"" 2>/dev/null || return 1
+  # A server that was already up kept whatever global env its first client had; the -e above
+  # fixes this session, and this fixes the server and names any session still on the wrong
+  # fleet dir — the one this restart is often run to cure is now right, the rest are listed.
+  [ -f "$LIB/fleet-env.mjs" ] && node "$LIB/fleet-env.mjs" heal "$sock" 2>/dev/null | sed 's/^/fleet-restart: /' >&2
+  return 0
 }
 
 # ── THE WALK ──────────────────────────────────────────────────────────────────

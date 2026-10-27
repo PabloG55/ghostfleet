@@ -141,11 +141,20 @@ case "$cmd" in
       if tmux -L "$SOCK" has-session -t master 2>/dev/null; then
         echo "fleet-project: master already running on $SOCK"
       else
+        # The project's profile both ways: per session with -e, and in the tmux client's own
+        # environment, which a server this starts takes as its GLOBAL one. Run from a session on
+        # another profile (the MCP's fleet_project_add is), the server otherwise took the
+        # caller's fleet dir, and every session opened on it later wrote there.
+        env CLAUDE_CONFIG_DIR="$CDIR" CLAUDE_FLEET_DIR="$CDIR/fleet" CLAUDE_FLEET_PROFILE="$PROFILE" \
         tmux -L "$SOCK" -f "$CONF" new-session -d -s master -c "$main" \
-          -e "CLAUDE_CONFIG_DIR=$CDIR" -e "CLAUDE_FLEET_SOCK=$SOCK" "exec agent-here master" \
+          -e "CLAUDE_CONFIG_DIR=$CDIR" -e "CLAUDE_FLEET_DIR=$CDIR/fleet" -e "CLAUDE_FLEET_PROFILE=$PROFILE" \
+          -e "CLAUDE_FLEET_SOCK=$SOCK" "exec agent-here master" \
           && echo "fleet-project: started master in $main" \
           || { echo "fleet-project: could not start master" >&2; exit 1; }
       fi
+      # ...and a server that was already up may have been started by somebody else's env.
+      command -v node >/dev/null 2>&1 && [ -f "$BIN_DIR/../lib/fleet-env.mjs" ] \
+        && node "$BIN_DIR/../lib/fleet-env.mjs" heal "$SOCK" 2>/dev/null | sed 's/^/fleet-project: /' >&2
       echo "fleet-project: dispatch to it with:  fleet-send -s $SOCK master \"<brief>\""
     fi
     ;;

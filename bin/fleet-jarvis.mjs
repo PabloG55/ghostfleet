@@ -54,6 +54,10 @@ const readStdin = () => { try { return fs.readFileSync(0, 'utf8'); } catch { ret
 // A TIMEOUT ON EVERY ONE: fleet-serve calls jarvisState() on the phone's poll, and a wedged
 // tmux server must cost that request two seconds, not the daemon its event loop.
 const tmux = (sock, ...a) => spawnSync('tmux', ['-L', sock, ...a], { encoding: 'utf8', timeout: 2000 });
+// A new-session that may START the server: the client's env becomes the server's global one,
+// so it is the fleet's profile here, never whoever ran this (lib/fleet-env.mjs).
+const tmuxAs = (m, ...a) => spawnSync('tmux', ['-L', m.sock, ...a], { encoding: 'utf8', timeout: 2000,
+  env: { ...process.env, CLAUDE_CONFIG_DIR: m.cfg, CLAUDE_FLEET_DIR: m.dir, CLAUDE_FLEET_PROFILE: m.profile } });
 const running = (m) => !!m && tmux(m.sock, 'has-session', '-t', '=master').status === 0;
 const sockFor = (name, prof) => (prof === 'work' || prof === 'default') ? `cf-${name}` : `cf-${prof}-${name}`;
 const cfgFor = (prof) => (prof === 'work' || prof === 'default') ? path.join(HOME, '.claude') : path.join(HOME, `.claude-${prof}`);
@@ -213,8 +217,8 @@ function resolveLive(m) {
   return r.status === 0 && id && transcript && fs.existsSync(transcript) ? id : '';
 }
 function startResumed(m, id) {
-  return tmux(m.sock, '-f', path.join(ROOT, 'tmux', 'cf.tmux.conf'), 'new-session', '-d', '-s', 'master', '-c', m.path,
-    '-e', `CLAUDE_CONFIG_DIR=${m.cfg}`, '-e', `CLAUDE_FLEET_SOCK=${m.sock}`, '-e', 'CLAUDE_FLEET_AGENT=',
+  return tmuxAs(m, '-f', path.join(ROOT, 'tmux', 'cf.tmux.conf'), 'new-session', '-d', '-s', 'master', '-c', m.path,
+    '-e', `CLAUDE_CONFIG_DIR=${m.cfg}`, '-e', `CLAUDE_FLEET_DIR=${m.dir}`, '-e', `CLAUDE_FLEET_SOCK=${m.sock}`, '-e', 'CLAUDE_FLEET_AGENT=',
     '-e', `CLAUDE_FLEET_RESUME=${id}`, '-e', 'CLAUDE_FLEET_FRESH=0', `exec ${path.join(BIN, 'agent-here')} master`);
 }
 // The jarvis entry's `apply` (lib/experimental.mjs): what turning the switch on or off has
@@ -362,8 +366,8 @@ function restart() {
   // governor that is running this very command, which exits when its fleet disappears.
   const old = `_jarvis-old-${now}`;
   tmux(m.sock, 'rename-session', '-t', '=master', old);
-  const r = tmux(m.sock, '-f', path.join(ROOT, 'tmux', 'cf.tmux.conf'), 'new-session', '-d', '-s', 'master', '-c', m.path,
-    '-e', `CLAUDE_CONFIG_DIR=${m.cfg}`, '-e', `CLAUDE_FLEET_SOCK=${m.sock}`, '-e', 'CLAUDE_FLEET_AGENT=',
+  const r = tmuxAs(m, '-f', path.join(ROOT, 'tmux', 'cf.tmux.conf'), 'new-session', '-d', '-s', 'master', '-c', m.path,
+    '-e', `CLAUDE_CONFIG_DIR=${m.cfg}`, '-e', `CLAUDE_FLEET_DIR=${m.dir}`, '-e', `CLAUDE_FLEET_SOCK=${m.sock}`, '-e', 'CLAUDE_FLEET_AGENT=',
     '-e', 'CLAUDE_FLEET_FRESH=1', `exec ${path.join(BIN, 'agent-here')} master`);
   if (r.status !== 0) {
     tmux(m.sock, 'rename-session', '-t', `=${old}`, 'master');   // put it back rather than leave none

@@ -316,6 +316,7 @@ while [ -L "$_src" ]; do
   case "$_t" in /*) _src="$_t" ;; *) _src="$(dirname "$_src")/$_t" ;; esac
 done
 UNDIM="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/undim.awk"
+FLEET_ENV="$(cd "$(dirname "$_src")/../lib" 2>/dev/null && pwd)/fleet-env.mjs"
 undim() { LC_ALL=C awk -f "$UNDIM"; }
 
 has_draft() {
@@ -837,11 +838,28 @@ wake_one() {
   rm -f "${FLEET_DIR:?}/$sock.$slot.parked" 2>/dev/null
   # CLAUDE_FLEET_WAKING tells agent-here that THIS start is the wake, so it leaves the marker
   # to the poll below — which keeps it when the wake does not come back.
-  local err
-  err="$(tmux -L "$sock" new-session -d -s "$slot" -c "$cwd" \
+  # THE FLEET'S PROFILE, SAID OUT LOUD. This launch passed neither the config dir nor the
+  # fleet dir, so a woken session ran on whatever the server's global env said — and that is
+  # whoever started the server, which for a fleet started from another profile's session is
+  # the wrong login AND the wrong fleet dir. With no server at all (the wake after a crash)
+  # this new-session starts one, and the client's env becomes its global env: the fleet's,
+  # here, not the caller's. A socket no project owns keeps the old behaviour.
+  local err fe_cfg="" fe_dir="" fe_prof="" fe_out=""
+  local -a fe_e=() fe_env=()
+  if command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
+     && fe_out="$(node "$FLEET_ENV" of "$sock" 2>/dev/null)" && [ -n "$fe_out" ]; then
+    IFS=$'\x1f' read -r fe_cfg fe_dir fe_prof _ <<< "$fe_out"
+    if [ -n "$fe_cfg" ] && [ -n "$fe_dir" ]; then
+      fe_e=(-e "CLAUDE_CONFIG_DIR=$fe_cfg" -e "CLAUDE_FLEET_DIR=$fe_dir" -e "CLAUDE_FLEET_PROFILE=$fe_prof")
+      fe_env=(CLAUDE_CONFIG_DIR="$fe_cfg" CLAUDE_FLEET_DIR="$fe_dir" CLAUDE_FLEET_PROFILE="$fe_prof")
+    fi
+  fi
+  err="$(env ${fe_env[@]+"${fe_env[@]}"} tmux -L "$sock" new-session -d -s "$slot" -c "$cwd" \
+    ${fe_e[@]+"${fe_e[@]}"} \
     -e "CLAUDE_FLEET_SOCK=$sock" -e "CLAUDE_FLEET_RESUME=$id" -e "CLAUDE_FLEET_WAKING=1" \
     "exec agent-here \"$slot\"" 2>&1)" \
     || { echo "fleet-hibernate: could not start a pane for '$slot': $err" >&2; return 1; }
+  [ -n "$fe_dir" ] && node "$FLEET_ENV" heal "$sock" 2>/dev/null | sed 's/^/fleet-hibernate: /' >&2
   local waited=0 pane=""
   while [ "$waited" -lt "$WAKE_TIMEOUT" ]; do
     # A BARE TARGET for the capture, an `=` target for the kill. `=name` is exact-match

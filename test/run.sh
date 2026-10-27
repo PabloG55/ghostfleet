@@ -5897,7 +5897,12 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
     for s in cf-xsamb cf-xsenv cf-xsflag cf-xsforce cf-other; do
       tmux -L "$s" kill-server 2>/dev/null
     done
-    ( cd "$XS/fleet" && ls *.manifest.tsv 2>/dev/null | sed 's/\.manifest\.tsv$//' )
+    # The caller's fleet dir, AND the owning project's: a spawn routed to a registered
+    # project writes into THAT fleet's dir, not the caller's (lib/fleet-env.mjs) — reading
+    # only the caller's made a correctly routed spawn look like one that chose nothing.
+    ( for d in "$XS/fleet" "$XS/home/.claude/fleet"; do ( cd "$d" 2>/dev/null && ls *.manifest.tsv 2>/dev/null ); done \
+        | sed 's/\.manifest\.tsv$//' | sort -u )
+    rm -rf "$XS/home/.claude"
   }
   is "no override: \$TMUX still wins"   "cf-xsamb"   "$(sockchosen '')"
   is "-s wins over \$TMUX"              "cf-xsflag"  "$(sockchosen '' -s cf-xsflag)"
@@ -19188,6 +19193,141 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   rm -rf "${PA:?}" "${PA_TMUX:?}"
 else
   skip "a fleet is restarted and drawn under its own account" "tmux, jq or node missing"
+fi
+
+# ── a fleet runs under ITS OWN profile, whoever started its server ────────────
+# A tmux server's global env is whatever its FIRST client exported. A project on a
+# non-default profile had its server started from a session of a default-profile project
+# that was asking it things and spawning workers into it, so the server's global env named
+# the DEFAULT profile's config and fleet dir. Its master had a per-session config dir and
+# ran on the right login, but nothing set the fleet dir per session, so for four days its
+# records, inbox and status went where neither the phone nor a --reply-to look: no
+# messages on the phone, and a question from the other fleet that was never answered.
+#   The sessions here are Claude-shaped stubs launched by the REAL agent-here, firing the
+# REAL hook with nothing but the environment they were launched with — which is the thing
+# under test. The projects: toolbox on the default profile, acme-api on `personal`.
+# WATCHED GOING RED on the code before this: (a) the spawned server and session carried
+# the default profile's dirs and w1's record landed in the default fleet dir; (b) the
+# MCP-shaped question was never answered; the bare launch kept the server's wrong dir;
+# (c) the governor left the server wrong and wrote no notice.
+group "a fleet runs under its own profile, whoever started its server"
+if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1 \
+   && command -v git >/dev/null 2>&1; then
+  FE="$(cd "$(mktemp -d "$TEST_RUNS.$$.fenv.XXXXXX")" && pwd -P)"; H="$FE/home"
+  WK="$H/.claude"; CL="$H/.claude-personal"; XS=cf-personal-acme-api; TS=cf-toolbox
+  FE_TMUX="$TMUX_TMPDIR/fe"; mkdir -p "$FE_TMUX"
+  mkdir -p "$H/.config/ghostfleet" "$WK/fleet" "$CL/fleet" "$FE/stub" "$FE/src/toolbox"
+  printf 'toolbox\t%s\twork\nacme-api\t%s\tpersonal\n' "$FE/src/toolbox" "$FE/src/acme-api" > "$H/.config/ghostfleet/projects"
+  git init -q -b main "$FE/src/acme-api" 2>/dev/null
+  git -C "$FE/src/acme-api" config user.email t@t; git -C "$FE/src/acme-api" config user.name t
+  : > "$FE/src/acme-api/f"; git -C "$FE/src/acme-api" add -A; git -C "$FE/src/acme-api" commit -qm i 2>/dev/null
+  cat > "$FE/stub/claude-here" <<STUB
+#!/usr/bin/env bash
+slot="\$1"; sid="fe-\$slot"; tr="$FE/\$sid.jsonl"; : > "\$tr"
+echo "\$slot \${CLAUDE_CONFIG_DIR:-} \${CLAUDE_FLEET_DIR:-}" >> "$FE/launched"
+fire() { printf '{"hook_event_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s"}' "\$1" "\$sid" "\$PWD" "\$tr" \\
+         | "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1; }
+rule='────────────────────────────────────────'
+fire SessionStart
+while :; do
+  printf '\033[2J\033[H\n%s\n❯ \n%s\n  status\n' "\$rule" "\$rule"
+  IFS= read -r line || exit 0
+  fire UserPromptSubmit
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"the schema lives in acme-api/db"}]}}' >> "\$tr"
+  fire Stop
+done
+STUB
+  chmod +x "$FE/stub/claude-here"
+  # the caller: a pane on the DEFAULT profile, with that profile's fleet env
+  fe() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_RESUME -u CLAUDE_FLEET_FRESH \
+           -u CLAUDE_FLEET_AGENT -u CLAUDE_FLEET_PROFILE \
+           HOME="$H" TMUX_TMPDIR="$FE_TMUX" CLAUDE_CONFIG_DIR="$WK" CLAUDE_FLEET_DIR="$WK/fleet" \
+           CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_SLOTS="$FE/slots" CLAUDE_FLEET_GOVERNOR=off \
+           PATH="$FE/stub:$ROOT/bin:$PATH" "$@" 2>&1; }
+  ft() { TMUX_TMPDIR="$FE_TMUX" tmux "$@"; }
+  genv() { ft -L "$1" show-environment -g "$2" 2>/dev/null; }
+
+  # ── (a) a spawn from a default-profile pane STARTS the personal fleet's server ──
+  ( cd "$FE/src/acme-api" && fe "$ROOT/bin/fleet-spawn" -s "$XS" w1 --new >/dev/null )
+  wait_for 10 "w1's first hook record" 'ls "$CL/fleet"/fe-w1.json "$WK/fleet"/fe-w1.json >/dev/null 2>&1'
+  is "profile: a server started from another profile's pane takes the FLEET's config dir" \
+     "CLAUDE_CONFIG_DIR=$CL" "$(genv "$XS" CLAUDE_CONFIG_DIR)"
+  is "profile: ...and the fleet's fleet dir" "CLAUDE_FLEET_DIR=$CL/fleet" "$(genv "$XS" CLAUDE_FLEET_DIR)"
+  is "profile: ...the session carries both itself" "CLAUDE_CONFIG_DIR=$CL|CLAUDE_FLEET_DIR=$CL/fleet" \
+     "$(ft -L "$XS" show-environment -t w1 CLAUDE_CONFIG_DIR 2>/dev/null)|$(ft -L "$XS" show-environment -t w1 CLAUDE_FLEET_DIR 2>/dev/null)"
+  is "profile: ...its process was launched with them" "w1 $CL $CL/fleet" "$(grep '^w1 ' "$FE/launched" 2>/dev/null)"
+  is "profile: ...and its record lands in the fleet's dir, with its socket" "$XS" \
+     "$(jq -r '.sock' "$CL/fleet/fe-w1.json" 2>/dev/null)"
+  is "profile: ...and nothing of it in the caller's" "0" "$(ls "$WK/fleet" | grep -c 'fe-w1' || true)"
+
+  # ── (b) a --reply-to question from the default-profile fleet is answered ─────
+  ft -L "$TS" new-session -d -s master -c "$FE/src/toolbox" -e "CLAUDE_CONFIG_DIR=$WK" 'sleep 600'
+  answered() { grep -c "	answered	.*acme-api/db" "$WK/fleet/$TS.inbox" 2>/dev/null || true; }
+  # The way the MCP asks across fleets: the target's profile in the env (invocation() in
+  # mcp/fleet-dispatch.mjs). This is the shape that was never answered.
+  fe env CLAUDE_CONFIG_DIR="$CL" CLAUDE_FLEET_DIR="$CL/fleet" \
+    "$ROOT/bin/fleet-send" -s "$XS" --anyway --reply-to "$TS/master" w1 "where does the schema live" >/dev/null
+  wait_for 12 "the answer in toolbox's inbox" '[ "$(answered)" -ge 1 ]'
+  is "profile: a question asked the way the MCP asks is answered into the asker's inbox" "1" "$(answered)"
+  # And from a plain default-profile pane, which used to leave the request in ITS OWN dir.
+  fe "$ROOT/bin/fleet-send" -s "$XS" --anyway --reply-to "$TS/master" w1 "and where is it migrated" >/dev/null
+  wait_for 12 "the second answer" '[ "$(answered)" -ge 2 ]'
+  is "profile: ...and one asked from a default-profile pane is answered too" "2" "$(answered)"
+  is "profile: ...no request was left behind in the caller's dir" "0" "$(ls "$WK/fleet" | grep -c "$XS.w1.reply-to" || true)"
+
+  # ── the one entry point: a launch that passes NOTHING still lands right ──────
+  # A server already wrong — the shape that ran for four days — and a session started on it
+  # with no -e at all, the way the old wake did. agent-here is what every path runs.
+  ft -L "$XS" set-environment -g CLAUDE_CONFIG_DIR "$WK"; ft -L "$XS" set-environment -g CLAUDE_FLEET_DIR "$WK/fleet"
+  # PATH from this client on purpose: tmux runs a command-line client's new-session with the
+  # CLIENT's PATH, and the stub has to be the claude-here it finds.
+  PATH="$FE/stub:$ROOT/bin:$PATH" ft -L "$XS" new-session -d -s bare -c "$FE/src/acme-api" -e CLAUDE_FLEET_SOCK="$XS" 'exec agent-here bare'
+  wait_for 10 "bare to launch" 'grep -q "^bare " "$FE/launched"'
+  is "profile: a session launched on a wrong server with no -e still gets the fleet's dirs" \
+     "bare $CL $CL/fleet" "$(grep '^bare ' "$FE/launched" 2>/dev/null)"
+
+  # ── (c) the governor corrects a wrong server and names the stragglers, once ──
+  # old1 is a process started under the wrong env BEFORE any of this — run without
+  # agent-here, which is exactly what an old launch looked like — so it writes its record
+  # into the default dir and goes on doing so.
+  ft -L "$XS" new-session -d -s old1 -c "$FE/src/acme-api" -e CLAUDE_FLEET_SOCK="$XS" \
+    -e CLAUDE_CONFIG_DIR="$WK" -e CLAUDE_FLEET_DIR="$WK/fleet" "exec '$FE/stub/claude-here' old1"
+  wait_for 10 "old1's record in the wrong dir" '[ -f "$WK/fleet/fe-old1.json" ]'
+  wait_for 10 "bare's record" '[ -f "$CL/fleet/fe-bare.json" ]'
+  old1pid="$(ft -L "$XS" display-message -p -t old1 '#{pane_pid}' 2>/dev/null)"
+  gov() { fe env CLAUDE_CONFIG_DIR="$CL" CLAUDE_FLEET_DIR="$CL/fleet" \
+            "$ROOT/bin/fleet-governor" -s "$XS" --once --no-resource >/dev/null; }
+  gov
+  is "profile: the governor puts the server's config dir right" "CLAUDE_CONFIG_DIR=$CL" "$(genv "$XS" CLAUDE_CONFIG_DIR)"
+  is "profile: ...and its fleet dir" "CLAUDE_FLEET_DIR=$CL/fleet" "$(genv "$XS" CLAUDE_FLEET_DIR)"
+  envrows() { grep -c "	fleet	env	" "$CL/fleet/$XS.inbox" 2>/dev/null || true; }
+  is "profile: ...and says so in the fleet's own inbox, once" "1" "$(envrows)"
+  row="$(grep "	fleet	env	" "$CL/fleet/$XS.inbox" 2>/dev/null)"
+  is "profile: ...naming the session still writing to the wrong dir, and how to restart it" "yes" \
+     "$(grep -q 'old1' <<< "$row" && grep -q "fleet-restart -s $XS --session old1" <<< "$row" && echo yes || echo "no: $row")"
+  is "profile: ...and ONLY that one — not the sessions that are right" "old1" \
+     "$(sed -nE 's/.*	sessions? (.*) (is|are) still writing.*/\1/p' <<< "$row")"
+  is "profile: ...nothing about it in the default fleet's inbox" "0" \
+     "$(grep -c '	env	' <<< "$(cat "$WK/fleet/$XS.inbox" 2>/dev/null)" || true)"
+  gov
+  is "profile: a second tick adds nothing — noticed once" "1" "$(envrows)"
+  is "profile: ...and the straggler was not restarted" "$old1pid" \
+     "$(ft -L "$XS" display-message -p -t old1 '#{pane_pid}' 2>/dev/null)"
+
+  # THROUGH A SYMLINK. Every launch site asks `node <lib>/fleet-env.mjs of <sock>` by a path
+  # built with `cd … && pwd`, which keeps a symlinked component; the CLI compared that to its
+  # own resolved path and, through a link, silently answered nothing — "nobody's fleet". It
+  # went unseen because this repo's path has no link in it; a copy under /tmp does.
+  ln -s "$ROOT" "$FE/linked"
+  is "profile: the resolver answers when it is reached through a symlink" "$CL/fleet" \
+     "$(HOME="$H" node "$FE/linked/lib/fleet-env.mjs" of "$XS" 2>/dev/null | cut -d$'\x1f' -f2)"
+  is "profile: ...and so does the projects reader beside it" "acme-api" \
+     "$(HOME="$H" node "$FE/linked/lib/projects.mjs" sock "$XS" 2>/dev/null | cut -d$'\x1f' -f1)"
+
+  for s in "$XS" "$TS"; do ft -L "$s" kill-server 2>/dev/null; done
+  rm -f "$FE/linked"; rm -rf "${FE:?}" "${FE_TMUX:?}"
+else
+  skip "a fleet runs under its own profile" "tmux, jq, node or git missing"
 fi
 
 # ── several Claude logins per profile, and failover between them (experimental) ─
