@@ -473,10 +473,28 @@ shows the pin and when it ends.
 
 **Readings are only as fresh as the last turn on that login.** Figures come from the mod's session
 records (`usage.limits.five_hour` / `seven_day`), so only the account in use is ever read. Nothing
-sends a request on an inactive account to refresh its figures. The last reading is trusted, and
-`list` shows how old each figure is (`read 2d ago`), so a stale one is visible. If a stale reading
-sends the profile to an account that is in fact spent, the first reply there carries the real
-figure, which is over the threshold, and the profile moves on.
+sends a request on an inactive account to refresh its figures, and `list` shows how old each figure
+is (`read 2d ago`). So a **planned** move (`backup's week resets first`) is made only to an account
+read in the **last 6 hours**. An older one is shown as `ready, stale (no planned move onto it)` and
+is used only as a **failover**, when the account in use cannot run, because a stale account beats
+stopping. The cost of trusting an old figure is not bounded the way it looks: a turn refused at the
+limit carries no usage figures, so it never becomes a reading. An account read three days ago at
+0% can have hit its weekly limit since, and nothing in its figures says so.
+
+**A turn refused at the limit is a reading.** When a turn fails with Claude's own usage-limit
+message, `You've hit your weekly limit · resets Oct 29 at 1am (America/New_York)` (or `session
+limit`, or a per-model limit), the StopFailure hook keeps that sentence beside `rate_limit` in the
+session's record. The account it was on is marked **OUT** until the reset the sentence names, in
+the zone it names. If there is no time it can read, the mark lasts until the stored weekly reset or
+24 hours after the failure, whichever is later. An OUT account is never chosen before then, not even
+as a failover. If it is the account in use, the profile leaves it **at once**, the same way it
+leaves one at the threshold: no 15-minute hold, and a by-hand pin does not keep it there. With
+nowhere to go, the profile is exhausted until the earliest reset. `list` shows `OUT until Thu 01:00
+(hit its weekly limit)`. A `rate_limit` without that sentence is a plain 429 that ran out of retries,
+and marks nothing. The failure that lands in the 90-second grace window right after a switch still
+counts when the account switched away from had room, because a limit there can only be the new
+account's. `fleet-accounts use` on an OUT account switches anyway (you may know the limit was
+lifted) and says so; the next turn refused at the limit marks it again.
 
 **What happens at the limit.** When either figure reaches the threshold (`fleet-accounts
 threshold`, default 97), the profile moves to the best account that still has room, chosen by the

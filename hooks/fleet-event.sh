@@ -96,12 +96,18 @@ fi
 # after it was swapped in. The error is one word from the binary's own enum, kept as
 # `failure` in the record until the next event rebuilds it. With the accounts switch off this
 # is the hook it was before StopFailure was wired: nothing written.
-FAILURE=""
+#   `rate_limit` is a usage limit AND a plain 429 that ran out of retries, so for it the
+# sentence goes in too (`failure.message`): "You've hit your weekly limit · resets Oct 29 at
+# 1am (America/New_York)" is what says which, and until when. It is the turn's own text
+# (`last_assistant_message`; the raw API error when there is none), one line, capped.
+FAILURE="" FAILURE_MSG=""
 if [ "$EVENT" = "StopFailure" ]; then
   grep -qsx on "${CLAUDE_FLEET_EXPERIMENTAL_DIR:-$HOME/.config/ghostfleet}/accounts.enabled" \
     || { _dbg "exit: StopFailure with the accounts switch off"; exit 0; }
   FAILURE="$(printf '%s' "$input" | jq -r '.error // "unknown"' 2>/dev/null | tr -cd 'a-z_')"
   [ -n "$FAILURE" ] || FAILURE=unknown
+  [ "$FAILURE" = rate_limit ] && FAILURE_MSG="$(printf '%s' "$input" \
+    | jq -r '(.last_assistant_message // .error_details // "") | tostring | gsub("[[:cntrl:]]+"; " ") | .[0:300]' 2>/dev/null)"
 fi
 
 # --- derive identity ---------------------------------------------------------
@@ -383,11 +389,11 @@ if jq -n \
   --arg sock "$SOCK" --arg pane "$PANE" \
   --arg cwd "$CWD" --arg folder "$folder" --arg branch "$branch" \
   --arg status "$status" --arg tr "$TRANSCRIPT" --argjson ts "$now" --arg from "$FROM" \
-  --argjson mod "$_mod" --arg failure "$FAILURE" \
+  --argjson mod "$_mod" --arg failure "$FAILURE" --arg fmsg "$FAILURE_MSG" \
   '{session_id:$id, zellij:$z, sock:$sock, slot:$slot, pane:$pane, cwd:$cwd, folder:$folder,
     branch:$branch, status:$status, transcript:$tr, ts:$ts}
    + (if $from != "" then {continued_from:$from} else {} end) + $mod
-   + (if $failure != "" then {failure:{error:$failure, at:$ts}} else {} end)' \
+   + (if $failure != "" then {failure:({error:$failure, at:$ts} + (if $fmsg != "" then {message:$fmsg} else {} end))} else {} end)' \
   >"$tmp" 2>/dev/null
 then
   mv -f "$tmp" "$FLEET_DIR/$SESSION.json" 2>/dev/null || _dbg "write: could not move $tmp into place"

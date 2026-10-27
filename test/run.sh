@@ -19881,6 +19881,15 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
           HOME="$AH" CLAUDE_CONFIG_DIR="$AW" CLAUDE_FLEET_DIR="$AW/fleet" bash "$ROOT/hooks/fleet-event.sh"
   is "accounts on: ...and with it on, the record carries the failure word" "ready authentication_failed" \
      "$(jq -r '"\(.status) \(.failure.error)"' "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json" 2>/dev/null)"
+  # rate_limit is a usage limit or a bare 429; the turn's own sentence says which, so it goes in.
+  jq -nc --arg id eeeeeeee-0000-4000-8000-0000000000f1 --arg cwd "$AC/src/acme-api/w2" \
+     '{hook_event_name:"StopFailure", session_id:$id, cwd:$cwd, error:"rate_limit",
+       last_assistant_message:"You\u0027ve hit your weekly limit · resets Oct 29 at 1am (America/New_York)\n/upgrade"}' \
+    | env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_FLEET_EXPERIMENTAL_DIR \
+          HOME="$AH" CLAUDE_CONFIG_DIR="$AW" CLAUDE_FLEET_DIR="$AW/fleet" bash "$ROOT/hooks/fleet-event.sh"
+  is "accounts on: a rate_limit failure keeps Claude's sentence beside the word, on one line" \
+     "rate_limit|You've hit your weekly limit · resets Oct 29 at 1am (America/New_York) /upgrade" \
+     "$(jq -r '"\(.failure.error)|\(.failure.message)"' "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json" 2>/dev/null)"
   rm -f "$AW/fleet/eeeeeeee-0000-4000-8000-0000000000f1.json"
 
   # ── 5h at the threshold, and one point under it ───────────────────────────────
@@ -20232,7 +20241,7 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   px() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR \
            -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_FLEET_PROFILE \
            HOME="$PH" TMUX_TMPDIR="$PC_TMUX" CLAUDE_FLEET_LOGIN_STORE=keychain FAKE_KEYCHAIN="$PC/kc" \
-           CLAUDE_FLEET_SECURITY="$ROOT/test/helpers/fake-security.mjs" CLAUDE_FLEET_ACCOUNTS_GRACE=0 \
+           CLAUDE_FLEET_SECURITY="$ROOT/test/helpers/fake-security.mjs" CLAUDE_FLEET_ACCOUNTS_GRACE="${PGRACE:-0}" \
            CLAUDE_FLEET_ACCOUNTS_CLOCK="$CLK" PATH="$ROOT/bin:$PATH" "$@" 2>&1; }
   # ptick <clock> — one governor tick at that second; prints the account in use after it
   ptick() { CLK="$1" px node "$ROOT/lib/accounts.mjs" tick "$PSOCK" >/dev/null; pst '.active'; }
@@ -20359,6 +20368,153 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   rm -rf "${PC:?}"
 else
   skip "accounts planner" "jq or node missing"
+fi
+
+# ── never switch to an account that is out of usage ───────────────────────────────
+# A turn refused at the limit carries no usage headers, so it never became a reading, and an
+# account's last reading could say "0%, week ends first" for days after it had run out. The
+# planner then moved the profile onto it on that reading, every turn failed with "You've hit
+# your weekly limit · resets …", the owner moved it back by hand, and two hours later the pin
+# ran out and the planner moved it back again — three times in one afternoon. Two rules now:
+# Claude's own limit sentence, kept by the StopFailure hook beside `rate_limit`, IS a reading
+# (out until the reset it names, left at once), and a planned move needs a reading younger
+# than STALE_S. Same clock seam and helpers as the planner group above; the failed turns are
+# a second session record, since a failed turn writes no usage of its own.
+# WATCHED GOING RED on staging (d68becd): the 3-days-stale backup was moved onto (backup, not
+# main); a weekly failure on backup was never read (backup stayed in use, no `out`, and the
+# return before the reset happened); the 5h failure on main never moved the profile (main);
+# the stale failover row was red with it; `list` had no `stale` and no `OUT until`. And
+# against this code: with the staleness check in preferred() removed the first row read
+# backup; with failedOn() reduced to accountAt the grace row read backup and null; with
+# usable() not asking outNow the not-before-the-reset row went back to backup at once.
+group "accounts: never switch to an account that is out of usage"
+if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  PC="$(cd "$(mktemp -d "$TEST_RUNS.$$.out.XXXXXX")" && pwd -P)"; PH="$PC/home"; PW="$PH/.claude"
+  PC_TMUX="$TMUX_TMPDIR/out"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api"
+  printf 'acme-api\t%s\twork\n' "$PC/src/acme-api" > "$PH/.config/ghostfleet/projects"
+  CLK=$T px "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
+  # pfail <n> <at> <message> — session n's turn failed at <at> with rate_limit and that text,
+  # as hooks/fleet-event.sh writes it
+  pfail() { jq -n --arg sock "$PSOCK" --argjson at "$2" --arg m "$3" --arg id "eeeeeeee-0000-4000-8000-00000000010$1" \
+              '{session_id:$id, sock:$sock, slot:"w\($id[-1:])", status:"ready", ts:$at, failure:{error:"rate_limit", at:$at, message:$m}}' \
+              > "$PW/fleet/eeeeeeee-0000-4000-8000-00000000010$1.json"; }
+  W7="You've hit your weekly limit · resets Mar 19 at 1am (America/New_York)"; R7=1900126800   # 05:00Z, EDT
+  W5="You've hit your session limit · resets 9:50pm (UTC)"; R5=$((T + 14600))
+
+  # ── the parser, on the binary's sentence and on the panes that carry it ─────────
+  lh() { node --input-type=module -e "
+    import fs from 'node:fs'; import { limitHit } from '$ROOT/lib/accounts.mjs';
+    const [src, at] = process.argv.slice(1); const t = fs.existsSync(src) ? fs.readFileSync(src, 'utf8') : src;
+    const r = limitHit(t, Number(at)); console.log(r ? \`\${r.limit || '-'} \${r.resets}\` : 'null');" "$1" "$2" 2>&1; }
+  ON=$(( $(node -e 'console.log(Date.parse("2026-10-27T14:39:29Z")/1000)') ))
+  is "out: the binary's weekly sentence, its 'Oct 29, 1am' twin, and the year form, read to the instant" \
+     "7d 1793250000|7d 1793250000|7d 1798853400" \
+     "$(lh "You've hit your weekly limit · resets Oct 29 at 1am (America/New_York)" $ON)|$(lh "You've hit your weekly limit · resets Oct 29, 1am (America/New_York)" $ON)|$(lh "You've hit your weekly limit · resets Jan 2, 2027 at 1:30am (UTC)" $ON)"
+  is "out: a bare time is the next one after the failure, across midnight" "5h 1792808400" \
+     "$(lh "You've hit your session limit · resets 10:20pm (America/New_York)" $(node -e 'console.log(Date.parse("2026-10-23T23:00:00Z")/1000)'))"
+  # The captured 5h panes and the weekly ones at 30 columns, where the sentence is three
+  # lines. (The pane is not the signal — a session QUOTING the line reads the same — but it
+  # is the same text, and this is where it was measured.)
+  REF=$(node -e 'console.log(Date.parse("2026-10-23T23:00:00Z")/1000)')
+  is "out: the 5h and weekly panes read the same at full width and at 30 columns" \
+     "5h 1792808400|5h 1792808400|7d 1793250000|7d 1793250000" \
+     "$(lh "$ROOT/test/fixtures/claude-limit-hit.txt" $REF)|$(lh "$ROOT/test/fixtures/claude-limit-hit-30col.txt" $REF)|$(lh "$ROOT/test/fixtures/claude-limit-weekly.txt" $ON)|$(lh "$ROOT/test/fixtures/claude-limit-weekly-30col.txt" $ON)"
+  is "out: not a usage limit — fast mode's own, a bare 429 — and a limit with no time it can read" "null|null|7d 0|7d 0" \
+     "$(lh "You've hit your fast limit · resets 3pm (UTC)" $ON)|$(lh "API Error: 429 rate limited" $ON)|$(lh "You've hit your weekly limit" $ON)|$(lh "You've hit your weekly limit · resets Oct 29 at 1am (Not/AZone)" $ON)"
+
+  # ── (a) the owner's case: a 3-days-old 0% is no reason to move ─────────────────
+  # backup read three days ago at 0%, its week "ending" 60h before main's: well past the margin.
+  fresh main backup
+  rd backup 0 $((T + 70*H)) $((T - 72*H))
+  prec 10 $((T + 4*H)) 30 $((T + 130*H)) "$T"
+  r1="$(ptick $((T + 60)))"
+  fresh main backup
+  rd backup 0 $((T + 70*H)) $((T - H))
+  prec 10 $((T + 4*H)) 30 $((T + 130*H)) "$T"
+  is "out: a planned move onto a 3-days-stale reading is not made; onto the same reading an hour old, it is" "main backup" "$r1 $(ptick $((T + 60)))"
+
+  # ── (e) ...but a stale account is still the failover when the one in use runs out ──
+  fresh main backup
+  rd backup 0 $((T + 70*H)) $((T - 72*H))
+  prec 10 $((T + 4*H)) 30 $((T + 130*H)) "$T"
+  ptick $((T + 60)) >/dev/null
+  out="$(CLK=$((T + 60)) px "$ROOT/bin/fleet-accounts" list work)"
+  is "out: list marks the stale account, and not the fresh one in use" "yes no" \
+     "$(grep -qE '^ +backup .* ready, stale' <<< "$out" && echo yes || echo "no: $out") $(grep -qE '^ +\* main .*stale' <<< "$out" && echo yes || echo no)"
+  pfail 1 $((T + 120)) "$W5"
+  is "out: main hits its 5h limit -> the stale backup, because that beats stopping" "backup $R5 null" \
+     "$(ptick $((T + 180))) $(pst .accounts.main.out.until) $(pst .exhausted)"
+
+  # ── (b) a weekly failure on the account just moved to: out until the reset, left AT ONCE ──
+  fresh main backup
+  rd backup 0 $((T + 70*H)) $((T - H))
+  prec 10 $((T + 4*H)) 30 $((T + 130*H)) "$T"
+  r1="$(ptick $((T + 60)))"                                  # planned: backup's week ends first
+  pfail 1 $((T + 120)) "$W7"
+  r2="$(ptick $((T + 180)))"                                 # two minutes into the 15-minute hold
+  is "out: weekly limit on backup -> out until the reset it named, and the profile leaves inside the hold" \
+     "backup main $R7 7d" "$r1 $r2 $(pst .accounts.backup.out.until) $(pst .accounts.backup.out.limit)"
+  is "out: ...said once in the inbox log, and the switch reaches the phone as 7d at 100%" "1 7d 100" \
+     "$(grep -c "backup hit its weekly limit — out until" "$PW/fleet/accounts.log") $(jq -r 'select(.event=="switched" and .from=="backup") | "\(.limit) \(.pct)"' "$PW/fleet/accounts.notify")"
+  # A fresh reading that says backup's week ends first, an hour before the reset: still not.
+  rd backup 0 $((T + 70*H)) $((R7 - 2*H))
+  r1="$(ptick $((R7 - H)))"
+  # ── (d) ...and once the reset has passed, it is eligible again ─────────────────
+  is "out: not chosen before the reset, even on a fresh reading that says it should be; chosen after" "main backup" \
+     "$r1 $(ptick $((R7 + 60)))"
+  # The same failure record is still on disk: it is spent, and does not mark backup again.
+  is "out: ...the failure already read does not mark it out again once the reset has passed" "$R7" "$(pst .accounts.backup.out.until)"
+
+  # ── a pinned choice gives way too, and the first failed turn inside the grace window counts ──
+  fresh main backup
+  rd backup 0 $((T + 140*H)) $((T - H))                      # its week ends later: no planned move
+  prec 10 $((T + 4*H)) 30 $((T + 130*H)) "$T"; ptick "$T" >/dev/null
+  CLK=$((T + 60)) px "$ROOT/bin/fleet-accounts" use work backup >/dev/null
+  pfail 1 $((T + 90)) "$W7"                                  # 30s after the switch: inside a 90s grace
+  is "out: a by-hand 'use' of backup is left at its weekly limit, failure in the grace window and all" "main $R7" \
+     "$(PGRACE=90 ptick $((T + 150))) $(pst .accounts.backup.out.until)"
+  out="$(CLK=$((T + 200)) px "$ROOT/bin/fleet-accounts" list work)"
+  is "out: list says OUT and until when" "yes" "$(grep -qE '^ +backup .* OUT until [^ ]+.*\(hit its weekly limit\)' <<< "$out" && echo yes || echo "no: $out")"
+  # ...where the login it replaced was itself out, a failure in that window is nobody's.
+  fresh main backup
+  prec 10 $((T + 4*H)) 30 $((T + 130*H)) "$T"; rd backup 0 $((T + 140*H)) $((T - H)); ptick "$T" >/dev/null
+  pfail 1 $((T + 60)) "$W5"; ptick $((T + 120)) >/dev/null   # main out -> backup at T+120
+  pfail 2 $((T + 150)) "$W5"                                 # main's session, not moved yet
+  is "out: ...but inside the grace window after leaving an account that was OUT, a limit is nobody's" "backup null" \
+     "$(PGRACE=90 ptick $((T + 240))) $(pst .accounts.backup.out)"
+
+  # ── (c) the 5h variant: out until its 5h reset, and back once it has passed ───
+  # main's week ends first, so without the mark the planner would return to it after the hold.
+  fresh main backup
+  rd backup 20 $((T + 100*H)) $((T - H))
+  prec 40 $((T + 4*H)) 30 $((T + 30*H)) "$T"
+  pfail 1 $((T + 60)) "$W5"
+  is "out: 5h limit on main -> backup at once; not back past the hold; back once its 5h reset passes" \
+     "backup $R5 backup backup main" \
+     "$(ptick $((T + 120))) $(pst .accounts.main.out.until) $(ptick $((T + 20*60))) $(ptick $((R5 - 60))) $(ptick $((R5 + 60)))"
+  # Both out: exhausted until the earlier reset — not "back to the one with room on paper".
+  fresh main backup
+  rd backup 20 $((T + 100*H)) $((T - H))
+  prec 40 $((T + 4*H)) 30 $((T + 30*H)) "$T"
+  pfail 1 $((T + 60)) "$W5"; ptick $((T + 120)) >/dev/null
+  pfail 2 $((T + 180)) "$W7"
+  is "out: both out -> exhausted until the earlier reset, not put back on either" "backup $R5" \
+     "$(ptick $((T + 240))) $(pst .exhausted.until)"
+  # No reset it can read: until the stored 7d reset, or a day, whichever is later.
+  fresh main backup
+  rd backup 20 $((T + 100*H)) $((T - H))
+  prec 40 $((T + 4*H)) 30 $((T + 10*H)) "$T"
+  pfail 1 $((T + 60)) "You've hit your weekly limit"
+  r1="$(ptick $((T + 120))) $(pst .accounts.main.out.until)"
+  fresh main backup
+  rd backup 20 $((T + 100*H)) $((T - H))
+  prec 40 $((T + 4*H)) 30 $((T + 30*H + 86400*2)) "$T"
+  pfail 1 $((T + 60)) "You've hit your weekly limit"
+  is "out: with no reset to read, out a day after the failure or until the stored 7d reset, whichever is later" \
+     "backup $((T + 60 + 86400))|backup $((T + 30*H + 86400*2))" "$r1|$(ptick $((T + 120))) $(pst .accounts.main.out.until)"
+  rm -rf "${PC:?}"
+else
+  skip "accounts: never switch to an account that is out of usage" "jq or node missing"
 fi
 
 # ── fleet-mod reload: onto the mod, touching only what is idle and empty ─────
