@@ -1400,8 +1400,8 @@ export function pushPayload(events, detail) {
   const acct = events.find(e => e.kind === 'account' && e.account);
   if (acct) {
     const a = acct.account, named = detail !== 'anonymous';
-    const EV = new Set(['switched', 'exhausted', 'needs-login', 'resumed']);
-    const CAUSE = new Set(['limit', 'needs-login', 'by-hand', 'none-active']);
+    const EV = new Set(['switched', 'exhausted', 'needs-login', 'blocked', 'resumed']);
+    const CAUSE = new Set(['limit', 'needs-login', 'blocked', 'by-hand', 'none-active']);
     out.account = { event: EV.has(a.event) ? a.event : 'switched' };
     if (CAUSE.has(a.cause)) out.account.cause = a.cause;
     if (a.limit === '5h' || a.limit === '7d') out.account.limit = a.limit;
@@ -1548,7 +1548,7 @@ export function undeliveredEvents(dirs, socks, sizes, names = new Map()) {
 const undeliveredSizes = new Map();  // marker path -> its size at the last scan
 
 // ── an account notice is a line in <fleet dir>/accounts.notify ──────────────
-// lib/accounts.mjs appends one JSON line per switch / exhausted / needs-login / resumed.
+// lib/accounts.mjs appends one JSON line per switch / exhausted / needs-login / blocked / resumed.
 // Read by growth, exactly as the undelivered markers are: the first sight of a file is a
 // baseline (yesterday's switch is not news), and only the bytes added since are read. Each
 // line becomes one event; pushPayload() copies its fields out by name, never by spreading.

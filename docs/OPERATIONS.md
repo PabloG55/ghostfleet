@@ -430,7 +430,7 @@ of service; whether to use this, and how, is your responsibility.
 A profile keeps **one** config dir — its conversations, settings, plugins, folder trust and
 `fleet/` dir never move. What changes is the **login** that dir holds, which is exactly what
 `/login` to another account does by hand. An *account* here is a saved login for a profile, and
-a profile can have any number of them, in order: main, fallback 1, fallback 2, …
+a profile can have any number of them. The order you add them in only breaks ties.
 
 ```bash
 fleet-experimental enable accounts
@@ -443,27 +443,53 @@ fleet-accounts list
 ```
 
 ```
-accounts; switch at 97% of the 5h or 7d limit
+accounts; switch at 97% of the 5h or 7d limit, spending the week that ends first
 
 work  (~/.claude)
-  * main    5h  98% (resets 14:00)      7d  41% (resets Mon 09:00)  exhausted until 14:00 (active)
-    backup  5h —                        7d —                        ready
+    main    5h  97% (resets 14:00, read 10m ago)         7d  30% (resets Tue 09:00, read 10m ago)     exhausted until 14:00
+  * backup  5h —                                         7d  90% (resets Fri 15:00, read 2d ago)      active
 ```
 
-**What happens at the limit.** Every fleet's governor reads the active account's 5-hour and
-weekly figures from the mod's session records (`usage.limits.five_hour` / `seven_day`). When
-either reaches the threshold (`fleet-accounts threshold`, default 97), the profile moves to the
-next account in order that still has room: the current login is copied back into its slot, the
-next one is put where Claude Code reads its login, and an inbox row plus a phone push say
-`work: switched from main to backup (5h at 97%)`. That is the whole switch, the same thing a
+**Which account it runs on: the allowance that expires first.** What is left of a weekly window
+when it resets is lost, so of the accounts under the threshold on **both** the 5-hour and the
+weekly window, the profile runs on the one whose weekly window resets soonest. Two weeks that end
+within 5 hours of each other count as a tie, and the one with more weekly room wins it. An account
+with no weekly reading counts as resetting last. In the listing above, main's week ends three
+days before backup's. So main is used until its 5-hour window runs out, the profile goes to backup,
+and it **comes back to main once main's 5-hour window resets** (14:00). That way main's week is
+spent before it expires, and backup's last 10% is kept for when it is needed.
+
+**Anti-thrash.** A switch away from an account that still has room happens only when the other
+account's week ends **more than 5 hours sooner**. Five hours is one 5-hour window: two weeks that
+end closer than that expire practically together, so switching between them buys nothing. The
+profile is also **held for 15 minutes after any switch**, long enough for the new login to be
+read, so the next choice is made on a real figure. Neither rule applies when the account in use is
+over the threshold or unusable; then it moves at once.
+
+**By hand.** `fleet-accounts use <profile> <name>` switches now and **pins** that account for
+**2 hours**: the planner leaves it there, unless it reaches the threshold or stops working. A
+`/login` by hand to a saved account is adopted and pinned the same way. `fleet-accounts list`
+shows the pin and when it ends.
+
+**Readings are only as fresh as the last turn on that login.** Figures come from the mod's session
+records (`usage.limits.five_hour` / `seven_day`), so only the account in use is ever read. Nothing
+sends a request on an inactive account to refresh its figures. The last reading is trusted, and
+`list` shows how old each figure is (`read 2d ago`), so a stale one is visible. If a stale reading
+sends the profile to an account that is in fact spent, the first reply there carries the real
+figure, which is over the threshold, and the profile moves on.
+
+**What happens at the limit.** When either figure reaches the threshold (`fleet-accounts
+threshold`, default 97), the profile moves to the best account that still has room, chosen by the
+rule above. The current login is copied back into its slot, the next one is put where Claude Code
+reads its login, and an inbox row plus a phone push say
+`work: switched from main to backup (5h at 97%)`. A planned move back (`switched from backup to main
+(main's week resets first, …)`) gets an inbox row but no push. That is the whole switch, the same thing a
 `/login` by hand does: **no session is restarted**. Each running Claude re-reads its login by
 itself (from the Keychain every 30 seconds on macOS, from `.credentials.json` on Linux), so a
 session mid-turn finishes that turn and its next request goes out on the new account, with its
 screen, its scrollback and anything it has running in the background left as they were. For a
 short grace window after a switch (`CLAUDE_FLEET_ACCOUNTS_GRACE`, default 90 seconds) a session
-may still be on the old login, so usage read in that window is credited to neither account. It **does not switch back** when an earlier account's window resets: it stays on
-the one it is on until that one is over the line, and the next switch then takes the first
-account in order with room. `fleet-accounts use <profile> <name>` switches by hand.
+may still be on the old login, so usage read in that window is credited to neither account.
 
 **When every account is spent**, every worker in the profile's fleets is parked (the lead is
 not), an inbox row and a push say `all work accounts exhausted until 14:00`, and at the
@@ -479,6 +505,13 @@ the profile's `settings.json`), or a session launched on it showing Claude's own
 …` with the exact command), and skipped until you `/login` to it again and re-run `fleet-accounts
 add work backup`, which clears the mark. It is never retried in a loop, and the profile's own
 first account expiring is the same case.
+
+**An account its organization has turned off** is a different case. A turn fails with
+`oauth_org_not_allowed` ("Your organization has disabled Claude subscription access for Claude
+Code"), and a `/login` gets the same refusal. That account is marked **BLOCKED**, said once with
+a push, and skipped. `list` shows it with the fix: only an admin of that organization can turn
+access back on. `use` refuses it. The mark clears by itself when a later reading on that login
+succeeds (a turn went through), or when you `/login` to it and `fleet-accounts add` it again.
 
 **Where the logins are.** Claude Code keeps a config dir's login in the macOS Keychain (item
 `Claude Code-credentials-<hash of the config dir>`) or, on Linux, `<config dir>/.credentials.json`,

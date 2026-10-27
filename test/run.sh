@@ -19718,8 +19718,8 @@ fi
 
 # ── several Claude logins per profile, and failover between them (experimental) ─
 # A profile is one config dir and stays one; an ACCOUNT is a saved login for it. When the
-# login in use reaches the threshold (5h OR 7d, default 97%), lib/accounts.mjs puts the next
-# saved login where Claude Code reads its own, and that is all: like a /login by hand, it
+# login in use reaches the threshold (5h OR 7d, default 97%), lib/accounts.mjs puts the best
+# saved login with room (the planner group after this one) where Claude Code reads its own: like a /login by hand, it
 # restarts no session, and each running Claude moves onto the new login by itself. A saved
 # login that no longer works is marked NEEDS-LOGIN and skipped; when nothing is left, the
 # workers are parked until the earliest reset, then resumed in the processes they are in. Everything here runs in a fake HOME, against a fake `security` (test/helpers/
@@ -19918,15 +19918,15 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   atick >/dev/null
   is "accounts: 7d at 98% switches backup -> spare, skipping main which is still over" "spare carol" "$(active) $(livewho)"
   is "accounts: ...naming the 7d limit" "1" "$(inbox_n 'work: switched from backup to spare (7d at 98%)')"
-  # main's window resets. NEVER SWITCH BACK: spare stays until it is over the line itself.
+  # main's window resets; when spare runs low, the switch goes to main, the one account with
+  # room (backup is still over its 7d). Whether main is ALSO worth going back to before then
+  # is the planner's question, asked on a clock of its own in the group after this one.
   jq '.accounts.main.usage.five_hour.resets = 1' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
   arec w1 "$ID1" ready 97 10 "$((NOW - 100))" 1
   atick >/dev/null
-  is "accounts: after main resets the profile stays on spare (no switch back)" "spare carol" "$(active) $(livewho)"
-  # ...and when spare runs low, the next switch goes to the HIGHEST-priority account with room.
   arec w2 "$ID2" working 99 10 "$(on_active)"
   atick >/dev/null
-  is "accounts: spare at 99% -> main (first in order with room), not backup" "main alice at-A3" "$(active) $(ax node "$FL" live "$AW")"
+  is "accounts: spare at 99% -> main (the one with room), not backup" "main alice at-A3" "$(active) $(ax node "$FL" live "$AW")"
 
   # ── a saved login that no longer works ───────────────────────────────────────
   # spare's saved copy dies (its refresh token expired while it sat unused). main then runs
@@ -20157,6 +20157,164 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
   rm -rf "${AC:?}" "${AC_TMUX:?}"
 else
   skip "accounts: several logins per profile" "tmux, jq or node missing"
+fi
+
+# ── which account to be on: spend the allowance that expires first ────────────────
+# What is left in a 7d window when it resets is lost, so among the accounts with room on both
+# windows the profile runs on the one whose week ends first, comes back to it once its 5h
+# window resets, and is held still for a while after a switch or a by-hand `use`. All of it is
+# about TIME, and this area has gone red on a slow runner three times leaning on the wall
+# clock, so every tick here runs on CLAUDE_FLEET_ACCOUNTS_CLOCK, a fixed epoch stepped by
+# hand: a row reads the same on any runner, at any hour, however long the run before it took.
+# No tmux: the tick reads no pane unless a fleet session exists, and none does. Readings for
+# the account in use come in as the mod writes them (a session record); an inactive account's
+# last reading is planted in accounts.json, which is the only place it could be.
+# WATCHED GOING RED on the code before the planner (stay until over the line, then the next in
+# order; NEEDS-LOGIN for every auth word; `list` without ages): the return to main after its
+# 5h reset never happened (backup backup backup); with two accounts with room, backup was
+# chosen by order over spare's earlier week, and by order again over spare's equal week with
+# more room; the hold and margin rows never moved at all; a by-hand `use` was never undone,
+# pinned or not; oauth_org_not_allowed set needs_login and told the owner to /login, and a
+# `blocked` line would have reached the phone as a "switched"; `list`
+# printed no age. And against the planner itself: with HOLD_S at 0 the hold row moved at 11
+# minutes; with the pin check removed the `use` row went back to main at 20 minutes; with
+# MARGIN_S at 0 a week ending 3h sooner was a switch, and weeks an hour apart were no tie.
+group "accounts planner: spend the allowance that expires first"
+if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  PC="$(cd "$(mktemp -d "$TEST_RUNS.$$.plan.XXXXXX")" && pwd -P)"; PH="$PC/home"; PW="$PH/.claude"
+  PC_TMUX="$TMUX_TMPDIR/plan"; mkdir -p "$PC_TMUX" "$PH/.config/ghostfleet" "$PC/src/acme-api"
+  printf 'acme-api\t%s\twork\n' "$PC/src/acme-api" > "$PH/.config/ghostfleet/projects"
+  PSOCK=cf-acme-api; FL="$ROOT/test/helpers/fake-login.mjs"; T=1900000000; H=3600; CLK=$T
+  px() { env -u TMUX -u TMUX_PANE -u CLAUDE_FLEET_SOCK -u CLAUDE_FLEET_SLOT -u CLAUDE_CONFIG_DIR -u CLAUDE_FLEET_DIR \
+           -u CLAUDE_FLEET_EXPERIMENTAL_DIR -u CLAUDE_FLEET_PROFILE \
+           HOME="$PH" TMUX_TMPDIR="$PC_TMUX" CLAUDE_FLEET_LOGIN_STORE=keychain FAKE_KEYCHAIN="$PC/kc" \
+           CLAUDE_FLEET_SECURITY="$ROOT/test/helpers/fake-security.mjs" CLAUDE_FLEET_ACCOUNTS_GRACE=0 \
+           CLAUDE_FLEET_ACCOUNTS_CLOCK="$CLK" PATH="$ROOT/bin:$PATH" "$@" 2>&1; }
+  # ptick <clock> — one governor tick at that second; prints the account in use after it
+  ptick() { CLK="$1" px node "$ROOT/lib/accounts.mjs" tick "$PSOCK" >/dev/null; pst '.active'; }
+  pst() { jq -cr "$1" "$PW/fleet/accounts.json"; }
+  pset() { jq "$@" "$PW/fleet/accounts.json" > "$PC/s.json" && mv "$PC/s.json" "$PW/fleet/accounts.json"; }
+  # fresh <name>… — a new profile on these accounts (main=alice, backup=bob, spare=carol), on
+  # main, every switch and pin three hours behind T, so nothing holds it where it is at T.
+  fresh() {
+    rm -rf "${PW:?}/fleet" "${PC:?}/kc"; mkdir -p "$PW/fleet"
+    local n who; for n in "$@"; do
+      case "$n" in main) who=alice ;; backup) who=bob ;; spare) who=carol ;; esac
+      CLK=$((T - 3*H)) px node "$FL" set "$PW" "$who" "${who}1" >/dev/null
+      CLK=$((T - 3*H)) px "$ROOT/bin/fleet-accounts" add work "$n" >/dev/null
+    done
+    CLK=$((T - 3*H)) px "$ROOT/bin/fleet-accounts" use work main >/dev/null
+    pset '.pin = null'; rm -f "$PW/fleet/accounts.notify" "$PW/fleet/accounts.log"
+  }
+  # rd <name> <7d pct> <7d resets> <read at> — that account's last reading, stored
+  rd() { pset --arg n "$1" --argjson p "$2" --argjson r "$3" --argjson at "$4" \
+              '.accounts[$n].usage = {seven_day: {pct: $p, resets: $r, at: $at}}'; }
+  # prec <5h pct> <5h resets> <7d pct> <7d resets> <at> [<failure word>] — what the mod writes
+  # for the session on the login in use; the tick credits it to whoever was active at <at>
+  prec() { jq -n --arg sock "$PSOCK" --argjson p5 "$1" --argjson r5 "$2" --argjson p7 "$3" --argjson r7 "$4" --argjson at "$5" --arg f "${6:-}" \
+             '{session_id:"eeeeeeee-0000-4000-8000-000000000001", sock:$sock, slot:"w1", status:"ready", ts:$at,
+               usage:{at:$at, limits:{five_hour:{pct:$p5, resets:$r5}, seven_day:{pct:$p7, resets:$r7}}}}
+              + (if $f == "" then {} else {failure:{error:$f, at:$at}} end)' > "$PW/fleet/eeeeeeee-0000-4000-8000-000000000001.json"; }
+  CLK=$T px "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
+
+  # ── the owner's case: main has the week that ends first, and hits its 5h limit ───
+  # backup has 10% of its week left with ~100h to go; main has 70% with ~30h. main at its 5h
+  # limit goes to backup — and comes BACK when main's 5h window resets, not before, so main's
+  # week is spent instead of expiring and backup's scarce one is kept for when it is needed.
+  fresh main backup
+  rd backup 90 $((T + 100*H)) $((T - 50*H))
+  prec 97 $((T + 2*H)) 30 $((T + 30*H)) "$T"
+  r="$(ptick "$T") $(ptick $((T + H))) $(ptick $((T + 2*H + 60)))"
+  is "planner: main at its 5h limit -> backup; back on main once main's 5h resets, not before" "backup backup main" "$r"
+  is "planner: ...the move back names why in the inbox log, and sends nothing to the phone" "1 1" \
+     "$(grep -c "switched from backup to main (main's week resets first" "$PW/fleet/accounts.log") $(grep -c '"event":"switched"' "$PW/fleet/accounts.notify")"
+  out="$(CLK=$((T + 2*H + 60)) px "$ROOT/bin/fleet-accounts" list work)"
+  is "planner: list says how old each figure is — backup's from two days ago, main's from two hours" "yes yes" \
+     "$(grep -E '^ +backup .*7d +90% \(resets [^)]*, read 2d ago\)' <<< "$out" >/dev/null && echo yes || echo "no: $out") $(grep -E '^ +\* main .*7d +30% \(resets [^)]*, read 2h ago\)' <<< "$out" >/dev/null && echo yes || echo no)"
+
+  # ── two accounts with room: the week that ends first, and inside the margin, more room ──
+  fresh main backup spare
+  rd backup 20 $((T + 90*H)) $((T - H)); rd spare 50 $((T + 20*H)) $((T - H))
+  prec 98 $((T + 3*H)) 10 $((T + 150*H)) "$T"
+  r1="$(ptick "$T")"
+  fresh main backup spare
+  rd backup 50 $((T + 20*H)) $((T - H)); rd spare 20 $((T + 21*H)) $((T - H))
+  prec 98 $((T + 3*H)) 10 $((T + 150*H)) "$T"
+  is "planner: of two with room, the earlier week wins; weeks an hour apart are a tie, won by more room" "spare|spare" "$r1|$(ptick "$T")"
+
+  # ── anti-thrash: the hold after a switch, and the margin a week must be sooner by ──
+  # main's 5h resets ten minutes after it pushed the profile to backup: main is the better
+  # account again at once, and the profile still stays put until 15 minutes have passed.
+  fresh main backup
+  rd backup 90 $((T + 100*H)) $((T - H))
+  prec 97 $((T + 600)) 30 $((T + 30*H)) "$T"
+  is "planner: no flip inside the 15-minute hold after a switch, the flip once it is over" "backup backup main" \
+     "$(ptick "$T") $(ptick $((T + 660))) $(ptick $((T + 960)))"
+  fresh main backup
+  prec 10 $((T + 4*H)) 30 $((T + 30*H)) "$T"; rd backup 20 $((T + 27*H)) $((T - H))
+  r1="$(ptick $((T + 60)))"; rd backup 20 $((T + 24*H)) $((T - H))
+  is "planner: a week ending 3h sooner is not worth a switch; one ending 6h sooner is" "main backup" "$r1 $(ptick $((T + 120)))"
+
+  # ── a by-hand `use` holds against the planner for two hours, but not past running out ──
+  fresh main backup
+  prec 10 $((T + 4*H)) 30 $((T + 30*H)) "$T"; rd backup 20 $((T + 100*H)) $((T - H))
+  ptick "$T" >/dev/null          # main's reading in, while main is the one it can be credited to
+  CLK=$T px "$ROOT/bin/fleet-accounts" use work backup >/dev/null
+  out="$(CLK=$((T + 20*60)) px "$ROOT/bin/fleet-accounts" list work)"
+  is "planner: a by-hand 'use' is kept 2h (past the hold), then the earlier week wins again" "backup backup main" \
+     "$(pst .active) $(ptick $((T + 20*60))) $(ptick $((T + 2*H + 60)))"
+  is "planner: ...and list says it is pinned and until when" "yes" "$(grep -q "on 'backup' by hand until" <<< "$out" && echo yes || echo "no: $out")"
+  # A guard rather than a change (the code before also left an account at its limit): the
+  # pin is a preference, so the account it holds still gives way when it runs out.
+  CLK=$((T + 3*H)) px "$ROOT/bin/fleet-accounts" use work backup >/dev/null
+  prec 99 $((T + 4*H)) 30 $((T + 100*H)) $((T + 3*H + 60))
+  is "planner: ...but a pinned account at its limit is still left" "main" "$(ptick $((T + 3*H + 120)))"
+
+  # ── an organization that has turned Claude Code off is BLOCKED, not NEEDS-LOGIN ──
+  fresh main backup
+  rd backup 20 $((T + 100*H)) $((T - H))
+  prec 10 $((T + 4*H)) 30 $((T + 30*H)) "$T" oauth_org_not_allowed
+  r="$(ptick $((T + 60)))"
+  is "planner: oauth_org_not_allowed marks main BLOCKED (not NEEDS-LOGIN) and moves to backup" "yes null backup" \
+     "$(grep -q 'organization has disabled' <<< "$(pst '.accounts.main.blocked.why // "no"')" && echo yes || echo "no: $(pst .accounts.main)") $(pst .accounts.main.needs_login) $r"
+  is "planner: ...the phone line is 'blocked', not 'needs-login'" "blocked main" \
+     "$(jq -r 'select(.event=="blocked" or .event=="needs-login") | "\(.event) \(.account)"' "$PW/fleet/accounts.notify" | paste -sd' ' -)"
+  # ...and that line survives fleet-serve's push payload, which copies only the event words it
+  # knows and would otherwise send it to the phone as a "switched".
+  mkdir -p "$PC/push"; : > "$PC/push/accounts.notify"; jq -c 'select(.event == "blocked")' "$PW/fleet/accounts.notify" > "$PC/blocked.line"
+  out="$(HOME="$PH" node --input-type=module -e "
+    import fs from 'node:fs';
+    import { accountEvents, pushPayload } from '$ROOT/bin/fleet-serve.mjs';
+    const sizes = new Map(); accountEvents(['$PC/push'], sizes);
+    fs.appendFileSync('$PC/push/accounts.notify', fs.readFileSync('$PC/blocked.line'));
+    console.log(JSON.stringify(pushPayload(accountEvents(['$PC/push'], sizes), 'named').account));" 2>&1)"
+  is "planner: ...and reaches the phone as 'blocked', named" '{"event":"blocked","profile":"work","account":"main"}' "$out"
+  # skipped: backup runs out, and main — the earlier week, with room on paper — is not chosen
+  prec 99 $((T + 4*H)) 30 $((T + 100*H)) $((T + 2*H))
+  r="$(ptick $((T + 2*H + 60)))"
+  is "planner: ...and skipped: with backup at its limit the profile is exhausted, not put back on main" "backup yes" \
+     "$r $(pst '.exhausted != null' | sed 's/true/yes/;s/false/no/')"
+  out="$(CLK=$((T + 2*H + 60)) px "$ROOT/bin/fleet-accounts" list work)"
+  is "planner: ...list shows BLOCKED and who can fix it, and does not say /login is the fix" "yes yes no" \
+     "$(grep -qE '^ +main .* BLOCKED$' <<< "$out" && echo yes || echo "no: $out") $(grep -q 'only an admin of that organization can turn it back on' <<< "$out" && echo yes || echo no) $(grep -q 'needs /login' <<< "$out" && echo yes || echo no)"
+  out="$(CLK=$((T + 2*H + 60)) px "$ROOT/bin/fleet-accounts" use work main)"; rc=$?
+  is "planner: ...'use' refuses it and names the org's admin" "1 yes" "$rc $(grep -q 'only an admin of that organization' <<< "$out" && echo yes || echo "no: $out")"
+  CLK=$((T + 3*H)) px node "$FL" set "$PW" alice alice2 >/dev/null
+  CLK=$((T + 3*H)) px "$ROOT/bin/fleet-accounts" add work main >/dev/null
+  r="$(ptick $((T + 3*H + 60)))"
+  is "planner: ...re-adding it clears BLOCKED, and the old failure does not block it again" "null main" "$(pst .accounts.main.blocked) $r"
+  # Cleared by a reading: blocked with nowhere to go, so main stays the account in use, and a
+  # turn on it then goes through (the admin turned access back on).
+  fresh main backup
+  rd backup 99 $((T + 100*H)) $((T - H))
+  prec 10 $((T + 4*H)) 30 $((T + 30*H)) "$T" oauth_org_not_allowed
+  r1="$(ptick $((T + 60))) $(pst '.accounts.main.blocked != null')"
+  jq --argjson at $((T + 600)) '.usage.at = $at' "$PW/fleet/eeeeeeee-0000-4000-8000-000000000001.json" > "$PC/s.json" && mv "$PC/s.json" "$PW/fleet/eeeeeeee-0000-4000-8000-000000000001.json"
+  r2="$(ptick $((T + 660))) $(pst .accounts.main.blocked) $(pst .exhausted)"; r3="$(ptick $((T + 720))) $(pst .accounts.main.blocked)"
+  is "planner: ...a reading on it afterwards clears BLOCKED and resumes, and the old failure stays spent" "main true|main null null|main null" "$r1|$r2|$r3"
+  rm -rf "${PC:?}"
+else
+  skip "accounts planner" "jq or node missing"
 fi
 
 # ── fleet-mod reload: onto the mod, touching only what is idle and empty ─────
