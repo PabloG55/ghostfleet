@@ -129,7 +129,11 @@ passively into an inbox you drain in one call:
   next task" — once its PR merges, that worker is retired with `fleet-stop --reclaim`
   and the next task gets a new session. (A worker's autonomous turn ends once, so one
   `done` per brief.)
-- a worker **`need-you`** — permission / usage-limit / a real question.
+- a worker **`need-you`** — permission / usage-limit / a real question. The row says
+  WHAT it asks (the tool and command, the question and its options, the limit line), and
+  whether it is still **`(pending)`** — the worker's pane still shows it — or
+  **`(cleared HH:MM)`**. A pending one is pinned under **`NEEDS YOU NOW`** at the top of
+  every `fleet-inbox`, seen or not, until it clears: being read is not being answered.
 - governor **`parked`/`resumed`** — budget shedding.
 
 - **`fleet-inbox`** — shows what's new since you last looked, then marks it seen.
@@ -140,7 +144,10 @@ passively into an inbox you drain in one call:
   *woken* by a nudge — *"[fleet] a worker finished or needs you…"*. When you get it,
   just drain `fleet-inbox` and act; it's an automated note, don't reply to it. (The
   push is debounced — a burst of finishes wakes you once. If it's off, you're not
-  woken while idle, so drain the inbox whenever you next act.)
+  woken while idle, so drain the inbox whenever you next act.) A need-you comes as an
+  alert of its own, even mid-turn — *"[fleet] <worker> NEEDS YOU: permission · Bash
+  command: …"*. Act on it: `fleet-answer <worker>` for what you may answer, and tell the
+  owner what it wants in one line when it is an approval, which is theirs to give.
 
 ## Asking a session a question (not dispatching work)
 

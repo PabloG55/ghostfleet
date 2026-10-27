@@ -60,23 +60,117 @@ else
   SEEN="$FLEET_DIR/$SOCK.inbox.seen"
 fi
 
-# TSV in ("<ts>\t<session>\t<event>\t<detail>") -> human-readable out
+# ── PENDING OR CLEARED ────────────────────────────────────────────────────────
+# A need-you row used to be a line like any other: read once, marked seen, and from then on
+# indistinguishable from history. Measured on a real incident: a worker stopped on a
+# permission dialog at 20:31, the lead drained the inbox at 20:34 and found that row beside
+# the same worker's DONE, read it as over, and nobody told the owner. So every need-you row
+# says which it is:
+#   PENDING  the worker's pane still shows a prompt — asked of the pane, the same detector
+#            fleet-answer uses, and only for the LATEST need-you of a worker with nothing
+#            after it. A pending one is listed at the TOP of every call, seen or not.
+#   CLEARED  when it stopped: the first event the worker sent after it (the hook writes it
+#            to <inbox>.cleared), or its next row in the inbox; failing both, the moment this
+#            first found the pane clear, which is then written down so the time holds still.
+# A decline by Esc fires no event at all, which is why the pane, not the record, decides.
+CLEARED="$INBOX.cleared"
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _lnk="$(readlink "$_src")"; case "$_lnk" in /*) _src="$_lnk" ;; *) _src="$(dirname "$_src")/$_lnk" ;; esac
+done
+DETECT="$(cd "$(dirname "$_src")" 2>/dev/null && pwd)/../lib/permission-dialog.mjs"
+
+hhmm() { date -r "$1" +%H:%M 2>/dev/null || date -d "@$1" +%H:%M 2>/dev/null || echo '--:--'; }
+
+# Is <session>'s need-you still on its pane? 0 yes, 1 no, 2 the session is gone. A row from
+# another fleet (Jarvis's inbox names "<project>/<session>") is asked on that fleet's socket.
+# No node or no detector: "yes" — a block shown twice costs a look, one hidden is the bug.
+still_asking() {                      # $1=session $2=detail
+  local sock="$SOCK" slot="$1" lim="" pane
+  case "$1" in */*) sock="cf-${1%/*}"; slot="${1##*/}" ;; esac
+  case "$sock$slot" in *[!A-Za-z0-9._~-]*) return 1 ;; esac
+  tmux -L "$sock" has-session -t "=$slot" 2>/dev/null || return 2
+  [ -f "$DETECT" ] && command -v node >/dev/null 2>&1 || return 0
+  case "$2" in limit:*|*[Ll]imit*) lim=--limit ;; esac
+  pane="$(tmux -L "$sock" capture-pane -p -t "$slot" 2>/dev/null)"
+  node "$DETECT" --ask $lim <<< "$pane" >/dev/null 2>&1
+  case "$?" in 0|2) return 0 ;; *) return 1 ;; esac
+}
+
+# Every row, numbered, with its state: "<n>\x1f<ts>\x1f<session>\x1f<event>\x1f<state>\x1f<detail>"
+# — \x1f because the state is empty on every row that is not a need-you, and a tab IFS
+# would collapse it (CLAUDE.md). state: pending | cleared:<epoch> | gone:<epoch> | ''.
+annotate() {
+  local cf="$CLEARED" n ts sess ev st detail c now
+  [ -f "$cf" ] || cf=/dev/null
+  now="$(date +%s)"
+  while IFS=$'\x1f' read -r n ts sess ev st detail; do
+    case "$st" in open*)
+      c="${st#open:}"
+      still_asking "$sess" "$detail"
+      case "$?" in
+        0) st=pending ;;
+        2) st="gone:${c:-$now}" ;;
+        *) if [ -z "$c" ]; then c="$now"; printf '%s\t%s\n' "$now" "$sess" >> "$CLEARED" 2>/dev/null; fi
+           st="cleared:$c" ;;
+      esac ;;
+    esac
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$n" "$ts" "$sess" "$ev" "$st" "$detail"
+  done < <(awk -F'\t' -v cf="$cf" '
+    FILENAME == cf { if ($1 ~ /^[0-9]+$/ && $2 != "") { k = ++nc[$2]; ct[$2, k] = $1 } ; next }
+    { n++; ts[n] = $1; ss[n] = $2; ev[n] = $3; dt[n] = $4 }
+    END {
+      for (i = n; i >= 1; i--) { nx[i] = (ss[i] in after) ? after[ss[i]] : ""; after[ss[i]] = ts[i] }
+      for (i = 1; i <= n; i++) {
+        st = ""
+        if (ev[i] == "need-you") {
+          c = ""
+          for (k = 1; k <= nc[ss[i]]; k++) { t = ct[ss[i], k]; if (t + 0 >= ts[i] + 0 && (c == "" || t + 0 < c + 0)) c = t }
+          if (nx[i] != "") { if (c == "" || nx[i] + 0 < c + 0) c = nx[i]; st = "cleared:" c }
+          else st = "open:" c
+        }
+        printf "%s\037%s\037%s\037%s\037%s\037%s\n", i, ts[i], ss[i], ev[i], st, dt[i]
+      }
+    }' "$cf" "$INBOX")
+}
+
+# annotated rows in -> human-readable out
 fmt() {
-  while IFS=$'\t' read -r ts sess ev detail; do
+  local n ts sess ev st detail up
+  while IFS=$'\x1f' read -r n ts sess ev st detail; do
     [ -n "$ts" ] || continue
-    # BSD/macOS takes an epoch with -r; GNU/Linux needs -d @epoch
-    hhmm="$(date -r "$ts" +%H:%M 2>/dev/null || date -d "@$ts" +%H:%M 2>/dev/null || echo '--:--')"
     up="$(printf '%s' "$ev" | tr '[:lower:]' '[:upper:]')"
+    case "$st" in
+      pending)   up="$up (pending)" ;;
+      cleared:*) up="$up (cleared $(hhmm "${st#cleared:}"))" ;;
+      gone:*)    up="$up (cleared — session gone)" ;;
+    esac
     # 22, not 14: a relayed answer (fleet-send --reply-to) names its sender as
     # "<project>/<session>", because the session answering you is in another fleet and
     # a bare name there is ambiguous — every project has one called `master`. At 14 the
     # project ate the column and every row read as the same responder.
-    printf '%s  %-22s %-9s %s\n' "$hhmm" "${sess:0:22}" "$up" "$detail"
+    printf '%s  %-22s %-9s %s\n' "$(hhmm "$ts")" "${sess:0:22}" "$up" "$detail"
   done
+}
+
+# The pending ones, first thing on every call — and the command that answers each.
+pinned() {
+  local rows n who
+  rows="$(grep -E $'^[^\x1f]*\x1f[^\x1f]*\x1f[^\x1f]*\x1fneed-you\x1fpending\x1f' <<< "$ANN" || true)"
+  [ -n "$rows" ] || return 0
+  n="$(grep -c . <<< "$rows")"
+  echo "NEEDS YOU NOW ($n) — still on the worker's screen; this stays here until it clears:"
+  while IFS=$'\x1f' read -r _ ts sess _ _ detail; do
+    printf '  %s  %-22s %s\n' "$(hhmm "$ts")" "${sess:0:22}" "${detail:-(no detail — fleet-read $sess)}"
+    case "$sess" in */*) who="-s cf-${sess%/*} ${sess##*/}" ;; *) who="$sess" ;; esac
+    printf '         → fleet-answer %s, or tell the owner (approving a tool call is theirs)\n' "$who"
+  done <<< "$rows"
+  echo
 }
 
 if [ "$MODE" = clear ]; then
   : > "$INBOX" 2>/dev/null || true
+  rm -f "$CLEARED" 2>/dev/null
   printf '0\n' > "$SEEN" 2>/dev/null || true
   echo "inbox: cleared"
   exit 0
@@ -130,18 +224,22 @@ finished_live() {
 reclaim_hints() { finished_live; reclaimable; }
 
 [ -f "$INBOX" ] && [ -s "$INBOX" ] || { echo "inbox: (empty)"; reclaim_hints; exit 0; }
+ANN="$(annotate)"
 
 if [ "$MODE" = all ]; then
+  pinned
   n="$(wc -l < "$INBOX" | tr -d ' ')"
   echo "inbox — all ($n):"
-  fmt < "$INBOX"
+  fmt <<< "$ANN"
   reclaim_hints
   exit 0
 fi
 
-# default: only what's new since the stored line-offset, then advance it
+# default: only what's new since the stored line-offset, then advance it. The pinned block
+# is not part of "new": a pending need-you is shown on every call until it clears.
 total="$(wc -l < "$INBOX" | tr -d ' ')"
 seen="$(cat "$SEEN" 2>/dev/null || echo 0)"; case "$seen" in ''|*[!0-9]*) seen=0 ;; esac
+pinned
 if [ "$total" -le "$seen" ]; then
   [ "$seen" -gt "$total" ] && printf '%s\n' "$total" > "$SEEN" 2>/dev/null   # inbox was cleared/rotated
   echo "inbox: nothing new"
@@ -149,6 +247,6 @@ if [ "$total" -le "$seen" ]; then
   exit 0
 fi
 echo "inbox — $((total - seen)) new:"
-tail -n +"$((seen + 1))" "$INBOX" | fmt
+awk -F'\037' -v from="$((seen + 1))" '$1 + 0 >= from' <<< "$ANN" | fmt
 printf '%s\n' "$total" > "$SEEN" 2>/dev/null || true
 reclaim_hints
