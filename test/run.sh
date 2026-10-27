@@ -20445,6 +20445,34 @@ if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   is "out: main hits its 5h limit -> the stale backup, because that beats stopping" "backup $R5 null" \
      "$(ptick $((T + 180))) $(pst .accounts.main.out.until) $(pst .exhausted)"
 
+  # ── (f) staleness is the 7d figure's own: a fresh 5h reading does not vouch for it ──
+  # A session record keeps only the windows the binary reported, so one can bring a 5h
+  # figure and no 7d one. backup's 5h was read three hours ago and its 7d four days ago — and
+  # "its week resets first" is decided on the 7d alone, so the fresh 5h made a four-day-old
+  # weekly figure count as fresh and the move went ahead.
+  # WATCHED GOING RED on staging (17e4a09): the four-days row read `backup backup` (moved);
+  # list showed backup `active`, its line reading `5h … read 3h ago … 7d … read 4d ago`; and
+  # the failover row read `main null`: backup was already in use when the turn failed, so the
+  # failure was credited to backup and the profile went back to main.
+  wk() {   # wk <7d read at> — backup: 5h 0% read 3h ago, 7d 0% ending 60h before main's
+    fresh main backup
+    rd backup 0 $((T + 70*H)) "$1"
+    pset --argjson r5 $((T + 2*H)) --argjson at $((T - 3*H)) \
+         '.accounts.backup.usage.five_hour = {pct: 0, resets: $r5, at: $at} | .accounts.backup.read_at = $at'
+    prec 10 $((T + 4*H)) 30 $((T + 130*H)) "$T"
+  }
+  wk $((T - 96*H)); r1="$(ptick $((T + 60)))"
+  out="$(CLK=$((T + 60)) px "$ROOT/bin/fleet-accounts" list work)"
+  wk $((T - 5*H))
+  is "out: a 7d figure 4 days old is no planned move though its 5h was read 3h ago; one 5h old is" "main backup" \
+     "$r1 $(ptick $((T + 60)))"
+  is "out: ...and list marks that account stale, by the same rule" "yes" \
+     "$(grep -qE '^ +backup .*read 3h ago.* ready, stale' <<< "$out" && echo yes || echo "no: $out")"
+  wk $((T - 96*H)); ptick $((T + 60)) >/dev/null
+  pfail 1 $((T + 120)) "$W5"
+  is "out: ...and it is still the failover when main hits its 5h limit" "backup $R5" \
+     "$(ptick $((T + 180))) $(pst .accounts.main.out.until)"
+
   # ── (b) a weekly failure on the account just moved to: out until the reset, left AT ONCE ──
   fresh main backup
   rd backup 0 $((T + 70*H)) $((T - H))
