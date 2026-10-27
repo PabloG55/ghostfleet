@@ -171,6 +171,25 @@ if ! T has-session -t "=$NAME" 2>/dev/null; then
     # `.` so it opens ON the folder (a file browser), not an empty buffer that gives no
     # clue which worktree you landed in.
     CMD="$ED ."
+    # A MOUSE DRAG COPIES HERE TOO. nvim with mouse=a takes the drag away from tmux, so
+    # the copy-mode binding every other pane copies through never runs; the Lua file
+    # puts the same fleet-copy on nvim's own mouse release (the why is in the file).
+    #   -c, not --cmd: it runs AFTER the user's config, so their mappings cannot shadow
+    # it, and nothing is written into that config. Neovim only — any other $EDITOR has
+    # its own idea of a mouse, and is left exactly as it was.
+    #   Through the symlink: ~/.local/bin/fleet-tab points into the staged runtime, and
+    # a dirname of the LINK would look for lib/ beside ~/.local/bin.
+    case "$(basename "${ED%% *}")" in
+      nvim)
+        _src="${BASH_SOURCE[0]}"
+        while [ -L "$_src" ]; do
+          _t="$(readlink "$_src")"
+          case "$_t" in /*) _src="$_t" ;; *) _src="$(dirname "$_src")/$_t" ;; esac
+        done
+        _lua="$(cd "$(dirname "$_src")/../lib" 2>/dev/null && pwd)/nvim-copy-on-select.lua"
+        # %q: tmux runs CMD through sh -c, and the runtime may sit under a path with a space.
+        [ -f "$_lua" ] && CMD="$ED -c $(printf '%q' "luafile $_lua") ." ;;
+    esac
   else
     # A login shell, so it is the prompt you actually configured, not a bare sh.
     CMD="${SHELL:-/bin/sh} -l"

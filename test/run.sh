@@ -10881,6 +10881,95 @@ else
   skip "drag to copy" "tmux not available"
 fi
 
+# ── 4d7. ...and in the editor tab, where nvim takes the drag away from tmux ──────
+# An nvim with mouse=a asks the terminal for the mouse, so tmux's MouseDrag1Pane hands the
+# drag to nvim (#{mouse_any_flag}) and the copy-mode binding above never runs: nvim makes a
+# visual selection and the clipboard is never touched. bin/fleet-tab loads
+# lib/nvim-copy-on-select.lua into the editor it launches to put fleet-copy on nvim's own
+# mouse release.
+#   Same rig as the group above — a REAL nvim, launched by fleet-tab itself, behind an
+# attached client with cf.tmux.conf, so the drag goes through tmux's mouse routing exactly
+# as a hand does. `--clean` keeps the runner's (or your) config out of it; its default
+# mouse=nvi is enough for nvim to claim the drag. An Ubuntu apt nvim is 0.9, which has no
+# getregion, so that leg runs the Lua's yank fallback and this one the getregion path.
+group "drag to copy in the editor (real nvim)"
+if ! command -v tmux >/dev/null 2>&1; then
+  skip "editor drag to copy" "tmux not available"
+elif ! command -v nvim >/dev/null 2>&1; then
+  skip "editor drag to copy" "nvim not installed"
+else
+  EC="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$EC/bin" "$EC/w"
+  printf 'alpha one\nbravo two\ncharlie three\ndelta four\n' > "$EC/w/a.txt"
+  # One record per CALL, closed by a marker, so "called once with X" and "called twice"
+  # read differently — and a linewise copy's trailing newline survives $(…).
+  printf '#!/bin/sh\ncat >> "%s/got.txt"; echo "<END>" >> "%s/got.txt"\n' "$EC" "$EC" > "$EC/bin/fleet-copy"
+  printf '#!/bin/sh\nexec sleep 120\n' > "$EC/bin/fakevim"
+  chmod +x "$EC/bin/fleet-copy" "$EC/bin/fakevim"
+  tmux -L cfedin kill-server 2>/dev/null; tmux -L cfedout kill-server 2>/dev/null
+  tmux -L cfedin -f "$ROOT/tmux/cf.tmux.conf" new-session -d -s master -x 80 -y 12 -c "$EC/w" 'sleep 120' 2>/dev/null
+  tmux -L cfedin set -g @cf_bin "$EC/bin" 2>/dev/null
+  ES="$(tmux -L cfedin display-message -p '#{socket_path}' 2>/dev/null)"
+  CLAUDE_FLEET_EDITOR="nvim --clean" "$ROOT/bin/fleet-tab" edit "$ES" "$EC/w" master >/dev/null 2>&1
+  calls() { grep -c '<END>' "$EC/got.txt" 2>/dev/null || true; }
+  ek() { tmux -L cfedin send-keys -t _edit-master "$@" 2>/dev/null; }
+  em() { tmux -L cfedout send-keys -l "$(printf "$1")" 2>/dev/null; sleep 0.2; }
+  # Keys go in through the pane and the mouse through the client — two paths, no ordering
+  # between them — so every switch from one to the other waits for nvim to be back in
+  # normal mode. Without it a drag's press landed mid-keystroke and selected from there.
+  idle() { ek Escape; sleep 0.2; wait_for 3 "normal mode" '! pane_has cfedin "-- (VISUAL|INSERT)" _edit-master'; }
+  # A keyboard yank first, so the fallback's register restore has something to restore.
+  wait_for 10 "nvim drew" 'pane_has cfedin "~" _edit-master'
+  ek ':e a.txt' Enter; wait_for 5 "a.txt open" 'pane_has cfedin "^alpha one" _edit-master'
+  ek 4 G y y; idle
+  tmux -L cfedout new-session -d -x 80 -y 12 "tmux -L cfedin attach -t _edit-master" 2>/dev/null
+  wait_for 5 "client attached" '[ "$(tmux -L cfedin list-clients 2>/dev/null | grep -c .)" -ge 1 ]'
+
+  # Charwise across two lines: press at 1,1, drag, release at 2,5.
+  em '\033[<0;1;1M'; em '\033[<32;3;1M'; em '\033[<32;5;2M'; em '\033[<0;5;2m'
+  wait_for 5 "first copy" '[ "$(calls)" -ge 1 ]'
+  is "a drag in nvim reaches fleet-copy" "alpha one"$'\n'"bravo<END>" "$(cat "$EC/got.txt" 2>/dev/null)"
+  is "...and the selection stays highlighted" "1" \
+     "$(grep -c -- '-- VISUAL --' <<< "$(tmux -L cfedin capture-pane -p -t _edit-master 2>/dev/null)" || true)"
+  # Copying must not cost you your yank: `p` still pastes what `yy` took.
+  idle; ek ":call writefile([getreg('\"')], '$EC/reg.txt')" Enter
+  wait_for 5 "register written" '[ -s "$EC/reg.txt" ]'
+  is "...and the unnamed register is left alone" "delta four" "$(cat "$EC/reg.txt" 2>/dev/null)"
+
+  # NOT ON THE KEYBOARD. Asserted as "the NEXT drag is the only call", not as "nothing
+  # was called": on a build that never copies at all, nothing is called either, and the
+  # row would be green for the wrong reason.
+  idle; : > "$EC/got.txt"
+  ek g g v j y; ek g g V j y; ek g g C-v j l y; idle
+  em '\033[<0;1;3M'; em '\033[<32;4;3M'; em '\033[<32;7;3M'; em '\033[<0;7;3m'
+  wait_for 5 "the drag after the keyboard" '[ "$(calls)" -ge 1 ]'
+  sleep 0.3
+  is "a keyboard v/V/^V + y does NOT copy" "charlie<END>" "$(cat "$EC/got.txt" 2>/dev/null)"
+
+  # Blockwise is an Alt-drag, and its release is <A-LeftRelease>, a different key. nvim's
+  # Alt-press EXTENDS a block from the cursor rather than moving it, so by hand a block is
+  # a click at one corner and an Alt-drag to the other. The corner is set with keys here:
+  # a click 0.2s before the Alt-press is inside tmux's double-click window, and the pair
+  # went to tmux as a double-click instead of to nvim.
+  ek g g 0; idle; : > "$EC/got.txt"
+  em '\033[<8;1;1M'; em '\033[<40;3;1M'; em '\033[<40;5;3M'; em '\033[<8;5;3m'
+  wait_for 5 "block copy" '[ "$(calls)" -ge 1 ]'
+  is "an Alt-drag copies the block" "alpha"$'\n'"bravo"$'\n'"charl<END>" "$(cat "$EC/got.txt" 2>/dev/null)"
+  # Linewise: V pressed while the button is still down. Ends in a newline, as `y` would.
+  idle; : > "$EC/got.txt"
+  em '\033[<0;3;1M'; em '\033[<32;5;1M'; em '\033[<32;5;2M'; ek V; sleep 0.2; em '\033[<0;5;2m'
+  wait_for 5 "line copy" '[ "$(calls)" -ge 1 ]'
+  is "a linewise drag copies whole lines" "alpha one"$'\n'"bravo two"$'\n'"<END>" "$(cat "$EC/got.txt" 2>/dev/null)"
+
+
+  # Only nvim gets it. Another editor is launched exactly as before.
+  CLAUDE_FLEET_EDITOR="$EC/bin/fakevim" "$ROOT/bin/fleet-tab" edit "$ES" "$EC/w" api-2 >/dev/null 2>&1
+  is "nvim is launched with the copy hook" "1" \
+     "$(tmux -L cfedin display-message -p -t _edit-master '#{pane_start_command}' 2>/dev/null | grep -c 'nvim-copy-on-select.lua' || true)"
+  is "...and another editor is not"       "0" \
+     "$(tmux -L cfedin display-message -p -t _edit-api-2 '#{pane_start_command}' 2>/dev/null | grep -c 'luafile' || true)"
+  tmux -L cfedout kill-server 2>/dev/null; tmux -L cfedin kill-server 2>/dev/null; rm -rf "$EC"
+fi
+
 # fleet-copy picks a clipboard tool at run time — pbcopy is macOS-only and this repo
 # supports Linux and WSL. Both directions: it must find one when present, and say what
 # is missing rather than exiting mutely when none is (it runs from a keybinding, where
