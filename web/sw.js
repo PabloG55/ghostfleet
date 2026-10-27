@@ -476,8 +476,12 @@ function accountText(a) {
     const who = a.account ? `${p}/${a.account}` : 'a Claude account';
     return { title: `${who} needs /login`, body: a.account ? `run /login as it in a ${p} session, then: fleet-accounts add ${p} ${a.account}` : 'see the inbox at the desk' };
   }
+  if (a.event === 'blocked') {
+    const who = a.account ? `${p}/${a.account}` : 'a Claude account';
+    return { title: `${who} is blocked`, body: 'its organization has turned off Claude Code for it — only that organization\'s admin can turn it back on; skipped until then' };
+  }
   if (a.event === 'resumed') return { title: `${p}: resumed`, body: a.to ? `on ${a.to}` : 'an account has room again' };
-  const why = a.cause === 'limit' && a.limit ? ` (${a.limit} at ${a.pct}%)` : a.cause === 'needs-login' ? ' (it needs /login)' : a.cause === 'by-hand' ? ' (by hand)' : '';
+  const why = a.cause === 'limit' && a.limit ? ` (${a.limit} at ${a.pct}%)` : a.cause === 'needs-login' ? ' (it needs /login)' : a.cause === 'blocked' ? ' (it is blocked by its organization)' : a.cause === 'by-hand' ? ' (by hand)' : '';
   return { title: `${p}: switched${a.to ? ' to ' + a.to : ' account'}`, body: `${a.from ? 'from ' + a.from : 'to another login'}${why}` };
 }
 self.addEventListener('push', e => {
