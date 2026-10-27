@@ -5897,7 +5897,12 @@ if command -v git >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
     for s in cf-xsamb cf-xsenv cf-xsflag cf-xsforce cf-other; do
       tmux -L "$s" kill-server 2>/dev/null
     done
-    ( cd "$XS/fleet" && ls *.manifest.tsv 2>/dev/null | sed 's/\.manifest\.tsv$//' )
+    # The caller's fleet dir, AND the owning project's: a spawn routed to a registered
+    # project writes into THAT fleet's dir, not the caller's (lib/fleet-env.mjs) — reading
+    # only the caller's made a correctly routed spawn look like one that chose nothing.
+    ( for d in "$XS/fleet" "$XS/home/.claude/fleet"; do ( cd "$d" 2>/dev/null && ls *.manifest.tsv 2>/dev/null ); done \
+        | sed 's/\.manifest\.tsv$//' | sort -u )
+    rm -rf "$XS/home/.claude"
   }
   is "no override: \$TMUX still wins"   "cf-xsamb"   "$(sockchosen '')"
   is "-s wins over \$TMUX"              "cf-xsflag"  "$(sockchosen '' -s cf-xsflag)"
