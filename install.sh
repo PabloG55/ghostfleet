@@ -518,8 +518,8 @@ fi
 # machine that already uses a feature, so an update changes nothing for somebody using it,
 # and off everywhere else. Jarvis is the one offered here, because it has a download behind it. Offering to turn it on is a step of its own, clearly labelled, with
 # Enter meaning NO — and never under --yes or with nobody watching, because "install missing
-# dependencies" is not a yes to an experimental feature. Its voice (whisper, below) is asked
-# about only once it is on: hearing is Jarvis's conversation mode and has no other use.
+# dependencies" is not a yes to an experimental feature. The Mac's voice (whisper, below) is
+# asked about whether it is on or not: it is every session's talk button, Jarvis's included.
 _jdir="${CLAUDE_FLEET_JARVIS_DIR:-$HOME/.config/ghostfleet}"
 "$REPO/bin/fleet-experimental" list >/dev/null 2>&1 || true
 _jon=0; grep -qsx on "$_jdir/jarvis.enabled" && _jon=1
@@ -535,25 +535,25 @@ elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
 else
   vsay "· Jarvis (experimental) is off — turn it on with: fleet-experimental enable jarvis"
 fi
-if [ "$_jon" = 1 ]; then
-  # JARVIS'S VOICE: whisper.cpp and one model, so the phone's conversation mode can be
-  # transcribed on this machine (docs/jarvis.md). The most optional thing here, and held to a
-  # stricter rule than the two above: NOT implied by --yes, because it is a ~550 MB download
-  # that nobody accepted by agreeing to "install missing dependencies" — only a person at a
-  # terminal saying yes to this question gets it. Already working is silent. And it can never
-  # fail the install: text to Jarvis works without it, and the command says how to add it later.
-  if "$REPO/bin/fleet-jarvis" voice >/dev/null 2>&1; then :
-  elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
-    _save_yes="$ASSUME_YES"; ASSUME_YES=0
-    rc=0; ask_optional "· Jarvis can listen: install whisper.cpp + a speech model (~550 MB, transcribed on this machine only)?" || rc=$?
-    ASSUME_YES="$_save_yes"
-    case $rc in
-      0) "$REPO/bin/fleet-jarvis" voice --install || echo "! voice was not set up — text to Jarvis still works; retry with: fleet-jarvis voice --install" ;;
-      *) echo "  Skipped. Voice for Jarvis later: fleet-jarvis voice --install" ;;
-    esac
-  else
-    vsay "· voice for Jarvis (optional, ~550 MB): fleet-jarvis voice --install"
-  fi
+# THE MAC'S EARS: whisper.cpp and one model, so the phone's conversation mode — the talk
+# button in every session's composer, and Jarvis's when it is on — is transcribed on this
+# machine (docs/mobile.md). It used to be asked only with Jarvis on, which left an owner who
+# had switched Jarvis off with no way to be offered talk at all. The most optional thing
+# here, and held to a stricter rule than the two above: NOT implied by --yes, because it is a
+# ~550 MB download that nobody accepted by agreeing to "install missing dependencies" — only
+# a person at a terminal saying yes to this question gets it. Already working is silent. And
+# it can never fail the install: typing works without it, and the command says how to add it.
+if "$REPO/bin/fleet-jarvis" voice >/dev/null 2>&1; then :
+elif [ -t 1 ] && ( exec 3<>/dev/tty ) 2>/dev/null; then
+  _save_yes="$ASSUME_YES"; ASSUME_YES=0
+  rc=0; ask_optional "· The phone can talk to your sessions: install whisper.cpp + a speech model (~550 MB, transcribed on this machine only)?" || rc=$?
+  ASSUME_YES="$_save_yes"
+  case $rc in
+    0) "$REPO/bin/fleet-jarvis" voice --install || echo "! voice was not set up — typing still works; retry with: fleet-jarvis voice --install" ;;
+    *) echo "  Skipped. Voice later: fleet-jarvis voice --install" ;;
+  esac
+else
+  vsay "· voice for talking to sessions from the phone (optional, ~550 MB): fleet-jarvis voice --install"
 fi
 # THE MAC'S SPEAKING VOICE: Kokoro, which fleet-serve reads the phone's replies with when it
 # is here (lib/speech.mjs) — better English, real Spanish, and nothing leaves the machine.

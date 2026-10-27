@@ -321,9 +321,12 @@ GET  /api/jarvis                            -> { ok, present, project, profile, 
                                                  status, voice: { ready, why? }, pending: [{id,tool,summary,ts,granted}] }
 POST /api/jarvis/confirm { id, answer }     -> { ok, id, answer, summary, told }
                                             'yes' needs X-Fleet-Assertion; 'no' does not
-POST /api/jarvis/hear   <audio/wav bytes>   -> { ok, text, ms }   4 MB cap; 415 if not RIFF/WAVE
+POST /api/jarvis/hear   <audio/wav bytes>   -> the same as /api/voice/hear, for clients older than it
                                             every /api/jarvis* is 404 { ok:false, disabled:true }
                                             while Jarvis is switched off
+GET  /api/voice                             -> { ok, voice: { ready, why? }, speak }   Jarvis on or off
+POST /api/voice/hear    <audio/wav bytes>   -> { ok, text, ms }   4 MB cap; 415 if not RIFF/WAVE;
+                                            503 { needs: 'voice' } without whisper.cpp
 ```
 
 ### Notifications
@@ -352,8 +355,10 @@ gesture. "not now" is honoured for three days. A payload from Jarvis carries
 
 Jarvis is experimental and switched off by default. The client learns the switch from
 `jarvis_enabled` on `/api/projects` (or a 404 from `/api/jarvis`), never from a build flag;
-off, it draws no band, no Jarvis screen and no `talk` button, and reads the Mac's voice from
-`speak` on `/api/projects`. On, its screen carries an `experimental` tag beside the name.
+off, it draws no band and no Jarvis screen, and reads the Mac's voice from `speak` on
+`/api/projects`. Every session's `talk` button stays either way: it reads the Mac's ears from
+`/api/voice` and hears through `/api/voice/hear`, falling back to `/api/jarvis` and
+`/api/jarvis/hear` on a daemon older than those routes. On, its screen carries an `experimental` tag beside the name.
 
 The master of masters (docs/jarvis.md) is the `jarvis` project's `master`, so its screen
 is the session screen pointed at it, plus three things: the proposals waiting on a yes

@@ -59,6 +59,7 @@ const S = {
   jarvis: null,         // last /api/jarvis payload — null until asked, {present:false} when absent
   jarvisOn: null,       // the Mac's Jarvis switch (/api/projects jarvis_enabled): null = not told yet
   speak: null,          // the Mac's voice (/api/projects speak) — reported with Jarvis off too
+  voice: null,          // last /api/voice payload (the Mac's ears) — null until asked, false = a daemon without the route
   jarvisMode: false,    // the session screen is showing JARVIS (see openJarvis): back goes to Projects
   wantJarvis: false,    // a notification from Jarvis was tapped; open it once unlocked
   pushOffer: false,     // show the one-tap "Turn on notifications" band (see maybePushOffer)
@@ -163,14 +164,19 @@ async function refresh() {
       const j = await api.getProjects();
       S.projects = j.projects; S.agents = j.agents || [];
       // JARVIS IS EXPERIMENTAL and the Mac says whether it is on. Off is GONE: no band, no
-      // Jarvis screen, no talk — and no /api/jarvis request, which would only 404. A daemon
+      // Jarvis screen, no talking to Jarvis — and no /api/jarvis request, which would only
+      // 404. Talking to a session stays (talkShown). A daemon
       // older than the switch sends no field, and keeps the old behaviour.
       if (typeof j.jarvis_enabled === 'boolean') S.jarvisOn = j.jarvis_enabled;
       if (j.speak) S.speak = j.speak;
       // The Jarvis band. Its own request, and allowed to fail on its own: a daemon older
       // than Jarvis answers 404, which means "no band", not "the Projects screen is broken".
+      // The Mac's ears beside it, on their own route: talk is every session's, not Jarvis's.
       if (S.jarvisOn === false) S.jarvis = null;
-      else try { S.jarvis = await api.getJarvis(); } catch (e) { jarvisFailed(e); }
+      await Promise.all([
+        readVoice(),
+        S.jarvisOn === false ? null : api.getJarvis().then((j) => { S.jarvis = j; }, jarvisFailed),
+      ]);
     }
     else if (S.screen === 'grid') {
       S.grid = await api.getGrid(S.project, S.sub);
@@ -189,10 +195,12 @@ async function refresh() {
         S.project = S.jarvis.project; S.session = 'master';
       }
       S.grid = await api.getGrid(S.project, S.sub);
-      // THE MAC'S EARS, for a session's `talk`: whether it can transcribe is reported by
-      // /api/jarvis, which a session screen opened straight from a notification has never
-      // asked. Once, and allowed to fail like the Projects band's read of it.
-      if (!S.jarvisMode && !S.jarvis && S.jarvisOn !== false) { try { S.jarvis = await api.getJarvis(); } catch (e) { jarvisFailed(e); } }
+      // THE MAC'S EARS, for a session's `talk`: a session screen opened straight from a
+      // notification has never asked the Projects poll's question. Once, whatever Jarvis's
+      // switch says — and on a daemon from before /api/voice, /api/jarvis is still where its
+      // ears are reported, so that is asked too while Jarvis can be on.
+      if (S.voice === null) await readVoice();
+      if (S.voice === false && !S.jarvisMode && !S.jarvis && S.jarvisOn !== false) { try { S.jarvis = await api.getJarvis(); } catch (e) { jarvisFailed(e); } }
       // The pane has its OWN faster timer (panePoll below), so this loop only has to
       // fetch it once, to fill the box on the way in rather than up to a poll later.
       if (S.view === 'pane' && !S.pane) await readPane();
@@ -1346,10 +1354,28 @@ try { localStorage.removeItem('gf.autospeak'); } catch {}
 // WHAT JARVIS'S SWITCH LEAVES ON SCREEN, as data, so the suite can drive both directions
 // without a phone. `on` is the daemon's word (true, false, or null for a daemon older than
 // the switch, which keeps the old behaviour); `j` is the last /api/jarvis answer.
+//   `talk` is talking to JARVIS. Talking to a session is not Jarvis's at all — see talkShown.
 export function jarvisSurfaces(on, j) {
   const off = on === false;
   return { bar: !off && !!j, screen: !off, talk: !off };
 }
+// WHETHER A SESSION'S COMPOSER HAS `talk`, as data. It used to be jarvisSurfaces().talk, so
+// switching Jarvis off — to be rid of its session — also took talk off every session, with
+// nothing on the switch saying it would. Hearing is the Mac's whisper, which /api/voice
+// reports whatever the switch says: so the button is drawn whenever the daemon has that
+// route (`v` an answer, or null while it is being asked), and a Mac that cannot hear is the
+// tap's refusal, not a missing button. Only a daemon from before /api/voice (`v` false)
+// with Jarvis off has no ears to offer — its hearing was under /api/jarvis, which is a 404.
+export function talkShown(on, v) {
+  return v !== false || on !== false;
+}
+// A 404 is a daemon from before the route; anything else is a failed read, and keeps what it had.
+async function readVoice() {
+  try { S.voice = await api.getVoice(); }
+  catch (e) { if (e instanceof api.AuthError) throw e; if (e && e.status === 404) S.voice = false; }
+}
+// The Mac's ears as last reported: /api/voice, or for a daemon before it, /api/jarvis's copy.
+const voiceNow = () => (S.voice && S.voice.voice) || (S.jarvis && S.jarvis.voice) || null;
 // A 404 FROM /api/jarvis IS THE SWITCH, said by the daemon: Jarvis is off (or the daemon is
 // older than Jarvis, which comes to the same screen). Anything else is a failed read, and the
 // screens keep what they had.
@@ -1618,7 +1644,8 @@ const talkLive = (g) => !!S.talk && S.talk.gen === g;
 // to have (not on a session screen).
 export function talkTarget() {
   if (S.screen !== 'session') return null;
-  if (S.jarvisMode) {
+  // With Jarvis switched off the target is never Jarvis, even on a screen left in its mode.
+  if (S.jarvisMode && S.jarvisOn !== false) {
     const j = S.jarvis;
     return { jarvis: true, project: (j && j.project) || S.project, session: 'master', label: 'Jarvis' };
   }
@@ -1626,19 +1653,22 @@ export function talkTarget() {
   return { jarvis: false, project: S.project, session: S.session, label: (c && c.label) || S.session };
 }
 // WHY `talk` CANNOT START, in words about the thing tapped, or '' when it can. The voice is
-// the Mac's (one transcriber for every target), and /api/jarvis reports it whether or not
-// Jarvis exists — so a session can be talked to on a Mac that never set Jarvis up.
-// Pure, so the suite can drive every reason without a phone: `j` is /api/jarvis's answer,
-// `card` the target's grid card, `caps` what this browser has.
-export function talkRefusal(t, j, card, caps) {
+// the Mac's (one transcriber for every target), and /api/voice reports it whether or not
+// Jarvis exists or is switched on — so a session can be talked to on a Mac that never set
+// Jarvis up, or switched it off.
+// Pure, so the suite can drive every reason without a phone: `j` is /api/jarvis's answer
+// (null when there is none, or it is off), `card` the target's grid card, `caps` what this
+// browser has, and `voice` the Mac's ears as /api/voice reported them — defaulting to the
+// copy /api/jarvis carries, which is all a daemon from before /api/voice has.
+export function talkRefusal(t, j, card, caps, voice = j && j.voice) {
   if (!t) return 'there is nothing on this screen to talk to';
   if (t.jarvis && (!j || !j.present)) return 'there is no Jarvis to talk to yet';
   if (!t.jarvis) {
     if (!card) return `'${t.session}' is not on this fleet's grid any more`;
     if (card.status === 'parked') return `${t.label} is parked — resume it from ⋯ before talking to it`;
   }
-  if (!j || !j.voice) return 'still asking the Mac whether it can hear — try again in a moment';
-  if (!j.voice.ready) return `voice is off — ${j.voice.why || 'the Mac has no transcriber'}`;
+  if (!voice) return 'still asking the Mac whether it can hear — try again in a moment';
+  if (!voice.ready) return `voice is off — ${voice.why || 'the Mac has no transcriber'}`;
   if (!caps.mic) return 'this browser gives web apps no microphone';
   if (!caps.audio) return 'this browser has no Web Audio to listen with';
   return '';
@@ -1647,7 +1677,7 @@ function talkWhyNot(t = talkTarget()) {
   return talkRefusal(t, S.jarvis, t && !t.jarvis ? cardOf(t.session) : null, {
     mic: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
     audio: !!(window.AudioContext || window.webkitAudioContext),
-  });
+  }, voiceNow());
 }
 function talkToggle() { if (S.talk) talkStop('conversation mode off'); else talkStart(); }
 function talkStart() {
@@ -1781,7 +1811,7 @@ async function endUtterance() {
   if (spoke < TALK.MIN_SPEECH_MS) { talkReopen(); return; }     // a cough, a door, a chair
   S.talk.phase = 'hearing'; render();
   let text = '';
-  try { text = String((await api.jarvisHear(encodeWav(frames, T.rate))).text || '').trim(); }
+  try { text = String((await api.hear(encodeWav(frames, T.rate))).text || '').trim(); }
   catch (e) {
     if (!talkLive(g)) return;
     if (e instanceof api.AuthError) { talkStop(''); lock(); return; }
@@ -2872,9 +2902,9 @@ function composer(card, opts = {}) {
   // place. One more control, the same size as the two beside it, and it is the whole of
   // conversation mode's UI besides the band above: tap once and the conversation runs itself
   // until you tap it again (see talkStart).
-  // TALK IS PART OF JARVIS — its hearing is the Mac's whisper, which exists for Jarvis — so
-  // with Jarvis switched off there is no button at all, not a button that refuses.
-  if (opts.talk && jarvisSurfaces(S.jarvisOn, S.jarvis).talk) {
+  // TALK IS NOT PART OF JARVIS: its hearing is the Mac's whisper, and a session is spoken to
+  // directly. So Jarvis switched off leaves the button on every session (talkShown).
+  if (opts.talk && talkShown(S.jarvisOn, S.voice)) {
     const t = btn(S.talk ? 'stop' : 'talk', () => talkToggle(), 'talk' + (S.talk ? ' on' : ''));
     const tg = talkTarget();
     t.setAttribute('aria-label', S.talk ? 'stop conversation mode' : `talk to ${(tg && tg.label) || 'this session'}`);
@@ -5037,9 +5067,9 @@ async function sheetSettings() {
   // A <select> and not a list of buttons: the list is however many voices the OS ships
   // (dozens on iOS) and that is the one place a native control beats anything drawn here.
   //   THE MAC'S VOICE COMES FIRST under the heading, because when it is there it is what
-  // reads, and the list below is only the fallback. Said only once /api/jarvis has answered:
+  // reads, and the list below is only the fallback. Said only once the daemon has answered:
   // an old daemon without `speak` says nothing rather than something wrong.
-  const k = (S.jarvis && S.jarvis.speak) || S.speak;
+  const k = (S.voice && S.voice.speak) || (S.jarvis && S.jarvis.speak) || S.speak;
   const macVoice = k && k.state ? el('div', { class: 'dim small', text:
     k.ready ? "the Mac reads replies with Kokoro — this device's voice below is only the fallback"
     : k.state === 'off' ? "the Mac's Kokoro is switched off, so this device's voice reads replies"
@@ -5116,7 +5146,7 @@ async function sheetSettings() {
   }
   // HOW LONG A PAUSE IS, in conversation mode: the one thing about it that is a matter of
   // the owner's own speech rather than of the machine. Shown wherever the talk button is.
-  if (jarvisSurfaces(S.jarvisOn, S.jarvis).talk) {
+  if (talkShown(S.jarvisOn, S.voice)) {
     const q = savedQuiet();
     const setQ = (v) => { try { localStorage.setItem(LS_QUIET, String(Math.min(QUIET.MAX, Math.max(QUIET.MIN, v)))); } catch {} render(); };
     kids.push(el('h2', { text: 'conversation mode' }));

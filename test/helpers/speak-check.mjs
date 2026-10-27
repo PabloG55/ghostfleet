@@ -108,6 +108,7 @@ const turnClock = APP.turnClock || (() => ({ start() {}, voice() {}, tap() {}, s
 const savedQuiet = APP.savedQuiet || (() => NaN);
 const QUIET = APP.QUIET || {};
 const bargeDetector = APP.bargeDetector || (() => ({ frame: () => '(no bargeDetector)' }));
+const talkShown = APP.talkShown || (() => '(no talkShown)');
 is('web/app.js exports speakable()', 'function', typeof speakable);
 is('web/app.js exports speechChunks()', 'function', typeof APP.speechChunks);
 is('web/app.js exports turnClock()', 'function', typeof APP.turnClock);
@@ -449,12 +450,30 @@ is('no Web Audio in this browser', 'this browser has no Web Audio to listen with
 const jp = { present: true, project: 'jarvis' };
 is('Jarvis off: no band', false, jarvisSurfaces(false, jp).bar);
 is('...no Jarvis screen', false, jarvisSurfaces(false, jp).screen);
-is('...and no talk button anywhere', false, jarvisSurfaces(false, jp).talk);
+is('...and no talking to Jarvis', false, jarvisSurfaces(false, jp).talk);
 is('Jarvis on: the band is there', true, jarvisSurfaces(true, jp).bar);
 is('...and talk', true, jarvisSurfaces(true, jp).talk);
 is('...but no band before /api/jarvis answers', false, jarvisSurfaces(true, null).bar);
 is('a daemon with no switch keeps the old behaviour', true, jarvisSurfaces(null, jp).bar && jarvisSurfaces(null, jp).talk);
 is('a working session can be talked to (the prompt queues)', '', talkRefusal(sess, hears, { ...live, status: 'working' }, caps));
+// TALK IS NOT JARVIS. Switched off, /api/jarvis is a 404 and leaves nothing (`j` null), and
+// the Mac's ears are read from /api/voice instead — the fifth argument. The owner switched
+// Jarvis off to be rid of its session and lost talk on every session with it; these are the
+// rows that would have said so. Each refusal has its '' neighbour, as above.
+const ready = { ready: true }, deaf = { ready: false, why: 'no whisper' };
+is('Jarvis off: a session can still be talked to', '', talkRefusal(sess, null, live, caps, ready));
+is('...and a Mac that cannot hear still says why', 'voice is off — no whisper', talkRefusal(sess, null, live, caps, deaf));
+is('...while /api/voice has not answered, it is still asking', true, /still asking the Mac/.test(talkRefusal(sess, null, live, caps, null)));
+is('...and the voice it reads is the Mac\'s, over a stale Jarvis one', '', talkRefusal(sess, { present: false, voice: deaf }, live, caps, ready));
+// The button: drawn whenever the Mac can be asked to hear, which is a daemon that has
+// /api/voice (S.voice an answer, or null while asking) — whatever Jarvis's switch says.
+// Only an older daemon with Jarvis off (no /api/voice: false) has no ears to offer.
+is('Jarvis off: the talk button is drawn', true, talkShown(false, { ok: true, voice: ready }));
+is('...even before /api/voice answers', true, talkShown(false, null));
+is('...and when the Mac cannot hear (the tap says why)', true, talkShown(false, { ok: true, voice: deaf }));
+is('...but not on an older daemon with no voice route', false, talkShown(false, false));
+is('Jarvis on, older daemon: still drawn (it hears via /api/jarvis)', true, talkShown(true, false));
+is('no switch, older daemon: the old behaviour, drawn', true, talkShown(null, false));
 
 // ── 7. the column count, which is what makes rotation safe ────────────────
 // gridColsFrom reads the USED value of grid-template-columns, so the keys agree with what
