@@ -475,7 +475,9 @@ shows the pin and when it ends.
 records (`usage.limits.five_hour` / `seven_day`), so only the account in use is ever read. Nothing
 sends a request on an inactive account to refresh its figures, and `list` shows how old each figure
 is (`read 2d ago`). So a **planned** move (`backup's week resets first`) is made only to an account
-read in the **last 6 hours**. An older one is shown as `ready, stale (no planned move onto it)` and
+whose **7d** figure was read in the **last 6 hours**: the weekly figure is what that move is decided
+on, and a turn can report a 5h figure without a 7d one, so a fresh 5h reading does not count. An
+older one is shown as `ready, stale (no planned move onto it)` and
 is used only as a **failover**, when the account in use cannot run, because a stale account beats
 stopping. The cost of trusting an old figure is not bounded the way it looks: a turn refused at the
 limit carries no usage figures, so it never becomes a reading. An account read three days ago at
