@@ -8187,6 +8187,134 @@ else
   skip "session label" "tmux missing"
 fi
 
+# ── 4a12. `/` finds an agent on the grid ─────────────────────────────────────
+# Typing part of a name highlights the cards that answer to it and dims the rest, in
+# place — nothing moves, nothing is hidden. Two steps, as in less and vim: while the
+# prompt is open EVERY printable key is query (`n` is in billing-svc), ⏎ locks it, and
+# only then are n / N next / previous and ⏎ opens. Driven through the real TUI, because
+# every claim here is about a keystroke path, and read through sgr-at.mjs, because
+# "dimmed" and "highlighted" are attributes of cells, not of bytes tmux re-serialises
+# differently per version.
+group "grid search: / finds an agent"
+if command -v tmux >/dev/null 2>&1; then
+  SR="$(mktemp -d)"; mkdir -p "$SR/fleet" "$SR/wd"
+  tmux -L cfsrchtest kill-server 2>/dev/null; tmux -L cfsrchdrv kill-server 2>/dev/null
+  # grid order is api-fix, billing-svc, cache-keys, docs-pass; master is the lead and
+  # draws no card of its own here
+  for s in master api-fix billing-svc cache-keys docs-pass; do
+    tmux -L cfsrchtest new-session -d -s "$s" -c "$SR/wd" "sleep 300" 2>/dev/null; done
+  # a labelled card: found by its label AND by the session name it no longer shows on top
+  printf 'PR 1184 retry work\n' > "$SR/fleet/cfsrchtest.cache-keys.label"
+  srframe() { tmux -L cfsrchdrv capture-pane -p -t d 2>/dev/null; }
+  srattr()  { node "$ROOT/test/helpers/sgr-at.mjs" "$@" <<< "$(tmux -L cfsrchdrv capture-pane -e -p -t d 2>/dev/null)"; }
+  # WAIT ON THE SCREEN, NEVER ON THE CLOCK (see the click group): every step waits for the
+  # text that proves the key before it was read.
+  srwait() {
+    local i=0
+    until grep -qF -- "$1" <<< "$(srframe)"; do
+      [ "$i" -lt 150 ] || { echo "grid never showed: $1" >&2; return 1; }; sleep 0.1; i=$((i+1)); done
+  }
+  srgone() {          # the same, for text that has to go away
+    local i=0
+    while grep -qF -- "$1" <<< "$(srframe)"; do
+      [ "$i" -lt 150 ] || { echo "grid never cleared: $1" >&2; return 1; }; sleep 0.1; i=$((i+1)); done
+  }
+  srstart() {         # $1 = width
+    tmux -L cfsrchdrv kill-session -t '=d' 2>/dev/null; : > "$SR/choice"
+    tmux -L cfsrchdrv -f /dev/null new-session -d -s d -x "${1:-120}" -y 40 \
+      "CLAUDE_FLEET_DIR='$SR/fleet' CLAUDE_FLEET_SCOPE=srch CLAUDE_FLEET_ROOT= node '$ROOT/bin/fleet-grid.mjs' cfsrchtest > '$SR/choice'" 2>/dev/null
+    srwait '─ 4 docs-pass ─'
+  }
+  srkey()  { tmux -L cfsrchdrv send-keys -t d "$@" 2>/dev/null; }
+  srtype() { tmux -L cfsrchdrv send-keys -t d -l "$1" 2>/dev/null; }
+  srdone() {
+    local i=0
+    while tmux -L cfsrchdrv has-session -t '=d' 2>/dev/null; do
+      [ "$i" -lt 150 ] || { srkey q; echo "grid never exited" >&2; break; }; sleep 0.1; i=$((i+1)); done
+    cat "$SR/choice"
+  }
+  US=$'\x1f'
+
+  # THE MATCHER, without a screen — it is lib/ so the phone can ask it the same question
+  # (JS in single quotes: `{a:1,b:2}` inside a double-quoted word is brace-expanded)
+  srlib() { SRLIB="$ROOT/lib/grid-search.mjs" node --input-type=module \
+              -e 'const S = await import(process.env.SRLIB); '"$1" 2>&1; }
+  is "matcher: case-insensitive, label OR name"          "0 2" \
+     "$(srlib 'console.log(S.matchIndices([{name:"acme-api"},{name:"scratch"},{name:"x",label:"Acme docs"}],"ACME").join(" "))')"
+  is "matcher: an empty query matches nothing"           "" \
+     "$(srlib 'console.log(S.matchIndices([{name:"acme-api"}],"").join(" "))')"
+  is "matcher: a non-session entry never matches"        "1" \
+     "$(srlib 'console.log(S.matchIndices([{newCard:true},{card:{name:"toolbox"}}],"o",x=>x.card).join(" "))')"
+  is "matcher: next/prev wrap, from off a match too"     "2 7 7 2 5" \
+     "$(srlib 'const m=[2,5,7]; console.log([S.stepMatch(m,7,1),S.stepMatch(m,2,-1),S.stepMatch(m,0,-1),S.stepMatch(m,9,1),S.stepMatch(m,3,1)].join(" "))')"
+
+  srstart 120
+  srkey /; srwait "type part of an agent's name"
+  srtype bil; srwait '/bil'
+  is "/ + a partial name: the prompt says what matched"  "1" "$(grep -cF '/bil  1 match' <<< "$(srframe)" || true)"
+  # the cursor IS the reversed top rule; it jumped from card 1 to the match
+  is "...the cursor jumps to the matching card"          "bold+rev" "$(srattr '─ 2 billing-svc')"
+  is "...and leaves the card it was on"                  "dim"      "$(srattr '─ 1 api-fix')"
+  # the letters that matched are marked inside the card: on the cursor's reversed rule
+  # they are the part that is NOT reversed
+  is "...the matched letters are marked on the card"     "bold"     "$(srattr 'billing-svc ─' 0)"
+  is "...and the rest of its title is not"               "bold+rev" "$(srattr 'billing-svc ─' 3)"
+  is "...a card that does not match is dimmed in place"  "dim"      "$(srattr '─ 4 docs-pass')"
+  srkey Escape; srgone '/bil'
+  is "Esc clears the prompt"                             "0"        "$(grep -cF '/bil' <<< "$(srframe)" || true)"
+  is "...and the frame is drawn normally again"          "plain"    "$(srattr '─ 1 api-fix')"
+  is "...with the cursor left where the search put it"   "bold+rev" "$(srattr '─ 2 billing-svc')"
+
+  # n / N cycle the matches, in grid order, wrapping both ways. `s` is in billing-svc,
+  # cache-keys (a labelled card, so only its l2 shows the name) and docs-pass.
+  srkey /; srtype s; srwait '3 matches'; srkey Enter; srwait '1 of 3'
+  is "⏎ locks the search on the first match"             "bold+rev" "$(srattr '─ 2 billing-svc')"
+  srkey n; srwait '2 of 3'
+  is "n moves to the next match"                         "bold+rev" "$(srattr '─ 3 PR 1184')"
+  is "...found by the session name under its label"      "rev"      "$(srattr 'cache-keys · ' 9 | sed 's/^bold+//')"
+  is "...and a match off the cursor is still marked"     "bold+rev" "$(srattr 'docs-pass ─' 3)"
+  srkey n; srwait '3 of 3'; srkey n; srwait '1 of 3'
+  is "n wraps from the last match to the first"          "bold+rev" "$(srattr '─ 2 billing-svc')"
+  srkey N; srwait '3 of 3'
+  is "N wraps from the first match to the last"          "bold+rev" "$(srattr '─ 4 docs-pass')"
+  # LOCKED, the card verbs are still inert: x would open a kill prompt in that row
+  srkey x; srkey p; srkey s; srwait '3 of 3'
+  is "locked: x / p / s do nothing to the card"          "0" "$(grep -cE 'kill session|schedule' <<< "$(srframe)" || true)"
+  srkey Enter
+  is "⏎ on the locked search opens the selected card"    "attach${US}docs-pass" "$(srdone)"
+
+  # TYPING owns every letter — the card verbs included — and says so when nothing answers
+  srstart 120
+  # ONE KEY PER WRITE: a run typed in one write reaches the grid as a single token, which
+  # no binding matches — so on a grid that obeys letters, `px` in one write proves nothing.
+  # Apart, p pauses the card and x opens a kill prompt; here they must only be query.
+  srkey /; srwait "type part of an agent's name"; srkey p; srwait '/p'; srkey x; srwait "no agent matches 'px'"
+  is "typed letters go into the query, not the cards"    "0" "$(grep -cE 'kill session|schedule' <<< "$(srframe)" || true)"
+  is "no match: the cursor stays where it was"           "bold+rev" "$(srattr '─ 1 api-fix')"
+  # Backspace edits: from `pxs` back to nothing and then a real name
+  srkey BSpace; srkey BSpace; srwait "type part of an agent's name"
+  srtype 1184; srwait '/1184'
+  is "a label matches too (Backspace edited the query)"  "bold+rev" "$(srattr '─ 3 PR 1184')"
+  srkey Enter; srwait '1 of 1'; srkey Enter
+  is "/ … ⏎ ⏎ opens the matched card"                    "attach${US}cache-keys" "$(srdone)"
+
+  # 80 columns: two cards to a row, and the prompt still one line
+  srstart 80
+  srkey /; srtype docs; srwait '/docs'; srkey Enter; srwait '1 of 1'
+  is "80 cols: the prompt fits on its row"               "1" "$(grep -cE '^ /docs  1 of 1 .*esc clear *$' <<< "$(srframe)" || true)"
+  is "80 cols: the match is selected"                    "bold+rev" "$(srattr '─ 4 docs-pass')"
+  srkey Escape; srkey q; srdone >/dev/null
+  # CHECKED LAST, NOT BESIDE THE KEYS. A pause is fleet-pause, run detached, and it writes
+  # its marker only after watching the pane hold still for 0.6s — so a row read right
+  # after the keystroke passes on a grid that DID pause, and did, under a mutation that
+  # made the locked step obey p. By here two more grids have come and gone.
+  is "no typed or locked key paused a card"              "0" "$(ls "$SR/fleet" | grep -c 'parked' || true)"
+
+  tmux -L cfsrchdrv kill-server 2>/dev/null; tmux -L cfsrchtest kill-server 2>/dev/null; rm -rf "$SR"
+else
+  skip "grid search" "tmux missing"
+fi
+
 # ── 4b. the stack ────────────────────────────────────────────────────────────
 # stack.tsv is "sock<TAB>session". Socket-scoped for the reason every marker in this
 # repo is: EVERY project has a session called `master`, so a bare name stacks whichever

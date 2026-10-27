@@ -61,6 +61,7 @@ control plane).
 | --- | --- |
 | `↑↓←→` / `hjkl` | move |
 | `⇧h` `⇧j` `⇧k` `⇧l` | **reorder** the selected card (persisted — see below) |
+| `/` | **find an agent** — type part of its name or label; matches are highlighted, the rest dimmed, the cursor on the first. `⏎` keeps the search, then `n` / `N` step through the matches and `⏎` opens one. `Esc` clears it |
 | `⏎` | enter the selected card full-screen |
 | a **`· FREE`** card (grey) | a worktree with no live session — `⏎` attaches directly, no prompt |
 | `n` | new session on a checkout — lands on a **naming screen** (edit or accept the suggested name), then resumes if that checkout already has a conversation |
@@ -306,6 +307,7 @@ explaining it's a keyboard-navigable mini file browser.
 |---|---|---|
 | `↑↓←→` / `hjkl` | move selection | README |
 | `⇧h` `⇧j` `⇧k` `⇧l` (`H J K L`) | **reorders** the selected session's card (persisted per fleet — see below) | README |
+| `/` | **find an agent**: every printable key types into the query (card verbs included — `p` or `x` there is a letter, not a pause or a kill), matched against each card's label and session name, case-insensitive. Matching cards are drawn bold with the matched letters reversed; the rest are dimmed in place; the cursor jumps to the first match. `⏎` locks the search — then `n` / `N` next / previous (wrapping), `⏎` opens, `/` or `⌫` edits again. `Esc` clears it from either step; `q` / `` ` `` clear a locked one before they would leave the grid. Matching lives in `lib/grid-search.mjs` | [CODE] |
 | `⏎` | enters the selected session in full | README |
 | `n` | new session on a checkout — lands on the **naming screen** below (edit or accept the suggested name), then **resumes** if a conversation already exists there | README + [CONFIRMED] nuance |
 | `N` | new session, conversation **forced blank** | README + [CONFIRMED] nuance |
