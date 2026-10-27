@@ -4352,6 +4352,83 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   is "ledger: prose closes nothing; unknown ids dropped; the verdict applied; gated never again; who asks; every width; not *.json" \
      "true | 2 | 1:done:user,2:not-done:user,3:open:user,4:open:user,5:open:promise | 3 | - | 5 | user,user,-,-,- | 0 | 1/1 | false | ledger · 1 open · oldest 1m “add a changelog line” · promise: merge when green" "$lj"
 
+  # A brief from the lead counts as done only with proof. Measured on one fleet: 40% of closed
+  # items were closed by the judge with no proof, and in one weekend all 33 "done" items across
+  # 23 workers were, while nothing merged: the judge reads the turn's prose, never its work. So
+  # a `fleet` item the judge reads as done stays OPEN, marked `answered`; only ledger_close with
+  # proof (or the person's own hand) closes it. The person's messages and the agent's promises
+  # are judged exactly as before. One brief each: open and judged done, waiting and mentioned
+  # as done, open and in progress; then a person's ask and a promise, both judged done.
+  lb="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const now = 10 * 86400000
+    let l = L.emptyLedger()
+    l = L.addPrompt(l, { text: 'add the acme-api export endpoint', at: now - 60000, source: 'fleet', whole: true })
+    l = L.addPrompt(l, { text: 'rename the toolbox flag', at: now - 60000, source: 'fleet', whole: true })
+    l = L.addPrompt(l, { text: 'fix the billing-svc retry', at: now - 60000, source: 'fleet', whole: true })
+    l = L.addPrompt(l, { text: 'what does the scratch fixture hold?', at: now - 60000, source: 'user' })
+    l = L.addItem(l, { text: 'merge once CI is green', at: now - 60000, source: 'promise' })
+    l = { ...l, items: l.items.map(i => (i.id === '2' ? { ...i, state: 'waiting', progress: { at: now - 1, reason: 'waits on the person: a pick' } } : i)) }
+    const v = L.parseVerdict(JSON.stringify({ items: ['1', '2', '4', '5'].map(id => ({ id, status: 'done', reason: 'reported finished' })).concat([{ id: '3', status: 'in-progress', reason: 'CI running' }]), promises: [] }), ['1', '2', '3', '4', '5'])
+    l = L.applyVerdict(l, v, { nowMs: now, turnId: 't1', promises: 'show' })
+    const row = i => i.id + ':' + i.state + ':' + (i.closedBy || '-') + ':' + (i.answered ? 'a' : '-')
+    console.log(l.items.map(row).join(','))" 2>&1)"
+  is "ledger: the judge cannot close a brief from the lead as done: it stays open, marked answered; the person's ask and a promise still close" \
+     "1:open:-:a,2:open:-:a,3:open:-:-,4:done:judge:-,5:done:judge:-" "$lb"
+  # ...and the agent's ledger_close with proof does, while one without proof is still refused.
+  lc="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const now = 10 * 86400000
+    let l = L.addPrompt(L.emptyLedger(), { text: 'add the acme-api export endpoint', at: now - 60000, source: 'fleet', whole: true })
+    l = L.applyVerdict(l, { items: [{ id: '1', status: 'done', reason: 'r' }], promises: [] }, { nowMs: now, turnId: 't1', promises: 'show' })
+    const bare = L.closeByAgent(l, '1', '  ', { nowMs: now, turnId: 't2' })
+    const proved = L.closeByAgent(l, '1', 'PR #41', { nowMs: now, turnId: 't2' })
+    const it = proved.ledger && proved.ledger.items[0]
+    console.log([bare.ledger === null, proved.said, it && it.state + ':' + it.closedBy + ':' + it.proof].join(' | '))" 2>&1)"
+  is "ledger: ledger_close with proof closes the answered brief; without proof it is refused" \
+     "true | ledger: 1 closed | done:agent:PR #41" "$lc"
+  # The nudge is bounded, by data that survives a reload: a brief the judge reads as answered is
+  # asked for its proof ONCE, ever (proofAskedAt), never by the plain gate as well, and the
+  # nudge's own turn is a gate turn (never re-prompted) inside the shared cooldown. A worker
+  # that ignores it keeps the item open and listed as answered with no proof, and is not woken
+  # for it again.
+  ln="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const now = 10 * 86400000
+    let l = L.addPrompt(L.emptyLedger(), { text: 'add the acme-api export endpoint', at: now - 60000, source: 'fleet', whole: true })
+    const judged = (l, t) => L.applyVerdict(l, { items: [{ id: '1', status: 'done', reason: 'r' }], promises: [] }, { nowMs: now, turnId: t, promises: 'show' })
+    l = judged(l, 't1')
+    const first = L.proofTargets(l, now, 't1').map(i => i.id).join('') || '-'
+    const gate = L.gateTargets(l, now, { promises: 'show' }).map(i => i.id).join('') || '-'
+    const nudge = L.proofPrompt(L.proofTargets(l, now, 't1'))
+    l = L.markProofAsked(l, ['1'], now)
+    const again = L.proofTargets(judged(l, 't2'), now, 't2').map(i => i.id).join('') || '-'
+    const listed = /\[answered, no proof\]/.test(L.listing(l, now))
+    console.log([first, gate, again, L.isGateTurn(nudge), /mcp__ghostfleet__ledger_close/.test(nudge), /proof/.test(nudge),
+      L.lastGateAt(l) === now, L.gateHold({ gateTurn: true, nowMs: now }), listed].join(' | '))" 2>&1)"
+  is "ledger: the proof nudge names an answered brief once, never twice, never through the plain gate too; its turn is a gate turn" \
+     "1 | - | - | true | true | true | true | gate-turn | true" "$ln"
+  # An item carried to the master from a stopped worker (carryItems) is `fleet`, and needs proof
+  # like any brief, whatever it was in the worker: a worker that stopped without proving it is
+  # the judge-done this refuses. But the master is never nudged for it, as it is never
+  # re-prompted for one: its turn was not asked it. ledger_close with proof closes it.
+  lk="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const now = 10 * 86400000
+    let w = L.addPrompt(L.emptyLedger(), { text: 'fix the billing-svc retry', at: now - 60000, source: 'fleet', whole: true })
+    w = L.addPrompt(w, { text: 'what does the scratch fixture hold?', at: now - 60000, source: 'user' })
+    const r = L.carryItems(w, L.emptyLedger(), { from: 'w2', sessionId: 's2', to: 'master', nowMs: now })
+    const all = { items: r.lead.items.map(i => ({ id: i.id, status: 'done', reason: 'r' })), promises: [] }
+    const m = L.applyVerdict(r.lead, all, { nowMs: now, turnId: 't1', promises: 'show' })
+    const row = i => i.id + ':' + i.state + ':' + (i.carried ? i.carried.source : '-') + ':' + (i.answered ? 'a' : '-')
+    const nudge = L.proofTargets(m, now, 't1').map(i => i.id).join('') || '-'
+    const gate = L.gateTargets(m, now, { promises: 'show' }).map(i => i.id).join('') || '-'
+    const listed = /w2 stopped; it was open\]  \[answered, no proof\]/.test(L.listing(m, now))
+    const closed = L.closeByAgent(m, '1', 'PR #42', { nowMs: now }).said
+    console.log([m.items.map(row).join(','), nudge, gate, listed, closed].join(' | '))" 2>&1)"
+  is "ledger: an item carried from a stopped worker needs proof on the master too, and is never nudged for it" \
+     "1:open:fleet:a,2:open:user:a | - | - | true | ledger: 1 closed" "$lk"
+
   # A queued message pulled back out of the queue (Up) never reaches the model: the gate must
   # not nag about it. Only a QUEUED item missing from the user messages is withdrawn.
   lw="$(node --no-warnings --input-type=module -e "
@@ -4458,8 +4535,10 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   # One long lead session's shapes, replayed (placeholder words; the helper says what each
   # line means). Against the ledger.js before this fix the same replay reads 10 nudge items,
   # 3 resends counted twice, the landed promise stale, the waiting item open, 2 answers as asks.
+  # Its four briefs from the lead the judge read as done stay open, answered with no proof:
+  # before that rule all four closed as judge-done and "open now" read 1.
   is "ledger: a week's shapes replayed: no nudge items, resends folded, a landed stale promise closed, waiting held, answers folded" \
-     "items 18|nudge items 0|resent pairs counted twice 0|done-but-stale promise: done|waiting on the person: waiting|bare answers made items 0|open now 1" \
+     "items 18|nudge items 0|resent pairs counted twice 0|done-but-stale promise: done|waiting on the person: waiting|bare answers made items 0|briefs answered, no proof 4|open now 5" \
      "$(node --no-warnings "$ROOT/test/helpers/ledger-replay.mjs" "$ROOT/mods/ghostfleet/hooks/ledger.js" "$ROOT/test/fixtures/ledger-replay.json" 2>&1 | grep -v '^by source' | paste -sd'|' -)"
   # fleet-ledger, from outside: by name on THIS socket (another fleet's w1 is not this one's).
   LG="$(mktemp -d)" && LG="$(cd "${LG:?}" && pwd -P)"

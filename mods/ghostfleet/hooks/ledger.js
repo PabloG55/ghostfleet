@@ -18,6 +18,9 @@
 //            fleet    a prompt fleet-send handed to the mod (DELIVERY)
 //            promise  a commitment the agent made in a final message ("I'll merge when green")
 //   gated    true once the gate has re-prompted about it: at most once per item, ever
+//   answered { at, turnId, reason }: a `fleet` item the judge read as done. It stays OPEN:
+//            a brief from the lead is done only with proof (needsProof); the gate asks for
+//            that proof once (proofAskedAt, see proofTargets)
 //   progress { at, turnId, reason }: a judged turn reported the item's state and said the
 //            work goes on elsewhere (a worker, a build, CI) or waits on the person. It stays
 //            open, listed and judged, and the gate never names it (gateTargets)
@@ -29,9 +32,11 @@
 //            the first prompt of the latest one, and only items from `window` on are gated.
 //            An item from before this field existed has none, and is never gated again
 //   carried  { from, sessionId, id, state, source, at, note }: on a LEAD's item, the worker it
-//            came from when that worker was stopped, and what the item was there
-//   closedBy agent (ledger_close / ledger_drop, with `proof` or `reason`) | judge |
-//            person (/ledger close, fleet-ledger close; `hand` in a file written before)
+//            came from when that worker was stopped, and what the item was there. Its
+//            source is `fleet`, so it too is done only with proof (needsProof)
+//   closedBy agent (ledger_close / ledger_drop, with `proof` or `reason`) | judge (never
+//            `done` on a fleet item) | person (/ledger close, fleet-ledger close; `hand` in a
+//            file written before)
 
 export const LEDGER_VERSION = 1
 export const KEEP_ITEMS = 200                 // the file keeps the newest 200
@@ -551,6 +556,25 @@ export const waitsOnPerson = text => WAITS.test(String(text || '')) || UPON.test
 // not gated, and five is already more than a band row or a person can keep in view.
 export const PROMISE_CAP = 5
 
+// A BRIEF FROM THE LEAD IS DONE ONLY WITH PROOF. The judge reads a turn's prose and never its
+// work, so "done" from it is a reading of what the agent said. For the person's own messages
+// and the agent's promises that reading is the backup it was built to be. For a `fleet` item
+// it was the fleet's record of work: measured on one fleet, 670 of 1,676 closed items (40%)
+// were closed by the judge with no proof, and in one weekend stretch all 33 "done" items
+// across 23 workers were, while the lead's own transcript shows nothing merged or spawned in
+// that time. It read as days of autonomous work that did not happen. So a fleet item the
+// judge reads as done stays OPEN with `answered` on it, and the gate asks the agent once for
+// the proof (proofTargets); ledger_close with proof, or the person by hand, closes it. The
+// judge may still keep it open, report it in progress, or hold it waiting. Not retroactive:
+// an item the judge closed before this keeps its state. An item carried to a lead from a
+// stopped worker is `fleet` too, and needs proof the same way (proofTargets says why it is
+// never nudged for it).
+export const needsProof = i => i.source === 'fleet'
+function answeredOnly(i, v, nowMs, turnId) {
+  const { progress, ...rest } = i
+  return { ...rest, answered: { at: nowMs, ...(turnId ? { turnId } : {}), ...(v.reason ? { reason: v.reason } : {}) } }
+}
+
 // The verdict applied: judged items close, promises join as items of their own. A promise
 // the judge says restates an open one (`same`), or that reads as one (samePromise), is that
 // promise, never a second; its newer words replace the older ones only when the judge said so.
@@ -570,7 +594,7 @@ export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
       // promise reported on ("#12 merged; #13 awaiting") went stale five turns later on the
       // count it had before the report, and from stale nothing could close it.
       if (v.status === 'in-progress') {
-        const { keptOpen, ...rest } = i
+        const { keptOpen, answered, ...rest } = i
         const progress = { at: nowMs, ...(turnId ? { turnId } : {}), ...(v.reason ? { reason: v.reason } : {}) }
         return waitsOnPersonNote(v.reason) ? { ...rest, state: 'waiting', progress } : { ...rest, progress }
       }
@@ -580,6 +604,7 @@ export function applyVerdict(ledger, verdict, { nowMs, turnId, promises }) {
         return kept < STALE_TURNS ? { ...i, keptOpen: kept }
           : { ...i, keptOpen: kept, state: 'stale', closedAt: nowMs, closedBy: 'judge', reason: `no turn addressed it in ${kept} judged turns` }
       }
+      if (v.status === 'done' && needsProof(i)) return answeredOnly(i, v, nowMs, turnId)
       return { ...i, state: v.status, closedAt: nowMs, closedBy: 'judge', ...(v.reason ? { reason: v.reason } : {}) }
     }),
   }
@@ -676,6 +701,7 @@ export function expireDormant(ledger, nowMs) {
 // A verdict on a dormant item: done and not-done close it; in progress reopens it, or keeps it
 // waiting when what it waits on is still the person; "open" leaves it where it was.
 function revisited(i, v, nowMs, turnId) {
+  if (v.status === 'done' && needsProof(i)) return answeredOnly(reopened(i), v, nowMs, turnId)
   if (v.status === 'done' || v.status === 'not-done') return { ...i, state: v.status, closedAt: nowMs, closedBy: 'judge', ...(v.reason ? { reason: v.reason } : {}) }
   if (v.status !== 'in-progress') return i
   const progress = { at: nowMs, ...(turnId ? { turnId } : {}), ...(v.reason ? { reason: v.reason } : {}) }
@@ -697,7 +723,7 @@ function revisited(i, v, nowMs, turnId) {
 // was repeat the same report. Only the ignored item is owed a nudge.
 export function gateTargets(ledger, nowMs, { promises }) {
   const from = Number(ledger.window) || 0
-  return openItems(ledger, nowMs).filter(i => !i.gated && !i.progress && from && Number(i.prompt) >= from
+  return openItems(ledger, nowMs).filter(i => !i.gated && !i.progress && !i.answered && from && Number(i.prompt) >= from
     && (i.source !== 'promise' || promises === 'gate'))
 }
 
@@ -721,7 +747,7 @@ export function gateTargets(ledger, nowMs, { promises }) {
 // separate ask the person makes later in the session is still owed its nudge. The window is
 // read from the items' `gatedAt`, so a reload does not reset it.
 export const GATE_COOLDOWN_MS = 5 * 60_000
-export const lastGateAt = ledger => Math.max(0, ...ledger.items.map(i => Number(i.gatedAt) || 0))
+export const lastGateAt = ledger => Math.max(0, ...ledger.items.map(i => Math.max(Number(i.gatedAt) || 0, Number(i.proofAskedAt) || 0)))
 export function gateHold({ gateTurn, waitingOnPerson, lastGate = 0, nowMs, workers = 0 }) {
   if (gateTurn) return 'gate-turn'
   if (waitingOnPerson) return 'waiting'
@@ -794,6 +820,38 @@ export function gatePrompt(items) {
 export const markGated = (ledger, ids, nowMs) => ({
   ...ledger,
   items: ledger.items.map(i => (ids.includes(i.id) ? { ...i, gated: true, gatedAt: nowMs } : i)),
+})
+
+// The briefs the judge read as answered in THIS turn and that were never asked for their proof.
+// The bound is in the data, like `gated`: an item carries `proofAskedAt` once asked and is never
+// asked again, across reloads too. With the holds the gate already has (gateHold: the nudge's
+// own turn is a gate turn and is never re-prompted, nor is one inside the cooldown), a worker
+// that ended its turn is woken at most once per brief, however many turns the judge goes on
+// reading it as answered. One that answers the nudge without proof keeps the item open, listed
+// "[answered, no proof]", and is not woken for it again. Not limited to the latest prompt's
+// window: a brief answered now is owed its proof now, whenever it was sent.
+//   Never an item CARRIED from a stopped worker (carryItems). It needs proof as any brief does,
+// since a worker that stopped without proving it is exactly the judge-done this rule refuses,
+// whatever it was in the worker (an ask, a brief, a promise); but it is never re-prompted at the
+// lead's turn end, because the lead's turn was not asked it. The lead's note lists it with the
+// close-with-proof rule, and /ledger shows it "[answered, no proof]" once the judge reads it so.
+export function proofTargets(ledger, nowMs, turnId) {
+  return openItems(ledger, nowMs).filter(i => needsProof(i) && i.answered && !i.proofAskedAt && !i.carried
+    && (!turnId || i.answered.turnId === turnId))
+}
+
+export function proofPrompt(items) {
+  const lines = items.map(i => `${i.id}. "${excerpt(i.text, 160)}"`)
+  return [
+    `${GATE_HEAD} ${items.length === 1 ? 'A brief from the lead reads as answered' : `${items.length} briefs from the lead read as answered`}, but a brief counts as done only with proof:`,
+    ...lines,
+    `Close each with ${TOOL.close} and the proof that it is done (a PR number, commit or file path), or say what is still missing (${VIA_CLI}). (Asked once per brief; it will not be asked again.)`,
+  ].join('\n')
+}
+
+export const markProofAsked = (ledger, ids, nowMs) => ({
+  ...ledger,
+  items: ledger.items.map(i => (ids.includes(i.id) ? { ...i, proofAskedAt: nowMs } : i)),
 })
 
 // ── the agent's own hand: the tools ledger_close, ledger_drop, ledger_add ──────
@@ -948,7 +1006,8 @@ export function listing(ledger, nowMs, { all = false } = {}) {
     const working = i.state === 'open' && i.progress ? `  [in progress${i.progress.reason ? `: ${excerpt(i.progress.reason, 60)}` : ''}]` : ''
     const c = i.state === 'open' && i.carried
     const came = c ? `  [${c.from} stopped; it was ${c.state}${c.note ? `: ${excerpt(c.note, 60)}` : ''}]` : ''
-    return `${i.id.padStart(3)}  ${i.state.padEnd(8)} ${tag.padEnd(7)} ${ago(nowMs - i.at).padStart(4)}  ${excerpt(i.text, 100)}${i.gated ? '  [gated]' : ''}${working}${came}${why}`
+    const unproven = i.state === 'open' && i.answered ? '  [answered, no proof]' : ''
+    return `${i.id.padStart(3)}  ${i.state.padEnd(8)} ${tag.padEnd(7)} ${ago(nowMs - i.at).padStart(4)}  ${excerpt(i.text, 100)}${i.gated ? '  [gated]' : ''}${working}${came}${unproven}${why}`
   })
   return [...out, ...waits, ...judged].join('\n')
 }

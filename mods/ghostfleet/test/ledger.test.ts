@@ -1323,3 +1323,90 @@ test('a bare answer to the agent\'s numbered question folds into the item that a
   await type($, '4')
   expect(book(w).items.length).toBe(2)
 })
+
+// A brief from the lead is done only with proof (ledger.js needsProof): the judge reading it as
+// done leaves it open, and the gate asks for the proof once per brief, ever.
+test('a brief from the lead the judge reads as done stays open; one nudge asks for its proof, never a second', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'add the acme-api export endpoint' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'add the acme-api export endpoint', turnId: 't1' })
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t1', 'Added the export endpoint; all done.'))
+  await settle(clock)
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ source: 'fleet', state: 'open', answered: expect.objectContaining({ turnId: 't1' }) }))
+  expect(book(w).items[0].closedBy).toBeUndefined()
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('A brief from the lead reads as answered')
+  expect(nags(w)[0].text).toContain('1. "add the acme-api export endpoint"')
+  expect(nags(w)[0].text).not.toContain('still open from this session')
+  // the nudge's turn answers in prose again: judged done again, still open, not nudged again
+  await $.turn.start({ text: nags(w)[0].text, turnId: 't2' })
+  await $.turn.complete(done('t2', 'It is done, as I said.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  // nor on a later ordinary turn, past the cooldown and after a reload would have reset memory
+  await clock.advance(COOLDOWN)
+  await type($, 'what next?')
+  await $.turn.start({ text: 'what next?', turnId: 't3' })
+  w.heard = ['what next?']
+  await $.turn.complete(done('t3', 'Nothing; the endpoint is done.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(book(w).items[0].state).toBe('open')
+  // the agent's own close with proof is what closes it
+  expect(await tool($, CLOSE, { id: '1', proof: 'PR #41' })).toBe('ledger: 1 closed')
+  expect(book(w).items[0]).toEqual(expect.objectContaining({ state: 'done', closedBy: 'agent', proof: 'PR #41' }))
+})
+
+test("the person's own request is still closed by the judge; a brief beside it waits for proof", async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'rename the toolbox flag' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'rename the toolbox flag', turnId: 't1' })
+  await type($, 'and what does the scratch fixture hold?', 't1')
+  w.heard = ['rename the toolbox flag', 'and what does the scratch fixture hold?']
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t1', 'Renamed the flag. The scratch fixture holds two sessions.'))
+  await settle(clock)
+  expect(book(w).items.map((i: any) => [i.source, i.state, i.closedBy ?? '-'])).toEqual([['fleet', 'open', '-'], ['user', 'done', 'judge']])
+  expect(nags(w).length).toBe(1)
+  expect(nags(w)[0].text).toContain('1. "rename the toolbox flag"')
+  expect(nags(w)[0].text).not.toContain('scratch fixture')
+})
+
+test('a proof nudge inside the cooldown is held, not lost, and goes out at a later answered turn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const w = world(on)
+  await start($)
+  await type($, 'fix the login redirect')
+  await $.turn.start({ text: 'fix the login redirect', turnId: 't1' })
+  w.heard = ['fix the login redirect']
+  await $.turn.complete(done('t1', 'Looked around.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  // a brief lands and is answered inside the cooldown: held
+  w.files.set(`${SPOOL}/1000-1.json`, JSON.stringify({ id: '1000-1', text: 'bump the billing-svc version' }))
+  await clock.advance(500)
+  await $.turn.start({ text: 'bump the billing-svc version', turnId: 't2' })
+  w.judge = verdict(id => (id === '2' ? 'done' : 'open'))
+  await $.turn.complete(done('t2', 'Bumped it.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(1)
+  expect(book(w).judge.held).toBe('cooldown')
+  expect(book(w).items[1].proofAskedAt).toBeUndefined()
+  // past it, the next turn the judge reads it as done again asks, once
+  await clock.advance(COOLDOWN)
+  await type($, 'status?')
+  await $.turn.start({ text: 'status?', turnId: 't3' })
+  w.heard = ['fix the login redirect', 'status?']
+  w.judge = verdict(() => 'done')
+  await $.turn.complete(done('t3', 'Redirect fixed, version bumped.'))
+  await settle(clock)
+  expect(nags(w).length).toBe(2)
+  expect(nags(w)[1].text).toContain('2. "bump the billing-svc version"')
+})

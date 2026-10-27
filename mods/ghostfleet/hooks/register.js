@@ -47,7 +47,7 @@ import {
   markGated, closeByHand, clearOpen, listing, ledgerRuns, stampTurn, withdrawn, dropItems, turnBlocks,
   judgeBatches, JUDGE_TOKENS, gateHold, lastGateAt, isGateTurn,
   markInterrupted, addPrompt, closeByAgent, dropByAgent, addByAgent, contextNote, TOOL,
-  revisit, expireDormant, endsOnChoice,
+  revisit, expireDormant, endsOnChoice, proofTargets, proofPrompt, markProofAsked,
 } from './ledger.js'
 import {
   spoolOf, entryId, waiting, staleReceipts, replyOf, replyMarker, armedMarker, isTurnOf,
@@ -990,6 +990,9 @@ function startBand($) {
 //            item the turn reported in progress, and never at all at the end of a turn the
 //            gate itself started, one that ends on a question to the person, one inside the
 //            cooldown, or a lead's while its workers are still at it (gateHold)
+//   PROOF    a brief from the lead (`fleet`) the judge reads as done stays open: only
+//            ledger_close with proof closes it. The same re-prompt, under the same holds, asks
+//            for that proof ONCE per brief, ever (ledger.js proofTargets)
 //
 // A NAG, NOT A GUARD. It fails OPEN everywhere: a judge that errors, times out or answers
 // a wrong shape closes nothing and re-prompts nothing (the item stays open, the failure is
@@ -1345,7 +1348,9 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
   if (turnsStarted !== generation || turnRunning || pending || judgeNext) return
   const judged = new Set(open.map(i => i.id))
   let targets = gateTargets(after, nowMs, cfg).filter(i => judged.has(i.id))
-  if (!targets.length) return
+  // Briefs this turn's verdict read as answered, owed their proof (ledger.js needsProof).
+  let proof = proofTargets(after, nowMs, e.turnId)
+  if (!targets.length && !proof.length) return
   // Asked of every open queued or interrupted item, not only the targets: the rewound copy of
   // a message stopped and sent again is from the window before, so the gate would never name
   // it, and unasked it stayed open beside its resend as a second item for one message.
@@ -1359,8 +1364,9 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
       : unsure.map(i => i.id)
     if (msgs && gone.length) await changeLedger($, l => dropItems(l, gone))
     targets = targets.filter(i => !gone.includes(i.id))
-    if (!targets.length) return
+    proof = proof.filter(i => !gone.includes(i.id))
   }
+  if (!targets.length && !proof.length) return
   // Each of these is a turn whose re-prompt could only be answered with the report it just
   // gave (ledger.js gateHold). The items stay open and un-gated: a later turn may still name them.
   const band = await bounded($, $.state.get(BAND), IO_MS, null)
@@ -1370,16 +1376,20 @@ async function judgeTurn($, cfg, e, blocks, nowMs, generation) {
     workers: team ? (Number(team.working) || 0) + (Number(team.need) || 0) : 0,
   })
   if (held) {
-    await changeLedger($, l => ({ ...l, judge: { ...(l.judge || judge), held, heldItems: targets.map(i => i.id) } }))
-    void $.ui.log(`ghostfleet ledger: no re-prompt for ${targets.map(i => i.id).join(', ')} (${held})`, { to: 'debug' })
+    const heldItems = [...targets, ...proof].map(i => i.id)
+    await changeLedger($, l => ({ ...l, judge: { ...(l.judge || judge), held, heldItems } }))
+    void $.ui.log(`ghostfleet ledger: no re-prompt for ${heldItems.join(', ')} (${held})`, { to: 'debug' })
     return
   }
   const ids = targets.map(i => i.id)
+  const asked = proof.map(i => i.id)
   // Marked BEFORE the submit: a crash between the two loses one nag, never adds a second.
-  const marked = await changeLedger($, l => markGated(l, ids, nowMs))
+  const marked = await changeLedger($, l => markProofAsked(markGated(l, ids, nowMs), asked, nowMs))
   if (!marked) return
-  // Framed ("the ghostfleet plugin sent a message"), not asUser: it is the mod talking.
-  void Promise.resolve($.prompt.submit({ text: gatePrompt(targets) })).catch(() => {})
+  // Framed ("the ghostfleet plugin sent a message"), not asUser: it is the mod talking. One
+  // submit, so the briefs owed proof and the ignored asks are one turn, not two.
+  const text = [targets.length ? gatePrompt(targets) : '', proof.length ? proofPrompt(proof) : ''].filter(Boolean).join('\n\n')
+  void Promise.resolve($.prompt.submit({ text })).catch(() => {})
 }
 
 async function onLedgerCommand($, e) {
