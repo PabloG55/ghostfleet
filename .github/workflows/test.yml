@@ -54,7 +54,17 @@ jobs:
     # on the branch and says nothing about the code, so 30 keeps a hang readable while
     # leaving a green run room to finish. If macOS approaches this too, the fix is the
     # suite's settle time, not another bump.
-    timeout-minutes: 30
+    #   It did, and 45 is that bump with the measurement behind it. A GREEN macOS run of
+    # staging (40523117350) spent 28.4 min in the suite alone across 278 groups, so with the
+    # ~1.5 min of setup the job finished at about 29.5 of 30 — and a PR run that reached 277
+    # of those groups in 29.1 min was cancelled on the clock with every row it had run
+    # green. A bound a green run can hit is a flake one level up: red on the branch, nothing
+    # wrong in the code. No single group is the cause (the slowest are 165s and 130s, and both
+    # are doing work, not waiting), so there is no settle time to cut that buys back 50%
+    # headroom. What this bound exists for — a hang — is also narrower than it was: every CDP
+    # call in lib/browser.mjs now fails on its own after 60s, and the two silent macOS hangs
+    # were cancelled with a Chrome and a node still alive, inside fleet-look. 45 leaves a green run ~50% room and still makes a tmux hang readable.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
