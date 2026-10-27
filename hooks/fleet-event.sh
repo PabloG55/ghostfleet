@@ -530,6 +530,12 @@ _input_empty() { _input_state "$1" "$2"; [ "$?" = 0 ]; }
 # either would swallow the other's wake. Called with the socket alone it is what it always
 # was: this fleet's dir, the notify stamp, the worker nudge — whose words live HERE, inside
 # the function, so it still works when lifted out and run on its own (the suite does).
+#   A NEED-YOU KIND (`needyou`, `<lead>.needyou`) differs in three ways, all for the same
+# reason — each one names a worker and what it wants, so it is not interchangeable with the
+# next the way "a worker finished" is. A second need-you while one is armed is ADDED to it
+# (<kind>.more) rather than dropped by the single-flight lock; no stamp swallows it, since
+# the stamp another need-you wrote was about somebody else; and it goes --now, folded into
+# a running turn instead of queued behind it (see _needyou_nudge).
 _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=message $5=target]
   # declared separately, not `local a=$1 b=…$a…`: bash expands every assignment word in a
   # single `local` before binding any of them, so the second would read an unset $sock and
@@ -538,7 +544,10 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
   sock="$1"; dir="${2:-$FLEET_DIR}"; kind="${3:-notify}"; msg="${4:-[fleet] A worker finished or needs you — run fleet-inbox to see what changed, then continue (dispatch the next step, merge, or unblock). Automated nudge; no need to reply to it.}"; to="${5:-master}"
   lock="$dir/$sock.$kind.retry"
   p="$(cat "$lock" 2>/dev/null)"
-  case "$p" in ''|*[!0-9]*) ;; *) kill -0 "$p" 2>/dev/null && return 0 ;; esac
+  case "$p" in ''|*[!0-9]*) ;; *) if kill -0 "$p" 2>/dev/null; then
+    case "$kind" in needyou|*.needyou) printf '%s\n' "$msg" >> "$dir/$sock.$kind.more" 2>/dev/null ;; esac
+    return 0
+  fi ;; esac
   export -f _pane_text _input_state _input_empty
   FLEET_DIR="$dir" nohup bash -c '
     sock="$1"; lock="$2"; every="${3:-20}"; tries="${4:-30}"; kind="${5:-notify}"; msg="$6"; to="${7:-master}"
@@ -554,14 +563,23 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
       case "$kind" in jarvis) win="${CLAUDE_FLEET_JARVIS_DEBOUNCE:-30}" ;; *) win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}" ;; esac
       case "$win" in ""|*[!0-9]*) win=30 ;; esac
       now="$(date +%s)"
+      ny=0; case "$kind" in needyou|*.needyou) ny=1 ;; esac
       # a fresh event already woke it: nothing left to deliver
-      [ "$(( now - last ))" -ge "$win" ] || exit 0
+      [ "$ny" = 1 ] || [ "$(( now - last ))" -ge "$win" ] || exit 0
       if _input_empty "$sock" "$to"; then
         printf "%s\n" "$now" > "$stamp" 2>/dev/null
+        more="$FLEET_DIR/$sock.$kind.more"
+        if [ "$ny" = 1 ] && [ -s "$more" ]; then
+          nl="$(printf "\nx")"; msg="$msg${nl%x}$(cat "$more")"; rm -f "$more"
+        fi
         # CLAUDE_FLEET_DIR is where fleet-send QUEUES a prompt for a busy target, so it is
         # the target fleet dir: the one its own Stop drains. (No apostrophes in here: this
         # whole body is one single-quoted argument.)
-        CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send --nudge -s "$sock" "$to" "$msg" >/dev/null 2>&1
+        if [ "$ny" = 1 ]; then
+          CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send --nudge --now -s "$sock" "$to" "$msg" >/dev/null 2>&1
+        else
+          CLAUDE_FLEET_DIR="$FLEET_DIR" fleet-send --nudge -s "$sock" "$to" "$msg" >/dev/null 2>&1
+        fi
         exit 0
       fi
     done
@@ -572,9 +590,9 @@ _defer_nudge() {                      # $1=socket [$2=fleet dir $3=kind $4=messa
     # reads: a worker sat on a permission prompt behind four such expiries before anyone
     # looked. The row lands beside the worker rows it failed to announce, so the next
     # fleet-inbox (and every reader of the inbox) shows the gap; fleet-serve watches the
-    # marker above and buzzes the phone. A sub-lead kind is <lead>.notify and its inbox is
-    # <sock>.<lead>.inbox; master and Jarvis read the fleet inbox.
-    case "$kind" in *.notify) inbox="$FLEET_DIR/$sock.${kind%.notify}.inbox" ;; *) inbox="$FLEET_DIR/$sock.inbox" ;; esac
+    # marker above and buzzes the phone. The inbox is the one the TARGET reads: a sub-lead
+    # reads <sock>.<lead>.inbox, and master and Jarvis read the fleet inbox.
+    case "$to" in master) inbox="$FLEET_DIR/$sock.inbox" ;; *) inbox="$FLEET_DIR/$sock.$to.inbox" ;; esac
     printf "%s\t%s\t%s\t%s\n" "$(date +%s)" "$to" undelivered \
       "wake expired after $(( every * tries ))s: the input box never read empty, so the rows above went unannounced" \
       >> "$inbox" 2>/dev/null
@@ -627,6 +645,60 @@ _peer_answered() {              # $1=transcript $2=line this turn starts at $3=a
   [ "$n" -gt 0 ]
 }
 
+# --- WHAT A NEED-YOU IS ASKING, read off the worker's own pane -----------------
+# The Notification's words are "Claude needs your permission" for a tool call AND for an
+# AskUserQuestion picker (measured, 2.1.295), so a row carrying only them told the lead that
+# something was wanted and never what. lib/permission-dialog.mjs is the one detector for
+# what a pane is asking (fleet-answer and the phone use it), and it says so in one scrubbed
+# line. The dialog is already drawn when this fires — measured identical at the hook's start
+# and a second later — so the one retry is for a slower redraw, not the expected case. A
+# limit is no dialog, so its line is looked for only when the Notification said "limit".
+# No node, no detector, no pane: the Notification's words, as before.
+NEED_ASK=""
+if [ "$status" = need-you ] && [ -n "$SOCK" ]; then
+  _det="$(cd "$(dirname "$_cf_src")" 2>/dev/null && pwd)/../lib/permission-dialog.mjs"
+  _ntgt="${PANE%@*}"; [ -n "$_ntgt" ] || _ntgt="$SLOT"
+  if [ -n "$_ntgt" ] && [ -f "$_det" ] && command -v node >/dev/null 2>&1; then
+    _lim=""; case "$low" in *limit*) _lim=--limit ;; esac
+    for _try in 1 2; do
+      NEED_ASK="$(tmux -L "$SOCK" capture-pane -p -t "$_ntgt" 2>/dev/null \
+        | node "$_det" --ask $_lim 2>/dev/null | head -1 | tr '\t\037' '  ')"
+      [ -n "$NEED_ASK" ] || [ "$_try" = 2 ] && break
+      sleep 0.3
+    done
+  fi
+fi
+NEED_DETAIL="${NEED_ASK:-${NOTE:0:120}}"
+
+# A need-you NUDGE names the worker and the ask, and is nothing like a finish's. Its own
+# paths, because the generic one was the failure: the same words as a DONE, the same
+# debounce stamp (a burst of finishes swallowed it), and the same queue (a mid-turn lead got
+# it only after its turn, and after every DONE nudge queued ahead of it). So:
+#   - debounced per WORKER, and only against the SAME ask — a second worker, or the same
+#     worker's next dialog, is news;
+#   - sent --now, folded into a running turn, because a worker stopped on a dialog is the one
+#     event that should interrupt; it still waits for an empty input box like every wake;
+#   - deferred under a need-you kind of its own, so a done's armed retry does not hold it.
+# It ends "no need to reply to it" on purpose: the mod's ledger (isNudge) and Jarvis's both
+# drop a [fleet] message that says so, and a --now paste carries no nudge marker.
+_needyou_nudge() {
+  local sent last lask win kind msg
+  sent="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.needyou.sent"
+  last=""; lask=""
+  [ -f "$sent" ] && IFS=$'\x1f' read -r last lask < "$sent"
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  win="${CLAUDE_FLEET_NOTIFY_DEBOUNCE:-30}"; case "$win" in ''|*[!0-9]*) win=30 ;; esac
+  [ "$lask" = "$NEED_DETAIL" ] && [ "$(( now - last ))" -lt "$win" ] && return 0
+  printf '%s\x1f%s\n' "$now" "$NEED_DETAIL" > "$sent" 2>/dev/null
+  msg="[fleet] $SLOT NEEDS YOU: $NEED_DETAIL — fleet-answer $SLOT, or tell the owner (approving a tool call is theirs to do). fleet-inbox says whether it is still pending. Automated alert, not a new task; no need to reply to it."
+  kind=needyou; [ -n "$_parent" ] && kind="$_parent.needyou"
+  if _input_empty "$CLAUDE_FLEET_SOCK" "$_to"; then
+    ( fleet-send --nudge --now -s "$CLAUDE_FLEET_SOCK" "$_to" "$msg" >/dev/null 2>&1 & )
+  else
+    _defer_nudge "$CLAUDE_FLEET_SOCK" "$FLEET_DIR" "$kind" "$msg" "$_to"
+  fi
+}
+
 # --- push worker events into the lead's inbox (see fleet-inbox) ---------------
 # Event-driven, zero polling: the lead can't be interrupted, so it drains this
 # feed with `fleet-inbox` instead of polling every sibling. Emit the two events a
@@ -656,13 +728,25 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ] \
   fi
 fi
 if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; then
+  # WHEN A NEED-YOU CLEARED. fleet-inbox marks a need-you pending or cleared, and "cleared"
+  # needs a time: the first event after it that is not itself a need-you (the approved tool
+  # running, the next prompt, the Stop). The row's inbox is remembered in a marker so the
+  # clear lands beside it — a sub-lead's child's in the sub-lead's inbox. A decline by Esc
+  # fires no event at all, which is why fleet-inbox still asks the pane.
+  _nym="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.${SLOT}.needyou"
+  if [ "$status" != need-you ] && [ -f "$_nym" ]; then
+    _nyi="$(head -1 "$_nym" 2>/dev/null)"
+    case "$_nyi" in /*.inbox) printf '%s\t%s\n' "$now" "$SLOT" >> "$_nyi.cleared" 2>/dev/null ;; esac
+    rm -f "$_nym" 2>/dev/null
+  fi
   ev=""; detail=""
-  if   [ "$status" = "need-you" ]; then ev="need-you"; detail="${NOTE:0:120}"
+  if   [ "$status" = "need-you" ]; then ev="need-you"; detail="$NEED_DETAIL"
   elif [ "$EVENT" = "Stop" ];      then ev="done";      detail="${folder}${branch:+ · $branch}"
   fi
   if [ -n "$ev" ]; then
     printf '%s\t%s\t%s\t%s\n' "$now" "$SLOT" "$ev" "$detail" \
       >> "$_inbox" 2>/dev/null || true
+    [ "$ev" = need-you ] && printf '%s\n' "$_inbox" > "$_nym" 2>/dev/null
 
     # Opt-in PUSH: instead of the lead polling, WAKE it so it drains the inbox and
     # acts. Enable per fleet by `touch $FLEET_DIR/<sock>.notify-lead` (live, no
@@ -715,7 +799,10 @@ if [ -n "$SLOT" ] && [ "$SLOT" != master ] && [ -n "${CLAUDE_FLEET_SOCK:-}" ]; t
       || [ -f "$_pm.notify-lead" ] \
       || [ -f "$HOME/.config/ghostfleet/notify-lead" ]; then _push=1
     fi
-    if [ "$_push" = 1 ] \
+    if [ "$_push" = 1 ] && [ "$ev" = need-you ] \
+       && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_to" 2>/dev/null; then
+      _needyou_nudge
+    elif [ "$_push" = 1 ] \
        && tmux -L "$CLAUDE_FLEET_SOCK" has-session -t "$_to" 2>/dev/null; then
       # One stamp per WAKE TARGET: a sub-lead's burst must not swallow master's next wake.
       stamp="$FLEET_DIR/${CLAUDE_FLEET_SOCK}.notify.stamp"
@@ -788,8 +875,8 @@ if [ -f "$JMARK" ] && ! grep -qsx off "$JMARK.enabled" && [ -n "$SOCK" ] && [ -n
     j_last="$(cat "$j_stamp" 2>/dev/null || echo 0)"; case "$j_last" in ''|*[!0-9]*) j_last=0 ;; esac
     j_win="${CLAUDE_FLEET_JARVIS_DEBOUNCE:-30}"; case "$j_win" in ''|*[!0-9]*) j_win=30 ;; esac
     if [ "$status" = need-you ]; then
-      [ "$j_own" = 1 ] || printf '%s\t%s\t%s\t%s\n' "$now" "$j_who" "need-you" "${NOTE:0:160}" >> "$j_dir/$j_sock.inbox" 2>/dev/null
-      j_msg="[fleet] need-you: $j_who — ${NOTE:0:120}. Run fleet_digest, then tell the owner in one line what is blocked and what you propose. Answering it for him is on the confirm-list. Automated wake."
+      [ "$j_own" = 1 ] || printf '%s\t%s\t%s\t%s\n' "$now" "$j_who" "need-you" "$NEED_DETAIL" >> "$j_dir/$j_sock.inbox" 2>/dev/null
+      j_msg="[fleet] need-you: $j_who — $NEED_DETAIL. Run fleet_digest, then tell the owner in one line what is blocked and what you propose. Answering it for him is on the confirm-list. Automated wake."
       # Leading-edge, like every other wake here: a burst of blocks is one look, and the digest
       # the look starts with names all of them. Not running: the row waits in its inbox.
       if tmux -L "$j_sock" has-session -t master 2>/dev/null && [ "$(( now - j_last ))" -ge "$j_win" ]; then
@@ -932,7 +1019,7 @@ if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && [ -n "$SLOT" ]; then
             sleep 0.2
           done
         else
-          r_ev="asks"; r_txt="$NOTE"
+          r_ev="asks"; r_txt="$NEED_DETAIL"
         fi
         # Bash substring, not `cut -c`: this text is UTF-8 (em dashes, box glyphs) and
         # cut counts bytes in the C locale, which would slice a character in half.

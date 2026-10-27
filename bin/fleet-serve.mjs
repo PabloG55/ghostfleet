@@ -1505,8 +1505,9 @@ function pushEvents(rows) {
 // a file nobody reads, so a worker sat on a permission prompt behind four of them until it
 // was found by hand. That marker GROWING is the event: no status changes (the lead is
 // idle, as it was), so the transition rule above cannot see it.
-//   The kind names the target: `notify` and `jarvis` wake the socket's master, a sub-lead's
-// is `<lead>.notify`. A socket can carry dots no better than a session can be trusted not
+//   The kind names the target: `notify`, `jarvis` and `needyou` wake the socket's master, a
+// sub-lead's is `<lead>.notify` or `<lead>.needyou` (a worker's need-you has a wake of its own,
+// hooks/fleet-event.sh _needyou_nudge, so it cannot be held behind a finish's). A socket can carry dots no better than a session can be trusted not
 // to, so the socket is matched against the ones the scan KNOWS, longest first.
 //   SAME BASELINE RULE: the first sight of a marker is its size, never a buzz — a daemon
 // starting next to a week of expiries must not ring for all of them.
@@ -1517,8 +1518,9 @@ export function undeliveredTarget(name, socks) {
   const sock = [...socks].filter(s => base.startsWith(`${s}.`)).sort((a, b) => b.length - a.length)[0];
   if (!sock) return null;
   const kind = base.slice(sock.length + 1);
-  if (kind === 'notify' || kind === 'jarvis') return { sock, session: 'master' };
-  if (kind.endsWith('.notify') && kind.length > '.notify'.length) return { sock, session: kind.slice(0, -'.notify'.length) };
+  if (kind === 'notify' || kind === 'jarvis' || kind === 'needyou') return { sock, session: 'master' };
+  for (const k of ['.notify', '.needyou'])
+    if (kind.endsWith(k) && kind.length > k.length) return { sock, session: kind.slice(0, -k.length) };
   return null;
 }
 export function undeliveredEvents(dirs, socks, sizes, names = new Map()) {

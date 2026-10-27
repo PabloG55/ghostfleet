@@ -10970,6 +10970,169 @@ else
   skip "deferred wake" "tmux missing"
 fi
 
+# ── 4d5d. a need-you says WHO and WHAT, and stays on top until it clears ─────
+# Measured on a real incident: a worker stopped on a permission dialog (a refused recursive
+# delete) while its lead was mid-turn. The lead's nudge was the generic "a worker finished or
+# needs you", debounced with the finishes and queued behind the running turn; when it drained
+# the inbox three minutes later the row read `NEED-YOU  Claude needs your permission` — no
+# word of what was wanted — beside the same worker's DONE. It looked like history, and the
+# owner was never told. Claude Code's notification gives those same words for a tool call AND
+# for an AskUserQuestion picker (2.1.295, both "permission_prompt"), so only the pane says
+# which. The fixtures are real captures from a scratch session at 100, 56 and 30 columns
+# (claude-*-dashed*, claude-question-notify*), with its paths swapped for placeholders; the
+# 30-column limit is the real wide capture rewrapped, since a usage limit cannot be summoned.
+group "a need-you names the worker and the ask"
+if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  ny_ask() { local f="$1"; shift; node "$ROOT/lib/permission-dialog.mjs" --ask "$@" < "$FIX/$f" 2>/dev/null; }
+  PERM='permission · Bash command: mkdir -p build/cache && rm -rf build/cache'
+  for f in claude-permission-dashed.txt claude-permission-dashed-56col.txt claude-permission-dashed-30col.txt; do
+    is "the ask of a permission dialog, $f" "$PERM" "$(ny_ask "$f")"
+  done
+  QASK='question: Which cache should billing-svc use for its scratch builds? (1 Local disk · 2 Object store · 3 No cache)'
+  for f in claude-question-notify.txt claude-question-notify-56col.txt claude-question-notify-30col.txt; do
+    is "the ask of a question picker, $f" "$QASK" "$(ny_ask "$f")"
+  done
+  is "the older dialog shape still gives its command" "1" \
+     "$([ "$(ny_ask claude-permission-bash-56col.txt | grep -cF 'permission · Bash command: git log --oneline -1 && touch notes.txt')" -ge 1 ] && echo 1 || echo 0)"
+  LIM="limit: You've hit your session limit · resets 10:20pm (America/New_York)"
+  is "a usage limit, when the notification said limit" "$LIM" "$(ny_ask claude-limit-hit.txt --limit)"
+  is "...at 30 columns, wrapped over three lines"      "$LIM" "$(ny_ask claude-limit-hit-30col.txt --limit)"
+  # the other direction: a pane asking nothing gives nothing, and its status says so; and a
+  # limit in the transcript is not an ask unless the notification was about one
+  for f in claude-idle.txt claude-busy.txt claude-composer-typed.txt claude-limit-hit.txt; do
+    is "nothing asked on $f" "|1" "$(o="$(ny_ask "$f")"; echo "$o|$?")"
+  done
+  ny_sc() { node --input-type=module -e "import { scrubLine } from '$ROOT/lib/permission-dialog.mjs';
+    const s = scrubLine('rm -rf\t/Users/dev/src/x\n  and\x1fmore ' + 'z'.repeat(400), { home: '/Users/dev' });
+    $1" 2>&1; }
+  is "the ask is one line, without a tab or a unit separator" "1|0" \
+     "$(ny_sc 'console.log(JSON.stringify([s.split("\n").length, /[\t\x1f]/.test(s) ? 1 : 0]))' | tr -d '[]' | tr , '|')"
+  is "...with \$HOME read as ~"   "rm -rf ~/src/x and more" "$(ny_sc 'console.log(s.slice(0, 23))')"
+  is "...and capped"              "200" "$(ny_sc 'console.log([...s].length)')"
+
+  # ── the hook, end to end, against a fleet of its own ──
+  # HOME is a temp dir on purpose: the hook also reads a global notify marker and Jarvis's
+  # marker from there, and the real ones must neither change the answer nor be woken.
+  NY="$(cd "$(mktemp -d)" && pwd -P)"; mkdir -p "$NY/bin" "$NY/home" "$NY/fleet"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/sent.log"\n' "$NY" > "$NY/bin/fleet-send"
+  chmod +x "$NY/bin/fleet-send"
+  : > "$NY/fleet/cfneed.notify-lead"
+  rule="$(printf '─%.0s' $(seq 1 40))"
+  printf '%s\n❯ \n%s\n' "$rule" "$rule" > "$NY/empty.txt"
+  printf '%s\n❯ half a sentence\n%s\n' "$rule" "$rule" > "$NY/typed.txt"
+  ny_show() { tmux -L cfneed respawn-pane -k -t "$1" "clear; cat '$2'; sleep 300" 2>/dev/null; }
+  tmux -L cfneed kill-server 2>/dev/null
+  for s in master profile-env docs-pass billing-svc; do
+    tmux -L cfneed new-session -d -s "$s" -x 100 -y 40 'sleep 300' 2>/dev/null
+  done
+  ny_show master "$NY/empty.txt"
+  ny_show profile-env "$FIX/claude-permission-dashed.txt"
+  ny_show docs-pass "$FIX/claude-question-notify.txt"
+  ny_show billing-svc "$FIX/claude-idle.txt"
+  wait_for 5 "the panes to draw" 'pane_has cfneed "Do you want to proceed" profile-env && pane_has cfneed "Which cache" docs-pass' || true
+  nyfire() {                                    # $1 = slot, $2 = event, $3 = message
+    printf '{"hook_event_name":"%s","session_id":"ny-%s","cwd":"%s","transcript_path":"","message":"%s","notification_type":"permission_prompt"}' \
+      "$2" "$1" "$NY" "${3:-}" \
+      | env -u TMUX -u TMUX_PANE HOME="$NY/home" CLAUDE_FLEET_SOCK=cfneed CLAUDE_FLEET_SLOT="$1" \
+          CLAUDE_FLEET_DIR="$NY/fleet" CLAUDE_FLEET_NOTIFIER=off CLAUDE_FLEET_NOTIFY_RETRY_EVERY=1 \
+          CLAUDE_FLEET_NOTIFY_RETRY_TRIES=20 PATH="$NY/bin:$PATH" "$ROOT/hooks/fleet-event.sh" >/dev/null 2>&1
+  }
+  ny_sent() { grep -cF -- "$1" "$NY/sent.log" 2>/dev/null || true; }
+  : > "$NY/sent.log"
+  # a finish first, which nudges and stamps the finish's debounce...
+  nyfire docs-pass Stop
+  wait_for 5 "the finish's nudge" '[ "$(ny_sent "A worker finished")" -ge 1 ]' || true
+  # ...then, inside that debounce, the need-you
+  nyfire profile-env Notification 'Claude needs your permission'
+  wait_for 5 "the need-you's nudge" '[ "$(ny_sent "NEEDS YOU")" -ge 1 ]' || true
+  is "the inbox row carries the ask, not the notification's words" "$PERM" \
+     "$(awk -F'\t' '$2 == "profile-env" && $3 == "need-you" { print $4 }' "$NY/fleet/cfneed.inbox" 2>/dev/null)"
+  is "a need-you nudge names the worker and the ask"      "1" "$(ny_sent "profile-env NEEDS YOU: $PERM")"
+  is "...though a finish was nudged a moment before"      "1" "$(ny_sent "A worker finished")"
+  is "...folded into a running turn, never queued behind one" "1" \
+     "$(grep -c '^--nudge --now -s cfneed master \[fleet\] profile-env NEEDS YOU' "$NY/sent.log" 2>/dev/null || true)"
+  # a SECOND worker inside the same window is news, and so is its question
+  nyfire docs-pass Notification 'Claude needs your permission'
+  wait_for 5 "the second worker's nudge" '[ "$(ny_sent "docs-pass NEEDS YOU")" -ge 1 ]' || true
+  is "a second worker's need-you is not debounced away"   "1" "$(ny_sent "docs-pass NEEDS YOU: $QASK")"
+  # the SAME dialog notified twice is one nudge
+  nyfire profile-env Notification 'Claude needs your permission'
+  sleep 1
+  is "the same dialog notified twice is one nudge"        "1" "$(ny_sent "profile-env NEEDS YOU")"
+  # and the other direction: a need-you does not swallow the next FINISH
+  # (counted by the finish's own STAMP: the old need-you sent the finish's very words, so a
+  # count of them passes on the code this replaces)
+  rm -f "$NY/fleet/cfneed.notify.stamp" "$NY/fleet/cfneed.profile-env.needyou.sent"
+  nyfire profile-env Notification 'Claude needs your permission'
+  is "a need-you leaves the finish's debounce alone"      "0" "$([ -f "$NY/fleet/cfneed.notify.stamp" ] && echo 1 || echo 0)"
+  nyfire billing-svc Stop
+  wait_for 5 "the finish after a need-you" '[ "$(ny_sent "A worker finished")" -ge 2 ]' || true
+  is "...so a finish right after it still nudges"         "2" "$(ny_sent "A worker finished")"
+
+  # ── when it cleared ──
+  nyfire profile-env PostToolUse
+  CLR="$(awk -F'\t' '$2 == "profile-env" { print $1; exit }' "$NY/fleet/cfneed.inbox.cleared" 2>/dev/null)"
+  is "the worker moving on writes when it cleared"        "1" "$([ -n "$CLR" ] && echo 1 || echo 0)"
+
+  # ── fleet-inbox: pending at the top, cleared with its time ──
+  nyinbox() { env -u TMUX -u TMUX_PANE HOME="$NY/home" CLAUDE_FLEET_DIR="$NY/fleet" CLAUDE_FLEET_SLOT=master \
+                "$ROOT/bin/fleet-inbox" -s cfneed "$@" 2>&1; }
+  ny_pinned() { sed -n '/^NEEDS YOU NOW/,/^$/p' <<< "$1"; }
+  out="$(nyinbox)"
+  is "fleet-inbox pins a need-you still on screen"        "1" "$(grep -c '^NEEDS YOU NOW (2)' <<< "$out" || true)"
+  is "...at the top, above the new rows"                  "1" \
+     "$(awk '/^NEEDS YOU NOW/ && !a { a = NR } /^inbox —/ && !b { b = NR } END { print (a && b && a < b) ? 1 : 0 }' <<< "$out")"
+  is "...naming the worker and its ask"                   "1" \
+     "$([ "$(ny_pinned "$out" | grep -F "profile-env" | grep -cF "$PERM")" -ge 1 ] && echo 1 || echo 0)"
+  is "...and how to answer it"                            "1" \
+     "$([ "$(ny_pinned "$out" | grep -cF '→ fleet-answer profile-env')" -ge 1 ] && echo 1 || echo 0)"
+  is "...marked pending in the list too"                  "1" \
+     "$([ "$(grep -c 'profile-env .*NEED-YOU (pending)' <<< "$out")" -ge 1 ] && echo 1 || echo 0)"
+  out="$(nyinbox)"
+  is "seen, and still pending: it stays on top"           "1" "$(grep -c '^NEEDS YOU NOW (2)' <<< "$out" || true)"
+  is "...while the rest is not new any more"              "1" "$(grep -c '^inbox: nothing new' <<< "$out" || true)"
+  # the dialog goes from the pane: cleared, at the time the hook wrote down
+  ny_show profile-env "$FIX/claude-idle.txt"
+  wait_for 5 "the dialog to leave the pane" '! pane_has cfneed "Do you want to proceed" profile-env' || true
+  hm="$(date -r "$CLR" +%H:%M 2>/dev/null || date -d "@$CLR" +%H:%M 2>/dev/null)"
+  out="$(nyinbox --all)"
+  is "a need-you no longer on screen leaves the top"      "0" "$(ny_pinned "$out" | grep -c 'profile-env' || true)"
+  # the LATEST of its rows: the earlier ones are cleared by the rows after them either way
+  is "...and its latest reads cleared, at the time it cleared" "1" \
+     "$(grep -F 'profile-env            NEED-YOU' <<< "$out" | tail -1 | grep -cF "NEED-YOU (cleared $hm)" || true)"
+  # THE INCIDENT'S SHAPE: a need-you followed by the same worker's DONE is over, and says so
+  nyfire docs-pass Stop
+  out="$(nyinbox --all)"
+  is "a need-you followed by its worker's DONE reads cleared" "0" \
+     "$(grep -c 'docs-pass .*NEED-YOU (pending)' <<< "$out" || true)"
+  is "...and nothing is pinned any more"               "0" "$(grep -c '^NEEDS YOU NOW' <<< "$out" || true)"
+
+  # ── a busy box: deferred, on a wake of its own ──
+  rm -f "$NY/fleet/"*.needyou.sent "$NY/fleet/cfneed.notify.stamp"
+  ny_show master "$NY/typed.txt"
+  ny_show profile-env "$FIX/claude-permission-dashed.txt"
+  ny_show docs-pass "$FIX/claude-question-notify.txt"
+  wait_for 5 "the panes to redraw" 'pane_has cfneed "half a sentence" master && pane_has cfneed "Do you want to proceed" profile-env' || true
+  : > "$NY/sent.log"
+  nyfire billing-svc Stop                       # a finish's retry is armed first
+  nyfire profile-env Notification 'Claude needs your permission'
+  nyfire docs-pass Notification 'Claude needs your permission'
+  is "a need-you arms a wake of its own beside a finish's" "1|1" \
+     "$([ -f "$NY/fleet/cfneed.notify.retry" ] && echo 1 || echo 0)|$([ -f "$NY/fleet/cfneed.needyou.retry" ] && echo 1 || echo 0)"
+  is "...and a second one while it waits is added, not dropped" "1" \
+     "$([ "$(grep -c 'docs-pass NEEDS YOU' "$NY/fleet/cfneed.needyou.more" 2>/dev/null)" -ge 1 ] && echo 1 || echo 0)"
+  is "...and nothing is pasted over the half-typed message" "0" "$(ny_sent "NEEDS YOU")"
+  ny_show master "$NY/empty.txt"
+  wait_for 15 "the deferred need-you" '[ "$(ny_sent "docs-pass NEEDS YOU")" -ge 1 ]' || true
+  is "the box clears: the deferred alert names both workers" "1|1" \
+     "$(ny_sent "profile-env NEEDS YOU: $PERM")|$(ny_sent "docs-pass NEEDS YOU: $QASK")"
+  is "...in one --now paste"                              "1" \
+     "$(grep -c '^--nudge --now -s cfneed master \[fleet\] profile-env NEEDS YOU' "$NY/sent.log" 2>/dev/null || true)"
+  tmux -L cfneed kill-server 2>/dev/null; rm -rf "$NY"
+else
+  skip "a need-you names the worker and the ask" "tmux, node or jq missing"
+fi
+
 # ── 4d6. selecting with the mouse must reach the system clipboard ────────────
 # `mouse on` is what creates this problem: tmux captures the drag, so the terminal's own
 # selection never happens and what you highlight lands in tmux's private buffer —
@@ -16184,6 +16347,12 @@ if command -v node >/dev/null 2>&1; then
      "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-other.notify.undelivered', ['cf-acme-api'])))")"
   is "the longest known socket wins" '{"sock":"cf-acme.api","session":"master"}' \
      "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-acme.api.notify.undelivered', ['cf-acme','cf-acme.api'])))")"
+  # a need-you has a wake of its own (hooks/fleet-event.sh _needyou_nudge), so an expired one
+  # is under its own kind — and must buzz the phone exactly as a finish's does
+  is "an expired need-you wake names master"     '{"sock":"cf-acme-api","session":"master"}' \
+     "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-acme-api.needyou.undelivered', ['cf-acme-api'])))")"
+  is "...and a sub-lead's names the lead"        '{"sock":"cf-acme-api","session":"api-lead"}' \
+     "$(ud "console.log(JSON.stringify(undeliveredTarget('cf-acme-api.api-lead.needyou.undelivered', ['cf-acme-api'])))")"
   # THE SEQUENCE, in one process so the size map carries between scans: a marker already
   # there is a baseline; it growing is ONE event; an unchanged rescan is silent.
   printf 'old expiry\n' > "$UD/cf-acme-api.api-lead.notify.undelivered"
