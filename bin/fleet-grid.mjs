@@ -30,6 +30,7 @@ import { modState, modLimitAt } from '../lib/mod-status.mjs';
 import * as J from '../lib/jarvis.mjs';
 import * as X from '../lib/experimental.mjs';
 import { keyReader } from '../lib/keys.mjs';
+import { matchIndices, stepMatch, matchSpan } from '../lib/grid-search.mjs';
 // LOADED, NOT IMPORTED, and for the reason preview() below spells out: test/run.sh's vis35
 // group runs a COPY of this file from a temp directory, where a static import of ../lib
 // resolves to nothing and the whole control plane fails to load. A grid that cannot start
@@ -1401,7 +1402,29 @@ function humanAge(a) {
 
 // ── card rendering ────────────────────────────────────────────────────────
 const CW = 30; // inner content width
-function cardLines(card, selected, idx) {
+// A SEARCH'S LOOK, from the palette the cards already wear (see srchQ). `hl` is null with
+// no search up; otherwise { q, hit }. A hit is drawn bold — the weight the selected card
+// already has, without its reversed top rule, so the cursor still reads as the cursor —
+// and the letters that matched are reversed in the card's own colour, which reads the
+// same on a red NEEDS YOU card as on a cyan working one because it IS that colour. A miss
+// is dimmed, the way the `+ new session` card always is when it is not selected: still in
+// its place, still its status colour, just quieter. The selected card is never dimmed —
+// the cursor parked on a miss (nothing matched) has to stay findable.
+function srchWrap(color, hl) {     // an unselected card's lead-in; selected ones never ask
+  return !hl ? color : hl.hit ? `${C.bold}${color}` : `${C.dim}${color}`;
+}
+// Reverse the matched letters of `line` inside [from, to). On the selected card's top
+// rule — already reversed whole — the match is the part that is NOT, so it inverts the
+// other way. Offsets are taken on the plain line before any colour goes in, and the
+// codes added are zero-width, so every card stays exactly CW+2 columns.
+function srchMark(line, from, to, q, inverted) {
+  const sp = matchSpan(line.slice(from, to), q);
+  if (!sp) return line;
+  const [a, b] = [from + sp[0], from + sp[1]];
+  const [on, off] = inverted ? [C.unrev, C.rev] : [C.rev, C.unrev];
+  return line.slice(0, a) + on + line.slice(a, b) + off + line.slice(b);
+}
+function cardLines(card, selected, idx, hl = null) {
   // A sub-lead's card wears its TEAM's status (see teamStatusOf); every other card's
   // teamStatus is null and this is its own status, as it always was.
   const meta = STATUS[card.teamStatus || card.status] || STATUS.starting;
@@ -1516,8 +1539,16 @@ function cardLines(card, selected, idx) {
   const bot = `╰${'─'.repeat(CW)}╯`;
   const wrap = (s, isTop) => selected
     ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}`
-    : `${color}${s}${C.reset}`;
-  return [wrap(top, true), wrap(l1), wrap(l2), wrap(l3), wrap(bot)];
+    : `${srchWrap(color, hl)}${s}${C.reset}`;
+  // The title is the label when there is one, so the session name is only on l2 then, as
+  // its first word — and a card found BY its name must show where the name is.
+  let t = top, s2 = l2;
+  if (hl?.hit) {
+    const from = 1 + 2 + num.length;                 // ╭, '─ ', the jump digit
+    t = srchMark(top, from, 1 + title.length, hl.q, selected);
+    if (card.label) s2 = srchMark(l2, 2, 2 + card.name.length, hl.q, false);
+  }
+  return [wrap(t, true), wrap(l1), wrap(s2), wrap(l3), wrap(bot)];
 }
 function newCardLines(selected) {
   const color = C.yellow;
@@ -1530,7 +1561,7 @@ function newCardLines(selected) {
 }
 // a worktree that exists but has no live session — ⏎ jumps straight to naming one,
 // skipping the checkout picker entirely (the worktree is already identified)
-function freeCardLines(w, selected, idx) {
+function freeCardLines(w, selected, idx, hl = null) {
   const color = w.removing ? C.yellow : C.grey;
   const num = idx >= 0 && idx < 9 ? `${idx + 1} ` : '';
   const title = clip(`─ ${num}${path.basename(w.path)} `, CW);
@@ -1546,7 +1577,7 @@ function freeCardLines(w, selected, idx) {
   const bot = `╰${'─'.repeat(CW)}╯`;
   const wrap = (s, isTop) => selected
     ? `${C.bold}${color}${isTop ? C.rev : ''}${s}${C.unrev}${C.reset}`
-    : `${color}${s}${C.reset}`;
+    : `${srchWrap(color, hl)}${s}${C.reset}`;
   return [wrap(top, true), wrap(l1), wrap(l2), wrap(l3), wrap(bot)];
 }
 
@@ -2026,9 +2057,10 @@ let SUB = SUB_ARG;
 // with --select <session>. This one-line file is how the next grid knows the session was
 // entered from a sub-grid, so detaching lands you back in it rather than at the top.
 function subMemFile() { return path.join(FLEET_DIR, `${SOCK}.grid-sub`); }
-function enterSub(name) { SUB = name; sel = 0; buildItems(); }
+// A search is about the cards it was typed against; a different grid ends it.
+function enterSub(name) { SUB = name; sel = 0; srchQ = null; buildItems(); }
 function leaveSub() {
-  const was = SUB; SUB = ''; buildItems();
+  const was = SUB; SUB = ''; srchQ = null; buildItems();
   const i = items.findIndex(it => it.card && it.card.name === was);
   sel = i >= 0 ? i : 0;
 }
@@ -2077,6 +2109,21 @@ let confirmWt = null;        // { path, branch, msg, force } — free worktree a
 let wtRmMsg = '';
 let labelFor = null;         // session being labelled (from the settings page's 'l')
 let labelInput = '';         // editable, pre-filled with the current label
+// ── `/` FINDS AN AGENT, the way less and vim do ──────────────────────────────
+// Two steps, because the typing step has to own every letter: `n` is in `billing-svc`,
+// and a search where n jumps instead of typing cannot find half the fleet. So: `/` opens
+// the prompt and every printable key goes into the query (the cursor follows the first
+// match as you type); ⏎ locks it, and only THEN are n / N next / previous and ⏎ opens.
+// Esc clears it from either step. Matching lives in lib/grid-search.mjs.
+//   The card verbs (p, x, s, t …) stay inert for as long as a search is up, in both
+// steps — a query typed into what turns out to be the locked step must not pause or kill
+// whatever the cursor happens to sit on.
+let srchQ = null;            // null = no search; otherwise the query ('' just after `/`)
+let srchTyping = false;      // true = keys type into the query; false = locked, n/N/⏎ act
+function srchMatches() { return srchQ ? matchIndices(items, srchQ, it => it.card) : []; }
+// The cursor goes to the first match on every keystroke, and nowhere when nothing
+// matches — the card you were on is a better place to be left than the top of the grid.
+function srchFirst() { const m = srchMatches(); if (m.length) sel = m[0]; }
 
 // Rename BOTH the tmux session and its worktree folder (git worktree move), so the
 // two never drift apart — a session named "x" always sitting in a folder named "x"
@@ -2167,6 +2214,8 @@ function renderGrid() {
         `${C.red} — f = remove anyway · any key = cancel${C.reset}\x1b[K\n`
       : `${C.red}${C.bold} remove worktree '${path.basename(confirmWt.path)}' (${confirmWt.branch})?${C.reset}` +
         `${C.red} y = yes · any other key = cancel${C.reset}\x1b[K\n`;
+  else if (srchQ != null)
+    buf += searchLine() + '\x1b[K\n';
   else if (wtRmMsg)
     buf += `${C.yellow}${C.bold} ${clip(wtRmMsg, Math.max(20, W() - 2))}${C.reset}\x1b[K\n`;
   else if (!cards.length && !jumpStage)
@@ -2180,13 +2229,15 @@ function renderGrid() {
   else
     buf += (jumpStage ? jumpHint() : '') + '\x1b[K\n';
   const nc = cols();
+  const hits = new Set(srchMatches());
+  const hlOf = (idx) => srchQ ? { q: srchQ, hit: hits.has(idx) } : null;
   for (let i = 0; i < items.length; i += nc) {
     const rowItems = items.slice(i, i + nc);
     const linesPerCard = rowItems.map((it, j) => {
       const idx = i + j;
       return it.newCard ? newCardLines(idx === sel)
-           : it.freeWt  ? freeCardLines(it.freeWt, idx === sel, idx)
-           : cardLines(it.card, idx === sel, idx);
+           : it.freeWt  ? freeCardLines(it.freeWt, idx === sel, idx, hlOf(idx))
+           : cardLines(it.card, idx === sel, idx, hlOf(idx));
     });
     for (let li = 0; li < 5; li++) {
       buf += ' ' + linesPerCard.map(lc => lc[li]).join(' ') + '\x1b[K\n';
@@ -2207,9 +2258,9 @@ function renderGrid() {
   // line between 93 and 106 columns and none above; at 80 the banner was already being
   // pushed off by the footer as it stood, which is its own problem and not this one.
   buf += SUB
-    ? `${C.dim} ↑↓←→/hjkl move · ⏎/1-9 enter · t stack · s sched · p pause · P resume · ${xVerb} · , settings · ` +
+    ? `${C.dim} ↑↓←→/hjkl move · / find · ⏎/1-9 enter · t stack · s sched · p pause · P resume · ${xVerb} · , settings · ` +
       `Ctrl-t term · Ctrl-n edit · Ctrl-f jump · Ctrl-p/Q projects · q/\` up to the top grid${C.reset}\x1b[K\n`
-    : `${C.dim} ↑↓←→/hjkl move · ⇧hjkl reorder · ⏎/1-9 enter · n new · N parallel · w worktree · t stack · ` +
+    : `${C.dim} ↑↓←→/hjkl move · / find · ⇧hjkl reorder · ⏎/1-9 enter · n new · N parallel · w worktree · t stack · ` +
          `s sched · p pause · P resume · ${xVerb} · , settings · Ctrl-t term · Ctrl-n edit · Ctrl-f jump · ` +
          `Ctrl-p/Q projects · q/\` back${C.reset}\x1b[K\n`;
   buf += '\x1b[J'; // clear from cursor to end of screen
@@ -2641,6 +2692,77 @@ function jumpHint() {
       : `project ${k(jumpProj)}, session? ${k('1-9')} · ${k('⏎/m')} = master · ${k('s')} = grid · ${k('esc')}`;
   return ` ${C.yellow}${C.bold}jump →${C.reset} ${C.dim}${body}${C.reset}`;
 }
+// The search's prompt, in the confirm/jump row under the header — the row every other
+// one-line mode on this screen already speaks in, styled like jumpHint: a yellow lead,
+// dim prose, the keys themselves bright. ONE ROW, ALWAYS: a line that wraps pushes the
+// whole grid down and reflows it under the cursor you are steering, so the hint drops to
+// its short form before it would wrap, and the query is clipped before the hint goes.
+function searchLine() {
+  const k = s => `${C.reset}${C.bold}${s}${C.dim}`;
+  const m = srchMatches();
+  const q = clip(srchQ, Math.max(8, W() - 52));
+  const lead = ` ${C.yellow}${C.bold}/${C.reset}${C.bold}${q}${C.reset}${srchTyping ? `${C.rev} ${C.unrev}` : ' '} `;
+  const leadW = 2 + vis(q) + 2;
+  const fits = (plain) => leadW + vis(plain) <= W() - 1;
+  if (!srchQ)
+    return lead + `${C.dim}type part of an agent's name · ${k('esc')} cancel${C.reset}`;
+  if (!m.length)
+    return lead + `${C.yellow}no agent matches '${q}'${C.reset}`;
+  const n = `${m.length} match${m.length === 1 ? '' : 'es'}`;
+  if (srchTyping)
+    return lead + `${C.dim}${n} · ${k('⏎')} keep · ${k('esc')} clear${C.reset}`;
+  const at = m.indexOf(sel);
+  const pos = at >= 0 ? `${at + 1} of ${m.length}` : n;
+  return lead + (fits(`${pos} · n next · N prev · ⏎ open · / edit · esc clear`)
+    ? `${C.dim}${pos} · ${k('n')} next · ${k('N')} prev · ${k('⏎')} open · ${k('/')} edit · ${k('esc')} clear${C.reset}`
+    : `${C.dim}${pos} · ${k('n')}/${k('N')} · ${k('⏎')} open · ${k('esc')}${C.reset}`);
+}
+// One key while a search is up. Returns a choice to finish with, or null.
+function searchKey(key) {
+  const bs = key === '\x7f' || key === '\b';
+  const shorter = () => [...srchQ].slice(0, -1).join('');
+  if (key === '\x1b' || key === '\x03') { srchQ = null; return null; }
+  if (key === '\x1b[A') { moveGrid('up'); return null; }
+  if (key === '\x1b[B') { moveGrid('down'); return null; }
+  if (key === '\x1b[C') { moveGrid('right'); return null; }
+  if (key === '\x1b[D') { moveGrid('left'); return null; }
+  if (srchTyping) {
+    // Locks only onto something: with nothing matching there is nothing for n or ⏎ to do,
+    // and a locked prompt you have to unlock to fix a typo is one key worse than this.
+    if (key === '\r' || key === '\n') { if (srchMatches().length) srchTyping = false; return null; }
+    if (bs) { if (!srchQ) srchQ = null; else { srchQ = shorter(); srchFirst(); } return null; }
+    // Every printable key, digits and the card verbs included — that is the point of the
+    // typing step. A pasted run arrives as one token and goes in whole. Any other control
+    // or escape sequence (a function key, ^T) is dropped rather than typed or obeyed.
+    if (key.startsWith('\x1b')) return null;
+    const t = [...key].filter(ch => ch >= ' ' && ch !== '\x7f').join('');
+    if (t) { srchQ += t; srchFirst(); }
+    return null;
+  }
+  // LOCKED. n / N step, ⏎ opens, / or ⌫ go back to editing; q and ` clear the search
+  // before they would leave the grid — one back-out at a time. Everything else is inert.
+  if (key === 'q' || key === '\x60') { srchQ = null; return null; }
+  if (key === '/') { srchTyping = true; return null; }
+  if (bs) { srchTyping = true; srchQ = shorter(); srchFirst(); return null; }
+  if (key === '\r' || key === '\n') { srchQ = null; return openSelected(); }
+  // A run of keys in one read (`nn` typed fast) is each of them, in order.
+  for (const ch of key) {
+    if (ch === 'n' || ch === 'N') { const i = stepMatch(srchMatches(), sel, ch === 'n' ? 1 : -1); if (i >= 0) sel = i; }
+    else if (ch === 'k') moveGrid('up');
+    else if (ch === 'j') moveGrid('down');
+    else if (ch === 'l') moveGrid('right');
+    else if (ch === 'h') moveGrid('left');
+  }
+  return null;
+}
+// What ⏎ does to the selected item — the same from a search as without one.
+function openSelected() {
+  const it = items[sel];
+  if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; return null; }
+  if (it?.card) return cardChoice(it.card);
+  if (it?.freeWt) return freeWtChoice(it.freeWt);
+  return null;
+}
 function jumpKey(key) {
   const digit = key.length === 1 && key >= '1' && key <= '9';
   if (!jumpStage) {                                   // only ^F opens a chord
@@ -2787,6 +2909,7 @@ function onKey(key) {
       } else confirmWt = null;
       render(); return;
     }
+    if (srchQ != null) { const c = searchKey(key); if (c) return finish(c); render(); return; }
     {                                                // ^F jump chord (see jumpKey)
       const j = jumpKey(key);
       if (j) { if (j !== 'handled') return finish(j); render(); return; }
@@ -2875,12 +2998,8 @@ function onKey(key) {
       const it = items[sel]; const i = it?.card ? cards.findIndex(c => c.name === it.card.name) : 0;
       gSetSel = i >= 0 ? i : 0;                      // land on the session you had selected
     }
-    else if (key === '\r' || key === '\n') {
-      const it = items[sel];
-      if (it?.newCard) { checkouts = discoverCheckouts(); pickSel = 0; mode = 'picker'; }
-      else if (it?.card) { const c = cardChoice(it.card); if (c) return finish(c); }
-      else if (it?.freeWt) return finish(freeWtChoice(it.freeWt));
-    }
+    else if (key === '/') { srchQ = ''; srchTyping = true; }
+    else if (key === '\r' || key === '\n') { const c = openSelected(); if (c) return finish(c); }
     render();
   } else if (mode === 'picker') {
     if (key === '\x1b' || key === '\x03' || key === 'q' || key === '\x60') { mode = 'grid'; render(); return; }

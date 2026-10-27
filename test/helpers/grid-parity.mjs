@@ -61,6 +61,9 @@ function lift(openRe) {
 
 const lifted = [
   `import path from 'node:path';`,
+  // cardLines marks a search's matches through this; the module is a data: URL, so the
+  // import has to be absolute
+  `import { matchSpan } from '${new URL('../../lib/grid-search.mjs', import.meta.url).href}';`,
   lift(/^const C = \{/),
   lift(/^const STATUS = \{/),
   lift(/^function vis\(/),
@@ -72,6 +75,8 @@ const lifted = [
   SRC.split('\n').find(l => /^const CW = /.test(l)),
   lift(/^function rollupText\(/),
   lift(/^function leadAgeText\(/),
+  lift(/^function srchWrap\(/),
+  lift(/^function srchMark\(/),
   lift(/^function cardLines\(/),
   lift(/^function newCardLines\(/),
   lift(/^function freeCardLines\(/),
