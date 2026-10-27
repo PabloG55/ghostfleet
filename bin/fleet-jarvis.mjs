@@ -60,10 +60,12 @@ const cfgFor = (prof) => (prof === 'work' || prof === 'default') ? path.join(HOM
 const stampFile = () => path.join(J.cfgHome(), 'jarvis.restarted');
 
 // The words whisper is primed with: the names it will hear and would otherwise mangle
-// ("acme api" came back as "Acme Appy" unprimed, measured on the turbo model).
+// ("acme api" came back as "Acme Appy" unprimed, measured on the turbo model). Every
+// session's talk is heard with these, so "Jarvis" is among them only while Jarvis is on: a
+// primed word is one whisper reaches for, and with Jarvis off nobody is saying it.
 export function vocabulary() {
   const names = [...new Set(projects().map(p => p.name))].slice(0, 40);
-  return `Jarvis, ghostfleet, worktree, master, pull request, ${names.join(', ')}.`;
+  return `${J.enabled() ? 'Jarvis, ' : ''}ghostfleet, worktree, master, pull request, ${names.join(', ')}.`;
 }
 
 // ── init ────────────────────────────────────────────────────────────────────

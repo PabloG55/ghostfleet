@@ -262,6 +262,7 @@ if (phase === 'jarvis') {
 }
 
 // ── Jarvis's switch: every /api/jarvis* route, the project list, and the Mac's voice ──
+// (both halves of it: /api/speak reads replies, /api/voice hears the owner).
 //     node serve-probe.mjs <base> jarvisswitch <enrol-code> <wav-file>
 // Run once with Jarvis switched on and once off; run.sh compares the two, so an "off" row
 // can only pass because the switch changed something.
@@ -271,6 +272,14 @@ if (phase === 'jarvisswitch') {
   row('jarvis', await a.api(base, 'GET', '/api/jarvis'));
   row('confirm', await a.api(base, 'POST', '/api/jarvis/confirm', { id: 'NOPE', answer: 'no' }));
   row('hear', await a.api(base, 'POST', '/api/jarvis/hear', wav, { contentType: 'audio/wav' }));
+  // THE MAC'S EARS ARE NOT JARVIS'S: every session's talk needs them, so their own routes
+  // answer either way. Asked with no token as well, so "answers with Jarvis off" cannot
+  // be bought by dropping the auth in front of them.
+  row('voice.noToken', await request(base, 'GET', '/api/voice'));
+  row('voice', await a.api(base, 'GET', '/api/voice'));
+  row('voice.hear.noToken', await request(base, 'POST', '/api/voice/hear', { body: wav, contentType: 'audio/wav' }));
+  row('voice.hear', await a.api(base, 'POST', '/api/voice/hear', wav, { contentType: 'audio/wav' }));
+  row('voice.hear.text', await a.api(base, 'POST', '/api/voice/hear', Buffer.from('this is not audio at all, only text wearing a header'), { contentType: 'audio/wav' }));
   row('projects', await a.api(base, 'GET', '/api/projects?rollup=0'));
   row('speak', await a.api(base, 'POST', '/api/speak', { text: 'Hello from the fleet.' }));
 }

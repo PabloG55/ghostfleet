@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 13e765c2fd74
+// CLIENT-HASH: c104a6dc105c
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -364,7 +364,12 @@
 // 1200 characters. A phone still on v71 sends after a second of quiet and stops long replies.
 // v73 says what a Claude account notice is (fleet-accounts): a profile that switched login,
 // ran out, or needs /login. A phone still on v72 shows such a push as "a session has an answer".
-const VERSION = 'ghostfleet-v73';
+// v74 keeps every session's talk button with Jarvis switched off: the Mac's ears are read
+// from /api/voice and heard through /api/voice/hear, which answer either way. A phone still
+// on v73 keeps hiding talk while Jarvis is off, and with it on goes on using /api/jarvis and
+// /api/jarvis/hear, which still answer — so it only gets talk back once it is RELAUNCHED
+// (swiped away, not resumed from the app switcher; CLAUDE.md, "an installed PWA").
+const VERSION = 'ghostfleet-v74';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

@@ -1865,7 +1865,33 @@ const ATTACH_RESIZE_OVER = 512 * 1024;     // below this an already-readable ima
 // Two minutes of 16 kHz 16-bit mono is 3.8 MB; the client stops an utterance at 90 s (it
 // waits through pauses now, so a thought spoken slowly runs long), and this is the headroom.
 const HEAR_BODY_CAP = 4 * 1024 * 1024;
+// Both spellings of hearing: /api/voice/hear is the Mac's ears, answered with Jarvis on or
+// off; /api/jarvis/hear is the same handler under the old name, kept for an installed phone
+// still running a client from before the split, and gone with Jarvis like the rest of it.
+const HEAR_PATHS = new Set(['/api/voice/hear', '/api/jarvis/hear']);
 let hearChain = Promise.resolve();
+// HEARING: one utterance in, its words out. The bytes are the WAV the client encoded (16
+// kHz mono PCM) and the transcriber is whisper.cpp ON THIS MACHINE — the audio goes no
+// further than this process and a private temp dir that is gone before the reply is. The
+// words go back to the phone, which shows them and sends them itself, so what a session is
+// told is exactly what the owner saw they said.
+async function hear(req, res, body) {
+  if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
+  if (!Buffer.isBuffer(body) || !body.length) return send(res, 400, { ok: false, text: 'no audio in the body — POST the WAV bytes themselves (audio/wav)' });
+  if (!jarvis.isWav(body)) return send(res, 415, { ok: false, text: 'that is not a WAV file — the body is read for RIFF/WAVE, not trusted from its content-type' });
+  const v = jarvis.voiceStatus();
+  if (!v.ready) return send(res, 503, { ok: false, text: v.why, needs: 'voice' });
+  const t0 = Date.now();
+  // One at a time: whisper uses every core it is given, and two at once would each take
+  // twice as long while the owner waits on both.
+  const run = () => jarvis.transcribeAsync(body, { prompt: vocabulary() });
+  const r = await (hearChain = hearChain.then(run, run));
+  const ms = Date.now() - t0;
+  if (r.error) return send(res, 502, { ok: false, text: r.error });
+  // The size and the time, never the words: a log file is a surface too.
+  log(`voice: heard ${Math.round(body.length / 1024)} KB in ${ms}ms -> ${r.text.length} chars`);
+  return send(res, 200, { ok: true, text: r.text, ms });
+}
 // One line per sentence spoken, saying which voice read it and whether it was made or
 // replayed — the record that proves a mixed reply really did switch voices.
 const speakLog = (job, m) => log(`speak: ${job.it.id.slice(0, 8)} ${job.it.lang} ${job.it.voice} ${job.it.text.length} chars ${m.ok ? (m.cached ? 'cached' : `synth ${m.ms}ms`) : `FAILED ${m.error}`}`);
@@ -2000,8 +2026,8 @@ async function api(req, res, url, ip) {
   let body;
   try {
     body = req.method === 'POST'
-      ? await readBody(req, p === '/api/attach' ? ATTACH_BODY_CAP : p === '/api/jarvis/hear' ? HEAR_BODY_CAP : undefined,
-                       { raw: p === '/api/jarvis/hear' }) : {};
+      ? await readBody(req, p === '/api/attach' ? ATTACH_BODY_CAP : HEAR_PATHS.has(p) ? HEAR_BODY_CAP : undefined,
+                       { raw: HEAR_PATHS.has(p) }) : {};
   } catch (e) {
     // ...and the refusal says the NUMBER. "body larger than 8388608 bytes" is actionable;
     // a dropped connection is what this used to do.
@@ -2456,16 +2482,27 @@ function agentCatalogue() {
       converted: path.extname(out) === '.jpg' && kind !== 'jpg', dropped });
   }
 
+  // ── the Mac's ears: every session's `talk` (docs/mobile.md) ──────────────────
+  // NOT JARVIS'S, and so not behind its switch. These used to live only under /api/jarvis/*,
+  // which made switching Jarvis off — to be rid of its session — also take the talk button
+  // off every session on the phone, a cost nothing on the switch said it had. Talking to a
+  // session never goes through Jarvis: it needs whisper.cpp on this machine and the session.
+  // `speak` rides beside `voice` because the phone's settings sheet reports both halves.
+  if (p === '/api/voice' && req.method === 'GET')
+    return send(res, 200, { ok: true, voice: jarvis.voiceStatus(), speak: speech.status() });
+  if (p === '/api/voice/hear') return hear(req, res, body);
+
   // ── Jarvis: the master of masters (docs/jarvis.md) ──────────────────────────
   // Three routes, all behind the same token as everything else. What Jarvis IS — its
   // project, its session, whether it can hear, what waits on a yes — comes from the one
   // place bin/fleet-jarvis reads it, so the phone and `fleet-jarvis status` cannot disagree.
-  //   `voice` is answered EVEN WITHOUT A JARVIS: it is the Mac's transcriber, not Jarvis's,
-  // and every session's `talk` asks it here. `speak` likewise: whether the Mac reads replies
-  // with Kokoro, which the phone's settings sheet reports beside the device's own voices.
+  //   `voice` and `speak` are repeated here, and /api/jarvis/hear is /api/voice/hear under
+  // its old name, for an installed phone whose client predates /api/voice (CLAUDE.md: a
+  // PWA keeps its old client until it is relaunched). With Jarvis on, nothing it asks for
+  // has moved; with Jarvis off it had no talk button to ask with.
   // SWITCHED OFF, EVERY JARVIS ROUTE IS A 404 and says why — not a 200 that describes an
-  // absent Jarvis, which a client would draw as a band. /api/speak is NOT one of them: the
-  // per-message play button is the phone's own feature and keeps working.
+  // absent Jarvis, which a client would draw as a band. /api/speak and /api/voice are NOT
+  // among them: the play button and every session's talk are the phone's own features.
   if ((p === '/api/jarvis' || p.startsWith('/api/jarvis/')) && !jarvis.enabled())
     return send(res, 404, { ok: false, disabled: true, experimental: true, text: jarvis.DISABLED_WHY });
   if (p === '/api/jarvis' && req.method === 'GET') {
@@ -2510,27 +2547,7 @@ function agentCatalogue() {
     return send(res, 200, { ok: true, id, answer: ans, summary: r.summary, told });
   }
 
-  // HEARING: one utterance in, its words out. The bytes are the WAV the client encoded (16
-  // kHz mono PCM) and the transcriber is whisper.cpp ON THIS MACHINE — the audio goes no
-  // further than this process and a private temp dir that is gone before the reply is. The
-  // words go back to the phone, which shows them and sends them itself, so what Jarvis is
-  // told is exactly what the owner saw he said.
-  if (p === '/api/jarvis/hear') {
-    if (req.method !== 'POST') return send(res, 405, { ok: false, text: 'POST only' });
-    if (!Buffer.isBuffer(body) || !body.length) return send(res, 400, { ok: false, text: 'no audio in the body — POST the WAV bytes themselves (audio/wav)' });
-    if (!jarvis.isWav(body)) return send(res, 415, { ok: false, text: 'that is not a WAV file — the body is read for RIFF/WAVE, not trusted from its content-type' });
-    const v = jarvis.voiceStatus();
-    if (!v.ready) return send(res, 503, { ok: false, text: v.why, needs: 'voice' });
-    const t0 = Date.now();
-    // One at a time: whisper uses every core it is given, and two at once would each take
-    // twice as long while he waits on both.
-    const r = await (hearChain = hearChain.then(() => jarvis.transcribeAsync(body, { prompt: vocabulary() }), () => jarvis.transcribeAsync(body, { prompt: vocabulary() })));
-    const ms = Date.now() - t0;
-    if (r.error) return send(res, 502, { ok: false, text: r.error });
-    // The size and the time, never the words: a log file is a surface too.
-    log(`jarvis: heard ${Math.round(body.length / 1024)} KB in ${ms}ms -> ${r.text.length} chars`);
-    return send(res, 200, { ok: true, text: r.text, ms });
-  }
+  if (p === '/api/jarvis/hear') return hear(req, res, body);
 
   // SPEAKING: the reverse of hearing, and optional in the same way (lib/speech.mjs). The
   // phone POSTs the words it wants read; the answer is the sentences, each with the voice

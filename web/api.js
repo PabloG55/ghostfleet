@@ -560,15 +560,33 @@ export async function jarvisConfirm(id, answer, assertion = null) {
   record('jarvis_confirm', { id, answer }, 'ok');
   return j;
 }
+// ── the Mac's ears (every session's talk) ─────────────────────────────────
+// Whether the Mac can transcribe, and whether it reads replies with Kokoro. NOT Jarvis's:
+// /api/voice answers with Jarvis switched off, which is the whole reason it is its own
+// route. A daemon from before the split answers 404, and the caller falls back to the
+// `voice` /api/jarvis carries. The fixture cannot hear, for the reason getJarvis gives, and
+// says so from the one place the fixtures record the Mac's ears (jarvis.json) — read as a
+// file, so it answers with the fixture's Jarvis switched off as the daemon does.
+export async function getVoice() {
+  if ((await ready()).mode === 'server') return get('/api/voice');
+  const j = await fixture('jarvis.json');
+  return { ok: true, voice: j.voice || null, speak: j.speak || null };
+}
 // One utterance, as WAV bytes, to the Mac's own whisper.cpp. Nothing else hears it.
-export async function jarvisHear(wav) {
-  if ((await ready()).mode !== 'server') throw new Error('voice needs a real fleet-serve — fixtures have nothing to transcribe with');
-  if (!haveToken()) throw new AuthError('no live session token');
-  let r;
+//   /api/voice/hear first; a 404 there is a daemon from before the split, which only hears
+// under Jarvis's name — so that is asked next, and with Jarvis off it 404s as well, which
+// is said as what it is rather than as "hearing failed".
+async function postHear(path, wav) {
   try {
-    r = await fetch(baseUrl() + '/api/jarvis/hear', { method: 'POST',
+    return await fetch(baseUrl() + path, { method: 'POST',
       headers: { 'Content-Type': 'audio/wav', Authorization: `Bearer ${token}` }, body: wav });
   } catch (e) { throw new OfflineError(String((e && e.message) || e)); }
+}
+export async function hear(wav) {
+  if ((await ready()).mode !== 'server') throw new Error('voice needs a real fleet-serve — fixtures have nothing to transcribe with');
+  if (!haveToken()) throw new AuthError('no live session token');
+  let r = await postHear('/api/voice/hear', wav);
+  if (r.status === 404) r = await postHear('/api/jarvis/hear', wav);
   if (r.status === 401) { clearToken(); throw new AuthError('the server rejected the session token'); }
   slid(r);
   const j = await r.json().catch(() => ({ ok: false, text: `HTTP ${r.status}` }));

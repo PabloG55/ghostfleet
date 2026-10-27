@@ -14841,7 +14841,28 @@ if CLAUDE_FLEET_WHISPER_BIN="$JW/whisper-cli" CLAUDE_FLEET_WHISPER_MODEL="$JW/gg
   is "...that says Jarvis is disabled"          "true" "$(jj jarvis jswoff disabled)"
   is "...and how to turn it on"                 "1"    "$(jj jarvis jswoff text | grep -c 'fleet-experimental enable jarvis' || true)"
   is "...a yes is a 404 too"                    "404"  "$(jpf confirm jswoff)"
-  is "...and so is hearing"                     "404"  "$(jpf hear jswoff)"
+  is "...and so is Jarvis's hearing route"      "404"  "$(jpf hear jswoff)"
+  # TALK IS NOT JARVIS. The owner switched Jarvis off to be rid of its session and lost the
+  # talk button on every session with it, because the transcriber was only reachable under
+  # /api/jarvis/*. The Mac's ears have their own routes, answered with the switch either
+  # way, behind the same token — and the Jarvis-only routes above stay 404s.
+  is "Jarvis off: the Mac's voice still answers" "200"  "$(jpf voice jswoff)"
+  is "...saying it can hear"                    "true" "$(jj voice jswoff voice.ready)"
+  is "...behind the token like everything else" "401"  "$(jpf voice.noToken jswoff)"
+  is "...and a wav is still transcribed"        "200"  "$(jpf voice.hear jswoff)"
+  is "...to the words the transcriber said"     "hello fleet" "$(jj voice.hear jswoff text)"
+  is "...behind the token too"                  "401"  "$(jpf voice.hear.noToken jswoff)"
+  is "...and text wearing a header is refused"  "415"  "$(jpf voice.hear.text jswoff)"
+  # AN INSTALLED PHONE KEEPS ITS OLD CLIENT (CLAUDE.md), and that client hears through
+  # /api/jarvis/hear and reads its voice from /api/jarvis. With Jarvis on both still answer,
+  # beside the new routes that answer the same.
+  is "Jarvis on: the old hearing route answers" "200"  "$(jpf hear jswon)"
+  is "...with the words"                        "hello fleet" "$(jj hear jswon text)"
+  is "...and /api/jarvis still reports voice"   "true" "$(jj jarvis jswon voice.ready)"
+  is "...while the new route answers too"       "200"  "$(jpf voice.hear jswon)"
+  is "...and so does the voice readiness"       "true" "$(jj voice jswon voice.ready)"
+  is "...and no audio is kept on disk"          "0"    "$(ls "$JW" | grep -c '^gf-hear-' || true)"
+  is "...nor is a word of it in the log"        "0"    "$(grep -c 'hello fleet' "$SV/log.jarvis" || true)"
   is "...the project list says it is off"       "false" "$(jj projects jswoff jarvis_enabled)"
   is "...and has no card for Jarvis's project"  "0"    "$(jj projects jswoff projects | grep -c '"name":"demo"' || true)"
   is "...while the Mac's voice still answers"   "$(jpf speak jswon)" "$(jpf speak jswoff)"

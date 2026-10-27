@@ -811,13 +811,14 @@ away. The owner asked for one on every message, beside the other per-message con
 is there now; tap it to play, tap it again to stop. Two voices at once stays impossible:
 starting one message stops the other.
 
-**Conversation mode, in every session** — while Jarvis (experimental, off by default) is
-switched on; with it off there is no talk button anywhere. The composer of every session — not only Jarvis's —
+**Conversation mode, in every session** — whether or not Jarvis (experimental, off by
+default) is switched on: talking to a session never goes through Jarvis, only through the
+Mac's transcriber and the session itself. The composer of every session — not only Jarvis's —
 has the **talk** button, the same control in the same place: tap it once and the mic opens,
 **3.5 seconds of quiet** ends what you said (counted from your last word; a setting, 1.5–8 s,
 under **conversation mode** in settings — a pause to think does not send half a sentence),
-the Mac transcribes it (whisper.cpp, the transcriber Jarvis uses — `fleet-jarvis voice
---install`), it is sent to *that* session as a prompt, and when the session's turn is over its
+the Mac transcribes it (whisper.cpp, through `/api/voice/hear` — `fleet-jarvis voice
+--install` sets it up; Jarvis uses the same one), it is sent to *that* session as a prompt, and when the session's turn is over its
 final reply is read aloud in the Mac's voice (or the device's, as below) before the mic opens
 again. While the quiet runs, the band above the chat drains a bar and says how long is left;
 talking again fills it, and **a tap on the band sends now**. **Talking over an answer cuts

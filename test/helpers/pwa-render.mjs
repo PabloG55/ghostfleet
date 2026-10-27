@@ -1657,11 +1657,28 @@ is('...then to projects', true, await until(() => /— projects/.test(app.textCo
 // closing the app should do, and what the old code did on the FIRST back from anywhere.
 is('...and the stack is unwound', 0, histDepth);
 
+// ── JARVIS SWITCHED OFF TAKES JARVIS, NOT TALK ──────────────────────────
+// Talk used to be drawn only while Jarvis was on, so an owner who switched Jarvis off to be
+// rid of its session lost the talk button on every session too. The switch is the daemon's
+// (`jarvis_enabled` on the project list), so the fleet below is the shipped one with only
+// that field changed; the band going is the proof the client took it, and then the very
+// session the rows above read with Jarvis on must still carry the same button.
+const pjShipped = JSON.parse(fs.readFileSync(new URL('../../web/fixtures/projects.json', import.meta.url), 'utf8'));
+const jarvisBand = () => /talk or type|type to it|not set up — at the Mac/.test(app.textContent);
+is('Jarvis on: the band is there to go', true, await until(jarvisBand, 4000));
+fixtureOverride = { 'projects.json': { ...pjShipped, jarvis_enabled: false } };
+pollTick();
+is('Jarvis off: the band goes', true, await until(() => !jarvisBand(), 4000));
+
 // ── THE OTHER DIRECTION: a worker keeps all of it ───────────────────────
 clickVerb('open');
 is('a project opens again', true, await until(() => !!cardTitled(/api-fix/), 4000));
 tap(cardTitled(/api-fix/));
 await until(() => !!app.find(n => n.tag === 'textarea'), 4000);
+is('Jarvis off: a session composer still has the talk button', 'talk',
+   ((await until(() => !!talkB(), 4000)) && talkB() || { textContent: '' }).textContent);
+is('...named for the session, not for Jarvis', true, /^talk to (?!Jarvis)\S/.test((talkB() || { attrs: {} }).attrs['aria-label'] || ''));
+fixtureOverride = null;
 is('a worker says nothing about a lead', false, /the fleet's lead/.test(app.textContent));
 click(btnWith(/⋯/));
 const wacts = sheetHost.firstChild;
