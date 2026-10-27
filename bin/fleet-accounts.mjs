@@ -11,8 +11,11 @@
 // one whose 7d window resets soonest (its unspent allowance is the next to be lost); weeks
 // ending within 5h of each other are a tie, won by more 7d room. It leaves an account at the
 // threshold, and comes back once that account's 5h window resets. A planned switch waits 15
-// minutes after the last one and needs a week ending more than 5h sooner. Figures come only
-// from real turns on the login in use, so an inactive account's are as old as `list` says.
+// minutes after the last one, needs a week ending more than 5h sooner, and is never made onto
+// an account last read over 6h ago (`stale` in the list) — that one is only a failover.
+// Figures come only from real turns on the login in use, so an inactive account's are as old
+// as `list` says. A turn refused with Claude's "You've hit your … limit · resets …" marks
+// that account OUT until the reset it names; it is left at once and never chosen before then.
 // An account its organization has disabled for Claude Code is BLOCKED and skipped: a /login
 // cannot fix that, only an admin of that organization can.
 //
@@ -63,7 +66,9 @@ function list(only) {
       let state = n === st.active ? 'active' : 'ready';
       if (a.needs_login) state = 'NEEDS-LOGIN';
       else if (a.blocked) state = 'BLOCKED';
+      else if (A.outNow(a)) state = `OUT until ${A.hhmm(a.out.until)} (hit its ${a.out.why}${a.out.said ? '' : ', no reset time given'})`;
       else if (over) state = `exhausted until ${A.hhmm(over.resets)}`;
+      else if (n !== st.active && A.stale(a)) state = 'ready, stale (no planned move onto it)';
       const u = a.usage || {};
       console.log(`  ${n === st.active ? '*' : ' '} ${n.padEnd(w)}  ${fmtWin(u.five_hour, '5h')} ${fmtWin(u.seven_day, '7d')} ${state}${n === st.active && state !== 'active' ? ' (active)' : ''}`);
       if (a.needs_login) console.log(`    ${a.needs_login.why} — run: ${A.loginCmd(p, n)}`);
@@ -75,7 +80,7 @@ function list(only) {
 async function main() {
   const [cmd = 'list', a1, a2] = process.argv.slice(2);
   if (['-h', '--help', 'help'].includes(cmd)) {
-    return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 19).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
+    return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 22).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
   }
   if (cmd === 'list') return list(a1);
   if (!X.enabled('accounts')) die(X.disabledWhy('accounts', 'fleet-accounts'));
@@ -100,6 +105,7 @@ async function main() {
     case 'use': {
       const p = prof(a1); if (!a2) die('use needs <profile> <name>', 2);
       let r; try { r = A.use(p, a2); } catch (e) { die(e.message); }
+      if (r.wasOut) console.log(`${p}/${a2} hit its ${r.wasOut.why} (Claude said until ${A.hhmm(r.wasOut.until)}) — using it anyway, by hand; a turn refused at the limit again marks it out and moves on`);
       if (r.same) return console.log(`${p} is already on '${a2}' — kept there until ${A.hhmm(r.st.pin.until)} unless it runs out`);
       return console.log(`${p}: switched to '${a2}' — running sessions move onto it by themselves within half a minute, as after a /login; nothing is restarted. Kept there until ${A.hhmm(r.st.pin.until)} unless it runs out`);
     }
