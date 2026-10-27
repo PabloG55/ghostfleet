@@ -36,6 +36,17 @@ fi
 DIR="$(cd "$DIR" 2>/dev/null && pwd)" || { echo "fleet-companion: bad directory" >&2; exit 1; }
 
 CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+FDIR="${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}"
+# The fleet's own profile when a project owns the socket — `-s` names another fleet, and
+# the caller's env is the caller's profile (lib/fleet-env.mjs).
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do _l="$(readlink "$_src")"; case "$_l" in /*) _src="$_l" ;; *) _src="$(dirname "$_src")/$_l" ;; esac; done
+FLEET_ENV="$(cd "$(dirname "$_src")/../lib" 2>/dev/null && pwd)/fleet-env.mjs"
+if command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
+   && _env="$(node "$FLEET_ENV" of "$SOCK" 2>/dev/null)" && [ -n "$_env" ]; then
+  IFS=$'\x1f' read -r _cfg _dir _ <<< "$_env"
+  [ -n "$_cfg" ] && [ -n "$_dir" ] && { CFG_DIR="$_cfg"; FDIR="$_dir"; }
+fi
 base="${DIR##*/}"
 name="$base~q"; i=2
 while tmux -L "$SOCK" has-session -t "$name" 2>/dev/null; do name="$base~q$i"; i=$((i + 1)); done
@@ -46,8 +57,9 @@ while tmux -L "$SOCK" has-session -t "$name" 2>/dev/null; do name="$base~q$i"; i
 # name and therefore no agent marker, so it still resolves to claude exactly as before
 # — but going through the dispatcher means an explicit CLAUDE_FLEET_AGENT is honoured
 # instead of silently ignored, which is the whole point of having one entry point.
+env CLAUDE_CONFIG_DIR="$CFG_DIR" CLAUDE_FLEET_DIR="$FDIR" \
 tmux -L "$SOCK" new-session -d -s "$name" -c "$DIR" \
-  -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
+  -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_DIR=$FDIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
   "exec agent-here \"$name\"" || { echo "fleet-companion: failed to start session" >&2; exit 1; }
 
 echo "fleet-companion: started '$name' in $DIR (same worktree, fresh conversation)"

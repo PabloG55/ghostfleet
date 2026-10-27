@@ -571,6 +571,26 @@ accounts_tick() {
   [ "$rc" = 0 ]
 }
 
+# ── THE SERVER'S ENVIRONMENT IS THE PROJECT'S ─────────────────────────────────
+# A tmux server's global env is whatever its first client exported, and a fleet started
+# from a session of ANOTHER profile's project took that profile's config and fleet dir:
+# every session opened on it without its own -e then wrote its records, inbox and status
+# where neither the phone nor a --reply-to look (lib/fleet-env.mjs has the whole account).
+# The launch paths pass the fleet's own now, but a server started wrong before that, or by
+# a path nobody has thought of, stays wrong until somebody looks — so the one process that
+# is alive exactly as long as the fleet looks every tick. It corrects the server and names,
+# once, in this fleet's inbox, the sessions whose process still writes elsewhere. It never
+# restarts one: that is the owner's call, and the notice says how.
+#   Its own step, not a link in the chain below: a machine or budget ceiling short-circuits
+# that chain, and a fleet under pressure is no reason to leave its records invisible.
+env_tick() {
+  command -v node >/dev/null 2>&1 && [ -f "$LIB_DIR/fleet-env.mjs" ] || return 0
+  local out
+  out="$(node "$LIB_DIR/fleet-env.mjs" heal "$SOCK" $([ "$DRY" = 1 ] && echo --dry-run) 2>&1)"
+  [ -n "$out" ] && printf '%s\n' "$out" | while IFS= read -r line; do log "env: $line"; done
+  return 0
+}
+
 modelabel="ACTIVE (parks all at ceiling)"; [ "$DRY" = 1 ] && modelabel="dry-run (no pausing)"
 reslabel="mem-level>=${MEM_LEVEL}, swap>=${SWAP_PCT}%, procs>=${PROC_PCT}%"; [ "$RESOURCE" = 1 ] || reslabel="off"
 log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<${RESUME}%; resources ${reslabel}; interval ${INTERVAL}s"
@@ -578,10 +598,12 @@ log "started on $SOCK — $modelabel — budget pause-all>=${PAUSE_AT}%, resume<
 # a token reading is beside the point, and letting the budget path also act on the same
 # pass could resume for one ceiling what the other just parked for.
 if [ "$ONCE" = 1 ]; then
+  env_tick
   resource_tick || accounts_tick || tick
 else
   while true; do
     tmux -L "$SOCK" list-sessions >/dev/null 2>&1 || { log "fleet $SOCK is gone — governor exiting"; exit 0; }
+    env_tick
     resource_tick || accounts_tick || tick
     # JARVIS'S FRESH START rides on ITS OWN fleet's governor — the one long-lived process
     # that is already alive exactly as long as Jarvis is, so the restart needs no daemon, cron

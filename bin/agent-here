@@ -70,6 +70,41 @@ set -uo pipefail
 # and it. Checked before doing it — nothing in bin/, lib/, tmux/ or hooks/ reads
 # `pane_current_command` or `pane_pid`, and every status detector reads the pane's
 # CONTENT via capture-pane, which is unchanged.
+# ── THE FLEET'S PROFILE, NOT THE ONE THAT HAPPENED TO START THE SERVER ─────────
+# A session's CLAUDE_FLEET_DIR came from the tmux server's GLOBAL environment unless its
+# launcher passed one, and the global env is whatever the server's FIRST client exported.
+# A project on another profile, whose server was started from a default-profile session,
+# ran its master for four days with the right login and the wrong fleet dir: records,
+# inbox and status in the default profile's directory, a phone that showed it as having
+# no messages, and a --reply-to question that was never answered (lib/fleet-env.mjs has
+# the whole account). Every launch site passes both now — and this is the one entry point
+# all of them go through, so a site that forgets, or one added later, still cannot start
+# a session in another profile's directory.
+#   The socket names its fleet; lib/projects.mjs says whose that is. A socket no project
+# owns (a scratch fleet, a test) keeps what it was given: there is no profile to be wrong
+# about, and guessing one would be the bug in the other direction.
+#   THE FLEET DIR ALWAYS, THE CONFIG DIR UNLESS THIS SESSION WAS GIVEN ONE. The fleet dir
+# is where the fleet's readers look, so it has exactly one right answer. The login does
+# not: fleet-open resumes a conversation under the profile its TRANSCRIPT lives in, into
+# whichever fleet owns the repo, and a transcript only resumes under its own config dir.
+# A launcher says so with a per-session -e, which `show-environment -t <pane>` reports and
+# the server's global value never shows up in — so only an inherited one is replaced.
+if [ -n "${CLAUDE_FLEET_SOCK:-}" ] && command -v node >/dev/null 2>&1; then
+  _ah="${BASH_SOURCE[0]}"
+  while [ -L "$_ah" ]; do _l="$(readlink "$_ah")"; case "$_l" in /*) _ah="$_l" ;; *) _ah="$(dirname "$_ah")/$_l" ;; esac; done
+  _fe="$(cd "$(dirname "$_ah")/../lib" 2>/dev/null && pwd)/fleet-env.mjs"
+  if [ -f "$_fe" ] && _env="$(node "$_fe" of "$CLAUDE_FLEET_SOCK" 2>/dev/null)" && [ -n "$_env" ]; then
+    IFS=$'\x1f' read -r _cfg _dir _prof _ <<< "$_env"
+    if [ -n "$_cfg" ] && [ -n "$_dir" ]; then
+      export CLAUDE_FLEET_DIR="$_dir"
+      _own=""
+      [ -n "${TMUX_PANE:-}" ] \
+        && _own="$(tmux -L "$CLAUDE_FLEET_SOCK" show-environment -t "$TMUX_PANE" CLAUDE_CONFIG_DIR 2>/dev/null)"
+      case "$_own" in CLAUDE_CONFIG_DIR=/*) ;; *) export CLAUDE_CONFIG_DIR="$_cfg" CLAUDE_FLEET_PROFILE="$_prof" ;; esac
+    fi
+  fi
+fi
+
 MARK_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
 SLOT="${1:-}"; case "$SLOT" in --|"") SLOT="${CLAUDE_FLEET_SLOT:-}" ;; esac
 MARK=""

@@ -317,7 +317,7 @@ _new_session() {                     # $1=name $2=cwd $3=agent $4=fresh("1" or "
   local name="$1" cwd="$2" agent="$3" sid
   local extra=(); [ "${4:-}" = 1 ] && extra=(-e "CLAUDE_FLEET_FRESH=1")
   sid="$(TM new-session -d -P -F '#{session_id}' -s "$name" -c "$cwd" \
-    -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" \
+    -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_DIR=$CFG_DIR/fleet" -e "CLAUDE_FLEET_SOCK=$SOCK" \
     ${extra[@]+"${extra[@]}"} -e "CLAUDE_FLEET_AGENT=$agent" \
     "exec agent-here \"$name\"")" || sid=""
   sid="${sid%%$'\n'*}"
@@ -334,6 +334,12 @@ _new_session() {                     # $1=name $2=cwd $3=agent $4=fresh("1" or "
 # failing silently inside run-shell.
 tm_wire() {
   TM source-file "$CONF" 2>/dev/null || true
+  # A server started by somebody else — a session of another profile's project spawning or
+  # asking into this one — took THAT caller's global env, and every session opened on it
+  # since without its own -e wrote to that profile's fleet dir. Entering the project is the
+  # moment the owner is looking, so the server is put right here (lib/fleet-env.mjs) and any
+  # session still running on the wrong dir is named in the inbox, not restarted.
+  [ -f "$BIN_DIR/../lib/fleet-env.mjs" ] && node "$BIN_DIR/../lib/fleet-env.mjs" heal "$SOCK" >/dev/null 2>&1
   TM set-option -g @cf_bin "$BIN_DIR" 2>/dev/null || true
   # Hand the server the grid's CARD ORDER (⇧hjkl in the grid persists one). ⇧←→ runs
   # fleet-cycle inside run-shell, which inherits the server's environment and not this
@@ -566,7 +572,7 @@ enter_master() {
   local main; main="$(master_checkout "$PROJECT_ROOT" "$PROJECT")"
   TM has-session -t master 2>/dev/null || \
     remember_agent master "${PROJECT_AGENT:-}"
-    TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_AGENT=${PROJECT_AGENT:-}" "exec agent-here master"
+    TM new-session -d -s master -c "$main" -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_DIR=$CFG_DIR/fleet" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_AGENT=${PROJECT_AGENT:-}" "exec agent-here master"
   tm_wire                                               # refresh bindings/status on the live server
   ensure_governor                                       # budget backpressure for this fleet (non-Claude, singleton)
   # master's status-left names the project it leads + its live worker count

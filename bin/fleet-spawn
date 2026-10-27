@@ -384,6 +384,28 @@ route_to_owner() {
 }
 route_to_owner
 
+# ── THE SOCKET IS FINAL; NOW THE FLEET'S OWN PROFILE ─────────────────────────
+# Two paths above settle the socket and neither settled the fleet dir. -s kept the
+# CALLER's config dir outright, and route_to_owner moved the config dir but left
+# $CLAUDE_FLEET_DIR as the caller exported it — so a worker spawned from a default-profile
+# session into a project on another profile had its parent tag, agent marker and park
+# markers written into the default profile's directory, and, when this new-session was the
+# one that started the server, the server's global env was the caller's. Every session
+# anybody opened there afterwards inherited that fleet dir. Resolved from the socket, the
+# same way the phone and fleet-restart resolve it; a socket no project owns keeps what it
+# had (lib/fleet-env.mjs).
+_src_fe="${BASH_SOURCE[0]}"
+while [ -L "$_src_fe" ]; do _l="$(readlink "$_src_fe")"; case "$_l" in /*) _src_fe="$_l" ;; *) _src_fe="$(dirname "$_src_fe")/$_l" ;; esac; done
+FLEET_ENV="$(cd "$(dirname "$_src_fe")/../lib" 2>/dev/null && pwd)/fleet-env.mjs"
+if command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
+   && _env="$(node "$FLEET_ENV" of "$SOCK" 2>/dev/null)" && [ -n "$_env" ]; then
+  IFS=$'\x1f' read -r _cfg _dir _prof _ <<< "$_env"
+  if [ -n "$_cfg" ] && [ -n "$_dir" ]; then
+    CFG_DIR="$_cfg"
+    export CLAUDE_CONFIG_DIR="$_cfg" CLAUDE_FLEET_DIR="$_dir" CLAUDE_FLEET_PROFILE="$_prof"
+  fi
+fi
+
 # who's live where — so we can tell free worktrees from occupied ones (same test
 # as fleet-worktrees: a worktree is FREE = no live session on it + clean tree).
 panes="$(tmux -L "$SOCK" list-panes -a -F '#{pane_current_path}	#{session_name}' 2>/dev/null)"
@@ -802,10 +824,16 @@ fi
 # never reaches stdout — the grid parses that stream, and a stray line in it is a hazard
 # for no benefit.
 sid="$(tmux -L "$SOCK" new-session -d -P -F '#{session_id}' -s "$name" -c "$WT" \
-  -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
+  -e "CLAUDE_CONFIG_DIR=$CFG_DIR" -e "CLAUDE_FLEET_DIR=${CLAUDE_FLEET_DIR:-$CFG_DIR/fleet}" \
+  -e "CLAUDE_FLEET_SOCK=$SOCK" -e "CLAUDE_FLEET_FRESH=1" \
   -e "CLAUDE_FLEET_MODEL=$MODEL" -e "CLAUDE_FLEET_AGENT=$AGENT" -e "CLAUDE_FLEET_SLOT=$SLOT" \
   "exec agent-here \"$name\"")" || sid=""
 sid="${sid%%$'\n'*}"
+# A server that was ALREADY running may have been started by somebody else's environment;
+# the new session is right either way (-e outranks the global), and this puts the server
+# right too and names whoever is still running on the wrong dir.
+[ -n "$sid" ] && command -v node >/dev/null 2>&1 && [ -f "$FLEET_ENV" ] \
+  && node "$FLEET_ENV" heal "$SOCK" 2>/dev/null | sed 's/^/fleet-spawn: /' >&2
 
 # ...AND EXIT 0 ONLY THEN. tmux can return 0 and the session still be gone a moment
 # later: the pane runs `exec agent-here <name>`, and if that cannot exec — not on PATH

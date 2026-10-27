@@ -11,6 +11,17 @@
 # Status lives under the ACTIVE config dir, so work and personal profiles
 # (CLAUDE_CONFIG_DIR=~/.claude vs ~/.claude-personal) stay separate.
 FLEET_DIR="${CLAUDE_FLEET_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/fleet}"
+#   TRUSTED AS GIVEN, EVEN WHEN IT IS ANOTHER PROFILE'S. A session whose fleet's server was
+# started from another profile's session ran four days with this pointing at that profile's
+# dir (lib/fleet-env.mjs). Redirecting here was considered and declined: this variable is
+# read by every writer in the process — the MCP server's inbox and queue, fleet-send, the
+# mod's handoff spool, the agent's own tools — and moving only the hook's half would split
+# one session across two directories, records in one and its queue and inbox in the other,
+# which is a harder thing to see than a session uniformly in the wrong place. Refusing is
+# worse: no record at all is the very silence being fixed. And the cure is a restart either
+# way. So the fix is upstream — every launch takes the fleet's dir from its project, and
+# agent-here enforces it for whatever launches it — and a session already running wrong is
+# named in its fleet's inbox by the governor, never quietly re-pointed.
 
 # Route by the LIVE tmux server ($TMUX), not a possibly-stale CLAUDE_FLEET_SOCK: a
 # long-running --resume/--fork Claude can hold an env var from an earlier context,
