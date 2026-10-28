@@ -93,7 +93,7 @@ try {
     if (!t) return 'no target';
     const r = t.getBoundingClientRect();
     const x = Math.round(r.left + 20), y = Math.round(r.top + 4);
-    const pe = (n, X, Y, on) => on.dispatchEvent(new PointerEvent(n, { bubbles: true, clientX: X, clientY: Y, pointerId: 1 }));
+    const pe = (n, X, Y, on) => on.dispatchEvent(new PointerEvent(n, { bubbles: true, pointerType: 'touch', clientX: X, clientY: Y, pointerId: 1 }));
     pe('pointerdown', x, y, t);
     if (d) pe('pointermove', x, y + d, t);
     const endY = bk ? y : y + d;
@@ -149,7 +149,7 @@ try {
     const t = pt === 'grip' ? c.querySelector('.c-top') : (c.querySelector('.c-where') || c);
     const r = t.getBoundingClientRect();
     const x = Math.round(r.left + 20), y = Math.round(r.top + 4);
-    const pe = (n, X, Y, on) => on.dispatchEvent(new PointerEvent(n, { bubbles: true, clientX: X, clientY: Y, pointerId: 1 }));
+    const pe = (n, X, Y, on) => on.dispatchEvent(new PointerEvent(n, { bubbles: true, pointerType: 'touch', clientX: X, clientY: Y, pointerId: 1 }));
     pe('pointerdown', x, y, t);
     // SAMPLED MID-GESTURE, because release clears the lift: asked afterwards, a drag that
     // was recognised and one that was not look the same.
@@ -216,8 +216,8 @@ try {
   // asserted is that the drag was RECOGNISED — the card lifts, and the drop indicator
   // names a direction.
   await fresh();
-  await b.evaluate(() => { document.querySelector('#app .card .c-where, #app .card').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })); return null; });
-  await b.evaluate(() => { const c = document.querySelector('#app .card'); c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 })); return null; });
+  await b.evaluate(() => { document.querySelector('#app .card .c-where, #app .card').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', pointerId: 1 })); return null; });
+  await b.evaluate(() => { const c = document.querySelector('#app .card'); c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch', pointerId: 1 })); return null; });
   await until(onGrid, 5000);
   await until(() => b.evaluate(() => !!document.querySelector('#app .card .c-top.t')), 5000);
   const lifted = await b.evaluate(() => {
@@ -226,14 +226,14 @@ try {
     const t = c.querySelector('.c-top');
     const r = t.getBoundingClientRect();
     const x = Math.round(r.left + 20), y = Math.round(r.top + 4);
-    const pe = (n, X, Y, on) => on.dispatchEvent(new PointerEvent(n, { bubbles: true, clientX: X, clientY: Y, pointerId: 1 }));
+    const pe = (n, X, Y, on) => on.dispatchEvent(new PointerEvent(n, { bubbles: true, pointerType: 'touch', clientX: X, clientY: Y, pointerId: 1 }));
     pe('pointerdown', x, y, t);
     const onDown = c.classList.contains('lift');
     pe('pointermove', x, y + 110, t);
     const dir = c.classList.contains('drop-below') ? 'below' : c.classList.contains('drop-above') ? 'above' : 'none';
     // Cancelled, not released: this asserts the recognition and must not go on to fire
     // the reorder verb and leave a toast behind for nothing.
-    c.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerId: 1 }));
+    c.dispatchEvent(new PointerEvent('pointercancel', { bubbles: true, pointerType: 'touch', pointerId: 1 }));
     const cleared = !c.classList.contains('lift') && !c.classList.contains('drop-below');
     return { onDown, dir, cleared };
   });

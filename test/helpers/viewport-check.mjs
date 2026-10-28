@@ -1359,8 +1359,11 @@ try {
   await tapCard('api-fix'); await seeing('session', 'the session screen');
   const swipeChat = (x0, y0, x1, y1) => evaluate((a) => {
     const c = document.querySelector('#app .chat'); if (!c) return false;
-    c.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: a[0], clientY: a[1], pointerId: 1 }));
-    c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: a[2], clientY: a[3], pointerId: 1 }));
+    // A FINGER, said so: since the desk, a swipe is a touch gesture only (touchGesture in
+    // app.js), and an event that names no pointer type is judged by this emulation's
+    // pointer, which `mobile: true` alone reports as fine.
+    c.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', clientX: a[0], clientY: a[1], pointerId: 1 }));
+    c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch', clientX: a[2], clientY: a[3], pointerId: 1 }));
     return true;
   }, [x0, y0, x1, y1]);
   const openName = () => evaluate(() => {

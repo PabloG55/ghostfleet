@@ -280,10 +280,11 @@ wide and is a touch screen: it keeps the card grid it had. Below the width, on e
 and on every touch screen, nothing changes. `DUO_QUERY` in `app.js` is the one place this
 is decided.
 
-**The composer.** With a mouse or trackpad (`(hover: hover) and (pointer: fine)` — a page
-cannot see a keyboard, only a pointer), `⏎` sends and `⇧⏎` is a new line. On a touch
-screen `⏎` stays the new line it has always been and `send` stays the button. `Esc` leaves
-the box, which is how the keys below come back.
+**The composer.** With a keyboard, `⏎` sends and `⇧⏎` is a new line: at a desk (a mouse or
+trackpad, `(hover: hover) and (pointer: fine)`) and on an iPhone or iPad with a keyboard
+attached (below). With only the on-screen keyboard, `⏎` stays the new line it has always
+been and `send` stays the button. `Esc` leaves the box, which is how the keys below come
+back.
 
 **Images.** `Ctrl-V` / `⌘V` of an image in the composer, or an image file dragged onto the
 conversation, goes through the photo picker's own path — `addPhotos` → `api.attach` — so
@@ -291,6 +292,48 @@ it has the same 6 MB limit, the same ten-per-message cap and lands in the same a
 directory. It shows as a tile before sending, with `×` to remove it. A non-image dropped
 there attaches nothing and says so; anywhere else on the page a dropped file is refused
 rather than letting the browser navigate to it and throw the draft away.
+
+**Gestures are a finger's.** The phone's pointer gestures do not fire for a mouse, a pen or
+a desktop trackpad: there the keys and a plain click do the work, and a finger keeps every
+one of them. The gestures, and how each is gated:
+
+| gesture (touch) | does | with a mouse / pen / trackpad |
+|---|---|---|
+| tap a card | open it | a click opens it — the one thing that stays |
+| long-press a card (600ms) | `x`: the desk's kill / remove question | nothing; `x` asks it |
+| swipe ← / → across a card | `p` pause / `P` resume | nothing — a drag is a text selection; `p` / `P` |
+| drag a card by its title | `⇧hjkl` reorder | nothing; `H J K L` |
+| swipe across the chat | the next / previous session | nothing; `⇧←` / `⇧→` |
+
+The test is the event's own `pointerType` (`touchGesture` in `app.js`): `'touch'` gets the
+gesture, `'mouse'` and `'pen'` never do, decided per press — so a laptop with a touch screen
+gets gestures from the finger and none from its trackpad in the same session at the same
+width. Only an event that names no type at all (one built by a script) falls back to the
+screen's primary pointer, `(hover: hover) and (pointer: fine)`. There is no pull-to-refresh
+or edge-swipe in this client to gate: the browser's own pull-to-refresh is already off
+(`overscroll-behavior` on the shell), and an edge-swipe back is the system's, which only
+ever reaches the app as a history step.
+
+**On an iPhone or iPad**, everything here is the same with touch's own shapes:
+
+- **Paste.** An image pasted from iOS's own menu (long-press in the composer → Paste)
+  attaches through the same path. Safari hands it over in `clipboardData.items` with an
+  empty `files`, and both are read.
+- **A keyboard attached.** The keys above and Enter-to-send work exactly as at a desk.
+  A page cannot ask whether a keyboard is attached, so the client watches what arrives and
+  remembers it for the page's life (`noteKeyboard`). One trusted keydown of any of these
+  is enough:
+  - a key that arrives with no text field focused — the on-screen keyboard only exists
+    while one is;
+  - a key the on-screen keyboard does not have: Esc, Tab, an arrow, an F-key, a modifier
+    on its own, or a Ctrl / ⌘ / Alt chord;
+  - a key typed into a field while the on-screen keyboard is not up. The visual viewport
+    says which: the on-screen keyboard takes a third of the screen, while an attached one
+    leaves at most a shortcut bar.
+
+  With only the on-screen keyboard, none of that happens and ⏎ stays the new line.
+- **The phone keeps its layout and its gestures.** Two panes need a fine pointer as well
+  as the width, so neither a phone nor a tablet held sideways ever gets them.
 
 ### The keys: the Mac grid's, the same key doing the same thing
 
@@ -312,9 +355,10 @@ Some keys a page can never have: `Ctrl-N`, `Ctrl-T` and `Ctrl-W` open a window, 
 and close one before any page hears them, in an installed PWA too. Where the desk uses one,
 the table says so and offers no substitute.
 
-`test/helpers/desktop-check.mjs` presses every key in this table in a real Chrome — at
-1600×900 with a keyboard, and the composer's `⏎` again at 390×844 with touch — and fails
-if a key is added here without a row that presses it.
+`test/helpers/desktop-check.mjs` presses every key in this table in a real Chrome at
+1600×900, checks the gestures with a real mouse there and with touch at 390×844, drives the
+phone with an emulated on-screen keyboard and with an attached one, and fails if a key is
+added here without a row that presses it.
 
 <!-- desk-keys -->
 | desk key | where | what it does here |

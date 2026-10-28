@@ -410,17 +410,6 @@ try {
   await press('`');
   is('...so the keys work again', true, onGrid(await settle(x => !x.session)));
 
-  // The phone: ⏎ is the new line it has always been.
-  await fresh(390, 844, true);
-  await tap('acme-api');
-  await until(() => b.evaluate(() => /:/.test((document.querySelector('#app > .hdr .scope') || {}).textContent || '')));
-  await tap('api-fix');
-  await until(() => b.evaluate(() => !!document.querySelector('#app .composer textarea')));
-  await b.evaluate(() => { document.querySelector('#app .composer textarea')?.focus(); return null; });
-  await keys('o', 'k', 'Enter');
-  is('phone: ⏎ in the composer is still a new line', 'ok\n', (await look()).draft);
-  is('...and sends nothing', false, await auditHas('fleet_send'));
-
   // ════════════════════════════════════════════════════════════════════════════════════
   // IMAGES: paste and drop, through the picker's own path
   // ════════════════════════════════════════════════════════════════════════════════════
@@ -475,6 +464,201 @@ try {
   s = await settle(x => x.toast);
   is('a dropped non-image attaches nothing', 0, s.tiles);
   is('...and says why', true, /only images/.test(s.toast));
+
+  // ════════════════════════════════════════════════════════════════════════════════════
+  // GESTURES ARE A FINGER'S: a mouse gets the click and the keys, touch keeps them all
+  // ════════════════════════════════════════════════════════════════════════════════════
+  // THE MOUSE IS REAL: Input.dispatchMouseEvent goes through the browser's own input path
+  // and arrives as pointerType 'mouse', so the mouse rows prove the gate in app.js and not a
+  // type this file claimed.
+  //   THE SWIPES AND THE TITLE DRAG BY FINGER ARE TYPED POINTER EVENTS, and that is a
+  // measured limit rather than a shortcut. Under Chrome's touch emulation a real touch that
+  // moves sideways over a card is taken by the browser as a pan — pointerdown, then
+  // pointercancel, no pointerup — and a real touch on the title lands on the name inside
+  // it, which wire() does not treat as the grip. Both measured identically on staging's
+  // client, so neither is this change; both are on the PR's list to check on a real iPhone.
+  // Tap and long-press do not move, so those go in as REAL touches.
+  const spot = (name, part = 'body') => b.evaluate((nm, pt) => {
+    const c = [...document.querySelectorAll('.card[data-idx]')].find(n => (n.querySelector('.c-name') || {}).textContent?.trim() === nm);
+    if (!c) return null;
+    const t = pt === 'grip' ? c.querySelector('.c-top') : (c.querySelector('.c-msg') || c.querySelector('.c-where') || c);
+    const r = t.getBoundingClientRect();
+    // The grip is the title ROW: pressed in the gap between the name and the time, so the
+    // pointer's target is the row itself (.c-top.t) and not the name inside it.
+    // A drag LEFT starts at the right of the card: a mouse's pointerup goes to whatever is
+    // under it, so a swipe that ends off the card is a release the card never sees.
+    const x = Math.round(pt === 'grip' ? r.left + r.width * 0.6 : pt === 'right' ? r.left + r.width * 0.8 : r.left + Math.min(40, r.width / 3)), y = Math.round(r.top + r.height / 2);
+    if (pt === 'grip' && document.elementFromPoint(x, y) !== t) return null;
+    return { x, y };
+  }, name, part);
+  const chatAt = () => b.evaluate(() => {
+    const c = document.querySelector('#app .chat'); if (!c) return null;
+    const r = c.getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  });
+  // A path from p by (dx, dy) in steps, held `ms` before release; `probe` runs mid-gesture.
+  async function mouseDrag(p, dx, dy, ms = 0, probe = null) {
+    if (!p) return null;                   // nothing there to press: the row says so, the run goes on
+    const m = (type, x, y, extra = {}) => b.call('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1, ...extra });
+    await m('mouseMoved', p.x, p.y, { buttons: 0, button: 'none' });
+    await m('mousePressed', p.x, p.y);
+    for (let i = 1; i <= 6; i++) await m('mouseMoved', p.x + dx * i / 6, p.y + dy * i / 6);
+    if (ms) await sleep(ms);
+    const mid = probe ? await probe() : null;
+    await m('mouseReleased', p.x + dx, p.y + dy);
+    await sleep(300);
+    return mid;
+  }
+  // A finger that MOVES, as typed pointer events on the element under it (the grip itself
+  // for `part: 'grip'`, as test/helpers/grip-check.mjs does).
+  async function fingerDrag(name, part, dx, dy, probe = null) {
+    const fire = (type, ddx, ddy) => b.evaluate((nm, pt, type, ddx, ddy) => {
+      const c = [...document.querySelectorAll('.card[data-idx]')].find(n => (n.querySelector('.c-name') || {}).textContent?.trim() === nm)
+        || (nm === '#chat' ? document.querySelector('#app .chat') : null);
+      if (!c) return false;
+      const t = pt === 'grip' ? c.querySelector('.c-top') : (c.querySelector('.c-msg') || c);
+      const r = t.getBoundingClientRect();
+      const x = Math.round(r.left + Math.min(40, r.width / 3)), y = Math.round(r.top + r.height / 2);
+      window.__fd = window.__fd || {}; if (type === 'pointerdown') window.__fd = { t };
+      (window.__fd.t || t).dispatchEvent(new PointerEvent(type, { bubbles: true, pointerType: 'touch', pointerId: 7, clientX: x + ddx, clientY: y + ddy }));
+      return true;
+    }, name, part, type, ddx, ddy);
+    await fire('pointerdown', 0, 0);
+    for (let i = 1; i <= 6; i++) await fire('pointermove', dx * i / 6, dy * i / 6);
+    const mid = probe ? await probe() : null;
+    await fire('pointerup', dx, dy);
+    await sleep(300);
+    return mid;
+  }
+  async function touchDrag(p, dx, dy, ms = 0, probe = null) {
+    if (!p) return null;
+    const t = (type, x, y) => b.call('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }] });
+    await t('touchStart', p.x, p.y);
+    for (let i = 1; i <= 6; i++) await t('touchMove', p.x + dx * i / 6, p.y + dy * i / 6);
+    if (ms) await sleep(ms);
+    const mid = probe ? await probe() : null;
+    await t('touchEnd');
+    await sleep(300);
+    return mid;
+  }
+  const lifted = () => b.evaluate(() => !!document.querySelector('.card.lift, .card.drop-above, .card.drop-below'));
+  // THE PHONE SLIDES BETWEEN SCREENS (a view transition, ~260ms), and while it plays the
+  // page under a finger is the transition's snapshot, not the cards: a touch then lands on
+  // #app itself. So the touch rows wait for the slide to finish, as a thumb does.
+  const slid = () => until(() => b.evaluate(() => !document.documentElement.dataset.nav), 3000).then(() => sleep(150));
+  const phoneGrid = async () => { await fresh(390, 844, true); await tap('acme-api'); await settle(onGrid); await slid(); };
+
+  // A desk, a mouse.
+  // ABSENCE IS GIVEN A SECOND, the way grip-check gives its `false` rows one: a verb is a
+  // round trip away, and a row asked before it could have landed proves nothing.
+  await toGrid();
+  await mouseDrag(await spot('api-fix', 'right'), -160, 0);
+  await sleep(1000);
+  is('mouse: a drag that would be a swipe ← pauses nothing', false, await auditHas('fleet_pause'));
+  await mouseDrag(await spot('api-fix'), 160, 0);
+  await sleep(1000);
+  is('mouse: ...nor a swipe → resume anything', false, await auditHas('fleet_resume'));
+  is('...and opens nothing either', '', (await look()).session);
+  await mouseDrag(await spot('api-fix'), 0, 0, 900);
+  is('mouse: held still for 900ms asks nothing (no long-press)', '', (await look()).confirm);
+  const grip = await spot('docs-pass', 'grip');
+  is('mouse: a drag by the title lifts nothing', false, grip ? await mouseDrag(grip, 0, 140, 0, lifted) : 'no bare grip to press');
+  await sleep(1000);
+  is('...and reorders nothing', false, await auditHas('fleet_order'));
+  await mouseDrag(await spot('api-fix'), 0, 0);
+  is('mouse: a plain click still opens the card', 'api-fix', (await settle(x => x.session)).session);
+  await mouseDrag(await chatAt(), -200, 0);
+  await sleep(600);
+  is('mouse: a drag across the chat stays on the session (no swipe to the next)', 'api-fix', (await look()).session);
+
+  // A phone, a finger: every one of those gestures, still there.
+  await phoneGrid();
+  await fingerDrag('api-fix', 'body', -160, 0);
+  is('touch: swipe ← still pauses', true, await until(() => auditHas('fleet_pause'), 3000));
+  await phoneGrid();
+  await fingerDrag('api-fix', 'body', 160, 0);
+  is('touch: swipe → still resumes', true, await until(() => auditHas('fleet_resume'), 3000));
+  await phoneGrid();
+  await touchDrag(await spot('api-fix'), 0, 0, 900);
+  is('touch: a long-press still asks the desk\'s question', "kill session 'api-fix'?", (await settle(x => x.confirm)).confirm);
+  await phoneGrid();
+  is('touch: a drag by the title still lifts the card', true, await fingerDrag('docs-pass', 'grip', 0, 140, lifted));
+  is('...and reorders it', true, await until(() => auditHas('fleet_order'), 3000));
+  await phoneGrid();
+  await touchDrag(await spot('api-fix'), 0, 0);
+  is('touch: a tap still opens the card', 'api-fix', (await settle(x => x.session)).session);
+  await slid();
+  await fingerDrag('#chat', 'body', -200, 0);
+  is('touch: a swipe across the chat still goes to the next session', 'docs-pass', (await settle(x => x.session && x.session !== 'api-fix')).session);
+
+  // ════════════════════════════════════════════════════════════════════════════════════
+  // AN iPHONE: touch, the on-screen keyboard, or a keyboard attached
+  // ════════════════════════════════════════════════════════════════════════════════════
+  // No simulator here, so the phone is Chrome at 390x844 with touch emulation. The on-screen
+  // keyboard is emulated the way iOS presents it to a page: the visual viewport shrinks by
+  // a third of the screen while a field is focused (the threshold syncViewport() reads).
+  const phoneSession = async () => { await phoneGrid(); await tap('api-fix'); await settle(x => x.session === 'api-fix'); await slid(); };
+  const onScreenKeyboard = async (up) => {
+    await b.call('Emulation.setDeviceMetricsOverride', { width: 390, height: up ? 500 : 844, deviceScaleFactor: 1, mobile: true });
+    await sleep(300);
+  };
+
+  await phoneSession();
+  await b.evaluate(() => { document.querySelector('#app .composer textarea')?.focus(); return null; });
+  await onScreenKeyboard(true);
+  await keys('o', 'k', 'Enter');
+  is('iPhone, on-screen keyboard: ⏎ in the composer is still a new line', 'ok\n', (await look()).draft);
+  is('...and sends nothing', false, await auditHas('fleet_send'));
+  await onScreenKeyboard(false);
+
+  // A keyboard attached: the field is focused and NO on-screen keyboard comes up, so the
+  // keys that arrive are a real keyboard's — the first ⏎ sends.
+  await phoneSession();
+  await b.evaluate(() => { document.querySelector('#app .composer textarea')?.focus(); return null; });
+  await keys('o', 'k');
+  await press('Enter', { as: 'iPhone ⏎' });
+  is('iPhone, keyboard attached: ⏎ sends', true, await until(() => auditHas('fleet_send'), 3000));
+  is('...and empties the box', '', (await settle(x => x.draft === '')).draft);
+
+  // ...and the Mac-grid keys, with nothing focused, on the phone's single column.
+  await fresh(390, 844, true);
+  const [p0, p1] = await order('');
+  await press('j');
+  is('iPhone, keyboard attached: j moves the cursor on Projects', [p0, p1], [p0, (await look()).sel]);
+  is('...in the single column', false, (await look()).duo);
+  await phoneGrid();
+  await press('2');
+  const opened = (await settle(x => x.session)).session;
+  is('iPhone, keyboard attached: 2 opens card 2', 'api-fix', opened);
+  await press('`');
+  is('iPhone, keyboard attached: ` goes back to the grid', ['api-fix', true], [opened, onGrid(await settle(x => !x.session))]);
+  await press('/'); await keys('d', 'o', 'c');
+  is('iPhone, keyboard attached: / finds an agent', 'docs-pass', (await look()).sel);
+  await press('Escape');
+  await phoneSession();
+  await press('Escape');                   // a key from nowhere: proves the keyboard
+  await press('p');
+  is('iPhone, keyboard attached: a letter in a session goes to the composer', 'p', (await look()).draft);
+  await press('Enter');
+  is('...and ⏎ there sends it', true, await until(() => auditHas('fleet_send'), 3000));
+
+  // iOS's Paste (long-press in the box → Paste): Safari hands the image over in
+  // clipboardData.ITEMS with an empty `files`, so this is that shape exactly — the event a
+  // DataTransfer-built paste above does not exercise.
+  await phoneSession();
+  await b.evaluate((png) => {
+    const bin = atob(png); const u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+    const f = new File([u8], 'image.png', { type: 'image/png' });
+    const box = document.querySelector('#app .composer textarea'); if (!box) return null;
+    box.focus();
+    const ev = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'clipboardData', { value: { files: [], types: ['image/png'], items: [{ kind: 'file', type: 'image/png', getAsFile: () => f }] } });
+    box.dispatchEvent(ev);
+    return null;
+  }, PNG);
+  s = await settle(x => x.tiles && /failed|ready/.test(x.tileTitle));
+  is('iPhone: an image from the Paste menu attaches', 1, s.tiles);
+  is('...through the picker\'s path', true, /attachments need a real fleet/.test(s.tileTitle));
 
   // ════════════════════════════════════════════════════════════════════════════════════
   // THE TABLE: every desk key in web/README.md has a row above

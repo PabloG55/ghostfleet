@@ -2584,7 +2584,8 @@ const SWIPE_NEXT = 60, EDGE = 24;
 function wireSessionSwipe(node) {
   let x0 = 0, y0 = 0, live = false;
   node.addEventListener('pointerdown', ev => {
-    live = ev.clientX > EDGE;             // the left edge belongs to the system
+    // A finger only (touchGesture): with a mouse this drag is selecting text in a bubble.
+    live = touchGesture(ev) && ev.clientX > EDGE;   // the left edge belongs to the system
     x0 = ev.clientX; y0 = ev.clientY;
   });
   node.addEventListener('pointerup', ev => {
@@ -3270,7 +3271,7 @@ function copyText(t) {
 //   The bottom safe-area inset goes to 0 while the keyboard is up. It is there for the home
 // indicator, the keyboard covers the home indicator, and stacking one on the other is the
 // "too much space between the text box and the bottom" half of the same report.
-let vvTallest = 0, vvWidth = 0;
+let vvTallest = 0, vvWidth = 0, softKeyboardUp = false;
 function syncViewport() {
   try {
     const vv = typeof visualViewport !== 'undefined' ? visualViewport : null;
@@ -3283,6 +3284,7 @@ function syncViewport() {
     // keyboard takes a third of the screen. 120px is well above the former, well below the
     // latter.
     const keyboard = vvTallest - h > 120;
+    softKeyboardUp = keyboard;
     const root = document.documentElement.style;
     // A list that was showing the newest message keeps showing it as it shrinks — the
     // keyboard opening must not leave the reader looking at whatever was mid-screen.
@@ -3367,11 +3369,11 @@ function composer(card, opts = {}) {
   // THE THREE KEYS THE BOX KEEPS. Everything else typed here is text; the window's key
   // handler ignores a focused text box entirely (onKey), so `q` is a letter in a message
   // and never a way out of the screen.
-  //   ⏎ SENDS WITH A KEYBOARD AND IS A NEW LINE ON A PHONE. On a touch screen the return
-  // key is how a second line is typed and `send` is a button under the thumb, which is how
-  // the phone has always worked and is not changed here; at a desk, Enter-to-send is every
-  // chat's contract and ⇧⏎ is the new line. Which one this is is asked of the pointer
-  // (enterSends) because that is what a page can see — it cannot ask about a keyboard.
+  //   ⏎ SENDS WITH A KEYBOARD AND IS A NEW LINE ON A PHONE. With the on-screen keyboard the
+  // return key is how a second line is typed and `send` is a button under the thumb, which
+  // is how the phone has always worked and is not changed here; with a real keyboard —
+  // a desk, or an iPhone or iPad with one attached — Enter-to-send is every chat's contract
+  // and ⇧⏎ is the new line. enterSends() says which, and what it counts as evidence.
   //   Never mid-composition: an IME's own Enter commits the characters, and sending then
   // would ship half a word.
   box.addEventListener('keydown', (e) => {
@@ -3432,11 +3434,34 @@ function composer(card, opts = {}) {
   kids.push(btn('send', () => sendDraft(), 'go'));
   return el('div', { class: 'composer' }, kids);
 }
-// Hover and a fine pointer: a mouse or a trackpad, which is to say a computer with a
-// keyboard. A phone answers neither, and a phone is where ⏎ must stay a new line.
-export function enterSends() {
-  try { return !!matchMedia('(hover: hover) and (pointer: fine)').matches; } catch { return false; }
+// ⏎ SENDS WHEN THERE IS A KEYBOARD, and a page cannot ask whether there is one. Two kinds
+// of evidence, either enough:
+//   - a fine pointer that hovers: a mouse or a trackpad, which is to say a computer;
+//   - a real keydown only a physical keyboard can send (hwKeyboard below). This is the
+//     iPhone or iPad with a keyboard attached: a touch screen, and still a keyboard.
+// With only the on-screen keyboard there is neither, and ⏎ stays the new line it has
+// always been on a phone.
+export function enterSends() { return finePointer() || hwKeyboard; }
+// A PHYSICAL KEYBOARD, PROVEN BY WHAT IT SENT. Sticky for the life of the page, and set by
+// any trusted keydown the on-screen keyboard cannot produce:
+//   - one that arrives with no text field focused — the on-screen keyboard only exists
+//     while one is, so a key from nowhere came from a real keyboard;
+//   - a key the on-screen keyboard does not have: Esc, Tab, the arrows, the F-keys, a
+//     modifier pressed on its own, or a Ctrl / ⌘ / Alt chord;
+//   - a key typed into a field while the on-screen keyboard is NOT up. syncViewport() knows
+//     that from the visual viewport: an on-screen keyboard takes a third of the screen,
+//     a connected one leaves at most a shortcut bar (the 120px threshold there).
+// Never by device, model or width — an iPad with a keyboard and an iPad without one are
+// the same device at the same width.
+let hwKeyboard = false;
+const SOFTLESS_KEY = /^(Escape|Tab|Arrow|F\d{1,2}$|Shift$|Control$|Alt$|Meta$|CapsLock$|Home$|End$|PageUp$|PageDown$)/;
+export function noteKeyboard(e) {
+  if (hwKeyboard || !e || e.isTrusted === false) return;
+  const t = e.target;
+  const field = !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || !!t.isContentEditable);
+  if (!field || SOFTLESS_KEY.test(e.key || '') || e.ctrlKey || e.metaKey || e.altKey || !softKeyboardUp) hwKeyboard = true;
 }
+export function keyboardSeen() { return hwKeyboard; }
 // The image files a paste or a drop carries — `files` first, then the item list, which is
 // where some browsers put a screenshot copied to the clipboard.
 function imagesOf(dt) {
@@ -4935,23 +4960,42 @@ function cardEl(m, h, idx) {
 // The grip is why reorder does not fight the page scroll: only that one line sets
 // touch-action:none, so a vertical drag anywhere else on the card still scrolls.
 const LONG_PRESS = 600, MOVE_SLOP = 10, SWIPE = 60;
+// ── a GESTURE IS A FINGER'S ───────────────────────────────────────────────────────────
+// Every gesture below — long-press, the two swipes, the drag by the title, and the chat's
+// swipe to the next session — exists because a phone has no keys. On a desk they misfire:
+// a mouse held still for 600ms is not a decision to kill, and a drag to select text across
+// a card is not a request to pause it. So a mouse or a pen gets the plain click and the
+// keys (web/README.md, "On a desk"), and a finger gets everything it always had.
+//   ASKED OF THE EVENT, NOT THE WINDOW. pointerType says what is pressing right now — a
+// laptop with a touch screen gets gestures from the finger and none from its trackpad, in
+// the same session at the same width. Only an event that names no type at all (one built
+// by a script) falls back to the screen's primary pointer.
+const finePointer = () => { try { return !!matchMedia('(hover: hover) and (pointer: fine)').matches; } catch { return false; } };
+export function touchGesture(ev) {
+  const t = ev && ev.pointerType;
+  if (t === 'touch') return true;
+  if (t === 'mouse' || t === 'pen') return false;
+  return !finePointer();
+}
 function wire(node, h, idx) {
   // `travelled` is NOT derivable from the pointerup position, and that is the whole reason
   // this variable exists: a finger that went down, moved 40px and came back to where it
   // started reports dx = dy = 0 at the end, exactly like one that never moved. They are
   // different gestures — the second is a tap, the first is a drag the reader thought
   // better of — and only a flag set DURING the move can tell them apart.
-  let x0 = 0, y0 = 0, t0 = 0, held = false, dragging = false, timer = 0, rowH = 0, travelled = false;
+  let x0 = 0, y0 = 0, t0 = 0, held = false, dragging = false, timer = 0, rowH = 0, travelled = false, finger = true;
   const clear = () => { clearTimeout(timer); timer = 0; };
   node.addEventListener('pointerdown', ev => {
     if (idx >= 0) { S.sel = idx; markSel(); }
     x0 = ev.clientX; y0 = ev.clientY; t0 = Date.now(); held = false; travelled = false;
-    dragging = !!h.reorder && ev.target.classList.contains('t');
+    finger = touchGesture(ev);
+    // A mouse arms nothing: no grip, no long-press timer. What is left for it is the click.
+    dragging = finger && !!h.reorder && ev.target.classList.contains('t');
     if (dragging) {
       rowH = node.getBoundingClientRect().height;
       node.setPointerCapture(ev.pointerId);
       node.classList.add('lift');
-    } else if (h.longPress) {
+    } else if (finger && h.longPress) {
       timer = setTimeout(() => { held = true; clear(); h.longPress(); }, LONG_PRESS);
     }
   });
@@ -4991,6 +5035,13 @@ function wire(node, h, idx) {
       return;
     }
     if (held) return;                                        // long-press already fired
+    // A mouse: a click opens, and anything that moved — a text selection, a drag that
+    // went nowhere — does nothing but leave the selection where the press put it.
+    if (!finger) {
+      if (!travelled && Math.hypot(dx, dy) <= MOVE_SLOP && h.tap) { h.tap(); return; }
+      if (idx >= 0) render();
+      return;
+    }
     if (Math.abs(dx) > SWIPE && Math.abs(dx) > Math.abs(dy) * 2) {
       if (dx < 0 && h.swipeLeft) h.swipeLeft(); else if (dx > 0 && h.swipeRight) h.swipeRight();
       return;
@@ -6387,6 +6438,9 @@ try {
     visualViewport.addEventListener('scroll', syncViewport);
   }
 } catch {}
+// CAPTURE, so the keydown that proves a keyboard is counted before the composer decides
+// what its ⏎ means — the first ⏎ from an iPad's keyboard sends.
+addEventListener('keydown', noteKeyboard, true);
 addEventListener('keydown', onKey);
 wireDrop();
 // NO TAP-ANYWHERE AUDIO UNLOCK. There was one here, for speak mode's replies that arrived
