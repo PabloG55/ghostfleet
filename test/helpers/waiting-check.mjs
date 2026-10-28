@@ -8,11 +8,11 @@
 //
 // THE CONTRACT BETWEEN TWO FILES THAT NEVER IMPORT EACH OTHER. web/app.js's replyText() is
 // the message a tap on a waiting item sends to its master; mods/ghostfleet/hooks/ledger.js's
-// wakeWaiting() is what decides, from the words of that message, that the item was answered.
+// wakeWaiting() is what decides, from the words of that message, that the owner replied to it.
 // If the reply stopped quoting the item, every reply would arrive, be read, and leave the
 // item `waiting` on the owner's list as if the owner had never written: no error anywhere, only a
 // list that does not move. So the reply is fed through the real addPrompt the mod runs on a
-// delivered prompt, and the item has to come out `answered` — and an item it does not quote
+// delivered prompt, and the item has to come out `replied` — and an item it does not quote
 // has to stay where it was, or the check would pass for a ledger that wakes everything.
 //
 // Its own twenty lines of DOM, for speak-check.mjs's reason: importing app.js runs its boot
@@ -74,8 +74,11 @@ is('...says how long it has WAITED (since it started waiting, not since it was a
 is('...quotes the ask on one line', '“merge #12 now, or wait for the billing-svc review?”/true', `${m.msg}/${m.one}`);
 is('...and says what the master needs, without the judge\'s "waits on the person"', 'needs: pick merge now or wait', m.need);
 is('...and which item, of which session', 'master · #7', m.where);
-const ans = APP.waitingModel({ ...row, state: 'answered', since: nowS - 60 }, nowS);
-is('an answered one is grey and says the master has it', 'grey/↩ answered/true', `${ans.color}/${ans.statusLabel}/${/master has not closed it/.test(ans.need)}`);
+const ans = APP.waitingModel({ ...row, state: 'replied', since: nowS - 60 }, nowS);
+is('one the owner replied to is grey and says the master has it', 'grey/↩ you replied/true', `${ans.color}/${ans.statusLabel}/${/master has not closed it/.test(ans.need)}`);
+const car = APP.waitingModel({ ...row, id: '12', text: '[cache-keys] pick the TTL', state: 'open', reason: '', since: nowS - 5 * 3600,
+                               from: 'cache-keys', was: 'waiting', note: 'waits on the person: a TTL' }, nowS);
+is('a carried one says which worker it came from and what it last said', 'cache-keys stopped while waiting: waits on the person: a TTL', car.need);
 const open = APP.waitingModel({ ...row, state: 'open', reason: '', since: nowS - 5 * 3600 }, nowS);
 is('an untouched open request is yellow, and says why it is listed', 'yellow/○ open, untouched/no word on it for hours', `${open.color}/${open.statusLabel}/${open.need}`);
 
@@ -93,7 +96,7 @@ const ledger = { v: 1, seq: 8, prompt: 3, window: 3, items: [
 // as DELIVERY records a prompt fleet-send handed over: one item, whole
 const after = L.addPrompt(ledger, { text, at: now, source: 'fleet', whole: true });
 const held = L.heldItems(after, now).map(i => `${i.id}:${i.state}`).join(',');
-is('delivered, the reply makes ITS item answered, and leaves the other waiting', '8:waiting,7:answered', held);
+is('delivered, the reply makes ITS item replied, and leaves the other waiting', '8:waiting,7:replied', held);
 const closed = { ...after, items: after.items.map(i => (i.id === '7' ? { ...i, state: 'done', closedBy: 'agent', proof: 'merged #12' } : i)) };
 is('...and once the master closes it, it is off the list', '8:waiting', L.heldItems(closed, now).map(i => `${i.id}:${i.state}`).join(','));
 

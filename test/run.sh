@@ -4625,7 +4625,46 @@ if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
       L.requestText(note + ' and also fix it') === 'and also fix it',
     ].join(' | '))" 2>&1)"
   is "ledger: held for the person = waiting, answered, untouched 4h; a status question asks each, and a request naming a status does not; a quoted status note is not the person's words" \
-     "3:open,1:waiting,2:answered | all-yes | all-no | 2 | 1 | 3,1,2 | true | true | true" "$lh"
+     "3:open,1:waiting,2:replied | all-yes | all-no | 2 | 1 | 3,1,2 | true | true | true" "$lh"
+  # ...AND THE TWO KINDS OF ITEM #82 AND #83 ADDED, through the code that makes them rather
+  # than a hand-built item: a worker's ask CARRIED to its master by fleet-stop (carryItems), and
+  # a `fleet` item the judge read as done, which stays open for its proof (applyVerdict). A
+  # carried ask is the master's own by then: off the list while fresh, listed once untouched
+  # for four hours with the worker it came from, and waiting when the master's judge says so.
+  # A proof-only item is never listed: the owner's phone messages arrive as `fleet`, and every
+  # one answered in prose would come back to them after four hours as "waiting on you". Unless
+  # it is one the owner replied to, which stays until the master closes it.
+  lc="$(node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    const H = 3600000, t0 = 100 * 24 * H
+    let worker = L.emptyLedger()
+    worker = L.addItem(worker, { text: 'pick the cache-keys TTL', at: t0 - 2 * H, source: 'fleet' })
+    worker = { ...worker, items: worker.items.map(i => ({ ...i, state: 'waiting', progress: { at: t0 - H, reason: 'waits on the person: a TTL' } })) }
+    let lead = L.emptyLedger()
+    lead = L.addItem(lead, { text: 'what is left on the release?', at: t0 - 6 * H, source: 'fleet' })   // from the phone
+    const c = L.carryItems(worker, lead, { from: 'cache-keys', sessionId: 'w-1', nowMs: t0 })
+    lead = c.lead
+    const carried = c.ids[0]
+    const ids = L.openItems(lead, t0).map(i => i.id)
+    const done = L.parseVerdict(JSON.stringify({ items: [{ id: '1', status: 'done', reason: 'answered in the reply' }], promises: [] }), ids)
+    lead = L.applyVerdict(lead, done, { nowMs: t0, turnId: 't1', promises: 'show' })
+    const row = (l, at) => L.heldItems(l, at).map(i => i.id + ':' + i.state + (i.from ? ':' + i.from + '/' + i.was + '/' + (i.note || '') : '')).join(',') || '-'
+    const answered = lead.items.find(i => i.id === '1')
+    const fresh = row(lead, t0 + 60000)
+    const later = row(lead, t0 + 5 * H)
+    // the master's judge says the carried ask waits on the person
+    const ids2 = L.openItems(lead, t0 + 5 * H).map(i => i.id)
+    const wv = L.parseVerdict(JSON.stringify({ items: [{ id: carried, status: 'in-progress', reason: 'waits on the person: the TTL' }], promises: [] }), ids2)
+    const waiting = row(L.applyVerdict(lead, wv, { nowMs: t0 + 5 * H, turnId: 't2', promises: 'show' }), t0 + 5 * H)
+    // the owner replied to a waiting fleet item, then the judge read it as done without proof
+    let r = L.emptyLedger()
+    r = L.addItem(r, { text: 'merge #12 or wait for the review', at: t0 - 3 * H, source: 'fleet' })
+    r = { ...r, items: r.items.map(i => ({ ...i, state: 'waiting', progress: { at: t0 - 2 * H, reason: 'waits on the person: pick' } })) }
+    r = L.addPrompt(r, { text: 'Re your ledger item 1: \"merge #12 or wait for the review\" go ahead', at: t0, source: 'fleet', whole: true })
+    r = L.applyVerdict(r, L.parseVerdict(JSON.stringify({ items: [{ id: '1', status: 'done' }], promises: [] }), ['1', '2']), { nowMs: t0 + H, turnId: 't3', promises: 'show' })
+    console.log([answered.state + '/' + !!answered.answered, fresh, later, waiting, row(r, t0 + 5 * H)].join(' | '))" 2>&1)"
+  is "ledger: a carried ask is listed only once untouched 4h, with its worker; waiting when judged so; a proof-only answer never is, unless the owner replied" \
+     "open/true | - | 2:open:cache-keys/waiting/waits on the person: a TTL | 2:waiting:cache-keys/waiting/waits on the person: a TTL | 1:replied" "$lc"
   is "fleet-ledger: install.sh links it" "1" "$(grep -cE '^ +fleet-digest .*fleet-ledger' "$ROOT/install.sh" || true)"
   rm -rf "${LG:?}"
 else
@@ -17160,7 +17199,7 @@ if [ -d "$ROOT/web" ]; then
   node "$ROOT/test/helpers/waiting-check.mjs" > "$PW/waiting" 2> "$PW/waiting.err"
   is "waiting-check ran"              "0" "$?"
   is "...without complaining"         ""  "$(head -2 "$PW/waiting.err" | tr '\n' ' ' | sed 's/ *$//')"
-  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/waiting")" -ge 11 ] && echo yes || echo "no: $(wc -l < "$PW/waiting") rows")"
+  is "...and produced its checks"     "yes" "$([ "$(wc -l < "$PW/waiting")" -ge 12 ] && echo yes || echo "no: $(wc -l < "$PW/waiting") rows")"
   while IFS=$'\x1f' read -r name want got; do
     is "$name" "$want" "$got"
   done < "$PW/waiting"

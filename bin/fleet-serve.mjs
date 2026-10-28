@@ -1636,7 +1636,7 @@ export function heldScan(list, nowMs = Date.now(), cache = ledgerCache) {
 // the daemon starting beside yesterday's items does not ring for them; they are on the list.
 // Keyed by the master's session and the item, so a restarted master (a new ledger whose ids
 // start again at 1) cannot hide its first item behind the old session's.
-//   An item that was answered and then waits again HAS newly entered waiting: it rings.
+//   An item the owner replied to that then waits again HAS newly entered waiting: it rings.
 export function waitingEvents({ rows, socks }, seen) {
   const cur = new Map([...socks].map(s => [s, new Set()]));
   const project = new Map();
@@ -2378,7 +2378,7 @@ function agentCatalogue() {
 
   // ── what every master holds for the owner, across every project and profile ─
   // The owner's list (web/app.js "waiting on you"): each master's waiting items, the ones the
-  // owner answered that it has not closed yet, and requests nobody has touched in hours. Read off
+  // owner replied to that it has not closed yet, and requests nobody has touched in hours. Read off
   // the ledger files (heldScan); nothing here changes one. An item leaves when its master
   // closes or drops it — the reply is a message (fleet_send), never a close by hand.
   if (p === '/api/waiting' && req.method === 'GET') {
@@ -2386,7 +2386,9 @@ function agentCatalogue() {
     const { rows } = heldScan(shownToPhone());
     return send(res, 200, { ok: true, at: now(), items: rows.map(r => ({
       project: r.project, profile: r.profile, session: r.session, key: r.key, id: r.id,
-      text: r.text, state: r.state, reason: r.reason, at: Math.floor(r.at / 1000), since: Math.floor(r.since / 1000) })) });
+      text: r.text, state: r.state, reason: r.reason, at: Math.floor(r.at / 1000), since: Math.floor(r.since / 1000),
+      // where an item CARRIED from a stopped worker came from (ledger.js carryItems)
+      ...(r.from ? { from: r.from, was: r.was, ...(r.note ? { note: r.note } : {}) } : {}) })) });
   }
 
   if (p === '/api/inbox' && req.method === 'GET') {

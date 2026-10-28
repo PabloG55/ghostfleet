@@ -1409,6 +1409,8 @@ test('a proof nudge inside the cooldown is held, not lost, and goes out at a lat
   await settle(clock)
   expect(nags(w).length).toBe(2)
   expect(nags(w)[1].text).toContain('2. "bump the billing-svc version"')
+})
+
 // A WAITING ITEM WAS NEVER IN FRONT OF THE MODEL AGAIN. contextNote lists open items only, so
 // "whats the status" was answered from whatever the model remembered of the turn that asked
 // the person, and the items that were holding the session up were the ones it left out.

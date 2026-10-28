@@ -946,7 +946,7 @@ fixtureOverride = { 'waiting.json': { ok: true, items: [
   { project: 'acme-api', profile: 'work', session: 'master', key: 'k:7', id: '7', text: 'merge #12 now, or wait for the review?',
     state: 'waiting', reason: 'waits on the person: pick one', since_ago: 7200, at_ago: 9000 },
   { project: 'toolbox', profile: 'work', session: 'master', key: 'k:2', id: '2', text: 'rename the scratch keys',
-    state: 'answered', reason: '', since_ago: 60, at_ago: 20000 },
+    state: 'replied', reason: '', since_ago: 60, at_ago: 20000 },
 ] } };
 const held = () => app.all(n => n.className.split(/\s+/).includes('card') && isWaiting(n));
 // tapCard() is declared further down; a `const` read before its line is a ReferenceError.
@@ -964,7 +964,7 @@ const heads = () => {
   return list ? list.all(n => n.className === 'sect').map(n => n.textContent.trim()) : [];
 };
 is('waiting items are drawn, under their heading, above the projects', 'waiting on you · 1|projects', heads().join('|'));
-is('...the waiting one first, then the answered one', 'acme-api,toolbox', held().map(c => partOf(c, 'c-name')).join(','));
+is('...the waiting one first, then the one the owner replied to', 'acme-api,toolbox', held().map(c => partOf(c, 'c-name')).join(','));
 is('...each carrying no number and no index', true, held().every(c => !partOf(c, 'c-num') && c.dataset.idx === undefined));
 is('the projects keep the numbers they had', '1,2,3,4,5',
    [numberOf('acme-api'), numberOf('acme-web'), numberOf('toolbox'), numberOf('billing-svc'), numberOf('scratch')].join(','));

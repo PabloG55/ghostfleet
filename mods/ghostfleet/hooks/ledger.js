@@ -937,25 +937,43 @@ export function contextNote(ledger, nowMs) {
 // heldItems() is the list the person is shown (the phone, fleet-serve /api/waiting) and
 // asked (statusNote), one row per item:
 //   waiting   a judged turn said it waits on the person (waitsOnPersonNote); `since` is when
-//   answered  it was waiting and the person's message spoke to it (wakeWaiting): open again,
+//   replied   it was waiting and the person's message spoke to it (wakeWaiting): open again,
 //             the agent's move now. Still listed, so a reply does not make the row vanish
-//             before the agent has acted on it; it leaves when the agent closes or drops it
+//             before the agent has acted on it; it leaves when the agent closes or drops it.
+//             (Not `answered`, which on an item is the judge's word for a brief it read as
+//             done without proof; the person replying and the judge reading are two events)
 //   open      a request (never a promise) nobody has touched in HELD_OPEN_MS: no turn
 //             reported on it and nothing woke it. Four hours: a long turn, or a worker it
 //             was handed to, legitimately holds a request for an hour or two with a report
 //             on it, and a report restarts the clock (lastTouch). One untouched for twice
 //             the two-hour quiet spell above was dropped or is blocked, and either way the
 //             person is who can move it
+// NOT a request the judge read as done that waits only for its proof (`answered`, needsProof).
+// The person's messages from the phone reach a master as `fleet` items, so after the proof
+// rule every question asked from the phone and answered in prose stays open; listed after four
+// hours it would hand the person their own answered question back as something waiting on
+// them. What it still owes is the agent's proof, which the person cannot give.
+// An item CARRIED to this session from a stopped worker (carryItems) is the session's own
+// request now: it is listed by the same rules, untouched for four hours or waiting, and its
+// row says where it came from (`from`, `was`, `note`) since its text is the worker's ask.
 export const HELD_OPEN_MS = 4 * 3_600_000
+// NOR the person's reply itself. A message that wakes a waiting item (wakeWaiting) is also an
+// item of its own, made from the same prompt at the same instant (`woke` is its `at`). Listed,
+// it is the same ask twice, the item as `replied` and the reply as `open` four hours on, and the
+// second is the person's own words handed back to them.
 export function heldItems(ledger, nowMs) {
   const rows = []
+  const replies = new Set(ledger.items.filter(i => i.woke).map(i => Number(i.woke)))
   for (const i of ledger.items) {
     if (!fresh(i, nowMs)) continue
+    if (i.state === 'open' && replies.has(Number(i.at)) && !i.woke) continue
     const reason = i.progress && i.progress.reason ? excerpt(i.progress.reason, 160) : ''
-    const row = state => ({ id: i.id, text: excerpt(i.text), source: i.source, at: Number(i.at) || 0, state, reason })
+    const c = i.carried
+    const came = c ? { from: String(c.from || ''), was: String(c.state || ''), ...(c.note ? { note: excerpt(c.note, 160) } : {}) } : {}
+    const row = state => ({ id: i.id, text: excerpt(i.text), source: i.source, at: Number(i.at) || 0, state, reason, ...came })
     if (i.state === 'waiting') rows.push({ ...row('waiting'), since: Number(i.progress && i.progress.at) || Number(i.at) || 0 })
-    else if (i.state === 'open' && i.woke) rows.push({ ...row('answered'), since: Number(i.woke) })
-    else if (i.state === 'open' && i.source !== 'promise' && nowMs - lastTouch(i) >= HELD_OPEN_MS) rows.push({ ...row('open'), since: lastTouch(i) })
+    else if (i.state === 'open' && i.woke) rows.push({ ...row('replied'), since: Number(i.woke) })
+    else if (i.state === 'open' && i.source !== 'promise' && !i.answered && nowMs - lastTouch(i) >= HELD_OPEN_MS) rows.push({ ...row('open'), since: lastTouch(i) })
   }
   return rows.sort((a, b) => a.since - b.since || Number(a.id) - Number(b.id))
 }
@@ -994,13 +1012,13 @@ export function statusNote(ledger, nowMs) {
   const held = heldItems(ledger, nowMs)
   if (!held.length) return ''
   const shown = held.slice(0, STATUS_ITEMS)
-  const word = { waiting: 'waiting on them', answered: 'they answered, yours to finish', open: 'open, untouched' }
+  const word = { waiting: 'waiting on them', replied: 'they replied, yours to finish', open: 'open, untouched' }
   return [
     STATUS_HEAD,
     'The person just asked for status. These items are held for them:',
-    ...shown.map(i => `${i.id} (${word[i.state]} ${ago(nowMs - i.since)}): ${excerpt(i.text, NOTE_TEXT)}${i.reason ? ` — you said: ${excerpt(i.reason, 100)}` : ''}`),
+    ...shown.map(i => `${i.id} (${word[i.state]} ${ago(nowMs - i.since)}): ${excerpt(i.text, NOTE_TEXT)}${i.reason ? ` — you said: ${excerpt(i.reason, 100)}` : ''}${i.from ? ` — carried from ${i.from}, stopped while ${i.was}` : ''}`),
     ...(held.length > shown.length ? [`+${held.length - shown.length} more (/ledger all lists them)`] : []),
-    'Your status answer must include every one of these, by id, and ASK the person about each one: one direct question per item, saying what you need from them to move it. For one they already answered, say what you did with the answer, or close it. Do not fold them into a summary line.',
+    'Your status answer must include every one of these, by id, and ASK the person about each one: one direct question per item, saying what you need from them to move it. For one they already replied to, say what you did with the reply, or close it. Do not fold them into a summary line.',
   ].join('\n')
 }
 

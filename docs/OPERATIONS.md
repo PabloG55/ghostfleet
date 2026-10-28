@@ -1089,8 +1089,12 @@ what the agent left open; and **the gate** re-prompts once, only about the lates
   ways. **On the phone:** `fleet-serve` reads each project's master's ledger (every project
   and profile it lists; workers' items reach the owner through their master) and the
   Projects screen opens on a "waiting on you" list: the project, the ask, how long it has
-  waited, and what the master said it needs. Beside them, an item the owner answered that the
-  master has not closed yet, and a request nobody has touched in four hours. A tap replies
+  waited, and what the master said it needs. Beside them, an item the owner replied to that
+  the master has not closed yet, and a request nobody has touched in four hours, but never one
+  that is only `[answered, no proof]`: the owner's phone messages reach a master as `fleet`
+  items, so each one answered in prose stays open for its proof, and what it still owes is the
+  agent's, not the owner's. An item carried from a stopped worker is the master's own request
+  by then and is listed by the same rules; its row names the worker and what it last said. A tap replies
   with an ordinary message to that master quoting the item, which wakes it; the owner never
   closes one, and it leaves the list when the master closes or drops it. An item newly
   waiting rings the phone once per project. **In the session:** a short status question

@@ -689,13 +689,13 @@ const PROJECTS_HINT = 'tap a project to open it · remove is here, behind ⋯ ·
 //   THE CARD IS THE CARD: cardEl(), the rail, the chip, the two text rows. Its words are
 // the project, the ask, how long it has waited, and what the master said it needs. The hue
 // is from the fixed palette — need-you red for an item waiting on the owner, yellow for a request
-// nobody has touched in hours, grey for one the owner answered that the master has not closed.
+// nobody has touched in hours, grey for one the owner replied to that the master has not closed.
 //   A TAP REPLIES (sheetReply). There is no close here, on purpose: an item leaves the list
 // when its master closes or drops it, which is the master saying it is done.
 const WAITING_LOOK = {
   waiting: { label: '● waiting on you', color: 'red' },
   open: { label: '○ open, untouched', color: 'yellow' },
-  answered: { label: '↩ answered', color: 'grey' },
+  replied: { label: '↩ you replied', color: 'grey' },
 };
 // "waits on the person: pick A or B" is the judge's sentence; the card already says whom.
 const needOf = (reason) => String(reason || '').replace(/^\s*(?:waits?|waiting)\s+on\s+(?:the\s+)?(?:person|user|owner|you)\s*[:,—-]?\s*/i, '').trim();
@@ -708,15 +708,19 @@ export function waitingModel(row, nowS = Math.floor(Date.now() / 1000)) {
     when: G.humanAge(Math.max(0, nowS - (Number(row.since) || nowS))),
     where: `master · #${row.id}`, path: '',
     msg: `“${row.text}”`, one: true,
-    need: row.state === 'answered' ? 'you answered — the master has not closed it yet'
-        : need ? `needs: ${need}` : row.state === 'open' ? 'no word on it for hours' : '',
+    need: row.state === 'replied' ? 'you replied — the master has not closed it yet'
+        : need ? `needs: ${need}`
+        // carried from a stopped worker (ledger.js carryItems): its text is the worker's ask,
+        // so the row says whose, and what the worker last said about it
+        : row.from ? `${row.from} stopped while ${row.was || 'open'}${row.note ? `: ${row.note}` : ''}`
+        : row.state === 'open' ? 'no word on it for hours' : '',
     placeholder: '', agent: '', pr: '', lead: false, exited: false,
   };
 }
 function waitingCards() {
   const rows = S.waiting || [];
   if (!rows.length) return [];
-  const n = rows.filter((r) => r.state !== 'answered').length;
+  const n = rows.filter((r) => r.state !== 'replied').length;
   return [
     el('div', { class: 'sect', text: n ? `waiting on you · ${n}` : 'waiting on you' }),
     ...rows.map((r) => cardEl(waitingModel(r), { tap: () => sheetReply(r) }, -1)),

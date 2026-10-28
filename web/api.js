@@ -349,7 +349,7 @@ async function rollup(project) {
 // a broken Projects screen — the same rule as the Jarvis band.
 //   The fixture stores AGES (`since_ago`, `at_ago`, seconds before now) rather than epochs,
 // so "waited 2h" stays 2h however long after the file was written the demo is run. A reply
-// sent in fixture mode turns its item `answered`, as the daemon's would once the master's
+// sent in fixture mode turns its item `replied`, as the daemon's would once the master's
 // ledger read the message (ledger.js wakeWaiting); nothing closes it, since only a master can.
 export async function getWaiting() {
   if ((await ready()).mode === 'server') {
@@ -361,7 +361,7 @@ export async function getWaiting() {
   const items = (j.items || []).map(({ since_ago, at_ago, ...i }) => {
     const row = { ...i, since: nowS - (Number(since_ago) || 0), at: nowS - (Number(at_ago) || 0) };
     const replied = overlay.replied.get(`${i.project}#${i.id}`);
-    return replied && row.state === 'waiting' ? { ...row, state: 'answered', since: replied } : row;
+    return replied && row.state === 'waiting' ? { ...row, state: 'replied', since: replied } : row;
   });
   return { ...j, items };
 }
