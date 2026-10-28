@@ -671,7 +671,11 @@ const tabBtn = (label) => { const t = tabStrip(); return t && t.all(n => n.tag =
 // regex relaxed enough to match both spellings would have proved neither, and the digit
 // is the whole point of numberOf(): it is what `Ctrl-f <n>` counts at the desk, so a card
 // renamed by its own index is the bug these rows exist to catch.
-const cardEls = () => app.all(n => n.className.split(/\s+/).includes('card'));
+// NOT A WAITING ITEM'S CARD. Projects also lists what each master holds for the owner
+// (app.js waitingModel), titled with the PROJECT's name and carrying no number, so a card
+// "named acme-api" would otherwise be that one: measured, numberOf() read ',,,4,5'.
+const isWaiting = (n) => n.className.split(/\s+/).includes('k-waiting');
+const cardEls = () => app.all(n => n.className.split(/\s+/).includes('card') && !isWaiting(n));
 const partOf = (card, cls) => {
   const n = card.find(x => x.className.split(/\s+/).includes(cls));
   return n ? n.textContent.trim() : '';
@@ -778,7 +782,8 @@ const fleetOf = (...rows) => ({ home: '/Users/you', projects: rows.map(([name, p
 // and one that never renders the new fleet still fails its own assertion.
 const reopenProjects = async (ready) => {
   for (let attempt = 0; attempt < 3; attempt++) {
-    const first = app.all(n => n.className.split(/\s+/).includes('card'))
+    // ...a PROJECT's card: a waiting item's opens the answer sheet, not a project.
+    const first = app.all(n => n.className.split(/\s+/).includes('card') && !isWaiting(n))
       .find(n => !/add project/.test(n.textContent));
     if (first) {
       (first.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: first, pointerId: 1 }));
@@ -931,6 +936,46 @@ is('...and draws no strip, being one profile', false, !!tabStrip());
 fixtureOverride = null;
 await reopenProjects();
 is('the shipped fleet is back', true, await until(() => shows('acme-api') && shows('scratch'), 4000));
+
+// ── WAITING ON YOU, on the screen every row above measured ────────────────
+// The shipped waiting.json is empty, so the rows above run on the Projects screen they
+// were written for. These put two held items on it and ask the same questions again:
+// the projects keep their numbers, the cursor never lands on an item, a tap on a project
+// still opens it, and a tap on an item opens its answer sheet rather than a project.
+fixtureOverride = { 'waiting.json': { ok: true, items: [
+  { project: 'acme-api', profile: 'work', session: 'master', key: 'k:7', id: '7', text: 'merge #12 now, or wait for the review?',
+    state: 'waiting', reason: 'waits on the person: pick one', since_ago: 7200, at_ago: 9000 },
+  { project: 'toolbox', profile: 'work', session: 'master', key: 'k:2', id: '2', text: 'rename the scratch keys',
+    state: 'answered', reason: '', since_ago: 60, at_ago: 20000 },
+] } };
+const held = () => app.all(n => n.className.split(/\s+/).includes('card') && isWaiting(n));
+// tapCard() is declared further down; a `const` read before its line is a ReferenceError.
+const press = (n) => { if (!n) return false;
+  (n.listeners.pointerdown || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 }));
+  (n.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 }));
+  return true; };
+await reopenProjects(() => held().length === 2);
+const list = app.find(n => n.className.split(/\s+/).includes('cards'));
+const heads = () => (list ? list.all(n => n.className === 'sect').map(n => n.textContent.trim()) : []);
+is('waiting items are drawn, under their heading, above the projects', 'waiting on you · 1|projects', heads().join('|'));
+is('...the waiting one first, then the answered one', 'acme-api,toolbox', held().map(c => partOf(c, 'c-name')).join(','));
+is('...each carrying no number and no index', true, held().every(c => !partOf(c, 'c-num') && c.dataset.idx === undefined));
+is('the projects keep the numbers they had', '1,2,3,4,5',
+   [numberOf('acme-api'), numberOf('acme-web'), numberOf('toolbox'), numberOf('billing-svc'), numberOf('scratch')].join(','));
+is('...and the cursor is on a project, never on an item', true,
+   held().every(c => !c.className.split(/\s+/).includes('sel')) && cardEls().some(c => c.className.split(/\s+/).includes('sel')));
+press(held()[0]);
+is('a tap on an item opens its answer sheet', true,
+   await until(() => /answer/.test(sheetHost.textContent) && /acme-api · master · #7/.test(sheetHost.textContent), 2000));
+is('...on this screen, not a project', true, !!btnWith(/add project/) || !!cardNamed('scratch'));
+click(sheetHost.find(n => n.tag === 'button' && /esc back/.test(n.textContent)));
+await tick(5);
+is('a tap on a project still opens the project', true, press(cardNamed('acme-api')) && await until(() => !btnWith(/add project/) && !cardNamed('scratch'), 4000));
+swipeBack();
+await until(() => !!cardNamed('scratch'), 4000);
+fixtureOverride = null;
+await reopenProjects(() => held().length === 0);
+is('...and with none held, no heading is drawn', '', heads().join('|'));
 
 // ── which CLI a project's master runs ────────────────────────────────────
 // "the master cant be selected as open code or codex add that pls". The column has been
