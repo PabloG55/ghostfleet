@@ -352,8 +352,12 @@ unset CLAUDE_FLEET_DIR CLAUDE_CONFIG_DIR CLAUDE_FLEET_SOCK CLAUDE_FLEET_SLOT CLA
 # screen WRITES when a project is added, removed or reordered. CI has none of them, so the
 # rule is the prefix, not a list: drop everything the caller's fleet exported, keep only
 # what this file set above. A group that wants one sets it on the command it runs.
+# The caller's own pairs are kept aside first, so a row can ask whether any of them still
+# reached a fixture — by value, because the suite exports some of these names itself.
+: > "$TMUX_TMPDIR/caller-fleet.env"
 for v in $(compgen -e | grep -E '^(CLAUDE_FLEET_|GHOSTFLEET_)'); do
-  [ "$v" = CLAUDE_FLEET_EXPERIMENTAL_DIR ] || unset "$v"
+  [ "$v" = CLAUDE_FLEET_EXPERIMENTAL_DIR ] && continue
+  printf '%s=%s\n' "$v" "${!v}" >> "$TMUX_TMPDIR/caller-fleet.env"; unset "$v"
 done
 HOME="$TMUX_TMPDIR/home"; export HOME; mkdir -p "$HOME"
 
@@ -19375,12 +19379,12 @@ if command -v tmux >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
   onname() { grep -qE "session name — .*/$1\$" <<<"$2"; }   # checkout scr
   # THE FIXTURE SEES NOTHING OF THE CALLER'S FLEET. Asked of the fixture server's own
   # environment, which is what the grid inherits — not of the suite's variables, which is the
-  # proxy. Run from inside a fleet session this listed the caller's root, scope, profile and
+  # proxy — and by value, since the suite's own fleet-serve groups export GHOSTFLEET_SERVE_*. Run from inside a fleet session this listed the caller's root, scope, profile and
   # projects file until the preamble dropped them by prefix.
   pgrid
   is "park: the fixture server carries none of the caller's fleet env" "" \
-     "$(tmux -L cfpark show-environment -g 2>/dev/null | grep -E '^(CLAUDE_FLEET_|GHOSTFLEET_)' \
-        | grep -v '^CLAUDE_FLEET_EXPERIMENTAL_DIR=' | sed 's/=.*//' | tr '\n' ' ' | sed 's/ *$//')"
+     "$(tmux -L cfpark show-environment -g 2>/dev/null | grep -Fxf "$TMUX_TMPDIR/caller-fleet.env" \
+        | sed 's/=.*//' | tr '\n' ' ' | sed 's/ *$//')"
   # n -> the checkout picker (acme-api is first, sorted) -> Enter -> the name screen
   pkeys n Enter
   scr="$(pwait 'session name')"
@@ -21990,6 +21994,18 @@ STUB
   sleep 0.2
   is "...while a predecessor that exits within the grace is resumed" "$M" "$(launch master CLAUDE_FLEET_RESUME="$M")"
   reap "$OCH"
+  # A BUSY MACHINE STILL HAS HOLDERS. The scan reads every argv on the machine, and past
+  # execFileSync's 1 MB default it threw, came back empty, and said nobody held anything —
+  # nine rows here red on a dev Mac whose process table had grown to 1.2 MB, and green on a
+  # quiet one. So the table is padded past the old cap on purpose: 8 × 60 KB of argv.
+  OCPAD=""; OCPADARG="pad-$(head -c 60000 /dev/zero | tr '\0' x)"
+  for i in 1 2 3 4 5 6 7 8; do ( exec -a "$OCPADARG" sleep 60 ) & OCPAD="$OCPAD $!"; disown "$!"; done
+  ( exec -a "claude --resume $V" sleep 60 ) & OCH=$!; disown "$OCH"
+  sleep 0.3
+  is "Q3: a holder is still seen when the process table is over 1 MB" "$OCH" \
+     "$(cd "$ROOT" && node -e 'import("./lib/slot-claim.mjs").then(m => console.log(m.holders({ cfgs: [] }).get(process.argv[1]) || ""))' "$V" 2>/dev/null)"
+  # shellcheck disable=SC2086
+  reap "$OCH" $OCPAD
 
   # A PATH WITH AN UNDERSCORE. claude-here names a transcript folder by turning only `/` and
   # `.` into `-`; lib/slot-claim.mjs once re-derived it turning everything non-alphanumeric,
