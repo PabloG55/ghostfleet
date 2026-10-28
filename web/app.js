@@ -30,7 +30,7 @@ import * as screensUI from './screens.js';
 
 // ── state ─────────────────────────────────────────────────────────────────
 const S = {
-  screen: 'projects',   // projects | grid | session
+  screen: 'projects',   // projects | queue | grid | session
   project: null,        // the fleet being looked at
   session: null,        // the card opened on the session screen
   projects: null,       // last /api/projects payload
@@ -68,7 +68,8 @@ const S = {
   talk: null,           // conversation mode: { phase, sent, seen, since } — null when off
   waiting: null,        // last /api/waiting items (what the masters hold for the owner); null = not told
   usage: null,          // last /api/usage (the Claude accounts each profile runs on); null = not told
-  wantWaiting: false,   // a "waiting on you" notification was tapped; land on Projects once unlocked
+  wantWaiting: false,   // a "waiting on you" notification was tapped; open the queue once unlocked
+  qsel: 0,              // the queue's cursor, for the desk's keys (index into S.waiting)
   entry: '',            // 'projects' when this session is a master entered the desk's way (⏎ on a
                         // project, ` on its grid, Ctrl-f n m) — one level under Projects, not two
   srch: null,           // the grid's `/` search: { q, typing } — see "the keyboard" at the bottom
@@ -137,7 +138,7 @@ function restore() {
   // ...and give the back gesture the trail it would have had if you had walked here. A
   // cold open is at the root of its own history, so without this the first swipe out of a
   // restored session screen leaves the app — the exact complaint, one reopen later.
-  seedNav(S.screen === 'session' ? (S.jarvisMode || S.entry ? 1 : 2) : S.screen === 'grid' ? 1 : 0);
+  seedNav(S.screen === 'session' ? (S.jarvisMode || S.entry ? 1 : 2) : (S.screen === 'grid' || S.screen === 'queue') ? 1 : 0);
 }
 function seedNav(depth) { for (let i = 0; i < depth; i++) pushNav(); }
 
@@ -193,10 +194,12 @@ async function refreshOnce() {
   maybePushOffer();
   // A tapped notification from Jarvis, once there is a session to open it with.
   if (S.wantJarvis && !S.locked) { S.wantJarvis = false; openJarvis(); return; }
-  // A tapped "waiting on you": the list is on Projects, wherever the app was left.
-  if (S.wantWaiting && !S.locked) { S.wantWaiting = false; if (S.screen !== 'projects') { toProjects(); return; } }
+  // A tapped "waiting on you" opens the queue, wherever the app was left.
+  if (S.wantWaiting && !S.locked) { S.wantWaiting = false; if (S.screen !== 'queue') { openQueue(); return; } }
   try {
-    if (S.screen === 'projects') {
+    // The queue is read by the same request as Projects, and in two panes Projects is
+    // beside it, so the one read serves both.
+    if (S.screen === 'projects' || S.screen === 'queue') {
       // The payload carries the agent CATALOGUE beside the projects, and both are needed:
       // the list draws the cards, the catalogue fills the picker. Keeping only `.projects`
       // (which is what this line did) left the picker with nothing to offer and no way to
@@ -378,10 +381,10 @@ function toast(text, kind = '', action = null) {
 // has a composer pinned to the bottom and a conversation that scrolls between two fixed
 // bars, and the grid has a card list under a header — both are columns of a known height,
 // which is what stops the layout moving on a poll.
-const SHELL_SCREENS = new Set(['session', 'grid', 'projects']);
+const SHELL_SCREENS = new Set(['session', 'grid', 'projects', 'queue']);
 // The screens are a STACK, and the depth is what makes a transition directional: the only
 // thing motion can say here that a static swap cannot is which way you went.
-const SCREEN_DEPTH = { projects: 0, grid: 1, session: 2 };
+const SCREEN_DEPTH = { projects: 0, queue: 1, grid: 1, session: 2 };
 // ONLY ON A REAL SCREEN CHANGE. render() runs on the 5s poll and after every verb, so
 // animating on render would re-run the slide every five seconds on a screen nobody moved
 // away from — the Preact path deliberately does not even empty #app, for the same reason.
@@ -428,8 +431,8 @@ function slideNav() {
     return true;
   } catch { return false; }
 }
-// THE TWO SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
-const PREACT_SCREENS = new Set(['projects', 'grid']);
+// THE SCREENS PREACT DRAWS. The session screen is still this file's, built with el().
+const PREACT_SCREENS = new Set(['projects', 'grid', 'queue']);
 // Whether Preact currently owns #app. Not derivable from S.screen: the screen can change
 // in the same breath as the lock, and what has to be known here is who put the nodes on
 // screen, not who would put them there now.
@@ -463,16 +466,20 @@ function renderDuo(app, side) {
   document.documentElement.classList.toggle('duo', true);
   side.classList.toggle('shell', true);
   navFrom = S.screen;
-  // Jarvis was opened from Projects, so Projects is the list beside it.
-  const left = (S.screen === 'projects' || (S.screen === 'session' && S.jarvisMode)) ? 'projects' : 'grid';
+  // Jarvis and the queue were opened from Projects, so Projects is the list beside them.
+  const queue = S.screen === 'queue';
+  const left = (S.screen === 'projects' || queue || (S.screen === 'session' && S.jarvisMode)) ? 'projects' : 'grid';
   const inSession = S.screen === 'session';
   const props = left === 'grid' ? gridProps() : projectsProps();
   // ONE confirm bar and one toast, in the pane that asked. With a session open that is the
   // session's; drawn in both, a `y` would read as answering two questions.
-  if (inSession) { props.confirm = null; props.toast = null; }
+  if (inSession || queue) { props.confirm = null; props.toast = null; }
   screensUI.mount(side, left, props);
   sideUp = true;
   if (inSession) { paintElScreen(app); return; }
+  // THE QUEUE OPENS ON THE RIGHT, where a conversation would: it is the list of things to
+  // answer, and Projects stays where it was beside it.
+  if (queue) { mountPreact(app, 'queue', queueProps()); return; }
   if (preactUp) { screensUI.unmount(app); preactUp = false; }
   // The session's nodes leave with it: keepScreen() must not later take this line for a
   // chat it can patch, so its memory goes too.
@@ -523,15 +530,7 @@ function render() {
   // (`#app.shell > .cards`, `> .hdr`, `> .verbs`), so one div of nesting would stop the
   // card list being the screen's scrolling region and let the whole page scroll.
   if (!S.locked && PREACT_SCREENS.has(S.screen)) {
-    if (!preactUp) {
-      app.textContent = '';
-      paneBoxNode = paneNode = paneGeomNode = chatNode = null;
-      composerNode = null;
-      preactUp = true;
-    }
-    screensUI.mount(app, S.screen, S.screen === 'grid' ? gridProps() : projectsProps());
-    renderSheet();
-    syncPanePoll(); syncChatPoll();
+    mountPreact(app, S.screen, S.screen === 'grid' ? gridProps() : S.screen === 'queue' ? queueProps() : projectsProps());
     return;
   }
   // LEAVING IT IS AN UNMOUNT, NOT A `textContent = ''`. Clearing the container behind
@@ -540,6 +539,18 @@ function render() {
   // the tree down — and it has to happen BEFORE the wipe below, while the nodes are still
   // there to be removed.
   paintElScreen(app);
+}
+function mountPreact(app, screen, props) {
+  if (!preactUp) {
+    app.textContent = '';
+    screenMem = null;
+    paneBoxNode = paneNode = paneGeomNode = chatNode = null;
+    composerNode = null;
+    preactUp = true;
+  }
+  screensUI.mount(app, screen, props);
+  renderSheet();
+  syncPanePoll(); syncChatPoll();
 }
 // Everything app.js still draws with el() — the lock screen and the session screen — into
 // #app. One body for both layouts: two panes put this same column on the right.
@@ -930,7 +941,7 @@ function projectsProps() {
     // answered yet and gets the wait.
     cards: S.projects == null ? skeletonCards(4) : [
       ...usageCards(),
-      ...waitingCards(),
+      ...queueRow(),
       ...visibleProjects().map(({ p, i }) =>
         // i is the GLOBAL index, on purpose
         cardEl(G.projectModel(p, i, i === S.sel), {
@@ -962,12 +973,17 @@ function projectsProps() {
 }
 const PROJECTS_HINT = 'tap a project to open it · remove is here, behind ⋯ · reorder the list at the desk';
 
-// ── waiting on you ────────────────────────────────────────────────────────
-// WHAT EVERY MASTER IS HOLDING FOR THE OWNER, at the top of Projects: one card per ledger item a
+// ── waiting on you: the queue ─────────────────────────────────────────────
+// WHAT EVERY MASTER IS HOLDING FOR THE OWNER, on a screen of its own: one card per ledger item a
 // master keeps in state `waiting` (mods/ghostfleet/hooks/ledger.js heldItems), across every
 // project and profile, whatever tab is open — a tab that hid one would be the failure the
 // tab's need-you count exists to prevent. A master goes on with everything else and waits on
 // these; how soon the owner sees them is how long an unattended run lasts.
+//   ON ITS OWN SCREEN, AND ONE ROW ON PROJECTS. It was the top of Projects, and a list that
+// grows by itself does not belong above the thing the screen is for: at seventeen items, some
+// of them days old, it was a phone screen and more, and the projects started below the fold.
+// Projects keeps one line — `queue · n ›`, red while anything waits on the owner — and the
+// list is a tap (or ⏎ on that line) away. At a desk it opens on the right, as a session does.
 //   THE CARD IS THE CARD: cardEl(), the rail, the chip, the two text rows. Its words are
 // the project, the ask, how long it has waited, and what the master said it needs. The hue
 // is from the fixed palette — need-you red for an item waiting on the owner, yellow for a request
@@ -999,15 +1015,54 @@ export function waitingModel(row, nowS = Math.floor(Date.now() / 1000)) {
     placeholder: '', agent: '', pr: '', lead: false, exited: false,
   };
 }
-function waitingCards() {
+// The line on Projects. n is every item the queue lists, the answered ones too: it is the
+// length of the page the row opens, and a row that read 0 over a page of three would be the
+// row disagreeing with what it opens. The HUE carries the urgent part: red only while some
+// item waits on the owner, the muted grey of the TUI when every item is answered or untouched.
+// Nothing held is no row at all.
+function queueRow() {
   const rows = S.waiting || [];
   if (!rows.length) return [];
-  const n = rows.filter((r) => r.state !== 'replied').length;
-  return [
-    el('div', { class: 'sect', text: n ? `waiting on you · ${n}` : 'waiting on you' }),
-    ...rows.map((r) => cardEl(waitingModel(r), { tap: () => sheetReply(r) }, -1)),
-    el('div', { class: 'sect', text: 'projects' }),
-  ];
+  const hot = rows.some((r) => r.state === 'waiting');
+  const row = el('button', { class: 'queue-row' + (hot ? ' hot' : ''), type: 'button',
+    'aria-label': `queue: ${rows.length} held for you${hot ? ', some waiting on you' : ''}`, onclick: openQueue }, [
+    el('span', { class: 'qt', text: `queue · ${rows.length}` }),
+    el('span', { class: 'qgo', 'aria-hidden': 'true', text: '›' }),
+  ]);
+  // THE FOCUS SURVIVES THE POLL. Every render builds the card list's nodes afresh, so a row
+  // Tabbed to at a desk was a detached node five seconds later, and the ⏎ meant for it went
+  // to Projects' ⏎ and opened a master. The new row takes the focus the old one had, once
+  // the list has placed it.
+  try {
+    const a = document.activeElement;
+    if (a && a.classList && a.classList.contains('queue-row')) queueMicrotask(() => { try { if (row.isConnected) row.focus(); } catch {} });
+  } catch {}
+  return [row];
+}
+// One level under Projects wherever it is opened from — the row, or a tapped notification
+// from inside a session — so back is always Projects.
+function openQueue() {
+  if (S.screen === 'session') { talkStop(''); stopSpeaking(); S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
+  S.screen = 'queue'; S.jarvisMode = false; S.entry = ''; S.srch = null; S.wantCard = 0; S.qsel = 0;
+  setDepth(1);
+  save(); render(); refresh();
+}
+function queueProps() {
+  const rows = S.waiting || [];
+  S.qsel = Math.max(0, Math.min(S.qsel, rows.length - 1));
+  return {
+    scope: `— queue · ${rows.length}`,
+    mode: modeSpec(),
+    stale: S.stale,
+    confirm: null,
+    // The same cards, in the same order, with the same tap as on Projects before: the
+    // answer sheet. Null is "not read yet" and gets the wait, as on Projects.
+    cards: S.waiting == null ? skeletonCards(2)
+      : rows.length ? rows.map((r, i) => cardEl({ ...waitingModel(r), selected: i === S.qsel }, { tap: () => sheetReply(r) }, -1))
+      : [el('div', { class: 'sect', text: 'nothing is waiting on you' })],
+    listRef: (list) => { if (list) watchScroll('queue', list); },
+    toast: S.toast,
+  };
 }
 // The reply is an ordinary message to that master, and it QUOTES the item: the master reads
 // which ask it answers, and its ledger wakes the item on the quoted words (wakeWaiting).
@@ -4954,6 +5009,7 @@ function popTo() {
   // the same ` the desk uses to go up.
   else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; S.srch = null; }
   else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; S.srch = null; }
+  else if (S.screen === 'queue') S.screen = 'projects';
   else return;                                  // at the root: let the platform have it
   navDepth = Math.max(0, navDepth - 1);
   render(); refresh();
@@ -6287,6 +6343,10 @@ function onKey(e) {
     return;
   }
   if (typingIn(e.target) && !deskKeyFromComposer(e)) return;
+  // ⏎ ON THE QUEUE'S ROW IS THE ROW'S: the browser turns it into the button's click. Taken
+  // here it would be Projects' ⏎ and open the project under the cursor instead.
+  if (S.screen === 'projects' && (e.key === 'Enter' || e.key === ' ') && e.target && e.target.classList
+      && e.target.classList.contains('queue-row')) return;
   const k = e.key;
   if (S.locked || !k || e.metaKey) return;
   // A modifier on its own is not a key: the chord arrives with the next event.
@@ -6316,6 +6376,7 @@ function onKey(e) {
   let used;
   if (S.screen === 'session') used = sessionKey(e, k, lk, ctrl);
   else if (S.screen === 'grid') used = gridKey(e, k, lk, ctrl);
+  else if (S.screen === 'queue') used = queueKey(e, k, lk, ctrl);
   else used = projectsKey(e, k, lk, ctrl);
   if (used) e.preventDefault();
 }
@@ -6554,6 +6615,25 @@ function projectsKey(e, k, lk, ctrl) {
         return true;
       }
       return false;
+  }
+  return true;
+}
+// ── the queue: a list to answer, so the cursor, ⏎, and the grid's ways out ─────────────
+function queueKey(e, k, lk, ctrl) {
+  const rows = S.waiting || [];
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    return false;
+  }
+  const move = (d) => { const n = S.qsel + d; if (n >= 0 && n < rows.length) { S.qsel = n; render(); } };
+  switch (k) {
+    case 'ArrowUp': case 'k': move(-1); break;
+    case 'ArrowDown': case 'j': move(1); break;
+    case 'Enter': if (rows[S.qsel]) sheetReply(rows[S.qsel]); break;
+    case 'q': case '`': back(); break;
+    case 'Q': toProjects(); break;
+    default: return false;
   }
   return true;
 }

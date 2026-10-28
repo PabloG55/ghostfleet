@@ -386,7 +386,7 @@ added here without a row that presses it.
 |---|---|---|
 | `j` · `k` · `h` · `l` · `↓` · `↑` · `→` · `←` | Projects, grid | move the cursor: a row down / up, a card right / left |
 | `H` · `J` · `K` · `L` | Projects, grid | reorder the selected project / card. Sent as `fleet_project_order` / `fleet_order`, which `fleet-serve` refuses by name today (`NOT_YET`: only the desk writes those files) — the refusal is shown |
-| `⏎` | Projects | open the project on its **master**, as the desk does, with its grid beside it |
+| `⏎` | Projects | open the project on its **master**, as the desk does, with its grid beside it. On the `queue · n ›` row (Tab to it, or click it), the queue instead |
 | `1-9` | Projects, grid | the project at that position (on its master) / the card at that position |
 | `Ctrl-s` | Projects | that project's grid, skipping master |
 | `s` | Projects, grid | schedule a message — to that project's master / to the selected session |
@@ -400,9 +400,11 @@ added here without a row that presses it.
 | `n` · `N` | grid | the new-session picker. One picker for both: this client starts sessions with `fleet_spawn`, which has no resume-or-blank switch |
 | `w` | grid | new worktree |
 | `p` · `P` | grid | pause / resume the selected session |
-| `Q` · `Ctrl-p` | grid, session | Projects |
+| `Q` · `Ctrl-p` | grid, session, queue | Projects |
 | `q` · `` ` `` · `Ctrl-c` | grid | up: a sub-grid to the top grid, the top grid to the project's **master** (however the grid was reached). `Ctrl-c` only when nothing is selected — with a selection it stays copy |
 | `` ` `` | session | back: a worker to its grid, a master to Projects |
+| `j` · `k` · `↓` · `↑` · `⏎` | queue | move the cursor through what the masters hold for you / answer the item under it |
+| `q` · `` ` `` | queue | back to Projects |
 | `⇧→` · `⇧←` | session | the next / previous session — master first, then the cards in grid order, wrapping at both ends (`fleet-cycle`) |
 | `Ctrl-s` | session | the grid |
 | `Ctrl-f` | everywhere | the jump chord, with tmux's own prompt at each step |

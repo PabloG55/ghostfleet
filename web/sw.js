@@ -394,7 +394,11 @@
 // v79 says what all-exhausted did to the workers: a project whose budget limit is ignored is
 // not parked by the accounts engine, so the push and the accounts line say they keep running.
 // A phone still on v78 says "workers paused" for those too.
-const VERSION = 'ghostfleet-v79';
+// v80 moves what the masters hold for the owner off Projects onto a queue screen of its own:
+// Projects keeps one `queue · n ›` row, the queue opens in the right pane at a desk, and a
+// tapped "waiting on you" notification opens the queue. A phone still on v79 goes on drawing
+// the whole list at the top of Projects until it is relaunched.
+const VERSION = 'ghostfleet-v80';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js', './grid-search.js',
@@ -544,7 +548,7 @@ self.addEventListener('push', e => {
 // gets '#jarvis', which app.js reads once and clears. Both land AFTER the unlock.
 self.addEventListener('notificationclick', e => {
   e.notification.close();
-  // ...AND A SECOND: an item a master is waiting on opens Projects, where the list is.
+  // ...AND A SECOND: an item a master is waiting on opens the queue, where the list is.
   const open = e.notification.data && e.notification.data.open;
   const to = open === 'jarvis' || open === 'waiting' ? open : '';
   e.waitUntil((async () => {

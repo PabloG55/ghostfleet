@@ -307,6 +307,11 @@ function ProjectsScreen(p) {
 function GridScreen(p) {
   return <CardScreen {...p} band={<CountStrip strip={p.strip} />} />;
 }
+// What the masters hold for the owner. No band: the list is the whole screen, and the line
+// that opens it is a card on Projects (app.js queueRow), not a band here.
+function QueueScreen(p) {
+  return <CardScreen {...p} band={null} />;
+}
 
 // ── what app.js calls ─────────────────────────────────────────────────────────────────
 // mount() is idempotent: Preact diffs against whatever it put in this container last time,
@@ -321,7 +326,7 @@ function GridScreen(p) {
 // tears the old tree down and builds the new one, which is exactly what crossing between
 // two screens means. Preact would also tear down on the differing component type alone;
 // the key is here so that stays true if these two ever become one component with a prop.
-const SCREENS = { projects: ProjectsScreen, grid: GridScreen };
+const SCREENS = { projects: ProjectsScreen, grid: GridScreen, queue: QueueScreen };
 export function mount(container, screen, props) {
   const S = SCREENS[screen];
   // Not a silent no-op: a typo here would leave the container holding the PREVIOUS screen

@@ -1125,8 +1125,9 @@ is('the last payload is kept for a cold open', true, /localStorage\.setItem\(LS_
 is('...and a stale screen says how old it is', true, /offline — last fetched/.test(JS['screens.js']));
 // the half that stays in app.js — a screen cannot report staleness it was never handed, and
 // a props builder that quietly stopped passing it would leave the sentence above intact and
-// unreachable, which is the silent version of this bug.
-is('...and app.js still hands the staleness over', 2,
+// unreachable, which is the silent version of this bug. One per props builder — Projects,
+// the grid and the queue — so 2 is a screen that stopped saying how old it is.
+is('...and app.js still hands the staleness over', 3,
    (APP.match(/^\s*stale: S\.stale,$/gm) || []).length);
 // §5's rule about the token, checked as CODE and not as prose: the first version of
 // this assertion matched api.js's own comment explaining why the token is not stored,

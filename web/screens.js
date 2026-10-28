@@ -224,9 +224,16 @@ function GridScreen(p) {
 		band: /* @__PURE__ */ u(CountStrip, { strip: p.strip })
 	});
 }
+function QueueScreen(p) {
+	return /* @__PURE__ */ u(CardScreen, {
+		...p,
+		band: null
+	});
+}
 var SCREENS = {
 	projects: ProjectsScreen,
-	grid: GridScreen
+	grid: GridScreen,
+	queue: QueueScreen
 };
 function mount(container, screen, props) {
 	const S = SCREENS[screen];
