@@ -64,6 +64,8 @@ const S = {
   wantJarvis: false,    // a notification from Jarvis was tapped; open it once unlocked
   pushOffer: false,     // show the one-tap "Turn on notifications" band (see maybePushOffer)
   talk: null,           // conversation mode: { phase, sent, seen, since } — null when off
+  waiting: null,        // last /api/waiting items (what the masters hold for the owner); null = not told
+  wantWaiting: false,   // a "waiting on you" notification was tapped; land on Projects once unlocked
 };
 // WHICH VIEW A TAP ON A CARD LANDS ON, and it moved. #45 made it the pane, because a
 // message list could not show a command and the first person to use the app said so. It is
@@ -155,6 +157,8 @@ async function refresh() {
   maybePushOffer();
   // A tapped notification from Jarvis, once there is a session to open it with.
   if (S.wantJarvis && !S.locked) { S.wantJarvis = false; openJarvis(); return; }
+  // A tapped "waiting on you": the list is on Projects, wherever the app was left.
+  if (S.wantWaiting && !S.locked) { S.wantWaiting = false; if (S.screen !== 'projects') { toProjects(); return; } }
   try {
     if (S.screen === 'projects') {
       // The payload carries the agent CATALOGUE beside the projects, and both are needed:
@@ -173,9 +177,13 @@ async function refresh() {
       // than Jarvis answers 404, which means "no band", not "the Projects screen is broken".
       // The Mac's ears beside it, on their own route: talk is every session's, not Jarvis's.
       if (S.jarvisOn === false) S.jarvis = null;
+      // WHAT THE MASTERS HOLD FOR THE OWNER, on its own request and allowed to fail on its own like
+      // the band: a daemon older than the list answers null, which is no section.
       await Promise.all([
         readVoice(),
         S.jarvisOn === false ? null : api.getJarvis().then((j) => { S.jarvis = j; }, jarvisFailed),
+        api.getWaiting().then((j) => { S.waiting = j && Array.isArray(j.items) ? j.items : null; },
+                              (e) => { if (e instanceof api.AuthError) throw e; }),
       ]);
     }
     else if (S.screen === 'grid') {
@@ -640,6 +648,7 @@ function projectsProps() {
     // An empty list is a real answer and gets the first-run path; a null one has not been
     // answered yet and gets the wait.
     cards: S.projects == null ? skeletonCards(4) : [
+      ...waitingCards(),
       ...visibleProjects().map(({ p, i }) =>
         // i is the GLOBAL index, on purpose
         cardEl(G.projectModel(p, i, i === S.sel), {
@@ -670,6 +679,87 @@ function projectsProps() {
   };
 }
 const PROJECTS_HINT = 'tap a project to open it · remove is here, behind ⋯ · reorder the list at the desk';
+
+// ── waiting on you ────────────────────────────────────────────────────────
+// WHAT EVERY MASTER IS HOLDING FOR THE OWNER, at the top of Projects: one card per ledger item a
+// master keeps in state `waiting` (mods/ghostfleet/hooks/ledger.js heldItems), across every
+// project and profile, whatever tab is open — a tab that hid one would be the failure the
+// tab's need-you count exists to prevent. A master goes on with everything else and waits on
+// these; how soon the owner sees them is how long an unattended run lasts.
+//   THE CARD IS THE CARD: cardEl(), the rail, the chip, the two text rows. Its words are
+// the project, the ask, how long it has waited, and what the master said it needs. The hue
+// is from the fixed palette — need-you red for an item waiting on the owner, yellow for a request
+// nobody has touched in hours, grey for one the owner replied to that the master has not closed.
+//   A TAP REPLIES (sheetReply). There is no close here, on purpose: an item leaves the list
+// when its master closes or drops it, which is the master saying it is done.
+const WAITING_LOOK = {
+  waiting: { label: '● waiting on you', color: 'red' },
+  open: { label: '○ open, untouched', color: 'yellow' },
+  replied: { label: '↩ you replied', color: 'grey' },
+};
+// "waits on the person: pick A or B" is the judge's sentence; the card already says whom.
+const needOf = (reason) => String(reason || '').replace(/^\s*(?:waits?|waiting)\s+on\s+(?:the\s+)?(?:person|user|owner|you)\s*[:,—-]?\s*/i, '').trim();
+export function waitingModel(row, nowS = Math.floor(Date.now() / 1000)) {
+  const look = WAITING_LOOK[row.state] || WAITING_LOOK.waiting;
+  const need = needOf(row.reason);
+  return {
+    kind: 'waiting', selected: false, num: null, color: look.color,
+    title: row.project, statusLabel: look.label,
+    when: G.humanAge(Math.max(0, nowS - (Number(row.since) || nowS))),
+    where: `master · #${row.id}`, path: '',
+    msg: `“${row.text}”`, one: true,
+    need: row.state === 'replied' ? 'you replied — the master has not closed it yet'
+        : need ? `needs: ${need}`
+        // carried from a stopped worker (ledger.js carryItems): its text is the worker's ask,
+        // so the row says whose, and what the worker last said about it
+        : row.from ? `${row.from} stopped while ${row.was || 'open'}${row.note ? `: ${row.note}` : ''}`
+        : row.state === 'open' ? 'no word on it for hours' : '',
+    placeholder: '', agent: '', pr: '', lead: false, exited: false,
+  };
+}
+function waitingCards() {
+  const rows = S.waiting || [];
+  if (!rows.length) return [];
+  const n = rows.filter((r) => r.state !== 'replied').length;
+  return [
+    el('div', { class: 'sect', text: n ? `waiting on you · ${n}` : 'waiting on you' }),
+    ...rows.map((r) => cardEl(waitingModel(r), { tap: () => sheetReply(r) }, -1)),
+    el('div', { class: 'sect', text: 'projects' }),
+  ];
+}
+// The reply is an ordinary message to that master, and it QUOTES the item: the master reads
+// which ask it answers, and its ledger wakes the item on the quoted words (wakeWaiting).
+export function replyText(row, text) {
+  return `Re your ledger item ${row.id}: "${row.text}"\n\n${String(text || '').trim()}`;
+}
+// THE CHAT'S OWN SEND PATH: the outbox entry, then fleet_send, then the ack — so the bubble
+// is in that master's chat when the owner opens it, queued behind a turn or typed in, exactly as a
+// message from the composer. A send that does not go gives the words back.
+function sheetReply(row) {
+  const t = el('textarea', { placeholder: 'your answer…', autocapitalize: 'sentences', spellcheck: 'false' });
+  t.value = row.draft || '';
+  t.addEventListener('input', () => { row.draft = t.value; });
+  const go = async () => {
+    const typed = (t.value || '').trim();
+    if (!typed) { toast('nothing to send', 'bad'); renderUnlessTyping(); return; }
+    const text = replyText(row, typed);
+    closeSheet();
+    const item = outboxAdd(text, row.project, 'master', { typed });
+    const r = await doVerb('fleet_send', { project: row.project, session: 'master', prompt: text }, { quiet: true });
+    if (r) { outboxAcked(item, r); row.draft = ''; toast(`sent to ${row.project}'s master`, 'good'); renderUnlessTyping(); return; }
+    outboxDrop(item);
+    row.draft = typed;
+    render();
+  };
+  const need = needOf(row.reason);
+  openSheet(sheet('answer', `→ ${row.project} · master · #${row.id}`, [
+    el('p', { class: 'q', text: `“${row.text}”` }),
+    need ? el('p', { text: `needs: ${need}` }) : null,
+    field('reply', t),
+    el('p', { text: 'sent to the master as a message quoting this item; it leaves the list when the master closes it.' }),
+    el('div', { class: 'row' }, [btn('send', go, 'go'), btn('esc back', closeSheet)]),
+  ]));
+}
 // `Q` / Ctrl-p jumps straight to Projects from anywhere, which is neither forward nor
 // back. Unwinding our own entries keeps the stack honest: pushing here would leave the
 // gesture retracing grid → session screens you have already left, and leaving the stack
@@ -4056,8 +4146,10 @@ function cardEl(m, h, idx) {
   } else if (m.exited) {
     d.append(el('div', { class: 'c-msg none', text: 'the agent exited — open it and press enter to resume this conversation' }));
   } else if (m.msg || m.placeholder) {
-    d.append(el('div', { class: 'c-msg' + (m.msg ? '' : ' none'), text: m.msg || m.placeholder }));
+    d.append(el('div', { class: 'c-msg' + (m.msg ? '' : ' none') + (m.one ? ' one' : ''), text: m.msg || m.placeholder }));
   }
+  // A waiting item's second row: what its master said it needs (waitingModel).
+  if (m.need) d.append(el('div', { class: 'c-need', text: m.need }));
   // THE GRIP IS STILL EXACTLY ONE LINE, and it is now the title row rather than the top
   // border. `.c-top` carries `touch-action: none` in app.css so a drag that starts there
   // reorders, and a vertical drag anywhere else on the card still scrolls the list. That
@@ -5374,6 +5466,7 @@ if ('serviceWorker' in navigator) {
   // or opens one on #jarvis). Opened after the unlock, never instead of it.
   navigator.serviceWorker.addEventListener('message', (ev) => {
     if (ev && ev.data && ev.data.open === 'jarvis') { S.wantJarvis = true; if (!S.locked) refresh(); }
+    if (ev && ev.data && ev.data.open === 'waiting') { S.wantWaiting = true; if (!S.locked) refresh(); }
   });
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) { hadController = true; return; }
@@ -5383,6 +5476,10 @@ if ('serviceWorker' in navigator) {
 }
 if (location.hash === '#jarvis') {
   S.wantJarvis = true;
+  try { history.replaceState(history.state, '', location.pathname + location.search); } catch {}
+}
+if (location.hash === '#waiting') {
+  S.wantWaiting = true;
   try { history.replaceState(history.state, '', location.pathname + location.search); } catch {}
 }
 markStandalone();

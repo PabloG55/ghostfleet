@@ -93,6 +93,7 @@ const REMINDER = [
   /(?:The ghostfleet plugin sent a message:\s*)?\[ghostfleet ledger\][\s\S]*?(?:it will not be asked again\.\)|$)/g,
   /This is how Claude Code surfaces a prompt a plugin submits between turns[^\n]*/g,
   /\[ghostfleet ledger: open items\][\s\S]*?(?:for an ask this list missed\.|$)/g,
+  /\[ghostfleet ledger: waiting on the person\][\s\S]*?(?:into a summary line\.|$)/g,
 ]
 const unquote = t => REMINDER.reduce((a, re) => a.replace(re, ' '), t)
 export function requestText(text) {
@@ -921,6 +922,112 @@ export function contextNote(ledger, nowMs) {
     ...(more > 0 ? [`+${more} more open (/ledger lists them)`] : []),
     `When one is finished, call ${TOOL.close} with its id and the proof (a path, link, commit, PR number or command result). ${TOOL.drop} with a reason if it is not a real ask or the person cancelled it (${VIA_CLI}); ${TOOL.add} for an ask this list missed.`,
   ].join('\n')
+}
+
+// ── what the session holds for the person ─────────────────────────────────────
+//
+// A `waiting` item is off the open list and off the note above (contextNote reads open
+// items only), so nothing put it in front of the model again once the turn that asked had
+// scrolled away, and nothing put it in front of the person at all outside the session:
+// /ledger said "+N waiting on the person" as a count. Measured on one master: every quiet
+// spell of two hours or more had nothing left it could do alone, and six of its eight
+// outstanding items were waiting on the owner, each closed only after the owner wrote. The
+// limit on an unattended run was how soon the owner saw those.
+//
+// heldItems() is the list the person is shown (the phone, fleet-serve /api/waiting) and
+// asked (statusNote), one row per item:
+//   waiting   a judged turn said it waits on the person (waitsOnPersonNote); `since` is when
+//   replied   it was waiting and the person's message spoke to it (wakeWaiting): open again,
+//             the agent's move now. Still listed, so a reply does not make the row vanish
+//             before the agent has acted on it; it leaves when the agent closes or drops it.
+//             (Not `answered`, which on an item is the judge's word for a brief it read as
+//             done without proof; the person replying and the judge reading are two events)
+//   open      a request (never a promise) nobody has touched in HELD_OPEN_MS: no turn
+//             reported on it and nothing woke it. Four hours: a long turn, or a worker it
+//             was handed to, legitimately holds a request for an hour or two with a report
+//             on it, and a report restarts the clock (lastTouch). One untouched for twice
+//             the two-hour quiet spell above was dropped or is blocked, and either way the
+//             person is who can move it
+// NOT a request the judge read as done that waits only for its proof (`answered`, needsProof).
+// The person's messages from the phone reach a master as `fleet` items, so after the proof
+// rule every question asked from the phone and answered in prose stays open; listed after four
+// hours it would hand the person their own answered question back as something waiting on
+// them. What it still owes is the agent's proof, which the person cannot give.
+// An item CARRIED to this session from a stopped worker (carryItems) is the session's own
+// request now: it is listed by the same rules, untouched for four hours or waiting, and its
+// row says where it came from (`from`, `was`, `note`) since its text is the worker's ask.
+export const HELD_OPEN_MS = 4 * 3_600_000
+// NOR the person's reply itself. A message that wakes a waiting item (wakeWaiting) is also an
+// item of its own, made from the same prompt at the same instant (`woke` is its `at`). Listed,
+// it is the same ask twice, the item as `replied` and the reply as `open` four hours on, and the
+// second is the person's own words handed back to them.
+export function heldItems(ledger, nowMs) {
+  const rows = []
+  const replies = new Set(ledger.items.filter(i => i.woke).map(i => Number(i.woke)))
+  for (const i of ledger.items) {
+    if (!fresh(i, nowMs)) continue
+    if (i.state === 'open' && replies.has(Number(i.at)) && !i.woke) continue
+    const reason = i.progress && i.progress.reason ? excerpt(i.progress.reason, 160) : ''
+    const c = i.carried
+    const came = c ? { from: String(c.from || ''), was: String(c.state || ''), ...(c.note ? { note: excerpt(c.note, 160) } : {}) } : {}
+    const row = state => ({ id: i.id, text: excerpt(i.text), source: i.source, at: Number(i.at) || 0, state, reason, ...came })
+    if (i.state === 'waiting') rows.push({ ...row('waiting'), since: Number(i.progress && i.progress.at) || Number(i.at) || 0 })
+    else if (i.state === 'open' && i.woke) rows.push({ ...row('replied'), since: Number(i.woke) })
+    else if (i.state === 'open' && i.source !== 'promise' && !i.answered && nowMs - lastTouch(i) >= HELD_OPEN_MS) rows.push({ ...row('open'), since: lastTouch(i) })
+  }
+  return rows.sort((a, b) => a.since - b.since || Number(a.id) - Number(b.id))
+}
+
+// THE PERSON ASKING FOR STATUS. Short messages only, and the status word has to be what is
+// asked about: "whats the status", "status?", "any update?", "qué falta", "cómo vamos". A
+// request that merely names a status ("fix the status bar", "the status file is torn") is
+// work, not a status question, and must not have the agent stop to recite its ledger.
+const STATUS_MAX = 120
+const STATUS_ASKS = [
+  /^(?:so\s+|ok\s+|and\s+|hey\s+)?(?:what'?s|whats|what\s+is|how'?s|hows)\s+(?:the\s+|our\s+|your\s+)?(?:status|state\s+of\s+(?:things|play)|progress|situation)\b/i,
+  /^status\s*(?:[?!.]|$|update|report|check|pls|please|of\b|on\b)/i,
+  /\b(?:what'?s|whats|what\s+is)\s+(?:left|pending|outstanding|blocking|missing)\b/i,
+  /\bwhat\s+(?:remains|is\s+left)\b/i,
+  /\bwhere\s+(?:are\s+we|do\s+we\s+stand|are\s+things)\b/i,
+  /\bhow'?s\s+it\s+going\b|\bhow\s+is\s+it\s+going\b|\bhow\s+are\s+things\b/i,
+  /^(?:any\s+)?(?:updates?|progress)\s*\?/i,
+  /\bwhat\s+do\s+you\s+need\s+from\s+me\b|\banything\s+(?:for|from)\s+me\b|\bwaiting\s+on\s+me\b/i,
+  /\bqu[eé]\s+(?:falta|queda|hay\s+pendiente)\b/i,
+  /\bc[oó]mo\s+(?:va|vamos|vas|van)\b|\ben\s+qu[eé]\s+(?:estamos|vamos|va)\b/i,
+  /^(?:y\s+)?(?:el\s+)?estado\s*(?:[?¿]|$)/i,
+  /\bqu[eé]\s+necesitas\s+de\s+m[ií]\b/i,
+]
+export function isStatusQuestion(text) {
+  const t = requestText(text).replace(/^¿\s*/, '')
+  if (!t || t.length > STATUS_MAX || isNudge(text)) return false
+  return STATUS_ASKS.some(re => re.test(t))
+}
+
+// The note a status question carries beside contextNote: every held item, with what the
+// agent last said it needs, and the instruction to put each one to the person as a
+// question. '' when nothing is held, so a status answer with nothing owed reads as before.
+export const STATUS_HEAD = '[ghostfleet ledger: waiting on the person]'
+export const STATUS_ITEMS = 12
+export function statusNote(ledger, nowMs) {
+  const held = heldItems(ledger, nowMs)
+  if (!held.length) return ''
+  const shown = held.slice(0, STATUS_ITEMS)
+  const word = { waiting: 'waiting on them', replied: 'they replied, yours to finish', open: 'open, untouched' }
+  return [
+    STATUS_HEAD,
+    'The person just asked for status. These items are held for them:',
+    ...shown.map(i => `${i.id} (${word[i.state]} ${ago(nowMs - i.since)}): ${excerpt(i.text, NOTE_TEXT)}${i.reason ? ` — you said: ${excerpt(i.reason, 100)}` : ''}${i.from ? ` — carried from ${i.from}, stopped while ${i.was}` : ''}`),
+    ...(held.length > shown.length ? [`+${held.length - shown.length} more (/ledger all lists them)`] : []),
+    'Your status answer must include every one of these, by id, and ASK the person about each one: one direct question per item, saying what you need from them to move it. For one they already replied to, say what you did with the reply, or close it. Do not fold them into a summary line.',
+  ].join('\n')
+}
+
+// Everything a prompt carries to the model, in order: the open items, then (on a status
+// question) what is held for the person. register.js's prompt.submit hands this over whole.
+export function promptNotes(ledger, text, nowMs) {
+  const notes = [contextNote(ledger, nowMs)]
+  if (isStatusQuestion(text)) notes.push(statusNote(ledger, nowMs))
+  return notes.filter(Boolean)
 }
 
 // By hand: `fleet-ledger close <id>` and `/ledger close <id>`. null when there is no such

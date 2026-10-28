@@ -1410,3 +1410,32 @@ test('a proof nudge inside the cooldown is held, not lost, and goes out at a lat
   expect(nags(w).length).toBe(2)
   expect(nags(w)[1].text).toContain('2. "bump the billing-svc version"')
 })
+
+// A WAITING ITEM WAS NEVER IN FRONT OF THE MODEL AGAIN. contextNote lists open items only, so
+// "whats the status" was answered from whatever the model remembered of the turn that asked
+// the person, and the items that were holding the session up were the ones it left out.
+test('a status question carries what waits on the person, with the instruction to ask each; other prompts do not', async ($, on) => {
+  const clock = mock.clock(on, { now: 100 * 3_600_000 })
+  const w = world(on)
+  await start($)
+  const now = 100 * 3_600_000
+  w.files.set(LEDGER, JSON.stringify({ v: 1, seq: 2, prompt: 2, window: 2, items: [
+    { id: '1', text: 'merge #12 or wait for the review', at: now - 3 * 3_600_000, state: 'waiting', source: 'user',
+      progress: { at: now - 2 * 3_600_000, reason: 'waits on the person: pick merge now or wait' } },
+    { id: '2', text: 'rename the cache keys', at: now - 60_000, state: 'open', source: 'user' },
+  ] }))
+  await type($, 'fix the status bar colour')
+  expect(notes(w)[0]).not.toContain('[ghostfleet ledger: waiting on the person]')
+  expect(notes(w)[0]).not.toContain('merge #12')
+  await type($, 'whats the status')
+  const note = notes(w)[1]
+  expect(note).toContain('[ghostfleet ledger: open items]')
+  expect(note).toContain('[ghostfleet ledger: waiting on the person]')
+  expect(note).toContain('1 (waiting on them 2h): merge #12 or wait for the review — you said: waits on the person: pick merge now or wait')
+  expect(note).toContain('ASK the person about each one')
+  // the fresh open item is on the open list, not held: four hours untouched is the bar
+  expect(note).not.toContain('2 (open, untouched')
+  await type($, 'qué falta?')
+  expect(notes(w)[2]).toContain('merge #12 or wait for the review')
+  await clock.advance(10)
+})

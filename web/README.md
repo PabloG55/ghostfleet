@@ -317,6 +317,10 @@ GET  /api/push/key                          -> { key, detail, subscribed, endpoi
 POST /api/push/subscribe { endpoint, keys } -> { ok, subscribed, detail }   201
 POST /api/push/unsubscribe { endpoint }     -> { ok, removed }
 GET  /api/digest                            -> { ok, at, since, liveness, projects, totals }   always peeked
+GET  /api/waiting                           -> { ok, at, items: [{ project, profile, session, key, id, text,
+                                                 state: waiting|replied|open, reason, at, since,
+                                                 from?, was?, note? }] }   (from: carried from a stopped worker)
+                                            each master's held ledger items; 503 without the mod's ledger.js
 GET  /api/jarvis                            -> { ok, present, project, profile, session, running,
                                                  status, voice: { ready, why? }, pending: [{id,tool,summary,ts,granted}] }
 POST /api/jarvis/confirm { id, answer }     -> { ok, id, answer, summary, told }
