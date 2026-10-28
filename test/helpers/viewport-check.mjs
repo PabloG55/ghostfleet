@@ -109,6 +109,11 @@ let chromeErr = '';
 const chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-first-run',
   '--no-default-browser-check', '--disable-extensions', '--mute-audio',
   '--use-mock-keychain', '--password-store=basic',
+  // A PHONE'S POINTER: coarse, and no hover. `mobile: true` alone reports a fine pointer that
+  // hovers — a desk's — and since the desk opens a chat with the composer focused (with a
+  // keyboard, web/README.md "On a desk"), every phone section here was measuring a desk:
+  // the box took the focus on open and the poll waited for the typing to stop.
+  '--blink-settings=primaryPointerType=2,availablePointerTypes=2,primaryHoverType=1,availableHoverTypes=1',
   `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'],
   { stdio: ['ignore', 'ignore', 'pipe'] });
 chrome.stderr.on('data', (d) => { chromeErr += String(d); });
@@ -1222,9 +1227,10 @@ try {
   //   AS A TOUCH SCREEN, which a tablet is. `mobile: true` alone reports a fine pointer, so
   // this walk was a 1024px window with a mouse — which is now the desk's two-pane layout
   // (web/README.md, "On a desk"), not the tablet's. Touch is what keeps it the tablet.
+  //   AND LEFT ON: turning touch emulation off hands Chrome back a fine pointer whatever
+  // the launch declared (measured), and every section after this one is a phone.
   await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await walk(1024, 768);
-  await call('Emulation.setTouchEmulationEnabled', { enabled: false });
   await bigText();
   await placeholderSweep();
   await loadingSkeletons();

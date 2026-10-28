@@ -3573,7 +3573,10 @@ export function enterSends() { return finePointer() || hwKeyboard; }
 let hwKeyboard = false;
 const SOFTLESS_KEY = /^(Escape|Tab|Arrow|F\d{1,2}$|Shift$|Control$|Alt$|Meta$|CapsLock$|Home$|End$|PageUp$|PageDown$)/;
 export function noteKeyboard(e) {
-  if (hwKeyboard || !e || e.isTrusted === false) return;
+  // isTrusted TRUE, not merely "not false": only the browser's own input sets it, so a
+  // keydown a script built — or a test harness's plain object, which has no such field —
+  // is never taken for a keyboard someone attached.
+  if (hwKeyboard || !e || e.isTrusted !== true) return;
   const t = e.target;
   const field = !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || !!t.isContentEditable);
   if (!field || SOFTLESS_KEY.test(e.key || '') || e.ctrlKey || e.metaKey || e.altKey || !softKeyboardUp) hwKeyboard = true;

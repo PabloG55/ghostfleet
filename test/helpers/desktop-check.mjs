@@ -132,7 +132,11 @@ try {
   // SETUP BY TAP, NOT BY KEY. Both clients — this one and the one before it — open a card on
   // a tap, so a row reached this way is red only for the key it is about. Reached by a key
   // that is itself new, every row after it would be red because the setup was.
-  const tap = (name) => b.evaluate((nm) => {
+  // FOR THE CARD, NOT ONLY FOR THE SCREEN: a grid's header names the project before its
+  // cards arrive (they are placeholders until the read lands), and a tap on a placeholder is
+  // a tap on nothing — a red row on a slower runner over a client that was right.
+  const tap = async (name) => { await until(() => b.evaluate((nm) => [...document.querySelectorAll('.card[data-idx] .c-name')].some(n => n.textContent.trim() === nm) || nm === '', name), 6000); return tapNow(name); };
+  const tapNow = (name) => b.evaluate((nm) => {
     const c = [...document.querySelectorAll('.card[data-idx]')].find(n => (n.querySelector('.c-name') || {}).textContent?.trim() === nm)
       || (nm === '' ? document.querySelector('.card') : null);
     if (!c) return false;
