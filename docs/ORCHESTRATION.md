@@ -45,6 +45,7 @@ which is what keeps a long-running or restarted lead from getting lost:
 | **rename** a worker + move its worktree | `fleet-rename <session> <new-name>` |
 | **retire** a finished worker and its worktree | `fleet-stop --reclaim <session>` — removes the tree when safe (a squash-merged PR on a clean tree is), else keeps it and says why |
 | **stop** a worker for good (or a dead orphan) | `fleet-stop <session>` |
+| what a stopped worker still **owed** | `fleet-ledger` — both stops hand its open, waiting and not-done ledger items to you, labelled `[<worker>]`; finish, re-dispatch or drop each |
 | the checkout's **dev-stack slot** | `fleet-slot of <path>` · `fleet-slot list` |
 
 ### Nested leads — a worker can run its own workers

@@ -99,6 +99,8 @@ and the next task goes to a fresh session. What you may reuse is the **folder**:
 1. A worker finished and its PR merged → **`fleet-stop --reclaim <session>`**. It stops
    the session and removes the worktree when that is safe (a squash-merged PR on a clean
    tree is), or keeps it and says why. `fleet-inbox` lists these for you, with the command.
+   Whatever its ledger still held open lands in YOURS as `[<worker>] <ask>`: finish it,
+   re-dispatch it to a new session, or drop it with a reason.
 2. New task → run **`fleet-worktrees`**. If a **FREE** worktree fits, start a NEW session
    in it: **`fleet-spawn <name> --reuse <worktree>`** — `--reuse` always opens a new
    conversation there (it never resumes the old one), and it refuses a worktree somebody

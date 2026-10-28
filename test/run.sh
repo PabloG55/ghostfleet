@@ -11657,6 +11657,99 @@ else
   skip "fleet-stop --reclaim" "git or tmux missing"
 fi
 
+# ── a stopped worker's unfinished ledger items go to its lead ─────────────────
+# A worker's ledger outlives it, and nothing read it again: measured on one fleet, 117
+# unfinished items across 280 worker ledgers, 100 over a day old, none of them visible to the
+# master the person talks to. A stop now hands each open, waiting or not-done item to the
+# lead (labelled with the worker), leaves everything else, and never fails over a lead whose
+# ledger cannot take them.
+group "fleet-stop carries a worker's unfinished ledger items to its lead"
+if command -v node >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then
+  CY="$(cd "$(mktemp -d)" && pwd -P)"
+  CYT=1760000000000
+  rec() { printf '{"session_id":"%s","sock":"%s","slot":"%s","ts":%s}' "$1" "$2" "$3" "${4:-5}" > "$CY/$1.json"; }
+  rec m-1 cfcarry master; rec w-1 cfcarry api-fix; rec w-2 cfcarry docs-pass
+  rec o-1 cf-other master; rec o-2 cf-other api-fix
+  rec s-1 cfcarry billing-svc; rec c-1 cfcarry billing-svc-tests; printf 'billing-svc\n' > "$CY/cfcarry.billing-svc-tests.parent"
+  rec n-1 cfcarry2 api-fix; rec n-2 cfcarry3 master; rec n-3 cfcarry3 api-fix; rec n-4 cfcarry4 master; rec n-5 cfcarry4 api-fix
+  node --no-warnings --input-type=module -e "
+    import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+    import fs from 'node:fs'
+    const day = 86400000, t0 = $CYT - 14 * day
+    const book = (file, rows) => {
+      let l = L.emptyLedger()
+      for (const [text, state, more] of rows) {
+        l = L.addItem(l, { text, at: t0, source: more && more.source || 'user', asIs: true })
+        l = { ...l, items: l.items.map((i, k) => (k === l.items.length - 1 ? { ...i, state, ...(more || {}) } : i)) }
+      }
+      fs.writeFileSync('$CY/' + file, JSON.stringify(l))
+    }
+    book('m-1.ledger', [['review the export PR', 'open'], ['bump the version', 'done', { proof: 'abc1234' }]])
+    book('w-1.ledger', [
+      ['fix the login redirect', 'open', { progress: { at: t0, reason: 'the fix is pushed, CI is running' } }],
+      ['deploy once a region is picked', 'waiting', { progress: { at: t0, reason: 'waits on the user picking a region' } }],
+      ['add a changelog line', 'not-done', { reason: 'the turn never added it' }],
+      ['bump the version', 'done', { proof: 'abc1234' }],
+      ['rename the flag', 'dropped', { reason: 'the person cancelled it' }],
+      ['merge when green', 'stale', { source: 'promise' }],
+    ])
+    book('w-2.ledger', [['tidy the docs', 'done', { proof: 'PR #9' }]])
+    book('o-1.ledger', [['ship acme-web', 'open']])
+    book('o-2.ledger', [['other fleet work', 'open']])
+    book('s-1.ledger', [['split the billing job', 'open']])
+    book('c-1.ledger', [['write the billing tests', 'open']])
+    for (const f of ['n-1', 'n-3', 'n-5']) book(f + '.ledger', [['fix the login redirect', 'open']])
+    fs.writeFileSync('$CY/n-4.ledger', '{\"v\":1,\"items\":[{\"id\":\"1\"')" 2>/dev/null
+  # n-2 (cfcarry3's master) keeps no ledger at all; cfcarry2 has no master record; n-4 is torn.
+  cp "$CY/m-1.ledger" "$CY/m-1.before"; cp "$CY/o-1.ledger" "$CY/o-1.before"
+  cp "$CY/n-3.ledger" "$CY/n-3.before"; cp "$CY/n-4.ledger" "$CY/n-4.before"; cp "$CY/n-1.ledger" "$CY/n-1.before"
+  tmux -L cfcarry kill-server 2>/dev/null
+  tmux -L cfcarry new-session -d -s api-fix 'sleep 90' 2>/dev/null
+  cystop() { env -u TMUX -u CLAUDE_FLEET_SLOT -u TMUX_PANE CLAUDE_FLEET_NOW_MS=$CYT CLAUDE_FLEET_DIR="$CY" "$ROOT/bin/fleet-stop" "$@" 2>&1; }
+  out="$(cystop -s cfcarry api-fix)"
+  is "a worker with open, waiting and not-done items: stopped, and says what it carried" "0|1" \
+     "$(tmux -L cfcarry has-session -t api-fix 2>/dev/null && echo 1 || echo 0)|$(grep -c "carried 3 unfinished ledger items to 'master'" <<< "$out" || true)"
+  is "...each is an open item of master's, labelled with the worker, its old state and last word kept" \
+     "3:open:fleet:[api-fix] fix the login redirect:open:the fix is pushed, CI is running|4:open:fleet:[api-fix] deploy once a region is picked:waiting:waits on the user picking a region|5:open:fleet:[api-fix] add a changelog line:not-done:the turn never added it" \
+     "$(jq -r '.items[]|select(.carried)|"\(.id):\(.state):\(.source):\(.text):\(.carried.state):\(.carried.note)"' "$CY/m-1.ledger" | paste -sd'|' -)"
+  is "...dated at the stop, so a 14-day-old ask is inside master's band, and never gated" "$CYT $CYT $CYT|0" \
+     "$(jq -r '[.items[]|select(.carried)|.at]|map(tostring)|join(" ")' "$CY/m-1.ledger")|$(jq '[.items[]|select(.carried and (.prompt != null))]|length' "$CY/m-1.ledger")"
+  is "...its done, dropped and stale items are not carried, and the carried ones are marked so" \
+     "1:carried:3|2:carried:4|3:carried:5|4:done:|5:dropped:|6:stale:" \
+     "$(jq -r '.items[]|"\(.id):\(.state):\(.carriedTo.id // "")"' "$CY/w-1.ledger" | paste -sd'|' -)"
+  is "...master's own items are untouched" "$(jq -c '.items' "$CY/m-1.before")" "$(jq -c '.items[:2]' "$CY/m-1.ledger")"
+  is "...another fleet's master and its api-fix are untouched" "same same" \
+     "$(cmp -s "$CY/o-1.ledger" "$CY/o-1.before" && echo same || echo changed) $(jq -r 'if .items[0].state == "open" then "same" else "changed" end' "$CY/o-2.ledger")"
+  is "...fleet-ledger lists them on master, where they came from" "3" \
+     "$(env -u TMUX CLAUDE_FLEET_NOW_MS=$CYT CLAUDE_FLEET_DIR="$CY" "$ROOT/bin/fleet-ledger" -s cfcarry master | grep -c '\[api-fix stopped; it was ' || true)"
+  is "...and a second carry of the same ledger adds nothing" "null" \
+     "$(node --no-warnings --input-type=module -e "
+        import * as L from '$ROOT/mods/ghostfleet/hooks/ledger.js'
+        import fs from 'node:fs'
+        const r = f => L.parseLedger(fs.readFileSync('$CY/' + f, 'utf8'))
+        const w = r('w-1.ledger'); w.items = w.items.map(i => (i.state === 'carried' ? { ...i, state: 'open' } : i))
+        console.log(JSON.stringify(L.carryItems(w, r('m-1.ledger'), { from: 'api-fix', sessionId: 'w-1', nowMs: 1 })))" 2>&1)"
+  cp "$CY/m-1.ledger" "$CY/m-1.mid"
+  out="$(cystop -s cfcarry docs-pass)"
+  is "a worker with nothing open carries nothing, and says nothing about it" "same|0" \
+     "$(cmp -s "$CY/m-1.ledger" "$CY/m-1.mid" && echo same || echo changed)|$(grep -c 'ledger item' <<< "$out" || true)"
+  cystop -s cfcarry billing-svc-tests >/dev/null
+  is "a sub-lead's worker carries to the sub-lead, not to master" "[billing-svc-tests] write the billing tests|same" \
+     "$(jq -r '.items[]|select(.carried)|.text' "$CY/s-1.ledger")|$(cmp -s "$CY/m-1.ledger" "$CY/m-1.mid" && echo same || echo changed)"
+  # The lead cannot take them: the stop still completes, and says where the items stayed.
+  o2="$(cystop -s cfcarry2 api-fix; echo "rc=$?")"; o3="$(cystop -s cfcarry3 api-fix; echo "rc=$?")"; o4="$(cystop -s cfcarry4 api-fix; echo "rc=$?")"
+  is "no master record, no master ledger, a torn one: each stop completes and names the item it left" "rc=0 rc=0 rc=0|1 1 1" \
+     "$(for o in "$o2" "$o3" "$o4"; do tail -1 <<< "$o"; done | paste -sd' ' -)|$(for o in "$o2" "$o3" "$o4"; do grep -c "1 unfinished ledger item of 'api-fix' stay in its own ledger" <<< "$o" || true; done | paste -sd' ' -)"
+  is "...pointing at the file that holds them, which is unchanged, as is the torn one" "1 1 1|same same same" \
+     "$(grep -c 'fleet-ledger --session n-1 all' <<< "$o2" || true) $(grep -c 'fleet-ledger --session n-3 all' <<< "$o3" || true) $(grep -c 'fleet-ledger --session n-5 all' <<< "$o4" || true)|$(for f in n-1 n-3 n-4; do cmp -s "$CY/$f.ledger" "$CY/$f.before" && echo same || echo changed; done | paste -sd' ' -)"
+  is "...and master gets no ledger written for it" "0" "$([ -e "$CY/n-2.ledger" ] && echo 1 || echo 0)"
+  is "fleet-stop --help says where the unfinished items go" "1" \
+     "$("$ROOT/bin/fleet-stop" --help 2>/dev/null | grep -c 'WHAT IT STILL OWED GOES TO ITS LEAD' || true)"
+  tmux -L cfcarry kill-server 2>/dev/null; rm -rf "${CY:?}"
+else
+  skip "fleet-stop carries a worker's unfinished ledger items to its lead" "node, jq or tmux missing"
+fi
+
 # ── a SQUASH-merged worker has to be reclaimable the moment it merges ─────────
 # Refused twice in one day, each time right after the worker's PR was squash-merged:
 # "remove it anyway with: --reclaim --force". Every gate fleet-clean had was blind to it
@@ -19737,6 +19830,17 @@ STUB
      "$(HOME="$H" node "$FE/linked/lib/fleet-env.mjs" of "$XS" 2>/dev/null | cut -d$'\x1f' -f2)"
   is "profile: ...and so does the projects reader beside it" "acme-api" \
      "$(HOME="$H" node "$FE/linked/lib/projects.mjs" sock "$XS" 2>/dev/null | cut -d$'\x1f' -f1)"
+
+  # A STOP READS THE FLEET'S DIR, NOT THE CALLER'S. The worker and its master wrote into the
+  # project's profile; a stop run from a default-profile shell looked in its own dir, found no
+  # record of the worker, and carried nothing (and cleared nothing it should have).
+  printf '{"session_id":"fe-cm","sock":"%s","slot":"master","ts":5}' "$XS" > "$CL/fleet/fe-cm.json"
+  printf '{"session_id":"fe-cw","sock":"%s","slot":"api-carry","ts":5}' "$XS" > "$CL/fleet/fe-cw.json"
+  printf '{"v":1,"seq":0,"items":[]}' > "$CL/fleet/fe-cm.ledger"
+  printf '{"v":1,"seq":1,"items":[{"id":"1","text":"fix the login redirect","at":1,"state":"open","source":"user"}]}' > "$CL/fleet/fe-cw.ledger"
+  fe "$ROOT/bin/fleet-stop" -s "$XS" api-carry >/dev/null
+  is "profile: a stop from the default profile carries into the fleet's own master's ledger" "[api-carry] fix the login redirect|0" \
+     "$(jq -r '.items[].text' "$CL/fleet/fe-cm.ledger" 2>/dev/null)|$(ls "$CL/fleet" | grep -c '^fe-cw\.json$' || true)"
 
   for s in "$XS" "$TS"; do ft -L "$s" kill-server 2>/dev/null; done
   rm -f "$FE/linked"; rm -rf "${FE:?}" "${FE_TMUX:?}"
