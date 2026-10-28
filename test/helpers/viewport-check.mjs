@@ -52,6 +52,10 @@ const is = (name, want, got) => rows.push(name + US + JSON.stringify(want) + US 
 // Chrome. A skipped group that says why beats a green one that proved nothing, and beats
 // a weakened assertion that proves less than its name claims.
 const skipGroup = (what, why) => rows.push('#SKIP' + US + what + US + why);
+// SAID, NOT ASSERTED: something the run recovered from, which test/run.sh prints dimmed and
+// does not count. Not stderr — run.sh holds that to empty, so a recovery written there
+// would turn the run red for the very thing it recovered from.
+const note = (what) => rows.push('#NOTE' + US + what + US);
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const done = (code = 0) => { console.log(rows.join('\n')); process.exit(code); };
 
@@ -216,10 +220,11 @@ function wsConnect(url) {
 const CALL_MS = 60000;
 async function connect(wsUrl) {
   const ws = await wsConnect(wsUrl);
-  let id = 0; const waits = new Map();
+  let id = 0; const waits = new Map(), events = [];
   ws.onMessage(data => {
     let m; try { m = JSON.parse(data); } catch { return; }
     if (m.id && waits.has(m.id)) { waits.get(m.id)(m); waits.delete(m.id); }
+    else if (m.method) for (const f of events) f(m.method, m.params || {});
   });
   const send = (method, params = {}, sessionId) => new Promise((res, rej) => {
     const i = ++id;
@@ -229,7 +234,7 @@ async function connect(wsUrl) {
     ws.send(JSON.stringify({ id: i, method, params, ...(sessionId ? { sessionId } : {}) }));
   });
   ws.onClose(() => { for (const [i, f] of waits) { waits.delete(i); f({ error: { message: 'the debugging socket closed with this call unanswered' } }); } });
-  return { send, close: () => ws.close() };
+  return { send, on: (f) => events.push(f), close: () => ws.close() };
 }
 // A browser that will not be driven is an environment, not a regression: say so and let
 // run.sh skip, the same as having no Chrome at all.
@@ -241,10 +246,31 @@ const { sessionId } = await browserWs.send('Target.attachToTarget', { targetId, 
 const call = (m, p = {}) => browserWs.send(m, p, sessionId);
 await call('Page.enable');
 await call('Runtime.enable');
+// EVERY SCRIPT THE PAGE ASKED FOR, and what came of it — so a boot whose module graph
+// died can be told apart by its CAUSE (see goto): a module the server would not give
+// (a status) is the client's fault, a module that never answered at all is not.
+await call('Network.enable');
+const scripts = new Map();         // requestId -> { loader, url, status, failed }
+browserWs.on((method, p) => {
+  if (method === 'Network.requestWillBeSent' && p.type === 'Script')
+    scripts.set(p.requestId, { loader: p.loaderId, url: p.request.url, status: 0, failed: '' });
+  else if (method === 'Network.responseReceived' && scripts.has(p.requestId))
+    scripts.get(p.requestId).status = p.response.status;
+  else if (method === 'Network.loadingFailed' && scripts.has(p.requestId))
+    scripts.get(p.requestId).failed = p.errorText || 'failed';
+});
 // What the page threw, recorded by the page itself on every navigation: a boot that broke
 // is told apart from one that is slow (see goto), and a row that times out says which.
+//   ...AND A SCRIPT THAT NEVER LOADED, which throws nothing. A module graph that fails to
+// fetch fires `error` on its <script> element and never on window, so the first listener
+// cannot see it — and the page it leaves is the static shell, readyState complete, an
+// empty #app, `errors: []`, which is exactly what a slow boot looks like. It is caught in
+// the CAPTURE phase because a resource error does not bubble; `SCRIPT` keeps out a failed
+// icon, which costs nothing and must not end a wait.
 await call('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
   const e = window.__bootErrs = [];
+  addEventListener('error', (ev) => { const t = ev.target;
+    if (t && t.tagName === 'SCRIPT') e.push('could not load ' + (t.src || 'an inline script')); }, true);
   addEventListener('error', (ev) => e.push(String((ev.error && ev.error.message) || ev.message || 'error')));
   addEventListener('unhandledrejection', (ev) => e.push('unhandled: ' + String((ev.reason && ev.reason.message) || ev.reason)));
 })();` });
@@ -390,18 +416,54 @@ const seeingCard = (re) => waitFor(`a card named ${re}`, (re) =>
 // the moment the app mounts. What it must NOT do is wait that long on a boot that broke:
 // a page that threw is answered at once, with what it threw.
 const BOOT_MS = 30000;
+// A BOOT THE BROWSER ABORTED IS NOT A BOOT THAT FAILED, and waiting cannot rescue it.
+// Red on the macOS leg as `{ready: complete, app: -, kids: 0, errors: []}` at the 30s
+// deadline, and green on a re-run. Reproduced here under parallel load (about one run in
+// forty, at 8-16 runs at once) and caught with the network log on: one module of app.js's
+// graph — api.js once, passkey.js once — ended `net::ERR_ABORTED, canceled` with no
+// response, while its siblings were answered from the service worker's cache in the same
+// milliseconds, and nothing navigated or threw. One dropped import fails the whole graph,
+// so app.js never evaluates and the page is the static shell for good: a deadline of 30s
+// or 300s answers the same. None of the client's own code has run when a graph's import is
+// dropped, and the one piece that has — sw.js's fetch handler — has no path that cancels:
+// a handler that fails rejects, which reads ERR_FAILED, not a cancel. The next navigation
+// boots clean.
+//   So the boot is navigated AGAIN — but only for that cause, and only twice. The test is
+// narrow on purpose: nothing thrown, and every script that did answer answered < 400. A
+// module that 404s, a renamed import, a client that throws on load — those are the client's
+// own failures, and they still go red on the first attempt, now at once rather than after
+// the full budget (the self-test at the foot of this file shows both directions).
+const BOOT_TRIES = 3;
+const aborted = async (loader, errs) => {
+  if (!errs.every(e => e.startsWith('could not load '))) return '';
+  // The page's error and CDP's loadingFailed travel separately; give the second a moment
+  // to land rather than deciding on half the evidence. Bounded, and usually instant.
+  const mine = () => [...scripts.values()].filter(r => r.loader === loader);
+  for (const t0 = Date.now(); mine().some(r => !r.status && !r.failed) && Date.now() - t0 < 2000;) await sleep(25);
+  const rs = mine();
+  if (rs.some(r => r.status >= 400)) return '';
+  const gone = rs.filter(r => r.failed && !r.status);
+  return gone.length ? `the browser dropped ${gone.map(r => `${r.url.replace(/^.*\//, '')} (${r.failed})`).join(', ')}` : '';
+};
 const goto = async (u, ready) => {
-  await call('Page.navigate', { url: u });
   // Not `readyState === 'complete'` alone: that is true of the static shell, which is an
   // empty #app and a <script type=module> the browser has not run yet. The self-test page
   // at the foot of this file is a plain document with no #app at all, so it passes its
   // own predicate rather than waiting forever for a client that is not there.
   const want = ready || SEEN.booted;
-  const settled = await waitFor(`${u} to be ready`, (src) =>
-    (window.__bootErrs || []).length > 0 || (0, eval)(src)(), BOOT_MS, `(${want})`);
-  if (settled) {
+  for (let attempt = 1; ; attempt++) {
+    scripts.clear();
+    const { loaderId } = await call('Page.navigate', { url: u });
+    const settled = await waitFor(`${u} to be ready`, (src) =>
+      (window.__bootErrs || []).length > 0 || (0, eval)(src)(), BOOT_MS, `(${want})`);
+    if (!settled) return;
     const errs = await evaluate(() => (window.__bootErrs || []).slice(0, 3));
-    if (errs.length && !(await evaluate(want))) is(`${u} boots`, 'without throwing', `it threw: ${errs.join(' | ')}`);
+    if (!errs.length || await evaluate(want)) return;
+    const why = await aborted(loaderId, errs);
+    // Said in the run's output: a retry nobody can see is how a rate creeps up.
+    if (why && attempt < BOOT_TRIES) { note(`boot of ${u}: ${why} — navigated again (${attempt + 1}/${BOOT_TRIES})`); continue; }
+    is(`${u} boots`, 'without failing', `it did not: ${errs.join(' | ')}${why ? ` — ${why}, ${BOOT_TRIES} times running` : ''}`);
+    return;
   }
 };
 // A FLOW THAT MUST START LOCKED HAS TO SAY SO. restore() brings back the screen the client
@@ -1492,6 +1554,43 @@ try {
   const proof = rows.splice(before).join(' ');
   is('a wait that never holds returns false', false, rc);
   is('...and leaves a row naming what it waited for', true, proof.includes('a condition that cannot hold'));
+
+  // ── and a boot is retried for the browser's failure, never for the client's ──
+  // goto() navigates again when a module was DROPPED, and that is a rule which could just
+  // as easily retry everything, or nothing, and stay green either way on a quiet machine
+  // where nothing is ever dropped. So both causes are made on purpose: one module of the
+  // graph aborted once (it must boot, on the second navigation), and the same module
+  // answered 404 every time (it must go red, on the first). Intercepted in the network
+  // layer, so the service worker is bypassed for these two — a cached module never reaches
+  // the network to be intercepted.
+  await call('Network.setBypassServiceWorker', { bypass: true });
+  let mode = '', paused = 0;
+  browserWs.on((method, p) => {
+    if (method !== 'Fetch.requestPaused') return;
+    paused++;
+    const once = mode === 'abort' && paused === 1;
+    (once ? call('Fetch.failRequest', { requestId: p.requestId, errorReason: 'Aborted' })
+      : mode === '404' ? call('Fetch.fulfillRequest', { requestId: p.requestId, responseCode: 404, body: '' })
+      : call('Fetch.continueRequest', { requestId: p.requestId })).catch(() => {});
+  });
+  await call('Fetch.enable', { patterns: [{ urlPattern: '*/passkey.js' }] });
+  mode = 'abort'; paused = 0;
+  const r0 = rows.length;
+  await goto(BASE);
+  // Taken back out like the proof row above — but not before checking the retry SAID so.
+  const abortRows = rows.splice(r0), noted = abortRows.filter(r => r.startsWith('#NOTE'));
+  is('a module the browser dropped is navigated again, and boots', '1 retry, 0 red rows, booted',
+     `${paused - 1} retr${paused === 2 ? 'y' : 'ies'}, ${abortRows.length - noted.length} red rows, ${await evaluate(SEEN.booted) ? 'booted' : 'blank'}`);
+  is('...and the run says it did, naming the module', true, noted.length === 1 && noted[0].includes('dropped passkey.js'));
+  mode = '404'; paused = 0;
+  const r1 = rows.length, t404 = Date.now();
+  await goto(BASE);
+  const missRows = rows.splice(r1).join(' ');
+  is('a module that 404s is NOT navigated again', 1, paused);
+  is('...it goes red, naming what did not load', true, /boots.*could not load .*app\.js/.test(missRows));
+  is('...and at once, not at the deadline', true, Date.now() - t404 < BOOT_MS / 3);
+  await call('Fetch.disable');
+  await call('Network.setBypassServiceWorker', { bypass: false });
 } catch (e) {
   is('the walk completed', '', String((e && e.message) || e));
 }
