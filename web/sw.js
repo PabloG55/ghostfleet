@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 3122829b3859
+// CLIENT-HASH: 002e2563aabf
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -374,7 +374,14 @@
 // still on v74 has no section and shows such a push as "a session has an answer".
 // v76 draws the Claude accounts line at the top of Projects, and the sheet of every account
 // behind it (read from /api/usage): a phone still on v75 shows neither until it is relaunched.
-const VERSION = 'ghostfleet-v76';
+// v77 keeps an open chat in step with the transcript: it goes on reading while the owner
+// types, after "load older" and across a resume, one read at a time, honouring a 429's
+// Retry-After and dropping an answer older than the one on screen — and asks with
+// If-None-Match, so an idle chat's poll is a 304. It opens a chat every time (retrying the
+// first page, and saying so), updates the list instead of rebuilding it (a scrolled table or
+// code line stays scrolled) and loads older messages by scrolling up. A phone still on v76
+// can hold a reply back until the chat is reopened; it reads the daemon's new answers unchanged.
+const VERSION = 'ghostfleet-v77';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
   './ansi.js', './md.js',

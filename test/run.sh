@@ -3662,6 +3662,51 @@ else
   skip "rename carries the conversation" "tmux/git/jq missing"
 fi
 
+# ── the transcript lookup is one jq, and "nothing changed" is a stat ─────────────
+# The phone's open chat reads the same page every few seconds, and the daemon's log showed
+# that read taking 8-26 s in clusters. Timed on a fleet dir of 119 status records, 0.67 s of
+# a 0.85 s read was the LOOKUP — one jq per record — and the rest re-parsed a transcript that
+# had not changed. So the lookup is one process now, with the old loop kept as the fallback
+# for a broken record, and --json carries a `stamp` that --unless turns into "unchanged".
+# Both halves of each: the fallback is proven to be NEEDED by the fixture before it is
+# trusted, and a stamp that never matched would pass "a new stamp after it grows" alone.
+group "fleet-read finds the transcript in one pass, and can say nothing changed"
+if command -v jq >/dev/null 2>&1; then
+  FR="$(mktemp -d "$TEST_RUNS.$$.frstamp.XXXXXX")"; FR="$(cd "$FR" && pwd -P)"
+  mkdir -p "$FR/cfg/fleet" "$FR/cfg/projects/acme-api"
+  FRT="$FR/cfg/projects/acme-api/t.jsonl"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"ship the acme-api fix"},"timestamp":"2026-10-01T00:00:00.000Z"}' \
+                '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"on it"}]},"timestamp":"2026-10-01T00:00:01.000Z"}' > "$FRT"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    printf '{"session_id":"s%s","sock":"cf-scratch","slot":"w%s","transcript":"/nonexistent","ts":%s}\n' "$i" "$i" "$i" > "$FR/cfg/fleet/s$i.json"
+  done
+  printf '{"session_id":"api","sock":"cf-acme-api","slot":"api-fix","transcript":"%s","ts":99}\n' "$FRT" > "$FR/cfg/fleet/zz-api.json"
+  frj() { env TMUX= CLAUDE_FLEET_DIR="$FR/cfg/fleet" CLAUDE_CONFIG_DIR="$FR/cfg" "$ROOT/bin/fleet-read" -s cf-acme-api --json api-fix "$@" 2>/dev/null; }
+  is "the transcript is found among the records"       "2" "$(frj | jq -r '.messages | length' 2>/dev/null)"
+  # A record caught half-written, sorted FIRST so a single jq meets it before the real one.
+  printf '{"slot":' > "$FR/cfg/fleet/00-broken.json"
+  is "fixture: one jq over the dir really does lose it" "" \
+     "$(jq -r 'select(.slot == "api-fix") | .slot' "$FR"/cfg/fleet/*.json 2>/dev/null)"
+  is "...and fleet-read still finds the transcript"   "2" "$(frj | jq -r '.messages | length' 2>/dev/null)"
+  rm -f "$FR/cfg/fleet/00-broken.json"
+  frst="$(frj | jq -r '.stamp' 2>/dev/null)"
+  is "the page carries a stamp"                        "yes" "$([ -n "$frst" ] && [ "$frst" != null ] && echo yes || echo "no: $frst")"
+  # It goes on the wire, and the transcript lives under the owner's home.
+  is "...of digits, which names no path"               "1" "$(printf '%s' "$frst" | grep -cE '^[0-9]+$' || true)"
+  is "unless that stamp: unchanged"                    "true" "$(frj --unless "$frst" | jq -r '.unchanged' 2>/dev/null)"
+  is "...and no page is read for it"                   "null" "$(frj --unless "$frst" | jq -r '.messages' 2>/dev/null)"
+  is "any other stamp still gets the page"             "2" "$(frj --unless 12345 | jq -r '.messages | length' 2>/dev/null)"
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"shipped"}]},"timestamp":"2026-10-01T00:00:02.000Z"}' >> "$FRT"
+  is "the transcript grows: the old stamp gets the page" "3" "$(frj --unless "$frst" | jq -r '.messages | length' 2>/dev/null)"
+  is "...under a new stamp"                            "yes" "$([ "$(frj | jq -r '.stamp' 2>/dev/null)" != "$frst" ] && echo yes || echo no)"
+  # The plain mode is what the MCP fleet_read and the grid parse, byte for byte.
+  is "the plain read is untouched"                     "shipped" \
+     "$(env TMUX= CLAUDE_FLEET_DIR="$FR/cfg/fleet" CLAUDE_CONFIG_DIR="$FR/cfg" "$ROOT/bin/fleet-read" -s cf-acme-api api-fix 2>/dev/null)"
+  rm -rf "$FR"
+else
+  skip "fleet-read's one-pass lookup" "jq missing"
+fi
+
 # ── a conversation sent to the background keeps its card ─────────────────────
 # Claude Code's /background (or ← into its agent view) ends a transcript with a
 # `continued-in` line and goes on under a NEW session id, in a spare process its daemon
@@ -14536,6 +14581,51 @@ else
   skip "real grid through the daemon" "git, tmux or node missing"
 fi
 
+# ── /api/session on a large transcript: fast when unchanged, 304 when held, one read ──
+# The REAL fleet-read behind the daemon, not the stub the groups above use, because what is
+# measured is fleet-read's cost: a fleet dir of 119 status records and a 42 MB transcript,
+# the shape the daemon's log was slow on. Watched red on the reader and daemon before this
+# change: a repeat read took 765-1027 ms here (bound 250), there was no ETag and so no 304,
+# and six reads at once ran fleet-read six times. A wrapper counts the runs.
+group "fleet-serve: the open chat's read is cheap, conditional and shared"
+# needs: free_port answers in digits
+if command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  CS="$TMUX_TMPDIR/chatserve"; mkdir -p "$CS/home/.config/ghostfleet" "$CS/home/.claude/fleet" "$CS/repo"
+  cp -R "$ROOT/bin" "$ROOT/mcp" "$ROOT/lib" "$CS/"
+  mv "$CS/bin/fleet-read" "$CS/bin/fleet-read.real"
+  printf '#!/bin/sh\necho x >> "%s/spawns"\nexec "$(dirname "$0")/fleet-read.real" "$@"\n' "$CS" > "$CS/bin/fleet-read"
+  chmod +x "$CS/bin/fleet-read"
+  printf 'demo\t%s\twork\n' "$CS/repo" > "$CS/home/.config/ghostfleet/projects"
+  CST="$CS/home/.claude/projects/-repo/t.jsonl"
+  node "$ROOT/test/helpers/serve-session.mjs" build "$CS/home/.claude/fleet" "$CST" cf-demo api-fix
+  CPORT="$(free_port)"; CPORT="${CPORT:-18911}"
+  CBASE="http://localhost:$CPORT"
+  cs_cli() { GHOSTFLEET_SERVE_CONFIG="$CS/serve.json" GHOSTFLEET_SERVE_AUDIT="$CS/audit.jsonl" HOME="$CS/home" TMUX= node "$CS/bin/fleet-serve.mjs" "$@"; }
+  cs_cli init --bind 127.0.0.1 --port "$CPORT" >/dev/null 2>&1
+  ccode="$(cs_cli enroll phone | grep -oE '[A-Z0-9]{5}-[A-Z0-9]{5}')"
+  GHOSTFLEET_SERVE_CONFIG="$CS/serve.json" GHOSTFLEET_SERVE_AUDIT="$CS/audit.jsonl" \
+    HOME="$CS/home" TMUX= CLAUDE_FLEET_AWAKE=off node "$SV_TAG" "$CS/bin/fleet-serve.mjs" > "$CS/log" 2>&1 &
+  csp=$!
+  SERVE_PIDS="$SERVE_PIDS $csp"
+  sv_reg "${csp}"
+  i=0; while [ "$i" -lt 60 ] && ! curl -s -m1 "$CBASE/healthz" >/dev/null 2>&1; do
+    kill -0 "$csp" 2>/dev/null || break
+    i=$((i+1)); sleep 0.1
+  done
+  if curl -s -m1 "$CBASE/healthz" >/dev/null 2>&1; then
+    node "$ROOT/test/helpers/serve-session.mjs" probe "$CBASE" "$ccode" "$CST" "$CS/spawns" > "$CS/out" 2> "$CS/err"
+    is "serve-session ran"                "" "$(head -2 "$CS/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"       "yes" "$([ "$(wc -l < "$CS/out")" -ge 12 ] && echo yes || echo "no: $(wc -l < "$CS/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do is "$name" "$want" "$got"; done < "$CS/out"
+  else
+    bad "the daemon comes up (chat read)" "listening on $CBASE" "$(tr '\n' ' ' < "$CS/log" 2>/dev/null | cut -c1-180)"
+  fi
+  reap "$csp"
+  rm -rf "$CS"
+else
+  skip "the open chat's read" "jq or node missing"
+fi
+
 group "fleet-serve rate limits a token that leaked"
 # needs: free_port answers in digits
 sv_rate 3 2 200
@@ -20096,6 +20186,54 @@ fi
 # the default profile's dirs and w1's record landed in the default fleet dir; (b) the
 # MCP-shaped question was never answered; the bare launch kept the server's wrong dir;
 # (c) the governor left the server wrong and wrote no notice.
+# ── an open chat converges to the transcript, whatever the daemon does ──────────────
+# "An agent's reply sometimes does not appear in an open chat until I leave it and open it
+# again." The real client in a real browser at phone size with touch, against a fake daemon
+# serving web/fixtures/ that misbehaves the ways the daemon's log said the real one did: slow
+# reads, a slow read overtaken by a fast one, a 429 burst, a read in flight across a trip to
+# the background — plus the owner typing their next message, "load older", and a swipe to the
+# next session with a read of the last one still out. Each scenario writes the reply into the
+# transcript WHILE the chat is open and asks the screen whether it arrived. Watched red on
+# the client before this change in every scenario but the control: the reply never landed
+# while typing or after load-older, two reads in flight under a slow daemon, the reply drawn
+# and then taken away by the older read, asked again inside a 20 s Retry-After, the last
+# session's transcript drawn under the next one's name, and no 304 ever.
+#   AND THE SAME POLL, SEEN FROM THE OTHER SIDE: a wide table or code line scrolled sideways
+# snapped back to its first column on every poll, at phone size and desktop size, because
+# render() rebuilt every bubble. Red before: scrollLeft 140 -> 0 for both, four mutations from
+# a poll that brought nothing, and a selection in the table gone. The chat's own scrollTop
+# was already held by scrollMem and is a control here — green before and after.
+#   AND OPENING ONE: "it shows nothing until I send a message". Opened while the first read
+# was slow, refused once (429), failed once or never answered, with the owner typing at once,
+# the old client never drew the conversation in 15-25 s: the retry was the 5 s poll, which
+# typing holds, and a read that landed while typing was not drawn until a send forced it. Red
+# before on all four, and after a failed read nothing said the chat was retrying. A wait is
+# still drawn as the skeleton, with no words, as the phone has drawn one since v70.
+#   AND OLDER MESSAGES LOAD BY SCROLLING UP: no press, the message the reader was on stays
+# where it was (within 2px), one page in flight, a "start of conversation" marker and no fetch
+# past it, and the button back only after a failed fetch. Red before: nothing loaded without
+# the press, and the button was there whether or not anything had failed.
+group "phone client: an open chat converges to the transcript without reopening"
+if command -v node >/dev/null 2>&1; then
+  CLC="$(mktemp -d "$TEST_RUNS.$$.chatlands.XXXXXX")"
+  node "$ROOT/test/helpers/chat-lands-check.mjs" > "$CLC/out" 2> "$CLC/err"
+  clcrc=$?
+  if grep -q '^#SKIP' "$CLC/out" 2>/dev/null; then
+    skip "an open chat converges" "no chrome to run the client in"
+  else
+    is "chat-lands-check ran"           "0" "$clcrc"
+    is "...without complaining"         ""  "$(head -2 "$CLC/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$CLC/out")" -ge 20 ] && echo yes || echo "no: $(wc -l < "$CLC/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$CLC/out"
+  fi
+  rm -rf "$CLC"
+else
+  skip "an open chat converges" "node missing"
+fi
+
 group "a fleet runs under its own profile, whoever started its server"
 if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -v node >/dev/null 2>&1 \
    && command -v git >/dev/null 2>&1; then

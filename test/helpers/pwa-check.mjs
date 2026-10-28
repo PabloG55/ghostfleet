@@ -1020,10 +1020,15 @@ is('the load-more marker is set in exactly one place', 1,
 // taken before the fetch and armed after it, or a poll landing in the gap spends it.
 is('...and the measurement is its argument', true,
    /function holdScrollFromEnd\(key, fromEnd\)/.test(APP));
+// In loadOlder() now — the scroll to the ceiling is the press — and of the list ON SCREEN:
+// the chat is updated rather than rebuilt (keepScreen), so a closure's own list can be one
+// that was never attached, which measures 0 from the end, the one place this must never send
+// anybody. Where the DOM can measure a message, the anchor on it supersedes this hold
+// (holdAnchor); the hold is what is left where it cannot.
 is('...measured before the fetch', true,
-   /const held = measureFromEnd\('chat', wrap\);\n *try \{/.test(APP));
+   /const held = live \? measureFromEnd\('chat', live\) : null;[^]{0,600}?const older = await api\.getSession/.test(APP));
 is('...and armed after it, next to the render that spends it', true,
-   /holdScrollFromEnd\('chat', held\);\n *render\(\);/.test(APP));
+   /const older = await api\.getSession[^]{0,1200}?holdScrollFromEnd\('chat', held\);[^]{0,500}?paintChat\(\);/.test(APP));
 
 // A tap on a card lands on the CHAT, and that is a change of mind with a reason: #45 made
 // it the pane because a message list could not show a command, and the person using the app

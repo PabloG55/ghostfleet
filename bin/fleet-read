@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fleet-read [-s SOCKET] <session> [n]
-# fleet-read [-s SOCKET] --json <session> [--limit N] [--before TS]
+# fleet-read [-s SOCKET] --json <session> [--limit N] [--before TS] [--unless STAMP]
 #
 # Print the last n (default 1) assistant messages from a sibling session's
 # transcript — so a lead session can check a worker's progress/output.
@@ -27,13 +27,14 @@ _t="${TMUX:-}"; case "${_t##*/}" in cf-*) SOCK="${_t%%,*}"; SOCK="${SOCK##*/}" ;
 # Flags in any position, and named positionals. fleet-stop's header explains why: a flag
 # silently dropped because it came after the session name stops the worker and leaves the
 # worktree, with nothing to say so.
-JSON=0; LIMIT=20; BEFORE=""; SESSION=""; N=""
+JSON=0; LIMIT=20; BEFORE=""; UNLESS=""; SESSION=""; N=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -s)       SOCK="${2:-}"; shift 2 ;;
     --json)   JSON=1; shift ;;
     --limit)  LIMIT="${2:-20}"; shift 2 ;;
     --before) BEFORE="${2:-}"; shift 2 ;;
+    --unless) UNLESS="${2:-}"; shift 2 ;;
     -*)       echo "fleet-read: unknown option $1" >&2; exit 1 ;;
     *)        if [ -z "$SESSION" ]; then SESSION="$1"; elif [ -z "$N" ]; then N="$1"
               else echo "fleet-read: unexpected arg $1" >&2; exit 1; fi; shift ;;
@@ -48,19 +49,34 @@ command -v jq >/dev/null 2>&1 || { echo "fleet-read: jq required" >&2; exit 1; }
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 FLEET_DIR="${CLAUDE_FLEET_DIR:-$CFG/fleet}"
 
+# ONE jq OVER EVERY STATUS FILE, NOT ONE PER FILE. The lookups below used to loop
+# `for f in *.json; do jq …; done`, and a fleet dir measured at 119 records made that 119
+# processes on every call — 0.67 s of a 0.85 s read, on a 42 MB transcript whose own parse
+# took a tenth of that. The phone's open chat asks this every few seconds, and process
+# spawns are the cost a loaded Mac inflates first: the same endpoint was logged at 8-26 s.
+# One process reads them all. The loop stays as the fallback, because the property it had
+# is worth keeping: a status file caught half-written, or broken, cost its own row and
+# nothing else, while a single jq that meets a parse error abandons the files after it.
+# jq reads its files as ONE stream, so a cut-off record runs on into the next file — and
+# that can never parse, because every record opens with `{` where only `,` or a closer is
+# allowed. So a broken file is always an error here, never a silently merged row.
+scan() {
+  local out
+  if out="$(jq -r "$@" "$FLEET_DIR"/*.json 2>/dev/null)"; then printf '%s\n' "$out"; return; fi
+  for f in "$FLEET_DIR"/*.json; do jq -r "$@" "$f" 2>/dev/null; done
+}
+
 # Locate the session's transcript via its status file — newest entry for that slot ON
 # THIS FLEET. Scoping by sock is essential: every fleet has a session named `master`,
 # so matching by slot alone returns whichever project's master wrote most recently
 # (i.e. some other repo's conversation). Entries predating the sock field are only
 # trusted when nothing better exists, and never for the ambiguous `master` name.
-row="$(for f in "$FLEET_DIR"/*.json; do
-  jq -r --arg s "$SESSION" --arg k "$SOCK" \
-    'select(.slot==$s and ((.sock // "") == $k))|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' "$f" 2>/dev/null
-done | sort -rn | head -1)"
+row="$(scan --arg s "$SESSION" --arg k "$SOCK" \
+    'select(.slot==$s and ((.sock // "") == $k))|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' \
+  | sort -rn | head -1)"
 if [ -z "$row" ] && [ "$SESSION" != master ]; then          # legacy files (no sock)
-  row="$(for f in "$FLEET_DIR"/*.json; do
-    jq -r --arg s "$SESSION" 'select(.slot==$s and ((.sock // "") == ""))|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' "$f" 2>/dev/null
-  done | sort -rn | head -1)"
+  row="$(scan --arg s "$SESSION" 'select(.slot==$s and ((.sock // "") == ""))|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' \
+    | sort -rn | head -1)"
 fi
 # ── NO RECORD UNDER THIS NAME: ASK THE PANE WHO IS IN IT ─────────────────────
 # A record is written under the name the hook saw, and until the hook learned to ask tmux
@@ -77,10 +93,9 @@ if [ -z "$row" ] && [ "$SESSION" != master ] && [ -n "$SOCK" ]; then
   IFS=$'\t' read -r _pane _ppid < <(tmux -L "$SOCK" list-panes -t "$SESSION" \
       -F '#{pane_id}@#{pid}'$'\t''#{pane_pid}' 2>/dev/null | head -1)
   if [ -n "${_pane:-}" ]; then
-    row="$(for f in "$FLEET_DIR"/*.json; do
-      jq -r --arg p "$_pane" --arg k "$SOCK" \
-        'select((.pane // "") == $p and ((.sock // "") == $k))|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' "$f" 2>/dev/null
-    done | sort -rn | head -1)"
+    row="$(scan --arg p "$_pane" --arg k "$SOCK" \
+        'select((.pane // "") == $p and ((.sock // "") == $k))|[(.ts//0),(.transcript//""),(.session_id//"")]|@tsv' \
+      | sort -rn | head -1)"
   fi
   if [ -z "$row" ] && [ -n "${_ppid:-}" ]; then
     for _p in "$_ppid" $(pgrep -P "$_ppid" 2>/dev/null); do
@@ -230,6 +245,22 @@ fi
 # the one thing a message list must not get wrong.
 TAIL_LINES=2000
 if [ "$JSON" = 1 ]; then
+  # ── THE STAMP: has anything this page is made of changed? ──────────────────
+  # The phone's open chat asks for the same page every few seconds and nearly every answer
+  # is the one before it. Everything below this line — the tail, two jq passes over up to
+  # 2000 records, megabytes of tool results among them — is spent finding that out, so the
+  # stamp is asked first: which file (the path, the inode), how big it is and when it was
+  # written, which page, and this reader itself (a deploy changes what the same bytes
+  # read as). `--unless` with the stamp of the last answer gets `unchanged` back instead.
+  #   A CHECKSUM, NOT THE FIELDS: the path is under the owner's home, and the stamp goes on
+  # the wire. GNU stat first, BSD after — `stat -f` on Linux is the FILESYSTEM's status and
+  # succeeds, so the other order would stamp every transcript on a disk the same.
+  _st="$(stat -c '%i %s %Y' "$tr" "$0" 2>/dev/null || stat -f '%i %z %m' "$tr" "$0" 2>/dev/null)"
+  stamp="$(printf '%s\n' "$tr" "$_st" "$sid" "$LIMIT" "$BEFORE" | cksum | tr -d ' \t')"
+  if [ -n "$UNLESS" ] && [ -n "$_st" ] && [ "$UNLESS" = "$stamp" ]; then
+    jq -n --arg s "$SESSION" --arg stamp "$stamp" '{session:$s, unchanged:true, stamp:$stamp}'
+    exit 0
+  fi
   lines="$(wc -l < "$tr" 2>/dev/null | tr -d ' ')"
   trunc=false; [ "${lines:-0}" -gt "$TAIL_LINES" ] && trunc=true
   # role + timestamp per message, both halves of the conversation, tool results excluded:
@@ -237,7 +268,7 @@ if [ "$JSON" = 1 ]; then
   # on some user turns and an array on the rest.
   tail -n "$TAIL_LINES" "$tr" \
     | jq -c "$MSGS" 2>/dev/null \
-    | jq -s --argjson limit "$LIMIT" --arg before "$BEFORE" --arg s "$SESSION" --argjson trunc "$trunc" '
+    | jq -s --argjson limit "$LIMIT" --arg before "$BEFORE" --arg s "$SESSION" --argjson trunc "$trunc" --arg stamp "$stamp" '
         # A RUN OF TOOL CALLS IS ONE ITEM. One assistant turn can make forty calls, and a page
         # is twenty items: unfolded, a busy turn would fill the phone with cards and push the
         # conversation out of the page. Folded here, before paging, so a page still counts
@@ -254,7 +285,7 @@ if [ "$JSON" = 1 ]; then
            else ([ $all | to_entries[] | select((.value.ts | tostring) == $before) | .key ] | first // $total)
            end) as $end
         | (if $end - $limit < 0 then 0 else $end - $limit end) as $start
-        | { session: $s, total: $total, window_truncated: $trunc,
+        | { session: $s, total: $total, window_truncated: $trunc, stamp: $stamp,
             messages: $all[$start:$end],
             next_before: (if $start > 0 then ($all[$start].ts | tostring) else null end) }'
   exit 0

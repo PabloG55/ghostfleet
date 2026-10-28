@@ -1006,15 +1006,40 @@ function gridJson(t, sub = '') {
 // socket, a fallback rebuilt from session_id and the pane's cwd, and a deliberate refusal
 // to take "the newest .jsonl in that directory" because several sessions can share a
 // checkout and newest-wins prints a DIFFERENT session's conversation. One reader.
-async function sessionMessages(t, session, limit, before) {
+//
+// ONE READ PER PAGE, HOWEVER MANY ASK, AND NONE WHEN NOTHING CHANGED. An open chat polls this
+// every few seconds from every device it is open on, and the log of the evening this was
+// written showed the cost compounding: answers that took under a second took 8-26 s in
+// clusters, because each slow read left the next poll arriving while it still ran, and every
+// one of them spawned its own fleet-read over the same transcript. So a read already running
+// for the same page is joined rather than repeated, and the last answer is kept beside its
+// `stamp` — fleet-read's checksum of which file, how big, when written — which goes back as
+// `unless`: an unchanged transcript then costs fleet-read its lookup and a stat, and the page
+// is the one already here. Still one reader: fleet-read decides what "unchanged" means.
+const sessReads = new Map();    // page key -> the read in flight for it
+const sessCache = new Map();    // page key -> { stamp, json }, most recent last
+const SESS_CACHE_MAX = 64;
+function sessionMessages(t, session, limit, before) {
+  const key = [t.name, session, limit, before || ''].join('\x1f');
+  let p = sessReads.get(key);
+  if (!p) {
+    p = readSession(t, session, limit, before, key).finally(() => sessReads.delete(key));
+    sessReads.set(key, p);
+  }
+  return p;
+}
+async function readSession(t, session, limit, before, key, ask = true) {
+  const had = ask ? sessCache.get(key) : null;
   const args = { project: t.name, session, json: true, limit, before };
+  if (had) args.unless = had.stamp;
   // 32 MB, not the 1 MB default: a page is 20 messages and a message is a whole assistant
   // turn, which is routinely tens of KB and occasionally far more. Overflow is not a
   // truncated page here — the dispatch refuses it by name — but the cap has to sit above
   // what a real conversation produces or an ordinary read starts failing.
   const out = await callToolAsync('fleet_read', args, { timeout: 60000, maxBuffer: 32 * 1024 * 1024 });
   const text = typeof out === 'string' ? out : String(out.text);
-  try { return { json: JSON.parse(text) }; }
+  let json;
+  try { json = JSON.parse(text); }
   catch {
     // A runtime whose fleet-read predates --json prints its usage line here rather than
     // JSON. Say which flag is missing instead of handing the phone a parse error.
@@ -1022,6 +1047,32 @@ async function sessionMessages(t, session, limit, before) {
       ? `this runtime's bin/fleet-read has no --json flag — it carries the per-message timestamp and role /api/session needs`
       : `fleet-read --json did not return JSON: ${text.trim().slice(0, 200)}` };
   }
+  if (json && json.unchanged) {
+    // The page this said was unchanged has to be the one we hold; anything else (it was
+    // evicted while the read ran) is asked for again, in full.
+    if (had && json.stamp === had.stamp) return { json: had.json };
+    return ask ? readSession(t, session, limit, before, key, false) : { error: 'fleet-read answered unchanged to a read that asked for the page' };
+  }
+  // The NEWEST page only: it is the one a chat polls, and an older page is asked for once, on
+  // a tap. Keeping those too would let a reader paging back through a long transcript fill
+  // this with pages of whole assistant turns that nobody will ask for again.
+  if (!before && json && typeof json.stamp === 'string' && json.stamp) {
+    sessCache.delete(key);
+    sessCache.set(key, { stamp: json.stamp, json });
+    while (sessCache.size > SESS_CACHE_MAX) sessCache.delete(sessCache.keys().next().value);
+  }
+  return { json };
+}
+
+// AN ETAG OVER THE WHOLE ANSWER, transcript and queue alike, and a 304 to a client that
+// already holds it. What it saves is the trip, not the read: the page is the same bytes the
+// phone already drew, and on a WireGuard tunnel over cellular that is what costs.
+function etagOf(obj) {
+  return '"' + crypto.createHash('sha1').update(JSON.stringify(obj)).digest('base64url').slice(0, 22) + '"';
+}
+function holdsTag(req, tag) {
+  const h = String(req.headers['if-none-match'] || '');
+  return !!h && h.split(',').some(x => x.trim().replace(/^W\//, '') === tag);
 }
 
 // ── what is still WAITING to be delivered ──────────────────────────────────
@@ -2341,7 +2392,10 @@ function agentCatalogue() {
     const [r, queue] = await Promise.all([sessionMessages(t, session, limit, before),
                                           before ? null : sessionQueue(t, session)]);
     if (r.error) return send(res, 502, { ok: false, text: r.error });
-    return send(res, 200, queue ? { ...r.json, queue } : r.json);
+    const body = queue ? { ...r.json, queue } : r.json;
+    const tag = etagOf(body);
+    if (holdsTag(req, tag)) { res.writeHead(304, { ETag: tag, 'cache-control': 'no-store' }); return res.end(); }
+    return send(res, 200, body, { ETag: tag });
   }
 
   if (p === '/api/pane' && req.method === 'GET') {

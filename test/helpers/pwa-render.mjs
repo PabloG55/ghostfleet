@@ -1902,14 +1902,15 @@ await until(() => { const b = chatBox(); return !!b && !!b.find(n => n.className
   const box = chatBox();
   is('the chat is a scroller', true, !!box && box.scrollHeight > box.clientHeight);
   is('...and a chat opens at the newest message', true, !!box && box.scrollTop === box.scrollHeight - box.clientHeight);
-  // The reader goes up to the middle and presses the button at the ceiling.
+  // The reader scrolls up to the ceiling — which is what asks for the page above now; there
+  // is no button to press unless a fetch failed (chat-lands-check drives that one).
   box.scrollTop = Math.round((box.scrollHeight - box.clientHeight) / 3);
   await tick(5);
-  const fromEndBefore = box.scrollHeight - box.scrollTop;
   is('the reader scrolls up', true, box.scrollTop > 0);
-  const older = btnWith(/load \d+ older/);
-  is('...and there is a page above them to load', true, !!older);
-  click(older);
+  is('...and there is no button to press for older messages', null, btnWith(/load \d+ older/) || null);
+  box.scrollTop = 0;
+  const fromEndBefore = box.scrollHeight - box.scrollTop;
+  dispatch(box, 'scroll', { type: 'scroll', target: box, currentTarget: box });
   is('...the page arrives', true, await until(() => { const b = chatBox(); return !!b && b.scrollHeight > box.scrollHeight; }, 4000));
   await tick(5);
   const now = chatBox();
