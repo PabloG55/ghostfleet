@@ -1057,6 +1057,10 @@ function sheetReply(row) {
 // only move when a turn lands, so this asks every USAGE_POLL_MS and on a resume, never per tick.
 const USAGE_POLL_MS = 45000;
 const USAGE_RED = new Set(['out', 'exhausted', 'needs-login', 'blocked']);
+// What all-exhausted did to the workers: a project whose budget is ignored keeps running.
+// The words are lib/accounts.mjs WORKERS', keyed by the word /api/usage carries.
+const USAGE_WORKERS = { paused: 'workers paused', running: 'workers keep running (budget ignored)', mixed: 'workers paused, except where the budget is ignored' };
+const usageWorkers = (x) => USAGE_WORKERS[x && x.workers] || USAGE_WORKERS.paused;
 const USAGE_FLOOR_MS = 10000;
 let usageAt = 0, usageBusy = false, usageWanted = false;
 function readUsage() {
@@ -1087,7 +1091,7 @@ export function usageLines(u) {
   if (!ps.length) return [{ profile: '', text: 'accounts: no profile has an account yet', color: 'grey' }];
   return ps.map((p) => {
     const profile = ps.length > 1 ? p.profile : '';
-    if (p.exhausted) return { profile, text: `all accounts exhausted${p.exhausted.until_at ? ` until ${p.exhausted.until_at}` : ''} — workers paused`, color: 'red' };
+    if (p.exhausted) return { profile, text: `all accounts exhausted${p.exhausted.until_at ? ` until ${p.exhausted.until_at}` : ''} — ${usageWorkers(p.exhausted)}`, color: 'red' };
     if (p.unsaved) return { profile, text: 'on a login that is not saved — failover paused', color: 'yellow' };
     const a = (p.accounts || []).find((x) => x.active);
     if (!a) return { profile, text: 'no account is active', color: 'grey' };
@@ -1112,7 +1116,7 @@ function sheetUsage() {
   if (!(u.profiles || []).length) kids.push(el('p', { text: 'no profile has an account yet — fleet-accounts add <profile> <name>' }));
   for (const p of u.profiles || []) {
     kids.push(el('h3', { class: 'u-prof', text: p.profile + (p.unsaved ? ' — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)'
-      : p.exhausted ? ` — ALL EXHAUSTED${p.exhausted.until_at ? ` until ${p.exhausted.until_at}` : ''}, workers paused` : '') }));
+      : p.exhausted ? ` — ALL EXHAUSTED${p.exhausted.until_at ? ` until ${p.exhausted.until_at}` : ''}, ${usageWorkers(p.exhausted)}` : '') }));
     if (!p.accounts.length) { kids.push(el('p', { text: '(no accounts)' })); continue; }
     if (p.accounts.length < 2) kids.push(el('p', { text: 'one account: nothing to fail over to yet — add another' }));
     if (p.pin) kids.push(el('p', { class: 'u-pin', text: `on '${p.pin.account}' by hand until ${p.pin.until_at} — the planner leaves it there unless it runs out` }));

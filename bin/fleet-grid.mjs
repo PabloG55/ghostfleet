@@ -30,6 +30,7 @@ import { modState, modLimitAt } from '../lib/mod-status.mjs';
 import * as J from '../lib/jarvis.mjs';
 import * as X from '../lib/experimental.mjs';
 import { keyReader } from '../lib/keys.mjs';
+import { budgetFile, budgetIgnored } from '../lib/projects.mjs';
 import { matchIndices, stepMatch, matchSpan } from '../lib/grid-search.mjs';
 // LOADED, NOT IMPORTED, and for the reason preview() below spells out: test/run.sh's vis35
 // group runs a COPY of this file from a temp directory, where a static import of ../lib
@@ -3598,8 +3599,10 @@ function toggleExperimental(name) {
 // enforcing it — read live each tick (no restart), and flipping it on RELEASES the
 // workers the governor parked. Use it when you have extra usage and want the fleet
 // to keep going; hand-paused workers stay paused either way.
-function limitFile(proj) { return path.join(profileDir(proj.profile), 'fleet', sockOf(proj) + '.governor-off'); }
-function ignoreLimit(proj) { try { return fs.existsSync(limitFile(proj)); } catch { return false; } }
+// The accounts engine reads the same marker (lib/projects.mjs budgetIgnored) and does not
+// park this project's workers when every account is spent, either.
+function limitFile(proj) { return budgetFile(path.join(profileDir(proj.profile), 'fleet'), sockOf(proj)); }
+function ignoreLimit(proj) { return budgetIgnored(path.join(profileDir(proj.profile), 'fleet'), sockOf(proj)); }
 function toggleIgnoreLimit(proj) {
   const f = limitFile(proj);
   if (ignoreLimit(proj)) { try { fs.unlinkSync(f); } catch {} }

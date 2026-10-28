@@ -18,6 +18,9 @@
 // that account OUT until the reset it names; it is left at once and never chosen before then.
 // An account its organization has disabled for Claude Code is BLOCKED and skipped: a /login
 // cannot fix that, only an admin of that organization can.
+// With every account spent, the profile's workers are parked until the earliest reset —
+// except in a project whose budget limit is `ignored` (the grid's settings, <sock>.governor-off):
+// its workers keep running until Claude itself refuses, and are never parked for this.
 //
 // [experimental] off on a new install — enable with: fleet-experimental enable accounts
 //
@@ -56,7 +59,7 @@ function list(only) {
   if (!profs.length) { console.log('  no profile has an account yet — fleet-accounts add <profile> <name>'); return; }
   for (const p of profs) {
     const d = A.describe(p, thr);
-    console.log(`\n${p}  (${cfgFor(p).replace(process.env.HOME || '\0', '~')})${d.unsaved ? '  — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)' : d.exhausted ? `  — ALL EXHAUSTED${d.exhausted.until_at ? ' until ' + d.exhausted.until_at : ''}, workers paused` : ''}`);
+    console.log(`\n${p}  (${cfgFor(p).replace(process.env.HOME || '\0', '~')})${d.unsaved ? '  — ON A LOGIN THAT IS NOT SAVED, failover paused (fleet-accounts add to manage it)' : d.exhausted ? `  — ALL EXHAUSTED${d.exhausted.until_at ? ' until ' + d.exhausted.until_at : ''}, ${A.WORKERS[d.exhausted.workers] || A.WORKERS.paused}` : ''}`);
     if (!d.accounts.length) { console.log('  (no accounts)'); continue; }
     if (d.accounts.length < 2) console.log('  one account: nothing to fail over to yet — add another');
     if (d.pin) console.log(`  on '${d.pin.account}' by hand until ${d.pin.until_at} — the planner leaves it there unless it runs out`);
@@ -71,7 +74,7 @@ function list(only) {
 async function main() {
   const [cmd = 'list', a1, a2] = process.argv.slice(2);
   if (['-h', '--help', 'help'].includes(cmd)) {
-    return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 22).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
+    return console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 25).map(l => l.replace(/^\/\/ ?/, '')).join('\n'));
   }
   if (cmd === 'list') return list(a1);
   if (!X.enabled('accounts')) die(X.disabledWhy('accounts', 'fleet-accounts'));

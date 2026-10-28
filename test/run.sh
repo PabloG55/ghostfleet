@@ -16897,11 +16897,12 @@ if command -v node >/dev/null 2>&1; then
   # an organization and two tokens no real state file holds; a payload that copied the state
   # through would carry them. And the keys are named in full, so a new field is a decision.
   # Counted beside the accounts it was looked for in, so an error in place of the payload — no
-  # decoy in it either — reads as 0 of 0 and not as a pass.
+  # decoy in it either — reads as 0 of 0 and not as a pass. `workers` is one word of three
+  # (paused / running / mixed): what all-exhausted did, given each project's budget limit.
   is "it carries no address, organization, token, login id, home path or unlisted profile" "0 of 7 accounts" \
      "$(grep -cE 'decoy|DECOY|Decoy|"id"|id-[0-9a-f]|hidden|'"$UA" "$UA/on.json" || true) of $(node -e 'try { console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).profiles.reduce((n, p) => n + p.accounts.length, 0)) } catch { console.log(0) }' "$UA/on.json") accounts"
   is "...and no key beyond the ones named" \
-     "account,accounts,active,at,day,enabled,exhausted,five_hour,fix,kind,left,name,ok,pct,pin,profile,profiles,read,resets,resets_at,seven_day,stale,state,threshold,unsaved,until,until_at" \
+     "account,accounts,active,at,day,enabled,exhausted,five_hour,fix,kind,left,name,ok,pct,pin,profile,profiles,read,resets,resets_at,seven_day,stale,state,threshold,unsaved,until,until_at,workers" \
      "$(node -e 'try { const k = new Set(), walk = v => { if (v && typeof v === "object") for (const [x, y] of Object.entries(v)) { if (!Array.isArray(v)) k.add(x); walk(y) } };
         walk(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))); console.log([...k].sort().join(",")) } catch { console.log("unparsed") }' "$UA/on.json")"
   urep "$((UNOW + 23400))" > "$UA/later.json"
@@ -20736,6 +20737,37 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
      "$([ -f "$AW/fleet/$ASOCK.w1.parked" ] && echo yes || echo no) $([ -f "$AW/fleet/$ASOCK.w2.parked" ] && echo yes || echo no) $(grep -q "un-parked $ASOCK.w1" <<< "$out" && echo yes || echo "no: $out")"
   ax "$ROOT/bin/fleet-experimental" enable accounts >/dev/null
   cp "$AC/w1.parked" "$AW/fleet/$ASOCK.w1.parked"; cp "$AC/w2.parked" "$AW/fleet/$ASOCK.w2.parked"; cp "$AC/acc.json" "$AW/fleet/accounts.json"
+  # ── budget ignored: all exhausted parks nothing in that project ─────────────────
+  # The grid's "budget limit: ignored" (<sock>.governor-off) is the owner saying run until
+  # Claude itself refuses — a week at 97% still has work in it. Flipped on mid-episode, the
+  # engine's parks there are let go on the next tick, with a prompt that says why; while
+  # it stays on, nothing is parked again, and a fresh episode says workers keep running.
+  # Then back to enforced, which parks exactly as above.
+  ign_prompted() { local i; for i in $(seq 1 50); do
+      grep -q 'budget limit is now set to ignored' <<< "$(atmux -L "$ASOCK" capture-pane -p -J -t "$1")" && { echo yes; return; }
+      sleep 0.1; done; echo no; }
+  parked_now() { for s in w1 w2 master; do printf '%s=%s ' "$s" "$(cut -d' ' -f1 "$AW/fleet/$ASOCK.$s.parked" 2>/dev/null || echo none)"; done | sed 's/ $//'; }
+  : > "$AW/fleet/$ASOCK.governor-off"
+  out="$(atick)"
+  is "accounts: budget switched to ignored -> the engine's parks are resumed on the next tick, told why" \
+     "w1=none w2=none master=none|resumed w1,resumed w2|yes yes" \
+     "$(parked_now)|$(grep -E '^accounts: (resumed|un-parked) w' <<< "$out" | sed 's/^accounts: //' | paste -sd, -)|$(ign_prompted w1) $(ign_prompted w2)"
+  out="$(atick)"
+  is "accounts: ...and still exhausted, nobody is parked again while it stays ignored" "w1=none w2=none master=none 0 yes" \
+     "$(parked_now) $(grep -c 'parked' <<< "$out" || true) $(jq -e '.exhausted != null' "$AW/fleet/accounts.json" >/dev/null && echo yes || echo no)"
+  jq '.exhausted = null' "$AW/fleet/accounts.json" > "$AC/s.json" && mv "$AC/s.json" "$AW/fleet/accounts.json"
+  paused0="$(inbox_n 'workers paused')"
+  atick >/dev/null
+  is "accounts: all exhausted with budget ignored -> no session parked, the notice says workers keep running" \
+     "w1=none w2=none master=none 1 0 running" \
+     "$(parked_now) $(grep -cE "all work accounts exhausted until [A-Za-z0-9: ]+ \(needs /login: spare\) — budget ignored here, so workers keep running until Claude refuses them" "$AW/fleet/$ASOCK.inbox" || true) $(( $(inbox_n 'workers paused') - paused0 )) $(grep '"exhausted"' "$AW/fleet/accounts.notify" | tail -1 | jq -r '.workers')"
+  out="$(ax "$ROOT/bin/fleet-accounts" list)"
+  is "accounts: ...and fleet-accounts list says the same" "yes" \
+     "$(grep -q 'ALL EXHAUSTED until .*, workers keep running (budget ignored)' <<< "$out" && echo yes || echo "no: $out")"
+  rm -f "$AW/fleet/$ASOCK.governor-off"
+  atick >/dev/null
+  is "accounts: budget back to enforced -> its workers are parked as before, the lead is not" "w1=governor-accounts w2=governor-accounts master=none" "$(parked_now)"
+  cp "$AC/w1.parked" "$AW/fleet/$ASOCK.w1.parked"; cp "$AC/w2.parked" "$AW/fleet/$ASOCK.w2.parked"; cp "$AC/acc.json" "$AW/fleet/accounts.json"
   # ── the earliest reset (main's 5h) passes: resume, and bring back what was parked ──
   # Into the processes they are in. A park is an Escape: the turn ends, and the process, its
   # conversation and whatever it left running in the background do not. So a parked worker
@@ -20908,6 +20940,22 @@ if command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && command -
     });" 2>&1)"
   is "accounts: the push carries the switch as fields, and nothing else" \
      '{"event":"switched","cause":"limit","limit":"5h","pct":97,"profile":"work","from":"main","to":"backup"} {"event":"switched","cause":"limit","limit":"5h","pct":97}' "$out"
+  # All exhausted in a project whose budget is ignored: the word for what happened to the
+  # workers reaches the phone (a field the whitelist dropped would leave it saying "paused"),
+  # and the service worker's own sentence says they keep running. accountText is lifted out
+  # of web/sw.js and run as it is, since nothing else in the suite runs that file.
+  out="$(HOME="$AH" node --input-type=module -e "
+    import { accountEvents, pushPayload } from '$ROOT/bin/fleet-serve.mjs';
+    import fs from 'node:fs';
+    const sizes = new Map(); accountEvents(['$AW/fleet'], sizes);
+    fs.appendFileSync('$AW/fleet/accounts.notify', JSON.stringify({ at: 1, profile: 'work', event: 'exhausted', until: 1900000000, needs_login: [], workers: 'running' }) + '\n');
+    const acc = pushPayload(accountEvents(['$AW/fleet'], sizes), 'anonymous').account;
+    const src = fs.readFileSync('$ROOT/web/sw.js', 'utf8'), i = src.indexOf('function accountText(');
+    const accountText = new Function(src.slice(i, src.indexOf('\n}\n', i) + 2) + '; return accountText;')();
+    const say = (w) => accountText({ event: 'exhausted', until: 1900000000, workers: w }).body.replace(/until [^—]*— /, '');
+    console.log(acc.workers, '|', say('running'), '|', say('paused'), '|', say('mixed'));" 2>&1)"
+  is "accounts: the push says what all-exhausted did to the workers, even in anonymous mode" \
+     "running | workers keep running (budget ignored) | workers paused, they resume then | workers paused, except where the budget is ignored, they resume then" "$out"
 
   # ── the governor: the accounts engine owns the budget ceiling, or nothing changes ──
   # A 99% reading left by the account switched AWAY from is in the fleet dir. The governor's
