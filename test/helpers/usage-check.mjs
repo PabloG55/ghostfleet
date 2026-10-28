@@ -82,12 +82,14 @@ try {
       await until(() => b.evaluate(() => {
         const e = [...document.querySelectorAll('button')].find(x => x.textContent.trim().startsWith('continue without a passkey'));
         if (e) e.click();
-        return !!document.querySelector('#app .card .c-top');
+        return !!document.querySelector(':is(#app, #side) .card .c-top');
       }));
-      return until(() => b.evaluate(() => !!document.querySelector('#app .usage')), 8000);
+      return until(() => b.evaluate(() => !!document.querySelector(':is(#app, #side) .usage')), 8000);
     };
+    // WHICHEVER PANE PROJECTS IS IN. On a phone that is #app; at 1280 with a mouse the client
+    // draws two panes and Projects is the left one, #side (web/README.md, "On a desk").
     const line = () => b.evaluate(() => {
-      const u = document.querySelector('#app .usage');
+      const u = document.querySelector(':is(#app, #side) .usage');
       if (!u) return null;
       const r = u.getBoundingClientRect(), list = u.parentElement, first = list && list.firstElementChild;
       return {
@@ -160,7 +162,7 @@ try {
     }
 
     // ── the sheet: every account of every profile, in `fleet-accounts list`'s words ────
-    await b.evaluate(() => { const u = document.querySelector('#app .usage'); if (u) u.click(); return null; });
+    await b.evaluate(() => { const u = document.querySelector(':is(#app, #side) .usage'); if (u) u.click(); return null; });
     const st = await until(sheetText, 4000);
     await shot('sheet');
     const want = ['switch at 97% of the 5h or 7d limit, spending the week that ends first',
@@ -209,7 +211,7 @@ try {
     is(`${size}: with the experiment off, the line says so and nothing else`,
        [[V.off.off], 'grey'], l && [l.lines.map(x => x.text), l.lines.map(x => x.hue).join(',')]);
     is(`${size}: ...and is not a control`, 'div', l && l.tag);
-    const tapped = await b.evaluate(() => { const u = document.querySelector('#app .usage'); if (u) u.click(); return !!u; });
+    const tapped = await b.evaluate(() => { const u = document.querySelector(':is(#app, #side) .usage'); if (u) u.click(); return !!u; });
     await sleep(400);
     is(`${size}: ...so a tap on it opens nothing`, 'tapped|', `${tapped ? 'tapped' : 'no line'}|${await sheetText()}`);
 

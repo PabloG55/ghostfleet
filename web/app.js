@@ -458,8 +458,8 @@ function leaveDuo() {
   sideUp = false;
 }
 function renderDuo(app, side) {
-  document.documentElement.classList.add('duo');
-  side.classList.add('shell');
+  document.documentElement.classList.toggle('duo', true);
+  side.classList.toggle('shell', true);
   navFrom = S.screen;
   // Jarvis was opened from Projects, so Projects is the list beside it.
   const left = (S.screen === 'projects' || (S.screen === 'session' && S.jarvisMode)) ? 'projects' : 'grid';
@@ -489,7 +489,11 @@ function render() {
   const app = document.getElementById('app');
   const side = sideNode();
   if (side && !S.locked && SHELL_SCREENS.has(S.screen) && wideNow()) {
-    try { app.classList.add('shell'); document.documentElement.classList.add('shell'); } catch {}
+    // toggle(…, true), NOT add(): add() rewrites the class attribute even when the token is
+    // already there, and that is a DOM mutation on every 5s poll of a screen where nothing
+    // changed — the kept chat (#86) is measured by exactly that count. toggle with force
+    // does nothing when the answer is already true.
+    try { app.classList.toggle('shell', true); document.documentElement.classList.toggle('shell', true); } catch {}
     renderDuo(app, side);
     return;
   }
