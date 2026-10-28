@@ -955,8 +955,14 @@ const press = (n) => { if (!n) return false;
   (n.listeners.pointerup || []).forEach(f => f({ clientX: 0, clientY: 0, target: n, pointerId: 1 }));
   return true; };
 await reopenProjects(() => held().length === 2);
-const list = app.find(n => n.className.split(/\s+/).includes('cards'));
-const heads = () => (list ? list.all(n => n.className === 'sect').map(n => n.textContent.trim()) : []);
+// Looked up on every call: leaving Projects and coming back builds a NEW `.cards` (the
+// screen's key changes), and a node kept from before is a detached list still holding the
+// old children. Measured: it went on reading 'waiting on you · 1|projects' after the
+// items were gone, while held() — which reads #app — read none.
+const heads = () => {
+  const list = app.find(n => n.className.split(/\s+/).includes('cards'));
+  return list ? list.all(n => n.className === 'sect').map(n => n.textContent.trim()) : [];
+};
 is('waiting items are drawn, under their heading, above the projects', 'waiting on you · 1|projects', heads().join('|'));
 is('...the waiting one first, then the answered one', 'acme-api,toolbox', held().map(c => partOf(c, 'c-name')).join(','));
 is('...each carrying no number and no index', true, held().every(c => !partOf(c, 'c-num') && c.dataset.idx === undefined));
