@@ -19,6 +19,8 @@ import * as api from './api.js';
 import * as pk from './passkey.js';
 import * as ansi from './ansi.js';
 import * as md from './md.js';
+// The desk's own matcher for `/` — one answer to "which cards does `bil` mean" (see the file).
+import { matchIndices, stepMatch } from './grid-search.js';
 // THE ONE BUILT FILE IN web/. Everything above is served exactly as written; this one is
 // vite's output from web/src/screens.jsx, committed beside its source. It holds BOTH card
 // screens — Projects and the grid — which is why it is no longer called projects.js. The
@@ -67,6 +69,12 @@ const S = {
   waiting: null,        // last /api/waiting items (what the masters hold for the owner); null = not told
   usage: null,          // last /api/usage (the Claude accounts each profile runs on); null = not told
   wantWaiting: false,   // a "waiting on you" notification was tapped; land on Projects once unlocked
+  entry: '',            // 'projects' when this session is a master entered the desk's way (⏎ on a
+                        // project, ` on its grid, Ctrl-f n m) — one level under Projects, not two
+  srch: null,           // the grid's `/` search: { q, typing } — see "the keyboard" at the bottom
+  jump: null,           // the Ctrl-f chord in progress: { stage: 'first'|'proj'|'grid', proj }
+  prefix: false,        // Ctrl-a was pressed in a session: the next key is a tmux-prefixed one
+  wantCard: 0,          // Ctrl-f <p> <s>: open card s once project p's grid has been read
 };
 // WHICH VIEW A TAP ON A CARD LANDS ON, and it moved. #45 made it the pane, because a
 // message list could not show a command and the first person to use the app said so. It is
@@ -94,7 +102,7 @@ function save() {
       // session and reopening restored the session SCREEN with nothing on it: "'null' is
       // not on this fleet's grid any more". It was always broken and was easy to miss
       // while that screen was a card and a row of buttons; it is the whole viewport now.
-      session: S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode,
+      session: S.session, view: S.view, profile: S.profile, jarvisMode: S.jarvisMode, entry: S.entry,
       projects: S.projects, grid: S.grid, sub: S.sub,
     }));
   } catch {}
@@ -108,6 +116,9 @@ function restore() {
   // the sub-grid you were in; the next grid read falls back to the top if it has gone
   S.sub = (S.project && typeof j.sub === 'string') ? j.sub : '';
   S.jarvisMode = !!j.jarvisMode && S.screen === 'session';
+  S.entry = j.entry === 'projects' && S.screen === 'session' ? 'projects' : '';
+  // ...and what was being typed there, which a relaunch used to throw away.
+  if (S.screen === 'session' && S.session) S.draft = draftGet(draftKey());
   // 'msgs' was the old list view's name and is not a view any more; anything unrecognised
   // falls to the default rather than rendering neither.
   S.view = j.view === 'pane' ? 'pane' : DEFAULT_VIEW;
@@ -126,7 +137,7 @@ function restore() {
   // ...and give the back gesture the trail it would have had if you had walked here. A
   // cold open is at the root of its own history, so without this the first swipe out of a
   // restored session screen leaves the app — the exact complaint, one reopen later.
-  seedNav(S.screen === 'session' ? (S.jarvisMode ? 1 : 2) : S.screen === 'grid' ? 1 : 0);
+  seedNav(S.screen === 'session' ? (S.jarvisMode || S.entry ? 1 : 2) : S.screen === 'grid' ? 1 : 0);
 }
 function seedNav(depth) { for (let i = 0; i < depth; i++) pushNav(); }
 
@@ -218,6 +229,13 @@ async function refreshOnce() {
       // The sub-lead went away while its grid was open: the server answers the top grid's
       // shape with no cards, and staying on an empty screen with a name on it is the lie.
       if (S.sub && S.grid && !S.grid.sub) { S.sub = ''; S.grid = await api.getGrid(S.project); }
+      // Ctrl-f <p> <s>: the card is only known once project p's grid is. No such card is
+      // the desk's answer too — you are left on the grid it would have been on.
+      if (S.wantCard && S.screen === 'grid') {
+        const it = items()[S.wantCard - 1];
+        S.wantCard = 0;
+        if (it && it.card) { S.sel = items().indexOf(it); save(); openItem(it); return; }
+      }
     }
     else if (S.screen === 'session') {
       // JARVIS IS A PROJECT like any other, so once it is known the rest of this branch is
@@ -395,6 +413,9 @@ function markNav(app, screen) {
 let uaSlid = false;
 function slideNav() {
   if (S.locked || !SHELL_SCREENS.has(S.screen) || navFrom === null || navFrom === S.screen) return false;
+  // Not in two panes: a slide says "this screen replaced that one", and beside each other
+  // neither replaced anything. The whole window sliding left to open a chat is a lie.
+  if (wideNow()) { navFrom = S.screen; return false; }
   const d = (SCREEN_DEPTH[S.screen] ?? 0) - (SCREEN_DEPTH[navFrom] ?? 0);
   if (!d) return false;
   if (uaSlid) { navFrom = S.screen; return false; }
@@ -413,9 +434,72 @@ const PREACT_SCREENS = new Set(['projects', 'grid']);
 // in the same breath as the lock, and what has to be known here is who put the nodes on
 // screen, not who would put them there now.
 let preactUp = false;
+// ── two panes, on a wide window ───────────────────────────────────────────────
+// The SAME two screens the phone walks between, side by side: #side gets the list the phone
+// would be showing (Projects, or this project's grid), #app gets the session — or one line
+// saying nothing is open. No component is new; each pane is drawn by exactly the code that
+// draws it on a phone. app.css (html.duo) says why 1024px, and the number lives here once.
+//   WIDE AND A MOUSE, NOT WIDE ALONE. A tablet held sideways is 1024 and up, and it is a
+// touch screen: the brief was that touch stays exactly as it is, and on a tablet that is
+// #78's card grid in several tracks. So the pointer decides too — a trackpad or a mouse —
+// the same question enterSends() asks, for the same reason: it is what a page can see.
+const DUO_MIN_PX = 1024;
+const DUO_QUERY = `(min-width: ${DUO_MIN_PX}px) and (hover: hover) and (pointer: fine)`;
+let duoMq = null, sideUp = false, wasWide = false;
+export function wideNow() {
+  try { duoMq = duoMq || matchMedia(DUO_QUERY); return !!duoMq.matches; } catch { return false; }
+}
+const sideNode = () => { try { return document.getElementById('side'); } catch { return null; } };
+function leaveDuo() {
+  try { document.documentElement.classList.remove('duo'); } catch {}
+  const side = sideNode();
+  if (!sideUp || !side) return;
+  screensUI.unmount(side);
+  side.textContent = '';
+  side.classList.remove('shell');
+  sideUp = false;
+}
+function renderDuo(app, side) {
+  document.documentElement.classList.toggle('duo', true);
+  side.classList.toggle('shell', true);
+  navFrom = S.screen;
+  // Jarvis was opened from Projects, so Projects is the list beside it.
+  const left = (S.screen === 'projects' || (S.screen === 'session' && S.jarvisMode)) ? 'projects' : 'grid';
+  const inSession = S.screen === 'session';
+  const props = left === 'grid' ? gridProps() : projectsProps();
+  // ONE confirm bar and one toast, in the pane that asked. With a session open that is the
+  // session's; drawn in both, a `y` would read as answering two questions.
+  if (inSession) { props.confirm = null; props.toast = null; }
+  screensUI.mount(side, left, props);
+  sideUp = true;
+  if (inSession) { paintElScreen(app); return; }
+  if (preactUp) { screensUI.unmount(app); preactUp = false; }
+  // The session's nodes leave with it: keepScreen() must not later take this line for a
+  // chat it can patch, so its memory goes too.
+  app.textContent = '';
+  screenMem = null;
+  paneBoxNode = paneNode = paneGeomNode = chatNode = null;
+  composerNode = null;
+  app.append(el('div', { class: 'duo-empty', text: left === 'projects'
+    ? 'no session open — ⏎ on a project opens its master, Ctrl-s its grid'
+    : 'no session open — ⏎ or 1-9 opens one, / finds one' }));
+  renderSheet();
+  syncPanePoll(); syncChatPoll();
+}
 function render() {
   if (slideNav()) return;
   const app = document.getElementById('app');
+  const side = sideNode();
+  if (side && !S.locked && SHELL_SCREENS.has(S.screen) && wideNow()) {
+    // toggle(…, true), NOT add(): add() rewrites the class attribute even when the token is
+    // already there, and that is a DOM mutation on every 5s poll of a screen where nothing
+    // changed — the kept chat (#86) is measured by exactly that count. toggle with force
+    // does nothing when the answer is already true.
+    try { app.classList.toggle('shell', true); document.documentElement.classList.toggle('shell', true); } catch {}
+    renderDuo(app, side);
+    return;
+  }
+  leaveDuo();
   // Toggled on <html> as well: the page must not scroll behind a screen that owns the
   // viewport, or a drag near the edge slides the whole app and the scroller under the
   // finger never moves. Guarded — the fake DOM the suite renders into has no classList on
@@ -455,6 +539,33 @@ function render() {
   // screen opens it diffs against nodes that no longer exist. Rendering null is what tears
   // the tree down — and it has to happen BEFORE the wipe below, while the nodes are still
   // there to be removed.
+  paintElScreen(app);
+}
+// Everything app.js still draws with el() — the lock screen and the session screen — into
+// #app. One body for both layouts: two panes put this same column on the right.
+// ── A CHAT OPENS READY TO TYPE IN — WITH A KEYBOARD ─────────────────────────────────────
+// Opening a session focused nothing, so the first key a person at a desk pressed went
+// nowhere (or, since the desk's keys, into the composer by way of typeIntoComposer — one
+// key late to feel like a box that was ready). So a chat that has just been opened takes
+// the focus, the caret after any draft it is holding.
+//   ONLY WITH A KEYBOARD, by the same evidence ⏎-to-send uses (enterSends): a fine pointer
+// that hovers, or a key from a real keyboard on an iPhone or iPad. On a touch-only phone a
+// focused box raises the on-screen keyboard over the conversation the person opened to
+// read — every time, on every chat — so there nothing is focused, as before.
+//   Once per open, not per render: the poll redraws, and a box that grabbed the focus back
+// each time would steal it from the search field of a sheet, or from a reader who had
+// deliberately left the box with Esc.
+let focusOnOpen = false;
+function focusIfOpened() {
+  if (!focusOnOpen || S.screen !== 'session' || S.sheet || S.locked) return;
+  focusOnOpen = false;
+  if (enterSends()) focusComposerAt(null);     // null: the end of the draft
+}
+function paintElScreen(app) {
+  paintElScreenBody(app);
+  focusIfOpened();
+}
+function paintElScreenBody(app) {
   if (preactUp) { screensUI.unmount(app); preactUp = false; screenMem = null; }
   // What is on screen now, before the build below re-points these at nodes it has not yet
   // decided to use (keepScreen()).
@@ -595,7 +706,13 @@ function keepScreen(app, screen, liveChat, liveComposer) {
         && builtChat && screen.includes(builtChat) && liveChat && liveChat.parentNode === app
         && canCompare(liveChat))) return false;
   const parts = partsOf(screen, (n) => n === builtChat);
-  const draftSame = (S.draft || '') === screenMem.draft;
+  // THE BOX'S OWN TEXT, NOT THE DRAFT AS LAST REMEMBERED. screenMem.draft is written by a
+  // render, and renders wait while someone types — so after a send it still says '' from
+  // before the typing, S.draft is '' again, the two agree, and the kept box went on holding
+  // the message that had just gone. Measured on the send button with the box focused, and
+  // every ⏎ from a keyboard is that case. What the box holds is the thing to compare.
+  const onScreen = isLive(liveComposer) && typeof liveComposer.value === 'string' ? liveComposer.value : screenMem.draft;
+  const draftSame = (S.draft || '') === onScreen;
   const nodes = parts.map((p) => {
     if (p.node === builtChat) return liveChat;
     const isComposer = p.node.classList && p.node.classList.contains('composer');
@@ -607,7 +724,13 @@ function keepScreen(app, screen, liveChat, liveComposer) {
   chatNode = liveChat;
   // The composer kept is the composer on screen; the one just built was never attached.
   const ci = parts.findIndex((p) => p.node.classList && p.node.classList.contains('composer'));
-  if (ci >= 0 && nodes[ci] !== parts[ci].node) composerNode = liveComposer;
+  if (ci >= 0 && nodes[ci] !== parts[ci].node) {
+    composerNode = liveComposer;
+    // ...and so is its photo strip. composer() pointed photoStripNode at the strip it built,
+    // which is never attached when the old row is kept, so an image added while the box has
+    // the focus — a paste, always — was painted into a strip nobody can see.
+    try { const strip = nodes[ci].querySelector && nodes[ci].querySelector('.photos'); if (strip) photoStripNode = strip; } catch {}
+  }
   screenMem = { who: chatWho(), draft: S.draft || '',
                 parts: new Map(parts.filter((p) => p.node !== builtChat).map((p) => [p.key, { node: nodes[parts.indexOf(p)], sig: p.sig }])) };
   return true;
@@ -1010,19 +1133,16 @@ function sheetUsage() {
 // gesture retracing grid → session screens you have already left, and leaving the stack
 // alone would make the first back-gesture from Projects exit the app.
 function toProjects() {
-  const n = navDepth;
   S.screen = 'projects'; S.sel = 0; S.session = null; S.sess = null; S.pane = null;
   stopSpeaking(); S.jarvisMode = false; talkStop('');
-  navDepth = 0;
-  if (n > 0 && typeof history !== 'undefined' && typeof history.go === 'function') {
-    try { history.go(-n); } catch {}    // popstate fires; popTo() sees screen==='projects'
-  }
+  S.entry = ''; S.srch = null; S.wantCard = 0;
+  setDepth(0);
   render(); refresh();
 }
 
 function openProject(name) {
   if (!name) return;
-  S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null; S.sub = '';
+  S.project = name; S.screen = 'grid'; S.sel = 0; S.grid = null; S.sub = ''; S.srch = null;
   // Another project's card list is a different list; row 12 of it means nothing here.
   scrollMem.delete('grid');
   pushNav();                          // so the back gesture returns to Projects, not out
@@ -1111,7 +1231,7 @@ function gridProps() {
     // Same rule as the projects screen: a null grid has not been answered yet, an empty one
     // has. `its` always carries the `+ new session` card, so length alone cannot tell them
     // apart — ask S.grid itself.
-    cards: S.grid == null ? skeletonCards(6) : its.map((it, idx) => {
+    cards: S.grid == null ? skeletonCards(6) : its.map((it, idx) => dimUnmatched(idx, (() => {
       const isSel = idx === S.sel;
       if (it.newCard) return cardEl(G.newModel(isSel), { tap: () => sheetPicker() }, idx);
       if (it.freeWt) {
@@ -1131,7 +1251,7 @@ function gridProps() {
         swipeRight: () => resumeSession(c.name),
         reorder: d => reorder(c.name, d),
       }, idx);
-    }),
+    })())),
     // ONCE, WHEN PREACT BUILDS THE LIST — not on every render, which is what the old
     // `out.push(watchScroll('grid', list))` amounted to. What it still has to do is restore
     // a position after the screen has been LEFT and come back to; what it no longer has to
@@ -1170,6 +1290,11 @@ function gridProps() {
 // THE GRID'S HINT, STILL THIS FILE'S STRING. It is the TUI's own wording (§7) and pwa-check
 // greps web/app.js for it; it moved out of a permanent band and into the sheet, not out of
 // this file.
+// While a `/` search has a query, the cards it does not match are dimmed in place.
+function dimUnmatched(idx, node) {
+  if (S.srch && S.srch.q && node && node.classList) node.classList.toggle('miss', !srchMatches().includes(idx));
+  return node;
+}
 const GRID_HINT = 'tap a card · swipe ← pause · swipe → resume · long-press = x · drag a card\'s title to reorder';
 
 // ⇧hjkl → drag. reorderSession(name, delta) is the TUI's own move, and at nc = 1 all
@@ -1729,8 +1854,9 @@ function openJarvis() {
   S.jarvisMode = true; S.screen = 'session'; S.session = 'master';
   if (j && j.present) S.project = j.project;
   S.sess = null; S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.caret = null; stopSpeaking();
+  S.draft = draftGet(draftKey()); S.caret = null; stopSpeaking();
   scrollMem.delete('pane'); scrollMem.delete('chat');
+  focusOnOpen = true;
   pushNav();
   render(); refresh();
 }
@@ -1856,6 +1982,7 @@ function jarvisScreen() {
   }
   if (S.talk) out.push(talkBand());
   out.push(S.view === 'pane' ? paneView() : chatView(c));
+  out.push(lostPhotosHint());
   out.push(composer(c, { talk: true }));
   return out.filter(Boolean);
 }
@@ -2323,24 +2450,84 @@ export function encodeWav(frames, rate) {
 // WHOLE transcript, which the pane cannot do (a pane is what fits on a screen plus
 // whatever scrollback tmux kept), and prose reads better in it. Two views of two
 // different things, not two attempts at one.
-function openSession(name) {
+// `opts.depth` puts the session at that level of the back-stack instead of one below the
+// current screen — a master entered the desk's way sits one level under Projects, and a
+// ⇧←/⇧→ step replaces the session rather than stacking on it (tmux's switch-client).
+// `opts.entry` is how it was entered; see S.entry.
+function openSession(name, opts = {}) {
   if (!name) return;
   S.session = name; S.screen = 'session'; S.sess = null; S.jarvisMode = false; talkStop('');
+  S.entry = opts.entry || ''; S.srch = null; S.wantCard = 0;
+  focusOnOpen = true;
+  // The open session is the selected card, so the list beside it (two panes) marks it.
+  const at = items().findIndex(i => i.card && i.card.name === name);
+  if (at >= 0) S.sel = at;
   // Reset to the pane on every open rather than remembering the last choice. The card is
   // tapped to answer "what is this worker doing right now", and the pane is the answer to
   // that question; a sticky preference would sometimes answer a different one.
   S.view = DEFAULT_VIEW; S.pane = null; S.paneGeom = null; S.paneErr = ''; S.pscroll = 0;
-  S.draft = ''; S.caret = null; stopSpeaking();
+  S.draft = draftGet(draftKey()); S.caret = null; stopSpeaking();
   // Another session's offset means nothing in this one's pane or transcript.
   scrollMem.delete('pane'); scrollMem.delete('chat');
-  pushNav();
+  if (Number.isInteger(opts.depth)) setDepth(opts.depth); else pushNav();
   render(); refresh();
+}
+// ── the desk's other ways in ──────────────────────────────────────────────────
+// AT THE DESK, A PROJECT OPENS ON ITS MASTER. ⏎ or a digit on Projects attaches master,
+// Ctrl-s goes to the grid instead, and from the grid ` goes back UP to master — "however
+// you reached the grid" (docs/SHORTCUTS.md §3). The phone's taps keep their own walk
+// (Projects → grid → session); these are what the same KEYS do, which is the desk's walk.
+function leadOf(project = S.project) {
+  const c = S.project === project && S.grid && (S.grid.cards || []).find(x => x.lead);
+  return (c && c.name) || 'master';
+}
+function enterMaster(name) {
+  if (!name) return;
+  if (S.project !== name) { S.grid = null; S.sel = 0; scrollMem.delete('grid'); }
+  S.project = name; S.sub = '';
+  openSession(leadOf(name), { depth: 1, entry: 'projects' });
+}
+// Straight to a project's grid (Ctrl-s), and — for Ctrl-f <p> <s> — to card s on it once
+// the grid has been read (refresh() spends S.wantCard).
+function toGridOf(name, want = 0) {
+  if (!name) return;
+  if (S.project !== name) { S.grid = null; S.sel = 0; scrollMem.delete('grid'); }
+  if (S.screen === 'session') { talkStop(''); stopSpeaking(); S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; }
+  S.project = name; S.screen = 'grid'; S.sub = ''; S.jarvisMode = false; S.entry = ''; S.srch = null;
+  S.wantCard = want;
+  setDepth(1);
+  render(); refresh();
+}
+// What ⏎ (and a digit) does to an item — the same thing a tap on its card does, which is
+// the same thing the desk's openSelected() does: a sub-lead opens its sub-grid, a lost or
+// sleeping card is reopened or woken, a free worktree asks for a name, `+ new` picks.
+function openItem(it) {
+  if (!it) return;
+  if (it.newCard) return sheetPicker();
+  if (it.freeWt) return sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path });
+  const c = it.card;
+  if (!c) return;
+  if (c.lost) return reopenSession(c.name);
+  if (c.asleep) return wakeSession(c.name);
+  if (G.cardModel(c, false, 0).rollup) return openSub(c.name);
+  openSession(c.name);
+}
+// ⇧← / ⇧→ inside a session: bin/fleet-cycle's ring — the cards in grid order (master
+// first), only those with a live tmux session, wrapping at BOTH ends. Deliberately not the
+// swipe's stepSession(), which stops at the ends for a reason that is about a finger.
+function cycleSession(dir) {
+  const ring = items().filter(i => i.card && !i.card.lost && !i.card.asleep).map(i => i.card.name);
+  if (ring.length < 2) return;
+  let i = ring.indexOf(S.session);
+  if (i < 0) i = 0;                      // not in the ring: start at the top, as fleet-cycle does
+  const to = ring[(i + dir + ring.length) % ring.length];
+  openSession(to, { depth: navDepth, entry: S.entry });
 }
 // A sub-lead's card opens its SUB-GRID — itself first, then only its workers — one level
 // down, so back (the ‹, the swipe, popTo) comes up to the top grid rather than out.
 function openSub(name) {
   if (!name) return;
-  S.sub = name; S.sel = 0; S.grid = null;
+  S.sub = name; S.sel = 0; S.grid = null; S.srch = null;
   scrollMem.delete('grid');
   pushNav();
   render(); refresh();
@@ -2395,6 +2582,7 @@ function sessionScreen() {
   if (lead) out.push(el('div', { class: 'hint lead1', text: "the fleet's lead — no stop, reclaim, rename or pause" }));
   if (S.talk) out.push(talkBand());
   out.push(S.view === 'pane' ? paneView() : chatView(c));
+  out.push(lostPhotosHint());
   out.push(composer(c, { talk: true }));
   return out.filter(Boolean);
 }
@@ -2440,7 +2628,8 @@ const SWIPE_NEXT = 60, EDGE = 24;
 function wireSessionSwipe(node) {
   let x0 = 0, y0 = 0, live = false;
   node.addEventListener('pointerdown', ev => {
-    live = ev.clientX > EDGE;             // the left edge belongs to the system
+    // A finger only (touchGesture): with a mouse this drag is selecting text in a bubble.
+    live = touchGesture(ev) && ev.clientX > EDGE;   // the left edge belongs to the system
     x0 = ev.clientX; y0 = ev.clientY;
   });
   node.addEventListener('pointerup', ev => {
@@ -2689,6 +2878,75 @@ function copyIcon(done) { return done ? iconSvg(ICON_TICK) : iconSvg(ICON_COPY_B
 // belongs to the session that picked it, not to whatever composer is on screen when its
 // bytes land — the same discipline readPane() keeps for a capture that arrives late.
 let photoSeq = 0, photoChain = Promise.resolve(), photoStripNode = null;
+// ── a DRAFT PER SESSION, kept until it is sent ─────────────────────────────────────────
+// Typing in a chat, leaving it and coming back used to find the box empty, and so did a
+// reload or relaunching the installed app: the draft was one S.draft for the whole app,
+// and every way into a session blanked it. Now each session has its own, here.
+//   KEYED BY PROFILE, SOCKET AND SESSION. Every project has a session called `master`, so
+// a session name alone is two projects' drafts in one box; the socket is what the rest of
+// the fleet scopes a session by (CLAUDE.md: "a session's status must be scoped by its
+// fleet socket"), and the profile keeps two profiles' same-named projects apart.
+//   NOT THE OUTBOX. The outbox holds what has been SENT and not yet seen in the transcript;
+// a draft is what has not been sent at all. A failed send hands its words back to the box
+// (sendDraft), which writes them here like any other typing, so the two never hold the
+// same text twice.
+//   localStorage, mirrored from memory and wrapped like every other read here: in a
+// private window, or with site data blocked, the draft still lives for the page's life.
+//   PHOTOS stay with their draft for as long as the page lives (S.photos, keyed by
+// session, is never cleared by leaving a chat). They cannot survive a reload — a picked
+// File is not something a page can store — so the draft remembers how many it had, and a
+// reload that lost them says so above the composer instead of quietly sending less.
+const LS_DRAFTS = 'gf.drafts';
+const DRAFT_DAYS = 30;               // a draft nobody has touched in a month is let go
+const drafts = new Map();            // key -> { text, photos, at }
+const draftLost = new Map();         // key -> photos a reload dropped, until said and seen
+let draftsLoaded = false;
+export function draftKey(project = S.project, session = S.session) {
+  const p = (S.projects || []).find((x) => x && x.name === project);
+  const profile = (p && p.profile) || (S.grid && project === S.project && S.grid.profile) || '';
+  const sock = (p && p.socket) || `project:${project || ''}`;
+  return `${profile}\x1f${sock}\x1f${session || ''}`;
+}
+function loadDrafts() {
+  if (draftsLoaded) return;
+  draftsLoaded = true;
+  try {
+    const o = JSON.parse(localStorage.getItem(LS_DRAFTS) || '{}') || {};
+    const old = Date.now() / 1000 - DRAFT_DAYS * 86400;
+    for (const [k, v] of Object.entries(o)) {
+      if (!v || typeof v.text !== 'string' || (v.at || 0) < old) continue;
+      drafts.set(k, v);
+      if (v.photos > 0) draftLost.set(k, v.photos);   // this page never had them
+    }
+  } catch {}
+}
+function persistDrafts() {
+  try { localStorage.setItem(LS_DRAFTS, JSON.stringify(Object.fromEntries(drafts))); } catch {}
+}
+export function draftGet(key = draftKey()) { loadDrafts(); const d = drafts.get(key); return d ? d.text : ''; }
+function draftPut(key, text, photos) {
+  loadDrafts();
+  if (!text && !photos) drafts.delete(key);
+  else drafts.set(key, { text: String(text || ''), photos: photos || 0, at: Math.floor(Date.now() / 1000) });
+  persistDrafts();
+}
+// The open session's draft, as the box holds it now.
+function saveDraft() { draftPut(draftKey(), S.draft || '', photosFor().length); }
+// A session's photo count changed (added, removed, sent) — wherever the screen is now.
+function savePhotosOf(project, session) {
+  const key = draftKey(project, session);
+  const here = project === S.project && session === S.session;
+  if (photosFor(photoKey(project, session)).length) draftLost.delete(key);
+  draftPut(key, here ? (S.draft || '') : draftGet(key), photosFor(photoKey(project, session)).length);
+}
+function lostPhotosHint() {
+  const key = draftKey(), n = draftLost.get(key);
+  if (!n) return null;
+  const ok = btn('ok', () => { draftLost.delete(key); draftPut(key, S.draft || '', photosFor().length); render(); });
+  return el('div', { class: 'hint lost', role: 'status' }, [
+    el('span', { text: `${n} photo${n > 1 ? 's' : ''} attached to this draft did not survive the reload — attach ${n > 1 ? 'them' : 'it'} again ` }), ok,
+  ]);
+}
 const photoKey = (project = S.project, session = S.session) => `${project} ${session}`;
 const photosFor = (key = photoKey()) => S.photos.filter((p) => p.key === key);
 
@@ -2852,6 +3110,7 @@ function addPhotos(files, card, want = { project: S.project, session: S.session 
     S.photos.push(item);
     photoChain = photoChain.then(() => uploadPhoto(item, file, want, card));
   }
+  savePhotosOf(want.project, want.session);
   paintPhotos();
   // The caret back where it was, so the sentence carries on from the photo.
   if (take.length && here) focusComposerAt(at);
@@ -2877,6 +3136,8 @@ async function uploadPhoto(item, file, want, card) {
 
 function removePhoto(item) {
   S.photos = S.photos.filter((p) => p !== item);
+  const [project, session] = String(item.key).split(' ');
+  savePhotosOf(project, session);
   paintPhotos();
 }
 
@@ -3126,7 +3387,7 @@ function copyText(t) {
 //   The bottom safe-area inset goes to 0 while the keyboard is up. It is there for the home
 // indicator, the keyboard covers the home indicator, and stacking one on the other is the
 // "too much space between the text box and the bottom" half of the same report.
-let vvTallest = 0, vvWidth = 0;
+let vvTallest = 0, vvWidth = 0, softKeyboardUp = false;
 function syncViewport() {
   try {
     const vv = typeof visualViewport !== 'undefined' ? visualViewport : null;
@@ -3139,6 +3400,7 @@ function syncViewport() {
     // keyboard takes a third of the screen. 120px is well above the former, well below the
     // latter.
     const keyboard = vvTallest - h > 120;
+    softKeyboardUp = keyboard;
     const root = document.documentElement.style;
     // A list that was showing the newest message keeps showing it as it shrinks — the
     // keyboard opening must not leave the reader looking at whatever was mid-screen.
@@ -3212,6 +3474,7 @@ function composer(card, opts = {}) {
     if (!isLive(box)) return;
     const prev = S.draft || '';
     S.draft = box.value; growComposer(box);
+    saveDraft();
     const caret = Number.isInteger(box.selectionStart) ? box.selectionStart : null;
     if (caret != null) S.caret = caret;
     // Every photo's place follows the edit (anchorAfterEdit).
@@ -3220,6 +3483,35 @@ function composer(card, opts = {}) {
   // Where the caret was when the box let go — the camera tap is what usually takes it, and
   // that is the place the photo keeps (openPicker).
   box.addEventListener('blur', () => { if (isLive(box) && Number.isInteger(box.selectionStart)) S.caret = box.selectionStart; });
+  // THE THREE KEYS THE BOX KEEPS. Everything else typed here is text; the window's key
+  // handler ignores a focused text box entirely (onKey), so `q` is a letter in a message
+  // and never a way out of the screen.
+  //   ⏎ SENDS WITH A KEYBOARD AND IS A NEW LINE ON A PHONE. With the on-screen keyboard the
+  // return key is how a second line is typed and `send` is a button under the thumb, which
+  // is how the phone has always worked and is not changed here; with a real keyboard —
+  // a desk, or an iPhone or iPad with one attached — Enter-to-send is every chat's contract
+  // and ⇧⏎ is the new line. enterSends() says which, and what it counts as evidence.
+  //   Never mid-composition: an IME's own Enter commits the characters, and sending then
+  // would ship half a word.
+  box.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); try { box.blur(); } catch {} return; }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229 && enterSends()) {
+      e.preventDefault();
+      sendDraft();
+    }
+  });
+  // AN IMAGE PASTED INTO THE BOX IS A PHOTO, through the picker's own path: addPhotos keys it
+  // to this session, caps it at ATTACH_PER_MESSAGE, and api.attach sends it with the same
+  // size limit to the same attach directory. It lands at the caret, like a picked one.
+  // Text on the clipboard is left to the browser; an image's file name riding along with
+  // it (a copy from Finder carries both) is not pasted as text.
+  box.addEventListener('paste', (e) => {
+    const files = imagesOf(e.clipboardData);
+    if (!files.length) return;
+    e.preventDefault();
+    const caret = Number.isInteger(box.selectionStart) ? box.selectionStart : String(S.draft || '').length;
+    addPhotos(files, cardOf(S.session), { project: S.project, session: S.session, caret });
+  });
   // ...AND ON EVERY RENDER, not only on a keystroke. render() rebuilds this element from
   // scratch on the 5s poll, on a toast, on a view switch — with rows="1" and the draft
   // poured back in — so a two-line message came back as one line and a clipped sliver of
@@ -3259,6 +3551,90 @@ function composer(card, opts = {}) {
   kids.push(btn('send', () => sendDraft(), 'go'));
   return el('div', { class: 'composer' }, kids);
 }
+// ⏎ SENDS WHEN THERE IS A KEYBOARD, and a page cannot ask whether there is one. Two kinds
+// of evidence, either enough:
+//   - a fine pointer that hovers: a mouse or a trackpad, which is to say a computer;
+//   - a real keydown only a physical keyboard can send (hwKeyboard below). This is the
+//     iPhone or iPad with a keyboard attached: a touch screen, and still a keyboard.
+// With only the on-screen keyboard there is neither, and ⏎ stays the new line it has
+// always been on a phone.
+export function enterSends() { return finePointer() || hwKeyboard; }
+// A PHYSICAL KEYBOARD, PROVEN BY WHAT IT SENT. Sticky for the life of the page, and set by
+// any trusted keydown the on-screen keyboard cannot produce:
+//   - one that arrives with no text field focused — the on-screen keyboard only exists
+//     while one is, so a key from nowhere came from a real keyboard;
+//   - a key the on-screen keyboard does not have: Esc, Tab, the arrows, the F-keys, a
+//     modifier pressed on its own, or a Ctrl / ⌘ / Alt chord;
+//   - a key typed into a field while the on-screen keyboard is NOT up. syncViewport() knows
+//     that from the visual viewport: an on-screen keyboard takes a third of the screen,
+//     a connected one leaves at most a shortcut bar (the 120px threshold there).
+// Never by device, model or width — an iPad with a keyboard and an iPad without one are
+// the same device at the same width.
+let hwKeyboard = false;
+const SOFTLESS_KEY = /^(Escape|Tab|Arrow|F\d{1,2}$|Shift$|Control$|Alt$|Meta$|CapsLock$|Home$|End$|PageUp$|PageDown$)/;
+export function noteKeyboard(e) {
+  // isTrusted TRUE, not merely "not false": only the browser's own input sets it, so a
+  // keydown a script built — or a test harness's plain object, which has no such field —
+  // is never taken for a keyboard someone attached.
+  if (hwKeyboard || !e || e.isTrusted !== true) return;
+  const t = e.target;
+  const field = !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || !!t.isContentEditable);
+  if (!field || SOFTLESS_KEY.test(e.key || '') || e.ctrlKey || e.metaKey || e.altKey || !softKeyboardUp) hwKeyboard = true;
+}
+export function keyboardSeen() { return hwKeyboard; }
+// The image files a paste or a drop carries — `files` first, then the item list, which is
+// where some browsers put a screenshot copied to the clipboard.
+function imagesOf(dt) {
+  if (!dt) return [];
+  const out = [...(dt.files || [])].filter(f => f && /^image\//.test(f.type || ''));
+  if (!out.length) {
+    for (const it of dt.items || []) {
+      if (it && it.kind === 'file' && /^image\//.test(it.type || '')) { const f = it.getAsFile(); if (f) out.push(f); }
+    }
+  }
+  return out;
+}
+const carriesFiles = (dt) => !!dt && [...(dt.types || [])].includes('Files');
+// AN IMAGE DROPPED ON THE CONVERSATION — the chat, the pane or the composer, which is all of
+// #app when a session is open (two panes or one). Same path as the paste above.
+//   The WINDOW refuses every file drop it does not take, because a browser's default for a
+//   dropped file is to navigate to it: one image dropped a few pixels into the list would
+//   replace the whole app with a picture and throw the draft away.
+function wireDrop() {
+  const app = document.getElementById('app');
+  const here = () => S.screen === 'session' && !S.locked && !S.sheet;
+  try {
+    addEventListener('dragover', (e) => { if (carriesFiles(e.dataTransfer)) e.preventDefault(); });
+    addEventListener('drop', (e) => { if (carriesFiles(e.dataTransfer)) e.preventDefault(); });
+    app.addEventListener('dragover', (e) => {
+      if (!carriesFiles(e.dataTransfer) || !here()) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = 'copy'; } catch {}
+      app.classList.add('drop-on');
+    });
+    app.addEventListener('dragleave', (e) => { if (!e.relatedTarget || !app.contains(e.relatedTarget)) app.classList.remove('drop-on'); });
+    app.addEventListener('drop', (e) => {
+      app.classList.remove('drop-on');
+      if (!carriesFiles(e.dataTransfer) || !here()) return;
+      e.preventDefault();
+      const files = imagesOf(e.dataTransfer);
+      // DRAWN NOW, not when the typing stops: a drop is the mouse, not the keyboard, and on a
+      // desk the box usually holds the focus (a chat opens focused there) — waiting for it to
+      // blur would leave the refusal unsaid. The focus goes back where it was.
+      if (!files.length) {
+        const had = typingNow(), at = isLive(composerNode) && Number.isInteger(composerNode.selectionStart) ? composerNode.selectionStart : null;
+        toast('only images attach — the same as the photo picker', 'bad');
+        render();
+        if (had) focusComposerAt(at);
+        return;
+      }
+      const box = composerNode;
+      const caret = isLive(box) && document.activeElement === box && Number.isInteger(box.selectionStart)
+        ? box.selectionStart : Number.isInteger(S.caret) ? S.caret : String(S.draft || '').length;
+      addPhotos(files, cardOf(S.session), { project: S.project, session: S.session, caret });
+    });
+  } catch {}
+}
 async function sendDraft() {
   const mine = photosFor();
   const waiting = mine.filter((p) => p.state === 'up').length;
@@ -3284,17 +3660,29 @@ async function sendDraft() {
   // one", but `at` is the PHONE's clock and `m.ts` is the Mac's, and the two are as close
   // as whatever synced them last. Counting occurrences needs no clock at all.
   const item = outboxAdd(text, S.project, S.session, { typed, photos: mine });
+  // THE BOX EMPTIES NOW; THE DRAFT IS KEPT UNTIL THE SEND IS KNOWN TO HAVE GONE. A reload,
+  // a relaunch or a dropped connection in between must find the words still there, so the
+  // stored draft is only cleared on success — and only if it still holds what was sent:
+  // anything typed while the send was in flight is a new draft and stays.
+  const key = draftKey(item.project, item.session);
   S.draft = ''; S.caret = null;
   scrollMem.delete('chat');          // a message you just sent belongs on screen
   render();
   const r = await doVerb('fleet_send', { project: item.project, session: item.session, prompt: text }, { quiet: true });
-  if (r) { outboxAcked(item, r); renderUnlessTyping(); return; }
+  if (r) {
+    if (draftGet(key) === typed) draftPut(key, '', photosFor(photoKey(item.project, item.session)).length);
+    // Came back to this chat mid-send: the box was refilled from the stored draft, which
+    // has just been sent.
+    if (S.project === item.project && S.session === item.session && S.draft === typed) { S.draft = ''; render(); }
+    outboxAcked(item, r); renderUnlessTyping(); return;
+  }
   outboxDrop(item);                              // doVerb already said why
   // A SEND THAT DID NOT ARRIVE GIVES EVERYTHING BACK — the words as well as the photos. The
   // daemon answers a send fleet-send could not deliver with ok:false, so this is the path
   // that runs when the mod refuses a prompt.
   if (mine.length) S.photos = [...mine, ...S.photos];
-  if (!S.draft) S.draft = typed;
+  if (S.project === item.project && S.session === item.session) { if (!S.draft) S.draft = typed; saveDraft(); }
+  else savePhotosOf(item.project, item.session);
   render();
 }
 // ── the outbox ────────────────────────────────────────────────────────────
@@ -3477,6 +3865,7 @@ export async function editOutbox(row, node) {
   }
   if (photos.length) adoptPhotos(photos, photoKey(), S.draft ? back.length + 1 : 0);
   S.draft = S.draft ? `${back}\n${S.draft}` : back;
+  saveDraft();
   const box = composerNode;
   if (isLive(box) && document.activeElement === box) {
     box.value = S.draft;
@@ -3871,7 +4260,7 @@ export function gridColsFrom(tracks) {
 }
 function gridCols() {
   try {
-    const list = document.querySelector('#app .cards');
+    const list = document.querySelector('#app .cards, #side .cards');
     if (!list) return 1;
     return gridColsFrom(getComputedStyle(list).gridTemplateColumns);
   } catch { return 1; }
@@ -4531,6 +4920,22 @@ function pushNav() {
   navDepth++;
   try { history.pushState({ gf: navDepth }, '', location.href); } catch {}
 }
+// MOVE TO A DEPTH WITHOUT WALKING IT. The desk's keys jump across the stack — Ctrl-p from
+// a session, Ctrl-s from a master, Ctrl-f from anywhere — so the screen is changed by the
+// caller and the history is only brought into line: deeper pushes, shallower pops in one
+// go. That pop fires popstate, and popTo() must not ALSO move the screen it answers to,
+// so it is counted out here and skipped there.
+let navSkip = 0;
+function setDepth(d) {
+  if (navDepth > d) {
+    const n = navDepth - d;
+    navDepth = d;
+    if (typeof history !== 'undefined' && typeof history.go === 'function') {
+      navSkip++;
+      try { history.go(-n); } catch { navSkip--; }
+    }
+  } else while (navDepth < d) pushNav();
+}
 // The actual screen change. Called ONLY by popstate (and by the pop-less fallbacks below,
 // for a browser that gave us no history object at all).
 function popTo() {
@@ -4538,11 +4943,13 @@ function popTo() {
   if (S.confirm) { cancel(); return; }
   // Jarvis was opened from Projects and sits one level under it, whatever its session is.
   if (S.screen === 'session' && S.jarvisMode) { talkStop(''); S.jarvisMode = false; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
+  // A master entered the desk's way is one level under Projects, like Jarvis.
+  else if (S.screen === 'session' && S.entry === 'projects') { talkStop(''); S.entry = ''; S.screen = 'projects'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
   else if (S.screen === 'session') { talkStop(''); S.screen = 'grid'; S.session = null; S.sess = null; S.pane = null; S.paneErr = ''; stopSpeaking(); }
   // A SUB-GRID IS ONE LEVEL DOWN, so back from it is the top grid, not the projects list —
   // the same ` the desk uses to go up.
-  else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; }
-  else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; }
+  else if (S.screen === 'grid' && S.sub) { S.sub = ''; S.sel = 0; S.grid = null; S.srch = null; }
+  else if (S.screen === 'grid') { S.screen = 'projects'; S.sel = 0; S.srch = null; }
   else return;                                  // at the root: let the platform have it
   navDepth = Math.max(0, navDepth - 1);
   render(); refresh();
@@ -4695,23 +5102,42 @@ function cardEl(m, h, idx) {
 // The grip is why reorder does not fight the page scroll: only that one line sets
 // touch-action:none, so a vertical drag anywhere else on the card still scrolls.
 const LONG_PRESS = 600, MOVE_SLOP = 10, SWIPE = 60;
+// ── a GESTURE IS A FINGER'S ───────────────────────────────────────────────────────────
+// Every gesture below — long-press, the two swipes, the drag by the title, and the chat's
+// swipe to the next session — exists because a phone has no keys. On a desk they misfire:
+// a mouse held still for 600ms is not a decision to kill, and a drag to select text across
+// a card is not a request to pause it. So a mouse or a pen gets the plain click and the
+// keys (web/README.md, "On a desk"), and a finger gets everything it always had.
+//   ASKED OF THE EVENT, NOT THE WINDOW. pointerType says what is pressing right now — a
+// laptop with a touch screen gets gestures from the finger and none from its trackpad, in
+// the same session at the same width. Only an event that names no type at all (one built
+// by a script) falls back to the screen's primary pointer.
+const finePointer = () => { try { return !!matchMedia('(hover: hover) and (pointer: fine)').matches; } catch { return false; } };
+export function touchGesture(ev) {
+  const t = ev && ev.pointerType;
+  if (t === 'touch') return true;
+  if (t === 'mouse' || t === 'pen') return false;
+  return !finePointer();
+}
 function wire(node, h, idx) {
   // `travelled` is NOT derivable from the pointerup position, and that is the whole reason
   // this variable exists: a finger that went down, moved 40px and came back to where it
   // started reports dx = dy = 0 at the end, exactly like one that never moved. They are
   // different gestures — the second is a tap, the first is a drag the reader thought
   // better of — and only a flag set DURING the move can tell them apart.
-  let x0 = 0, y0 = 0, t0 = 0, held = false, dragging = false, timer = 0, rowH = 0, travelled = false;
+  let x0 = 0, y0 = 0, t0 = 0, held = false, dragging = false, timer = 0, rowH = 0, travelled = false, finger = true;
   const clear = () => { clearTimeout(timer); timer = 0; };
   node.addEventListener('pointerdown', ev => {
     if (idx >= 0) { S.sel = idx; markSel(); }
     x0 = ev.clientX; y0 = ev.clientY; t0 = Date.now(); held = false; travelled = false;
-    dragging = !!h.reorder && ev.target.classList.contains('t');
+    finger = touchGesture(ev);
+    // A mouse arms nothing: no grip, no long-press timer. What is left for it is the click.
+    dragging = finger && !!h.reorder && ev.target.classList.contains('t');
     if (dragging) {
       rowH = node.getBoundingClientRect().height;
       node.setPointerCapture(ev.pointerId);
       node.classList.add('lift');
-    } else if (h.longPress) {
+    } else if (finger && h.longPress) {
       timer = setTimeout(() => { held = true; clear(); h.longPress(); }, LONG_PRESS);
     }
   });
@@ -4751,6 +5177,13 @@ function wire(node, h, idx) {
       return;
     }
     if (held) return;                                        // long-press already fired
+    // A mouse: a click opens, and anything that moved — a text selection, a drag that
+    // went nowhere — does nothing but leave the selection where the press put it.
+    if (!finger) {
+      if (!travelled && Math.hypot(dx, dy) <= MOVE_SLOP && h.tap) { h.tap(); return; }
+      if (idx >= 0) render();
+      return;
+    }
     if (Math.abs(dx) > SWIPE && Math.abs(dx) > Math.abs(dy) * 2) {
       if (dx < 0 && h.swipeLeft) h.swipeLeft(); else if (dx > 0 && h.swipeRight) h.swipeRight();
       return;
@@ -4769,7 +5202,7 @@ function wire(node, h, idx) {
 // Moving the selection must not re-render: a re-render during a pointer sequence
 // replaces the node under the finger and the gesture dies half-finished.
 function markSel() {
-  for (const n of document.querySelectorAll('#app .card')) {
+  for (const n of document.querySelectorAll('#app .card, #side .card')) {
     n.classList.toggle('sel', n.dataset.idx === String(S.sel));
   }
 }
@@ -4785,7 +5218,7 @@ function markSel() {
 // that check can no longer see. One spelling, two renderers.
 function confirmSpec() {
   const c = S.confirm;
-  if (!c) return null;
+  if (!c) return S.jump ? jumpSpec() : (S.srch && S.screen === 'grid') ? searchSpec() : null;
   const yn = 'y = yes · any other key = cancel';
   const cancelBtn = { label: 'cancel', onClick: cancel };
   if (c.kind === 'kill' || c.kind === 'reclaim-kill') {
@@ -4825,6 +5258,29 @@ function confirmSpec() {
   }
   return null;
 }
+// The Ctrl-f chord's prompt, word for word what tmux/cf.tmux.conf's display-message says at
+// each step — the chord is the desk's, so its instructions are too.
+function jumpSpec() {
+  const j = S.jump;
+  const q = j.stage === 'grid' ? 'jump → grid of project? 1-9  ·  esc'
+    : j.stage === 'proj' ? `jump → project ${j.proj}: session? 1-9  ·  ⏎ or m = master  ·  s = grid  ·  esc`
+    : "jump → project? 1-9  ·  s + digit = that project's grid  ·  p = projects  ·  esc";
+  return { cls: 'jump', q, keys: '', buttons: [] };
+}
+// The `/` prompt, in the row the desk's searchLine() uses, with its wording.
+function searchSpec() {
+  const { q, typing } = S.srch;
+  const m = srchMatches();
+  const keys = !q ? "type part of an agent's name · esc cancel"
+    : !m.length ? `no agent matches '${q}'`
+    : typing ? `${m.length} match${m.length === 1 ? '' : 'es'} · ⏎ keep · esc clear`
+    : `${m.indexOf(S.sel) >= 0 ? `${m.indexOf(S.sel) + 1} of ${m.length}` : `${m.length} match${m.length === 1 ? '' : 'es'}`} · n next · N prev · ⏎ open · / edit · esc clear`;
+  return { cls: 'search', q: '/' + q + (typing ? '▏' : ''), keys, buttons: [] };
+}
+function srchMatches() { return S.srch && S.srch.q ? matchIndices(items(), S.srch.q, it => it.card) : []; }
+// The cursor follows the first match on every keystroke — and stays put when nothing
+// matches, because the card you were on is a better place to be left than the top.
+function srchFirst() { const m = srchMatches(); if (m.length) S.sel = m[0]; }
 function confirmBar() {
   const s = confirmSpec();
   return s ? bar(s) : null;
@@ -5779,15 +6235,60 @@ async function sheetSettings() {
   openSheet(sheet('settings', S.screen === 'projects' ? 'per project' : 'per session', kids), false);
 }
 
-// ── keyboard: the same keys, for a desktop browser and a BT keyboard ──────
+// ── the keyboard: THE MAC GRID'S KEYS, the same key doing the same thing ──────
+// Reported from a desktop browser: the keys here differed from the desk's, so a hand that
+// knows the grid did the wrong thing in the browser. The map below is taken from the desk
+// itself, not from memory of it — bin/fleet-grid.mjs's grid and Projects handlers (including
+// `/` search) for the two list screens, and tmux/cf.tmux.conf's bindings for a session —
+// and web/README.md carries it as a table, desk key → what it does here, including every
+// key the browser keeps for itself and every desk feature this client deliberately lacks.
+// test/helpers/desktop-check.mjs presses each key in that table.
+//
+// THREE RULES THAT ARE NOT IN ANY ONE BINDING:
+//   - A TEXT BOX OWNS THE KEYBOARD. Nothing here fires while an input, a textarea or a
+//     select has focus — `q` in a message is a letter. The composer keeps ⏎, ⇧⏎ and Esc
+//     for itself (see composer()); Esc is how you leave it and give these back.
+//   - A SESSION IS ATTACHED. At the desk, inside a session every key goes to the agent
+//     except the handful tmux binds with -n (` ⇧←→ Ctrl-s Ctrl-p Ctrl-f Ctrl-x Ctrl-t
+//     Ctrl-n, and Ctrl-a's prefix table). Here the agent's input is the composer, so a
+//     printable key on the session screen is typed into it — the p/P/x/r/l/s/q letters
+//     this screen used to take were this client's own invention and did something the
+//     desk's same key never does.
+//   - CMD IS THE BROWSER'S. The desk binds Ctrl, never ⌘, so nothing here answers a key
+//     with metaKey held: ⌘C, ⌘V, ⌘R and the rest keep doing what the OS says.
+// Some Ctrl keys cannot be had at all — Ctrl-n, Ctrl-t and Ctrl-w open, open and close a
+// tab before any page hears them, installed PWA or not — and the README table says which.
+const typingIn = (t) => !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || !!t.isContentEditable);
+// THE KEYS TMUX TAKES EVEN WHILE YOU TYPE TO THE AGENT. At the desk a session is attached
+// and every key goes to the agent — except the ones tmux/cf.tmux.conf binds with -n, which
+// tmux answers first: ` (back), ⇧← / ⇧→ (the next session), Ctrl-s, Ctrl-p, Ctrl-f, and
+// Ctrl-a's prefix table. The composer is the agent's input here, so from inside it those
+// same keys act, and nothing else does — including the desk's two costs: a literal ` cannot
+// be typed into a message (the desk documents the same), and ⇧←/⇧→ move between sessions
+// rather than selecting text. A chord or a prefix already started takes its next key whole.
+// Only the composer, and only a session's: an input in a sheet is never a session.
+function deskKeyFromComposer(e) {
+  if (S.screen !== 'session' || !insideComposer(e.target)) return false;
+  if (S.jump || S.prefix) return true;
+  const k = e.key, lk = k && k.length === 1 ? k.toLowerCase() : k;
+  if (e.metaKey || e.altKey) return false;
+  if (e.ctrlKey) return lk === 's' || lk === 'p' || lk === 'f' || lk === 'a';
+  if (k === '`') return true;
+  return !!e.shiftKey && (k === 'ArrowLeft' || k === 'ArrowRight');
+}
+const hasSelection = () => { try { return String(getSelection() || '') !== ''; } catch { return false; } };
 function onKey(e) {
   if (S.sheet) {                       // a form owns the keyboard while it is open
     if (e.key === 'Escape') { e.preventDefault(); closeSheet(); }
     return;
   }
-  if (/^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || ''))) return;
+  if (typingIn(e.target) && !deskKeyFromComposer(e)) return;
   const k = e.key;
-  if (S.locked) return;
+  if (S.locked || !k || e.metaKey) return;
+  // A modifier on its own is not a key: the chord arrives with the next event.
+  if (k === 'Shift' || k === 'Control' || k === 'Alt' || k === 'Meta') return;
+  const ctrl = !!e.ctrlKey && !e.altKey;
+  const lk = k.length === 1 ? k.toLowerCase() : k;
   if (S.confirm) {
     e.preventDefault();
     const c = S.confirm;
@@ -5804,108 +6305,265 @@ function onKey(e) {
     } else cancel();
     return;
   }
-  // The session screen has one subject — the session you opened — and the grid's `sel`
-  // is not it. Wired to `items()` as well, `p` on this screen paused whichever card the
-  // grid cursor happened to be on: the right verb, the wrong worker, no error.
-  if (S.screen === 'session') {
-    switch (k) {
-      case 'q': case '`': back(); break;
-      case 'Q': toProjects(); break;
-      case 'p': pauseSession(S.session); break;
-      case 'P': resumeSession(S.session); break;
-      case 's': sheetSchedule(S.session); break;
-      case 'r': sheetRename(S.session); break;
-      case 'l': sheetLabel(S.session); break;
-      case 'x': case 'X': askKill(S.session); break;
-      case ',': sheetSettings(); break;
-      default: return;
-    }
-    e.preventDefault();
-    return;
+  // The search comes BEFORE the chord, as at the desk: while `/` is typing, every key is a
+  // letter of the query, and a Ctrl key is dropped rather than obeyed.
+  if (S.screen === 'grid' && S.srch) { if (searchKey(e, k, lk, ctrl)) e.preventDefault(); return; }
+  if (S.jump) { e.preventDefault(); jumpKey(k, lk, ctrl); return; }
+  let used;
+  if (S.screen === 'session') used = sessionKey(e, k, lk, ctrl);
+  else if (S.screen === 'grid') used = gridKey(e, k, lk, ctrl);
+  else used = projectsKey(e, k, lk, ctrl);
+  if (used) e.preventDefault();
+}
+
+// ── Ctrl-f: the jump chord, every step of tmux/cf.tmux.conf's cfjump tables ────────────
+// Ctrl-f <p> <s> → project p, its card s · Ctrl-f <p> ⏎|m → its master · Ctrl-f <p> s and
+// Ctrl-f s <p> → its grid · Ctrl-f p → Projects. Esc (or Ctrl-f, or Ctrl-c) cancels and
+// any other key aborts. The prompt for each step is jumpSpec()'s. Live on every screen.
+function startJump() { S.jump = { stage: 'first', proj: 0 }; render(); }
+function jumpKey(k, lk, ctrl) {
+  const j = S.jump;
+  const digit = !ctrl && /^[1-9]$/.test(k);
+  S.jump = null;
+  if (k === 'Escape' || (ctrl && (lk === 'f' || lk === 'c'))) return render();
+  if (j.stage === 'first') {
+    if (digit) { S.jump = { stage: 'proj', proj: Number(k) }; return render(); }
+    if (!ctrl && lk === 's') { S.jump = { stage: 'grid', proj: 0 }; return render(); }
+    if (!ctrl && lk === 'p') return toProjects();
+    return render();
   }
-  const list = S.screen === 'projects'
-    ? [...(S.projects || []).map(p => ({ project: p })), { add: true }]
-    : items();
+  if (j.stage === 'grid') return digit ? jumpTo(Number(k), 'grid') : render();
+  if (digit) return jumpTo(j.proj, 'card', Number(k));
+  if (k === 'Enter' || (!ctrl && lk === 'm')) return jumpTo(j.proj, 'master');
+  if (!ctrl && lk === 's') return jumpTo(j.proj, 'grid');
+  render();
+}
+// The Nth project of the whole list — the same count the desk's proj_nth makes and the
+// digits on Projects use, whatever tab the Projects screen is showing.
+async function jumpTo(n, what, card = 0) {
+  if (!S.projects) { try { S.projects = (await api.getProjects()).projects; } catch {} }
+  const p = (S.projects || [])[n - 1];
+  if (!p) return render();                 // no project there: the desk does nothing either
+  if (what === 'master') return enterMaster(p.name);
+  toGridOf(p.name, what === 'card' ? card : 0);
+}
+
+// ── a session: tmux's -n bindings, and the agent's input for the rest ─────────────────
+function sessionKey(e, k, lk, ctrl) {
+  // Ctrl-a, then: g / d back · s the grid · p Projects · f the jump chord · ←/→ cycle.
+  // (x, t, n and < > { } are the stack and the tabs, which this client does not have.)
+  if (S.prefix) {
+    S.prefix = false;
+    if (ctrl) return lk === 'a';           // Ctrl-a Ctrl-a: a literal Ctrl-a for the agent — nothing to send it to here
+    if (lk === 'g' || lk === 'd') sessionBack();
+    else if (lk === 's') toGridOf(S.project);
+    else if (lk === 'p') toProjects();
+    else if (lk === 'f') startJump();
+    else if (k === 'ArrowRight' && !S.jarvisMode) cycleSession(1);
+    else if (k === 'ArrowLeft' && !S.jarvisMode) cycleSession(-1);
+    return true;
+  }
+  if (ctrl) {
+    if (lk === 'a') { S.prefix = true; return true; }
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 's') { toGridOf(S.project); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    return false;                          // the rest are the browser's (copy, find-in-page …)
+  }
+  if (k === '`') { sessionBack(); return true; }
+  if (e.shiftKey && (k === 'ArrowRight' || k === 'ArrowLeft')) {
+    if (!S.jarvisMode) cycleSession(k === 'ArrowRight' ? 1 : -1);
+    return true;
+  }
+  // Everything else at the desk goes to the agent. Here that is the composer: the key is
+  // typed into it, at its caret, and it keeps the focus, so the rest of the sentence follows.
+  if (k.length === 1 && !e.altKey) return typeIntoComposer(k);
+  if (k === 'Enter') { focusComposerAt(null); return true; }
+  return false;
+}
+// ` from a session is tmux's detach: a worker goes back to the grid it came from, a master
+// goes back to Projects — at the desk master IS the project's front door (enter_master).
+function sessionBack() {
+  if (S.jarvisMode) return back();
+  if (isLeadCard(S.session) || (S.entry === 'projects' && S.session === leadOf())) return toProjects();
+  if (navDepth >= 2) back();               // up to the grid (or sub-grid) it was opened from
+  else toGridOf(S.project);
+}
+function typeIntoComposer(text) {
+  const box = composerNode;
+  if (!isLive(box)) return false;
+  try {
+    box.focus();
+    const a = Number.isInteger(box.selectionStart) ? box.selectionStart : box.value.length;
+    const b = Number.isInteger(box.selectionEnd) ? box.selectionEnd : a;
+    box.setRangeText(text, a, b, 'end');
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+  } catch { return false; }
+  return true;
+}
+
+// ── the grid: fleet-grid.mjs's onKey, mode 'grid' ──────────────────────────────────────
+function gridKey(e, k, lk, ctrl) {
+  const list = items();
   const it = list[S.sel] || {};
-  // ARROWS WALK WHAT IS DRAWN; DIGITS STAY GLOBAL. `list` is deliberately the unfiltered
-  // one, so `5` opens project 5 the way `Ctrl-f 5` does at the desk and the way the card
-  // says — the digit is an address and an address does not change with the tab. Stepping
-  // is the other thing: j/k through cards that are not on screen is a cursor that
-  // disappears, so on the projects screen a step goes to the next VISIBLE index (plus the
-  // `+ new project` card, which is always drawn).
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    if (lk === 'p') { toProjects(); return true; }
+    // Ctrl-c is back at the desk. Here it is also copy, and copy wins whenever something
+    // is selected to copy.
+    if (lk === 'c' && !hasSelection()) { gridBack(); return true; }
+    return false;
+  }
+  // HOW MANY COLUMNS ARE ACTUALLY ON SCREEN, asked of the browser rather than computed
+  // from an assumed character width. The CSS picks the count with auto-fill (see
+  // app.css), so the only place the truth lives is the resolved grid — and reading it back
+  // means the keys agree with what the eye sees at any viewport. Falls back to 1, which is
+  // every phone and the left pane of two.
+  const nc = gridCols();
+  const move = d => { const n = S.sel + d; if (n >= 0 && n < list.length) { S.sel = n; render(); } };
+  const sub = () => { toast(`this is ${S.sub}'s sub-grid — its workers are spawned by ${S.sub} (fleet-spawn from its worktree); \` goes back up`); render(); };
+  switch (k) {
+    // Up and down cross a ROW, which is nc cards — the TUI's ⇧K/⇧J arithmetic.
+    case 'ArrowUp': case 'k': move(-nc); break;
+    case 'ArrowDown': case 'j': move(nc); break;
+    case 'ArrowLeft': case 'h': move(-1); break;
+    case 'ArrowRight': case 'l': move(1); break;
+    // Not in a sub-grid: the order file is the TOP grid's numbering.
+    case 'H': case 'K': if (it.card && !S.sub) reorder(it.card.name, k === 'H' ? -1 : -nc); break;
+    case 'L': case 'J': if (it.card && !S.sub) reorder(it.card.name, k === 'L' ? 1 : nc); break;
+    case '/': S.srch = { q: '', typing: true }; render(); break;
+    case 'Enter': openItem(it); break;
+    // The web has one way to start a session (fleet_spawn), so n and N open the same picker.
+    case 'n': case 'N': if (S.sub) sub(); else sheetPicker(); break;
+    case 'w': case 'W': if (S.sub) sub(); else sheetWorktree(); break;
+    case 's': case 'S': if (it.card) sheetSchedule(it.card.name); break;
+    case 'p': if (it.card) pauseSession(it.card.name); break;
+    case 'P': if (it.card) resumeSession(it.card.name); break;
+    case 'x': case 'X':
+      if (it.card) askKill(it.card.name);
+      else if (it.freeWt) askRemoveWorktree(it.freeWt);
+      break;
+    case ',': sheetSettings(); break;
+    case 'Q': toProjects(); break;
+    case 'q': case '`': gridBack(); break;
+    default:
+      if (k >= '1' && k <= '9' && k.length === 1) {
+        const i = Number(k) - 1;
+        const t = list[i];
+        // Cards and free worktrees, as at the desk; `+ new` is not a digit's to open.
+        if (!t || !(t.card || t.freeWt)) return true;
+        S.sel = i;
+        openItem(t);
+        return true;
+      }
+      return false;
+  }
+  return true;
+}
+// q / ` / Ctrl-c on the grid: a sub-grid goes up to the top grid; the top grid goes up to
+// the project's MASTER, however the grid was reached (docs/SHORTCUTS.md §3).
+function gridBack() {
+  if (S.sub) return back();
+  enterMaster(S.project);
+}
+// ...and while `/` is up (the desk's searchKey). Typing: every printable key is the query,
+// ⏎ locks it onto a match. Locked: n / N step, ⏎ opens, / or ⌫ edit again, q / ` clear,
+// hjkl still move, and every card verb is inert. Esc clears from either step; the arrows
+// move in both. Returns whether the key was taken.
+function searchKey(e, k, lk, ctrl) {
+  const s = S.srch;
+  const nc = gridCols(), n = items().length;
+  const move = d => { const i = S.sel + d; if (i >= 0 && i < n) S.sel = i; };
+  const shorter = () => [...s.q].slice(0, -1).join('');
+  if (k === 'Escape' || (ctrl && lk === 'c' && !hasSelection())) S.srch = null;
+  else if (k === 'ArrowUp') move(-nc);
+  else if (k === 'ArrowDown') move(nc);
+  else if (k === 'ArrowLeft') move(-1);
+  else if (k === 'ArrowRight') move(1);
+  else if (ctrl || e.altKey) return false;
+  else if (s.typing) {
+    if (k === 'Enter') { if (srchMatches().length) s.typing = false; }
+    else if (k === 'Backspace') { if (!s.q) S.srch = null; else { s.q = shorter(); srchFirst(); } }
+    else if (k.length === 1) { s.q += k; srchFirst(); }
+    else return false;
+  } else {
+    if (k === 'q' || k === '`') S.srch = null;
+    else if (k === '/') s.typing = true;
+    else if (k === 'Backspace') { s.typing = true; s.q = shorter(); srchFirst(); }
+    else if (k === 'Enter') { S.srch = null; openItem(items()[S.sel]); return true; }
+    else if (k === 'n' || k === 'N') { const i = stepMatch(srchMatches(), S.sel, k === 'n' ? 1 : -1); if (i >= 0) S.sel = i; }
+    else if (k === 'k') move(-nc);
+    else if (k === 'j') move(nc);
+    else if (k === 'h') move(-1);
+    else if (k === 'l') move(1);
+  }
+  render();
+  return true;
+}
+
+// ── Projects: fleet-grid.mjs's onKeyProjects ───────────────────────────────────────────
+function projectsKey(e, k, lk, ctrl) {
+  const projects = S.projects || [];
+  const list = [...projects.map(p => ({ project: p })), { add: true }];
+  const it = list[S.sel] || {};
+  if (ctrl) {
+    if (lk === 'f') { startJump(); return true; }
+    // Ctrl-s: straight to that project's grid, skipping master.
+    if (lk === 's') { if (it.project) toGridOf(it.project.name); return true; }
+    return false;
+  }
+  // ARROWS WALK WHAT IS DRAWN; DIGITS STAY GLOBAL. The digit is an address — `5` opens
+  // project 5 the way `Ctrl-f 5` does at the desk — so it counts the unfiltered list.
+  // Stepping goes to the next VISIBLE index (plus the `+ new project` card, always drawn):
+  // j/k onto a card the profile tab hides is a cursor that disappears.
   const move = d => {
     let n = S.sel + d;
-    // WAS `S.profile !== PROFILE_ALL`, and a hidden demo is exactly the case that breaks:
-    // on the `all` tab the visible set is now smaller than the list, so the old condition
-    // walked j/k straight onto demo cards that are not drawn — a cursor that disappears,
-    // which is the failure this branch already existed to prevent. Ask whether anything is
-    // hidden, not which tab is on.
-    if (S.screen === 'projects' && visibleProjects().length !== (S.projects || []).length) {
-      const stops = [...visibleProjects().map(v => v.i), (S.projects || []).length];
+    if (visibleProjects().length !== projects.length) {
+      const stops = [...visibleProjects().map(v => v.i), projects.length];
       const at = stops.indexOf(S.sel);
       n = at >= 0 ? stops[at + (d > 0 ? 1 : -1)] : stops[0];
       if (n == null) return;
     }
     if (n >= 0 && n < list.length) { S.sel = n; render(); }
   };
-  // HOW MANY COLUMNS ARE ACTUALLY ON SCREEN, asked of the browser rather than computed
-  // from an assumed character width. The CSS picks the count with auto-fill (see
-  // app.css), so the only place the truth lives is the resolved grid — and reading it back
-  // means the keys agree with what the eye sees at any viewport, including the one the
-  // rotation unlock just made possible. Falls back to 1, which is every phone.
   const nc = gridCols();
   switch (k) {
-    // Up and down cross a ROW, which is nc cards — the TUI's ⇧K/⇧J arithmetic, and at
-    // nc = 1 it is the one-card step it has always been.
     case 'ArrowUp': case 'k': move(-nc); break;
     case 'ArrowDown': case 'j': move(nc); break;
-    // Left and right are always one card. At nc = 1 that makes them the same step as up
-    // and down, which is what they used to be unconditionally.
     case 'ArrowLeft': case 'h': move(-1); break;
     case 'ArrowRight': case 'l': move(1); break;
-    case 'H': case 'K': if (it.card) reorder(it.card.name, -1); break;
-    case 'L': case 'J': if (it.card) reorder(it.card.name, 1); break;
-    case 'Enter':
-      if (S.screen === 'projects') { it.add ? sheetAddProject() : openProject(it.project.name); }
-      else if (it.card) openSession(it.card.name);
-      else if (it.freeWt) sheetName({ cwd: it.freeWt.path, name: G.basename(it.freeWt.path), reuse: it.freeWt.path });
-      else sheetPicker();
-      break;
-    case 'n': case 'N': if (S.screen !== 'projects') sheetPicker(); break;
-    case 'w': case 'W': if (S.screen !== 'projects') sheetWorktree(); break;
-    case 's':
-      if (S.screen === 'projects') { if (it.project) sheetSchedule('master', it.project.name); }
-      else if (it.card) sheetSchedule(it.card.name);
-      break;
-    case 'p': if (it.card) pauseSession(it.card.name); break;
-    case 'P': if (it.card) resumeSession(it.card.name); break;
-    case 'x': case 'X':
-      // Not on the projects screen: there `remove` is reached through `⋯` only (see the
-      // seam in the projects spec), and a key would be a second way in.
-      if (it.card) askKill(it.card.name);
-      else if (it.freeWt) askRemoveWorktree(it.freeWt);
-      break;
+    case 'H': case 'K': if (it.project) reorderProject(it.project.name, k === 'H' ? -1 : -nc); break;
+    case 'L': case 'J': if (it.project) reorderProject(it.project.name, k === 'L' ? 1 : nc); break;
+    // ⏎ enters the project's MASTER, as at the desk; on `+ new project` it adds one.
+    case 'Enter': if (it.add) sheetAddProject(); else if (it.project) enterMaster(it.project.name); break;
+    case 's': case 'S': if (it.project) sheetSchedule('master', it.project.name); break;
+    // The desk's `x`, with the desk's question. Only the KEY: a long-press on a project
+    // card still asks nothing (see wire()), because a resting thumb is not a decision.
+    case 'x': if (it.project) { S.confirm = { kind: 'project', name: it.project.name }; render(); } break;
     case ',': sheetSettings(); break;
-    case 'q': case '`': back(); break;
-    case 'Q': toProjects(); break;
     default:
-      if (k >= '1' && k <= '9') {
+      if (k >= '1' && k <= '9' && k.length === 1) {
         const i = Number(k) - 1;
-        const t = list[i];
-        if (!t) break;
+        if (!projects[i]) return true;
         S.sel = i;
-        if (S.screen === 'projects') { t.project ? openProject(t.project.name) : sheetAddProject(); }
-        else if (t.card) openSession(t.card.name);
-        else if (t.freeWt) sheetName({ cwd: t.freeWt.path, name: G.basename(t.freeWt.path), reuse: t.freeWt.path });
-        else sheetPicker();
-      } else if (e.ctrlKey && (k === 'p' || k === 'P')) { toProjects(); }
-      // Ctrl-f is a chord in the terminal because there is no other way to point at a
-      // project from inside a session. Here the two screens ARE the chord: projects,
-      // then a card.
-      else if (e.ctrlKey && (k === 'f' || k === 'F')) { toProjects(); }
-      return;
+        enterMaster(projects[i].name);
+        return true;
+      }
+      return false;
   }
-  e.preventDefault();
+  return true;
+}
+// ⇧hjkl on Projects: the desk's reorderProject. The daemon refuses fleet_project_order by
+// name today (fleet-serve NOT_YET — the order file is written only by the desk's Projects
+// screen), exactly as it refuses the grid's fleet_order; the refusal is shown, not hidden.
+async function reorderProject(name, delta) {
+  const names = (S.projects || []).map(p => p.name);
+  const i = names.indexOf(name);
+  const ni = Math.max(0, Math.min(names.length - 1, i + delta));
+  if (i < 0 || ni === i) return;
+  names.splice(ni, 0, ...names.splice(i, 1));
+  S.sel = ni;
+  await doVerb('fleet_project_order', { order: names }, { quiet: true });
 }
 
 // ── boot ──────────────────────────────────────────────────────────────────
@@ -5918,8 +6576,11 @@ function onKey(e) {
 // declaration exists. test/helpers/pwa-check.mjs asserts the ordering.
 restore();
 fitCards();
+wasWide = wideNow();
 addEventListener('resize', () => {
   fitCards();
+  // Crossing the two-pane breakpoint is a different layout, not a resize of this one.
+  if (wideNow() !== wasWide) { wasWide = wideNow(); if (!typingNow()) render(); }
   syncViewport();
   // An orientation change moves the fold, and the pane box was sized against the old one.
   if (paneBoxNode) sizePaneBox(paneBoxNode);
@@ -5936,14 +6597,18 @@ try {
     visualViewport.addEventListener('scroll', syncViewport);
   }
 } catch {}
+// CAPTURE, so the keydown that proves a keyboard is counted before the composer decides
+// what its ⏎ means — the first ⏎ from an iPad's keyboard sends.
+addEventListener('keydown', noteKeyboard, true);
 addEventListener('keydown', onKey);
+wireDrop();
 // NO TAP-ANYWHERE AUDIO UNLOCK. There was one here, for speak mode's replies that arrived
 // long after the tap; speak mode is gone, and the listener went on claiming the phone's
 // audio session on every first tap — which paused the owner's music. See unlockAudio().
 // The system back gesture. Every backward move in the app comes through here, so a swipe
 // and a tap on `‹` cannot mean two different things (back() asks the platform to pop, and
 // this is what answers). No URL is ever read: the entries carry a depth, not a route.
-addEventListener('popstate', (e) => { uaSlid = !!(e && e.hasUAVisualTransition); try { popTo(); } finally { uaSlid = false; } });
+addEventListener('popstate', (e) => { if (navSkip > 0) { navSkip--; return; } uaSlid = !!(e && e.hasUAVisualTransition); try { popTo(); } finally { uaSlid = false; } });
 // §5: a passkey whenever there is no live session — the token dies after 15 minutes
 // without a request, and that expiry is the only thing that brings the sensor back.
 document.addEventListener('visibilitychange', () => {

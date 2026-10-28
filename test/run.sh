@@ -17543,6 +17543,37 @@ if [ -d "$ROOT/web" ]; then
   fi
   rm -rf "$GRP"
 
+  # ── the client on a desk: two panes, the Mac grid's keys, Enter, paste and drop ─
+  # A desktop browser got a phone column in the middle of the window, a composer that needed
+  # a click to send, images only through the picker, and keys that were not the desk's. The
+  # helper presses every key in web/README.md's desk-key table through Chrome's own keyboard
+  # path at 1600x900, the composer's Enter again at 390x844 with touch, and pastes and drops
+  # an image File. Watched red two ways: against staging's client (every row about new
+  # behaviour), and against copies of this one broken on purpose for the rows staging
+  # already passed — no key handler, keys while typing, Enter always sending, ⇧⏎ sending,
+  # always two panes, × not removing, a table row with no test, and four chord steps.
+  # The browser's `/` uses the desk's matcher, as a copy under web/ (a browser cannot fetch
+  # lib/, and the desk must not need web/ to start — see lib/grid-search.mjs). Two copies
+  # are only one matcher while they are the same bytes.
+  is "web/grid-search.js is lib/grid-search.mjs, byte for byte" "" \
+     "$(cmp "$ROOT/lib/grid-search.mjs" "$ROOT/web/grid-search.js" 2>&1)"
+  DSK="$(mktemp -d "$TEST_RUNS.$$.desk.XXXXXX")"
+  node "$ROOT/test/helpers/desktop-check.mjs" > "$DSK/out" 2> "$DSK/err"
+  dskrc=$?
+  if grep -q 'no chrome' "$DSK/out" 2>/dev/null; then
+    skip "the desktop client" "no chrome to press keys in"
+  else
+    is "desktop-check ran"              "0" "$dskrc"
+    is "...without complaining"         ""  "$(head -2 "$DSK/err" | tr '\n' ' ' | sed 's/ *$//')"
+    is "...and produced its checks"     "yes" "$([ "$(wc -l < "$DSK/out")" -ge 100 ] && echo yes || echo "no: $(wc -l < "$DSK/out") rows")"
+    while IFS=$'\x1f' read -r name want got; do
+      if [ "$name" = '#SKIP' ]; then skip "$want" "$got"; continue; fi
+      if [ "$name" = '#NA' ];   then na   "$want" "$got"; continue; fi
+      is "$name" "$want" "$got"
+    done < "$DSK/out"
+  fi
+  rm -rf "$DSK"
+
   # ── the owner's music keeps playing until they ask the app to speak ──────────
   # Opening the installed app paused whatever the phone was playing: unlockAudio() ran on
   # every first tap anywhere, and set a non-mixable 'playback' session, resumed an

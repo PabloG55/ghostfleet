@@ -83,7 +83,7 @@
 // still shows a fixture fleet with no way to enrol. That is indistinguishable from the fix
 // not working. A new name means install() refetches the shell and activate() drops the old
 // cache, so the next open runs the new code.
-// CLIENT-HASH: 002e2563aabf
+// CLIENT-HASH: 3d694201ab99
 // ...pinned to the bytes of everything precached below (test/helpers/pwa-check.mjs). Change
 // any of them and the suite goes red with the hash to paste here — which is the moment to
 // bump VERSION, so the two can never drift apart again.
@@ -381,10 +381,20 @@
 // first page, and saying so), updates the list instead of rebuilding it (a scrolled table or
 // code line stays scrolled) and loads older messages by scrolling up. A phone still on v76
 // can hold a reply back until the chat is reopened; it reads the daemon's new answers unchanged.
-const VERSION = 'ghostfleet-v77';
+// v78 is the desk: two panes from 1024px up with a mouse, the Mac grid's keys (a letter on
+// the session screen now types into the composer instead of pausing or killing), ⏎ sends
+// with a mouse and keyboard, and an image pasted or dropped into the conversation attaches;
+// a mouse gets no phone gestures. It adds grid-search.js to the shell — a byte-for-byte copy
+// of lib/grid-search.mjs, the desk's `/` matcher.
+// A desktop still on v77 keeps the phone column. On the phone a finger keeps every
+// gesture; what v78 adds there is an attached keyboard (the keys, ⏎ to send) and an image
+// pasted from iOS's own Paste menu. And a draft is the session's, kept until it is sent:
+// a phone still on v77 blanks the box whenever a chat is opened. With a keyboard, a chat
+// opens with the box focused.
+const VERSION = 'ghostfleet-v78';
 const SHELL = [
   './', './index.html', './app.css', './app.js', './api.js', './grid.js', './passkey.js',
-  './ansi.js', './md.js',
+  './ansi.js', './md.js', './grid-search.js',
   // Built, not written: web/src/screens.jsx through vite — BOTH card screens, which is why
   // this is screens.js and was projects.js up to v28. Stable filenames, no content hash,
   // which is what lets them sit in this hand-written list at all — see vite.config.mjs,

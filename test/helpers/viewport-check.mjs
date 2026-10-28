@@ -109,6 +109,11 @@ let chromeErr = '';
 const chrome = spawn(CHROME, ['--headless=new', '--disable-gpu', '--no-first-run',
   '--no-default-browser-check', '--disable-extensions', '--mute-audio',
   '--use-mock-keychain', '--password-store=basic',
+  // A PHONE'S POINTER: coarse, and no hover. `mobile: true` alone reports a fine pointer that
+  // hovers — a desk's — and since the desk opens a chat with the composer focused (with a
+  // keyboard, web/README.md "On a desk"), every phone section here was measuring a desk:
+  // the box took the focus on open and the poll waited for the typing to stop.
+  '--blink-settings=primaryPointerType=2,availablePointerTypes=2,primaryHoverType=1,availableHoverTypes=1',
   `--user-data-dir=${profile}`, '--remote-debugging-port=0', 'about:blank'],
   { stdio: ['ignore', 'ignore', 'pipe'] });
 chrome.stderr.on('data', (d) => { chromeErr += String(d); });
@@ -1219,6 +1224,12 @@ try {
   await walk(320, 568);
   // #78 unpinned rotation, and a landscape tablet is where the card grid switches to more
   // than one track — a different layout, and so a different chance to overflow.
+  //   AS A TOUCH SCREEN, which a tablet is. `mobile: true` alone reports a fine pointer, so
+  // this walk was a 1024px window with a mouse — which is now the desk's two-pane layout
+  // (web/README.md, "On a desk"), not the tablet's. Touch is what keeps it the tablet.
+  //   AND LEFT ON: turning touch emulation off hands Chrome back a fine pointer whatever
+  // the launch declared (measured), and every section after this one is a phone.
+  await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await walk(1024, 768);
   await bigText();
   await placeholderSweep();
@@ -1354,8 +1365,11 @@ try {
   await tapCard('api-fix'); await seeing('session', 'the session screen');
   const swipeChat = (x0, y0, x1, y1) => evaluate((a) => {
     const c = document.querySelector('#app .chat'); if (!c) return false;
-    c.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, clientX: a[0], clientY: a[1], pointerId: 1 }));
-    c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, clientX: a[2], clientY: a[3], pointerId: 1 }));
+    // A FINGER, said so: since the desk, a swipe is a touch gesture only (touchGesture in
+    // app.js), and an event that names no pointer type is judged by this emulation's
+    // pointer, which `mobile: true` alone reports as fine.
+    c.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType: 'touch', clientX: a[0], clientY: a[1], pointerId: 1 }));
+    c.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerType: 'touch', clientX: a[2], clientY: a[3], pointerId: 1 }));
     return true;
   }, [x0, y0, x1, y1]);
   const openName = () => evaluate(() => {
